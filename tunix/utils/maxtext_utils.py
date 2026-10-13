@@ -207,10 +207,10 @@ def build_maxtext_config(
 
   if max_seq_token_per_tpu is not None and max_seq_token_per_tpu > 0:
     # When sequence packing is enabled, the batch assembler feeds 1 packed row
-    # per FSDP shard (global batch size = mesh_fsdp), independent of
-    # train_micro_batch_size.
+    # per data-parallel shard (global batch size = mesh_fsdp * mesh_expert),
+    # independent of train_micro_batch_size.
     # TODO(maxtext-team): verify this is the desired behavior.
-    per_device_batch_size = mesh_fsdp / num_devices
+    per_device_batch_size = (mesh_fsdp * mesh_expert) / num_devices
   else:
     if train_micro_batch_size % mesh_fsdp:
       raise ValueError(

@@ -499,6 +499,21 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertIn("per_device_batch_size=0.25", argv)
     self.assertIn("max_target_length=4096", argv)
 
+  def test_max_seq_token_per_tpu_scales_with_mesh_expert(self):
+    argv = self._build_config_argv(
+        train_micro_batch_size=64,
+        mesh_fsdp=32,
+        mesh_tp=1,
+        mesh_expert=2,
+        mesh_context=4,
+        num_devices=256,
+        max_prompt_length=4096,
+        max_response_length=61440,
+        max_seq_token_per_tpu=65536,
+    )
+    self.assertIn("per_device_batch_size=0.25", argv)
+    self.assertIn("max_target_length=65536", argv)
+
   def test_pathways_persistence_requires_gs_output_dir_when_saving_enabled(self):
     with mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
       with self.assertRaisesRegex(

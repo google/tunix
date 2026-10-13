@@ -247,11 +247,29 @@ export NEW_MODEL_DESIGN=1
 export ATTN_BUCKETIZED_NUM_REQS=true
 export ATTN_CUSTOM_NUM_REQS_BUCKETS=4
 export ONEHOT_MOE_PERMUTE_THRESHOLD="${ONEHOT_MOE_PERMUTE_THRESHOLD:-2048}"
+export RAGGED_GATHER_REDUCE_VERSION="${RAGGED_GATHER_REDUCE_VERSION:-v2}"
+case ",${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-}," in
+  *,RAGGED_GATHER_REDUCE_VERSION,*) ;;
+  *) export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY},}RAGGED_GATHER_REDUCE_VERSION" ;;
+esac
 export VLLM_MOE_CHUNK_SIZE=256
 export SLICE_ROPE_CACHE=1
 export DP_SCHED_BATCH_PREFILL=false
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false}"
 export VLLM_ENABLE_V1_MULTIPROCESSING=0
+
+# MoE and collective optimization switches (defaults disabled to preserve baseline)
+export TPU_SMALL_ALL_REDUCE="${TPU_SMALL_ALL_REDUCE:-0}"
+export TPU_MOE_SINGLE_SORT="${TPU_MOE_SINGLE_SORT:-0}"
+export TPU_MOE_ROUTER_TOPK="${TPU_MOE_ROUTER_TOPK:-sort}"
+export TPU_MOE_LOWTOK="${TPU_MOE_LOWTOK:-0}"
+
+# Propagate optimization flags to vLLM's Ray workers
+for _opt_var in TPU_SMALL_ALL_REDUCE TPU_MOE_SINGLE_SORT TPU_MOE_ROUTER_TOPK TPU_MOE_LOWTOK; do
+  if [[ ",${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-}," != *",${_opt_var},"* ]]; then
+    export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY},}${_opt_var}"
+  fi
+done
 
 # Phased inference profiling (vLLM / tpu-inference)
 # Disabled by default (PHASED_PROFILING_DIR="" in tpu-inference). Only active when PROFILE_SAMPLER=true.
