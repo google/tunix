@@ -799,7 +799,7 @@ class MllogUtilsTest(absltest.TestCase):
           fp8_emitted["lowest_numerical_precision_in_attn"], "bfloat16"
       )
       self.assertEqual(
-          fp8_emitted["lowest_numerical_precision_in_comm"], "bfloat16"
+          fp8_emitted["lowest_numerical_precision_in_comm"], "fp8"
       )
 
   def _finish_training_args(self):
