@@ -310,6 +310,204 @@ def extract_task_image(item: dict[str, Any]) -> Any | None:
   return None
 
 
+def load_images_from_manifest(
+    manifest_path: str,
+    *,
+    scaffold: str = "r2egym",
+    include_runtime_image: bool = False,
+    openhands_server_image: str | None = None,
+    image_rewrite: Any | None = None,
+) -> list[str]:
+  """Loads raw image URIs from a manifest file and applies image rewriting.
+
+  Args:
+    manifest_path: Local file path or gs:// URI to a manifest file containing
+      one image URI per line.
+    scaffold: Agent scaffold name ("r2egym" or "openhands").
+    include_runtime_image: Whether to also include scaffold runtime container
+      image (e.g. OpenHands agent server image) in the returned list.
+    openhands_server_image: Optional override for OPENHANDS_SERVER_IMAGE.
+    image_rewrite: Optional image rewrite function. If omitted, uses
+      get_image_rewrite_fn().
+
+  Returns:
+    Sorted list of unique container image URIs.
+  """
+  rewrite_fn = get_image_rewrite_fn(image_rewrite)
+  images: set[str] = set()
+
+  if not manifest_path or not manifest_path.strip():
+    raise ValueError("manifest_path must be a non-empty string.")
+  cleaned_path = manifest_path.strip()
+  if cleaned_path.startswith("gs://"):
+    try:
+      from etils import epath  # pylint: disable=g-import-not-at-top
+
+      text = epath.Path(cleaned_path).read_text()
+    except ImportError:
+      import subprocess  # pylint: disable=g-import-not-at-top
+
+      text = subprocess.check_output(
+          ["gcloud", "storage", "cat", cleaned_path], text=True
+      )
+  else:
+    with open(cleaned_path, "r", encoding="utf-8") as f:
+      text = f.read()
+
+  for raw_line in text.splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#"):
+      continue
+    images.add(rewrite_fn(line) if rewrite_fn is not None else line)
+
+  if include_runtime_image and scaffold.strip().lower() == "openhands":
+    try:
+      from examples.deepswe import template as template_mod  # pylint: disable=g-import-not-at-top
+
+      default_oh_img = getattr(
+          template_mod, "DEFAULT_OPENHANDS_SERVER_IMAGE", ""
+      )
+    except (ImportError, AttributeError):
+      default_oh_img = ""
+    oh_image = (
+        openhands_server_image
+        or os.environ.get("OPENHANDS_SERVER_IMAGE")
+        or os.environ.get("SANDBOX_RUNTIME_CONTAINER_IMAGE")
+        or os.environ.get("AGENT_SERVER_IMAGE")
+        or default_oh_img
+    ).strip()
+    if oh_image:
+      images.add(oh_image)
+
+  return sorted(images)
+
+
+def prewarm_manifest_sandboxes(
+    manifest_path: str,
+    *,
+    fleet: Any | None = None,
+    scaffold: str = "r2egym",
+    max_warmpool_replicas: int | None = None,
+    num_generations: int = 8,
+    wait: bool = False,
+    async_warm: bool = False,
+    max_workers: int = 32,
+    image_rewrite: Any | None = None,
+) -> threading.Thread | None:
+  """Pre-warms all sandbox images in a manifest on Kubernetes upfront.
+
+  Args:
+    manifest_path: Path (local or gs://) to image manifest file.
+    fleet: SandboxFleet instance (or None to use get_global_fleet()).
+    scaffold: Agent scaffold name ("r2egym" or "openhands").
+    max_warmpool_replicas: Optional cap on replicas per image.
+    num_generations: Number of generations per prompt.
+    wait: Whether to wait for warmpool readiness.
+    async_warm: Whether to run the warmup in a background thread.
+    max_workers: Number of concurrent worker threads.
+    image_rewrite: Optional image rewrite function.
+
+  Returns:
+    The background threading.Thread if async_warm=True, else None.
+  """
+  fleet_inst = fleet or get_global_fleet()
+  if fleet_inst is None:
+    raise ValueError(
+        "prewarm_manifest_sandboxes requires a non-None SandboxFleet."
+    )
+
+  rewrite_fn = get_image_rewrite_fn(
+      image_rewrite or getattr(fleet_inst, "_image_rewrite_fn", None)
+  )
+  images = load_images_from_manifest(
+      manifest_path,
+      scaffold=scaffold,
+      include_runtime_image=False,
+      image_rewrite=rewrite_fn,
+  )
+  target_reps = (
+      max_warmpool_replicas
+      if max_warmpool_replicas is not None
+      else num_generations
+  )
+  fail_fast = SandboxFailFastConfig.from_env().enabled
+  fleet_error_cls = _fleet_error_cls() if fail_fast else None
+  workers = max(1, int(os.getenv("PREWARM_MAX_WORKERS", str(max_workers))))
+
+  def _do_warm() -> None:
+    logging.info(
+        "[prewarm_manifest_sandboxes] Priming %d static sandbox image(s) on K8s"
+        " (wait=%s, target_reps=%d, max_workers=%d)...",
+        len(images),
+        wait,
+        target_reps,
+        workers,
+    )
+
+    def _create(img: str) -> None:
+      try:
+        fleet_inst.warm_image(img, replicas_override=target_reps, wait=False)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        if fail_fast and isinstance(e, fleet_error_cls):
+          raise
+        logging.warning("[prewarm_manifest_sandboxes] Warm note for %s: %s", img, e)
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=workers,
+        thread_name_prefix="manifest-warm",
+    ) as executor:
+      list(executor.map(_create, images))
+
+    if wait:
+      def _await_ready(img: str) -> None:
+        try:
+          fleet_inst.warm_image(img, replicas_override=target_reps, wait=True)
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          logging.warning(
+              "[prewarm_manifest_sandboxes] Warm pool for %s not fully ready: %s",
+              img,
+              e,
+          )
+
+      with concurrent.futures.ThreadPoolExecutor(
+          max_workers=workers,
+          thread_name_prefix="manifest-ready",
+      ) as executor:
+        list(executor.map(_await_ready, images))
+
+    logging.info(
+        "[prewarm_manifest_sandboxes] Finished priming %d static sandbox image(s).",
+        len(images),
+    )
+
+  if async_warm:
+    thread_error: list[BaseException] = []
+
+    def _target() -> None:
+      try:
+        _do_warm()
+      except BaseException as exc:  # pylint: disable=broad-exception-caught
+        thread_error.append(exc)
+
+    thread = threading.Thread(
+        target=_target,
+        name="prewarm-manifest-sandboxes",
+        daemon=True,
+    )
+
+    def _join_and_check(timeout: float | None = None) -> None:
+      thread.join(timeout=timeout)
+      if thread_error:
+        raise thread_error[0]
+
+    thread.join_and_check = _join_and_check  # type: ignore[attr-defined]
+    thread.start()
+    return thread
+  else:
+    _do_warm()
+    return None
+
+
 def normalize_tasks_for_fleet(
     tasks: Any,
     scaffold: str = "r2egym",
@@ -483,6 +681,8 @@ def init_global_fleet(
     scaffold: str = "r2egym",
     image_rewrite: Any | None = None,
     node_selector: dict[str, str] | None = None,
+    images_file: str | None = None,
+    static_images: Sequence[str] | None = None,
 ) -> Any:
   """Initialize the process-wide SandboxFleet instance once upfront."""
   global _GLOBAL_FLEET
@@ -637,6 +837,26 @@ def init_global_fleet(
     image_rewrite_fn = get_image_rewrite_fn(image_rewrite)
     fleet_inst._image_rewrite_fn = image_rewrite_fn
 
+    if tasks is None and (images_file or static_images):
+      resolved_file = images_file or os.getenv("PREWARM_IMAGES_FILE")
+      if static_images is not None:
+        raw_imgs = list(static_images)
+      elif resolved_file:
+        raw_imgs = load_images_from_manifest(
+            resolved_file,
+            scaffold=scaffold,
+            include_runtime_image=False,
+            image_rewrite=image_rewrite_fn,
+        )
+      else:
+        raw_imgs = []
+      try:
+        from agent_sandbox_rl import Task  # pyrefly: ignore[missing-import]
+
+        tasks = [Task(id=img, image=img) for img in raw_imgs]
+      except ImportError:
+        tasks = [{"image": img, "instance_id": img} for img in raw_imgs]
+
     if tasks is not None:
       normalized_tasks = normalize_tasks_for_fleet(
           tasks, scaffold=scaffold, image_rewrite=image_rewrite_fn
@@ -786,7 +1006,9 @@ class PrewarmDatasetIterator:
       wait_initial: bool = True,
       async_initial: bool = False,
       max_staleness: int = 0,
-      max_workers: int = 16,
+      max_workers: int = 32,
+      images_file: str | None = None,
+      static_images: Sequence[str] | None = None,
   ):
     self.scaffold = scaffold
     self.dataset_iter = iter(dataset)
@@ -797,18 +1019,37 @@ class PrewarmDatasetIterator:
     self.unwarm_on_exhaustion = unwarm_on_exhaustion
     self.wait_initial = wait_initial
     self.max_staleness = max(0, int(max_staleness))
+    self.images_file = images_file or os.getenv("PREWARM_IMAGES_FILE")
     # Steady-state window of undispatched batches, and the deeper start-up
     # window that covers batches 0..S (dispatched back-to-back) + 1 prefetch.
     self.lookahead_batches = max(1, int(lookahead_steps))
     self.initial_lookahead_batches = max(
         self.lookahead_batches, self.max_staleness + 1
     )
-    self.max_workers = max(1, int(max_workers))
+    self.max_workers = max(
+        1, int(os.getenv("PREWARM_MAX_WORKERS", str(max_workers)))
+    )
     self._fail_fast = SandboxFailFastConfig.from_env().enabled
     self._lock = threading.Lock()
     self.image_rewrite = get_image_rewrite_fn(
         image_rewrite or getattr(self.fleet, "_image_rewrite_fn", None)
     )
+
+    self.static_images: list[str] | None = None
+    if static_images is not None:
+      rewrite_fn = getattr(self, "image_rewrite", None) or get_image_rewrite_fn()
+      self.static_images = sorted(
+          {rewrite_fn(img) if rewrite_fn is not None else img for img in static_images}
+      )
+    elif self.images_file:
+      self.static_images = load_images_from_manifest(
+          self.images_file,
+          scaffold=self.scaffold,
+          include_runtime_image=False,
+          image_rewrite=self.image_rewrite,
+      )
+
+    self._static_mode = self.static_images is not None
 
     self.current_batch: collections.deque[tuple[Any, dict[str, int], int]] = (
         collections.deque()
@@ -826,39 +1067,40 @@ class PrewarmDatasetIterator:
     self._initial_warm_thread: threading.Thread | None = None
     self._initial_warm_error: BaseException | None = None
 
-    # 1. Fill current_batch queue up to batch_size
-    self._fill_batch(self.current_batch, self._current_batch_counts)
+    if self._static_mode:
+      target_reps = (
+          self.max_warmpool_replicas
+          if self.max_warmpool_replicas is not None
+          else self.num_generations
+      )
+      self._image_counts = {img: target_reps for img in self.static_images}
+      if self.fleet is not None:
+        fleet_warmed = getattr(self.fleet, "_warmed", None)
+        if isinstance(fleet_warmed, dict):
+          self._active_replicas.update(fleet_warmed)
+        elif hasattr(self.fleet, "active_pools") and isinstance(
+            self.fleet.active_pools, dict
+        ):
+          self._active_replicas.update(self.fleet.active_pools)
 
-    # 2. Fill the start-up lookahead window (batches 0..S + 1 prefetch)
-    self._refill_lookahead(self.initial_lookahead_batches)
-
-    # 3. Dict maintains the samples of active batches
-    self._update_image_counts()
-
-    # 4. After the dict updated, we interact the fleet. Batches 0..S are
-    # dispatched back-to-back immediately when step 0 starts, so all of their
-    # pools are waited on; prefetch batch(es) (> S) warm in the background.
-    if self._image_counts:
-      startup_wait_images = set(self._current_batch_counts)
-      for batch in list(self._lookahead)[: self.max_staleness]:
-        startup_wait_images.update(batch.counts)
       wait_images = (
-          frozenset(startup_wait_images)
+          frozenset(
+              img
+              for img in self._image_counts.keys()
+              if img not in self._active_replicas
+          )
           if self.wait_initial
           else frozenset()
       )
       logging.info(
-          "[PrewarmDatasetIterator] Priming initial sandboxes on K8s"
-          " (wait=%s, async_initial=%s, initial_lookahead_batches=%d):"
-          " creating %d"
-          " pool(s), readiness barrier on the %d pool(s) of start-up"
-          " batches 0..%d...",
+          "[PrewarmDatasetIterator] Priming static sandboxes from manifest on K8s"
+          " (images_file=%s, wait=%s, async_initial=%s):"
+          " creating %d pool(s), readiness barrier on %d pool(s)...",
+          self.images_file,
           self.wait_initial,
           async_initial,
-          self.initial_lookahead_batches,
-          len(self._image_counts),
+          len([img for img in self._image_counts if img not in self._active_replicas]),
           len(wait_images),
-          self.max_staleness,
       )
       if async_initial:
         def _run_initial_warm() -> None:
@@ -875,6 +1117,60 @@ class PrewarmDatasetIterator:
         self._initial_warm_thread.start()
       else:
         self._interact_fleet(wait_images)
+
+      # Fill initial batches from dataset for prompt dispatching without extracting images
+      self._fill_batch(self.current_batch, self._current_batch_counts)
+      self._refill_lookahead(self.initial_lookahead_batches)
+    else:
+      # 1. Fill current_batch queue up to batch_size
+      self._fill_batch(self.current_batch, self._current_batch_counts)
+
+      # 2. Fill the start-up lookahead window (batches 0..S + 1 prefetch)
+      self._refill_lookahead(self.initial_lookahead_batches)
+
+      # 3. Dict maintains the samples of active batches
+      self._update_image_counts()
+
+      # 4. After the dict updated, we interact the fleet. Batches 0..S are
+      # dispatched back-to-back immediately when step 0 starts, so all of their
+      # pools are waited on; prefetch batch(es) (> S) warm in the background.
+      if self._image_counts:
+        startup_wait_images = set(self._current_batch_counts)
+        for batch in list(self._lookahead)[: self.max_staleness]:
+          startup_wait_images.update(batch.counts)
+        wait_images = (
+            frozenset(startup_wait_images)
+            if self.wait_initial
+            else frozenset()
+        )
+        logging.info(
+            "[PrewarmDatasetIterator] Priming initial sandboxes on K8s"
+            " (wait=%s, async_initial=%s, initial_lookahead_batches=%d):"
+            " creating %d"
+            " pool(s), readiness barrier on the %d pool(s) of start-up"
+            " batches 0..%d...",
+            self.wait_initial,
+            async_initial,
+            self.initial_lookahead_batches,
+            len(self._image_counts),
+            len(wait_images),
+            self.max_staleness,
+        )
+        if async_initial:
+          def _run_initial_warm() -> None:
+            try:
+              self._interact_fleet(wait_images)
+            except BaseException as exc:  # pylint: disable=broad-exception-caught
+              self._initial_warm_error = exc
+
+          self._initial_warm_thread = threading.Thread(
+              target=_run_initial_warm,
+              name="prewarm-initial-sandboxes",
+              daemon=True,
+          )
+          self._initial_warm_thread.start()
+        else:
+          self._interact_fleet(wait_images)
 
   @property
   def next_batch(self) -> collections.deque[tuple[Any, dict[str, int], int]]:
@@ -992,14 +1288,21 @@ class PrewarmDatasetIterator:
       except StopIteration:
         self._exhausted = True
         break
-      item_counts = self._extract_item_image_counts(item)
-      img_count_sum = sum(item_counts.values())
-      if img_count_sum > 0:
-        sample_count = img_count_sum
-      elif isinstance(item, (list, tuple)):
-        sample_count = max(1, len(item))
+      if self._static_mode:
+        item_counts = {}
+        if isinstance(item, (list, tuple)):
+          sample_count = max(1, len(item))
+        else:
+          sample_count = 1
       else:
-        sample_count = 1
+        item_counts = self._extract_item_image_counts(item)
+        img_count_sum = sum(item_counts.values())
+        if img_count_sum > 0:
+          sample_count = img_count_sum
+        elif isinstance(item, (list, tuple)):
+          sample_count = max(1, len(item))
+        else:
+          sample_count = 1
       queue.append((item, item_counts, sample_count))
       for img, count in item_counts.items():
         counts_dict[img] = counts_dict.get(img, 0) + count
@@ -1008,6 +1311,8 @@ class PrewarmDatasetIterator:
 
   def _update_image_counts(self) -> None:
     """Updates dict to maintain samples of active batches."""
+    if self._static_mode:
+      return
     self._image_counts.clear()
     for img, count in self._previous_batch_counts.items():
       self._image_counts[img] = self._image_counts.get(img, 0) + count
@@ -1036,9 +1341,12 @@ class PrewarmDatasetIterator:
     desired: dict[str, int] = {}
     for img, count in self._image_counts.items():
       if count > 0:
-        reps = count * self.num_generations
-        if self.max_warmpool_replicas is not None:
-          reps = min(reps, self.max_warmpool_replicas)
+        if self._static_mode:
+          reps = count
+        else:
+          reps = count * self.num_generations
+          if self.max_warmpool_replicas is not None:
+            reps = min(reps, self.max_warmpool_replicas)
         desired[img] = reps
 
     # Partition actions
@@ -1206,11 +1514,12 @@ class PrewarmDatasetIterator:
       # batch S+1 (the start-up prefetch) is dispatched.
       self._refill_lookahead(self.lookahead_batches)
 
-      # Dict maintains the samples of active batches
-      self._update_image_counts()
+      if not self._static_mode:
+        # Dict maintains the samples of active batches
+        self._update_image_counts()
 
-      # After the dict updated, we interact the fleet (no readiness barrier)
-      self._interact_fleet()
+        # After the dict updated, we interact the fleet (no readiness barrier)
+        self._interact_fleet()
 
     item, _, _ = self.current_batch.popleft()
     return item

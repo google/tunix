@@ -145,43 +145,12 @@ def load_images_from_manifest(
   Returns:
     Sorted list of unique container image URIs to stage on sandbox nodes.
   """
-  rewrite_fn = sandbox_utils.get_image_rewrite_fn()
-  images: set[str] = set()
-
-  if not manifest_path or not manifest_path.strip():
-    raise ValueError("manifest_path must be a non-empty string.")
-  cleaned_path = manifest_path.strip()
-  if cleaned_path.startswith("gs://"):
-    try:
-      from etils import epath  # pylint: disable=g-import-not-at-top
-      text = epath.Path(cleaned_path).read_text()
-    except ImportError:
-      import subprocess  # pylint: disable=g-import-not-at-top
-      text = subprocess.check_output(
-          ["gcloud", "storage", "cat", cleaned_path], text=True
-      )
-  else:
-    with open(cleaned_path, "r", encoding="utf-8") as f:
-      text = f.read()
-
-  for raw_line in text.splitlines():
-    line = raw_line.strip()
-    if not line or line.startswith("#"):
-      continue
-    images.add(rewrite_fn(line) if rewrite_fn is not None else line)
-
-  if scaffold.strip().lower() == "openhands":
-    oh_image = (
-        openhands_server_image
-        or os.environ.get("OPENHANDS_SERVER_IMAGE")
-        or os.environ.get("SANDBOX_RUNTIME_CONTAINER_IMAGE")
-        or os.environ.get("AGENT_SERVER_IMAGE")
-        or template.DEFAULT_OPENHANDS_SERVER_IMAGE
-    ).strip()
-    if oh_image:
-      images.add(oh_image)
-
-  return sorted(images)
+  return sandbox_utils.load_images_from_manifest(
+      manifest_path,
+      scaffold=scaffold,
+      include_runtime_image=True,
+      openhands_server_image=openhands_server_image,
+  )
 
 
 def _resolve_node_selector(
