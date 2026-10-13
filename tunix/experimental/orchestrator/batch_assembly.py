@@ -534,68 +534,6 @@ def to_rl_trainer_payload(
   )
 
 
-def _log_router_replay_coverage(
-    payload: datatypes.RLTrainerPayload, *, batch_id: str, num_segments: int
-) -> None:
-  """Logs how many real packed tokens the trainer will actually replay.
-
-  Judged on layer 0 only so it stays cheap on `[B, T, L, K]` payloads. The MoE
-  layer forces a token only if all `top_k` slots are `>= 0` and distinct, and
-  re-gates it otherwise. A trajectory's last token has no routing (vLLM routes
-  `P + G - 1` positions), so correctly aligned routing forces
-  `real - segments` tokens.
-
-  Args:
-    payload: Packed payload carrying `routed_experts` and `segment_ids`.
-    batch_id: Microbatch tracking id for the log line.
-    num_segments: Number of trajectories packed into the payload.
-  """
-  ext = packing._packing_ext  # pylint: disable=protected-access
-  routed_raw = np.asarray(payload.routed_experts)
-  if routed_raw.dtype == np.uint8 and (
-      routed_raw.ndim == 4
-      or (routed_raw.ndim == 5 and routed_raw.shape[4] == 5)
-  ):
-    routed_arr = np.ascontiguousarray(routed_raw, dtype=np.uint8)
-  else:
-    routed_arr = np.ascontiguousarray(routed_raw, dtype=np.int16)
-  seg_arr = np.ascontiguousarray(payload.segment_ids, dtype=np.int32)
-  if (
-      ext is not None
-      and (
-          (routed_arr.dtype == np.int16 and routed_arr.ndim == 4)
-          or (routed_arr.dtype == np.uint8 and routed_arr.ndim in (4, 5))
-      )
-      and seg_arr.ndim == 2
-  ):
-    num_forced, num_real = ext.count_router_replay_forced_tokens(
-        routed_arr, seg_arr
-    )
-  else:
-    layer0_encoded = (
-        routed_arr[..., 0:1, :, :]
-        if (routed_arr.dtype == np.uint8 and routed_arr.ndim == 5)
-        else routed_arr[..., 0:1, :]
-    )
-    decoded_layer0 = packing.decode_routed_experts(layer0_encoded, batched=True)
-    assert decoded_layer0 is not None
-    real = seg_arr > 0
-    layer0 = np.sort(decoded_layer0[..., 0, :], axis=-1)
-    forced = np.all(layer0 >= 0, axis=-1) & ~np.any(
-        layer0[..., 1:] == layer0[..., :-1], axis=-1
-    )
-    num_forced = int(np.count_nonzero(forced & real))
-    num_real = int(np.count_nonzero(real))
-  logging.info(
-      "Router replay: %d/%d real tokens forced in %s (%d segments; aligned"
-      " routing forces real - segments).",
-      num_forced,
-      num_real,
-      batch_id,
-      num_segments,
-  )
-
-
 def _merge_batch_lineage(
     items: Sequence[Any],
     *,
@@ -745,10 +683,6 @@ class SequencePackedBatchAssembler:
         trajectory_ids=traj_ids,
         lineage_context=merged_lineage,
     )
-    if payload.routed_experts is not None:
-      _log_router_replay_coverage(
-          payload, batch_id=batch_tracking_id, num_segments=len(placed)
-      )
     return AssembledBatch(
         payload=payload,
         is_final_batch=is_final_batch,

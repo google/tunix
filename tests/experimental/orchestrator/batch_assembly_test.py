@@ -2705,36 +2705,6 @@ class SequencePackedRoutingTest(absltest.TestCase):
     ):
       self._assembler(segment_alignment_boundary=0)
 
-  def test_router_replay_coverage_logs_for_top_k_1_2_and_4(self):
-    for top_k in (1, 2, 4):
-      routed = np.zeros((1, 4, 2, top_k), dtype=np.int16)
-      routed[0, :3] = np.arange(top_k, dtype=np.int16)
-      routed[0, 3:] = _UNSET
-      # Token 1 has duplicate expert ID when top_k >= 2.
-      if top_k >= 2:
-        routed[0, 1, 0, 1] = routed[0, 1, 0, 0]
-      seg_ids = np.array([[1, 1, 1, 0]], dtype=np.int32)
-      payload = datatypes.RLTrainerPayload(
-          prompt_ids=np.zeros((1, 0), dtype=np.int32),
-          prompt_mask=np.zeros((1, 0), dtype=np.float32),
-          completion_ids=np.ones((1, 4), dtype=np.int32),
-          completion_mask=np.ones((1, 4), dtype=np.float32),
-          advantages=np.zeros((1, 4), dtype=np.float32),
-          segment_ids=seg_ids,
-          routed_experts=routed,
-      )
-      with self.assertLogs(level="INFO") as logs:
-        batch_assembly._log_router_replay_coverage(
-            payload, batch_id="test_b0", num_segments=1
-        )
-      expected = (
-          "3/3 real tokens forced" if top_k == 1 else "2/3 real tokens forced"
-      )
-      self.assertTrue(
-          any(expected in msg for msg in logs.output),
-          f"Expected {expected!r} in {logs.output}",
-      )
-
   def _assert_batches_identical(
       self,
       cpp_batches: list[batch_assembly.AssembledBatch],
@@ -3033,7 +3003,7 @@ class SequencePackedRoutingTest(absltest.TestCase):
     self._assert_batches_identical([pb_mix], [pb_mix_py])
     self._assert_batches_identical([pb_mix_i16_cpp], [pb_mix_i16_py])
 
-  def test_k5_uint8_routed_experts_round_trip_and_coverage_logging(self):
+  def test_k5_uint8_routed_experts_round_trip(self):
     # Regression test for K=5 (E <= 255) where batched uint8 has shape
     # (B, T, L, 5) and must never be misclassified as 4D unbatched uint10.
     raw_k5_a = np.array(
@@ -3094,14 +3064,6 @@ class SequencePackedRoutingTest(absltest.TestCase):
     orig_ext = packing._packing_ext
     try:
       packing._packing_ext = None
-      with self.assertLogs(level="INFO") as logs:
-        batch_assembly._log_router_replay_coverage(
-            b_k5.payload, batch_id="k5_py_fallback", num_segments=2
-        )
-      self.assertTrue(
-          any("10/12 real tokens forced" in msg for msg in logs.output),
-          f"Unexpected coverage log: {logs.output}",
-      )
       seq_k5_py = batch_assembly.SequencePackedBatchAssembler(
           batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=16
       )
@@ -3120,6 +3082,166 @@ class SequencePackedRoutingTest(absltest.TestCase):
 
     self._assert_batches_identical([b_k5], [b_k5_py])
     self._assert_batches_identical([pb_k5], [pb_k5_py])
+
+  def test_parallel_padded_batch_assembler_cpp_and_python_parity(self):
+    self.assertIsNotNone(packing._packing_ext)
+    orig_threads = packing._packing_ext.get_packing_threads()
+    packing._packing_ext.set_packing_threads(4)
+    try:
+      batch_size = 8
+      max_p = 1024
+      max_r = 1024
+      seq_cap = max_p + max_r
+      rng = np.random.default_rng(2027)
+      top_k = 8
+      num_layers = 32
+      self.assertGreaterEqual(
+          batch_size * seq_cap * num_layers * top_k,
+          packing._packing_ext.MIN_PARALLEL_BYTES,
+      )
+      # 6 real items into batch_size=8 leaves 2 empty tail rows on flush;
+      # lengths include prompt truncation (>1024) and response truncation
+      # (>1024).
+      lengths = [
+          (512, 600),
+          (1200, 700),   # prompt truncated to 1024
+          (400, 1300),   # response truncated to 1024
+          (1150, 1180),  # both prompt and response truncated
+          (1024, 1024),  # exact capacity
+          (300, 450),
+      ]
+      modes = (
+          "uint8",
+          "uint10",
+          "mixed_u8_u10",
+          "mixed_u8_i16",
+          "mixed_u10_i16",
+          "partial_none_disables_routing",
+      )
+      for mode in modes:
+        with self.subTest(mode=mode):
+          payloads: list[datatypes.RLTrainerPayload] = []
+          for idx, (p_len, c_len) in enumerate(lengths):
+            full_len = p_len + c_len
+            routed_len = full_len - (idx % 2)
+            if mode == "partial_none_disables_routing" and idx == 4:
+              routed = None
+            else:
+              if mode in ("uint8", "partial_none_disables_routing"):
+                tier = "uint8"
+              elif mode == "uint10":
+                tier = "uint10"
+              elif mode == "mixed_u8_u10":
+                tier = "uint8" if idx % 2 == 0 else "uint10"
+              elif mode == "mixed_u8_i16":
+                tier = "uint8" if idx % 2 == 0 else "int16"
+              else:
+                tier = "uint10" if idx % 2 == 0 else "int16"
+              max_exp = 200 if tier == "uint8" else 700
+              raw_r = rng.integers(
+                  -1,
+                  max_exp,
+                  size=(routed_len, num_layers, top_k),
+                  dtype=np.int16,
+              )
+              if tier == "int16":
+                routed = raw_r
+              elif tier == "uint8":
+                routed = packing.encode_routed_experts(raw_r, mode="uint8")
+              else:
+                routed = packing.encode_routed_experts(raw_r, mode="uint10")
+
+            payloads.append(
+                datatypes.RLTrainerPayload(
+                    prompt_ids=rng.integers(
+                        1, 500, size=p_len, dtype=np.int32
+                    ),
+                    prompt_mask=(
+                        rng.integers(0, 2, size=p_len).astype(np.float32)
+                        if idx % 2 == 0
+                        else np.ones(p_len, dtype=np.float32)
+                    ),
+                    completion_ids=rng.integers(
+                        1, 500, size=c_len, dtype=np.int32
+                    ),
+                    completion_mask=(
+                        rng.integers(0, 2, size=full_len).astype(np.float32)
+                        if idx % 3 == 0
+                        else np.ones(c_len, dtype=np.float32)
+                    ),
+                    advantages=(
+                        np.array([float(idx + 1) * 0.5], dtype=np.float32)
+                        if idx % 2 == 1
+                        else rng.standard_normal(full_len).astype(np.float32)
+                    ),
+                    old_per_token_logps=rng.standard_normal(c_len).astype(
+                        np.float32
+                    ),
+                    ref_per_token_logps=rng.standard_normal(c_len).astype(
+                        np.float32
+                    ),
+                    returns=rng.standard_normal(full_len).astype(np.float32),
+                    old_values=rng.standard_normal(full_len).astype(
+                        np.float32
+                    ),
+                    sampler_is_weights=rng.standard_normal(full_len).astype(
+                        np.float32
+                    ),
+                    routed_experts=routed,
+                    metadata={"traj_id": f"pad_parallel_{mode}_{idx}"},
+                )
+            )
+
+          def _run(
+              batch_items: list[datatypes.RLTrainerPayload],
+          ) -> list[batch_assembly.AssembledBatch]:
+            asm = batch_assembly.PaddedBatchAssembler(
+                batch_size=batch_size,
+                max_prompt_length=max_p,
+                max_response_length=max_r,
+                pad_id=7,
+                num_generations=2,
+                mini_batch_size=4,
+            )
+            out = list(asm.feed(batch_items))
+            out.extend(asm.flush())
+            return out
+
+          cpp_batches = _run(payloads)
+          orig_ext = packing._packing_ext
+          try:
+            packing._packing_ext = None
+            py_batches = _run(payloads)
+          finally:
+            packing._packing_ext = orig_ext
+
+          self.assertLen(cpp_batches, 1)
+          routed_out = cpp_batches[0].payload.routed_experts
+          if mode == "partial_none_disables_routing":
+            self.assertIsNone(routed_out)
+          elif mode == "uint8":
+            self.assertIsNotNone(routed_out)
+            self.assertEqual(routed_out.dtype, np.uint8)
+            self.assertEqual(
+                routed_out.shape, (batch_size, seq_cap, num_layers, top_k)
+            )
+          elif mode in ("uint10", "mixed_u8_u10"):
+            self.assertIsNotNone(routed_out)
+            self.assertEqual(routed_out.dtype, np.uint8)
+            self.assertEqual(
+                routed_out.shape,
+                (batch_size, seq_cap, num_layers, top_k // 4, 5),
+            )
+          else:  # mixed_u8_i16, mixed_u10_i16
+            self.assertIsNotNone(routed_out)
+            self.assertEqual(routed_out.dtype, np.int16)
+            self.assertEqual(
+                routed_out.shape, (batch_size, seq_cap, num_layers, top_k)
+            )
+
+          self._assert_batches_identical(cpp_batches, py_batches)
+    finally:
+      packing._packing_ext.set_packing_threads(orig_threads)
 
 
 if __name__ == "__main__":

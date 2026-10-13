@@ -12,16 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <pthread.h>
+#if defined(__linux__)
+#include <sched.h>
+#endif
+#include <unistd.h>
+
 #include <algorithm>
+#include <condition_variable>  // NOLINT(build/c++11)
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <exception>
+#include <functional>
 #include <memory>
+#include <mutex>  // NOLINT(build/c++11)
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <thread>  // NOLINT(build/c++11)
 #include <utility>
 #include <vector>
 
@@ -476,9 +487,382 @@ struct RawChunkBuffers {
   std::vector<std::vector<int64_t>> bin_indices;
 };
 
-// Allocates uninitialized buffers and populates all rows in a single forward
-// pass per row without holding the GIL. Every output byte is written at most
-// once (no redundant full-matrix memset before memcpy).
+// Fork-safe persistent worker pool for parallel row population in
+// `AllocateAndPopulateChunkNogil` and `AssemblePaddedChunkFast`.
+//
+// Invariants and concurrency contract:
+// 1. Concurrent callers to `ParallelFor` serialize on the process-wide mutex
+//    `g_pool_mu_`.
+// 2. `fn` must NOT re-enter `ParallelFor` (`g_pool_mu_` is non-recursive and
+//    would self-deadlock) and must NOT call the Python C-API (the GIL is
+//    released before entering `ParallelFor`).
+// 3. If any worker or the calling thread throws an exception inside `fn`, the
+//    first exception is captured and rethrown on the calling thread only after
+//    all active workers complete the current generation barrier.
+// 4. The singleton pool (`g_pool_`) and its worker threads are intentionally
+//    leaked at process exit to avoid static destruction order hazards. Across
+//    `fork()`, the `pthread_atfork` child handler resets `g_pool_mu_` and
+//    `g_pool_` so the child lazily initializes a fresh pool; `pid_ != cur_pid`
+//    serves as a secondary fallback if `pthread_atfork` registration fails.
+class PackingWorkerPool {
+ public:
+  static constexpr size_t kMaxThreads = 16;
+  static constexpr size_t kMinBytesPerThread = 2 * 1024 * 1024;  // 2 MiB
+  static constexpr size_t kMinParallelBytes = 2 * kMinBytesPerThread;  // 4 MiB
+
+  PackingWorkerPool(const PackingWorkerPool&) = delete;
+  PackingWorkerPool& operator=(const PackingWorkerPool&) = delete;
+  PackingWorkerPool(PackingWorkerPool&&) = delete;
+  PackingWorkerPool& operator=(PackingWorkerPool&&) = delete;
+
+  static void ParallelFor(size_t num_rows, size_t total_bytes,
+                          const std::function<void(size_t, size_t)>& fn) {
+    if (num_rows < 2 || total_bytes < kMinParallelBytes) {
+      fn(0, num_rows);
+      return;
+    }
+    EnsureAtforkRegistered();
+    std::lock_guard<PoolMutex> pool_lk(*g_pool_mu_);  // NOLINT(build/c++11)
+    const pid_t cur_pid = getpid();
+    if (g_pool_ == nullptr || g_pool_->pid_ != cur_pid) {
+      g_pool_ = new PackingWorkerPool(cur_pid, g_configured_threads_);
+    }
+    g_pool_->RunLocked(num_rows, total_bytes, fn);
+  }
+
+  // Initializes `g_configured_threads_` from CPU affinity / hardware
+  // concurrency during `NB_MODULE` initialization.
+  static void InitDefaultThreads() noexcept {
+    g_configured_threads_ = DetectHardwareThreads();
+  }
+
+  static int64_t GetConfiguredThreads() {
+    EnsureAtforkRegistered();
+    std::lock_guard<PoolMutex> pool_lk(*g_pool_mu_);  // NOLINT(build/c++11)
+    return static_cast<int64_t>(g_configured_threads_);
+  }
+
+  static void SetConfiguredThreads(int64_t num_threads) {
+    if (num_threads < 1 || num_threads > static_cast<int64_t>(kMaxThreads)) {
+      throw std::invalid_argument(
+          "num_threads must be in [1, " + std::to_string(kMaxThreads) +
+          "], got " + std::to_string(num_threads) + ".");
+    }
+    EnsureAtforkRegistered();
+    std::lock_guard<PoolMutex> pool_lk(*g_pool_mu_);  // NOLINT(build/c++11)
+    const size_t target = static_cast<size_t>(num_threads);
+    g_configured_threads_ = target;
+    if (g_pool_ != nullptr) {
+      if (g_pool_->pid_ == getpid()) {
+        if (g_pool_->num_threads_ != target) {
+          g_pool_->ShutdownLaunchedWorkers();
+          delete g_pool_;
+          g_pool_ = nullptr;
+        }
+      } else {
+        g_pool_ = nullptr;
+      }
+    }
+  }
+
+ private:
+  static size_t DetectHardwareThreads() noexcept {
+#if defined(__linux__)
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    if (sched_getaffinity(0, sizeof(cpuset), &cpuset) == 0) {
+      const int affinity_cpus = CPU_COUNT(&cpuset);
+      if (affinity_cpus > 0) {
+        return std::clamp<size_t>(static_cast<size_t>(affinity_cpus), 1,
+                                  kMaxThreads);
+      }
+    }
+#endif
+    const unsigned int hw = std::thread::hardware_concurrency();
+    if (hw == 0) {
+      return kMaxThreads;
+    }
+    return std::clamp<size_t>(static_cast<size_t>(hw), 1, kMaxThreads);
+  }
+
+  static void EnsureAtforkRegistered() {
+    static std::once_flag atfork_once;  // NOLINT(build/c++11)
+    std::call_once(atfork_once, []() {  // NOLINT(build/c++11)
+      // Best-effort registration; if `pthread_atfork` returns non-zero, the
+      // `g_pool_->pid_ != getpid()` check in `ParallelFor` provides a fallback
+      // when `g_pool_mu_` was not locked across fork.
+      (void)pthread_atfork(nullptr, nullptr, &PackingWorkerPool::OnForkChild);
+    });
+  }
+
+  static void OnForkChild() {
+    g_pool_mu_ = new PoolMutex();
+    g_pool_ = nullptr;
+  }
+
+  struct WorkerSlot {
+    std::condition_variable cv;
+    uint64_t gen = 0;
+    std::thread thread;
+  };
+
+  PackingWorkerPool(pid_t pid, size_t num_threads)
+      : pid_(pid), num_threads_(num_threads) {
+    if (num_threads_ <= 1) {
+      return;
+    }
+    const size_t num_bg = num_threads_ - 1;
+    try {
+      for (size_t t = 0; t < num_bg; ++t) {
+        workers_.emplace_back();
+        workers_.back().thread = std::thread([this, t]() { WorkerLoop(t); });
+      }
+    } catch (...) {
+      ShutdownLaunchedWorkers();
+      throw;
+    }
+  }
+
+  void ShutdownLaunchedWorkers() noexcept {
+    {
+      std::lock_guard<PoolMutex> lk(mu_);  // NOLINT(build/c++11)
+      stop_ = true;
+    }
+    for (WorkerSlot& slot : workers_) {
+      slot.cv.notify_one();
+    }
+    for (WorkerSlot& slot : workers_) {
+      if (slot.thread.joinable()) {
+        slot.thread.join();
+      }
+    }
+    workers_.clear();
+  }
+
+  void WorkerLoop(size_t slot_idx) {
+    WorkerSlot& slot = workers_[slot_idx];
+    const size_t worker_idx = slot_idx + 1;
+    uint64_t seen_gen = 0;
+    while (true) {
+      const std::function<void(size_t, size_t)>* fn_ptr = nullptr;
+      size_t r_start = 0;
+      size_t r_end = 0;
+      {
+        std::unique_lock<PoolMutex> lk(mu_);  // NOLINT(build/c++11)
+        slot.cv.wait(lk, [&]() { return stop_ || slot.gen > seen_gen; });
+        if (stop_) {
+          return;
+        }
+        seen_gen = slot.gen;
+        fn_ptr = current_fn_;
+        r_start = (num_rows_ * worker_idx) / active_threads_;
+        r_end = (num_rows_ * (worker_idx + 1)) / active_threads_;
+      }
+      std::exception_ptr local_exc;
+      if (fn_ptr != nullptr && r_start < r_end) {
+        try {
+          (*fn_ptr)(r_start, r_end);
+        } catch (...) {
+          local_exc = std::current_exception();
+        }
+      }
+      {
+        std::lock_guard<PoolMutex> lk(mu_);  // NOLINT(build/c++11)
+        if (local_exc && !worker_exc_) {
+          worker_exc_ = local_exc;
+        }
+        if (--remaining_workers_ == 0) {
+          cv_done_.notify_one();
+        }
+      }
+    }
+  }
+
+  void RunLocked(size_t num_rows, size_t total_bytes,
+                 const std::function<void(size_t, size_t)>& fn) {
+    const size_t byte_threads =
+        std::max<size_t>(1, total_bytes / kMinBytesPerThread);
+    const size_t n_threads = std::min({num_threads_, num_rows, byte_threads});
+    if (n_threads <= 1) {
+      fn(0, num_rows);
+      return;
+    }
+    const size_t num_active_bg = n_threads - 1;
+    {
+      std::lock_guard<PoolMutex> lk(mu_);  // NOLINT(build/c++11)
+      current_fn_ = &fn;
+      num_rows_ = num_rows;
+      active_threads_ = n_threads;
+      remaining_workers_ = num_active_bg;
+      worker_exc_ = nullptr;
+      for (size_t t = 0; t < num_active_bg; ++t) {
+        ++workers_[t].gen;
+      }
+    }
+    for (size_t t = 0; t < num_active_bg; ++t) {
+      workers_[t].cv.notify_one();
+    }
+    const size_t main_end = num_rows / n_threads;
+    std::exception_ptr main_exc;
+    if (main_end > 0) {
+      try {
+        fn(0, main_end);
+      } catch (...) {
+        main_exc = std::current_exception();
+      }
+    }
+    std::exception_ptr rethrow_exc;
+    {
+      std::unique_lock<PoolMutex> lk(mu_);  // NOLINT(build/c++11)
+      cv_done_.wait(lk, [&]() { return remaining_workers_ == 0; });
+      current_fn_ = nullptr;
+      rethrow_exc = main_exc ? main_exc : worker_exc_;
+      worker_exc_ = nullptr;
+    }
+    if (rethrow_exc) {
+      std::rethrow_exception(rethrow_exc);
+    }
+  }
+
+  using PoolMutex = std::mutex;  // NOLINT(build/c++11)
+  static inline PoolMutex* g_pool_mu_ = new PoolMutex();
+  static inline PackingWorkerPool* g_pool_ = nullptr;
+  static inline size_t g_configured_threads_ = kMaxThreads;
+
+  pid_t pid_;
+  size_t num_threads_;
+  PoolMutex mu_;
+  std::condition_variable cv_done_;
+  std::deque<WorkerSlot> workers_;
+  const std::function<void(size_t, size_t)>* current_fn_ = nullptr;
+  size_t num_rows_ = 0;
+  size_t active_threads_ = 0;
+  size_t remaining_workers_ = 0;
+  std::exception_ptr worker_exc_;
+  bool stop_ = false;
+};
+
+// Populates a single packed row `b` inside `AllocateAndPopulateChunkNogil`.
+void PopulatePackedRow(size_t b,
+                       const std::vector<const SegmentView*>& seg_views,
+                       size_t n_carried, int64_t budget, int32_t pad_id,
+                       int64_t segment_alignment_boundary,
+                       int64_t routed_layers, int64_t routed_k,
+                       RoutedEncoding routed_encoding, size_t routed_tok_bytes,
+                       RawChunkBuffers* out) {
+  const int64_t row_offset = static_cast<int64_t>(b) * budget;
+  int32_t* ids_row = out->ids.get() + row_offset;
+  float* pmask_row = out->prompt_mask.get() + row_offset;
+  float* cmask_row = out->completion_mask.get() + row_offset;
+  float* adv_row = out->advantages.get() + row_offset;
+  int32_t* seg_ids_row = out->segment_ids.get() + row_offset;
+  int32_t* seg_pos_row = out->segment_positions.get() + row_offset;
+  uint8_t* routed_base = out->routed_experts_bytes.get();
+  uint8_t* routed_row =
+      (routed_base != nullptr)
+          ? (routed_base + static_cast<size_t>(row_offset) * routed_tok_bytes)
+          : nullptr;
+
+  auto zero_pad_span = [&](int64_t start, int64_t len) {
+    const size_t len_sz = static_cast<size_t>(len);
+    std::fill_n(ids_row + start, len, pad_id);
+    std::memset(pmask_row + start, 0, len_sz * sizeof(float));
+    std::memset(cmask_row + start, 0, len_sz * sizeof(float));
+    std::memset(adv_row + start, 0, len_sz * sizeof(float));
+    std::memset(seg_ids_row + start, 0, len_sz * sizeof(int32_t));
+    std::memset(seg_pos_row + start, 0, len_sz * sizeof(int32_t));
+    for (size_t k = 0; k < n_carried; ++k) {
+      std::memset(out->per_token[k].get() + row_offset + start, 0,
+                  len_sz * sizeof(float));
+    }
+    if (routed_row != nullptr) {
+      PadUnsetRoutedBytes(routed_row, routed_encoding, start, len,
+                          routed_layers, routed_k);
+    }
+  };
+
+  int64_t cursor = 0;
+  const size_t n_segs = seg_views.size();
+  for (size_t s = 0; s < n_segs; ++s) {
+    const SegmentView& v = *seg_views[s];
+    const int32_t seg_id = static_cast<int32_t>(s + 1);
+    const int64_t p = v.p_len;
+    const int64_t c = v.c_len;
+    const int64_t n = p + c;
+    const int64_t aligned =
+        (s > 0 && segment_alignment_boundary > 1)
+            ? AlignOffset(cursor, segment_alignment_boundary)
+            : cursor;
+    const int64_t end = aligned + n;
+    if (end > budget) {
+      throw std::invalid_argument("pack_bin: bin size " + std::to_string(end) +
+                                  " exceeds budget " + std::to_string(budget) +
+                                  ".");
+    }
+    if (v.routed_ptr != nullptr && v.routed_tokens > n) {
+      throw std::invalid_argument("PackItem.routed_experts token length " +
+                                  std::to_string(v.routed_tokens) +
+                                  " exceeds segment token length " +
+                                  std::to_string(n) + ".");
+    }
+    if (aligned > cursor) {
+      zero_pad_span(cursor, aligned - cursor);
+    }
+    cursor = aligned;
+    const int64_t comp_start = cursor + p;
+    const size_t p_sz = static_cast<size_t>(p);
+    const size_t c_sz = static_cast<size_t>(c);
+
+    if (p > 0) {
+      std::memcpy(ids_row + cursor, v.prompt_ptr, p_sz * sizeof(int32_t));
+      std::fill_n(pmask_row + cursor, p, 1.0f);
+      std::memset(cmask_row + cursor, 0, p_sz * sizeof(float));
+      std::memset(adv_row + cursor, 0, p_sz * sizeof(float));
+      for (size_t k = 0; k < n_carried; ++k) {
+        std::memset(out->per_token[k].get() + row_offset + cursor, 0,
+                    p_sz * sizeof(float));
+      }
+    }
+    if (c > 0) {
+      std::memcpy(ids_row + comp_start, v.comp_ptr, c_sz * sizeof(int32_t));
+      std::memset(pmask_row + comp_start, 0, c_sz * sizeof(float));
+      std::memcpy(cmask_row + comp_start, v.mask_ptr, c_sz * sizeof(float));
+      std::memcpy(adv_row + comp_start, v.adv_ptr, c_sz * sizeof(float));
+      for (size_t k = 0; k < n_carried; ++k) {
+        std::memcpy(out->per_token[k].get() + row_offset + comp_start,
+                    v.per_token_ptrs[k], c_sz * sizeof(float));
+      }
+    }
+    std::fill_n(seg_ids_row + cursor, n, seg_id);
+    for (int64_t pos = 0; pos < n; ++pos) {
+      seg_pos_row[cursor + pos] = static_cast<int32_t>(pos);
+    }
+    if (routed_row != nullptr) {
+      const int64_t m = (v.routed_ptr != nullptr) ? v.routed_tokens : 0;
+      if (m > 0) {
+        CopyOrTranscodeRoutedTokens(v.routed_ptr, v.routed_encoding,
+                                    /*src_tok_offset=*/0, routed_row,
+                                    routed_encoding,
+                                    /*dst_tok_offset=*/cursor, m, routed_layers,
+                                    routed_k);
+      }
+      if (m < n) {
+        PadUnsetRoutedBytes(routed_row, routed_encoding, cursor + m, n - m,
+                            routed_layers, routed_k);
+      }
+    }
+    cursor = end;
+  }
+
+  if (cursor < budget) {
+    zero_pad_span(cursor, budget - cursor);
+  }
+}
+
+// Allocates uninitialized buffers and populates all rows in parallel across
+// `PackingWorkerPool` without holding the GIL. Every output byte is written at
+// most once (no redundant full-matrix memset before memcpy), so each worker
+// thread faults and populates its own disjoint row pages in parallel.
 RawChunkBuffers AllocateAndPopulateChunkNogil(
     const std::vector<std::vector<const SegmentView*>>& bins_views,
     size_t n_carried, int64_t budget, int32_t pad_id,
@@ -512,117 +896,19 @@ RawChunkBuffers AllocateAndPopulateChunkNogil(
         AllocRawBuffer<uint8_t>(total_elems * routed_tok_bytes);
   }
 
-  int32_t* ids_base = out.ids.get();
-  float* prompt_mask_base = out.prompt_mask.get();
-  float* completion_mask_base = out.completion_mask.get();
-  float* advantages_base = out.advantages.get();
-  int32_t* segment_ids_base = out.segment_ids.get();
-  int32_t* segment_positions_base = out.segment_positions.get();
-  uint8_t* routed_base = out.routed_experts_bytes.get();
+  const size_t bytes_per_token =
+      (6 + n_carried) * sizeof(float) + routed_tok_bytes;
+  const size_t total_bytes = total_elems * bytes_per_token;
 
-  for (size_t b = 0; b < n_bins; ++b) {
-    const auto& seg_views = bins_views[b];
-    const int64_t row_offset = static_cast<int64_t>(b) * budget;
-    int32_t* ids_row = ids_base + row_offset;
-    float* pmask_row = prompt_mask_base + row_offset;
-    float* cmask_row = completion_mask_base + row_offset;
-    float* adv_row = advantages_base + row_offset;
-    int32_t* seg_ids_row = segment_ids_base + row_offset;
-    int32_t* seg_pos_row = segment_positions_base + row_offset;
-    uint8_t* routed_row =
-        (routed_base != nullptr)
-            ? (routed_base + static_cast<size_t>(row_offset) * routed_tok_bytes)
-            : nullptr;
-
-    // Shared helper to pad either an alignment gap or the trailing row tail.
-    auto zero_pad_span = [&](int64_t start, int64_t len) {
-      const size_t len_sz = static_cast<size_t>(len);
-      std::fill_n(ids_row + start, len, pad_id);
-      std::memset(pmask_row + start, 0, len_sz * sizeof(float));
-      std::memset(cmask_row + start, 0, len_sz * sizeof(float));
-      std::memset(adv_row + start, 0, len_sz * sizeof(float));
-      std::memset(seg_ids_row + start, 0, len_sz * sizeof(int32_t));
-      std::memset(seg_pos_row + start, 0, len_sz * sizeof(int32_t));
-      for (size_t k = 0; k < n_carried; ++k) {
-        std::memset(out.per_token[k].get() + row_offset + start, 0,
-                    len_sz * sizeof(float));
-      }
-      if (routed_row != nullptr) {
-        PadUnsetRoutedBytes(routed_row, routed_encoding, start, len,
-                            routed_layers, routed_k);
-      }
-    };
-
-    int64_t cursor = 0;
-    const size_t n_segs = seg_views.size();
-    for (size_t s = 0; s < n_segs; ++s) {
-      const SegmentView& v = *seg_views[s];
-      const int32_t seg_id = static_cast<int32_t>(s + 1);
-      const int64_t p = v.p_len;
-      const int64_t c = v.c_len;
-      const int64_t n = p + c;
-      const int64_t aligned =
-          (s > 0 && segment_alignment_boundary > 1)
-              ? AlignOffset(cursor, segment_alignment_boundary)
-              : cursor;
-      const int64_t end = aligned + n;
-      if (end > budget) {
-        throw std::invalid_argument("pack_bin: bin size " +
-                                    std::to_string(end) + " exceeds budget " +
-                                    std::to_string(budget) + ".");
-      }
-      if (aligned > cursor) {
-        zero_pad_span(cursor, aligned - cursor);
-      }
-      cursor = aligned;
-      const int64_t comp_start = cursor + p;
-      const size_t p_sz = static_cast<size_t>(p);
-      const size_t c_sz = static_cast<size_t>(c);
-
-      if (p > 0) {
-        std::memcpy(ids_row + cursor, v.prompt_ptr, p_sz * sizeof(int32_t));
-        std::fill_n(pmask_row + cursor, p, 1.0f);
-        std::memset(cmask_row + cursor, 0, p_sz * sizeof(float));
-        std::memset(adv_row + cursor, 0, p_sz * sizeof(float));
-        for (size_t k = 0; k < n_carried; ++k) {
-          std::memset(out.per_token[k].get() + row_offset + cursor, 0,
-                      p_sz * sizeof(float));
+  PackingWorkerPool::ParallelFor(
+      n_bins, total_bytes, [&](size_t b_start, size_t b_end) {
+        for (size_t b = b_start; b < b_end; ++b) {
+          PopulatePackedRow(b, bins_views[b], n_carried, budget, pad_id,
+                            segment_alignment_boundary, routed_layers, routed_k,
+                            routed_encoding, routed_tok_bytes, &out);
         }
-      }
-      if (c > 0) {
-        std::memcpy(ids_row + comp_start, v.comp_ptr, c_sz * sizeof(int32_t));
-        std::memset(pmask_row + comp_start, 0, c_sz * sizeof(float));
-        std::memcpy(cmask_row + comp_start, v.mask_ptr, c_sz * sizeof(float));
-        std::memcpy(adv_row + comp_start, v.adv_ptr, c_sz * sizeof(float));
-        for (size_t k = 0; k < n_carried; ++k) {
-          std::memcpy(out.per_token[k].get() + row_offset + comp_start,
-                      v.per_token_ptrs[k], c_sz * sizeof(float));
-        }
-      }
-      std::fill_n(seg_ids_row + cursor, n, seg_id);
-      for (int64_t pos = 0; pos < n; ++pos) {
-        seg_pos_row[cursor + pos] = static_cast<int32_t>(pos);
-      }
-      if (routed_row != nullptr) {
-        const int64_t m = (v.routed_ptr != nullptr) ? v.routed_tokens : 0;
-        if (m > 0) {
-          CopyOrTranscodeRoutedTokens(
-              v.routed_ptr, v.routed_encoding,
-              /*src_tok_offset=*/0, routed_row, routed_encoding,
-              /*dst_tok_offset=*/cursor, m, routed_layers, routed_k);
-        }
-        if (m < n) {
-          PadUnsetRoutedBytes(routed_row, routed_encoding, cursor + m, n - m,
-                              routed_layers, routed_k);
-        }
-      }
-      cursor = end;
-    }
+      });
 
-    if (cursor < budget) {
-      zero_pad_span(cursor, budget - cursor);
-    }
-  }
   return out;
 }
 
@@ -1225,7 +1511,182 @@ inline void ExtractPaddedRoutedView(nb::object r_obj, PaddedItemView* v,
   keep->push_back(std::move(r_obj));
 }
 
-// Single-pass `nogil` 2D rectangular padding for `PaddedBatchAssembler`.
+struct PaddedRowCounts {
+  int64_t valid_tokens = 0;
+  int64_t num_sequences = 0;
+  int64_t truncated_prompts = 0;
+  int64_t truncated_completions = 0;
+};
+
+// Shared batch-level context for `PopulatePaddedRow`.
+struct PaddedBatchContext {
+  size_t n_items;
+  const std::vector<PaddedItemView>* views;
+  size_t n_opt;
+  size_t p_sz;
+  size_t c_sz;
+  size_t seq_sz;
+  int64_t max_prompt_len;
+  int64_t max_response_len;
+  int32_t pad_id;
+  RoutedEncoding chunk_routed_encoding;
+  int64_t routed_layers;
+  int64_t routed_k;
+  int64_t routed_tok_bytes;
+  int32_t* prompt_ids_base;
+  float* prompt_mask_base;
+  int32_t* comp_ids_base;
+  float* comp_mask_base;
+  float* advantages_base;
+  const std::vector<RawBufferPtr<float>>* opt_bufs;
+  uint8_t* routed_base;
+};
+
+// Populates a single padded row `r` inside `AssemblePaddedChunkFast`.
+PaddedRowCounts PopulatePaddedRow(size_t r, const PaddedBatchContext& ctx) {
+  int32_t* p_row = ctx.prompt_ids_base + r * ctx.p_sz;
+  float* pm_row = ctx.prompt_mask_base + r * ctx.p_sz;
+  int32_t* c_row = ctx.comp_ids_base + r * ctx.c_sz;
+  float* cm_row = ctx.comp_mask_base + r * ctx.c_sz;
+  float* adv_row = ctx.advantages_base + r * ctx.c_sz;
+  uint8_t* r_row = (ctx.routed_base != nullptr)
+                       ? (ctx.routed_base +
+                          static_cast<int64_t>(r * ctx.seq_sz) *
+                              ctx.routed_tok_bytes)
+                       : nullptr;
+
+  PaddedRowCounts counts;
+  if (r >= ctx.n_items) {
+    std::fill_n(p_row, ctx.p_sz, ctx.pad_id);
+    std::memset(pm_row, 0, ctx.p_sz * sizeof(float));
+    std::fill_n(c_row, ctx.c_sz, ctx.pad_id);
+    std::memset(cm_row, 0, ctx.c_sz * sizeof(float));
+    std::memset(adv_row, 0, ctx.c_sz * sizeof(float));
+    for (size_t k = 0; k < ctx.n_opt; ++k) {
+      std::memset((*ctx.opt_bufs)[k].get() + r * ctx.c_sz, 0,
+                  ctx.c_sz * sizeof(float));
+    }
+    if (r_row != nullptr) {
+      PadUnsetRoutedBytes(r_row, ctx.chunk_routed_encoding, 0,
+                          static_cast<int64_t>(ctx.seq_sz), ctx.routed_layers,
+                          ctx.routed_k);
+    }
+    return counts;
+  }
+
+  const PaddedItemView& v = (*ctx.views)[r];
+  if (v.p_len > ctx.max_prompt_len) {
+    counts.truncated_prompts = 1;
+  }
+  if (v.c_len > ctx.max_response_len) {
+    counts.truncated_completions = 1;
+  }
+  const int64_t p_keep = std::min(v.p_len, ctx.max_prompt_len);
+  const int64_t p_pad = ctx.max_prompt_len - p_keep;
+  const int64_t p_src_off = v.p_len - p_keep;
+  const int64_t c_keep = std::min(v.c_len, ctx.max_response_len);
+  const int64_t c_pad = ctx.max_response_len - c_keep;
+
+  counts.valid_tokens = p_keep + c_keep;
+  counts.num_sequences = 1;
+
+  // Left-pad prompt_ids and prompt_mask.
+  if (p_pad > 0) {
+    std::fill_n(p_row, p_pad, ctx.pad_id);
+    std::memset(pm_row, 0, static_cast<size_t>(p_pad) * sizeof(float));
+  }
+  if (p_keep > 0) {
+    std::memcpy(p_row + p_pad, v.prompt_ptr + p_src_off,
+                static_cast<size_t>(p_keep) * sizeof(int32_t));
+    if (v.prompt_mask_ptr != nullptr && v.p_mask_len == v.p_len) {
+      std::memcpy(pm_row + p_pad, v.prompt_mask_ptr + p_src_off,
+                  static_cast<size_t>(p_keep) * sizeof(float));
+    } else {
+      std::fill_n(pm_row + p_pad, p_keep, 1.0f);
+    }
+  }
+
+  // Right-pad completion_ids.
+  if (c_keep > 0) {
+    std::memcpy(c_row, v.comp_ptr,
+                static_cast<size_t>(c_keep) * sizeof(int32_t));
+  }
+  if (c_pad > 0) {
+    std::fill_n(c_row + c_keep, c_pad, ctx.pad_id);
+  }
+
+  // Completion mask.
+  if (!v.has_comp_mask) {
+    if (c_keep > 0) {
+      std::fill_n(cm_row, c_keep, 1.0f);
+    }
+    if (c_pad > 0) {
+      std::memset(cm_row + c_keep, 0,
+                  static_cast<size_t>(c_pad) * sizeof(float));
+    }
+  } else {
+    PopulateCompletionAlignedRow(v.comp_mask, v.p_len, v.c_len, c_keep,
+                                 ctx.max_response_len, cm_row);
+  }
+
+  // Advantages & optional per-token fields.
+  PopulateCompletionAlignedRow(v.advantages, v.p_len, v.c_len, c_keep,
+                               ctx.max_response_len, adv_row);
+  for (size_t k = 0; k < ctx.n_opt; ++k) {
+    PopulateCompletionAlignedRow(v.optional_fields[k], v.p_len, v.c_len, c_keep,
+                                 ctx.max_response_len,
+                                 (*ctx.opt_bufs)[k].get() + r * ctx.c_sz);
+  }
+
+  // Single-pass routed experts alignment + padding (no upfront full-buffer
+  // memset).
+  if (r_row != nullptr) {
+    if (v.routed_ptr == nullptr) {
+      PadUnsetRoutedBytes(r_row, ctx.chunk_routed_encoding, 0,
+                          static_cast<int64_t>(ctx.seq_sz), ctx.routed_layers,
+                          ctx.routed_k);
+    } else {
+      const int64_t kept_p_start =
+          std::max<int64_t>(v.p_len - ctx.max_prompt_len, 0);
+      const int64_t kept_p_end = std::min(v.p_len, v.routed_tokens);
+      const int64_t p_part_len =
+          std::max<int64_t>(kept_p_end - kept_p_start, 0);
+      const int64_t p_out_start = ctx.max_prompt_len - (v.p_len - kept_p_start);
+      if (p_out_start > 0) {
+        PadUnsetRoutedBytes(r_row, ctx.chunk_routed_encoding, 0, p_out_start,
+                            ctx.routed_layers, ctx.routed_k);
+      }
+      if (p_part_len > 0) {
+        CopyOrTranscodeRoutedTokens(
+            v.routed_ptr, v.routed_encoding, kept_p_start, r_row,
+            ctx.chunk_routed_encoding, p_out_start, p_part_len,
+            ctx.routed_layers, ctx.routed_k);
+      }
+      const int64_t p_written_end = p_out_start + p_part_len;
+      if (p_written_end < ctx.max_prompt_len) {
+        PadUnsetRoutedBytes(r_row, ctx.chunk_routed_encoding, p_written_end,
+                            ctx.max_prompt_len - p_written_end,
+                            ctx.routed_layers, ctx.routed_k);
+      }
+      const int64_t kept_c_end = std::min(v.p_len + c_keep, v.routed_tokens);
+      const int64_t c_part_len = std::max<int64_t>(kept_c_end - v.p_len, 0);
+      if (c_part_len > 0) {
+        CopyOrTranscodeRoutedTokens(
+            v.routed_ptr, v.routed_encoding, v.p_len, r_row,
+            ctx.chunk_routed_encoding, ctx.max_prompt_len, c_part_len,
+            ctx.routed_layers, ctx.routed_k);
+      }
+      const int64_t c_written_end = ctx.max_prompt_len + c_part_len;
+      const int64_t seq_len_i64 = static_cast<int64_t>(ctx.seq_sz);
+      if (c_written_end < seq_len_i64) {
+        PadUnsetRoutedBytes(r_row, ctx.chunk_routed_encoding, c_written_end,
+                            seq_len_i64 - c_written_end, ctx.routed_layers,
+                            ctx.routed_k);
+      }
+    }
+  }
+  return counts;
+}
 nb::tuple AssemblePaddedChunkFast(nb::sequence chunk_seq,
                                   const std::vector<std::string>& present_names,
                                   int64_t batch_size, int64_t max_prompt_len,
@@ -1357,125 +1818,53 @@ nb::tuple AssemblePaddedChunkFast(nb::sequence chunk_seq,
     if (replay_routing && routed_tok_bytes > 0) {
       routed_buf = AllocRawBuffer<uint8_t>(
           b_sz * seq_sz * static_cast<size_t>(routed_tok_bytes));
-      PadUnsetRoutedBytes(routed_buf.get(), chunk_routed_encoding, 0,
-                          static_cast<int64_t>(b_sz * seq_sz), routed_layers,
-                          routed_k);
     }
     row_valid_tokens = AllocRawBuffer<int64_t>(b_sz);
     row_num_sequences = AllocRawBuffer<int64_t>(b_sz);
-    std::memset(row_valid_tokens.get(), 0, b_sz * sizeof(int64_t));
-    std::memset(row_num_sequences.get(), 0, b_sz * sizeof(int64_t));
+    std::vector<int64_t> row_trunc_p(b_sz, 0);
+    std::vector<int64_t> row_trunc_c(b_sz, 0);
 
-    for (size_t r = 0; r < b_sz; ++r) {
-      int32_t* p_row = prompt_ids.get() + r * p_sz;
-      float* pm_row = prompt_mask.get() + r * p_sz;
-      int32_t* c_row = comp_ids.get() + r * c_sz;
-      float* cm_row = comp_mask.get() + r * c_sz;
-      float* adv_row = advantages.get() + r * c_sz;
-
-      if (r >= n_items) {
-        std::fill_n(p_row, p_sz, pad_id);
-        std::memset(pm_row, 0, p_sz * sizeof(float));
-        std::fill_n(c_row, c_sz, pad_id);
-        std::memset(cm_row, 0, c_sz * sizeof(float));
-        std::memset(adv_row, 0, c_sz * sizeof(float));
-        for (size_t k = 0; k < n_opt; ++k) {
-          std::memset(opt_bufs[k].get() + r * c_sz, 0, c_sz * sizeof(float));
-        }
-        continue;
-      }
-
-      const PaddedItemView& v = views[r];
-      if (v.p_len > max_prompt_len) {
-        ++truncated_prompts;
-      }
-      if (v.c_len > max_response_len) {
-        ++truncated_completions;
-      }
-      const int64_t p_keep = std::min(v.p_len, max_prompt_len);
-      const int64_t p_pad = max_prompt_len - p_keep;
-      const int64_t p_src_off = v.p_len - p_keep;
-      const int64_t c_keep = std::min(v.c_len, max_response_len);
-      const int64_t c_pad = max_response_len - c_keep;
-
-      row_valid_tokens[r] = p_keep + c_keep;
-      row_num_sequences[r] = 1;
-
-      // Left-pad prompt_ids and prompt_mask.
-      if (p_pad > 0) {
-        std::fill_n(p_row, p_pad, pad_id);
-        std::memset(pm_row, 0, static_cast<size_t>(p_pad) * sizeof(float));
-      }
-      if (p_keep > 0) {
-        std::memcpy(p_row + p_pad, v.prompt_ptr + p_src_off,
-                    static_cast<size_t>(p_keep) * sizeof(int32_t));
-        if (v.prompt_mask_ptr != nullptr && v.p_mask_len == v.p_len) {
-          std::memcpy(pm_row + p_pad, v.prompt_mask_ptr + p_src_off,
-                      static_cast<size_t>(p_keep) * sizeof(float));
-        } else {
-          std::fill_n(pm_row + p_pad, p_keep, 1.0f);
-        }
-      }
-
-      // Right-pad completion_ids.
-      if (c_keep > 0) {
-        std::memcpy(c_row, v.comp_ptr,
-                    static_cast<size_t>(c_keep) * sizeof(int32_t));
-      }
-      if (c_pad > 0) {
-        std::fill_n(c_row + c_keep, c_pad, pad_id);
-      }
-
-      // Completion mask.
-      if (!v.has_comp_mask) {
-        if (c_keep > 0) {
-          std::fill_n(cm_row, c_keep, 1.0f);
-        }
-        if (c_pad > 0) {
-          std::memset(cm_row + c_keep, 0,
-                      static_cast<size_t>(c_pad) * sizeof(float));
-        }
-      } else {
-        PopulateCompletionAlignedRow(v.comp_mask, v.p_len, v.c_len, c_keep,
-                                     max_response_len, cm_row);
-      }
-
-      // Advantages & optional per-token fields.
-      PopulateCompletionAlignedRow(v.advantages, v.p_len, v.c_len, c_keep,
-                                   max_response_len, adv_row);
-      for (size_t k = 0; k < n_opt; ++k) {
-        PopulateCompletionAlignedRow(v.optional_fields[k], v.p_len, v.c_len,
-                                     c_keep, max_response_len,
-                                     opt_bufs[k].get() + r * c_sz);
-      }
-
-      // Routed experts alignment.
-      if (routed_buf != nullptr && v.routed_ptr != nullptr) {
-        uint8_t* r_row = routed_buf.get() +
-                         static_cast<int64_t>(r * seq_sz) * routed_tok_bytes;
-        const int64_t kept_p_start =
-            std::max<int64_t>(v.p_len - max_prompt_len, 0);
-        const int64_t kept_p_end = std::min(v.p_len, v.routed_tokens);
-        const int64_t p_part_len =
-            std::max<int64_t>(kept_p_end - kept_p_start, 0);
-        const int64_t p_out_start = max_prompt_len - (v.p_len - kept_p_start);
-        if (p_part_len > 0) {
-          CopyOrTranscodeRoutedTokens(v.routed_ptr, v.routed_encoding,
-                                      kept_p_start, r_row,
-                                      chunk_routed_encoding, p_out_start,
-                                      p_part_len, routed_layers, routed_k);
-        }
-        const int64_t kept_c_end =
-            std::min(v.p_len + c_keep, v.routed_tokens);
-        const int64_t c_part_len = std::max<int64_t>(kept_c_end - v.p_len, 0);
-        if (c_part_len > 0) {
-          CopyOrTranscodeRoutedTokens(v.routed_ptr, v.routed_encoding, v.p_len,
-                                      r_row, chunk_routed_encoding,
-                                      max_prompt_len, c_part_len, routed_layers,
-                                      routed_k);
-        }
-      }
-    }
+    const PaddedBatchContext pad_ctx{
+        n_items,
+        &views,
+        n_opt,
+        p_sz,
+        c_sz,
+        seq_sz,
+        max_prompt_len,
+        max_response_len,
+        pad_id,
+        chunk_routed_encoding,
+        routed_layers,
+        routed_k,
+        routed_tok_bytes,
+        prompt_ids.get(),
+        prompt_mask.get(),
+        comp_ids.get(),
+        comp_mask.get(),
+        advantages.get(),
+        &opt_bufs,
+        routed_buf.get(),
+    };
+    const size_t bytes_per_row =
+        p_sz * (sizeof(int32_t) + sizeof(float)) +
+        c_sz * (sizeof(int32_t) + (2 + n_opt) * sizeof(float)) +
+        (routed_buf ? seq_sz * static_cast<size_t>(routed_tok_bytes) : 0);
+    const size_t total_bytes = b_sz * bytes_per_row;
+    PackingWorkerPool::ParallelFor(
+        b_sz, total_bytes, [&](size_t r_start, size_t r_end) {
+          for (size_t r = r_start; r < r_end; ++r) {
+            const PaddedRowCounts counts = PopulatePaddedRow(r, pad_ctx);
+            row_valid_tokens[r] = counts.valid_tokens;
+            row_num_sequences[r] = counts.num_sequences;
+            row_trunc_p[r] = counts.truncated_prompts;
+            row_trunc_c[r] = counts.truncated_completions;
+          }
+        });
+    truncated_prompts =
+        std::accumulate(row_trunc_p.begin(), row_trunc_p.end(), int64_t{0});
+    truncated_completions =
+        std::accumulate(row_trunc_c.begin(), row_trunc_c.end(), int64_t{0});
   }
 
   nb::dict opt_dict;
@@ -1494,183 +1883,6 @@ nb::tuple AssemblePaddedChunkFast(nb::sequence chunk_seq,
       Wrap1DArray(std::move(row_valid_tokens), b_sz),
       Wrap1DArray(std::move(row_num_sequences), b_sz), truncated_prompts,
       truncated_completions);
-}
-
-// Counts forced router replay tokens on layer 0 (`[B, T, L, K]` for `int16` or
-// `uint8`, or `[B, T, L, K//4, 5]` for `uint10`) without the GIL, returning
-// `(num_forced, num_real)`.
-std::pair<int64_t, int64_t> CountRouterReplayForcedTokens(
-    nb::object routed_experts_obj,
-    nb::ndarray<const int32_t, nb::ndim<2>, nb::c_contig, nb::device::cpu>
-        segment_ids) {
-  const int32_t* seg_ptr = segment_ids.data();
-  const int64_t b_dim = static_cast<int64_t>(segment_ids.shape(0));
-  const int64_t t_dim = static_cast<int64_t>(segment_ids.shape(1));
-  const int64_t num_tokens = b_dim * t_dim;
-
-  nb::ndarray<const uint8_t, nb::ndim<4>, nb::c_contig, nb::device::cpu> u8_4d;
-  if (nb::try_cast(routed_experts_obj, u8_4d, /*convert=*/false)) {
-    if (static_cast<int64_t>(u8_4d.shape(0)) != b_dim ||
-        static_cast<int64_t>(u8_4d.shape(1)) != t_dim) {
-      throw std::invalid_argument(
-          "routed_experts leading [B, T] shape must match segment_ids shape.");
-    }
-    const int64_t num_layers = static_cast<int64_t>(u8_4d.shape(2));
-    if (num_layers <= 0) {
-      throw std::invalid_argument(
-          "routed_experts must have at least 1 layer (shape[2] > 0).");
-    }
-    const int64_t top_k = static_cast<int64_t>(u8_4d.shape(3));
-    const int64_t token_stride = num_layers * top_k;
-    const uint8_t* routed_ptr = u8_4d.data();
-
-    int64_t num_real = 0;
-    int64_t num_forced = 0;
-    {
-      nb::gil_scoped_release release;
-      for (int64_t t = 0; t < num_tokens; ++t) {
-        if (seg_ptr[t] <= 0) {
-          continue;
-        }
-        ++num_real;
-        const uint8_t* l0 = routed_ptr + t * token_stride;
-        bool valid = true;
-        for (int64_t k = 0; k < top_k; ++k) {
-          const uint8_t v = l0[k];
-          if (v == 0) {
-            valid = false;
-            break;
-          }
-          for (int64_t j = 0; j < k; ++j) {
-            if (l0[j] == v) {
-              valid = false;
-              break;
-            }
-          }
-          if (!valid) {
-            break;
-          }
-        }
-        if (valid) {
-          ++num_forced;
-        }
-      }
-    }
-    return {num_forced, num_real};
-  }
-
-  nb::ndarray<const uint8_t, nb::ndim<5>, nb::c_contig, nb::device::cpu> u8_5d;
-  if (nb::try_cast(routed_experts_obj, u8_5d, /*convert=*/false) &&
-      u8_5d.shape(4) == 5) {
-    if (static_cast<int64_t>(u8_5d.shape(0)) != b_dim ||
-        static_cast<int64_t>(u8_5d.shape(1)) != t_dim) {
-      throw std::invalid_argument(
-          "routed_experts leading [B, T] shape must match segment_ids shape.");
-    }
-    const int64_t num_layers = static_cast<int64_t>(u8_5d.shape(2));
-    if (num_layers <= 0) {
-      throw std::invalid_argument(
-          "routed_experts must have at least 1 layer (shape[2] > 0).");
-    }
-    const int64_t groups_per_layer = static_cast<int64_t>(u8_5d.shape(3));
-    const int64_t top_k = groups_per_layer * 4;
-    const int64_t layer_bytes = groups_per_layer * 5;
-    const int64_t token_stride = num_layers * layer_bytes;
-    const uint8_t* routed_ptr = u8_5d.data();
-
-    int64_t num_real = 0;
-    int64_t num_forced = 0;
-    {
-      nb::gil_scoped_release release;
-      std::vector<uint16_t> l0_vals(static_cast<size_t>(top_k));
-      for (int64_t t = 0; t < num_tokens; ++t) {
-        if (seg_ptr[t] <= 0) {
-          continue;
-        }
-        ++num_real;
-        const uint8_t* l0_bytes = routed_ptr + t * token_stride;
-        for (int64_t g = 0; g < groups_per_layer; ++g) {
-          UnpackUint10ToFour(l0_bytes + g * 5, &l0_vals[g * 4]);
-        }
-        bool valid = true;
-        for (int64_t k = 0; k < top_k; ++k) {
-          const uint16_t v = l0_vals[k];
-          if (v == 0) {
-            valid = false;
-            break;
-          }
-          for (int64_t j = 0; j < k; ++j) {
-            if (l0_vals[j] == v) {
-              valid = false;
-              break;
-            }
-          }
-          if (!valid) {
-            break;
-          }
-        }
-        if (valid) {
-          ++num_forced;
-        }
-      }
-    }
-    return {num_forced, num_real};
-  }
-
-  nb::ndarray<const int16_t, nb::ndim<4>, nb::c_contig, nb::device::cpu>
-      routed_experts;
-  if (!nb::try_cast(routed_experts_obj, routed_experts, /*convert=*/false)) {
-    throw std::invalid_argument(
-        "count_router_replay_forced_tokens expects C-contiguous CPU int16 4D, "
-        "uint8 4D, or uint8 5D (shape[4]==5) routed_experts.");
-  }
-  if (static_cast<int64_t>(routed_experts.shape(0)) != b_dim ||
-      static_cast<int64_t>(routed_experts.shape(1)) != t_dim) {
-    throw std::invalid_argument(
-        "routed_experts leading [B, T] shape must match segment_ids shape.");
-  }
-  const int64_t num_layers = static_cast<int64_t>(routed_experts.shape(2));
-  if (num_layers <= 0) {
-    throw std::invalid_argument(
-        "routed_experts must have at least 1 layer (shape[2] > 0).");
-  }
-  const int16_t* routed_ptr = routed_experts.data();
-  const int64_t top_k = static_cast<int64_t>(routed_experts.shape(3));
-  const int64_t token_stride = num_layers * top_k;
-
-  int64_t num_real = 0;
-  int64_t num_forced = 0;
-  {
-    nb::gil_scoped_release release;
-    for (int64_t t = 0; t < num_tokens; ++t) {
-      if (seg_ptr[t] <= 0) {
-        continue;
-      }
-      ++num_real;
-      const int16_t* l0 = routed_ptr + t * token_stride;
-      bool valid = true;
-      for (int64_t k = 0; k < top_k; ++k) {
-        const int16_t e = l0[k];
-        if (e < 0) {
-          valid = false;
-          break;
-        }
-        for (int64_t j = 0; j < k; ++j) {
-          if (l0[j] == e) {
-            valid = false;
-            break;
-          }
-        }
-        if (!valid) {
-          break;
-        }
-      }
-      if (valid) {
-        ++num_forced;
-      }
-    }
-  }
-  return {num_forced, num_real};
 }
 
 inline void CheckUnbatchedRank1D(PyObject* obj, const char* field_name) {
@@ -2294,10 +2506,33 @@ nb::object DecodeRoutedExpertsFast(nb::object encoded_obj, bool batched) {
   return Wrap3DArray(std::move(out), t_dim, l_dim, k_dim);
 }
 
+#if defined(__SANITIZE_THREAD__)
+constexpr bool kThreadSanitizer = true;
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+constexpr bool kThreadSanitizer = true;
+#else
+constexpr bool kThreadSanitizer = false;
+#endif
+#else
+constexpr bool kThreadSanitizer = false;
+#endif
+
 }  // namespace
 
 NB_MODULE(_packing_ext, m) {
   m.doc() = "C++ nanobind nogil acceleration for Tunix RL sequence packing.";
+  PackingWorkerPool::InitDefaultThreads();
+  m.attr("MIN_BYTES_PER_THREAD") =
+      static_cast<int64_t>(PackingWorkerPool::kMinBytesPerThread);
+  m.attr("MIN_PARALLEL_BYTES") =
+      static_cast<int64_t>(PackingWorkerPool::kMinParallelBytes);
+  m.attr("MAX_PACKING_THREADS") =
+      static_cast<int64_t>(PackingWorkerPool::kMaxThreads);
+  m.attr("THREAD_SANITIZER") = kThreadSanitizer;
+  m.def("get_packing_threads", &PackingWorkerPool::GetConfiguredThreads);
+  m.def("set_packing_threads", &PackingWorkerPool::SetConfiguredThreads,
+        nb::arg("num_threads"));
   m.def("fill_one_chunk_fast", &FillOneChunkFast, nb::arg("lengths"),
         nb::arg("budget"), nb::arg("pack_size"), nb::arg("max_segments"),
         nb::arg("segment_alignment_boundary"));
@@ -2319,8 +2554,6 @@ NB_MODULE(_packing_ext, m) {
   m.def("ingest_payloads_fast", &IngestPayloadsFast, nb::arg("items"),
         nb::arg("max_packed_len"), nb::arg("pack_item_cls"),
         nb::arg("buffer_out"));
-  m.def("count_router_replay_forced_tokens", &CountRouterReplayForcedTokens,
-        nb::arg("routed_experts"), nb::arg("segment_ids"));
   m.def("encode_routed_experts_fast", &EncodeRoutedExpertsFast,
         nb::arg("routed").none(), nb::arg("mode") = "auto",
         nb::arg("num_experts") = nb::none(), nb::arg("batched") = false);
