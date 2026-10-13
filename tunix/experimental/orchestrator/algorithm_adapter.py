@@ -28,6 +28,7 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.orchestrator import held_routing
 from tunix.generate import utils as generate_utils
 from tunix.rl import algo_core
 from tunix.rl import algorithm_config
@@ -68,19 +69,20 @@ def _extract_tokens_and_masks(
 
 def _routed_experts_for(
     item: datatypes.TrajectoryItem, seq_len: int
-) -> np.ndarray | None:
+) -> np.ndarray | held_routing.BitPackedRoutedExperts | None:
   """Aligns a rollout's captured routing to the payload's token sequence.
 
   Args:
     item: Trajectory item, whose `routed_experts` (if any) is `[captured_len,
-      num_layers, top_k]`.
+      num_layers, top_k]`, dense or bit-packed by `held_routing`.
     seq_len: Length of the prompt+completion sequence in the payload.
 
   Returns:
     `[seq_len, num_layers, top_k]`, or None when nothing was captured. Rows
     beyond what the rollout reported are left `UNSET_ROUTED_EXPERT` so the
     model falls back to its own gate there rather than replaying a wrong
-    expert.
+    expert. Bit-packed routing is aligned the same way and stays bit-packed;
+    the batch assembler expands it when it packs the trajectory.
   """
   routed = getattr(item, "routed_experts", None)
   if routed is None and isinstance(item.traj, dict):
@@ -89,6 +91,8 @@ def _routed_experts_for(
     routed = item.metadata.get("routed_experts")
   if routed is None:
     return None
+  if held_routing.is_bitpacked(routed):
+    return held_routing.fit_tokens(routed, seq_len)
   routed_arr = np.asarray(routed, dtype=np.int16)
   if routed_arr.ndim != 3:
     raise ValueError(

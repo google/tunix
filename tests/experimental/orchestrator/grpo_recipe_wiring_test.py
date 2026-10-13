@@ -697,6 +697,37 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
     self.assertTrue(parsed.trainer_warmup_compile)
     self.assertTrue(parsed.trainer_warmup_routed_experts)
 
+  def test_launchers_wire_compact_held_routed_experts(self):
+    block = _deepswe_k8s_orchestrator_block()
+    # Passed only when on, so a launcher newer than the image is harmless.
+    self.assertIn("--compact_held_routed_experts", block)
+    self.assertNotIn("--no-compact_held_routed_experts", block)
+    root = os.path.join(
+        os.path.dirname(os.path.abspath(tunix.__file__)),
+        "experimental",
+        "examples",
+    )
+    for rel in (
+        ("deepswe_dist", "k8s_launcher.sh"),
+        ("recipes", "mlperf_base.sh"),
+    ):
+      with open(os.path.join(root, *rel)) as f:
+        self.assertIn(
+            "export COMPACT_HELD_ROUTED_EXPERTS="
+            "${COMPACT_HELD_ROUTED_EXPERTS:-false}",
+            f.read(),
+            os.path.join(*rel),
+        )
+
+    parse = run_deepswe_dist._parse_args  # pylint: disable=protected-access
+    self.assertFalse(parse([]).compact_held_routed_experts)
+    self.assertTrue(
+        parse(["--compact_held_routed_experts"]).compact_held_routed_experts
+    )
+    self.assertFalse(
+        parse(["--no-compact_held_routed_experts"]).compact_held_routed_experts
+    )
+
 
 class AuxMetricForwardingTest(absltest.TestCase):
   """Tests for converting a loss function's aux metrics for the buffer."""

@@ -21,6 +21,7 @@ pipelines.
 import abc
 import asyncio
 from collections.abc import Callable, Iterable, Mapping, Sequence, Sized
+import concurrent.futures
 import copy
 import ctypes
 import dataclasses
@@ -36,6 +37,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.common import logging_utils
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
+from tunix.experimental.orchestrator import held_routing
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.queue_manager import trajectory_queue_manager
 from tunix.experimental.trajectory import store as trajectory_store_lib
@@ -50,6 +52,11 @@ BatchConfig = batch_assembly.BatchConfig
 
 
 _EXHAUSTED = object()
+# Threads bit-packing polled routing under `compact_held_routed_experts`.
+# One 30k-token trajectory takes ~20 ms on an idle core (~150 ms on a heavily
+# oversubscribed one), and a start-up burst has delivered ~35 trajectories/s,
+# so 8 threads keep up with room to spare.
+_HELD_ROUTING_WORKERS = 8
 
 
 def _release_host_memory() -> None:
@@ -407,6 +414,7 @@ class StandardRLProgram(RLProgram):
       initial_dispatch_stagger_s: float = 0.0,
       initial_dispatch_first_stagger_s: float | None = None,
       trainer_warmup_payload: datatypes.RLTrainerPayload | None = None,
+      compact_held_routed_experts: bool = False,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -570,6 +578,28 @@ class StandardRLProgram(RLProgram):
     # `on_train_start`, after `configure_worker` (which discards any compile
     # done at bring-up). None keeps the lazy compile on the first micro-batch.
     self.trainer_warmup_payload = trainer_warmup_payload
+    # Bit-pack each finished trajectory's router-replay routing as soon as it
+    # is polled (`held_routing`, 0.6x at top-10) and keep it that way while the
+    # trajectory waits for its group and for the trainer. The batch assembler
+    # restores the exact int16 array when it packs the trajectory, so trainer
+    # payloads are unchanged. Encoding runs on its own small thread pool, off
+    # the event loop and off the assembler's threads.
+    self.compact_held_routed_experts = bool(compact_held_routed_experts)
+    self._held_routing_stats = held_routing.CompactionStats()
+    self._held_routing_executor: (
+        concurrent.futures.ThreadPoolExecutor | None
+    ) = None
+    if self.compact_held_routed_experts:
+      self._held_routing_executor = concurrent.futures.ThreadPoolExecutor(
+          max_workers=_HELD_ROUTING_WORKERS,
+          thread_name_prefix="held-routing",
+      )
+      logging.info(
+          "compact_held_routed_experts: holding router-replay routing"
+          " bit-packed (lo8hi16) until the batch assembler packs it;"
+          " %d encode threads.",
+          _HELD_ROUTING_WORKERS,
+      )
     self._first_train_payload_logged = False
     self._initial_dispatch_t0: float | None = None
     self._initial_stagger_logged: set[int] = set()
@@ -661,6 +691,10 @@ class StandardRLProgram(RLProgram):
       self.trajectory_logger.stop()
     if self.metrics_logger is not None:
       self.metrics_logger.close()
+    executor = getattr(self, "_held_routing_executor", None)
+    if executor is not None:
+      executor.shutdown(wait=False, cancel_futures=True)
+      self._held_routing_executor = None
 
   @property
   def _next_batch(self) -> int:
@@ -987,6 +1021,8 @@ class StandardRLProgram(RLProgram):
             # requests or retry them internally. Otherwise, a dropped RPC will cause
             # `_in_flight_rollouts` to never reach 0, hanging the EOF cascade.
             self._in_flight_rollouts -= len(completed)
+            if getattr(self, "_held_routing_executor", None) is not None:
+              await self._compact_held_routing(completed)
             for item in completed:
               await self.raw_q.put(item)
         except datatypes.NoHealthyRolloutWorkersError:
@@ -997,6 +1033,43 @@ class StandardRLProgram(RLProgram):
     finally:
       # NB: We currently assume it's safe to silently drop partial groups upon EOF.
       await self.raw_q.close()
+
+  async def _compact_held_routing(self, items: Sequence[Any]) -> None:
+    """Bit-packs freshly polled trajectories' routing on the encode threads.
+
+    Returns once every item is done, so `raw_q` only receives finished
+    encodings. Never raises: an item that cannot be encoded keeps its dense
+    routing, and if the thread pool itself fails every item stays dense, so no
+    finished trajectory is lost from the pipeline.
+
+    Args:
+      items: Trajectory items just returned by `poll_rollouts`.
+    """
+    executor = getattr(self, "_held_routing_executor", None)
+    if executor is None or not items:
+      return
+    loop = asyncio.get_running_loop()
+    futures = []
+    try:
+      for item in items:
+        futures.append(
+            loop.run_in_executor(
+                executor, held_routing.compact_item_routing, item
+            )
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+      logging.exception(
+          "Could not schedule routing bit-packing; the remaining polled"
+          " trajectories stay dense."
+      )
+    # Wait for everything that was scheduled, so no item is still being
+    # rewritten when it reaches `raw_q`.
+    results = await asyncio.gather(*futures, return_exceptions=True)
+    for result in results:
+      if isinstance(result, held_routing.CompactionStats):
+        self._held_routing_stats.merge(result)
+      else:
+        self._held_routing_stats.errors += 1
 
   async def critique_stage(self) -> None:
     """Stage 2: Scores rewards, PRMs, and reference KL logprobs."""
@@ -1389,6 +1462,28 @@ class StandardRLProgram(RLProgram):
         float(filtered_trajectories_count),
         log_step,
     )
+    if getattr(self, "compact_held_routed_experts", False):
+      # Cumulative since the program started.
+      held = self._held_routing_stats
+      self._log_metric(
+          "rollout/held_routing_compacted_total",
+          float(held.compacted),
+          log_step,
+      )
+      self._log_metric(
+          "rollout/held_routing_kept_dense_total",
+          float(held.kept_dense + held.errors),
+          log_step,
+      )
+      self._log_metric(
+          "rollout/held_routing_saved_gb_total",
+          (held.dense_bytes - held.held_bytes) / 1e9,
+          log_step,
+      )
+      self._log_metric(
+          "rollout/held_routing_encode_seconds_total", held.seconds, log_step
+      )
+      logging.info("[held-routing] %s", held.summary())
 
     # --- 2. Reward Metrics ---
     rewards_to_log = step_rewards

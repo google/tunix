@@ -25,13 +25,16 @@ potentially move to a common library.
 """
 
 import collections
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+import concurrent.futures
 import dataclasses
+import threading
 from typing import Any, Generic, NamedTuple, Protocol, TypeVar
 from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
+from tunix.experimental.orchestrator import held_routing
 from tunix.rl import packing
 from tunix.rl import utils as rl_utils
 
@@ -475,7 +478,14 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
 
   routed = None
   if item.routed_experts is not None:
-    routed = np.asarray(item.routed_experts, dtype=np.int16)
+    if held_routing.is_bitpacked(item.routed_experts):
+      # Held bit-packed while it waited; restore the exact int16 array, only
+      # for the rows the packed row will use.
+      routed = held_routing.expand(
+          held_routing.fit_tokens(item.routed_experts, p_len + c_len)
+      )
+    else:
+      routed = np.asarray(item.routed_experts, dtype=np.int16)
     if routed.ndim != 3:
       raise ValueError(
           "RLTrainerPayload.routed_experts must be [p + c, num_layers, top_k]"
@@ -504,6 +514,41 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
       per_token=per_token,
       routed_experts=routed,
   )
+
+
+_expand_pool: concurrent.futures.ThreadPoolExecutor | None = None
+_expand_pool_lock = threading.Lock()
+# Threads expanding a fed group's bit-packed routing (`held_routing`). One
+# 30k-token trajectory takes ~20 ms, and the last group of a step is on the
+# critical path, so its 16 expansions run side by side.
+_EXPAND_WORKERS = 8
+
+
+def _to_pack_items(
+    items: Sequence[datatypes.RLTrainerPayload],
+) -> Iterator[packing.PackItem]:
+  """`to_pack_item` over `items`, in order.
+
+  Items whose routing was held bit-packed are converted on a small thread pool,
+  since expanding it is the only costly part of `to_pack_item`. Results and
+  errors still come back in item order, as in a plain loop.
+
+  Args:
+    items: The payloads being fed.
+  """
+  if len(items) > 1 and any(
+      held_routing.is_bitpacked(getattr(item, "routed_experts", None))
+      for item in items
+  ):
+    global _expand_pool
+    with _expand_pool_lock:
+      if _expand_pool is None:
+        _expand_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=_EXPAND_WORKERS,
+            thread_name_prefix="held-routing-expand",
+        )
+    return _expand_pool.map(to_pack_item, items)
+  return (to_pack_item(item) for item in items)
 
 
 def to_rl_trainer_payload(
@@ -798,8 +843,7 @@ class SequencePackedBatchAssembler:
       items: Sequence[datatypes.RLTrainerPayload],
   ) -> list[AssembledBatch]:
     """Ingests items and flushes at the optimizer-update boundary."""
-    for item in items:
-      pack_item = to_pack_item(item)
+    for item, pack_item in zip(items, _to_pack_items(items)):
       packing.validate_items([pack_item], self.max_packed_len)
       # `pack_item` now owns the sequence-aligned `routed_experts` array; the
       # buffered `raw_payload` is only consulted for `metadata["lineage"]` in
@@ -1178,8 +1222,13 @@ class PaddedBatchAssembler:
       routed = item.routed_experts
       if replay_routing and routed is not None:
         # `routed_experts` is declared ArrayLike, which admits jax arrays and
-        # scalars; concretise it here as the sibling fields above do.
-        routed_arr = np.asarray(routed, dtype=np.int16)
+        # scalars; concretise it here as the sibling fields above do. Routing
+        # held bit-packed while it waited is restored to the exact int16.
+        routed_arr = (
+            held_routing.expand(routed)
+            if held_routing.is_bitpacked(routed)
+            else np.asarray(routed, dtype=np.int16)
+        )
         if batched_routed_experts is None:
           batched_routed_experts = np.full(
               (
