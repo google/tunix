@@ -3140,18 +3140,22 @@ def _run_with_dispatcher(
     first_stagger_s: float = 0.0,
     stagger_s: float = 0.0,
     rollout_s: float = 0.01,
-) -> tuple[_Run, dict[int, float]]:
+) -> tuple[_Run, dict[int, float], dict[int, float]]:
   """Runs `sc` with the real dispatcher (`rollout_dispatch_stage`) in front.
 
   The engine's `dispatch_rollouts` stands in for the rollouts and critique:
-  each dispatched prompt's group reaches `scored_q` `rollout_s` later, at the
-  policy version it was dispatched with. `max_staleness` is 1, so batch 1 is
-  inside the dispatch window from the start and only the start-up stagger
-  (google/tunix#2845) holds it.
+  each dispatched prompt's group reaches `scored_q` `rollout_s` later, stamped
+  with policy version `max(0, batch_idx - 1)`, which `max_staleness` 1 always
+  admits. (The version it was dispatched at would depend on whether step 0 had
+  synced by then, i.e. on machine load.) With `max_staleness` 1, batch 1 is
+  inside the dispatch window from the start, so with a blocking sync only the
+  start-up stagger (google/tunix#2845) holds it.
 
   Returns:
-    The run, and per prompt batch when its first prompt was dispatched, in
-    seconds after batch 0's.
+    The run, and in seconds after the stagger's own reference point (batch 0
+    reaching the dispatch window, `_initial_dispatch_t0`; batch 0's first
+    dispatch when there is no stagger): when each prompt batch's first prompt
+    was dispatched, and when each step ended.
   """
   log: list[Any] = []
   checkpoints: list[dict[str, Any]] = []
@@ -3185,24 +3189,33 @@ def _run_with_dispatcher(
       ),
   )
   first_dispatch: dict[int, float] = {}
+  step_end: dict[int, float] = {}
   deliveries: set[asyncio.Task[None]] = set()
+  on_step_end = program.on_step_end
+  assert on_step_end is not None
 
-  async def _deliver(prompt_idx: int, version: int) -> None:
+  def _timed_on_step_end(step: int, result: Any) -> None:
+    step_end[step] = time.monotonic()
+    on_step_end(step, result)
+
+  program.on_step_end = _timed_on_step_end
+
+  async def _deliver(prompt_idx: int) -> None:
     await asyncio.sleep(rollout_s)
+    batch_idx = prompt_idx // sc.full_batch_size
     for gen in range(NUM_GENERATIONS):
       item = _item(
           prompt_idx, gen, full_batch_size=sc.full_batch_size, logps=sc.logps
       )
-      item.policy_version = version
+      item.policy_version = max(0, batch_idx - 1)
       await program.scored_q.put(item)
 
   async def _dispatch_rollouts(prompts, **kwargs):
+    del kwargs
     for prompt in prompts:
       coordinates = prompt["metadata"]
       first_dispatch.setdefault(coordinates["batch_idx"], time.monotonic())
-      task = asyncio.create_task(
-          _deliver(coordinates["prompt_idx"], kwargs["policy_version"])
-      )
+      task = asyncio.create_task(_deliver(coordinates["prompt_idx"]))
       deliveries.add(task)
       task.add_done_callback(deliveries.discard)
     return [p["prompt_id"] for p in prompts]
@@ -3219,11 +3232,19 @@ def _run_with_dispatcher(
       for task in list(deliveries):
         task.cancel()
 
+  # As in BoundaryTimingTest: gc.collect() at a step's end can stall the event
+  # loop, and with it the dispatcher, for tens of ms.
   try:
-    asyncio.run(_main())
+    with mock.patch.object(rl_program, "_release_host_memory", lambda: None):
+      asyncio.run(_main())
   finally:
     handle.close()
-  t0 = first_dispatch[0]
+  # The stagger counts from batch 0 reaching the window, a thread hop before
+  # its first dispatch; measured from the dispatch, a loaded box makes batch 1
+  # look early.
+  t0 = program._initial_dispatch_t0  # pylint: disable=protected-access
+  if t0 is None:
+    t0 = first_dispatch[0]
   run = _Run(
       log=log,
       metrics=program.metrics_logger.records,  # pyrefly: ignore
@@ -3232,54 +3253,77 @@ def _run_with_dispatcher(
       trainer=trainer,
       program=program,
   )
-  return run, {b: t - t0 for b, t in first_dispatch.items()}
+  return (
+      run,
+      {b: t - t0 for b, t in first_dispatch.items()},
+      {s: t - t0 for s, t in step_end.items()},
+  )
 
 
 class StaggeredDispatchTest(absltest.TestCase):
   """google/tunix#2845's start-up stagger, with the real dispatcher in front.
 
   PRE-REGISTERED, written before the first run: batch 1 is held for the first
-  gap in every mode (it is dispatched 1.0 s after batch 0, within 0.3 s); at
-  boundary 0 nothing is taken ahead in time (step 1's groups do not exist
-  yet, so the prepack waits on the held batch without holding up step 0 or
-  the dispatcher); boundary 1 is pipelined; and the trainer cannot tell any
-  mode from the base loop. Control: without the stagger batch 1 goes out at
-  once.
+  gap in every mode; when step 0 is over before batch 1 goes out, nothing is
+  taken ahead at boundary 0 (step 1's groups do not exist yet, so the prepack
+  waits on the held batch without holding up step 0 or the dispatcher); a
+  later boundary is pipelined; and the trainer cannot tell any mode from the
+  base loop. Control: without the stagger batch 1 goes out at once.
+
+  Revised after the first cmcs runs, where the box ran at load ~170 on 160
+  cores: the first version asserted batch 1 goes out within 0.3 s of the gap
+  and boundary 0 is never taken ahead. Both assumed step 0 ends well within
+  the gap; under that load it did not, in every mode including the base loop
+  (MEASURED: base 1.10-1.29 s, off up to 2.08 s), and with a background sync
+  the dispatch window then rightly waits for step 0's round. Now the sync
+  blocks (so only the stagger holds batch 1), the lower bound is exact, the
+  upper bound allows for a loaded box, and the boundary-0 claim is checked
+  whenever its precondition (step 0 ended before batch 1 went out) holds.
   """
 
   _SC = _Scenario(
-      order="prompt_batch", num_prompts=12, max_steps=3, costs=_BUSY
+      order="prompt_batch",
+      num_prompts=12,
+      max_steps=3,
+      costs=_BUSY,
+      async_sync=False,
   )
   _FIRST_S = 1.0
 
   def test_the_held_batch_and_the_pipelined_boundary(self):
-    ref, ref_due = _run_with_dispatcher(
+    ref, ref_due, _ = _run_with_dispatcher(
         self._SC,
         pipelined=False,
         program_cls=_BaseLoopProgram,
         first_stagger_s=self._FIRST_S,
     )
-    self.assertAlmostEqual(ref_due[1], self._FIRST_S + 0.15, delta=0.15)
+    self.assertGreaterEqual(ref_due[1], self._FIRST_S - 0.001, ref_due)
     for mode, kwargs in _MODES.items():
-      new, due = _run_with_dispatcher(
+      new, due, step_end = _run_with_dispatcher(
           self._SC, **kwargs, first_stagger_s=self._FIRST_S
       )
+      boundaries = _boundaries(new)
       print(
           f"STAGGER_DUE_S base={ref_due[1]:.3f} {mode}={due[1]:.3f}"
-          f" boundaries={_boundaries(new)}"
+          f" step0_end={step_end[0]:.3f} boundaries={boundaries}"
       )
       with self.subTest(mode=mode):
-        self.assertAlmostEqual(
-            due[1], self._FIRST_S + 0.15, delta=0.15, msg=due
-        )
+        # Held for the gap (to the timer's resolution), and not much longer
+        # even on a loaded box.
+        self.assertGreaterEqual(due[1], self._FIRST_S - 0.001, due)
+        self.assertLess(due[1], self._FIRST_S + 0.5, due)
         _assert_equivalent(self, ref, new)
         _assert_weights_follow_updates(self, new)
-        boundaries = _boundaries(new)
         self.assertLen(boundaries, 2)
-        self.assertEqual(boundaries[0], (False, False))
-        self.assertEqual(boundaries[1][0], kwargs["pipelined"], boundaries)
-    _, no_stagger = _run_with_dispatcher(self._SC, pipelined=True, staged=True)
-    self.assertLess(no_stagger[1], 0.1, no_stagger)
+        if step_end[0] < due[1]:
+          # Step 0 was over before its successor's groups existed: the
+          # prepack had nothing to take, and waited without holding it up.
+          self.assertEqual(boundaries[0], (False, False), (step_end, due))
+        self.assertEqual(any(b[0] for b in boundaries), kwargs["pipelined"])
+    _, no_stagger, _ = _run_with_dispatcher(
+        self._SC, pipelined=True, staged=True
+    )
+    self.assertLess(no_stagger[1], 0.5, no_stagger)
 
 
 UNIT = 0.02
