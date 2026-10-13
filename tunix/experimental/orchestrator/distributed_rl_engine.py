@@ -1108,7 +1108,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         not self._weights_consistent
         or self._actor_busy_count > 0
         or self._actor_weights_dirty
-        or self._pending_sync_lock.locked()
         or self._weight_sync_coordinator is None
         or not self._weight_sync_coordinator.has_pending_destinations()
         or self._weight_sync_coordinator.in_flight

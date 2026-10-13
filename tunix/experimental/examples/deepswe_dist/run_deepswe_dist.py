@@ -94,8 +94,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           else 1
       ),
       help=(
-          "Minimum number of rollout worker replicas to wait for before"
-          " starting training."
+          "Total number of rollout worker replicas configured for the job."
+      ),
+  )
+  parser.add_argument(
+      "--min_rollout_replicas",
+      type=int,
+      default=(
+          int(val)
+          if (val := os.getenv("MIN_ROLLOUT_REPLICAS", "").strip())
+          else 0
+      ),
+      help=(
+          "Minimum number of rollout worker replicas required before starting"
+          " training. If <= 0 (default 0), waits for all --rollout_replicas."
       ),
   )
   parser.add_argument(
@@ -726,6 +738,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   return parser.parse_args(argv)
 
 
+def _resolve_min_rollout_replicas(args: argparse.Namespace) -> int:
+  """Resolves the minimum rollout worker replicas required before starting training."""
+  return orchestrator.resolve_min_rollout_replicas(
+      rollout_replicas=args.rollout_replicas,
+      min_rollout_replicas=args.min_rollout_replicas,
+  )
+
+
 def _build_trajectory_store_config(
     args: argparse.Namespace,
 ) -> dict[str, Any] | None:
@@ -950,14 +970,18 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           cache_dir=args.dataset_cache_dir or None,
           scaffold=args.scaffold,
       )
+  min_rollout_replicas = _resolve_min_rollout_replicas(args)
   try:
     logging.info(
-        "Waiting for workers to register (before MLPerf init_start)..."
+        "Waiting for workers to register (before MLPerf init_start):"
+        " min_rollout_replicas=%d, rollout_replicas=%d...",
+        min_rollout_replicas,
+        args.rollout_replicas,
     )
     cluster.wait_for_workers(
         min_workers={
             datatypes.Role.ACTOR: 1,
-            datatypes.Role.ROLLOUT: args.rollout_replicas,
+            datatypes.Role.ROLLOUT: min_rollout_replicas,
             datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
         },
         timeout=args.init_timeout_s,

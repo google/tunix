@@ -173,8 +173,31 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--rollout_replicas",
       type=int,
-      default=1,
-      help="Number of rollout worker replicas to wait for.",
+      default=(
+          int(val)
+          if (
+              val := (
+                  os.getenv("ROLLOUT_REPLICAS")
+                  or os.getenv("ROLLOUT_WORKERS")
+                  or ""
+              ).strip()
+          )
+          else 1
+      ),
+      help="Total number of rollout worker replicas configured for the job.",
+  )
+  parser.add_argument(
+      "--min_rollout_replicas",
+      type=int,
+      default=(
+          int(val)
+          if (val := os.getenv("MIN_ROLLOUT_REPLICAS", "").strip())
+          else 0
+      ),
+      help=(
+          "Minimum number of rollout worker replicas required before starting"
+          " training. If <= 0 (default 0), waits for all --rollout_replicas."
+      ),
   )
   parser.add_argument(
       "--max_concurrent_rollouts_per_worker",
@@ -581,11 +604,20 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
   )
 
-  logging.info("Waiting for workers to register via discovery service...")
+  min_rollout_replicas = orchestrator.resolve_min_rollout_replicas(
+      rollout_replicas=args.rollout_replicas,
+      min_rollout_replicas=args.min_rollout_replicas,
+  )
+  logging.info(
+      "Waiting for workers to register via discovery service"
+      " (min_rollout_replicas=%d, rollout_replicas=%d)...",
+      min_rollout_replicas,
+      args.rollout_replicas,
+  )
   cluster.wait_for_workers(
       min_workers={
           datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: args.rollout_replicas,
+          datatypes.Role.ROLLOUT: min_rollout_replicas,
           datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
       },
       timeout=args.init_timeout_s,

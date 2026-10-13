@@ -274,6 +274,7 @@ export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x2}
 export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-8}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
 export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-1}
+export MIN_ROLLOUT_REPLICAS=${MIN_ROLLOUT_REPLICAS:-0}
 export KUEUE_QUEUE=${KUEUE_QUEUE:-}
 export K8S_NAMESPACE=${K8S_NAMESPACE:-default}
 export KUEUE_QUEUE_NAME=${KUEUE_QUEUE_NAME:-${KUEUE_QUEUE:-${QUEUE_NAME:-}}}
@@ -472,6 +473,7 @@ start_orchestrator() {
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
       ROLLOUT_WORKERS=\"${ROLLOUT_WORKERS:-${ROLLOUT_REPLICAS:-1}}\" \
+      MIN_ROLLOUT_REPLICAS=\"${MIN_ROLLOUT_REPLICAS:-0}\" \
       EPISODE_TIMEOUT_SECS=\"${EPISODE_TIMEOUT_SECS:-5400}\" \
       WEIGHT_SYNC_DISABLE_TIMEOUTS=\"${WEIGHT_SYNC_DISABLE_TIMEOUTS}\" \
       ${WEIGHT_SYNC_PARALLEL_H2H:+WEIGHT_SYNC_PARALLEL_H2H=\"${WEIGHT_SYNC_PARALLEL_H2H}\"} \
@@ -496,6 +498,7 @@ start_orchestrator() {
         --mini_batch_size=${MINI_BATCH_SIZE} \
         --num_generations=${NUM_GENERATIONS} \
         --rollout_replicas=${ROLLOUT_WORKERS:-${ROLLOUT_REPLICAS:-1}} \
+        --min_rollout_replicas=${MIN_ROLLOUT_REPLICAS:-0} \
         --temperature=${TEMPERATURE} \
         --top_p=${TOP_P} \
         --top_k=${TOP_K} \

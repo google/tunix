@@ -144,6 +144,7 @@ export ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-20000}
 export ROLLOUT_ID=${ROLLOUT_ID:-$JOB_PREFIX-roll}
 export ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
 export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-1}
+export MIN_ROLLOUT_REPLICAS=${MIN_ROLLOUT_REPLICAS:-0}
 
 export TRAINER_ID=${TRAINER_ID:-$JOB_PREFIX-train}
 export TRAINER_PORT=${TRAINER_PORT:-20002}
@@ -298,6 +299,7 @@ start_orchestrator() {
         --trajectory_group_order=${TRAJECTORY_GROUP_ORDER} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --rollout_replicas=${ROLLOUT_REPLICAS} \
+        --min_rollout_replicas=${MIN_ROLLOUT_REPLICAS} \
         ${TEMPERATURE:+--temperature=${TEMPERATURE}} \
         ${TOP_P:+--top_p=${TOP_P}} \
         ${TOP_K:+--top_k=${TOP_K}} \
