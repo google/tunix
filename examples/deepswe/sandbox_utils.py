@@ -391,7 +391,7 @@ def prewarm_manifest_sandboxes(
     num_generations: int = 8,
     wait: bool = False,
     async_warm: bool = False,
-    max_workers: int = 16,
+    max_workers: int = 32,
     image_rewrite: Any | None = None,
 ) -> threading.Thread | None:
   """Pre-warms all sandbox images in a manifest on Kubernetes upfront.
@@ -432,6 +432,7 @@ def prewarm_manifest_sandboxes(
   )
   fail_fast = SandboxFailFastConfig.from_env().enabled
   fleet_error_cls = _fleet_error_cls() if fail_fast else None
+  workers = max(1, int(os.getenv("PREWARM_MAX_WORKERS", str(max_workers))))
 
   def _do_warm() -> None:
     logging.info(
@@ -440,7 +441,7 @@ def prewarm_manifest_sandboxes(
         len(images),
         wait,
         target_reps,
-        max_workers,
+        workers,
     )
 
     def _create(img: str) -> None:
@@ -452,7 +453,7 @@ def prewarm_manifest_sandboxes(
         logging.warning("[prewarm_manifest_sandboxes] Warm note for %s: %s", img, e)
 
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=max(1, max_workers),
+        max_workers=workers,
         thread_name_prefix="manifest-warm",
     ) as executor:
       list(executor.map(_create, images))
@@ -469,7 +470,7 @@ def prewarm_manifest_sandboxes(
           )
 
       with concurrent.futures.ThreadPoolExecutor(
-          max_workers=max(1, max_workers),
+          max_workers=workers,
           thread_name_prefix="manifest-ready",
       ) as executor:
         list(executor.map(_await_ready, images))
@@ -1005,7 +1006,7 @@ class PrewarmDatasetIterator:
       wait_initial: bool = True,
       async_initial: bool = False,
       max_staleness: int = 0,
-      max_workers: int = 16,
+      max_workers: int = 32,
       images_file: str | None = None,
       static_images: Sequence[str] | None = None,
   ):
@@ -1025,7 +1026,9 @@ class PrewarmDatasetIterator:
     self.initial_lookahead_batches = max(
         self.lookahead_batches, self.max_staleness + 1
     )
-    self.max_workers = max(1, int(max_workers))
+    self.max_workers = max(
+        1, int(os.getenv("PREWARM_MAX_WORKERS", str(max_workers)))
+    )
     self._fail_fast = SandboxFailFastConfig.from_env().enabled
     self._lock = threading.Lock()
     self.image_rewrite = get_image_rewrite_fn(

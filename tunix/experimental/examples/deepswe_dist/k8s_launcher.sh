@@ -181,6 +181,7 @@ export SANDBOX_WAIT_INITIAL=${SANDBOX_WAIT_INITIAL:-true}
 export SANDBOX_IMAGE_PULL_POLICY=${SANDBOX_IMAGE_PULL_POLICY:-IfNotPresent}
 export PREPULL_SANDBOX_IMAGES=${PREPULL_SANDBOX_IMAGES:-false}
 export PREWARM_IMAGES_FILE=${PREWARM_IMAGES_FILE:-}
+export PREWARM_MAX_WORKERS=${PREWARM_MAX_WORKERS:-32}
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-0}
 export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
 # Orbax Pathways impl: "persistence" (default) or "colocated_python". Selecting
@@ -546,6 +547,7 @@ start_orchestrator() {
         $([[ "${PREPULL_SANDBOX_IMAGES}" == "true" || "${PREPULL_SANDBOX_IMAGES}" == "True" || "${PREPULL_SANDBOX_IMAGES}" == "1" ]] && echo --prepull_sandbox_images || echo --no-prepull_sandbox_images) \
         ${PREPULL_IMAGES_FILE:+--prepull_images_file=\"${PREPULL_IMAGES_FILE}\"} \
         ${PREWARM_IMAGES_FILE:+--prewarm_images_file=\"${PREWARM_IMAGES_FILE}\"} \
+        ${PREWARM_MAX_WORKERS:+--prewarm_max_workers=${PREWARM_MAX_WORKERS}} \
         ${MAX_CONCURRENCY:+--max_concurrency=${MAX_CONCURRENCY}} \
         $([[ "${ROLLOUT_FAULT_TOLERANCE}" == "false" || "${ROLLOUT_FAULT_TOLERANCE}" == "False" || "${ROLLOUT_FAULT_TOLERANCE}" == "0" ]] && echo --no-rollout_fault_tolerance || echo --rollout_fault_tolerance) \
         ${MAX_CONCURRENT_ROLLOUTS_PER_WORKER:+--max_concurrent_rollouts_per_worker=${MAX_CONCURRENT_ROLLOUTS_PER_WORKER}} \

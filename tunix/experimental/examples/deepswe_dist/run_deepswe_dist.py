@@ -548,6 +548,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--prewarm_max_workers",
+      type=int,
+      default=int(os.getenv("PREWARM_MAX_WORKERS", "32")),
+      help="Maximum concurrent worker threads for pre-warming sandbox pools on Kubernetes.",
+  )
+  parser.add_argument(
       "--max_concurrency",
       type=int,
       default=128,
@@ -1073,6 +1079,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         num_generations=args.num_generations,
         wait=args.sandbox_wait_initial,
         async_warm=True,
+        max_workers=args.prewarm_max_workers,
     )
 
   try:
@@ -1210,6 +1217,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
             scaffold=args.scaffold,
             wait_initial=False if prewarm_manifest else args.sandbox_wait_initial,
             max_staleness=args.max_staleness,
+            max_workers=args.prewarm_max_workers,
             images_file=prewarm_manifest or None,
         )
       else:
