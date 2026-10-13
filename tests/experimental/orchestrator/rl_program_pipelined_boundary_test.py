@@ -1069,7 +1069,9 @@ def _new_program(
     program_cls: type[rl_program.StandardRLProgram],
     log: list[Any],
     checkpoints: list[dict[str, Any]],
+    program_kwargs: dict[str, Any] | None = None,
 ) -> rl_program.StandardRLProgram:
+  """The program for `sc`; `program_kwargs` override or add constructor args."""
   # The program refuses use_rollout_logps=False with several updates per
   # step. Without old logps in the payloads nothing is rescored either way.
   use_rollout_logps = sc.logps or sc.full_batch_size != sc.mini_batch_size
@@ -1103,11 +1105,11 @@ def _new_program(
     if sc.tail_s:
       time.sleep(sc.tail_s)
 
-  program = program_cls(
-      algo=algo,  # pyrefly: ignore[bad-argument-type]
+  kwargs: dict[str, Any] = dict(
+      algo=algo,
       dataset=None,
       max_steps=sc.max_steps,
-      assembler=_CountingAssembler(inner, log, sc.pack_s),  # pyrefly: ignore
+      assembler=_CountingAssembler(inner, log, sc.pack_s),
       batch_size=sc.full_batch_size,
       max_staleness=0,
       sync_weights=sc.sync_weights,
@@ -1121,6 +1123,8 @@ def _new_program(
       pipeline_step_boundary=pipelined,
       stage_next_microbatch=staged,
   )
+  kwargs.update(program_kwargs or {})
+  program = program_cls(**kwargs)
   program.metrics_logger = _MetricsRecorder()  # pyrefly: ignore
   return program
 
@@ -3119,11 +3123,165 @@ class FailureHandlingTest(absltest.TestCase):
 # Timing, with the trainer's measured costs scaled down (fakes, not a TPU).
 # ---------------------------------------------------------------------------
 
+
 # One "second" of the real system. Costs below are tr-s3's (MEASURED, see the
 # report): device 15.11 s per micro-batch, update ~1 s, host part 9.53 s,
 # get_metrics ~0.5 s once the update landed, destination bind+metadata 1.64 s,
 # trainer prepare_weight_sync 4.45 s, step bookkeeping 2.7 s, packing the
 # first micro-batch ~4 s.
+def _run_with_dispatcher(
+    sc: _Scenario,
+    *,
+    pipelined: bool,
+    staged: bool = False,
+    program_cls: type[
+        rl_program.StandardRLProgram
+    ] = rl_program.StandardRLProgram,
+    first_stagger_s: float = 0.0,
+    stagger_s: float = 0.0,
+    rollout_s: float = 0.01,
+) -> tuple[_Run, dict[int, float]]:
+  """Runs `sc` with the real dispatcher (`rollout_dispatch_stage`) in front.
+
+  The engine's `dispatch_rollouts` stands in for the rollouts and critique:
+  each dispatched prompt's group reaches `scored_q` `rollout_s` later, at the
+  policy version it was dispatched with. `max_staleness` is 1, so batch 1 is
+  inside the dispatch window from the start and only the start-up stagger
+  (google/tunix#2845) holds it.
+
+  Returns:
+    The run, and per prompt batch when its first prompt was dispatched, in
+    seconds after batch 0's.
+  """
+  log: list[Any] = []
+  checkpoints: list[dict[str, Any]] = []
+  trainer = _Trainer(log, sc.costs)
+  host_s = sc.costs.host_s
+
+  def transfer_s(method: str, kwargs: dict[str, Any]) -> float:
+    del kwargs
+    return host_s if method in ("fwd_bwd", "stage_fwd_bwd") else 0.0
+
+  worker = _Worker(lambda: trainer)
+  worker.initialize()
+  handle = _RemoteHandle(worker, transfer_s)
+  engine = distributed_rl_engine.DistributedRLEngine(
+      rollout_workers=[],
+      trainer_workers={datatypes.Role.ACTOR: handle},
+      weight_sync_coordinator=_Coordinator(handle, sc.dest_s, sc.round_s),
+  )
+  program = _new_program(
+      sc,
+      pipelined=pipelined,
+      staged=staged,
+      program_cls=program_cls,
+      log=log,
+      checkpoints=checkpoints,
+      program_kwargs=dict(
+          dataset=[f"task_{i}" for i in range(sc.num_prompts)],
+          max_staleness=1,
+          initial_dispatch_stagger_s=stagger_s,
+          initial_dispatch_first_stagger_s=first_stagger_s,
+      ),
+  )
+  first_dispatch: dict[int, float] = {}
+  deliveries: set[asyncio.Task[None]] = set()
+
+  async def _deliver(prompt_idx: int, version: int) -> None:
+    await asyncio.sleep(rollout_s)
+    for gen in range(NUM_GENERATIONS):
+      item = _item(
+          prompt_idx, gen, full_batch_size=sc.full_batch_size, logps=sc.logps
+      )
+      item.policy_version = version
+      await program.scored_q.put(item)
+
+  async def _dispatch_rollouts(prompts, **kwargs):
+    for prompt in prompts:
+      coordinates = prompt["metadata"]
+      first_dispatch.setdefault(coordinates["batch_idx"], time.monotonic())
+      task = asyncio.create_task(
+          _deliver(coordinates["prompt_idx"], kwargs["policy_version"])
+      )
+      deliveries.add(task)
+      task.add_done_callback(deliveries.discard)
+    return [p["prompt_id"] for p in prompts]
+
+  engine.dispatch_rollouts = _dispatch_rollouts  # pyrefly: ignore
+
+  async def _main():
+    program.engine = engine
+    dispatcher = asyncio.create_task(program.rollout_dispatch_stage())
+    try:
+      await asyncio.wait_for(program.train_stage(), timeout=120)
+    finally:
+      dispatcher.cancel()
+      for task in list(deliveries):
+        task.cancel()
+
+  try:
+    asyncio.run(_main())
+  finally:
+    handle.close()
+  t0 = first_dispatch[0]
+  run = _Run(
+      log=log,
+      metrics=program.metrics_logger.records,  # pyrefly: ignore
+      checkpoints=checkpoints,
+      last_step_result=program.last_step_result,
+      trainer=trainer,
+      program=program,
+  )
+  return run, {b: t - t0 for b, t in first_dispatch.items()}
+
+
+class StaggeredDispatchTest(absltest.TestCase):
+  """google/tunix#2845's start-up stagger, with the real dispatcher in front.
+
+  PRE-REGISTERED, written before the first run: batch 1 is held for the first
+  gap in every mode (it is dispatched 1.0 s after batch 0, within 0.3 s); at
+  boundary 0 nothing is taken ahead in time (step 1's groups do not exist
+  yet, so the prepack waits on the held batch without holding up step 0 or
+  the dispatcher); boundary 1 is pipelined; and the trainer cannot tell any
+  mode from the base loop. Control: without the stagger batch 1 goes out at
+  once.
+  """
+
+  _SC = _Scenario(
+      order="prompt_batch", num_prompts=12, max_steps=3, costs=_BUSY
+  )
+  _FIRST_S = 1.0
+
+  def test_the_held_batch_and_the_pipelined_boundary(self):
+    ref, ref_due = _run_with_dispatcher(
+        self._SC,
+        pipelined=False,
+        program_cls=_BaseLoopProgram,
+        first_stagger_s=self._FIRST_S,
+    )
+    self.assertAlmostEqual(ref_due[1], self._FIRST_S + 0.15, delta=0.15)
+    for mode, kwargs in _MODES.items():
+      new, due = _run_with_dispatcher(
+          self._SC, **kwargs, first_stagger_s=self._FIRST_S
+      )
+      print(
+          f"STAGGER_DUE_S base={ref_due[1]:.3f} {mode}={due[1]:.3f}"
+          f" boundaries={_boundaries(new)}"
+      )
+      with self.subTest(mode=mode):
+        self.assertAlmostEqual(
+            due[1], self._FIRST_S + 0.15, delta=0.15, msg=due
+        )
+        _assert_equivalent(self, ref, new)
+        _assert_weights_follow_updates(self, new)
+        boundaries = _boundaries(new)
+        self.assertLen(boundaries, 2)
+        self.assertEqual(boundaries[0], (False, False))
+        self.assertEqual(boundaries[1][0], kwargs["pipelined"], boundaries)
+    _, no_stagger = _run_with_dispatcher(self._SC, pipelined=True, staged=True)
+    self.assertLess(no_stagger[1], 0.1, no_stagger)
+
+
 UNIT = 0.02
 T_DEV, T_UPD, T_HOST, T_METRICS = 15.0, 1.0, 9.5, 0.5
 T_DEST, T_STAGE, T_TAIL, T_PACK = 1.6, 4.5, 2.7, 4.0
