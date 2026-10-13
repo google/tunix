@@ -110,6 +110,11 @@ def create_trajectory_engine(config: EngineConfig) -> sa.Engine:
   backend = parsed_url.get_backend_name()
 
   if backend == Dialect.POSTGRESQL:
+    connect_args = (
+        {}
+        if "connect_timeout" in parsed_url.query
+        else {"connect_timeout": 5}
+    )
     return sa.create_engine(
         url,
         echo=config.echo,
@@ -118,6 +123,7 @@ def create_trajectory_engine(config: EngineConfig) -> sa.Engine:
         pool_size=config.pool_size,
         max_overflow=config.max_overflow,
         pool_timeout=config.pool_timeout_s,
+        connect_args=connect_args,
     )
 
   if backend == Dialect.SQLITE:

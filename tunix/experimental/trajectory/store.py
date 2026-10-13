@@ -1,8 +1,10 @@
 """Protocols defining Trajectory Store interfaces."""
 
 import abc
-from typing import Any, ClassVar, Mapping, Protocol, runtime_checkable
+from collections.abc import Mapping, Sequence
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
+from absl import logging
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 
 # ==============================================================================
@@ -204,9 +206,10 @@ class TrajectoryStore(TrajectoryReader, TrajectoryWriter, abc.ABC):
 
   @classmethod
   def from_config(
-      cls, config: Mapping[str, Any] | None
-  ) -> "TrajectoryStore | None":
-    """Builds the store described by `config`, or None when it is disabled.
+      cls,
+      config: Mapping[str, Any] | Sequence[Mapping[str, Any] | None] | None,
+  ) -> "TrajectoryStore | list[TrajectoryStore] | None":
+    """Builds the store(s) described by `config`, or None when disabled.
 
     Call once per process and hold onto the result: the process that built a
     store owns closing it. Calling this twice in one process builds two
@@ -215,23 +218,41 @@ class TrajectoryStore(TrajectoryReader, TrajectoryWriter, abc.ABC):
     construct once.
 
     Args:
-      config: Configuration mapping, or None. The "backend" key selects the
-        implementation; "enabled" turns the store off without removing the
-        rest of the config.
+      config: Configuration mapping, sequence of configuration mappings, or
+        None. The "backend" key selects the implementation; "enabled" turns the
+        store off without removing the rest of the config.
 
     Returns:
-      A store instance, or None if `config` is None or not enabled.
+      A store instance, a list of store instances (when `config` is a sequence),
+      or None if `config` is None or no store is enabled.
 
     Raises:
       ValueError: If "backend" names no known implementation, or the selected
         backend rejects the rest of the config.
     """
-    if config is None or not config.get("enabled", False):
+    if config is None:
+      return None
+    if not isinstance(config, Mapping):
+      stores: list[TrajectoryStore] = []
+      try:
+        for item_config in config:
+          store = cls.from_config(item_config)
+          if isinstance(store, list):
+            stores.extend(store)
+          elif store is not None:
+            stores.append(store)
+      except Exception:
+        for built_store in stores:
+          built_store.close()
+        raise
+      return stores or None
+    if not config.get("enabled", False):
       return None
 
     # Ensure built-in backends are imported so their __init_subclass__ hooks
     # have registered them in _REGISTRY before lookup. Imported here rather
     # than at module level because all implementations import this module.
+    import sqlalchemy as sa  # pylint: disable=g-import-not-at-top
     from tunix.experimental.trajectory import file_store  # pylint: disable=g-import-not-at-top,unused-import
     from tunix.experimental.trajectory import in_memory_store  # pylint: disable=g-import-not-at-top,unused-import
     from tunix.experimental.trajectory import sql_store  # pylint: disable=g-import-not-at-top,unused-import
@@ -242,4 +263,12 @@ class TrajectoryStore(TrajectoryReader, TrajectoryWriter, abc.ABC):
           f"Unknown Trajectory Store backend {backend!r}; expected one of"
           f" {sorted(cls._REGISTRY)}."
       )
-    return cls._REGISTRY[backend]._from_config(config)  # pylint: disable=protected-access
+    try:
+      return cls._REGISTRY[backend]._from_config(config)  # pylint: disable=protected-access
+    except (sa.exc.SQLAlchemyError, OSError, ImportError):
+      logging.warning(
+          "Failed to connect to %r TrajectoryStore; skipping store.",
+          backend,
+          exc_info=True,
+      )
+      return None

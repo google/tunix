@@ -1305,6 +1305,54 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     )
     orch.shutdown()
 
+  def test_orchestrator_supports_list_of_trajectory_store_configs_with_none(
+      self,
+  ):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    file_cfg = {
+        "enabled": True,
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+    }
+    registry = worker_registry.WorkerRegistry()
+    mock_rollout_remote = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    orch = orchestrator.ClusterOrchestrator(
+        registry=registry,
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        trajectory_store_config=[file_cfg, None],
+    )
+    orch.register_worker_handle(
+        "rollout-remote-0", [datatypes.Role.ROLLOUT], mock_rollout_remote
+    )
+
+    self.assertIsInstance(orch.trajectory_store, list)
+    self.assertLen(orch.trajectory_store, 1)
+    self.assertIsInstance(
+        orch.trajectory_store[0], file_store.FileTrajectoryStore
+    )
+    expected_cfg = [
+        {
+            "enabled": True,
+            "backend": "file",
+            "root_dir": str(tmp_dir),
+            "run_id": orch.run_id,
+        },
+    ]
+    self.assertEqual(orch.trajectory_store_config, expected_cfg)
+
+    orch.bring_up_workers()
+    mock_rollout_remote.submit.assert_any_call(
+        "with_trajectory_store_config", expected_cfg
+    )
+    file_store_inst = orch.trajectory_store[0]
+    orch.shutdown()
+    with self.assertRaises(RuntimeError):
+      file_store_inst.add_step(
+          trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+      )
+
   @mock.patch.object(orchestrator.time, "sleep")
   def test_dynamic_worker_bring_up_retries_transient_init_error(
       self, mock_sleep

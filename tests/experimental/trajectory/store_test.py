@@ -15,11 +15,14 @@
 """Tests for TrajectoryStore.from_config and to_config."""
 
 import tempfile
+from unittest import mock
 
 from absl.testing import absltest
 from etils import epath
+import sqlalchemy as sa
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import in_memory_store
+from tunix.experimental.trajectory import sql_store
 from tunix.experimental.trajectory import store as store_lib
 from tunix.experimental.trajectory import trajectory_testing
 
@@ -140,6 +143,68 @@ class FromConfigTest(absltest.TestCase):
       self.assertIsInstance(store, CustomStore)
     finally:
       store_lib.TrajectoryStore._REGISTRY.pop("custom_test_backend", None)
+
+  def test_sequence_config_builds_list_and_skips_none_entries(self):
+    stores = store_lib.TrajectoryStore.from_config([
+        self._file_config(),
+        None,
+        {"enabled": True, "backend": "memory"},
+    ])
+    self.assertIsInstance(stores, list)
+    self.assertLen(stores, 2)
+    self.assertIsInstance(stores[0], file_store.FileTrajectoryStore)
+    self.assertIsInstance(stores[1], in_memory_store.InMemoryTrajectoryStore)
+    stores[0].close()
+
+  def test_sequence_config_with_all_disabled_returns_none(self):
+    self.assertIsNone(
+        store_lib.TrajectoryStore.from_config([
+            None,
+            self._file_config(enabled=False),
+        ])
+    )
+
+  def test_unreachable_sql_backend_in_sequence_is_skipped_without_blocking_file_store(
+      self,
+  ):
+    sql_config = {
+        "enabled": True,
+        "backend": "sql",
+        "db_url": "postgresql+psycopg2://user:pass@127.0.0.1:5432/db",
+        "run_id": "run_1",
+    }
+    with mock.patch.object(
+        sql_store.SqlTrajectoryStore,
+        "_initialize_schema",
+        side_effect=sa.exc.OperationalError("connect", None, Exception("down")),
+    ):
+      stores = store_lib.TrajectoryStore.from_config(
+          [self._file_config(), sql_config]
+      )
+    self.assertIsInstance(stores, list)
+    self.assertLen(stores, 1)
+    self.assertIsInstance(stores[0], file_store.FileTrajectoryStore)
+    stores[0].close()
+
+  def test_missing_driver_import_error_in_sequence_is_skipped(self):
+    sql_config = {
+        "enabled": True,
+        "backend": "sql",
+        "db_url": "postgresql+psycopg2://user:pass@127.0.0.1:5432/db",
+        "run_id": "run_1",
+    }
+    with mock.patch.object(
+        sql_store.SqlTrajectoryStore,
+        "_from_config",
+        side_effect=ModuleNotFoundError("No module named 'psycopg2'"),
+    ):
+      stores = store_lib.TrajectoryStore.from_config(
+          [self._file_config(), sql_config]
+      )
+    self.assertIsInstance(stores, list)
+    self.assertLen(stores, 1)
+    self.assertIsInstance(stores[0], file_store.FileTrajectoryStore)
+    stores[0].close()
 
 
 class ToConfigTest(absltest.TestCase):
