@@ -869,6 +869,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           skip_jit=skip_jit,
           # Tells the trainer which micro-batch is the step's last (MaxText's
           # retry_dropless_final_micro_batch runs it with the dropless program).
+          # On the last one the worker also runs update() inside this RPC, which
+          # makes it non-idempotent: a retried request would re-run the
+          # microbatch AND apply a second optimizer step, so it must never be
+          # retried blindly.
           apply_optimizer=apply_optimizer,
           **kwargs,
       )
@@ -876,12 +880,29 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         self._actor_weights_dirty = True
       if not apply_optimizer:
         return fwd_bwd_result
-      train_step = await self._invoke_worker(worker, "update")
+      # A worker that ran the optimizer inside the fwd_bwd RPC reports
+      # `updated=True` (TrainerWorker strips any caller-supplied copy of the
+      # key before echoing request metadata, so only the worker can set it). A
+      # worker without the fused update never sets it and takes the explicit
+      # update() below. Keyed on `updated` alone: a missing `train_step` must
+      # never trigger a second optimizer step.
+      update_ready = False
+      if (
+          isinstance(fwd_bwd_result, datatypes.Response)
+          and isinstance(fwd_bwd_result.metadata, Mapping)
+          and bool(fwd_bwd_result.metadata.get("updated"))
+      ):
+        train_step = fwd_bwd_result.metadata.get("train_step")
+        # Set only by a worker that waited for the update to land on device.
+        update_ready = bool(fwd_bwd_result.metadata.get("update_ready"))
+      else:
+        train_step = await self._invoke_worker(worker, "update")
       return {
           "fwd_bwd": fwd_bwd_result,
           "updated": True,
           "train_step": train_step,
           "accumulated": accumulate_gradients,
+          "update_ready": update_ready,
       }
 
   async def get_metrics(
@@ -914,7 +935,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       )
       if worker is None:
         raise ValueError(f"No worker registered for role {role}")
-      return await self._invoke_worker(worker, "get_metrics", **kwargs)
+      start = time.monotonic()
+      metrics = await self._invoke_worker(worker, "get_metrics", **kwargs)
+      # Logged so step timelines built from this log can place and size the
+      # fetch: before the checkpoint save it also waits for the update.
+      logging.info(
+          "get_metrics RPC returned on %s worker in %.3fs",
+          role.value if isinstance(role, datatypes.Role) else str(role),
+          time.monotonic() - start,
+      )
+      return metrics
 
   def configure_worker(
       self,
