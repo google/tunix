@@ -56,7 +56,8 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
       merged_meta = dict(resp.metadata)
       if resp.payload.metadata:
         merged_meta.update(resp.payload.metadata)
-      return dataclasses.replace(resp.payload, metadata=merged_meta)
+      if merged_meta != resp.payload.metadata:
+        return dataclasses.replace(resp.payload, metadata=merged_meta)
     return resp.payload
 
   if resp.error is not None:
@@ -816,6 +817,22 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           worker, "per_token_logps", items=items, **kwargs
       )
 
+  async def compile_trainer(
+      self,
+      dummy_data: datatypes.RLTrainerPayload | None,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+  ) -> Any:
+    """Compiles the trainer's step kernels against `dummy_data` now.
+
+    For callers that want the compile out of the first `train_step`. It must
+    run after `configure_worker`, whose loss/input-fn reset discards any
+    earlier compile.
+    """
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+    return await self._invoke_worker(worker, "compile", dummy_data=dummy_data)
+
   async def train_step(
       self,
       payload: datatypes.RLTrainerPayload,
@@ -843,12 +860,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         payload=payload,
         metadata=metadata,
     )
-    fwd_bwd_kwargs = dict(kwargs)
-    if apply_optimizer:
-      # The worker runs update() inside this fwd_bwd RPC. That makes the call
-      # non-idempotent: a retried request would re-run the microbatch AND
-      # apply a second optimizer step, so it must never be retried blindly.
-      fwd_bwd_kwargs["apply_optimizer"] = True
     is_actor = role == datatypes.Role.ACTOR
     async with self._actor_busy_guard(is_actor):
       fwd_bwd_result = await self._invoke_worker(
@@ -856,7 +867,14 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           "fwd_bwd",
           request=request,
           skip_jit=skip_jit,
-          **fwd_bwd_kwargs,
+          # Tells the trainer which micro-batch is the step's last (MaxText's
+          # retry_dropless_final_micro_batch runs it with the dropless program).
+          # On the last one the worker also runs update() inside this RPC, which
+          # makes it non-idempotent: a retried request would re-run the
+          # microbatch AND apply a second optimizer step, so it must never be
+          # retried blindly.
+          apply_optimizer=apply_optimizer,
+          **kwargs,
       )
       if is_actor:
         self._actor_weights_dirty = True
@@ -865,13 +883,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       # A worker that ran the optimizer inside the fwd_bwd RPC reports
       # `updated=True` (TrainerWorker strips any caller-supplied copy of the
       # key before echoing request metadata, so only the worker can set it). A
-      # worker that predates `apply_optimizer` never sets it and takes the
-      # explicit update() below, but it forwards the unknown kwarg to its
-      # trainer's fwd_bwd(): harmless for a backend that accepts and ignores
-      # extra kwargs (MaxText's engine does), a TypeError for one with a strict
-      # signature. So run the orchestrator and its workers from the same Tunix
-      # version. Keyed on `updated` alone: a missing `train_step` must never
-      # trigger a second optimizer step.
+      # worker without the fused update never sets it and takes the explicit
+      # update() below. Keyed on `updated` alone: a missing `train_step` must
+      # never trigger a second optimizer step.
       update_ready = False
       if (
           isinstance(fwd_bwd_result, datatypes.Response)
@@ -955,12 +969,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         worker = self._trainer_workers.get(role)
         if worker is None:
           raise ValueError(f"No trainer worker registered for role {role_name}")
-        logging.info(
-            "Auto-configuring trainer loss and model input fn on %s worker...",
-            role_name,
-        )
         pad_id = getattr(assembler, "pad_id", kwargs.get("pad_id", 0))
         eos_id = getattr(assembler, "eos_id", kwargs.get("eos_id", pad_id))
+        logging.info(
+            "Auto-configuring trainer loss and model input fn on %s worker"
+            " (pad_id=%s, eos_id=%s)...",
+            role_name,
+            pad_id,
+            eos_id,
+        )
         gen_fn = algo.build_gen_model_input_fn(
             pad_id=pad_id,  # pyrefly: ignore[bad-argument-type]
             eos_id=eos_id,  # pyrefly: ignore[bad-argument-type]

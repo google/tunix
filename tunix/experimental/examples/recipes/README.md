@@ -39,7 +39,7 @@ docker build \
 - `INSTALL_MAXTEXT=true`: Installs MaxText, `maxtext-vllm-adapter`, and TPU diagnostics from `requirements/maxtext_requirements.txt`.
 - `INSTALL_RAIDEN=true`: Installs the Raiden (`tpu_sync_jax`) wheel for direct DCN weight synchronization.
 - `INSTALL_DEEPSWE_DEPS=true`: **(Required for DeepSWE)** Installs the agentic evaluation and Kubernetes sandbox client dependencies (`swebench`, `openhands-sdk`, `k8s-agent-sandbox`, `agent-sandbox-rl`, `r2e-gym`, and `kubernetes`).
-- `INSTALL_K8S_TOOLS=true`: *(Optional, omitted above)* Installs interactive CLI debugging tools (`gcloud`, `kubectl`, `k9s`, `vim`, `lsof`, `procps`) inside the container; not required at runtime.
+- `INSTALL_K8S_TOOLS=true`: *(Optional, omitted above)* Installs interactive CLI debugging tools (`gcloud`, `k9s`, `vim`, `lsof`, `procps`) inside the container (`kubectl` is already installed by default for orchestrator gang teardown).
 
 ### 2. Push Image to Google Container Registry (GCR)
 

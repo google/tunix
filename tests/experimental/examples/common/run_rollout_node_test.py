@@ -217,12 +217,12 @@ class RunRolloutNodeTest(unittest.TestCase):
 
   def test_replica_seed_derives_distinct_32bit_seed_from_worker_id(self):
     self.assertIsNone(
-        run_rollout_node._replica_seed(
+        run_rollout_node.math_utils.replica_seed(
             run_rollout_node._parse_args(["--worker_id", "roll-0"])
         )
     )
     self.assertEqual(
-        run_rollout_node._replica_seed(
+        run_rollout_node.math_utils.replica_seed(
             run_rollout_node._parse_args(
                 ["--worker_id", "job-roll-0", "--seed", "42"]
             )
@@ -230,7 +230,7 @@ class RunRolloutNodeTest(unittest.TestCase):
         42,
     )
     self.assertEqual(
-        run_rollout_node._replica_seed(
+        run_rollout_node.math_utils.replica_seed(
             run_rollout_node._parse_args(
                 ["--worker_id", "job-roll-127", "--seed", "42"]
             )
@@ -239,7 +239,7 @@ class RunRolloutNodeTest(unittest.TestCase):
     )
     # Single-replica worker_id with no numeric suffix uses replica_idx=0.
     self.assertEqual(
-        run_rollout_node._replica_seed(
+        run_rollout_node.math_utils.replica_seed(
             run_rollout_node._parse_args(
                 ["--worker_id", "job-roll", "--seed", "42"]
             )
@@ -248,7 +248,7 @@ class RunRolloutNodeTest(unittest.TestCase):
     )
     # Modulo 2**32 keeps the seed within numpy's valid 32-bit range.
     self.assertEqual(
-        run_rollout_node._replica_seed(
+        run_rollout_node.math_utils.replica_seed(
             run_rollout_node._parse_args(
                 ["--worker_id", "job-roll-5", "--seed", str(2**32 - 2)]
             )

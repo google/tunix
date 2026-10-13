@@ -655,7 +655,7 @@ class SandboxUtilsTest(absltest.TestCase):
             run_id="test-run-1234",
             in_cluster=True,
             namespace="test-ns",
-            delete_pods=False,
+            delete_pods=True,
         )
 
   def test_init_global_fleet_registers_subsequent_task_images_in_plan(self):

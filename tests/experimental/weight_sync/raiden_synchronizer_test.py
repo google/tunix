@@ -184,6 +184,13 @@ class RaidenSynchronizerTest(absltest.TestCase):
     self.assertEqual(ws.kwargs["listener_port"], 0)
     self.assertEqual(ws.arrays, sync.arrays)
 
+  def test_env_parallelism_overrides_explicit_arg(self):
+    with mock.patch.dict("os.environ", {"RAIDEN_PARALLELISM": "16"}):
+      raiden_synchronizer.RaidenSynchronizer(
+          "rollout", self._state(), parallelism=4
+      )
+    self.assertEqual(self.ws_lib.instances[0].kwargs["parallelism"], 16)
+
   def test_census_drops_leaves_without_devices(self):
     names, arrays = raiden_synchronizer._filter_bindable(
         ["good", "bad"], [jnp.ones((2,)), _NoDevicesArray()]

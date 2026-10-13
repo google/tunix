@@ -216,18 +216,21 @@ def patch_agent_sandbox_rl_templates() -> None:
         pod_spec = spec["podTemplate"]["spec"]
         pod_spec["automountServiceAccountToken"] = False
         pod_spec["shareProcessNamespace"] = False
+        pull_policy = (
+            template.image_pull_policy
+            if template is not None and template.image_pull_policy
+            else os.getenv("SANDBOX_IMAGE_PULL_POLICY", "IfNotPresent")
+        )
+        for init_ctr in pod_spec.get("initContainers", []):
+          init_ctr.setdefault("imagePullPolicy", pull_policy)
         containers = pod_spec["containers"]
         if containers:
           containers[0]["name"] = RUNTIME_CONTAINER_NAME
+          containers[0].setdefault("imagePullPolicy", pull_policy)
         if not any(
             "name" in c and c["name"] == EVAL_CONTAINER_NAME
             for c in containers
         ):
-          pull_policy = (
-              template.image_pull_policy
-              if template is not None and template.image_pull_policy
-              else "IfNotPresent"
-          )
           containers.append({
               "name": EVAL_CONTAINER_NAME,
               "image": image,
@@ -701,8 +704,10 @@ def teardown_global_fleet() -> None:
       run_id = getattr(fleet, "run_id", None)
       if run_id:
         for c in getattr(fleet, "registry", []):
-          c_ns = getattr(c, "namespace", None) or os.getenv(
-              "NAMESPACE", "rl-tunix-swebench"
+          c_ns = (
+              getattr(c, "namespace", None)
+              or os.getenv("SANDBOX_NAMESPACE")
+              or os.getenv("NAMESPACE", "priority-dev")
           )
           logging.info(
               "[SandboxFleet] Reaping resources for run_id=%s in namespace=%s",
@@ -713,7 +718,7 @@ def teardown_global_fleet() -> None:
               run_id=run_id,
               in_cluster=getattr(c, "in_cluster", True),
               namespace=c_ns,
-              delete_pods=False,
+              delete_pods=True,
           )
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.warning("[SandboxFleet] Reaper note: %s", e)

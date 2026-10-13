@@ -14,6 +14,7 @@
 """Common RL helper classes and functions."""
 
 import functools
+import re
 import inspect
 from typing import Any, Iterable, Sequence
 
@@ -411,6 +412,77 @@ def model_call_contains(model, target_arg: str) -> bool:
   return _call_contains_by_type(type(target_obj), target_arg)
 
 
+def pop_moe_overflow(model: nnx.Module) -> jax.Array:
+  """Pops the `moe_has_overflow` intermediates MoE layers sowed on `model`.
+
+  Args:
+    model: The model after a forward pass.
+
+  Returns:
+    Scalar bool, True if any sowed flag (scanned layers stack them) is True.
+  """
+  flags = nnx.pop(
+      model, nnx.All(nnx.Intermediate, nnx.PathContains("moe_has_overflow"))
+  ).to_pure_dict()
+  leaves = [jnp.any(f) for f in jax.tree.leaves(flags)]
+  return jnp.any(jnp.stack(leaves)) if leaves else jnp.array(False)
+
+
+def wants_moe_audit(model: Any) -> bool:
+  """True for a MaxText model configured with log_moe_drops=true (MoE drop audit).
+
+  The trainer hands the loss a `TunixMaxTextAdapter`, which has no `config` of
+  its own: the MaxText model, and its config, is `.base`. Both are checked.
+  """
+  for m in (model, getattr(model, "base", None)):
+    if bool(getattr(getattr(m, "config", None), "log_moe_drops", False)):
+      return True
+  return False
+
+
+def _natural_key(path_str: str) -> list[Any]:
+  return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", path_str)]
+
+
+def pop_moe_audit(model: nnx.Module) -> dict[str, jax.Array] | None:
+  """Pops the MoE drop audit MaxText's RoutedMoE sowed on `model` (log_moe_drops).
+
+  Returns `{"dropped": int32[L], "max_ratio": float32[L]}`, one entry per MoE layer call in natural path
+  order (a scanned stack contributes its stacked values in order), or None if nothing was sown. The last entry
+  of each sow tuple is this forward's. MaxText's training engine reads it from the loss aux under
+  `_moe_audit` and logs it as MOE_DROP_AUDIT.
+  """
+  found = {"moe_dropped_assignments": [], "moe_max_load_ratio": []}
+  for path, var in nnx.state(model, nnx.Intermediate).flat_state():
+    name = str(path[-1]) if path else ""
+    if name in found:
+      sown = var.get_value() if hasattr(var, "get_value") else var
+      latest = jnp.asarray(sown[-1] if isinstance(sown, tuple) else sown)
+      found[name].append(("/".join(str(p) for p in path), latest))
+  nnx.pop(
+      model,
+      nnx.All(
+          nnx.Intermediate,
+          nnx.Any(
+              nnx.PathContains("moe_dropped_assignments"),
+              nnx.PathContains("moe_max_load_ratio"),
+          ),
+      ),
+  )
+  if not found["moe_dropped_assignments"]:
+    return None
+  out = {}
+  for name, key, dtype in (
+      ("moe_dropped_assignments", "dropped", jnp.int32),
+      ("moe_max_load_ratio", "max_ratio", jnp.float32),
+  ):
+    entries = sorted(found[name], key=lambda e: _natural_key(e[0]))
+    out[key] = jnp.concatenate(
+        [jnp.ravel(v).astype(dtype) for _, v in entries]
+    )
+  return out
+
+
 @functools.partial(
     jax.jit,
     static_argnames=(
@@ -420,6 +492,8 @@ def model_call_contains(model, target_arg: str) -> bool:
         "return_entropy",
         "temperature",
         "chunk_size",
+        "return_moe_overflow",
+        "return_moe_audit",
     ),
 )
 def compute_per_token_logps(
@@ -438,7 +512,9 @@ def compute_per_token_logps(
     chunk_size: int = 0,
     routed_experts: jax.Array | None = None,
     token_mask: jax.Array | None = None,
-) -> jax.Array | tuple[jax.Array, jax.Array]:
+    return_moe_overflow: bool = False,
+    return_moe_audit: bool = False,
+) -> jax.Array | tuple[jax.Array, ...]:
   """Computes the per-token log probabilities.
 
   Args:
@@ -466,6 +542,10 @@ def compute_per_token_logps(
       name MaxText's adapter uses -- so it replays this routing instead of
       re-running its router. Ignored by models that do not accept the kwarg.
     token_mask: Optional explicit valid positions for prompt plus completion.
+    return_moe_overflow: whether to also return a scalar bool that is True if
+      any MoE layer sowed a True `moe_has_overflow` intermediate (MaxText's
+      RoutedMoE dropped tokens) during the forward pass. The model is merged
+      inside this jit, so these intermediates are otherwise lost.
 
   Returns:
     per_token_logps: jax.Array token-level logarithmic values.
@@ -477,6 +557,8 @@ def compute_per_token_logps(
     entropy: optional per-token entropy jax.Array of shape matches
     per_token_logps,
       returned if return_entropy is True.
+    moe_overflow: optional scalar bool, returned last if return_moe_overflow
+      is True; False for models that sow no `moe_has_overflow`.
   """
   model = nnx.merge(graphdef, state)
 
@@ -535,6 +617,16 @@ def compute_per_token_logps(
     )
 
   outputs, _ = model(input_tokens, **model_kwargs)
+  moe_overflow = pop_moe_overflow(model) if return_moe_overflow else None
+  # log_moe_drops: the drop audit dict (or None), appended after the overflow flag.
+  moe_audit = pop_moe_audit(model) if return_moe_audit else None
+
+  def _result(*outs):
+    if return_moe_overflow:
+      outs += (moe_overflow,)
+    if return_moe_audit:
+      outs += (moe_audit,)
+    return outs if len(outs) > 1 else outs[0]
 
   if segment_ids is not None:
     # Packed Mode: Evaluate the full sequence (mixed prompts + completions).
@@ -576,8 +668,8 @@ def compute_per_token_logps(
         per_token_entropy = jax.lax.stop_gradient(per_token_entropy)  # pyrefly: ignore[unbound-name]
 
     if return_entropy:
-      return per_token_logps, per_token_entropy  # pyrefly: ignore[unbound-name]
-    return per_token_logps
+      return _result(per_token_logps, per_token_entropy)  # pyrefly: ignore[unbound-name]
+    return _result(per_token_logps)
   else:
     logits = outputs[:, -logits_to_keep - 1 : -1, :]
     if temperature != 0.0 and temperature != 1.0:
@@ -599,8 +691,8 @@ def compute_per_token_logps(
 
     if return_entropy:
       entropy = compute_entropy_from_logits(logits)
-      return per_token_logps, entropy
-    return per_token_logps
+      return _result(per_token_logps, entropy)
+    return _result(per_token_logps)
 
 
 def sampler_trainer_agreement(

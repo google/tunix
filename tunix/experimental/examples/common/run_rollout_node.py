@@ -31,6 +31,7 @@ from tunix.experimental.examples.common import models
 from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
+from tunix.utils import math_utils
 from tunix.utils import maxtext_utils
 
 # Import Raiden before any other libraries to ensure correct JAX compilation.
@@ -389,17 +390,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   return args
 
 
-def _replica_seed(args: argparse.Namespace) -> int | None:
-  """Derives the per-replica 32-bit vLLM engine seed from --seed and --worker_id."""
-  seed = getattr(args, "seed", None)
-  if seed is None:
-    return None
-  worker_id = str(getattr(args, "worker_id", "") or "")
-  suffix = worker_id.rsplit("-", 1)[-1]
-  replica_idx = int(suffix) if (suffix.isascii() and suffix.isdigit()) else 0
-  return (int(seed) + replica_idx) % (2**32)
-
-
 def _get_tensor_parallel_size(args: argparse.Namespace) -> int:
   """Derives tensor_parallel_size from mesh_tp if not explicitly set."""
   tp = getattr(args, "tensor_parallel_size", None)
@@ -671,7 +661,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       "max_model_len": max_model_len,
       "enable_prefix_caching": enable_prefix_caching,
   }
-  replica_seed = _replica_seed(args)
+  replica_seed = math_utils.replica_seed(args)
   if replica_seed is not None:
     engine_kwargs["seed"] = replica_seed
 
@@ -880,7 +870,7 @@ def _create_vllm_sampler(args, tokenizer):
       # FCFS.
       scheduling_policy=_vllm_scheduling_policy(args, vllm_overrides),
   )
-  replica_seed = _replica_seed(args)
+  replica_seed = math_utils.replica_seed(args)
   if replica_seed is not None:
     engine_kwargs["seed"] = replica_seed
   if gpu_mem_util is not None:

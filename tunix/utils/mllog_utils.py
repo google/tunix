@@ -1012,6 +1012,13 @@ def log_rcp_step_stats(
       "global_valid_toks": float(valid_toks) if valid_toks is not None else None,
       "global_valid_seqs": float(valid_seqs) if valid_seqs is not None else None,
   }
+  # MoE drop audit (MaxText log_moe_drops=true): per step, the assignments the ragged buffer dropped in the
+  # programs whose gradients were accumulated (0 in a compliant run; -1 if not computed), and the dropless
+  # replays of #5570. Omitted if absent.
+  for key in ("moe_dropped_assignments", "moe_dropless_replays"):
+    val = stats.get(key, stats.get(f"actor/{key}", stats.get(f"trainer/{key}")))
+    if val is not None:
+      train_tracked[key] = float(val)
   log_tracked_stats(train_tracked, step=step_num, samples_count=samples_count)
 
   # 2. Timing stats event: train_step_time, policy_training_time, exposed_generation_time, weight_sync_time, valid_tokens_per_sec_per_gpu
@@ -1374,7 +1381,8 @@ def init_print(
       # Mandatory v6.1 precision and run-config disclosures.
       "lowest_numerical_precision_in_linear": "fp8" if is_fp8 else "bfloat16",
       "lowest_numerical_precision_in_attn": "bfloat16",
-      "lowest_numerical_precision_in_comm": "bfloat16",
+      # An FP8 rollout receives its routed experts as float8_e4m3fn on weight sync.
+      "lowest_numerical_precision_in_comm": "fp8" if is_fp8 else "bfloat16",
       "config_filename": args.model_id or "qwen35_397b_grpo",
       "generation_backend": getattr(args, "rollout_engine", "vllm"),
       "generation_tensor_parallelism": rollout_tp,

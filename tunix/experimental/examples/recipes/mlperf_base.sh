@@ -111,7 +111,7 @@ export USE_WEIGHT_CONVERTER="true"
 export PREFUSE_MOE_WEIGHTS="true"
 export TRAINER_PREFUSE_MOE_WEIGHTS="true"
 export ROLLOUT_PREFUSE_MOE_WEIGHTS="true"
-export VERIFY_WEIGHTS="true"
+export VERIFY_WEIGHTS="${VERIFY_WEIGHTS:-true}"
 export TRAINER_PADDED_MOE_MLP_DIM=""
 export WEIGHT_SYNC_MODE="${WEIGHT_SYNC_MODE:-raiden}"
 export WEIGHT_SYNC_DISABLE_TIMEOUTS="${WEIGHT_SYNC_DISABLE_TIMEOUTS:-${DISABLE_WEIGHT_SYNC_TIMEOUTS:-0}}"
@@ -120,6 +120,17 @@ export WEIGHT_SYNC_PARALLEL_H2H="${WEIGHT_SYNC_PARALLEL_H2H:-0}"
 export TPU_RAIDEN_DATA_NICS="${TPU_RAIDEN_DATA_NICS:-eth0}"
 export RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER="${RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER:-0}"
 export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
+
+# Raiden tuning. The TRAINER_* values go to the Pathways worker, where native
+# Raiden runs for the trainer.
+export RAIDEN_PARALLELISM="${RAIDEN_PARALLELISM:-16}"
+export TRAINER_RAIDEN_COALESCE_WINDOW_BYTES="${TRAINER_RAIDEN_COALESCE_WINDOW_BYTES:-67108864}"
+export TRAINER_RAIDEN_PIPELINE_GROUP_SIZE="${TRAINER_RAIDEN_PIPELINE_GROUP_SIZE:-16}"
+export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV} RAIDEN_PARALLELISM=${RAIDEN_PARALLELISM} RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=${TRAINER_RAIDEN_COALESCE_WINDOW_BYTES} RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=${TRAINER_RAIDEN_PIPELINE_GROUP_SIZE}"
+export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV} RAIDEN_PARALLELISM=${RAIDEN_PARALLELISM} RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16"
+export PATHWAYS_WORKER_EXTRA_ENV="${PATHWAYS_WORKER_EXTRA_ENV}
+RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=${TRAINER_RAIDEN_COALESCE_WINDOW_BYTES}
+RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=${TRAINER_RAIDEN_PIPELINE_GROUP_SIZE}"
 
 # ==============================================================================
 # WandB Configuration
@@ -156,7 +167,49 @@ export TARGET_ACCURACY="${TARGET_ACCURACY:-0.69}"
 export VLLM_LOGGING_LEVEL="INFO"
 export VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-65536}"
 export VLLM_MAX_NUM_BATCHED_TOKENS=2048
-export VLLM_MAX_NUM_SEQS=16
+
+# Rollout attention data parallelism. `true` (default) keeps the recipe's
+# sharding_strategy (enable_dp_attention) and 16 sequences per engine.
+# `false` sets enable_dp_attention=false and tensor_parallelism=1, keeps
+# expert_parallelism, and defaults max_num_seqs to 64 (VLLM_MAX_NUM_SEQS still
+# overrides it). Without attention DP the engine (maxtext_vllm_adapter) pads the
+# KV heads up to expert_parallelism x tensor_parallelism (2 -> 8 on EP8), so the
+# trainer's weight converter has to replicate K/V heads to the same count:
+# kv_tp_size=<ep x tp> is appended to MAXTEXT_EXTRA_FLAGS. Without it, weight
+# sync fails at round 0 on a manifest shape mismatch ((4096, 2, 256) vs
+# (4096, 8, 256)). The launcher prefers an additional_config (or max_num_seqs)
+# key in VLLM_CONFIG_JSON over these settings; this knob does not edit it, so
+# keep the two consistent when combining them.
+export ROLLOUT_ATTENTION_DP="${ROLLOUT_ATTENTION_DP:-true}"
+case "${ROLLOUT_ATTENTION_DP}" in
+  true)
+    export VLLM_MAX_NUM_SEQS=16
+    ;;
+  false)
+    export VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-64}"
+    VLLM_ADDITIONAL_CONFIG="$(python3 -c '
+import json, os
+cfg = json.loads(os.environ.get("VLLM_ADDITIONAL_CONFIG") or "{}")
+strategy = cfg.setdefault("sharding", {}).setdefault("sharding_strategy", {})
+strategy["enable_dp_attention"] = False
+strategy["tensor_parallelism"] = 1
+print(json.dumps(cfg, separators=(",", ":")))
+')"
+    export VLLM_ADDITIONAL_CONFIG
+    _rollout_kv_tp="$(python3 -c '
+import json, os
+s = json.loads(os.environ["VLLM_ADDITIONAL_CONFIG"])["sharding"]["sharding_strategy"]
+print(int(s.get("expert_parallelism", 1)) * int(s["tensor_parallelism"]))
+')"
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:+$MAXTEXT_EXTRA_FLAGS }kv_tp_size=${_rollout_kv_tp}"
+    unset _rollout_kv_tp
+    ;;
+  *)
+    echo "ERROR: ROLLOUT_ATTENTION_DP must be true or false, got '${ROLLOUT_ATTENTION_DP}'" >&2
+    exit 1
+    ;;
+esac
+
 export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.9}"
 
 # Sharding Configs
@@ -203,11 +256,29 @@ export NEW_MODEL_DESIGN=1
 export ATTN_BUCKETIZED_NUM_REQS=true
 export ATTN_CUSTOM_NUM_REQS_BUCKETS=4
 export ONEHOT_MOE_PERMUTE_THRESHOLD="${ONEHOT_MOE_PERMUTE_THRESHOLD:-2048}"
+export RAGGED_GATHER_REDUCE_VERSION="${RAGGED_GATHER_REDUCE_VERSION:-v2}"
+case ",${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-}," in
+  *,RAGGED_GATHER_REDUCE_VERSION,*) ;;
+  *) export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY},}RAGGED_GATHER_REDUCE_VERSION" ;;
+esac
 export VLLM_MOE_CHUNK_SIZE=256
 export SLICE_ROPE_CACHE=1
 export DP_SCHED_BATCH_PREFILL=false
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false}"
 export VLLM_ENABLE_V1_MULTIPROCESSING=0
+
+# MoE and collective optimization switches (defaults disabled to preserve baseline)
+export TPU_SMALL_ALL_REDUCE="${TPU_SMALL_ALL_REDUCE:-0}"
+export TPU_MOE_SINGLE_SORT="${TPU_MOE_SINGLE_SORT:-0}"
+export TPU_MOE_ROUTER_TOPK="${TPU_MOE_ROUTER_TOPK:-sort}"
+export TPU_MOE_LOWTOK="${TPU_MOE_LOWTOK:-0}"
+
+# Propagate optimization flags to vLLM's Ray workers
+for _opt_var in TPU_SMALL_ALL_REDUCE TPU_MOE_SINGLE_SORT TPU_MOE_ROUTER_TOPK TPU_MOE_LOWTOK; do
+  if [[ ",${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-}," != *",${_opt_var},"* ]]; then
+    export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY},}${_opt_var}"
+  fi
+done
 
 # Phased inference profiling (vLLM / tpu-inference)
 # Disabled by default (PHASED_PROFILING_DIR="" in tpu-inference). Only active when PROFILE_SAMPLER=true.
@@ -263,6 +334,16 @@ export MAX_STALENESS=${MAX_STALENESS:-1}
 # prompt batch first (vLLM priority scheduling, priority = batch index) instead
 # of in arrival order (FCFS, the default).
 export ROLLOUT_PRIORITY_SCHEDULING=${ROLLOUT_PRIORITY_SCHEDULING:-false}
+# Seconds between the start-up prompt batches (batch k held until k * this
+# after batch 0 dispatches). Default 0 = no stagger.
+export INITIAL_DISPATCH_STAGGER_S=${INITIAL_DISPATCH_STAGGER_S:-0}
+# Seconds batch 1 is held after batch 0 dispatches when it should differ from
+# INITIAL_DISPATCH_STAGGER_S (then batch k > 1 follows at FIRST + (k - 1) *
+# INITIAL_DISPATCH_STAGGER_S). Empty (default) or 0 = INITIAL_DISPATCH_STAGGER_S.
+export INITIAL_DISPATCH_FIRST_STAGGER_S=${INITIAL_DISPATCH_FIRST_STAGGER_S:-}
+# `true` compiles the trainer at bring-up against one synthetic micro-batch
+# (before run_start) instead of on the first real micro-batch. Default false.
+export TRAINER_WARMUP_COMPILE=${TRAINER_WARMUP_COMPILE:-false}
 # Overlap each step's weight sync with the next step's training. Safe only
 # while the trainer transfers from host staging, since the next step rewrites
 # the device buffers mid-transfer.
@@ -275,6 +356,13 @@ fi
 # Pack the next microbatch while the trainer runs the current one.
 export PIPELINE_TRAIN_MICROBATCHES=${PIPELINE_TRAIN_MICROBATCHES:-false}
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-prompt_batch}
+export USE_DEFAULT_SQL_STORE="${USE_DEFAULT_SQL_STORE:-false}"
+if [[ -z "${TRAJECTORY_STORE_DB_URL:-}" ]] && [[ "${USE_DEFAULT_SQL_STORE}" =~ ^(1|true|True|TRUE)$ ]]; then
+  TRAJECTORY_STORE_DB_URL="$(gcloud secrets versions access latest --secret=tunix-sql-store-uri --project=cloud-tpu-multipod-dev 2>/dev/null || true)"
+  if [[ -z "${TRAJECTORY_STORE_DB_URL}" ]]; then
+    echo "WARNING: USE_DEFAULT_SQL_STORE is enabled but TRAJECTORY_STORE_DB_URL could not be retrieved from GCP Secret Manager." >&2
+  fi
+fi
 export TRAJECTORY_STORE_DB_URL="${TRAJECTORY_STORE_DB_URL:-}"
 
 # Sequence packing
@@ -326,7 +414,7 @@ export SKIP_STEP_ON_NAN="${SKIP_STEP_ON_NAN:-true}"
 # Architecture & Rematerialization
 export REMAT_POLICY="${REMAT_POLICY:-full}"
 export TRAINER_MAXTEXT_ATTENTION="flash"
-export COMPUTE_LOGPS_CHUNK_SIZE=512
+export COMPUTE_LOGPS_CHUNK_SIZE="${COMPUTE_LOGPS_CHUNK_SIZE:-512}"
 
 export EPISODE_TIMEOUT_SECS=1800
 export DEBUG=${DEBUG:-1}
@@ -346,9 +434,13 @@ export OPENHANDS_MULTI_TOOL_CALLS="${OPENHANDS_MULTI_TOOL_CALLS:-false}"
 export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
 export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
 export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
-export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
-export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-c3d-np}"
+export SANDBOX_NODE_SELECTOR_KEY="${SANDBOX_NODE_SELECTOR_KEY:-workload}"
+export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox}"
 export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-2}"
+export SANDBOX_WAIT_INITIAL="${SANDBOX_WAIT_INITIAL:-false}"
+export SANDBOX_IMAGE_PULL_POLICY="${SANDBOX_IMAGE_PULL_POLICY:-IfNotPresent}"
+export PREPULL_SANDBOX_IMAGES="${PREPULL_SANDBOX_IMAGES:-true}"
+export PREPULL_IMAGES_FILE="${PREPULL_IMAGES_FILE:-${DATASET_PATH}/sandbox_images.txt}"
 export ROLLOUT_MAX_CONCURRENCY="${ROLLOUT_MAX_CONCURRENCY:-256}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
 export STEP_TIMEOUT_SECS="${STEP_TIMEOUT_SECS:-60}"

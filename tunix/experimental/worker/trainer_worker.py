@@ -232,7 +232,12 @@ class TrainerWorker(abstract_worker.Worker):
     req_metadata.pop("update_ready", None)
     kwargs.pop("skip_jit", None)
     try:
-      self._trainer.fwd_bwd(request.payload, **kwargs)
+      # The trainer still sees `apply_optimizer`: it marks the step's last
+      # micro-batch (MaxText's retry_dropless_final_micro_batch runs that one
+      # with the dropless program). The update itself is run here, below.
+      self._trainer.fwd_bwd(
+          request.payload, apply_optimizer=apply_optimizer, **kwargs
+      )
       if apply_optimizer:
         try:
           # Through this worker's update(), not the trainer's, so a fused step

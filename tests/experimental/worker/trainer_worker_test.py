@@ -245,8 +245,8 @@ class TrainerWorkerTest(absltest.TestCase):
     self.assertEqual(self.worker.state, datatypes.WorkerState.ERROR)
     self.assertEqual(self.worker.heartbeat().last_error, "bad microbatch")
 
-  def test_fwd_bwd_does_not_leak_control_kwargs_to_trainer(self):
-    """`apply_optimizer`/`skip_jit` stay in the worker; update runs after fwd_bwd."""
+  def test_fwd_bwd_passes_the_last_micro_batch_flag_but_not_skip_jit(self):
+    """The trainer sees `apply_optimizer` (its last-micro-batch flag), not `skip_jit`; update runs after fwd_bwd."""
     update_seen_fwd_bwd_calls = []
     original_update = self.fake_trainer.update
 
@@ -274,9 +274,13 @@ class TrainerWorkerTest(absltest.TestCase):
         cache_nnx_graph=False,
     )
 
-    self.assertEqual(self.fake_trainer.fwd_bwd_calls[0][1], {})
+    # MaxText's retry_dropless_final_micro_batch reads the flag in fwd_bwd.
     self.assertEqual(
-        self.fake_trainer.fwd_bwd_calls[1][1], {"cache_nnx_graph": False}
+        self.fake_trainer.fwd_bwd_calls[0][1], {"apply_optimizer": False}
+    )
+    self.assertEqual(
+        self.fake_trainer.fwd_bwd_calls[1][1],
+        {"apply_optimizer": True, "cache_nnx_graph": False},
     )
     # update() ran exactly once, after the second fwd_bwd.
     self.assertEqual(update_seen_fwd_bwd_calls, [2])
@@ -421,7 +425,8 @@ class TrainerWorkerTest(absltest.TestCase):
     )
 
     self.assertEqual(
-        self.fake_trainer.fwd_bwd_calls[-1][1], {"cache_nnx_graph": False}
+        self.fake_trainer.fwd_bwd_calls[-1][1],
+        {"apply_optimizer": True, "cache_nnx_graph": False},
     )
     self.assertEqual(update_kwargs, [{}])
 

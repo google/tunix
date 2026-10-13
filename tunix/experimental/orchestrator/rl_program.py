@@ -400,11 +400,21 @@ class StandardRLProgram(RLProgram):
       checkpoint_optimizer_interval_steps: int = 1,
       pipeline_train_microbatches: bool = False,
       rollout_priority_scheduling: bool = False,
+      initial_dispatch_stagger_s: float = 0.0,
+      initial_dispatch_first_stagger_s: float | None = None,
+      trainer_warmup_payload: datatypes.RLTrainerPayload | None = None,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
     if max_staleness < 0:
       raise ValueError("max_staleness must be non-negative.")
+    if initial_dispatch_stagger_s < 0:
+      raise ValueError("initial_dispatch_stagger_s must be non-negative.")
+    if (
+        initial_dispatch_first_stagger_s is not None
+        and initial_dispatch_first_stagger_s < 0
+    ):
+      raise ValueError("initial_dispatch_first_stagger_s must be non-negative.")
     if checkpoint_optimizer_interval_steps < 0:
       raise ValueError(
           "checkpoint_optimizer_interval_steps must be non-negative."
@@ -541,6 +551,24 @@ class StandardRLProgram(RLProgram):
     # under `max_staleness > 0`. Off, every request gets priority 0 and the
     # rollouts serve requests in arrival order.
     self.rollout_priority_scheduling = rollout_priority_scheduling
+    # Spread the start-up prompt batches out in time: batch 1 is held until
+    # `initial_dispatch_first_stagger_s` (defaults to
+    # `initial_dispatch_stagger_s`) after batch 0 first dispatches, and each
+    # later batch `initial_dispatch_stagger_s` after the one before it. Applies
+    # only before the trainer consumes its first batch; both 0 disables it.
+    self.initial_dispatch_stagger_s = float(initial_dispatch_stagger_s)
+    self.initial_dispatch_first_stagger_s = (
+        self.initial_dispatch_stagger_s
+        if initial_dispatch_first_stagger_s is None
+        else float(initial_dispatch_first_stagger_s)
+    )
+    # One synthetic micro-batch to compile the trainer against before
+    # `on_train_start`, after `configure_worker` (which discards any compile
+    # done at bring-up). None keeps the lazy compile on the first micro-batch.
+    self.trainer_warmup_payload = trainer_warmup_payload
+    self._first_train_payload_logged = False
+    self._initial_dispatch_t0: float | None = None
+    self._initial_stagger_logged: set[int] = set()
     self._sync_error: BaseException | None = None
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     # Trajectory logging is disabled on mlperf to prevent GCS write timeouts
@@ -657,6 +685,7 @@ class StandardRLProgram(RLProgram):
     # skip the loop and keep dispatching after a sync round failed.
     if self._sync_error is not None:
       raise self._sync_error
+    await self._hold_initial_stagger(batch_idx)
     if self.partial_rollout:
       await self._wait_for_partial_dispatch_window(batch_idx)
       return
@@ -676,6 +705,66 @@ class StandardRLProgram(RLProgram):
       # between the test above and the clear, and nothing would set it again.
       await self._window_release.wait()
       self._window_release.clear()
+
+  def _initial_dispatch_offset(self, batch_idx: int) -> float:
+    """Seconds after batch 0's first dispatch at which start-up batch is due.
+
+    Batch 0 is due at once, batch 1 after `initial_dispatch_first_stagger_s`,
+    and batch k > 1 after `first + (k - 1) * initial_dispatch_stagger_s`.
+
+    Args:
+      batch_idx: The prompt batch index.
+
+    Returns:
+      The offset in seconds.
+    """
+    if batch_idx <= 0:
+      return 0.0
+    return (
+        self.initial_dispatch_first_stagger_s
+        + (batch_idx - 1) * self.initial_dispatch_stagger_s
+    )
+
+  async def _hold_initial_stagger(self, batch_idx: int) -> None:
+    """Holds start-up batch `batch_idx` until its staggered dispatch time.
+
+    Batch k (k > 0) is held until `_initial_dispatch_offset(k)` after batch 0
+    first dispatched. No-op when both staggers are 0, and once the trainer has
+    consumed a batch (`_next_batch > 0`).
+
+    Args:
+      batch_idx: The prompt batch the dispatcher is about to emit into.
+    """
+    if (
+        self.initial_dispatch_stagger_s <= 0
+        and self.initial_dispatch_first_stagger_s <= 0
+    ) or self._next_batch > 0:
+      return
+    if batch_idx == 0:
+      if self._initial_dispatch_t0 is None:
+        self._initial_dispatch_t0 = time.monotonic()
+      return
+    t0 = self._initial_dispatch_t0
+    if t0 is None:
+      return
+    due = t0 + self._initial_dispatch_offset(batch_idx)
+    now = time.monotonic()
+    if now >= due:
+      return
+    if batch_idx not in self._initial_stagger_logged:
+      self._initial_stagger_logged.add(batch_idx)
+      logging.info(
+          "[pipeline] STAGGER batch_idx=%d held %.1f s"
+          " (initial_dispatch_first_stagger_s=%.1f"
+          " initial_dispatch_stagger_s=%.1f)",
+          batch_idx,
+          due - now,
+          self.initial_dispatch_first_stagger_s,
+          self.initial_dispatch_stagger_s,
+      )
+    await asyncio.sleep(due - now)
+    if self._sync_error is not None:
+      raise self._sync_error
 
   async def _wait_for_partial_dispatch_window(self, batch_idx: int) -> None:
     """Per-batch dispatch gate for partial rollout.
@@ -877,6 +966,9 @@ class StandardRLProgram(RLProgram):
     assert self.engine is not None
     try:
       while not self._dispatch_done.is_set() or self._in_flight_rollouts > 0:
+        if self._in_flight_rollouts <= 0:
+          await asyncio.sleep(0.001)
+          continue
 
         try:
           completed = await self.engine.poll_rollouts()
@@ -2038,6 +2130,12 @@ class StandardRLProgram(RLProgram):
                 logging_utils.summarize_list(list(mb.trajectory_ids)),
             )
           mb = None
+          if not self._first_train_payload_logged:
+            self._first_train_payload_logged = True
+            logging.info(
+                "First trainer micro-batch: %s",
+                batch_assembly.describe_payload(batch),
+            )
           await _await_pending_train()
           train_step = self._timed_train_step(
               batch, apply_optimizer=is_final_batch
@@ -2241,6 +2339,25 @@ class StandardRLProgram(RLProgram):
           role=datatypes.Role.ACTOR,
           sync_weights=True,
           policy_version=self.policy_version,
+      )
+
+    if self.trainer_warmup_payload is not None:
+      warmup_payload, self.trainer_warmup_payload = (
+          self.trainer_warmup_payload,
+          None,
+      )
+      logging.info(
+          "Trainer warm-up compile against synthetic micro-batch: %s",
+          batch_assembly.describe_payload(warmup_payload),
+      )
+      _t_compile = time.monotonic()
+      await engine.compile_trainer(  # pytype: disable=attribute-error
+          warmup_payload, role=datatypes.Role.ACTOR
+      )
+      del warmup_payload
+      logging.info(
+          "Trainer warm-up compile finished in %.1fs.",
+          time.monotonic() - _t_compile,
       )
 
     if self.on_train_start is not None:

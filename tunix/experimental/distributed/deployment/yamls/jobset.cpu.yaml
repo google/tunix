@@ -54,9 +54,9 @@ ${QUEUE_LABEL}spec:
             hostNetwork: true
             restartPolicy: Never${PRIORITY_CLASS_LINE}
             # Room for the orchestrator's SIGTERM cleanup (sandbox fleet teardown
-            # and reap, stopping workers) when the API server is slow. A clean
-            # exit still ends the pod immediately.
-            terminationGracePeriodSeconds: 60
+            # and reap, stopping workers, and deleting sibling JobSets) when the
+            # API server is slow. A clean exit still ends the pod immediately.
+            terminationGracePeriodSeconds: 300
             nodeSelector:
               cloud.google.com/gke-nodepool: ${CPU_NODEPOOL}
             tolerations:
@@ -96,7 +96,7 @@ ${QUEUE_LABEL}spec:
                   wait $$PID
                   EXIT_CODE=$$?
 
-                  echo "Program End: $$(date)"
+${TEARDOWN_ON_EXIT}                  echo "Program End: $$(date)"
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:

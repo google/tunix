@@ -39,7 +39,7 @@ if REPO_ROOT not in sys.path:
 # pylint: disable=g-import-not-at-top
 from tunix.experimental.common import datatypes
 from tunix.experimental.distributed.runtime import context as runtime_context
-from tunix.experimental.examples.common import orch_k8s_cleanup
+from tunix.experimental.examples.deepswe_dist import trainer_warmup
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator
@@ -301,6 +301,52 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " --priority_scheduling; off, requests are served in arrival order."
       ),
   )
+  parser.add_argument(
+      "--initial_dispatch_stagger_s",
+      type=float,
+      default=0.0,
+      help=(
+          "Stagger the start-up prompt batches: each batch after batch 1 is"
+          " held this many seconds after the one before it (batch 1 waits"
+          " --initial_dispatch_first_stagger_s, which defaults to this value)."
+          " Applies only before the trainer consumes its first batch. 0"
+          " (default) dispatches the start-up batches as soon as the staleness"
+          " window allows."
+      ),
+  )
+  parser.add_argument(
+      "--initial_dispatch_first_stagger_s",
+      type=float,
+      default=None,
+      help=(
+          "Seconds batch 1 is held after batch 0 first dispatches; later"
+          " start-up batches follow every --initial_dispatch_stagger_s. Unset"
+          " (default) uses --initial_dispatch_stagger_s for batch 1 as well."
+      ),
+  )
+  parser.add_argument(
+      "--trainer_warmup_compile",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Compile the trainer before run_start (after the program configures"
+          " the trainer loss) against one synthetic micro-batch built through"
+          " the live batch assembler, instead of lazily on the first real"
+          " micro-batch inside the timed run."
+      ),
+  )
+  parser.add_argument(
+      "--trainer_warmup_routed_experts",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "The rollouts return routed experts (router replay), so the warm-up"
+          " micro-batch carries routed_experts too. Its [num_layers, top_k] is"
+          " read from the model config, else from the two flags below."
+      ),
+  )
+  parser.add_argument("--trainer_warmup_routed_layers", type=int, default=None)
+  parser.add_argument("--trainer_warmup_routed_top_k", type=int, default=None)
   # ---- Optional GRPO algorithm options -------------------------------------
   # All default to off, so omitting them reproduces the previous behaviour.
   parser.add_argument(
@@ -461,6 +507,37 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--sandbox_wait_initial",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("SANDBOX_WAIT_INITIAL", "true").lower()
+      in ("1", "true", "yes"),
+      help=(
+          "Whether PrewarmDatasetIterator waits synchronously for the initial"
+          " warmpool batch before yielding the first prompt."
+      ),
+  )
+  parser.add_argument(
+      "--prepull_sandbox_images",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("PREPULL_SANDBOX_IMAGES", "false").lower()
+      in ("1", "true", "yes"),
+      help=(
+          "Pre-pull all static dataset task images onto sandbox nodes with"
+          " imagePullPolicy=IfNotPresent and run sync && sysctl"
+          " vm.drop_caches=3 before init_start / run_start."
+      ),
+  )
+  parser.add_argument(
+      "--prepull_images_file",
+      type=str,
+      default=os.getenv("PREPULL_IMAGES_FILE", ""),
+      help=(
+          "Path (local or gs://) to a static manifest file containing container"
+          " image URIs to pre-pull before init_start without touching the"
+          " dataset."
+      ),
+  )
+  parser.add_argument(
       "--max_concurrency",
       type=int,
       default=128,
@@ -518,19 +595,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help=(
           "Send a graceful gRPC stop to every remote worker when the"
           " orchestrator exits (drains in-flight checkpoint saves)."
-      ),
-  )
-  parser.add_argument(
-      "--delete_worker_jobsets_on_exit",
-      action=argparse.BooleanOptionalAction,
-      default=True,
-      help=(
-          "After --stop_workers_on_exit has drained the workers, delete the"
-          " run's <prefix>-train / <prefix>-roll* JobSets through the"
-          " in-cluster Kubernetes API so they do not outlive the orchestrator"
-          " (workers are long-lived servers and never exit on their own)."
-          " No-op unless ORCHESTRATOR_ID is a <prefix>-orch id. Only takes"
-          " effect together with --stop_workers_on_exit."
       ),
   )
   parser.add_argument(
@@ -856,19 +920,69 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
   )
 
-  logging.info(
-      "Waiting for workers to register (before MLPerf init_start)..."
-  )
-  cluster.wait_for_workers(
-      min_workers={
-          datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: args.rollout_replicas,
-          datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
-      },
-      timeout=args.init_timeout_s,
-      poll_interval_s=1.0,
-  )
-  logging.info("Registered workers: %s", cluster.worker_infos())
+  prepull_future = None
+  prepull_executor = None
+  if args.use_agent_sandbox and args.prepull_sandbox_images:
+    from concurrent import futures  # pylint: disable=g-import-not-at-top
+    from tunix.experimental.examples.deepswe_dist import prepull_sandbox_images  # pylint: disable=g-import-not-at-top
+
+    logging.info(
+        "Starting sandbox container image pre-pulling (before MLPerf"
+        " init_start)..."
+    )
+    prepull_executor = futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="sandbox-prepull"
+    )
+    if args.prepull_images_file:
+      prepull_future = prepull_executor.submit(
+          prepull_sandbox_images.prepull_from_manifest,
+          manifest_path=args.prepull_images_file,
+          scaffold=args.scaffold,
+      )
+    else:
+      prepull_future = prepull_executor.submit(
+          prepull_sandbox_images.prepull_from_dataset,
+          dataset_name=args.dataset_name,
+          dataset_split=args.dataset_split,
+          dataset_path=args.dataset_path,
+          cache_dir=args.dataset_cache_dir or None,
+          scaffold=args.scaffold,
+      )
+  try:
+    logging.info(
+        "Waiting for workers to register (before MLPerf init_start)..."
+    )
+    cluster.wait_for_workers(
+        min_workers={
+            datatypes.Role.ACTOR: 1,
+            datatypes.Role.ROLLOUT: args.rollout_replicas,
+            datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
+        },
+        timeout=args.init_timeout_s,
+        poll_interval_s=1.0,
+    )
+    logging.info("Registered workers: %s", cluster.worker_infos())
+    if prepull_future is not None:
+      logging.info(
+          "Waiting for sandbox container image pre-pulling to finish before"
+          " MLPerf init_start..."
+      )
+      try:
+        num_staged = prepull_future.result()
+        logging.info(
+            "Finished pre-pulling %d static sandbox images (and dropped OS"
+            " caches) before MLPerf init_start.",
+            num_staged,
+        )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "[Prepull] Sandbox image pre-pulling encountered an error: %s."
+            " Proceeding with training using on-demand GKE Image Streaming.",
+            e,
+        )
+  finally:
+    if prepull_executor is not None:
+      prepull_executor.shutdown(wait=False)
 
   if args.rcp_logging:
     mllog_utils.init_start(args)
@@ -1036,7 +1150,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
             max_warmpool_replicas=args.max_warmpool_replicas,
             unwarm_on_exhaustion=True,
             scaffold=args.scaffold,
-            wait_initial=True,
+            wait_initial=args.sandbox_wait_initial,
             max_staleness=args.max_staleness,
         )
       else:
@@ -1079,6 +1193,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         pipeline_train_microbatches=args.pipeline_train_microbatches,
         partial_rollout=args.in_flight_weight_updates,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
+        initial_dispatch_stagger_s=args.initial_dispatch_stagger_s,
+        initial_dispatch_first_stagger_s=args.initial_dispatch_first_stagger_s,
         on_train_start=_on_train_start,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",
@@ -1110,6 +1226,54 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
 
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
+    if args.trainer_warmup_compile:
+      # Compiled by the program after `configure_worker` and before
+      # `on_train_start` (run_start): `configure_worker` re-sends the loss and
+      # input fn, which discards any compile done at bring-up.
+      routed_shape = None
+      if args.trainer_warmup_routed_experts:
+        routed_shape = trainer_warmup.routed_experts_shape_from_config(
+            tokenizer_path
+        )
+        if routed_shape is not None:
+          logging.info(
+              "TRAINER_WARMUP_COMPILE: routed_experts [num_layers, top_k]=%s"
+              " from the model config at %s.",
+              routed_shape,
+              tokenizer_path,
+          )
+        elif (
+            args.trainer_warmup_routed_layers
+            and args.trainer_warmup_routed_top_k
+        ):
+          routed_shape = (
+              args.trainer_warmup_routed_layers,
+              args.trainer_warmup_routed_top_k,
+          )
+          logging.warning(
+              "TRAINER_WARMUP_COMPILE: model config unavailable; routed_experts"
+              " [num_layers, top_k]=%s from --trainer_warmup_routed_layers /"
+              " --trainer_warmup_routed_top_k.",
+              routed_shape,
+          )
+        else:
+          logging.warning(
+              "TRAINER_WARMUP_COMPILE: router replay is on but [num_layers,"
+              " top_k] is unknown; the warm-up omits routed_experts and the"
+              " first real micro-batch will recompile."
+          )
+      program.trainer_warmup_payload = trainer_warmup.build_warmup_payload(
+          algo=algo,
+          batch_config=program.batch_config,
+          num_generations=program.num_generations,
+          mini_batch_size=program.mini_batch_size,
+          train_micro_batch_size=algo.train_micro_batch_size,
+          routed_experts_shape=routed_shape,
+      )
+      logging.info(
+          "TRAINER_WARMUP_COMPILE: built synthetic micro-batch: %s",
+          batch_assembly.describe_payload(program.trainer_warmup_payload),
+      )
     cluster.bring_up_workers(dummy_data=None)
     logging.info("Starting DeepSWE StandardRLProgram execution...")
     cluster.run(
@@ -1157,7 +1321,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
                 run_id=run_id,
                 in_cluster=getattr(c, "in_cluster", True),
                 namespace=c_ns,
-                delete_pods=False,
+                delete_pods=True,
             )
       except Exception as e:  # pylint: disable=broad-exception-caught
         logging.warning("Reaper note: %s", e)
@@ -1168,15 +1332,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.warning("Global fleet teardown note: %s", e)
     if args.stop_workers_on_exit:
-      # Graceful gRPC stop (drains checkpoints), then wait until the workers
-      # report STOPPED, then delete their JobSets: workers are long-lived
-      # servers that never exit on their own, so without the deletion the
-      # -train / -roll* JobSets outlive the orchestrator and hold their TPUs.
-      orch_k8s_cleanup.shutdown_cluster_and_workers(
-          cluster,
-          orchestrator_id=os.environ.get("ORCHESTRATOR_ID"),
-          delete_jobsets=args.delete_worker_jobsets_on_exit,
-      )
+      logging.info("Shutting down cluster workers...")
+      cluster.shutdown()
     else:
       cluster.monitor.close()
 

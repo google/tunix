@@ -847,6 +847,7 @@ def ppo_policy_loss_fn(
 
   return_entropy = entropy_coef is not None and entropy_coef != 0.0
   graphdef, state = nnx.split(model)
+  want_moe_audit = common.wants_moe_audit(model)
   outputs = common.compute_per_token_logps(
       graphdef,
       state,
@@ -859,11 +860,16 @@ def ppo_policy_loss_fn(
       segment_ids=getattr(train_example, "segment_ids", None),
       segment_positions=getattr(train_example, "segment_positions", None),
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
+      return_moe_overflow=True,
+      return_moe_audit=want_moe_audit,
   )
+  moe_audit = None
+  if want_moe_audit:
+    *outputs, moe_audit = outputs
   if return_entropy:
-    per_token_logps, token_entropy = outputs
+    per_token_logps, token_entropy, has_moe_overflow = outputs
   else:
-    per_token_logps = outputs
+    per_token_logps, has_moe_overflow = outputs
 
   advantages = train_example.advantages
   old_per_token_logps = train_example.old_per_token_logps
@@ -910,7 +916,13 @@ def ppo_policy_loss_fn(
       "pg_clipfrac_lower": sft_utils.WeightedMetric(
           unreduced_pg_clipfrac_lower, denominator, min_denom=1.0
       ),
+      # Read by MaxText's engine to retry a micro-batch whose MoE dropped
+      # tokens.
+      "has_moe_overflow": has_moe_overflow,
   }
+  if moe_audit is not None:
+    # log_moe_drops: per-layer drop audit, logged by MaxText's engine.
+    aux["_moe_audit"] = moe_audit
 
   if return_entropy:
     unreduced_entropy = jnp.sum(token_entropy * completion_mask)  # pyrefly: ignore[unbound-name]
@@ -1135,22 +1147,29 @@ def grpo_loss_fn(
     token_mask = jnp.concatenate(
         [train_example.prompt_mask, completion_attention_mask], axis=1
     )
-  per_token_logps, token_entropy = common.compute_per_token_logps(
-      graphdef,
-      state,
-      prompt_tokens=train_example.prompt_ids,
-      completion_tokens=completion_ids,
-      pad_id=pad_id,
-      eos_id=eos_id,
-      stop_gradient=False,
-      return_entropy=True,
-      segment_ids=segment_ids,
-      segment_positions=getattr(train_example, "segment_positions", None),
-      temperature=algo_config.temperature,
-      chunk_size=kwargs.get("compute_logps_chunk_size", 0),
-      routed_experts=getattr(train_example, "routed_experts", None),
-      token_mask=token_mask,
+  want_moe_audit = common.wants_moe_audit(model)
+  logps_outputs = (
+      common.compute_per_token_logps(
+          graphdef,
+          state,
+          prompt_tokens=train_example.prompt_ids,
+          completion_tokens=completion_ids,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          stop_gradient=False,
+          return_entropy=True,
+          segment_ids=segment_ids,
+          segment_positions=getattr(train_example, "segment_positions", None),
+          temperature=algo_config.temperature,
+          chunk_size=kwargs.get("compute_logps_chunk_size", 0),
+          routed_experts=getattr(train_example, "routed_experts", None),
+          token_mask=token_mask,
+          return_moe_overflow=True,
+          return_moe_audit=want_moe_audit,
+      )
   )
+  per_token_logps, token_entropy, has_moe_overflow = logps_outputs[:3]
+  moe_audit = logps_outputs[3] if want_moe_audit else None
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
 
   # Per-token trainer-minus-sampler log ratio, computed once and shared by the
@@ -1589,6 +1608,11 @@ def grpo_loss_fn(
       num_segments=num_segments,
   )
   aux["entropy"] = entropy_loss
+  # Read by MaxText's engine to retry a micro-batch whose MoE dropped tokens.
+  aux["has_moe_overflow"] = has_moe_overflow
+  if moe_audit is not None:
+    # log_moe_drops: per-layer drop audit, logged by MaxText's engine.
+    aux["_moe_audit"] = moe_audit
 
   return sft_utils.LossOutput(primary_loss=total_loss, aux_metrics=aux)  # pyrefly: ignore[bad-argument-type]
 
