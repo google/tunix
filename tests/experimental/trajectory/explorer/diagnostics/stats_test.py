@@ -83,8 +83,20 @@ class StepCountsTest(absltest.TestCase):
         {"total": 5, "agent": 2, "user": 2, "system": 0, "other": 1},
     )
 
+  def test_str_shows_total_and_source_split(self) -> None:
+    counts = stats_lib.StepCounts(agent=3, user=2, system=1, other=0)
+
+    self.assertEqual(str(counts), "6 (agent 3, user 2, system 1, other 0)")
+    self.assertEqual(f"{counts}", str(counts))
+
 
 class TokenCountsTest(parameterized.TestCase):
+
+  def test_str_shows_total_and_prompt_completion_split(self) -> None:
+    counts = stats_lib.TokenCounts(prompt=100, completion=50, cached=20)
+
+    self.assertEqual(str(counts), "150 (100+50)")
+    self.assertEqual(f"{counts}", str(counts))
 
   @parameterized.named_parameters(
       ("no_metrics", None, None),

@@ -134,6 +134,13 @@ class StepCounts(NamedTuple):
     """Returns the number of environment steps, `user + system`."""
     return self.user + self.system
 
+  def __str__(self) -> str:
+    """Formats the counts as `total (agent a, user u, system s, other o)`."""
+    return (
+        f"{self.total} (agent {self.agent}, user {self.user}, system"
+        f" {self.system}, other {self.other})"
+    )
+
   def to_json_dict(self) -> StepCountsJson:
     """Returns the counts as a plain JSON-serializable dict."""
     return StepCountsJson(
@@ -231,6 +238,10 @@ class TokenCounts(NamedTuple):
   def total(self) -> int:
     """Returns `prompt + completion`."""
     return self.prompt + self.completion
+
+  def __str__(self) -> str:
+    """Formats the counts as `total (prompt+completion)`."""
+    return f"{self.total} ({self.prompt}+{self.completion})"
 
   def to_json_dict(self) -> TokenCountsJson:
     """Returns the counts as a plain JSON-serializable dict."""
