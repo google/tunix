@@ -147,6 +147,38 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(flags["num_moe_token_chunks"], "4")
     self.assertEqual(trainer.count(_HBM_CAP), 3)
 
+  def test_moe_audit_and_padding_knobs_are_off_by_default(self):
+    flags = _maxtext_flags(_jobset(self.default, "train"))
+    for key in (
+        "moe_exclude_padding_from_routing",
+        "log_moe_drops",
+        "retry_dropless_final_micro_batch",
+    ):
+      self.assertNotIn(key, flags)
+
+  def test_moe_audit_and_padding_knobs_append_their_flags(self):
+    trainer = _jobset(
+        _render(
+            RAGGED_BUFFER_FACTOR="2.75",
+            RETRY_WHEN_TOKENS_DROPPED="true",
+            RETRY_DROPLESS_FINAL_MICRO_BATCH="true",
+            MOE_EXCLUDE_PADDING="true",
+            LOG_MOE_DROPS="true",
+        ),
+        "train",
+    )
+    flags = _maxtext_flags(trainer)
+    self.assertEqual(flags["moe_exclude_padding_from_routing"], "true")
+    self.assertEqual(flags["log_moe_drops"], "true")
+    self.assertEqual(flags["retry_dropless_final_micro_batch"], "true")
+    self.assertEqual(flags["ragged_buffer_factor"], "2.75")
+
+  def test_final_micro_batch_knob_needs_the_retry(self):
+    flags = _maxtext_flags(
+        _jobset(_render(RETRY_DROPLESS_FINAL_MICRO_BATCH="true"), "train")
+    )
+    self.assertNotIn("retry_dropless_final_micro_batch", flags)
+
   def test_dropless_rejects_other_values(self):
     with self.assertRaisesRegex(AssertionError, "DROPLESS must be true or false"):
       _render(DROPLESS="yes")

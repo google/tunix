@@ -173,6 +173,21 @@ if [[ "${RETRY_WHEN_TOKENS_DROPPED:-false}" == "true" ]]; then
   if [[ -n "${FIRST_PHASE_RAGGED_BUFFER_FACTOR:-}" ]]; then
     export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} first_phase_ragged_buffer_factor=${FIRST_PHASE_RAGGED_BUFFER_FACTOR}"
   fi
+  # Opt-in: the final micro-batch of each step runs the dropless program directly
+  # rather than overflowing and replaying.
+  if [[ "${RETRY_DROPLESS_FINAL_MICRO_BATCH:-false}" == "true" ]]; then
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} retry_dropless_final_micro_batch=true"
+  fi
+fi
+# Opt-in: MOE_EXCLUDE_PADDING=true keeps padding tokens out of MoE routing
+# (moe_exclude_padding_from_routing), and LOG_MOE_DROPS=true logs a per-micro-batch
+# MoE drop audit (log_moe_drops, MOE_DROP_AUDIT lines). Both need a MaxText with
+# those flags.
+if [[ "${MOE_EXCLUDE_PADDING:-false}" == "true" ]]; then
+  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} moe_exclude_padding_from_routing=true"
+fi
+if [[ "${LOG_MOE_DROPS:-false}" == "true" ]]; then
+  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} log_moe_drops=true"
 fi
 export DEBUG=${DEBUG:-0}
 
