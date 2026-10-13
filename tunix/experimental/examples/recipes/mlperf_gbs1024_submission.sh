@@ -31,15 +31,15 @@ export BATCH_SIZE="${BATCH_SIZE:-64}"
 
 # Learning rate and gradient clip follow the global batch size when not set:
 # GBS = BATCH_SIZE * NUM_GENERATIONS (16), LEARNING_RATE = 1e-6 * sqrt(GBS / 256),
-# MAX_GRAD_NORM = 2 / sqrt(GBS). GBS 1,024 gives 2e-06 / 0.0625 and GBS 1,152
-# (BATCH_SIZE=72) gives 2.1213e-06 / 0.0589256.
+# MAX_GRAD_NORM = 0.125 * sqrt(256 / GBS). GBS 1,024 gives 2e-06 / 0.0625 and
+# GBS 1,152 (BATCH_SIZE=72) gives 2.1213203435596424e-06 / 0.05892556509887896.
 if [[ ! "${BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: BATCH_SIZE must be a positive integer, got '${BATCH_SIZE}'" >&2
   exit 1
 fi
 _gbs=$(( BATCH_SIZE * ${NUM_GENERATIONS:-16} ))
-export LEARNING_RATE="${LEARNING_RATE:-$(python3 -c "import math; print(f'{1e-6 * math.sqrt(${_gbs} / 256):.5g}')")}"
-export MAX_GRAD_NORM="${MAX_GRAD_NORM:-$(python3 -c "import math; print(f'{2 / math.sqrt(${_gbs}):.6g}')")}"
+export LEARNING_RATE="${LEARNING_RATE:-$(python3 -c "import math; print(f'{1e-6 * math.sqrt(${_gbs} / 256):.16g}')")}"
+export MAX_GRAD_NORM="${MAX_GRAD_NORM:-$(python3 -c "import math; print(f'{0.125 * math.sqrt(256 / ${_gbs}):.16g}')")}"
 unset _gbs
 
 # Start-up: hold batch 1 175 s after batch 0 and each later start-up batch 75 s
