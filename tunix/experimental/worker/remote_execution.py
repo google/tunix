@@ -1970,6 +1970,16 @@ class PoolExecutionSession:
             if isinstance(target, dict)
             else getattr(target, "metadata", None)
         )
+        if meta is None:
+          if isinstance(target, dict) and "metadata" in target:
+            meta = {}
+            target["metadata"] = meta
+          elif not isinstance(target, dict) and hasattr(target, "metadata"):
+            try:
+              meta = {}
+              setattr(target, "metadata", meta)
+            except Exception:  # pylint: disable=broad-exception-caught
+              meta = None
         if isinstance(meta, dict):
           qm = meta.get("queue_metrics")
           if isinstance(qm, dict):

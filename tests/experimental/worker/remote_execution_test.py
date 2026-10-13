@@ -3280,6 +3280,76 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_pool_execution_session_attaches_l1_queue_metrics_when_metadata_is_none(
+      self,
+  ):
+    class NoneMetadataHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self._queue: asyncio.Queue[remote_lib.ExecutionResponse] = (
+            asyncio.Queue()
+        )
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        req_id = request_id or ""
+
+        async def _finish():
+          if req_id == "req_dict":
+            res = {"request_id": req_id, "metadata": None}
+          else:
+            class _Obj:
+
+              def __init__(self, rid):
+                self.request_id = rid
+                self.metadata = None
+
+            res = _Obj(req_id)
+          await self._queue.put(
+              remote_lib.ExecutionResponse(
+                  request_id=req_id,
+                  result=res,
+              )
+          )
+
+        asyncio.create_task(_finish())
+        return req_id
+
+      async def poll_responses(self, timeout_s=50.0):
+        return await asyncio.wait_for(self._queue.get(), timeout=timeout_s)
+
+    async def _run():
+      worker = NoneMetadataHandle()
+      pool = remote_lib.RoutingActorPool([worker])
+      session = remote_lib.PoolExecutionSession(pool)
+
+      await session.submit("req_dict", "generate")
+      await session.submit("req_obj", "generate")
+
+      results = {}
+      while len(results) < 2:
+        batch = await session.poll_completed(timeout_s=1.0)
+        for res, exc in batch:
+          self.assertIsNone(exc)
+          if isinstance(res, dict):
+            results[res["request_id"]] = res["metadata"]
+          else:
+            results[res.request_id] = res.metadata
+
+      self.assertIn("queue_metrics", results["req_dict"])
+      self.assertIn("queue_metrics", results["req_obj"])
+      await session.close()
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

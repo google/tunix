@@ -1384,6 +1384,9 @@ class ClusterOrchestratorTest(absltest.TestCase):
 
     class _RolloutActor:
 
+      def __init__(self, pause_on_pre_sync: bool = False):
+        self.pause_on_pre_sync = pause_on_pre_sync
+
       def initialize(self):
         return datatypes.Response()
 
@@ -1403,8 +1406,11 @@ class ClusterOrchestratorTest(absltest.TestCase):
       def get_weight_sync_metadata(self):
         return _mock_ws_asubmit("get_weight_sync_metadata")
 
-      def pre_weight_sync(self, req):
+      async def pre_weight_sync(self, req):
         del req
+        if self.pause_on_pre_sync:
+          sync_entered.set()
+          await release_sync.wait()
         return {}
 
       def weight_sync(self, req):
@@ -1427,7 +1433,9 @@ class ClusterOrchestratorTest(absltest.TestCase):
 
     r0_srv = remote_execution.InProcessRemoteExecutionServer(_RolloutActor())
     h_r0 = remote_execution.InProcessActorHandle(r0_srv)
-    r1_srv = remote_execution.InProcessRemoteExecutionServer(_RolloutActor())
+    r1_srv = remote_execution.InProcessRemoteExecutionServer(
+        _RolloutActor(pause_on_pre_sync=True)
+    )
     h_r1 = remote_execution.InProcessActorHandle(r1_srv)
 
     orch = orchestrator.ClusterOrchestrator(
@@ -1447,27 +1455,18 @@ class ClusterOrchestratorTest(absltest.TestCase):
     orch.wait_for_pending_bring_ups(timeout=5.0)
     self.assertEqual(orch.engine._rollout_workers, [])
 
-    orig_sync = orch.engine.weight_sync_coordinator.sync
-
-    async def _slow_sync(*args, **kwargs):
-      sync_entered.set()
-      await release_sync.wait()
-      return await orig_sync(*args, **kwargs)
-
     async def _run_concurrent():
-      with mock.patch.object(
-          orch.engine.weight_sync_coordinator, "sync", side_effect=_slow_sync
-      ):
-        t1 = asyncio.create_task(orch.engine.sync_pending_weights())
-        await sync_entered.wait()
-        # t2 runs while t1 holds _pending_sync_lock; it must wait for t1 to
-        # finish so rollout-1 is ACTIVE when t2 returns!
-        t2 = asyncio.create_task(orch.engine.sync_pending_weights())
-        await asyncio.sleep(0.02)
-        self.assertFalse(t2.done())
-        release_sync.set()
-        await asyncio.gather(t1, t2)
-        self.assertEqual(orch.engine._rollout_workers, [h_r1])
+      t1 = asyncio.create_task(orch.engine.sync_pending_weights())
+      await sync_entered.wait()
+      self.assertTrue(orch.engine.weight_sync_coordinator.in_flight)
+      # t2 runs while t1 holds _pending_sync_lock and coordinator.in_flight is True;
+      # it must wait for t1 to finish so rollout-1 is ACTIVE when t2 returns!
+      t2 = asyncio.create_task(orch.engine.sync_pending_weights())
+      await asyncio.sleep(0.02)
+      self.assertFalse(t2.done())
+      release_sync.set()
+      await asyncio.gather(t1, t2)
+      self.assertEqual(orch.engine._rollout_workers, [h_r1])
 
     asyncio.run(_run_concurrent())
     orch.shutdown()

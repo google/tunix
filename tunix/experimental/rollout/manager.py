@@ -416,6 +416,8 @@ class RolloutManager:
         )
         trajectory: TrajectoryOrError = await collector.run_episode()
       if isinstance(trajectory, datatypes.TrajectoryItem):
+        if trajectory.metadata is None:
+          trajectory.metadata = {}
         if "request_id" not in trajectory.metadata:
           trajectory.metadata["request_id"] = request.request_id
         qm = dict(trajectory.metadata.get("queue_metrics") or {})

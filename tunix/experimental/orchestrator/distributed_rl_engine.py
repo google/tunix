@@ -1134,7 +1134,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         or self._actor_weights_dirty
         or self._weight_sync_coordinator is None
         or not self._weight_sync_coordinator.has_pending_destinations()
-        or self._weight_sync_coordinator.in_flight
+        or (
+            self._weight_sync_coordinator.in_flight
+            and not self._pending_sync_lock.locked()
+        )
         or self._weight_sync_coordinator.poisoned is not None
     ):
       return None

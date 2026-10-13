@@ -50,20 +50,39 @@ RequestFuture = Future[Union[RequestOutput, PoolingRequestOutput]]
 QueuedRequest = dict[str, Any]
 
 
-def _get_vllm_scheduler(llm_engine: Any) -> Any:
-  """Extracts the underlying vLLM V1 Scheduler from an LLMEngine if available."""
+def _normalize_schedulers(sched: Any) -> list[Any]:
+  if sched is None:
+    return []
+  if isinstance(sched, list):
+    return [s for s in sched if s is not None]
+  return [sched]
+
+
+def _get_vllm_schedulers(llm_engine: Any) -> list[Any]:
+  """Extracts underlying vLLM Scheduler instances from an LLMEngine."""
   sched = getattr(llm_engine, "scheduler", None)
-  if sched is not None and not isinstance(sched, list):
-    return sched
+  norm = _normalize_schedulers(sched)
+  if norm:
+    return norm
   ec = getattr(llm_engine, "engine_core", None)
   if ec is not None:
     sched = getattr(ec, "scheduler", None)
-    if sched is not None:
-      return sched
+    norm = _normalize_schedulers(sched)
+    if norm:
+      return norm
     inner_ec = getattr(ec, "engine_core", None)
     if inner_ec is not None:
-      return getattr(inner_ec, "scheduler", None)
-  return None
+      sched = getattr(inner_ec, "scheduler", None)
+      norm = _normalize_schedulers(sched)
+      if norm:
+        return norm
+  return []
+
+
+def _get_vllm_scheduler(llm_engine: Any) -> Any:
+  """Extracts the underlying vLLM V1 Scheduler from an LLMEngine if available."""
+  schedulers = _get_vllm_schedulers(llm_engine)
+  return schedulers[0] if schedulers else None
 
 
 class VLLMInProcessDriver:
@@ -411,23 +430,24 @@ class VLLMInProcessDriver:
           100,
       )
       if self._llm_engine.has_unfinished_requests():
-        scheduler = _get_vllm_scheduler(self._llm_engine)
+        schedulers = _get_vllm_schedulers(self._llm_engine)
         pre_active_ids: set[str] = set()
-        if scheduler is not None:
-          waiting_q = getattr(scheduler, "waiting", None) or ()
-          skipped_q = getattr(scheduler, "skipped_waiting", None) or ()
-          running_q = getattr(scheduler, "running", None) or ()
-          for q in (waiting_q, skipped_q, running_q):
-            for req_obj in q:
-              rid = getattr(req_obj, "request_id", None)
-              if isinstance(rid, str):
-                pre_active_ids.add(rid)
-                st = self._req_queue_stats.get(rid)
-                if st is not None:
-                  st["num_preemptions"] = max(
-                      st["num_preemptions"],
-                      int(getattr(req_obj, "num_preemptions", 0) or 0),
-                  )
+        if schedulers:
+          for scheduler in schedulers:
+            waiting_q = getattr(scheduler, "waiting", None) or ()
+            skipped_q = getattr(scheduler, "skipped_waiting", None) or ()
+            running_q = getattr(scheduler, "running", None) or ()
+            for q in (waiting_q, skipped_q, running_q):
+              for req_obj in q:
+                rid = getattr(req_obj, "request_id", None)
+                if isinstance(rid, str):
+                  pre_active_ids.add(rid)
+                  st = self._req_queue_stats.get(rid)
+                  if st is not None:
+                    st["num_preemptions"] = max(
+                        st["num_preemptions"],
+                        int(getattr(req_obj, "num_preemptions", 0) or 0),
+                    )
 
         t0 = time.monotonic()
         outputs = self._llm_engine.step()
@@ -440,43 +460,69 @@ class VLLMInProcessDriver:
         }
         finished_ids.discard(None)
 
-        if scheduler is not None:
-          post_waiting_q = getattr(scheduler, "waiting", None) or ()
-          post_skipped_q = getattr(scheduler, "skipped_waiting", None) or ()
-          post_running_q = getattr(scheduler, "running", None) or ()
+        if schedulers:
           post_waiting_ids: set[str] = set()
-          for q in (post_waiting_q, post_skipped_q):
-            for req_obj in q:
+          post_running_ids: set[str] = set()
+          kv_usage = 0.0
+
+          for scheduler in schedulers:
+            post_waiting_q = getattr(scheduler, "waiting", None) or ()
+            post_skipped_q = getattr(scheduler, "skipped_waiting", None) or ()
+            post_running_q = getattr(scheduler, "running", None) or ()
+            for q in (post_waiting_q, post_skipped_q):
+              for req_obj in q:
+                rid = getattr(req_obj, "request_id", None)
+                if isinstance(rid, str):
+                  post_waiting_ids.add(rid)
+                  st = self._req_queue_stats.get(rid)
+                  if st is not None:
+                    st["num_preemptions"] = max(
+                        st["num_preemptions"],
+                        int(getattr(req_obj, "num_preemptions", 0) or 0),
+                    )
+            for req_obj in post_running_q:
               rid = getattr(req_obj, "request_id", None)
               if isinstance(rid, str):
-                post_waiting_ids.add(rid)
+                post_running_ids.add(rid)
                 st = self._req_queue_stats.get(rid)
                 if st is not None:
                   st["num_preemptions"] = max(
                       st["num_preemptions"],
                       int(getattr(req_obj, "num_preemptions", 0) or 0),
                   )
-          post_running_ids: set[str] = set()
-          for req_obj in post_running_q:
-            rid = getattr(req_obj, "request_id", None)
-            if isinstance(rid, str):
-              post_running_ids.add(rid)
-              st = self._req_queue_stats.get(rid)
-              if st is not None:
-                st["num_preemptions"] = max(
-                    st["num_preemptions"],
-                    int(getattr(req_obj, "num_preemptions", 0) or 0),
-                )
 
-          kv_usage = 0.0
-          get_kv = getattr(scheduler, "get_kv_cache_usage", None)
-          if callable(get_kv):
-            try:
-              raw_kv = get_kv()
-              if isinstance(raw_kv, (int, float)):
-                kv_usage = float(raw_kv)
-            except Exception:  # pylint: disable=broad-exception-caught
-              kv_usage = 0.0
+            sched_kv = 0.0
+            get_kv = getattr(scheduler, "get_kv_cache_usage", None)
+            kv_found = False
+            if callable(get_kv):
+              try:
+                raw_kv = get_kv()
+                if isinstance(raw_kv, (tuple, list)) and raw_kv:
+                  raw_kv = raw_kv[0]
+                if isinstance(raw_kv, (int, float)):
+                  sched_kv = float(raw_kv)
+                  kv_found = True
+              except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            if not kv_found:
+              block_manager = getattr(scheduler, "block_manager", None)
+              if block_manager is not None:
+                try:
+                  get_free = getattr(
+                      block_manager, "get_num_free_gpu_blocks", None
+                  ) or getattr(block_manager, "get_num_free_blocks", None)
+                  get_total = getattr(
+                      block_manager, "get_num_total_gpu_blocks", None
+                  ) or getattr(block_manager, "get_num_total_blocks", None)
+                  if callable(get_free) and callable(get_total):
+                    total_blocks = get_total()
+                    free_blocks = get_free()
+                    if total_blocks > 0:
+                      sched_kv = max(0.0, 1.0 - (free_blocks / total_blocks))
+                except Exception:  # pylint: disable=broad-exception-caught
+                  pass
+
+            kv_usage = max(kv_usage, sched_kv)
 
           executed_ids = (post_running_ids | finished_ids) - post_waiting_ids
           waiting_count = len(post_waiting_ids) + len(self._submission_queue)

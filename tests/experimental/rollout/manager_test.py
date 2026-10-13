@@ -810,6 +810,41 @@ class MaxConcurrencyTest(unittest.IsolatedAsyncioTestCase):
         results = await manager.generate(reqs)
       self.assertEqual(len(results), 3)
 
+  async def test_generate_handles_trajectory_with_none_metadata(self):
+    class _NoneMetadataCollector(_NoopCollector):
+
+      async def run_episode(self):
+        return datatypes.TrajectoryItem(
+            prompt_id=self.traj_id,
+            group_index=0,
+            traj={},
+            metadata=None,
+        )
+
+    manager = manager_lib.RolloutManager(
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    req = datatypes.RolloutRequest(
+        request_id="req_none_meta",
+        prompt="prompt",
+        prompt_id="p_none",
+        group_index=0,
+    )
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _NoneMetadataCollector,
+    ):
+      results = await manager.generate([req])
+
+    self.assertEqual(len(results), 1)
+    res = results[0]
+    self.assertIsInstance(res.metadata, dict)
+    self.assertEqual(res.metadata["request_id"], "req_none_meta")
+    self.assertIn("queue_metrics", res.metadata)
+
 
 if __name__ == "__main__":
   absltest.main()

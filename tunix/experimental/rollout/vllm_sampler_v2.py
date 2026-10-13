@@ -1050,7 +1050,10 @@ class RLVllmSampler:
             get_kv = getattr(sched, "get_kv_cache_usage", None)
             if callable(get_kv):
               try:
-                kv_usage = float(get_kv() or 0.0)
+                raw_kv = get_kv()
+                if isinstance(raw_kv, (tuple, list)) and raw_kv:
+                  raw_kv = raw_kv[0]
+                kv_usage = float(raw_kv or 0.0)
                 kv_perc = (
                     (kv_usage * 100.0) if kv_usage <= 1.0 else float(kv_usage)
                 )
