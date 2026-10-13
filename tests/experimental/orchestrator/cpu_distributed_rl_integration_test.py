@@ -29,6 +29,7 @@ import socket
 import time
 from types import SimpleNamespace
 from typing import Any, Iterator, Sequence, Tuple
+from unittest import mock
 
 from absl import logging
 from absl.testing import absltest
@@ -47,6 +48,7 @@ import multiprocessing
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
+from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.orchestrator import worker_registry
@@ -1023,6 +1025,163 @@ class CpuDistributedRLIntegrationTest(parameterized.TestCase):
 
           program.close()
           cluster.shutdown()
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="separate_first_stagger",
+          first_stagger_s=2.0,
+          stagger_s=0.5,
+          expected_offsets_s=(0.0, 2.0, 2.5),
+      ),
+      dict(
+          testcase_name="first_stagger_defaults_to_stagger",
+          first_stagger_s=None,
+          stagger_s=0.5,
+          expected_offsets_s=(0.0, 0.5, 1.0),
+      ),
+  )
+  def test_initial_dispatch_stagger_end_to_end(
+      self,
+      first_stagger_s: float | None,
+      stagger_s: float,
+      expected_offsets_s: tuple[float, float, float],
+  ):
+    """Start-up batches go out at 0, first, first + stagger on the real loop.
+
+    Batch 0 is held in training past the last stagger deadline, as on a real
+    run where its cold first stage outlasts the stagger, so the hold applies
+    to every start-up batch rather than lapsing once the trainer moves on.
+
+    Args:
+      first_stagger_s: `initial_dispatch_first_stagger_s` for the program.
+      stagger_s: `initial_dispatch_stagger_s` for the program.
+      expected_offsets_s: Expected dispatch offset of batches 0, 1 and 2.
+    """
+    with running_multiprocess_worker(_run_trainer_worker_process) as (
+        t_handle,
+        _,
+        _,
+        _,
+    ):
+      with running_multiprocess_worker(
+          _run_rollout_worker_process, "rollout-0"
+      ) as (r_handle, _, _, _):
+        cluster = orchestrator.ClusterOrchestrator(weight_sync_mode="raiden")
+        cluster.register_worker_handle(
+            worker_id="trainer-0",
+            roles=[datatypes.Role.ACTOR],
+            handle=t_handle,
+        )
+        cluster.register_worker_handle(
+            worker_id="rollout-0",
+            roles=[datatypes.Role.ROLLOUT],
+            handle=r_handle,
+        )
+
+        algo_config = algorithm_config.GRPOConfig(
+            num_generations=2,
+            epsilon=0.2,
+            beta=0.0,
+            temperature=1.0,
+        )
+        algo = algorithm_adapter.GRPOAdapter(
+            algo_config=algo_config,
+            mini_batch_size=2,
+            train_micro_batch_size=1,
+            max_packed_len=16,
+            max_response_length=8,
+        )
+        t_handle.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
+        t_handle.submit(
+            "with_gen_model_input_fn",
+            algo.build_gen_model_input_fn(pad_id=0, eos_id=2),
+        )
+
+        # A program batch is `mini_batch_size` prompts (no `batch_size` set).
+        num_batches = 3
+        num_prompts = num_batches * algo.mini_batch_size
+        prompt_items = [
+            {
+                "prompt": f"prompt_{i}",
+                "prompt_id": f"prompt_{i}",
+                "generation_kwargs": {"max_tokens": 4, "temperature": 1.0},
+            }
+            for i in range(num_prompts)
+        ]
+
+        def mock_reward_fn(
+            unused_completion: str,
+            metadata: dict[str, Any],
+        ) -> float:
+          return 1.0 if metadata["group_index"] % 2 == 0 else -1.0
+
+        assembler = batch_assembly.PaddedBatchAssembler(
+            batch_size=1,
+            num_generations=algo.num_generations,
+            mini_batch_size=algo.mini_batch_size,
+            max_prompt_length=16,
+            max_response_length=16,
+            pad_id=0,
+        )
+        program = rl_program.StandardRLProgram(
+            algo=algo,
+            dataset=prompt_items,
+            max_steps=num_batches,
+            reward_fns=[mock_reward_fn],
+            assembler=assembler,
+            sync_weights=True,
+            max_staleness=num_batches - 1,
+            initial_dispatch_stagger_s=stagger_s,
+            initial_dispatch_first_stagger_s=first_stagger_s,
+        )
+
+        # First time each batch clears the dispatch gate, i.e. its DISPATCH.
+        dispatched_at: dict[int, float] = {}
+        wait_for_window = program._wait_for_dispatch_window
+
+        async def _recording_wait(batch_idx: int) -> None:
+          await wait_for_window(batch_idx)
+          dispatched_at.setdefault(batch_idx, time.monotonic())
+
+        program._wait_for_dispatch_window = _recording_wait
+
+        # Keep batch 0 in training until after the last stagger deadline.
+        hold_train_until_s = expected_offsets_s[-1] + 1.0
+        train_step = distributed_rl_engine.DistributedRLEngine.train_step
+
+        async def _held_train_step(engine, *args: Any, **kwargs: Any) -> Any:
+          t0 = dispatched_at[0]
+          await asyncio.sleep(
+              max(0.0, t0 + hold_train_until_s - time.monotonic())
+          )
+          return await train_step(engine, *args, **kwargs)
+
+        with mock.patch.object(
+            distributed_rl_engine.DistributedRLEngine,
+            "train_step",
+            _held_train_step,
+        ):
+          cluster.run(program, bring_up=True)
+
+        self.assertEqual(sorted(dispatched_at), list(range(num_batches)))
+        t0 = dispatched_at[0]
+        for batch_idx, expected_s in enumerate(expected_offsets_s):
+          offset_s = dispatched_at[batch_idx] - t0
+          self.assertGreaterEqual(
+              offset_s, expected_s, f"batch {batch_idx} dispatched early"
+          )
+          self.assertLess(
+              offset_s, expected_s + 0.5, f"batch {batch_idx} dispatched late"
+          )
+
+        self.assertEqual(
+            r_handle.submit("get_generate_count"),
+            num_prompts * algo.num_generations,
+        )
+        self.assertEqual(program.step, num_batches)
+
+        program.close()
+        cluster.shutdown()
 
   def test_m6_rollout_worker_crash_eviction_and_rejoin(self):
     """Milestone 6: Rollout worker process crash, automatic eviction, re-dispatch, and dynamic rejoin with Raiden weight sync."""
