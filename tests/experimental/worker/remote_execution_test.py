@@ -3207,5 +3207,70 @@ class RemoteExecutionTest(absltest.TestCase):
     self.assertEqual(options.get("grpc.use_local_subchannel_pool"), 1)
 
 
+  def test_set_max_poll_batch_idx_pauses_future_batch_and_shifts_timeout(self):
+    """Verifies set_max_poll_batch_idx gates future-batch actors and shifts task_timeout_s."""
+
+    class BatchStubWorker:
+
+      def __init__(self, name: str, latency: float = 0.02):
+        self.name = name
+        self.latency = latency
+
+      async def generate_trajectories(self, requests=None):
+        await asyncio.sleep(self.latency)
+        req = requests[0]
+        return f"[{self.name}] {req.prompt}"
+
+    class FakeReq:
+
+      def __init__(self, prompt: str, batch_idx: int):
+        self.prompt = prompt
+        self.metadata = {"batch_idx": batch_idx}
+
+    async def _run():
+      actor_b0 = create_in_process_handle(BatchStubWorker("worker_b0"))
+      actor_b1 = create_in_process_handle(BatchStubWorker("worker_b1"))
+      pool = remote_lib.RoutingActorPool([actor_b0, actor_b1])
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              task_timeout_s=0.10,
+          ),
+      )
+      # Restrict polling to batch_idx <= 0.
+      session.set_max_poll_batch_idx(0)
+
+      # Submit batch 1 task first (batch_idx=1) and batch 0 task second (batch_idx=0).
+      await session.submit(
+          "req_b1",
+          "generate_trajectories",
+          requests=[FakeReq("p_b1", batch_idx=1)],
+      )
+      await session.submit(
+          "req_b0",
+          "generate_trajectories",
+          requests=[FakeReq("p_b0", batch_idx=0)],
+      )
+
+      # Batch 0 should complete, while Batch 1 stays paused without timing out.
+      first_batch = await session.poll_completed(timeout_s=0.5)
+      first_results = [res for res, exc in first_batch if exc is None]
+      self.assertEqual(len(first_results), 1)
+      self.assertIn("p_b0", first_results[0])
+
+      # Wait longer than task_timeout_s (0.10s) while actor carrying req_b1 is paused.
+      await asyncio.sleep(0.15)
+
+      # Now ungate polling: req_b1 should complete cleanly without a false timeout.
+      session.set_max_poll_batch_idx(None)
+      second_batch = await session.poll_completed(timeout_s=0.5)
+      second_results = [res for res, exc in second_batch if exc is None]
+      self.assertEqual(len(second_results), 1)
+      self.assertIn("p_b1", second_results[0])
+      await session.close()
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
   absltest.main()

@@ -325,6 +325,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--memory_high_watermark_ratio",
+      type=float,
+      default=(
+          float(os.getenv("MEMORY_HIGH_WATERMARK_RATIO"))
+          if os.getenv("MEMORY_HIGH_WATERMARK_RATIO", "").strip()
+          else None
+      ),
+      help=(
+          "Optional orchestrator cgroup/host memory high-watermark ratio in"
+          " (0.0, 1.0] (e.g. 0.80) to enable deadlock-free polling and"
+          " dispatch memory backpressure. Unset disables memory backpressure."
+      ),
+  )
+  parser.add_argument(
       "--trainer_warmup_compile",
       action=argparse.BooleanOptionalAction,
       default=False,
@@ -1195,6 +1209,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         rollout_priority_scheduling=args.rollout_priority_scheduling,
         initial_dispatch_stagger_s=args.initial_dispatch_stagger_s,
         initial_dispatch_first_stagger_s=args.initial_dispatch_first_stagger_s,
+        memory_high_watermark_ratio=args.memory_high_watermark_ratio,
         on_train_start=_on_train_start,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",

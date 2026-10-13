@@ -100,6 +100,7 @@ export TIS_RATIO_MIN=${TIS_RATIO_MIN:-${TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN:
 export TIS_RATIO=${TIS_RATIO:-${TRUNCATED_IMPORTANCE_SAMPLING_RATIO:-}}
 export SAMPLER_IS_LENGTH_BUCKETS=${SAMPLER_IS_LENGTH_BUCKETS:-}
 export MAX_STALENESS=${MAX_STALENESS:-}
+export MEMORY_HIGH_WATERMARK_RATIO=${MEMORY_HIGH_WATERMARK_RATIO:-}
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 export PROFILER_STEPS=${PROFILER_STEPS:-0}
 export SKIP_FIRST_N_PROFILER_STEPS=${SKIP_FIRST_N_PROFILER_STEPS:-}
@@ -552,6 +553,7 @@ start_orchestrator() {
         ${ROLLOUT_MAX_TASK_RETRIES:+--rollout_max_task_retries=${ROLLOUT_MAX_TASK_RETRIES}} \
         $([[ "${RECOVER_UNKNOWN_TRANSFER_STATE}" == "true" || "${RECOVER_UNKNOWN_TRANSFER_STATE}" == "True" || "${RECOVER_UNKNOWN_TRANSFER_STATE}" == "1" ]] && echo --recover_unknown_transfer_state || echo --no-recover_unknown_transfer_state) \
         ${MAX_STALENESS:+--max_staleness=${MAX_STALENESS}} \
+        ${MEMORY_HIGH_WATERMARK_RATIO:+--memory_high_watermark_ratio=${MEMORY_HIGH_WATERMARK_RATIO}} \
         $([[ "${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}" =~ ^[0-9]+$ ]] && echo "--checkpoint_optimizer_interval_steps=${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}") \
         ${TRAJECTORY_GROUP_ORDER:+--trajectory_group_order=${TRAJECTORY_GROUP_ORDER}} \
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \

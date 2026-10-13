@@ -741,6 +741,76 @@ class BatchOrderedQueueManagerTest(absltest.TestCase):
     asyncio.run(_run_test())
 
 
+  def test_get_group_max_batch_idx_filter(self):
+    """Verifies get_group(max_batch_idx_fn=...) skips future-batch groups until unblocked."""
+
+    async def _run():
+      q = trajectory_queue_manager.TrajectoryQueueManager(num_generations=1)
+      item_b1 = _create_item("p1", group_index=0, reward=1.0, batch_idx=1)
+      item_b0 = _create_item("p0", group_index=0, reward=1.0, batch_idx=0)
+      await q.put(item_b1)
+
+      # With max_batch_idx=0, batch 1 group stays buffered and consumer waits.
+      max_batch = 0
+      consumer = asyncio.create_task(
+          q.get_group(max_batch_idx_fn=lambda: max_batch)
+      )
+      await asyncio.sleep(0.02)
+      self.assertFalse(consumer.done())
+
+      # Arriving batch 0 group satisfies max_batch_idx=0 immediately.
+      await q.put(item_b0)
+      got_b0 = await asyncio.wait_for(consumer, timeout=1.0)
+      self.assertEqual([it.metadata["batch_idx"] for it in got_b0], [0])
+
+      # Advancing max_batch to 1 + notify_consumers() unblocks batch 1.
+      consumer_b1 = asyncio.create_task(
+          q.get_group(max_batch_idx_fn=lambda: max_batch)
+      )
+      max_batch = 1
+      q.notify_consumers()
+      got_b1 = await asyncio.wait_for(consumer_b1, timeout=1.0)
+      self.assertEqual([it.metadata["batch_idx"] for it in got_b1], [1])
+
+    asyncio.run(_run())
+
+  def test_batch_ordered_queue_manager_sealed_and_pending_queries(self):
+    """Verifies is_batch_sealed, pending_groups_for_batch, and on_state_change."""
+
+    async def _run():
+      state_changes = []
+      q = trajectory_queue_manager.BatchOrderedQueueManager(
+          full_batch_size=2,
+          num_generations=1,
+          on_state_change=lambda: state_changes.append(1),
+      )
+      self.assertFalse(q.is_batch_sealed(0))
+      self.assertEqual(q.pending_groups_for_batch(0), 0)
+
+      await q.put(_create_item("b0_p0", group_index=0, reward=1.0, batch_idx=0))
+      self.assertFalse(q.is_batch_sealed(0))
+      self.assertEqual(q.pending_groups_for_batch(0), 1)
+      self.assertGreaterEqual(len(state_changes), 1)
+
+      await q.put(_create_item("b0_p1", group_index=0, reward=1.0, batch_idx=0))
+      self.assertTrue(q.is_batch_sealed(0))
+      self.assertEqual(q.pending_groups_for_batch(0), 2)
+
+      b_idx1, group1 = await q.get_ordered_group()
+      self.assertEqual(b_idx1, 0)
+      self.assertLen(group1, 1)
+      self.assertEqual(q.pending_groups_for_batch(0), 1)
+
+      b_idx2, group2 = await q.get_ordered_group()
+      self.assertEqual(b_idx2, 0)
+      self.assertLen(group2, 1)
+      self.assertEqual(q.pending_groups_for_batch(0), 0)
+      q.commit_batch(0)
+      self.assertEqual(q.next_batch_idx, 1)
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
   absltest.main()
 

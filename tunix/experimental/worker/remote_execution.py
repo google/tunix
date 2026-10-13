@@ -1657,7 +1657,10 @@ class PoolExecutionSession:
     self._task_payloads: Dict[
         str, Tuple[Optional[str], Tuple[Any, ...], Dict[str, Any]]
     ] = {}
+    self._task_batch_idx: Dict[str, int] = {}
     self._task_retries: Dict[str, int] = {}
+    self._max_poll_batch_idx: Optional[int] = None
+    self._poll_gate_event: Optional[asyncio.Event] = None
     self._failed_tasks: collections.deque[
         Tuple[
             str,
@@ -1698,6 +1701,59 @@ class PoolExecutionSession:
     self._task_timeout_s = (
         float(task_timeout_s) if task_timeout_s is not None else None
     )
+
+  @property
+  def max_poll_batch_idx(self) -> Optional[int]:
+    """Maximum prompt-batch index eligible for worker polling."""
+    return self._max_poll_batch_idx
+
+  def _notify_poll_gate(self) -> None:
+    """Wakes any worker polling loops parked on the batch-index poll gate."""
+    if self._poll_gate_event is not None:
+      self._poll_gate_event.set()
+      self._poll_gate_event = asyncio.Event()
+
+  def set_max_poll_batch_idx(self, max_batch_idx: Optional[int]) -> None:
+    """Sets the maximum prompt-batch index eligible for background worker polling.
+
+    * `None`: Unrestricted polling across all workers.
+    * `< 0` (e.g. `-1`): Pauses background polling across all workers.
+    * `>= 0`: Only polls workers that have at least one in-flight task with
+      `batch_idx <= max_batch_idx`; workers only running future batches pause
+      so their completed responses remain buffered on the remote workers.
+    """
+    normalized = int(max_batch_idx) if max_batch_idx is not None else None
+    if self._max_poll_batch_idx == normalized:
+      return
+    self._max_poll_batch_idx = normalized
+    self._run_on_session_loop(self._notify_poll_gate)
+
+  def _can_poll_actor(self, actor: ActorHandle) -> bool:
+    """Returns True if polling `actor` is permitted by the current batch gate."""
+    max_batch = self._max_poll_batch_idx
+    if max_batch is None:
+      return True
+    if max_batch < 0:
+      return False
+    dispatched_set = self._dispatched_tasks.get(actor)
+    if not dispatched_set:
+      return True
+    return any(
+        self._task_batch_idx.get(rid, 0) <= max_batch for rid in dispatched_set
+    )
+
+  @staticmethod
+  def _extract_task_batch_idx(orig_kwargs: Dict[str, Any]) -> int:
+    """Extracts `batch_idx` from `requests=[RolloutRequest(...)]` if present."""
+    reqs = orig_kwargs.get("requests")
+    if isinstance(reqs, Sequence) and reqs:
+      first = reqs[0]
+      metadata = getattr(first, "metadata", None)
+      if isinstance(metadata, Mapping) and "batch_idx" in metadata:
+        batch_idx = metadata["batch_idx"]
+        if batch_idx is not None:
+          return int(batch_idx)
+    return 0
 
   @property
   def retain_pending_on_zero_workers(self) -> bool:
@@ -1760,6 +1816,7 @@ class PoolExecutionSession:
       self._worker_poll_tasks.clear()
       self._active_workers.clear()
       self._draining_pending = False
+      self._poll_gate_event = None
       for actor, dset in list(self._dispatched_tasks.items()):
         if dset and actor in self._pool.actors:
           self._ensure_worker_polling(actor)
@@ -1925,6 +1982,7 @@ class PoolExecutionSession:
   ) -> None:
     """Marks `req_id` as terminally failed and cleans up its tracking state."""
     payload = self._task_payloads.pop(req_id, None)
+    self._task_batch_idx.pop(req_id, None)
     self._task_retries.pop(req_id, None)
     self._task_dispatch_times.pop(req_id, None)
     self._task_last_failed_actor.pop(req_id, None)
@@ -2133,6 +2191,8 @@ class PoolExecutionSession:
     dispatched_set.add(request_id)
     self._task_dispatch_times[request_id] = time.monotonic()
     self._ensure_worker_polling(actor)
+    if self._max_poll_batch_idx is not None and self._can_poll_actor(actor):
+      self._notify_poll_gate()
 
     try:
       dispatch_coro = actor.dispatch_task(
@@ -2219,6 +2279,7 @@ class PoolExecutionSession:
     orig_kwargs = dict(kwargs)
     args_tuple = tuple(args)
     self._task_payloads[request_id] = (method_name, args_tuple, orig_kwargs)
+    self._task_batch_idx[request_id] = self._extract_task_batch_idx(orig_kwargs)
     self._in_flight += 1
 
     if not self._pending_queue and self._pool.actors:
@@ -2229,6 +2290,7 @@ class PoolExecutionSession:
       except Exception:
         self._in_flight = max(0, self._in_flight - 1)
         self._task_payloads.pop(request_id, None)
+        self._task_batch_idx.pop(request_id, None)
         raise
       if actor is not None:
         await self._dispatch_to_actor(
@@ -2303,6 +2365,19 @@ class PoolExecutionSession:
           if not dispatched_set:
             break
         try:
+          while not self._closed and not self._can_poll_actor(actor):
+            if self._poll_gate_event is None:
+              self._poll_gate_event = asyncio.Event()
+            gate = self._poll_gate_event
+            pause_start = time.monotonic()
+            await gate.wait()
+            paused_s = max(0.0, time.monotonic() - pause_start)
+            if paused_s > 0.0:
+              for rid in list(dispatched_set):
+                if rid in self._task_dispatch_times:
+                  self._task_dispatch_times[rid] += paused_s
+          if self._closed:
+            break
           timeout_s = self._task_timeout_s
           if timeout_s is not None:
             now = time.monotonic()
@@ -2373,6 +2448,7 @@ class PoolExecutionSession:
             self._task_last_failed_actor.pop(req_id, None)
             self._in_flight = max(0, self._in_flight - 1)
             payload = self._task_payloads.pop(req_id, None)
+            self._task_batch_idx.pop(req_id, None)
             self._task_retries.pop(req_id, None)
             try:
               res = response.unwrap()
@@ -2523,6 +2599,7 @@ class PoolExecutionSession:
   async def close(self) -> None:
     """Closes the session and cancels all background polling tasks."""
     self._closed = True
+    self._notify_poll_gate()
     self._response_queue.put_nowait(self._sentinel)
     for t in list(self._poll_tasks):
       if not t.done():

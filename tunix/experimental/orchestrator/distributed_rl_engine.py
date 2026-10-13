@@ -633,6 +633,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         completed.append(_response_to_trajectory_item(err_resp))
     return completed
 
+  def set_max_poll_batch_idx(self, max_batch_idx: int | None) -> None:
+    """Sets the maximum prompt-batch index eligible for background worker polling."""
+    self._rollout_session.set_max_poll_batch_idx(max_batch_idx)
+
   async def poll_rollouts(
       self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
   ) -> list[datatypes.TrajectoryItem]:

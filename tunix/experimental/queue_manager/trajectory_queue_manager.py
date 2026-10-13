@@ -139,6 +139,7 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
       key_fn: Optional[Callable[[datatypes.TrajectoryItem], Hashable]] = None,
       batch_idx_fn: Optional[Callable[[datatypes.TrajectoryItem], int]] = None,
       on_drop: DropFn | None = None,
+      on_ready_change: Callable[[], None] | None = None,
   ):
     """Initializes TrajectoryQueueManager.
 
@@ -166,6 +167,7 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
     )
     self._batch_idx_fn = batch_idx_fn or default_batch_idx_fn
     self._on_drop = on_drop
+    self._on_ready_change = on_ready_change
 
   @classmethod
   def create(
@@ -175,6 +177,7 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
       current_policy_version: Callable[[], int] | None = None,
       filter_fn: Any | None = None,
       on_drop: DropFn | None = None,
+      on_ready_change: Callable[[], None] | None = None,
   ) -> "TrajectoryQueueManager":
     """Creates a grouped trajectory queue with optional policy staleness filtering.
 
@@ -198,6 +201,7 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
             max_staleness, current_policy_version, filter_fn
         ),
         on_drop=on_drop,
+        on_ready_change=on_ready_change,
     )
 
   def _on_candidate_group(
@@ -210,6 +214,8 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
     if not valid_group and filtered_out and self._on_drop is not None:
       batch_idx = self._batch_idx_fn(filtered_out[0])
       self._on_drop(batch_idx, 1)
+    if self._on_ready_change is not None:
+      self._on_ready_change()
 
   def __aiter__(self) -> "TrajectoryQueueManager":
     return self
@@ -220,9 +226,50 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
       raise StopAsyncIteration
     return group
 
-  async def get_group(self) -> list[datatypes.TrajectoryItem]:
-    """Retrieves a single ready group of TrajectoryItems."""
-    return await self._get_one_ready_group()
+  def notify_consumers(self) -> None:
+    """Wakes waiting consumers when external admission gates change."""
+    self._have_ready.set()
+
+  async def get_group(
+      self,
+      *,
+      max_batch_idx_fn: Callable[[], int | None] | None = None,
+  ) -> list[datatypes.TrajectoryItem]:
+    """Retrieves a single ready group, optionally gated by prompt-batch index."""
+    if max_batch_idx_fn is None:
+      return await self._get_one_ready_group()
+
+    while True:
+      if self._exc:
+        raise self._exc
+      if self._clearing:
+        return []
+      max_batch_idx = max_batch_idx_fn()
+      async with self._lock:
+        if self._ready_groups:
+          if max_batch_idx is None:
+            return self._ready_groups.popleft()
+          if max_batch_idx >= 0:
+            for idx, group in enumerate(self._ready_groups):
+              if not group:
+                del self._ready_groups[idx]
+                return group
+              metadata = group[0].metadata
+              batch_idx = (
+                  int(metadata["batch_idx"])
+                  if metadata is not None and "batch_idx" in metadata
+                  else 0
+              )
+              if batch_idx <= max_batch_idx:
+                del self._ready_groups[idx]
+                return group
+        if self._closed:
+          if not self._ready_groups:
+            return []
+          if max_batch_idx is None or max_batch_idx >= 0:
+            return self._ready_groups.popleft()
+      await self._have_ready.wait()
+      self._have_ready.clear()
 
   async def get_group_batch(
       self, num_groups: int
@@ -297,6 +344,7 @@ class BatchOrderedQueueManager(group_queue_manager.GroupQueueManager):
       key_fn: Optional[Callable[[TrajectoryItem], Hashable]] = None,
       batch_idx_fn: Optional[Callable[[TrajectoryItem], int]] = None,
       on_cursor_advance: CursorFn | None = None,
+      on_state_change: Callable[[], None] | None = None,
   ):
     """Initializes BatchOrderedQueueManager.
 
@@ -339,6 +387,7 @@ class BatchOrderedQueueManager(group_queue_manager.GroupQueueManager):
     self.full_batch_size = full_batch_size
     self._batch_idx_fn = batch_idx_fn or default_batch_idx_fn
     self._on_cursor_advance = on_cursor_advance
+    self._on_state_change = on_state_change
 
     # Ready groups staged per batch, replacing the base `_ready_groups` FIFO.
     self._pending: Dict[int, Deque[list[TrajectoryItem]]] = (
@@ -365,6 +414,7 @@ class BatchOrderedQueueManager(group_queue_manager.GroupQueueManager):
       current_policy_version: Callable[[], int] | None = None,
       filter_fn: Any | None = None,
       on_cursor_advance: CursorFn | None = None,
+      on_state_change: Callable[[], None] | None = None,
   ) -> "BatchOrderedQueueManager":
     """Creates a prompt-batch-ordered queue, mirroring the arrival factory.
 
@@ -389,6 +439,7 @@ class BatchOrderedQueueManager(group_queue_manager.GroupQueueManager):
             max_staleness, current_policy_version, filter_fn
         ),
         on_cursor_advance=on_cursor_advance,
+        on_state_change=on_state_change,
     )
 
   async def get_batch(self, batch_size: int) -> list[TrajectoryItem]:
@@ -417,6 +468,20 @@ class BatchOrderedQueueManager(group_queue_manager.GroupQueueManager):
   def serving_batch_idx(self) -> int:
     """Batch `get_ordered_group` currently draws from."""
     return self._serving_batch_idx
+
+  def is_batch_sealed(self, batch_idx: int) -> bool:
+    """Returns True if `batch_idx` has resolved all expected groups or passed."""
+    return batch_idx < self._next_batch_idx or batch_idx in self._sealed
+
+  def pending_groups_for_batch(self, batch_idx: int) -> int:
+    """Returns the number of ready groups currently staged for `batch_idx`."""
+    pending = self._pending.get(batch_idx)
+    return len(pending) if pending is not None else 0
+
+  def _notify_state_change(self) -> None:
+    self._have_ready.set()
+    if self._on_state_change is not None:
+      self._on_state_change()
 
   def next_batch_after(self, batch_idx: int) -> int:
     """Returns the first untrained, non-hole batch index after `batch_idx`."""
@@ -450,7 +515,7 @@ class BatchOrderedQueueManager(group_queue_manager.GroupQueueManager):
     self._expected[batch_idx] = num_groups
     self._maybe_seal(batch_idx)
     self._advance_over_holes()
-    self._have_ready.set()
+    self._notify_state_change()
 
   def dropped(self, batch_idx: int, num_groups: int = 1) -> None:
     """Records `num_groups` groups dropped upstream for `batch_idx`.
@@ -474,7 +539,7 @@ class BatchOrderedQueueManager(group_queue_manager.GroupQueueManager):
     self._seen[batch_idx] += num_groups
     self._maybe_seal(batch_idx)
     self._advance_over_holes()
-    self._have_ready.set()
+    self._notify_state_change()
 
   def skip(self, begin: int, end: int) -> None:
     """Passes over batches `[begin, end)` without ever serving them.
@@ -490,7 +555,7 @@ class BatchOrderedQueueManager(group_queue_manager.GroupQueueManager):
       self._drop_batch_state(batch_idx)
     self._advance_to(end)
     self._advance_over_holes()
-    self._have_ready.set()
+    self._notify_state_change()
 
   def commit_batch(self, batch_idx: int) -> None:
     """Releases a batch's state after its optimizer step.
@@ -505,7 +570,7 @@ class BatchOrderedQueueManager(group_queue_manager.GroupQueueManager):
     self._drop_batch_state(batch_idx)
     self._advance_to(batch_idx + 1)
     self._advance_over_holes()
-    self._have_ready.set()
+    self._notify_state_change()
 
   async def get_ordered_group(
       self,
@@ -604,7 +669,7 @@ class BatchOrderedQueueManager(group_queue_manager.GroupQueueManager):
 
     self._maybe_seal(batch_idx)
     self._advance_over_holes()
-    self._have_ready.set()
+    self._notify_state_change()
 
   def _maybe_seal(self, batch_idx: int) -> None:
     """Seals a batch once every group it should contain has been resolved."""
