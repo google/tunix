@@ -171,6 +171,12 @@ class AssembledBatch(NamedTuple):
   trajectory_ids: tuple[str, ...] = ()
 
 
+def _zeros_or_none(
+    enabled: bool, shape: tuple[int, ...]
+) -> np.ndarray | None:
+  return np.zeros(shape, dtype=np.float32) if enabled else None
+
+
 @dataclasses.dataclass
 class BatchConfig:
   """Configuration for batch assembly.
@@ -216,6 +222,7 @@ class BatchAssembler(Generic[T], Protocol):
   Attributes:
     num_generations: Number of rollout trajectories / generations generated per
       prompt group (G). Must be a positive integer.
+    mini_batch_size: Number of prompt groups per optimizer update.
   """
 
   num_generations: int
@@ -237,6 +244,44 @@ class BatchAssembler(Generic[T], Protocol):
       self,
   ) -> Iterator[AssembledBatch]:
     """Drains remaining buffered items, padding to the required static tensor shape."""
+    ...
+
+  def build_dummy_payload(
+      self,
+      *,
+      with_old_per_token_logps: bool,
+      with_ref_per_token_logps: bool,
+      with_sampler_is_weights: bool = False,
+      sampler_agreement_applied: bool = False,
+      with_routed_experts: bool = False,
+  ) -> datatypes.RLTrainerPayload:
+    """Builds a synthetic microbatch with the exact static layout `feed()` emits.
+
+    The trainer compiles one executable per payload pytree structure (field
+    presence, shapes, dtypes), so a payload built here lets the trainer compile
+    ahead of time and serve the first real microbatch from its JIT cache. Must
+    not touch buffered rollouts or lineage counters.
+
+    Args:
+      with_old_per_token_logps: Whether real payloads carry behavior-policy
+        logps (`old_per_token_logps`), i.e. the algorithm uses rollout logps.
+      with_ref_per_token_logps: Whether real payloads carry reference-model
+        logps (`ref_per_token_logps`), i.e. the algorithm needs a KL term.
+      with_sampler_is_weights: Whether real payloads carry pre-computed
+        importance/rejection-sampling weights (`sampler_is_weights`) from the
+        non-fused sampler-trainer agreement path.
+      sampler_agreement_applied: Value of the static `sampler_agreement_applied`
+        pytree metadata flag on the payload.
+      with_routed_experts: Whether real payloads carry MoE router indices
+        (`routed_experts`) for router replay. When True, populates a 4D
+        `[B, S, 0, 0]` `int16` placeholder whose trailing `(num_layers, top_k)`
+        dimensions are resolved by the trainer from its model config during
+        `compile()`.
+
+    Returns:
+      A batched payload whose `jax.tree.structure`, shapes and dtypes match
+      what `feed()` / `flush()` yield under the same configuration.
+    """
     ...
 
   # TODO (tunix-dev): we should not allow `start_batch_index` to be None once failure recovery logic is implemented.
@@ -848,6 +893,40 @@ class SequencePackedBatchAssembler:
     self._rollouts_since_update = 0
     return self._drain_buffer(drain_all=True)
 
+  def build_dummy_payload(
+      self,
+      *,
+      with_old_per_token_logps: bool,
+      with_ref_per_token_logps: bool,
+      with_sampler_is_weights: bool = False,
+      sampler_agreement_applied: bool = False,
+      with_routed_experts: bool = False,
+  ) -> datatypes.RLTrainerPayload:
+    """Builds a zero-filled `[batch_size, max_packed_len]` dummy payload."""
+    shape = (self.batch_size, self.max_packed_len)
+    max_segments = packing.effective_max_segments(
+        self.max_packed_len, self.max_segments_per_packed_row
+    )
+    return datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((self.batch_size, 0), dtype=np.int32),
+        prompt_mask=np.zeros((self.batch_size, 0), dtype=np.float32),
+        completion_ids=np.zeros(shape, dtype=np.int32),
+        completion_mask=np.zeros(shape, dtype=np.float32),
+        advantages=np.zeros(shape, dtype=np.float32),
+        segment_ids=np.zeros(shape, dtype=np.int32),
+        segment_positions=np.zeros(shape, dtype=np.int32),
+        num_segments=max_segments + 1,
+        old_per_token_logps=_zeros_or_none(with_old_per_token_logps, shape),
+        ref_per_token_logps=_zeros_or_none(with_ref_per_token_logps, shape),
+        sampler_is_weights=_zeros_or_none(with_sampler_is_weights, shape),
+        sampler_agreement_applied=sampler_agreement_applied,
+        routed_experts=(
+            np.empty((*shape, 0, 0), dtype=np.int16)
+            if with_routed_experts
+            else None
+        ),
+    )
+
   def reset(self, *, start_batch_index: int | None = None) -> None:
     """Resets the internal buffer and optimizer-update rollout counter.
 
@@ -976,6 +1055,44 @@ class PaddedBatchAssembler:
     """Flushes any remaining items padded to batch_size."""
     self._rollouts_since_update = 0
     return self._drain_buffer(drain_all=True)
+
+  def build_dummy_payload(
+      self,
+      *,
+      with_old_per_token_logps: bool,
+      with_ref_per_token_logps: bool,
+      with_sampler_is_weights: bool = False,
+      sampler_agreement_applied: bool = False,
+      with_routed_experts: bool = False,
+  ) -> datatypes.RLTrainerPayload:
+    """Builds a zero-filled `[batch_size, P]` / `[batch_size, C]` dummy payload."""
+    prompt_shape = (self.batch_size, self.max_prompt_length)
+    completion_shape = (self.batch_size, self.max_response_length)
+    return datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros(prompt_shape, dtype=np.int32),
+        prompt_mask=np.zeros(prompt_shape, dtype=np.float32),
+        completion_ids=np.zeros(completion_shape, dtype=np.int32),
+        completion_mask=np.zeros(completion_shape, dtype=np.float32),
+        advantages=np.zeros(completion_shape, dtype=np.float32),
+        old_per_token_logps=_zeros_or_none(
+            with_old_per_token_logps, completion_shape
+        ),
+        ref_per_token_logps=_zeros_or_none(
+            with_ref_per_token_logps, completion_shape
+        ),
+        sampler_is_weights=_zeros_or_none(
+            with_sampler_is_weights, completion_shape
+        ),
+        sampler_agreement_applied=sampler_agreement_applied,
+        routed_experts=(
+            np.empty(
+                (self.batch_size, self.max_seq_len, 0, 0),
+                dtype=np.int16,
+            )
+            if with_routed_experts
+            else None
+        ),
+    )
 
   def reset(self, *, start_batch_index: int | None = None) -> None:
     """Resets internal buffering state, discarding all pending rollouts.

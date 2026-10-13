@@ -1623,6 +1623,113 @@ class V1ParityTest(parameterized.TestCase):
         nnx.state(model_dynamic, nnx.Param),
     )
 
+  def test_compile_with_none_dummy_data_is_noop(self):
+    model, _ = self._two_identical_models()
+    initial_weights = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+    trainer = self._make_trainer_v2(model, accum_steps=1)
+
+    trainer.compile(None)
+
+    self.assertIsNone(trainer._jitted_fwd_bwd_step_fn)
+    self.assertIsNone(trainer._jitted_update_step_fn)
+    self.assertIsNone(trainer._jitted_eval_step_fn)
+    self.assertEqual(trainer.train_steps, 0)
+    self._assert_fp32_weights_close(
+        initial_weights, nnx.state(model, nnx.Param)
+    )
+
+  def test_compile_with_dummy_batch_compiles_all_steps_without_mutating_state(
+      self,
+  ):
+    for accum_steps in (1, 2):
+      with self.subTest(accum_steps=accum_steps):
+        model, _ = self._two_identical_models()
+        initial_weights = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+        trainer = self._make_trainer_v2(model, accum_steps=accum_steps)
+        batch = dummy_datasets(batch_size=4)[0]
+
+        fwd_bwd_traces = 0
+        update_traces = 0
+
+        def traced_fwd_bwd(*args, _orig=trainer._fwd_bwd_step, **kwargs):
+          nonlocal fwd_bwd_traces
+          fwd_bwd_traces += 1
+          return _orig(*args, **kwargs)
+
+        def traced_update(*args, _orig=trainer._update_step, **kwargs):
+          nonlocal update_traces
+          update_traces += 1
+          return _orig(*args, **kwargs)
+
+        with (
+            mock.patch.object(
+                trainer, 'create_fwd_bwd_step_fn', return_value=traced_fwd_bwd
+            ),
+            mock.patch.object(
+                trainer, 'create_update_step_fn', return_value=traced_update
+            ),
+        ):
+          trainer.compile(batch)
+          self.assertEqual(fwd_bwd_traces, 1)
+          self.assertEqual(update_traces, 1)
+
+          self.assertIsNotNone(trainer._jitted_fwd_bwd_step_fn)
+          self.assertIsNotNone(trainer._jitted_update_step_fn)
+          self.assertIsNotNone(trainer._jitted_eval_step_fn)
+          self.assertTrue(trainer.grad_accumulator.persistent)
+          self.assertTrue(
+              jax.tree_util.tree_leaves(trainer.grad_accumulator.grads)
+          )
+          self.assertEqual(trainer.train_steps, 0)
+          self.assertEqual(trainer.iter_steps, 0)
+          self._assert_fp32_weights_close(
+              initial_weights, nnx.state(model, nnx.Param)
+          )
+
+          # Verify split fwd_bwd + update executes cleanly after AOT compile
+          # without re-tracing either step function.
+          for _ in range(accum_steps):
+            trainer.fwd_bwd(batch)
+          trainer.update()
+          self.assertEqual(fwd_bwd_traces, 1)
+          self.assertEqual(update_traces, 1)
+        self.assertEqual(trainer.train_steps, 1)
+        self._assert_weights_changed(
+            initial_weights, nnx.state(model, nnx.Param)
+        )
+
+  def test_compile_expands_routed_experts_placeholder_from_model_config(
+      self,
+  ):
+    model, _ = self._two_identical_models()
+    model.config.num_layers = 3
+    model.config.num_experts_per_tok = 2
+    trainer = self._make_trainer_v2(model, accum_steps=1)
+    dummy = peft_trainer_v2.datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((2, 4), dtype=np.int32),
+        prompt_mask=np.zeros((2, 4), dtype=np.float32),
+        completion_ids=np.zeros((2, 6), dtype=np.int32),
+        completion_mask=np.zeros((2, 6), dtype=np.float32),
+        advantages=np.zeros((2, 6), dtype=np.float32),
+        routed_experts=np.empty((2, 10, 0, 0), dtype=np.int16),
+    )
+
+    prepared: list[Any] = []
+
+    def _capture_prepare(payload):
+      prepared.append(payload)
+      return dummy_datasets(batch_size=2)[0]
+
+    with mock.patch.object(
+        trainer, '_prepare_payload', side_effect=_capture_prepare
+    ):
+      trainer.compile(dummy)
+
+    self.assertLen(prepared, 1)
+    self.assertIsNotNone(prepared[0].routed_experts)
+    self.assertEqual(prepared[0].routed_experts.shape, (2, 10, 3, 2))
+    self.assertEqual(prepared[0].routed_experts.dtype, np.int16)
+
 
 class GradientAccumulatorTest(parameterized.TestCase):
 

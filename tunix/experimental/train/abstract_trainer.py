@@ -80,15 +80,21 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def compile(self, dummy_data: Any) -> None:
-    """Triggers JAX compilation. `with_loss_fn` must be called first.
+  def compile(
+      self, dummy_data: datatypes.TrainerPayload | None = None
+  ) -> None:
+    """Triggers ahead-of-time JAX compilation. `with_loss_fn` must be called first.
 
-    Idempotent; safe to call multiple times. Under JAX jit semantics, XLA
-    compilation itself still happens on the first call per input shape; this
-    method constructs the jitted callables and applies optimizer sharding so
-    the first step avoids double compilation. Does NOT restore checkpoints.
+    Idempotent; safe to call multiple times. When `dummy_data` is `None`,
+    compilation is deferred (no-op) until a concrete payload is supplied.
+    When `dummy_data` is provided, lowers and compiles the trainer step
+    executables (`fwd_bwd`, `update`, and `eval`) ahead of time so the first
+    real step hits the JIT cache without mutating model or optimizer state.
+    Does NOT restore checkpoints.
+
     Args:
-      dummy_data: A dummy batch of data to trigger compilation.
+      dummy_data: Optional dummy batch of data to lower and compile step
+        executables ahead of time. If `None`, compilation is deferred.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement compile."

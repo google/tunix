@@ -43,6 +43,7 @@ export SEGMENT_ALIGNMENT_BOUNDARY=${SEGMENT_ALIGNMENT_BOUNDARY:-}
 
 # Set to tunix to run Tunix's PeftTrainer, and maxtext to run MaxText's MaxTextTrainingEngine
 export TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
+export TRAINER_PRECOMPILE=${TRAINER_PRECOMPILE:-true}
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-${BATCH_SIZE}}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 export LEARNING_RATE=${LEARNING_RATE:-1e-6}
@@ -245,6 +246,7 @@ start_orchestrator() {
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
+        --trainer_precompile=${TRAINER_PRECOMPILE} \
         --stop_workers_on_exit \
         --enable_trajectory_store=${TRAJECTORY_STORE_ENABLED} \
         --trajectory_store_backend=${TRAJECTORY_STORE_BACKEND} \

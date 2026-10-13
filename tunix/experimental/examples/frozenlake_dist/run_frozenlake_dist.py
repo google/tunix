@@ -199,6 +199,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default="",
       help="Root directory for the file-backed TrajectoryStore.",
   )
+  parser.add_argument(
+      "--trainer_precompile",
+      type=_str2bool,
+      default=_str2bool(os.getenv("TRAINER_PRECOMPILE", "true")),
+      nargs="?",
+      const=True,
+      help=(
+          "Precompile the trainer step executables (fwd_bwd, update, eval)"
+          " ahead of time during worker configuration."
+      ),
+  )
   args = parser.parse_args(argv)
   if args.max_steps is None:
     args.max_steps = args.num_batches * args.num_iterations * args.num_epochs
@@ -452,6 +463,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       max_staleness=args.max_staleness,
       group_order=args.trajectory_group_order,
       sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
+      precompile_trainer=args.trainer_precompile,
       on_step_begin=lambda step: logging.info(
           ">>> FrozenLake step %d starting", step
       ),

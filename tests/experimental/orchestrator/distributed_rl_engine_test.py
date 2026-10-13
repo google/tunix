@@ -21,6 +21,8 @@ from absl.testing import absltest
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
+from tunix.experimental.orchestrator import algorithm_adapter
+from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.worker import remote_execution
@@ -70,6 +72,7 @@ class MockActorHandle(mock.MagicMock):
     self.set_target_state = mock.AsyncMock()
     self.with_loss_fn = mock.MagicMock()
     self.with_gen_model_input_fn = mock.MagicMock()
+    self.compile = mock.MagicMock()
 
   def submit(self, method_name: str, *args, **kwargs):
     method = getattr(self, method_name)
@@ -799,7 +802,6 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-
   def test_sync_weights_requires_a_coordinator(self):
     async def _run():
       with self.assertRaises(RuntimeError):
@@ -1523,13 +1525,24 @@ class DistributedRLEngineTest(absltest.TestCase):
 
   def test_configure_worker_actor_configures_loss_and_gen_model_input_fn(self):
     mock_algo = mock.MagicMock()
+    mock_algo.algo_config.use_rollout_logps = True
+    mock_algo.requires_reference_kl = False
+    mock_algo.has_critic = False
     mock_loss = mock.MagicMock()
     mock_gen_fn = mock.MagicMock()
     mock_assembler = mock.MagicMock()
     mock_assembler.pad_id = 10
     mock_assembler.eos_id = 20
+    mock_dummy = mock.MagicMock()
+    mock_assembler.build_dummy_payload.return_value = mock_dummy
     mock_algo.loss_fn.return_value = mock_loss
     mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
+    parent = mock.MagicMock()
+    parent.attach_mock(self.mock_actor.with_loss_fn, "with_loss_fn")
+    parent.attach_mock(
+        self.mock_actor.with_gen_model_input_fn, "with_gen_model_input_fn"
+    )
+    parent.attach_mock(self.mock_actor.compile, "compile")
 
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,
@@ -1544,6 +1557,97 @@ class DistributedRLEngineTest(absltest.TestCase):
     mock_algo.build_gen_model_input_fn.assert_called_once_with(
         pad_id=10, eos_id=20
     )
+    mock_assembler.build_dummy_payload.assert_called_once_with(
+        with_old_per_token_logps=True,
+        with_ref_per_token_logps=False,
+        with_sampler_is_weights=False,
+        sampler_agreement_applied=False,
+        with_routed_experts=False,
+    )
+    self.mock_actor.compile.assert_called_once_with(mock_dummy)
+    # Both setters clear the trainer JIT cache; compile must come last.
+    self.assertEqual(
+        [c[0] for c in parent.mock_calls],
+        ["with_loss_fn", "with_gen_model_input_fn", "compile"],
+    )
+
+  def test_configure_worker_actor_forwards_non_fused_sampler_agreement_flags(
+      self,
+  ):
+    mock_algo = mock.MagicMock()
+    mock_algo.algo_config.use_rollout_logps = True
+    mock_algo.algo_config.sampler_is = "token"
+    mock_algo.algo_config.sampler_rs = None
+    mock_algo.requires_reference_kl = True
+    mock_assembler = mock.MagicMock()
+    mock_assembler.pad_id = 0
+    mock_assembler.eos_id = 1
+
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=mock_algo,
+        assembler=mock_assembler,
+        can_fuse_agreement_in_loss=False,
+    )
+
+    mock_assembler.build_dummy_payload.assert_called_once_with(
+        with_old_per_token_logps=True,
+        with_ref_per_token_logps=True,
+        with_sampler_is_weights=True,
+        sampler_agreement_applied=True,
+        with_routed_experts=False,
+    )
+
+  def test_configure_worker_actor_builds_routed_experts_dummy_from_assembler(
+      self,
+  ):
+    mock_algo = mock.MagicMock()
+    mock_algo.algo_config.use_rollout_logps = True
+    mock_algo.algo_config.sampler_is = None
+    mock_algo.algo_config.sampler_rs = None
+    mock_algo.requires_reference_kl = False
+    assembler = batch_assembly.PaddedBatchAssembler(
+        batch_size=2,
+        max_prompt_length=4,
+        max_response_length=4,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=1,
+    )
+
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=mock_algo,
+        assembler=assembler,
+        return_routed_experts=True,
+    )
+
+    self.mock_actor.compile.assert_called_once()
+    compiled_payload = self.mock_actor.compile.call_args.args[0]
+    self.assertIsNotNone(compiled_payload.routed_experts)
+    self.assertEqual(compiled_payload.routed_experts.shape, (2, 8, 0, 0))
+    self.assertEqual(compiled_payload.routed_experts.dtype, np.int16)
+
+  def test_configure_worker_actor_precompile_false_skips_compile(self):
+    mock_algo = mock.MagicMock()
+    mock_algo.algo_config.use_rollout_logps = True
+    mock_algo.requires_reference_kl = False
+    mock_algo.has_critic = False
+    mock_assembler = mock.MagicMock()
+    mock_assembler.pad_id = 0
+    mock_assembler.eos_id = 1
+
+    self.engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=mock_algo,
+        assembler=mock_assembler,
+        precompile=False,
+    )
+
+    self.mock_actor.with_loss_fn.assert_called_once()
+    self.mock_actor.with_gen_model_input_fn.assert_called_once()
+    mock_assembler.build_dummy_payload.assert_not_called()
+    self.mock_actor.compile.assert_not_called()
 
   def test_preformed_rollout_requests_inherit_generation_args(self):
     async def _run():
@@ -1623,7 +1727,7 @@ class DistributedRLEngineTest(absltest.TestCase):
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,
         algo=mock_algo,
-        assembler=mock.MagicMock(spec=[]),
+        assembler=mock.MagicMock(spec=["build_dummy_payload"]),
         pad_id=42,
         eos_id=43,
     )
@@ -1731,12 +1835,14 @@ class DistributedRLEngineTest(absltest.TestCase):
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,
         algo=mock_algo,
-        assembler=mock.MagicMock(spec=[]),
+        assembler=mock.MagicMock(spec=["build_dummy_payload"]),
     )
     mock_algo.build_gen_model_input_fn.assert_called_with(pad_id=0, eos_id=0)
 
     # 2. eos_id defaults to pad_id when only pad_id is set on assembler
-    mock_assembler_pad_only = mock.MagicMock(spec=["pad_id"])
+    mock_assembler_pad_only = mock.MagicMock(
+        spec=["pad_id", "build_dummy_payload"]
+    )
     mock_assembler_pad_only.pad_id = 7
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,

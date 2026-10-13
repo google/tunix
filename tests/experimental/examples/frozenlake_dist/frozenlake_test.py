@@ -230,6 +230,12 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertEqual(args.sampler_is_threshold, 2.0)
     self.assertEqual(args.grid_size_range, (2, 9))
     self.assertEqual(args.wandb_project, "tunix-frozenlake")
+    self.assertTrue(args.trainer_precompile)
+
+    args_no_precompile = run_frozenlake_dist._parse_args(
+        ["--trainer_precompile=false"]
+    )
+    self.assertFalse(args_no_precompile.trainer_precompile)
 
     algo = run_frozenlake_dist._build_algo(args)
     self.assertEqual(algo.algo_config.sampler_is, "token")

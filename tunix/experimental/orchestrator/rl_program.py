@@ -285,6 +285,7 @@ class StandardRLProgram(RLProgram):
       batch_size: int | None = None,
       max_staleness: int = 0,
       sync_weights: bool = True,
+      precompile_trainer: bool = True,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       trajectory_log_dir: str | None = None,
       trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
@@ -357,6 +358,12 @@ class StandardRLProgram(RLProgram):
           f"batch_size={self.full_batch_size}, "
           f"mini_batch_size={self.mini_batch_size}."
       )
+    self.can_fuse_agreement_in_loss = (
+        algo_config is not None
+        and getattr(algo_config, "policy_loss_fn", "grpo") == "grpo"
+        and getattr(algo_config, "num_iterations", 1) == 1
+        and self.mini_batch_size >= self.full_batch_size
+    )
     self.batch_config = batch_config or batch_assembly.BatchConfig()
     if self.batch_config.max_response_length is None:
       self.batch_config = dataclasses.replace(
@@ -376,6 +383,7 @@ class StandardRLProgram(RLProgram):
       )
     self.max_staleness = max_staleness
     self.sync_weights = sync_weights
+    self.precompile_trainer = precompile_trainer
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     if trajectory_log_dir is None and metrics_logging_options is not None:
       log_dir = getattr(metrics_logging_options, "log_dir", "")
@@ -1399,18 +1407,12 @@ class StandardRLProgram(RLProgram):
               )
               batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
             algo_config = getattr(self.algo, "algo_config", None)
-            can_fuse_agreement_in_loss = (
-                algo_config is not None
-                and getattr(algo_config, "policy_loss_fn", "grpo") == "grpo"
-                and getattr(algo_config, "num_iterations", 1) == 1
-                and self.mini_batch_size >= self.full_batch_size
-            )
             if (
                 isinstance(batch, datatypes.RLTrainerPayload)
                 and batch.old_per_token_logps is not None
                 and algo_config is not None
                 and algo_config.use_rollout_logps
-                and not can_fuse_agreement_in_loss
+                and not self.can_fuse_agreement_in_loss
             ):
               await _await_pending_train()
               batch = await self._apply_sampler_trainer_agreement(
@@ -1592,6 +1594,11 @@ class StandardRLProgram(RLProgram):
         role=datatypes.Role.ACTOR,
         algo=self.algo,
         assembler=self.assembler,
+        can_fuse_agreement_in_loss=self.can_fuse_agreement_in_loss,
+        precompile=self.precompile_trainer,
+        return_routed_experts=bool(
+            self.generation_args.return_routed_experts
+        ),
     )
 
     if self.sync_weights:

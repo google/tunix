@@ -1203,8 +1203,56 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return self._record_update(grad_norm)
 
   @override
-  def compile(self, dummy_data: Any) -> None:
-    pass
+  def compile(
+      self, dummy_data: datatypes.TrainerPayload | None = None
+  ) -> None:
+    """Pre-compiles jitted trainer step executables ahead of time."""
+    if dummy_data is None:
+      return
+
+    def _resolve_dummy_routed_experts(data: Any) -> Any:
+      if (
+          not isinstance(data, datatypes.RLTrainerPayload)
+          or data.routed_experts is None
+          or np.asarray(data.routed_experts).size != 0
+      ):
+        return data
+      assert hasattr(self.model, "config")
+      cfg = self.model.config
+      prompt_shape = np.asarray(data.prompt_ids).shape
+      completion_shape = np.asarray(data.completion_ids).shape
+      batch_size = int(completion_shape[0])
+      seq_len = int(prompt_shape[1]) + int(completion_shape[1])
+      return dataclasses.replace(
+          data,
+          routed_experts=np.zeros(
+              (batch_size, seq_len, cfg.num_layers, cfg.num_experts_per_tok),
+              dtype=np.int16,
+          ),
+      )
+
+    self._ensure_persistent_grad_accumulator()
+    fwd_bwd_step, update_step, eval_step = (
+        self.jit_fwd_bwd_update_and_eval_step()
+    )
+    inputs = self._prepare_payload(_resolve_dummy_routed_experts(dummy_data))
+    # maybe_cache_and_partial wraps nnx.cached_partial(jitted, ...) in
+    # functools.partial so the jitted fn stays reachable via .func;
+    # .func.__wrapped__ is the nnx.jit whose cache serves the real steps.
+    update_step.func.__wrapped__.lower(
+        self.model,
+        self.optimizer,
+        self.grad_accumulator,
+    ).compile()
+    fwd_bwd_step.func.__wrapped__.lower(
+        self.model,
+        grad_accumulator=self.grad_accumulator,
+        inputs=inputs,
+    ).compile()
+    eval_step.func.__wrapped__.lower(
+        self.model,
+        inputs,
+    ).compile()
 
   @override
   def eval_step(

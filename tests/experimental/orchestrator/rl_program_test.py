@@ -235,6 +235,7 @@ class RLProgramTest(absltest.TestCase):
     self.mock_algo.max_packed_len = 16
     self.mock_algo.max_response_length = 1024
     self.mock_algo.requires_reference_kl = False
+    self.mock_algo.has_critic = False
     self.mock_algo.algo_config = types.SimpleNamespace(
         temperature=None,
         use_rollout_logps=True,
@@ -3856,9 +3857,40 @@ class RLProgramTest(absltest.TestCase):
           role=datatypes.Role.ACTOR,
           algo=self.mock_algo,
           assembler=mock_assembler,
+          can_fuse_agreement_in_loss=True,
+          precompile=True,
+          return_routed_experts=False,
       )
 
+      non_fused_program = self._create_program(
+          dataset=["prompt_data_0", "prompt_data_1"],
+          max_steps=1,
+          batch_size=2,
+          assembler=mock_assembler,
+      )
+      self.assertFalse(non_fused_program.can_fuse_agreement_in_loss)
+
     asyncio.run(_run())
+
+  def test_precompile_trainer_forwarded_to_configure_worker(self):
+    for precompile_trainer in (True, False):
+      with self.subTest(precompile_trainer=precompile_trainer):
+        self.mock_engine.configure_worker.reset_mock()
+        program = self._create_program(
+            dataset=[],
+            max_steps=0,
+            precompile_trainer=precompile_trainer,
+            sync_weights=False,
+        )
+        asyncio.run(program.run_async(self.mock_engine))
+        self.mock_engine.configure_worker.assert_called_once_with(
+            role=datatypes.Role.ACTOR,
+            algo=self.mock_algo,
+            assembler=program.assembler,
+            can_fuse_agreement_in_loss=program.can_fuse_agreement_in_loss,
+            precompile=precompile_trainer,
+            return_routed_experts=False,
+        )
 
   def test_run_async_configures_worker_before_prepare_rollout_policy(self):
     async def _run():
@@ -5454,6 +5486,7 @@ class StandardRLProgramAsyncDatasetTest(absltest.TestCase):
     self.mock_algo.max_packed_len = 16
     self.mock_algo.max_response_length = 16
     self.mock_algo.requires_reference_kl = False
+    self.mock_algo.has_critic = False
     self.mock_algo.use_rollout_logps = True
     self.mock_algo.algo_config = types.SimpleNamespace(
         temperature=None,
@@ -5657,6 +5690,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     self.mock_algo.max_packed_len = 16
     self.mock_algo.max_response_length = 16
     self.mock_algo.requires_reference_kl = False
+    self.mock_algo.has_critic = False
     self.mock_algo.algo_config = mock.MagicMock(
         temperature=None,
         use_rollout_logps=False,

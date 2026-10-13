@@ -540,7 +540,23 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       assembler: batch_assembly.BatchAssembler[Any],
       **kwargs: Any,
   ) -> None:
-    """Configures worker(s) under the specified role with algorithm or runtime settings."""
+    """Configures worker(s) under the specified role with algorithm or runtime settings.
+
+    For trainer roles this registers the loss and model-input functions, then
+    precompiles the trainer step executables against a dummy microbatch built
+    by `assembler.build_dummy_payload(...)`, so the first real train step does
+    not stall on XLA compilation.
+
+    Args:
+      role: Target worker role to configure (defaults to `Role.ACTOR`).
+      algo: Algorithm adapter providing the loss and model-input functions.
+      assembler: Batch assembler used to build the dummy microbatch for
+        ahead-of-time compilation.
+      **kwargs: Role-specific configuration options (for trainer roles:
+        `can_fuse_agreement_in_loss: bool = True`, `precompile: bool = True`,
+        `return_routed_experts: bool = False`, and optional `pad_id` / `eos_id`
+        overrides).
+    """
     role_name = role.value if isinstance(role, datatypes.Role) else str(role)
     if algo is None:
       raise ValueError(
@@ -561,15 +577,47 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         )
         pad_id = getattr(assembler, "pad_id", kwargs.get("pad_id", 0))
         eos_id = getattr(assembler, "eos_id", kwargs.get("eos_id", pad_id))
+        can_fuse_agreement_in_loss = bool(
+            kwargs.get("can_fuse_agreement_in_loss", True)
+        )
+        precompile = bool(kwargs.get("precompile", True))
+        return_routed_experts = bool(kwargs.get("return_routed_experts", False))
         gen_fn = algo.build_gen_model_input_fn(
             pad_id=pad_id,
             eos_id=eos_id,
         )
+        use_rollout_logps = algo.algo_config.use_rollout_logps
+        sampler_agreement_applied = (
+            use_rollout_logps and not can_fuse_agreement_in_loss
+        )
+        with_sampler_is_weights = sampler_agreement_applied and (
+            algo.algo_config.sampler_is is not None
+            or algo.algo_config.sampler_rs is not None
+        )
 
         def _configure():
           assert worker is not None
+          # Both setters clear the trainer's JIT cache, so the ahead-of-time
+          # compile must run strictly after them.
           worker.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
           worker.submit("with_gen_model_input_fn", gen_fn)
+          if not precompile:
+            return
+          dummy_payload = assembler.build_dummy_payload(
+              with_old_per_token_logps=use_rollout_logps,
+              with_ref_per_token_logps=algo.requires_reference_kl,
+              with_sampler_is_weights=with_sampler_is_weights,
+              sampler_agreement_applied=sampler_agreement_applied,
+              with_routed_experts=return_routed_experts,
+          )
+          # TODO(tunix-dev): Move to the worker lifecycle (e.g., the
+          # `initialize` step) so pre-compilation runs during the standard
+          # lifecycle `compile` phase instead of re-compiling here.
+          logging.info(
+              "Precompiling trainer step executables on %s worker...",
+              role_name,
+          )
+          worker.submit("compile", dummy_payload)
 
         try:
           loop = asyncio.get_running_loop()
