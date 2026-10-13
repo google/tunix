@@ -401,6 +401,7 @@ class StandardRLProgram(RLProgram):
       pipeline_train_microbatches: bool = False,
       rollout_priority_scheduling: bool = False,
       initial_dispatch_stagger_s: float = 0.0,
+      initial_dispatch_first_stagger_s: float | None = None,
       trainer_warmup_payload: datatypes.RLTrainerPayload | None = None,
   ):
     super().__init__()
@@ -409,6 +410,11 @@ class StandardRLProgram(RLProgram):
       raise ValueError("max_staleness must be non-negative.")
     if initial_dispatch_stagger_s < 0:
       raise ValueError("initial_dispatch_stagger_s must be non-negative.")
+    if (
+        initial_dispatch_first_stagger_s is not None
+        and initial_dispatch_first_stagger_s < 0
+    ):
+      raise ValueError("initial_dispatch_first_stagger_s must be non-negative.")
     if checkpoint_optimizer_interval_steps < 0:
       raise ValueError(
           "checkpoint_optimizer_interval_steps must be non-negative."
@@ -545,10 +551,17 @@ class StandardRLProgram(RLProgram):
     # under `max_staleness > 0`. Off, every request gets priority 0 and the
     # rollouts serve requests in arrival order.
     self.rollout_priority_scheduling = rollout_priority_scheduling
-    # Spread the start-up prompt batches out in time: batch k is held until
-    # `k * initial_dispatch_stagger_s` after batch 0 first dispatches. Applies
-    # only before the trainer consumes its first batch; 0 disables it.
+    # Spread the start-up prompt batches out in time: batch 1 is held until
+    # `initial_dispatch_first_stagger_s` (defaults to
+    # `initial_dispatch_stagger_s`) after batch 0 first dispatches, and each
+    # later batch `initial_dispatch_stagger_s` after the one before it. Applies
+    # only before the trainer consumes its first batch; both 0 disables it.
     self.initial_dispatch_stagger_s = float(initial_dispatch_stagger_s)
+    self.initial_dispatch_first_stagger_s = (
+        self.initial_dispatch_stagger_s
+        if initial_dispatch_first_stagger_s is None
+        else float(initial_dispatch_first_stagger_s)
+    )
     # One synthetic micro-batch to compile the trainer against before
     # `on_train_start`, after `configure_worker` (which discards any compile
     # done at bring-up). None keeps the lazy compile on the first micro-batch.
@@ -693,18 +706,39 @@ class StandardRLProgram(RLProgram):
       await self._window_release.wait()
       self._window_release.clear()
 
+  def _initial_dispatch_offset(self, batch_idx: int) -> float:
+    """Seconds after batch 0's first dispatch at which start-up batch is due.
+
+    Batch 0 is due at once, batch 1 after `initial_dispatch_first_stagger_s`,
+    and batch k > 1 after `first + (k - 1) * initial_dispatch_stagger_s`.
+
+    Args:
+      batch_idx: The prompt batch index.
+
+    Returns:
+      The offset in seconds.
+    """
+    if batch_idx <= 0:
+      return 0.0
+    return (
+        self.initial_dispatch_first_stagger_s
+        + (batch_idx - 1) * self.initial_dispatch_stagger_s
+    )
+
   async def _hold_initial_stagger(self, batch_idx: int) -> None:
     """Holds start-up batch `batch_idx` until its staggered dispatch time.
 
-    With `initial_dispatch_stagger_s > 0`, batch k (k > 0) is held until
-    `k * initial_dispatch_stagger_s` after batch 0 first dispatched. No-op once
-    the trainer has consumed a batch (`_next_batch > 0`).
+    Batch k (k > 0) is held until `_initial_dispatch_offset(k)` after batch 0
+    first dispatched. No-op when both staggers are 0, and once the trainer has
+    consumed a batch (`_next_batch > 0`).
 
     Args:
       batch_idx: The prompt batch the dispatcher is about to emit into.
     """
-    stagger = self.initial_dispatch_stagger_s
-    if stagger <= 0 or self._next_batch > 0:
+    if (
+        self.initial_dispatch_stagger_s <= 0
+        and self.initial_dispatch_first_stagger_s <= 0
+    ) or self._next_batch > 0:
       return
     if batch_idx == 0:
       if self._initial_dispatch_t0 is None:
@@ -713,7 +747,7 @@ class StandardRLProgram(RLProgram):
     t0 = self._initial_dispatch_t0
     if t0 is None:
       return
-    due = t0 + batch_idx * stagger
+    due = t0 + self._initial_dispatch_offset(batch_idx)
     now = time.monotonic()
     if now >= due:
       return
@@ -721,10 +755,12 @@ class StandardRLProgram(RLProgram):
       self._initial_stagger_logged.add(batch_idx)
       logging.info(
           "[pipeline] STAGGER batch_idx=%d held %.1f s"
-          " (initial_dispatch_stagger_s=%.1f)",
+          " (initial_dispatch_first_stagger_s=%.1f"
+          " initial_dispatch_stagger_s=%.1f)",
           batch_idx,
           due - now,
-          stagger,
+          self.initial_dispatch_first_stagger_s,
+          self.initial_dispatch_stagger_s,
       )
     await asyncio.sleep(due - now)
     if self._sync_error is not None:

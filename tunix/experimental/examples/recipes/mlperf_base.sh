@@ -326,6 +326,10 @@ export ROLLOUT_PRIORITY_SCHEDULING=${ROLLOUT_PRIORITY_SCHEDULING:-false}
 # Seconds between the start-up prompt batches (batch k held until k * this
 # after batch 0 dispatches). Default 0 = no stagger.
 export INITIAL_DISPATCH_STAGGER_S=${INITIAL_DISPATCH_STAGGER_S:-0}
+# Seconds batch 1 is held after batch 0 dispatches when it should differ from
+# INITIAL_DISPATCH_STAGGER_S (then batch k > 1 follows at FIRST + (k - 1) *
+# INITIAL_DISPATCH_STAGGER_S). Empty (default) or 0 = INITIAL_DISPATCH_STAGGER_S.
+export INITIAL_DISPATCH_FIRST_STAGGER_S=${INITIAL_DISPATCH_FIRST_STAGGER_S:-}
 # `true` compiles the trainer at bring-up against one synthetic micro-batch
 # (before run_start) instead of on the first real micro-batch. Default false.
 export TRAINER_WARMUP_COMPILE=${TRAINER_WARMUP_COMPILE:-false}
