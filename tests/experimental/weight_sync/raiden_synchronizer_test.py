@@ -48,6 +48,14 @@ class _FakeWeightSynchronizer:
   def get_metrics(self):
     return {"total_tiled_bytes": 0}
 
+  def get_local_endpoints(self):
+    # Like the native layer: one endpoint serves every shard, named by the
+    # explicit global indices when the caller passed them.
+    shards = self.kwargs.get("global_shard_indices") or range(self.num_shards)
+    return [
+        {"endpoint": f"127.0.0.1:{self.local_port}", "shards": list(shards)}
+    ]
+
 
 class _FakeWsLib:
 
@@ -605,6 +613,65 @@ class RaidenSynchronizerTest(absltest.TestCase):
         RuntimeError, "Not all synchronizer arrays were matched"
     ):
       sync.apply_to_runner(runner)
+
+  def test_explicit_global_shard_indices_and_multi_numa_endpoints(self):
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
+    sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("data")
+    )
+    arr = jax.device_put(jnp.ones((2, 4), jnp.float32), sharding)
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout", {"w": arr})
+    ws = self.ws_lib.instances[0]
+    self.assertEqual(ws.kwargs["global_shard_indices"], [0])
+    md = sync.work_unit_metadata()
+    self.assertEqual(md.variables[0].global_shard_indices, (0,))
+
+    # Simulate Host 1 with 4 local shards (global indices [4, 5, 6, 7])
+    # and 2 NUMA NICs.
+    sync._global_shard_indices = [4, 5, 6, 7]
+    ws.num_shards = 4
+    ws.get_local_endpoints = lambda: [
+        {"endpoint": "10.0.1.1:40001", "shards": [4, 5]},
+        {"endpoint": "10.0.1.2:40002", "shards": [6, 7]},
+    ]
+    md_host1 = sync.work_unit_metadata()
+    self.assertEqual(
+        md_host1.shards,
+        (
+            "10.0.1.1:40001",
+            "10.0.1.1:40001",
+            "10.0.1.2:40002",
+            "10.0.1.2:40002",
+        ),
+    )
+
+  def test_routable_address_replaces_wildcard_and_loopback_hosts(self):
+    for endpoint, expected in (
+        (":40001", "10.0.0.9:40001"),
+        ("0.0.0.0:40001", "10.0.0.9:40001"),
+        ("127.0.0.1:40001", "10.0.0.9:40001"),
+        ("10.0.1.1:40001", "10.0.1.1:40001"),
+        ("[::1]:40001", "[::1]:40001"),
+        ("", ""),
+    ):
+      with self.subTest(endpoint=endpoint):
+        self.assertEqual(
+            raiden_synchronizer._routable_address(endpoint, "10.0.0.9"),
+            expected,
+        )
+
+  def test_shards_no_endpoint_reports_use_the_default_port(self):
+    sync = raiden_synchronizer.RaidenSynchronizer(
+        "rollout", self._state(), bind_ip="1.2.3.4"
+    )
+    sync._global_shard_indices = [3, 7]
+    ws = self.ws_lib.instances[0]
+    ws.get_local_endpoints = lambda: [
+        {"endpoint": "10.0.1.1:40001", "shards": [7]}
+    ]
+    self.assertEqual(
+        sync.work_unit_metadata().shards, ("1.2.3.4:12345", "10.0.1.1:40001")
+    )
 
 
 if __name__ == "__main__":

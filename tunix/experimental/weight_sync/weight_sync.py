@@ -92,6 +92,10 @@ class TensorMetadata:
       e.g. `((), ("tp",), ("attention_dp", "tp"))`. The string form makes every
       consumer re-parse it and reserves the comma. Needs the Raiden handler and
       the MaxText adapter migrated together.
+    global_shard_indices: Global shard index of each shard this variable is
+      published from, in shard order. Lets a transport pair source and
+      destination shards explicitly instead of inferring them from mesh
+      geometry, which expert parallelism breaks. Empty means unreported.
   """
 
   name: str
@@ -101,6 +105,7 @@ class TensorMetadata:
   item_size: int
   layer_idx: int = 0
   sharding_spec: tuple[str, ...] = ()
+  global_shard_indices: tuple[int, ...] = ()
 
   def __post_init__(self) -> None:
     rank = len(self.shape)
@@ -239,6 +244,7 @@ class WorkUnitMetadata:
                 item_size=int(v["item_size"]),
                 layer_idx=int(v.get("layer_idx", 0)),
                 sharding_spec=tuple(v.get("sharding_spec", ())),
+                global_shard_indices=tuple(v.get("global_shard_indices", ())),
             )
         )
       elif hasattr(v, "name"):
@@ -251,6 +257,9 @@ class WorkUnitMetadata:
                 item_size=int(v.item_size),
                 layer_idx=int(getattr(v, "layer_idx", 0)),
                 sharding_spec=tuple(getattr(v, "sharding_spec", ())),
+                global_shard_indices=tuple(
+                    getattr(v, "global_shard_indices", ())
+                ),
             )
         )
 
