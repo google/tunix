@@ -25,7 +25,7 @@ import copy
 import inspect
 import json
 import time
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from absl import logging
 import numpy as np
@@ -83,7 +83,10 @@ class TrajectoryCollectEngine:
       ] = None,
       on_final_reward_callback: Optional[Callable[[Any], None]] = None,
       policy_version: Optional[int] = None,
-      trajectory_store: Optional[store_lib.TrajectoryWriter] = None,
+      trajectory_store: Optional[
+          store_lib.TrajectoryWriter
+          | Sequence[Optional[store_lib.TrajectoryWriter]]
+      ] = None,
       metadata: Optional[trajectory_lib.TrajectoryMetadata] = None,
   ):
     """Initialize the trajectory collection engine.
@@ -122,8 +125,9 @@ class TrajectoryCollectEngine:
           computed and added to last step.
         policy_version: Optional policy version integer to pass down for
           trajectory and performance tracing.
-        trajectory_store: Optional TrajectoryWriter to write trajectory steps
-          to.
+        trajectory_store: Optional TrajectoryWriter or sequence of
+          TrajectoryWriters (e.g. [file_store, sql_store], where None entries
+          are skipped) to write trajectory steps to.
         metadata: Optional TrajectoryMetadata for the current episode.
     """
     self.agent = agent
@@ -134,7 +138,12 @@ class TrajectoryCollectEngine:
     self.on_rollout_output_callback = on_rollout_output_callback
     self.on_final_reward_callback = on_final_reward_callback
     self.policy_version = policy_version
-    self.trajectory_store = trajectory_store
+    stores = (
+        [s for s in trajectory_store if s is not None]
+        if isinstance(trajectory_store, (list, tuple))
+        else ([trajectory_store] if trajectory_store is not None else [])
+    )
+    self.trajectory_store = stores or None
     self.metadata = metadata
     self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
@@ -323,7 +332,8 @@ class TrajectoryCollectEngine:
         task = self.agent.trajectory.task or getattr(self.env, "task", None)
         task_step = converter_lib.create_task_step(task)
         if task_step is not None:
-          self.trajectory_store.add_step(task_step, self.metadata)
+          for store in self.trajectory_store:
+            store.add_step(task_step, self.metadata)
 
       while True:
         if len(self.agent.trajectory.steps) >= self.max_steps:
@@ -373,7 +383,8 @@ class TrajectoryCollectEngine:
                 policy_version=self.policy_version,
             )
             if agent_step is not None:
-              self.trajectory_store.add_step(agent_step, self.metadata)
+              for store in self.trajectory_store:
+                store.add_step(agent_step, self.metadata)
     except asyncio.TimeoutError:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
       raise
@@ -383,7 +394,8 @@ class TrajectoryCollectEngine:
     finally:
       if self.trajectory_store is not None and self.metadata is not None:
         self.sync_trajectory_metadata(policy_version=self.policy_version)
-        self.trajectory_store.update_metadata(self.metadata)
+        for store in self.trajectory_store:
+          store.update_metadata(self.metadata)
 
     self.model_time["total_latency"] = float(
         sum(self.model_time["step_latency"])
@@ -1183,7 +1195,8 @@ class TrajectoryCollectEngine:
       )
       if agent_step is not None:
         self.sync_trajectory_metadata(policy_version=self.policy_version)
-        self.trajectory_store.add_step(agent_step, self.metadata)
+        for store in self.trajectory_store:
+          store.add_step(agent_step, self.metadata)
 
     logging.debug(
         "%s Agent Action:\n%s",
@@ -1299,7 +1312,8 @@ class TrajectoryCollectEngine:
       )
       if env_step is not None:
         self.sync_trajectory_metadata()
-        self.trajectory_store.add_step(env_step, self.metadata)
+        for store in self.trajectory_store:
+          store.add_step(env_step, self.metadata)
 
     if env_utils.is_debug_inference_logs_enabled():
       turn_idx = max(0, len(self.model_time['step_latency']) - 1)
@@ -1384,7 +1398,8 @@ class TrajectoryCollectEngine:
       )
       if env_step is not None:
         self.sync_trajectory_metadata()
-        self.trajectory_store.add_step(env_step, self.metadata)
+        for store in self.trajectory_store:
+          store.add_step(env_step, self.metadata)
     logging.debug(
         "%s Final reward computed: %s", self._debug_prefix, final_reward
     )

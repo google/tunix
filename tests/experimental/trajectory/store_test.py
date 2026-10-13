@@ -141,6 +141,26 @@ class FromConfigTest(absltest.TestCase):
     finally:
       store_lib.TrajectoryStore._REGISTRY.pop("custom_test_backend", None)
 
+  def test_sequence_config_builds_list_and_skips_none_entries(self):
+    stores = store_lib.TrajectoryStore.from_config([
+        self._file_config(),
+        None,
+        {"enabled": True, "backend": "memory"},
+    ])
+    self.assertIsInstance(stores, list)
+    self.assertLen(stores, 2)
+    self.assertIsInstance(stores[0], file_store.FileTrajectoryStore)
+    self.assertIsInstance(stores[1], in_memory_store.InMemoryTrajectoryStore)
+    stores[0].close()
+
+  def test_sequence_config_with_all_disabled_returns_none(self):
+    self.assertIsNone(
+        store_lib.TrajectoryStore.from_config([
+            None,
+            self._file_config(enabled=False),
+        ])
+    )
+
 
 class ToConfigTest(absltest.TestCase):
 

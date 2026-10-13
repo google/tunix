@@ -134,7 +134,9 @@ class TrajectoryCollectorEngine:
       tokenizer: Any,
       chat_parser: Any,
       eos_ids: Collection[int] | None = None,
-      trajectory_store: Optional[store.TrajectoryWriter] = None,
+      trajectory_store: Optional[
+          store.TrajectoryWriter | Sequence[Optional[store.TrajectoryWriter]]
+      ] = None,
       partial_rollout: bool = False,
   ):
     if (
@@ -155,7 +157,12 @@ class TrajectoryCollectorEngine:
     self.agent = agent
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
-    self.trajectory_store = trajectory_store
+    stores = (
+        [s for s in trajectory_store if s is not None]
+        if isinstance(trajectory_store, (list, tuple))
+        else ([trajectory_store] if trajectory_store is not None else [])
+    )
+    self.trajectory_store = stores or None
     self.partial_rollout: bool = bool(partial_rollout)
     self.is_paused: bool = False
     self.is_cancelled: bool = False
@@ -550,7 +557,8 @@ class TrajectoryCollectorEngine:
             status=agent_types.TrajectoryStatus.FAILED,
         )
       if self.trajectory_store is not None and self.metadata is not None:
-        self.trajectory_store.update_metadata(self.metadata)
+        for s in self.trajectory_store:
+          s.update_metadata(self.metadata)
         self.trajectory_store = None
 
   def get_accumulated_token_ids(self) -> List[int]:

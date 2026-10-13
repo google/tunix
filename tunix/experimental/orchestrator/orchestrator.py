@@ -56,7 +56,9 @@ class ClusterOrchestrator:
       lifecycle_driver: lifecycle.LifecycleDriver | None = None,
       monitor: health_monitor.HealthMonitor | None = None,
       weight_sync_mode: str | None = None,
-      trajectory_store_config: Mapping[str, Any] | None = None,
+      trajectory_store_config: (
+          Mapping[str, Any] | Sequence[Mapping[str, Any] | None] | None
+      ) = None,
       jax_cache_config: Mapping[str, Any] | None = None,
       run_id: str | None = None,
       disable_weight_sync_timeouts: bool | None = None,
@@ -123,14 +125,23 @@ class ClusterOrchestrator:
         "save_jax_cache",
         os.getenv("SAVE_JAX_CACHE", "true").strip().lower() in ("1", "true", "yes"),
     )
-    cfg_run_id = (
-        trajectory_store_config.get("run_id")
-        if trajectory_store_config is not None
-        else None
+    is_single_store_config = isinstance(trajectory_store_config, Mapping)
+    store_configs = (
+        [trajectory_store_config]
+        if is_single_store_config
+        else list(trajectory_store_config or [])
+    )
+    configured_run_id = next(
+        (
+            store_config.get("run_id")
+            for store_config in store_configs
+            if store_config and store_config.get("run_id")
+        ),
+        None,
     )
     self.run_id: str = (
         run_id
-        or (str(cfg_run_id).strip() if cfg_run_id else "")
+        or (str(configured_run_id).strip() if configured_run_id else "")
         or f"run_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     )
     # The sole construction site for this process's Trajectory Store: one
@@ -142,25 +153,38 @@ class ClusterOrchestrator:
     # `trajectory_store` argument.
     # TODO(sizhi): Wire active trajectory reads/writes between
     # orchestrator/program and rollout workers in follow-up CLs.
-    self.trajectory_store_config: dict[str, Any] | None = None
-    if trajectory_store_config is not None:
-      self.trajectory_store_config = dict(trajectory_store_config)
+    for idx, store_config in enumerate(store_configs):
       if (
-          self.trajectory_store_config.get("enabled", False)
-          and self.trajectory_store_config.get("backend") in ("file", "sql")
-          and not self.trajectory_store_config.get("run_id")
+          store_config
+          and store_config.get("enabled", False)
+          and store_config.get("backend") in ("file", "sql")
       ):
-        self.trajectory_store_config["run_id"] = self.run_id
+        store_configs[idx] = {
+            **store_config,
+            "run_id": store_config.get("run_id") or self.run_id,
+        }
     self.trajectory_store = trajectory_store_lib.TrajectoryStore.from_config(
-        self.trajectory_store_config
+        store_configs[0] if is_single_store_config else (store_configs or None)
     )
-    if self.trajectory_store is not None:
+    self.trajectory_store_config: (
+        dict[str, Any] | list[dict[str, Any]] | None
+    ) = None
+    if isinstance(self.trajectory_store, list):
+      self.trajectory_store_config = [
+          store.to_config() for store in self.trajectory_store
+      ]
+      stores = self.trajectory_store
+    elif self.trajectory_store is not None:
       self.trajectory_store_config = self.trajectory_store.to_config()
-      # Logged so a config mismatch between this process and its workers is one
-      # grep away.
+      stores = [self.trajectory_store]
+    else:
+      stores = []
+    # Logged so a config mismatch between this process and its workers is one
+    # grep away.
+    for store in stores:
       logging.info(
           "[trajectory-store] orchestrator built %s",
-          self.trajectory_store.to_redacted_config(),
+          store.to_redacted_config(),
       )
 
   @property
@@ -641,7 +665,11 @@ class ClusterOrchestrator:
           self._bring_up_executor.shutdown, wait=False, cancel_futures=True
       )
       if self.trajectory_store is not None:
-        stack.callback(self.trajectory_store.close)
+        if isinstance(self.trajectory_store, (list, tuple)):
+          for store in self.trajectory_store:
+            stack.callback(store.close)
+        else:
+          stack.callback(self.trajectory_store.close)
       stack.callback(self.lifecycle_driver.shutdown)
       stack.callback(self._shutdown_remote_workers)
       stack.callback(self.monitor.close)

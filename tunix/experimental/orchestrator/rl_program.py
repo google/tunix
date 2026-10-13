@@ -386,7 +386,11 @@ class StandardRLProgram(RLProgram):
       partial_rollout: bool = False,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       trajectory_log_dir: str | None = None,
-      trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
+      trajectory_store: (
+          trajectory_store_lib.TrajectoryStore
+          | Sequence[trajectory_store_lib.TrajectoryStore | None]
+          | None
+      ) = None,
       metrics_prefix: str = "",
       mode: Mode | str = Mode.TRAIN,
       group_order: (
@@ -637,7 +641,13 @@ class StandardRLProgram(RLProgram):
     )
 
   @property
-  def trajectory_store(self) -> trajectory_store_lib.TrajectoryStore | None:
+  def trajectory_store(
+      self,
+  ) -> (
+      trajectory_store_lib.TrajectoryStore
+      | Sequence[trajectory_store_lib.TrajectoryStore | None]
+      | None
+  ):
     return self._trajectory_store
 
   def close(self) -> None:

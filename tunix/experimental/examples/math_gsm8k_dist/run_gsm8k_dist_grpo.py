@@ -366,23 +366,23 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 def _build_trajectory_store_config(
     args: argparse.Namespace,
-) -> dict[str, Any] | None:
-  """Builds the TrajectoryStore configuration dict from orchestrator CLI flags."""
-  db_url = (args.trajectory_store_db_url or "").strip()
-  if db_url:
-    return {
-        "enabled": True,
-        "backend": "sql",
-        "db_url": db_url,
-    }
+) -> list[dict[str, Any] | None] | None:
+  """Builds the [file_store, sql_store] TrajectoryStore configuration list."""
   root_dir = (args.trajectory_store_root_dir or "").strip()
-  if root_dir:
-    return {
-        "enabled": True,
-        "backend": "file",
-        "root_dir": root_dir,
-    }
-  return None
+  db_url = (args.trajectory_store_db_url or "").strip()
+  file_cfg = (
+      {"enabled": True, "backend": "file", "root_dir": root_dir}
+      if root_dir
+      else None
+  )
+  sql_cfg = (
+      {"enabled": True, "backend": "sql", "db_url": db_url}
+      if db_url
+      else None
+  )
+  if file_cfg is None and sql_cfg is None:
+    return None
+  return [file_cfg, sql_cfg]
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:

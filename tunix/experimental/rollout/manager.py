@@ -82,7 +82,9 @@ class RolloutManager:
       tokenizer: Any = None,
       chat_parser: Any = None,
       drain_timeout_s: float | None = None,
-      trajectory_store: Optional[store.TrajectoryWriter] = None,
+      trajectory_store: Optional[
+          store.TrajectoryWriter | Sequence[Optional[store.TrajectoryWriter]]
+      ] = None,
   ):
     """Initializes the RolloutManager.
 
@@ -97,8 +99,9 @@ class RolloutManager:
       chat_parser: Chat parser for conversation templating.
       drain_timeout_s: How long pre_weight_sync waits for in-flight trajectories
         before pausing the stragglers, roughly one worst-case trajectory.
-      trajectory_store: Optional TrajectoryWriter for persisting rollout steps
-        and episode metadata.
+      trajectory_store: Optional TrajectoryWriter or sequence of
+        TrajectoryWriters (e.g. [file_store, sql_store], where None entries are
+        skipped) for persisting rollout steps and episode metadata.
     """
     self.config = config
     max_concurrency = 0 if max_concurrency is None else int(max_concurrency)

@@ -330,6 +330,34 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     self.assertIs(worker.manager.trajectory_store, worker.trajectory_store)
     worker.stop()
 
+  def test_list_of_trajectory_store_configs_builds_list_and_skips_none(
+      self,
+  ):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    file_cfg = {
+        "enabled": True,
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "dual_worker_run",
+    }
+    worker = _worker(
+        config=rollout_worker.RolloutConfig(
+            trajectory_store_config=[file_cfg, None]
+        )
+    )
+    self.assertIsInstance(worker.trajectory_store, list)
+    self.assertLen(worker.trajectory_store, 1)
+    self.assertIsInstance(
+        worker.trajectory_store[0], file_store.FileTrajectoryStore
+    )
+    self.assertIs(worker.manager.trajectory_store, worker.trajectory_store)
+    file_store_inst = worker.trajectory_store[0]
+    worker.stop()
+    with self.assertRaises(RuntimeError):
+      file_store_inst.add_step(
+          trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+      )
+
   def test_info_includes_max_concurrency(self):
     worker = rollout_worker.RolloutWorker(
         worker_id="w_conc",
