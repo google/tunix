@@ -378,6 +378,9 @@ class CodecTest(parameterized.TestCase):
     wide = ids.astype(np.int32)
     wide[0, 0, 0] = 65535  # int16 cast would wrap to -1.
     self.assertIsNone(held_routing.compact(wide))
+    wrapping = ids.astype(np.int32)
+    wrapping[0, 0, 0] = 65536 + 4  # A 16-bit cast would wrap it to expert 4.
+    self.assertIsNone(held_routing.compact(wrapping))
 
   def test_empty_routing(self):
     ids = np.zeros((0, 60, 10), dtype=np.int16)
