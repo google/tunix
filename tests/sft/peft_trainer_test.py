@@ -23,6 +23,7 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 import chex
+import flax
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -82,6 +83,11 @@ def dummy_datasets(batch_size: int, repeat: int = 1):
       )
       for x in dummy_input
   ] * repeat
+
+
+@flax.struct.dataclass(frozen=True)
+class _FlaggedTrainingInput(peft_trainer.TrainingInput):
+  is_update_step: np.ndarray | None = None
 
 
 global_counter = 0
@@ -897,6 +903,30 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertEqual(additional_metrics['empty'], 0)
     self.assertEqual(additional_metrics['fallback'], 2.0)
     self.assertEqual(additional_metrics['weighted'], 2.0)
+
+  def test_write_metrics_fetches_once_and_reduces_bf16_in_float32(self):
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model,
+        optax.sgd(1e-3),
+        peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=100),
+    )
+    # Summed in bf16, 256 + 1 rounds back to 256, so the bf16 mean is 64.0.
+    # The float32 mean is 259 / 4 = 64.75.
+    values = [jnp.array(x, dtype=jnp.bfloat16) for x in (256.0, 1.0, 1.0, 1.0)]
+    buffer = peft_trainer.MetricsBuffer(
+        step=0,
+        losses=[jnp.array(1.0)],
+        additional_metrics={'metric': (values, np.mean)},
+    )
+    with mock.patch.object(
+        peft_trainer.jax, 'device_get', wraps=jax.device_get
+    ) as device_get, mock.patch.object(trainer, '_log_metrics') as log_metrics:
+      trainer._write_metrics(buffer)
+
+    device_get.assert_called_once()
+    additional_metrics = log_metrics.call_args.kwargs['additional_metrics']
+    self.assertEqual(additional_metrics['metric'], 64.75)
 
   def test_loss_output_gradient_scaling(self):
     # _train_step accumulates grad(unreduced_sum) with the metric's denominator
@@ -2010,6 +2040,30 @@ class Depth1FastPathTest(parameterized.TestCase):
     ds = [_FlaggedInput(dummy_datasets(batch_size=4)[0])]
     with self.assertRaisesRegex(ValueError, 'is_update_step=False'):
       trainer.train(ds)
+
+  def test_is_update_step_is_read_from_unsharded_input(self):
+    """The update flag comes from the input as given, not the sharded copy."""
+    base = dummy_datasets(batch_size=4)[0]
+    ds = [
+        _FlaggedTrainingInput(
+            input_tokens=base.input_tokens,
+            input_mask=base.input_mask,
+            is_update_step=np.array([True]),
+        )
+    ]
+
+    def shard_input_flipping_flag(x, data_sharding_axis):
+      del data_sharding_axis
+      return x.replace(is_update_step=np.array([False]))
+
+    trainer = self._make_trainer(accum_steps=None, max_seq_token=64)
+    with mock.patch.object(
+        peft_trainer.sharding_utils,
+        'shard_input',
+        side_effect=shard_input_flipping_flag,
+    ):
+      trainer.train(ds)
+    self.assertEqual(trainer.train_steps, 1)
 
   def test_depth2_cadence(self):
     """Depth 2: skip step accumulates only; update step applies and resets."""
