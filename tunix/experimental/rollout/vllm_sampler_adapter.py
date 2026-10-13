@@ -207,7 +207,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       model_name: str = "",
       sampler_instance: Any = None,
       worker_index: int = 0,
-      parallelism: int = 4,
+      parallelism: int | None = None,
       weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
       free_kv_cache_during_weight_sync: bool | None = None,
       partial_rollout: bool | None = None,
@@ -474,6 +474,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     else:
       from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top
 
+      parallelism = raiden_synchronizer.resolve_parallelism(self._parallelism)
       auto_h2d = self._auto_h2d
       if auto_h2d is None and raiden_synchronizer.is_parallel_h2h_enabled():
         auto_h2d = False
@@ -481,20 +482,20 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         try:
           res = await sampler.bind_raiden_sync(
               worker_index=self.worker_index,
-              parallelism=self._parallelism,
+              parallelism=parallelism,
               job_name=self.raiden_job_name,
               auto_h2d=bool(auto_h2d),
           )
         except TypeError:
           res = await sampler.bind_raiden_sync(
               worker_index=self.worker_index,
-              parallelism=self._parallelism,
+              parallelism=parallelism,
               job_name=self.raiden_job_name,
           )
       else:
         res = await sampler.bind_raiden_sync(
             worker_index=self.worker_index,
-            parallelism=self._parallelism,
+            parallelism=parallelism,
             job_name=self.raiden_job_name,
         )
     self._weight_sync_bound = True

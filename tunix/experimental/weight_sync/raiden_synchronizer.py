@@ -554,7 +554,7 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
       *,
       worker_index: int = 0,
       auto_h2d: bool = False,
-      parallelism: int = 4,
+      parallelism: Optional[int] = None,
       bind_ip: Optional[str] = None,
       **kwargs: Any,
   ):
@@ -567,7 +567,7 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
     self.ip = bind_ip or local_ip()
     self._auto_h2d = auto_h2d
     self._is_proxy = is_proxy
-    self._parallelism = parallelism
+    self._parallelism = resolve_parallelism(parallelism)
     self._sync: Any = None
     self._ips: List[str] = []
     self._unique_listeners: List[str] = []
@@ -1200,6 +1200,11 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
 RaidenWeightSync = RaidenSynchronizer
 
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "y", "t", "on"})
+
+
+def resolve_parallelism(requested: Optional[int] = None) -> int:
+  """Worker transfer threads: RAIDEN_PARALLELISM if set, else `requested`."""
+  return int(os.environ.get("RAIDEN_PARALLELISM", requested or 4))
 
 
 def is_parallel_h2h_enabled() -> bool:
