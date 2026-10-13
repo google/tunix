@@ -20,6 +20,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
+import jax
 import jax.numpy as jnp
 
 from tunix.experimental.train import peft_trainer_v2
@@ -140,6 +141,81 @@ class WeightSyncStagingTest(absltest.TestCase):
   def test_release_without_prepare_is_a_no_op(self):
     fake = self._fake_trainer()
     self.assertTrue(peft_trainer_v2.PeftTrainer.release_weight_sync(fake))
+
+  def test_prepare_direct_target_state_casts_floating_and_preserves_non_floating(
+      self,
+  ):
+    class _CustomFloatVar(nnx.Variable):
+      pass
+
+    class _MixedModel(nnx.Module):
+
+      def __init__(self):
+        self.w = nnx.Param(jnp.ones((2, 2), dtype=jnp.float32))
+        self.lora = _CustomFloatVar(jnp.ones((2, 1), dtype=jnp.float32))
+        self.step = nnx.Variable(jnp.array(7, dtype=jnp.int32))
+
+    fake = self._fake_trainer()
+    fake.model = _MixedModel()
+    fake._sampler_type = "vanilla"
+    fake._target_state = jax.tree.map(
+        lambda x: nnx.Param(
+            jax.ShapeDtypeStruct(
+                shape=x.shape,
+                dtype=jnp.bfloat16
+                if jnp.issubdtype(x.dtype, jnp.floating)
+                else x.dtype,
+            )
+        ),
+        nnx.state(fake.model),
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+
+    with mock.patch.object(
+        raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer
+    ):
+      peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
+
+    bound = fake._weight_sync_worker.bound_state
+    self.assertEqual(bound["w"].value.dtype, jnp.bfloat16)
+    self.assertIsInstance(bound["lora"], _CustomFloatVar)
+    self.assertEqual(bound["lora"].value.dtype, jnp.bfloat16)
+    self.assertEqual(bound["step"].value.dtype, jnp.int32)
+    self.assertEqual(fake.model.w.value.dtype, jnp.float32)
+    self.assertEqual(fake.model.lora.value.dtype, jnp.float32)
+
+  def test_prepare_direct_target_state_raises_on_path_or_shape_mismatch(self):
+    fake = self._fake_trainer()
+    fake._sampler_type = "vanilla"
+
+    with self.subTest("missing_in_source"):
+      fake._target_state = nnx.State({
+          "w": nnx.Param(jax.ShapeDtypeStruct((2, 2), jnp.bfloat16)),
+          "extra": nnx.Param(jax.ShapeDtypeStruct((2, 2), jnp.bfloat16)),
+      })
+      with mock.patch.object(
+          raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer
+      ):
+        with self.assertRaisesRegex(ValueError, "missing_in_source"):
+          peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
+
+    with self.subTest("extra_in_source"):
+      fake._target_state = nnx.State({})
+      with mock.patch.object(
+          raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer
+      ):
+        with self.assertRaisesRegex(ValueError, "extra_in_source"):
+          peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
+
+    with self.subTest("shape_mismatch"):
+      fake._target_state = nnx.State({
+          "w": nnx.Param(jax.ShapeDtypeStruct((2, 3), jnp.bfloat16)),
+      })
+      with mock.patch.object(
+          raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer
+      ):
+        with self.assertRaisesRegex(ValueError, "shape mismatch"):
+          peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
 
 
 if __name__ == "__main__":

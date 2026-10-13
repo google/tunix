@@ -353,6 +353,57 @@ def _default_weight_sync_worker() -> Any:
   return raiden_synchronizer.RaidenSynchronizer("trainer")
 
 
+def _cast_state_to_target_dtypes(
+    src_state: nnx.State, target_state: nnx.State
+) -> nnx.State:
+  """Matches `src_state` to `target_state` by path and casts floating leaves."""
+  is_var_leaf = lambda x: isinstance(x, nnx.Variable)
+  src_leaves_with_path, src_treedef = jax.tree_util.tree_flatten_with_path(
+      src_state, is_leaf=is_var_leaf
+  )
+  tgt_leaves_with_path, _ = jax.tree_util.tree_flatten_with_path(
+      target_state, is_leaf=is_var_leaf
+  )
+
+  src_by_key = {
+      jax.tree_util.keystr(path): leaf for path, leaf in src_leaves_with_path
+  }
+  tgt_by_key = {
+      jax.tree_util.keystr(path): leaf for path, leaf in tgt_leaves_with_path
+  }
+
+  missing_in_src = sorted(set(tgt_by_key) - set(src_by_key))
+  extra_in_src = sorted(set(src_by_key) - set(tgt_by_key))
+  if missing_in_src or extra_in_src:
+    raise ValueError(
+        "Direct weight sync state path mismatch between trainer and target:"
+        f" missing_in_source={missing_in_src}, extra_in_source={extra_in_src}"
+    )
+
+  converted_leaves = []
+  for path, src_leaf in src_leaves_with_path:
+    key = jax.tree_util.keystr(path)
+    tgt_leaf = tgt_by_key[key]
+    src_arr = src_leaf.value
+    tgt_spec = tgt_leaf.value
+
+    if src_arr.shape != tgt_spec.shape:
+      raise ValueError(
+          f"Direct weight sync shape mismatch at {key}: trainer shape"
+          f" {src_arr.shape} != target shape {tgt_spec.shape}"
+      )
+
+    if (
+        jnp.issubdtype(src_arr.dtype, jnp.floating)
+        and src_arr.dtype != tgt_spec.dtype
+    ):
+      converted_leaves.append(src_leaf.replace(src_arr.astype(tgt_spec.dtype)))
+    else:
+      converted_leaves.append(src_leaf)
+
+  return jax.tree_util.tree_unflatten(src_treedef, converted_leaves)
+
+
 class PeftTrainer(abstract_trainer.AbstractTrainer):
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
 
@@ -1330,7 +1381,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       worker.bind(converted_state)
     else:
       # TODO(lancewang): Handle LoRA parameter synchronization.
-      worker.bind(nnx.state(self.model))
+      src_state = nnx.state(self.model)
+      if self._target_state is not None:
+        src_state = _cast_state_to_target_dtypes(src_state, self._target_state)
+      worker.bind(src_state)
 
     worker.d2h()
     if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":

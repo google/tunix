@@ -14,11 +14,7 @@
 
 from unittest import mock
 
-try:
-  from absl.testing import absltest
-except ImportError:
-  import unittest as absltest
-
+from absl.testing import absltest
 from tunix.utils import maxtext_utils
 
 
@@ -62,6 +58,9 @@ class MaxTextUtilsTest(absltest.TestCase):
       self.assertIn("base_num_kv_heads=8", argv)
       self.assertIn("ici_tensor_parallelism=4", argv)
       self.assertIn("ici_fsdp_parallelism=2", argv)
+      self.assertIn("dtype=bfloat16", argv)
+      self.assertIn("weight_dtype=bfloat16", argv)
+      self.assertIn("grad_dtype=float32", argv)
       self.assertIn("prefuse_moe_weights=True", argv)
       self.assertIn("use_weight_converter=False", argv)
       self.assertIn("rollout_tensor_parallelism=4", argv)
@@ -76,6 +75,7 @@ class MaxTextUtilsTest(absltest.TestCase):
 
     mock_compute = mock.MagicMock(return_value=2304)
 
+    mock_convert_utils = mock.MagicMock(compute_padded_moe_mlp_dim=mock_compute)
     with mock.patch.object(
         maxtext_utils,
         "maxtext_modules",
@@ -86,9 +86,10 @@ class MaxTextUtilsTest(absltest.TestCase):
     ), mock.patch.dict(
         "sys.modules",
         {
-            "maxtext.integration.vllm.convert_utils": mock.MagicMock(
-                compute_padded_moe_mlp_dim=mock_compute
-            )
+            "maxtext.src.maxtext.integration.vllm.convert_utils": (
+                mock_convert_utils
+            ),
+            "maxtext.integration.vllm.convert_utils": mock_convert_utils,
         },
     ):
       cfg = maxtext_utils.build_maxtext_config(
@@ -148,6 +149,9 @@ class MaxTextUtilsTest(absltest.TestCase):
           moe_mlp_tp_size, exp_moe_tp, f"{name}: moe_mlp_tp_size mismatch"
       )
 
+      mock_convert_utils = mock.MagicMock(
+          compute_padded_moe_mlp_dim=mock_compute_padded_moe_mlp_dim
+      )
       with mock.patch.object(
           maxtext_utils,
           "maxtext_modules",
@@ -160,9 +164,10 @@ class MaxTextUtilsTest(absltest.TestCase):
       ), mock.patch.dict(
           "sys.modules",
           {
-              "maxtext.integration.vllm.convert_utils": mock.MagicMock(
-                  compute_padded_moe_mlp_dim=mock_compute_padded_moe_mlp_dim
-              )
+              "maxtext.src.maxtext.integration.vllm.convert_utils": (
+                  mock_convert_utils
+              ),
+              "maxtext.integration.vllm.convert_utils": mock_convert_utils,
           },
       ):
         maxtext_utils.build_maxtext_config(
@@ -267,6 +272,11 @@ class MaxTextUtilsTest(absltest.TestCase):
     mock_pyconfig.initialize.return_value = mock_cfg
     mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
 
+    mock_convert_utils = mock.MagicMock(
+        compute_padded_moe_mlp_dim=mock.MagicMock(
+            side_effect=ValueError("Padding failure")
+        )
+    )
     with mock.patch.object(
         maxtext_utils,
         "maxtext_modules",
@@ -277,11 +287,10 @@ class MaxTextUtilsTest(absltest.TestCase):
     ), mock.patch.dict(
         "sys.modules",
         {
-            "maxtext.integration.vllm.convert_utils": mock.MagicMock(
-                compute_padded_moe_mlp_dim=mock.MagicMock(
-                    side_effect=ValueError("Padding failure")
-                )
-            )
+            "maxtext.src.maxtext.integration.vllm.convert_utils": (
+                mock_convert_utils
+            ),
+            "maxtext.integration.vllm.convert_utils": mock_convert_utils,
         },
     ):
       with self.assertRaisesRegex(
@@ -320,6 +329,7 @@ class MaxTextUtilsTest(absltest.TestCase):
     mock_file = mock.mock_open(
         read_data="base_num_kv_heads: 4\nbase_moe_mlp_dim: 1024\n"
     )
+    mock_convert_utils = mock.MagicMock(compute_padded_moe_mlp_dim=mock_compute)
     with mock.patch.object(
         maxtext_utils,
         "maxtext_modules",
@@ -329,9 +339,10 @@ class MaxTextUtilsTest(absltest.TestCase):
     ), mock.patch.dict(
         "sys.modules",
         {
-            "maxtext.integration.vllm.convert_utils": mock.MagicMock(
-                compute_padded_moe_mlp_dim=mock_compute
-            )
+            "maxtext.src.maxtext.integration.vllm.convert_utils": (
+                mock_convert_utils
+            ),
+            "maxtext.integration.vllm.convert_utils": mock_convert_utils,
         },
     ), self.assertLogs(
         level="INFO"
@@ -368,7 +379,10 @@ class MaxTextUtilsTest(absltest.TestCase):
         ),
     ), mock.patch.dict(
         "sys.modules",
-        {"maxtext.integration.vllm.convert_utils": None},
+        {
+            "maxtext.src.maxtext.integration.vllm.convert_utils": None,
+            "maxtext.integration.vllm.convert_utils": None,
+        },
     ), self.assertLogs(
         level="WARNING"
     ) as logs:

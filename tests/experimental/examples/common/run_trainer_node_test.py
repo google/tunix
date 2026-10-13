@@ -163,14 +163,18 @@ class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
 class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
 
   def test_model_loading_separates_compute_and_parameter_dtypes(self):
-    for load_dtype in (None, "float32"):
+    for load_dtype, expected_load_dtype in (
+        (None, "float32"),
+        ("float32", "float32"),
+        ("bfloat16", "bfloat16"),
+    ):
       with self.subTest(load_dtype=load_dtype):
         argv = ["--model_dir=/tmp/model", "--model_dtype=bfloat16"]
         if load_dtype:
           argv.append(f"--model_load_dtype={load_dtype}")
-        args = run_trainer_node._parse_args(argv)
-        # Avoid depending on the caller's MODEL_LOAD_DTYPE environment.
-        args.model_load_dtype = load_dtype
+        with mock.patch.dict("os.environ", {}, clear=False):
+          run_trainer_node.os.environ.pop("MODEL_LOAD_DTYPE", None)
+          args = run_trainer_node._parse_args(argv)
         with mock.patch.object(
             run_trainer_node.automodel.AutoModel,
             "from_pretrained",
@@ -182,7 +186,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         self.assertIs(model, mock.sentinel.model)
         self.assertEqual(load.call_args.kwargs["dtype"], "bfloat16")
         self.assertEqual(
-            load.call_args.kwargs["load_dtype"], load_dtype or "bfloat16"
+            load.call_args.kwargs["load_dtype"], expected_load_dtype
         )
 
   def setUp(self):
@@ -586,6 +590,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args.optimizer_chain_kwargs, {})
     self.assertFalse(args.use_lora)
     self.assertEqual(args.model_dtype, "float32")
+    self.assertEqual(args.model_load_dtype, "float32")
     self.assertEqual(args.rollout_mesh_tp, 0)
     self.assertFalse(args.prefuse_moe_weights)
     self.assertTrue(args.use_weight_converter)

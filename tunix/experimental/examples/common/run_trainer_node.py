@@ -171,16 +171,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--model_dtype",
       choices=("bfloat16", "float32"),
       default=os.getenv("MODEL_DTYPE", "float32"),
-      help=(
-          "Computation dtype; also the parameter loading dtype unless"
-          " --model_load_dtype is set."
-      ),
+      help="Computation dtype for forward and backward activations.",
   )
   parser.add_argument(
       "--model_load_dtype",
       choices=("bfloat16", "float32"),
-      default=os.getenv("MODEL_LOAD_DTYPE"),
-      help="Parameter loading dtype. Defaults to --model_dtype.",
+      default=os.getenv("MODEL_LOAD_DTYPE") or "float32",
+      help=(
+          "Parameter loading and master weight storage dtype. Defaults to"
+          " float32 so mixed-precision training (--model_dtype=bfloat16)"
+          " maintains float32 master weights, gradients, and optimizer moments."
+      ),
   )
   parser.add_argument(
       "--remat_config",
@@ -572,7 +573,7 @@ def _load_actor_model(args, mesh: Mesh, *, lora: bool):
       mesh=mesh,
       model_path=args.model_dir,
       dtype=args.model_dtype,
-      load_dtype=args.model_load_dtype or args.model_dtype,
+      load_dtype=args.model_load_dtype,
       remat_config=args.remat_config,
       use_flash_attention=args.use_flash_attention,
       flash_attention_block_size=args.flash_attention_block_size,
