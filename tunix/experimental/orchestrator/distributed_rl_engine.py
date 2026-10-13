@@ -867,6 +867,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           "fwd_bwd",
           request=request,
           skip_jit=skip_jit,
+          # Tells the trainer which micro-batch is the step's last (MaxText's
+          # retry_dropless_final_micro_batch runs it with the dropless program).
+          apply_optimizer=apply_optimizer,
           **kwargs,
       )
       if is_actor:
