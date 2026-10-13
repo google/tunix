@@ -76,6 +76,8 @@ except ImportError:
 
 RPC_TIMEOUT_S = network.RPC_TIMEOUT_S
 LONG_POLL_TIMEOUT_S = network.LONG_POLL_TIMEOUT_S
+is_bulk_lz4_enabled = network.is_bulk_lz4_enabled
+set_bulk_lz4_enabled = network.set_bulk_lz4_enabled
 
 _BULK_CAPABILITY_METADATA = (("x-tunix-bulk", "1"),)
 

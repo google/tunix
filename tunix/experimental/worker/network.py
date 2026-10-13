@@ -65,6 +65,7 @@ from typing import (
 from absl import logging
 import cloudpickle
 import numpy as np
+from tunix.experimental.worker import _compression_ext
 
 
 # Default per-call deadline (seconds) applied to remote invocations so a dead or
@@ -1752,6 +1753,41 @@ def _assign_stripe_hosts(
   return assigned
 
 
+# Minimum buffer size (512 KiB) and maximum compression ratio (0.85) for
+# transparent C++ `nogil` LZ4 block compression on the bulk TCP data plane.
+_BULK_LZ4_MIN_BYTES = 512 * 1024
+_BULK_LZ4_MAX_RATIO = 0.85
+_BULK_LZ4_BLOCK_BYTES = 256 * 1024
+
+
+def _parse_bulk_lz4_env() -> bool:
+  raw = os.environ.get("TUNIX_BULK_TCP_LZ4", "1").strip().lower()
+  if raw in ("1", "true", "yes", "on"):
+    return True
+  if raw in ("0", "false", "no", "off"):
+    return False
+  raise ValueError(
+      "TUNIX_BULK_TCP_LZ4 must be one of ('0', '1', 'false', 'true', 'no',"
+      f" 'yes', 'off', 'on'), got {raw!r}."
+  )
+
+
+_BULK_LZ4_ENABLED: bool = _parse_bulk_lz4_env()
+
+
+def is_bulk_lz4_enabled() -> bool:
+  """Returns True if out-of-band bulk TCP LZ4 compression is enabled on send."""
+  return _BULK_LZ4_ENABLED
+
+
+def set_bulk_lz4_enabled(enabled: bool) -> None:
+  """Enables or disables out-of-band bulk TCP LZ4 compression on send."""
+  global _BULK_LZ4_ENABLED
+  if not isinstance(enabled, bool):
+    raise ValueError(f"enabled must be a bool, got {enabled!r}.")
+  _BULK_LZ4_ENABLED = enabled
+
+
 class _BulkLayout(NamedTuple):
   """Computed buffer layout for out-of-band bulk TCP transfers."""
 
@@ -1763,12 +1799,18 @@ class _BulkLayout(NamedTuple):
 def _plan_bulk_buffer_layout(
     header_len: int,
     buffer_lengths: Sequence[int],
+    compressed_lengths: Optional[Sequence[int]] = None,
 ) -> _BulkLayout:
   """Single source of truth for bulk buffer partitioning and 64-byte alignment."""
   bulk_lengths: List[int] = []
   packed_offsets: Dict[int, int] = {}
   packed_tail_len = header_len
   for i, length in enumerate(buffer_lengths):
+    wire_len = (
+        compressed_lengths[i]
+        if (compressed_lengths is not None and compressed_lengths[i] > 0)
+        else length
+    )
     if length == 0:
       bulk_lengths.append(0)
     elif length < _BULK_PACK_MAX_BYTES:
@@ -1776,16 +1818,53 @@ def _plan_bulk_buffer_layout(
           _BULK_PACK_ALIGN - 1
       )
       packed_offsets[i] = packed_tail_len
-      packed_tail_len += length
+      packed_tail_len += wire_len
       bulk_lengths.append(0)
     else:
-      bulk_lengths.append(length)
+      bulk_lengths.append(wire_len)
   bulk_lengths.append(packed_tail_len)
   return _BulkLayout(bulk_lengths, packed_offsets, sum(bulk_lengths))
 
 
+def _try_compress_views_nogil(
+    data_views: Sequence[memoryview],  # pylint: disable=g-bare-generic
+) -> Tuple[
+    Tuple[int, ...],
+    Dict[int, Tuple[np.ndarray, memoryview]],  # pylint: disable=g-bare-generic
+]:
+  """Probes and LZ4-compresses qualifying buffers >= 512 KiB without holding the GIL."""
+  if not _BULK_LZ4_ENABLED:
+    return (0,) * len(data_views), {}
+  comp_lens: List[int] = []
+  comp_views: Dict[int, Tuple[np.ndarray, memoryview]] = {}  # pylint: disable=g-bare-generic
+  try:
+    for i, mv in enumerate(data_views):
+      mv_len = len(mv)
+      if mv_len >= _BULK_LZ4_MIN_BYTES:
+        comp_arr = _compression_ext.try_compress_bulk_buffer(
+            mv, _BULK_LZ4_MAX_RATIO, _BULK_LZ4_BLOCK_BYTES
+        )
+        if comp_arr is not None:
+          comp_mv = memoryview(comp_arr)
+          comp_views[i] = (comp_arr, comp_mv)
+          comp_lens.append(len(comp_mv))
+          continue
+      comp_lens.append(0)
+    return tuple(comp_lens), comp_views
+  except Exception:
+    for _, cmv in comp_views.values():
+      cmv.release()
+    raise
+
+
+_CompressedViewMap = Mapping[int, Tuple[np.ndarray, memoryview]]  # pylint: disable=g-bare-generic
+
+
 def _partition_bulk_views(
     views: Sequence[memoryview],  # pylint: disable=g-bare-generic
+    *,
+    compressed_lengths: Optional[Sequence[int]] = None,
+    compressed_views: Optional[_CompressedViewMap] = None,
 ) -> Tuple[
     int,
     Tuple[int, ...],
@@ -1797,23 +1876,30 @@ def _partition_bulk_views(
   data_views = views[1:]
   header_len = len(header_mv)
   buffer_lengths = tuple(len(v) for v in data_views)
-  layout = _plan_bulk_buffer_layout(header_len, buffer_lengths)
+  layout = _plan_bulk_buffer_layout(
+      header_len, buffer_lengths, compressed_lengths
+  )
   bulk_views: List[_SegmentedBulkView] = []
   small_segments: List[memoryview] = [header_mv]  # pylint: disable=g-bare-generic
   cur_tail_off = header_len
   for i, mv in enumerate(data_views):
+    wire_mv = (
+        compressed_views[i][1]
+        if (compressed_views is not None and i in compressed_views)
+        else mv
+    )
     if i in layout.packed_offsets:
       target_off = layout.packed_offsets[i]
       pad = target_off - cur_tail_off
       if pad > 0:
         small_segments.append(_ZERO_PAD_MV[:pad])
-      small_segments.append(mv)
-      cur_tail_off = target_off + len(mv)
+      small_segments.append(wire_mv)
+      cur_tail_off = target_off + len(wire_mv)
       bulk_views.append(_SegmentedBulkView(()))
-    elif len(mv) == 0:
+    elif len(wire_mv) == 0:
       bulk_views.append(_SegmentedBulkView(()))
     else:
-      bulk_views.append(_SegmentedBulkView((mv,)))
+      bulk_views.append(_SegmentedBulkView((wire_mv,)))
   bulk_views.append(_SegmentedBulkView(small_segments))
   return header_len, buffer_lengths, layout, bulk_views
 
@@ -1823,8 +1909,9 @@ def _reconstruct_target_buffers(
     buffer_lengths: Sequence[int],
     raw_bulk_buffers: Mapping[int, np.ndarray],
     layout: _BulkLayout,
+    compressed_lengths: Optional[Sequence[int]] = None,
 ) -> Tuple[np.ndarray, List[np.ndarray]]:
-  """Reconstructs header and 64B-aligned target buffers via zero-copy views."""
+  """Reconstructs header and 64B-aligned target buffers via zero-copy views or LZ4 decompression."""
   # Small buffers (< _BULK_PACK_MAX_BYTES) coalesced into the trailing packed
   # buffer are returned as 64-byte-aligned zero-copy views sharing `packed_buf`.
   # Callers retaining only a small subset of arrays long-term across steps
@@ -1842,19 +1929,28 @@ def _reconstruct_target_buffers(
   target_buffers: List[np.ndarray] = []
   empty_u8 = np.empty(0, dtype=np.uint8)
   for i, length in enumerate(buffer_lengths):
+    comp_len = compressed_lengths[i] if compressed_lengths is not None else 0
+    wire_len = comp_len if comp_len > 0 else length
     if length == 0:
       target_buffers.append(empty_u8)
-    elif i in layout.packed_offsets:
+      continue
+    if i in layout.packed_offsets:
       off = layout.packed_offsets[i]
-      target_buffers.append(packed_buf[off : off + length])
+      wire_buf = packed_buf[off : off + wire_len]
     else:
       buf = raw_bulk_buffers.get(i)
-      if buf is None or len(buf) != length:
+      if buf is None or len(buf) != wire_len:
         raise RuntimeError(
-            f"Bulk buffer {i} missing or size mismatch: expected {length}"
+            f"Bulk buffer {i} missing or size mismatch: expected {wire_len}"
             " bytes."
         )
-      target_buffers.append(buf)
+      wire_buf = buf
+    if comp_len > 0:
+      out_buf = _alloc_aligned_u8(length)
+      _compression_ext.decompress_bulk_buffer(wire_buf, out_buf)
+      target_buffers.append(out_buf)
+    else:
+      target_buffers.append(wire_buf)
   return header_view, target_buffers
 
 
@@ -1863,10 +1959,15 @@ def _reconstruct_and_unpickle(
     buffer_lengths: Sequence[int],
     raw_bulk_buffers: Mapping[int, np.ndarray],
     layout: _BulkLayout,
+    compressed_lengths: Optional[Sequence[int]] = None,
 ) -> Any:
   """Reconstructs zero-copy buffer views and unpickles on `_SERDE_EXECUTOR`."""
   header_view, target_buffers = _reconstruct_target_buffers(
-      header_len, buffer_lengths, raw_bulk_buffers, layout
+      header_len,
+      buffer_lengths,
+      raw_bulk_buffers,
+      layout,
+      compressed_lengths,
   )
   header_mv = memoryview(header_view)
   try:
@@ -2004,6 +2105,14 @@ class _BulkManifest(NamedTuple):
   total_bulk_bytes: int
   header_len: int
   buffer_lengths: Tuple[int, ...]
+  compressed_lengths: Optional[Tuple[int, ...]] = None
+
+
+def _release_compressed_views(
+    comp_views: Mapping[int, Tuple[np.ndarray, memoryview]],  # pylint: disable=g-bare-generic
+) -> None:
+  for _, cmv in comp_views.values():
+    cmv.release()
 
 
 async def _stream_bulk_pull_chunks(
@@ -2013,12 +2122,22 @@ async def _stream_bulk_pull_chunks(
 ) -> AsyncIterator[bytes]:
   """Streams a bulk manifest over gRPC while serving buffers via `_OP_PULL`."""
   tid: Optional[bytes] = None
+  comp_views: Dict[int, Tuple[np.ndarray, memoryview]] = {}  # pylint: disable=g-bare-generic
   try:
+    loop = asyncio.get_running_loop()
+    if _BULK_LZ4_ENABLED:
+      comp_lens, comp_views = await loop.run_in_executor(
+          _SERDE_EXECUTOR, _try_compress_views_nogil, views[1:]
+      )
+    else:
+      comp_lens, comp_views = (0,) * (len(views) - 1), {}
+    has_compressed = any(c > 0 for c in comp_lens)
     header_len, buffer_lengths, layout, bulk_views = _partition_bulk_views(
-        views
+        views,
+        compressed_lengths=comp_lens if has_compressed else None,
+        compressed_views=comp_views if has_compressed else None,
     )
     total_bulk_bytes = layout.total_bulk_bytes
-    loop = asyncio.get_running_loop()
     tid, done_fut = bulk_server.register_outgoing(
         bulk_views, total_bulk_bytes, loop
     )
@@ -2030,6 +2149,7 @@ async def _stream_bulk_pull_chunks(
             total_bulk_bytes,
             header_len,
             buffer_lengths,
+            comp_lens if has_compressed else None,
         ),
         protocol=5,
     )
@@ -2039,6 +2159,7 @@ async def _stream_bulk_pull_chunks(
   finally:
     if tid is not None:
       bulk_server.unregister_outgoing(tid)
+    _release_compressed_views(comp_views)
     _release_views_and_buffers(views, raw_buffers)
 
 
@@ -2056,15 +2177,25 @@ async def _stream_bulk_push_chunks(
   push_futs: List[asyncio.Future[None]] = []
   active_socks = _ActiveStripeSockets()
   completed_all = False
+  comp_views: Dict[int, Tuple[np.ndarray, memoryview]] = {}  # pylint: disable=g-bare-generic
   try:
     if not bulk_hosts:
       raise ValueError("bulk_hosts must not be empty.")
+    loop = asyncio.get_running_loop()
+    if _BULK_LZ4_ENABLED:
+      comp_lens, comp_views = await loop.run_in_executor(
+          _SERDE_EXECUTOR, _try_compress_views_nogil, views[1:]
+      )
+    else:
+      comp_lens, comp_views = (0,) * (len(views) - 1), {}
+    has_compressed = any(c > 0 for c in comp_lens)
     header_len, buffer_lengths, layout, bulk_views = _partition_bulk_views(
-        views
+        views,
+        compressed_lengths=comp_lens if has_compressed else None,
+        compressed_views=comp_views if has_compressed else None,
     )
     total_bulk_bytes = layout.total_bulk_bytes
     tid = _allocate_transfer_id()
-    loop = asyncio.get_running_loop()
     stripes = _plan_bulk_stripes(layout.bulk_lengths, num_hosts=len(bulk_hosts))
     stripe_hosts = _assign_stripe_hosts(stripes, bulk_hosts)
     for target_host, (buf_idx, buf_total_len, offset, take) in zip(
@@ -2095,6 +2226,7 @@ async def _stream_bulk_push_chunks(
             total_bulk_bytes,
             header_len,
             buffer_lengths,
+            comp_lens if has_compressed else None,
         ),
         protocol=5,
     )
@@ -2119,9 +2251,12 @@ async def _stream_bulk_push_chunks(
               push_tracker.error = rf_exc
               break
       active_socks.abort_all()
-    _drain_and_release_async(
-        raw_futs, lambda: _release_views_and_buffers(views, raw_buffers)
-    )
+
+    def _release_all() -> None:
+      _release_compressed_views(comp_views)
+      _release_views_and_buffers(views, raw_buffers)
+
+    _drain_and_release_async(raw_futs, _release_all)
 
 
 def _can_use_bulk_transfer(
@@ -2167,7 +2302,29 @@ def _validate_bulk_manifest(meta: _BulkManifest) -> _BulkLayout:
     raise ValueError(
         f"Invalid bulk manifest buffer_lengths: {meta.buffer_lengths!r}."
     )
-  layout = _plan_bulk_buffer_layout(meta.header_len, meta.buffer_lengths)
+  comp_lens = meta.compressed_lengths
+  if comp_lens is not None:
+    if (
+        not isinstance(comp_lens, tuple)
+        or len(comp_lens) != len(meta.buffer_lengths)
+        or any(
+            not _is_exact_int(clen)
+            or clen < 0
+            or (clen > 0 and clen >= meta.buffer_lengths[i])
+            for i, clen in enumerate(comp_lens)
+        )
+    ):
+      raise ValueError(
+          f"Invalid bulk manifest compressed_lengths: {comp_lens!r}."
+      )
+  total_uncompressed = meta.header_len + sum(meta.buffer_lengths)
+  if total_uncompressed <= 0 or total_uncompressed > _MAX_BULK_TRANSFER_BYTES:
+    raise ValueError(
+        f"Invalid bulk manifest uncompressed byte total: {total_uncompressed}."
+    )
+  layout = _plan_bulk_buffer_layout(
+      meta.header_len, meta.buffer_lengths, comp_lens
+  )
   if (
       layout.total_bulk_bytes <= 0
       or layout.total_bulk_bytes > _MAX_BULK_TRANSFER_BYTES
@@ -2287,6 +2444,7 @@ async def _deserialize_from_async_chunks(
           first_meta.buffer_lengths,
           raw_bulk_buffers,
           layout,
+          first_meta.compressed_lengths,
       )
       del raw_bulk_buffers
       async for _ in chunk_iter:

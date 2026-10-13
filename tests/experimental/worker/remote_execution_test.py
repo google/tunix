@@ -28,6 +28,7 @@ import numpy as np
 import portpicker
 from tunix.experimental.worker import network as network_lib
 from tunix.experimental.worker import remote_execution as remote_lib
+from tunix.rl import packing
 
 
 class StubWorkerEngine:
@@ -3545,7 +3546,7 @@ class RemoteExecutionTest(parameterized.TestCase):
               views, raw_buffers, bulk_server
           )
           first_chunk = await pull_gen.__anext__()
-          _, pull_tid, pull_port, total_bulk, _, buf_lens = (
+          _, pull_tid, pull_port, total_bulk, _, buf_lens, *_ = (
               remote_lib.pickle.loads(first_chunk)
           )
           packed_idx = len(buf_lens)
@@ -4052,6 +4053,165 @@ class RemoteExecutionTest(parameterized.TestCase):
         await server.stop_serving(grace=0.0)
 
     asyncio.run(_run())
+
+  def test_bulk_transfer_lz4_compression_push_and_pull_roundtrip(self):
+    bulk_server = network_lib._BulkTransferServer()
+    bulk_server.start()
+    prev_lz4 = network_lib.is_bulk_lz4_enabled()
+    try:
+      network_lib.set_bulk_lz4_enabled(True)
+      self.assertTrue(remote_lib.is_bulk_lz4_enabled())
+      with self.assertRaisesRegex(ValueError, "enabled must be a bool"):
+        network_lib.set_bulk_lz4_enabled(1)  # type: ignore[arg-type]
+
+      rng = np.random.default_rng(77)
+      expert_tuples = np.array(
+          [
+              [0, 1, 2, 3, 4, 5, 6, 7],
+              [0, 1, 2, 3, 11, 19, 23, 31],
+              [1, 2, 4, 8, 16, 23, 31, 64],
+              [0, 2, 4, 6, 8, 12, 16, 24],
+          ],
+          dtype=np.int16,
+      )
+      # Standalone 8 MiB compressible Phase A uint8 routed_experts tensor.
+      raw_u8_i16 = np.full((16, 2048, 32, 8), -1, dtype=np.int16)
+      idx_u8 = rng.integers(0, len(expert_tuples), size=(16, 1100, 32))
+      raw_u8_i16[:, :1100, :, :] = expert_tuples[idx_u8]
+      packed_u8 = packing.encode_routed_experts(
+          raw_u8_i16, num_experts=128, batched=True
+      )
+      self.assertEqual(packed_u8.nbytes, 8 * 1024 * 1024)
+
+      # Packed-tail 1.25 MiB (< 4 MiB) compressible Phase A uint10 tensor.
+      raw_u10_i16 = np.full((4, 1024, 32, 8), -1, dtype=np.int16)
+      idx_u10 = rng.integers(0, len(expert_tuples), size=(4, 512, 32))
+      raw_u10_i16[:, :512, :, :] = expert_tuples[idx_u10] * 3
+      packed_u10 = packing.encode_routed_experts(
+          raw_u10_i16, num_experts=384, batched=True
+      )
+      self.assertEqual(packed_u10.nbytes, 1280 * 1024)
+
+      # Standalone 4 MiB incompressible random float32 logprobs tensor.
+      random_logps = rng.standard_normal(1024 * 1024, dtype=np.float32)
+      self.assertEqual(random_logps.nbytes, 4 * 1024 * 1024)
+
+      # Small < 512 KiB metadata array (stays zero-copy uncompressed).
+      small_meta = np.arange(1024, dtype=np.int32)
+
+      payload = {
+          "routed_u8": packed_u8,
+          "routed_u10": packed_u10,
+          "logps": random_logps,
+          "small": small_meta,
+      }
+      req = remote_lib.ExecutionRequest(
+          request_id="req_lz4",
+          method_name="train_step",
+          args=(payload,),
+          kwargs={},
+      )
+      resp = remote_lib.ExecutionResponse(result=payload)
+
+      async def _run():
+        _, _, req_views, req_raw_buffers, _ = (
+            network_lib._prepare_serialized_chunk_specs(req._as_tuple())
+        )
+        push_chunks = [
+            c
+            async for c in network_lib._stream_bulk_push_chunks(
+                req_views, req_raw_buffers, ("127.0.0.1",), bulk_server.port
+            )
+        ]
+        self.assertLen(push_chunks, 1)
+        meta = remote_lib.pickle.loads(push_chunks[0])
+        self.assertIsInstance(meta, network_lib._BulkManifest)
+        self.assertIsNotNone(meta.compressed_lengths)
+        assert meta.compressed_lengths is not None
+        # Compressible buffers have compressed_lengths > 0 and < 40% of raw;
+        # incompressible float32 and small < 512 KiB array have 0.
+        comp_non_zero = [c for c in meta.compressed_lengths if c > 0]
+        self.assertLen(comp_non_zero, 2)
+        uncompressed_total = meta.header_len + sum(meta.buffer_lengths)
+        self.assertLess(meta.total_bulk_bytes, int(uncompressed_total * 0.55))
+
+        async def _push_gen():
+          for c in push_chunks:
+            yield c
+
+        restored_req = (
+            await remote_lib.ExecutionRequest.deserialize_async_chunks(
+                _push_gen(), bulk_server=bulk_server
+            )
+        )
+        out_push = restored_req.args[0]
+        for key in ("routed_u8", "routed_u10", "logps", "small"):
+          np.testing.assert_array_equal(out_push[key], payload[key])
+          self.assertEqual(out_push[key].ctypes.data % 64, 0)
+          self.assertTrue(out_push[key].flags.writeable)
+        np.testing.assert_array_equal(
+            packing.decode_routed_experts(out_push["routed_u8"], batched=True),
+            raw_u8_i16,
+        )
+        np.testing.assert_array_equal(
+            packing.decode_routed_experts(out_push["routed_u10"], batched=True),
+            raw_u10_i16,
+        )
+
+        # Verify _OP_PULL path with LZ4 compression as well.
+        async def _pull_gen():
+          async for c in resp.serialize_async_chunks(bulk_server=bulk_server):
+            yield c
+
+        restored_resp = (
+            await remote_lib.ExecutionResponse.deserialize_async_chunks(
+                _pull_gen(), bulk_hosts=("127.0.0.1",)
+            )
+        )
+        assert restored_resp is not None
+        out_pull = restored_resp.unwrap()
+        for key in ("routed_u8", "routed_u10", "logps", "small"):
+          np.testing.assert_array_equal(out_pull[key], payload[key])
+          self.assertEqual(out_pull[key].ctypes.data % 64, 0)
+          self.assertTrue(out_pull[key].flags.writeable)
+
+        # Verify disabling the knob via set_bulk_lz4_enabled(False) bypasses
+        # LZ4 compression completely and sends raw uncompressed buffers.
+        remote_lib.set_bulk_lz4_enabled(False)
+        self.assertFalse(network_lib.is_bulk_lz4_enabled())
+        _, _, nolz4_views, nolz4_raw_buffers, _ = (
+            network_lib._prepare_serialized_chunk_specs(req._as_tuple())
+        )
+        nolz4_chunks = [
+            c
+            async for c in network_lib._stream_bulk_push_chunks(
+                nolz4_views,
+                nolz4_raw_buffers,
+                ("127.0.0.1",),
+                bulk_server.port,
+            )
+        ]
+        meta_nolz4 = remote_lib.pickle.loads(nolz4_chunks[0])
+        self.assertIsNone(meta_nolz4.compressed_lengths)
+        self.assertGreaterEqual(meta_nolz4.total_bulk_bytes, uncompressed_total)
+
+        async def _nolz4_gen():
+          for c in nolz4_chunks:
+            yield c
+
+        restored_nolz4 = (
+            await remote_lib.ExecutionRequest.deserialize_async_chunks(
+                _nolz4_gen(), bulk_server=bulk_server
+            )
+        )
+        np.testing.assert_array_equal(
+            restored_nolz4.args[0]["routed_u8"], packed_u8
+        )
+
+      asyncio.run(_run())
+    finally:
+      network_lib.set_bulk_lz4_enabled(prev_lz4)
+      bulk_server.stop()
 
 
 if __name__ == "__main__":
