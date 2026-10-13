@@ -67,6 +67,7 @@ class ClusterOrchestrator:
       fault_tolerance_config: datatypes.RolloutFaultToleranceConfig | None = (
           None
       ),
+      num_rollout_pools: int | None = None,
   ):
     """Initializes ClusterOrchestrator.
 
@@ -116,6 +117,7 @@ class ClusterOrchestrator:
     )
     self._pending_bring_up_futures: set[futures.Future[Any]] = set()
     self.engine: distributed_rl_engine.DistributedRLEngine | None = None
+    self._num_rollout_pools = num_rollout_pools
     self.registry.add_state_listener(self._on_registry_state_changed)
     mode = getattr(weight_sync_mode, "value", weight_sync_mode)
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
@@ -876,8 +878,15 @@ class ClusterOrchestrator:
         if shim.handle is handle:
           self.registry.evict(wid)
 
-  def _create_engine(self) -> distributed_rl_engine.DistributedRLEngine:
+  def _create_engine(
+      self, num_rollout_pools: int | None = None
+  ) -> distributed_rl_engine.DistributedRLEngine:
     """Constructs a DistributedRLEngine from the registered role groups."""
+    pools = (
+        num_rollout_pools
+        if num_rollout_pools is not None
+        else (self._num_rollout_pools or 1)
+    )
     rollout_workers = self._get_actor_handles(datatypes.Role.ROLLOUT)
     actor_workers = self._get_actor_handles(datatypes.Role.ACTOR)
     critic_workers = self._get_actor_handles(datatypes.Role.CRITIC)
@@ -949,6 +958,7 @@ class ClusterOrchestrator:
         on_worker_evicted=self._on_engine_worker_evicted,
         rollout_worker_capacities=rollout_worker_capacities or None,
         fault_tolerance_config=self._fault_tolerance_config,
+        num_rollout_pools=pools,
     )
 
   def run(
@@ -971,7 +981,12 @@ class ClusterOrchestrator:
 
     self.monitor.poll()
     logging.info("Executing program %s...", type(program).__name__)
-    engine = self.engine or self._create_engine()
+    if self.engine is None:
+      prog_pools = getattr(program, "num_rollout_pools", None)
+      pools = self._num_rollout_pools or prog_pools or 1
+      engine = self._create_engine(num_rollout_pools=pools)
+    else:
+      engine = self.engine
     program.run(
         engine=engine,
         **kwargs,

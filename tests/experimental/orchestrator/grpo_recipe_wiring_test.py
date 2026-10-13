@@ -371,7 +371,7 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
         _row(n, rollout_per_token_logps=np.full(n, -0.25, dtype=np.float32))
         for n in (3, 5)
     ]
-    packed = _assembler()._pack_chunk(rows)  # pylint: disable=protected-access
+    packed, _ = _assembler()._pack_chunk(rows)  # pylint: disable=protected-access
     got = np.asarray(packed.rollout_per_token_logps)
     self.assertEqual(got.shape, (2, 6))
     np.testing.assert_allclose(got[0, :3], -0.25)
@@ -379,7 +379,7 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
     np.testing.assert_allclose(got[1, :5], -0.25)
 
   def test_rollout_logprobs_stay_none_when_no_row_carries_them(self):
-    packed = _assembler()._pack_chunk([_row(3), _row(3)])  # pylint: disable=protected-access
+    packed, _ = _assembler()._pack_chunk([_row(3), _row(3)])  # pylint: disable=protected-access
     self.assertIsNone(packed.rollout_per_token_logps)
 
   def test_overlong_is_stacked_one_value_per_sequence(self):
@@ -387,15 +387,15 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
         _row(3, overlong=np.float32(1.0)),
         _row(5, overlong=np.float32(0.0)),
     ]
-    packed = _assembler()._pack_chunk(rows)  # pylint: disable=protected-access
+    packed, _ = _assembler()._pack_chunk(rows)  # pylint: disable=protected-access
     np.testing.assert_allclose(np.asarray(packed.overlong), [1.0, 0.0])
 
   def test_overlong_stays_none_when_no_row_carries_it(self):
-    packed = _assembler()._pack_chunk([_row(3), _row(3)])  # pylint: disable=protected-access
+    packed, _ = _assembler()._pack_chunk([_row(3), _row(3)])  # pylint: disable=protected-access
     self.assertIsNone(packed.overlong)
 
   def test_trailing_rows_are_padded_as_not_overlong(self):
-    packed = _assembler()._pack_chunk([_row(3, overlong=np.float32(1.0))])  # pylint: disable=protected-access
+    packed, _ = _assembler()._pack_chunk([_row(3, overlong=np.float32(1.0))])  # pylint: disable=protected-access
     np.testing.assert_allclose(np.asarray(packed.overlong), [1.0, 0.0])
 
 
@@ -590,6 +590,44 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
     )
     self.assertFalse(
         parse(["--no-in_flight_weight_updates"]).in_flight_weight_updates
+    )
+
+  def test_launchers_pass_staggered_rollout_pools(self):
+    self.assertIn(
+        "--staggered_rollout_pools", _deepswe_k8s_orchestrator_block()
+    )
+    self.assertIn(
+        "--weight_sync_pool_only", _deepswe_k8s_orchestrator_block()
+    )
+    self.assertIn(
+        "--staggered_rollout_pools",
+        _launcher_orchestrator_cmd("deepswe_dist"),
+    )
+    self.assertIn(
+        "--weight_sync_pool_only",
+        _launcher_orchestrator_cmd("deepswe_dist"),
+    )
+
+  def test_staggered_rollout_pools_flags(self):
+    parse = run_deepswe_dist._parse_args  # pylint: disable=protected-access
+    self.assertFalse(parse([]).staggered_rollout_pools)
+    self.assertTrue(
+        parse(["--staggered_rollout_pools"]).staggered_rollout_pools
+    )
+    self.assertFalse(
+        parse(["--no-staggered_rollout_pools"]).staggered_rollout_pools
+    )
+    self.assertIsNone(parse([]).num_rollout_pools)
+    self.assertEqual(parse(["--num_rollout_pools", "3"]).num_rollout_pools, 3)
+
+  def test_weight_sync_pool_only_flag(self):
+    parse = run_deepswe_dist._parse_args  # pylint: disable=protected-access
+    self.assertFalse(parse([]).weight_sync_pool_only)
+    self.assertTrue(
+        parse(["--weight_sync_pool_only"]).weight_sync_pool_only
+    )
+    self.assertFalse(
+        parse(["--no-weight_sync_pool_only"]).weight_sync_pool_only
     )
 
   def test_launchers_wire_rollout_skip_jax_precompile(self):

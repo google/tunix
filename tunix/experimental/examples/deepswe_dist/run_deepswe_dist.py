@@ -291,6 +291,43 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--staggered_rollout_pools",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("STAGGERED_ROLLOUT_POOLS", "false").lower()
+      in ("1", "true", "yes"),
+      help=(
+          "Split the rollout worker pool into (max_staleness + 1) independent"
+          " pools. Batch i is dispatched to pool i % K to eliminate"
+          " cross-batch interference, scheduler priority starvation, and"
+          " KV-cache contention."
+      ),
+  )
+  parser.add_argument(
+      "--num_rollout_pools",
+      type=int,
+      default=(
+          int(os.environ["NUM_ROLLOUT_POOLS"])
+          if os.getenv("NUM_ROLLOUT_POOLS")
+          else None
+      ),
+      help=(
+          "Number of independent rollout worker pools. Defaults to"
+          " (max_staleness + 1) when --staggered_rollout_pools is set."
+      ),
+  )
+  parser.add_argument(
+      "--weight_sync_pool_only",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("WEIGHT_SYNC_POOL_ONLY", "false").lower()
+      in ("1", "true", "yes"),
+      help=(
+          "When True, weight sync is performed ONLY on the replicas in pool"
+          " i % K after batch i is trained before sending batch i + K to pool"
+          " i % K. Other pools generating other batches are untouched. When"
+          " False, sync weights across all rollout replicas at every step."
+      ),
+  )
+  parser.add_argument(
       "--rollout_priority_scheduling",
       action=argparse.BooleanOptionalAction,
       default=False,
@@ -911,10 +948,15 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
 
+  num_rollout_pools = args.num_rollout_pools
+  if args.staggered_rollout_pools and num_rollout_pools is None:
+    num_rollout_pools = int(args.max_staleness) + 1
+
   cluster = orchestrator.ClusterOrchestrator(
       weight_sync_mode=args.weight_sync_mode,
       trajectory_store_config=_build_trajectory_store_config(args),
       disable_weight_sync_timeouts=args.disable_weight_sync_timeouts,
+      num_rollout_pools=num_rollout_pools,
       jax_cache_config={
           "save_jax_cache": os.getenv("SAVE_JAX_CACHE", "true").lower() in ("1", "true", "yes"),
           "jax_cache_gcs_dir": os.getenv("JAX_CACHE_GCS_DIR"),
@@ -1259,6 +1301,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         async_weight_sync=args.async_weight_sync,
         pipeline_train_microbatches=args.pipeline_train_microbatches,
         partial_rollout=args.in_flight_weight_updates,
+        staggered_rollout_pools=args.staggered_rollout_pools,
+        num_rollout_pools=num_rollout_pools,
+        weight_sync_pool_only=args.weight_sync_pool_only,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
         initial_dispatch_stagger_s=args.initial_dispatch_stagger_s,
         initial_dispatch_first_stagger_s=args.initial_dispatch_first_stagger_s,

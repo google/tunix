@@ -227,6 +227,19 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertNotIn("--initial_dispatch_first_stagger_s", orch)
     self.assertNotIn("--trainer_warmup_compile", orch)
 
+  def test_staggered_rollout_pools_disables_initial_dispatch_stagger(self):
+    orch = _jobset(
+        _render(
+            STAGGERED_ROLLOUT_POOLS="true",
+            WEIGHT_SYNC_POOL_ONLY="true",
+        ),
+        "orch",
+    )
+    self.assertIn("--staggered_rollout_pools", orch)
+    self.assertIn("--weight_sync_pool_only", orch)
+    self.assertNotIn("--initial_dispatch_stagger_s", orch)
+    self.assertNotIn("--initial_dispatch_first_stagger_s", orch)
+
   def test_rollout_attention_without_data_parallelism(self):
     cfg = _vllm_config(_jobset(self.default, "roll-0"))
     strategy = cfg["additional_config"]["sharding"]["sharding_strategy"]

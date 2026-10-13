@@ -2584,6 +2584,128 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_multi_pool_dispatch_and_weight_sync(self):
+    async def _run():
+      async def _fake_sync(policy_version=0, **kwargs):
+        del kwargs
+        return _FakeSyncResult(policy_version)
+
+      rollout_workers = [MockActorHandle() for _ in range(6)]
+      coordinator = mock.create_autospec(
+          weight_sync_coordinator_lib.WeightSyncCoordinator, instance=True
+      )
+      coordinator.sync = mock.AsyncMock(side_effect=_fake_sync)
+      coordinator.has_pending_destinations.return_value = False
+      coordinator.in_flight = False
+      coordinator.poisoned = None
+
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=rollout_workers,
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          weight_sync_coordinator=coordinator,
+          num_rollout_pools=3,
+      )
+
+      self.assertEqual(engine.num_rollout_pools, 3)
+      self.assertEqual(len(engine._rollout_pools), 3)
+      for pool in engine._rollout_pools:
+        self.assertEqual(len(pool.actors), 2)
+
+      # Pool 0 gets workers 0 and 1, Pool 1 gets 2 and 3, Pool 2 gets 4 and 5.
+      self.assertEqual(
+          engine._rollout_pools[0].actors,
+          [rollout_workers[0], rollout_workers[1]],
+      )
+      self.assertEqual(
+          engine._rollout_pools[1].actors,
+          [rollout_workers[2], rollout_workers[3]],
+      )
+      self.assertEqual(
+          engine._rollout_pools[2].actors,
+          [rollout_workers[4], rollout_workers[5]],
+      )
+
+      # Dispatch to pool 1
+      rollout_workers[2].poll_responses.return_value = [
+          datatypes.RolloutResponse(
+              request_id="req_p1_g0_v0",
+              payload=datatypes.TrajectoryItem(
+                  prompt_id="p1",
+                  group_index=0,
+                  traj={"status": "SUCCEEDED"},
+              ),
+          )
+      ]
+      reqs = [{"prompt": "p1", "prompt_id": "p1"}]
+      req_ids = await engine.dispatch_rollouts(
+          reqs, num_generations=1, policy_version=0, pool_idx=1
+      )
+      self.assertEqual(len(req_ids), 1)
+
+      # Verify the request reached a worker in pool 1 (workers 2 or 3)
+      dispatched_pool_1 = (
+          rollout_workers[2].generate.call_count
+          + rollout_workers[3].generate.call_count
+      )
+      self.assertEqual(dispatched_pool_1, 1)
+      self.assertEqual(rollout_workers[0].generate.call_count, 0)
+      self.assertEqual(rollout_workers[1].generate.call_count, 0)
+      self.assertEqual(rollout_workers[4].generate.call_count, 0)
+      self.assertEqual(rollout_workers[5].generate.call_count, 0)
+
+      # Poll rollouts across the multi-pool sessions
+      completed = await engine.poll_rollouts(timeout_s=1.0)
+      self.assertEqual(len(completed), 1)
+      self.assertEqual(completed[0].prompt_id, "p1")
+
+      # Weight sync on pool 1 only: only session 1 drains pending tasks
+      with (
+          mock.patch.object(
+              engine._rollout_sessions[0], "_schedule_drain_pending"
+          ) as drain_0,
+          mock.patch.object(
+              engine._rollout_sessions[1], "_schedule_drain_pending"
+          ) as drain_1,
+          mock.patch.object(
+              engine._rollout_sessions[2], "_schedule_drain_pending"
+          ) as drain_2,
+      ):
+        synced_v = await engine.sync_weights(policy_version=1, pool_idx=1)
+        self.assertEqual(synced_v, 1)
+        coordinator.sync.assert_called_once_with(
+            policy_version=1,
+            destination_workers=[rollout_workers[2], rollout_workers[3]],
+        )
+        drain_0.assert_not_called()
+        drain_1.assert_called_once()
+        drain_2.assert_not_called()
+
+      # Weight sync across all pools (pool_idx=None): all sessions drain
+      coordinator.sync.reset_mock()
+      with (
+          mock.patch.object(
+              engine._rollout_sessions[0], "_schedule_drain_pending"
+          ) as drain_0,
+          mock.patch.object(
+              engine._rollout_sessions[1], "_schedule_drain_pending"
+          ) as drain_1,
+          mock.patch.object(
+              engine._rollout_sessions[2], "_schedule_drain_pending"
+          ) as drain_2,
+      ):
+        synced_v = await engine.sync_weights(policy_version=2, pool_idx=None)
+        self.assertEqual(synced_v, 2)
+        coordinator.sync.assert_called_once_with(
+            policy_version=2,
+        )
+        drain_0.assert_called_once()
+        drain_1.assert_called_once()
+        drain_2.assert_called_once()
+
+      await engine.close()
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

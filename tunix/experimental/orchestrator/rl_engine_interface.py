@@ -53,6 +53,7 @@ class AbstractRLEngine(Protocol):
       generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
       priority: int = 0,
+      pool_idx: int | None = None,
       **kwargs: Any,
   ) -> list[str]:
     """High-level convenience: Expands prompts by num_generations and dispatches rollouts.
@@ -167,6 +168,8 @@ class AbstractRLEngine(Protocol):
       role: datatypes.Role = datatypes.Role.ACTOR,
       target_roles: Sequence[datatypes.Role] | None = None,
       policy_version: int | None = None,
+      pool_idx: int | None = None,
+      destination_workers: Sequence[Any] | None = None,
       **kwargs: Any,
   ) -> int:
     """Coordinates decentralized peer-to-peer weight sync across worker roles."""

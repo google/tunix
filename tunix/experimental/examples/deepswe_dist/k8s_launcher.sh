@@ -130,6 +130,33 @@ case "${ROLLOUT_PRIORITY_SCHEDULING}" in
     exit 1
     ;;
 esac
+
+export STAGGERED_ROLLOUT_POOLS="${STAGGERED_ROLLOUT_POOLS:-false}"
+case "${STAGGERED_ROLLOUT_POOLS}" in
+  true|True|1) STAGGERED_ROLLOUT_POOLS=true ;;
+  false|False|0) STAGGERED_ROLLOUT_POOLS=false ;;
+  *)
+    echo "STAGGERED_ROLLOUT_POOLS must be true or false, got '${STAGGERED_ROLLOUT_POOLS}'" >&2
+    exit 1
+    ;;
+esac
+export NUM_ROLLOUT_POOLS="${NUM_ROLLOUT_POOLS:-}"
+export WEIGHT_SYNC_POOL_ONLY="${WEIGHT_SYNC_POOL_ONLY:-false}"
+case "${WEIGHT_SYNC_POOL_ONLY}" in
+  true|True|1) WEIGHT_SYNC_POOL_ONLY=true ;;
+  false|False|0) WEIGHT_SYNC_POOL_ONLY=false ;;
+  *)
+    echo "WEIGHT_SYNC_POOL_ONLY must be true or false, got '${WEIGHT_SYNC_POOL_ONLY}'" >&2
+    exit 1
+    ;;
+esac
+if [[ "${STAGGERED_ROLLOUT_POOLS}" == "true" ]]; then
+  # Independent pools eliminate cross-batch contention, so initial dispatch
+  # stagger and priority scheduling are not needed and default to 0 / false.
+  export INITIAL_DISPATCH_STAGGER_S="${INITIAL_DISPATCH_STAGGER_S:-0}"
+  export INITIAL_DISPATCH_FIRST_STAGGER_S="${INITIAL_DISPATCH_FIRST_STAGGER_S:-0}"
+  export ROLLOUT_PRIORITY_SCHEDULING=false
+fi
 # Seconds between the start-up prompt batches (batch k held until k * this
 # after batch 0 dispatches). Default 0 = no stagger.
 export INITIAL_DISPATCH_STAGGER_S=${INITIAL_DISPATCH_STAGGER_S:-0}
@@ -564,6 +591,9 @@ start_orchestrator() {
         $([[ "${PIPELINE_TRAIN_MICROBATCHES}" == "true" || "${PIPELINE_TRAIN_MICROBATCHES}" == "True" || "${PIPELINE_TRAIN_MICROBATCHES}" == "1" ]] && echo --pipeline_train_microbatches || echo --no-pipeline_train_microbatches) \
         $([[ "${IN_FLIGHT_WEIGHT_UPDATES}" == "true" || "${IN_FLIGHT_WEIGHT_UPDATES}" == "True" || "${IN_FLIGHT_WEIGHT_UPDATES}" == "1" ]] && echo --in_flight_weight_updates || echo --no-in_flight_weight_updates) \
         $([[ "${ROLLOUT_PRIORITY_SCHEDULING}" == "true" ]] && echo --rollout_priority_scheduling || echo --no-rollout_priority_scheduling) \
+        $([[ "${STAGGERED_ROLLOUT_POOLS}" == "true" ]] && echo --staggered_rollout_pools || echo --no-staggered_rollout_pools) \
+        ${NUM_ROLLOUT_POOLS:+--num_rollout_pools=${NUM_ROLLOUT_POOLS}} \
+        $([[ "${WEIGHT_SYNC_POOL_ONLY}" == "true" ]] && echo --weight_sync_pool_only || echo --no-weight_sync_pool_only) \
         $([[ "${INITIAL_DISPATCH_STAGGER_S}" != "0" && "${INITIAL_DISPATCH_STAGGER_S}" != "0.0" && -n "${INITIAL_DISPATCH_STAGGER_S}" ]] && echo --initial_dispatch_stagger_s=${INITIAL_DISPATCH_STAGGER_S})$([[ -n "${INITIAL_DISPATCH_FIRST_STAGGER_S}" && "${INITIAL_DISPATCH_FIRST_STAGGER_S}" != "0" && "${INITIAL_DISPATCH_FIRST_STAGGER_S}" != "0.0" ]] && echo " --initial_dispatch_first_stagger_s=${INITIAL_DISPATCH_FIRST_STAGGER_S}")$([[ "${TRAINER_WARMUP_COMPILE}" == "true" || "${TRAINER_WARMUP_COMPILE}" == "True" || "${TRAINER_WARMUP_COMPILE}" == "1" ]] && echo " --trainer_warmup_compile$([[ "${RETURN_ROUTED_EXPERTS}" == "true" || "${RETURN_ROUTED_EXPERTS}" == "True" || "${RETURN_ROUTED_EXPERTS}" == "1" ]] && echo " --trainer_warmup_routed_experts")") \
         ${dataset_args} \
         ${shuffle_arg} \

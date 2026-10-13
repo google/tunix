@@ -987,7 +987,10 @@ class WeightSyncCoordinator:
     return members
 
   def _destinations(
-      self, *, only_pending: bool = False
+      self,
+      *,
+      only_pending: bool = False,
+      destination_workers: Optional[Sequence[Any]] = None,
   ) -> list[WeightSyncDestination]:
     """Returns registered destination workers eligible for weight sync."""
     if only_pending:
@@ -1000,8 +1003,17 @@ class WeightSyncCoordinator:
     members = self._members(
         self._destination_role,
         states=target_states,
-        allow_empty=only_pending,
+        allow_empty=only_pending or (destination_workers is not None),
     )
+    if destination_workers is not None:
+      allowed = set(destination_workers)
+      filtered = []
+      for m in members:
+        wid = _worker_id(m)
+        handle = getattr(m, "handle", None)
+        if m in allowed or wid in allowed or handle in allowed:
+          filtered.append(m)
+      members = filtered
     for member in members:
       if not isinstance(member, WeightSyncDestination):
         raise TypeError(
@@ -1170,6 +1182,7 @@ class WeightSyncCoordinator:
       *,
       source_staged: Optional[asyncio.Event] = None,
       only_pending: bool = False,
+      destination_workers: Optional[Sequence[Any]] = None,
       **extra_config,
   ) -> WeightSyncResult:
     """Runs one full round; returns only if it committed.
@@ -1190,6 +1203,9 @@ class WeightSyncCoordinator:
       only_pending: When True, only targets destinations in
         `PENDING_WEIGHT_SYNC` without quiescing or interrupting `ACTIVE`
         destinations.
+      destination_workers: Optional subset of destination worker objects,
+        ActorHandles, or worker_ids to sync. When None, all eligible destination
+        workers are synced.
       **extra_config: Carried to the workers in the request.
     """
     if self._poisoned:
@@ -1220,6 +1236,7 @@ class WeightSyncCoordinator:
               extra_config,
               source_staged=source_staged,
               only_pending=only_pending,
+              destination_workers=destination_workers,
           )
         except WeightSyncError as err:
           res = err.result
@@ -1254,11 +1271,11 @@ class WeightSyncCoordinator:
                 worker_registry.MembershipState.ACTIVE,
                 worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
             )
-          remaining_destinations = self._registry.group(
-              self._destination_role,
-              states=target_states,
+          remaining_destinations = self._destinations(
+              only_pending=only_pending,
+              destination_workers=destination_workers,
           )
-          if remaining_destinations.is_empty():
+          if not remaining_destinations:
             raise
           can_retry = (
               evicted_any
@@ -1286,6 +1303,7 @@ class WeightSyncCoordinator:
               extra_config,
               source_staged=source_staged,
               only_pending=only_pending,
+              destination_workers=destination_workers,
           )
       except WeightSyncError as err:
         res = err.result
@@ -1376,6 +1394,7 @@ class WeightSyncCoordinator:
       source_staged: Optional[asyncio.Event] = None,
       *,
       only_pending: bool = False,
+      destination_workers: Optional[Sequence[Any]] = None,
   ) -> WeightSyncResult:
     round_index = self._round_index
     self._round_index += 1
@@ -1384,7 +1403,9 @@ class WeightSyncCoordinator:
     req_id = f"{self._req_id_prefix}-v{policy_version}-r{round_index}"
 
     sources = self._sources()
-    destinations = self._destinations(only_pending=only_pending)
+    destinations = self._destinations(
+        only_pending=only_pending, destination_workers=destination_workers
+    )
 
     state = RoundState.PREPARING
     transfer: Optional[weight_sync.TransferResult] = None
