@@ -93,6 +93,15 @@ if [[ "$TRAINER_BACKEND" == "maxtext" && -z "$MAXTEXT_CKPT" ]]; then
   exit 1
 fi
 export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-artifacts/deepswe_dist/maxtext}
+export MAXTEXT_EXTRA_FLAGS=${MAXTEXT_EXTRA_FLAGS:-}
+export PROFILER_STEPS=${PROFILER_STEPS:-0}
+export SKIP_FIRST_N_PROFILER_STEPS=${SKIP_FIRST_N_PROFILER_STEPS:-}
+export PROFILER_PERIOD=${PROFILER_PERIOD:-}
+export ENABLE_TPU_PROFILING_OPTIONS=${ENABLE_TPU_PROFILING_OPTIONS:-true}
+export TPU_PROFILE_CHIPS_PER_TASK=${TPU_PROFILE_CHIPS_PER_TASK:-1}
+export TPU_PROFILE_SPARSE_CORES=${TPU_PROFILE_SPARSE_CORES:-1}
+export TPU_PROFILE_SPARSE_CORE_TILES=${TPU_PROFILE_SPARSE_CORE_TILES:-1}
+export UPLOAD_ALL_PROFILER_RESULTS=${UPLOAD_ALL_PROFILER_RESULTS:-false}
 export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
 # Padded MoE MLP intermediate dimension; must match rollout TP padding for MoE models.
@@ -266,6 +275,31 @@ stop_trainer() {
 
 start_trainer() {
   local maxtext_args=""
+  local profiler_flags=""
+  if [[ -n "$PROFILER_STEPS" ]]; then
+    profiler_flags+=" --profiler_steps=${PROFILER_STEPS}"
+  fi
+  if [[ -n "$SKIP_FIRST_N_PROFILER_STEPS" ]]; then
+    profiler_flags+=" --skip_first_n_profiler_steps=${SKIP_FIRST_N_PROFILER_STEPS}"
+  fi
+  if [[ -n "$PROFILER_PERIOD" ]]; then
+    profiler_flags+=" --profiler_period=${PROFILER_PERIOD}"
+  fi
+  if [[ -n "$ENABLE_TPU_PROFILING_OPTIONS" ]]; then
+    profiler_flags+=" --enable_tpu_profiling_options=${ENABLE_TPU_PROFILING_OPTIONS}"
+  fi
+  if [[ -n "$TPU_PROFILE_CHIPS_PER_TASK" ]]; then
+    profiler_flags+=" --tpu_num_chips_to_profile_per_task=${TPU_PROFILE_CHIPS_PER_TASK}"
+  fi
+  if [[ -n "$TPU_PROFILE_SPARSE_CORES" ]]; then
+    profiler_flags+=" --tpu_num_sparse_cores_to_trace=${TPU_PROFILE_SPARSE_CORES}"
+  fi
+  if [[ -n "$TPU_PROFILE_SPARSE_CORE_TILES" ]]; then
+    profiler_flags+=" --tpu_num_sparse_core_tiles_to_trace=${TPU_PROFILE_SPARSE_CORE_TILES}"
+  fi
+  if [[ -n "$UPLOAD_ALL_PROFILER_RESULTS" ]]; then
+    profiler_flags+=" --upload_all_profiler_results=${UPLOAD_ALL_PROFILER_RESULTS}"
+  fi
   if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
     maxtext_args=" \
       --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
@@ -311,7 +345,7 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${CKPT_D2H_CONCURRENT_GB:+ CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${CKPT_D2H_CONCURRENT_GB:+ CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}}${MAXTEXT_EXTRA_FLAGS:+ MAXTEXT_EXTRA_FLAGS=\"${MAXTEXT_EXTRA_FLAGS}\"}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_trainer_node.main \
@@ -338,6 +372,7 @@ start_trainer() {
         --sampler=${SAMPLER} \
         ${lora_args} \
         ${maxtext_args} \
+        ${profiler_flags} \
         ${DEBUG:+--debug} \
     " \
     | apply_manifest

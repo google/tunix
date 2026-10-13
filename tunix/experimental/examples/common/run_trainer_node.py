@@ -481,6 +481,46 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=-1,
       help="Profile every N steps. If negative, profile only once.",
   )
+  parser.add_argument(
+      "--enable_tpu_profiling_options",
+      type=_str2bool,
+      default=True,
+      nargs="?",
+      const=True,
+      help=(
+          "Pass the --tpu_num_* TPU profiling options to MaxText when"
+          " profiling. MaxText's training engine profiler ignores them for now."
+      ),
+  )
+  parser.add_argument(
+      "--tpu_num_chips_to_profile_per_task",
+      type=int,
+      default=1,
+      help="Number of TPU chips to profile per host task.",
+  )
+  parser.add_argument(
+      "--tpu_num_sparse_cores_to_trace",
+      type=int,
+      default=1,
+      help="Number of TPU SparseCores to trace per chip.",
+  )
+  parser.add_argument(
+      "--tpu_num_sparse_core_tiles_to_trace",
+      type=int,
+      default=1,
+      help="Number of TPU SparseCore tiles to trace per SparseCore.",
+  )
+  parser.add_argument(
+      "--upload_all_profiler_results",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help=(
+          "Ask MaxText to upload profiles from all hosts, not only host 0."
+          " MaxText's training engine profiler ignores this for now."
+      ),
+  )
   return parser.parse_args(argv)
 
 
@@ -654,6 +694,11 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
         skip_first_n_steps=args.skip_first_n_profiler_steps,
         profiler_steps=args.profiler_steps,
         profiler_period=args.profiler_period,
+        enable_tpu_profiling_options=args.enable_tpu_profiling_options,
+        tpu_num_chips_to_profile_per_task=args.tpu_num_chips_to_profile_per_task,
+        tpu_num_sparse_cores_to_trace=args.tpu_num_sparse_cores_to_trace,
+        tpu_num_sparse_core_tiles_to_trace=args.tpu_num_sparse_core_tiles_to_trace,
+        upload_all_profiler_results=args.upload_all_profiler_results,
     )
 
   maxtext_config = maxtext_utils.build_maxtext_config(

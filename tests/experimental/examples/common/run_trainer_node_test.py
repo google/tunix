@@ -463,7 +463,50 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     run_trainer_node._create_maxtext_trainer_factory(args)
     mock_build_cfg.assert_called_once()
     self.assertEqual(
-        mock_build_cfg.call_args.kwargs.get("max_seq_token_per_tpu"), 4096
+        mock_build_cfg.call_args.kwargs["max_seq_token_per_tpu"], 4096
+    )
+
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_plumbs_profiler_and_tpu_options(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    del mock_create_mesh, mock_get_pad_id
+    args = run_trainer_node._parse_args([
+        "--profiler_steps",
+        "3",
+        "--skip_first_n_profiler_steps",
+        "8",
+        "--profiler_period",
+        "10",
+        "--enable_tpu_profiling_options=false",
+        "--tpu_num_chips_to_profile_per_task",
+        "2",
+        "--tpu_num_sparse_cores_to_trace",
+        "3",
+        "--tpu_num_sparse_core_tiles_to_trace",
+        "4",
+        "--upload_all_profiler_results=true",
+    ])
+    run_trainer_node._create_maxtext_trainer_factory(args)
+    mock_build_cfg.assert_called_once()
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs["profiling_options"],
+        run_trainer_node.maxtext_utils.ProfilerOptions(
+            skip_first_n_steps=8,
+            profiler_steps=3,
+            profiler_period=10,
+            enable_tpu_profiling_options=False,
+            tpu_num_chips_to_profile_per_task=2,
+            tpu_num_sparse_cores_to_trace=3,
+            tpu_num_sparse_core_tiles_to_trace=4,
+            upload_all_profiler_results=True,
+        ),
     )
 
   @mock.patch.object(

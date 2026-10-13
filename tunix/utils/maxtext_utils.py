@@ -31,6 +31,16 @@ class ProfilerOptions:
   profiler_steps: int
   # If positive, profile every N steps.
   profiler_period: int = -1
+  # TPU advanced profiling options, meant to bound XSpace proto size and
+  # extend the SparseCore trace window across multi-second training micro-steps.
+  # MaxText's training engine profiler (MicroStepProfiler) does not read these
+  # or upload_all_profiler_results yet: it honors only the step settings above
+  # and traces only host 0.
+  enable_tpu_profiling_options: bool = True
+  tpu_num_chips_to_profile_per_task: int = 1
+  tpu_num_sparse_cores_to_trace: int = 1
+  tpu_num_sparse_core_tiles_to_trace: int = 1
+  upload_all_profiler_results: bool = False
 
 
 def maxtext_modules():
@@ -347,9 +357,26 @@ def build_maxtext_config(
 
   if profiling_options is not None:
     argv.extend([
+        "profiler=xplane",
         f"profiler_steps={profiling_options.profiler_steps}",
         f"skip_first_n_steps_for_profiler={profiling_options.skip_first_n_steps}",
         f"profile_periodically_period={profiling_options.profiler_period}",
+        f"upload_all_profiler_results={str(profiling_options.upload_all_profiler_results).lower()}",
+    ])
+    if profiling_options.enable_tpu_profiling_options:
+      argv.extend([
+          "enable_tpu_profiling_options=true",
+          f"tpu_num_chips_to_profile_per_task={profiling_options.tpu_num_chips_to_profile_per_task}",
+          f"tpu_num_sparse_cores_to_trace={profiling_options.tpu_num_sparse_cores_to_trace}",
+          f"tpu_num_sparse_core_tiles_to_trace={profiling_options.tpu_num_sparse_core_tiles_to_trace}",
+      ])
+    else:
+      argv.append("enable_tpu_profiling_options=false")
+  else:
+    argv.extend([
+        "profiler=''",
+        "profiler_steps=0",
+        "skip_first_n_steps_for_profiler=-1",
     ])
 
   argv.extend([
@@ -419,6 +446,20 @@ def build_maxtext_config(
         _d2h_gb,
     )
     argv.append(f"checkpoint_storage_device_host_concurrent_gb={_d2h_gb}")
+
+  _extra = os.environ.get("MAXTEXT_EXTRA_FLAGS", "").strip()
+  if _extra:
+    _pairs = [tok for tok in _extra.split() if tok]
+    _bad = [tok for tok in _pairs if "=" not in tok]
+    if _bad:
+      raise ValueError(
+          "MAXTEXT_EXTRA_FLAGS entries must be key=value, got: "
+          f"{' '.join(_bad)}"
+      )
+    logging.info(
+        "MAXTEXT_EXTRA_FLAGS adding %d flag(s): %s", len(_pairs), _pairs
+    )
+    argv.extend(_pairs)
 
   logging.info("MaxText config argv: %s", argv)
   return pyconfig.initialize(argv)

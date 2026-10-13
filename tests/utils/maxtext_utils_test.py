@@ -512,6 +512,88 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertIn("per_device_batch_size=0.25", argv)
     self.assertIn("max_target_length=4096", argv)
 
+  def test_build_maxtext_config_profiling_options_enables_xplane_and_tpu_options(
+      self,
+  ):
+    argv = self._build_config_argv(
+        profiling_options=maxtext_utils.ProfilerOptions(
+            skip_first_n_steps=8,
+            profiler_steps=3,
+            profiler_period=-1,
+        ),
+    )
+    self.assertIn("profiler=xplane", argv)
+    self.assertIn("profiler_steps=3", argv)
+    self.assertIn("skip_first_n_steps_for_profiler=8", argv)
+    self.assertIn("profile_periodically_period=-1", argv)
+    self.assertIn("upload_all_profiler_results=false", argv)
+    self.assertIn("enable_tpu_profiling_options=true", argv)
+    self.assertIn("tpu_num_chips_to_profile_per_task=1", argv)
+    self.assertIn("tpu_num_sparse_cores_to_trace=1", argv)
+    self.assertIn("tpu_num_sparse_core_tiles_to_trace=1", argv)
+
+  def test_build_maxtext_config_profiling_options_custom_tpu_and_upload_flags(
+      self,
+  ):
+    argv = self._build_config_argv(
+        profiling_options=maxtext_utils.ProfilerOptions(
+            skip_first_n_steps=5,
+            profiler_steps=6,
+            profiler_period=10,
+            enable_tpu_profiling_options=True,
+            tpu_num_chips_to_profile_per_task=2,
+            tpu_num_sparse_cores_to_trace=2,
+            tpu_num_sparse_core_tiles_to_trace=16,
+            upload_all_profiler_results=True,
+        ),
+    )
+    self.assertIn("profiler=xplane", argv)
+    self.assertIn("profiler_steps=6", argv)
+    self.assertIn("skip_first_n_steps_for_profiler=5", argv)
+    self.assertIn("profile_periodically_period=10", argv)
+    self.assertIn("upload_all_profiler_results=true", argv)
+    self.assertIn("enable_tpu_profiling_options=true", argv)
+    self.assertIn("tpu_num_chips_to_profile_per_task=2", argv)
+    self.assertIn("tpu_num_sparse_cores_to_trace=2", argv)
+    self.assertIn("tpu_num_sparse_core_tiles_to_trace=16", argv)
+
+    argv_disabled_tpu = self._build_config_argv(
+        profiling_options=maxtext_utils.ProfilerOptions(
+            skip_first_n_steps=1,
+            profiler_steps=2,
+            enable_tpu_profiling_options=False,
+        ),
+    )
+    self.assertIn("profiler=xplane", argv_disabled_tpu)
+    self.assertIn("enable_tpu_profiling_options=false", argv_disabled_tpu)
+    self.assertEmpty([a for a in argv_disabled_tpu if a.startswith("tpu_num_")])
+
+  def test_build_maxtext_config_profiling_options_none_disables_profiler(self):
+    argv = self._build_config_argv(profiling_options=None)
+    self.assertIn("profiler=''", argv)
+    self.assertIn("profiler_steps=0", argv)
+    self.assertIn("skip_first_n_steps_for_profiler=-1", argv)
+    self.assertNotIn("profiler=xplane", argv)
+
+  def test_build_maxtext_config_maxtext_extra_flags_passthrough_and_validation(
+      self,
+  ):
+    with mock.patch.dict(
+        "os.environ",
+        {"MAXTEXT_EXTRA_FLAGS": "use_ring_of_experts=true sa_block_q=512"},
+    ):
+      argv = self._build_config_argv()
+    self.assertEqual(argv[-2:], ["use_ring_of_experts=true", "sa_block_q=512"])
+
+    with mock.patch.dict(
+        "os.environ",
+        {"MAXTEXT_EXTRA_FLAGS": "use_ring_of_experts=true invalid_flag"},
+    ):
+      with self.assertRaisesRegex(
+          ValueError, "MAXTEXT_EXTRA_FLAGS entries must be key=value"
+      ):
+        self._build_config_argv()
+
 
 if __name__ == "__main__":
   absltest.main()
