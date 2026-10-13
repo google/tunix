@@ -177,16 +177,22 @@ class SubmissionLauncherTest(absltest.TestCase):
   def test_start_up_flags_are_emitted(self):
     orch = _jobset(self.default, "orch")
     self.assertIn("--initial_dispatch_stagger_s=75", orch)
+    self.assertIn("--initial_dispatch_first_stagger_s=175", orch)
     self.assertIn("--trainer_warmup_compile", orch)
     self.assertIn("--trainer_warmup_routed_experts", orch)
     self.assertIn("--no-sandbox_wait_initial", orch)
 
   def test_start_up_flags_can_be_turned_off(self):
     orch = _jobset(
-        _render(INITIAL_DISPATCH_STAGGER_S="0", TRAINER_WARMUP_COMPILE="false"),
+        _render(
+            INITIAL_DISPATCH_STAGGER_S="0",
+            INITIAL_DISPATCH_FIRST_STAGGER_S="0",
+            TRAINER_WARMUP_COMPILE="false",
+        ),
         "orch",
     )
     self.assertNotIn("--initial_dispatch_stagger_s", orch)
+    self.assertNotIn("--initial_dispatch_first_stagger_s", orch)
     self.assertNotIn("--trainer_warmup_compile", orch)
 
   def test_rollout_attention_without_data_parallelism(self):

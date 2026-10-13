@@ -673,6 +673,7 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
     block = _deepswe_k8s_orchestrator_block()
     for flag in (
         "--initial_dispatch_stagger_s=",
+        "--initial_dispatch_first_stagger_s=",
         "--trainer_warmup_compile",
         "--trainer_warmup_routed_experts",
     ):
@@ -682,6 +683,13 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
     defaults = parse([])
     self.assertFalse(defaults.trainer_warmup_compile)
     self.assertFalse(defaults.trainer_warmup_routed_experts)
+    self.assertIsNone(defaults.initial_dispatch_first_stagger_s)
+    self.assertEqual(
+        parse(
+            ["--initial_dispatch_first_stagger_s=175"]
+        ).initial_dispatch_first_stagger_s,
+        175.0,
+    )
     parsed = parse([
         "--trainer_warmup_compile",
         "--trainer_warmup_routed_experts",

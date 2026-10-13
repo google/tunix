@@ -42,8 +42,12 @@ export LEARNING_RATE="${LEARNING_RATE:-$(python3 -c "import math; print(f'{1e-6 
 export MAX_GRAD_NORM="${MAX_GRAD_NORM:-$(python3 -c "import math; print(f'{2 / math.sqrt(${_gbs}):.6g}')")}"
 unset _gbs
 
-# Start-up: hold each prompt batch 75 s after the previous one, and compile the
-# trainer on a synthetic micro-batch before run_start.
+# Start-up: hold batch 1 175 s after batch 0 and each later start-up batch 75 s
+# after the previous one (batch 2 at 250 s), and compile the trainer on a
+# synthetic micro-batch before run_start. The longer first gap keeps batch 1 off
+# the engines for most of batch 0, which otherwise decodes ~30% slower alongside
+# the next batches.
+export INITIAL_DISPATCH_FIRST_STAGGER_S="${INITIAL_DISPATCH_FIRST_STAGGER_S:-175}"
 export INITIAL_DISPATCH_STAGGER_S="${INITIAL_DISPATCH_STAGGER_S:-75}"
 export TRAINER_WARMUP_COMPILE="${TRAINER_WARMUP_COMPILE:-true}"
 export SANDBOX_WAIT_INITIAL="${SANDBOX_WAIT_INITIAL:-false}"

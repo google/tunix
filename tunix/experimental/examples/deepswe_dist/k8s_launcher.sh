@@ -133,6 +133,10 @@ esac
 # Seconds between the start-up prompt batches (batch k held until k * this
 # after batch 0 dispatches). Default 0 = no stagger.
 export INITIAL_DISPATCH_STAGGER_S=${INITIAL_DISPATCH_STAGGER_S:-0}
+# Seconds batch 1 is held after batch 0 dispatches when it should differ from
+# INITIAL_DISPATCH_STAGGER_S (then batch k > 1 follows at FIRST + (k - 1) *
+# INITIAL_DISPATCH_STAGGER_S). Empty (default) or 0 = INITIAL_DISPATCH_STAGGER_S.
+export INITIAL_DISPATCH_FIRST_STAGGER_S=${INITIAL_DISPATCH_FIRST_STAGGER_S:-}
 # `true` compiles the trainer at bring-up against one synthetic micro-batch
 # (before run_start) instead of on the first real micro-batch. Default false.
 export TRAINER_WARMUP_COMPILE=${TRAINER_WARMUP_COMPILE:-false}
@@ -555,7 +559,7 @@ start_orchestrator() {
         $([[ "${PIPELINE_TRAIN_MICROBATCHES}" == "true" || "${PIPELINE_TRAIN_MICROBATCHES}" == "True" || "${PIPELINE_TRAIN_MICROBATCHES}" == "1" ]] && echo --pipeline_train_microbatches || echo --no-pipeline_train_microbatches) \
         $([[ "${IN_FLIGHT_WEIGHT_UPDATES}" == "true" || "${IN_FLIGHT_WEIGHT_UPDATES}" == "True" || "${IN_FLIGHT_WEIGHT_UPDATES}" == "1" ]] && echo --in_flight_weight_updates || echo --no-in_flight_weight_updates) \
         $([[ "${ROLLOUT_PRIORITY_SCHEDULING}" == "true" ]] && echo --rollout_priority_scheduling || echo --no-rollout_priority_scheduling) \
-        $([[ "${INITIAL_DISPATCH_STAGGER_S}" != "0" && "${INITIAL_DISPATCH_STAGGER_S}" != "0.0" && -n "${INITIAL_DISPATCH_STAGGER_S}" ]] && echo --initial_dispatch_stagger_s=${INITIAL_DISPATCH_STAGGER_S})$([[ "${TRAINER_WARMUP_COMPILE}" == "true" || "${TRAINER_WARMUP_COMPILE}" == "True" || "${TRAINER_WARMUP_COMPILE}" == "1" ]] && echo " --trainer_warmup_compile$([[ "${RETURN_ROUTED_EXPERTS}" == "true" || "${RETURN_ROUTED_EXPERTS}" == "True" || "${RETURN_ROUTED_EXPERTS}" == "1" ]] && echo " --trainer_warmup_routed_experts")") \
+        $([[ "${INITIAL_DISPATCH_STAGGER_S}" != "0" && "${INITIAL_DISPATCH_STAGGER_S}" != "0.0" && -n "${INITIAL_DISPATCH_STAGGER_S}" ]] && echo --initial_dispatch_stagger_s=${INITIAL_DISPATCH_STAGGER_S})$([[ -n "${INITIAL_DISPATCH_FIRST_STAGGER_S}" && "${INITIAL_DISPATCH_FIRST_STAGGER_S}" != "0" && "${INITIAL_DISPATCH_FIRST_STAGGER_S}" != "0.0" ]] && echo " --initial_dispatch_first_stagger_s=${INITIAL_DISPATCH_FIRST_STAGGER_S}")$([[ "${TRAINER_WARMUP_COMPILE}" == "true" || "${TRAINER_WARMUP_COMPILE}" == "True" || "${TRAINER_WARMUP_COMPILE}" == "1" ]] && echo " --trainer_warmup_compile$([[ "${RETURN_ROUTED_EXPERTS}" == "true" || "${RETURN_ROUTED_EXPERTS}" == "True" || "${RETURN_ROUTED_EXPERTS}" == "1" ]] && echo " --trainer_warmup_routed_experts")") \
         ${dataset_args} \
         ${shuffle_arg} \
         ${sandbox_arg} \

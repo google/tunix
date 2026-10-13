@@ -392,6 +392,63 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(program.num_generations, 5)
     self.assertEqual(program.mini_batch_size, 3)
 
+  def test_initial_dispatch_offsets(self):
+    def offsets(**kwargs):
+      program = rl_program.StandardRLProgram(
+          dataset=["prompt_1"], algo=self.mock_algo, **kwargs
+      )
+      return [program._initial_dispatch_offset(k) for k in range(4)]  # pylint: disable=protected-access
+
+    # one stagger for every gap (the first gap defaults to it)
+    self.assertEqual(
+        offsets(initial_dispatch_stagger_s=75.0), [0.0, 75.0, 150.0, 225.0]
+    )
+    # a longer gap before batch 1, then the regular stagger
+    self.assertEqual(
+        offsets(
+            initial_dispatch_stagger_s=75.0,
+            initial_dispatch_first_stagger_s=175.0,
+        ),
+        [0.0, 175.0, 250.0, 325.0],
+    )
+    # only batch 1 held
+    self.assertEqual(
+        offsets(initial_dispatch_first_stagger_s=175.0),
+        [0.0, 175.0, 175.0, 175.0],
+    )
+    self.assertEqual(offsets(), [0.0, 0.0, 0.0, 0.0])
+    with self.assertRaisesRegex(ValueError, "first_stagger_s must be non"):
+      rl_program.StandardRLProgram(
+          dataset=["prompt_1"],
+          algo=self.mock_algo,
+          initial_dispatch_first_stagger_s=-1.0,
+      )
+
+  def test_initial_stagger_holds_batch_one_for_the_first_gap(self):
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_1"],
+        algo=self.mock_algo,
+        initial_dispatch_stagger_s=75.0,
+        initial_dispatch_first_stagger_s=175.0,
+    )
+    sleeps = []
+
+    async def fake_sleep(s):
+      sleeps.append(round(s, 3))
+
+    async def _run():
+      with mock.patch.object(rl_program.time, "monotonic", return_value=1000.0):
+        await program._hold_initial_stagger(0)  # pylint: disable=protected-access
+      with mock.patch.object(
+          rl_program.time, "monotonic", return_value=1010.0
+      ), mock.patch.object(rl_program.asyncio, "sleep", fake_sleep):
+        await program._hold_initial_stagger(1)  # pylint: disable=protected-access
+        await program._hold_initial_stagger(2)  # pylint: disable=protected-access
+
+    asyncio.run(_run())
+    # batch 1 due at 1000 + 175, batch 2 at 1000 + 175 + 75; both asked at 1010
+    self.assertEqual(sleeps, [165.0, 240.0])
+
   def test_unexpected_num_generations_argument_raises_type_error(self):
     with self.assertRaises(TypeError):
       rl_program.StandardRLProgram(  # pyrefly: ignore[unexpected-keyword-arg]

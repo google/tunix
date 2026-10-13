@@ -307,10 +307,22 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       type=float,
       default=0.0,
       help=(
-          "Stagger the start-up prompt batches: batch k is held until"
-          " k * this many seconds after batch 0 first dispatches. Applies only"
-          " before the trainer consumes its first batch. 0 (default) dispatches"
-          " the start-up batches as soon as the staleness window allows."
+          "Stagger the start-up prompt batches: each batch after batch 1 is"
+          " held this many seconds after the one before it (batch 1 waits"
+          " --initial_dispatch_first_stagger_s, which defaults to this value)."
+          " Applies only before the trainer consumes its first batch. 0"
+          " (default) dispatches the start-up batches as soon as the staleness"
+          " window allows."
+      ),
+  )
+  parser.add_argument(
+      "--initial_dispatch_first_stagger_s",
+      type=float,
+      default=None,
+      help=(
+          "Seconds batch 1 is held after batch 0 first dispatches; later"
+          " start-up batches follow every --initial_dispatch_stagger_s. Unset"
+          " (default) uses --initial_dispatch_stagger_s for batch 1 as well."
       ),
   )
   parser.add_argument(
@@ -1196,6 +1208,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         partial_rollout=args.in_flight_weight_updates,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
         initial_dispatch_stagger_s=args.initial_dispatch_stagger_s,
+        initial_dispatch_first_stagger_s=args.initial_dispatch_first_stagger_s,
         on_train_start=_on_train_start,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",
