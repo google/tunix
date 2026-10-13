@@ -54,12 +54,12 @@ export MAXTEXT_MODEL_NAME="qwen3.5-397b-a17b"
 # 4x4x8 = 128 chips = 256 devices.
 # Sharding: TP=1, FSDP=32, CP=4, EP=2, cp-as-ep.
 # Mesh product: 32 * 1 * 2 * 4 = 256 devices.
-export TRAINER_JOBSET_YAML="jobset.pathways.yaml"
-export TRAINER_TPU_SLICE="tpu7x:4x4x8"
-export TRAINER_MESH_FSDP=32
-export TRAINER_MESH_TP=1
-export TRAINER_MESH_EXPERT=2
-export TRAINER_MESH_CONTEXT=4
+export TRAINER_JOBSET_YAML="${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}"
+export TRAINER_TPU_SLICE="${TRAINER_TPU_SLICE:-tpu7x:4x4x8}"
+export TRAINER_MESH_FSDP="${TRAINER_MESH_FSDP:-32}"
+export TRAINER_MESH_TP="${TRAINER_MESH_TP:-1}"
+export TRAINER_MESH_EXPERT="${TRAINER_MESH_EXPERT:-2}"
+export TRAINER_MESH_CONTEXT="${TRAINER_MESH_CONTEXT:-4}"
 
 # Rollout: 8 chips = 16 devices = 2 hosts per replica. dp * tp * expert must equal
 # the DEVICE count, so expert=16 on 8 chips. Scaled rollout recipes
