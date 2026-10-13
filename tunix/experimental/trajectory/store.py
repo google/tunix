@@ -4,6 +4,7 @@ import abc
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
+from absl import logging
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 
 # ==============================================================================
@@ -251,6 +252,7 @@ class TrajectoryStore(TrajectoryReader, TrajectoryWriter, abc.ABC):
     # Ensure built-in backends are imported so their __init_subclass__ hooks
     # have registered them in _REGISTRY before lookup. Imported here rather
     # than at module level because all implementations import this module.
+    import sqlalchemy as sa  # pylint: disable=g-import-not-at-top
     from tunix.experimental.trajectory import file_store  # pylint: disable=g-import-not-at-top,unused-import
     from tunix.experimental.trajectory import in_memory_store  # pylint: disable=g-import-not-at-top,unused-import
     from tunix.experimental.trajectory import sql_store  # pylint: disable=g-import-not-at-top,unused-import
@@ -261,4 +263,12 @@ class TrajectoryStore(TrajectoryReader, TrajectoryWriter, abc.ABC):
           f"Unknown Trajectory Store backend {backend!r}; expected one of"
           f" {sorted(cls._REGISTRY)}."
       )
-    return cls._REGISTRY[backend]._from_config(config)  # pylint: disable=protected-access
+    try:
+      return cls._REGISTRY[backend]._from_config(config)  # pylint: disable=protected-access
+    except (sa.exc.SQLAlchemyError, OSError):
+      logging.warning(
+          "Failed to connect to %r TrajectoryStore; skipping store.",
+          backend,
+          exc_info=True,
+      )
+      return None
