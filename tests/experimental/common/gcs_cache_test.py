@@ -380,7 +380,7 @@ class GcsCacheTest(absltest.TestCase):
     self.assertTrue(res1.startswith("gs://test-bucket/jax_cache/v5p/qwen3.5-35b-a3b/rollout_2x2x1_ep8_tp1_"))
 
     # Verify that changing quantization changes the fingerprint hash
-    cmd_fp8 = f"export ROLLOUT_FP8=true; {cmd}"
+    cmd_fp8 = f"export ROLLOUT_FP8=false; {cmd}"
     res2 = subprocess.check_output(["bash", "-c", cmd_fp8], text=True).strip()
     self.assertTrue(res2.startswith("gs://test-bucket/jax_cache/v5p/qwen3.5-35b-a3b/rollout_2x2x1_ep8_tp1_"))
     self.assertNotEqual(res1, res2)
