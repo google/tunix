@@ -265,7 +265,7 @@ class TrajectoryStore(TrajectoryReader, TrajectoryWriter, abc.ABC):
       )
     try:
       return cls._REGISTRY[backend]._from_config(config)  # pylint: disable=protected-access
-    except (sa.exc.SQLAlchemyError, OSError):
+    except (sa.exc.SQLAlchemyError, OSError, ImportError):
       logging.warning(
           "Failed to connect to %r TrajectoryStore; skipping store.",
           backend,

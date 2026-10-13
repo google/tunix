@@ -186,6 +186,26 @@ class FromConfigTest(absltest.TestCase):
     self.assertIsInstance(stores[0], file_store.FileTrajectoryStore)
     stores[0].close()
 
+  def test_missing_driver_import_error_in_sequence_is_skipped(self):
+    sql_config = {
+        "enabled": True,
+        "backend": "sql",
+        "db_url": "postgresql+psycopg2://user:pass@127.0.0.1:5432/db",
+        "run_id": "run_1",
+    }
+    with mock.patch.object(
+        sql_store.SqlTrajectoryStore,
+        "_from_config",
+        side_effect=ModuleNotFoundError("No module named 'psycopg2'"),
+    ):
+      stores = store_lib.TrajectoryStore.from_config(
+          [self._file_config(), sql_config]
+      )
+    self.assertIsInstance(stores, list)
+    self.assertLen(stores, 1)
+    self.assertIsInstance(stores[0], file_store.FileTrajectoryStore)
+    stores[0].close()
+
 
 class ToConfigTest(absltest.TestCase):
 

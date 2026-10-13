@@ -304,6 +304,36 @@ class TrajectoryCollectEngine:
           reward_time=self.reward_time,
       )
 
+  def _store_add_step(self, step: Any) -> None:
+    """Writes a step to each configured trajectory store, isolating failures."""
+    if self.trajectory_store is None or self.metadata is None:
+      return
+    for store in self.trajectory_store:
+      try:
+        store.add_step(step, self.metadata)
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "%s Failed to record step in %s.",
+            self._debug_prefix,
+            type(store).__name__,
+            exc_info=True,
+        )
+
+  def _store_update_metadata(self) -> None:
+    """Updates trajectory metadata in each configured store, isolating failures."""
+    if self.trajectory_store is None or self.metadata is None:
+      return
+    for store in self.trajectory_store:
+      try:
+        store.update_metadata(self.metadata)
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "%s Failed to update trajectory metadata in %s.",
+            self._debug_prefix,
+            type(store).__name__,
+            exc_info=True,
+        )
+
   async def collect(self, mode: str = "Conversation") -> Any:
     """Execute a complete rollout episode and return the resulting trajectory.
 
@@ -332,8 +362,7 @@ class TrajectoryCollectEngine:
         task = self.agent.trajectory.task or getattr(self.env, "task", None)
         task_step = converter_lib.create_task_step(task)
         if task_step is not None:
-          for store in self.trajectory_store:
-            store.add_step(task_step, self.metadata)
+          self._store_add_step(task_step)
 
       while True:
         if len(self.agent.trajectory.steps) >= self.max_steps:
@@ -383,8 +412,7 @@ class TrajectoryCollectEngine:
                 policy_version=self.policy_version,
             )
             if agent_step is not None:
-              for store in self.trajectory_store:
-                store.add_step(agent_step, self.metadata)
+              self._store_add_step(agent_step)
     except asyncio.TimeoutError:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
       raise
@@ -394,8 +422,7 @@ class TrajectoryCollectEngine:
     finally:
       if self.trajectory_store is not None and self.metadata is not None:
         self.sync_trajectory_metadata(policy_version=self.policy_version)
-        for store in self.trajectory_store:
-          store.update_metadata(self.metadata)
+        self._store_update_metadata()
 
     self.model_time["total_latency"] = float(
         sum(self.model_time["step_latency"])
@@ -1195,8 +1222,7 @@ class TrajectoryCollectEngine:
       )
       if agent_step is not None:
         self.sync_trajectory_metadata(policy_version=self.policy_version)
-        for store in self.trajectory_store:
-          store.add_step(agent_step, self.metadata)
+        self._store_add_step(agent_step)
 
     logging.debug(
         "%s Agent Action:\n%s",
@@ -1312,8 +1338,7 @@ class TrajectoryCollectEngine:
       )
       if env_step is not None:
         self.sync_trajectory_metadata()
-        for store in self.trajectory_store:
-          store.add_step(env_step, self.metadata)
+        self._store_add_step(env_step)
 
     if env_utils.is_debug_inference_logs_enabled():
       turn_idx = max(0, len(self.model_time['step_latency']) - 1)
@@ -1398,8 +1423,7 @@ class TrajectoryCollectEngine:
       )
       if env_step is not None:
         self.sync_trajectory_metadata()
-        for store in self.trajectory_store:
-          store.add_step(env_step, self.metadata)
+        self._store_add_step(env_step)
     logging.debug(
         "%s Final reward computed: %s", self._debug_prefix, final_reward
     )

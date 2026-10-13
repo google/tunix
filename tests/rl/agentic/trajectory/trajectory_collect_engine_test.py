@@ -1346,6 +1346,35 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
       self.assertEqual(metas[0].status, 'SUCCEEDED')
       self.assertEqual(metas[0].target_policy_versions, [42])
 
+  def test_trajectory_store_exception_in_one_store_does_not_block_other_store(
+      self,
+  ):
+    failing_store = mock.MagicMock(spec=in_memory_store.InMemoryTrajectoryStore)
+    failing_store.add_step.side_effect = RuntimeError('writer closed')
+    failing_store.update_metadata.side_effect = RuntimeError('writer closed')
+    healthy_store = in_memory_store.InMemoryTrajectoryStore()
+    metadata = converter_lib.create_trajectory_metadata(
+        traj_id='traj_isolated_123',
+    )
+    self.mock_agent.trajectory.task = {'prompts': ['Solve math']}
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        trajectory_store=[failing_store, healthy_store],
+        metadata=metadata,
+        policy_version=42,
+    )
+    traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    self.assertEqual(traj.status, agent_types.TrajectoryStatus.SUCCEEDED)
+
+    trajs = healthy_store.get_trajectories(['traj_isolated_123'])
+    self.assertLen(trajs, 1)
+    self.assertGreaterEqual(len(trajs[0].steps), 3)
+    metas = healthy_store.get_trajectories_metadata()
+    self.assertLen(metas, 1)
+    self.assertEqual(metas[0].status, 'SUCCEEDED')
+
   def test_debug_inference_logs_with_and_without_metadata(self):
     store = in_memory_store.InMemoryTrajectoryStore()
     metadata = converter_lib.create_trajectory_metadata(

@@ -558,7 +558,15 @@ class TrajectoryCollectorEngine:
         )
       if self.trajectory_store is not None and self.metadata is not None:
         for s in self.trajectory_store:
-          s.update_metadata(self.metadata)
+          try:
+            s.update_metadata(self.metadata)
+          except Exception:  # pylint: disable=broad-exception-caught
+            logging.warning(
+                "Failed to update trajectory metadata in %s for %s.",
+                type(s).__name__,
+                self.traj_id,
+                exc_info=True,
+            )
         self.trajectory_store = None
 
   def get_accumulated_token_ids(self) -> List[int]:

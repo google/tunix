@@ -359,7 +359,7 @@ export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-prompt_batch}
 export USE_DEFAULT_SQL_STORE="${USE_DEFAULT_SQL_STORE:-true}"
 if [[ "${DRY_RUN:-false}" != "true" ]] && [[ -z "${TRAJECTORY_STORE_DB_URL:-}" ]] && [[ "${USE_DEFAULT_SQL_STORE}" =~ ^(1|true|True|TRUE)$ ]]; then
   if [[ -n "${PROJECT:-}" ]]; then
-    TRAJECTORY_STORE_DB_URL="$(gcloud secrets versions access latest --secret=tunix-sql-store-uri --project="${PROJECT}" 2>/dev/null || true)"
+    TRAJECTORY_STORE_DB_URL="$(timeout 10s gcloud secrets versions access latest --secret=tunix-sql-store-uri --project="${PROJECT}" --quiet 2>/dev/null || true)"
   fi
   if [[ -z "${TRAJECTORY_STORE_DB_URL}" ]]; then
     echo "WARNING: USE_DEFAULT_SQL_STORE is enabled but TRAJECTORY_STORE_DB_URL could not be retrieved from GCP Secret Manager for project '${PROJECT:-}'; SQL trajectory store will be skipped." >&2
