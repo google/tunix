@@ -6151,7 +6151,6 @@ class RLProgramTest(absltest.TestCase):
       # Step 0 (batch 0 on pool 0) finishes training and starts background
       # weight sync on pool 0, while commit advances _next_batch to 1.
       program._syncing_pools.add(0)
-      program._syncing_pool = 0
       program._step = 1
       program._release_window()
       await asyncio.sleep(0.05)
@@ -6165,7 +6164,6 @@ class RLProgramTest(absltest.TestCase):
       # Pool 0's weight sync commits version 1.
       program.pool_policy_versions[0] = 1
       program._syncing_pools.discard(0)
-      program._syncing_pool = None
       program._release_window()
       for _ in range(50):
         if len(dispatched) >= 4:

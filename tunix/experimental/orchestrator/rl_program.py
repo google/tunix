@@ -588,10 +588,13 @@ class StandardRLProgram(RLProgram):
     self.staggered_rollout_pools = (
         staggered_rollout_pools or (self.num_rollout_pools > 1)
     )
+    # Only read when `weight_sync_pool_only`: each step's round reaches a
+    # single pool, so every pool holds its own version. Otherwise every entry
+    # tracks `policy_version` and the global `_unsynced_steps` applies.
     self.weight_sync_pool_only = weight_sync_pool_only
     self.pool_policy_versions = [0] * self.num_rollout_pools
-    self._syncing_pool: int | None = None
-    self._round_due_pool: int | None = None
+    # Pools whose round is in flight / due but not yet started. Their next
+    # batch is held until the round commits (`_wait_for_dispatch_window`).
     self._syncing_pools: set[int] = set()
     self._round_due_pools: set[int] = set()
 
@@ -703,6 +706,39 @@ class StandardRLProgram(RLProgram):
     """Wakes the dispatcher after `_next_batch` advances."""
     self._window_release.set()
 
+  def _consumed_pool_idx(
+      self,
+      current_batch_idx: int | None,
+      current_step: int,
+      groups: Sequence[Sequence[datatypes.TrajectoryItem]],
+  ) -> int:
+    """Index of the rollout pool that generated the batch this step consumed.
+
+    Batch `b` always goes to pool `b % num_rollout_pools`. Under
+    `PROMPT_BATCH` ordering `current_batch_idx` is that batch; under `ARRIVAL`
+    ordering the first consumed group's `batch_idx` stands in for it, and
+    failing that the step index (correct whenever batches arrive in order).
+
+    Args:
+      current_batch_idx: The prompt batch consumed this step, if known.
+      current_step: The training step index.
+      groups: The groups consumed so far this step.
+
+    Returns:
+      The pool index, always 0 with a single pool.
+    """
+    if self.num_rollout_pools <= 1:
+      return 0
+    if current_batch_idx is None:
+      for g in groups:
+        meta = getattr(g[0], "metadata", None) if g else None
+        if isinstance(meta, dict) and meta.get("batch_idx") is not None:
+          current_batch_idx = int(meta["batch_idx"])
+          break
+    if current_batch_idx is None:
+      current_batch_idx = current_step
+    return current_batch_idx % self.num_rollout_pools
+
   async def _wait_for_dispatch_window(self, batch_idx: int) -> None:
     """Blocks until `batch_idx` is inside the policy-staleness window.
 
@@ -734,8 +770,6 @@ class StandardRLProgram(RLProgram):
         pool_syncing = (
             target_pool in self._syncing_pools
             or target_pool in self._round_due_pools
-            or self._syncing_pool == target_pool
-            or self._round_due_pool == target_pool
         )
         if not pool_syncing and batch_idx <= self._next_batch + self.max_staleness:
           break
@@ -1942,9 +1976,6 @@ class StandardRLProgram(RLProgram):
     finally:
       if pool_idx is not None:
         self._syncing_pools.discard(pool_idx)
-      self._syncing_pool = (
-          next(iter(self._syncing_pools)) if self._syncing_pools else None
-      )
       # The dispatcher has to wake to see committed version or `_sync_error`.
       self._release_window()
 
@@ -1966,14 +1997,8 @@ class StandardRLProgram(RLProgram):
     self._round_due = False
     if pool_idx is not None:
       self._round_due_pools.discard(pool_idx)
-    self._round_due_pool = (
-        next(iter(self._round_due_pools)) if self._round_due_pools else None
-    )
-    if self.weight_sync_pool_only and pool_idx is not None:
-      self._syncing_pools.add(pool_idx)
-      self._syncing_pool = pool_idx
-    else:
-      self._syncing_pool = None
+      if self.weight_sync_pool_only:
+        self._syncing_pools.add(pool_idx)
     # The trainer's weights are this version from here on; rollouts catch up
     # when the round commits.
     self.policy_version = target_version
@@ -2274,13 +2299,11 @@ class StandardRLProgram(RLProgram):
               if self.async_weight_sync:
                 self._round_due = True
               if self.weight_sync_pool_only and self.num_rollout_pools > 1:
-                due_pool = (
-                    (current_batch_idx % self.num_rollout_pools)
-                    if current_batch_idx is not None
-                    else (current_step % self.num_rollout_pools)
+                self._round_due_pools.add(
+                    self._consumed_pool_idx(
+                        current_batch_idx, current_step, uncommitted_groups
+                    )
                 )
-                self._round_due_pools.add(due_pool)
-                self._round_due_pool = due_pool
             # TODO(tunix-dev): Configurable checkpointing frequency. Today we
             # checkpoint at the same frequency as the weight update.
             # TODO(tunix-dev): For now any failures in save_checkpoint will
@@ -2301,21 +2324,9 @@ class StandardRLProgram(RLProgram):
         )
         break
 
-      target_pool_idx = 0
-      if self.num_rollout_pools > 1:
-        if current_batch_idx is not None:
-          target_pool_idx = current_batch_idx % self.num_rollout_pools
-        else:
-          item_batch_idx = None
-          for g in uncommitted_groups:
-            if g and getattr(g[0], "metadata", None):
-              item_batch_idx = g[0].metadata.get("batch_idx")
-              if item_batch_idx is not None:
-                break
-          if item_batch_idx is not None:
-            target_pool_idx = item_batch_idx % self.num_rollout_pools
-          else:
-            target_pool_idx = current_step % self.num_rollout_pools
+      target_pool_idx = self._consumed_pool_idx(
+          current_batch_idx, current_step, uncommitted_groups
+      )
 
       if self.sync_weights and self.async_weight_sync:
         # Only the time the trainer is actually held: the previous round, if
@@ -2331,23 +2342,11 @@ class StandardRLProgram(RLProgram):
         if self.weight_sync_pool_only and self.num_rollout_pools > 1:
           sync_kwargs["pool_idx"] = target_pool_idx
           self._round_due_pools.discard(target_pool_idx)
-          self._round_due_pool = (
-              next(iter(self._round_due_pools))
-              if self._round_due_pools
-              else None
-          )
           self._syncing_pools.add(target_pool_idx)
-          self._syncing_pool = target_pool_idx
         try:
           new_version = await self.engine.sync_weights(**sync_kwargs)
         finally:
-          if self.weight_sync_pool_only and self.num_rollout_pools > 1:
-            self._syncing_pools.discard(target_pool_idx)
-            self._syncing_pool = (
-                next(iter(self._syncing_pools))
-                if self._syncing_pools
-                else None
-            )
+          self._syncing_pools.discard(target_pool_idx)
         weight_sync_time = time.monotonic() - _t_sync
         new_v = (
             new_version if new_version is not None else self.policy_version + 1
