@@ -347,6 +347,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--trainer_warmup_routed_layers", type=int, default=None)
   parser.add_argument("--trainer_warmup_routed_top_k", type=int, default=None)
+  parser.add_argument(
+      "--compact_held_routed_experts",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Router replay: bit-pack each finished trajectory's routed_experts"
+          " (9-bit expert ids, 0.6x at top-10) while the orchestrator holds it,"
+          " waiting for its group and for the trainer. The batch assembler"
+          " restores the exact int16 array when it packs the trajectory, so"
+          " trainer payloads are unchanged. Cuts orchestrator host memory"
+          " under deep max_staleness."
+      ),
+  )
   # ---- Optional GRPO algorithm options -------------------------------------
   # All default to off, so omitting them reproduces the previous behaviour.
   parser.add_argument(
@@ -1262,6 +1275,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         rollout_priority_scheduling=args.rollout_priority_scheduling,
         initial_dispatch_stagger_s=args.initial_dispatch_stagger_s,
         initial_dispatch_first_stagger_s=args.initial_dispatch_first_stagger_s,
+        compact_held_routed_experts=args.compact_held_routed_experts,
         on_train_start=_on_train_start,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",

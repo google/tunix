@@ -140,6 +140,11 @@ export INITIAL_DISPATCH_FIRST_STAGGER_S=${INITIAL_DISPATCH_FIRST_STAGGER_S:-}
 # `true` compiles the trainer at bring-up against one synthetic micro-batch
 # (before run_start) instead of on the first real micro-batch. Default false.
 export TRAINER_WARMUP_COMPILE=${TRAINER_WARMUP_COMPILE:-false}
+# `true` holds each finished trajectory's router-replay routing bit-packed on
+# the orchestrator (0.6x at top-10) until the batch assembler packs it; trainer
+# payloads are unchanged. Default false. Passed only when on, so an older image
+# never sees the flag.
+export COMPACT_HELD_ROUTED_EXPERTS=${COMPACT_HELD_ROUTED_EXPERTS:-false}
 
 # JAX compilation cache configuration
 export LOCAL_JAX_CACHE_DIR=${LOCAL_JAX_CACHE_DIR:-${JAX_CACHE_DIR:-/tmp/jax_cache}}
@@ -565,6 +570,7 @@ start_orchestrator() {
         $([[ "${IN_FLIGHT_WEIGHT_UPDATES}" == "true" || "${IN_FLIGHT_WEIGHT_UPDATES}" == "True" || "${IN_FLIGHT_WEIGHT_UPDATES}" == "1" ]] && echo --in_flight_weight_updates || echo --no-in_flight_weight_updates) \
         $([[ "${ROLLOUT_PRIORITY_SCHEDULING}" == "true" ]] && echo --rollout_priority_scheduling || echo --no-rollout_priority_scheduling) \
         $([[ "${INITIAL_DISPATCH_STAGGER_S}" != "0" && "${INITIAL_DISPATCH_STAGGER_S}" != "0.0" && -n "${INITIAL_DISPATCH_STAGGER_S}" ]] && echo --initial_dispatch_stagger_s=${INITIAL_DISPATCH_STAGGER_S})$([[ -n "${INITIAL_DISPATCH_FIRST_STAGGER_S}" && "${INITIAL_DISPATCH_FIRST_STAGGER_S}" != "0" && "${INITIAL_DISPATCH_FIRST_STAGGER_S}" != "0.0" ]] && echo " --initial_dispatch_first_stagger_s=${INITIAL_DISPATCH_FIRST_STAGGER_S}")$([[ "${TRAINER_WARMUP_COMPILE}" == "true" || "${TRAINER_WARMUP_COMPILE}" == "True" || "${TRAINER_WARMUP_COMPILE}" == "1" ]] && echo " --trainer_warmup_compile$([[ "${RETURN_ROUTED_EXPERTS}" == "true" || "${RETURN_ROUTED_EXPERTS}" == "True" || "${RETURN_ROUTED_EXPERTS}" == "1" ]] && echo " --trainer_warmup_routed_experts")") \
+        $([[ "${COMPACT_HELD_ROUTED_EXPERTS}" == "true" || "${COMPACT_HELD_ROUTED_EXPERTS}" == "True" || "${COMPACT_HELD_ROUTED_EXPERTS}" == "1" ]] && echo --compact_held_routed_experts) \
         ${dataset_args} \
         ${shuffle_arg} \
         ${sandbox_arg} \
