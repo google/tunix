@@ -181,6 +181,5 @@ export SANDBOX_NODE_SELECTOR_KEY="${SANDBOX_NODE_SELECTOR_KEY:-workload}"
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox}"
 export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]'
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
-export PREPULL_IMAGES_FILE="${PREPULL_IMAGES_FILE:-${BUCKET}/benchmark-r2e-gym-easy/sandbox_images.txt}"
 
 source "${DIR}/mlperf_base.sh" "$@"
