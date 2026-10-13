@@ -382,6 +382,131 @@ def load_images_from_manifest(
   return sorted(images)
 
 
+def prewarm_manifest_sandboxes(
+    manifest_path: str,
+    *,
+    fleet: Any | None = None,
+    scaffold: str = "r2egym",
+    max_warmpool_replicas: int | None = None,
+    num_generations: int = 8,
+    wait: bool = False,
+    async_warm: bool = False,
+    max_workers: int = 16,
+    image_rewrite: Any | None = None,
+) -> threading.Thread | None:
+  """Pre-warms all sandbox images in a manifest on Kubernetes upfront.
+
+  Args:
+    manifest_path: Path (local or gs://) to image manifest file.
+    fleet: SandboxFleet instance (or None to use get_global_fleet()).
+    scaffold: Agent scaffold name ("r2egym" or "openhands").
+    max_warmpool_replicas: Optional cap on replicas per image.
+    num_generations: Number of generations per prompt.
+    wait: Whether to wait for warmpool readiness.
+    async_warm: Whether to run the warmup in a background thread.
+    max_workers: Number of concurrent worker threads.
+    image_rewrite: Optional image rewrite function.
+
+  Returns:
+    The background threading.Thread if async_warm=True, else None.
+  """
+  fleet_inst = fleet or get_global_fleet()
+  if fleet_inst is None:
+    raise ValueError(
+        "prewarm_manifest_sandboxes requires a non-None SandboxFleet."
+    )
+
+  rewrite_fn = get_image_rewrite_fn(
+      image_rewrite or getattr(fleet_inst, "_image_rewrite_fn", None)
+  )
+  images = load_images_from_manifest(
+      manifest_path,
+      scaffold=scaffold,
+      include_runtime_image=False,
+      image_rewrite=rewrite_fn,
+  )
+  target_reps = (
+      max_warmpool_replicas
+      if max_warmpool_replicas is not None
+      else num_generations
+  )
+  fail_fast = SandboxFailFastConfig.from_env().enabled
+  fleet_error_cls = _fleet_error_cls() if fail_fast else None
+
+  def _do_warm() -> None:
+    logging.info(
+        "[prewarm_manifest_sandboxes] Priming %d static sandbox image(s) on K8s"
+        " (wait=%s, target_reps=%d, max_workers=%d)...",
+        len(images),
+        wait,
+        target_reps,
+        max_workers,
+    )
+
+    def _create(img: str) -> None:
+      try:
+        fleet_inst.warm_image(img, replicas_override=target_reps, wait=False)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        if fail_fast and isinstance(e, fleet_error_cls):
+          raise
+        logging.warning("[prewarm_manifest_sandboxes] Warm note for %s: %s", img, e)
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=max(1, max_workers),
+        thread_name_prefix="manifest-warm",
+    ) as executor:
+      list(executor.map(_create, images))
+
+    if wait:
+      def _await_ready(img: str) -> None:
+        try:
+          fleet_inst.warm_image(img, replicas_override=target_reps, wait=True)
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          logging.warning(
+              "[prewarm_manifest_sandboxes] Warm pool for %s not fully ready: %s",
+              img,
+              e,
+          )
+
+      with concurrent.futures.ThreadPoolExecutor(
+          max_workers=max(1, max_workers),
+          thread_name_prefix="manifest-ready",
+      ) as executor:
+        list(executor.map(_await_ready, images))
+
+    logging.info(
+        "[prewarm_manifest_sandboxes] Finished priming %d static sandbox image(s).",
+        len(images),
+    )
+
+  if async_warm:
+    thread_error: list[BaseException] = []
+
+    def _target() -> None:
+      try:
+        _do_warm()
+      except BaseException as exc:  # pylint: disable=broad-exception-caught
+        thread_error.append(exc)
+
+    thread = threading.Thread(
+        target=_target,
+        name="prewarm-manifest-sandboxes",
+        daemon=True,
+    )
+
+    def _join_and_check(timeout: float | None = None) -> None:
+      thread.join(timeout=timeout)
+      if thread_error:
+        raise thread_error[0]
+
+    thread.join_and_check = _join_and_check  # type: ignore[attr-defined]
+    thread.start()
+    return thread
+  else:
+    _do_warm()
+    return None
+
+
 def normalize_tasks_for_fleet(
     tasks: Any,
     scaffold: str = "r2egym",
@@ -946,8 +1071,21 @@ class PrewarmDatasetIterator:
           else self.num_generations
       )
       self._image_counts = {img: target_reps for img in self.static_images}
+      if self.fleet is not None:
+        fleet_warmed = getattr(self.fleet, "_warmed", None)
+        if isinstance(fleet_warmed, dict):
+          self._active_replicas.update(fleet_warmed)
+        elif hasattr(self.fleet, "active_pools") and isinstance(
+            self.fleet.active_pools, dict
+        ):
+          self._active_replicas.update(self.fleet.active_pools)
+
       wait_images = (
-          frozenset(self._image_counts.keys())
+          frozenset(
+              img
+              for img in self._image_counts.keys()
+              if img not in self._active_replicas
+          )
           if self.wait_initial
           else frozenset()
       )
@@ -958,7 +1096,7 @@ class PrewarmDatasetIterator:
           self.images_file,
           self.wait_initial,
           async_initial,
-          len(self._image_counts),
+          len([img for img in self._image_counts if img not in self._active_replicas]),
           len(wait_images),
       )
       if async_initial:

@@ -948,6 +948,71 @@ class SandboxUtilsTest(absltest.TestCase):
     iterator.close()
     self.assertEqual(set(fleet.unwarm_calls), {"img_one", "img_two"})
 
+  def test_prewarm_manifest_sandboxes_sync(self):
+    fleet = FakeFleet()
+    with tempfile.NamedTemporaryFile("w", delete=False) as f:
+      f.write("img_alpha\nimg_beta\n")
+      f.flush()
+      tmp_path = f.name
+    try:
+      thread = sandbox_utils.prewarm_manifest_sandboxes(
+          manifest_path=tmp_path,
+          fleet=fleet,
+          num_generations=4,
+          wait=True,
+          async_warm=False,
+      )
+      self.assertIsNone(thread)
+      self.assertIn(("img_alpha", 4, False), fleet.warm_calls)
+      self.assertIn(("img_beta", 4, False), fleet.warm_calls)
+      self.assertIn(("img_alpha", 4, True), fleet.warm_calls)
+      self.assertIn(("img_beta", 4, True), fleet.warm_calls)
+      self.assertEqual(fleet.active_pools, {"img_alpha": 4, "img_beta": 4})
+    finally:
+      os.unlink(tmp_path)
+
+  def test_prewarm_manifest_sandboxes_async(self):
+    fleet = FakeFleet()
+    with tempfile.NamedTemporaryFile("w", delete=False) as f:
+      f.write("img_x\nimg_y\n")
+      f.flush()
+      tmp_path = f.name
+    try:
+      thread = sandbox_utils.prewarm_manifest_sandboxes(
+          manifest_path=tmp_path,
+          fleet=fleet,
+          num_generations=2,
+          wait=False,
+          async_warm=True,
+      )
+      self.assertIsNotNone(thread)
+      thread.join_and_check()
+      self.assertIn(("img_x", 2, False), fleet.warm_calls)
+      self.assertIn(("img_y", 2, False), fleet.warm_calls)
+      self.assertNotIn(("img_x", 2, True), fleet.warm_calls)
+      self.assertEqual(fleet.active_pools, {"img_x": 2, "img_y": 2})
+    finally:
+      os.unlink(tmp_path)
+
+  def test_prewarm_dataset_iterator_reuses_already_warmed_fleet(self):
+    fleet = FakeFleet()
+    fleet.active_pools = {"img_pre_a": 2, "img_pre_b": 2}
+    dataset = [{"prompt": "p0"}, {"prompt": "p1"}]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        static_images=["img_pre_a", "img_pre_b"],
+        batch_size=1,
+        num_generations=2,
+        wait_initial=True,
+    )
+    # Since fleet already had active_pools populated, no warm calls should be made
+    self.assertEqual(fleet.warm_calls, [])
+    self.assertEqual(next(iterator), {"prompt": "p0"})
+    iterator.close()
+    self.assertEqual(set(fleet.unwarm_calls), {"img_pre_a", "img_pre_b"})
+    self.assertEqual(fleet.active_pools, {})
+
 
 _FAIL_FAST_ENV = {
     "FT_SANDBOX_FAIL_FAST": "true",

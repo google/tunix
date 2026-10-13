@@ -1043,6 +1043,38 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   fleet = None
   prompt_stream = None
   program = None
+  prewarm_thread = None
+
+  prewarm_manifest = (
+      args.prewarm_images_file
+      or os.getenv("PREWARM_IMAGES_FILE")
+      or ""
+  )
+  if args.use_agent_sandbox and prewarm_manifest:
+    logging.info(
+        "[Init] Initializing SandboxFleet and pre-warming sandboxes from"
+        " manifest '%s' before train_start...",
+        prewarm_manifest,
+    )
+    fleet = sandbox_utils.init_global_fleet(
+        tasks=None,
+        images_file=prewarm_manifest,
+        max_concurrency=args.max_concurrency,
+        num_generations=args.num_generations,
+        batch_size=args.batch_size,
+        max_warmpool_replicas=args.max_warmpool_replicas,
+        scaffold=args.scaffold,
+    )
+    prewarm_thread = sandbox_utils.prewarm_manifest_sandboxes(
+        manifest_path=prewarm_manifest,
+        fleet=fleet,
+        scaffold=args.scaffold,
+        max_warmpool_replicas=args.max_warmpool_replicas,
+        num_generations=args.num_generations,
+        wait=args.sandbox_wait_initial,
+        async_warm=True,
+    )
+
   try:
     global_batch_size = int(args.batch_size) * int(args.num_generations)
     val_start_step = (
@@ -1097,7 +1129,18 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
 
     def _on_train_start(step: int) -> None:
-      nonlocal fleet, prompt_stream
+      nonlocal fleet, prompt_stream, prewarm_thread
+      if prewarm_thread is not None:
+        logging.info(
+            "[Init] Waiting for manifest sandbox pre-warming to complete before"
+            " train_start..."
+        )
+        if hasattr(prewarm_thread, "join_and_check"):
+          prewarm_thread.join_and_check()
+        else:
+          prewarm_thread.join()
+        prewarm_thread = None
+
       if args.rcp_logging:
         mllog_utils.train_start(args, step=step)
 
@@ -1122,14 +1165,19 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
 
       if args.use_agent_sandbox:
-        fleet = sandbox_utils.init_global_fleet(
-            tasks=dataset,
-            max_concurrency=args.max_concurrency,
-            num_generations=args.num_generations,
-            batch_size=args.batch_size,
-            max_warmpool_replicas=args.max_warmpool_replicas,
-            scaffold=args.scaffold,
-        )
+        if fleet is None:
+          fleet = sandbox_utils.init_global_fleet(
+              tasks=dataset,
+              max_concurrency=args.max_concurrency,
+              num_generations=args.num_generations,
+              batch_size=args.batch_size,
+              max_warmpool_replicas=args.max_warmpool_replicas,
+              scaffold=args.scaffold,
+          )
+        else:
+          sandbox_utils.ensure_tasks_in_fleet_plan(
+              fleet, list(dataset), scaffold=args.scaffold
+          )
 
       raw_prompt_stream = deepswe.iter_prompt_items(
           dataset=dataset,
@@ -1152,11 +1200,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           max_staleness=args.max_staleness,
       )
       if args.use_agent_sandbox:
-        prewarm_manifest = (
-            args.prewarm_images_file
-            or os.getenv("PREWARM_IMAGES_FILE")
-            or ""
-        )
         prompt_stream = swe_env.PrewarmDatasetIterator(
             raw_prompt_stream,
             fleet=fleet,
@@ -1165,7 +1208,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
             max_warmpool_replicas=args.max_warmpool_replicas,
             unwarm_on_exhaustion=True,
             scaffold=args.scaffold,
-            wait_initial=args.sandbox_wait_initial,
+            wait_initial=False if prewarm_manifest else args.sandbox_wait_initial,
             max_staleness=args.max_staleness,
             images_file=prewarm_manifest or None,
         )
@@ -1303,6 +1346,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     logging.exception("FATAL ERROR in orchestrator execution: %s", e)
     raise
   finally:
+    if prewarm_thread is not None and prewarm_thread.is_alive():
+      prewarm_thread.join(timeout=10)
     if program is not None and hasattr(program, "close"):
       program.close()
     if prompt_stream is not None and hasattr(prompt_stream, "close"):
