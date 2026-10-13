@@ -39,7 +39,6 @@ if REPO_ROOT not in sys.path:
 # pylint: disable=g-import-not-at-top
 from tunix.experimental.common import datatypes
 from tunix.experimental.distributed.runtime import context as runtime_context
-from tunix.experimental.examples.common import orch_k8s_cleanup
 from tunix.experimental.examples.deepswe_dist import trainer_warmup
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
@@ -584,19 +583,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help=(
           "Send a graceful gRPC stop to every remote worker when the"
           " orchestrator exits (drains in-flight checkpoint saves)."
-      ),
-  )
-  parser.add_argument(
-      "--delete_worker_jobsets_on_exit",
-      action=argparse.BooleanOptionalAction,
-      default=True,
-      help=(
-          "After --stop_workers_on_exit has drained the workers, delete the"
-          " run's <prefix>-train / <prefix>-roll* JobSets through the"
-          " in-cluster Kubernetes API so they do not outlive the orchestrator"
-          " (workers are long-lived servers and never exit on their own)."
-          " No-op unless ORCHESTRATOR_ID is a <prefix>-orch id. Only takes"
-          " effect together with --stop_workers_on_exit."
       ),
   )
   parser.add_argument(
@@ -1333,15 +1319,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.warning("Global fleet teardown note: %s", e)
     if args.stop_workers_on_exit:
-      # Graceful gRPC stop (drains checkpoints), then wait until the workers
-      # report STOPPED, then delete their JobSets: workers are long-lived
-      # servers that never exit on their own, so without the deletion the
-      # -train / -roll* JobSets outlive the orchestrator and hold their TPUs.
-      orch_k8s_cleanup.shutdown_cluster_and_workers(
-          cluster,
-          orchestrator_id=os.environ.get("ORCHESTRATOR_ID"),
-          delete_jobsets=args.delete_worker_jobsets_on_exit,
-      )
+      logging.info("Shutting down cluster workers...")
+      cluster.shutdown()
     else:
       cluster.monitor.close()
 

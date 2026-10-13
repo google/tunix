@@ -267,6 +267,7 @@ start_orchestrator() {
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     ${GANG_ID:+--gang_id="${GANG_ID}"} \
+    ${GANG_ID:+--teardown_gang_on_exit} \
     --cpu_machine=${CPU_MACHINE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
