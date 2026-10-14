@@ -572,6 +572,10 @@ class TrainerWorker(abstract_worker.Worker):
             float(wait_for_device()) if callable(wait_for_device) else None
         )
         waiting_for = "the update"
+        # Cleared only here: update() refuses to run while an update is
+        # deferred, and the device wait above has to come first, because it
+        # is what tells the caller whether the stage hid behind the step's
+        # last micro-batch.
         self._deferred_update = None
         train_step = self.update()
         update_token = getattr(self._trainer, "last_update_token", None)

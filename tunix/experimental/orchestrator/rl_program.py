@@ -2213,6 +2213,13 @@ class StandardRLProgram(RLProgram):
           step_result, elapsed = await train_step
           policy_training_time += elapsed
           if is_final_batch:
+            # While an update is deferred the worker refuses get_metrics, a
+            # checkpoint and a weight sync, so `_stage_next_before_update`,
+            # which always applies the update, runs before any of them. A
+            # result without `update_deferred` means the trainer ran the
+            # update inside the call after all (the engine reports that as a
+            # fused call): `stage_after` is then still set, and the stage goes
+            # after the update below, as with `--no-stage_before_update`.
             if (
                 defer_update
                 and isinstance(step_result, dict)
@@ -2228,6 +2235,10 @@ class StandardRLProgram(RLProgram):
                   next_state, step_result
               )
               policy_training_time += time.monotonic() - deferred_start
+              # This boundary's stage was made, or refused, before the
+              # update. Skip the hook below: staging after the update's
+              # dispatch is the order this path replaces, and under dropless
+              # replay it would find the device idle and latch staging off.
               stage_after = False
             if (
                 isinstance(step_result, dict)
