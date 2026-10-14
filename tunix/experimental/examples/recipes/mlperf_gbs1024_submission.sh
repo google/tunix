@@ -86,6 +86,8 @@ export TRAINER_TUNED_FLAGS="${TRAINER_TUNED_FLAGS:-true}"
 if [[ "${TRAINER_TUNED_FLAGS}" == "true" ]]; then
   export COMPUTE_LOGPS_CHUNK_SIZE="${COMPUTE_LOGPS_CHUNK_SIZE:-1024}"
 fi
+# SparseCore offload size thresholds for the trainer (see mlperf_397b_256_v7x.sh).
+export TRAINER_SC_OFFLOAD_THRESHOLDS="${TRAINER_SC_OFFLOAD_THRESHOLDS:-true}"
 export DROPLESS="${DROPLESS:-true}"
 case "${DROPLESS}" in
   true)
