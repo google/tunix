@@ -603,6 +603,23 @@ class FinalMetrics(pydantic.BaseModel):
   )
 
 
+class TrajectoryMetrics(pydantic.BaseModel):
+  """Universal rollout performance and RL training metrics for a trajectory."""
+
+  model_config = pydantic.ConfigDict(extra="forbid")
+
+  trajectory_id: str | None = pydantic.Field(
+      default=None,
+      description="Canonical unique identifier for this trajectory document.",
+  )
+  extra: MetadataDict = pydantic.Field(
+      default=None,
+      description=(
+          "Custom metrics"
+      ),
+  )
+
+
 class ToolCall(pydantic.BaseModel):
   """A tool call within a step."""
 
