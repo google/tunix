@@ -1505,6 +1505,152 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_next_step_first_train_step_not_held_by_deferred_get_metrics(self):
+    """Step N+1's first micro-batch goes out before step N's metrics fetch."""
+
+    async def _run():
+      events = []
+      next_train_issued = asyncio.Event()
+
+      async def mock_train_step(batch, **kwargs):
+        del kwargs
+        events.append(f"train_step:{batch}")
+        if batch == "mb2":
+          next_train_issued.set()
+        return {"train_step": 1, "update_ready": True}
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        events.append("get_metrics_start")
+        # Held open until step 1 has issued its first micro-batch. Before
+        # this change the loop awaited the fetch first, so this would hang.
+        await asyncio.wait_for(next_train_issued.wait(), timeout=5)
+        events.append("get_metrics_end")
+        return None
+
+      # Two micro-batches per step, two steps.
+      self.mock_algo.mini_batch_size = 2
+      assembler = _OneMicrobatchPerGroupAssembler(2, events)
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0"),
+          _make_trajectory_group("prompt_1"),
+          _make_trajectory_group("prompt_2"),
+          _make_trajectory_group("prompt_3"),
+      )
+      program = self._create_program(
+          dataset=[f"prompt_data_{i}" for i in range(4)],
+          batch_size=2,
+          max_steps=2,
+          assembler=assembler,
+          sync_weights=True,
+      )
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10)
+
+      self.assertLess(
+          events.index("train_step:mb2"), events.index("get_metrics_end")
+      )
+      # Step 0's fetch landed before step 1's optimizer update overwrote the
+      # trainer's metrics slot.
+      self.assertLess(
+          events.index("get_metrics_end"), events.index("train_step:mb3")
+      )
+      self.assertEqual(events.count("get_metrics_end"), 2)
+      self.assertIsNone(program._pending_bookkeeping)
+
+    asyncio.run(_run())
+
+  def test_on_step_end_runs_after_next_step_issued_its_first_train_step(self):
+    async def _run():
+      events = []
+
+      async def mock_train_step(batch, **kwargs):
+        del kwargs
+        events.append(f"train_step:{batch}")
+        return "step_done"
+
+      def on_step_end(step, result):
+        del result
+        events.append(f"on_step_end:{step}")
+
+      # Two micro-batches per step, two steps.
+      self.mock_algo.mini_batch_size = 2
+      assembler = _OneMicrobatchPerGroupAssembler(2, events)
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0"),
+          _make_trajectory_group("prompt_1"),
+          _make_trajectory_group("prompt_2"),
+          _make_trajectory_group("prompt_3"),
+      )
+      program = self._create_program(
+          dataset=[f"prompt_data_{i}" for i in range(4)],
+          batch_size=2,
+          max_steps=2,
+          assembler=assembler,
+          on_step_end=on_step_end,
+      )
+      self.mock_engine.train_step.side_effect = mock_train_step
+
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10)
+
+      train_events = [e for e in events if e.startswith("train_step")]
+      self.assertEqual(
+          train_events,
+          [f"train_step:mb{i}" for i in range(4)],
+      )
+      # Step 0's callback waits for step 1's first micro-batch to be issued
+      # and runs before step 1's optimizer update; step 1's runs once the
+      # loop ends.
+      idx = events.index
+      self.assertLess(idx("train_step:mb2"), idx("on_step_end:0"))
+      self.assertLess(idx("on_step_end:0"), idx("train_step:mb3"))
+      self.assertLess(idx("train_step:mb3"), idx("on_step_end:1"))
+      self.assertEqual(program.last_step_result.step, 1)
+
+    asyncio.run(_run())
+
+  def test_on_step_end_failure_fails_the_run(self):
+    async def _run():
+      def on_step_end(step, result):
+        del result
+        raise RuntimeError(f"callback failed at step {step}")
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(on_step_end=on_step_end)
+
+      with self.assertRaisesRegex(RuntimeError, "callback failed at step 0"):
+        await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10)
+
+    asyncio.run(_run())
+
+  def test_step_metrics_reduce_off_the_event_loop(self):
+    async def _run():
+      reduce_threads = []
+      original = rl_program.StandardRLProgram._collect_and_log_step_metrics
+
+      def recording(self_, *args, **kwargs):
+        reduce_threads.append(threading.current_thread())
+        return original(self_, *args, **kwargs)
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program()
+      with mock.patch.object(
+          rl_program.StandardRLProgram,
+          "_collect_and_log_step_metrics",
+          recording,
+      ):
+        await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10)
+
+      self.assertLen(reduce_threads, 1)
+      self.assertIsNot(reduce_threads[0], threading.main_thread())
+      self.assertIsNotNone(program.last_step_result)
+
+    asyncio.run(_run())
+
   def test_resume_sets_step_and_policy_version_from_engine(self):
     self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=3)
     program = self._create_program(dataset=["p0"], max_steps=5)

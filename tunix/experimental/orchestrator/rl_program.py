@@ -62,6 +62,19 @@ def _release_host_memory() -> None:
     pass
 
 
+def _log_task_failure(task: asyncio.Task[Any]) -> None:
+  """Logs a background task's exception as soon as it fails.
+
+  The task is also awaited later, which re-raises the exception and fails the
+  run; this only makes the failure visible in the log at the time it happens.
+  """
+  if task.cancelled():
+    return
+  exc = task.exception()
+  if exc is not None:
+    logging.error("Background step bookkeeping failed: %r", exc)
+
+
 def _next_or_exhausted(iterator: Any) -> Any:
   """`next()` that returns `_EXHAUSTED` instead of raising StopIteration.
 
@@ -554,6 +567,17 @@ class StandardRLProgram(RLProgram):
     # overwrites the device buffers while the transfer is still reading.
     self.async_weight_sync = async_weight_sync
     self._pending_sync: asyncio.Task[None] | None = None
+    # End-of-step bookkeeping (the deferred trainer get_metrics, step metric
+    # reduction and logging, `on_step_end`, host memory release) runs as a
+    # background task once the step has committed, so the next step's first
+    # micro-batch reaches the trainer without waiting for it. The task is
+    # awaited before the next step's optimizer update (the trainer's metrics
+    # slot is overwritten there) and when the loop ends.
+    self._pending_bookkeeping: asyncio.Task[None] | None = None
+    # Set when a step issues its first train_step; the bookkeeping task holds
+    # its GIL-bound work (numpy reductions, gc.collect) until then so it
+    # overlaps trainer compute instead of the next step's first packing.
+    self._first_train_issued = asyncio.Event()
     # Trained steps whose weights have not reached the rollouts yet. Held out
     # of the dispatch window; stays set if the round fails.
     self._unsynced_steps = 0
@@ -1935,15 +1959,29 @@ class StandardRLProgram(RLProgram):
       # Failed (or finished) before signalling; surface a failure now.
       await self._await_pending_sync()
 
+  async def _await_pending_bookkeeping(self) -> None:
+    """Waits for the previous step's bookkeeping task; raises if it failed."""
+    task, self._pending_bookkeeping = self._pending_bookkeeping, None
+    if task is not None:
+      await task
+
   async def train_stage(self) -> None:
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
     try:
       await self._train_loop()
-      # The last round must land before the run is reported done.
+      # The last step's bookkeeping and the last round must land before the
+      # run is reported done.
+      self._first_train_issued.set()
+      await self._await_pending_bookkeeping()
       await self._await_pending_sync()
     finally:
       if self._pending_sync is not None and not self._pending_sync.done():
         self._pending_sync.cancel()
+      if (
+          self._pending_bookkeeping is not None
+          and not self._pending_bookkeeping.done()
+      ):
+        self._pending_bookkeeping.cancel()
 
   async def _train_loop(self) -> None:
     assert self.engine is not None
@@ -1952,6 +1990,7 @@ class StandardRLProgram(RLProgram):
       current_step = self._step
       step_start_time = time.monotonic()
       consumed_policy_version = self.policy_version
+      self._first_train_issued.clear()
 
       uncommitted_groups = []
       step_result = None
@@ -1972,9 +2011,6 @@ class StandardRLProgram(RLProgram):
       policy_training_time = 0.0
       exposed_generation_time = 0.0
       weight_sync_time = 0.0
-      # The end-of-step get_metrics() deferred past the weight sync and commit,
-      # kept out of policy_training_time because it no longer runs in training.
-      metrics_fetch_time = 0.0
 
       current_batch_idx: int | None = None
 
@@ -2185,13 +2221,22 @@ class StandardRLProgram(RLProgram):
                 batch_assembly.describe_payload(batch),
             )
           await _await_pending_train()
+          if is_final_batch:
+            # The optimizer update overwrites the trainer's metrics slot, so
+            # the previous step's deferred get_metrics must have landed. When
+            # this is also the step's first micro-batch, release the
+            # bookkeeping's gate first or the two would wait on each other.
+            self._first_train_issued.set()
+            await self._await_pending_bookkeeping()
           train_step = self._timed_train_step(
               batch, apply_optimizer=is_final_batch
           )
           batch = None
           if self.pipeline_train_microbatches and not is_final_batch:
             self._pending_train = asyncio.create_task(train_step)
+            self._first_train_issued.set()
             continue
+          self._first_train_issued.set()
           step_result, elapsed = await train_step
           policy_training_time += elapsed
           if is_final_batch:
@@ -2287,17 +2332,92 @@ class StandardRLProgram(RLProgram):
       # after this step's bookkeeping and the next step's first packing.
       await asyncio.sleep(0)
 
-      if pending_metrics_fetch:
-        _t_metrics = time.monotonic()
-        trainer_metrics = await self.engine.get_metrics(
-            role=datatypes.Role.ACTOR
-        )
-        metrics_fetch_time += time.monotonic() - _t_metrics
-
+      # The step is committed: everything below is bookkeeping that the next
+      # step's first micro-batch does not depend on. Hand it to a background
+      # task and move on, so the trainer gets step N+1's first micro-batch as
+      # soon as it is packed instead of after the deferred metrics fetch, the
+      # metric reduction and logging, and the host memory release.
       step_time_sec = time.monotonic() - step_start_time
+      await self._await_pending_bookkeeping()
+      self._pending_bookkeeping = asyncio.create_task(
+          self._finish_step_bookkeeping(
+              current_step=current_step,
+              step_result=step_result,
+              trainer_metrics=trainer_metrics,
+              pending_metrics_fetch=pending_metrics_fetch,
+              all_step_items=all_step_items,
+              uncommitted_groups=uncommitted_groups,
+              scored_items=scored_items,
+              step_rewards=step_rewards,
+              step_advantages=step_advantages,
+              generation_metrics=generation_metrics,
+              num_rollouts=num_rollouts,
+              num_microbatches=num_microbatches,
+              step_padding_stats=step_padding_stats,
+              step_packing_time_sec=step_packing_time_sec,
+              step_time_sec=step_time_sec,
+              consumed_policy_version=consumed_policy_version,
+              step_sampler_agreement=step_sampler_agreement,
+              policy_training_time=policy_training_time,
+              exposed_generation_time=exposed_generation_time,
+              weight_sync_time=weight_sync_time,
+              policy_version=self.policy_version,
+          )
+      )
+      self._pending_bookkeeping.add_done_callback(_log_task_failure)
 
-      filtered_groups = await self._drain_filtered_groups()
+      self._step += 1
+      # Strictly after the increment: the dispatcher re-reads `_next_batch` on
+      # waking, and waking it on the old value would park it again with no one
+      # left to set the event.
+      self._release_window()
 
+  async def _finish_step_bookkeeping(
+      self,
+      *,
+      current_step: int,
+      step_result: Any,
+      trainer_metrics: Any,
+      pending_metrics_fetch: bool,
+      all_step_items: list[Any],
+      uncommitted_groups: list[Any],
+      scored_items: list[Any],
+      step_rewards: list[float],
+      step_advantages: list[float],
+      generation_metrics: dict[str, Any],
+      num_rollouts: int,
+      num_microbatches: int,
+      step_padding_stats: list[batch_assembly.PaddingStats],
+      step_packing_time_sec: float,
+      step_time_sec: float,
+      consumed_policy_version: int,
+      step_sampler_agreement: dict[str, tuple[Any, list[float]]],
+      policy_training_time: float,
+      exposed_generation_time: float,
+      weight_sync_time: float,
+      policy_version: int,
+  ) -> None:
+    """Runs a committed step's metrics fetch, logging and memory release.
+
+    Runs as a background task after `commit`. The awaits (metrics RPC,
+    filtered-group drain) proceed right away; the GIL-bound work waits until
+    the next step has issued its first train_step, so it overlaps trainer
+    compute rather than the next step's first packing. `_train_loop` awaits
+    this task before the next optimizer update and when it ends, so a failure
+    here still fails the run.
+    """
+    assert self.engine is not None
+    metrics_fetch_time = 0.0
+    if pending_metrics_fetch:
+      _t_metrics = time.monotonic()
+      trainer_metrics = await self.engine.get_metrics(role=datatypes.Role.ACTOR)
+      metrics_fetch_time += time.monotonic() - _t_metrics
+
+    filtered_groups = await self._drain_filtered_groups()
+
+    await self._first_train_issued.wait()
+
+    def _reduce_and_log() -> dict[str, Any]:
       metrics_summary = self._collect_and_log_step_metrics(
           all_step_items=all_step_items,
           step_rewards=step_rewards,
@@ -2324,47 +2444,45 @@ class StandardRLProgram(RLProgram):
           log_step=current_step,
           consumed_policy_version=consumed_policy_version,
       )
-      filtered_groups.clear()
-      all_step_items.clear()
-      uncommitted_groups.clear()
-      scored_items.clear()
+      return metrics_summary
 
-      self.last_step_result = RLStepResult(
-          step=current_step,
-          policy_version=self.policy_version,
-          num_rollouts=num_rollouts,
-          num_microbatches=num_microbatches,
-          reward_mean=metrics_summary["reward_mean"],
-          reward_std=metrics_summary["reward_std"],
-          advantage_mean=metrics_summary["advantage_mean"],
-          advantage_std=metrics_summary["advantage_std"],
-          train_result=step_result,
+    metrics_summary = await asyncio.to_thread(_reduce_and_log)
+    filtered_groups.clear()
+    all_step_items.clear()
+    uncommitted_groups.clear()
+    scored_items.clear()
+
+    self.last_step_result = RLStepResult(
+        step=current_step,
+        policy_version=policy_version,
+        num_rollouts=num_rollouts,
+        num_microbatches=num_microbatches,
+        reward_mean=metrics_summary["reward_mean"],
+        reward_std=metrics_summary["reward_std"],
+        advantage_mean=metrics_summary["advantage_mean"],
+        advantage_std=metrics_summary["advantage_std"],
+        train_result=step_result,
+    )
+
+    loss_val = metrics_summary["loss_val"]
+    perplexity_val = metrics_summary["perplexity_val"]
+    grad_norm_val = metrics_summary["grad_norm_val"]
+    if self.mode == Mode.TRAIN:
+      logging.info(
+          "Train step %d - loss: %s - reward_mean: %.4f - advantage_mean:"
+          " %.4f - grad_norm: %s - perplexity: %s - step_time: %.2fs",
+          current_step,
+          f"{loss_val:.4f}" if loss_val is not None else "N/A",
+          metrics_summary["reward_mean"],
+          metrics_summary["advantage_mean"],
+          f"{grad_norm_val:.4g}" if grad_norm_val is not None else "N/A",
+          f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
+          step_time_sec,
       )
 
-      loss_val = metrics_summary["loss_val"]
-      perplexity_val = metrics_summary["perplexity_val"]
-      grad_norm_val = metrics_summary["grad_norm_val"]
-      if self.mode == Mode.TRAIN:
-        logging.info(
-            "Train step %d - loss: %s - reward_mean: %.4f - advantage_mean:"
-            " %.4f - grad_norm: %s - perplexity: %s - step_time: %.2fs",
-            current_step,
-            f"{loss_val:.4f}" if loss_val is not None else "N/A",
-            metrics_summary["reward_mean"],
-            metrics_summary["advantage_mean"],
-            f"{grad_norm_val:.4g}" if grad_norm_val is not None else "N/A",
-            f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
-            step_time_sec,
-        )
-
-      if self.on_step_end:
-        self.on_step_end(current_step, step_result)
-      self._step += 1
-      # Strictly after the increment: the dispatcher re-reads `_next_batch` on
-      # waking, and waking it on the old value would park it again with no one
-      # left to set the event.
-      self._release_window()
-      _release_host_memory()
+    if self.on_step_end:
+      self.on_step_end(current_step, step_result)
+    await asyncio.to_thread(_release_host_memory)
 
   async def run_async(
       self,
@@ -2446,6 +2564,11 @@ class StandardRLProgram(RLProgram):
           task.cancel()
       if self._pending_train is not None and not self._pending_train.done():
         self._pending_train.cancel()
+      if (
+          self._pending_bookkeeping is not None
+          and not self._pending_bookkeeping.done()
+      ):
+        self._pending_bookkeeping.cancel()
 
   def run(
       self,
