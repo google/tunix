@@ -369,13 +369,15 @@ class _OldTrainerWorker(_Worker):
 
   stage_fwd_bwd = None
   fwd_bwd_staged = None
+  apply_deferred_update = None
 
   def info(self) -> datatypes.WorkerInfo:
     info = super().info()
     resources = {
         k: v
         for k, v in info.resources.items()
-        if k not in ("stage_fwd_bwd", "reports_device_wait")
+        if k
+        not in ("stage_fwd_bwd", "reports_device_wait", "stage_before_update")
     }
     return dataclasses.replace(info, resources=resources)
 
@@ -1122,6 +1124,12 @@ def _new_program(
       on_checkpoint_saved=checkpoints.append,
       pipeline_step_boundary=pipelined,
       stage_next_microbatch=staged,
+      # This file tests the stage after the step's last call (the hook for a
+      # trainer that cannot defer its update, and `--no-stage_before_update`).
+      # The default, staging between the last micro-batch and a deferred
+      # update, runs these scenarios in
+      # rl_program_stage_before_update_test.py.
+      stage_before_update=False,
   )
   kwargs.update(program_kwargs or {})
   program = program_cls(**kwargs)
@@ -1161,6 +1169,7 @@ def _run(
     errors: list[BaseException] | None = None,
     worker_cls: type[_Worker] = _Worker,
     trainer_cls: type[_Trainer] = _Trainer,
+    program_kwargs: dict[str, Any] | None = None,
 ) -> _Run:
   """Runs `sc` to the end; with `errors`, records a failure instead of raising."""
   log: list[Any] = []
@@ -1191,6 +1200,7 @@ def _run(
       program_cls=program_cls,
       log=log,
       checkpoints=checkpoints,
+      program_kwargs=program_kwargs,
   )
 
   async def _main():

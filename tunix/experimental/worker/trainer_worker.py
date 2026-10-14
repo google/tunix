@@ -80,6 +80,20 @@ class TrainerWorker(abstract_worker.Worker):
     self._staged_fwd_bwd: (
         tuple[str, Any, dict[str, Any], dict[str, Any]] | None
     ) = None
+    # The request id of a step's last micro-batch whose update
+    # `fwd_bwd(apply_optimizer=True, defer_update=True)` left to
+    # `apply_deferred_update`; until then the step is open, so nothing that
+    # needs it closed (another micro-batch, metrics, a checkpoint, a weight
+    # sync, actor log-probs) is accepted.
+    self._deferred_update: str | None = None
+
+  def _refuse_while_update_deferred(self, method: str) -> None:
+    if self._deferred_update is not None:
+      raise RuntimeError(
+          f"TrainerWorker.{method}() refused: the update of the step whose"
+          f" last micro-batch was {self._deferred_update!r} is deferred; run"
+          " apply_deferred_update() first."
+      )
 
   def _policy_version(self) -> int:
     if self._trainer is None:
@@ -125,13 +139,16 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.READY
 
   def _drop_stale_stage(self, by: str) -> None:
-    """Drops a micro-batch staged before a (re)compile or a restore.
+    """Drops a micro-batch staged, or an update deferred, before a (re)compile
+    or a restore.
 
-    Only `fwd_bwd_staged` and `stop()` release a stage otherwise, so one left
-    by an orchestrator that died without `stop()` (an OOM kill, a preemption)
-    would make its successor's first stage fail, and every restart's after
-    it. A successor brings the worker up with `compile` and resumes with
-    `restore_checkpoint`; either way the held micro-batch will never run.
+    Only `fwd_bwd_staged` and `stop()` release a stage otherwise, and only
+    `apply_deferred_update` a deferred update, so either left by an
+    orchestrator that died without `stop()` (an OOM kill, a preemption) would
+    make its successor's first stage, or first micro-batch, fail, and every
+    restart's after it. A successor brings the worker up with `compile` and
+    resumes with `restore_checkpoint`; either way the held micro-batch will
+    never run and the deferred update will never be applied.
 
     Args:
       by: The call dropping it, for the log.
@@ -144,6 +161,14 @@ class TrainerWorker(abstract_worker.Worker):
           self._staged_fwd_bwd[0],
       )
       self._staged_fwd_bwd = None
+    if self._deferred_update is not None:
+      logging.warning(
+          "TrainerWorker %s drops the update deferred after micro-batch %r,"
+          " never applied.",
+          by,
+          self._deferred_update,
+      )
+      self._deferred_update = None
 
   def compile(self, dummy_data: Any = None) -> datatypes.Response:
     """Triggers JIT compilation using the provided dummy_data."""
@@ -177,6 +202,7 @@ class TrainerWorker(abstract_worker.Worker):
       return self._response(stopped=True, already_stopped=True)
     self._is_running = False
     self._staged_fwd_bwd = None
+    self._deferred_update = None
     if self.state == WorkerState.READY:
       self.state = WorkerState.DRAINING
     if self._trainer is not None:
@@ -203,6 +229,10 @@ class TrainerWorker(abstract_worker.Worker):
             "reports_device_wait": callable(
                 getattr(self._trainer, "wait_for_device", None)
             ),
+            # ... and take that micro-batch between a step's last fwd_bwd and
+            # its update: `fwd_bwd(apply_optimizer=True, defer_update=True)`
+            # leaves the update to `apply_deferred_update`.
+            "stage_before_update": True,
         },
     )
 
@@ -260,6 +290,7 @@ class TrainerWorker(abstract_worker.Worker):
       apply_optimizer: bool = False,
       *,
       wait_for_update: bool = True,
+      defer_update: bool = False,
       **kwargs: Any,
   ) -> datatypes.Response:
     """Executes one forward/backward pass, optionally applying the optimizer.
@@ -272,26 +303,44 @@ class TrainerWorker(abstract_worker.Worker):
         its dispatch, for a caller that sends the next step's first
         micro-batch ahead (`stage_fwd_bwd`) while the device finishes; that
         stage then waits for the device and confirms the update instead.
+      defer_update: With `apply_optimizer`, the trainer is still told this is
+        the step's last micro-batch, but the update is left to
+        `apply_deferred_update`, for a caller that stages the next step's
+        first micro-batch in between (`stage_fwd_bwd`). Until then the worker
+        accepts nothing that needs the step closed. Never passed to the
+        trainer.
       **kwargs: Passed to the trainer's `fwd_bwd`.
 
     Returns:
       The response, with `updated`, `train_step` and, once confirmed,
-      `update_ready` in its metadata when the optimizer ran.
+      `update_ready` in its metadata when the optimizer ran, or
+      `update_deferred` when it was deferred.
     """
     self._ensure_ready()
+    if defer_update and not apply_optimizer:
+      raise ValueError(
+          "fwd_bwd(defer_update=True) needs apply_optimizer=True: only a"
+          " step's last micro-batch has an update to defer."
+      )
+    self._refuse_while_update_deferred("fwd_bwd")
     req_metadata = dict(request.metadata) if request.metadata else {}
     req_metadata.pop("updated", None)
     req_metadata.pop("train_step", None)
     req_metadata.pop("update_ready", None)
+    req_metadata.pop("update_deferred", None)
     kwargs.pop("skip_jit", None)
     try:
       # The trainer still sees `apply_optimizer`: it marks the step's last
       # micro-batch (MaxText's retry_dropless_final_micro_batch runs that one
-      # with the dropless program). The update itself is run here, below.
+      # with the dropless program). The update itself is run here, below, or
+      # by `apply_deferred_update`.
       self._trainer.fwd_bwd(
           request.payload, apply_optimizer=apply_optimizer, **kwargs
       )
-      if apply_optimizer:
+      if apply_optimizer and defer_update:
+        self._deferred_update = str(request.request_id)
+        req_metadata["update_deferred"] = True
+      elif apply_optimizer:
         try:
           # Through this worker's update(), not the trainer's, so a fused step
           # gets the same bookkeeping (state on failure, step timing) as an
@@ -354,14 +403,20 @@ class TrainerWorker(abstract_worker.Worker):
     (`last_update_token`), this also returns only once it is ready and says
     so (`update_ready`), as a fused `fwd_bwd` would have.
 
+    Or it follows a last train call sent with `defer_update=True`, before the
+    step's update. Then it waits for nothing and confirms nothing: the device
+    is meant to be still computing that micro-batch, and the wait (and the
+    confirmation) belong to `apply_deferred_update`, which runs the update
+    next. `device_wait_s` is then None and `before_update` is set.
+
     Args:
       request: The micro-batch.
       **kwargs: Passed to the trainer's `fwd_bwd` when it runs.
 
     Returns:
       A response naming the staged request, with `device_wait_s` (None when
-      the trainer cannot tell) and, once confirmed, `update_ready` in its
-      metadata.
+      the trainer cannot tell, or when staged before the update) and, once
+      confirmed, `update_ready` in its metadata.
     """
     if self.state == WorkerState.PENDING:
       self.initialize()
@@ -381,39 +436,42 @@ class TrainerWorker(abstract_worker.Worker):
       )
     req_metadata = dict(request.metadata) if request.metadata else {}
     # Only this worker sets these; a caller-supplied copy is not echoed.
-    for key in ("staged", "device_wait_s", "update_ready"):
+    for key in ("staged", "device_wait_s", "update_ready", "before_update"):
       req_metadata.pop(key, None)
     kwargs.pop("skip_jit", None)
     update_ready = False
+    device_wait_s = None
+    before_update = self._deferred_update is not None
     try:
       staged_input = request.payload
       prepare = getattr(self._trainer, "prepare_fwd_bwd_input", None)
       if callable(prepare):
         staged_input = prepare(request.payload)
-      # Both waits are for the work dispatched before this call, which ends
-      # with the step's optimizer update, so a failure in either is that
-      # update's and is reported as the fused call reports it.
-      waiting_for = "the device"
-      try:
-        wait_for_device = getattr(self._trainer, "wait_for_device", None)
-        device_wait_s = (
-            float(wait_for_device()) if callable(wait_for_device) else None
-        )
-        # After the device wait, which already covers the update when the
-        # trainer queues it (MaxText's throttler holds its gradient norm, so
-        # a failed update raises there first).
-        waiting_for = "the update"
-        update_token = getattr(self._trainer, "last_update_token", None)
-        if update_token is not None:
-          jax.block_until_ready(update_token)
-          update_ready = True
-      except Exception as exc:
-        raise RuntimeError(
-            "optimizer update() failed: dispatched by"
-            " fwd_bwd(apply_optimizer=True, wait_for_update=False), it did not"
-            f" land (seen by stage_fwd_bwd waiting for {waiting_for}):"
-            f" {type(exc).__name__}: {exc}"
-        ) from exc
+      if not before_update:
+        # Both waits are for the work dispatched before this call, which ends
+        # with the step's optimizer update, so a failure in either is that
+        # update's and is reported as the fused call reports it.
+        waiting_for = "the device"
+        try:
+          wait_for_device = getattr(self._trainer, "wait_for_device", None)
+          device_wait_s = (
+              float(wait_for_device()) if callable(wait_for_device) else None
+          )
+          # After the device wait, which already covers the update when the
+          # trainer queues it (MaxText's throttler holds its gradient norm, so
+          # a failed update raises there first).
+          waiting_for = "the update"
+          update_token = getattr(self._trainer, "last_update_token", None)
+          if update_token is not None:
+            jax.block_until_ready(update_token)
+            update_ready = True
+        except Exception as exc:
+          raise RuntimeError(
+              "optimizer update() failed: dispatched by"
+              " fwd_bwd(apply_optimizer=True, wait_for_update=False), it did"
+              f" not land (seen by stage_fwd_bwd waiting for {waiting_for}):"
+              f" {type(exc).__name__}: {exc}"
+          ) from exc
     except Exception as exc:
       self._last_error = str(exc)
       self.state = WorkerState.ERROR
@@ -431,6 +489,8 @@ class TrainerWorker(abstract_worker.Worker):
     }
     if update_ready:
       response_metadata["update_ready"] = True
+    if before_update:
+      response_metadata["before_update"] = True
     resp = self._response(**response_metadata)
     resp.request_id = request.request_id
     return resp
@@ -473,9 +533,76 @@ class TrainerWorker(abstract_worker.Worker):
     )
     return self.fwd_bwd(request, **{**stage_kwargs, **kwargs})
 
+  def apply_deferred_update(self) -> datatypes.Response:
+    """Runs the update `fwd_bwd(apply_optimizer=True, defer_update=True)` left.
+
+    Between the two, the caller staged the next step's first micro-batch
+    (`stage_fwd_bwd`), so its transfer ran while the device computed this
+    step's last micro-batch. This first waits for the device when the trainer
+    has `wait_for_device` and reports how long (`device_wait_s`): how long that
+    micro-batch still ran once the staged one was in place. ~0 means the
+    device had gone idle, i.e. the transfer outlasted it and delayed the
+    update. The wait costs nothing where the trainer's `update()` blocks until
+    the step's last micro-batch has finished anyway (MaxText with
+    `retry_when_tokens_dropped`, which reads its overflow flag on the host
+    first); elsewhere it holds the update's dispatch back by one readiness
+    round trip.
+
+    Then runs the update through `update()` and, when the trainer exposes an
+    output of it (`last_update_token`), returns only once it has landed and
+    says so (`update_ready`), as a fused `fwd_bwd` would have.
+
+    Returns:
+      A response with `updated`, `train_step`, `device_wait_s` (None when the
+      trainer cannot tell) and, once confirmed, `update_ready` in its
+      metadata.
+    """
+    self._ensure_ready()
+    if self._deferred_update is None:
+      raise RuntimeError(
+          "TrainerWorker holds no deferred update: apply_deferred_update()"
+          " follows fwd_bwd(apply_optimizer=True, defer_update=True)."
+      )
+    metadata: dict[str, Any] = {}
+    waiting_for = "the device"
+    try:
+      try:
+        wait_for_device = getattr(self._trainer, "wait_for_device", None)
+        device_wait_s = (
+            float(wait_for_device()) if callable(wait_for_device) else None
+        )
+        waiting_for = "the update"
+        self._deferred_update = None
+        train_step = self.update()
+        update_token = getattr(self._trainer, "last_update_token", None)
+        if update_token is not None:
+          jax.block_until_ready(update_token)
+          metadata["update_ready"] = True
+      except Exception as exc:
+        # Waiting for the device is waiting for the step's last micro-batch,
+        # whose failure surfaces there; the rest is the update's.
+        raise RuntimeError(
+            "deferred optimizer update failed: left by"
+            " fwd_bwd(apply_optimizer=True, defer_update=True), seen by"
+            f" apply_deferred_update waiting for {waiting_for}:"
+            f" {type(exc).__name__}: {exc}"
+        ) from exc
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
+    self._last_error = None
+    return self._response(
+        updated=True,
+        train_step=train_step,
+        device_wait_s=device_wait_s,
+        **metadata,
+    )
+
   def update(self, **kwargs) -> int:
     """Applies the accumulated (mean) gradients as one optimizer update."""
     self._ensure_ready()
+    self._refuse_while_update_deferred("update")
     try:
       train_step = self._trainer.update(**kwargs)
       self._last_error = None
@@ -492,6 +619,7 @@ class TrainerWorker(abstract_worker.Worker):
   ) -> datatypes.Response:
     """Executes one evaluation step on the given payload."""
     self._ensure_ready()
+    self._refuse_while_update_deferred("eval_step")
     req_metadata = dict(request.metadata) if request.metadata else {}
     try:
       self._trainer.eval_step(request.payload, **kwargs)
@@ -507,6 +635,7 @@ class TrainerWorker(abstract_worker.Worker):
   def run_eval(self, eval_ds: Any, **kwargs) -> datatypes.Response:
     """Runs an explicit evaluation phase over eval micro-batches."""
     self._ensure_ready()
+    self._refuse_while_update_deferred("run_eval")
     if eval_ds is None:
       return self._response(evaluated=True, eval_batches=0)
     try:
@@ -554,6 +683,7 @@ class TrainerWorker(abstract_worker.Worker):
     """
     del kwargs  # Accepted for engine-forwarding parity; unused.
     self._ensure_ready()
+    self._refuse_while_update_deferred("per_token_logps")
     if items.pad_id is None or items.eos_id is None:
       raise ValueError(
           "TrainerWorker.per_token_logps requires pad_id and eos_id to be set "
@@ -637,6 +767,7 @@ class TrainerWorker(abstract_worker.Worker):
   def save_checkpoint(self, metadata: Any, **kwargs) -> datatypes.Response:
     """Force the trainer to serialize its state (model + optimizer)."""
     self._ensure_ready()
+    self._refuse_while_update_deferred("save_checkpoint")
     try:
       self._trainer.save_checkpoint(metadata, **kwargs)
       ckpt_path = self._resolve_checkpoint_path(metadata)
@@ -663,6 +794,7 @@ class TrainerWorker(abstract_worker.Worker):
   def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Stages weights for transfer and returns their metadata."""
     self._ensure_ready()
+    self._refuse_while_update_deferred("prepare_weight_sync")
     self.state = WorkerState.SYNCING
     try:
       if sync_request is not None:
@@ -729,4 +861,5 @@ class TrainerWorker(abstract_worker.Worker):
 
   def get_metrics(self) -> Any:
     """Returns and clears the recently collected step metric records."""
+    self._refuse_while_update_deferred("get_metrics")
     return self._trainer.get_metrics()

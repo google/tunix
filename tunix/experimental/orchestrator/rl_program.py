@@ -464,6 +464,7 @@ class StandardRLProgram(RLProgram):
       trainer_warmup_payload: datatypes.RLTrainerPayload | None = None,
       pipeline_step_boundary: bool = False,
       stage_next_microbatch: bool = False,
+      stage_before_update: bool = True,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -601,12 +602,25 @@ class StandardRLProgram(RLProgram):
     # opens that one call later (PROMPT_BATCH opens it at the commit).
     self.pipeline_step_boundary = pipeline_step_boundary
     # With `pipeline_step_boundary`: also send that micro-batch's data to the
-    # trainer host right after step k's last train call (which runs the update
-    # and, when a stage follows, returns at its dispatch), while the device
-    # still computes, so the train call that later runs it carries no data.
-    # Needs an engine with `stage_train_step` and a trainer that supports it
+    # trainer host while the device still computes step k's last micro-batch,
+    # so the train call that later runs it carries no data. Needs an engine
+    # with `stage_train_step` and a trainer that supports it
     # (`trainer_staging_support`); otherwise the boundary runs unstaged.
     self.stage_next_microbatch = stage_next_microbatch
+    # Where that stage goes. With `stage_before_update` and a trainer that can
+    # defer a step's update (`stage_before_update` in its staging support):
+    # between step k's last train call, sent with its update deferred, and
+    # that update (`_stage_next_before_update`). The last call then returns
+    # once the trainer has dispatched the last micro-batch, which under
+    # MaxText's `retry_when_tokens_dropped` is when the micro-batch before it
+    # finished, so the transfer runs while the device computes the last one.
+    # Otherwise right after the last call, which runs the update and returns
+    # at its dispatch (`_maybe_stage_next_microbatch`); under
+    # `retry_when_tokens_dropped` that dispatch waits until the last
+    # micro-batch has finished, so the transfer finds the device idle and the
+    # latch below switches staging off at the first boundary. Only matters
+    # with `stage_next_microbatch`.
+    self.stage_before_update = stage_before_update
     # Takes groups for a step ahead of it (`_prepack`), filling a `_StepState`
     # the step adopts when it starts.
     self._intake_task: asyncio.Task[None] | None = None
@@ -617,6 +631,10 @@ class StandardRLProgram(RLProgram):
     self._staging_latched_off = False
     # What the trainer said it supports of staging; asked once, lazily.
     self._staging_supported: bool | None = None
+    self._staging_support: dict[str, bool] | None = None
+    # Whether it can also defer a step's update past its last micro-batch, so
+    # the stage goes in between (`_trainer_can_stage_before_update`).
+    self._stage_before_update_supported: bool | None = None
     # The optimizer step the trainer last reported (`train_step` of an update
     # call), from which `_stage_planned` predicts the next one.
     self._last_optimizer_step: int | None = None
@@ -1907,6 +1925,7 @@ class StandardRLProgram(RLProgram):
       apply_optimizer: bool,
       staged_request_id: str | None = None,
       wait_for_update: bool = True,
+      defer_update: bool = False,
   ) -> tuple[Any, float]:
     assert self.engine is not None
     start = time.monotonic()
@@ -1919,6 +1938,10 @@ class StandardRLProgram(RLProgram):
       # (`_trainer_can_stage`): its worker's fused update then returns at
       # the update's dispatch (`TrainerWorker.fwd_bwd`).
       kwargs["wait_for_update"] = False
+    if defer_update:
+      # Only to a trainer that can (`_trainer_can_stage_before_update`): the
+      # update is left to `apply_deferred_update`.
+      kwargs["defer_update"] = True
     result = await self.engine.train_step(
         batch,
         role=datatypes.Role.ACTOR,
@@ -2041,10 +2064,13 @@ class StandardRLProgram(RLProgram):
       logging, `on_step_end` and host-memory release run once that call is on
       the trainer.
     * Transfer (`stage_next_microbatch`). That micro-batch's data goes to the
-      trainer host right after step k's last train call, which then returns
-      at the update's dispatch (`_stage_planned`,
-      `_maybe_stage_next_microbatch`), while the device still computes. The
-      one stage call is the only call added on the trainer.
+      trainer host while the device still computes step k's last micro-batch
+      (`_stage_planned`): between step k's last train call, sent with its
+      update deferred, and that update (`_stage_next_before_update`), when
+      the trainer can defer it; else right after the last call, which then
+      returns at the update's dispatch (`_maybe_stage_next_microbatch`). The
+      stage call, and with a deferred update the update call, are the only
+      calls added on the trainer.
     """
     assert self.engine is not None
     ordered_q = isinstance(
@@ -2169,10 +2195,16 @@ class StandardRLProgram(RLProgram):
               and self.stage_next_microbatch
               and await self._stage_planned(next_state, rescored=rescored)
           )
+          # Or, when the trainer can, the update is left out of this call and
+          # the stage goes before it (`_stage_next_before_update`).
+          defer_update = (
+              stage_after and await self._trainer_can_stage_before_update()
+          )
           train_step = self._timed_train_step(
               batch,
               apply_optimizer=is_final_batch,
               wait_for_update=not stage_after,
+              defer_update=defer_update,
           )
           batch = None
           if self.pipeline_train_microbatches and not is_final_batch:
@@ -2181,6 +2213,22 @@ class StandardRLProgram(RLProgram):
           step_result, elapsed = await train_step
           policy_training_time += elapsed
           if is_final_batch:
+            if (
+                defer_update
+                and isinstance(step_result, dict)
+                and step_result.get("update_deferred")
+            ):
+              assert next_state is not None
+              # The trainer has this step's last micro-batch and no update
+              # yet: stage the next step's first micro-batch under it, then
+              # run the update. Training time, as the fused call's wait for
+              # the device would have been.
+              deferred_start = time.monotonic()
+              step_result = await self._stage_next_before_update(
+                  next_state, step_result
+              )
+              policy_training_time += time.monotonic() - deferred_start
+              stage_after = False
             if (
                 isinstance(step_result, dict)
                 and step_result.get("train_step") is not None
@@ -2687,6 +2735,7 @@ class StandardRLProgram(RLProgram):
         support = {}
       else:
         support = await probe(role=datatypes.Role.ACTOR)
+      self._staging_support = dict(support)
       self._staging_supported = bool(
           support.get("stage_fwd_bwd") and support.get("reports_device_wait")
       )
@@ -2699,6 +2748,34 @@ class StandardRLProgram(RLProgram):
             support,
         )
     return self._staging_supported
+
+  async def _trainer_can_stage_before_update(self) -> bool:
+    """Whether to stage between the last call and the update; asks once.
+
+    Needs `stage_before_update`, an engine with `apply_deferred_update`, and a
+    trainer that can defer a step's update (`stage_before_update` in the
+    staging support `_trainer_can_stage` asked it for). Only asked when a
+    stage is planned, i.e. once the trainer is known to stage at all.
+    """
+    if not self.stage_before_update:
+      return False
+    if self._stage_before_update_supported is None:
+      if not await self._trainer_can_stage():
+        return False
+      support = self._staging_support or {}
+      self._stage_before_update_supported = bool(
+          support.get("stage_before_update")
+          and getattr(self.engine, "apply_deferred_update", None) is not None
+      )
+      if not self._stage_before_update_supported:
+        logging.warning(
+            "[pipeline] The trainer cannot defer a step's update past its last"
+            " microbatch (%s): staging right after the last call instead,"
+            " which hides nothing when the trainer's update waits for that"
+            " microbatch (MaxText retry_when_tokens_dropped).",
+            support,
+        )
+    return self._stage_before_update_supported
 
   async def _stage_planned(
       self, st: _StepState | None, *, rescored: bool
@@ -2727,8 +2804,11 @@ class StandardRLProgram(RLProgram):
         rollout log-probs, so its first would be too, and those go out whole.
 
     Returns:
-      Whether to send the step's last call with `wait_for_update=False` and
-      call `_maybe_stage_next_microbatch` once it returns.
+      Whether to stage: send the step's last call with its update deferred
+      and call `_stage_next_before_update` once it returns, when the trainer
+      can (`_trainer_can_stage_before_update`); else send it with
+      `wait_for_update=False` and call `_maybe_stage_next_microbatch` once it
+      returns.
     """
     if (
         not self.stage_next_microbatch
@@ -2822,6 +2902,45 @@ class StandardRLProgram(RLProgram):
       return False
     if not await self._trainer_can_stage():
       return False
+    sent = await self._send_stage(st)
+    if sent is None:
+      return False
+    staged, stage_s = sent
+    device_wait_s = staged.device_wait_s
+    logging.info(
+        "[pipeline] STAGED next step's first microbatch on the trainer in"
+        " %.2fs; its device then still computed for %s (request_id=%s)",
+        stage_s,
+        "unknown" if device_wait_s is None else f"{device_wait_s:.2f}s",
+        staged.request_id,
+    )
+    if not self._staging_hidden(device_wait_s):
+      self._staging_latched_off = True
+      logging.warning(
+          "[pipeline] Staging a microbatch took %.2fs and the trainer's device"
+          " was idle before it finished (device wait %s): the trainer is fed"
+          " slower than it computes, so staging only delays each step's"
+          " weight sync. Not staging for the rest of the run.",
+          stage_s,
+          "unknown" if device_wait_s is None else f"{device_wait_s:.3f}s",
+      )
+    return staged.update_ready
+
+  async def _send_stage(self, st: _StepState) -> tuple[Any, float] | None:
+    """Stages `st.ready[0]` on the trainer; the callers checked it may go.
+
+    A stage is optional, so one that fails on the way to the trainer, or in
+    the reference log-probs it needs, falls back: the micro-batch goes back
+    to the front of `st.ready` and staging is off for the rest of the run. A
+    stage the trainer ran and that raised there is re-raised.
+
+    Args:
+      st: The next step's state, filled by `_prepack`.
+
+    Returns:
+      The engine's `StagedTrainStep` and how long the call took, or None when
+      it fell back.
+    """
     intake, self._intake_task = self._intake_task, None
     mb = st.ready.pop(0)
     calling_trainer = False
@@ -2851,28 +2970,94 @@ class StandardRLProgram(RLProgram):
           exc,
           self._step + 1,
       )
-      return False
+      return None
     batch = None
     st.staged = (mb._replace(payload=None), staged.request_id)
-    device_wait_s = staged.device_wait_s
-    logging.info(
-        "[pipeline] STAGED next step's first microbatch on the trainer in"
-        " %.2fs; its device then still computed for %s (request_id=%s)",
-        stage_s,
-        "unknown" if device_wait_s is None else f"{device_wait_s:.2f}s",
-        staged.request_id,
+    return staged, stage_s
+
+  async def _stage_next_before_update(
+      self, st: _StepState, step_result: dict[str, Any]
+  ) -> dict[str, Any]:
+    """Stages the next step's first micro-batch, then runs the step's update.
+
+    Called once the step's last train call, sent with its update deferred
+    (`_stage_planned`, `_trainer_can_stage_before_update`), has returned: the
+    trainer has dispatched that micro-batch and holds the update back. Under
+    MaxText's `retry_when_tokens_dropped` the call returns once the
+    micro-batch before it has finished (it reads that one's overflow flag),
+    so the device computes the whole last micro-batch while the stage's
+    transfer runs. The update then goes out when the last micro-batch is done,
+    where `update()` would have dispatched it anyway (it reads that one's flag
+    first), so nothing is delayed while the transfer is shorter than the
+    micro-batch.
+
+    The micro-batch is staged under the refusals of
+    `_maybe_stage_next_microbatch`: not when it is not packed yet, closes its
+    step, or is rescored under the live weights first (those go out whole),
+    and not once staging is off. The scored-checkpoint refusal was applied by
+    `_stage_planned`, from the predicted optimizer step. A stage that fails on
+    the way falls back as there (`_send_stage`); the update still runs.
+
+    The update call waits for the device first and says how long
+    (`device_wait_s`): how long the last micro-batch still ran once the staged
+    one was in place. Under `_STAGING_HIDDEN_WAIT_S`, the transfer outlasted
+    it and delayed the update, metrics, checkpoint stamp and weight sync: the
+    trainer is fed slower than it computes, so staging is switched off for the
+    rest of the run, as there.
+
+    A replay of the last micro-batch (MaxText reruns an overflowed one,
+    dropless, inside `update()`) leaves the staged micro-batch as it is: its
+    inputs are mapped from its own payload alone (`prepare_fwd_bwd_input`
+    reads no parameter, gradient or optimizer state), and the rerun reads the
+    inputs it kept for itself.
+
+    Args:
+      st: The next step's state, filled by `_prepack`.
+      step_result: The last train call's result (`update_deferred`).
+
+    Returns:
+      `step_result` with the update call's result over it: `updated`,
+      `train_step`, `update_ready` (the trainer confirmed the update landed,
+      so the caller may stamp and save the checkpoint without a get_metrics()
+      first) and `device_wait_s`.
+    """
+    assert self.engine is not None
+    sent = None
+    if (
+        not self._staging_latched_off
+        and self._intake_done()
+        and st.staged is None
+        and st.ready
+        and not st.ready[0].is_final_batch
+        and not self._needs_sampler_agreement(st.ready[0].payload)
+    ):
+      sent = await self._send_stage(st)
+    update = await self.engine.apply_deferred_update(  # pyrefly: ignore[missing-attribute]
+        role=datatypes.Role.ACTOR
     )
-    if not self._staging_hidden(device_wait_s):
-      self._staging_latched_off = True
-      logging.warning(
-          "[pipeline] Staging a microbatch took %.2fs and the trainer's device"
-          " was idle before it finished (device wait %s): the trainer is fed"
-          " slower than it computes, so staging only delays each step's"
-          " weight sync. Not staging for the rest of the run.",
+    if sent is not None:
+      staged, stage_s = sent
+      device_wait_s = update.get("device_wait_s")
+      logging.info(
+          "[pipeline] STAGED next step's first microbatch on the trainer"
+          " before the update in %.2fs; the last microbatch then still"
+          " computed for %s (request_id=%s)",
           stage_s,
-          "unknown" if device_wait_s is None else f"{device_wait_s:.3f}s",
+          "unknown" if device_wait_s is None else f"{device_wait_s:.2f}s",
+          staged.request_id,
       )
-    return staged.update_ready
+      if not self._staging_hidden(device_wait_s):
+        self._staging_latched_off = True
+        logging.warning(
+            "[pipeline] Staging a microbatch took %.2fs and the trainer's"
+            " device was idle before it finished (device wait %s): the"
+            " trainer is fed slower than it computes, so staging only delays"
+            " each step's update and weight sync. Not staging for the rest of"
+            " the run.",
+            stage_s,
+            "unknown" if device_wait_s is None else f"{device_wait_s:.3f}s",
+        )
+    return {**step_result, **update}
 
   async def _send_first_microbatch_ahead(
       self, st: _StepState

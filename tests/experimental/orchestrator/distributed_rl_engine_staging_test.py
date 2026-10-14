@@ -382,7 +382,12 @@ class _OldTrainerWorker(trainer_worker.TrainerWorker):
         resources={
             k: v
             for k, v in info.resources.items()
-            if k not in ("stage_fwd_bwd", "reports_device_wait")
+            if k
+            not in (
+                "stage_fwd_bwd",
+                "reports_device_wait",
+                "stage_before_update",
+            )
         },
     )
 
@@ -402,21 +407,33 @@ class TrainerStagingSupportTest(absltest.TestCase):
     engine = _real_engine(trainer_worker.TrainerWorker, _WaitingTrainer())
     self.assertEqual(
         asyncio.run(engine.trainer_staging_support()),
-        {"stage_fwd_bwd": True, "reports_device_wait": True},
+        {
+            "stage_fwd_bwd": True,
+            "reports_device_wait": True,
+            "stage_before_update": True,
+        },
     )
 
   def test_a_trainer_without_it_cannot_report_its_device(self):
     engine = _real_engine(trainer_worker.TrainerWorker, _MinimalTrainer())
     self.assertEqual(
         asyncio.run(engine.trainer_staging_support()),
-        {"stage_fwd_bwd": True, "reports_device_wait": False},
+        {
+            "stage_fwd_bwd": True,
+            "reports_device_wait": False,
+            "stage_before_update": True,
+        },
     )
 
   def test_an_older_trainer_worker_supports_nothing(self):
     engine = _real_engine(_OldTrainerWorker, _WaitingTrainer())
     self.assertEqual(
         asyncio.run(engine.trainer_staging_support()),
-        {"stage_fwd_bwd": False, "reports_device_wait": False},
+        {
+            "stage_fwd_bwd": False,
+            "reports_device_wait": False,
+            "stage_before_update": False,
+        },
     )
 
   def test_the_device_wait_comes_back_through_a_real_worker(self):

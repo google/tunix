@@ -868,6 +868,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     Returns:
       `stage_fwd_bwd`: it holds a micro-batch ahead of its fwd_bwd.
       `reports_device_wait`: it reports `StagedTrainStep.device_wait_s`.
+      `stage_before_update`: it can defer a step's update past its last
+      micro-batch (`train_step(defer_update=True)` and
+      `apply_deferred_update`), so a stage runs in between.
     """
     worker = self._trainer_workers.get(role)
     if worker is None:
@@ -876,7 +879,45 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     resources = getattr(info, "resources", None) or {}
     return {
         key: bool(resources.get(key, False))
-        for key in ("stage_fwd_bwd", "reports_device_wait")
+        for key in (
+            "stage_fwd_bwd",
+            "reports_device_wait",
+            "stage_before_update",
+        )
+    }
+
+  async def apply_deferred_update(
+      self, role: datatypes.Role = datatypes.Role.ACTOR
+  ) -> dict[str, Any]:
+    """Runs the update a `train_step(defer_update=True)` left on the trainer.
+
+    Args:
+      role: Trainer role.
+
+    Returns:
+      `updated` (True), `train_step`, `update_ready` (the trainer confirmed the
+      update landed) and `device_wait_s` (how long the trainer still waited
+      for its device before dispatching the update; ~0 means a stage sent in
+      between outlasted the step's last micro-batch, None when it cannot
+      tell).
+    """
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+    async with self._actor_busy_guard(role == datatypes.Role.ACTOR):
+      resp = await self._invoke_worker(worker, "apply_deferred_update")
+      if role == datatypes.Role.ACTOR:
+        self._actor_weights_dirty = True
+    metadata = getattr(resp, "metadata", None) or {}
+    device_wait_s = metadata.get("device_wait_s")
+    return {
+        "updated": bool(metadata.get("updated")),
+        "train_step": metadata.get("train_step"),
+        # Set only by a worker that waited for the update to land on device.
+        "update_ready": bool(metadata.get("update_ready")),
+        "device_wait_s": (
+            None if device_wait_s is None else float(device_wait_s)
+        ),
     }
 
   async def stage_train_step(
@@ -938,6 +979,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       apply_optimizer: bool = True,
       skip_jit: bool = False,
       staged_request_id: str | None = None,
+      defer_update: bool = False,
       **kwargs: Any,
   ) -> Any:
     """Executes atomic gradient accumulation / update on TrainerWorker.
@@ -949,6 +991,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       apply_optimizer: Apply the accumulated gradients after this micro-batch.
       skip_jit: Forwarded to the trainer.
       staged_request_id: Runs the micro-batch `stage_train_step` sent ahead.
+      defer_update: With `apply_optimizer`, the micro-batch is still the
+        step's last, but the update is left to `apply_deferred_update`, for a
+        caller that stages the next step's first micro-batch in between. Only
+        for a trainer whose `trainer_staging_support()` has
+        `stage_before_update`.
       **kwargs: Forwarded to the trainer's `fwd_bwd`.
     """
     worker = self._trainer_workers.get(role)
@@ -958,6 +1005,14 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       raise ValueError(
           "train_step takes a payload or a staged_request_id, not both."
       )
+    if defer_update:
+      if not apply_optimizer:
+        raise ValueError(
+            "train_step(defer_update=True) needs apply_optimizer=True: only a"
+            " step's last micro-batch has an update to defer."
+        )
+      # Passed only when set, so the default call is unchanged.
+      kwargs = {**kwargs, "defer_update": True}
     role_name = role.value if isinstance(role, datatypes.Role) else str(role)
     logging.info(
         "Executing train_step on %s worker (accumulate_gradients=%s,"
@@ -1001,6 +1056,24 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         self._actor_weights_dirty = True
       if not apply_optimizer:
         return fwd_bwd_result
+      if (
+          defer_update
+          and isinstance(fwd_bwd_result, datatypes.Response)
+          and isinstance(fwd_bwd_result.metadata, Mapping)
+          and bool(fwd_bwd_result.metadata.get("update_deferred"))
+      ):
+        # Set only by a worker that deferred it (TrainerWorker strips any
+        # caller-supplied copy of the key); the caller runs
+        # `apply_deferred_update` next. A worker that ran the update after all
+        # is handled below, as a fused call.
+        return {
+            "fwd_bwd": fwd_bwd_result,
+            "updated": False,
+            "update_deferred": True,
+            "train_step": None,
+            "accumulated": accumulate_gradients,
+            "update_ready": False,
+        }
       # A worker that ran the optimizer inside the fwd_bwd RPC reports
       # `updated=True` (TrainerWorker strips any caller-supplied copy of the
       # key before echoing request metadata, so only the worker can set it). A

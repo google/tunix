@@ -298,8 +298,21 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=False,
       help=(
           "With --pipeline_step_boundary: send the next step's first"
-          " micro-batch to the trainer host right after this step's update"
-          " is dispatched, so its train call carries no data."
+          " micro-batch to the trainer host while the device still computes"
+          " this step's last one, so its train call carries no data."
+      ),
+  )
+  parser.add_argument(
+      "--stage_before_update",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "With --stage_next_microbatch: stage between this step's last"
+          " micro-batch and its update, which the trainer then defers, rather"
+          " than after the update's dispatch. Needed wherever the trainer's"
+          " update waits for the last micro-batch (MaxText"
+          " retry_when_tokens_dropped); --no-stage_before_update stages"
+          " after the update's dispatch."
       ),
   )
   parser.add_argument(
@@ -1282,6 +1295,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         pipeline_train_microbatches=args.pipeline_train_microbatches,
         pipeline_step_boundary=args.pipeline_step_boundary,
         stage_next_microbatch=args.stage_next_microbatch,
+        stage_before_update=args.stage_before_update,
         partial_rollout=args.in_flight_weight_updates,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
         initial_dispatch_stagger_s=args.initial_dispatch_stagger_s,

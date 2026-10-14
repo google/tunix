@@ -296,9 +296,11 @@ class TrainerWorkerStagingTest(absltest.TestCase):
     with_wait = _worker(_WaitingTrainer()).info().resources
     self.assertTrue(with_wait["stage_fwd_bwd"])
     self.assertTrue(with_wait["reports_device_wait"])
+    self.assertTrue(with_wait["stage_before_update"])
     without = _worker(_Trainer()).info().resources
     self.assertTrue(without["stage_fwd_bwd"])
     self.assertFalse(without["reports_device_wait"])
+    self.assertTrue(without["stage_before_update"])
 
   def test_stop_drops_the_staged_batch(self):
     worker = _worker(_Trainer())
