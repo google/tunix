@@ -61,7 +61,6 @@ export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-$(( ${_rollout_dims//x/*} / $
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 
 # Sandbox Concurrency
-export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-16}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-1024}"
 
 # MLPerf RCP logging with deferred offline eval: from VAL_START_AT (default
