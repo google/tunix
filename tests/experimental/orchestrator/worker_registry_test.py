@@ -161,6 +161,185 @@ class WorkerRegistryTest(absltest.TestCase):
     self.assertEqual(registry.roles(), {"rollout"})
     self.assertCountEqual(registry.group("rollout").members(), [t0_new, t1_new])
 
+  def test_membership_state_filtering_in_group_and_active_group(self):
+    registry = worker_registry.WorkerRegistry()
+    state_cls = worker_registry.MembershipState
+
+    w_init = mock_worker.MockWorker(worker_id="w0", roles={"rollout"})
+    w_pending = mock_worker.MockWorker(worker_id="w1", roles={"rollout"})
+    w_active = mock_worker.MockWorker(worker_id="w2", roles={"rollout"})
+    w_evicted = mock_worker.MockWorker(worker_id="w3", roles={"rollout"})
+
+    registry.register(w_init, state=state_cls.INITIALIZING)
+    registry.register(w_pending, state=state_cls.PENDING_WEIGHT_SYNC)
+    registry.register(w_active, state=state_cls.ACTIVE)
+    registry.register(w_evicted, state=state_cls.EVICTED)
+
+    self.assertEqual(registry.state("w0"), state_cls.INITIALIZING)
+    self.assertEqual(registry.state("w1"), state_cls.PENDING_WEIGHT_SYNC)
+    self.assertEqual(registry.state("w2"), state_cls.ACTIVE)
+    self.assertEqual(registry.state("w3"), state_cls.EVICTED)
+
+    # Default group() includes only ACTIVE, excluding INITIALIZING,
+    # PENDING_WEIGHT_SYNC, and EVICTED.
+    self.assertEqual(registry.group("rollout").members(), [w_active])
+
+    # Explicit states filter (e.g. WeightSyncCoordinator includes
+    # PENDING_WEIGHT_SYNC)
+    self.assertEqual(
+        registry.group(
+            "rollout",
+            states=(state_cls.ACTIVE, state_cls.PENDING_WEIGHT_SYNC),
+        ).members(),
+        [w_pending, w_active],
+    )
+    self.assertEqual(
+        registry.group("rollout", states=(state_cls.INITIALIZING,)).members(),
+        [w_init],
+    )
+    self.assertEqual(
+        registry.group(
+            "rollout", states=(state_cls.EVICTED, state_cls.ACTIVE)
+        ).members(),
+        [w_active, w_evicted],
+    )
+
+  def test_monotonic_incarnation_across_override_and_re_register(self):
+    registry = worker_registry.WorkerRegistry()
+    w_v1 = mock_worker.MockWorker(worker_id="r0", roles={"rollout"})
+    w_v2 = mock_worker.MockWorker(worker_id="r0", roles={"rollout"})
+    w_v3 = mock_worker.MockWorker(worker_id="r0", roles={"rollout"})
+
+    registry.register(w_v1)
+    self.assertEqual(registry.incarnation("r0"), 1)
+
+    registry.register(w_v2, override=True)
+    self.assertEqual(registry.incarnation("r0"), 2)
+
+    registry.unregister("r0")
+    with self.assertRaises(KeyError):
+      registry.incarnation("r0")
+    with self.assertRaises(KeyError):
+      registry.state("r0")
+
+    registry.register(w_v3)
+    self.assertEqual(registry.incarnation("r0"), 3)
+
+  def test_set_state_and_evict_with_expected_incarnation(self):
+    registry = worker_registry.WorkerRegistry()
+    state_cls = worker_registry.MembershipState
+
+    w0 = mock_worker.MockWorker(worker_id="r0", roles={"rollout"})
+    registry.register(w0, state=state_cls.INITIALIZING)
+    inc1 = registry.incarnation("r0")
+    self.assertEqual(inc1, 1)
+
+    # Stale/wrong expected_incarnation returns False and does not change state
+    self.assertFalse(
+        registry.set_state(
+            "r0", state_cls.PENDING_WEIGHT_SYNC, expected_incarnation=99
+        )
+    )
+    self.assertEqual(registry.state("r0"), state_cls.INITIALIZING)
+
+    # Matching expected_incarnation succeeds
+    self.assertTrue(
+        registry.set_state(
+            "r0", state_cls.PENDING_WEIGHT_SYNC, expected_incarnation=inc1
+        )
+    )
+    self.assertEqual(registry.state("r0"), state_cls.PENDING_WEIGHT_SYNC)
+
+    # Unconditional set_state succeeds
+    self.assertTrue(registry.set_state("r0", state_cls.ACTIVE))
+    self.assertEqual(registry.state("r0"), state_cls.ACTIVE)
+
+    # set_state on unknown worker raises KeyError
+    with self.assertRaises(KeyError):
+      registry.set_state("unknown", state_cls.ACTIVE)
+
+    # Re-register r0 with override=True (incarnation -> 2)
+    w0_new = mock_worker.MockWorker(worker_id="r0", roles={"rollout"})
+    registry.register(w0_new, override=True, state=state_cls.ACTIVE)
+    inc2 = registry.incarnation("r0")
+    self.assertEqual(inc2, 2)
+
+    # Evict with stale incarnation (1) fails and leaves new incarnation ACTIVE
+    self.assertFalse(registry.evict("r0", expected_incarnation=inc1))
+    self.assertEqual(registry.state("r0"), state_cls.ACTIVE)
+    self.assertEqual(registry.group("rollout").members(), [w0_new])
+
+    # Evict with matching incarnation (2) succeeds and removes from group
+    self.assertTrue(registry.evict("r0", expected_incarnation=inc2))
+    self.assertEqual(registry.state("r0"), state_cls.EVICTED)
+    self.assertEmpty(registry.group("rollout").members())
+
+    # Evict on unknown worker returns False
+    self.assertFalse(registry.evict("unknown"))
+
+  def test_retrieval_methods_exclude_evicted_by_default(self):
+    registry = worker_registry.WorkerRegistry()
+    r0 = mock_worker.MockWorker(worker_id="r0", roles={"rollout"})
+    r1 = mock_worker.MockWorker(worker_id="r1", roles={"rollout"})
+    registry.register(r0)
+    registry.register(r1)
+    self.assertTrue(registry.evict("r0"))
+
+    self.assertEqual(registry.worker_ids(), ["r1"])
+    self.assertEqual(registry.workers(), [r1])
+    self.assertEqual(registry.infos(), [r1.info()])
+    self.assertEqual(registry.worker_ids(include_evicted=True), ["r0", "r1"])
+    self.assertEqual(registry.workers(include_evicted=True), [r0, r1])
+    self.assertEqual(
+        registry.infos(include_evicted=True), [r0.info(), r1.info()]
+    )
+    # Identity-level membership still tracks evicted workers so incarnation
+    # history and re-registration keep working.
+    self.assertLen(registry, 2)
+    self.assertIn("r0", registry)
+    self.assertEqual(
+        registry.state("r0"), worker_registry.MembershipState.EVICTED
+    )
+
+  def test_state_listeners_notified_only_on_transitions(self):
+    registry = worker_registry.WorkerRegistry()
+    state_cls = worker_registry.MembershipState
+    events: list[tuple[str, worker_registry.MembershipState]] = []
+    registry.add_state_listener(lambda wid, state: events.append((wid, state)))
+
+    r0 = mock_worker.MockWorker(worker_id="r0", roles={"rollout"})
+    registry.register(r0, state=state_cls.INITIALIZING)
+    self.assertEqual(events, [("r0", state_cls.INITIALIZING)])
+
+    # Re-applying the current state is a no-op for listeners.
+    self.assertTrue(registry.set_state("r0", state_cls.INITIALIZING))
+    self.assertEqual(events, [("r0", state_cls.INITIALIZING)])
+
+    self.assertTrue(registry.set_state("r0", state_cls.ACTIVE))
+    self.assertTrue(registry.set_state("r0", state_cls.ACTIVE))
+    self.assertEqual(
+        events, [("r0", state_cls.INITIALIZING), ("r0", state_cls.ACTIVE)]
+    )
+
+    # Repeated evictions (e.g. session callback + coordinator) notify once.
+    self.assertTrue(registry.evict("r0"))
+    self.assertTrue(registry.evict("r0"))
+    self.assertEqual(
+        events,
+        [
+            ("r0", state_cls.INITIALIZING),
+            ("r0", state_cls.ACTIVE),
+            ("r0", state_cls.EVICTED),
+        ],
+    )
+    self.assertEqual(registry.state("r0"), state_cls.EVICTED)
+
+    # A fresh incarnation re-arms notifications.
+    r0_new = mock_worker.MockWorker(worker_id="r0", roles={"rollout"})
+    registry.register(r0_new, override=True, state=state_cls.ACTIVE)
+    self.assertEqual(events[-1], ("r0", state_cls.ACTIVE))
+    self.assertLen(events, 4)
+
 
 if __name__ == "__main__":
   absltest.main()

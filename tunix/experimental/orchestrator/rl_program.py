@@ -164,7 +164,7 @@ def _tag_prompt(prompt_item: Any, coordinates: Mapping[str, int]) -> Any:
 def _generation_metrics(
     groups: Sequence[Sequence[Any]],
 ) -> dict[str, float]:
-  """Computes the step's `generation/completions/*` metrics, grouped by prompt.
+  """Computes the step's `rollout/completions/*` metrics, grouped by prompt.
 
   Matches `agentic_grpo_learner.GRPOLearner._process_results`: the two means are
   per group, not per rollout, so a short group still weighs the same as a full
@@ -216,12 +216,12 @@ def _generation_metrics(
   if not all_lengths:
     return {}
   return {
-      "generation/completions/clip_ratio": float(np.mean(clip_ratios)),
-      "generation/completions/mean_raw_length": float(
+      "rollout/completions/clip_ratio": float(np.mean(clip_ratios)),
+      "rollout/completions/mean_raw_length": float(
           np.mean(group_mean_lengths)
       ),
-      "generation/completions/max_raw_length": float(np.max(all_lengths)),
-      "generation/completions/min_raw_length": float(np.min(all_lengths)),
+      "rollout/completions/max_raw_length": float(np.max(all_lengths)),
+      "rollout/completions/min_raw_length": float(np.min(all_lengths)),
   }
 
 
@@ -386,12 +386,17 @@ class StandardRLProgram(RLProgram):
       partial_rollout: bool = False,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       trajectory_log_dir: str | None = None,
-      trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
+      trajectory_store: (
+          trajectory_store_lib.TrajectoryStore
+          | Sequence[trajectory_store_lib.TrajectoryStore | None]
+          | None
+      ) = None,
       metrics_prefix: str = "",
       mode: Mode | str = Mode.TRAIN,
       group_order: (
           trajectory_queue_manager.GroupOrder | str
       ) = trajectory_queue_manager.GroupOrder.ARRIVAL,
+      on_train_start: Callable[[int], None] | None = None,
       on_step_begin: Callable[[int], None] | None = None,
       on_step_end: Callable[[int, Any], None] | None = None,
       val_start_step: int | None = None,
@@ -399,6 +404,9 @@ class StandardRLProgram(RLProgram):
       checkpoint_optimizer_interval_steps: int = 1,
       pipeline_train_microbatches: bool = False,
       rollout_priority_scheduling: bool = False,
+      initial_dispatch_stagger_s: float = 0.0,
+      initial_dispatch_first_stagger_s: float | None = None,
+      trainer_warmup_payload: datatypes.RLTrainerPayload | None = None,
       num_generations_to_dispatch: int | None = None,
       prefer_valid_rollouts: bool = True,
   ):
@@ -406,6 +414,13 @@ class StandardRLProgram(RLProgram):
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
     if max_staleness < 0:
       raise ValueError("max_staleness must be non-negative.")
+    if initial_dispatch_stagger_s < 0:
+      raise ValueError("initial_dispatch_stagger_s must be non-negative.")
+    if (
+        initial_dispatch_first_stagger_s is not None
+        and initial_dispatch_first_stagger_s < 0
+    ):
+      raise ValueError("initial_dispatch_first_stagger_s must be non-negative.")
     if checkpoint_optimizer_interval_steps < 0:
       raise ValueError(
           "checkpoint_optimizer_interval_steps must be non-negative."
@@ -461,21 +476,6 @@ class StandardRLProgram(RLProgram):
     self.mini_batch_size = algo.mini_batch_size
     if self.mini_batch_size <= 0 or self.num_generations <= 0:
       raise ValueError("mini_batch_size and num_generations must be positive.")
-    if (
-        num_generations_to_dispatch is not None
-        and num_generations_to_dispatch < self.num_generations
-    ):
-      raise ValueError(
-          f"num_generations_to_dispatch ({num_generations_to_dispatch}) must be"
-          f" >= num_generations ({self.num_generations})."
-      )
-    self.num_generations_to_dispatch = num_generations_to_dispatch
-    self.prefer_valid_rollouts = prefer_valid_rollouts
-    self._effective_generations_to_dispatch = (
-        self.num_generations_to_dispatch
-        if self.num_generations_to_dispatch is not None
-        else self.num_generations
-    )
     if (
         num_generations_to_dispatch is not None
         and num_generations_to_dispatch < self.num_generations
@@ -572,6 +572,24 @@ class StandardRLProgram(RLProgram):
     # under `max_staleness > 0`. Off, every request gets priority 0 and the
     # rollouts serve requests in arrival order.
     self.rollout_priority_scheduling = rollout_priority_scheduling
+    # Spread the start-up prompt batches out in time: batch 1 is held until
+    # `initial_dispatch_first_stagger_s` (defaults to
+    # `initial_dispatch_stagger_s`) after batch 0 first dispatches, and each
+    # later batch `initial_dispatch_stagger_s` after the one before it. Applies
+    # only before the trainer consumes its first batch; both 0 disables it.
+    self.initial_dispatch_stagger_s = float(initial_dispatch_stagger_s)
+    self.initial_dispatch_first_stagger_s = (
+        self.initial_dispatch_stagger_s
+        if initial_dispatch_first_stagger_s is None
+        else float(initial_dispatch_first_stagger_s)
+    )
+    # One synthetic micro-batch to compile the trainer against before
+    # `on_train_start`, after `configure_worker` (which discards any compile
+    # done at bring-up). None keeps the lazy compile on the first micro-batch.
+    self.trainer_warmup_payload = trainer_warmup_payload
+    self._first_train_payload_logged = False
+    self._initial_dispatch_t0: float | None = None
+    self._initial_stagger_logged: set[int] = set()
     self._sync_error: BaseException | None = None
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     # Trajectory logging is disabled on mlperf to prevent GCS write timeouts
@@ -593,6 +611,7 @@ class StandardRLProgram(RLProgram):
         if isinstance(group_order, trajectory_queue_manager.GroupOrder)
         else trajectory_queue_manager.GroupOrder(group_order)
     )
+    self.on_train_start = on_train_start
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
     self.val_start_step = val_start_step
@@ -642,7 +661,13 @@ class StandardRLProgram(RLProgram):
     )
 
   @property
-  def trajectory_store(self) -> trajectory_store_lib.TrajectoryStore | None:
+  def trajectory_store(
+      self,
+  ) -> (
+      trajectory_store_lib.TrajectoryStore
+      | Sequence[trajectory_store_lib.TrajectoryStore | None]
+      | None
+  ):
     return self._trajectory_store
 
   def close(self) -> None:
@@ -690,6 +715,7 @@ class StandardRLProgram(RLProgram):
     # skip the loop and keep dispatching after a sync round failed.
     if self._sync_error is not None:
       raise self._sync_error
+    await self._hold_initial_stagger(batch_idx)
     if self.partial_rollout:
       await self._wait_for_partial_dispatch_window(batch_idx)
       return
@@ -709,6 +735,66 @@ class StandardRLProgram(RLProgram):
       # between the test above and the clear, and nothing would set it again.
       await self._window_release.wait()
       self._window_release.clear()
+
+  def _initial_dispatch_offset(self, batch_idx: int) -> float:
+    """Seconds after batch 0's first dispatch at which start-up batch is due.
+
+    Batch 0 is due at once, batch 1 after `initial_dispatch_first_stagger_s`,
+    and batch k > 1 after `first + (k - 1) * initial_dispatch_stagger_s`.
+
+    Args:
+      batch_idx: The prompt batch index.
+
+    Returns:
+      The offset in seconds.
+    """
+    if batch_idx <= 0:
+      return 0.0
+    return (
+        self.initial_dispatch_first_stagger_s
+        + (batch_idx - 1) * self.initial_dispatch_stagger_s
+    )
+
+  async def _hold_initial_stagger(self, batch_idx: int) -> None:
+    """Holds start-up batch `batch_idx` until its staggered dispatch time.
+
+    Batch k (k > 0) is held until `_initial_dispatch_offset(k)` after batch 0
+    first dispatched. No-op when both staggers are 0, and once the trainer has
+    consumed a batch (`_next_batch > 0`).
+
+    Args:
+      batch_idx: The prompt batch the dispatcher is about to emit into.
+    """
+    if (
+        self.initial_dispatch_stagger_s <= 0
+        and self.initial_dispatch_first_stagger_s <= 0
+    ) or self._next_batch > 0:
+      return
+    if batch_idx == 0:
+      if self._initial_dispatch_t0 is None:
+        self._initial_dispatch_t0 = time.monotonic()
+      return
+    t0 = self._initial_dispatch_t0
+    if t0 is None:
+      return
+    due = t0 + self._initial_dispatch_offset(batch_idx)
+    now = time.monotonic()
+    if now >= due:
+      return
+    if batch_idx not in self._initial_stagger_logged:
+      self._initial_stagger_logged.add(batch_idx)
+      logging.info(
+          "[pipeline] STAGGER batch_idx=%d held %.1f s"
+          " (initial_dispatch_first_stagger_s=%.1f"
+          " initial_dispatch_stagger_s=%.1f)",
+          batch_idx,
+          due - now,
+          self.initial_dispatch_first_stagger_s,
+          self.initial_dispatch_stagger_s,
+      )
+    await asyncio.sleep(due - now)
+    if self._sync_error is not None:
+      raise self._sync_error
 
   async def _wait_for_partial_dispatch_window(self, batch_idx: int) -> None:
     """Per-batch dispatch gate for partial rollout.
@@ -885,10 +971,17 @@ class StandardRLProgram(RLProgram):
         }
         if self.generation_args is not None:
           dispatch_kwargs["generation_args"] = self.generation_args
-        await self.engine.dispatch_rollouts(
-            [prompt_item],
-            **dispatch_kwargs,
-        )
+        try:
+          await self.engine.dispatch_rollouts(
+              [prompt_item],
+              **dispatch_kwargs,
+          )
+        except Exception:
+          self._in_flight_rollouts = max(
+              0,
+              self._in_flight_rollouts - self._effective_generations_to_dispatch,
+          )
+          raise
       if last_coordinates is not None and isinstance(
           self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
       ):
@@ -904,6 +997,9 @@ class StandardRLProgram(RLProgram):
     assert self.engine is not None
     try:
       while not self._dispatch_done.is_set() or self._in_flight_rollouts > 0:
+        if self._in_flight_rollouts <= 0:
+          await asyncio.sleep(0.001)
+          continue
 
         try:
           completed = await self.engine.poll_rollouts()
@@ -927,6 +1023,8 @@ class StandardRLProgram(RLProgram):
                 cancel_task.add_done_callback(
                     self._pending_cancel_tasks.discard
                 )
+        except datatypes.NoHealthyRolloutWorkersError:
+          raise
         except Exception as exc:  # pylint: disable=broad-exception-caught
           logging.warning("Error in polling_stage: %s", exc)
           await asyncio.sleep(0.01)
@@ -952,11 +1050,12 @@ class StandardRLProgram(RLProgram):
 
         rewards = []
         for item in group:
-          # Skip reward evaluation or extraction for failed, timed-out, or
+          # Skip reward evaluation or extraction for failed, env-timed-out, or
           # masked-out trajectories (`not item.is_valid`): although the payload
           # still goes through trainer fwd/bwd to keep static batch shapes, its
           # advantage and completion_mask are zeroed out, so scoring it is
           # wasted work (and an aborted trajectory may lack trajectory_reward).
+          # Episode-budget timeouts are valid and arrive with reward 0.
           if not item.is_valid:
             r = 0.0
           elif self.reward_fns:
@@ -1042,12 +1141,13 @@ class StandardRLProgram(RLProgram):
           first_meta = getattr(group[0], "metadata", None) or {}
           logging.info(
               "[pipeline] ARRIVE prompt_id=%s prompt_idx=%s batch_idx=%s"
-              " intra_batch_idx=%s policy_version=%d",
+              " intra_batch_idx=%s policy_version=%d worker_id=%s",
               getattr(group[0], "prompt_id", ""),
               first_meta.get("prompt_idx"),
               first_meta.get("batch_idx"),
               first_meta.get("intra_batch_idx"),
               getattr(group[0], "policy_version", 0),
+              first_meta.get("worker_id"),
           )
         group = None
         trainer_payloads = None
@@ -1056,6 +1156,16 @@ class StandardRLProgram(RLProgram):
         item = None
     finally:
       await self.scored_q.close()
+
+  _SAMPLER_IS_ATTR_PREFIXES = (
+      "sampler_is/hist_frac/",
+      "sampler_is/hist_mass/",
+      "sampler_is/pos_signed/",
+      "sampler_is/pos_absmean/",
+      "sampler_is/conf_signed/",
+      "sampler_is/conf_frac/",
+      "sampler_is/lenscale/",
+  )
 
   def _log_metric(
       self,
@@ -1110,6 +1220,7 @@ class StandardRLProgram(RLProgram):
       policy_training_time: float = 0.0,
       exposed_generation_time: float = 0.0,
       weight_sync_time: float = 0.0,
+      metrics_fetch_time: float = 0.0,
       filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]] = (),
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
@@ -1216,66 +1327,70 @@ class StandardRLProgram(RLProgram):
         )
 
     if prompt_lengths:
-      self.metrics_logger.log(
-          self.metrics_prefix,
-          "rollout/prompt_length_mean",
+      self._log_metric(
+          "rollout/prompts/mean_length",
           float(np.mean(prompt_lengths)),
-          self.mode,
+          log_step,
+      )
+      self._log_metric(
+          "rollout/prompts/max_length",
+          float(np.max(prompt_lengths)),
+          log_step,
+      )
+      self._log_metric(
+          "rollout/prompts/min_length",
+          float(np.min(prompt_lengths)),
           log_step,
       )
     if completion_lengths:
-      self.metrics_logger.log(
-          self.metrics_prefix,
-          "rollout/completion_length_mean",
+      self._log_metric(
+          "rollout/completions/mean_length",
           float(np.mean(completion_lengths)),
-          self.mode,
+          log_step,
+      )
+      self._log_metric(
+          "rollout/completions/max_length",
+          float(np.max(completion_lengths)),
+          log_step,
+      )
+      self._log_metric(
+          "rollout/completions/min_length",
+          float(np.min(completion_lengths)),
           log_step,
       )
     if total_lengths:
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/total_tokens_mean",
           float(np.mean(total_lengths)),
-          self.mode,
           log_step,
       )
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/global_valid_toks",
           float(np.sum(total_lengths)),
-          self.mode,
           log_step,
       )
     elif completion_lengths:
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/global_valid_toks",
           float(np.sum(completion_lengths)),
-          self.mode,
           log_step,
       )
     if all_step_items:
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/global_valid_seqs",
           float(len(all_step_items)),
-          self.mode,
           log_step,
       )
     if turns_list:
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/num_turns_mean",
           float(np.mean(turns_list)),
-          self.mode,
           log_step,
       )
     if successes:
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/success_rate",
           float(np.mean(successes)),
-          self.mode,
           log_step,
       )
     if staleness_list:
@@ -1285,42 +1400,31 @@ class StandardRLProgram(RLProgram):
           "staleness_min": float(np.min(staleness_list)),
       }
       for tag, val in staleness_stats.items():
-        self.metrics_logger.log(
-            self.metrics_prefix, f"rollout/{tag}", val, self.mode, log_step
-        )
+        self._log_metric(f"rollout/{tag}", val, log_step)
     if partial_rollouts:
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/partial_rollout_fraction",
           float(np.mean(partial_rollouts)),
-          self.mode,
           log_step,
       )
 
-    # Generation metrics, already named to match the agentic GRPO learner so
-    # the same dashboards work for both.
+    # Generation/rollout metrics grouped under rollout/*.
     if generation_metrics:
       for tag, val in generation_metrics.items():
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            tag,
-            val,
-            self.mode,
-            log_step,
-        )
+        if tag.startswith("generation/"):
+          tag = "rollout/" + tag.removeprefix("generation/")
+        self._log_metric(tag, val, log_step)
 
-    self.metrics_logger.log(
-        self.metrics_prefix,
+    filtered_groups_count = len(filtered_groups)
+    filtered_trajectories_count = sum(len(g) for g in filtered_groups)
+    self._log_metric(
         "rollout/filtered_groups_count",
-        len(filtered_groups),
-        self.mode,
+        float(filtered_groups_count),
         log_step,
     )
-    self.metrics_logger.log(
-        self.metrics_prefix,
+    self._log_metric(
         "rollout/filtered_trajectories_count",
-        sum(len(g) for g in filtered_groups),
-        self.mode,
+        float(filtered_trajectories_count),
         log_step,
     )
 
@@ -1328,11 +1432,9 @@ class StandardRLProgram(RLProgram):
     rewards_to_log = step_rewards
     if all_step_items:
       valid_flags = [item.is_valid for item in all_step_items]
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/invalid_trajectory_frac",
           1.0 - float(np.mean(valid_flags)),
-          self.mode,
           log_step,
       )
       rewards_to_log = [
@@ -1355,9 +1457,7 @@ class StandardRLProgram(RLProgram):
           "sum": reward_sum,
       }
       for tag, val in reward_stats.items():
-        self.metrics_logger.log(
-            self.metrics_prefix, f"rewards/{tag}", val, self.mode, log_step
-        )
+        self._log_metric(f"rewards/{tag}", val, log_step)
 
     # --- Advantage Metrics ---
     advantage_mean = float(np.mean(step_advantages)) if step_advantages else 0.0
@@ -1382,15 +1482,10 @@ class StandardRLProgram(RLProgram):
           "nonzero_frac": advantage_nonzero_frac,
       }
       for tag, val in advantage_stats.items():
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            f"rewards/advantage/{tag}",
-            val,
-            self.mode,
-            log_step,
-        )
+        self._log_metric(f"rewards/advantage/{tag}", val, log_step)
 
-    # --- 3. Orchestrator Metrics ---
+    # --- 3. Perf & Orchestrator Metrics ---
+    self._log_metric("perf/global_step_time", float(step_time_sec), log_step)
     orchestrator_stats = {
         "policy_version": float(self.policy_version),
         "num_rollouts": float(num_rollouts),
@@ -1399,11 +1494,10 @@ class StandardRLProgram(RLProgram):
         "policy_training_time": float(policy_training_time),
         "exposed_generation_time": float(exposed_generation_time),
         "weight_sync_time": float(weight_sync_time),
+        "metrics_fetch_time": float(metrics_fetch_time),
     }
     for tag, val in orchestrator_stats.items():
-      self.metrics_logger.log(
-          self.metrics_prefix, f"orchestrator/{tag}", val, self.mode, log_step
-      )
+      self._log_metric(f"orchestrator/{tag}", val, log_step)
     if padding_stats:
       for tag, val in batch_assembly.summarize_padding_stats(
           padding_stats
@@ -1416,7 +1510,7 @@ class StandardRLProgram(RLProgram):
       for tag, val in packing_stats.items():
         self._log_metric(f"efficiency/packing/{tag}", val, log_step)
 
-    # --- 4. Trainer Metrics ---
+    # --- 4. Actor Trainer Metrics ---
     loss_val = None
     perplexity_val = None
     grad_norm_val = None
@@ -1450,84 +1544,94 @@ class StandardRLProgram(RLProgram):
 
       # Loss & Perplexity
       raw_loss = scalar_metrics.pop(
-          "loss", scalar_metrics.pop("trainer/loss", None)
+          "loss",
+          scalar_metrics.pop(
+              "trainer/loss", scalar_metrics.pop("actor/loss", None)
+          ),
       )
-      if raw_loss is None and "loss" in weighted_metrics:
-        raw_loss = weighted_metrics.pop("loss")
-      elif raw_loss is None and "trainer/loss" in weighted_metrics:
-        raw_loss = weighted_metrics.pop("trainer/loss")
+      if raw_loss is None:
+        if "loss" in weighted_metrics:
+          raw_loss = weighted_metrics.pop("loss")
+        elif "trainer/loss" in weighted_metrics:
+          raw_loss = weighted_metrics.pop("trainer/loss")
+        elif "actor/loss" in weighted_metrics:
+          raw_loss = weighted_metrics.pop("actor/loss")
 
       loss_val = _extract_scalar(raw_loss)
       if loss_val is not None:
-        self.metrics_logger.log(
-            self.metrics_prefix, "trainer/loss", loss_val, self.mode, log_step
-        )
+        self._log_metric("loss", loss_val, log_step, prefix="actor")
         perplexity_val = float(np.exp(loss_val))
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            "trainer/perplexity",
-            perplexity_val,
-            self.mode,
-            log_step,
+        self._log_metric(
+            "perplexity", perplexity_val, log_step, prefix="actor"
         )
 
       # Learning Rate
       raw_lr = scalar_metrics.pop(
-          "learning_rate", scalar_metrics.pop("trainer/learning_rate", None)
+          "learning_rate",
+          scalar_metrics.pop(
+              "trainer/learning_rate",
+              scalar_metrics.pop("actor/learning_rate", None),
+          ),
       )
       lr_val = _extract_scalar(raw_lr)
       if lr_val is not None:
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            "trainer/learning_rate",
-            lr_val,
-            self.mode,
-            log_step,
-        )
+        self._log_metric("learning_rate", lr_val, log_step, prefix="actor")
 
       # Grad Norm
       # ``gradient_norm`` is the MaxText training engine's name for it
       # (``MaxTextTrainingEngine.update`` records it under that key). Read the
-      # MaxText key via ``.get`` rather than ``.pop`` so ``trainer/gradient_norm``
+      # MaxText key via ``.get`` rather than ``.pop`` so ``gradient_norm``
       # continues to be published by the auxiliary scalar loop below while also
-      # populating ``trainer/grad_norm`` and the console step summary.
+      # populating ``actor/grad_norm`` and the console step summary.
       raw_gn = scalar_metrics.pop("grad_norm", None)
       if raw_gn is None:
         raw_gn = scalar_metrics.pop("trainer/grad_norm", None)
       if raw_gn is None:
+        raw_gn = scalar_metrics.pop("actor/grad_norm", None)
+      if raw_gn is None:
         raw_gn = scalar_metrics.get("gradient_norm")
       if raw_gn is None:
         raw_gn = scalar_metrics.get("trainer/gradient_norm")
+      if raw_gn is None:
+        raw_gn = scalar_metrics.get("actor/gradient_norm")
       gn_val = _extract_scalar(raw_gn)
       grad_norm_val = gn_val
       if gn_val is not None:
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            "trainer/grad_norm",
-            gn_val,
-            self.mode,
-            log_step,
-        )
+        self._log_metric("grad_norm", gn_val, log_step, prefix="actor")
 
       # Auxiliary weighted metrics
       for k, v in weighted_metrics.items():
         val = _extract_scalar(v, k)
         if val is not None:
-          metric_key = k if k.startswith("trainer/") else f"trainer/{k}"
-          self.metrics_logger.log(
-              self.metrics_prefix, metric_key, val, self.mode, log_step
+          clean_key = (
+              k.removeprefix("trainer/").removeprefix("actor/")
           )
+          self._log_metric(clean_key, val, log_step, prefix="actor")
 
       # Auxiliary scalar metrics
       for k, v in scalar_metrics.items():
-        if k in ("perplexity", "trainer/perplexity"):
+        if k in ("perplexity", "trainer/perplexity", "actor/perplexity"):
           continue
         val = _extract_scalar(v, k)
         if val is not None:
-          metric_key = k if k.startswith("trainer/") else f"trainer/{k}"
-          self.metrics_logger.log(
-              self.metrics_prefix, metric_key, val, self.mode, log_step
+          clean_key = (
+              k.removeprefix("trainer/").removeprefix("actor/")
           )
+          if clean_key.startswith(self._SAMPLER_IS_ATTR_PREFIXES):
+            self._log_metric(
+                clean_key.removeprefix("sampler_is/"),
+                val,
+                log_step,
+                prefix="sampler_is_attr",
+            )
+          elif clean_key.startswith((
+              "sampler_trainer/",
+              "sampler_is/",
+              "sampler_rs/",
+          )):
+            self._log_metric(clean_key, val, log_step)
+          else:
+            self._log_metric(clean_key, val, log_step, prefix="actor")
 
       # Every trainer-side metric for the step on one line, the sequence gate's
       # included (``sample_mask/kept_frac``, ``sample_mask/mult_prob_error_*``,
@@ -1552,20 +1656,22 @@ class StandardRLProgram(RLProgram):
       )
 
     # --- 5. Sampler/Trainer Agreement Metrics ---
-    # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``) by
-    # the shared helper; reduce each metric's per-microbatch values with the
-    # aggregation fn the helper paired with it.
+    # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``,
+    # ``sampler_rs/*``) by the shared helper; reduce each metric's
+    # per-microbatch values with the aggregation fn the helper paired with it.
     if sampler_agreement:
       for name, (agg_fn, values) in sampler_agreement.items():
         if not values:
           continue
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            name,
-            float(agg_fn(values)),
-            self.mode,
-            log_step,
-        )
+        if name.startswith(self._SAMPLER_IS_ATTR_PREFIXES):
+          self._log_metric(
+              name.removeprefix("sampler_is/"),
+              float(agg_fn(values)),
+              log_step,
+              prefix="sampler_is_attr",
+          )
+        else:
+          self._log_metric(name, float(agg_fn(values)), log_step)
 
     return {
         "reward_mean": reward_mean,
@@ -1862,9 +1968,13 @@ class StandardRLProgram(RLProgram):
       groups_consumed = 0
       checkpoint_saved = False
       final_minibatch_completed = False
+      pending_metrics_fetch = False
       policy_training_time = 0.0
       exposed_generation_time = 0.0
       weight_sync_time = 0.0
+      # The end-of-step get_metrics() deferred past the weight sync and commit,
+      # kept out of policy_training_time because it no longer runs in training.
+      metrics_fetch_time = 0.0
 
       current_batch_idx: int | None = None
 
@@ -2068,6 +2178,12 @@ class StandardRLProgram(RLProgram):
                 logging_utils.summarize_list(list(mb.trajectory_ids)),
             )
           mb = None
+          if not self._first_train_payload_logged:
+            self._first_train_payload_logged = True
+            logging.info(
+                "First trainer micro-batch: %s",
+                batch_assembly.describe_payload(batch),
+            )
           await _await_pending_train()
           train_step = self._timed_train_step(
               batch, apply_optimizer=is_final_batch
@@ -2079,25 +2195,35 @@ class StandardRLProgram(RLProgram):
           step_result, elapsed = await train_step
           policy_training_time += elapsed
           if is_final_batch:
-            _t_metrics = time.monotonic()
-            trainer_metrics = await self.engine.get_metrics(
-                role=datatypes.Role.ACTOR
+            # Save only at a resumable full-batch boundary. An optimizer step
+            # can occur earlier when a full batch contains multiple mini
+            # batches, but the dataset resume cursor advances in full batches.
+            full_batch_complete = (
+                groups_consumed >= self.full_batch_size or not scored_items
             )
-            policy_training_time += time.monotonic() - _t_metrics
+            # The checkpoint is stamped as the weight-update time and saved
+            # next, so the update must have landed on device first. Unless the
+            # trainer has said it did (`update_ready`), fetching the metrics is
+            # what waits for it, so the fetch stays ahead of the save, counted
+            # as training time, as with a separate update RPC.
+            pending_metrics_fetch = full_batch_complete and bool(
+                isinstance(step_result, dict)
+                and step_result.get("update_ready")
+            )
+            if not pending_metrics_fetch:
+              _t_metrics = time.monotonic()
+              trainer_metrics = await self.engine.get_metrics(
+                  role=datatypes.Role.ACTOR
+              )
+              policy_training_time += time.monotonic() - _t_metrics
             final_minibatch_completed = True
             if self.sync_weights and self.async_weight_sync:
               self._round_due = True
             # TODO(tunix-dev): Configurable checkpointing frequency. Today we
             # checkpoint at the same frequency as the weight update.
-            # Save only at a resumable full-batch boundary. An optimizer step
-            # can occur earlier when a full batch contains multiple mini
-            # batches, but the dataset resume cursor advances in full batches.
             # TODO(tunix-dev): For now any failures in save_checkpoint will
             # abort the entire program. Make it configurable on whether to fail
             # or continue.
-            full_batch_complete = (
-                groups_consumed >= self.full_batch_size or not scored_items
-            )
             if full_batch_complete:
               await _maybe_save_checkpoint()
 
@@ -2161,6 +2287,13 @@ class StandardRLProgram(RLProgram):
       # after this step's bookkeeping and the next step's first packing.
       await asyncio.sleep(0)
 
+      if pending_metrics_fetch:
+        _t_metrics = time.monotonic()
+        trainer_metrics = await self.engine.get_metrics(
+            role=datatypes.Role.ACTOR
+        )
+        metrics_fetch_time += time.monotonic() - _t_metrics
+
       step_time_sec = time.monotonic() - step_start_time
 
       filtered_groups = await self._drain_filtered_groups()
@@ -2183,6 +2316,7 @@ class StandardRLProgram(RLProgram):
           policy_training_time=policy_training_time,
           exposed_generation_time=exposed_generation_time,
           weight_sync_time=weight_sync_time,
+          metrics_fetch_time=metrics_fetch_time,
           filtered_groups=filtered_groups,
       )
       self._log_consumed_trajectories(
@@ -2258,6 +2392,28 @@ class StandardRLProgram(RLProgram):
           sync_weights=True,
           policy_version=self.policy_version,
       )
+
+    if self.trainer_warmup_payload is not None:
+      warmup_payload, self.trainer_warmup_payload = (
+          self.trainer_warmup_payload,
+          None,
+      )
+      logging.info(
+          "Trainer warm-up compile against synthetic micro-batch: %s",
+          batch_assembly.describe_payload(warmup_payload),
+      )
+      _t_compile = time.monotonic()
+      await engine.compile_trainer(  # pytype: disable=attribute-error
+          warmup_payload, role=datatypes.Role.ACTOR
+      )
+      del warmup_payload
+      logging.info(
+          "Trainer warm-up compile finished in %.1fs.",
+          time.monotonic() - _t_compile,
+      )
+
+    if self.on_train_start is not None:
+      self.on_train_start(self._step)
 
     train_task = asyncio.create_task(self.train_stage())
     tasks = [

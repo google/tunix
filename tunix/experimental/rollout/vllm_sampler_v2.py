@@ -34,6 +34,7 @@ from typing import Any
 import numpy as np
 from vllm import envs
 from tunix.generate import utils as generate_utils
+from tunix.utils import env_utils
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams as VllmSamplingParams
@@ -139,8 +140,12 @@ class RLVllmSampler:
     driver_worker = getattr(model_executor, "driver_worker", None)
     return [driver_worker] if driver_worker else []
 
+  _START_MAX_ATTEMPTS: int = 3
+  _START_RETRY_DELAY_SECONDS: float = 2.0
+
   async def start(self, **kwargs: Any) -> None:
     """Initializes the vLLM engine and execution environment."""
+    del kwargs
     if self._is_running:
       logger.warning("RLVllmSampler is already running.")
       return
@@ -151,7 +156,40 @@ class RLVllmSampler:
         self.engine_args.scheduling_policy,
     )
 
-    self._engine = AsyncLLMEngine.from_engine_args(self.engine_args)
+    if os.environ.get("WEIGHT_SYNC_PARALLEL_H2H", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "y",
+        "t",
+        "on",
+    ):
+      extra_vars = os.environ.get("VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", "")
+      existing = [v.strip() for v in extra_vars.split(",") if v.strip()]
+      if "WEIGHT_SYNC_PARALLEL_H2H" not in existing:
+        existing.append("WEIGHT_SYNC_PARALLEL_H2H")
+        os.environ["VLLM_RAY_EXTRA_ENV_VARS_TO_COPY"] = ",".join(existing)
+
+    for attempt in range(1, self._START_MAX_ATTEMPTS + 1):
+      try:
+        self._engine = AsyncLLMEngine.from_engine_args(self.engine_args)
+        break
+      except RuntimeError as e:
+        if (
+            "Engine core initialization failed" not in str(e)
+            or attempt >= self._START_MAX_ATTEMPTS
+        ):
+          raise
+        logger.warning(
+            "AsyncLLMEngine initialization failed on attempt %d/%d (%s); "
+            "retrying in %.1fs...",
+            attempt,
+            self._START_MAX_ATTEMPTS,
+            e,
+            self._START_RETRY_DELAY_SECONDS,
+        )
+        await asyncio.sleep(self._START_RETRY_DELAY_SECONDS)
+
     self._is_running = True
     self._log_stats_task = asyncio.create_task(self._log_stats_loop())
 
@@ -387,6 +425,12 @@ class RLVllmSampler:
         ):
           routed_experts = np.array(routed_experts)
 
+        num_preemptions = (
+            getattr(final_output.metrics, 'num_preemptions', 0)
+            if getattr(final_output, 'metrics', None) is not None
+            else 0
+        )
+
         return SimpleNamespace(
             request_id=req_id,
             text=text,
@@ -398,6 +442,7 @@ class RLVllmSampler:
             finish_reason=getattr(output_choice, "finish_reason", "stop")
             or "stop",
             policy_version=policy_version,
+            num_preemptions=num_preemptions,
             error=None,
         )
 
@@ -416,6 +461,7 @@ class RLVllmSampler:
           routed_experts=None,
           finish_reason="stop",
           policy_version=policy_version,
+          num_preemptions=0,
           error=err_obj,
       )
     except asyncio.CancelledError:
@@ -439,6 +485,7 @@ class RLVllmSampler:
           routed_experts=None,
           finish_reason="stop",
           policy_version=policy_version,
+          num_preemptions=0,
           error=err_obj,
       )
 
@@ -463,6 +510,7 @@ class RLVllmSampler:
       await self.start()
 
     raw_input_mode = False
+    sample_start_time = time.perf_counter()
     if isinstance(sampling_requests, (str, list)) and (
         isinstance(sampling_requests, str)
         or not sampling_requests
@@ -580,9 +628,38 @@ class RLVllmSampler:
           for req_id, task_gen, expected_ids in pending_tasks
       ])
 
+    sample_duration = time.perf_counter() - sample_start_time
+    if env_utils.is_debug_inference_logs_enabled():
+      tot_prompt_toks = 0
+      tot_comp_toks = 0
+      tot_preempts = 0
+      for r in results:
+        tot_prompt_toks += len(r.prompt_token_ids)
+        tot_comp_toks += len(r.token_ids)
+        tot_preempts += r.num_preemptions
+      s_tps = tot_comp_toks / sample_duration if sample_duration > 0 else 0.0
+      s_tpot_ms = (
+          (sample_duration / tot_comp_toks) * 1000.0
+          if tot_comp_toks > 0
+          else 0.0
+      )
+      logger.info(
+          '[DEBUG_INFERENCE][Sampler] requests=%d, duration=%.3fs, '
+          'prompt_tokens=%d, completion_tokens=%d, preemptions=%d, '
+          'tps=%.2f, tpot=%.2fms',
+          len(results),
+          sample_duration,
+          tot_prompt_toks,
+          tot_comp_toks,
+          tot_preempts,
+          s_tps,
+          s_tpot_ms,
+      )
+
     if raw_input_mode:
       return [r.text for r in results]
     return list(results)
+
 
   # ----------------------------------------------------------------------------
   # Cache Management
@@ -648,7 +725,8 @@ class RLVllmSampler:
       worker_index: int = 0,
       parallelism: int = 4,
       job_name: str = "rollout",
-  ) -> None:
+      auto_h2d: bool | None = None,
+  ) -> list[dict]:
     """Binds Raiden to each TPU worker's live weights, in-process.
 
     `get_weights_state()` cannot back a rollout-side weight sync: the
@@ -660,7 +738,25 @@ class RLVllmSampler:
     happen in the worker subprocess instead -- see
     `tpu_worker.TPUWorker.bind_raiden_sync`.
     """
-    await self._call_worker_method(
+    from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top
+
+    if auto_h2d is not None or raiden_synchronizer.is_parallel_h2h_enabled():
+      raiden_synchronizer.patch_raiden_worker_sync()
+    if auto_h2d is not None:
+      try:
+        return await self._call_worker_method(
+            "bind_raiden_sync",
+            worker_index,
+            parallelism,
+            job_name,
+            auto_h2d=bool(auto_h2d),
+        )
+      except TypeError:
+        logger.warning(
+            "Worker bind_raiden_sync does not accept auto_h2d kwarg;"
+            " falling back to 3-arg call."
+        )
+    return await self._call_worker_method(
         "bind_raiden_sync", worker_index, parallelism, job_name
     )
 

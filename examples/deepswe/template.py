@@ -441,8 +441,12 @@ Remember: when making multiple file edits in a row to the same file, you should 
 
 def get_openhands_tools(
     max_timeout: int | None = None,
-    workspace_mount_path_in_sandbox: str = "/workspace",
-    enable_think: bool = False,
+    # Only feeds the example paths in the str_replace_editor `path`
+    # description. The reference (Gym 610a08ab) starts OpenHands with
+    # RUNTIME=local from /openhands_setup/OpenHands, and OpenHands' local
+    # runtime uses the working directory there, so this is the rendered value.
+    workspace_mount_path_in_sandbox: str = "/openhands_setup/OpenHands",
+    enable_think: bool = True,
     enable_task_tracker: bool = True,
 ) -> list[dict[str, Any]]:
   """Returns the OpenHands CodeActAgent tool schemas matching nv-OpenHands@0d766ad0."""
@@ -495,7 +499,7 @@ def get_openhands_tools(
                           "enum": list(_RISK_LEVELS),
                       },
                   },
-                  "required": ["command", "security_risk"],
+                  "required": ["command"],
               },
           },
       },
@@ -674,7 +678,7 @@ def get_openhands_tools(
                       "enum": list(_RISK_LEVELS),
                   },
               },
-              "required": ["command", "path", "security_risk"],
+              "required": ["command", "path"],
           },
       },
   })
@@ -809,7 +813,52 @@ When using tools that support the security_risk parameter, assess the safety ris
   - Always use specific keywords that uniquely identify the target process
   - Prefer using `ps aux` to find the exact process ID (PID) first, then kill that specific PID
   - When possible, use more targeted approaches like finding the PID from a pidfile or using application-specific shutdown commands
-</PROCESS_MANAGEMENT>"""
+</PROCESS_MANAGEMENT>
+
+<TASK_MANAGEMENT>
+* You have access to the `task_tracker` tool to help you organize and monitor development work. Use this tool REGULARLY to maintain task visibility and provide users with clear progress updates. This tool is ESSENTIAL for systematic planning and decomposing complex development work into manageable components. Failing to use this tool for planning may result in overlooked requirements - which is unacceptable.
+* It is crucial that you update task status to "done" immediately upon completion of each work item. Do not accumulate multiple finished tasks before updating their status.
+* For complex, multi-phase development work, use `task_tracker` to establish a comprehensive plan with well-defined steps:
+  1. Begin by decomposing the overall objective into primary phases using `task_tracker`
+  2. Include detailed work items as necessary to break complex activities into actionable units
+  3. Update tasks to "in_progress" status when commencing work on them
+  4. Update tasks to "done" status immediately after completing each item
+  5. For each primary phase, incorporate additional work items as you identify new requirements
+  6. If you determine the plan requires substantial modifications, suggest revisions and obtain user confirmation before proceeding
+* Example workflow for debugging and resolution:
+  ```
+  User: "Execute the test suite and resolve any validation failures"
+  Assistant: I'm going to use the task_tracker tool to organize the following work items:
+  - Execute the test suite
+  - Resolve any validation failures
+  I'm now going to run the test suite using the terminal.
+  [After running tests and discovering 8 validation failures]
+  I found 8 validation failures that need attention. I'm going to use the task_tracker tool to add 8 specific items to the task list.
+  [Updating first task to in_progress]
+  Let me begin addressing the first validation issue...
+  [After resolving first failure]
+  The first validation issue has been resolved, let me mark that task as done and proceed to the second item...
+  ```
+* Example workflow for component development:
+  ```
+  User: "Build a dashboard component that displays analytics data with interactive charts and filtering options"
+  Assistant: I'll help you create an analytics dashboard with interactive charts and filtering. Let me first use the task_tracker tool to organize this development work.
+  Adding the following tasks to the tracker:
+  1. Analyze existing analytics data structure and requirements
+  2. Design dashboard layout and component architecture
+  3. Implement data visualization charts with interactivity
+  4. Create filtering and search functionality
+  5. Integrate components and perform testing
+  Let me start by examining the current analytics data structure to understand what we're working with...
+  [Assistant proceeds with implementation step by step, updating tasks to in_progress and done as work progresses]
+  ```
+</TASK_MANAGEMENT>
+
+<TASK_TRACKING_PERSISTENCE>
+* IMPORTANT: If you were using the task_tracker tool before a condensation event, continue using it after condensation
+* Check condensation summaries for TASK_TRACKING sections to maintain continuity
+* If you see a condensation event with TASK_TRACKING, immediately use task_tracker to view and continue managing them
+</TASK_TRACKING_PERSISTENCE>"""
 
 
 def format_qwen_tools_system_prompt(
@@ -1139,20 +1188,35 @@ DEFAULT_OPENHANDS_KEEPALIVE_CMD = [
     "sh",
     "-c",
     (
-        "chmod +x /oh/openhands-agent-server 2>/dev/null || true; ([ -d /oh/glibc236 ] && export LD_LIBRARY_PATH=\"/oh/glibc236:${LD_LIBRARY_PATH:-}\"); ([ -d"
-        " /testbed ] && [ ! -e /workspace ] && ln -s /testbed /workspace"
-        " 2>/dev/null || true); ([ -d /workspace ] && [ ! -e /testbed ] && ln"
-        " -s /workspace /testbed 2>/dev/null || true); git config --global"
-        " --add safe.directory '*' 2>/dev/null || true; [ -d /testbed ] && cd"
-        " /testbed; if [ -x /oh/openhands-agent-server ]; then exec"
+        "chmod +x /oh/openhands-agent-server 2>/dev/null || true; if [ -d"
+        ' /testbed/.venv/bin ]; then export PATH="/testbed/.venv/bin:${PATH}";'
+        " fi; ([ -d /testbed ] && [ ! -e /workspace ] && ln -s /testbed"
+        " /workspace 2>/dev/null || true); ([ -d /workspace ] && [ ! -e"
+        " /testbed ] && ln -s /workspace /testbed 2>/dev/null || true); git"
+        " config --global --add safe.directory '*' 2>/dev/null || true; cd /;"
+        " if [ -x /oh/openhands-agent-server ]; then exec"
         " /oh/openhands-agent-server --host 0.0.0.0 --port 8000; elif [ -x"
-        " /usr/local/bin/openhands-agent-server ]; then exec tini --"
+        " /usr/local/bin/openhands-agent-server ]; then [ -d /testbed ] && cd"
+        " /testbed; exec tini --"
         " /usr/local/bin/openhands-agent-server --host 0.0.0.0 --port 8000;"
         " elif [ -x /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/agent-server ]; then"
-        " exec /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/agent-server --host 0.0.0.0 --port 8000;"
+        " [ -d /testbed ] && cd /testbed; exec"
+        " /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/agent-server --host 0.0.0.0 --port 8000;"
         " fi"
     ),
 ]
+
+
+RUNTIME_CONTAINER_NAME = "agent-runtime"
+EVAL_CONTAINER_NAME = "eval"
+DEFAULT_OPENHANDS_SERVER_IMAGE = (
+    "gcr.io/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62"
+)
+
+
+def get_image_pull_policy() -> str:
+  """Returns the container imagePullPolicy for sandbox pods."""
+  return os.getenv("SANDBOX_IMAGE_PULL_POLICY", "IfNotPresent")
 
 
 def get_openhands_pod_template(
@@ -1184,13 +1248,18 @@ def get_openhands_pod_template(
       os.getenv("OPENHANDS_SERVER_IMAGE")
       or os.getenv("SANDBOX_RUNTIME_CONTAINER_IMAGE")
       or os.getenv("AGENT_SERVER_IMAGE")
-      or "gcr.io/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62"
+      or DEFAULT_OPENHANDS_SERVER_IMAGE
   )
 
+  pull_policy = get_image_pull_policy()
+
   extra_pod_spec = {
+      "automountServiceAccountToken": False,
+      "shareProcessNamespace": False,
       "initContainers": [{
           "name": "oh-server",
           "image": server_image,
+          "imagePullPolicy": pull_policy,
           "command": [
               "sh",
               "-c",
@@ -1204,6 +1273,7 @@ def get_openhands_pod_template(
       }],
       "volumes": [{"name": "oh", "emptyDir": {}}],
       "containers": [{
+          "imagePullPolicy": pull_policy,
           "ports": [{"containerPort": 8000}],
           "volumeMounts": [{"name": "oh", "mountPath": "/oh"}],
           "readinessProbe": {
@@ -1245,6 +1315,7 @@ def get_openhands_pod_template(
     }]
 
   return TemplateSpec(
+      image_pull_policy=pull_policy,
       keepalive_command=keepalive_cmd,
       resources=ResourceSpec(
           cpu=os.getenv("SANDBOX_CPU", "500m"),

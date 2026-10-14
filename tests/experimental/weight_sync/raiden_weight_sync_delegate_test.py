@@ -211,6 +211,18 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
     res = await delegate.abort_weight_sync(sync_request=req)
     self.assertTrue(res)
 
+  def test_parallel_h2h_env_sets_auto_h2d_false_by_default(self):
+    with mock.patch.dict("os.environ", {"WEIGHT_SYNC_PARALLEL_H2H": "1"}):
+      delegate = self._delegate()
+      self.assertIs(delegate._synchronizers[0].kwargs["auto_h2d"], False)
+
+  def test_explicit_auto_h2d_overrides_parallel_h2h_env(self):
+    with mock.patch.dict("os.environ", {"WEIGHT_SYNC_PARALLEL_H2H": "1"}):
+      delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+          auto_h2d=True
+      )
+      self.assertIs(delegate._synchronizers[0].kwargs["auto_h2d"], True)
+
 
 if __name__ == "__main__":
   absltest.main()

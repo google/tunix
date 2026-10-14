@@ -24,6 +24,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from absl import logging
 from tunix.generate import utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algo_core  # pylint: disable=unused-import
@@ -33,6 +34,7 @@ from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import rl_learner
 from tunix.utils import compat
+from tunix.utils import env_utils
 
 TrainingInputT = rl_learner.TrainingInputT
 RewardFn = rl_learner.RewardFn
@@ -356,24 +358,41 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         else 0.0
     )
     total_preemptions = 0
-    if hasattr(rollout_output, "num_preemptions") and rollout_output.num_preemptions is not None:
+    if (
+        hasattr(rollout_output, 'num_preemptions')
+        and rollout_output.num_preemptions is not None
+    ):
       p = rollout_output.num_preemptions
-      total_preemptions = sum(p) if isinstance(p, (list, tuple, np.ndarray)) else int(p)
+      total_preemptions = (
+          sum(p) if isinstance(p, (list, tuple, np.ndarray)) else int(p)
+      )
 
-    self.rl_engine.buffer_metrics(
-        {
-            "inference/rollout_duration_sec": (rollout_duration, np.mean),
-            "inference/total_time_sec": (rollout_duration, np.mean),
-            "inference/total_completion_tokens": (
-                float(total_completion_tokens),
-                np.mean,
-            ),
-            "inference/total_preemptions": (float(total_preemptions), np.mean),
-            "inference/tokens_per_second": (tps, np.mean),
-            "inference/tpot_ms": (tpot_ms, np.mean),
-        },
-        mode=mode,
-    )
+    if env_utils.is_debug_inference_logs_enabled():
+      logging.info(
+          '[DEBUG_INFERENCE][Sampler] requests=%d, duration=%.3fs, '
+          'completion_tokens=%d, preemptions=%d, tps=%.2f, tpot=%.2fms',
+          len(training_input['prompts']),
+          rollout_duration,
+          total_completion_tokens,
+          total_preemptions,
+          tps,
+          tpot_ms,
+      )
+      self.rl_engine.buffer_metrics(
+          {
+              'inference/rollout_duration_sec': (rollout_duration, np.mean),
+              'inference/total_time_sec': (rollout_duration, np.mean),
+              'inference/total_completion_tokens': (
+                  float(total_completion_tokens),
+                  np.mean,
+              ),
+              'inference/total_preemptions': (float(total_preemptions), np.mean),
+              'inference/tokens_per_second': (tps, np.mean),
+              'inference/tpot_ms': (tpot_ms, np.mean),
+          },
+          mode=mode,
+      )
+
 
     agreement_metrics, sampler_is_weights, jax_completion_mask = (
         common.sampler_trainer_agreement(

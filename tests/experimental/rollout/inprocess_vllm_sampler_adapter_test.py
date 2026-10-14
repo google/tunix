@@ -309,6 +309,35 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     with self.assertRaises(ValueError):
       asyncio.run(self.sampler_adapter.sample(None))
 
+  def test_vllm_sampler_deferred_to_initialize(self):
+    self.mock_vllm_lib.VllmSampler.reset_mock()
+    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="deferred_slice",
+        tokenizer=self.mock_tokenizer,
+        config=self.mock_config,
+    )
+    self.assertFalse(adapter.is_initialized)
+    self.assertIsNone(adapter.vllm_sampler)
+    self.mock_vllm_lib.VllmSampler.assert_not_called()
+
+    adapter.initialize()
+    self.assertTrue(adapter.is_initialized)
+    self.assertIsNotNone(adapter.vllm_sampler)
+    self.mock_vllm_lib.VllmSampler.assert_called_once()
+
+  def test_get_underlying_sampler_lazily_initializes(self):
+    self.mock_vllm_lib.VllmSampler.reset_mock()
+    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="lazy_slice",
+        tokenizer=self.mock_tokenizer,
+        config=self.mock_config,
+    )
+    self.assertFalse(adapter.is_initialized)
+    underlying = adapter._get_underlying_sampler()
+    self.assertTrue(adapter.is_initialized)
+    self.assertEqual(underlying, self.mock_vllm_sampler)
+    self.mock_vllm_lib.VllmSampler.assert_called_once()
+
   def test_sample_cancellation_aborts_vllm_requests(self):
     import threading  # pylint: disable=g-import-not-at-top
 

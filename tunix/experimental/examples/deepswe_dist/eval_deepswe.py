@@ -51,6 +51,14 @@ def parse_args(argv=None):
   p.add_argument(
       "--role", choices=("controller", "worker"), default="controller"
   )
+  p.add_argument(
+      "--worker_id",
+      default="deepswe-eval",
+      help=(
+          "Worker identifier; numeric replica suffix offsets the vLLM engine"
+          " seed modulo 2**32."
+      ),
+  )
   p.add_argument("--worker_addresses", nargs="+", default=["localhost:20001"])
   p.add_argument("--port", type=int, default=20001)
   p.add_argument("--model_id", default=MODEL_ID)
@@ -125,7 +133,10 @@ def parse_args(argv=None):
       "--seed",
       type=int,
       default=42,
-      help="Engine RNG seed; concurrent request ordering can affect samples.",
+      help=(
+          "Base engine RNG seed; offset by the numeric replica suffix of"
+          " --worker_id modulo 2**32."
+      ),
   )
   p.add_argument("--enable_thinking", type=boolean, default=False)
   p.add_argument("--enable_prefix_caching", type=boolean, default=False)
@@ -416,6 +427,7 @@ def compact_result(response):
 async def evaluate_worker(handle, jobs, limit, timeout, write_record):
   """Bounded dispatch with short RPCs; episode duration is not an RPC deadline."""
   pending = {}
+  timed_out = set()
   rows = []
   exhausted = False
   while pending or not exhausted:
@@ -434,6 +446,9 @@ async def evaluate_worker(handle, jobs, limit, timeout, write_record):
       break
     reply = await handle.poll_responses(timeout_s=5)
     if reply is not None:
+      if reply.request_id in timed_out:
+        timed_out.discard(reply.request_id)
+        continue
       if reply.request_id not in pending:
         raise RuntimeError(f"Unrecognized/duplicate result: {reply.request_id}")
       fields, start = pending.pop(reply.request_id)
@@ -459,8 +474,38 @@ async def evaluate_worker(handle, jobs, limit, timeout, write_record):
       )
       await asyncio.to_thread(write_record, row)
       rows.append(row)
-    if any(time.monotonic() - start > timeout for _, start in pending.values()):
-      raise TimeoutError("Worker exceeded collection and cleanup deadline")
+    now = time.monotonic()
+    expired = [
+        req_id
+        for req_id, (_, start) in pending.items()
+        if now - start > timeout
+    ]
+    for req_id in expired:
+      fields, start = pending.pop(req_id)
+      timed_out.add(req_id)
+      logging.warning(
+          "Request %s (instance_id=%s) exceeded controller deadline"
+          " (%.1fs > %.1fs); recording TIMEOUT.",
+          req_id,
+          fields["metadata"]["instance_id"],
+          now - start,
+          timeout,
+      )
+      row = {
+          "reward": 0.0,
+          "resolved": False,
+          "status": "TIMEOUT",
+          "error": None,
+          "instance_id": fields["metadata"]["instance_id"],
+          "attempt": fields["group_index"],
+          "request_id": req_id,
+          "wall_seconds": now - start,
+      }
+      requested_agent = fields["metadata"].get("agent_name")
+      if requested_agent:
+        row["agent_name"] = requested_agent
+      await asyncio.to_thread(write_record, row)
+      rows.append(row)
   return rows
 
 
@@ -645,7 +690,7 @@ async def run_controller(a):
           len(handles),
           min(a.max_concurrent, a.batch_size * a.num_rollouts_per_instance),
       )
-    deadline = a.timeout + a.reward_timeout + 360
+    deadline = a.timeout + a.reward_timeout + 600
     for index, handle in enumerate(handles):
       limit = effective_concurrency // len(handles) + (
           index < effective_concurrency % len(handles)
@@ -692,7 +737,7 @@ async def run_controller(a):
         else pass_at_k[str(a.num_rollouts_per_instance)]
     )
     target_acc = float(a.target_accuracy)
-    target_reached = bool(eval_ok and eval_accuracy >= target_acc)
+    target_reached = bool(eval_ok and eval_accuracy > target_acc)
     rcp_logged = False
     if a.rcp_logging and eval_ok:
       mllog_utils.start_eval(
@@ -750,6 +795,12 @@ def main(argv=None):
   )
   sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
   if a.role == "worker":
+    try:
+      from tunix.experimental.common import gcs_cache  # pylint: disable=g-import-not-at-top
+      gcs_cache.restore_jax_cache(role="rollout")
+    except Exception as e:  # pylint: disable=broad-except
+      logging.warning("[jax_cache] Failed to restore JAX cache: %s", e)
+
     # Run this file directly so Pathways initializes before tunix.__init__
     # imports JAX and the model stack.
     if "proxy" in os.environ.get("JAX_PLATFORMS", "").split(","):
@@ -758,7 +809,14 @@ def main(argv=None):
       pathwaysutils.initialize()
     from tunix.experimental.examples.deepswe_dist import eval_worker
 
-    asyncio.run(eval_worker.serve(a))
+    try:
+      asyncio.run(eval_worker.serve(a))
+    finally:
+      try:
+        from tunix.experimental.common import gcs_cache  # pylint: disable=g-import-not-at-top
+        gcs_cache.save_jax_cache(role="rollout")
+      except Exception as e:  # pylint: disable=broad-except
+        logging.warning("[jax_cache] Failed to save JAX cache: %s", e)
   else:
     # Must precede importing the DTOs, registry, or dataset wrapper.
     os.environ["JAX_PLATFORMS"] = "cpu"

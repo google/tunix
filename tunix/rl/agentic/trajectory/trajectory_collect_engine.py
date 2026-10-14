@@ -25,7 +25,7 @@ import copy
 import inspect
 import json
 import time
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from absl import logging
 import numpy as np
@@ -40,8 +40,10 @@ from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.rollout import base_rollout
+from tunix.utils import env_utils
 
 BaseTaskEnv = base_environment.BaseTaskEnv
+
 ConversationAgentBase = base_agent.ConversationAgentBase
 
 
@@ -81,7 +83,10 @@ class TrajectoryCollectEngine:
       ] = None,
       on_final_reward_callback: Optional[Callable[[Any], None]] = None,
       policy_version: Optional[int] = None,
-      trajectory_store: Optional[store_lib.TrajectoryWriter] = None,
+      trajectory_store: Optional[
+          store_lib.TrajectoryWriter
+          | Sequence[Optional[store_lib.TrajectoryWriter]]
+      ] = None,
       metadata: Optional[trajectory_lib.TrajectoryMetadata] = None,
   ):
     """Initialize the trajectory collection engine.
@@ -120,8 +125,9 @@ class TrajectoryCollectEngine:
           computed and added to last step.
         policy_version: Optional policy version integer to pass down for
           trajectory and performance tracing.
-        trajectory_store: Optional TrajectoryWriter to write trajectory steps
-          to.
+        trajectory_store: Optional TrajectoryWriter or sequence of
+          TrajectoryWriters (e.g. [file_store, sql_store], where None entries
+          are skipped) to write trajectory steps to.
         metadata: Optional TrajectoryMetadata for the current episode.
     """
     self.agent = agent
@@ -132,7 +138,12 @@ class TrajectoryCollectEngine:
     self.on_rollout_output_callback = on_rollout_output_callback
     self.on_final_reward_callback = on_final_reward_callback
     self.policy_version = policy_version
-    self.trajectory_store = trajectory_store
+    stores = (
+        [s for s in trajectory_store if s is not None]
+        if isinstance(trajectory_store, (list, tuple))
+        else ([trajectory_store] if trajectory_store is not None else [])
+    )
+    self.trajectory_store = stores or None
     self.metadata = metadata
     self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
@@ -293,6 +304,36 @@ class TrajectoryCollectEngine:
           reward_time=self.reward_time,
       )
 
+  def _store_add_step(self, step: Any) -> None:
+    """Writes a step to each configured trajectory store, isolating failures."""
+    if self.trajectory_store is None or self.metadata is None:
+      return
+    for store in self.trajectory_store:
+      try:
+        store.add_step(step, self.metadata)
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "%s Failed to record step in %s.",
+            self._debug_prefix,
+            type(store).__name__,
+            exc_info=True,
+        )
+
+  def _store_update_metadata(self) -> None:
+    """Updates trajectory metadata in each configured store, isolating failures."""
+    if self.trajectory_store is None or self.metadata is None:
+      return
+    for store in self.trajectory_store:
+      try:
+        store.update_metadata(self.metadata)
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "%s Failed to update trajectory metadata in %s.",
+            self._debug_prefix,
+            type(store).__name__,
+            exc_info=True,
+        )
+
   async def collect(self, mode: str = "Conversation") -> Any:
     """Execute a complete rollout episode and return the resulting trajectory.
 
@@ -321,7 +362,7 @@ class TrajectoryCollectEngine:
           task = self.agent.trajectory.task or getattr(self.env, "task", None)
           task_step = converter_lib.create_task_step(task)
           if task_step is not None:
-            self.trajectory_store.add_step(task_step, self.metadata)
+            self._store_add_step(task_step)
 
         while True:
           if len(self.agent.trajectory.steps) >= self.max_steps:
@@ -345,11 +386,18 @@ class TrajectoryCollectEngine:
 
         self._finalize_terminal_step_routing()
 
-        masked_out = (
-            self.overlong_filter
-            and self.agent.trajectory.status in self.filter_statuses
+        status = self.agent.trajectory.status
+        masked_out = self.overlong_filter and status in self.filter_statuses
+        # An episode that exhausted its wall-clock budget scores 0 by
+        # definition; grading its unfinished state would waste sandbox time and
+        # could reward an incomplete trajectory. Invalid trajectories (e.g.
+        # ENV_TIMEOUT after a hung env.step) are dropped from training, so their
+        # grade would be discarded and the env may be unresponsive.
+        skip_final_reward = masked_out or status in (
+            agent_types.INVALID_TRAJECTORY_STATUSES
+            | {agent_types.TrajectoryStatus.TIMEOUT}
         )
-        if not masked_out:
+        if not skip_final_reward:
           await self._append_final_reward()
         self.compute_mc_reward()
         self.compute_trajectory_reward()
@@ -363,7 +411,7 @@ class TrajectoryCollectEngine:
                 policy_version=self.policy_version,
             )
             if agent_step is not None:
-              self.trajectory_store.add_step(agent_step, self.metadata)
+              self._store_add_step(agent_step)
     except asyncio.TimeoutError:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
       raise
@@ -373,7 +421,7 @@ class TrajectoryCollectEngine:
     finally:
       if self.trajectory_store is not None and self.metadata is not None:
         self.sync_trajectory_metadata(policy_version=self.policy_version)
-        self.trajectory_store.update_metadata(self.metadata)
+        self._store_update_metadata()
 
     self.model_time["total_latency"] = float(
         sum(self.model_time["step_latency"])
@@ -396,6 +444,42 @@ class TrajectoryCollectEngine:
         self.model_time["total_latency"] + total_env_time + total_reward_time
     )
     self.agent.trajectory.total_time = total_time
+
+    if env_utils.is_debug_inference_logs_enabled():
+      num_steps = len(self.model_time['step_latency'])
+      m_lat = self.model_time['total_latency']
+      comp_toks = self.model_time['total_completion_tokens']
+      p_cnt = self.model_time['total_preemptions']
+      tps = comp_toks / m_lat if m_lat > 0 else 0.0
+      tpot_ms = (m_lat / comp_toks) * 1000.0 if comp_toks > 0 else 0.0
+      mean_step_lat = (m_lat / num_steps) if num_steps > 0 else 0.0
+      traj_id = self._debug_traj_id
+      status_str = (
+          self.agent.trajectory.status.name
+          if hasattr(self.agent.trajectory.status, 'name')
+          else str(self.agent.trajectory.status)
+      )
+      logging.info(
+          '[DEBUG_INFERENCE][Trajectory] traj_id=%s, global_step=%s, '
+          'status=%s, reward=%s, steps=%d, total_time=%.3fs, '
+          'model_time=%.3fs, env_time=%.3fs, reward_time=%.3fs, '
+          'mean_step_latency=%.3fs, '
+          'completion_tokens=%d, preemptions=%d, tps=%.2f, tpot=%.2fms',
+          traj_id,
+          self.policy_version,
+          status_str,
+          self.agent.trajectory.reward,
+          num_steps,
+          total_time,
+          m_lat,
+          total_env_time,
+          total_reward_time,
+          mean_step_lat,
+          comp_toks,
+          p_cnt,
+          tps,
+          tpot_ms,
+      )
 
     if mode not in ["Trajectory", "Steps", "Token", "Conversation"]:
       raise ValueError(
@@ -665,8 +749,10 @@ class TrajectoryCollectEngine:
     state, and optionally tokenizing the initial prompt messages.
     """
     logging.debug("%s env.reset starting", self._debug_prefix)
-    (obs, info), wall_time = await self._run_with_timing(self.env.reset)
-    logging.debug(
+    (obs, info), wall_time = await self._run_with_timing(
+        self.env.reset, timeout=self.timeout
+    )
+    logging.info(
         "%s env.reset done in %.1fs",
         self._debug_prefix,
         wall_time,
@@ -739,6 +825,22 @@ class TrajectoryCollectEngine:
     if pair_index is not None:
       return f"[step_idx={step_idx}, pair_index={pair_index}]"
     return f"[step_idx={step_idx}]"
+
+  @property
+  def _debug_traj_id(self) -> str:
+    """Returns a trajectory identifier for debug inference logging."""
+    if self.metadata is not None:
+      traj_id = getattr(self.metadata, "trajectory_id", None) or getattr(
+          self.metadata, "traj_id", None
+      )
+      if traj_id:
+        return str(traj_id)
+    traj_id = getattr(self.agent.trajectory, "trajectory_id", None) or getattr(
+        self.agent.trajectory, "traj_id", None
+    )
+    if traj_id:
+      return str(traj_id)
+    return self._debug_prefix
 
   def _rollout_state_info(
       self, info: Optional[Dict[str, Any]] = None
@@ -821,35 +923,77 @@ class TrajectoryCollectEngine:
       )
 
     model_start = time.perf_counter()
-    if is_async:
-      try:
-        rollout_output = await model_call_fn(  # pytype: disable=bad-return-type
-            chat_input,
-            self.env,
-            max_generation_steps=max_generation_steps,
-            **call_kwargs,
-        )
-      except Exception as e:
-        logging.exception("Caught exception inside async model_call: %s", e)
-        raise
-    else:
-
-      def _safe_model_call():
-        try:
-          return model_call_fn(
-              chat_input,
-              self.env,
-              max_generation_steps=max_generation_steps,
-              **call_kwargs,
-          )
-        except Exception as e:
-          logging.exception("Caught exception inside model_call: %s", e)
-          raise
-
-      rollout_output = await asyncio.get_running_loop().run_in_executor(
-          None,
-          _safe_model_call,
+    remaining_time = self.timeout - (model_start - self._start_ts)
+    if remaining_time <= 0:
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
+      logging.warning(
+          "%s Episode timed out before model_call after %.1f seconds"
+          " (timeout=%ds).",
+          self._debug_prefix,
+          model_start - self._start_ts,
+          self.timeout,
       )
+      self._log_trajectory_clip("TIMEOUT")
+      cur_step = self.agent.get_current_step()
+      if cur_step is not None:
+        cur_step.done = True
+      return True
+
+    try:
+      if is_async:
+        try:
+          rollout_output = await asyncio.wait_for(
+              model_call_fn(  # pytype: disable=bad-return-type
+                  chat_input,
+                  self.env,
+                  max_generation_steps=max_generation_steps,
+                  **call_kwargs,
+              ),
+              timeout=remaining_time,
+          )
+        except asyncio.TimeoutError:
+          raise
+        except Exception as e:
+          logging.exception("Caught exception inside async model_call: %s", e)
+          raise
+      else:
+
+        def _safe_model_call():
+          try:
+            return model_call_fn(
+                chat_input,
+                self.env,
+                max_generation_steps=max_generation_steps,
+                **call_kwargs,
+            )
+          except Exception as e:
+            logging.exception("Caught exception inside model_call: %s", e)
+            raise
+
+        rollout_output = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                None,
+                _safe_model_call,
+            ),
+            timeout=remaining_time,
+        )
+    except asyncio.TimeoutError:
+      step_latency = time.perf_counter() - model_start
+      self.model_time["step_latency"].append(step_latency)
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
+      logging.warning(
+          "%s model_call timed out after %.1f seconds (remaining_time=%.1fs,"
+          " episode timeout=%ds).",
+          self._debug_prefix,
+          step_latency,
+          remaining_time,
+          self.timeout,
+      )
+      self._log_trajectory_clip("TIMEOUT")
+      cur_step = self.agent.get_current_step()
+      if cur_step is not None:
+        cur_step.done = True
+      return True
     step_latency = time.perf_counter() - model_start
     self.model_time["step_latency"].append(step_latency)
     prompt_len = (
@@ -857,7 +1001,13 @@ class TrajectoryCollectEngine:
         if rollout_output.prompt_lengths is not None
         and len(rollout_output.prompt_lengths) > 0
         else (
-            len(rollout_output.left_padded_prompt_tokens[0])
+            (
+                len(rollout_output.left_padded_prompt_tokens[0])
+                if hasattr(
+                    rollout_output.left_padded_prompt_tokens[0], "__len__"
+                )
+                else len(rollout_output.left_padded_prompt_tokens)
+            )
             if rollout_output.left_padded_prompt_tokens is not None
             and len(rollout_output.left_padded_prompt_tokens) > 0
             else 0
@@ -1071,7 +1221,7 @@ class TrajectoryCollectEngine:
       )
       if agent_step is not None:
         self.sync_trajectory_metadata(policy_version=self.policy_version)
-        self.trajectory_store.add_step(agent_step, self.metadata)
+        self._store_add_step(agent_step)
 
     logging.debug(
         "%s Agent Action:\n%s",
@@ -1187,7 +1337,32 @@ class TrajectoryCollectEngine:
       )
       if env_step is not None:
         self.sync_trajectory_metadata()
-        self.trajectory_store.add_step(env_step, self.metadata)
+        self._store_add_step(env_step)
+
+    if env_utils.is_debug_inference_logs_enabled():
+      turn_idx = max(0, len(self.model_time['step_latency']) - 1)
+      turn_tps = comp_len / step_latency if step_latency > 0 else 0.0
+      turn_tpot_ms = (
+          (step_latency / comp_len) * 1000.0 if comp_len > 0 else 0.0
+      )
+      traj_id = self._debug_traj_id
+      env_lat = wall_time if env_step_executed else 0.0
+      turn_total = step_latency + env_lat
+      logging.info(
+          '[DEBUG_INFERENCE][Turn] traj_id=%s, turn=%d, model_time=%.3fs, '
+          'env_time=%.3fs, total_time=%.3fs, prompt_tokens=%d, '
+          'completion_tokens=%d, preemptions=%d, tps=%.2f, tpot=%.2fms',
+          traj_id,
+          turn_idx,
+          step_latency,
+          env_lat,
+          turn_total,
+          prompt_len,
+          comp_len,
+          preempt,
+          turn_tps,
+          turn_tpot_ms,
+      )
 
     if step_timed_out:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
@@ -1197,6 +1372,7 @@ class TrajectoryCollectEngine:
       return True
 
     return done
+
 
   async def _append_final_reward(self):
     """Compute and add final reward to the last step of the episode.
@@ -1215,7 +1391,21 @@ class TrajectoryCollectEngine:
       # is provided or no step is taken.
       logging.debug("%s Final reward function is skipped", self._debug_prefix)
       return
-    final_reward, wall_time = await self._run_with_timing(self.final_reward_fn)
+    reward_timeout = (
+        float(getattr(self.env, "reward_timeout", None) or 120.0) + 60.0
+    )
+    try:
+      final_reward, wall_time = await self._run_with_timing(
+          self.final_reward_fn, timeout=reward_timeout
+      )
+    except asyncio.TimeoutError:
+      logging.error(
+          "%s final_reward_fn timed out after %.1fs; defaulting final_reward"
+          " to 0.0.",
+          self._debug_prefix,
+          reward_timeout,
+      )
+      final_reward, wall_time = 0.0, reward_timeout
 
     self.reward_time["reward_latency"] += wall_time
     last_step.reward += final_reward
@@ -1232,7 +1422,7 @@ class TrajectoryCollectEngine:
       )
       if env_step is not None:
         self.sync_trajectory_metadata()
-        self.trajectory_store.add_step(env_step, self.metadata)
+        self._store_add_step(env_step)
     logging.debug(
         "%s Final reward computed: %s", self._debug_prefix, final_reward
     )

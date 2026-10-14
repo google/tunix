@@ -14,8 +14,11 @@
 
 """Unit tests for Kubernetes deployment YAML manifest generator."""
 
+import importlib.util
 import io
 import os
+import pathlib
+import stat
 import subprocess
 import sys
 from typing import Any
@@ -23,7 +26,24 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
-from tunix.experimental.distributed.deployment import yaml_generator
+import yaml
+
+try:
+  from tunix.experimental.distributed.deployment import yaml_generator
+except (ImportError, ModuleNotFoundError):
+  _MODULE_PATH = (
+      pathlib.Path(__file__).resolve().parents[4]
+      / "tunix"
+      / "experimental"
+      / "distributed"
+      / "deployment"
+      / "yaml_generator.py"
+  )
+  _SPEC = importlib.util.spec_from_file_location("yaml_generator", _MODULE_PATH)
+  assert _SPEC is not None and _SPEC.loader is not None
+  yaml_generator = importlib.util.module_from_spec(_SPEC)
+  sys.modules["yaml_generator"] = yaml_generator
+  _SPEC.loader.exec_module(yaml_generator)
 
 
 def _get_template_path(filename: str) -> str:
@@ -816,6 +836,334 @@ class FailFastRenderTest(parameterized.TestCase):
         check=False,
     )
     self.assertEqual(result.returncode, expected, result.stdout)
+
+  @parameterized.named_parameters(
+      ("deepswe_dist", "deepswe_dist", "deepswe"),
+      ("math_gsm8k_dist", "math_gsm8k_dist", "math"),
+  )
+  def test_k8s_launcher_rollout_batches_manifests_into_single_kubectl_apply(
+      self, example_dir, job_prefix
+  ):
+    repo_root = pathlib.Path(__file__).resolve().parents[4]
+    launcher = (
+        repo_root
+        / "tunix"
+        / "experimental"
+        / "examples"
+        / example_dir
+        / "k8s_launcher.sh"
+    )
+
+    tempdir = self.create_tempdir().full_path
+    kubectl_log = os.path.join(tempdir, "kubectl_calls.log")
+    applied_manifest = os.path.join(tempdir, "applied.yaml")
+    kubectl_bin = os.path.join(tempdir, "kubectl")
+    with open(kubectl_bin, "w") as f:
+      f.write(
+          "#!/bin/bash\n"
+          f'echo "$*" >> "{kubectl_log}"\n'
+          'if [[ "$*" == *"apply -f -"* ]]; then\n'
+          f'  cat > "{applied_manifest}"\n'
+          "fi\n"
+      )
+    os.chmod(kubectl_bin, stat.S_IRWXU)
+
+    env = dict(
+        os.environ,
+        PATH=f"{tempdir}:{os.environ.get('PATH', '')}",
+        ENTER_KUBE_CONTEXT="/dev/null",
+        ROLLOUT_REPLICAS="4",
+        JOB_PREFIX=job_prefix,
+        TUNIX_IMAGE="test-image:latest",
+    )
+    result = subprocess.run(
+        ["bash", str(launcher), "rollout"],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    self.assertEqual(result.returncode, 0, result.stderr)
+
+    with open(kubectl_log) as f:
+      calls = [line.strip() for line in f if line.strip()]
+    replica_delete_calls = [
+        c for c in calls if f"{job_prefix}-roll-0" in c and "delete" in c
+    ]
+    self.assertLen(
+        replica_delete_calls,
+        1,
+        f"Expected 1 batched replica delete call, got: {calls}",
+    )
+    for i in range(4):
+      self.assertIn(f"{job_prefix}-roll-{i}", replica_delete_calls[0])
+
+    apply_calls = [c for c in calls if "apply -f -" in c]
+    self.assertLen(apply_calls, 1, f"Expected 1 batched apply, got: {calls}")
+
+    with open(applied_manifest) as f:
+      docs = list(yaml.safe_load_all(f.read()))
+    self.assertLen(docs, 4)
+    self.assertEqual(
+        [doc["metadata"]["name"] for doc in docs],
+        [f"{job_prefix}-roll-{i}" for i in range(4)],
+    )
+
+  def test_k8s_launcher_single_host_dynamic_slicing_direct_apply(
+      self,
+  ):
+    repo_root = pathlib.Path(__file__).resolve().parents[4]
+    launcher = (
+        repo_root
+        / "tunix"
+        / "experimental"
+        / "examples"
+        / "deepswe_dist"
+        / "k8s_launcher.sh"
+    )
+
+    tempdir = self.create_tempdir().full_path
+    kubectl_log = os.path.join(tempdir, "kubectl_calls.log")
+    applied_manifest = os.path.join(tempdir, "applied.yaml")
+    kubectl_bin = os.path.join(tempdir, "kubectl")
+    with open(kubectl_bin, "w") as f:
+      f.write(
+          "#!/bin/bash\n"
+          f'echo "$*" >> "{kubectl_log}"\n'
+          'if [[ "$*" == *"apply -f -"* ]]; then\n'
+          f'  cat > "{applied_manifest}"\n'
+          "fi\n"
+      )
+    os.chmod(kubectl_bin, stat.S_IRWXU)
+
+    env = dict(
+        os.environ,
+        PATH=f"{tempdir}:{os.environ.get('PATH', '')}",
+        ENTER_KUBE_CONTEXT="/dev/null",
+        ROLLOUT_REPLICAS="3",
+        ROLLOUT_TPU_SLICE="tpu7x:2x2x1",
+        JOB_PREFIX="deepswe",
+    )
+    result = subprocess.run(
+        ["bash", str(launcher), "start_rollout_only"],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    self.assertEqual(result.returncode, 0, result.stderr)
+
+    with open(kubectl_log) as f:
+      calls = [line.strip() for line in f if line.strip()]
+    self.assertLen([c for c in calls if "apply -f -" in c], 1)
+    self.assertEmpty([c for c in calls if "patch" in c])
+    self.assertEmpty([c for c in calls if "delete workload" in c])
+
+    with open(applied_manifest) as f:
+      docs = list(yaml.safe_load_all(f.read()))
+    self.assertEqual(
+        [doc["metadata"]["name"] for doc in docs],
+        ["deepswe-roll-0", "deepswe-roll-1", "deepswe-roll-2"],
+    )
+    for doc in docs:
+      annos = (
+          doc["spec"]["replicatedJobs"][0]["template"]["spec"]["template"][
+              "metadata"
+          ]["annotations"]
+      )
+      self.assertEqual(
+          annos.get("cloud.google.com/gke-tpu-slice-topology"), "2x2x1"
+      )
+      self.assertEqual(
+          annos.get("cloud.google.com/skip-tpu-webhook-check"), "true"
+      )
+      self.assertNotIn("kueue.x-k8s.io/podset-required-topology", annos)
+
+  def test_cpu_teardown_gang_on_exit_disabled_by_default(self):
+    template_file = _get_template_path("jobset.cpu.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=foo-orch",
+        "--namespace=priority-dev",
+        "--gang_id=foo",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+    self.assertIn("terminationGracePeriodSeconds: 300", rendered)
+    self.assertNotIn("kubectl delete jobsets.jobset.x-k8s.io", rendered)
+
+  def test_cpu_teardown_gang_on_exit_renders_and_preserves_exit_code(self):
+    template_file = _get_template_path("jobset.cpu.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=foo-orch",
+        "--namespace=priority-dev",
+        "--gang_id=foo",
+        "--teardown_gang_on_exit",
+        '--worker_startup_command=eval "$TEST_WORKLOAD_CMD"',
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+
+    job = _proc_job_spec(rendered)
+    (container,) = job["template"]["spec"]["containers"]
+    script = container["command"][2]
+    expected_kubectl = (
+        'kubectl delete jobsets.jobset.x-k8s.io -n "priority-dev"'
+        ' -l "scheduling.x-k8s.io/gang-id=foo"'
+        ' --field-selector="metadata.name!=foo-orch"'
+        " --ignore-not-found=true --wait=false"
+    )
+    self.assertIn(expected_kubectl, script)
+    self.assertLess(
+        script.index("EXIT_CODE=$?"),
+        script.index(expected_kubectl),
+    )
+    self.assertLess(
+        script.index(expected_kubectl),
+        script.index("exit $EXIT_CODE"),
+    )
+
+    tempdir = self.create_tempdir().full_path
+    kubectl_log = os.path.join(tempdir, "kubectl_calls.log")
+    kubectl_bin = os.path.join(tempdir, "kubectl")
+    with open(kubectl_bin, "w") as f:
+      f.write(
+          "#!/bin/bash\n"
+          f'echo "$*" >> "{kubectl_log}"\n'
+          'exit "${FAKE_KUBECTL_EXIT:-0}"\n'
+      )
+    os.chmod(kubectl_bin, stat.S_IRWXU)
+
+    for workload_exit, kubectl_exit in ((0, 0), (7, 0), (7, 1)):
+      with self.subTest(workload_exit=workload_exit, kubectl_exit=kubectl_exit):
+        if os.path.exists(kubectl_log):
+          os.remove(kubectl_log)
+        env = dict(
+            os.environ,
+            PATH=f"{tempdir}:{os.environ.get('PATH', '')}",
+            TEST_WORKLOAD_CMD=f"exit {workload_exit}",
+            FAKE_KUBECTL_EXIT=str(kubectl_exit),
+        )
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(result.returncode, workload_exit, result.stdout)
+        with open(kubectl_log) as f:
+          calls = [line.strip() for line in f if line.strip()]
+        self.assertEqual(
+            calls,
+            [
+                "delete jobsets.jobset.x-k8s.io -n priority-dev"
+                " -l scheduling.x-k8s.io/gang-id=foo"
+                " --field-selector=metadata.name!=foo-orch"
+                " --ignore-not-found=true --wait=false"
+            ],
+        )
+
+  def test_teardown_gang_on_exit_without_gang_id_raises(self):
+    template_file = _get_template_path("jobset.cpu.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=foo-orch",
+        "--gang_id=",
+        "--teardown_gang_on_exit",
+    ]
+    with mock.patch.dict(os.environ, {"GANG_ID": ""}, clear=False):
+      with mock.patch.object(sys, "argv", argv):
+        with self.assertRaisesRegex(ValueError, "requires --gang_id"):
+          yaml_generator.main()
+
+  def test_teardown_gang_on_exit_on_unsupported_template_raises(self):
+    with self.assertRaisesRegex(ValueError, "not supported by template"):
+      _render(
+          "jobset.pathways.yaml",
+          "tpuv5:4x4x4",
+          "--gang_id=foo",
+          "--teardown_gang_on_exit",
+      )
+
+  @parameterized.named_parameters(
+      ("deepswe_dist", "deepswe_dist"),
+      ("math_gsm8k_dist", "math_gsm8k_dist"),
+  )
+  def test_k8s_launcher_orchestrator_teardown_on_exit(
+      self, example_dir: str
+  ):
+    repo_root = pathlib.Path(__file__).resolve().parents[4]
+    launcher = (
+        repo_root
+        / "tunix"
+        / "experimental"
+        / "examples"
+        / example_dir
+        / "k8s_launcher.sh"
+    )
+    base_env = dict(
+        os.environ,
+        JOB_PREFIX="testrun",
+        K8S_NAMESPACE="priority-dev",
+        ROLLOUT_REPLICAS="1",
+        USE_AGENT_SANDBOX="0",
+        TUNIX_IMAGE="test-image:latest",
+        MAXTEXT_CKPT="gs://dummy-bucket/ckpt",
+        PYTHON_BIN=sys.executable,
+        PYTHON=sys.executable,
+    )
+    base_env.pop("GANG_ID", None)
+
+    res_default = subprocess.run(
+        ["bash", str(launcher), "start", "--dry-run"],
+        cwd=str(repo_root),
+        env=base_env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    docs = [
+        d
+        for d in yaml.safe_load_all(res_default.stdout)
+        if isinstance(d, dict) and d.get("kind") == "JobSet"
+    ]
+    by_name = {d["metadata"]["name"]: d for d in docs}
+    self.assertIn("testrun-orch", by_name)
+    self.assertIn("testrun-train", by_name)
+    orch_script = (
+        by_name["testrun-orch"]["spec"]["replicatedJobs"][0]["template"][
+            "spec"
+        ]["template"]["spec"]["containers"][0]["command"][2]
+    )
+    self.assertIn(
+        'kubectl delete jobsets.jobset.x-k8s.io -n "priority-dev"'
+        ' -l "scheduling.x-k8s.io/gang-id=testrun"'
+        ' --field-selector="metadata.name!=testrun-orch"'
+        " --ignore-not-found=true --wait=false",
+        orch_script,
+    )
+    for name, doc in by_name.items():
+      if name == "testrun-orch":
+        continue
+      self.assertNotIn(
+          "kubectl delete jobsets.jobset.x-k8s.io",
+          yaml.safe_dump(doc),
+      )
 
 
 if __name__ == "__main__":

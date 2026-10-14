@@ -16,10 +16,12 @@
 
 import asyncio
 import collections
+import contextlib
 import math
 import os
 import time
 from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Union
+import weakref
 from absl import logging
 from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
@@ -77,11 +79,13 @@ class RolloutManager:
       sampler: Optional[sampler_lib.Sampler] = None,
       env_pool: Any = None,
       agent_factory: Optional[Callable[[], Any]] = None,
-      max_concurrency: int = 64,
+      max_concurrency: Optional[int] = 64,
       tokenizer: Any = None,
       chat_parser: Any = None,
       drain_timeout_s: float | None = None,
-      trajectory_store: Optional[store.TrajectoryWriter] = None,
+      trajectory_store: Optional[
+          store.TrajectoryWriter | Sequence[Optional[store.TrajectoryWriter]]
+      ] = None,
   ):
     """Initializes the RolloutManager.
 
@@ -90,15 +94,18 @@ class RolloutManager:
       sampler: Optional pre-constructed Sampler instance.
       env_pool: Environment pool for rollout execution.
       agent_factory: Factory callable producing agent instances.
-      max_concurrency: Maximum number of concurrent episodes.
+      max_concurrency: Maximum number of concurrent episodes; values <= 0
+        disable the cap.
       tokenizer: Tokenizer for prompt/response encoding.
       chat_parser: Chat parser for conversation templating.
       drain_timeout_s: How long pre_weight_sync waits for in-flight trajectories
         before pausing the stragglers, roughly one worst-case trajectory.
-      trajectory_store: Optional TrajectoryWriter for persisting rollout steps
-        and episode metadata.
+      trajectory_store: Optional TrajectoryWriter or sequence of
+        TrajectoryWriters (e.g. [file_store, sql_store], where None entries are
+        skipped) for persisting rollout steps and episode metadata.
     """
     self.config = config
+    max_concurrency = 0 if max_concurrency is None else int(max_concurrency)
     if sampler is None:
       sampler_type = getattr(config, "sampler_type", "vanilla")
       weight_sync_mode = getattr(
@@ -162,7 +169,7 @@ class RolloutManager:
     self.sampler = sampler
     self.env_pool = env_pool
     self.agent_factory = agent_factory
-    self.max_concurrency = max_concurrency
+    self._max_concurrency = max_concurrency
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
     self.trajectory_store = trajectory_store
@@ -188,6 +195,9 @@ class RolloutManager:
     )
     self._completed_queue: asyncio.Queue[TrajectoryOrError] = asyncio.Queue()
     self._traffic_inst = None
+    self._concurrency_sems: weakref.WeakKeyDictionary[
+        asyncio.AbstractEventLoop, asyncio.Semaphore
+    ] = weakref.WeakKeyDictionary()
     self._episode_timeout_s = _env_float(
         "EPISODE_TIMEOUT_SECS",
         collector_lib.DEFAULT_EPISODE_TIMEOUT_SECS,
@@ -220,6 +230,28 @@ class RolloutManager:
     )
 
   @property
+  def max_concurrency(self) -> int:
+    """Maximum number of concurrent episodes; None or <= 0 means uncapped."""
+    return self._max_concurrency
+
+  def _get_concurrency_semaphore(
+      self,
+  ) -> contextlib.AbstractAsyncContextManager[Any]:
+    """Returns the concurrency semaphore bound to the running event loop.
+
+    The semaphore is created lazily because `__init__` runs before the serving
+    loop exists, and cached per running loop (e.g. per-call `asyncio.run` in
+    the in-process actor path) since asyncio primitives bind to the loop they
+    are first awaited on.
+    """
+    if self._max_concurrency is None or self._max_concurrency <= 0:
+      return contextlib.nullcontext()
+    loop = asyncio.get_running_loop()
+    if loop not in self._concurrency_sems:
+      self._concurrency_sems[loop] = asyncio.Semaphore(self._max_concurrency)
+    return self._concurrency_sems[loop]
+
+  @property
   def _traffic(self) -> traffic_controller_lib.TrafficController:
     if self._traffic_inst is None:
       self._traffic_inst = traffic_controller_lib.TrafficController()
@@ -241,47 +273,39 @@ class RolloutManager:
       raise traffic_controller_lib.AdmissionClosedError(
           "rollout worker is stopped"
       )
-    if request.prompt_id and request.prompt_id in self._cancelled_prompt_ids:
-      error_metadata = dict(request.metadata or {})
-      error_metadata["prompt_id"] = request.prompt_id
-      error_metadata["group_index"] = request.group_index
-      error_metadata["policy_version"] = int(
-          getattr(request, "target_policy_version", 0) or 0
-      )
-      cancelled_err = trajectory_lib.TrajectoryError(
-          trajectory_id=request.traj_id,
-          prompt_id=request.prompt_id,
-          error_message="Trajectory cancelled before execution.",
-          error_type="CancelledError",
-          metadata=error_metadata,
-      )
-      await self._completed_queue.put(cancelled_err)
-      if on_complete:
-        on_complete(cancelled_err)
-      return cancelled_err
+    async def _check_cancelled() -> Optional[trajectory_lib.TrajectoryError]:
+      if request.prompt_id and request.prompt_id in self._cancelled_prompt_ids:
+        error_metadata = dict(request.metadata or {})
+        error_metadata["request_id"] = request.request_id
+        error_metadata["prompt_id"] = request.prompt_id
+        error_metadata["group_index"] = request.group_index
+        error_metadata["policy_version"] = int(
+            getattr(request, "target_policy_version", 0) or 0
+        )
+        cancelled_err = trajectory_lib.TrajectoryError(
+            trajectory_id=request.traj_id,
+            prompt_id=request.prompt_id,
+            error_message="Trajectory cancelled before execution.",
+            error_type="CancelledError",
+            metadata=error_metadata,
+        )
+        await self._completed_queue.put(cancelled_err)
+        if on_complete:
+          on_complete(cancelled_err)
+        return cancelled_err
+      return None
+
+    cancelled_res = await _check_cancelled()
+    if cancelled_res is not None:
+      return cancelled_res
     await self._traffic.wait_for_admission()
     if self._traffic.state == datatypes.WorkerState.STOPPED:
       raise traffic_controller_lib.AdmissionClosedError(
           "rollout worker is stopped"
       )
-    if request.prompt_id and request.prompt_id in self._cancelled_prompt_ids:
-      error_metadata = dict(request.metadata or {})
-      error_metadata["prompt_id"] = request.prompt_id
-      error_metadata["group_index"] = request.group_index
-      error_metadata["policy_version"] = int(
-          getattr(request, "target_policy_version", 0) or 0
-      )
-      cancelled_err = trajectory_lib.TrajectoryError(
-          trajectory_id=request.traj_id,
-          prompt_id=request.prompt_id,
-          error_message="Trajectory cancelled before execution.",
-          error_type="CancelledError",
-          metadata=error_metadata,
-      )
-      await self._completed_queue.put(cancelled_err)
-      if on_complete:
-        on_complete(cancelled_err)
-      return cancelled_err
+    cancelled_res = await _check_cancelled()
+    if cancelled_res is not None:
+      return cancelled_res
     if partial:
       if self.sampler is not None:
         sampler_version = self.sampler._policy_version
@@ -402,9 +426,14 @@ class RolloutManager:
   ) -> None:
     """Runs episode loop, removes active tracking, and resolves callbacks/streams."""
     try:
-      trajectory: TrajectoryOrError = await collector.run_episode()
+      async with self._get_concurrency_semaphore():
+        trajectory: TrajectoryOrError = await collector.run_episode()
+      if isinstance(trajectory, datatypes.TrajectoryItem):
+        if "request_id" not in trajectory.metadata:
+          trajectory.metadata["request_id"] = request.request_id
     except asyncio.CancelledError:
       error_metadata = dict(request.metadata or {})
+      error_metadata["request_id"] = request.request_id
       error_metadata["prompt_id"] = request.prompt_id
       error_metadata["group_index"] = request.group_index
       error_metadata["policy_version"] = int(
@@ -419,6 +448,7 @@ class RolloutManager:
       )
     except Exception as e:  # pylint: disable=broad-exception-caught
       error_metadata = dict(request.metadata or {})
+      error_metadata["request_id"] = request.request_id
       error_metadata["prompt_id"] = request.prompt_id
       error_metadata["group_index"] = request.group_index
       error_metadata["policy_version"] = int(

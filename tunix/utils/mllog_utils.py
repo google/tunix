@@ -548,7 +548,7 @@ def log_offline_eval_step(
 ) -> bool:
   """Logs offline eval events for one checkpoint and a backdated run_stop.
 
-  run_stop(status="success") is emitted when eval_accuracy reaches
+  run_stop(status="success") is emitted when eval_accuracy exceeds
   target_accuracy; run_stop(status="aborted") is emitted when the final
   checkpoint misses it. Both use checkpoint_timestamp_ms as time_ms so
   checkpoint serialization and offline eval are excluded from time-to-train.
@@ -566,9 +566,9 @@ def log_offline_eval_step(
       already emitted it when eval began).
 
   Returns:
-    True if target_accuracy was reached.
+    True if target_accuracy was exceeded.
   """
-  passed = float(eval_accuracy) >= float(target_accuracy)
+  passed = float(eval_accuracy) > float(target_accuracy)
   if not (_is_master_process() and mllogger is not None):
     return passed
 
@@ -689,7 +689,9 @@ def check_eval(
   """Logs an evaluation block completion, checks for early stopping, and handles next block."""
   global _block_open, _train_stopped
   target_acc = target_accuracy if target_accuracy is not None else getattr(args, "target_accuracy", 0.69)
-  is_early_stop = (target_acc is not None) and (eval_accuracy >= target_acc)
+  is_early_stop = (target_acc is not None) and (
+      float(eval_accuracy) > float(target_acc)
+  )
 
   if not (_is_master_process() and mllogger is not None):
     return is_early_stop
@@ -933,21 +935,30 @@ def _extract_kv_from_metrics_buffer(metrics_buffer: Any) -> dict[str, Any]:
   if raw_metrics is None and hasattr(metrics_buffer, "metrics_logger"):
     raw_metrics = getattr(metrics_buffer.metrics_logger, "_metrics", None)
   if isinstance(raw_metrics, dict):
-    for prefix_dict in raw_metrics.values():
+    for prefix_key, prefix_dict in raw_metrics.items():
       if not isinstance(prefix_dict, dict):
         continue
       for mode_key, mode_dict in prefix_dict.items():
         if str(mode_key) != "train" or not isinstance(mode_dict, dict):
           continue
         for k, vals in mode_dict.items():
-          if vals and k not in kv_stats:
-            val = _clean_metric_val(vals[-1])
-            if val is not None:
+          if not vals:
+            continue
+          val = _clean_metric_val(vals[-1])
+          if val is None:
+            continue
+          if prefix_key:
+            prefixed_k = f"{prefix_key}/{k}"
+            if prefixed_k not in kv_stats:
+              kv_stats[prefixed_k] = val
+            if prefix_key in ("trainer", "actor") and k not in kv_stats:
               kv_stats[k] = val
-              if k.startswith("trainer/"):
-                short_k = k[len("trainer/") :]
-                if short_k not in kv_stats:
-                  kv_stats[short_k] = val
+          if k not in kv_stats:
+            kv_stats[k] = val
+          if k.startswith(("trainer/", "actor/")):
+            short_k = k.split("/", 1)[1]
+            if short_k not in kv_stats:
+              kv_stats[short_k] = val
 
   return kv_stats
 
@@ -989,7 +1000,7 @@ def log_rcp_step_stats(
   if valid_toks is None and valid_seqs is not None:
     mean_toks = stats.get(
         "rollout/total_tokens_mean",
-        stats.get("rollout/completion_length_mean", stats.get("generation/completions/mean_raw_length")),
+        stats.get("rollout/completions/mean_length", stats.get("rollout/completion_length_mean", stats.get("rollout/completions/mean_raw_length", stats.get("generation/completions/mean_raw_length")))),
     )
     if mean_toks is not None:
       valid_toks = float(mean_toks) * float(valid_seqs)
@@ -1001,6 +1012,13 @@ def log_rcp_step_stats(
       "global_valid_toks": float(valid_toks) if valid_toks is not None else None,
       "global_valid_seqs": float(valid_seqs) if valid_seqs is not None else None,
   }
+  # MoE drop audit (MaxText log_moe_drops=true): per step, the assignments the ragged buffer dropped in the
+  # programs whose gradients were accumulated (0 in a compliant run; -1 if not computed), and the dropless
+  # replays of #5570. Omitted if absent.
+  for key in ("moe_dropped_assignments", "moe_dropless_replays"):
+    val = stats.get(key, stats.get(f"actor/{key}", stats.get(f"trainer/{key}")))
+    if val is not None:
+      train_tracked[key] = float(val)
   log_tracked_stats(train_tracked, step=step_num, samples_count=samples_count)
 
   # 2. Timing stats event: train_step_time, policy_training_time, exposed_generation_time, weight_sync_time, valid_tokens_per_sec_per_gpu
@@ -1275,10 +1293,17 @@ def init_print(
   train_sp = 1
   if train_mesh is not None and hasattr(train_mesh, "shape"):
     train_tp = train_mesh.shape.get("tp", train_mesh.shape.get("tensor", 1))
-    train_sp = train_mesh.shape.get("sp", 1)
-  elif getattr(args, "train_mesh_tp", None) is not None:
-    train_tp = args.train_mesh_tp
-    train_sp = getattr(args, "train_mesh_sp", 1) or 1
+    train_sp = train_mesh.shape.get(
+        "sp", train_mesh.shape.get("context", 1)
+    )
+  else:
+    if getattr(args, "train_mesh_tp", None) is not None:
+      train_tp = args.train_mesh_tp
+    train_sp = (
+        getattr(args, "train_mesh_context", None)
+        or getattr(args, "train_mesh_sp", None)
+        or 1
+    )
 
   rollout_tp = 1
   if rollout_mesh is not None and hasattr(rollout_mesh, "shape"):
@@ -1356,7 +1381,8 @@ def init_print(
       # Mandatory v6.1 precision and run-config disclosures.
       "lowest_numerical_precision_in_linear": "fp8" if is_fp8 else "bfloat16",
       "lowest_numerical_precision_in_attn": "bfloat16",
-      "lowest_numerical_precision_in_comm": "bfloat16",
+      # An FP8 rollout receives its routed experts as float8_e4m3fn on weight sync.
+      "lowest_numerical_precision_in_comm": "fp8" if is_fp8 else "bfloat16",
       "config_filename": args.model_id or "qwen35_397b_grpo",
       "generation_backend": getattr(args, "rollout_engine", "vllm"),
       "generation_tensor_parallelism": rollout_tp,

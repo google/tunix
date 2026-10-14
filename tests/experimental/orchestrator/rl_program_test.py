@@ -18,6 +18,7 @@ from collections.abc import Sequence
 import dataclasses
 import pathlib
 import threading
+import time
 import types
 from typing import Any
 from unittest import mock
@@ -57,10 +58,12 @@ class _MockWorkerHandle(mock.MagicMock):
 
   Simulates remote ActorHandle execution:
   - Rollout responses: `responses` is a FIFO queue of batches
-    (`list[list[RolloutResponse]]`). `poll_responses()` pops and returns the
-    next batch inside an `ExecutionResponse`. When `responses` is empty (all
-    queued rollouts consumed), it returns `None` to emulate an idle long-polling
-    worker awaiting new dispatch requests.
+    (`list[list[RolloutResponse]]`). `poll_responses()` pops the next batch and
+    returns it inside an `ExecutionResponse` tagged with the `request_id` of the
+    oldest still-pending `dispatch_task()` call, i.e. tasks complete in dispatch
+    order. When `responses` is empty (all queued rollouts consumed), it returns
+    `None` to emulate an idle long-polling worker awaiting new dispatch
+    requests.
   - Trainer execution: `fwd_bwd`, `update`, and `get_metrics` are handled via
     `asubmit()`.
   """
@@ -69,6 +72,7 @@ class _MockWorkerHandle(mock.MagicMock):
     super().__init__(spec=remote_execution.ActorHandle, *args, **kwargs)
     self.role = role
     self.responses: list[list[datatypes.RolloutResponse]] = []
+    self.pending_request_ids: list[str] = []
     self.metrics_buffer: exp_metrics.MetricsBuffer | None = None
     self.train_step_count: int = 0
     self.dispatched_requests: list[Any] = []
@@ -95,16 +99,23 @@ class _MockWorkerHandle(mock.MagicMock):
             for req in reqs
         ]
         self.responses.append(resps)
-    return request_id or "task_ack"
+    task_id = request_id or "task_ack"
+    self.pending_request_ids.append(task_id)
+    return task_id
 
   async def poll_responses(
       self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
   ) -> Any:
-    """Pops queued rollout responses, or returns None if no responses are ready."""
+    """Pops the next queued batch as the completion of the oldest dispatched task."""
     del timeout_s
     if self.responses:
       items = self.responses.pop(0)
-      return remote_execution.ExecutionResponse(request_id="poll", result=items)
+      request_id = (
+          self.pending_request_ids.pop(0) if self.pending_request_ids else ""
+      )
+      return remote_execution.ExecutionResponse(
+          request_id=request_id, result=items
+      )
     await asyncio.sleep(0.01)
     return None
 
@@ -112,6 +123,16 @@ class _MockWorkerHandle(mock.MagicMock):
       self, method_name: str | None = None, *args: Any, **kwargs: Any
   ) -> Any:
     if method_name == "fwd_bwd":
+      if kwargs.get("apply_optimizer", False):
+        self.train_step_count += 1
+        return datatypes.Response(
+            request_id="step",
+            metadata={
+                "loss": 0.5,
+                "updated": True,
+                "train_step": self.train_step_count,
+            },
+        )
       return datatypes.Response(request_id="step", metadata={"loss": 0.5})
     elif method_name == "update":
       self.train_step_count += 1
@@ -383,6 +404,63 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(program.num_generations, 5)
     self.assertEqual(program.mini_batch_size, 3)
 
+  def test_initial_dispatch_offsets(self):
+    def offsets(**kwargs):
+      program = rl_program.StandardRLProgram(
+          dataset=["prompt_1"], algo=self.mock_algo, **kwargs
+      )
+      return [program._initial_dispatch_offset(k) for k in range(4)]  # pylint: disable=protected-access
+
+    # one stagger for every gap (the first gap defaults to it)
+    self.assertEqual(
+        offsets(initial_dispatch_stagger_s=75.0), [0.0, 75.0, 150.0, 225.0]
+    )
+    # a longer gap before batch 1, then the regular stagger
+    self.assertEqual(
+        offsets(
+            initial_dispatch_stagger_s=75.0,
+            initial_dispatch_first_stagger_s=175.0,
+        ),
+        [0.0, 175.0, 250.0, 325.0],
+    )
+    # only batch 1 held
+    self.assertEqual(
+        offsets(initial_dispatch_first_stagger_s=175.0),
+        [0.0, 175.0, 175.0, 175.0],
+    )
+    self.assertEqual(offsets(), [0.0, 0.0, 0.0, 0.0])
+    with self.assertRaisesRegex(ValueError, "first_stagger_s must be non"):
+      rl_program.StandardRLProgram(
+          dataset=["prompt_1"],
+          algo=self.mock_algo,
+          initial_dispatch_first_stagger_s=-1.0,
+      )
+
+  def test_initial_stagger_holds_batch_one_for_the_first_gap(self):
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_1"],
+        algo=self.mock_algo,
+        initial_dispatch_stagger_s=75.0,
+        initial_dispatch_first_stagger_s=175.0,
+    )
+    sleeps = []
+
+    async def fake_sleep(s):
+      sleeps.append(round(s, 3))
+
+    async def _run():
+      with mock.patch.object(rl_program.time, "monotonic", return_value=1000.0):
+        await program._hold_initial_stagger(0)  # pylint: disable=protected-access
+      with mock.patch.object(
+          rl_program.time, "monotonic", return_value=1010.0
+      ), mock.patch.object(rl_program.asyncio, "sleep", fake_sleep):
+        await program._hold_initial_stagger(1)  # pylint: disable=protected-access
+        await program._hold_initial_stagger(2)  # pylint: disable=protected-access
+
+    asyncio.run(_run())
+    # batch 1 due at 1000 + 175, batch 2 at 1000 + 175 + 75; both asked at 1010
+    self.assertEqual(sleeps, [165.0, 240.0])
+
   def test_unexpected_num_generations_argument_raises_type_error(self):
     with self.assertRaises(TypeError):
       rl_program.StandardRLProgram(  # pyrefly: ignore[unexpected-keyword-arg]
@@ -499,6 +577,47 @@ class RLProgramTest(absltest.TestCase):
       self.assertEqual(program.last_step_result.reward_mean, 1.0)
       self.assertEqual(program.last_step_result.policy_version, 1)
       self.assertEqual(program.last_step_result.train_result, "step_done")
+
+    asyncio.run(_run())
+
+  def test_on_train_start_called_after_prepare_rollout_policy_and_before_rollouts(
+      self,
+  ):
+    async def _run():
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
+      events = []
+
+      async def _prepare_rollout_policy(**kwargs):
+        del kwargs
+        events.append("prepare_rollout_policy")
+
+      async def _dispatch_rollouts(*args, **kwargs):
+        del args, kwargs
+        events.append("dispatch_rollouts")
+
+      self.mock_engine.prepare_rollout_policy.side_effect = (
+          _prepare_rollout_policy
+      )
+      self.mock_engine.dispatch_rollouts.side_effect = _dispatch_rollouts
+
+      program = self._create_program(
+          dataset=["prompt_data_0"],
+          max_steps=1,
+          on_train_start=lambda step: events.append(("on_train_start", step)),
+          on_step_begin=lambda step: events.append(("on_step_begin", step)),
+      )
+
+      await program.run_async(self.mock_engine)
+
+      self.assertEqual(
+          events,
+          [
+              "prepare_rollout_policy",
+              ("on_train_start", 0),
+              "dispatch_rollouts",
+              ("on_step_begin", 0),
+          ],
+      )
 
     asyncio.run(_run())
 
@@ -876,6 +995,513 @@ class RLProgramTest(absltest.TestCase):
       await program.run_async(self.mock_engine, num_steps=1)
 
       self.assertEqual(call_order, ["save_checkpoint", "sync_weights"])
+
+    asyncio.run(_run())
+
+  def test_get_metrics_deferred_after_checkpoint_sync_weights_and_commit(self):
+    async def _run():
+      call_order = []
+      policy_version_at_metrics = []
+
+      async def mock_train_step(*args, **kwargs):
+        del args, kwargs
+        call_order.append("train_step")
+        return {"train_step": 1, "update_ready": True}
+
+      async def mock_save_checkpoint(*args, **kwargs):
+        del args, kwargs
+        call_order.append("save_checkpoint")
+        return {"checkpoint_saved": True}
+
+      async def mock_sync_weights(*args, **kwargs):
+        del args, kwargs
+        call_order.append("sync_weights")
+        return 1
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(sync_weights=True)
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        call_order.append("get_metrics")
+        policy_version_at_metrics.append(program.policy_version)
+        return None
+
+      original_commit = program.scored_q.commit
+
+      def _recording_commit(*args, **kwargs):
+        call_order.append("commit")
+        return original_commit(*args, **kwargs)
+
+      program.scored_q.commit = _recording_commit
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.save_checkpoint.side_effect = mock_save_checkpoint
+      self.mock_engine.sync_weights.side_effect = mock_sync_weights
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      await program.run_async(self.mock_engine, num_steps=1)
+
+      self.assertEqual(
+          call_order,
+          [
+              "train_step",
+              "save_checkpoint",
+              "sync_weights",
+              "commit",
+              "get_metrics",
+          ],
+      )
+      self.assertEqual(policy_version_at_metrics, [1])
+
+    asyncio.run(_run())
+
+  def test_get_metrics_deferred_after_async_weight_sync_start_and_commit(self):
+    async def _run():
+      call_order = []
+      pending_sync_at_metrics = []
+      transfer_gate = asyncio.Event()
+
+      async def mock_train_step(*args, **kwargs):
+        del args, kwargs
+        call_order.append("train_step")
+        return {"train_step": 1, "update_ready": True}
+
+      async def mock_save_checkpoint(*args, **kwargs):
+        del args, kwargs
+        call_order.append("save_checkpoint")
+        return {"checkpoint_saved": True}
+
+      async def mock_sync_weights(
+          *args, policy_version=None, source_staged=None, **kwargs
+      ):
+        del args, kwargs
+        call_order.append("sync_start")
+        if source_staged is not None:
+          source_staged.set()
+        await transfer_gate.wait()
+        call_order.append("sync_done")
+        return policy_version or 1
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(
+          sync_weights=True, async_weight_sync=True
+      )
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        call_order.append("get_metrics")
+        pending_sync_at_metrics.append(program._pending_sync is not None)
+        transfer_gate.set()
+        return None
+
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.save_checkpoint.side_effect = mock_save_checkpoint
+      self.mock_engine.sync_weights.side_effect = mock_sync_weights
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      # The transfer gate only opens from the deferred fetch: if the fetch
+      # were never issued this would hang, so bound it and fail instead.
+      await asyncio.wait_for(
+          program.run_async(self.mock_engine, num_steps=1), timeout=10
+      )
+
+      self.assertEqual(
+          call_order,
+          [
+              "train_step",
+              "save_checkpoint",
+              "sync_start",
+              "get_metrics",
+              "sync_done",
+          ],
+      )
+      self.assertEqual(pending_sync_at_metrics, [True])
+
+    asyncio.run(_run())
+
+  def test_get_metrics_multi_minibatch_defers_only_final_minibatch(self):
+    async def _run():
+      call_order = []
+      self.mock_algo.num_generations = 2
+      self.mock_algo.mini_batch_size = 2
+
+      async def mock_train_step(*args, apply_optimizer=False, **kwargs):
+        del args, kwargs
+        call_order.append(f"train_step(opt={apply_optimizer})")
+        return (
+            {"train_step": 1, "update_ready": True}
+            if apply_optimizer
+            else "queued"
+        )
+
+      async def mock_save_checkpoint(*args, **kwargs):
+        del args, kwargs
+        call_order.append("save_checkpoint")
+        return {"checkpoint_saved": True}
+
+      async def mock_sync_weights(*args, **kwargs):
+        del args, kwargs
+        call_order.append("sync_weights")
+        return 1
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        call_order.append("get_metrics")
+        return None
+
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.save_checkpoint.side_effect = mock_save_checkpoint
+      self.mock_engine.sync_weights.side_effect = mock_sync_weights
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      assembler = batch_assembly.PaddedBatchAssembler(
+          batch_size=2,
+          max_prompt_length=4,
+          max_response_length=4,
+          pad_id=0,
+          num_generations=2,
+          mini_batch_size=2,
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          batch_size=4,
+          reward_fns=[lambda *_: 1.0],
+          assembler=assembler,
+          sync_weights=True,
+          async_weight_sync=False,
+      )
+      program.engine = self.mock_engine
+
+      for group_idx in range(4):
+        for item_idx in range(2):
+          payload = datatypes.RLTrainerPayload(
+              prompt_ids=np.array([1, 2], dtype=np.int32),
+              prompt_mask=np.ones(2, dtype=np.float32),
+              completion_ids=np.array([3, 4], dtype=np.int32),
+              completion_mask=np.ones(2, dtype=np.float32),
+              advantages=np.ones(2, dtype=np.float32),
+          )
+          item = datatypes.TrajectoryItem(
+              group_index=item_idx,
+              prompt_id=f"prompt_{group_idx}",
+              start_step=0,
+              traj={"trajectory_reward": 1.0},
+          )
+          item.payload = payload
+          await program.scored_q.put(item)
+
+      await program.train_stage()
+
+      self.assertEqual(
+          call_order,
+          [
+              "train_step(opt=False)",
+              "train_step(opt=True)",
+              "get_metrics",
+              "train_step(opt=False)",
+              "train_step(opt=True)",
+              "save_checkpoint",
+              "sync_weights",
+              "get_metrics",
+          ],
+      )
+
+    asyncio.run(_run())
+
+  def test_get_metrics_time_is_reported_apart_from_policy_training_time(self):
+    async def _run():
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(0.2)
+        return None
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(sync_weights=True)
+      self.mock_engine.train_step.return_value = {
+          "train_step": 1,
+          "update_ready": True,
+      }
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      await program.run_async(self.mock_engine)
+
+      # The fetch now runs after the weight sync and commit, so booking it as
+      # policy training time would misplace it on any step timeline.
+      logger = program.metrics_logger
+      self.assertGreaterEqual(
+          logger.get_metric("orchestrator", "metrics_fetch_time", "train"),
+          0.2,
+      )
+      self.assertLess(
+          logger.get_metric("orchestrator", "policy_training_time", "train"),
+          0.2,
+      )
+
+    asyncio.run(_run())
+
+  def test_get_metrics_stays_ahead_of_the_checkpoint_without_update_ready(self):
+    """A trainer that cannot say its update landed keeps the fetch-first order."""
+
+    async def _run():
+      call_order = []
+
+      async def mock_train_step(*args, **kwargs):
+        del args, kwargs
+        call_order.append("train_step")
+        return {"train_step": 1}
+
+      async def mock_save_checkpoint(*args, **kwargs):
+        del args, kwargs
+        call_order.append("save_checkpoint")
+        return {"checkpoint_saved": True}
+
+      async def mock_sync_weights(*args, **kwargs):
+        del args, kwargs
+        call_order.append("sync_weights")
+        return 1
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        call_order.append("get_metrics")
+        await asyncio.sleep(0.2)
+        return None
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(sync_weights=True)
+      original_commit = program.scored_q.commit
+
+      def _recording_commit(*args, **kwargs):
+        call_order.append("commit")
+        return original_commit(*args, **kwargs)
+
+      program.scored_q.commit = _recording_commit
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.save_checkpoint.side_effect = mock_save_checkpoint
+      self.mock_engine.sync_weights.side_effect = mock_sync_weights
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      await program.run_async(self.mock_engine)
+
+      self.assertEqual(
+          call_order,
+          [
+              "train_step",
+              "get_metrics",
+              "save_checkpoint",
+              "sync_weights",
+              "commit",
+          ],
+      )
+      # It waits for the update, as an update RPC would: training time.
+      logger = program.metrics_logger
+      self.assertGreaterEqual(
+          logger.get_metric("orchestrator", "policy_training_time", "train"),
+          0.2,
+      )
+      self.assertEqual(
+          logger.get_metric("orchestrator", "metrics_fetch_time", "train"),
+          0.0,
+      )
+
+    asyncio.run(_run())
+
+  def test_round_stays_open_during_the_fetch_without_update_ready(self):
+    """With async sync, the fetch-first order still runs before the round is marked due."""
+
+    async def _run():
+      round_due_during_fetch = []
+
+      async def mock_sync_weights(
+          *args, policy_version=None, source_staged=None, **kwargs
+      ):
+        del args, kwargs
+        if source_staged is not None:
+          source_staged.set()
+        return policy_version or 1
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(sync_weights=True, async_weight_sync=True)
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        round_due_during_fetch.append(program._round_due)
+        return None
+
+      self.mock_engine.train_step.return_value = {"train_step": 1}
+      self.mock_engine.sync_weights.side_effect = mock_sync_weights
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10)
+
+      # Marking it due closes the rollout dispatch window, which a separate
+      # update RPC also left open until the fetch returned.
+      self.assertEqual(round_due_during_fetch, [False])
+
+    asyncio.run(_run())
+
+  def test_checkpoint_timestamp_is_taken_after_the_update_landed(self):
+    """The weight-update timestamp never precedes the call that waited for the update."""
+
+    async def _run(update_ready):
+      waited_until_ms = []
+
+      async def mock_train_step(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(0.05)
+        if update_ready:
+          waited_until_ms.append(time.time_ns() // 1_000_000)
+        return {"train_step": 1, "update_ready": update_ready}
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(0.05)
+        if not update_ready:
+          waited_until_ms.append(time.time_ns() // 1_000_000)
+        return None
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(sync_weights=True)
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      await program.run_async(self.mock_engine)
+
+      self.assertLen(waited_until_ms, 1)
+      self.assertGreaterEqual(
+          program.last_step_timestamp_ms, waited_until_ms[0]
+      )
+
+    for update_ready in (False, True):
+      with self.subTest(update_ready=update_ready):
+        asyncio.run(_run(update_ready))
+
+  def test_metrics_fetch_time_counts_only_the_deferred_fetch(self):
+    """In a two-minibatch step the mid-step fetch is training time, the deferred one is not."""
+
+    async def _run():
+      self.mock_algo.num_generations = 2
+      self.mock_algo.mini_batch_size = 2
+      fetch_delay_s = 0.2
+
+      async def mock_train_step(*args, apply_optimizer=False, **kwargs):
+        del args, kwargs
+        if apply_optimizer:
+          return {"train_step": 1, "update_ready": True}
+        return "queued"
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(fetch_delay_s)
+        return None
+
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      assembler = batch_assembly.PaddedBatchAssembler(
+          batch_size=2,
+          max_prompt_length=4,
+          max_response_length=4,
+          pad_id=0,
+          num_generations=2,
+          mini_batch_size=2,
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          batch_size=4,
+          reward_fns=[lambda *_: 1.0],
+          assembler=assembler,
+          sync_weights=True,
+          async_weight_sync=False,
+      )
+      program.engine = self.mock_engine
+      for group_idx in range(4):
+        for item_idx in range(2):
+          item = datatypes.TrajectoryItem(
+              group_index=item_idx,
+              prompt_id=f"prompt_{group_idx}",
+              start_step=0,
+              traj={"trajectory_reward": 1.0},
+          )
+          item.payload = datatypes.RLTrainerPayload(
+              prompt_ids=np.array([1, 2], dtype=np.int32),
+              prompt_mask=np.ones(2, dtype=np.float32),
+              completion_ids=np.array([3, 4], dtype=np.int32),
+              completion_mask=np.ones(2, dtype=np.float32),
+              advantages=np.ones(2, dtype=np.float32),
+          )
+          await program.scored_q.put(item)
+
+      await program.train_stage()
+
+      self.assertEqual(self.mock_engine.get_metrics.await_count, 2)
+      logger = program.metrics_logger
+      for name in ("policy_training_time", "metrics_fetch_time"):
+        value = logger.get_metric("orchestrator", name, "train")
+        self.assertGreaterEqual(value, fetch_delay_s, name)
+        self.assertLess(value, 2 * fetch_delay_s, name)
+
+    asyncio.run(_run())
+
+  def test_get_metrics_deferred_after_commit_with_async_weight_sync(self):
+    """With async weight sync too, the deferred fetch runs only after the commit."""
+
+    async def _run():
+      call_order = []
+
+      async def mock_train_step(*args, **kwargs):
+        del args, kwargs
+        call_order.append("train_step")
+        return {"train_step": 1, "update_ready": True}
+
+      async def mock_save_checkpoint(*args, **kwargs):
+        del args, kwargs
+        call_order.append("save_checkpoint")
+        return {"checkpoint_saved": True}
+
+      async def mock_sync_weights(
+          *args, policy_version=None, source_staged=None, **kwargs
+      ):
+        del args, kwargs
+        call_order.append("sync_start")
+        if source_staged is not None:
+          source_staged.set()
+        return policy_version or 1
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        call_order.append("get_metrics")
+        return None
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(sync_weights=True, async_weight_sync=True)
+      original_commit = program.scored_q.commit
+
+      def _recording_commit(*args, **kwargs):
+        call_order.append("commit")
+        return original_commit(*args, **kwargs)
+
+      program.scored_q.commit = _recording_commit
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.save_checkpoint.side_effect = mock_save_checkpoint
+      self.mock_engine.sync_weights.side_effect = mock_sync_weights
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10)
+
+      self.assertEqual(
+          call_order,
+          [
+              "train_step",
+              "save_checkpoint",
+              "sync_start",
+              "commit",
+              "get_metrics",
+          ],
+      )
 
     asyncio.run(_run())
 
@@ -3138,136 +3764,136 @@ class RLProgramTest(absltest.TestCase):
       self.assertIsNotNone(logger)
 
       # 1. Trainer Metrics (retrieved from TrainerWorker.get_metrics)
-      self.assertTrue(logger.metric_exists("", "trainer/loss", "train"))
+      self.assertTrue(logger.metric_exists("actor", "loss", "train"))
       self.assertAlmostEqual(
-          logger.get_metric("", "trainer/loss", "train"), 0.5
+          logger.get_metric("actor", "loss", "train"), 0.5
       )
-      self.assertTrue(logger.metric_exists("", "trainer/perplexity", "train"))
+      self.assertTrue(logger.metric_exists("actor", "perplexity", "train"))
       self.assertAlmostEqual(
-          logger.get_metric("", "trainer/perplexity", "train"),
+          logger.get_metric("actor", "perplexity", "train"),
           float(np.exp(0.5)),
           places=5,
       )
       self.assertTrue(
-          logger.metric_exists("", "trainer/learning_rate", "train")
+          logger.metric_exists("actor", "learning_rate", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "trainer/learning_rate", "train"), 1e-4
+          logger.get_metric("actor", "learning_rate", "train"), 1e-4
       )
-      self.assertTrue(logger.metric_exists("", "trainer/grad_norm", "train"))
+      self.assertTrue(logger.metric_exists("actor", "grad_norm", "train"))
       self.assertAlmostEqual(
-          logger.get_metric("", "trainer/grad_norm", "train"), 0.25
+          logger.get_metric("actor", "grad_norm", "train"), 0.25
       )
-      self.assertTrue(logger.metric_exists("", "trainer/kl", "train"))
-      self.assertAlmostEqual(logger.get_metric("", "trainer/kl", "train"), 0.02)
+      self.assertTrue(logger.metric_exists("actor", "kl", "train"))
+      self.assertAlmostEqual(logger.get_metric("actor", "kl", "train"), 0.02)
 
       # 2. Reward Metrics
-      self.assertTrue(logger.metric_exists("", "rewards/mean", "train"))
+      self.assertTrue(logger.metric_exists("rewards", "mean", "train"))
       self.assertAlmostEqual(
-          logger.get_metric("", "rewards/mean", "train"), 2.5
+          logger.get_metric("rewards", "mean", "train"), 2.5
       )
-      self.assertTrue(logger.metric_exists("", "rewards/std", "train"))
-      self.assertAlmostEqual(logger.get_metric("", "rewards/std", "train"), 0.0)
-      self.assertTrue(logger.metric_exists("", "rewards/min", "train"))
-      self.assertAlmostEqual(logger.get_metric("", "rewards/min", "train"), 2.5)
-      self.assertTrue(logger.metric_exists("", "rewards/max", "train"))
-      self.assertAlmostEqual(logger.get_metric("", "rewards/max", "train"), 2.5)
-      self.assertTrue(logger.metric_exists("", "rewards/sum", "train"))
-      self.assertAlmostEqual(logger.get_metric("", "rewards/sum", "train"), 5.0)
+      self.assertTrue(logger.metric_exists("rewards", "std", "train"))
+      self.assertAlmostEqual(logger.get_metric("rewards", "std", "train"), 0.0)
+      self.assertTrue(logger.metric_exists("rewards", "min", "train"))
+      self.assertAlmostEqual(logger.get_metric("rewards", "min", "train"), 2.5)
+      self.assertTrue(logger.metric_exists("rewards", "max", "train"))
+      self.assertAlmostEqual(logger.get_metric("rewards", "max", "train"), 2.5)
+      self.assertTrue(logger.metric_exists("rewards", "sum", "train"))
+      self.assertAlmostEqual(logger.get_metric("rewards", "sum", "train"), 5.0)
 
       # Advantage Metrics
       self.assertTrue(
-          logger.metric_exists("", "rewards/advantage/mean", "train")
+          logger.metric_exists("rewards", "advantage/mean", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rewards/advantage/mean", "train"), 1.0
+          logger.get_metric("rewards", "advantage/mean", "train"), 1.0
       )
       self.assertTrue(
-          logger.metric_exists("", "rewards/advantage/max", "train")
+          logger.metric_exists("rewards", "advantage/max", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rewards/advantage/max", "train"), 1.0
+          logger.get_metric("rewards", "advantage/max", "train"), 1.0
       )
       self.assertTrue(
-          logger.metric_exists("", "rewards/advantage/min", "train")
+          logger.metric_exists("rewards", "advantage/min", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rewards/advantage/min", "train"), 1.0
+          logger.get_metric("rewards", "advantage/min", "train"), 1.0
       )
       self.assertTrue(
-          logger.metric_exists("", "rewards/advantage/std", "train")
+          logger.metric_exists("rewards", "advantage/std", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rewards/advantage/std", "train"), 0.0
+          logger.get_metric("rewards", "advantage/std", "train"), 0.0
       )
       self.assertAlmostEqual(program.last_step_result.advantage_mean, 1.0)
       self.assertAlmostEqual(program.last_step_result.advantage_std, 0.0)
 
       # 3. Rollout Metrics (collected from RolloutWorker responses)
       self.assertTrue(
-          logger.metric_exists("", "rollout/prompt_length_mean", "train")
+          logger.metric_exists("rollout", "prompts/mean_length", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/prompt_length_mean", "train"), 2.0
+          logger.get_metric("rollout", "prompts/mean_length", "train"), 2.0
       )
       self.assertTrue(
-          logger.metric_exists("", "rollout/completion_length_mean", "train")
+          logger.metric_exists("rollout", "completions/mean_length", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/completion_length_mean", "train"), 2.0
+          logger.get_metric("rollout", "completions/mean_length", "train"), 2.0
       )
       self.assertTrue(
-          logger.metric_exists("", "rollout/total_tokens_mean", "train")
+          logger.metric_exists("rollout", "total_tokens_mean", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/total_tokens_mean", "train"), 4.0
+          logger.get_metric("rollout", "total_tokens_mean", "train"), 4.0
       )
 
-      self.assertTrue(logger.metric_exists("", "rollout/success_rate", "train"))
+      self.assertTrue(logger.metric_exists("rollout", "success_rate", "train"))
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/success_rate", "train"), 1.0
+          logger.get_metric("rollout", "success_rate", "train"), 1.0
       )
       self.assertTrue(
-          logger.metric_exists("", "rollout/staleness_mean", "train")
+          logger.metric_exists("rollout", "staleness_mean", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/staleness_mean", "train"), 0.0
+          logger.get_metric("rollout", "staleness_mean", "train"), 0.0
       )
       self.assertTrue(
-          logger.metric_exists("", "rollout/staleness_max", "train")
+          logger.metric_exists("rollout", "staleness_max", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/staleness_max", "train"), 0.0
+          logger.get_metric("rollout", "staleness_max", "train"), 0.0
       )
       self.assertTrue(
-          logger.metric_exists("", "rollout/staleness_min", "train")
+          logger.metric_exists("rollout", "staleness_min", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/staleness_min", "train"), 0.0
+          logger.get_metric("rollout", "staleness_min", "train"), 0.0
       )
 
       # 4. Orchestrator Metrics
       self.mock_engine.sync_weights.assert_not_called()
       self.assertTrue(
-          logger.metric_exists("", "orchestrator/policy_version", "train")
+          logger.metric_exists("orchestrator", "policy_version", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "orchestrator/policy_version", "train"), 0.0
+          logger.get_metric("orchestrator", "policy_version", "train"), 0.0
       )
       self.assertTrue(
-          logger.metric_exists("", "orchestrator/num_rollouts", "train")
+          logger.metric_exists("orchestrator", "num_rollouts", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "orchestrator/num_rollouts", "train"), 2.0
+          logger.get_metric("orchestrator", "num_rollouts", "train"), 2.0
       )
       self.assertTrue(
-          logger.metric_exists("", "orchestrator/num_microbatches", "train")
+          logger.metric_exists("orchestrator", "num_microbatches", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "orchestrator/num_microbatches", "train"), 1.0
+          logger.get_metric("orchestrator", "num_microbatches", "train"), 1.0
       )
       self.assertTrue(
-          logger.metric_exists("", "orchestrator/step_time_sec", "train")
+          logger.metric_exists("orchestrator", "step_time_sec", "train")
       )
 
     asyncio.run(_run())
@@ -3320,28 +3946,28 @@ class RLProgramTest(absltest.TestCase):
       logger = program.metrics_logger
       self.assertIsNotNone(logger)
       self.assertTrue(
-          logger.metric_exists("", "rewards/advantage/mean", "train")
+          logger.metric_exists("rewards", "advantage/mean", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rewards/advantage/mean", "train"), 0.5
+          logger.get_metric("rewards", "advantage/mean", "train"), 0.5
       )
       self.assertTrue(
-          logger.metric_exists("", "rewards/advantage/max", "train")
+          logger.metric_exists("rewards", "advantage/max", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rewards/advantage/max", "train"), 1.5
+          logger.get_metric("rewards", "advantage/max", "train"), 1.5
       )
       self.assertTrue(
-          logger.metric_exists("", "rewards/advantage/min", "train")
+          logger.metric_exists("rewards", "advantage/min", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rewards/advantage/min", "train"), -0.5
+          logger.get_metric("rewards", "advantage/min", "train"), -0.5
       )
       self.assertTrue(
-          logger.metric_exists("", "rewards/advantage/std", "train")
+          logger.metric_exists("rewards", "advantage/std", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rewards/advantage/std", "train"), 1.0
+          logger.get_metric("rewards", "advantage/std", "train"), 1.0
       )
       self.assertAlmostEqual(program.last_step_result.advantage_mean, 0.5)
       self.assertAlmostEqual(program.last_step_result.advantage_std, 1.0)
@@ -3418,16 +4044,16 @@ class RLProgramTest(absltest.TestCase):
 
       logger = program.metrics_logger
       self.assertTrue(
-          logger.metric_exists("actor_mesh", "rewards/mean", "eval")
+          logger.metric_exists("actor_mesh/rewards", "mean", "eval")
       )
       self.assertAlmostEqual(
-          logger.get_metric("actor_mesh", "rewards/mean", "eval"), 3.0
+          logger.get_metric("actor_mesh/rewards", "mean", "eval"), 3.0
       )
       self.assertTrue(
-          logger.metric_exists("actor_mesh", "trainer/loss", "eval")
+          logger.metric_exists("actor_mesh/actor", "loss", "eval")
       )
       self.assertAlmostEqual(
-          logger.get_metric("actor_mesh", "trainer/loss", "eval"), 0.2
+          logger.get_metric("actor_mesh/actor", "loss", "eval"), 0.2
       )
 
     asyncio.run(_run())
@@ -3497,16 +4123,16 @@ class RLProgramTest(absltest.TestCase):
 
       logger = program.metrics_logger
       self.assertTrue(
-          logger.metric_exists("", "rollout/staleness_mean", "train")
+          logger.metric_exists("rollout", "staleness_mean", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/staleness_mean", "train"), 2.0
+          logger.get_metric("rollout", "staleness_mean", "train"), 2.0
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/staleness_max", "train"), 2.0
+          logger.get_metric("rollout", "staleness_max", "train"), 2.0
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/staleness_min", "train"), 2.0
+          logger.get_metric("rollout", "staleness_min", "train"), 2.0
       )
 
     asyncio.run(_run())
@@ -3557,13 +4183,13 @@ class RLProgramTest(absltest.TestCase):
 
       logger = program.metrics_logger
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/prompt_length_mean", "train"), 4.0
+          logger.get_metric("rollout", "prompts/mean_length", "train"), 4.0
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/completion_length_mean", "train"), 6.0
+          logger.get_metric("rollout", "completions/mean_length", "train"), 6.0
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/total_tokens_mean", "train"), 10.0
+          logger.get_metric("rollout", "total_tokens_mean", "train"), 10.0
       )
 
     asyncio.run(_run())
@@ -3618,13 +4244,13 @@ class RLProgramTest(absltest.TestCase):
 
       logger = program.metrics_logger
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/prompt_length_mean", "train"), 2.0
+          logger.get_metric("rollout", "prompts/mean_length", "train"), 2.0
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/completion_length_mean", "train"), 3.0
+          logger.get_metric("rollout", "completions/mean_length", "train"), 3.0
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/total_tokens_mean", "train"), 5.0
+          logger.get_metric("rollout", "total_tokens_mean", "train"), 5.0
       )
 
     asyncio.run(_run())
@@ -3654,10 +4280,74 @@ class RLProgramTest(absltest.TestCase):
 
       logger = program.metrics_logger
       self.assertFalse(
-          logger.metric_exists("", "rollout/success_rate", "train")
+          logger.metric_exists("rollout", "success_rate", "train")
       )
 
     asyncio.run(_run())
+
+  def test_trainer_aux_metrics_split_into_actor_sampler_is_and_sampler_is_attr_tabs(
+      self,
+  ):
+    program = self._create_program()
+    program.metrics_logger = mock.MagicMock()
+    program._collect_and_log_step_metrics(
+        all_step_items=[],
+        step_rewards=[],
+        trainer_metrics={
+            "weighted_metrics": {
+                "loss": 0.4,
+                "pg_clipfrac": 0.1,
+                "sample_mask/kept_frac": 0.875,
+                "sample_mask/mult_prob_error_mean": 1.05,
+            },
+            "scalar_metrics": {
+                "learning_rate": 1e-6,
+                "grad_norm": 0.25,
+                "sample_mask/mult_prob_error_max": 1.4,
+                "tis/is_oob_ratio": 0.02,
+                "sampler_is/token_logdiff_absmean": 0.03,
+                "sampler_is/seq_geomean_mean": 0.999,
+                "sampler_is/hist_frac/[-0.01,0.01)": 0.92,
+                "sampler_is/pos_signed/0": -0.001,
+                "sampler_is/conf_frac/0": 0.5,
+                "sampler_is/lenscale/0_1024_mean": 0.01,
+            },
+        },
+        num_rollouts=0,
+        num_microbatches=1,
+        padding_stats=[],
+        packing_time_sec=0.0,
+        step_time_sec=1.0,
+        consumed_policy_version=0,
+        log_step=0,
+    )
+    logged = {
+        f"{call.args[0]}/{call.args[3]}/{call.args[1]}": call.args[2]
+        for call in program.metrics_logger.log.call_args_list
+    }
+    self.assertAlmostEqual(logged["actor/train/loss"], 0.4)
+    self.assertAlmostEqual(logged["actor/train/pg_clipfrac"], 0.1)
+    self.assertAlmostEqual(logged["actor/train/sample_mask/kept_frac"], 0.875)
+    self.assertAlmostEqual(
+        logged["actor/train/sample_mask/mult_prob_error_mean"], 1.05
+    )
+    self.assertAlmostEqual(
+        logged["actor/train/sample_mask/mult_prob_error_max"], 1.4
+    )
+    self.assertAlmostEqual(logged["actor/train/tis/is_oob_ratio"], 0.02)
+    self.assertAlmostEqual(
+        logged["sampler_is/train/token_logdiff_absmean"], 0.03
+    )
+    self.assertAlmostEqual(logged["sampler_is/train/seq_geomean_mean"], 0.999)
+    self.assertAlmostEqual(
+        logged["sampler_is_attr/train/hist_frac/[-0.01,0.01)"], 0.92
+    )
+    self.assertAlmostEqual(logged["sampler_is_attr/train/pos_signed/0"], -0.001)
+    self.assertAlmostEqual(logged["sampler_is_attr/train/conf_frac/0"], 0.5)
+    self.assertAlmostEqual(
+        logged["sampler_is_attr/train/lenscale/0_1024_mean"], 0.01
+    )
+    program.close()
 
   def test_nested_dict_metrics_buffer_ingestion(self):
     async def _run():
@@ -3675,12 +4365,12 @@ class RLProgramTest(absltest.TestCase):
 
       logger = program.metrics_logger
       self.assertAlmostEqual(
-          logger.get_metric("", "trainer/loss", "train"), 0.35
+          logger.get_metric("actor", "loss", "train"), 0.35
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "trainer/learning_rate", "train"), 5e-5
+          logger.get_metric("actor", "learning_rate", "train"), 5e-5
       )
-      self.assertAlmostEqual(logger.get_metric("", "trainer/kl", "train"), 0.01)
+      self.assertAlmostEqual(logger.get_metric("actor", "kl", "train"), 0.01)
 
     asyncio.run(_run())
 
@@ -3737,11 +4427,11 @@ class RLProgramTest(absltest.TestCase):
 
       logger = program.metrics_logger
       self.assertTrue(
-          logger.metric_exists("", "rollout/num_turns_mean", "train")
+          logger.metric_exists("rollout", "num_turns_mean", "train")
       )
       # (2 + 4) / 2 = 3.0
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/num_turns_mean", "train"), 3.0
+          logger.get_metric("rollout", "num_turns_mean", "train"), 3.0
       )
 
     asyncio.run(_run())
@@ -3877,14 +4567,18 @@ class RLProgramTest(absltest.TestCase):
         logged_dicts = [call.args[0] for call in mock_wandb.log.call_args_list]
         logged_keys = {k for d in logged_dicts for k in d.keys()}
 
-        self.assertIn("train/trainer/loss", logged_keys)
-        self.assertIn("train/trainer/learning_rate", logged_keys)
-        self.assertIn("train/rewards/mean", logged_keys)
-        self.assertIn("train/rewards/advantage/abs_mean", logged_keys)
-        self.assertIn("train/rewards/advantage/nonzero_frac", logged_keys)
-        self.assertIn("train/rollout/prompt_length_mean", logged_keys)
-        self.assertIn("train/rollout/staleness_mean", logged_keys)
-        self.assertIn("train/orchestrator/policy_version", logged_keys)
+        self.assertIn("actor/train/loss", logged_keys)
+        self.assertIn("actor/train/learning_rate", logged_keys)
+        self.assertIn("rewards/train/mean", logged_keys)
+        self.assertIn("rewards/train/advantage/abs_mean", logged_keys)
+        self.assertIn("rewards/train/advantage/nonzero_frac", logged_keys)
+        self.assertIn("rollout/train/prompts/mean_length", logged_keys)
+        self.assertIn("rollout/train/completions/mean_length", logged_keys)
+        self.assertIn("rollout/train/total_tokens_mean", logged_keys)
+        self.assertIn("rollout/train/staleness_mean", logged_keys)
+        self.assertIn("perf/train/global_step_time", logged_keys)
+        self.assertIn("orchestrator/train/policy_version", logged_keys)
+        self.assertFalse(any(k.startswith("generation/") for k in logged_keys))
 
         # Verify wandb.finish was called on close
         mock_wandb.finish.assert_called_once()
@@ -4353,10 +5047,10 @@ class RLProgramTest(absltest.TestCase):
       self.mock_engine.per_token_logps.assert_awaited()
       logger = program.metrics_logger
       self.assertTrue(
-          logger.metric_exists("", "sampler_trainer/logp_diff_mean", "train")
+          logger.metric_exists("sampler_trainer", "logp_diff_mean", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "sampler_trainer/logp_diff_mean", "train"),
+          logger.get_metric("sampler_trainer", "logp_diff_mean", "train"),
           0.15,
           places=5,
       )
@@ -4512,13 +5206,13 @@ class RLProgramTest(absltest.TestCase):
     )
     logger = program.metrics_logger
     self.assertTrue(
-        logger.metric_exists("", "sampler_trainer/logp_diff_mean", "train")
+        logger.metric_exists("sampler_trainer", "logp_diff_mean", "train")
     )
     self.assertAlmostEqual(
-        logger.get_metric("", "sampler_trainer/logp_diff_mean", "train"), 0.3
+        logger.get_metric("sampler_trainer", "logp_diff_mean", "train"), 0.3
     )
     self.assertAlmostEqual(
-        logger.get_metric("", "sampler_trainer/logp_diff_max", "train"), 0.9
+        logger.get_metric("sampler_trainer", "logp_diff_max", "train"), 0.9
     )
 
   def test_partial_rollout_fraction_metric_logged(self):
@@ -4554,10 +5248,10 @@ class RLProgramTest(absltest.TestCase):
     )
     logger = program.metrics_logger
     self.assertTrue(
-        logger.metric_exists("", "rollout/partial_rollout_fraction", "train")
+        logger.metric_exists("rollout", "partial_rollout_fraction", "train")
     )
     self.assertAlmostEqual(
-        logger.get_metric("", "rollout/partial_rollout_fraction", "train"), 0.5
+        logger.get_metric("rollout", "partial_rollout_fraction", "train"), 0.5
     )
 
   def test_trajectory_logger_initialization(self):
@@ -4683,7 +5377,7 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_critique_stage_evaluates_unmasked_max_steps_and_skips_timeout(
+  def test_critique_stage_evaluates_unmasked_max_steps_and_timeout(
       self,
   ):
     async def _run():
@@ -4724,13 +5418,13 @@ class RLProgramTest(absltest.TestCase):
 
       await program.critique_stage()
 
-      # MAX_STEPS_REACHED with non-zero masks (overlong_filter=False) is valid
-      # and scored, whereas TIMEOUT is always invalid and skipped.
-      self.assertEqual(reward_fn.call_count, 1)
+      # MAX_STEPS_REACHED with non-zero masks (overlong_filter=False) and an
+      # episode TIMEOUT are both valid samples and are scored.
+      self.assertEqual(reward_fn.call_count, 2)
       rewards = self.mock_algo.create_trainer_payloads.call_args.kwargs[
           "rewards"
       ]
-      self.assertEqual(rewards, [0.75, 0.0])
+      self.assertEqual(rewards, [0.75, 0.75])
       program.close()
 
     asyncio.run(_run())
@@ -4770,11 +5464,11 @@ class RLProgramTest(absltest.TestCase):
 
     logger = program.metrics_logger
     self.assertAlmostEqual(
-        logger.get_metric("", "rollout/invalid_trajectory_frac", "train"), 0.5
+        logger.get_metric("rollout", "invalid_trajectory_frac", "train"), 0.5
     )
     # Reward metrics reflect only valid trajectories.
-    self.assertAlmostEqual(logger.get_metric("", "rewards/mean", "train"), 1.0)
-    self.assertFalse(logger.metric_exists("", "rewards/valid_mean", "train"))
+    self.assertAlmostEqual(logger.get_metric("rewards", "mean", "train"), 1.0)
+    self.assertFalse(logger.metric_exists("rewards", "valid_mean", "train"))
     program.close()
 
   def test_collect_and_log_step_metrics_skips_rewards_when_all_invalid(self):
@@ -4801,9 +5495,9 @@ class RLProgramTest(absltest.TestCase):
 
     logger = program.metrics_logger
     self.assertAlmostEqual(
-        logger.get_metric("", "rollout/invalid_trajectory_frac", "train"), 1.0
+        logger.get_metric("rollout", "invalid_trajectory_frac", "train"), 1.0
     )
-    self.assertFalse(logger.metric_exists("", "rewards/mean", "train"))
+    self.assertFalse(logger.metric_exists("rewards", "mean", "train"))
     program.close()
 
   def test_collect_and_log_step_metrics_logs_filtered_groups_metrics(self):
@@ -4832,10 +5526,10 @@ class RLProgramTest(absltest.TestCase):
 
     logger = program.metrics_logger
     self.assertEqual(
-        logger.get_metric("", "rollout/filtered_groups_count", "train"), 2
+        logger.get_metric("rollout", "filtered_groups_count", "train"), 2
     )
     self.assertEqual(
-        logger.get_metric("", "rollout/filtered_trajectories_count", "train"), 3
+        logger.get_metric("rollout", "filtered_trajectories_count", "train"), 3
     )
     self.assertEqual(metrics_summary["filtered_groups_count"], 2)
     self.assertEqual(metrics_summary["filtered_trajectories_count"], 3)
@@ -4881,10 +5575,10 @@ class RLProgramTest(absltest.TestCase):
       # Verify metric was logged
       logger = program.metrics_logger
       self.assertEqual(
-          logger.get_metric("", "rollout/filtered_groups_count", "train"), 1
+          logger.get_metric("rollout", "filtered_groups_count", "train"), 1
       )
       self.assertEqual(
-          logger.get_metric("", "rollout/filtered_trajectories_count", "train"), 1
+          logger.get_metric("rollout", "filtered_trajectories_count", "train"), 1
       )
       program.close()
 
@@ -4935,10 +5629,10 @@ class RLProgramTest(absltest.TestCase):
       )
       logger = program.metrics_logger
       self.assertAlmostEqual(
-          logger.get_metric("", "rollout/invalid_trajectory_frac", "train"), 0.5
+          logger.get_metric("rollout", "invalid_trajectory_frac", "train"), 0.5
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rewards/mean", "train"), 1.0
+          logger.get_metric("rewards", "mean", "train"), 1.0
       )
       program.close()
 
@@ -5014,7 +5708,7 @@ class RLProgramTest(absltest.TestCase):
           program.last_step_result.advantage_std, 0.75, places=5
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "rewards/advantage/abs_mean", "train"),
+          logger.get_metric("rewards", "advantage/abs_mean", "train"),
           0.75,
           places=5,
       )
@@ -5337,8 +6031,8 @@ class GenerationMetricsTest(absltest.TestCase):
         _traj_item([1, 2], clipped=False, raw_length=2),
     ]])
 
-    self.assertEqual(metrics["generation/completions/clip_ratio"], 0.5)
-    self.assertEqual(metrics["generation/completions/mean_raw_length"], 2.5)
+    self.assertEqual(metrics["rollout/completions/clip_ratio"], 0.5)
+    self.assertEqual(metrics["rollout/completions/mean_raw_length"], 2.5)
 
   def test_ignores_annotations_in_traj_dict(self):
     # Enforces Zero-Redundancy contract: annotations must be read strictly
@@ -5364,8 +6058,8 @@ class GenerationMetricsTest(absltest.TestCase):
         _traj_item([], clipped=False, raw_length=0),
     ]])
 
-    self.assertEqual(metrics["generation/completions/clip_ratio"], 0.5)
-    self.assertEqual(metrics["generation/completions/min_raw_length"], 0.0)
+    self.assertEqual(metrics["rollout/completions/clip_ratio"], 0.5)
+    self.assertEqual(metrics["rollout/completions/min_raw_length"], 0.0)
 
   def test_unannotated_items_do_not_join_the_denominator(self):
     # Mixed groups are not expected in practice, but an unannotated rollout
@@ -5375,8 +6069,8 @@ class GenerationMetricsTest(absltest.TestCase):
         _traj_item([1, 2, 3, 4]),
     ]])
 
-    self.assertEqual(metrics["generation/completions/clip_ratio"], 1.0)
-    self.assertEqual(metrics["generation/completions/mean_raw_length"], 4.0)
+    self.assertEqual(metrics["rollout/completions/clip_ratio"], 1.0)
+    self.assertEqual(metrics["rollout/completions/mean_raw_length"], 4.0)
 
   def test_half_annotated_item_is_skipped_not_raised(self):
     # A producer that wrote one key and not the other is a bug, but it must
@@ -5388,8 +6082,8 @@ class GenerationMetricsTest(absltest.TestCase):
         [[half, _traj_item([1, 2], clipped=False, raw_length=2)]]
     )
 
-    self.assertEqual(metrics["generation/completions/clip_ratio"], 0.0)
-    self.assertEqual(metrics["generation/completions/mean_raw_length"], 2.0)
+    self.assertEqual(metrics["rollout/completions/clip_ratio"], 0.0)
+    self.assertEqual(metrics["rollout/completions/mean_raw_length"], 2.0)
 
   def test_returns_empty_without_annotations(self):
     payload_only = datatypes.TrajectoryItem(prompt_id="p", traj={})
@@ -5407,9 +6101,9 @@ class GenerationMetricsTest(absltest.TestCase):
         [[_traj_item([1, 2], clipped=np.True_, raw_length=np.int64(2))]]
     )
 
-    self.assertIsInstance(metrics["generation/completions/clip_ratio"], float)
-    self.assertEqual(metrics["generation/completions/clip_ratio"], 1.0)
-    self.assertEqual(metrics["generation/completions/mean_raw_length"], 2.0)
+    self.assertIsInstance(metrics["rollout/completions/clip_ratio"], float)
+    self.assertEqual(metrics["rollout/completions/clip_ratio"], 1.0)
+    self.assertEqual(metrics["rollout/completions/mean_raw_length"], 2.0)
 
   def test_each_metric_uses_its_own_reduce_op(self):
     metrics = rl_program._generation_metrics([
@@ -5426,10 +6120,10 @@ class GenerationMetricsTest(absltest.TestCase):
     self.assertEqual(
         metrics,
         {
-            "generation/completions/clip_ratio": 0.25,
-            "generation/completions/mean_raw_length": 15.0,
-            "generation/completions/max_raw_length": 30.0,
-            "generation/completions/min_raw_length": 8.0,
+            "rollout/completions/clip_ratio": 0.25,
+            "rollout/completions/mean_raw_length": 15.0,
+            "rollout/completions/max_raw_length": 30.0,
+            "rollout/completions/min_raw_length": 8.0,
         },
     )
 
@@ -5445,7 +6139,7 @@ class GenerationMetricsTest(absltest.TestCase):
 
     metrics = rl_program._generation_metrics([group_a, group_b])
 
-    self.assertEqual(metrics["generation/completions/clip_ratio"], 0.625)
+    self.assertEqual(metrics["rollout/completions/clip_ratio"], 0.625)
 
 
 class GenerationMetricsLoggingTest(absltest.TestCase):
@@ -5483,7 +6177,7 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
         log_step=0,
     )
     return {
-        call.args[1]: call.args[2]
+        f"{call.args[0]}/{call.args[1]}": call.args[2]
         for call in program.metrics_logger.log.call_args_list
     }
 
@@ -5496,14 +6190,14 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
 
     logged = self._log_metrics(computed)
 
-    self.assertEqual(logged["generation/completions/clip_ratio"], 1.0)
-    self.assertEqual(logged["generation/completions/max_raw_length"], 2.0)
+    self.assertEqual(logged["rollout/completions/clip_ratio"], 1.0)
+    self.assertEqual(logged["rollout/completions/max_raw_length"], 2.0)
 
   def test_no_metrics_logs_no_generation_metrics(self):
     logged = self._log_metrics({})
 
     self.assertEmpty(
-        [k for k in logged if k.startswith("generation/completions/")]
+        [k for k in logged if k.startswith("rollout/completions/")]
     )
 
 

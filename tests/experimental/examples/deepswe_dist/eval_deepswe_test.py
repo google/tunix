@@ -29,6 +29,7 @@ import types
 import unittest
 from unittest import mock
 
+from tunix.utils import math_utils
 from tunix.utils import maxtext_utils
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -193,6 +194,28 @@ class EvalTest(unittest.TestCase):
     self.assertNotIn("seed", first["generation_kwargs"])
     self.assertNotIn("seed", second["generation_kwargs"])
     self.assertEqual(eval_lib.model_profile(a)["seed"], 0)
+    self.assertEqual(math_utils.replica_seed(a), 0)
+    self.assertEqual(
+        math_utils.replica_seed(
+            self.args("--worker_id", "job-eval-0", "--seed", "42")
+        ),
+        42,
+    )
+    rep15 = self.args("--worker_id", "job-eval-15", "--seed", "42")
+    self.assertEqual(math_utils.replica_seed(rep15), 57)
+    self.assertEqual(eval_lib.model_profile(rep15)["seed"], 42)
+    self.assertEqual(
+        math_utils.replica_seed(
+            self.args("--worker_id", "job-eval", "--seed", "42")
+        ),
+        42,
+    )
+    self.assertEqual(
+        math_utils.replica_seed(
+            self.args("--worker_id", "job-eval-5", "--seed", str(2**32 - 2))
+        ),
+        3,
+    )
     self.assertNotEqual(first["request_id"], second["request_id"])
     self.assertIsNone(first["max_response_length"])
     self.assertEqual(first["generation_kwargs"]["max_generation_steps"], 12288)
@@ -208,6 +231,16 @@ class EvalTest(unittest.TestCase):
     self.assertEqual(req["max_response_length"], 61440)
     self.assertIsNone(req["generation_kwargs"]["top_k"])
     self.assertEqual(with_limits.batch_size, 16)
+
+    launcher_text = (RECIPE / "k8s_launcher.sh").read_text()
+    eval_start = launcher_text.index("python3 -u ${eval_cmd}")
+    eval_cmd = launcher_text[
+        eval_start : launcher_text.index('\n      "\n', eval_start)
+    ]
+    self.assertIn("--worker_id=${replica_id}", eval_cmd)
+    self.assertIn("--seed=${SEED}", eval_cmd)
+    worker_text = (RECIPE / "eval_worker.py").read_text()
+    self.assertIn('"seed": math_utils.replica_seed(a)', worker_text)
 
   def test_limited_remote_dataset_streams_and_uses_image_identity(self):
     entry = self.entry()
@@ -466,18 +499,52 @@ class RpcTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_missing_reply_has_deadline(self):
     a = eval_lib.parse_args(["--model_absolute_path", "gs://models/0/items"])
-    fields = eval_lib.request_fields(
+    fields0 = eval_lib.request_fields(
         a, {"instance_id": "a", "problem_statement": "p"}, 0, 0
     )
-    handle = types.SimpleNamespace(
-        dispatch_task=mock.AsyncMock(return_value=fields["request_id"]),
-        poll_responses=mock.AsyncMock(return_value=None),
+    fields1 = eval_lib.request_fields(
+        a, {"instance_id": "b", "problem_statement": "p"}, 1, 0
     )
-    with mock.patch.object(eval_lib.time, "monotonic", side_effect=[0, 20]):
-      with self.assertRaises(TimeoutError):
-        await eval_lib.evaluate_worker(
-            handle, iter([fields]), 1, 10, lambda r: None
-        )
+    late_reply = types.SimpleNamespace(
+        request_id=fields0["request_id"],
+        unwrap=lambda: dict(reward=1.0, resolved=True, status="SUCCEEDED", error=None),
+    )
+    ok_reply = types.SimpleNamespace(
+        request_id=fields1["request_id"],
+        unwrap=lambda: dict(reward=1.0, resolved=True, status="SUCCEEDED", error=None),
+    )
+    handle = types.SimpleNamespace(
+        dispatch_task=mock.AsyncMock(
+            side_effect=[fields0["request_id"], fields1["request_id"]]
+        ),
+        poll_responses=mock.AsyncMock(
+            side_effect=[None, late_reply, ok_reply]
+        ),
+    )
+    written = []
+    real_monotonic = eval_lib.time.monotonic
+    calls = 0
+
+    def fake_monotonic():
+      nonlocal calls
+      calls += 1
+      if calls == 1:
+        return 0.0
+      return 20.0 + real_monotonic()
+
+    with mock.patch.object(eval_lib.time, "monotonic", side_effect=fake_monotonic):
+      rows = await eval_lib.evaluate_worker(
+          handle, iter([fields0, fields1]), 1, 10, written.append
+      )
+    self.assertEqual(len(rows), 2)
+    self.assertEqual(rows[0]["request_id"], fields0["request_id"])
+    self.assertEqual(rows[0]["status"], "TIMEOUT")
+    self.assertEqual(rows[0]["reward"], 0.0)
+    self.assertFalse(rows[0]["resolved"])
+    self.assertIsNone(rows[0]["error"])
+    self.assertEqual(rows[1]["request_id"], fields1["request_id"])
+    self.assertEqual(rows[1]["status"], "SUCCEEDED")
+    self.assertTrue(rows[1]["resolved"])
 
 
 if __name__ == "__main__":

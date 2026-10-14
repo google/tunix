@@ -35,10 +35,12 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Job Identification & Cloud Storage ---
 export JOB_PREFIX="${JOB_PREFIX:-${USER}-$(date +%Y%m%d-%H%M%S)}"
+export BUCKET="${BUCKET:-gs://atwigg-trellis-europe-west4-dev}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-gsm8k-35b-256}"
-export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-europe-west4-dev/maxtext/${JOB_PREFIX}}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}}"
+export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-${BUCKET}/maxtext/${JOB_PREFIX}}"
+export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${BUCKET}/trajectories/${JOB_PREFIX}}"
+export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-${BUCKET}/trajectories/${JOB_PREFIX}/store}}"
 export ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-20000}"
 export ROLLOUT_PORT="${ROLLOUT_PORT:-20001}"
 export TRAINER_PORT="${TRAINER_PORT:-20002}"
@@ -50,12 +52,11 @@ export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/atwigg/trellis-
 export PROJECT="${PROJECT:-cloud-tpu-shared-capacity}"
 export REGION="${REGION:-europe-west4}"
 export CLUSTER="${CLUSTER:-bodaborg-v5p-nap}"
+export K8S_NAMESPACE="${K8S_NAMESPACE:-trellis}"
 if [[ "${DRY_RUN:-false}" != "true" ]]; then
   kubectl config use-context "gke_${PROJECT}_${REGION}_${CLUSTER}" || true
-  kubectl config set-context --current --namespace=trellis || true
+  kubectl config set-context --current --namespace="${K8S_NAMESPACE}" || true
 fi
-
-export K8S_NAMESPACE="${K8S_NAMESPACE:-trellis}"
 export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
 export KUEUE_QUEUE_NAME="${KUEUE_QUEUE_NAME:-${KUEUE_QUEUE}}"
 export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
@@ -88,6 +89,9 @@ export MAXTEXT_MODEL_NAME="${MAXTEXT_MODEL_NAME:-qwen3.5-35b-a3b}"
 
 export RETURN_ROUTED_EXPERTS="${RETURN_ROUTED_EXPERTS:-false}"
 
+# Rollout attention kernel (USE_BATCHED_RPA_LONG_CTX_KERNEL -> ROLLOUT_MAXTEXT_ATTENTION); see rollout_attention.sh.
+source "${DIR}/rollout_attention.sh"
+
 if [[ "${MAXTEXT_MODEL_NAME}" == "qwen3-0.6b" || "${MODEL_NAME}" == "Qwen3-0.6B" ]]; then
   export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://maxtext-model-checkpoints/qwen3-0.6b/2025-10-27/scanned/0/items}"
   export TRAINER_BASE_NUM_KV_HEADS="${TRAINER_BASE_NUM_KV_HEADS:-8}"
@@ -98,7 +102,7 @@ if [[ "${MAXTEXT_MODEL_NAME}" == "qwen3-0.6b" || "${MODEL_NAME}" == "Qwen3-0.6B"
   export VLLM_ENABLE_EXPERT_PARALLEL="${VLLM_ENABLE_EXPERT_PARALLEL:-false}"
   export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-0}"
   if [[ -z "${VLLM_ADDITIONAL_CONFIG:-}" ]]; then
-    export VLLM_ADDITIONAL_CONFIG='{"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":false}}'
+    export VLLM_ADDITIONAL_CONFIG='{"maxtext_config":{"scan_layers":false,"attention":"'"${ROLLOUT_MAXTEXT_ATTENTION}"'","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":false}}'
   fi
   export TRAINABLE_PARAMETERS_MASK="${TRAINABLE_PARAMETERS_MASK:-.*}"
 else
@@ -108,7 +112,7 @@ else
   export VLLM_ENABLE_EXPERT_PARALLEL="${VLLM_ENABLE_EXPERT_PARALLEL:-true}"
   export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-0}"
   if [[ -z "${VLLM_ADDITIONAL_CONFIG:-}" ]]; then
-    export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":4,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
+    export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":4,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"'"${ROLLOUT_MAXTEXT_ATTENTION}"'","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
   fi
 fi
 
@@ -175,15 +179,31 @@ fi
 # Rollout Worker Environment Flags (Optimizations & Runtime Settings)
 # ==============================================================================
 export NUM_PRECOMPILE_WORKERS="${NUM_PRECOMPILE_WORKERS:-8}"
+export SKIP_JAX_PRECOMPILE="${SKIP_JAX_PRECOMPILE:-1}"
+export SAVE_JAX_CACHE="${SAVE_JAX_CACHE:-true}"
 export NEW_MODEL_DESIGN="${NEW_MODEL_DESIGN:-1}"
 export ATTN_BUCKETIZED_NUM_REQS="${ATTN_BUCKETIZED_NUM_REQS:-true}"
 export ATTN_CUSTOM_NUM_REQS_BUCKETS="${ATTN_CUSTOM_NUM_REQS_BUCKETS:-4}"
-export ONEHOT_MOE_PERMUTE_THRESHOLD="${ONEHOT_MOE_PERMUTE_THRESHOLD:-32768}"
+export ONEHOT_MOE_PERMUTE_THRESHOLD="${ONEHOT_MOE_PERMUTE_THRESHOLD:-2048}"
+export RAGGED_GATHER_REDUCE_VERSION="${RAGGED_GATHER_REDUCE_VERSION:-v3}"
 export VLLM_MOE_CHUNK_SIZE="${VLLM_MOE_CHUNK_SIZE:-256}"
 export SLICE_ROPE_CACHE="${SLICE_ROPE_CACHE:-1}"
 export DP_SCHED_BATCH_PREFILL="${DP_SCHED_BATCH_PREFILL:-false}"
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false}"
 export VLLM_ENABLE_V1_MULTIPROCESSING="${VLLM_ENABLE_V1_MULTIPROCESSING:-0}"
+
+# Phased inference profiling (vLLM / tpu-inference)
+# Disabled by default (PHASED_PROFILING_DIR="" in tpu-inference). Only active when PROFILE_SAMPLER=true.
+export PROFILE_SAMPLER="${PROFILE_SAMPLER:-false}"
+if [[ "${PROFILE_SAMPLER}" == "true" || "${PROFILE_SAMPLER}" == "True" || "${PROFILE_SAMPLER}" == "1" ]]; then
+  export PHASED_PROFILING_DIR="${PHASED_PROFILING_DIR:-${MAXTEXT_OUTPUT_DIR:+${MAXTEXT_OUTPUT_DIR}/inference_profiles}}"
+  export PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR="${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:-3}"
+  export PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP="${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:-10}"
+else
+  export PHASED_PROFILING_DIR="${PHASED_PROFILING_DIR:-}"
+  export PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR="${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:-}"
+  export PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP="${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:-}"
+fi
 
 # ==============================================================================
 # Hyperparameters & Loss Configuration
@@ -243,6 +263,7 @@ export COMPUTE_LOGPS_CHUNK_SIZE="${COMPUTE_LOGPS_CHUNK_SIZE:-512}"
 
 export EPISODE_TIMEOUT_SECS="${EPISODE_TIMEOUT_SECS:-1800}"
 export DEBUG="${DEBUG:-1}"
+export TUNIX_DEBUG_INFERENCE_LOGS="${TUNIX_DEBUG_INFERENCE_LOGS:-true}"
 
 # ==============================================================================
 # GSM8K Dataset & Sequence Parameters (No Sandboxing)
@@ -271,7 +292,7 @@ ROLLOUT_RAIDEN_ENV=""
 if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
   ROLLOUT_RAIDEN_ENV="USE_RAIDEN_FFI=false RAIDEN_USE_FFI=0"
 fi
-export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-} PYTHONUNBUFFERED=1 TUNIX_IS_INTERNAL_ENV=false RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP} ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_MESH_TP} ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING} VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS} VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION} NUM_PRECOMPILE_WORKERS=${NUM_PRECOMPILE_WORKERS} NEW_MODEL_DESIGN=${NEW_MODEL_DESIGN} ATTN_BUCKETIZED_NUM_REQS=${ATTN_BUCKETIZED_NUM_REQS} ATTN_CUSTOM_NUM_REQS_BUCKETS=${ATTN_CUSTOM_NUM_REQS_BUCKETS} ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD} VLLM_MOE_CHUNK_SIZE=${VLLM_MOE_CHUNK_SIZE} SLICE_ROPE_CACHE=${SLICE_ROPE_CACHE} DP_SCHED_BATCH_PREFILL=${DP_SCHED_BATCH_PREFILL} VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING} VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL} LIBTPU_INIT_ARGS=\"${LIBTPU_INIT_ARGS}\" ${ROLLOUT_RAIDEN_ENV}"
+export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-} PYTHONUNBUFFERED=1 TUNIX_IS_INTERNAL_ENV=false USE_BATCHED_RPA_LONG_CTX_KERNEL=${USE_BATCHED_RPA_LONG_CTX_KERNEL} RAGGED_GATHER_REDUCE_VERSION=${RAGGED_GATHER_REDUCE_VERSION} RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP} ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_MESH_TP} ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING} VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS} VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION} NUM_PRECOMPILE_WORKERS=${NUM_PRECOMPILE_WORKERS} NEW_MODEL_DESIGN=${NEW_MODEL_DESIGN} ATTN_BUCKETIZED_NUM_REQS=${ATTN_BUCKETIZED_NUM_REQS} ATTN_CUSTOM_NUM_REQS_BUCKETS=${ATTN_CUSTOM_NUM_REQS_BUCKETS} ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD} VLLM_MOE_CHUNK_SIZE=${VLLM_MOE_CHUNK_SIZE} SLICE_ROPE_CACHE=${SLICE_ROPE_CACHE} DP_SCHED_BATCH_PREFILL=${DP_SCHED_BATCH_PREFILL} VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING} VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL} LIBTPU_INIT_ARGS=\"${LIBTPU_INIT_ARGS}\" ${ROLLOUT_RAIDEN_ENV}"
 export ROLLOUT_EXTRA_ARGS="${ROLLOUT_EXTRA_ARGS:-} --prefuse_moe_weights=${ROLLOUT_PREFUSE_MOE_WEIGHTS} --tensor_parallel_size=${ROLLOUT_MESH_TP} --return_routed_experts=${RETURN_ROUTED_EXPERTS} --free_kv_cache_during_weight_sync=${ROLLOUT_FREE_KV_CACHE} --max_concurrency=${ROLLOUT_MAX_CONCURRENCY}"
 
 # ==============================================================================

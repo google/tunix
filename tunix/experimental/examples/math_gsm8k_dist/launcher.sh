@@ -576,6 +576,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --in_flight_weight_updates="$IN_FLIGHT_WEIGHT_UPDATES"
     --chat_parser="$CHAT_PARSER"
+    --seed="$SEED"
   )
 
   # shellcheck disable=SC2206
@@ -589,7 +590,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
   fi
 
   export JAX_PLATFORMS=tpu,cpu
-  export SKIP_JAX_PRECOMPILE=1
+  export SKIP_JAX_PRECOMPILE="${ROLLOUT_SKIP_JAX_PRECOMPILE:-0}"
   export TPU_VISIBLE_DEVICES=${ROLLOUT_TPU_CHIPS}
   export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
   export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}

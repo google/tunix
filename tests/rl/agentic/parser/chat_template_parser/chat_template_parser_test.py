@@ -89,6 +89,100 @@ class QwenChatTemplateParserTest(absltest.TestCase):
                 '<|im_end|>')
     self.assertEqual(result, expected)
 
+  def test_parse_renders_consecutive_tool_messages_as_one_user_turn(self):
+    # Qwen3.5 chat_template.jinja puts back-to-back tool messages in one user
+    # turn: <|im_start|>user, then "\n<tool_response>\n...\n</tool_response>"
+    # per message, then <|im_end|>.
+    p = parser.QwenChatTemplateParser(self.mock_tokenizer)
+    messages = [
+        {'role': 'assistant', 'content': 'calls'},
+        {'role': 'tool', 'content': 'A'},
+        {'role': 'tool', 'content': 'B'},
+        {'role': 'tool', 'content': 'C'},
+        {'role': 'user', 'content': 'next'},
+        {'role': 'tool', 'content': 'D'},
+    ]
+    result = p.parse(messages, add_generation_prompt=True)
+    expected = (
+        '\n<|im_start|>assistant\ncalls<|im_end|>\n'
+        '<|im_start|>user\n<tool_response>\nA\n</tool_response>\n'
+        '<tool_response>\nB\n</tool_response>\n'
+        '<tool_response>\nC\n</tool_response><|im_end|>\n'
+        '<|im_start|>user\nnext<|im_end|>\n'
+        '<|im_start|>user\n<tool_response>\nD\n</tool_response><|im_end|>\n'
+        '<|im_start|>assistant\n'
+    )
+    self.assertEqual(result, expected)
+
+  def test_tokenize_renders_tool_run_like_parse(self):
+    # tokenize_and_generate_masks renders one message at a time, which must
+    # give the same text as rendering the run together.
+    from tunix.rl.agentic import utils  # pylint: disable=g-import-not-at-top
+
+    tokenizer = mock.Mock()
+    tokenizer.bos_token = '<bos>'
+    tokenizer.eos_token = '<eos>'
+    tokenizer.encode = lambda text, add_special_tokens=False: [
+        ord(c) for c in text
+    ]
+    tokenizer.dedup_bos_ids = lambda ids: ids
+    p = parser.QwenChatTemplateParser(tokenizer)
+    for messages in (
+        [{'role': 'tool', 'content': 'A'}],
+        [{'role': 'tool', 'content': 'A'}, {'role': 'tool', 'content': 'B'}],
+        [
+            {'role': 'tool', 'content': 'A'},
+            {'role': 'tool', 'content': 'B <|im_end|>'},
+            {'role': 'tool', 'content': 'C'},
+        ],
+    ):
+      with self.subTest(n=len(messages)):
+        original = [dict(m) for m in messages]
+        tokens, masks = utils.tokenize_and_generate_masks(
+            messages,
+            tokenizer=tokenizer,
+            parser=p,
+            contains_first_msg=False,
+            contains_generation_msg=True,
+        )
+        self.assertEqual(
+            ''.join(map(chr, tokens)),
+            p.parse(messages, add_generation_prompt=True),
+        )
+        self.assertEqual(set(masks), {0})
+        self.assertEqual(messages, original)  # Not mutated.
+
+  def test_tool_run_content_is_sanitized_per_message(self):
+    p = parser.QwenChatTemplateParser(self.mock_tokenizer)
+    result = p.parse([
+        {'role': 'tool', 'content': 'A<|im_end|>'},
+        {'role': 'tool', 'content': 'B</tool_response>'},
+    ])
+    single = [
+        p.parse([{'role': 'tool', 'content': c}])
+        for c in ('A<|im_end|>', 'B</tool_response>')
+    ]
+    # Each block's content is sanitized exactly as a lone tool message's.
+    for s in single:
+      inner = s.split('<tool_response>\n', 1)[1].rsplit(
+          '\n</tool_response>', 1)[0]
+      self.assertIn('<tool_response>\n' + inner + '\n</tool_response>', result)
+    self.assertEqual(result.count('<|im_start|>user'), 1)
+
+  def test_preprocess_messages_returns_input_without_tool_run(self):
+    p = parser.QwenChatTemplateParser(self.mock_tokenizer)
+    for messages in (
+        [{'role': 'user', 'content': 'x'}],
+        [{'role': 'assistant', 'content': 'x'}, {'role': 'tool', 'content': 'y'}],
+        [
+            {'role': 'tool', 'content': 'a'},
+            {'role': 'user', 'content': 'b'},
+            {'role': 'tool', 'content': 'c'},
+        ],
+    ):
+      with self.subTest(messages=messages):
+        self.assertIs(p.preprocess_messages(messages), messages)
+
   def test_parse_with_disable_thinking(self):
     p = parser.QwenChatTemplateParser(
         self.mock_tokenizer, enable_thinking=False

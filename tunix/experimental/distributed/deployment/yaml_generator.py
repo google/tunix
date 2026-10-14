@@ -207,6 +207,36 @@ def render_fail_fast(
   )
 
 
+def render_teardown_on_exit(
+    *, enabled: bool, namespace: str, gang_id: str, jobset_name: str
+) -> str:
+  """Renders the PID-1 wrapper block that deletes sibling gang JobSets on exit."""
+  if not enabled:
+    return ""
+  if not gang_id:
+    raise ValueError(
+        "--teardown_gang_on_exit requires --gang_id (or GANG_ID) to be set."
+    )
+  return _indent_lines(
+      [
+          (
+              'echo "Tearing down sibling JobSets for gang'
+              f" '{gang_id}' in namespace '{namespace}'...\""
+          ),
+          (
+              "kubectl delete jobsets.jobset.x-k8s.io"
+              f' -n "{namespace}"'
+              f' -l "scheduling.x-k8s.io/gang-id={gang_id}"'
+              f' --field-selector="metadata.name!={jobset_name}"'
+              " --ignore-not-found=true --wait=false"
+              ' || echo "WARNING: sibling JobSet teardown failed (exit $?)"'
+          ),
+          "",
+      ],
+      _WRAPPER_INDENT,
+  )
+
+
 def main() -> None:
   """Parses command-line arguments and renders a deployment YAML from a template."""
   parser = argparse.ArgumentParser(
@@ -283,15 +313,6 @@ def main() -> None:
       action=argparse.BooleanOptionalAction,
       default=None,
       help="Enable GKE dynamic slicing annotations and topology selectors.",
-  )
-  parser.add_argument(
-      "--omit_slice_topology",
-      action="store_true",
-      default=False,
-      help=(
-          "Omit cloud.google.com/gke-tpu-slice-topology annotation from initial"
-          " JobSet manifest (used for single-host dynamic slice admission flow)."
-      ),
   )
   parser.add_argument(
       "--head_nodepool",
@@ -400,6 +421,16 @@ def main() -> None:
           " before the worker registered with the orchestrator."
       ),
   )
+  parser.add_argument(
+      "--teardown_gang_on_exit",
+      action="store_true",
+      default=False,
+      help=(
+          "Render the CPU PID-1 wrapper so that after the main command exits,"
+          " it deletes all sibling JobSets sharing scheduling.x-k8s.io/gang-id"
+          " (excluding this JobSet)."
+      ),
+  )
 
   args = parser.parse_args()
   if args.startup_retries < 0:
@@ -481,6 +512,12 @@ def main() -> None:
       )
     labels.append(f'    scheduling.x-k8s.io/gang-id: "{args.gang_id}"\n')
   queue_label = "  labels:\n" + "".join(labels) if labels else ""
+  teardown_on_exit = render_teardown_on_exit(
+      enabled=args.teardown_gang_on_exit,
+      namespace=args.namespace,
+      gang_id=args.gang_id,
+      jobset_name=jobset_name,
+  )
 
   # Optional reservation pin. NAP will not create a large TPU slice without being
   # told which reservation to draw from -- it fails the scale-up with
@@ -574,11 +611,9 @@ def main() -> None:
       ]
     else:
       anno_lines = [
+          f'cloud.google.com/gke-tpu-slice-topology: "{slice_topology}"',
           'cloud.google.com/skip-tpu-webhook-check: "true"',
-          'kueue.x-k8s.io/podset-required-topology: cloud.google.com/gke-tpu-partition-4x4x4-id',
       ]
-      if not args.omit_slice_topology:
-        anno_lines.insert(0, f'cloud.google.com/gke-tpu-slice-topology: "{slice_topology}"')
     tpu_annotations = "\n" + "\n".join(f"              {line}" for line in anno_lines)
   else:
     tpu_annotations = ""
@@ -693,9 +728,14 @@ def main() -> None:
       else ""
   )
 
-  # RAIDEN_BROADCAST_K and TPU_RAIDEN_DATA_NICS are set in every container env of
-  # the jobset templates; rendering them again here would duplicate the entry.
-  template_env = ("RAIDEN_BROADCAST_K", "TPU_RAIDEN_DATA_NICS")
+  # RAIDEN_BROADCAST_K, TPU_RAIDEN_DATA_NICS, and ENABLE_MULTI_NUMA are set in
+  # every container env of the jobset templates; rendering them again here would
+  # duplicate the entry.
+  template_env = (
+      "RAIDEN_BROADCAST_K",
+      "TPU_RAIDEN_DATA_NICS",
+      "ENABLE_MULTI_NUMA",
+  )
   worker_env = {}
 
   # Under Pathways the TPU program runs in the worker, not the user container, so
@@ -729,11 +769,22 @@ def main() -> None:
       for flag in os.environ.get("PATHWAYS_PROXY_EXTRA_ARGS", "").split()
   )
 
+  enable_multi_numa = os.environ.get("ENABLE_MULTI_NUMA", "0")
+  tpu_raiden_data_nics = os.environ.get("TPU_RAIDEN_DATA_NICS", "eth0")
+
   with open(args.template_file, "r") as f:
     template_text = f.read()
     if args.fail_fast and "${FAIL_FAST_POD_FAILURE_POLICY}" not in template_text:
       raise ValueError(
           f"--fail_fast is not supported by template {args.template_file}"
+      )
+    if (
+        args.teardown_gang_on_exit
+        and "${TEARDOWN_ON_EXIT}" not in template_text
+    ):
+      raise ValueError(
+          "--teardown_gang_on_exit is not supported by template"
+          f" {args.template_file}"
       )
 
     # Guard: only Pathways templates run the colocated sidecar; non-Pathways
@@ -806,6 +857,9 @@ def main() -> None:
         STARTUP_COMMAND=args.worker_startup_command,
         PATHWAYS_WORKER_EXTRA_ENV=pathways_worker_extra_env,
         PATHWAYS_PROXY_EXTRA_ARGS=pathways_proxy_extra_args,
+        ENABLE_MULTI_NUMA=enable_multi_numa,
+        TPU_RAIDEN_DATA_NICS=tpu_raiden_data_nics,
+        TEARDOWN_ON_EXIT=teardown_on_exit,
         **dataclasses.asdict(fail_fast),
     )
     print(content)

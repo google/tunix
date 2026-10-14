@@ -15,6 +15,7 @@
 """Unit tests for tunix.oss.examples.deepswe.sandbox_utils."""
 
 import os
+import tempfile
 import threading
 from unittest import mock
 from absl.testing import absltest
@@ -76,9 +77,16 @@ class SandboxUtilsTest(absltest.TestCase):
     # current_batch has p0, p1 (img_A: 2).
     # Dict maintains samples of both queues:
     # img_A: 2 (8 reps), img_B: 2 (8 reps).
-    # Fleet warms both with wait=True (synchronous initial priming barrier).
-    self.assertEqual(
-        fleet.warm_calls, [("img_A", 8, True), ("img_B", 8, True)]
+    # Fleet creates both pools (wait=False); only the current batch's pool
+    # (img_A) gets the initial priming barrier (wait=True). The next batch's
+    # pool warms in the background.
+    self.assertCountEqual(
+        fleet.warm_calls,
+        [
+            ("img_A", 8, False),
+            ("img_A", 8, True),
+            ("img_B", 8, False),
+        ],
     )
     self.assertEqual(fleet.active_pools, {"img_A": 8, "img_B": 8})
     self.assertLen(iterator.current_batch, 2)
@@ -138,20 +146,27 @@ class SandboxUtilsTest(absltest.TestCase):
         max_staleness=1,
     )
     self.assertTrue(iterator.has_next())
-    self.assertEqual(fleet.active_pools, {"img_A": 4, "img_B": 4})
+    # Start-up window = max_staleness + 1 = 2 undispatched batches past current.
+    self.assertEqual(
+        fleet.active_pools, {"img_A": 4, "img_B": 4, "img_C": 4}
+    )
 
     # Batch 0 (p0 / img_A)
     self.assertEqual(next(iterator)["prompt"], "p0")
-    self.assertEqual(fleet.active_pools, {"img_A": 4, "img_B": 4})
+    self.assertEqual(
+        fleet.active_pools, {"img_A": 4, "img_B": 4, "img_C": 4}
+    )
 
-    # Batch 1 (p1 / img_B): img_A retained in _previous_batches (1/2)
+    # Batch 1 (p1 / img_B): img_A retained in _previous_batches (1/2). The
+    # window still holds img_C (>= lookahead_steps), so nothing new is warmed.
     self.assertEqual(next(iterator)["prompt"], "p1")
     self.assertNotIn("img_A", fleet.unwarm_calls)
     self.assertEqual(
         fleet.active_pools, {"img_A": 4, "img_B": 4, "img_C": 4}
     )
 
-    # Batch 2 (p2 / img_C): both img_A and img_B retained in _previous_batches (2/2)
+    # Batch 2 (p2 / img_C): both img_A and img_B retained in _previous_batches
+    # (2/2); the window slides by one and img_D is prewarmed.
     self.assertEqual(next(iterator)["prompt"], "p2")
     self.assertNotIn("img_A", fleet.unwarm_calls)
     self.assertNotIn("img_B", fleet.unwarm_calls)
@@ -173,6 +188,104 @@ class SandboxUtilsTest(absltest.TestCase):
     iterator.close()
     self.assertEqual(fleet.active_pools, {})
 
+  def test_sliding_window_startup_then_one_batch_ahead(self):
+    # max_staleness=2 mimics the orchestrator: batches 0..2 are pulled
+    # back-to-back at start-up, then one batch per committed step.
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(8)
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=4,
+        batch_size=1,
+        max_staleness=2,
+    )
+    self.assertEqual(iterator.initial_lookahead_batches, 3)
+    self.assertEqual(iterator.lookahead_batches, 1)
+    # Before the first pull: batches 0..2 (dispatched at start-up) and the
+    # prefetch batch 3 all have pools; batches 0..2 are waited on, while the
+    # prefetch batch 3 warms in the background.
+    self.assertEqual(set(fleet.active_pools), {f"img_{i}" for i in range(4)})
+    self.assertCountEqual(
+        [call for call in fleet.warm_calls if call[2]],
+        [("img_0", 4, True), ("img_1", 4, True), ("img_2", 4, True)],
+    )
+
+    # Start-up dispatch of batches 0..2: no new pools, the window drains to
+    # exactly the prefetch batch.
+    for i in range(3):
+      self.assertEqual(next(iterator)["prompt"], f"p{i}")
+    self.assertEqual(set(fleet.active_pools), {f"img_{i}" for i in range(4)})
+    self.assertLen(iterator._lookahead, 1)  # pylint: disable=protected-access
+
+    # Each later dispatch (one committed step) slides the window by one: the
+    # batch after the one just dispatched is prewarmed, never more.
+    self.assertEqual(next(iterator)["prompt"], "p3")
+    self.assertIn("img_4", fleet.active_pools)
+    self.assertNotIn("img_5", fleet.active_pools)
+    self.assertEqual(next(iterator)["prompt"], "p4")
+    self.assertIn("img_5", fleet.active_pools)
+    self.assertNotIn("img_6", fleet.active_pools)
+    # Previous window (S + 1 = 3 batches: img_1..img_3) slid past img_0.
+    self.assertNotIn("img_0", fleet.active_pools)
+    self.assertIn("img_1", fleet.active_pools)
+    # Pools created after start-up never block.
+    self.assertCountEqual(
+        [call for call in fleet.warm_calls if call[2]],
+        [("img_0", 4, True), ("img_1", 4, True), ("img_2", 4, True)],
+    )
+    iterator.close()
+
+  def test_lookahead_steps_overrides_when_larger(self):
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(5)
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=2,
+        batch_size=1,
+        lookahead_steps=3,
+        max_staleness=0,
+    )
+    self.assertEqual(iterator.lookahead_batches, 3)
+    self.assertEqual(iterator.initial_lookahead_batches, 3)
+    self.assertLen(fleet.active_pools, 4)
+    iterator.close()
+
+  def test_all_pools_created_before_readiness_barrier(self):
+    # With one worker thread, the old single-phase flow created and waited on
+    # each pool in turn, so lookahead pools waited behind the barrier. Now
+    # every pool is created first and only then is the barrier run.
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(4)
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=2,
+        batch_size=1,
+        max_staleness=2,
+        max_workers=1,
+    )
+    self.assertEqual(
+        fleet.warm_calls,
+        [
+            ("img_0", 2, False),
+            ("img_1", 2, False),
+            ("img_2", 2, False),
+            ("img_3", 2, False),
+            ("img_0", 2, True),
+            ("img_1", 2, True),
+            ("img_2", 2, True),
+        ],
+    )
+    iterator.close()
+
   def test_wait_initial_configurable(self):
     fleet = FakeFleet()
     dataset = [{"prompt": "p0", "docker_image": "img_A"}]
@@ -184,6 +297,42 @@ class SandboxUtilsTest(absltest.TestCase):
         wait_initial=False,
     )
     self.assertEqual(fleet.warm_calls, [("img_A", 2, False)])
+
+  def test_async_initial_runs_in_background_until_wait_for_initial(self):
+    warm_started = threading.Event()
+    allow_warm_finish = threading.Event()
+    fleet = FakeFleet()
+    orig_warm = fleet.warm_image
+
+    def _blocking_warm(
+        image: str, replicas_override: int | None = None, wait: bool = False
+    ) -> None:
+      orig_warm(image, replicas_override=replicas_override, wait=wait)
+      if wait:
+        warm_started.set()
+        allow_warm_finish.wait(timeout=5.0)
+
+    fleet.warm_image = _blocking_warm
+    dataset = [{"prompt": "p0", "docker_image": "img_A"}]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=2,
+        batch_size=1,
+        wait_initial=True,
+        async_initial=True,
+    )
+    self.assertTrue(warm_started.wait(timeout=5.0))
+    self.assertIsNotNone(iterator._initial_warm_thread)
+    self.assertTrue(iterator._initial_warm_thread.is_alive())
+
+    allow_warm_finish.set()
+    iterator.wait_for_initial()
+    self.assertIsNone(iterator._initial_warm_thread)
+    self.assertEqual(
+        fleet.warm_calls, [("img_A", 2, False), ("img_A", 2, True)]
+    )
+    self.assertEqual(next(iterator)["prompt"], "p0")
 
   def test_batched_items_format_preserved(self):
     fleet = FakeFleet()
@@ -507,7 +656,7 @@ class SandboxUtilsTest(absltest.TestCase):
             run_id="test-run-1234",
             in_cluster=True,
             namespace="test-ns",
-            delete_pods=False,
+            delete_pods=True,
         )
 
   def test_init_global_fleet_registers_subsequent_task_images_in_plan(self):
@@ -616,6 +765,254 @@ class SandboxUtilsTest(absltest.TestCase):
     iterator.close()
     self.assertEqual(fleet.active_pools, {})
 
+  def test_patch_agent_sandbox_rl_templates_sets_unmanaged_network_policy_and_eval_container(self):
+    class _FakeResources:
+
+      def _template_manifest(self, image, template_name, template):
+        del template
+        return {
+            "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+            "kind": "SandboxTemplate",
+            "metadata": {"name": template_name},
+            "spec": {
+                "podTemplate": {
+                    "metadata": {"labels": {"sandbox": template_name}},
+                    "spec": {"containers": [{"image": image}]},
+                }
+            },
+        }
+
+    fake_resources_mod = mock.MagicMock()
+    fake_resources_mod.Resources = _FakeResources
+    fake_asrl = mock.MagicMock()
+    fake_asrl.resources = fake_resources_mod
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "agent_sandbox_rl": fake_asrl,
+            "agent_sandbox_rl.resources": fake_resources_mod,
+        },
+    ):
+      sandbox_utils.patch_agent_sandbox_rl_templates()
+      res = _FakeResources()
+      manifest = res._template_manifest("img:v1", "oh-test-123", None)
+      self.assertEqual(
+          manifest["spec"]["networkPolicyManagement"], "Unmanaged"
+      )
+      pod_spec = manifest["spec"]["podTemplate"]["spec"]
+      self.assertFalse(pod_spec["automountServiceAccountToken"])
+      self.assertFalse(pod_spec["shareProcessNamespace"])
+      self.assertLen(pod_spec["containers"], 2)
+      self.assertEqual(
+          pod_spec["containers"][0]["name"],
+          sandbox_utils.RUNTIME_CONTAINER_NAME,
+      )
+      eval_ctr = pod_spec["containers"][1]
+      self.assertEqual(eval_ctr["name"], sandbox_utils.EVAL_CONTAINER_NAME)
+      self.assertEqual(eval_ctr["image"], "img:v1")
+      self.assertEqual(eval_ctr["command"], ["sleep", "infinity"])
+      self.assertNotIn("volumeMounts", eval_ctr)
+
+  def test_patch_r2egym_for_agent_sandbox_routes_container_and_defers_setup_env(self):
+    class _FakeCoreV1Api:
+
+      def connect_get_namespaced_pod_exec(self, *args, **kwargs):
+        return args, kwargs
+
+    class _FakeDockerRuntime:
+
+      def __init__(self, *args, **kwargs):
+        self.init_args = (args, kwargs)
+
+      def start_container(self, docker_image, command, ctr_name, **kwargs):
+        return ("orig", docker_image, command, ctr_name, kwargs)
+
+      def _start_kubernetes_sandbox(self):
+        self.client = _FakeCoreV1Api()
+        return "k8s-sandbox"
+
+      def setup_env(self):
+        return "setup-ran"
+
+    fake_k8s_client = mock.MagicMock()
+    fake_k8s_client.CoreV1Api = _FakeCoreV1Api
+    fake_k8s = mock.MagicMock()
+    fake_k8s.client = fake_k8s_client
+    fake_docker_mod = mock.MagicMock()
+    fake_docker_mod.DockerRuntime = _FakeDockerRuntime
+    fake_runtime_pkg = mock.MagicMock()
+    fake_runtime_pkg.docker = fake_docker_mod
+
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "kubernetes": fake_k8s,
+            "kubernetes.client": fake_k8s_client,
+            "r2egym": mock.MagicMock(),
+            "r2egym.agenthub": mock.MagicMock(),
+            "r2egym.agenthub.runtime": fake_runtime_pkg,
+            "r2egym.agenthub.runtime.docker": fake_docker_mod,
+        },
+    ):
+      sandbox_utils.patch_r2egym_for_agent_sandbox()
+      api = _FakeCoreV1Api()
+      _, kw = api.connect_get_namespaced_pod_exec("pod-1", "default")
+      self.assertEqual(kw["container"], sandbox_utils.RUNTIME_CONTAINER_NAME)
+
+      rt = _FakeDockerRuntime(backend="kubernetes-sandbox")
+      handle = mock.MagicMock()
+      handle._target_container = sandbox_utils.EVAL_CONTAINER_NAME
+      handle._defer_setup_env = True
+      rt._handle = handle
+      rt.start_container("img:v1", ["/bin/bash"], "pod-1")
+      self.assertEqual(rt._target_container, sandbox_utils.EVAL_CONTAINER_NAME)
+      _, kw_eval = rt.client.connect_get_namespaced_pod_exec("pod-1", "default")
+      self.assertEqual(kw_eval["container"], sandbox_utils.EVAL_CONTAINER_NAME)
+      self.assertIsNone(rt.setup_env())
+
+      handle._defer_setup_env = False
+      self.assertEqual(rt.setup_env(), "setup-ran")
+
+  def test_load_images_from_manifest(self):
+    with tempfile.NamedTemporaryFile("w", delete=False) as f:
+      f.write(
+          "# Header comment\n\nimage_1:latest\n  image_2:v2  \n# Inline"
+          " comment\nimage_1:latest\n"
+      )
+      f.flush()
+      tmp_path = f.name
+    try:
+      images = sandbox_utils.load_images_from_manifest(tmp_path)
+      self.assertEqual(images, ["image_1:latest", "image_2:v2"])
+    finally:
+      os.unlink(tmp_path)
+
+  def test_load_images_from_manifest_empty_path_raises(self):
+    with self.assertRaises(ValueError):
+      sandbox_utils.load_images_from_manifest("")
+
+  def test_prewarm_from_images_file_ignores_dataset_docker_image(self):
+    with tempfile.NamedTemporaryFile("w", delete=False) as f:
+      f.write("static_img_a\nstatic_img_b\n")
+      f.flush()
+      tmp_path = f.name
+    try:
+      fleet = FakeFleet()
+      # Dataset items do not contain any docker_image field.
+      dataset = [{"prompt": f"prompt_{i}"} for i in range(5)]
+      iterator = sandbox_utils.PrewarmDatasetIterator(
+          dataset,
+          fleet=fleet,
+          images_file=tmp_path,
+          batch_size=2,
+          num_generations=4,
+          wait_initial=True,
+      )
+      # Both static images must be warmed with target_reps=4 and wait=False then wait=True
+      self.assertIn(("static_img_a", 4, False), fleet.warm_calls)
+      self.assertIn(("static_img_b", 4, False), fleet.warm_calls)
+      self.assertIn(("static_img_a", 4, True), fleet.warm_calls)
+      self.assertIn(("static_img_b", 4, True), fleet.warm_calls)
+      self.assertEqual(fleet.active_pools, {"static_img_a": 4, "static_img_b": 4})
+
+      # Pull all items
+      items = list(iterator)
+      self.assertEqual(len(items), 5)
+      self.assertEqual(items[0], {"prompt": "prompt_0"})
+
+      # Advancing through batches should NOT unwarm the manifest pools
+      self.assertEqual(fleet.unwarm_calls, [])
+      self.assertEqual(fleet.active_pools, {"static_img_a": 4, "static_img_b": 4})
+
+      iterator.close()
+      self.assertEqual(set(fleet.unwarm_calls), {"static_img_a", "static_img_b"})
+      self.assertEqual(fleet.active_pools, {})
+    finally:
+      os.unlink(tmp_path)
+
+  def test_prewarm_from_static_images_sequence(self):
+    fleet = FakeFleet()
+    dataset = [{"prompt": "p0"}, {"prompt": "p1"}]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        static_images=["img_one", "img_two"],
+        batch_size=1,
+        num_generations=2,
+        wait_initial=False,
+    )
+    self.assertIn(("img_one", 2, False), fleet.warm_calls)
+    self.assertIn(("img_two", 2, False), fleet.warm_calls)
+    self.assertNotIn(("img_one", 2, True), fleet.warm_calls)
+    self.assertEqual(next(iterator), {"prompt": "p0"})
+    iterator.close()
+    self.assertEqual(set(fleet.unwarm_calls), {"img_one", "img_two"})
+
+  def test_prewarm_manifest_sandboxes_sync(self):
+    fleet = FakeFleet()
+    with tempfile.NamedTemporaryFile("w", delete=False) as f:
+      f.write("img_alpha\nimg_beta\n")
+      f.flush()
+      tmp_path = f.name
+    try:
+      thread = sandbox_utils.prewarm_manifest_sandboxes(
+          manifest_path=tmp_path,
+          fleet=fleet,
+          num_generations=4,
+          wait=True,
+          async_warm=False,
+      )
+      self.assertIsNone(thread)
+      self.assertIn(("img_alpha", 4, False), fleet.warm_calls)
+      self.assertIn(("img_beta", 4, False), fleet.warm_calls)
+      self.assertIn(("img_alpha", 4, True), fleet.warm_calls)
+      self.assertIn(("img_beta", 4, True), fleet.warm_calls)
+      self.assertEqual(fleet.active_pools, {"img_alpha": 4, "img_beta": 4})
+    finally:
+      os.unlink(tmp_path)
+
+  def test_prewarm_manifest_sandboxes_async(self):
+    fleet = FakeFleet()
+    with tempfile.NamedTemporaryFile("w", delete=False) as f:
+      f.write("img_x\nimg_y\n")
+      f.flush()
+      tmp_path = f.name
+    try:
+      thread = sandbox_utils.prewarm_manifest_sandboxes(
+          manifest_path=tmp_path,
+          fleet=fleet,
+          num_generations=2,
+          wait=False,
+          async_warm=True,
+      )
+      self.assertIsNotNone(thread)
+      thread.join_and_check()
+      self.assertIn(("img_x", 2, False), fleet.warm_calls)
+      self.assertIn(("img_y", 2, False), fleet.warm_calls)
+      self.assertNotIn(("img_x", 2, True), fleet.warm_calls)
+      self.assertEqual(fleet.active_pools, {"img_x": 2, "img_y": 2})
+    finally:
+      os.unlink(tmp_path)
+
+  def test_prewarm_dataset_iterator_reuses_already_warmed_fleet(self):
+    fleet = FakeFleet()
+    fleet.active_pools = {"img_pre_a": 2, "img_pre_b": 2}
+    dataset = [{"prompt": "p0"}, {"prompt": "p1"}]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        static_images=["img_pre_a", "img_pre_b"],
+        batch_size=1,
+        num_generations=2,
+        wait_initial=True,
+    )
+    # Since fleet already had active_pools populated, no warm calls should be made
+    self.assertEqual(fleet.warm_calls, [])
+    self.assertEqual(next(iterator), {"prompt": "p0"})
+    iterator.close()
+    self.assertEqual(set(fleet.unwarm_calls), {"img_pre_a", "img_pre_b"})
+    self.assertEqual(fleet.active_pools, {})
+
 
 _FAIL_FAST_ENV = {
     "FT_SANDBOX_FAIL_FAST": "true",
@@ -629,11 +1026,25 @@ class _FakeFleetError(Exception):
 
 
 class _FailingWarmFleet(FakeFleet):
+  """Pool creation itself fails (e.g. name collision with another run)."""
 
   def warm_image(
       self, image: str, replicas_override: int | None = None, wait: bool = False
   ) -> None:
-    raise _FakeFleetError(f"pool for {image} never became ready")
+    raise _FakeFleetError(f"pool for {image} belongs to another run")
+
+
+class _SlowReadyWarmFleet(FakeFleet):
+  """Pool creation succeeds but the readiness barrier times out."""
+
+  def warm_image(
+      self, image: str, replicas_override: int | None = None, wait: bool = False
+  ) -> None:
+    super().warm_image(image, replicas_override=replicas_override, wait=wait)
+    if wait:
+      raise _FakeFleetError(
+          f"warm pool for {image} did not become ready within 600s"
+      )
 
 
 class SandboxFailFastTest(absltest.TestCase):
@@ -690,14 +1101,38 @@ class SandboxFailFastTest(absltest.TestCase):
     self.assertNotIn("ready_timeout", sdk.FleetConfig.call_args[1])
     sdk.SandboxFleet.return_value.preflight.assert_not_called()
 
-  def test_prewarm_fail_fast_raises_fleet_error(self):
+  def test_prewarm_fail_fast_raises_on_pool_creation_error(self):
     dataset = [{"prompt": "p0", "docker_image": "img_A"}]
     with mock.patch.dict("sys.modules", {"agent_sandbox_rl": self._fake_sdk()}):
       with mock.patch.dict(os.environ, _FAIL_FAST_ENV):
-        with self.assertRaisesRegex(_FakeFleetError, "never became ready"):
+        with self.assertRaisesRegex(_FakeFleetError, "belongs to another run"):
           sandbox_utils.PrewarmDatasetIterator(
               dataset, fleet=_FailingWarmFleet(), num_generations=2, batch_size=1
           )
+
+  def test_prewarm_fail_fast_tolerates_readiness_timeout(self):
+    # A pool that exists but is slow to fill must not end the run: the
+    # orchestrator keeps the pool as active (so it is still scaled/unwarmed
+    # later) and proceeds; rollout workers degrade per trajectory.
+    dataset = [{"prompt": "p0", "docker_image": "img_A"}]
+    fleet = _SlowReadyWarmFleet()
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": self._fake_sdk()}):
+      with mock.patch.dict(os.environ, _FAIL_FAST_ENV):
+        with self.assertLogs(level="WARNING") as logs:
+          iterator = sandbox_utils.PrewarmDatasetIterator(
+              dataset, fleet=fleet, num_generations=2, batch_size=1
+          )
+    self.assertEqual(
+        fleet.warm_calls, [("img_A", 2, False), ("img_A", 2, True)]
+    )
+    self.assertEqual(fleet.active_pools, {"img_A": 2})
+    self.assertEqual(iterator._active_replicas, {"img_A": 2})  # pylint: disable=protected-access
+    self.assertTrue(
+        any("not fully ready yet" in line for line in logs.output), logs.output
+    )
+    self.assertEqual(next(iterator), dataset[0])
+    iterator.close()
+    self.assertEqual(fleet.unwarm_calls, ["img_A"])
 
   def test_prewarm_off_logs_fleet_error(self):
     dataset = [{"prompt": "p0", "docker_image": "img_A"}]

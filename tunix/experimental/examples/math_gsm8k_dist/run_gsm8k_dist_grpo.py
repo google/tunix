@@ -176,6 +176,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Number of rollout worker replicas to wait for.",
   )
   parser.add_argument(
+      "--max_concurrent_rollouts_per_worker",
+      type=int,
+      default=(
+          int(val)
+          if (val := os.getenv("MAX_CONCURRENT_ROLLOUTS_PER_WORKER", "").strip())
+          else None
+      )
+      or None,
+      help=(
+          "Optional cap on concurrent in-flight rollouts dispatched to any "
+          "single rollout worker."
+      ),
+  )
+  parser.add_argument(
       "--weight_sync_mode",
       type=weight_sync.WeightSyncMode,
       default=weight_sync.WeightSyncMode(os.getenv("WEIGHT_SYNC_MODE", "none")),
@@ -253,7 +267,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--inference_addr", type=str, default="")
-  parser.add_argument("--stop_workers_on_exit", action="store_true")
+  parser.add_argument(
+      "--stop_workers_on_exit",
+      action="store_true",
+      help=(
+          "Send a graceful gRPC stop to every remote worker when the"
+          " orchestrator exits."
+      ),
+  )
   parser.add_argument(
       "--use_rollout_logps",
       action=argparse.BooleanOptionalAction,
@@ -324,24 +345,44 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--trajectory_store_root",
       dest="trajectory_store_root_dir",
       type=str,
-      default="",
+      default=os.getenv(
+          "TRAJECTORY_STORE_ROOT_DIR",
+          os.getenv("TRAJECTORY_STORE_ROOT", ""),
+      ),
       help="Root directory for the file-backed TrajectoryStore.",
+  )
+  parser.add_argument(
+      "--trajectory_store_db_url",
+      type=str,
+      default=os.getenv("TRAJECTORY_STORE_DB_URL", ""),
+      help=(
+          "SQLAlchemy database URL for the SQL-backed TrajectoryStore (e.g."
+          " 'sqlite:////path/to/store.db' or"
+          " 'postgresql+psycopg2://user:pass@host:5432/dbname')."
+      ),
   )
   return parser.parse_args(argv)
 
 
 def _build_trajectory_store_config(
     args: argparse.Namespace,
-) -> dict[str, Any] | None:
-  """Builds the TrajectoryStore configuration dict from orchestrator CLI flags."""
+) -> list[dict[str, Any] | None] | None:
+  """Builds the [file_store, sql_store] TrajectoryStore configuration list."""
   root_dir = (args.trajectory_store_root_dir or "").strip()
-  if not root_dir:
+  db_url = (args.trajectory_store_db_url or "").strip()
+  file_cfg = (
+      {"enabled": True, "backend": "file", "root_dir": root_dir}
+      if root_dir
+      else None
+  )
+  sql_cfg = (
+      {"enabled": True, "backend": "sql", "db_url": db_url}
+      if db_url
+      else None
+  )
+  if file_cfg is None and sql_cfg is None:
     return None
-  return {
-      "enabled": True,
-      "backend": "file",
-      "root_dir": root_dir,
-  }
+  return [file_cfg, sql_cfg]
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
@@ -510,6 +551,14 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       weight_sync_mode=args.weight_sync_mode,
       trajectory_store_config=_build_trajectory_store_config(args),
       disable_weight_sync_timeouts=args.disable_weight_sync_timeouts,
+      jax_cache_config={
+          "save_jax_cache": os.getenv("SAVE_JAX_CACHE", "true").lower() in ("1", "true", "yes"),
+          "jax_cache_gcs_dir": os.getenv("JAX_CACHE_GCS_DIR"),
+          "rollout_jax_cache_gcs_dir": os.getenv("ROLLOUT_JAX_CACHE_GCS_DIR"),
+      },
+      max_concurrent_rollouts_per_worker=(
+          args.max_concurrent_rollouts_per_worker
+      ),
   )
   context.ipc.discovery.on_register(
       functools.partial(

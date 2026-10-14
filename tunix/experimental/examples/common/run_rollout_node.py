@@ -31,6 +31,7 @@ from tunix.experimental.examples.common import models
 from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
+from tunix.utils import math_utils
 from tunix.utils import maxtext_utils
 
 # Import Raiden before any other libraries to ensure correct JAX compilation.
@@ -44,6 +45,12 @@ REPO_ROOT = os.path.abspath(
 # rollout process can start with non-vLLM samplers in environments where vLLM is
 # not installed.
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+if os.environ.get("WEIGHT_SYNC_PARALLEL_H2H", ""):
+  _ray_extra_vars = os.environ.get("VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", "")
+  _ray_parts = [p.strip() for p in _ray_extra_vars.split(",") if p.strip()]
+  if "WEIGHT_SYNC_PARALLEL_H2H" not in _ray_parts:
+    _ray_parts.append("WEIGHT_SYNC_PARALLEL_H2H")
+    os.environ["VLLM_RAY_EXTRA_ENV_VARS_TO_COPY"] = ",".join(_ray_parts)
 
 CHAT_PARSERS = {
     "qwen": chat_parser_lib.QwenChatTemplateParser,
@@ -363,6 +370,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " path."
       ),
   )
+  parser.add_argument(
+      "--seed",
+      type=int,
+      default=None,
+      help=(
+          "Base random seed for the rollout sampler engine; offset by the"
+          " numeric replica suffix of --worker_id modulo 2**32."
+      ),
+  )
 
   args = parser.parse_args(argv)
   if args.priority_scheduling and args.sampler != "vllm":
@@ -645,6 +661,9 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       "max_model_len": max_model_len,
       "enable_prefix_caching": enable_prefix_caching,
   }
+  replica_seed = math_utils.replica_seed(args)
+  if replica_seed is not None:
+    engine_kwargs["seed"] = replica_seed
 
   prefuse_moe = getattr(args, "prefuse_moe_weights", True)
   if "prefuse_moe_weights" in vllm_overrides:
@@ -851,6 +870,9 @@ def _create_vllm_sampler(args, tokenizer):
       # FCFS.
       scheduling_policy=_vllm_scheduling_policy(args, vllm_overrides),
   )
+  replica_seed = math_utils.replica_seed(args)
+  if replica_seed is not None:
+    engine_kwargs["seed"] = replica_seed
   if gpu_mem_util is not None:
     engine_kwargs["gpu_memory_utilization"] = gpu_mem_util
 
@@ -948,6 +970,10 @@ def main(argv: list[str], context: Any = None) -> None:
   logging.info("Importing rollout registry module: %s", args.registry_module)
   importlib.import_module(args.registry_module)
 
+  from tunix.experimental.common import gcs_cache  # pylint: disable=g-import-not-at-top
+
+  gcs_cache.restore_jax_cache(role="rollout")
+
   if context and args.sampler == "vanilla":
     context.jax.initialize()
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
@@ -982,23 +1008,12 @@ def main(argv: list[str], context: Any = None) -> None:
     server = remote_execution.GrpcRemoteExecutionServer(worker_service)
     await server.start_serving_async(args.port)
     logging.info("Serving vLLM rollout worker on port %d.", args.port)
-
-    if args.sampler != "vanilla":
-      # Eagerly start the sampler engine so all pods in a multihost rollout
-      # jobset join the JAX distributed group at startup rather than lazily.
-      logging.info("Eagerly starting sampler engine...")
-      await worker_service.sampler.start()
-      logging.info("Sampler engine started.")
-      if hasattr(worker_service.sampler, "bind_weight_sync"):
-        logging.info("Eagerly warming up Raiden weight sync...")
-        await worker_service.sampler.bind_weight_sync()
-        logging.info("Raiden weight sync warmed up.")
-
     context.ipc.discovery.register(
         metadata=pickle.dumps({
             "service_type": "rollout",
             "service_port": args.port,
             "worker_id": args.worker_id,
+            "max_concurrency": args.max_concurrency,
         })
     )
     logging.info("Rollout worker is registered.")

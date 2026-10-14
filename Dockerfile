@@ -27,7 +27,7 @@ RUN pip install git+https://github.com/ayaka14732/jax-smi.git
 # If you encounter a checkpoint issue, try using following old version of pathways-utils.
 # RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
 RUN pip install gcsfs
-RUN pip install wandb
+RUN pip install wandb psycopg2-binary
 
 # Set the working directory
 WORKDIR /app
@@ -47,16 +47,22 @@ RUN uv pip install .
 RUN uv pip install 'jax==0.11.0' 'flax==0.12.7' && \
     uv pip install torchax aqtp tokamax math_verify drjax
 
-# Build argument to conditionally install Kubernetes tools
+# Install standalone kubectl unconditionally (required at runtime by the
+# orchestrator pod's PID-1 --teardown_gang_on_exit wrapper).
+RUN curl -fsSL "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+      -o /usr/local/bin/kubectl && \
+    chmod +x /usr/local/bin/kubectl
+
+# Build argument to conditionally install additional Kubernetes debugging tools
 ARG INSTALL_K8S_TOOLS=false
 
-# Install gcloud, kubectl, k9s
+# Install gcloud, k9s, vim, lsof, procps
 RUN if [ "$INSTALL_K8S_TOOLS" = "true" ]; then \
       apt-get update && \
       apt-get install -y vim lsof procps apt-transport-https ca-certificates gnupg && \
       (echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list) && \
       (curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --batch --yes --no-tty --dearmor -o /usr/share/keyrings/cloud.google.gpg) && \
-      apt-get update && apt-get install -y google-cloud-cli google-cloud-cli-gke-gcloud-auth-plugin kubectl && \
+      apt-get update && apt-get install -y google-cloud-cli google-cloud-cli-gke-gcloud-auth-plugin && \
       (curl -sS https://webinstall.dev/k9s | bash) && \
       rm -rf /var/lib/apt/lists/*; \
     fi

@@ -78,6 +78,10 @@ export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 export DEBUG=${DEBUG:-0}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+export WEIGHT_SYNC_PARALLEL_H2H=${WEIGHT_SYNC_PARALLEL_H2H:-}
+
+# JAX compilation cache configuration
+source "${LAUNCHER_DIR}/../common/jax_cache_config.sh"
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export CHAT_PARSER=${CHAT_PARSER:-raw}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
@@ -95,6 +99,20 @@ export COLOCATED_PYTHON_SIDECAR_MEMORY=${COLOCATED_PYTHON_SIDECAR_MEMORY:-16Gi}
 
 # Optional: enable experimental batched-RPA attention kernel for rollout.
 export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
+
+# Phased inference profiling (vLLM / tpu-inference)
+# Disabled by default (PHASED_PROFILING_DIR="" in tpu-inference). Only active when PROFILE_SAMPLER=true.
+export PROFILE_SAMPLER=${PROFILE_SAMPLER:-false}
+if [[ "${PROFILE_SAMPLER}" == "true" || "${PROFILE_SAMPLER}" == "True" || "${PROFILE_SAMPLER}" == "1" ]]; then
+  export PHASED_PROFILING_DIR=${PHASED_PROFILING_DIR:-${MAXTEXT_OUTPUT_DIR:+${MAXTEXT_OUTPUT_DIR}/inference_profiles}}
+  export PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:-3}
+  export PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:-10}
+else
+  export PHASED_PROFILING_DIR=${PHASED_PROFILING_DIR:-}
+  export PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:-}
+  export PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:-}
+fi
+export TUNIX_DEBUG_INFERENCE_LOGS=${TUNIX_DEBUG_INFERENCE_LOGS:-true}
 
 # MaxText configuration: only consulted when TRAINER_BACKEND=maxtext.
 source "${LAUNCHER_DIR}/../common/maxtext_config.sh"
@@ -114,6 +132,8 @@ export WANDB_API_KEY=${WANDB_API_KEY:-}
 export LOG_DIR=${LOG_DIR:-}
 export TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 export TRAJECTORY_STORE_ROOT_DIR=${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-}}
+export USE_DEFAULT_SQL_STORE=${USE_DEFAULT_SQL_STORE:-true}
+export TRAJECTORY_STORE_DB_URL=${TRAJECTORY_STORE_DB_URL:-}
 export TFDS_DATA_DIR=${TFDS_DATA_DIR:-"artifacts/data"}
 export TFDS_SPLIT=${TFDS_SPLIT:-train}
 export FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
@@ -179,6 +199,7 @@ export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-16}
 # ROLLOUT_VLLM_CONFIG_JSON, when set, wins -- the degree is merged into it.
 export ROLLOUT_MESH_EXPERT=${ROLLOUT_MESH_EXPERT:-1}
 export ROLLOUT_VLLM_CONFIG_JSON=${ROLLOUT_VLLM_CONFIG_JSON:-}
+export ROLLOUT_SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE:-0}
 
 # Kubernetes Cluster & Scheduling Options
 export K8S_NAMESPACE=${K8S_NAMESPACE:-${NAMESPACE:-default}}
@@ -198,9 +219,11 @@ stop_orchestrator() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
     echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete pods -l jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE} --force --grace-period=0 --ignore-not-found=true"
   else
-    kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
-    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+    kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=false
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
+    kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     while kubectl get jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" &>/dev/null; do
       sleep 2
     done
@@ -227,24 +250,41 @@ start_orchestrator() {
     shuffle_arg="--shuffle"
   fi
 
+  local jax_cache_env=""
+  if [[ "${DISABLE_JAX_CACHE:-0}" != "1" && "${DISABLE_JAX_CACHE:-false}" != "true" ]]; then
+    if [[ -n "${JAX_CACHE_GCS_DIR}" ]]; then
+      jax_cache_env+=" JAX_CACHE_GCS_DIR=\"${JAX_CACHE_GCS_DIR}\""
+    fi
+    if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" ]]; then
+      jax_cache_env+=" ROLLOUT_JAX_CACHE_GCS_DIR=\"${ROLLOUT_JAX_CACHE_GCS_DIR}\""
+    fi
+    if [[ -n "${SAVE_JAX_CACHE}" ]]; then
+      jax_cache_env+=" SAVE_JAX_CACHE=\"${SAVE_JAX_CACHE}\""
+    fi
+  fi
+
   "$PYTHON" "$YAML_GEN" \
     "$YAML_DIR/jobset.cpu.yaml" \
     --jobset_name="${ORCHESTRATOR_ID}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     ${GANG_ID:+--gang_id="${GANG_ID}"} \
+    ${GANG_ID:+--teardown_gang_on_exit} \
     --cpu_machine=${CPU_MACHINE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
+      ORCHESTRATOR_ID=\"${ORCHESTRATOR_ID}\" \
       ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
       ${WANDB_ENTITY:+WANDB_ENTITY=\"${WANDB_ENTITY}\"} \
       ${LOG_DIR:+LOG_DIR=\"${LOG_DIR}\"} \
       ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
+      ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
+      ${WEIGHT_SYNC_PARALLEL_H2H:+WEIGHT_SYNC_PARALLEL_H2H=\"${WEIGHT_SYNC_PARALLEL_H2H}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
-      ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV} }python -m tunix.experimental.distributed.runtime.main \
+      ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV} }${jax_cache_env} python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_gsm8k_dist_grpo.main \
@@ -290,6 +330,7 @@ start_orchestrator() {
         ${LOG_DIR:+--log_dir=\"${LOG_DIR}\"} \
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
         ${TRAJECTORY_STORE_ROOT_DIR:+--trajectory_store_root_dir=\"${TRAJECTORY_STORE_ROOT_DIR}\"} \
+        ${TRAJECTORY_STORE_DB_URL:+--trajectory_store_db_url=\"${TRAJECTORY_STORE_DB_URL}\"} \
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
@@ -303,9 +344,11 @@ stop_trainer() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${TRAINER_ID} -n ${K8S_NAMESPACE}"
     echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${TRAINER_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete pods -l jobset.sigs.k8s.io/jobset-name=${TRAINER_ID} -n ${K8S_NAMESPACE} --force --grace-period=0 --ignore-not-found=true"
   else
-    kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
-    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+    kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=false
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
+    kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     while kubectl get jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" &>/dev/null; do
       sleep 2
     done
@@ -413,53 +456,44 @@ start_trainer() {
     | apply_manifest
 }
 
-stop_rollout_instance() {
-  local target_id="$1"
+stop_rollout() {
+  local replicas=${ROLLOUT_REPLICAS:-1}
+  local target_ids=("${ROLLOUT_ID}")
+  if [[ ${replicas} -gt 1 ]]; then
+    for ((i = 0; i < replicas; i++)); do
+      target_ids+=("${ROLLOUT_ID}-${i}")
+    done
+  fi
+
+  local selector_list
+  selector_list=$(IFS=,; echo "${target_ids[*]}")
   if [[ "$ROLLOUT_JOBSET_YAML" =~ ^leaderworkerset ]]; then
     if [[ "$DRY_RUN" == "true" ]]; then
-      echo "kubectl delete leaderworkerset ${target_id} -n ${K8S_NAMESPACE}"
+      echo "kubectl delete leaderworkerset ${target_ids[*]} -n ${K8S_NAMESPACE}"
+      echo "kubectl delete pods -l \"leaderworkerset.sigs.k8s.io/name in (${selector_list})\" -n ${K8S_NAMESPACE} --force --grace-period=0 --ignore-not-found=true"
     else
-      kubectl delete leaderworkerset "${target_id}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
-      while kubectl get leaderworkerset "${target_id}" -n "${K8S_NAMESPACE}" &>/dev/null; do
-        sleep 2
-      done
+      kubectl delete leaderworkerset "${target_ids[@]}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=false
+      kubectl delete pods -l "leaderworkerset.sigs.k8s.io/name in (${selector_list})" -n "${K8S_NAMESPACE}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     fi
   else
     if [[ "$DRY_RUN" == "true" ]]; then
-      echo "kubectl delete jobset ${target_id} -n ${K8S_NAMESPACE}"
-      echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${target_id} -n ${K8S_NAMESPACE}"
+      echo "kubectl delete jobset ${target_ids[*]} -n ${K8S_NAMESPACE}"
+      echo "kubectl delete workload -l \"jobset.sigs.k8s.io/jobset-name in (${selector_list})\" -n ${K8S_NAMESPACE} --ignore-not-found=true --wait=false"
+      echo "kubectl delete pods -l \"jobset.sigs.k8s.io/jobset-name in (${selector_list})\" -n ${K8S_NAMESPACE} --force --grace-period=0 --ignore-not-found=true"
     else
-      kubectl delete jobset "${target_id}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
-      kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${target_id}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-      while kubectl get jobset "${target_id}" -n "${K8S_NAMESPACE}" &>/dev/null; do
-        sleep 2
-      done
+      kubectl delete jobset "${target_ids[@]}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=false
+      kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name in (${selector_list})" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
+      kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name in (${selector_list})" -n "${K8S_NAMESPACE}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     fi
   fi
 }
 
-stop_rollout() {
-  if [[ $ROLLOUT_REPLICAS -gt 1 ]]; then
-    stop_rollout_instance "${ROLLOUT_ID}"
-  fi
-  for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
-    local target_id="${ROLLOUT_ID}"
-    if [[ $ROLLOUT_REPLICAS -gt 1 ]]; then
-      target_id="${ROLLOUT_ID}-${i}"
-    fi
-    stop_rollout_instance "${target_id}"
-  done
-}
-
-start_rollout_instance() {
+render_rollout_instance() {
   local target_id="$1"
   local debug_flag=""
+  local extra_flags=""
   if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
     debug_flag="--debug"
-  fi
-
-  if [[ "${ROLLOUT_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
-    echo "Rollout Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
   fi
 
   local maxtext_args
@@ -555,6 +589,16 @@ if cfg:
     raiden_env+=" RAIDEN_USE_FFI=0"
   fi
 
+  local jax_cache_env=""
+  if [[ "${DISABLE_JAX_CACHE:-0}" != "1" && "${DISABLE_JAX_CACHE:-false}" != "true" ]]; then
+    if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" ]]; then
+      jax_cache_env+=" JAX_CACHE_GCS_DIR=\"${ROLLOUT_JAX_CACHE_GCS_DIR}\""
+    fi
+    if [[ -n "${SAVE_JAX_CACHE}" ]]; then
+      jax_cache_env+=" SAVE_JAX_CACHE=\"${SAVE_JAX_CACHE}\""
+    fi
+  fi
+
   "$PYTHON" "$YAML_GEN" \
     "$YAML_DIR/${ROLLOUT_JOBSET_YAML}" \
     --jobset_name="${target_id}" \
@@ -568,7 +612,9 @@ if cfg:
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env}${ROLLOUT_EXTRA_ENV:+ ${ROLLOUT_EXTRA_ENV}} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+      ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
+      ${WEIGHT_SYNC_PARALLEL_H2H:+WEIGHT_SYNC_PARALLEL_H2H=\"${WEIGHT_SYNC_PARALLEL_H2H}\"} \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env}${ROLLOUT_EXTRA_ENV:+ ${ROLLOUT_EXTRA_ENV}} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} ${PHASED_PROFILING_DIR:+PHASED_PROFILING_DIR=\"${PHASED_PROFILING_DIR}\"} ${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:+PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR}} ${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:+PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP}}${jax_cache_env} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_rollout_node.main \
@@ -590,22 +636,40 @@ if cfg:
         --chat_parser=${CHAT_PARSER} \
         --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
         --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
+        ${SEED:+--seed=${SEED}} \
         ${extra_flags} \
         ${maxtext_args} \
         ${vllm_args} \
         ${ROLLOUT_EXTRA_ARGS:+${ROLLOUT_EXTRA_ARGS} }${debug_flag} \
-    " \
-    | apply_manifest
+    "
 }
 
 start_rollout() {
-  for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
+  local replicas=${ROLLOUT_REPLICAS:-1}
+  if [[ ${replicas} -le 0 ]]; then
+    return 0
+  fi
+  if [[ "${ROLLOUT_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+    echo "Rollout Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}" >&2
+  fi
+  if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" && "${DISABLE_JAX_CACHE:-false}" != "true" && "${DISABLE_JAX_CACHE:-0}" != "1" ]]; then
+    echo "[launcher] Rollout JAX cache GCS: ${ROLLOUT_JAX_CACHE_GCS_DIR} (save=${SAVE_JAX_CACHE:-true})" >&2
+  fi
+
+  local placeholder="__TUNIX_REPLICA_ID__"
+  local manifest_template
+  manifest_template="$(render_rollout_instance "${placeholder}")" || return $?
+
+  for ((i = 0; i < replicas; i++)); do
     local target_id="${ROLLOUT_ID}"
-    if [[ $ROLLOUT_REPLICAS -gt 1 ]]; then
+    if [[ ${replicas} -gt 1 ]]; then
       target_id="${ROLLOUT_ID}-${i}"
     fi
-    start_rollout_instance "${target_id}"
-  done
+    if [[ ${i} -gt 0 ]]; then
+      echo "---"
+    fi
+    printf '%s\n' "${manifest_template//${placeholder}/${target_id}}"
+  done | apply_manifest
 }
 
 while [[ $# -gt 0 ]]; do
@@ -696,7 +760,16 @@ done
 if [[ "$DRY_RUN" != "true" ]]; then
   ENTER_KUBE_CONTEXT=${ENTER_KUBE_CONTEXT:-"${LAUNCHER_DIR}/../common/enter_kube_context.sh"}
   source "${ENTER_KUBE_CONTEXT}"
+  if [[ "$COMMAND" == "start" || "$COMMAND" == "orchestrator" ]] && [[ -z "${TRAJECTORY_STORE_DB_URL:-}" ]] && [[ "${USE_DEFAULT_SQL_STORE}" =~ ^(1|true|True|TRUE)$ ]]; then
+    if [[ -n "${PROJECT:-}" ]]; then
+      TRAJECTORY_STORE_DB_URL="$(timeout 10s gcloud secrets versions access latest --secret=tunix-sql-store-uri --project="${PROJECT}" --quiet 2>/dev/null || true)"
+    fi
+    if [[ -z "${TRAJECTORY_STORE_DB_URL}" ]]; then
+      echo "WARNING: USE_DEFAULT_SQL_STORE is enabled but TRAJECTORY_STORE_DB_URL could not be retrieved from GCP Secret Manager for project '${PROJECT:-}'; SQL trajectory store will be skipped." >&2
+    fi
+  fi
 fi
+export TRAJECTORY_STORE_DB_URL="${TRAJECTORY_STORE_DB_URL:-}"
 
 if [[ -z "$TUNIX_IMAGE" ]]; then
   echo "Error: no image set. Build one with tunix, maxtext, and" \

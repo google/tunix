@@ -38,8 +38,10 @@ from google.protobuf import json_format
 from google.protobuf import message
 import numpy as np
 import pandas as pd
+from tunix.utils import env_utils
 
 _T = TypeVar('_T')
+
 
 _DEFAULT_GCS_TIMEOUT_SEC = 10.0
 _DEFAULT_STOP_TIMEOUT_SEC = 15.0
@@ -860,6 +862,44 @@ def log_trajectory_json(
         step_dir / 'inference_metrics.jsonl',
         '\n'.join(jsonl_lines) + '\n',
     )
+
+    if env_utils.is_debug_inference_logs_enabled():
+      for r in inference_step_records:
+        logging.info(
+            '[DEBUG_INFERENCE][Turn] traj_id=%s, step=%d, model_time=%.3fs, '
+            'env_time=%.3fs, total_time=%.3fs, prompt_tokens=%s, '
+            'completion_tokens=%s, preemptions=%s, tps=%.2f, tpot=%.2fms',
+            r.get('traj_id'),
+            r.get('step_index', 0),
+            r.get('model_time_sec', 0.0) or 0.0,
+            r.get('env_time_sec', 0.0) or 0.0,
+            r.get('total_time_sec', 0.0) or 0.0,
+            r.get('prompt_tokens'),
+            r.get('completion_tokens'),
+            r.get('preemptions', 0),
+            r.get('tokens_per_second', 0.0) or 0.0,
+            r.get('tpot_ms', 0.0) or 0.0,
+        )
+      logging.info(
+          '[DEBUG_INFERENCE][Trajectory] traj_id=%s, global_step=%s, '
+          'status=%s, reward=%s, steps=%d, total_time=%.3fs, '
+          'model_time=%.3fs, env_time=%.3fs, mean_step_latency=%.3fs, '
+          'completion_tokens=%d, preemptions=%d, tps=%.2f, tpot=%.2fms',
+          inference_summary.get('traj_id'),
+          inference_summary.get('global_step'),
+          inference_summary.get('status'),
+          inference_summary.get('reward'),
+          inference_summary.get('num_steps', 0),
+          inference_summary.get('total_time_sec', 0.0) or 0.0,
+          inference_summary.get('total_model_time_sec', 0.0) or 0.0,
+          inference_summary.get('total_env_time_sec', 0.0) or 0.0,
+          inference_summary.get('mean_step_latency_sec', 0.0) or 0.0,
+          inference_summary.get('total_completion_tokens', 0),
+          inference_summary.get('total_preemptions', 0),
+          inference_summary.get('tokens_per_second', 0.0) or 0.0,
+          inference_summary.get('tpot_ms', 0.0) or 0.0,
+      )
+
 
     logging.log_first_n(
         logging.INFO,

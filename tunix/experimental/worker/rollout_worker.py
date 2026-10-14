@@ -15,6 +15,7 @@
 """Top-level RolloutWorker abstractions (Service vs Client Driver)."""
 
 import dataclasses
+import inspect
 import threading
 from typing import Any, AsyncIterator, Callable, List, Mapping, Optional, Sequence, Union
 
@@ -58,7 +59,9 @@ class RolloutConfig(base_rollout.RolloutConfig):
   agent_name: str = ""
   env_config: dict[str, Any] = dataclasses.field(default_factory=dict)
   agent_config: dict[str, Any] = dataclasses.field(default_factory=dict)
-  trajectory_store_config: Mapping[str, Any] | None = None
+  trajectory_store_config: (
+      Mapping[str, Any] | Sequence[Mapping[str, Any] | None] | None
+  ) = None
   partial_rollout: bool = False
 
 
@@ -106,14 +109,19 @@ class RolloutWorker(abstract_worker.Worker):
         config.trajectory_store_config if config is not None else None
     )
     if self._trajectory_store is not None:
-      # Several workers can share one log stream, and absl log lines carry no
-      # process identity, so the worker_id is what attributes a reported
-      # config to a process.
-      logging.info(
-          "[trajectory-store] worker %s built %s",
-          worker_id,
-          self._trajectory_store.to_config(),
-      )
+      for store in (
+          self._trajectory_store
+          if isinstance(self._trajectory_store, list)
+          else [self._trajectory_store]
+      ):
+        # Several workers can share one log stream, and absl log lines carry no
+        # process identity, so the worker_id is what attributes a reported
+        # config to a process.
+        logging.info(
+            "[trajectory-store] worker %s built %s",
+            worker_id,
+            store.to_redacted_config(),
+        )
     self.manager = manager_lib.RolloutManager(
         config=config,
         sampler=sampler,
@@ -126,15 +134,29 @@ class RolloutWorker(abstract_worker.Worker):
     )
 
   @property
-  def trajectory_store(self) -> trajectory_store_lib.TrajectoryStore | None:
+  def trajectory_store(
+      self,
+  ) -> (
+      trajectory_store_lib.TrajectoryStore
+      | list[trajectory_store_lib.TrajectoryStore]
+      | None
+  ):
     return self._trajectory_store
 
   def with_trajectory_store_config(
-      self, trajectory_store_config: Mapping[str, Any] | None
+      self,
+      trajectory_store_config: (
+          Mapping[str, Any] | Sequence[Mapping[str, Any] | None] | None
+      ),
   ) -> datatypes.Response:
     """Configures the worker's TrajectoryStore from the orchestrator."""
     if self._trajectory_store is not None:
-      self._trajectory_store.close()
+      for store in (
+          self._trajectory_store
+          if isinstance(self._trajectory_store, list)
+          else [self._trajectory_store]
+      ):
+        store.close()
     if self.config is not None:
       self.config.trajectory_store_config = trajectory_store_config
     self._trajectory_store = trajectory_store_lib.TrajectoryStore.from_config(
@@ -142,11 +164,16 @@ class RolloutWorker(abstract_worker.Worker):
     )
     self.manager.trajectory_store = self._trajectory_store
     if self._trajectory_store is not None:
-      logging.info(
-          "[trajectory-store] worker %s built %s",
-          self.worker_id,
-          self._trajectory_store.to_config(),
-      )
+      for store in (
+          self._trajectory_store
+          if isinstance(self._trajectory_store, list)
+          else [self._trajectory_store]
+      ):
+        logging.info(
+            "[trajectory-store] worker %s built %s",
+            self.worker_id,
+            store.to_redacted_config(),
+        )
     return datatypes.Response(
         metadata={
             "worker_id": self.worker_id,
@@ -169,6 +196,7 @@ class RolloutWorker(abstract_worker.Worker):
         resources={
             "sampler": type(self.sampler).__name__,
             "policy_version": self._policy_version,
+            "max_concurrency": self.manager.max_concurrency,
         },
     )
 
@@ -206,9 +234,17 @@ class RolloutWorker(abstract_worker.Worker):
     finally:
       self.state = WorkerState.READY
 
-  def start(self) -> datatypes.Response:
+  async def start(self) -> datatypes.Response:
     if self.state == WorkerState.PENDING:
       self.initialize()
+    if hasattr(self.sampler, "start"):
+      res = self.sampler.start()
+      if inspect.isawaitable(res):
+        await res
+    if hasattr(self.sampler, "bind_weight_sync"):
+      res = self.sampler.bind_weight_sync()
+      if inspect.isawaitable(res):
+        await res
     return datatypes.Response(
         metadata={
             "worker_id": self.worker_id,
@@ -224,8 +260,16 @@ class RolloutWorker(abstract_worker.Worker):
     finally:
       # Runs even when cancel_all raises, so a failed stop releases the
       # store's background writer thread instead of leaking it.
-      if self._trajectory_store is not None:
-        self._trajectory_store.close()
+      for store in (
+          self._trajectory_store
+          if isinstance(self._trajectory_store, list)
+          else (
+              [self._trajectory_store]
+              if self._trajectory_store is not None
+              else []
+          )
+      ):
+        store.close()
     return datatypes.Response()
 
   def pause(self) -> datatypes.Response:
@@ -407,6 +451,7 @@ class RolloutWorker(abstract_worker.Worker):
       metadata["group_index"] = group_index
       return datatypes.RolloutResponse(
           request_id=request_id
+          or metadata.get("request_id", "")
           or getattr(item, "trajectory_id", "")
           or prompt_id,
           status="ERROR",
@@ -420,7 +465,11 @@ class RolloutWorker(abstract_worker.Worker):
     if isinstance(item, datatypes.RolloutResponse):
       return item
     if isinstance(item, datatypes.TrajectoryItem):
-      req_id = request_id or getattr(item, "traj_id", "")
+      req_id = (
+          request_id
+          or item.metadata.get("request_id", "")
+          or item.traj_id
+      )
       if prompt_tokens is not None and getattr(item, "prompt_tokens", None) is None:
         item.metadata["prompt_tokens"] = prompt_tokens
       item.metadata.setdefault("worker_id", self.worker_id)

@@ -201,6 +201,14 @@ class RemoteWorkerShim:
   def __init__(self, handle: Any, info: datatypes.WorkerInfo):
     self._handle = handle
     self._info = info
+    try:
+      handle.worker_id = info.worker_id
+    except AttributeError:
+      pass
+
+  @property
+  def handle(self) -> Any:
+    return self._handle
 
   def info(self) -> datatypes.WorkerInfo:
     return self._info
@@ -369,6 +377,21 @@ def _worker_id(member: object) -> str:
     except Exception:  # pylint: disable=broad-except
       pass
   return repr(member)
+
+
+def _reraise_if_not_phase_failure(exc: BaseException) -> None:
+  """Re-raises `exc` if it is a control-flow signal rather than a failure.
+
+  `asyncio.CancelledError` is the awaiting caller withdrawing (a `wait_for`
+  deadline, task cancellation) and `KeyboardInterrupt` / `SystemExit` are
+  interpreter shutdown. None of them says anything about the worker, so they
+  must propagate untouched instead of being reconciled, recorded, or wrapped
+  into a `WeightSyncError` like a real phase failure. Needed wherever a failure
+  arrives as a VALUE -- `gather(return_exceptions=True)` hands these back as
+  results -- or where a `BaseException` handler would otherwise swallow them.
+  """
+  if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+    raise exc
 
 
 class StaleRoundError(RuntimeError):
@@ -560,6 +583,14 @@ def is_weight_sync_timeouts_disabled() -> bool:
   return False
 
 
+def is_parallel_h2h_enabled() -> bool:
+  """Returns True if parallel H2H transfer before destination quiesce is enabled."""
+  val = os.getenv("WEIGHT_SYNC_PARALLEL_H2H")
+  if val is not None:
+    return val.strip().lower() in _TRUTHY_ENV_VALUES
+  return False
+
+
 def _env_float(name: str, default: float) -> float:
   val = os.getenv(name)
   if val is None or not val.strip():
@@ -726,6 +757,9 @@ class WeightSyncResult:
     return self.state is RoundState.COMMITTED
 
 
+NoHealthyRolloutWorkersError = datatypes.NoHealthyRolloutWorkersError
+
+
 class WeightSyncError(RuntimeError):
   """A round did not commit. Carries the round's result.
 
@@ -781,6 +815,9 @@ class WeightSyncCoordinator:
       first_uuid: int = 1,
       timeouts: Optional[PhaseTimeouts] = None,
       disable_timeouts: Optional[bool] = None,
+      evict_failed_destinations: bool = False,
+      recover_unknown_transfer_state: bool = False,
+      parallel_h2h: Optional[bool] = None,
   ):
     self._registry = registry
     self._handler = handler
@@ -792,9 +829,18 @@ class WeightSyncCoordinator:
       self._timeouts = PhaseTimeouts.disabled()
     else:
       self._timeouts = timeouts or PhaseTimeouts()
+    self._evict_failed_destinations = evict_failed_destinations
+    self._recover_unknown_transfer_state = recover_unknown_transfer_state
+    self._parallel_h2h = (
+        is_parallel_h2h_enabled()
+        if parallel_h2h is None
+        else bool(parallel_h2h)
+    )
     logging.info(
-        "WeightSyncCoordinator initialized with timeouts (disabled=%s): %s",
+        "WeightSyncCoordinator initialized with timeouts (disabled=%s,"
+        " parallel_h2h=%s): %s",
         disable_timeouts or is_weight_sync_timeouts_disabled(),
+        self._parallel_h2h,
         self._timeouts,
     )
 
@@ -804,6 +850,12 @@ class WeightSyncCoordinator:
     self._poisoned: Optional[str] = None
     self._last_committed_version: Optional[int] = None
     self._current_round_abort_s: float = 0.0
+    self._last_sync_duration_s: Optional[float] = None
+
+  @property
+  def parallel_h2h(self) -> bool:
+    """Whether H2H transfer runs concurrently before destination quiesce."""
+    return self._parallel_h2h
 
   @property
   def round_index(self) -> int:
@@ -815,9 +867,26 @@ class WeightSyncCoordinator:
     return self._last_committed_version
 
   @property
+  def last_sync_duration_s(self) -> Optional[float]:
+    """Duration in seconds of the most recently completed `sync()` call."""
+    return self._last_sync_duration_s
+
+  @property
+  def in_flight(self) -> bool:
+    """Whether a weight sync round is currently running."""
+    return self._in_flight
+
+  @property
   def poisoned(self) -> Optional[str]:
     """Why the coordinator refuses new rounds, or None."""
     return self._poisoned
+
+  def has_pending_destinations(self) -> bool:
+    """Returns True if any destination worker is waiting in PENDING_WEIGHT_SYNC."""
+    return not self._registry.group(
+        self._destination_role,
+        states=(worker_registry.MembershipState.PENDING_WEIGHT_SYNC,),
+    ).is_empty()
 
   def reset_after_recovery(self) -> None:
     """Clears the poison after the operator restored the fleet.
@@ -828,11 +897,81 @@ class WeightSyncCoordinator:
     logging.warning("coordinator poison cleared: %s", self._poisoned)
     self._poisoned = None
 
+  async def release_after_unknown_transfer(
+      self,
+      result: Optional[WeightSyncResult] = None,
+  ) -> None:
+    """Explicitly releases source staging after an UNKNOWN_TRANSFER_STATE failure.
+
+    When a transfer times out or reports an unknown outcome, `_run_round`
+    skips `release_weight_sync` so a still-running transfer does not read freed
+    source staging buffers, leaving the source worker in `SYNCING`. Once the
+    operator or coordinator has evicted the failed destination(s), calling this
+    method releases source staging on all sources (returning the trainer to
+    `READY`) and clears the coordinator poison.
+
+    Args:
+      result: Optional `WeightSyncResult` from the failed round used to build
+        the release `WeightSyncRequest`.
+
+    Raises:
+      RuntimeError: If any source fails `release_weight_sync`.
+    """
+    sources = self._sources()
+    if result is not None:
+      release_request = self.build_request(
+          result.policy_version,
+          req_id=result.req_id,
+          uuid=result.uuid,
+          round_index=result.round_index,
+      )
+    else:
+      release_request = self.build_request(
+          self._last_committed_version or 0,
+          req_id=f"{self._req_id_prefix}-release",
+          uuid=self._next_uuid,
+          round_index=self._round_index,
+      )
+    release_errors = await asyncio.gather(
+        *[
+            asyncio.wait_for(
+                s.release_weight_sync(release_request),
+                self._timeouts.release,
+            )
+            for s in sources
+        ],
+        return_exceptions=True,
+    )
+    failed = [
+        (_worker_id(s), err)
+        for s, err in zip(sources, release_errors)
+        if isinstance(err, BaseException)
+    ]
+    if failed:
+      raise RuntimeError(
+          f"release_weight_sync failed on sources: {failed!r}"
+      ) from failed[0][1]
+    if self._poisoned is not None:
+      self.reset_after_recovery()
+
   # ---------------------------------------------------------------- lookup
 
-  def _members(self, role: str) -> list[Any]:
-    group = self._registry.group(role)
+  def _members(
+      self,
+      role: str,
+      *,
+      states: Optional[Sequence[worker_registry.MembershipState]] = None,
+      allow_empty: bool = False,
+  ) -> list[Any]:
+    """Returns registered workers for `role` matching `states`."""
+    group = self._registry.group(role, states=states)
     if group.is_empty():
+      if allow_empty:
+        return []
+      if role == self._destination_role:
+        raise datatypes.NoHealthyRolloutWorkersError(
+            f"no workers registered for role {role!r}"
+        )
       raise ValueError(f"no workers registered for role {role!r}")
     return list(group)
 
@@ -847,8 +986,22 @@ class WeightSyncCoordinator:
         )
     return members
 
-  def _destinations(self) -> list[WeightSyncDestination]:
-    members = self._members(self._destination_role)
+  def _destinations(
+      self, *, only_pending: bool = False
+  ) -> list[WeightSyncDestination]:
+    """Returns registered destination workers eligible for weight sync."""
+    if only_pending:
+      target_states = (worker_registry.MembershipState.PENDING_WEIGHT_SYNC,)
+    else:
+      target_states = (
+          worker_registry.MembershipState.ACTIVE,
+          worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
+      )
+    members = self._members(
+        self._destination_role,
+        states=target_states,
+        allow_empty=only_pending,
+    )
     for member in members:
       if not isinstance(member, WeightSyncDestination):
         raise TypeError(
@@ -935,11 +1088,8 @@ class WeightSyncCoordinator:
     try:
       await _wait_for(method(request), timeout)
       return None
-    except asyncio.CancelledError:
-      raise
-    except (KeyboardInterrupt, SystemExit):
-      raise  # interpreter shutdown is not a phase failure to reconcile
     except BaseException as e:  # pylint: disable=broad-except
+      _reraise_if_not_phase_failure(e)
       if accepts is not None:
         phase = await self._worker_phase(destination, request)
         if phase is not None and phase in accepts:
@@ -1019,6 +1169,7 @@ class WeightSyncCoordinator:
       policy_version: int = 0,
       *,
       source_staged: Optional[asyncio.Event] = None,
+      only_pending: bool = False,
       **extra_config,
   ) -> WeightSyncResult:
     """Runs one full round; returns only if it committed.
@@ -1036,6 +1187,9 @@ class WeightSyncCoordinator:
         its live weights again without affecting what this round pushes. Only
         true when the source transfers from a host snapshot rather than
         straight out of device buffers.
+      only_pending: When True, only targets destinations in
+        `PENDING_WEIGHT_SYNC` without quiescing or interrupting `ACTIVE`
+        destinations.
       **extra_config: Carried to the workers in the request.
     """
     if self._poisoned:
@@ -1059,9 +1213,159 @@ class WeightSyncCoordinator:
     self._in_flight = True
     start_time = time.monotonic()
     try:
-      return await self._run_round(policy_version, extra_config, source_staged)
+      try:
+        try:
+          return await self._run_round(
+              policy_version,
+              extra_config,
+              source_staged=source_staged,
+              only_pending=only_pending,
+          )
+        except WeightSyncError as err:
+          res = err.result
+          if not self._evict_failed_destinations or res is None:
+            raise
+          if (
+              res.state is RoundState.UNKNOWN_TRANSFER_STATE
+              and not self._recover_unknown_transfer_state
+          ):
+            raise
+          failed_worker_ids = [
+              w.worker_id
+              for w in res.workers
+              if w.phase != "committed"
+              and (
+                  res.state is RoundState.PARTIALLY_COMMITTED
+                  or w.needs_restart
+                  or w.phase == "unknown"
+                  or (w.error and w.phase != "aborted")
+              )
+          ]
+          evicted_any = False
+          for wid in failed_worker_ids:
+            if self._registry.evict(wid):
+              evicted_any = True
+          if only_pending:
+            target_states = (
+                worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
+            )
+          else:
+            target_states = (
+                worker_registry.MembershipState.ACTIVE,
+                worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
+            )
+          remaining_destinations = self._registry.group(
+              self._destination_role,
+              states=target_states,
+          )
+          if remaining_destinations.is_empty():
+            raise
+          can_retry = (
+              evicted_any
+              or res.state is RoundState.PARTIALLY_COMMITTED
+              or (
+                  res.state is RoundState.UNKNOWN_TRANSFER_STATE
+                  and self._recover_unknown_transfer_state
+              )
+          )
+          if not can_retry:
+            raise
+          logging.warning(
+              "Weight sync failed on destination worker(s) %s (state=%s);"
+              " recovering and retrying sync (policy_version=%d).",
+              failed_worker_ids,
+              res.state.value,
+              policy_version,
+          )
+          if res.state is RoundState.UNKNOWN_TRANSFER_STATE:
+            await self.release_after_unknown_transfer(res)
+          elif self._poisoned is not None:
+            self.reset_after_recovery()
+          return await self._run_round(
+              policy_version,
+              extra_config,
+              source_staged=source_staged,
+              only_pending=only_pending,
+          )
+      except WeightSyncError as err:
+        res = err.result
+        failed_worker_ids = (
+            [
+                w.worker_id
+                for w in res.workers
+                if w.phase != "committed"
+                and (
+                    res.state is RoundState.PARTIALLY_COMMITTED
+                    or w.needs_restart
+                    or w.phase == "unknown"
+                    or (w.error and w.phase != "aborted")
+                )
+            ]
+            if res is not None
+            else []
+        )
+        can_evict = (
+            self._evict_failed_destinations
+            and res is not None
+            and not (
+                res.state is RoundState.UNKNOWN_TRANSFER_STATE
+                and not self._recover_unknown_transfer_state
+            )
+        )
+        if can_evict:
+          for wid in failed_worker_ids:
+            self._registry.evict(wid)
+        if only_pending:
+          target_states = (worker_registry.MembershipState.PENDING_WEIGHT_SYNC,)
+        else:
+          target_states = (
+              worker_registry.MembershipState.ACTIVE,
+              worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
+          )
+        remaining_destinations = self._registry.group(
+            self._destination_role,
+            states=target_states,
+        )
+        if (
+            only_pending
+            and (
+                res is None
+                or res.state is not RoundState.UNKNOWN_TRANSFER_STATE
+                or self._recover_unknown_transfer_state
+            )
+            and not self._registry.group(
+                self._destination_role,
+                states=(worker_registry.MembershipState.ACTIVE,),
+            ).is_empty()
+        ):
+          # Every PENDING_WEIGHT_SYNC destination of this catch-up round was
+          # evicted (or failed without touching ACTIVE destinations): the
+          # failure is contained to pending worker(s), so release source
+          # staging / clear the poison and keep the coordinator usable for the
+          # next regular round instead of reporting the fleet as unhealthy.
+          logging.warning(
+              "[rollout-ft] action=pending_sync_abandoned policy_version=%d"
+              " evicted=%s; ACTIVE rollout workers keep serving.",
+              policy_version,
+              failed_worker_ids,
+          )
+          if (
+              res is not None
+              and res.state is RoundState.UNKNOWN_TRANSFER_STATE
+          ):
+            await self.release_after_unknown_transfer(res)
+          elif self._poisoned is not None:
+            self.reset_after_recovery()
+          raise
+        if can_evict and remaining_destinations.is_empty():
+          raise datatypes.NoHealthyRolloutWorkersError(
+              "No healthy rollout destination workers remaining after weight"
+              f" sync failure (evicted: {failed_worker_ids})."
+          ) from err
+        raise
     finally:
       elapsed_time = time.monotonic() - start_time
+      self._last_sync_duration_s = elapsed_time
       logging.info("Weight sync finished in %.2f seconds.", elapsed_time)
       self._in_flight = False
 
@@ -1070,6 +1374,8 @@ class WeightSyncCoordinator:
       policy_version: int,
       extra_config: dict[str, Any],
       source_staged: Optional[asyncio.Event] = None,
+      *,
+      only_pending: bool = False,
   ) -> WeightSyncResult:
     round_index = self._round_index
     self._round_index += 1
@@ -1078,7 +1384,7 @@ class WeightSyncCoordinator:
     req_id = f"{self._req_id_prefix}-v{policy_version}-r{round_index}"
 
     sources = self._sources()
-    destinations = self._destinations()
+    destinations = self._destinations(only_pending=only_pending)
 
     state = RoundState.PREPARING
     transfer: Optional[weight_sync.TransferResult] = None
@@ -1142,6 +1448,9 @@ class WeightSyncCoordinator:
           result(),
       )
 
+    if not destinations:
+      raise fail("no pending destination workers remaining")
+
     def poison_if_needed() -> None:
       if state in _POISONING_STATES and not self._poisoned:
         self._poisoned = (
@@ -1186,10 +1495,13 @@ class WeightSyncCoordinator:
       try:
         t_phase = time.monotonic()
         try:
-          await asyncio.gather(*[
-              _wait_for(d.bind_weight_sync(), self._timeouts.bind)
-              for d in destinations
-          ])
+          bind_results = await asyncio.gather(
+              *[
+                  _wait_for(d.bind_weight_sync(), self._timeouts.bind)
+                  for d in destinations
+              ],
+              return_exceptions=True,
+          )
         finally:
           t_bind_s = time.monotonic() - t_phase
           t_prepare_s = t_bind_s
@@ -1202,15 +1514,35 @@ class WeightSyncCoordinator:
               _format_timeout(self._timeouts.bind),
               len(destinations),
           )
+        first_bind_err: Optional[BaseException] = None
+        for d, res in zip(destinations, bind_results):
+          if isinstance(res, BaseException):
+            _reraise_if_not_phase_failure(res)
+            wid = _worker_id(d)
+            worker_reports[wid] = WorkerRoundReport(
+                worker_id=wid,
+                phase="unknown",
+                error=repr(res),
+                needs_restart=True,
+            )
+            if first_bind_err is None:
+              first_bind_err = res
+        if first_bind_err is not None:
+          # Caught by the enclosing pre-quiesce `except Exception` block (line
+          # 1604) and wrapped into WeightSyncError via `fail(...)`.
+          raise first_bind_err
 
         t_phase = time.monotonic()
         try:
-          dst_meta_lists = await asyncio.gather(*[
-              _wait_for(
-                  d.get_weight_sync_metadata(), self._timeouts.metadata
-              )
-              for d in destinations
-          ])
+          dst_meta_results = await asyncio.gather(
+              *[
+                  _wait_for(
+                      d.get_weight_sync_metadata(), self._timeouts.metadata
+                  )
+                  for d in destinations
+              ],
+              return_exceptions=True,
+          )
         finally:
           t_metadata_s = time.monotonic() - t_phase
           t_prepare_s = t_bind_s + t_metadata_s
@@ -1223,6 +1555,28 @@ class WeightSyncCoordinator:
               _format_timeout(self._timeouts.metadata),
               len(destinations),
           )
+        first_meta_err: Optional[BaseException] = None
+        for d, res in zip(destinations, dst_meta_results):
+          if isinstance(res, BaseException):
+            _reraise_if_not_phase_failure(res)
+            wid = _worker_id(d)
+            worker_reports[wid] = WorkerRoundReport(
+                worker_id=wid,
+                phase="unknown",
+                error=repr(res),
+                needs_restart=True,
+            )
+            if first_meta_err is None:
+              first_meta_err = res
+        if first_meta_err is not None:
+          # Caught by the enclosing pre-quiesce `except Exception` block and
+          # wrapped into WeightSyncError via `fail(...)`.
+          raise first_meta_err
+        dst_meta_lists = [
+            res
+            for res in dst_meta_results
+            if not isinstance(res, BaseException)
+        ]
 
         # Metadata is collected exactly once and the same objects flow to both
         # registration and the request. Collecting twice would hand the
@@ -1385,9 +1739,8 @@ class WeightSyncCoordinator:
       for metadata, result_or_error in zip(
           registration_metadata, registrations
       ):
-        if isinstance(result_or_error, asyncio.CancelledError):
-          raise result_or_error  # cancellation is never a phase failure
         if isinstance(result_or_error, BaseException):
+          _reraise_if_not_phase_failure(result_or_error)
           registration_errors.append(result_or_error)
           # `WeightSyncError` carries these failures structurally, but an
           # uncaught exception renderer normally prints only its outer
@@ -1428,115 +1781,178 @@ class WeightSyncCoordinator:
           **extra_config,
       )
 
-      # --- downtime starts here ---
-      quiesce_attempted = True
-      t_phase = time.monotonic()
-      pre_failures = await self._phase_on_all(
-          destinations, "pre_weight_sync", prepared_request, self._timeouts.pre
-      )
-      t_pre_s = time.monotonic() - t_phase
-      logging.info(
-          "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=pre"
-          " elapsed_s=%.3f timeout=%s workers=%d failures=%d",
-          round_index,
-          req_id,
-          t_pre_s,
-          _format_timeout(self._timeouts.pre),
-          len(destinations),
-          len(pre_failures),
-      )
-      if pre_failures:
-        failures += pre_failures
-        state = await self._rollback(destinations, prepared_request, failures)
-        poison_if_needed()
-        await record_workers("pre_weight_sync failed")
-        raise fail("pre_weight_sync failed")
-      state = RoundState.PREPARED
+      async def _exec_transfer() -> None:
+        nonlocal state, transfer_in_flight, transfer, t_transfer_s, release_source
+        state = RoundState.TRANSFERRING
+        transfer_in_flight = True
+        t_phase = time.monotonic()
+        try:
+          transfer = await _wait_for(
+              loop.run_in_executor(
+                  None,
+                  functools.partial(
+                      self._handler.transfer,
+                      src_units=list(source_units),
+                      dst_units=list(destination_units),
+                      req_id=req_id,
+                      generation=uuid,
+                  ),
+              ),
+              self._timeouts.transfer,
+          )
+          transfer_in_flight = False
+          t_transfer_s = time.monotonic() - t_phase
+          logging.info(
+              "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=transfer"
+              " elapsed_s=%.3f timeout=%s success=%s",
+              round_index,
+              req_id,
+              t_transfer_s,
+              _format_timeout(self._timeouts.transfer),
+              transfer.success if transfer is not None else False,
+          )
+        except (
+            asyncio.TimeoutError,
+            weight_sync.TransferOutcomeUnknownError,
+        ) as e:
+          t_transfer_s = time.monotonic() - t_phase
+          logging.info(
+              "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=transfer"
+              " elapsed_s=%.3f timeout=%s outcome=timeout_or_unknown",
+              round_index,
+              req_id,
+              t_transfer_s,
+              _format_timeout(self._timeouts.transfer),
+          )
+          # Two triggers, one meaning: the coordinator's own deadline elapsed
+          # (the executor thread is still running), or the transport reported
+          # its RPC outcome unknown (reply lost, server possibly still
+          # executing). Either way the transfer may still be WRITING into
+          # destination staging. Aborting destinations would discard buffers a
+          # live transfer is filling; releasing source staging would pull
+          # memory out from under it. Neither is safe, so neither happens: the
+          # round parks in UNKNOWN_TRANSFER_STATE, the coordinator poisons
+          # itself, and recovery is worker restarts plus reset_after_recovery().
+          # (On Python 3.11+ asyncio.TimeoutError is the builtin TimeoutError,
+          # so an unwrapped transport timeout also lands here rather than in the
+          # rollback branch below.)
+          failures.append(
+              f"transfer: outcome unknown ({e!r}); the transfer may still be"
+              " running"
+          )
+          state = RoundState.UNKNOWN_TRANSFER_STATE
+          release_source = False
+          poison_if_needed()
+          await record_workers("transfer timed out")
+          raise fail(
+              "transfer timed out; destinations NOT aborted and source staging"
+              " NOT released because the transfer may still be running"
+          ) from e
+        except asyncio.CancelledError:
+          t_transfer_s = time.monotonic() - t_phase
+          raise
+        except Exception as e:  # pylint: disable=broad-except
+          t_transfer_s = time.monotonic() - t_phase
+          logging.error("transfer raised exception: %s", e, exc_info=True)
+          transfer_in_flight = False
+          failures.append(f"transfer: {e!r}")
+          if quiesce_attempted:
+            state = await self._rollback(
+                destinations, prepared_request, failures
+            )
+          else:
+            state = RoundState.ABORTED
+          poison_if_needed()
+          await record_workers("transfer raised")
+          raise fail("transfer raised") from e
 
-      state = RoundState.TRANSFERRING
-      transfer_in_flight = True
-      t_phase = time.monotonic()
-      try:
-        transfer = await _wait_for(
-            loop.run_in_executor(
-                None,
-                functools.partial(
-                    self._handler.transfer,
-                    src_units=list(source_units),
-                    dst_units=list(destination_units),
-                    req_id=req_id,
-                    generation=uuid,
-                ),
-            ),
-            self._timeouts.transfer,
+        if transfer is None or not transfer.success:
+          msg = (
+              transfer.message
+              if transfer is not None
+              else "TransferResult is None"
+          )
+          failures.append(f"transfer: {msg}")
+          if quiesce_attempted:
+            state = await self._rollback(
+                destinations, prepared_request, failures
+            )
+          else:
+            state = RoundState.ABORTED
+          poison_if_needed()
+          await record_workers("transfer failed")
+          raise fail("transfer failed")
+
+      async def _exec_pre() -> None:
+        nonlocal quiesce_attempted, t_pre_s, state
+        # --- downtime starts here ---
+        quiesce_attempted = True
+        t_phase = time.monotonic()
+        pre_failures = await self._phase_on_all(
+            destinations,
+            "pre_weight_sync",
+            prepared_request,
+            self._timeouts.pre,
         )
-        transfer_in_flight = False
-        t_transfer_s = time.monotonic() - t_phase
+        t_pre_s = time.monotonic() - t_phase
         logging.info(
-            "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=transfer"
-            " elapsed_s=%.3f timeout=%s success=%s",
+            "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=pre"
+            " elapsed_s=%.3f timeout=%s workers=%d failures=%d",
             round_index,
             req_id,
-            t_transfer_s,
-            _format_timeout(self._timeouts.transfer),
-            transfer.success if transfer is not None else False,
+            t_pre_s,
+            _format_timeout(self._timeouts.pre),
+            len(destinations),
+            len(pre_failures),
         )
-      except (
-          asyncio.TimeoutError,
-          weight_sync.TransferOutcomeUnknownError,
-      ) as e:
-        t_transfer_s = time.monotonic() - t_phase
-        logging.info(
-            "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=transfer"
-            " elapsed_s=%.3f timeout=%s outcome=timeout_or_unknown",
-            round_index,
-            req_id,
-            t_transfer_s,
-            _format_timeout(self._timeouts.transfer),
-        )
-        # Two triggers, one meaning: the coordinator's own deadline elapsed
-        # (the executor thread is still running), or the transport reported
-        # its RPC outcome unknown (reply lost, server possibly still
-        # executing). Either way the transfer may still be WRITING into
-        # destination staging. Aborting destinations would discard buffers a
-        # live transfer is filling; releasing source staging would pull
-        # memory out from under it. Neither is safe, so neither happens: the
-        # round parks in UNKNOWN_TRANSFER_STATE, the coordinator poisons
-        # itself, and recovery is worker restarts plus reset_after_recovery().
-        # (On Python 3.11+ asyncio.TimeoutError is the builtin TimeoutError,
-        # so an unwrapped transport timeout also lands here rather than in the
-        # rollback branch below.)
-        failures.append(
-            f"transfer: outcome unknown ({e!r}); the transfer may still be"
-            " running"
-        )
-        state = RoundState.UNKNOWN_TRANSFER_STATE
-        release_source = False
-        poison_if_needed()
-        await record_workers("transfer timed out")
-        raise fail(
-            "transfer timed out; destinations NOT aborted and source staging"
-            " NOT released because the transfer may still be running"
-        ) from e
-      except asyncio.CancelledError:
-        t_transfer_s = time.monotonic() - t_phase
-        raise
-      except Exception as e:  # pylint: disable=broad-except
-        t_transfer_s = time.monotonic() - t_phase
-        logging.error("transfer raised exception: %s", e, exc_info=True)
-        transfer_in_flight = False
-        failures.append(f"transfer: {e!r}")
-        state = await self._rollback(destinations, prepared_request, failures)
-        poison_if_needed()
-        await record_workers("transfer raised")
-        raise fail("transfer raised") from e
+        if pre_failures:
+          failures.extend(pre_failures)
+          state = await self._rollback(destinations, prepared_request, failures)
+          poison_if_needed()
+          await record_workers("pre_weight_sync failed")
+          raise fail("pre_weight_sync failed")
+        state = RoundState.PREPARED
 
-      if not transfer.success:
-        failures.append(f"transfer: {transfer.message}")
-        state = await self._rollback(destinations, prepared_request, failures)
-        poison_if_needed()
-        await record_workers("transfer failed")
-        raise fail("transfer failed")
+      run_parallel_h2h = self._parallel_h2h
+      if run_parallel_h2h:
+        if uuid <= 0:
+          logging.warning(
+              "WEIGHT_SYNC_PHASE round=%d req_id=%s parallel_h2h=True"
+              " requested, but uuid=%d is not positive; falling back to"
+              " sequential quiesce-before-transfer order.",
+              round_index,
+              req_id,
+              uuid,
+          )
+          run_parallel_h2h = False
+        unsafe_units = [
+            f"{m.unit.job_name}:{m.unit.job_replica_id}(auto_h2d={m.auto_h2d!r})"
+            for m in dst_metadata
+            if m.auto_h2d is not False
+        ]
+        if unsafe_units:
+          logging.warning(
+              "WEIGHT_SYNC_PHASE round=%d req_id=%s parallel_h2h=True"
+              " requested, but destination unit(s) did not confirm"
+              " auto_h2d=False (%s); falling back to sequential"
+              " quiesce-before-transfer order to avoid writing into live HBM"
+              " during serving.",
+              round_index,
+              req_id,
+              ", ".join(unsafe_units),
+          )
+          run_parallel_h2h = False
+
+      if run_parallel_h2h:
+        # In parallel H2H mode: transfer runs while destinations are still
+        # active and serving.
+        await _exec_transfer()
+        # Downtime begins here:
+        await _exec_pre()
+      else:
+        # Sequential mode: quiesce destinations first, then transfer.
+        await _exec_pre()
+        await _exec_transfer()
 
       state = RoundState.H2D_IN_PROGRESS
       t_phase = time.monotonic()
@@ -1604,6 +2020,16 @@ class WeightSyncCoordinator:
         worker_reports.setdefault(
             wid, WorkerRoundReport(worker_id=wid, phase="committed")
         )
+        try:
+          self._registry.set_state(
+              wid,
+              worker_registry.MembershipState.ACTIVE,
+              expected_state=worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
+          )
+        except KeyError:
+          logging.warning(
+              "Worker %r unregistered before weight sync promotion.", wid
+          )
       return result()
 
     except asyncio.CancelledError:

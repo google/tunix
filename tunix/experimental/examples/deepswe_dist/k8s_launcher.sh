@@ -81,6 +81,7 @@ export PIPELINE_TRAIN_MICROBATCHES=${PIPELINE_TRAIN_MICROBATCHES:-false}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export WEIGHT_SYNC_DISABLE_TIMEOUTS=${WEIGHT_SYNC_DISABLE_TIMEOUTS:-${DISABLE_WEIGHT_SYNC_TIMEOUTS:-0}}
+export WEIGHT_SYNC_PARALLEL_H2H=${WEIGHT_SYNC_PARALLEL_H2H:-}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-5}
 export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-2}
 export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints}
@@ -103,6 +104,17 @@ export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 export PROFILER_STEPS=${PROFILER_STEPS:-0}
 export SKIP_FIRST_N_PROFILER_STEPS=${SKIP_FIRST_N_PROFILER_STEPS:-}
 export PROFILER_PERIOD=${PROFILER_PERIOD:-}
+export PROFILE_SAMPLER=${PROFILE_SAMPLER:-false}
+if [[ "${PROFILE_SAMPLER}" == "true" || "${PROFILE_SAMPLER}" == "True" || "${PROFILE_SAMPLER}" == "1" ]]; then
+  export PHASED_PROFILING_DIR=${PHASED_PROFILING_DIR:-${MAXTEXT_OUTPUT_DIR:+${MAXTEXT_OUTPUT_DIR}/inference_profiles}}
+  export PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:-3}
+  export PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:-10}
+else
+  export PHASED_PROFILING_DIR=${PHASED_PROFILING_DIR:-}
+  export PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:-}
+  export PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:-}
+fi
+export TUNIX_DEBUG_INFERENCE_LOGS=${TUNIX_DEBUG_INFERENCE_LOGS:-true}
 export ROLLOUT_FREE_KV_CACHE=${ROLLOUT_FREE_KV_CACHE:-false}
 export IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
 # Serve the oldest in-flight prompt batch first: the orchestrator stamps each
@@ -118,6 +130,24 @@ case "${ROLLOUT_PRIORITY_SCHEDULING}" in
     exit 1
     ;;
 esac
+# Seconds between the start-up prompt batches (batch k held until k * this
+# after batch 0 dispatches). Default 0 = no stagger.
+export INITIAL_DISPATCH_STAGGER_S=${INITIAL_DISPATCH_STAGGER_S:-0}
+# Seconds batch 1 is held after batch 0 dispatches when it should differ from
+# INITIAL_DISPATCH_STAGGER_S (then batch k > 1 follows at FIRST + (k - 1) *
+# INITIAL_DISPATCH_STAGGER_S). Empty (default) or 0 = INITIAL_DISPATCH_STAGGER_S.
+export INITIAL_DISPATCH_FIRST_STAGGER_S=${INITIAL_DISPATCH_FIRST_STAGGER_S:-}
+# `true` compiles the trainer at bring-up against one synthetic micro-batch
+# (before run_start) instead of on the first real micro-batch. Default false.
+export TRAINER_WARMUP_COMPILE=${TRAINER_WARMUP_COMPILE:-false}
+
+# JAX compilation cache configuration
+export LOCAL_JAX_CACHE_DIR=${LOCAL_JAX_CACHE_DIR:-${JAX_CACHE_DIR:-/tmp/jax_cache}}
+export JAX_CACHE_GCS_DIR=${JAX_CACHE_GCS_DIR:-}
+export ROLLOUT_JAX_CACHE_GCS_DIR=${ROLLOUT_JAX_CACHE_GCS_DIR:-${JAX_CACHE_GCS_DIR:+${JAX_CACHE_GCS_DIR}/rollout}}
+export EVAL_JAX_CACHE_GCS_DIR=${EVAL_JAX_CACHE_GCS_DIR:-${ROLLOUT_JAX_CACHE_GCS_DIR}}
+export SAVE_JAX_CACHE=${SAVE_JAX_CACHE:-true}
+export SKIP_JAX_PRECOMPILE=${SKIP_JAX_PRECOMPILE:-1}
 
 # DeepSWE dataset and environment configuration
 export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
@@ -134,7 +164,8 @@ else
   export ROLLOUT_AGENT_NAME=${ROLLOUT_AGENT_NAME:-deepswe_agent}
 fi
 export USE_AGENT_SANDBOX=${USE_AGENT_SANDBOX:-1}
-export SANDBOX_NAMESPACE=${SANDBOX_NAMESPACE:-rl-tunix-swebench}
+INITIAL_SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-}"
+export SANDBOX_NAMESPACE="${INITIAL_SANDBOX_NAMESPACE:-$( [[ -n "${K8S_NAMESPACE:-}" && "${K8S_NAMESPACE}" != "default" ]] && echo "${K8S_NAMESPACE}" || echo "trellis" )}"
 export SANDBOX_NODE_SELECTOR_KEY=${SANDBOX_NODE_SELECTOR_KEY:-}
 export SANDBOX_NODE_SELECTOR_VAL=${SANDBOX_NODE_SELECTOR_VAL:-}
 export SANDBOX_TOLERATIONS=${SANDBOX_TOLERATIONS:-}
@@ -146,6 +177,11 @@ export ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-64}
 export MAX_CONCURRENCY=${MAX_CONCURRENCY:-${ROLLOUT_MAX_CONCURRENCY}}
 export FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
 export MAX_WARMPOOL_REPLICAS=${MAX_WARMPOOL_REPLICAS:-4}
+export SANDBOX_WAIT_INITIAL=${SANDBOX_WAIT_INITIAL:-true}
+export SANDBOX_IMAGE_PULL_POLICY=${SANDBOX_IMAGE_PULL_POLICY:-IfNotPresent}
+export PREPULL_SANDBOX_IMAGES=${PREPULL_SANDBOX_IMAGES:-false}
+export PREWARM_IMAGES_FILE=${PREWARM_IMAGES_FILE:-}
+export PREWARM_MAX_WORKERS=${PREWARM_MAX_WORKERS:-32}
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-0}
 export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
 # Orbax Pathways impl: "persistence" (default) or "colocated_python". Selecting
@@ -172,6 +208,8 @@ export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
 export ROLLOUT_MESH_EXPERT=${ROLLOUT_MESH_EXPERT:-1}
 # Optional: enable experimental batched-RPA attention kernel for rollout.
 export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
+export ROLLOUT_SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE:-0}
+export EVAL_SKIP_JAX_PRECOMPILE=${EVAL_SKIP_JAX_PRECOMPILE:-1}
 
 # MaxText configuration: only consulted when TRAINER_BACKEND=maxtext.
 export REMAT_POLICY=${REMAT_POLICY:-decoder}
@@ -204,6 +242,7 @@ export NEW_MODEL_DESIGN=${NEW_MODEL_DESIGN:-}
 export ATTN_BUCKETIZED_NUM_REQS=${ATTN_BUCKETIZED_NUM_REQS:-}
 export ATTN_CUSTOM_NUM_REQS_BUCKETS=${ATTN_CUSTOM_NUM_REQS_BUCKETS:-}
 export ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD:-}
+export RAGGED_GATHER_REDUCE_VERSION=${RAGGED_GATHER_REDUCE_VERSION:-v3}
 export VLLM_MOE_CHUNK_SIZE=${VLLM_MOE_CHUNK_SIZE:-}
 export SLICE_ROPE_CACHE=${SLICE_ROPE_CACHE:-}
 export DP_SCHED_BATCH_PREFILL=${DP_SCHED_BATCH_PREFILL:-}
@@ -256,6 +295,10 @@ export ORCHESTRATOR_EXTRA_ENV=${ORCHESTRATOR_EXTRA_ENV:-}
 export ROLLOUT_EXTRA_ENV=${ROLLOUT_EXTRA_ENV:-}
 export VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY=${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY:-}
 export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-}
+export TPU_SMALL_ALL_REDUCE="${TPU_SMALL_ALL_REDUCE:-1}"
+export TPU_MOE_SINGLE_SORT="${TPU_MOE_SINGLE_SORT:-1}"
+export TPU_MOE_ROUTER_TOPK="${TPU_MOE_ROUTER_TOPK:-rowmax}"
+export TPU_MOE_LOWTOK="${TPU_MOE_LOWTOK:-1}"
 export DRY_RUN=${DRY_RUN:-false}
 
 # Worker fail-fast. `FAIL_FAST=true`: a trainer/rollout worker that dies after
@@ -265,10 +308,26 @@ export DRY_RUN=${DRY_RUN:-false}
 # the JobSet up to FT_STARTUP_RETRIES times. `false`: legacy restart behaviour.
 # The orchestrator JobSet is already fail-fast either way.
 # With `true` the sandbox side fails fast too (examples/deepswe/sandbox_utils.py
-# SandboxFailFastConfig): sandbox readiness is capped at
+# SandboxFailFastConfig): sandbox readiness waits are capped at
 # FT_SANDBOX_READY_TIMEOUT_S, SWEEnv tries fleet.acquire FT_SANDBOX_ACQUIRE_RETRIES
-# times, and a warm-pool error ends the run.
+# times, and a warm-pool *creation* error (template/pool name owned by another
+# run, run-namespace setup) ends the run. A warm pool that exists but is slow to
+# become ready does NOT end the run: the orchestrator logs it and continues,
+# and a rollout whose claim still cannot be served after the retries fails
+# only that trajectory.
+export ROLLOUT_FAULT_TOLERANCE=${ROLLOUT_FAULT_TOLERANCE:-true}
+export MAX_CONCURRENT_ROLLOUTS_PER_WORKER=${MAX_CONCURRENT_ROLLOUTS_PER_WORKER:-}
+export ROLLOUT_TASK_TIMEOUT_S=${ROLLOUT_TASK_TIMEOUT_S:-}
+export MAX_ZERO_WORKER_WAIT_S=${MAX_ZERO_WORKER_WAIT_S:-}
+export ROLLOUT_MAX_TASK_RETRIES=${ROLLOUT_MAX_TASK_RETRIES:-}
+export RECOVER_UNKNOWN_TRANSFER_STATE=${RECOVER_UNKNOWN_TRANSFER_STATE:-false}
+
 export FAIL_FAST=${FAIL_FAST:-false}
+if [[ "${ROLLOUT_FAULT_TOLERANCE}" == "false" || "${ROLLOUT_FAULT_TOLERANCE}" == "False" || "${ROLLOUT_FAULT_TOLERANCE}" == "0" ]]; then
+  export ROLLOUT_FAIL_FAST=${ROLLOUT_FAIL_FAST:-${FAIL_FAST}}
+else
+  export ROLLOUT_FAIL_FAST=${ROLLOUT_FAIL_FAST:-false}
+fi
 export FT_STARTUP_RETRIES=${FT_STARTUP_RETRIES:-3}
 export FT_SANDBOX_READY_TIMEOUT_S=${FT_SANDBOX_READY_TIMEOUT_S:-600}
 export FT_SANDBOX_ACQUIRE_RETRIES=${FT_SANDBOX_ACQUIRE_RETRIES:-2}
@@ -283,6 +342,18 @@ case "${FAIL_FAST}" in
     ;;
   *)
     echo "Invalid FAIL_FAST='${FAIL_FAST}' (expected true|false)" >&2
+    exit 1
+    ;;
+esac
+case "${ROLLOUT_FAIL_FAST}" in
+  false)
+    ROLLOUT_FAIL_FAST_GENERATOR_FLAGS=()
+    ;;
+  true)
+    ROLLOUT_FAIL_FAST_GENERATOR_FLAGS=(--fail_fast "--startup_retries=${FT_STARTUP_RETRIES}")
+    ;;
+  *)
+    echo "Invalid ROLLOUT_FAIL_FAST='${ROLLOUT_FAIL_FAST}' (expected true|false)" >&2
     exit 1
     ;;
 esac
@@ -309,20 +380,24 @@ stop_orchestrator() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
     echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete pods -l jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE} --force --grace-period=0 --ignore-not-found=true"
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-      echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --ignore-not-found=true"
-      echo "kubectl delete sandboxtemplates -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --ignore-not-found=true"
-      echo "kubectl delete sandboxclaims -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --ignore-not-found=true"
+      echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --wait=false --ignore-not-found=true"
+      echo "kubectl delete sandboxtemplates -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --wait=false --ignore-not-found=true"
+      echo "kubectl delete sandboxclaims -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --wait=false --ignore-not-found=true"
+      echo "kubectl delete sandboxes -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --wait=false --ignore-not-found=true"
       echo "kubectl delete pods -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --force --grace-period=0 --ignore-not-found=true"
     fi
   else
-    kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
-    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+    kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
+    kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
       echo "Cleaning up sandboxes and warmpools for ${ORCHESTRATOR_ID} in ${SANDBOX_NAMESPACE}..."
-      kubectl delete sandboxwarmpools -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --ignore-not-found=true 2>/dev/null || true
-      kubectl delete sandboxtemplates -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --ignore-not-found=true 2>/dev/null || true
-      kubectl delete sandboxclaims -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxwarmpools -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --wait=false --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxtemplates -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --wait=false --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxclaims -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --wait=false --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxes -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --wait=false --ignore-not-found=true 2>/dev/null || true
       kubectl delete pods -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     fi
   fi
@@ -340,7 +415,7 @@ start_orchestrator() {
   local sandbox_env=""
   local sandbox_arg=""
   if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ${OPENHANDS_SERVER_IMAGE:+OPENHANDS_SERVER_IMAGE=\"${OPENHANDS_SERVER_IMAGE}\"} ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS=\"${SANDBOX_TOLERATIONS}\"} ${FAIL_FAST_SANDBOX_ENV}"
+    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ${OPENHANDS_SERVER_IMAGE:+OPENHANDS_SERVER_IMAGE=\"${OPENHANDS_SERVER_IMAGE}\"} ${SANDBOX_IMAGE_PULL_POLICY:+SANDBOX_IMAGE_PULL_POLICY=\"${SANDBOX_IMAGE_PULL_POLICY}\"} ${PREPULL_IMAGES_PER_POD:+PREPULL_IMAGES_PER_POD=\"${PREPULL_IMAGES_PER_POD}\"} ${PREPULL_MAX_PARALLEL_DAEMONSETS:+PREPULL_MAX_PARALLEL_DAEMONSETS=\"${PREPULL_MAX_PARALLEL_DAEMONSETS}\"} ${PREPULL_MAX_IMAGES:+PREPULL_MAX_IMAGES=\"${PREPULL_MAX_IMAGES}\"} ${PREPULL_TIMEOUT_S:+PREPULL_TIMEOUT_S=\"${PREPULL_TIMEOUT_S}\"} ${PREPULL_IMAGES_FILE:+PREPULL_IMAGES_FILE=\"${PREPULL_IMAGES_FILE}\"} ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS='${SANDBOX_TOLERATIONS}'} ${FAIL_FAST_SANDBOX_ENV}"
     sandbox_arg="--use_agent_sandbox"
   elif [[ -n "${IMAGE_REWRITE_PREFIX}" ]]; then
     sandbox_env="IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\""
@@ -368,12 +443,26 @@ start_orchestrator() {
     disable_ws_timeouts_arg="--disable_weight_sync_timeouts"
   fi
 
+  local jax_cache_env=""
+  if [[ "${DISABLE_JAX_CACHE:-0}" != "1" && "${DISABLE_JAX_CACHE:-false}" != "true" ]]; then
+    if [[ -n "${JAX_CACHE_GCS_DIR}" ]]; then
+      jax_cache_env+=" JAX_CACHE_GCS_DIR=\"${JAX_CACHE_GCS_DIR}\""
+    fi
+    if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" ]]; then
+      jax_cache_env+=" ROLLOUT_JAX_CACHE_GCS_DIR=\"${ROLLOUT_JAX_CACHE_GCS_DIR}\""
+    fi
+    if [[ -n "${SAVE_JAX_CACHE}" ]]; then
+      jax_cache_env+=" SAVE_JAX_CACHE=\"${SAVE_JAX_CACHE}\""
+    fi
+  fi
+
   "$PYTHON_BIN" "$YAML_GENERATOR" \
     "${YAML_DIR}/jobset.cpu.yaml" \
     --jobset_name="${ORCHESTRATOR_ID}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     ${GANG_ID:+--gang_id="${GANG_ID}"} \
+    ${GANG_ID:+--teardown_gang_on_exit} \
     --cpu_machine=${CPU_MACHINE} \
     --cpu_nodepool="${CPU_NODEPOOL}" \
     --cpu_memory="${CPU_MEMORY}" \
@@ -383,6 +472,7 @@ start_orchestrator() {
       ORCHESTRATOR_ID=\"${ORCHESTRATOR_ID}\" \
       ${sandbox_env} \
       ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
+      ${OPENHANDS_MULTI_TOOL_CALLS:+OPENHANDS_MULTI_TOOL_CALLS=\"${OPENHANDS_MULTI_TOOL_CALLS}\"} \
       ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
       ${WANDB_ENTITY:+WANDB_ENTITY=\"${WANDB_ENTITY}\"} \
@@ -391,6 +481,7 @@ start_orchestrator() {
       ROLLOUT_WORKERS=\"${ROLLOUT_WORKERS:-${ROLLOUT_REPLICAS:-1}}\" \
       EPISODE_TIMEOUT_SECS=\"${EPISODE_TIMEOUT_SECS:-5400}\" \
       WEIGHT_SYNC_DISABLE_TIMEOUTS=\"${WEIGHT_SYNC_DISABLE_TIMEOUTS}\" \
+      ${WEIGHT_SYNC_PARALLEL_H2H:+WEIGHT_SYNC_PARALLEL_H2H=\"${WEIGHT_SYNC_PARALLEL_H2H}\"} \
       ${ROLLOUT_FP8:+ROLLOUT_FP8=\"${ROLLOUT_FP8}\"} \
       ${TRAINER_FP8:+TRAINER_FP8=\"${TRAINER_FP8}\"} \
       ${ROLLOUT_QUANTIZATION:+ROLLOUT_QUANTIZATION=\"${ROLLOUT_QUANTIZATION}\"} \
@@ -400,8 +491,9 @@ start_orchestrator() {
       MALLOC_MMAP_THRESHOLD_=\"${MALLOC_MMAP_THRESHOLD_:-131072}\" \
       PYTHONUNBUFFERED=1 \
       TUNIX_IS_INTERNAL_ENV=false \
+      ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
       ${BOOTSTRAP_CMD} \
-      ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV} }python -m tunix.experimental.distributed.runtime.main \
+      ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV} }${jax_cache_env} python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
         --process_main=tunix.experimental.examples.deepswe_dist.run_deepswe_dist.main \
@@ -445,6 +537,7 @@ start_orchestrator() {
         ${LOG_DIR:+--log_dir=\"${LOG_DIR}\"} \
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
         ${TRAJECTORY_STORE_ROOT_DIR:+--trajectory_store_root_dir=\"${TRAJECTORY_STORE_ROOT_DIR}\"} \
+        ${TRAJECTORY_STORE_DB_URL:+--trajectory_store_db_url=\"${TRAJECTORY_STORE_DB_URL}\"} \
         --flush_every_n_steps=${FLUSH_EVERY_N_STEPS} \
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
@@ -452,9 +545,20 @@ start_orchestrator() {
         ${disable_ws_timeouts_arg} \
         --stop_workers_on_exit \
         ${MAX_WARMPOOL_REPLICAS:+--max_warmpool_replicas=${MAX_WARMPOOL_REPLICAS}} \
+        $([[ "${SANDBOX_WAIT_INITIAL}" == "false" || "${SANDBOX_WAIT_INITIAL}" == "False" || "${SANDBOX_WAIT_INITIAL}" == "0" ]] && echo --no-sandbox_wait_initial || echo --sandbox_wait_initial) \
+        $([[ "${PREPULL_SANDBOX_IMAGES}" == "true" || "${PREPULL_SANDBOX_IMAGES}" == "True" || "${PREPULL_SANDBOX_IMAGES}" == "1" ]] && echo --prepull_sandbox_images || echo --no-prepull_sandbox_images) \
+        ${PREPULL_IMAGES_FILE:+--prepull_images_file=\"${PREPULL_IMAGES_FILE}\"} \
+        ${PREWARM_IMAGES_FILE:+--prewarm_images_file=\"${PREWARM_IMAGES_FILE}\"} \
+        ${PREWARM_MAX_WORKERS:+--prewarm_max_workers=${PREWARM_MAX_WORKERS}} \
         ${MAX_CONCURRENCY:+--max_concurrency=${MAX_CONCURRENCY}} \
+        $([[ "${ROLLOUT_FAULT_TOLERANCE}" == "false" || "${ROLLOUT_FAULT_TOLERANCE}" == "False" || "${ROLLOUT_FAULT_TOLERANCE}" == "0" ]] && echo --no-rollout_fault_tolerance || echo --rollout_fault_tolerance) \
+        ${MAX_CONCURRENT_ROLLOUTS_PER_WORKER:+--max_concurrent_rollouts_per_worker=${MAX_CONCURRENT_ROLLOUTS_PER_WORKER}} \
+        ${ROLLOUT_TASK_TIMEOUT_S:+--rollout_task_timeout_s=${ROLLOUT_TASK_TIMEOUT_S}} \
+        ${MAX_ZERO_WORKER_WAIT_S:+--max_zero_worker_wait_s=${MAX_ZERO_WORKER_WAIT_S}} \
+        ${ROLLOUT_MAX_TASK_RETRIES:+--rollout_max_task_retries=${ROLLOUT_MAX_TASK_RETRIES}} \
+        $([[ "${RECOVER_UNKNOWN_TRANSFER_STATE}" == "true" || "${RECOVER_UNKNOWN_TRANSFER_STATE}" == "True" || "${RECOVER_UNKNOWN_TRANSFER_STATE}" == "1" ]] && echo --recover_unknown_transfer_state || echo --no-recover_unknown_transfer_state) \
         ${MAX_STALENESS:+--max_staleness=${MAX_STALENESS}} \
-        $([[ -n "${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}" && "${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}" -gt 0 ]] && echo "--checkpoint_optimizer_interval_steps=${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}") \
+        $([[ "${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}" =~ ^[0-9]+$ ]] && echo "--checkpoint_optimizer_interval_steps=${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}") \
         ${TRAJECTORY_GROUP_ORDER:+--trajectory_group_order=${TRAJECTORY_GROUP_ORDER}} \
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \
         $([[ "${EXACT_TOKEN_CONTINUITY}" == "false" || "${EXACT_TOKEN_CONTINUITY}" == "False" || "${EXACT_TOKEN_CONTINUITY}" == "0" ]] && echo --no-exact_token_continuity || echo --exact_token_continuity) \
@@ -462,6 +566,7 @@ start_orchestrator() {
         $([[ "${PIPELINE_TRAIN_MICROBATCHES}" == "true" || "${PIPELINE_TRAIN_MICROBATCHES}" == "True" || "${PIPELINE_TRAIN_MICROBATCHES}" == "1" ]] && echo --pipeline_train_microbatches || echo --no-pipeline_train_microbatches) \
         $([[ "${IN_FLIGHT_WEIGHT_UPDATES}" == "true" || "${IN_FLIGHT_WEIGHT_UPDATES}" == "True" || "${IN_FLIGHT_WEIGHT_UPDATES}" == "1" ]] && echo --in_flight_weight_updates || echo --no-in_flight_weight_updates) \
         $([[ "${ROLLOUT_PRIORITY_SCHEDULING}" == "true" ]] && echo --rollout_priority_scheduling || echo --no-rollout_priority_scheduling) \
+        $([[ "${INITIAL_DISPATCH_STAGGER_S}" != "0" && "${INITIAL_DISPATCH_STAGGER_S}" != "0.0" && -n "${INITIAL_DISPATCH_STAGGER_S}" ]] && echo --initial_dispatch_stagger_s=${INITIAL_DISPATCH_STAGGER_S})$([[ -n "${INITIAL_DISPATCH_FIRST_STAGGER_S}" && "${INITIAL_DISPATCH_FIRST_STAGGER_S}" != "0" && "${INITIAL_DISPATCH_FIRST_STAGGER_S}" != "0.0" ]] && echo " --initial_dispatch_first_stagger_s=${INITIAL_DISPATCH_FIRST_STAGGER_S}")$([[ "${TRAINER_WARMUP_COMPILE}" == "true" || "${TRAINER_WARMUP_COMPILE}" == "True" || "${TRAINER_WARMUP_COMPILE}" == "1" ]] && echo " --trainer_warmup_compile$([[ "${RETURN_ROUTED_EXPERTS}" == "true" || "${RETURN_ROUTED_EXPERTS}" == "True" || "${RETURN_ROUTED_EXPERTS}" == "1" ]] && echo " --trainer_warmup_routed_experts")") \
         ${dataset_args} \
         ${shuffle_arg} \
         ${sandbox_arg} \
@@ -479,6 +584,7 @@ start_orchestrator() {
         --weight_decay=${WEIGHT_DECAY} \
         --max_grad_norm=${MAX_GRAD_NORM} \
         --train_mesh_tp=${TRAINER_MESH_TP} \
+        --train_mesh_context=${TRAINER_MESH_CONTEXT:-1} \
         --train_mesh_expert=${TRAINER_MESH_EXPERT} \
         --rollout_mesh_tp=${ROLLOUT_MESH_TP} \
         --rollout_mesh_expert=${ROLLOUT_MESH_EXPERT:-1} \
@@ -497,9 +603,11 @@ stop_trainer() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${TRAINER_ID} -n ${K8S_NAMESPACE}"
     echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${TRAINER_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete pods -l jobset.sigs.k8s.io/jobset-name=${TRAINER_ID} -n ${K8S_NAMESPACE} --force --grace-period=0 --ignore-not-found=true"
   else
-    kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
-    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+    kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
+    kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
   fi
 }
 
@@ -628,16 +736,24 @@ stop_rollout() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${ROLLOUT_ID} -n ${K8S_NAMESPACE}"
     kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[a-f0-9]+" | xargs -r echo kubectl delete -n "${K8S_NAMESPACE}"
+    echo "kubectl delete pods -l jobset.sigs.k8s.io/jobset-name=${ROLLOUT_ID} -n ${K8S_NAMESPACE} --force --grace-period=0 --ignore-not-found=true"
     if [[ ${replicas} -gt 1 ]]; then
+      local selector_list
+      selector_list=$(seq -s, -f "${ROLLOUT_ID}-%g" 0 $((replicas - 1)))
       echo "kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((replicas - 1))) -n ${K8S_NAMESPACE}"
       kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[0-9]+-[a-f0-9]+" | xargs -r echo kubectl delete -n "${K8S_NAMESPACE}"
+      echo "kubectl delete pods -l \"jobset.sigs.k8s.io/jobset-name in (${selector_list})\" -n ${K8S_NAMESPACE} --force --grace-period=0 --ignore-not-found=true"
     fi
   else
-    kubectl delete jobset "${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
+    kubectl delete jobset "${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false
     kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[a-f0-9]+" | xargs -r kubectl delete -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
+    kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name=${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     if [[ ${replicas} -gt 1 ]]; then
-      kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((replicas - 1))) -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+      local selector_list
+      selector_list=$(seq -s, -f "${ROLLOUT_ID}-%g" 0 $((replicas - 1)))
+      kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((replicas - 1))) -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
       kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[0-9]+-[a-f0-9]+" | xargs -r kubectl delete -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
+      kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name in (${selector_list})" -n "${K8S_NAMESPACE}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     fi
   fi
 }
@@ -716,47 +832,60 @@ if cfg:
   fi
   local sandbox_env=""
   if [[ "$USE_AGENT_SANDBOX" == "1" || "$USE_AGENT_SANDBOX" == "true" || "$USE_AGENT_SANDBOX" == "True" ]]; then
-    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ${OPENHANDS_SERVER_IMAGE:+OPENHANDS_SERVER_IMAGE=\"${OPENHANDS_SERVER_IMAGE}\"} ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS=\"${SANDBOX_TOLERATIONS}\"} ORCHESTRATOR_ID=\"${ORCHESTRATOR_ID}\" ${FAIL_FAST_SANDBOX_ENV}"
+    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ${OPENHANDS_SERVER_IMAGE:+OPENHANDS_SERVER_IMAGE=\"${OPENHANDS_SERVER_IMAGE}\"} ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS='${SANDBOX_TOLERATIONS}'} ORCHESTRATOR_ID=\"${ORCHESTRATOR_ID}\" ${FAIL_FAST_SANDBOX_ENV}"
   elif [[ -n "${IMAGE_REWRITE_PREFIX}" ]]; then
     sandbox_env="IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\" ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"}"
   fi
-  local dynamic_slicing_single_host=false
-  if [[ "${ROLLOUT_TPU_SLICE}" =~ ^(tpu7x|tpu-v7x-slice):2x2x1 ]]; then
-    if [[ "${USE_DYNAMIC_SLICING}" == "true" || "${USE_DYNAMIC_SLICING}" == "1" || -z "${USE_DYNAMIC_SLICING}" ]]; then
-      dynamic_slicing_single_host=true
+  local start_index=${ROLLOUT_START_INDEX:-0}
+  local replicas=${ROLLOUT_REPLICAS:-1}
+  local replica_ids=()
+  for ((i = start_index; i < replicas; i++)); do
+    local replica_id="${ROLLOUT_ID}"
+    if [[ ${replicas} -gt 1 ]]; then
+      replica_id="${ROLLOUT_ID}-${i}"
+    fi
+    replica_ids+=("${replica_id}")
+  done
+  if [[ ${#replica_ids[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" && "${DISABLE_JAX_CACHE:-false}" != "true" && "${DISABLE_JAX_CACHE:-0}" != "1" ]]; then
+    echo "[launcher] Rollout JAX cache GCS: ${ROLLOUT_JAX_CACHE_GCS_DIR} (save=${SAVE_JAX_CACHE:-true})" >&2
+  fi
+
+  local jax_cache_env=""
+  if [[ "${DISABLE_JAX_CACHE:-0}" != "1" && "${DISABLE_JAX_CACHE:-false}" != "true" ]]; then
+    if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" ]]; then
+      jax_cache_env+=" JAX_CACHE_GCS_DIR=\"${ROLLOUT_JAX_CACHE_GCS_DIR}\""
+    fi
+    if [[ -n "${SAVE_JAX_CACHE}" ]]; then
+      jax_cache_env+=" SAVE_JAX_CACHE=\"${SAVE_JAX_CACHE}\""
     fi
   fi
 
-  for i in $(seq ${ROLLOUT_START_INDEX:-0} $((ROLLOUT_REPLICAS - 1))); do
-    local replica_id="${ROLLOUT_ID}"
-    local worker_id="${ROLLOUT_ID}"
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
-      replica_id="${ROLLOUT_ID}-${i}"
-      worker_id="${ROLLOUT_ID}-${i}"
-    fi
-
-    local extra_generator_flags=()
-    if [[ "$dynamic_slicing_single_host" == "true" ]]; then
-      extra_generator_flags+=(--omit_slice_topology)
-    fi
-
+  local placeholder="__TUNIX_REPLICA_ID__"
+  local manifest_template
+  manifest_template=$(
     COLOCATED_PYTHON_SIDECAR_IMAGE="" "$PYTHON_BIN" "$YAML_GENERATOR" \
       "${YAML_DIR}/${ROLLOUT_JOBSET_YAML}" \
-      --jobset_name="${replica_id}" \
+      --jobset_name="${placeholder}" \
       --namespace="${K8S_NAMESPACE}" \
-      "${FAIL_FAST_GENERATOR_FLAGS[@]}" \
+      "${ROLLOUT_FAIL_FAST_GENERATOR_FLAGS[@]}" \
       ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
       ${GANG_ID:+--gang_id="${GANG_ID}"} \
       --tpu_slice=${ROLLOUT_TPU_SLICE} \
       --worker_container_image="${TUNIX_IMAGE}" \
       --worker_container_port="${ROLLOUT_PORT}" \
-      "${extra_generator_flags[@]}" \
       --worker_startup_command=" \
         PYTHONUNBUFFERED=1 \
         TUNIX_IS_INTERNAL_ENV=false \
+        ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
         EPISODE_TIMEOUT_SECS="${EPISODE_TIMEOUT_SECS:-5400}" \
         WEIGHT_SYNC_DISABLE_TIMEOUTS=\"${WEIGHT_SYNC_DISABLE_TIMEOUTS}\" \
+        ${WEIGHT_SYNC_PARALLEL_H2H:+WEIGHT_SYNC_PARALLEL_H2H=\"${WEIGHT_SYNC_PARALLEL_H2H}\"} \
         ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
+        ${OPENHANDS_MULTI_TOOL_CALLS:+OPENHANDS_MULTI_TOOL_CALLS=\"${OPENHANDS_MULTI_TOOL_CALLS}\"} \
         ${BOOTSTRAP_CMD} \
         USE_RAIDEN_FFI=false RAIDEN_USE_FFI=0 \
         RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} \
@@ -776,22 +905,30 @@ if cfg:
         ${ATTN_BUCKETIZED_NUM_REQS:+ATTN_BUCKETIZED_NUM_REQS=${ATTN_BUCKETIZED_NUM_REQS}} \
         ${ATTN_CUSTOM_NUM_REQS_BUCKETS:+ATTN_CUSTOM_NUM_REQS_BUCKETS=${ATTN_CUSTOM_NUM_REQS_BUCKETS}} \
         ${ONEHOT_MOE_PERMUTE_THRESHOLD:+ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD}} \
+        ${RAGGED_GATHER_REDUCE_VERSION:+RAGGED_GATHER_REDUCE_VERSION=${RAGGED_GATHER_REDUCE_VERSION}} \
         ${VLLM_MOE_CHUNK_SIZE:+VLLM_MOE_CHUNK_SIZE=${VLLM_MOE_CHUNK_SIZE}} \
         ${SLICE_ROPE_CACHE:+SLICE_ROPE_CACHE=${SLICE_ROPE_CACHE}} \
         ${DP_SCHED_BATCH_PREFILL:+DP_SCHED_BATCH_PREFILL=${DP_SCHED_BATCH_PREFILL}} \
         ${LIBTPU_INIT_ARGS:+LIBTPU_INIT_ARGS=\"${LIBTPU_INIT_ARGS}\"} \
         ${VLLM_ENABLE_V1_MULTIPROCESSING:+VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}} \
         ${VLLM_LOGGING_LEVEL:+VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL}} \
+        ${PHASED_PROFILING_DIR:+PHASED_PROFILING_DIR=\"${PHASED_PROFILING_DIR}\"} \
+        ${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:+PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR}} \
+        ${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:+PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP}} \
         ${ROLLOUT_ENV_FLAGS} \
         ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
         ${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY:+VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY=\"${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY}\"} \
         ${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=\"${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY}\"} \
+        ${TPU_SMALL_ALL_REDUCE:+TPU_SMALL_ALL_REDUCE=\"${TPU_SMALL_ALL_REDUCE}\"} \
+        ${TPU_MOE_SINGLE_SORT:+TPU_MOE_SINGLE_SORT=\"${TPU_MOE_SINGLE_SORT}\"} \
+        ${TPU_MOE_ROUTER_TOPK:+TPU_MOE_ROUTER_TOPK=\"${TPU_MOE_ROUTER_TOPK}\"} \
+        ${TPU_MOE_LOWTOK:+TPU_MOE_LOWTOK=\"${TPU_MOE_LOWTOK}\"} \
         ${ROLLOUT_EXTRA_ENV} \
-        SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${sandbox_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+        SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${sandbox_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1}${jax_cache_env} python -m tunix.experimental.distributed.runtime.main \
           --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
           --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
           --process_main=tunix.experimental.examples.common.run_rollout_node.main \
-          --worker_id=${worker_id} \
+          --worker_id=${placeholder} \
           --port=${ROLLOUT_PORT} \
           --model_id=${MODEL_ID} \
           --model_dir=${MODEL_DIR} \
@@ -816,42 +953,22 @@ if cfg:
           --env_name=deepswe_env \
           --agent_name=${ROLLOUT_AGENT_NAME} \
           --max_concurrency=${ROLLOUT_MAX_CONCURRENCY} \
+          --seed=${SEED} \
           ${lora_args} \
           ${maxtext_args} \
           ${vllm_args} \
           ${DEBUG:+--debug} \
-      " \
-      | apply_manifest
+      "
+  ) || return $?
 
-    if [[ "$dynamic_slicing_single_host" == "true" && "$DRY_RUN" != "true" ]]; then
-      local slice_topo="${ROLLOUT_TPU_SLICE#*:}"
-      echo "Applying single-host dynamic slicing patch for ${replica_id} (${slice_topo})..."
-      kubectl patch jobset "${replica_id}" -n "${K8S_NAMESPACE}" --type='json' \
-        -p="[{\"op\": \"add\", \"path\": \"/spec/replicatedJobs/0/template/spec/template/metadata/annotations/cloud.google.com~1gke-tpu-slice-topology\", \"value\": \"${slice_topo}\"}]"
+  local idx=0
+  for replica_id in "${replica_ids[@]}"; do
+    if [[ ${idx} -gt 0 ]]; then
+      echo "---"
     fi
-  done
-
-  if [[ "$dynamic_slicing_single_host" == "true" && "$DRY_RUN" != "true" ]]; then
-    local replicas=${ROLLOUT_WORKERS:-${ROLLOUT_REPLICAS:-1}}
-    echo "Waiting for Kueue to create initial workloads before recycling..."
-    sleep 3
-    for ((i=0; i<replicas; i++)); do
-      local replica_id="${ROLLOUT_ID}"
-      if [[ ${replicas} -gt 1 ]]; then
-        replica_id="${ROLLOUT_ID}-${i}"
-      fi
-      local wl_name
-      wl_name=$(kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${replica_id}-[a-f0-9]+" | head -n 1 | sed 's|^workload.*/||' || true)
-      if [[ -n "${wl_name}" ]]; then
-        local has_topo
-        has_topo=$(kubectl get workload "${wl_name}" -n "${K8S_NAMESPACE}" -o jsonpath='{.spec.podSets[0].template.metadata.annotations.cloud\.google\.com/gke-tpu-slice-topology}' 2>/dev/null || true)
-        if [[ -z "${has_topo}" ]]; then
-          echo "Recycling workload ${wl_name} for ${replica_id} to apply dynamic slicing..."
-          kubectl delete workload "${wl_name}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
-        fi
-      fi
-    done
-  fi
+    printf '%s\n' "${manifest_template//${placeholder}/${replica_id}}"
+    ((idx++))
+  done | apply_manifest
 }
 
 start_mock_trainer() {
@@ -1008,7 +1125,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --image_rewrite_prefix   Registry prefix for sandbox images"
       exit 0
       ;;
-    start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout|start_rollout_only|eval|stop_eval)
+    start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout|start_rollout_only|prepull_sandbox|eval|stop_eval)
       COMMAND="$1"
       shift
       ;;
@@ -1017,6 +1134,8 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+export SANDBOX_NAMESPACE="${INITIAL_SANDBOX_NAMESPACE:-$( [[ -n "${K8S_NAMESPACE:-}" && "${K8S_NAMESPACE}" != "default" ]] && echo "${K8S_NAMESPACE}" || echo "trellis" )}"
 
 start_eval() {
   if [[ -z "${MAXTEXT_CKPT:-}" ]]; then
@@ -1035,27 +1154,35 @@ start_eval() {
   local max_model_len="${VLLM_MAX_MODEL_LEN:-65536}"
   local max_context_limit="${MAX_CONTEXT_LIMIT:-$((max_model_len - ${MAX_PROMPT_LENGTH:-4096}))}"
   local output_dir="${EVAL_OUTPUT_DIR:-${TRAJECTORY_LOG_DIR:-eval_results}}"
+  local replicas=${ROLLOUT_REPLICAS:-1}
   local sandbox_env=""
   if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
     local eval_job_prefix="${eval_name}"
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+    if [[ ${replicas} -gt 1 ]]; then
       eval_job_prefix="${eval_name}-0"
     fi
-    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS=\"${SANDBOX_TOLERATIONS}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ${OPENHANDS_SERVER_IMAGE:+OPENHANDS_SERVER_IMAGE=\"${OPENHANDS_SERVER_IMAGE}\"} ORCHESTRATOR_ID=\"${JOB_PREFIX}\" JOB_PREFIX=\"${eval_job_prefix}\" ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"}"
+    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS='${SANDBOX_TOLERATIONS}'} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ${OPENHANDS_SERVER_IMAGE:+OPENHANDS_SERVER_IMAGE=\"${OPENHANDS_SERVER_IMAGE}\"} ORCHESTRATOR_ID=\"${JOB_PREFIX}\" JOB_PREFIX=\"${eval_job_prefix}\" ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"}"
   elif [[ -n "${IMAGE_REWRITE_PREFIX}" ]]; then
     sandbox_env="IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\""
   fi
 
   local worker_addrs="localhost:${eval_port}"
-  if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
-    for ((j=1; j<ROLLOUT_REPLICAS; j++)); do
+  if [[ ${replicas} -gt 1 ]]; then
+    for ((j=1; j<replicas; j++)); do
       worker_addrs="${worker_addrs} ${eval_name}-${j}-proc-0-0.${eval_name}-${j}:${eval_port}"
     done
   fi
 
-  for i in $(seq ${ROLLOUT_START_INDEX:-0} $((ROLLOUT_REPLICAS - 1))); do
+  local start_index=${ROLLOUT_START_INDEX:-0}
+  local eval_cache_dir="${EVAL_JAX_CACHE_GCS_DIR:-${ROLLOUT_JAX_CACHE_GCS_DIR}}"
+  if [[ -n "${eval_cache_dir}" && "${DISABLE_JAX_CACHE:-false}" != "true" && "${DISABLE_JAX_CACHE:-0}" != "1" ]]; then
+    echo "[launcher] Eval JAX cache GCS: ${eval_cache_dir} (save=${SAVE_JAX_CACHE:-true})" >&2
+  fi
+
+  local idx=0
+  for ((i = start_index; i < replicas; i++)); do
     local replica_id="${eval_name}"
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+    if [[ ${replicas} -gt 1 ]]; then
       replica_id="${eval_name}-${i}"
     fi
     local eval_cmd="tunix/experimental/examples/deepswe_dist/eval_launcher.py"
@@ -1065,6 +1192,9 @@ start_eval() {
       role_arg="--role=worker"
     fi
 
+    if [[ ${idx} -gt 0 ]]; then
+      echo "---"
+    fi
     COLOCATED_PYTHON_SIDECAR_IMAGE="" "$PYTHON_BIN" "$YAML_GENERATOR" \
       "${YAML_DIR}/${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}" \
       --jobset_name="${replica_id}" \
@@ -1086,10 +1216,15 @@ start_eval() {
       --worker_container_port="${eval_port}" \
       --worker_startup_command=" \
         PYTHONUNBUFFERED=1 \
+        ${eval_cache_dir:+JAX_CACHE_GCS_DIR=\"${eval_cache_dir}\"} \
+        ${eval_cache_dir:+ROLLOUT_JAX_CACHE_GCS_DIR=\"${eval_cache_dir}\"} \
+        SAVE_JAX_CACHE=\"${SAVE_JAX_CACHE:-true}\" \
         TUNIX_IS_INTERNAL_ENV=false \
+        ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
         VLLM_TPU_USING_PATHWAYS=1 \
         ${sandbox_env} \
         ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
+        ${OPENHANDS_MULTI_TOOL_CALLS:+OPENHANDS_MULTI_TOOL_CALLS=\"${OPENHANDS_MULTI_TOOL_CALLS}\"} \
         ${BOOTSTRAP_CMD} \
         ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
         ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE} \
@@ -1117,6 +1252,13 @@ start_eval() {
         ${ATTN_BUCKETIZED_NUM_REQS:+ATTN_BUCKETIZED_NUM_REQS=${ATTN_BUCKETIZED_NUM_REQS}} \
         ${ATTN_CUSTOM_NUM_REQS_BUCKETS:+ATTN_CUSTOM_NUM_REQS_BUCKETS=${ATTN_CUSTOM_NUM_REQS_BUCKETS}} \
         ${ONEHOT_MOE_PERMUTE_THRESHOLD:+ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD}} \
+        ${RAGGED_GATHER_REDUCE_VERSION:+RAGGED_GATHER_REDUCE_VERSION=${RAGGED_GATHER_REDUCE_VERSION}} \
+        ${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY:+VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY=\"${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY}\"} \
+        ${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=\"${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY}\"} \
+        ${TPU_SMALL_ALL_REDUCE:+TPU_SMALL_ALL_REDUCE=\"${TPU_SMALL_ALL_REDUCE}\"} \
+        ${TPU_MOE_SINGLE_SORT:+TPU_MOE_SINGLE_SORT=\"${TPU_MOE_SINGLE_SORT}\"} \
+        ${TPU_MOE_ROUTER_TOPK:+TPU_MOE_ROUTER_TOPK=\"${TPU_MOE_ROUTER_TOPK}\"} \
+        ${TPU_MOE_LOWTOK:+TPU_MOE_LOWTOK=\"${TPU_MOE_LOWTOK}\"} \
         ${VLLM_MOE_CHUNK_SIZE:+VLLM_MOE_CHUNK_SIZE=${VLLM_MOE_CHUNK_SIZE}} \
         ${SLICE_ROPE_CACHE:+SLICE_ROPE_CACHE=${SLICE_ROPE_CACHE}} \
         ${DP_SCHED_BATCH_PREFILL:+DP_SCHED_BATCH_PREFILL=${DP_SCHED_BATCH_PREFILL}} \
@@ -1125,10 +1267,14 @@ start_eval() {
         ${VLLM_ENABLE_V1_MULTIPROCESSING:+VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}} \
         ${VLLM_LOGGING_LEVEL:+VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL}} \
         ${VLLM_DATA_PARALLEL_SIZE:+VLLM_DATA_PARALLEL_SIZE=${VLLM_DATA_PARALLEL_SIZE}} \
+        ${PHASED_PROFILING_DIR:+PHASED_PROFILING_DIR=\"${PHASED_PROFILING_DIR}\"} \
+        ${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:+PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR}} \
+        ${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:+PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP}} \
         ${ROLLOUT_ENV_FLAGS} \
         ${ROLLOUT_EXTRA_ENV} \
-        SKIP_JAX_PRECOMPILE=1 python3 -u ${eval_cmd} \
+        SKIP_JAX_PRECOMPILE=${EVAL_SKIP_JAX_PRECOMPILE} python3 -u ${eval_cmd} \
           ${role_arg} \
+          --worker_id=${replica_id} \
           --worker_addresses ${worker_addrs} \
           --port=${eval_port} \
           --model_id=${MODEL_ID} \
@@ -1176,43 +1322,62 @@ start_eval() {
           ${CHECKPOINT_TIMESTAMP_MS:+--checkpoint_timestamp_ms=${CHECKPOINT_TIMESTAMP_MS}} \
           --samples_count=${SAMPLES_COUNT:-0} \
           --is_last_checkpoint=${IS_LAST_CHECKPOINT:-false} \
-      " \
-      | apply_manifest
-  done
+      "
+    ((idx++))
+  done | apply_manifest
 }
 
 stop_eval() {
   local eval_name="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
   local eval_ns="${EVAL_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
+  local replicas=${ROLLOUT_REPLICAS:-1}
+  local selector_list=""
+  if [[ -n "${JOB_PREFIX}" ]]; then
+    selector_list="${JOB_PREFIX}"
+  fi
+  if [[ -n "${eval_name}" ]]; then
+    if [[ -n "${selector_list}" ]]; then
+      selector_list="${selector_list},${eval_name},${eval_name}-0"
+    else
+      selector_list="${eval_name},${eval_name}-0"
+    fi
+  fi
+  local sandbox_selector="app.kubernetes.io/created-by in (${selector_list})"
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "[DRY RUN] Would delete jobset ${eval_name} in namespace ${eval_ns}"
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
-      echo "kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((ROLLOUT_REPLICAS - 1))) -n ${eval_ns}"
-      for ((i=0; i<ROLLOUT_REPLICAS; i++)); do
-        echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${eval_name}-${i} -n ${eval_ns}"
-      done
+    echo "kubectl delete pods -l jobset.sigs.k8s.io/jobset-name=${eval_name} -n ${eval_ns} --force --grace-period=0 --ignore-not-found=true"
+    if [[ ${replicas} -gt 1 ]]; then
+      local selector_list
+      selector_list=$(seq -s, -f "${eval_name}-%g" 0 $((replicas - 1)))
+      echo "kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((replicas - 1))) -n ${eval_ns}"
+      echo "kubectl delete workload -l \"jobset.sigs.k8s.io/jobset-name in (${selector_list})\" -n ${eval_ns} --ignore-not-found=true --wait=false"
+      echo "kubectl delete pods -l \"jobset.sigs.k8s.io/jobset-name in (${selector_list})\" -n ${eval_ns} --force --grace-period=0 --ignore-not-found=true"
     fi
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-      echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --ignore-not-found=true"
-      echo "kubectl delete sandboxtemplates -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --ignore-not-found=true"
-      echo "kubectl delete sandboxclaims -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --ignore-not-found=true"
-      echo "kubectl delete pods -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --force --grace-period=0 --ignore-not-found=true"
+      echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --wait=false --ignore-not-found=true"
+      echo "kubectl delete sandboxtemplates -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --wait=false --ignore-not-found=true"
+      echo "kubectl delete sandboxclaims -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --wait=false --ignore-not-found=true"
+      echo "kubectl delete sandboxes -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --wait=false --ignore-not-found=true"
+      echo "kubectl delete pods -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --force --grace-period=0 --ignore-not-found=true"
     fi
   else
-    kubectl delete jobset "${eval_name}" -n "${eval_ns}" --ignore-not-found=true || true
-    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${eval_name}" -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
-      kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((ROLLOUT_REPLICAS - 1))) -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
-      for ((i=0; i<ROLLOUT_REPLICAS; i++)); do
-        kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${eval_name}-${i}" -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
-      done
+    kubectl delete jobset "${eval_name}" -n "${eval_ns}" --ignore-not-found=true --wait=false || true
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${eval_name}" -n "${eval_ns}" --ignore-not-found=true --wait=false 2>/dev/null || true
+    kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name=${eval_name}" -n "${eval_ns}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
+    if [[ ${replicas} -gt 1 ]]; then
+      local selector_list
+      selector_list=$(seq -s, -f "${eval_name}-%g" 0 $((replicas - 1)))
+      kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((replicas - 1))) -n "${eval_ns}" --ignore-not-found=true --wait=false 2>/dev/null || true
+      kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name in (${selector_list})" -n "${eval_ns}" --ignore-not-found=true --wait=false 2>/dev/null || true
+      kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name in (${selector_list})" -n "${eval_ns}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     fi
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-      echo "Cleaning up sandboxes and warmpools for ${JOB_PREFIX} in ${SANDBOX_NAMESPACE}..."
-      kubectl delete sandboxwarmpools -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${JOB_PREFIX}" --ignore-not-found=true 2>/dev/null || true
-      kubectl delete sandboxtemplates -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${JOB_PREFIX}" --ignore-not-found=true 2>/dev/null || true
-      kubectl delete sandboxclaims -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${JOB_PREFIX}" --ignore-not-found=true 2>/dev/null || true
-      kubectl delete pods -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${JOB_PREFIX}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
+      echo "Cleaning up sandboxes and warmpools for ${JOB_PREFIX} (${eval_name}) in ${SANDBOX_NAMESPACE}..."
+      kubectl delete sandboxwarmpools -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --wait=false --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxtemplates -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --wait=false --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxclaims -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --wait=false --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxes -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --wait=false --ignore-not-found=true 2>/dev/null || true
+      kubectl delete pods -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     fi
   fi
 }
@@ -1242,7 +1407,7 @@ if [[ "$COMMAND" != "eval" && "$COMMAND" != "stop_eval" && -z "$TUNIX_IMAGE" ]];
 fi
 
 if [[ "$COMMAND" == "start" ]]; then
-  if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
+  if [[ "$DRY_RUN" != "true" ]] && [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
     echo "Ensuring RBAC permissions for default:xpk-sa in namespace '${SANDBOX_NAMESPACE:-trellis}'..."
     kubectl create rolebinding xpk-sa-default-pod-exec -n "${SANDBOX_NAMESPACE:-trellis}" --role=pod-exec --serviceaccount=default:xpk-sa --dry-run=client -o yaml | kubectl apply -f - || true
     kubectl create rolebinding xpk-sa-default-power-users -n "${SANDBOX_NAMESPACE:-trellis}" --clusterrole=power-users --serviceaccount=default:xpk-sa --dry-run=client -o yaml | kubectl apply -f - || true
@@ -1276,12 +1441,21 @@ elif [[ "$COMMAND" == "mock_rollout" ]]; then
   stop_rollout; start_mock_rollout
 elif [[ "$COMMAND" == "start_rollout_only" ]]; then
   start_rollout
+elif [[ "$COMMAND" == "prepull_sandbox" ]]; then
+  "$PYTHON_BIN" "${DIR}/prepull_sandbox_images.py" \
+    ${PREPULL_IMAGES_FILE:+--images_file="${PREPULL_IMAGES_FILE}"} \
+    --dataset_name="${DATASET_NAME}" \
+    --dataset_split="${DATASET_SPLIT}" \
+    ${DATASET_PATH:+--dataset_path="${DATASET_PATH}"} \
+    ${DATASET_CACHE_DIR:+--dataset_cache_dir="${DATASET_CACHE_DIR}"} \
+    --scaffold="${SCAFFOLD}" \
+    --namespace="${SANDBOX_NAMESPACE}"
 elif [[ "$COMMAND" == "eval" ]]; then
   stop_eval
   start_eval
 elif [[ "$COMMAND" == "stop_eval" ]]; then
   stop_eval
 else
-  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'test_orchestrator', 'stop', 'orchestrator', 'trainer', 'mock_trainer', 'rollout', 'mock_rollout', 'eval', 'stop_eval'."
+  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'test_orchestrator', 'stop', 'orchestrator', 'trainer', 'mock_trainer', 'rollout', 'mock_rollout', 'start_rollout_only', 'prepull_sandbox', 'eval', 'stop_eval'."
   exit 1
 fi

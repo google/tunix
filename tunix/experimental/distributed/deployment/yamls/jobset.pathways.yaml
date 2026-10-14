@@ -76,8 +76,10 @@ ${HEAD_AFFINITY}${HEAD_TOLERATIONS}
               env:
               - name: RAIDEN_BROADCAST_K
                 value: "64"
+              - name: ENABLE_MULTI_NUMA
+                value: "${ENABLE_MULTI_NUMA}"
               - name: TPU_RAIDEN_DATA_NICS
-                value: "eth0"
+                value: "${TPU_RAIDEN_DATA_NICS}"
               - name: REPLICATED_JOB_NAME
                 valueFrom:
                   fieldRef:
@@ -116,8 +118,10 @@ ${HEAD_AFFINITY}${HEAD_TOLERATIONS}
               env:
               - name: RAIDEN_BROADCAST_K
                 value: "64"
+              - name: ENABLE_MULTI_NUMA
+                value: "${ENABLE_MULTI_NUMA}"
               - name: TPU_RAIDEN_DATA_NICS
-                value: "eth0"
+                value: "${TPU_RAIDEN_DATA_NICS}"
               - name: PATHWAYS_HEAD
                 valueFrom:
                   fieldRef:
@@ -163,8 +167,10 @@ ${FAIL_FAST_WRAPPER_POST}                  echo "Program End: $$(date)"
               env:
               - name: RAIDEN_BROADCAST_K
                 value: "64"
+              - name: ENABLE_MULTI_NUMA
+                value: "${ENABLE_MULTI_NUMA}"
               - name: TPU_RAIDEN_DATA_NICS
-                value: "eth0"
+                value: "${TPU_RAIDEN_DATA_NICS}"
               # Injects the JobSet Name
               - name: JOBSET_NAME
                 valueFrom:
@@ -238,8 +244,10 @@ ${PW_NODE_AFFINITY}
               env:
               - name: RAIDEN_BROADCAST_K
                 value: "64"
+              - name: ENABLE_MULTI_NUMA
+                value: "${ENABLE_MULTI_NUMA}"
               - name: TPU_RAIDEN_DATA_NICS
-                value: "eth0"
+                value: "${TPU_RAIDEN_DATA_NICS}"
               - name: TPU_MIN_LOG_LEVEL
                 value: "0"
               - name: TF_CPP_MIN_LOG_LEVEL

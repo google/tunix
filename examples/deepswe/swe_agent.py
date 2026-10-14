@@ -1,6 +1,7 @@
 """DeepSWE Agent."""
 
 import json
+import os
 import re
 from typing import Any
 from typing import Optional, Union  # Added Union for pytype compatibility
@@ -83,6 +84,16 @@ except ImportError:
 TOKEN_WARNING_THRESHOLD = 28000
 
 
+def multi_tool_calls_enabled() -> bool:
+  """Whether CodeActAgent runs every tool call of a turn, like OpenHands.
+
+  Off by default; set OPENHANDS_MULTI_TOOL_CALLS=true to enable. When off,
+  only the first tool call of a turn runs.
+  """
+  value = os.getenv("OPENHANDS_MULTI_TOOL_CALLS", "false")
+  return value.strip().lower() in ("1", "true", "yes")
+
+
 def parse_oai_response(response: Any):
   thought = response.choices[0].message.content
   if not thought:
@@ -163,9 +174,11 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
   Supports:
   1. Qwen3/Qwen3.5 XML tool calls: <tool_call><function=...>...</function></tool_call>
   2. Bare XML function blocks: <function=...></function>
-  3. JSON tool calls: <tool_call>{...}</tool_call> or ```json ... ```
-  4. Markdown code blocks: ```(bash|sh|shell|python|py|ipython) ... ```
-  5. Task completion indicators: COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+  3. Task completion indicators: COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+
+  Like the reference parser (vLLM qwen3_xml), only <function=> XML is a tool
+  call: markdown code fences (```bash, ```python, ```json) and JSON bodies in
+  <tool_call> blocks are not, so such a turn gets no action.
 
   Returns:
     (thought, action): Tuple of reasoning string and SWEAction instance.
@@ -176,16 +189,18 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
   tc_pattern = re.compile(
       r"(?s)<tool_call>\s*(.*?)\s*(?:</tool_call>|$)"
   )
-  cb_pattern = re.compile(
-      r"(?s)```(bash|sh|shell|python|py|ipython)\s*\n(.*?)(?:```|$)"
-  )
-  json_cb_pattern = re.compile(
-      r"(?s)```json\s*\n(.*?)(?:```|$)"
-  )
+
+  def _first_tool_call(text_slice: str) -> Optional[re.Match]:
+    # Like qwen3_xml, skip <tool_call> blocks without a <function=> (empty,
+    # JSON or other text) and use the first one that has one.
+    for m in tc_pattern.finditer(text_slice):
+      if xml_pattern.search(m.group(1)):
+        return m
+    return None
 
   def _collect_candidates(text_slice: str, offset: int):
     found = []
-    tc_match = tc_pattern.search(text_slice)
+    tc_match = _first_tool_call(text_slice)
     if tc_match:
       found.append((0, offset + tc_match.start(), "tool_call", tc_match))
 
@@ -196,26 +211,6 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
           tc_match.start() <= xml_match.start() <= tc_match.end()
       ):
         found.append((0, offset + xml_match.start(), "xml", xml_match))
-
-    json_match = json_cb_pattern.search(text_slice)
-    if json_match:
-      try:
-        parsed_json = json.loads(json_match.group(1).strip())
-        if isinstance(parsed_json, dict) and (
-            "name" in parsed_json or "function" in parsed_json
-        ):
-          found.append((
-              0,
-              offset + json_match.start(),
-              "json_block",
-              (json_match, parsed_json),
-          ))
-      except Exception:
-        pass
-
-    cb_match = cb_pattern.search(text_slice)
-    if cb_match:
-      found.append((1, offset + cb_match.start(), "code_block", cb_match))
     return found
 
   # Prefer tool calls emitted after </think> so illustrative code fences or
@@ -232,8 +227,7 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
     candidates = _collect_candidates(response_text, 0)
 
   if candidates:
-    # Prefer structured tool invocations (priority 0) over generic markdown
-    # code fences (priority 1), then earliest position in the response.
+    # Earliest structured tool invocation in the response.
     candidates.sort(key=lambda x: (x[0], x[1]))
     _, match_start, match_type, payload = candidates[0]
 
@@ -245,60 +239,12 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
       action = parse_openhands_xml_action(xml_str)
       return thought, action
 
-    elif match_type in ("tool_call", "json_block"):
+    elif match_type == "tool_call":
       thought = response_text[:match_start].strip()
-      if match_type == "tool_call":
-        raw_payload = payload.group(1).strip()
-        xml_in_tc = xml_pattern.search(raw_payload)
-        if xml_in_tc:
-          xml_str = xml_in_tc.group(1).strip()
-          if not xml_str.endswith("</function>"):
-            xml_str += "\n</function>"
-          action = parse_openhands_xml_action(xml_str)
-          return thought, action
-        try:
-          data = json.loads(raw_payload)
-        except Exception:
-          data = {}
-      else:
-        _, data = payload
-
-      if isinstance(data, list) and data:
-        data = data[0]
-      if isinstance(data, dict):
-        if "function" in data and isinstance(data["function"], dict):
-          fn_name = data["function"].get("name", "")
-          args = data["function"].get("arguments", {})
-        else:
-          fn_name = data.get("name", "")
-          args = data.get("arguments", data.get("parameters", {}))
-        if isinstance(args, str):
-          try:
-            args = json.loads(args)
-          except Exception:
-            args = {"command": args}
-        if not isinstance(args, dict):
-          args = {"command": str(args)}
-        normalized_args = {}
-        for k, v in args.items():
-          if isinstance(v, (dict, list)):
-            normalized_args[str(k)] = json.dumps(v, ensure_ascii=False)
-          else:
-            normalized_args[str(k)] = str(v)
-        action = SWEAction(fn_name, normalized_args)
-        return thought, action
-
-    elif match_type == "code_block":
-      thought = response_text[:match_start].strip()
-      lang = payload.group(1).lower()
-      code = payload.group(2).strip()
-      if lang in ("bash", "sh", "shell"):
-        if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in code:
-          action = SWEAction("submit", {})
-        else:
-          action = SWEAction("execute_bash", {"command": code})
-      else:  # python, py, ipython
-        action = SWEAction("execute_ipython_cell", {"code": code})
+      xml_str = xml_pattern.search(payload.group(1).strip()).group(1).strip()
+      if not xml_str.endswith("</function>"):
+        xml_str += "\n</function>"
+      action = parse_openhands_xml_action(xml_str)
       return thought, action
 
   # Fallback: check for completion trigger in plain text
@@ -312,6 +258,74 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
   thought = response_text.strip()
   action = SWEAction(function_name="", parameters={})
   return thought, action
+
+
+def parse_codeact_response_all(response_text: str) -> tuple[str, list[Any]]:
+  """Parses every tool call of a CodeAct / OpenHands response, in order.
+
+  The reference parser (vLLM qwen3_xml) can return several calls for one
+  response, and OpenHands runs all of them. This splits the response into
+  calls the way qwen3_xml does (checked against vLLM 0.20.0):
+  - each <tool_call> opens a call, which ends at </tool_call> or at the next
+    <tool_call>; the call is its first <function=> block, if any (qwen3_xml
+    merges a second <function=> into the same call);
+  - a bare <function=> outside <tool_call> opens a call if it is the first
+    opener or follows a <tool_call>; one that follows another bare
+    <function=> is dropped.
+  The reference reasoning parser hands qwen3_xml only the text after the
+  first "</think>", or all of it when there is none (enable_thinking: false).
+  For well-formed responses the first call is `parse_codeact_response`'s.
+
+  Returns:
+    (thought, actions): `parse_codeact_response`'s thought, and a non-empty
+    list of SWEActions (`parse_codeact_response`'s action alone when no
+    call is found).
+  """
+  thought, first = parse_codeact_response(response_text)
+  _, think_sep, after_think = response_text.partition("</think>")
+  content = after_think if think_sep else response_text
+  function_pattern = re.compile(
+      r"(?s)<function\s*=\s*[^>]+>.*?(?:</function>|$)"
+  )
+  opener_pattern = re.compile(r"<tool_call>|<function\s*=")
+  calls = []
+  pos = 0
+  previous = None
+  while (opener := opener_pattern.search(content, pos)) is not None:
+    if opener.group(0) == "<tool_call>":
+      start = opener.end()
+      ends = [
+          i
+          for i in (
+              content.find("</tool_call>", start),
+              content.find("<tool_call>", start),
+          )
+          if i != -1
+      ]
+      end = min(ends) if ends else len(content)
+      function = function_pattern.search(content[start:end])
+      if function:
+        calls.append(function.group(0))
+      previous = "tool_call"
+      pos = end + (
+          len("</tool_call>") if content.startswith("</tool_call>", end) else 0
+      )
+    else:
+      function = function_pattern.match(content, opener.start())
+      if function is None:  # A "<function=" cut off before its ">".
+        pos = opener.end()
+        continue
+      if previous != "bare":
+        calls.append(function.group(0))
+      previous = "bare"
+      pos = function.end()
+  actions = []
+  for xml_str in calls:
+    xml_str = xml_str.strip()
+    if not xml_str.endswith("</function>"):
+      xml_str += "\n</function>"
+    actions.append(parse_openhands_xml_action(xml_str))
+  return thought, actions or [first]
 
 
 _LOGGED_AGENT_CONFIGS: set[tuple[str, str, str, bool]] = set()
@@ -454,7 +468,9 @@ class SWEAgent(ConversationAgentBase):
     """
     self._trajectory.steps.append(self.cur_step)
     thought, action = self._parse_model_response(response)
-    action_str = action.to_xml_string() if action.function_name else ""
+    action_str = (
+        action.to_xml_string() if getattr(action, "function_name", True) else ""
+    )
 
     # Update Trajectory
     cur_step = self._trajectory.steps[-1]
@@ -497,6 +513,37 @@ class CodeActAgent(SWEAgent):
         format_model_response=format_model_response,
         scaffold=scaffold,
     )
+    self.multi_tool_calls = multi_tool_calls_enabled()
+
+  def update_from_model(self, response: str, **kwargs):
+    """Like SWEAgent.update_from_model, plus every later tool call of the turn.
+
+    The reference OpenHands queues all tool calls of one model response and
+    runs them in order before calling the model again. With
+    OPENHANDS_MULTI_TOOL_CALLS on, the calls come from
+    `parse_codeact_response_all`, and a turn with two or more returns them all
+    as a list of XML strings for the env to run in order.
+
+    Args:
+      response: The model response.
+      **kwargs: Passed to SWEAgent.update_from_model.
+
+    Returns:
+      The action: an XML string, or a list of them for a multi-call turn.
+    """
+    result = super().update_from_model(response, **kwargs)
+    if not self.multi_tool_calls or self.use_fn_calling:
+      return result
+    _, actions = parse_codeact_response_all(response)
+    calls = [
+        a.to_xml_string() for a in actions if getattr(a, "function_name", "")
+    ]
+    if not calls or calls == [result.action]:
+      return result
+    if len(calls) > 1:
+      logging.info("CodeActAgent: turn has %d tool calls.", len(calls))
+    self._trajectory.steps[-1].action = "\n".join(calls)
+    return Action(action=calls if len(calls) > 1 else calls[0])
 
   def update_from_env(
       self,
@@ -506,6 +553,14 @@ class CodeActAgent(SWEAgent):
       info: Optional[dict[str, Any]] = None,
       **kwargs,
   ) -> None:
+    if isinstance(observation, list):
+      # A multi-call turn: one tool result per call that ran.
+      observation = [str(o) for o in observation]
+      ConversationAgentBase.update_from_env(
+          self, observation, reward, done, info
+      )
+      self.cur_step = Step(observation=observation)
+      return
     observation = str(observation)
     if info is None:
       info = {}
@@ -533,8 +588,12 @@ class CodeActAgent(SWEAgent):
     if len(self._trajectory.steps) == 0:
       self._messages.append({"role": "user", "content": str(observation)})
       return
+    if isinstance(observation, list):
+      for result in observation:
+        self._messages.append({"role": "tool", "content": str(result)})
+      return
     last_step = self._trajectory.steps[-1]
-    if info.get("is_fake_user_response") or not last_step.action:
+    if (info and info.get("is_fake_user_response")) or not last_step.action:
       self._messages.append({"role": "user", "content": str(observation)})
     else:
       self._messages.append({"role": "tool", "content": str(observation)})
@@ -550,7 +609,9 @@ class CodeActAgent(SWEAgent):
 __all__ = [
     "CodeActAgent",
     "SWEAgent",
+    "multi_tool_calls_enabled",
     "parse_codeact_response",
+    "parse_codeact_response_all",
     "parse_oai_response",
     "parse_openhands_xml_action",
     "parse_xml_response",

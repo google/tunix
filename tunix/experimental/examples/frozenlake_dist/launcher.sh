@@ -298,6 +298,7 @@ TRAINER_PID=$!
     --env_name=frozenlake_env
     --agent_name=frozenlake_agent
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
+    --seed="$SEED"
     --vllm_hbm_utilization="$VLLM_HBM_UTILIZATION"
     --vllm_max_num_seqs="$VLLM_MAX_NUM_SEQS"
     --vllm_max_num_batched_tokens="$VLLM_MAX_NUM_BATCHED_TOKENS"

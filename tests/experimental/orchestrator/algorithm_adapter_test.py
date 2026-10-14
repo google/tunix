@@ -881,7 +881,6 @@ class IsValidTrajectoryTest(absltest.TestCase):
   def test_invalid_status_is_invalid(self):
     for status in (
         datatypes.TrajectoryStatus.FAILED,
-        datatypes.TrajectoryStatus.TIMEOUT,
         datatypes.TrajectoryStatus.ENV_TIMEOUT,
         "FAILED",
         "failed",
@@ -892,6 +891,17 @@ class IsValidTrajectoryTest(absltest.TestCase):
             "conversation_masks": np.ones(3, dtype=np.float32),
         })
         self.assertFalse(item.is_valid)
+
+  def test_episode_timeout_is_valid(self):
+    # An episode that exhausts its wall-clock budget is a normal reward-0
+    # sample, not a runtime failure.
+    for status in (datatypes.TrajectoryStatus.TIMEOUT, "TIMEOUT"):
+      with self.subTest(status=status):
+        item = self._item({
+            "status": status,
+            "conversation_masks": np.ones(3, dtype=np.float32),
+        })
+        self.assertTrue(item.is_valid)
 
   def test_overlong_statuses_follow_conversation_masks(self):
     for status in (

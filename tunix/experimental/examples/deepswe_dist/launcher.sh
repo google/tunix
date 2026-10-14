@@ -434,6 +434,7 @@ echo "Launching DeepSWE rollout node..."
     --env_name=deepswe_env
     --agent_name=deepswe_agent
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
+    --seed="$SEED"
   )
   
   # shellcheck disable=SC2206
@@ -449,7 +450,7 @@ echo "Launching DeepSWE rollout node..."
     ROLLOUT_CMD+=(--debug)
   fi
   export JAX_PLATFORMS=tpu,cpu
-  export SKIP_JAX_PRECOMPILE=1
+  export SKIP_JAX_PRECOMPILE="${ROLLOUT_SKIP_JAX_PRECOMPILE:-0}"
   export TPU_VISIBLE_DEVICES=${ROLLOUT_TPU_CHIPS}
   export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
   export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}

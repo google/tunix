@@ -20,8 +20,8 @@
 # Both need a MaxText that has the rollout_fp8_moe / fp8_moe_fake_quant flags.
 # ==============================================================================
 
-export ROLLOUT_FP8="${ROLLOUT_FP8:-false}"
-export TRAINER_FP8="${TRAINER_FP8:-false}"
+export ROLLOUT_FP8="${ROLLOUT_FP8:-true}"
+export TRAINER_FP8="${TRAINER_FP8:-true}"
 for _var in ROLLOUT_FP8 TRAINER_FP8; do
   if [[ "${!_var}" != "true" && "${!_var}" != "false" ]]; then
     echo "ERROR: ${_var} must be true or false, got '${!_var}'" >&2

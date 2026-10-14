@@ -20,6 +20,7 @@ from typing import Any, Callable, ContextManager, cast
 
 from absl import logging
 from flax import nnx
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -62,8 +63,12 @@ class TrainerWorker(abstract_worker.Worker):
         If `None`, the whole request is scored in one forward.
     """
     self._execution_context = execution_context
-    with self.execution_context():
-      self._trainer = trainer_factory()
+    self._trainer_factory = trainer_factory
+    self._trainer: abstract_trainer.AbstractTrainer | None = None
+    self._pending_loss_fn: tuple[Callable[..., Any], bool] | None = None
+    self._pending_gen_model_input_fn: (
+        Callable[[Any], dict[str, Any]] | None
+    ) = None
     self._logps_chunk_size = logps_chunk_size
     self._logps_micro_batch_size = logps_micro_batch_size
     self._is_running = False
@@ -72,6 +77,8 @@ class TrainerWorker(abstract_worker.Worker):
     self._last_error: str | None = None
 
   def _policy_version(self) -> int:
+    if self._trainer is None:
+      return 0
     return int(getattr(self._trainer, "policy_version", 0))
 
   def _response(self, **metadata: Any) -> datatypes.Response:
@@ -96,6 +103,18 @@ class TrainerWorker(abstract_worker.Worker):
       return self._response(initialized=True, ready=True)
     self.state = WorkerState.INITIALIZING
     try:
+      if self._trainer is None:
+        with self.execution_context():
+          self._trainer = self._trainer_factory()
+        if self._pending_loss_fn is not None:
+          loss_fn, has_aux = self._pending_loss_fn
+          self._trainer.with_loss_fn(loss_fn, has_aux)
+          self._pending_loss_fn = None
+        if self._pending_gen_model_input_fn is not None:
+          self._trainer.with_gen_model_input_fn(
+              self._pending_gen_model_input_fn
+          )
+          self._pending_gen_model_input_fn = None
       return self._response(initialized=True)
     finally:
       self.state = WorkerState.READY
@@ -132,7 +151,8 @@ class TrainerWorker(abstract_worker.Worker):
     self._is_running = False
     if self.state == WorkerState.READY:
       self.state = WorkerState.DRAINING
-    self._trainer.close()
+    if self._trainer is not None:
+      self._trainer.close()
     self.state = WorkerState.STOPPED
     return self._response(stopped=True)
 
@@ -141,7 +161,11 @@ class TrainerWorker(abstract_worker.Worker):
         worker_id=self._worker_id,
         roles=frozenset({"trainer", "weight_sync"}),
         resources={
-            "trainer": type(self._trainer).__name__,
+            "trainer": (
+                type(self._trainer).__name__
+                if self._trainer is not None
+                else "LazyTrainer"
+            ),
             "policy_version": self._policy_version(),
         },
     )
@@ -157,7 +181,10 @@ class TrainerWorker(abstract_worker.Worker):
       self, loss_fn: Callable[..., Any], has_aux: bool = False
   ) -> datatypes.Response:
     """Sets the loss function used by `fwd_bwd` (and evaluation)."""
-    self._trainer.with_loss_fn(loss_fn, has_aux)
+    if self._trainer is not None:
+      self._trainer.with_loss_fn(loss_fn, has_aux)
+    else:
+      self._pending_loss_fn = (loss_fn, has_aux)
     return self._response(loss_fn_configured=True)
 
   def with_gen_model_input_fn(
@@ -174,11 +201,15 @@ class TrainerWorker(abstract_worker.Worker):
         return out
 
       gen_model_input_fn = _wrapped_gen_model_input_fn
-    self._trainer.with_gen_model_input_fn(gen_model_input_fn)
+    if self._trainer is not None:
+      self._trainer.with_gen_model_input_fn(gen_model_input_fn)
+    else:
+      self._pending_gen_model_input_fn = gen_model_input_fn
     return self._response(gen_model_input_fn_configured=True)
 
   def set_target_state(self, target_state: Any) -> datatypes.Response:
     """Stores rollout target_state so trainer-side weight sync can convert."""
+    self._ensure_ready()
     setter = getattr(self._trainer, "set_target_state", None)
     if not callable(setter):
       raise AttributeError(
@@ -190,14 +221,49 @@ class TrainerWorker(abstract_worker.Worker):
   def fwd_bwd(
       self,
       request: datatypes.TrainRequest,
+      apply_optimizer: bool = False,
       **kwargs: Any,
   ) -> datatypes.Response:
-    """Executes one forward/backward pass."""
+    """Executes one forward/backward pass, optionally applying the optimizer."""
     self._ensure_ready()
     req_metadata = dict(request.metadata) if request.metadata else {}
+    req_metadata.pop("updated", None)
+    req_metadata.pop("train_step", None)
+    req_metadata.pop("update_ready", None)
     kwargs.pop("skip_jit", None)
     try:
-      self._trainer.fwd_bwd(request.payload, **kwargs)
+      # The trainer still sees `apply_optimizer`: it marks the step's last
+      # micro-batch (MaxText's retry_dropless_final_micro_batch runs that one
+      # with the dropless program). The update itself is run here, below.
+      self._trainer.fwd_bwd(
+          request.payload, apply_optimizer=apply_optimizer, **kwargs
+      )
+      if apply_optimizer:
+        try:
+          # Through this worker's update(), not the trainer's, so a fused step
+          # gets the same bookkeeping (state on failure, step timing) as an
+          # update RPC.
+          train_step = self.update()
+          # update() returns at dispatch. When the trainer exposes an output of
+          # the update executable, return only once it is ready and say so: the
+          # caller stamps the checkpoint as soon as this call returns, and with
+          # `update_ready` it no longer needs get_metrics() to wait for the
+          # update before the checkpoint save and weight sync.
+          update_token = getattr(self._trainer, "last_update_token", None)
+          if update_token is not None:
+            jax.block_until_ready(update_token)
+            req_metadata["update_ready"] = True
+        except Exception as exc:
+          # The caller sees this on a fwd_bwd response; say it was the
+          # optimizer step, run after this microbatch's gradients were
+          # already accumulated.
+          raise RuntimeError(
+              "optimizer update() failed inside fwd_bwd(apply_optimizer=True),"
+              " after this microbatch's gradients were accumulated:"
+              f" {type(exc).__name__}: {exc}"
+          ) from exc
+        req_metadata["updated"] = True
+        req_metadata["train_step"] = train_step
       self._last_error = None
       resp = self._response(queued=True, **req_metadata)
       resp.request_id = request.request_id
@@ -421,7 +487,8 @@ class TrainerWorker(abstract_worker.Worker):
     """
     if sync_request is None:
       return
-    if not sync_request.extra_config.get(
+    extra_config = getattr(sync_request, "extra_config", None)
+    if not isinstance(extra_config, dict) or not extra_config.get(
         weight_sync.RELEASE_SOURCE_AFTER_STAGE
     ):
       return

@@ -39,6 +39,7 @@ if REPO_ROOT not in sys.path:
 # pylint: disable=g-import-not-at-top
 from tunix.experimental.common import datatypes
 from tunix.experimental.distributed.runtime import context as runtime_context
+from tunix.experimental.examples.deepswe_dist import trainer_warmup
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator
@@ -98,12 +99,96 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--rollout_replicas",
       type=int,
-      default=int(
-          os.getenv("ROLLOUT_REPLICAS", os.getenv("ROLLOUT_WORKERS", "1"))
+      default=(
+          int(val)
+          if (
+              val := (
+                  os.getenv("ROLLOUT_REPLICAS")
+                  or os.getenv("ROLLOUT_WORKERS")
+                  or ""
+              ).strip()
+          )
+          else 1
       ),
       help=(
           "Minimum number of rollout worker replicas to wait for before"
           " starting training."
+      ),
+  )
+  parser.add_argument(
+      "--rollout_fault_tolerance",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("ROLLOUT_FAULT_TOLERANCE", "true").strip().lower()
+      not in ("0", "false", "no"),
+      help=(
+          "Enable rollout worker fault tolerance (eviction, retry, and dynamic "
+          "rejoin)."
+      ),
+  )
+  parser.add_argument(
+      "--max_concurrent_rollouts_per_worker",
+      type=int,
+      default=(
+          int(val)
+          if (val := os.getenv("MAX_CONCURRENT_ROLLOUTS_PER_WORKER", "").strip())
+          else None
+      )
+      or None,
+      help=(
+          "Optional cap on concurrent in-flight rollouts dispatched to any "
+          "single rollout worker."
+      ),
+  )
+  parser.add_argument(
+      "--rollout_task_timeout_s",
+      type=float,
+      default=(
+          float(val)
+          if (val := os.getenv("ROLLOUT_TASK_TIMEOUT_S", "").strip())
+          else None
+      )
+      or None,
+      help=(
+          "Optional per-task execution timeout in seconds once a rollout "
+          "request is dispatched to a worker."
+      ),
+  )
+  parser.add_argument(
+      "--max_zero_worker_wait_s",
+      type=float,
+      default=(
+          float(val)
+          if (val := os.getenv("MAX_ZERO_WORKER_WAIT_S", "").strip())
+          else 600.0
+      ),
+      help=(
+          "Maximum duration in seconds to wait when zero active rollout "
+          "workers remain before raising NoHealthyRolloutWorkersError."
+      ),
+  )
+  parser.add_argument(
+      "--rollout_max_task_retries",
+      type=int,
+      default=(
+          int(val)
+          if (val := os.getenv("ROLLOUT_MAX_TASK_RETRIES", "").strip())
+          else 3
+      ),
+      help=(
+          "Maximum number of retry attempts per rollout request_id before "
+          "synthesizing a terminal FAILED placeholder trajectory."
+      ),
+  )
+  parser.add_argument(
+      "--recover_unknown_transfer_state",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("RECOVER_UNKNOWN_TRANSFER_STATE", "false")
+      .strip()
+      .lower()
+      in ("1", "true", "yes"),
+      help=(
+          "Attempt recovery from RoundState.UNKNOWN_TRANSFER_STATE during "
+          "weight sync by evicting uncommitted workers and retrying once."
       ),
   )
   parser.add_argument("--max_steps", type=int, default=1)
@@ -234,6 +319,52 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " --priority_scheduling; off, requests are served in arrival order."
       ),
   )
+  parser.add_argument(
+      "--initial_dispatch_stagger_s",
+      type=float,
+      default=0.0,
+      help=(
+          "Stagger the start-up prompt batches: each batch after batch 1 is"
+          " held this many seconds after the one before it (batch 1 waits"
+          " --initial_dispatch_first_stagger_s, which defaults to this value)."
+          " Applies only before the trainer consumes its first batch. 0"
+          " (default) dispatches the start-up batches as soon as the staleness"
+          " window allows."
+      ),
+  )
+  parser.add_argument(
+      "--initial_dispatch_first_stagger_s",
+      type=float,
+      default=None,
+      help=(
+          "Seconds batch 1 is held after batch 0 first dispatches; later"
+          " start-up batches follow every --initial_dispatch_stagger_s. Unset"
+          " (default) uses --initial_dispatch_stagger_s for batch 1 as well."
+      ),
+  )
+  parser.add_argument(
+      "--trainer_warmup_compile",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Compile the trainer before run_start (after the program configures"
+          " the trainer loss) against one synthetic micro-batch built through"
+          " the live batch assembler, instead of lazily on the first real"
+          " micro-batch inside the timed run."
+      ),
+  )
+  parser.add_argument(
+      "--trainer_warmup_routed_experts",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "The rollouts return routed experts (router replay), so the warm-up"
+          " micro-batch carries routed_experts too. Its [num_layers, top_k] is"
+          " read from the model config, else from the two flags below."
+      ),
+  )
+  parser.add_argument("--trainer_warmup_routed_layers", type=int, default=None)
+  parser.add_argument("--trainer_warmup_routed_top_k", type=int, default=None)
   # ---- Optional GRPO algorithm options -------------------------------------
   # All default to off, so omitting them reproduces the previous behaviour.
   parser.add_argument(
@@ -394,6 +525,53 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--sandbox_wait_initial",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("SANDBOX_WAIT_INITIAL", "true").lower()
+      in ("1", "true", "yes"),
+      help=(
+          "Whether PrewarmDatasetIterator waits synchronously for the initial"
+          " warmpool batch before yielding the first prompt."
+      ),
+  )
+  parser.add_argument(
+      "--prepull_sandbox_images",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("PREPULL_SANDBOX_IMAGES", "false").lower()
+      in ("1", "true", "yes"),
+      help=(
+          "Pre-pull all static dataset task images onto sandbox nodes with"
+          " imagePullPolicy=IfNotPresent and run sync && sysctl"
+          " vm.drop_caches=3 before init_start / run_start."
+      ),
+  )
+  parser.add_argument(
+      "--prepull_images_file",
+      type=str,
+      default=os.getenv("PREPULL_IMAGES_FILE", ""),
+      help=(
+          "Path (local or gs://) to a static manifest file containing container"
+          " image URIs to pre-pull before init_start without touching the"
+          " dataset."
+      ),
+  )
+  parser.add_argument(
+      "--prewarm_images_file",
+      type=str,
+      default=os.getenv("PREWARM_IMAGES_FILE", ""),
+      help=(
+          "Path (local or gs://) to a static manifest file (e.g. sandboxes.txt)"
+          " containing container image URIs to pre-warm on Kubernetes directly"
+          " instead of dynamically discovering images by inspecting the dataset."
+      ),
+  )
+  parser.add_argument(
+      "--prewarm_max_workers",
+      type=int,
+      default=int(os.getenv("PREWARM_MAX_WORKERS", "32")),
+      help="Maximum concurrent worker threads for pre-warming sandbox pools on Kubernetes.",
+  )
+  parser.add_argument(
       "--max_concurrency",
       type=int,
       default=128,
@@ -445,7 +623,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--inference_addr", type=str, default="")
-  parser.add_argument("--stop_workers_on_exit", action="store_true")
+  parser.add_argument(
+      "--stop_workers_on_exit",
+      action="store_true",
+      help=(
+          "Send a graceful gRPC stop to every remote worker when the"
+          " orchestrator exits (drains in-flight checkpoint saves)."
+      ),
+  )
   parser.add_argument(
       "--debug",
       action="store_true",
@@ -518,6 +703,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=int(os.getenv("TRAINER_MESH_TP", "1")),
   )
   parser.add_argument(
+      "--train_mesh_context",
+      "--train_mesh_sp",
+      dest="train_mesh_context",
+      type=int,
+      default=int(os.getenv("TRAINER_MESH_CONTEXT", "1")),
+  )
+  parser.add_argument(
       "--train_mesh_expert",
       type=int,
       default=int(os.getenv("TRAINER_MESH_EXPERT", "1")),
@@ -547,24 +739,44 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--trajectory_store_root",
       dest="trajectory_store_root_dir",
       type=str,
-      default="",
+      default=os.getenv(
+          "TRAJECTORY_STORE_ROOT_DIR",
+          os.getenv("TRAJECTORY_STORE_ROOT", ""),
+      ),
       help="Root directory for the file-backed TrajectoryStore.",
+  )
+  parser.add_argument(
+      "--trajectory_store_db_url",
+      type=str,
+      default=os.getenv("TRAJECTORY_STORE_DB_URL", ""),
+      help=(
+          "SQLAlchemy database URL for the SQL-backed TrajectoryStore (e.g."
+          " 'sqlite:////path/to/store.db' or"
+          " 'postgresql+psycopg2://user:pass@host:5432/dbname')."
+      ),
   )
   return parser.parse_args(argv)
 
 
 def _build_trajectory_store_config(
     args: argparse.Namespace,
-) -> dict[str, Any] | None:
-  """Builds the TrajectoryStore configuration dict from orchestrator CLI flags."""
+) -> list[dict[str, Any] | None] | None:
+  """Builds the [file_store, sql_store] TrajectoryStore configuration list."""
   root_dir = (args.trajectory_store_root_dir or "").strip()
-  if not root_dir:
+  db_url = (args.trajectory_store_db_url or "").strip()
+  file_cfg = (
+      {"enabled": True, "backend": "file", "root_dir": root_dir}
+      if root_dir
+      else None
+  )
+  sql_cfg = (
+      {"enabled": True, "backend": "sql", "db_url": db_url}
+      if db_url
+      else None
+  )
+  if file_cfg is None and sql_cfg is None:
     return None
-  return {
-      "enabled": True,
-      "backend": "file",
-      "root_dir": root_dir,
-  }
+  return [file_cfg, sql_cfg]
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
@@ -655,8 +867,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   ), "Require discovery API, but process context doesn't support."
 
   args = _parse_args(argv)
-  if args.rcp_logging:
-    mllog_utils.init_start(args)
   logging.basicConfig(
       level=logging.DEBUG if args.debug else logging.INFO,
       format="%(asctime)s - [DeepSWEOrchestrator] %(message)s",
@@ -719,6 +929,98 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
 
+  cluster = orchestrator.ClusterOrchestrator(
+      weight_sync_mode=args.weight_sync_mode,
+      trajectory_store_config=_build_trajectory_store_config(args),
+      disable_weight_sync_timeouts=args.disable_weight_sync_timeouts,
+      jax_cache_config={
+          "save_jax_cache": os.getenv("SAVE_JAX_CACHE", "true").lower() in ("1", "true", "yes"),
+          "jax_cache_gcs_dir": os.getenv("JAX_CACHE_GCS_DIR"),
+          "rollout_jax_cache_gcs_dir": os.getenv("ROLLOUT_JAX_CACHE_GCS_DIR"),
+      },
+      fault_tolerance_config=datatypes.RolloutFaultToleranceConfig(
+          enabled=args.rollout_fault_tolerance,
+          max_task_retries=args.rollout_max_task_retries,
+          max_in_flight_per_worker=args.max_concurrent_rollouts_per_worker,
+          task_timeout_s=args.rollout_task_timeout_s,
+          max_zero_worker_wait_s=args.max_zero_worker_wait_s,
+          recover_unknown_transfer_state=args.recover_unknown_transfer_state,
+      ),
+  )
+  context.ipc.discovery.on_register(
+      functools.partial(
+          cluster.register_worker_from_hostname,
+          rpc_timeout_s=args.rpc_timeout_s,
+      )
+  )
+
+  prepull_future = None
+  prepull_executor = None
+  if args.use_agent_sandbox and args.prepull_sandbox_images:
+    from concurrent import futures  # pylint: disable=g-import-not-at-top
+    from tunix.experimental.examples.deepswe_dist import prepull_sandbox_images  # pylint: disable=g-import-not-at-top
+
+    logging.info(
+        "Starting sandbox container image pre-pulling (before MLPerf"
+        " init_start)..."
+    )
+    prepull_executor = futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="sandbox-prepull"
+    )
+    if args.prepull_images_file:
+      prepull_future = prepull_executor.submit(
+          prepull_sandbox_images.prepull_from_manifest,
+          manifest_path=args.prepull_images_file,
+          scaffold=args.scaffold,
+      )
+    else:
+      prepull_future = prepull_executor.submit(
+          prepull_sandbox_images.prepull_from_dataset,
+          dataset_name=args.dataset_name,
+          dataset_split=args.dataset_split,
+          dataset_path=args.dataset_path,
+          cache_dir=args.dataset_cache_dir or None,
+          scaffold=args.scaffold,
+      )
+  try:
+    logging.info(
+        "Waiting for workers to register (before MLPerf init_start)..."
+    )
+    cluster.wait_for_workers(
+        min_workers={
+            datatypes.Role.ACTOR: 1,
+            datatypes.Role.ROLLOUT: args.rollout_replicas,
+            datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
+        },
+        timeout=args.init_timeout_s,
+        poll_interval_s=1.0,
+    )
+    logging.info("Registered workers: %s", cluster.worker_infos())
+    if prepull_future is not None:
+      logging.info(
+          "Waiting for sandbox container image pre-pulling to finish before"
+          " MLPerf init_start..."
+      )
+      try:
+        num_staged = prepull_future.result()
+        logging.info(
+            "Finished pre-pulling %d static sandbox images (and dropped OS"
+            " caches) before MLPerf init_start.",
+            num_staged,
+        )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "[Prepull] Sandbox image pre-pulling encountered an error: %s."
+            " Proceeding with training using on-demand GKE Image Streaming.",
+            e,
+        )
+  finally:
+    if prepull_executor is not None:
+      prepull_executor.shutdown(wait=False)
+
+  if args.rcp_logging:
+    mllog_utils.init_start(args)
+
   tokenizer_path = (
       args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
   )
@@ -739,46 +1041,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       eos_id,
   )
 
+  from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
   from examples.deepswe import swe_env  # pylint: disable=g-import-not-at-top
   from tunix.experimental.examples.deepswe_dist import deepswe  # pylint: disable=g-import-not-at-top
-
-  dataset = deepswe.load_deepswe_dataset(
-      dataset_name=args.dataset_name,
-      dataset_split=args.dataset_split,
-      dataset_path=args.dataset_path,
-      cache_dir=args.dataset_cache_dir or None,
-      shuffle=args.shuffle,
-      seed=args.seed,
-  )
-  logging.info(
-      "Loaded DeepSWE dataset: source=%s split=%s size=%d.",
-      args.dataset_path or args.dataset_name,
-      args.dataset_split,
-      len(dataset),
-  )
-
-  cluster = orchestrator.ClusterOrchestrator(
-      weight_sync_mode=args.weight_sync_mode,
-      trajectory_store_config=_build_trajectory_store_config(args),
-      disable_weight_sync_timeouts=args.disable_weight_sync_timeouts,
-  )
-  context.ipc.discovery.on_register(
-      functools.partial(
-          cluster.register_worker_from_hostname,
-          rpc_timeout_s=args.rpc_timeout_s,
-      )
-  )
-
-  cluster.wait_for_workers(
-      min_workers={
-          datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: args.rollout_replicas,
-          datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
-      },
-      timeout=args.init_timeout_s,
-      poll_interval_s=1.0,
-  )
-  logging.info("Registered workers: %s", cluster.worker_infos())
 
   algo = _build_algo(args)
   trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
@@ -801,58 +1066,46 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
   fleet = None
   prompt_stream = None
-  try:
-    effective_num_generations_to_dispatch = (
-        args.num_generations_to_dispatch
-        if args.num_generations_to_dispatch is not None
-        else args.num_generations
-    )
-    if args.use_agent_sandbox:
-      # Initialize fleet plan from dataset. Eager warmpools are skipped;
-      # dynamic sliding-window prewarming with initial barrier is handled by
-      # PrewarmDatasetIterator below.
-      fleet = swe_env._init_global_fleet(  # pylint: disable=protected-access
-          tasks=dataset,
-          max_concurrency=args.max_concurrency,
-          num_generations=effective_num_generations_to_dispatch,
-          batch_size=args.batch_size,
-          max_warmpool_replicas=args.max_warmpool_replicas,
-          scaffold=args.scaffold,
-      )
+  program = None
+  prewarm_thread = None
+  effective_num_generations_to_dispatch = (
+      args.num_generations_to_dispatch
+      if args.num_generations_to_dispatch is not None
+      else args.num_generations
+  )
 
-    prompt_stream = deepswe.iter_prompt_items(
-        dataset=dataset,
-        max_steps=args.max_steps,
+  prewarm_manifest = (
+      args.prewarm_images_file
+      or os.getenv("PREWARM_IMAGES_FILE")
+      or ""
+  )
+  if args.use_agent_sandbox and prewarm_manifest:
+    logging.info(
+        "[Init] Initializing SandboxFleet and pre-warming sandboxes from"
+        " manifest '%s' before train_start...",
+        prewarm_manifest,
+    )
+    fleet = sandbox_utils.init_global_fleet(
+        tasks=None,
+        images_file=prewarm_manifest,
+        max_concurrency=args.max_concurrency,
+        num_generations=effective_num_generations_to_dispatch,
         batch_size=args.batch_size,
-        max_turns=args.max_turns,
-        max_response_length=args.max_response_length,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=None if args.top_k < 0 else args.top_k,
-        step_timeout_secs=args.step_timeout_secs,
-        reward_timeout_secs=args.reward_timeout_secs,
-        env_backend=args.env_backend,
-        use_agent_sandbox=args.use_agent_sandbox,
+        max_warmpool_replicas=args.max_warmpool_replicas,
         scaffold=args.scaffold,
-        env_verbose=args.env_verbose,
-        episode_timeout_secs=args.episode_timeout_secs,
-        overlong_filter=args.overlong_filter,
-        exact_token_continuity=args.exact_token_continuity,
-        max_staleness=args.max_staleness,
     )
-    if args.use_agent_sandbox:
-      prompt_stream = swe_env.PrewarmDatasetIterator(
-          prompt_stream,
-          fleet=fleet,
-          num_generations=effective_num_generations_to_dispatch,
-          batch_size=args.batch_size,
-          max_warmpool_replicas=args.max_warmpool_replicas,
-          unwarm_on_exhaustion=True,
-          scaffold=args.scaffold,
-          wait_initial=True,
-          max_staleness=args.max_staleness,
-      )
+    prewarm_thread = sandbox_utils.prewarm_manifest_sandboxes(
+        manifest_path=prewarm_manifest,
+        fleet=fleet,
+        scaffold=args.scaffold,
+        max_warmpool_replicas=args.max_warmpool_replicas,
+        num_generations=effective_num_generations_to_dispatch,
+        wait=args.sandbox_wait_initial,
+        async_warm=True,
+        max_workers=args.prewarm_max_workers,
+    )
 
+  try:
     global_batch_size = int(args.batch_size) * int(args.num_generations)
     val_start_step = (
         mllog_utils.compute_val_start_step(global_batch_size, args.val_start_at)
@@ -905,9 +1158,98 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           manifest_file,
       )
 
+    def _on_train_start(step: int) -> None:
+      nonlocal fleet, prompt_stream, prewarm_thread
+      if prewarm_thread is not None:
+        logging.info(
+            "[Init] Waiting for manifest sandbox pre-warming to complete before"
+            " train_start..."
+        )
+        if hasattr(prewarm_thread, "join_and_check"):
+          prewarm_thread.join_and_check()
+        else:
+          prewarm_thread.join()
+        prewarm_thread = None
+
+      if args.rcp_logging:
+        mllog_utils.train_start(args, step=step)
+
+      logging.info(
+          "Loading DeepSWE dataset after train_start: source=%s split=%s.",
+          args.dataset_path or args.dataset_name,
+          args.dataset_split,
+      )
+      dataset = deepswe.load_deepswe_dataset(
+          dataset_name=args.dataset_name,
+          dataset_split=args.dataset_split,
+          dataset_path=args.dataset_path,
+          cache_dir=args.dataset_cache_dir or None,
+          shuffle=args.shuffle,
+          seed=args.seed,
+      )
+      logging.info(
+          "Loaded DeepSWE dataset: source=%s split=%s size=%d.",
+          args.dataset_path or args.dataset_name,
+          args.dataset_split,
+          len(dataset),
+      )
+
+      if args.use_agent_sandbox:
+        if fleet is None:
+          fleet = sandbox_utils.init_global_fleet(
+              tasks=dataset,
+              max_concurrency=args.max_concurrency,
+              num_generations=effective_num_generations_to_dispatch,
+              batch_size=args.batch_size,
+              max_warmpool_replicas=args.max_warmpool_replicas,
+              scaffold=args.scaffold,
+          )
+        else:
+          sandbox_utils.ensure_tasks_in_fleet_plan(
+              fleet, list(dataset), scaffold=args.scaffold
+          )
+
+      raw_prompt_stream = deepswe.iter_prompt_items(
+          dataset=dataset,
+          max_steps=args.max_steps,
+          batch_size=args.batch_size,
+          max_turns=args.max_turns,
+          max_response_length=args.max_response_length,
+          temperature=args.temperature,
+          top_p=args.top_p,
+          top_k=None if args.top_k < 0 else args.top_k,
+          step_timeout_secs=args.step_timeout_secs,
+          reward_timeout_secs=args.reward_timeout_secs,
+          env_backend=args.env_backend,
+          use_agent_sandbox=args.use_agent_sandbox,
+          scaffold=args.scaffold,
+          env_verbose=args.env_verbose,
+          episode_timeout_secs=args.episode_timeout_secs,
+          overlong_filter=args.overlong_filter,
+          exact_token_continuity=args.exact_token_continuity,
+          max_staleness=args.max_staleness,
+      )
+      if args.use_agent_sandbox:
+        prompt_stream = swe_env.PrewarmDatasetIterator(
+            raw_prompt_stream,
+            fleet=fleet,
+            num_generations=effective_num_generations_to_dispatch,
+            batch_size=args.batch_size,
+            max_warmpool_replicas=args.max_warmpool_replicas,
+            unwarm_on_exhaustion=True,
+            scaffold=args.scaffold,
+            wait_initial=False if prewarm_manifest else args.sandbox_wait_initial,
+            max_staleness=args.max_staleness,
+            max_workers=args.prewarm_max_workers,
+            images_file=prewarm_manifest or None,
+        )
+      else:
+        prompt_stream = raw_prompt_stream
+      program.dataset = prompt_stream
+
     program = rl_program.StandardRLProgram(
         algo=algo,
-        dataset=prompt_stream,
+        dataset=None,
         max_steps=args.max_steps,
         generation_args=datatypes.GenerationArgs(
             max_generation_steps=args.max_response_length,
@@ -943,6 +1285,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         pipeline_train_microbatches=args.pipeline_train_microbatches,
         partial_rollout=args.in_flight_weight_updates,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
+        initial_dispatch_stagger_s=args.initial_dispatch_stagger_s,
+        initial_dispatch_first_stagger_s=args.initial_dispatch_first_stagger_s,
+        on_train_start=_on_train_start,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",
             step,
@@ -969,13 +1314,59 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     if args.rcp_logging:
       mllog_utils.init_print(
           args,
-          train_dataset=dataset,
+          train_dataset=None,
       )
 
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
+    if args.trainer_warmup_compile:
+      # Compiled by the program after `configure_worker` and before
+      # `on_train_start` (run_start): `configure_worker` re-sends the loss and
+      # input fn, which discards any compile done at bring-up.
+      routed_shape = None
+      if args.trainer_warmup_routed_experts:
+        routed_shape = trainer_warmup.routed_experts_shape_from_config(
+            tokenizer_path
+        )
+        if routed_shape is not None:
+          logging.info(
+              "TRAINER_WARMUP_COMPILE: routed_experts [num_layers, top_k]=%s"
+              " from the model config at %s.",
+              routed_shape,
+              tokenizer_path,
+          )
+        elif (
+            args.trainer_warmup_routed_layers
+            and args.trainer_warmup_routed_top_k
+        ):
+          routed_shape = (
+              args.trainer_warmup_routed_layers,
+              args.trainer_warmup_routed_top_k,
+          )
+          logging.warning(
+              "TRAINER_WARMUP_COMPILE: model config unavailable; routed_experts"
+              " [num_layers, top_k]=%s from --trainer_warmup_routed_layers /"
+              " --trainer_warmup_routed_top_k.",
+              routed_shape,
+          )
+        else:
+          logging.warning(
+              "TRAINER_WARMUP_COMPILE: router replay is on but [num_layers,"
+              " top_k] is unknown; the warm-up omits routed_experts and the"
+              " first real micro-batch will recompile."
+          )
+      program.trainer_warmup_payload = trainer_warmup.build_warmup_payload(
+          algo=algo,
+          batch_config=program.batch_config,
+          num_generations=program.num_generations,
+          mini_batch_size=program.mini_batch_size,
+          train_micro_batch_size=algo.train_micro_batch_size,
+          routed_experts_shape=routed_shape,
+      )
+      logging.info(
+          "TRAINER_WARMUP_COMPILE: built synthetic micro-batch: %s",
+          batch_assembly.describe_payload(program.trainer_warmup_payload),
+      )
     cluster.bring_up_workers(dummy_data=None)
-    if args.rcp_logging:
-      mllog_utils.train_start(args, step=0)
     logging.info("Starting DeepSWE StandardRLProgram execution...")
     cluster.run(
         program=program,
@@ -988,6 +1379,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     logging.exception("FATAL ERROR in orchestrator execution: %s", e)
     raise
   finally:
+    if prewarm_thread is not None and prewarm_thread.is_alive():
+      prewarm_thread.join(timeout=10)
     if program is not None and hasattr(program, "close"):
       program.close()
     if prompt_stream is not None and hasattr(prompt_stream, "close"):
@@ -1022,7 +1415,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
                 run_id=run_id,
                 in_cluster=getattr(c, "in_cluster", True),
                 namespace=c_ns,
-                delete_pods=False,
+                delete_pods=True,
             )
       except Exception as e:  # pylint: disable=broad-exception-caught
         logging.warning("Reaper note: %s", e)

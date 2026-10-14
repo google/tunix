@@ -169,6 +169,7 @@ class FakeDestination:
       raise_after_complete_once: Optional[str] = None,
       status_unreachable: bool = False,
       transport_mode: Optional[str] = None,
+      auto_h2d: Optional[bool] = None,
   ):
     self._info = datatypes.WorkerInfo(
         worker_id=worker_id, roles=frozenset({datatypes.Role.ROLLOUT.value})
@@ -178,6 +179,7 @@ class FakeDestination:
     self._global_shape = global_shape
     self._item_size = item_size
     self._transport_mode = transport_mode
+    self._auto_h2d = auto_h2d
     self._fail_on = fail_on
     self._fail_persistently = fail_persistently
     self._failed_once: set[str] = set()
@@ -244,6 +246,7 @@ class FakeDestination:
       await asyncio.sleep(self._delay_duration)
 
   async def bind_weight_sync(self):
+    self._maybe_fail("bind")
     if not self.bound:
       self.bind_calls += 1
       self.port = self._port_base + self.bind_calls
@@ -251,6 +254,7 @@ class FakeDestination:
     self._log.append(f"{self._info.worker_id}:bind")
 
   async def get_weight_sync_metadata(self):
+    self._maybe_fail("metadata")
     self._log.append(f"{self._info.worker_id}:metadata")
     if self._variables:
       return [
@@ -260,6 +264,7 @@ class FakeDestination:
               control_plane_rpc_address=f"10.0.0.2:{self.port + 500}",
               variables=self._variables,
               transport_mode=self._transport_mode,
+              auto_h2d=self._auto_h2d,
           )
       ]
     return [
@@ -272,6 +277,7 @@ class FakeDestination:
             layout=(0,),
             item_size=self._item_size,
             transport_mode=self._transport_mode,
+            auto_h2d=self._auto_h2d,
         )
     ]
 
@@ -412,6 +418,8 @@ class CoordinatorTestBase(absltest.TestCase):
       *destinations: FakeDestination,
       sources=None,
       timeouts=None,
+      evict_failed_destinations: bool = False,
+      parallel_h2h=None,
   ):
     self.log: list[str] = []
     self.wire = Wire()
@@ -435,6 +443,8 @@ class CoordinatorTestBase(absltest.TestCase):
         handler=self.handler,
         controller_id="test-controller",
         timeouts=timeouts or FAST_TIMEOUTS,
+        evict_failed_destinations=evict_failed_destinations,
+        parallel_h2h=parallel_h2h,
     )
     return self.coordinator
 
@@ -1614,6 +1624,26 @@ class CancellationTest(CoordinatorTestBase):
 
     asyncio.run(scenario())
 
+  def test_system_exit_from_registration_thread_propagates_unwrapped(self):
+    # ThreadPoolExecutor hands a thread's `SystemExit` back as the future's
+    # exception, so with `return_exceptions=True` it arrives as a VALUE.
+    # Interpreter shutdown is not a registration failure: it must surface
+    # as-is rather than be logged and wrapped into a `WeightSyncError`.
+    dest = FakeDestination("sampler", [])
+    self.make(dest)
+
+    def exiting_register(metadata):
+      del metadata
+      raise SystemExit(3)
+
+    self.handler.register_work_unit = exiting_register
+
+    with self.assertRaises(SystemExit):
+      self.sync(1)
+    # Registration precedes `pre`, so no destination was ever quiesced.
+    self.assertNotIn("pre", self.phases("sampler"))
+    self.assertIsNone(self.coordinator.poisoned)
+
   def test_cancel_recovery_rereads_after_abort_and_records_late_commit(self):
     # Classification sees h2d_done, so the worker is aborted -- but its post
     # completed between the classification query and the abort, so the abort
@@ -2009,6 +2039,427 @@ class PhaseTimingsAndDisabledTimeoutsRoundTest(CoordinatorTestBase):
     result = self.sync(policy_version=1)
     self.assertTrue(result.success)
     self.assertTrue(math.isinf(self.coordinator._timeouts.h2d))
+
+
+class ElasticWorkerMembershipTest(CoordinatorTestBase):
+
+  def test_bind_failure_reports_failed_destination_worker(self):
+    d0 = FakeDestination("roll-0", [])
+    d1 = FakeDestination("roll-1", [], fail_on="bind", fail_persistently=True)
+    d2 = FakeDestination("roll-2", [], fail_on="bind", fail_persistently=True)
+    self.make(d0, d1, d2)
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    result = ctx.exception.result
+    self.assertIs(result.state, RoundState.PREPARING)
+    self.assertIsNone(self.coordinator.poisoned)
+    reports = {w.worker_id: w for w in result.workers}
+    self.assertEqual(set(reports.keys()), {"roll-1", "roll-2"})
+    for wid in ("roll-1", "roll-2"):
+      self.assertEqual(reports[wid].phase, "unknown")
+      self.assertTrue(reports[wid].needs_restart)
+      self.assertIn(f"{wid} failed at bind", reports[wid].error)
+
+  def test_metadata_failure_reports_failed_destination_worker(self):
+    d0 = FakeDestination("roll-0", [])
+    d1 = FakeDestination("roll-1", [])
+    d2 = FakeDestination(
+        "roll-2", [], fail_on="metadata", fail_persistently=True
+    )
+    self.make(d0, d1, d2)
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    result = ctx.exception.result
+    self.assertIs(result.state, RoundState.PREPARING)
+    self.assertIsNone(self.coordinator.poisoned)
+    reports = {w.worker_id: w for w in result.workers}
+    self.assertEqual(set(reports.keys()), {"roll-2"})
+    self.assertEqual(reports["roll-2"].phase, "unknown")
+    self.assertTrue(reports["roll-2"].needs_restart)
+    self.assertIn("roll-2 failed at metadata", reports["roll-2"].error)
+
+  def test_evicting_failed_destination_and_rejoining_later_syncs_cleanly(self):
+    d0 = FakeDestination("roll-0", [])
+    d1 = FakeDestination("roll-1", [])
+    d2 = FakeDestination("roll-2", [], fail_on="bind", fail_persistently=True)
+    self.make(d0, d1, d2)
+
+    # Round 0 fails during bind on roll-2; result.workers identifies roll-2.
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    failed_ids = [
+        w.worker_id for w in ctx.exception.result.workers if w.needs_restart
+    ]
+    self.assertEqual(failed_ids, ["roll-2"])
+    for wid in failed_ids:
+      self.registry.unregister(wid)
+
+    # Retry succeeds across surviving destinations roll-0 and roll-1.
+    r1 = self.sync(policy_version=1)
+    self.assertTrue(r1.success)
+    self.assertEqual(d0.serving, expected_pattern(1))
+    self.assertEqual(d1.serving, expected_pattern(1))
+    self.assertEqual(d2.serving, [0.0] * 4)
+
+    # Next round: roll-1 fails mid-round during post with unreachable status,
+    # poisoning the coordinator.
+    d1._fail_on = "post"  # pylint: disable=protected-access
+    d1._fail_persistently = True  # pylint: disable=protected-access
+    d1._status_unreachable = True  # pylint: disable=protected-access
+    with self.assertRaises(WeightSyncError) as ctx2:
+      self.sync(policy_version=2)
+
+    self.assertIs(ctx2.exception.result.state, RoundState.FAILED_NEEDS_RESTART)
+    self.assertIsNotNone(self.coordinator.poisoned)
+    failed_ids_2 = [
+        w.worker_id for w in ctx2.exception.result.workers if w.needs_restart
+    ]
+    self.assertEqual(failed_ids_2, ["roll-1"])
+    for wid in failed_ids_2:
+      self.registry.unregister(wid)
+    self.coordinator.reset_after_recovery()
+
+    # Retry succeeds on surviving roll-0.
+    r2 = self.sync(policy_version=2)
+    self.assertTrue(r2.success)
+    self.assertEqual(d0.serving, expected_pattern(2))
+
+    # Now roll-1 and roll-2 restart/recover and re-register in WorkerRegistry.
+    d1.restart()
+    d1._fail_on = None  # pylint: disable=protected-access
+    d1._status_unreachable = False  # pylint: disable=protected-access
+    d2.restart()
+    d2._fail_on = None  # pylint: disable=protected-access
+    self.registry.register(d1)
+    self.registry.register(d2)
+
+    # Subsequent sync automatically binds, collects metadata, registers work
+    # units, and syncs weights to the rejoined workers alongside roll-0.
+    r3 = self.sync(policy_version=3)
+    self.assertTrue(r3.success)
+    self.assertEqual(d0.serving, expected_pattern(3))
+    self.assertEqual(d1.serving, expected_pattern(3))
+    self.assertEqual(d2.serving, expected_pattern(3))
+    self.assertEqual(
+        sorted(u.job_name for u in r3.destination_units),
+        ["roll-0", "roll-1", "roll-2"],
+    )
+
+  def test_only_pending_syncs_only_pending_weight_sync_destinations(self):
+    d0 = FakeDestination("roll-0", [])
+    d1 = FakeDestination("roll-1", [])
+    self.make(d0)
+
+    r1 = self.sync(policy_version=2)
+    self.assertTrue(r1.success)
+    self.assertEqual(d0.serving, expected_pattern(2))
+    self.assertFalse(self.coordinator.has_pending_destinations())
+
+    # Register roll-1 in PENDING_WEIGHT_SYNC
+    d1._log = self.log  # pylint: disable=protected-access
+    self.handler.attach(d1)
+    self.registry.register(
+        d1, state=worker_registry.MembershipState.PENDING_WEIGHT_SYNC
+    )
+    self.assertTrue(self.coordinator.has_pending_destinations())
+    self.log.clear()
+
+    # Sync with only_pending=True: roll-0 must NOT be quiesced or touched.
+    r2 = self.sync(policy_version=2, only_pending=True)
+    self.assertTrue(r2.success)
+    self.assertEqual(d1.serving, expected_pattern(2))
+    self.assertEqual(self.phases("roll-0"), [])
+    self.assertEqual(
+        self.phases("roll-1"), ["bind", "metadata", "pre", "sync", "post"]
+    )
+    self.assertEqual([u.job_name for u in r2.destination_units], ["roll-1"])
+
+  def test_no_destinations_raises_no_healthy_rollout_workers_error(self):
+    wire = Wire()
+    registry = worker_registry.WorkerRegistry()
+    registry.register(FakeSource("trainer", wire, []))
+    coordinator = weight_sync_coordinator.WeightSyncCoordinator(
+        registry=registry,
+        handler=FakeHandler(wire, []),
+        timeouts=FAST_TIMEOUTS,
+    )
+    with self.assertRaises(datatypes.NoHealthyRolloutWorkersError):
+      asyncio.run(coordinator.sync(1))
+
+  def test_last_sync_duration_s_recorded(self):
+    dest = FakeDestination("sampler", [])
+    self.make(dest)
+    self.assertIsNone(self.coordinator.last_sync_duration_s)
+
+    self.sync(policy_version=1)
+    self.assertIsNotNone(self.coordinator.last_sync_duration_s)
+    self.assertGreaterEqual(self.coordinator.last_sync_duration_s, 0.0)
+
+  def test_release_after_unknown_transfer_releases_source_and_allows_retry(
+      self,
+  ):
+    d0 = FakeDestination("roll-0", [])
+    d1 = FakeDestination("roll-1", [])
+    self.make(d0, d1)
+    self.handler.raise_on_transfer = weight_sync.TransferOutcomeUnknownError(
+        "transfer timed out"
+    )
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    result = ctx.exception.result
+    self.assertIs(result.state, RoundState.UNKNOWN_TRANSFER_STATE)
+    self.assertEqual(self.sources[0].release_calls, 0)
+    self.assertIsNotNone(self.coordinator.poisoned)
+
+    # Evict roll-1, explicitly release source staging, reset poison, and retry.
+    self.registry.unregister("roll-1")
+    asyncio.run(self.coordinator.release_after_unknown_transfer(result))
+    self.assertEqual(self.sources[0].release_calls, 1)
+
+    self.handler.raise_on_transfer = None
+    self.coordinator.reset_after_recovery()
+    retry_res = self.sync(policy_version=1)
+    self.assertTrue(retry_res.success)
+    self.assertIs(retry_res.state, RoundState.COMMITTED)
+    self.assertEqual(d0.serving, expected_pattern(1))
+    self.assertEqual(self.sources[0].release_calls, 2)
+
+  def test_auto_evict_and_retry_partially_committed_and_unknown_transfer(self):
+    # 1. PARTIALLY_COMMITTED auto-evicts the failed worker, clears poison, and
+    # retries on the surviving destination when evict_failed_destinations=True.
+    d0 = FakeDestination("roll-0", [])
+    d1 = FakeDestination("roll-1", [], fail_on="post", fail_persistently=True)
+    self.make(d0, d1, evict_failed_destinations=True)
+
+    res_partial = self.sync(policy_version=1)
+    self.assertTrue(res_partial.success)
+    self.assertIs(res_partial.state, RoundState.COMMITTED)
+    self.assertEqual(d0.serving, expected_pattern(1))
+    self.assertEqual(
+        self.registry.state("roll-1"),
+        worker_registry.MembershipState.EVICTED,
+    )
+
+    # 2. UNKNOWN_TRANSFER_STATE fails loud when
+    # recover_unknown_transfer_state=False.
+    d2 = FakeDestination("roll-2", [])
+    self.handler.attach(d2)
+    self.registry.register(d2)
+    self.handler.raise_on_transfer = weight_sync.TransferOutcomeUnknownError(
+        "transfer timed out"
+    )
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=2)
+    self.assertIs(ctx.exception.result.state, RoundState.UNKNOWN_TRANSFER_STATE)
+    self.assertIsNotNone(self.coordinator.poisoned)
+
+    # 3. With recover_unknown_transfer_state=True, a one-shot transfer timeout
+    # releases source staging, clears poison, and retries cleanly.
+    asyncio.run(
+        self.coordinator.release_after_unknown_transfer(ctx.exception.result)
+    )
+    self.coordinator._recover_unknown_transfer_state = True  # pylint: disable=protected-access
+    transfer_attempts = 0
+    orig_transfer = self.handler.transfer
+
+    def _fail_once_transfer(*args, **kwargs):
+      nonlocal transfer_attempts
+      transfer_attempts += 1
+      if transfer_attempts == 1:
+        raise weight_sync.TransferOutcomeUnknownError("transient timeout")
+      return orig_transfer(*args, **kwargs)
+
+    self.handler.raise_on_transfer = None
+    self.handler.transfer = _fail_once_transfer
+    res_unknown = self.sync(policy_version=2)
+    self.assertTrue(res_unknown.success)
+    self.assertIs(res_unknown.state, RoundState.COMMITTED)
+    self.assertEqual(d0.serving, expected_pattern(2))
+
+  def test_only_pending_failure_evicts_worker_without_poisoning(self):
+    d0 = FakeDestination("roll-0", [])
+    d1 = FakeDestination(
+        "roll-1",
+        [],
+        fail_on="post",
+        fail_persistently=True,
+        status_unreachable=True,
+    )
+    self.make(d0, evict_failed_destinations=True)
+    self.assertTrue(self.sync(policy_version=2).success)
+
+    # roll-1 rejoins in PENDING_WEIGHT_SYNC and dies during its catch-up round.
+    d1._log = self.log  # pylint: disable=protected-access
+    self.handler.attach(d1)
+    self.registry.register(
+        d1, state=worker_registry.MembershipState.PENDING_WEIGHT_SYNC
+    )
+    self.log.clear()
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=2, only_pending=True)
+
+    # The failure is contained to the evicted worker: the coordinator is not
+    # poisoned and the ACTIVE destination was never touched.
+    self.assertIs(ctx.exception.result.state, RoundState.FAILED_NEEDS_RESTART)
+    self.assertIsNone(self.coordinator.poisoned)
+    self.assertIs(
+        self.registry.state("roll-1"), worker_registry.MembershipState.EVICTED
+    )
+    self.assertFalse(self.coordinator.has_pending_destinations())
+    self.assertEqual(self.phases("roll-0"), [])
+    self.assertEqual(d0.serving, expected_pattern(2))
+
+    # The next regular round proceeds on the surviving ACTIVE destination.
+    r3 = self.sync(policy_version=3)
+    self.assertTrue(r3.success)
+    self.assertEqual(d0.serving, expected_pattern(3))
+    self.assertEqual([u.job_name for u in r3.destination_units], ["roll-0"])
+
+    # Two PENDING_WEIGHT_SYNC workers both fail across initial + retry rounds:
+    # both are evicted and the coordinator remains unpoisoned.
+    d2 = FakeDestination("roll-2", [], fail_on="bind", fail_persistently=True)
+    d3 = FakeDestination(
+        "roll-3",
+        [],
+        fail_on="post",
+        fail_persistently=True,
+        status_unreachable=True,
+    )
+    for d in (d2, d3):
+      d._log = self.log  # pylint: disable=protected-access
+      self.handler.attach(d)
+      self.registry.register(
+          d, state=worker_registry.MembershipState.PENDING_WEIGHT_SYNC
+      )
+    with self.assertRaises(WeightSyncError) as ctx2:
+      self.sync(policy_version=3, only_pending=True)
+    self.assertIs(ctx2.exception.result.state, RoundState.FAILED_NEEDS_RESTART)
+    self.assertIsNone(self.coordinator.poisoned)
+    self.assertIs(
+        self.registry.state("roll-2"), worker_registry.MembershipState.EVICTED
+    )
+    self.assertIs(
+        self.registry.state("roll-3"), worker_registry.MembershipState.EVICTED
+    )
+    self.assertTrue(self.sync(policy_version=4).success)
+    self.assertEqual(d0.serving, expected_pattern(4))
+
+  def test_evict_failed_destinations_retries_on_survivors(self):
+    d0 = FakeDestination("roll-0", [])
+    d1 = FakeDestination("roll-1", [], fail_on="bind", fail_persistently=True)
+    self.make(d0, d1, evict_failed_destinations=True)
+
+    r1 = self.sync(policy_version=1)
+
+    self.assertTrue(r1.success)
+    self.assertIsNone(self.coordinator.poisoned)
+    self.assertIs(
+        self.registry.state("roll-1"), worker_registry.MembershipState.EVICTED
+    )
+    self.assertEqual(d0.serving, expected_pattern(1))
+    self.assertEqual([u.job_name for u in r1.destination_units], ["roll-0"])
+
+
+class ParallelH2hCoordinatorTest(CoordinatorTestBase):
+
+  def test_parallel_h2h_runs_transfer_before_pre_when_auto_h2d_false(self):
+    dest = FakeDestination("sampler", [], auto_h2d=False)
+    self.make(dest, parallel_h2h=True)
+
+    admitting_during_transfer = []
+    orig_transfer = self.handler.transfer
+
+    def spy_transfer(*args, **kwargs):
+      admitting_during_transfer.append(dest.admitting)
+      return orig_transfer(*args, **kwargs)
+
+    self.handler.transfer = spy_transfer
+    result = self.sync(policy_version=1)
+
+    self.assertTrue(result.success)
+    self.assertEqual(admitting_during_transfer, [True])
+    self.assertLess(self.log.index("transfer"), self.log.index("sampler:pre"))
+    self.assertLess(
+        self.log.index("sampler:pre"), self.log.index("sampler:sync")
+    )
+    self.assertEqual(dest.serving, expected_pattern(1))
+
+  def test_parallel_h2h_transfer_failure_before_pre_aborts_without_downtime(
+      self,
+  ):
+    dest = FakeDestination("sampler", [], auto_h2d=False)
+    self.make(dest, parallel_h2h=True)
+    self.handler.result_success = False
+    self.handler.result_message = "network glitch during parallel h2h"
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    self.assertIs(ctx.exception.result.state, RoundState.ABORTED)
+    self.assertNotIn("pre", self.phases("sampler"))
+    self.assertNotIn("abort", self.phases("sampler"))
+    self.assertTrue(dest.admitting)
+    self.assertTrue(dest.kv_cache)
+    self.assertEqual(self.sources[0].release_calls, 1)
+    self.assertIsNone(self.coordinator.poisoned)
+
+  def test_parallel_h2h_transfer_timeout_before_pre_poisons_and_holds_staging(
+      self,
+  ):
+    dest = FakeDestination("sampler", [], auto_h2d=False)
+    self.make(
+        dest,
+        parallel_h2h=True,
+        timeouts=dataclasses.replace(FAST_TIMEOUTS, transfer=0.05),
+    )
+    self.handler.transfer_delay = 0.3
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    self.assertIs(ctx.exception.result.state, RoundState.UNKNOWN_TRANSFER_STATE)
+    self.assertNotIn("pre", self.phases("sampler"))
+    self.assertNotIn("abort", self.phases("sampler"))
+    self.assertEqual(self.sources[0].release_calls, 0)
+    self.assertIsNotNone(self.coordinator.poisoned)
+
+  def test_parallel_h2h_pre_failure_after_transfer_rolls_back_destinations(
+      self,
+  ):
+    dest = FakeDestination(
+        "sampler", [], auto_h2d=False, fail_on="pre", fail_persistently=True
+    )
+    self.make(dest, parallel_h2h=True)
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    self.assertIs(ctx.exception.result.state, RoundState.ABORTED)
+    self.assertLess(self.log.index("transfer"), self.log.index("sampler:pre"))
+    self.assertIn("abort", self.phases("sampler"))
+    self.assertTrue(dest.admitting)
+    self.assertEqual(self.sources[0].release_calls, 1)
+    self.assertIsNone(self.coordinator.poisoned)
+
+  def test_parallel_h2h_falls_back_to_sequential_when_dest_auto_h2d_not_false(
+      self,
+  ):
+    for dest_auto_h2d in (True, None):
+      dest = FakeDestination("sampler", [], auto_h2d=dest_auto_h2d)
+      self.make(dest, parallel_h2h=True)
+
+      result = self.sync(policy_version=1)
+
+      self.assertTrue(result.success)
+      self.assertLess(self.log.index("sampler:pre"), self.log.index("transfer"))
+      self.assertEqual(dest.serving, expected_pattern(1))
 
 
 if __name__ == "__main__":
