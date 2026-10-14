@@ -142,10 +142,15 @@ export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"
 export REMAT_POLICY="${REMAT_POLICY:-custom}"
 export RAGGED_BUFFER_FACTOR="${RAGGED_BUFFER_FACTOR:-2.0}"
 export REMAT_CONTEXT="${REMAT_CONTEXT:-remat}"
+# REMAT_DECODER_LAYER_INPUT: where the trainer keeps each layer's input for the backward pass
+# (decoder_layer_input). offload (default) parks it in host memory; device keeps it in HBM, which
+# drops the per-layer host round trip (~115 ms of DMA wait per micro-batch on the RL trainer bench,
+# AI-Hypercomputer/maxtext#5701) for ~1 GiB of HBM (AOT, tpu7x-256).
+export REMAT_DECODER_LAYER_INPUT="${REMAT_DECODER_LAYER_INPUT:-offload}"
 export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
 export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep \
 use_gdn_kernel=true gdn_cp_mode=head gdn_chunk_size=64 \
-decoder_layer_input=offload context=${REMAT_CONTEXT} gdn=remat gdn_conv=remat gdn_states=remat \
+decoder_layer_input=${REMAT_DECODER_LAYER_INPUT} context=${REMAT_CONTEXT} gdn=remat gdn_conv=remat gdn_states=remat \
 megablox=true sparse_matmul=true use_tokamax_gmm=true use_gmm_v2=true \
 use_gmm_v2_heuristic_tiling=false merge_gating_gmm=false \
 wi_tile_fwd_batch_seq=256 wi_tile_fwd_embed_dim=4096 wi_tile_fwd_mlp_dim=1024 \
