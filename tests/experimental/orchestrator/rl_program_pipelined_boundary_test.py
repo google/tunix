@@ -1543,7 +1543,7 @@ class _NeverLatches(rl_program.StandardRLProgram):
 
 
 class _MinGapLatch(rl_program.StandardRLProgram):
-  """WRONG, the latch as first built (review finding F1).
+  """WRONG, the latch as first built.
 
   Stops staging once a stage takes 0.9x the SHORTEST gap between the step's
   train calls returning. A step starts on a device the weight sync drained and
@@ -1762,7 +1762,7 @@ class PipelinedBoundaryEquivalenceTest(parameterized.TestCase):
 
 
 class PipelinedBoundaryChecksFailOnWrongProgramsTest(absltest.TestCase):
-  """Rule 7: each gate above is shown to fire on a deliberately wrong input."""
+  """Each gate above is shown to fire on a deliberately wrong input."""
 
   def test_equivalence_check_catches_sending_before_the_boundary(self):
     sc = _SCENARIOS["prompt_batch"]
@@ -1951,7 +1951,7 @@ class TokenTrainerEquivalenceTest(parameterized.TestCase):
 
 
 class TokenTrainerChecksFailOnWrongProgramsTest(absltest.TestCase):
-  """Rule 7 for the token-trainer checks, the relaxed one above all."""
+  """Controls for the token-trainer checks, the relaxed one above all."""
 
   def test_the_relaxed_check_still_catches_the_wrong_programs(self):
     sc = _SCENARIOS["prompt_batch"]
@@ -2264,12 +2264,12 @@ _FEED_BOUND = _Costs(device_s=0.05, update_s=0.01, host_s=0.3)
 class StagingLatchTest(absltest.TestCase):
   """Staging switches itself off when the trainer is fed slower than it computes.
 
-  The latch reads how long the trainer still waited for its device once a
-  staged micro-batch was in place (`device_wait_s`). Review finding F1: the
-  latch as first built compared the stage with the shortest gap between the
-  step's train calls returning, which is the transfer time whenever a step
-  has three or more calls, so it switched staging off on a device-bound
-  trainer (`_MinGapLatch` below reproduces it).
+  The latch reads how long the trainer still waited for its device once a staged
+  micro-batch was in place (`device_wait_s`). The latch as first built compared
+  the stage with the shortest gap between the step's train calls returning,
+  which is the transfer time whenever a step has three or more calls, so it
+  switched staging off on a device-bound trainer (`_MinGapLatch` below
+  reproduces it).
   """
 
   def test_feed_bound_trainer_stops_staging_after_one_step(self):
@@ -2303,7 +2303,7 @@ class StagingLatchTest(absltest.TestCase):
     self.assertFalse(run.program._staging_latched_off)
 
   def test_trainer_bound_at_trs3_ratios_keeps_staging(self):
-    # PRE-REGISTERED (review P1/P2, inverted for the fix): device 15.11,
+    # PRE-REGISTERED (inverted for the fix): device 15.11,
     # transfer 9.53 units, >= 3 calls per step. All 3 boundaries stage, and
     # each stage finds ~D + update - T = 6.6 units of device work left.
     sc = _latch_scenario(_trs3_costs())
@@ -2323,7 +2323,7 @@ class StagingLatchTest(absltest.TestCase):
     )
 
   def test_the_first_latch_tripped_at_trs3_ratios(self):
-    # Negative control (review P1): the min-gap latch, same scenario, stages
+    # Negative control: the min-gap latch, same scenario, stages
     # once and switches off, the gap it read being the transfer, not D.
     sc = _latch_scenario(_trs3_costs())
     with mock.patch.object(rl_program, "_release_host_memory", lambda: None):
@@ -2335,7 +2335,7 @@ class StagingLatchTest(absltest.TestCase):
     self.assertBetween(cadences[0], 8.0, 11.5, msg)
 
   def test_lane_busy_costs_with_three_or_more_calls_keep_staging(self):
-    # Review P3, inverted: D/T = 7.5, >= 3 calls per step.
+    # Inverted: D/T = 7.5, >= 3 calls per step.
     sc = _latch_scenario(_BUSY, dest_s=0.0, pack_s=0.0, tail_s=0.0)
     run = _run(sc, pipelined=True, staged=True)
     self.assertGreaterEqual(min(_microbatches_per_step(run)), 3, run.log)
@@ -2391,7 +2391,7 @@ _SUPPORT_SCENARIO = dataclasses.replace(
 
 
 class StagingSupportTest(absltest.TestCase):
-  """Staging runs only on a trainer that supports it (review finding F4)."""
+  """Staging runs only on a trainer that supports it."""
 
   def test_an_older_trainer_image_gets_the_boundary_unstaged(self):
     sc = _SUPPORT_SCENARIO
@@ -2544,7 +2544,7 @@ def _cursor_during_step(run: _Run, step: int) -> list[int]:
 
 
 class HoleCursorTest(absltest.TestCase):
-  """PROMPT_BATCH, a short batch k and then a hole at k+1 (review F3).
+  """PROMPT_BATCH, a short batch k and then a hole at k+1.
 
   The pipelined boundary reads batch k+1 by index before batch k commits.
   When batch k was short, step k's own last read had already moved the
@@ -2631,7 +2631,7 @@ class _StepTimes(rl_program.StandardRLProgram):
 class StepTimeTest(absltest.TestCase):
   """What `step_time` (and the RCP `train_step_time` built from it) spans.
 
-  Review finding F5 said consecutive steps' step_time now overlap. They do
+  A review asked whether consecutive steps' step_time now overlap. They do
   not: step k ends at its commit, before step k+1's first micro-batch is
   sent, which is where step k+1 now starts. What changes is that step k's
   deferred bookkeeping falls inside step k+1's time instead of between two
@@ -2662,7 +2662,7 @@ class StepTimeTest(absltest.TestCase):
 
 
 class StepLogTest(absltest.TestCase):
-  """Step k's `Train step` line waits for step k+1's first call (review F7).
+  """Step k's `Train step` line waits for step k+1's first call.
 
   So a `[pipeline] SENT_AHEAD step=k` line, logged once that call is sent,
   marks the step in the log before its metrics line, for monitoring keyed on
@@ -2712,7 +2712,7 @@ def _boom(*args, **kwargs):
 
 
 class DefaultOffTest(absltest.TestCase):
-  """Off by default, and off means the old loop (review D1/D2)."""
+  """Off by default, and off means the old loop."""
 
   def test_library_defaults_take_none_of_the_new_paths(self):
     sc = dataclasses.replace(
@@ -2763,7 +2763,7 @@ def _recipe_guard() -> str:
   return text[start : text.index(end_marker, start) + len(end_marker)]
 
 
-# The guard as first built (review finding F6): only the literal "true".
+# The guard as first built: only the literal "true".
 _FIRST_RECIPE_GUARD = """export PIPELINE_STEP_BOUNDARY=${PIPELINE_STEP_BOUNDARY:-false}
 export STAGE_NEXT_MICROBATCH=${STAGE_NEXT_MICROBATCH:-false}
 if [[ "${STAGE_NEXT_MICROBATCH}" == "true" && "${PIPELINE_STEP_BOUNDARY}" != "true" ]]; then
@@ -2928,7 +2928,7 @@ def _assert_matches_base_loop(
 
 
 class RandomizedEquivalenceTest(parameterized.TestCase):
-  """PRE-REGISTERED (review): all draws pass in every mode."""
+  """PRE-REGISTERED: all draws pass in every mode."""
 
   @parameterized.parameters(*range(_NUM_DRAWS))
   def test_unified_loop_matches_the_base_loop(self, seed):
@@ -2972,7 +2972,7 @@ class TokenRandomizedEquivalenceTest(parameterized.TestCase):
 
 
 class TokenRandomizedCoverageTest(absltest.TestCase):
-  """Rule 7 on the token draws: they reach both staged outcomes."""
+  """Negative controls on the token draws: they reach both staged outcomes."""
 
   def test_draws_stage_and_fall_back(self):
     staged_draws = fallback_draws = 0
@@ -3003,7 +3003,7 @@ class TokenRandomizedCoverageTest(absltest.TestCase):
 
 
 class RandomizedChecksAreNotVacuousTest(absltest.TestCase):
-  """Rule 7 on the draws: they reach the new paths and catch wrong programs.
+  """Controls on the draws: they reach the new paths and catch wrong programs.
 
   Review result, kept: the wrong programs were caught in 6/30 and 5/30 draws
   (prediction >= 5 each, HIT); coverage of the new paths is printed only (its
@@ -3284,7 +3284,7 @@ class StaggeredDispatchTest(absltest.TestCase):
   later boundary is pipelined; and the trainer cannot tell any mode from the
   base loop. Control: without the stagger batch 1 goes out at once.
 
-  Revised after the first cmcs runs, where the box ran at load ~170 on 160
+  Revised after the first runs on a shared CPU machine at load ~170 on 160
   cores: the first version asserted batch 1 goes out within 0.3 s of the gap
   and boundary 0 is never taken ahead. Both assumed step 0 ends well within
   the gap; under that load it did not, in every mode including the base loop

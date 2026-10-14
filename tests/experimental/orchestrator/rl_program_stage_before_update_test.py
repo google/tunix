@@ -416,7 +416,7 @@ def _costs(*, device, update, stage, host, metrics) -> l3t._Costs:
 
 # tr-s3 MEASURED (the harness's `_trs3_costs`, in production seconds).
 TRS3 = dict(device=15.11, update=1.0, stage=4.45, host=9.53, metrics=0.5)
-# siv-sk1r MEASURED (R-L3-RECONCILE section 1): D 13.396 s, update 1.59 s,
+# siv-sk1r MEASURED (its TRAINER_STEP_TIMING lines): D 13.396 s, update 1.59 s,
 # prepare_weight_sync 4.60 s, gRPC leg 11.18 s, get_metrics and coordinator
 # ~0.9 s.
 SK1R = dict(device=13.4, update=1.6, stage=4.6, host=11.2, metrics=0.9)
@@ -546,7 +546,7 @@ class StageBeforeUpdateEquivalenceTest(parameterized.TestCase):
 
 
 class StageBeforeUpdateChecksFailOnWrongProgramsTest(absltest.TestCase):
-  """Rule 7 for the checks above."""
+  """Negative controls for the checks above."""
 
   def test_a_rerun_that_reads_the_staged_micro_batch_is_caught(self):
     # The wrong double only differs from `_LastOverflowsTrainer` while a stage
@@ -717,7 +717,7 @@ class DroplessReplayTest(absltest.TestCase):
 
 
 class StageBeforeUpdateHidesTest(absltest.TestCase):
-  """PRE-REGISTERED (diag-L3 R1/R3/R5, re-run on this code).
+  """PRE-REGISTERED, re-run on this code.
 
   Under the replay double the hook after the last call stages once and
   latches (positive control: its wait < 50 ms), while staging before the
@@ -783,7 +783,7 @@ class StageBeforeUpdateHidesTest(absltest.TestCase):
     )
 
   def test_the_hook_after_the_last_call_latches_under_replay(self):
-    # Positive control (diag-L3 P2): same scenario, the old hook.
+    # Positive control: same scenario, the old hook.
     sc = _latch_scenario(TRS3)
     run = _quiet(
         l3t._run,
