@@ -261,16 +261,24 @@ class RolloutWorker(abstract_worker.Worker):
     self._ensure_initialized()
     return self.manager.get_target_state()
 
-  def _stamp_worker_lineage(self, metadata: dict[str, Any] | None) -> None:
+  def _stamp_worker_lineage(
+      self,
+      metadata: dict[str, Any] | None,
+      *,
+      execution_time_s: float | None = None,
+  ) -> None:
     """Appends worker generation telemetry to the lineage context if present."""
     if metadata is None:
       return
     lineage_ctx = metadata.get("lineage")
     if lineage_ctx is not None and hasattr(lineage_ctx, "add_event"):
+      attributes: dict[str, Any] = {"worker_id": self.worker_id}
+      if execution_time_s is not None:
+        attributes["execution_time_s"] = float(execution_time_s)
       lineage_ctx.add_event(
           component="worker.rollout",
           operation="generate",
-          attributes={"worker_id": self.worker_id},
+          attributes=attributes,
       )
 
   def _to_rollout_response(
@@ -300,7 +308,12 @@ class RolloutWorker(abstract_worker.Worker):
       req_id = request_id or getattr(item, "traj_id", "")
       if prompt_tokens is not None and getattr(item, "prompt_tokens", None) is None:
         item.metadata["prompt_tokens"] = prompt_tokens
-      self._stamp_worker_lineage(item.metadata)
+      exec_time_s = (
+          item.traj.get("execution_time_s")
+          if isinstance(item.traj, dict)
+          else None
+      )
+      self._stamp_worker_lineage(item.metadata, execution_time_s=exec_time_s)
       return datatypes.RolloutResponse(
           request_id=req_id,
           status="COMPLETED",

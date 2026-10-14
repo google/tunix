@@ -399,6 +399,34 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_run_episode_records_sampled_tokens_per_turn(self):
+    async def _run():
+      engine = collector.TrajectoryCollectorEngine(
+          traj_id="t1",
+          request=datatypes.RolloutRequest(
+              prompt_id="p1",
+              prompt="What is 2+2?",
+              max_response_length=50,
+              metadata={"overlong_filter": True},
+          ),
+          sampler=_MockSampler(token_lengths=[30, 20]),
+          env_client=_MultiStepEnv(
+              task={"question": "2+2", "answer": "4"}, max_steps=3
+          ),
+          agent=model_agent.ModelAgent("test_agent"),
+          tokenizer=_MockTokenizer(),
+          chat_parser=_RecordingParser(),
+      )
+      return await engine.run_episode()
+
+    item = asyncio.run(_run())
+
+    # The second turn uses up the response budget, so the overlong filter
+    # zeroes the training mask; the per-turn lengths are recorded regardless.
+    self.assertEqual(item.traj["status"], "MAX_CONTEXT_LIMIT_REACHED")
+    self.assertFalse(np.any(item.traj["conversation_masks"]))
+    self.assertEqual(item.traj["assistant_turn_lengths"], [30, 20])
+
   def test_model_call_seeds_vanilla_sampler_deterministically(self):
     async def _run():
       sampler = _MockVanillaSampler()

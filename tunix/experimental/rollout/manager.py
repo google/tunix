@@ -308,8 +308,13 @@ class RolloutManager:
       resolve_cb: Callable[[TrajectoryOrError], None],
   ) -> None:
     """Runs episode loop, removes active tracking, and resolves callbacks/streams."""
+    run_start = time.perf_counter()
     try:
       trajectory: TrajectoryOrError = await collector.run_episode()
+      if isinstance(trajectory, datatypes.TrajectoryItem) and isinstance(
+          trajectory.traj, dict
+      ):
+        trajectory.traj["execution_time_s"] = time.perf_counter() - run_start
     except Exception as e:  # pylint: disable=broad-exception-caught
       error_metadata = dict(request.metadata or {})
       error_metadata["prompt_id"] = request.prompt_id

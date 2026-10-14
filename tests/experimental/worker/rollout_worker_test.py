@@ -89,6 +89,9 @@ class RolloutWorkerTest(absltest.TestCase):
       self.assertEqual(
           worker_event.attributes.get("worker_id"), "rollout_worker_42"
       )
+      self.assertGreaterEqual(
+          worker_event.attributes.get("execution_time_s", -1.0), 0.0
+      )
 
     asyncio.run(_run())
 

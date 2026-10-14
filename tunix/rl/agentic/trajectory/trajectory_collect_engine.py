@@ -159,6 +159,7 @@ class TrajectoryCollectEngine:
 
     self.overlong_filter = overlong_filter
     self.perf_v2 = perf_v2 or perf_tracer_v2.NoopTracer()
+    self._assistant_turn_lengths: List[int] = []
     self._cumulative_prompt_tokens: int = 0
     self._current_step_initial_routed_experts: Optional[np.ndarray] = None
     # Whether any turn so far returned routed experts.
@@ -634,6 +635,10 @@ class TrajectoryCollectEngine:
           "prompt_tokens": prompt_tokens,
           "conversation_tokens": conversation_tokens,
           "conversation_masks": final_masks,
+          # Kept apart from `conversation_masks`, which the overlong filter
+          # zeroes, so consumers still see how long a masked-out rollout's
+          # turns ran.
+          "assistant_turn_lengths": list(self._assistant_turn_lengths),
           "status": self.agent.trajectory.status.name,
           "trajectory_reward": self.agent.trajectory.reward,
           "env_time": self.env_time,
@@ -725,6 +730,7 @@ class TrajectoryCollectEngine:
     self.agent.trajectory.prompt_tokens = []
     self.agent.trajectory.prompt_length = None
     self._response_token_count = 0
+    self._assistant_turn_lengths = []
     self._cumulative_prompt_tokens = 0
     self._current_step_initial_routed_experts = None
     self._has_routed_experts = False
@@ -1090,8 +1096,11 @@ class TrajectoryCollectEngine:
       ]
       self._cumulative_prompt_tokens += delta_routed.shape[0]
 
-    if rollout_output.tokens:
-      self._response_token_count += len(rollout_output.tokens[0])
+    sampled_tokens = (
+        len(rollout_output.tokens[0]) if rollout_output.tokens else 0
+    )
+    self._assistant_turn_lengths.append(sampled_tokens)
+    self._response_token_count += sampled_tokens
 
     action = self.agent.update_from_model(rollout_output.text[0]).action
     # `step_idx` is tracked separately from `len(steps)`, so verify that

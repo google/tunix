@@ -330,6 +330,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
             'reward_latency': 0.0,
         },
         'old_logprobs': np.array([1, 1, 0, 0, 1, 1]),
+        'assistant_turn_lengths': [2, 2],
         'policy_version': None,
         'original_input': {'some': 'task'},
         'group_id': None,

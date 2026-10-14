@@ -39,6 +39,7 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import dataset_utils
 from tunix.experimental.orchestrator import rl_engine_interface
+from tunix.experimental.orchestrator import step_telemetry
 from tunix.experimental.queue_manager import trajectory_queue_manager
 from tunix.experimental.trajectory import store as trajectory_store_lib
 from tunix.rl import common as rl_common
@@ -126,6 +127,10 @@ def _generation_metrics(
       "rollout/completions/max_raw_length": float(np.max(all_lengths)),
       "rollout/completions/min_raw_length": float(np.min(all_lengths)),
   }
+
+
+# Rollouts named per step in the `[rollout] ... slowest` log line.
+_NUM_SLOWEST_ROLLOUTS_LOGGED = 3
 
 
 def _extract_reward(item: Any) -> float:
@@ -653,19 +658,16 @@ class StandardRLProgram(RLProgram):
             raw_status = src_traj.get("status") or getattr(
                 src_item, "status", None
             )
-            raw_steps = src_traj.get("steps")
             traj_dict = dict(src_traj)
           elif src_traj is not None:
             raw_status = getattr(src_traj, "status", None) or getattr(
                 src_item, "status", None
             )
-            raw_steps = getattr(src_traj, "steps", None)
             traj_dict = (
                 src_traj.to_dict() if hasattr(src_traj, "to_dict") else {}
             )
           else:
             raw_status = getattr(src_item, "status", None)
-            raw_steps = []
             traj_dict = {}
           if isinstance(raw_status, datatypes.TrajectoryStatus):
             status = raw_status
@@ -679,7 +681,6 @@ class StandardRLProgram(RLProgram):
             )
           else:
             status = datatypes.TrajectoryStatus.RUNNING
-          steps = raw_steps if isinstance(raw_steps, list) else []
           src_metadata = getattr(src_item, "metadata", None)
           metadata = dict(src_metadata) if src_metadata else {}
           metadata.pop("routed_experts", None)
@@ -694,7 +695,6 @@ class StandardRLProgram(RLProgram):
           src_policy_version = int(src_policy_version or 0)
           traj_dict["trajectory_reward"] = reward_val
           traj_dict["status"] = status
-          traj_dict["steps"] = steps
           traj_dict["conversation_masks"] = payload.completion_mask
           traj_dict["policy_version"] = src_policy_version
           item = datatypes.TrajectoryItem(
@@ -783,6 +783,7 @@ class StandardRLProgram(RLProgram):
       log_step: int,
       sampler_agreement: dict[str, tuple[Any, list[Any]]] | None = None,
       filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]] = (),
+      step_times: step_telemetry.StepTimes | None = None,
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
 
@@ -805,8 +806,6 @@ class StandardRLProgram(RLProgram):
     prompt_lengths = []
     completion_lengths = []
     total_lengths = []
-    turns_list = []
-    successes = []
     staleness_list = []
     for item in all_step_items:
       p_len = None
@@ -843,29 +842,6 @@ class StandardRLProgram(RLProgram):
         completion_lengths.append(c_len)
       if p_len is not None and c_len is not None:
         total_lengths.append(p_len + c_len)
-
-      traj = getattr(item, "traj", None)
-      if isinstance(traj, dict):
-        steps = traj.get("steps")
-        status = traj.get("status") or getattr(item, "status", None)
-      elif traj is not None:
-        steps = getattr(traj, "steps", None)
-        status = getattr(traj, "status", None) or getattr(item, "status", None)
-      else:
-        steps = getattr(item, "steps", None)
-        status = getattr(item, "status", None)
-      if steps and len(steps) > 0:
-        turns_list.append(len(steps))
-      if status is not None:
-        if isinstance(status, datatypes.TrajectoryStatus):
-          if status != datatypes.TrajectoryStatus.RUNNING:
-            is_succ = status == datatypes.TrajectoryStatus.SUCCEEDED
-            successes.append(1.0 if is_succ else 0.0)
-        elif isinstance(status, str):
-          status_str = status.upper()
-          if status_str != "RUNNING":
-            is_succ = status_str in ("COMPLETED", "SUCCEEDED", "SUCCESS")
-            successes.append(1.0 if is_succ else 0.0)
 
       # Batch ingestion staleness: consumed_policy_version - item.policy_version
       pol_ver = getattr(item, "policy_version", None)
@@ -916,18 +892,6 @@ class StandardRLProgram(RLProgram):
           float(np.mean(total_lengths)),
           log_step,
       )
-    if turns_list:
-      self._log_metric(
-          "rollout/num_turns_mean",
-          float(np.mean(turns_list)),
-          log_step,
-      )
-    if successes:
-      self._log_metric(
-          "rollout/success_rate",
-          float(np.mean(successes)),
-          log_step,
-      )
     if staleness_list:
       staleness_stats = {
           "staleness_mean": float(np.mean(staleness_list)),
@@ -936,6 +900,18 @@ class StandardRLProgram(RLProgram):
       }
       for tag, val in staleness_stats.items():
         self._log_metric(f"rollout/{tag}", val, log_step)
+
+    rollout_facts = [
+        step_telemetry.RolloutFacts.of(item) for item in all_step_items
+    ]
+    rollout_health = step_telemetry.rollout_health(rollout_facts)
+    for tag, val in rollout_health.metrics.items():
+      self._log_metric(tag, val, log_step)
+    slowest = step_telemetry.slowest_rollouts_summary(
+        rollout_facts, k=_NUM_SLOWEST_ROLLOUTS_LOGGED
+    )
+    if slowest is not None:
+      logging.info("[rollout] step=%d %s", log_step, slowest)
 
     # Generation/rollout metrics grouped under rollout/*.
     if generation_metrics:
@@ -1023,6 +999,9 @@ class StandardRLProgram(RLProgram):
     }
     for tag, val in orchestrator_stats.items():
       self._log_metric(f"orchestrator/{tag}", val, log_step)
+    if step_times is not None:
+      for tag, val in dataclasses.asdict(step_times).items():
+        self._log_metric(f"perf/{tag}", val, log_step)
     if padding_stats:
       for tag, val in batch_assembly.summarize_padding_stats(
           padding_stats
@@ -1282,23 +1261,45 @@ class StandardRLProgram(RLProgram):
       }
       self.trajectory_logger.log_item_async(row)
 
+  async def _timed_train_step(
+      self, batch: datatypes.RLTrainerPayload, *, apply_optimizer: bool
+  ) -> tuple[Any, float]:
+    """Runs one microbatch's `train_step`; returns its result and seconds.
+
+    Intermediate microbatches (`apply_optimizer=False`) intentionally return
+    once `fwd_bwd` is dispatched so the next microbatch's RPC, host-to-device
+    input sharding, and XLA launch stay pipelined with TPU execution.
+    """
+    assert self.engine is not None
+    start = time.monotonic()
+    result = await self.engine.train_step(
+        batch,
+        role=datatypes.Role.ACTOR,
+        accumulate_gradients=True,
+        apply_optimizer=apply_optimizer,
+    )
+    return result, time.monotonic() - start
+
   async def train_stage(self) -> None:
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
     assert self.engine is not None
 
-    pending_train: asyncio.Task[Any] | None = None
+    pending_train: asyncio.Task[tuple[Any, float]] | None = None
     step_result: Any = None
+    step_times = step_telemetry.StepTimes()
 
     async def _await_pending_train() -> None:
       nonlocal pending_train, step_result
       task, pending_train = pending_train, None
       if task is not None:
-        step_result = await task
+        step_result, train_sec = await task
+        step_times.policy_training_time += train_sec
 
     try:
       while self.max_steps is None or self._step < self.max_steps:
         current_step = self._step
         step_start_time = time.monotonic()
+        step_times = step_telemetry.StepTimes()
         consumed_policy_version = self.policy_version
 
         uncommitted_groups = []
@@ -1325,6 +1326,7 @@ class StandardRLProgram(RLProgram):
               and step_result.get("train_step") is not None
           ):
             optimizer_step = int(step_result["train_step"])
+          checkpoint_start = time.monotonic()
           await self.engine.save_checkpoint(
               role=datatypes.Role.ACTOR,
               metadata={
@@ -1338,10 +1340,13 @@ class StandardRLProgram(RLProgram):
                   ),
               },
           )
+          step_times.checkpoint_time += time.monotonic() - checkpoint_start
           checkpoint_saved = True
 
         while groups_consumed < self.full_batch_size:
+          wait_start = time.monotonic()
           scored_items = await self.scored_q.get_batch(self.num_generations)
+          step_times.exposed_generation_time += time.monotonic() - wait_start
           if not scored_items:
             batch_iter = iter(self.assembler.flush())
           else:
@@ -1400,10 +1405,14 @@ class StandardRLProgram(RLProgram):
                     "datatypes.RLTrainerPayload microbatches; got "
                     f"{type(batch).__name__}."
                 )
+              reference_start = time.monotonic()
               ref_logps = await self.engine.per_token_logps(
                   datatypes.Role.REFERENCE,
                   items=batch,
                   temperature=self.generation_args.temperature,
+              )
+              step_times.reference_logps_time += (
+                  time.monotonic() - reference_start
               )
               batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
             algo_config = getattr(self.algo, "algo_config", None)
@@ -1415,8 +1424,12 @@ class StandardRLProgram(RLProgram):
                 and not self.can_fuse_agreement_in_loss
             ):
               await _await_pending_train()
+              agreement_start = time.monotonic()
               batch = await self._apply_sampler_trainer_agreement(
                   batch, step_sampler_agreement
+              )
+              step_times.sampler_agreement_time += (
+                  time.monotonic() - agreement_start
               )
 
             num_microbatches += 1
@@ -1432,18 +1445,17 @@ class StandardRLProgram(RLProgram):
             is_final_batch = mb.is_final_batch
             await _await_pending_train()
             pending_train = asyncio.create_task(
-                self.engine.train_step(
-                    batch,
-                    role=datatypes.Role.ACTOR,
-                    accumulate_gradients=True,
-                    apply_optimizer=is_final_batch,
-                )
+                self._timed_train_step(batch, apply_optimizer=is_final_batch)
             )
             del batch, mb
             if is_final_batch:
               await _await_pending_train()
+              metrics_start = time.monotonic()
               trainer_metrics = await self.engine.get_metrics(
                   role=datatypes.Role.ACTOR
+              )
+              step_times.policy_training_time += (
+                  time.monotonic() - metrics_start
               )
               final_minibatch_completed = True
               # TODO(tunix-dev): Configurable checkpointing frequency. Today we
@@ -1475,9 +1487,14 @@ class StandardRLProgram(RLProgram):
           break
 
         if self.sync_weights:
+          # TODO(tunix-dev): Split into drain/transfer/publish once
+          # `sync_weights` reports per-phase times; draining in-flight rollouts
+          # can dominate this.
+          sync_start = time.monotonic()
           new_version = await self.engine.sync_weights(
               role=datatypes.Role.ACTOR
           )
+          step_times.weight_sync_time += time.monotonic() - sync_start
           self.policy_version = (
               new_version
               if new_version is not None
@@ -1529,6 +1546,7 @@ class StandardRLProgram(RLProgram):
             log_step=current_step,
             sampler_agreement=step_sampler_agreement,
             filtered_groups=filtered_groups,
+            step_times=step_times,
         )
         del filtered_groups
         self._log_consumed_trajectories(

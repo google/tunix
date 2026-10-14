@@ -284,13 +284,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             tracking_id=req.traj_id,
             parent_tracking_ids=[str(req.prompt_id)],
         )
+        dispatch_attrs: dict[str, Any] = {
+            "policy_version": req.target_policy_version,
+            "group_index": req.group_index,
+        }
+        if "batch_idx" in req.metadata:
+          dispatch_attrs["batch_idx"] = req.metadata["batch_idx"]
         lineage_ctx.add_event(
             component="engine.dispatch",
             operation="rollout",
-            attributes={
-                "policy_version": req.target_policy_version,
-                "group_index": req.group_index,
-            },
+            attributes=dispatch_attrs,
         )
         req.metadata["lineage"] = lineage_ctx
 
