@@ -153,6 +153,11 @@ export USER_CONTAINER_MEMORY=${USER_CONTAINER_MEMORY:-48G}
 export USER_CONTAINER_MEMORY_LIMIT=${USER_CONTAINER_MEMORY_LIMIT:-70G}
 export PATHWAYS_WORKER_MEMORY=${PATHWAYS_WORKER_MEMORY:-100G}
 export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
+# Trainer only: host buffers of at least this many bytes (e.g. 16777216) go
+# from the trainer to pathways-proxy through a shared tmpfs instead of
+# localhost gRPC. Unset keeps gRPC. Each in-flight buffer is also held in the
+# trainer container's memory, so raise USER_CONTAINER_MEMORY_LIMIT with it.
+export TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES=${TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES:-}
 
 export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-leaderworkerset.mcjax.ray.yaml}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5e:4x4}
@@ -342,6 +347,7 @@ start_trainer() {
     --user_container_memory="${USER_CONTAINER_MEMORY}" \
     --user_container_memory_limit="${USER_CONTAINER_MEMORY_LIMIT}" \
     --pathways_worker_memory="${PATHWAYS_WORKER_MEMORY}" \
+    ${TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES:+--ifrt_proxy_large_transfer_threshold_bytes="${TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES}"} \
     --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \

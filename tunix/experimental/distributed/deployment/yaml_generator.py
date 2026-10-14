@@ -348,6 +348,20 @@ def main() -> None:
       default="100G",
       help="Memory request for the pathways-worker container",
   )
+  parser.add_argument(
+      "--ifrt_proxy_large_transfer_threshold_bytes",
+      type=int,
+      default=2**63 - 1,
+      help=(
+          "Pathways templates: host buffers of at least this many bytes go"
+          " from the user container to pathways-proxy through a shared"
+          " memory-backed directory instead of localhost gRPC (a 31 GB batch"
+          " took ~1-1.6 s instead of ~6-10 s on v5p). Each such buffer also"
+          " takes memory in the user container until it has been sent to the"
+          " workers. The default, like the IFRT proxy client's, turns this"
+          " off."
+      ),
+  )
 
   parser.add_argument(
       "--worker_container_name",
@@ -393,6 +407,12 @@ def main() -> None:
   )
 
   args = parser.parse_args()
+  if not 0 < args.ifrt_proxy_large_transfer_threshold_bytes <= 2**63 - 1:
+    # The IFRT proxy client parses the value as a positive int64.
+    parser.error(
+        "--ifrt_proxy_large_transfer_threshold_bytes must be in [1, 2**63 - 1],"
+        f" got {args.ifrt_proxy_large_transfer_threshold_bytes}"
+    )
   if args.startup_retries < 0:
     raise ValueError(
         f"--startup_retries must be >= 0, got {args.startup_retries}"
@@ -771,6 +791,9 @@ def main() -> None:
         USER_CONTAINER_MEMORY=args.user_container_memory,
         USER_CONTAINER_MEMORY_LIMIT=args.user_container_memory_limit,
         PATHWAYS_WORKER_MEMORY=args.pathways_worker_memory,
+        IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES=(
+            args.ifrt_proxy_large_transfer_threshold_bytes
+        ),
         CPU_MACHINE=args.cpu_machine,
         CPU_NODEPOOL=args.cpu_nodepool,
         CPU_MEMORY=args.cpu_memory,
