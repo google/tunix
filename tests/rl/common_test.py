@@ -1026,6 +1026,35 @@ def _routing(length, fill):
   )
 
 
+class ChunkedLogitsHookTest(absltest.TestCase):
+
+  def test_uses_model_chunked_logits_when_present(self):
+    w = jax.random.normal(jax.random.key(0), (8, 11))
+    hidden = jax.random.normal(jax.random.key(1), (2, 13, 8))
+    ids = jax.random.randint(jax.random.key(2), (2, 13), 0, 11)
+
+    class _Scan:
+
+      def compute_final_logits(self, h):
+        return h @ w
+
+    class _Hook(_Scan):
+      calls = 0
+
+      def apply_chunked_logits(self, h, inputs, chunk_fn, chunk_size):
+        self.calls += 1
+        del chunk_size
+        return chunk_fn(h @ w, inputs)
+
+    hook = _Hook()
+    want = common.compute_chunked_logps(_Scan(), hidden, ids, 0.7, 4, True)
+    got = common.compute_chunked_logps(hook, hidden, ids, 0.7, 4, True)
+    self.assertEqual(hook.calls, 1)
+    for g, e in zip(got, want):
+      self.assertEqual(g.shape, (2, 13))
+      np.testing.assert_allclose(g, e, rtol=1e-5, atol=1e-5)
+
+
 class AlignRoutedExpertsTest(parameterized.TestCase):
   """Rollout routing must be padded exactly like the token ids it describes."""
 

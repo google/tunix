@@ -938,6 +938,23 @@ def compute_chunked_logps(
   padded_seq_len = seq_len + pad_len
   num_chunks = padded_seq_len // chunk_size
 
+  if hasattr(model, "apply_chunked_logits"):
+    # The model chunks the logits itself, keeping its output head out of the
+    # chunk loop (MaxText: gathered once, gradient accumulated across chunks
+    # rather than re-gathered and reduced per chunk).
+    def chunk_fn(logits_chunk, ids_chunk):
+      if temperature != 0.0 and temperature != 1.0:
+        logits_chunk /= temperature
+      logps_chunk = selective_log_softmax(logits_chunk, ids_chunk)
+      if return_entropy:
+        return logps_chunk, compute_entropy_from_logits(logits_chunk)
+      return logps_chunk
+
+    out = model.apply_chunked_logits(
+        hidden_states, target_ids, chunk_fn, chunk_size
+    )
+    return jax.tree.map(lambda x: x[:, :seq_len], out)
+
   # 2. Reshape into chunks: [Batch, NumChunks, ChunkSize, ...]
   hs_reshaped = hidden_states.reshape(
       batch_size, num_chunks, chunk_size, hidden_dim
