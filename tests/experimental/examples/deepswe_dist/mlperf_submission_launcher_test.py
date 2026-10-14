@@ -16,8 +16,9 @@
 
 Each test renders mlperf_gbs1024_submission.sh with DRY_RUN=true and checks the
 rendered JobSets, so the defaults, the DROPLESS switch and the learning-rate
-rule are tested through the same path a launch takes. One test renders the other
-397B v7x recipes, which leave TRAINER_TUNED_FLAGS off.
+rule are tested through the same path a launch takes. Two tests render the other
+397B v7x recipes, which leave TRAINER_TUNED_FLAGS, the sharded log-prob head and
+the staged step boundary off.
 """
 
 import json
@@ -281,8 +282,15 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertIn("--trainer_warmup_routed_experts", orch)
     self.assertIn("--no-sandbox_wait_initial", orch)
 
-  def test_the_pipelined_step_boundary_is_off_by_default(self):
+  def test_the_staged_step_boundary_is_on_by_default(self):
     orch = _jobset(self.default, "orch")
+    self.assertIn("--pipeline_step_boundary", orch)
+    self.assertIn("--stage_next_microbatch", orch)
+    self.assertNotIn("--no-pipeline_step_boundary", orch)
+    self.assertNotIn("--no-stage_next_microbatch", orch)
+
+  def test_the_pipelined_step_boundary_off_turns_staging_off(self):
+    orch = _jobset(_render(PIPELINE_STEP_BOUNDARY="false"), "orch")
     self.assertIn("--no-pipeline_step_boundary", orch)
     self.assertIn("--no-stage_next_microbatch", orch)
 
@@ -300,7 +308,21 @@ class SubmissionLauncherTest(absltest.TestCase):
     with self.assertRaisesRegex(
         AssertionError, "STAGE_NEXT_MICROBATCH=true requires"
     ):
-      _render(STAGE_NEXT_MICROBATCH="true")
+      _render(PIPELINE_STEP_BOUNDARY="false", STAGE_NEXT_MICROBATCH="true")
+
+  def test_the_sharded_log_prob_head_is_on_in_the_trainer_only(self):
+    self.assertRegex(
+        _jobset(self.default, "train"), r"\bTUNIX_LOGPS_SHARDED_HEAD=local\b"
+    )
+    for suffix in ("orch", "roll-0"):
+      self.assertNotIn(
+          "TUNIX_LOGPS_SHARDED_HEAD", _jobset(self.default, suffix), suffix
+      )
+
+  def test_the_sharded_log_prob_head_can_be_turned_off(self):
+    trainer = _jobset(_render(TUNIX_LOGPS_SHARDED_HEAD="0"), "train")
+    self.assertRegex(trainer, r"\bTUNIX_LOGPS_SHARDED_HEAD=0\b")
+    self.assertNotIn("TUNIX_LOGPS_SHARDED_HEAD=local", trainer)
 
   def test_start_up_flags_can_be_turned_off(self):
     orch = _jobset(
@@ -414,6 +436,18 @@ class SubmissionLauncherTest(absltest.TestCase):
       for key, (off, _) in _TUNED_KEYS.items():
         if key != "num_moe_token_chunks":  # two in these recipes either way
           self.assertEqual(_value(flags, key), off, f"{name}: {key}")
+
+  def test_head_and_staging_are_off_in_the_other_397b_v7x_recipes(self):
+    for name in (
+        "mlperf_397b_256_v7x.sh",
+        "mlperf_397b_1024_v7x.sh",
+        "mlperf_gbs512.sh",
+    ):
+      render = _render(_RECIPE.with_name(name))
+      self.assertNotIn("TUNIX_LOGPS_SHARDED_HEAD", render, name)
+      orch = _jobset(render, "orch")
+      self.assertIn("--no-pipeline_step_boundary", orch, name)
+      self.assertIn("--no-stage_next_microbatch", orch, name)
 
 
 if __name__ == "__main__":
