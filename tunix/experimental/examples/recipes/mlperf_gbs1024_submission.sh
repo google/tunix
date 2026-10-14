@@ -73,7 +73,9 @@ export ROLLOUT_ATTENTION_DP="${ROLLOUT_ATTENTION_DP:-false}"
 #   COMPUTE_LOGPS_CHUNK_SIZE=1024 (mlperf_base.sh's default is 512).
 # RAGGED_BUFFER_FACTOR=-1 keeps the fully dropless buffers instead: context
 # offload and four token chunks, without the replay, padding and audit flags.
-# Both layouts fit an XLA HBM budget of 84992 MiB. Two opt-in replay knobs run
+# The replay layout ran within an XLA HBM budget of 84992 MiB on the bench; the fully
+# dropless layout fit that budget before the tuned keys and the log-prob head and has
+# not been compiled with them. Two opt-in replay knobs run
 # the regular program with larger buffers, the fully dropless final micro-batch
 # (RETRY_DROPLESS_FINAL_MICRO_BATCH=true) and the first-phase buffer factor
 # (FIRST_PHASE_RAGGED_BUFFER_FACTOR); with either, the layout keeps four chunks

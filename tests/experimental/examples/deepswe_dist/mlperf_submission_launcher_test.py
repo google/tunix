@@ -51,7 +51,6 @@ _MAXTEXT_DEFAULTS = {
     "cast_grads_after_all_reduce": "false",
     "gdn_cp_matmul_precision": "highest",
     "gdn_cp_state": "remat",
-    "moe_route": "remat",
 }
 _TUNED_KEYS = {
     "cast_grads_after_all_reduce": ("false", "true"),
@@ -59,7 +58,6 @@ _TUNED_KEYS = {
     "gdn_cp_matmul_precision": ("highest", "high"),
     "gdn_cp_mode": ("head", "seq"),
     "gdn_cp_state": ("remat", "device"),
-    "moe_route": ("remat", "device"),
     "num_moe_token_chunks": ("4", "2"),
     "sa_fuse_reciprocal": ("false", "true"),
     "sa_use_base2_exp": ("true", "false"),
@@ -410,10 +408,14 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(cfg["max_num_seqs"], 16)
     self.assertNotIn("kv_tp_size", _maxtext_flags(_jobset(render, "train")))
 
-  def test_tuned_flags_set_exactly_the_nine_keys_at_the_bench_cell(self):
+  def test_tuned_flags_set_exactly_the_tuned_keys_at_the_bench_cell(self):
     before = _maxtext_flags(_jobset(self.bench_off, "train"))
     after = _maxtext_flags(_jobset(self.bench_on, "train"))
     self.assertEqual(_flag_changes(before, after), _TUNED_KEYS)
+
+  def test_tuned_flags_leave_moe_route_at_its_default(self):
+    # moe_route=device was inert in the bench's MaxText and is live at the pin.
+    self.assertNotIn("moe_route", _maxtext_flags(_jobset(self.default, "train")))
 
   def test_tuned_flags_change_only_the_trainer_flags(self):
     off_docs = self.bench_off.split("\n---\n")
