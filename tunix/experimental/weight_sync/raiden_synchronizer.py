@@ -34,6 +34,8 @@ import jax.numpy as jnp
 from tunix.experimental.weight_sync import weight_sync
 from tunix.utils import mesh
 
+mesh_utils = mesh
+
 
 def _get_host_rss_gb() -> tuple[float, float]:
   """Returns (current_rss_gb, peak_rss_gb) for the current process."""
@@ -803,7 +805,7 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
       ctrl_ip = unpack_control_ip(row)
       if idx < len(src_devices):
         dev = src_devices[idx]
-        host_key = mesh.device_host_key(dev)
+        host_key = mesh_utils.device_host_key(dev)
         if host_key is None:
           task_id = getattr(dev, "task_id", None)
           host_key = (

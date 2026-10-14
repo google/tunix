@@ -990,17 +990,27 @@ class RaidenSynchronizerTest(absltest.TestCase):
       ]
 
     with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
-      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
-      mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
-      sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-      arr = jax.device_put(jnp.ones((2, 4), jnp.float32), sharding)
-      sync.arrays = [arr]
+      import types
 
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
       fake_devs = [mock.Mock(id=0, task_id=0), mock.Mock(id=1, task_id=0)]
-      fake_mesh = mock.MagicMock()
-      fake_mesh.axis_names = ("data",)
-      fake_mesh.shape = {"data": 2}
-      fake_mesh.devices = np.array(fake_devs, dtype=object)
+      fake_mesh = types.SimpleNamespace(
+          axis_names=("data",),
+          shape={"data": 2},
+          devices=np.array(fake_devs, dtype=object),
+      )
+      fake_sharding = types.SimpleNamespace(
+          mesh=fake_mesh,
+          shard_shape=lambda s: s,
+          spec=jax.sharding.PartitionSpec(),
+      )
+      sync.arrays = [
+          types.SimpleNamespace(
+              shape=(2, 4),
+              dtype=np.dtype(np.float32),
+              sharding=fake_sharding,
+          )
+      ]
 
       eth0_words = _pack_ipv4("10.11.3.60")
       eth2_words = _pack_ipv4("10.34.3.60")
@@ -1013,8 +1023,12 @@ class RaidenSynchronizerTest(absltest.TestCase):
       )
 
       with (
-          mock.patch.object(sync.arrays[0].sharding, "mesh", fake_mesh),
           mock.patch.object(raiden_synchronizer, "_raiden_ffi", autospec=True),
+          mock.patch.object(
+              raiden_synchronizer.jax.sharding,
+              "NamedSharding",
+              side_effect=lambda *args, **kwargs: None,
+          ),
           mock.patch.object(
               raiden_synchronizer.jax,
               "device_put",
