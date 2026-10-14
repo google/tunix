@@ -558,6 +558,7 @@ start_orchestrator() {
         ${ROLLOUT_MAX_TASK_RETRIES:+--rollout_max_task_retries=${ROLLOUT_MAX_TASK_RETRIES}} \
         $([[ "${RECOVER_UNKNOWN_TRANSFER_STATE}" == "true" || "${RECOVER_UNKNOWN_TRANSFER_STATE}" == "True" || "${RECOVER_UNKNOWN_TRANSFER_STATE}" == "1" ]] && echo --recover_unknown_transfer_state || echo --no-recover_unknown_transfer_state) \
         ${MAX_STALENESS:+--max_staleness=${MAX_STALENESS}} \
+        ${MAX_IN_FLIGHT_BATCHES:+--max_in_flight_batches=${MAX_IN_FLIGHT_BATCHES}} \
         $([[ "${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}" =~ ^[0-9]+$ ]] && echo "--checkpoint_optimizer_interval_steps=${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}") \
         ${TRAJECTORY_GROUP_ORDER:+--trajectory_group_order=${TRAJECTORY_GROUP_ORDER}} \
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \

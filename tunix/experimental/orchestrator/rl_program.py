@@ -25,6 +25,7 @@ import copy
 import ctypes
 import dataclasses
 import gc
+import math
 import os
 import threading
 import time
@@ -409,11 +410,14 @@ class StandardRLProgram(RLProgram):
       trainer_warmup_payload: datatypes.RLTrainerPayload | None = None,
       num_generations_to_dispatch: int | None = None,
       prefer_valid_rollouts: bool = True,
+      max_in_flight_batches: float | None = None,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
     if max_staleness < 0:
       raise ValueError("max_staleness must be non-negative.")
+    if max_in_flight_batches is not None and not max_in_flight_batches > 0:
+      raise ValueError("max_in_flight_batches must be positive.")
     if initial_dispatch_stagger_s < 0:
       raise ValueError("initial_dispatch_stagger_s must be non-negative.")
     if (
@@ -583,6 +587,29 @@ class StandardRLProgram(RLProgram):
         if initial_dispatch_first_stagger_s is None
         else float(initial_dispatch_first_stagger_s)
     )
+    # Caps the rollouts in flight (dispatched and not yet polled back) at
+    # this many prompt batches' worth of trajectories. The staleness window
+    # decides which batches may go out; this decides how much of them the
+    # rollouts run at once. Without it, a batch goes out whole the moment the
+    # rollouts commit the version it needs, even while the batch the trainer
+    # is waiting on is still decoding on the same engines, which slows that
+    # batch and stretches its tail. With it, a batch past the trainer's next
+    # one goes out prompt by prompt as earlier rollouts finish. The batch the
+    # trainer consumes next is never held: holding it could only stall the
+    # trainer. None leaves dispatch to the staleness window alone.
+    self.max_in_flight_batches = max_in_flight_batches
+    self._max_in_flight_rollouts: int | None = None
+    if max_in_flight_batches is not None:
+      batch_rollouts = (
+          self.full_batch_size * self._effective_generations_to_dispatch
+      )
+      # At least one prompt's rollouts, so a cap below that cannot wedge the
+      # dispatcher. Rounded first so 0.7 * 10 cannot ceil to 8.
+      self._max_in_flight_rollouts = max(
+          self._effective_generations_to_dispatch,
+          math.ceil(round(max_in_flight_batches * batch_rollouts, 6)),
+      )
+    self._in_flight_hold_logged: set[int] = set()
     # One synthetic micro-batch to compile the trainer against before
     # `on_train_start`, after `configure_worker` (which discards any compile
     # done at bring-up). None keeps the lazy compile on the first micro-batch.
@@ -702,11 +729,51 @@ class StandardRLProgram(RLProgram):
     """Wakes the dispatcher after `_next_batch` advances."""
     self._window_release.set()
 
+  def _in_flight_cap_reached(self, batch_idx: int) -> bool:
+    """Whether a prompt of `batch_idx` would overrun `max_in_flight_batches`.
+
+    Only batches past the one the trainer consumes next are capped, so the
+    cap can delay the batches it runs ahead on but never the one it is
+    waiting for. That batch always goes out, which also keeps the dispatcher
+    moving if `_in_flight_rollouts` ever fails to drain.
+
+    Args:
+      batch_idx: The prompt batch the dispatcher is about to emit into.
+
+    Returns:
+      True if the prompt must wait for earlier rollouts to finish.
+    """
+    cap = self._max_in_flight_rollouts
+    if cap is None or batch_idx <= self._next_batch:
+      return False
+    return (
+        self._in_flight_rollouts + self._effective_generations_to_dispatch > cap
+    )
+
+  def _log_in_flight_hold(self, batch_idx: int) -> None:
+    """Logs, once per batch, that the in-flight cap is holding `batch_idx`."""
+    if (
+        batch_idx in self._in_flight_hold_logged
+        or not self._in_flight_cap_reached(batch_idx)
+    ):
+      return
+    self._in_flight_hold_logged.add(batch_idx)
+    logging.info(
+        "[pipeline] IN_FLIGHT_HOLD batch_idx=%d in_flight=%d cap=%d"
+        " next_batch=%d (max_in_flight_batches=%g)",
+        batch_idx,
+        self._in_flight_rollouts,
+        self._max_in_flight_rollouts,
+        self._next_batch,
+        self.max_in_flight_batches,
+    )
+
   async def _wait_for_dispatch_window(self, batch_idx: int) -> None:
     """Blocks until `batch_idx` is inside the policy-staleness window.
 
     The dispatcher may run `max_staleness` prompt batches past the batch the
-    trainer is about to consume, and no further (R1).
+    trainer is about to consume, and no further (R1). Under
+    `max_in_flight_batches` it also waits for the rollouts to have room.
 
     Args:
       batch_idx: The prompt batch the dispatcher is about to emit into.
@@ -728,9 +795,11 @@ class StandardRLProgram(RLProgram):
         or self._round_due
         or batch_idx
         > self._next_batch - self._unsynced_steps + self.max_staleness
+        or self._in_flight_cap_reached(batch_idx)
     ):
       if self._sync_error is not None:
         raise self._sync_error
+      self._log_in_flight_hold(batch_idx)
       # Wait first, clear second. The reverse loses a release that lands
       # between the test above and the clear, and nothing would set it again.
       await self._window_release.wait()
@@ -804,7 +873,8 @@ class StandardRLProgram(RLProgram):
     `batch_idx` goes out once the rollouts have committed version
     `batch_idx - max_staleness`: its trajectories are then stamped no older
     than that, which the staleness filter keeps until step `batch_idx`
-    consumes them.
+    consumes them. Under `max_in_flight_batches`, each of its prompts also
+    waits for the rollouts to have room.
 
     Args:
       batch_idx: The prompt batch the dispatcher is about to emit into.
@@ -813,9 +883,11 @@ class StandardRLProgram(RLProgram):
         batch_idx > self._next_batch + self.max_staleness
         or batch_idx - self.max_staleness
         > self.policy_version - self._unsynced_steps
+        or self._in_flight_cap_reached(batch_idx)
     ):
       if self._sync_error is not None:
         raise self._sync_error
+      self._log_in_flight_hold(batch_idx)
       await self._window_release.wait()
       self._window_release.clear()
 
@@ -1008,6 +1080,9 @@ class StandardRLProgram(RLProgram):
             # requests or retry them internally. Otherwise, a dropped RPC will cause
             # `_in_flight_rollouts` to never reach 0, hanging the EOF cascade.
             self._in_flight_rollouts -= len(completed)
+            if self._max_in_flight_rollouts is not None:
+              # Room under the in-flight cap for a prompt it is holding.
+              self._release_window()
             for item in completed:
               group_completed = await self.raw_q.put(item)
               if (

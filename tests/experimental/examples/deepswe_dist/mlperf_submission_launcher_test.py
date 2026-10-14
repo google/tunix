@@ -227,6 +227,13 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertNotIn("--initial_dispatch_first_stagger_s", orch)
     self.assertNotIn("--trainer_warmup_compile", orch)
 
+  def test_in_flight_cap_is_off_by_default(self):
+    self.assertNotIn("--max_in_flight_batches", _jobset(self.default, "orch"))
+
+  def test_in_flight_cap_reaches_the_orchestrator(self):
+    orch = _jobset(_render(MAX_IN_FLIGHT_BATCHES="1.5"), "orch")
+    self.assertIn("--max_in_flight_batches=1.5", orch)
+
   def test_rollout_attention_without_data_parallelism(self):
     cfg = _vllm_config(_jobset(self.default, "roll-0"))
     strategy = cfg["additional_config"]["sharding"]["sharding_strategy"]
