@@ -62,6 +62,13 @@ export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
+# Router replay: rollout captures the MoE experts each token was routed to and
+# the MaxText trainer (TRAINER_BACKEND=maxtext) replays them. Set
+# ROUTED_EXPERTS_NUM_EXPERTS when the model has 256-1023 experts per layer so
+# every batch uses the same encoding.
+export RETURN_ROUTED_EXPERTS=${RETURN_ROUTED_EXPERTS:-false}
+export ROUTED_EXPERTS_ENCODE_MODE=${ROUTED_EXPERTS_ENCODE_MODE:-auto}
+export ROUTED_EXPERTS_NUM_EXPERTS=${ROUTED_EXPERTS_NUM_EXPERTS:-}
 
 # DeepSWE dataset and environment configuration
 export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
@@ -181,6 +188,15 @@ if [[ "$BETA" != "0" && "$BETA" != "0.0" ]]; then
   exit 1
 fi
 
+case "${RETURN_ROUTED_EXPERTS}" in
+  1|[tT][rR][uU][eE]|[yY][eE][sS]|[yY]|[tT])
+    if [[ "${TRAINER_BACKEND}" != "maxtext" ]]; then
+      echo "Error: RETURN_ROUTED_EXPERTS needs TRAINER_BACKEND=maxtext; only the MaxText trainer replays routed experts."
+      exit 1
+    fi
+    ;;
+esac
+
 stop_orchestrator() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
@@ -247,6 +263,8 @@ start_orchestrator() {
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         --trainer_precompile=${TRAINER_PRECOMPILE} \
+        --routed_experts_encode_mode=${ROUTED_EXPERTS_ENCODE_MODE} \
+        ${ROUTED_EXPERTS_NUM_EXPERTS:+--routed_experts_num_experts=${ROUTED_EXPERTS_NUM_EXPERTS}} \
         --stop_workers_on_exit \
         --enable_trajectory_store=${TRAJECTORY_STORE_ENABLED} \
         --trajectory_store_backend=${TRAJECTORY_STORE_BACKEND} \
@@ -473,6 +491,9 @@ start_rollout() {
         --lora_alpha=${LORA_ALPHA} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         --in_flight_weight_updates=${IN_FLIGHT_WEIGHT_UPDATES} \
+        --return_routed_experts=${RETURN_ROUTED_EXPERTS} \
+        --routed_experts_encode_mode=${ROUTED_EXPERTS_ENCODE_MODE} \
+        ${ROUTED_EXPERTS_NUM_EXPERTS:+--routed_experts_num_experts=${ROUTED_EXPERTS_NUM_EXPERTS}} \
         --registry_module=tunix.experimental.examples.deepswe_dist.deepswe \
         --env_name=deepswe_env \
         --agent_name=deepswe_agent \

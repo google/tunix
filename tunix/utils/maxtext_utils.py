@@ -89,6 +89,7 @@ def build_vllm_maxtext_additional_config(
     *,
     attention: str = "",
     prefuse_moe_weights: bool | None = None,
+    return_routed_experts: bool = False,
 ) -> dict[str, Any]:
   """Builds the vLLM `additional_config` a MaxText rollout model reads.
 
@@ -103,6 +104,9 @@ def build_vllm_maxtext_additional_config(
       empty.
     prefuse_moe_weights: Whether the rollout expects w0/w1 pre-fused into the
       TPU GMM layout. None leaves MaxText's default in place.
+    return_routed_experts: Whether the MaxText MoE layers return the experts
+      each token was routed to, for router replay. Only written when True, so
+      MaxText versions that predate this key keep working by default.
 
   Returns:
     The `additional_config` mapping to hand to the vLLM engine.
@@ -119,6 +123,8 @@ def build_vllm_maxtext_additional_config(
     overrides["prefuse_moe_weights"] = prefuse_moe_weights
   if attention:
     overrides["attention"] = attention
+  if return_routed_experts:
+    overrides["return_routed_experts"] = True
   return {"maxtext_config": overrides}
 
 

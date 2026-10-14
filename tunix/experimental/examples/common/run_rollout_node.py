@@ -28,6 +28,7 @@ import signal
 import sys
 from typing import Any
 
+from tunix.common import datatypes as common_datatypes
 from tunix.experimental.common import gcs_cache
 from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
@@ -316,6 +317,33 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Enable KV prefix caching in vLLM sampler.",
   )
   parser.add_argument(
+      "--return_routed_experts",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help=(
+          "Capture the MoE experts each token was routed to, so the trainer"
+          " can replay them. Replay needs the MaxText trainer backend."
+      ),
+  )
+  parser.add_argument(
+      "--routed_experts_encode_mode",
+      choices=common_datatypes.ROUTED_EXPERTS_ENCODE_MODES,
+      default="auto",
+      help="Compact encoding for captured routed experts.",
+  )
+  parser.add_argument(
+      "--routed_experts_num_experts",
+      type=int,
+      default=None,
+      help=(
+          "Experts per MoE layer (E); captured ids >= E are rejected. With"
+          " --routed_experts_encode_mode=auto, the tier comes from E instead"
+          " of the ids seen. Set the same value on the orchestrator."
+      ),
+  )
+  parser.add_argument(
       "--in_flight_weight_updates",
       type=_str2bool,
       default=_str2bool(os.getenv("IN_FLIGHT_WEIGHT_UPDATES", "false")),
@@ -383,6 +411,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Root directory for the file-backed TrajectoryStore.",
   )
   args = parser.parse_args(argv)
+  if args.return_routed_experts and args.sampler == "vanilla":
+    parser.error(
+        "--return_routed_experts needs a vLLM sampler; the vanilla sampler"
+        " does not capture routed experts."
+    )
   _get_tensor_parallel_size(args)
   return args
 
@@ -483,6 +516,9 @@ def _rollout_config_kwargs(
           getattr(args, "in_flight_weight_updates", False)
       ),
       "trajectory_store_config": _trajectory_store_config(args),
+      "return_routed_experts": args.return_routed_experts,
+      "routed_experts_encode_mode": args.routed_experts_encode_mode,
+      "routed_experts_num_experts": args.routed_experts_num_experts,
   }
 
 
@@ -665,6 +701,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
             args.maxtext_model_name,
             attention=args.maxtext_attention,
             prefuse_moe_weights=args.prefuse_moe_weights,
+            return_routed_experts=args.return_routed_experts,
         )
     )
 
@@ -701,6 +738,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       tensor_parallel_size=tp_size,
       data_parallel_size=args.mesh_fsdp,
       return_logprobs=True,
+      return_routed_experts=args.return_routed_experts,
       init_with_random_weights=args.vllm_init_with_random_weights,
       hbm_utilization=args.vllm_hbm_utilization,
       lora_config=lora_config,
@@ -795,6 +833,8 @@ def _create_vllm_sampler(args, tokenizer):
     engine_kwargs["max_num_seqs"] = args.vllm_max_num_seqs
   if args.vllm_max_num_batched_tokens is not None:
     engine_kwargs["max_num_batched_tokens"] = args.vllm_max_num_batched_tokens
+  if args.return_routed_experts:
+    engine_kwargs["enable_return_routed_experts"] = True
   if args.maxtext_model_name:
     # The architectures override is applied by `_vllm_hf_overrides`.
     logging.info(
@@ -807,6 +847,7 @@ def _create_vllm_sampler(args, tokenizer):
             args.maxtext_model_name,
             attention=args.maxtext_attention,
             prefuse_moe_weights=args.prefuse_moe_weights,
+            return_routed_experts=args.return_routed_experts,
         )
     )
   engine_args = AsyncEngineArgs(**engine_kwargs)  # type: ignore[arg-type]
