@@ -287,6 +287,10 @@ export PREEMPTIBLE=${PREEMPTIBLE:-${preemptible:-false}}
 export PRIORITY_CLASS=${PRIORITY_CLASS:-medium}
 
 export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
+# The trainer process's opt-in sharded log-prob head (TUNIX_LOGPS_SHARDED_HEAD
+# in tunix/rl/common.py: local turns it on; unset or 0 leaves it off). Passed to
+# the trainer only, and only when set.
+export TUNIX_LOGPS_SHARDED_HEAD=${TUNIX_LOGPS_SHARDED_HEAD:-}
 # Extra KEY=VALUE env for the orchestrator and rollout processes (the recipes set
 # Raiden tuning and weight-sync timeouts here). The VLLM_RAY_* lists tell vLLM
 # which of the rollout driver's env vars to forward to its Ray workers on the
@@ -670,6 +674,7 @@ start_trainer() {
       ${TRAINER_MAXTEXT_ATTENTION:+TRAINER_MAXTEXT_ATTENTION=\"${TRAINER_MAXTEXT_ATTENTION}\"} \
       ${raiden_env} \
       ${MAXTEXT_EXTRA_FLAGS:+MAXTEXT_EXTRA_FLAGS=\"${MAXTEXT_EXTRA_FLAGS}\"} \
+      ${TUNIX_LOGPS_SHARDED_HEAD:+TUNIX_LOGPS_SHARDED_HEAD=${TUNIX_LOGPS_SHARDED_HEAD}} \
       ${TRAINER_EXTRA_ENV:+${TRAINER_EXTRA_ENV}} \
       RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} \
       USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER} \
