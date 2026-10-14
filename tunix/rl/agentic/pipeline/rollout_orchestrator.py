@@ -22,8 +22,10 @@ groups them into batches for further processing.
 from __future__ import annotations
 
 import asyncio
+import collections
 from collections.abc import Hashable
 import copy
+import os
 import traceback
 from typing import Any, AsyncIterable, Callable, Dict, Iterable, List, Optional, Tuple, Type
 
@@ -60,6 +62,7 @@ class RolloutOrchestrator:
       engine_cls: Type[TrajectoryCollectEngine] = TrajectoryCollectEngine,
       engine_kwargs: Optional[Dict[str, Any]] = None,
       max_concurrency: Optional[int] = None,
+      prefetch_size: Optional[int] = None,
   ):
     """Initializes the RolloutOrchestrator.
 
@@ -79,10 +82,14 @@ class RolloutOrchestrator:
       max_concurrency: The maximum number of agent-environment interaction
         episodes to run in parallel. This limits the number of concurrent calls
         to the underlying language model.
+      prefetch_size: Optional number of upcoming agent-environment pairs to
+        prefetch and pre-warm ahead of time in the background. Defaults to
+        TUNIX_ROLLOUT_PREFETCH_SIZE or max_concurrency.
     """
     self.engine_cls = engine_cls
     self.engine_kwargs = engine_kwargs or {}
     self.max_concurrency = max_concurrency
+    self.prefetch_size = prefetch_size
     self._tasks: List[asyncio.Task] = []
     self._stop = asyncio.Event()
     self._group_queue_manager: Optional[GroupQueueManager] = None
@@ -210,15 +217,13 @@ class RolloutOrchestrator:
       ] = lambda i, _, __: i,
       collect_mode: Optional[str] = None,
       start_step_fn: Optional[Callable[[], int]] = None,
+      prefetch_size: Optional[int] = None,
   ):
     """Dynamically runs collectors from a stream of agent-env pairs.
 
-    This coroutine manages a pool of producer tasks. It draws pairs from
-    `pairs_stream` and starts a `_runner` for each. It maintains up to
-    `self.max_concurrency` active runners, starting new ones as they
-    finish, until the `pairs_stream` is exhausted. This method is intended to
-    be run as a background task. It sets up a shared queue that can be
-    consumed from using `yield_batches`.
+    This coroutine manages a pool of producer tasks. It maintains a prefetch
+    buffer of upcoming agent-environment pairs to trigger asynchronous background
+    pre-warming ahead of time, and runs up to `self.max_concurrency` active runners.
 
     Args:
       pairs_stream: An iterable of tuples, where each tuple contains an
@@ -235,6 +240,9 @@ class RolloutOrchestrator:
         `TrajectoryCollectEngine`.
       start_step_fn: An optional callable to get the starting step for each
         trajectory item.
+      prefetch_size: Optional number of upcoming agent-environment pairs to
+        prefetch and pre-warm ahead of time in the background. Defaults to
+        self.prefetch_size or TUNIX_ROLLOUT_PREFETCH_SIZE or max_concurrency.
 
     Raises:
       ValueError: If `max_concurrency` is not set.
@@ -265,63 +273,106 @@ class RolloutOrchestrator:
     active_tasks: set[asyncio.Task] = set()
     stream_exhausted = False
 
+    prefetch_queue: collections.deque[Tuple[ConversationAgentBase, BaseTaskEnv]] = (
+        collections.deque()
+    )
+    if prefetch_size is not None:
+      effective_prefetch = prefetch_size
+    elif self.prefetch_size is not None:
+      effective_prefetch = self.prefetch_size
+    else:
+      env_prefetch = os.getenv("TUNIX_ROLLOUT_PREFETCH_SIZE")
+      effective_prefetch = (
+          int(env_prefetch)
+          if env_prefetch is not None
+          else (self.max_concurrency or 0)
+      )
+    effective_prefetch = max(0, effective_prefetch)
+
+    async def _fetch_next_pair():
+      if is_async_stream:
+        return await anext(pairs_iterator)  # pytype: disable=name-error
+      return next(pairs_iterator)  # pyrefly: ignore[bad-argument-type]
+
+    async def _refill_prefetch():
+      nonlocal stream_exhausted
+      while (
+          not stream_exhausted
+          and len(prefetch_queue) < effective_prefetch
+          and not self._stop.is_set()
+      ):
+        try:
+          agent, env = await _fetch_next_pair()
+          if hasattr(env, "prewarm") and callable(env.prewarm):
+            env.prewarm()
+          prefetch_queue.append((agent, env))
+        except (StopIteration, StopAsyncIteration):
+          logging.debug("Pairs stream exhausted during prefetch.")
+          stream_exhausted = True
+          break
+        except Exception as e:
+          logging.error("Error prefetching next trajectory: %s", e)
+          raise e
+
     try:
       logging.debug(
-          "Orchestrator producer loop starting with %d concurrency",
+          "Orchestrator producer loop starting with %d concurrency (prefetch=%d)",
           self.max_concurrency,
+          effective_prefetch,
       )
       while not self._stop.is_set():
-        # Phase 1: Fill worker pool
-        # As long as we have concurrency slots available and the input stream
-        # is not exhausted, start new runner tasks.
+        # Phase 1: Prefetch upcoming pairs so environments begin background pre-warming
+        await _refill_prefetch()
+
+        # Phase 2: Launch tasks up to max_concurrency
         while (
-            not stream_exhausted
-            and len(active_tasks) < self.max_concurrency
+            len(active_tasks) < self.max_concurrency
             and not self._stop.is_set()
         ):
-          try:
-            if is_async_stream:
-              agent, env = await anext(pairs_iterator)  # pytype: disable=name-error
-            else:
-              agent, env = next(pairs_iterator)  # pyrefly: ignore[bad-argument-type]
-            task = asyncio.create_task(
-                self._runner(
-                    agent=agent,
-                    env=env,
-                    manager=self._group_queue_manager,
-                    group_key_fn=group_key_fn,
-                    start_step_fn=start_step_fn,
-                    collect_mode=collect_mode,
-                )
-            )
-            active_tasks.add(task)
-            self._tasks.append(task)
-          except (StopIteration, StopAsyncIteration):
-            logging.debug("Pairs stream exhausted.")
-            stream_exhausted = True
+          if prefetch_queue:
+            agent, env = prefetch_queue.popleft()
+          elif not stream_exhausted:
+            try:
+              agent, env = await _fetch_next_pair()
+              if hasattr(env, "prewarm") and callable(env.prewarm):
+                env.prewarm()
+            except (StopIteration, StopAsyncIteration):
+              logging.debug("Pairs stream exhausted.")
+              stream_exhausted = True
+              break
+            except Exception as e:
+              logging.error("Error getting next trajectory: %s", e)
+              raise e
+          else:
             break
-          except Exception as e:
-            logging.error(
-                "Error getting next trajectory: %s",
-                e,
-            )
-            raise e
-        # If no tasks are running and stream is exhausted, done.
-        if not active_tasks:
+
+          task = asyncio.create_task(
+              self._runner(
+                  agent=agent,
+                  env=env,
+                  manager=self._group_queue_manager,
+                  group_key_fn=group_key_fn,
+                  start_step_fn=start_step_fn,
+                  collect_mode=collect_mode,
+              )
+          )
+          active_tasks.add(task)
+          self._tasks.append(task)
+
+        # Refill prefetch buffer again immediately so upcoming environments
+        # pre-warm in the background while active tasks are running!
+        await _refill_prefetch()
+
+        # If no tasks are running and stream is exhausted and prefetch empty, done.
+        if not active_tasks and not prefetch_queue:
           break  # All done
 
-        # Phase 2: Wait for any task to complete
-        # This frees up a slot for a new task if the stream is not exhausted.
+        # Phase 3: Wait for any task to complete
         done, pending = await asyncio.wait(
             active_tasks, return_when=asyncio.FIRST_COMPLETED
         )
-        # Eagerly check for exceptions in completed tasks. If a runner fails,
-        # it could cause a deadlock where the consumer waits for a group that
-        # will never be completed. Propagating the exception ensures a clean
-        # shutdown.
         for task in done:
           task.result()  # This will re-raise any exception in the task.
-          # Remove the completed task from the _tasks list.
           if task in self._tasks:
             self._tasks.remove(task)
         active_tasks = pending
@@ -331,14 +382,21 @@ class RolloutOrchestrator:
         await asyncio.gather(*self._tasks, return_exceptions=True)
     except asyncio.CancelledError:
       logging.debug("Producer task was cancelled.")
-      # The consumer's `finally` block will handle cleanup.
       raise
     except Exception as e:
       logging.error("Producer task failed: %s", e)
       if self._group_queue_manager:
         await self._group_queue_manager.put_exception(e)
-      raise
+      raise e
     finally:
+      # Clean up any unused prefetched environments to release handles
+      while prefetch_queue:
+        _, env = prefetch_queue.popleft()
+        if hasattr(env, "close") and callable(env.close):
+          try:
+            env.close()
+          except Exception as e:
+            logging.warning("Error closing prefetched env during cleanup: %s", e)
       # Shield the final cleanup step to ensure it runs even if the producer
       # task is being cancelled. This prevents leaving the manager in an
       # inconsistent state.
