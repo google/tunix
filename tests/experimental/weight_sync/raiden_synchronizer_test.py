@@ -952,6 +952,99 @@ class RaidenSynchronizerTest(absltest.TestCase):
       self.assertEqual(metrics["bytes"], 128)
       self.assertIn("last_h2d_s", metrics)
 
+  def test_unpack_control_ip_uses_control_columns_or_falls_back(self):
+    def _pack_ipv4(ip_str):
+      octets = [int(part) for part in ip_str.split(".")]
+      raw = b"\x00" * 10 + b"\xff\xff" + bytes(octets)
+      return [
+          int.from_bytes(raw[i : i + 4], byteorder="little", signed=True)
+          for i in range(0, 16, 4)
+      ]
+
+    data_words = _pack_ipv4("10.34.3.60")
+    ctrl_words = _pack_ipv4("10.11.3.60")
+
+    row_10 = np.array(data_words + [40001, 42353] + ctrl_words, dtype=np.int32)
+    self.assertEqual(raiden_synchronizer.unpack_ip(row_10), "10.34.3.60")
+    self.assertEqual(
+        raiden_synchronizer.unpack_control_ip(row_10), "10.11.3.60"
+    )
+
+    row_6 = np.array(data_words + [40001, 42353], dtype=np.int32)
+    self.assertEqual(raiden_synchronizer.unpack_control_ip(row_6), "10.34.3.60")
+
+    row_10_zero = np.array(
+        data_words + [40001, 42353, 0, 0, 0, 0], dtype=np.int32
+    )
+    self.assertEqual(
+        raiden_synchronizer.unpack_control_ip(row_10_zero), "10.34.3.60"
+    )
+
+  def test_init_ffi_transport_pins_listeners_to_host_primary_ip(self):
+    def _pack_ipv4(ip_str):
+      octets = [int(part) for part in ip_str.split(".")]
+      raw = b"\x00" * 10 + b"\xff\xff" + bytes(octets)
+      return [
+          int.from_bytes(raw[i : i + 4], byteorder="little", signed=True)
+          for i in range(0, 16, 4)
+      ]
+
+    with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+      mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
+      sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+      arr = jax.device_put(jnp.ones((2, 4), jnp.float32), sharding)
+      sync.arrays = [arr]
+
+      fake_devs = [mock.Mock(id=0, task_id=0), mock.Mock(id=1, task_id=0)]
+      fake_mesh = mock.MagicMock()
+      fake_mesh.axis_names = ("data",)
+      fake_mesh.shape = {"data": 2}
+      fake_mesh.devices = np.array(fake_devs, dtype=object)
+
+      eth0_words = _pack_ipv4("10.11.3.60")
+      eth2_words = _pack_ipv4("10.34.3.60")
+      fake_info = np.array(
+          [
+              eth0_words + [30001, 40001],
+              eth2_words + [30002, 42353],
+          ],
+          dtype=np.int32,
+      )
+
+      with (
+          mock.patch.object(sync.arrays[0].sharding, "mesh", fake_mesh),
+          mock.patch.object(raiden_synchronizer, "_raiden_ffi", autospec=True),
+          mock.patch.object(
+              raiden_synchronizer.jax,
+              "device_put",
+              side_effect=lambda x, *_: x,
+          ),
+          mock.patch.object(
+              raiden_synchronizer.mesh,
+              "device_host_key",
+              return_value=(0, 0),
+          ),
+          mock.patch(
+              "jax.experimental.multihost_utils.global_array_to_host_local_array",
+              return_value=fake_info,
+          ),
+          mock.patch(
+              "jax.experimental.multihost_utils.process_allgather",
+              return_value=fake_info,
+          ),
+      ):
+        sync._init_ffi_transport(is_d2h=True)
+
+      self.assertEqual(
+          sync._ips,
+          ["10.11.3.60:30001", "10.34.3.60:30002"],
+      )
+      self.assertEqual(
+          sync._unique_listeners,
+          ["10.11.3.60:40001", "10.11.3.60:42353"],
+      )
+
 
 if __name__ == "__main__":
   absltest.main()

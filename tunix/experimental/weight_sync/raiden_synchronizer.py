@@ -218,6 +218,17 @@ def unpack_ip(row: Any) -> str:
   return f"[{addr_str}]" if ":" in addr_str else addr_str
 
 
+def unpack_control_ip(row: Any) -> str:
+  """Unpacks the control-plane IP from the FFI metadata row (falls back to data IP)."""
+  if len(row) >= 10:
+    raw_bytes = b"".join(
+        int(x).to_bytes(4, byteorder="little", signed=True) for x in row[6:10]
+    )
+    if raw_bytes != b"\x00" * 16:
+      return unpack_ip(row[6:10])
+  return unpack_ip(row)
+
+
 def flatten_weights(state: Any) -> Tuple[List[str], List[Any]]:
   """Returns (names, arrays) for every array leaf, in stable tree order."""
   names, arrays = [], []
@@ -780,15 +791,29 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
         mesh,
         jax.sharding.PartitionSpec(*mesh.axis_names, None),
     )
+    info_cols = int(local_ws_info.shape[-1])
     gathered_ws_info = multihost_utils.process_allgather(local_ws_info).reshape(
-        -1, 6
+        -1, info_cols
     )
 
     self._ips, listeners = [], []
-    for row in gathered_ws_info:
+    host_control_ip = {}
+    for idx, row in enumerate(gathered_ws_info):
       ip = unpack_ip(row)
+      ctrl_ip = unpack_control_ip(row)
+      if idx < len(src_devices):
+        dev = src_devices[idx]
+        host_key = mesh.device_host_key(dev)
+        if host_key is None:
+          task_id = getattr(dev, "task_id", None)
+          host_key = (
+              task_id
+              if task_id is not None
+              else idx // max(1, devices_per_host)
+          )
+        ctrl_ip = host_control_ip.setdefault(host_key, ctrl_ip)
       self._ips.append(f"{ip}:{int(row[4])}")
-      listeners.append(f"{ip}:{int(row[5])}")
+      listeners.append(f"{ctrl_ip}:{int(row[5])}")
     self._listeners = listeners
 
     self._unique_listeners = []
