@@ -697,6 +697,18 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
     self.assertTrue(parsed.trainer_warmup_compile)
     self.assertTrue(parsed.trainer_warmup_routed_experts)
 
+  def test_k8s_launcher_wires_max_in_flight_batches(self):
+    self.assertIn(
+        "${MAX_IN_FLIGHT_BATCHES:+--max_in_flight_batches="
+        "${MAX_IN_FLIGHT_BATCHES}}",
+        _deepswe_k8s_orchestrator_block(),
+    )
+    parse = run_deepswe_dist._parse_args  # pylint: disable=protected-access
+    self.assertIsNone(parse([]).max_in_flight_batches)
+    self.assertEqual(
+        parse(["--max_in_flight_batches=1.5"]).max_in_flight_batches, 1.5
+    )
+
 
 class AuxMetricForwardingTest(absltest.TestCase):
   """Tests for converting a loss function's aux metrics for the buffer."""

@@ -2271,6 +2271,164 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_max_in_flight_batches_sizes_the_cap_in_rollouts(self):
+    def cap(**kwargs):
+      program = rl_program.StandardRLProgram(
+          dataset=["prompt_1"], algo=self.mock_algo, batch_size=2, **kwargs
+      )
+      return program._max_in_flight_rollouts  # pylint: disable=protected-access
+
+    # A batch is 2 prompts x 2 generations = 4 rollouts.
+    self.assertIsNone(cap())
+    self.assertEqual(cap(max_in_flight_batches=1.5), 6)
+    self.assertEqual(cap(max_in_flight_batches=1.25), 5)
+    # Over-generated rollouts are in flight too: 2 prompts x 3 dispatched.
+    self.assertEqual(
+        cap(max_in_flight_batches=1.0, num_generations_to_dispatch=3), 6
+    )
+    # Never below one prompt's rollouts, or nothing could ever go out.
+    self.assertEqual(cap(max_in_flight_batches=0.1), 2)
+    for bad in (0.0, -1.0, float("nan")):
+      with self.assertRaisesRegex(ValueError, "max_in_flight_batches"):
+        cap(max_in_flight_batches=bad)
+
+  def test_in_flight_cap_holds_lookahead_prompts_until_rollouts_finish(self):
+    async def _run():
+      dispatched = []
+
+      async def mock_dispatch(prompts, **kwargs):
+        del kwargs
+        dispatched.append(prompts[0]["metadata"]["batch_idx"])
+        return ["rollout"]
+
+      self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+
+      program = rl_program.StandardRLProgram(
+          dataset=[f"prompt_{i}" for i in range(6)],
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=self.assembler,
+          batch_size=2,
+          max_staleness=2,
+          async_weight_sync=True,
+          partial_rollout=True,
+          max_in_flight_batches=1.5,
+      )
+      program.engine = self.mock_engine
+
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      await asyncio.sleep(0.05)
+      # The staleness window admits batches 0-2, but the cap is 6 rollouts
+      # (1.5 batches of 2 prompts x 2 generations): batch 0 goes out whole,
+      # batch 1 only up to the cap.
+      self.assertEqual(dispatched, [0, 0, 1])
+      self.assertEqual(program._in_flight_rollouts, 6)
+      self.assertEqual(program._in_flight_hold_logged, {1})
+
+      # One prompt's rollouts come back, and the next prompt takes its place.
+      program._in_flight_rollouts -= 2
+      program._release_window()
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched, [0, 0, 1, 1])
+      self.assertEqual(program._in_flight_hold_logged, {1, 2})
+
+      program._in_flight_rollouts -= 4
+      program._release_window()
+      await asyncio.wait_for(dispatch_task, timeout=1.0)
+      self.assertEqual(dispatched, [0, 0, 1, 1, 2, 2])
+
+    asyncio.run(_run())
+
+  def test_in_flight_cap_never_holds_the_trainers_next_batch(self):
+    async def _run():
+      dispatched = []
+
+      async def mock_dispatch(prompts, **kwargs):
+        del kwargs
+        dispatched.append(prompts[0]["metadata"]["batch_idx"])
+        return ["rollout"]
+
+      self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+
+      program = rl_program.StandardRLProgram(
+          dataset=[f"prompt_{i}" for i in range(6)],
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=self.assembler,
+          batch_size=2,
+          max_staleness=2,
+          max_in_flight_batches=0.5,
+      )
+      program.engine = self.mock_engine
+      # Rollouts that never drain (say, a lost response) fill the cap.
+      program._in_flight_rollouts = 100
+
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      await asyncio.sleep(0.05)
+      # Batch 0 is the one the trainer consumes next, so it goes out anyway.
+      # Batch 1 is inside the staleness window but waits on the cap.
+      self.assertEqual(dispatched, [0, 0])
+
+      # Once the trainer moves on, its new next batch goes out in turn.
+      program._step = 1
+      program._release_window()
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched, [0, 0, 1, 1])
+
+      dispatch_task.cancel()
+      await asyncio.gather(dispatch_task, return_exceptions=True)
+
+    asyncio.run(_run())
+
+  def test_polling_releases_prompts_held_by_the_in_flight_cap(self):
+    async def _run():
+      dispatched = []
+
+      async def mock_dispatch(prompts, **kwargs):
+        del kwargs
+        dispatched.append(prompts[0]["prompt_id"])
+        return ["rollout"]
+
+      completions: asyncio.Queue[list[datatypes.TrajectoryItem]] = (
+          asyncio.Queue()
+      )
+
+      async def mock_poll(*args, **kwargs):
+        del args, kwargs
+        return await completions.get()
+
+      self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+      self.mock_engine.poll_rollouts.side_effect = mock_poll
+
+      program = rl_program.StandardRLProgram(
+          dataset=[f"prompt_{i}" for i in range(4)],
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=self.assembler,
+          batch_size=1,
+          max_staleness=3,
+          max_in_flight_batches=1.0,
+      )
+      program.engine = self.mock_engine
+
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      polling_task = asyncio.create_task(program.polling_stage())
+      await asyncio.sleep(0.05)
+      # One prompt of two rollouts per batch and a cap of one batch: batch 1
+      # waits for batch 0's rollouts even though the window admits it.
+      self.assertEqual(dispatched, ["prompt_0"])
+
+      await completions.put(_make_trajectory_group(prompt_id="prompt_0"))
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched, ["prompt_0", "prompt_1"])
+      self.assertEqual(program._in_flight_rollouts, 2)
+
+      for task in (dispatch_task, polling_task):
+        task.cancel()
+      await asyncio.gather(dispatch_task, polling_task, return_exceptions=True)
+
+    asyncio.run(_run())
+
   def test_no_dispatch_slips_into_a_round_queued_behind_the_last(self):
     async def _run():
       dispatched = []

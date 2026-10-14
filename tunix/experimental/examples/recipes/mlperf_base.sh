@@ -343,6 +343,13 @@ export INITIAL_DISPATCH_STAGGER_S=${INITIAL_DISPATCH_STAGGER_S:-0}
 # INITIAL_DISPATCH_STAGGER_S (then batch k > 1 follows at FIRST + (k - 1) *
 # INITIAL_DISPATCH_STAGGER_S). Empty (default) or 0 = INITIAL_DISPATCH_STAGGER_S.
 export INITIAL_DISPATCH_FIRST_STAGGER_S=${INITIAL_DISPATCH_FIRST_STAGGER_S:-}
+# Cap on the rollouts in flight, in prompt batches' worth of trajectories
+# (BATCH_SIZE * NUM_GENERATIONS_TO_DISPATCH each). MAX_STALENESS decides which
+# batches may be dispatched; this holds a batch past the trainer's next one,
+# prompt by prompt, until earlier batches' rollouts finish, instead of sending
+# it whole the moment its weights commit. E.g. 1.5 with MAX_STALENESS=2.
+# Empty (default) = no cap.
+export MAX_IN_FLIGHT_BATCHES=${MAX_IN_FLIGHT_BATCHES:-}
 # `true` compiles the trainer at bring-up against one synthetic micro-batch
 # (before run_start) instead of on the first real micro-batch. Default false.
 export TRAINER_WARMUP_COMPILE=${TRAINER_WARMUP_COMPILE:-false}

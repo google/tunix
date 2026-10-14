@@ -343,6 +343,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--max_in_flight_batches",
+      type=float,
+      default=None,
+      help=(
+          "Cap the rollouts in flight at this many prompt batches' worth of"
+          " trajectories (batch_size * num_generations_to_dispatch each). A"
+          " batch past the one the trainer consumes next then goes out prompt"
+          " by prompt as earlier rollouts finish, instead of all at once when"
+          " the rollouts commit the weights it needs. The trainer's next batch"
+          " is never held. Unset (default) leaves dispatch to the"
+          " --max_staleness window alone."
+      ),
+  )
+  parser.add_argument(
       "--trainer_warmup_compile",
       action=argparse.BooleanOptionalAction,
       default=False,
@@ -1287,6 +1301,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         rollout_priority_scheduling=args.rollout_priority_scheduling,
         initial_dispatch_stagger_s=args.initial_dispatch_stagger_s,
         initial_dispatch_first_stagger_s=args.initial_dispatch_first_stagger_s,
+        max_in_flight_batches=args.max_in_flight_batches,
         on_train_start=_on_train_start,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",
