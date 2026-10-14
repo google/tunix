@@ -56,32 +56,52 @@ export SANDBOX_WAIT_INITIAL="${SANDBOX_WAIT_INITIAL:-false}"
 # trainer replicates K/V heads to match (mlperf_base.sh appends kv_tp_size).
 export ROLLOUT_ATTENTION_DP="${ROLLOUT_ATTENTION_DP:-false}"
 
-# Dropless MoE trainer. `true` (default) keeps every routed token
-# (ragged_buffer_factor=-1); its buffers fit with context offload, four token
-# chunks and an XLA HBM budget of 84992 MiB. `false` is the capacity-factor
-# trainer of the base recipe (buffer factor 2.0, context remat, two chunks, no
-# HBM cap). Each value can still be overridden on its own.
+# Dropless MoE trainer. `true` (default) keeps every routed token. `false` is the
+# capacity-factor trainer of the base recipe (buffer factor 2.0, context remat, two
+# chunks, no HBM cap). Each value can still be overridden on its own.
 # A finite buffer factor stays dropless only with the replay knobs of
 # mlperf_397b_256_v7x.sh (RETRY_WHEN_TOKENS_DROPPED, RETRY_NUM_MOE_TOKEN_CHUNKS,
 # RETRY_DROPLESS_FIRST_STEPS, FIRST_PHASE_RAGGED_BUFFER_FACTOR; maxtext #5570),
-# which rerun an overflowing micro-batch with a dropless program. For example,
-#   RAGGED_BUFFER_FACTOR=2.75 RETRY_WHEN_TOKENS_DROPPED=true
-# keeps this block's context offload and HBM budget; it keeps four chunks only
-# with TRAINER_TUNED_FLAGS=false (below).
+# which rerun an overflowing micro-batch with a dropless program.
 #
-# TRAINER_TUNED_FLAGS (see mlperf_397b_256_v7x.sh) is on in this recipe; `false`
-# renders the trainer as before. It was measured with the replay layout above, and
-# there it also sets two MoE token chunks. The fully dropless buffers
-# (RAGGED_BUFFER_FACTOR=-1) keep four.
+# TRAINER_TUNED_FLAGS (see mlperf_397b_256_v7x.sh) is on in this recipe and
+# selects the trainer cell measured on the RL trainer bench
+# (AI-Hypercomputer/maxtext#5701), the replay layout:
+#   RAGGED_BUFFER_FACTOR=2.75 with RETRY_WHEN_TOKENS_DROPPED=true, two MoE token
+#   chunks, REMAT_CONTEXT=device, MOE_EXCLUDE_PADDING=true (padding stays out of
+#   MoE routing), LOG_MOE_DROPS=true (per-micro-batch drop audit), and
+#   COMPUTE_LOGPS_CHUNK_SIZE=1024 (mlperf_base.sh's default is 512).
+# RAGGED_BUFFER_FACTOR=-1 keeps the fully dropless buffers instead: context
+# offload and four token chunks, without the replay, padding and audit flags.
+# Both layouts fit an XLA HBM budget of 84992 MiB. Two opt-in replay knobs run
+# the regular program with larger buffers, the fully dropless final micro-batch
+# (RETRY_DROPLESS_FINAL_MICRO_BATCH=true) and the first-phase buffer factor
+# (FIRST_PHASE_RAGGED_BUFFER_FACTOR); with either, the layout keeps four chunks
+# and context offload, which the measured cell's memory does not cover.
+# TRAINER_TUNED_FLAGS=false renders the trainer as before (the fully dropless
+# buffers, chunks of 512).
 export TRAINER_TUNED_FLAGS="${TRAINER_TUNED_FLAGS:-true}"
+if [[ "${TRAINER_TUNED_FLAGS}" == "true" ]]; then
+  export COMPUTE_LOGPS_CHUNK_SIZE="${COMPUTE_LOGPS_CHUNK_SIZE:-1024}"
+fi
 export DROPLESS="${DROPLESS:-true}"
 case "${DROPLESS}" in
   true)
-    export RAGGED_BUFFER_FACTOR="${RAGGED_BUFFER_FACTOR:--1}"
-    export REMAT_CONTEXT="${REMAT_CONTEXT:-offload}"
-    if [[ "${TRAINER_TUNED_FLAGS}" == "true" && "${RAGGED_BUFFER_FACTOR}" != "-1" ]]; then
-      export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
+    if [[ "${TRAINER_TUNED_FLAGS}" == "true" ]]; then
+      export RAGGED_BUFFER_FACTOR="${RAGGED_BUFFER_FACTOR:-2.75}"
     fi
+    export RAGGED_BUFFER_FACTOR="${RAGGED_BUFFER_FACTOR:--1}"
+    if [[ "${TRAINER_TUNED_FLAGS}" == "true" && "${RAGGED_BUFFER_FACTOR}" != "-1" ]]; then
+      export RETRY_WHEN_TOKENS_DROPPED="${RETRY_WHEN_TOKENS_DROPPED:-true}"
+      export MOE_EXCLUDE_PADDING="${MOE_EXCLUDE_PADDING:-true}"
+      export LOG_MOE_DROPS="${LOG_MOE_DROPS:-true}"
+      if [[ "${RETRY_DROPLESS_FINAL_MICRO_BATCH:-false}" != "true" \
+            && -z "${FIRST_PHASE_RAGGED_BUFFER_FACTOR:-}" ]]; then
+        export REMAT_CONTEXT="${REMAT_CONTEXT:-device}"
+        export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
+      fi
+    fi
+    export REMAT_CONTEXT="${REMAT_CONTEXT:-offload}"
     export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-4}"
     export TRAINER_MAX_HBM_SIZE_MIB="${TRAINER_MAX_HBM_SIZE_MIB:-84992}"
     if [[ "${RAGGED_BUFFER_FACTOR}" != "-1" && "${RETRY_WHEN_TOKENS_DROPPED:-false}" != "true" ]]; then

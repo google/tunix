@@ -167,16 +167,43 @@ class SubmissionLauncherTest(absltest.TestCase):
     cls.bench_on = _render(**_BENCH_CELL)
     cls.bench_off = _render(TRAINER_TUNED_FLAGS="false", **_BENCH_CELL)
 
-  def test_dropless_is_the_default(self):
+  def test_the_default_trainer_is_the_measured_bench_cell(self):
     trainer = _jobset(self.default, "train")
     flags = _maxtext_flags(trainer)
-    self.assertEqual(flags["ragged_buffer_factor"], "-1")
-    self.assertEqual(flags["context"], "offload")
-    self.assertEqual(flags["num_moe_token_chunks"], "4")
+    self.assertEqual(flags["ragged_buffer_factor"], "2.75")
+    self.assertEqual(flags["retry_when_tokens_dropped"], "true")
+    self.assertEqual(flags["retry_num_moe_token_chunks"], "8")
+    self.assertEqual(flags["context"], "device")
+    self.assertEqual(flags["num_moe_token_chunks"], "2")
+    self.assertEqual(flags["moe_exclude_padding_from_routing"], "true")
+    self.assertEqual(flags["log_moe_drops"], "true")
+    self.assertIn("--compute_logps_chunk_size=1024 ", trainer)
     # The HBM budget reaches the trainer env, the Pathways workers and the
     # Pathways proxy (which compiles the trainer program).
     self.assertEqual(trainer.count(_HBM_CAP), 3)
     self.assertIn("--pipeline_train_microbatches", _jobset(self.default, "orch"))
+    # The bench cell differs only in its batch size (GBS 1,152), which sets no
+    # trainer MaxText or libtpu flag.
+    bench = _jobset(self.bench_on, "train")
+    self.assertEqual(flags, _maxtext_flags(bench))
+    libtpu = r"LIBTPU_INIT_ARGS='([^']*)'"
+    self.assertEqual(
+        re.search(libtpu, trainer).group(1), re.search(libtpu, bench).group(1)
+    )
+
+  def test_buffer_factor_minus_one_keeps_the_fully_dropless_layout(self):
+    trainer = _jobset(_render(RAGGED_BUFFER_FACTOR="-1"), "train")
+    flags = _maxtext_flags(trainer)
+    self.assertEqual(flags["ragged_buffer_factor"], "-1")
+    self.assertEqual(flags["context"], "offload")
+    self.assertEqual(flags["num_moe_token_chunks"], "4")
+    for key in (
+        "retry_when_tokens_dropped",
+        "moe_exclude_padding_from_routing",
+        "log_moe_drops",
+    ):
+      self.assertNotIn(key, flags)
+    self.assertEqual(trainer.count(_HBM_CAP), 3)
 
   def test_dropless_false_is_the_capacity_factor_trainer(self):
     trainer = _jobset(_render(DROPLESS="false"), "train")
@@ -190,11 +217,16 @@ class SubmissionLauncherTest(absltest.TestCase):
     trainer = _jobset(_render(NUM_MOE_TOKEN_CHUNKS="8"), "train")
     flags = _maxtext_flags(trainer)
     self.assertEqual(flags["num_moe_token_chunks"], "8")
-    self.assertEqual(flags["ragged_buffer_factor"], "-1")
+    self.assertEqual(flags["ragged_buffer_factor"], "2.75")
+    self.assertEqual(flags["context"], "device")
 
   def test_finite_buffer_factor_needs_the_retry_to_stay_dropless(self):
-    with self.assertRaisesRegex(AssertionError, "RETRY_WHEN_TOKENS_DROPPED"):
-      _render(RAGGED_BUFFER_FACTOR="2.75")
+    for overrides in (
+        {"RETRY_WHEN_TOKENS_DROPPED": "false"},
+        {"TRAINER_TUNED_FLAGS": "false"},
+    ):
+      with self.assertRaisesRegex(AssertionError, "RETRY_WHEN_TOKENS_DROPPED"):
+        _render(RAGGED_BUFFER_FACTOR="2.75", **overrides)
 
   def test_finite_buffer_factor_with_retry_keeps_the_dropless_layout(self):
     # With TRAINER_TUNED_FLAGS on, this layout runs two chunks instead (see the
@@ -215,14 +247,19 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(flags["num_moe_token_chunks"], "4")
     self.assertEqual(trainer.count(_HBM_CAP), 3)
 
-  def test_moe_audit_and_padding_knobs_are_off_by_default(self):
+  def test_moe_audit_and_padding_knobs_follow_the_replay_layout(self):
     flags = _maxtext_flags(_jobset(self.default, "train"))
-    for key in (
-        "moe_exclude_padding_from_routing",
-        "log_moe_drops",
-        "retry_dropless_final_micro_batch",
-    ):
-      self.assertNotIn(key, flags)
+    self.assertEqual(flags["moe_exclude_padding_from_routing"], "true")
+    self.assertEqual(flags["log_moe_drops"], "true")
+    self.assertNotIn("retry_dropless_final_micro_batch", flags)
+    for render in (_render(RAGGED_BUFFER_FACTOR="-1"), self.default_off):
+      flags = _maxtext_flags(_jobset(render, "train"))
+      for key in (
+          "moe_exclude_padding_from_routing",
+          "log_moe_drops",
+          "retry_dropless_final_micro_batch",
+      ):
+        self.assertNotIn(key, flags)
 
   def test_moe_audit_and_padding_knobs_append_their_flags(self):
     trainer = _jobset(
@@ -240,10 +277,28 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(flags["log_moe_drops"], "true")
     self.assertEqual(flags["retry_dropless_final_micro_batch"], "true")
     self.assertEqual(flags["ragged_buffer_factor"], "2.75")
+    # The fully dropless final program keeps the layout's four chunks and
+    # context offload; two chunks were measured without it.
+    self.assertEqual(flags["num_moe_token_chunks"], "4")
+    self.assertEqual(flags["context"], "offload")
+
+  def test_first_phase_buffer_factor_keeps_four_chunks(self):
+    flags = _maxtext_flags(
+        _jobset(_render(FIRST_PHASE_RAGGED_BUFFER_FACTOR="4.0"), "train")
+    )
+    self.assertEqual(flags["first_phase_ragged_buffer_factor"], "4.0")
+    self.assertEqual(flags["ragged_buffer_factor"], "2.75")
+    self.assertEqual(flags["num_moe_token_chunks"], "4")
+    self.assertEqual(flags["context"], "offload")
 
   def test_final_micro_batch_knob_needs_the_retry(self):
     flags = _maxtext_flags(
-        _jobset(_render(RETRY_DROPLESS_FINAL_MICRO_BATCH="true"), "train")
+        _jobset(
+            _render(
+                RAGGED_BUFFER_FACTOR="-1", RETRY_DROPLESS_FINAL_MICRO_BATCH="true"
+            ),
+            "train",
+        )
     )
     self.assertNotIn("retry_dropless_final_micro_batch", flags)
 
@@ -381,10 +436,15 @@ class SubmissionLauncherTest(absltest.TestCase):
         {key: off for key, (off, _) in _TUNED_KEYS.items()},
     )
     self.assertNotIn("offloading_copy_to_sparsecore", trainer)
+    # The fully dropless buffers and chunks of 512, as before the switch.
+    self.assertEqual(flags["ragged_buffer_factor"], "-1")
+    self.assertEqual(flags["context"], "offload")
+    self.assertNotIn("retry_when_tokens_dropped", flags)
+    self.assertIn("--compute_logps_chunk_size=512 ", trainer)
 
   def test_tuned_flags_keep_four_chunks_without_a_buffer_factor(self):
-    # The fully dropless layout (the default) was not measured with two chunks.
-    trainer = _jobset(self.default, "train")
+    # The fully dropless layout was not measured with two chunks.
+    trainer = _jobset(_render(RAGGED_BUFFER_FACTOR="-1"), "train")
     before = _maxtext_flags(_jobset(self.default_off, "train"))
     expected = dict(_TUNED_KEYS)
     del expected["num_moe_token_chunks"]
