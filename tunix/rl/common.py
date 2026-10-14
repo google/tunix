@@ -1158,7 +1158,9 @@ def _head_parameters(graphdef, treedef, abstract_leaves, hidden_struct):
 
   Returns:
     {index into `abstract_leaves`: dtype to gather that leaf in}, for every
-    leaf `compute_final_logits` reads.
+    leaf `compute_final_logits` reads that `_use_dtypes` sees. A leaf read only
+    through an output of an inner call (for example an identity `jax.jit`,
+    `jax.checkpoint` or `custom_jvp`) is missed; see `_use_dtypes`.
   """
 
   def head(leaves, hs):
@@ -1201,9 +1203,10 @@ def maybe_compute_sharded_chunked_logps(
     * `compute_final_logits` reads no model state;
     * a head parameter has no dimension divisible by the number of devices
       (a scalar parameter never has one).
-  Some other unsupported inputs raise instead of falling back, for example a
-  mesh with Explicit axes (inside `jax.shard_map`) or logical-axis rules that
-  list two sequence axes out of mesh order (in `jax.lax.ppermute`).
+  Some other unsupported inputs raise instead of falling back, for example, on
+  a mesh with Explicit axes, an input whose sharding differs from the head's
+  `in_specs` (inside `jax.shard_map`), or logical-axis rules that list two
+  sequence axes out of mesh order (in `jax.lax.ppermute`).
 
   Args:
     model: The merged model; must expose `compute_final_logits`.
