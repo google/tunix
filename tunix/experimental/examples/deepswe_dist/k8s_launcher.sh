@@ -78,6 +78,8 @@ export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export EXACT_TOKEN_CONTINUITY=${EXACT_TOKEN_CONTINUITY:-true}
 export ASYNC_WEIGHT_SYNC=${ASYNC_WEIGHT_SYNC:-false}
 export PIPELINE_TRAIN_MICROBATCHES=${PIPELINE_TRAIN_MICROBATCHES:-false}
+export PIPELINE_STEP_BOUNDARY=${PIPELINE_STEP_BOUNDARY:-false}
+export STAGE_NEXT_MICROBATCH=${STAGE_NEXT_MICROBATCH:-false}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export WEIGHT_SYNC_DISABLE_TIMEOUTS=${WEIGHT_SYNC_DISABLE_TIMEOUTS:-${DISABLE_WEIGHT_SYNC_TIMEOUTS:-0}}
@@ -564,6 +566,8 @@ start_orchestrator() {
         $([[ "${EXACT_TOKEN_CONTINUITY}" == "false" || "${EXACT_TOKEN_CONTINUITY}" == "False" || "${EXACT_TOKEN_CONTINUITY}" == "0" ]] && echo --no-exact_token_continuity || echo --exact_token_continuity) \
         $([[ "${ASYNC_WEIGHT_SYNC}" == "true" || "${ASYNC_WEIGHT_SYNC}" == "True" || "${ASYNC_WEIGHT_SYNC}" == "1" ]] && echo --async_weight_sync || echo --no-async_weight_sync) \
         $([[ "${PIPELINE_TRAIN_MICROBATCHES}" == "true" || "${PIPELINE_TRAIN_MICROBATCHES}" == "True" || "${PIPELINE_TRAIN_MICROBATCHES}" == "1" ]] && echo --pipeline_train_microbatches || echo --no-pipeline_train_microbatches) \
+        $([[ "${PIPELINE_STEP_BOUNDARY}" == "true" || "${PIPELINE_STEP_BOUNDARY}" == "True" || "${PIPELINE_STEP_BOUNDARY}" == "1" ]] && echo --pipeline_step_boundary || echo --no-pipeline_step_boundary) \
+        $([[ "${STAGE_NEXT_MICROBATCH}" == "true" || "${STAGE_NEXT_MICROBATCH}" == "True" || "${STAGE_NEXT_MICROBATCH}" == "1" ]] && echo --stage_next_microbatch || echo --no-stage_next_microbatch) \
         $([[ "${IN_FLIGHT_WEIGHT_UPDATES}" == "true" || "${IN_FLIGHT_WEIGHT_UPDATES}" == "True" || "${IN_FLIGHT_WEIGHT_UPDATES}" == "1" ]] && echo --in_flight_weight_updates || echo --no-in_flight_weight_updates) \
         $([[ "${ROLLOUT_PRIORITY_SCHEDULING}" == "true" ]] && echo --rollout_priority_scheduling || echo --no-rollout_priority_scheduling) \
         $([[ "${INITIAL_DISPATCH_STAGGER_S}" != "0" && "${INITIAL_DISPATCH_STAGGER_S}" != "0.0" && -n "${INITIAL_DISPATCH_STAGGER_S}" ]] && echo --initial_dispatch_stagger_s=${INITIAL_DISPATCH_STAGGER_S})$([[ -n "${INITIAL_DISPATCH_FIRST_STAGGER_S}" && "${INITIAL_DISPATCH_FIRST_STAGGER_S}" != "0" && "${INITIAL_DISPATCH_FIRST_STAGGER_S}" != "0.0" ]] && echo " --initial_dispatch_first_stagger_s=${INITIAL_DISPATCH_FIRST_STAGGER_S}")$([[ "${TRAINER_WARMUP_COMPILE}" == "true" || "${TRAINER_WARMUP_COMPILE}" == "True" || "${TRAINER_WARMUP_COMPILE}" == "1" ]] && echo " --trainer_warmup_compile$([[ "${RETURN_ROUTED_EXPERTS}" == "true" || "${RETURN_ROUTED_EXPERTS}" == "True" || "${RETURN_ROUTED_EXPERTS}" == "1" ]] && echo " --trainer_warmup_routed_experts")") \
