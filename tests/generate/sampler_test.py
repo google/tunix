@@ -989,6 +989,68 @@ class SamplerTest(parameterized.TestCase):
         np.array(new_embedding),
     )
 
+  def test_update_params_with_filter_types_mixed_sharding_and_non_jax_leaves(
+      self,
+  ):
+    vocab = tc.MockVocab()
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
+    named_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec()
+    )
+
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    # Place only one parameter on NamedSharding while leaving the rest on
+    # SingleDeviceSharding so `any(...)` would trigger `reshard_pytree` and
+    # fail with AttributeError on `SingleDeviceSharding.mesh`.
+    transformer.emb.embedding.value = jax.device_put(
+        transformer.emb.embedding.value, named_sharding
+    )
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    source_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    new_embedding = jax.device_put(
+        jnp.ones_like(source_model.emb.embedding.value) * 55.0,
+        named_sharding,
+    )
+    source_model.emb.embedding.value = new_embedding
+    new_state = nnx.state(source_model, nnx.Param)
+
+    sampler.update_params(new_state, filter_types=(nnx.Param,))
+
+    state_dict = {
+        ".".join(str(p) for p in path): var
+        for path, var in sampler.transformer_state.flat_state()
+    }
+    np.testing.assert_allclose(
+        np.array(state_dict["emb.embedding"].value),
+        np.array(new_embedding),
+    )
+
+    # Also verify non-jax.Array leaves (no `.sharding` attribute) in dst_params
+    # do not raise AttributeError when checking shardings.
+    with mock.patch.object(
+        nnx,
+        "state",
+        return_value={"non_jax_leaf": np.zeros((2, 2), dtype=np.float32)},
+    ):
+      sampler.update_params(new_state, filter_types=(nnx.Param,))
+
   def test_update_params_precision_conversion(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(

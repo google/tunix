@@ -21,7 +21,7 @@ import dataclasses
 import functools
 import inspect
 import operator
-from typing import Any, Optional, Tuple
+from typing import Any
 import warnings
 
 from absl import logging
@@ -67,7 +67,7 @@ class _SamplingState:
   positions: jnp.ndarray  # [B, L]
 
   # Model state for conditioning the model on autoregressively.
-  cache: dict[str, dict[str, jaxtyping.Array]]
+  cache: Cache
 
   # Is decoding done on the given sequence?
   done: jnp.ndarray  # [B]
@@ -109,6 +109,15 @@ class _SamplingState:
   ) = None
 
 
+def _compute_sampled_logprobs(
+    logits: jnp.ndarray, next_token: jnp.ndarray
+) -> jnp.ndarray:
+  """Computes the log-probability of each sampled `next_token` from `logits`."""
+  logp = jax.nn.log_softmax(logits, axis=-1)
+  logp_sampled = jnp.take_along_axis(logp, next_token[..., None], axis=-1)
+  return jnp.squeeze(logp_sampled, axis=-1)
+
+
 def sample_top_p(
     logits: jnp.ndarray,
     key: jax.Array,
@@ -122,49 +131,41 @@ def sample_top_p(
   next_token_logits = logits[:, -1].astype(jnp.float32) / temperature
 
   # top_k=0 or None both mean "no top-k filtering" — use full vocabulary.
-  _no_topk = top_k is None or top_k <= 0
+  k = next_token_logits.shape[-1] if top_k is None or top_k <= 0 else top_k
   # Skip softmax and sorting if top_p is 1.0 and top_k is full vocab.
-  if top_p >= 1.0 and _no_topk:
+  if top_p >= 1.0 and k == next_token_logits.shape[-1]:
     next_token = jax.random.categorical(key, logits=next_token_logits)
-    if not return_logprobs:
-      return next_token, None
-    logp = jax.nn.log_softmax(next_token_logits, axis=-1)
-    logp_sampled = jnp.take_along_axis(logp, next_token[..., None], axis=-1)
-    logp_sampled = jnp.squeeze(logp_sampled, axis=-1)
-    return next_token, logp_sampled
-
-  k = next_token_logits.shape[-1] if _no_topk else top_k
-  logits_sorted, indices = jax.lax.top_k(next_token_logits, k=k)  # pyrefly: ignore[bad-argument-type]
-
-  probs_sorted = jax.nn.softmax(logits_sorted, axis=-1)
-  cumsum_probs = jnp.cumsum(probs_sorted, axis=-1)
-  mask = cumsum_probs - probs_sorted > top_p
-  logits_sorted = jnp.where(mask, -jnp.inf, logits_sorted)
-
-  next_token_idx = jax.random.categorical(key, logits=logits_sorted)
-  next_token = jnp.take_along_axis(indices, next_token_idx[..., None], axis=-1)
-  next_token = jnp.squeeze(next_token, axis=-1)
-
-  if return_logprobs:
-    logp = jax.nn.log_softmax(next_token_logits, axis=-1)
-    logp_sampled = jnp.take_along_axis(logp, next_token[..., None], axis=-1)
-    logp_sampled = jnp.squeeze(logp_sampled, axis=-1)
   else:
-    logp_sampled = None
+    logits_sorted, indices = jax.lax.top_k(next_token_logits, k=k)
+    probs_sorted = jax.nn.softmax(logits_sorted, axis=-1)
+    cumsum_probs = jnp.cumsum(probs_sorted, axis=-1)
+    mask = cumsum_probs - probs_sorted > top_p
+    logits_sorted = jnp.where(mask, -jnp.inf, logits_sorted)
 
+    next_token_idx = jax.random.categorical(key, logits=logits_sorted)
+    next_token = jnp.take_along_axis(indices, next_token_idx[..., None], axis=-1)
+    next_token = jnp.squeeze(next_token, axis=-1)
+
+  logp_sampled = (
+      _compute_sampled_logprobs(next_token_logits, next_token)
+      if return_logprobs
+      else None
+  )
   return next_token, logp_sampled
 
 
 def sample_best(
-    logits, return_logprobs: bool = False
+    logits: jnp.ndarray, return_logprobs: bool = False
 ) -> tuple[jnp.ndarray, jnp.ndarray | None]:
-  next_token = jnp.argmax(logits[:, -1], axis=-1, keepdims=True)
-  next_token = next_token[:, 0]
-  if not return_logprobs:
-    return next_token, None
-  logp = jax.nn.log_softmax(logits[:, -1].astype(jnp.float32), axis=-1)
-  logp_sampled = jnp.take_along_axis(logp, next_token[..., None], axis=-1)
-  logp_sampled = jnp.squeeze(logp_sampled, axis=-1)
+  next_token_logits = logits[:, -1]
+  next_token = jnp.argmax(next_token_logits, axis=-1)
+  logp_sampled = (
+      _compute_sampled_logprobs(
+          next_token_logits.astype(jnp.float32), next_token
+      )
+      if return_logprobs
+      else None
+  )
   return next_token, logp_sampled
 
 
@@ -226,7 +227,7 @@ class Sampler(base_sampler.BaseSampler):
     self.cache_config = cache_config
     self.image_processor = image_processor
     self._transformer_graphdef: graph.NodeDef = nnx.graphdef(transformer)  # pyrefly: ignore[bad-assignment]
-    self._transformer_state: list[statelib.State] = nnx.variables(transformer)
+    self._transformer_state: statelib.State = nnx.variables(transformer)
     self._flattened_transformer_state: list[statelib.State] = jax.tree.leaves(
         self._transformer_state,
         is_leaf=lambda x: isinstance(x, nnx.Variable),
@@ -249,12 +250,12 @@ class Sampler(base_sampler.BaseSampler):
         donate_argnums=(1,),
         static_argnames=('echo',),
     )
-    self._supports_decode_only_last_token = (
+    self._supports_decode_only_last_token: bool = (
         'decode_only_last_token'
         in inspect.signature(transformer.__call__).parameters
     )
 
-  def model_def_and_state(self) -> tuple[graph.NodeDef, statelib.State]:
+  def model_def_and_state(self) -> tuple[graph.NodeDef, list[statelib.State]]:
     """Returns the transformer graphdef and state."""
     return self._transformer_graphdef, self._flattened_transformer_state
 
@@ -271,7 +272,7 @@ class Sampler(base_sampler.BaseSampler):
   @transformer_state.setter
   def transformer_state(self, state: statelib.State) -> None:
 
-    def get_all_param_types(tree):
+    def get_all_param_types(tree: statelib.State) -> set[type[nnx.Variable]]:
       param_types = set()
       jax.tree_util.tree_map(
           lambda x: param_types.add(type(x)),
@@ -280,7 +281,9 @@ class Sampler(base_sampler.BaseSampler):
       )
       return param_types
 
-    def check_tree_structure(tree1, tree2):
+    def check_tree_structure(
+        tree1: statelib.State, tree2: statelib.State
+    ) -> None:
       if jax.tree_util.tree_structure(tree1) != jax.tree_util.tree_structure(
           tree2
       ):
@@ -290,9 +293,9 @@ class Sampler(base_sampler.BaseSampler):
             f' {jax.tree_util.tree_structure(tree2)}'
         )
 
-      def check_shape_dtype_sharding(x, y):
+      def check_shape_dtype_sharding(x: jax.Array, y: jax.Array) -> bool:
 
-        def equivalent_sharding(x, y):
+        def equivalent_sharding(x: jax.Array, y: jax.Array) -> bool:
           # Lift the condition on memory_kind due to offloading.
           # Besides it seems jax.jit might change some shardings of the params
           # to equivalent representation so here we check if the specs are
@@ -361,14 +364,19 @@ class Sampler(base_sampler.BaseSampler):
   def update_params(
       self,
       updated_weights: jaxtyping.PyTree,
-      filter_types: Optional[Tuple[Any, ...]] = None,
+      filter_types: tuple[Any, ...] | None = None,
   ) -> None:
     """Updates model parameters in the sampler."""
     if filter_types is not None:
       dst_params = nnx.state(self.transformer, filter_types)
-      try:
+      dst_leaves = jax.tree.leaves(dst_params)
+      if dst_leaves and all(
+          isinstance(x, jax.Array)
+          and isinstance(x.sharding, jax.sharding.NamedSharding)
+          for x in dst_leaves
+      ):
         resharded_params = reshard.reshard_pytree(updated_weights, dst_params)
-      except (AttributeError, ValueError):
+      else:
         resharded_params = updated_weights
     else:
       resharded_params = updated_weights
@@ -406,10 +414,10 @@ class Sampler(base_sampler.BaseSampler):
       include_logits: bool,
       forbidden_token_ids: tuple[int, ...] | None,
       temperature: float,
-      top_p: Optional[float],
-      top_k: Optional[int],
+      top_p: float | None,
+      top_k: int | None,
       seed: jax.Array,
-      beam_size: Optional[int],
+      beam_size: int | None,
       include_logprobs: bool = False,
       prompt_lengths: jax.Array | None = None,
   ) -> _SamplingState:
@@ -521,7 +529,7 @@ class Sampler(base_sampler.BaseSampler):
       self,
       logits: jnp.ndarray,
       eos: jax.Array,
-      cache: dict[str, dict[str, jaxtyping.Array]],
+      cache: Cache,
       sampler_state: _SamplingState,
   ) -> _SamplingState:
     """Samples a token from the logits."""
@@ -579,28 +587,20 @@ class Sampler(base_sampler.BaseSampler):
         logprobs_buffer = logprobs_buffer.at[:, decoding_step + 1].set(logp)
 
     done = done | jnp.isin(token_buffer[:, decoding_step + 1], eos)
-    return _SamplingState(
-        decoding_step=sampler_state.decoding_step + 1,
-        num_input_tokens=sampler_state.num_input_tokens,
+    return dataclasses.replace(
+        sampler_state,
+        decoding_step=decoding_step + 1,
         token_buffer=token_buffer,
-        input_mask=sampler_state.input_mask,
-        positions=sampler_state.positions,
         logits_buffer=logits_buffer,
         logprobs_buffer=logprobs_buffer,
         cache=cache,
         done=done,
-        total_sampling_steps=sampler_state.total_sampling_steps,
-        forbidden_token_ids=sampler_state.forbidden_token_ids,
-        temperature=sampler_state.temperature,
-        sampling_parameters=sampler_state.sampling_parameters,
-        seed=sampler_state.seed,
-        sampling_mode=sampler_state.sampling_mode,
         beam_search_sampling_state=beam_search_state,
     )
 
   def _prefill_fn(
       self,
-      params: statelib.State,
+      params: list[statelib.State],
       sampler_state: _SamplingState,
       images: jnp.ndarray | None = None,
       audios: Any = None,
@@ -608,32 +608,22 @@ class Sampler(base_sampler.BaseSampler):
   ) -> _SamplingState:
     """Performs prefill."""
     batch_size = sampler_state.token_buffer.shape[0]
+    slice_start = (0, 0)
+    slice_sizes = (batch_size, sampler_state.num_input_tokens)
 
     tokens = jax.lax.dynamic_slice(
-        sampler_state.token_buffer,
-        start_indices=jnp.zeros(
-            (sampler_state.token_buffer.ndim,), dtype=jnp.int32
-        ),
-        slice_sizes=(batch_size, sampler_state.num_input_tokens),
+        sampler_state.token_buffer, slice_start, slice_sizes
     )
     step_positions = jax.lax.dynamic_slice(
-        sampler_state.positions,
-        start_indices=jnp.zeros(
-            (sampler_state.token_buffer.ndim,), dtype=jnp.int32
-        ),
-        slice_sizes=(batch_size, sampler_state.num_input_tokens),
+        sampler_state.positions, slice_start, slice_sizes
     )
-
     input_mask = jax.lax.dynamic_slice(
-        sampler_state.input_mask,
-        start_indices=jnp.zeros(
-            (sampler_state.token_buffer.ndim,), dtype=jnp.int32
-        ),
-        slice_sizes=(batch_size, sampler_state.num_input_tokens),
+        sampler_state.input_mask, slice_start, slice_sizes
     )
 
-    if hasattr(self.transformer, 'get_attention_mask'):
-      attention_mask = self.transformer.get_attention_mask(
+    transformer = nnx.merge(self._transformer_graphdef, params)  # pyrefly: ignore[no-matching-overload]
+    if hasattr(transformer, 'get_attention_mask'):
+      attention_mask = transformer.get_attention_mask(
           tokens, inputs_mask=input_mask
       )
       seq_len = attention_mask.shape[-1]
@@ -647,7 +637,6 @@ class Sampler(base_sampler.BaseSampler):
           input_mask, self.cache_config.cache_size
       )
 
-    transformer = nnx.merge(self._transformer_graphdef, params)  # pyrefly: ignore[no-matching-overload]
     kwargs = {}
     if images is not None:
       kwargs['images'] = images
@@ -678,23 +667,24 @@ class Sampler(base_sampler.BaseSampler):
           (0, start_idx, 0),
       )
     else:
-      logits_buffer = sampler_state.logits_buffer
+      logits_buffer = None
 
     if sampler_state.sampling_mode == 'beam_search':
       # init beam state in prefill instead of init as one minor optimization
       # to avoid running unnecessary prefill for
       # duplicated input prompt per beam.
       beam_size = int(sampler_state.sampling_parameters['beam_size'])
-      sampling_state, updated_args = beam_search_lib.init_batched_beam_state(
-          logits=logits,
-          input_token_buffer=sampler_state.token_buffer,
-          initial_cache=cache,
-          done=sampler_state.done,
-          positions=sampler_state.positions,
-          logits_buffer=sampler_state.logits_buffer,
-          beam_size=beam_size,
+      beam_search_sampling_state, updated_args = (
+          beam_search_lib.init_batched_beam_state(
+              logits=logits,
+              input_token_buffer=sampler_state.token_buffer,
+              initial_cache=cache,
+              done=sampler_state.done,
+              positions=sampler_state.positions,
+              logits_buffer=sampler_state.logits_buffer,
+              beam_size=beam_size,
+          )
       )
-      beam_search_sampling_state = sampling_state
       logits = updated_args['logits']
       cache = updated_args['cache']
       token_buffer = updated_args['token_buffer']
@@ -703,43 +693,34 @@ class Sampler(base_sampler.BaseSampler):
       logits_buffer = updated_args['logits_buffer']
       state_input_mask = jnp.repeat(sampler_state.input_mask, beam_size, axis=0)
 
-    updated_sampling_state = _SamplingState(
-        decoding_step=sampler_state.decoding_step,
-        num_input_tokens=sampler_state.num_input_tokens,
+    updated_sampling_state = dataclasses.replace(
+        sampler_state,
         token_buffer=token_buffer,
         input_mask=state_input_mask,
         positions=positions,
         logits_buffer=logits_buffer,
-        logprobs_buffer=sampler_state.logprobs_buffer,
         cache=cache,
         done=done,
-        total_sampling_steps=sampler_state.total_sampling_steps,
-        forbidden_token_ids=sampler_state.forbidden_token_ids,
-        temperature=sampler_state.temperature,
-        sampling_parameters=sampler_state.sampling_parameters,
-        seed=sampler_state.seed,
-        sampling_mode=sampler_state.sampling_mode,
         beam_search_sampling_state=beam_search_sampling_state,
     )
-    updated_sampler_state = self._sample(
+    return self._sample(
         logits=logits,
         cache=cache,
         eos=self.eos_ids,
         sampler_state=updated_sampling_state,
     )
-    return updated_sampler_state
 
   def _decode_fn(
       self,
-      params: statelib.State,
+      params: list[statelib.State],
       sampling_state: _SamplingState,
   ) -> _SamplingState:
     """Internal generating function (to be jitted)."""
 
-    def sample_with_params(sampler_state: _SamplingState):
+    def sample_with_params(sampler_state: _SamplingState) -> _SamplingState:
       return self._sample_step(params, sampler_state)
 
-    def cond_fn(sampler_state: _SamplingState):
+    def cond_fn(sampler_state: _SamplingState) -> jax.Array:
       return (
           sampler_state.decoding_step < sampler_state.total_sampling_steps - 1
       ) & jnp.any(jnp.logical_not(sampler_state.done))
@@ -747,17 +728,12 @@ class Sampler(base_sampler.BaseSampler):
     return jax.lax.while_loop(cond_fn, sample_with_params, sampling_state)
 
   def _sample_step(
-      self, params: statelib.State, sampler_state: _SamplingState
+      self, params: list[statelib.State], sampler_state: _SamplingState
   ) -> _SamplingState:
     """Performs a single sampling step."""
-    batch_size = sampler_state.token_buffer.shape[0]
     decoding_step = sampler_state.decoding_step
-
-    last_token = sampler_state.token_buffer[:, decoding_step]
-    last_token = last_token.reshape((batch_size, 1))
-    step_positions = jnp.expand_dims(
-        sampler_state.positions[:, decoding_step], -1
-    )
+    last_token = sampler_state.token_buffer[:, decoding_step, None]
+    step_positions = sampler_state.positions[:, decoding_step, None]
 
     input_mask = jnp.logical_not(sampler_state.input_mask)
     attention_mask = utils.compute_attention_masks(
@@ -783,13 +759,10 @@ class Sampler(base_sampler.BaseSampler):
       logits_buffer = updated_sampler_state.logits_buffer.at[
           :, decoding_step + 1
       ].set(next_logits)
-    else:
-      logits_buffer = None
-
-    updated_sampler_state = dataclasses.replace(
-        updated_sampler_state,
-        logits_buffer=logits_buffer,
-    )
+      updated_sampler_state = dataclasses.replace(
+          updated_sampler_state,
+          logits_buffer=logits_buffer,
+      )
     return updated_sampler_state
 
   def __call__(
@@ -803,10 +776,10 @@ class Sampler(base_sampler.BaseSampler):
       eos_tokens: Sequence[int] | None = None,
       forbidden_tokens: Iterable[int] | None = None,
       temperature: float = 0.0,
-      top_p: Optional[float] = None,
-      top_k: Optional[int] = None,
-      beam_size: Optional[int] = None,
-      seed: int | None = None,
+      top_p: float | None = None,
+      top_k: int | None = None,
+      beam_size: int | None = None,
+      seed: int | jax.Array | None = None,
       pad_output: bool = False,
       images: (
           str
@@ -1019,7 +992,9 @@ class Sampler(base_sampler.BaseSampler):
           max_len,
           jnp.asarray(prompt_lengths, dtype=jnp.int32) if exact_input else None,
       )
-      out_tokens, lengths = jax.device_get(out_tokens), jax.device_get(lengths)
+      out_tokens, lengths, out_logits = jax.device_get(
+          (out_tokens, lengths, out_logits)
+      )
       decoded_outputs = [
           self.tokenizer.decode(tokens[:length].tolist())
           for tokens, length in zip(out_tokens, lengths)
