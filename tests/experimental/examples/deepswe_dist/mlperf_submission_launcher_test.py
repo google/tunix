@@ -250,6 +250,19 @@ class SubmissionLauncherTest(absltest.TestCase):
     with self.assertRaisesRegex(AssertionError, "DROPLESS must be true or false"):
       _render(DROPLESS="yes")
 
+  def test_the_sharded_log_prob_head_is_off_unless_set(self):
+    self.assertNotIn("TUNIX_LOGPS_SHARDED_HEAD", self.default)
+
+  def test_the_sharded_log_prob_head_reaches_the_trainer_only(self):
+    render = _render(TUNIX_LOGPS_SHARDED_HEAD="local")
+    self.assertRegex(
+        _jobset(render, "train"), r"\bTUNIX_LOGPS_SHARDED_HEAD=local\b"
+    )
+    for suffix in ("orch", "roll-0"):
+      self.assertNotIn(
+          "TUNIX_LOGPS_SHARDED_HEAD", _jobset(render, suffix), suffix
+      )
+
   def test_default_batch_gives_the_gbs_1024_hyperparameters(self):
     orch = _jobset(self.default, "orch")
     self.assertIn("--batch_size=64 ", orch)
