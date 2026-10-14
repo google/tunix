@@ -96,6 +96,30 @@ class _TokenTrainer(_WaitingTrainer):
     return step
 
 
+class _UpdateFailsAtTheDeviceTrainer(_TokenTrainer):
+  """An update that fails on the device, met by the device wait first.
+
+  MaxText's `wait_for_device` is its throttler's `block_until_ready()`, which
+  also waits on the update's gradient norm (maxtext 6db77afd6).
+  """
+
+  def wait_for_device(self):
+    if self.last_update_token is not None:
+      raise RuntimeError("XLA: update 1 failed on device")
+    return super().wait_for_device()
+
+
+class _RestorableTrainer(_Trainer):
+  """Also takes the calls a restarted orchestrator brings a worker up with."""
+
+  def compile(self, dummy_data):
+    self.calls.append(("compile", dummy_data, {}))
+
+  def restore_checkpoint(self, **kwargs):
+    self.calls.append(("restore_checkpoint", None, kwargs))
+    return {"step": 3}
+
+
 class _RecordingWaits:
   """Patches `jax.block_until_ready` in the worker to log each wait."""
 
@@ -432,10 +456,91 @@ class FusedUpdateStagingTest(absltest.TestCase):
         "block_until_ready",
         side_effect=ValueError("update failed on device"),
     ):
-      with self.assertRaisesRegex(ValueError, "update failed on device"):
+      # Reported as the optimizer step, as the fused call reports it, in the
+      # error and in the worker's health report.
+      with self.assertRaisesRegex(
+          RuntimeError,
+          r"^optimizer update\(\) failed: .*stage_fwd_bwd.*the update\b.*"
+          r"ValueError: update failed on device",
+      ) as raised:
         worker.stage_fwd_bwd(_request("req-1", 1))
+    self.assertIsInstance(raised.exception.__cause__, ValueError)
     self.assertEqual(worker.state, WorkerState.ERROR)
+    self.assertIn("optimizer update() failed", worker.heartbeat().last_error)
     self.assertIsNone(worker._staged_fwd_bwd)
+
+  def test_a_failed_update_met_by_the_device_wait_is_reported_as_the_update(
+      self,
+  ):
+    trainer = _UpdateFailsAtTheDeviceTrainer()
+    worker = _worker(trainer)
+    worker.fwd_bwd(
+        _request("req-0", 0), apply_optimizer=True, wait_for_update=False
+    )
+    with self.assertRaisesRegex(
+        RuntimeError,
+        r"^optimizer update\(\) failed: .*stage_fwd_bwd.*the device\b.*"
+        r"RuntimeError: XLA: update 1 failed on device",
+    ) as raised:
+      worker.stage_fwd_bwd(_request("req-1", 1))
+    self.assertIsInstance(raised.exception.__cause__, RuntimeError)
+    self.assertEqual(worker.state, WorkerState.ERROR)
+    self.assertIn("optimizer update() failed", worker.heartbeat().last_error)
+    self.assertIsNone(worker._staged_fwd_bwd)
+
+  def test_a_failed_prepare_is_not_reported_as_the_update(self):
+    # Control: only the waits for the work dispatched before the stage are
+    # the update's; preparing the stage's own input is the stage's.
+    worker = _worker(_FailingPrepareTrainer())
+    with self.assertRaisesRegex(RuntimeError, "^device_put failed$"):
+      worker.stage_fwd_bwd(_request("req-1", 1))
+    self.assertEqual(worker.heartbeat().last_error, "device_put failed")
+
+
+class StaleStageTest(absltest.TestCase):
+  """A stage left by an orchestrator that died without stop() (OOM kill,
+  preemption) is dropped when a successor brings the worker up again."""
+
+  def _held(self) -> trainer_worker.TrainerWorker:
+    worker = _worker(_RestorableTrainer())
+    worker.stage_fwd_bwd(_request("dead-orchestrator", 1))
+    return worker
+
+  def test_initialize_alone_keeps_the_held_stage(self):
+    # Control: a held stage is refused a successor, and initialize() (a no-op
+    # on a ready worker) does not change that.
+    worker = self._held()
+    worker.initialize()
+    with self.assertRaisesRegex(
+        RuntimeError, "already holds staged micro-batch 'dead-orchestrator'"
+    ):
+      worker.stage_fwd_bwd(_request("req-2", 2))
+
+  def test_compile_drops_the_held_stage(self):
+    worker = self._held()
+    with self.assertLogs(level="WARNING") as logs:
+      worker.compile(None)
+    self.assertIsNone(worker._staged_fwd_bwd)
+    self.assertIn("dead-orchestrator", logs.output[0])
+    self.assertTrue(
+        worker.stage_fwd_bwd(_request("req-2", 2)).metadata["staged"]
+    )
+
+  def test_restore_checkpoint_drops_the_held_stage(self):
+    worker = self._held()
+    with self.assertLogs(level="WARNING") as logs:
+      self.assertEqual(worker.restore_checkpoint(), {"step": 3})
+    self.assertIsNone(worker._staged_fwd_bwd)
+    self.assertIn("dead-orchestrator", logs.output[0])
+    self.assertTrue(
+        worker.stage_fwd_bwd(_request("req-2", 2)).metadata["staged"]
+    )
+
+  def test_a_dropped_stage_cannot_be_run(self):
+    worker = self._held()
+    worker.restore_checkpoint()
+    with self.assertRaisesRegex(RuntimeError, "no staged micro-batch"):
+      worker.fwd_bwd_staged("dead-orchestrator")
 
 
 if __name__ == "__main__":

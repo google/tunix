@@ -124,11 +124,33 @@ class TrainerWorker(abstract_worker.Worker):
     finally:
       self.state = WorkerState.READY
 
+  def _drop_stale_stage(self, by: str) -> None:
+    """Drops a micro-batch staged before a (re)compile or a restore.
+
+    Only `fwd_bwd_staged` and `stop()` release a stage otherwise, so one left
+    by an orchestrator that died without `stop()` (an OOM kill, a preemption)
+    would make its successor's first stage fail, and every restart's after
+    it. A successor brings the worker up with `compile` and resumes with
+    `restore_checkpoint`; either way the held micro-batch will never run.
+
+    Args:
+      by: The call dropping it, for the log.
+    """
+    if self._staged_fwd_bwd is not None:
+      logging.warning(
+          "TrainerWorker %s drops staged micro-batch %r, staged before it and"
+          " never run.",
+          by,
+          self._staged_fwd_bwd[0],
+      )
+      self._staged_fwd_bwd = None
+
   def compile(self, dummy_data: Any = None) -> datatypes.Response:
     """Triggers JIT compilation using the provided dummy_data."""
     if self.state == WorkerState.PENDING:
       self.initialize()
     self.state = WorkerState.COMPILING
+    self._drop_stale_stage("compile")
     try:
       self._trainer.compile(dummy_data)
       return self._response(compiled=True)
@@ -317,7 +339,8 @@ class TrainerWorker(abstract_worker.Worker):
     the model, optimizer or gradient state changes, so the trainer's step
     order is that of the `fwd_bwd` / `fwd_bwd_staged` calls, and this may
     land while a weight sync holds the worker. One at a time: a second stage
-    before the first ran is refused rather than replacing it.
+    before the first ran is refused rather than replacing it (a `compile` or
+    `restore_checkpoint`, as a restarted orchestrator's bring-up, drops it).
 
     Then, when the trainer has `wait_for_device`, waits for the work it had
     dispatched before this call and reports how long that took
@@ -367,16 +390,30 @@ class TrainerWorker(abstract_worker.Worker):
       prepare = getattr(self._trainer, "prepare_fwd_bwd_input", None)
       if callable(prepare):
         staged_input = prepare(request.payload)
-      wait_for_device = getattr(self._trainer, "wait_for_device", None)
-      device_wait_s = (
-          float(wait_for_device()) if callable(wait_for_device) else None
-      )
-      # After the device wait, which already covers the update when the
-      # trainer queues it (MaxText's throttler holds its gradient norm).
-      update_token = getattr(self._trainer, "last_update_token", None)
-      if update_token is not None:
-        jax.block_until_ready(update_token)
-        update_ready = True
+      # Both waits are for the work dispatched before this call, which ends
+      # with the step's optimizer update, so a failure in either is that
+      # update's and is reported as the fused call reports it.
+      waiting_for = "the device"
+      try:
+        wait_for_device = getattr(self._trainer, "wait_for_device", None)
+        device_wait_s = (
+            float(wait_for_device()) if callable(wait_for_device) else None
+        )
+        # After the device wait, which already covers the update when the
+        # trainer queues it (MaxText's throttler holds its gradient norm, so
+        # a failed update raises there first).
+        waiting_for = "the update"
+        update_token = getattr(self._trainer, "last_update_token", None)
+        if update_token is not None:
+          jax.block_until_ready(update_token)
+          update_ready = True
+      except Exception as exc:
+        raise RuntimeError(
+            "optimizer update() failed: dispatched by"
+            " fwd_bwd(apply_optimizer=True, wait_for_update=False), it did not"
+            f" land (seen by stage_fwd_bwd waiting for {waiting_for}):"
+            f" {type(exc).__name__}: {exc}"
+        ) from exc
     except Exception as exc:
       self._last_error = str(exc)
       self.state = WorkerState.ERROR
@@ -613,6 +650,7 @@ class TrainerWorker(abstract_worker.Worker):
   def restore_checkpoint(self, **kwargs) -> Any:
     """Restore state from latest checkpoint and return the metadata pytree."""
     self._ensure_ready()
+    self._drop_stale_stage("restore_checkpoint")
     try:
       result = self._trainer.restore_checkpoint(**kwargs)
       self._last_error = None

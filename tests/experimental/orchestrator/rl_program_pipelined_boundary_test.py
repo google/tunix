@@ -2454,22 +2454,26 @@ class StagingSupportTest(absltest.TestCase):
       _run(_SUPPORT_SCENARIO, pipelined=False)
     self.assertEmpty(calls)
 
-  def test_one_failed_stage_is_fatal_like_the_same_transfer_unstaged(self):
-    # Neutral, not a regression (review F2): unstaged, the same bytes cross
-    # the same channel once, in the train call, and would fail the same way.
+  def test_a_stage_that_fails_on_the_trainer_is_fatal(self):
+    # The trainer ran the stage and it raised: the run ends with that error,
+    # as it would for a train call (past its refusals, stage_fwd_bwd puts the
+    # worker in ERROR, so no checkpoint could follow). A stage that fails on
+    # the way, or in the reference call before it, falls back to sending the
+    # micro-batch whole instead (rl_program_pipelined_boundary_robustness).
     real = _Worker.stage_fwd_bwd
     calls = {"n": 0}
 
     def _flaky(self, request, **kwargs):
       calls["n"] += 1
       if calls["n"] == 1:
-        raise ConnectionError("transient: stream reset")
+        raise ConnectionError("raised by the worker's stage_fwd_bwd")
       return real(self, request, **kwargs)
 
     errors: list[BaseException] = []
     with mock.patch.object(_Worker, "stage_fwd_bwd", _flaky):
       run = _run(_SUPPORT_SCENARIO, pipelined=True, staged=True, errors=errors)
     self.assertLen(errors, 1)
+    self.assertIn("raised by the worker's stage_fwd_bwd", str(errors[0]))
     self.assertEqual(run.program.step, 0)
 
 

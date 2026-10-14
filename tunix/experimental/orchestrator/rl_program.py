@@ -62,6 +62,22 @@ def _release_host_memory() -> None:
     pass
 
 
+def _raised_by_worker_method(exc: BaseException) -> bool:
+  """Whether a worker call failed in the worker's method, not on the way.
+
+  An actor handle re-raises the method's exception as a RuntimeError whose
+  message starts "RemoteExecutionError" (`ExecutionResponse.unwrap`); a
+  transport failure (a gRPC status, a reset connection, a timeout) is raised
+  as itself.
+
+  Args:
+    exc: What the call raised.
+  """
+  return isinstance(exc, RuntimeError) and str(exc).startswith(
+      "RemoteExecutionError"
+  )
+
+
 def _next_or_exhausted(iterator: Any) -> Any:
   """`next()` that returns `_EXHAUSTED` instead of raising StopIteration.
 
@@ -576,7 +592,13 @@ class StandardRLProgram(RLProgram):
     # first micro-batch goes to the trainer as soon as step k's weight sync
     # has staged, and step k's metrics, logging and host-memory release run
     # while it is on its way. The trainer gets the same calls, with the same
-    # inputs, in the same order as without it.
+    # inputs, in the same order as without it. What moves with that
+    # bookkeeping: step k's `Train step` line, StepMetrics and `on_step_end`
+    # follow a `[pipeline] SENT_AHEAD step=k` line (step k trained, step k+1
+    # started), so a wedge in step k+1's first call stops the log there;
+    # `on_step_begin(k+1)` fires after step k+1's first train call returned;
+    # and under ARRIVAL order the dispatch window, keyed on the step count,
+    # opens that one call later (PROMPT_BATCH opens it at the commit).
     self.pipeline_step_boundary = pipeline_step_boundary
     # With `pipeline_step_boundary`: also send that micro-batch's data to the
     # trainer host right after step k's last train call (which runs the update
@@ -2767,6 +2789,16 @@ class StandardRLProgram(RLProgram):
     starts on a device drained by the weight sync, so its first calls return
     at the transfer's pace even when the device is the bottleneck.)
 
+    A stage is optional, so one that fails on the way to the trainer, or in
+    the reference log-probs it needs, falls back: the micro-batch goes back
+    to the front of `st.ready` and is sent whole in the next step's first
+    train call, as without staging, and this step keeps its get_metrics()
+    barrier, checkpoint and weight sync. Staging is then off for the rest of
+    the run. A stage the trainer ran and that raised there ends the run with
+    its error, as a failed train call does: past its refusals,
+    `TrainerWorker.stage_fwd_bwd` puts the worker in ERROR, so no checkpoint
+    could follow anyway.
+
     Args:
       st: The next step's state, filled by `_prepack`.
       step_result: The current step's final train call result.
@@ -2790,14 +2822,36 @@ class StandardRLProgram(RLProgram):
       return False
     if not await self._trainer_can_stage():
       return False
-    self._intake_task = None
+    intake, self._intake_task = self._intake_task, None
     mb = st.ready.pop(0)
-    batch = await self._with_reference_logps(mb.payload)
-    start = time.monotonic()
-    staged = await self.engine.stage_train_step(  # pyrefly: ignore[missing-attribute]
-        batch, role=datatypes.Role.ACTOR
-    )
-    stage_s = time.monotonic() - start
+    calling_trainer = False
+    try:
+      batch = await self._with_reference_logps(mb.payload)
+      start = time.monotonic()
+      calling_trainer = True
+      staged = await self.engine.stage_train_step(  # pyrefly: ignore[missing-attribute]
+          batch, role=datatypes.Role.ACTOR
+      )
+      stage_s = time.monotonic() - start
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      if calling_trainer and _raised_by_worker_method(exc):
+        raise
+      # Undone exactly, so `_send_first_microbatch_ahead` sends it whole. Had
+      # the trainer received it after all (a reply lost on the way back), it
+      # holds it unused: with staging off nothing names it, and a successor's
+      # bring-up drops it.
+      st.ready.insert(0, mb)
+      self._intake_task = intake
+      self._staging_latched_off = True
+      logging.warning(
+          "[pipeline] Staging failed on the way to the trainer or in the"
+          " reference log-probs (%r); sending the microbatch whole in step"
+          " %d's first train call instead, and not staging for the rest of"
+          " the run.",
+          exc,
+          self._step + 1,
+      )
+      return False
     batch = None
     st.staged = (mb._replace(payload=None), staged.request_id)
     device_wait_s = staged.device_wait_s
