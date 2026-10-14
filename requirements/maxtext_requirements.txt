@@ -1,8 +1,9 @@
 # TODO(maxtext-dev): Update the commits after all code changes land.
 # atwigg/mlperf 60425bfbd plus AI-Hypercomputer/maxtext#5718 (prepare_fwd_bwd_input,
-# wait_for_device for the staged step boundary). Re-pin to #5718's merge commit.
-maxtext @ git+https://github.com/google/maxtext.git@c79bcfd162d3c93c08fcdcc7fc8364596a319f5c
-maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@c79bcfd162d3c93c08fcdcc7fc8364596a319f5c#subdirectory=src/maxtext/integration/vllm
+# wait_for_device for the staged step boundary) and #5740-#5742 (gather small FSDP-sharded
+# kernels once per scanned layer stack). Re-pin to the merge commits when they land.
+maxtext @ git+https://github.com/google/maxtext.git@8c3c06197be916fa9255303165cc11b6dec04a2c
+maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@8c3c06197be916fa9255303165cc11b6dec04a2c#subdirectory=src/maxtext/integration/vllm
 aqtp
 cheroot
 cloud-accelerator-diagnostics
