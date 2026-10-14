@@ -46,9 +46,16 @@ _SC_FLAG = "--xla_tpu_enable_offloading_copy_to_sparsecore=false"
 # cell: key -> (value with it off, value with it on). A repeated key takes its
 # last value, as MaxText's command line parsing does, and an absent key its
 # MaxText default (_MAXTEXT_DEFAULTS).
-_MAXTEXT_DEFAULTS = {"gdn_cp_state": "remat", "moe_route": "remat"}
+_MAXTEXT_DEFAULTS = {
+    "cast_grads_after_all_reduce": "false",
+    "gdn_cp_matmul_precision": "highest",
+    "gdn_cp_state": "remat",
+    "moe_route": "remat",
+}
 _TUNED_KEYS = {
+    "cast_grads_after_all_reduce": ("false", "true"),
     "context_parallel_strategy": ("ring", "all_gather"),
+    "gdn_cp_matmul_precision": ("highest", "high"),
     "gdn_cp_mode": ("head", "seq"),
     "gdn_cp_state": ("remat", "device"),
     "moe_route": ("remat", "device"),
@@ -305,7 +312,7 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(cfg["max_num_seqs"], 16)
     self.assertNotIn("kv_tp_size", _maxtext_flags(_jobset(render, "train")))
 
-  def test_tuned_flags_set_exactly_the_seven_keys_at_the_bench_cell(self):
+  def test_tuned_flags_set_exactly_the_nine_keys_at_the_bench_cell(self):
     before = _maxtext_flags(_jobset(self.bench_off, "train"))
     after = _maxtext_flags(_jobset(self.bench_on, "train"))
     self.assertEqual(_flag_changes(before, after), _TUNED_KEYS)
