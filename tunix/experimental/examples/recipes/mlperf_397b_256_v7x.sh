@@ -99,6 +99,15 @@ export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS:---DANGEROUS_tpu_run
 if [[ -n "${TRAINER_MAX_HBM_SIZE_MIB:-}" ]]; then
   export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS} --xla_tpu_max_hbm_size_mib=${TRAINER_MAX_HBM_SIZE_MIB}"
 fi
+# Opt-in: TRAINER_SC_OFFLOAD_THRESHOLDS=true offloads only large collectives to the
+# SparseCores, so the small per-layer ones skip the SparseCore queue (SC0 was 75% busy):
+# all-reduces from 64 MiB, all-gathers from 256 MiB. The trainer's all-gathers are
+# 8.4 MB and 134 MB (FSDP layer weights) vs 470 MB (MoE tokens) and 520 MB (expert
+# weights), so any all-gather threshold between 134 and 470 MB is the same split.
+# RL trainer bench (128 chips): 106.5 -> 105.1 s/step.
+if [[ "${TRAINER_SC_OFFLOAD_THRESHOLDS:-false}" == "true" ]]; then
+  export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS} --xla_tpu_sparse_core_all_reduce_offload_min_size_in_bytes=67108864 --xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes=268435456"
+fi
 export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD} ENABLE_MULTI_NUMA=${ENABLE_MULTI_NUMA} TPU_RAIDEN_DATA_NICS=${TPU_RAIDEN_DATA_NICS} RAIDEN_BROADCAST_HOST_RATIO=${RAIDEN_BROADCAST_HOST_RATIO} RAIDEN_BROADCAST_PIPELINE_STAGES=${RAIDEN_BROADCAST_PIPELINE_STAGES} LIBTPU_INIT_ARGS='${TRAINER_LIBTPU_INIT_ARGS}'${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS:+ TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS}}${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS:+ TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS}}}"
 # Under Pathways the trainer's TPU program runs in the pathways-worker container,
 # so the trainer libtpu flags must be set there (yaml_generator.py renders one

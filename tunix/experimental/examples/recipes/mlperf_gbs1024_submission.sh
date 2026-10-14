@@ -67,6 +67,7 @@ export ROLLOUT_ATTENTION_DP="${ROLLOUT_ATTENTION_DP:-false}"
 # which rerun an overflowing micro-batch with a dropless program. For example,
 #   RAGGED_BUFFER_FACTOR=2.75 RETRY_WHEN_TOKENS_DROPPED=true
 # keeps this block's context offload, four chunks and HBM budget.
+export TRAINER_SC_OFFLOAD_THRESHOLDS="${TRAINER_SC_OFFLOAD_THRESHOLDS:-true}"
 export DROPLESS="${DROPLESS:-true}"
 case "${DROPLESS}" in
   true)
