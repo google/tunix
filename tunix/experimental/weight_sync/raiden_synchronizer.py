@@ -800,14 +800,21 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
 
     self._ips, listeners = [], []
     host_control_ip = {}
+    distinct_task_ids = {
+        getattr(d, "task_id", None) for d in src_devices
+    } - {None}
     for idx, row in enumerate(gathered_ws_info):
       ip = unpack_ip(row)
       ctrl_ip = unpack_control_ip(row)
-      if idx < len(src_devices):
+      if len(row) < 10 and idx < len(src_devices):
         dev = src_devices[idx]
         host_key = mesh_utils.device_host_key(dev)
         if host_key is None:
-          task_id = getattr(dev, "task_id", None)
+          task_id = (
+              getattr(dev, "task_id", None)
+              if len(distinct_task_ids) > 1
+              else None
+          )
           host_key = (
               task_id
               if task_id is not None
