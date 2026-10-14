@@ -98,6 +98,23 @@ case "${DROPLESS}" in
     ;;
 esac
 
+# The sharded log-prob head (TUNIX_LOGPS_SHARDED_HEAD, tunix/rl/common.py) and
+# the staged step boundary (--pipeline_step_boundary, --stage_next_microbatch),
+# measured on the RL trainer bench (AI-Hypercomputer/maxtext#5701). On in this
+# recipe only.
+#   TUNIX_LOGPS_SHARDED_HEAD=local: the trainer process computes log-probs with
+#     the sharded head (k8s_launcher.sh passes it to the trainer); 0 turns it off.
+#   PIPELINE_STEP_BOUNDARY=1, STAGE_NEXT_MICROBATCH=1: the orchestrator sends the
+#     next step's first micro-batch ahead of this step's bookkeeping, and stages it
+#     on the trainer before this step's deferred update. Staging needs
+#     AI-Hypercomputer/maxtext#5718; without it the orchestrator warns and runs
+#     the boundary pipelined but unstaged. STAGE_NEXT_MICROBATCH follows
+#     PIPELINE_STEP_BOUNDARY unless set, so PIPELINE_STEP_BOUNDARY=false alone
+#     turns both off.
+export TUNIX_LOGPS_SHARDED_HEAD="${TUNIX_LOGPS_SHARDED_HEAD:-local}"
+export PIPELINE_STEP_BOUNDARY="${PIPELINE_STEP_BOUNDARY:-1}"
+export STAGE_NEXT_MICROBATCH="${STAGE_NEXT_MICROBATCH:-${PIPELINE_STEP_BOUNDARY}}"
+
 export TRAINER_FP8="${TRAINER_FP8:-true}"
 export ROLLOUT_FP8="${ROLLOUT_FP8:-true}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-128}"

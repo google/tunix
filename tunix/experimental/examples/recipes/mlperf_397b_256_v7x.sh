@@ -102,11 +102,12 @@ if [[ -n "${TRAINER_MAX_HBM_SIZE_MIB:-}" ]]; then
 fi
 # TRAINER_TUNED_FLAGS (true or false): trainer settings measured on the RL trainer
 # bench (AI-Hypercomputer/maxtext#5701) at this recipe's 128-chip trainer cell. Most
-# are the settings of runs 59 and 62 in AI-Hypercomputer/maxtext#5409 that this recipe
-# does not use yet. Off here and in the recipes that source this one; on in
-# mlperf_gbs1024_submission.sh. Part 1, the trainer libtpu flag, is appended here so
-# the trainer env, the Pathways workers and the proxy (which compiles the trainer
-# program) all copy it. A value already in TRAINER_LIBTPU_INIT_ARGS is kept.
+# are settings of the MaxText pretraining recipe for this model
+# (AI-Hypercomputer/maxtext#5409) that this recipe does not use yet. Off here and in
+# the recipes that source this one; on in mlperf_gbs1024_submission.sh. Part 1, the
+# trainer libtpu flag, is appended here so the trainer env, the Pathways workers and
+# the proxy (which compiles the trainer program) all copy it. A value already in
+# TRAINER_LIBTPU_INIT_ARGS is kept.
 #   --xla_tpu_enable_offloading_copy_to_sparsecore=false: XLA does not offload copies
 #     to the SparseCores. Bench, alone: 130.8 -> 126.4 s/step.
 # Part 2, the MaxText keys, follows MAXTEXT_EXTRA_FLAGS below.
@@ -233,7 +234,7 @@ fi
 # s/step.
 #   gdn_cp_matmul_precision=high: seq mode composes GDN state in 3 bf16 passes, not 6.
 #   cast_grads_after_all_reduce=true: all-reduce-only bf16 grads cast to f32 after it.
-# The two together (bench, same pod, google/tunix#2873 log-prob head on in both arms):
+# The two together (bench, same pod, the sharded log-prob head on in both arms):
 # 107.59 -> 106.24 s/step; grad_norm moved 1.5e-5 relative, less than a rerun (1.9e-5).
 if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
   export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_strategy=all_gather sa_fuse_reciprocal=true sa_use_base2_exp=false gdn_cp_mode=seq gdn_cp_state=device moe_route=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true"
