@@ -184,6 +184,15 @@ export ROLLOUT_ATTENTION_DP="${ROLLOUT_ATTENTION_DP:-false}"
 case "${ROLLOUT_ATTENTION_DP}" in
   true)
     export VLLM_MAX_NUM_SEQS=16
+    VLLM_ADDITIONAL_CONFIG="$(python3 -c '
+import json, os
+cfg = json.loads(os.environ.get("VLLM_ADDITIONAL_CONFIG") or "{}")
+strategy = cfg.setdefault("sharding", {}).setdefault("sharding_strategy", {})
+strategy["enable_dp_attention"] = True
+strategy["tensor_parallelism"] = 1
+print(json.dumps(cfg, separators=(",", ":")))
+')"
+    export VLLM_ADDITIONAL_CONFIG
     ;;
   false)
     export VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-64}"
@@ -262,23 +271,16 @@ case ",${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-}," in
   *) export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY},}RAGGED_GATHER_REDUCE_VERSION" ;;
 esac
 export VLLM_MOE_CHUNK_SIZE=256
-export SLICE_ROPE_CACHE=1
 export DP_SCHED_BATCH_PREFILL=false
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false}"
 export VLLM_ENABLE_V1_MULTIPROCESSING=0
 
-# MoE and collective optimization switches
+# MoE and collective optimization switches (propagated to Ray workers via TPU_ prefix below)
 export TPU_SMALL_ALL_REDUCE="${TPU_SMALL_ALL_REDUCE:-1}"
 export TPU_MOE_SINGLE_SORT="${TPU_MOE_SINGLE_SORT:-1}"
 export TPU_MOE_ROUTER_TOPK="${TPU_MOE_ROUTER_TOPK:-rowmax}"
 export TPU_MOE_LOWTOK="${TPU_MOE_LOWTOK:-1}"
-
-# Propagate optimization flags to vLLM's Ray workers
-for _opt_var in TPU_SMALL_ALL_REDUCE TPU_MOE_SINGLE_SORT TPU_MOE_ROUTER_TOPK TPU_MOE_LOWTOK; do
-  if [[ ",${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-}," != *",${_opt_var},"* ]]; then
-    export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY},}${_opt_var}"
-  fi
-done
+export VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY="${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY:-RAIDEN_,TPU_,WEIGHT_SYNC_}"
 
 # Phased inference profiling (vLLM / tpu-inference)
 # Disabled by default (PHASED_PROFILING_DIR="" in tpu-inference). Only active when PROFILE_SAMPLER=true.

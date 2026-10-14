@@ -6,7 +6,7 @@ set -e
 # ==============================================================================
 # - TPU7x dynamic slicing on pod1 (bodaborg-tpu7x-gsc) or pod2 (bodaborg-tpu7x-gsc-elm)
 # - Trainer on 128 chips (4x4x8 = 256 devices, FSDP=32, TP=1, EXPERT=2, CP=4)
-# - Rollout on 256 chips (32 replicas x 8 chips 2x2x2, EP=16, TP=1)
+# - Rollout on 256 chips (16 replicas x 16 chips 2x2x4, DP=2, EP=16, TP=1)
 # - Sandbox configured for sandbox-np nodepool with workload tolerations
 # ==============================================================================
 
@@ -31,8 +31,6 @@ export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STOR
 
 export K8S_NAMESPACE="${K8S_NAMESPACE:-priority-dev}"
 export USE_DYNAMIC_SLICING="true"
-export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
-export TPU_RAIDEN_DATA_NICS="${TPU_RAIDEN_DATA_NICS:-eth0}"
 
 # Head pod lands on cpu-np (~257G allocatable). mlperf_pathways_config.sh's
 # 260G user-container request plus proxy/rm requests (~280G) never schedules
@@ -40,8 +38,6 @@ export TPU_RAIDEN_DATA_NICS="${TPU_RAIDEN_DATA_NICS:-eth0}"
 export USER_CONTAINER_MEMORY="${USER_CONTAINER_MEMORY:-48G}"
 
 export RAIDEN_DEVICES_PER_HOST=8
-export RAIDEN_BROADCAST_HOST_RATIO="${RAIDEN_BROADCAST_HOST_RATIO:-1.0}"
-export RAIDEN_BROADCAST_PIPELINE_STAGES="${RAIDEN_BROADCAST_PIPELINE_STAGES:-4}"
 
 # Model configuration
 export MODEL_NAME="Qwen3.5-397B-A17B"
@@ -49,7 +45,7 @@ export MODEL_ID="Qwen/Qwen3.5-397B-A17B"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-Qwen/Qwen3.5-397B-A17B}"
 export MAXTEXT_MODEL_NAME="qwen3.5-397b-a17b"
 
-# Topologies (128 chips / 256 devices Trainer 4x4x8, 16x 8-chip Rollout slices on TPU7x dynamic slicing)
+# Topologies (128 chips / 256 devices Trainer 4x4x8, 16x 16-chip Rollout slices on TPU7x dynamic slicing)
 # Mesh product is DEVICES, and v7x has 2 devices/chip at ~95 GB each.
 # 4x4x8 = 128 chips = 256 devices.
 # Sharding: TP=1, FSDP=32, CP=4, EP=2, cp-as-ep.
@@ -61,10 +57,9 @@ export TRAINER_MESH_TP="${TRAINER_MESH_TP:-1}"
 export TRAINER_MESH_EXPERT="${TRAINER_MESH_EXPERT:-2}"
 export TRAINER_MESH_CONTEXT="${TRAINER_MESH_CONTEXT:-4}"
 
-# Rollout: 8 chips = 16 devices = 2 hosts per replica. dp * tp * expert must equal
-# the DEVICE count, so expert=16 on 8 chips. Scaled rollout recipes
-# (mlperf_397b_1024_v7x.sh) override ROLLOUT_REPLICAS, ROLLOUT_TPU_SLICE and
-# VLLM_DATA_PARALLEL_SIZE; expert then fills the slice's devices (2 per chip) / dp.
+# Rollout: 16 chips = 32 devices = 4 hosts per replica. dp * tp * expert must equal
+# the DEVICE count, so expert=16 at dp=2 on 16 chips. Scaled rollout recipes
+# (mlperf_397b_512_v7x.sh, mlperf_397b_1024_v7x.sh) override ROLLOUT_REPLICAS.
 export ROLLOUT_JOBSET_YAML="${ROLLOUT_JOBSET_YAML:-jobset.mcjax.ray.yaml}"
 export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x4}"
 export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-2}"
@@ -77,18 +72,17 @@ export MAX_CONCURRENCY="${MAX_CONCURRENCY:-1024}"
 
 # vLLM Rollout Configuration
 # Rollout attention kernel (USE_BATCHED_RPA_LONG_CTX_KERNEL -> ROLLOUT_MAXTEXT_ATTENTION); see rollout_attention.sh.
+# tensor_parallelism and enable_dp_attention are set by ROLLOUT_ATTENTION_DP in mlperf_base.sh.
 source "${DIR}/rollout_attention.sh"
-export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":'"${ROLLOUT_MESH_EXPERT}"',"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"'"${ROLLOUT_MAXTEXT_ATTENTION}"'","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"per_device_batch_size":0.0}}'
+export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":'"${ROLLOUT_MESH_EXPERT}"'}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"attention":"'"${ROLLOUT_MAXTEXT_ATTENTION}"'","prefuse_moe_weights":true}}'
 
 # Rollout Worker Flags & Raiden tuning
-export ONEHOT_MOE_PERMUTE_THRESHOLD="${ONEHOT_MOE_PERMUTE_THRESHOLD:-2048}"
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
-export VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY="RAIDEN_,TPU_,WEIGHT_SYNC_"
+# RAIDEN_*, TPU_*, WEIGHT_SYNC_*, and VLLM_* env vars are copied to Ray workers via prefix.
 export TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS="${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS:-120000}"
 export TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS="${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS:-5}"
-export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="USE_BATCHED_RPA_LONG_CTX_KERNEL,ONEHOT_MOE_PERMUTE_THRESHOLD,LIBTPU_INIT_ARGS,RAY_memory_monitor_refresh_ms,VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,ENABLE_MULTI_NUMA,TPU_RAIDEN_DATA_NICS,FLOAT32_GATE_LOGITS,FLOAT32_LOGITS,NEW_MODEL_DESIGN,ATTN_BUCKETIZED_NUM_REQS,ATTN_CUSTOM_NUM_REQS_BUCKETS,VLLM_MOE_CHUNK_SIZE,SLICE_ROPE_CACHE,DP_SCHED_BATCH_PREFILL,TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS,TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS,WEIGHT_SYNC_PARALLEL_H2H"
-export ORCHESTRATOR_EXTRA_ENV="${ORCHESTRATOR_EXTRA_ENV:-WEIGHT_SYNC_BIND_TIMEOUT_S=900 WEIGHT_SYNC_METADATA_TIMEOUT_S=900 WEIGHT_SYNC_H2D_TIMEOUT_S=3600 WEIGHT_SYNC_TRANSFER_TIMEOUT_S=7200 RAIDEN_PARALLELISM=16 TPU_RAIDEN_DATA_NICS=${TPU_RAIDEN_DATA_NICS} RAIDEN_BROADCAST_HOST_RATIO=${RAIDEN_BROADCAST_HOST_RATIO} RAIDEN_BROADCAST_PIPELINE_STAGES=${RAIDEN_BROADCAST_PIPELINE_STAGES}${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS:+ TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS}}${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS:+ TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS}}}"
-export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-USE_BATCHED_RPA_LONG_CTX_KERNEL=${USE_BATCHED_RPA_LONG_CTX_KERNEL} ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD} RAY_memory_monitor_refresh_ms=0 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 ENABLE_MULTI_NUMA=${ENABLE_MULTI_NUMA} TPU_RAIDEN_DATA_NICS=${TPU_RAIDEN_DATA_NICS} RAIDEN_BROADCAST_HOST_RATIO=${RAIDEN_BROADCAST_HOST_RATIO} RAIDEN_BROADCAST_PIPELINE_STAGES=${RAIDEN_BROADCAST_PIPELINE_STAGES}${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS:+ TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS}}${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS:+ TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS}}}"
+export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="USE_BATCHED_RPA_LONG_CTX_KERNEL,ONEHOT_MOE_PERMUTE_THRESHOLD,LIBTPU_INIT_ARGS,NEW_MODEL_DESIGN,ATTN_BUCKETIZED_NUM_REQS,ATTN_CUSTOM_NUM_REQS_BUCKETS,DP_SCHED_BATCH_PREFILL"
+export ORCHESTRATOR_EXTRA_ENV="${ORCHESTRATOR_EXTRA_ENV:-WEIGHT_SYNC_BIND_TIMEOUT_S=900 WEIGHT_SYNC_METADATA_TIMEOUT_S=900 WEIGHT_SYNC_H2D_TIMEOUT_S=3600 WEIGHT_SYNC_TRANSFER_TIMEOUT_S=7200 RAIDEN_PARALLELISM=16${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS:+ TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS}}${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS:+ TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS}}}"
+export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-USE_BATCHED_RPA_LONG_CTX_KERNEL=${USE_BATCHED_RPA_LONG_CTX_KERNEL}${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS:+ TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS}}${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS:+ TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS}}}"
 # Rollout (vLLM) libtpu flags; mlperf_base.sh only applies its default when unset.
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false --xla_tpu_dvfs_p_state=7}"
 # v7x caps scoped VMEM at 67043328 bytes (65472 KiB); 65536 is rejected per compile
@@ -99,16 +93,12 @@ export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS:---DANGEROUS_tpu_run
 if [[ -n "${TRAINER_MAX_HBM_SIZE_MIB:-}" ]]; then
   export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS} --xla_tpu_max_hbm_size_mib=${TRAINER_MAX_HBM_SIZE_MIB}"
 fi
-export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD} ENABLE_MULTI_NUMA=${ENABLE_MULTI_NUMA} TPU_RAIDEN_DATA_NICS=${TPU_RAIDEN_DATA_NICS} RAIDEN_BROADCAST_HOST_RATIO=${RAIDEN_BROADCAST_HOST_RATIO} RAIDEN_BROADCAST_PIPELINE_STAGES=${RAIDEN_BROADCAST_PIPELINE_STAGES} LIBTPU_INIT_ARGS='${TRAINER_LIBTPU_INIT_ARGS}'${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS:+ TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS}}${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS:+ TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS}}}"
+export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-LIBTPU_INIT_ARGS='${TRAINER_LIBTPU_INIT_ARGS}'${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS:+ TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS}}${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS:+ TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS}}}"
 # Under Pathways the trainer's TPU program runs in the pathways-worker container,
 # so the trainer libtpu flags must be set there (yaml_generator.py renders one
 # KEY=VALUE per line into the worker env).
 export PATHWAYS_WORKER_EXTRA_ENV="${PATHWAYS_WORKER_EXTRA_ENV:-LIBTPU_INIT_ARGS=${TRAINER_LIBTPU_INIT_ARGS} --megascale_port=-1 --xprof_compress_jftrace=true
-SKIP_MEGASCALE_PJRT_CLIENT=true
-ENABLE_MULTI_NUMA=${ENABLE_MULTI_NUMA}
-TPU_RAIDEN_DATA_NICS=${TPU_RAIDEN_DATA_NICS}
-RAIDEN_BROADCAST_HOST_RATIO=${RAIDEN_BROADCAST_HOST_RATIO}
-RAIDEN_BROADCAST_PIPELINE_STAGES=${RAIDEN_BROADCAST_PIPELINE_STAGES}${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS:+
+SKIP_MEGASCALE_PJRT_CLIENT=true${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS:+
 TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS}}${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS:+
 TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS}}}"
 
@@ -120,9 +110,6 @@ for _f in ${TRAINER_LIBTPU_INIT_ARGS}; do [[ "${_f}" == --xla_* ]] && _trainer_x
 export PATHWAYS_PROXY_EXTRA_ARGS="${PATHWAYS_PROXY_EXTRA_ARGS:-${_trainer_xla_flags% }}"
 
 # Hyperparameters & DeepSWE Pipeline Configuration
-# Must be a multiple of TRAINER_MESH_FSDP=32. Only the padded batch assembler reads it;
-# sequence packing (MAX_SEQ_TOKEN_PER_TPU set) sizes micro steps from the trainer mesh.
-export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-64}"
 export MAX_STEPS="${MAX_STEPS:-30}"
 export CHECKPOINT_SAVE_INTERVAL_STEPS="${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}"
 export CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-30}"
@@ -135,29 +122,27 @@ export RAGGED_BUFFER_FACTOR="${RAGGED_BUFFER_FACTOR:-2.0}"
 export REMAT_CONTEXT="${REMAT_CONTEXT:-remat}"
 export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
 export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep \
-use_gdn_kernel=true gdn_cp_mode=head gdn_chunk_size=64 \
-decoder_layer_input=offload context=${REMAT_CONTEXT} gdn=remat gdn_conv=remat gdn_states=remat \
-megablox=true sparse_matmul=true use_tokamax_gmm=true use_gmm_v2=true \
-use_gmm_v2_heuristic_tiling=false merge_gating_gmm=false \
-wi_tile_fwd_batch_seq=256 wi_tile_fwd_embed_dim=4096 wi_tile_fwd_mlp_dim=1024 \
-wi_tile_dlhs_batch_seq=256 wi_tile_dlhs_embed_dim=4096 wi_tile_dlhs_mlp_dim=1024 \
-wi_tile_drhs_batch_seq=256 wi_tile_drhs_embed_dim=4096 wi_tile_drhs_mlp_dim=1024 \
-wo_tile_fwd_batch_seq=256 wo_tile_fwd_embed_dim=4096 wo_tile_fwd_mlp_dim=1024 \
-wo_tile_dlhs_batch_seq=256 wo_tile_dlhs_embed_dim=4096 wo_tile_dlhs_mlp_dim=1024 \
-wo_tile_drhs_batch_seq=256 wo_tile_drhs_embed_dim=4096 wo_tile_drhs_mlp_dim=1024 \
-use_ring_of_experts=true num_moe_token_chunks=${NUM_MOE_TOKEN_CHUNKS} moe_chunk_barrier=false \
+use_gdn_kernel=true gdn_cp_mode=head \
+decoder_layer_input=offload context=${REMAT_CONTEXT} \
+use_tokamax_gmm=true use_gmm_v2=true \
+wi_tile_fwd_batch_seq=256 wi_tile_fwd_embed_dim=4096 \
+wi_tile_dlhs_batch_seq=256 wi_tile_dlhs_embed_dim=4096 \
+wi_tile_drhs_batch_seq=256 wi_tile_drhs_embed_dim=4096 \
+wo_tile_fwd_batch_seq=256 wo_tile_fwd_embed_dim=4096 \
+wo_tile_dlhs_batch_seq=256 wo_tile_dlhs_embed_dim=4096 \
+wo_tile_drhs_batch_seq=256 wo_tile_drhs_embed_dim=4096 \
+use_ring_of_experts=true num_moe_token_chunks=${NUM_MOE_TOKEN_CHUNKS} \
 ring_of_experts_local_routing=true moe_expert_weight_prefetch=forward \
 moe_chunk_pipeline=true ring_of_experts_row_major_reduce_scatter=true \
 use_ragged_sort=true use_custom_sort_vjp=false ragged_buffer_factor=${RAGGED_BUFFER_FACTOR} \
 use_tokamax_splash=true use_splash_scheduler=true \
-sa_block_q=1024 sa_block_kv=4096 sa_block_kv_compute=512 \
-sa_block_q_dkv=2048 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=512 \
-sa_fuse_reciprocal=false sa_use_base2_exp=true dq_reduction_steps=3 \
-context_parallel_strategy=ring context_parallel_load_balance=false allow_split_physical_axes=false \
+sa_block_q=1024 sa_block_kv=4096 \
+sa_block_q_dkv=2048 sa_block_kv_dkv=2048 \
+sa_fuse_reciprocal=false dq_reduction_steps=3 \
+context_parallel_strategy=ring context_parallel_load_balance=false \
 context_parallel_attention_load_balance=true \
-num_vocab_tiling=16 use_iota_embed=false mu_dtype=float32 grad_dtype=float32 \
-checkpoint_storage_concurrent_gb=96 \
-packing=True optimizer_memory_host_offload=true}"
+num_vocab_tiling=16 mu_dtype=float32 \
+optimizer_memory_host_offload=true}"
 # Opt-in: RETRY_WHEN_TOKENS_DROPPED=true reruns a micro-batch whose MoE ragged buffer overflows
 # with a dropless program (RETRY_NUM_MOE_TOKEN_CHUNKS scanned token chunks, ~63 GiB/device)
 # instead of dropping its tokens. Needs RAGGED_BUFFER_FACTOR > 0 and a MaxText with the
