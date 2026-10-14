@@ -46,6 +46,41 @@ _STOP_TIMEOUT_S = 60.0  # Timeout for stopping remote workers. 60 should not be 
 _JAX_CACHE_UPLOAD_TIMEOUT_S = 180.0  # Per-worker bound on a JAX cache upload RPC.
 
 
+def resolve_min_rollout_replicas(
+    rollout_replicas: int,
+    min_rollout_replicas: int = 0,
+) -> int:
+  """Resolves the minimum rollout worker replicas required before starting training.
+
+  Args:
+    rollout_replicas: Total number of rollout worker replicas configured.
+    min_rollout_replicas: Minimum rollout replicas to wait for before starting
+      training. If <= 0 (default 0), waits for all `rollout_replicas`. If
+      greater than `rollout_replicas`, clamps to `rollout_replicas` with a
+      warning.
+
+  Returns:
+    Effective minimum rollout replicas to wait for.
+  """
+  if rollout_replicas <= 0:
+    raise ValueError(
+        f"rollout_replicas must be positive; got {rollout_replicas}."
+    )
+  min_replicas = (
+      min_rollout_replicas if min_rollout_replicas > 0 else rollout_replicas
+  )
+  if min_replicas > rollout_replicas:
+    logging.warning(
+        "min_rollout_replicas (%d) exceeds rollout_replicas (%d); "
+        "clamping to rollout_replicas (%d).",
+        min_replicas,
+        rollout_replicas,
+        rollout_replicas,
+    )
+    min_replicas = rollout_replicas
+  return min_replicas
+
+
 class ClusterOrchestrator:
   """Supervises cluster hardware, health monitoring, and program execution."""
 
@@ -67,6 +102,7 @@ class ClusterOrchestrator:
       fault_tolerance_config: datatypes.RolloutFaultToleranceConfig | None = (
           None
       ),
+      target_rollout_replicas: int | None = None,
   ):
     """Initializes ClusterOrchestrator.
 
@@ -93,8 +129,11 @@ class ClusterOrchestrator:
         evicted and its in-flight tasks are re-queued.
       fault_tolerance_config: Optional consolidated rollout fault-tolerance
         configuration.
+      target_rollout_replicas: Optional total number of rollout worker replicas
+        configured for the job.
     """
     self.config = config
+    self._target_rollout_replicas = target_rollout_replicas
     # Legacy scalar arguments take precedence over the consolidated config;
     # `with_overrides` validates the merged result (positive caps/timeouts).
     self._fault_tolerance_config = (
@@ -112,7 +151,7 @@ class ClusterOrchestrator:
     self._brought_up = False
     self._warmup_data: Any = None
     self._bring_up_executor = futures.ThreadPoolExecutor(
-        max_workers=4, thread_name_prefix="worker_bringup"
+        max_workers=64, thread_name_prefix="worker_bringup"
     )
     self._pending_bring_up_futures: set[futures.Future[Any]] = set()
     self.engine: distributed_rl_engine.DistributedRLEngine | None = None
@@ -430,14 +469,14 @@ class ClusterOrchestrator:
               incarnation,
               target_state.value,
           )
-      try:
-        self.registry.set_state(
-            worker_id,
-            target_state,
-            expected_incarnation=incarnation,
-        )
-      except KeyError:
-        return
+        try:
+          self.registry.set_state(
+              worker_id,
+              target_state,
+              expected_incarnation=incarnation,
+          )
+        except KeyError:
+          return
     except Exception as err:  # pylint: disable=broad-exception-caught
       logging.error(
           "Failed to bring up dynamic remote worker %s: %r", worker_id, err
@@ -576,6 +615,7 @@ class ClusterOrchestrator:
         w_id
         for w_id in worker_ids
         if datatypes.Role.ROLLOUT.value in shims[w_id].info().roles
+        and self.registry.state(w_id) == worker_registry.MembershipState.ACTIVE
     ]
     if not rollout_worker_ids:
       return
@@ -941,6 +981,29 @@ class ClusterOrchestrator:
         if cap is not None:
           rollout_worker_capacities[shim.handle] = cap
 
+    target_rollout_replicas = (
+        self._target_rollout_replicas
+        if (
+            isinstance(self._target_rollout_replicas, int)
+            and self._target_rollout_replicas > 0
+        )
+        else None
+    )
+    role_groups = getattr(self.config, "role_groups", None)
+    if target_rollout_replicas is None and isinstance(role_groups, Mapping):
+      rollout_group = role_groups.get(datatypes.Role.ROLLOUT) or role_groups.get(
+          datatypes.Role.ROLLOUT.value
+      )
+      replicas = getattr(rollout_group, "replicas", None)
+      if isinstance(replicas, int) and replicas > 0:
+        target_rollout_replicas = replicas
+    if target_rollout_replicas is None:
+      env_replicas = (
+          os.getenv("ROLLOUT_REPLICAS") or os.getenv("ROLLOUT_WORKERS") or ""
+      ).strip()
+      if env_replicas.isdigit() and int(env_replicas) > 0:
+        target_rollout_replicas = int(env_replicas)
+
     return distributed_rl_engine.DistributedRLEngine(
         rollout_workers=rollout_workers,
         trainer_workers=trainer_workers,
@@ -949,6 +1012,7 @@ class ClusterOrchestrator:
         on_worker_evicted=self._on_engine_worker_evicted,
         rollout_worker_capacities=rollout_worker_capacities or None,
         fault_tolerance_config=self._fault_tolerance_config,
+        target_rollout_replicas=target_rollout_replicas,
     )
 
   def run(

@@ -1652,6 +1652,10 @@ class PoolExecutionSession:
     self._known_actors: set[ActorHandle] = set(pool.actors)
     self._dispatched_tasks: Dict[ActorHandle, set[str]] = {}
     self._task_dispatch_times: Dict[str, float] = {}
+    self._task_submit_ts: Dict[str, float] = {}
+    self._task_pending_enter_ts: Dict[str, float] = {}
+    self._task_l1_wait_s: Dict[str, float] = {}
+    self._task_l1_queued_count: Dict[str, int] = {}
     self._task_last_failed_actor: Dict[str, ActorHandle] = {}
     self._pending_queue: collections.deque[str] = collections.deque()
     self._task_payloads: Dict[
@@ -1920,6 +1924,69 @@ class PoolExecutionSession:
       if poll_task is not current:
         poll_task.cancel()
 
+  def _record_pending_enqueue(self, req_id: str) -> None:
+    self._task_pending_enter_ts[req_id] = time.monotonic()
+    self._task_l1_queued_count[req_id] = (
+        self._task_l1_queued_count.get(req_id, 0) + 1
+    )
+
+  def _record_pending_dequeue(self, req_id: str) -> None:
+    enter_ts = self._task_pending_enter_ts.pop(req_id, None)
+    if enter_ts is not None:
+      wait_s = max(0.0, time.monotonic() - enter_ts)
+      self._task_l1_wait_s[req_id] = (
+          self._task_l1_wait_s.get(req_id, 0.0) + wait_s
+      )
+
+  def _pop_l1_queue_metrics(self, req_id: str) -> dict[str, Any]:
+    self._record_pending_dequeue(req_id)
+    l1_wait_s = self._task_l1_wait_s.pop(req_id, 0.0)
+    l1_queued_count = self._task_l1_queued_count.pop(req_id, 0)
+    submit_ts = self._task_submit_ts.pop(req_id, None)
+    e2e_wall_s = (
+        max(0.0, time.monotonic() - submit_ts) if submit_ts is not None else 0.0
+    )
+    return {
+        "l1_queue_wait_s": float(l1_wait_s),
+        "l1_queued": bool(l1_queued_count > 0),
+        "l1_queued_count": int(l1_queued_count),
+        "e2e_wall_s": float(e2e_wall_s),
+    }
+
+  @staticmethod
+  def _attach_l1_queue_metrics(res: Any, l1_metrics: dict[str, Any]) -> None:
+    items = res if isinstance(res, list) else [res]
+    for item in items:
+      payload = (
+          item.get("payload")
+          if isinstance(item, dict)
+          else getattr(item, "payload", None)
+      )
+      for target in (item, payload):
+        if target is None:
+          continue
+        meta = (
+            target.get("metadata")
+            if isinstance(target, dict)
+            else getattr(target, "metadata", None)
+        )
+        if meta is None:
+          if isinstance(target, dict) and "metadata" in target:
+            meta = {}
+            target["metadata"] = meta
+          elif not isinstance(target, dict) and hasattr(target, "metadata"):
+            try:
+              meta = {}
+              setattr(target, "metadata", meta)
+            except Exception:  # pylint: disable=broad-exception-caught
+              meta = None
+        if isinstance(meta, dict):
+          qm = meta.get("queue_metrics")
+          if isinstance(qm, dict):
+            meta["queue_metrics"] = {**qm, **l1_metrics}
+          else:
+            meta["queue_metrics"] = dict(l1_metrics)
+
   def _fail_task(
       self, req_id: str, exc: Exception, *, enqueue_response: bool = True
   ) -> None:
@@ -1928,6 +1995,7 @@ class PoolExecutionSession:
     self._task_retries.pop(req_id, None)
     self._task_dispatch_times.pop(req_id, None)
     self._task_last_failed_actor.pop(req_id, None)
+    self._pop_l1_queue_metrics(req_id)
     if payload is not None:
       self._failed_tasks.append((req_id, payload, exc))
     if enqueue_response:
@@ -1964,6 +2032,7 @@ class PoolExecutionSession:
             self._max_task_retries,
             exc,
         )
+        self._record_pending_enqueue(req_id)
         self._pending_queue.appendleft(req_id)
       else:
         self._fail_task(req_id, exc)
@@ -2127,6 +2196,7 @@ class PoolExecutionSession:
       from_pending: bool = False,
   ) -> None:
     """Dispatches a task to `actor`, handling eviction and retries on failure."""
+    self._record_pending_dequeue(request_id)
     call_kwargs = dict(orig_kwargs)
     call_kwargs.pop("route_key", None)
     dispatched_set = self._dispatched_tasks.setdefault(actor, set())
@@ -2173,6 +2243,7 @@ class PoolExecutionSession:
             self._max_task_retries,
             exc,
         )
+        self._record_pending_enqueue(request_id)
         self._pending_queue.appendleft(request_id)
         if not self._pool.actors:
           self._response_queue.put_nowait(self._sentinel)
@@ -2219,6 +2290,7 @@ class PoolExecutionSession:
     orig_kwargs = dict(kwargs)
     args_tuple = tuple(args)
     self._task_payloads[request_id] = (method_name, args_tuple, orig_kwargs)
+    self._task_submit_ts[request_id] = time.monotonic()
     self._in_flight += 1
 
     if not self._pending_queue and self._pool.actors:
@@ -2229,6 +2301,7 @@ class PoolExecutionSession:
       except Exception:
         self._in_flight = max(0, self._in_flight - 1)
         self._task_payloads.pop(request_id, None)
+        self._task_submit_ts.pop(request_id, None)
         raise
       if actor is not None:
         await self._dispatch_to_actor(
@@ -2241,6 +2314,7 @@ class PoolExecutionSession:
         )
         return request_id
 
+    self._record_pending_enqueue(request_id)
     self._pending_queue.append(request_id)
     if self._pool.actors:
       await self._drain_pending_queue()
@@ -2374,8 +2448,10 @@ class PoolExecutionSession:
             self._in_flight = max(0, self._in_flight - 1)
             payload = self._task_payloads.pop(req_id, None)
             self._task_retries.pop(req_id, None)
+            l1_metrics = self._pop_l1_queue_metrics(req_id)
             try:
               res = response.unwrap()
+              self._attach_l1_queue_metrics(res, l1_metrics)
               self._response_queue.put_nowait((res, None))
             except Exception as exc:  # pylint: disable=broad-exception-caught
               if payload is not None:
@@ -2523,6 +2599,10 @@ class PoolExecutionSession:
   async def close(self) -> None:
     """Closes the session and cancels all background polling tasks."""
     self._closed = True
+    self._task_submit_ts.clear()
+    self._task_pending_enter_ts.clear()
+    self._task_l1_wait_s.clear()
+    self._task_l1_queued_count.clear()
     self._response_queue.put_nowait(self._sentinel)
     for t in list(self._poll_tasks):
       if not t.done():

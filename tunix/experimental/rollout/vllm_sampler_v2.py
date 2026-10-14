@@ -378,12 +378,20 @@ class RLVllmSampler:
       task: Any,
       expected_prompt_token_ids: list[int] | None = None,
       policy_version: int | None = None,
+      pause_wait_s: float = 0.0,
+      load_snapshot: Any = None,
   ) -> SimpleNamespace:
     """Consumes an AsyncLLMEngine output stream and formats output result."""
+    stream_start_ts = time.monotonic()
+    first_step_ts: float | None = None
     try:
       final_output = None
       async for step_output in task:
+        if first_step_ts is None:
+          first_step_ts = time.monotonic()
         final_output = step_output
+      stream_end_ts = time.monotonic()
+      total_stream_s = max(0.0, stream_end_ts - stream_start_ts)
 
       if final_output and final_output.outputs:
         output_choice = final_output.outputs[0]
@@ -425,11 +433,85 @@ class RLVllmSampler:
         ):
           routed_experts = np.array(routed_experts)
 
+        ro_metrics = getattr(final_output, "metrics", None)
         num_preemptions = (
-            getattr(final_output.metrics, 'num_preemptions', 0)
-            if getattr(final_output, 'metrics', None) is not None
+            int(getattr(ro_metrics, "num_preemptions", 0) or 0)
+            if ro_metrics is not None
             else 0
         )
+        tunix_q = getattr(final_output, "_tunix_queue_stats", None)
+        if isinstance(tunix_q, dict):
+          queue_metrics = dict(tunix_q)
+          queue_metrics["driver_wait_s"] = (
+              float(queue_metrics.get("driver_wait_s", 0.0) or 0.0)
+              + float(pause_wait_s)
+          )
+          queue_metrics["num_preemptions"] = max(
+              int(queue_metrics.get("num_preemptions", 0) or 0),
+              num_preemptions,
+          )
+          num_preemptions = queue_metrics["num_preemptions"]
+          if queue_metrics["driver_wait_s"] > 0.005 or num_preemptions > 0:
+            queue_metrics["l3_queued"] = True
+        else:
+          queued_ts = (
+              float(getattr(ro_metrics, "queued_ts", 0.0) or 0.0)
+              if ro_metrics is not None
+              else 0.0
+          )
+          scheduled_ts = (
+              float(getattr(ro_metrics, "scheduled_ts", 0.0) or 0.0)
+              if ro_metrics is not None
+              else 0.0
+          )
+          last_token_ts = (
+              float(getattr(ro_metrics, "last_token_ts", 0.0) or 0.0)
+              if ro_metrics is not None
+              else 0.0
+          )
+          sched_wait_s = (
+              max(0.0, scheduled_ts - queued_ts)
+              if (scheduled_ts > 0.0 and queued_ts > 0.0)
+              else 0.0
+          )
+          tpu_exec_s = (
+              max(0.0, last_token_ts - scheduled_ts)
+              if (last_token_ts > 0.0 and scheduled_ts > 0.0)
+              else max(0.0, total_stream_s - sched_wait_s)
+          )
+          kv_usage = 0.0
+          waiting_ratio = 0.0
+          if load_snapshot is not None:
+            kv_perc = float(
+                getattr(load_snapshot, "kv_cache_usage_perc", 0.0) or 0.0
+            )
+            kv_usage = kv_perc / 100.0 if kv_perc > 1.0 else kv_perc
+            w_cnt = int(
+                getattr(load_snapshot, "num_requests_waiting", 0) or 0
+            )
+            r_cnt = int(
+                getattr(load_snapshot, "num_requests_running", 0) or 0
+            )
+            if w_cnt + r_cnt > 0:
+              waiting_ratio = float(w_cnt) / float(w_cnt + r_cnt)
+          queue_metrics = {
+              "driver_wait_s": float(pause_wait_s),
+              "sched_wait_s": float(sched_wait_s),
+              "tpu_exec_s": float(tpu_exec_s),
+              "sched_wait_steps": (
+                  1 if (sched_wait_s > 0.005 or waiting_ratio > 0.0) else 0
+              ),
+              "num_preemptions": int(num_preemptions),
+              "kv_cache_usage_mean": float(kv_usage),
+              "kv_cache_usage_max": float(kv_usage),
+              "waiting_req_ratio": float(waiting_ratio),
+              "l3_queued": bool(
+                  sched_wait_s > 0.005
+                  or num_preemptions > 0
+                  or pause_wait_s > 0.005
+                  or waiting_ratio > 0.0
+              ),
+          }
 
         return SimpleNamespace(
             request_id=req_id,
@@ -443,6 +525,7 @@ class RLVllmSampler:
             or "stop",
             policy_version=policy_version,
             num_preemptions=num_preemptions,
+            queue_metrics=queue_metrics,
             error=None,
         )
 
@@ -499,11 +582,18 @@ class RLVllmSampler:
     Accepts raw string lists, dictionaries, or duck-typed objects from callers
     (such as `tunix.experimental.common.datatypes.SamplingRequest`).
     """
+    pause_start_ts = time.monotonic()
     while self._is_paused:
       await asyncio.sleep(0.05)
+    pause_wait_s = max(0.0, time.monotonic() - pause_start_ts)
 
     if not self._is_running or self._engine is None:
       await self.start()
+
+    try:
+      load_snapshot = await self.get_load_info()
+    except Exception:  # pylint: disable=broad-exception-caught
+      load_snapshot = None
 
     raw_input_mode = False
     sample_start_time = time.perf_counter()
@@ -589,6 +679,8 @@ class RLVllmSampler:
               task_gen,
               expected_prompt_token_ids=expected_ids,
               policy_version=ver,
+              pause_wait_s=pause_wait_s,
+              load_snapshot=load_snapshot,
           )
           for req_id, task_gen, expected_ids, ver in pending_tasks
       ])
@@ -619,7 +711,11 @@ class RLVllmSampler:
 
       results = await asyncio.gather(*[
           self._process_request_output(
-              req_id, task_gen, expected_prompt_token_ids=expected_ids
+              req_id,
+              task_gen,
+              expected_prompt_token_ids=expected_ids,
+              pause_wait_s=pause_wait_s,
+              load_snapshot=load_snapshot,
           )
           for req_id, task_gen, expected_ids in pending_tasks
       ])
@@ -933,7 +1029,9 @@ class RLVllmSampler:
             schedulers if isinstance(schedulers, list) else [schedulers]
         )
         for sched in sched_list:
-          num_waiting += len(getattr(sched, "waiting", []))
+          num_waiting += len(getattr(sched, "waiting", [])) + len(
+              getattr(sched, "skipped_waiting", [])
+          )
           num_running += len(getattr(sched, "running", []))
 
           block_manager = getattr(sched, "block_manager", None)
@@ -948,6 +1046,20 @@ class RLVllmSampler:
                 kv_cache_usage_perc = max(
                     kv_cache_usage_perc, used_ratio * 100.0
                 )
+          else:
+            get_kv = getattr(sched, "get_kv_cache_usage", None)
+            if callable(get_kv):
+              try:
+                raw_kv = get_kv()
+                if isinstance(raw_kv, (tuple, list)) and raw_kv:
+                  raw_kv = raw_kv[0]
+                kv_usage = float(raw_kv or 0.0)
+                kv_perc = (
+                    (kv_usage * 100.0) if kv_usage <= 1.0 else float(kv_usage)
+                )
+                kv_cache_usage_perc = max(kv_cache_usage_perc, kv_perc)
+              except Exception:  # pylint: disable=broad-exception-caught
+                pass
 
     return SimpleNamespace(
         num_requests_waiting=num_waiting,

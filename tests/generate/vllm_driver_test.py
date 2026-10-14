@@ -14,9 +14,12 @@
 
 import threading
 import time
+import types
 from typing import Iterable
 
 from absl.testing import absltest
+from tunix.generate.vllm_async_driver import _get_vllm_scheduler
+from tunix.generate.vllm_async_driver import _get_vllm_schedulers
 from tunix.generate.vllm_async_driver import VLLMInProcessDriver
 
 
@@ -304,6 +307,219 @@ class VllmDriverAsyncTest(absltest.TestCase):
           submission_timeout_s=-1.0,
           auto_start=False,
       )
+
+  def test_driver_attaches_l3_scheduler_queue_stats_on_outputs(self):
+    class _ReqObj:
+
+      def __init__(self, request_id: str, num_preemptions: int = 0):
+        self.request_id = request_id
+        self.num_preemptions = num_preemptions
+
+    class _FakeScheduler:
+
+      def __init__(self):
+        self.waiting = []
+        self.skipped_waiting = []
+        self.running = []
+
+      def get_kv_cache_usage(self) -> float:
+        return 0.75
+
+    class _SchedulerBackedEngine(_FakeLLMEngine):
+
+      def __init__(self):
+        super().__init__(["req-run", "req-wait"])
+        self.scheduler = _FakeScheduler()
+        self._step_idx = 0
+
+      def add_request(self, request_id: str, *_, **__):
+        super().add_request(request_id)
+        self.scheduler.waiting.append(_ReqObj(request_id))
+
+      def step(self):
+        self._step_idx += 1
+        time.sleep(0.01)
+        if self._step_idx == 1:
+          # Step 1: req-run executes and finishes; req-wait stays in waiting
+          self.scheduler.waiting = [_ReqObj("req-wait", num_preemptions=1)]
+          self.scheduler.running = []
+          self._pending.remove("req-run")
+          return [_DummyRequestOutput("req-run")]
+        # Step 2: req-wait executes and finishes
+        self.scheduler.waiting = []
+        self.scheduler.running = []
+        self._pending.remove("req-wait")
+        return [_DummyRequestOutput("req-wait")]
+
+    engine = _SchedulerBackedEngine()
+    driver = VLLMInProcessDriver(
+        llm_engine=engine, poll_interval_s=0.001, auto_start=True
+    )
+    self.addCleanup(driver.shutdown)
+
+    fut_run, fut_wait = driver.submit_requests([
+        {"request_id": "req-run", "prompt": {"prompt_token_ids": [1]}, "params": object()},
+        {"request_id": "req-wait", "prompt": {"prompt_token_ids": [2]}, "params": object()},
+    ])
+    out_run = fut_run.result(timeout=5.0)
+    out_wait = fut_wait.result(timeout=5.0)
+
+    stats_run = getattr(out_run, "_tunix_queue_stats", None)
+    stats_wait = getattr(out_wait, "_tunix_queue_stats", None)
+    self.assertIsInstance(stats_run, dict)
+    self.assertIsInstance(stats_wait, dict)
+
+    # req-run ran on step 1 with 0 scheduler wait steps
+    self.assertEqual(stats_run["sched_wait_steps"], 0)
+    self.assertEqual(stats_run["sched_wait_s"], 0.0)
+    self.assertGreater(stats_run["tpu_exec_s"], 0.0)
+    self.assertAlmostEqual(stats_run["kv_cache_usage_max"], 0.75)
+    self.assertAlmostEqual(stats_run["waiting_req_ratio"], 0.5)
+
+    # req-wait waited in scheduler.waiting on step 1 and ran on step 2
+    self.assertEqual(stats_wait["sched_wait_steps"], 1)
+    self.assertGreater(stats_wait["sched_wait_s"], 0.0)
+    self.assertGreater(stats_wait["tpu_exec_s"], 0.0)
+    self.assertEqual(stats_wait["num_preemptions"], 1)
+    self.assertTrue(stats_wait["l3_queued"])
+
+  def test_get_vllm_schedulers_normalizes_list_and_single_and_none(self):
+    s1, s2 = object(), object()
+    e_single = types.SimpleNamespace(scheduler=s1)
+    self.assertEqual(_get_vllm_schedulers(e_single), [s1])
+    self.assertIs(_get_vllm_scheduler(e_single), s1)
+
+    e_list = types.SimpleNamespace(scheduler=[s1, s2])
+    self.assertEqual(_get_vllm_schedulers(e_list), [s1, s2])
+    self.assertIs(_get_vllm_scheduler(e_list), s1)
+
+    e_ec = types.SimpleNamespace(
+        scheduler=None, engine_core=types.SimpleNamespace(scheduler=[s2])
+    )
+    self.assertEqual(_get_vllm_schedulers(e_ec), [s2])
+    self.assertIs(_get_vllm_scheduler(e_ec), s2)
+
+    e_none = types.SimpleNamespace()
+    self.assertEqual(_get_vllm_schedulers(e_none), [])
+    self.assertIsNone(_get_vllm_scheduler(e_none))
+
+  def test_driver_attaches_l3_stats_with_list_schedulers_and_tuple_kv_cache_usage(
+      self,
+  ):
+    class _ReqObj:
+
+      def __init__(self, request_id: str, num_preemptions: int = 0):
+        self.request_id = request_id
+        self.num_preemptions = num_preemptions
+
+    class _RankScheduler:
+
+      def __init__(self, raw_kv):
+        self.waiting = []
+        self.skipped_waiting = []
+        self.running = []
+        self._raw_kv = raw_kv
+
+      def get_kv_cache_usage(self):
+        return self._raw_kv
+
+    class _MultiSchedulerEngine(_FakeLLMEngine):
+
+      def __init__(self):
+        super().__init__(["req-r0", "req-r1"])
+        self.s0 = _RankScheduler((0.85, 0.15))
+        self.s1 = _RankScheduler((0.40, 0.05))
+        self.scheduler = [self.s0, self.s1]
+
+      def add_request(self, request_id: str, *_, **__):
+        super().add_request(request_id)
+        if request_id == "req-r0":
+          self.s0.waiting.append(_ReqObj(request_id))
+        else:
+          self.s1.waiting.append(_ReqObj(request_id))
+
+      def step(self):
+        time.sleep(0.01)
+        reqs = list(self._pending)
+        self._pending.clear()
+        self.s0.waiting.clear()
+        self.s1.waiting.clear()
+        return [_DummyRequestOutput(r) for r in reqs]
+
+    engine = _MultiSchedulerEngine()
+    driver = VLLMInProcessDriver(
+        llm_engine=engine, poll_interval_s=0.001, auto_start=True
+    )
+    self.addCleanup(driver.shutdown)
+
+    futs = driver.submit_requests([
+        {
+            "request_id": "req-r0",
+            "prompt": {"prompt_token_ids": [1]},
+            "params": object(),
+        },
+        {
+            "request_id": "req-r1",
+            "prompt": {"prompt_token_ids": [2]},
+            "params": object(),
+        },
+    ])
+    out0 = futs[0].result(timeout=5.0)
+    out1 = futs[1].result(timeout=5.0)
+
+    stats0 = getattr(out0, "_tunix_queue_stats", None)
+    stats1 = getattr(out1, "_tunix_queue_stats", None)
+    self.assertIsInstance(stats0, dict)
+    self.assertIsInstance(stats1, dict)
+    self.assertAlmostEqual(stats0["kv_cache_usage_max"], 0.85)
+    self.assertAlmostEqual(stats1["kv_cache_usage_max"], 0.85)
+
+  def test_driver_with_block_manager_fallback(self):
+    class _FakeBlockManager:
+
+      def get_num_free_gpu_blocks(self):
+        return 20
+
+      def get_num_total_gpu_blocks(self):
+        return 100
+
+    class _BlockManagerScheduler:
+
+      def __init__(self):
+        self.waiting = []
+        self.skipped_waiting = []
+        self.running = []
+        self.block_manager = _FakeBlockManager()
+
+    class _BlockManagerEngine(_FakeLLMEngine):
+
+      def __init__(self):
+        super().__init__(["req-bm"])
+        self.scheduler = _BlockManagerScheduler()
+
+      def step(self):
+        time.sleep(0.01)
+        reqs = list(self._pending)
+        self._pending.clear()
+        return [_DummyRequestOutput(r) for r in reqs]
+
+    engine = _BlockManagerEngine()
+    driver = VLLMInProcessDriver(
+        llm_engine=engine, poll_interval_s=0.001, auto_start=True
+    )
+    self.addCleanup(driver.shutdown)
+
+    futs = driver.submit_requests([
+        {
+            "request_id": "req-bm",
+            "prompt": {"prompt_token_ids": [1]},
+            "params": object(),
+        },
+    ])
+    out = futs[0].result(timeout=5.0)
+    stats = getattr(out, "_tunix_queue_stats", None)
+    self.assertIsInstance(stats, dict)
+    self.assertAlmostEqual(stats["kv_cache_usage_max"], 0.8)
 
 
 if __name__ == "__main__":

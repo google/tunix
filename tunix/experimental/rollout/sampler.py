@@ -112,6 +112,7 @@ class SamplingResponse(datatypes.Response):
   finish_reason: str = "stop"
   routed_experts: ArrayLike | None = None
   policy_version: int | None = None
+  queue_metrics: dict[str, Any] | None = None
 
   def __post_init__(self):
     if (

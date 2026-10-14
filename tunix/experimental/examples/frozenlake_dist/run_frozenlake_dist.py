@@ -64,6 +64,35 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Number of prompt groups per optimizer update.",
   )
   parser.add_argument("--num_generations", type=int, default=8)
+  parser.add_argument(
+      "--rollout_replicas",
+      type=int,
+      default=(
+          int(val)
+          if (
+              val := (
+                  os.getenv("ROLLOUT_REPLICAS")
+                  or os.getenv("ROLLOUT_WORKERS")
+                  or ""
+              ).strip()
+          )
+          else 1
+      ),
+      help="Total number of rollout worker replicas configured for the job.",
+  )
+  parser.add_argument(
+      "--min_rollout_replicas",
+      type=int,
+      default=(
+          int(val)
+          if (val := os.getenv("MIN_ROLLOUT_REPLICAS", "").strip())
+          else 0
+      ),
+      help=(
+          "Minimum number of rollout worker replicas required before starting"
+          " training. If <= 0 (default 0), waits for all --rollout_replicas."
+      ),
+  )
   parser.add_argument("--num_batches", type=int, default=150)
   parser.add_argument("--num_iterations", type=int, default=1)
   parser.add_argument("--num_epochs", type=int, default=3)
@@ -331,7 +360,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
 
   cluster = orchestrator.ClusterOrchestrator(
-      weight_sync_mode=args.weight_sync_mode
+      weight_sync_mode=args.weight_sync_mode,
+      target_rollout_replicas=args.rollout_replicas,
   )
   context.ipc.discovery.on_register(
       functools.partial(
@@ -339,10 +369,14 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           rpc_timeout_s=args.rpc_timeout_s,
       )
   )
+  min_rollout_replicas = orchestrator.resolve_min_rollout_replicas(
+      rollout_replicas=args.rollout_replicas,
+      min_rollout_replicas=args.min_rollout_replicas,
+  )
   cluster.wait_for_workers(
       min_workers={
           datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: 1,
+          datatypes.Role.ROLLOUT: min_rollout_replicas,
           datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
       },
       timeout=args.init_timeout_s,

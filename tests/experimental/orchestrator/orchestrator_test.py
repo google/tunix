@@ -1154,6 +1154,366 @@ class ClusterOrchestratorTest(absltest.TestCase):
     self.assertEqual(orch.engine._rollout_workers, [h_r0])
     orch.shutdown()
 
+  def test_min_rollout_replicas_starts_early_and_late_workers_join_during_bring_up_and_training(
+      self,
+  ):
+    ws_proto = orchestrator.weight_sync_coordinator.weight_sync
+
+    def _mock_ws_asubmit(method_name, *args, **kwargs):
+      del args, kwargs
+      if method_name in ("get_weight_sync_metadata", "prepare_weight_sync"):
+        return [
+            ws_proto.WorkUnitMetadata(
+                unit=ws_proto.WorkUnitId(job_name="w"),
+                global_shape=(4,),
+                item_size=4,
+            )
+        ]
+      return {}
+
+    class _RolloutActor:
+
+      def __init__(self, worker_id: str, on_start=None):
+        self.worker_id = worker_id
+        self.on_start = on_start
+        self.compiled = False
+        self.uploaded_cache = False
+
+      def initialize(self):
+        return datatypes.Response()
+
+      def compile(self, dummy_data=None):
+        del dummy_data
+        self.compiled = True
+        return datatypes.Response()
+
+      def start(self):
+        if self.on_start is not None:
+          self.on_start()
+        return datatypes.Response()
+
+      def stop(self):
+        return datatypes.Response()
+
+      def upload_jax_cache(self, gcs_uri: str = ""):
+        del gcs_uri
+        if not self.compiled:
+          raise RuntimeError("upload_jax_cache called before compile")
+        self.uploaded_cache = True
+        return True
+
+      def bind_weight_sync(self):
+        return {}
+
+      def get_weight_sync_metadata(self):
+        return _mock_ws_asubmit("get_weight_sync_metadata")
+
+      def pre_weight_sync(self, req):
+        del req
+        return {}
+
+      def weight_sync(self, req):
+        del req
+        return {}
+
+      def post_weight_sync(self, req):
+        del req
+        return {}
+
+      def abort_weight_sync(self, req):
+        del req
+        return {}
+
+      def get_weight_sync_status(self):
+        return {"phase": "committed"}
+
+      def generate(self, requests):
+        out = []
+        for req in requests:
+          out.append(
+              datatypes.RolloutResponse(
+                  request_id=req.request_id,
+                  status="COMPLETED",
+                  payload=datatypes.TrajectoryItem(
+                      prompt_id=req.prompt_id,
+                      group_index=req.group_index,
+                      traj={
+                          "worker_id": self.worker_id,
+                          "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                      },
+                  ),
+              )
+          )
+        return out
+
+    h_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_actor.asubmit.side_effect = _mock_ws_asubmit
+
+    r0_block_event = threading.Event()
+    r0_entered_compile = threading.Event()
+
+    class _SlowCompileRolloutActor(_RolloutActor):
+
+      def compile(self, dummy_data=None):
+        r0_entered_compile.set()
+        r0_block_event.wait(timeout=5.0)
+        return super().compile(dummy_data)
+
+    r0_actor = _SlowCompileRolloutActor("r0")
+    r0_srv = remote_execution.InProcessRemoteExecutionServer(r0_actor)
+    h_r0 = remote_execution.InProcessActorHandle(r0_srv)
+
+    # r1 registers while bring_up_workers() is bringing up r1, with worker_id
+    # "rollout-0" sorting before "rollout-1" so sync_jax_cache() would pick
+    # "rollout-0" if it did not filter by MembershipState.ACTIVE!
+    def _register_r0_during_r1_start():
+      orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0)
+      r0_entered_compile.wait(timeout=5.0)
+
+    r1_actor = _RolloutActor("r1", on_start=_register_r0_during_r1_start)
+    r1_srv = remote_execution.InProcessRemoteExecutionServer(r1_actor)
+    h_r1 = remote_execution.InProcessActorHandle(r1_srv)
+
+    r2_actor = _RolloutActor("r2")
+    r2_srv = remote_execution.InProcessRemoteExecutionServer(r2_actor)
+    h_r2 = remote_execution.InProcessActorHandle(r2_srv)
+
+    orch = orchestrator.ClusterOrchestrator(
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        weight_sync_mode="fallback",
+        jax_cache_config={
+            "save_jax_cache": True,
+            "rollout_jax_cache_gcs_dir": "gs://test-bucket/cache",
+        },
+        target_rollout_replicas=3,
+    )
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
+    orch.register_worker_handle("rollout-1", [datatypes.Role.ROLLOUT], h_r1)
+
+    # Wait for min_rollout_replicas=1 (out of 3 total replicas)
+    orch.wait_for_workers(
+        {datatypes.Role.ACTOR: 1, datatypes.Role.ROLLOUT: 1},
+        timeout=1.0,
+        poll_interval_s=0.01,
+    )
+
+    # Bring up workers: rollout-1 finishes bring-up and becomes ACTIVE, while
+    # rollout-0 registered during bring-up and is still INITIALIZING when
+    # sync_jax_cache() runs. sync_jax_cache() must pick ACTIVE rollout-1.
+    orch.bring_up_workers()
+    self.assertTrue(r1_actor.uploaded_cache)
+    self.assertFalse(r0_actor.uploaded_cache)
+
+    # Unblock rollout-0's background bring-up and wait for it to finish.
+    r0_block_event.set()
+    orch.wait_for_pending_bring_ups(timeout=5.0)
+    self.assertEqual(
+        orch.registry.state("rollout-0"),
+        worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
+    )
+
+    assert orch.engine is not None
+    self.assertAlmostEqual(orch.engine.active_rollout_workers_ratio, 1.0 / 3.0)
+    # Initial weight sync at step 0 promotes rollout-0 as well.
+    asyncio.run(orch.engine.sync_weights(policy_version=0))
+    self.assertEqual(
+        orch.registry.state("rollout-0"),
+        worker_registry.MembershipState.ACTIVE,
+    )
+    self.assertCountEqual(orch.engine._rollout_workers, [h_r1, h_r0])
+    self.assertAlmostEqual(orch.engine.active_rollout_workers_ratio, 2.0 / 3.0)
+
+    # Now rollout-2 joins during training while policy_version=0 is active.
+    orch.register_worker_handle("rollout-2", [datatypes.Role.ROLLOUT], h_r2)
+    orch.wait_for_pending_bring_ups(timeout=5.0)
+    self.assertEqual(
+        orch.registry.state("rollout-2"),
+        worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
+    )
+
+    # Dispatching rollout requests triggers sync_pending_weights() and promotes
+    # rollout-2 to ACTIVE so all 3 workers serve requests.
+    async def _dispatch_and_poll():
+      await orch.engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              request_id=f"req_{i}",
+              prompt=f"p_{i}",
+              prompt_id=f"p_{i}",
+              group_index=0,
+          )
+          for i in range(3)
+      ])
+      out = []
+      while len(out) < 3:
+        out.extend(await orch.engine.poll_rollouts(timeout_s=2.0))
+      return out
+
+    items = asyncio.run(_dispatch_and_poll())
+    self.assertEqual(
+        orch.registry.state("rollout-2"),
+        worker_registry.MembershipState.ACTIVE,
+    )
+    self.assertCountEqual(orch.engine._rollout_workers, [h_r1, h_r0, h_r2])
+    self.assertAlmostEqual(orch.engine.active_rollout_workers_ratio, 1.0)
+    self.assertCountEqual(
+        [item.traj["worker_id"] for item in items],
+        ["r0", "r1", "r2"],
+    )
+    orch.shutdown()
+
+  def test_sync_pending_weights_awaits_in_flight_sync_for_concurrent_callers(
+      self,
+  ):
+    ws_proto = orchestrator.weight_sync_coordinator.weight_sync
+
+    sync_entered = asyncio.Event()
+    release_sync = asyncio.Event()
+
+    def _mock_ws_asubmit(method_name, *args, **kwargs):
+      del args, kwargs
+      if method_name in ("get_weight_sync_metadata", "prepare_weight_sync"):
+        return [
+            ws_proto.WorkUnitMetadata(
+                unit=ws_proto.WorkUnitId(job_name="w"),
+                global_shape=(4,),
+                item_size=4,
+            )
+        ]
+      return {}
+
+    class _RolloutActor:
+
+      def __init__(self, pause_on_pre_sync: bool = False):
+        self.pause_on_pre_sync = pause_on_pre_sync
+
+      def initialize(self):
+        return datatypes.Response()
+
+      def compile(self, dummy_data=None):
+        del dummy_data
+        return datatypes.Response()
+
+      def start(self):
+        return datatypes.Response()
+
+      def stop(self):
+        return datatypes.Response()
+
+      def bind_weight_sync(self):
+        return {}
+
+      def get_weight_sync_metadata(self):
+        return _mock_ws_asubmit("get_weight_sync_metadata")
+
+      async def pre_weight_sync(self, req):
+        del req
+        if self.pause_on_pre_sync:
+          sync_entered.set()
+          await release_sync.wait()
+        return {}
+
+      def weight_sync(self, req):
+        del req
+        return {}
+
+      def post_weight_sync(self, req):
+        del req
+        return {}
+
+      def abort_weight_sync(self, req):
+        del req
+        return {}
+
+      def get_weight_sync_status(self):
+        return {"phase": "committed"}
+
+    h_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_actor.asubmit.side_effect = _mock_ws_asubmit
+
+    r0_srv = remote_execution.InProcessRemoteExecutionServer(_RolloutActor())
+    h_r0 = remote_execution.InProcessActorHandle(r0_srv)
+    r1_srv = remote_execution.InProcessRemoteExecutionServer(
+        _RolloutActor(pause_on_pre_sync=True)
+    )
+    h_r1 = remote_execution.InProcessActorHandle(r1_srv)
+
+    orch = orchestrator.ClusterOrchestrator(
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        weight_sync_mode="fallback",
+    )
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
+    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0)
+    orch.bring_up_workers()
+    assert orch.engine is not None
+    asyncio.run(orch.engine.sync_weights(policy_version=1))
+
+    # Evict rollout-0 and register rollout-1 in PENDING_WEIGHT_SYNC.
+    orch.registry.evict("rollout-0")
+    orch.register_worker_handle("rollout-1", [datatypes.Role.ROLLOUT], h_r1)
+    orch.wait_for_pending_bring_ups(timeout=5.0)
+    self.assertEqual(orch.engine._rollout_workers, [])
+
+    async def _run_concurrent():
+      t1 = asyncio.create_task(orch.engine.sync_pending_weights())
+      await sync_entered.wait()
+      self.assertTrue(orch.engine.weight_sync_coordinator.in_flight)
+      # t2 runs while t1 holds _pending_sync_lock and coordinator.in_flight is True;
+      # it must wait for t1 to finish so rollout-1 is ACTIVE when t2 returns!
+      t2 = asyncio.create_task(orch.engine.sync_pending_weights())
+      await asyncio.sleep(0.02)
+      self.assertFalse(t2.done())
+      release_sync.set()
+      await asyncio.gather(t1, t2)
+      self.assertEqual(orch.engine._rollout_workers, [h_r1])
+
+    asyncio.run(_run_concurrent())
+    orch.shutdown()
+
+  def test_resolve_min_rollout_replicas(self):
+    # 1. Default min_rollout_replicas=0 waits for all rollout_replicas
+    self.assertEqual(
+        orchestrator.resolve_min_rollout_replicas(
+            rollout_replicas=64, min_rollout_replicas=0
+        ),
+        64,
+    )
+
+    # 2. Negative min_rollout_replicas (-1) waits for all rollout_replicas
+    self.assertEqual(
+        orchestrator.resolve_min_rollout_replicas(
+            rollout_replicas=64, min_rollout_replicas=-1
+        ),
+        64,
+    )
+
+    # 3. Positive min_rollout_replicas < rollout_replicas uses min_rollout_replicas
+    self.assertEqual(
+        orchestrator.resolve_min_rollout_replicas(
+            rollout_replicas=64, min_rollout_replicas=32
+        ),
+        32,
+    )
+
+    # 4. min_rollout_replicas > rollout_replicas clamps to rollout_replicas with warning
+    with self.assertLogs(level="WARNING") as cm:
+      self.assertEqual(
+          orchestrator.resolve_min_rollout_replicas(
+              rollout_replicas=64, min_rollout_replicas=80
+          ),
+          64,
+      )
+    self.assertTrue(
+        any("clamping to rollout_replicas" in msg for msg in cm.output)
+    )
+
+    # 5. Non-positive rollout_replicas raises ValueError
+    with self.assertRaisesRegex(ValueError, "rollout_replicas must be positive"):
+      orchestrator.resolve_min_rollout_replicas(
+          rollout_replicas=0, min_rollout_replicas=0
+      )
+
 
 def _trajectory_store_orchestrator(
     **kwargs,

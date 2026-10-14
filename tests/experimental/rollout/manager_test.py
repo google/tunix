@@ -762,6 +762,10 @@ class MaxConcurrencyTest(unittest.IsolatedAsyncioTestCase):
         _TrackingCollector,
     ):
       gen_task = asyncio.create_task(manager.generate(reqs))
+      for _ in range(100):
+        if active >= 2:
+          break
+        await asyncio.sleep(0.01)
       await asyncio.sleep(0.02)
       self.assertEqual(active, 2)
       self.assertEqual(peak, 2)
@@ -770,6 +774,12 @@ class MaxConcurrencyTest(unittest.IsolatedAsyncioTestCase):
 
     self.assertEqual(len(results), 5)
     self.assertEqual(peak, 2)
+    queued_flags = [
+        r.metadata["queue_metrics"]["l2_queued"] for r in results
+    ]
+    # First 2 acquired semaphore immediately; remaining 3 found semaphore locked
+    self.assertEqual(sum(1 for f in queued_flags if f), 3)
+    self.assertEqual(sum(1 for f in queued_flags if not f), 2)
 
   async def test_uncapped_max_concurrency_runs_without_semaphore(self):
     for limit in (None, 0):
@@ -799,6 +809,41 @@ class MaxConcurrencyTest(unittest.IsolatedAsyncioTestCase):
       ):
         results = await manager.generate(reqs)
       self.assertEqual(len(results), 3)
+
+  async def test_generate_handles_trajectory_with_none_metadata(self):
+    class _NoneMetadataCollector(_NoopCollector):
+
+      async def run_episode(self):
+        return datatypes.TrajectoryItem(
+            prompt_id=self.traj_id,
+            group_index=0,
+            traj={},
+            metadata=None,
+        )
+
+    manager = manager_lib.RolloutManager(
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    req = datatypes.RolloutRequest(
+        request_id="req_none_meta",
+        prompt="prompt",
+        prompt_id="p_none",
+        group_index=0,
+    )
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _NoneMetadataCollector,
+    ):
+      results = await manager.generate([req])
+
+    self.assertEqual(len(results), 1)
+    res = results[0]
+    self.assertIsInstance(res.metadata, dict)
+    self.assertEqual(res.metadata["request_id"], "req_none_meta")
+    self.assertIn("queue_metrics", res.metadata)
 
 
 if __name__ == "__main__":

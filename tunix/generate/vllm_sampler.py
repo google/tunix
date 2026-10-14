@@ -936,11 +936,63 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     ]
     all_input_ids = np.array(all_input_ids, dtype=np.int32)
 
+    queue_metrics: list[dict[str, Any]] = []
+    for ro in outputs:
+      tunix_q = getattr(ro, "_tunix_queue_stats", None)
+      ro_metrics = getattr(ro, "metrics", None)
+      ro_preemptions = (
+          int(getattr(ro_metrics, "num_preemptions", 0) or 0)
+          if ro_metrics is not None
+          else 0
+      )
+      if isinstance(tunix_q, dict):
+        qm = dict(tunix_q)
+        qm["num_preemptions"] = max(
+            int(qm.get("num_preemptions", 0) or 0), ro_preemptions
+        )
+        if qm["num_preemptions"] > 0:
+          qm["l3_queued"] = True
+      elif ro_metrics is not None:
+        queued_ts = float(getattr(ro_metrics, "queued_ts", 0.0) or 0.0)
+        scheduled_ts = float(getattr(ro_metrics, "scheduled_ts", 0.0) or 0.0)
+        last_token_ts = float(getattr(ro_metrics, "last_token_ts", 0.0) or 0.0)
+        sched_wait_s = (
+            max(0.0, scheduled_ts - queued_ts)
+            if (scheduled_ts > 0.0 and queued_ts > 0.0)
+            else 0.0
+        )
+        tpu_exec_s = (
+            max(0.0, last_token_ts - scheduled_ts)
+            if (last_token_ts > 0.0 and scheduled_ts > 0.0)
+            else max(0.0, float(sample_duration) - sched_wait_s)
+        )
+        qm = {
+            "driver_wait_s": 0.0,
+            "sched_wait_s": sched_wait_s,
+            "tpu_exec_s": tpu_exec_s,
+            "sched_wait_steps": 1 if sched_wait_s > 0.005 else 0,
+            "num_preemptions": ro_preemptions,
+            "kv_cache_usage_mean": 0.0,
+            "kv_cache_usage_max": 0.0,
+            "waiting_req_ratio": 0.0,
+            "l3_queued": bool(sched_wait_s > 0.005 or ro_preemptions > 0),
+        }
+      else:
+        qm = {
+            "driver_wait_s": 0.0,
+            "sched_wait_s": 0.0,
+            "tpu_exec_s": max(0.0, float(sample_duration)),
+            "sched_wait_steps": 0,
+            "num_preemptions": 0,
+            "kv_cache_usage_mean": 0.0,
+            "kv_cache_usage_max": 0.0,
+            "waiting_req_ratio": 0.0,
+            "l3_queued": False,
+        }
+      queue_metrics.append(qm)
+
     num_preemptions = [
-        getattr(ro.metrics, "num_preemptions", 0)
-        if getattr(ro, "metrics", None) is not None
-        else 0
-        for ro in outputs
+        int(qm.get("num_preemptions", 0) or 0) for qm in queue_metrics
     ]
 
     if env_utils.is_debug_inference_logs_enabled():
@@ -986,5 +1038,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
             [len(row) for row in prompt_ids], dtype=np.int32
         ),
         num_preemptions=num_preemptions,
+        queue_metrics=queue_metrics,
     )
 

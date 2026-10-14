@@ -269,7 +269,14 @@ class RolloutManager:
       raise traffic_controller_lib.AdmissionClosedError(
           "rollout worker is stopped"
       )
-    await self._traffic.wait_for_admission()
+    admission_blocked = not self._traffic.is_admission_open()
+    if admission_blocked:
+      t_adm0 = time.monotonic()
+      await self._traffic.wait_for_admission()
+      l2_admission_wait_s = max(0.0, time.monotonic() - t_adm0)
+    else:
+      await self._traffic.wait_for_admission()
+      l2_admission_wait_s = 0.0
     if self._traffic.state == datatypes.WorkerState.STOPPED:
       raise traffic_controller_lib.AdmissionClosedError(
           "rollout worker is stopped"
@@ -355,7 +362,13 @@ class RolloutManager:
 
     self._active_collectors[traj_id] = collector
     task = asyncio.create_task(
-        self._run_and_enqueue(collector, request, _resolve)
+        self._run_and_enqueue(
+            collector,
+            request,
+            _resolve,
+            l2_admission_wait_s=l2_admission_wait_s,
+            admission_blocked=admission_blocked,
+        )
     )
     task.add_done_callback(
         lambda t: future.cancel()
@@ -391,14 +404,42 @@ class RolloutManager:
       collector: collector_lib.TrajectoryCollectorEngine,
       request: datatypes.RolloutRequest,
       resolve_cb: Callable[[TrajectoryOrError], None],
+      *,
+      l2_admission_wait_s: float = 0.0,
+      admission_blocked: bool = False,
   ) -> None:
     """Runs episode loop, removes active tracking, and resolves callbacks/streams."""
     try:
-      async with self._get_concurrency_semaphore():
+      sem = self._get_concurrency_semaphore()
+      sem_locked = bool(isinstance(sem, asyncio.Semaphore) and sem.locked())
+      t_sem0 = time.monotonic()
+      async with sem:
+        l2_semaphore_wait_s = (
+            max(0.0, time.monotonic() - t_sem0) if sem_locked else 0.0
+        )
         trajectory: TrajectoryOrError = await collector.run_episode()
       if isinstance(trajectory, datatypes.TrajectoryItem):
+        if trajectory.metadata is None:
+          trajectory.metadata = {}
         if "request_id" not in trajectory.metadata:
           trajectory.metadata["request_id"] = request.request_id
+        qm = dict(trajectory.metadata.get("queue_metrics") or {})
+        l2_pause_wait_s = float(qm.get("l2_pause_wait_s", 0.0) or 0.0)
+        l2_paused_turns = int(qm.get("l2_paused_turns", 0) or 0)
+        l2_wait_s = (
+            float(l2_admission_wait_s)
+            + float(l2_semaphore_wait_s)
+            + l2_pause_wait_s
+        )
+        qm["l2_admission_wait_s"] = float(l2_admission_wait_s)
+        qm["l2_semaphore_wait_s"] = float(l2_semaphore_wait_s)
+        qm["l2_wait_s"] = float(l2_wait_s)
+        qm["l2_queued"] = bool(
+            admission_blocked
+            or sem_locked
+            or l2_paused_turns > 0
+        )
+        trajectory.metadata["queue_metrics"] = qm
     except Exception as e:  # pylint: disable=broad-exception-caught
       error_metadata = dict(request.metadata or {})
       error_metadata["request_id"] = request.request_id

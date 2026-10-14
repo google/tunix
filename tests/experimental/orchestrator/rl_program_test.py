@@ -6766,6 +6766,151 @@ class ExtractScalarTest(absltest.TestCase):
     )
 
 
+class TrajectoryQueueMetricsTest(absltest.TestCase):
+
+  def test_collect_and_log_step_metrics_logs_full_pipeline_trajectory_queue_metrics(
+      self,
+  ):
+    algo = mock.MagicMock()
+    algo.num_generations = 2
+    algo.mini_batch_size = 1
+    assembler = mock.MagicMock()
+    logger = mock.MagicMock()
+    program = rl_program.StandardRLProgram(
+        algo=algo,
+        dataset=["p0"],
+        batch_size=1,
+        assembler=assembler,
+    )
+    program.metrics_logger = logger
+    program.engine = mock.MagicMock()
+    program.engine.active_rollout_workers_ratio = 0.75
+
+    # Trajectory 0: not queued anywhere (active TPU exec = 2.0s, env = 1.0s)
+    item0 = datatypes.TrajectoryItem(
+        prompt_id="p0",
+        group_index=0,
+        start_step=0,
+        traj={"status": "SUCCEEDED", "trajectory_reward": 1.0},
+        prompt_tokens=np.array([1, 2], dtype=np.int32),
+        completion_tokens=np.array([3, 4], dtype=np.int32),
+        metadata={
+            "queue_metrics": {
+                "l1_queue_wait_s": 0.0,
+                "l1_queued": False,
+                "l2_wait_s": 0.0,
+                "l2_queued": False,
+                "l3_wait_s": 0.0,
+                "l3_queued": False,
+                "l3_sched_wait_steps": 0,
+                "l3_num_preemptions": 0,
+                "tpu_exec_s": 2.0,
+                "env_exec_s": 1.0,
+                "e2e_wall_s": 3.0,
+                "l3_kv_cache_usage_mean": 0.4,
+                "l3_kv_cache_usage_max": 0.5,
+                "l3_waiting_req_ratio": 0.0,
+            }
+        },
+    )
+    # Trajectory 1: queued at L1 (1.0s), L2 (0.5s), and L3 (0.5s, preempted once)
+    # with TPU exec = 2.0s, env = 1.0s, total = 5.0s
+    item1 = datatypes.TrajectoryItem(
+        prompt_id="p0",
+        group_index=1,
+        start_step=0,
+        traj={"status": "SUCCEEDED", "trajectory_reward": 0.0},
+        prompt_tokens=np.array([1, 2], dtype=np.int32),
+        completion_tokens=np.array([3, 4], dtype=np.int32),
+        metadata={
+            "queue_metrics": {
+                "l1_queue_wait_s": 1.0,
+                "l1_queued": True,
+                "l2_wait_s": 0.5,
+                "l2_queued": True,
+                "l3_wait_s": 0.5,
+                "l3_queued": True,
+                "l3_sched_wait_steps": 3,
+                "l3_num_preemptions": 1,
+                "tpu_exec_s": 2.0,
+                "env_exec_s": 1.0,
+                "e2e_wall_s": 5.0,
+                "l3_kv_cache_usage_mean": 0.8,
+                "l3_kv_cache_usage_max": 0.95,
+                "l3_waiting_req_ratio": 0.6,
+            }
+        },
+    )
+
+    program._collect_and_log_step_metrics(
+        all_step_items=[item0, item1],
+        step_rewards=[1.0, 0.0],
+        step_advantages=[0.5, -0.5],
+        num_rollouts=2,
+        num_microbatches=1,
+        step_time_sec=5.0,
+        consumed_policy_version=0,
+        log_step=1,
+    )
+
+    logged = {
+        f"{call.args[0]}/{call.args[1]}" if call.args[0] else call.args[1]: (
+            call.args[2]
+        )
+        for call in logger.log.call_args_list
+    }
+    # 1 out of 2 trajectories was queued across L1/L2/L3 and preempted
+    self.assertAlmostEqual(logged["rollout/queue/queued_traj_frac_total"], 0.5)
+    self.assertAlmostEqual(
+        logged["rollout/queue/l1_orchestrator_queued_traj_frac"], 0.5
+    )
+    self.assertAlmostEqual(
+        logged["rollout/queue/l2_worker_queued_traj_frac"], 0.5
+    )
+    self.assertAlmostEqual(
+        logged["rollout/queue/l3_tpu_sched_queued_traj_frac"], 0.5
+    )
+    self.assertAlmostEqual(
+        logged["rollout/queue/l3_tpu_preempted_traj_frac"], 0.5
+    )
+
+    # Total queue time = 2.0s; total TPU exec = 4.0s; TPU demand = 6.0s; e2e = 8.0s
+    self.assertAlmostEqual(
+        logged["rollout/queue/tpu_demand_queue_time_frac"], 2.0 / 6.0
+    )
+    self.assertAlmostEqual(
+        logged["rollout/queue/l1_orchestrator_queue_time_frac"], 1.0 / 6.0
+    )
+    self.assertAlmostEqual(
+        logged["rollout/queue/l2_worker_queue_time_frac"], 0.5 / 6.0
+    )
+    self.assertAlmostEqual(
+        logged["rollout/queue/l3_tpu_sched_queue_time_frac"], 0.5 / 6.0
+    )
+    self.assertAlmostEqual(
+        logged["rollout/queue/l1_orchestrator_queue_time_frac"]
+        + logged["rollout/queue/l2_worker_queue_time_frac"]
+        + logged["rollout/queue/l3_tpu_sched_queue_time_frac"],
+        logged["rollout/queue/tpu_demand_queue_time_frac"],
+    )
+    self.assertAlmostEqual(
+        logged["rollout/queue/e2e_queue_time_frac"], 2.0 / 8.0
+    )
+    self.assertAlmostEqual(logged["rollout/queue/l1_wait_sec_mean"], 0.5)
+    self.assertAlmostEqual(logged["rollout/queue/l1_wait_sec_max"], 1.0)
+    self.assertAlmostEqual(logged["rollout/queue/l2_wait_sec_mean"], 0.25)
+    self.assertAlmostEqual(logged["rollout/queue/l3_wait_sec_mean"], 0.25)
+    self.assertAlmostEqual(logged["rollout/queue/tpu_exec_sec_mean"], 2.0)
+    self.assertAlmostEqual(logged["rollout/queue/env_exec_sec_mean"], 1.0)
+    self.assertAlmostEqual(
+        logged["rollout/queue/l3_tpu_kv_cache_usage_max"], 0.95
+    )
+    self.assertAlmostEqual(
+        logged["rollout/queue/active_rollout_workers_ratio"], 0.75
+    )
+    program.close()
+
+
 
 if __name__ == "__main__":
   absltest.main()

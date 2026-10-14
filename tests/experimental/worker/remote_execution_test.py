@@ -3206,6 +3206,150 @@ class RemoteExecutionTest(absltest.TestCase):
     options = dict(remote_lib._grpc_options())  # pylint: disable=protected-access
     self.assertEqual(options.get("grpc.use_local_subchannel_pool"), 1)
 
+  def test_pool_execution_session_attaches_l1_queue_metrics(self):
+    class GatedMetadataHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self.gate = asyncio.Event()
+        self._queue: asyncio.Queue[remote_lib.ExecutionResponse] = (
+            asyncio.Queue()
+        )
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        req_id = request_id or ""
+
+        async def _finish():
+          if req_id == "req_first":
+            await self.gate.wait()
+          await self._queue.put(
+              remote_lib.ExecutionResponse(
+                  request_id=req_id,
+                  result={"request_id": req_id, "metadata": {}},
+              )
+          )
+
+        asyncio.create_task(_finish())
+        return req_id
+
+      async def poll_responses(self, timeout_s=50.0):
+        return await asyncio.wait_for(self._queue.get(), timeout=timeout_s)
+
+    async def _run():
+      worker = GatedMetadataHandle()
+      pool = remote_lib.RoutingActorPool([worker])
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(max_in_flight_per_worker=1),
+      )
+
+      # req_first dispatches immediately; req_second is queued in _pending_queue
+      await session.submit("req_first", "generate")
+      await session.submit("req_second", "generate")
+      self.assertEqual(session.pending_count, 1)
+      await asyncio.sleep(0.03)
+      worker.gate.set()
+
+      results = {}
+      while len(results) < 2:
+        batch = await session.poll_completed(timeout_s=1.0)
+        for res, exc in batch:
+          self.assertIsNone(exc)
+          results[res["request_id"]] = res["metadata"]["queue_metrics"]
+
+      self.assertFalse(results["req_first"]["l1_queued"])
+      self.assertEqual(results["req_first"]["l1_queued_count"], 0)
+      self.assertEqual(results["req_first"]["l1_queue_wait_s"], 0.0)
+
+      self.assertTrue(results["req_second"]["l1_queued"])
+      self.assertEqual(results["req_second"]["l1_queued_count"], 1)
+      self.assertGreaterEqual(results["req_second"]["l1_queue_wait_s"], 0.02)
+      self.assertGreaterEqual(
+          results["req_second"]["e2e_wall_s"],
+          results["req_second"]["l1_queue_wait_s"],
+      )
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_attaches_l1_queue_metrics_when_metadata_is_none(
+      self,
+  ):
+    class NoneMetadataHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self._queue: asyncio.Queue[remote_lib.ExecutionResponse] = (
+            asyncio.Queue()
+        )
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        req_id = request_id or ""
+
+        async def _finish():
+          if req_id == "req_dict":
+            res = {"request_id": req_id, "metadata": None}
+          else:
+            class _Obj:
+
+              def __init__(self, rid):
+                self.request_id = rid
+                self.metadata = None
+
+            res = _Obj(req_id)
+          await self._queue.put(
+              remote_lib.ExecutionResponse(
+                  request_id=req_id,
+                  result=res,
+              )
+          )
+
+        asyncio.create_task(_finish())
+        return req_id
+
+      async def poll_responses(self, timeout_s=50.0):
+        return await asyncio.wait_for(self._queue.get(), timeout=timeout_s)
+
+    async def _run():
+      worker = NoneMetadataHandle()
+      pool = remote_lib.RoutingActorPool([worker])
+      session = remote_lib.PoolExecutionSession(pool)
+
+      await session.submit("req_dict", "generate")
+      await session.submit("req_obj", "generate")
+
+      results = {}
+      while len(results) < 2:
+        batch = await session.poll_completed(timeout_s=1.0)
+        for res, exc in batch:
+          self.assertIsNone(exc)
+          if isinstance(res, dict):
+            results[res["request_id"]] = res["metadata"]
+          else:
+            results[res.request_id] = res.metadata
+
+      self.assertIn("queue_metrics", results["req_dict"])
+      self.assertIn("queue_metrics", results["req_obj"])
+      await session.close()
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()
