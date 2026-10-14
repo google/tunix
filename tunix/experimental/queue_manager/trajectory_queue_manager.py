@@ -134,6 +134,8 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
       self,
       *,
       num_generations: Optional[int] = None,
+      num_generations_to_dispatch: Optional[int] = None,
+      prefer_valid_rollouts: bool = True,
       group_fn: Optional[GroupFn] = None,
       filter_fn: Optional[FilterFn] = None,
       key_fn: Optional[Callable[[datatypes.TrajectoryItem], Hashable]] = None,
@@ -145,8 +147,16 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
     Args:
       num_generations: Optional target number of trajectories per ready group
         when using default grouping.
-      group_fn: Optional custom grouping function. If None, `num_generations` must
-        be provided.
+      num_generations_to_dispatch: Optional total number of trajectories
+        dispatched per prompt when over-generating (`>= num_generations`).
+      prefer_valid_rollouts: When over-generating (`num_generations_to_dispatch
+        > num_generations`), whether to wait for `num_generations` valid
+        (`item.is_valid == True`) trajectories before emitting the group and
+        falling back to invalid trajectories only if the dispatch budget is
+        exhausted. When False, emits the first `num_generations` trajectories to
+        finish regardless of validity.
+      group_fn: Optional custom grouping function. If None, `num_generations`
+        must be provided.
       filter_fn: Optional pluggable function to filter candidate groups.
       key_fn: Optional function to extract grouping key. Defaults to prompt_id
         fallback.
@@ -155,8 +165,70 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
       on_drop: Optional callback invoked as `on_drop(batch_idx, 1)` whenever
         `filter_fn` discards an entire candidate group.
     """
+    if (
+        num_generations is not None
+        and num_generations_to_dispatch is not None
+        and num_generations_to_dispatch < num_generations
+    ):
+      raise ValueError(
+          f"num_generations_to_dispatch ({num_generations_to_dispatch}) must be"
+          f" >= num_generations ({num_generations})."
+      )
+    self.num_generations_to_dispatch = (
+        num_generations_to_dispatch
+        if num_generations_to_dispatch is not None
+        else num_generations
+    )
+    self.prefer_valid_rollouts = prefer_valid_rollouts
+    self._remaining_to_drop: dict[Hashable, int] = {}
+
     if key_fn is None and group_fn is None:
       key_fn = default_key_fn
+
+    if (
+        group_fn is None
+        and num_generations is not None
+        and self.num_generations_to_dispatch is not None
+        and self.num_generations_to_dispatch > num_generations
+    ):
+      effective_key_fn = key_fn
+      assert effective_key_fn is not None
+      target_g = num_generations
+      effective_dispatch = self.num_generations_to_dispatch
+
+      def _overgen_group_fn(
+          buckets: dict[Hashable, list[datatypes.TrajectoryItem]],
+          item: datatypes.TrajectoryItem,
+      ) -> Optional[list[datatypes.TrajectoryItem]]:
+        key = effective_key_fn(item)
+        remaining = self._remaining_to_drop.get(key, 0)
+        if remaining > 0:
+          if remaining == 1:
+            del self._remaining_to_drop[key]
+          else:
+            self._remaining_to_drop[key] = remaining - 1
+          return None
+        bucket = buckets.setdefault(key, [])
+        bucket.append(item)
+        if self.prefer_valid_rollouts:
+          valid_items = [x for x in bucket if x.is_valid]
+          invalid_items = [x for x in bucket if not x.is_valid]
+          if len(valid_items) >= target_g or len(bucket) >= effective_dispatch:
+            buckets.pop(key, None)
+            spare = effective_dispatch - len(bucket)
+            if spare > 0:
+              self._remaining_to_drop[key] = spare
+            return (valid_items + invalid_items)[:target_g]
+          return None
+        if len(bucket) >= target_g:
+          buckets.pop(key, None)
+          spare = effective_dispatch - len(bucket)
+          if spare > 0:
+            self._remaining_to_drop[key] = spare
+          return bucket[:target_g]
+        return None
+
+      group_fn = _overgen_group_fn
 
     super().__init__(
         num_generations=num_generations,
@@ -167,10 +239,19 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
     self._batch_idx_fn = batch_idx_fn or default_batch_idx_fn
     self._on_drop = on_drop
 
+  async def clear(self) -> tuple[list[Any], list[Any]]:
+    """Clears all internal state including over-generation drop tracking."""
+    res = await super().clear()
+    async with self._lock:
+      self._remaining_to_drop.clear()
+    return res
+
   @classmethod
   def create(
       cls,
       num_generations: int = 1,
+      num_generations_to_dispatch: Optional[int] = None,
+      prefer_valid_rollouts: bool = True,
       max_staleness: int = 0,
       current_policy_version: Callable[[], int] | None = None,
       filter_fn: Any | None = None,
@@ -180,6 +261,10 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
 
     Args:
       num_generations: Number of trajectories that form one group.
+      num_generations_to_dispatch: Optional total number of trajectories
+        dispatched per prompt when over-generating (`>= num_generations`).
+      prefer_valid_rollouts: Whether to wait for `num_generations` valid
+        trajectories before completing a group when over-generating.
       max_staleness: Reject groups produced more than this many policy versions
         behind. 0 disables the staleness filter.
       current_policy_version: Reads the trainer's current policy version; only
@@ -194,6 +279,8 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
     """
     return cls(
         num_generations=num_generations,
+        num_generations_to_dispatch=num_generations_to_dispatch,
+        prefer_valid_rollouts=prefer_valid_rollouts,
         filter_fn=build_filter(  # pyrefly: ignore[bad-argument-type]
             max_staleness, current_policy_version, filter_fn
         ),
