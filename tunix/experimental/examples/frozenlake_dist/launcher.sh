@@ -377,7 +377,7 @@ cmd=(
   --sampler_is_threshold="$SAMPLER_IS_THRESHOLD"
   --seed="$SEED"
   --weight_sync_mode="$WEIGHT_SYNC_MODE"
-  --trainer_fsdp="$TRAINER_FSDP"
+  --num_data_shards="$(( ${TRAINER_FSDP:-1} * ${TRAINER_EXPERT:-1} ))"
   --grid_size_range $GRID_SIZE_RANGE
   --stop_workers_on_exit
   --enable_trajectory_store="$TRAJECTORY_STORE_ENABLED"

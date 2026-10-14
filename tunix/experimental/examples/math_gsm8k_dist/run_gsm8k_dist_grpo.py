@@ -112,23 +112,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " back; use 64 for Qwen3.5 GatedDeltaNet (gdn_chunk_size=64)."
       ),
   )
-  # TODO(tunix-dev): Clean up worker specific configuration to orchestrator.
   parser.add_argument(
-      "--trainer_fsdp",
+      "--num_data_shards",
       type=int,
       default=None,
       help=(
-          "Trainer FSDP mesh dimension size for sequence packing pack_size"
-          " computation."
-      ),
-  )
-  parser.add_argument(
-      "--trainer_dp",
-      type=int,
-      default=None,
-      help=(
-          "Trainer DP mesh dimension size for sequence packing pack_size"
-          " computation."
+          "Total number of trainer data-parallel shards (e.g. fsdp * dp *"
+          " expert) used as the sequence packing pack_size."
       ),
   )
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
@@ -527,8 +517,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           max_seq_token_per_tpu=args.max_seq_token_per_tpu,
           max_segments_per_packed_row=args.max_segments_per_packed_row,
           segment_alignment_boundary=args.segment_alignment_boundary,
-          trainer_fsdp=args.trainer_fsdp,
-          trainer_dp=args.trainer_dp,
+          num_data_shards=args.num_data_shards,
       ),
       metrics_logging_options=metrics_logging_options,
       trajectory_log_dir=args.trajectory_log_dir,

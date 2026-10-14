@@ -226,6 +226,29 @@ class MaxTextUtilsTest(absltest.TestCase):
             mesh_fsdp=2,
         )
 
+  def test_batch_size_must_divide_fsdp_times_expert(self):
+    # MaxText shards the batch over fsdp and expert together: 6 rows divide
+    # fsdp=2 but cannot be split across fsdp=2 x expert=2 = 4 batch shards.
+    with self.assertRaisesRegex(
+        ValueError, r"mesh_fsdp \* mesh_expert = 2 \* 2 = 4"
+    ):
+      self._build_config_argv(
+          train_micro_batch_size=6,
+          mesh_fsdp=2,
+          mesh_tp=2,
+          mesh_expert=2,
+          num_devices=8,
+      )
+    argv = self._build_config_argv(
+        train_micro_batch_size=8,
+        mesh_fsdp=2,
+        mesh_tp=2,
+        mesh_expert=2,
+        num_devices=8,
+    )
+    self.assertIn("per_device_batch_size=1.0", argv)
+    self.assertIn("ici_expert_parallelism=2", argv)
+
   def test_build_maxtext_config_range_validations(self):
     mock_pyconfig = mock.MagicMock()
     with mock.patch.object(
@@ -510,6 +533,22 @@ class MaxTextUtilsTest(absltest.TestCase):
         max_seq_token_per_tpu=4096,
     )
     self.assertIn("per_device_batch_size=0.25", argv)
+    self.assertIn("max_target_length=4096", argv)
+
+  def test_max_seq_token_per_tpu_includes_mesh_expert_in_per_device_batch_size(
+      self,
+  ):
+    argv = self._build_config_argv(
+        train_micro_batch_size=1,
+        mesh_fsdp=2,
+        mesh_tp=2,
+        mesh_expert=2,
+        num_devices=8,
+        max_prompt_length=512,
+        max_response_length=512,
+        max_seq_token_per_tpu=4096,
+    )
+    self.assertIn("per_device_batch_size=0.5", argv)
     self.assertIn("max_target_length=4096", argv)
 
   def test_build_maxtext_config_profiling_options_enables_xplane_and_tpu_options(

@@ -416,7 +416,7 @@ echo "Launching CPU orchestrator..."
     ORCHESTRATOR_CMD+=(--max_segments_per_packed_row="$MAX_SEGMENTS_PER_PACKED_ROW")
   fi
   if [[ -n "$TRAINER_FSDP" ]]; then
-    ORCHESTRATOR_CMD+=(--trainer_fsdp="$TRAINER_FSDP")
+    ORCHESTRATOR_CMD+=(--num_data_shards="$(( ${TRAINER_FSDP:-1} * ${TRAINER_EXPERT:-1} ))")
   fi
   if [[ -n "$LOG_DIR" ]]; then
     ORCHESTRATOR_CMD+=(--log_dir="$LOG_DIR")

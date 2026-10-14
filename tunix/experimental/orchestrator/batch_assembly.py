@@ -193,11 +193,13 @@ class BatchConfig:
       packing is enabled.
     segment_alignment_boundary: Enforces that every packed sequence starts at an
       index that is a multiple of this value, padding any gaps. By default (1),
-      sequences are packed tightly back-to-back. Use larger values to align
-      with chunk boundaries for models with chunked processing (e.g., 64 for
-      Qwen3.5 GatedDeltaNet).
-    trainer_fsdp: Trainer FSDP mesh dimension size for sequence packing.
-    trainer_dp: Trainer DP mesh dimension size for sequence packing.
+      sequences are packed tightly back-to-back. Use larger values to align with
+      chunk boundaries for models with chunked processing (e.g., 64 for Qwen3.5
+      GatedDeltaNet).
+    num_data_shards: Total number of data-parallel shards on the trainer across
+      all batch-sharded mesh axes (e.g., `fsdp * dp * fsdp_transpose * expert`
+      in MaxText). Used as `pack_size` when sequence packing is enabled so the
+      packed row count is evenly divisible by the trainer's batch sharding.
   """
 
   pad_id: int = 0
@@ -206,8 +208,7 @@ class BatchConfig:
   max_seq_token_per_tpu: int | None = None
   max_segments_per_packed_row: int | None = None
   segment_alignment_boundary: int = packing.DEFAULT_SEGMENT_ALIGNMENT_BOUNDARY
-  trainer_fsdp: int | None = None
-  trainer_dp: int | None = None
+  num_data_shards: int | None = None
 
 
 def _extract_trajectory_id(item: Any) -> str:
@@ -1471,8 +1472,8 @@ def create_batch_assembler(
 
   If `batch_config.max_seq_token_per_tpu` is provided, a
   `SequencePackedBatchAssembler` is used. The packing `batch_size` (pack_size)
-  is computed from `batch_config.trainer_fsdp` and `batch_config.trainer_dp`
-  (or defaults to `train_micro_batch_size` with a warning if neither is set).
+  is set to `batch_config.num_data_shards` (or defaults to
+  `train_micro_batch_size` with a warning if not set).
   The packing budget is validated against `batch_config.max_prompt_length` and
   `max_response_length`.
 
@@ -1486,24 +1487,22 @@ def create_batch_assembler(
     num_generations: Number of rollout generations per prompt group (G).
     mini_batch_size: Number of prompt groups per model update.
     train_micro_batch_size: Micro-batch size for training.
-    batch_config: BatchConfig containing packing, padding, and mesh dimension
+    batch_config: BatchConfig containing packing, padding, and data shard
       settings.
 
   Returns:
     A BatchAssembler instance.
   """
   if batch_config.max_seq_token_per_tpu is not None:
-    if batch_config.trainer_fsdp is None and batch_config.trainer_dp is None:
+    if batch_config.num_data_shards is None:
       logging.warning(
-          "trainer_fsdp and trainer_dp are not set, defaulting pack_size to "
+          "num_data_shards is not set, defaulting pack_size to "
           "train_micro_batch_size=%d.",
           train_micro_batch_size,
       )
       pack_size = train_micro_batch_size
     else:
-      pack_size = (batch_config.trainer_fsdp or 1) * (
-          batch_config.trainer_dp or 1
-      )
+      pack_size = batch_config.num_data_shards
 
     if (
         batch_config.max_prompt_length is not None

@@ -2460,7 +2460,7 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
 
 class CreateBatchAssemblerTest(absltest.TestCase):
 
-  def test_create_sequence_packed_assembler_with_mesh_dims(self):
+  def test_create_sequence_packed_assembler_with_num_data_shards(self):
     assembler = batch_assembly.create_batch_assembler(
         num_generations=2,
         mini_batch_size=2,
@@ -2471,8 +2471,7 @@ class CreateBatchAssemblerTest(absltest.TestCase):
             max_response_length=256,
             max_seq_token_per_tpu=1024,
             max_segments_per_packed_row=8,
-            trainer_fsdp=2,
-            trainer_dp=4,
+            num_data_shards=8,
         ),
     )
     self.assertIsInstance(

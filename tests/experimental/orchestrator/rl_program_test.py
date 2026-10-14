@@ -3946,8 +3946,7 @@ class RLProgramTest(absltest.TestCase):
         batch_config=batch_assembly.BatchConfig(
             max_seq_token_per_tpu=1024,
             max_segments_per_packed_row=4,
-            trainer_fsdp=2,
-            trainer_dp=2,
+            num_data_shards=4,
         ),
     )
     self.assertIsInstance(

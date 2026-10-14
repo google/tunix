@@ -179,18 +179,24 @@ def build_maxtext_config(
         f" {max_seq_token_per_tpu}"
     )
 
+  num_data_shards = mesh_fsdp * mesh_expert
   if max_seq_token_per_tpu is not None and max_seq_token_per_tpu > 0:
     # When sequence packing is enabled, the batch assembler feeds 1 packed row
-    # per FSDP shard (global batch size = mesh_fsdp), independent of
-    # train_micro_batch_size.
+    # per data shard (global batch size = mesh_fsdp * mesh_expert), independent
+    # of train_micro_batch_size.
     # TODO(maxtext-team): verify this is the desired behavior.
-    per_device_batch_size = mesh_fsdp / num_devices
+    per_device_batch_size = num_data_shards / num_devices
   else:
-    if train_micro_batch_size % mesh_fsdp:
+    # MaxText shards the batch dimension over the mesh axes behind
+    # `activation_embed_and_logits_batch`; of those, this config sets fsdp and
+    # expert. A micro-batch that does not divide their product is replicated
+    # across them instead, and every device computes all of it.
+    if train_micro_batch_size % num_data_shards:
       raise ValueError(
           f"train_micro_batch_size={train_micro_batch_size} must be a multiple"
-          f" of mesh_fsdp={mesh_fsdp}; MaxText shards the batch dimension"
-          " across it."
+          f" of mesh_fsdp * mesh_expert = {mesh_fsdp} * {mesh_expert} ="
+          f" {num_data_shards}; MaxText shards the batch dimension across both"
+          " axes."
       )
     per_device_batch_size = train_micro_batch_size / num_devices
 

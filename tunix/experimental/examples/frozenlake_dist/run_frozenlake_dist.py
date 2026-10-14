@@ -141,8 +141,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Enables sequence-packed batches when set.",
   )
   parser.add_argument("--max_segments_per_packed_row", type=int, default=None)
-  parser.add_argument("--trainer_fsdp", type=int, default=None)
-  parser.add_argument("--trainer_dp", type=int, default=None)
+  parser.add_argument("--num_data_shards", type=int, default=None)
   parser.add_argument(
       "--log_dir",
       type=str,
@@ -453,8 +452,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           max_response_length=args.max_response_length,
           max_seq_token_per_tpu=args.max_seq_token_per_tpu,
           max_segments_per_packed_row=args.max_segments_per_packed_row,
-          trainer_fsdp=args.trainer_fsdp,
-          trainer_dp=args.trainer_dp,
+          num_data_shards=args.num_data_shards,
       ),
       metrics_logging_options=metrics_options,
       trajectory_log_dir=args.trajectory_log_dir,
