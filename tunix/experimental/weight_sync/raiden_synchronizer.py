@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import collections
+from collections import abc
 import dataclasses
 import functools
 import inspect
@@ -33,8 +34,6 @@ from jax.experimental import compute_on
 import jax.numpy as jnp
 from tunix.experimental.weight_sync import weight_sync
 from tunix.utils import mesh
-
-mesh_utils = mesh
 
 
 def _get_host_rss_gb() -> tuple[float, float]:
@@ -220,14 +219,17 @@ def unpack_ip(row: Any) -> str:
   return f"[{addr_str}]" if ":" in addr_str else addr_str
 
 
-def unpack_control_ip(row: Any) -> str:
-  """Unpacks the control-plane IP from the FFI metadata row (falls back to data IP)."""
-  if len(row) >= 10:
-    raw_bytes = b"".join(
-        int(x).to_bytes(4, byteorder="little", signed=True) for x in row[6:10]
-    )
-    if raw_bytes != b"\x00" * 16:
-      return unpack_ip(row[6:10])
+def unpack_control_ip(row: abc.Sequence[int]) -> str:
+  """Unpacks the control-plane IP from row[6:10], falling back to row[:4].
+
+  Args:
+    row: FFI metadata row (6 or 10 int32 elements).
+
+  Returns:
+    Decoded control-plane IPv4 or bracketed IPv6 string.
+  """
+  if len(row) >= 10 and any(int(x) != 0 for x in row[6:10]):
+    return unpack_ip(row[6:10])
   return unpack_ip(row)
 
 
@@ -761,7 +763,7 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
       )
       def _local_init(anchor, s_idx, sizes):
         axis_names = mesh.axis_names
-        out_shape = tuple([1] * len(axis_names)) + (6,)
+        out_shape = tuple([1] * len(axis_names)) + (10,)
         return jax.ffi.ffi_call(
             "init_weight_synchronizer",
             jax.ShapeDtypeStruct(out_shape, jnp.int32),
@@ -799,28 +801,9 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
     )
 
     self._ips, listeners = [], []
-    host_control_ip = {}
-    distinct_task_ids = {
-        getattr(d, "task_id", None) for d in src_devices
-    } - {None}
-    for idx, row in enumerate(gathered_ws_info):
+    for row in gathered_ws_info:
       ip = unpack_ip(row)
       ctrl_ip = unpack_control_ip(row)
-      if len(row) < 10 and idx < len(src_devices):
-        dev = src_devices[idx]
-        host_key = mesh_utils.device_host_key(dev)
-        if host_key is None:
-          task_id = (
-              getattr(dev, "task_id", None)
-              if len(distinct_task_ids) > 1
-              else None
-          )
-          host_key = (
-              task_id
-              if task_id is not None
-              else idx // max(1, devices_per_host)
-          )
-        ctrl_ip = host_control_ip.setdefault(host_key, ctrl_ip)
       self._ips.append(f"{ip}:{int(row[4])}")
       listeners.append(f"{ctrl_ip}:{int(row[5])}")
     self._listeners = listeners
