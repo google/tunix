@@ -464,6 +464,10 @@ class RLVllmSampler:
           num_preemptions=0,
           error=err_obj,
       )
+    except asyncio.CancelledError:
+      if self._engine is not None:
+        await self._engine.abort(req_id)
+      raise
     except Exception as e:
       logger.exception("Error generating sampling result for req_id=%s", req_id)
       err_obj = SimpleNamespace(

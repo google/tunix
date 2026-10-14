@@ -92,6 +92,10 @@ class AbstractRLEngine(Protocol):
     """Retrieves completed rollout responses from workers via long-polling."""
     ...
 
+  async def cancel_rollouts(self, prompt_id: str) -> int:
+    """Cancels in-flight rollout trajectories matching `prompt_id` across workers."""
+    ...
+
   async def generate(
       self,
       prompts: Sequence[Any],
