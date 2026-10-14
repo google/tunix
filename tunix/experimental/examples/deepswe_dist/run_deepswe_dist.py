@@ -79,6 +79,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--num_generations", type=int, default=2)
   parser.add_argument(
+      "--num_generations_to_dispatch",
+      type=int,
+      default=None,
+      help=(
+          "Number of trajectories to dispatch per prompt for intra-prompt"
+          " over-generation. Defaults to num_generations."
+      ),
+  )
+  parser.add_argument(
+      "--prefer_valid_rollouts",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "When over-generating, prefer valid rollouts over truncated or"
+          " timed-out rollouts before sealing a group."
+      ),
+  )
+  parser.add_argument(
       "--rollout_replicas",
       type=int,
       default=(
@@ -1087,6 +1105,11 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   prompt_stream = None
   program = None
   prewarm_thread = None
+  effective_num_generations_to_dispatch = (
+      args.num_generations_to_dispatch
+      if args.num_generations_to_dispatch is not None
+      else args.num_generations
+  )
 
   prewarm_manifest = (
       args.prewarm_images_file
@@ -1103,7 +1126,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         tasks=None,
         images_file=prewarm_manifest,
         max_concurrency=args.max_concurrency,
-        num_generations=args.num_generations,
+        num_generations=effective_num_generations_to_dispatch,
         batch_size=args.batch_size,
         max_warmpool_replicas=args.max_warmpool_replicas,
         scaffold=args.scaffold,
@@ -1113,7 +1136,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         fleet=fleet,
         scaffold=args.scaffold,
         max_warmpool_replicas=args.max_warmpool_replicas,
-        num_generations=args.num_generations,
+        num_generations=effective_num_generations_to_dispatch,
         wait=args.sandbox_wait_initial,
         async_warm=True,
         max_workers=args.prewarm_max_workers,
@@ -1213,7 +1236,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           fleet = sandbox_utils.init_global_fleet(
               tasks=dataset,
               max_concurrency=args.max_concurrency,
-              num_generations=args.num_generations,
+              num_generations=effective_num_generations_to_dispatch,
               batch_size=args.batch_size,
               max_warmpool_replicas=args.max_warmpool_replicas,
               scaffold=args.scaffold,
@@ -1247,7 +1270,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         prompt_stream = swe_env.PrewarmDatasetIterator(
             raw_prompt_stream,
             fleet=fleet,
-            num_generations=args.num_generations,
+            num_generations=effective_num_generations_to_dispatch,
             batch_size=args.batch_size,
             max_warmpool_replicas=args.max_warmpool_replicas,
             unwarm_on_exhaustion=True,
@@ -1288,6 +1311,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         trajectory_log_dir=args.trajectory_log_dir,
         trajectory_store=cluster.trajectory_store,
         max_staleness=args.max_staleness,
+        num_generations_to_dispatch=args.num_generations_to_dispatch,
+        prefer_valid_rollouts=args.prefer_valid_rollouts,
         group_order=args.trajectory_group_order,
         sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
         checkpoint_optimizer_interval_steps=(

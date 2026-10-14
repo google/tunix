@@ -353,51 +353,50 @@ class TrajectoryCollectEngine:
     """  # fmt: skip
     try:
       await self._reset()
-
-      self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
-      self._logged_clip_reasons.clear()
-
-      if self.trajectory_store is not None and self.metadata is not None:
-        self.sync_trajectory_metadata(policy_version=self.policy_version)
-        task = self.agent.trajectory.task or getattr(self.env, "task", None)
-        task_step = converter_lib.create_task_step(task)
-        if task_step is not None:
-          self._store_add_step(task_step)
-
-      while True:
-        if len(self.agent.trajectory.steps) >= self.max_steps:
-          self.agent.trajectory.status = (
-              agent_types.TrajectoryStatus.MAX_STEPS_REACHED
-          )
-          self._log_trajectory_clip("MAX_STEPS_REACHED")
-          break
-
-        done = await self._one_step()
-
-        if done:
-          if (
-              self.agent.trajectory.status
-              == agent_types.TrajectoryStatus.RUNNING
-          ):
-            self.agent.trajectory.status = (
-                agent_types.TrajectoryStatus.SUCCEEDED
-            )
-          break
-
-      self._finalize_terminal_step_routing()
-
-      status = self.agent.trajectory.status
-      masked_out = self.overlong_filter and status in self.filter_statuses
-      # An episode that exhausted its wall-clock budget scores 0 by
-      # definition; grading its unfinished state would waste sandbox time and
-      # could reward an incomplete trajectory. Invalid trajectories (e.g.
-      # ENV_TIMEOUT after a hung env.step) are dropped from training, so their
-      # grade would be discarded and the env may be unresponsive.
-      skip_final_reward = masked_out or status in (
-          agent_types.INVALID_TRAJECTORY_STATUSES
-          | {agent_types.TrajectoryStatus.TIMEOUT}
-      )
       try:
+        self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
+        self._logged_clip_reasons.clear()
+
+        if self.trajectory_store is not None and self.metadata is not None:
+          self.sync_trajectory_metadata(policy_version=self.policy_version)
+          task = self.agent.trajectory.task or getattr(self.env, "task", None)
+          task_step = converter_lib.create_task_step(task)
+          if task_step is not None:
+            self._store_add_step(task_step)
+
+        while True:
+          if len(self.agent.trajectory.steps) >= self.max_steps:
+            self.agent.trajectory.status = (
+                agent_types.TrajectoryStatus.MAX_STEPS_REACHED
+            )
+            self._log_trajectory_clip("MAX_STEPS_REACHED")
+            break
+
+          done = await self._one_step()
+
+          if done:
+            if (
+                self.agent.trajectory.status
+                == agent_types.TrajectoryStatus.RUNNING
+            ):
+              self.agent.trajectory.status = (
+                  agent_types.TrajectoryStatus.SUCCEEDED
+              )
+            break
+
+        self._finalize_terminal_step_routing()
+
+        status = self.agent.trajectory.status
+        masked_out = self.overlong_filter and status in self.filter_statuses
+        # An episode that exhausted its wall-clock budget scores 0 by
+        # definition; grading its unfinished state would waste sandbox time and
+        # could reward an incomplete trajectory. Invalid trajectories (e.g.
+        # ENV_TIMEOUT after a hung env.step) are dropped from training, so their
+        # grade would be discarded and the env may be unresponsive.
+        skip_final_reward = masked_out or status in (
+            agent_types.INVALID_TRAJECTORY_STATUSES
+            | {agent_types.TrajectoryStatus.TIMEOUT}
+        )
         if not skip_final_reward:
           await self._append_final_reward()
         self.compute_mc_reward()

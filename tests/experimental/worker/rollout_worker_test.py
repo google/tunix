@@ -212,6 +212,19 @@ class RolloutWorkerTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_cancel_by_prompt_id_delegates_to_manager(self):
+    async def _run():
+      with mock.patch.object(
+          self.worker.manager,
+          "cancel_by_prompt_id",
+          new=mock.AsyncMock(return_value=3),
+      ) as cancel_mock:
+        cancelled = await self.worker.cancel_by_prompt_id("prompt_1")
+      self.assertEqual(cancelled, 3)
+      cancel_mock.assert_awaited_once_with("prompt_1")
+
+    asyncio.run(_run())
+
 
 def _worker(config=None):
   return rollout_worker.RolloutWorker(
