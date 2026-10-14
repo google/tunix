@@ -14,6 +14,7 @@
 """Common RL helper classes and functions."""
 
 import functools
+import os
 import re
 import inspect
 from typing import Any, Iterable, Sequence
@@ -906,6 +907,71 @@ def sampler_trainer_agreement(
   return metrics, sampler_is_weights, filtered_completion_mask
 
 
+# Largest chunk_size whose chunk loop the TPU compiler lowers under context
+# parallelism without help. Measured with libtpu 0.0.51.dev20261010 and the
+# Pathways raiden_20261009183300 build at cp=4 (16,384 tokens per device):
+# 512 and 1024 compile; 2048, 4096 and 8192 fail with "Reshape should have
+# supported layout before reaching the emitter". At or below it (and with the
+# override below unset) compute_chunked_logps traces exactly the program it
+# always did, so its results are unchanged bit for bit.
+_MAX_CHUNK_WITHOUT_SEQUENCE_REPLICATION = 1024
+
+# Overrides the chunk_size rule above: "auto" (the default), "always" or
+# "never". The failure depends on the chunks per device, not only on
+# chunk_size: at cp=8 chunk 1024 already fails, so such a mesh needs "always"
+# (or a chunk_size above the threshold). Read at trace time.
+_SEQUENCE_REPLICATION_ENV = "TUNIX_LOGPS_REPLICATE_SEQUENCE"
+
+
+def _replicate_sequence_in_chunk_loop(chunk_size: int) -> bool:
+  """Whether compute_chunked_logps replicates its 32-bit loop arrays."""
+  mode = os.environ.get(_SEQUENCE_REPLICATION_ENV, "auto").strip().lower()
+  if mode in ("", "auto"):
+    return chunk_size > _MAX_CHUNK_WITHOUT_SEQUENCE_REPLICATION
+  if mode == "always":
+    return True
+  if mode == "never":
+    return False
+  raise ValueError(
+      f"{_SEQUENCE_REPLICATION_ENV}={mode!r}: expected auto, always or never."
+  )
+
+
+def _replicate_sequence_dims(
+    x: jax.Array, seq_dims: tuple[int, ...]
+) -> jax.Array:
+  """Replicates `x` along `seq_dims` over the active mesh.
+
+  The other dims stay unconstrained, so the batch keeps its sharding.
+
+  `compute_chunked_logps` scans over sequence chunks. Under context
+  parallelism the sequence is sharded outside the scan, and without a
+  constraint XLA moves that sharding from the chunk-index dim to the in-chunk
+  dim with an all-to-all on each array that enters or leaves the scan. For the
+  32-bit arrays (int32 targets in, f32 log-probs out) the TPU compiler lowers
+  that all-to-all's relayout as a reshape it cannot emit once there are few
+  chunks per device ("Reshape should have supported layout before reaching
+  the emitter"). These arrays are 4 bytes per token, so replicating them over
+  the sequence axes turns those all-to-alls into a small all-gather and a
+  local slice. No-op unless a mesh is set with `jax.set_mesh` (as the MaxText
+  training engine does); a legacy `with mesh:` block does not set one.
+
+  Args:
+    x: The array to constrain.
+    seq_dims: The dims of `x` that index sequence positions.
+
+  Returns:
+    `x`, constrained to be replicated along `seq_dims`.
+  """
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh.empty:
+    return x
+  spec = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
+  for d in seq_dims:
+    spec[d] = None
+  return jax.lax.with_sharding_constraint(x, jax.sharding.PartitionSpec(*spec))
+
+
 def compute_chunked_logps(
     model,
     hidden_states,
@@ -937,6 +1003,12 @@ def compute_chunked_logps(
 
   padded_seq_len = seq_len + pad_len
   num_chunks = padded_seq_len // chunk_size
+
+  # Keep the 32-bit arrays that enter and leave the chunk loop replicated over
+  # the sequence axes (see _replicate_sequence_dims).
+  replicate_sequence = _replicate_sequence_in_chunk_loop(chunk_size)
+  if replicate_sequence:
+    target_ids = _replicate_sequence_dims(target_ids, (1,))
 
   # 2. Reshape into chunks: [Batch, NumChunks, ChunkSize, ...]
   hs_reshaped = hidden_states.reshape(
@@ -974,6 +1046,9 @@ def compute_chunked_logps(
 
   if return_entropy:
     logps_chunked, entropy_chunked = scanned_out
+    if replicate_sequence:
+      logps_chunked = _replicate_sequence_dims(logps_chunked, (0, 2))
+      entropy_chunked = _replicate_sequence_dims(entropy_chunked, (0, 2))
     # 5. Swap back to batch-major and flatten the sequence dimension
     logps_reshaped = jnp.swapaxes(logps_chunked, 0, 1)
     entropy_reshaped = jnp.swapaxes(entropy_chunked, 0, 1)
@@ -987,6 +1062,8 @@ def compute_chunked_logps(
     return per_token_logps, per_token_entropy
   else:
     logps_chunked = scanned_out
+    if replicate_sequence:
+      logps_chunked = _replicate_sequence_dims(logps_chunked, (0, 2))
     # 5. Swap back to batch-major and flatten the sequence dimension
     logps_reshaped = jnp.swapaxes(logps_chunked, 0, 1)
     # 6. Slice off any padding we added initially.
