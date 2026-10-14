@@ -31,10 +31,11 @@ Responsibilities:
 from __future__ import annotations
 
 import collections
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import dataclasses
 from typing import Any
 
+import jax
 import tunix.experimental.generate.tiered_page_pool as page_pool_lib
 from tunix.generate import utils
 
@@ -75,6 +76,7 @@ class SingleTypeKVCacheManager:
     """
 
     self._page_manager = page_pool_config.create_manager()
+    self._cache_names = page_pool_config.partition_keys
     self._request_to_pages: dict[str, list[Page | None]] = {}
 
     self._page_size = page_pool_config.page_size
@@ -89,6 +91,75 @@ class SingleTypeKVCacheManager:
     self._unreferenced_host_pages: collections.OrderedDict[Page, None] = (
         collections.OrderedDict()
     )
+
+  @property
+  def cache_names(self) -> tuple[str, ...]:
+    return self._cache_names
+
+  @property
+  def window_size(self) -> int | None:
+    return self._window_size
+
+  def get_physical_pages(self) -> dict[str, jax.Array]:
+    """Returns a mapping of cache ID to physical page arrays."""
+    return self._page_manager.physical_device_pages
+
+  def get_page_idxs(self, request_id: str) -> list[int]:
+    """Returns the physical device page indices for the given request.
+
+    Args:
+      request_id: The request to look up.
+
+    Returns:
+      One physical device page index per page position of the request. Pages
+      released because they fell out of the attention window are reported as
+      -1 so that the indices stay aligned with the request's page positions.
+      Returns an empty list if the request is unknown.
+
+    Raises:
+      ValueError: If a page is unknown to the page manager or is not resident
+        on device.
+    """
+    pages = self._request_to_pages.get(request_id, [])
+
+    result: list[int] = []
+    for page in pages:
+      if page is None:
+        result.append(-1)
+        continue
+
+      idx = self._page_manager.page_idx(page.page_id)
+      if idx is None:
+        raise ValueError(f"Page {page.page_id} not found in page manager.")
+
+      # page_idx() returns the index within whichever tier the page lives in,
+      # so a host-resident page would yield a host pool index here.
+      loc = self._page_manager.page_location(page.page_id)
+      if loc != page_pool_lib.PageLocation.DEVICE:
+        raise ValueError(
+            f"Page {page.page_id} is not resident on device (location:"
+            f" {loc}). Pages must be loaded onto device before use."
+        )
+      result.append(idx)
+
+    return result
+
+  def update_device_pool(self, new_pages: Mapping[str, jax.Array]) -> None:
+    """Updates the device pool in the page manager with new pages."""
+    self._page_manager.update_device_pool(new_pages)
+
+  def reset_kv_caches(self) -> None:
+    """Releases all requests and frees all cached device and host pages.
+
+    This purges the prefix cache and returns every page to the free pools. The
+    underlying physical page arrays are not zeroed.
+    """
+    req_ids = list(self._request_to_pages.keys())
+    for request_id in req_ids:
+      self.release_request(request_id)
+
+    self._free_pages(list(self._unreferenced_device_pages.keys()))
+    self._free_pages(list(self._unreferenced_host_pages.keys()))
 
   def _touch_page(self, page: Page | None) -> None:
     """Increments a page's reference count."""

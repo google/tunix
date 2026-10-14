@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax.numpy as jnp
+import numpy as np
 from tunix.experimental.generate import single_type_kv_cache_manager
 from tunix.experimental.generate import tiered_page_pool
 
@@ -1497,6 +1498,170 @@ class RequestReleaseAndIndicesTest(absltest.TestCase):
     self.assertEqual(
         list(manager._unreferenced_device_pages), [pages[2], pages[1], pages[0]]
     )
+
+  def test_get_page_idxs_unscheduled_returns_empty(self):
+    manager = _create_manager()
+    self.assertEmpty(manager.get_page_idxs(request_id="req_999"))
+
+  def test_get_page_idxs_returns_correct_indices(self):
+    manager = _create_manager(page_size=4, num_device_pages=5)
+    req_id = "req_1"
+    manager.allocate_slots(
+        req_id, num_tokens=8, num_completed_tokens=0
+    )
+
+    req_pages = manager._request_to_pages[req_id]
+    expected_indices = []
+    for p in req_pages:
+      self.assertIsNotNone(p)
+      assert p is not None
+      expected_indices.append(manager._page_manager.page_idx(p.page_id))
+    indices = manager.get_page_idxs(req_id)
+    self.assertEqual(indices, expected_indices)
+
+  def test_get_page_idxs_returns_placeholder_when_active_page_is_none(self):
+    manager = _create_manager(page_size=4, num_device_pages=5)
+    req_id = "req_1"
+    manager.allocate_slots(
+        req_id, num_tokens=8, num_completed_tokens=0
+    )
+    req_pages = manager._request_to_pages[req_id]
+    req_pages[0] = None
+
+    indices = manager.get_page_idxs(req_id)
+
+    # Released pages keep their slot, reported as -1, so that the indices stay
+    # aligned with the request's page positions.
+    p1 = req_pages[1]
+    self.assertIsNotNone(p1)
+    assert p1 is not None
+    expected_indices = [-1, manager._page_manager.page_idx(p1.page_id)]
+    self.assertEqual(
+        indices,
+        expected_indices
+    )
+
+  def test_get_page_idxs_after_out_of_window_pages_released(self):
+    manager = _create_manager(
+        page_size=4, num_device_pages=10, window_size=4
+    )
+    req_id = "req_1"
+    manager.allocate_slots(req_id, num_tokens=16, num_completed_tokens=0)
+    indices_before_release = manager.get_page_idxs(req_id)
+    self.assertLen(indices_before_release, 4)
+
+    # With a window of 4 tokens, completing 12 tokens leaves pages 0 and 1
+    # outside the window.
+    manager.sync_request_state(
+        req_id, page_hashes=[10, 20, 30], num_completed_tokens=12
+    )
+
+    # The released pages are reported as -1 rather than dropped, so that the
+    # indices stay aligned with the request's page positions.
+    self.assertEqual(
+        manager.get_page_idxs(req_id), [-1, -1] + indices_before_release[2:]
+    )
+
+  def test_get_page_idxs_unknown_page_raises(self):
+    manager = _create_manager()
+    manager._request_to_pages["req_1"] = [Page(page_id=999, ref_count=1)]
+
+    with self.assertRaisesRegex(
+        ValueError, r"Page 999 not found in page manager\."
+    ):
+      manager.get_page_idxs("req_1")
+
+  def test_get_page_idxs_host_page_raises(self):
+    manager = _create_manager(num_device_pages=5, num_host_pages=5)
+    pids = manager._page_manager.allocate_device_pages(1)
+    manager._page_manager.offload(pids)
+    manager._request_to_pages["req_1"] = [Page(page_id=pids[0], ref_count=1)]
+
+    with self.assertRaisesRegex(ValueError, r"is not resident on device"):
+      manager.get_page_idxs("req_1")
+
+
+class UpdateDevicePoolAndPropertiesTest(absltest.TestCase):
+
+  def test_update_device_pool_calls_page_manager(self):
+    manager = _create_manager(partition_keys=("cache_0",))
+    new_arr = jnp.ones((10, 4), dtype=jnp.float32)
+    manager.update_device_pool({"cache_0": new_arr})
+    np.testing.assert_array_equal(
+        manager.get_physical_pages()["cache_0"], new_arr
+    )
+
+  def test_properties_and_physical_pages(self):
+    manager = _create_manager(
+        page_size=4,
+        window_size=8,
+        partition_keys=("cache_0", "cache_1"),
+    )
+    self.assertEqual(manager.cache_names, ("cache_0", "cache_1"))
+    self.assertEqual(manager.window_size, 8)
+    pages = manager.get_physical_pages()
+    self.assertIn("cache_0", pages)
+    self.assertIn("cache_1", pages)
+
+  def test_reset_kv_caches_frees_all_pages(self):
+    manager = _create_manager(page_size=4, num_device_pages=5, num_host_pages=5)
+    manager.allocate_slots("req_1", num_tokens=8, num_completed_tokens=0)
+    manager.sync_request_state(
+        "req_1", page_hashes=[10], num_completed_tokens=8
+    )
+    (device_page,) = _create_unreferenced_device_pages(
+        manager, num_pages=1, prefix_hashes=[20]
+    )
+    (host_page,) = _create_unreferenced_host_pages(
+        manager, num_pages=1, prefix_hashes=[30]
+    )
+    manager._prefix_hash_to_page[20] = device_page
+    manager._prefix_hash_to_page[30] = host_page
+
+    manager.reset_kv_caches()
+
+    pm = manager._page_manager
+    self.assertEqual(pm.num_free_device_pages, 5)
+    self.assertEqual(pm.num_free_host_pages, 5)
+    self.assertEmpty(manager._request_to_pages)
+    self.assertEmpty(manager._prefix_hash_to_page)
+    self.assertEmpty(manager._unreferenced_device_pages)
+    self.assertEmpty(manager._unreferenced_host_pages)
+
+  def test_reset_kv_caches_restores_full_capacity_and_purges_prefix_cache(
+      self,
+  ):
+    manager = _create_manager(page_size=4, num_device_pages=4, num_host_pages=4)
+    # A finished request leaves its full pages in the prefix cache.
+    manager.allocate_slots("req_1", num_tokens=8, num_completed_tokens=0)
+    manager.sync_request_state(
+        "req_1", page_hashes=[10, 20], num_completed_tokens=8
+    )
+    manager.release_request("req_1")
+    # A running request needs every device page, which offloads the cached
+    # pages to the host.
+    manager.allocate_slots("req_2", num_tokens=16, num_completed_tokens=0)
+    for h in (10, 20):
+      self.assertEqual(
+          manager._page_manager.page_location(
+              manager._prefix_hash_to_page[h].page_id
+          ),
+          tiered_page_pool.PageLocation.HOST,
+      )
+    self.assertLen(manager.find_longest_cache_hit([10, 20]), 2)
+
+    manager.reset_kv_caches()
+
+    self.assertEmpty(manager.find_longest_cache_hit([10, 20]))
+    self.assertEqual(manager._page_manager.num_free_device_pages, 4)
+    self.assertEqual(manager._page_manager.num_free_host_pages, 4)
+    self.assertTrue(
+        manager.has_sufficient_space(
+            "req_3", num_tokens=16, num_completed_tokens=0
+        )
+    )
+    manager.allocate_slots("req_3", num_tokens=16, num_completed_tokens=0)
+    self.assertLen(manager.get_page_idxs("req_3"), 4)
 
 
 if __name__ == "__main__":
