@@ -539,7 +539,11 @@ def compute_per_token_logps(
     segment_positions: optional 1D local position indices used for packing.
     temperature: temperature used for rollout.
     chunk_size: If not 0, computes the log probabilities in sequence chunks of
-      this size.
+      this size. With TUNIX_LOGPS_SHARDED_HEAD on and packed rows
+      (`segment_ids` set), the sharded head, when it engages (see
+      `maybe_compute_sharded_chunked_logps`), instead has each device scan its
+      own block of the sequence in chunks of `min(chunk_size, block length)`
+      positions.
     routed_experts: Optional `[B, T, num_layers, top_k]` MoE experts captured
       during rollout. Forwarded to the model as `forced_routed_experts` -- the
       name MaxText's adapter uses -- so it replays this routing instead of
@@ -645,7 +649,8 @@ def compute_per_token_logps(
     out = None
     if segment_ids is not None:
       # Packed rows score every position, so the head can run on the
-      # unsliced, still evenly sharded hidden states (opt-in, see below). It
+      # unsliced, still evenly sharded hidden states. Opt-in via
+      # TUNIX_LOGPS_SHARDED_HEAD; None when off or when it falls back. It
       # returns [B, T], already aligned like the padded output below.
       out = maybe_compute_sharded_chunked_logps(
           model,
@@ -1022,10 +1027,11 @@ def compute_chunked_logps(
 # gradient. And because `lax.scan` iterates over the sequence axis, a sequence
 # sharded over a context-parallel axis is gathered, so every context rank
 # computes every chunk. The sharded head runs the same per-chunk math inside
-# `shard_map`: each head parameter is all-gathered once per pass, each device
-# scans only the tokens it holds, the table gradient is accumulated per device in
-# float32 and reduce-scattered once, and chunks are read and written with
-# dynamic slices rather than reshapes.
+# `shard_map`: each head parameter is all-gathered once, in the forward, and the
+# backward reuses that copy (so it stays live from the forward to the
+# backward); each device scans only the tokens it holds; the table gradient is
+# accumulated per device in float32 and reduce-scattered once; and chunks are
+# read and written with dynamic slices rather than reshapes.
 SHARDED_HEAD_ENV = "TUNIX_LOGPS_SHARDED_HEAD"
 # Logical names of the hidden states' batch and length axes. When the active
 # flax logical-axis rules (MaxText's) map them, the head uses that layout.
@@ -1034,13 +1040,23 @@ _LOGICAL_LENGTH_AXIS = "activation_length"
 
 
 def sharded_head_mode() -> str | None:
-  """Returns None (off) or "local", from TUNIX_LOGPS_SHARDED_HEAD."""
+  """Returns None (off) or "local", from TUNIX_LOGPS_SHARDED_HEAD.
+
+  Case and surrounding whitespace are ignored. Off: unset, empty, 0, false, off,
+  no. On: local, 1, true, on, yes.
+
+  Raises:
+    ValueError: The variable has any other value.
+  """
   value = os.environ.get(SHARDED_HEAD_ENV, "").strip().lower()
   if value in ("", "0", "false", "off", "no"):
     return None
   if value in ("1", "true", "on", "yes", "local"):
     return "local"
-  raise ValueError(f"{SHARDED_HEAD_ENV}={value!r}: expected 0, 1 or local.")
+  raise ValueError(
+      f"{SHARDED_HEAD_ENV}={value!r}: expected local, 1, true, on or yes (on),"
+      " or empty, 0, false, off or no (off)."
+  )
 
 
 def _mesh_axes(entry) -> tuple[str, ...]:
@@ -1055,10 +1071,17 @@ def _token_partition(mesh, batch: int, seq_len: int):
   """Mesh axes sharding the [batch, seq] dims of the hidden states.
 
   Every mesh axis of size > 1 must shard one of the two, so that every device
-  holds distinct tokens and the gradient sum runs over all devices.
+  holds distinct tokens and the gradient sum runs over all devices. Tries the
+  layout the active flax logical-axis rules give `activation_batch` and
+  `activation_length` (an error while reading them skips this step), then one
+  greedy pass over the mesh axes in mesh order: each axis of size > 1 shards
+  the batch if the batch still divides, else the sequence if it still divides,
+  else the pass fails.
 
   Returns:
-    (batch_axes, seq_axes, source), or None if no such layout exists.
+    (batch_axes, seq_axes, source), with source "logical-axis-rules" or
+    "mesh-order"; or None if both steps fail. The greedy pass can miss a
+    layout that exists.
   """
   sizes = dict(mesh.shape)
   nontrivial = {a for a, n in sizes.items() if n > 1}
@@ -1099,7 +1122,14 @@ def _token_partition(mesh, batch: int, seq_len: int):
 
 
 def _use_dtypes(jaxpr, var) -> set[Any]:
-  """dtypes `var` is consumed in: a convert's target, else its own dtype."""
+  """dtypes `var` is consumed in: a convert's target, else its own dtype.
+
+  Recurses into an equation's inner jaxpr (its `jaxpr` or `call_jaxpr` param)
+  when that jaxpr has one input per equation input, assuming they line up one
+  to one. Known gap: a pass-through output records no use. If the inner jaxpr
+  returns `var` unchanged as one of its outputs, a later use of that output is
+  missed.
+  """
   out = set()
   for eqn in jaxpr.eqns:
     for k, v in enumerate(eqn.invars):
@@ -1125,6 +1155,10 @@ def _head_parameters(graphdef, treedef, abstract_leaves, hidden_struct):
   A leaf whose every use is a cast to one narrower float dtype (MaxText casts an
   fp32 vocab table to bf16 before the dot) is gathered after that cast, which is
   what XLA already does for the gather inside `compute_chunked_logps`.
+
+  Returns:
+    {index into `abstract_leaves`: dtype to gather that leaf in}, for every
+    leaf `compute_final_logits` reads.
   """
 
   def head(leaves, hs):
@@ -1156,17 +1190,28 @@ def maybe_compute_sharded_chunked_logps(
 ):
   """`compute_chunked_logps` for packed rows, with a shard_map'ed vocab head.
 
-  Off unless TUNIX_LOGPS_SHARDED_HEAD is set, and it falls back (returns None,
-  with a log line naming the reason) whenever its preconditions do not hold:
-  a mesh in context, every non-trivial mesh axis sharding the batch or the
-  sequence, and every head parameter divisible over the mesh on some dimension.
+  Off unless TUNIX_LOGPS_SHARDED_HEAD turns it on (see `sharded_head_mode`).
+  The switch is read when the caller is traced and is not part of any jit
+  cache key, so a change after the first trace takes effect only on a retrace.
+
+  Returns None, after logging
+  "[logps-head] sharded head off, using compute_chunked_logps: <reason>", when:
+    * no mesh is set with `jax.set_mesh` (a legacy `with mesh:` sets none);
+    * `_token_partition` finds no token layout;
+    * `compute_final_logits` reads no model state;
+    * a head parameter has no dimension divisible by the number of devices
+      (a scalar parameter never has one).
+  Some other unsupported inputs raise instead of falling back, for example a
+  mesh with Explicit axes (inside `jax.shard_map`) or logical-axis rules that
+  list two sequence axes out of mesh order (in `jax.lax.ppermute`).
 
   Args:
-    model: The merged actor model; must expose `compute_final_logits`.
+    model: The merged model; must expose `compute_final_logits`.
     hidden_states: [B, T, H], the model output for every position.
     input_tokens: [B, T] token ids; position t is scored from position t - 1.
     temperature: Sampling temperature the logits are divided by (0 or 1: none).
-    chunk_size: Tokens per scan step on each device.
+    chunk_size: Sequence positions per scan step on each device, capped at the
+      length of the device's block of the sequence.
     return_entropy: Whether to also return the per-token entropy.
 
   Returns:
@@ -1174,6 +1219,9 @@ def maybe_compute_sharded_chunked_logps(
     log-probs [B, T] whose index j scores `input_tokens[:, j]` from
     `hidden_states[:, j - 1]` (index 0 is 0), plus the entropy [B, T] if
     `return_entropy`.
+
+  Raises:
+    ValueError: TUNIX_LOGPS_SHARDED_HEAD has an unrecognized value.
   """
   mode = sharded_head_mode()
   if mode is None:
@@ -1236,13 +1284,16 @@ def maybe_compute_sharded_chunked_logps(
       layout_source,
       local_batch,
       local_len,
-      -(-local_len // chunk),
+      -(-local_len // chunk),  # ceil(local_len / chunk) scan steps
       chunk,
       [(p.shape, str(d)) for p, d in zip(params, gather_dtypes)],
       gather_axes,
   )
 
   def merged(full):
+    # Only the head leaves carry values. The others stay ShapeDtypeStruct
+    # placeholders, which compute_final_logits never reads (_head_parameters
+    # found the leaves it reads).
     values = list(abstract)
     for i, x in zip(head_index, full):
       values[i] = x
@@ -1294,6 +1345,11 @@ def maybe_compute_sharded_chunked_logps(
     return scan_forward(full, h, t)
 
   def head_local_fwd(h, t, *ps):
+    # With symbolic_zeros=True the inputs arrive as CustomVJPPrimal wrappers,
+    # hence `.value`. Their `.perturbed` flags are ignored, so the backward
+    # builds the f32 accumulator even for a frozen head. The gathered
+    # parameters are the residuals: the backward reuses them instead of
+    # gathering again.
     h, t = h.value, t.value
     ps = [p.value for p in ps]
     full = [
@@ -1304,14 +1360,18 @@ def maybe_compute_sharded_chunked_logps(
   def head_local_bwd(res, cts):
     h, t, full = res
     d_logps = cts[0]
+    # Without return_entropy the primal has one output, so no entropy
+    # cotangent: treat it as a symbolic zero.
     d_entropy = cts[1] if return_entropy else SymbolicZero(None)
     use_logps = not isinstance(d_logps, SymbolicZero)
     use_entropy = not isinstance(d_entropy, SymbolicZero)
-    shard_shapes = [
-        tuple(n // num_devices if k == d else n for k, n in enumerate(f.shape))
-        for f, d in zip(full, gather_dims)
-    ]
     if not (use_logps or use_entropy):
+      shard_shapes = [
+          tuple(
+              n // num_devices if k == d else n for k, n in enumerate(f.shape)
+          )
+          for f, d in zip(full, gather_dims)
+      ]
       zeros = [jnp.zeros(s, dt) for s, dt in zip(shard_shapes, param_dtypes)]
       return (jnp.zeros_like(h), None, *zeros)
 
@@ -1329,6 +1389,7 @@ def maybe_compute_sharded_chunked_logps(
         )
 
       def outputs_fn(full_, hs_):
+        # Exactly the outputs that have a cotangent in `cot`, in that order.
         outs = chunk_outputs(full_, hs_, ids, use_entropy)
         return outs if use_logps else outs[1:]
 
@@ -1363,12 +1424,13 @@ def maybe_compute_sharded_chunked_logps(
 
   def local(h, tok, *ps):
     # Position t predicts token t + 1; a shard's last position predicts the
-    # next shard's first token, and the sequence's last position (no target)
-    # is scored against token 0 and dropped. Both one-token shifts are explicit
-    # collective-permutes, so neither depends on how XLA partitions a shift of
-    # a sequence-sharded array.
+    # next shard's first token. The sequence's last position has no next
+    # token: its target is token id 0 (`neighbour` returns zeros past the last
+    # shard) and its score is dropped by the output shift below. Both one-token
+    # shifts are explicit collective-permutes, so neither depends on how XLA
+    # partitions a shift of a sequence-sharded array.
     t = jnp.concatenate([tok[:, 1:], neighbour(tok[:, :1], 1)], axis=1)
-    pad = -h.shape[1] % chunk
+    pad = -h.shape[1] % chunk  # up to the next multiple of chunk
     if pad:
       h = jnp.pad(h, ((0, 0), (0, pad), (0, 0)))
       t = jnp.pad(t, ((0, 0), (0, pad)))
@@ -1389,12 +1451,18 @@ def maybe_compute_sharded_chunked_logps(
           for p, d in zip(params, gather_dims)
       ],
   )
+  # Zero non-finite hidden states, as compute_chunked_logps does.
   hidden_states = jnp.where(jnp.isfinite(hidden_states), hidden_states, 0.0)
   outs = jax.shard_map(
       local,
       mesh=mesh,
       in_specs=in_specs,
       out_specs=(token_spec,) * num_out,
+      # The scan carries start as jnp.zeros, which the vma check types as the
+      # same on every device, while each chunk's outputs vary by device, so
+      # with the check lax.scan rejects the carry. Unchecked is still exact:
+      # every mesh axis of size > 1 is in every in and out spec, so the
+      # transpose adds no psum or division over a nontrivial axis.
       check_vma=False,
   )(hidden_states, input_tokens, *params)
   return outs if return_entropy else outs[0]
