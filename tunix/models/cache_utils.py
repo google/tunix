@@ -68,12 +68,56 @@ def maybe_bucket_prefix_length(
   if not is_chunked_prefill or prefix_length <= 0 or not boundaries:
     return prefix_length
   if isinstance(cache_or_len, Mapping):
-    effective_cap = cache_or_len['v'].shape[1]
+    if (
+        'split_prefix_v' in cache_or_len
+        and cache_or_len['split_prefix_v'] is not None
+    ):
+      effective_cap = cache_or_len['split_prefix_v'].shape[1]
+    else:
+      effective_cap = cache_or_len['v'].shape[1]
   elif cache_or_len is not None:
     effective_cap = cache_or_len
   else:
     effective_cap = prefix_length
   return bucket_prefix_length(prefix_length, effective_cap, boundaries)
+
+
+def merge_split_attention(
+    out_prefix: jaxtyping.Array,
+    lse_prefix: jaxtyping.Array,
+    out_suffix: jaxtyping.Array,
+    lse_suffix: jaxtyping.Array,
+    out_dtype: jnp.dtype,
+) -> jaxtyping.Array:
+  """LSE-weighted merge of two attention partitions. Pure JAX; CPU-testable.
+
+  nan_to_num zeroes fully-masked (out=NaN / lse=-inf) partitions so they don't
+  poison the residual stream. Boundary-straddling garbage rows are instead
+  neutralized by weight underflow, which relies on splash's DEFAULT_MASK_VALUE
+  staying large-negative.
+
+  Args:
+    out_prefix: Attention output for the prefix partition.
+    lse_prefix: Log-sum-exp weights for the prefix partition.
+    out_suffix: Attention output for the suffix partition.
+    lse_suffix: Log-sum-exp weights for the suffix partition.
+    out_dtype: Output data type for the merged attention result.
+
+  Returns:
+    Merged attention output array.
+  """
+  # lse shape: (B, N, T), out shape: (B, N, T, H)
+  max_lse = jnp.maximum(lse_prefix, lse_suffix)
+  # Guard against (-inf) - (-inf) = NaN when both partitions are fully masked.
+  w_prefix = jnp.nan_to_num(jnp.exp(lse_prefix - max_lse), nan=0.0)
+  w_suffix = jnp.nan_to_num(jnp.exp(lse_suffix - max_lse), nan=0.0)
+  w_sum = w_prefix + w_suffix
+  w_sum_safe = jnp.where(w_sum > 0, w_sum, 1.0)
+  encoded = (
+      w_prefix[..., None] * jnp.nan_to_num(out_prefix.astype(jnp.float32))
+      + w_suffix[..., None] * jnp.nan_to_num(out_suffix.astype(jnp.float32))
+  ) / w_sum_safe[..., None]
+  return encoded.astype(out_dtype)
 
 
 def read_prefix_kv(

@@ -561,6 +561,109 @@ class CacheUtilsTest(parameterized.TestCase):
           has_own_cache=False,
       )
 
+  def test_read_prefix_kv_split_attention(self):
+    b, prefix_len, suffix_len, kh, d = 1, 8, 4, 1, 8
+    key_proj = jnp.ones((b, suffix_len, kh, d)) * 2.0
+    value_proj = jnp.ones((b, suffix_len, kh, d)) * 3.0
+    cache = {
+        'k': jnp.ones((b, 16, kh, d)),
+        'v': jnp.ones((b, 16, kh, d)),
+        'end_index': jnp.array([8]),
+    }
+    res = cache_utils.read_prefix_kv(
+        cache,
+        key_proj,
+        value_proj,
+        is_chunked_prefill=True,
+        prefix_length=prefix_len,
+        use_split_attention=True,
+    )
+    # Suffix remains uncontaminated (not concatenated)
+    self.assertEqual(res.key.shape, (b, suffix_len, kh, d))
+    self.assertEqual(res.value.shape, (b, suffix_len, kh, d))
+    self.assertIsNotNone(res.split_prefix_k)
+    self.assertIsNotNone(res.split_prefix_v)
+    self.assertEqual(res.split_prefix_k.shape, (b, prefix_len, kh, d))
+    self.assertEqual(res.split_prefix_v.shape, (b, prefix_len, kh, d))
+
+  def test_maybe_bucket_prefix_length_with_split_prefix_v(self):
+    cache = {'split_prefix_v': jnp.zeros((1, 512, 1, 64))}
+    boundaries = (0, 128, 256, 512)
+    self.assertEqual(
+        cache_utils.maybe_bucket_prefix_length(
+            100, cache, is_chunked_prefill=True, boundaries=boundaries
+        ),
+        128,
+    )
+
+  def test_merge_split_attention(self):
+    b, n, t, h = 1, 2, 4, 8
+    out_prefix = jnp.full((b, n, t, h), float('nan'), dtype=jnp.float32)
+    lse_prefix = jnp.full((b, n, t), -jnp.inf, dtype=jnp.float32)
+    out_suffix = jnp.ones((b, n, t, h), dtype=jnp.float32) * 2.0
+    lse_suffix = jnp.zeros((b, n, t), dtype=jnp.float32)
+
+    merged = cache_utils.merge_split_attention(
+        out_prefix, lse_prefix, out_suffix, lse_suffix, jnp.float32
+    )
+    self.assertFalse(jnp.isnan(merged).any())
+    np.testing.assert_allclose(merged, 2.0)
+
+  def test_update_cache_prefill_3d_input_mask_axis_safety(self):
+    """Verifies update_cache_prefill with 3D input mask (kills axis=1 mutant)."""
+    b, kh, d = 2, 2, 8
+    cache = {
+        'k': jnp.zeros((b, 16, kh, d)),
+        'v': jnp.zeros((b, 16, kh, d)),
+        'end_index': jnp.zeros((b,), dtype=jnp.int32),
+    }
+    k_proj = jnp.zeros((b, 4, kh, d))
+    v_proj = jnp.zeros((b, 4, kh, d))
+    # 3D input mask: shape (2, 1, 4).
+    # Row 0 has 3 valid tokens, Row 1 has 2 valid tokens.
+    input_mask_3d = jnp.array(
+        [[[True, True, True, False]], [[True, True, False, False]]]
+    )
+    updated_cache, *_ = cache_utils.update_cache_prefill(
+        cache,
+        k_proj,
+        v_proj,
+        seq_len=4,
+        is_chunked_prefill=True,
+        prefix_length=0,
+        input_mask=input_mask_3d,
+        is_ring_buffer_read=False,
+        is_ring_buffer_write=False,
+    )
+    # Under axis=-1: max real-token count across batch is 3.
+    # Under mutant axis=1: sums over singleton dimension yielding max 1.
+    self.assertEqual(int(updated_cache['end_index'][0]), 3)
+
+  def test_read_prefix_kv_prefix_length_zero_returns_none_splits(self):
+    """Verifies read_prefix_kv returns None for split KV when prefix_length=0."""
+    b, kh, d = 1, 2, 8
+    cache = {
+        'k': jnp.zeros((b, 16, kh, d)),
+        'v': jnp.zeros((b, 16, kh, d)),
+        'end_index': jnp.zeros((b,), dtype=jnp.int32),
+    }
+    key_proj = jnp.zeros((b, 4, kh, d))
+    value_proj = jnp.zeros((b, 4, kh, d))
+    prior_end_index = jnp.array([0])
+
+    res = cache_utils.read_prefix_kv(
+        cache,
+        key_proj,
+        value_proj,
+        is_chunked_prefill=True,
+        prefix_length=0,
+        prior_end_index=prior_end_index,
+        use_split_attention=True,
+    )
+    self.assertIsNone(res.split_prefix_k)
+    self.assertIsNone(res.split_prefix_v)
+    self.assertIsNone(res.valid_mask)
+
 
 if __name__ == '__main__':
   absltest.main()
