@@ -1882,6 +1882,55 @@ class PoolExecutionSession:
     self._failed_tasks.clear()
     return failed
 
+  def cancel_pending_tasks(
+      self,
+      predicate: Callable[
+          [str, Tuple[Optional[str], Tuple[Any, ...], Dict[str, Any]]], bool
+      ],
+      result_factory: Optional[
+          Callable[
+              [str, Tuple[Optional[str], Tuple[Any, ...], Dict[str, Any]]], Any
+          ]
+      ] = None,
+  ) -> int:
+    """Cancels queued tasks in `_pending_queue` matching `predicate` before dispatch.
+
+    Args:
+      predicate: Callable `(request_id, payload)` returning True for pending
+        tasks that should be cancelled instead of dispatched to a worker.
+      result_factory: Optional callable `(request_id, payload)` producing a
+        synthetic result to enqueue on `_response_queue` so callers polling the
+        session observe the cancelled completion and keep in-flight accounting
+        balanced.
+
+    Returns:
+      Number of pending tasks removed from `_pending_queue`.
+    """
+    if not self._pending_queue:
+      return 0
+    kept: collections.deque[str] = collections.deque()
+    cancelled_count = 0
+    while self._pending_queue:
+      req_id = self._pending_queue.popleft()
+      payload = self._task_payloads.get(req_id)
+      if payload is None:
+        continue
+      if predicate(req_id, payload):
+        self._task_payloads.pop(req_id, None)
+        self._task_retries.pop(req_id, None)
+        self._task_dispatch_times.pop(req_id, None)
+        self._task_last_failed_actor.pop(req_id, None)
+        self._in_flight = max(0, self._in_flight - 1)
+        cancelled_count += 1
+        if result_factory is not None:
+          self._response_queue.put_nowait((result_factory(req_id, payload), None))
+      else:
+        kept.append(req_id)
+    self._pending_queue = kept
+    if cancelled_count > 0:
+      self._notify_if_zero_flight()
+    return cancelled_count
+
   def add_actor(
       self, actor: ActorHandle, *, max_in_flight: Optional[int] = None
   ) -> None:

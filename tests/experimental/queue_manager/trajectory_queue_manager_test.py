@@ -803,6 +803,73 @@ class BatchOrderedQueueManagerTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
+  def test_overgeneration_prefer_valid_rollouts_replaces_truncated_with_succeeded(
+      self,
+  ):
+    """Truncated/timed-out rollouts with is_valid=True wait for spare SUCCEEDED rollouts."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          num_generations_to_dispatch=4,
+          prefer_valid_rollouts=True,
+      )
+      succeeded_0 = _create_item("p1", group_index=0, is_valid=True)
+      succeeded_0.traj = {"status": "SUCCEEDED"}
+
+      truncated_1 = _create_item("p1", group_index=1, is_valid=True)
+      truncated_1.traj = {"status": "MAX_STEPS_REACHED"}
+
+      clipped_2 = _create_item("p1", group_index=2, is_valid=True)
+      clipped_2.traj = {"status": "SUCCEEDED"}
+      clipped_2.metadata["clipped"] = True
+
+      succeeded_3 = _create_item("p1", group_index=3, is_valid=True)
+      succeeded_3.traj = {"status": "SUCCEEDED"}
+
+      self.assertFalse(await manager.put(succeeded_0))
+      # Truncated and response-budget-clipped items should not seal the group early
+      # while spare rollouts are still in flight.
+      self.assertFalse(await manager.put(truncated_1))
+      self.assertFalse(await manager.put(clipped_2))
+      self.assertEqual(manager.ready_groups_count, 0)
+
+      # Spare SUCCEEDED rollout arrives -> 2 preferred items accumulated!
+      self.assertTrue(await manager.put(succeeded_3))
+      group = await manager.get_group()
+      self.assertEqual(group, [succeeded_0, succeeded_3])
+
+    asyncio.run(_run_test())
+
+  def test_overgeneration_prefer_valid_rollouts_prefers_truncated_over_failed_at_budget(
+      self,
+  ):
+    """When budget is exhausted, prefers SUCCEEDED > truncated valid > FAILED."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          num_generations_to_dispatch=3,
+          prefer_valid_rollouts=True,
+      )
+      failed_0 = _create_item("p1", group_index=0, is_valid=False)
+      failed_0.traj = {"status": "FAILED"}
+
+      truncated_1 = _create_item("p1", group_index=1, is_valid=True)
+      truncated_1.traj = {"status": "TIMEOUT"}
+
+      succeeded_2 = _create_item("p1", group_index=2, is_valid=True)
+      succeeded_2.traj = {"status": "SUCCEEDED"}
+
+      self.assertFalse(await manager.put(failed_0))
+      self.assertFalse(await manager.put(truncated_1))
+      self.assertTrue(await manager.put(succeeded_2))
+
+      group = await manager.get_group()
+      self.assertEqual(group, [succeeded_2, truncated_1])
+
+    asyncio.run(_run_test())
+
   def test_overgeneration_prefer_valid_rollouts_false_takes_first_g(self):
     """When prefer_valid_rollouts=False, emits the first G arrivals regardless of validity."""
 
