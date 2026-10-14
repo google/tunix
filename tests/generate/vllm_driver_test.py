@@ -16,7 +16,7 @@ import importlib.metadata
 import sys
 import threading
 import time
-from typing import Iterable
+from typing import Any, Iterable
 from unittest import mock
 
 try:
@@ -35,8 +35,18 @@ def _version_shim(pkg: str) -> str:
 
 importlib.metadata.version = _version_shim
 
-if "openai_harmony" not in sys.modules:
-  sys.modules["openai_harmony"] = mock.MagicMock()
+try:
+  import openai_harmony  # pylint: disable=g-import-not-at-top,unused-import
+except ImportError:
+  # openai_harmony is not installed in every environment this test runs in, so
+  # stub it only when it is missing; where it is installed, a stub would shadow
+  # the real package. vLLM uses openai_harmony.Message as a pydantic field type
+  # (ChatCompletionMessageParam), so the stub's Message must be a type pydantic
+  # can build a schema for. A MagicMock attribute makes importing vLLM fail with
+  # PydanticSchemaGenerationError.
+  _openai_harmony_stub = mock.MagicMock()
+  _openai_harmony_stub.Message = Any
+  sys.modules["openai_harmony"] = _openai_harmony_stub
 
 from absl.testing import absltest  # pylint: disable=g-import-not-at-top
 from tunix.generate.vllm_async_driver import VLLMInProcessDriver  # pylint: disable=g-import-not-at-top
