@@ -393,9 +393,11 @@ class TrainerWorker(abstract_worker.Worker):
 
     Then, when the trainer has `wait_for_device`, waits for the work it had
     dispatched before this call and reports how long that took
-    (`device_wait_s`): ~0 means the device was already idle, i.e. the
-    transfer did not hide behind its work. The wait is one the next call
-    (`get_metrics`, which needs the update landed) would make anyway.
+    (`device_wait_s`). A short wait means the device was already idle, i.e.
+    the transfer did not hide behind its work; how short depends on the
+    runtime (on Pathways an idle device's wait still reads about 2.7-2.9 s).
+    The wait is one the next call (`get_metrics`, which needs the update
+    landed) would make anyway.
 
     A stage follows a step's last train call, sent with
     `fwd_bwd(apply_optimizer=True, wait_for_update=False)`, so the update that
@@ -540,13 +542,14 @@ class TrainerWorker(abstract_worker.Worker):
     (`stage_fwd_bwd`), so its transfer ran while the device computed this
     step's last micro-batch. This first waits for the device when the trainer
     has `wait_for_device` and reports how long (`device_wait_s`): how long that
-    micro-batch still ran once the staged one was in place. ~0 means the
-    device had gone idle, i.e. the transfer outlasted it and delayed the
-    update. The wait costs nothing where the trainer's `update()` blocks until
-    the step's last micro-batch has finished anyway (MaxText with
-    `retry_when_tokens_dropped`, which reads its overflow flag on the host
-    first); elsewhere it holds the update's dispatch back by one readiness
-    round trip.
+    micro-batch still ran once the staged one was in place. A short wait
+    means the device had gone idle, i.e. the transfer outlasted it and
+    delayed the update (on Pathways an idle device's wait reads about
+    2.7-2.9 s, not ~0). The wait costs nothing where the trainer's
+    `update()` blocks until the step's last micro-batch has finished anyway
+    (MaxText with `retry_when_tokens_dropped`, which reads its overflow flag
+    on the host first); elsewhere it holds the update's dispatch back by one
+    readiness round trip.
 
     Then runs the update through `update()` and, when the trainer exposes an
     output of it (`last_update_token`), returns only once it has landed and

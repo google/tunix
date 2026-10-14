@@ -1610,10 +1610,11 @@ class _StampsBeforeUpdateLands(rl_program.StandardRLProgram):
 # Tests
 # ---------------------------------------------------------------------------
 
-# The trainer-bound regime: a micro-batch's device time well above the time
-# to pack one (tr-s3: 15.11 s against ~2.1 s), so step k+1's first micro-batch
-# is packed, and staged, before step k's boundary ends and the pipelined paths
-# are the ones taken. (`zero_costs` and `groups_arrive_late` cover the rest.)
+# The trainer-bound regime: a micro-batch's device time well above the time to
+# pack one (15.11 s against ~2.1 s in the submission run; see
+# `_submission_run_costs`), so step k+1's first micro-batch is packed, and
+# staged, before step k's boundary ends and the pipelined paths are the ones
+# taken. (`zero_costs` and `groups_arrive_late` cover the rest.)
 _BUSY = _Costs(device_s=0.15, update_s=0.01, host_s=0.02)
 
 _SCENARIOS = dict(
@@ -2213,7 +2214,6 @@ class CheckpointStampTest(absltest.TestCase):
         _run(sc, pipelined=True, staged=True, program_cls=_StagesEveryStep)
     )
     msg = f"unstaged={unstaged} staged={staged} stages_every_step={bad}"
-    print(f"STAMP_DELAYS_S {msg}")
     self.assertEqual(sorted(staged), [3, 4], msg)
     # Staging still ran where nothing is scored ...
     self.assertTrue(any(e[0] == "stage" for e in staged_run.log), msg)
@@ -2231,7 +2231,8 @@ def _stages(run: _Run) -> int:
 
 
 def _latch_scenario(costs: _Costs, **kwargs: Any) -> _Scenario:
-  """12 groups per step: several train calls per step, as at tr-s3 (8-9)."""
+  """12 groups per step: several train calls per step, as in the submission
+  run (8-9)."""
   base = dict(
       order="prompt_batch",
       num_prompts=48,
@@ -2247,8 +2248,12 @@ def _latch_scenario(costs: _Costs, **kwargs: Any) -> _Scenario:
   return _Scenario(**base)
 
 
-def _trs3_costs() -> _Costs:
-  """tr-s3's MEASURED trainer costs, one production second = UNIT."""
+def _submission_run_costs() -> _Costs:
+  """The submission run's trainer costs, one production second = UNIT.
+
+  The submission run is the MLPerf GBS-1,024 submission baseline run. These
+  are its per-call costs, from its TRAINER_STEP_TIMING lines.
+  """
   return _Costs(
       device_s=15.11 * UNIT,
       update_s=1.0 * UNIT,
@@ -2302,16 +2307,15 @@ class StagingLatchTest(absltest.TestCase):
     self.assertEqual(_stages(run), 4, run.log)
     self.assertFalse(run.program._staging_latched_off)
 
-  def test_trainer_bound_at_trs3_ratios_keeps_staging(self):
-    # PRE-REGISTERED (inverted for the fix): device 15.11,
-    # transfer 9.53 units, >= 3 calls per step. All 3 boundaries stage, and
-    # each stage finds ~D + update - T = 6.6 units of device work left.
-    sc = _latch_scenario(_trs3_costs())
+  def test_trainer_bound_at_submission_run_ratios_keeps_staging(self):
+    # Expected: device 15.11, transfer 9.53 units, >= 3 calls per step. All 3
+    # boundaries stage, and each stage finds ~D + update - T = 6.6 units of
+    # device work left.
+    sc = _latch_scenario(_submission_run_costs())
     with mock.patch.object(rl_program, "_release_host_memory", lambda: None):
       run = _run(sc, pipelined=True, staged=True)
     waits = [w / UNIT for w in run.trainer.device_waits]
     msg = f"device waits (units) {waits}"
-    print(f"TRS3_LATCH {msg} microbatches/step {_microbatches_per_step(run)}")
     self.assertGreaterEqual(min(_microbatches_per_step(run)), 3, run.log)
     self.assertEqual(_stages(run), 3, msg)
     self.assertFalse(run.program._staging_latched_off, msg)
@@ -2322,10 +2326,10 @@ class StagingLatchTest(absltest.TestCase):
         self, _run(sc, pipelined=False, program_cls=_BaseLoopProgram), run
     )
 
-  def test_the_first_latch_tripped_at_trs3_ratios(self):
+  def test_the_first_latch_tripped_at_submission_run_ratios(self):
     # Negative control: the min-gap latch, same scenario, stages
     # once and switches off, the gap it read being the transfer, not D.
-    sc = _latch_scenario(_trs3_costs())
+    sc = _latch_scenario(_submission_run_costs())
     with mock.patch.object(rl_program, "_release_host_memory", lambda: None):
       bad = _run(sc, pipelined=True, staged=True, program_cls=_MinGapLatch)
     cadences = [c / UNIT for c in bad.program.cadences if c is not None]
@@ -2334,7 +2338,7 @@ class StagingLatchTest(absltest.TestCase):
     self.assertTrue(bad.program._staging_latched_off)
     self.assertBetween(cadences[0], 8.0, 11.5, msg)
 
-  def test_lane_busy_costs_with_three_or_more_calls_keep_staging(self):
+  def test_busy_costs_with_three_or_more_calls_keep_staging(self):
     # Inverted: D/T = 7.5, >= 3 calls per step.
     sc = _latch_scenario(_BUSY, dest_s=0.0, pack_s=0.0, tail_s=0.0)
     run = _run(sc, pipelined=True, staged=True)
@@ -2408,7 +2412,7 @@ class StagingSupportTest(absltest.TestCase):
     )
 
   def test_without_the_check_an_older_trainer_image_fails_the_run(self):
-    # Negative control, the review's F1 measurement: staging without asking.
+    # Negative control: staging without asking the trainer first.
     class _SkipsTheCheck(rl_program.StandardRLProgram):
 
       async def _trainer_can_stage(self):
@@ -2488,7 +2492,7 @@ class StagingSupportTest(absltest.TestCase):
 
 
 def _advance_over_holes_eq(self):
-  """`_advance_over_holes` before the fix: passes a hole only at serving == next."""
+  """Pre-fix `_advance_over_holes`: passes a hole only at serving == next."""
   while (
       self._serving_batch_idx == self._next_batch_idx
       and self._next_batch_idx in self._sealed
@@ -2631,11 +2635,10 @@ class _StepTimes(rl_program.StandardRLProgram):
 class StepTimeTest(absltest.TestCase):
   """What `step_time` (and the RCP `train_step_time` built from it) spans.
 
-  A review asked whether consecutive steps' step_time now overlap. They do
-  not: step k ends at its commit, before step k+1's first micro-batch is
-  sent, which is where step k+1 now starts. What changes is that step k's
-  deferred bookkeeping falls inside step k+1's time instead of between two
-  steps.
+  Consecutive steps' step_time do not overlap: step k ends at its commit, before
+  step k+1's first micro-batch is sent, which is where step k+1 now starts. What
+  changes is that step k's deferred bookkeeping falls inside step k+1's time
+  instead of between two steps.
   """
 
   def test_steps_never_overlap_and_the_next_starts_at_its_first_send(self):
@@ -2816,7 +2819,7 @@ class RecipeGuardTest(absltest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Randomized scenarios (from the review's fuzz test, against the base loop).
+# Randomized scenarios, against the base loop.
 # ---------------------------------------------------------------------------
 
 _NUM_DRAWS = 30
@@ -2928,7 +2931,7 @@ def _assert_matches_base_loop(
 
 
 class RandomizedEquivalenceTest(parameterized.TestCase):
-  """PRE-REGISTERED: all draws pass in every mode."""
+  """All draws pass in every mode."""
 
   @parameterized.parameters(*range(_NUM_DRAWS))
   def test_unified_loop_matches_the_base_loop(self, seed):
@@ -2994,21 +2997,16 @@ class TokenRandomizedCoverageTest(absltest.TestCase):
       _assert_equivalent_but_metrics_fetch(self, ref, new)
       staged_draws += _staged_boundaries_confirm_the_update(self, new) > 0
       fallback_draws += not _check_equivalent(ref, new)
-    print(
-        f"TOKEN_COVERAGE staged_draws={staged_draws}"
-        f" fallback_draws={fallback_draws}"
-    )
     self.assertGreater(staged_draws, 0)
     self.assertGreater(fallback_draws, 0)
 
 
 class RandomizedChecksAreNotVacuousTest(absltest.TestCase):
-  """Controls on the draws: they reach the new paths and catch wrong programs.
+  """Controls on the draws: they catch wrong programs.
 
-  Review result, kept: the wrong programs were caught in 6/30 and 5/30 draws
-  (prediction >= 5 each, HIT); coverage of the new paths is printed only (its
-  predictions missed: zero device cost, max_steps 1 and the latch keep many
-  draws off them). `BiasedRandomizedEquivalenceTest` covers that gap.
+  Each wrong program is caught in at least 5 of the 30 draws. Reaching the
+  new paths is checked by `BiasedRandomizedEquivalenceTest` instead, since
+  zero device cost, max_steps 1 and the latch keep many draws off them.
   """
 
   def test_new_paths_run_and_wrong_programs_are_caught(self):
@@ -3031,10 +3029,6 @@ class RandomizedChecksAreNotVacuousTest(absltest.TestCase):
         )
         if errors or not _check_equivalent(ref, bad):
           caught[name] += 1
-    print(
-        f"FUZZ_COVERAGE sent_ahead_draws={sent_draws} "
-        f"staged_draws={staged_draws} caught={caught}"
-    )
     self.assertGreaterEqual(caught["sends_before_boundary"], 5)
     self.assertGreaterEqual(caught["prepacks_wrong_batch"], 5)
 
@@ -3055,10 +3049,6 @@ class BiasedRandomizedEquivalenceTest(absltest.TestCase):
         if mode == "staged":
           sent_draws += _Counting.sent_ahead > 0
           staged_draws += any(e[0] == "stage" for e in new.log)
-    print(
-        f"BIASED_COVERAGE sent_ahead_draws={sent_draws}"
-        f" staged_draws={staged_draws}"
-    )
     self.assertGreater(sent_draws, 0)
     self.assertGreater(staged_draws, 0)
 
@@ -3138,11 +3128,6 @@ class FailureHandlingTest(absltest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-# One "second" of the real system. Costs below are tr-s3's (MEASURED, see the
-# report): device 15.11 s per micro-batch, update ~1 s, host part 9.53 s,
-# get_metrics ~0.5 s once the update landed, destination bind+metadata 1.64 s,
-# trainer prepare_weight_sync 4.45 s, step bookkeeping 2.7 s, packing the
-# first micro-batch ~4 s.
 def _run_with_dispatcher(
     sc: _Scenario,
     *,
@@ -3277,22 +3262,19 @@ def _run_with_dispatcher(
 class StaggeredDispatchTest(absltest.TestCase):
   """google/tunix#2845's start-up stagger, with the real dispatcher in front.
 
-  PRE-REGISTERED, written before the first run: batch 1 is held for the first
-  gap in every mode; when step 0 is over before batch 1 goes out, nothing is
-  taken ahead at boundary 0 (step 1's groups do not exist yet, so the prepack
-  waits on the held batch without holding up step 0 or the dispatcher); a
-  later boundary is pipelined; and the trainer cannot tell any mode from the
-  base loop. Control: without the stagger batch 1 goes out at once.
+  Expected: batch 1 is held for the first gap in every mode; when step 0 is over
+  before batch 1 goes out, nothing is taken ahead at boundary 0 (step 1's groups
+  do not exist yet, so the prepack waits on the held batch without holding up
+  step 0 or the dispatcher); a later boundary is pipelined; and the trainer
+  cannot tell any mode from the base loop. Control: without the stagger batch 1
+  goes out at once.
 
-  Revised after the first runs on a shared CPU machine at load ~170 on 160
-  cores: the first version asserted batch 1 goes out within 0.3 s of the gap
-  and boundary 0 is never taken ahead. Both assumed step 0 ends well within
-  the gap; under that load it did not, in every mode including the base loop
-  (MEASURED: base 1.10-1.29 s, off up to 2.08 s), and with a background sync
-  the dispatch window then rightly waits for step 0's round. Now the sync
-  blocks (so only the stagger holds batch 1), the lower bound is exact, the
-  upper bound allows for a loaded box, and the boundary-0 claim is checked
-  whenever its precondition (step 0 ended before batch 1 went out) holds.
+  On a loaded machine step 0 may not end within the gap, in any mode including
+  the base loop, and with a background sync the dispatch window then rightly
+  waits for step 0's round. So the sync blocks (only the stagger holds batch 1),
+  the lower bound is exact, the upper bound allows for a loaded machine, and the
+  boundary-0 claim is checked whenever its precondition (step 0 ended before
+  batch 1 went out) holds.
   """
 
   _SC = _Scenario(
@@ -3317,10 +3299,6 @@ class StaggeredDispatchTest(absltest.TestCase):
           self._SC, **kwargs, first_stagger_s=self._FIRST_S
       )
       boundaries = _boundaries(new)
-      print(
-          f"STAGGER_DUE_S base={ref_due[1]:.3f} {mode}={due[1]:.3f}"
-          f" step0_end={step_end[0]:.3f} boundaries={boundaries}"
-      )
       with self.subTest(mode=mode):
         # Held for the gap (to the timer's resolution), and not much longer
         # even on a loaded box.
@@ -3340,11 +3318,16 @@ class StaggeredDispatchTest(absltest.TestCase):
     self.assertLess(no_stagger[1], 0.5, no_stagger)
 
 
+# One "second" of the real system. Costs below are the submission run's (see
+# `_submission_run_costs`): device 15.11 s per micro-batch, update ~1 s, host
+# part 9.53 s, get_metrics ~0.5 s once the update landed, destination
+# bind+metadata 1.64 s, trainer prepare_weight_sync 4.45 s, step bookkeeping
+# 2.7 s, packing the first micro-batch ~4 s.
 UNIT = 0.02
 T_DEV, T_UPD, T_HOST, T_METRICS = 15.0, 1.0, 9.5, 0.5
 T_DEST, T_STAGE, T_TAIL, T_PACK = 1.6, 4.5, 2.7, 4.0
-# PRE-REGISTERED, written before the first run: device idle from step k's
-# update landing to step k+1's first micro-batch starting, in those units.
+# Expected device idle time from step k's update landing to step k+1's first
+# micro-batch starting, in those units.
 PRED_TODAY = T_METRICS + T_DEST + T_STAGE + T_TAIL + T_PACK + T_HOST  # 22.8
 PRED_PIPELINED = T_METRICS + T_DEST + T_STAGE + T_HOST  # 16.1
 PRED_STAGED = T_METRICS + T_DEST + T_STAGE  # 6.6
@@ -3411,7 +3394,6 @@ class BoundaryTimingTest(absltest.TestCase):
     pipelined = self._gaps(pipelined=True, staged=False)
     staged = self._gaps(pipelined=True, staged=True)
     msg = f"today={today} pipelined={pipelined} staged={staged}"
-    print(f"BOUNDARY_GAP_UNITS {msg}")
     self.assertLen(today, 1, msg)
     # Positive control: the double reproduces today's boundary.
     self.assertAlmostEqual(today[0], PRED_TODAY, delta=TOLERANCE, msg=msg)
@@ -3447,11 +3429,11 @@ class _WaitsForTheUpdateBeforeStaging(rl_program.StandardRLProgram):
     return await super()._timed_train_step(batch, **kwargs)
 
 
-# PRE-REGISTERED, written before the first run. Against a token trainer the
-# fused call returns once its update landed and get_metrics moves past the
-# sync and commit: the gap is reordered, not changed, so today and pipelined
-# are as above. Staged, the last call returns at the update's dispatch and
-# the stage confirms the update, so the transfer hides as before.
+# Expected: against a token trainer the fused call returns once its update
+# landed and get_metrics moves past the sync and commit: the gap is reordered,
+# not changed, so today and pipelined are as above. Staged, the last call
+# returns at the update's dispatch and the stage confirms the update, so the
+# transfer hides as before.
 PRED_TODAY_TOKEN = PRED_TODAY  # 22.8
 PRED_PIPELINED_TOKEN = PRED_PIPELINED  # 16.1
 PRED_STAGED_TOKEN = PRED_STAGED  # 6.6
@@ -3486,7 +3468,6 @@ class TokenBoundaryTimingTest(absltest.TestCase):
         f" device_waits={staged_run.trainer.device_waits}"
         f"/{after_wait_run.trainer.device_waits}"
     )
-    print(f"TOKEN_BOUNDARY_GAP_UNITS {msg}")
     self.assertLen(today, 1, msg)
     self.assertAlmostEqual(today[0], PRED_TODAY_TOKEN, delta=TOLERANCE, msg=msg)
     self.assertAlmostEqual(

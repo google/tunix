@@ -49,13 +49,13 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
-import rl_program_pipelined_boundary_test as l3t
+import rl_program_pipelined_boundary_test as boundary_test
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.queue_manager import trajectory_queue_manager
 
 
-def _worker_of(run: l3t._Run):
+def _worker_of(run: boundary_test._Run):
   """The TrainerWorker behind a harness run's trainer handle."""
   handle = run.program.engine._trainer_workers[datatypes.Role.ACTOR]
   return handle._server.bound_instance
@@ -147,7 +147,7 @@ class _RunawayPrepack(_PrepackProbe):
         return
 
 
-class _StreamingBase(_StreamingRows, l3t._BaseLoopProgram):
+class _StreamingBase(_StreamingRows, boundary_test._BaseLoopProgram):
   pass
 
 
@@ -159,14 +159,16 @@ class _StreamingRunaway(_StreamingRows, _RunawayPrepack):
   pass
 
 
-_STREAMING_REFERENCES: dict[tuple[str, type], l3t._Run] = {}
+_STREAMING_REFERENCES: dict[tuple[str, type], boundary_test._Run] = {}
 
 
-def _streaming_reference(name: str, trainer_cls=l3t._Trainer) -> l3t._Run:
+def _streaming_reference(
+    name: str, trainer_cls=boundary_test._Trainer
+) -> boundary_test._Run:
   key = (name, trainer_cls)
   if key not in _STREAMING_REFERENCES:
-    _STREAMING_REFERENCES[key] = l3t._run(
-        l3t._SCENARIOS[name],
+    _STREAMING_REFERENCES[key] = boundary_test._run(
+        boundary_test._SCENARIOS[name],
         pipelined=False,
         program_cls=_StreamingBase,
         trainer_cls=trainer_cls,
@@ -208,7 +210,7 @@ _RESTARTS: collections.Counter[str] = collections.Counter()
 
 _BOTH_MODES = [
     (f"{name}_{mode}", name, mode)
-    for name in l3t._SCENARIOS
+    for name in boundary_test._SCENARIOS
     for mode in ("unstaged", "staged")
 ]
 
@@ -218,11 +220,13 @@ class PrepackBoundTest(parameterized.TestCase):
 
   @parameterized.named_parameters(*_BOTH_MODES)
   def test_default_rows_bound_and_measure(self, name, mode):
-    run = l3t._run(
-        l3t._SCENARIOS[name], program_cls=_PrepackProbe, **l3t._MODES[mode]
+    run = boundary_test._run(
+        boundary_test._SCENARIOS[name],
+        program_cls=_PrepackProbe,
+        **boundary_test._MODES[mode],
     )
     self.assertEqual(_prepack_violations(run.program), [])
-    if name in l3t._SENT_AHEAD:
+    if name in boundary_test._SENT_AHEAD:
       self.assertNotEmpty(run.program.ahead, "nothing was taken ahead")
     _READY_AFTER["default"].extend(run.program.ready_after)
     _RESTARTS["default"] += run.program.restarts
@@ -233,31 +237,35 @@ class PrepackBoundTest(parameterized.TestCase):
   def test_streaming_take_ahead_is_bounded_and_trains_the_same(
       self, name, mode
   ):
-    run = l3t._run(
-        l3t._SCENARIOS[name], program_cls=_StreamingProbe, **l3t._MODES[mode]
+    run = boundary_test._run(
+        boundary_test._SCENARIOS[name],
+        program_cls=_StreamingProbe,
+        **boundary_test._MODES[mode],
     )
     self.assertEqual(_prepack_violations(run.program), [])
-    l3t._assert_equivalent(self, _streaming_reference(name), run)
-    l3t._assert_weights_follow_updates(self, run)
-    if name in l3t._SENT_AHEAD:
+    boundary_test._assert_equivalent(self, _streaming_reference(name), run)
+    boundary_test._assert_weights_follow_updates(self, run)
+    if name in boundary_test._SENT_AHEAD:
       self.assertNotEmpty(run.program.ahead, "nothing was taken ahead")
     _READY_AFTER["streaming"].extend(run.program.ready_after)
     _RESTARTS["streaming"] += run.program.restarts
 
-  @parameterized.named_parameters((name, name) for name in l3t._SCENARIOS)
+  @parameterized.named_parameters(
+      (name, name) for name in boundary_test._SCENARIOS
+  )
   def test_streaming_staged_against_a_token_trainer(self, name):
-    run = l3t._run(
-        l3t._SCENARIOS[name],
+    run = boundary_test._run(
+        boundary_test._SCENARIOS[name],
         program_cls=_StreamingProbe,
         pipelined=True,
         staged=True,
-        trainer_cls=l3t._TokenTrainer,
+        trainer_cls=boundary_test._TokenTrainer,
     )
     self.assertEqual(_prepack_violations(run.program), [])
-    l3t._assert_equivalent_but_metrics_fetch(
-        self, _streaming_reference(name, l3t._TokenTrainer), run
+    boundary_test._assert_equivalent_but_metrics_fetch(
+        self, _streaming_reference(name, boundary_test._TokenTrainer), run
     )
-    l3t._staged_boundaries_confirm_the_update(self, run)
+    boundary_test._staged_boundaries_confirm_the_update(self, run)
     _RESTARTS["streaming_token_staged"] += run.program.restarts
 
   def test_the_streaming_regime_runs_the_restart_path(self):
@@ -266,10 +274,10 @@ class PrepackBoundTest(parameterized.TestCase):
     restarts = 0
     for name in ("prompt_batch", "arrival", "reference_kl"):
       for mode in ("unstaged", "staged"):
-        run = l3t._run(
-            l3t._SCENARIOS[name],
+        run = boundary_test._run(
+            boundary_test._SCENARIOS[name],
             program_cls=_StreamingProbe,
-            **l3t._MODES[mode],
+            **boundary_test._MODES[mode],
         )
         restarts += run.program.restarts
     self.assertGreater(restarts, 0)
@@ -277,11 +285,13 @@ class PrepackBoundTest(parameterized.TestCase):
   def test_the_bound_catches_a_runaway_that_the_equivalence_check_misses(self):
     for name in ("prompt_batch", "arrival"):
       ref = _streaming_reference(name)
-      run = l3t._run(
-          l3t._SCENARIOS[name], pipelined=True, program_cls=_StreamingRunaway
+      run = boundary_test._run(
+          boundary_test._SCENARIOS[name],
+          pipelined=True,
+          program_cls=_StreamingRunaway,
       )
       # The trainer cannot tell: same calls, inputs, weights and outputs.
-      self.assertTrue(l3t._check_equivalent(ref, run), name)
+      self.assertTrue(boundary_test._check_equivalent(ref, run), name)
       # The bound can.
       self.assertNotEmpty(_prepack_violations(run.program), name)
 
@@ -303,12 +313,12 @@ class _BadToken:
     raise RuntimeError(f"XLA: update {self._version} failed on device")
 
 
-class _FailsSecondUpdate(l3t._TokenTrainer):
+class _FailsSecondUpdate(boundary_test._TokenTrainer):
   """A token trainer whose second update fails on the device.
 
   Reading anything the failed update produced fails too: `get_metrics`
   returns its gradient norm (maxtext#5571's token), and a save or a weight
-  sync reads the weights it wrote (INFERRED MaxText semantics). Each such
+  sync reads the weights it wrote (as MaxText is assumed to do). Each such
   attempt is logged, so a path that saves after the failure shows up.
   """
 
@@ -346,8 +356,8 @@ class _FailsSecondUpdateAtTheDevice(_FailsSecondUpdate):
 
   MaxText's `wait_for_device` is its throttler's `block_until_ready()`,
   which waits on every queued output, the update's gradient norm included
-  (maxtext 6db77afd6, the MaxText half of this change). There the stage's
-  device wait, not its token wait, is what raises.
+  (AI-Hypercomputer/maxtext#5718, the MaxText half of this change). There
+  the stage's device wait, not its token wait, is what raises.
   """
 
   def wait_for_device(self):
@@ -368,7 +378,7 @@ _FAILED_UPDATE_TRAINERS = {
 _GET_METRICS_AFTER_FAILURE: dict[str, bool] = {}
 
 _FAILED_UPDATE_MODES = {
-    "base": dict(pipelined=False, program_cls=l3t._BaseLoopProgram),
+    "base": dict(pipelined=False, program_cls=boundary_test._BaseLoopProgram),
     "off": dict(pipelined=False),
     "unstaged": dict(pipelined=True),
     "staged": dict(pipelined=True, staged=True),
@@ -383,10 +393,10 @@ _FAILED_UPDATE_CASES = [
 
 def _run_failed_update(
     mode: str, trainer: str
-) -> tuple[l3t._Run, list[BaseException]]:
+) -> tuple[boundary_test._Run, list[BaseException]]:
   errors: list[BaseException] = []
-  run = l3t._run(
-      l3t._SCENARIOS["prompt_batch"],
+  run = boundary_test._run(
+      boundary_test._SCENARIOS["prompt_batch"],
       trainer_cls=_FAILED_UPDATE_TRAINERS[trainer],
       errors=errors,
       **_FAILED_UPDATE_MODES[mode],
@@ -394,7 +404,7 @@ def _run_failed_update(
   return run, errors
 
 
-def _stage_met_the_failure(run: l3t._Run) -> bool:
+def _stage_met_the_failure(run: boundary_test._Run) -> bool:
   """Whether the boundary after the failed update 2 was staged."""
   update_2 = max(
       i for i, e in enumerate(run.log) if e[0] == "update" and e[1] == 2
@@ -454,7 +464,8 @@ class FailedUpdateTest(parameterized.TestCase):
       self.assertTrue(
           _stage_met_the_failure(run),
           "precondition: the boundary after update 2 was staged (timing; the"
-          " L3 suite expects every prompt_batch boundary staged)",
+          " pipelined-boundary suite expects every prompt_batch boundary"
+          " staged)",
       )
     head = str(errors[0]).splitlines()[0]
     self.assertIn("optimizer update() failed", head)
@@ -472,12 +483,12 @@ class FailedUpdateTest(parameterized.TestCase):
 
 def _first_fingerprint_of_step_1() -> str:
   """Content hash of step 1's first micro-batch, from the base loop's run."""
-  ref = l3t._reference("prompt_batch")
+  ref = boundary_test._reference("prompt_batch")
   return next(e[1] for e in ref.log if e[0] == "fwd_bwd" and e[2] == 1)
 
 
 _TRANSPORT_FAILURE_MODES = {
-    "base": dict(pipelined=False, program_cls=l3t._BaseLoopProgram),
+    "base": dict(pipelined=False, program_cls=boundary_test._BaseLoopProgram),
     "unstaged": dict(pipelined=True),
     "staged": dict(pipelined=True, staged=True),
 }
@@ -486,17 +497,17 @@ _TRANSPORT_FAILURE_MODES = {
 def _run_with_transport_failure(
     mode: str,
     program_cls: type[rl_program.StandardRLProgram] | None = None,
-) -> tuple[l3t._Run, list[BaseException], dict[str, object]]:
+) -> tuple[boundary_test._Run, list[BaseException], dict[str, object]]:
   """Runs prompt_batch with the request carrying step 1's first micro-batch
   failing once in transport, before the trainer worker runs it."""
   target = _first_fingerprint_of_step_1()
-  real_execute = l3t._RemoteHandle._execute
+  real_execute = boundary_test._RemoteHandle._execute
   fired: dict[str, object] = {"n": 0, "method": None}
 
   async def _execute(self, request):
     if request.method_name in ("fwd_bwd", "stage_fwd_bwd") and not fired["n"]:
       payload = getattr(request.kwargs.get("request"), "payload", None)
-      if payload is not None and l3t._fingerprint(payload) == target:
+      if payload is not None and boundary_test._fingerprint(payload) == target:
         fired["n"] = 1
         fired["method"] = request.method_name
         raise ConnectionError("transport: stream reset before the call ran")
@@ -506,21 +517,23 @@ def _run_with_transport_failure(
   kwargs = dict(_TRANSPORT_FAILURE_MODES[mode])
   if program_cls is not None:
     kwargs["program_cls"] = program_cls
-  with mock.patch.object(l3t._RemoteHandle, "_execute", _execute):
-    run = l3t._run(l3t._SCENARIOS["prompt_batch"], errors=errors, **kwargs)
+  with mock.patch.object(boundary_test._RemoteHandle, "_execute", _execute):
+    run = boundary_test._run(
+        boundary_test._SCENARIOS["prompt_batch"], errors=errors, **kwargs
+    )
   return run, errors, fired
 
 
 def _assert_fell_back_and_trained_the_same(
-    test: absltest.TestCase, name: str, run: l3t._Run
+    test: absltest.TestCase, name: str, run: boundary_test._Run
 ) -> None:
   """The boundary went on unstaged, and the trainer cannot tell the run from
   the base loop's: the micro-batch went whole in step 1's first train call."""
-  l3t._assert_equivalent(test, l3t._reference(name), run)
-  l3t._assert_weights_follow_updates(test, run)
+  boundary_test._assert_equivalent(test, boundary_test._reference(name), run)
+  boundary_test._assert_weights_follow_updates(test, run)
   test.assertNotIn("stage", [e[0] for e in run.log])
   # Sent ahead at every boundary, staged at none: off for the rest of the run.
-  test.assertEqual(l3t._boundaries(run), [(True, False)] * 2, run.log)
+  test.assertEqual(boundary_test._boundaries(run), [(True, False)] * 2, run.log)
   test.assertTrue(run.program._staging_latched_off)
   worker = _worker_of(run)
   test.assertEqual(worker.state, datatypes.WorkerState.READY)
@@ -551,8 +564,8 @@ class FailedStageTransportTest(parameterized.TestCase):
     self.assertEqual(
         fired["method"],
         "stage_fwd_bwd",
-        "precondition: boundary 0 was staged (timing; the L3 suite expects"
-        " every prompt_batch boundary staged)",
+        "precondition: boundary 0 was staged (timing; the pipelined-boundary"
+        " suite expects every prompt_batch boundary staged)",
     )
     # The stage was optional: the run keeps step 0's barrier, checkpoint and
     # bookkeeping, sends the micro-batch whole, and (the failure being
@@ -617,11 +630,11 @@ class FailedReferenceWhileStagingTest(absltest.TestCase):
       return True
     return False
 
-  def _run(self) -> tuple[l3t._Run, list[BaseException]]:
+  def _run(self) -> tuple[boundary_test._Run, list[BaseException]]:
     errors: list[BaseException] = []
     with _warnings() as warnings:
-      run = l3t._run(
-          l3t._SCENARIOS["reference_kl"],
+      run = boundary_test._run(
+          boundary_test._SCENARIOS["reference_kl"],
           pipelined=True,
           staged=True,
           program_cls=_MarksItsStage,
@@ -630,26 +643,26 @@ class FailedReferenceWhileStagingTest(absltest.TestCase):
     self.assertEqual(
         self.fired,
         1,
-        "precondition: boundary 0 was staged (timing; the L3 suite expects"
-        " every reference_kl boundary staged)",
+        "precondition: boundary 0 was staged (timing; the pipelined-boundary"
+        " suite expects every reference_kl boundary staged)",
     )
     self.warnings = warnings
     return run, errors
 
   def test_a_transport_failure_falls_back(self):
-    real_execute = l3t._RemoteHandle._execute
+    real_execute = boundary_test._RemoteHandle._execute
     outer = self
 
     async def _execute(self, request):
       if (
           request.method_name == "per_token_logps"
-          and isinstance(self._server.bound_instance, l3t._Reference)
+          and isinstance(self._server.bound_instance, boundary_test._Reference)
           and outer._one_shot()
       ):
         raise ConnectionError("transport: reference stream reset")
       return await real_execute(self, request)
 
-    with mock.patch.object(l3t._RemoteHandle, "_execute", _execute):
+    with mock.patch.object(boundary_test._RemoteHandle, "_execute", _execute):
       run, errors = self._run()
     self.assertEqual(errors, [])
     _assert_fell_back_and_trained_the_same(self, "reference_kl", run)
@@ -659,7 +672,7 @@ class FailedReferenceWhileStagingTest(absltest.TestCase):
 
   def test_a_failure_in_the_reference_worker_falls_back(self):
     # A remote error, like a trainer-side one, but from the reference worker.
-    real_logps = l3t._Reference.per_token_logps
+    real_logps = boundary_test._Reference.per_token_logps
     outer = self
 
     def _per_token_logps(self, items, **kwargs):
@@ -667,7 +680,9 @@ class FailedReferenceWhileStagingTest(absltest.TestCase):
         raise RuntimeError("reference model: device lost")
       return real_logps(self, items, **kwargs)
 
-    with mock.patch.object(l3t._Reference, "per_token_logps", _per_token_logps):
+    with mock.patch.object(
+        boundary_test._Reference, "per_token_logps", _per_token_logps
+    ):
       run, errors = self._run()
     self.assertEqual(errors, [])
     _assert_fell_back_and_trained_the_same(self, "reference_kl", run)
@@ -847,7 +862,6 @@ class HoleRuleIdentityFuzzTest(absltest.TestCase):
         )
     ]
     self.assertNotEmpty(differ)
-    print(f"[holes] read-ahead: rules differ in {len(differ)}/{len(_SEEDS)}")
 
   def test_reading_ahead_trains_the_same_batches_and_groups(self):
     queue_cls = trajectory_queue_manager.BatchOrderedQueueManager
@@ -862,7 +876,7 @@ class HoleRuleIdentityFuzzTest(absltest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class _RestorableTrainer(l3t._Trainer):
+class _RestorableTrainer(boundary_test._Trainer):
   """The trainer double, plus the bring-up calls a successor makes."""
 
   def compile(self, dummy_data=None):
@@ -880,13 +894,15 @@ class StaleStageAfterRestartTest(absltest.TestCase):
   `compile`) and restores the checkpoint, which must drop it."""
 
   def _crashed_worker(self, held: bool):
-    worker = l3t._Worker(lambda: _RestorableTrainer([], l3t._Costs()))
+    worker = boundary_test._Worker(
+        lambda: _RestorableTrainer([], boundary_test._Costs())
+    )
     worker.initialize()
     if held:
       worker.stage_fwd_bwd(
           datatypes.TrainRequest(
               request_id="dead-orchestrator",
-              payload=l3t._payload(1, logps=False),
+              payload=boundary_test._payload(1, logps=False),
               metadata={},
           )
       )
@@ -896,7 +912,7 @@ class StaleStageAfterRestartTest(absltest.TestCase):
     return worker.stage_fwd_bwd(
         datatypes.TrainRequest(
             request_id="successor",
-            payload=l3t._payload(2, logps=False),
+            payload=boundary_test._payload(2, logps=False),
             metadata={},
         )
     )
@@ -929,17 +945,6 @@ class StaleStageAfterRestartTest(absltest.TestCase):
     self.assertIsNone(worker._staged_fwd_bwd)
     self.assertTrue(any("dead-orchestrator" in m for m in warnings), warnings)
     self.assertTrue(self._stage_new(worker).metadata["staged"])
-
-
-def tearDownModule():
-  for regime, values in sorted(_READY_AFTER.items()):
-    print(
-        f"[take-ahead] {regime}: micro-batches ready after a take-ahead: max"
-        f" {max(values, default=0)} over {len(values)} take-aheads, histogram"
-        f" {dict(sorted(collections.Counter(values).items()))}"
-    )
-  print(f"[take-ahead] restarts after a send-ahead: {dict(_RESTARTS)}")
-  print(f"[failed update] get_metrics met it: {_GET_METRICS_AFTER_FAILURE}")
 
 
 if __name__ == "__main__":

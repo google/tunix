@@ -611,13 +611,13 @@ class StandardRLProgram(RLProgram):
     # has staged, and step k's metrics, logging and host-memory release run
     # once that call has returned, while the device computes it. The trainer
     # gets the same calls, with the same inputs, in the same order as without
-    # it. What moves with that
-    # bookkeeping: step k's `Train step` line, StepMetrics and `on_step_end`
-    # follow a `[pipeline] SENT_AHEAD step=k` line (step k trained, step k+1
-    # started), so a wedge in step k+1's first call stops the log there;
-    # `on_step_begin(k+1)` fires after step k+1's first train call returned;
-    # and under ARRIVAL order the dispatch window, keyed on the step count,
-    # opens that one call later (PROMPT_BATCH opens it at the commit).
+    # it. What moves with that bookkeeping: step k's `Train step` line,
+    # StepMetrics and `on_step_end` follow a `[pipeline] SENT_AHEAD step=k` line
+    # (step k trained, step k+1 started), so a wedge in step k+1's first call
+    # stops the log there; `on_step_begin(k+1)` fires after step k+1's first
+    # train call returned; and under ARRIVAL order the dispatch window, keyed on
+    # the step count, opens that one call later (PROMPT_BATCH opens it at the
+    # commit).
     self.pipeline_step_boundary = pipeline_step_boundary
     # With `pipeline_step_boundary`: also send that micro-batch's data to the
     # trainer host while the device still computes step k's last micro-batch,
@@ -635,17 +635,19 @@ class StandardRLProgram(RLProgram):
     # Otherwise right after the last call, which runs the update and returns
     # at its dispatch (`_maybe_stage_next_microbatch`); under
     # `retry_when_tokens_dropped` that dispatch waits until the last
-    # micro-batch has finished, so the transfer finds the device idle and the
-    # latch below switches staging off at the first boundary. Only matters
-    # with `stage_next_microbatch`.
+    # micro-batch has finished, so the transfer finds the device idle and hides
+    # nothing, which the latch below catches at the first boundary except on
+    # Pathways (see `_STAGING_HIDDEN_WAIT_S`). Only matters with
+    # `stage_next_microbatch`.
     self.stage_before_update = stage_before_update
     # Takes groups for a step ahead of it (`_prepack`), filling a `_StepState`
     # the step adopts when it starts.
     self._intake_task: asyncio.Task[None] | None = None
-    # Set once a stage did not hide behind the trainer's device (its device
-    # had gone idle before the transfer finished): the trainer is then fed
-    # slower than it computes, and staging only delays each step's sync. Also
-    # set when the trainer cannot stage at all.
+    # Set once a stage is seen not to hide behind the trainer's device (its
+    # device had gone idle before the transfer finished; see
+    # `_STAGING_HIDDEN_WAIT_S` for where this can be seen): the trainer is then
+    # fed slower than it computes, and staging only delays each step's sync.
+    # Also set when the trainer cannot stage at all.
     self._staging_latched_off = False
     # What the trainer said it supports of staging; asked once, lazily.
     self._staging_supported: bool | None = None
@@ -2277,7 +2279,7 @@ class StandardRLProgram(RLProgram):
               # This boundary's stage was made, or refused, before the
               # update. Skip the hook below: staging after the update's
               # dispatch is the order this path replaces, and under dropless
-              # replay it would find the device idle and latch staging off.
+              # replay it would find the device idle and hide nothing.
               stage_after = False
             if (
                 isinstance(step_result, dict)
@@ -2753,10 +2755,14 @@ class StandardRLProgram(RLProgram):
       }
       await asyncio.to_thread(self.on_checkpoint_saved, ckpt_info)
 
-  # A trainer that still waited at least this long for its device once a
-  # staged micro-batch was in place had work left to hide the transfer
-  # behind. Anything shorter is the readiness check's own round trip (a
-  # Pathways proxy RPC), i.e. the device had already gone idle.
+  # How long a trainer must still have waited for its device, once a staged
+  # micro-batch was in place, for the stage to count as hidden behind the
+  # device's remaining work (`_staging_hidden`). A shorter wait is read as a
+  # device that had already gone idle, and switches staging off. That catches a
+  # stage that did not hide only where waiting on an idle device returns in well
+  # under this time. On Pathways the wait is a proxy round trip that reads about
+  # 2.7-2.9 s even on an idle device, above this threshold, so there this check
+  # never switches staging off.
   _STAGING_HIDDEN_WAIT_S = 0.05
 
   def _staging_hidden(self, device_wait_s: float | None) -> bool:
@@ -2911,17 +2917,19 @@ class StandardRLProgram(RLProgram):
     the device's remaining work -- several trainer copies fed through one
     controller -- would push that timestamp back.
 
-    And switched off for the rest of the run the first time a stage does not
-    hide. The trainer answers once the micro-batch is in place and its device
-    has finished the work dispatched before it, and says how long it waited
-    for the latter. A wait under `_STAGING_HIDDEN_WAIT_S` means the device
-    had already gone idle: the transfer outlasted the step's remaining device
-    work and delayed this step's metrics, stamp and weight sync. The trainer
-    is then fed slower than it computes, so staging only moves a transfer
-    from after the sync to before it. (A step's train calls returning cannot
-    tell this: MaxText queues `max_inflight_computations` of them, and a step
-    starts on a device drained by the weight sync, so its first calls return
-    at the transfer's pace even when the device is the bottleneck.)
+    And switched off for the rest of the run the first time a stage is seen not
+    to hide. The trainer answers once the micro-batch is in place and its device
+    has finished the work dispatched before it, and says how long it waited for
+    the latter. A wait under `_STAGING_HIDDEN_WAIT_S` means the device had
+    already gone idle: the transfer outlasted the step's remaining device work
+    and delayed this step's metrics, stamp and weight sync. The trainer is then
+    fed slower than it computes, so staging only moves a transfer from after the
+    sync to before it. (A step's train calls returning cannot tell this: MaxText
+    queues `max_inflight_computations` of them, and a step starts on a device
+    drained by the weight sync, so its first calls return at the transfer's pace
+    even when the device is the bottleneck.) On Pathways even an idle device's
+    wait reads above that threshold, so there such a stage is not seen and
+    staging stays on.
 
     A stage is optional, so one that fails on the way to the trainer, or in
     the reference log-probs it needs, falls back: the micro-batch goes back
@@ -3002,9 +3010,9 @@ class StandardRLProgram(RLProgram):
       batch = await self._with_reference_logps(mb.payload)
       start = time.monotonic()
       calling_trainer = True
-      staged = await self.engine.stage_train_step(  # pyrefly: ignore[missing-attribute]
-          batch, role=datatypes.Role.ACTOR
-      )
+      staged = await (
+          self.engine.stage_train_step  # pyrefly: ignore[missing-attribute]
+      )(batch, role=datatypes.Role.ACTOR)
       stage_s = time.monotonic() - start
     except Exception as exc:  # pylint: disable=broad-exception-caught
       if calling_trainer and _raised_by_worker_method(exc):
@@ -3057,7 +3065,8 @@ class StandardRLProgram(RLProgram):
     one was in place. Under `_STAGING_HIDDEN_WAIT_S`, the transfer outlasted
     it and delayed the update, metrics, checkpoint stamp and weight sync: the
     trainer is fed slower than it computes, so staging is switched off for the
-    rest of the run, as there.
+    rest of the run, as there. Also as there, this does not fire on Pathways,
+    where even an idle device's wait reads above that threshold.
 
     A replay of the last micro-batch (MaxText reruns an overflowed one,
     dropless, inside `update()`) leaves the staged micro-batch as it is: its
@@ -3086,9 +3095,9 @@ class StandardRLProgram(RLProgram):
         and not self._needs_sampler_agreement(st.ready[0].payload)
     ):
       sent = await self._send_stage(st)
-    update = await self.engine.apply_deferred_update(  # pyrefly: ignore[missing-attribute]
-        role=datatypes.Role.ACTOR
-    )
+    update = await (
+        self.engine.apply_deferred_update  # pyrefly: ignore[missing-attribute]
+    )(role=datatypes.Role.ACTOR)
     if sent is not None:
       staged, stage_s = sent
       device_wait_s = update.get("device_wait_s")

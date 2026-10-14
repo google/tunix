@@ -100,7 +100,7 @@ class _UpdateFailsAtTheDeviceTrainer(_TokenTrainer):
   """An update that fails on the device, met by the device wait first.
 
   MaxText's `wait_for_device` is its throttler's `block_until_ready()`, which
-  also waits on the update's gradient norm (maxtext 6db77afd6).
+  also waits on the update's gradient norm (AI-Hypercomputer/maxtext#5718).
   """
 
   def wait_for_device(self):
