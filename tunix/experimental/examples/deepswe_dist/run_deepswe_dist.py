@@ -287,9 +287,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help=(
           "Pipeline the step boundary: pack the next step's first"
           " micro-batch while this step's last ones train, send it as soon"
-          " as this step's weight sync has staged, and do this step's"
-          " metrics and logging while it is on its way. The trainer gets"
-          " the same calls in the same order."
+          " as this step's checkpoint, weight sync (its staging, with"
+          " --async_weight_sync) and commit are done, and do this step's"
+          " metrics and logging once that call has returned, while the"
+          " device computes it. The trainer gets the same calls in the same"
+          " order."
       ),
   )
   parser.add_argument(

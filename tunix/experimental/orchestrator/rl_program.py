@@ -592,8 +592,9 @@ class StandardRLProgram(RLProgram):
     # taken and packed while step k's last micro-batches train, step k+1's
     # first micro-batch goes to the trainer as soon as step k's weight sync
     # has staged, and step k's metrics, logging and host-memory release run
-    # while it is on its way. The trainer gets the same calls, with the same
-    # inputs, in the same order as without it. What moves with that
+    # once that call has returned, while the device computes it. The trainer
+    # gets the same calls, with the same inputs, in the same order as without
+    # it. What moves with that
     # bookkeeping: step k's `Train step` line, StepMetrics and `on_step_end`
     # follow a `[pipeline] SENT_AHEAD step=k` line (step k trained, step k+1
     # started), so a wedge in step k+1's first call stops the log there;
