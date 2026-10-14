@@ -14,14 +14,13 @@
 
 """Tests for RaidenSynchronizer."""
 
+import socket
 from unittest import mock
-
-import numpy as np
 
 from absl.testing import absltest
 import jax
 import jax.numpy as jnp
-
+import numpy as np
 from tunix.experimental.weight_sync import raiden_synchronizer
 
 
@@ -671,6 +670,53 @@ class RaidenSynchronizerTest(absltest.TestCase):
     ]
     self.assertEqual(
         sync.work_unit_metadata().shards, ("1.2.3.4:12345", "10.0.1.1:40001")
+    )
+
+  def test_ffi_separates_data_plane_ips_and_control_plane_listeners(self):
+    def _pack_ipv4(ip_str: str) -> list[int]:
+      raw = (
+          b"\x00" * 10 + b"\xff\xff" + socket.inet_pton(socket.AF_INET, ip_str)
+      )
+      return [
+          int.from_bytes(raw[i : i + 4], byteorder="little", signed=True)
+          for i in range(0, 16, 4)
+      ]
+
+    # Simulate 2 submanagers on a TPU7x host with
+    # TPU_RAIDEN_DATA_NICS="eth0,eth2":
+    # - Shard 0 (NUMA 0): data IP 10.11.3.60 (eth0), ctrl IP 10.11.3.60 (eth0)
+    # - Shard 1 (NUMA 1): data IP 10.34.3.60 (eth2), ctrl IP 10.11.3.60 (eth0)
+    row_numa0 = (
+        _pack_ipv4("10.11.3.60") + [41000, 42000] + _pack_ipv4("10.11.3.60")
+    )
+    row_numa1 = (
+        _pack_ipv4("10.34.3.60") + [41001, 42001] + _pack_ipv4("10.11.3.60")
+    )
+    fake_info = np.array([row_numa0, row_numa1], dtype=np.int32)
+
+    with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+      mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
+      sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+      arr = jax.device_put(jnp.ones((2, 4), jnp.float32), sharding)
+      sync.names = ["w"]
+      sync.arrays = [arr]
+
+      with mock.patch.object(
+          raiden_synchronizer, "_raiden_ffi", autospec=True
+      ), mock.patch(
+          "jax.experimental.multihost_utils.global_array_to_host_local_array",
+          return_value=fake_info,
+      ), mock.patch(
+          "jax.experimental.multihost_utils.process_allgather",
+          return_value=fake_info,
+      ):
+        sync._init_ffi_transport(is_d2h=True)
+        md = sync.work_unit_metadata()
+
+    self.assertEqual(md.shards, ("10.11.3.60:41000", "10.34.3.60:41001"))
+    self.assertEqual(
+        md.control_plane_rpc_address, "10.11.3.60:42000,10.11.3.60:42001"
     )
 
 

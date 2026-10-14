@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import collections
+from collections import abc
 import dataclasses
 import inspect
 import ipaddress
@@ -162,6 +163,20 @@ def unpack_ip(row: Any) -> str:
     return str(ipaddress.IPv4Address(raw_bytes[12:16]))
   addr_str = str(ipaddress.IPv6Address(raw_bytes))
   return f"[{addr_str}]" if ":" in addr_str else addr_str
+
+
+def unpack_control_ip(row: abc.Sequence[int]) -> str:
+  """Unpacks the control-plane IP from row[6:10], falling back to row[:4].
+
+  Args:
+    row: FFI metadata row (6 or 10 int32 elements).
+
+  Returns:
+    Decoded control-plane IPv4 or bracketed IPv6 string.
+  """
+  if len(row) >= 10 and any(int(x) != 0 for x in row[6:10]):
+    return unpack_ip(row[6:10])
+  return unpack_ip(row)
 
 
 def flatten_weights(state: Any) -> Tuple[List[str], List[Any]]:
@@ -633,7 +648,7 @@ class RaidenSynchronizer:
       )
       def _local_init(anchor, s_idx, sizes):
         axis_names = mesh.axis_names
-        out_shape = tuple([1] * len(axis_names)) + (6,)
+        out_shape = tuple([1] * len(axis_names)) + (10,)
         return jax.ffi.ffi_call(
             "init_weight_synchronizer",
             jax.ShapeDtypeStruct(out_shape, jnp.int32),
@@ -665,15 +680,17 @@ class RaidenSynchronizer:
         mesh,
         jax.sharding.PartitionSpec(*mesh.axis_names, None),
     )
+    info_cols = int(local_ws_info.shape[-1])
     gathered_ws_info = multihost_utils.process_allgather(local_ws_info).reshape(
-        -1, 6
+        -1, info_cols
     )
 
     self._ips, listeners = [], []
     for row in gathered_ws_info:
       ip = unpack_ip(row)
+      ctrl_ip = unpack_control_ip(row)
       self._ips.append(f"{ip}:{int(row[4])}")
-      listeners.append(f"{ip}:{int(row[5])}")
+      listeners.append(f"{ctrl_ip}:{int(row[5])}")
     self._listeners = listeners
 
     self._unique_listeners = []
