@@ -299,6 +299,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--prefetch_next_batch",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "While a step's optimizer update runs on the trainer, pull the"
+          " upcoming groups from the scored queue and pack them, so the next"
+          " micro-batch is ready to send as soon as the weight-sync snapshot"
+          " is taken. Nothing is dispatched early."
+      ),
+  )
+  parser.add_argument(
       "--in_flight_weight_updates",
       action=argparse.BooleanOptionalAction,
       default=False,
@@ -1283,6 +1294,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         ),
         async_weight_sync=args.async_weight_sync,
         pipeline_train_microbatches=args.pipeline_train_microbatches,
+        prefetch_next_batch=args.prefetch_next_batch,
         partial_rollout=args.in_flight_weight_updates,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
         initial_dispatch_stagger_s=args.initial_dispatch_stagger_s,

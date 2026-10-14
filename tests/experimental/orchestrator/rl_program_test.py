@@ -747,6 +747,66 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_prefetch_feeds_next_group_while_optimizer_update_runs(self):
+    """Arrival order: the next step's group is packed during the update."""
+
+    async def _run():
+      events = []
+
+      async def mock_train_step(batch, **kwargs):
+        events.append(f"train_start:{batch}")
+        if batch == "mb0":
+          # Held open until the next step's group is packed; without the
+          # prefetch this would time out and record the serial order.
+          for _ in range(200):
+            if "feed:1" in events:
+              break
+            await asyncio.sleep(0.005)
+        events.append(f"train_end:{batch}")
+        return f"result_{batch}"
+
+      self.mock_engine.train_step.side_effect = mock_train_step
+      # One group per step, every micro-batch is an optimizer update.
+      self.mock_algo.mini_batch_size = 1
+      assembler = _OneMicrobatchPerGroupAssembler(1, events)
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0"),
+          _make_trajectory_group("prompt_1"),
+      )
+      program = self._create_program(
+          dataset=["prompt_data_0", "prompt_data_1"],
+          max_steps=2,
+          assembler=assembler,
+          prefetch_next_batch=True,
+      )
+
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10)
+
+      self.assertLess(events.index("feed:1"), events.index("train_end:mb0"))
+      self.assertEqual(
+          [e for e in events if e.startswith("train")],
+          [
+              "train_start:mb0",
+              "train_end:mb0",
+              "train_start:mb1",
+              "train_end:mb1",
+          ],
+      )
+      self.assertEqual(
+          [
+              c.kwargs["apply_optimizer"]
+              for c in self.mock_engine.train_step.call_args_list
+          ],
+          [True, True],
+      )
+      self.assertEqual(program.last_step_result.step, 1)
+      self.assertEqual(program.last_step_result.train_result, "result_mb1")
+      self.assertEqual(program._prefetched, [])
+      self.assertIsNone(program._pending_train)
+
+    asyncio.run(_run())
+
   def test_pipeline_scores_reference_while_previous_trains(self):
     async def _run():
       events = []
@@ -6885,6 +6945,89 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       await program.train_stage()
 
       self.assertIsNone(scored_item.payload.routed_experts)
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_prefetch_packs_next_batch_while_optimizer_update_runs(self):
+    async def _run():
+      program = rl_program.StandardRLProgram(
+          algo=self.mock_algo,
+          dataset=["p0", "p1", "p2", "p3"],
+          batch_size=2,
+          group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
+          prefetch_next_batch=True,
+      )
+      program.engine = self.mock_engine
+      for pid, bidx in (("p0", 0), ("p1", 0), ("p2", 1), ("p3", 1)):
+        await program.scored_q.put(self._make_scored_item(pid, batch_idx=bidx))
+      await program.scored_q.close()
+
+      prefetched_during_update: list[int] = []
+      trained: list[tuple[str, bool]] = []
+
+      async def _train_step(batch, *, apply_optimizer, **_):
+        trained.append((batch.metadata.get("traj_id", ""), apply_optimizer))
+        if apply_optimizer:
+          if not prefetched_during_update:
+            # Hold step 0's update open until the prefetch has drawn and
+            # packed the whole next batch. Without the prefetch this would
+            # time out and record 0.
+            for _ in range(200):
+              if len(program._prefetched) >= 2:
+                break
+              await asyncio.sleep(0.005)
+          prefetched_during_update.append(len(program._prefetched))
+        return {"loss": 0.1}
+
+      self.mock_engine.train_step.side_effect = _train_step
+
+      await asyncio.wait_for(program.train_stage(), timeout=10)
+
+      # Step 0's update saw batch 1 fully pulled and packed; step 1's update
+      # had nothing left to prefetch.
+      self.assertEqual(prefetched_during_update, [2, 0])
+      self.assertEqual(program.step, 2)
+      self.assertEqual(program._next_batch, 2)
+      self.assertEqual(program._prefetched, [])
+      # Each step still trains exactly its own batch, in order.
+      self.assertEqual([t[1] for t in trained].count(True), 2)
+      self.assertEqual(self.mock_engine.train_step.call_count, len(trained))
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_prefetch_skips_the_last_step(self):
+    async def _run():
+      program = rl_program.StandardRLProgram(
+          algo=self.mock_algo,
+          dataset=["p0", "p1", "p2", "p3"],
+          batch_size=2,
+          max_steps=1,
+          group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
+          prefetch_next_batch=True,
+      )
+      program.engine = self.mock_engine
+      for pid, bidx in (("p0", 0), ("p1", 0), ("p2", 1), ("p3", 1)):
+        await program.scored_q.put(self._make_scored_item(pid, batch_idx=bidx))
+      await program.scored_q.close()
+
+      fetched = []
+      original = program.scored_q.get_ordered_group
+
+      async def _recording_get(**kwargs):
+        res = await original(**kwargs)
+        fetched.append(res[0] if res else None)
+        return res
+
+      program.scored_q.get_ordered_group = _recording_get
+
+      await asyncio.wait_for(program.train_stage(), timeout=10)
+
+      self.assertEqual(program.step, 1)
+      self.assertEqual(program._prefetched, [])
+      # Nothing from batch 1 was pulled: the run ends after step 0.
+      self.assertNotIn(1, fetched)
       program.close()
 
     asyncio.run(_run())

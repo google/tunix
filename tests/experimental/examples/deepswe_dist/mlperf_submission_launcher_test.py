@@ -115,6 +115,7 @@ class SubmissionLauncherTest(absltest.TestCase):
     # Pathways proxy (which compiles the trainer program).
     self.assertEqual(trainer.count(_HBM_CAP), 3)
     self.assertIn("--pipeline_train_microbatches", _jobset(self.default, "orch"))
+    self.assertIn("--prefetch_next_batch", _jobset(self.default, "orch"))
 
   def test_dropless_false_is_the_capacity_factor_trainer(self):
     trainer = _jobset(_render(DROPLESS="false"), "train")

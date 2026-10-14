@@ -345,6 +345,24 @@ class RLStepResult:
   train_result: Any = None
 
 
+@dataclasses.dataclass(kw_only=True)
+class _PrefetchedGroup:
+  """A scored group pulled and packed ahead of the step that will train it.
+
+  Attributes:
+    batch_idx: The prompt batch the group belongs to (None under arrival
+      ordering, where the queue has no batch cursor).
+    scored_items: The group's trajectory items, as returned by `scored_q`.
+    assembled_batches: Micro-batches the assembler emitted when fed this group.
+    packing_time_sec: Wall time spent in `assembler.feed` for this group.
+  """
+
+  batch_idx: int | None
+  scored_items: list[Any]
+  assembled_batches: list[batch_assembly.AssembledBatch]
+  packing_time_sec: float
+
+
 class RLProgram(abc.ABC):
   """Base class for multi-stage DAG workflows."""
 
@@ -416,6 +434,7 @@ class StandardRLProgram(RLProgram):
       on_checkpoint_saved: Callable[[dict[str, Any]], None] | None = None,
       checkpoint_optimizer_interval_steps: int = 1,
       pipeline_train_microbatches: bool = False,
+      prefetch_next_batch: bool = False,
       rollout_priority_scheduling: bool = False,
       initial_dispatch_stagger_s: float = 0.0,
       initial_dispatch_first_stagger_s: float | None = None,
@@ -554,6 +573,13 @@ class StandardRLProgram(RLProgram):
     # gradient-accumulation order is unchanged.
     self.pipeline_train_microbatches = pipeline_train_microbatches
     self._pending_train: asyncio.Task[tuple[Any, float]] | None = None
+    # While a step's final micro-batch (the optimizer update) is in flight,
+    # pull the next prompt batch's ready groups from `scored_q` and pack them,
+    # so the next step's first micro-batch is ready to send as soon as the
+    # weight-sync snapshot is taken. Prefetched groups are consumed first by
+    # the next step and attributed to it; nothing is dispatched early.
+    self.prefetch_next_batch = prefetch_next_batch
+    self._prefetched: list[_PrefetchedGroup] = []
     # A cancelled asyncio.to_thread leaves its worker running, so the error
     # path's reset() must wait for any in-flight feed/flush to finish.
     self._assembler_lock = threading.Lock()
@@ -1858,6 +1884,8 @@ class StandardRLProgram(RLProgram):
 
   async def _reset_assembler(self) -> None:
     """Resets the assembler once any in-flight feed/flush has finished."""
+    # Prefetched micro-batches came out of the assembler being reset.
+    self._prefetched.clear()
 
     def _locked() -> None:
       with self._assembler_lock:
@@ -1964,6 +1992,147 @@ class StandardRLProgram(RLProgram):
     task, self._pending_bookkeeping = self._pending_bookkeeping, None
     if task is not None:
       await task
+
+  async def _fetch_group(
+      self, batch_idx: int | None
+  ) -> tuple[int | None, list[Any]]:
+    """Waits for the next scored group.
+
+    Args:
+      batch_idx: Under prompt-batch ordering, the batch to draw from; None
+        draws from the batch at the queue's cursor. Ignored under arrival
+        ordering.
+
+    Returns:
+      `(batch_idx, group)`. The group is empty once `batch_idx` is drained (or
+      the queue is closed); `batch_idx` is then the one that was passed in.
+    """
+    if isinstance(
+        self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+    ):
+      ordered = await self.scored_q.get_ordered_group(batch_idx=batch_idx)
+      if ordered is None:
+        return batch_idx, []
+      return ordered
+    return batch_idx, await self.scored_q.get_group_batch(num_groups=1)
+
+  async def _feed_group(
+      self, scored_items: list[Any]
+  ) -> tuple[list[batch_assembly.AssembledBatch], float]:
+    """Packs one scored group; returns the emitted micro-batches and the time.
+
+    Also drops the per-trajectory `routed_experts` references once the
+    assembler has copied or packed them, so unbatched routing arrays do not
+    coexist with packed micro-batches and weight sync. The 1D mask fields on
+    `item.payload` are kept for `_collect_and_log_step_metrics`.
+    """
+    payloads = []
+    for item in scored_items:
+      payload = getattr(item, "payload", None)
+      if isinstance(payload, datatypes.RLTrainerPayload):
+        payload = dataclasses.replace(
+            payload,
+            metadata={
+                **payload.metadata,
+                "traj_id": item.traj_id,
+            },
+        )
+      payloads.append(payload)
+    packing_start_time = time.perf_counter()
+    assembled_batches = list(
+        await self._assemble(
+            self.assembler.feed,
+            payloads,  # pyrefly: ignore[bad-argument-type]
+        )
+    )
+    packing_time_sec = time.perf_counter() - packing_start_time
+    payloads.clear()
+    for item in scored_items:
+      item.routed_experts = None
+      if item.metadata is not None:
+        item.metadata.pop("routed_experts", None)
+      if isinstance(item.traj, dict):
+        item.traj.pop("routed_experts", None)
+      item_payload = getattr(item, "payload", None)
+      if (
+          isinstance(item_payload, datatypes.RLTrainerPayload)
+          and item_payload.routed_experts is not None
+      ):
+        item.payload = dataclasses.replace(item_payload, routed_experts=None)
+    return assembled_batches, packing_time_sec
+
+  def _has_groups_after(
+      self, groups_consumed: int, scored_items: list[Any]
+  ) -> bool:
+    """Whether anything will be trained after the update being issued now.
+
+    False only at the end of the last step's full batch, where a prefetch
+    would pull groups no step will consume.
+    """
+    full_batch_complete = (
+        groups_consumed >= self.full_batch_size or not scored_items
+    )
+    if not full_batch_complete:
+      return True
+    return self.max_steps is None or self._step + 1 < self.max_steps
+
+  async def _prefetch_groups_while(self, train_task: asyncio.Task[Any]) -> None:
+    """Pulls and packs upcoming groups while `train_task` runs.
+
+    Called with an optimizer-update micro-batch in flight. Groups land in
+    `self._prefetched`, which `_train_loop` drains before touching `scored_q`,
+    so their bookkeeping is attributed to the step (and mini-batch) that
+    trains them. Nothing is sent to the trainer here: dispatch still waits for
+    the update, the checkpoint, the weight-sync snapshot and the commit.
+
+    Stops at the first of: `train_task` finishing, `full_batch_size` groups
+    buffered, the batch being drawn from draining, or the queue closing.
+    Under prompt-batch ordering the first fetch draws from the queue's cursor
+    (the rest of the current batch if the update was mid-batch, otherwise the
+    next batch: the cursor runs one batch ahead of the committed one by
+    design); later fetches are pinned to that batch so the prefetch never
+    crosses a second boundary.
+
+    Args:
+      train_task: The in-flight optimizer-update train_step.
+    """
+    pinned_batch_idx: int | None = None
+    while (
+        not train_task.done() and len(self._prefetched) < self.full_batch_size
+    ):
+      fetch = asyncio.ensure_future(self._fetch_group(pinned_batch_idx))
+      try:
+        await asyncio.wait(
+            {train_task, fetch}, return_when=asyncio.FIRST_COMPLETED
+        )
+      except asyncio.CancelledError:
+        fetch.cancel()
+        raise
+      if not fetch.done():
+        # `get_ordered_group` only awaits its ready event between pops, so
+        # cancelling it here loses nothing.
+        fetch.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+          await fetch
+        break
+      batch_idx, scored_items = fetch.result()
+      if not scored_items:
+        break
+      pinned_batch_idx = batch_idx
+      assembled, packing_time = await self._feed_group(scored_items)
+      self._prefetched.append(
+          _PrefetchedGroup(
+              batch_idx=batch_idx,
+              scored_items=scored_items,
+              assembled_batches=assembled,
+              packing_time_sec=packing_time,
+          )
+      )
+    if self._prefetched:
+      logging.info(
+          "Prefetched %d group(s) during the optimizer update.",
+          len(self._prefetched),
+      )
 
   async def train_stage(self) -> None:
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
@@ -2084,18 +2253,21 @@ class StandardRLProgram(RLProgram):
 
       while groups_consumed < self.full_batch_size:
         _t_gen = time.monotonic()
-        if isinstance(
-            self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
-        ):
-          ordered = await self.scored_q.get_ordered_group(
-              batch_idx=current_batch_idx
-          )
-          if ordered is None:
-            scored_items = []
+        prefetched: _PrefetchedGroup | None = None
+        if self._prefetched:
+          head = self._prefetched[0]
+          if current_batch_idx is None or head.batch_idx == current_batch_idx:
+            prefetched = self._prefetched.pop(0)
+            current_batch_idx = head.batch_idx
+            scored_items = prefetched.scored_items
           else:
-            current_batch_idx, scored_items = ordered
+            # The buffer already holds the next prompt batch: this one has
+            # ended, exactly as if the queue had returned None for it.
+            scored_items = []
         else:
-          scored_items = await self.scored_q.get_group_batch(num_groups=1)
+          current_batch_idx, scored_items = await self._fetch_group(
+              current_batch_idx
+          )
         # TODO(sanbao): Track accurate generation time by matching rollout
         # requests/responses or reading from the rollout worker. Currently this
         # measures time spent waiting on the scored queue (which includes
@@ -2125,47 +2297,14 @@ class StandardRLProgram(RLProgram):
             ):
               step_advantages.append(float(np.mean(payload.advantages)))
 
-          payloads = []
-          for item in scored_items:
-            payload = getattr(item, "payload", None)
-            if isinstance(payload, datatypes.RLTrainerPayload):
-              payload = dataclasses.replace(
-                  payload,
-                  metadata={
-                      **payload.metadata,
-                      "traj_id": item.traj_id,
-                  },
-              )
-            payloads.append(payload)
-          packing_start_time = time.perf_counter()
-          assembled_batches = list(
-              await self._assemble(
-                  self.assembler.feed,
-                  payloads,  # pyrefly: ignore[bad-argument-type]
-              )
-          )
-          step_packing_time_sec += time.perf_counter() - packing_start_time
-          # `self.assembler` has now copied or packed `routed_experts`; release
-          # the per-trajectory references on `payloads` and `scored_items`
-          # (which remain in `all_step_items` until step-end metric logging) so
-          # unbatched routing arrays do not coexist with packed microbatches and
-          # weight sync. Lightweight 1D mask fields on `item.payload` are kept
-          # for `_collect_and_log_step_metrics`.
-          payloads.clear()
-          for item in scored_items:
-            item.routed_experts = None
-            if item.metadata is not None:
-              item.metadata.pop("routed_experts", None)
-            if isinstance(item.traj, dict):
-              item.traj.pop("routed_experts", None)
-            item_payload = getattr(item, "payload", None)
-            if (
-                isinstance(item_payload, datatypes.RLTrainerPayload)
-                and item_payload.routed_experts is not None
-            ):
-              item.payload = dataclasses.replace(
-                  item_payload, routed_experts=None
-              )
+          if prefetched is not None:
+            assembled_batches = prefetched.assembled_batches
+            step_packing_time_sec += prefetched.packing_time_sec
+          else:
+            assembled_batches, packing_time = await self._feed_group(
+                scored_items
+            )
+            step_packing_time_sec += packing_time
 
         while assembled_batches:
           mb = assembled_batches.pop(0)
@@ -2237,8 +2376,30 @@ class StandardRLProgram(RLProgram):
             self._first_train_issued.set()
             continue
           self._first_train_issued.set()
-          step_result, elapsed = await train_step
-          policy_training_time += elapsed
+          if (
+              is_final_batch
+              and self.prefetch_next_batch
+              and not self._prefetched
+              and self._has_groups_after(groups_consumed, scored_items)
+          ):
+            # Pull and pack the upcoming groups while the optimizer update
+            # runs, so the next micro-batch is ready when the trainer is.
+            # Registered as `_pending_train` so teardown cancels it like any
+            # other in-flight train_step.
+            self._pending_train = asyncio.create_task(train_step)
+            prefetch_error: Exception | None = None
+            try:
+              await self._prefetch_groups_while(self._pending_train)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+              # Never leave an optimizer update unobserved; surface the
+              # prefetch failure once the update has returned.
+              prefetch_error = exc
+            await _await_pending_train()
+            if prefetch_error is not None:
+              raise prefetch_error
+          else:
+            step_result, elapsed = await train_step
+            policy_training_time += elapsed
           if is_final_batch:
             # Save only at a resumable full-batch boundary. An optimizer step
             # can occur earlier when a full batch contains multiple mini

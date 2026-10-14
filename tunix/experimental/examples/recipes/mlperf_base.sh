@@ -357,6 +357,8 @@ if [[ "${ASYNC_WEIGHT_SYNC}" == "true" && "${WEIGHT_SYNC_MODE}" == "raiden" \
 fi
 # Pack the next microbatch while the trainer runs the current one.
 export PIPELINE_TRAIN_MICROBATCHES=${PIPELINE_TRAIN_MICROBATCHES:-false}
+# Pull and pack the upcoming groups while the optimizer update runs.
+export PREFETCH_NEXT_BATCH=${PREFETCH_NEXT_BATCH:-false}
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-prompt_batch}
 export USE_DEFAULT_SQL_STORE="${USE_DEFAULT_SQL_STORE:-true}"
 if [[ "${DRY_RUN:-false}" != "true" ]] && [[ -z "${TRAJECTORY_STORE_DB_URL:-}" ]] && [[ "${USE_DEFAULT_SQL_STORE}" =~ ^(1|true|True|TRUE)$ ]]; then
