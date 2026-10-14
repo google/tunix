@@ -282,7 +282,6 @@ def _trajectory_store_config(
   if not getattr(args, "enable_trajectory_store", False):
     return None
   config: dict[str, Any] = {
-      "enabled": True,
       "backend": getattr(args, "trajectory_store_backend", "file") or "file",
   }
   root_dir = getattr(args, "trajectory_store_dir", "")

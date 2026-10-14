@@ -314,18 +314,10 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     worker = _worker(config=rollout_worker.RolloutConfig())
     self.assertIsNone(worker.trajectory_store)
 
-  def test_disabled_trajectory_store_config_means_no_store(self):
-    config = rollout_worker.RolloutConfig(
-        trajectory_store_config={"enabled": False, "backend": "file"}
-    )
-    worker = _worker(config=config)
-    self.assertIsNone(worker.trajectory_store)
-
   def test_enabled_file_backend_builds_store_once(self):
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
     config = rollout_worker.RolloutConfig(
         trajectory_store_config={
-            "enabled": True,
             "backend": "file",
             "root_dir": str(tmp_dir),
             "run_id": "worker_run",
@@ -347,7 +339,6 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     # would build its own store exactly once, in its own __init__.
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
     config = {
-        "enabled": True,
         "backend": "file",
         "root_dir": str(tmp_dir),
         "run_id": "shared",
@@ -368,7 +359,6 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
     config = rollout_worker.RolloutConfig(
         trajectory_store_config={
-            "enabled": True,
             "backend": "file",
             "root_dir": str(tmp_dir),
             "run_id": "worker_run",
@@ -410,7 +400,6 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
 
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
     input_cfg = {
-        "enabled": True,
         "backend": "file",
         "root_dir": str(tmp_dir),
         "run_id": "handshake_run",

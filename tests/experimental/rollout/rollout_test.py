@@ -292,7 +292,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       svc = worker.RolloutWorker(
           worker_id="test_store_worker",
           config=worker.RolloutConfig(
-              trajectory_store_config={"backend": "memory", "enabled": True}
+              trajectory_store_config={"backend": "memory"}
           ),
           sampler=self.sampler,
           env_pool=self.env_pool,
@@ -367,7 +367,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       svc = worker.RolloutWorker(
           worker_id="test_store_worker_grp",
           config=worker.RolloutConfig(
-              trajectory_store_config={"backend": "memory", "enabled": True}
+              trajectory_store_config={"backend": "memory"}
           ),
           sampler=self.sampler,
           env_pool=self.env_pool,
@@ -411,7 +411,6 @@ class RolloutWorkerTest(parameterized.TestCase):
     temp_dir = self.create_tempdir().full_path
     file_store_cfg = {
         "backend": "file",
-        "enabled": True,
         "root_dir": temp_dir,
         "run_id": "test_cancel_and_max_steps",
     }
@@ -467,7 +466,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       max_steps_svc = worker.RolloutWorker(
           worker_id="test_max_steps_worker",
           config=worker.RolloutConfig(
-              trajectory_store_config={"backend": "memory", "enabled": True}
+              trajectory_store_config={"backend": "memory"}
           ),
           sampler=self.sampler,
           env_pool=max_steps_pool,

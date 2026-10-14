@@ -279,11 +279,10 @@ def _managed_stores(
       run_id, num_writers=num_writers
   )
   try:
-    full_config = {"enabled": True, **backend_config}
     with contextlib.ExitStack() as stack:
       writers = []
       for _ in range(num_writers):
-        store = store_lib.TrajectoryStore.from_config(full_config)
+        store = store_lib.TrajectoryStore.from_config(backend_config)
         if store is None:
           raise ValueError(
               f"Store config for backend {backend_config['backend']!r} built no"

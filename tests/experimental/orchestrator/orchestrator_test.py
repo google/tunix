@@ -534,18 +534,10 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     self.assertIsNone(orch.trajectory_store)
     orch.shutdown()
 
-  def test_disabled_config_means_no_store(self):
-    orch = _trajectory_store_orchestrator(
-        trajectory_store_config={"enabled": False, "backend": "file"}
-    )
-    self.assertIsNone(orch.trajectory_store)
-    orch.shutdown()
-
   def test_enabled_file_backend_builds_store_once(self):
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
     orch = _trajectory_store_orchestrator(
         trajectory_store_config={
-            "enabled": True,
             "backend": "file",
             "root_dir": str(tmp_dir),
             "run_id": "cluster_run",
@@ -562,7 +554,6 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
     orch = _trajectory_store_orchestrator(
         trajectory_store_config={
-            "enabled": True,
             "backend": "file",
             "root_dir": str(tmp_dir),
             "run_id": "cluster_run",
@@ -594,7 +585,6 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
   def test_bring_up_workers_verifies_matching_remote_rollout_store_config(self):
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
     cfg = {
-        "enabled": True,
         "backend": "file",
         "root_dir": str(tmp_dir),
         "run_id": "shared_run",
@@ -622,13 +612,11 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
   ):
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
     orch_cfg = {
-        "enabled": True,
         "backend": "file",
         "root_dir": str(tmp_dir),
         "run_id": "orch_run",
     }
     worker_cfg = {
-        "enabled": True,
         "backend": "file",
         "root_dir": str(tmp_dir),
         "run_id": "worker_run",
@@ -660,7 +648,6 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
   ):
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
     worker_cfg = {
-        "enabled": True,
         "backend": "file",
         "root_dir": str(tmp_dir),
         "run_id": "worker_run",

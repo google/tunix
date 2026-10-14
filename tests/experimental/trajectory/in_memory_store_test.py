@@ -97,7 +97,6 @@ class InMemoryTrajectoryStoreConfigTest(
 
   def _create_config(self) -> dict[str, Any]:
     return {
-        "enabled": True,
         "backend": "memory",
     }
 

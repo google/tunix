@@ -505,7 +505,6 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     `to_redacted_config()` instead.
     """
     return {
-        "enabled": True,
         "backend": self.BACKEND,
         "db_url": self._db_url,
         "run_id": self._run_id,

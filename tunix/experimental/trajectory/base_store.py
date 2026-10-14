@@ -165,9 +165,8 @@ class TrajectoryStore(
   growing a shared config object that knows about every backend's fields.
 
   `from_config` is the single construction entry point for the processes that
-  make up a run, and doubles as the on/off gate: a config of None, or one whose
-  "enabled" is false, yields None, leaving every store-guarded call site a
-  no-op.
+  make up a run, and doubles as the on/off gate: a config of None yields None,
+  leaving every store-guarded call site a no-op.
   """
 
   # The value of the config's "backend" key that selects this class.
@@ -352,19 +351,27 @@ class TrajectoryStore(
     construct once.
 
     Args:
-      config: Configuration mapping, or None. The "backend" key selects the
-        implementation; "enabled" turns the store off without removing the rest
-        of the config.
+      config: Configuration mapping, or None to run without a store. The
+        "backend" key selects the implementation.
 
     Returns:
-      A store instance, or None if `config` is None or not enabled.
+      A store instance, or None if `config` is None.
 
     Raises:
-      ValueError: If "backend" names no known implementation, or the selected
-        backend rejects the rest of the config.
+      ValueError: If `config` contains the removed "enabled" key, "backend"
+        names no known implementation, or the selected backend rejects the
+        rest of the config.
     """
-    if config is None or not config.get("enabled", False):
+    if config is None:
       return None
+    # Backends ignore keys they do not read, so a leftover "enabled": False
+    # would otherwise build an active store. Reject the key so such configs
+    # fail loudly instead.
+    if "enabled" in config:
+      raise ValueError(
+          "The 'enabled' key is no longer supported in TrajectoryStore"
+          " configs; pass None to disable the store."
+      )
 
     backend = config.get("backend")
     if backend not in cls._REGISTRY:

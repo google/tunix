@@ -358,7 +358,6 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
           " distributed config."
       )
     return {
-        "enabled": True,
         "backend": self.BACKEND,
         "root_dir": str(self._raw_root_dir),
         "run_id": self._run_id,

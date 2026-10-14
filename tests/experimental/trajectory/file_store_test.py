@@ -1174,7 +1174,6 @@ class FileTrajectoryStoreConfigTest(
 
   def _create_config(self) -> dict[str, Any]:
     return {
-        "enabled": True,
         "backend": "file",
         "root_dir": self.create_tempdir().full_path,
         "run_id": "run_1",
