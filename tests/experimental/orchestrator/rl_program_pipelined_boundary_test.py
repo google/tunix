@@ -2664,6 +2664,59 @@ class StepTimeTest(absltest.TestCase):
             self.assertGreaterEqual(starts[k], callbacks[k - 1])
 
 
+  def test_each_step_starts_where_the_previous_one_ended(self):
+    # step_time spans the same work in every mode. Groups up front: with the
+    # pipelined boundary the next step's first micro-batch is sent ahead and
+    # its clock starts at the send. Groups slower than a step trains: nothing
+    # is sent ahead (with one micro-batch per step, that micro-batch is also
+    # the step's last), the step waits for its groups, and the wait falls
+    # inside its step_time, as without the pipelined boundary.
+    cases = (
+        # (case, groups per step, seconds between groups, the steps wait)
+        ("sent_ahead", 4, 0.0, False),
+        ("waits_four_per_step", 4, 0.3, True),
+        ("waits_one_per_step", 1, 0.6, True),
+    )
+    for case, full, gap_s, waits_expected in cases:
+      sc = dataclasses.replace(
+          _SCENARIOS["prompt_batch"],
+          num_prompts=4 * full,
+          full_batch_size=full,
+          mini_batch_size=full,
+          max_steps=4,
+          arrival_gap_s=gap_s,
+      )
+      for pipelined in (False, True):
+        run = _run(sc, pipelined=pipelined, program_cls=_StepTimes)
+        times, waits = {}, {}
+        for prefix, name, value, step in run.metrics:
+          if prefix == "orchestrator" and name == "step_time_sec":
+            times[step] = value
+          if prefix == "orchestrator" and name == "exposed_generation_time":
+            waits[step] = value
+        ends, callbacks = run.program.ends, run.program.callbacks
+        self.assertLen(ends, sc.max_steps)
+        starts = [ends[k] - times[k] for k in range(len(ends))]
+        for k in range(1, len(ends)):
+          with self.subTest(case=case, pipelined=pipelined, step=k):
+            gap = starts[k] - ends[k - 1]
+            self.assertGreaterEqual(gap, 0.0)  # the windows do not overlap
+            if waits_expected:
+              self.assertGreater(waits[k], 0.1)  # the step really waited
+              self.assertLess(gap, 0.5 * waits[k])  # and started before that
+            else:
+              self.assertLess(waits[k], 0.05)  # nothing to wait for
+              if pipelined:
+                # Sent ahead: the clock started at the send, right after step
+                # k-1's commit and before its deferred bookkeeping ran.
+                self.assertLess(starts[k], callbacks[k - 1])
+                self.assertLess(gap, 0.25 * times[k])
+              else:
+                # Step k-1's bookkeeping runs between the two steps.
+                self.assertGreaterEqual(starts[k], callbacks[k - 1])
+                self.assertLess(gap, 0.5 * times[k])
+
+
 class StepLogTest(absltest.TestCase):
   """Step k's `Train step` line waits for step k+1's first call.
 

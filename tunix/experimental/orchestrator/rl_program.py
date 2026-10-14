@@ -2129,14 +2129,19 @@ class StandardRLProgram(RLProgram):
       consumed_policy_version = self.policy_version
       st = next_state if next_state is not None else _StepState()
       next_state = None
+      # The step's clock starts at the step boundary in every mode: at the send
+      # when its first micro-batch went ahead, and otherwise here, before any
+      # wait for its groups, as without the pipelined boundary. So step_time
+      # spans the same work either way, and the wait also counts as exposed
+      # generation time.
+      if st.start_time is None:
+        st.start_time = time.monotonic()
       if self._intake_task is not None:
         # Still taking this step's groups ahead; from here the wait is exposed.
         intake, self._intake_task = self._intake_task, None
         t_wait = time.monotonic()
         await intake
         st.exposed_generation_time += time.monotonic() - t_wait
-      if st.start_time is None:
-        st.start_time = time.monotonic()
       step_start_time = st.start_time
       if st.groups_consumed == 0:
         # Nothing was taken ahead (the next batch was a hole, or the queue
