@@ -66,12 +66,22 @@ export ROLLOUT_ATTENTION_DP="${ROLLOUT_ATTENTION_DP:-false}"
 # RETRY_DROPLESS_FIRST_STEPS, FIRST_PHASE_RAGGED_BUFFER_FACTOR; maxtext #5570),
 # which rerun an overflowing micro-batch with a dropless program. For example,
 #   RAGGED_BUFFER_FACTOR=2.75 RETRY_WHEN_TOKENS_DROPPED=true
-# keeps this block's context offload, four chunks and HBM budget.
+# keeps this block's context offload and HBM budget; it keeps four chunks only
+# with TRAINER_TUNED_FLAGS=false (below).
+#
+# TRAINER_TUNED_FLAGS (see mlperf_397b_256_v7x.sh) is on in this recipe; `false`
+# renders the trainer as before. It was measured with the replay layout above, and
+# there it also sets two MoE token chunks. The fully dropless buffers
+# (RAGGED_BUFFER_FACTOR=-1) keep four.
+export TRAINER_TUNED_FLAGS="${TRAINER_TUNED_FLAGS:-true}"
 export DROPLESS="${DROPLESS:-true}"
 case "${DROPLESS}" in
   true)
     export RAGGED_BUFFER_FACTOR="${RAGGED_BUFFER_FACTOR:--1}"
     export REMAT_CONTEXT="${REMAT_CONTEXT:-offload}"
+    if [[ "${TRAINER_TUNED_FLAGS}" == "true" && "${RAGGED_BUFFER_FACTOR}" != "-1" ]]; then
+      export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
+    fi
     export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-4}"
     export TRAINER_MAX_HBM_SIZE_MIB="${TRAINER_MAX_HBM_SIZE_MIB:-84992}"
     if [[ "${RAGGED_BUFFER_FACTOR}" != "-1" && "${RETRY_WHEN_TOKENS_DROPPED:-false}" != "true" ]]; then
