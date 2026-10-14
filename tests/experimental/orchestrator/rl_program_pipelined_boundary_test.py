@@ -17,9 +17,9 @@
 `_train_loop` is one loop for both step boundaries. Every scenario runs
 through it in three modes -- flags off, `pipeline_step_boundary`, and that
 plus `stage_next_microbatch` -- and through a frozen, byte-identical copy of
-the loop as it was before the pipelined boundary (`_BaseLoopProgram`, tunix
-5c76ca072: google/tunix#2719's fused final update and deferred get_metrics on
-atwigg/mlperf), against the same trainer double. Flags off must be that loop
+the loop as it was before the pipelined boundary (`_BaseLoopProgram`:
+atwigg/mlperf as of google/tunix#2719's fused final update and deferred
+get_metrics), against the same trainer double. Flags off must be that loop
 exactly: the same trainer calls, the same program events (feeds, flushes,
 step callbacks) in the same order, and the same metrics. The pipelined modes
 must be indistinguishable from it to the trainer: the same calls with the
@@ -585,9 +585,9 @@ def _release_host_memory() -> None:
 
 
 # sha256 of the base's `StandardRLProgram._train_loop` source, which the copy
-# below reproduces byte for byte: tunix 5c76ca072, i.e. google/tunix#2719 (the
-# fused final update and the deferred get_metrics) merged with atwigg/mlperf
-# ac0011988. (Before the rebase it was f85f6e6be's, d4c0ba80...1383.)
+# below reproduces byte for byte: atwigg/mlperf from c52127238 (the merge of
+# google/tunix#2719: the fused final update and the deferred get_metrics)
+# through 21b62f2bb, where `_train_loop` is unchanged.
 _BASE_TRAIN_LOOP_SHA256 = (
     "37032f00118fcb4ef7d9019ac6aec1066c9f9d4ad7d8a03d9000c576c514f1dd"
 )
@@ -597,8 +597,8 @@ class _BaseLoopProgram(rl_program.StandardRLProgram):
   """The program with `_train_loop` exactly as before the pipelined boundary.
 
   The reference every run of the unified loop is compared with: its
-  `_train_loop` is tunix 5c76ca072's, verbatim (`BaseLoopOracleTest` pins its
-  hash).
+  `_train_loop` is atwigg/mlperf's at c52127238 (google/tunix#2719) through
+  21b62f2bb, verbatim (`BaseLoopOracleTest` pins its hash).
   """
 
   # A verbatim copy, pinned by its hash: never reformat it.
