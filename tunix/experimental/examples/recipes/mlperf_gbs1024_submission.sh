@@ -23,7 +23,6 @@ export ASYNC_WEIGHT_SYNC="${ASYNC_WEIGHT_SYNC:-true}"
 export PIPELINE_TRAIN_MICROBATCHES="${PIPELINE_TRAIN_MICROBATCHES:-true}"
 export IN_FLIGHT_WEIGHT_UPDATES="${IN_FLIGHT_WEIGHT_UPDATES:-true}"
 export MAX_STALENESS="${MAX_STALENESS:-2}"
-export ROLLOUT_PRIORITY_SCHEDULING="${ROLLOUT_PRIORITY_SCHEDULING:-true}"
 export OPENHANDS_MULTI_TOOL_CALLS="${OPENHANDS_MULTI_TOOL_CALLS:-true}"
 export WEIGHT_SYNC_PARALLEL_H2H="${WEIGHT_SYNC_PARALLEL_H2H:-1}"
 export VERIFY_WEIGHTS="${VERIFY_WEIGHTS:-false}"
@@ -49,6 +48,9 @@ unset _gbs
 # the next batches.
 # When STAGGERED_ROLLOUT_POOLS is enabled, independent pools eliminate
 # cross-batch contention, so initial dispatch stagger is not needed.
+# Each pool only ever holds one batch, so there is nothing to stagger or
+# prioritise against either; both default off here (and may still be set
+# explicitly).
 if [[ "${STAGGERED_ROLLOUT_POOLS:-false}" == "true" || "${STAGGERED_ROLLOUT_POOLS:-false}" == "True" || "${STAGGERED_ROLLOUT_POOLS:-false}" == "1" ]]; then
   export INITIAL_DISPATCH_FIRST_STAGGER_S="${INITIAL_DISPATCH_FIRST_STAGGER_S:-0}"
   export INITIAL_DISPATCH_STAGGER_S="${INITIAL_DISPATCH_STAGGER_S:-0}"
@@ -56,6 +58,7 @@ if [[ "${STAGGERED_ROLLOUT_POOLS:-false}" == "true" || "${STAGGERED_ROLLOUT_POOL
 else
   export INITIAL_DISPATCH_FIRST_STAGGER_S="${INITIAL_DISPATCH_FIRST_STAGGER_S:-175}"
   export INITIAL_DISPATCH_STAGGER_S="${INITIAL_DISPATCH_STAGGER_S:-75}"
+  export ROLLOUT_PRIORITY_SCHEDULING="${ROLLOUT_PRIORITY_SCHEDULING:-true}"
 fi
 export TRAINER_WARMUP_COMPILE="${TRAINER_WARMUP_COMPILE:-true}"
 export SANDBOX_WAIT_INITIAL="${SANDBOX_WAIT_INITIAL:-false}"
