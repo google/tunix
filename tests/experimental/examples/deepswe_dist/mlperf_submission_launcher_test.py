@@ -19,15 +19,18 @@ rendered JobSets, so the defaults, the DROPLESS switch and the learning-rate
 rule are tested through the same path a launch takes.
 """
 
+import argparse
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
 
 from absl.testing import absltest
+from tunix.experimental.examples.deepswe_dist import run_deepswe_dist
 
 _REPO = Path(__file__).resolve().parents[4]
 _RECIPE = (
@@ -86,6 +89,16 @@ def _jobset(render: str, suffix: str) -> str:
     if re.search(rf"^  name: {_PREFIX}-{suffix}$", doc, re.M):
       return doc
   raise AssertionError(f"no JobSet {_PREFIX}-{suffix} in the render")
+
+
+def _orch_args(render: str) -> argparse.Namespace:
+  """Parses the rendered orchestrator command with run_deepswe_dist's parser."""
+  (line,) = [
+      l for l in _jobset(render, "orch").splitlines() if "run_deepswe_dist" in l
+  ]
+  tokens = shlex.split(line)
+  (main_idx,) = [i for i, tok in enumerate(tokens) if "run_deepswe_dist" in tok]
+  return run_deepswe_dist._parse_args(tokens[main_idx + 1 :])  # pylint: disable=protected-access
 
 
 def _maxtext_flags(trainer: str) -> dict[str, str]:
@@ -213,6 +226,28 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertIn("--trainer_warmup_compile", orch)
     self.assertIn("--trainer_warmup_routed_experts", orch)
     self.assertIn("--no-sandbox_wait_initial", orch)
+
+  def test_start_up_staggers_reach_the_orchestrator_parser(self):
+    args = _orch_args(self.default)
+    self.assertEqual(args.initial_dispatch_stagger_s, 75.0)
+    self.assertEqual(args.initial_dispatch_first_stagger_s, 175.0)
+    self.assertEqual(args.max_staleness, 2)
+    self.assertTrue(args.rollout_priority_scheduling)
+    self.assertFalse(args.sandbox_wait_initial)
+
+  def test_start_up_stagger_overrides_reach_the_orchestrator_parser(self):
+    args = _orch_args(
+        _render(
+            INITIAL_DISPATCH_STAGGER_S="60",
+            INITIAL_DISPATCH_FIRST_STAGGER_S="200",
+        )
+    )
+    self.assertEqual(args.initial_dispatch_stagger_s, 60.0)
+    self.assertEqual(args.initial_dispatch_first_stagger_s, 200.0)
+    # 0 drops the flag, so batch 1 falls back to the general stagger.
+    args = _orch_args(_render(INITIAL_DISPATCH_FIRST_STAGGER_S="0"))
+    self.assertEqual(args.initial_dispatch_stagger_s, 75.0)
+    self.assertIsNone(args.initial_dispatch_first_stagger_s)
 
   def test_start_up_flags_can_be_turned_off(self):
     orch = _jobset(
