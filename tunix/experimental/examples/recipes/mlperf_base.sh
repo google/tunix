@@ -377,6 +377,11 @@ if [[ "${_stage_next_microbatch_on}" == "true" && "${_pipeline_step_boundary_on}
   exit 1
 fi
 unset _pipeline_step_boundary_on _stage_next_microbatch_on
+# Stage trainer micro-batches ahead of fwd_bwd (`off` | `stage` | `serialize`).
+# Forwarded by k8s_launcher.sh to both the orchestrator and trainer containers.
+export TUNIX_STAGE_BATCH="${TUNIX_STAGE_BATCH:-off}"
+export TUNIX_STAGE_MAX_DEVICE_BATCHES="${TUNIX_STAGE_MAX_DEVICE_BATCHES:-1}"
+export TUNIX_MAX_STAGED_BATCHES="${TUNIX_MAX_STAGED_BATCHES:-2}"
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-prompt_batch}
 
 # Trajectory Store: flag to disable writing to trajectory store entirely (file and SQL).

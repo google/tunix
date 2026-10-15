@@ -277,7 +277,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       already been evicted (the call is then a no-op).
     """
     removed = self._rollout_session.remove_actor(handle, exc=exc)
-    if removed and not self._rollout_workers and self._zero_worker_since is None:
+    if (
+        removed
+        and not self._rollout_workers
+        and self._zero_worker_since is None
+    ):
       self._zero_worker_since = time.monotonic()
     return removed
 
@@ -1033,6 +1037,49 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         update_ready=bool(metadata.get("update_ready")),
     )
 
+  async def stage_train_batch(
+      self,
+      payload: datatypes.RLTrainerPayload,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      stage_key: str | None = None,
+  ) -> str | None:
+    """Stages a micro-batch on the trainer via `TrainerWorker.stage_batch`."""
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+    key = stage_key or f"stage_req_{uuid.uuid4().hex[:8]}"
+    # Carries payload.metadata here; the subsequent train_step(None, stage_key)
+    # sends {} because TrainerWorker only echoes request metadata and the
+    # engine only inspects `updated`/`train_step`/`update_ready` on the final
+    # micro-batch.
+    request = datatypes.TrainRequest(
+        request_id=key,
+        payload=payload,
+        metadata=dict(payload.metadata),
+    )
+    try:
+      resp = await self._invoke_worker(worker, "stage_batch", request=request)
+    except (AttributeError, RuntimeError) as exc:
+      logging.warning("stage_train_batch fallback for %s: %s", key, exc)
+      return None
+    metadata = resp.metadata
+    if metadata.get("staged"):
+      return key
+    return None
+
+  async def reset_staged_batches(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+  ) -> None:
+    """Best-effort reset of any queued staged batches on the trainer worker."""
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      return
+    try:
+      await self._invoke_worker(worker, "reset_staged")
+    except (AttributeError, RuntimeError):
+      pass
+
   async def train_step(
       self,
       payload: datatypes.RLTrainerPayload | None,
@@ -1041,18 +1088,20 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       apply_optimizer: bool = True,
       skip_jit: bool = False,
       staged_request_id: str | None = None,
+      stage_key: str | None = None,
       defer_update: bool = False,
       **kwargs: Any,
   ) -> Any:
     """Executes atomic gradient accumulation / update on TrainerWorker.
 
     Args:
-      payload: The micro-batch, or None with `staged_request_id`.
+      payload: The micro-batch, or None with `staged_request_id` / `stage_key`.
       role: Trainer role.
       accumulate_gradients: Reported back in the result.
       apply_optimizer: Apply the accumulated gradients after this micro-batch.
       skip_jit: Forwarded to the trainer.
       staged_request_id: Runs the micro-batch `stage_train_step` sent ahead.
+      stage_key: Runs the micro-batch `stage_train_batch` sent ahead.
       defer_update: With `apply_optimizer`, the micro-batch is still the
         step's last, but the update is left to `apply_deferred_update`, for a
         caller that stages the next step's first micro-batch in between. Only
@@ -1067,6 +1116,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       raise ValueError(
           "train_step takes a payload or a staged_request_id, not both."
       )
+    if stage_key is not None:
+      kwargs = {**kwargs, "stage_key": stage_key}
     if defer_update:
       if not apply_optimizer:
         raise ValueError(
@@ -1093,7 +1144,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     else:
       metadata = dict(getattr(payload, "metadata", {}) or {})
       request = datatypes.TrainRequest(
-          request_id=f"train_req_{uuid.uuid4().hex[:8]}",
+          request_id=stage_key or f"train_req_{uuid.uuid4().hex[:8]}",
           payload=payload,
           metadata=metadata,
       )
@@ -1525,9 +1576,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     try:
       raw_next_batch = metadata.get("next_batch_idx")
       restored_next_batch_idx = (
-          int(raw_next_batch)
-          if raw_next_batch is not None
-          else restored_step
+          int(raw_next_batch) if raw_next_batch is not None else restored_step
       )
     except (TypeError, ValueError):
       logging.warning(

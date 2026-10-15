@@ -39,6 +39,7 @@ import collections
 import concurrent.futures
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import inspect
 import json
@@ -598,6 +599,24 @@ class RemoteExecutionServer(abc.ABC):
     self._response_queue_loop: Optional[asyncio.AbstractEventLoop] = None
     self._request_counter: int = 0
     self._background_tasks: set[asyncio.Task[Any]] = set()
+    # Lazily built thread pool for the instance's `remote_executor_methods`
+    # (see `execute_request`).
+    self._method_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
+
+  def _method_executor(self) -> concurrent.futures.ThreadPoolExecutor:
+    if self._method_pool is None:
+      methods = getattr(self._instance, "remote_executor_methods", ()) or ()
+      max_workers = max(2, len(methods))
+      self._method_pool = concurrent.futures.ThreadPoolExecutor(
+          max_workers=max_workers, thread_name_prefix="rpc-method"
+      )
+    return self._method_pool
+
+  def close_executor(self) -> None:
+    """Shuts down the background method executor pool if one was created."""
+    pool, self._method_pool = self._method_pool, None
+    if pool is not None:
+      pool.shutdown(wait=False)
 
   def _get_response_queue(self) -> asyncio.Queue[ExecutionResponse]:
     """Returns the response queue bound to the currently running event loop."""
@@ -742,6 +761,18 @@ class RemoteExecutionServer(abc.ABC):
     try:
       if inspect.iscoroutinefunction(method):
         result = await method(*request.args, **request.kwargs)
+      elif target_name in getattr(
+          self._instance, "remote_executor_methods", ()
+      ):
+        # A sync method the instance asks to run off the event loop (e.g.
+        # TrainerWorker.stage_batch, and fwd_bwd under TUNIX_STAGE_BATCH=stage),
+        # so the loop keeps serving while it blocks. Two pool threads: a stage
+        # call must be served while a fwd_bwd blocks; the instance orders its
+        # own state access (the orchestrator never has two fwd_bwd in flight).
+        result = await asyncio.get_running_loop().run_in_executor(
+            self._method_executor(),
+            functools.partial(method, *request.args, **request.kwargs),
+        )
       else:
         result = method(*request.args, **request.kwargs)
       return ExecutionResponse(result=result, request_id=request.request_id)
@@ -891,12 +922,13 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
         loop.run_until_complete(self._server.wait_for_termination())
         loop.run_until_complete(asyncio.sleep(0.1))
     finally:
+      self.close_executor()
       self._serve_loop = None
       asyncio.set_event_loop(None)
       loop.close()
 
   async def stop_serving(self, grace: float = 0.5) -> None:
-
+    self.close_executor()
     if self._server:
       await self._server.stop(grace)
 
@@ -1095,14 +1127,19 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         request = ExecutionRequest(
             method_name=method_name, args=args, kwargs=kwargs
         )
-        chunks = request.serialize_async_chunks(chunk_size=self._stream_chunk_bytes)
+        chunks = request.serialize_async_chunks(
+            chunk_size=self._stream_chunk_bytes
+        )
         call = rpc(chunks, timeout=self._rpc_timeout_s)
         response = await ExecutionResponse.deserialize_async_chunks(call)
         assert response is not None
         return response.unwrap()
       except _grpc_aio_lib.AioRpcError as err:
-        if err.code() == _grpc_lib.StatusCode.UNAVAILABLE and attempt < max_retries:
-          backoff = 0.5 * (2 ** attempt)
+        if (
+            err.code() == _grpc_lib.StatusCode.UNAVAILABLE
+            and attempt < max_retries
+        ):
+          backoff = 0.5 * (2**attempt)
           logging.warning(
               "RPC %s to %s failed with %s; refreshing channel and retrying in"
               " %.2fs (attempt %d/%d)...",
@@ -1465,7 +1502,9 @@ class RoutingActorPool(ActorPool):
       ):
         return getattr(self.router, method_name)(self._actors, args, kwargs)
       elif callable(self.router):
-        return self.router(self._actors, method_name, args, kwargs)  # pyrefly: ignore[bad-return]
+        return self.router(
+            self._actors, method_name, args, kwargs
+        )  # pyrefly: ignore[bad-return]
       else:
         raise TypeError(
             f"Router object {type(self.router)} must provide a method matching "
@@ -1974,7 +2013,9 @@ class PoolExecutionSession:
         self._in_flight = max(0, self._in_flight - 1)
         cancelled_count += 1
         if result_factory is not None:
-          self._response_queue.put_nowait((result_factory(req_id, payload), None))
+          self._response_queue.put_nowait(
+              (result_factory(req_id, payload), None)
+          )
       else:
         kept.append(req_id)
     self._pending_queue = kept
