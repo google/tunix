@@ -43,6 +43,10 @@ _RECIPE = (
 _PREFIX = "launcher-test"
 _HBM_CAP = "--xla_tpu_max_hbm_size_mib=84992"
 _SC_FLAG = "--xla_tpu_enable_offloading_copy_to_sparsecore=false"
+_ND_RS_FLAG = "--xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true"
+_REMAT_FLAG = "--xla_jf_rematerialization_percent_shared_memory_limit=99"
+# The trainer libtpu flags TRAINER_TUNED_FLAGS appends.
+_TUNED_LIBTPU_FLAGS = (_SC_FLAG, _ND_RS_FLAG, _REMAT_FLAG)
 # What TRAINER_TUNED_FLAGS changes in the trainer's MaxText flags at the bench
 # cell: key -> (value with it off, value with it on). A repeated key takes its
 # last value, as MaxText's command line parsing does, and an absent key its
@@ -51,16 +55,21 @@ _MAXTEXT_DEFAULTS = {
     "cast_grads_after_all_reduce": "false",
     "gdn_cp_matmul_precision": "highest",
     "gdn_cp_state": "remat",
+    "moe_route": "remat",
 }
 _TUNED_KEYS = {
     "cast_grads_after_all_reduce": ("false", "true"),
     "context_parallel_strategy": ("ring", "all_gather"),
+    "decoder_layer_input": ("offload", "device"),
     "gdn_cp_matmul_precision": ("highest", "high"),
     "gdn_cp_mode": ("head", "seq"),
     "gdn_cp_state": ("remat", "device"),
+    "moe_route": ("remat", "device"),
     "num_moe_token_chunks": ("4", "2"),
     "sa_fuse_reciprocal": ("false", "true"),
     "sa_use_base2_exp": ("true", "false"),
+    "wi_tile_dlhs_embed_dim": ("4096", "2048"),
+    "wi_tile_dlhs_mlp_dim": ("1024", "2048"),
 }
 # The launch whose trainer the RL trainer bench (AI-Hypercomputer/maxtext#5701)
 # measured TRAINER_TUNED_FLAGS on: the replay layout (buffer factor 2.75 with
@@ -148,9 +157,10 @@ def _flag_changes(
 
 
 def _without_tuned_flags(trainer: str) -> str:
-  """Returns the trainer JobSet without the libtpu flag and MaxText flags."""
-  trainer = re.sub(rf'\n *- "{re.escape(_SC_FLAG)}"', "", trainer)  # proxy arg
-  trainer = trainer.replace(f" {_SC_FLAG}", "")  # trainer and worker env
+  """Returns the trainer JobSet without the tuned libtpu flags and MaxText flags."""
+  for flag in _TUNED_LIBTPU_FLAGS:
+    trainer = re.sub(rf'\n *- "{re.escape(flag)}"', "", trainer)  # proxy arg
+    trainer = trainer.replace(f" {flag}", "")  # trainer and worker env
   return re.sub(r'MAXTEXT_EXTRA_FLAGS="[^"]*"', "MAXTEXT_EXTRA_FLAGS=", trainer)
 
 
@@ -413,9 +423,9 @@ class SubmissionLauncherTest(absltest.TestCase):
     after = _maxtext_flags(_jobset(self.bench_on, "train"))
     self.assertEqual(_flag_changes(before, after), _TUNED_KEYS)
 
-  def test_tuned_flags_leave_moe_route_at_its_default(self):
-    # moe_route=device was inert in the bench's MaxText and is live at the pin.
-    self.assertNotIn("moe_route", _maxtext_flags(_jobset(self.default, "train")))
+  def test_tuned_flags_keep_moe_route_on_device(self):
+    flags = _maxtext_flags(_jobset(self.default, "train"))
+    self.assertEqual(flags["moe_route"], "device")
 
   def test_tuned_flags_change_only_the_trainer_flags(self):
     off_docs = self.bench_off.split("\n---\n")
@@ -425,9 +435,10 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(changed, [_jobset(self.bench_on, "train")])
     off = _jobset(self.bench_off, "train")
     on = _jobset(self.bench_on, "train")
-    self.assertNotIn("offloading_copy_to_sparsecore", off)
-    # The trainer env, the Pathways worker env and the Pathways proxy args.
-    self.assertEqual(on.count(_SC_FLAG), 3)
+    for flag in _TUNED_LIBTPU_FLAGS:
+      self.assertNotIn(flag.split("=")[0], off)
+      # The trainer env, the Pathways worker env and the Pathways proxy args.
+      self.assertEqual(on.count(flag), 3)
     self.assertEqual(_without_tuned_flags(on), _without_tuned_flags(off))
 
   def test_tuned_flags_false_turns_the_block_off(self):
@@ -437,7 +448,8 @@ class SubmissionLauncherTest(absltest.TestCase):
         {key: _value(flags, key) for key in _TUNED_KEYS},
         {key: off for key, (off, _) in _TUNED_KEYS.items()},
     )
-    self.assertNotIn("offloading_copy_to_sparsecore", trainer)
+    for flag in _TUNED_LIBTPU_FLAGS:
+      self.assertNotIn(flag.split("=")[0], trainer)
     # The fully dropless buffers and chunks of 512, as before the switch.
     self.assertEqual(flags["ragged_buffer_factor"], "-1")
     self.assertEqual(flags["context"], "offload")
@@ -493,7 +505,8 @@ class SubmissionLauncherTest(absltest.TestCase):
         "mlperf_gbs512.sh",
     ):
       render = _render(_RECIPE.with_name(name))
-      self.assertNotIn("offloading_copy_to_sparsecore", render, name)
+      for flag in _TUNED_LIBTPU_FLAGS:
+        self.assertNotIn(flag.split("=")[0], render, name)
       flags = _maxtext_flags(_jobset(render, "train"))
       for key, (off, _) in _TUNED_KEYS.items():
         if key != "num_moe_token_chunks":  # two in these recipes either way
