@@ -16,6 +16,9 @@
 3. **Decoupled Testing Architecture**
    CLI flag parsing and store initialization are tested once in `run_explorer_test.py`. Individual subcommand tests (`commands/*_test.py`) do **not** touch the filesystem or CLI parser; instead, they test command logic directly against prefilled in-memory stores using the test harness in `commands/testing.py`.
 
+4. **Decoupled Diagnostics Library (`diagnostics/`)**
+  Statistics live in `diagnostics/stats.py` (`:diagnostics`), which has no CLI dependencies: `TrajectoryStats.from_trajectory()` summarizes one trajectory and `RunStats.from_trajectories()` aggregates a run into a `pandas.DataFrame` (`RunStats.df`, columns per `COLUMN_DTYPES`) whose columns are reduced into run totals. Unreported quantities are `None` (nulls in the DataFrame), never `0`; both classes offer `to_json_dict()` for the `--json` contract. Subcommands render these objects rather than computing their own figures, so notebooks and evaluation scripts can import the same numbers.
+
 ---
 
 ## Usage
