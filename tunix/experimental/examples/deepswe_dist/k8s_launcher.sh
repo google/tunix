@@ -45,6 +45,11 @@ export MAX_TURNS=${MAX_TURNS:-20}
 export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
 export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
+# Padding position in each packed row: end (the orchestrator's default) or
+# start (padding first), and the token multiple a start row moves by (4096).
+# Empty leaves the orchestrator's default.
+export PACK_PAD_POSITION=${PACK_PAD_POSITION:-}
+export PACK_PAD_ALIGN=${PACK_PAD_ALIGN:-}
 export COMPUTE_LOGPS_CHUNK_SIZE=${COMPUTE_LOGPS_CHUNK_SIZE:-}
 
 # Set to tunix to run Tunix's PeftTrainer, and maxtext to run MaxText's MaxTextTrainingEngine
@@ -589,6 +594,8 @@ start_orchestrator() {
         ${IMAGE_REWRITE_PREFIX:+--image_rewrite_prefix=${IMAGE_REWRITE_PREFIX}} \
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
+        ${PACK_PAD_POSITION:+--pack_pad_position=${PACK_PAD_POSITION}} \
+        ${PACK_PAD_ALIGN:+--pack_pad_align=${PACK_PAD_ALIGN}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
         $( [[ "${TRAINER_MESH_EXPERT:-1}" -gt 1 ]] && echo "--trainer_expert=${TRAINER_MESH_EXPERT}" ) \
         ${RPC_TIMEOUT_S:+--rpc_timeout_s=${RPC_TIMEOUT_S}} \

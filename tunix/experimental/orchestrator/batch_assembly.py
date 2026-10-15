@@ -196,6 +196,13 @@ class BatchConfig:
       activation_batch / activation_batch_moe), so the packed row count must be
       divisible by the product of all four, not just fsdp * dp. A user with
       custom logical_axis_rules will need a different product.
+    pack_pad_position: Where each packed row's padding goes: "end" (default)
+      or "start", which moves the row right by its trailing padding rounded
+      down to a multiple of `pack_pad_align` tokens so that the padding comes
+      first (see `packing.PAD_POSITIONS`). Requires sequence packing.
+    pack_pad_align: The multiple of tokens a "start" row moves by (default
+      4096); a positive multiple of `segment_align_multiple`, smaller than
+      the packed row. Only valid with pack_pad_position="start".
   """
 
   pad_id: int = 0
@@ -208,6 +215,8 @@ class BatchConfig:
   trainer_dp: int | None = None
   trainer_expert: int | None = None
   trainer_fsdp_transpose: int | None = None
+  pack_pad_position: str = packing.DEFAULT_PAD_POSITION
+  pack_pad_align: int = packing.DEFAULT_PAD_ALIGN
 
 
 def _extract_trajectory_id(item: Any) -> str:
@@ -638,6 +647,8 @@ class SequencePackedBatchAssembler:
       pad_id: int = 0,
       max_segments_per_packed_row: int | None = None,
       segment_align_multiple: int = packing.DEFAULT_SEGMENT_ALIGN_MULTIPLE,
+      pad_position: str = packing.DEFAULT_PAD_POSITION,
+      pad_align: int = packing.DEFAULT_PAD_ALIGN,
       start_batch_index: int = 0,
   ):
     """Initializes SequencePackedBatchAssembler.
@@ -652,6 +663,12 @@ class SequencePackedBatchAssembler:
         that may be packed into a single row.
       segment_align_multiple: Token boundary alignment multiple for the start of
         each segment after the first in a packed row.
+      pad_position: "end" (padding after each row's segments) or "start"
+        (padding first), see `packing.PAD_POSITIONS`.
+      pad_align: With "start", each row moves right by its trailing padding
+        rounded down to a multiple of this; a positive multiple of
+        `segment_align_multiple` below `max_packed_len`. Must stay at its
+        default with "end", where it would do nothing.
       start_batch_index: Initial microbatch index offset for tracking IDs.
     """
     if batch_size <= 0:
@@ -677,6 +694,21 @@ class SequencePackedBatchAssembler:
           "segment_align_multiple must be positive, got"
           f" {segment_align_multiple}."
       )
+    packing.validate_pad_position(
+        pad_position, pad_align, segment_align_multiple
+    )
+    # Settings under which the option would do nothing are rejected rather
+    # than ignored, so a run never measures the default by accident.
+    if pad_position == "start" and pad_align >= max_packed_len:
+      raise ValueError(
+          f"pad_position='start' with pad_align={pad_align} >= max_packed_len"
+          f"={max_packed_len} never moves a row; lower pad_align."
+      )
+    if pad_position != "start" and pad_align != packing.DEFAULT_PAD_ALIGN:
+      raise ValueError(
+          f"pad_align={pad_align} only applies with pad_position='start', got"
+          f" pad_position={pad_position!r}."
+      )
     self.batch_size = batch_size
     self.max_packed_len = max_packed_len
     self.pad_id = pad_id
@@ -684,6 +716,8 @@ class SequencePackedBatchAssembler:
     self.mini_batch_size = mini_batch_size
     self.max_segments_per_packed_row = max_segments_per_packed_row
     self.segment_align_multiple = segment_align_multiple
+    self.pad_position = pad_position
+    self.pad_align = pad_align
     self._batch_counter = start_batch_index
 
     # Each entry is a `(PackItem, trajectory_id, raw_payload)` converted once at
@@ -736,6 +770,8 @@ class SequencePackedBatchAssembler:
         carried=carried,
         routed_shape=routed_shape,
         segment_align_multiple=self.segment_align_multiple,
+        pad_position=self.pad_position,
+        pad_align=self.pad_align,
     )
     batch_tracking_id = f"{_BATCH_ID_PREFIX}_{self._batch_counter}"
     merged_lineage = _merge_batch_lineage(
@@ -1335,10 +1371,13 @@ def create_batch_assembler(
 
     logging.info(
         "Using SequencePackedBatchAssembler with max_seq_token_per_tpu: %d, "
-        "max_segments_per_packed_row: %s, pack_size: %d",
+        "max_segments_per_packed_row: %s, pack_size: %d, "
+        "pack_pad_position: %s, pack_pad_align: %d",
         batch_config.max_seq_token_per_tpu,
         batch_config.max_segments_per_packed_row,
         pack_size,
+        batch_config.pack_pad_position,
+        batch_config.pack_pad_align,
     )
     return SequencePackedBatchAssembler(
         batch_size=pack_size,
@@ -1348,6 +1387,8 @@ def create_batch_assembler(
         pad_id=batch_config.pad_id,
         max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
         segment_align_multiple=batch_config.segment_align_multiple,
+        pad_position=batch_config.pack_pad_position,
+        pad_align=batch_config.pack_pad_align,
     )
 
   if batch_config.max_prompt_length is not None:
@@ -1355,6 +1396,15 @@ def create_batch_assembler(
       raise ValueError(
           "max_response_length must be specified in batch_config when"
           " max_prompt_length is set for PaddedBatchAssembler."
+      )
+    if (
+        batch_config.pack_pad_position != packing.DEFAULT_PAD_POSITION
+        or batch_config.pack_pad_align != packing.DEFAULT_PAD_ALIGN
+    ):
+      raise ValueError(
+          "pack_pad_position and pack_pad_align place the padding of packed"
+          " rows, and PaddedBatchAssembler does not pack: set"
+          " max_seq_token_per_tpu to pack, or leave both at their defaults."
       )
     return PaddedBatchAssembler(
         batch_size=train_micro_batch_size,
@@ -1372,4 +1422,6 @@ def create_batch_assembler(
       pad_id=batch_config.pad_id,
       max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
       segment_align_multiple=batch_config.segment_align_multiple,
+      pad_position=batch_config.pack_pad_position,
+      pad_align=batch_config.pack_pad_align,
   )

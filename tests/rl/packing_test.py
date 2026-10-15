@@ -15,6 +15,7 @@
 """Tests for the type-agnostic packing core logic."""
 
 from absl.testing import absltest
+from absl.testing import parameterized
 import numpy as np
 from tunix.rl import packing
 
@@ -483,6 +484,412 @@ class PackCoreTest(absltest.TestCase):
     row0 = chunk[0]
     self.assertTrue(np.shares_memory(row0.ids, chunk.ids))
     self.assertTrue(np.shares_memory(row0.routed_experts, chunk.routed_experts))
+
+
+def _random_bins(rng, *, budget, segment_align_multiple, pack_size):
+  """Random bins, filled as the assemblers fill them (`fill_one_chunk`).
+
+  The items include empty ones and prompt-only or completion-only ones; all of
+  them carry the same random subset of the per-token fields, and most of them
+  carry routing (an item without it is packed as unset routing).
+
+  Args:
+    rng: The random generator.
+    budget: Tokens per row.
+    segment_align_multiple: The packer's segment alignment.
+    pack_size: Rows in the chunk.
+
+  Returns:
+    The bins and the per-token fields to pack.
+  """
+  carried = tuple(f for f in packing.PER_TOKEN_FIELDS if rng.random() < 0.5)
+  routed = rng.random() < 0.7
+  items = []
+  for _ in range(int(rng.integers(1, 10))):
+    if rng.random() < 0.1:
+      p = c = 0
+    else:
+      n = int(rng.integers(1, max(2, budget // int(rng.integers(1, 5)))))
+      p = int(rng.integers(0, n + 1))
+      c = n - p
+    items.append(
+        packing.PackItem(
+            prompt_ids=rng.integers(5, 1000, p).astype(np.int32),
+            completion_ids=rng.integers(5, 1000, c).astype(np.int32),
+            completion_mask=(rng.random(c) < 0.8).astype(np.float32),
+            advantages=rng.standard_normal(c).astype(np.float32),
+            per_token={
+                f: rng.standard_normal(c).astype(np.float32) for f in carried
+            },
+            policy_version=np.array([int(rng.integers(0, 9))]),
+            routed_experts=(
+                rng.integers(0, 64, (p + c, 3, 2)).astype(np.int16)
+                if routed and rng.random() < 0.85
+                else None
+            ),
+        )
+    )
+  bins, _ = packing.fill_one_chunk(
+      items,
+      pack_size=pack_size,
+      budget=budget,
+      max_segments=8,
+      segment_align_multiple=segment_align_multiple,
+  )
+  return bins, carried
+
+
+def _row_arrays(chunk):
+  """Every `[rows, budget, ...]` array of a PackedChunk, by name."""
+  arrays = {
+      name: np.asarray(getattr(chunk, name))
+      for name in (
+          "ids",
+          "prompt_mask",
+          "completion_mask",
+          "advantages",
+          "segment_ids",
+          "segment_positions",
+      )
+  }
+  for name, values in chunk.per_token.items():
+    arrays[f"per_token/{name}"] = np.asarray(values)
+  if chunk.routed_experts is not None:
+    arrays["routed_experts"] = np.asarray(chunk.routed_experts)
+  return arrays
+
+
+def _rotated_like_pad_first(end, *, pad_align):
+  """The "end" chunk's rows, each rotated right by its rounded trailing padding.
+
+  Computed from the "end" layout alone, not by the packer: this is the
+  definition the "start" layout is tested against.
+
+  Args:
+    end: A chunk packed with pad_position="end".
+    pad_align: The multiple the trailing padding is rounded down to.
+
+  Returns:
+    The rotated arrays by name, and the shift of each row.
+  """
+  arrays = _row_arrays(end)
+  budget = arrays["ids"].shape[1]
+  shifts = []
+  for seg in arrays["segment_ids"]:
+    real = np.flatnonzero(seg > 0)
+    trailing = budget - 1 - int(real[-1]) if real.size else 0
+    shifts.append(trailing // pad_align * pad_align)
+  rotated = {
+      name: np.stack([np.roll(a[r], s, axis=0) for r, s in enumerate(shifts)])
+      for name, a in arrays.items()
+  }
+  return rotated, shifts
+
+
+class PadPositionTest(parameterized.TestCase):
+  """pad_position="start": each packed row's padding goes in front of it."""
+
+  def _assert_same_chunk(self, got, want):
+    got_arrays, want_arrays = _row_arrays(got), _row_arrays(want)
+    self.assertEqual(sorted(got_arrays), sorted(want_arrays))
+    for name, value in want_arrays.items():
+      self.assertEqual(got_arrays[name].dtype, value.dtype, name)
+      np.testing.assert_array_equal(got_arrays[name], value, err_msg=name)
+    self.assertEqual(got.num_real_segments, want.num_real_segments)
+    self.assertEqual(len(got.policy_versions), len(want.policy_versions))
+    for a, b in zip(got.policy_versions, want.policy_versions):
+      self.assertIs(a, b)
+
+  def test_defaults(self):
+    self.assertEqual(packing.DEFAULT_PAD_POSITION, "end")
+    self.assertEqual(packing.DEFAULT_PAD_ALIGN, 4096)
+    self.assertEqual(packing.PAD_POSITIONS, ("end", "start"))
+
+  def test_start_row_layout(self):
+    items = [
+        _item([1, 2], [3, 4, 5], adv=1.5),
+        _item([6], [7, 8], adv=0.5),
+    ]
+    [[row]] = packing.pack_core(
+        items,
+        budget=16,
+        pack_size=1,
+        segment_align_multiple=1,
+        pad_position="start",
+        pad_align=4,
+    )
+    # 8 tokens and 8 of padding: the row moves right by 8.
+    np.testing.assert_array_equal(row.ids, [0] * 8 + [1, 2, 3, 4, 5, 6, 7, 8])
+    np.testing.assert_array_equal(row.segment_ids, [0] * 8 + [1] * 5 + [2] * 3)
+    np.testing.assert_array_equal(
+        row.segment_positions, [0] * 8 + [0, 1, 2, 3, 4, 0, 1, 2]
+    )
+    np.testing.assert_array_equal(
+        row.prompt_mask, [0] * 8 + [1, 1, 0, 0, 0, 1, 0, 0]
+    )
+    np.testing.assert_array_equal(
+        row.completion_mask, [0] * 8 + [0, 0, 1, 1, 1, 0, 1, 1]
+    )
+    np.testing.assert_allclose(
+        row.advantages, [0] * 8 + [0, 0, 1.5, 1.5, 1.5, 0, 0.5, 0.5]
+    )
+    self.assertEqual(row.num_real_segments, 2)
+
+  def test_start_rounds_the_shift_down_to_pad_align(self):
+    # 7 tokens leave 9 of padding: pad_align 4 moves the row by 8, and one
+    # padding token stays at the end.
+    [[row]] = packing.pack_core(
+        [_item([1, 2, 3], [4, 5, 6, 7])],
+        budget=16,
+        pack_size=1,
+        segment_align_multiple=1,
+        pad_position="start",
+        pad_align=4,
+    )
+    np.testing.assert_array_equal(row.ids, [0] * 8 + [1, 2, 3, 4, 5, 6, 7, 0])
+    np.testing.assert_array_equal(row.segment_ids, [0] * 8 + [1] * 7 + [0])
+
+  def test_start_keeps_segment_starts_aligned(self):
+    # With the default 64-token alignment the "end" row holds [0, 30) and
+    # [64, 84) and 428 tokens of padding; pad_align 128 moves it by 384.
+    items = [
+        _item(np.arange(1, 11), np.arange(1, 21)),
+        _item(np.arange(1, 6), np.arange(1, 16)),
+    ]
+    [[row]] = packing.pack_core(
+        items, budget=512, pack_size=1, pad_position="start", pad_align=128
+    )
+    np.testing.assert_array_equal(
+        np.flatnonzero(row.segment_ids == 1), np.arange(384, 414)
+    )
+    np.testing.assert_array_equal(
+        np.flatnonzero(row.segment_ids == 2), np.arange(448, 468)
+    )
+
+  def test_start_moves_by_the_default_pad_align(self):
+    # The recipe's setting: "start" with pad_align left at its default. 4096
+    # and 4096.0 compare equal, and only an int can index a row, so pack one.
+    [[row]] = packing.pack_core(
+        [_item(np.arange(1, 11), np.arange(1, 21))],
+        budget=8192,
+        pack_size=1,
+        pad_position="start",
+    )
+    # 30 tokens leave 8162 of padding: the row moves by 4096.
+    np.testing.assert_array_equal(
+        np.flatnonzero(row.segment_ids), np.arange(4096, 4126)
+    )
+
+  def test_start_measures_the_padding_after_the_last_real_token(self):
+    # The shift is the padding after the row's last token, rounded down to
+    # pad_align; the end of the row is not rounded up to the segment alignment
+    # first. That only matters when the budget is not a multiple of
+    # segment_align_multiple: 100 tokens of a 300-token row leave 200 of
+    # padding, so the row moves by 192, where rounding its end up to 128 would
+    # leave 172 and move it by 128. The empty item goes last, which is where
+    # `fill_one_chunk` puts empty items.
+    chunk = packing.pack_chunk(
+        [[_item(np.arange(1, 41), np.arange(1, 61)), _item([], [])]],
+        budget=300,
+        pad_id=0,
+        carried=(),
+        pad_position="start",
+        pad_align=64,
+    )
+    np.testing.assert_array_equal(
+        np.flatnonzero(chunk.segment_ids[0]), np.arange(192, 292)
+    )
+
+  def test_start_moves_routing_and_per_token_values_with_their_tokens(self):
+    routing = np.arange(3 * 2 * 2, dtype=np.int16).reshape(3, 2, 2)
+    item = packing.PackItem(
+        prompt_ids=np.array([1], dtype=np.int32),
+        completion_ids=np.array([2, 3], dtype=np.int32),
+        completion_mask=np.ones(2, dtype=np.float32),
+        advantages=np.ones(2, dtype=np.float32),
+        per_token={"returns": np.array([1.0, 2.0], dtype=np.float32)},
+        routed_experts=routing,
+    )
+    row = packing.pack_bin(
+        [item],
+        budget=8,
+        pad_id=0,
+        carried=("returns",),
+        segment_align_multiple=1,
+        pad_position="start",
+        pad_align=4,
+    )
+    # 3 tokens and 5 of padding: the row moves right by 4.
+    np.testing.assert_array_equal(row.ids, [0, 0, 0, 0, 1, 2, 3, 0])
+    np.testing.assert_allclose(
+        row.per_token["returns"], [0, 0, 0, 0, 0, 1, 2, 0]
+    )
+    np.testing.assert_array_equal(row.routed_experts[4:7], routing)
+    np.testing.assert_array_equal(
+        row.routed_experts[:4], packing.UNSET_ROUTED_EXPERT
+    )
+    np.testing.assert_array_equal(
+        row.routed_experts[7:], packing.UNSET_ROUTED_EXPERT
+    )
+
+  def test_start_is_the_end_row_rotated_by_its_rounded_padding(self):
+    rng = np.random.default_rng(0)
+    shifted_rows = 0
+    for _ in range(200):
+      sam = int(rng.choice([1, 8, 64, 128]))
+      # 300 and 1000 are not multiples of every segment alignment.
+      budget = int(rng.choice([256, 300, 1000, 1024, 4096, 8192]))
+      pad_align = sam * int(rng.choice([1, 2, 4, 16]))
+      bins, carried = _random_bins(
+          rng,
+          budget=budget,
+          segment_align_multiple=sam,
+          pack_size=int(rng.integers(1, 5)),
+      )
+      kwargs = dict(
+          budget=budget, pad_id=3, carried=carried, segment_align_multiple=sam
+      )
+      end = packing.pack_chunk(bins, **kwargs)
+      start = packing.pack_chunk(
+          bins, pad_position="start", pad_align=pad_align, **kwargs
+      )
+      want, shifts = _rotated_like_pad_first(end, pad_align=pad_align)
+      got = _row_arrays(start)
+      self.assertEqual(sorted(got), sorted(want))
+      for name, value in want.items():
+        self.assertEqual(got[name].dtype, value.dtype, name)
+        np.testing.assert_array_equal(got[name], value, err_msg=name)
+      self.assertEqual(start.num_real_segments, end.num_real_segments)
+      for a, b in zip(start.policy_versions, end.policy_versions):
+        self.assertIs(a, b)
+      for r, shift in enumerate(shifts):
+        # Only padding moved to the front: the row's first `shift` positions.
+        self.assertFalse(got["segment_ids"][r, :shift].any())
+        np.testing.assert_array_equal(got["ids"][r, :shift], 3)
+        # Every segment still starts on the segment alignment.
+        seg_starts = np.flatnonzero(
+            (got["segment_ids"][r] > 0) & (got["segment_positions"][r] == 0)
+        )
+        np.testing.assert_array_equal(seg_starts % sam, 0)
+      shifted_rows += sum(s > 0 for s in shifts)
+    # The comparison is not vacuous: many rows did move.
+    self.assertGreater(shifted_rows, 100)
+
+  def test_start_keeps_each_token_with_its_values(self):
+    # Checked against the items themselves, not against the "end" layout.
+    rng = np.random.default_rng(1)
+    for _ in range(50):
+      bins, carried = _random_bins(
+          rng, budget=4096, segment_align_multiple=64, pack_size=3
+      )
+      chunk = packing.pack_chunk(
+          bins,
+          budget=4096,
+          pad_id=3,
+          carried=carried,
+          pad_position="start",
+          pad_align=512,
+      )
+      for r, bin_items in enumerate(bins):
+        real_items = [item for item in bin_items if item.num_tokens]
+        for seg, item in enumerate(real_items, start=1):
+          p = item.prompt_ids.shape[0]
+          where = np.flatnonzero(chunk.segment_ids[r] == seg)
+          self.assertLen(where, item.num_tokens)
+          self.assertEqual(where[-1] - where[0] + 1, item.num_tokens)
+          np.testing.assert_array_equal(
+              chunk.ids[r, where],
+              np.concatenate([item.prompt_ids, item.completion_ids]),
+          )
+          np.testing.assert_array_equal(
+              chunk.segment_positions[r, where], np.arange(item.num_tokens)
+          )
+          np.testing.assert_array_equal(chunk.prompt_mask[r, where[:p]], 1.0)
+          np.testing.assert_array_equal(chunk.prompt_mask[r, where[p:]], 0.0)
+          np.testing.assert_array_equal(
+              chunk.completion_mask[r, where[p:]], item.completion_mask
+          )
+          np.testing.assert_array_equal(
+              chunk.advantages[r, where[p:]], item.advantages
+          )
+          for name in carried:
+            np.testing.assert_array_equal(
+                chunk.per_token[name][r, where[p:]], item.per_token[name]
+            )
+          if item.routed_experts is not None:
+            np.testing.assert_array_equal(
+                chunk.routed_experts[r, where], item.routed_experts
+            )
+
+  def test_end_layout_is_the_same_whatever_pad_align(self):
+    # pad_align is not read with "end": no value of it changes or rejects an
+    # "end" row, also at segment alignments that do not divide 4096.
+    rng = np.random.default_rng(2)
+    for _ in range(100):
+      sam = int(rng.choice([1, 3, 48, 64, 100]))
+      budget = int(rng.choice([300, 1000, 4096]))
+      bins, carried = _random_bins(
+          rng,
+          budget=budget,
+          segment_align_multiple=sam,
+          pack_size=int(rng.integers(1, 4)),
+      )
+      kwargs = dict(
+          budget=budget, pad_id=3, carried=carried, segment_align_multiple=sam
+      )
+      default = packing.pack_chunk(bins, **kwargs)
+      for pad_align in (packing.DEFAULT_PAD_ALIGN, 0, -1, 100):
+        self._assert_same_chunk(
+            packing.pack_chunk(
+                bins, pad_position="end", pad_align=pad_align, **kwargs
+            ),
+            default,
+        )
+
+  def test_rows_that_cannot_move_are_unchanged(self):
+    # A full row, a row whose trailing padding is shorter than pad_align, an
+    # empty bin and a bin of empty items.
+    bins = [
+        [_item(np.arange(1, 5), np.arange(1, 5))],
+        [_item([1], [2, 3])],
+        [],
+        [_item([], [])],
+    ]
+    kwargs = dict(budget=8, pad_id=0, carried=(), segment_align_multiple=1)
+    self._assert_same_chunk(
+        packing.pack_chunk(bins, pad_position="start", pad_align=8, **kwargs),
+        packing.pack_chunk(bins, **kwargs),
+    )
+
+  @parameterized.named_parameters(
+      ("unknown_position", "middle", 4096, 64),
+      ("capitalized_position", "Start", 4096, 64),
+      ("zero_align", "start", 0, 64),
+      ("negative_align", "start", -64, 64),
+      ("align_not_a_multiple", "start", 100, 64),
+      ("align_below_the_segment_alignment", "start", 32, 64),
+  )
+  def test_invalid_settings_raise(self, pad_position, pad_align, sam):
+    items = [_item([1, 2], [3])]
+    kwargs = dict(
+        pad_position=pad_position,
+        pad_align=pad_align,
+        segment_align_multiple=sam,
+    )
+    with self.assertRaisesRegex(ValueError, "pad_"):
+      packing.validate_pad_position(pad_position, pad_align, sam)
+    with self.assertRaisesRegex(ValueError, "pad_"):
+      packing.pack_core(items, budget=8192, **kwargs)
+    with self.assertRaisesRegex(ValueError, "pad_"):
+      packing.pack_core([], budget=8192, **kwargs)
+    with self.assertRaisesRegex(ValueError, "pad_"):
+      packing.pack_chunk([items], budget=8192, pad_id=0, carried=(), **kwargs)
+    with self.assertRaisesRegex(ValueError, "pad_"):
+      packing.pack_bin(items, budget=8192, pad_id=0, carried=(), **kwargs)
+
+  def test_start_accepts_any_multiple_of_the_segment_alignment(self):
+    for pad_align, sam in ((64, 64), (4096, 64), (100, 1), (3, 3)):
+      packing.validate_pad_position("start", pad_align, sam)
 
 
 if __name__ == "__main__":

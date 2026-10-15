@@ -1040,10 +1040,11 @@ _LOGICAL_LENGTH_AXIS = "activation_length"
 
 
 def sharded_head_mode() -> str | None:
-  """Returns None (off) or "local", from TUNIX_LOGPS_SHARDED_HEAD.
+  """Returns None (off), "local" or "fused", from TUNIX_LOGPS_SHARDED_HEAD.
 
   Case and surrounding whitespace are ignored. Off: unset, empty, 0, false, off,
-  no. On: local, 1, true, on, yes.
+  no. On: local, 1, true, on, yes. On, with each chunk scored by the fused
+  log-softmax described above `_target_hit`: fused.
 
   Raises:
     ValueError: The variable has any other value.
@@ -1053,10 +1054,146 @@ def sharded_head_mode() -> str | None:
     return None
   if value in ("1", "true", "on", "yes", "local"):
     return "local"
+  if value == "fused":
+    return "fused"
   raise ValueError(
       f"{SHARDED_HEAD_ENV}={value!r}: expected local, 1, true, on or yes (on),"
-      " or empty, 0, false, off or no (off)."
+      " fused (on, with fused scoring), or empty, 0, false, off or no (off)."
   )
+
+
+# Fused scoring for the sharded head: TUNIX_LOGPS_SHARDED_HEAD=fused.
+#
+# With "local" the head scores each chunk with `selective_log_softmax` (and
+# `compute_entropy_from_logits`), and its backward differentiates that with
+# `jax.vjp`. At a 248,320-entry vocabulary two parts of it cost more than the
+# arithmetic:
+#   * The target logit is a `take_along_axis` gather. On TPU, XLA writes an f32
+#     copy of the [chunk, vocab] logits for SparseCore to gather the targets
+#     from, and the transpose of the gather is a scatter-add: an f32
+#     [chunk, vocab] cotangent, a flattened copy of it, a sort of the indices, a
+#     SparseCore scatter and a copy back to bf16, per chunk.
+#   * The backward recomputes the logsumexp's max and exp-sum, and the entropy
+#     recomputes the same reductions, plus one more exp pass, in the forward.
+# "fused" scores a chunk in one pass over its logits (`_head_logps_stats`): the
+# target logit by a one-hot select-sum, the max and exp-sum once, the entropy
+# from the same exponentials, and the max and exp-sum kept for the backward
+# (8 bytes per token). When only the log-probs have a cotangent, as in GRPO,
+# whose loss stops the entropy's gradient, the backward forms the logits'
+# cotangent in one elementwise pass over the recomputed logits
+# (`_head_logps_cotangent`): no f32 [chunk, vocab] intermediate, no scatter and
+# no reductions. An entropy cotangent takes the "local" backward.
+# The log-probs and the logits' cotangent are the f32 operations of the "local"
+# path in the same order. The exp-sum, though, is reduced in a different fusion
+# (with the entropy's sum, when the entropy is returned), and XLA may order
+# that reduction differently, so the log-probs and the gradients can differ
+# from "local" in their last bits. The entropy is computed by another formula
+# and differs in its last bits.
+
+
+def _target_hit(ids: jax.Array, shape) -> tuple[jax.Array, jax.Array]:
+  """One-hot of `ids` over the last axis of `shape`, as take_along_axis reads it.
+
+  Args:
+    ids: [...] target ids.
+    shape: Shape [..., V] of the logits the ids index.
+
+  Returns:
+    (hit, valid): `hit[..., v]` is True where v is the target, a negative id
+    counting from the end as in take_along_axis; `valid` is False for an id
+    outside [-V, V), which take_along_axis's default "fill" mode reads as NaN
+    and whose scatter, in its transpose, drops the cotangent.
+  """
+  vocab = shape[-1]
+  ids = jnp.where(ids < 0, ids + vocab, ids)  # take_along_axis wraps negatives
+  hit = (
+      jax.lax.broadcasted_iota(ids.dtype, shape, len(shape) - 1)
+      == ids[..., None]
+  )
+  return hit, (ids >= 0) & (ids < vocab)
+
+
+def _head_logps_stats(logits: jax.Array, ids: jax.Array, with_entropy: bool):
+  """`selective_log_softmax` (and the entropy) of a chunk, keeping max and sum.
+
+  Args:
+    logits: [..., V] logits, as `selective_log_softmax` receives them.
+    ids: [...] target ids.
+    with_entropy: Also compute the entropy of `compute_entropy_from_logits`.
+
+  Returns:
+    (logps, entropy, m, s): `selective_log_softmax(logits, ids)` by the same f32
+    operations; the entropy of `compute_entropy_from_logits(logits)` up to f32
+    rounding, or None; and the logsumexp's per-token max `m` and exp-sum `s`
+    (f32 [...]) for `_head_logps_cotangent`.
+  """
+  x = jnp.where(jnp.isfinite(logits), logits.astype(jnp.float32), 0.0)
+  # jax.nn.logsumexp(x, axis=-1), op for op (jax/_src/ops/special.py, b=None),
+  # with its max and exp-sum kept. The max is a stop_gradient there too.
+  amax = jnp.max(x, axis=-1, initial=-jnp.inf)
+  m = jax.lax.stop_gradient(
+      jax.lax.select(jnp.isfinite(amax), amax, jax.lax.full_like(amax, 0))
+  )
+  shifted = x - m[..., None]
+  e = jnp.exp(shifted)
+  s = jnp.abs(jnp.sum(e, axis=-1))
+  log_s = jnp.log(s)
+  # The target logit as a select-sum over the one-hot. It has one non-zero term,
+  # so it is exactly the gathered value, and its transpose is a select instead
+  # of take_along_axis's scatter-add.
+  hit, valid = _target_hit(ids, x.shape)
+  target = jnp.sum(jnp.where(hit, x, 0.0), axis=-1)
+  target = jnp.where(valid, target, jnp.nan)
+  logps = target - (log_s + m)
+  entropy = None
+  if with_entropy:
+    # The entropy from the same exponentials, so the whole forward is one pass
+    # over the logits: with p = e / s, -sum(p * log p) = log(s) - sum(e * (x -
+    # m)) / s. compute_entropy_from_logits reaches the same value through a
+    # second log_softmax and a second exp pass. The entropy is a metric here:
+    # GRPO's loss stops its gradient, and an entropy with a cotangent takes the
+    # autodiff backward.
+    entropy = log_s - jnp.sum(e * shifted, axis=-1) / s
+  return logps, entropy, m, s
+
+
+def _head_logps_cotangent(
+    logits: jax.Array,
+    ids: jax.Array,
+    g: jax.Array,
+    m: jax.Array,
+    s: jax.Array,
+) -> jax.Array:
+  """Cotangent of `logits` for `selective_log_softmax(logits, ids)` and `g`.
+
+  What `jax.vjp` of `selective_log_softmax` computes, as one elementwise
+  expression. With x the finite-masked f32 logits, autodiff adds the transpose
+  of the gather (a scatter-add of g into zeros) to the transpose of the
+  logsumexp (sub -> -g, log -> divide by s, abs -> unchanged for s > 0,
+  reduce_sum -> broadcast, exp -> multiply by exp(x - m)) and masks the sum
+  with isfinite. Here the scatter is a select on the one-hot, which puts the
+  same g at the target and zeros elsewhere; the other operations are the same
+  f32 operations in the same order, with the max `m` and exp-sum `s` that
+  `_head_logps_stats` kept.
+
+  Args:
+    logits: [..., V] logits, as `selective_log_softmax` received them.
+    ids: [...] target ids.
+    g: [...] cotangent of the log-probs.
+    m: [...] max from `_head_logps_stats`.
+    s: [...] exp-sum from `_head_logps_stats`.
+
+  Returns:
+    f32 [..., V] cotangent of `logits`.
+  """
+  finite = jnp.isfinite(logits)
+  x = jnp.where(finite, logits.astype(jnp.float32), 0.0)
+  hit, _ = _target_hit(ids, x.shape)
+  g = g.astype(jnp.float32)
+  d_x = jnp.where(hit, g[..., None], 0.0) + (-g / s)[..., None] * jnp.exp(
+      x - m[..., None]
+  )
+  return jnp.where(finite, d_x, 0.0)
 
 
 def _mesh_axes(entry) -> tuple[str, ...]:
@@ -1195,6 +1332,9 @@ def maybe_compute_sharded_chunked_logps(
   Off unless TUNIX_LOGPS_SHARDED_HEAD turns it on (see `sharded_head_mode`).
   The switch is read when the caller is traced and is not part of any jit
   cache key, so a change after the first trace takes effect only on a retrace.
+  With "fused", chunks are scored by `_head_logps_stats`, and a backward in
+  which only the log-probs have a cotangent forms the logits' cotangent with
+  `_head_logps_cotangent` (see the comment above `_target_hit`).
 
   Returns None, after logging
   "[logps-head] sharded head off, using compute_chunked_logps: <reason>", when:
@@ -1283,6 +1423,7 @@ def maybe_compute_sharded_chunked_logps(
     gather_dims.append(dim)
   param_dtypes = [jnp.result_type(p) for p in params]
   num_out = 2 if return_entropy else 1
+  fused = mode == "fused"
   logging.info(
       "[logps-head] sharded head %s: tokens batch=%s seq=%s (%s), %dx%d local"
       " tokens in %d steps of %d; gathers %s over %s",
@@ -1307,10 +1448,15 @@ def maybe_compute_sharded_chunked_logps(
       values[i] = x
     return nnx.merge(graphdef, jax.tree.unflatten(treedef, values))
 
-  def chunk_outputs(full, hs, ids, with_entropy):
+  def chunk_logits(full, hs):
+    # The f32 logits a chunk is scored from.
     logits = merged(full).compute_final_logits(hs).astype(jnp.float32)
     if temperature != 0.0 and temperature != 1.0:
       logits /= temperature
+    return logits
+
+  def chunk_outputs(full, hs, ids, with_entropy):
+    logits = chunk_logits(full, hs)
     logps = selective_log_softmax(logits, ids)
     if with_entropy:
       return logps, compute_entropy_from_logits(logits)
@@ -1329,19 +1475,32 @@ def maybe_compute_sharded_chunked_logps(
         g, gather_axes, scatter_dimension=dim, tiled=True
     )
 
-  def scan_forward(full, h, t):
+  def chunk_outputs_fused(full, hs, ids, with_stats):
+    # `chunk_outputs` for "fused", plus each token's max and exp-sum when the
+    # backward will need them.
+    logps, entropy, m, s = _head_logps_stats(
+        chunk_logits(full, hs), ids, return_entropy
+    )
+    outs = (logps, entropy) if return_entropy else (logps,)
+    return outs + (m, s) if with_stats else outs
+
+  def scan_forward(full, h, t, with_stats=False):
     def step(bufs, i):
       start = i * chunk
       hs = jax.lax.dynamic_slice_in_dim(h, start, chunk, axis=1)
       ids = jax.lax.dynamic_slice_in_dim(t, start, chunk, axis=1)
-      outs = chunk_outputs(full, hs, ids, return_entropy)
+      if fused:
+        outs = chunk_outputs_fused(full, hs, ids, with_stats)
+      else:
+        outs = chunk_outputs(full, hs, ids, return_entropy)
       bufs = tuple(
           jax.lax.dynamic_update_slice_in_dim(b, o, start, axis=1)
           for b, o in zip(bufs, outs)
       )
       return bufs, None
 
-    bufs = tuple(jnp.zeros(t.shape, jnp.float32) for _ in range(num_out))
+    num_bufs = num_out + (2 if with_stats else 0)
+    bufs = tuple(jnp.zeros(t.shape, jnp.float32) for _ in range(num_bufs))
     bufs, _ = jax.lax.scan(step, bufs, jnp.arange(h.shape[1] // chunk))
     return bufs
 
@@ -1363,10 +1522,69 @@ def maybe_compute_sharded_chunked_logps(
     full = [
         gather(p, d, dt) for p, d, dt in zip(ps, gather_dims, gather_dtypes)
     ]
+    if fused:
+      # Also keep the max and exp-sum of every token (f32 [B, T] each).
+      bufs = scan_forward(full, h, t, with_stats=True)
+      return bufs[:num_out], (h, t, tuple(full), bufs[num_out:])
     return scan_forward(full, h, t), (h, t, tuple(full))
 
+  def bwd_fused(h, t, full, stats, d_logps):
+    # The "local" backward's token chunks, with the logits' cotangent formed in
+    # one pass (`_head_logps_cotangent`) from the forward's max and exp-sum
+    # instead of by autodiff of `selective_log_softmax` (a scatter-add and f32
+    # [chunk, vocab] copies). The table and hidden-state cotangents still come
+    # from `jax.vjp` of `compute_final_logits` and are accumulated as there.
+    m_all, s_all = stats
+    scaled = temperature != 0.0 and temperature != 1.0
+
+    def step(carry, i):
+      acc, dh = carry
+      start = i * chunk
+      hs = jax.lax.dynamic_slice_in_dim(h, start, chunk, axis=1)
+      ids = jax.lax.dynamic_slice_in_dim(t, start, chunk, axis=1)
+      g = jax.lax.dynamic_slice_in_dim(d_logps, start, chunk, axis=1)
+      m = jax.lax.dynamic_slice_in_dim(m_all, start, chunk, axis=1)
+      s = jax.lax.dynamic_slice_in_dim(s_all, start, chunk, axis=1)
+      raw, vjp = jax.vjp(
+          lambda full_, hs_: merged(full_).compute_final_logits(hs_),
+          list(full),
+          hs,
+      )
+      # `chunk_logits` on `raw`, the logits' cotangent, then the transposes of
+      # the temperature division (a division) and of `astype(float32)` (a
+      # cast).
+      logits = raw.astype(jnp.float32)
+      if scaled:
+        logits /= temperature
+      d_logits = _head_logps_cotangent(logits, ids, g, m, s)
+      if scaled:
+        d_logits /= temperature
+      # An identity that pins one materialized cotangent. Without it XLA:TPU
+      # writes the cotangent for the hidden-state matmul and recomputes it (exp
+      # included) inside the table-gradient matmul's operand fusion; with it
+      # the cotangent becomes the logits matmul's epilogue and both gradient
+      # matmuls read it (in a deviceless TPU compile of the head at chunk
+      # 1024: 0.47 GiB fewer temporaries and a third fewer transcendentals).
+      d_logits = jax.lax.optimization_barrier(d_logits.astype(raw.dtype))
+      d_full, d_hs = vjp(d_logits)
+      acc = tuple(a + gg.astype(jnp.float32) for a, gg in zip(acc, d_full))
+      dh = jax.lax.dynamic_update_slice_in_dim(
+          dh, d_hs.astype(dh.dtype), start, axis=1
+      )
+      return (acc, dh), None
+
+    acc = tuple(jnp.zeros(f.shape, jnp.float32) for f in full)
+    (acc, dh), _ = jax.lax.scan(
+        step, (acc, jnp.zeros_like(h)), jnp.arange(h.shape[1] // chunk)
+    )
+    acc = [scatter(a, d) for a, d in zip(acc, gather_dims)]
+    return (dh, None, *[a.astype(dt) for a, dt in zip(acc, param_dtypes)])
+
   def head_local_bwd(res, cts):
-    h, t, full = res
+    if fused:
+      h, t, full, stats = res
+    else:
+      h, t, full = res
     d_logps = cts[0]
     # Without return_entropy the primal has one output, so no entropy
     # cotangent: treat it as a symbolic zero.
@@ -1382,6 +1600,11 @@ def maybe_compute_sharded_chunked_logps(
       ]
       zeros = [jnp.zeros(s, dt) for s, dt in zip(shard_shapes, param_dtypes)]
       return (jnp.zeros_like(h), None, *zeros)
+    if fused and use_logps and not use_entropy:
+      # An entropy with a cotangent (a loss that differentiates the entropy)
+      # takes the autodiff backward below, which is the "local" backward
+      # exactly.
+      return bwd_fused(h, t, full, stats, d_logps)
 
     def step(carry, i):
       acc, dh = carry
