@@ -24,6 +24,17 @@ Lifecycle:
   3. It is released once the request finishes or is aborted.
 """
 
+import enum
+
+
+class RequestStatus(enum.Enum):
+  """Lifecycle status of a request."""
+
+  # Waiting to be scheduled.
+  PENDING = enum.auto()
+  # Scheduled, and holds KV cache pages.
+  RUNNING = enum.auto()
+
 
 class RequestState:
   """Mutable runtime state for a single request."""
@@ -36,6 +47,10 @@ class RequestState:
     # Number of leading tokens in `token_ids` whose KV cache entries have been
     # computed.
     self.num_completed_tokens = 0
+    # Number of tokens scheduled as input to the model runner step.
+    self.num_tokens_scheduled = 0
+
+    self.status = RequestStatus.PENDING
 
   @property
   def request_id(self) -> str:
