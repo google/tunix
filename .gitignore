@@ -13,6 +13,8 @@
 
 # virtualenv/venv directories
 /venv/
+/.venv/
+/myenv/
 /bin/
 /include/
 /lib/
@@ -25,3 +27,12 @@
 /docs/sg_execution_times.rst
 /docs/generated
 build/*
+
+# Logs and runtime artifacts
+*.log
+/artifacts/
+/checkpoints/
+
+# Generated protobuf files
+*_pb2.py
+*_pb2_grpc.py
