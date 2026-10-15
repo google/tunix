@@ -917,9 +917,100 @@ class CancelByPromptIdTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(res.error_type, "CancelledError")
     self.assertEqual(res.prompt_id, "p_cancelled")
 
-    # After weight sync completes, the same prompt_id is no longer blocked.
+    # Cancelled prompt IDs remain tracked across weight sync so stragglers
+    # parked on admission or arriving under async staleness are still dropped.
     await manager.post_weight_sync()
-    self.assertEqual(len(manager._cancelled_prompt_ids), 0)
+    self.assertIn("p_cancelled", manager._cancelled_prompt_ids)
+    with mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      res_after_sync = await manager._generate_one(req_late)
+      collector_cls.assert_not_called()
+    self.assertEqual(res_after_sync.error_type, "CancelledError")
+
+  async def test_cancel_by_prompt_id_aborts_request_parked_on_weight_sync_admission(
+      self,
+  ):
+    manager = manager_lib.RolloutManager(
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    await manager.pre_weight_sync()
+
+    req_parked = datatypes.RolloutRequest(
+        request_id="req_parked",
+        prompt="parked prompt",
+        prompt_id="p_parked",
+        group_index=0,
+    )
+    with mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      task = asyncio.create_task(manager._generate_one(req_parked))
+      await asyncio.sleep(0.02)
+      self.assertFalse(task.done())
+
+      # Cancel while admission is closed for weight sync, then reopen admission.
+      await manager.cancel_by_prompt_id("p_parked")
+      await manager.post_weight_sync()
+
+      res = await asyncio.wait_for(task, timeout=1.0)
+      collector_cls.assert_not_called()
+      self.assertEqual(res.error_type, "CancelledError")
+      self.assertEqual(res.prompt_id, "p_parked")
+
+  async def test_cancel_by_prompt_id_does_not_block_on_slow_cleanup(self):
+    started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+
+    class _SlowCleanupCollector:
+
+      def __init__(self, traj_id, request, env_client=None, **kwargs):
+        del kwargs
+        self.traj_id = traj_id
+        self.request = request
+        self.env = env_client
+        self.is_cancelled = False
+
+      def cancel(self):
+        self.is_cancelled = True
+
+      async def run_episode(self):
+        started.set()
+        try:
+          await asyncio.sleep(10.0)
+        except asyncio.CancelledError:
+          await cleanup_release.wait()
+          raise
+
+    manager = manager_lib.RolloutManager(
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    req = datatypes.RolloutRequest(
+        request_id="req_slow", prompt="p_slow", prompt_id="p_slow", group_index=0
+    )
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _SlowCleanupCollector,
+    ):
+      task = asyncio.create_task(manager._generate_one(req))
+      await asyncio.wait_for(started.wait(), timeout=1.0)
+
+      # cancel_by_prompt_id and pre_weight_sync must not hang waiting on
+      # cleanup_release.
+      cancelled_count = await asyncio.wait_for(
+          manager.cancel_by_prompt_id("p_slow"), timeout=0.5
+      )
+      self.assertEqual(cancelled_count, 1)
+      await asyncio.wait_for(manager.pre_weight_sync(), timeout=0.5)
+
+      cleanup_release.set()
+      res = await asyncio.wait_for(task, timeout=1.0)
+      self.assertEqual(res.error_type, "CancelledError")
 
 
 if __name__ == "__main__":

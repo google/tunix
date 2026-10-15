@@ -130,7 +130,15 @@ WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 LOG_DIR=${LOG_DIR:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+DISABLE_TRAJECTORY_STORE=${DISABLE_TRAJECTORY_STORE:-false}
+if [[ "${DISABLE_TRAJECTORY_STORE}" =~ ^(1|true|True|TRUE)$ ]] || [[ "${ENABLE_TRAJECTORY_STORE:-true}" =~ ^(0|false|False|FALSE)$ ]]; then
+  DISABLE_TRAJECTORY_STORE=true
+  TRAJECTORY_STORE_ROOT_DIR=""
+  TRAJECTORY_STORE_ROOT=""
+  TRAJECTORY_STORE_DB_URL=""
+fi
 TRAJECTORY_STORE_ROOT_DIR=${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-}}
+TRAJECTORY_STORE_DB_URL=${TRAJECTORY_STORE_DB_URL:-}
 FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
 TRAINABLE_PARAMETERS_MASK=${TRAINABLE_PARAMETERS_MASK:-}
 
@@ -613,8 +621,16 @@ echo "Launching CPU orchestrator..."
   if [[ -n "$TRAJECTORY_LOG_DIR" ]]; then
     ORCHESTRATOR_CMD+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")
   fi
-  if [[ -n "$TRAJECTORY_STORE_ROOT_DIR" ]]; then
-    ORCHESTRATOR_CMD+=(--trajectory_store_root_dir="$TRAJECTORY_STORE_ROOT_DIR")
+  if [[ "${DISABLE_TRAJECTORY_STORE}" == "true" ]]; then
+    ORCHESTRATOR_CMD+=(--disable_trajectory_store)
+  else
+    ORCHESTRATOR_CMD+=(--no-disable_trajectory_store)
+    if [[ -n "$TRAJECTORY_STORE_ROOT_DIR" ]]; then
+      ORCHESTRATOR_CMD+=(--trajectory_store_root_dir="$TRAJECTORY_STORE_ROOT_DIR")
+    fi
+    if [[ -n "$TRAJECTORY_STORE_DB_URL" ]]; then
+      ORCHESTRATOR_CMD+=(--trajectory_store_db_url="$TRAJECTORY_STORE_DB_URL")
+    fi
   fi
   if [[ -n "$TRAINABLE_PARAMETERS_MASK" ]]; then
     ORCHESTRATOR_CMD+=(--trainable_parameters_mask="$TRAINABLE_PARAMETERS_MASK")

@@ -792,6 +792,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " 'postgresql+psycopg2://user:pass@host:5432/dbname')."
       ),
   )
+  parser.add_argument(
+      "--disable_trajectory_store",
+      action=argparse.BooleanOptionalAction,
+      default=(
+          os.getenv("DISABLE_TRAJECTORY_STORE", "false").lower()
+          in ("true", "1")
+          or os.getenv("ENABLE_TRAJECTORY_STORE", "true").lower()
+          in ("false", "0")
+      ),
+      help="Disables writing to trajectory store entirely (file and SQL).",
+  )
   return parser.parse_args(argv)
 
 
@@ -799,6 +810,8 @@ def _build_trajectory_store_config(
     args: argparse.Namespace,
 ) -> list[dict[str, Any] | None] | None:
   """Builds the [file_store, sql_store] TrajectoryStore configuration list."""
+  if getattr(args, "disable_trajectory_store", False):
+    return None
   root_dir = (args.trajectory_store_root_dir or "").strip()
   db_url = (args.trajectory_store_db_url or "").strip()
   file_cfg = (

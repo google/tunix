@@ -511,6 +511,27 @@ class SubmissionLauncherTest(absltest.TestCase):
       self.assertIn("--no-pipeline_step_boundary", orch, name)
       self.assertIn("--no-stage_next_microbatch", orch, name)
 
+  def test_trajectory_store_is_enabled_by_default(self):
+    orch = _jobset(self.default, "orch")
+    self.assertIn("--no-disable_trajectory_store", orch)
+    self.assertIn("--trajectory_store_root_dir=", orch)
+
+  def test_disable_trajectory_store_omits_store_args_and_passes_flag(self):
+    render = _render(DISABLE_TRAJECTORY_STORE="true")
+    orch = _jobset(render, "orch")
+    self.assertIn("--disable_trajectory_store", orch)
+    self.assertNotIn("--no-disable_trajectory_store", orch)
+    self.assertNotIn("--trajectory_store_root_dir", orch)
+    self.assertNotIn("--trajectory_store_db_url", orch)
+
+  def test_enable_trajectory_store_false_disables_store(self):
+    render = _render(ENABLE_TRAJECTORY_STORE="false")
+    orch = _jobset(render, "orch")
+    self.assertIn("--disable_trajectory_store", orch)
+    self.assertNotIn("--no-disable_trajectory_store", orch)
+    self.assertNotIn("--trajectory_store_root_dir", orch)
+    self.assertNotIn("--trajectory_store_db_url", orch)
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -378,13 +378,24 @@ if [[ "${_stage_next_microbatch_on}" == "true" && "${_pipeline_step_boundary_on}
 fi
 unset _pipeline_step_boundary_on _stage_next_microbatch_on
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-prompt_batch}
-export USE_DEFAULT_SQL_STORE="${USE_DEFAULT_SQL_STORE:-true}"
-if [[ "${DRY_RUN:-false}" != "true" ]] && [[ -z "${TRAJECTORY_STORE_DB_URL:-}" ]] && [[ "${USE_DEFAULT_SQL_STORE}" =~ ^(1|true|True|TRUE)$ ]]; then
-  if [[ -n "${PROJECT:-}" ]]; then
-    TRAJECTORY_STORE_DB_URL="$(timeout 10s gcloud secrets versions access latest --secret=tunix-sql-store-uri --project="${PROJECT}" --quiet 2>/dev/null || true)"
-  fi
-  if [[ -z "${TRAJECTORY_STORE_DB_URL}" ]]; then
-    echo "WARNING: USE_DEFAULT_SQL_STORE is enabled but TRAJECTORY_STORE_DB_URL could not be retrieved from GCP Secret Manager for project '${PROJECT:-}'; SQL trajectory store will be skipped." >&2
+
+# Trajectory Store: flag to disable writing to trajectory store entirely (file and SQL).
+export DISABLE_TRAJECTORY_STORE="${DISABLE_TRAJECTORY_STORE:-false}"
+if [[ "${DISABLE_TRAJECTORY_STORE}" =~ ^(1|true|True|TRUE)$ ]] || [[ "${ENABLE_TRAJECTORY_STORE:-true}" =~ ^(0|false|False|FALSE)$ ]]; then
+  export DISABLE_TRAJECTORY_STORE="true"
+  export TRAJECTORY_STORE_ROOT_DIR=""
+  export TRAJECTORY_STORE_ROOT=""
+  export TRAJECTORY_STORE_DB_URL=""
+  export USE_DEFAULT_SQL_STORE="false"
+else
+  export USE_DEFAULT_SQL_STORE="${USE_DEFAULT_SQL_STORE:-true}"
+  if [[ "${DRY_RUN:-false}" != "true" ]] && [[ -z "${TRAJECTORY_STORE_DB_URL:-}" ]] && [[ "${USE_DEFAULT_SQL_STORE}" =~ ^(1|true|True|TRUE)$ ]]; then
+    if [[ -n "${PROJECT:-}" ]]; then
+      TRAJECTORY_STORE_DB_URL="$(timeout 10s gcloud secrets versions access latest --secret=tunix-sql-store-uri --project="${PROJECT}" --quiet 2>/dev/null || true)"
+    fi
+    if [[ -z "${TRAJECTORY_STORE_DB_URL}" ]]; then
+      echo "WARNING: USE_DEFAULT_SQL_STORE is enabled but TRAJECTORY_STORE_DB_URL could not be retrieved from GCP Secret Manager for project '${PROJECT:-}'; SQL trajectory store will be skipped." >&2
+    fi
   fi
 fi
 export TRAJECTORY_STORE_DB_URL="${TRAJECTORY_STORE_DB_URL:-}"
@@ -460,7 +471,7 @@ export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
 export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
 export SANDBOX_NODE_SELECTOR_KEY="${SANDBOX_NODE_SELECTOR_KEY:-workload}"
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox}"
-export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-2}"
+export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-${NUM_GENERATIONS_TO_DISPATCH:-${NUM_GENERATIONS:-16}}}"
 export SANDBOX_WAIT_INITIAL="${SANDBOX_WAIT_INITIAL:-false}"
 export SANDBOX_IMAGE_PULL_POLICY="${SANDBOX_IMAGE_PULL_POLICY:-IfNotPresent}"
 export PREPULL_SANDBOX_IMAGES="${PREPULL_SANDBOX_IMAGES:-true}"

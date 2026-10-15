@@ -235,6 +235,13 @@ export SAMPLES_COUNT=${SAMPLES_COUNT:-0}
 export IS_LAST_CHECKPOINT=${IS_LAST_CHECKPOINT:-false}
 export METRIC_LOGGER_DIR=${METRIC_LOGGER_DIR:-}
 export TARGET_ACCURACY=${TARGET_ACCURACY:-0.69}
+export DISABLE_TRAJECTORY_STORE=${DISABLE_TRAJECTORY_STORE:-false}
+if [[ "${DISABLE_TRAJECTORY_STORE}" =~ ^(1|true|True|TRUE)$ ]] || [[ "${ENABLE_TRAJECTORY_STORE:-true}" =~ ^(0|false|False|FALSE)$ ]]; then
+  export DISABLE_TRAJECTORY_STORE=true
+  export TRAJECTORY_STORE_ROOT_DIR=""
+  export TRAJECTORY_STORE_ROOT=""
+  export TRAJECTORY_STORE_DB_URL=""
+fi
 export TRAJECTORY_STORE_ROOT_DIR=${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-}}
 export EOS_TOKENS=${EOS_TOKENS:-}
 
@@ -544,6 +551,7 @@ start_orchestrator() {
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
         ${TRAJECTORY_STORE_ROOT_DIR:+--trajectory_store_root_dir=\"${TRAJECTORY_STORE_ROOT_DIR}\"} \
         ${TRAJECTORY_STORE_DB_URL:+--trajectory_store_db_url=\"${TRAJECTORY_STORE_DB_URL}\"} \
+        $([[ "${DISABLE_TRAJECTORY_STORE}" == "true" ]] && echo --disable_trajectory_store || echo --no-disable_trajectory_store) \
         --flush_every_n_steps=${FLUSH_EVERY_N_STEPS} \
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
@@ -887,6 +895,7 @@ if cfg:
       --worker_container_image="${TUNIX_IMAGE}" \
       --worker_container_port="${ROLLOUT_PORT}" \
       --worker_startup_command=" \
+        sysctl -w net.core.somaxconn=65535 net.ipv4.tcp_max_syn_backlog=65535 net.ipv4.ip_local_port_range=\"1024 65535\" net.ipv4.tcp_tw_reuse=1 2>/dev/null || true; \
         PYTHONUNBUFFERED=1 \
         TUNIX_IS_INTERNAL_ENV=false \
         ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \

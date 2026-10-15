@@ -108,6 +108,11 @@ class TrafficController:
       self._active_tasks.add(task)
     task.add_done_callback(self._on_task_done)
 
+  def untrack(self, task: asyncio.Task[Any]) -> None:
+    """Removes a cancelled task from active tracking before cleanup finishes."""
+    with self._lock:
+      self._active_tasks.discard(task)
+
   def _on_task_done(self, task: asyncio.Task[Any]) -> None:
     with self._lock:
       self._active_tasks.discard(task)
