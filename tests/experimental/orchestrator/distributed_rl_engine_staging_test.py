@@ -16,6 +16,7 @@
 
 import asyncio
 import dataclasses
+import threading
 from typing import Any
 from unittest import mock
 
@@ -311,7 +312,10 @@ class StagedTrainStepTest(absltest.TestCase):
     real_block_until_ready = trainer_worker.jax.block_until_ready
 
     def _recording_block_until_ready(x):
-      waited.append(x)
+      # Only the serving path's waits: the step timer (TRAINER_STEP_TIMING)
+      # also blocks on last_update_token, from its own daemon thread.
+      if threading.current_thread().name != "step-timer-ready":
+        waited.append(x)
       return real_block_until_ready(x)
 
     async def _run():
