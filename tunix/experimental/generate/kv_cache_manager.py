@@ -38,9 +38,13 @@ import math
 
 import jax
 import jax.numpy as jnp
+from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import single_type_kv_cache_manager
 import tunix.experimental.generate.tiered_page_pool as page_pool_lib
 from tunix.generate import utils
+
+
+Page = single_type_kv_cache_manager.Page
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -284,12 +288,98 @@ class KVCacheManager:
     """Returns the names of all allocated caches."""
     return self._cache_names
 
+  @property
+  def _null_computed_pages(self) -> tuple[tuple[Page | None, ...], ...]:
+    """Returns the computed pages of a request with no prefix match."""
+    return tuple(() for _ in self._kv_cache_group_managers)
+
+  def get_page_idxs(
+      self,
+      req: request_lib.RequestState,
+  ) -> dict[str, tuple[int, ...]]:
+    """Returns a mapping of cache name to device page indices for the request.
+
+    Args:
+        req: The request identifier to get page indices for.
+
+    Returns:
+        A dictionary mapping each cache name to its tuple of device page
+        indices. Entries are -1 for pages outside the cache's active window.
+    """
+    page_idxs: dict[str, tuple[int, ...]] = {}
+    for manager in self._kv_cache_group_managers:
+      group_page_idxs = tuple(manager.get_page_idxs(req.request_id))
+      for cache in manager.cache_names:
+        page_idxs[cache] = group_page_idxs
+    return page_idxs
+
   def get_physical_pages(self) -> dict[str, jax.Array]:
     """Returns a mapping of cache name to physical device pages."""
     physical_pages: dict[str, jax.Array] = {}
     for manager in self._kv_cache_group_managers:
       physical_pages.update(manager.get_physical_pages())
     return physical_pages
+
+  def allocate_slots(
+      self,
+      req: request_lib.RequestState,
+      num_new_tokens: int,
+      new_computed_pages: Sequence[Sequence[Page | None]] | None = None,
+  ) -> bool:
+    """Allocates token slots for a request.
+
+    Args:
+        req: The request to prepare for the next engine step.
+        num_new_tokens: The number of new tokens to be allocated and computed.
+        new_computed_pages: The computed pages, as returned by
+            `get_computed_pages`. `None` if there are no computed pages.
+
+    Returns:
+        True if the allocation succeeded, False if there is insufficient space.
+        On failure, no slots are allocated.
+    """
+    if new_computed_pages is None:
+      new_computed_pages = self._null_computed_pages
+
+    if len(new_computed_pages) != len(self._kv_cache_group_managers):
+      raise ValueError(
+          "new_computed_pages must be the computed pages returned by "
+          "get_computed_pages."
+      )
+
+    n_computed_tokens = len(new_computed_pages[0])
+    if not all(len(p) == n_computed_tokens for p in new_computed_pages):
+      raise ValueError(
+          "All computed pages must have the same length, got "
+          f"{[len(p) for p in new_computed_pages]}."
+      )
+
+    if num_new_tokens <= 0:
+      raise ValueError(
+          f"num_new_tokens must be positive, got {num_new_tokens}."
+      )
+
+    managers_and_pages = list(
+        zip(self._kv_cache_group_managers, new_computed_pages)
+    )
+    if not all(
+        manager.has_sufficient_space(
+            req.request_id, num_new_tokens, req.num_completed_tokens, pages
+        )
+        for manager, pages in managers_and_pages
+    ):
+      return False
+
+    for manager, pages in managers_and_pages:
+      manager.allocate_slots(
+          req.request_id, num_new_tokens, req.num_completed_tokens, pages
+      )
+    return True
+
+  def release_request(self, req: request_lib.RequestState) -> None:
+    """Releases pages for a finished request."""
+    for manager in self._kv_cache_group_managers:
+      manager.release_request(req.request_id)
 
   def update_device_pool(self, new_pages: Mapping[str, jax.Array]) -> None:
     """Updates the physical device pages."""
@@ -299,3 +389,8 @@ class KVCacheManager:
 
     for manager in self._kv_cache_group_managers:
       manager.update_device_pool(new_pages)
+
+  def reset_kv_caches(self) -> None:
+    """Releases all requests and frees all pages."""
+    for manager in self._kv_cache_group_managers:
+      manager.reset_kv_caches()

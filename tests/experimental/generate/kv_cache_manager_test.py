@@ -24,6 +24,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.generate import kv_cache_manager
+from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import single_type_kv_cache_manager
 
 # Sharding tests need up to 4 devices.
@@ -514,7 +515,151 @@ class KVCacheManagerInitTest(parameterized.TestCase):
       )
 
 
+class AllocateSlotsTest(parameterized.TestCase):
+
+  def test_allocate_slots_success(self):
+    mgr = _create_manager()
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    self.assertTrue(mgr.allocate_slots(req, num_new_tokens=8))
+    self.assertLen(mgr.get_page_idxs(req)["cache_0"], 2)
+
+  def test_allocate_slots_insufficient_space_returns_false(self):
+    mgr = _create_manager(num_device_pages=1)
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    # 8 tokens requires 2 pages, but only 1 page capacity exists
+    self.assertFalse(mgr.allocate_slots(req, num_new_tokens=8))
+
+  @parameterized.named_parameters(
+      dict(testcase_name="zero", num_new_tokens=0),
+      dict(testcase_name="negative", num_new_tokens=-1),
+  )
+  def test_allocate_slots_non_positive_tokens_raises(self, num_new_tokens):
+    mgr = _create_manager()
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    with self.assertRaisesRegex(
+        ValueError, rf"num_new_tokens must be positive, got {num_new_tokens}\."
+    ):
+      mgr.allocate_slots(req, num_new_tokens=num_new_tokens)
+
+  def test_allocate_slots_wrong_computed_pages_raises(self):
+    mgr, _, _ = _create_two_group_manager()
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    with self.assertRaisesRegex(ValueError, r"returned by get_computed_pages"):
+      mgr.allocate_slots(req, num_new_tokens=8, new_computed_pages=((),))
+
+  def test_allocate_slots_insufficient_space_in_one_group_allocates_none(self):
+    mgr, full, local = _create_two_group_manager(
+        page_size=4, num_device_pages=10
+    )
+    # Leave 1 free page in the local group only.
+    for i in range(9):
+      local.allocate_slots("other", num_tokens=4, num_completed_tokens=4 * i)
+
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    self.assertFalse(mgr.allocate_slots(req, num_new_tokens=8))
+    self.assertNotIn("r1", full._request_to_pages)
+    self.assertNotIn("r1", local._request_to_pages)
+    self.assertEqual(full._page_manager.num_free_device_pages, 10)
+
+  def test_allocate_slots_multi_step(self):
+    mgr = _create_manager(page_size=4, num_device_pages=10)
+    group = mgr._kv_cache_group_managers[0]
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(6)))
+
+    # Step 1: Prefill 6 tokens into 2 pages, leaving 2 free slots in page 2.
+    self.assertTrue(mgr.allocate_slots(req, num_new_tokens=6))
+    prefill_page_idxs = mgr.get_page_idxs(req)["cache_0"]
+    self.assertLen(prefill_page_idxs, 2)
+    req.num_completed_tokens = 6
+
+    # Step 2: 2 more tokens fit in the partially filled page, so no new page is
+    # allocated.
+    self.assertTrue(mgr.allocate_slots(req, num_new_tokens=2))
+    self.assertEqual(mgr.get_page_idxs(req)["cache_0"], prefill_page_idxs)
+    self.assertEqual(group._page_manager.num_free_device_pages, 8)
+    req.num_completed_tokens = 8
+
+    # Step 3: Both pages are full, so 1 more token crosses the page boundary
+    # and allocates a new page after the existing ones.
+    self.assertTrue(mgr.allocate_slots(req, num_new_tokens=1))
+    page_idxs = mgr.get_page_idxs(req)["cache_0"]
+    self.assertLen(page_idxs, 3)
+    self.assertEqual(page_idxs[:2], prefill_page_idxs)
+    self.assertEqual(group._page_manager.num_free_device_pages, 7)
+
+  def test_allocate_slots_multi_step_insufficient_space_returns_false(self):
+    mgr = _create_manager(page_size=4, num_device_pages=2)
+    group = mgr._kv_cache_group_managers[0]
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+
+    self.assertTrue(mgr.allocate_slots(req, num_new_tokens=8))
+    page_idxs = mgr.get_page_idxs(req)["cache_0"]
+    self.assertLen(page_idxs, 2)
+    req.num_completed_tokens = 8
+
+    # Both pages are full, so the next token needs a third page, which does
+    # not exist. This is only detected if `num_completed_tokens` is forwarded.
+    self.assertFalse(mgr.allocate_slots(req, num_new_tokens=1))
+    self.assertEqual(mgr.get_page_idxs(req)["cache_0"], page_idxs)
+    self.assertEqual(group._page_manager.num_free_device_pages, 0)
+
+
+class ReleaseRequestTest(parameterized.TestCase):
+
+  def test_release_request_releases_every_group(self):
+    mgr, full, local = _create_two_group_manager()
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    mgr.allocate_slots(req, num_new_tokens=8)
+    self.assertIn("r1", full._request_to_pages)
+    self.assertIn("r1", local._request_to_pages)
+
+    mgr.release_request(req)
+    self.assertNotIn("r1", full._request_to_pages)
+    self.assertNotIn("r1", local._request_to_pages)
+    self.assertEqual(
+        mgr.get_page_idxs(req), {f"cache_{i}": () for i in range(4)}
+    )
+
+  def test_release_unknown_request_is_noop(self):
+    mgr = _create_manager()
+    req = request_lib.RequestState(req_id="unknown", prompt_token_ids=[0])
+    mgr.release_request(req)
+    mgr.release_request(req)
+
+  def test_reset_kv_caches_frees_all_pages(self):
+    mgr, full, local = _create_two_group_manager(page_size=4)
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    mgr.allocate_slots(req, num_new_tokens=8)
+
+    mgr.reset_kv_caches()
+
+    for manager in (full, local):
+      self.assertEmpty(manager._request_to_pages)
+      self.assertEqual(manager._page_manager.num_free_device_pages, 10)
+
+
 class InspectionTest(parameterized.TestCase):
+
+  def test_get_page_idxs_maps_every_cache_to_its_group(self):
+    mgr, full, local = _create_two_group_manager()
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    mgr.allocate_slots(req, num_new_tokens=8)
+
+    page_idxs = mgr.get_page_idxs(req)
+
+    full_page_idxs = tuple(full.get_page_idxs("r1"))
+    local_page_idxs = tuple(local.get_page_idxs("r1"))
+    self.assertLen(full_page_idxs, 2)
+    self.assertLen(local_page_idxs, 2)
+    self.assertEqual(
+        page_idxs,
+        {
+            "cache_0": full_page_idxs,
+            "cache_1": full_page_idxs,
+            "cache_2": local_page_idxs,
+            "cache_3": local_page_idxs,
+        },
+    )
 
   def test_get_physical_pages(self):
     mgr, _, _ = _create_two_group_manager()
