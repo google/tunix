@@ -357,6 +357,26 @@ if [[ "${ASYNC_WEIGHT_SYNC}" == "true" && "${WEIGHT_SYNC_MODE}" == "raiden" \
 fi
 # Pack the next microbatch while the trainer runs the current one.
 export PIPELINE_TRAIN_MICROBATCHES=${PIPELINE_TRAIN_MICROBATCHES:-false}
+# Pipeline the step boundary: pack and send the next step's first microbatch
+# without waiting for this step's metrics and logging (same trainer calls, in
+# the same order). STAGE_NEXT_MICROBATCH also ships its data to the trainer
+# while the previous step's last microbatch still computes.
+export PIPELINE_STEP_BOUNDARY=${PIPELINE_STEP_BOUNDARY:-false}
+export STAGE_NEXT_MICROBATCH=${STAGE_NEXT_MICROBATCH:-false}
+# Same truthiness as k8s_launcher.sh: true, True or 1 turns a flag on.
+case "${PIPELINE_STEP_BOUNDARY}" in
+  true|True|1) _pipeline_step_boundary_on=true ;;
+  *) _pipeline_step_boundary_on=false ;;
+esac
+case "${STAGE_NEXT_MICROBATCH}" in
+  true|True|1) _stage_next_microbatch_on=true ;;
+  *) _stage_next_microbatch_on=false ;;
+esac
+if [[ "${_stage_next_microbatch_on}" == "true" && "${_pipeline_step_boundary_on}" != "true" ]]; then
+  echo "STAGE_NEXT_MICROBATCH=${STAGE_NEXT_MICROBATCH} requires PIPELINE_STEP_BOUNDARY on (true, True or 1), got '${PIPELINE_STEP_BOUNDARY}'" >&2
+  exit 1
+fi
+unset _pipeline_step_boundary_on _stage_next_microbatch_on
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-prompt_batch}
 
 # Trajectory Store: flag to disable writing to trajectory store entirely (file and SQL).

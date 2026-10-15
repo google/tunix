@@ -749,9 +749,17 @@ class BatchOrderedQueueManager(group_queue_manager.GroupQueueManager):
       self._sealed.discard(batch_idx)
 
   def _advance_over_holes(self) -> None:
-    """Passes over any sealed empty batches sitting at `next_batch_idx`."""
+    """Passes over any sealed empty batches sitting at `next_batch_idx`.
+
+    Also when the serving cursor is already past the hole: a consumer that
+    reads the next batch by index before committing the current one (the
+    pipelined step boundary) moves it there, and the hole must still be
+    passed once the current batch commits. A batch being trained is never a
+    hole (it has admitted groups), so this cannot skip one.
+    """
+
     while (
-        self._serving_batch_idx == self._next_batch_idx
+        self._serving_batch_idx >= self._next_batch_idx
         and self._next_batch_idx in self._sealed
         and self._admitted.get(self._next_batch_idx, 0) == 0
     ):
