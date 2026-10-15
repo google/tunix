@@ -1101,6 +1101,75 @@ _BASH_TIMEOUT_MESSAGE = (
 # The execute_bash wrapper prints this marker, the final working directory
 # and `which python` on exit, standing in for the reference's PS1 metadata.
 _BASH_META_SENTINEL = "__OH_BASH_META__"
+_BASH_NOCHANGE_SENTINEL = "__OH_BASH_NOCHANGE_TIMEOUT__"
+
+
+def _wrap_with_inactivity_timeout(
+    inner_cmd: str, no_change_timeout: float
+) -> str:
+  """Wraps a shell command with an output-inactivity timeout."""
+  b64_cmd = base64.b64encode(inner_cmd.encode("utf-8")).decode("ascii")
+  driver = (
+      "import base64, os, select, signal, subprocess, sys\n"
+      f"cmd = base64.b64decode('{b64_cmd}').decode('utf-8')\n"
+      f"idle_limit = {float(no_change_timeout)}\n"
+      "out_r, out_w = os.pipe()\n"
+      "err_r, err_w = os.pipe()\n"
+      "proc = subprocess.Popen(\n"
+      "    ['/bin/sh', '-c', cmd],\n"
+      "    stdout=out_w,\n"
+      "    stderr=err_w,\n"
+      "    start_new_session=True,\n"
+      ")\n"
+      "os.close(out_w)\n"
+      "os.close(err_w)\n"
+      "fds = [out_r, err_r]\n"
+      "timed_out = False\n"
+      "while fds:\n"
+      "  exited = proc.poll() is not None\n"
+      "  wait_s = 0.05 if exited else idle_limit\n"
+      "  ready, _, _ = select.select(fds, [], [], wait_s)\n"
+      "  if not ready:\n"
+      "    if not exited:\n"
+      "      timed_out = True\n"
+      "      try:\n"
+      "        os.killpg(proc.pid, signal.SIGKILL)\n"
+      "      except OSError:\n"
+      "        pass\n"
+      "      proc.wait()\n"
+      "    break\n"
+      "  for fd in ready:\n"
+      "    data = os.read(fd, 4096)\n"
+      "    if not data:\n"
+      "      fds.remove(fd)\n"
+      "      os.close(fd)\n"
+      "    elif fd == out_r:\n"
+      "      sys.stdout.buffer.write(data)\n"
+      "      sys.stdout.flush()\n"
+      "    else:\n"
+      "      sys.stderr.buffer.write(data)\n"
+      "      sys.stderr.flush()\n"
+      "for fd in list(fds):\n"
+      "  try:\n"
+      "    os.close(fd)\n"
+      "  except OSError:\n"
+      "    pass\n"
+      "if timed_out:\n"
+      f"  sys.stdout.write('\\n{_BASH_NOCHANGE_SENTINEL}\\n')\n"
+      "  sys.stdout.flush()\n"
+      "  sys.exit(124)\n"
+      "sys.exit(proc.wait())\n"
+  )
+  b64_driver = base64.b64encode(driver.encode("utf-8")).decode("ascii")
+  return (
+      "("
+      + _STRIP_PYINSTALLER_LD_PATH
+      + 'export PYTHONUNBUFFERED=1 __OH_CWD_FILE="/var/tmp/.oh_cwd"; '
+      + "python3 -c \"import base64; exec(base64.b64decode('"
+      + b64_driver
+      + "').decode('utf-8'))\""
+      + ")"
+  )
 
 
 def _truncate_observation(content: str) -> str:
@@ -1117,6 +1186,7 @@ def _format_command_result(
     bash_observation: bool = False,
     truncate: bool = True,
     command_echo: str = "",
+    no_change_timeout: Optional[int] = None,
 ) -> tuple[str, bool]:
   """Formats an OpenHands CommandResult into (observation, timed_out).
 
@@ -1136,7 +1206,13 @@ def _format_command_result(
     stdout = str(result)
   stderr = str(getattr(result, "stderr", "") or "")
   exit_code = getattr(result, "exit_code", None)
-  timed_out = _command_timed_out(result, timeout, elapsed)
+  nochange_triggered = False
+  if _BASH_NOCHANGE_SENTINEL in stdout:
+    nochange_triggered = True
+    stdout = stdout.replace(_BASH_NOCHANGE_SENTINEL, "")
+    if stdout.endswith("\n"):
+      stdout = stdout[:-1]
+  timed_out = nochange_triggered or _command_timed_out(result, timeout, elapsed)
 
   if not bash_observation:
     obs = stdout
@@ -1171,7 +1247,15 @@ def _format_command_result(
   if command_echo:
     merged = f"{command_echo}\n{merged}"
   content = _truncate_observation(merged.strip())
-  if timed_out:
+  if nochange_triggered or (timed_out and no_change_timeout is not None):
+    idle_secs = (
+        int(no_change_timeout) if no_change_timeout is not None else 30
+    )
+    rendered = (
+        f"{content}\n[The command has no new output after {idle_secs} seconds."
+        f" {_BASH_TIMEOUT_MESSAGE}]"
+    )
+  elif timed_out:
     rendered = (
         f"{content}\n[The command timed out after {float(timeout)} seconds."
         f" {_BASH_TIMEOUT_MESSAGE}]"
@@ -1195,6 +1279,7 @@ def _execute_in_workspace(
     bash_observation: bool = False,
     truncate: bool = True,
     command_echo: str = "",
+    no_change_timeout: Optional[int] = None,
 ) -> EnvStepResult:
   """Runs `wrapped_cmd` in env.workspace; never raises, never ends the episode."""
   max_steps = getattr(env, "max_steps", None)
@@ -1211,6 +1296,7 @@ def _execute_in_workspace(
         bash_observation,
         truncate,
         command_echo,
+        no_change_timeout=no_change_timeout,
     )
     if timed_out:
       info["command_timed_out"] = True
@@ -1467,19 +1553,37 @@ def step_openhands(
           info={"max_steps": max_steps},
       )
 
-    default_timeout = float(getattr(env, "step_timeout", 60.0))
-    max_timeout = float(
-        os.getenv("COMMAND_EXEC_TIMEOUT", str(int(default_timeout)))
+    # Use an output-inactivity timeout when no explicit timeout is provided,
+    # and cap explicit timeouts at the configured maximum.
+    env_step_timeout = float(env.step_timeout)
+    max_timeout = min(
+        env_step_timeout,
+        float(os.getenv("COMMAND_EXEC_TIMEOUT", str(int(env_step_timeout)))),
+    )
+    no_change_timeout = min(
+        float(os.getenv("NO_CHANGE_TIMEOUT_SECONDS", "30")), max_timeout
     )
     raw_timeout = params.get("timeout")
-    step_timeout = default_timeout
-    if raw_timeout is not None:
+    if raw_timeout is not None and str(raw_timeout).strip() != "":
       try:
         req_timeout = float(raw_timeout)
-        if req_timeout > 0:
-          step_timeout = min(req_timeout, max(default_timeout, max_timeout))
       except (ValueError, TypeError):
-        step_timeout = default_timeout
+        if hasattr(env, "total_steps"):
+          env.total_steps += 1
+        return EnvStepResult(
+            observation=(
+                f"Validation failure for {action_obj.function_name}: Invalid"
+                f" float passed to 'timeout' argument: {raw_timeout}"
+            ),
+            reward=0,
+            done=False,
+            info={"max_steps": max_steps},
+        )
+      step_timeout = min(max(0.0, req_timeout), max_timeout)
+      active_no_change_timeout = None
+    else:
+      step_timeout = max_timeout
+      active_no_change_timeout = int(no_change_timeout)
 
     # The closing parenthesis goes on its own line. Appended to the command's
     # last line, it would be swallowed by a heredoc terminator (`EOF)`) or a
@@ -1487,19 +1591,26 @@ def step_openhands(
     # The EXIT trap persists the working directory for the next command and
     # prints the metadata that _format_command_result renders like the
     # reference PS1 block (cwd and `which python`), keeping the exit code.
-    wrapped_cmd = (
+    inner_cmd = (
         "("
         + _STRIP_PYINSTALLER_LD_PATH
         + "if [ -d /testbed/.venv/bin ]; then export"
         ' PATH="/testbed/.venv/bin:${PATH}"; fi; '
-        + "__oh_cwd=$(cat /var/tmp/.oh_cwd 2>/dev/null); "
+        + '__oh_cwd_file="${__OH_CWD_FILE:-/var/tmp/.oh_cwd}"; '
+        + '__oh_cwd=$(cat "$__oh_cwd_file" 2>/dev/null); '
         'if [ -n "$__oh_cwd" ] && [ -d "$__oh_cwd" ]; then cd "$__oh_cwd"; '
         "elif [ -d /testbed ]; then cd /testbed; else cd /workspace; fi; "
-        "trap '__oh_rc=$?; pwd > /var/tmp/.oh_cwd 2>/dev/null; "
+        'trap \'__oh_rc=$?; pwd > "$__oh_cwd_file" 2>/dev/null; '
         f'printf "\\n{_BASH_META_SENTINEL}%s\\t%s\\n" "$(pwd)"'
         ' "$(which python 2>/dev/null || echo "")"; exit $__oh_rc\' EXIT; '
         f"{cmd}\n)"
     )
+    if active_no_change_timeout is not None:
+      wrapped_cmd = _wrap_with_inactivity_timeout(
+          inner_cmd, no_change_timeout
+      )
+    else:
+      wrapped_cmd = inner_cmd
 
     # The reference strips the echoed command from the tmux pane only when the
     # pane shows it verbatim. The pane drops empty lines and trailing spaces,
@@ -1516,6 +1627,7 @@ def step_openhands(
           "Command execution failed",
           bash_observation=True,
           command_echo=pane_echo if pane_echo != cmd else "",
+          no_change_timeout=active_no_change_timeout,
       )
     elif getattr(env, "env", None) is not None:
       if isinstance(getattr(action_obj, "parameters", None), dict):
