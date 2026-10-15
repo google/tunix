@@ -30,7 +30,7 @@ consumer picks a class rather than discovering the shape at runtime.
 from __future__ import annotations
 
 import collections
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 import enum
 from typing import Any, Deque, Dict, Optional, Set, Tuple
 
@@ -45,6 +45,35 @@ FilterFn = group_queue_manager.FilterFn[TrajectoryItem]
 CursorFn = Callable[[int], None]
 # Reports `num_groups` groups dropped upstream for `batch_idx`.
 DropFn = Callable[[int, int], None]
+
+_TRUNCATED_OR_TIMED_OUT_STATUSES = frozenset({
+    datatypes.TrajectoryStatus.MAX_STEPS_REACHED,
+    datatypes.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
+    datatypes.TrajectoryStatus.TIMEOUT,
+    datatypes.TrajectoryStatus.MAX_STEPS_REACHED.name,
+    datatypes.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED.name,
+    datatypes.TrajectoryStatus.TIMEOUT.name,
+})
+
+
+def _is_truncated_or_timed_out(item: TrajectoryItem) -> bool:
+  """Returns True if `item` was truncated or timed out rather than finishing cleanly."""
+  status = None
+  traj = getattr(item, "traj", None)
+  if isinstance(traj, Mapping):
+    status = traj.get("status")
+  elif traj is not None:
+    status = getattr(traj, "status", None)
+  metadata = getattr(item, "metadata", None)
+  if status is None and isinstance(metadata, Mapping):
+    status = metadata.get("status")
+  if isinstance(status, str):
+    status = status.upper()
+  if status in _TRUNCATED_OR_TIMED_OUT_STATUSES:
+    return True
+  if isinstance(metadata, Mapping) and bool(metadata.get("clipped")):
+    return True
+  return False
 
 
 class GroupOrder(enum.Enum):
@@ -211,14 +240,28 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
         bucket = buckets.setdefault(key, [])
         bucket.append(item)
         if self.prefer_valid_rollouts:
-          valid_items = [x for x in bucket if x.is_valid]
+          preferred_items = [
+              x
+              for x in bucket
+              if x.is_valid and not _is_truncated_or_timed_out(x)
+          ]
+          truncated_valid_items = [
+              x
+              for x in bucket
+              if x.is_valid and _is_truncated_or_timed_out(x)
+          ]
           invalid_items = [x for x in bucket if not x.is_valid]
-          if len(valid_items) >= target_g or len(bucket) >= effective_dispatch:
+          if (
+              len(preferred_items) >= target_g
+              or len(bucket) >= effective_dispatch
+          ):
             buckets.pop(key, None)
             spare = effective_dispatch - len(bucket)
             if spare > 0:
               self._remaining_to_drop[key] = spare
-            return (valid_items + invalid_items)[:target_g]
+            return (
+                preferred_items + truncated_valid_items + invalid_items
+            )[:target_g]
           return None
         if len(bucket) >= target_g:
           buckets.pop(key, None)
@@ -706,9 +749,17 @@ class BatchOrderedQueueManager(group_queue_manager.GroupQueueManager):
       self._sealed.discard(batch_idx)
 
   def _advance_over_holes(self) -> None:
-    """Passes over any sealed empty batches sitting at `next_batch_idx`."""
+    """Passes over any sealed empty batches sitting at `next_batch_idx`.
+
+    Also when the serving cursor is already past the hole: a consumer that
+    reads the next batch by index before committing the current one (the
+    pipelined step boundary) moves it there, and the hole must still be
+    passed once the current batch commits. A batch being trained is never a
+    hole (it has admitted groups), so this cannot skip one.
+    """
+
     while (
-        self._serving_batch_idx == self._next_batch_idx
+        self._serving_batch_idx >= self._next_batch_idx
         and self._next_batch_idx in self._sealed
         and self._admitted.get(self._next_batch_idx, 0) == 0
     ):

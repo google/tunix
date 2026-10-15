@@ -84,6 +84,27 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
   raise ValueError("RolloutResponse payload is None.")
 
 
+@dataclasses.dataclass(frozen=True)
+class StagedTrainStep:
+  """A micro-batch the trainer holds ahead of its train_step (`stage_train_step`).
+
+  Attributes:
+    request_id: Pass as `train_step(None, staged_request_id=...)`.
+    device_wait_s: How long the trainer, once it held the micro-batch, still
+      waited for the work it had dispatched before: ~0 means its device was
+      already idle, so the transfer did not hide behind that work. None when
+      the trainer cannot tell.
+    update_ready: The trainer confirmed that the optimizer update dispatched
+      before the stage has landed on device (it exposes `last_update_token`).
+      Like `update_ready` on a fused train_step result, it lets the caller
+      stamp and save the step's checkpoint without a get_metrics() first.
+  """
+
+  request_id: str
+  device_wait_s: float | None = None
+  update_ready: bool = False
+
+
 class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   """Worker-backed compute router dispatching RPCs across role pools."""
 
@@ -672,16 +693,67 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
     return completed
 
+  def _cancel_pending_rollout_requests(self, prompt_id: str) -> int:
+    """Cancels tasks matching `prompt_id` still waiting in `_rollout_session._pending_queue`."""
+    if not prompt_id:
+      return 0
+
+    def _matches(
+        req_id: str,
+        payload: tuple[str | None, tuple[Any, ...], dict[str, Any]],
+    ) -> bool:
+      del req_id
+      _, _, orig_kwargs = payload
+      reqs = orig_kwargs.get("requests") or ()
+      return any(getattr(r, "prompt_id", None) == prompt_id for r in reqs)
+
+    def _build_cancelled_response(
+        req_id: str,
+        payload: tuple[str | None, tuple[Any, ...], dict[str, Any]],
+    ) -> list[datatypes.RolloutResponse]:
+      _, _, orig_kwargs = payload
+      responses: list[datatypes.RolloutResponse] = []
+      for req in orig_kwargs.get("requests") or ():
+        responses.append(
+            datatypes.RolloutResponse(
+                request_id=getattr(req, "request_id", None) or req_id,
+                status="ERROR",
+                error=datatypes.ErrorInfo(
+                    error_type="CancelledError",
+                    message=(
+                        "Trajectory cancelled in orchestrator pending queue"
+                        " before dispatch."
+                    ),
+                ),
+                payload=None,
+                metadata={
+                    **(dict(req.metadata) if req.metadata is not None else {}),
+                    "request_id": getattr(req, "request_id", None) or req_id,
+                    "prompt_id": req.prompt_id,
+                    "group_index": req.group_index,
+                    "policy_version": req.target_policy_version,
+                },
+            )
+        )
+      return responses
+
+    return self._rollout_session.cancel_pending_tasks(
+        _matches, result_factory=_build_cancelled_response
+    )
+
   async def cancel_rollouts(self, prompt_id: str) -> int:
     """Cancels in-flight rollout trajectories matching `prompt_id` across all rollout workers."""
-    if not self._rollout_workers or not prompt_id:
+    if not prompt_id:
       return 0
+    cancelled_pending = self._cancel_pending_rollout_requests(prompt_id)
+    if not self._rollout_workers:
+      return cancelled_pending
     tasks = [
         self._invoke_worker(w, "cancel_by_prompt_id", prompt_id=prompt_id)
         for w in self._rollout_workers
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    return sum(r for r in results if isinstance(r, int))
+    return cancelled_pending + sum(r for r in results if isinstance(r, int))
 
   async def generate(
       self,
@@ -844,19 +916,165 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       raise ValueError(f"No trainer worker registered for role {role}")
     return await self._invoke_worker(worker, "compile", dummy_data=dummy_data)
 
-  async def train_step(
+  async def trainer_staging_support(
+      self, role: datatypes.Role = datatypes.Role.ACTOR
+  ) -> dict[str, bool]:
+    """What the role's trainer supports of `stage_train_step`, from its `info()`.
+
+    Asked before anything is staged, so a trainer image that predates staging
+    is found without sending it a micro-batch it cannot hold.
+
+    Args:
+      role: Trainer role to ask.
+
+    Returns:
+      `stage_fwd_bwd`: it holds a micro-batch ahead of its fwd_bwd.
+      `reports_device_wait`: it reports `StagedTrainStep.device_wait_s`.
+      `stage_before_update`: it can defer a step's update past its last
+      micro-batch (`train_step(defer_update=True)` and
+      `apply_deferred_update`), so a stage runs in between.
+    """
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+    info = await self._invoke_worker(worker, "info")
+    resources = getattr(info, "resources", None) or {}
+    return {
+        key: bool(resources.get(key, False))
+        for key in (
+            "stage_fwd_bwd",
+            "reports_device_wait",
+            "stage_before_update",
+        )
+    }
+
+  async def apply_deferred_update(
+      self, role: datatypes.Role = datatypes.Role.ACTOR
+  ) -> dict[str, Any]:
+    """Runs the update a `train_step(defer_update=True)` left on the trainer.
+
+    Args:
+      role: Trainer role.
+
+    Returns:
+      `updated` (True), `train_step`, `update_ready` (the trainer confirmed the
+      update landed) and `device_wait_s` (how long the trainer still waited
+      for its device before dispatching the update; ~0 means a stage sent in
+      between outlasted the step's last micro-batch, None when it cannot
+      tell).
+    """
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+    async with self._actor_busy_guard(role == datatypes.Role.ACTOR):
+      resp = await self._invoke_worker(worker, "apply_deferred_update")
+      if role == datatypes.Role.ACTOR:
+        self._actor_weights_dirty = True
+    metadata = getattr(resp, "metadata", None) or {}
+    device_wait_s = metadata.get("device_wait_s")
+    return {
+        "updated": bool(metadata.get("updated")),
+        "train_step": metadata.get("train_step"),
+        # Set only by a worker that waited for the update to land on device.
+        "update_ready": bool(metadata.get("update_ready")),
+        "device_wait_s": (
+            None if device_wait_s is None else float(device_wait_s)
+        ),
+    }
+
+  async def stage_train_step(
       self,
       payload: datatypes.RLTrainerPayload,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      **kwargs: Any,
+  ) -> StagedTrainStep:
+    """Sends a micro-batch to the trainer ahead of the train_step that runs it.
+
+    The trainer only holds it: no model, optimizer or gradient state changes,
+    so the trainer's step order is that of the train_step calls. Pass the
+    returned id as `train_step(None, staged_request_id=...)`; that call then
+    carries no data.
+
+    Args:
+      payload: The micro-batch.
+      role: Trainer role to stage on.
+      **kwargs: Forwarded to the trainer's `fwd_bwd` when it runs.
+
+    Returns:
+      The staged micro-batch's id, how long the trainer then still waited for
+      its device, and whether it confirmed the update dispatched before the
+      stage has landed.
+    """
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+    role_name = role.value if isinstance(role, datatypes.Role) else str(role)
+    request = datatypes.TrainRequest(
+        request_id=f"train_req_{uuid.uuid4().hex[:8]}",
+        payload=payload,
+        metadata=dict(getattr(payload, "metadata", {}) or {}),
+    )
+    logging.info(
+        "Staging train_step input on %s worker (request_id=%s)...",
+        role_name,
+        request.request_id,
+    )
+    async with self._actor_busy_guard(role == datatypes.Role.ACTOR):
+      resp = await self._invoke_worker(
+          worker, "stage_fwd_bwd", request=request, **kwargs
+      )
+    metadata = getattr(resp, "metadata", None) or {}
+    device_wait_s = metadata.get("device_wait_s")
+    return StagedTrainStep(
+        request_id=request.request_id,
+        device_wait_s=None if device_wait_s is None else float(device_wait_s),
+        # Set only by a worker that waited for the update to land on device
+        # (TrainerWorker strips any caller-supplied copy of the key).
+        update_ready=bool(metadata.get("update_ready")),
+    )
+
+  async def train_step(
+      self,
+      payload: datatypes.RLTrainerPayload | None,
       role: datatypes.Role = datatypes.Role.ACTOR,
       accumulate_gradients: bool = False,
       apply_optimizer: bool = True,
       skip_jit: bool = False,
+      staged_request_id: str | None = None,
+      defer_update: bool = False,
       **kwargs: Any,
   ) -> Any:
-    """Executes atomic gradient accumulation / update on TrainerWorker."""
+    """Executes atomic gradient accumulation / update on TrainerWorker.
+
+    Args:
+      payload: The micro-batch, or None with `staged_request_id`.
+      role: Trainer role.
+      accumulate_gradients: Reported back in the result.
+      apply_optimizer: Apply the accumulated gradients after this micro-batch.
+      skip_jit: Forwarded to the trainer.
+      staged_request_id: Runs the micro-batch `stage_train_step` sent ahead.
+      defer_update: With `apply_optimizer`, the micro-batch is still the
+        step's last, but the update is left to `apply_deferred_update`, for a
+        caller that stages the next step's first micro-batch in between. Only
+        for a trainer whose `trainer_staging_support()` has
+        `stage_before_update`.
+      **kwargs: Forwarded to the trainer's `fwd_bwd`.
+    """
     worker = self._trainer_workers.get(role)
     if worker is None:
       raise ValueError(f"No trainer worker registered for role {role}")
+    if staged_request_id is not None and payload is not None:
+      raise ValueError(
+          "train_step takes a payload or a staged_request_id, not both."
+      )
+    if defer_update:
+      if not apply_optimizer:
+        raise ValueError(
+            "train_step(defer_update=True) needs apply_optimizer=True: only a"
+            " step's last micro-batch has an update to defer."
+        )
+      # Passed only when set, so the default call is unchanged.
+      kwargs = {**kwargs, "defer_update": True}
     role_name = role.value if isinstance(role, datatypes.Role) else str(role)
     logging.info(
         "Executing train_step on %s worker (accumulate_gradients=%s,"
@@ -865,18 +1083,27 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         accumulate_gradients,
         apply_optimizer,
     )
-    metadata = dict(getattr(payload, "metadata", {}) or {})
-    request = datatypes.TrainRequest(
-        request_id=f"train_req_{uuid.uuid4().hex[:8]}",
-        payload=payload,
-        metadata=metadata,
-    )
     is_actor = role == datatypes.Role.ACTOR
+    if staged_request_id is not None:
+      # The micro-batch is already on the trainer (`stage_train_step`); this
+      # call names it and carries no data. `fwd_bwd_staged` runs it through
+      # the worker's `fwd_bwd`, so the response below is handled the same way.
+      method = "fwd_bwd_staged"
+      call_kwargs: dict[str, Any] = {"staged_request_id": staged_request_id}
+    else:
+      metadata = dict(getattr(payload, "metadata", {}) or {})
+      request = datatypes.TrainRequest(
+          request_id=f"train_req_{uuid.uuid4().hex[:8]}",
+          payload=payload,
+          metadata=metadata,
+      )
+      method = "fwd_bwd"
+      call_kwargs = {"request": request}
     async with self._actor_busy_guard(is_actor):
       fwd_bwd_result = await self._invoke_worker(
           worker,
-          "fwd_bwd",
-          request=request,
+          method,
+          **call_kwargs,
           skip_jit=skip_jit,
           # Tells the trainer which micro-batch is the step's last (MaxText's
           # retry_dropless_final_micro_batch runs it with the dropless program).
@@ -891,6 +1118,24 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         self._actor_weights_dirty = True
       if not apply_optimizer:
         return fwd_bwd_result
+      if (
+          defer_update
+          and isinstance(fwd_bwd_result, datatypes.Response)
+          and isinstance(fwd_bwd_result.metadata, Mapping)
+          and bool(fwd_bwd_result.metadata.get("update_deferred"))
+      ):
+        # Set only by a worker that deferred it (TrainerWorker strips any
+        # caller-supplied copy of the key); the caller runs
+        # `apply_deferred_update` next. A worker that ran the update after all
+        # is handled below, as a fused call.
+        return {
+            "fwd_bwd": fwd_bwd_result,
+            "updated": False,
+            "update_deferred": True,
+            "train_step": None,
+            "accumulated": accumulate_gradients,
+            "update_ready": False,
+        }
       # A worker that ran the optimizer inside the fwd_bwd RPC reports
       # `updated=True` (TrainerWorker strips any caller-supplied copy of the
       # key before echoing request metadata, so only the worker can set it). A

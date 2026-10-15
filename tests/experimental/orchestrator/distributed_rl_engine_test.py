@@ -2602,6 +2602,69 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_cancel_rollouts_cancels_pending_queue_requests_before_dispatch(self):
+    async def _run():
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          max_concurrent_rollouts_per_worker=1,
+      )
+      async def _hang_poll(timeout_s=None):
+        del timeout_s
+        await asyncio.sleep(10.0)
+
+      self.mock_rollout_1.dispatch_task = mock.AsyncMock()
+      self.mock_rollout_1.poll_responses = mock.AsyncMock(
+          side_effect=_hang_poll
+      )
+      self.mock_rollout_1.cancel_by_prompt_id.return_value = 1
+
+      reqs = [
+          datatypes.RolloutRequest(
+              request_id="req_p42_0",
+              prompt="p42",
+              prompt_id="prompt_42",
+              group_index=0,
+              target_policy_version=3,
+          ),
+          datatypes.RolloutRequest(
+              request_id="req_p42_1",
+              prompt="p42",
+              prompt_id="prompt_42",
+              group_index=1,
+              target_policy_version=3,
+          ),
+          datatypes.RolloutRequest(
+              request_id="req_p99_0",
+              prompt="p99",
+              prompt_id="prompt_99",
+              group_index=0,
+              target_policy_version=3,
+          ),
+      ]
+      await engine.dispatch_rollout_requests(reqs)
+      # Only req_p42_0 is dispatched (worker capacity = 1); the other two sit
+      # in _pending_queue.
+      self.assertEqual(self.mock_rollout_1.dispatch_task.call_count, 1)
+      self.assertEqual(engine._rollout_session.pending_count, 2)
+
+      cancelled = await engine.cancel_rollouts("prompt_42")
+      # 1 pending in _pending_queue + 1 active on mock_rollout_1.
+      self.assertEqual(cancelled, 2)
+      self.assertEqual(engine._rollout_session.pending_count, 1)
+
+      # Polling rollouts immediately returns the synthetic cancelled item for
+      # req_p42_1 without ever dispatching it to the worker.
+      polled = await engine.poll_rollouts(timeout_s=0.05)
+      self.assertLen(polled, 1)
+      self.assertEqual(polled[0].prompt_id, "prompt_42")
+      self.assertEqual(polled[0].group_index, 1)
+      self.assertEqual(polled[0].traj["status"], datatypes.TrajectoryStatus.FAILED)
+      self.assertEqual(self.mock_rollout_1.dispatch_task.call_count, 1)
+      await engine.close()
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

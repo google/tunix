@@ -427,6 +427,12 @@ class RolloutManager:
     """Runs episode loop, removes active tracking, and resolves callbacks/streams."""
     try:
       async with self._get_concurrency_semaphore():
+        if getattr(collector, "_cancelled", False) is True or (
+            request.prompt_id and request.prompt_id in self._cancelled_prompt_ids
+        ):
+          raise asyncio.CancelledError(
+              "Trajectory cancelled before execution."
+          )
         trajectory: TrajectoryOrError = await collector.run_episode()
       if isinstance(trajectory, datatypes.TrajectoryItem):
         if "request_id" not in trajectory.metadata:
@@ -536,13 +542,15 @@ class RolloutManager:
     cancelled_tasks: list[asyncio.Task[None]] = []
     for traj_id, collector in list(self._active_collectors.items()):
       if collector.request.prompt_id == prompt_id:
+        self._active_collectors.pop(traj_id, None)
         collector.cancel()
-        task = self._active_tasks.get(traj_id)
+        task = self._active_tasks.pop(traj_id, None)
         if task is not None and not task.done():
+          self._traffic.untrack(task)
           task.cancel()
           cancelled_tasks.append(task)
     if cancelled_tasks:
-      await asyncio.gather(*cancelled_tasks, return_exceptions=True)
+      await asyncio.wait(cancelled_tasks, timeout=0.1)
     return len(cancelled_tasks)
 
   async def pre_weight_sync(
@@ -667,7 +675,6 @@ class RolloutManager:
     res = None
     if self.sampler:
       res = await self.sampler.post_weight_sync(sync_request, **kwargs)
-    self._cancelled_prompt_ids.clear()
     self.resume_all()
     self._traffic.reopen()
     logging.info(
@@ -697,7 +704,6 @@ class RolloutManager:
 
   def reopen_admission(self) -> bool:
     """Reopens rollout admission after an aborted round."""
-    self._cancelled_prompt_ids.clear()
     return self._traffic.reopen()
 
   async def bind_weight_sync(self, **kwargs) -> Any:

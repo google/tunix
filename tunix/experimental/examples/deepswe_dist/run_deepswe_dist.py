@@ -299,6 +299,43 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--pipeline_step_boundary",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Pipeline the step boundary: pack the next step's first"
+          " micro-batch while this step's last ones train, send it as soon"
+          " as this step's checkpoint, weight sync (its staging, with"
+          " --async_weight_sync) and commit are done, and do this step's"
+          " metrics and logging once that call has returned, while the"
+          " device computes it. The trainer gets the same calls in the same"
+          " order."
+      ),
+  )
+  parser.add_argument(
+      "--stage_next_microbatch",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "With --pipeline_step_boundary: send the next step's first"
+          " micro-batch to the trainer host while the device still computes"
+          " this step's last one, so its train call carries no data."
+      ),
+  )
+  parser.add_argument(
+      "--stage_before_update",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "With --stage_next_microbatch: stage between this step's last"
+          " micro-batch and its update, which the trainer then defers, rather"
+          " than after the update's dispatch. Needed wherever the trainer's"
+          " update waits for the last micro-batch (MaxText"
+          " retry_when_tokens_dropped); --no-stage_before_update stages"
+          " after the update's dispatch."
+      ),
+  )
+  parser.add_argument(
       "--in_flight_weight_updates",
       action=argparse.BooleanOptionalAction,
       default=False,
@@ -755,6 +792,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " 'postgresql+psycopg2://user:pass@host:5432/dbname')."
       ),
   )
+  parser.add_argument(
+      "--disable_trajectory_store",
+      action=argparse.BooleanOptionalAction,
+      default=(
+          os.getenv("DISABLE_TRAJECTORY_STORE", "false").lower()
+          in ("true", "1")
+          or os.getenv("ENABLE_TRAJECTORY_STORE", "true").lower()
+          in ("false", "0")
+      ),
+      help="Disables writing to trajectory store entirely (file and SQL).",
+  )
   return parser.parse_args(argv)
 
 
@@ -762,6 +810,8 @@ def _build_trajectory_store_config(
     args: argparse.Namespace,
 ) -> list[dict[str, Any] | None] | None:
   """Builds the [file_store, sql_store] TrajectoryStore configuration list."""
+  if getattr(args, "disable_trajectory_store", False):
+    return None
   root_dir = (args.trajectory_store_root_dir or "").strip()
   db_url = (args.trajectory_store_db_url or "").strip()
   file_cfg = (
@@ -1283,6 +1333,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         ),
         async_weight_sync=args.async_weight_sync,
         pipeline_train_microbatches=args.pipeline_train_microbatches,
+        pipeline_step_boundary=args.pipeline_step_boundary,
+        stage_next_microbatch=args.stage_next_microbatch,
+        stage_before_update=args.stage_before_update,
         partial_rollout=args.in_flight_weight_updates,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
         initial_dispatch_stagger_s=args.initial_dispatch_stagger_s,

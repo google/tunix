@@ -357,14 +357,45 @@ if [[ "${ASYNC_WEIGHT_SYNC}" == "true" && "${WEIGHT_SYNC_MODE}" == "raiden" \
 fi
 # Pack the next microbatch while the trainer runs the current one.
 export PIPELINE_TRAIN_MICROBATCHES=${PIPELINE_TRAIN_MICROBATCHES:-false}
+# Pipeline the step boundary: pack and send the next step's first microbatch
+# without waiting for this step's metrics and logging (same trainer calls, in
+# the same order). STAGE_NEXT_MICROBATCH also ships its data to the trainer
+# while the previous step's last microbatch still computes.
+export PIPELINE_STEP_BOUNDARY=${PIPELINE_STEP_BOUNDARY:-false}
+export STAGE_NEXT_MICROBATCH=${STAGE_NEXT_MICROBATCH:-false}
+# Same truthiness as k8s_launcher.sh: true, True or 1 turns a flag on.
+case "${PIPELINE_STEP_BOUNDARY}" in
+  true|True|1) _pipeline_step_boundary_on=true ;;
+  *) _pipeline_step_boundary_on=false ;;
+esac
+case "${STAGE_NEXT_MICROBATCH}" in
+  true|True|1) _stage_next_microbatch_on=true ;;
+  *) _stage_next_microbatch_on=false ;;
+esac
+if [[ "${_stage_next_microbatch_on}" == "true" && "${_pipeline_step_boundary_on}" != "true" ]]; then
+  echo "STAGE_NEXT_MICROBATCH=${STAGE_NEXT_MICROBATCH} requires PIPELINE_STEP_BOUNDARY on (true, True or 1), got '${PIPELINE_STEP_BOUNDARY}'" >&2
+  exit 1
+fi
+unset _pipeline_step_boundary_on _stage_next_microbatch_on
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-prompt_batch}
-export USE_DEFAULT_SQL_STORE="${USE_DEFAULT_SQL_STORE:-true}"
-if [[ "${DRY_RUN:-false}" != "true" ]] && [[ -z "${TRAJECTORY_STORE_DB_URL:-}" ]] && [[ "${USE_DEFAULT_SQL_STORE}" =~ ^(1|true|True|TRUE)$ ]]; then
-  if [[ -n "${PROJECT:-}" ]]; then
-    TRAJECTORY_STORE_DB_URL="$(timeout 10s gcloud secrets versions access latest --secret=tunix-sql-store-uri --project="${PROJECT}" --quiet 2>/dev/null || true)"
-  fi
-  if [[ -z "${TRAJECTORY_STORE_DB_URL}" ]]; then
-    echo "WARNING: USE_DEFAULT_SQL_STORE is enabled but TRAJECTORY_STORE_DB_URL could not be retrieved from GCP Secret Manager for project '${PROJECT:-}'; SQL trajectory store will be skipped." >&2
+
+# Trajectory Store: flag to disable writing to trajectory store entirely (file and SQL).
+export DISABLE_TRAJECTORY_STORE="${DISABLE_TRAJECTORY_STORE:-false}"
+if [[ "${DISABLE_TRAJECTORY_STORE}" =~ ^(1|true|True|TRUE)$ ]] || [[ "${ENABLE_TRAJECTORY_STORE:-true}" =~ ^(0|false|False|FALSE)$ ]]; then
+  export DISABLE_TRAJECTORY_STORE="true"
+  export TRAJECTORY_STORE_ROOT_DIR=""
+  export TRAJECTORY_STORE_ROOT=""
+  export TRAJECTORY_STORE_DB_URL=""
+  export USE_DEFAULT_SQL_STORE="false"
+else
+  export USE_DEFAULT_SQL_STORE="${USE_DEFAULT_SQL_STORE:-true}"
+  if [[ "${DRY_RUN:-false}" != "true" ]] && [[ -z "${TRAJECTORY_STORE_DB_URL:-}" ]] && [[ "${USE_DEFAULT_SQL_STORE}" =~ ^(1|true|True|TRUE)$ ]]; then
+    if [[ -n "${PROJECT:-}" ]]; then
+      TRAJECTORY_STORE_DB_URL="$(timeout 10s gcloud secrets versions access latest --secret=tunix-sql-store-uri --project="${PROJECT}" --quiet 2>/dev/null || true)"
+    fi
+    if [[ -z "${TRAJECTORY_STORE_DB_URL}" ]]; then
+      echo "WARNING: USE_DEFAULT_SQL_STORE is enabled but TRAJECTORY_STORE_DB_URL could not be retrieved from GCP Secret Manager for project '${PROJECT:-}'; SQL trajectory store will be skipped." >&2
+    fi
   fi
 fi
 export TRAJECTORY_STORE_DB_URL="${TRAJECTORY_STORE_DB_URL:-}"

@@ -421,6 +421,58 @@ class BatchOrderedQueueManagerTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
+  def test_hole_is_passed_once_the_batch_before_it_commits(self):
+    """Tests a hole read past by index before the previous batch commits.
+
+    A short batch 0, then a hole at batch 1. Draining batch 0 moves the
+    serving cursor to 1; reading batch 1 by index before batch 0 commits (the
+    pipelined step boundary does) moves it on to 2. Committing batch 0 must
+    still pass over the hole, or `next_batch_idx` lags a batch until the next
+    commit and the hole's state is never dropped.
+    """
+
+    async def _run_test():
+      cursor_log: list[int] = []
+      manager = _create_batch_manager(full_batch_size=2, cursor_log=cursor_log)
+      manager.expect(0, num_groups=1)
+      manager.expect(1, num_groups=0)
+      only = await _put_group(manager, "p0", batch_idx=0)
+      await _put_group(manager, "p4", batch_idx=2)
+
+      self.assertEqual(await manager.get_ordered_group(), (0, only))
+      self.assertIsNone(await manager.get_ordered_group(batch_idx=0))
+      self.assertEqual(manager.serving_batch_idx, 1)
+      self.assertIsNone(await manager.get_ordered_group(batch_idx=1))
+      self.assertEqual(manager.serving_batch_idx, 2)
+      self.assertEqual(manager.next_batch_idx, 0)
+
+      manager.commit_batch(0)
+      self.assertEqual(manager.next_batch_idx, 2)
+      self.assertEqual(cursor_log, [1, 2])
+      self.assertNotIn(1, manager._sealed)
+
+    asyncio.run(_run_test())
+
+  def test_hole_rule_change_leaves_the_in_order_consumer_alone(self):
+    """Tests the same batches read in order, committing between them."""
+
+    async def _run_test():
+      cursor_log: list[int] = []
+      manager = _create_batch_manager(full_batch_size=2, cursor_log=cursor_log)
+      manager.expect(0, num_groups=1)
+      manager.expect(1, num_groups=0)
+      only = await _put_group(manager, "p0", batch_idx=0)
+      later = await _put_group(manager, "p4", batch_idx=2)
+
+      self.assertEqual(await manager.get_ordered_group(), (0, only))
+      self.assertIsNone(await manager.get_ordered_group(batch_idx=0))
+      manager.commit_batch(0)
+      self.assertEqual(manager.next_batch_idx, 2)
+      self.assertEqual(cursor_log, [1, 2])
+      self.assertEqual(await manager.get_ordered_group(), (2, later))
+
+    asyncio.run(_run_test())
+
   def test_expect_seals_a_short_final_batch(self):
     """Tests expect() letting a batch seal below full_batch_size."""
 
@@ -800,6 +852,73 @@ class BatchOrderedQueueManagerTest(absltest.TestCase):
 
       group = await manager.get_group()
       self.assertEqual(group, [valid_1, invalid_0])
+
+    asyncio.run(_run_test())
+
+  def test_overgeneration_prefer_valid_rollouts_replaces_truncated_with_succeeded(
+      self,
+  ):
+    """Truncated/timed-out rollouts with is_valid=True wait for spare SUCCEEDED rollouts."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          num_generations_to_dispatch=4,
+          prefer_valid_rollouts=True,
+      )
+      succeeded_0 = _create_item("p1", group_index=0, is_valid=True)
+      succeeded_0.traj = {"status": "SUCCEEDED"}
+
+      truncated_1 = _create_item("p1", group_index=1, is_valid=True)
+      truncated_1.traj = {"status": "MAX_STEPS_REACHED"}
+
+      clipped_2 = _create_item("p1", group_index=2, is_valid=True)
+      clipped_2.traj = {"status": "SUCCEEDED"}
+      clipped_2.metadata["clipped"] = True
+
+      succeeded_3 = _create_item("p1", group_index=3, is_valid=True)
+      succeeded_3.traj = {"status": "SUCCEEDED"}
+
+      self.assertFalse(await manager.put(succeeded_0))
+      # Truncated and response-budget-clipped items should not seal the group early
+      # while spare rollouts are still in flight.
+      self.assertFalse(await manager.put(truncated_1))
+      self.assertFalse(await manager.put(clipped_2))
+      self.assertEqual(manager.ready_groups_count, 0)
+
+      # Spare SUCCEEDED rollout arrives -> 2 preferred items accumulated!
+      self.assertTrue(await manager.put(succeeded_3))
+      group = await manager.get_group()
+      self.assertEqual(group, [succeeded_0, succeeded_3])
+
+    asyncio.run(_run_test())
+
+  def test_overgeneration_prefer_valid_rollouts_prefers_truncated_over_failed_at_budget(
+      self,
+  ):
+    """When budget is exhausted, prefers SUCCEEDED > truncated valid > FAILED."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          num_generations_to_dispatch=3,
+          prefer_valid_rollouts=True,
+      )
+      failed_0 = _create_item("p1", group_index=0, is_valid=False)
+      failed_0.traj = {"status": "FAILED"}
+
+      truncated_1 = _create_item("p1", group_index=1, is_valid=True)
+      truncated_1.traj = {"status": "TIMEOUT"}
+
+      succeeded_2 = _create_item("p1", group_index=2, is_valid=True)
+      succeeded_2.traj = {"status": "SUCCEEDED"}
+
+      self.assertFalse(await manager.put(failed_0))
+      self.assertFalse(await manager.put(truncated_1))
+      self.assertTrue(await manager.put(succeeded_2))
+
+      group = await manager.get_group()
+      self.assertEqual(group, [succeeded_2, truncated_1])
 
     asyncio.run(_run_test())
 

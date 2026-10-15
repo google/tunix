@@ -62,6 +62,22 @@ def _release_host_memory() -> None:
     pass
 
 
+def _raised_by_worker_method(exc: BaseException) -> bool:
+  """Whether a worker call failed in the worker's method, not on the way.
+
+  An actor handle re-raises the method's exception as a RuntimeError whose
+  message starts "RemoteExecutionError" (`ExecutionResponse.unwrap`); a
+  transport failure (a gRPC status, a reset connection, a timeout) is raised
+  as itself.
+
+  Args:
+    exc: What the call raised.
+  """
+  return isinstance(exc, RuntimeError) and str(exc).startswith(
+      "RemoteExecutionError"
+  )
+
+
 def _next_or_exhausted(iterator: Any) -> Any:
   """`next()` that returns `_EXHAUSTED` instead of raising StopIteration.
 
@@ -332,6 +348,45 @@ class RLStepResult:
   train_result: Any = None
 
 
+@dataclasses.dataclass(eq=False)
+class _StepState:
+  """One step's intake and train-side counters, for `_train_loop`.
+
+  The groups taken from `scored_q`, what they were packed into, and the
+  per-step counters. With `pipeline_step_boundary`, a step's state can be
+  filled while the previous step still trains (`_prepack`); the step adopts
+  it when it starts.
+  """
+
+  uncommitted_groups: list[Any] = dataclasses.field(default_factory=list)
+  all_step_items: list[Any] = dataclasses.field(default_factory=list)
+  step_rewards: list[float] = dataclasses.field(default_factory=list)
+  step_advantages: list[float] = dataclasses.field(default_factory=list)
+  num_rollouts: int = 0
+  groups_consumed: int = 0
+  current_batch_idx: int | None = None
+  # What the queue last returned; `[]` once it has no further group.
+  scored_items: list[Any] = dataclasses.field(default_factory=list)
+  packing_time_sec: float = 0.0
+  exposed_generation_time: float = 0.0
+  # Packed but not yet sent to the trainer, in packing order.
+  ready: list[batch_assembly.AssembledBatch] = dataclasses.field(
+      default_factory=list
+  )
+  num_microbatches: int = 0
+  padding_stats: list[batch_assembly.PaddingStats] = dataclasses.field(
+      default_factory=list
+  )
+  sampler_agreement: dict[str, tuple[Any, list[float]]] = dataclasses.field(
+      default_factory=dict
+  )
+  step_begun: bool = False
+  start_time: float | None = None
+  # The first micro-batch, already on the trainer host (`stage_train_step`):
+  # the micro-batch without its payload, and the id that runs it.
+  staged: tuple[batch_assembly.AssembledBatch, str] | None = None
+
+
 class RLProgram(abc.ABC):
   """Base class for multi-stage DAG workflows."""
 
@@ -409,6 +464,9 @@ class StandardRLProgram(RLProgram):
       trainer_warmup_payload: datatypes.RLTrainerPayload | None = None,
       num_generations_to_dispatch: int | None = None,
       prefer_valid_rollouts: bool = True,
+      pipeline_step_boundary: bool = False,
+      stage_next_microbatch: bool = False,
+      stage_before_update: bool = True,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -421,6 +479,12 @@ class StandardRLProgram(RLProgram):
         and initial_dispatch_first_stagger_s < 0
     ):
       raise ValueError("initial_dispatch_first_stagger_s must be non-negative.")
+    if stage_next_microbatch and not pipeline_step_boundary:
+      raise ValueError(
+          "stage_next_microbatch requires pipeline_step_boundary: the"
+          " micro-batch it stages is the one the pipelined boundary takes"
+          " ahead."
+      )
     if checkpoint_optimizer_interval_steps < 0:
       raise ValueError(
           "checkpoint_optimizer_interval_steps must be non-negative."
@@ -541,6 +605,59 @@ class StandardRLProgram(RLProgram):
     # gradient-accumulation order is unchanged.
     self.pipeline_train_microbatches = pipeline_train_microbatches
     self._pending_train: asyncio.Task[tuple[Any, float]] | None = None
+    # Pipelines the step boundary (see `_train_loop`): step k+1's groups are
+    # taken and packed while step k's last micro-batches train, step k+1's
+    # first micro-batch goes to the trainer as soon as step k's weight sync
+    # has staged, and step k's metrics, logging and host-memory release run
+    # once that call has returned, while the device computes it. The trainer
+    # gets the same calls, with the same inputs, in the same order as without
+    # it. What moves with that bookkeeping: step k's `Train step` line,
+    # StepMetrics and `on_step_end` follow a `[pipeline] SENT_AHEAD step=k` line
+    # (step k trained, step k+1 started), so a wedge in step k+1's first call
+    # stops the log there; `on_step_begin(k+1)` fires after step k+1's first
+    # train call returned; and under ARRIVAL order the dispatch window, keyed on
+    # the step count, opens that one call later (PROMPT_BATCH opens it at the
+    # commit).
+    self.pipeline_step_boundary = pipeline_step_boundary
+    # With `pipeline_step_boundary`: also send that micro-batch's data to the
+    # trainer host while the device still computes step k's last micro-batch,
+    # so the train call that later runs it carries no data. Needs an engine
+    # with `stage_train_step` and a trainer that supports it
+    # (`trainer_staging_support`); otherwise the boundary runs unstaged.
+    self.stage_next_microbatch = stage_next_microbatch
+    # Where that stage goes. With `stage_before_update` and a trainer that can
+    # defer a step's update (`stage_before_update` in its staging support):
+    # between step k's last train call, sent with its update deferred, and
+    # that update (`_stage_next_before_update`). The last call then returns
+    # once the trainer has dispatched the last micro-batch, which under
+    # MaxText's `retry_when_tokens_dropped` is when the micro-batch before it
+    # finished, so the transfer runs while the device computes the last one.
+    # Otherwise right after the last call, which runs the update and returns
+    # at its dispatch (`_maybe_stage_next_microbatch`); under
+    # `retry_when_tokens_dropped` that dispatch waits until the last
+    # micro-batch has finished, so the transfer finds the device idle and hides
+    # nothing, which the latch below catches at the first boundary except on
+    # Pathways (see `_STAGING_HIDDEN_WAIT_S`). Only matters with
+    # `stage_next_microbatch`.
+    self.stage_before_update = stage_before_update
+    # Takes groups for a step ahead of it (`_prepack`), filling a `_StepState`
+    # the step adopts when it starts.
+    self._intake_task: asyncio.Task[None] | None = None
+    # Set once a stage is seen not to hide behind the trainer's device (its
+    # device had gone idle before the transfer finished; see
+    # `_STAGING_HIDDEN_WAIT_S` for where this can be seen): the trainer is then
+    # fed slower than it computes, and staging only delays each step's sync.
+    # Also set when the trainer cannot stage at all.
+    self._staging_latched_off = False
+    # What the trainer said it supports of staging; asked once, lazily.
+    self._staging_supported: bool | None = None
+    self._staging_support: dict[str, bool] | None = None
+    # Whether it can also defer a step's update past its last micro-batch, so
+    # the stage goes in between (`_trainer_can_stage_before_update`).
+    self._stage_before_update_supported: bool | None = None
+    # The optimizer step the trainer last reported (`train_step` of an update
+    # call), from which `_stage_planned` predicts the next one.
+    self._last_optimizer_step: int | None = None
     # A cancelled asyncio.to_thread leaves its worker running, so the error
     # path's reset() must wait for any in-flight feed/flush to finish.
     self._assembler_lock = threading.Lock()
@@ -1843,15 +1960,35 @@ class StandardRLProgram(RLProgram):
     await asyncio.to_thread(_locked)
 
   async def _timed_train_step(
-      self, batch: datatypes.RLTrainerPayload, *, apply_optimizer: bool
+      self,
+      batch: datatypes.RLTrainerPayload | None,
+      *,
+      apply_optimizer: bool,
+      staged_request_id: str | None = None,
+      wait_for_update: bool = True,
+      defer_update: bool = False,
   ) -> tuple[Any, float]:
     assert self.engine is not None
     start = time.monotonic()
+    # Passed only when set, so engines without staging see the call unchanged.
+    kwargs = {}
+    if staged_request_id is not None:
+      kwargs["staged_request_id"] = staged_request_id
+    if not wait_for_update:
+      # Only with staging, i.e. to a trainer that supports it
+      # (`_trainer_can_stage`): its worker's fused update then returns at
+      # the update's dispatch (`TrainerWorker.fwd_bwd`).
+      kwargs["wait_for_update"] = False
+    if defer_update:
+      # Only to a trainer that can (`_trainer_can_stage_before_update`): the
+      # update is left to `apply_deferred_update`.
+      kwargs["defer_update"] = True
     result = await self.engine.train_step(
         batch,
         role=datatypes.Role.ACTOR,
         accumulate_gradients=True,
         apply_optimizer=apply_optimizer,
+        **kwargs,
     )
     return result, time.monotonic() - start
 
@@ -1944,39 +2081,90 @@ class StandardRLProgram(RLProgram):
     finally:
       if self._pending_sync is not None and not self._pending_sync.done():
         self._pending_sync.cancel()
+      if self._intake_task is not None and not self._intake_task.done():
+        self._intake_task.cancel()
 
   async def _train_loop(self) -> None:
+    """Trains one optimizer step per full batch of scored groups.
+
+    One loop for both step boundaries. Without `pipeline_step_boundary`, step
+    k+1 starts once step k's bookkeeping is done. With it, the trainer gets
+    the same calls, with the same inputs, in the same order -- every
+    micro-batch of step k (the last one also runs step k's update), then the
+    metrics fetch, checkpoint save and weight-sync staging, then step k+1's
+    first micro-batch -- and the assembler sees the same feeds, so the
+    micro-batches, their order, and the weights each is computed on are
+    unchanged. What moves is the orchestrator's own work between step k's
+    update and step k+1's first micro-batch:
+
+    * Packing. Once step k's last group is fed, step k+1's groups are taken
+      and packed (`_prepack`) while step k's last micro-batches train.
+    * Bookkeeping. Step k+1's first micro-batch is sent right after step k's
+      sync stages, its batch commits and, when deferred, its metrics are
+      fetched (`_send_first_microbatch_ahead`); step k's step metrics,
+      logging, `on_step_end` and host-memory release run once that call is on
+      the trainer.
+    * Transfer (`stage_next_microbatch`). That micro-batch's data goes to the
+      trainer host while the device still computes step k's last micro-batch
+      (`_stage_planned`): between step k's last train call, sent with its
+      update deferred, and that update (`_stage_next_before_update`), when
+      the trainer can defer it; else right after the last call, which then
+      returns at the update's dispatch (`_maybe_stage_next_microbatch`). The
+      stage call, and with a deferred update the update call, are the only
+      calls added on the trainer.
+    """
     assert self.engine is not None
+    ordered_q = isinstance(
+        self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+    )
+    # The next step's state while it is taken ahead (`_prepack`); only ever
+    # set with `pipeline_step_boundary`.
+    next_state: _StepState | None = None
 
     while self.max_steps is None or self._step < self.max_steps:
       current_step = self._step
-      step_start_time = time.monotonic()
+      is_last_step = (
+          self.max_steps is not None and current_step + 1 >= self.max_steps
+      )
       consumed_policy_version = self.policy_version
+      st = next_state if next_state is not None else _StepState()
+      next_state = None
+      # The step's clock starts at the step boundary in every mode: at the send
+      # when its first micro-batch went ahead, and otherwise here, before any
+      # wait for its groups, as without the pipelined boundary. So step_time
+      # spans the same work either way, and the wait also counts as exposed
+      # generation time.
+      if st.start_time is None:
+        st.start_time = time.monotonic()
+      if self._intake_task is not None:
+        # Still taking this step's groups ahead; from here the wait is exposed.
+        intake, self._intake_task = self._intake_task, None
+        t_wait = time.monotonic()
+        await intake
+        st.exposed_generation_time += time.monotonic() - t_wait
+      step_start_time = st.start_time
+      if st.groups_consumed == 0:
+        # Nothing was taken ahead (the next batch was a hole, or the queue
+        # closed): start exactly as without taking ahead.
+        st.current_batch_idx = None
+        st.scored_items = []
+      elif not st.step_begun:
+        st.step_begun = True
+        if self.on_step_begin:
+          self.on_step_begin(current_step)
 
-      uncommitted_groups = []
       step_result = None
       trainer_metrics = None
-      step_sampler_agreement: dict[str, tuple[Any, list[float]]] = {}
-      step_rewards = []
-      step_advantages = []
-      num_microbatches = 0
-      step_padding_stats: list[batch_assembly.PaddingStats] = []
-      step_packing_time_sec = 0.0
-      num_rollouts = 0
-      all_step_items = []
-      scored_items = []
-      groups_consumed = 0
       checkpoint_saved = False
       final_minibatch_completed = False
       pending_metrics_fetch = False
+      queue_dry = False
+      prepack_started = False
       policy_training_time = 0.0
-      exposed_generation_time = 0.0
       weight_sync_time = 0.0
       # The end-of-step get_metrics() deferred past the weight sync and commit,
       # kept out of policy_training_time because it no longer runs in training.
       metrics_fetch_time = 0.0
-
-      current_batch_idx: int | None = None
 
       async def _await_pending_train() -> None:
         nonlocal step_result, policy_training_time
@@ -1987,196 +2175,47 @@ class StandardRLProgram(RLProgram):
 
       async def _maybe_save_checkpoint() -> None:
         nonlocal checkpoint_saved
-        ckpt_ts_ms = time.time_ns() // 1_000_000
-        self.last_step_timestamp_ms = ckpt_ts_ms
-        optimizer_step = self.step + 1
-        if (
-            isinstance(step_result, dict)
-            and step_result.get("train_step") is not None
-        ):
-          optimizer_step = int(step_result["train_step"])
-        if (
-            self.val_start_step is not None
-            and optimizer_step < self.val_start_step
-        ):
-          checkpoint_saved = True
-          return
-        if isinstance(
-            self.scored_q,
-            trajectory_queue_manager.BatchOrderedQueueManager,
-        ):
-          next_batch_idx = (
-              self.scored_q.next_batch_after(current_batch_idx)
-              if current_batch_idx is not None
-              else self.scored_q.next_batch_idx
-          )
-        else:
-          next_batch_idx = self.step + 1
-        save_kwargs = {}
-        interval = self.checkpoint_optimizer_interval_steps
-        if interval == 0 or (
-            optimizer_step % interval != 0
-            and (self.max_steps is None or self.step + 1 < self.max_steps)
-        ):
-          # Sent only when skipping, so an interval of 1 leaves the request,
-          # and trainers that predate the option, untouched.
-          save_kwargs["save_optimizer_state"] = False
-        save_resp = await self.engine.save_checkpoint(
-            role=datatypes.Role.ACTOR,
-            metadata={
-                "step": optimizer_step,
-                "global_step": self.step + 1,
-                "next_batch_idx": next_batch_idx,
-                "policy_version": self.policy_version + 1,
-                "num_rollouts": num_rollouts,
-                "num_microbatches": num_microbatches,
-            },
-            **save_kwargs,
-        )
+        await self._save_step_checkpoint(st, step_result)
         checkpoint_saved = True
-        if self.on_checkpoint_saved is not None:
-          # `TrainerWorker.save_checkpoint` always returns the saved path in
-          # `Response.metadata["checkpoint_path"]`. The callback runs in a
-          # worker thread (it may do blocking file/GCS I/O) and is awaited, so
-          # calls never overlap and its exceptions still propagate.
-          ckpt_info: dict[str, Any] = {
-              "step": optimizer_step,
-              "timestamp_ms": ckpt_ts_ms,
-              "checkpoint_path": save_resp.metadata["checkpoint_path"],
-          }
-          await asyncio.to_thread(self.on_checkpoint_saved, ckpt_info)
 
-      while groups_consumed < self.full_batch_size:
-        _t_gen = time.monotonic()
-        if isinstance(
-            self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+      while True:
+        if (
+            self.pipeline_step_boundary
+            and not prepack_started
+            and not is_last_step
+            and st.groups_consumed > 0
+            and (queue_dry or st.groups_consumed >= self.full_batch_size)
         ):
-          ordered = await self.scored_q.get_ordered_group(
-              batch_idx=current_batch_idx
-          )
-          if ordered is None:
-            scored_items = []
-          else:
-            current_batch_idx, scored_items = ordered
-        else:
-          scored_items = await self.scored_q.get_group_batch(num_groups=1)
-        # TODO(sanbao): Track accurate generation time by matching rollout
-        # requests/responses or reading from the rollout worker. Currently this
-        # measures time spent waiting on the scored queue (which includes
-        # rollout + reward calculation), as MLPerf does not strictly validate
-        # per-component timing accuracy.
-        exposed_generation_time += time.monotonic() - _t_gen
-        if not scored_items:
-          packing_start_time = time.perf_counter()
-          assembled_batches = list(await self._assemble(self.assembler.flush))
-          step_packing_time_sec += time.perf_counter() - packing_start_time
-        else:
-          if groups_consumed == 0 and self.on_step_begin:
-            self.on_step_begin(current_step)
-
-          groups_consumed += 1
-          uncommitted_groups.append(scored_items)
-          all_step_items.extend(scored_items)
-          num_rollouts += len(scored_items)
-          for item in scored_items:
-            step_rewards.append(_extract_reward(item))
-            payload = getattr(item, "payload", None)
-            if (
-                item.is_valid
-                and payload is not None
-                and payload.advantages is not None
-                and np.asarray(payload.advantages).size > 0
-            ):
-              step_advantages.append(float(np.mean(payload.advantages)))
-
-          payloads = []
-          for item in scored_items:
-            payload = getattr(item, "payload", None)
-            if isinstance(payload, datatypes.RLTrainerPayload):
-              payload = dataclasses.replace(
-                  payload,
-                  metadata={
-                      **payload.metadata,
-                      "traj_id": item.traj_id,
-                  },
-              )
-            payloads.append(payload)
-          packing_start_time = time.perf_counter()
-          assembled_batches = list(
-              await self._assemble(
-                  self.assembler.feed,
-                  payloads,  # pyrefly: ignore[bad-argument-type]
+          # Every group of this step is fed. Take the next step's ahead while
+          # this step's last micro-batches train. Under PROMPT_BATCH order
+          # that is the next batch by index: `next_batch_idx` does not move
+          # before this batch commits, and a hole there just leaves nothing
+          # taken.
+          prepack_started = True
+          next_state = _StepState(
+              current_batch_idx=(
+                  st.current_batch_idx + 1
+                  if ordered_q and st.current_batch_idx is not None
+                  else None
               )
           )
-          step_packing_time_sec += time.perf_counter() - packing_start_time
-          # `self.assembler` has now copied or packed `routed_experts`; release
-          # the per-trajectory references on `payloads` and `scored_items`
-          # (which remain in `all_step_items` until step-end metric logging) so
-          # unbatched routing arrays do not coexist with packed microbatches and
-          # weight sync. Lightweight 1D mask fields on `item.payload` are kept
-          # for `_collect_and_log_step_metrics`.
-          payloads.clear()
-          for item in scored_items:
-            item.routed_experts = None
-            if item.metadata is not None:
-              item.metadata.pop("routed_experts", None)
-            if isinstance(item.traj, dict):
-              item.traj.pop("routed_experts", None)
-            item_payload = getattr(item, "payload", None)
-            if (
-                isinstance(item_payload, datatypes.RLTrainerPayload)
-                and item_payload.routed_experts is not None
-            ):
-              item.payload = dataclasses.replace(
-                  item_payload, routed_experts=None
-              )
+          self._intake_task = asyncio.create_task(self._prepack(next_state))
 
-        while assembled_batches:
-          mb = assembled_batches.pop(0)
+        # Send what is packed, in order: a feed's micro-batches go out before
+        # the next group is taken.
+        while st.ready:
+          mb = st.ready.pop(0)
           is_final_batch = mb.is_final_batch
-          batch = mb.payload
-          if getattr(self.algo, "requires_reference_kl", False):
-            if not isinstance(batch, datatypes.RLTrainerPayload):
-              raise TypeError(
-                  "Reference KL requires an assembler that returns "
-                  "datatypes.RLTrainerPayload microbatches; got "
-                  f"{type(batch).__name__}."
-              )
-            # The reference model is static and on its own worker, so this
-            # overlaps the in-flight actor train_step.
-            ref_logps = await self.engine.per_token_logps(
-                datatypes.Role.REFERENCE, items=batch
-            )
-            batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
-          algo_config = getattr(self.algo, "algo_config", None)
-          if (
-              isinstance(batch, datatypes.RLTrainerPayload)
-              and batch.old_per_token_logps is not None
-              and algo_config is not None
-              and algo_config.use_rollout_logps
-          ):
+          # The reference model is static and on its own worker, so this
+          # overlaps the in-flight actor train_step.
+          batch = await self._with_reference_logps(mb.payload)
+          rescored = self._needs_sampler_agreement(batch)
+          if rescored:
             await _await_pending_train()
             batch = await self._apply_sampler_trainer_agreement(
-                batch, step_sampler_agreement
+                batch, st.sampler_agreement
             )
-
-          num_microbatches += 1
-          if mb.padding_stats is not None:
-            step_padding_stats.append(mb.padding_stats)
-            logging.info(
-                "Packed %d trajectories into microbatch: %s (padding_ratio=%.3f,"
-                " row_imbalance=%.3f)",
-                len(mb.trajectory_ids),
-                logging_utils.summarize_list(list(mb.trajectory_ids)),
-                mb.padding_stats.padding_ratio,
-                mb.padding_stats.row_imbalance,
-            )
-          else:
-            logging.info(
-                "Packed %d trajectories into microbatch: %s",
-                len(mb.trajectory_ids),
-                logging_utils.summarize_list(list(mb.trajectory_ids)),
-            )
+          self._record_microbatch(st, mb)
           mb = None
           if not self._first_train_payload_logged:
             self._first_train_payload_logged = True
@@ -2185,8 +2224,33 @@ class StandardRLProgram(RLProgram):
                 batch_assembly.describe_payload(batch),
             )
           await _await_pending_train()
+          # Save only at a resumable full-batch boundary. An optimizer step
+          # can occur earlier when a full batch contains multiple mini
+          # batches, but the dataset resume cursor advances in full batches.
+          # (Known before the call: it changes neither count.)
+          full_batch_complete = is_final_batch and (
+              st.groups_consumed >= self.full_batch_size or not st.scored_items
+          )
+          # Whether the next step's first micro-batch is staged right after
+          # this call. The call runs the update too, and then returns at the
+          # update's dispatch rather than once it landed, so the transfer
+          # hides behind the device's remaining work; the stage confirms the
+          # update instead. Off the flag, the call is exactly as without it.
+          stage_after = (
+              full_batch_complete
+              and self.stage_next_microbatch
+              and await self._stage_planned(next_state, rescored=rescored)
+          )
+          # Or, when the trainer can, the update is left out of this call and
+          # the stage goes before it (`_stage_next_before_update`).
+          defer_update = (
+              stage_after and await self._trainer_can_stage_before_update()
+          )
           train_step = self._timed_train_step(
-              batch, apply_optimizer=is_final_batch
+              batch,
+              apply_optimizer=is_final_batch,
+              wait_for_update=not stage_after,
+              defer_update=defer_update,
           )
           batch = None
           if self.pipeline_train_microbatches and not is_final_batch:
@@ -2195,21 +2259,57 @@ class StandardRLProgram(RLProgram):
           step_result, elapsed = await train_step
           policy_training_time += elapsed
           if is_final_batch:
-            # Save only at a resumable full-batch boundary. An optimizer step
-            # can occur earlier when a full batch contains multiple mini
-            # batches, but the dataset resume cursor advances in full batches.
-            full_batch_complete = (
-                groups_consumed >= self.full_batch_size or not scored_items
-            )
-            # The checkpoint is stamped as the weight-update time and saved
-            # next, so the update must have landed on device first. Unless the
-            # trainer has said it did (`update_ready`), fetching the metrics is
-            # what waits for it, so the fetch stays ahead of the save, counted
-            # as training time, as with a separate update RPC.
-            pending_metrics_fetch = full_batch_complete and bool(
+            # While an update is deferred the worker refuses get_metrics, a
+            # checkpoint and a weight sync, so `_stage_next_before_update`,
+            # which always applies the update, runs before any of them. A
+            # result without `update_deferred` means the trainer ran the
+            # update inside the call after all (the engine reports that as a
+            # fused call): `stage_after` is then still set, and the stage goes
+            # after the update below, as with `--no-stage_before_update`.
+            if (
+                defer_update
+                and isinstance(step_result, dict)
+                and step_result.get("update_deferred")
+            ):
+              assert next_state is not None
+              # The trainer has this step's last micro-batch and no update
+              # yet: stage the next step's first micro-batch under it, then
+              # run the update. Training time, as the fused call's wait for
+              # the device would have been.
+              deferred_start = time.monotonic()
+              step_result = await self._stage_next_before_update(
+                  next_state, step_result
+              )
+              policy_training_time += time.monotonic() - deferred_start
+              # This boundary's stage was made, or refused, before the
+              # update. Skip the hook below: staging after the update's
+              # dispatch is the order this path replaces, and under dropless
+              # replay it would find the device idle and hide nothing.
+              stage_after = False
+            if (
+                isinstance(step_result, dict)
+                and step_result.get("train_step") is not None
+            ):
+              self._last_optimizer_step = int(step_result["train_step"])
+            update_ready = bool(
                 isinstance(step_result, dict)
                 and step_result.get("update_ready")
             )
+            if stage_after:
+              assert next_state is not None
+              # The update is dispatched and the device has this step's last
+              # micro-batch and the update ahead of it.
+              if await self._maybe_stage_next_microbatch(
+                  next_state, step_result
+              ):
+                update_ready = True
+            # The checkpoint is stamped as the weight-update time and saved
+            # next, so the update must have landed on device first. Unless the
+            # trainer has said it did (`update_ready`, from this call or from
+            # the stage right after it), fetching the metrics is what waits
+            # for it, so the fetch stays ahead of the save, counted as
+            # training time, as with a separate update RPC.
+            pending_metrics_fetch = full_batch_complete and update_ready
             if not pending_metrics_fetch:
               _t_metrics = time.monotonic()
               trainer_metrics = await self.engine.get_metrics(
@@ -2227,13 +2327,18 @@ class StandardRLProgram(RLProgram):
             if full_batch_complete:
               await _maybe_save_checkpoint()
 
-        if not scored_items:
+        if queue_dry:
           if not checkpoint_saved and final_minibatch_completed:
             await _maybe_save_checkpoint()
           break
+        if st.groups_consumed >= self.full_batch_size:
+          break
+        if not await self._take_group(st, current_step=current_step):
+          await self._flush_step(st)
+          queue_dry = True
 
       await _await_pending_train()
-      if not all_step_items:
+      if not st.all_step_items:
         logging.info(
             "Dataset exhausted at step %d before max_steps.", current_step
         )
@@ -2258,30 +2363,32 @@ class StandardRLProgram(RLProgram):
         )
 
       # Before `commit()`, which will eventually take ownership of the groups.
-      generation_metrics = _generation_metrics(uncommitted_groups)
+      generation_metrics = _generation_metrics(st.uncommitted_groups)
       logging.info(
           "[pipeline] COMMIT step=%d batch_idx=%s consumed_version=%d"
           " rollout_versions=%s groups=%s",
           current_step,
-          current_batch_idx,
+          st.current_batch_idx,
           consumed_policy_version,
-          [getattr(g[0], "policy_version", 0) for g in uncommitted_groups if g],
+          [
+              getattr(g[0], "policy_version", 0)
+              for g in st.uncommitted_groups
+              if g
+          ],
           [
               (
                   getattr(g[0], "prompt_id", ""),
                   (getattr(g[0], "metadata", None) or {}).get("batch_idx"),
               )
-              for g in uncommitted_groups
+              for g in st.uncommitted_groups
               if g
           ],
       )
-      if isinstance(
-          self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
-      ):
-        assert current_batch_idx is not None
-        self.scored_q.commit_batch(current_batch_idx)
+      if ordered_q:
+        assert st.current_batch_idx is not None
+        self.scored_q.commit_batch(st.current_batch_idx)
       else:
-        self.scored_q.commit(current_step, groups=uncommitted_groups)
+        self.scored_q.commit(current_step, groups=st.uncommitted_groups)
       # The commit may have opened the dispatch window. Yield so the
       # dispatcher refills the just-synced rollout workers now, rather than
       # after this step's bookkeeping and the next step's first packing.
@@ -2298,42 +2405,63 @@ class StandardRLProgram(RLProgram):
 
       filtered_groups = await self._drain_filtered_groups()
 
+      if next_state is not None:
+        # Step k+1's first micro-batch goes to the trainer now. This step's
+        # remaining bookkeeping waits until that call is on the trainer, so
+        # its transfer is not slowed by it and the device computes while it
+        # runs: step k's `Train step` line, StepMetrics and `on_step_end`
+        # therefore follow the `[pipeline] SENT_AHEAD` line by one train
+        # call's return (one transfer unstaged, ~a round trip staged).
+        sent_ahead = await self._send_first_microbatch_ahead(next_state)
+        if sent_ahead is not None:
+          logging.info(
+              "[pipeline] SENT_AHEAD step=%d first microbatch of step %d is on"
+              " its way to the trainer; step %d's metrics follow once it is"
+              " there.",
+              current_step,
+              current_step + 1,
+              current_step,
+          )
+          # Not collected here: its result is step k+1's, and a failure
+          # surfaces when step k+1 collects it.
+          await asyncio.wait({sent_ahead})
+
       metrics_summary = self._collect_and_log_step_metrics(
-          all_step_items=all_step_items,
-          step_rewards=step_rewards,
-          step_advantages=step_advantages,
+          all_step_items=st.all_step_items,
+          step_rewards=st.step_rewards,
+          step_advantages=st.step_advantages,
           generation_metrics=generation_metrics,
           step_result=step_result,
           trainer_metrics=trainer_metrics,
-          num_rollouts=num_rollouts,
-          num_microbatches=num_microbatches,
-          padding_stats=step_padding_stats,
-          packing_time_sec=step_packing_time_sec,
+          num_rollouts=st.num_rollouts,
+          num_microbatches=st.num_microbatches,
+          padding_stats=st.padding_stats,
+          packing_time_sec=st.packing_time_sec,
           step_time_sec=step_time_sec,
           consumed_policy_version=consumed_policy_version,
           log_step=current_step,
-          sampler_agreement=step_sampler_agreement,
+          sampler_agreement=st.sampler_agreement,
           policy_training_time=policy_training_time,
-          exposed_generation_time=exposed_generation_time,
+          exposed_generation_time=st.exposed_generation_time,
           weight_sync_time=weight_sync_time,
           metrics_fetch_time=metrics_fetch_time,
           filtered_groups=filtered_groups,
       )
       self._log_consumed_trajectories(
-          all_step_items,
+          st.all_step_items,
           log_step=current_step,
           consumed_policy_version=consumed_policy_version,
       )
       filtered_groups.clear()
-      all_step_items.clear()
-      uncommitted_groups.clear()
-      scored_items.clear()
+      st.all_step_items.clear()
+      st.uncommitted_groups.clear()
+      st.scored_items.clear()
 
       self.last_step_result = RLStepResult(
           step=current_step,
           policy_version=self.policy_version,
-          num_rollouts=num_rollouts,
-          num_microbatches=num_microbatches,
+          num_rollouts=st.num_rollouts,
+          num_microbatches=st.num_microbatches,
           reward_mean=metrics_summary["reward_mean"],
           reward_std=metrics_summary["reward_std"],
           advantage_mean=metrics_summary["advantage_mean"],
@@ -2365,6 +2493,692 @@ class StandardRLProgram(RLProgram):
       # left to set the event.
       self._release_window()
       _release_host_memory()
+
+  # The pieces of `_train_loop` that work on a `_StepState`, so that a step's
+  # state can be filled ahead of it (`_prepack`) and its first micro-batch
+  # sent (`_send_first_microbatch_ahead`) or staged
+  # (`_maybe_stage_next_microbatch`) early under `pipeline_step_boundary`.
+
+  async def _take_group(
+      self, st: _StepState, *, current_step: int | None
+  ) -> bool:
+    """Takes the step's next group from `scored_q` and feeds it to the assembler.
+
+    `current_step` is None when taking ahead for a step that has not started
+    (`_prepack`): the queue wait and `on_step_begin` are then left to the
+    step, which does both on adopting the state.
+
+    Args:
+      st: State of the step the group is for.
+      current_step: The step taking the group, or None when taking ahead.
+
+    Returns:
+      False, leaving `st.scored_items == []`, when the queue has no further
+      group for the step.
+    """
+    t_gen = time.monotonic()
+    if isinstance(
+        self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+    ):
+      ordered = await self.scored_q.get_ordered_group(
+          batch_idx=st.current_batch_idx
+      )
+      if ordered is None:
+        scored_items = []
+      else:
+        st.current_batch_idx, scored_items = ordered
+    else:
+      scored_items = await self.scored_q.get_group_batch(num_groups=1)
+    # TODO(sanbao): Track accurate generation time by matching rollout
+    # requests/responses or reading from the rollout worker. Currently this
+    # measures time spent waiting on the scored queue (which includes
+    # rollout + reward calculation), as MLPerf does not strictly validate
+    # per-component timing accuracy.
+    if current_step is not None:
+      st.exposed_generation_time += time.monotonic() - t_gen
+    st.scored_items = scored_items
+    if not scored_items:
+      return False
+    if current_step is not None and not st.step_begun:
+      st.step_begun = True
+      if self.on_step_begin:
+        self.on_step_begin(current_step)
+
+    st.groups_consumed += 1
+    st.uncommitted_groups.append(scored_items)
+    st.all_step_items.extend(scored_items)
+    st.num_rollouts += len(scored_items)
+    for item in scored_items:
+      st.step_rewards.append(_extract_reward(item))
+      payload = getattr(item, "payload", None)
+      if (
+          item.is_valid
+          and payload is not None
+          and payload.advantages is not None
+          and np.asarray(payload.advantages).size > 0
+      ):
+        st.step_advantages.append(float(np.mean(payload.advantages)))
+
+    payloads = []
+    for item in scored_items:
+      payload = getattr(item, "payload", None)
+      if isinstance(payload, datatypes.RLTrainerPayload):
+        payload = dataclasses.replace(
+            payload,
+            metadata={
+                **payload.metadata,
+                "traj_id": item.traj_id,
+            },
+        )
+      payloads.append(payload)
+    packing_start_time = time.perf_counter()
+    assembled_batches = list(
+        await self._assemble(
+            self.assembler.feed,
+            payloads,  # pyrefly: ignore[bad-argument-type]
+        )
+    )
+    st.packing_time_sec += time.perf_counter() - packing_start_time
+    # `self.assembler` has now copied or packed `routed_experts`; release
+    # the per-trajectory references on `payloads` and `scored_items`
+    # (which remain in `all_step_items` until step-end metric logging) so
+    # unbatched routing arrays do not coexist with packed microbatches and
+    # weight sync. Lightweight 1D mask fields on `item.payload` are kept
+    # for `_collect_and_log_step_metrics`.
+    payloads.clear()
+    for item in scored_items:
+      item.routed_experts = None
+      if item.metadata is not None:
+        item.metadata.pop("routed_experts", None)
+      if isinstance(item.traj, dict):
+        item.traj.pop("routed_experts", None)
+      item_payload = getattr(item, "payload", None)
+      if (
+          isinstance(item_payload, datatypes.RLTrainerPayload)
+          and item_payload.routed_experts is not None
+      ):
+        item.payload = dataclasses.replace(item_payload, routed_experts=None)
+    st.ready.extend(assembled_batches)
+    return True
+
+  async def _flush_step(self, st: _StepState) -> None:
+    """Packs whatever the assembler still holds for the step."""
+    packing_start_time = time.perf_counter()
+    st.ready.extend(list(await self._assemble(self.assembler.flush)))
+    st.packing_time_sec += time.perf_counter() - packing_start_time
+
+  async def _prepack(self, st: _StepState) -> None:
+    """Takes groups for a step ahead of it, until one micro-batch is packed.
+
+    Also stops once the step has all its groups, or the queue has no further
+    group for it. The step takes over exactly where this stops, so the
+    assembler sees the same feeds in the same order as without taking ahead.
+
+    Args:
+      st: State of the step being taken ahead.
+    """
+    while not st.ready and st.groups_consumed < self.full_batch_size:
+      if not await self._take_group(st, current_step=None):
+        return
+
+  def _intake_done(self) -> bool:
+    """Whether the intake task finished without error (and is not consumed)."""
+    task = self._intake_task
+    return (
+        task is not None
+        and task.done()
+        and not task.cancelled()
+        and task.exception() is None
+    )
+
+  async def _with_reference_logps(self, batch: Any) -> Any:
+    """Adds the reference policy's log-probs when the algorithm needs them."""
+    if not getattr(self.algo, "requires_reference_kl", False):
+      return batch
+    if not isinstance(batch, datatypes.RLTrainerPayload):
+      raise TypeError(
+          "Reference KL requires an assembler that returns "
+          "datatypes.RLTrainerPayload microbatches; got "
+          f"{type(batch).__name__}."
+      )
+    assert self.engine is not None
+    # The reference model is static and on its own worker.
+    ref_logps = await self.engine.per_token_logps(
+        datatypes.Role.REFERENCE, items=batch
+    )
+    return batch_assembly.with_ref_per_token_logps(batch, ref_logps)
+
+  def _needs_sampler_agreement(self, batch: Any) -> bool:
+    """Whether `batch` is rescored under the trainer's live weights first."""
+    algo_config = getattr(self.algo, "algo_config", None)
+    return bool(
+        isinstance(batch, datatypes.RLTrainerPayload)
+        and batch.old_per_token_logps is not None
+        and algo_config is not None
+        and algo_config.use_rollout_logps
+    )
+
+  def _record_microbatch(
+      self, st: _StepState, mb: batch_assembly.AssembledBatch
+  ) -> None:
+    """Counts a micro-batch about to be trained, and logs what it packs."""
+    st.num_microbatches += 1
+    if mb.padding_stats is not None:
+      st.padding_stats.append(mb.padding_stats)
+      logging.info(
+          "Packed %d trajectories into microbatch: %s (padding_ratio=%.3f,"
+          " row_imbalance=%.3f)",
+          len(mb.trajectory_ids),
+          logging_utils.summarize_list(list(mb.trajectory_ids)),
+          mb.padding_stats.padding_ratio,
+          mb.padding_stats.row_imbalance,
+      )
+    else:
+      logging.info(
+          "Packed %d trajectories into microbatch: %s",
+          len(mb.trajectory_ids),
+          logging_utils.summarize_list(list(mb.trajectory_ids)),
+      )
+
+  def _optimizer_step_after(self, step_result: Any) -> int:
+    """The optimizer step a step's final train call completed."""
+    if (
+        isinstance(step_result, dict)
+        and step_result.get("train_step") is not None
+    ):
+      return int(step_result["train_step"])
+    return self.step + 1
+
+  def _writes_scored_checkpoint(self, step_result: Any) -> bool:
+    """Whether this step's checkpoint is one an MLPerf eval may be scored on."""
+    return (
+        self.val_start_step is not None
+        and self._optimizer_step_after(step_result) >= self.val_start_step
+    )
+
+  async def _save_step_checkpoint(
+      self, st: _StepState, step_result: Any
+  ) -> None:
+    """Stamps the step's checkpoint time and saves it unless it is unscored.
+
+    The stamp is taken here, after the barrier that proves the step's update
+    landed (MLPerf: a checkpoint's timestamp follows its last weight update):
+    `get_metrics`, or the trainer's `update_ready` on the step's last train
+    call or on the stage right after it.
+
+    Args:
+      st: The step's state.
+      step_result: The step's final train call result.
+    """
+    assert self.engine is not None
+    ckpt_ts_ms = time.time_ns() // 1_000_000
+    self.last_step_timestamp_ms = ckpt_ts_ms
+    optimizer_step = self._optimizer_step_after(step_result)
+    if self.val_start_step is not None and optimizer_step < self.val_start_step:
+      return
+    if isinstance(
+        self.scored_q,
+        trajectory_queue_manager.BatchOrderedQueueManager,
+    ):
+      next_batch_idx = (
+          self.scored_q.next_batch_after(st.current_batch_idx)
+          if st.current_batch_idx is not None
+          else self.scored_q.next_batch_idx
+      )
+    else:
+      next_batch_idx = self.step + 1
+    save_kwargs = {}
+    interval = self.checkpoint_optimizer_interval_steps
+    if interval == 0 or (
+        optimizer_step % interval != 0
+        and (self.max_steps is None or self.step + 1 < self.max_steps)
+    ):
+      # Sent only when skipping, so an interval of 1 leaves the request,
+      # and trainers that predate the option, untouched.
+      save_kwargs["save_optimizer_state"] = False
+    save_resp = await self.engine.save_checkpoint(
+        role=datatypes.Role.ACTOR,
+        metadata={
+            "step": optimizer_step,
+            "global_step": self.step + 1,
+            "next_batch_idx": next_batch_idx,
+            "policy_version": self.policy_version + 1,
+            "num_rollouts": st.num_rollouts,
+            "num_microbatches": st.num_microbatches,
+        },
+        **save_kwargs,
+    )
+    if self.on_checkpoint_saved is not None:
+      # `TrainerWorker.save_checkpoint` always returns the saved path in
+      # `Response.metadata["checkpoint_path"]`. The callback runs in a
+      # worker thread (it may do blocking file/GCS I/O) and is awaited, so
+      # calls never overlap and its exceptions still propagate.
+      ckpt_info: dict[str, Any] = {
+          "step": optimizer_step,
+          "timestamp_ms": ckpt_ts_ms,
+          "checkpoint_path": save_resp.metadata["checkpoint_path"],
+      }
+      await asyncio.to_thread(self.on_checkpoint_saved, ckpt_info)
+
+  # How long a trainer must still have waited for its device, once a staged
+  # micro-batch was in place, for the stage to count as hidden behind the
+  # device's remaining work (`_staging_hidden`). A shorter wait is read as a
+  # device that had already gone idle, and switches staging off. That catches a
+  # stage that did not hide only where waiting on an idle device returns in well
+  # under this time. On Pathways the wait is a proxy round trip that reads about
+  # 2.7-2.9 s even on an idle device, above this threshold, so there this check
+  # never switches staging off.
+  _STAGING_HIDDEN_WAIT_S = 0.05
+
+  def _staging_hidden(self, device_wait_s: float | None) -> bool:
+    """Whether a stage hid behind the trainer's device (see `_maybe_stage_...`).
+
+    Args:
+      device_wait_s: How long the trainer still waited for the work dispatched
+        before the stage, once the staged micro-batch was in place; None when
+        it cannot tell.
+    """
+    return (
+        device_wait_s is not None
+        and device_wait_s >= self._STAGING_HIDDEN_WAIT_S
+    )
+
+  async def _trainer_can_stage(self) -> bool:
+    """Whether the actor's trainer supports staging; asks it once.
+
+    Staging needs a trainer that holds a micro-batch ahead of its fwd_bwd and
+    reports whether doing so hid behind its device (`device_wait_s`, without
+    which the latch below cannot tell a feed-bound trainer). An older trainer
+    image, or a trainer without the report, gets the boundary unstaged.
+    """
+    if self._staging_supported is None:
+      probe = getattr(self.engine, "trainer_staging_support", None)
+      if (
+          probe is None
+          or getattr(self.engine, "stage_train_step", None) is None
+      ):
+        support = {}
+      else:
+        support = await probe(role=datatypes.Role.ACTOR)
+      self._staging_support = dict(support)
+      self._staging_supported = bool(
+          support.get("stage_fwd_bwd") and support.get("reports_device_wait")
+      )
+      if not self._staging_supported:
+        self._staging_latched_off = True
+        logging.warning(
+            "[pipeline] stage_next_microbatch is set but the trainer cannot"
+            " stage a microbatch and report whether that hid behind its"
+            " device (%s). Running the pipelined boundary unstaged.",
+            support,
+        )
+    return self._staging_supported
+
+  async def _trainer_can_stage_before_update(self) -> bool:
+    """Whether to stage between the last call and the update; asks once.
+
+    Needs `stage_before_update`, an engine with `apply_deferred_update`, and a
+    trainer that can defer a step's update (`stage_before_update` in the
+    staging support `_trainer_can_stage` asked it for). Only asked when a
+    stage is planned, i.e. once the trainer is known to stage at all.
+    """
+    if not self.stage_before_update:
+      return False
+    if self._stage_before_update_supported is None:
+      if not await self._trainer_can_stage():
+        return False
+      support = self._staging_support or {}
+      self._stage_before_update_supported = bool(
+          support.get("stage_before_update")
+          and getattr(self.engine, "apply_deferred_update", None) is not None
+      )
+      if not self._stage_before_update_supported:
+        logging.warning(
+            "[pipeline] The trainer cannot defer a step's update past its last"
+            " microbatch (%s): staging right after the last call instead,"
+            " which hides nothing when the trainer's update waits for that"
+            " microbatch (MaxText retry_when_tokens_dropped).",
+            support,
+        )
+    return self._stage_before_update_supported
+
+  async def _stage_planned(
+      self, st: _StepState | None, *, rescored: bool
+  ) -> bool:
+    """Whether to stage the next step's first micro-batch after the last call.
+
+    Decided before this step's last call is sent: it runs the update too; when
+    a stage follows it must return at the update's dispatch
+    (`wait_for_update=False`) rather than once the update landed, or the
+    transfer could not hide behind the device. Planning a stage that then
+    does not happen costs that step the deferred metrics fetch: the update
+    is not confirmed, so get_metrics() is its barrier again, ahead of the
+    checkpoint save. So this rules out now whatever `_maybe_stage_next_...`
+    would refuse after the call: the flag, the latch, a step that writes a
+    scored checkpoint (the update this call runs is the one after the last
+    the trainer reported; before any, `self.step + 1`, exact with one update
+    per step as the recipes run), rescored micro-batches, an already packed
+    micro-batch that closes its step, and a trainer that cannot stage. What
+    is left open is whether the micro-batch is packed by the time the call
+    returns.
+
+    Args:
+      st: The next step's state, or None when nothing is taken ahead.
+      rescored: This step's last micro-batch is rescored under the live
+        weights (`_needs_sampler_agreement`). The next step's carry the same
+        rollout log-probs, so its first would be too, and those go out whole.
+
+    Returns:
+      Whether to stage: send the step's last call with its update deferred
+      and call `_stage_next_before_update` once it returns, when the trainer
+      can (`_trainer_can_stage_before_update`); else send it with
+      `wait_for_update=False` and call `_maybe_stage_next_microbatch` once it
+      returns.
+    """
+    if (
+        not self.stage_next_microbatch
+        or st is None
+        or self._staging_latched_off
+        or st.staged is not None
+        or rescored
+    ):
+      return False
+    predicted_step = (
+        self._last_optimizer_step + 1
+        if self._last_optimizer_step is not None
+        else self.step + 1
+    )
+    if self._writes_scored_checkpoint({"train_step": predicted_step}):
+      return False
+    if self._intake_done():
+      # Taking ahead is over: only what it packed could go, and it has to be
+      # neither the step's last micro-batch nor rescored.
+      if not st.ready:
+        return False
+      first = st.ready[0]
+      if first.is_final_batch or self._needs_sampler_agreement(first.payload):
+        return False
+    return await self._trainer_can_stage()
+
+  async def _maybe_stage_next_microbatch(
+      self,
+      st: _StepState,
+      step_result: Any,
+  ) -> bool:
+    """Sends the next step's first micro-batch to the trainer host ahead of time.
+
+    Called right after the current step's last train call returns. That call
+    ran the update too and, staging being planned (`_stage_planned`), came
+    back at the update's dispatch, while the trainer's device still computes
+    the step's last micro-batch and update, so the transfer hides behind that
+    work. The train call that later runs it (`_send_first_microbatch_ahead`)
+    names it instead of carrying it, and lands on the trainer at the same
+    point as without staging. Skipped when the micro-batch is not packed yet,
+    closes its step, or is rescored under the live weights first
+    (`use_rollout_logps`): those go out whole.
+
+    Also skipped when this step writes a scored checkpoint: its timestamp is
+    taken once the update lands (`get_metrics`), and a transfer longer than
+    the device's remaining work -- several trainer copies fed through one
+    controller -- would push that timestamp back.
+
+    And switched off for the rest of the run the first time a stage is seen not
+    to hide. The trainer answers once the micro-batch is in place and its device
+    has finished the work dispatched before it, and says how long it waited for
+    the latter. A wait under `_STAGING_HIDDEN_WAIT_S` means the device had
+    already gone idle: the transfer outlasted the step's remaining device work
+    and delayed this step's metrics, stamp and weight sync. The trainer is then
+    fed slower than it computes, so staging only moves a transfer from after the
+    sync to before it. (A step's train calls returning cannot tell this: MaxText
+    queues `max_inflight_computations` of them, and a step starts on a device
+    drained by the weight sync, so its first calls return at the transfer's pace
+    even when the device is the bottleneck.) On Pathways even an idle device's
+    wait reads above that threshold, so there such a stage is not seen and
+    staging stays on.
+
+    A stage is optional, so one that fails on the way to the trainer, or in
+    the reference log-probs it needs, falls back: the micro-batch goes back
+    to the front of `st.ready` and is sent whole in the next step's first
+    train call, as without staging, and this step keeps its get_metrics()
+    barrier, checkpoint and weight sync. Staging is then off for the rest of
+    the run. A stage the trainer ran and that raised there ends the run with
+    its error, as a failed train call does: past its refusals,
+    `TrainerWorker.stage_fwd_bwd` puts the worker in ERROR, so no checkpoint
+    could follow anyway.
+
+    Args:
+      st: The next step's state, filled by `_prepack`.
+      step_result: The current step's final train call result.
+
+    Returns:
+      Whether the trainer confirmed, once the micro-batch was staged, that
+      the step's update has landed (`StagedTrainStep.update_ready`): the
+      caller may then stamp and save the checkpoint without a get_metrics()
+      first, as after a fused call that waited for the update. False when
+      nothing was staged.
+    """
+    if self._staging_latched_off:
+      return False
+    if self._writes_scored_checkpoint(step_result):
+      return False
+    if not self._intake_done() or st.staged is not None:
+      return False
+    if not st.ready or st.ready[0].is_final_batch:
+      return False
+    if self._needs_sampler_agreement(st.ready[0].payload):
+      return False
+    if not await self._trainer_can_stage():
+      return False
+    sent = await self._send_stage(st)
+    if sent is None:
+      return False
+    staged, stage_s = sent
+    device_wait_s = staged.device_wait_s
+    logging.info(
+        "[pipeline] STAGED next step's first microbatch on the trainer in"
+        " %.2fs; its device then still computed for %s (request_id=%s)",
+        stage_s,
+        "unknown" if device_wait_s is None else f"{device_wait_s:.2f}s",
+        staged.request_id,
+    )
+    if not self._staging_hidden(device_wait_s):
+      self._staging_latched_off = True
+      logging.warning(
+          "[pipeline] Staging a microbatch took %.2fs and the trainer's device"
+          " was idle before it finished (device wait %s): the trainer is fed"
+          " slower than it computes, so staging only delays each step's"
+          " weight sync. Not staging for the rest of the run.",
+          stage_s,
+          "unknown" if device_wait_s is None else f"{device_wait_s:.3f}s",
+      )
+    return staged.update_ready
+
+  async def _send_stage(self, st: _StepState) -> tuple[Any, float] | None:
+    """Stages `st.ready[0]` on the trainer; the callers checked it may go.
+
+    A stage is optional, so one that fails on the way to the trainer, or in
+    the reference log-probs it needs, falls back: the micro-batch goes back
+    to the front of `st.ready` and staging is off for the rest of the run. A
+    stage the trainer ran and that raised there is re-raised.
+
+    Args:
+      st: The next step's state, filled by `_prepack`.
+
+    Returns:
+      The engine's `StagedTrainStep` and how long the call took, or None when
+      it fell back.
+    """
+    intake, self._intake_task = self._intake_task, None
+    mb = st.ready.pop(0)
+    calling_trainer = False
+    try:
+      batch = await self._with_reference_logps(mb.payload)
+      start = time.monotonic()
+      calling_trainer = True
+      staged = await (
+          self.engine.stage_train_step  # pyrefly: ignore[missing-attribute]
+      )(batch, role=datatypes.Role.ACTOR)
+      stage_s = time.monotonic() - start
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      if calling_trainer and _raised_by_worker_method(exc):
+        raise
+      # Undone exactly, so `_send_first_microbatch_ahead` sends it whole. Had
+      # the trainer received it after all (a reply lost on the way back), it
+      # holds it unused: with staging off nothing names it, and a successor's
+      # bring-up drops it.
+      st.ready.insert(0, mb)
+      self._intake_task = intake
+      self._staging_latched_off = True
+      logging.warning(
+          "[pipeline] Staging failed on the way to the trainer or in the"
+          " reference log-probs (%r); sending the microbatch whole in step"
+          " %d's first train call instead, and not staging for the rest of"
+          " the run.",
+          exc,
+          self._step + 1,
+      )
+      return None
+    batch = None
+    st.staged = (mb._replace(payload=None), staged.request_id)
+    return staged, stage_s
+
+  async def _stage_next_before_update(
+      self, st: _StepState, step_result: dict[str, Any]
+  ) -> dict[str, Any]:
+    """Stages the next step's first micro-batch, then runs the step's update.
+
+    Called once the step's last train call, sent with its update deferred
+    (`_stage_planned`, `_trainer_can_stage_before_update`), has returned: the
+    trainer has dispatched that micro-batch and holds the update back. Under
+    MaxText's `retry_when_tokens_dropped` the call returns once the
+    micro-batch before it has finished (it reads that one's overflow flag),
+    so the device computes the whole last micro-batch while the stage's
+    transfer runs. The update then goes out when the last micro-batch is done,
+    where `update()` would have dispatched it anyway (it reads that one's flag
+    first), so nothing is delayed while the transfer is shorter than the
+    micro-batch.
+
+    The micro-batch is staged under the refusals of
+    `_maybe_stage_next_microbatch`: not when it is not packed yet, closes its
+    step, or is rescored under the live weights first (those go out whole),
+    and not once staging is off. The scored-checkpoint refusal was applied by
+    `_stage_planned`, from the predicted optimizer step. A stage that fails on
+    the way falls back as there (`_send_stage`); the update still runs.
+
+    The update call waits for the device first and says how long
+    (`device_wait_s`): how long the last micro-batch still ran once the staged
+    one was in place. Under `_STAGING_HIDDEN_WAIT_S`, the transfer outlasted
+    it and delayed the update, metrics, checkpoint stamp and weight sync: the
+    trainer is fed slower than it computes, so staging is switched off for the
+    rest of the run, as there. Also as there, this does not fire on Pathways,
+    where even an idle device's wait reads above that threshold.
+
+    A replay of the last micro-batch (MaxText reruns an overflowed one,
+    dropless, inside `update()`) leaves the staged micro-batch as it is: its
+    inputs are mapped from its own payload alone (`prepare_fwd_bwd_input`
+    reads no parameter, gradient or optimizer state), and the rerun reads the
+    inputs it kept for itself.
+
+    Args:
+      st: The next step's state, filled by `_prepack`.
+      step_result: The last train call's result (`update_deferred`).
+
+    Returns:
+      `step_result` with the update call's result over it: `updated`,
+      `train_step`, `update_ready` (the trainer confirmed the update landed,
+      so the caller may stamp and save the checkpoint without a get_metrics()
+      first) and `device_wait_s`.
+    """
+    assert self.engine is not None
+    sent = None
+    if (
+        not self._staging_latched_off
+        and self._intake_done()
+        and st.staged is None
+        and st.ready
+        and not st.ready[0].is_final_batch
+        and not self._needs_sampler_agreement(st.ready[0].payload)
+    ):
+      sent = await self._send_stage(st)
+    update = await (
+        self.engine.apply_deferred_update  # pyrefly: ignore[missing-attribute]
+    )(role=datatypes.Role.ACTOR)
+    if sent is not None:
+      staged, stage_s = sent
+      device_wait_s = update.get("device_wait_s")
+      logging.info(
+          "[pipeline] STAGED next step's first microbatch on the trainer"
+          " before the update in %.2fs; the last microbatch then still"
+          " computed for %s (request_id=%s)",
+          stage_s,
+          "unknown" if device_wait_s is None else f"{device_wait_s:.2f}s",
+          staged.request_id,
+      )
+      if not self._staging_hidden(device_wait_s):
+        self._staging_latched_off = True
+        logging.warning(
+            "[pipeline] Staging a microbatch took %.2fs and the trainer's"
+            " device was idle before it finished (device wait %s): the"
+            " trainer is fed slower than it computes, so staging only delays"
+            " each step's update and weight sync. Not staging for the rest of"
+            " the run.",
+            stage_s,
+            "unknown" if device_wait_s is None else f"{device_wait_s:.3f}s",
+        )
+    return {**step_result, **update}
+
+  async def _send_first_microbatch_ahead(
+      self, st: _StepState
+  ) -> asyncio.Task[tuple[Any, float]] | None:
+    """Sends the next step's first micro-batch, taken ahead by `_prepack`.
+
+    Called once the current step's weight sync has staged and its batch is
+    committed: the point at which `_train_loop` first sends any of the next
+    step's micro-batches. The train call is left in `_pending_train` for the
+    next step to collect as its own. The next step's groups then keep being
+    taken, so its second micro-batch is packed while the first is in flight.
+
+    Args:
+      st: The next step's state.
+
+    Returns:
+      The train call's task, or None when nothing was ready to send.
+    """
+    assert self._pending_train is None
+    if st.staged is not None:
+      mb, staged_request_id = st.staged
+      st.staged = None
+      st.start_time = time.monotonic()
+      batch = None
+    elif self._intake_done() and st.ready and not st.ready[0].is_final_batch:
+      self._intake_task = None
+      mb = st.ready.pop(0)
+      staged_request_id = None
+      st.start_time = time.monotonic()
+      batch = await self._with_reference_logps(mb.payload)
+      if self._needs_sampler_agreement(batch):
+        batch = await self._apply_sampler_trainer_agreement(
+            batch, st.sampler_agreement
+        )
+    else:
+      return None
+    self._record_microbatch(st, mb)
+    mb = None
+    self._pending_train = asyncio.create_task(
+        self._timed_train_step(
+            batch,
+            apply_optimizer=False,
+            staged_request_id=staged_request_id,
+        )
+    )
+    batch = None
+    if (
+        not st.ready
+        and st.scored_items
+        and st.groups_consumed < self.full_batch_size
+    ):
+      self._intake_task = asyncio.create_task(self._prepack(st))
+    return self._pending_train
 
   async def run_async(
       self,
@@ -2446,6 +3260,8 @@ class StandardRLProgram(RLProgram):
           task.cancel()
       if self._pending_train is not None and not self._pending_train.done():
         self._pending_train.cancel()
+      if self._intake_task is not None and not self._intake_task.done():
+        self._intake_task.cancel()
 
   def run(
       self,

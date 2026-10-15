@@ -78,6 +78,8 @@ export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export EXACT_TOKEN_CONTINUITY=${EXACT_TOKEN_CONTINUITY:-true}
 export ASYNC_WEIGHT_SYNC=${ASYNC_WEIGHT_SYNC:-false}
 export PIPELINE_TRAIN_MICROBATCHES=${PIPELINE_TRAIN_MICROBATCHES:-false}
+export PIPELINE_STEP_BOUNDARY=${PIPELINE_STEP_BOUNDARY:-false}
+export STAGE_NEXT_MICROBATCH=${STAGE_NEXT_MICROBATCH:-false}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export WEIGHT_SYNC_DISABLE_TIMEOUTS=${WEIGHT_SYNC_DISABLE_TIMEOUTS:-${DISABLE_WEIGHT_SYNC_TIMEOUTS:-0}}
@@ -233,6 +235,13 @@ export SAMPLES_COUNT=${SAMPLES_COUNT:-0}
 export IS_LAST_CHECKPOINT=${IS_LAST_CHECKPOINT:-false}
 export METRIC_LOGGER_DIR=${METRIC_LOGGER_DIR:-}
 export TARGET_ACCURACY=${TARGET_ACCURACY:-0.69}
+export DISABLE_TRAJECTORY_STORE=${DISABLE_TRAJECTORY_STORE:-false}
+if [[ "${DISABLE_TRAJECTORY_STORE}" =~ ^(1|true|True|TRUE)$ ]] || [[ "${ENABLE_TRAJECTORY_STORE:-true}" =~ ^(0|false|False|FALSE)$ ]]; then
+  export DISABLE_TRAJECTORY_STORE=true
+  export TRAJECTORY_STORE_ROOT_DIR=""
+  export TRAJECTORY_STORE_ROOT=""
+  export TRAJECTORY_STORE_DB_URL=""
+fi
 export TRAJECTORY_STORE_ROOT_DIR=${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-}}
 export EOS_TOKENS=${EOS_TOKENS:-}
 
@@ -287,6 +296,10 @@ export PREEMPTIBLE=${PREEMPTIBLE:-${preemptible:-false}}
 export PRIORITY_CLASS=${PRIORITY_CLASS:-medium}
 
 export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
+# The trainer process's opt-in sharded log-prob head (TUNIX_LOGPS_SHARDED_HEAD
+# in tunix/rl/common.py: local turns it on; unset or 0 leaves it off). Passed to
+# the trainer only, and only when set.
+export TUNIX_LOGPS_SHARDED_HEAD=${TUNIX_LOGPS_SHARDED_HEAD:-}
 # Extra KEY=VALUE env for the orchestrator and rollout processes (the recipes set
 # Raiden tuning and weight-sync timeouts here). The VLLM_RAY_* lists tell vLLM
 # which of the rollout driver's env vars to forward to its Ray workers on the
@@ -538,6 +551,7 @@ start_orchestrator() {
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
         ${TRAJECTORY_STORE_ROOT_DIR:+--trajectory_store_root_dir=\"${TRAJECTORY_STORE_ROOT_DIR}\"} \
         ${TRAJECTORY_STORE_DB_URL:+--trajectory_store_db_url=\"${TRAJECTORY_STORE_DB_URL}\"} \
+        $([[ "${DISABLE_TRAJECTORY_STORE}" == "true" ]] && echo --disable_trajectory_store || echo --no-disable_trajectory_store) \
         --flush_every_n_steps=${FLUSH_EVERY_N_STEPS} \
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
@@ -564,6 +578,8 @@ start_orchestrator() {
         $([[ "${EXACT_TOKEN_CONTINUITY}" == "false" || "${EXACT_TOKEN_CONTINUITY}" == "False" || "${EXACT_TOKEN_CONTINUITY}" == "0" ]] && echo --no-exact_token_continuity || echo --exact_token_continuity) \
         $([[ "${ASYNC_WEIGHT_SYNC}" == "true" || "${ASYNC_WEIGHT_SYNC}" == "True" || "${ASYNC_WEIGHT_SYNC}" == "1" ]] && echo --async_weight_sync || echo --no-async_weight_sync) \
         $([[ "${PIPELINE_TRAIN_MICROBATCHES}" == "true" || "${PIPELINE_TRAIN_MICROBATCHES}" == "True" || "${PIPELINE_TRAIN_MICROBATCHES}" == "1" ]] && echo --pipeline_train_microbatches || echo --no-pipeline_train_microbatches) \
+        $([[ "${PIPELINE_STEP_BOUNDARY}" == "true" || "${PIPELINE_STEP_BOUNDARY}" == "True" || "${PIPELINE_STEP_BOUNDARY}" == "1" ]] && echo --pipeline_step_boundary || echo --no-pipeline_step_boundary) \
+        $([[ "${STAGE_NEXT_MICROBATCH}" == "true" || "${STAGE_NEXT_MICROBATCH}" == "True" || "${STAGE_NEXT_MICROBATCH}" == "1" ]] && echo --stage_next_microbatch || echo --no-stage_next_microbatch) \
         $([[ "${IN_FLIGHT_WEIGHT_UPDATES}" == "true" || "${IN_FLIGHT_WEIGHT_UPDATES}" == "True" || "${IN_FLIGHT_WEIGHT_UPDATES}" == "1" ]] && echo --in_flight_weight_updates || echo --no-in_flight_weight_updates) \
         $([[ "${ROLLOUT_PRIORITY_SCHEDULING}" == "true" ]] && echo --rollout_priority_scheduling || echo --no-rollout_priority_scheduling) \
         $([[ "${INITIAL_DISPATCH_STAGGER_S}" != "0" && "${INITIAL_DISPATCH_STAGGER_S}" != "0.0" && -n "${INITIAL_DISPATCH_STAGGER_S}" ]] && echo --initial_dispatch_stagger_s=${INITIAL_DISPATCH_STAGGER_S})$([[ -n "${INITIAL_DISPATCH_FIRST_STAGGER_S}" && "${INITIAL_DISPATCH_FIRST_STAGGER_S}" != "0" && "${INITIAL_DISPATCH_FIRST_STAGGER_S}" != "0.0" ]] && echo " --initial_dispatch_first_stagger_s=${INITIAL_DISPATCH_FIRST_STAGGER_S}")$([[ "${TRAINER_WARMUP_COMPILE}" == "true" || "${TRAINER_WARMUP_COMPILE}" == "True" || "${TRAINER_WARMUP_COMPILE}" == "1" ]] && echo " --trainer_warmup_compile$([[ "${RETURN_ROUTED_EXPERTS}" == "true" || "${RETURN_ROUTED_EXPERTS}" == "True" || "${RETURN_ROUTED_EXPERTS}" == "1" ]] && echo " --trainer_warmup_routed_experts")") \
@@ -672,6 +688,7 @@ start_trainer() {
       ${TRAINER_MAXTEXT_ATTENTION:+TRAINER_MAXTEXT_ATTENTION=\"${TRAINER_MAXTEXT_ATTENTION}\"} \
       ${raiden_env} \
       ${MAXTEXT_EXTRA_FLAGS:+MAXTEXT_EXTRA_FLAGS=\"${MAXTEXT_EXTRA_FLAGS}\"} \
+      ${TUNIX_LOGPS_SHARDED_HEAD:+TUNIX_LOGPS_SHARDED_HEAD=${TUNIX_LOGPS_SHARDED_HEAD}} \
       ${TRAINER_EXTRA_ENV:+${TRAINER_EXTRA_ENV}} \
       RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} \
       USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER} \
@@ -878,6 +895,7 @@ if cfg:
       --worker_container_image="${TUNIX_IMAGE}" \
       --worker_container_port="${ROLLOUT_PORT}" \
       --worker_startup_command=" \
+        sysctl -w net.core.somaxconn=65535 net.ipv4.tcp_max_syn_backlog=65535 net.ipv4.ip_local_port_range=\"1024 65535\" net.ipv4.tcp_tw_reuse=1 2>/dev/null || true; \
         PYTHONUNBUFFERED=1 \
         TUNIX_IS_INTERNAL_ENV=false \
         ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \

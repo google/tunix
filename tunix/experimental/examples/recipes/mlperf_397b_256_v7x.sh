@@ -27,7 +27,12 @@ export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://mlperf-6-1-submission/ckpt/qwen35_397b
 
 export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-${BUCKET}/maxtext/${JOB_PREFIX}}"
 export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${BUCKET}/trajectories/${JOB_PREFIX}/logger}"
-export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-${BUCKET}/trajectories/${JOB_PREFIX}/store}}"
+export DISABLE_TRAJECTORY_STORE="${DISABLE_TRAJECTORY_STORE:-false}"
+if [[ "${DISABLE_TRAJECTORY_STORE}" =~ ^(1|true|True|TRUE)$ ]] || [[ "${ENABLE_TRAJECTORY_STORE:-true}" =~ ^(0|false|False|FALSE)$ ]]; then
+  export TRAJECTORY_STORE_ROOT_DIR=""
+else
+  export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-${BUCKET}/trajectories/${JOB_PREFIX}/store}}"
+fi
 
 export K8S_NAMESPACE="${K8S_NAMESPACE:-priority-dev}"
 export USE_DYNAMIC_SLICING="true"
@@ -99,6 +104,30 @@ export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS:---DANGEROUS_tpu_run
 if [[ -n "${TRAINER_MAX_HBM_SIZE_MIB:-}" ]]; then
   export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS} --xla_tpu_max_hbm_size_mib=${TRAINER_MAX_HBM_SIZE_MIB}"
 fi
+# TRAINER_TUNED_FLAGS (true or false): trainer settings measured on the RL trainer
+# bench (AI-Hypercomputer/maxtext#5701) at this recipe's 128-chip trainer cell. Most
+# are settings of the MaxText pretraining recipe for this model
+# (AI-Hypercomputer/maxtext#5409) that this recipe does not use yet. Off here and in
+# the recipes that source this one; on in mlperf_gbs1024_submission.sh. Part 1, the
+# trainer libtpu flag, is appended here so the trainer env, the Pathways workers and
+# the proxy (which compiles the trainer program) all copy it. A value already in
+# TRAINER_LIBTPU_INIT_ARGS is kept.
+#   --xla_tpu_enable_offloading_copy_to_sparsecore=false: XLA does not offload copies
+#     to the SparseCores. Bench, alone: 130.8 -> 126.4 s/step.
+# Part 2, the MaxText keys, follows MAXTEXT_EXTRA_FLAGS below.
+case "${TRAINER_TUNED_FLAGS:-false}" in
+  true)
+    if [[ " ${TRAINER_LIBTPU_INIT_ARGS} " != *" --xla_tpu_enable_offloading_copy_to_sparsecore="* ]]; then
+      export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS} --xla_tpu_enable_offloading_copy_to_sparsecore=false"
+    fi
+    ;;
+  false)
+    ;;
+  *)
+    echo "ERROR: TRAINER_TUNED_FLAGS must be true or false, got '${TRAINER_TUNED_FLAGS}'" >&2
+    exit 1
+    ;;
+esac
 # Opt-in: TRAINER_SC_OFFLOAD_THRESHOLDS=true offloads only large collectives to the
 # SparseCores, so the small per-layer ones skip the SparseCore queue (SC0 was 75% busy):
 # all-reduces from 64 MiB, all-gathers from 256 MiB. The trainer's all-gathers are
@@ -223,6 +252,33 @@ if [[ "${MOE_EXCLUDE_PADDING:-false}" == "true" ]]; then
 fi
 if [[ "${LOG_MOE_DROPS:-false}" == "true" ]]; then
   export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} log_moe_drops=true"
+fi
+# TRAINER_TUNED_FLAGS=true, part 2 (part 1 is with the trainer libtpu flags above): the
+# MaxText keys. Appended last: MaxText keeps the last value of a repeated key, so they
+# replace the values above.
+#   context_parallel_strategy=all_gather: attention all-gathers K/V over the context
+#     axis instead of passing it around a ring.
+#   sa_fuse_reciprocal=true, sa_use_base2_exp=false: Splash attention kernel options
+#     (SplashConfig fuse_reciprocal / use_base2_exp). These three keys alone, without
+#     the libtpu flag: 130.8 -> 127.5 s/step on the bench.
+#   gdn_cp_mode=seq: GDN context parallelism shards the sequence instead of the heads,
+#     which drops head mode's all-to-alls (MaxText's `auto` picks seq at context 4).
+#   gdn_cp_state=device: keeps seq mode's carries (conv halo, local transition, incoming
+#     state), so the backward does not replay the halo exchange and the first pass.
+#   moe_route stays at its default (remat). The bench image's MaxText tags nothing with
+#     it, so the moe_route=device of the measured runs changed nothing there. MaxText at
+#     this recipe's pin tags the ragged sort's integer routing results, where device
+#     would keep them on the chip at a memory cost no run has measured.
+#   num_moe_token_chunks=2 comes from NUM_MOE_TOKEN_CHUNKS: the default here, and set by
+#     mlperf_gbs1024_submission.sh for its replay layout.
+# The keys above with two token chunks, on top of the libtpu flag (bench, same pod, with
+# the inert moe_route=device): 126.4 -> 121.7 s/step.
+#   gdn_cp_matmul_precision=high: seq mode composes GDN state in 3 bf16 passes, not 6.
+#   cast_grads_after_all_reduce=true: all-reduce-only bf16 grads cast to f32 after it.
+# The two together (bench, same pod, the sharded log-prob head on in both arms):
+# 107.59 -> 106.24 s/step; grad_norm moved 1.5e-5 relative, less than a rerun (1.9e-5).
+if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
+  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_strategy=all_gather sa_fuse_reciprocal=true sa_use_base2_exp=false gdn_cp_mode=seq gdn_cp_state=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true"
 fi
 export DEBUG=${DEBUG:-0}
 

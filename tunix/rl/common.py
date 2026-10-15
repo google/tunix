@@ -14,6 +14,8 @@
 """Common RL helper classes and functions."""
 
 import functools
+import math
+import os
 import re
 import inspect
 from typing import Any, Iterable, Sequence
@@ -23,6 +25,7 @@ import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
+from jax.custom_derivatives import SymbolicZero  # pylint: disable=g-importing-member
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import jax.tree_util as jtu
 import numpy as np
@@ -536,7 +539,11 @@ def compute_per_token_logps(
     segment_positions: optional 1D local position indices used for packing.
     temperature: temperature used for rollout.
     chunk_size: If not 0, computes the log probabilities in sequence chunks of
-      this size.
+      this size. With TUNIX_LOGPS_SHARDED_HEAD on and packed rows
+      (`segment_ids` set), the sharded head, when it engages (see
+      `maybe_compute_sharded_chunked_logps`), instead has each device scan its
+      own block of the sequence in chunks of `min(chunk_size, block length)`
+      positions.
     routed_experts: Optional `[B, T, num_layers, top_k]` MoE experts captured
       during rollout. Forwarded to the model as `forced_routed_experts` -- the
       name MaxText's adapter uses -- so it replays this routing instead of
@@ -639,21 +646,37 @@ def compute_per_token_logps(
   input_tokens_to_keep = input_tokens[:, -logits_to_keep:]
 
   if chunk_size > 0:
-    hidden_state = outputs[:, -logits_to_keep - 1 : -1, :]
-    out = compute_chunked_logps(
-        model,
-        hidden_state,
-        input_tokens_to_keep,
-        temperature,
-        chunk_size,
-        return_entropy,
-    )
+    out = None
+    if segment_ids is not None:
+      # Packed rows score every position, so the head can run on the
+      # unsliced, still evenly sharded hidden states. Opt-in via
+      # TUNIX_LOGPS_SHARDED_HEAD; None when off or when it falls back. It
+      # returns [B, T], already aligned like the padded output below.
+      out = maybe_compute_sharded_chunked_logps(
+          model,
+          outputs,
+          input_tokens,
+          temperature,
+          chunk_size,
+          return_entropy,
+      )
+    aligned = out is not None
+    if out is None:
+      hidden_state = outputs[:, -logits_to_keep - 1 : -1, :]
+      out = compute_chunked_logps(
+          model,
+          hidden_state,
+          input_tokens_to_keep,
+          temperature,
+          chunk_size,
+          return_entropy,
+      )
     if return_entropy:
       per_token_logps, per_token_entropy = out
     else:
       per_token_logps = out
 
-    if segment_ids is not None:
+    if segment_ids is not None and not aligned:
       per_token_logps = jnp.pad(
           per_token_logps, ((0, 0), (1, 0)), constant_values=0.0
       )
@@ -994,6 +1017,463 @@ def compute_chunked_logps(
         :, :seq_len
     ]
     return per_token_logps
+
+
+# Sharded chunked log-prob head, opt-in via TUNIX_LOGPS_SHARDED_HEAD.
+#
+# Under GSPMD, `compute_chunked_logps` pays per chunk: an all-gather of every
+# head weight (a [4096, 248320] vocab table is 2 GB in bf16) in the forward and
+# again in the rematerialized backward, and an all-reduce of the full-size table
+# gradient. And because `lax.scan` iterates over the sequence axis, a sequence
+# sharded over a context-parallel axis is gathered, so every context rank
+# computes every chunk. The sharded head runs the same per-chunk math inside
+# `shard_map`: each head parameter is all-gathered once, in the forward, and the
+# backward reuses that copy (so it stays live from the forward to the
+# backward); each device scans only the tokens it holds; the table gradient is
+# accumulated per device in float32 and reduce-scattered once; and chunks are
+# read and written with dynamic slices rather than reshapes.
+SHARDED_HEAD_ENV = "TUNIX_LOGPS_SHARDED_HEAD"
+# Logical names of the hidden states' batch and length axes. When the active
+# flax logical-axis rules (MaxText's) map them, the head uses that layout.
+_LOGICAL_BATCH_AXIS = "activation_batch"
+_LOGICAL_LENGTH_AXIS = "activation_length"
+
+
+def sharded_head_mode() -> str | None:
+  """Returns None (off) or "local", from TUNIX_LOGPS_SHARDED_HEAD.
+
+  Case and surrounding whitespace are ignored. Off: unset, empty, 0, false, off,
+  no. On: local, 1, true, on, yes.
+
+  Raises:
+    ValueError: The variable has any other value.
+  """
+  value = os.environ.get(SHARDED_HEAD_ENV, "").strip().lower()
+  if value in ("", "0", "false", "off", "no"):
+    return None
+  if value in ("1", "true", "on", "yes", "local"):
+    return "local"
+  raise ValueError(
+      f"{SHARDED_HEAD_ENV}={value!r}: expected local, 1, true, on or yes (on),"
+      " or empty, 0, false, off or no (off)."
+  )
+
+
+def _mesh_axes(entry) -> tuple[str, ...]:
+  if entry is None:
+    return ()
+  if isinstance(entry, str):
+    return (entry,)
+  return tuple(entry)
+
+
+def _token_partition(mesh, batch: int, seq_len: int):
+  """Mesh axes sharding the [batch, seq] dims of the hidden states.
+
+  Every mesh axis of size > 1 must shard one of the two, so that every device
+  holds distinct tokens and the gradient sum runs over all devices. Tries the
+  layout the active flax logical-axis rules give `activation_batch` and
+  `activation_length` (an error while reading them skips this step), then one
+  greedy pass over the mesh axes in mesh order: each axis of size > 1 shards
+  the batch if the batch still divides, else the sequence if it still divides,
+  else the pass fails.
+
+  Returns:
+    (batch_axes, seq_axes, source), with source "logical-axis-rules" or
+    "mesh-order"; or None if both steps fail. The greedy pass can miss a
+    layout that exists.
+  """
+  sizes = dict(mesh.shape)
+  nontrivial = {a for a, n in sizes.items() if n > 1}
+
+  def valid(b, s):
+    if set(b) & set(s) or not set(b + s) <= set(sizes):
+      return False
+    if not nontrivial <= set(b + s):
+      return False
+    return (
+        batch % math.prod(sizes[a] for a in b) == 0
+        and seq_len % math.prod(sizes[a] for a in s) == 0
+    )
+
+  rules = flax.linen.get_logical_axis_rules()
+  if rules:
+    try:
+      spec = flax.linen.logical_to_mesh_axes(
+          (_LOGICAL_BATCH_AXIS, _LOGICAL_LENGTH_AXIS), rules
+      )
+      b, s = _mesh_axes(spec[0]), _mesh_axes(spec[1])
+      if valid(b, s):
+        return b, s, "logical-axis-rules"
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+  b, s = [], []
+  for a in mesh.axis_names:
+    n = sizes[a]
+    if n == 1:
+      continue
+    if batch % (math.prod(sizes[x] for x in b) * n) == 0:
+      b.append(a)
+    elif seq_len % (math.prod(sizes[x] for x in s) * n) == 0:
+      s.append(a)
+    else:
+      return None
+  return tuple(b), tuple(s), "mesh-order"
+
+
+def _use_dtypes(jaxpr, var) -> set[Any]:
+  """dtypes `var` is consumed in: a convert's target, else its own dtype.
+
+  Recurses into an equation's inner jaxpr (its `jaxpr` or `call_jaxpr` param)
+  when that jaxpr has one input per equation input, assuming they line up one
+  to one. Known gap: a pass-through output records no use. If the inner jaxpr
+  returns `var` unchanged as one of its outputs, a later use of that output is
+  missed.
+  """
+  out = set()
+  for eqn in jaxpr.eqns:
+    for k, v in enumerate(eqn.invars):
+      if v is not var:
+        continue
+      if eqn.primitive.name == "convert_element_type":
+        out.add(jnp.dtype(eqn.params["new_dtype"]))
+        continue
+      inner = eqn.params.get("jaxpr", eqn.params.get("call_jaxpr"))
+      inner = getattr(inner, "jaxpr", inner)
+      if inner is not None and len(getattr(inner, "invars", ())) == len(
+          eqn.invars
+      ):
+        out |= _use_dtypes(inner, inner.invars[k])
+      else:
+        out.add(jnp.dtype(var.aval.dtype))
+  return out
+
+
+def _head_parameters(graphdef, treedef, abstract_leaves, hidden_struct):
+  """Leaves `compute_final_logits` reads, mapped to the dtype to gather in.
+
+  A leaf whose every use is a cast to one narrower float dtype (MaxText casts an
+  fp32 vocab table to bf16 before the dot) is gathered after that cast, which is
+  what XLA already does for the gather inside `compute_chunked_logps`.
+
+  Returns:
+    {index into `abstract_leaves`: dtype to gather that leaf in}, for every
+    leaf `compute_final_logits` reads that `_use_dtypes` sees. A leaf read only
+    through an output of an inner call (for example an identity `jax.jit`,
+    `jax.checkpoint` or `custom_jvp`) is missed; see `_use_dtypes`.
+  """
+
+  def head(leaves, hs):
+    model = nnx.merge(graphdef, jax.tree.unflatten(treedef, leaves))
+    return model.compute_final_logits(hs)
+
+  jaxpr = jax.make_jaxpr(head)(list(abstract_leaves), hidden_struct).jaxpr
+  out = {}
+  for i, var in enumerate(jaxpr.invars[: len(abstract_leaves)]):
+    dtypes = _use_dtypes(jaxpr, var)
+    if not dtypes:
+      continue
+    own = jnp.dtype(abstract_leaves[i].dtype)
+    dtype = next(iter(dtypes)) if len(dtypes) == 1 else own
+    narrower = (
+        jnp.issubdtype(dtype, jnp.floating) and dtype.itemsize < own.itemsize
+    )
+    out[i] = dtype if narrower else own
+  return out
+
+
+def maybe_compute_sharded_chunked_logps(
+    model,
+    hidden_states,
+    input_tokens,
+    temperature,
+    chunk_size,
+    return_entropy,
+):
+  """`compute_chunked_logps` for packed rows, with a shard_map'ed vocab head.
+
+  Off unless TUNIX_LOGPS_SHARDED_HEAD turns it on (see `sharded_head_mode`).
+  The switch is read when the caller is traced and is not part of any jit
+  cache key, so a change after the first trace takes effect only on a retrace.
+
+  Returns None, after logging
+  "[logps-head] sharded head off, using compute_chunked_logps: <reason>", when:
+    * no mesh is set with `jax.set_mesh` (a legacy `with mesh:` sets none);
+    * `_token_partition` finds no token layout;
+    * `compute_final_logits` reads no model state;
+    * a head parameter has no dimension divisible by the number of devices
+      (a scalar parameter never has one).
+  Some other unsupported inputs raise instead of falling back, for example, on
+  a mesh with Explicit axes, or an input whose sharding differs from the head's
+  `in_specs` (inside `jax.shard_map`). Sequence axes are used in mesh order, so
+  logical-axis rules that list them in another order reshard the input.
+
+  Args:
+    model: The merged model; must expose `compute_final_logits`.
+    hidden_states: [B, T, H], the model output for every position.
+    input_tokens: [B, T] token ids; position t is scored from position t - 1.
+    temperature: Sampling temperature the logits are divided by (0 or 1: none).
+    chunk_size: Sequence positions per scan step on each device, capped at the
+      length of the device's block of the sequence.
+    return_entropy: Whether to also return the per-token entropy.
+
+  Returns:
+    None, or the packed-row result of `compute_per_token_logps`: per-token
+    log-probs [B, T] whose index j scores `input_tokens[:, j]` from
+    `hidden_states[:, j - 1]` (index 0 is 0), plus the entropy [B, T] if
+    `return_entropy`.
+
+  Raises:
+    ValueError: TUNIX_LOGPS_SHARDED_HEAD has an unrecognized value.
+  """
+  mode = sharded_head_mode()
+  if mode is None:
+    return None
+
+  def fallback(reason):
+    logging.warning(
+        "[logps-head] sharded head off, using compute_chunked_logps: %s", reason
+    )
+    return None
+
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh.empty:
+    return fallback("no mesh in context (jax.set_mesh)")
+  batch, seq_len, hidden_dim = hidden_states.shape
+  partition = _token_partition(mesh, batch, seq_len)
+  if partition is None:
+    return fallback(f"no token layout for {batch}x{seq_len} on {mesh.shape}")
+  batch_axes, seq_axes, layout_source = partition
+  # `jax.lax.ppermute` numbers the sequence shards in mesh order, so the specs
+  # list the sequence axes in mesh order too. A rule that lists them in another
+  # order then costs a reshard on entry instead of shifting tokens across the
+  # wrong shards.
+  seq_axes = tuple(a for a in mesh.axis_names if a in seq_axes)
+  gather_axes = tuple(a for a in mesh.axis_names if mesh.shape[a] > 1)
+  num_devices = math.prod(mesh.shape[a] for a in gather_axes)
+  local_batch = batch // math.prod(mesh.shape[a] for a in batch_axes)
+  local_len = seq_len // math.prod(mesh.shape[a] for a in seq_axes)
+  chunk = min(chunk_size, local_len)
+
+  graphdef, state = nnx.split(model)
+  leaves, treedef = jax.tree.flatten(state)
+  abstract = [
+      jax.ShapeDtypeStruct(jnp.shape(x), jnp.result_type(x)) for x in leaves
+  ]
+  head = _head_parameters(
+      graphdef,
+      treedef,
+      abstract,
+      jax.ShapeDtypeStruct(
+          (local_batch, chunk, hidden_dim), hidden_states.dtype
+      ),
+  )
+  if not head:
+    return fallback("compute_final_logits reads no model state")
+  head_index = sorted(head)
+  params = [leaves[i] for i in head_index]
+  gather_dtypes = [head[i] for i in head_index]
+  gather_dims = []
+  for p in params:
+    dim = next((d for d, n in enumerate(p.shape) if n % num_devices == 0), None)
+    if dim is None:
+      return fallback(
+          f"head parameter {p.shape} not divisible by {num_devices}"
+      )
+    gather_dims.append(dim)
+  param_dtypes = [jnp.result_type(p) for p in params]
+  num_out = 2 if return_entropy else 1
+  logging.info(
+      "[logps-head] sharded head %s: tokens batch=%s seq=%s (%s), %dx%d local"
+      " tokens in %d steps of %d; gathers %s over %s",
+      mode,
+      batch_axes,
+      seq_axes,
+      layout_source,
+      local_batch,
+      local_len,
+      -(-local_len // chunk),  # ceil(local_len / chunk) scan steps
+      chunk,
+      [(p.shape, str(d)) for p, d in zip(params, gather_dtypes)],
+      gather_axes,
+  )
+
+  def merged(full):
+    # Only the head leaves carry values. The others stay ShapeDtypeStruct
+    # placeholders, which compute_final_logits never reads (_head_parameters
+    # found the leaves it reads).
+    values = list(abstract)
+    for i, x in zip(head_index, full):
+      values[i] = x
+    return nnx.merge(graphdef, jax.tree.unflatten(treedef, values))
+
+  def chunk_outputs(full, hs, ids, with_entropy):
+    logits = merged(full).compute_final_logits(hs).astype(jnp.float32)
+    if temperature != 0.0 and temperature != 1.0:
+      logits /= temperature
+    logps = selective_log_softmax(logits, ids)
+    if with_entropy:
+      return logps, compute_entropy_from_logits(logits)
+    return (logps,)
+
+  def gather(p, dim, dtype):
+    p = p.astype(dtype)
+    if not gather_axes:
+      return p
+    return jax.lax.all_gather(p, gather_axes, axis=dim, tiled=True)
+
+  def scatter(g, dim):
+    if not gather_axes:
+      return g
+    return jax.lax.psum_scatter(
+        g, gather_axes, scatter_dimension=dim, tiled=True
+    )
+
+  def scan_forward(full, h, t):
+    def step(bufs, i):
+      start = i * chunk
+      hs = jax.lax.dynamic_slice_in_dim(h, start, chunk, axis=1)
+      ids = jax.lax.dynamic_slice_in_dim(t, start, chunk, axis=1)
+      outs = chunk_outputs(full, hs, ids, return_entropy)
+      bufs = tuple(
+          jax.lax.dynamic_update_slice_in_dim(b, o, start, axis=1)
+          for b, o in zip(bufs, outs)
+      )
+      return bufs, None
+
+    bufs = tuple(jnp.zeros(t.shape, jnp.float32) for _ in range(num_out))
+    bufs, _ = jax.lax.scan(step, bufs, jnp.arange(h.shape[1] // chunk))
+    return bufs
+
+  @jax.custom_vjp
+  def head_local(h, t, *ps):
+    full = [
+        gather(p, d, dt) for p, d, dt in zip(ps, gather_dims, gather_dtypes)
+    ]
+    return scan_forward(full, h, t)
+
+  def head_local_fwd(h, t, *ps):
+    # With symbolic_zeros=True the inputs arrive as CustomVJPPrimal wrappers,
+    # hence `.value`. Their `.perturbed` flags are ignored, so the backward
+    # builds the f32 accumulator even for a frozen head. The gathered
+    # parameters are the residuals: the backward reuses them instead of
+    # gathering again.
+    h, t = h.value, t.value
+    ps = [p.value for p in ps]
+    full = [
+        gather(p, d, dt) for p, d, dt in zip(ps, gather_dims, gather_dtypes)
+    ]
+    return scan_forward(full, h, t), (h, t, tuple(full))
+
+  def head_local_bwd(res, cts):
+    h, t, full = res
+    d_logps = cts[0]
+    # Without return_entropy the primal has one output, so no entropy
+    # cotangent: treat it as a symbolic zero.
+    d_entropy = cts[1] if return_entropy else SymbolicZero(None)
+    use_logps = not isinstance(d_logps, SymbolicZero)
+    use_entropy = not isinstance(d_entropy, SymbolicZero)
+    if not (use_logps or use_entropy):
+      shard_shapes = [
+          tuple(
+              n // num_devices if k == d else n for k, n in enumerate(f.shape)
+          )
+          for f, d in zip(full, gather_dims)
+      ]
+      zeros = [jnp.zeros(s, dt) for s, dt in zip(shard_shapes, param_dtypes)]
+      return (jnp.zeros_like(h), None, *zeros)
+
+    def step(carry, i):
+      acc, dh = carry
+      start = i * chunk
+      hs = jax.lax.dynamic_slice_in_dim(h, start, chunk, axis=1)
+      ids = jax.lax.dynamic_slice_in_dim(t, start, chunk, axis=1)
+      cot = []
+      if use_logps:
+        cot.append(jax.lax.dynamic_slice_in_dim(d_logps, start, chunk, axis=1))
+      if use_entropy:
+        cot.append(
+            jax.lax.dynamic_slice_in_dim(d_entropy, start, chunk, axis=1)
+        )
+
+      def outputs_fn(full_, hs_):
+        # Exactly the outputs that have a cotangent in `cot`, in that order.
+        outs = chunk_outputs(full_, hs_, ids, use_entropy)
+        return outs if use_logps else outs[1:]
+
+      _, vjp = jax.vjp(outputs_fn, list(full), hs)
+      d_full, d_hs = vjp(tuple(cot))
+      acc = tuple(a + g.astype(jnp.float32) for a, g in zip(acc, d_full))
+      dh = jax.lax.dynamic_update_slice_in_dim(
+          dh, d_hs.astype(dh.dtype), start, axis=1
+      )
+      return (acc, dh), None
+
+    acc = tuple(jnp.zeros(f.shape, jnp.float32) for f in full)
+    (acc, dh), _ = jax.lax.scan(
+        step, (acc, jnp.zeros_like(h)), jnp.arange(h.shape[1] // chunk)
+    )
+    acc = [scatter(a, d) for a, d in zip(acc, gather_dims)]
+    d_params = [a.astype(dt) for a, dt in zip(acc, param_dtypes)]
+    return (dh, None, *d_params)
+
+  head_local.defvjp(head_local_fwd, head_local_bwd, symbolic_zeros=True)
+
+  seq_shards = math.prod(mesh.shape[a] for a in seq_axes)
+
+  def neighbour(x, step):
+    """`x` of the sequence shard `step` places later; zeros past either end."""
+    if seq_shards == 1:
+      return jnp.zeros_like(x)
+    perm = [
+        (i, i - step) for i in range(seq_shards) if 0 <= i - step < seq_shards
+    ]
+    return jax.lax.ppermute(x, seq_axes, perm)
+
+  def local(h, tok, *ps):
+    # Position t predicts token t + 1; a shard's last position predicts the
+    # next shard's first token. The sequence's last position has no next
+    # token: its target is token id 0 (`neighbour` returns zeros past the last
+    # shard) and its score is dropped by the output shift below. Both one-token
+    # shifts are explicit collective-permutes, so neither depends on how XLA
+    # partitions a shift of a sequence-sharded array.
+    t = jnp.concatenate([tok[:, 1:], neighbour(tok[:, :1], 1)], axis=1)
+    pad = -h.shape[1] % chunk  # up to the next multiple of chunk
+    if pad:
+      h = jnp.pad(h, ((0, 0), (0, pad), (0, 0)))
+      t = jnp.pad(t, ((0, 0), (0, pad)))
+    outs = [o[:, : o.shape[1] - pad] for o in head_local(h, t, *ps)]
+    # Index j holds token j's log-prob (scored at position j - 1); index 0 is 0.
+    return tuple(
+        jnp.concatenate([neighbour(o[:, -1:], -1), o[:, :-1]], axis=1)
+        for o in outs
+    )
+
+  P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
+  token_spec = P(batch_axes or None, seq_axes or None)
+  in_specs = (
+      P(batch_axes or None, seq_axes or None, None),
+      token_spec,
+      *[
+          P(*[gather_axes if k == d else None for k in range(p.ndim)])
+          for p, d in zip(params, gather_dims)
+      ],
+  )
+  # Zero non-finite hidden states, as compute_chunked_logps does.
+  hidden_states = jnp.where(jnp.isfinite(hidden_states), hidden_states, 0.0)
+  outs = jax.shard_map(
+      local,
+      mesh=mesh,
+      in_specs=in_specs,
+      out_specs=(token_spec,) * num_out,
+      # The scan carries start as jnp.zeros, which the vma check types as the
+      # same on every device, while each chunk's outputs vary by device, so
+      # with the check lax.scan rejects the carry. Unchecked is still exact:
+      # every mesh axis of size > 1 is in every in and out spec, so the
+      # transpose adds no psum or division over a nontrivial axis.
+      check_vma=False,
+  )(hidden_states, input_tokens, *params)
+  return outs if return_entropy else outs[0]
 
 
 @nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
