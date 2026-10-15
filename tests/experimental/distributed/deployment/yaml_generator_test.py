@@ -23,6 +23,8 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.experimental.distributed.deployment import yaml_generator
 
+_THRESHOLD_ENV = "IFRT_PROXY_GRPC_LARGE_TRANSFER_OPTIMIZATION_THRESHOLD_BYTES"
+
 
 def _get_template_path(filename: str) -> str:
   # Locate template file relative to yaml_generator module directory
@@ -277,6 +279,78 @@ class YamlGeneratorTest(parameterized.TestCase):
         self.assertIn("memory: 190G", rendered)
         self.assertIn("memory: 160G", rendered)
         self.assertIn("memory: 120G", rendered)
+
+  def test_generate_pathways_yaml_large_transfer_directory(self):
+    template_file = _get_template_path("jobset.pathways.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-pathways-job",
+        "--tpu_slice=tpuv5:2x2x2",
+        "--user_container_memory_limit=256G",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+        # One memory-backed volume, sized like the user container (its pages
+        # are charged there), mounted in pathways-proxy and the user container.
+        self.assertEqual(rendered.count("name: ifrt-proxy-large-transfer"), 3)
+        self.assertIn("medium: Memory", rendered)
+        self.assertIn("sizeLimit: 256G", rendered)
+        self.assertEqual(
+            rendered.count("mountPath: /ifrt_proxy_large_transfer"), 2
+        )
+        self.assertEqual(
+            rendered.count(
+                "name: IFRT_PROXY_GRPC_LARGE_TRANSFER_OPTIMIZATION_DIRECTORY"
+            ),
+            2,
+        )
+        # Without the chmod, pathways-proxy cannot delete the files; the
+        # container must not start if it fails while the transfers are on.
+        self.assertRegex(
+            rendered,
+            r"if ! chmod 0777 /ifrt_proxy_large_transfer &&\s+"
+            rf"\(\( {_THRESHOLD_ENV} < 9223372036854775807 \)\); then",
+        )
+        # Off by default: the IFRT proxy client's own default threshold.
+        self.assertIn('value: "9223372036854775807"', rendered)
+
+  def test_generate_pathways_yaml_large_transfer_threshold(self):
+    template_file = _get_template_path("jobset.pathways.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-pathways-job",
+        "--tpu_slice=tpuv5:2x2x2",
+        "--ifrt_proxy_large_transfer_threshold_bytes=16777216",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+        self.assertRegex(
+            rendered, rf'name: {_THRESHOLD_ENV}\s+value: "16777216"'
+        )
+
+  @parameterized.named_parameters(
+      ("zero", "0"),
+      ("negative", "-1"),
+      ("above_int64", str(2**63)),
+  )
+  def test_invalid_large_transfer_threshold_raises(self, threshold):
+    template_file = _get_template_path("jobset.pathways.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--tpu_slice=tpuv5:2x2x2",
+        f"--ifrt_proxy_large_transfer_threshold_bytes={threshold}",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stderr", new_callable=io.StringIO):
+        with self.assertRaises(SystemExit):
+          yaml_generator.main()
 
   def test_generate_ray_yaml_with_pre_init_commands(self):
     template_file = _get_template_path("leaderworkerset.mcjax.ray.yaml")
