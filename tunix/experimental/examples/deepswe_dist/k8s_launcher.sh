@@ -886,6 +886,7 @@ if cfg:
       --worker_container_image="${TUNIX_IMAGE}" \
       --worker_container_port="${ROLLOUT_PORT}" \
       --worker_startup_command=" \
+        sysctl -w net.core.somaxconn=65535 net.ipv4.tcp_max_syn_backlog=65535 net.ipv4.ip_local_port_range=\"1024 65535\" net.ipv4.tcp_tw_reuse=1 2>/dev/null || true; \
         PYTHONUNBUFFERED=1 \
         TUNIX_IS_INTERNAL_ENV=false \
         ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \

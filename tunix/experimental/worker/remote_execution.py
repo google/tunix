@@ -41,6 +41,7 @@ import contextlib
 import dataclasses
 import hashlib
 import inspect
+import json
 import pickle
 import threading
 import time
@@ -111,19 +112,34 @@ _SERDE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 
 def _grpc_options(
     max_message_bytes: int = _MAX_MESSAGE_BYTES,
-) -> List[Tuple[str, int]]:
+) -> List[Tuple[str, Union[int, str]]]:
   """Channel/server options lifting the message-size cap and enabling keepalive."""
+  service_config = {
+      "methodConfig": [{
+          "name": [{"service": "tunix.ExecutionService"}],
+          "retryPolicy": {
+              "maxAttempts": 5,
+              "initialBackoff": "0.5s",
+              "maxBackoff": "10s",
+              "backoffMultiplier": 2.0,
+              "retryableStatusCodes": ["UNAVAILABLE"],
+          },
+      }]
+  }
   return [
       ("grpc.max_send_message_length", max_message_bytes),
       ("grpc.max_receive_message_length", max_message_bytes),
-      ("grpc.keepalive_time_ms", 20000),
-      ("grpc.keepalive_timeout_ms", 10000),
+      ("grpc.keepalive_time_ms", 60000),
+      ("grpc.keepalive_timeout_ms", 60000),
       ("grpc.keepalive_permit_without_calls", 1),
       ("grpc.http2.max_pings_without_data", 0),
       ("grpc.http2.max_ping_strikes", 0),
       ("grpc.http2.min_ping_interval_without_data_ms", 5000),
       ("grpc.http2.min_recv_ping_interval_without_data_ms", 5000),
       ("grpc.use_local_subchannel_pool", 1),
+      ("grpc.so_reuseport", 1),
+      ("grpc.tcp_user_timeout_ms", 30000),
+      ("grpc.service_config", json.dumps(service_config)),
   ]
 
 
@@ -1022,12 +1038,13 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         response_deserializer=lambda b: b,
     )
 
-  async def _ensure_async_channel(self) -> Any:
+  async def _ensure_async_channel(self, force: bool = False) -> Any:
     """Ensures the async gRPC channel and stubs are bound to the active loop."""
     assert _grpc_aio_lib is not None
     current_loop = _running_loop()
     if (
-        self._channel is None
+        force
+        or self._channel is None
         or self._channel_loop is not current_loop
         or (self._channel_loop is not None and self._channel_loop.is_closed())
     ):
@@ -1070,16 +1087,50 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       method_name: Optional[str],
       args: Sequence[Any],
       kwargs: Dict[str, Any],
+      max_retries: int = 3,
   ) -> Any:
     """Streams an ExecutionRequest over `rpc` and unwraps the ExecutionResponse."""
-    request = ExecutionRequest(
-        method_name=method_name, args=args, kwargs=kwargs
-    )
-    chunks = request.serialize_async_chunks(chunk_size=self._stream_chunk_bytes)
-    call = rpc(chunks, timeout=self._rpc_timeout_s)
-    response = await ExecutionResponse.deserialize_async_chunks(call)
-    assert response is not None
-    return response.unwrap()
+    for attempt in range(max_retries + 1):
+      try:
+        request = ExecutionRequest(
+            method_name=method_name, args=args, kwargs=kwargs
+        )
+        chunks = request.serialize_async_chunks(chunk_size=self._stream_chunk_bytes)
+        call = rpc(chunks, timeout=self._rpc_timeout_s)
+        response = await ExecutionResponse.deserialize_async_chunks(call)
+        assert response is not None
+        return response.unwrap()
+      except _grpc_aio_lib.AioRpcError as err:
+        if err.code() == _grpc_lib.StatusCode.UNAVAILABLE and attempt < max_retries:
+          backoff = 0.5 * (2 ** attempt)
+          logging.warning(
+              "RPC %s to %s failed with %s; refreshing channel and retrying in"
+              " %.2fs (attempt %d/%d)...",
+              method_name,
+              self._host_port,
+              err.details(),
+              backoff,
+              attempt + 1,
+              max_retries,
+          )
+          await asyncio.sleep(backoff)
+          if rpc is self._sync_rpc:
+            old_sync = self._sync_channel
+            self._sync_channel = _grpc_aio_lib.insecure_channel(
+                self._host_port, options=_grpc_options(self._max_message_bytes)
+            )
+            self._sync_rpc = self._make_rpc(self._sync_channel)
+            rpc = self._sync_rpc
+            if old_sync is not None:
+              try:
+                await asyncio.wait_for(old_sync.close(), timeout=1.0)
+              except Exception:  # pylint: disable=broad-exception-caught
+                pass
+          else:
+            await self._ensure_async_channel(force=True)
+            rpc = self._rpc
+          continue
+        raise
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
     """Blocking gRPC invocation; safe to call repeatedly.
@@ -2473,6 +2524,25 @@ class PoolExecutionSession:
               )
               self._notify_if_zero_flight()
               continue
+          is_transient = (
+              _GRPC_AVAILABLE
+              and _grpc_aio_lib is not None
+              and _grpc_lib is not None
+              and isinstance(exc, _grpc_aio_lib.AioRpcError)
+              and exc.code()
+              in (
+                  _grpc_lib.StatusCode.UNAVAILABLE,
+                  _grpc_lib.StatusCode.DEADLINE_EXCEEDED,
+              )
+          )
+          if is_transient and not self._closed and actor in self._known_actors:
+            logging.warning(
+                "Transient error polling worker %s: %r. Reconnecting in 1s...",
+                actor,
+                exc,
+            )
+            await asyncio.sleep(1.0)
+            continue
           # Transport, timeout, or polling failure on this worker; evict and/or
           # retry in-flight tasks.
           self._active_workers.discard(actor)
