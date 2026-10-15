@@ -3505,5 +3505,99 @@ class TokenBoundaryTimingTest(absltest.TestCase):
     self.assertTrue(after_wait_run.program._staging_latched_off, msg)
 
 
+class _SlowStepMetrics(rl_program.StandardRLProgram):
+  """Step metric reduction that takes `delay_s` and records its thread."""
+
+  delay_s: float = 0.0
+  fail_at_step: int | None = None
+
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.reduce_threads: list[threading.Thread] = []
+
+  def _collect_and_log_step_metrics(self, **kwargs):
+    self.reduce_threads.append(threading.current_thread())
+    if self.fail_at_step is not None and kwargs["log_step"] == self.fail_at_step:
+      raise RuntimeError(f"step metrics failed at step {kwargs['log_step']}")
+    time.sleep(self.delay_s)
+    return super()._collect_and_log_step_metrics(**kwargs)
+
+
+class BackgroundBookkeepingTest(absltest.TestCase):
+  """With the pipelined boundary, step k's bookkeeping runs in the background.
+
+  Step k+1 starts, and sends its second micro-batch, without waiting for step
+  k's metric reduction, logging, `on_step_end` and host-memory release; the
+  reduction runs off the event loop. Trainer calls and callback order are
+  unchanged.
+  """
+
+  def _second_microbatch_of_next_step_before_on_step_end(
+      self, run: _Run
+  ) -> list[bool]:
+    log = run.log
+    fwd = [i for i, e in enumerate(log) if e[0] == "fwd_bwd"]
+    out = []
+    first_of_next = 0
+    per_step = _microbatches_per_step(run)
+    for k, n in enumerate(per_step[:-1]):
+      first_of_next += n
+      if per_step[k + 1] < 2:
+        continue
+      second = fwd[first_of_next + 1]
+      out.append(second < log.index(("on_step_end", k)))
+    return out
+
+  def test_slow_step_metrics_do_not_hold_the_next_step(self):
+    sc = dataclasses.replace(
+        _SCENARIOS["prompt_batch"], num_prompts=16, max_steps=4
+    )
+    slow = type("_Slow", (_SlowStepMetrics,), {"delay_s": 0.5})
+    for pipelined, expect in ((False, False), (True, True)):
+      with self.subTest(pipelined=pipelined):
+        run = _run(sc, pipelined=pipelined, program_cls=slow)
+        second_first = self._second_microbatch_of_next_step_before_on_step_end(
+            run
+        )
+        self.assertNotEmpty(second_first)
+        self.assertEqual(set(second_first), {expect}, second_first)
+        # Callbacks keep their order: on_step_end(k) before on_step_begin(k+1).
+        for k in range(sc.max_steps - 1):
+          self.assertLess(
+              run.log.index(("on_step_end", k)),
+              run.log.index(("on_step_begin", k + 1)),
+          )
+        self.assertEqual(run.last_step_result.step, sc.max_steps - 1)
+
+  def test_same_trainer_calls_and_outputs_as_the_base_loop(self):
+    sc = _SCENARIOS["prompt_batch"]
+    ref = _reference("prompt_batch")
+    slow = type("_Slow", (_SlowStepMetrics,), {"delay_s": 0.2})
+    run = _run(sc, pipelined=True, program_cls=slow)
+    self.assertTrue(_check_equivalent(ref, run))
+
+  def test_step_metrics_reduce_off_the_event_loop_only_when_pipelined(self):
+    sc = _SCENARIOS["prompt_batch"]
+    for pipelined in (False, True):
+      with self.subTest(pipelined=pipelined):
+        run = _run(sc, pipelined=pipelined, program_cls=_SlowStepMetrics)
+        threads = run.program.reduce_threads
+        self.assertLen(threads, sc.max_steps)
+        on_main = {t is threading.main_thread() for t in threads}
+        self.assertEqual(on_main, {not pipelined})
+
+  def test_bookkeeping_failure_fails_the_run(self):
+    sc = dataclasses.replace(
+        _SCENARIOS["prompt_batch"], num_prompts=16, max_steps=4
+    )
+    failing = type("_Failing", (_SlowStepMetrics,), {"fail_at_step": 0})
+    errors: list[BaseException] = []
+    run = _run(sc, pipelined=True, program_cls=failing, errors=errors)
+    self.assertLen(errors, 1)
+    self.assertIn("step metrics failed at step 0", str(errors[0]))
+    self.assertNotIn(("on_step_end", 0), run.log)
+    self.assertIsNone(run.program._pending_bookkeeping)
+
+
 if __name__ == "__main__":
   absltest.main()

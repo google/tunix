@@ -21,6 +21,7 @@ pipelines.
 import abc
 import asyncio
 from collections.abc import Callable, Iterable, Mapping, Sequence, Sized
+import contextlib
 import copy
 import ctypes
 import dataclasses
@@ -60,6 +61,19 @@ def _release_host_memory() -> None:
     libc.malloc_trim(0)
   except (OSError, AttributeError):
     pass
+
+
+def _log_task_failure(task: asyncio.Task[Any]) -> None:
+  """Logs a background task's exception as soon as it fails.
+
+  The task is also awaited later, which re-raises the exception and fails the
+  run; this only makes the failure visible in the log when it happens.
+  """
+  if task.cancelled():
+    return
+  exc = task.exception()
+  if exc is not None:
+    logging.error("Background step bookkeeping failed: %r", exc)
 
 
 def _raised_by_worker_method(exc: BaseException) -> bool:
@@ -609,15 +623,14 @@ class StandardRLProgram(RLProgram):
     # taken and packed while step k's last micro-batches train, step k+1's
     # first micro-batch goes to the trainer as soon as step k's weight sync
     # has staged, and step k's metrics, logging and host-memory release run
-    # once that call has returned, while the device computes it. The trainer
-    # gets the same calls, with the same inputs, in the same order as without
-    # it. What moves with that
-    # bookkeeping: step k's `Train step` line, StepMetrics and `on_step_end`
-    # follow a `[pipeline] SENT_AHEAD step=k` line (step k trained, step k+1
-    # started), so a wedge in step k+1's first call stops the log there;
-    # `on_step_begin(k+1)` fires after step k+1's first train call returned;
-    # and under ARRIVAL order the dispatch window, keyed on the step count,
-    # opens that one call later (PROMPT_BATCH opens it at the commit).
+    # in a background task (`_finish_step_bookkeeping`) once that call has
+    # returned, while step k+1 carries on. The trainer gets the same calls,
+    # with the same inputs, in the same order as without it. What moves with
+    # that bookkeeping: step k's `Train step` line, StepMetrics and
+    # `on_step_end` follow a `[pipeline] SENT_AHEAD step=k` line (step k
+    # trained, step k+1 started) and may follow step k+1's second micro-batch;
+    # `on_step_begin(k+1)` is held until right after `on_step_end(k)`; and
+    # the dispatch window opens at the commit under both orders.
     self.pipeline_step_boundary = pipeline_step_boundary
     # With `pipeline_step_boundary`: also send that micro-batch's data to the
     # trainer host while the device still computes step k's last micro-batch,
@@ -642,6 +655,19 @@ class StandardRLProgram(RLProgram):
     # Takes groups for a step ahead of it (`_prepack`), filling a `_StepState`
     # the step adopts when it starts.
     self._intake_task: asyncio.Task[None] | None = None
+    # With `pipeline_step_boundary`: step k's post-commit bookkeeping (step
+    # metric reduction and logging, consumed-trajectory logging, the `Train
+    # step` line, `on_step_end`, host memory release), run as a background
+    # task so step k+1 starts, and sends its second micro-batch, without
+    # waiting for it, and the other stages keep running meanwhile. Awaited
+    # before step k+1's weight sync (so `policy_version` cannot move under its
+    # reduction) and when the loop ends, so a failure still fails the run.
+    self._pending_bookkeeping: asyncio.Task[None] | None = None
+    # A step whose `on_step_begin` waits for the previous step's background
+    # bookkeeping to run `on_step_end` first (`_begin_step`), and whether that
+    # `on_step_end` has run.
+    self._deferred_step_begin: int | None = None
+    self._previous_step_ended = True
     # Set once a stage did not hide behind the trainer's device (its device
     # had gone idle before the transfer finished): the trainer is then fed
     # slower than it computes, and staging only delays each step's sync. Also
@@ -1990,6 +2016,26 @@ class StandardRLProgram(RLProgram):
     )
     return result, time.monotonic() - start
 
+  def _begin_step(self, step: int) -> None:
+    """Runs `on_step_begin(step)`, after the previous step's `on_step_end`.
+
+    With the previous step's bookkeeping still running in the background,
+    the call is left to that task, which makes it right after
+    `on_step_end(step - 1)`, so callbacks keep their order.
+    """
+    if not self.on_step_begin:
+      return
+    if not self._previous_step_ended:
+      self._deferred_step_begin = step
+      return
+    self.on_step_begin(step)
+
+  async def _await_pending_bookkeeping(self) -> None:
+    """Waits for the previous step's bookkeeping task; raises if it failed."""
+    task, self._pending_bookkeeping = self._pending_bookkeeping, None
+    if task is not None:
+      await task
+
   async def _await_pending_sync(self) -> None:
     """Waits for the background weight sync, if any; raises if it failed."""
     task, self._pending_sync = self._pending_sync, None
@@ -2073,14 +2119,29 @@ class StandardRLProgram(RLProgram):
   async def train_stage(self) -> None:
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
     try:
-      await self._train_loop()
-      # The last round must land before the run is reported done.
+      try:
+        await self._train_loop()
+      except Exception:
+        # As without the background task, a step's bookkeeping completes
+        # before a failure in the next step surfaces; its own failure, if any,
+        # is logged by `_log_task_failure` and the loop's error wins.
+        with contextlib.suppress(Exception):
+          await self._await_pending_bookkeeping()
+        raise
+      # The last step's bookkeeping and the last round must land before the
+      # run is reported done.
+      await self._await_pending_bookkeeping()
       await self._await_pending_sync()
     finally:
       if self._pending_sync is not None and not self._pending_sync.done():
         self._pending_sync.cancel()
       if self._intake_task is not None and not self._intake_task.done():
         self._intake_task.cancel()
+      if (
+          self._pending_bookkeeping is not None
+          and not self._pending_bookkeeping.done()
+      ):
+        self._pending_bookkeeping.cancel()
 
   async def _train_loop(self) -> None:
     """Trains one optimizer step per full batch of scored groups.
@@ -2100,8 +2161,9 @@ class StandardRLProgram(RLProgram):
     * Bookkeeping. Step k+1's first micro-batch is sent right after step k's
       sync stages, its batch commits and, when deferred, its metrics are
       fetched (`_send_first_microbatch_ahead`); step k's step metrics,
-      logging, `on_step_end` and host-memory release run once that call is on
-      the trainer.
+      logging, `on_step_end` and host-memory release run in a background task
+      once that call is on the trainer (`_finish_step_bookkeeping`), so step
+      k+1 and the other stages do not wait for them.
     * Transfer (`stage_next_microbatch`). That micro-batch's data goes to the
       trainer host while the device still computes step k's last micro-batch
       (`_stage_planned`): between step k's last train call, sent with its
@@ -2143,8 +2205,7 @@ class StandardRLProgram(RLProgram):
         st.scored_items = []
       elif not st.step_begun:
         st.step_begun = True
-        if self.on_step_begin:
-          self.on_step_begin(current_step)
+        self._begin_step(current_step)
 
       step_result = None
       trainer_metrics = None
@@ -2331,6 +2392,10 @@ class StandardRLProgram(RLProgram):
           queue_dry = True
 
       await _await_pending_train()
+      # The previous step's bookkeeping reads `policy_version`, which this
+      # step's weight sync advances below; it has long finished by now (it
+      # only waited for this step's first calls), so this rarely waits.
+      await self._await_pending_bookkeeping()
       if not st.all_step_items:
         logging.info(
             "Dataset exhausted at step %d before max_steps.", current_step
@@ -2398,26 +2463,58 @@ class StandardRLProgram(RLProgram):
 
       filtered_groups = await self._drain_filtered_groups()
 
-      if next_state is not None:
-        # Step k+1's first micro-batch goes to the trainer now. This step's
-        # remaining bookkeeping waits until that call is on the trainer, so
-        # its transfer is not slowed by it and the device computes while it
-        # runs: step k's `Train step` line, StepMetrics and `on_step_end`
-        # therefore follow the `[pipeline] SENT_AHEAD` line by one train
-        # call's return (one transfer unstaged, ~a round trip staged).
-        sent_ahead = await self._send_first_microbatch_ahead(next_state)
-        if sent_ahead is not None:
-          logging.info(
-              "[pipeline] SENT_AHEAD step=%d first microbatch of step %d is on"
-              " its way to the trainer; step %d's metrics follow once it is"
-              " there.",
-              current_step,
-              current_step + 1,
-              current_step,
-          )
-          # Not collected here: its result is step k+1's, and a failure
-          # surfaces when step k+1 collects it.
-          await asyncio.wait({sent_ahead})
+      if self.pipeline_step_boundary:
+        sent_ahead = None
+        if next_state is not None:
+          # Step k+1's first micro-batch goes to the trainer now.
+          sent_ahead = await self._send_first_microbatch_ahead(next_state)
+          if sent_ahead is not None:
+            logging.info(
+                "[pipeline] SENT_AHEAD step=%d first microbatch of step %d is"
+                " on its way to the trainer; step %d's metrics follow in the"
+                " background once it is there.",
+                current_step,
+                current_step + 1,
+                current_step,
+            )
+            # Let the call start before the step counter moves, as when the
+            # bookkeeping ran inline after it.
+            await asyncio.sleep(0)
+        # This step's remaining bookkeeping runs in the background, so step
+        # k+1 starts (and sends its second micro-batch) right away and the
+        # other stages are not frozen by it.
+        self._previous_step_ended = False
+        self._pending_bookkeeping = asyncio.create_task(
+            self._finish_step_bookkeeping(
+                st=st,
+                current_step=current_step,
+                step_result=step_result,
+                trainer_metrics=trainer_metrics,
+                generation_metrics=generation_metrics,
+                step_time_sec=step_time_sec,
+                consumed_policy_version=consumed_policy_version,
+                policy_training_time=policy_training_time,
+                weight_sync_time=weight_sync_time,
+                metrics_fetch_time=metrics_fetch_time,
+                filtered_groups=filtered_groups,
+                policy_version=self.policy_version,
+                sent_ahead=sent_ahead,
+            )
+        )
+        self._pending_bookkeeping.add_done_callback(_log_task_failure)
+        self._step += 1
+        # Strictly after the increment: the dispatcher re-reads `_next_batch`
+        # on waking, and waking it on the old value would park it again with
+        # no one left to set the event.
+        self._release_window()
+        # Where the inline path releases host memory too: while the device
+        # computes the sent-ahead micro-batch, before step k+1 starts taking
+        # step k+2's groups ahead. `gc.collect()` holds the GIL, so running it
+        # later, from the background task, would stall that intake right where
+        # it must finish for step k+2's first micro-batch to be staged.
+        # Step k's items are freed by the next step's collection instead.
+        _release_host_memory()
+        continue
 
       metrics_summary = self._collect_and_log_step_metrics(
           all_step_items=st.all_step_items,
@@ -2487,6 +2584,132 @@ class StandardRLProgram(RLProgram):
       self._release_window()
       _release_host_memory()
 
+  async def _finish_step_bookkeeping(
+      self,
+      *,
+      st: _StepState,
+      current_step: int,
+      step_result: Any,
+      trainer_metrics: Any,
+      generation_metrics: Mapping[str, float],
+      step_time_sec: float,
+      consumed_policy_version: int,
+      policy_training_time: float,
+      weight_sync_time: float,
+      metrics_fetch_time: float,
+      filtered_groups: list[Any],
+      policy_version: int,
+      sent_ahead: asyncio.Task[tuple[Any, float]] | None,
+  ) -> None:
+    """A committed step's bookkeeping, as a background task.
+
+    Used with `pipeline_step_boundary`. Does what the inline path does after
+    the commit, in the same order and with the same inputs, but off the train
+    loop's critical path and, for the CPU-heavy parts, off the event loop:
+
+    * Waits for the next step's sent-ahead first micro-batch to reach the
+      trainer, as the inline path did, so its transfer is not slowed by this.
+    * Reduces and logs the step metrics and the consumed trajectories in a
+      worker thread, so polling, critique and dispatch keep running.
+    * Logs the `Train step` line and runs `on_step_end` (on the loop, as
+      before; they are cheap).
+
+    `_train_loop` awaits this before the next step's weight sync and when it
+    ends, so a failure here still fails the run.
+
+    Args:
+      st: The committed step's state; nothing else touches it any more.
+      current_step: The committed step.
+      step_result: Its final train call's result.
+      trainer_metrics: Its trainer metrics (already fetched).
+      generation_metrics: Its generation metrics (computed before commit).
+      step_time_sec: Its step time, measured at commit.
+      consumed_policy_version: The policy version it trained from.
+      policy_training_time: Its training time.
+      weight_sync_time: Its weight-sync time.
+      metrics_fetch_time: Its deferred metrics-fetch time.
+      filtered_groups: Its filtered groups, already drained.
+      policy_version: `self.policy_version` after its weight sync started.
+      sent_ahead: The next step's first train call, when sent ahead.
+    """
+    if sent_ahead is not None:
+      # Not collected here: its result is step k+1's, and a failure surfaces
+      # when step k+1 collects it.
+      await asyncio.wait({sent_ahead})
+
+    def _reduce_and_log() -> dict[str, Any]:
+      metrics_summary = self._collect_and_log_step_metrics(
+          all_step_items=st.all_step_items,
+          step_rewards=st.step_rewards,
+          step_advantages=st.step_advantages,
+          generation_metrics=generation_metrics,
+          step_result=step_result,
+          trainer_metrics=trainer_metrics,
+          num_rollouts=st.num_rollouts,
+          num_microbatches=st.num_microbatches,
+          padding_stats=st.padding_stats,
+          packing_time_sec=st.packing_time_sec,
+          step_time_sec=step_time_sec,
+          consumed_policy_version=consumed_policy_version,
+          log_step=current_step,
+          sampler_agreement=st.sampler_agreement,
+          policy_training_time=policy_training_time,
+          exposed_generation_time=st.exposed_generation_time,
+          weight_sync_time=weight_sync_time,
+          metrics_fetch_time=metrics_fetch_time,
+          filtered_groups=filtered_groups,
+      )
+      self._log_consumed_trajectories(
+          st.all_step_items,
+          log_step=current_step,
+          consumed_policy_version=consumed_policy_version,
+      )
+      return metrics_summary
+
+    metrics_summary = await asyncio.to_thread(_reduce_and_log)
+    filtered_groups.clear()
+    st.all_step_items.clear()
+    st.uncommitted_groups.clear()
+    st.scored_items.clear()
+
+    self.last_step_result = RLStepResult(
+        step=current_step,
+        policy_version=policy_version,
+        num_rollouts=st.num_rollouts,
+        num_microbatches=st.num_microbatches,
+        reward_mean=metrics_summary["reward_mean"],
+        reward_std=metrics_summary["reward_std"],
+        advantage_mean=metrics_summary["advantage_mean"],
+        advantage_std=metrics_summary["advantage_std"],
+        train_result=step_result,
+    )
+
+    loss_val = metrics_summary["loss_val"]
+    perplexity_val = metrics_summary["perplexity_val"]
+    grad_norm_val = metrics_summary["grad_norm_val"]
+    if self.mode == Mode.TRAIN:
+      logging.info(
+          "Train step %d - loss: %s - reward_mean: %.4f - advantage_mean:"
+          " %.4f - grad_norm: %s - perplexity: %s - step_time: %.2fs",
+          current_step,
+          f"{loss_val:.4f}" if loss_val is not None else "N/A",
+          metrics_summary["reward_mean"],
+          metrics_summary["advantage_mean"],
+          f"{grad_norm_val:.4g}" if grad_norm_val is not None else "N/A",
+          f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
+          step_time_sec,
+      )
+
+    if self.on_step_end:
+      self.on_step_end(current_step, step_result)
+    self._previous_step_ended = True
+    if self._deferred_step_begin is not None:
+      # The next step began while this ran; its callback goes now, after
+      # this step's (`_begin_step`).
+      step, self._deferred_step_begin = self._deferred_step_begin, None
+      if self.on_step_begin:
+        self.on_step_begin(step)
+
   # The pieces of `_train_loop` that work on a `_StepState`, so that a step's
   # state can be filled ahead of it (`_prepack`) and its first micro-batch
   # sent (`_send_first_microbatch_ahead`) or staged
@@ -2534,8 +2757,7 @@ class StandardRLProgram(RLProgram):
       return False
     if current_step is not None and not st.step_begun:
       st.step_begun = True
-      if self.on_step_begin:
-        self.on_step_begin(current_step)
+      self._begin_step(current_step)
 
     st.groups_consumed += 1
     st.uncommitted_groups.append(scored_items)
@@ -3248,6 +3470,11 @@ class StandardRLProgram(RLProgram):
         self._pending_train.cancel()
       if self._intake_task is not None and not self._intake_task.done():
         self._intake_task.cancel()
+      if (
+          self._pending_bookkeeping is not None
+          and not self._pending_bookkeeping.done()
+      ):
+        self._pending_bookkeeping.cancel()
 
   def run(
       self,
