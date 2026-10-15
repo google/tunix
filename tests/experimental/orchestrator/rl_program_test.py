@@ -6803,6 +6803,70 @@ class ExtractScalarTest(absltest.TestCase):
 
 
 
+class TrainerStepTimingLogTest(absltest.TestCase):
+  """`_log_trainer_step_timing` says so when the trainer's record is short."""
+
+  def setUp(self):
+    super().setUp()
+    algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+    algo.num_generations = 1
+    algo.mini_batch_size = 2
+    algo.train_micro_batch_size = 2
+    algo.max_packed_len = 16
+    algo.max_response_length = 16
+    algo.requires_reference_kl = False
+    algo.algo_config = mock.MagicMock(
+        temperature=1.0,
+        use_rollout_logps=False,
+        sampler_is=None,
+        sampler_is_threshold=2.0,
+    )
+    self.engine = mock.AsyncMock(
+        spec=rl_program.rl_engine_interface.AbstractRLEngine
+    )
+    self.program = rl_program.StandardRLProgram(algo=algo, dataset=["p0"])
+    self.program.engine = self.engine
+    self.addCleanup(self.program.close)
+
+  def _log(self, timing):
+    self.engine.get_step_timing.return_value = (timing, 0.25)
+    asyncio.run(self.program._log_trainer_step_timing(4))
+
+  def test_a_complete_record_is_logged_without_a_warning(self):
+    timing = {
+        "v": 1,
+        "train_step": 5,
+        "mb": [{"i": 0, "via": "fwd_bwd_staged"}],
+        "update": {"via": "apply_deferred_update"},
+        "prepare": None,
+    }
+    with self.assertLogs(level="INFO") as logs:
+      self._log(timing)
+    self.assertTrue(
+        any("TRAINER_STEP_TIMING step=4" in m for m in logs.output)
+    )
+    self.assertFalse(any(m.startswith("WARNING") for m in logs.output))
+
+  def test_an_empty_record_is_logged_and_warned_about(self):
+    timing = {
+        "v": 1,
+        "train_step": None,
+        "mb": [],
+        "update": None,
+        "prepare": {"recv_ago_s": 5.0, "done_ago_s": 0.4},
+    }
+    with self.assertLogs(level="WARNING") as logs:
+      self._log(timing)
+    self.assertLen(logs.output, 1)
+    self.assertIn("step=4 is incomplete (0 micro-batch entries", logs.output[0])
+    self.assertIn("update missing", logs.output[0])
+
+  def test_no_record_logs_nothing(self):
+    self.engine.get_step_timing.return_value = (None, 0.0)
+    with self.assertNoLogs(level="INFO"):
+      asyncio.run(self.program._log_trainer_step_timing(4))
+
+
 if __name__ == "__main__":
   absltest.main()
 
