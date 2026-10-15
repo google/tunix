@@ -15,10 +15,15 @@
 """Continuous batching scheduler for Tunix rollout requests."""
 
 import collections
+from collections.abc import Sequence
 import dataclasses
+import functools
 
 from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import request as request_lib
+
+
+_PrefixMatch = Sequence[Sequence[kv_cache_manager_lib.Page | None]]
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -29,30 +34,22 @@ class SchedulerConfig:
   max_num_batched_tokens: int
   # The maximum number of sequences that can be scheduled in a single batch.
   max_num_seqs: int
-  # The size of a chunked prefill request in tokens. Must be a power of 2 and
-  # less than or equal to max_num_batched_tokens.
-  chunked_prefill_length: int
+  # The maximum size of a chunked prefill request in tokens.
+  max_chunked_prefill_length: int
   # The number of model forward passes to execute per engine step.
   num_scheduler_steps: int = 1
 
   def __post_init__(self):
-    if self.chunked_prefill_length < 0:
+    if self.max_chunked_prefill_length <= 0:
       raise ValueError(
-          "Chunked prefill length must be non-negative. Got"
-          f" {self.chunked_prefill_length}."
+          "max_chunked_prefill_length must be positive. Got"
+          f" {self.max_chunked_prefill_length}."
       )
 
-    is_power_of_two = lambda n: n > 0 and (n & (n - 1)) == 0
-    if not is_power_of_two(self.chunked_prefill_length):
+    if self.max_chunked_prefill_length > self.max_num_batched_tokens:
       raise ValueError(
-          "Chunked prefill length must be a power of 2. Got"
-          f" {self.chunked_prefill_length}."
-      )
-
-    if self.chunked_prefill_length > self.max_num_batched_tokens:
-      raise ValueError(
-          "Chunked prefill length must be less than or equal to "
-          f"max_num_batched_tokens. Got  {self.chunked_prefill_length} "
+          "max_chunked_prefill_length must be less than or equal to "
+          f"max_num_batched_tokens. Got {self.max_chunked_prefill_length} "
           f"and {self.max_num_batched_tokens}."
       )
 
@@ -81,29 +78,150 @@ class Scheduler:
     self._pending_requests: collections.deque[request_lib.RequestState] = (
         collections.deque()
     )
+    self._token_budget: int = 0
 
     self._kv_cache_manager = kv_cache_manager
 
-  @property
+  @functools.cached_property
   def chunked_prefill_length(self) -> int:
-    return self._config.chunked_prefill_length
+    # Chunked prefill length must be a power of two.
+    return 1 << (self._config.max_chunked_prefill_length.bit_length() - 1)
 
   @property
   def num_active_requests(self) -> int:
     return len(self._running_requests) + len(self._pending_requests)
 
+  def _schedule_requests(self) -> None:
+    """Schedules requests from the running and pending queues."""
+    requests = list(self._running_requests) + list(self._pending_requests)
+    new_running_requests = []
+    self._token_budget = self._config.max_num_batched_tokens
+
+    n_admitted_requests = 0
+    while (
+        n_admitted_requests < len(requests)
+        and len(new_running_requests) < self._config.max_num_seqs
+    ):
+      req = requests[n_admitted_requests]
+
+      scheduled = self._try_schedule_request(req, n_admitted_requests)
+      if not scheduled:
+        break
+
+      n_admitted_requests += 1
+      new_running_requests.append(req)
+
+    while len(self._running_requests) > n_admitted_requests:
+      self._preempt()
+
+    self._running_requests = collections.deque(new_running_requests)
+    self._pending_requests = collections.deque(requests[n_admitted_requests:])
+
+  def _try_schedule_request(
+      self,
+      req: request_lib.RequestState,
+      n_admitted_requests: int,
+  ) -> bool:
+    """Tries to schedule `req` for the next step."""
+    n_tokens_hit, computed_pages = self._get_prefix_hit(req)
+    is_decode, is_chunked_prefill, n_tokens_to_schedule, n_to_allocate = (
+        self._get_n_tokens_to_schedule(req, n_tokens_hit)
+    )
+
+    if n_tokens_to_schedule > self._token_budget:
+      return False
+
+    while True:
+      allocated = self._kv_cache_manager.allocate_slots(
+          req,
+          num_new_tokens=n_to_allocate,
+          new_computed_pages=computed_pages,
+      )
+
+      if allocated:
+        break
+
+      # If there was a request scheduled in the previous step, and it arrived
+      # after the current request, preempt it to free up KV cache slots.
+      can_preempt = len(self._running_requests) > 1 + n_admitted_requests
+      if can_preempt:
+        self._preempt()
+      else:
+        return False
+
+    self._token_budget -= n_tokens_to_schedule
+    req.is_decode = is_decode
+    req.is_chunked_prefill = is_chunked_prefill
+
+    req.status = request_lib.RequestStatus.RUNNING
+    req.num_computed_tokens += n_tokens_hit
+    return True
+
+  def _get_prefix_hit(
+      self, req: request_lib.RequestState
+  ) -> tuple[int, _PrefixMatch | None]:
+    """Syncs `req` with the KV cache, and returns its prefix-cache hit.
+
+    Args:
+      req: The request to look up a prefix-cache hit for.
+
+    Returns:
+      (n_tokens_hit, computed_pages), to be passed to `_allocate_slots`.
+    """
+    # The KV cache manager must advance its view of the request to the current
+    # token count.
+    self._kv_cache_manager.sync_request_state(req)
+    if req.num_computed_tokens > 0:
+      return 0, None
+
+    n_pages_hit, computed_pages = self._kv_cache_manager.get_computed_pages(req)
+    return n_pages_hit * self._kv_cache_manager.page_size, computed_pages
+
+  def _get_n_tokens_to_schedule(
+      self,
+      req: request_lib.RequestState,
+      n_tokens_hit: int,
+  ) -> tuple[bool, bool, int, int]:
+    """Returns (is_decode, is_chunked_prefill, n_tokens_to_schedule, n_to_allocate)."""
+
+    n_unprocessed = req.num_total_tokens - (
+        req.num_computed_tokens + n_tokens_hit
+    )
+
+    if n_unprocessed == 1:
+      is_decode = True
+      is_chunked_prefill = False
+      n_tokens_to_schedule = 1
+      n_to_allocate = self._config.num_scheduler_steps
+    elif n_unprocessed > self.chunked_prefill_length:
+      is_decode = False
+      is_chunked_prefill = True
+      n_tokens_to_schedule = self.chunked_prefill_length
+      n_to_allocate = self.chunked_prefill_length
+    else:
+      is_decode = False
+      is_chunked_prefill = False
+      n_tokens_to_schedule = n_unprocessed
+      n_to_allocate = n_unprocessed + self._config.num_scheduler_steps - 1
+
+    return is_decode, is_chunked_prefill, n_tokens_to_schedule, n_to_allocate
+
   def preempt_all(self) -> None:
     """Returns every running request to the pending queue."""
     while self._running_requests:
       self._preempt()
+    for req in self._pending_requests:
+      req.num_in_flight_tokens = 0
 
   def _preempt(self) -> None:
     """Moves the most recently admitted request to the front of pending."""
     req = self._running_requests.pop()
-    req.num_tokens_scheduled = 0
-    req.num_completed_tokens = 0
-    req.status = request_lib.RequestStatus.PENDING
-
     self._kv_cache_manager.release_request(req)
+
+    req.num_computed_tokens = 0
+    req.num_in_flight_tokens = 0
+    req.is_decode = False
+    req.is_chunked_prefill = False
+    req.status = request_lib.RequestStatus.PENDING
 
     self._pending_requests.appendleft(req)

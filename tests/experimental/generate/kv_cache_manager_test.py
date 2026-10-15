@@ -155,7 +155,7 @@ def _allocate_pages(
   """
   for _ in range(num_pages):
     assert mgr.allocate_slots(req, mgr.page_size)
-    req.num_completed_tokens += mgr.page_size
+    req.num_computed_tokens += mgr.page_size
 
 
 def _cache_pages(
@@ -582,6 +582,18 @@ class SyncRequestStateTest(parameterized.TestCase):
     mgr.sync_request_state(req)
     self.assertLen(mgr._request_to_prefix_hashes["r1"], 1)
 
+  def test_sync_request_state_with_in_flight_tokens_hashes_all_present_tokens(
+      self,
+  ):
+    mgr = _create_manager()
+    # 8 tokens in `token_ids` plus 1 in flight: the in-flight token is the
+    # withheld last token, so all 8 present tokens (2 full pages) are hashed.
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    req.num_computed_tokens = 8
+    req.num_in_flight_tokens = 1
+    mgr.sync_request_state(req)
+    self.assertLen(mgr._request_to_prefix_hashes["r1"], 2)
+
   def test_sync_request_state_hashes_every_full_page(self):
     mgr = _create_manager()
     # 20 tokens -> withholding the last token leaves 19, so 4 full pages.
@@ -608,7 +620,7 @@ class SyncRequestStateTest(parameterized.TestCase):
     # 9 tokens: withholding the last token leaves 2 full pages.
     req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(9)))
     mgr.allocate_slots(req, num_new_tokens=8)
-    req.num_completed_tokens = 8
+    req.num_computed_tokens = 8
 
     mgr.sync_request_state(req)
 
@@ -624,7 +636,7 @@ class SyncRequestStateTest(parameterized.TestCase):
     req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(13)))
     mgr.allocate_slots(req, num_new_tokens=8)
     # Only the first page is complete. The second is partially filled.
-    req.num_completed_tokens = 6
+    req.num_computed_tokens = 6
 
     mgr.sync_request_state(req)
 
@@ -647,7 +659,7 @@ class SyncRequestStateTest(parameterized.TestCase):
     req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(16)))
     _allocate_pages(mgr, req, num_pages=4)
 
-    req.num_completed_tokens = 12
+    req.num_computed_tokens = 12
     mgr.sync_request_state(req)
 
     # 12 tokens over a 4-token window leaves the first two pages behind. They
@@ -670,7 +682,7 @@ class GetComputedPagesTest(parameterized.TestCase):
     mgr = _create_manager()
     req1 = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(12)))
     mgr.allocate_slots(req1, num_new_tokens=12)
-    req1.num_completed_tokens = 12
+    req1.num_computed_tokens = 12
     mgr.sync_request_state(req1)
     mgr.release_request(req1)
 
@@ -696,7 +708,7 @@ class GetComputedPagesTest(parameterized.TestCase):
     first = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
     mgr.sync_request_state(first)
     mgr.allocate_slots(first, num_new_tokens=8)
-    first.num_completed_tokens = 8
+    first.num_computed_tokens = 8
     mgr.sync_request_state(first)
 
     # The same prompt would be a full prefix hit if caching were enabled.
@@ -831,7 +843,7 @@ class AllocateSlotsTest(parameterized.TestCase):
     mgr = _create_manager()
     req1 = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(12)))
     mgr.allocate_slots(req1, num_new_tokens=12)
-    req1.num_completed_tokens = 12
+    req1.num_computed_tokens = 12
     mgr.sync_request_state(req1)
     mgr.release_request(req1)
 
@@ -886,14 +898,14 @@ class AllocateSlotsTest(parameterized.TestCase):
     self.assertTrue(mgr.allocate_slots(req, num_new_tokens=6))
     prefill_page_idxs = mgr.get_page_idxs(req)["cache_0"]
     self.assertLen(prefill_page_idxs, 2)
-    req.num_completed_tokens = 6
+    req.num_computed_tokens = 6
 
     # Step 2: 2 more tokens fit in the partially filled page, so no new page is
     # allocated.
     self.assertTrue(mgr.allocate_slots(req, num_new_tokens=2))
     self.assertEqual(mgr.get_page_idxs(req)["cache_0"], prefill_page_idxs)
     self.assertEqual(group._page_manager.num_free_device_pages, 8)
-    req.num_completed_tokens = 8
+    req.num_computed_tokens = 8
 
     # Step 3: Both pages are full, so 1 more token crosses the page boundary
     # and allocates a new page after the existing ones.
@@ -911,10 +923,10 @@ class AllocateSlotsTest(parameterized.TestCase):
     self.assertTrue(mgr.allocate_slots(req, num_new_tokens=8))
     page_idxs = mgr.get_page_idxs(req)["cache_0"]
     self.assertLen(page_idxs, 2)
-    req.num_completed_tokens = 8
+    req.num_computed_tokens = 8
 
     # Both pages are full, so the next token needs a third page, which does
-    # not exist. This is only detected if `num_completed_tokens` is forwarded.
+    # not exist. This is only detected if `num_computed_tokens` is forwarded.
     self.assertFalse(mgr.allocate_slots(req, num_new_tokens=1))
     self.assertEqual(mgr.get_page_idxs(req)["cache_0"], page_idxs)
     self.assertEqual(group._page_manager.num_free_device_pages, 0)
@@ -957,10 +969,10 @@ class ReleaseRequestTest(parameterized.TestCase):
     req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(13)))
     # The local group cannot allocate more than its window in a single step.
     mgr.allocate_slots(req, num_new_tokens=8)
-    req.num_completed_tokens = 8
+    req.num_computed_tokens = 8
     mgr.allocate_slots(req, num_new_tokens=4)
     # The filled pages must be cached when the request is released.
-    req.num_completed_tokens = 12
+    req.num_computed_tokens = 12
 
     mgr.release_request(req)
 

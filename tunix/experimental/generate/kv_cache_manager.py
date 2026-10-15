@@ -389,6 +389,7 @@ class KVCacheManager:
     Args:
         req: The request to sync the internal state for.
     """
+    num_computed = req.num_computed_tokens - req.num_in_flight_tokens
     completed_page_hashes: list[int] = []
     if self._enable_prefix_caching:
       page_hashes = self._request_to_prefix_hashes.setdefault(
@@ -399,16 +400,16 @@ class KVCacheManager:
       # Withhold the last token from hashing so that it is not hit in the
       # cache. Otherwise, 0-len prefills may occur if all tokens are stored in
       # the cache.
-      unhashed_tokens = req.token_ids[n_hashed_tokens:-1]
+      unhashed_tokens = req.token_ids[n_hashed_tokens : req.num_total_tokens - 1]
       last_page_hash = page_hashes[-1] if page_hashes else 0
       page_hashes.extend(self._chunk_and_hash(unhashed_tokens, last_page_hash))
 
-      num_completed_pages = req.num_completed_tokens // self._page_size
+      num_completed_pages = num_computed // self._page_size
       completed_page_hashes = page_hashes[:num_completed_pages]
 
     for manager in self._kv_cache_group_managers:
       manager.sync_request_state(
-          req.request_id, completed_page_hashes, req.num_completed_tokens
+          req.request_id, completed_page_hashes, num_computed
       )
 
   def get_computed_pages(
@@ -479,7 +480,7 @@ class KVCacheManager:
     )
     if not all(
         manager.has_sufficient_space(
-            req.request_id, num_new_tokens, req.num_completed_tokens, pages
+            req.request_id, num_new_tokens, req.num_computed_tokens, pages
         )
         for manager, pages in managers_and_pages
     ):
@@ -487,7 +488,7 @@ class KVCacheManager:
 
     for manager, pages in managers_and_pages:
       manager.allocate_slots(
-          req.request_id, num_new_tokens, req.num_completed_tokens, pages
+          req.request_id, num_new_tokens, req.num_computed_tokens, pages
       )
     return True
 

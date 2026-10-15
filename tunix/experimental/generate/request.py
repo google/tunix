@@ -44,13 +44,22 @@ class RequestState:
     self._request_id = req_id
     # The prompt tokens followed by any tokens generated so far.
     self.token_ids = list(prompt_token_ids)
-    # Number of leading tokens in `token_ids` whose KV cache entries have been
-    # computed.
-    self.num_completed_tokens = 0
-    # Number of tokens scheduled as input to the model runner step.
-    self.num_tokens_scheduled = 0
+    # Number of tokens whose KV cache is computed. This includes tokens that
+    # were speculatively scheduled and are in flight.
+    self.num_computed_tokens = 0
+    # Number of tokens being sampled by an in-flight model runner step.
+    self.num_in_flight_tokens = 0
+    # Whether the request is scheduled as a decode step.
+    self.is_decode = False
+    # Whether the request is scheduled as a chunked prefill step.
+    self.is_chunked_prefill = False
 
     self.status = RequestStatus.PENDING
+
+  @property
+  def num_total_tokens(self) -> int:
+    """Total tokens including any tokens being sampled in flight."""
+    return len(self.token_ids) + self.num_in_flight_tokens
 
   @property
   def request_id(self) -> str:
