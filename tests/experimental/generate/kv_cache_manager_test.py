@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import os
 
 from absl.testing import absltest
@@ -47,6 +48,7 @@ def _create_cache_config(
     num_kv_heads: int = 2,
     head_dim: int = 16,
     mesh: jax.sharding.Mesh | None = None,
+    enable_prefix_caching: bool = True,
 ) -> kv_cache_manager.CacheConfig:
   bytes_per_cache_page = page_size * (2 * num_kv_heads) * head_dim * 4
   total_bytes_per_page = bytes_per_cache_page * num_caches
@@ -56,6 +58,7 @@ def _create_cache_config(
       max_device_bytes=total_bytes_per_page * num_device_pages,
       max_host_bytes=total_bytes_per_page * num_host_pages,
       page_size=page_size,
+      enable_prefix_caching=enable_prefix_caching,
       dtype=jnp.float32,
       dp_axis=dp_axis,
       tp_axis=tp_axis,
@@ -102,6 +105,7 @@ def _create_two_group_manager(
     page_size: int = 4,
     num_device_pages: int = 10,
     window_size: int = 8,
+    enable_prefix_caching: bool = True,
 ) -> tuple[
     kv_cache_manager.KVCacheManager,
     single_type_kv_cache_manager.SingleTypeKVCacheManager,
@@ -113,6 +117,7 @@ def _create_two_group_manager(
     page_size: The number of tokens per page.
     num_device_pages: The number of device pages in each group.
     window_size: The sliding window size of the local attention group.
+    enable_prefix_caching: Whether prefix caching is enabled.
 
   Returns:
     The manager, its full attention group (cache_0, cache_1) and its local
@@ -127,9 +132,57 @@ def _create_two_group_manager(
       },
       page_size=page_size,
       num_device_pages=num_device_pages,
+      enable_prefix_caching=enable_prefix_caching,
   )
   full, local = mgr._kv_cache_group_managers
   return mgr, full, local
+
+
+def _allocate_pages(
+    mgr: kv_cache_manager.KVCacheManager,
+    req: request_lib.RequestState,
+    num_pages: int,
+):
+  """Allocates and completes `num_pages` pages, one page per step.
+
+  Local attention groups cannot allocate more than the window size of tokens in
+  a single step.
+
+  Args:
+    mgr: The manager to allocate pages in.
+    req: The request to allocate pages for.
+    num_pages: The number of pages to allocate.
+  """
+  for _ in range(num_pages):
+    assert mgr.allocate_slots(req, mgr.page_size)
+    req.num_completed_tokens += mgr.page_size
+
+
+def _cache_pages(
+    mgr: kv_cache_manager.KVCacheManager,
+    group_page_hashes: Sequence[Sequence[int]],
+):
+  """Caches pages with the given hashes in each group, then releases them.
+
+  Args:
+    mgr: The manager to cache pages in.
+    group_page_hashes: The page hashes to cache in each group.
+  """
+  num_pages = max(len(h) for h in group_page_hashes)
+  req = request_lib.RequestState(
+      req_id="setup", prompt_token_ids=[0] * num_pages * mgr.page_size
+  )
+  _allocate_pages(mgr, req, num_pages)
+  for manager, page_hashes in zip(
+      mgr._kv_cache_group_managers, group_page_hashes
+  ):
+    manager.sync_request_state(
+        req.request_id, page_hashes, len(page_hashes) * mgr.page_size
+    )
+  # Release through the groups directly. `KVCacheManager.release_request` syncs
+  # first, which would re-hash the pages with their real token hashes.
+  for manager in mgr._kv_cache_group_managers:
+    manager.release_request(req.request_id)
 
 
 class CacheConfigTest(parameterized.TestCase):
@@ -515,6 +568,233 @@ class KVCacheManagerInitTest(parameterized.TestCase):
       )
 
 
+class SyncRequestStateTest(parameterized.TestCase):
+
+  def test_chunk_and_hash(self):
+    mgr = _create_manager()
+    hashes = mgr._chunk_and_hash(list(range(10)))
+    self.assertLen(hashes, 2)  # 10 tokens -> 2 full pages of 4.
+
+  def test_sync_request_state_withholds_last_token(self):
+    mgr = _create_manager()
+    # 8 tokens: withholding the last token leaves 7, so only 1 full page.
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    mgr.sync_request_state(req)
+    self.assertLen(mgr._request_to_prefix_hashes["r1"], 1)
+
+  def test_sync_request_state_hashes_every_full_page(self):
+    mgr = _create_manager()
+    # 20 tokens -> withholding the last token leaves 19, so 4 full pages.
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(20)))
+    mgr.sync_request_state(req)
+    self.assertLen(mgr._request_to_prefix_hashes["r1"], 4)
+
+  def test_sync_request_state_hashes_incrementally(self):
+    mgr = _create_manager()
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(9)))
+    mgr.sync_request_state(req)
+    first_hashes = list(mgr._request_to_prefix_hashes["r1"])
+
+    req.token_ids = req.token_ids + list(range(9, 13))
+    mgr.sync_request_state(req)
+
+    self.assertEqual(
+        mgr._request_to_prefix_hashes["r1"],
+        first_hashes + mgr._chunk_and_hash(list(range(8, 12)), first_hashes[-1]),
+    )
+
+  def test_sync_request_state_caches_pages_in_every_group(self):
+    mgr, full, local = _create_two_group_manager(page_size=4)
+    # 9 tokens: withholding the last token leaves 2 full pages.
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(9)))
+    mgr.allocate_slots(req, num_new_tokens=8)
+    req.num_completed_tokens = 8
+
+    mgr.sync_request_state(req)
+
+    page_hashes = mgr._request_to_prefix_hashes["r1"]
+    self.assertLen(page_hashes, 2)
+    for manager in (full, local):
+      for h in page_hashes:
+        self.assertIn(h, manager._prefix_hash_to_page)
+
+  def test_sync_request_state_does_not_cache_incomplete_pages(self):
+    mgr, full, local = _create_two_group_manager(page_size=4)
+    # 13 tokens: withholding the last token leaves 3 full pages to hash.
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(13)))
+    mgr.allocate_slots(req, num_new_tokens=8)
+    # Only the first page is complete. The second is partially filled.
+    req.num_completed_tokens = 6
+
+    mgr.sync_request_state(req)
+
+    page_hashes = mgr._request_to_prefix_hashes["r1"]
+    self.assertLen(page_hashes, 3)
+    for manager in (full, local):
+      self.assertIn(page_hashes[0], manager._prefix_hash_to_page)
+      for h in page_hashes[1:]:
+        self.assertNotIn(h, manager._prefix_hash_to_page)
+      partial_page = manager._request_to_pages["r1"][1]
+      assert partial_page is not None
+      self.assertIsNone(partial_page.prefix_hash)
+
+  def test_sync_request_state_releases_out_of_window_without_caching(self):
+    # Registering pages is not the only thing a sync does, so turning the
+    # prefix cache off must not stop out-of-window pages being reclaimed.
+    mgr = _create_manager(
+        cache_to_window_size={"cache_0": 4}, enable_prefix_caching=False
+    )
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(16)))
+    _allocate_pages(mgr, req, num_pages=4)
+
+    req.num_completed_tokens = 12
+    mgr.sync_request_state(req)
+
+    # 12 tokens over a 4-token window leaves the first two pages behind. They
+    # keep their slots, reported as -1 rather than dropped, so the indices stay
+    # aligned with the request's page positions.
+    page_idxs = mgr.get_page_idxs(req)["cache_0"]
+    self.assertLen(page_idxs, 4)
+    self.assertEqual(list(page_idxs[:2]), [-1, -1])
+    self.assertNotIn(-1, page_idxs[2:])
+
+
+class GetComputedPagesTest(parameterized.TestCase):
+
+  def test_get_computed_pages_without_sync_returns_zero(self):
+    mgr = _create_manager()
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    self.assertEqual(mgr.get_computed_pages(req), (0, ((),)))
+
+  def test_get_computed_pages_hits_cached_prefix(self):
+    mgr = _create_manager()
+    req1 = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(12)))
+    mgr.allocate_slots(req1, num_new_tokens=12)
+    req1.num_completed_tokens = 12
+    mgr.sync_request_state(req1)
+    mgr.release_request(req1)
+
+    req2 = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(12)))
+    mgr.sync_request_state(req2)
+    n_hit, computed_pages = mgr.get_computed_pages(req2)
+
+    # 12 tokens -> withholding the last token leaves 2 full pages.
+    self.assertEqual(n_hit, 2)
+    self.assertLen(computed_pages[0], 2)
+
+  def test_prefix_caching_disabled_hashes_nothing(self):
+    mgr = _create_manager(enable_prefix_caching=False)
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(20)))
+
+    mgr.sync_request_state(req)
+
+    self.assertEqual(mgr.get_computed_pages(req), (0, ((),)))
+    self.assertEmpty(mgr._request_to_prefix_hashes)
+
+  def test_prefix_caching_disabled_never_hits(self):
+    mgr = _create_manager(enable_prefix_caching=False)
+    first = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    mgr.sync_request_state(first)
+    mgr.allocate_slots(first, num_new_tokens=8)
+    first.num_completed_tokens = 8
+    mgr.sync_request_state(first)
+
+    # The same prompt would be a full prefix hit if caching were enabled.
+    second = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(8)))
+    mgr.sync_request_state(second)
+    self.assertEqual(mgr.get_computed_pages(second), (0, ((),)))
+
+
+class FindLongestCacheHitTest(parameterized.TestCase):
+  """Tests reconciling prefix cache hits across groups."""
+
+  def test_empty_hashes(self):
+    mgr, _, _ = _create_two_group_manager()
+    self.assertEqual(mgr._find_longest_cache_hit([]), (0, ((), ())))
+
+  def test_empty_cache(self):
+    mgr, _, _ = _create_two_group_manager()
+    self.assertEqual(mgr._find_longest_cache_hit([100, 101]), (0, ((), ())))
+
+  def test_all_groups_hit_identical_prefix(self):
+    # The local group's window (8 tokens, 2 pages) covers pages 1..2.
+    mgr, full, local = _create_two_group_manager(page_size=4)
+    _cache_pages(mgr, [[10, 20, 30], [10, 20, 30]])
+
+    hit_count, hit_pages = mgr._find_longest_cache_hit([10, 20, 30, 40])
+
+    self.assertEqual(hit_count, 3)
+    self.assertEqual(
+        hit_pages,
+        (
+            tuple(full._prefix_hash_to_page[h] for h in (10, 20, 30)),
+            (None,) + tuple(local._prefix_hash_to_page[h] for h in (20, 30)),
+        ),
+    )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="full_longer",
+          group_page_hashes=[[10, 20, 30], [10, 20]],
+      ),
+      dict(
+          testcase_name="local_longer",
+          group_page_hashes=[[10, 20], [10, 20, 30]],
+      ),
+  )
+  def test_reconciles_to_shortest_hit(self, group_page_hashes):
+    mgr, full, local = _create_two_group_manager(page_size=4)
+    _cache_pages(mgr, group_page_hashes)
+
+    hit_count, hit_pages = mgr._find_longest_cache_hit([10, 20, 30])
+
+    self.assertEqual(hit_count, 2)
+    self.assertEqual(
+        hit_pages,
+        (
+            tuple(full._prefix_hash_to_page[h] for h in (10, 20)),
+            tuple(local._prefix_hash_to_page[h] for h in (10, 20)),
+        ),
+    )
+
+  def test_one_group_misses(self):
+    mgr, _, _ = _create_two_group_manager(page_size=4)
+    _cache_pages(mgr, [[10, 20], []])
+
+    self.assertEqual(mgr._find_longest_cache_hit([10, 20]), (0, ((), ())))
+
+  def test_requeries_groups_after_truncation(self):
+    # The local group's window (2 pages) initially covers pages 3..4, which
+    # are cached. After truncating to the full group's 4 page hit, the window
+    # covers pages 2..3, and page 2 misses.
+    mgr, _, local = _create_two_group_manager(page_size=4, window_size=8)
+    _cache_pages(mgr, [[10, 20, 30, 40], [10, 20, 30, 40, 50]])
+    local._free_pages([local._prefix_hash_to_page[h] for h in (10, 20, 30)])
+
+    self.assertLen(local.find_longest_cache_hit([10, 20, 30, 40, 50]), 5)
+    self.assertEqual(
+        mgr._find_longest_cache_hit([10, 20, 30, 40, 50]), (0, ((), ()))
+    )
+
+  def test_local_attention_out_of_window_returns_none_entries(self):
+    # The local group's window (8 tokens, 2 pages) covers pages 2..3.
+    mgr, full, local = _create_two_group_manager(page_size=4, window_size=8)
+    _cache_pages(mgr, [[10, 20, 30, 40], [10, 20, 30, 40]])
+    local._free_pages([local._prefix_hash_to_page[10]])
+
+    hit_count, hit_pages = mgr._find_longest_cache_hit([10, 20, 30, 40])
+
+    self.assertEqual(hit_count, 4)
+    self.assertEqual(
+        hit_pages[0],
+        tuple(full._prefix_hash_to_page[h] for h in (10, 20, 30, 40)),
+    )
+    self.assertEqual(
+        hit_pages[1],
+        (None, None) + tuple(local._prefix_hash_to_page[h] for h in (30, 40)),
+    )
+
+
 class AllocateSlotsTest(parameterized.TestCase):
 
   def test_allocate_slots_success(self):
@@ -546,6 +826,42 @@ class AllocateSlotsTest(parameterized.TestCase):
     req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
     with self.assertRaisesRegex(ValueError, r"returned by get_computed_pages"):
       mgr.allocate_slots(req, num_new_tokens=8, new_computed_pages=((),))
+
+  def test_allocate_slots_with_cached_prefix(self):
+    mgr = _create_manager()
+    req1 = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(12)))
+    mgr.allocate_slots(req1, num_new_tokens=12)
+    req1.num_completed_tokens = 12
+    mgr.sync_request_state(req1)
+    mgr.release_request(req1)
+
+    req2 = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(12)))
+    mgr.sync_request_state(req2)
+    n_hit, computed_pages = mgr.get_computed_pages(req2)
+    self.assertGreater(n_hit, 0)
+    self.assertTrue(
+        mgr.allocate_slots(
+            req2, num_new_tokens=4, new_computed_pages=computed_pages
+        )
+    )
+
+  def test_allocate_slots_binds_computed_pages_in_every_group(self):
+    mgr, full, local = _create_two_group_manager(page_size=4)
+    _cache_pages(mgr, [[201], [201]])
+    _, computed_pages = mgr._find_longest_cache_hit([201])
+
+    req = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(8)))
+    self.assertTrue(
+        mgr.allocate_slots(
+            req, num_new_tokens=4, new_computed_pages=computed_pages
+        )
+    )
+
+    for manager in (full, local):
+      cached_page = manager._prefix_hash_to_page[201]
+      self.assertLen(manager._request_to_pages["r2"], 2)
+      self.assertIs(manager._request_to_pages["r2"][0], cached_page)
+      self.assertEqual(cached_page.ref_count, 1)
 
   def test_allocate_slots_insufficient_space_in_one_group_allocates_none(self):
     mgr, full, local = _create_two_group_manager(
@@ -626,6 +942,43 @@ class ReleaseRequestTest(parameterized.TestCase):
     mgr.release_request(req)
     mgr.release_request(req)
 
+  def test_release_request_evicts_prefix_hashes(self):
+    mgr = _create_manager()
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    mgr.sync_request_state(req)
+    self.assertIn("r1", mgr._request_to_prefix_hashes)
+
+    mgr.release_request(req)
+    self.assertNotIn("r1", mgr._request_to_prefix_hashes)
+
+  def test_release_request_caches_pages_before_releasing(self):
+    mgr, full, local = _create_two_group_manager(page_size=4)
+    # 13 tokens: withholding the last token leaves 3 full pages.
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(13)))
+    # The local group cannot allocate more than its window in a single step.
+    mgr.allocate_slots(req, num_new_tokens=8)
+    req.num_completed_tokens = 8
+    mgr.allocate_slots(req, num_new_tokens=4)
+    # The filled pages must be cached when the request is released.
+    req.num_completed_tokens = 12
+
+    mgr.release_request(req)
+
+    page_hashes = mgr._chunk_and_hash(list(range(12)))
+    self.assertLen(page_hashes, 3)
+    for manager in (full, local):
+      # The released pages remain cached on the device.
+      for h in page_hashes:
+        self.assertIn(h, manager._prefix_hash_to_page)
+      self.assertLen(manager._unreferenced_device_pages, 3)
+      self.assertEqual(manager._page_manager.num_free_device_pages, 7)
+
+    # A request with the same prompt hits every released page.
+    req2 = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(13)))
+    mgr.sync_request_state(req2)
+    n_hit, _ = mgr.get_computed_pages(req2)
+    self.assertEqual(n_hit, 3)
+
   def test_reset_kv_caches_frees_all_pages(self):
     mgr, full, local = _create_two_group_manager(page_size=4)
     req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
@@ -635,6 +988,19 @@ class ReleaseRequestTest(parameterized.TestCase):
 
     for manager in (full, local):
       self.assertEmpty(manager._request_to_pages)
+      self.assertEqual(manager._page_manager.num_free_device_pages, 10)
+
+  def test_reset_kv_caches_clears_prefix_cache(self):
+    mgr, full, local = _create_two_group_manager(page_size=4)
+    _cache_pages(mgr, [[10, 20], [10, 20]])
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(9)))
+    mgr.sync_request_state(req)
+
+    mgr.reset_kv_caches()
+
+    self.assertEmpty(mgr._request_to_prefix_hashes)
+    for manager in (full, local):
+      self.assertEmpty(manager._prefix_hash_to_page)
       self.assertEqual(manager._page_manager.num_free_device_pages, 10)
 
 

@@ -57,6 +57,8 @@ class CacheConfig:
   max_host_bytes: int = 0
   # The number of tokens per page.
   page_size: int = 16
+  # Whether pages may be shared between requests with a common prefix.
+  enable_prefix_caching: bool = True
   # The data type of KV cache entries.
   dtype: jax.typing.DTypeLike
   # The mesh axis to shard pages across.
@@ -275,6 +277,8 @@ class KVCacheManager:
     self._cache_names = tuple(cache_geometries.keys())
 
     self._page_size = config.page_size
+    self._enable_prefix_caching = config.enable_prefix_caching
+    self._request_to_prefix_hashes: dict[str, list[int]] = {}
     self._kv_cache_group_managers = _create_kv_cache_group_managers(
         config, cache_geometries
     )
@@ -292,6 +296,60 @@ class KVCacheManager:
   def _null_computed_pages(self) -> tuple[tuple[Page | None, ...], ...]:
     """Returns the computed pages of a request with no prefix match."""
     return tuple(() for _ in self._kv_cache_group_managers)
+
+  def _chunk_and_hash(
+      self, tokens: Sequence[int], start_hash: int = 0
+  ) -> list[int]:
+    """Chunks tokens into pages and hashes them."""
+    hashes = []
+    parent_hash = start_hash
+    aligned_n_tokens = (len(tokens) // self._page_size) * self._page_size
+    # TODO(yatlas): Python hash is only 64 bits, so collisions are not
+    # negligible. This should be replaced with SHA256.
+    for i in range(0, aligned_n_tokens, self._page_size):
+      chunk = tuple(tokens[i : i + self._page_size])
+      parent_hash = hash((parent_hash, chunk))
+      hashes.append(parent_hash)
+    return hashes
+
+  def _find_longest_cache_hit(
+      self,
+      page_hashes: Sequence[int],
+  ) -> tuple[int, tuple[tuple[Page | None, ...], ...]]:
+    """Finds the longest prefix of `page_hashes` cached in every group.
+
+    Groups may hit different prefix lengths. Each round truncates the hashes to
+    the shortest hit, and queries the groups again, until they agree. Groups
+    must be requeried since a local attention group may miss on a shorter
+    prefix, as the window covers different pages.
+
+    Args:
+      page_hashes: The prefix hashes of the request's full pages.
+
+    Returns:
+      A tuple of
+        - The number of computed pages, common to all groups.
+        - The computed pages of each group. Entries are `None` for pages
+          outside a group's active window.
+    """
+    if not self._enable_prefix_caching:
+      return 0, self._null_computed_pages
+
+    if not page_hashes:
+      return 0, self._null_computed_pages
+
+    while True:
+      hits = [
+          manager.find_longest_cache_hit(page_hashes)
+          for manager in self._kv_cache_group_managers
+      ]
+      min_n_hit = min(len(h) for h in hits)
+      max_n_hit = max(len(h) for h in hits)
+      if min_n_hit == max_n_hit:
+        prefix_match_len = min_n_hit
+        return prefix_match_len, tuple(tuple(h) for h in hits)
+
+      page_hashes = page_hashes[:min_n_hit]
 
   def get_page_idxs(
       self,
@@ -319,6 +377,63 @@ class KVCacheManager:
     for manager in self._kv_cache_group_managers:
       physical_pages.update(manager.get_physical_pages())
     return physical_pages
+
+  def sync_request_state(self, req: request_lib.RequestState) -> None:
+    """Advances the cache's view of a request to its current token count.
+
+    Registers the pages the request has filled since its last schedule, and
+    releases the ones that have fallen out of a sliding window.
+
+    Must be called before `get_computed_pages` or `allocate_slots`.
+
+    Args:
+        req: The request to sync the internal state for.
+    """
+    completed_page_hashes: list[int] = []
+    if self._enable_prefix_caching:
+      page_hashes = self._request_to_prefix_hashes.setdefault(
+          req.request_id, []
+      )
+      n_hashed_tokens = len(page_hashes) * self._page_size
+
+      # Withhold the last token from hashing so that it is not hit in the
+      # cache. Otherwise, 0-len prefills may occur if all tokens are stored in
+      # the cache.
+      unhashed_tokens = req.token_ids[n_hashed_tokens:-1]
+      last_page_hash = page_hashes[-1] if page_hashes else 0
+      page_hashes.extend(self._chunk_and_hash(unhashed_tokens, last_page_hash))
+
+      num_completed_pages = req.num_completed_tokens // self._page_size
+      completed_page_hashes = page_hashes[:num_completed_pages]
+
+    for manager in self._kv_cache_group_managers:
+      manager.sync_request_state(
+          req.request_id, completed_page_hashes, req.num_completed_tokens
+      )
+
+  def get_computed_pages(
+      self,
+      req: request_lib.RequestState,
+  ) -> tuple[int, tuple[tuple[Page | None, ...], ...]]:
+    """Returns the computed (prefix matched) pages for a request.
+
+    Looks the request's prompt up against the pages other requests have
+    already cached. `sync_request_state` must be called on a request before
+    this to ensure it has registered its hashable pages.
+
+    Args:
+        req: The request to get the computed pages for.
+
+    Returns:
+        A tuple containing:
+          - The number of computed pages.
+          - The computed pages, to be passed to `allocate_slots`.
+    """
+    if not self._enable_prefix_caching:
+      return 0, self._null_computed_pages
+
+    page_hashes = self._request_to_prefix_hashes.get(req.request_id, [])
+    return self._find_longest_cache_hit(page_hashes)
 
   def allocate_slots(
       self,
@@ -378,10 +493,16 @@ class KVCacheManager:
 
   def release_request(self, req: request_lib.RequestState) -> None:
     """Releases pages for a finished request."""
+    # Cache any outstanding pages before releasing the request.
+    self.sync_request_state(req)
+
     for manager in self._kv_cache_group_managers:
       manager.release_request(req.request_id)
+    self._request_to_prefix_hashes.pop(req.request_id, None)
 
-  def update_device_pool(self, new_pages: Mapping[str, jax.Array]) -> None:
+  def update_device_pool(
+      self, new_pages: dict[str, jax.Array]
+  ) -> None:
     """Updates the physical device pages."""
     unknown_caches = set(new_pages) - set(self._cache_names)
     if unknown_caches:
@@ -394,3 +515,4 @@ class KVCacheManager:
     """Releases all requests and frees all pages."""
     for manager in self._kv_cache_group_managers:
       manager.reset_kv_caches()
+    self._request_to_prefix_hashes.clear()
