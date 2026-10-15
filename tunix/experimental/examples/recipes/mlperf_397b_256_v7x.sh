@@ -57,7 +57,8 @@ export MAXTEXT_MODEL_NAME="qwen3.5-397b-a17b"
 # Topologies (128 chips / 256 devices Trainer 4x4x8, 16x 8-chip Rollout slices on TPU7x dynamic slicing)
 # Mesh product is DEVICES, and v7x has 2 devices/chip at ~95 GB each.
 # 4x4x8 = 128 chips = 256 devices.
-# Sharding: TP=1, FSDP=32, CP=4, EP=2, cp-as-ep.
+# Sharding: TP=1, FSDP=32, CP=4, EP=2, cp-as-ep (cp-as-ep-dense-no-cp with
+# TRAINER_TUNED_FLAGS=true, see below).
 # Mesh product: 32 * 1 * 2 * 4 = 256 devices.
 export TRAINER_JOBSET_YAML="${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}"
 export TRAINER_TPU_SLICE="${TRAINER_TPU_SLICE:-tpu7x:4x4x8}"
@@ -293,6 +294,14 @@ fi
 #   wi_tile_fwd_batch_seq, wi_tile_drhs_batch_seq, wo_tile_fwd_batch_seq,
 #   wo_tile_dlhs_batch_seq and wo_tile_drhs_batch_seq=512: row tiles of 512 for the five
 #     MoE GMMs with 1024 tiles. wi_tile_dlhs_batch_seq stays 256 next to its 2048 K tile.
+#   custom_mesh_and_rule=cp-as-ep-dense-no-cp (replacing cp-as-ep above): cp-as-ep with
+#     the dense weights (attention and shared-expert projections, the MoE router and the
+#     shared-expert gate) sharded over fsdp x expert (64-way) instead of fsdp x context x
+#     expert (256-way) and replicated over context, so their all-gathers run in four
+#     groups of 64 devices instead of one of 256. Their gradients are still
+#     reduce-scattered over all 256 devices, then all-gathered over context. The GDN
+#     projections, routed experts, embeddings and activations are sharded as under
+#     cp-as-ep.
 # These on the bench, regular micro-batch or s/step as above, 0 tokens dropped:
 #   moe_routing_index_math=count 10.022 -> 9.875 s (o275x-mf-cnt-prof),
 #     moe_unsplit_prefused_wi with two exact rewrites this block leaves off 10.022 ->
@@ -307,7 +316,15 @@ fi
 #     86.253 s/step (o275x-s6silu-l3-prof) and the five 512 tiles 86.364 s/step
 #     (o275x-s6t512-l3); gdn_conv1d_dense_token_stack 86.926 -> 85.731 s/step, same pod,
 #     against an arm whose one change is a no-op (o275x-s6n2-l3-prof ->
-#     o275x-s6gr-l3-prof).
+#     o275x-s6gr-l3-prof);
+#   custom_mesh_and_rule=cp-as-ep-dense-no-cp, on the code of
+#     AI-Hypercomputer/maxtext#5758 + AI-Hypercomputer/maxtext#5783 at this cell:
+#     82.111 to 82.269 s/step with cp-as-ep (four runs in three pods, mean 82.185;
+#     8.942 to 8.959 s) -> 81.261 and 81.245 s/step in two pods (o275x-l2-l3-prof;
+#     8.838 s), 3,629 and 3,630 tokens/s/chip. Its numerics runs in both pods pass
+#     all six gates (nxl2), with cp-as-ep's loss to the ten digits logged and the
+#     gradient norm within 1.4e-4 relative. In an AOT compile of that cell fwd_bwd
+#     takes 81.05 GiB of HBM (78.28 with cp-as-ep), under the runs' 84992 MiB budget.
 # The whole TRAINER_TUNED_FLAGS cell of mlperf_gbs1024_submission.sh (these keys, its
 # log-prob head and chunk size, padding first in packed rows, the staged step boundary):
 # 82.671 and 82.670 s/step in two pods (o275x-c9pfxhv-l3), against 106.30 s/step before
@@ -321,15 +338,17 @@ fi
 # Numerics (loss gates off, random advantages, three steps, against two reference runs
 # whose gradient norms differ by 1.9e-5 relative): all six gates pass (nxc9pfxhv).
 # moe_routing_maps and moe_gmm_v2_dlhs_transpose_rhs come from
-# AI-Hypercomputer/maxtext#5698, and moe_routing_index_math, moe_unsplit_prefused_wi,
+# AI-Hypercomputer/maxtext#5698, moe_routing_index_math, moe_unsplit_prefused_wi,
 # moe_roe_packed_routing_gather, moe_router_grad_from_wo_input, moe_wi_gmm_fused_swiglu,
 # gdn_conv1d_input_in_qkv_dtype and gdn_conv1d_dense_token_stack from the MaxText change
-# of AI-Hypercomputer/maxtext#5758 (on top of #5698). The MaxText pinned in
-# requirements/maxtext_requirements.txt (e526ea02) has none of these nine keys, and
-# MaxText refuses a key it does not define when the trainer starts, so
-# TRAINER_TUNED_FLAGS=true needs that pin moved to a MaxText with #5758.
+# of AI-Hypercomputer/maxtext#5758 (on top of #5698), and the cp-as-ep-dense-no-cp
+# rule from AI-Hypercomputer/maxtext#5783 (on top of #5758). The MaxText pinned in
+# requirements/maxtext_requirements.txt (e526ea02) has none of these nine keys and
+# not the rule, and MaxText refuses a key or rule it does not define when the trainer
+# starts, so TRAINER_TUNED_FLAGS=true needs that pin moved to a MaxText with both
+# changes.
 if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
-  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_strategy=all_gather sa_fuse_reciprocal=true gdn_cp_mode=seq gdn_cp_state=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true wi_tile_dlhs_mlp_dim=2048 decoder_layer_input=device moe_routing_maps=device moe_gmm_v2_dlhs_transpose_rhs=true moe_routing_index_math=count moe_unsplit_prefused_wi=true moe_roe_packed_routing_gather=true moe_router_grad_from_wo_input=true moe_wi_gmm_fused_swiglu=true gdn_conv1d_input_in_qkv_dtype=true gdn_conv1d_dense_token_stack=true wi_tile_fwd_batch_seq=512 wi_tile_drhs_batch_seq=512 wo_tile_fwd_batch_seq=512 wo_tile_dlhs_batch_seq=512 wo_tile_drhs_batch_seq=512"
+  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_strategy=all_gather sa_fuse_reciprocal=true gdn_cp_mode=seq gdn_cp_state=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true wi_tile_dlhs_mlp_dim=2048 decoder_layer_input=device moe_routing_maps=device moe_gmm_v2_dlhs_transpose_rhs=true moe_routing_index_math=count moe_unsplit_prefused_wi=true moe_roe_packed_routing_gather=true moe_router_grad_from_wo_input=true moe_wi_gmm_fused_swiglu=true gdn_conv1d_input_in_qkv_dtype=true gdn_conv1d_dense_token_stack=true wi_tile_fwd_batch_seq=512 wi_tile_drhs_batch_seq=512 wo_tile_fwd_batch_seq=512 wo_tile_dlhs_batch_seq=512 wo_tile_drhs_batch_seq=512 custom_mesh_and_rule=cp-as-ep-dense-no-cp"
 fi
 export DEBUG=${DEBUG:-0}
 
