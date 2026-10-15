@@ -222,17 +222,24 @@ fi
 # replace the values above.
 #   context_parallel_strategy=all_gather: attention all-gathers K/V over the context
 #     axis instead of passing it around a ring.
-#   sa_fuse_reciprocal=true, sa_use_base2_exp=false: Splash attention kernel options
-#     (SplashConfig fuse_reciprocal / use_base2_exp). These three keys alone, without
-#     the libtpu flag: 130.8 -> 127.5 s/step on the bench.
+#   sa_fuse_reciprocal=true: a Splash attention kernel option (SplashConfig
+#     fuse_reciprocal). With context_parallel_strategy=all_gather and
+#     sa_use_base2_exp=false, without the libtpu flag, on the bench: 130.8 -> 127.5
+#     s/step.
+#   sa_use_base2_exp stays at true (set above). The block set it to false until the
+#     bench measured the base-2 exponentials 0.025 s faster per micro-batch
+#     (o275x-gx-b2e); q * log2(e) is rounded in bf16, and its numerics run (nxgx-b2e)
+#     passes all six gates.
 #   gdn_cp_mode=seq: GDN context parallelism shards the sequence instead of the heads,
 #     which drops head mode's all-to-alls (MaxText's `auto` picks seq at context 4).
 #   gdn_cp_state=device: keeps seq mode's carries (conv halo, local transition, incoming
 #     state), so the backward does not replay the halo exchange and the first pass.
 #   moe_route stays at its default (remat). The bench image's MaxText tags nothing with
-#     it, so the moe_route=device of the measured runs changed nothing there. MaxText at
-#     this recipe's pin tags the ragged sort's integer routing results, where device
-#     would keep them on the chip at a memory cost no run has measured.
+#     it (it tags the routing arrays moe_routing_maps, below), and neither does
+#     AI-Hypercomputer/maxtext#5758, so the moe_route=device of the measured runs changed
+#     nothing there. MaxText at this recipe's pin tags the ragged sort's integer routing
+#     results with it, where device would keep them on the chip at a memory cost no run
+#     has measured.
 #   num_moe_token_chunks=2 comes from NUM_MOE_TOKEN_CHUNKS: the default here, and set by
 #     mlperf_gbs1024_submission.sh for its replay layout.
 # The keys above with two token chunks, on top of the libtpu flag (bench, same pod, with
@@ -241,8 +248,88 @@ fi
 #   cast_grads_after_all_reduce=true: all-reduce-only bf16 grads cast to f32 after it.
 # The two together (bench, same pod, the sharded log-prob head on in both arms):
 # 107.59 -> 106.24 s/step; grad_norm moved 1.5e-5 relative, less than a rerun (1.9e-5).
+#   wi_tile_dlhs_mlp_dim=2048: the K tile of wi's input-gradient GMM. The trainer fuses
+#     wi's gate and up weights (prefuse_moe_weights, on in mlperf_base.sh), so that
+#     contraction is 2048 wide, and a 1024 tile takes two K steps that each fetch the
+#     weight block again.
+#   decoder_layer_input=device: each decoder layer's input stays in HBM instead of being
+#     offloaded to host memory.
+#   moe_routing_maps=device: the backward reuses the forward's MoE routing maps (top-k
+#     expert ids, ragged-sort permutations, sorted token indices, group sizes) instead of
+#     running top-k and the sorts again. It saves values; it does not change them.
+#   moe_gmm_v2_dlhs_transpose_rhs=true: the input-gradient GMMs read the expert weights
+#     through the kernel's transpose_rhs instead of from a transposed copy of them.
+# These four on the bench, as the time of a regular micro-batch (a step has nine; the
+# median of micro-batches 3 to 9 over steps 1 to 4), with no token dropped in any arm:
+#   the tile alone, same pod: 10.773 -> 10.605 s (o275x-hd -> o275x-t2048, 106.3 -> 104.7
+#     s/step);
+#   decoder_layer_input=device alone, other pods: 10.754 -> 10.712 s (x3l -> x3dli, both
+#     with the staged step boundary: 98.3 -> 98.0 s/step);
+#   those two on top of the GDN change of AI-Hypercomputer/maxtext#5667, other pods:
+#     10.582 -> 10.319 s (o275x-t67 -> o275x-stk1a, 104.5 -> 102.1 s/step); against two
+#     reference runs the loss moved 4.6e-8 and grad_norm 3.9e-5 relative, a rerun 1.9e-5
+#     (nxstk1a-rp);
+#   on top of that, same pod: moe_routing_maps=device 10.319 -> 10.189 s (o275x-stk1a-a,
+#     102.1 -> 100.9 s/step) and moe_gmm_v2_dlhs_transpose_rhs=true 10.319 -> 10.195 s
+#     (o275x-stk1a-b, 102.1 -> 100.9 s/step).
+#   moe_routing_index_math=count: the ring-of-experts ragged sort builds its routing
+#     index maps with one sort of a packed key and by counting, instead of stable
+#     argsorts: the same maps.
+#   moe_unsplit_prefused_wi=true: the fused wi = [w0 | w1] stays whole up to the GEMM
+#     instead of being split at the layer's entry and joined again before it.
+#   moe_roe_packed_routing_gather=true: the layer routes its tokens once and all-gathers
+#     their routing weights and expert ids as one array, not twice per token chunk.
+#   moe_router_grad_from_wo_input=true: the down projection and the unsort run as one op
+#     whose backward takes the routing-weight gradient from the GEMM's input, so the
+#     rematerialized backward does not run the down-projection GEMM again.
+#   moe_wi_gmm_fused_swiglu=true: the wi GEMM applies the SwiGLU to its f32 accumulator
+#     in its epilogue, instead of a separate pass over its [rows, 2 * mlp] output.
+#   gdn_conv1d_input_in_qkv_dtype=true: the GDN Conv1D backward keeps its halo-extended
+#     input in qkv's dtype and casts each tap where it reads it, instead of writing an
+#     f32 copy of it.
+#   gdn_conv1d_dense_token_stack=true: the GDN forward kernel assembles its Conv1D output
+#     from dense per-token views, so the SiLU after it does not run on rows padded from 1
+#     to 8 sublanes.
+#   wi_tile_fwd_batch_seq, wi_tile_drhs_batch_seq, wo_tile_fwd_batch_seq,
+#   wo_tile_dlhs_batch_seq and wo_tile_drhs_batch_seq=512: row tiles of 512 for the five
+#     MoE GMMs with 1024 tiles. wi_tile_dlhs_batch_seq stays 256 next to its 2048 K tile.
+# These on the bench, regular micro-batch or s/step as above, 0 tokens dropped:
+#   moe_routing_index_math=count 10.022 -> 9.875 s (o275x-mf-cnt-prof),
+#     moe_unsplit_prefused_wi with two exact rewrites this block leaves off 10.022 ->
+#     9.852 s (o275x-mf-gb-prof) and moe_router_grad_from_wo_input 10.022 -> 9.765 s
+#     (o275x-mf-a14-prof), each against o275x-mf-ctl in the same pod;
+#     moe_roe_packed_routing_gather 9.938 s (o275x-mf-pra-prof) against 10.033 s in
+#     another pod (o275x-gdn-ctl);
+#   the five MoE keys together, same pod: 10.0445 -> 9.510 s (o275x-s5c-l3-prof ->
+#     o275x-s5moe5-l3-prof, 91.87 -> 87.04 s/step);
+#   gdn_conv1d_input_in_qkv_dtype alone: -0.050 s per micro-batch;
+#   then against o275x-s6c-l3 (86.970 s/step) in the same pod: moe_wi_gmm_fused_swiglu
+#     86.253 s/step (o275x-s6silu-l3-prof) and the five 512 tiles 86.364 s/step
+#     (o275x-s6t512-l3); gdn_conv1d_dense_token_stack 86.926 -> 85.731 s/step, same pod,
+#     against an arm whose one change is a no-op (o275x-s6n2-l3-prof ->
+#     o275x-s6gr-l3-prof).
+# The whole TRAINER_TUNED_FLAGS cell of mlperf_gbs1024_submission.sh (these keys, its
+# log-prob head and chunk size, padding first in packed rows, the staged step boundary):
+# 82.671 and 82.670 s/step in two pods (o275x-c9pfxhv-l3), against 106.30 s/step before
+# these keys, the fused head and padding first (o275x-hd, which also ran without the
+# staged step boundary; per regular micro-batch, which the boundary leaves alone, about
+# 10.77 -> 9.01 s). That build switched the MaxText changes with environment variables
+# and also hoisted attention's load-balancing permute, which neither MaxText PR has
+# (alone on the bench: 99.504 -> 99.267 s/step). The keys themselves, on the MaxText
+# change's own code without gdn_conv1d_dense_token_stack, the fused head and padding
+# first: 85.295 and 85.251 s/step (o275x-prc-l3-prof, o275x-prc-l3-r).
+# Numerics (loss gates off, random advantages, three steps, against two reference runs
+# whose gradient norms differ by 1.9e-5 relative): all six gates pass (nxc9pfxhv).
+# moe_routing_maps and moe_gmm_v2_dlhs_transpose_rhs come from
+# AI-Hypercomputer/maxtext#5698, and moe_routing_index_math, moe_unsplit_prefused_wi,
+# moe_roe_packed_routing_gather, moe_router_grad_from_wo_input, moe_wi_gmm_fused_swiglu,
+# gdn_conv1d_input_in_qkv_dtype and gdn_conv1d_dense_token_stack from the MaxText change
+# of AI-Hypercomputer/maxtext#5758 (on top of #5698). The MaxText pinned in
+# requirements/maxtext_requirements.txt (e526ea02) has none of these nine keys, and
+# MaxText refuses a key it does not define when the trainer starts, so
+# TRAINER_TUNED_FLAGS=true needs that pin moved to a MaxText with #5758.
 if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
-  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_strategy=all_gather sa_fuse_reciprocal=true sa_use_base2_exp=false gdn_cp_mode=seq gdn_cp_state=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true"
+  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_strategy=all_gather sa_fuse_reciprocal=true gdn_cp_mode=seq gdn_cp_state=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true wi_tile_dlhs_mlp_dim=2048 decoder_layer_input=device moe_routing_maps=device moe_gmm_v2_dlhs_transpose_rhs=true moe_routing_index_math=count moe_unsplit_prefused_wi=true moe_roe_packed_routing_gather=true moe_router_grad_from_wo_input=true moe_wi_gmm_fused_swiglu=true gdn_conv1d_input_in_qkv_dtype=true gdn_conv1d_dense_token_stack=true wi_tile_fwd_batch_seq=512 wi_tile_drhs_batch_seq=512 wo_tile_fwd_batch_seq=512 wo_tile_dlhs_batch_seq=512 wo_tile_drhs_batch_seq=512"
 fi
 export DEBUG=${DEBUG:-0}
 

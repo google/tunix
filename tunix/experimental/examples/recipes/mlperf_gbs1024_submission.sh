@@ -70,8 +70,13 @@ export ROLLOUT_ATTENTION_DP="${ROLLOUT_ATTENTION_DP:-false}"
 # (AI-Hypercomputer/maxtext#5701), the replay layout:
 #   RAGGED_BUFFER_FACTOR=2.75 with RETRY_WHEN_TOKENS_DROPPED=true, two MoE token
 #   chunks, REMAT_CONTEXT=device, MOE_EXCLUDE_PADDING=true (padding stays out of
-#   MoE routing), LOG_MOE_DROPS=true (per-micro-batch drop audit), and
-#   COMPUTE_LOGPS_CHUNK_SIZE=1024 (mlperf_base.sh's default is 512).
+#   MoE routing), LOG_MOE_DROPS=true (per-micro-batch drop audit),
+#   COMPUTE_LOGPS_CHUNK_SIZE=4096 (mlperf_base.sh's default is 512), and
+#   PACK_PAD_POSITION=start (each packed row's padding goes first, which evens the
+#   attention work of the context ranks under load-balanced context parallelism).
+# Log-prob chunks of 4096 were measured with the sharded log-prob head (below) only;
+# without it the log-prob program failed to compile on TPU at chunks of 2048 and
+# 4096, so TUNIX_LOGPS_SHARDED_HEAD=0 (or false, off, no) keeps chunks of 1024.
 # RAGGED_BUFFER_FACTOR=-1 keeps the fully dropless buffers instead: context
 # offload and four token chunks, without the replay, padding and audit flags.
 # The replay layout ran within an XLA HBM budget of 84992 MiB on the bench; the fully
@@ -82,10 +87,16 @@ export ROLLOUT_ATTENTION_DP="${ROLLOUT_ATTENTION_DP:-false}"
 # (FIRST_PHASE_RAGGED_BUFFER_FACTOR); with either, the layout keeps four chunks
 # and context offload, which the measured cell's memory does not cover.
 # TRAINER_TUNED_FLAGS=false renders the trainer as before (the fully dropless
-# buffers, chunks of 512).
+# buffers, chunks of 512, the "local" log-prob head, padding at the end of packed
+# rows).
 export TRAINER_TUNED_FLAGS="${TRAINER_TUNED_FLAGS:-true}"
 if [[ "${TRAINER_TUNED_FLAGS}" == "true" ]]; then
-  export COMPUTE_LOGPS_CHUNK_SIZE="${COMPUTE_LOGPS_CHUNK_SIZE:-1024}"
+  _logps_head="$(printf '%s' "${TUNIX_LOGPS_SHARDED_HEAD:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  case "${_logps_head}" in
+    0|false|off|no) export COMPUTE_LOGPS_CHUNK_SIZE="${COMPUTE_LOGPS_CHUNK_SIZE:-1024}" ;;
+  esac
+  export COMPUTE_LOGPS_CHUNK_SIZE="${COMPUTE_LOGPS_CHUNK_SIZE:-4096}"
+  export PACK_PAD_POSITION="${PACK_PAD_POSITION:-start}"
 fi
 export DROPLESS="${DROPLESS:-true}"
 case "${DROPLESS}" in
@@ -125,8 +136,11 @@ esac
 # the staged step boundary (--pipeline_step_boundary, --stage_next_microbatch),
 # measured on the RL trainer bench (AI-Hypercomputer/maxtext#5701). On in this
 # recipe only.
-#   TUNIX_LOGPS_SHARDED_HEAD=local: the trainer process computes log-probs with
-#     the sharded head (k8s_launcher.sh passes it to the trainer); 0 turns it off.
+#   TUNIX_LOGPS_SHARDED_HEAD=fused (TRAINER_TUNED_FLAGS=true) or local (false): the
+#     trainer process computes log-probs with the sharded head (k8s_launcher.sh
+#     passes it to the trainer); fused scores each chunk in one pass and, when only
+#     the log-probs are differentiated (GRPO), forms the logits' cotangent without a
+#     scatter. 0 turns the head off.
 #   PIPELINE_STEP_BOUNDARY=1, STAGE_NEXT_MICROBATCH=1: the orchestrator sends the
 #     next step's first micro-batch ahead of this step's bookkeeping, and stages it
 #     on the trainer before this step's deferred update. Staging needs
@@ -134,6 +148,9 @@ esac
 #     the boundary pipelined but unstaged. STAGE_NEXT_MICROBATCH follows
 #     PIPELINE_STEP_BOUNDARY unless set, so PIPELINE_STEP_BOUNDARY=false alone
 #     turns both off.
+if [[ "${TRAINER_TUNED_FLAGS}" == "true" ]]; then
+  export TUNIX_LOGPS_SHARDED_HEAD="${TUNIX_LOGPS_SHARDED_HEAD:-fused}"
+fi
 export TUNIX_LOGPS_SHARDED_HEAD="${TUNIX_LOGPS_SHARDED_HEAD:-local}"
 export PIPELINE_STEP_BOUNDARY="${PIPELINE_STEP_BOUNDARY:-1}"
 export STAGE_NEXT_MICROBATCH="${STAGE_NEXT_MICROBATCH:-${PIPELINE_STEP_BOUNDARY}}"

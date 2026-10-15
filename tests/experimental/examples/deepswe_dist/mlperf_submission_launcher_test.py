@@ -51,20 +51,63 @@ _MAXTEXT_DEFAULTS = {
     "cast_grads_after_all_reduce": "false",
     "gdn_cp_matmul_precision": "highest",
     "gdn_cp_state": "remat",
+    # Defaults in the MaxText of AI-Hypercomputer/maxtext#5698 and #5758; see
+    # _BENCH_MAXTEXT_KEYS.
+    "gdn_conv1d_dense_token_stack": "false",
+    "gdn_conv1d_input_in_qkv_dtype": "false",
+    "moe_gmm_v2_dlhs_transpose_rhs": "false",
+    "moe_roe_packed_routing_gather": "false",
+    "moe_router_grad_from_wo_input": "false",
+    "moe_routing_index_math": "sort",
+    "moe_routing_maps": "remat",
+    "moe_unsplit_prefused_wi": "false",
+    "moe_wi_gmm_fused_swiglu": "false",
 }
 _TUNED_KEYS = {
     "cast_grads_after_all_reduce": ("false", "true"),
     "context_parallel_strategy": ("ring", "all_gather"),
+    "decoder_layer_input": ("offload", "device"),
+    "gdn_conv1d_dense_token_stack": ("false", "true"),
+    "gdn_conv1d_input_in_qkv_dtype": ("false", "true"),
     "gdn_cp_matmul_precision": ("highest", "high"),
     "gdn_cp_mode": ("head", "seq"),
     "gdn_cp_state": ("remat", "device"),
+    "moe_gmm_v2_dlhs_transpose_rhs": ("false", "true"),
+    "moe_roe_packed_routing_gather": ("false", "true"),
+    "moe_router_grad_from_wo_input": ("false", "true"),
+    "moe_routing_index_math": ("sort", "count"),
+    "moe_routing_maps": ("remat", "device"),
+    "moe_unsplit_prefused_wi": ("false", "true"),
+    "moe_wi_gmm_fused_swiglu": ("false", "true"),
     "num_moe_token_chunks": ("4", "2"),
     "sa_fuse_reciprocal": ("false", "true"),
-    "sa_use_base2_exp": ("true", "false"),
+    "wi_tile_dlhs_mlp_dim": ("1024", "2048"),
+    "wi_tile_drhs_batch_seq": ("256", "512"),
+    "wi_tile_fwd_batch_seq": ("256", "512"),
+    "wo_tile_dlhs_batch_seq": ("256", "512"),
+    "wo_tile_drhs_batch_seq": ("256", "512"),
+    "wo_tile_fwd_batch_seq": ("256", "512"),
 }
+# Tuned keys that the MaxText in requirements/maxtext_requirements.txt
+# (e526ea02) does not define: two from AI-Hypercomputer/maxtext#5698 and seven
+# from AI-Hypercomputer/maxtext#5758, which is on top of it. MaxText refuses a
+# key it does not define when the trainer starts, so only
+# TRAINER_TUNED_FLAGS=true may pass them.
+_BENCH_MAXTEXT_KEYS = (
+    "gdn_conv1d_dense_token_stack",
+    "gdn_conv1d_input_in_qkv_dtype",
+    "moe_gmm_v2_dlhs_transpose_rhs",
+    "moe_roe_packed_routing_gather",
+    "moe_router_grad_from_wo_input",
+    "moe_routing_index_math",
+    "moe_routing_maps",
+    "moe_unsplit_prefused_wi",
+    "moe_wi_gmm_fused_swiglu",
+)
 # The launch whose trainer the RL trainer bench (AI-Hypercomputer/maxtext#5701)
 # measured TRAINER_TUNED_FLAGS on: the replay layout (buffer factor 2.75 with
-# the dropless replay), with context on device.
+# the dropless replay), with context on device, log-prob chunks of 4096 with
+# the fused log-prob head, and packed rows padded first.
 _BENCH_CELL = {
     "BATCH_SIZE": "72",
     "RAGGED_BUFFER_FACTOR": "2.75",
@@ -72,7 +115,9 @@ _BENCH_CELL = {
     "REMAT_CONTEXT": "device",
     "MOE_EXCLUDE_PADDING": "true",
     "LOG_MOE_DROPS": "true",
-    "COMPUTE_LOGPS_CHUNK_SIZE": "1024",
+    "COMPUTE_LOGPS_CHUNK_SIZE": "4096",
+    "TUNIX_LOGPS_SHARDED_HEAD": "fused",
+    "PACK_PAD_POSITION": "start",
 }
 
 
@@ -175,7 +220,13 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(flags["num_moe_token_chunks"], "2")
     self.assertEqual(flags["moe_exclude_padding_from_routing"], "true")
     self.assertEqual(flags["log_moe_drops"], "true")
-    self.assertIn("--compute_logps_chunk_size=1024 ", trainer)
+    # Base-2 exponentials stay on: the block no longer turns them off.
+    self.assertEqual(flags["sa_use_base2_exp"], "true")
+    self.assertIn("--compute_logps_chunk_size=4096 ", trainer)
+    self.assertRegex(trainer, r"\bTUNIX_LOGPS_SHARDED_HEAD=fused\b")
+    self.assertRegex(
+        _jobset(self.default, "orch"), r"--pack_pad_position=start\b"
+    )
     # The HBM budget reaches the trainer env, the Pathways workers and the
     # Pathways proxy (which compiles the trainer program).
     self.assertEqual(trainer.count(_HBM_CAP), 3)
@@ -363,35 +414,65 @@ class SubmissionLauncherTest(absltest.TestCase):
     ):
       _render(PIPELINE_STEP_BOUNDARY="false", STAGE_NEXT_MICROBATCH="true")
 
-  def test_packed_rows_pad_at_the_end_by_default(self):
+  def test_packed_rows_pad_first_with_the_tuned_flags(self):
     orch = _jobset(self.default, "orch")
+    self.assertRegex(orch, r"--pack_pad_position=start\b")
+    self.assertNotIn("--pack_pad_align", orch)
+    # An explicit value wins.
+    orch = _jobset(_render(PACK_PAD_POSITION="end"), "orch")
+    self.assertRegex(orch, r"--pack_pad_position=end\b")
+    self.assertNotIn("--pack_pad_position=start", orch)
+
+  def test_packed_rows_pad_at_the_end_without_the_tuned_flags(self):
+    orch = _jobset(self.default_off, "orch")
     self.assertNotIn("--pack_pad_position", orch)
     self.assertNotIn("--pack_pad_align", orch)
 
   def test_the_packed_row_pad_position_reaches_only_the_orchestrator(self):
-    render = _render(PACK_PAD_POSITION="start", PACK_PAD_ALIGN="8192")
+    render = _render(
+        TRAINER_TUNED_FLAGS="false", PACK_PAD_POSITION="start",
+        PACK_PAD_ALIGN="8192",
+    )
     orch = _jobset(render, "orch")
     self.assertRegex(orch, r"--pack_pad_position=start\b")
     self.assertRegex(orch, r"--pack_pad_align=8192\b")
     docs = render.split("\n---\n")
-    default_docs = self.default.split("\n---\n")
+    default_docs = self.default_off.split("\n---\n")
     self.assertLen(docs, len(default_docs))
     changed = [doc for doc, before in zip(docs, default_docs) if doc != before]
     self.assertEqual(changed, [orch])
 
   def test_the_sharded_log_prob_head_is_on_in_the_trainer_only(self):
     self.assertRegex(
-        _jobset(self.default, "train"), r"\bTUNIX_LOGPS_SHARDED_HEAD=local\b"
+        _jobset(self.default, "train"), r"\bTUNIX_LOGPS_SHARDED_HEAD=fused\b"
     )
     for suffix in ("orch", "roll-0"):
       self.assertNotIn(
           "TUNIX_LOGPS_SHARDED_HEAD", _jobset(self.default, suffix), suffix
       )
+    # TRAINER_TUNED_FLAGS=false keeps the "local" head; an explicit value wins.
+    off = _jobset(self.default_off, "train")
+    self.assertRegex(off, r"\bTUNIX_LOGPS_SHARDED_HEAD=local\b")
+    self.assertNotIn("TUNIX_LOGPS_SHARDED_HEAD=fused", off)
+    local = _jobset(_render(TUNIX_LOGPS_SHARDED_HEAD="local"), "train")
+    self.assertRegex(local, r"\bTUNIX_LOGPS_SHARDED_HEAD=local\b")
+    self.assertNotIn("TUNIX_LOGPS_SHARDED_HEAD=fused", local)
+    self.assertIn("--compute_logps_chunk_size=4096 ", local)
 
   def test_the_sharded_log_prob_head_can_be_turned_off(self):
-    trainer = _jobset(_render(TUNIX_LOGPS_SHARDED_HEAD="0"), "train")
-    self.assertRegex(trainer, r"\bTUNIX_LOGPS_SHARDED_HEAD=0\b")
-    self.assertNotIn("TUNIX_LOGPS_SHARDED_HEAD=local", trainer)
+    # Without the head, chunks of 4096 failed to compile on TPU: 1024 instead.
+    for value in ("0", "false", "OFF", "No"):
+      trainer = _jobset(_render(TUNIX_LOGPS_SHARDED_HEAD=value), "train")
+      self.assertRegex(trainer, rf"\bTUNIX_LOGPS_SHARDED_HEAD={value}\b")
+      self.assertNotIn("TUNIX_LOGPS_SHARDED_HEAD=local", trainer)
+      self.assertNotIn("TUNIX_LOGPS_SHARDED_HEAD=fused", trainer)
+      self.assertIn("--compute_logps_chunk_size=1024 ", trainer, value)
+    # An explicit chunk size still wins.
+    trainer = _jobset(
+        _render(TUNIX_LOGPS_SHARDED_HEAD="0", COMPUTE_LOGPS_CHUNK_SIZE="512"),
+        "train",
+    )
+    self.assertIn("--compute_logps_chunk_size=512 ", trainer)
 
   def test_start_up_flags_can_be_turned_off(self):
     orch = _jobset(
@@ -454,6 +535,8 @@ class SubmissionLauncherTest(absltest.TestCase):
         {key: off for key, (off, _) in _TUNED_KEYS.items()},
     )
     self.assertNotIn("offloading_copy_to_sparsecore", trainer)
+    for key in _BENCH_MAXTEXT_KEYS:
+      self.assertNotIn(key, flags)
     # The fully dropless buffers and chunks of 512, as before the switch.
     self.assertEqual(flags["ragged_buffer_factor"], "-1")
     self.assertEqual(flags["context"], "offload")
@@ -514,6 +597,8 @@ class SubmissionLauncherTest(absltest.TestCase):
       for key, (off, _) in _TUNED_KEYS.items():
         if key != "num_moe_token_chunks":  # two in these recipes either way
           self.assertEqual(_value(flags, key), off, f"{name}: {key}")
+      for key in _BENCH_MAXTEXT_KEYS:
+        self.assertNotIn(key, flags, name)
 
   def test_head_and_staging_are_off_in_the_other_397b_v7x_recipes(self):
     for name in (
@@ -526,6 +611,7 @@ class SubmissionLauncherTest(absltest.TestCase):
       orch = _jobset(render, "orch")
       self.assertIn("--no-pipeline_step_boundary", orch, name)
       self.assertIn("--no-stage_next_microbatch", orch, name)
+      self.assertNotIn("--pack_pad_position", orch, name)
 
   def test_trajectory_store_is_enabled_by_default(self):
     orch = _jobset(self.default, "orch")
