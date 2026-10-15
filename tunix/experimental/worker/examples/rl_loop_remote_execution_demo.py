@@ -29,6 +29,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
+from tunix.experimental.worker import task_pool
 
 
 class MockRolloutWorker(abstract_worker.Worker):
@@ -182,7 +183,7 @@ async def run_rl_training_loop(
     batch_size: int = 4,
 ) -> List[Dict[str, Any]]:
   """Runs a sample RL training loop using remote_execution and ActorPool."""
-  pool = remote_execution.RoutingActorPool(worker_addresses)
+  pool = task_pool.RoutingActorPool(worker_addresses)
   data_loader = random_prompt_loader(
       num_batches=num_epochs, batch_size=batch_size
   )

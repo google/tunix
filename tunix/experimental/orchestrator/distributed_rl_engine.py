@@ -38,6 +38,7 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.worker import remote_execution
+from tunix.experimental.worker import task_pool
 
 _summarize_list = logging_utils.summarize_list
 
@@ -85,10 +86,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       weight_sync_coordinator: Any = None,
   ):
     self._rollout_workers = list(rollout_workers)
-    self._rollout_pool = remote_execution.RoutingActorPool(
+    self._rollout_pool = task_pool.RoutingActorPool(
         self._rollout_workers
     )
-    self._rollout_session = remote_execution.PoolExecutionSession(
+    self._rollout_session = task_pool.PoolExecutionSession(
         self._rollout_pool
     )
     self._trainer_workers = dict(trainer_workers)
