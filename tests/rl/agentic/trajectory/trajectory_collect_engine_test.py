@@ -1383,12 +1383,25 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         policy_version=42,
     )
     with (
+        mock.patch.object(
+            store, 'add_step', wraps=store.add_step
+        ) as mock_add_step,
         mock.patch.object(store, 'flush', wraps=store.flush) as mock_flush,
         mock.patch.object(store, 'close', wraps=store.close) as mock_close,
     ):
-      asyncio.run(self._run_collect(engine, mode='Trajectory'))
+      traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
       mock_flush.assert_not_called()
       mock_close.assert_not_called()
+      self.assertEqual(
+          [call.args[0].step_id for call in mock_add_step.call_args_list],
+          [0, 1, 2, 3, 4, 4],
+      )
+      agent_step_writes = [
+          call.args[0]
+          for call in mock_add_step.call_args_list
+          if call.args[0].step_id in (1, 3)
+      ]
+      self.assertLen(agent_step_writes, 2)
 
     # Verify trajectory store contains the written steps via public API
     trajs = store.get_trajectories(['traj_test_123'])
@@ -1397,8 +1410,11 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertGreaterEqual(len(stored_traj.steps), 3)
     self.assertEqual(stored_traj.steps[0].step_id, 0)
     self.assertEqual(stored_traj.steps[0].message, 'Solve math')
-    self.assertEqual(stored_traj.steps[1].mc_return, 3.5)
-    self.assertEqual(stored_traj.steps[3].mc_return, 2.5)
+    rehydrated_traj = converter_lib.to_tunix_trajectory(stored_traj)
+    self.assertEqual(
+        [step.mc_return for step in rehydrated_traj.steps],
+        [step.mc_return for step in traj.steps],
+    )
     metas = store.get_trajectories_metadata()
     self.assertLen(metas, 1)
     self.assertEqual(metas[0].trajectory_id, 'traj_test_123')
@@ -1420,7 +1436,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         metadata=metadata,
         policy_version=42,
     )
-    asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
 
     for store in (store_file, store_sql):
       trajs = store.get_trajectories(['traj_dual_123'])
@@ -1429,8 +1445,11 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
       self.assertGreaterEqual(len(stored_traj.steps), 3)
       self.assertEqual(stored_traj.steps[0].step_id, 0)
       self.assertEqual(stored_traj.steps[0].message, 'Solve math')
-      self.assertEqual(stored_traj.steps[1].mc_return, 3.5)
-      self.assertEqual(stored_traj.steps[3].mc_return, 2.5)
+      rehydrated_traj = converter_lib.to_tunix_trajectory(stored_traj)
+      self.assertEqual(
+          [step.mc_return for step in rehydrated_traj.steps],
+          [step.mc_return for step in traj.steps],
+      )
       metas = store.get_trajectories_metadata()
       self.assertLen(metas, 1)
       self.assertEqual(metas[0].trajectory_id, 'traj_dual_123')
