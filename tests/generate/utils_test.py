@@ -149,6 +149,15 @@ class UtilsTest(parameterized.TestCase):
   def test_cdiv(self, a, b, expected):
     self.assertEqual(utils.cdiv(a, b), expected)
 
+  @parameterized.parameters(
+      (jnp.float32, 1),
+      (jnp.bfloat16, 2),
+      (jnp.int8, 4),
+      (jnp.int4, 8),
+  )
+  def test_get_dtype_packing(self, dtype, expected):
+    self.assertEqual(utils.get_dtype_packing(dtype), expected)
+
   def test_find_first_non_pad_idx(self):
     data = [
         ([1, 2, 3, 4, 5, 6], 0),

@@ -96,6 +96,11 @@ def cdiv(a: int, b: int) -> int:
   return -(-a // b)
 
 
+def get_dtype_packing(dtype: jax.typing.DTypeLike) -> int:
+  """Returns the number of elements of `dtype` packed into 32 bits."""
+  return max(1, 32 // jax.dtypes.itemsize_bits(dtype))
+
+
 def pad_to_length(
     x: np.ndarray,
     target_length: int,
