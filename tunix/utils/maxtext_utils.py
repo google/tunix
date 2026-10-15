@@ -43,6 +43,17 @@ class ProfilerOptions:
   upload_all_profiler_results: bool = False
 
 
+@dataclasses.dataclass(frozen=True)
+class AdamWOptions:
+  """AdamW hyperparameters that replace MaxText's base.yml defaults."""
+  b1: float
+  b2: float
+  eps: float
+  weight_decay: float
+  # Global-norm clipping threshold; 0 disables clipping.
+  gradient_clipping_threshold: float
+
+
 def maxtext_modules():
   """Imports MaxText lazily; some installs nest it under maxtext.src.maxtext."""
   from maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
@@ -137,6 +148,7 @@ def build_maxtext_config(
     prefuse_moe_weights: bool = False,
     use_weight_converter: bool = True,
     max_seq_token_per_tpu: int | None = 0,
+    adamw_options: AdamWOptions | None = None,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
@@ -383,6 +395,19 @@ def build_maxtext_config(
         "profiler=''",
         "profiler_steps=0",
         "skip_first_n_steps_for_profiler=-1",
+    ])
+
+  # Without options, MaxText trains with its base.yml optimizer defaults.
+  # opt_type is left at MaxText's default, adamw (callers validate the flag),
+  # so an M_OPT_TYPE env override of it still works.
+  if adamw_options is not None:
+    argv.extend([
+        f"adam_b1={adamw_options.b1}",
+        f"adam_b2={adamw_options.b2}",
+        f"adam_eps={adamw_options.eps}",
+        f"adam_weight_decay={adamw_options.weight_decay}",
+        "gradient_clipping_threshold="
+        f"{adamw_options.gradient_clipping_threshold}",
     ])
 
   argv.extend([

@@ -305,7 +305,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " (e.g. constant_schedule, warmup_cosine_decay_schedule). Empty"
           " keeps the constant --optimizer_learning_rate. Only applies to"
           " --trainer_backend=tunix; the maxtext backend builds its own"
-          " optimizer."
+          " learning-rate schedule."
       ),
   )
   parser.add_argument(
@@ -672,9 +672,66 @@ def _checkpoint_root_directory(args) -> str | None:
   return None
 
 
+def _maxtext_adamw_options(
+    args: argparse.Namespace,
+) -> maxtext_utils.AdamWOptions:
+  """Maps the `--optimizer_*` flags onto MaxText's AdamW configuration.
+
+  Only AdamW, optionally behind global-norm clipping, is mapped. Any other
+  optimizer or chained transformation fails here instead of silently training
+  with MaxText's defaults.
+
+  Args:
+    args: Parsed CLI namespace.
+
+  Returns:
+    The AdamW options for `maxtext_utils.build_maxtext_config`.
+
+  Raises:
+    ValueError: If the flags ask for an unmapped optimizer or chained
+      transformation, or clip without a positive max_norm.
+  """
+  hint = (
+      " For other MaxText optimizer settings, drop this flag and set them in"
+      ' MAXTEXT_EXTRA_FLAGS instead (e.g. MAXTEXT_EXTRA_FLAGS="opt_type=sgd").'
+  )
+  if args.optimizer_opt_type.lower() != "adamw":
+    raise ValueError(
+        f"--optimizer_opt_type={args.optimizer_opt_type} is not supported by"
+        " the maxtext backend, which maps only adamw." + hint
+    )
+  chain = args.optimizer_opt_chain_type
+  if not chain:
+    # Unchained, as in the tunix backend.
+    clipping_threshold = 0.0
+  elif chain.lower() == "clip_by_global_norm":
+    if "max_norm" not in args.optimizer_chain_kwargs:
+      raise ValueError(
+          f"--optimizer_opt_chain_type={chain} needs a max_norm in"
+          " --optimizer_chain_kwargs."
+      )
+    clipping_threshold = float(args.optimizer_chain_kwargs["max_norm"])
+    # MaxText reads 0 as "do not clip", where optax would zero every update.
+    if clipping_threshold <= 0:
+      raise ValueError(f"max_norm must be positive, got {clipping_threshold}.")
+  else:
+    raise ValueError(
+        f"--optimizer_opt_chain_type={chain} is not supported by the maxtext"
+        " backend, which maps only clip_by_global_norm." + hint
+    )
+  return maxtext_utils.AdamWOptions(
+      b1=args.optimizer_b1,
+      b2=args.optimizer_b2,
+      eps=args.optimizer_eps,
+      weight_decay=args.optimizer_weight_decay,
+      gradient_clipping_threshold=clipping_threshold,
+  )
+
+
 def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
   """Creates the trainer factory function and mesh for MaxText's MaxTextTrainingEngine."""
   logging.info("Trainer backend: MaxText's MaxTextTrainingEngine.")
+  adamw_options = _maxtext_adamw_options(args)
   pad_id = maxtext_utils.get_tokenizer_pad_id(
       args.model_id, args.tokenizer_path, args.model_dir
   )
@@ -683,8 +740,8 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
   if args.optimizer_schedule_type:
     logging.warning(
         "--optimizer_schedule_type=%s is ignored by the maxtext backend, which"
-        " builds its own optimizer from --optimizer_learning_rate and"
-        " --maxtext_warmup_steps_fraction.",
+        " builds its own learning-rate schedule from --optimizer_learning_rate"
+        " and --maxtext_warmup_steps_fraction.",
         args.optimizer_schedule_type,
     )
 
@@ -713,6 +770,7 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       max_response_length=args.max_response_length,
       learning_rate=args.optimizer_learning_rate,
       warmup_steps_fraction=args.maxtext_warmup_steps_fraction,
+      adamw_options=adamw_options,
       load_parameters_path=args.maxtext_ckpt_path,
       padded_moe_mlp_dim=args.maxtext_padded_moe_mlp_dim,
       base_output_directory=args.maxtext_output_directory,

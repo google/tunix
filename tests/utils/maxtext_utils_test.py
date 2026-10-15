@@ -17,6 +17,10 @@ from unittest import mock
 from absl.testing import absltest
 from tunix.utils import maxtext_utils
 
+# MaxText optimizer config keys. `AdamWOptions` sets all but opt_type, which
+# stays at MaxText's default (adamw) so env overrides of it keep working.
+_OPTIMIZER_KEYS = ("opt_type=", "adam_", "gradient_clipping_threshold=")
+
 
 class MaxTextUtilsTest(absltest.TestCase):
 
@@ -471,6 +475,32 @@ class MaxTextUtilsTest(absltest.TestCase):
       self._build_config_argv(
           max_seq_token_per_tpu=-1,
       )
+
+  def test_adamw_options_override_maxtext_optimizer_defaults(self):
+    argv = self._build_config_argv(
+        adamw_options=maxtext_utils.AdamWOptions(
+            b1=0.8,
+            b2=0.999,
+            eps=1e-6,
+            weight_decay=0.0,
+            gradient_clipping_threshold=0.125,
+        )
+    )
+    # Exactly once each: MaxText's CLI parsing keeps the last duplicate.
+    self.assertEqual(
+        [a for a in argv if a.startswith(_OPTIMIZER_KEYS)],
+        [
+            "adam_b1=0.8",
+            "adam_b2=0.999",
+            "adam_eps=1e-06",
+            "adam_weight_decay=0.0",
+            "gradient_clipping_threshold=0.125",
+        ],
+    )
+
+  def test_without_adamw_options_keeps_maxtext_optimizer_defaults(self):
+    argv = self._build_config_argv()
+    self.assertEmpty([a for a in argv if a.startswith(_OPTIMIZER_KEYS)])
 
   def test_checkpoint_save_interval_zero_keeps_restore_but_disables_saving(
       self,

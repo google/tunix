@@ -30,6 +30,7 @@ from tunix.experimental.examples.common import run_trainer_node
 from tunix.experimental.train import peft_trainer_v2
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker
+from tunix.utils import maxtext_utils
 
 
 class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
@@ -508,6 +509,88 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
             upload_all_profiler_results=True,
         ),
     )
+
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_plumbs_adamw_options(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    del mock_create_mesh, mock_get_pad_id  # Unused.
+    args = run_trainer_node._parse_args(["--optimizer_b2=0.98"])
+    run_trainer_node._create_maxtext_trainer_factory(args)
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs["adamw_options"],
+        maxtext_utils.AdamWOptions(
+            b1=0.9,
+            b2=0.98,
+            eps=1e-8,
+            weight_decay=0.0,
+            gradient_clipping_threshold=0.0,
+        ),
+    )
+
+  def test_maxtext_adamw_options_follow_optimizer_flags(self):
+    # Names are case-insensitive, as cli.config.create_optimizer reads them.
+    args = run_trainer_node._parse_args([
+        "--optimizer_opt_type=AdamW",
+        "--optimizer_b1=0.8",
+        "--optimizer_b2=0.98",
+        "--optimizer_eps=1e-6",
+        "--optimizer_weight_decay=0.05",
+        "--optimizer_opt_chain_type=CLIP_BY_GLOBAL_NORM",
+        "--optimizer_chain_kwargs={'max_norm': 0.125}",
+    ])
+    self.assertEqual(
+        run_trainer_node._maxtext_adamw_options(args),
+        maxtext_utils.AdamWOptions(
+            b1=0.8,
+            b2=0.98,
+            eps=1e-6,
+            weight_decay=0.05,
+            gradient_clipping_threshold=0.125,
+        ),
+    )
+
+  def test_maxtext_adamw_options_without_chain_disable_clipping(self):
+    # Like the tunix backend, an unchained optimizer does not clip; MaxText's
+    # own defaults (b2=0.95, weight_decay=0.1, clipping at 1.0) never apply.
+    options = run_trainer_node._maxtext_adamw_options(
+        run_trainer_node._parse_args([])
+    )
+    self.assertEqual(
+        (options.b2, options.weight_decay, options.gradient_clipping_threshold),
+        (0.999, 0.0, 0.0),
+    )
+
+  def test_maxtext_adamw_options_reject_unmapped_flags(self):
+    for argv, error in (
+        (["--optimizer_opt_type=sgd"], "maps only adamw.*MAXTEXT_EXTRA_FLAGS"),
+        (
+            ["--optimizer_opt_chain_type=clip"],
+            "maps only clip_by_global_norm.*MAXTEXT_EXTRA_FLAGS",
+        ),
+        (
+            ["--optimizer_opt_chain_type=clip_by_global_norm"],
+            "needs a max_norm",
+        ),
+        (
+            [
+                "--optimizer_opt_chain_type=clip_by_global_norm",
+                "--optimizer_chain_kwargs={'max_norm': 0}",
+            ],
+            "must be positive",
+        ),
+    ):
+      with self.subTest(argv=argv):
+        with self.assertRaisesRegex(ValueError, error):
+          run_trainer_node._maxtext_adamw_options(
+              run_trainer_node._parse_args(argv)
+          )
 
   @mock.patch.object(
       run_trainer_node,
