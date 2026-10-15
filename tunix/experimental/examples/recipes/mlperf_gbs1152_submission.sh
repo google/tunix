@@ -28,7 +28,7 @@ export OPENHANDS_MULTI_TOOL_CALLS="${OPENHANDS_MULTI_TOOL_CALLS:-true}"
 export WEIGHT_SYNC_PARALLEL_H2H="${WEIGHT_SYNC_PARALLEL_H2H:-1}"
 export VERIFY_WEIGHTS="${VERIFY_WEIGHTS:-false}"
 export DISABLE_TRAJECTORY_STORE="${DISABLE_TRAJECTORY_STORE:-false}"
-export BATCH_SIZE="${BATCH_SIZE:-64}"
+export BATCH_SIZE="${BATCH_SIZE:-72}"
 
 # Learning rate and gradient clip follow the global batch size when not set:
 # GBS = BATCH_SIZE * NUM_GENERATIONS (16), LEARNING_RATE = 1e-6 * sqrt(GBS / 256),
