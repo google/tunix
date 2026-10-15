@@ -39,6 +39,67 @@ UNSET_ROUTED_EXPERT = -1
 # `sequence_length_round: 64` and Qwen3.5's `gdn_chunk_size = 64`).
 DEFAULT_SEGMENT_ALIGN_MULTIPLE = 64
 
+# Where a packed row's padding goes (`pad_position` of `pack_chunk`).
+#
+# "end" writes the row's segments from position 0 and leaves the padding at the
+# end of the row. "start" lays the row out exactly as "end" does, then moves the
+# whole row right by its trailing padding rounded down to a multiple of
+# `pad_align`: the padding comes first, and fewer than `pad_align` padding
+# tokens stay at the end.
+#
+# Why: under load-balanced context parallelism (MaxText's DUAL_CHUNK_SWAP:
+# context rank r holds sequence chunks r and 2 * cp - 1 - r) the last chunk of
+# a row is rank 0's. With the padding at the end, only rank 0 gets lighter;
+# ranks 1..cp-1 still attend every real query to every earlier position. An
+# attention kernel that skips the tiles whose query and key segment-id ranges
+# do not overlap skips the padding's key tiles for every real query once the
+# padding comes first, so the work is spread more evenly over the ranks and
+# the busiest rank, which sets the step time, does less. tokamax's Splash
+# skips such tiles whenever it is given segment ids, from tokamax
+# 0.0.16.dev20261008 on; a kernel that only masks segment ids element by
+# element computes every tile, and there "start" gains nothing.
+#
+# Only positions in the row move. Every token keeps its id, its segment id,
+# its position inside its segment and its masks, advantages, per-token values
+# and routed experts, so a model whose attention, convolutions and recurrences
+# all respect segment ids (as well as causal order) computes the same values;
+# the kernel's tile boundaries move, so its reductions may round differently.
+PAD_POSITIONS: tuple[str, ...] = ("end", "start")
+DEFAULT_PAD_POSITION = "end"
+# With "start", a row moves by a multiple of this many tokens, which keeps
+# every segment start where it sits relative to the attention kernel's tiles:
+# 4096 is the largest Splash block (`sa_block_kv`) of the Qwen3.5-397B-A17B
+# recipe. It must be a multiple of `segment_align_multiple`, so the segment
+# alignment is kept too.
+DEFAULT_PAD_ALIGN = 4096
+
+
+def validate_pad_position(
+    pad_position: str, pad_align: int, segment_align_multiple: int
+) -> None:
+  """Raises ValueError unless `pad_position` and `pad_align` can pack a row.
+
+  `pad_align` is only read with pad_position="start", so it is only checked
+  then: an "end" row is the same whatever `pad_align` is.
+
+  Args:
+    pad_position: One of `PAD_POSITIONS`.
+    pad_align: With "start", a positive multiple of `segment_align_multiple`.
+    segment_align_multiple: The packer's (positive) segment alignment.
+  """
+  if pad_position not in PAD_POSITIONS:
+    raise ValueError(
+        f"pad_position must be one of {PAD_POSITIONS}, got {pad_position!r}."
+    )
+  if pad_position == "start" and (
+      pad_align <= 0 or pad_align % segment_align_multiple
+  ):
+    raise ValueError(
+        "pad_align must be a positive multiple of segment_align_multiple"
+        f" ({segment_align_multiple}) with pad_position='start', got"
+        f" {pad_align}."
+    )
+
 
 def align_offset(offset: int, segment_align_multiple: int) -> int:
   """Rounds `offset` up to the next multiple of `segment_align_multiple`."""
@@ -318,16 +379,50 @@ def pack_bin(
     carried: Sequence[str],
     routed_shape: tuple[int, ...] | None = None,
     segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
+    pad_position: str = DEFAULT_PAD_POSITION,
+    pad_align: int = DEFAULT_PAD_ALIGN,
 ) -> PackedRow:
   """Packs a single bin of items into a single `[budget]` PackedRow."""
-  return pack_chunk(
+  chunk = pack_chunk(
       [bin_items],
       budget=budget,
       pad_id=pad_id,
       carried=carried,
       routed_shape=routed_shape,
       segment_align_multiple=segment_align_multiple,
-  )[0]  # pytype: disable=bad-return-type
+      pad_position=pad_position,
+      pad_align=pad_align,
+  )
+  return chunk[0]  # pytype: disable=bad-return-type
+
+
+def _pad_first_shift(
+    bin_items: Sequence[PackItem],
+    *,
+    budget: int,
+    pad_align: int,
+    segment_align_multiple: int,
+) -> int:
+  """Returns how far right pad_position="start" moves a bin's row.
+
+  The row's tokens, written from position 0 as `pack_chunk` writes them with
+  "end", stop at `used`; the shift is the trailing padding `budget - used`
+  rounded down to a multiple of `pad_align`. A row without tokens, or one that
+  exceeds the budget (which `pack_chunk` rejects), is not moved.
+  """
+  used = 0
+  placed = 0
+  for item in bin_items:
+    n = item.num_tokens
+    if n == 0:
+      continue
+    if placed:
+      used = align_offset(used, segment_align_multiple)
+    used += n
+    placed += 1
+  if not placed or used > budget:
+    return 0
+  return (budget - used) // pad_align * pad_align
 
 
 def pack_chunk(
@@ -338,13 +433,30 @@ def pack_chunk(
     carried: Sequence[str],
     routed_shape: tuple[int, ...] | None = None,
     segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
+    pad_position: str = DEFAULT_PAD_POSITION,
+    pad_align: int = DEFAULT_PAD_ALIGN,
 ) -> PackedChunk:
-  """Packs a sequence of bins of one chunk into a contiguous `PackedChunk`."""
+  """Packs a sequence of bins of one chunk into a contiguous `PackedChunk`.
+
+  Args:
+    bins: The items of each row.
+    budget: Tokens per row.
+    pad_id: Token id of the padding.
+    carried: The per-token fields to pack.
+    routed_shape: Trailing `(num_layers, top_k)` routing shape, or None to
+      derive it from the items.
+    segment_align_multiple: Start alignment of every segment after the first.
+    pad_position: "end" puts each row's padding after its segments; "start"
+      moves each row right by its trailing padding rounded down to a multiple
+      of `pad_align`, so the padding comes first (see `PAD_POSITIONS`).
+    pad_align: The multiple a "start" row moves by. Not read with "end".
+  """
   if segment_align_multiple <= 0:
     raise ValueError(
         "segment_align_multiple must be positive, got"
         f" {segment_align_multiple}."
     )
+  validate_pad_position(pad_position, pad_align, segment_align_multiple)
   if routed_shape is None:
     placed = [item for bin_items in bins for item in bin_items]
     routed_shape = routed_experts_shape(placed)
@@ -371,6 +483,18 @@ def pack_chunk(
   for b, bin_items in enumerate(bins):
     if not bin_items:
       continue
+    # "start" writes every token of the row `shift` positions to the right of
+    # where "end" writes it; segment ids, in-segment positions and routing move
+    # with their tokens. Segment starts stay aligned: `cursor` is aligned as
+    # before and `shift` is a multiple of segment_align_multiple.
+    shift = 0
+    if pad_position == "start":
+      shift = _pad_first_shift(
+          bin_items,
+          budget=budget,
+          pad_align=pad_align,
+          segment_align_multiple=segment_align_multiple,
+      )
     cursor = 0
     real_seg = 0
     for item in bin_items:
@@ -387,12 +511,13 @@ def pack_chunk(
         raise ValueError(
             f"pack_bin: bin size {cursor + n} exceeds budget {budget}."
         )
-      seq = slice(cursor, cursor + n)
-      comp = slice(cursor + p, cursor + n)
+      offset = shift + cursor
+      seq = slice(offset, offset + n)
+      comp = slice(offset + p, offset + n)
 
-      ids[b, cursor : cursor + p] = item.prompt_ids
+      ids[b, offset : offset + p] = item.prompt_ids
       ids[b, comp] = item.completion_ids
-      prompt_mask[b, cursor : cursor + p] = 1.0
+      prompt_mask[b, offset : offset + p] = 1.0
       segment_ids[b, seq] = seg
       segment_positions[b, seq] = np.arange(n, dtype=np.int32)
 
@@ -452,8 +577,13 @@ def pack_core(
     max_segments_per_packed_row: int | None = None,
     pad_id: int = 0,
     segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
+    pad_position: str = DEFAULT_PAD_POSITION,
+    pad_align: int = DEFAULT_PAD_ALIGN,
 ) -> list[PackedChunk]:
-  """Packs `items` into a sequence of chunks, each containing `pack_size` PackedRows with `budget` tokens."""
+  """Packs `items` into a sequence of chunks, each containing `pack_size` PackedRows with `budget` tokens.
+
+  `pad_position` and `pad_align` place each row's padding, as in `pack_chunk`.
+  """
   if budget <= 0:
     raise ValueError(f"Budget must be positive, got {budget}.")
   if pack_size <= 0:
@@ -471,6 +601,7 @@ def pack_core(
         "segment_align_multiple must be positive, got"
         f" {segment_align_multiple}."
     )
+  validate_pad_position(pad_position, pad_align, segment_align_multiple)
   if not items:
     return []
 
@@ -499,6 +630,8 @@ def pack_core(
             carried=carried,
             routed_shape=routed_experts_shape(placed),
             segment_align_multiple=segment_align_multiple,
+            pad_position=pad_position,
+            pad_align=pad_align,
         )
     )
   return chunks

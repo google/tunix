@@ -363,6 +363,22 @@ class SubmissionLauncherTest(absltest.TestCase):
     ):
       _render(PIPELINE_STEP_BOUNDARY="false", STAGE_NEXT_MICROBATCH="true")
 
+  def test_packed_rows_pad_at_the_end_by_default(self):
+    orch = _jobset(self.default, "orch")
+    self.assertNotIn("--pack_pad_position", orch)
+    self.assertNotIn("--pack_pad_align", orch)
+
+  def test_the_packed_row_pad_position_reaches_only_the_orchestrator(self):
+    render = _render(PACK_PAD_POSITION="start", PACK_PAD_ALIGN="8192")
+    orch = _jobset(render, "orch")
+    self.assertRegex(orch, r"--pack_pad_position=start\b")
+    self.assertRegex(orch, r"--pack_pad_align=8192\b")
+    docs = render.split("\n---\n")
+    default_docs = self.default.split("\n---\n")
+    self.assertLen(docs, len(default_docs))
+    changed = [doc for doc, before in zip(docs, default_docs) if doc != before]
+    self.assertEqual(changed, [orch])
+
   def test_the_sharded_log_prob_head_is_on_in_the_trainer_only(self):
     self.assertRegex(
         _jobset(self.default, "train"), r"\bTUNIX_LOGPS_SHARDED_HEAD=local\b"
