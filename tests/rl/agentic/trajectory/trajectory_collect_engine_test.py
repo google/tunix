@@ -1759,6 +1759,10 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         [step.reward for step in rehydrated_traj.steps],
         [step.reward for step in traj.steps],
     )
+    self.assertEqual(
+        [step.mc_return for step in rehydrated_traj.steps],
+        [step.mc_return for step in traj.steps],
+    )
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_trajectory_store_masked_out_skips_final_reward(self, mock_convert):

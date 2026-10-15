@@ -231,7 +231,6 @@ def create_agent_step(
       prefill_routed_experts=prefill_routed_experts,
       prefill_start=prefill_start,
       prefill_num_context=prefill_num_context,
-      mc_return=(float(step.mc_return) if step.mc_return is not None else None),
       extra=extra or None,
   )
 
@@ -314,7 +313,6 @@ def to_tunix_step(
   assistant_tokens = None
   assistant_masks = None
   logprobs = None
-  mc_return = 0.0
 
   if agent_step is not None:
     thought = agent_step.reasoning_content or ""
@@ -339,9 +337,6 @@ def to_tunix_step(
     assistant_tokens = getattr(agent_step, "assistant_tokens", None)
     assistant_masks = getattr(agent_step, "assistant_masks", None)
     logprobs = getattr(agent_step, "logprobs", None)
-    mc_return_val = getattr(agent_step, "mc_return", None)
-    if mc_return_val is not None:
-      mc_return = float(mc_return_val)
 
     if agent_step.metrics is not None:
       if (
@@ -391,7 +386,6 @@ def to_tunix_step(
       observation=observation,
       reward=reward,
       done=done,
-      mc_return=mc_return,
       assistant_tokens=_to_numpy_or_none(assistant_tokens),
       assistant_masks=_to_numpy_or_none(assistant_masks),
       env_tokens=_to_numpy_or_none(env_tokens),
@@ -433,10 +427,10 @@ def to_tunix_trajectory(
         "prompt_id" in traj
         or "status" in traj
         or "total_reward" in traj
+        or "gamma" in traj
         or traj.get("schema_version", "").startswith("Tunix")
         or any(
             step.get("step_id") == 0
-            or "mc_return" in step
             or "reward" in step
             for step in traj.get("steps", [])
             if isinstance(step, dict)
@@ -495,6 +489,12 @@ def to_tunix_trajectory(
       converted_step_idx += 1
 
   prompt_routed_experts = _split_prefill_routed_experts(routed_turns)
+
+  gamma = float(metadata_obj.gamma) if metadata_obj.gamma is not None else 1.0
+  g = 0.0
+  for dto_step in reversed(dto_steps):
+    g = dto_step.reward + gamma * g
+    dto_step.mc_return = g
 
   reward = (
       float(metadata_obj.total_reward)
@@ -633,6 +633,7 @@ def create_trajectory_metadata(
     status: (
         str | agent_types.TrajectoryStatus
     ) = agent_types.TrajectoryStatus.RUNNING,
+    gamma: float | None = None,
     extra: dict[str, Any] | None = None,
 ) -> trajectory_lib.TunixTrajectoryMetadata:
   """Constructs TunixTrajectoryMetadata from rollout request and agent state."""
@@ -669,6 +670,7 @@ def create_trajectory_metadata(
       target_policy_versions=target_policy_versions,
       status=status_str,
       total_reward=getattr(traj_obj, "reward", None),
+      gamma=(float(gamma) if gamma is not None else None),
       masked_out=traj_obj.masked_out if traj_obj is not None else None,
       hyperparams=getattr(request, "generation_kwargs", None),
       env_time=getattr(traj_obj, "env_time", None),
@@ -686,6 +688,7 @@ def update_trajectory_metadata(
     policy_version: int | None = None,
     target_policy_versions: list[int] | None = None,
     status: str | agent_types.TrajectoryStatus | None = None,
+    gamma: float | None = None,
     env_time: dict[str, Any] | None = None,
     reward_time: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
@@ -698,6 +701,7 @@ def update_trajectory_metadata(
     policy_version: Optional policy version to append to target_policy_versions.
     target_policy_versions: Optional explicit list of target policy versions.
     status: Optional explicit status override.
+    gamma: Optional discount factor for Monte Carlo return calculation.
     env_time: Optional explicit environment timing dictionary.
     reward_time: Optional explicit reward timing dictionary.
     extra: Optional dictionary of extra metadata fields to merge.
@@ -738,6 +742,12 @@ def update_trajectory_metadata(
       existing = metadata.extra.setdefault("target_policy_versions", [])
       if policy_version not in existing:
         existing.append(policy_version)
+
+  if (
+      isinstance(metadata, trajectory_lib.TunixTrajectoryMetadata)
+      and gamma is not None
+  ):
+    metadata.gamma = float(gamma)
 
   if traj_obj is not None:
     if hasattr(metadata, "total_reward"):

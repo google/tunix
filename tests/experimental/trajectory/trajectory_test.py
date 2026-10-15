@@ -1082,7 +1082,6 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
         assistant_tokens=np.array([10, 20]),
         assistant_masks=np.array([1, 1]),
         logprobs=np.array([-0.1, -0.2]),
-        mc_return=1.5,
         extra={"custom_key": "custom_val"},
     )
     self.assertEqual(step.step_id, 1)
@@ -1092,7 +1091,6 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     np.testing.assert_array_equal(step.assistant_tokens, np.array([10, 20]))
     np.testing.assert_array_equal(step.assistant_masks, np.array([1, 1]))
     np.testing.assert_array_equal(step.logprobs, np.array([-0.1, -0.2]))
-    self.assertEqual(step.mc_return, 1.5)
     self.assertEqual(step.extra, {"custom_key": "custom_val"})
 
   def test_step_env_fields(self):
@@ -1117,18 +1115,15 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
         message="Thinking",
         assistant_tokens=np.array([10, 20]),
         logprobs=np.array([-0.5, -0.3]),
-        mc_return=2.0,
     )
     json_str = step.model_dump_json(exclude_none=True)
     loaded_dict = json.loads(json_str)
     self.assertEqual(loaded_dict["assistant_tokens"], [10, 20])
     self.assertEqual(loaded_dict["logprobs"], [-0.5, -0.3])
-    self.assertEqual(loaded_dict["mc_return"], 2.0)
 
     reloaded_step = trajectory.TunixAgentStep.model_validate_json(json_str)
     self.assertEqual(reloaded_step.assistant_tokens, [10, 20])
     self.assertEqual(reloaded_step.logprobs, [-0.5, -0.3])
-    self.assertEqual(reloaded_step.mc_return, 2.0)
 
   def test_step_equality(self):
     step1 = trajectory.TunixAgentStep(
@@ -1505,6 +1500,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     expected_step_0 = converter.to_tunix_step(
         agent_step=step_1, env_step=step_2
     )
+    expected_step_0.mc_return = 4.5
     self.assertStepEqual(converted_traj.steps[0], expected_step_0)
     self.assertEqual(
         converted_traj.steps[0].model_response, "Action 1 response"
@@ -1525,7 +1521,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     )
     self.assertEqual(converted_traj.steps[0].reward, 0.5)
     self.assertFalse(converted_traj.steps[0].done)
-    self.assertEqual(converted_traj.steps[0].mc_return, 1.0)
+    self.assertEqual(converted_traj.steps[0].mc_return, 4.5)
     np.testing.assert_array_equal(
         converted_traj.steps[0].assistant_tokens, np.array([101, 102])
     )
@@ -1550,6 +1546,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     expected_step_1 = converter.to_tunix_step(
         agent_step=step_3, env_step=step_4
     )
+    expected_step_1.mc_return = 4.0
     self.assertStepEqual(converted_traj.steps[1], expected_step_1)
     self.assertEqual(
         converted_traj.steps[1].model_response, "Action 2 response"
@@ -1590,7 +1587,6 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
         {
             "user_key": "val",
             trajectory.TUNIX_EXTENSIONS_KEY: {
-                "mc_return": 2.5,
                 "assistant_tokens": [10, 20],
                 "assistant_masks": [1, 1],
                 "logprobs": [-0.5, -0.2],
@@ -1682,6 +1678,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
                 "target_policy_versions": [2, 3],
                 "status": "SUCCEEDED",
                 "total_reward": 3.5,
+                "gamma": 0.9,
                 "masked_out": False,
                 "hyperparams": {"temperature": 0.7},
                 "env_time": {"step_0": 0.05},
@@ -1693,7 +1690,6 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
   def test_to_atif_step_retains_none_valued_subclass_fields_in_extra(self):
     sparse_agent_step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(
         update={
-            "mc_return": None,
             "assistant_tokens": None,
             "assistant_masks": None,
             "logprobs": None,
@@ -1710,7 +1706,6 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
         atif_step.extra,
         {
             trajectory.TUNIX_EXTENSIONS_KEY: {
-                "mc_return": None,
                 "assistant_tokens": None,
                 "assistant_masks": None,
                 "logprobs": None,
@@ -1780,6 +1775,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
                 "target_policy_versions": [2, 3],
                 "status": "SUCCEEDED",
                 "total_reward": 3.5,
+                "gamma": 0.9,
                 "masked_out": False,
                 "hyperparams": {"temperature": 0.7},
                 "env_time": {"step_0": 0.05},
@@ -1805,6 +1801,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
             "target_policy_versions": [2, 3],
             "status": "SUCCEEDED",
             "total_reward": 3.5,
+            "gamma": 0.9,
             "masked_out": False,
             "hyperparams": {"temperature": 0.7},
             "env_time": {"step_0": 0.05},
@@ -1888,7 +1885,6 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
   def test_from_atif_step_round_trip_restores_unset_tunix_fields(self):
     sparse_agent_step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(
         update={
-            "mc_return": None,
             "assistant_tokens": None,
             "assistant_masks": None,
             "logprobs": None,
@@ -2001,7 +1997,7 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
 
     self.assertIsInstance(rehydrated_step, trajectory.TunixAgentStep)
     self.assertEqual(rehydrated_step.step_id, base_atif_step.step_id - 1)
-    self.assertIsNone(rehydrated_step.mc_return)
+    self.assertIsNone(rehydrated_step.assistant_tokens)
     self.assertIsNone(rehydrated_step.extra)
 
   def test_from_atif_metadata_without_tunix_extensions_rehydrates_with_defaults(
@@ -2054,6 +2050,7 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
             "target_policy_versions",
             "status",
             "total_reward",
+            "gamma",
             "masked_out",
             "hyperparams",
             "env_time",

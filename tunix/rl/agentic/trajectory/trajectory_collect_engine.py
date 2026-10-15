@@ -276,6 +276,7 @@ class TrajectoryCollectEngine:
           metadata=self.metadata,
           agent=self.agent,
           policy_version=self.policy_version,
+          gamma=self.gamma,
           env_time=self.env_time,
           reward_time=self.reward_time,
       )
