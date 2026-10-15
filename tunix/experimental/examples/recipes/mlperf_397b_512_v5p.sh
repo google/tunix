@@ -17,7 +17,12 @@ export JOB_PREFIX="${JOB_PREFIX:-$USER}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-397b}"
 export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-europe-west4-dev/maxtext/${JOB_PREFIX}}"
 export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}/logger}"
-export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}/store}}"
+export DISABLE_TRAJECTORY_STORE="${DISABLE_TRAJECTORY_STORE:-false}"
+if [[ "${DISABLE_TRAJECTORY_STORE}" =~ ^(1|true|True|TRUE)$ ]] || [[ "${ENABLE_TRAJECTORY_STORE:-true}" =~ ^(0|false|False|FALSE)$ ]]; then
+  export TRAJECTORY_STORE_ROOT_DIR=""
+else
+  export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}/store}}"
+fi
 
 export REGION="europe-west4"
 export CLUSTER="bodaborg-v5p-nap"
