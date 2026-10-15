@@ -14,8 +14,20 @@
 
 """Common enums and datatypes for Tunix."""
 
+import dataclasses
 import enum
 from typing import Literal
+
+
+@dataclasses.dataclass(frozen=True)
+class CacheConfig:
+  """Configuration for the KV cache."""
+
+  cache_size: int
+  num_layers: int
+  num_kv_heads: int
+  head_dim: int
+
 
 ROUTED_EXPERTS_ENCODE_MODES: tuple[str, ...] = (
     "auto",
