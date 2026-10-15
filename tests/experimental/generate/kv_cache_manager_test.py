@@ -27,9 +27,12 @@ import numpy as np
 from tunix.experimental.generate import kv_cache_manager
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import single_type_kv_cache_manager
+from tunix.experimental.rollout import sampler as sampler_lib
 
 # Sharding tests need up to 4 devices.
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
+
+_GIB = 1 << 30
 
 
 def _create_mesh() -> jax.sharding.Mesh:
@@ -55,8 +58,8 @@ def _create_cache_config(
   if mesh is None and (dp_axis or tp_axis):
     mesh = _create_mesh()
   return kv_cache_manager.CacheConfig(
-      max_device_bytes=total_bytes_per_page * num_device_pages,
-      max_host_bytes=total_bytes_per_page * num_host_pages,
+      max_device_size_gib=(total_bytes_per_page * num_device_pages) / _GIB,
+      max_host_size_gib=(total_bytes_per_page * num_host_pages) / _GIB,
       page_size=page_size,
       enable_prefix_caching=enable_prefix_caching,
       dtype=jnp.float32,
@@ -138,6 +141,18 @@ def _create_two_group_manager(
   return mgr, full, local
 
 
+def _create_request(
+    req_id: str = "r1",
+    prompt_token_ids: Sequence[int] = (),
+    max_tokens: int = 20,
+) -> request_lib.RequestState:
+  return request_lib.RequestState(
+      req_id=req_id,
+      prompt_token_ids=list(prompt_token_ids),
+      sampling_params=sampler_lib.SamplingParams(max_tokens=max_tokens),
+  )
+
+
 def _allocate_pages(
     mgr: kv_cache_manager.KVCacheManager,
     req: request_lib.RequestState,
@@ -169,7 +184,7 @@ def _cache_pages(
     group_page_hashes: The page hashes to cache in each group.
   """
   num_pages = max(len(h) for h in group_page_hashes)
-  req = request_lib.RequestState(
+  req = _create_request(
       req_id="setup", prompt_token_ids=[0] * num_pages * mgr.page_size
   )
   _allocate_pages(mgr, req, num_pages)
@@ -189,8 +204,8 @@ class CacheConfigTest(parameterized.TestCase):
 
   def test_valid_config(self):
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=1024 * 1024,
-        max_host_bytes=512 * 1024,
+        max_device_size_gib=1.0,
+        max_host_size_gib=0.5,
         page_size=16,
         dtype=jnp.float32,
         dp_axis="dp",
@@ -205,7 +220,7 @@ class CacheConfigTest(parameterized.TestCase):
 
   def test_dp_size_is_one_without_dp_axis(self):
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=1024 * 1024,
+        max_device_size_gib=1.0,
         dtype=jnp.float32,
         tp_axis="tp",
         mesh=_create_mesh(),
@@ -215,7 +230,7 @@ class CacheConfigTest(parameterized.TestCase):
   def test_sharding_axes_without_mesh_raises(self):
     with self.assertRaisesRegex(ValueError, r"mesh is required"):
       kv_cache_manager.CacheConfig(
-          max_device_bytes=1024 * 1024,
+          max_device_size_gib=1.0,
           page_size=16,
           dtype=jnp.float32,
           dp_axis="dp",
@@ -228,7 +243,7 @@ class CacheConfigTest(parameterized.TestCase):
   def test_axis_not_in_mesh_raises(self, dp_axis, tp_axis):
     with self.assertRaisesRegex(ValueError, r"is not in the mesh axes"):
       kv_cache_manager.CacheConfig(
-          max_device_bytes=1024 * 1024,
+          max_device_size_gib=1.0,
           dtype=jnp.float32,
           dp_axis=dp_axis,
           tp_axis=tp_axis,
@@ -239,36 +254,36 @@ class CacheConfigTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, r"page_size must be positive"):
       kv_cache_manager.CacheConfig(
           page_size=0,
-          max_device_bytes=1024,
+          max_device_size_gib=1.0,
           dtype=jnp.float32,
       )
 
-  def test_invalid_negative_bytes_raises(self):
+  def test_invalid_negative_size_raises(self):
     with self.assertRaisesRegex(
-        ValueError, r"max_device_bytes must be positive"
+        ValueError, r"max_device_size_gib must be positive"
     ):
       kv_cache_manager.CacheConfig(
           page_size=16,
-          max_device_bytes=-100,
+          max_device_size_gib=-1.0,
           dtype=jnp.float32,
       )
     with self.assertRaisesRegex(
-        ValueError, r"max_host_bytes cannot be negative"
+        ValueError, r"max_host_size_gib cannot be negative"
     ):
       kv_cache_manager.CacheConfig(
           page_size=16,
-          max_device_bytes=1024,
-          max_host_bytes=-100,
+          max_device_size_gib=1.0,
+          max_host_size_gib=-1.0,
           dtype=jnp.float32,
       )
 
-  def test_zero_device_bytes_raises(self):
+  def test_zero_device_size_raises(self):
     with self.assertRaisesRegex(
-        ValueError, r"max_device_bytes must be positive"
+        ValueError, r"max_device_size_gib must be positive"
     ):
       kv_cache_manager.CacheConfig(
           page_size=16,
-          max_device_bytes=0,
+          max_device_size_gib=0.0,
           dtype=jnp.float32,
       )
 
@@ -294,7 +309,7 @@ class CacheSizingTest(parameterized.TestCase):
 
   def test_derive_kv_geometry(self):
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=1024 * 1024,
+        max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
     )
@@ -311,7 +326,7 @@ class CacheSizingTest(parameterized.TestCase):
   def test_derive_cache_sharding(self, dp_axis, tp_axis):
     mesh = _create_mesh()
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=1024 * 1024,
+        max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
         dp_axis=dp_axis,
@@ -328,7 +343,7 @@ class CacheSizingTest(parameterized.TestCase):
 
   def test_derive_cache_sharding_no_sharding(self):
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=1024 * 1024,
+        max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
     )
@@ -336,8 +351,8 @@ class CacheSizingTest(parameterized.TestCase):
 
   def test_compute_page_limits(self):
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=1024 * 1024,
-        max_host_bytes=512 * 1024,
+        max_device_size_gib=(1024 * 1024) / _GIB,
+        max_host_size_gib=(512 * 1024) / _GIB,
         dtype=jnp.bfloat16,
         page_size=16,
     )
@@ -396,11 +411,12 @@ class CacheSizingTest(parameterized.TestCase):
     for budget_offset, expected_device, expected_host in (
         (0, expected_device_pages, 3),
         (-1, expected_device_pages_one_byte_short, 2),
+        (-0.2, expected_device_pages_one_byte_short, 2),
     ):
       with self.subTest(budget_offset=budget_offset):
         cfg = kv_cache_manager.CacheConfig(
-            max_device_bytes=8 * page_bytes + budget_offset,
-            max_host_bytes=3 * page_bytes + budget_offset,
+            max_device_size_gib=(8 * page_bytes + budget_offset) / _GIB,
+            max_host_size_gib=(3 * page_bytes + budget_offset) / _GIB,
             dtype=jnp.bfloat16,
             page_size=16,
             dp_axis=dp_axis,
@@ -424,7 +440,7 @@ class CacheSizingTest(parameterized.TestCase):
     # Weighting each group's byte budget by its own per-page cost makes the
     # weight cancel, so both groups end up with the same page count.
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=3 * (65536 + 16384),
+        max_device_size_gib=(3 * (65536 + 16384)) / _GIB,
         dtype=jnp.bfloat16,
         page_size=16,
     )
@@ -457,7 +473,7 @@ class CacheSizingTest(parameterized.TestCase):
     # Axis 0 of the pool is partitioned over dp, so a count that isn't a
     # multiple of dp_size would fail allocation with IndivisibleError.
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=37 * 1024,
+        max_device_size_gib=(37 * 1024) / _GIB,
         dtype=jnp.bfloat16,
         page_size=16,
         dp_axis="dp",
@@ -509,7 +525,7 @@ class KVCacheManagerInitTest(parameterized.TestCase):
     # Gemma 4's global layers project fewer, wider KV heads than its local
     # ones, so each group's pool must carry its own element shape.
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=4 * (4 * 4 * 8 * 4 + 4 * 1 * 16 * 4),
+        max_device_size_gib=(4 * (4 * 4 * 8 * 4 + 4 * 1 * 16 * 4)) / _GIB,
         page_size=4,
         dtype=jnp.float32,
     )
@@ -559,7 +575,7 @@ class KVCacheManagerInitTest(parameterized.TestCase):
     cfg = kv_cache_manager.CacheConfig(
         page_size=4,
         dtype=jnp.float32,
-        max_device_bytes=10,
+        max_device_size_gib=10 / _GIB,
     )
     with self.assertRaisesRegex(ValueError, r"Cannot allocate 0 device pages"):
       kv_cache_manager.KVCacheManager(
@@ -578,7 +594,7 @@ class SyncRequestStateTest(parameterized.TestCase):
   def test_sync_request_state_withholds_last_token(self):
     mgr = _create_manager()
     # 8 tokens: withholding the last token leaves 7, so only 1 full page.
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
     mgr.sync_request_state(req)
     self.assertLen(mgr._request_to_prefix_hashes["r1"], 1)
 
@@ -588,7 +604,7 @@ class SyncRequestStateTest(parameterized.TestCase):
     mgr = _create_manager()
     # 8 tokens in `token_ids` plus 1 in flight: the in-flight token is the
     # withheld last token, so all 8 present tokens (2 full pages) are hashed.
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
     req.num_computed_tokens = 8
     req.num_in_flight_tokens = 1
     mgr.sync_request_state(req)
@@ -597,13 +613,13 @@ class SyncRequestStateTest(parameterized.TestCase):
   def test_sync_request_state_hashes_every_full_page(self):
     mgr = _create_manager()
     # 20 tokens -> withholding the last token leaves 19, so 4 full pages.
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(20)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(20)))
     mgr.sync_request_state(req)
     self.assertLen(mgr._request_to_prefix_hashes["r1"], 4)
 
   def test_sync_request_state_hashes_incrementally(self):
     mgr = _create_manager()
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(9)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(9)))
     mgr.sync_request_state(req)
     first_hashes = list(mgr._request_to_prefix_hashes["r1"])
 
@@ -618,7 +634,7 @@ class SyncRequestStateTest(parameterized.TestCase):
   def test_sync_request_state_caches_pages_in_every_group(self):
     mgr, full, local = _create_two_group_manager(page_size=4)
     # 9 tokens: withholding the last token leaves 2 full pages.
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(9)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(9)))
     mgr.allocate_slots(req, num_new_tokens=8)
     req.num_computed_tokens = 8
 
@@ -633,7 +649,7 @@ class SyncRequestStateTest(parameterized.TestCase):
   def test_sync_request_state_does_not_cache_incomplete_pages(self):
     mgr, full, local = _create_two_group_manager(page_size=4)
     # 13 tokens: withholding the last token leaves 3 full pages to hash.
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(13)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(13)))
     mgr.allocate_slots(req, num_new_tokens=8)
     # Only the first page is complete. The second is partially filled.
     req.num_computed_tokens = 6
@@ -656,7 +672,7 @@ class SyncRequestStateTest(parameterized.TestCase):
     mgr = _create_manager(
         cache_to_window_size={"cache_0": 4}, enable_prefix_caching=False
     )
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(16)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(16)))
     _allocate_pages(mgr, req, num_pages=4)
 
     req.num_computed_tokens = 12
@@ -675,18 +691,18 @@ class GetComputedPagesTest(parameterized.TestCase):
 
   def test_get_computed_pages_without_sync_returns_zero(self):
     mgr = _create_manager()
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
     self.assertEqual(mgr.get_computed_pages(req), (0, ((),)))
 
   def test_get_computed_pages_hits_cached_prefix(self):
     mgr = _create_manager()
-    req1 = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(12)))
+    req1 = _create_request(req_id="r1", prompt_token_ids=list(range(12)))
     mgr.allocate_slots(req1, num_new_tokens=12)
     req1.num_computed_tokens = 12
     mgr.sync_request_state(req1)
     mgr.release_request(req1)
 
-    req2 = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(12)))
+    req2 = _create_request(req_id="r2", prompt_token_ids=list(range(12)))
     mgr.sync_request_state(req2)
     n_hit, computed_pages = mgr.get_computed_pages(req2)
 
@@ -696,7 +712,7 @@ class GetComputedPagesTest(parameterized.TestCase):
 
   def test_prefix_caching_disabled_hashes_nothing(self):
     mgr = _create_manager(enable_prefix_caching=False)
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(20)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(20)))
 
     mgr.sync_request_state(req)
 
@@ -705,14 +721,14 @@ class GetComputedPagesTest(parameterized.TestCase):
 
   def test_prefix_caching_disabled_never_hits(self):
     mgr = _create_manager(enable_prefix_caching=False)
-    first = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    first = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
     mgr.sync_request_state(first)
     mgr.allocate_slots(first, num_new_tokens=8)
     first.num_computed_tokens = 8
     mgr.sync_request_state(first)
 
     # The same prompt would be a full prefix hit if caching were enabled.
-    second = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(8)))
+    second = _create_request(req_id="r2", prompt_token_ids=list(range(8)))
     mgr.sync_request_state(second)
     self.assertEqual(mgr.get_computed_pages(second), (0, ((),)))
 
@@ -811,13 +827,13 @@ class AllocateSlotsTest(parameterized.TestCase):
 
   def test_allocate_slots_success(self):
     mgr = _create_manager()
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
     self.assertTrue(mgr.allocate_slots(req, num_new_tokens=8))
     self.assertLen(mgr.get_page_idxs(req)["cache_0"], 2)
 
   def test_allocate_slots_insufficient_space_returns_false(self):
     mgr = _create_manager(num_device_pages=1)
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
     # 8 tokens requires 2 pages, but only 1 page capacity exists
     self.assertFalse(mgr.allocate_slots(req, num_new_tokens=8))
 
@@ -827,7 +843,7 @@ class AllocateSlotsTest(parameterized.TestCase):
   )
   def test_allocate_slots_non_positive_tokens_raises(self, num_new_tokens):
     mgr = _create_manager()
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
     with self.assertRaisesRegex(
         ValueError, rf"num_new_tokens must be positive, got {num_new_tokens}\."
     ):
@@ -835,19 +851,19 @@ class AllocateSlotsTest(parameterized.TestCase):
 
   def test_allocate_slots_wrong_computed_pages_raises(self):
     mgr, _, _ = _create_two_group_manager()
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
     with self.assertRaisesRegex(ValueError, r"returned by get_computed_pages"):
       mgr.allocate_slots(req, num_new_tokens=8, new_computed_pages=((),))
 
   def test_allocate_slots_with_cached_prefix(self):
     mgr = _create_manager()
-    req1 = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(12)))
+    req1 = _create_request(req_id="r1", prompt_token_ids=list(range(12)))
     mgr.allocate_slots(req1, num_new_tokens=12)
     req1.num_computed_tokens = 12
     mgr.sync_request_state(req1)
     mgr.release_request(req1)
 
-    req2 = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(12)))
+    req2 = _create_request(req_id="r2", prompt_token_ids=list(range(12)))
     mgr.sync_request_state(req2)
     n_hit, computed_pages = mgr.get_computed_pages(req2)
     self.assertGreater(n_hit, 0)
@@ -862,7 +878,7 @@ class AllocateSlotsTest(parameterized.TestCase):
     _cache_pages(mgr, [[201], [201]])
     _, computed_pages = mgr._find_longest_cache_hit([201])
 
-    req = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(8)))
+    req = _create_request(req_id="r2", prompt_token_ids=list(range(8)))
     self.assertTrue(
         mgr.allocate_slots(
             req, num_new_tokens=4, new_computed_pages=computed_pages
@@ -883,7 +899,7 @@ class AllocateSlotsTest(parameterized.TestCase):
     for i in range(9):
       local.allocate_slots("other", num_tokens=4, num_completed_tokens=4 * i)
 
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
     self.assertFalse(mgr.allocate_slots(req, num_new_tokens=8))
     self.assertNotIn("r1", full._request_to_pages)
     self.assertNotIn("r1", local._request_to_pages)
@@ -892,7 +908,7 @@ class AllocateSlotsTest(parameterized.TestCase):
   def test_allocate_slots_multi_step(self):
     mgr = _create_manager(page_size=4, num_device_pages=10)
     group = mgr._kv_cache_group_managers[0]
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(6)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(6)))
 
     # Step 1: Prefill 6 tokens into 2 pages, leaving 2 free slots in page 2.
     self.assertTrue(mgr.allocate_slots(req, num_new_tokens=6))
@@ -918,7 +934,7 @@ class AllocateSlotsTest(parameterized.TestCase):
   def test_allocate_slots_multi_step_insufficient_space_returns_false(self):
     mgr = _create_manager(page_size=4, num_device_pages=2)
     group = mgr._kv_cache_group_managers[0]
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
 
     self.assertTrue(mgr.allocate_slots(req, num_new_tokens=8))
     page_idxs = mgr.get_page_idxs(req)["cache_0"]
@@ -936,7 +952,7 @@ class ReleaseRequestTest(parameterized.TestCase):
 
   def test_release_request_releases_every_group(self):
     mgr, full, local = _create_two_group_manager()
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
     mgr.allocate_slots(req, num_new_tokens=8)
     self.assertIn("r1", full._request_to_pages)
     self.assertIn("r1", local._request_to_pages)
@@ -950,13 +966,13 @@ class ReleaseRequestTest(parameterized.TestCase):
 
   def test_release_unknown_request_is_noop(self):
     mgr = _create_manager()
-    req = request_lib.RequestState(req_id="unknown", prompt_token_ids=[0])
+    req = _create_request(req_id="unknown", prompt_token_ids=[0])
     mgr.release_request(req)
     mgr.release_request(req)
 
   def test_release_request_evicts_prefix_hashes(self):
     mgr = _create_manager()
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
     mgr.sync_request_state(req)
     self.assertIn("r1", mgr._request_to_prefix_hashes)
 
@@ -966,7 +982,7 @@ class ReleaseRequestTest(parameterized.TestCase):
   def test_release_request_caches_pages_before_releasing(self):
     mgr, full, local = _create_two_group_manager(page_size=4)
     # 13 tokens: withholding the last token leaves 3 full pages.
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(13)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(13)))
     # The local group cannot allocate more than its window in a single step.
     mgr.allocate_slots(req, num_new_tokens=8)
     req.num_computed_tokens = 8
@@ -986,14 +1002,14 @@ class ReleaseRequestTest(parameterized.TestCase):
       self.assertEqual(manager._page_manager.num_free_device_pages, 7)
 
     # A request with the same prompt hits every released page.
-    req2 = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(13)))
+    req2 = _create_request(req_id="r2", prompt_token_ids=list(range(13)))
     mgr.sync_request_state(req2)
     n_hit, _ = mgr.get_computed_pages(req2)
     self.assertEqual(n_hit, 3)
 
   def test_reset_kv_caches_frees_all_pages(self):
     mgr, full, local = _create_two_group_manager(page_size=4)
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
     mgr.allocate_slots(req, num_new_tokens=8)
 
     mgr.reset_kv_caches()
@@ -1005,7 +1021,7 @@ class ReleaseRequestTest(parameterized.TestCase):
   def test_reset_kv_caches_clears_prefix_cache(self):
     mgr, full, local = _create_two_group_manager(page_size=4)
     _cache_pages(mgr, [[10, 20], [10, 20]])
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(9)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(9)))
     mgr.sync_request_state(req)
 
     mgr.reset_kv_caches()
@@ -1020,7 +1036,7 @@ class InspectionTest(parameterized.TestCase):
 
   def test_get_page_idxs_maps_every_cache_to_its_group(self):
     mgr, full, local = _create_two_group_manager()
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
     mgr.allocate_slots(req, num_new_tokens=8)
 
     page_idxs = mgr.get_page_idxs(req)
