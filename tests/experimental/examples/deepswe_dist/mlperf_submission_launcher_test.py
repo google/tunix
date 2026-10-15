@@ -72,6 +72,7 @@ _MAXTEXT_DEFAULTS = {
 _TUNED_KEYS = {
     "cast_grads_after_all_reduce": ("false", "true"),
     "context_parallel_strategy": ("ring", "all_gather"),
+    "custom_mesh_and_rule": ("cp-as-ep", "cp-as-ep-dense-no-cp"),
     "decoder_layer_input": ("offload", "device"),
     "gdn_conv1d_dense_token_stack": ("false", "true"),
     "gdn_conv1d_input_in_qkv_dtype": ("false", "true"),
@@ -110,6 +111,10 @@ _BENCH_MAXTEXT_KEYS = (
     "moe_unsplit_prefused_wi",
     "moe_wi_gmm_fused_swiglu",
 )
+# The custom mesh rule TRAINER_TUNED_FLAGS=true selects, which
+# AI-Hypercomputer/maxtext#5783 (on top of #5758) defines and the pin does
+# not: only TRAINER_TUNED_FLAGS=true may pass it.
+_BENCH_MESH_RULE = "cp-as-ep-dense-no-cp"
 # The launch whose trainer the RL trainer bench (AI-Hypercomputer/maxtext#5701)
 # measured TRAINER_TUNED_FLAGS on: the replay layout (buffer factor 2.75 with
 # the dropless replay), with context on device, log-prob chunks of 4096 with
@@ -242,6 +247,8 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(flags["log_moe_drops"], "true")
     # Base-2 exponentials stay on: the block no longer turns them off.
     self.assertEqual(flags["sa_use_base2_exp"], "true")
+    # The block's mesh rule replaces the recipe's cp-as-ep.
+    self.assertEqual(flags["custom_mesh_and_rule"], _BENCH_MESH_RULE)
     self.assertIn("--compute_logps_chunk_size=4096 ", trainer)
     self.assertRegex(trainer, r"\bTUNIX_LOGPS_SHARDED_HEAD=fused\b")
     self.assertRegex(
@@ -557,6 +564,7 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertNotIn("offloading_copy_to_sparsecore", trainer)
     for key in _BENCH_MAXTEXT_KEYS:
       self.assertNotIn(key, flags)
+    self.assertNotIn(_BENCH_MESH_RULE, trainer)
     # The fully dropless buffers and chunks of 512, as before the switch.
     self.assertEqual(flags["ragged_buffer_factor"], "-1")
     self.assertEqual(flags["context"], "offload")
@@ -680,6 +688,7 @@ class SubmissionLauncherTest(absltest.TestCase):
           self.assertEqual(_value(flags, key), off, f"{name}: {key}")
       for key in _BENCH_MAXTEXT_KEYS:
         self.assertNotIn(key, flags, name)
+      self.assertNotIn(_BENCH_MESH_RULE, render, name)
 
   def test_head_and_staging_are_off_in_the_other_397b_v7x_recipes(self):
     for name in (
