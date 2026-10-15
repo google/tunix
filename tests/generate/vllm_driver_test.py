@@ -48,6 +48,20 @@ except ImportError:
   _openai_harmony_stub.Message = Any
   sys.modules["openai_harmony"] = _openai_harmony_stub
 
+for _name in (
+    "xgrammar",
+    "xgrammar.structural_tag",
+    "xgrammar.openai_tool_call_schema",
+):
+  try:
+    importlib.import_module(_name)
+  except ImportError:
+    sys.modules[_name] = mock.MagicMock()
+
+# Import before vllm so vLLM patches it directly instead of adding an import
+# hook, which breaks under TAP's import profiler.
+importlib.import_module("torch._inductor.pattern_matcher")
+
 from absl.testing import absltest  # pylint: disable=g-import-not-at-top
 from tunix.generate.vllm_async_driver import VLLMInProcessDriver  # pylint: disable=g-import-not-at-top
 
