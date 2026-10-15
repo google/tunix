@@ -1124,7 +1124,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           " (request_id=%s, apply_optimizer=%s)",
           role_name,
           time.monotonic() - t_rpc,
-          request.request_id,
+          staged_request_id if staged_request_id is not None else request.request_id,
           apply_optimizer,
       )
       if is_actor:
