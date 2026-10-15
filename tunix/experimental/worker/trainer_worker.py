@@ -55,12 +55,17 @@ class TrainerWorker(abstract_worker.Worker):
   by an orchestrator (either locally or via RPC).
 
   Concurrency contract:
-    When `TUNIX_STAGE_BATCH=stage`, `stage_batch` and `fwd_bwd` are listed in
-    `remote_executor_methods` and execute on `RemoteExecutionServer`'s worker
-    thread pool so `stage_batch(MB k+1)` can prepare and transfer inputs while
-    `fwd_bwd(MB k)` blocks in `InflightThrottler.wait_for_next()`. The
-    orchestrator must serialize `fwd_bwd` calls (at most one `fwd_bwd` in flight
-    at a time) and await any in-flight `fwd_bwd` before calling `get_metrics`,
+    When `TUNIX_STAGE_BATCH=stage`, `stage_batch`, `fwd_bwd` and
+    `apply_deferred_update` are listed in `remote_executor_methods` and execute
+    on `RemoteExecutionServer`'s worker thread pool so `stage_batch(MB k+1)` can
+    prepare and transfer inputs while `fwd_bwd(MB k)` blocks in
+    `InflightThrottler.wait_for_next()`, and so the next step's second
+    micro-batch can be staged while `apply_deferred_update` waits for the
+    device at the step boundary (a method on the loop thread would hold every
+    other request back for that wait). The orchestrator must serialize
+    `fwd_bwd` calls (at most one `fwd_bwd` in flight at a time), send
+    `apply_deferred_update` only once the step's last `fwd_bwd` returned, and
+    await any in-flight `fwd_bwd` before calling `get_metrics`,
     `save_checkpoint`, `prepare_weight_sync`, or `release_weight_sync`.
   """
 
@@ -110,7 +115,7 @@ class TrainerWorker(abstract_worker.Worker):
     # sync, actor log-probs) is accepted.
     self._deferred_update: str | None = None
     self._remote_executor_methods: frozenset[str] = (
-        frozenset({"stage_batch", "fwd_bwd"})
+        frozenset({"stage_batch", "fwd_bwd", "apply_deferred_update"})
         if stage_batch_env_on()
         else frozenset({"stage_batch"})
     )

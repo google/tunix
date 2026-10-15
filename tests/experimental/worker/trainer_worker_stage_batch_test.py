@@ -209,7 +209,8 @@ class TrainerWorkerStageBatchTest(absltest.TestCase):
     ):
       worker = self._worker(StagingFakeTrainer())
       self.assertEqual(
-          worker.remote_executor_methods, frozenset({"stage_batch", "fwd_bwd"})
+          worker.remote_executor_methods,
+          frozenset({"stage_batch", "fwd_bwd", "apply_deferred_update"}),
       )
     with mock.patch.dict(
         os.environ, {trainer_worker.STAGE_BATCH_ENV: "serialize"}, clear=False
