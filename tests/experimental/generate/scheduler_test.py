@@ -21,6 +21,7 @@ import jax.numpy as jnp
 from tunix.experimental.generate import kv_cache_manager
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import scheduler
+from tunix.experimental.rollout import sampler as sampler_lib
 
 
 def _create_cache_config(
@@ -34,9 +35,11 @@ def _create_cache_config(
   bytes_per_layer_page = page_size * (2 * num_kv_heads) * head_dim * 4
   total_device_bytes_per_page = bytes_per_layer_page * num_layers
   total_host_bytes_per_page = bytes_per_layer_page * num_layers
+  gib = 1 << 30
   return kv_cache_manager.CacheConfig(
-      max_device_bytes=total_device_bytes_per_page * num_device_pages,
-      max_host_bytes=total_host_bytes_per_page * num_host_pages,
+      max_device_size_gib=(total_device_bytes_per_page * num_device_pages)
+      / gib,
+      max_host_size_gib=(total_host_bytes_per_page * num_host_pages) / gib,
       page_size=page_size,
       dtype=jnp.float32,
   )
@@ -70,6 +73,18 @@ def _create_scheduler_config(**overrides) -> scheduler.SchedulerConfig:
   )
   kwargs.update(overrides)
   return scheduler.SchedulerConfig(**kwargs)
+
+
+def _create_request(
+    req_id: str,
+    prompt_token_ids: list[int],
+    max_tokens: int = 20,
+) -> request_lib.RequestState:
+  return request_lib.RequestState(
+      req_id=req_id,
+      prompt_token_ids=prompt_token_ids,
+      sampling_params=sampler_lib.SamplingParams(max_tokens=max_tokens),
+  )
 
 
 def _admit(
@@ -147,17 +162,17 @@ class PreemptionTest(parameterized.TestCase):
     _admit(
         self.sched,
         self.kv_mgr,
-        request_lib.RequestState(req_id="r0", prompt_token_ids=[10, 20]),
+        _create_request(req_id="r0", prompt_token_ids=[10, 20]),
     )
     self.sched._pending_requests.append(
-        request_lib.RequestState(req_id="r1", prompt_token_ids=[30])
+        _create_request(req_id="r1", prompt_token_ids=[30])
     )
     self.assertEqual(self.sched.num_active_requests, 2)
 
   def test_preempt_moves_newest_request_to_front_of_pending(self):
-    r0 = request_lib.RequestState(req_id="r0", prompt_token_ids=[10, 20])
-    r1 = request_lib.RequestState(req_id="r1", prompt_token_ids=[30, 40])
-    pending = request_lib.RequestState(req_id="p", prompt_token_ids=[50])
+    r0 = _create_request(req_id="r0", prompt_token_ids=[10, 20])
+    r1 = _create_request(req_id="r1", prompt_token_ids=[30, 40])
+    pending = _create_request(req_id="p", prompt_token_ids=[50])
     _admit(self.sched, self.kv_mgr, r0)
     _admit(self.sched, self.kv_mgr, r1)
     self.sched._pending_requests.append(pending)
@@ -169,7 +184,7 @@ class PreemptionTest(parameterized.TestCase):
     self.assertEqual(r1.status, request_lib.RequestStatus.PENDING)
 
   def test_preempt_discards_kv_but_keeps_tokens(self):
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
+    req = _create_request(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
     _admit(self.sched, self.kv_mgr, req)
     req.num_computed_tokens = 4
     req.token_ids.append(90)
@@ -179,6 +194,7 @@ class PreemptionTest(parameterized.TestCase):
     # A preempted request must re-prefill from scratch.
     self.assertEqual(req.num_computed_tokens, 0)
     self.assertEqual(req.token_ids, [10, 20, 30, 40, 90])
+    self.assertEqual(req.prompt_length, 4)
     self.assertEqual(self.kv_mgr.get_page_idxs(req), {"cache_0": ()})
 
   def test_preempt_all_on_empty_scheduler_is_a_noop(self):
@@ -187,7 +203,7 @@ class PreemptionTest(parameterized.TestCase):
 
   def test_preempt_all_requeues_every_running_request_in_arrival_order(self):
     reqs = [
-        request_lib.RequestState(req_id=f"r{i}", prompt_token_ids=[10 * i, 20, 30])
+        _create_request(req_id=f"r{i}", prompt_token_ids=[10 * i, 20, 30])
         for i in range(3)
     ]
     for req in reqs:
@@ -203,7 +219,7 @@ class PreemptionTest(parameterized.TestCase):
     self.assertEqual(self.sched.num_active_requests, 3)
 
   def test_preempt_all_releases_prefix_hashes(self):
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(12)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(12)))
     _admit(self.sched, self.kv_mgr, req)
     self.assertIn("r1", self.kv_mgr._request_to_prefix_hashes)
 
@@ -214,8 +230,8 @@ class PreemptionTest(parameterized.TestCase):
     self.assertNotIn("r1", self.kv_mgr._request_to_prefix_hashes)
 
   def test_preempt_all_drops_done_requests(self):
-    aborted = request_lib.RequestState(req_id="a", prompt_token_ids=[10, 20])
-    running = request_lib.RequestState(req_id="r", prompt_token_ids=[30, 40])
+    aborted = _create_request(req_id="a", prompt_token_ids=[10, 20])
+    running = _create_request(req_id="r", prompt_token_ids=[30, 40])
     _admit(self.sched, self.kv_mgr, aborted)
     _admit(self.sched, self.kv_mgr, running)
     self.sched.abort_request(aborted)
@@ -253,7 +269,7 @@ class AdmissionTest(parameterized.TestCase):
     req.num_in_flight_tokens = 0
 
   def test_allocate_slots_full_prefill(self):
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
+    req = _create_request(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
 
     self.assertTrue(
         self.sched._try_schedule_request(req, n_admitted_requests=0)
@@ -263,7 +279,7 @@ class AdmissionTest(parameterized.TestCase):
     self.assertFalse(req.is_chunked_prefill)
 
   def test_allocate_slots_chunked_prefill(self):
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(32)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(32)))
 
     self.assertTrue(
         self.sched._try_schedule_request(req, n_admitted_requests=0)
@@ -274,7 +290,7 @@ class AdmissionTest(parameterized.TestCase):
 
   def test_allocate_slots_final_chunk_is_full_prefill(self):
     # Exactly one chunk of tokens remains, so this step samples.
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(16)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(16)))
 
     self.assertTrue(
         self.sched._try_schedule_request(req, n_admitted_requests=0)
@@ -284,7 +300,7 @@ class AdmissionTest(parameterized.TestCase):
     self.assertFalse(req.is_chunked_prefill)
 
   def test_allocate_slots_single_token_is_decode(self):
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=[42])
+    req = _create_request(req_id="r1", prompt_token_ids=[42])
 
     self.assertTrue(
         self.sched._try_schedule_request(req, n_admitted_requests=0)
@@ -294,7 +310,7 @@ class AdmissionTest(parameterized.TestCase):
     self.assertFalse(req.is_chunked_prefill)
 
   def test_allocate_slots_skips_prefix_cache_hit(self):
-    cached = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(12)))
+    cached = _create_request(req_id="r1", prompt_token_ids=list(range(12)))
     self.assertTrue(
         self.sched._try_schedule_request(cached, n_admitted_requests=0)
     )
@@ -303,7 +319,7 @@ class AdmissionTest(parameterized.TestCase):
 
     # The first 3 pages (12 tokens) are cached, so only the last 2 prompt
     # tokens need computing.
-    req = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(14)))
+    req = _create_request(req_id="r2", prompt_token_ids=list(range(14)))
     self.assertTrue(
         self.sched._try_schedule_request(req, n_admitted_requests=0)
     )
@@ -316,7 +332,7 @@ class AdmissionTest(parameterized.TestCase):
     sched = self._create_scheduler(
         kv_mgr=_create_kv_cache_manager(page_size=4, num_device_pages=1)
     )
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
 
     self.assertFalse(sched._try_schedule_request(req, n_admitted_requests=0))
     self.assertEqual(req.num_computed_tokens, 0)
@@ -326,7 +342,7 @@ class AdmissionTest(parameterized.TestCase):
   def test_schedule_pending_respects_max_num_seqs(self):
     for i in range(6):
       self.sched._pending_requests.append(
-          request_lib.RequestState(req_id=f"r{i}", prompt_token_ids=[i])
+          _create_request(req_id=f"r{i}", prompt_token_ids=[i])
       )
 
     self.sched._schedule_requests()
@@ -338,8 +354,8 @@ class AdmissionTest(parameterized.TestCase):
 
   def test_schedule_pending_chunked_prefill_needs_a_full_chunk_of_budget(self):
     sched = self._create_scheduler(max_num_batched_tokens=16)
-    r0 = request_lib.RequestState(req_id="r0", prompt_token_ids=list(range(8)))
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(32)))
+    r0 = _create_request(req_id="r0", prompt_token_ids=list(range(8)))
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(32)))
     sched._pending_requests.extend([r0, req])
 
     sched._schedule_requests()
@@ -352,8 +368,8 @@ class AdmissionTest(parameterized.TestCase):
 
   def test_schedule_pending_stops_at_token_budget(self):
     sched = self._create_scheduler(max_num_batched_tokens=16)
-    r1 = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
-    r2 = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(12)))
+    r1 = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
+    r2 = _create_request(req_id="r2", prompt_token_ids=list(range(12)))
     sched._pending_requests.extend([r1, r2])
 
     sched._schedule_requests()
@@ -370,9 +386,9 @@ class AdmissionTest(parameterized.TestCase):
     sched = self._create_scheduler(
         kv_mgr=_create_kv_cache_manager(page_size=4, num_device_pages=2)
     )
-    r1 = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(4)))
-    r2 = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(8)))
-    r3 = request_lib.RequestState(req_id="r3", prompt_token_ids=list(range(4)))
+    r1 = _create_request(req_id="r1", prompt_token_ids=list(range(4)))
+    r2 = _create_request(req_id="r2", prompt_token_ids=list(range(8)))
+    r3 = _create_request(req_id="r3", prompt_token_ids=list(range(4)))
     sched._pending_requests.extend([r1, r2, r3])
 
     sched._schedule_requests()
@@ -387,8 +403,8 @@ class AdmissionTest(parameterized.TestCase):
         kv_mgr=_create_kv_cache_manager(page_size=4, num_device_pages=2)
     )
     # Each request fills 1 page, so the cache is full.
-    r1 = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(4)))
-    r2 = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(4)))
+    r1 = _create_request(req_id="r1", prompt_token_ids=list(range(4)))
+    r2 = _create_request(req_id="r2", prompt_token_ids=list(range(4)))
     sched._pending_requests.extend([r1, r2])
     sched._schedule_requests()
     self._complete_step(r1, 90)
@@ -403,9 +419,9 @@ class AdmissionTest(parameterized.TestCase):
 
   def test_schedule_running_preempts_requests_beyond_token_budget(self):
     sched = self._create_scheduler(max_num_batched_tokens=16)
-    r1 = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
-    r2 = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(8, 16)))
-    r3 = request_lib.RequestState(req_id="r3", prompt_token_ids=list(range(16, 24)))
+    r1 = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
+    r2 = _create_request(req_id="r2", prompt_token_ids=list(range(8, 16)))
+    r3 = _create_request(req_id="r3", prompt_token_ids=list(range(16, 24)))
     _admit(sched, self.kv_mgr, r1)
     _admit(sched, self.kv_mgr, r2)
     _admit(sched, self.kv_mgr, r3)
@@ -419,8 +435,8 @@ class AdmissionTest(parameterized.TestCase):
 
   def test_preempted_running_request_resumes_next_step(self):
     sched = self._create_scheduler(max_num_batched_tokens=16)
-    prefill = request_lib.RequestState(req_id="p", prompt_token_ids=list(range(16)))
-    decode = request_lib.RequestState(req_id="d", prompt_token_ids=[100, 101])
+    prefill = _create_request(req_id="p", prompt_token_ids=list(range(16)))
+    decode = _create_request(req_id="d", prompt_token_ids=[100, 101])
     _admit(sched, self.kv_mgr, prefill)
     _admit(sched, self.kv_mgr, decode)
     self._complete_step(decode, 102)
@@ -459,12 +475,12 @@ class ScheduleStepTest(parameterized.TestCase):
     )
 
   def test_num_active_requests_counts_pending(self):
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=[10, 20, 30])
+    req = _create_request(req_id="r1", prompt_token_ids=[10, 20, 30])
     self.sched._pending_requests.append(req)
     self.assertEqual(self.sched.num_active_requests, 1)
 
   def test_schedule_step_full_prefill(self):
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
+    req = _create_request(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
     scheduled, dist = self.sched.schedule_step([req])
 
     self.assertLen(scheduled, 1)
@@ -488,7 +504,7 @@ class ScheduleStepTest(parameterized.TestCase):
         kv_cache_manager=self.kv_mgr,
     )
     prompt = list(range(32))
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=prompt)
+    req = _create_request(req_id="r1", prompt_token_ids=prompt)
     scheduled, dist = sched.schedule_step([req])
 
     self.assertLen(scheduled, 1)
@@ -498,7 +514,7 @@ class ScheduleStepTest(parameterized.TestCase):
     self.assertFalse(req.is_decode)
 
   def test_single_token_prompt_schedules_as_decode(self):
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=[42])
+    req = _create_request(req_id="r1", prompt_token_ids=[42])
     scheduled, dist = self.sched.schedule_step([req])
 
     self.assertLen(scheduled, 1)
@@ -508,9 +524,9 @@ class ScheduleStepTest(parameterized.TestCase):
     self.assertFalse(req.is_chunked_prefill)
 
   def test_schedule_step_orders_decodes_then_chunked_then_prefills(self):
-    prefill = request_lib.RequestState(req_id="p", prompt_token_ids=[10, 20, 30])
-    chunked = request_lib.RequestState(req_id="c", prompt_token_ids=list(range(32)))
-    decode = request_lib.RequestState(req_id="d", prompt_token_ids=[42])
+    prefill = _create_request(req_id="p", prompt_token_ids=[10, 20, 30])
+    chunked = _create_request(req_id="c", prompt_token_ids=list(range(32)))
+    decode = _create_request(req_id="d", prompt_token_ids=[42])
 
     scheduled, dist = self.sched.schedule_step([prefill, chunked, decode])
 
@@ -521,7 +537,7 @@ class ScheduleStepTest(parameterized.TestCase):
   def test_max_num_seqs_limit(self):
     # Config max_num_seqs is 4
     reqs = [
-        request_lib.RequestState(req_id=f"r{i}", prompt_token_ids=[i])
+        _create_request(req_id=f"r{i}", prompt_token_ids=[i])
         for i in range(6)
     ]
     scheduled, _ = self.sched.schedule_step(reqs)
@@ -540,20 +556,21 @@ class ScheduleStepTest(parameterized.TestCase):
     )
     sched = scheduler.Scheduler(config=config, kv_cache_manager=self.kv_mgr)
 
-    req1 = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
-    req2 = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(100, 112)))
+    req1 = _create_request(req_id="r1", prompt_token_ids=list(range(8)))
+    req2 = _create_request(req_id="r2", prompt_token_ids=list(range(100, 112)))
 
-    scheduled, _ = sched.schedule_step([req1, req2])
+    scheduled, dist = sched.schedule_step([req1, req2])
     # req1 uses 8 tokens, leaving 8.
     # req2 needs 12 tokens, which exceeds remaining budget 8, so it stays in
     # pending.
     self.assertLen(scheduled, 1)
     self.assertEqual(scheduled[0].request_id, "r1")
-    self.assertEqual(list(sched._pending_requests), [req2])
+    self.assertEqual(dist, (0, 0, 1))
     self.assertEqual(list(sched._running_requests), [req1])
+    self.assertEqual(list(sched._pending_requests), [req2])
 
   def test_aborted_pending_request_is_never_scheduled(self):
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=[10, 20, 30])
+    req = _create_request(req_id="r1", prompt_token_ids=[10, 20, 30])
     self.sched._pending_requests.append(req)
 
     self.sched.abort_request(req)
@@ -564,7 +581,7 @@ class ScheduleStepTest(parameterized.TestCase):
     self.assertEmpty(self.sched._pending_requests)
 
   def test_aborted_running_request_is_released_next_step(self):
-    req = request_lib.RequestState(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
+    req = _create_request(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
     self.sched.schedule_step([req])
 
     self.sched.abort_request(req)
@@ -577,6 +594,15 @@ class ScheduleStepTest(parameterized.TestCase):
     self.assertEmpty(self.sched._running_requests)
     self.assertEqual(self.kv_mgr.get_page_idxs(req), {"cache_0": ()})
 
+  def test_abort_after_finish_keeps_finished_status(self):
+    req = _create_request(req_id="r1", prompt_token_ids=[10, 20])
+    req.status = request_lib.RequestStatus.FINISHED_EOS
+
+    self.sched.abort_request(req)
+
+    self.assertEqual(req.status, request_lib.RequestStatus.FINISHED_EOS)
+
 
 if __name__ == "__main__":
   absltest.main()
+
