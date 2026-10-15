@@ -18,10 +18,11 @@
 sampling on device.
 """
 
+from collections.abc import Sequence
 import dataclasses
 import functools
 import operator
-from typing import Any
+from typing import Any, TypeVar
 
 from flax import nnx
 from flax import struct
@@ -83,7 +84,7 @@ class SamplingMetadata:
   @classmethod
   def from_sampling_params(
       cls,
-      sampling_params: tuple[sampler_lib.SamplingParams, ...],
+      sampling_params: Sequence[sampler_lib.SamplingParams],
       num_rows: int,
       max_top_k: int,
   ) -> 'SamplingMetadata':
@@ -197,6 +198,63 @@ def sample(
   return next_tokens, logp_sampled[:, 0]
 
 
+Cache = dict[str, jax.Array]
+_PyTree = TypeVar('_PyTree')
+
+
+@struct.dataclass
+class RPAMetadata:
+  """Execution metadata for the Ragged Paged Attention kernel.
+
+  Rows are ordered `[decodes, chunked prefills, full prefills]`, followed by
+  padding rows up to the batch's row capacity.
+  """
+
+  # `[num_rows, max_pages_per_seq]` physical page indices of each row, keyed by
+  # the name of the KV cache they index.
+  page_indices: dict[str, jax.Array | np.ndarray]
+  # `[num_rows]` KV length of each row, including the tokens it runs this step.
+  kv_lens: jax.Array | np.ndarray
+  # `[num_rows]` number of tokens each row runs this step.
+  query_lens: jax.Array | np.ndarray
+  # `[3]` row layout `(num_decodes, num_chunked_end, num_seqs)`: the decodes
+  # are rows `[0, i)`, the chunked prefills `[i, j)` and the full prefills
+  # `[j, k)`.
+  distribution: jax.Array | np.ndarray
+  chunk_prefill_size: int | None = struct.field(
+      default=None, pytree_node=False
+  )
+
+
+@functools.partial(jax.jit, static_argnames=['num_steps'])
+def _stack_steps(
+    first_step: jax.Array,
+    decode_steps: jax.Array | None,
+    num_steps: int,
+) -> jax.Array:
+  """Packs per-step outputs into a `[num_rows, num_steps, ...]` device array.
+
+  Args:
+    first_step: The `[num_rows, ...]` output of the scheduled batch's step.
+    decode_steps: The `[num_scheduler_steps - 1, num_rows, ...]` output of the
+      decode loop, or None when the loop did not run.
+    num_steps: The step capacity to pad out to.
+
+  Returns:
+    The outputs indexed by `[row, step, ...]`.
+  """
+  if decode_steps is not None:
+    return jnp.concatenate(
+        [first_step[:, None], jnp.swapaxes(decode_steps, 0, 1)], axis=1
+    )
+  if num_steps == 1:
+    return first_step[:, None]
+  out = jnp.zeros(
+      (first_step.shape[0], num_steps, *first_step.shape[1:]),
+      dtype=first_step.dtype,
+  )
+  return out.at[:, 0].set(first_step)
+
 class ModelRunner:
   """Runs the transformer forward pass and samples tokens."""
 
@@ -221,6 +279,17 @@ class ModelRunner:
     )
 
     self._config = config
+    self._rng = self._to_device(jax.random.PRNGKey(config.seed))
+
+    self._compiled_model_step_fn = jax.jit(
+        self._model_step_fn,
+        donate_argnames=['cache'],
+    )
+    self._compiled_decode_loop_fn = jax.jit(
+        self._decode_loop_fn,
+        donate_argnames=['cache'],
+        static_argnames=['num_steps'],
+    )
 
   @property
   def config(self) -> ModelRunnerConfig:
@@ -377,3 +446,318 @@ class ModelRunner:
     ):
       return self.transformer.config.dtype
     return self._flattened_transformer_state[0].dtype
+
+  def _get_token_positions(
+      self,
+      tokens: jax.Array,
+      metadata: RPAMetadata,
+  ) -> jax.Array:
+    """Returns the positions of each token within its sequence."""
+    total_capacity = tokens.shape[0]
+    n_rows = metadata.query_lens.shape[0]
+
+    # Example:
+    # tokens: [a, b, c, d, e, f, PAD, PAD]
+    # query_lens: [2, 1, 3]
+    # row_idxs: [0, 0, 1, 2, 2, 2, 2, 2]
+    row_idxs = jnp.repeat(
+        jnp.arange(n_rows),
+        metadata.query_lens,
+        total_repeat_length=total_capacity,
+    )
+
+    # Example:
+    # tokens: [a, b, c, d, e, f, PAD, PAD]
+    # query_lens: [2, 1, 3]
+    # intra_offsets: [0, 1, 0, 0, 1, 2, 3, 4]
+    local_positions = jnp.arange(total_capacity)
+    starts = jnp.zeros_like(metadata.query_lens)
+    if len(metadata.query_lens) > 0:
+      starts = starts.at[1:].set(jnp.cumsum(metadata.query_lens)[:-1])
+    intra_offsets = local_positions - starts[row_idxs]
+
+    # KV lens includes the query tokens. This yields the length of the sequences
+    # before appending the query tokens.
+    curr_seq_lens = metadata.kv_lens - metadata.query_lens
+
+    return intra_offsets + curr_seq_lens[row_idxs]
+
+  def _model_step_fn(
+      self,
+      params: list[nnx.Variable],
+      cache: Cache,
+      tokens: jax.Array,
+      metadata: RPAMetadata,
+      sampling_metadata: SamplingMetadata,
+      rng: jax.Array,
+  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
+    """Runs the model over a mixed batch and samples the next tokens.
+
+    Args:
+      params: The flattened transformer state to run with.
+      cache: The physical KV cache pages to read and write.
+      tokens: The ragged array of tokens for the batch.
+      metadata: Ragged execution metadata for the attention kernel.
+      sampling_metadata: Each row's sampling settings.
+      rng: PRNG key to split for sampling this step.
+
+    Returns:
+      A tuple of
+      - next_tokens: `[num_rows]` array of sampled tokens.
+      - logits: `[num_rows, vocab_size]` array of logits, or None.
+      - logprobs: `[num_rows]` array of logprobs, or None.
+      - updated_cache: The updated KV cache pages.
+      - rng: The updated PRNG key for subsequent steps.
+    """
+    config = self._config
+
+    transformer = nnx.merge(self._transformer_graphdef, params)
+    positions = self._get_token_positions(tokens, metadata)
+
+    # Each row samples from the logits of its last token, so the model only
+    # computes those.
+    last_token_idxs = jnp.maximum(0, jnp.cumsum(metadata.query_lens) - 1)
+    logits, updated_cache = transformer(
+        tokens,
+        positions,
+        cache=cache,
+        metadata=metadata,
+        mesh=config.mesh,
+        logits_idxs=last_token_idxs,
+    )
+
+    rng, step_rng = jax.random.split(rng)
+    next_tokens, logp = sample(
+        logits,
+        step_rng,
+        sampling_metadata,
+        max_top_k=config.max_top_k,
+        return_logprobs=config.return_logprobs,
+    )
+
+    res_logits = logits if config.return_logits else None
+    return next_tokens, res_logits, logp, updated_cache, rng
+
+  def _decode_loop_fn(
+      self,
+      params: list[nnx.Variable],
+      cache: Cache,
+      next_tokens: jax.Array,
+      metadata: RPAMetadata,
+      sampling_metadata: SamplingMetadata,
+      rng: jax.Array,
+      num_steps: int,
+  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
+    """Decodes `num_steps` tokens from the batch `metadata` just ran.
+
+    Args:
+      params: The flattened transformer state to run with.
+      cache: The physical KV cache pages to read and write.
+      next_tokens: The tokens sampled by the step that just ran, indexed by the
+        row of the scheduled batch.
+      metadata: The metadata of the step that just ran.
+      sampling_metadata: The sampling settings of the step that just ran,
+        indexed by the row of the scheduled batch.
+      rng: PRNG key to split across decode steps.
+      num_steps: How many decode steps to run.
+
+    Returns:
+      A tuple of
+      - tokens: `[num_steps, num_rows]` array of sampled tokens.
+      - logits: `[num_steps, num_rows, vocab_size]` array of logits, or None.
+      - logprobs: `[num_steps, num_rows]` array of logprobs, or None.
+      - updated cache: The updated KV cache pages.
+      - rng: The updated PRNG key for subsequent steps.
+    """
+    num_rows = metadata.query_lens.shape[0]
+    distribution = metadata.distribution
+
+    # Rows are ordered `[decodes, chunked prefills, full prefills]`. A chunked
+    # prefill still has prompt left to process, so its sampled token is
+    # discarded and it leaves the batch for the decode loop.
+    rows = jnp.arange(num_rows, dtype=jnp.int32)
+    is_chunked_prefill = (rows >= distribution[0]) & (rows < distribution[1])
+    is_surviving = (rows < distribution[2]) & ~is_chunked_prefill
+    num_decodes = distribution[0]
+    num_full_prefills = distribution[2] - distribution[1]
+    num_surviving = num_decodes + num_full_prefills
+    # Move the surviving rows to the front.
+    order = jnp.argsort(~is_surviving)
+
+    query_lens = jnp.where(rows < num_surviving, jnp.int32(1), jnp.int32(0))
+    kv_lens = (
+        jnp.where(
+            rows < num_surviving,
+            jnp.asarray(metadata.kv_lens, dtype=jnp.int32)[order],
+            jnp.int32(0),
+        )
+        + query_lens
+    )
+    decode_metadata = RPAMetadata(
+        page_indices={
+            cache_name: jnp.asarray(idxs, dtype=jnp.int32)[order]
+            for cache_name, idxs in metadata.page_indices.items()
+        },
+        kv_lens=kv_lens,
+        query_lens=query_lens,
+        distribution=jnp.full_like(
+            distribution, num_surviving, dtype=jnp.int32
+        ),
+        chunk_prefill_size=metadata.chunk_prefill_size,
+    )
+
+    # Each surviving request's sampling settings move along with its row. The
+    # rows past `num_surviving` become padding.
+    def compact(values, padding):
+      arr = jnp.asarray(values)
+      return jnp.where(
+          rows < num_surviving,
+          arr[order],
+          jnp.asarray(padding, dtype=arr.dtype),
+      )
+
+    decode_sampling_metadata = SamplingMetadata(
+        temperature=compact(sampling_metadata.temperature, jnp.float32(0.0)),
+        top_p=compact(sampling_metadata.top_p, jnp.float32(1.0)),
+        top_k=compact(sampling_metadata.top_k, jnp.int32(1)),
+    )
+
+    # Each surviving sequence feeds the token it just sampled back in, packed
+    # into the leading rows to match the compacted metadata.
+    decode_tokens = next_tokens[order]
+    inverse_order = jnp.argsort(order)
+
+    def decode_step(carry, _):
+      cache, tokens, kv_lens, rng = carry
+      step_metadata = dataclasses.replace(decode_metadata, kv_lens=kv_lens)
+      next_tokens, logits, logp, cache, rng = self._model_step_fn(
+          params,
+          cache,
+          tokens,
+          step_metadata,
+          decode_sampling_metadata,
+          rng,
+      )
+      carry = (cache, next_tokens, kv_lens + query_lens, rng)
+      return carry, (next_tokens, logits, logp)
+
+    carry, outputs = jax.lax.scan(
+        decode_step,
+        (cache, decode_tokens, decode_metadata.kv_lens, rng),
+        xs=None,
+        length=num_steps,
+    )
+    cache, _, _, rng = carry
+    tokens, logits, logp = outputs
+    # Send each output row back to the scheduled row it came from.
+    return (
+        tokens[:, inverse_order],
+        logits[:, inverse_order] if logits is not None else None,
+        logp[:, inverse_order] if logp is not None else None,
+        cache,
+        rng,
+    )
+
+  def _to_device(self, tree: _PyTree) -> _PyTree:
+    """Moves host arrays onto the device, replicated across the mesh."""
+    return jax.device_put(
+        tree,
+        jax.sharding.NamedSharding(
+            self._config.mesh, jax.sharding.PartitionSpec()
+        ),
+    )
+
+  def execute_step(
+      self,
+      cache: Cache,
+      tokens: jax.Array,
+      metadata: RPAMetadata,
+      sampling_params: Sequence[sampler_lib.SamplingParams],
+  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache]:
+    """Runs model forward passes on a batch of requests, and samples tokens.
+
+    Note: This function runs `num_scheduler_steps` forward passes, and samples
+    `num_scheduler_steps` tokens.
+
+    Args:
+      cache: The physical KV cache pages to read and write.
+      tokens: The ragged array of tokens for the batch.
+      metadata: Ragged execution metadata for the attention kernel.
+      sampling_params: The sampling settings of each scheduled request, in row
+        order.
+
+    Returns:
+      A tuple of:
+        - tokens: `[num_rows, num_scheduler_steps]` array of sampled tokens.
+        - logits: `[num_rows, num_scheduler_steps, vocab_size]` array of
+          logits, or None.
+        - logprobs: `[num_rows, num_scheduler_steps]` array of logprobs, or
+          None.
+        - updated cache: The updated KV cache pages.
+
+    Raises:
+      ValueError: If `sampling_params` does not hold one entry per scheduled
+        request.
+    """
+    config = self._config
+    num_rows = metadata.query_lens.shape[0]
+    num_scheduled = int(metadata.distribution[2])
+    if len(sampling_params) != num_scheduled:
+      raise ValueError(
+          f'Got {len(sampling_params)} sampling params for {num_scheduled}'
+          ' scheduled requests.'
+      )
+
+    device_metadata, sampling_metadata = self._to_device((
+        metadata,
+        SamplingMetadata.from_sampling_params(
+            sampling_params, num_rows, self._config.max_top_k
+        ),
+    ))
+
+    next_tokens, logits, logp, cache, self._rng = self._compiled_model_step_fn(
+        self._flattened_transformer_state,
+        cache,
+        tokens,
+        device_metadata,
+        sampling_metadata,
+        self._rng,
+    )
+    num_steps = config.num_scheduler_steps
+
+    # Chunked prefills drop out, but the rest of the batch carries on.
+    distribution = metadata.distribution
+
+    # distribution = [i, j, k]
+    # i: num decodes
+    # j: i + num chunked prefills
+    # k: j + num full prefills
+    # num_surviving: num decodes + num full prefills = i + k - j
+    num_surviving = distribution[0] + distribution[2] - distribution[1]
+
+    num_decode_steps = num_steps - 1 if num_surviving else 0
+
+    decode_tokens = decode_logits = decode_logp = None
+    if num_decode_steps:
+      decode_tokens, decode_logits, decode_logp, cache, self._rng = (
+          self._compiled_decode_loop_fn(
+              self._flattened_transformer_state,
+              cache,
+              next_tokens,
+              device_metadata,
+              sampling_metadata,
+              self._rng,
+              num_steps=num_decode_steps,
+          )
+      )
+
+    out_tokens = _stack_steps(next_tokens, decode_tokens, num_steps)
+    out_logits = (
+        _stack_steps(logits, decode_logits, num_steps)
+        if logits is not None
+        else None
+    )
+    out_logp = (
+        _stack_steps(logp, decode_logp, num_steps) if logp is not None else None
+    )
+    return out_tokens, out_logits, out_logp, cache
