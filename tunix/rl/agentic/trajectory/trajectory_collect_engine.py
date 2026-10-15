@@ -68,6 +68,8 @@ class TrajectoryCollectEngine:
       gamma: float = 1.0,
       max_response_length: Optional[int] = None,
       timeout: float = 600.0,
+      reset_timeout: Optional[float] = 3600.0,
+      final_reward_timeout: Optional[float] = 3600.0,
       tokenizer=None,
       chat_parser=None,
       filter_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
@@ -97,6 +99,15 @@ class TrajectoryCollectEngine:
         timeout (float): Maximum episode duration in seconds before timeout
           termination. Model calls after the first turn are cut off, and no
           model call or env.step starts, once it is spent.
+        reset_timeout (Optional[float]): Deadline in seconds for `env.reset`;
+          if it passes, `collect()` raises `asyncio.TimeoutError` and closes the
+          env while `env.reset` may still run in its executor thread. Defaults
+          to 3600.0; None means no deadline.
+        final_reward_timeout (Optional[float]): Deadline in seconds for the
+          env's `final_reward_fn`; if it passes, `collect()` raises
+          `asyncio.TimeoutError` and closes the env while the grader may still
+          run in its executor thread. Defaults to 3600.0; None means no
+          deadline.
         tokenizer: Optional tokenizer for converting messages to token IDs. This
           is required if we want to track down token counts.
         chat_parser: Optional chat parser for formatting messages
@@ -144,6 +155,8 @@ class TrajectoryCollectEngine:
     # lazily from the parser (see `_assistant_suffix_len`).
     self._assistant_suffix_len_cache: Optional[int] = None
     self.timeout = timeout
+    self.reset_timeout = reset_timeout
+    self.final_reward_timeout = final_reward_timeout
 
     # Tokenizer utilities for stepwise tokenization
     self.tokenizer = tokenizer
@@ -746,7 +759,9 @@ class TrajectoryCollectEngine:
     }
 
     logging.debug("%s env.reset starting", self._debug_prefix)
-    (obs, info), wall_time = await self._run_with_timing(self.env.reset)
+    (obs, info), wall_time = await self._run_with_timing(
+        self.env.reset, timeout=self.reset_timeout
+    )
     logging.debug(
         "%s env.reset done in %.1fs",
         self._debug_prefix,
@@ -1303,7 +1318,9 @@ class TrajectoryCollectEngine:
       # is provided or no step is taken.
       logging.debug("%s Final reward function is skipped", self._debug_prefix)
       return
-    final_reward, wall_time = await self._run_with_timing(self.final_reward_fn)
+    final_reward, wall_time = await self._run_with_timing(
+        self.final_reward_fn, timeout=self.final_reward_timeout
+    )
 
     self.reward_time["reward_latency"] += wall_time
     last_step.reward += final_reward

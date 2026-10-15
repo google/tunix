@@ -861,6 +861,53 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertLen(result_traj.steps, 1)
     self.assertFalse(result_traj.steps[-1].done)
 
+  def test_reset_timeout_raises(self):
+    self.mock_env.reset.side_effect = lambda: time.sleep(0.5)
+    default_engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+    )
+    self.assertEqual(default_engine.reset_timeout, 3600.0)
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        reset_timeout=0.1,
+    )
+    with self.assertRaises(asyncio.TimeoutError):
+      asyncio.run(self._run_collect(engine))
+
+    self.assertEqual(
+        self.trajectory.status, agent_types.TrajectoryStatus.TIMEOUT
+    )
+    self.mock_model_call.assert_not_called()
+    self.mock_env.close.assert_called_once()
+
+  def test_final_reward_timeout_raises(self):
+    self.mock_final_reward_fn.side_effect = lambda: time.sleep(0.5)
+    default_engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+    )
+    self.assertEqual(default_engine.final_reward_timeout, 3600.0)
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        final_reward_timeout=0.1,
+    )
+    with self.assertRaises(asyncio.TimeoutError):
+      asyncio.run(self._run_collect(engine))
+
+    self.assertEqual(
+        self.trajectory.status, agent_types.TrajectoryStatus.TIMEOUT
+    )
+    self.mock_env.close.assert_called_once()
+
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_overlong_filter_masks_out_and_skips_reward(self, mock_convert):
     # Setup for MAX_STEPS_REACHED
