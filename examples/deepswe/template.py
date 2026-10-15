@@ -1228,7 +1228,11 @@ RELOCATED_TESTBED_VENV_PATH = "/opt/testbed-venv"
 # of running with a half-moved venv.
 RELOCATE_TESTBED_VENV_CMD = (
     "if [ -d /testbed/.venv ] && [ ! -L /testbed/.venv ]; then"
-    f" {{ mv -T /testbed/.venv {RELOCATED_TESTBED_VENV_PATH}"
+    f" if [ -e {RELOCATED_TESTBED_VENV_PATH} ]; then"
+    " echo 'relocating /testbed/.venv failed: destination already exists'"
+    " >&2; exit 1;"
+    " fi;"
+    f" {{ mv /testbed/.venv {RELOCATED_TESTBED_VENV_PATH}"
     f" && ln -s {RELOCATED_TESTBED_VENV_PATH} /testbed/.venv"
     " && mkdir -p /testbed/.git/info"
     " && echo '/.venv' >> /testbed/.git/info/exclude; }"

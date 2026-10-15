@@ -279,7 +279,10 @@ def test_relocate_testbed_venv_cmd_fails_loudly(tmp_path):
       text=True,
   )
   assert res.returncode == 1
-  assert "relocating /testbed/.venv failed" in res.stderr.replace(root, "")
+  assert (
+      "relocating /testbed/.venv failed: destination already exists"
+      in res.stderr.replace(root, "")
+  )
   assert "reached" not in res.stdout
   assert os.path.isdir(os.path.join(root, "testbed", ".venv"))
   assert not os.path.islink(os.path.join(root, "testbed", ".venv"))

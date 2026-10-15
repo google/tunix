@@ -454,6 +454,9 @@ export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox}"
 export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-${NUM_GENERATIONS_TO_DISPATCH:-${NUM_GENERATIONS:-16}}}"
 export SANDBOX_WAIT_INITIAL="${SANDBOX_WAIT_INITIAL:-false}"
 export SANDBOX_IMAGE_PULL_POLICY="${SANDBOX_IMAGE_PULL_POLICY:-IfNotPresent}"
+# Move /testbed/.venv out of the repo so the agent's repo-wide find/grep skip
+# the ~6k installed-dependency files (prompt and grading are unchanged).
+export SANDBOX_RELOCATE_VENV="${SANDBOX_RELOCATE_VENV:-1}"
 export PREPULL_SANDBOX_IMAGES="${PREPULL_SANDBOX_IMAGES:-true}"
 export PREPULL_IMAGES_FILE="${PREPULL_IMAGES_FILE:-${DATASET_PATH}/sandbox_images.txt}"
 export PREWARM_IMAGES_FILE="${PREWARM_IMAGES_FILE:-${PREPULL_IMAGES_FILE}}"
