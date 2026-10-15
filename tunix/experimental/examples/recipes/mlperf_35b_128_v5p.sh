@@ -46,6 +46,7 @@ export MAXTEXT_MODEL_NAME="qwen3.5-35b-a3b"
 # use_gdn_kernel=true requires TRAINER_MESH_TP=1 (the GDN kernel shard_map does not shard over 'tensor').
 # Mesh product: 32 * 1 * 1 * 2 = 64 devices.
 export TRAINER_JOBSET_YAML="${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}"
+export TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES="${TRAINER_IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES:-16777216}"
 export TRAINER_TPU_SLICE="${TRAINER_TPU_SLICE:-tpuv5:4x4x4}"
 export TRAINER_MESH_FSDP="${TRAINER_MESH_FSDP:-32}"
 export TRAINER_MESH_TP="${TRAINER_MESH_TP:-1}"
