@@ -21,6 +21,7 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.dist_rl.rollout import sampler as sampler_lib
+from tunix.models import paged_attention
 from tunix.rl import reshard
 from tunix.tests import test_common as tc
 
@@ -525,9 +526,9 @@ class _UniformTransformer(nnx.Module):
 
 def _rpa_metadata(
     kv_lens: list[int], query_lens: list[int], distribution: list[int]
-) -> model_runner_lib.RPAMetadata:
+) -> paged_attention.PagedAttnMetadata:
   num_rows = len(query_lens)
-  return model_runner_lib.RPAMetadata(
+  return paged_attention.PagedAttnMetadata(
       page_indices={
           'layer_0': np.arange(2 * num_rows, dtype=np.int32).reshape(
               num_rows, 2

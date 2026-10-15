@@ -363,12 +363,12 @@ class StepTest(parameterized.TestCase):
         chunked_prefill_length=16,
     )
     spy = spy_on_execute_step(engine)
-    engine.add_request(testing_utils.make_request('0', [1, 2, 3]))
+    engine.add_request(testing_utils.make_request('0', [1] * 16))
 
     engine.step()
 
     metadata = spy.call_args_list[0].kwargs['metadata']
-    self.assertEqual(metadata.chunk_prefill_size, expected)
+    self.assertEqual(metadata.query_lens[0], expected)
 
   @parameterized.parameters(2, 3)
   def test_multi_step_decode(self, num_scheduler_steps):
