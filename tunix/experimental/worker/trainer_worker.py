@@ -233,6 +233,11 @@ class TrainerWorker(abstract_worker.Worker):
     # needs it closed (another micro-batch, metrics, a checkpoint, a weight
     # sync, actor log-probs) is accepted.
     self._deferred_update: str | None = None
+    # Created once here: the timer outlives the RPCs of a step, so nothing on
+    # the request path may replace it (a fresh one per call leaves the
+    # record with only the last RPC's entries).
+    self._step_timer = StepTimer()
+    self._missing_timing_tokens: set[str] = set()
 
   def _refuse_while_update_deferred(self, method: str) -> None:
     if self._deferred_update is not None:
@@ -241,8 +246,6 @@ class TrainerWorker(abstract_worker.Worker):
           f" last micro-batch was {self._deferred_update!r} is deferred; run"
           " apply_deferred_update() first."
       )
-    self._step_timer = StepTimer()
-    self._missing_timing_tokens: set[str] = set()
 
   def _policy_version(self) -> int:
     if self._trainer is None:
