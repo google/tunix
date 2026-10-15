@@ -123,12 +123,12 @@ class ImageProcessor:
           (self._height, self._width, self._channels), dtype=np.float32
       )
     elif isinstance(image, str):
-      image = Image.open(image)
+      image = Image.open(image)  # pyrefly: ignore[bad-assignment]
     elif isinstance(image, np.ndarray):
-      image = Image.fromarray(image)
+      image = Image.fromarray(image)  # pyrefly: ignore[bad-assignment]
 
     # Resize the image.
-    image = image.resize(
+    image = image.resize(  # pyrefly: ignore[missing-attribute]
         (self._width, self._height),  # Weird gotcha: PIL expects width first.
         resample=Image.Resampling.BILINEAR,
     )
@@ -241,7 +241,7 @@ def aspect_ratio_preserving_resize(
 
   pil_image = Image.fromarray(image)
   pil_image = pil_image.resize(
-      (target_width, target_height), resample=Image.BICUBIC
+      (target_width, target_height), resample=Image.BICUBIC  # pyrefly: ignore[missing-attribute]
   )
   return np.array(pil_image)
 
