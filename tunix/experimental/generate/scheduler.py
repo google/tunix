@@ -18,6 +18,7 @@ import collections
 from collections.abc import Sequence
 import dataclasses
 import functools
+import itertools
 
 from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import request as request_lib
@@ -89,7 +90,71 @@ class Scheduler:
 
   @property
   def num_active_requests(self) -> int:
-    return len(self._running_requests) + len(self._pending_requests)
+    return sum(
+        not req.is_done
+        for req in itertools.chain(
+            self._running_requests, self._pending_requests
+        )
+    )
+
+  def schedule_step(
+      self, new_requests: list[request_lib.RequestState]
+  ) -> tuple[tuple[request_lib.RequestState, ...], tuple[int, int, int]]:
+    """Selects the next step's requests and fetches their pages to the device.
+
+    Requests are scheduled in arrival order until all requests are scheduled,
+    the batch reaches `max_num_seqs` requests, the token budget is
+    exhausted, or there is insufficient KV cache memory for a request.
+
+    Args:
+      new_requests: New requests to schedule.
+
+    Returns:
+      A tuple of (scheduled_requests, distribution) where:
+        - scheduled_requests: The scheduled requests ordered as
+          [decodes, chunked_prefills, full_prefills].
+        - distribution: A three tuple (i, j, k) where
+          - i: The number of decode requests.
+          - j: i + the number of chunked prefill requests.
+          - k: j + the number of full prefill requests.
+    """
+    self._pending_requests.extend(new_requests)
+    self._running_requests = self._drop_done(self._running_requests)
+    self._pending_requests = self._drop_done(self._pending_requests)
+
+    self._schedule_requests()
+
+    decodes = [r for r in self._running_requests if r.is_decode]
+    chunked = [r for r in self._running_requests if r.is_chunked_prefill]
+    prefills = [
+        r
+        for r in self._running_requests
+        if not r.is_decode and not r.is_chunked_prefill
+    ]
+
+    i = len(decodes)
+    j = i + len(chunked)
+    k = j + len(prefills)
+
+    # The RPA kernel expects [decodes, chunked, prefills] ordering.
+    return tuple(decodes + chunked + prefills), (i, j, k)
+
+  def abort_request(self, req: request_lib.RequestState) -> None:
+    """Aborts `req`. Has no effect if `req` is already done."""
+    if not req.is_done:
+      req.status = request_lib.RequestStatus.ABORTED
+
+  def _drop_done(
+      self, queue: collections.deque[request_lib.RequestState]
+  ) -> collections.deque[request_lib.RequestState]:
+    """Drops done requests from `queue`, and releases their pages."""
+    kept = collections.deque()
+    for req in queue:
+      if req.is_done:
+        self._kv_cache_manager.release_request(req)
+      else:
+        kept.append(req)
+    return kept
 
   def _schedule_requests(self) -> None:
     """Schedules requests from the running and pending queues."""
@@ -208,6 +273,7 @@ class Scheduler:
 
   def preempt_all(self) -> None:
     """Returns every running request to the pending queue."""
+    self._running_requests = self._drop_done(self._running_requests)
     while self._running_requests:
       self._preempt()
     for req in self._pending_requests:

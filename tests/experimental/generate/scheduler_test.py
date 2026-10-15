@@ -213,6 +213,19 @@ class PreemptionTest(parameterized.TestCase):
     # become prefix-cache hits for other requests.
     self.assertNotIn("r1", self.kv_mgr._request_to_prefix_hashes)
 
+  def test_preempt_all_drops_done_requests(self):
+    aborted = request_lib.RequestState(req_id="a", prompt_token_ids=[10, 20])
+    running = request_lib.RequestState(req_id="r", prompt_token_ids=[30, 40])
+    _admit(self.sched, self.kv_mgr, aborted)
+    _admit(self.sched, self.kv_mgr, running)
+    self.sched.abort_request(aborted)
+
+    self.sched.preempt_all()
+
+    self.assertEqual(list(self.sched._pending_requests), [running])
+    self.assertEqual(aborted.status, request_lib.RequestStatus.ABORTED)
+    self.assertEqual(self.kv_mgr.get_page_idxs(aborted), {"cache_0": ()})
+
 
 class AdmissionTest(parameterized.TestCase):
 
@@ -427,6 +440,142 @@ class AdmissionTest(parameterized.TestCase):
     self.assertTrue(prefill.is_decode)
     self.assertFalse(decode.is_decode)
     self.assertFalse(decode.is_chunked_prefill)
+
+
+class ScheduleStepTest(parameterized.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.kv_mgr = _create_kv_cache_manager(page_size=4, num_device_pages=20)
+    self.config = scheduler.SchedulerConfig(
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+        max_chunked_prefill_length=16,
+        num_scheduler_steps=1,
+    )
+    self.sched = scheduler.Scheduler(
+        config=self.config,
+        kv_cache_manager=self.kv_mgr,
+    )
+
+  def test_num_active_requests_counts_pending(self):
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=[10, 20, 30])
+    self.sched._pending_requests.append(req)
+    self.assertEqual(self.sched.num_active_requests, 1)
+
+  def test_schedule_step_full_prefill(self):
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
+    scheduled, dist = self.sched.schedule_step([req])
+
+    self.assertLen(scheduled, 1)
+    self.assertEqual(scheduled[0].request_id, "r1")
+    # 0 decodes, 0 chunked prefills, 1 full prefill -> (0, 0, 1)
+    self.assertEqual(dist, (0, 0, 1))
+    self.assertFalse(req.is_decode)
+    self.assertFalse(req.is_chunked_prefill)
+
+  def test_schedule_step_chunked_prefill(self):
+    # Prompt is 32 tokens, but chunked_prefill_length is 16 and
+    # max_num_batched_tokens is 16.
+    small_config = scheduler.SchedulerConfig(
+        max_num_batched_tokens=16,
+        max_num_seqs=4,
+        max_chunked_prefill_length=16,
+        num_scheduler_steps=1,
+    )
+    sched = scheduler.Scheduler(
+        config=small_config,
+        kv_cache_manager=self.kv_mgr,
+    )
+    prompt = list(range(32))
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=prompt)
+    scheduled, dist = sched.schedule_step([req])
+
+    self.assertLen(scheduled, 1)
+    # 0 decodes, 1 chunked prefill, 0 full prefill -> (0, 1, 1)
+    self.assertEqual(dist, (0, 1, 1))
+    self.assertTrue(req.is_chunked_prefill)
+    self.assertFalse(req.is_decode)
+
+  def test_single_token_prompt_schedules_as_decode(self):
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=[42])
+    scheduled, dist = self.sched.schedule_step([req])
+
+    self.assertLen(scheduled, 1)
+    # 1 decode, 0 chunked, 0 full prefill -> (1, 1, 1)
+    self.assertEqual(dist, (1, 1, 1))
+    self.assertTrue(req.is_decode)
+    self.assertFalse(req.is_chunked_prefill)
+
+  def test_schedule_step_orders_decodes_then_chunked_then_prefills(self):
+    prefill = request_lib.RequestState(req_id="p", prompt_token_ids=[10, 20, 30])
+    chunked = request_lib.RequestState(req_id="c", prompt_token_ids=list(range(32)))
+    decode = request_lib.RequestState(req_id="d", prompt_token_ids=[42])
+
+    scheduled, dist = self.sched.schedule_step([prefill, chunked, decode])
+
+    self.assertEqual(scheduled, (decode, chunked, prefill))
+    # 1 decode, 1 chunked, 1 full prefill -> (1, 2, 3)
+    self.assertEqual(dist, (1, 2, 3))
+
+  def test_max_num_seqs_limit(self):
+    # Config max_num_seqs is 4
+    reqs = [
+        request_lib.RequestState(req_id=f"r{i}", prompt_token_ids=[i])
+        for i in range(6)
+    ]
+    scheduled, _ = self.sched.schedule_step(reqs)
+
+    self.assertLen(scheduled, 4)
+    self.assertEqual(self.sched.num_active_requests, 6)
+    self.assertLen(self.sched._pending_requests, 2)
+    self.assertLen(self.sched._running_requests, 4)
+
+  def test_token_budget_exhaustion(self):
+    config = scheduler.SchedulerConfig(
+        max_num_batched_tokens=16,
+        max_num_seqs=4,
+        max_chunked_prefill_length=16,
+        num_scheduler_steps=1,
+    )
+    sched = scheduler.Scheduler(config=config, kv_cache_manager=self.kv_mgr)
+
+    req1 = request_lib.RequestState(req_id="r1", prompt_token_ids=list(range(8)))
+    req2 = request_lib.RequestState(req_id="r2", prompt_token_ids=list(range(100, 112)))
+
+    scheduled, _ = sched.schedule_step([req1, req2])
+    # req1 uses 8 tokens, leaving 8.
+    # req2 needs 12 tokens, which exceeds remaining budget 8, so it stays in
+    # pending.
+    self.assertLen(scheduled, 1)
+    self.assertEqual(scheduled[0].request_id, "r1")
+    self.assertEqual(list(sched._pending_requests), [req2])
+    self.assertEqual(list(sched._running_requests), [req1])
+
+  def test_aborted_pending_request_is_never_scheduled(self):
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=[10, 20, 30])
+    self.sched._pending_requests.append(req)
+
+    self.sched.abort_request(req)
+    scheduled, _ = self.sched.schedule_step([])
+
+    self.assertEmpty(scheduled)
+    self.assertEqual(self.sched.num_active_requests, 0)
+    self.assertEmpty(self.sched._pending_requests)
+
+  def test_aborted_running_request_is_released_next_step(self):
+    req = request_lib.RequestState(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
+    self.sched.schedule_step([req])
+
+    self.sched.abort_request(req)
+    # The request is no longer active, but keeps its pages until the next step.
+    self.assertEqual(self.sched.num_active_requests, 0)
+    self.assertNotEqual(self.kv_mgr.get_page_idxs(req), {"cache_0": ()})
+    scheduled, _ = self.sched.schedule_step([])
+
+    self.assertEmpty(scheduled)
+    self.assertEmpty(self.sched._running_requests)
+    self.assertEqual(self.kv_mgr.get_page_idxs(req), {"cache_0": ()})
 
 
 if __name__ == "__main__":

@@ -34,6 +34,11 @@ class RequestStatus(enum.Enum):
   PENDING = enum.auto()
   # Scheduled, and holds KV cache pages.
   RUNNING = enum.auto()
+  # Aborted by the caller.
+  ABORTED = enum.auto()
+
+
+_DONE_STATUSES = frozenset({RequestStatus.ABORTED})
 
 
 class RequestState:
@@ -55,6 +60,11 @@ class RequestState:
     self.is_chunked_prefill = False
 
     self.status = RequestStatus.PENDING
+
+  @property
+  def is_done(self) -> bool:
+    """Whether the request has been aborted."""
+    return self.status in _DONE_STATUSES
 
   @property
   def num_total_tokens(self) -> int:
