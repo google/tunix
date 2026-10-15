@@ -634,6 +634,29 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertNotIn("--trajectory_store_root_dir", orch)
     self.assertNotIn("--trajectory_store_db_url", orch)
 
+  def test_256_chip_slice_uses_64x1x8_tuned_mesh(self):
+    render = _render(TRAINER_TPU_SLICE="tpu7x:4x8x8")
+    trainer = _jobset(render, "train")
+    flags = _maxtext_flags(trainer)
+    self.assertIn("--mesh_fsdp=64 ", trainer)
+    self.assertIn("--mesh_expert=1 ", trainer)
+    self.assertIn("--mesh_context=8 ", trainer)
+    self.assertEqual(flags["num_moe_token_chunks"], "1")
+    self.assertEqual(flags["moe_chunk_pipeline"], "false")
+    self.assertEqual(flags["query_proj"], "device")
+
+  def test_pad_start_with_finite_moe_capacity_requires_exclude_padding(self):
+    with self.assertRaisesRegex(
+        AssertionError,
+        "PACK_PAD_POSITION=start with finite MoE capacity requires",
+    ):
+      _render(
+          RAGGED_BUFFER_FACTOR="2.75",
+          RETRY_WHEN_TOKENS_DROPPED="true",
+          MOE_EXCLUDE_PADDING="false",
+          PACK_PAD_POSITION="start",
+      )
+
 
 if __name__ == "__main__":
   absltest.main()

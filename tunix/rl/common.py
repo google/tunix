@@ -685,6 +685,24 @@ def compute_per_token_logps(
             per_token_entropy, ((0, 0), (1, 0)), constant_values=0.0  # pyrefly: ignore[unbound-name]
         )
 
+    if segment_ids is not None:
+      # Zero out transitions from padding (segment_ids == 0) into a real segment
+      # (segment_ids > 0), such as at `t = shift` after leading padding under
+      # `pad_position="start"` or after an inter-segment alignment gap. Under
+      # `pad_position="end"` the first segment starts at `t = 0`, which is
+      # already zero-padded above; masking `0 -> >0` transitions ensures the
+      # first token after padding has the exact same 0.0 log-prob and zero
+      # backward cotangent into `hidden_states[:, t - 1]`.
+      after_pad = (segment_ids[:, :-1] == 0) & (segment_ids[:, 1:] > 0)
+      after_pad_mask = jnp.pad(
+          after_pad, ((0, 0), (1, 0)), constant_values=False
+      )
+      per_token_logps = jnp.where(after_pad_mask, 0.0, per_token_logps)
+      if return_entropy:
+        per_token_entropy = jnp.where(
+            after_pad_mask, 0.0, per_token_entropy  # pyrefly: ignore[unbound-name]
+        )
+
     if stop_gradient:
       per_token_logps = jax.lax.stop_gradient(per_token_logps)
       if return_entropy:
@@ -707,6 +725,11 @@ def compute_per_token_logps(
           per_token_logps, ((0, 0), (1, 0)), constant_values=0.0
       )
       logits = jnp.pad(logits, ((0, 0), (1, 0), (0, 0)), constant_values=0.0)
+      after_pad = (segment_ids[:, :-1] == 0) & (segment_ids[:, 1:] > 0)
+      after_pad_mask = jnp.pad(
+          after_pad, ((0, 0), (1, 0)), constant_values=False
+      )
+      per_token_logps = jnp.where(after_pad_mask, 0.0, per_token_logps)
 
     if stop_gradient:
       per_token_logps = jax.lax.stop_gradient(per_token_logps)
@@ -1091,7 +1114,9 @@ def sharded_head_mode() -> str | None:
 # and differs in its last bits.
 
 
-def _target_hit(ids: jax.Array, shape) -> tuple[jax.Array, jax.Array]:
+def _target_hit(
+    ids: jax.Array, shape: tuple[int, ...]
+) -> tuple[jax.Array, jax.Array]:
   """One-hot of `ids` over the last axis of `shape`, as take_along_axis reads it.
 
   Args:
@@ -1113,7 +1138,9 @@ def _target_hit(ids: jax.Array, shape) -> tuple[jax.Array, jax.Array]:
   return hit, (ids >= 0) & (ids < vocab)
 
 
-def _head_logps_stats(logits: jax.Array, ids: jax.Array, with_entropy: bool):
+def _head_logps_stats(
+    logits: jax.Array, ids: jax.Array, with_entropy: bool
+) -> tuple[jax.Array, jax.Array | None, jax.Array, jax.Array]:
   """`selective_log_softmax` (and the entropy) of a chunk, keeping max and sum.
 
   Args:

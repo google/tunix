@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Sequence, overload
 
 import numpy as np
 
@@ -221,9 +221,17 @@ class PackedChunk(Sequence[PackedRow]):
   def __len__(self) -> int:
     return self.ids.shape[0]
 
+  @overload
+  def __getitem__(self, idx: int) -> PackedRow:
+    ...
+
+  @overload
+  def __getitem__(self, idx: slice) -> list[PackedRow]:
+    ...
+
   def __getitem__(
       self, idx: int | slice
-  ) -> PackedRow | list[PackedRow]:  # pytype: disable=signature-mismatch
+  ) -> PackedRow | list[PackedRow]:
     if isinstance(idx, slice):
       return [self[i] for i in range(*idx.indices(len(self)))]
     if idx < 0:

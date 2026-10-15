@@ -112,7 +112,11 @@ case "${DROPLESS}" in
       if [[ "${RETRY_DROPLESS_FINAL_MICRO_BATCH:-false}" != "true" \
             && -z "${FIRST_PHASE_RAGGED_BUFFER_FACTOR:-}" ]]; then
         export REMAT_CONTEXT="${REMAT_CONTEXT:-device}"
-        export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
+        if [[ "${TRAINER_TPU_SLICE:-tpu7x:4x4x8}" == "tpu7x:4x8x8" && "${TRAINER_MESH_EXPERT:-1}" == "1" ]]; then
+          export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-1}"
+        else
+          export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
+        fi
       fi
     fi
     export REMAT_CONTEXT="${REMAT_CONTEXT:-offload}"
@@ -121,6 +125,14 @@ case "${DROPLESS}" in
     if [[ "${RAGGED_BUFFER_FACTOR}" != "-1" && "${RETRY_WHEN_TOKENS_DROPPED:-false}" != "true" ]]; then
       echo "ERROR: DROPLESS=true with RAGGED_BUFFER_FACTOR=${RAGGED_BUFFER_FACTOR} drops tokens;" \
            "set RETRY_WHEN_TOKENS_DROPPED=true or DROPLESS=false" >&2
+      exit 1
+    fi
+    if [[ "${PACK_PAD_POSITION:-end}" == "start" \
+          && "${RAGGED_BUFFER_FACTOR}" != "-1" \
+          && "${MOE_EXCLUDE_PADDING:-false}" != "true" ]]; then
+      echo "ERROR: PACK_PAD_POSITION=start with finite MoE capacity requires" \
+           "MOE_EXCLUDE_PADDING=true (or RAGGED_BUFFER_FACTOR=-1) so leading" \
+           "padding tokens do not fill expert buffers ahead of real tokens" >&2
       exit 1
     fi
     ;;

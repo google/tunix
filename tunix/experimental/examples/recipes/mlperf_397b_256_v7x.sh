@@ -54,17 +54,31 @@ export MODEL_ID="Qwen/Qwen3.5-397B-A17B"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-Qwen/Qwen3.5-397B-A17B}"
 export MAXTEXT_MODEL_NAME="qwen3.5-397b-a17b"
 
-# Topologies (128 chips / 256 devices Trainer 4x4x8, 16x 8-chip Rollout slices on TPU7x dynamic slicing)
-# Mesh product is DEVICES, and v7x has 2 devices/chip at ~95 GB each.
-# 4x4x8 = 128 chips = 256 devices.
-# Sharding: TP=1, FSDP=32, CP=4, EP=2, cp-as-ep.
-# Mesh product: 32 * 1 * 2 * 4 = 256 devices.
+# Topologies:
+# - Default 128-chip trainer (tpu7x:4x4x8 = 256 devices): FSDP=32, TP=1, EP=2, CP=4.
+# - 256-chip trainer (TRAINER_TPU_SLICE=tpu7x:4x8x8 = 512 devices):
+#     With TRAINER_TUNED_FLAGS=true: FSDP=64, TP=1, EP=1, CP=8 (num_moe_token_chunks=1).
+#     With TRAINER_TUNED_FLAGS=false: FSDP=32, TP=1, EP=2, CP=8.
 export TRAINER_JOBSET_YAML="${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}"
 export TRAINER_TPU_SLICE="${TRAINER_TPU_SLICE:-tpu7x:4x4x8}"
-export TRAINER_MESH_FSDP="${TRAINER_MESH_FSDP:-32}"
-export TRAINER_MESH_TP="${TRAINER_MESH_TP:-1}"
-export TRAINER_MESH_EXPERT="${TRAINER_MESH_EXPERT:-2}"
-export TRAINER_MESH_CONTEXT="${TRAINER_MESH_CONTEXT:-4}"
+if [[ "${TRAINER_TPU_SLICE}" == "tpu7x:4x8x8" ]]; then
+  if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
+    export TRAINER_MESH_FSDP="${TRAINER_MESH_FSDP:-64}"
+    export TRAINER_MESH_TP="${TRAINER_MESH_TP:-1}"
+    export TRAINER_MESH_EXPERT="${TRAINER_MESH_EXPERT:-1}"
+    export TRAINER_MESH_CONTEXT="${TRAINER_MESH_CONTEXT:-8}"
+  else
+    export TRAINER_MESH_FSDP="${TRAINER_MESH_FSDP:-32}"
+    export TRAINER_MESH_TP="${TRAINER_MESH_TP:-1}"
+    export TRAINER_MESH_EXPERT="${TRAINER_MESH_EXPERT:-2}"
+    export TRAINER_MESH_CONTEXT="${TRAINER_MESH_CONTEXT:-8}"
+  fi
+else
+  export TRAINER_MESH_FSDP="${TRAINER_MESH_FSDP:-32}"
+  export TRAINER_MESH_TP="${TRAINER_MESH_TP:-1}"
+  export TRAINER_MESH_EXPERT="${TRAINER_MESH_EXPERT:-2}"
+  export TRAINER_MESH_CONTEXT="${TRAINER_MESH_CONTEXT:-4}"
+fi
 
 # Rollout: 8 chips = 16 devices = 2 hosts per replica. dp * tp * expert must equal
 # the DEVICE count, so expert=16 on 8 chips. Scaled rollout recipes
@@ -149,9 +163,9 @@ for _f in ${TRAINER_LIBTPU_INIT_ARGS}; do [[ "${_f}" == --xla_* ]] && _trainer_x
 export PATHWAYS_PROXY_EXTRA_ARGS="${PATHWAYS_PROXY_EXTRA_ARGS:-${_trainer_xla_flags% }}"
 
 # Hyperparameters & DeepSWE Pipeline Configuration
-# Must be a multiple of TRAINER_MESH_FSDP=32. Only the padded batch assembler reads it;
-# sequence packing (MAX_SEQ_TOKEN_PER_TPU set) sizes micro steps from the trainer mesh.
-export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-64}"
+# Must be a multiple of TRAINER_MESH_FSDP. Defaults to TRAINER_MESH_FSDP * TRAINER_MESH_EXPERT
+# (64 for 32x2x4 and 64x1x8; 128 for 64x2x4) to match SequencePackedBatchAssembler's pack_size.
+export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-$(( TRAINER_MESH_FSDP * TRAINER_MESH_EXPERT ))}"
 export MAX_STEPS="${MAX_STEPS:-30}"
 export CHECKPOINT_SAVE_INTERVAL_STEPS="${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}"
 export CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-30}"
@@ -162,7 +176,11 @@ export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"
 export REMAT_POLICY="${REMAT_POLICY:-custom}"
 export RAGGED_BUFFER_FACTOR="${RAGGED_BUFFER_FACTOR:-2.0}"
 export REMAT_CONTEXT="${REMAT_CONTEXT:-remat}"
-export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
+if [[ "${TRAINER_TPU_SLICE}" == "tpu7x:4x8x8" && "${TRAINER_TUNED_FLAGS:-false}" == "true" && "${TRAINER_MESH_EXPERT}" == "1" ]]; then
+  export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-1}"
+else
+  export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
+fi
 export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep \
 use_gdn_kernel=true gdn_cp_mode=head gdn_chunk_size=64 \
 decoder_layer_input=offload context=${REMAT_CONTEXT} gdn=remat gdn_conv=remat gdn_states=remat \
@@ -330,6 +348,12 @@ fi
 # TRAINER_TUNED_FLAGS=true needs that pin moved to a MaxText with #5758.
 if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
   export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_strategy=all_gather sa_fuse_reciprocal=true gdn_cp_mode=seq gdn_cp_state=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true wi_tile_dlhs_mlp_dim=2048 decoder_layer_input=device moe_routing_maps=device moe_gmm_v2_dlhs_transpose_rhs=true moe_routing_index_math=count moe_unsplit_prefused_wi=true moe_roe_packed_routing_gather=true moe_router_grad_from_wo_input=true moe_wi_gmm_fused_swiglu=true gdn_conv1d_input_in_qkv_dtype=true gdn_conv1d_dense_token_stack=true wi_tile_fwd_batch_seq=512 wi_tile_drhs_batch_seq=512 wo_tile_fwd_batch_seq=512 wo_tile_dlhs_batch_seq=512 wo_tile_drhs_batch_seq=512"
+  if [[ "${TRAINER_TPU_SLICE}" == "tpu7x:4x8x8" ]]; then
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} moe_chunk_pipeline=false"
+    if [[ "${TRAINER_MESH_EXPERT}" == "1" ]]; then
+      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} query_proj=device key_proj=device value_proj=device out_proj=device qkv_proj=device"
+    fi
+  fi
 fi
 export DEBUG=${DEBUG:-0}
 
