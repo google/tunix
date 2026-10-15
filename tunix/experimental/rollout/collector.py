@@ -370,15 +370,7 @@ class TrajectoryCollectorEngine:
         metadata=self.metadata,
     )
     self._inner_engine = inner_engine
-    try:
-      rl_traj = await inner_engine.collect(mode="Token")
-    except Exception:
-      # ``collect`` only reaches its own ``finally: await self._close()`` once
-      # the turn loop has finished; anything raised inside the loop -- the
-      # ``exact_token_continuity`` consistency checks included -- propagates
-      # past it, so the environment is closed here or not at all.
-      await inner_engine._close()
-      raise
+    rl_traj = await inner_engine.collect(mode="Token")
     if (
         self.partial_rollout
         and isinstance(rl_traj, dict)

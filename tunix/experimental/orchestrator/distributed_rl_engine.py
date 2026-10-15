@@ -672,16 +672,67 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
     return completed
 
+  def _cancel_pending_rollout_requests(self, prompt_id: str) -> int:
+    """Cancels tasks matching `prompt_id` still waiting in `_rollout_session._pending_queue`."""
+    if not prompt_id:
+      return 0
+
+    def _matches(
+        req_id: str,
+        payload: tuple[str | None, tuple[Any, ...], dict[str, Any]],
+    ) -> bool:
+      del req_id
+      _, _, orig_kwargs = payload
+      reqs = orig_kwargs.get("requests") or ()
+      return any(getattr(r, "prompt_id", None) == prompt_id for r in reqs)
+
+    def _build_cancelled_response(
+        req_id: str,
+        payload: tuple[str | None, tuple[Any, ...], dict[str, Any]],
+    ) -> list[datatypes.RolloutResponse]:
+      _, _, orig_kwargs = payload
+      responses: list[datatypes.RolloutResponse] = []
+      for req in orig_kwargs.get("requests") or ():
+        responses.append(
+            datatypes.RolloutResponse(
+                request_id=getattr(req, "request_id", None) or req_id,
+                status="ERROR",
+                error=datatypes.ErrorInfo(
+                    error_type="CancelledError",
+                    message=(
+                        "Trajectory cancelled in orchestrator pending queue"
+                        " before dispatch."
+                    ),
+                ),
+                payload=None,
+                metadata={
+                    **(dict(req.metadata) if req.metadata is not None else {}),
+                    "request_id": getattr(req, "request_id", None) or req_id,
+                    "prompt_id": req.prompt_id,
+                    "group_index": req.group_index,
+                    "policy_version": req.target_policy_version,
+                },
+            )
+        )
+      return responses
+
+    return self._rollout_session.cancel_pending_tasks(
+        _matches, result_factory=_build_cancelled_response
+    )
+
   async def cancel_rollouts(self, prompt_id: str) -> int:
     """Cancels in-flight rollout trajectories matching `prompt_id` across all rollout workers."""
-    if not self._rollout_workers or not prompt_id:
+    if not prompt_id:
       return 0
+    cancelled_pending = self._cancel_pending_rollout_requests(prompt_id)
+    if not self._rollout_workers:
+      return cancelled_pending
     tasks = [
         self._invoke_worker(w, "cancel_by_prompt_id", prompt_id=prompt_id)
         for w in self._rollout_workers
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    return sum(r for r in results if isinstance(r, int))
+    return cancelled_pending + sum(r for r in results if isinstance(r, int))
 
   async def generate(
       self,

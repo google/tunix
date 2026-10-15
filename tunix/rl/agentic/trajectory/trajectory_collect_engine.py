@@ -351,9 +351,12 @@ class TrajectoryCollectEngine:
     Returns:
         Trajectory | dict | list: Depending on mode.
     """  # fmt: skip
+    self._env_closed: bool = False
+    self._bg_close_tasks: set[asyncio.Task[Any]] = set()
+    cancelled = False
     try:
-      await self._reset()
       try:
+        await self._reset()
         self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
         self._logged_clip_reasons.clear()
 
@@ -401,8 +404,17 @@ class TrajectoryCollectEngine:
           await self._append_final_reward()
         self.compute_mc_reward()
         self.compute_trajectory_reward()
+      except asyncio.CancelledError:
+        cancelled = True
+        raise
       finally:
-        await self._close()
+        if cancelled:
+          close_task = asyncio.create_task(self._close())
+          self._bg_close_tasks.add(close_task)
+          close_task.add_done_callback(self._bg_close_tasks.discard)
+          await asyncio.wait({close_task}, timeout=0.05)
+        else:
+          await self._close()
         if self.trajectory_store is not None and self.metadata is not None:
           for i, step in enumerate(self.agent.trajectory.steps):
             agent_step = converter_lib.create_agent_step(
@@ -1464,6 +1476,9 @@ class TrajectoryCollectEngine:
     Ensures proper cleanup of environment resources such as network
     connections, file handles, or external processes.
     """
+    if getattr(self, "_env_closed", False):
+      return
+    self._env_closed = True
     logging.debug("%s Closing environment.", self._debug_prefix)
     try:
       _, wall_time = await self._run_with_timing(self.env.close, timeout=150.0)

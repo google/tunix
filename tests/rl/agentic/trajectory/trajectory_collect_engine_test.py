@@ -14,6 +14,7 @@
 
 import asyncio
 import itertools
+import threading
 import time
 from unittest import mock
 
@@ -1264,6 +1265,70 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
     self.mock_env.reset.assert_called_once()
+    self.mock_env.close.assert_called_once()
+
+  def test_collect_cancelled_during_reset_closes_env(self):
+    reset_started = threading.Event()
+    release_reset = threading.Event()
+
+    def _blocking_reset():
+      reset_started.set()
+      release_reset.wait(timeout=2.0)
+      return 'initial_obs', {}
+
+    self.mock_env.reset.side_effect = _blocking_reset
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+    )
+
+    async def _run():
+      task = asyncio.create_task(engine.collect(mode='Token'))
+      while not reset_started.is_set():
+        await asyncio.sleep(0.005)
+      task.cancel()
+      with self.assertRaises(asyncio.CancelledError):
+        await task
+      release_reset.set()
+
+    asyncio.run(_run())
+    self.mock_env.reset.assert_called_once()
+    self.mock_env.close.assert_called_once()
+
+  def test_collect_cancelled_does_not_block_on_slow_env_close(self):
+    started = asyncio.Event()
+    close_started = threading.Event()
+    release_close = threading.Event()
+
+    async def _slow_model_call(chat_input, env_arg, **kwargs):
+      del chat_input, env_arg, kwargs
+      started.set()
+      await asyncio.sleep(10.0)
+
+    def _slow_close():
+      close_started.set()
+      release_close.wait(timeout=2.0)
+
+    self.mock_env.close.side_effect = _slow_close
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=_slow_model_call,
+    )
+
+    async def _run():
+      task = asyncio.create_task(engine.collect(mode='Token'))
+      await asyncio.wait_for(started.wait(), timeout=2.0)
+      task.cancel()
+      with self.assertRaises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.5)
+      self.assertTrue(close_started.wait(timeout=1.0))
+      release_close.set()
+      if engine._bg_close_tasks:
+        await asyncio.gather(* list(engine._bg_close_tasks))
+
+    asyncio.run(_run())
     self.mock_env.close.assert_called_once()
 
   def test_on_rollout_output_callback(self):
