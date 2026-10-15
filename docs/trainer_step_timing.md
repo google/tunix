@@ -30,21 +30,32 @@ TRAINER_STEP_TIMING step=<N> policy_version=<v> rtt_s=<r> timing=<json>
   "v": 1,
   "train_step": 12,
   "mb": [
-    {"i": 0, "dispatch_begin_ago_s": 71.412, "dispatch_end_ago_s": 70.980, "ready_ago_s": 56.301},
-    {"i": 1, "dispatch_begin_ago_s": 56.250, "dispatch_end_ago_s": 55.903, "ready_ago_s": 41.077}
+    {"i": 0, "dispatch_begin_ago_s": 71.412, "dispatch_end_ago_s": 70.980, "ready_ago_s": 56.301, "via": "fwd_bwd_staged"},
+    {"i": 1, "dispatch_begin_ago_s": 56.250, "dispatch_end_ago_s": 55.903, "ready_ago_s": 41.077, "via": "fwd_bwd"}
   ],
-  "update": {"dispatch_begin_ago_s": 40.900, "dispatch_end_ago_s": 40.611, "ready_ago_s": 27.455},
+  "update": {"dispatch_begin_ago_s": 40.900, "dispatch_end_ago_s": 40.611, "ready_ago_s": 27.455, "via": "apply_deferred_update"},
   "prepare": {"recv_ago_s": 6.120, "done_ago_s": 0.834}
 }
 ```
 
 * `train_step` – the trainer's own optimizer-step counter returned by `update`.
-* `mb[i]` – the i-th `fwd_bwd` RPC of this step, in the order received.
+* `mb[i]` – the i-th microbatch of this step, in the order it was dispatched,
+  whichever call ran it: a `fwd_bwd` RPC, or `fwd_bwd_staged` for a
+  microbatch received ahead by `stage_fwd_bwd` (the pipelined step boundary).
   `dispatch_begin` / `dispatch_end` bracket the worker's handler (which returns
   at dispatch); `ready` is when the microbatch's outputs became ready on
-  device, i.e. when its forward/backward actually finished.
-* `update` – the same three instants for the `update` RPC; `ready` is when the
-  optimizer step finished on device.
+  device, i.e. when its forward/backward actually finished. A `stage_fwd_bwd`
+  itself is not an entry: it only receives the data, and its microbatch is
+  recorded when `fwd_bwd_staged` runs it, in the step it belongs to.
+* `update` – the same three instants for the step's optimizer update, run by
+  the `update` RPC, inside the last microbatch's call (`fwd_bwd` /
+  `fwd_bwd_staged` with `apply_optimizer=True`), or by
+  `apply_deferred_update` after a `defer_update=True` last microbatch; `ready`
+  is when the optimizer step finished on device.
+* `via` (on each `mb[i]` and on `update`) – the call that ran it: `fwd_bwd`,
+  `fwd_bwd_staged`, `update` or `apply_deferred_update` (a fused update is
+  recorded under the microbatch call that ran it). Added to schema version 1
+  without a version bump; records from earlier builds lack it.
 * `prepare` – when this round's `prepare_weight_sync` was received and
   finished on the worker. It reads the updated weights, so `recv` is never
   before `update.ready`. `null` when the step took no weight sync.
@@ -74,6 +85,25 @@ train_step update RPC returned on actor worker in 0.412s (train_step=12)
 
 These are orchestrator-clock instants of the *dispatch* acknowledgements and
 complement the device-side instants above.
+
+### When the record is short
+
+The worker counts the microbatches it dispatched in the step (and whether the
+update ran) apart from the timer. When `get_step_timing` would return fewer
+`mb` entries than microbatches ran, or no `update` after one ran, the trainer
+log carries a warning naming the call(s) whose work is missing, e.g.
+`TRAINER_STEP_TIMING: the step record lists 0 of the 8 micro-batches this
+worker ran; not recorded, by entry point: fwd_bwd x7, fwd_bwd_staged x1.`
+<!-- TODO: verify against a real trainer log line once a run hits it -->
+The orchestrator still logs the line as received and, when `mb` is empty or
+`update` is `null`, follows it with a warning
+(`TRAINER_STEP_TIMING step=<N> is incomplete (...)`) that points to the
+trainer log, so an empty record is never read as "no microbatches ran".
+
+Builds that carried the first cherry-pick of this change onto the
+deferred-update / staged-boundary branch re-created the timer on every
+worker call, so their records hold only `prepare` (`"mb": []`,
+`"update": null`, `"train_step": null`) on every path.
 
 ## How readiness is observed without blocking
 
