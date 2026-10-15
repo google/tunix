@@ -185,10 +185,16 @@ class FromConfigTest(absltest.TestCase):
       def get_trajectories(self, trajectory_ids):
         return []
 
+      def get_trajectories_metrics(self, trajectory_ids=None):
+        return []
+
       def add_step(self, step, metadata):
         pass
 
       def update_metadata(self, metadata):
+        pass
+
+      def update_metrics(self, metrics):
         pass
 
       def flush(self):
@@ -575,6 +581,11 @@ class ExceptionsTest(absltest.TestCase):
     err = store_lib.TrajectoryMetadataNotFoundError("t_456")
     self.assertEqual(err.trajectory_id, "t_456")
     self.assertIn("t_456", str(err))
+
+  def test_trajectory_metrics_not_found_error(self):
+    err = store_lib.TrajectoryMetricsNotFoundError("t_789")
+    self.assertEqual(err.trajectory_id, "t_789")
+    self.assertIn("t_789", str(err))
 
 
 if __name__ == "__main__":

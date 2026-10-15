@@ -43,6 +43,14 @@ class TrajectoryMetadataNotFoundError(KeyError):
     self.trajectory_id = trajectory_id
 
 
+class TrajectoryMetricsNotFoundError(KeyError):
+  """Raised when requested trajectory metrics are not found in the store."""
+
+  def __init__(self, trajectory_id: str) -> None:
+    super().__init__(f"Trajectory metrics for ID '{trajectory_id}' not found.")
+    self.trajectory_id = trajectory_id
+
+
 # ==============================================================================
 # Protocols (Structural Interfaces)
 # ==============================================================================
@@ -89,6 +97,26 @@ class TrajectoryReader(Protocol[MetadataT]):
     """
     ...
 
+  def get_trajectories_metrics(
+      self, trajectory_ids: list[str] | None = None
+  ) -> list[trajectory_lib.TrajectoryMetrics]:
+    """Retrieves metrics for trajectories in the run.
+
+    Args:
+      trajectory_ids: Optional list of unique trajectory identifiers. If
+        specified, only metrics for these IDs are returned. If None, metrics for
+        all trajectories in the run with recorded metrics are returned.
+
+    Returns:
+      A list of TrajectoryMetrics objects for the requested trajectories, in the
+      order of `trajectory_ids` if specified.
+
+    Raises:
+      TrajectoryMetricsNotFoundError: If any requested trajectory ID does not
+        have recorded metrics.
+    """
+    ...
+
 
 @runtime_checkable
 class TrajectoryWriter(Protocol[MetadataT]):
@@ -125,6 +153,25 @@ class TrajectoryWriter(Protocol[MetadataT]):
 
     Args:
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
+    """
+    ...
+
+  def update_metrics(
+      self,
+      metrics: trajectory_lib.TrajectoryMetrics,
+  ) -> None:
+    """Updates (or creates) trajectory metrics.
+
+    If metrics already exist for `metrics.trajectory_id`, implementations merge
+    `metrics.extra` into the existing `extra` dictionary, allowing rollout
+    workers and RL trainers to record metrics independently without overwriting
+    each other's keys.
+
+    Implementations snapshot `metrics` at call time, so callers may keep
+    mutating it afterwards without affecting what was logged.
+
+    Args:
+      metrics: TrajectoryMetrics containing trajectory_id and metrics data.
     """
     ...
 

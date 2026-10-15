@@ -2932,5 +2932,72 @@ class Int3DArraySerializationTest(parameterized.TestCase):
       )
 
 
+class TrajectoryMetricsTest(parameterized.TestCase):
+  """Tests for the standalone TrajectoryMetrics model."""
+
+  def test_init_with_trajectory_id_sets_extra_to_none(self) -> None:
+    metrics = trajectory.TrajectoryMetrics(trajectory_id="traj_1001")
+
+    self.assertEqual(metrics.trajectory_id, "traj_1001")
+    self.assertIsNone(metrics.extra)
+    self.assertEqual(
+        metrics.model_dump(exclude_none=True),
+        {"trajectory_id": "traj_1001"},
+    )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="missing_trajectory_id",
+          payload={},
+      ),
+      dict(
+          testcase_name="none_trajectory_id",
+          payload={"trajectory_id": None},
+      ),
+      dict(
+          testcase_name="empty_trajectory_id",
+          payload={"trajectory_id": ""},
+      ),
+  )
+  def test_invalid_trajectory_id_raises_validation_error(
+      self, payload: dict[str, Any]
+  ) -> None:
+    with self.assertRaises(pydantic.ValidationError):
+      trajectory.TrajectoryMetrics.model_validate(payload)
+
+  def test_model_dump_and_validate_with_fields_round_trips(self) -> None:
+    metrics = trajectory.TrajectoryMetrics(
+        trajectory_id="traj_1001",
+        extra={
+            "trajectory_reward": 1.0,
+            "reward_breakdown": {"format": 0.2, "accuracy": 0.8},
+            "advantage": 1.45,
+            "global_step": 12,
+            "step_latencies": np.array([0.1, 0.2]),
+        },
+    )
+
+    serialized = metrics.model_dump(mode="json")
+    restored = trajectory.TrajectoryMetrics.model_validate(serialized)
+
+    self.assertEqual(restored.trajectory_id, "traj_1001")
+    self.assertEqual(
+        restored.extra,
+        {
+            "trajectory_reward": 1.0,
+            "reward_breakdown": {"format": 0.2, "accuracy": 0.8},
+            "advantage": 1.45,
+            "global_step": 12,
+            "step_latencies": [0.1, 0.2],
+        },
+    )
+
+  def test_unknown_top_level_field_raises_validation_error(self) -> None:
+    with self.assertRaisesRegex(pydantic.ValidationError, "extra_forbidden"):
+      trajectory.TrajectoryMetrics.model_validate(
+          {"trajectory_id": "traj_1001", "unknown_metric": 1}
+      )
+
+
 if __name__ == "__main__":
   absltest.main()
