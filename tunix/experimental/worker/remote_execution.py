@@ -112,7 +112,7 @@ _SERDE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 
 def _grpc_options(
     max_message_bytes: int = _MAX_MESSAGE_BYTES,
-) -> List[Tuple[str, Any]]:
+) -> List[Tuple[str, Union[int, str]]]:
   """Channel/server options lifting the message-size cap and enabling keepalive."""
   service_config = {
       "methodConfig": [{
@@ -134,8 +134,8 @@ def _grpc_options(
       ("grpc.keepalive_permit_without_calls", 1),
       ("grpc.http2.max_pings_without_data", 0),
       ("grpc.http2.max_ping_strikes", 0),
-      ("grpc.http2.min_ping_interval_without_data_ms", 10000),
-      ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
+      ("grpc.http2.min_ping_interval_without_data_ms", 5000),
+      ("grpc.http2.min_recv_ping_interval_without_data_ms", 5000),
       ("grpc.use_local_subchannel_pool", 1),
       ("grpc.so_reuseport", 1),
       ("grpc.tcp_user_timeout_ms", 30000),
@@ -1038,12 +1038,13 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         response_deserializer=lambda b: b,
     )
 
-  async def _ensure_async_channel(self) -> Any:
+  async def _ensure_async_channel(self, force: bool = False) -> Any:
     """Ensures the async gRPC channel and stubs are bound to the active loop."""
     assert _grpc_aio_lib is not None
     current_loop = _running_loop()
     if (
-        self._channel is None
+        force
+        or self._channel is None
         or self._channel_loop is not current_loop
         or (self._channel_loop is not None and self._channel_loop.is_closed())
     ):
@@ -1113,9 +1114,21 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
               max_retries,
           )
           await asyncio.sleep(backoff)
-          await self.close()
-          await self._ensure_async_channel()
-          rpc = self._rpc
+          if rpc is self._sync_rpc:
+            old_sync = self._sync_channel
+            self._sync_channel = _grpc_aio_lib.insecure_channel(
+                self._host_port, options=_grpc_options(self._max_message_bytes)
+            )
+            self._sync_rpc = self._make_rpc(self._sync_channel)
+            rpc = self._sync_rpc
+            if old_sync is not None:
+              try:
+                await asyncio.wait_for(old_sync.close(), timeout=1.0)
+              except Exception:  # pylint: disable=broad-exception-caught
+                pass
+          else:
+            await self._ensure_async_channel(force=True)
+            rpc = self._rpc
           continue
         raise
 
