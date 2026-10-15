@@ -41,6 +41,7 @@ export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-64}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-$(( 32 * ROLLOUT_REPLICAS ))}"
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-${REGION:-us-east1}-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 export ENABLE_THINKING="${ENABLE_THINKING:-false}"
+export OPENHANDS_MULTI_TOOL_CALLS="${OPENHANDS_MULTI_TOOL_CALLS:-true}"
 
 _eval_no_launch="${MLPERF_NO_LAUNCH:-0}"
 _eval_pw_worker_extra_env="${PATHWAYS_WORKER_EXTRA_ENV:-}"
