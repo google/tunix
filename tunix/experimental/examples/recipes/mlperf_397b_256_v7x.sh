@@ -114,11 +114,22 @@ fi
 # TRAINER_LIBTPU_INIT_ARGS is kept.
 #   --xla_tpu_enable_offloading_copy_to_sparsecore=false: XLA does not offload copies
 #     to the SparseCores. Bench, alone: 130.8 -> 126.4 s/step.
+#   --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true: N-d
+#     reduce-scatters are offloaded to the SparseCores as well. Bench: 97.24 -> 97.15 s/step.
+#   --xla_jf_rematerialization_percent_shared_memory_limit=99: XLA's remat pass may use
+#     more of HBM before it recomputes (69 -> 59 recompute clones in the trainer program).
+#     Bench: 10.226 -> 10.197 s per micro-batch.
 # Part 2, the MaxText keys, follows MAXTEXT_EXTRA_FLAGS below.
 case "${TRAINER_TUNED_FLAGS:-false}" in
   true)
     if [[ " ${TRAINER_LIBTPU_INIT_ARGS} " != *" --xla_tpu_enable_offloading_copy_to_sparsecore="* ]]; then
       export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS} --xla_tpu_enable_offloading_copy_to_sparsecore=false"
+    fi
+    if [[ " ${TRAINER_LIBTPU_INIT_ARGS} " != *" --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter="* ]]; then
+      export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS} --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true"
+    fi
+    if [[ " ${TRAINER_LIBTPU_INIT_ARGS} " != *" --xla_jf_rematerialization_percent_shared_memory_limit="* ]]; then
+      export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS} --xla_jf_rematerialization_percent_shared_memory_limit=99"
     fi
     ;;
   false)
@@ -265,10 +276,12 @@ fi
 #     which drops head mode's all-to-alls (MaxText's `auto` picks seq at context 4).
 #   gdn_cp_state=device: keeps seq mode's carries (conv halo, local transition, incoming
 #     state), so the backward does not replay the halo exchange and the first pass.
-#   moe_route stays at its default (remat). The bench image's MaxText tags nothing with
-#     it, so the moe_route=device of the measured runs changed nothing there. MaxText at
-#     this recipe's pin tags the ragged sort's integer routing results, where device
-#     would keep them on the chip at a memory cost no run has measured.
+#   moe_route=device: keeps the ragged sort's integer routing results for the backward
+#     instead of replaying both argsorts (+4.3 GiB compile temp; the trainer fits).
+#     Bench: 10.226 -> 10.184 s per micro-batch.
+#   wi_tile_dlhs_mlp_dim=2048 wi_tile_dlhs_embed_dim=2048: the wi input-gradient GEMM
+#     tiles the full 2048 contraction once instead of refetching its 8 MiB weight tile
+#     (tk 1024 -> 2048, tn 4096 -> 2048). Part of the bench cell below.
 #   num_moe_token_chunks=2 comes from NUM_MOE_TOKEN_CHUNKS: the default here, and set by
 #     mlperf_gbs1024_submission.sh for its replay layout.
 # The keys above with two token chunks, on top of the libtpu flag (bench, same pod, with
@@ -278,7 +291,7 @@ fi
 # The two together (bench, same pod, the sharded log-prob head on in both arms):
 # 107.59 -> 106.24 s/step; grad_norm moved 1.5e-5 relative, less than a rerun (1.9e-5).
 if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
-  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_strategy=all_gather sa_fuse_reciprocal=true sa_use_base2_exp=false gdn_cp_mode=seq gdn_cp_state=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true"
+  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_strategy=all_gather sa_fuse_reciprocal=true sa_use_base2_exp=false gdn_cp_mode=seq gdn_cp_state=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true moe_route=device wi_tile_dlhs_mlp_dim=2048 wi_tile_dlhs_embed_dim=2048"
 fi
 export DEBUG=${DEBUG:-0}
 

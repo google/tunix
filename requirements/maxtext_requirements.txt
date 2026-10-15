@@ -1,6 +1,8 @@
 # TODO(maxtext-dev): Update the commits after all code changes land.
-maxtext @ git+https://github.com/google/maxtext.git@079d690bc2b3391c9cb47e3a5d104da6f13e6fa8
-maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@079d690bc2b3391c9cb47e3a5d104da6f13e6fa8#subdirectory=src/maxtext/integration/vllm
+# atwigg/mlperf (AI-Hypercomputer/maxtext#5718's merge commit) plus AI-Hypercomputer/maxtext#5759
+# (trainer GDN/MoE/engine speedups) and #5741 (router and query kernels gathered once).
+maxtext @ git+https://github.com/google/maxtext.git@c345d249181e57734e1579c4632c4eb9b9b89f0c
+maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@c345d249181e57734e1579c4632c4eb9b9b89f0c#subdirectory=src/maxtext/integration/vllm
 aqtp
 cheroot
 cloud-accelerator-diagnostics

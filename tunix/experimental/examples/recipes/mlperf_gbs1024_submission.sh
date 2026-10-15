@@ -70,7 +70,8 @@ export ROLLOUT_ATTENTION_DP="${ROLLOUT_ATTENTION_DP:-false}"
 # (AI-Hypercomputer/maxtext#5701), the replay layout:
 #   RAGGED_BUFFER_FACTOR=2.75 with RETRY_WHEN_TOKENS_DROPPED=true, two MoE token
 #   chunks, REMAT_CONTEXT=device, MOE_EXCLUDE_PADDING=true (padding stays out of
-#   MoE routing), LOG_MOE_DROPS=true (per-micro-batch drop audit), and
+#   MoE routing), LOG_MOE_DROPS=true (per-micro-batch drop audit),
+#   REMAT_DECODER_LAYER_INPUT=device (layer inputs stay in HBM for the backward) and
 #   COMPUTE_LOGPS_CHUNK_SIZE=1024 (mlperf_base.sh's default is 512).
 # RAGGED_BUFFER_FACTOR=-1 keeps the fully dropless buffers instead: context
 # offload and four token chunks, without the replay, padding and audit flags.
@@ -86,6 +87,7 @@ export ROLLOUT_ATTENTION_DP="${ROLLOUT_ATTENTION_DP:-false}"
 export TRAINER_TUNED_FLAGS="${TRAINER_TUNED_FLAGS:-true}"
 if [[ "${TRAINER_TUNED_FLAGS}" == "true" ]]; then
   export COMPUTE_LOGPS_CHUNK_SIZE="${COMPUTE_LOGPS_CHUNK_SIZE:-1024}"
+  export REMAT_DECODER_LAYER_INPUT="${REMAT_DECODER_LAYER_INPUT:-device}"
 fi
 # SparseCore offload size thresholds for the trainer (see mlperf_397b_256_v7x.sh).
 export TRAINER_SC_OFFLOAD_THRESHOLDS="${TRAINER_SC_OFFLOAD_THRESHOLDS:-true}"
