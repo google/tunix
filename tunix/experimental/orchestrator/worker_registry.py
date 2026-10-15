@@ -24,11 +24,78 @@ changes.
 """
 
 import collections
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 import threading
+from typing import Any
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.worker import abstract_worker
+from tunix.experimental.worker import remote_execution
+
+# TODO(tunix-dev) remove this after raiden weight sync redesign.
+class RemoteWorkerShim(abstract_worker.Worker):
+  """Presents a remote ActorHandle as a control-plane Worker and weight sync participant."""
+
+  def __init__(
+      self, handle: remote_execution.ActorHandle, info: datatypes.WorkerInfo
+  ):
+    self._handle = handle
+    self._info = info
+
+  def info(self) -> datatypes.WorkerInfo:
+    return self._info
+
+  def initialize(self, *args, **kwargs) -> Any:
+    resp = self._handle.submit("initialize", *args, **kwargs)
+    if (
+        isinstance(resp, datatypes.Response)
+        and "trajectory_store_config" in resp.metadata
+    ):
+      self._info.resources["trajectory_store_config"] = resp.metadata[
+          "trajectory_store_config"
+      ]
+    return resp
+
+  def compile(self, dummy_data: Any = None) -> Any:
+    return self._handle.submit("compile", dummy_data)
+
+  def start(self) -> Any:
+    return self._handle.submit("start")
+
+  def heartbeat(self, *args, **kwargs) -> Any:
+    return self._handle.submit("heartbeat", *args, **kwargs)
+
+  def stop(self, *args, **kwargs) -> Any:
+    return self._handle.submit("stop", *args, **kwargs)
+
+  async def prepare_weight_sync(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit("prepare_weight_sync", *args, **kwargs)
+
+  async def release_weight_sync(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit("release_weight_sync", *args, **kwargs)
+
+  async def bind_weight_sync(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit("bind_weight_sync", *args, **kwargs)
+
+  async def get_weight_sync_metadata(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit(
+        "get_weight_sync_metadata", *args, **kwargs
+    )
+
+  async def pre_weight_sync(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit("pre_weight_sync", *args, **kwargs)
+
+  async def weight_sync(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit("weight_sync", *args, **kwargs)
+
+  async def post_weight_sync(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit("post_weight_sync", *args, **kwargs)
+
+  async def abort_weight_sync(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit("abort_weight_sync", *args, **kwargs)
+
+  async def get_weight_sync_status(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit("get_weight_sync_status", *args, **kwargs)
 
 
 class WorkerGroup:
@@ -65,6 +132,7 @@ class WorkerRegistry:
   def __init__(self):
     self._lock = threading.Lock()
     self._workers: dict[str, abstract_worker.Worker] = {}
+    self._handles: dict[str, remote_execution.ActorHandle] = {}
     self._infos: dict[str, datatypes.WorkerInfo] = {}
     self._role_to_ids: dict[str, set[str]] = collections.defaultdict(set)
 
@@ -87,6 +155,13 @@ class WorkerRegistry:
     """
     info = worker.info()
     worker_id = info.worker_id
+    handle = (
+        worker._handle
+        if isinstance(worker, RemoteWorkerShim)
+        else remote_execution.InProcessActorHandle(
+            remote_execution.InProcessRemoteExecutionServer(worker)
+        )
+    )
     with self._lock:
       if worker_id in self._workers and not override:
         raise ValueError(f"duplicate worker_id: {worker_id!r}")
@@ -103,16 +178,43 @@ class WorkerRegistry:
               del self._role_to_ids[role]
 
       self._workers[worker_id] = worker
+      self._handles[worker_id] = handle
       self._infos[worker_id] = info
       for role in info.roles:
         self._role_to_ids[role].add(worker_id)
     return info
+
+  def register_handle(
+      self,
+      worker_id: str,
+      roles: Sequence[datatypes.Role | str],
+      handle: remote_execution.ActorHandle,
+      resources: Mapping[str, Any] | None = None,
+      override: bool = False,
+  ) -> datatypes.WorkerInfo:
+    """Registers a remote worker ActorHandle under its declared id and roles."""
+    if not isinstance(handle, remote_execution.ActorHandle):
+      raise TypeError(
+          "register_handle expects a remote_execution.ActorHandle, got "
+          f"{type(handle)}"
+      )
+    role_names = frozenset(
+        role.value if isinstance(role, datatypes.Role) else role
+        for role in roles
+    )
+    info = datatypes.WorkerInfo(
+        worker_id=worker_id,
+        roles=role_names,
+        resources={"remote": True, **dict(resources or {})},
+    )
+    return self.register(RemoteWorkerShim(handle, info), override=override)
 
   def unregister(self, worker_id: str) -> None:
     """Removes a worker (and its role memberships) from the registry."""
     with self._lock:
       info = self._infos.pop(worker_id)
       del self._workers[worker_id]
+      del self._handles[worker_id]
       for role in info.roles:
         members = self._role_to_ids.get(role)
         if members is not None:
@@ -124,6 +226,10 @@ class WorkerRegistry:
     with self._lock:
       return self._workers[worker_id]
 
+  def handle(self, worker_id: str) -> remote_execution.ActorHandle:
+    with self._lock:
+      return self._handles[worker_id]
+
   def info(self, worker_id: str) -> datatypes.WorkerInfo:
     with self._lock:
       return self._infos[worker_id]
@@ -133,6 +239,14 @@ class WorkerRegistry:
     with self._lock:
       ids = sorted(self._role_to_ids.get(role, set()))
       return WorkerGroup(role, [self._workers[i] for i in ids])
+
+  def handles(
+      self, role: datatypes.Role | str
+  ) -> list[remote_execution.ActorHandle]:
+    """Returns the (possibly empty) list of ActorHandles serving `role`."""
+    with self._lock:
+      ids = sorted(self._role_to_ids.get(role, set()))
+      return [self._handles[i] for i in ids]
 
   def roles(self) -> set[str]:
     with self._lock:

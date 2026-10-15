@@ -14,9 +14,13 @@
 
 """Tests for the WorkerRegistry and WorkerGroup."""
 
+from unittest import mock
+
 from absl.testing import absltest
+from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.worker import mock_worker
+from tunix.experimental.worker import remote_execution
 
 
 class WorkerRegistryTest(absltest.TestCase):
@@ -160,6 +164,48 @@ class WorkerRegistryTest(absltest.TestCase):
     # The worker should just be "rollout" now
     self.assertEqual(registry.roles(), {"rollout"})
     self.assertCountEqual(registry.group("rollout").members(), [t0_new, t1_new])
+
+  def test_register_handle_and_handles_by_role(self):
+    registry = worker_registry.WorkerRegistry()
+    local_worker = mock_worker.MockWorker(worker_id="r-local", roles={"rollout"})
+    remote_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+    remote_handle.submit.side_effect = [
+        datatypes.Response(
+            metadata={"trajectory_store_config": {"backend": "memory"}}
+        ),
+        datatypes.Response(),
+        datatypes.Response(),
+    ]
+
+    registry.register(local_worker)
+    info = registry.register_handle(
+        "r-remote",
+        [datatypes.Role.ROLLOUT],
+        remote_handle,
+        resources={"tpu": 4},
+    )
+
+    self.assertEqual(info.resources, {"remote": True, "tpu": 4})
+    self.assertIsInstance(
+        registry.get("r-remote"), worker_registry.RemoteWorkerShim
+    )
+    self.assertIs(registry.handle("r-remote"), remote_handle)
+    self.assertIsInstance(
+        registry.handle("r-local"), remote_execution.InProcessActorHandle
+    )
+    self.assertEqual(
+        registry.handles(datatypes.Role.ROLLOUT),
+        [registry.handle("r-local"), remote_handle],
+    )
+
+    shim = registry.get("r-remote")
+    shim.initialize()
+    shim.compile("dummy")
+    shim.start()
+    self.assertEqual(
+        registry.info("r-remote").resources["trajectory_store_config"],
+        {"backend": "memory"},
+    )
 
 
 if __name__ == "__main__":

@@ -183,52 +183,7 @@ def create_default_handler(
     raise ValueError(f"Unknown weight sync mode: {mode_name!r}")
 
 
-class RemoteWorkerShim:
-  """Presents a generic remote RPC handle as a weight sync participant."""
-
-  def __init__(self, handle: Any, info: datatypes.WorkerInfo):
-    self._handle = handle
-    self._info = info
-
-  def info(self) -> datatypes.WorkerInfo:
-    return self._info
-
-  def heartbeat(self, *args, **kwargs) -> Any:
-    return self._handle.submit("heartbeat", *args, **kwargs)
-
-  def stop(self, *args, **kwargs) -> Any:
-    return self._handle.submit("stop", *args, **kwargs)
-
-  async def prepare_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("prepare_weight_sync", *args, **kwargs)
-
-  async def release_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("release_weight_sync", *args, **kwargs)
-
-  async def bind_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("bind_weight_sync", *args, **kwargs)
-
-  async def get_weight_sync_metadata(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit(
-        "get_weight_sync_metadata", *args, **kwargs
-    )
-
-  async def pre_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("pre_weight_sync", *args, **kwargs)
-
-  async def weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("weight_sync", *args, **kwargs)
-
-  async def post_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("post_weight_sync", *args, **kwargs)
-
-  async def abort_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("abort_weight_sync", *args, **kwargs)
-
-  async def get_weight_sync_status(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("get_weight_sync_status", *args, **kwargs)
-
-
+RemoteWorkerShim = worker_registry.RemoteWorkerShim
 weight_sync.WeightSyncSource.register(RemoteWorkerShim)
 weight_sync.WeightSyncDestination.register(RemoteWorkerShim)
 
