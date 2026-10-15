@@ -1724,11 +1724,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       )
       if uses_weighted_loss:
         eval_loss = self._buffered_eval_metrics.loss
-      logging.info(
-          "Train step %d eval loss: %f",
-          self._train_steps,
-          eval_loss if uses_weighted_loss else eval_loss / eval_steps,
-      )
+      else:
+        eval_loss /= eval_steps
+      logging.info("Train step %d eval loss: %f", self._train_steps, eval_loss)
       if self.training_hooks:
         self.training_hooks.on_eval_step_end(self, eval_loss)
 
