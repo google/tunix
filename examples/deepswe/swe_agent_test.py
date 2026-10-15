@@ -1123,8 +1123,8 @@ class SweAgentTest(absltest.TestCase):
                 "execute_bash",
                 {
                     "command": (
-                        "python3 -c 'import sys, time;"
-                        " [ (print(i, flush=True), time.sleep(0.12)) for i in"
+                        "python3 -c 'import time;"
+                        " [ (print(i), time.sleep(0.12)) for i in"
                         " range(4) ]'"
                     )
                 },
@@ -1141,8 +1141,8 @@ class SweAgentTest(absltest.TestCase):
                 "execute_bash",
                 {
                     "command": (
-                        "python3 -c 'import sys, time; print(\"start\","
-                        " flush=True); time.sleep(5)'"
+                        "python3 -c 'import time; print(\"start\");"
+                        " time.sleep(5)'"
                     )
                 },
             ),

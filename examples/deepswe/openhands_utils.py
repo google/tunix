@@ -1164,7 +1164,7 @@ def _wrap_with_inactivity_timeout(
   return (
       "("
       + _STRIP_PYINSTALLER_LD_PATH
-      + 'export __OH_CWD_FILE="/var/tmp/.oh_cwd"; '
+      + 'export PYTHONUNBUFFERED=1 __OH_CWD_FILE="/var/tmp/.oh_cwd"; '
       + "python3 -c \"import base64; exec(base64.b64decode('"
       + b64_driver
       + "').decode('utf-8'))\""
