@@ -54,6 +54,7 @@ _MAXTEXT_DEFAULTS = {
     # Defaults in the MaxText of AI-Hypercomputer/maxtext#5698, #5758 and the
     # change on top of #5721; see _BENCH_MAXTEXT_KEYS.
     "context_parallel_attention_load_balance_hoist_ids": "false",
+    "fp8_fake_quant_hoist": "off",
     "gdn_conv1d_dense_token_stack": "false",
     "gdn_conv1d_input_in_qkv_dtype": "false",
     "moe_gmm_v2_dlhs_transpose_rhs": "false",
@@ -78,6 +79,7 @@ _TUNED_KEYS = {
     "context_parallel_strategy": ("ring", "all_gather"),
     "custom_mesh_and_rule": ("cp-as-ep", "cp-as-ep-dense-no-cp"),
     "decoder_layer_input": ("offload", "device"),
+    "fp8_fake_quant_hoist": ("off", "gather8"),
     "gdn_conv1d_dense_token_stack": ("false", "true"),
     "gdn_conv1d_input_in_qkv_dtype": ("false", "true"),
     "gdn_cp_matmul_precision": ("highest", "high"),
@@ -107,10 +109,13 @@ _TUNED_KEYS = {
 # context_parallel_attention_load_balance_hoist_ids, moe_wo_gmm_fused_dswiglu and
 # query_proj_kernel_gather_once, which only the MaxText change on top of #5721
 # defines (the pinned parambole/rl-4600-final-maxtext; atwigg/mlperf at bbd0f6f10
-# does not). MaxText refuses a key it does not define when the trainer starts, so
-# only TRAINER_TUNED_FLAGS=true may pass them.
+# does not), and fp8_fake_quant_hoist, which only the pinned commit of that
+# branch defines (its previous head 94f11c09d does not). MaxText refuses a key
+# it does not define when the trainer starts, so only TRAINER_TUNED_FLAGS=true
+# may pass them.
 _BENCH_MAXTEXT_KEYS = (
     "context_parallel_attention_load_balance_hoist_ids",
+    "fp8_fake_quant_hoist",
     "gdn_conv1d_dense_token_stack",
     "gdn_conv1d_input_in_qkv_dtype",
     "moe_gmm_v2_dlhs_transpose_rhs",
@@ -156,6 +161,9 @@ _MESH_64X1X8 = {
     "TRAINER_MESH_CONTEXT": "8",
 }
 _PROJ_KEYS = ("query_proj", "key_proj", "value_proj", "out_proj", "qkv_proj")
+# TRAINER_TUNED_FLAGS adds fp8_fake_quant_hoist only at the 128-chip 32x2x4
+# mesh, where it was timed, and only with the trainer's fp8 fake-quant on.
+_FQ_HOIST = "fp8_fake_quant_hoist"
 
 
 def _render(recipe: Path = _RECIPE, **overrides: str) -> str:
@@ -207,6 +215,12 @@ def _jobset(render: str, suffix: str) -> str:
 def _maxtext_flags(trainer: str) -> dict[str, str]:
   flags = re.search(r'MAXTEXT_EXTRA_FLAGS="([^"]*)"', trainer).group(1)
   return dict(token.split("=", 1) for token in flags.split())
+
+
+def _maxtext_flag_tokens(trainer: str, key: str) -> list[str]:
+  """Returns every `key=...` token of the trainer's MaxText flags, in order."""
+  flags = re.search(r'MAXTEXT_EXTRA_FLAGS="([^"]*)"', trainer).group(1)
+  return [token for token in flags.split() if token.split("=", 1)[0] == key]
 
 
 def _vllm_config(rollout: str) -> dict:
@@ -637,8 +651,11 @@ class SubmissionLauncherTest(absltest.TestCase):
     expected = {key: ("remat", "device") for key in _PROJ_KEYS}
     # MaxText refuses query_proj_kernel_gather_once with query_proj=device.
     expected["query_proj_kernel_gather_once"] = ("true", "false")
+    # fp8_fake_quant_hoist only at 32x2x4.
+    expected[_FQ_HOIST] = ("gather8", "off")
     self.assertEqual(_flag_changes(before, flags), expected)
     self.assertNotIn("query_proj_kernel_gather_once", flags)
+    self.assertNotIn(_FQ_HOIST, flags)
     self.assertEqual(flags["num_moe_token_chunks"], "2")
     self.assertEqual(flags["moe_chunk_pipeline"], "true")
     self.assertEqual(flags["moe_roe_packed_routing_gather"], "true")
@@ -656,8 +673,11 @@ class SubmissionLauncherTest(absltest.TestCase):
     expected["moe_roe_packed_routing_gather"] = ("true", "false")
     # MaxText refuses query_proj_kernel_gather_once with query_proj=device.
     expected["query_proj_kernel_gather_once"] = ("true", "false")
+    # fp8_fake_quant_hoist only at 32x2x4.
+    expected[_FQ_HOIST] = ("gather8", "off")
     self.assertEqual(_flag_changes(before, flags), expected)
     self.assertNotIn("query_proj_kernel_gather_once", flags)
+    self.assertNotIn(_FQ_HOIST, flags)
 
   def test_tuned_flags_keep_an_explicit_chunk_count_at_64x1x8(self):
     flags = _maxtext_flags(
@@ -672,6 +692,34 @@ class SubmissionLauncherTest(absltest.TestCase):
     for key in _PROJ_KEYS:
       self.assertEqual(flags[key], "device", key)
     self.assertNotIn("query_proj_kernel_gather_once", flags)
+    self.assertNotIn(_FQ_HOIST, flags)
+
+  def test_fp8_fake_quant_hoist_only_at_the_timed_cell(self):
+    # Once, with gather8, in the 32x2x4 trainer with the tuned flags (the
+    # default render and the bench cell), next to fp8_moe_fake_quant=true.
+    for render in (self.default, self.bench_on):
+      trainer = _jobset(render, "train")
+      self.assertEqual(
+          _maxtext_flag_tokens(trainer, _FQ_HOIST), [f"{_FQ_HOIST}=gather8"]
+      )
+      self.assertEqual(_maxtext_flags(trainer)["fp8_moe_fake_quant"], "true")
+    # Nowhere else: tuned flags off, the 256-chip meshes, TRAINER_FP8=false.
+    others = {
+        "tuned off": self.default_off,
+        "bench, tuned off": self.bench_off,
+        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
+        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
+        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
+        "32x2x8, tuned off": _render(
+            TRAINER_TUNED_FLAGS="false", **_MESH_32X2X8
+        ),
+    }
+    for name, render in others.items():
+      self.assertNotIn(_FQ_HOIST, render, name)
+    # Without the trainer's fp8 fake-quant, MaxText would raise on the key.
+    no_fp8 = _jobset(_render(TRAINER_FP8="false", **_BENCH_CELL), "train")
+    self.assertNotIn("fp8_moe_fake_quant", _maxtext_flags(no_fp8))
+    self.assertNotIn(_FQ_HOIST, no_fp8)
 
   def test_tuned_flags_false_leaves_the_256_chip_meshes_alone(self):
     for mesh in (_MESH_32X2X8, _MESH_64X1X8):
@@ -756,6 +804,7 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(flags["moe_chunk_pipeline"], "false")
     self.assertEqual(flags["query_proj"], "device")
     self.assertNotIn("query_proj_kernel_gather_once", flags)
+    self.assertNotIn(_FQ_HOIST, flags)
 
   def test_pad_start_with_finite_moe_capacity_requires_exclude_padding(self):
     with self.assertRaisesRegex(

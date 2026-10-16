@@ -1,9 +1,9 @@
 # TODO(maxtext-dev): Update the commits after all code changes land.
 # Branch parambole/rl-4600-final-maxtext of AI-Hypercomputer/maxtext: atwigg/mlperf at the merge of AI-Hypercomputer/maxtext#5721
 # (bbd0f6f10; includes the #5698 port, #5758, #5783 and GDN/MoE trainer perf) plus moe_wo_gmm_fused_dswiglu,
-# context_parallel_attention_load_balance_hoist_ids and query_proj_kernel_gather_once.
-maxtext @ git+https://github.com/google/maxtext.git@94f11c09df83e9903c093e4544beba3bb198ff8b
-maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@94f11c09df83e9903c093e4544beba3bb198ff8b#subdirectory=src/maxtext/integration/vllm
+# context_parallel_attention_load_balance_hoist_ids, query_proj_kernel_gather_once and fp8_fake_quant_hoist.
+maxtext @ git+https://github.com/google/maxtext.git@e1cd8bf1debaac1d0f2afa583346cd99c6e9a1ad
+maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@e1cd8bf1debaac1d0f2afa583346cd99c6e9a1ad#subdirectory=src/maxtext/integration/vllm
 aqtp
 cheroot
 cloud-accelerator-diagnostics

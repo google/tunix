@@ -354,6 +354,16 @@ fi
 #     256-chip 32x2x8 and 64x1x8, which keep query_proj on device (below): there the
 #     backward does not replay the projection, so it reads the query kernel only for
 #     the input gradient.
+#   fp8_fake_quant_hoist=gather8: with fp8_moe_fake_quant=true (TRAINER_FP8=true) every
+#     routed-expert weight is rounded to its per-channel fp8 grid in each layer's forward
+#     and remat replay. The key computes the absmax that fixes each channel's scale once
+#     for the whole layer stack, before the layer scan (one FSDP max all-reduce per
+#     weight instead of one per layer and pass), and the expert weights' FSDP
+#     all-gathers move the float8_e4m3fn codes (1 byte per element instead of 2), which
+#     are dequantized after the gather. The same values: on CPU the loss, the logits and
+#     every gradient are bit-identical to the key off. MaxText raises when the trainer
+#     traces it without fp8_moe_fake_quant=true, so the block passes it only with
+#     TRAINER_FP8=true, and only at the 128-chip 32x2x4 mesh, the one it was timed at.
 # These on the bench, regular micro-batch or s/step as above, 0 tokens dropped:
 #   moe_routing_index_math=count 10.022 -> 9.875 s (o275x-mf-cnt-prof),
 #     moe_unsplit_prefused_wi with two exact rewrites this block leaves off 10.022 ->
@@ -388,6 +398,11 @@ fi
 #     gathers the query kernel once per attention layer instead of twice, at the same
 #     device peak; the MaxText change's test, executed on TPU v5p, gives bit-identical
 #     values and gradients with it.
+#   fp8_fake_quant_hoist=gather8, on the pinned MaxText with this block's other keys at
+#     32x2x4, against the same code without it in the same pod: 80.385 -> 79.397 s/step
+#     (o275x-v19a-ctl -> o275x-v19a-fq8, 3,669 -> 3,714 tokens/s/chip), 0 tokens
+#     dropped. In an AOT compile of that cell fwd_bwd takes 80.26 GiB of HBM (79.96
+#     without it).
 #   custom_mesh_and_rule=cp-as-ep-dense-no-cp, on the code of
 #     AI-Hypercomputer/maxtext#5758 at this cell without
 #     context_parallel_attention_load_balance_hoist_ids, moe_wo_gmm_fused_dswiglu and
@@ -434,9 +449,10 @@ fi
 # AI-Hypercomputer/maxtext#5721. All twelve keys, and the cp-as-ep-dense-no-cp rule
 # below, are in the MaxText pinned in requirements/maxtext_requirements.txt (branch
 # parambole/rl-4600-final-maxtext, on atwigg/mlperf at bbd0f6f10, the merge of
-# AI-Hypercomputer/maxtext#5721; bbd0f6f10 itself lacks those three). MaxText refuses a
-# key it does not define when the trainer starts, so an older MaxText needs
-# TRAINER_TUNED_FLAGS=false.
+# AI-Hypercomputer/maxtext#5721; bbd0f6f10 itself lacks those three). So is
+# fp8_fake_quant_hoist, from the commit after them on that branch (94f11c09d, the branch's
+# previous head, lacks it). MaxText refuses a key it does not define when the trainer
+# starts, so an older MaxText needs TRAINER_TUNED_FLAGS=false.
 # The 256-chip trainer (TRAINER_TPU_SLICE=tpu7x:4x8x8, 512 devices), from Rohan Bierneni's
 # 256-chip trainer runs (2026-10-15, RL trainer bench, 9 micro-batches of 64 rows, steps 1-4):
 # 32x2x8 60.62 s/step and 64x1x8 55.97 s/step, against 82.17 s/step for 32x2x4 on 128 chips.
@@ -464,6 +480,12 @@ if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
       export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} query_proj_kernel_gather_once=true"
       ;;
   esac
+  # fp8_fake_quant_hoist only at the mesh it was timed at, and only with the trainer's fp8
+  # fake-quant on (fp8_moe.sh: TRAINER_FP8 defaults to true), without which MaxText raises.
+  if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" \
+        && "${TRAINER_FP8:-true}" == "true" ]]; then
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} fp8_fake_quant_hoist=gather8"
+  fi
 fi
 export DEBUG=${DEBUG:-0}
 
