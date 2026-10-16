@@ -680,6 +680,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Enable MLPerf RCP (mllog) compliance logging.",
   )
   parser.add_argument(
+      "--mlperf_max_init_time_s",
+      type=float,
+      default=float(os.getenv("MLPERF_MAX_INIT_TIME_S", "1800")),
+      help=(
+          "MLPerf init time limit; init beyond this counts toward "
+          "time-to-train (init_stop/run_start are emitted at the limit). "
+          "0 disables."
+      ),
+  )
+  parser.add_argument(
       "--val_start_at",
       type=int,
       default=(
@@ -1069,7 +1079,15 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       prepull_executor.shutdown(wait=False)
 
   if args.rcp_logging:
-    mllog_utils.init_start(args)
+    mllog_utils.init_start(
+        args, max_init_time_s=args.mlperf_max_init_time_s
+    )
+    # Log submission metadata/hyperparameters inside the init window, before
+    # the init timer can emit run_start.
+    mllog_utils.init_print(
+        args,
+        train_dataset=None,
+    )
 
   tokenizer_path = (
       args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
@@ -1363,12 +1381,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         val_start_step=val_start_step,
         on_checkpoint_saved=_on_checkpoint_saved if manifest_file else None,
     )
-
-    if args.rcp_logging:
-      mllog_utils.init_print(
-          args,
-          train_dataset=None,
-      )
 
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
     if args.trainer_warmup_compile:

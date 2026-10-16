@@ -50,6 +50,7 @@ class MllogUtilsTest(absltest.TestCase):
     self.test_dir = tempfile.mkdtemp()
 
   def tearDown(self):
+    mllog_utils._cancel_init_timer()
     if mllog_utils.mllogger is not None:
       for h in list(getattr(mllog_utils.mllogger.logger, "handlers", [])):
         if isinstance(h, logging.FileHandler):
@@ -596,6 +597,69 @@ class MllogUtilsTest(absltest.TestCase):
     self.assertIn('"key": "init_stop"', content)
     self.assertIn('"key": "run_start"', content)
     self.assertIn('"key": "block_start"', content)
+
+  def _init_timeout_args(self):
+    return types.SimpleNamespace(
+        seed=1,
+        metric_logger_dir=self.test_dir,
+        batch_size=8,
+        num_generations=8,
+        max_steps=5,
+    )
+
+  def test_train_start_before_init_timeout_cancels_timer(self):
+    args = self._init_timeout_args()
+    mllog_utils.init_start(args, max_init_time_s=1800)
+    mllog_utils.train_start(args)
+    self.assertIsNone(mllog_utils._init_timer)
+
+    events = _read_mllog_events(os.path.join(self.test_dir, "seed_1.out"))
+    keys = [e["key"] for e in events]
+    self.assertEqual(
+        keys[-3:], ["init_stop", "run_start", "block_start"]
+    )
+
+  def test_init_timeout_emits_run_start_at_limit(self):
+    args = self._init_timeout_args()
+    mllog_utils.init_start(args, max_init_time_s=1800)
+    # Simulate the timer firing instead of waiting 30 minutes.
+    mllog_utils._cancel_init_timer()
+    mllog_utils._on_init_timeout(1800)
+    mllog_utils.train_start(args)
+
+    events = _read_mllog_events(os.path.join(self.test_dir, "seed_1.out"))
+    by_key = {}
+    for e in events:
+      by_key.setdefault(e["key"], []).append(e)
+    self.assertLen(by_key["init_stop"], 1)
+    self.assertLen(by_key["run_start"], 1)
+    self.assertLen(by_key["block_start"], 1)
+    init_start_ms = by_key["init_start"][0]["time_ms"]
+    self.assertEqual(by_key["init_stop"][0]["time_ms"], init_start_ms + 1800000)
+    self.assertEqual(by_key["run_start"][0]["time_ms"], init_start_ms + 1800000)
+
+  def test_init_timer_fires(self):
+    args = self._init_timeout_args()
+    mllog_utils.init_start(args, max_init_time_s=0.05)
+    mllog_utils._init_timer.join(timeout=5)
+    mllog_utils.train_start(args)
+
+    events = _read_mllog_events(os.path.join(self.test_dir, "seed_1.out"))
+    keys = [e["key"] for e in events]
+    self.assertEqual(keys.count("init_stop"), 1)
+    self.assertEqual(keys.count("run_start"), 1)
+    self.assertLess(keys.index("run_start"), keys.index("block_start"))
+
+  def test_init_timeout_disabled(self):
+    args = self._init_timeout_args()
+    mllog_utils.init_start(args, max_init_time_s=0)
+    self.assertIsNone(mllog_utils._init_timer)
+
+  def test_finish_training_cancels_init_timer(self):
+    args = self._init_timeout_args()
+    mllog_utils.init_start(args, max_init_time_s=1800)
+    mllog_utils.finish_training(args, status="aborted")
+    self.assertIsNone(mllog_utils._init_timer)
 
   def test_train_stop(self):
     args = types.SimpleNamespace(
