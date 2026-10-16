@@ -10,7 +10,7 @@
 
 2. **Dual Output Contract (Human & `--json`)**
    Every subcommand implements `execute(self, reader: store.TrajectoryReader, output_json: bool = False) -> int`.
-   - When `output_json=False` (default), commands print formatted, human-readable terminal summaries using `termcolor`.
+   - When `output_json=False` (default), commands print formatted, human-readable terminal summaries.
    - When `output_json=True` (`--json`), commands emit machine-readable JSON to `stdout` while any CLI usage errors are isolated to `stderr` (exit code `2`), enabling clean composition with `jq` and automated evaluation scripts.
 
 3. **Decoupled Testing Architecture**
@@ -18,6 +18,19 @@
 
 4. **Decoupled Diagnostics Library (`diagnostics/`)**
   Statistics live in `diagnostics/stats.py` (`:diagnostics`), which has no CLI dependencies: `TrajectoryStats.from_trajectory()` summarizes one trajectory and `RunStats.from_trajectories()` aggregates a run into a `pandas.DataFrame` (`RunStats.df`, columns per `COLUMN_DTYPES`) whose columns are reduced into run totals. Unreported quantities are `None` (nulls in the DataFrame), never `0`; both classes offer `to_json_dict()` for the `--json` contract. Subcommands render these objects rather than computing their own figures, so notebooks and evaluation scripts can import the same numbers.
+
+5. **Exit Codes**
+   `0` on success, `1` when the requested data does not exist (e.g. `show` on an unknown trajectory ID), and `2` for a bad flag or flag combination. Errors go to `stderr`, never into the `--json` payload.
+
+---
+
+## Subcommands
+
+| Command | What it prints |
+|---|---|
+| `ping` | Store connectivity and the number of trajectories. |
+| `summary` | One row per trajectory (status, steps by source, tokens, tool calls, reward) followed by run totals: steps, tokens, status counts, mean reward and per-tool call counts. Under `--json`, the rows are the records of `RunStats.df`. |
+| `show --trajectory_id=<id>` | A trajectory's header (status, reward, steps, tokens, subagents), every step with its message, reasoning, tool calls and observations (truncated to `--max_chars`, `0` for no truncation), and the tool-call sequence. |
 
 ---
 
@@ -29,7 +42,20 @@ python3 -m tunix.experimental.trajectory.explorer.run_explorer \
   --store file \
   --root_dir /tmp/tx_smoke \
   --run_id run_95d297b1 \
-  ping
+  summary
+```
+
+```
+trajectory  status     steps  agent  env  tokens        tool calls  reward
+t_atif      SUCCEEDED      3      1    2  150 (100+50)           1  3.5
+t_atif_2    SUCCEEDED      2      1    1  150 (100+50)           1  3.5
+
+Trajectories: 2
+Steps: 5 (agent 2, user 3, system 0, other 0)
+Tokens: 300 (200+100) reported by 2/2
+Statuses: SUCCEEDED x2 reported by 2/2
+Mean reward: 3.5 reported by 2/2
+Tool calls: search x2
 ```
 
 ### Machine-Readable JSON Output
@@ -38,15 +64,14 @@ python3 -m tunix.experimental.trajectory.explorer.run_explorer \
   --store file \
   --root_dir /tmp/tx_smoke \
   --run_id run_95d297b1 \
-  --json ping
-# {"status": "ok", "trajectories_count": 4}
+  --json show --trajectory_id traj_1001 | jq .stats.tool_call_names
 ```
 
 ---
 
 ## How to Add a New Subcommand
 
-Adding a new subcommand (e.g., `summary`, `show`, or `diff`) requires **4 steps**:
+Adding a new subcommand requires **4 steps**. `commands/summary.py` and `commands/show.py` are complete examples; shared terminal helpers (missing-value marker, status name, step/token counts) live in `commands/formatting.py`.
 
 ### Step 1: Implement `BaseCommand` in `commands/<name>.py`
 Create a frozen dataclass inheriting from `base.BaseCommand`. Any fields declared on the dataclass automatically become subcommand-specific CLI flags via `simple_parsing`.
