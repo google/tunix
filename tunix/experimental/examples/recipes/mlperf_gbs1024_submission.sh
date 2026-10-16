@@ -112,11 +112,14 @@ case "${DROPLESS}" in
       if [[ "${RETRY_DROPLESS_FINAL_MICRO_BATCH:-false}" != "true" \
             && -z "${FIRST_PHASE_RAGGED_BUFFER_FACTOR:-}" ]]; then
         export REMAT_CONTEXT="${REMAT_CONTEXT:-device}"
-        if [[ "${TRAINER_TPU_SLICE:-tpu7x:4x4x8}" == "tpu7x:4x8x8" && "${TRAINER_MESH_EXPERT:-1}" == "1" ]]; then
+        # One token chunk at the 256-chip trainer mesh 64x1x8 (see mlperf_397b_256_v7x.sh), which is
+        # also the mesh mlperf_397b_256_v7x.sh picks for tpu7x:4x8x8 when no mesh is given.
+        if [[ "${TRAINER_MESH_FSDP:-}x${TRAINER_MESH_EXPERT:-}x${TRAINER_MESH_CONTEXT:-}" == "64x1x8" ]] \
+           || [[ "${TRAINER_TPU_SLICE:-}" == "tpu7x:4x8x8" \
+                 && "${TRAINER_MESH_FSDP:-64}x${TRAINER_MESH_EXPERT:-1}x${TRAINER_MESH_CONTEXT:-8}" == "64x1x8" ]]; then
           export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-1}"
-        else
-          export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
         fi
+        export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
       fi
     fi
     export REMAT_CONTEXT="${REMAT_CONTEXT:-offload}"
