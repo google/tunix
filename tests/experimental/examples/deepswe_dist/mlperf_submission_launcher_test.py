@@ -51,8 +51,9 @@ _MAXTEXT_DEFAULTS = {
     "cast_grads_after_all_reduce": "false",
     "gdn_cp_matmul_precision": "highest",
     "gdn_cp_state": "remat",
-    # Defaults in the MaxText of AI-Hypercomputer/maxtext#5698 and #5758; see
-    # _BENCH_MAXTEXT_KEYS.
+    # Defaults in the MaxText of AI-Hypercomputer/maxtext#5698, #5758 and the
+    # change on top of #5721; see _BENCH_MAXTEXT_KEYS.
+    "context_parallel_attention_load_balance_hoist_ids": "false",
     "gdn_conv1d_dense_token_stack": "false",
     "gdn_conv1d_input_in_qkv_dtype": "false",
     "moe_gmm_v2_dlhs_transpose_rhs": "false",
@@ -71,6 +72,7 @@ _MAXTEXT_DEFAULTS = {
 }
 _TUNED_KEYS = {
     "cast_grads_after_all_reduce": ("false", "true"),
+    "context_parallel_attention_load_balance_hoist_ids": ("false", "true"),
     "context_parallel_strategy": ("ring", "all_gather"),
     "custom_mesh_and_rule": ("cp-as-ep", "cp-as-ep-dense-no-cp"),
     "decoder_layer_input": ("offload", "device"),
@@ -97,10 +99,13 @@ _TUNED_KEYS = {
 }
 # Tuned keys that MaxText before AI-Hypercomputer/maxtext#5721 (e.g. e526ea02)
 # does not define: two from AI-Hypercomputer/maxtext#5698 and seven from
-# AI-Hypercomputer/maxtext#5758, which is on top of it. MaxText refuses a key it
-# does not define when the trainer starts, so only TRAINER_TUNED_FLAGS=true may
-# pass them.
+# AI-Hypercomputer/maxtext#5758, which is on top of it, and
+# context_parallel_attention_load_balance_hoist_ids, which only the MaxText
+# change on top of #5721 defines (the pinned parambole/rl-4600-final-maxtext;
+# atwigg/mlperf at bbd0f6f10 does not). MaxText refuses a key it does not define
+# when the trainer starts, so only TRAINER_TUNED_FLAGS=true may pass them.
 _BENCH_MAXTEXT_KEYS = (
+    "context_parallel_attention_load_balance_hoist_ids",
     "gdn_conv1d_dense_token_stack",
     "gdn_conv1d_input_in_qkv_dtype",
     "moe_gmm_v2_dlhs_transpose_rhs",

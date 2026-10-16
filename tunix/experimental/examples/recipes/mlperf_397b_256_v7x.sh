@@ -322,6 +322,16 @@ fi
 #   wi_tile_fwd_batch_seq, wi_tile_drhs_batch_seq, wo_tile_fwd_batch_seq,
 #   wo_tile_dlhs_batch_seq and wo_tile_drhs_batch_seq=512: row tiles of 512 for the five
 #     MoE GMMs with 1024 tiles. wi_tile_dlhs_batch_seq stays 256 next to its 2048 K tile.
+#   context_parallel_attention_load_balance_hoist_ids=true: remat_policy=custom saves
+#     each attention layer's load-balance-ordered positions and segment ids. They depend
+#     only on the batch, so jax.lax.scan keeps one copy outside the layer loop, and the
+#     remat replay of every attention layer reads it instead of reordering them again.
+#     The same values. Compiled for TPU v7x, XLA already moves the reorder's
+#     collective-permutes out of the loop without the key; the key moves out the rest
+#     of the reorder. MaxText refuses the key without
+#     context_parallel_attention_load_balance=true, an even context parallelism of at
+#     least 2, remat_policy=custom and scan_layers=true, which this recipe's trainer has
+#     (TRAINER_MESH_CONTEXT=4, or 8 on the 256-chip trainer; REMAT_POLICY=custom).
 # These on the bench, regular micro-batch or s/step as above, 0 tokens dropped:
 #   moe_routing_index_math=count 10.022 -> 9.875 s (o275x-mf-cnt-prof),
 #     moe_unsplit_prefused_wi with two exact rewrites this block leaves off 10.022 ->
@@ -337,27 +347,36 @@ fi
 #     (o275x-s6t512-l3); gdn_conv1d_dense_token_stack 86.926 -> 85.731 s/step, same pod,
 #     against an arm whose one change is a no-op (o275x-s6n2-l3-prof ->
 #     o275x-s6gr-l3-prof).
+#   context_parallel_attention_load_balance_hoist_ids alone, against controls in other
+#     pods: 99.504 -> 99.267 s/step (o275x-gdn-ctl -> o275x-s3-x17h), 99.248 -> 99.267
+#     (o275x-mf-ctl -> o275x-s3-x17h) and 91.7513 -> 91.8665 (o275x-stk3-l3-prof ->
+#     o275x-s5c-l3-prof): -0.237, +0.019 and +0.115 s/step, within the 0.255 s/step
+#     spread of one unchanged configuration over four pods (o275x-hd), so no effect is
+#     resolved.
 # The whole TRAINER_TUNED_FLAGS cell of mlperf_gbs1024_submission.sh (these keys, its
 # log-prob head and chunk size, padding first in packed rows, the staged step boundary):
 # 82.671 and 82.670 s/step in two pods (o275x-c9pfxhv-l3), against 106.30 s/step before
 # these keys, the fused head and padding first (o275x-hd, which also ran without the
 # staged step boundary; per regular micro-batch, which the boundary leaves alone, about
 # 10.77 -> 9.01 s). That build switched the MaxText changes with environment variables
-# and also hoisted attention's load-balancing permute, which neither MaxText PR has
-# (alone on the bench: 99.504 -> 99.267 s/step). The keys themselves, on the MaxText
-# change's own code without gdn_conv1d_dense_token_stack, the fused head and padding
-# first: 85.295 and 85.251 s/step (o275x-prc-l3-prof, o275x-prc-l3-r).
+# (context_parallel_attention_load_balance_hoist_ids as PARAMBOLE_ATTN_HOIST_PERMUTE=1).
+# The keys themselves, on the code of AI-Hypercomputer/maxtext#5758 without
+# gdn_conv1d_dense_token_stack and context_parallel_attention_load_balance_hoist_ids,
+# the fused head and padding first: 85.295 and 85.251 s/step (o275x-prc-l3-prof,
+# o275x-prc-l3-r).
 # Numerics (loss gates off, random advantages, three steps, against two reference runs
 # whose gradient norms differ by 1.9e-5 relative): all six gates pass (nxc9pfxhv).
 # moe_routing_maps and moe_gmm_v2_dlhs_transpose_rhs come from
-# AI-Hypercomputer/maxtext#5698, and moe_routing_index_math, moe_unsplit_prefused_wi,
+# AI-Hypercomputer/maxtext#5698, moe_routing_index_math, moe_unsplit_prefused_wi,
 # moe_roe_packed_routing_gather, moe_router_grad_from_wo_input, moe_wi_gmm_fused_swiglu,
 # gdn_conv1d_input_in_qkv_dtype and gdn_conv1d_dense_token_stack from the MaxText change
-# of AI-Hypercomputer/maxtext#5758 (on top of #5698). All nine keys, and the
-# cp-as-ep-dense-no-cp rule below, are in the MaxText pinned in
-# requirements/maxtext_requirements.txt (branch parambole/rl-4600-final-maxtext, on
-# atwigg/mlperf at bbd0f6f10, the merge of AI-Hypercomputer/maxtext#5721). MaxText refuses
-# a key it does not define when the trainer starts, so an older MaxText needs
+# of AI-Hypercomputer/maxtext#5758 (on top of #5698), and
+# context_parallel_attention_load_balance_hoist_ids from the MaxText change on top of
+# AI-Hypercomputer/maxtext#5721. All ten keys, and the cp-as-ep-dense-no-cp rule below,
+# are in the MaxText pinned in requirements/maxtext_requirements.txt (branch
+# parambole/rl-4600-final-maxtext, on atwigg/mlperf at bbd0f6f10, the merge of
+# AI-Hypercomputer/maxtext#5721; bbd0f6f10 itself lacks the hoist key). MaxText refuses a
+# key it does not define when the trainer starts, so an older MaxText needs
 # TRAINER_TUNED_FLAGS=false.
 # The 256-chip trainer (TRAINER_TPU_SLICE=tpu7x:4x8x8, 512 devices), from Rohan Bierneni's
 # 256-chip trainer runs (2026-10-15, RL trainer bench, 9 micro-batches of 64 rows, steps 1-4):
@@ -375,7 +394,7 @@ fi
 # over all devices and then all-gathered over context; the GDN projections (embed_gdn), routed
 # experts, embeddings and activations stay as under cp-as-ep. 128 chips: 82.185 -> 81.253 s/step.
 if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
-  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_strategy=all_gather sa_fuse_reciprocal=true gdn_cp_mode=seq gdn_cp_state=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true wi_tile_dlhs_mlp_dim=2048 decoder_layer_input=device moe_routing_maps=device moe_gmm_v2_dlhs_transpose_rhs=true moe_routing_index_math=count moe_unsplit_prefused_wi=true moe_roe_packed_routing_gather=${_moe_chunk_pipeline} moe_router_grad_from_wo_input=true moe_wi_gmm_fused_swiglu=true gdn_conv1d_input_in_qkv_dtype=true gdn_conv1d_dense_token_stack=true wi_tile_fwd_batch_seq=512 wi_tile_drhs_batch_seq=512 wo_tile_fwd_batch_seq=512 wo_tile_dlhs_batch_seq=512 wo_tile_drhs_batch_seq=512 custom_mesh_and_rule=cp-as-ep-dense-no-cp"
+  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_strategy=all_gather sa_fuse_reciprocal=true gdn_cp_mode=seq gdn_cp_state=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true wi_tile_dlhs_mlp_dim=2048 decoder_layer_input=device moe_routing_maps=device moe_gmm_v2_dlhs_transpose_rhs=true moe_routing_index_math=count moe_unsplit_prefused_wi=true moe_roe_packed_routing_gather=${_moe_chunk_pipeline} moe_router_grad_from_wo_input=true moe_wi_gmm_fused_swiglu=true gdn_conv1d_input_in_qkv_dtype=true gdn_conv1d_dense_token_stack=true wi_tile_fwd_batch_seq=512 wi_tile_drhs_batch_seq=512 wo_tile_fwd_batch_seq=512 wo_tile_dlhs_batch_seq=512 wo_tile_drhs_batch_seq=512 context_parallel_attention_load_balance_hoist_ids=true custom_mesh_and_rule=cp-as-ep-dense-no-cp"
   case "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" in
     32x2x8|64x1x8)
       export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} query_proj=device key_proj=device value_proj=device out_proj=device qkv_proj=device"
