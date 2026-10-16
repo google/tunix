@@ -20,6 +20,7 @@ never train a staged micro-batch in another's place.
 """
 
 import asyncio
+import threading
 from typing import Any
 from unittest import mock
 
@@ -131,7 +132,10 @@ class _RecordingWaits:
     )
 
   def _wait(self, x):
-    self._trainer.calls.append(("block_until_ready", x, {}))
+    # Only the serving thread's waits: the step timer (TRAINER_STEP_TIMING)
+    # also blocks on the trainer's tokens, from its own daemon thread.
+    if threading.current_thread() is threading.main_thread():
+      self._trainer.calls.append(("block_until_ready", x, {}))
     return self._real(x)
 
   def __enter__(self):

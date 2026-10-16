@@ -1121,6 +1121,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   def _record_fwd_bwd(self, train_loss: ArrayLike, aux: Any) -> None:
     """Bookkeeping for one forward/backward pass, independent of how it ran."""
+    # Readiness token for the worker's step timer: becomes ready when this
+    # microbatch's device work has completed (see trainer_worker.StepTimer).
+    self.last_fwd_bwd_token = train_loss
     self._buffered_train_metrics = self._buffer_metrics(
         self._buffered_train_metrics,
         loss=train_loss,
@@ -1132,6 +1135,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def _record_update(self, grad_norm: ArrayLike) -> int:
     """Bookkeeping for one optimizer update, independent of how it ran."""
     self._last_update_grad_norm = grad_norm
+    self.last_update_token = grad_norm  # ready when the optimizer step is
     if self._buffered_train_metrics is not None:
       metrics = self._buffered_train_metrics.additional_metrics
       if "grad_norm" not in metrics:

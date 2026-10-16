@@ -15,6 +15,7 @@ rollout.md
 algorithms.md
 models.md
 metrics.md
+trainer_step_timing.md
 examples.md
 talks.md
 contributing.md

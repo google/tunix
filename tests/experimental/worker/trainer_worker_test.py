@@ -20,6 +20,9 @@ per-token log-prob scorer run through AbstractTrainer.model_scope.
 """
 
 import contextlib
+import json
+import threading
+import time
 from typing import Any
 from unittest import mock
 
@@ -342,7 +345,10 @@ class TrainerWorkerTest(absltest.TestCase):
     real_block_until_ready = trainer_worker.jax.block_until_ready
 
     def _recording_block_until_ready(x):
-      events.append(("block_until_ready", x))
+      # Only the serving thread's waits: the step timer (TRAINER_STEP_TIMING)
+      # also blocks on the same token, from its own daemon thread.
+      if threading.current_thread() is threading.main_thread():
+        events.append(("block_until_ready", x))
       return real_block_until_ready(x)
 
     with mock.patch.object(
@@ -456,6 +462,260 @@ class TrainerWorkerTest(absltest.TestCase):
   def test_update_returns_step_count(self):
     step = self.worker.update()
     self.assertEqual(step, 11)
+
+  def _train_request(self, rid):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1, 2]], dtype=np.int32),
+        prompt_mask=np.ones((1, 2), dtype=np.float32),
+        completion_ids=np.array([[3, 4]], dtype=np.int32),
+        completion_mask=np.ones((1, 2), dtype=np.float32),
+        advantages=np.array([1.0], dtype=np.float32),
+        metadata={},
+    )
+    return datatypes.TrainRequest(request_id=rid, payload=payload, metadata={})
+
+  def test_get_step_timing_records_microbatches_update_and_prepare(self):
+    # Tokens make the timer observe device readiness off the serving thread.
+    self.fake_trainer.last_fwd_bwd_token = jnp.asarray(1.0)
+    self.fake_trainer.last_update_token = jnp.asarray(2.0)
+    self.fake_trainer.prepare_weight_sync = lambda **kw: None
+
+    self.worker.fwd_bwd(request=self._train_request("r0"))
+    self.worker.fwd_bwd(request=self._train_request("r1"))
+    train_step = self.worker.update()
+    self.worker.prepare_weight_sync()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+      t = self.worker.get_step_timing()
+      if t["update"]["ready_ago_s"] is not None and all(
+          m["ready_ago_s"] is not None for m in t["mb"]
+      ):
+        break
+      time.sleep(0.01)
+
+    self.assertEqual(t["v"], trainer_worker.STEP_TIMING_SCHEMA_VERSION)
+    self.assertEqual(t["train_step"], train_step)
+    self.assertEqual([m["i"] for m in t["mb"]], [0, 1])
+    for m in t["mb"]:
+      # dispatch_begin precedes dispatch_end precedes now: ago values descend.
+      self.assertGreaterEqual(m["dispatch_begin_ago_s"], m["dispatch_end_ago_s"])
+      self.assertGreaterEqual(m["dispatch_end_ago_s"], 0.0)
+      self.assertIsNotNone(m["ready_ago_s"])
+    self.assertGreaterEqual(
+        t["update"]["dispatch_begin_ago_s"], t["update"]["dispatch_end_ago_s"]
+    )
+    self.assertIsNotNone(t["update"]["ready_ago_s"])
+    self.assertGreaterEqual(t["prepare"]["recv_ago_s"], t["prepare"]["done_ago_s"])
+    # The update happened after the last microbatch was dispatched.
+    self.assertLessEqual(
+        t["update"]["dispatch_begin_ago_s"], t["mb"][-1]["dispatch_end_ago_s"]
+    )
+    # Wire-safe: plain JSON.
+    json.dumps(t)
+
+  def test_get_step_timing_without_tokens_has_no_ready_instants(self):
+    self.worker.fwd_bwd(request=self._train_request("r0"))
+    self.worker.update()
+    t = self.worker.get_step_timing()
+    self.assertLen(t["mb"], 1)
+    self.assertIsNone(t["mb"][0]["ready_ago_s"])
+    self.assertIsNone(t["update"]["ready_ago_s"])
+    self.assertIsNone(t["prepare"])
+
+  def test_missing_timing_tokens_warn_once_per_token(self):
+    with self.assertLogs(level="WARNING") as logs:
+      self.worker.fwd_bwd(request=self._train_request("r0"))
+      self.worker.fwd_bwd(request=self._train_request("r1"))
+      self.worker.update()
+      self.worker.fwd_bwd(request=self._train_request("r2"))
+      self.worker.update()
+    warnings = [m for m in logs.output if "TRAINER_STEP_TIMING" in m]
+    self.assertLen(warnings, 2)
+    self.assertTrue(any("`last_fwd_bwd_token`" in m for m in warnings))
+    self.assertTrue(any("`last_update_token`" in m for m in warnings))
+
+  def test_get_step_timing_resets_on_first_fwd_bwd_after_update(self):
+    self.worker.fwd_bwd(request=self._train_request("r0"))
+    self.worker.update()
+    self.worker.fwd_bwd(request=self._train_request("r1"))
+    t = self.worker.get_step_timing()
+    self.assertLen(t["mb"], 1)
+    self.assertIsNone(t["update"])
+
+  def _set_timing_tokens(self):
+    self.fake_trainer.last_fwd_bwd_token = jnp.asarray(1.0)
+    self.fake_trainer.last_update_token = jnp.asarray(2.0)
+
+  def _timing_once_ready(self):
+    """`get_step_timing()` once every recorded instant has been observed."""
+    deadline = time.monotonic() + 5
+    while True:
+      t = self.worker.get_step_timing()
+      ready = all(m["ready_ago_s"] is not None for m in t["mb"]) and (
+          t["update"] is None or t["update"]["ready_ago_s"] is not None
+      )
+      if ready or time.monotonic() > deadline:
+        return t
+      time.sleep(0.01)
+
+  def _assert_step_record(self, t, mb_via, update_via, train_step):
+    self.assertEqual([m["i"] for m in t["mb"]], list(range(len(mb_via))))
+    self.assertEqual([m["via"] for m in t["mb"]], mb_via)
+    for m in t["mb"]:
+      self.assertGreaterEqual(m["dispatch_begin_ago_s"], m["dispatch_end_ago_s"])
+      self.assertIsNotNone(m["ready_ago_s"])
+    # Dispatch order: each micro-batch began after the one before it.
+    begins = [m["dispatch_begin_ago_s"] for m in t["mb"]]
+    self.assertEqual(begins, sorted(begins, reverse=True))
+    self.assertIsNotNone(t["update"])
+    self.assertEqual(t["update"]["via"], update_via)
+    self.assertIsNotNone(t["update"]["ready_ago_s"])
+    self.assertLessEqual(
+        t["update"]["dispatch_begin_ago_s"], t["mb"][-1]["dispatch_end_ago_s"]
+    )
+    self.assertEqual(t["train_step"], train_step)
+    json.dumps(t)
+
+  def test_step_timing_survives_the_calls_between_update_and_snapshot(self):
+    # Regression: the timer was re-created by every call that checks for a
+    # deferred update, so the record kept only `prepare`.
+    self._set_timing_tokens()
+    timer = self.worker._step_timer
+    self.worker.fwd_bwd(request=self._train_request("r0"))
+    self.worker.fwd_bwd(request=self._train_request("r1"))
+    train_step = self.worker.update()
+    self.worker.get_metrics()
+    self.worker.save_checkpoint(metadata={"step": train_step})
+    self.worker.prepare_weight_sync()
+    self.assertIs(self.worker._step_timer, timer)
+    t = self._timing_once_ready()
+    self._assert_step_record(t, ["fwd_bwd", "fwd_bwd"], "update", train_step)
+    self.assertIsNotNone(t["prepare"])
+
+  def test_step_timing_with_deferred_update_and_staged_next_micro_batch(self):
+    # The stage-before-update boundary, as the orchestrator drives it: the
+    # last micro-batch defers its update, the next step's first micro-batch
+    # is staged, then the update, the weight sync and the timing fetch; the
+    # staged micro-batch runs only after.
+    self._set_timing_tokens()
+    with self.assertNoLogs(level="WARNING"):
+      # Step 0: plain micro-batches.
+      self.worker.fwd_bwd(request=self._train_request("s0-0"))
+      self.worker.fwd_bwd(request=self._train_request("s0-1"))
+      self.worker.fwd_bwd(
+          request=self._train_request("s0-2"),
+          apply_optimizer=True,
+          defer_update=True,
+      )
+      self.worker.stage_fwd_bwd(self._train_request("s1-0"))
+      resp = self.worker.apply_deferred_update()
+      self.worker.prepare_weight_sync()
+      t = self._timing_once_ready()
+      self._assert_step_record(
+          t,
+          ["fwd_bwd", "fwd_bwd", "fwd_bwd"],
+          "apply_deferred_update",
+          resp.metadata["train_step"],
+      )
+      self.assertIsNotNone(t["prepare"])
+      self.worker.release_weight_sync()
+      self.worker.get_metrics()
+
+      # Step 1 opens with the staged micro-batch: the record starts over.
+      self.worker.fwd_bwd_staged("s1-0")
+      t = self.worker.get_step_timing()
+      self.assertEqual([m["via"] for m in t["mb"]], ["fwd_bwd_staged"])
+      self.assertIsNone(t["update"])
+      self.assertIsNone(t["prepare"])
+      self.worker.fwd_bwd(request=self._train_request("s1-1"))
+      self.worker.fwd_bwd(
+          request=self._train_request("s1-2"),
+          apply_optimizer=True,
+          defer_update=True,
+      )
+      self.worker.stage_fwd_bwd(self._train_request("s2-0"))
+      resp = self.worker.apply_deferred_update()
+      self.worker.prepare_weight_sync()
+      t = self._timing_once_ready()
+    self._assert_step_record(
+        t,
+        ["fwd_bwd_staged", "fwd_bwd", "fwd_bwd"],
+        "apply_deferred_update",
+        resp.metadata["train_step"],
+    )
+
+  def test_step_timing_with_staged_micro_batches_and_fused_update(self):
+    # Every micro-batch staged and run with `fwd_bwd_staged`; the last one
+    # runs the update at dispatch and the next step's first is staged after.
+    self._set_timing_tokens()
+    with self.assertNoLogs(level="WARNING"):
+      for i in range(3):
+        self.worker.stage_fwd_bwd(self._train_request(f"r{i}"))
+        last = i == 2
+        resp = self.worker.fwd_bwd_staged(
+            f"r{i}", apply_optimizer=last, wait_for_update=not last
+        )
+      self.worker.stage_fwd_bwd(self._train_request("next"))
+      self.worker.get_metrics()
+      self.worker.prepare_weight_sync()
+      t = self._timing_once_ready()
+    self._assert_step_record(
+        t,
+        ["fwd_bwd_staged"] * 3,
+        "fwd_bwd_staged",
+        resp.metadata["train_step"],
+    )
+
+  def test_fused_update_is_recorded_under_fwd_bwd(self):
+    self._set_timing_tokens()
+    self.worker.fwd_bwd(request=self._train_request("r0"))
+    resp = self.worker.fwd_bwd(
+        request=self._train_request("r1"), apply_optimizer=True
+    )
+    t = self._timing_once_ready()
+    self._assert_step_record(
+        t, ["fwd_bwd", "fwd_bwd"], "fwd_bwd", resp.metadata["train_step"]
+    )
+
+  def test_step_timing_warns_when_the_timer_missed_micro_batches(self):
+    self._set_timing_tokens()
+    self.worker.fwd_bwd(request=self._train_request("r0"))
+    self.worker.stage_fwd_bwd(self._train_request("r1"))
+    self.worker.fwd_bwd_staged("r1")
+    # A timer replaced mid-step (as the bad merge did) loses what came before.
+    self.worker._step_timer = trainer_worker.StepTimer()
+    self.worker.fwd_bwd(request=self._train_request("r2"))
+    with self.assertLogs(level="WARNING") as logs:
+      t = self.worker.get_step_timing()
+    self.assertLen(t["mb"], 1)
+    warnings = [m for m in logs.output if "TRAINER_STEP_TIMING" in m]
+    self.assertLen(warnings, 1)
+    self.assertIn("lists 1 of the 3 micro-batches", warnings[0])
+    self.assertIn("fwd_bwd x1, fwd_bwd_staged x1", warnings[0])
+
+  def test_step_timing_warns_when_the_record_is_empty_after_a_step(self):
+    self._set_timing_tokens()
+    self.worker.fwd_bwd(
+        request=self._train_request("r0"),
+        apply_optimizer=True,
+        defer_update=True,
+    )
+    self.worker.apply_deferred_update()
+    self.worker._step_timer = trainer_worker.StepTimer()
+    with self.assertLogs(level="WARNING") as logs:
+      t = self.worker.get_step_timing()
+    self.assertEqual(t["mb"], [])
+    self.assertIsNone(t["update"])
+    warnings = [m for m in logs.output if "TRAINER_STEP_TIMING" in m]
+    self.assertLen(warnings, 2)
+    self.assertIn("lists 0 of the 1 micro-batches", warnings[0])
+    self.assertIn("fwd_bwd x1", warnings[0])
+    self.assertIn("via apply_deferred_update", warnings[1])
+
+  def test_step_timing_does_not_warn_before_any_step(self):
+    with self.assertNoLogs(level="WARNING"):
+      t = self.worker.get_step_timing()
+    self.assertEqual(t["mb"], [])
 
   def test_save_checkpoint_returns_checkpoint_path_from_checkpoint_dir(self):
     resp_empty = self.worker.save_checkpoint(metadata={"step": 5})
