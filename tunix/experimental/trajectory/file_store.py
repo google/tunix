@@ -58,13 +58,12 @@ def _dump_json(model: pydantic.BaseModel) -> str:
   return model.model_dump_json(indent=2, exclude_none=True)
 
 
-def _is_gcs_path(path: epath.Path) -> bool:
-  """Returns whether `path` targets Google Cloud Storage (`gs://`)."""
-  # Use `as_uri()` rather than `str(path)` because `etils.epath` backends may
-  # normalize `gs://` URIs to backend-specific mount paths in `str(path)`,
-  # whereas `as_uri()` consistently returns `gs://...`. Guard with
-  # `is_absolute()` because `as_uri()` raises `ValueError` on relative paths.
-  return path.is_absolute() and path.as_uri().startswith("gs://")
+def _requires_mkdir(path: epath.Path) -> bool:
+  """Returns whether `path` is on a local filesystem that requires `mkdir`."""
+  # Local POSIX paths are either relative or resolve to a `file://` URI, whereas
+  # remote object stores (such as `gs://` or `s3://`) preserve their cloud URI
+  # scheme in `as_uri()` even when `str(path)` normalizes to a mount path.
+  return not path.is_absolute() or path.as_uri().startswith("file://")
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -138,7 +137,7 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
 
     Optimizations:
       - Directory Creation: `mkdir` is executed only once per trajectory on the
-        first step for non-GCS filesystems (skipped on `gs://`), tracked by
+        first step for local (`file://`) filesystems, tracked by
         `_metadata_hash_by_trajectory_id`.
       - Metadata Caching: `metadata.json` is only written when its serialized
         content changes, minimizing redundant writes across multi-step turns.
@@ -146,11 +145,10 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
     traj_id = task.trajectory_id
 
     # Create directory on first step of this trajectory for local filesystems.
-    # GCS uses a flat object namespace where writing metadata.json materializes
-    # the prefix without a 0-byte directory marker object.
-    if (
-        traj_id not in self._metadata_hash_by_trajectory_id
-        and not _is_gcs_path(task.traj_dir)
+    # Remote object stores use a flat object namespace where writing
+    # metadata.json materializes the prefix without a 0-byte directory marker.
+    if traj_id not in self._metadata_hash_by_trajectory_id and _requires_mkdir(
+        task.traj_dir
     ):
       task.traj_dir.mkdir(parents=True, exist_ok=True)
 

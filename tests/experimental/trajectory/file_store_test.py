@@ -333,26 +333,31 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
       dict(
           testcase_name="gcs_path",
           path=epath.Path("gs://bucket/dir"),
-          expected=True,
+          expected=False,
+      ),
+      dict(
+          testcase_name="s3_path",
+          path=epath.Path("s3://bucket/dir"),
+          expected=False,
       ),
       dict(
           testcase_name="local_absolute_path",
           path=epath.Path("/tmp/local/dir"),
-          expected=False,
+          expected=True,
       ),
       dict(
           testcase_name="local_relative_path",
           path=epath.Path("relative/dir"),
-          expected=False,
+          expected=True,
       ),
   )
-  def test_is_gcs_path_identifies_gcs_and_local_paths(
+  def test_requires_mkdir_identifies_local_and_object_store_paths(
       self,
       path: epath.Path,
       expected: bool,
   ) -> None:
-    """Verifies _is_gcs_path distinguishes gs:// paths from local paths."""
-    self.assertEqual(file_store._is_gcs_path(path), expected)
+    """Verifies _requires_mkdir returns True only for local filesystem paths."""
+    self.assertEqual(file_store._requires_mkdir(path), expected)
 
   def test_add_step_on_gcs_path_skips_mkdir_and_writes_files(self) -> None:
     """Verifies add_step on a gs:// path skips mkdir and writes files."""
