@@ -14,6 +14,9 @@
 
 """Tests for the WorkerRegistry and WorkerGroup."""
 
+import pickle
+import threading
+import time
 from unittest import mock
 
 from absl.testing import absltest
@@ -46,7 +49,10 @@ class WorkerRegistryTest(absltest.TestCase):
     self.assertLen(trainer_group, 2)
     self.assertEqual(trainer_group.members(), [trainer0, trainer1])
 
-    self.assertIs(registry.get("r0"), rollout)
+    self.assertIsInstance(
+        registry.handle("r0"), remote_execution.InProcessActorHandle
+    )
+    self.assertIs(registry.handle("r0").server.bound_instance, rollout)
     self.assertLen(registry, 3)
     self.assertIn("t0", registry)
 
@@ -105,17 +111,19 @@ class WorkerRegistryTest(absltest.TestCase):
     self.assertTrue(group.is_empty())
     self.assertEmpty(group.members())
 
-  def test_unregister_removes_from_registry_and_groups(self):
+  def test_unregister_removes_from_registry_and_closes_handle(self):
     registry = worker_registry.WorkerRegistry()
-    registry.register(mock_worker.MockWorker(worker_id="t0", roles={"trainer"}))
+    remote_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+    registry.register_handle("t0", ["trainer"], remote_handle)
     registry.unregister("t0")
+    remote_handle.close.assert_awaited_once()
     self.assertNotIn("t0", registry)
     self.assertTrue(registry.group("trainer").is_empty())
     self.assertNotIn("trainer", registry.roles())
     with self.assertRaises(KeyError):
       registry.unregister("t0")
     with self.assertRaises(KeyError):
-      registry.get("t0")
+      registry.handle("t0")
     with self.assertRaises(KeyError):
       registry.info("t0")
 
@@ -137,8 +145,10 @@ class WorkerRegistryTest(absltest.TestCase):
 
     self.assertEqual(registry.info("r0").worker_id, "r0")
     self.assertEqual(registry.worker_ids(), ["r0", "t0"])
-    self.assertEqual(registry.workers(), [r0, t0])
     self.assertEqual(registry.infos(), [r0.info(), t0.info()])
+    self.assertEqual(registry.infos("rollout"), [r0.info()])
+    self.assertEqual(registry.infos("trainer"), [t0.info()])
+    self.assertEmpty(registry.infos("inference"))
 
   def test_register_override_cleans_up_empty_roles(self):
     registry = worker_registry.WorkerRegistry()
@@ -169,13 +179,6 @@ class WorkerRegistryTest(absltest.TestCase):
     registry = worker_registry.WorkerRegistry()
     local_worker = mock_worker.MockWorker(worker_id="r-local", roles={"rollout"})
     remote_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
-    remote_handle.submit.side_effect = [
-        datatypes.Response(
-            metadata={"trajectory_store_config": {"backend": "memory"}}
-        ),
-        datatypes.Response(),
-        datatypes.Response(),
-    ]
 
     registry.register(local_worker)
     info = registry.register_handle(
@@ -186,9 +189,6 @@ class WorkerRegistryTest(absltest.TestCase):
     )
 
     self.assertEqual(info.resources, {"remote": True, "tpu": 4})
-    self.assertIsInstance(
-        registry.get("r-remote"), worker_registry.RemoteWorkerShim
-    )
     self.assertIs(registry.handle("r-remote"), remote_handle)
     self.assertIsInstance(
         registry.handle("r-local"), remote_execution.InProcessActorHandle
@@ -197,15 +197,116 @@ class WorkerRegistryTest(absltest.TestCase):
         registry.handles(datatypes.Role.ROLLOUT),
         [registry.handle("r-local"), remote_handle],
     )
+    members = registry.group(datatypes.Role.ROLLOUT).members()
+    self.assertLen(members, 2)
+    self.assertIs(members[0], local_worker)
+    self.assertIsInstance(members[1], worker_registry.RemoteWorkerShim)
+    self.assertEqual(members[1].info(), info)
 
-    shim = registry.get("r-remote")
-    shim.initialize()
-    shim.compile("dummy")
-    shim.start()
-    self.assertEqual(
-        registry.info("r-remote").resources["trajectory_store_config"],
-        {"backend": "memory"},
+  @mock.patch.object(remote_execution.ActorHandle, "from_address")
+  def test_register_from_hostname(self, mock_from_address):
+    mock_from_address.return_value = mock.MagicMock(
+        spec=remote_execution.ActorHandle
     )
+    registry = worker_registry.WorkerRegistry()
+    for port, (service_type, role) in enumerate(
+        [
+            ("trainer", datatypes.Role.ACTOR),
+            ("rollout", datatypes.Role.ROLLOUT),
+            ("inference", datatypes.Role.REFERENCE),
+        ],
+        start=5000,
+    ):
+      meta = pickle.dumps({
+          "service_type": service_type,
+          "service_port": port,
+          "worker_id": f"{service_type}-0",
+      })
+      registry.register_from_hostname("host", 0, meta, rpc_timeout_s=120.0)
+      mock_from_address.assert_called_with(
+          f"grpc://host:{port}", rpc_timeout_s=120.0
+      )
+      self.assertEqual(registry.handles(role), [mock_from_address.return_value])
+
+    info_by_id = {i.worker_id: i for i in registry.infos()}
+    self.assertEqual(
+        info_by_id["trainer-0"],
+        datatypes.WorkerInfo(
+            worker_id="trainer-0",
+            roles=frozenset({"actor"}),
+            resources={"remote": True, "address": "host:5000"},
+        ),
+    )
+
+  def test_register_from_hostname_unknown_service_type(self):
+    registry = worker_registry.WorkerRegistry()
+    meta = pickle.dumps({
+        "service_type": "unknown",
+        "service_port": 5000,
+        "worker_id": "bad-0",
+    })
+    with self.assertRaisesRegex(RuntimeError, "unknown service type unknown"):
+      registry.register_from_hostname("host", 0, meta)
+
+  def test_wait_for_workers_already_available(self):
+    mock_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    registry = worker_registry.WorkerRegistry()
+    registry.register_handle("actor-0", [datatypes.Role.ACTOR], mock_actor)
+    registry.register_handle(
+        "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout
+    )
+
+    registry.wait_for_workers(
+        {
+            datatypes.Role.ACTOR: 1,
+            datatypes.Role.ROLLOUT: 1,
+            datatypes.Role.REFERENCE: 0,
+        },
+        timeout=1.0,
+    )
+
+  def test_wait_for_workers_delayed_registration(self):
+    mock_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    registry = worker_registry.WorkerRegistry()
+
+    def register_later():
+      time.sleep(0.05)
+      registry.register_handle("actor-0", [datatypes.Role.ACTOR], mock_actor)
+
+    t = threading.Thread(target=register_later)
+    t.start()
+    try:
+      registry.wait_for_workers(
+          {datatypes.Role.ACTOR: 1},
+          timeout=2.0,
+      )
+    finally:
+      t.join()
+
+    self.assertLen(registry.handles(datatypes.Role.ACTOR), 1)
+
+  def test_wait_for_workers_timeout(self):
+    registry = worker_registry.WorkerRegistry()
+    with self.assertRaises(TimeoutError):
+      registry.wait_for_workers(
+          {datatypes.Role.ACTOR: 1},
+          timeout=0.05,
+      )
+
+  def test_close_closes_all_handles_and_clears_state(self):
+    registry = worker_registry.WorkerRegistry()
+    h0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    registry.register_handle("w0", [datatypes.Role.ACTOR], h0)
+    registry.register_handle("w1", [datatypes.Role.ROLLOUT], h1)
+
+    registry.close()
+
+    h0.close.assert_awaited_once()
+    h1.close.assert_awaited_once()
+    self.assertEmpty(registry)
+    self.assertEmpty(registry.roles())
 
 
 if __name__ == "__main__":

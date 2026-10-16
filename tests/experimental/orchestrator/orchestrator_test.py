@@ -123,21 +123,25 @@ class ClusterOrchestratorTest(absltest.TestCase):
     engine = orch._create_engine()
     self.assertIsNotNone(engine._weight_sync_coordinator)
 
-    # Assert they are properly shimmed in the registry
+    # Assert they are properly shimmed in the registry group
     self.assertIn("actor-0", orch.registry.worker_ids())
     self.assertIn("rollout-0", orch.registry.worker_ids())
     self.assertIsInstance(
-        orch.registry.get("actor-0"), worker_registry.RemoteWorkerShim
+        orch.registry.group(datatypes.Role.ACTOR).members()[0],
+        worker_registry.RemoteWorkerShim,
     )
     self.assertIsInstance(
-        orch.registry.get("rollout-0"), worker_registry.RemoteWorkerShim
+        orch.registry.group(datatypes.Role.ROLLOUT).members()[0],
+        worker_registry.RemoteWorkerShim,
     )
 
   def test_bring_up_and_shutdown_remote_worker_handles(self):
     from tunix.experimental.worker import remote_execution
 
     mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout.submit.return_value = datatypes.Response()
     mock_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_actor.submit.return_value = datatypes.Response()
 
     registry = worker_registry.WorkerRegistry()
     orch = orchestrator.ClusterOrchestrator(

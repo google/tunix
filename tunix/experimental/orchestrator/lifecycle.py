@@ -14,31 +14,18 @@
 
 """Lifecycle driver for bringing a fleet of workers up and down.
 
-Sequences the `Worker` lifecycle (`initialize` -> `compile` -> `start`) across
-an
+Sequences the worker lifecycle (`initialize` -> `compile` -> `start`) across an
 entire registry, phase by phase, so every worker finishes one phase before the
 next begins (e.g. all compiles happen before any worker starts serving).
 Shutdown is best-effort: every worker gets a `stop()` even if an earlier one
 raised, and the collected failures are reported together.
 """
 
-import asyncio
 import concurrent.futures
-import inspect
 import logging
 from typing import Any
 
 from tunix.experimental.orchestrator import worker_registry
-
-
-def _start_worker(worker: Any) -> Any:
-  # Local in-process workers also use asyncio.run() per call in
-  # InProcessActorHandle.submit; remote workers run on
-  # GrpcRemoteExecutionServer's persistent loop.
-  res = worker.start()
-  if inspect.iscoroutine(res):
-    return asyncio.run(res)
-  return res
 
 
 class LifecycleError(RuntimeError):
@@ -70,16 +57,36 @@ class LifecycleDriver:
     Args:
       dummy_data: Dummy data each worker uses to synthesize warmup dummies.
     """
-    workers = self._registry.workers()
+    worker_ids = self._registry.worker_ids()
+
+    def _init_worker(wid: str) -> None:
+      resp = self._registry.handle(wid).submit("initialize")
+      if "trajectory_store_config" in resp.metadata:
+        self._registry.info(wid).resources["trajectory_store_config"] = (
+            resp.metadata["trajectory_store_config"]
+        )
+
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=self._max_workers
     ) as pool:
       # TODO(noghabi): Refactor to allow successful workers to proceed to
       # compile/start and potentially retry failed ones, rather than fail-fast
       # on the first error.
-      list(pool.map(lambda w: w.initialize(), workers))
-      list(pool.map(lambda w: w.compile(dummy_data), workers))
-      list(pool.map(_start_worker, workers))
+      list(pool.map(_init_worker, worker_ids))
+      list(
+          pool.map(
+              lambda wid: self._registry.handle(wid).submit(
+                  "compile", dummy_data
+              ),
+              worker_ids,
+          )
+      )
+      list(
+          pool.map(
+              lambda wid: self._registry.handle(wid).submit("start"),
+              worker_ids,
+          )
+      )
 
   def shutdown(self) -> None:
     """Stops every worker best-effort, then raises if any stop() failed."""
@@ -88,13 +95,13 @@ class LifecycleDriver:
 
     def _stop_worker(wid: str) -> None:
       try:
-        worker = self._registry.get(wid)
+        handle = self._registry.handle(wid)
       except KeyError:
         logging.warning(
             "Worker %r unregistered concurrently, nothing to stop.", wid
         )
         return  # Worker unregistered concurrently, nothing to stop.
-      worker.stop()
+      handle.submit("stop")
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=self._max_workers

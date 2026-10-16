@@ -805,6 +805,10 @@ class ActorHandle(abc.ABC):
     """Long-polls remote server response queue for completed result."""
     pass
 
+  async def close(self) -> None:
+    """Releases any underlying transport resources held by this handle."""
+    pass
+
 
 class RemoteActorHandle(ActorHandle):
   """ActorHandle targeting a remote network worker address over gRPC/Stubby."""
@@ -1422,7 +1426,16 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self._invalidate_bulk_port()
     self._seen_bulk_targets.clear()
     if self._channel is not None:
-      await self._channel.close()
+      # `self._channel` is lazily created on the caller's event loop (e.g.
+      # `RLProgram.run()`), which is typically already closed by the time
+      # `WorkerRegistry.close()` runs on a fresh shutdown loop. Calling
+      # `channel.close()` releases the underlying C-core channel so the
+      # interpreter does not hang at exit, while ignoring cross-loop poller
+      # cleanup errors so shutdown can proceed to `_sync_loop` teardown.
+      try:
+        await self._channel.close()
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
       self._channel = None
       self._channel_loop = None
       self._rpc = None
