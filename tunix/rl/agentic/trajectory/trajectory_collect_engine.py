@@ -280,7 +280,7 @@ class TrajectoryCollectEngine:
           dtype=np.int16,
       )
 
-  def _sync_trajectory_metadata(self) -> None:
+  def _sync_trajectory_metadata(self, *, include_timings: bool = True) -> None:
     """Syncs metadata status and agent trajectory timing/reward in place."""
     if self.trajectory_store is None or self.metadata is None:
       return
@@ -290,8 +290,8 @@ class TrajectoryCollectEngine:
           agent=self.agent,
           policy_version=self.policy_version,
           gamma=self.gamma,
-          env_time=self.env_time,
-          reward_time=self.reward_time,
+          env_time=self.env_time if include_timings else None,
+          reward_time=self.reward_time if include_timings else None,
       )
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(
@@ -337,7 +337,7 @@ class TrajectoryCollectEngine:
     if self.trajectory_store is None or self.metadata is None:
       return
     try:
-      self._sync_trajectory_metadata()
+      self._sync_trajectory_metadata(include_timings=False)
       task = self.agent.trajectory.task or getattr(self.env, "task", None)
       task_step = converter_lib.create_task_step(task)
       if task_step is None:
@@ -389,7 +389,7 @@ class TrajectoryCollectEngine:
           prefill_num_context=prefill_num_context,
       )
       if agent_step is not None:
-        self._sync_trajectory_metadata()
+        self._sync_trajectory_metadata(include_timings=False)
         self.trajectory_store.add_step(agent_step, self.metadata)
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(
@@ -410,7 +410,6 @@ class TrajectoryCollectEngine:
           step, tunix_step_id=self.agent.trajectory.step_idx
       )
       if env_step is not None:
-        self._sync_trajectory_metadata()
         self.trajectory_store.add_step(env_step, self.metadata)
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(
@@ -740,9 +739,12 @@ class TrajectoryCollectEngine:
     """
     self.agent.reset()
     self.agent.trajectory.step_idx = -1
+    self.agent.trajectory.reward = 0.0
     self.agent.trajectory.masked_out = None
     self.agent.trajectory.prompt_tokens = []
     self.agent.trajectory.prompt_length = None
+    self.agent.trajectory.env_time = {}
+    self.agent.trajectory.reward_time = {}
     self._response_token_count = 0
     self._assistant_turn_lengths = []
     self._cumulative_prompt_tokens = 0

@@ -1754,10 +1754,24 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         metadata=metadata,
         policy_version=42,
     )
+    step_meta_jsons: list[str] = []
+    orig_add_step = store.add_step
+
+    def _recording_add_step(step, meta):
+      self.assertEqual(meta.env_time, {})
+      self.assertEqual(meta.reward_time, {})
+      step_meta_jsons.append(
+          meta.to_atif_metadata().model_dump_json(exclude_none=True)
+      )
+      return orig_add_step(step, meta)
+
     with (
         mock.patch.object(
-            store, 'add_step', wraps=store.add_step
+            store, 'add_step', side_effect=_recording_add_step
         ) as mock_add_step,
+        mock.patch.object(
+            engine, 'record_metadata', wraps=engine.record_metadata
+        ) as mock_record_metadata,
         mock.patch.object(store, 'flush', wraps=store.flush) as mock_flush,
         mock.patch.object(store, 'close', wraps=store.close) as mock_close,
     ):
@@ -1765,6 +1779,11 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
       # Task step plus one agent and one env step per turn, plus one upsert of
       # the terminal env step when _append_final_reward folds in final_reward.
       self.assertEqual(mock_add_step.call_count, 6)
+      # Metadata must remain unchanged across all add_step calls so
+      # FileTrajectoryStore only writes metadata.json once at episode start and
+      # once on update_metadata at episode end.
+      self.assertLen(set(step_meta_jsons), 1)
+      mock_record_metadata.assert_called_once()
       mock_flush.assert_not_called()
       mock_close.assert_not_called()
 
@@ -1801,6 +1820,8 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertEqual(metas[0].total_reward, 3.5)
     self.assertFalse(metas[0].masked_out)
     self.assertEqual(metas[0].target_policy_versions, [42])
+    self.assertLen(metas[0].env_time['step_latency'], 2)
+    self.assertIn('reward_latency', metas[0].reward_time)
     self.assertEqual([step.reward for step in traj.steps], [1.0, 2.5])
     self.assertEqual(
         [step.reward for step in rehydrated_traj.steps],
@@ -1810,6 +1831,75 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         [step.mc_return for step in rehydrated_traj.steps],
         [step.mc_return for step in traj.steps],
     )
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_trajectory_store_syncs_policy_version_across_turns(
+      self, mock_convert
+  ):
+    mock_convert.side_effect = [
+        ([101], [1]),  # prompt tokens
+        ([301, 302], [1, 1]),  # env tokens 1
+    ]
+    store = in_memory_store.InMemoryTrajectoryStore()
+    metadata = converter_lib.create_trajectory_metadata(
+        traj_id='traj_policy_advance',
+    )
+    self.mock_agent.trajectory.task = {'prompts': ['Solve math']}
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        trajectory_store=store,
+        metadata=metadata,
+        policy_version=42,
+    )
+    orig_model_call = self.mock_model_call.side_effect
+    call_idx = 0
+
+    def _advancing_model_call(*args, **kwargs):
+      nonlocal call_idx
+      del args, kwargs
+      if call_idx == 1:
+        engine.policy_version = 43
+      call_idx += 1
+      return next(orig_model_call)
+
+    self.mock_model_call.side_effect = _advancing_model_call
+    self.mock_env.step.side_effect = [
+        ('obs1', 1.0, False, {}),
+        RuntimeError('mid-episode env failure'),
+    ]
+    recorded_versions_per_step: list[tuple[int, list[int]]] = []
+    orig_add_step = store.add_step
+
+    def _recording_add_step(step, meta):
+      recorded_versions_per_step.append(
+          (step.step_id, list(meta.target_policy_versions or []))
+      )
+      return orig_add_step(step, meta)
+
+    with mock.patch.object(store, 'add_step', side_effect=_recording_add_step):
+      with self.assertRaisesRegex(RuntimeError, 'mid-episode env failure'):
+        asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+    self.assertEqual(
+        recorded_versions_per_step,
+        [
+            (0, [42]),  # task step
+            (1, [42]),  # turn 0 agent step
+            (2, [42]),  # turn 0 env step
+            (3, [42, 43]),  # turn 1 agent step (policy_version advanced to 43)
+            (4, [42, 43]),  # turn 1 env step (written in finally block)
+        ],
+    )
+    (stored_traj,) = store.get_trajectories(['traj_policy_advance'])
+    self.assertEqual(stored_traj.steps[1].policy_version, 42)
+    self.assertEqual(stored_traj.steps[3].policy_version, 43)
+    (stored_meta,) = store.get_trajectories_metadata(['traj_policy_advance'])
+    self.assertEqual(stored_meta.target_policy_versions, [42, 43])
+    self.assertEqual(stored_meta.status, 'FAILED')
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_trajectory_store_masked_out_skips_final_reward(self, mock_convert):
