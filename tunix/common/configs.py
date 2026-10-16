@@ -120,6 +120,16 @@ class RolloutConfig:
   # Whether to return logprobs from the sampler.
   return_logprobs: bool = False
 
+  # Whether to return output logits from the sampler.
+  return_logits: bool = False
+
+  # Beam width for beam search decoding.
+  beam_size: int | None = None
+
+  # TODO(yatlas): Throw an error if this flag is set in the non-agentic path.
+  # Mode of weight synchronization ("none", "fallback", "raiden").
+  weight_sync_mode: str = "none"
+
   # Whether to capture the MoE experts each token was routed through, so the
   # trainer can replay them instead of re-running its own router. MoE models on
   # a backend that supports capture only; a no-op otherwise.

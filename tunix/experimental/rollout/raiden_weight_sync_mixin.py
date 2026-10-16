@@ -32,7 +32,11 @@ class RaidenDestinationWeightSyncMixin:
   raiden_sync_delegate: Any
 
   def _get_underlying_sampler(self) -> Any:
-    return getattr(self, "sampler", None) or getattr(self, "vllm_sampler", None)
+    return (
+        getattr(self, "sampler", None)
+        or getattr(self, "vllm_sampler", None)
+        or (self if hasattr(self, "transformer_state") else None)
+    )
 
   def _check_weight_sync_boundness(self) -> None:
     """Verifies that the Raiden delegate has been bound before executing sync phases."""
@@ -88,7 +92,7 @@ class RaidenDestinationWeightSyncMixin:
           f"{self.__class__.__name__} [{self.server_id}] sampler is not"
           " initialized."
       )
-    if hasattr(sampler, "get_target_state"):
+    if sampler is not self and hasattr(sampler, "get_target_state"):
       return sampler.get_target_state()
     if hasattr(sampler, "transformer_state"):
       state = sampler.transformer_state
