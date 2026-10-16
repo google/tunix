@@ -1016,6 +1016,144 @@ class SweAgentTest(absltest.TestCase):
         mock_workspace.execute_command.call_args.kwargs["timeout"], 45.0
     )
 
+  def test_step_openhands_bash_default_no_change_timeout_and_max_cap(self):
+    import subprocess  # pylint: disable=g-import-not-at-top
+    import tempfile  # pylint: disable=g-import-not-at-top
+
+    mock_workspace = mock.MagicMock()
+    mock_res = mock.MagicMock(
+        spec=["stdout", "stderr", "exit_code", "timeout_occurred"]
+    )
+    mock_res.exit_code = 124
+    mock_res.stdout = (
+        f"hanging output\n{openhands_utils._BASH_NOCHANGE_SENTINEL}\n"
+    )
+    mock_res.stderr = ""
+    mock_res.timeout_occurred = False
+    mock_workspace.execute_command.return_value = mock_res
+
+    mock_env = mock.MagicMock()
+    mock_env.workspace = mock_workspace
+    mock_env.max_steps = 10
+    mock_env.step_timeout = 60.0
+    mock_env.total_steps = 0
+
+    # 1. Omitted timeout uses NO_CHANGE_TIMEOUT_SECONDS (30s) for inactivity
+    # while keeping the outer step timeout at 60.0s.
+    res_default = openhands_utils.step_openhands(
+        mock_env,
+        SWEAction("execute_bash", {"command": "python3 repro.py"}),
+    )
+    self.assertTrue(res_default.info.get("command_timed_out"))
+    self.assertIn(
+        "[The command has no new output after 30 seconds.",
+        res_default.observation,
+    )
+    self.assertEqual(
+        mock_workspace.execute_command.call_args.kwargs["timeout"], 60.0
+    )
+
+    # 2. Explicit timeout > 60s is capped at COMMAND_EXEC_TIMEOUT (60.0s),
+    # even when env.step_timeout is larger.
+    mock_env.step_timeout = 1800.0
+    with mock.patch.dict(os.environ, {"COMMAND_EXEC_TIMEOUT": "60"}):
+      openhands_utils.step_openhands(
+          mock_env,
+          SWEAction("execute_bash", {"command": "pytest", "timeout": "120"}),
+      )
+    self.assertEqual(
+        mock_workspace.execute_command.call_args.kwargs["timeout"], 60.0
+    )
+    mock_env.step_timeout = 60.0
+
+    # 3. NO_CHANGE_TIMEOUT_SECONDS env var overrides the inactivity limit.
+    with mock.patch.dict(os.environ, {"NO_CHANGE_TIMEOUT_SECONDS": "25"}):
+      res_override = openhands_utils.step_openhands(
+          mock_env,
+          SWEAction("execute_bash", {"command": "python3 repro.py"}),
+      )
+      self.assertIn(
+          "[The command has no new output after 25 seconds.",
+          res_override.observation,
+      )
+
+    # 4. Invalid non-numeric timeout returns a validation failure observation.
+    mock_workspace.reset_mock()
+    res_invalid = openhands_utils.step_openhands(
+        mock_env,
+        SWEAction("execute_bash", {"command": "pytest", "timeout": "abc"}),
+    )
+    self.assertEqual(
+        res_invalid.observation,
+        "Validation failure for execute_bash: Invalid float passed to"
+        " 'timeout' argument: abc",
+    )
+    mock_workspace.execute_command.assert_not_called()
+
+    # 5. Real execution: active output resets the inactivity timer, while
+    # silent stalls terminate early with the inactivity notice.
+    with tempfile.TemporaryDirectory() as tmpdir:
+      cwd_file = os.path.join(tmpdir, ".oh_cwd")
+
+      class _RealWs:
+
+        def execute_command(self, cmd, timeout=60.0):
+          proc = subprocess.run(
+              ["sh", "-c", cmd.replace("/var/tmp/.oh_cwd", cwd_file)],
+              capture_output=True,
+              text=True,
+              timeout=timeout,
+          )
+          res = mock.MagicMock(spec=["stdout", "stderr", "exit_code"])
+          res.stdout = proc.stdout
+          res.stderr = proc.stderr
+          res.exit_code = proc.returncode
+          return res
+
+      real_env = mock.MagicMock()
+      real_env.workspace = _RealWs()
+      real_env.max_steps = 10
+      real_env.step_timeout = 10.0
+      real_env.total_steps = 0
+
+      with mock.patch.dict(os.environ, {"NO_CHANGE_TIMEOUT_SECONDS": "0.3"}):
+        active_res = openhands_utils.step_openhands(
+            real_env,
+            SWEAction(
+                "execute_bash",
+                {
+                    "command": (
+                        "python3 -c 'import time;"
+                        " [ (print(i), time.sleep(0.12)) for i in"
+                        " range(4) ]'"
+                    )
+                },
+            ),
+        )
+        self.assertFalse(active_res.info.get("command_timed_out"))
+        self.assertIn(
+            "[The command completed with exit code 0.]", active_res.observation
+        )
+
+        stalled_res = openhands_utils.step_openhands(
+            real_env,
+            SWEAction(
+                "execute_bash",
+                {
+                    "command": (
+                        "python3 -c 'import time; print(\"start\");"
+                        " time.sleep(5)'"
+                    )
+                },
+            ),
+        )
+        self.assertTrue(stalled_res.info.get("command_timed_out"))
+        self.assertIn("start", stalled_res.observation)
+        self.assertIn(
+            "[The command has no new output after 0 seconds.",
+            stalled_res.observation,
+        )
+
   def test_step_openhands_bash_wrapper_keeps_heredoc_and_comment_valid(self):
     import subprocess  # pylint: disable=g-import-not-at-top
     import tempfile  # pylint: disable=g-import-not-at-top
