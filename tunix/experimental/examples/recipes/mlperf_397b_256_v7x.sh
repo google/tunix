@@ -353,10 +353,11 @@ fi
 # AI-Hypercomputer/maxtext#5698, and moe_routing_index_math, moe_unsplit_prefused_wi,
 # moe_roe_packed_routing_gather, moe_router_grad_from_wo_input, moe_wi_gmm_fused_swiglu,
 # gdn_conv1d_input_in_qkv_dtype and gdn_conv1d_dense_token_stack from the MaxText change
-# of AI-Hypercomputer/maxtext#5758 (on top of #5698). The MaxText pinned in
-# requirements/maxtext_requirements.txt (e526ea02) has none of these nine keys, and
-# MaxText refuses a key it does not define when the trainer starts, so
-# TRAINER_TUNED_FLAGS=true needs that pin moved to a MaxText with #5758.
+# of AI-Hypercomputer/maxtext#5758 (on top of #5698). All nine keys, and the
+# cp-as-ep-dense-no-cp rule below, are in the MaxText pinned in
+# requirements/maxtext_requirements.txt (atwigg/mlperf at bbd0f6f10, the merge of
+# AI-Hypercomputer/maxtext#5721). MaxText refuses a key it does not define when the
+# trainer starts, so an older MaxText needs TRAINER_TUNED_FLAGS=false.
 # The 256-chip trainer (TRAINER_TPU_SLICE=tpu7x:4x8x8, 512 devices), from Rohan Bierneni's
 # 256-chip trainer runs (2026-10-15, RL trainer bench, 9 micro-batches of 64 rows, steps 1-4):
 # 32x2x8 60.62 s/step and 64x1x8 55.97 s/step, against 82.17 s/step for 32x2x4 on 128 chips.

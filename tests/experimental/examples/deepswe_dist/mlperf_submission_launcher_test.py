@@ -95,11 +95,11 @@ _TUNED_KEYS = {
     "wo_tile_drhs_batch_seq": ("256", "512"),
     "wo_tile_fwd_batch_seq": ("256", "512"),
 }
-# Tuned keys that the MaxText in requirements/maxtext_requirements.txt
-# (e526ea02) does not define: two from AI-Hypercomputer/maxtext#5698 and seven
-# from AI-Hypercomputer/maxtext#5758, which is on top of it. MaxText refuses a
-# key it does not define when the trainer starts, so only
-# TRAINER_TUNED_FLAGS=true may pass them.
+# Tuned keys that MaxText before AI-Hypercomputer/maxtext#5721 (e.g. e526ea02)
+# does not define: two from AI-Hypercomputer/maxtext#5698 and seven from
+# AI-Hypercomputer/maxtext#5758, which is on top of it. MaxText refuses a key it
+# does not define when the trainer starts, so only TRAINER_TUNED_FLAGS=true may
+# pass them.
 _BENCH_MAXTEXT_KEYS = (
     "gdn_conv1d_dense_token_stack",
     "gdn_conv1d_input_in_qkv_dtype",
