@@ -290,8 +290,6 @@ class TrajectoryCollectEngine:
           agent=self.agent,
           policy_version=self.policy_version,
           gamma=self.gamma,
-          env_time=self.env_time,
-          reward_time=self.reward_time,
       )
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(
@@ -306,6 +304,11 @@ class TrajectoryCollectEngine:
       return
     try:
       self._sync_trajectory_metadata()
+      converter_lib.update_trajectory_metadata(
+          metadata=self.metadata,
+          env_time=self.env_time,
+          reward_time=self.reward_time,
+      )
       self.trajectory_store.update_metadata(self.metadata)
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(

@@ -1812,6 +1812,66 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     )
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_collect_defers_timing_metadata_to_record_metadata(
+      self, mock_convert
+  ):
+    mock_convert.side_effect = [
+        ([101], [1]),
+        ([301, 302], [1, 1]),
+        ([303, 304], [1, 1]),
+    ]
+    self.mock_env.final_reward_fn = lambda: 0.5
+    store = in_memory_store.InMemoryTrajectoryStore()
+    metadata = converter_lib.create_trajectory_metadata(
+        traj_id='traj_cache_dedup',
+    )
+    self.mock_agent.trajectory.task = {'prompts': ['Solve math']}
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        trajectory_store=store,
+        metadata=metadata,
+        policy_version=42,
+    )
+
+    step_metadata_snapshots = []
+    orig_add_step = store.add_step
+
+    def _capture_add_step(step, meta):
+      step_metadata_snapshots.append(
+          meta.to_atif_metadata().model_dump_json(exclude_none=True)
+      )
+      return orig_add_step(step, meta)
+
+    with (
+        mock.patch.object(store, 'add_step', side_effect=_capture_add_step),
+        mock.patch.object(
+            engine, 'record_metadata', wraps=engine.record_metadata
+        ) as mock_record_metadata,
+    ):
+      asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+    self.assertLen(step_metadata_snapshots, 6)
+    # Every add_step call during the turn loop (task step + 2 turns of agent/env
+    # steps) sees identical serialized metadata, allowing FileTrajectoryStore
+    # and SqlTrajectoryStore metadata caches to hit on all steps after step 0.
+    self.assertLen(set(step_metadata_snapshots[:5]), 1)
+    mock_record_metadata.assert_called_once()
+
+    (final_meta,) = store.get_trajectories_metadata(['traj_cache_dedup'])
+    self.assertEqual(final_meta.status, 'SUCCEEDED')
+    self.assertEqual(final_meta.total_reward, 3.5)
+    self.assertIsNotNone(final_meta.env_time)
+    self.assertLen(final_meta.env_time['step_latency'], 2)
+    self.assertIn('reset_latency', final_meta.env_time)
+    self.assertIn('close_latency', final_meta.env_time)
+    self.assertIsNotNone(final_meta.reward_time)
+    self.assertIn('reward_latency', final_meta.reward_time)
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_trajectory_store_masked_out_skips_final_reward(self, mock_convert):
     mock_convert.return_value = ([101], [1])
     self.mock_env.max_steps = 1
