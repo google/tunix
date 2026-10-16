@@ -329,6 +329,69 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
         },
     )
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="gcs_path",
+          path=epath.Path("gs://bucket/dir"),
+          expected=True,
+      ),
+      dict(
+          testcase_name="local_absolute_path",
+          path=epath.Path("/tmp/local/dir"),
+          expected=False,
+      ),
+      dict(
+          testcase_name="local_relative_path",
+          path=epath.Path("relative/dir"),
+          expected=False,
+      ),
+  )
+  def test_is_gcs_path_identifies_gcs_and_local_paths(
+      self,
+      path: epath.Path,
+      expected: bool,
+  ) -> None:
+    """Verifies _is_gcs_path distinguishes gs:// paths from local paths."""
+    self.assertEqual(file_store._is_gcs_path(path), expected)
+
+  def test_add_step_on_gcs_path_skips_mkdir_and_writes_files(self) -> None:
+    """Verifies add_step on a gs:// path skips mkdir and writes files."""
+    gcs_root = epath.Path("gs://test-bucket/trajectories")
+    gcs_store = file_store.FileTrajectoryStore(root_dir=gcs_root)
+    self.addCleanup(gcs_store.close)
+    meta_path = gcs_store.get_trajectory_metadata_path(
+        trajectory_testing.TRAJECTORY_ID_1
+    )
+    step_path = gcs_store.get_step_path(
+        trajectory_testing.TRAJECTORY_ID_1,
+        trajectory_testing.STEP_1_1.step_id,
+    )
+    path_cls = type(gcs_root)
+
+    with (
+        mock.patch.object(path_cls, "mkdir", autospec=True) as mock_mkdir,
+        mock.patch.object(path_cls, "write_text", autospec=True) as mock_write,
+    ):
+      gcs_store.add_step(
+          trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+      )
+      gcs_store.flush()
+
+    expected_meta_json = trajectory_testing.METADATA_1.model_dump_json(
+        indent=2, exclude_none=True
+    )
+    expected_step_json = trajectory_testing.STEP_1_1.model_dump_json(
+        indent=2, exclude_none=True
+    )
+    mock_mkdir.assert_not_called()
+    self.assertEqual(
+        mock_write.call_args_list,
+        [
+            mock.call(meta_path, expected_meta_json),
+            mock.call(step_path, expected_step_json),
+        ],
+    )
+
   def test_metadata_written_on_first_step_and_skipped_when_unchanged(
       self,
   ) -> None:

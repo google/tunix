@@ -58,6 +58,11 @@ def _dump_json(model: pydantic.BaseModel) -> str:
   return model.model_dump_json(indent=2, exclude_none=True)
 
 
+def _is_gcs_path(path: epath.Path) -> bool:
+  """Returns whether `path` targets Google Cloud Storage (`gs://`)."""
+  return path.is_absolute() and path.as_uri().startswith("gs://")
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class _FileWriteTask(async_writer.WriteTask):
   """File-specific write task containing filesystem destination paths."""
@@ -129,17 +134,20 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
 
     Optimizations:
       - Directory Creation: `mkdir` is executed only once per trajectory on the
-        first step, tracked by `_metadata_hash_by_trajectory_id`.
+        first step for non-GCS filesystems (skipped on `gs://`), tracked by
+        `_metadata_hash_by_trajectory_id`.
       - Metadata Caching: `metadata.json` is only written when its serialized
         content changes, minimizing redundant writes across multi-step turns.
-
-    Args:
-      task: Container holding directory paths, metadata, and step payload.
     """
     traj_id = task.trajectory_id
 
-    # Create directory on first step of this trajectory.
-    if traj_id not in self._metadata_hash_by_trajectory_id:
+    # Create directory on first step of this trajectory for local filesystems.
+    # GCS uses a flat object namespace where writing metadata.json materializes
+    # the prefix without a 0-byte directory marker object.
+    if (
+        traj_id not in self._metadata_hash_by_trajectory_id
+        and not _is_gcs_path(task.traj_dir)
+    ):
       task.traj_dir.mkdir(parents=True, exist_ok=True)
 
     # Only write metadata.json if metadata content has changed.
