@@ -29,7 +29,6 @@ export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/atwigg/trellis-
 export PROJECT="cloud-tpu-shared-capacity"
 export REGION="us-central1"
 export CLUSTER="bodaborg-tpu7x-gsc"
-export POD="pod1"
 export BUCKET="gs://atwigg-trellis-us-central1-fast-dev"
 export TPU_RESERVATION="ghostfish-tb2qe8ysltros"
 export KUEUE_QUEUE="multislice-queue"
@@ -66,10 +65,6 @@ export MAXTEXT_CKPT="gs://mlperf-6-1-submission/ckpt/qwen35_397b/scanned_reshard
 export MAXTEXT_OUTPUT_DIR="${BUCKET}/maxtext/${JOB_PREFIX}"
 export TRAJECTORY_LOG_DIR="${BUCKET}/trajectories/${JOB_PREFIX}/logger"
 export DISABLE_TRAJECTORY_STORE="true"
-export TRAJECTORY_STORE_ROOT_DIR=""
-export TRAJECTORY_STORE_ROOT=""
-export TRAJECTORY_STORE_DB_URL=""
-export USE_DEFAULT_SQL_STORE="false"
 
 export PATHWAYS_CHECKPOINTING_IMPL="persistence"
 export ENABLE_PATHWAYS_PERSISTENCE="1"
@@ -87,25 +82,16 @@ export COLOCATED_PYTHON_SIDECAR_SHM="1"
 export WANDB_ENTITY="google-trellis"
 export WANDB_PROJECT="trellis-deepswe"
 export WANDB_RUN_NAME="${JOB_PREFIX}-mlperf-397b-v7x"
-export WANDB_RESUME="allow"
 
 export RCP_LOGGING="true"
 export METRIC_LOGGER_DIR="${MAXTEXT_OUTPUT_DIR}/mllog"
 export TARGET_ACCURACY="0.69"
-export UBENCH_REPORTING="true"
 
 export DEBUG="0"
 export TUNIX_DEBUG_INFERENCE_LOGS="false"
-export PYTHONFAULTHANDLER="1"
 export PROFILER_STEPS="0"
 export SKIP_FIRST_N_PROFILER_STEPS="-1"
-export TPU_PROFILE_CHIPS_PER_TASK="1"
-export TPU_PROFILE_SPARSE_CORES="1"
-export TPU_PROFILE_SPARSE_CORE_TILES="1"
 export PROFILE_SAMPLER="false"
-export PHASED_PROFILING_DIR=""
-export PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=""
-export PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=""
 
 # ==============================================================================
 # 4. Model, Topologies & Weight Sync (Pathways + Raiden)
@@ -153,46 +139,29 @@ export USE_WEIGHT_CONVERTER="true"
 export PREFUSE_MOE_WEIGHTS="true"
 export TRAINER_PREFUSE_MOE_WEIGHTS="true"
 export ROLLOUT_PREFUSE_MOE_WEIGHTS="true"
-export TRAINER_PADDED_MOE_MLP_DIM=""
 
 export ENABLE_MULTI_NUMA="0"
 export TPU_RAIDEN_DATA_NICS="eth0"
 export RAIDEN_DEVICES_PER_HOST="8"
-export RAIDEN_BROADCAST_HOST_RATIO="1.0"
-export RAIDEN_BROADCAST_PIPELINE_STAGES="4"
 export RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER="0"
-export RAIDEN_PARALLELISM="16"
-export TRAINER_RAIDEN_COALESCE_WINDOW_BYTES="67108864"
-export TRAINER_RAIDEN_PIPELINE_GROUP_SIZE="16"
-export TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS="120000"
-export TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS="5"
 
 # ==============================================================================
 # 5. Trainer Flags & Environment
 # ==============================================================================
 export TRAINER_FP8="true"
-export TRAINER_TUNED_FLAGS="true"
-export DROPLESS="true"
-export RAGGED_BUFFER_FACTOR="2.75"
-export RETRY_WHEN_TOKENS_DROPPED="true"
-export MOE_EXCLUDE_PADDING="true"
-export LOG_MOE_DROPS="true"
 export REMAT_POLICY="custom"
-export REMAT_CONTEXT="device"
-export NUM_MOE_TOKEN_CHUNKS="2"
-export TRAINER_MAX_HBM_SIZE_MIB="84992"
 export TRAINER_MAXTEXT_ATTENTION="flash"
 export COMPUTE_LOGPS_CHUNK_SIZE="1024"
 export TUNIX_LOGPS_SHARDED_HEAD="local"
 export TRAINER_WARMUP_COMPILE="true"
 
-export TRAINER_LIBTPU_INIT_ARGS="--DANGEROUS_tpu_runtime_abi_verification_disabled=true --xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=false --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=false --xla_tpu_scoped_vmem_limit_kib=65472 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=false --xla_tpu_dvfs_p_state=7 --xla_tpu_max_hbm_size_mib=84992 --xla_tpu_enable_offloading_copy_to_sparsecore=false"
+_TRAINER_LIBTPU_INIT_ARGS="--DANGEROUS_tpu_runtime_abi_verification_disabled=true --xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=false --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=false --xla_tpu_scoped_vmem_limit_kib=65472 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=false --xla_tpu_dvfs_p_state=7 --xla_tpu_max_hbm_size_mib=84992 --xla_tpu_enable_offloading_copy_to_sparsecore=false"
 
 export PATHWAYS_PROXY_EXTRA_ARGS="--xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=false --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=false --xla_tpu_scoped_vmem_limit_kib=65472 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=false --xla_tpu_dvfs_p_state=7 --xla_tpu_max_hbm_size_mib=84992 --xla_tpu_enable_offloading_copy_to_sparsecore=false"
 
-export TRAINER_EXTRA_ENV="ONEHOT_MOE_PERMUTE_THRESHOLD=2048 ENABLE_MULTI_NUMA=0 TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_HOST_RATIO=1.0 RAIDEN_BROADCAST_PIPELINE_STAGES=4 LIBTPU_INIT_ARGS='${TRAINER_LIBTPU_INIT_ARGS}' TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=120000 TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=5 RAIDEN_PARALLELISM=16 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16"
+export TRAINER_EXTRA_ENV="ONEHOT_MOE_PERMUTE_THRESHOLD=2048 ENABLE_MULTI_NUMA=0 TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_HOST_RATIO=1.0 RAIDEN_BROADCAST_PIPELINE_STAGES=4 LIBTPU_INIT_ARGS='${_TRAINER_LIBTPU_INIT_ARGS}' TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=120000 TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=5 RAIDEN_PARALLELISM=16 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16"
 
-export PATHWAYS_WORKER_EXTRA_ENV="LIBTPU_INIT_ARGS=${TRAINER_LIBTPU_INIT_ARGS} --megascale_port=-1 --xprof_compress_jftrace=true
+export PATHWAYS_WORKER_EXTRA_ENV="LIBTPU_INIT_ARGS=${_TRAINER_LIBTPU_INIT_ARGS} --megascale_port=-1 --xprof_compress_jftrace=true
 SKIP_MEGASCALE_PJRT_CLIENT=true
 ENABLE_MULTI_NUMA=0
 TPU_RAIDEN_DATA_NICS=eth0
@@ -202,6 +171,7 @@ TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=120000
 TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=5
 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864
 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16"
+unset _TRAINER_LIBTPU_INIT_ARGS
 
 export ORCHESTRATOR_EXTRA_ENV="WEIGHT_SYNC_BIND_TIMEOUT_S=900 WEIGHT_SYNC_METADATA_TIMEOUT_S=900 WEIGHT_SYNC_H2D_TIMEOUT_S=3600 WEIGHT_SYNC_TRANSFER_TIMEOUT_S=7200 RAIDEN_PARALLELISM=16 TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_HOST_RATIO=1.0 RAIDEN_BROADCAST_PIPELINE_STAGES=4 TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=120000 TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=5"
 
@@ -237,8 +207,6 @@ kv_tp_size=8 rollout_fp8_moe=true fp8_moe_fake_quant=true"
 # 6. Rollout (vLLM) Flags, Environment & JAX Cache
 # ==============================================================================
 export ROLLOUT_FP8="true"
-export ROLLOUT_ATTENTION_DP="false"
-export USE_BATCHED_RPA_LONG_CTX_KERNEL="true"
 export ROLLOUT_MAXTEXT_ATTENTION="vllm_batched_rpa_long_ctx"
 
 export VLLM_LOGGING_LEVEL="INFO"
@@ -249,7 +217,6 @@ export VLLM_GPU_MEMORY_UTILIZATION="0.9"
 export VLLM_ENABLE_EXPERT_PARALLEL="true"
 export ENABLE_PREFIX_CACHING="true"
 export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="0"
-export MAMBA_CACHE_MODE="align"
 export VLLM_MAMBA_CACHE_MODE="align"
 export RETURN_ROUTED_EXPERTS="true"
 export ROLLOUT_FREE_KV_CACHE="false"
@@ -264,7 +231,6 @@ export VLLM_LIMIT_MM_PER_PROMPT='{"image": 0, "video": 0}'
 export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":8,"tensor_parallelism":1,"enable_dp_attention":false}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_batched_rpa_long_ctx","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"per_device_batch_size":0.0,"fp8_moe":true}}'
 
 export ONEHOT_MOE_PERMUTE_THRESHOLD="2048"
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="1800"
 export ROLLOUT_SKIP_JAX_PRECOMPILE="0"
 export NUM_PRECOMPILE_WORKERS="8"
 export NEW_MODEL_DESIGN="1"
@@ -287,8 +253,6 @@ export ROLLOUT_EXTRA_ENV="USE_BATCHED_RPA_LONG_CTX_KERNEL=true ONEHOT_MOE_PERMUT
 
 # JAX Compilation Cache
 export LOCAL_JAX_CACHE_DIR="/tmp/jax_cache"
-export JAX_CACHE_GCS_DIR=""
-export JAX_CACHE_BUCKET="${BUCKET}"
 export ROLLOUT_JAX_CACHE_GCS_DIR="${BUCKET}/jax_cache/v7x/qwen3.5-397b-a17b/rollout_2x2x1_ep8_tp1_44402c2102"
 export SAVE_JAX_CACHE="true"
 export SKIP_JAX_PRECOMPILE="1"
@@ -302,7 +266,6 @@ export MAX_STEPS="10"
 export BATCH_SIZE="72"
 export MINI_BATCH_SIZE="72"
 export NUM_GENERATIONS="16"
-export NUM_GENERATIONS_TO_DISPATCH=""
 export TRAIN_MICRO_BATCH_SIZE="64"
 export LEARNING_RATE="2.121320343559642e-06"
 export MAX_GRAD_NORM="0.05892556509887896"
@@ -360,8 +323,6 @@ export USE_AGENT_SANDBOX="1"
 export SCAFFOLD="openhands"
 export OPENHANDS_MULTI_TOOL_CALLS="true"
 export SANDBOX_NAMESPACE="${K8S_NAMESPACE:-trellis}"
-export POOL_NAME_FORMAT=""
-export TEMPLATE_NAME_PREFIX=""
 export MAX_WARMPOOL_REPLICAS="16"
 export SANDBOX_WAIT_INITIAL="false"
 export SANDBOX_IMAGE_PULL_POLICY="IfNotPresent"
@@ -384,113 +345,13 @@ export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandb
 export IMAGE_REWRITE_PREFIX="us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/"
 
 # ==============================================================================
-# 8. uBench Reporting
+# 8. Execution Dispatch
 # ==============================================================================
-_ubench_log() {
-  echo "UBENCH_REPORTING: $*" >&2
-}
+if [ -f "${DIR}/ubench_reporting.sh" ]; then
+  ( source "${DIR}/ubench_reporting.sh" "$@" ) ||
+    echo "UBENCH_REPORTING: Not recording this run for uBench. The launch continues." >&2
+fi
 
-_ubench_upload() {
-  gcloud storage cp - "$1" --no-user-output-enabled
-}
-
-_ubench_main() {
-  if [[ "${1:-start}" != "start" ]]; then
-    return 0
-  fi
-  local arg
-  for arg in "$@"; do
-    case "${arg}" in
-      --dry-run|--dry_run|--render)
-        _ubench_log "Dry run. Not writing files to ${MAXTEXT_OUTPUT_DIR}."
-        return 0
-        ;;
-    esac
-  done
-  if [[ "${JOB_PREFIX}" == "${USER:-}" ]]; then
-    _ubench_log "Not recording this run for uBench, because JOB_PREFIX is" \
-      "the default (\$USER). To record runs, use a new JOB_PREFIX for each" \
-      "run."
-    return 0
-  fi
-  if [[ ! "${JOB_PREFIX}" =~ ^[a-z][a-z0-9-]*$ ]]; then
-    _ubench_log "JOB_PREFIX '${JOB_PREFIX}' must start with a lowercase" \
-      "letter and use only lowercase letters, digits, and '-'."
-    return 1
-  fi
-  if ! command -v gcloud &> /dev/null; then
-    _ubench_log "gcloud CLI is not installed or not in PATH."
-    return 1
-  fi
-  local run_dir="${MAXTEXT_OUTPUT_DIR%/}"
-  local root="${run_dir%/*}"
-  if gcloud storage ls "${run_dir}/logs/resolved_config.yaml" > /dev/null 2>&1; then
-    _ubench_log "${run_dir} already has uBench files from an earlier run." \
-      "Use a new JOB_PREFIX."
-    return 1
-  fi
-
-  local rl_topology
-  rl_topology="$(cat <<EOF
-trainer:
-  accelerator: tpu7x
-  topology: "4x4x8"
-  replicas: 1
-  chips: 128
-rollout:
-  accelerator: tpu7x
-  topology: "2x2x1"
-  replicas: 128
-  chips: 512
-total_chips: 640
-EOF
-)"
-  local resolved_config
-  resolved_config="$(cat <<EOF
-# Written by tunix/experimental/examples/recipes/ubench_reporting.sh.
-benchmark_type: DISTRIBUTED
-run_name: "${JOB_PREFIX}"
-cluster:
-  gke:
-    project: "${PROJECT}"
-    zone: "${REGION}"
-    cluster_name: "${CLUSTER}"
-distributed:
-  recipe:
-    generator_type: HELM
-    artifacts_gcs_root_path: "${root}"
-  workload:
-    type: TUNIX_RL
-    model: "${MODEL_ID}"
-    hardware: V7X_4X4X8
-    num_steps: ${MAX_STEPS}
-    image: "${TUNIX_IMAGE}"
-    recipe_type: MLPERF
-    # Same as the uBench default: skip the first (warmup) step.
-    metrics_config:
-      start_step: 1
-EOF
-)"
-  if ! printf '%s\n' "${rl_topology}" |
-         _ubench_upload "${run_dir}/logs/rl_topology.yaml" ||
-     ! echo "job_start_time: '$(date -u +%Y-%m-%dT%H:%M:%SZ)'" |
-         _ubench_upload "${run_dir}/workload_timestamps.yaml" ||
-     ! printf '%s\n' "${resolved_config}" |
-         _ubench_upload "${run_dir}/logs/resolved_config.yaml"; then
-    _ubench_log "Could not write the uBench files to ${run_dir}."
-    return 1
-  fi
-
-  _ubench_log "After the run finishes, report it with:"
-  echo "  ubench benchmark report --run-name ${JOB_PREFIX} --gcs-root-path ${root}" >&2
-}
-
-( _ubench_main "$@" ) ||
-  echo "UBENCH_REPORTING: Not recording this run for uBench. The launch continues." >&2
-
-# ==============================================================================
-# 9. Execution Dispatch
-# ==============================================================================
 if [ -f "${DIR}/../deepswe_dist/k8s_launcher.sh" ]; then
   LAUNCHER="${DIR}/../deepswe_dist/k8s_launcher.sh"
 elif [ -f "${DIR}/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh" ]; then
