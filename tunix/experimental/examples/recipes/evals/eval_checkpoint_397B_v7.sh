@@ -16,17 +16,18 @@
 set -e
 
 # ==============================================================================
-# Single-checkpoint MLPerf DeepSWE evaluation on 512 TPU v7x chips (397B)
+# Single-checkpoint MLPerf DeepSWE evaluation on TPU v7x (397B)
 # ==============================================================================
 # Usage:
-#   ./eval_checkpoint_397B_v7.sh gs://path_to_checkpoint [--dry-run] [--require-target]
+#   ./eval_checkpoint_397B_v7.sh [gs://path_to_checkpoint] [--dry-run] [--require-target]
+#   JOB_PREFIX=<run_prefix> [STEP=<step>] ./eval_checkpoint_397B_v7.sh [--dry-run]
 #   ./eval_checkpoint_397B_v7.sh stop_eval
 #
 # Behavior:
-# - Scales Qwen3.5-397B-A17B rollout evaluation to 512 TPU v7x chips by default
-#   (32 replicas x 16 chips tpu7x:2x2x4, BATCH_SIZE=128, MAX_CONCURRENCY=512,
-#   MAX_WARMPOOL_REPLICAS=32).
-# - Auto-detects cluster/pod (us-east1 -> pod2, us-central1 -> pod1).
+# - Inherits rollout worker, model, cluster, and sandbox settings directly from
+#   mlperf_gbs1024_submission.sh via mlperf_397b_v7x_eval.sh (128 replicas x
+#   8 chips tpu7x:2x2x1 on jobset.tpu.yaml, DP=1, TP=4, EP=8, FP8 rollout;
+#   no Pathways, no cpu-np nodes).
 # - Auto-discovers <run>/mllog/eval_checkpoints.jsonl when present so
 #   eval_start, eval_accuracy, eval_stop, and run_stop are appended to the
 #   training run's MLLOG file (seed_<seed>.out).
@@ -36,12 +37,14 @@ set -e
 
 usage() {
   cat >&2 <<EOF
-Usage: $(basename "$0") <gs://path_to_checkpoint> [--dry-run] [--require-target]
+Usage: $(basename "$0") [gs://path_to_checkpoint] [--dry-run] [--require-target]
+       JOB_PREFIX=<run_prefix> [STEP=<step>] $(basename "$0") [--dry-run] [--require-target]
        $(basename "$0") stop_eval
 
 Arguments:
   <gs://path_to_checkpoint>  GCS path to checkpoint (e.g. gs://.../checkpoints/7/model_params
-                             or gs://.../checkpoints/7)
+                             or gs://.../checkpoints/7). Optional if JOB_PREFIX (and STEP /
+                             CHECKPOINT_STEP or eval_checkpoints.jsonl) is provided.
   --dry-run, --render        Render K8s JobSet YAML without submitting to the cluster
   --require-target           Exit with code 2 if evaluation completes with target_reached=false
   stop, stop_eval            Tear down running evaluation JobSets and sandboxes
@@ -51,15 +54,6 @@ EOF
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ "${1:-}" == "stop" || "${1:-}" == "stop_eval" ]]; then
-  if [[ -z "${POD:-}" && -z "${REGION:-}" ]]; then
-    _ctx="$(kubectl config current-context 2>/dev/null || true)"
-    if [[ "${_ctx}" == *us-central1* ]]; then
-      export POD="pod1"
-    else
-      export POD="pod2"
-    fi
-  fi
-  export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-32}"
   exec bash "${SCRIPT_DIR}/mlperf_397b_v7x_eval.sh" stop_eval "${@:2}"
 fi
 
@@ -99,116 +93,121 @@ while [[ $# -gt 0 ]]; do
 done
 
 CKPT_PATH="${CKPT_ARG:-${MAXTEXT_CKPT:-}}"
-if [[ -z "${CKPT_PATH}" ]]; then
-  echo "Error: checkpoint path is required." >&2
-  usage
-  exit 1
-fi
-
-# Strip trailing slash; if given a step directory (.../<step>), append /model_params.
-CKPT_PATH="${CKPT_PATH%/}"
-if [[ "${CKPT_PATH}" =~ /[0-9]+$ ]]; then
-  CKPT_PATH="${CKPT_PATH}/model_params"
-fi
-export MAXTEXT_CKPT="${CKPT_PATH}"
-
-# ==============================================================================
-# Auto-detect Pod / Region / Cluster from Checkpoint URI or Kubectl Context
-# ==============================================================================
-if [[ -z "${POD:-}" && -z "${REGION:-}" ]]; then
-  if [[ "${MAXTEXT_CKPT}" == *us-east1* ]]; then
-    export POD="pod2"
-  elif [[ "${MAXTEXT_CKPT}" == *us-central1* ]]; then
-    export POD="pod1"
-  else
-    _ctx="$(kubectl config current-context 2>/dev/null || true)"
-    if [[ "${_ctx}" == *us-central1* ]]; then
-      export POD="pod1"
-    else
-      export POD="pod2"
-    fi
+if [[ -n "${CKPT_PATH}" ]]; then
+  # Strip trailing slash; if given a step directory (.../<step>), append /model_params.
+  CKPT_PATH="${CKPT_PATH%/}"
+  if [[ "${CKPT_PATH}" =~ /[0-9]+$ ]]; then
+    CKPT_PATH="${CKPT_PATH}/model_params"
   fi
+  export MAXTEXT_CKPT="${CKPT_PATH}"
 fi
 
-if [[ "${POD:-pod2}" == "pod2" || "${POD:-}" == "2" || "${POD:-}" == "elm" || "${REGION:-}" == us-east1* ]]; then
-  export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
+# If checkpoint URI is in us-east1 and POD/REGION were not set, select pod2;
+# otherwise let mlperf_gbs1024_submission.sh set its default pod/cluster.
+if [[ -z "${POD:-}" && -z "${REGION:-}" && "${MAXTEXT_CKPT:-}" == *us-east1* ]]; then
+  export POD="pod2"
 fi
 
-# ==============================================================================
-# 512 TPU v7x Chip Defaults (32 replicas x 16 chips tpu7x:2x2x4 = 512 chips)
-# ==============================================================================
-export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x4}"
-export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-32}"
-export NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
-export BATCH_SIZE="${BATCH_SIZE:-128}"
-export MAX_CONCURRENCY="${MAX_CONCURRENCY:-512}"
-export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-32}"
-
-# ==============================================================================
-# Auto-discover Manifest Metadata (<run>/mllog/eval_checkpoints.jsonl)
-# ==============================================================================
-# Both base resharded checkpoints (.../0/items) and 397B MaxText RL checkpoints
-# (.../checkpoints/<step>/model_params) use scanned layers (SCAN_LAYERS=true).
-export SCAN_LAYERS="${SCAN_LAYERS:-true}"
-
+# Infer JOB_PREFIX and CHECKPOINT_STEP from the checkpoint path when not explicitly set.
 CKPT_RUN_TAG="single_ckpt"
-if [[ "${MAXTEXT_CKPT}" =~ ^(.*)/([0-9]+)/model_params$ ]]; then
+if [[ "${MAXTEXT_CKPT:-}" =~ ^(.*)/([0-9]+)/model_params$ ]]; then
   CKPT_ROOT="${BASH_REMATCH[1]}"
   DETECTED_STEP="${BASH_REMATCH[2]}"
   _run_dir="${CKPT_ROOT%/checkpoints}"
   CKPT_RUN_TAG="$(basename "${_run_dir}")"
   CKPT_RUN_TAG="${CKPT_RUN_TAG%-checkpoints}"
   CKPT_RUN_TAG="${CKPT_RUN_TAG%-train}"
-  export CHECKPOINT_STEP="${CHECKPOINT_STEP:-${DETECTED_STEP}}"
+  export JOB_PREFIX="${JOB_PREFIX:-${CKPT_RUN_TAG}}"
+  export CHECKPOINT_STEP="${CHECKPOINT_STEP:-${STEP:-${DETECTED_STEP}}}"
+elif [[ -n "${STEP:-}" && -z "${CHECKPOINT_STEP:-}" ]]; then
+  export CHECKPOINT_STEP="${STEP}"
+fi
 
-  if MANIFEST_META="$(python3 - "${CHECKPOINT_MANIFEST_FILE:-}" "${CKPT_ROOT}" "${CHECKPOINT_STEP}" "${MAXTEXT_CKPT}" <<'PY'
+USER_EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-}"
+USER_MANIFEST_FILE="${CHECKPOINT_MANIFEST_FILE:-}"
+
+# Unset CHECKPOINT_MANIFEST_FILE before sourcing mlperf_397b_v7x_eval.sh so
+# mlperf_base.sh does not enter the multi-checkpoint manifest loop.
+unset CHECKPOINT_MANIFEST_FILE
+
+# Inherit all rollout worker, model, cluster, and eval settings from
+# mlperf_397b_v7x_eval.sh -> mlperf_gbs1024_submission.sh without launching yet.
+MLPERF_NO_LAUNCH=1 source "${SCRIPT_DIR}/mlperf_397b_v7x_eval.sh" >&2
+
+# If the caller did not explicitly pass a checkpoint path (positional arg or
+# MAXTEXT_CKPT env var), ignore the base-model default set by mlperf_397b_256_v7x.sh
+# and resolve the trained checkpoint from the manifest (or JOB_PREFIX / BUCKET).
+if [[ -z "${CKPT_PATH}" ]]; then
+  export MAXTEXT_CKPT=""
+  CKPT_RUN_TAG="${JOB_PREFIX}"
+  CKPT_ROOT="${BUCKET%/}/${JOB_PREFIX}-train/checkpoints"
+fi
+
+# ==============================================================================
+# Auto-discover Manifest Metadata (<run>/mllog/eval_checkpoints.jsonl)
+# ==============================================================================
+if [[ -n "${CKPT_ROOT:-}" || -n "${MAXTEXT_OUTPUT_DIR:-}" ]]; then
+  if MANIFEST_META="$(python3 - "${USER_MANIFEST_FILE}" "${CKPT_ROOT:-}" "${MAXTEXT_OUTPUT_DIR:-}" "${BUCKET:-}" "${JOB_PREFIX:-}" "${CHECKPOINT_STEP:--1}" "${MAXTEXT_CKPT:-}" <<'PY'
 import json
 import os
 import subprocess
 import sys
 
-explicit_manifest, ckpt_root, target_step_str, ckpt_path = sys.argv[1:5]
+(
+    explicit_manifest,
+    ckpt_root,
+    maxtext_output_dir,
+    bucket,
+    job_prefix,
+    target_step_str,
+    ckpt_path,
+) = sys.argv[1:8]
 target_step = int(target_step_str)
 ckpt_root = ckpt_root.rstrip("/")
+maxtext_output_dir = maxtext_output_dir.rstrip("/")
+bucket = bucket.rstrip("/")
 
 candidates = []
 if explicit_manifest:
   candidates.append(explicit_manifest)
 else:
-  if ckpt_root.endswith("-checkpoints"):
-    candidates.append(f"{ckpt_root[:-len('-checkpoints')]}/mllog/eval_checkpoints.jsonl")
-  if ckpt_root.endswith("/checkpoints"):
-    train_dir = ckpt_root[:-len("/checkpoints")]
-    parent_dir = os.path.dirname(train_dir)
-    if parent_dir:
-      candidates.append(f"{parent_dir}/mllog/eval_checkpoints.jsonl")
-    candidates.append(f"{train_dir}/mllog/eval_checkpoints.jsonl")
-  candidates.append(f"{ckpt_root}/mllog/eval_checkpoints.jsonl")
+  if ckpt_root:
+    if ckpt_root.endswith("-checkpoints"):
+      candidates.append(f"{ckpt_root[:-len('-checkpoints')]}/mllog/eval_checkpoints.jsonl")
+    if ckpt_root.endswith("/checkpoints"):
+      train_dir = ckpt_root[:-len("/checkpoints")]
+      parent_dir = os.path.dirname(train_dir)
+      if parent_dir:
+        candidates.append(f"{parent_dir}/mllog/eval_checkpoints.jsonl")
+      candidates.append(f"{train_dir}/mllog/eval_checkpoints.jsonl")
+    candidates.append(f"{ckpt_root}/mllog/eval_checkpoints.jsonl")
+  if maxtext_output_dir:
+    candidates.append(f"{maxtext_output_dir}/mllog/eval_checkpoints.jsonl")
+  if bucket and job_prefix:
+    candidates.append(f"{bucket}/{job_prefix}-train/mllog/eval_checkpoints.jsonl")
+    candidates.append(f"{bucket}/maxtext/{job_prefix}/mllog/eval_checkpoints.jsonl")
+
+def read_gcs_or_local(path: str) -> str:
+  if path.startswith("gs://"):
+    for cmd in (["gcloud", "storage", "cat", path], ["gsutil", "cat", path]):
+      res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+      if res.returncode == 0 and res.stdout.strip():
+        return res.stdout
+    return ""
+  try:
+    with open(path, encoding="utf-8") as f:
+      return f.read()
+  except OSError:
+    return ""
 
 text = ""
 used_manifest = ""
 for path in dict.fromkeys(candidates):
-  if path.startswith("gs://"):
-    res = subprocess.run(
-        ["gsutil", "cat", path],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if res.returncode == 0 and res.stdout.strip():
-      text = res.stdout
-      used_manifest = path
-      break
-  else:
-    try:
-      with open(path, encoding="utf-8") as f:
-        content = f.read()
-      if content.strip():
-        text = content
-        used_manifest = path
-        break
-    except OSError:
-      continue
+  content = read_gcs_or_local(path)
+  if content.strip():
+    text = content
+    used_manifest = path
+    break
 
 if not text:
   sys.exit(1)
@@ -217,15 +216,36 @@ records = [json.loads(line) for line in text.splitlines() if line.strip()]
 if not records:
   sys.exit(1)
 
-max_step = max(int(r["step"]) for r in records)
 matched = None
-for r in records:
-  if int(r["step"]) == target_step or str(r["checkpoint_path"]).rstrip("/") == ckpt_path.rstrip("/"):
-    matched = r
-    break
+if target_step < 0 and not ckpt_path:
+  matched = records[-1]
+else:
+  if ckpt_path:
+    for r in reversed(records):
+      if str(r.get("checkpoint_path", "")).rstrip("/") == ckpt_path.rstrip("/"):
+        matched = r
+        break
+  if matched is None and target_step >= 0:
+    for r in reversed(records):
+      if int(r["step"]) == target_step:
+        matched = r
+        break
 
 if matched is None:
   sys.exit(1)
+
+matched_root = os.path.dirname(
+    os.path.dirname(str(matched.get("checkpoint_path", "")).rstrip("/"))
+)
+same_run_records = [
+    r
+    for r in records
+    if os.path.dirname(
+        os.path.dirname(str(r.get("checkpoint_path", "")).rstrip("/"))
+    )
+    == matched_root
+] or records
+max_step = max(int(r["step"]) for r in same_run_records)
 
 mllog_file = str(matched["mllog_file"]) if "mllog_file" in matched else ""
 canonical_ckpt = str(matched["checkpoint_path"])
@@ -242,7 +262,7 @@ print("|".join([
 PY
   )"; then
     IFS='|' read -r _M_PATH _M_STEP _M_SAMPLES _M_TS_MS _M_IS_LAST _M_MLLOG _M_CKPT <<< "${MANIFEST_META}"
-    if [[ -n "${_M_CKPT}" && "${_M_CKPT}" != "${MAXTEXT_CKPT}" ]]; then
+    if [[ -n "${_M_CKPT}" && "${_M_CKPT}" != "${MAXTEXT_CKPT:-}" ]]; then
       echo "[eval_checkpoint_397B_v7] Resolved canonical checkpoint path from manifest: ${_M_CKPT}" >&2
       export MAXTEXT_CKPT="${_M_CKPT}"
     fi
@@ -260,27 +280,19 @@ PY
   fi
 fi
 
+if [[ -z "${MAXTEXT_CKPT:-}" && -n "${CKPT_ROOT:-}" && -n "${CHECKPOINT_STEP:-}" ]]; then
+  export MAXTEXT_CKPT="${CKPT_ROOT%/}/${CHECKPOINT_STEP}/model_params"
+fi
+
+if [[ -z "${MAXTEXT_CKPT:-}" ]]; then
+  echo "Error: could not resolve MAXTEXT_CKPT. Pass <gs://path_to_checkpoint> or set STEP/CHECKPOINT_STEP." >&2
+  usage
+  exit 1
+fi
+
 if [[ "${RCP_LOGGING:-auto}" == "auto" ]]; then
   export RCP_LOGGING="false"
 fi
-
-USER_EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-}"
-USER_ROLLOUT_JOBSET_YAML="${ROLLOUT_JOBSET_YAML:-}"
-
-# Unset CHECKPOINT_MANIFEST_FILE before sourcing mlperf_397b_v7x_eval.sh so
-# mlperf_base.sh does not enter the multi-checkpoint manifest loop.
-unset CHECKPOINT_MANIFEST_FILE
-
-# Load shared 397B v7x and MLPerf base configuration without launching yet.
-# Redirect stdout to stderr so `kubectl config use-context` messages do not
-# pollute stdout metrics/YAML output.
-MLPERF_NO_LAUNCH=1 source "${SCRIPT_DIR}/mlperf_397b_v7x_eval.sh" >&2
-
-# eval_worker.py uses Pathways (JAX_PLATFORMS=proxy, VLLM_TPU_USING_PATHWAYS=1)
-# to expose all 32 devices across the 4-host tpu7x:2x2x4 slice; override
-# mlperf_397b_v7x_eval.sh's unconditional jobset.mcjax.ray.yaml unless the caller
-# explicitly set ROLLOUT_JOBSET_YAML.
-export ROLLOUT_JOBSET_YAML="${USER_ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}"
 
 # Default EVAL_OUTPUT_DIR to a checkpoint-specific subpath so summary.json files
 # from different runs/steps are cleanly isolated.
@@ -290,7 +302,7 @@ fi
 
 echo "[eval_checkpoint_397B_v7] Checkpoint:      ${MAXTEXT_CKPT}" >&2
 echo "[eval_checkpoint_397B_v7] Cluster / Pod:   ${CLUSTER} (${REGION}, ${POD})" >&2
-echo "[eval_checkpoint_397B_v7] Topology:        ${ROLLOUT_REPLICAS}x ${ROLLOUT_TPU_SLICE} (512 v7x chips), batch_size=${BATCH_SIZE}, max_concurrency=${MAX_CONCURRENCY}" >&2
+echo "[eval_checkpoint_397B_v7] Topology:        ${ROLLOUT_REPLICAS}x ${ROLLOUT_TPU_SLICE} (${ROLLOUT_JOBSET_YAML}), batch_size=${BATCH_SIZE}, max_concurrency=${MAX_CONCURRENCY}" >&2
 echo "[eval_checkpoint_397B_v7] Output Dir:      ${EVAL_OUTPUT_DIR}" >&2
 
 if [[ "${DRY_RUN_MODE}" == "true" || "${DRY_RUN:-false}" == "true" ]]; then
@@ -300,7 +312,7 @@ fi
 list_summaries() {
   local out_dir="${EVAL_OUTPUT_DIR%/}"
   if [[ "${out_dir}" == gs://* ]]; then
-    gsutil ls "${out_dir}/*/summary.json" 2>/dev/null | sort || true
+    (gcloud storage ls "${out_dir}/*/summary.json" 2>/dev/null || gsutil ls "${out_dir}/*/summary.json" 2>/dev/null) | sort || true
   else
     compgen -G "${out_dir}/*/summary.json" | sort || true
   fi
@@ -378,7 +390,11 @@ if not new_summaries:
 
 summary_uri = new_summaries[-1]
 if summary_uri.startswith("gs://"):
-  text = subprocess.check_output(["gsutil", "cat", summary_uri], text=True)
+  res = subprocess.run(["gcloud", "storage", "cat", summary_uri], capture_output=True, text=True, check=False)
+  if res.returncode == 0 and res.stdout.strip():
+    text = res.stdout
+  else:
+    text = subprocess.check_output(["gsutil", "cat", summary_uri], text=True)
 else:
   with open(summary_uri, encoding="utf-8") as f:
     text = f.read()

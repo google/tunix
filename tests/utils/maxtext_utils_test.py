@@ -1189,6 +1189,138 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertFalse(prefused_wi_deleted_during_exec)
     self.assertTrue(prefused_wi.deleted)
 
+  def test_load_and_convert_scanned_checkpoint_fp8_moe_and_pinned_host_staging(
+      self,
+  ):
+    class FakeSharding:
+
+      def __init__(self, memory_kind="device"):
+        self.memory_kind = memory_kind
+
+      def with_memory_kind(self, kind):
+        return FakeSharding(kind)
+
+      def __eq__(self, other):
+        return (
+            isinstance(other, FakeSharding)
+            and self.memory_kind == other.memory_kind
+        )
+
+    class FakeArray:
+
+      def __init__(self, shape, memory_kind="device"):
+        self.shape = shape
+        self.sharding = FakeSharding(memory_kind)
+        self.deleted = False
+
+      def __getitem__(self, item):
+        return FakeArray(
+            (self.shape[0], self.shape[1] // 2), self.sharding.memory_kind
+        )
+
+      def delete(self):
+        self.deleted = True
+
+    pinned_wi = FakeArray((4, 8), memory_kind="pinned_host")
+    seen_memory_kinds = []
+
+    def fake_exec_group(group, src_flat, tgt_flat):
+      seen_memory_kinds.extend(
+          src_flat[k].sharding.memory_kind for k in group.source_keys
+      )
+      return [("out_key", FakeArray((4, 8), memory_kind="device"))]
+
+    orig_converter = mock.MagicMock()
+    orig_converter._build_plan = mock.MagicMock()
+    orig_converter._execute_group = fake_exec_group
+
+    def fake_convert(scanned_state, target_state=None):
+      src_flat = {("decoder", "layers", 0, "wi"): pinned_wi}
+      orig_converter._build_plan(src_flat, {})
+      group = mock.MagicMock(
+          op="fuse_moe",
+          source_keys=[
+              ("decoder", "layers", 0, "wi_0"),
+              ("decoder", "layers", 0, "wi_1"),
+          ],
+      )
+      orig_converter._execute_group(group, src_flat, {})
+      return {"model": {}}
+
+    orig_converter.convert = fake_convert
+    converter_cls = mock.Mock(return_value=orig_converter)
+
+    scanned_cfg = mock.sentinel.scanned_cfg
+    pyconfig_mod = mock.MagicMock(initialize=mock.Mock(return_value=scanned_cfg))
+    model_creation_mod = mock.MagicMock(
+        from_pretrained=mock.Mock(
+            return_value=(mock.sentinel.model, mock.sentinel.mesh)
+        )
+    )
+    nnx_mod = mock.MagicMock(
+        Param=mock.sentinel.Param,
+        state=mock.Mock(return_value=mock.sentinel.scanned_state),
+    )
+
+    def fake_device_put(arr, sharding):
+      return FakeArray(arr.shape, memory_kind=sharding.memory_kind)
+
+    jax_mod = mock.MagicMock(
+        Array=FakeArray,
+        devices=mock.Mock(return_value=["d0"]),
+        clear_caches=mock.Mock(),
+        block_until_ready=mock.Mock(),
+        device_put=mock.Mock(side_effect=fake_device_put),
+        tree_util=None,
+    )
+    mock_sampler = mock.MagicMock()
+    mock_sampler.vllm_sampler.transformer_state = {
+        "decoder": {"layers_0": {"mlp": {"routed_experts": {"wi_scale": object()}}}}
+    }
+
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "flax": mock.MagicMock(nnx=nnx_mod),
+            "flax.nnx": nnx_mod,
+            "jax": jax_mod,
+            "maxtext.common.common_types": mock.MagicMock(
+                MODEL_MODE_AUTOREGRESSIVE="autoregressive"
+            ),
+            "maxtext.configs": mock.MagicMock(pyconfig=pyconfig_mod),
+            "maxtext.integration.vllm.weight_converter": mock.MagicMock(
+                MaxTextToMaxTextConverter=converter_cls
+            ),
+            "maxtext.utils": mock.MagicMock(
+                model_creation_utils=model_creation_mod
+            ),
+            "maxtext.utils.globals": mock.MagicMock(
+                MAXTEXT_CONFIGS_DIR="/maxtext/configs"
+            ),
+        },
+    ):
+      maxtext_utils.load_and_convert_scanned_checkpoint(
+          path="/ckpt/0/items",
+          sampler=mock_sampler,
+          mesh_tp=2,
+          ckpt_prefuse_moe=True,
+          maxtext_config_overrides={"fp8_moe": True},
+      )
+
+    # Scanned checkpoint on disk is BF16, so scanned_cfg overrides fp8_moe=False
+    # while MaxTextToMaxTextConverter receives fp8_moe=True.
+    _, init_kwargs = pyconfig_mod.initialize.call_args
+    self.assertFalse(init_kwargs["fp8_moe"])
+    converter_cls.assert_called_once_with(
+        config=scanned_cfg,
+        tp=2,
+        prefuse_moe_weights=True,
+        target_dtype=None,
+        fp8_moe=True,
+    )
+    self.assertEqual(seen_memory_kinds, ["device", "device"])
+    self.assertTrue(pinned_wi.deleted)
+
   def test_pathways_ocdbt_selection(self):
     """CKPT_USE_OCDBT only enables OCDBT under colocated_python; persistence always forces it off."""
     ckpt_opts = mock.MagicMock(save_interval_steps=1, max_to_keep=2)
