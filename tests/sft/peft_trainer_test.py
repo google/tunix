@@ -29,6 +29,7 @@ import jax.numpy as jnp
 import jax.sharding as shd
 import numpy as np
 import optax
+from orbax.checkpoint import v1 as ocp
 from tunix.rl import common
 from tunix.sft import checkpoint_manager
 from tunix.sft import checkpoint_options
@@ -641,11 +642,59 @@ class PeftTrainerTest(parameterized.TestCase):
                 mock.ANY,
                 save_only_lora_params=True,
                 force=True,
+                custom_metadata={},
             ),
             mock.call.close(),
         ],
         any_order=False,
     )
+
+  def test_final_checkpoint_keeps_custom_metadata(self):
+    ckpt_dir = os.path.join(self.temp_path, 'final_ckpt_metadata')
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=3,
+        checkpoint_root_directory=ckpt_dir,
+        # Only step 2 is saved by the policy; step 3 is saved by close().
+        checkpointing_options=checkpoint_options.create_checkpointing_options(
+            save_decision_policy=ocp.training.save_decision_policies.FixedIntervalPolicy(
+                2
+            ),
+        ),
+    )
+
+    class MetadataTrainer(peft_trainer.PeftTrainer):
+
+      def custom_checkpoint_metadata(self):
+        return {'trained_steps': self.train_steps}
+
+    def new_trainer():
+      model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+      return MetadataTrainer(model, optax.sgd(1e-3), config)
+
+    trainer = new_trainer().with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(dummy_datasets(batch_size=2, repeat=2))
+    self.assertEqual(trainer.train_steps, 3)
+
+    resumed = new_trainer()
+    self.assertEqual(resumed.train_steps, 3)
+    self.assertEqual(resumed._restored_custom_metadata, {'trained_steps': 3})
+
+  def test_close_without_update_does_not_save_checkpoint(self):
+    ckpt_dir = os.path.join(self.temp_path, 'no_update')
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=10,
+        checkpoint_root_directory=ckpt_dir,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    trainer.train([])  # e.g. an empty or already exhausted dataset.
+
+    self.assertEqual(trainer.train_steps, 0)
+    self.assertEmpty(os.listdir(ckpt_dir))
 
   def test_loss_fn_with_aux(self):
     def custom_loss_fn(
