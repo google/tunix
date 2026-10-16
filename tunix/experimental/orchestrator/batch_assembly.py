@@ -27,6 +27,7 @@ potentially move to a common library.
 import collections
 from collections.abc import Iterator, Mapping, Sequence
 import dataclasses
+import functools
 from typing import Any, Generic, NamedTuple, Protocol, TypeVar
 from absl import logging
 import numpy as np
@@ -177,6 +178,29 @@ def _zeros_or_none(
   return np.zeros(shape, dtype=np.float32) if enabled else None
 
 
+def _dummy_routed_experts_and_metadata(
+    with_routed_experts: bool,
+    batch_size: int,
+    seq_len: int,
+    routed_experts_encode_mode: packing.RoutedExpertsEncodeMode,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+  if not with_routed_experts:
+    return None, {}
+  packing.validate_routed_experts_encode_config(
+      routed_experts_encode_mode, None
+  )
+  return (
+      np.empty((batch_size, seq_len, 0, 0), dtype=np.int16),
+      {
+          "routed_experts_encode_fn": functools.partial(
+              packing.encode_routed_experts,
+              mode=routed_experts_encode_mode,
+              batched=True,
+          )
+      },
+  )
+
+
 @dataclasses.dataclass
 class BatchConfig:
   """Configuration for batch assembly.
@@ -255,6 +279,7 @@ class BatchAssembler(Generic[T], Protocol):
       with_sampler_is_weights: bool = False,
       sampler_agreement_applied: bool = False,
       with_routed_experts: bool = False,
+      routed_experts_encode_mode: packing.RoutedExpertsEncodeMode = "auto",
   ) -> datatypes.RLTrainerPayload:
     """Builds a synthetic microbatch with the exact static layout `feed()` emits.
 
@@ -274,10 +299,13 @@ class BatchAssembler(Generic[T], Protocol):
       sampler_agreement_applied: Value of the static `sampler_agreement_applied`
         pytree metadata flag on the payload.
       with_routed_experts: Whether real payloads carry MoE router indices
-        (`routed_experts`) for router replay. When True, populates a 4D
-        `[B, S, 0, 0]` `int16` placeholder whose trailing `(num_layers, top_k)`
-        dimensions are resolved by the trainer from its model config during
-        `compile()`.
+        (`routed_experts`) for router replay. When True, populates a 4D `[B, S,
+        0, 0]` `int16` placeholder and a `routed_experts_encode_fn` entry in
+        `metadata` so the trainer can expand and compact-encode the placeholder
+        using its model config during `compile()`.
+      routed_experts_encode_mode: Compact wire encoding mode (`"auto"`,
+        `"uint8"`, `"uint10"`, or `"int16"`) bound into
+        `metadata["routed_experts_encode_fn"]` when `with_routed_experts=True`.
 
     Returns:
       A batched payload whose `jax.tree.structure`, shapes and dtypes match
@@ -902,11 +930,18 @@ class SequencePackedBatchAssembler:
       with_sampler_is_weights: bool = False,
       sampler_agreement_applied: bool = False,
       with_routed_experts: bool = False,
+      routed_experts_encode_mode: packing.RoutedExpertsEncodeMode = "auto",
   ) -> datatypes.RLTrainerPayload:
     """Builds a zero-filled `[batch_size, max_packed_len]` dummy payload."""
     shape = (self.batch_size, self.max_packed_len)
     max_segments = packing.effective_max_segments(
         self.max_packed_len, self.max_segments_per_packed_row
+    )
+    routed_experts, metadata = _dummy_routed_experts_and_metadata(
+        with_routed_experts,
+        self.batch_size,
+        self.max_packed_len,
+        routed_experts_encode_mode,
     )
     return datatypes.RLTrainerPayload(
         prompt_ids=np.zeros((self.batch_size, 0), dtype=np.int32),
@@ -921,11 +956,8 @@ class SequencePackedBatchAssembler:
         ref_per_token_logps=_zeros_or_none(with_ref_per_token_logps, shape),
         sampler_is_weights=_zeros_or_none(with_sampler_is_weights, shape),
         sampler_agreement_applied=sampler_agreement_applied,
-        routed_experts=(
-            np.empty((*shape, 0, 0), dtype=np.int16)
-            if with_routed_experts
-            else None
-        ),
+        routed_experts=routed_experts,
+        metadata=metadata,
     )
 
   def reset(self, *, start_batch_index: int | None = None) -> None:
@@ -1065,10 +1097,17 @@ class PaddedBatchAssembler:
       with_sampler_is_weights: bool = False,
       sampler_agreement_applied: bool = False,
       with_routed_experts: bool = False,
+      routed_experts_encode_mode: packing.RoutedExpertsEncodeMode = "auto",
   ) -> datatypes.RLTrainerPayload:
     """Builds a zero-filled `[batch_size, P]` / `[batch_size, C]` dummy payload."""
     prompt_shape = (self.batch_size, self.max_prompt_length)
     completion_shape = (self.batch_size, self.max_response_length)
+    routed_experts, metadata = _dummy_routed_experts_and_metadata(
+        with_routed_experts,
+        self.batch_size,
+        self.max_seq_len,
+        routed_experts_encode_mode,
+    )
     return datatypes.RLTrainerPayload(
         prompt_ids=np.zeros(prompt_shape, dtype=np.int32),
         prompt_mask=np.zeros(prompt_shape, dtype=np.float32),
@@ -1085,14 +1124,8 @@ class PaddedBatchAssembler:
             with_sampler_is_weights, completion_shape
         ),
         sampler_agreement_applied=sampler_agreement_applied,
-        routed_experts=(
-            np.empty(
-                (self.batch_size, self.max_seq_len, 0, 0),
-                dtype=np.int16,
-            )
-            if with_routed_experts
-            else None
-        ),
+        routed_experts=routed_experts,
+        metadata=metadata,
     )
 
   def reset(self, *, start_batch_index: int | None = None) -> None:

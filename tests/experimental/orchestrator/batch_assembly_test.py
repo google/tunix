@@ -3427,6 +3427,7 @@ class BuildDummyPayloadTest(parameterized.TestCase):
     self.assertIsNotNone(dummy.routed_experts)
     self.assertEqual(dummy.routed_experts.shape, (3, 14, 0, 0))
     self.assertEqual(dummy.routed_experts.dtype, np.int16)
+    self.assertIn("routed_experts_encode_fn", dummy.metadata)
 
   def test_packed_with_routed_experts_builds_placeholder(self):
     assembler = batch_assembly.create_batch_assembler(
@@ -3448,6 +3449,119 @@ class BuildDummyPayloadTest(parameterized.TestCase):
     self.assertIsNotNone(dummy.routed_experts)
     self.assertEqual(dummy.routed_experts.shape, (2, 16, 0, 0))
     self.assertEqual(dummy.routed_experts.dtype, np.int16)
+    self.assertIn("routed_experts_encode_fn", dummy.metadata)
+
+  @parameterized.named_parameters(
+      ("padded_auto_u8", "padded", "auto", 8, 2, (3, 14, 3, 2), np.uint8),
+      (
+          "padded_auto_u10",
+          "padded",
+          "auto",
+          256,
+          4,
+          (3, 14, 3, 1, 5),
+          np.uint8,
+      ),
+      ("padded_u8", "padded", "uint8", 8, 2, (3, 14, 3, 2), np.uint8),
+      ("padded_u10", "padded", "uint10", 256, 4, (3, 14, 3, 1, 5), np.uint8),
+      ("padded_i16", "padded", "int16", 256, 4, (3, 14, 3, 4), np.int16),
+      ("packed_auto_u8", "packed", "auto", 8, 2, (2, 16, 3, 2), np.uint8),
+      (
+          "packed_auto_u10",
+          "packed",
+          "auto",
+          256,
+          4,
+          (2, 16, 3, 1, 5),
+          np.uint8,
+      ),
+      ("packed_i16", "packed", "int16", 8, 2, (2, 16, 3, 2), np.int16),
+  )
+  def test_routed_experts_encode_fn_matches_real_feed_across_modes(
+      self,
+      assembler_kind,
+      encode_mode,
+      num_experts,
+      top_k,
+      expected_shape,
+      expected_dtype,
+  ):
+    num_layers = 3
+    if assembler_kind == "padded":
+      make_asm = lambda: batch_assembly.PaddedBatchAssembler(
+          batch_size=3,
+          max_prompt_length=8,
+          max_response_length=6,
+          pad_id=7,
+          num_generations=3,
+          mini_batch_size=1,
+      )
+    else:
+      make_asm = lambda: batch_assembly.SequencePackedBatchAssembler(
+          batch_size=2,
+          num_generations=4,
+          mini_batch_size=1,
+          max_packed_len=16,
+          pad_id=7,
+          max_segments_per_packed_row=3,
+          segment_alignment_boundary=4,
+      )
+    dummy = make_asm().build_dummy_payload(
+        with_old_per_token_logps=True,
+        with_ref_per_token_logps=False,
+        with_routed_experts=True,
+        routed_experts_encode_mode=encode_mode,
+    )
+    batch_size, seq_len = dummy.routed_experts.shape[:2]
+    expanded = np.zeros(
+        (batch_size, seq_len, num_layers, top_k),
+        dtype=dummy.routed_experts.dtype,
+    )
+    encode_fn = dummy.metadata["routed_experts_encode_fn"]
+    resolved_routed = encode_fn(expanded, num_experts=num_experts)
+    self.assertEqual(resolved_routed.shape, expected_shape)
+    self.assertEqual(resolved_routed.dtype, expected_dtype)
+    resolved_dummy = dataclasses.replace(
+        dummy, routed_experts=resolved_routed, metadata={}
+    )
+
+    asm = make_asm()
+    raw_routed = np.zeros((9, num_layers, top_k), dtype=np.int16)
+    encoded_item_routed = packing.encode_routed_experts(
+        raw_routed,
+        mode=encode_mode,
+        num_experts=num_experts,
+    )
+    old_logps = np.full(4, -0.5, dtype=np.float32)
+    payloads = [
+        dataclasses.replace(
+            _make_payload(5, 4, old_logps=old_logps),
+            routed_experts=encoded_item_routed,
+        )
+        for _ in range(asm.rollouts_per_optimizer_update)
+    ]
+    batches = list(asm.feed(payloads))
+    self.assertNotEmpty(batches)
+    self._assert_same_jit_signature(resolved_dummy, batches[0].payload)
+
+  def test_build_dummy_payload_rejects_invalid_routed_experts_encode_mode(self):
+    asm = batch_assembly.PaddedBatchAssembler(
+        batch_size=2,
+        max_prompt_length=4,
+        max_response_length=4,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=1,
+    )
+    with self.assertRaisesRegex(
+        ValueError, "routed_experts_encode_mode must be one of"
+    ):
+      asm.build_dummy_payload(
+          with_old_per_token_logps=True,
+          with_ref_per_token_logps=False,
+          with_routed_experts=True,
+          routed_experts_encode_mode="bad_mode",
+      )
 
   def test_padded_leaves_assembler_state_untouched(self):
     asm = batch_assembly.PaddedBatchAssembler(

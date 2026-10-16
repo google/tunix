@@ -610,12 +610,18 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           worker.submit("with_gen_model_input_fn", gen_fn)
           if not precompile:
             return
+          routed_experts_encode_mode = (
+              algo.algo_config.routed_experts_encode_mode
+              if return_routed_experts
+              else "auto"
+          )
           dummy_payload = assembler.build_dummy_payload(
               with_old_per_token_logps=use_rollout_logps,
               with_ref_per_token_logps=algo.requires_reference_kl,
               with_sampler_is_weights=with_sampler_is_weights,
               sampler_agreement_applied=sampler_agreement_applied,
               with_routed_experts=return_routed_experts,
+              routed_experts_encode_mode=routed_experts_encode_mode,
           )
           # TODO(tunix-dev): Move to the worker lifecycle (e.g., the
           # `initialize` step) so pre-compilation runs during the standard

@@ -1701,9 +1701,12 @@ class V1ParityTest(parameterized.TestCase):
   def test_compile_expands_routed_experts_placeholder_from_model_config(
       self,
   ):
+    @dataclasses.dataclass(kw_only=True)
+    class _MoEModelConfig(tc.ModelConfig):
+      num_experts_per_tok: int = 2
+
     model, _ = self._two_identical_models()
-    model.config.num_layers = 3
-    model.config.num_experts_per_tok = 2
+    model.config = _MoEModelConfig(num_layers=3, num_experts_per_tok=2)
     trainer = self._make_trainer_v2(model, accum_steps=1)
     dummy = peft_trainer_v2.datatypes.RLTrainerPayload(
         prompt_ids=np.zeros((2, 4), dtype=np.int32),
@@ -1729,6 +1732,60 @@ class V1ParityTest(parameterized.TestCase):
     self.assertIsNotNone(prepared[0].routed_experts)
     self.assertEqual(prepared[0].routed_experts.shape, (2, 10, 3, 2))
     self.assertEqual(prepared[0].routed_experts.dtype, np.int16)
+
+  def test_compile_encodes_routed_experts_placeholder_via_metadata_encode_fn(
+      self,
+  ):
+    @dataclasses.dataclass(kw_only=True)
+    class _MoEModelConfig(tc.ModelConfig):
+      num_experts: int = 8
+      num_experts_per_tok: int = 2
+
+    model, _ = self._two_identical_models()
+    model.config = _MoEModelConfig(
+        num_layers=3, num_experts=8, num_experts_per_tok=2
+    )
+    trainer = self._make_trainer_v2(model, accum_steps=1)
+
+    seen_encode_calls: list[tuple[tuple[int, ...], np.dtype, int | None]] = []
+
+    def _encode_fn(
+        arr: np.ndarray, *, num_experts: int | None = None
+    ) -> np.ndarray:
+      seen_encode_calls.append((arr.shape, arr.dtype, num_experts))
+      return arr.astype(np.uint8)
+
+    dummy = peft_trainer_v2.datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((2, 4), dtype=np.int32),
+        prompt_mask=np.zeros((2, 4), dtype=np.float32),
+        completion_ids=np.zeros((2, 6), dtype=np.int32),
+        completion_mask=np.zeros((2, 6), dtype=np.float32),
+        advantages=np.zeros((2, 6), dtype=np.float32),
+        routed_experts=np.empty((2, 10, 0, 0), dtype=np.int16),
+        metadata={'routed_experts_encode_fn': _encode_fn, 'keep_key': 42},
+    )
+
+    prepared: list[Any] = []
+
+    def _capture_prepare(payload):
+      prepared.append(payload)
+      return dummy_datasets(batch_size=2)[0]
+
+    with mock.patch.object(
+        trainer, '_prepare_payload', side_effect=_capture_prepare
+    ):
+      trainer.compile(dummy)
+
+    self.assertEqual(
+        seen_encode_calls, [((2, 10, 3, 2), np.dtype(np.int16), 8)]
+    )
+    self.assertLen(prepared, 1)
+    self.assertIsNotNone(prepared[0].routed_experts)
+    self.assertEqual(prepared[0].routed_experts.shape, (2, 10, 3, 2))
+    self.assertEqual(prepared[0].routed_experts.dtype, np.uint8)
+    self.assertNotIn('routed_experts_encode_fn', prepared[0].metadata)
+    self.assertEqual(prepared[0].metadata['keep_key'], 42)
+    self.assertIn('routed_experts_encode_fn', dummy.metadata)
 
 
 class GradientAccumulatorTest(parameterized.TestCase):

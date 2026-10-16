@@ -65,6 +65,7 @@ _MAXTEXT_STEP_EXECUTABLES = ("fwd_bwd", "fwd_bwd_accum", "update", "kernel")
 
 def _rollouts(
     routed_experts_shape: tuple[int, int] | None = None,
+    num_experts: int = 4,
 ) -> list[datatypes.TrajectoryItem]:
   return [
       datatypes.TrajectoryItem(
@@ -75,8 +76,10 @@ def _rollouts(
               "old_logprobs": np.array([-0.5, -0.5], dtype=np.float32),
               **(
                   {
-                      "routed_experts": np.zeros(
-                          (5, *routed_experts_shape), dtype=np.int16
+                      "routed_experts": np.full(
+                          (5, *routed_experts_shape),
+                          num_experts - 1,
+                          dtype=np.int16,
                       )
                   }
                   if routed_experts_shape is not None
@@ -93,8 +96,10 @@ def _rollouts(
               "old_logprobs": np.array([-0.4, -0.4, -0.4], dtype=np.float32),
               **(
                   {
-                      "routed_experts": np.zeros(
-                          (5, *routed_experts_shape), dtype=np.int16
+                      "routed_experts": np.full(
+                          (5, *routed_experts_shape),
+                          num_experts - 1,
+                          dtype=np.int16,
                       )
                   }
                   if routed_experts_shape is not None
@@ -196,13 +201,14 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
   def _build_trainer(
       self,
       routed_experts_shape: tuple[int, int] | None = None,
+      num_experts: int = 4,
   ) -> tuple[peft_trainer_v2.PeftTrainer, dict[str, int]]:
     if routed_experts_shape is not None:
       num_layers, top_k = routed_experts_shape
       model = _ToyMoETransformer(
           config=_ToyMoEModelConfig(
               num_layers=num_layers,
-              num_experts=4,
+              num_experts=num_experts,
               num_experts_per_tok=top_k,
           ),
           rngs=nnx.Rngs(0),
@@ -310,6 +316,7 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
       assembler_kind: str = "packed",
       can_fuse_agreement_in_loss: bool = True,
       routed_experts_shape: tuple[int, int] | None = None,
+      routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = "auto",
       precompile: bool = True,
   ):
     worker = trainer_worker.TrainerWorker(
@@ -330,7 +337,7 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
         beta=0.0,
         use_rollout_logps=True,
         sampler_is="token" if not can_fuse_agreement_in_loss else None,
-        routed_experts_encode_mode="int16",
+        routed_experts_encode_mode=routed_experts_encode_mode,
     )
     algo_cfg.temperature = 1.0
     adapter = algorithm_adapter.GRPOAdapter(
@@ -361,11 +368,13 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
       *,
       can_fuse_agreement_in_loss: bool = True,
       routed_experts_shape: tuple[int, int] | None = None,
+      num_experts: int = 4,
   ) -> int:
     (assembled,) = list(
         assembler.feed(
             adapter.create_trainer_payloads(
-                _rollouts(routed_experts_shape), [1.0, 0.0]
+                _rollouts(routed_experts_shape, num_experts=num_experts),
+                [1.0, 0.0],
             )
         )
     )
@@ -398,24 +407,45 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
     return step
 
   @parameterized.named_parameters(
-      ("padded", "padded", True, None),
-      ("packed", "packed", True, None),
-      ("packed_non_fused_agreement", "packed", False, None),
-      ("padded_moe_routed_experts", "padded", True, (2, 2)),
-      ("packed_moe_routed_experts", "packed", True, (2, 2)),
+      ("padded", "padded", True, None, 4, "auto"),
+      ("packed", "packed", True, None, 4, "auto"),
+      ("packed_non_fused_agreement", "packed", False, None, 4, "auto"),
+      ("padded_moe_routed_experts", "padded", True, (2, 2), 4, "auto"),
+      ("packed_moe_routed_experts", "packed", True, (2, 2), 4, "auto"),
+      (
+          "packed_moe_routed_experts_uint10",
+          "packed",
+          True,
+          (2, 4),
+          256,
+          "auto",
+      ),
+      (
+          "packed_moe_routed_experts_int16",
+          "packed",
+          True,
+          (2, 2),
+          4,
+          "int16",
+      ),
   )
   def test_first_real_step_is_served_from_jit_cache(
       self,
       assembler_kind,
       can_fuse_agreement_in_loss,
       routed_experts_shape,
+      num_experts,
+      routed_experts_encode_mode,
   ):
-    trainer, trace_counts = self._build_trainer(routed_experts_shape)
+    trainer, trace_counts = self._build_trainer(
+        routed_experts_shape, num_experts=num_experts
+    )
     worker, adapter, assembler = self._bring_up_and_configure(
         trainer,
         assembler_kind=assembler_kind,
         can_fuse_agreement_in_loss=can_fuse_agreement_in_loss,
         routed_experts_shape=routed_experts_shape,
+        routed_experts_encode_mode=routed_experts_encode_mode,
     )
 
     # `compile(None)` at bring-up is a no-op; `configure_worker` precompiles
@@ -437,6 +467,7 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
         assembler,
         can_fuse_agreement_in_loss=can_fuse_agreement_in_loss,
         routed_experts_shape=routed_experts_shape,
+        num_experts=num_experts,
     )
     self.assertEqual(step, 1)
     self.assertEqual(trace_counts, traces_after_configure)

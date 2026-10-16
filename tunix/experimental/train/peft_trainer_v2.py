@@ -1211,24 +1211,26 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       return
 
     def _resolve_dummy_routed_experts(data: Any) -> Any:
-      if (
-          not isinstance(data, datatypes.RLTrainerPayload)
-          or data.routed_experts is None
-          or np.asarray(data.routed_experts).size != 0
-      ):
+      if not isinstance(data, datatypes.RLTrainerPayload):
+        return data
+      if data.routed_experts is None:
+        return data
+      routed_experts = np.asarray(data.routed_experts)
+      if routed_experts.size != 0:
         return data
       assert hasattr(self.model, "config")
       cfg = self.model.config
-      prompt_shape = np.asarray(data.prompt_ids).shape
-      completion_shape = np.asarray(data.completion_ids).shape
-      batch_size = int(completion_shape[0])
-      seq_len = int(prompt_shape[1]) + int(completion_shape[1])
+      batch_size, seq_len = routed_experts.shape[:2]
+      expanded = np.zeros(
+          (batch_size, seq_len, cfg.num_layers, cfg.num_experts_per_tok),
+          dtype=routed_experts.dtype,
+      )
+      metadata = dict(data.metadata)
+      if "routed_experts_encode_fn" in metadata:
+        encode_fn = metadata.pop("routed_experts_encode_fn")
+        expanded = encode_fn(expanded, num_experts=cfg.num_experts)
       return dataclasses.replace(
-          data,
-          routed_experts=np.zeros(
-              (batch_size, seq_len, cfg.num_layers, cfg.num_experts_per_tok),
-              dtype=np.int16,
-          ),
+          data, routed_experts=expanded, metadata=metadata
       )
 
     self._ensure_persistent_grad_accumulator()

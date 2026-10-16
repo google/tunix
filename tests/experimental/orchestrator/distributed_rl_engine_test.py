@@ -1549,6 +1549,7 @@ class DistributedRLEngineTest(absltest.TestCase):
   def test_configure_worker_actor_configures_loss_and_gen_model_input_fn(self):
     mock_algo = mock.MagicMock()
     mock_algo.algo_config.use_rollout_logps = True
+    mock_algo.algo_config.routed_experts_encode_mode = "auto"
     mock_algo.requires_reference_kl = False
     mock_algo.has_critic = False
     mock_loss = mock.MagicMock()
@@ -1586,6 +1587,7 @@ class DistributedRLEngineTest(absltest.TestCase):
         with_sampler_is_weights=False,
         sampler_agreement_applied=False,
         with_routed_experts=False,
+        routed_experts_encode_mode="auto",
     )
     self.mock_actor.compile.assert_called_once_with(mock_dummy)
     # Both setters clear the trainer JIT cache; compile must come last.
@@ -1619,6 +1621,7 @@ class DistributedRLEngineTest(absltest.TestCase):
         with_sampler_is_weights=True,
         sampler_agreement_applied=True,
         with_routed_experts=False,
+        routed_experts_encode_mode="auto",
     )
 
   def test_configure_worker_actor_builds_routed_experts_dummy_from_assembler(
@@ -1628,6 +1631,7 @@ class DistributedRLEngineTest(absltest.TestCase):
     mock_algo.algo_config.use_rollout_logps = True
     mock_algo.algo_config.sampler_is = None
     mock_algo.algo_config.sampler_rs = None
+    mock_algo.algo_config.routed_experts_encode_mode = "uint10"
     mock_algo.requires_reference_kl = False
     assembler = batch_assembly.PaddedBatchAssembler(
         batch_size=2,
@@ -1650,6 +1654,11 @@ class DistributedRLEngineTest(absltest.TestCase):
     self.assertIsNotNone(compiled_payload.routed_experts)
     self.assertEqual(compiled_payload.routed_experts.shape, (2, 8, 0, 0))
     self.assertEqual(compiled_payload.routed_experts.dtype, np.int16)
+    self.assertIn("routed_experts_encode_fn", compiled_payload.metadata)
+    self.assertEqual(
+        compiled_payload.metadata["routed_experts_encode_fn"].keywords["mode"],
+        "uint10",
+    )
 
   def test_configure_worker_actor_precompile_false_skips_compile(self):
     mock_algo = mock.MagicMock()
