@@ -18,29 +18,198 @@
 sampling on device.
 """
 
+import dataclasses
 import functools
 import operator
 from typing import Any
 
 from flax import nnx
+from flax import struct
 from flax.nnx import filterlib
 from flax.nnx import graph
 from flax.nnx import statelib
 import jax
 import jax.numpy as jnp
 import jaxtyping
+import numpy as np
+from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.rl import reshard
 from tunix.rl import utils as rl_utils
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class ModelRunnerConfig:
+  """Configuration for the model runner."""
+
+  # The maximum `top_k` value allowed in `SamplingParams`.
+  # <= 0 to set no limit.
+  max_top_k: int
+  # The device mesh the transformer runs on.
+  mesh: jax.sharding.Mesh
+  # Whether or not return logprobs.
+  return_logprobs: bool = False
+  # Whether or not to return logits.
+  return_logits: bool = False
+  # The number of model forward passes to execute per engine step.
+  num_scheduler_steps: int = 1
+  # The engine's single sampling seed. Each step's key is derived from it, and
+  # every row samples independently under that key.
+  seed: int = 0
+
+  def __post_init__(self):
+    if self.num_scheduler_steps < 1:
+      raise ValueError(
+          f'num_scheduler_steps must be positive, got {self.num_scheduler_steps}.'
+      )
+
+
+@struct.dataclass
+class SamplingMetadata:
+  """The sampling settings of each request in a batch.
+
+  Each array has one entry per request in the batch. Rows past the scheduled
+  requests are padding, and sample greedily.
+  """
+
+  # Zero samples greedily.
+  temperature: jax.Array | np.ndarray  # `[num_rows]` float32
+  # Samples only from the smallest set of most likely tokens whose probability
+  # reaches this value.
+  top_p: jax.Array | np.ndarray        # `[num_rows]` float32, in (0, 1].
+  # Samples only from the `top_k` most likely tokens. <= 0 means no limit.
+  top_k: jax.Array | np.ndarray        # `[num_rows]` int32, in [1, max_top_k].
+
+  # TODO(yatlas): Remove sampling_params. It is being deprecated.
+  @classmethod
+  def from_sampling_params(
+      cls,
+      sampling_params: tuple[sampler_lib.SamplingParams, ...],
+      num_rows: int,
+      max_top_k: int,
+  ) -> 'SamplingMetadata':
+    """Packs the scheduled requests' sampling settings into host arrays.
+
+    Args:
+      sampling_params: The sampling settings of each scheduled request, in row
+        order.
+      num_rows: The row capacity of the batch.
+      max_top_k: The maximum `top_k` value allowed.
+
+    Returns:
+      The metadata, padded out to `num_rows` rows.
+    """
+    if len(sampling_params) > num_rows:
+      raise ValueError(
+          f'Got {len(sampling_params)} sampling params for {num_rows} rows.'
+      )
+
+    temperature = np.zeros((num_rows,), dtype=np.float32)
+    top_p = np.ones((num_rows,), dtype=np.float32)
+    top_k = np.ones((num_rows,), dtype=np.int32)
+    for row, params in enumerate(sampling_params):
+      if (
+          max_top_k > 0
+          and params.top_k is not None
+          and params.top_k > max_top_k
+      ):
+        raise ValueError(
+            f'top_k={params.top_k} exceeds the engine max_top_k={max_top_k}.'
+        )
+      temperature[row] = params.temperature
+
+      # No `top_p` keeps every token.
+      top_p[row] = 1.0 if params.top_p is None else params.top_p
+      top_k[row] = max_top_k if params.top_k is None else params.top_k
+
+    return cls(temperature=temperature, top_p=top_p, top_k=top_k)
+
+
+def sample(
+    logits: jax.Array,
+    key: jax.Array,
+    metadata: SamplingMetadata,
+    max_top_k: int,
+    return_logprobs: bool = False,
+) -> tuple[jax.Array, jax.Array | None]:
+  """Samples one token per row, under each row's own sampling settings.
+
+  A row with zero temperature takes its most likely token. Every other row
+  samples from its `top_k` most likely tokens, cut down further to the smallest
+  prefix whose probability reaches its `top_p`, at its own temperature.
+
+  Args:
+    logits: The `[num_rows, vocab_size]` next-token logits.
+    key: The step's PRNG key, derived from the engine seed. Every row samples
+      independently under it.
+    metadata: Each row's sampling settings.
+    max_top_k: How many candidate tokens to draw for every row. Each row's
+      `top_k` must not exceed it. -1 draws every token in the vocabulary.
+    return_logprobs: Whether to return the sampled tokens' logprobs.
+
+  Returns:
+    A tuple of
+    - `next_tokens`: The `[num_rows]` sampled tokens.
+    - `logprobs`: The `[num_rows]` logprobs, or None if `return_logprobs` is
+      False.
+  """
+  # For most current use cases of Tunix, k does not vary across rows. If this
+  # changes, this function should be updated to sample individually per row so
+  # that performance is not dependent on max_top_k.
+
+  is_greedy = metadata.temperature <= 0.0
+  temperature = jnp.where(is_greedy, 1.0, metadata.temperature)
+
+  vocab_size = logits.shape[-1]
+  k = vocab_size if max_top_k <= 0 else min(max_top_k, vocab_size)
+
+  candidate_logits, candidate_tokens = jax.lax.top_k(logits, k)
+  scaled_logits = candidate_logits.astype(jnp.float32) / temperature[:, None]
+
+  ranks = jnp.arange(k)
+  top_k = jnp.where(metadata.top_k <= 0, k, metadata.top_k)
+  scaled_logits = jnp.where(
+      ranks[None, :] < top_k[:, None], scaled_logits, -jnp.inf
+  )
+
+  # Keep each token whose predecessors have not yet reached `top_p`, which
+  # always keeps the most likely token.
+  probs = jax.nn.softmax(scaled_logits, axis=-1)
+  probs_before = jnp.cumsum(probs, axis=-1) - probs
+  scaled_logits = jnp.where(
+      probs_before > metadata.top_p[:, None], -jnp.inf, scaled_logits
+  )
+
+  sampled = jax.random.categorical(key, scaled_logits, axis=-1)
+  sampled_tokens = jnp.take_along_axis(
+      candidate_tokens, sampled[:, None], axis=-1
+  )[:, 0]
+  # The candidates are sorted, so the first one is the most likely token.
+  next_tokens = jnp.where(is_greedy, candidate_tokens[:, 0], sampled_tokens)
+
+  if not return_logprobs:
+    return next_tokens, None
+
+  # Upscale logits before computing logprobs to preserve precision.
+  scaled_full_logits = logits.astype(jnp.float32) / temperature[:, None]
+
+  logp = jax.nn.log_softmax(scaled_full_logits, axis=-1)
+  logp_sampled = jnp.take_along_axis(logp, next_tokens[:, None], axis=-1)
+  return next_tokens, logp_sampled[:, 0]
 
 
 class ModelRunner:
   """Runs the transformer forward pass and samples tokens."""
 
-  def __init__(self, transformer: nnx.Module):
+  def __init__(
+      self,
+      transformer: nnx.Module,
+      config: ModelRunnerConfig,
+  ):
     """Initializes the runner.
 
     Args:
       transformer: An instance of the transformer to run.
+      config: The runner's configuration.
     """
     self._transformer_graphdef: graph.GraphDef[nnx.Module] = nnx.graphdef(
         transformer
@@ -50,6 +219,12 @@ class ModelRunner:
         self._transformer_state,
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
+
+    self._config = config
+
+  @property
+  def config(self) -> ModelRunnerConfig:
+    return self._config
 
   def model_def_and_state(
       self,
