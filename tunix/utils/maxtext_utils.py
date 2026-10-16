@@ -896,6 +896,38 @@ def _delete_pytree_buffers(tree, jax_mod, keep_tree=None):
         pass
 
 
+def _tree_has_fp8_scale_keys(tree: Any) -> bool:
+  """Returns True if `tree` contains any FP8 MoE scale keys (`wi_scale`, `wo_scale`, etc.)."""
+  import unittest.mock as _mock  # pylint: disable=import-outside-toplevel
+
+  fp8_scale_keys = ("wi_scale", "wo_scale", "wi_0_scale", "wi_1_scale")
+  stack = [tree]
+  visited = set()
+  while stack:
+    node = stack.pop()
+    if node is None or isinstance(node, _mock.Mock) or id(node) in visited:
+      continue
+    visited.add(id(node))
+    if isinstance(node, dict):
+      for k, v in node.items():
+        if k in fp8_scale_keys:
+          return True
+        stack.append(v)
+    elif hasattr(node, "_mapping") and not isinstance(
+        getattr(node, "_mapping", None), _mock.Mock
+    ):
+      stack.append(node._mapping)
+    elif hasattr(node, "__dict__") and not isinstance(
+        node, (str, bytes, int, float, bool)
+    ):
+      for k, v in vars(node).items():
+        if k in fp8_scale_keys:
+          return True
+        if not k.startswith("_"):
+          stack.append(v)
+  return False
+
+
 def load_and_convert_scanned_checkpoint(
     path: str | os.PathLike,
     sampler: Any,
@@ -933,9 +965,9 @@ def load_and_convert_scanned_checkpoint(
   if hasattr(vllm_sampler, "delete_cache"):
     vllm_sampler.delete_cache()
     reinit_needed = True
-  _delete_pytree_buffers(
-      getattr(vllm_sampler, "transformer_state", None), jax
-  )
+  target_state = getattr(vllm_sampler, "transformer_state", None)
+  target_fp8_moe = _tree_has_fp8_scale_keys(target_state)
+  _delete_pytree_buffers(target_state, jax)
   try:
     if base_config_path is None:
       base_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
@@ -947,24 +979,78 @@ def load_and_convert_scanned_checkpoint(
         "attention": "dot_product",
         "model_call_mode": "",
     })
+    if target_fp8_moe:
+      scanned_overrides["fp8_moe"] = False
     scanned_cfg = pyconfig.initialize(
         ["", str(base_config_path)], **scanned_overrides
     )
-    scanned_model, scanned_mesh = model_creation_utils.from_pretrained(
-        scanned_cfg,
-        devices=jax.devices(),
-        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+    maxtext_nnx_mod = getattr(model_creation_utils, "maxtext_utils_nnx", None)
+    orig_create_sharded = getattr(
+        maxtext_nnx_mod, "create_nnx_sharded_model", None
     )
+    use_pinned_host_restore = (
+        maxtext_nnx_mod is not None
+        and callable(orig_create_sharded)
+        and isinstance(getattr(jax, "ShapeDtypeStruct", None), type)
+    )
+    if use_pinned_host_restore:
+
+      class _SubscriptableShapeDtypeStruct(jax.ShapeDtypeStruct):
+
+        def __getitem__(self, idx):
+          return self
+
+      def _pinned_host_abstract_model(
+          init_model_fn, mesh, model_mode=MODEL_MODE_AUTOREGRESSIVE
+      ):
+        abstract_model = model_creation_utils._create_nnx_abstract_model(  # pylint: disable=protected-access
+            init_model_fn, model_mode=model_mode
+        )
+        graphdef, abstract_state = nnx.split(abstract_model)
+        spec_state = model_creation_utils.get_LogicalPartitionSpec(
+            init_model_fn, mesh, model_mode=model_mode
+        )
+
+        def _to_pinned_sds(x, s):
+          if isinstance(s, jax.sharding.Sharding) and hasattr(
+              s, "with_memory_kind"
+          ):
+            try:
+              s = s.with_memory_kind("pinned_host")
+            except Exception:  # pylint: disable=broad-exception-caught
+              pass
+          if hasattr(x, "shape") and hasattr(x, "dtype"):
+            return _SubscriptableShapeDtypeStruct(x.shape, x.dtype, sharding=s)
+          return x
+
+        abstract_sharded_state = jax.tree.map(
+            _to_pinned_sds, abstract_state, spec_state
+        )
+        return nnx.merge(graphdef, abstract_sharded_state)
+
+      maxtext_nnx_mod.create_nnx_sharded_model = _pinned_host_abstract_model
+    try:
+      scanned_model, scanned_mesh = model_creation_utils.from_pretrained(
+          scanned_cfg,
+          devices=jax.devices(),
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+    finally:
+      if use_pinned_host_restore:
+        maxtext_nnx_mod.create_nnx_sharded_model = orig_create_sharded
     scanned_state = nnx.state(scanned_model, nnx.Param)
     del scanned_model, scanned_mesh
     gc.collect()
 
-    converter = MaxTextToMaxTextConverter(
+    converter_kwargs: dict[str, Any] = dict(
         config=scanned_cfg,
         tp=mesh_tp,
         prefuse_moe_weights=True,
         target_dtype=None,
     )
+    if target_fp8_moe:
+      converter_kwargs["fp8_moe"] = True
+    converter = MaxTextToMaxTextConverter(**converter_kwargs)
     orig_exec_group = getattr(converter, "_execute_group", None)
     prefused_moe_sources = {}
     orig_build_plan = getattr(converter, "_build_plan", None)
@@ -991,6 +1077,23 @@ def load_and_convert_scanned_checkpoint(
 
     if callable(orig_exec_group):
 
+      def _stage_to_device(arr):
+        sharding = getattr(arr, "sharding", None)
+        if (
+            sharding is not None
+            and getattr(sharding, "memory_kind", None) == "pinned_host"
+            and hasattr(sharding, "with_memory_kind")
+            and hasattr(jax, "device_put")
+        ):
+          dev_arr = jax.device_put(
+              arr, sharding.with_memory_kind("device")
+          )
+          if hasattr(jax, "block_until_ready"):
+            jax.block_until_ready(dev_arr)
+          _delete_pytree_buffers(arr, jax, keep_tree=dev_arr)
+          return dev_arr
+        return arr
+
       def _exec_and_free_group(group, src_flat, tgt_flat):
         prefused_wi = None
         if group.op == "fuse_moe" and group.source_keys:
@@ -998,11 +1101,15 @@ def load_and_convert_scanned_checkpoint(
               group.source_keys[0][:-1], None
           )
           if prefused_wi is not None:
+            prefused_wi = _stage_to_device(prefused_wi)
             half = prefused_wi.shape[-1] // 2
             wi_0 = prefused_wi[..., :half]
             wi_1 = prefused_wi[..., half:]
             src_flat[group.source_keys[0]] = wi_0
             src_flat[group.source_keys[1]] = wi_1
+        for k in group.source_keys:
+          if k in src_flat and src_flat[k] is not None:
+            src_flat[k] = _stage_to_device(src_flat[k])
         outs = orig_exec_group(group, src_flat, tgt_flat)
         out_arrays = [out for _, out in outs]
         if hasattr(jax, "block_until_ready"):
