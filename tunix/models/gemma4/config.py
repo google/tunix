@@ -76,7 +76,7 @@ class SplashAttentionImpl(enum.Enum):
   """Backend implementation to use for splash (flash) attention.
 
   JAX: `jax.experimental.pallas.ops.tpu.splash_attention`.
-  TOKAMAX: `tokamax._src.ops.experimental.tpu.splash_attention`.
+  TOKAMAX: `tokamax._src.ops.splash_attention`.
   """
 
   JAX = 'jax'
