@@ -62,6 +62,12 @@ _MAXTEXT_DEFAULTS = {
     "moe_routing_maps": "remat",
     "moe_unsplit_prefused_wi": "false",
     "moe_wi_gmm_fused_swiglu": "false",
+    # remat_policy=custom's per-tensor keys (MaxText base.yml).
+    "query_proj": "remat",
+    "key_proj": "remat",
+    "value_proj": "remat",
+    "out_proj": "remat",
+    "qkv_proj": "remat",
 }
 _TUNED_KEYS = {
     "cast_grads_after_all_reduce": ("false", "true"),
@@ -119,6 +125,15 @@ _BENCH_CELL = {
     "TUNIX_LOGPS_SHARDED_HEAD": "fused",
     "PACK_PAD_POSITION": "start",
 }
+# The 256-chip trainer meshes and the keys TRAINER_TUNED_FLAGS adds at them.
+_MESH_32X2X8 = {"TRAINER_TPU_SLICE": "tpu7x:4x8x8", "TRAINER_MESH_CONTEXT": "8"}
+_MESH_64X1X8 = {
+    "TRAINER_TPU_SLICE": "tpu7x:4x8x8",
+    "TRAINER_MESH_FSDP": "64",
+    "TRAINER_MESH_EXPERT": "1",
+    "TRAINER_MESH_CONTEXT": "8",
+}
+_PROJ_KEYS = ("query_proj", "key_proj", "value_proj", "out_proj", "qkv_proj")
 
 
 def _render(recipe: Path = _RECIPE, **overrides: str) -> str:
@@ -584,6 +599,67 @@ class SubmissionLauncherTest(absltest.TestCase):
         AssertionError, "TRAINER_TUNED_FLAGS must be true or false"
     ):
       _render(TRAINER_TUNED_FLAGS="yes")
+
+  def test_tuned_flags_at_the_256_chip_mesh_32x2x8(self):
+    before = _maxtext_flags(_jobset(self.bench_on, "train"))
+    flags = _maxtext_flags(
+        _jobset(_render(**_BENCH_CELL, **_MESH_32X2X8), "train")
+    )
+    self.assertEqual(
+        _flag_changes(before, flags),
+        {key: ("remat", "device") for key in _PROJ_KEYS},
+    )
+    self.assertEqual(flags["num_moe_token_chunks"], "2")
+    self.assertEqual(flags["moe_chunk_pipeline"], "true")
+    self.assertEqual(flags["moe_roe_packed_routing_gather"], "true")
+
+  def test_tuned_flags_at_the_256_chip_mesh_64x1x8(self):
+    before = _maxtext_flags(_jobset(self.bench_on, "train"))
+    flags = _maxtext_flags(
+        _jobset(_render(**_BENCH_CELL, **_MESH_64X1X8), "train")
+    )
+    expected = {key: ("remat", "device") for key in _PROJ_KEYS}
+    # One token chunk, so no chunk pipeline, and so no packed routing gather,
+    # which MaxText refuses without the pipeline.
+    expected["num_moe_token_chunks"] = ("2", "1")
+    expected["moe_chunk_pipeline"] = ("true", "false")
+    expected["moe_roe_packed_routing_gather"] = ("true", "false")
+    self.assertEqual(_flag_changes(before, flags), expected)
+
+  def test_tuned_flags_keep_an_explicit_chunk_count_at_64x1x8(self):
+    flags = _maxtext_flags(
+        _jobset(
+            _render(NUM_MOE_TOKEN_CHUNKS="2", **_BENCH_CELL, **_MESH_64X1X8),
+            "train",
+        )
+    )
+    self.assertEqual(flags["num_moe_token_chunks"], "2")
+    self.assertEqual(flags["moe_chunk_pipeline"], "true")
+    self.assertEqual(flags["moe_roe_packed_routing_gather"], "true")
+    for key in _PROJ_KEYS:
+      self.assertEqual(flags[key], "device", key)
+
+  def test_tuned_flags_false_leaves_the_256_chip_meshes_alone(self):
+    for mesh in (_MESH_32X2X8, _MESH_64X1X8):
+      flags = _maxtext_flags(
+          _jobset(_render(TRAINER_TUNED_FLAGS="false", **mesh), "train")
+      )
+      for key in _PROJ_KEYS:
+        self.assertNotIn(key, flags, mesh)
+      self.assertEqual(flags["num_moe_token_chunks"], "4", mesh)
+      self.assertEqual(flags["moe_chunk_pipeline"], "true", mesh)
+
+  def test_one_token_chunk_turns_the_chunk_pipeline_off(self):
+    # MaxText refuses moe_chunk_pipeline=true with one token chunk, and
+    # moe_roe_packed_routing_gather=true without the chunk pipeline.
+    flags = _maxtext_flags(
+        _jobset(_render(NUM_MOE_TOKEN_CHUNKS="1", **_BENCH_CELL), "train")
+    )
+    self.assertEqual(flags["num_moe_token_chunks"], "1")
+    self.assertEqual(flags["moe_chunk_pipeline"], "false")
+    self.assertEqual(flags["moe_roe_packed_routing_gather"], "false")
+    for key in _PROJ_KEYS:
+      self.assertNotIn(key, flags)
 
   def test_tuned_flags_are_off_in_the_other_397b_v7x_recipes(self):
     for name in (

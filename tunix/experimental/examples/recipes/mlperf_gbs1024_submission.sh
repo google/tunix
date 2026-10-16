@@ -112,6 +112,10 @@ case "${DROPLESS}" in
       if [[ "${RETRY_DROPLESS_FINAL_MICRO_BATCH:-false}" != "true" \
             && -z "${FIRST_PHASE_RAGGED_BUFFER_FACTOR:-}" ]]; then
         export REMAT_CONTEXT="${REMAT_CONTEXT:-device}"
+        # One token chunk at the 256-chip trainer mesh 64x1x8 (see mlperf_397b_256_v7x.sh).
+        if [[ "${TRAINER_MESH_FSDP:-}x${TRAINER_MESH_EXPERT:-}x${TRAINER_MESH_CONTEXT:-}" == "64x1x8" ]]; then
+          export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-1}"
+        fi
         export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
       fi
     fi

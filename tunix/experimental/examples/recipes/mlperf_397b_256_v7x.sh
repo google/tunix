@@ -5,7 +5,9 @@ set -e
 # MLPerf DeepSWE recipe: Qwen3.5-397B-A17B on TPU v7x
 # ==============================================================================
 # - TPU7x dynamic slicing on pod1 (bodaborg-tpu7x-gsc) or pod2 (bodaborg-tpu7x-gsc-elm)
-# - Trainer on 128 chips (4x4x8 = 256 devices, FSDP=32, TP=1, EXPERT=2, CP=4)
+# - Trainer on 128 chips (4x4x8 = 256 devices, FSDP=32, TP=1, EXPERT=2, CP=4), or on 256
+#   chips with TRAINER_TPU_SLICE=tpu7x:4x8x8 and TRAINER_MESH_FSDP/EXPERT/CONTEXT 32/2/8 or
+#   64/1/8 (TRAINER_TUNED_FLAGS then adds those meshes' keys, see below)
 # - Rollout on 256 chips (32 replicas x 8 chips 2x2x2, EP=16, TP=1)
 # - Sandbox configured for sandbox-np nodepool with workload tolerations
 # ==============================================================================
@@ -162,7 +164,20 @@ export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"
 export REMAT_POLICY="${REMAT_POLICY:-custom}"
 export RAGGED_BUFFER_FACTOR="${RAGGED_BUFFER_FACTOR:-2.0}"
 export REMAT_CONTEXT="${REMAT_CONTEXT:-remat}"
+# TRAINER_TUNED_FLAGS=true at the 256-chip trainer mesh 64x1x8 runs one MoE token chunk (see
+# the end of the TRAINER_TUNED_FLAGS block); an explicit NUM_MOE_TOKEN_CHUNKS wins.
+if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" \
+      && "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "64x1x8" ]]; then
+  export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-1}"
+fi
 export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
+# MaxText refuses moe_chunk_pipeline=true with one MoE token chunk, so one chunk turns the
+# pipeline off.
+if [[ "${NUM_MOE_TOKEN_CHUNKS}" == "1" ]]; then
+  _moe_chunk_pipeline=false
+else
+  _moe_chunk_pipeline=true
+fi
 export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep \
 use_gdn_kernel=true gdn_cp_mode=head gdn_chunk_size=64 \
 decoder_layer_input=offload context=${REMAT_CONTEXT} gdn=remat gdn_conv=remat gdn_states=remat \
@@ -176,7 +191,7 @@ wo_tile_dlhs_batch_seq=256 wo_tile_dlhs_embed_dim=4096 wo_tile_dlhs_mlp_dim=1024
 wo_tile_drhs_batch_seq=256 wo_tile_drhs_embed_dim=4096 wo_tile_drhs_mlp_dim=1024 \
 use_ring_of_experts=true num_moe_token_chunks=${NUM_MOE_TOKEN_CHUNKS} moe_chunk_barrier=false \
 ring_of_experts_local_routing=true moe_expert_weight_prefetch=forward \
-moe_chunk_pipeline=true ring_of_experts_row_major_reduce_scatter=true \
+moe_chunk_pipeline=${_moe_chunk_pipeline} ring_of_experts_row_major_reduce_scatter=true \
 use_ragged_sort=true use_custom_sort_vjp=false ragged_buffer_factor=${RAGGED_BUFFER_FACTOR} \
 use_tokamax_splash=true use_splash_scheduler=true \
 sa_block_q=1024 sa_block_kv=4096 sa_block_kv_compute=512 \
@@ -328,8 +343,21 @@ fi
 # requirements/maxtext_requirements.txt (e526ea02) has none of these nine keys, and
 # MaxText refuses a key it does not define when the trainer starts, so
 # TRAINER_TUNED_FLAGS=true needs that pin moved to a MaxText with #5758.
+# The 256-chip trainer (TRAINER_TPU_SLICE=tpu7x:4x8x8, 512 devices), from Rohan Bierneni's
+# 256-chip trainer runs (2026-10-15; their step times are not recorded here):
+#   at 32x2x8 (TRAINER_MESH_FSDP=32, TRAINER_MESH_EXPERT=2, TRAINER_MESH_CONTEXT=8) and
+#   64x1x8 (64, 1, 8), query_proj, key_proj, value_proj, out_proj and qkv_proj=device keep
+#   those projections' outputs in HBM for the backward instead of recomputing them. MaxText
+#   also names the GDN layers' fused qkvz projection qkv_proj, so qkv_proj covers them too.
+#   At 64x1x8, NUM_MOE_TOKEN_CHUNKS defaults to 1 (above), so moe_chunk_pipeline is false,
+#   and so is moe_roe_packed_routing_gather: MaxText refuses it without the pipeline.
 if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
-  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_strategy=all_gather sa_fuse_reciprocal=true gdn_cp_mode=seq gdn_cp_state=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true wi_tile_dlhs_mlp_dim=2048 decoder_layer_input=device moe_routing_maps=device moe_gmm_v2_dlhs_transpose_rhs=true moe_routing_index_math=count moe_unsplit_prefused_wi=true moe_roe_packed_routing_gather=true moe_router_grad_from_wo_input=true moe_wi_gmm_fused_swiglu=true gdn_conv1d_input_in_qkv_dtype=true gdn_conv1d_dense_token_stack=true wi_tile_fwd_batch_seq=512 wi_tile_drhs_batch_seq=512 wo_tile_fwd_batch_seq=512 wo_tile_dlhs_batch_seq=512 wo_tile_drhs_batch_seq=512"
+  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_strategy=all_gather sa_fuse_reciprocal=true gdn_cp_mode=seq gdn_cp_state=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true wi_tile_dlhs_mlp_dim=2048 decoder_layer_input=device moe_routing_maps=device moe_gmm_v2_dlhs_transpose_rhs=true moe_routing_index_math=count moe_unsplit_prefused_wi=true moe_roe_packed_routing_gather=${_moe_chunk_pipeline} moe_router_grad_from_wo_input=true moe_wi_gmm_fused_swiglu=true gdn_conv1d_input_in_qkv_dtype=true gdn_conv1d_dense_token_stack=true wi_tile_fwd_batch_seq=512 wi_tile_drhs_batch_seq=512 wo_tile_fwd_batch_seq=512 wo_tile_dlhs_batch_seq=512 wo_tile_drhs_batch_seq=512"
+  case "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" in
+    32x2x8|64x1x8)
+      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} query_proj=device key_proj=device value_proj=device out_proj=device qkv_proj=device"
+      ;;
+  esac
 fi
 export DEBUG=${DEBUG:-0}
 
