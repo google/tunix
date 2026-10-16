@@ -112,8 +112,8 @@ _BENCH_MAXTEXT_KEYS = (
     "moe_wi_gmm_fused_swiglu",
 )
 # The custom mesh rule TRAINER_TUNED_FLAGS=true selects, which
-# AI-Hypercomputer/maxtext#5783 (on top of #5758) defines and the pin does
-# not: only TRAINER_TUNED_FLAGS=true may pass it.
+# AI-Hypercomputer/maxtext#5783 (in #5721) defines and MaxText before #5721
+# does not: only TRAINER_TUNED_FLAGS=true may pass it.
 _BENCH_MESH_RULE = "cp-as-ep-dense-no-cp"
 # The launch whose trainer the RL trainer bench (AI-Hypercomputer/maxtext#5701)
 # measured TRAINER_TUNED_FLAGS on: the replay layout (buffer factor 2.75 with
