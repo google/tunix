@@ -1,7 +1,7 @@
 # TODO(maxtext-dev): Update the commits after all code changes land.
 # atwigg/mlperf at AI-Hypercomputer/maxtext#5721 (includes #5698 + #5758 + GDN/MoE trainer perf).
-maxtext @ git+https://github.com/google/maxtext.git@d66a82096bc8a9c43f01d8750eca4e58c4eab383
-maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@d66a82096bc8a9c43f01d8750eca4e58c4eab383#subdirectory=src/maxtext/integration/vllm
+maxtext @ git+https://github.com/google/maxtext.git@22fa0c5598993549ce3e80125c54300b14c7310c
+maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@22fa0c5598993549ce3e80125c54300b14c7310c#subdirectory=src/maxtext/integration/vllm
 aqtp
 cheroot
 cloud-accelerator-diagnostics
