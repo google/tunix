@@ -46,15 +46,17 @@ from tunix.generate import utils
 
 Page = single_type_kv_cache_manager.Page
 
+_GIB = 1 << 30
+
 
 @dataclasses.dataclass(kw_only=True)
 class CacheConfig:
   """Raw configuration parameters for KV Cache allocation and sharding."""
 
-  # The maximum number of bytes to allocate on each device.
-  max_device_bytes: int
-  # The maximum number of bytes to allocate on the host.
-  max_host_bytes: int = 0
+  # The maximum number of GiB to allocate on each device.
+  max_device_size_gib: float
+  # The maximum number of GiB to allocate on the host.
+  max_host_size_gib: float = 0.0
   # The number of tokens per page.
   page_size: int = 16
   # Whether pages may be shared between requests with a common prefix.
@@ -72,15 +74,15 @@ class CacheConfig:
   def __post_init__(self):
     positive_checks = {
         "page_size": self.page_size,
-        "max_device_bytes": self.max_device_bytes,
+        "max_device_size_gib": self.max_device_size_gib,
     }
     for field_name, value in positive_checks.items():
       if value <= 0:
         raise ValueError(f"{field_name} must be positive, got {value}.")
 
-    if self.max_host_bytes < 0:
+    if self.max_host_size_gib < 0:
       raise ValueError(
-          f"max_host_bytes cannot be negative, got {self.max_host_bytes}."
+          f"max_host_size_gib cannot be negative, got {self.max_host_size_gib}."
       )
 
     if not (self.dp_axis or self.tp_axis):
@@ -193,13 +195,14 @@ def _compute_page_limits(
       math.prod(shape) for shape in group_shapes
   )
 
-  num_groups = config.max_device_bytes // bytes_per_device_per_group
+  max_device_bytes = math.floor(config.max_device_size_gib * _GIB)
+  num_groups = max_device_bytes // bytes_per_device_per_group
   if num_groups <= 0:
     raise ValueError(
-        "Cannot allocate 0 device pages. max_device_bytes="
-        f"{config.max_device_bytes} is smaller than the "
-        f"{bytes_per_device_per_group} bytes each device needs to hold one "
-        f"page on each of {config.dp_size} DP replica(s)."
+        "Cannot allocate 0 device pages. max_device_size_gib="
+        f"{config.max_device_size_gib} ({max_device_bytes} bytes) is smaller "
+        f"than the {bytes_per_device_per_group} bytes each device needs to "
+        f"hold one page on each of {config.dp_size} DP replica(s)."
     )
   num_device_pages = num_groups * config.dp_size
 
@@ -209,14 +212,15 @@ def _compute_page_limits(
       * config.page_size
       * sum(math.prod(shape) for shape in element_shapes)
   )
-  num_host_pages = config.max_host_bytes // bytes_per_page
+  max_host_bytes = math.floor(config.max_host_size_gib * _GIB)
+  num_host_pages = max_host_bytes // bytes_per_page
   return num_device_pages, num_host_pages
 
 
 def _create_kv_cache_group_managers(
     config: CacheConfig,
     cache_geometries: Mapping[str, CacheGeometry],
-) -> list[single_type_kv_cache_manager.SingleTypeKVCacheManager]:
+) -> tuple[list[single_type_kv_cache_manager.SingleTypeKVCacheManager], int]:
   """Creates one `SingleTypeKVCacheManager` per unique cache geometry."""
   if not cache_geometries:
     raise ValueError("At least one cache must be configured.")
@@ -257,7 +261,7 @@ def _create_kv_cache_group_managers(
             window_size=geometry.window_size,
         )
     )
-  return managers
+  return managers, num_device_pages
 
 
 class KVCacheManager:
@@ -275,12 +279,13 @@ class KVCacheManager:
       cache_geometries: The geometry of each named cache.
     """
     self._cache_names = tuple(cache_geometries.keys())
+    self._cache_geometries = dict(cache_geometries)
 
     self._page_size = config.page_size
     self._enable_prefix_caching = config.enable_prefix_caching
     self._request_to_prefix_hashes: dict[str, list[int]] = {}
-    self._kv_cache_group_managers = _create_kv_cache_group_managers(
-        config, cache_geometries
+    self._kv_cache_group_managers, self._num_device_pages = (
+        _create_kv_cache_group_managers(config, cache_geometries)
     )
 
   @property
@@ -288,9 +293,19 @@ class KVCacheManager:
     return self._page_size
 
   @property
+  def num_device_pages(self) -> int:
+    """The number of device pages per cache."""
+    return self._num_device_pages
+
+  @property
   def cache_names(self) -> tuple[str, ...]:
     """Returns the names of all allocated caches."""
     return self._cache_names
+
+  @property
+  def cache_geometries(self) -> Mapping[str, CacheGeometry]:
+    """Returns the geometry of each named cache."""
+    return self._cache_geometries
 
   @property
   def _null_computed_pages(self) -> tuple[tuple[Page | None, ...], ...]:

@@ -21,6 +21,7 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.models import paged_attention
 from tunix.rl import reshard
 from tunix.tests import test_common as tc
 
@@ -317,6 +318,9 @@ class ModelRunnerTest(absltest.TestCase):
       def __init__(self):
         self.w = nnx.Param(jnp.ones((1,), dtype=jnp.bfloat16))
 
+      def __call__(self, tokens, positions, cache, metadata):
+        raise NotImplementedError()
+
     runner = _runner(NoConfig())
 
     self.assertEqual(runner.dtype, jnp.bfloat16)
@@ -473,6 +477,362 @@ class ModelRunnerTest(absltest.TestCase):
     mock_reshard.assert_not_called()
     self._assert_trees_equal(runner.transformer_state, new_state)
 
+
+_VOCAB_SIZE = 16
+
+
+class _NextTokenTransformer(nnx.Module):
+  """A stand-in transformer that follows the RPA calling convention.
+
+  Each token's most likely successor is `token + 1`, then `token + 2`, and the
+  positions it was called with are written into the cache, so tests can check
+  both what the runner sampled and what it fed in.
+  """
+
+  def __init__(self):
+    self.scale = nnx.Param(jnp.ones(()))
+
+  def __call__(
+      self, tokens, positions, cache, metadata, mesh, logits_idxs=None
+  ):
+    del metadata, mesh
+    logits = self.scale * (
+        10.0 * jax.nn.one_hot((tokens + 1) % _VOCAB_SIZE, _VOCAB_SIZE)
+        + 5.0 * jax.nn.one_hot((tokens + 2) % _VOCAB_SIZE, _VOCAB_SIZE)
+    )
+    if logits_idxs is not None:
+      logits = logits[logits_idxs]
+    # The cache keeps its shape, as the decode loop carries it between steps.
+    return logits, {
+        'positions': cache['positions'].at[: positions.shape[0]].set(positions)
+    }
+
+
+class _UniformTransformer(nnx.Module):
+  """A stand-in transformer that gives every token the same logit."""
+
+  def __init__(self):
+    self.scale = nnx.Param(jnp.ones(()))
+
+  def __call__(
+      self, tokens, positions, cache, metadata, mesh, logits_idxs=None
+  ):
+    del positions, metadata, mesh
+    logits = self.scale * jnp.zeros((tokens.shape[0], _VOCAB_SIZE))
+    if logits_idxs is not None:
+      logits = logits[logits_idxs]
+    return logits, cache
+
+
+def _rpa_metadata(
+    kv_lens: list[int], query_lens: list[int], distribution: list[int]
+) -> paged_attention.RPAMetadata:
+  num_rows = len(query_lens)
+  return paged_attention.RPAMetadata(
+      page_indices={
+          'layer_0': np.arange(2 * num_rows, dtype=np.int32).reshape(
+              num_rows, 2
+          )
+      },
+      kv_lens=np.array(kv_lens, dtype=np.int32),
+      query_lens=np.array(query_lens, dtype=np.int32),
+      distribution=np.array(distribution, dtype=np.int32),
+  )
+
+
+def _positions_cache(num_tokens: int) -> model_runner_lib.Cache:
+  return {'positions': jnp.zeros((num_tokens,), dtype=jnp.int32)}
+
+
+class ExecuteStepTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    # One decode with 5 cached tokens, then a full prefill of 3 tokens, then a
+    # padding row.
+    self.metadata = _rpa_metadata(
+        kv_lens=[6, 3, 0], query_lens=[1, 3, 0], distribution=[1, 1, 2]
+    )
+    self.tokens = jnp.array([4, 7, 8, 9], dtype=jnp.int32)
+    self.greedy = (_params(temperature=0.0), _params(temperature=0.0))
+
+  def _execute(self, runner, sampling_params=None):
+    return runner.execute_step(
+        cache=_positions_cache(4),
+        tokens=self.tokens,
+        metadata=self.metadata,
+        sampling_params=sampling_params or self.greedy,
+    )
+
+  def test_get_token_positions(self):
+    runner = _runner(_NextTokenTransformer())
+    metadata = _rpa_metadata(
+        kv_lens=[1, 7, 0], query_lens=[1, 3, 0], distribution=[1, 1, 2]
+    )
+
+    positions = runner._get_token_positions(
+        tokens=jnp.zeros((6,), dtype=jnp.int32), metadata=metadata
+    )
+
+    # Row 0 starts at 1 - 1 = 0 ([0]); row 1 starts at 7 - 3 = 4 ([4, 5, 6]);
+    # the two trailing padding elements belong to row 2 (start 0 -> [0, 1]).
+    np.testing.assert_array_equal(positions, [0, 4, 5, 6, 0, 1])
+
+  def test_samples_from_the_last_token_of_each_row(self):
+    tokens, logits, logp, _ = self._execute(_runner(_NextTokenTransformer()))
+
+    self.assertIsInstance(tokens, jax.Array)
+    # The decode continues from 4, and the prefill from its last token 9.
+    np.testing.assert_array_equal(tokens[:2], [[5], [10]])
+    self.assertIsNone(logits)
+    self.assertIsNone(logp)
+
+  def test_positions_continue_from_the_cached_tokens(self):
+    _, _, _, cache = self._execute(_runner(_NextTokenTransformer()))
+
+    np.testing.assert_array_equal(cache['positions'], [5, 0, 1, 2])
+
+  def test_returns_last_token_logits_per_row(self):
+    runner = _runner(_NextTokenTransformer(), return_logits=True)
+
+    tokens, logits, _, _ = self._execute(runner)
+
+    np.testing.assert_array_equal(tokens[:2], [[5], [10]])
+    self.assertEqual(logits.shape, (3, 1, _VOCAB_SIZE))
+    # The prefill's logits come from its last token, 9.
+    self.assertEqual(int(np.argmax(logits[1, 0])), 10)
+
+  def test_returns_logprobs_per_row(self):
+    runner = _runner(_NextTokenTransformer(), return_logprobs=True)
+
+    _, _, logp, _ = self._execute(runner)
+
+    self.assertEqual(logp.shape, (3, 1))
+    expected = jax.nn.log_softmax(
+        10.0 * jax.nn.one_hot(5, _VOCAB_SIZE)
+        + 5.0 * jax.nn.one_hot(6, _VOCAB_SIZE)
+    )[5]
+    np.testing.assert_allclose(logp[0, 0], expected, rtol=1e-6)
+
+  def test_each_row_uses_its_own_sampling_params(self):
+    # The prefill is limited to its single most likely token, whatever its
+    # temperature, while the decode stays greedy.
+    runner = _runner(_NextTokenTransformer())
+
+    tokens, _, _, _ = self._execute(
+        runner, (_params(temperature=0.0), _params(temperature=5.0, top_k=1))
+    )
+
+    np.testing.assert_array_equal(tokens[:2], [[5], [10]])
+
+  def test_batches_metadata_transfer(self):
+    runner = _runner(
+        _NextTokenTransformer(), return_logits=True, return_logprobs=True
+    )
+    with mock.patch.object(
+        runner, '_to_device', wraps=runner._to_device
+    ) as mock_to_device:
+      tokens, logits, logp, _ = self._execute(runner)
+
+    # Both `metadata` and `sampling_metadata` are transferred in one call.
+    mock_to_device.assert_called_once()
+    self.assertEqual(tokens.shape, (3, 1))
+    self.assertEqual(logits.shape, (3, 1, _VOCAB_SIZE))
+    self.assertEqual(logp.shape, (3, 1))
+
+  def test_sampling_params_must_match_the_scheduled_requests(self):
+    runner = _runner(_NextTokenTransformer())
+
+    with self.assertRaisesRegex(ValueError, 'sampling params'):
+      self._execute(runner, (_params(),))
+
+  def test_non_positive_num_scheduler_steps_raises(self):
+    with self.assertRaisesRegex(ValueError, 'num_scheduler_steps'):
+      _runner(_NextTokenTransformer(), num_scheduler_steps=0)
+
+
+class ExecuteStepSeedTest(absltest.TestCase):
+  """Checks how sampling depends on the engine seed."""
+
+  _NUM_ROWS = 64
+
+  def _execute(self, runner, sampling_params=None):
+    # Every row decodes one token from a uniform distribution.
+    num_rows = len(sampling_params) if sampling_params else self._NUM_ROWS
+    metadata = _rpa_metadata(
+        kv_lens=[1] * num_rows,
+        query_lens=[1] * num_rows,
+        distribution=[num_rows] * 3,
+    )
+    tokens, _, _, _ = runner.execute_step(
+        cache={},
+        tokens=jnp.zeros((num_rows,), dtype=jnp.int32),
+        metadata=metadata,
+        sampling_params=sampling_params or (_params(),) * num_rows,
+    )
+    return tokens
+
+  def test_unseeded_sampling_is_reproducible_for_an_engine_seed(self):
+    tokens = self._execute(_runner(_UniformTransformer(), seed=3))
+    again = self._execute(_runner(_UniformTransformer(), seed=3))
+
+    np.testing.assert_array_equal(tokens, again)
+
+  def test_unseeded_sampling_differs_every_step(self):
+    runner = _runner(_UniformTransformer())
+
+    first = self._execute(runner)
+    second = self._execute(runner)
+
+    self.assertFalse(np.array_equal(first, second))
+
+  def test_unseeded_sampling_depends_on_the_engine_seed(self):
+    tokens = self._execute(_runner(_UniformTransformer(), seed=0))
+    other = self._execute(_runner(_UniformTransformer(), seed=1))
+
+    self.assertFalse(np.array_equal(tokens, other))
+
+def _fake_step_fn(params, cache, tokens, metadata, sampling_metadata, rng):
+  """A stand-in for `ModelRunner._model_step_fn` that always samples token 1."""
+  del params, tokens, sampling_metadata, rng
+  num_rows = len(metadata.query_lens)
+  return jnp.ones((num_rows,), dtype=jnp.int32), None, None, cache
+
+
+class MultiStepExecuteTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    # A decode continuing from 4, a chunked prefill ending in 4, a full
+    # prefill ending in 9, and a padding row.
+    self.metadata = _rpa_metadata(
+        kv_lens=[6, 4, 3, 0], query_lens=[1, 4, 3, 0], distribution=[1, 2, 3]
+    )
+    self.tokens = jnp.array([4, 1, 2, 3, 4, 7, 8, 9], dtype=jnp.int32)
+    self.greedy = (_params(temperature=0.0),) * 3
+
+  def _execute(self, runner):
+    return runner.execute_step(
+        cache=_positions_cache(8),
+        tokens=self.tokens,
+        metadata=self.metadata,
+        sampling_params=self.greedy,
+    )
+
+  def test_surviving_rows_keep_decoding(self):
+    runner = _runner(_NextTokenTransformer(), num_scheduler_steps=3)
+
+    tokens, _, _, cache = self._execute(runner)
+
+    np.testing.assert_array_equal(tokens[0], [5, 6, 7])
+    np.testing.assert_array_equal(tokens[2], [10, 11, 12])
+    # The last step decoded the two survivors at the ends of their sequences.
+    np.testing.assert_array_equal(cache['positions'][:2], [7, 4])
+
+  def test_returns_logits_and_logprobs_for_every_step(self):
+    runner = _runner(
+        _NextTokenTransformer(),
+        num_scheduler_steps=3,
+        return_logits=True,
+        return_logprobs=True,
+    )
+
+    _, logits, logp, _ = self._execute(runner)
+
+    self.assertEqual(logits.shape, (4, 3, _VOCAB_SIZE))
+    self.assertEqual(logp.shape, (4, 3))
+    # The full prefill's second step decoded 10, so it favours 11.
+    np.testing.assert_array_equal(np.argmax(logits[2, 1]), 11)
+    expected = jax.nn.log_softmax(
+        10.0 * jax.nn.one_hot(11, _VOCAB_SIZE)
+        + 5.0 * jax.nn.one_hot(12, _VOCAB_SIZE)
+    )[11]
+    np.testing.assert_allclose(logp[2, 1], expected, rtol=1e-6)
+
+  def test_the_metadata_advances_between_steps(self):
+    runner = _runner(_NextTokenTransformer(), num_scheduler_steps=3)
+    mock_step = mock.Mock(wraps=_fake_step_fn)
+    runner._model_step_fn = mock_step
+    runner._compiled_model_step_fn = mock_step
+
+    # The decode loop is a compiled `scan`, so its metadata is only concrete
+    # with tracing turned off.
+    with jax.disable_jit():
+      self._execute(runner)
+
+    step_metadata = [call.args[3] for call in mock_step.call_args_list]
+    self.assertLen(step_metadata, 3)
+    # The scheduled batch runs as-is.
+    np.testing.assert_array_equal(step_metadata[0].query_lens, [1, 4, 3, 0])
+    np.testing.assert_array_equal(step_metadata[0].distribution, [1, 2, 3])
+    # The chunked prefill drops out and the rest decode one token per step.
+    for metadata in step_metadata[1:]:
+      np.testing.assert_array_equal(metadata.query_lens, [1, 1, 0, 0])
+      np.testing.assert_array_equal(metadata.distribution, [2, 2, 2])
+      self.assertEqual(metadata.query_lens.dtype, jnp.int32)
+      self.assertEqual(metadata.kv_lens.dtype, jnp.int32)
+      self.assertEqual(metadata.distribution.dtype, jnp.int32)
+      self.assertEqual(metadata.page_indices['layer_0'].dtype, jnp.int32)
+    np.testing.assert_array_equal(step_metadata[1].kv_lens, [7, 4, 0, 0])
+    np.testing.assert_array_equal(step_metadata[2].kv_lens, [8, 5, 0, 0])
+    # The full prefill's pages move up with it into the second row.
+    np.testing.assert_array_equal(
+        step_metadata[1].page_indices['layer_0'][:2], [[0, 1], [4, 5]]
+    )
+    step_rngs = [call.args[5] for call in mock_step.call_args_list]
+    self.assertFalse(np.array_equal(step_rngs[0], step_rngs[1]))
+    self.assertFalse(np.array_equal(step_rngs[1], step_rngs[2]))
+
+  def test_sampling_settings_follow_their_rows(self):
+    runner = _runner(_NextTokenTransformer(), num_scheduler_steps=2)
+    mock_step = mock.Mock(wraps=_fake_step_fn)
+    runner._model_step_fn = mock_step
+    runner._compiled_model_step_fn = mock_step
+
+    with jax.disable_jit():
+      runner.execute_step(
+          cache=_positions_cache(8),
+          tokens=self.tokens,
+          metadata=self.metadata,
+          sampling_params=(
+              _params(temperature=0.5, top_k=2),
+              _params(temperature=0.9),
+              _params(temperature=0.7, top_p=0.8),
+          ),
+      )
+
+    decode_sampling_metadata = mock_step.call_args_list[1].args[4]
+    # The full prefill's settings move up with it, and the vacated rows sample
+    # greedily like any other padding row.
+    np.testing.assert_allclose(
+        decode_sampling_metadata.temperature, [0.5, 0.7, 0.0, 0.0]
+    )
+    np.testing.assert_allclose(
+        decode_sampling_metadata.top_p, [1.0, 0.8, 1.0, 1.0]
+    )
+    np.testing.assert_array_equal(decode_sampling_metadata.top_k, [2, 8, 1, 1])
+    self.assertEqual(decode_sampling_metadata.temperature.dtype, jnp.float32)
+    self.assertEqual(decode_sampling_metadata.top_p.dtype, jnp.float32)
+    self.assertEqual(decode_sampling_metadata.top_k.dtype, jnp.int32)
+
+  def test_stops_when_every_row_drops_out(self):
+    # A batch of nothing but chunked prefills has no row left to decode, so
+    # only the scheduled step runs.
+    runner = _runner(_NextTokenTransformer(), num_scheduler_steps=4)
+    runner._compiled_decode_loop_fn = mock.Mock()
+
+    tokens, _, _, _ = runner.execute_step(
+        cache=_positions_cache(8),
+        tokens=self.tokens,
+        metadata=_rpa_metadata(
+            kv_lens=[4, 4, 0], query_lens=[4, 4, 0], distribution=[0, 2, 2]
+        ),
+        sampling_params=self.greedy[:2],
+    )
+
+    runner._compiled_decode_loop_fn.assert_not_called()
+    self.assertEqual(tokens.shape, (3, 4))
+    np.testing.assert_array_equal(tokens[:, 1:], 0)
 
 if __name__ == '__main__':
   absltest.main()
