@@ -1233,6 +1233,7 @@ start_eval() {
       --worker_container_image="${TUNIX_IMAGE}" \
       --worker_container_port="${eval_port}" \
       --worker_startup_command=" \
+        sed -i 's/is_partial=False/is_partial=True/g' /opt/venv/lib/python3.12/site-packages/maxtext/utils/model_creation_utils.py; \
         PYTHONUNBUFFERED=1 \
         ${eval_cache_dir:+JAX_CACHE_GCS_DIR=\"${eval_cache_dir}\"} \
         ${eval_cache_dir:+ROLLOUT_JAX_CACHE_GCS_DIR=\"${eval_cache_dir}\"} \
