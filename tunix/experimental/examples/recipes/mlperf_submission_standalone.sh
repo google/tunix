@@ -334,24 +334,9 @@ export IMAGE_REWRITE_PREFIX="us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/t
 # ==============================================================================
 # 8. Execution Dispatch
 # ==============================================================================
-if [ -f "${DIR}/ubench_reporting.sh" ]; then
-  ( source "${DIR}/ubench_reporting.sh" "$@" ) ||
-    echo "UBENCH_REPORTING: Not recording this run for uBench. The launch continues." >&2
-fi
-
-if [ -f "${DIR}/../deepswe_dist/k8s_launcher.sh" ]; then
-  LAUNCHER="${DIR}/../deepswe_dist/k8s_launcher.sh"
-elif [ -f "${DIR}/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh" ]; then
-  LAUNCHER="${DIR}/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh"
-elif [ -f "${DIR}/../../../../third_party/py/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh" ]; then
-  LAUNCHER="${DIR}/../../../../third_party/py/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh"
-elif [ -f "${HOME}/github/tunix_build/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh" ]; then
-  LAUNCHER="${HOME}/github/tunix_build/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh"
-else
-  echo "Error: k8s_launcher.sh not found relative to ${DIR}" >&2
-  exit 1
-fi
+( source "${DIR}/ubench_reporting.sh" "$@" ) ||
+  echo "UBENCH_REPORTING: Not recording this run for uBench. The launch continues." >&2
 
 COMMAND="${1:-start}"
 shift || true
-exec "${LAUNCHER}" --command "${COMMAND}" --image "${TUNIX_IMAGE}" "$@"
+exec "${DIR}/../deepswe_dist/k8s_launcher.sh" --command "${COMMAND}" --image "${TUNIX_IMAGE}" "$@"
