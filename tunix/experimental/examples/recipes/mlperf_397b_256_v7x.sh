@@ -61,6 +61,7 @@ export MAXTEXT_MODEL_NAME="qwen3.5-397b-a17b"
 # - 256-chip trainer (TRAINER_TPU_SLICE=tpu7x:4x8x8 = 512 devices):
 #     With TRAINER_TUNED_FLAGS=true: FSDP=64, TP=1, EP=1, CP=8 (num_moe_token_chunks=1).
 #     With TRAINER_TUNED_FLAGS=false: FSDP=32, TP=1, EP=2, CP=8.
+# Mesh rule: cp-as-ep (cp-as-ep-dense-no-cp with TRAINER_TUNED_FLAGS=true, see below).
 export TRAINER_JOBSET_YAML="${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}"
 export TRAINER_TPU_SLICE="${TRAINER_TPU_SLICE:-tpu7x:4x4x8}"
 if [[ "${TRAINER_TPU_SLICE}" == "tpu7x:4x8x8" ]]; then
@@ -332,6 +333,27 @@ fi
 #     context_parallel_attention_load_balance=true, an even context parallelism of at
 #     least 2, remat_policy=custom and scan_layers=true, which this recipe's trainer has
 #     (TRAINER_MESH_CONTEXT=4, or 8 on the 256-chip trainer; REMAT_POLICY=custom).
+#   moe_wo_gmm_fused_dswiglu=true: the input-gradient GMM of the MoE down projection runs
+#     the SwiGLU backward in its epilogue: it turns its f32 accumulator into d[gate | up]
+#     (with moe_router_grad_from_wo_input, also into the routing weight's gradient)
+#     instead of writing the activation's gradient in bf16 for separate passes to read
+#     back. The derivative reads the f32 accumulator, so the gradients of wi and of
+#     everything before it change by bf16 rounding. MaxText refuses the key unless that
+#     GMM has one n tile (wo_tile_dlhs_mlp_dim = the MoE MLP dim, 1024 here) and, with
+#     moe_wi_gmm_fused_swiglu, wi_tile_fwd_mlp_dim halves to that dim or to a multiple of
+#     128 dividing it (1024 here: two n tiles of 512 per half); it also needs explicit
+#     tiles (use_gmm_v2_heuristic_tiling=false), prefuse_moe_weights, use_tokamax_gmm,
+#     use_gmm_v2 and a remat policy that does not save the routed experts' gate or up
+#     half, which this recipe's trainer has.
+#   query_proj_kernel_gather_once=true: the attention query projection keeps the kernel
+#     it gathered in the remat replay for its input gradient, so the backward gathers the
+#     query kernel once per attention layer instead of twice. The same values. MaxText
+#     refuses the key unless the backward replays the query projection
+#     (remat_policy=custom with query_proj=remat, its default) and the kernel's embed
+#     dimension is sharded. So the block passes it at every trainer mesh but the
+#     256-chip 32x2x8 and 64x1x8, which keep query_proj on device (below): there the
+#     backward does not replay the projection, so it reads the query kernel only for
+#     the input gradient.
 # These on the bench, regular micro-batch or s/step as above, 0 tokens dropped:
 #   moe_routing_index_math=count 10.022 -> 9.875 s (o275x-mf-cnt-prof),
 #     moe_unsplit_prefused_wi with two exact rewrites this block leaves off 10.022 ->
@@ -353,8 +375,32 @@ fi
 #     o275x-s5c-l3-prof): -0.237, +0.019 and +0.115 s/step, within the 0.255 s/step
 #     spread of one unchanged configuration over four pods (o275x-hd), so no effect is
 #     resolved.
-# The whole TRAINER_TUNED_FLAGS cell of mlperf_gbs1024_submission.sh (these keys, its
-# log-prob head and chunk size, padding first in packed rows, the staged step boundary):
+#   moe_wo_gmm_fused_dswiglu, switched with an environment variable on an overlay build
+#     with this block's keys of AI-Hypercomputer/maxtext#5758, the hoist and padding
+#     first, against controls in another pod: 83.316 -> 82.148 s/step, 9.0845 -> 8.9545 s
+#     (o275x-c9pfxctl-l3 -> o275x-c9ypfctl-l3); with the fused log-prob head and two
+#     changes that no PR has, 82.787 -> 81.604 s/step (o275x-c9pfxall-l3-prof ->
+#     o275x-c9ypfall-l3). On one TPU v7x chip its kernels at this cell's shapes match an
+#     f32 SwiGLU backward to 1.658e-3 relative L2 (parambole-bck-2d4c2), and its numerics
+#     run passes all six gates (nxc9ypfckhv).
+#   query_proj_kernel_gather_once: not timed on TPU alone (only in the whole cell below).
+#     In an AOT compile of this cell's trainer program (with cp-as-ep) the backward
+#     gathers the query kernel once per attention layer instead of twice, at the same
+#     device peak; the MaxText change's test, executed on TPU v5p, gives bit-identical
+#     values and gradients with it.
+#   custom_mesh_and_rule=cp-as-ep-dense-no-cp, on the code of
+#     AI-Hypercomputer/maxtext#5758 at this cell without
+#     context_parallel_attention_load_balance_hoist_ids, moe_wo_gmm_fused_dswiglu and
+#     query_proj_kernel_gather_once: 82.111 to 82.269 s/step with cp-as-ep (four runs in
+#     three pods, mean 82.185; 8.942 to 8.959 s) -> 81.261 and 81.245 s/step in two pods
+#     (o275x-l2-l3-prof; 8.838 s), 3,629 and 3,630 tokens/s/chip. Its numerics runs in
+#     both pods pass all six gates (nxl2), with cp-as-ep's loss to the ten digits logged
+#     and the gradient norm within 1.4e-4 relative. In an AOT compile of that cell
+#     fwd_bwd takes 81.05 GiB of HBM (78.28 with cp-as-ep), under the runs' 84992 MiB
+#     budget.
+# The TRAINER_TUNED_FLAGS cell of mlperf_gbs1024_submission.sh (these keys, its log-prob
+# head and chunk size, padding first in packed rows, the staged step boundary) before
+# moe_wo_gmm_fused_dswiglu, query_proj_kernel_gather_once and cp-as-ep-dense-no-cp:
 # 82.671 and 82.670 s/step in two pods (o275x-c9pfxhv-l3), against 106.30 s/step before
 # these keys, the fused head and padding first (o275x-hd, which also ran without the
 # staged step boundary; per regular micro-batch, which the boundary leaves alone, about
@@ -366,16 +412,29 @@ fi
 # o275x-prc-l3-r).
 # Numerics (loss gates off, random advantages, three steps, against two reference runs
 # whose gradient norms differ by 1.9e-5 relative): all six gates pass (nxc9pfxhv).
+# The bench cell of this block at 32x2x4 with all four of
+# context_parallel_attention_load_balance_hoist_ids, moe_wo_gmm_fused_dswiglu,
+# query_proj_kernel_gather_once and cp-as-ep-dense-no-cp, on the MaxText of
+# AI-Hypercomputer/maxtext#5758 with the change on top of it (the pinned MaxText without
+# #5721's three commits of Rohan Bierneni): 80.398 and 80.342 s/step in two pods
+# (o275x-f2-l3-prof, o275x-f2-l3-r), 3,668 and 3,671 tokens/s/chip, regular micro-batch
+# 8.748 s, against 82.373 s/step and 8.966 s for the code of #5758 with the keys before
+# these four (o275x-prfc-f1, a third pod of the same booking; the two pods' own control
+# arms did not finish, so the comparison is across pods). Numerics in both pods (nxf2):
+# all six gates pass, the loss is 0.0304453575 in all three steps, as with that code
+# under the same protocol (nxprf-l3), and the gradient norm is within 2.0e-4 relative
+# of it. Not run with #5721's three commits, at the 256-chip meshes, or end to end.
 # moe_routing_maps and moe_gmm_v2_dlhs_transpose_rhs come from
 # AI-Hypercomputer/maxtext#5698, moe_routing_index_math, moe_unsplit_prefused_wi,
 # moe_roe_packed_routing_gather, moe_router_grad_from_wo_input, moe_wi_gmm_fused_swiglu,
 # gdn_conv1d_input_in_qkv_dtype and gdn_conv1d_dense_token_stack from the MaxText change
 # of AI-Hypercomputer/maxtext#5758 (on top of #5698), and
-# context_parallel_attention_load_balance_hoist_ids from the MaxText change on top of
-# AI-Hypercomputer/maxtext#5721. All ten keys, and the cp-as-ep-dense-no-cp rule below,
-# are in the MaxText pinned in requirements/maxtext_requirements.txt (branch
+# context_parallel_attention_load_balance_hoist_ids, moe_wo_gmm_fused_dswiglu and
+# query_proj_kernel_gather_once from the MaxText change on top of
+# AI-Hypercomputer/maxtext#5721. All twelve keys, and the cp-as-ep-dense-no-cp rule
+# below, are in the MaxText pinned in requirements/maxtext_requirements.txt (branch
 # parambole/rl-4600-final-maxtext, on atwigg/mlperf at bbd0f6f10, the merge of
-# AI-Hypercomputer/maxtext#5721; bbd0f6f10 itself lacks the hoist key). MaxText refuses a
+# AI-Hypercomputer/maxtext#5721; bbd0f6f10 itself lacks those three). MaxText refuses a
 # key it does not define when the trainer starts, so an older MaxText needs
 # TRAINER_TUNED_FLAGS=false.
 # The 256-chip trainer (TRAINER_TPU_SLICE=tpu7x:4x8x8, 512 devices), from Rohan Bierneni's
@@ -394,10 +453,15 @@ fi
 # over all devices and then all-gathered over context; the GDN projections (embed_gdn), routed
 # experts, embeddings and activations stay as under cp-as-ep. 128 chips: 82.185 -> 81.253 s/step.
 if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
-  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_strategy=all_gather sa_fuse_reciprocal=true gdn_cp_mode=seq gdn_cp_state=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true wi_tile_dlhs_mlp_dim=2048 decoder_layer_input=device moe_routing_maps=device moe_gmm_v2_dlhs_transpose_rhs=true moe_routing_index_math=count moe_unsplit_prefused_wi=true moe_roe_packed_routing_gather=${_moe_chunk_pipeline} moe_router_grad_from_wo_input=true moe_wi_gmm_fused_swiglu=true gdn_conv1d_input_in_qkv_dtype=true gdn_conv1d_dense_token_stack=true wi_tile_fwd_batch_seq=512 wi_tile_drhs_batch_seq=512 wo_tile_fwd_batch_seq=512 wo_tile_dlhs_batch_seq=512 wo_tile_drhs_batch_seq=512 context_parallel_attention_load_balance_hoist_ids=true custom_mesh_and_rule=cp-as-ep-dense-no-cp"
+  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_strategy=all_gather sa_fuse_reciprocal=true gdn_cp_mode=seq gdn_cp_state=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true wi_tile_dlhs_mlp_dim=2048 decoder_layer_input=device moe_routing_maps=device moe_gmm_v2_dlhs_transpose_rhs=true moe_routing_index_math=count moe_unsplit_prefused_wi=true moe_roe_packed_routing_gather=${_moe_chunk_pipeline} moe_router_grad_from_wo_input=true moe_wi_gmm_fused_swiglu=true gdn_conv1d_input_in_qkv_dtype=true gdn_conv1d_dense_token_stack=true wi_tile_fwd_batch_seq=512 wi_tile_drhs_batch_seq=512 wo_tile_fwd_batch_seq=512 wo_tile_dlhs_batch_seq=512 wo_tile_drhs_batch_seq=512 context_parallel_attention_load_balance_hoist_ids=true moe_wo_gmm_fused_dswiglu=true custom_mesh_and_rule=cp-as-ep-dense-no-cp"
   case "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" in
     32x2x8|64x1x8)
       export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} query_proj=device key_proj=device value_proj=device out_proj=device qkv_proj=device"
+      ;;
+    *)
+      # query_proj stays remat, so the backward replays the query projection, which
+      # query_proj_kernel_gather_once needs (MaxText refuses it with query_proj=device).
+      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} query_proj_kernel_gather_once=true"
       ;;
   esac
 fi

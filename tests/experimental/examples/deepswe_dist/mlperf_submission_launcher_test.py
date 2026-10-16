@@ -63,6 +63,8 @@ _MAXTEXT_DEFAULTS = {
     "moe_routing_maps": "remat",
     "moe_unsplit_prefused_wi": "false",
     "moe_wi_gmm_fused_swiglu": "false",
+    "moe_wo_gmm_fused_dswiglu": "false",
+    "query_proj_kernel_gather_once": "false",
     # remat_policy=custom's per-tensor keys (MaxText base.yml).
     "query_proj": "remat",
     "key_proj": "remat",
@@ -88,7 +90,9 @@ _TUNED_KEYS = {
     "moe_routing_maps": ("remat", "device"),
     "moe_unsplit_prefused_wi": ("false", "true"),
     "moe_wi_gmm_fused_swiglu": ("false", "true"),
+    "moe_wo_gmm_fused_dswiglu": ("false", "true"),
     "num_moe_token_chunks": ("4", "2"),
+    "query_proj_kernel_gather_once": ("false", "true"),
     "sa_fuse_reciprocal": ("false", "true"),
     "wi_tile_dlhs_mlp_dim": ("1024", "2048"),
     "wi_tile_drhs_batch_seq": ("256", "512"),
@@ -100,10 +104,11 @@ _TUNED_KEYS = {
 # Tuned keys that MaxText before AI-Hypercomputer/maxtext#5721 (e.g. e526ea02)
 # does not define: two from AI-Hypercomputer/maxtext#5698 and seven from
 # AI-Hypercomputer/maxtext#5758, which is on top of it, and
-# context_parallel_attention_load_balance_hoist_ids, which only the MaxText
-# change on top of #5721 defines (the pinned parambole/rl-4600-final-maxtext;
-# atwigg/mlperf at bbd0f6f10 does not). MaxText refuses a key it does not define
-# when the trainer starts, so only TRAINER_TUNED_FLAGS=true may pass them.
+# context_parallel_attention_load_balance_hoist_ids, moe_wo_gmm_fused_dswiglu and
+# query_proj_kernel_gather_once, which only the MaxText change on top of #5721
+# defines (the pinned parambole/rl-4600-final-maxtext; atwigg/mlperf at bbd0f6f10
+# does not). MaxText refuses a key it does not define when the trainer starts, so
+# only TRAINER_TUNED_FLAGS=true may pass them.
 _BENCH_MAXTEXT_KEYS = (
     "context_parallel_attention_load_balance_hoist_ids",
     "gdn_conv1d_dense_token_stack",
@@ -115,6 +120,8 @@ _BENCH_MAXTEXT_KEYS = (
     "moe_routing_maps",
     "moe_unsplit_prefused_wi",
     "moe_wi_gmm_fused_swiglu",
+    "moe_wo_gmm_fused_dswiglu",
+    "query_proj_kernel_gather_once",
 )
 # The custom mesh rule TRAINER_TUNED_FLAGS=true selects, which
 # AI-Hypercomputer/maxtext#5783 (in #5721) defines and MaxText before #5721
@@ -254,6 +261,10 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(flags["sa_use_base2_exp"], "true")
     # The block's mesh rule replaces the recipe's cp-as-ep.
     self.assertEqual(flags["custom_mesh_and_rule"], _BENCH_MESH_RULE)
+    # query_proj_kernel_gather_once needs the backward to replay the query
+    # projection: query_proj stays at its default, remat.
+    self.assertEqual(flags["query_proj_kernel_gather_once"], "true")
+    self.assertNotIn("query_proj", flags)
     self.assertIn("--compute_logps_chunk_size=4096 ", trainer)
     self.assertRegex(trainer, r"\bTUNIX_LOGPS_SHARDED_HEAD=fused\b")
     self.assertRegex(
@@ -623,10 +634,11 @@ class SubmissionLauncherTest(absltest.TestCase):
     flags = _maxtext_flags(
         _jobset(_render(**_BENCH_CELL, **_MESH_32X2X8), "train")
     )
-    self.assertEqual(
-        _flag_changes(before, flags),
-        {key: ("remat", "device") for key in _PROJ_KEYS},
-    )
+    expected = {key: ("remat", "device") for key in _PROJ_KEYS}
+    # MaxText refuses query_proj_kernel_gather_once with query_proj=device.
+    expected["query_proj_kernel_gather_once"] = ("true", "false")
+    self.assertEqual(_flag_changes(before, flags), expected)
+    self.assertNotIn("query_proj_kernel_gather_once", flags)
     self.assertEqual(flags["num_moe_token_chunks"], "2")
     self.assertEqual(flags["moe_chunk_pipeline"], "true")
     self.assertEqual(flags["moe_roe_packed_routing_gather"], "true")
@@ -642,7 +654,10 @@ class SubmissionLauncherTest(absltest.TestCase):
     expected["num_moe_token_chunks"] = ("2", "1")
     expected["moe_chunk_pipeline"] = ("true", "false")
     expected["moe_roe_packed_routing_gather"] = ("true", "false")
+    # MaxText refuses query_proj_kernel_gather_once with query_proj=device.
+    expected["query_proj_kernel_gather_once"] = ("true", "false")
     self.assertEqual(_flag_changes(before, flags), expected)
+    self.assertNotIn("query_proj_kernel_gather_once", flags)
 
   def test_tuned_flags_keep_an_explicit_chunk_count_at_64x1x8(self):
     flags = _maxtext_flags(
@@ -656,6 +671,7 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(flags["moe_roe_packed_routing_gather"], "true")
     for key in _PROJ_KEYS:
       self.assertEqual(flags[key], "device", key)
+    self.assertNotIn("query_proj_kernel_gather_once", flags)
 
   def test_tuned_flags_false_leaves_the_256_chip_meshes_alone(self):
     for mesh in (_MESH_32X2X8, _MESH_64X1X8):
@@ -739,6 +755,7 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(flags["num_moe_token_chunks"], "1")
     self.assertEqual(flags["moe_chunk_pipeline"], "false")
     self.assertEqual(flags["query_proj"], "device")
+    self.assertNotIn("query_proj_kernel_gather_once", flags)
 
   def test_pad_start_with_finite_moe_capacity_requires_exclude_padding(self):
     with self.assertRaisesRegex(
