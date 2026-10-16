@@ -299,21 +299,6 @@ class ClusterOrchestrator:
 
   def _create_engine(self) -> distributed_rl_engine.DistributedRLEngine:
     """Constructs a DistributedRLEngine from the registered role groups."""
-    rollout_workers = self.registry.handles(datatypes.Role.ROLLOUT)
-    actor_workers = self.registry.handles(datatypes.Role.ACTOR)
-    critic_workers = self.registry.handles(datatypes.Role.CRITIC)
-    reference_workers = self.registry.handles(datatypes.Role.REFERENCE)
-
-    trainer_workers = {}
-    if actor_workers:
-      trainer_workers[datatypes.Role.ACTOR] = actor_workers[0]
-    if critic_workers:
-      trainer_workers[datatypes.Role.CRITIC] = critic_workers[0]
-
-    inference_workers = {}
-    if reference_workers:
-      inference_workers[datatypes.Role.REFERENCE] = reference_workers[0]
-
     coordinator = None
     if self._weight_sync_mode not in (None, "none"):
       from tunix.experimental.weight_sync import weight_sync_coordinator
@@ -328,9 +313,7 @@ class ClusterOrchestrator:
       )
 
     return distributed_rl_engine.DistributedRLEngine(
-        rollout_workers=rollout_workers,
-        trainer_workers=trainer_workers,
-        inference_workers=inference_workers,
+        registry=self.registry,
         weight_sync_coordinator=coordinator,
     )
 

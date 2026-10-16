@@ -34,6 +34,7 @@ from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.orchestrator import step_telemetry
+from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.worker import inference_worker as exp_inference_worker
 from tunix.experimental.worker import remote_execution
@@ -225,6 +226,28 @@ def _scored_traj(reward: float = 1.0) -> dict[str, Any]:
       "trajectory_reward": reward,
       "status": datatypes.TrajectoryStatus.SUCCEEDED,
   }
+
+
+def _make_engine(
+    *,
+    rollout_workers=(),
+    trainer_workers=None,
+    inference_workers=None,
+    weight_sync_coordinator=None,
+) -> distributed_rl_engine.DistributedRLEngine:
+  registry = worker_registry.WorkerRegistry()
+  for idx, handle in enumerate(rollout_workers):
+    registry.register_handle(
+        f"rollout-{idx}", [datatypes.Role.ROLLOUT], handle
+    )
+  for role, handle in (trainer_workers or {}).items():
+    registry.register_handle(f"trainer-{role}", [role], handle)
+  for role, handle in (inference_workers or {}).items():
+    registry.register_handle(f"inference-{role}", [role], handle)
+  return distributed_rl_engine.DistributedRLEngine(
+      registry=registry,
+      weight_sync_coordinator=weight_sync_coordinator,
+  )
 
 
 class RLProgramTest(absltest.TestCase):
@@ -864,7 +887,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_dataset_coordinates_reach_rollout_requests(self):
     mock_rollout = _MockWorkerHandle(role=datatypes.Role.ROLLOUT)
-    engine = distributed_rl_engine.DistributedRLEngine(
+    engine = _make_engine(
         rollout_workers=[mock_rollout],
         trainer_workers={
             datatypes.Role.ACTOR: _MockWorkerHandle(role=datatypes.Role.ACTOR)
@@ -2289,7 +2312,7 @@ class RLProgramTest(absltest.TestCase):
       mock_coordinator.sync = mock.AsyncMock(
           return_value=mock.MagicMock(policy_version=1)
       )
-      engine = distributed_rl_engine.DistributedRLEngine(
+      engine = _make_engine(
           rollout_workers=[mock_rollout],
           trainer_workers={datatypes.Role.ACTOR: mock_actor},
           weight_sync_coordinator=mock_coordinator,
@@ -2805,7 +2828,7 @@ class RLProgramTest(absltest.TestCase):
       trainer_worker = _MockWorkerHandle(role="trainer")
       trainer_worker.metrics_buffer = mock_buffer
 
-      engine = distributed_rl_engine.DistributedRLEngine(
+      engine = _make_engine(
           rollout_workers=[rollout_worker],
           trainer_workers={datatypes.Role.ACTOR: trainer_worker},
       )
@@ -3004,7 +3027,7 @@ class RLProgramTest(absltest.TestCase):
       trainer_worker.metrics_buffer = exp_metrics.MetricsBuffer(
           id=1, scalar_metrics={"loss": 0.1}
       )
-      engine = distributed_rl_engine.DistributedRLEngine(
+      engine = _make_engine(
           rollout_workers=[rollout_worker],
           trainer_workers={datatypes.Role.ACTOR: trainer_worker},
       )
@@ -3080,7 +3103,7 @@ class RLProgramTest(absltest.TestCase):
       rollout_worker_2 = _MockWorkerHandle(role="rollout")
       rollout_worker_2.metrics_buffer = {"rollouts_completed": 12}
 
-      engine = distributed_rl_engine.DistributedRLEngine(
+      engine = _make_engine(
           rollout_workers=[rollout_worker_1, rollout_worker_2],
           trainer_workers={
               datatypes.Role.ACTOR: actor_worker,
@@ -3156,7 +3179,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_distributed_engine_train_step_and_get_metrics(self):
     async def _run():
-      mock_worker = mock.MagicMock()
+      mock_worker = mock.MagicMock(spec=remote_execution.ActorHandle)
       mock_worker.asubmit.side_effect = lambda method, *args, **kwargs: {
           "fwd_bwd": "fwd_bwd_done",
           "update": 1,
@@ -3165,7 +3188,7 @@ class RLProgramTest(absltest.TestCase):
           ),
       }[method]
 
-      engine = distributed_rl_engine.DistributedRLEngine(
+      engine = _make_engine(
           rollout_workers=[],
           trainer_workers={datatypes.Role.ACTOR: mock_worker},
       )
@@ -3408,7 +3431,7 @@ class RLProgramTest(absltest.TestCase):
           id=1, scalar_metrics={"loss": 0.25}
       )
 
-      engine = distributed_rl_engine.DistributedRLEngine(
+      engine = _make_engine(
           rollout_workers=[],
           trainer_workers={datatypes.Role.ACTOR: actor_worker},
       )

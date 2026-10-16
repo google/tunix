@@ -40,6 +40,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import distributed_rl_engine
+from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.train import peft_trainer_v2
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker
@@ -317,10 +318,9 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
     handle = remote_execution.InProcessActorHandle(
         remote_execution.InProcessRemoteExecutionServer(worker)
     )
-    engine = distributed_rl_engine.DistributedRLEngine(
-        rollout_workers=[],
-        trainer_workers={datatypes.Role.ACTOR: handle},
-    )
+    registry = worker_registry.WorkerRegistry()
+    registry.register_handle("trainer-0", [datatypes.Role.ACTOR], handle)
+    engine = distributed_rl_engine.DistributedRLEngine(registry=registry)
     handle.submit("initialize")
     handle.submit("compile", None)
     handle.submit("start")

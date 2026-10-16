@@ -89,16 +89,18 @@ class ClusterOrchestratorTest(absltest.TestCase):
     )
 
     engine = orch._create_engine()
-    self.assertIs(engine._rollout_workers[0], mock_rollout)
+    self.assertEqual(
+        orch.worker_handles(datatypes.Role.ROLLOUT), [mock_rollout]
+    )
     self.assertIs(
-        engine._trainer_workers[datatypes.Role.ACTOR],
+        engine._role_handle(datatypes.Role.ACTOR),
         mock_actor,
     )
     self.assertIs(
-        engine._trainer_workers[datatypes.Role.CRITIC],
+        engine._role_handle(datatypes.Role.CRITIC),
         mock_critic,
     )
-    self.assertIs(engine._inference_workers[datatypes.Role.REFERENCE], mock_ref)
+    self.assertIs(engine._role_handle(datatypes.Role.REFERENCE), mock_ref)
     self.assertSequenceEqual(
         orch.worker_infos(), [actor_info, critic_info, ref_info, rollout_info]
     )
@@ -200,7 +202,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
     orch = orchestrator.ClusterOrchestrator(registry=registry)
     engine = orch._create_engine()
     self.assertIsInstance(
-        engine._rollout_workers[0], remote_execution.InProcessActorHandle
+        engine._rollout_handles()[0], remote_execution.InProcessActorHandle
     )
 
   def test_worker_handles_returns_remote_and_local_workers(self):

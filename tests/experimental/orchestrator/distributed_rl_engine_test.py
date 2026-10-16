@@ -25,6 +25,7 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import rl_engine_interface
+from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.worker import remote_execution
 
 
@@ -123,6 +124,28 @@ class _FakeWeightSyncCoordinator:
     return _FakeSyncResult(version)
 
 
+def _make_engine(
+    *,
+    rollout_workers=(),
+    trainer_workers=None,
+    inference_workers=None,
+    weight_sync_coordinator=None,
+) -> distributed_rl_engine.DistributedRLEngine:
+  registry = worker_registry.WorkerRegistry()
+  for idx, handle in enumerate(rollout_workers):
+    registry.register_handle(
+        f"rollout-{idx}", [datatypes.Role.ROLLOUT], handle
+    )
+  for role, handle in (trainer_workers or {}).items():
+    registry.register_handle(f"trainer-{role}", [role], handle)
+  for role, handle in (inference_workers or {}).items():
+    registry.register_handle(f"inference-{role}", [role], handle)
+  return distributed_rl_engine.DistributedRLEngine(
+      registry=registry,
+      weight_sync_coordinator=weight_sync_coordinator,
+  )
+
+
 class DistributedRLEngineTest(absltest.TestCase):
 
   def setUp(self):
@@ -132,7 +155,7 @@ class DistributedRLEngineTest(absltest.TestCase):
     self.mock_actor = MockActorHandle()
     self.mock_ref = MockActorHandle()
 
-    self.engine = distributed_rl_engine.DistributedRLEngine(
+    self.engine = _make_engine(
         rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
         trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
         inference_workers={datatypes.Role.REFERENCE: self.mock_ref},
@@ -450,7 +473,7 @@ class DistributedRLEngineTest(absltest.TestCase):
     asyncio.run(_run())
 
   def _engine_with_coordinator(self, coordinator):
-    return distributed_rl_engine.DistributedRLEngine(
+    return _make_engine(
         rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
         trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
         inference_workers={datatypes.Role.REFERENCE: self.mock_ref},
@@ -695,7 +718,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           return _FakeResult
 
       coordinator = _FakeCoordinator()
-      engine = distributed_rl_engine.DistributedRLEngine(
+      engine = _make_engine(
           rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
           trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
           inference_workers={datatypes.Role.REFERENCE: self.mock_ref},
@@ -724,7 +747,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           return _FakeResult
 
       coordinator = _FakeCoordinator()
-      engine = distributed_rl_engine.DistributedRLEngine(
+      engine = _make_engine(
           rollout_workers=[self.mock_rollout_1],
           trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
           inference_workers={datatypes.Role.REFERENCE: self.mock_ref},
@@ -746,7 +769,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       self,
   ):
     async def _run():
-      engine_no_rollout = distributed_rl_engine.DistributedRLEngine(
+      engine_no_rollout = _make_engine(
           rollout_workers=[],
           trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
       )
@@ -1701,7 +1724,7 @@ class DistributedRLEngineTest(absltest.TestCase):
     mock_algo.loss_fn.return_value = mock_loss
     mock_algo.build_gen_model_input_fn.return_value = mock_gen_fn
 
-    engine = distributed_rl_engine.DistributedRLEngine(
+    engine = _make_engine(
         rollout_workers=[self.mock_rollout_1],
         trainer_workers={datatypes.Role.CRITIC: mock_critic},
     )
@@ -1759,7 +1782,7 @@ class DistributedRLEngineTest(absltest.TestCase):
         assembler=mock_assembler,
     )
 
-    engine_no_workers = distributed_rl_engine.DistributedRLEngine(
+    engine_no_workers = _make_engine(
         rollout_workers=[],
         trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
     )
@@ -1811,7 +1834,7 @@ class DistributedRLEngineTest(absltest.TestCase):
     )
 
   def test_configure_worker_actor_raises_when_no_actor_worker(self):
-    engine = distributed_rl_engine.DistributedRLEngine(
+    engine = _make_engine(
         rollout_workers=[self.mock_rollout_1],
         trainer_workers={},
     )
