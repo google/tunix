@@ -41,7 +41,7 @@ from tunix.models.gemma4.layers import RMSNorm
 from tunix.utils.sharding_utils import shard
 
 if typing.TYPE_CHECKING:
-  from tokamax._src.ops.splash_attention import splash_attention_kernel as tokamax_splash
+  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash
 
   SplashKernel = (
       splash.SplashAttentionKernel | tokamax_splash.SplashAttentionKernel
@@ -91,8 +91,8 @@ def _resolve_active_mesh() -> MeshType | None:
 def _tokamax_splash_libs():
   """Lazily imports Tokamax's splash-attention kernel and mask modules."""
   try:
-    from tokamax._src.ops.splash_attention import splash_attention_kernel as tokamax_splash_lib  # pylint: disable=g-import-not-at-top
-    from tokamax._src.ops.splash_attention import splash_attention_mask as tokamax_splash_mask_lib  # pylint: disable=g-import-not-at-top
+    from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_lib
+    from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask_lib
   except ImportError as e:
     raise ImportError(
         "The Tokamax splash_attention backend requires the 'tokamax'"
