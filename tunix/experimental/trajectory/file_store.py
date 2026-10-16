@@ -60,6 +60,10 @@ def _dump_json(model: pydantic.BaseModel) -> str:
 
 def _is_gcs_path(path: epath.Path) -> bool:
   """Returns whether `path` targets Google Cloud Storage (`gs://`)."""
+  # Use `as_uri()` rather than `str(path)` because `etils.epath` backends may
+  # normalize `gs://` URIs to backend-specific mount paths in `str(path)`,
+  # whereas `as_uri()` consistently returns `gs://...`. Guard with
+  # `is_absolute()` because `as_uri()` raises `ValueError` on relative paths.
   return path.is_absolute() and path.as_uri().startswith("gs://")
 
 
