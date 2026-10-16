@@ -208,6 +208,7 @@ class FromConfigTest(absltest.TestCase):
   def test_tunix_trajectory_store_from_config_binds_tunix_metadata(self):
     store = store_lib.TunixTrajectoryStore.from_config(self._file_config())
     self.assertIsInstance(store, file_store.FileTrajectoryStore)
+    self.assertIsInstance(store, store_lib.TunixTrajectoryStore)
     self.assertIs(
         store._metadata_cls,  # pylint: disable=protected-access
         trajectory_lib.TunixTrajectoryMetadata,
@@ -224,6 +225,37 @@ class FromConfigTest(absltest.TestCase):
           )
       )
     store.close()
+
+  def test_tunix_trajectory_store_isinstance_true_for_bound_backends(self):
+    file_s = store_lib.TunixTrajectoryStore.from_config(self._file_config())
+    self.assertIsInstance(file_s, store_lib.TunixTrajectoryStore)
+    self.assertIsInstance(file_s, store_lib.TrajectoryStore)
+    file_s.close()
+
+    mem_s = store_lib.TunixTrajectoryStore.from_config({"backend": "memory"})
+    self.assertIsInstance(mem_s, store_lib.TunixTrajectoryStore)
+    self.assertIsInstance(mem_s, store_lib.TrajectoryStore)
+
+    subscripted_mem = in_memory_store.InMemoryTrajectoryStore[
+        trajectory_lib.TunixTrajectoryMetadata
+    ]()
+    self.assertIsInstance(subscripted_mem, store_lib.TunixTrajectoryStore)
+    self.assertIsInstance(subscripted_mem, store_lib.TrajectoryStore)
+
+  def test_tunix_trajectory_store_isinstance_false_for_unbound_or_other_metadata(
+      self,
+  ):
+    unbound_mem = in_memory_store.InMemoryTrajectoryStore()
+    self.assertNotIsInstance(unbound_mem, store_lib.TunixTrajectoryStore)
+
+    base_meta_mem = in_memory_store.InMemoryTrajectoryStore[
+        trajectory_lib.TrajectoryMetadata
+    ]()
+    self.assertNotIsInstance(base_meta_mem, store_lib.TunixTrajectoryStore)
+
+    self.assertNotIsInstance("not_a_store", store_lib.TunixTrajectoryStore)
+    self.assertNotIsInstance(42, store_lib.TunixTrajectoryStore)
+    self.assertNotIsInstance(None, store_lib.TunixTrajectoryStore)
 
 
 class GenericTypeParametersTest(absltest.TestCase):

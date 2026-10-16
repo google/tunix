@@ -386,18 +386,28 @@ class TrajectoryStore(
     return cast(Self, store)
 
 
-# TODO(tunix-dev): Consider overriding __instancecheck__ (via a metaclass) so
-# `isinstance(store, TunixTrajectoryStore)` returns True for stores bound to
-# `TunixTrajectoryMetadata`.
+class TunixTrajectoryStoreMeta(type(TrajectoryStore)):
+  """Metaclass enabling isinstance checks for TunixTrajectoryStore."""
+
+  def __instancecheck__(cls, instance: object) -> bool:
+    if super().__instancecheck__(instance):
+      return True
+    if not isinstance(instance, TrajectoryStore):
+      return False
+    instance_meta_cls = instance._get_bound_metadata_cls()
+    return instance_meta_cls is not None and issubclass(
+        instance_meta_cls, trajectory_lib.TunixTrajectoryMetadata
+    )
+
+
 class TunixTrajectoryStore(
     TrajectoryStore[trajectory_lib.TunixTrajectoryMetadata],
-    abc.ABC,
+    metaclass=TunixTrajectoryStoreMeta,
 ):
   """TrajectoryStore bound to TunixTrajectoryMetadata.
 
   `TunixTrajectoryStore.from_config(config)` instantiates the configured backend
   (`FileTrajectoryStore`, `SqlTrajectoryStore`, or `InMemoryTrajectoryStore`)
-  and binds it to `TunixTrajectoryMetadata`. Note that the returned instance is
-  a subclass of `TrajectoryStore` (and of the selected backend), not a runtime
-  subclass of `TunixTrajectoryStore`.
+  and binds it to `TunixTrajectoryMetadata`. Note that `isinstance(store,
+  TunixTrajectoryStore)` returns True via metaclass instance checking.
   """
