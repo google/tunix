@@ -326,6 +326,61 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     np.testing.assert_array_equal(payload.completion_mask[0, 30:64], 0)
     np.testing.assert_array_equal(payload.completion_ids[0, 30:64], 42)
 
+  def test_pad_position_start_puts_each_rows_padding_first(self):
+    items = [
+        _make_payload(
+            2, 2, advantage=1.5, old_logps=np.full(2, -0.5, np.float32)
+        ),
+        _make_payload(
+            3, 1, advantage=-0.5, old_logps=np.full(1, -0.7, np.float32)
+        ),
+    ]
+    (end,) = self._drain(self._make_assembler(max_packed_len=16), items)
+    (start,) = self._drain(
+        self._make_assembler(
+            max_packed_len=16, pad_position="start", pad_align=4
+        ),
+        items,
+    )
+    # 8 real tokens and 8 of padding: every per-token field moves right by 8.
+    for name in (
+        "completion_ids",
+        "completion_mask",
+        "advantages",
+        "segment_ids",
+        "segment_positions",
+        "old_per_token_logps",
+    ):
+      np.testing.assert_array_equal(
+          getattr(start, name),
+          np.roll(getattr(end, name), 8, axis=1),
+          err_msg=name,
+      )
+    self.assertEqual(start.prompt_ids.shape, (1, 0))
+    self.assertEqual(start.num_segments, end.num_segments)
+
+  def test_pad_settings_that_do_nothing_or_break_alignment_raise(self):
+    for kwargs, regex in (
+        (dict(pad_position="middle"), "pad_position must be one of"),
+        (
+            dict(
+                pad_position="start",
+                pad_align=100,
+                max_packed_len=8192,
+                segment_align_multiple=64,
+            ),
+            "positive multiple",
+        ),
+        (
+            dict(pad_position="start", pad_align=16, max_packed_len=16),
+            "never moves a row",
+        ),
+        (dict(pad_align=512), "only applies with pad_position='start'"),
+    ):
+      with self.subTest(kwargs=kwargs):
+        with self.assertRaisesRegex(ValueError, regex):
+          self._make_assembler(**kwargs)
+
   def test_sequence_packed_assembler_rejects_partial_optional_fields(self):
     items = [
         _make_payload(2, 2),
@@ -2243,6 +2298,59 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     self.assertEqual(assembler.batch_size, 2)
     self.assertEqual(assembler.max_packed_len, 8192)
 
+  def test_create_sequence_packed_assembler_pads_at_the_end_by_default(self):
+    assembler = batch_assembly.create_batch_assembler(
+        num_generations=2,
+        mini_batch_size=2,
+        train_micro_batch_size=1,
+        batch_config=batch_assembly.BatchConfig(max_seq_token_per_tpu=1024),
+    )
+    self.assertEqual(assembler.pad_position, "end")
+    self.assertEqual(assembler.pad_align, 4096)
+
+  def test_create_sequence_packed_assembler_passes_the_pad_position(self):
+    for config in (
+        batch_assembly.BatchConfig(
+            max_seq_token_per_tpu=1024,
+            pack_pad_position="start",
+            pack_pad_align=256,
+        ),
+        # No budget and no prompt length: the default packed assembler.
+        batch_assembly.BatchConfig(
+            pack_pad_position="start", pack_pad_align=256
+        ),
+    ):
+      with self.subTest(config=config):
+        assembler = batch_assembly.create_batch_assembler(
+            num_generations=2,
+            mini_batch_size=2,
+            train_micro_batch_size=1,
+            batch_config=config,
+        )
+        self.assertIsInstance(
+            assembler, batch_assembly.SequencePackedBatchAssembler
+        )
+        self.assertEqual(assembler.pad_position, "start")
+        self.assertEqual(assembler.pad_align, 256)
+
+  def test_create_padded_batch_assembler_refuses_the_pad_position(self):
+    # The padded assembler does not pack, so the options would do nothing.
+    for overrides in (
+        dict(pack_pad_position="start"),
+        dict(pack_pad_align=512),
+    ):
+      with self.subTest(overrides=overrides):
+        with self.assertRaisesRegex(ValueError, "does not pack"):
+          batch_assembly.create_batch_assembler(
+              num_generations=2,
+              mini_batch_size=2,
+              train_micro_batch_size=4,
+              batch_config=batch_assembly.BatchConfig(
+                  max_prompt_length=128,
+                  max_response_length=256,
+                  **overrides,
+              ),
+          )
 
   def test_create_sequence_packed_assembler_pack_size_includes_expert(self):
     assembler = batch_assembly.create_batch_assembler(

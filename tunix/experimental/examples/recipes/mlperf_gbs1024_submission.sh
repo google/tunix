@@ -51,7 +51,12 @@ export ROLLOUT_ATTENTION_DP="${ROLLOUT_ATTENTION_DP:-false}"
 
 export TRAINER_TUNED_FLAGS="${TRAINER_TUNED_FLAGS:-true}"
 if [[ "${TRAINER_TUNED_FLAGS}" == "true" ]]; then
-  export COMPUTE_LOGPS_CHUNK_SIZE="${COMPUTE_LOGPS_CHUNK_SIZE:-1024}"
+  _logps_head="$(printf '%s' "${TUNIX_LOGPS_SHARDED_HEAD:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  case "${_logps_head}" in
+    0|false|off|no) export COMPUTE_LOGPS_CHUNK_SIZE="${COMPUTE_LOGPS_CHUNK_SIZE:-1024}" ;;
+  esac
+  export COMPUTE_LOGPS_CHUNK_SIZE="${COMPUTE_LOGPS_CHUNK_SIZE:-4096}"
+  export PACK_PAD_POSITION="${PACK_PAD_POSITION:-start}"
 fi
 export DROPLESS="${DROPLESS:-true}"
 case "${DROPLESS}" in
@@ -67,6 +72,13 @@ case "${DROPLESS}" in
       if [[ "${RETRY_DROPLESS_FINAL_MICRO_BATCH:-false}" != "true" \
             && -z "${FIRST_PHASE_RAGGED_BUFFER_FACTOR:-}" ]]; then
         export REMAT_CONTEXT="${REMAT_CONTEXT:-device}"
+        # One token chunk at the 256-chip trainer mesh 64x1x8 (see mlperf_397b_256_v7x.sh), which is
+        # also the mesh mlperf_397b_256_v7x.sh picks for tpu7x:4x8x8 when no mesh is given.
+        if [[ "${TRAINER_MESH_FSDP:-}x${TRAINER_MESH_EXPERT:-}x${TRAINER_MESH_CONTEXT:-}" == "64x1x8" ]] \
+           || [[ "${TRAINER_TPU_SLICE:-}" == "tpu7x:4x8x8" \
+                 && "${TRAINER_MESH_FSDP:-64}x${TRAINER_MESH_EXPERT:-1}x${TRAINER_MESH_CONTEXT:-8}" == "64x1x8" ]]; then
+          export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-1}"
+        fi
         export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
       fi
     fi
@@ -78,6 +90,14 @@ case "${DROPLESS}" in
            "set RETRY_WHEN_TOKENS_DROPPED=true or DROPLESS=false" >&2
       exit 1
     fi
+    if [[ "${PACK_PAD_POSITION:-end}" == "start" \
+          && "${RAGGED_BUFFER_FACTOR}" != "-1" \
+          && "${MOE_EXCLUDE_PADDING:-false}" != "true" ]]; then
+      echo "ERROR: PACK_PAD_POSITION=start with finite MoE capacity requires" \
+           "MOE_EXCLUDE_PADDING=true (or RAGGED_BUFFER_FACTOR=-1) so leading" \
+           "padding tokens do not fill expert buffers ahead of real tokens" >&2
+      exit 1
+    fi
     ;;
   false)
     ;;
@@ -87,6 +107,9 @@ case "${DROPLESS}" in
     ;;
 esac
 
+if [[ "${TRAINER_TUNED_FLAGS}" == "true" ]]; then
+  export TUNIX_LOGPS_SHARDED_HEAD="${TUNIX_LOGPS_SHARDED_HEAD:-fused}"
+fi
 export TUNIX_LOGPS_SHARDED_HEAD="${TUNIX_LOGPS_SHARDED_HEAD:-local}"
 export PIPELINE_STEP_BOUNDARY="${PIPELINE_STEP_BOUNDARY:-1}"
 export STAGE_NEXT_MICROBATCH="${STAGE_NEXT_MICROBATCH:-${PIPELINE_STEP_BOUNDARY}}"
