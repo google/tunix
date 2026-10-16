@@ -395,22 +395,21 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
   context.ipc.discovery.on_register(
       functools.partial(
-          cluster.register_worker_from_hostname,
+          cluster.registry.register_from_hostname,
           rpc_timeout_s=args.rpc_timeout_s,
       )
   )
-  cluster.wait_for_workers(
+  cluster.registry.wait_for_workers(
       min_workers={
           datatypes.Role.ACTOR: 1,
           datatypes.Role.ROLLOUT: 1,
           datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
       },
       timeout=args.init_timeout_s,
-      poll_interval_s=1.0,
   )
 
   algo = _build_algo(args)
-  trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
+  trainer_handles = cluster.registry.handles(datatypes.Role.ACTOR)
   if len(trainer_handles) != 1:
     raise ValueError(f"Expected 1 trainer worker, got {len(trainer_handles)}.")
 

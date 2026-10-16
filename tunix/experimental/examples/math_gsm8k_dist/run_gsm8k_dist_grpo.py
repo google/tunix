@@ -461,22 +461,23 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
   context.ipc.discovery.on_register(
       functools.partial(
-          cluster.register_worker_from_hostname,
+          cluster.registry.register_from_hostname,
           rpc_timeout_s=args.rpc_timeout_s,
       )
   )
 
   logging.info("Waiting for workers to register via discovery service...")
-  cluster.wait_for_workers(
+  cluster.registry.wait_for_workers(
       min_workers={
           datatypes.Role.ACTOR: 1,
           datatypes.Role.ROLLOUT: args.rollout_replicas,
           datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
       },
       timeout=args.init_timeout_s,
-      poll_interval_s=1.0,
   )
-  logging.info("Registered Orchestrator V2 workers: %s", cluster.worker_infos())
+  logging.info(
+      "Registered Orchestrator V2 workers: %s", cluster.registry.infos()
+  )
 
   algo = _build_algo(args)
 
@@ -543,7 +544,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     cluster.bring_up_workers(dummy_data=None)
     logging.info(
         "Cluster workers ready: %s. Starting StandardRLProgram execution...",
-        [w.worker_id for w in cluster.worker_infos()],
+        [w.worker_id for w in cluster.registry.infos()],
     )
     cluster.run(
         program=program,
