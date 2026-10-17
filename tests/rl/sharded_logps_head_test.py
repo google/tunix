@@ -200,7 +200,7 @@ class ShardedLogpsHeadTest(parameterized.TestCase):
       nonfinite: (row, position) pairs whose hidden state is NaN. The scores
         computed from them get loss weight 0, as padding does.
       lower: Return the StableHLO text of the jitted value_and_grad instead of
-        running it.
+        running it; 'jaxpr': return its jaxpr.
     """
     model = _HeadOnly(dtype, batch, seq)
     if nonfinite:
@@ -242,6 +242,8 @@ class ShardedLogpsHeadTest(parameterized.TestCase):
       return value, (logps, entropy)
 
     with self._head_switch(mode, rules, expect, legacy_mesh):
+      if lower == 'jaxpr':
+        return jax.make_jaxpr(jax.value_and_grad(loss, has_aux=True))(state)
       step = jax.jit(jax.value_and_grad(loss, has_aux=True))
       if lower:
         return step.lower(state).as_text()
@@ -631,6 +633,134 @@ class ShardedLogpsHeadTest(parameterized.TestCase):
       )
     if mode == 'local':
       self.assertGreater(count['gather'], 0, count)
+
+
+  @contextlib.contextmanager
+  def _grad_scatter(self, value):
+    """Sets TUNIX_LOGPS_HEAD_GRAD_SCATTER (None: unset) for the body."""
+    with mock.patch.dict(os.environ):
+      if value is None:
+        os.environ.pop(common.HEAD_GRAD_SCATTER_ENV, None)
+      else:
+        os.environ[common.HEAD_GRAD_SCATTER_ENV] = value
+      yield
+
+  @parameterized.parameters(
+      ('', None),
+      ('off', None),
+      (' Off ', None),
+      ('chunk', 'chunk'),
+      (' CHUNK ', 'chunk'),
+      ('chunk_f32', 'chunk_f32'),
+      ('chunk_unroll', 'chunk_unroll'),
+  )
+  def test_grad_scatter_mode_parsing(self, value, want):
+    with self._grad_scatter(value):
+      self.assertEqual(common.head_grad_scatter_mode(), want)
+
+  @parameterized.parameters('chunks', '1', 'on', 'true', 'chunk-f32', 'chunk,chunk_f32')
+  def test_grad_scatter_mode_rejects_unknown(self, value):
+    with self._grad_scatter(value):
+      with self.assertRaisesRegex(ValueError, common.HEAD_GRAD_SCATTER_ENV):
+        common.head_grad_scatter_mode()
+
+  @parameterized.parameters(None, 'off')
+  def test_grad_scatter_needs_sharded_head(self, head):
+    with self._grad_scatter('chunk'):
+      with self.assertRaisesRegex(ValueError, common.HEAD_GRAD_SCATTER_ENV):
+        self._run(head)
+
+  def test_grad_scatter_off_is_the_default_program(self):
+    # Unset and "off" lower to the same program.
+    with self._grad_scatter(None):
+      want = self._run('fused', differentiate=('logps',), lower=True)
+    with self._grad_scatter('off'):
+      got = self._run('fused', differentiate=('logps',), lower=True)
+    self.assertEqual(got, want)
+
+  @parameterized.product(
+      scatter=('chunk', 'chunk_f32', 'chunk_unroll'),
+      config=(('fused', ('logps',)), ('fused', ('logps', 'entropy')),
+              ('local', ('logps',))),
+  )
+  def test_grad_scatter_matches_off(self, scatter, config):
+    # An f32 table is gathered and reduce-scattered in f32 in every mode, so
+    # the modes differ from off only in the order of the f32 sums. Chunk 12
+    # leaves a padded last chunk.
+    mode, differentiate = config
+    kwargs = dict(differentiate=differentiate, chunk_size=12)
+    with self._grad_scatter(None):
+      want = self._run(mode, **kwargs)
+    with self._grad_scatter(scatter):
+      got = self._run(mode, **kwargs)
+    self._assert_fused_parity(got, want)
+
+  @parameterized.parameters('chunk', 'chunk_f32', 'chunk_unroll')
+  def test_grad_scatter_bf16_table(self, scatter):
+    # A bf16 head: the table's gradient arrives in bf16. chunk reduce-scatters
+    # it in bf16 (a precision change), chunk_f32 casts it to f32 first. The
+    # hidden-state gradient does not depend on the accumulator; unrolling the
+    # loop may re-order its sums.
+    kwargs = dict(dtype=jnp.bfloat16, differentiate=('logps',))
+    with self._grad_scatter(None):
+      want = self._run('fused', **kwargs)
+    with self._grad_scatter(scatter):
+      got = self._run('fused', **kwargs)
+    np.testing.assert_array_equal(got[0], want[0])
+    g, w = (np.asarray(x[2]['table'][...], np.float32) for x in (got, want))
+    err = np.linalg.norm(g - w) / np.linalg.norm(w)
+    self.assertLess(err, 1e-6 if scatter == 'chunk_f32' else 2.0**-6)
+    g, w = (np.asarray(x[2]['h'][...], np.float32) for x in (got, want))
+    if scatter == 'chunk_unroll':
+      self.assertLess(np.linalg.norm(g - w) / np.linalg.norm(w), 1e-3)
+    else:
+      np.testing.assert_array_equal(g, w)
+
+  @parameterized.parameters(
+      (None, False, False),
+      ('chunk', True, False),
+      ('chunk_f32', True, False),
+      ('chunk_unroll', True, True),
+  )
+  def test_grad_scatter_placement(self, scatter, in_loop, unrolled):
+    # Off: one reduce-scatter per head parameter after the chunk loop. On: one
+    # per parameter inside the loop body (unrolled for chunk_unroll).
+    found = []
+
+    def walk(jaxpr, path):
+      for eqn in jaxpr.eqns:
+        if eqn.primitive.name == 'reduce_scatter':
+          found.append(tuple(path))
+        for v in eqn.params.values():
+          for sub in v if isinstance(v, (list, tuple)) else [v]:
+            sub = getattr(sub, 'jaxpr', sub)
+            if hasattr(sub, 'eqns'):
+              unroll = eqn.params.get('unroll', 1)
+              walk(sub, path + [(eqn.primitive.name, unroll)])
+
+    with self._grad_scatter(scatter):
+      walk(self._run('fused', differentiate=('logps',), lower='jaxpr').jaxpr, [])
+    self.assertLen(found, 2)
+    for path in found:
+      scans = [u for name, u in path if name == 'scan']
+      self.assertEqual(bool(scans), in_loop, path)
+      if in_loop:
+        self.assertEqual(scans[-1] not in (1, False), unrolled, path)
+
+  def test_grad_scatter_banner(self):
+    with self._grad_scatter('chunk'):
+      with self.assertLogs(level='WARNING') as logs:
+        self._run('fused', differentiate=('logps',))
+    self.assertIn(
+        '[logps-head] table-gradient scatter chunk:', '\n'.join(logs.output)
+    )
+
+  def test_grad_scatter_fallback_warns(self):
+    # The head falls back (no token layout): the switch has no effect.
+    with self._grad_scatter('chunk'):
+      with self.assertLogs(level='WARNING') as logs:
+        self._run('local', batch=3, seq=63, chunk_size=7, expect=[False])
+    self.assertIn('has no effect', '\n'.join(logs.output))
 
 
 class FusedScoringTest(parameterized.TestCase):
