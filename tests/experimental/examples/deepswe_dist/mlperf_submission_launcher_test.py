@@ -56,6 +56,7 @@ _MAXTEXT_DEFAULTS = {
     "context_parallel_attention_load_balance_hoist_ids": "false",
     "fp8_fake_quant_hoist": "off",
     "gdn_conv1d_dense_token_stack": "false",
+    "gdn_cp_m_scan": "false",
     "gdn_conv1d_input_in_qkv_dtype": "false",
     "moe_gmm_v2_dlhs_transpose_rhs": "false",
     "moe_roe_packed_routing_gather": "false",
@@ -83,6 +84,7 @@ _TUNED_KEYS = {
     "fp8_fake_quant_hoist": ("off", "gather8"),
     "gdn_conv1d_dense_token_stack": ("false", "true"),
     "gdn_conv1d_input_in_qkv_dtype": ("false", "true"),
+    "gdn_cp_m_scan": ("false", "true"),
     "gdn_cp_matmul_precision": ("highest", "high"),
     "gdn_cp_mode": ("head", "seq"),
     "gdn_cp_state": ("remat", "device"),
@@ -112,15 +114,17 @@ _TUNED_KEYS = {
 # context_parallel_attention_load_balance_hoist_ids, moe_wo_gmm_fused_dswiglu and
 # query_proj_kernel_gather_once, which only the MaxText change on top of #5721
 # defines (the pinned parambole/rl-4600-final-maxtext; atwigg/mlperf at bbd0f6f10
-# does not), and fp8_fake_quant_hoist and wi_tile_fwd_rhs_buffer_count, which
-# only later commits of that branch define (94f11c09d defines neither, and
-# e1cd8bf1d not the second). MaxText refuses a key it does not define when the
-# trainer starts, so only TRAINER_TUNED_FLAGS=true may pass them.
+# does not), and fp8_fake_quant_hoist, wi_tile_fwd_rhs_buffer_count and
+# gdn_cp_m_scan, which only later commits of that branch define (94f11c09d
+# defines none of them, e1cd8bf1d only the first, 15285fd74 not the last).
+# MaxText refuses a key it does not define when the trainer starts, so only
+# TRAINER_TUNED_FLAGS=true may pass them.
 _BENCH_MAXTEXT_KEYS = (
     "context_parallel_attention_load_balance_hoist_ids",
     "fp8_fake_quant_hoist",
     "gdn_conv1d_dense_token_stack",
     "gdn_conv1d_input_in_qkv_dtype",
+    "gdn_cp_m_scan",
     "moe_gmm_v2_dlhs_transpose_rhs",
     "moe_roe_packed_routing_gather",
     "moe_router_grad_from_wo_input",
@@ -173,6 +177,11 @@ _FQ_HOIST = "fp8_fake_quant_hoist"
 # needs to fit VMEM, only at the 128-chip 32x2x4 mesh, where they were timed.
 _WI_TILE = "wi_tile_fwd_mlp_dim"
 _WI_BUFFERS = "wi_tile_fwd_rhs_buffer_count"
+# TRAINER_TUNED_FLAGS adds gdn_cp_m_scan only at the 128-chip 32x2x4 mesh, where
+# it was timed, and never its backward twin gdn_cp_dh_scan, which made the step
+# slower on the bench.
+_GDN_M_SCAN = "gdn_cp_m_scan"
+_GDN_DH_SCAN = "gdn_cp_dh_scan"
 
 
 def _render(recipe: Path = _RECIPE, **overrides: str) -> str:
@@ -664,10 +673,12 @@ class SubmissionLauncherTest(absltest.TestCase):
     expected[_FQ_HOIST] = ("gather8", "off")
     expected[_WI_TILE] = ("2048", "1024")
     expected[_WI_BUFFERS] = ("2", "0")
+    expected[_GDN_M_SCAN] = ("true", "false")
     self.assertEqual(_flag_changes(before, flags), expected)
     self.assertNotIn("query_proj_kernel_gather_once", flags)
     self.assertNotIn(_FQ_HOIST, flags)
     self.assertNotIn(_WI_BUFFERS, flags)
+    self.assertNotIn(_GDN_M_SCAN, flags)
     self.assertEqual(flags["num_moe_token_chunks"], "2")
     self.assertEqual(flags["moe_chunk_pipeline"], "true")
     self.assertEqual(flags["moe_roe_packed_routing_gather"], "true")
@@ -689,10 +700,12 @@ class SubmissionLauncherTest(absltest.TestCase):
     expected[_FQ_HOIST] = ("gather8", "off")
     expected[_WI_TILE] = ("2048", "1024")
     expected[_WI_BUFFERS] = ("2", "0")
+    expected[_GDN_M_SCAN] = ("true", "false")
     self.assertEqual(_flag_changes(before, flags), expected)
     self.assertNotIn("query_proj_kernel_gather_once", flags)
     self.assertNotIn(_FQ_HOIST, flags)
     self.assertNotIn(_WI_BUFFERS, flags)
+    self.assertNotIn(_GDN_M_SCAN, flags)
 
   def test_tuned_flags_keep_an_explicit_chunk_count_at_64x1x8(self):
     flags = _maxtext_flags(
@@ -710,6 +723,7 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertNotIn(_FQ_HOIST, flags)
     self.assertEqual(flags[_WI_TILE], "1024")
     self.assertNotIn(_WI_BUFFERS, flags)
+    self.assertNotIn(_GDN_M_SCAN, flags)
 
   def test_fp8_fake_quant_hoist_only_at_the_timed_cell(self):
     # Once, with gather8, in the 32x2x4 trainer with the tuned flags (the
@@ -774,6 +788,38 @@ class SubmissionLauncherTest(absltest.TestCase):
           _maxtext_flag_tokens(trainer, _WI_TILE), [f"{_WI_TILE}=1024"], name
       )
       self.assertNotIn(_WI_BUFFERS, render, name)
+
+  def test_gdn_cp_m_scan_only_at_the_timed_mesh(self):
+    # Once, in the 32x2x4 trainer with the tuned flags (the default render, the
+    # bench cell, and the bench cell with TRAINER_FP8=false, which it does not
+    # depend on); its backward twin gdn_cp_dh_scan never, anywhere.
+    at_32x2x4 = {
+        "default": self.default,
+        "bench": self.bench_on,
+        "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
+    }
+    for name, render in at_32x2x4.items():
+      trainer = _jobset(render, "train")
+      self.assertEqual(
+          _maxtext_flag_tokens(trainer, _GDN_M_SCAN),
+          [f"{_GDN_M_SCAN}=true"],
+          name,
+      )
+    # Nowhere else: tuned flags off, the 256-chip meshes.
+    others = {
+        "tuned off": self.default_off,
+        "bench, tuned off": self.bench_off,
+        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
+        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
+        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
+        "32x2x8, tuned off": _render(
+            TRAINER_TUNED_FLAGS="false", **_MESH_32X2X8
+        ),
+    }
+    for name, render in others.items():
+      self.assertNotIn(_GDN_M_SCAN, render, name)
+    for name, render in {**at_32x2x4, **others}.items():
+      self.assertNotIn(_GDN_DH_SCAN, render, name)
 
   def test_tuned_flags_false_leaves_the_256_chip_meshes_alone(self):
     for mesh in (_MESH_32X2X8, _MESH_64X1X8):
@@ -861,6 +907,7 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertNotIn(_FQ_HOIST, flags)
     self.assertEqual(flags[_WI_TILE], "1024")
     self.assertNotIn(_WI_BUFFERS, flags)
+    self.assertNotIn(_GDN_M_SCAN, flags)
 
   def test_pad_start_with_finite_moe_capacity_requires_exclude_padding(self):
     with self.assertRaisesRegex(

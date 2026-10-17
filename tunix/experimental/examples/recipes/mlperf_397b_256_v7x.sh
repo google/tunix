@@ -385,6 +385,11 @@ fi
 #     refuses the buffer count unless moe_wi_gmm_fused_swiglu=true and
 #     use_gmm_v2_heuristic_tiling=false, as here. Both only at the 128-chip 32x2x4 mesh,
 #     the one they were timed at.
+#   gdn_cp_m_scan=true, at 32x2x4: with gdn_cp_mode=seq, the GDN context-parallel forward
+#     folds each rank's chunk transitions into its local transition product with one
+#     Pallas scan in VMEM instead of an XLA reduction tree of matmuls. MaxText refuses the
+#     key unless use_gdn_kernel=true and gdn_chunk_size=64, as here. Its backward twin,
+#     gdn_cp_dh_scan, stays off: it made the step slower on the bench (below).
 # These on the bench, regular micro-batch or s/step as above, 0 tokens dropped:
 #   moe_routing_index_math=count 10.022 -> 9.875 s (o275x-mf-cnt-prof),
 #     moe_unsplit_prefused_wi with two exact rewrites this block leaves off 10.022 ->
@@ -432,6 +437,13 @@ fi
 #     six gates, with the loss of the code without the keys (nx-e6k1). In an AOT compile of
 #     that cell fwd_bwd takes the same 80.26 GiB of HBM as without the keys, at the same
 #     scheduler memory.
+#   gdn_cp_m_scan=true, on MaxText with this block's other keys at 32x2x4 (without the 2048
+#     tile), against the same code with the key off in the same pod: 79.480 -> 78.822 s/step
+#     (o275x-g2-ctl -> o275x-g2-m, 3,711 -> 3,742 tokens/s/chip), 0 tokens dropped; 78.795
+#     in a replicate in another pod (o275x-gr-m). Its numerics run passes all six gates with
+#     the loss of the code without the key (nx-gm-m). gdn_cp_dh_scan made the step slower:
+#     79.403 -> 80.610 s/step alone (o275x-g3-ctl -> o275x-g3-dh) and 80.152 with both
+#     scans (o275x-g2-both, against 79.480).
 #   custom_mesh_and_rule=cp-as-ep-dense-no-cp, on the code of
 #     AI-Hypercomputer/maxtext#5758 at this cell without
 #     context_parallel_attention_load_balance_hoist_ids, moe_wo_gmm_fused_dswiglu and
@@ -480,8 +492,9 @@ fi
 # parambole/rl-4600-final-maxtext, on atwigg/mlperf at bbd0f6f10, the merge of
 # AI-Hypercomputer/maxtext#5721; bbd0f6f10 itself lacks those three). So is
 # fp8_fake_quant_hoist, from the commit after them on that branch (94f11c09d lacks it), and
-# wi_tile_fwd_rhs_buffer_count, from a later one (e1cd8bf1d, the branch's previous head,
-# lacks it). MaxText refuses a key it does not define when the trainer
+# wi_tile_fwd_rhs_buffer_count and gdn_cp_m_scan, from later ones (e1cd8bf1d lacks both, and
+# 15285fd74, the branch's previous head, gdn_cp_m_scan). MaxText refuses a key it does not
+# define when the trainer
 # starts, so an older MaxText needs TRAINER_TUNED_FLAGS=false.
 # The 256-chip trainer (TRAINER_TPU_SLICE=tpu7x:4x8x8, 512 devices), from Rohan Bierneni's
 # 256-chip trainer runs (2026-10-15, RL trainer bench, 9 micro-batches of 64 rows, steps 1-4):
@@ -521,6 +534,11 @@ if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
   # fit VMEM.
   if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
     export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} wi_tile_fwd_rhs_buffer_count=2"
+  fi
+  # gdn_cp_m_scan only at the mesh it was timed at. Its backward twin gdn_cp_dh_scan stays off:
+  # on the bench it made the step slower.
+  if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} gdn_cp_m_scan=true"
   fi
 fi
 export DEBUG=${DEBUG:-0}
