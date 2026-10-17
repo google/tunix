@@ -65,6 +65,8 @@ class RoutingActorPool:
 
   Args:
     actors: Initial sequence of worker actor handles or string URI targets.
+    actors_fn: Optional zero-arg callable returning the live sequence of
+      `ActorHandle`s (mutually exclusive with `actors`).
     router: Optional custom routing callable `(actors, method_name, args,
       kwargs) -> ActorHandle` or router module/object providing per-method
       handlers matching `method_name` with signature `(actors, args, kwargs) ->
@@ -75,15 +77,29 @@ class RoutingActorPool:
       self,
       actors: Optional[Sequence[Union[str, ActorHandle]]] = None,
       *,
+      actors_fn: Optional[Callable[[], Sequence[ActorHandle]]] = None,
       router: Optional[Union[Callable[..., ActorHandle], Any]] = None,
   ):
+    if actors is not None and actors_fn is not None:
+      raise ValueError("Cannot specify both `actors` and `actors_fn`.")
+    self._actors_fn = actors_fn
     self._actors: List[ActorHandle] = []
     for a in actors or []:
       self.add_actor(a)
     self._idx = 0
     self.router = router
 
+  @property
+  def actors(self) -> Sequence[ActorHandle]:
+    if self._actors_fn is not None:
+      return self._actors_fn()
+    return self._actors
+
   def add_actor(self, actor: Union[str, ActorHandle]) -> None:
+    if self._actors_fn is not None:
+      raise RuntimeError(
+          "Cannot call add_actor() on a RoutingActorPool backed by actors_fn."
+      )
     if isinstance(actor, str):
       self._actors.append(ActorHandle.from_address(actor))
     elif isinstance(actor, ActorHandle):
@@ -113,9 +129,8 @@ class RoutingActorPool:
     Raises:
       RuntimeError: If the pool contains no registered ActorHandles.
     """
-
-    if not self._actors:
-
+    actors = self.actors
+    if not actors:
       raise RuntimeError(
           "RoutingActorPool contains no registered ActorHandles."
       )
@@ -127,9 +142,9 @@ class RoutingActorPool:
           and hasattr(self.router, method_name)
           and callable(getattr(self.router, method_name))
       ):
-        return getattr(self.router, method_name)(self._actors, args, kwargs)
+        return getattr(self.router, method_name)(actors, args, kwargs)
       elif callable(self.router):
-        return self.router(self._actors, method_name, args, kwargs)
+        return self.router(actors, method_name, args, kwargs)
       else:
         raise TypeError(
             f"Router object {type(self.router)} must provide a method matching "
@@ -142,13 +157,13 @@ class RoutingActorPool:
     if route_key is not None:
       # Not builtin `hash()`: it salts `str` per process, so placement would
       # not survive a restart.
-      # TODO(tunix-dev): `% len(self._actors)` remaps every key when pool
+      # TODO(tunix-dev): `% len(actors)` remaps every key when pool
       # membership changes, not just the keys on the affected actor. Switch to
       # rendezvous (HRW) hashing before adding actor eviction.
-      return self._actors[stable_route_hash(route_key) % len(self._actors)]
+      return actors[stable_route_hash(route_key) % len(actors)]
 
     # Default fallback: round-robin load balancing across all endpoints
-    actor = self._actors[self._idx % len(self._actors)]
+    actor = actors[self._idx % len(actors)]
     self._idx += 1
     return actor
 
@@ -191,7 +206,7 @@ class RoutingActorPool:
           - args: Positional arguments sequence passed to the remote method.
           - kwargs: Keyword arguments dictionary passed to the remote method.
     """
-    if not self._actors:
+    if not self.actors:
       raise RuntimeError(
           "RoutingActorPool contains no registered ActorHandles."
       )
@@ -254,8 +269,17 @@ class PoolExecutionSession:
     failures.
   """
 
-  def __init__(self, pool: RoutingActorPool):
-    self._pool = pool
+  def __init__(
+      self,
+      pool: Optional[RoutingActorPool] = None,
+      *,
+      actors_fn: Optional[Callable[[], Sequence[ActorHandle]]] = None,
+  ):
+    if (pool is None) == (actors_fn is None):
+      raise ValueError("Must specify exactly one of `pool` or `actors_fn`.")
+    self._pool = (
+        pool if pool is not None else RoutingActorPool(actors_fn=actors_fn)
+    )
     self._response_queue: asyncio.Queue[Any] = asyncio.Queue()
     self._active_workers: set[ActorHandle] = set()
     self._dispatched_tasks: Dict[ActorHandle, set[str]] = {}
@@ -267,6 +291,12 @@ class PoolExecutionSession:
   def _notify_if_zero_flight(self) -> None:
     if self._in_flight == 0:
       self._response_queue.put_nowait(self._sentinel)
+
+  async def asubmit(
+      self, method_name: Optional[str] = None, *args, **kwargs
+  ) -> Any:
+    """Selects a worker from the underlying pool and awaits a one-shot RPC."""
+    return await self._pool.asubmit(method_name, *args, **kwargs)
 
   async def submit(
       self,

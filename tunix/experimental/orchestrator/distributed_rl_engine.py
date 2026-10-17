@@ -21,7 +21,6 @@ AbstractRLEngine.
 """
 
 import asyncio
-import collections
 from collections.abc import Mapping, Sequence
 import concurrent.futures
 import inspect
@@ -83,10 +82,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       weight_sync_coordinator: Any = None,
   ):
     self._registry = registry
-    self._rollout_pool = actor_pool.RoutingActorPool(
-        self._registry.handles(datatypes.Role.ROLLOUT)
+    self._rollout_session = actor_pool.PoolExecutionSession(
+        actors_fn=self._rollout_handles
     )
-    self._rollout_session = actor_pool.PoolExecutionSession(self._rollout_pool)
     self._policy_version = 0
     self._weight_sync_coordinator = weight_sync_coordinator
     self._restored_checkpoint_metadata: dict[str, Any] | None = None
@@ -389,24 +387,19 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         generation_args=generation_args,
         route_metadata=route_metadata,
     )
-    worker_to_requests: dict[Any, list[datatypes.RolloutRequest]] = (
-        collections.defaultdict(list)
-    )
-    for req in requests:
-      worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": req.traj_id}
-      )
-      worker_to_requests[worker].append(req)
-
-    tasks = [
-        self._invoke_worker(worker, "generate", requests=w_requests)
-        for worker, w_requests in worker_to_requests.items()
-        if w_requests
-    ]
-    if not tasks:
+    if not requests:
       return []
 
-    results = await asyncio.gather(*tasks)
+    results = await asyncio.gather(
+        *(
+            self._rollout_session.asubmit(
+                "generate",
+                requests=[req],
+                route_key=req.traj_id,
+            )
+            for req in requests
+        )
+    )
     raw_items = [
         item
         for sublist in results

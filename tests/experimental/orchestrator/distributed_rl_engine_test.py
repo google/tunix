@@ -1963,6 +1963,28 @@ class DistributedRLEngineTest(absltest.TestCase):
     self.assertEqual(item.metadata["intra_batch_idx"], 1)
     self.assertIn("old_logprobs", item.traj)
 
+  def test_rollout_session_dynamically_reflects_late_registration(self):
+    async def _run():
+      registry = worker_registry.WorkerRegistry()
+      # Construct engine BEFORE any rollout worker is registered in registry
+      engine = distributed_rl_engine.DistributedRLEngine(registry=registry)
+
+      late_rollout = MockActorHandle()
+      registry.register_handle(
+          "rollout-late", [datatypes.Role.ROLLOUT], late_rollout
+      )
+
+      req_ids = await engine.dispatch_rollouts(
+          [{"prompt": "p_late", "prompt_id": "p_late"}],
+          num_generations=1,
+          policy_version=0,
+      )
+      self.assertEqual(req_ids, ["req_p_late_g0_v0"])
+      late_rollout.generate.assert_awaited_once()
+      await engine.close()
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

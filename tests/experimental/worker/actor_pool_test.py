@@ -723,6 +723,69 @@ class ActorPoolTest(parameterized.TestCase):
 
     asyncio.run(_run())
 
+  def test_routing_actor_pool_actors_fn_dynamic_view_and_guards(self):
+    engine_0 = StubWorkerEngine("worker_0", latency=0.001)
+    engine_1 = StubWorkerEngine("worker_1", latency=0.001)
+    h0 = create_in_process_handle(engine_0)
+    h1 = create_in_process_handle(engine_1)
+
+    with self.assertRaisesRegex(
+        ValueError, "Cannot specify both `actors` and `actors_fn`"
+    ):
+      actor_pool.RoutingActorPool([h0], actors_fn=lambda: [h0])
+
+    live_handles: list[remote_lib.ActorHandle] = []
+    pool = actor_pool.RoutingActorPool(actors_fn=lambda: list(live_handles))
+
+    with self.assertRaisesRegex(
+        RuntimeError, "Cannot call add_actor\\(\\) on a RoutingActorPool"
+    ):
+      pool.add_actor(h0)
+
+    # Empty initially
+    with self.assertRaisesRegex(
+        RuntimeError, "RoutingActorPool contains no registered ActorHandles"
+    ):
+      pool.submit("get_status")
+
+    # Dynamically populate h0, then h1
+    live_handles.append(h0)
+    self.assertEqual(list(pool.actors), [h0])
+    self.assertIn("worker_id=worker_0", pool.submit("get_status"))
+
+    live_handles.append(h1)
+    self.assertEqual(list(pool.actors), [h0, h1])
+    seen = {pool.submit("get_status"), pool.submit("get_status")}
+    self.assertTrue(any("worker_id=worker_0" in s for s in seen))
+    self.assertTrue(any("worker_id=worker_1" in s for s in seen))
+
+    # Dynamically remove h0 -> only h1 receives calls
+    live_handles.remove(h0)
+    self.assertEqual(list(pool.actors), [h1])
+    for _ in range(3):
+      self.assertIn("worker_id=worker_1", pool.submit("get_status"))
+
+    with self.assertRaisesRegex(
+        ValueError, "Must specify exactly one of `pool` or `actors_fn`"
+    ):
+      actor_pool.PoolExecutionSession()
+    with self.assertRaisesRegex(
+        ValueError, "Must specify exactly one of `pool` or `actors_fn`"
+    ):
+      actor_pool.PoolExecutionSession(
+          pool, actors_fn=lambda: list(live_handles)
+      )
+
+    async def _run_session():
+      session = actor_pool.PoolExecutionSession(
+          actors_fn=lambda: list(live_handles)
+      )
+      status = await session.asubmit("get_status")
+      self.assertIn("worker_id=worker_1", status)
+      await session.close()
+
+    asyncio.run(_run_session())
+
 
 if __name__ == "__main__":
   absltest.main()
