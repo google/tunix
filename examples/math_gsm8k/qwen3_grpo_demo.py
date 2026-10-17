@@ -29,11 +29,14 @@ This script contains the following components:
 
 from __future__ import annotations
 
+import os
+
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+
 import argparse
 import gc
 import logging
 import math
-import os
 import sys
 import time
 
@@ -137,10 +140,10 @@ from tunix.sft import utils as sft_utils
 
 # ====== Argparse ======
 arg_parser = argparse.ArgumentParser(
-    description="Train Qwen3-1.7B on GSM8K with the VTC GRPO recipe."
+    description="Train Qwen3-0.6B on GSM8K with the VTC GRPO recipe."
 )
-arg_parser.add_argument("--batch_size", type=int, default=4)
-arg_parser.add_argument("--mini_batch_size", type=int, default=2)
+arg_parser.add_argument("--batch_size", type=int, default=16)
+arg_parser.add_argument("--mini_batch_size", type=int, default=16)
 arg_parser.add_argument("--train_micro_batch_size", type=int, default=1)
 arg_parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
 arg_parser.add_argument("--max_steps", type=int, default=200)
@@ -159,7 +162,7 @@ args, _ = arg_parser.parse_known_args()
 
 
 # ====== Recipe Defaults ======
-MODEL_NAME = "Qwen3-1.7B"
+MODEL_NAME = "Qwen3-0.6B"
 MODEL_ID = f"Qwen/{MODEL_NAME}"
 SEED = 42
 
@@ -176,18 +179,18 @@ EVAL_BATCH_SIZE = 128
 EVAL_AT_START = True
 EVAL_AT_END = True
 
-BETA = 0.04
+BETA = 0.0
 EPSILON = 0.2
 # NeMo's reference_policy_kl_type="k2" is exactly 0.5 * (logp-ref_logp)^2,
 # which matches Tunix's "mse_kl" implementation.
 KL_LOSS_MODE = "mse_kl"
-LEARNING_RATE = 2.0e-7
+LEARNING_RATE = 3e-6
 WEIGHT_DECAY = 0.01
 ADAM_B1 = 0.9
 ADAM_B2 = 0.999
 ADAM_EPS = 1.0e-8
 MAX_GRAD_NORM = 1.0
-WARMUP_STEPS = 50
+WARMUP_STEPS = 10
 LR_DECAY_STEPS = 500
 
 MAX_PROMPT_LENGTH = 1024
@@ -217,6 +220,9 @@ MODEL_DTYPE = jnp.bfloat16
 ARTIFACT_ROOT = os.path.join(REPO_ROOT, "artifacts", "qwen3_grpo_gsm8k_vtc")
 TFDS_DATA_DIR = os.path.join(ARTIFACT_ROOT, "data")
 MODEL_DOWNLOAD_DIR = os.path.join(ARTIFACT_ROOT, "models")
+MODEL_DOWNLOAD_DIR = (  # For OSS usage, set this to the local path where the model is downloaded.
+    "/scratch/models/Qwen3-0.6B"
+)
 INTERMEDIATE_CKPT_DIR = os.path.join(ARTIFACT_ROOT, "intermediate_ckpt")
 CHECKPOINT_ROOT = os.path.join(
     ARTIFACT_ROOT, "checkpoints", str(int(time.time()))
@@ -370,7 +376,7 @@ def put_model_on_device(model: nnx.Module) -> nnx.Module:
 def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module]:
   ensure_model_downloaded()
 
-  config = qwen3_model_lib.ModelConfig.qwen3_1p7b()
+  config = qwen3_model_lib.ModelConfig.qwen3_0p6b()
   if ENABLE_REMAT:
     config.remat_config = qwen3_model_lib.RematConfig.DECODER
   else:
@@ -469,7 +475,11 @@ def main() -> None:
       token=os.getenv("HF_TOKEN"),
       trust_remote_code=True,
   )
-  chat_parser = VTCRawTextParser()
+  # chat_parser = VTCRawTextParser()
+  chat_parser = chat_parser_lib.QwenChatTemplateParser(
+      tokenizer=tokenizer,
+      enable_thinking=False,  # Set True if using native <think> tags (Option A2)
+  )
   qwen_eos_tokens = tokenizer.encode("<|im_end|>", add_special_tokens=False)  # pyrefly: ignore[missing-attribute]
 
   reference, actor = create_reference_and_actor(shared_mesh)
@@ -480,7 +490,7 @@ def main() -> None:
       "max_prompt_length": MAX_PROMPT_LENGTH,
       "kv_cache_size": KV_CACHE_SIZE,
       "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
-      "eos_tokens": qwen_eos_tokens,
+      "eos_tokens": [151643, 151645],
       "return_logprobs": True,
   }
   train_rollout_dict = {
@@ -577,8 +587,14 @@ def main() -> None:
       epsilon_high=EPSILON,
       advantage_estimator="grpo",
       degenerate_group_masking=False,
-      use_rollout_logps=False,
-      system_prompt="",
+      use_rollout_logps=True,
+      log_sampler_trainer_agreement=True,
+      system_prompt=(
+          "You are a helpful math assistant. Solve the user's math problem "
+          "step by step. Keep your thinking concise inside <think>...</think> "
+          "tags, and put your final numerical answer inside \\boxed{}."
+          ""
+      ),
       max_response_length=MAX_RESPONSE_LENGTH,
       max_concurrency=MAX_CONCURRENCY,
       loss_agg_mode="sequence-mean-token-mean",
