@@ -16,6 +16,8 @@
 
 from collections.abc import Mapping
 import contextlib
+import dataclasses
+import os
 from typing import Any, Callable, ContextManager, cast
 
 from absl import logging
@@ -32,6 +34,18 @@ from tunix.rl import common as rl_common
 
 WorkerState = datatypes.WorkerState
 
+STAGE_BATCH_ENV = "TUNIX_STAGE_BATCH"
+
+
+def stage_batch_env_on() -> bool:
+  """Whether `TUNIX_STAGE_BATCH` selects staging."""
+  return os.environ.get(STAGE_BATCH_ENV, "").strip().lower() in (
+      "1",
+      "true",
+      "yes",
+      "stage",
+  )
+
 
 class TrainerWorker(abstract_worker.Worker):
   """Worker wrapper for a Trainer.
@@ -39,6 +53,20 @@ class TrainerWorker(abstract_worker.Worker):
   The TrainerWorker owns an AbstractTrainer and orchestrates its initialization,
   compilation, and execution. It exposes the trainer's API so it can be called
   by an orchestrator (either locally or via RPC).
+
+  Concurrency contract:
+    When `TUNIX_STAGE_BATCH=stage`, `stage_batch`, `fwd_bwd` and
+    `apply_deferred_update` are listed in `remote_executor_methods` and execute
+    on `RemoteExecutionServer`'s worker thread pool so `stage_batch(MB k+1)` can
+    prepare and transfer inputs while `fwd_bwd(MB k)` blocks in
+    `InflightThrottler.wait_for_next()`, and so the next step's second
+    micro-batch can be staged while `apply_deferred_update` waits for the
+    device at the step boundary (a method on the loop thread would hold every
+    other request back for that wait). The orchestrator must serialize
+    `fwd_bwd` calls (at most one `fwd_bwd` in flight at a time), send
+    `apply_deferred_update` only once the step's last `fwd_bwd` returned, and
+    await any in-flight `fwd_bwd` before calling `get_metrics`,
+    `save_checkpoint`, `prepare_weight_sync`, or `release_weight_sync`.
   """
 
   def __init__(
@@ -66,9 +94,9 @@ class TrainerWorker(abstract_worker.Worker):
     self._trainer_factory = trainer_factory
     self._trainer: abstract_trainer.AbstractTrainer | None = None
     self._pending_loss_fn: tuple[Callable[..., Any], bool] | None = None
-    self._pending_gen_model_input_fn: (
-        Callable[[Any], dict[str, Any]] | None
-    ) = None
+    self._pending_gen_model_input_fn: Callable[[Any], dict[str, Any]] | None = (
+        None
+    )
     self._logps_chunk_size = logps_chunk_size
     self._logps_micro_batch_size = logps_micro_batch_size
     self._is_running = False
@@ -86,6 +114,11 @@ class TrainerWorker(abstract_worker.Worker):
     # needs it closed (another micro-batch, metrics, a checkpoint, a weight
     # sync, actor log-probs) is accepted.
     self._deferred_update: str | None = None
+    self._remote_executor_methods: frozenset[str] = (
+        frozenset({"stage_batch", "fwd_bwd", "apply_deferred_update"})
+        if stage_batch_env_on()
+        else frozenset({"stage_batch"})
+    )
 
   def _refuse_while_update_deferred(self, method: str) -> None:
     if self._deferred_update is not None:
@@ -94,6 +127,22 @@ class TrainerWorker(abstract_worker.Worker):
           f" last micro-batch was {self._deferred_update!r} is deferred; run"
           " apply_deferred_update() first."
       )
+
+  @property
+  def remote_executor_methods(self) -> frozenset[str]:
+    """Method names that `RemoteExecutionServer` runs on its thread pool."""
+    return self._remote_executor_methods
+
+  @remote_executor_methods.setter
+  def remote_executor_methods(self, methods: frozenset[str]) -> None:
+    self._remote_executor_methods = frozenset(methods)
+
+  def _with_dense_routing(self, payload: Any) -> Any:
+    """Materializes a wire-packed `routed_experts` leaf into a dense array."""
+    routed = getattr(payload, "routed_experts", None)
+    if routed is not None and hasattr(routed, "materialize"):
+      return dataclasses.replace(payload, routed_experts=routed.materialize())
+    return payload
 
   def _policy_version(self) -> int:
     if self._trainer is None:
@@ -334,9 +383,8 @@ class TrainerWorker(abstract_worker.Worker):
       # micro-batch (MaxText's retry_dropless_final_micro_batch runs that one
       # with the dropless program). The update itself is run here, below, or
       # by `apply_deferred_update`.
-      self._trainer.fwd_bwd(
-          request.payload, apply_optimizer=apply_optimizer, **kwargs
-      )
+      payload = self._with_dense_routing(request.payload)
+      self._trainer.fwd_bwd(payload, apply_optimizer=apply_optimizer, **kwargs)
       if apply_optimizer and defer_update:
         self._deferred_update = str(request.request_id)
         req_metadata["update_deferred"] = True
@@ -445,10 +493,10 @@ class TrainerWorker(abstract_worker.Worker):
     device_wait_s = None
     before_update = self._deferred_update is not None
     try:
-      staged_input = request.payload
+      staged_input = self._with_dense_routing(request.payload)
       prepare = getattr(self._trainer, "prepare_fwd_bwd_input", None)
       if callable(prepare):
-        staged_input = prepare(request.payload)
+        staged_input = prepare(staged_input)
       if not before_update:
         # Both waits are for the work dispatched before this call, which ends
         # with the step's optimizer update, so a failure in either is that
@@ -605,6 +653,45 @@ class TrainerWorker(abstract_worker.Worker):
         device_wait_s=device_wait_s,
         **metadata,
     )
+
+  def stage_batch(
+      self,
+      request: datatypes.TrainRequest,
+  ) -> datatypes.Response:
+    """Stages a micro-batch on the trainer ahead of its `fwd_bwd`."""
+    self._ensure_ready()
+    req_metadata = dict(request.metadata) if request.metadata else {}
+    if not hasattr(self._trainer, "stage_batch"):
+      resp = self._response(
+          staged=False,
+          reason="trainer_does_not_support_stage_batch",
+          **req_metadata,
+      )
+      resp.request_id = request.request_id
+      return resp
+    try:
+      payload = self._with_dense_routing(request.payload)
+      staged = bool(self._trainer.stage_batch(payload, key=request.request_id))
+      self._last_error = None
+      resp = self._response(staged=staged, **req_metadata)
+      resp.request_id = request.request_id
+      return resp
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      logging.warning("stage_batch failed on %s: %s", self._worker_id, exc)
+      resp = self._response(
+          staged=False,
+          reason=f"{type(exc).__name__}: {exc}",
+          **req_metadata,
+      )
+      resp.request_id = request.request_id
+      return resp
+
+  def reset_staged(self) -> datatypes.Response:
+    """Drops any queued staged micro-batches on the underlying trainer."""
+    self._ensure_ready()
+    reset_fn = getattr(self._trainer, "reset_staged", None)
+    dropped = int(reset_fn()) if callable(reset_fn) else 0
+    return self._response(reset_staged=True, dropped=dropped)
 
   def update(self, **kwargs) -> int:
     """Applies the accumulated (mean) gradients as one optimizer update."""

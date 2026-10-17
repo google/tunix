@@ -130,7 +130,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       type=int,
       default=(
           int(val)
-          if (val := os.getenv("MAX_CONCURRENT_ROLLOUTS_PER_WORKER", "").strip())
+          if (
+              val := os.getenv("MAX_CONCURRENT_ROLLOUTS_PER_WORKER", "").strip()
+          )
           else None
       )
       or None,
@@ -336,6 +338,22 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--stage_train_batches",
+      action=argparse.BooleanOptionalAction,
+      default=None,
+      help=(
+          "Pre-stage microbatches onto the trainer ahead of fwd_bwd while the"
+          " previous microbatch is running. Defaults to TUNIX_STAGE_BATCH=stage"
+          " when --pipeline_train_microbatches is enabled."
+      ),
+  )
+  parser.add_argument(
+      "--max_staged_batches",
+      type=int,
+      default=int(os.getenv("TUNIX_MAX_STAGED_BATCHES", "2")),
+      help="Maximum microbatches staged ahead on the trainer (default 2).",
+  )
+  parser.add_argument(
       "--in_flight_weight_updates",
       action=argparse.BooleanOptionalAction,
       default=False,
@@ -488,9 +506,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--trajectory_group_order",
       choices=("arrival", "prompt_batch"),
       default=os.getenv("TRAJECTORY_GROUP_ORDER", "arrival"),
-      help=(
-          "Trajectory group order."
-      ),
+      help="Trajectory group order.",
   )
   parser.add_argument(
       "--weight_sync_mode",
@@ -514,9 +530,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Trainable parameters regex mask for freezing weights.",
   )
   parser.add_argument("--dataset_path", type=str, default="")
-  parser.add_argument(
-      "--dataset_name", type=str, default=DEFAULT_DATASET_NAME
-  )
+  parser.add_argument("--dataset_name", type=str, default=DEFAULT_DATASET_NAME)
   parser.add_argument("--dataset_split", type=str, default="train")
   parser.add_argument(
       "--dataset_cache_dir",
@@ -599,14 +613,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help=(
           "Path (local or gs://) to a static manifest file (e.g. sandboxes.txt)"
           " containing container image URIs to pre-warm on Kubernetes directly"
-          " instead of dynamically discovering images by inspecting the dataset."
+          " instead of dynamically discovering images by inspecting the"
+          " dataset."
       ),
   )
   parser.add_argument(
       "--prewarm_max_workers",
       type=int,
       default=int(os.getenv("PREWARM_MAX_WORKERS", "32")),
-      help="Maximum concurrent worker threads for pre-warming sandbox pools on Kubernetes.",
+      help=(
+          "Maximum concurrent worker threads for pre-warming sandbox pools on"
+          " Kubernetes."
+      ),
   )
   parser.add_argument(
       "--max_concurrency",
@@ -820,9 +838,7 @@ def _build_trajectory_store_config(
       else None
   )
   sql_cfg = (
-      {"enabled": True, "backend": "sql", "db_url": db_url}
-      if db_url
-      else None
+      {"enabled": True, "backend": "sql", "db_url": db_url} if db_url else None
   )
   if file_cfg is None and sql_cfg is None:
     return None
@@ -951,7 +967,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
 
   if args.image_rewrite_prefix:
-    os.environ["IMAGE_REWRITE_PREFIX"] = args.image_rewrite_prefix.strip('"\'')
+    os.environ["IMAGE_REWRITE_PREFIX"] = args.image_rewrite_prefix.strip("\"'")
   if args.disable_weight_sync_timeouts:
     os.environ["WEIGHT_SYNC_DISABLE_TIMEOUTS"] = "1"
 
@@ -984,7 +1000,10 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       trajectory_store_config=_build_trajectory_store_config(args),
       disable_weight_sync_timeouts=args.disable_weight_sync_timeouts,
       jax_cache_config={
-          "save_jax_cache": os.getenv("SAVE_JAX_CACHE", "true").lower() in ("1", "true", "yes"),
+          "save_jax_cache": (
+              os.getenv("SAVE_JAX_CACHE", "true").lower()
+              in ("1", "true", "yes")
+          ),
           "jax_cache_gcs_dir": os.getenv("JAX_CACHE_GCS_DIR"),
           "rollout_jax_cache_gcs_dir": os.getenv("ROLLOUT_JAX_CACHE_GCS_DIR"),
       },
@@ -1125,9 +1144,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
 
   prewarm_manifest = (
-      args.prewarm_images_file
-      or os.getenv("PREWARM_IMAGES_FILE")
-      or ""
+      args.prewarm_images_file or os.getenv("PREWARM_IMAGES_FILE") or ""
   )
   if args.use_agent_sandbox and prewarm_manifest:
     logging.info(
@@ -1288,7 +1305,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
             max_warmpool_replicas=args.max_warmpool_replicas,
             unwarm_on_exhaustion=True,
             scaffold=args.scaffold,
-            wait_initial=False if prewarm_manifest else args.sandbox_wait_initial,
+            wait_initial=False
+            if prewarm_manifest
+            else args.sandbox_wait_initial,
             max_staleness=args.max_staleness,
             max_workers=args.prewarm_max_workers,
             images_file=prewarm_manifest or None,
@@ -1336,6 +1355,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         pipeline_step_boundary=args.pipeline_step_boundary,
         stage_next_microbatch=args.stage_next_microbatch,
         stage_before_update=args.stage_before_update,
+        stage_train_batches=args.stage_train_batches,
+        max_staged_batches=args.max_staged_batches,
         partial_rollout=args.in_flight_weight_updates,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
         initial_dispatch_stagger_s=args.initial_dispatch_stagger_s,
@@ -1460,7 +1481,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
                 or os.getenv("NAMESPACE", "priority-dev")
             )
             logging.info(
-                "Reaping agent_sandbox_rl resources for run_id=%s in namespace=%s...",
+                "Reaping agent_sandbox_rl resources for run_id=%s in"
+                " namespace=%s...",
                 run_id,
                 c_ns,
             )

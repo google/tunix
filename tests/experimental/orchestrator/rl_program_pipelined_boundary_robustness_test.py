@@ -120,13 +120,13 @@ class _PrepackProbe(rl_program.StandardRLProgram):
       tag = st._probe_tag = self._num_tags
     return tag
 
-  async def _take_group(self, st, *, current_step):
+  async def _take_group(self, st, *, current_step, **kwargs):
     tag = self._tag(st)
     if current_step is None:
       self.ahead.append((self._step, tag, len(st.ready), st.staged is not None))
     else:
       self.own[tag].add(current_step)
-    took = await super()._take_group(st, current_step=current_step)
+    took = await super()._take_group(st, current_step=current_step, **kwargs)
     if current_step is None:
       self.ready_after.append(len(st.ready))
     return took
