@@ -126,6 +126,22 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--routed_experts_encode_mode",
+      choices=datatypes.ROUTED_EXPERTS_ENCODE_MODES,
+      default="auto",
+      help="Compact encoding of routed experts in trainer batches.",
+  )
+  parser.add_argument(
+      "--routed_experts_num_experts",
+      type=int,
+      default=None,
+      help=(
+          "Experts per MoE layer. Set it with --routed_experts_encode_mode=auto"
+          " when 256 <= E <= 1023 so every batch encodes to the same tier and"
+          " the trainer step does not recompile."
+      ),
+  )
+  parser.add_argument(
       "--offpolicy",
       "--max_staleness",
       dest="max_staleness",
@@ -289,6 +305,8 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       epsilon=args.epsilon,
       beta=args.beta,
       use_rollout_logps=args.use_rollout_logps,
+      routed_experts_encode_mode=args.routed_experts_encode_mode,
+      routed_experts_num_experts=args.routed_experts_num_experts,
   )
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,
