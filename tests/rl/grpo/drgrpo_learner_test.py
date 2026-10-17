@@ -68,6 +68,7 @@ class DrGRPOlearnerTest(parameterized.TestCase):
     example.segment_positions = None
     example.sampler_is_weights = None
     example.routed_experts = None
+    example.images = None
     return example
 
   def test_create_config(self):

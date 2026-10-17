@@ -487,6 +487,7 @@ class RLTrainerPayload(TrainerPayload):
       indexing raw bytes directly.
     returns: Optional [B, C] value baseline returns (for PPO / Critic).
     old_values: Optional [B, C] critic value estimates (for PPO / Critic).
+    images: Optional multimodal image arrays for vision-language models.
     num_segments: Optional static upper bound on number of segments in packed
       rows.
     metadata: Extra payload metadata dictionary.
@@ -505,6 +506,7 @@ class RLTrainerPayload(TrainerPayload):
   routed_experts: ArrayLike | None = None
   returns: ArrayLike | None = None
   old_values: ArrayLike | None = None
+  images: ArrayLike | None = None
   num_segments: int | None = flax.struct.field(default=None, pytree_node=False)
   sampler_agreement_applied: bool = flax.struct.field(
       default=False, pytree_node=False

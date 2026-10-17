@@ -767,6 +767,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       **kwargs,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
+    images = kwargs.pop("images", None)
     exact_input = prompt_token_ids is not None
     prompt_ids = utils.resolve_prompt_tokens(
         input_strings,
@@ -842,6 +843,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
       sampling_kwargs = self.config.sampling_kwargs.copy()
       sampling_kwargs.update(kwargs)
+      if images is None:
+        images = sampling_kwargs.pop("images", None)
+      else:
+        sampling_kwargs.pop("images", None)
       raw_prompt_start = sampling_kwargs.pop(
           "routed_experts_prompt_start", None
       )
@@ -895,10 +900,91 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       # One sampled row per submitted row, no truncation: the echo check and
       # the recorded history assume the engine consumed exactly these ids.
       raise ValueError("prompt_token_ids requires exactly one output per row")
-    prompt_objects = cast(
-        List[TokensPrompt],
-        [{"prompt_token_ids": list(ids)} for ids in prompt_ids],
-    )
+
+    normalized_images_per_seq: List[Optional[List[Any]]] = []
+    if images is not None:
+      if isinstance(images, (list, tuple)):
+        if len(images) == len(prompt_ids) and len(images) > 0:
+          if isinstance(images[0], (list, tuple)):
+            for seq_imgs in images:
+              norm_seq = [img for img in seq_imgs if img is not None]
+              normalized_images_per_seq.append(norm_seq if norm_seq else None)
+          else:
+            for img in images:
+              norm_seq = [img] if img is not None else None
+              normalized_images_per_seq.append(norm_seq)
+        else:
+          flat_list = (
+              images[0]
+              if (len(images) > 0 and isinstance(images[0], (list, tuple)))
+              else images
+          )
+          norm_seq = [img for img in flat_list if img is not None]
+          for idx in range(len(prompt_ids)):
+            normalized_images_per_seq.append(
+                norm_seq if idx == 0 and norm_seq else None
+            )
+      elif isinstance(images, np.ndarray) or (
+          hasattr(images, "size") and hasattr(images, "mode")
+      ):
+        for idx in range(len(prompt_ids)):
+          normalized_images_per_seq.append([images] if idx == 0 else None)
+      else:
+        raise TypeError(f"Unsupported type for images: {type(images)}")
+    else:
+      normalized_images_per_seq = [None] * len(prompt_ids)
+
+    prompt_objects: List[TokensPrompt] = []
+    for idx, ids in enumerate(prompt_ids):
+      p_obj: dict[str, Any] = {
+          "prompt_token_ids": list(ids),
+      }
+      if not exact_input and input_strings is not None:
+        p_obj["prompt"] = input_strings[idx]
+      seq_imgs = (
+          normalized_images_per_seq[idx]
+          if idx < len(normalized_images_per_seq)
+          else None
+      )
+      if seq_imgs:
+        num_images = len(seq_imgs)
+        if not exact_input and input_strings is not None:
+          prompt_text = input_strings[idx]
+          placeholder_count = prompt_text.count(
+              "<|image|>"
+          ) + prompt_text.count("<image>")
+          if placeholder_count < num_images:
+            missing = num_images - placeholder_count
+            placeholder_str = "<|image|>\n" * missing
+            if "<|turn>user\n" in prompt_text:
+              prompt_text = prompt_text.replace(
+                  "<|turn>user\n",
+                  f"<|turn>user\n{placeholder_str}",
+                  1,
+              )
+            elif "<|im_start|>user\n" in prompt_text:
+              prompt_text = prompt_text.replace(
+                  "<|im_start|>user\n",
+                  f"<|im_start|>user\n{placeholder_str}",
+                  1,
+              )
+            elif "<start_of_turn>user\n" in prompt_text:
+              prompt_text = prompt_text.replace(
+                  "<start_of_turn>user\n",
+                  f"<start_of_turn>user\n{placeholder_str}",
+                  1,
+              )
+            else:
+              prompt_text = placeholder_str + prompt_text
+            p_obj["prompt"] = prompt_text
+            p_obj["prompt_token_ids"] = list(self.tokenize(prompt_text))
+        p_obj["multi_modal_data"] = {
+            "image": seq_imgs if len(seq_imgs) > 1 else seq_imgs[0]
+        }
+        mm_hashes = [getattr(img, "_vllm_mm_hash", None) for img in seq_imgs]
+        if all(h is not None for h in mm_hashes):
+          p_obj["multi_modal_uuids"] = {"image": mm_hashes}
+      prompt_objects.append(cast(TokensPrompt, p_obj))
     if (
         raw_cache_salt is not None
         and not isinstance(raw_cache_salt, (list, tuple))
@@ -954,7 +1040,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       )
     else:
       outputs = self._generate_offline(prompt_objects, target_sampling_params)
-    if exact_input:
+    if exact_input and not any(normalized_images_per_seq):
       utils.check_prompt_echo(prompt_ids, outputs, backend_name="vLLM")
     decoded_outputs, out_logprobs, out_tokens, out_routed_experts = (
         self.detokenize(input_strings, outputs)
@@ -964,9 +1050,17 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     ):
       raise ValueError("Logprobs are not returned from the vLLM.")
 
+    resolved_prompt_ids = []
+    for out, orig_ids in zip(outputs, prompt_ids):
+      p_toks = getattr(out, "prompt_token_ids", None)
+      if p_toks is not None and len(p_toks) > 0:
+        resolved_prompt_ids.append(list(p_toks))
+      else:
+        resolved_prompt_ids.append(orig_ids)
+
     all_input_ids, prompt_lengths, max_prompt_length = (
         utils.left_pad_prompt_tokens(
-            prompt_ids,
+            resolved_prompt_ids,
             max_prompt_length,
             self.tokenizer.pad_id(),
         )
