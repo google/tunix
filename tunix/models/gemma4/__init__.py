@@ -14,11 +14,13 @@
 
 """Gemma4 API."""
 
+from tunix.models.gemma4 import mapping_sglang_jax
 from tunix.models.gemma4 import mapping_vllm_jax
 from tunix.models.gemma4 import model
 from tunix.models.gemma4 import params_safetensors
 
 BACKEND_MAPPINGS = {
+    'sglang_jax': mapping_sglang_jax.SGLANG_JAX_MAPPING,
     'vllm_jax': mapping_vllm_jax.VLLM_JAX_MAPPING,
 }
 
