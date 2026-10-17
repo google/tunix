@@ -1416,5 +1416,105 @@ class RandomizedEquivalenceTest(parameterized.TestCase):
     self.assertGreater(staged_draws, 0)
 
 
+class GrpcMicrobatchPipelineTest(absltest.TestCase):
+  """End-to-end pipelined step boundary and intra-step microbatch overlap over
+  real gRPC (`GrpcRemoteActorHandle` + `GrpcRemoteExecutionServer`)."""
+
+  def test_zero_inter_microbatch_device_gaps_over_real_grpc(self):
+    sc = boundary_test._Scenario(
+        order="prompt_batch",
+        num_prompts=54,
+        full_batch_size=27,
+        mini_batch_size=27,
+        max_steps=2,
+        costs=boundary_test._Costs(
+            device_s=0.16,
+            update_s=0.02,
+            stage_s=0.04,
+            host_s=0.0,
+            metrics_s=0.01,
+        ),
+        dest_s=0.02,
+        round_s=0.01,
+        pack_s=0.005,
+        tail_s=0.08,
+    )
+    ref = _quiet(_base, sc, _ReplayTokenTrainer)
+
+    log: list[Any] = []
+    checkpoints: list[dict[str, Any]] = []
+    trainer = _ReplayTokenTrainer(log, sc.costs)
+    worker = boundary_test._Worker(lambda: trainer)
+    worker.initialize()
+    ref_handle = boundary_test._RemoteHandle(boundary_test._Reference())
+
+    async def _main():
+      import portpicker  # pylint: disable=g-import-not-at-top
+      port = portpicker.pick_unused_port()
+      server = boundary_test.remote_execution.GrpcRemoteExecutionServer(worker)
+      await server.start_serving_async(port=port)
+      handle = boundary_test.remote_execution.GrpcRemoteActorHandle(
+          f"grpc://localhost:{port}"
+      )
+      coordinator = boundary_test._Coordinator(handle, sc.dest_s, sc.round_s)
+      engine = boundary_test.distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[],
+          trainer_workers={datatypes.Role.ACTOR: handle},
+          inference_workers={datatypes.Role.REFERENCE: ref_handle},
+          weight_sync_coordinator=coordinator,
+      )
+      program = boundary_test._new_program(
+          sc,
+          pipelined=True,
+          staged=True,
+          program_cls=_NeverLatches,
+          log=log,
+          checkpoints=checkpoints,
+          program_kwargs=dict(_SBU),
+      )
+      program.engine = engine
+      feeder = asyncio.create_task(boundary_test._feed_queue(program, sc))
+      try:
+        await asyncio.wait_for(program.train_stage(), timeout=60)
+      finally:
+        feeder.cancel()
+        await handle.close()
+        await server.stop_serving()
+      return program
+
+    try:
+      program = _quiet(asyncio.run, _main())
+    finally:
+      ref_handle.close()
+
+    run = boundary_test._Run(
+        log=log,
+        metrics=program.metrics_logger.records,  # pyrefly: ignore
+        checkpoints=checkpoints,
+        last_step_result=program.last_step_result,
+        trainer=trainer,
+        program=program,
+    )
+    boundary_test._assert_equivalent(self, ref, run)
+    self.assertEqual(_stages(run), 1)
+    # In Step 1 (after the first update), every microbatch (including mb1 -> mb2
+    # across Step 0's 0.10s tail_s bookkeeping) is dispatched before the
+    # previous microbatch finishes on the device, yielding 0.0s idle gap.
+    first_upd_idx = next(
+        i for i, (kind, *_) in enumerate(trainer.device) if kind == "update"
+    )
+    step1_mbs = [
+        span
+        for span in trainer.device[first_upd_idx + 1 :]
+        if span[0] == "fwd_bwd"
+    ]
+    self.assertGreaterEqual(len(step1_mbs), 9)
+    inter_mb_gaps = [
+        round(step1_mbs[i][2] - step1_mbs[i - 1][3], 4)
+        for i in range(1, len(step1_mbs))
+    ]
+    self.assertEqual(inter_mb_gaps, [0.0] * len(inter_mb_gaps), inter_mb_gaps)
+
+
 if __name__ == "__main__":
   absltest.main()

@@ -21,10 +21,12 @@ pipelines.
 import abc
 import asyncio
 from collections.abc import Callable, Iterable, Mapping, Sequence, Sized
+import contextlib
 import copy
 import ctypes
 import dataclasses
 import gc
+import json
 import os
 import threading
 import time
@@ -605,6 +607,7 @@ class StandardRLProgram(RLProgram):
     # gradient-accumulation order is unchanged.
     self.pipeline_train_microbatches = pipeline_train_microbatches
     self._pending_train: asyncio.Task[tuple[Any, float]] | None = None
+    self._inflight_train: asyncio.Task[tuple[Any, float]] | None = None
     # Pipelines the step boundary (see `_train_loop`): step k+1's groups are
     # taken and packed while step k's last micro-batches train, step k+1's
     # first micro-batch goes to the trainer as soon as step k's weight sync
@@ -1992,6 +1995,47 @@ class StandardRLProgram(RLProgram):
     )
     return result, time.monotonic() - start
 
+  async def _log_trainer_step_timing(self, step: int) -> None:
+    """Logs `TRAINER_STEP_TIMING` for `step` (one line, machine-readable).
+
+    Format::
+
+      TRAINER_STEP_TIMING step=<N> policy_version=<v> rtt_s=<r> timing=<json>
+
+    `timing` is the trainer worker's step snapshot (schema `v`): per
+    microbatch `mb[i].{dispatch_begin,dispatch_end,ready}_ago_s`, the same for
+    `update`, and `prepare.{recv,done}_ago_s` for this round's
+    `prepare_weight_sync`. Every `*_ago_s` is seconds before the worker handled
+    the request, measured on the trainer's monotonic clock. On this log's
+    clock an instant is `t(line) - rtt_s / 2 - ago_s`. `ready` is when the
+    device finished the work (None if not yet observed); `dispatch_*` bracket
+    the RPC handler, which returns at dispatch. A worker that cannot answer
+    logs nothing here (the engine logs why).
+    """
+    assert self.engine is not None
+    # `get_step_timing` logs and returns None when the worker cannot answer.
+    timing, rtt_s = await self.engine.get_step_timing(role=datatypes.Role.ACTOR)
+    if timing is None:
+      return
+    logging.info(
+        "TRAINER_STEP_TIMING step=%d policy_version=%d rtt_s=%.3f timing=%s",
+        step,
+        self.policy_version,
+        rtt_s,
+        json.dumps(timing, separators=(",", ":")),
+    )
+    if not timing.get("mb") or timing.get("update") is None:
+      # The step trained, so an empty `mb` or no `update` is the timer
+      # missing work; the trainer worker's log names the call that skipped it.
+      logging.warning(
+          "TRAINER_STEP_TIMING step=%d is incomplete (%d micro-batch"
+          " entries, update %s); see the trainer log for the call that"
+          " skipped the step timer.",
+          step,
+          len(timing.get("mb") or []),
+          "missing" if timing.get("update") is None else "present",
+      )
+
   async def _await_pending_sync(self) -> None:
     """Waits for the background weight sync, if any; raises if it failed."""
     task, self._pending_sync = self._pending_sync, None
@@ -2168,10 +2212,42 @@ class StandardRLProgram(RLProgram):
 
       async def _await_pending_train() -> None:
         nonlocal step_result, policy_training_time
+        inflight, self._inflight_train = self._inflight_train, None
+        if inflight is not None:
+          step_result, elapsed = await inflight
+          policy_training_time += elapsed
         task, self._pending_train = self._pending_train, None
         if task is not None:
           step_result, elapsed = await task
           policy_training_time += elapsed
+
+      async def _await_train_upload_slot() -> None:
+        nonlocal step_result, policy_training_time
+        inflight, self._inflight_train = self._inflight_train, None
+        if inflight is not None:
+          step_result, elapsed = await inflight
+          policy_training_time += elapsed
+        if self._pending_train is not None:
+          wait_upload = getattr(
+              self.engine, "wait_for_actor_upload_idle", None
+          )
+          can_overlap_upload = (
+              self.pipeline_train_microbatches
+              and callable(wait_upload)
+              and await wait_upload(role=datatypes.Role.ACTOR)
+          )
+          if can_overlap_upload:
+            if self._pending_train.done():
+              task, self._pending_train = self._pending_train, None
+              step_result, elapsed = await task
+              policy_training_time += elapsed
+            else:
+              self._inflight_train, self._pending_train = (
+                  self._pending_train,
+                  None,
+              )
+          else:
+            await _await_pending_train()
 
       async def _maybe_save_checkpoint() -> None:
         nonlocal checkpoint_saved
@@ -2223,7 +2299,7 @@ class StandardRLProgram(RLProgram):
                 "First trainer micro-batch: %s",
                 batch_assembly.describe_payload(batch),
             )
-          await _await_pending_train()
+          await _await_train_upload_slot()
           # Save only at a resumable full-batch boundary. An optimizer step
           # can occur earlier when a full batch contains multiple mini
           # batches, but the dataset resume cursor advances in full batches.
@@ -2255,8 +2331,21 @@ class StandardRLProgram(RLProgram):
           batch = None
           if self.pipeline_train_microbatches and not is_final_batch:
             self._pending_train = asyncio.create_task(train_step)
+            await asyncio.sleep(0)
             continue
-          step_result, elapsed = await train_step
+          if self._inflight_train is not None:
+            final_train_task = asyncio.create_task(train_step)
+            try:
+              await _await_pending_train()
+              step_result, elapsed = await final_train_task
+            except BaseException:
+              if not final_train_task.done():
+                final_train_task.cancel()
+                with contextlib.suppress(BaseException):
+                  await final_train_task
+              raise
+          else:
+            step_result, elapsed = await train_step
           policy_training_time += elapsed
           if is_final_batch:
             # While an update is deferred the worker refuses get_metrics, a
@@ -2361,6 +2450,9 @@ class StandardRLProgram(RLProgram):
         self.policy_version = (
             new_version if new_version is not None else self.policy_version + 1
         )
+      # The source has staged (or the round ran), so the trainer's update is
+      # complete: fetch and log its device-side timeline for this step.
+      await self._log_trainer_step_timing(current_step)
 
       # Before `commit()`, which will eventually take ownership of the groups.
       generation_metrics = _generation_metrics(st.uncommitted_groups)
@@ -2425,6 +2517,13 @@ class StandardRLProgram(RLProgram):
           # Not collected here: its result is step k+1's, and a failure
           # surfaces when step k+1 collects it.
           await asyncio.wait({sent_ahead})
+          if (
+              self.pipeline_train_microbatches
+              and sent_ahead.done()
+              and not sent_ahead.cancelled()
+              and sent_ahead.exception() is None
+          ):
+            await self._maybe_send_second_microbatch_ahead(next_state)
 
       metrics_summary = self._collect_and_log_step_metrics(
           all_step_items=st.all_step_items,
@@ -3040,6 +3139,13 @@ class StandardRLProgram(RLProgram):
       return None
     batch = None
     st.staged = (mb._replace(payload=None), staged.request_id)
+    if (
+        self._intake_task is None
+        and not st.ready
+        and st.scored_items
+        and st.groups_consumed < self.full_batch_size
+    ):
+      self._intake_task = asyncio.create_task(self._prepack(st))
     return staged, stage_s
 
   async def _stage_next_before_update(
@@ -3173,12 +3279,62 @@ class StandardRLProgram(RLProgram):
     )
     batch = None
     if (
-        not st.ready
+        self._intake_task is None
+        and not st.ready
         and st.scored_items
         and st.groups_consumed < self.full_batch_size
     ):
       self._intake_task = asyncio.create_task(self._prepack(st))
     return self._pending_train
+
+  async def _maybe_send_second_microbatch_ahead(self, st: _StepState) -> None:
+    """Uploads step k+1's second micro-batch before step k's CPU bookkeeping."""
+    assert self.engine is not None
+    if self._pending_train is None or self._inflight_train is not None:
+      return
+    wait_upload = getattr(self.engine, "wait_for_actor_upload_idle", None)
+    if not callable(wait_upload) or not await wait_upload(
+        role=datatypes.Role.ACTOR
+    ):
+      return
+    if not self._intake_done():
+      return
+    if (
+        not st.ready
+        or st.ready[0].is_final_batch
+        or self._needs_sampler_agreement(st.ready[0].payload)
+    ):
+      return
+    self._intake_task = None
+    mb = st.ready.pop(0)
+    batch = await self._with_reference_logps(mb.payload)
+    if self._needs_sampler_agreement(batch):
+      st.ready.insert(0, mb)
+      return
+    self._record_microbatch(st, mb)
+    mb = None
+    if not self._first_train_payload_logged:
+      self._first_train_payload_logged = True
+      logging.info(
+          "First trainer micro-batch: %s",
+          batch_assembly.describe_payload(batch),
+      )
+    self._inflight_train = self._pending_train
+    self._pending_train = asyncio.create_task(
+        self._timed_train_step(
+            batch,
+            apply_optimizer=False,
+        )
+    )
+    batch = None
+    if (
+        self._intake_task is None
+        and not st.ready
+        and st.scored_items
+        and st.groups_consumed < self.full_batch_size
+    ):
+      self._intake_task = asyncio.create_task(self._prepack(st))
+    await wait_upload(role=datatypes.Role.ACTOR)
 
   async def run_async(
       self,
@@ -3258,6 +3414,8 @@ class StandardRLProgram(RLProgram):
       for task in tasks:
         if not task.done():
           task.cancel()
+      if self._inflight_train is not None and not self._inflight_train.done():
+        self._inflight_train.cancel()
       if self._pending_train is not None and not self._pending_train.done():
         self._pending_train.cancel()
       if self._intake_task is not None and not self._intake_task.done():

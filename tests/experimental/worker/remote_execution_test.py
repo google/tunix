@@ -3206,6 +3206,120 @@ class RemoteExecutionTest(absltest.TestCase):
     options = dict(remote_lib._grpc_options())  # pylint: disable=protected-access
     self.assertEqual(options.get("grpc.use_local_subchannel_pool"), 1)
 
+  def test_trb_wire_codec_round_trip_bit_identical(self):
+    rng = np.random.default_rng(42)
+    active = rng.integers(0, 512, size=(4, 512, 32, 8), dtype=np.int16)
+    pad = np.full((4, 256, 32, 8), -1, dtype=np.int16)
+    routed = np.concatenate([active, pad], axis=1)
+    raw = memoryview(routed).cast("B")
+    encoded = remote_lib._encode_wire_chunk(raw)  # pylint: disable=protected-access
+    self.assertEqual(encoded[: len(remote_lib._TRB_MAGIC)], remote_lib._TRB_MAGIC)  # pylint: disable=protected-access
+    self.assertLess(len(encoded), int(len(raw) * 0.62))
+
+    dst_u8 = np.empty(len(raw), dtype=np.uint8)
+    decoded_n = remote_lib._try_decode_wire_chunk_into(  # pylint: disable=protected-access
+        encoded, dst_u8, 0, len(raw)
+    )
+    self.assertEqual(decoded_n, len(raw))
+    dst = dst_u8.view(np.int16).reshape(routed.shape)
+    self.assertEqual(dst.dtype, np.int16)
+    np.testing.assert_array_equal(dst, routed)
+
+    # Out-of-range int16 values fall back cleanly to raw passthrough.
+    wide = np.full((1, 512, 32, 8), 1024, dtype=np.int16)
+    wide_raw = memoryview(wide).cast("B")
+    self.assertEqual(
+        remote_lib._encode_wire_chunk(wide_raw),  # pylint: disable=protected-access
+        wide_raw.tobytes(),
+    )
+
+  def test_pack_args_kwargs_and_send_prepacked_over_grpc(self):
+    rng = np.random.default_rng(7)
+    routed = np.concatenate(
+        [
+            rng.integers(0, 512, size=(2, 256, 32, 8), dtype=np.int16),
+            np.full((2, 128, 32, 8), -1, dtype=np.int16),
+        ],
+        axis=1,
+    )
+    received = []
+
+    class EchoTrainerWorker:
+
+      def stage_fwd_bwd(self, request, **kwargs):
+        received.append((request, kwargs))
+        return {"staged": True, "request_id": request["request_id"]}
+
+    async def _run():
+      async with running_grpc_server(EchoTrainerWorker()) as (_, handle):
+        req = {
+            "request_id": "mb-0",
+            "routed_experts": routed,
+            "prompt_ids": rng.integers(0, 1000, size=(2, 128), dtype=np.int32),
+        }
+        prepacked = remote_lib._pack_args_kwargs(  # pylint: disable=protected-access
+            (), {"request": req, "apply_optimizer": False}
+        )
+        self.assertIsInstance(prepacked, remote_lib._PrepackedArgsKwargs)  # pylint: disable=protected-access
+        task = asyncio.create_task(
+            handle.send_prepacked("stage_fwd_bwd", prepacked)
+        )
+        await handle.wait_for_upload_idle()
+        res = await task
+        self.assertEqual(res, {"staged": True, "request_id": "mb-0"})
+        self.assertLen(received, 1)
+        got_req, got_kw = received[0]
+        self.assertEqual(got_kw, {"apply_optimizer": False})
+        self.assertEqual(got_req["routed_experts"].dtype, np.int16)
+        np.testing.assert_array_equal(got_req["routed_experts"], routed)
+        np.testing.assert_array_equal(
+            got_req["prompt_ids"], req["prompt_ids"]
+        )
+
+    asyncio.run(_run())
+
+  def test_grpc_server_streams_next_microbatch_while_sync_fwd_bwd_blocks(self):
+    rng = np.random.default_rng(99)
+    routed = rng.integers(0, 512, size=(4, 512, 32, 8), dtype=np.int16)
+    spans = []
+
+    class BlockingTrainerWorker:
+
+      def fwd_bwd(self, request, **kwargs):
+        del kwargs
+        t0 = time.monotonic()
+        time.sleep(0.20)
+        t1 = time.monotonic()
+        spans.append((request["id"], t0, t1, request["routed_experts"]))
+        return {"id": request["id"]}
+
+    async def _run():
+      async with running_grpc_server(BlockingTrainerWorker()) as (_, handle):
+        p1 = remote_lib._pack_args_kwargs(  # pylint: disable=protected-access
+            (), {"request": {"id": 1, "routed_experts": routed}}
+        )
+        p2 = remote_lib._pack_args_kwargs(  # pylint: disable=protected-access
+            (), {"request": {"id": 2, "routed_experts": routed + 1}}
+        )
+        t1 = asyncio.create_task(handle.send_prepacked("fwd_bwd", p1))
+        await handle.wait_for_upload_idle()
+        # Start uploading mb2 while mb1 is still blocked in fwd_bwd on server!
+        t2 = asyncio.create_task(handle.send_prepacked("fwd_bwd", p2))
+        await handle.wait_for_upload_idle()
+        await asyncio.gather(t1, t2)
+
+    asyncio.run(_run())
+    self.assertLen(spans, 2)
+    _, _, end1, r1 = spans[0]
+    _, start2, _, r2 = spans[1]
+    # Because mb2 finished uploading and deserializing on the server's asyncio
+    # loop while mb1 was sleeping on _sync_exec_pool, mb2 starts immediately
+    # after mb1 finishes (< 25ms gap).
+    self.assertGreaterEqual(start2, end1)
+    self.assertLess(start2 - end1, 0.025)
+    np.testing.assert_array_equal(r1, routed)
+    np.testing.assert_array_equal(r2, routed + 1)
+
 
 if __name__ == "__main__":
   absltest.main()
