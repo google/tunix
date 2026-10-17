@@ -2,9 +2,11 @@
 # Branch parambole/rl-4600-final-maxtext of AI-Hypercomputer/maxtext: atwigg/mlperf at the merge of AI-Hypercomputer/maxtext#5721
 # (bbd0f6f10; includes the #5698 port, #5758, #5783 and GDN/MoE trainer perf) plus moe_wo_gmm_fused_dswiglu,
 # context_parallel_attention_load_balance_hoist_ids, query_proj_kernel_gather_once, fp8_fake_quant_hoist,
-# wi_tile_fwd_rhs_buffer_count and gdn_cp_m_scan.
-maxtext @ git+https://github.com/google/maxtext.git@1bf840cff1256c1bafefa350554064983d0d675b
-maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@1bf840cff1256c1bafefa350554064983d0d675b#subdirectory=src/maxtext/integration/vllm
+# wi_tile_fwd_rhs_buffer_count, gdn_cp_m_scan, gdn_cp_pass1_states_and_bf16_qkv, gdn_out_proj_token_minor,
+# moe_fp8_bwd_dispatch, ragged_unsort_spread_masked_indices, moe_fallback_topk_capacity, fp32_master_storage
+# and gdn_cp_fast_state_passing.
+maxtext @ git+https://github.com/google/maxtext.git@6679552770a08d712ca3ce876625cadce8007077
+maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@6679552770a08d712ca3ce876625cadce8007077#subdirectory=src/maxtext/integration/vllm
 aqtp
 cheroot
 cloud-accelerator-diagnostics

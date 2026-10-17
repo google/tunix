@@ -113,9 +113,21 @@ export ORCHESTRATOR_EXTRA_ENV="${ORCHESTRATOR_EXTRA_ENV:-WEIGHT_SYNC_BIND_TIMEOU
 export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-USE_BATCHED_RPA_LONG_CTX_KERNEL=${USE_BATCHED_RPA_LONG_CTX_KERNEL} ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD} RAY_memory_monitor_refresh_ms=0 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 ENABLE_MULTI_NUMA=${ENABLE_MULTI_NUMA} TPU_RAIDEN_DATA_NICS=${TPU_RAIDEN_DATA_NICS} RAIDEN_BROADCAST_HOST_RATIO=${RAIDEN_BROADCAST_HOST_RATIO} RAIDEN_BROADCAST_PIPELINE_STAGES=${RAIDEN_BROADCAST_PIPELINE_STAGES}${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS:+ TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS}}${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS:+ TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS}}}"
 # Rollout (vLLM) libtpu flags; mlperf_base.sh only applies its default when unset.
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false --xla_tpu_dvfs_p_state=7}"
+# TRAINER_TUNED_FLAGS=true at the 128-chip trainer mesh 32x2x4 sets
+# --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=true in the default trainer libtpu
+# flags below (false elsewhere, as before): XLA issues every offloaded reduce-scatter on one
+# SparseCore. On its own it made the step slower on the bench (about +0.9 s/step); with
+# gdn_cp_dh_scan, which the block also sets only there (part 2), the two together are faster
+# (numbers in part 2). A TRAINER_LIBTPU_INIT_ARGS set by the caller is kept as it is.
+if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" \
+      && "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
+  _single_sc_reduce_scatter=true
+else
+  _single_sc_reduce_scatter=false
+fi
 # v7x caps scoped VMEM at 67043328 bytes (65472 KiB); 65536 is rejected per compile
 # (INVALID_ARGUMENT in pathways-rm) and the compiler falls back to its default.
-export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS:---DANGEROUS_tpu_runtime_abi_verification_disabled=true --xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=false --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=false --xla_tpu_scoped_vmem_limit_kib=65472 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=false --xla_tpu_dvfs_p_state=7}"
+export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS:---DANGEROUS_tpu_runtime_abi_verification_disabled=true --xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=false --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=false --xla_tpu_scoped_vmem_limit_kib=65472 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=${_single_sc_reduce_scatter} --xla_tpu_dvfs_p_state=7}"
 # Optional XLA HBM budget for the trainer, in MiB (unset = no cap). Appended here,
 # before the trainer env, Pathways worker env and proxy args below copy the flags.
 if [[ -n "${TRAINER_MAX_HBM_SIZE_MIB:-}" ]]; then
@@ -389,7 +401,34 @@ fi
 #     folds each rank's chunk transitions into its local transition product with one
 #     Pallas scan in VMEM instead of an XLA reduction tree of matmuls. MaxText refuses the
 #     key unless use_gdn_kernel=true and gdn_chunk_size=64, as here. Its backward twin,
-#     gdn_cp_dh_scan, stays off: it made the step slower on the bench (below).
+#     gdn_cp_dh_scan, is set below, with the final stack's keys.
+#   The final stack's keys, at 32x2x4 (moe_fp8_bwd_dispatch only with TRAINER_FP8=true):
+#   gdn_cp_dh_scan=true: the GDN context-parallel backward folds the incoming state gradients
+#     with one Pallas scan in VMEM instead of an XLA reduction tree. It pays only with the
+#     single-SparseCore reduce-scatter libtpu flag, which the block sets at this mesh (part 1).
+#   gdn_cp_pass1_states_and_bf16_qkv=true and gdn_out_proj_token_minor=true: GDN context-parallel
+#     pass 1 runs a states-only forward kernel (no output, no chunk states to HBM), the
+#     prefill-only forward kernels DMA bfloat16 qkv chunks and upcast them in VMEM instead of
+#     materializing a float32 copy, and the gated-norm output is laid out token-minor before
+#     out_proj. Bit-identical for bfloat16 activations; MaxText refuses the first unless
+#     use_gdn_kernel=true, gdn_chunk_size=64 and dtype=bfloat16, as here.
+#   moe_fp8_bwd_dispatch=true: in the ring of experts, the backward all-gather of the MoE output
+#     cotangent moves float8_e4m3fn values with one float32 scale per row instead of bfloat16.
+#     Lossy, so only with the trainer's fp8 fake-quant on (TRAINER_FP8=true), the cell whose
+#     numerics run it passed.
+#   ragged_unsort_spread_masked_indices=true: with moe_routing_index_math=count and the packed
+#     ring-of-experts buffer, the masked lanes of the unsort backward's slot-order gather (other
+#     shards' and dropped slots, about 7 of 8 at expert parallelism 8) read their own slot index
+#     instead of all reading table entry 0. The outer where discards them: bit-identical.
+#   moe_fallback_topk_capacity=128: under router replay the router's own top-k is computed only
+#     for the tokens that use it (at most 128 rows per call, a lax.cond computes every row
+#     above that) instead of for every token. Bit-identical.
+#   gdn_cp_fast_state_passing=true: the GDN context-parallel cross-rank state and state-gradient
+#     scans on 4 ranks take 2 rounds instead of 3 plus a psum. Bit-identical on CPU.
+#   fp32_master_storage=residual16: Tunix's float32-master optimizer stores a scanned layer's
+#     master as the 16 bits its bfloat16 weight does not hold plus one packed bit per element
+#     and rebuilds it bit for bit at each update: the same masters, weights and updates, with
+#     2.13 instead of 4 bytes per element stored and copied to and from host memory.
 # These on the bench, regular micro-batch or s/step as above, 0 tokens dropped:
 #   moe_routing_index_math=count 10.022 -> 9.875 s (o275x-mf-cnt-prof),
 #     moe_unsplit_prefused_wi with two exact rewrites this block leaves off 10.022 ->
@@ -444,6 +483,23 @@ fi
 #     the loss of the code without the key (nx-gm-m). gdn_cp_dh_scan made the step slower:
 #     79.403 -> 80.610 s/step alone (o275x-g3-ctl -> o275x-g3-dh) and 80.152 with both
 #     scans (o275x-g2-both, against 79.480).
+#   The final stack's keys, each against the same code without it in the same pod (later
+#   MaxText stacks than the previous pin; steps 1-4, 0 tokens dropped):
+#   gdn_cp_pass1_states_and_bf16_qkv with gdn_out_proj_token_minor: 79.491 -> 78.181 s/step
+#     (o275x-c3-ctl -> o275x-c3-both); with the 2048 wi tile and gdn_cp_m_scan as well, 77.223
+#     (o275x-c3-k1em), numerics 6 of 6 (nx-c3-k1em).
+#   gdn_cp_dh_scan with the single-SparseCore reduce-scatter flag, on that stack, both arms with
+#     the flag: 78.134 -> 76.221 s/step (o275x-s2-emc -> o275x-s2-emdc, 3,774 -> 3,869
+#     tokens/s/chip), numerics 6 of 6 (nx-s2-emdc). The flag alone costs about 0.9 s/step (78.134
+#     against 77.223 without it, another pod), so the two together are about -1.0 s/step.
+#   moe_fp8_bwd_dispatch on that stack: 76.419 -> 76.183 s/step (o275x-fs-best -> o275x-fs-f8d),
+#     76.131 in a replicate in a new pod (o275x-bf-best), numerics 6 of 6 (nx-fs-f8d).
+#   ragged_unsort_spread_masked_indices on that stack: 76.405 -> 74.041 s/step (o275x-sgs-ctl ->
+#     o275x-sgs-spread, 3,860 -> 3,983 tokens/s/chip), numerics 6 of 6 (nx-sgs-spread).
+#   moe_fallback_topk_capacity=128 and fp32_master_storage=residual16 on that stack, one pod:
+#     76.413 -> 76.116 and 76.057 s/step (o275x-c1s-ctl -> o275x-c1s-c1, o275x-c1s-s1), numerics
+#     6 of 6 with both (nx-c1s1).
+#   gdn_cp_fast_state_passing was not timed alone on TPU.
 #   custom_mesh_and_rule=cp-as-ep-dense-no-cp, on the code of
 #     AI-Hypercomputer/maxtext#5758 at this cell without
 #     context_parallel_attention_load_balance_hoist_ids, moe_wo_gmm_fused_dswiglu and
@@ -492,10 +548,13 @@ fi
 # parambole/rl-4600-final-maxtext, on atwigg/mlperf at bbd0f6f10, the merge of
 # AI-Hypercomputer/maxtext#5721; bbd0f6f10 itself lacks those three). So is
 # fp8_fake_quant_hoist, from the commit after them on that branch (94f11c09d lacks it), and
-# wi_tile_fwd_rhs_buffer_count and gdn_cp_m_scan, from later ones (e1cd8bf1d lacks both, and
-# 15285fd74, the branch's previous head, gdn_cp_m_scan). MaxText refuses a key it does not
-# define when the trainer
-# starts, so an older MaxText needs TRAINER_TUNED_FLAGS=false.
+# wi_tile_fwd_rhs_buffer_count and gdn_cp_m_scan (with gdn_cp_dh_scan), from later ones
+# (e1cd8bf1d lacks them, 15285fd74 the scans), and gdn_cp_pass1_states_and_bf16_qkv,
+# gdn_out_proj_token_minor, moe_fp8_bwd_dispatch, ragged_unsort_spread_masked_indices,
+# moe_fallback_topk_capacity, fp32_master_storage and gdn_cp_fast_state_passing, from the
+# commits after 1bf840cff (the branch's previous head lacks all seven). MaxText refuses a key
+# it does not define when the trainer starts, so an older MaxText needs
+# TRAINER_TUNED_FLAGS=false.
 # The 256-chip trainer (TRAINER_TPU_SLICE=tpu7x:4x8x8, 512 devices), from Rohan Bierneni's
 # 256-chip trainer runs (2026-10-15, RL trainer bench, 9 micro-batches of 64 rows, steps 1-4):
 # 32x2x8 60.62 s/step and 64x1x8 55.97 s/step, against 82.17 s/step for 32x2x4 on 128 chips.
@@ -535,10 +594,19 @@ if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
   if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
     export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} wi_tile_fwd_rhs_buffer_count=2"
   fi
-  # gdn_cp_m_scan only at the mesh it was timed at. Its backward twin gdn_cp_dh_scan stays off:
-  # on the bench it made the step slower.
+  # gdn_cp_m_scan only at the mesh it was timed at.
   if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
     export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} gdn_cp_m_scan=true"
+  fi
+  # The final stack's keys only at the mesh they were timed at, where part 1 also sets the
+  # single-SparseCore reduce-scatter flag that gdn_cp_dh_scan needs; moe_fp8_bwd_dispatch only
+  # with the trainer's fp8 fake-quant on, the cell its numerics were measured on.
+  if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} gdn_cp_dh_scan=true gdn_cp_pass1_states_and_bf16_qkv=true gdn_out_proj_token_minor=true"
+    if [[ "${TRAINER_FP8:-true}" == "true" ]]; then
+      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} moe_fp8_bwd_dispatch=true"
+    fi
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} ragged_unsort_spread_masked_indices=true moe_fallback_topk_capacity=128 gdn_cp_fast_state_passing=true fp32_master_storage=residual16"
   fi
 fi
 export DEBUG=${DEBUG:-0}
