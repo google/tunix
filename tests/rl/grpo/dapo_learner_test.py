@@ -329,5 +329,41 @@ class RewardShapingTest(parameterized.TestCase):
     self.assertSequenceAlmostEqual(expected_scores, scores, places=4)
 
 
+class DAPOLearnerRewardFnsTest(parameterized.TestCase):
+
+  def _config(self):
+    return dapo_lib.DAPOConfig(
+        overlong_buffer={
+            "enable": True,
+            "overlong_buffer_length": 20,
+            "overlong_buffer_penalty": 10,
+            "max_response_length": 100,
+        }
+    )
+
+  @parameterized.named_parameters(
+      dict(testcase_name="list", wrap=list),
+      dict(testcase_name="tuple", wrap=tuple),
+  )
+  def test_does_not_mutate_caller_reward_fns(self, wrap):
+    user_fn = lambda prompts, completions, **kwargs: [0.0] * len(completions)
+    reward_fns = wrap([user_fn])
+    with mock.patch.object(
+        grpo_lib.GrpoLearner, "__init__", return_value=None
+    ) as mock_init:
+      for _ in range(2):
+        dapo_lib.DAPOLearner(
+            rl_engine=mock.MagicMock(),
+            algo_config=self._config(),
+            reward_fns=reward_fns,
+        )
+
+    self.assertEqual(list(reward_fns), [user_fn])
+    for call in mock_init.call_args_list:
+      self.assertEqual(
+          call.kwargs["reward_fns"], [user_fn, dapo_lib.reward_shaping]
+      )
+
+
 if __name__ == "__main__":
   absltest.main()
