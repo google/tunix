@@ -17,6 +17,7 @@
 pip install -e .[frozenlake]
 
 set -x # Enable xtrace
+export PYTHONPATH=".:${PYTHONPATH:-}"
 
 batch_size=${batch_size:-64}
 num_batches=${num_batches:-5}
