@@ -1180,6 +1180,8 @@ class PeftTrainer:
       assert metrics_buffer is not None
       if uses_weighted_loss:
         eval_loss = metrics_buffer.loss
+      else:
+        eval_loss /= eval_steps
       self._write_metrics(metrics_buffer)
       logging.info(
           "Train step %d eval loss: %f - eval perplexity: %f",
