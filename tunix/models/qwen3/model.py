@@ -906,9 +906,10 @@ class MoELayer(nnx.Module):
     mesh = pxla.thread_resources.env.physical_mesh
 
     # -------------------------------------------------------------
-    # Fallback to Vanilla dense routing if CPU or un-meshed environment
+    # Fallback to Vanilla dense routing if not on TPU or un-meshed environment.
+    # Megablox is a Pallas TPU kernel.
     # -------------------------------------------------------------
-    if not use_megablox or (mesh.empty or jax.devices()[0].platform == 'cpu'):
+    if not use_megablox or (mesh.empty or jax.devices()[0].platform != 'tpu'):
       dispatch_mask = jax.nn.one_hot(
           routing_idx,
           num_classes=self.num_experts,  # pyrefly: ignore[bad-argument-type]
