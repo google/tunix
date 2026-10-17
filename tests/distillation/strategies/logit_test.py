@@ -187,6 +187,37 @@ class LogitStrategyTest(parameterized.TestCase):
     npt.assert_allclose(computed_loss, expected_loss, rtol=1e-5, atol=1e-5)
     self.assertEqual(metrics, {})
 
+  def test_padded_positions_are_excluded(self):
+    """Positions with an all-zero label row must not affect any loss term."""
+    s_key, t_key, l_key = jax.random.split(jax.random.key(1), 3)
+    batch_size, seq_len, num_classes = 2, 6, 10
+    shape = (batch_size, seq_len, num_classes)
+    student = jax.random.normal(s_key, shape)
+    teacher = jax.random.normal(t_key, shape)
+    ids = jax.random.randint(l_key, (batch_size, seq_len), 0, num_classes)
+    labels = jax.nn.one_hot(ids, num_classes)
+    keep = 3
+    pad = (jnp.arange(seq_len) < keep).astype(labels.dtype)[None, :, None]
+    strategy = LogitStrategy(
+        student_forward_fn=self.dummy_fn,
+        teacher_forward_fn=self.dummy_fn,
+        labels_fn=self.dummy_fn,
+    )
+
+    loss, metrics = strategy.compute_loss(student, teacher, labels * pad)
+    ref_loss, ref_metrics = strategy.compute_loss(
+        student[:, :keep], teacher[:, :keep], labels[:, :keep]
+    )
+    eval_loss, _ = strategy.compute_eval_loss(student, labels * pad)
+    ref_eval_loss, _ = strategy.compute_eval_loss(
+        student[:, :keep], labels[:, :keep]
+    )
+
+    npt.assert_allclose(loss, ref_loss, rtol=1e-5)
+    npt.assert_allclose(eval_loss, ref_eval_loss, rtol=1e-5)
+    for k, v in ref_metrics.items():
+      npt.assert_allclose(metrics[k], v, rtol=1e-5, err_msg=k)
+
   def test_get_train_loss(self):
     strategy = LogitStrategy(
         student_forward_fn=lambda _, student_output, **kwargs: student_output,
