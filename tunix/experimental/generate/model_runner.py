@@ -18,10 +18,11 @@
 sampling on device.
 """
 
+from collections.abc import Sequence
 import dataclasses
 import functools
 import operator
-from typing import Any
+from typing import Any, TypeVar
 
 from flax import nnx
 from flax import struct
@@ -83,7 +84,7 @@ class SamplingMetadata:
   @classmethod
   def from_sampling_params(
       cls,
-      sampling_params: tuple[sampler_lib.SamplingParams, ...],
+      sampling_params: Sequence[sampler_lib.SamplingParams],
       num_rows: int,
       max_top_k: int,
   ) -> 'SamplingMetadata':
@@ -197,6 +198,34 @@ def sample(
   return next_tokens, logp_sampled[:, 0]
 
 
+Cache = dict[str, jax.Array]
+_PyTree = TypeVar('_PyTree')
+
+
+@struct.dataclass
+class RPAMetadata:
+  """Execution metadata for the Ragged Paged Attention kernel.
+
+  Rows are ordered `[decodes, chunked prefills, full prefills]`, followed by
+  padding rows up to the batch's row capacity.
+  """
+
+  # `[num_rows, max_pages_per_seq]` physical page indices of each row, keyed by
+  # the name of the KV cache they index.
+  page_indices: dict[str, jax.Array | np.ndarray]
+  # `[num_rows]` KV length of each row, including the tokens it runs this step.
+  kv_lens: jax.Array | np.ndarray
+  # `[num_rows]` number of tokens each row runs this step.
+  query_lens: jax.Array | np.ndarray
+  # `[3]` row layout `(num_decodes, num_chunked_end, num_seqs)`: the decodes
+  # are rows `[0, i)`, the chunked prefills `[i, j)` and the full prefills
+  # `[j, k)`.
+  distribution: jax.Array | np.ndarray
+  chunk_prefill_size: int | None = struct.field(
+      default=None, pytree_node=False
+  )
+
+
 class ModelRunner:
   """Runs the transformer forward pass and samples tokens."""
 
@@ -220,7 +249,19 @@ class ModelRunner:
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
 
+    if config.num_scheduler_steps != 1:
+      raise NotImplementedError(
+          'Only num_scheduler_steps=1 is supported, got'
+          f' {config.num_scheduler_steps}.'
+      )
+
     self._config = config
+    self._rng = self._to_device(jax.random.PRNGKey(config.seed))
+
+    self._compiled_model_step_fn = jax.jit(
+        self._model_step_fn,
+        donate_argnames=['cache'],
+    )
 
   @property
   def config(self) -> ModelRunnerConfig:
@@ -377,3 +418,163 @@ class ModelRunner:
     ):
       return self.transformer.config.dtype
     return self._flattened_transformer_state[0].dtype
+
+  def _get_token_positions(
+      self,
+      tokens: jax.Array,
+      metadata: RPAMetadata,
+  ) -> jax.Array:
+    """Returns the positions of each token within its sequence."""
+    total_capacity = tokens.shape[0]
+    n_rows = metadata.query_lens.shape[0]
+
+    # Example:
+    # tokens: [a, b, c, d, e, f, PAD, PAD]
+    # query_lens: [2, 1, 3]
+    # row_idxs: [0, 0, 1, 2, 2, 2, 2, 2]
+    row_idxs = jnp.repeat(
+        jnp.arange(n_rows),
+        metadata.query_lens,
+        total_repeat_length=total_capacity,
+    )
+
+    # Example:
+    # tokens: [a, b, c, d, e, f, PAD, PAD]
+    # query_lens: [2, 1, 3]
+    # intra_offsets: [0, 1, 0, 0, 1, 2, 3, 4]
+    local_positions = jnp.arange(total_capacity)
+    starts = jnp.zeros_like(metadata.query_lens)
+    if len(metadata.query_lens) > 0:
+      starts = starts.at[1:].set(jnp.cumsum(metadata.query_lens)[:-1])
+    intra_offsets = local_positions - starts[row_idxs]
+
+    # KV lens includes the query tokens. This yields the length of the sequences
+    # before appending the query tokens.
+    curr_seq_lens = metadata.kv_lens - metadata.query_lens
+
+    return intra_offsets + curr_seq_lens[row_idxs]
+
+  def _model_step_fn(
+      self,
+      params: list[nnx.Variable],
+      cache: Cache,
+      tokens: jax.Array,
+      metadata: RPAMetadata,
+      sampling_metadata: SamplingMetadata,
+      rng: jax.Array,
+  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
+    """Runs the model over a mixed batch and samples the next tokens.
+
+    Args:
+      params: The flattened transformer state to run with.
+      cache: The physical KV cache pages to read and write.
+      tokens: The ragged array of tokens for the batch.
+      metadata: Ragged execution metadata for the attention kernel.
+      sampling_metadata: Each row's sampling settings.
+      rng: PRNG key to split for sampling this step.
+
+    Returns:
+      A tuple of
+      - next_tokens: `[num_rows]` array of sampled tokens.
+      - logits: `[num_rows, vocab_size]` array of logits, or None.
+      - logprobs: `[num_rows]` array of logprobs, or None.
+      - updated_cache: The updated KV cache pages.
+      - rng: The updated PRNG key for subsequent steps.
+    """
+    config = self._config
+
+    transformer = nnx.merge(self._transformer_graphdef, params)
+    positions = self._get_token_positions(tokens, metadata)
+
+    # Each row samples from the logits of its last token, so the model only
+    # computes those.
+    last_token_idxs = jnp.maximum(0, jnp.cumsum(metadata.query_lens) - 1)
+    logits, updated_cache = transformer(
+        tokens,
+        positions,
+        cache=cache,
+        metadata=metadata,
+        mesh=config.mesh,
+        logits_idxs=last_token_idxs,
+    )
+
+    rng, step_rng = jax.random.split(rng)
+    next_tokens, logp = sample(
+        logits,
+        step_rng,
+        sampling_metadata,
+        max_top_k=config.max_top_k,
+        return_logprobs=config.return_logprobs,
+    )
+
+    res_logits = logits if config.return_logits else None
+    return next_tokens, res_logits, logp, updated_cache, rng
+
+  def _to_device(self, tree: _PyTree) -> _PyTree:
+    """Moves host arrays onto the device, replicated across the mesh."""
+    return jax.device_put(
+        tree,
+        jax.sharding.NamedSharding(
+            self._config.mesh, jax.sharding.PartitionSpec()
+        ),
+    )
+
+  def execute_step(
+      self,
+      cache: Cache,
+      tokens: jax.Array,
+      metadata: RPAMetadata,
+      sampling_params: Sequence[sampler_lib.SamplingParams],
+  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache]:
+    """Runs model forward passes on a batch of requests, and samples tokens.
+
+    Note: This function runs `num_scheduler_steps` forward passes, and samples
+    `num_scheduler_steps` tokens.
+
+    Args:
+      cache: The physical KV cache pages to read and write.
+      tokens: The ragged array of tokens for the batch.
+      metadata: Ragged execution metadata for the attention kernel.
+      sampling_params: The sampling settings of each scheduled request, in row
+        order.
+
+    Returns:
+      A tuple of:
+        - tokens: `[num_rows, 1]` array of sampled tokens.
+        - logits: `[num_rows, 1, vocab_size]` array of logits, or None.
+        - logprobs: `[num_rows, 1]` array of logprobs, or None.
+        - updated cache: The updated KV cache pages.
+
+    Raises:
+      ValueError: If `sampling_params` does not hold one entry per scheduled
+        request.
+    """
+    num_rows = metadata.query_lens.shape[0]
+    num_scheduled = int(metadata.distribution[2])
+    if len(sampling_params) != num_scheduled:
+      raise ValueError(
+          f'Got {len(sampling_params)} sampling params for {num_scheduled}'
+          ' scheduled requests.'
+      )
+
+    device_metadata, sampling_metadata = self._to_device((
+        metadata,
+        SamplingMetadata.from_sampling_params(
+            sampling_params, num_rows, self._config.max_top_k
+        ),
+    ))
+
+    next_tokens, logits, logp, cache, self._rng = self._compiled_model_step_fn(
+        self._flattened_transformer_state,
+        cache,
+        tokens,
+        device_metadata,
+        sampling_metadata,
+        self._rng,
+    )
+    return (
+        next_tokens[:, None],
+        logits[:, None] if logits is not None else None,
+        logp[:, None] if logp is not None else None,
+        cache,
+    )

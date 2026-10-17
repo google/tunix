@@ -317,6 +317,9 @@ class ModelRunnerTest(absltest.TestCase):
       def __init__(self):
         self.w = nnx.Param(jnp.ones((1,), dtype=jnp.bfloat16))
 
+      def __call__(self, tokens, positions, cache, metadata):
+        raise NotImplementedError()
+
     runner = _runner(NoConfig())
 
     self.assertEqual(runner.dtype, jnp.bfloat16)
@@ -472,6 +475,221 @@ class ModelRunnerTest(absltest.TestCase):
 
     mock_reshard.assert_not_called()
     self._assert_trees_equal(runner.transformer_state, new_state)
+
+
+_VOCAB_SIZE = 16
+
+
+class _NextTokenTransformer(nnx.Module):
+  """A stand-in transformer that follows the RPA calling convention.
+
+  Each token's most likely successor is `token + 1`, then `token + 2`, and the
+  positions it was called with are written into the cache, so tests can check
+  both what the runner sampled and what it fed in.
+  """
+
+  def __init__(self):
+    self.scale = nnx.Param(jnp.ones(()))
+
+  def __call__(
+      self, tokens, positions, cache, metadata, mesh, logits_idxs=None
+  ):
+    del metadata, mesh
+    logits = self.scale * (
+        10.0 * jax.nn.one_hot((tokens + 1) % _VOCAB_SIZE, _VOCAB_SIZE)
+        + 5.0 * jax.nn.one_hot((tokens + 2) % _VOCAB_SIZE, _VOCAB_SIZE)
+    )
+    if logits_idxs is not None:
+      logits = logits[logits_idxs]
+    # The cache keeps its shape, as the decode loop carries it between steps.
+    return logits, {
+        'positions': cache['positions'].at[: positions.shape[0]].set(positions)
+    }
+
+
+class _UniformTransformer(nnx.Module):
+  """A stand-in transformer that gives every token the same logit."""
+
+  def __init__(self):
+    self.scale = nnx.Param(jnp.ones(()))
+
+  def __call__(
+      self, tokens, positions, cache, metadata, mesh, logits_idxs=None
+  ):
+    del positions, metadata, mesh
+    logits = self.scale * jnp.zeros((tokens.shape[0], _VOCAB_SIZE))
+    if logits_idxs is not None:
+      logits = logits[logits_idxs]
+    return logits, cache
+
+
+def _rpa_metadata(
+    kv_lens: list[int], query_lens: list[int], distribution: list[int]
+) -> model_runner_lib.RPAMetadata:
+  num_rows = len(query_lens)
+  return model_runner_lib.RPAMetadata(
+      page_indices={
+          'layer_0': np.arange(2 * num_rows, dtype=np.int32).reshape(
+              num_rows, 2
+          )
+      },
+      kv_lens=np.array(kv_lens, dtype=np.int32),
+      query_lens=np.array(query_lens, dtype=np.int32),
+      distribution=np.array(distribution, dtype=np.int32),
+  )
+
+
+def _positions_cache(num_tokens: int) -> model_runner_lib.Cache:
+  return {'positions': jnp.zeros((num_tokens,), dtype=jnp.int32)}
+
+
+class ExecuteStepTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    # One decode with 5 cached tokens, then a full prefill of 3 tokens, then a
+    # padding row.
+    self.metadata = _rpa_metadata(
+        kv_lens=[6, 3, 0], query_lens=[1, 3, 0], distribution=[1, 1, 2]
+    )
+    self.tokens = jnp.array([4, 7, 8, 9], dtype=jnp.int32)
+    self.greedy = (_params(temperature=0.0), _params(temperature=0.0))
+
+  def _execute(self, runner, sampling_params=None):
+    return runner.execute_step(
+        cache=_positions_cache(4),
+        tokens=self.tokens,
+        metadata=self.metadata,
+        sampling_params=sampling_params or self.greedy,
+    )
+
+  def test_get_token_positions(self):
+    runner = _runner(_NextTokenTransformer())
+    metadata = _rpa_metadata(
+        kv_lens=[1, 7, 0], query_lens=[1, 3, 0], distribution=[1, 1, 2]
+    )
+
+    positions = runner._get_token_positions(
+        tokens=jnp.zeros((6,), dtype=jnp.int32), metadata=metadata
+    )
+
+    # Row 0 starts at 1 - 1 = 0 ([0]); row 1 starts at 7 - 3 = 4 ([4, 5, 6]);
+    # the two trailing padding elements belong to row 2 (start 0 -> [0, 1]).
+    np.testing.assert_array_equal(positions, [0, 4, 5, 6, 0, 1])
+
+  def test_samples_from_the_last_token_of_each_row(self):
+    tokens, logits, logp, _ = self._execute(_runner(_NextTokenTransformer()))
+
+    self.assertIsInstance(tokens, jax.Array)
+    # The decode continues from 4, and the prefill from its last token 9.
+    np.testing.assert_array_equal(tokens[:2], [[5], [10]])
+    self.assertIsNone(logits)
+    self.assertIsNone(logp)
+
+  def test_positions_continue_from_the_cached_tokens(self):
+    _, _, _, cache = self._execute(_runner(_NextTokenTransformer()))
+
+    np.testing.assert_array_equal(cache['positions'], [5, 0, 1, 2])
+
+  def test_returns_last_token_logits_per_row(self):
+    runner = _runner(_NextTokenTransformer(), return_logits=True)
+
+    tokens, logits, _, _ = self._execute(runner)
+
+    np.testing.assert_array_equal(tokens[:2], [[5], [10]])
+    self.assertEqual(logits.shape, (3, 1, _VOCAB_SIZE))
+    # The prefill's logits come from its last token, 9.
+    self.assertEqual(int(np.argmax(logits[1, 0])), 10)
+
+  def test_returns_logprobs_per_row(self):
+    runner = _runner(_NextTokenTransformer(), return_logprobs=True)
+
+    _, _, logp, _ = self._execute(runner)
+
+    self.assertEqual(logp.shape, (3, 1))
+    expected = jax.nn.log_softmax(
+        10.0 * jax.nn.one_hot(5, _VOCAB_SIZE)
+        + 5.0 * jax.nn.one_hot(6, _VOCAB_SIZE)
+    )[5]
+    np.testing.assert_allclose(logp[0, 0], expected, rtol=1e-6)
+
+  def test_each_row_uses_its_own_sampling_params(self):
+    # The prefill is limited to its single most likely token, whatever its
+    # temperature, while the decode stays greedy.
+    runner = _runner(_NextTokenTransformer())
+
+    tokens, _, _, _ = self._execute(
+        runner, (_params(temperature=0.0), _params(temperature=5.0, top_k=1))
+    )
+
+    np.testing.assert_array_equal(tokens[:2], [[5], [10]])
+
+  def test_batches_metadata_transfer(self):
+    runner = _runner(
+        _NextTokenTransformer(), return_logits=True, return_logprobs=True
+    )
+    with mock.patch.object(
+        runner, '_to_device', wraps=runner._to_device
+    ) as mock_to_device:
+      tokens, logits, logp, _ = self._execute(runner)
+
+    # Both `metadata` and `sampling_metadata` are transferred in one call.
+    mock_to_device.assert_called_once()
+    self.assertEqual(tokens.shape, (3, 1))
+    self.assertEqual(logits.shape, (3, 1, _VOCAB_SIZE))
+    self.assertEqual(logp.shape, (3, 1))
+
+  def test_sampling_params_must_match_the_scheduled_requests(self):
+    runner = _runner(_NextTokenTransformer())
+
+    with self.assertRaisesRegex(ValueError, 'sampling params'):
+      self._execute(runner, (_params(),))
+
+  def test_multiple_scheduler_steps_are_not_supported_yet(self):
+    with self.assertRaisesRegex(NotImplementedError, 'num_scheduler_steps'):
+      _runner(_NextTokenTransformer(), num_scheduler_steps=2)
+
+
+class ExecuteStepSeedTest(absltest.TestCase):
+  """Checks how sampling depends on the engine seed."""
+
+  _NUM_ROWS = 64
+
+  def _execute(self, runner, sampling_params=None):
+    # Every row decodes one token from a uniform distribution.
+    num_rows = len(sampling_params) if sampling_params else self._NUM_ROWS
+    metadata = _rpa_metadata(
+        kv_lens=[1] * num_rows,
+        query_lens=[1] * num_rows,
+        distribution=[num_rows] * 3,
+    )
+    tokens, _, _, _ = runner.execute_step(
+        cache={},
+        tokens=jnp.zeros((num_rows,), dtype=jnp.int32),
+        metadata=metadata,
+        sampling_params=sampling_params or (_params(),) * num_rows,
+    )
+    return tokens
+
+  def test_unseeded_sampling_is_reproducible_for_an_engine_seed(self):
+    tokens = self._execute(_runner(_UniformTransformer(), seed=3))
+    again = self._execute(_runner(_UniformTransformer(), seed=3))
+
+    np.testing.assert_array_equal(tokens, again)
+
+  def test_unseeded_sampling_differs_every_step(self):
+    runner = _runner(_UniformTransformer())
+
+    first = self._execute(runner)
+    second = self._execute(runner)
+
+    self.assertFalse(np.array_equal(first, second))
+
+  def test_unseeded_sampling_depends_on_the_engine_seed(self):
+    tokens = self._execute(_runner(_UniformTransformer(), seed=0))
+    other = self._execute(_runner(_UniformTransformer(), seed=1))
+
+    self.assertFalse(np.array_equal(tokens, other))
 
 
 if __name__ == '__main__':
