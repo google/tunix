@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: deepswe-prewarm-benchmark
+  namespace: default
+  labels:
+    app: prewarm-benchmark
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: prewarm-benchmark
+    spec:
+      serviceAccountName: xpk-sa
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: gcr.io/cloud-tpu-multipod-dev/wenxindong/trellis-35b:nanstop-netpol
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -ex
+            cd /app
+            python3 examples/deepswe/benchmark_sandbox_prewarm.py \
+              --num_tasks 2 \
+              --simulated_overlap_sec 60 \
+              --scaffold openhands \
+              --namespace default
+        resources:
+          requests:
+            cpu: "4"
+            memory: "16Gi"
+        env:
+          - name: SANDBOX_NAMESPACE
+            value: "default"
+          - name: SCAFFOLD
+            value: "openhands"
+          - name: TUNIX_PREWARM_SANDBOX
+            value: "1"
