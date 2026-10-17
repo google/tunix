@@ -88,6 +88,14 @@ def _get_step_path(traj_dir: epath.Path, atif_step_id: int) -> epath.Path:
   return traj_dir / _STEP_FILENAME_TEMPLATE.format(step_id=atif_step_id)
 
 
+def _requires_mkdir(path: epath.Path) -> bool:
+  """Returns whether `path` is on a local filesystem that requires `mkdir`."""
+  # Local POSIX paths are either relative or resolve to a `file://` URI, whereas
+  # remote object stores (such as `gs://` or `s3://`) preserve their cloud URI
+  # scheme in `as_uri()` even when `str(path)` normalizes to a mount path.
+  return not path.is_absolute() or path.as_uri().startswith("file://")
+
+
 def _read_text_or_none(path: epath.Path) -> str | None:
   """Returns the contents of the file at `path`, or None if it is missing.
 
@@ -199,7 +207,8 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
 
     Optimizations:
       - Directory Creation: `mkdir` is executed only once per trajectory on the
-        first step, tracked by `_metadata_hash_by_trajectory_id`.
+        first step for local (`file://`) filesystems, tracked by
+        `_metadata_hash_by_trajectory_id`.
       - Metadata Caching: `metadata.json` is only written when its serialized
         content changes, minimizing redundant writes across multi-step turns.
 
@@ -212,8 +221,12 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
     """
     traj_id = task.trajectory_id
 
-    # Create directory on first step of this trajectory.
-    if traj_id not in self._metadata_hash_by_trajectory_id:
+    # Create directory on first step of this trajectory for local filesystems.
+    # Remote object stores use a flat object namespace where writing
+    # metadata.json materializes the prefix without a 0-byte directory marker.
+    if traj_id not in self._metadata_hash_by_trajectory_id and _requires_mkdir(
+        task.traj_dir
+    ):
       task.traj_dir.mkdir(parents=True, exist_ok=True)
 
     # Only write metadata.json if metadata content has changed.
