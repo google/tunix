@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for task routing pool and execution session (`task_pool.py`)."""
+"""Unit tests for actor routing pool and execution session (`actor_pool.py`)."""
 
 import asyncio
 from typing import Any, Optional
 from absl.testing import absltest
 from absl.testing import parameterized
+from tunix.experimental.worker import actor_pool
 from tunix.experimental.worker import remote_execution as remote_lib
-from tunix.experimental.worker import task_pool
 
 
 class StubWorkerEngine:
@@ -71,7 +71,7 @@ def create_in_process_handle(
   return remote_lib.InProcessActorHandle(server)
 
 
-class TaskPoolTest(parameterized.TestCase):
+class ActorPoolTest(parameterized.TestCase):
   """Tests verifying RoutingActorPool and PoolExecutionSession."""
 
   def test_actor_pool_load_balancing_and_streaming(self):
@@ -85,7 +85,7 @@ class TaskPoolTest(parameterized.TestCase):
       handle_a = remote_lib.InProcessActorHandle(server_a)
       handle_b = remote_lib.InProcessActorHandle(server_b)
 
-      pool = task_pool.RoutingActorPool([handle_a, handle_b])
+      pool = actor_pool.RoutingActorPool([handle_a, handle_b])
 
       # Submit batch of tasks across pool and verify out-of-order completion
       # stream
@@ -114,29 +114,29 @@ class TaskPoolTest(parameterized.TestCase):
     # hash would produce different numbers on each interpreter invocation and
     # so could never match a hardcoded constant.
     self.assertEqual(
-        task_pool.stable_route_hash("prompt_7"), 7682816066691324195
+        actor_pool.stable_route_hash("prompt_7"), 7682816066691324195
     )
     self.assertEqual(
-        task_pool.stable_route_hash("route_key_abc"), 8273245243606849686
+        actor_pool.stable_route_hash("route_key_abc"), 8273245243606849686
     )
 
   def test_stable_route_hash_passes_integers_through(self):
     # Integer keys are explicit shard indices and must not be hashed.
     for shard in (0, 1, 7, 64):
-      self.assertEqual(task_pool.stable_route_hash(shard), shard)
+      self.assertEqual(actor_pool.stable_route_hash(shard), shard)
 
   def test_stable_route_hash_rejects_negative_integers(self):
     # A negative shard index is always a caller bug: `%` would silently fold it
     # onto a valid actor instead of surfacing the mistake.
     with self.assertRaises(ValueError):
-      task_pool.stable_route_hash(-1)
+      actor_pool.stable_route_hash(-1)
 
   def test_stable_route_hash_separates_adjacent_structured_keys(self):
     # Regression guard: CRC32 is linear over GF(2), so keys differing in one
     # trailing character collapse into the same bucket under small moduli.
     for num_actors in (2, 3, 4, 8):
       buckets = {
-          task_pool.stable_route_hash(f"prompt_7#{shard}") % num_actors
+          actor_pool.stable_route_hash(f"prompt_7#{shard}") % num_actors
           for shard in range(num_actors)
       }
       self.assertGreater(
@@ -157,7 +157,7 @@ class TaskPoolTest(parameterized.TestCase):
           remote_lib.InProcessRemoteExecutionServer(engine_1)
       )
 
-      pool = task_pool.RoutingActorPool([handle_0, handle_1])
+      pool = actor_pool.RoutingActorPool([handle_0, handle_1])
 
       # Verify sticky routing: identical route_keys consistently route to the
       # same worker without method_name
@@ -186,7 +186,7 @@ class TaskPoolTest(parameterized.TestCase):
           return actors[1]
         return actors[0]
 
-      smart_pool = task_pool.RoutingActorPool(
+      smart_pool = actor_pool.RoutingActorPool(
           [handle_0, handle_1], router=custom_router
       )
 
@@ -212,7 +212,7 @@ class TaskPoolTest(parameterized.TestCase):
         def kv_cache_aware(self, actors, unused_args, unused_kwargs):
           return actors[1]
 
-      method_pool = task_pool.RoutingActorPool(
+      method_pool = actor_pool.RoutingActorPool(
           [handle_0, handle_1], router=MethodSpecificRouter()
       )
       res_method = await method_pool.asubmit("kv_cache_aware", "any_prompt")
@@ -222,7 +222,7 @@ class TaskPoolTest(parameterized.TestCase):
       class BadRouter:
         pass
 
-      bad_pool = task_pool.RoutingActorPool(
+      bad_pool = actor_pool.RoutingActorPool(
           [handle_0, handle_1], router=BadRouter()
       )
       with self.assertRaisesRegex(
@@ -233,14 +233,14 @@ class TaskPoolTest(parameterized.TestCase):
     asyncio.run(_run_test())
 
   def test_actor_pool_submit_without_actors_raises(self):
-    pool = task_pool.RoutingActorPool()
+    pool = actor_pool.RoutingActorPool()
     with self.assertRaisesRegex(
         RuntimeError, "RoutingActorPool contains no registered ActorHandles"
     ):
       pool.submit("any")
 
   def test_actor_pool_stream_without_actors_raises(self):
-    pool = task_pool.RoutingActorPool()
+    pool = actor_pool.RoutingActorPool()
 
     async def _run_pool_err():
       with self.assertRaisesRegex(
@@ -253,7 +253,7 @@ class TaskPoolTest(parameterized.TestCase):
     asyncio.run(_run_pool_err())
 
   def test_actor_pool_add_invalid_type_raises(self):
-    pool = task_pool.RoutingActorPool()
+    pool = actor_pool.RoutingActorPool()
     with self.assertRaisesRegex(
         TypeError, "Expected str or ActorHandle, got <class 'int'>"
     ):
@@ -269,7 +269,7 @@ class TaskPoolTest(parameterized.TestCase):
 
     async def _run():
       handle = create_in_process_handle(NoneWorker())
-      pool = task_pool.RoutingActorPool([handle])
+      pool = actor_pool.RoutingActorPool([handle])
 
       tasks = [("req_1", "void_task", (), {}), ("req_2", "void_task", (), {})]
       results = []
@@ -287,7 +287,7 @@ class TaskPoolTest(parameterized.TestCase):
       engine = StubWorkerEngine("crashing_worker", latency=0.01)
       engine.pause()
       handle = create_in_process_handle(engine)
-      pool = task_pool.RoutingActorPool([handle])
+      pool = actor_pool.RoutingActorPool([handle])
 
       tasks = [("req_1", "compute_trajectory", ("failing_prompt",), {})]
       with self.assertRaisesRegex(RuntimeError, "currently paused"):
@@ -312,7 +312,7 @@ class TaskPoolTest(parameterized.TestCase):
     async def _run():
       w1 = create_in_process_handle(DynamicWorker("w1"))
       w2 = create_in_process_handle(DynamicWorker("w2"))
-      pool = task_pool.RoutingActorPool([w1, w2])
+      pool = actor_pool.RoutingActorPool([w1, w2])
 
       results = []
       errors = []
@@ -354,7 +354,7 @@ class TaskPoolTest(parameterized.TestCase):
 
     async def _run():
       w1 = create_in_process_handle(EchoWorker())
-      pool = task_pool.RoutingActorPool([w1])
+      pool = actor_pool.RoutingActorPool([w1])
 
       initial_tasks = [
           ("custom_id_1", "process", (5,), {}),
@@ -401,8 +401,8 @@ class TaskPoolTest(parameterized.TestCase):
 
     async def _run():
       handle = FailingDispatchHandle()
-      pool = task_pool.RoutingActorPool([handle])
-      session = task_pool.PoolExecutionSession(pool)
+      pool = actor_pool.RoutingActorPool([handle])
+      session = actor_pool.PoolExecutionSession(pool)
 
       with self.assertRaises(ConnectionError):
         await session.submit("req_fail", "process", 1)
@@ -462,8 +462,8 @@ class TaskPoolTest(parameterized.TestCase):
 
     async def _run():
       handle = DropDuringSecondDispatchHandle()
-      pool = task_pool.RoutingActorPool([handle])
-      session = task_pool.PoolExecutionSession(pool)
+      pool = actor_pool.RoutingActorPool([handle])
+      session = actor_pool.PoolExecutionSession(pool)
 
       # 1. Dispatch task1 (returns task_1, polling loop starts long-poll for task1)
       await session.submit("req_t1", "task1")
@@ -547,8 +547,8 @@ class TaskPoolTest(parameterized.TestCase):
 
     async def _run():
       handle = OutOfOrderHandle()
-      pool = task_pool.RoutingActorPool([handle])
-      session = task_pool.PoolExecutionSession(pool)
+      pool = actor_pool.RoutingActorPool([handle])
+      session = actor_pool.PoolExecutionSession(pool)
 
       await session.submit("req_1", "method")
       await session.submit("req_2", "method")
@@ -598,8 +598,8 @@ class TaskPoolTest(parameterized.TestCase):
 
     async def _run():
       h1, h2 = CaptureHandle(), CaptureHandle()
-      pool = task_pool.RoutingActorPool([h1, h2])
-      session = task_pool.PoolExecutionSession(pool)
+      pool = actor_pool.RoutingActorPool([h1, h2])
+      session = actor_pool.PoolExecutionSession(pool)
       await session.submit("req_1", "generate", route_key="sticky_key", x=42)
       self.assertEqual(dispatched_kwargs, [{"x": 42}])
       await session.close()
@@ -641,11 +641,11 @@ class TaskPoolTest(parameterized.TestCase):
       ])
       idle_handle = FastBatchHandle([])
       # Custom router sends all tasks to busy_handle, leaving idle_handle with 0 tasks
-      pool = task_pool.RoutingActorPool(
+      pool = actor_pool.RoutingActorPool(
           [busy_handle, idle_handle],
           router=lambda actors, method, args, kwargs: actors[0],
       )
-      session = task_pool.PoolExecutionSession(pool)
+      session = actor_pool.PoolExecutionSession(pool)
 
       await session.submit("req_1", "generate")
       await session.submit("req_2", "generate")
@@ -701,8 +701,8 @@ class TaskPoolTest(parameterized.TestCase):
 
     async def _run():
       handle = CrashingHandle()
-      pool = task_pool.RoutingActorPool([handle])
-      session = task_pool.PoolExecutionSession(pool)
+      pool = actor_pool.RoutingActorPool([handle])
+      session = actor_pool.PoolExecutionSession(pool)
 
       # First task succeeds dispatch and starts _poll_worker_loop
       await session.submit("req_1", "generate")

@@ -12,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Multi-node task routing pool and out-of-order execution session (`ActorPool`, `RoutingActorPool`, `PoolExecutionSession`)."""
+"""Multi-node actor routing pool and out-of-order execution session (`RoutingActorPool`, `PoolExecutionSession`)."""
 
-import abc
 import asyncio
 import contextlib
 import hashlib
@@ -35,46 +34,6 @@ from tunix.experimental.worker import remote_execution
 ActorHandle = remote_execution.ActorHandle
 ExecutionResponse = remote_execution.ExecutionResponse
 LONG_POLL_TIMEOUT_S = remote_execution.LONG_POLL_TIMEOUT_S
-
-
-class ActorPool(abc.ABC):
-  """Stateless load-balanced routing across worker farms with out-of-order task streaming."""
-
-  @abc.abstractmethod
-  def add_actor(self, actor: Union[str, ActorHandle]) -> None:
-    """Adds a worker actor handle or string URI target address to the pool."""
-    pass
-
-  @abc.abstractmethod
-  def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
-    """Submits request to least-loaded or next available worker in the pool."""
-    pass
-
-  @abc.abstractmethod
-  async def asubmit(
-      self, method_name: Optional[str] = None, *args, **kwargs
-  ) -> Any:
-    """Asynchronously submits request and returns completed result."""
-    pass
-
-  @abc.abstractmethod
-  def as_completed_stream(
-      self,
-      tasks: Sequence[
-          Tuple[str, str, Sequence[Any], Dict[str, Any]]
-      ],
-  ) -> AsyncIterator[Any]:
-    """Dispatches a batch of tasks across pool and yields results strictly out-of-order.
-
-    Args:
-      tasks: Sequence of task specifications formatted as 4-tuples:
-        `(request_id, method_name, args, kwargs)`, where:
-          - request_id: Unique request identifier string.
-          - method_name: Target remote method name to execute on the worker.
-          - args: Positional arguments sequence passed to the remote method.
-          - kwargs: Keyword arguments dictionary passed to the remote method.
-    """
-    raise NotImplementedError
 
 
 def stable_route_hash(route_key: Any) -> int:
@@ -101,8 +60,8 @@ def stable_route_hash(route_key: Any) -> int:
   return int.from_bytes(digest.digest(), "big")
 
 
-class RoutingActorPool(ActorPool):
-  """ActorPool with smart task routing (`route_key affinity, round-robin fallback`).
+class RoutingActorPool:
+  """Actor pool with smart task routing (`route_key affinity, round-robin fallback`).
 
   Args:
     actors: Initial sequence of worker actor handles or string URI targets.

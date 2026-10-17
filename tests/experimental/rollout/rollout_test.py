@@ -25,9 +25,9 @@ from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import collector
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.trajectory import store as trajectory_store_lib
+from tunix.experimental.worker import actor_pool
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import rollout_worker as worker
-from tunix.experimental.worker import task_pool
 
 
 class RolloutWorkerTest(parameterized.TestCase):
@@ -275,7 +275,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       self.assertEqual(traj.request_id, "traj_prompt_native_actor_g0")
 
       # Direct RoutingActorPool out-of-order streaming and string URI support
-      pool = task_pool.RoutingActorPool([handle])
+      pool = actor_pool.RoutingActorPool([handle])
       pool.add_actor("grpc://rollout-pod-2:50051")
       tasks = [(req.prompt_id, "generate", (req,), {})]
       results = []

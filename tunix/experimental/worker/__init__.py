@@ -16,6 +16,9 @@
 
 # pylint: disable=g-importing-member
 from tunix.experimental.worker.abstract_worker import Worker
+from tunix.experimental.worker.actor_pool import PoolExecutionSession
+from tunix.experimental.worker.actor_pool import RoutingActorPool
+from tunix.experimental.worker.actor_pool import stable_route_hash
 from tunix.experimental.worker.remote_execution import ActorHandle
 from tunix.experimental.worker.remote_execution import ExecutionRequest
 from tunix.experimental.worker.remote_execution import ExecutionResponse
@@ -23,7 +26,3 @@ from tunix.experimental.worker.remote_execution import InProcessActorHandle
 from tunix.experimental.worker.remote_execution import InProcessRemoteExecutionServer
 from tunix.experimental.worker.remote_execution import RemoteExecutionServer
 from tunix.experimental.worker.rollout_worker import RolloutWorker
-from tunix.experimental.worker.task_pool import ActorPool
-from tunix.experimental.worker.task_pool import PoolExecutionSession
-from tunix.experimental.worker.task_pool import RoutingActorPool
-from tunix.experimental.worker.task_pool import stable_route_hash

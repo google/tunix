@@ -26,8 +26,8 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import sampler as base_sampler_lib
 from tunix.experimental.trajectory import trajectory as trajectory_lib
+from tunix.experimental.worker import actor_pool
 from tunix.experimental.worker import remote_execution
-from tunix.experimental.worker import task_pool
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
@@ -376,7 +376,7 @@ class MockGlobalOrchestrator:
       self.trainer_handle = trainer
     else:
       self.trainer_handle = getattr(trainer, "actor_handle", None)
-    self.worker_pool = task_pool.RoutingActorPool(self.actor_handles)
+    self.worker_pool = actor_pool.RoutingActorPool(self.actor_handles)
 
   def start_workers(self) -> None:
     """Starts all managed rollout worker instances via actor handles."""
