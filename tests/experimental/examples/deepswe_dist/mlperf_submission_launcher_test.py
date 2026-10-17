@@ -66,6 +66,7 @@ _MAXTEXT_DEFAULTS = {
     "moe_wi_gmm_fused_swiglu": "false",
     "moe_wo_gmm_fused_dswiglu": "false",
     "query_proj_kernel_gather_once": "false",
+    "wi_tile_fwd_rhs_buffer_count": "0",
     # remat_policy=custom's per-tensor keys (MaxText base.yml).
     "query_proj": "remat",
     "key_proj": "remat",
@@ -99,6 +100,8 @@ _TUNED_KEYS = {
     "wi_tile_dlhs_mlp_dim": ("1024", "2048"),
     "wi_tile_drhs_batch_seq": ("256", "512"),
     "wi_tile_fwd_batch_seq": ("256", "512"),
+    "wi_tile_fwd_mlp_dim": ("1024", "2048"),
+    "wi_tile_fwd_rhs_buffer_count": ("0", "2"),
     "wo_tile_dlhs_batch_seq": ("256", "512"),
     "wo_tile_drhs_batch_seq": ("256", "512"),
     "wo_tile_fwd_batch_seq": ("256", "512"),
@@ -109,10 +112,10 @@ _TUNED_KEYS = {
 # context_parallel_attention_load_balance_hoist_ids, moe_wo_gmm_fused_dswiglu and
 # query_proj_kernel_gather_once, which only the MaxText change on top of #5721
 # defines (the pinned parambole/rl-4600-final-maxtext; atwigg/mlperf at bbd0f6f10
-# does not), and fp8_fake_quant_hoist, which only the pinned commit of that
-# branch defines (its previous head 94f11c09d does not). MaxText refuses a key
-# it does not define when the trainer starts, so only TRAINER_TUNED_FLAGS=true
-# may pass them.
+# does not), and fp8_fake_quant_hoist and wi_tile_fwd_rhs_buffer_count, which
+# only later commits of that branch define (94f11c09d defines neither, and
+# e1cd8bf1d not the second). MaxText refuses a key it does not define when the
+# trainer starts, so only TRAINER_TUNED_FLAGS=true may pass them.
 _BENCH_MAXTEXT_KEYS = (
     "context_parallel_attention_load_balance_hoist_ids",
     "fp8_fake_quant_hoist",
@@ -127,6 +130,7 @@ _BENCH_MAXTEXT_KEYS = (
     "moe_wi_gmm_fused_swiglu",
     "moe_wo_gmm_fused_dswiglu",
     "query_proj_kernel_gather_once",
+    "wi_tile_fwd_rhs_buffer_count",
 )
 # The custom mesh rule TRAINER_TUNED_FLAGS=true selects, which
 # AI-Hypercomputer/maxtext#5783 (in #5721) defines and MaxText before #5721
@@ -164,6 +168,11 @@ _PROJ_KEYS = ("query_proj", "key_proj", "value_proj", "out_proj", "qkv_proj")
 # TRAINER_TUNED_FLAGS adds fp8_fake_quant_hoist only at the 128-chip 32x2x4
 # mesh, where it was timed, and only with the trainer's fp8 fake-quant on.
 _FQ_HOIST = "fp8_fake_quant_hoist"
+# TRAINER_TUNED_FLAGS sets the recipe's wi_tile_fwd_mlp_dim to 2048 (one value,
+# not an override) and adds wi_tile_fwd_rhs_buffer_count=2, which that tile
+# needs to fit VMEM, only at the 128-chip 32x2x4 mesh, where they were timed.
+_WI_TILE = "wi_tile_fwd_mlp_dim"
+_WI_BUFFERS = "wi_tile_fwd_rhs_buffer_count"
 
 
 def _render(recipe: Path = _RECIPE, **overrides: str) -> str:
@@ -651,11 +660,14 @@ class SubmissionLauncherTest(absltest.TestCase):
     expected = {key: ("remat", "device") for key in _PROJ_KEYS}
     # MaxText refuses query_proj_kernel_gather_once with query_proj=device.
     expected["query_proj_kernel_gather_once"] = ("true", "false")
-    # fp8_fake_quant_hoist only at 32x2x4.
+    # fp8_fake_quant_hoist, the 2048 tile and its buffer count only at 32x2x4.
     expected[_FQ_HOIST] = ("gather8", "off")
+    expected[_WI_TILE] = ("2048", "1024")
+    expected[_WI_BUFFERS] = ("2", "0")
     self.assertEqual(_flag_changes(before, flags), expected)
     self.assertNotIn("query_proj_kernel_gather_once", flags)
     self.assertNotIn(_FQ_HOIST, flags)
+    self.assertNotIn(_WI_BUFFERS, flags)
     self.assertEqual(flags["num_moe_token_chunks"], "2")
     self.assertEqual(flags["moe_chunk_pipeline"], "true")
     self.assertEqual(flags["moe_roe_packed_routing_gather"], "true")
@@ -673,11 +685,14 @@ class SubmissionLauncherTest(absltest.TestCase):
     expected["moe_roe_packed_routing_gather"] = ("true", "false")
     # MaxText refuses query_proj_kernel_gather_once with query_proj=device.
     expected["query_proj_kernel_gather_once"] = ("true", "false")
-    # fp8_fake_quant_hoist only at 32x2x4.
+    # fp8_fake_quant_hoist, the 2048 tile and its buffer count only at 32x2x4.
     expected[_FQ_HOIST] = ("gather8", "off")
+    expected[_WI_TILE] = ("2048", "1024")
+    expected[_WI_BUFFERS] = ("2", "0")
     self.assertEqual(_flag_changes(before, flags), expected)
     self.assertNotIn("query_proj_kernel_gather_once", flags)
     self.assertNotIn(_FQ_HOIST, flags)
+    self.assertNotIn(_WI_BUFFERS, flags)
 
   def test_tuned_flags_keep_an_explicit_chunk_count_at_64x1x8(self):
     flags = _maxtext_flags(
@@ -693,6 +708,8 @@ class SubmissionLauncherTest(absltest.TestCase):
       self.assertEqual(flags[key], "device", key)
     self.assertNotIn("query_proj_kernel_gather_once", flags)
     self.assertNotIn(_FQ_HOIST, flags)
+    self.assertEqual(flags[_WI_TILE], "1024")
+    self.assertNotIn(_WI_BUFFERS, flags)
 
   def test_fp8_fake_quant_hoist_only_at_the_timed_cell(self):
     # Once, with gather8, in the 32x2x4 trainer with the tuned flags (the
@@ -720,6 +737,43 @@ class SubmissionLauncherTest(absltest.TestCase):
     no_fp8 = _jobset(_render(TRAINER_FP8="false", **_BENCH_CELL), "train")
     self.assertNotIn("fp8_moe_fake_quant", _maxtext_flags(no_fp8))
     self.assertNotIn(_FQ_HOIST, no_fp8)
+
+  def test_wi_tile_2048_with_two_weight_buffers_only_at_the_timed_mesh(self):
+    # In the 32x2x4 trainer with the tuned flags (the default render, the bench
+    # cell, and the bench cell with TRAINER_FP8=false, which the tile does not
+    # depend on): the tile once, at 2048 (the recipe's 1024 replaced, not
+    # overridden), and the buffer count once, at 2.
+    at_32x2x4 = {
+        "default": self.default,
+        "bench": self.bench_on,
+        "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
+    }
+    for name, render in at_32x2x4.items():
+      trainer = _jobset(render, "train")
+      self.assertEqual(
+          _maxtext_flag_tokens(trainer, _WI_TILE), [f"{_WI_TILE}=2048"], name
+      )
+      self.assertEqual(
+          _maxtext_flag_tokens(trainer, _WI_BUFFERS), [f"{_WI_BUFFERS}=2"], name
+      )
+    # Elsewhere the recipe's tile, once, and no buffer count: tuned flags off,
+    # the 256-chip meshes.
+    others = {
+        "tuned off": self.default_off,
+        "bench, tuned off": self.bench_off,
+        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
+        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
+        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
+        "32x2x8, tuned off": _render(
+            TRAINER_TUNED_FLAGS="false", **_MESH_32X2X8
+        ),
+    }
+    for name, render in others.items():
+      trainer = _jobset(render, "train")
+      self.assertEqual(
+          _maxtext_flag_tokens(trainer, _WI_TILE), [f"{_WI_TILE}=1024"], name
+      )
+      self.assertNotIn(_WI_BUFFERS, render, name)
 
   def test_tuned_flags_false_leaves_the_256_chip_meshes_alone(self):
     for mesh in (_MESH_32X2X8, _MESH_64X1X8):
@@ -805,6 +859,8 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(flags["query_proj"], "device")
     self.assertNotIn("query_proj_kernel_gather_once", flags)
     self.assertNotIn(_FQ_HOIST, flags)
+    self.assertEqual(flags[_WI_TILE], "1024")
+    self.assertNotIn(_WI_BUFFERS, flags)
 
   def test_pad_start_with_finite_moe_capacity_requires_exclude_padding(self):
     with self.assertRaisesRegex(

@@ -193,12 +193,22 @@ if [[ "${NUM_MOE_TOKEN_CHUNKS}" == "1" ]]; then
 else
   _moe_chunk_pipeline=true
 fi
+# TRAINER_TUNED_FLAGS=true at the 128-chip trainer mesh 32x2x4 gives the fused wi forward
+# GMM N tiles of 2048 instead of 1024 (wi_tile_fwd_mlp_dim below, one value), next to the
+# 2-deep weight pipeline that tile needs to fit VMEM (wi_tile_fwd_rhs_buffer_count=2, at
+# the end of the TRAINER_TUNED_FLAGS block).
+if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" \
+      && "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
+  _wi_tile_fwd_mlp_dim=2048
+else
+  _wi_tile_fwd_mlp_dim=1024
+fi
 export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep \
 use_gdn_kernel=true gdn_cp_mode=head gdn_chunk_size=64 \
 decoder_layer_input=offload context=${REMAT_CONTEXT} gdn=remat gdn_conv=remat gdn_states=remat \
 megablox=true sparse_matmul=true use_tokamax_gmm=true use_gmm_v2=true \
 use_gmm_v2_heuristic_tiling=false merge_gating_gmm=false \
-wi_tile_fwd_batch_seq=256 wi_tile_fwd_embed_dim=4096 wi_tile_fwd_mlp_dim=1024 \
+wi_tile_fwd_batch_seq=256 wi_tile_fwd_embed_dim=4096 wi_tile_fwd_mlp_dim=${_wi_tile_fwd_mlp_dim} \
 wi_tile_dlhs_batch_seq=256 wi_tile_dlhs_embed_dim=4096 wi_tile_dlhs_mlp_dim=1024 \
 wi_tile_drhs_batch_seq=256 wi_tile_drhs_embed_dim=4096 wi_tile_drhs_mlp_dim=1024 \
 wo_tile_fwd_batch_seq=256 wo_tile_fwd_embed_dim=4096 wo_tile_fwd_mlp_dim=1024 \
@@ -364,6 +374,17 @@ fi
 #     every gradient are bit-identical to the key off. MaxText raises when the trainer
 #     traces it without fp8_moe_fake_quant=true, so the block passes it only with
 #     TRAINER_FP8=true, and only at the 128-chip 32x2x4 mesh, the one it was timed at.
+#   wi_tile_fwd_mlp_dim=2048 with wi_tile_fwd_rhs_buffer_count=2, at 32x2x4: the fused
+#     SwiGLU wi forward GMM (moe_wi_gmm_fused_swiglu) covers each half of its [gate | up]
+#     output (the MoE MLP dim, 1024) with one N tile instead of two, so it makes one pass
+#     over its input rows instead of two. With the kernel's default three weight buffers
+#     that tile needs 66.95 MiB of VMEM, over the 57.60 MiB kernel limit;
+#     wi_tile_fwd_rhs_buffer_count=2 keeps two (50.95 MiB; kernel-only compiles for TPU
+#     v7x). Buffering only: the same values. The gate before the recipe's MaxText flags
+#     sets the recipe's own tile to 2048, so the flags carry one value of it. MaxText
+#     refuses the buffer count unless moe_wi_gmm_fused_swiglu=true and
+#     use_gmm_v2_heuristic_tiling=false, as here. Both only at the 128-chip 32x2x4 mesh,
+#     the one they were timed at.
 # These on the bench, regular micro-batch or s/step as above, 0 tokens dropped:
 #   moe_routing_index_math=count 10.022 -> 9.875 s (o275x-mf-cnt-prof),
 #     moe_unsplit_prefused_wi with two exact rewrites this block leaves off 10.022 ->
@@ -403,6 +424,14 @@ fi
 #     (o275x-v19a-ctl -> o275x-v19a-fq8, 3,669 -> 3,714 tokens/s/chip), 0 tokens
 #     dropped. In an AOT compile of that cell fwd_bwd takes 80.26 GiB of HBM (79.96
 #     without it).
+#   wi_tile_fwd_mlp_dim=2048 with wi_tile_fwd_rhs_buffer_count=2, on the pinned MaxText with
+#     this block's other keys at 32x2x4, against the same code with the two keys off in the
+#     same pod: 79.342 -> 79.024 s/step (o275x-ec-ctl -> o275x-ec-e6k, 3,717 -> 3,732
+#     tokens/s/chip) and 78.985 in a replicate (o275x-ec-e6kr), 0 tokens dropped; 79.140 and
+#     79.045 s/step in two other pods (o275x-e6k1, o275x-p3-e6k). Its numerics run passes all
+#     six gates, with the loss of the code without the keys (nx-e6k1). In an AOT compile of
+#     that cell fwd_bwd takes the same 80.26 GiB of HBM as without the keys, at the same
+#     scheduler memory.
 #   custom_mesh_and_rule=cp-as-ep-dense-no-cp, on the code of
 #     AI-Hypercomputer/maxtext#5758 at this cell without
 #     context_parallel_attention_load_balance_hoist_ids, moe_wo_gmm_fused_dswiglu and
@@ -450,8 +479,9 @@ fi
 # below, are in the MaxText pinned in requirements/maxtext_requirements.txt (branch
 # parambole/rl-4600-final-maxtext, on atwigg/mlperf at bbd0f6f10, the merge of
 # AI-Hypercomputer/maxtext#5721; bbd0f6f10 itself lacks those three). So is
-# fp8_fake_quant_hoist, from the commit after them on that branch (94f11c09d, the branch's
-# previous head, lacks it). MaxText refuses a key it does not define when the trainer
+# fp8_fake_quant_hoist, from the commit after them on that branch (94f11c09d lacks it), and
+# wi_tile_fwd_rhs_buffer_count, from a later one (e1cd8bf1d, the branch's previous head,
+# lacks it). MaxText refuses a key it does not define when the trainer
 # starts, so an older MaxText needs TRAINER_TUNED_FLAGS=false.
 # The 256-chip trainer (TRAINER_TPU_SLICE=tpu7x:4x8x8, 512 devices), from Rohan Bierneni's
 # 256-chip trainer runs (2026-10-15, RL trainer bench, 9 micro-batches of 64 rows, steps 1-4):
@@ -485,6 +515,12 @@ if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
   if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" \
         && "${TRAINER_FP8:-true}" == "true" ]]; then
     export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} fp8_fake_quant_hoist=gather8"
+  fi
+  # wi_tile_fwd_rhs_buffer_count=2 only at the mesh it was timed at, where the recipe's
+  # wi_tile_fwd_mlp_dim is 2048 (above): that tile needs the 2-deep weight pipeline to
+  # fit VMEM.
+  if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} wi_tile_fwd_rhs_buffer_count=2"
   fi
 fi
 export DEBUG=${DEBUG:-0}
