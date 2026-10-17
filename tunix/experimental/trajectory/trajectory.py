@@ -603,6 +603,25 @@ class FinalMetrics(pydantic.BaseModel):
   )
 
 
+class TrajectoryMetrics(pydantic.BaseModel):
+  """Flexible metric capture expanding beyond `FinalMetrics`.
+
+  Captures trajectory-level execution timings, RL training statistics, and
+  other environment or computation metrics.
+  """
+
+  model_config = pydantic.ConfigDict(extra="forbid")
+
+  trajectory_id: str = pydantic.Field(
+      min_length=1,
+      description="Canonical unique identifier for this trajectory document.",
+  )
+  extra: MetadataDict = pydantic.Field(
+      default=None,
+      description="Custom metrics",
+  )
+
+
 class ToolCall(pydantic.BaseModel):
   """A tool call within a step."""
 
