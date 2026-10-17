@@ -402,7 +402,8 @@ fi
 #     Pallas scan in VMEM instead of an XLA reduction tree of matmuls. MaxText refuses the
 #     key unless use_gdn_kernel=true and gdn_chunk_size=64, as here. Its backward twin,
 #     gdn_cp_dh_scan, is set below, with the final stack's keys.
-#   The final stack's keys, at 32x2x4 (moe_fp8_bwd_dispatch only with TRAINER_FP8=true):
+#   The final stack's keys, at 32x2x4 (moe_fp8_bwd_dispatch and moe_fp8_token_all_gather only
+#   with TRAINER_FP8=true):
 #   gdn_cp_dh_scan=true: the GDN context-parallel backward folds the incoming state gradients
 #     with one Pallas scan in VMEM instead of an XLA reduction tree. It pays only with the
 #     single-SparseCore reduce-scatter libtpu flag, which the block sets at this mesh (part 1).
@@ -429,6 +430,23 @@ fi
 #     master as the 16 bits its bfloat16 weight does not hold plus one packed bit per element
 #     and rebuilds it bit for bit at each update: the same masters, weights and updates, with
 #     2.13 instead of 4 bytes per element stored and copied to and from host memory.
+#   moe_fp8_token_all_gather=true: in the ring of experts, the forward token all-gather (the
+#     dispatch) moves float8_e4m3fn values with one float32 scale per token row, dequantized
+#     to bfloat16 right after the gather; the backward is the plain bfloat16 reduce-scatter.
+#     Lossy, so only with the trainer's fp8 fake-quant on (TRAINER_FP8=true), the cell whose
+#     numerics run it passed.
+#   gdn_bwd_natural_layout=states: the Pallas GDN backward kernel reads the float32 chunk
+#     states and t_inv (and dht / dh0) in their natural layouts through its BlockSpec index
+#     maps instead of XLA relayouts to and from the head-group-major layout. Bit-identical.
+#   gdn_gated_norm_layout=token_minor: the bfloat16 GDN output is laid out token-minor before
+#     the gated RMSNorm, so its relayout is one bfloat16 transpose ahead of the float32
+#     convert instead of a re-tile, a convert and a float32 transpose per call. Layout only.
+#     On CPU the loss and the input gradient stay bit-identical. At the shapes of MaxText's
+#     unit test only the float32 sum that forms the norm's scale gradient is reordered
+#     (relative 1e-7); at other shapes a few elements of other weight gradients also move,
+#     by up to one bfloat16 ulp, and the TPU backward program changes, so bit-identity on
+#     TPU is not established. MaxText refuses it unless gdn_out_proj_token_minor=true,
+#     as here.
 # These on the bench, regular micro-batch or s/step as above, 0 tokens dropped:
 #   moe_routing_index_math=count 10.022 -> 9.875 s (o275x-mf-cnt-prof),
 #     moe_unsplit_prefused_wi with two exact rewrites this block leaves off 10.022 ->
@@ -500,6 +518,18 @@ fi
 #     76.413 -> 76.116 and 76.057 s/step (o275x-c1s-ctl -> o275x-c1s-c1, o275x-c1s-s1), numerics
 #     6 of 6 with both (nx-c1s1).
 #   gdn_cp_fast_state_passing was not timed alone on TPU.
+#   On that whole stack (all of the keys above), each against the same code without it in
+#   the same pod (MaxText stacks with these three keys; steps 1-4, 0 tokens dropped):
+#   moe_fp8_token_all_gather: 73.202 -> 72.692 s/step (o275x-m3b-ctl -> o275x-m3-cb1, 4,029
+#     -> 4,057 tokens/s/chip), and 73.139 -> 72.721 in a replicate in a new pod
+#     (o275x-m3b-ctlr -> o275x-m3-cb1r), numerics 6 of 6 (nx-m3-cb1).
+#   gdn_bwd_natural_layout=states, with a MoE dead-tail-row key this recipe does not set
+#     (-0.025 s/step on its own): 73.348 -> 73.140 s/step (o275x-mg3-ctl -> o275x-mg3-all),
+#     numerics 6 of 6 (nx-mg3-all); without that key, on top of moe_fp8_token_all_gather:
+#     72.554 -> 72.268 s/step (o275x-mg4-ctl -> o275x-mg4-nat).
+#   gdn_gated_norm_layout=token_minor on top of both: 72.442 -> 71.700 s/step
+#     (o275x-mg4-natc -> o275x-mg4-c0, 4,071 -> 4,113 tokens/s/chip). The three together have
+#     no numerics run yet.
 #   custom_mesh_and_rule=cp-as-ep-dense-no-cp, on the code of
 #     AI-Hypercomputer/maxtext#5758 at this cell without
 #     context_parallel_attention_load_balance_hoist_ids, moe_wo_gmm_fused_dswiglu and
@@ -552,9 +582,10 @@ fi
 # (e1cd8bf1d lacks them, 15285fd74 the scans), and gdn_cp_pass1_states_and_bf16_qkv,
 # gdn_out_proj_token_minor, moe_fp8_bwd_dispatch, ragged_unsort_spread_masked_indices,
 # moe_fallback_topk_capacity, fp32_master_storage and gdn_cp_fast_state_passing, from the
-# commits after 1bf840cff (the branch's previous head lacks all seven). MaxText refuses a key
-# it does not define when the trainer starts, so an older MaxText needs
-# TRAINER_TUNED_FLAGS=false.
+# commits after 1bf840cff (which lacks all seven), and moe_fp8_token_all_gather,
+# gdn_bwd_natural_layout and gdn_gated_norm_layout, from the commits after 6679552770a0 (which
+# lacks all three). MaxText refuses a key it does not define when the trainer starts, so an
+# older MaxText needs TRAINER_TUNED_FLAGS=false.
 # The 256-chip trainer (TRAINER_TPU_SLICE=tpu7x:4x8x8, 512 devices), from Rohan Bierneni's
 # 256-chip trainer runs (2026-10-15, RL trainer bench, 9 micro-batches of 64 rows, steps 1-4):
 # 32x2x8 60.62 s/step and 64x1x8 55.97 s/step, against 82.17 s/step for 32x2x4 on 128 chips.
@@ -607,6 +638,16 @@ if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
       export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} moe_fp8_bwd_dispatch=true"
     fi
     export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} ragged_unsort_spread_masked_indices=true moe_fallback_topk_capacity=128 gdn_cp_fast_state_passing=true fp32_master_storage=residual16"
+  fi
+  # Three keys timed on top of the final stack, only at that mesh: moe_fp8_token_all_gather only
+  # with the trainer's fp8 fake-quant on (lossy; its numerics run used that cell), then
+  # gdn_bwd_natural_layout=states and gdn_gated_norm_layout=token_minor (which MaxText refuses
+  # without gdn_out_proj_token_minor=true, set just above).
+  if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
+    if [[ "${TRAINER_FP8:-true}" == "true" ]]; then
+      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} moe_fp8_token_all_gather=true"
+    fi
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} gdn_bwd_natural_layout=states gdn_gated_norm_layout=token_minor"
   fi
 fi
 export DEBUG=${DEBUG:-0}

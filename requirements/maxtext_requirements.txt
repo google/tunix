@@ -3,10 +3,10 @@
 # (bbd0f6f10; includes the #5698 port, #5758, #5783 and GDN/MoE trainer perf) plus moe_wo_gmm_fused_dswiglu,
 # context_parallel_attention_load_balance_hoist_ids, query_proj_kernel_gather_once, fp8_fake_quant_hoist,
 # wi_tile_fwd_rhs_buffer_count, gdn_cp_m_scan, gdn_cp_pass1_states_and_bf16_qkv, gdn_out_proj_token_minor,
-# moe_fp8_bwd_dispatch, ragged_unsort_spread_masked_indices, moe_fallback_topk_capacity, fp32_master_storage
-# and gdn_cp_fast_state_passing.
-maxtext @ git+https://github.com/google/maxtext.git@6679552770a08d712ca3ce876625cadce8007077
-maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@6679552770a08d712ca3ce876625cadce8007077#subdirectory=src/maxtext/integration/vllm
+# moe_fp8_bwd_dispatch, ragged_unsort_spread_masked_indices, moe_fallback_topk_capacity, fp32_master_storage,
+# gdn_cp_fast_state_passing, moe_fp8_token_all_gather, gdn_bwd_natural_layout and gdn_gated_norm_layout.
+maxtext @ git+https://github.com/google/maxtext.git@ae5257c1ff8181d25514da1ec289bc49a0f25d6d
+maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@ae5257c1ff8181d25514da1ec289bc49a0f25d6d#subdirectory=src/maxtext/integration/vllm
 aqtp
 cheroot
 cloud-accelerator-diagnostics

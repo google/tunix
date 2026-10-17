@@ -76,6 +76,9 @@ _MAXTEXT_DEFAULTS = {
     "moe_fallback_topk_capacity": "0",
     "moe_fp8_bwd_dispatch": "false",
     "ragged_unsort_spread_masked_indices": "false",
+    "moe_fp8_token_all_gather": "false",
+    "gdn_bwd_natural_layout": "off",
+    "gdn_gated_norm_layout": "auto",
     # remat_policy=custom's per-tensor keys (MaxText base.yml).
     "query_proj": "remat",
     "key_proj": "remat",
@@ -123,6 +126,9 @@ _TUNED_KEYS = {
     "moe_fallback_topk_capacity": ("0", "128"),
     "gdn_cp_fast_state_passing": ("false", "true"),
     "fp32_master_storage": ("f32", "residual16"),
+    "moe_fp8_token_all_gather": ("false", "true"),
+    "gdn_bwd_natural_layout": ("off", "states"),
+    "gdn_gated_norm_layout": ("auto", "token_minor"),
 }
 # Tuned keys that MaxText before AI-Hypercomputer/maxtext#5721 (e.g. e526ea02)
 # does not define: two from AI-Hypercomputer/maxtext#5698 and seven from
@@ -136,7 +142,9 @@ _TUNED_KEYS = {
 # not the scans), and gdn_cp_pass1_states_and_bf16_qkv, gdn_out_proj_token_minor,
 # moe_fp8_bwd_dispatch, ragged_unsort_spread_masked_indices,
 # moe_fallback_topk_capacity, fp32_master_storage and gdn_cp_fast_state_passing,
-# which only the commits after 1bf840cff define.
+# which only the commits after 1bf840cff define, and moe_fp8_token_all_gather,
+# gdn_bwd_natural_layout and gdn_gated_norm_layout, which only the commits after
+# 6679552770a0 define.
 # MaxText refuses a key it does not define when the trainer starts, so only
 # TRAINER_TUNED_FLAGS=true may pass them.
 _BENCH_MAXTEXT_KEYS = (
@@ -163,6 +171,9 @@ _BENCH_MAXTEXT_KEYS = (
     "moe_fallback_topk_capacity",
     "gdn_cp_fast_state_passing",
     "fp32_master_storage",
+    "moe_fp8_token_all_gather",
+    "gdn_bwd_natural_layout",
+    "gdn_gated_norm_layout",
 )
 # The custom mesh rule TRAINER_TUNED_FLAGS=true selects, which
 # AI-Hypercomputer/maxtext#5783 (in #5721) defines and MaxText before #5721
@@ -211,9 +222,9 @@ _WI_BUFFERS = "wi_tile_fwd_rhs_buffer_count"
 _GDN_M_SCAN = "gdn_cp_m_scan"
 _GDN_DH_SCAN = "gdn_cp_dh_scan"
 # The final stack's keys, which TRAINER_TUNED_FLAGS adds only at the 128-chip
-# 32x2x4 mesh, where they were timed (moe_fp8_bwd_dispatch only with the
-# trainer's fp8 fake-quant on), next to the single-SparseCore reduce-scatter
-# libtpu flag that gdn_cp_dh_scan needs.
+# 32x2x4 mesh, where they were timed (moe_fp8_bwd_dispatch and
+# moe_fp8_token_all_gather only with the trainer's fp8 fake-quant on), next to
+# the single-SparseCore reduce-scatter libtpu flag that gdn_cp_dh_scan needs.
 _FINAL_KEYS = {
     "gdn_cp_dh_scan": "true",
     "gdn_cp_pass1_states_and_bf16_qkv": "true",
@@ -223,8 +234,11 @@ _FINAL_KEYS = {
     "moe_fallback_topk_capacity": "128",
     "gdn_cp_fast_state_passing": "true",
     "fp32_master_storage": "residual16",
+    "moe_fp8_token_all_gather": "true",
+    "gdn_bwd_natural_layout": "states",
+    "gdn_gated_norm_layout": "token_minor",
 }
-_FP8_ONLY = "moe_fp8_bwd_dispatch"
+_FP8_ONLY = ("moe_fp8_bwd_dispatch", "moe_fp8_token_all_gather")
 _RS_FLAG = "--xla_tpu_use_single_sparse_core_for_reduce_scatter_offload"
 
 
@@ -881,7 +895,8 @@ class SubmissionLauncherTest(absltest.TestCase):
   def test_final_stack_keys_only_at_the_timed_mesh(self):
     # Each key once, with its value, in the 32x2x4 trainer with the tuned flags
     # (the default render, the bench cell, and the bench cell with
-    # TRAINER_FP8=false, where only moe_fp8_bwd_dispatch is absent); nowhere
+    # TRAINER_FP8=false, where only moe_fp8_bwd_dispatch and
+    # moe_fp8_token_all_gather are absent); nowhere
     # else: tuned flags off, the 256-chip meshes.
     at_32x2x4 = {
         "default": self.default,
@@ -891,7 +906,7 @@ class SubmissionLauncherTest(absltest.TestCase):
     for name, render in at_32x2x4.items():
       trainer = _jobset(render, "train")
       for key, value in _FINAL_KEYS.items():
-        want = [] if key == _FP8_ONLY and "TRAINER_FP8" in name else [f"{key}={value}"]
+        want = [] if key in _FP8_ONLY and "TRAINER_FP8" in name else [f"{key}={value}"]
         self.assertEqual(_maxtext_flag_tokens(trainer, key), want, f"{name}: {key}")
     others = {
         "tuned off": self.default_off,
