@@ -23,6 +23,7 @@ from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.trajectory.explorer import run_explorer
 from tunix.experimental.trajectory.explorer.commands import ping
+from tunix.experimental.trajectory.explorer.commands import summary
 
 
 def _parse_cmd(cmd: str = "") -> run_explorer.ExplorerConfig:
@@ -62,6 +63,10 @@ class ParseArgsTest(absltest.TestCase):
   def test_subcommand_ping(self) -> None:
     config = _parse_cmd("ping")
     self.assertIsInstance(config.cmd, ping.PingCommand)
+
+  def test_subcommand_summary(self) -> None:
+    config = _parse_cmd("summary")
+    self.assertIsInstance(config.cmd, summary.SummaryCommand)
 
   def test_global_flags_compose_with_a_subcommand(self) -> None:
     config = _parse_cmd("--store file --root_dir /tmp/t --run_id r ping")
