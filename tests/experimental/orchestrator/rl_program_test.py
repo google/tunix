@@ -78,6 +78,7 @@ class _MockWorkerHandle(mock.MagicMock):
     self.metrics_buffer: exp_metrics.MetricsBuffer | None = None
     self.train_step_count: int = 0
     self.dispatched_requests: list[Any] = []
+    self._pending_request_ids: list[str] = []
 
   async def dispatch_task(
       self,
@@ -87,6 +88,8 @@ class _MockWorkerHandle(mock.MagicMock):
       **kwargs: Any,
   ) -> str:
     self.dispatched_requests.append((request_id, method_name, args, kwargs))
+    if request_id is not None:
+      self._pending_request_ids.append(request_id)
     if method_name == "generate":
       reqs = kwargs.get("requests", [])
       if reqs:
@@ -108,9 +111,10 @@ class _MockWorkerHandle(mock.MagicMock):
   ) -> Any:
     """Pops queued rollout responses, or returns None if no responses are ready."""
     del timeout_s
-    if self.responses:
+    if self.responses and self._pending_request_ids:
       items = self.responses.pop(0)
-      return remote_execution.ExecutionResponse(request_id="poll", result=items)
+      req_id = self._pending_request_ids.pop(0)
+      return remote_execution.ExecutionResponse(request_id=req_id, result=items)
     await asyncio.sleep(0.01)
     return None
 
@@ -6700,6 +6704,62 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       await asyncio.wait_for(program.run_async(self.mock_engine), timeout=5.0)
       program.close()
       self.assertEqual(program.step, 1)
+
+    asyncio.run(_run())
+
+  def test_polling_stage_worker_error_aborts_run_instead_of_hanging(self):
+    async def _run():
+      rollout_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+      actor_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+      async def _dispatch_task(
+          request_id=None, method_name=None, *args, **kwargs
+      ):
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def _failing_poll_responses(timeout_s=50.0):
+        del timeout_s
+        await asyncio.sleep(0.01)
+        raise RuntimeError("Rollout worker RPC connection lost")
+
+      rollout_handle.dispatch_task = mock.AsyncMock(side_effect=_dispatch_task)
+      rollout_handle.poll_responses = mock.AsyncMock(
+          side_effect=_failing_poll_responses
+      )
+
+      engine = _make_engine(
+          rollout_workers=[rollout_handle],
+          trainer_workers={datatypes.Role.ACTOR: actor_handle},
+      )
+      self.mock_algo.num_generations = 1
+      self.mock_algo.mini_batch_size = 1
+
+      program = rl_program.StandardRLProgram(
+          dataset=["q_0"],
+          max_steps=1,
+          algo=self.mock_algo,
+          batch_size=1,
+          max_staleness=1,
+          reward_fns=[lambda *_: 1.0],
+          assembler=batch_assembly.PaddedBatchAssembler(
+              batch_size=1,
+              max_prompt_length=4,
+              max_response_length=4,
+              pad_id=0,
+              num_generations=1,
+              mini_batch_size=1,
+          ),
+          sync_weights=False,
+      )
+      try:
+        with self.assertRaisesRegex(
+            RuntimeError, "Rollout worker RPC connection lost"
+        ):
+          await asyncio.wait_for(program.run_async(engine), timeout=0.5)
+      finally:
+        program.close()
+        await engine.close()
 
     asyncio.run(_run())
 

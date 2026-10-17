@@ -601,19 +601,11 @@ class StandardRLProgram(RLProgram):
     assert self.engine is not None
     try:
       while not self._dispatch_done.is_set() or self._in_flight_rollouts > 0:
-
-        try:
-          completed = await self.engine.poll_rollouts()
-          if isinstance(completed, list) and completed:
-            # TODO: Fault-tolerance must either decrement `_in_flight_rollouts` for failed
-            # requests or retry them internally. Otherwise, a dropped RPC will cause
-            # `_in_flight_rollouts` to never reach 0, hanging the EOF cascade.
-            self._in_flight_rollouts -= len(completed)
-            for item in completed:
-              await self.raw_q.put(item)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-          logging.warning("Error in polling_stage: %s", exc)
-          await asyncio.sleep(0.01)
+        completed = await self.engine.poll_rollouts()
+        if isinstance(completed, list) and completed:
+          self._in_flight_rollouts -= len(completed)
+          for item in completed:
+            await self.raw_q.put(item)
     finally:
       # NB: We currently assume it's safe to silently drop partial groups upon EOF.
       await self.raw_q.close()

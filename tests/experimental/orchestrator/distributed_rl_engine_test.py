@@ -15,6 +15,7 @@
 """Unit tests for DistributedRLEngine and WorkerPoolBalancer."""
 
 import asyncio
+import collections
 from unittest import mock
 
 from absl.testing import absltest
@@ -39,6 +40,8 @@ class MockActorHandle(mock.MagicMock):
 
   def __init__(self, *args, **kwargs):
     super().__init__(spec=remote_execution.ActorHandle, *args, **kwargs)
+    self._dispatched_request_ids: collections.deque[str] = collections.deque()
+
     # Ensure all mocked methods return awaitables by default
     async def _poll_impl(
         timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S,
@@ -48,9 +51,16 @@ class MockActorHandle(mock.MagicMock):
         await asyncio.sleep(min(timeout_s, 0.05))
         return None
       self.poll_responses.return_value = None
+      req_id = (
+          self._dispatched_request_ids.popleft()
+          if self._dispatched_request_ids
+          else ""
+      )
       if isinstance(val, remote_execution.ExecutionResponse):
+        if not val.request_id and req_id:
+          val.request_id = req_id
         return val
-      return remote_execution.ExecutionResponse(result=val)
+      return remote_execution.ExecutionResponse(request_id=req_id, result=val)
 
     self.generate = mock.AsyncMock()
     self.poll_responses = mock.AsyncMock(
@@ -96,6 +106,8 @@ class MockActorHandle(mock.MagicMock):
         and hasattr(self, request_id)
     ):
       method_name = request_id
+    if request_id is not None:
+      self._dispatched_request_ids.append(request_id)
     method = getattr(self, method_name)
     await method(*args, **kwargs)
     return request_id
@@ -1901,10 +1913,19 @@ class DistributedRLEngineTest(absltest.TestCase):
           ),
       )
 
+      fast_returned = False
+
       async def _fast_poll(timeout_s=50.0):
-        del timeout_s
-        await asyncio.sleep(0.01)
-        return resp1
+        nonlocal fast_returned
+        if not fast_returned and self.mock_rollout_1._dispatched_request_ids:
+          fast_returned = True
+          await asyncio.sleep(0.01)
+          resp1.request_id = (
+              self.mock_rollout_1._dispatched_request_ids.popleft()
+          )
+          return resp1
+        await asyncio.sleep(timeout_s)
+        return None
 
       async def _slow_poll(timeout_s=50.0):
         await asyncio.sleep(timeout_s)
@@ -1982,6 +2003,28 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertEqual(req_ids, ["req_p_late_g0_v0"])
       late_rollout.generate.assert_awaited_once()
       await engine.close()
+
+    asyncio.run(_run())
+
+  def test_poll_rollouts_propagates_worker_error_loudly(self):
+    async def _run():
+      async def _failing_poll(timeout_s=50.0):
+        del timeout_s
+        raise RuntimeError("Rollout worker process crashed with OOM")
+
+      self.mock_rollout_1.poll_responses.side_effect = _failing_poll
+      self.mock_rollout_2.poll_responses.side_effect = _failing_poll
+
+      await self.engine.dispatch_rollouts(
+          [{"prompt": "p1", "prompt_id": "p1"}],
+          num_generations=1,
+          policy_version=0,
+      )
+
+      with self.assertRaisesRegex(
+          RuntimeError, "Rollout worker process crashed with OOM"
+      ):
+        await self.engine.poll_rollouts(timeout_s=1.0)
 
     asyncio.run(_run())
 

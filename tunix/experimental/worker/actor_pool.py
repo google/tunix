@@ -353,17 +353,22 @@ class PoolExecutionSession:
         try:
           response = await actor.poll_responses(timeout_s=LONG_POLL_TIMEOUT_S)
           if isinstance(response, ExecutionResponse):
+            if (
+                not response.request_id
+                or response.request_id not in dispatched_set
+            ):
+              raise RuntimeError(
+                  "Received ExecutionResponse with unknown or missing"
+                  f" request_id={response.request_id!r}; in-flight"
+                  f" request_ids={sorted(dispatched_set)!r}."
+              )
+            dispatched_set.remove(response.request_id)
+            self._in_flight = max(0, self._in_flight - 1)
             try:
               res = response.unwrap()
               self._response_queue.put_nowait((res, None))
             except Exception as exc:  # pylint: disable=broad-exception-caught
               self._response_queue.put_nowait((None, exc))
-            if response.request_id and response.request_id in dispatched_set:
-              dispatched_set.remove(response.request_id)
-              self._in_flight = max(0, self._in_flight - 1)
-            elif dispatched_set:
-              dispatched_set.pop()
-              self._in_flight = max(0, self._in_flight - 1)
             self._notify_if_zero_flight()
         except asyncio.CancelledError:
           break

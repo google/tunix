@@ -339,8 +339,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         timeout_s=timeout_s
     ):
       if exc is not None:
-        logging.error("Failed polling rollout worker: %s", exc)
-        continue
+        raise exc
       if res is None:
         continue
       items = res if isinstance(res, list) else [res]

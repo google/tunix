@@ -786,6 +786,50 @@ class ActorPoolTest(parameterized.TestCase):
 
     asyncio.run(_run_session())
 
+  def test_pool_execution_session_rejects_unknown_or_missing_request_id(self):
+    class CorruptedIdHandle(remote_lib.ActorHandle):
+
+      def __init__(self, response_id: str):
+        self._response_id = response_id
+        self._returned = False
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        if not self._returned:
+          self._returned = True
+          return remote_lib.ExecutionResponse(
+              request_id=self._response_id, result="stale_or_corrupted"
+          )
+        await asyncio.sleep(timeout_s)
+        return None
+
+    async def _run():
+      for bad_id in ("unknown_req_id", ""):
+        handle = CorruptedIdHandle(bad_id)
+        pool = actor_pool.RoutingActorPool([handle])
+        session = actor_pool.PoolExecutionSession(pool)
+
+        await session.submit("req_1", "generate")
+        batch = await session.poll_completed(timeout_s=1.0)
+        self.assertLen(batch, 1)
+        res, exc = batch[0]
+        self.assertIsNone(res)
+        self.assertIsInstance(exc, RuntimeError)
+        self.assertIn("unknown or missing request_id", str(exc))
+        await session.close()
+
+    asyncio.run(_run())
 
 if __name__ == "__main__":
   absltest.main()
