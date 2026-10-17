@@ -19,6 +19,7 @@ from typing import Generic, TypeVar
 
 from absl.testing import absltest
 from etils import epath
+from tunix.experimental.trajectory import composite_store
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.trajectory import sql_store
@@ -232,6 +233,7 @@ class GenericTypeParametersTest(absltest.TestCase):
   def test_classes_inherit_parameters_without_explicit_generic(self) -> None:
     """Verifies that Python typing automatically discovers MetadataT."""
     self.assertLen(store_lib.TrajectoryStore.__parameters__, 1)
+    self.assertLen(composite_store.CompositeTrajectoryStore.__parameters__, 1)
     self.assertLen(in_memory_store.InMemoryTrajectoryStore.__parameters__, 1)
     self.assertLen(file_store.FileTrajectoryStore.__parameters__, 1)
     self.assertLen(sql_store.SqlTrajectoryStore.__parameters__, 1)
@@ -239,6 +241,10 @@ class GenericTypeParametersTest(absltest.TestCase):
     self.assertEqual(
         store_lib.TrajectoryStore.__parameters__,
         (store_lib.MetadataT,),
+    )
+    self.assertEqual(
+        composite_store.CompositeTrajectoryStore.__parameters__,
+        (composite_store.MetadataT,),
     )
     self.assertEqual(
         in_memory_store.InMemoryTrajectoryStore.__parameters__,
@@ -258,6 +264,9 @@ class GenericTypeParametersTest(absltest.TestCase):
     subscripted_store = store_lib.TrajectoryStore[
         trajectory_lib.TunixTrajectoryMetadata
     ]
+    subscripted_comp = composite_store.CompositeTrajectoryStore[
+        trajectory_lib.TunixTrajectoryMetadata
+    ]
     subscripted_mem = in_memory_store.InMemoryTrajectoryStore[
         trajectory_lib.TunixTrajectoryMetadata
     ]
@@ -268,6 +277,7 @@ class GenericTypeParametersTest(absltest.TestCase):
         trajectory_lib.TunixTrajectoryMetadata
     ]
     self.assertIsNotNone(subscripted_store)
+    self.assertIsNotNone(subscripted_comp)
     self.assertIsNotNone(subscripted_mem)
     self.assertIsNotNone(subscripted_file)
     self.assertIsNotNone(subscripted_sql)
@@ -278,6 +288,11 @@ class GenericTypeParametersTest(absltest.TestCase):
     self.assertIsInstance(mem, store_lib.TrajectoryStore)
     self.assertIsInstance(mem, store_lib.TrajectoryReader)
     self.assertIsInstance(mem, store_lib.TrajectoryWriter)
+
+    comp = composite_store.CompositeTrajectoryStore(stores=[mem])
+    self.assertIsInstance(comp, store_lib.TrajectoryStore)
+    self.assertIsInstance(comp, store_lib.TrajectoryReader)
+    self.assertIsInstance(comp, store_lib.TrajectoryWriter)
 
     tmp_dir = self.create_tempdir().full_path
     f_store = file_store.FileTrajectoryStore(root_dir=tmp_dir)
