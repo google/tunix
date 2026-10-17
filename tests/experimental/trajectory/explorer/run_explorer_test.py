@@ -23,6 +23,8 @@ from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.trajectory.explorer import run_explorer
 from tunix.experimental.trajectory.explorer.commands import ping
+from tunix.experimental.trajectory.explorer.commands import show
+from tunix.experimental.trajectory.explorer.commands import summary
 
 
 def _parse_cmd(cmd: str = "") -> run_explorer.ExplorerConfig:
@@ -62,6 +64,22 @@ class ParseArgsTest(absltest.TestCase):
   def test_subcommand_ping(self) -> None:
     config = _parse_cmd("ping")
     self.assertIsInstance(config.cmd, ping.PingCommand)
+
+  def test_subcommand_summary(self) -> None:
+    config = _parse_cmd("summary")
+    self.assertIsInstance(config.cmd, summary.SummaryCommand)
+
+  def test_subcommand_show_with_its_own_flags(self) -> None:
+    config = _parse_cmd("show --trajectory_id t1 --max_chars 0")
+    self.assertEqual(
+        config.cmd, show.ShowCommand(trajectory_id="t1", max_chars=0)
+    )
+
+  def test_subcommand_show_requires_a_trajectory_id(self) -> None:
+    with self.assertRaises(SystemExit) as cm:
+      with contextlib.redirect_stderr(io.StringIO()):
+        _parse_cmd("show")
+    self.assertEqual(cm.exception.code, 2)
 
   def test_global_flags_compose_with_a_subcommand(self) -> None:
     config = _parse_cmd("--store file --root_dir /tmp/t --run_id r ping")
