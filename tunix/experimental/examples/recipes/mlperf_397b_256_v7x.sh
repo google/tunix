@@ -162,10 +162,19 @@ export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"
 export REMAT_POLICY="${REMAT_POLICY:-custom}"
 export RAGGED_BUFFER_FACTOR="${RAGGED_BUFFER_FACTOR:-2.0}"
 export REMAT_CONTEXT="${REMAT_CONTEXT:-remat}"
+# Perf knobs from the step-4 xprof of the standalone trainer (defaults = current behaviour):
+# REMAT_MOE_ROUTE=device keeps the ragged-sort argsorts out of the bwd replay,
+# GDN_CP_MODE=seq drops GDN's 6 synchronous all-to-alls per layer (REMAT_GDN_CP_STATE=device
+# also keeps its halo exchange out of the bwd replay), MOE_EXPERT_WEIGHT_PREFETCH=forward_backward
+# moves expert weight-gradient GEMMs next to their layer (-17 GiB AOT peak).
+export REMAT_MOE_ROUTE="${REMAT_MOE_ROUTE:-remat}"
+export GDN_CP_MODE="${GDN_CP_MODE:-head}"
+export REMAT_GDN_CP_STATE="${REMAT_GDN_CP_STATE:-remat}"
+export MOE_EXPERT_WEIGHT_PREFETCH="${MOE_EXPERT_WEIGHT_PREFETCH:-forward}"
 export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
 export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep \
-use_gdn_kernel=true gdn_cp_mode=head gdn_chunk_size=64 \
-decoder_layer_input=offload context=${REMAT_CONTEXT} gdn=remat gdn_conv=remat gdn_states=remat \
+use_gdn_kernel=true gdn_cp_mode=${GDN_CP_MODE} gdn_chunk_size=64 \
+decoder_layer_input=offload context=${REMAT_CONTEXT} gdn=remat gdn_conv=remat gdn_states=remat gdn_cp_state=${REMAT_GDN_CP_STATE} \
 megablox=true sparse_matmul=true use_tokamax_gmm=true use_gmm_v2=true \
 use_gmm_v2_heuristic_tiling=false merge_gating_gmm=false \
 wi_tile_fwd_batch_seq=256 wi_tile_fwd_embed_dim=4096 wi_tile_fwd_mlp_dim=1024 \
@@ -175,9 +184,9 @@ wo_tile_fwd_batch_seq=256 wo_tile_fwd_embed_dim=4096 wo_tile_fwd_mlp_dim=1024 \
 wo_tile_dlhs_batch_seq=256 wo_tile_dlhs_embed_dim=4096 wo_tile_dlhs_mlp_dim=1024 \
 wo_tile_drhs_batch_seq=256 wo_tile_drhs_embed_dim=4096 wo_tile_drhs_mlp_dim=1024 \
 use_ring_of_experts=true num_moe_token_chunks=${NUM_MOE_TOKEN_CHUNKS} moe_chunk_barrier=false \
-ring_of_experts_local_routing=true moe_expert_weight_prefetch=forward \
+ring_of_experts_local_routing=true moe_expert_weight_prefetch=${MOE_EXPERT_WEIGHT_PREFETCH} \
 moe_chunk_pipeline=true ring_of_experts_row_major_reduce_scatter=true \
-use_ragged_sort=true use_custom_sort_vjp=false ragged_buffer_factor=${RAGGED_BUFFER_FACTOR} \
+use_ragged_sort=true use_custom_sort_vjp=false moe_route=${REMAT_MOE_ROUTE} ragged_buffer_factor=${RAGGED_BUFFER_FACTOR} \
 use_tokamax_splash=true use_splash_scheduler=true \
 sa_block_q=1024 sa_block_kv=4096 sa_block_kv_compute=512 \
 sa_block_q_dkv=2048 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=512 \
