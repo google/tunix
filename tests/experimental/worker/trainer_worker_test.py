@@ -773,5 +773,51 @@ class TrainerWorkerExecutionContextTest(absltest.TestCase):
     self.assertEqual(self.events, ["enter_ctx", "save_failed", "exit_ctx"])
 
 
+class TrainerWorkerCompactRoutingTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.fake_trainer = FakeTrainer()
+    self.worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer,
+        worker_id="trainer_0",
+    )
+    self.worker.initialize()
+
+  def test_fwd_bwd_and_eval_step_materialize_compact_routing(self):
+    valid = np.array([[True, False, True]], dtype=bool)
+    values = np.array([[[1, 2]], [[3, 4]]], dtype=np.int16)
+    compact = datatypes.CompactRoutedExperts.pack(values, valid, mode="uint10")
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[10, 0, 20]], dtype=np.int32),
+        prompt_mask=np.ones((1, 3), dtype=np.float32),
+        completion_ids=np.array([[11, 0, 21]], dtype=np.int32),
+        completion_mask=np.ones((1, 3), dtype=np.float32),
+        advantages=np.ones((1, 3), dtype=np.float32),
+        routed_experts=compact,
+    )
+    req = datatypes.TrainRequest(request_id="r1", payload=payload)
+    self.worker.fwd_bwd(request=req)
+    received = self.fake_trainer.fwd_bwd_calls[-1][0].routed_experts
+    self.assertIsInstance(received, np.ndarray)
+    np.testing.assert_array_equal(received, compact.materialize())
+
+    self.worker.eval_step(request=req)
+    eval_received = self.fake_trainer.eval_step_calls[-1][0].routed_experts
+    self.assertIsInstance(eval_received, np.ndarray)
+    np.testing.assert_array_equal(eval_received, compact.materialize())
+
+    prepared_calls = []
+    self.fake_trainer.prepare_fwd_bwd_input = lambda p: (
+        prepared_calls.append(p) or ("prepared", p)
+    )
+    self.worker.stage_fwd_bwd(request=req)
+    self.assertLen(prepared_calls, 1)
+    self.assertIsInstance(prepared_calls[0].routed_experts, np.ndarray)
+    np.testing.assert_array_equal(
+        prepared_calls[0].routed_experts, compact.materialize()
+    )
+
+
 if __name__ == "__main__":
   absltest.main()

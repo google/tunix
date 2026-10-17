@@ -16,6 +16,7 @@
 
 from collections.abc import Mapping
 import contextlib
+import dataclasses
 from typing import Any, Callable, ContextManager, cast
 
 from absl import logging
@@ -31,6 +32,18 @@ from tunix.experimental.worker import abstract_worker
 from tunix.rl import common as rl_common
 
 WorkerState = datatypes.WorkerState
+
+
+def _with_dense_routing(
+    payload: datatypes.RLTrainerPayload | None,
+) -> datatypes.RLTrainerPayload | None:
+  """Expands a compact `routed_experts` on the trainer, right before use."""
+  if payload is None:
+    return None
+  routing = getattr(payload, "routed_experts", None)
+  if isinstance(routing, datatypes.CompactRoutedExperts):
+    return dataclasses.replace(payload, routed_experts=routing.materialize())
+  return payload
 
 
 class TrainerWorker(abstract_worker.Worker):
@@ -335,7 +348,9 @@ class TrainerWorker(abstract_worker.Worker):
       # with the dropless program). The update itself is run here, below, or
       # by `apply_deferred_update`.
       self._trainer.fwd_bwd(
-          request.payload, apply_optimizer=apply_optimizer, **kwargs
+          _with_dense_routing(request.payload),
+          apply_optimizer=apply_optimizer,
+          **kwargs,
       )
       if apply_optimizer and defer_update:
         self._deferred_update = str(request.request_id)
@@ -445,10 +460,10 @@ class TrainerWorker(abstract_worker.Worker):
     device_wait_s = None
     before_update = self._deferred_update is not None
     try:
-      staged_input = request.payload
+      staged_input = _with_dense_routing(request.payload)
       prepare = getattr(self._trainer, "prepare_fwd_bwd_input", None)
       if callable(prepare):
-        staged_input = prepare(request.payload)
+        staged_input = prepare(staged_input)
       if not before_update:
         # Both waits are for the work dispatched before this call, which ends
         # with the step's optimizer update, so a failure in either is that
@@ -629,7 +644,7 @@ class TrainerWorker(abstract_worker.Worker):
     self._refuse_while_update_deferred("eval_step")
     req_metadata = dict(request.metadata) if request.metadata else {}
     try:
-      self._trainer.eval_step(request.payload, **kwargs)
+      self._trainer.eval_step(_with_dense_routing(request.payload), **kwargs)
       self._last_error = None
       resp = self._response(evaluated=True, **req_metadata)
       resp.request_id = request.request_id
@@ -661,7 +676,7 @@ class TrainerWorker(abstract_worker.Worker):
       eval_batches = 0
       with context:
         for payload in eval_ds:
-          self._trainer.eval_step(payload, **kwargs)
+          self._trainer.eval_step(_with_dense_routing(payload), **kwargs)
           eval_batches += 1
       self._last_error = None
       return self._response(evaluated=True, eval_batches=eval_batches)
@@ -715,11 +730,13 @@ class TrainerWorker(abstract_worker.Worker):
           if items.segment_positions is None
           else np.asarray(items.segment_positions, dtype=np.int32)
       )
-      routed = (
-          None
-          if getattr(items, "routed_experts", None) is None
-          else np.asarray(items.routed_experts, dtype=np.int16)
-      )
+      raw_routed = getattr(items, "routed_experts", None)
+      if isinstance(raw_routed, datatypes.CompactRoutedExperts):
+        routed = raw_routed.materialize()
+      elif raw_routed is not None:
+        routed = np.asarray(raw_routed, dtype=np.int16)
+      else:
+        routed = None
       micro_batch_size = self._logps_micro_batch_size or batch_size
       outs = []
       for start in range(0, batch_size, micro_batch_size):

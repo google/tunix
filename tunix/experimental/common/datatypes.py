@@ -21,6 +21,7 @@ This module centralizes type aliases and dataclasses used for:
 
 import dataclasses
 import enum
+import os
 import time
 from typing import Any, Dict
 import uuid
@@ -43,6 +44,276 @@ Role = common_datatypes.Role
 # Marks a router-replay slot the trainer must not replay, so the model falls
 # back to its own gate there. Matches what MaxText's replay path expects.
 UNSET_ROUTED_EXPERT = -1
+
+
+def _pack_uint10(values: np.ndarray) -> np.ndarray:
+  """Packs `[-1, 1022]` int16 values into 10-bit unsigned integers (5B / 4 vals)."""
+  if values.size == 0:
+    return np.zeros((0,), dtype=np.uint8)
+  min_v = int(values.min())
+  max_v = int(values.max())
+  if min_v < UNSET_ROUTED_EXPERT or max_v > 1022:
+    raise ValueError(
+        "uint10 CompactRoutedExperts requires expert ids in [-1, 1022]; got"
+        f" range [{min_v}, {max_v}]."
+    )
+  shifted = (values.astype(np.uint16, copy=False) + np.uint16(1)).ravel()
+  rem = (-shifted.size) % 4
+  if rem:
+    shifted = np.pad(shifted, (0, rem), mode="constant", constant_values=0)
+  quads = shifted.reshape(-1, 4)
+  v0 = quads[:, 0]
+  v1 = quads[:, 1]
+  v2 = quads[:, 2]
+  v3 = quads[:, 3]
+  out = np.empty((quads.shape[0], 5), dtype=np.uint8)
+  out[:, 0] = v0 & 0xFF
+  out[:, 1] = ((v0 >> 8) & 0x03) | ((v1 & 0x3F) << 2)
+  out[:, 2] = ((v1 >> 6) & 0x0F) | ((v2 & 0x0F) << 4)
+  out[:, 3] = ((v2 >> 4) & 0x3F) | ((v3 & 0x03) << 6)
+  out[:, 4] = (v3 >> 2) & 0xFF
+  return out.ravel()
+
+
+def _unpack_uint10(
+    packed: np.ndarray, shape: tuple[int, int, int]
+) -> np.ndarray:
+  """Unpacks 10-bit packed bytes back into a `shape` int16 routing array."""
+  total = shape[0] * shape[1] * shape[2]
+  if total == 0:
+    return np.zeros(shape, dtype=np.int16)
+  groups = packed.reshape(-1, 5)
+  b0 = groups[:, 0].astype(np.int16)
+  b1 = groups[:, 1].astype(np.int16)
+  b2 = groups[:, 2].astype(np.int16)
+  b3 = groups[:, 3].astype(np.int16)
+  b4 = groups[:, 4].astype(np.int16)
+  quads = np.empty((groups.shape[0], 4), dtype=np.int16)
+  quads[:, 0] = (b0 | ((b1 & 0x03) << 8)) - 1
+  quads[:, 1] = ((b1 >> 2) | ((b2 & 0x0F) << 6)) - 1
+  quads[:, 2] = ((b2 >> 4) | ((b3 & 0x3F) << 4)) - 1
+  quads[:, 3] = ((b3 >> 6) | (b4 << 2)) - 1
+  return quads.ravel()[:total].reshape(shape)
+
+
+@dataclasses.dataclass(frozen=True, init=False)
+class CompactRoutedExperts:
+  """A batch's router-replay routing, stored only at its real-token positions.
+
+  A batched `[B, T, num_layers, top_k]` int16 routing tensor is mostly padding
+  for long-context microbatches, and even for densely sequence-packed batches
+  each expert ID (-1 or 0..E-1) uses 16 bits while E <= 512 needs only 10 bits
+  and unrouted prompt tokens carry all `-1`s. This keeps only the routing rows
+  at `valid` positions (optionally stripping unrouted `-1` rows and bit-packing
+  into `uint10` or `uint8` on the wire) and rebuilds the dense `[B, T,
+  num_layers, top_k]` int16 tensor on the receiving side with `materialize()`.
+
+  Attributes:
+    values: `[N, num_layers, top_k]` int16 routing of the valid positions, in
+      row-major (`valid.nonzero()`) order.
+    valid: `[B, T]` bool mask of the positions `values` covers; `N ==
+      valid.sum()`. Every other position materializes as `UNSET_ROUTED_EXPERT`.
+    packed_values: Optional 1D `uint8` bit-packed representation when
+      `encoding` is `"uint10"` or `"uint8"`.
+    routed_shape: `(num_layers, top_k)` trailing dimensions.
+    encoding: Wire encoding (`"int16"`, `"uint10"`, or `"uint8"`).
+  """
+
+  _values: np.ndarray | None
+  valid: np.ndarray
+  packed_values: np.ndarray | None = None
+  routed_shape: tuple[int, int] = (0, 0)
+  encoding: str = "int16"
+
+  def __init__(
+      self,
+      *,
+      values: np.ndarray | None = None,
+      valid: np.ndarray,
+      packed_values: np.ndarray | None = None,
+      routed_shape: tuple[int, int] | None = None,
+      encoding: str = "int16",
+  ):
+    if not isinstance(valid, np.ndarray) or valid.dtype != np.bool_:
+      raise TypeError(
+          "CompactRoutedExperts.valid must be a bool numpy array; got"
+          f" {type(valid).__name__} of dtype"
+          f" {getattr(valid, 'dtype', None)}."
+      )
+    if valid.ndim != 2:
+      raise ValueError(
+          f"CompactRoutedExperts.valid must be [B, T]; got {valid.shape}."
+      )
+    num_valid = int(np.count_nonzero(valid))
+    if encoding == "int16":
+      if not isinstance(values, np.ndarray) or values.dtype != np.int16:
+        raise TypeError(
+            "CompactRoutedExperts.values must be an int16 numpy array; got"
+            f" {type(values).__name__} of dtype"
+            f" {getattr(values, 'dtype', None)}."
+        )
+      if values.ndim != 3:
+        raise ValueError(
+            "CompactRoutedExperts.values must be [N, num_layers, top_k]; got"
+            f" shape {values.shape}."
+        )
+      if values.shape[0] != num_valid:
+        raise ValueError(
+            f"CompactRoutedExperts has {values.shape[0]} routing rows but"
+            f" valid marks {num_valid} positions."
+        )
+      inferred_shape = (int(values.shape[1]), int(values.shape[2]))
+      object.__setattr__(self, "_values", values)
+      object.__setattr__(self, "packed_values", None)
+      object.__setattr__(self, "routed_shape", routed_shape or inferred_shape)
+    elif encoding in ("uint10", "uint8"):
+      if (
+          not isinstance(packed_values, np.ndarray)
+          or packed_values.dtype != np.uint8
+          or packed_values.ndim != 1
+      ):
+        raise TypeError(
+            "CompactRoutedExperts.packed_values must be a 1D uint8 numpy array"
+            f" when encoding={encoding!r}; got {type(packed_values).__name__}."
+        )
+      if routed_shape is None or len(routed_shape) != 2:
+        raise ValueError(
+            "CompactRoutedExperts requires routed_shape=(num_layers, top_k)"
+            f" when encoding={encoding!r}; got {routed_shape!r}."
+        )
+      total_elems = num_valid * int(routed_shape[0]) * int(routed_shape[1])
+      expected_bytes = (
+          ((total_elems + 3) // 4) * 5 if encoding == "uint10" else total_elems
+      )
+      if packed_values.size != expected_bytes:
+        raise ValueError(
+            f"CompactRoutedExperts packed_values has {packed_values.size}"
+            f" bytes but expected {expected_bytes} for {num_valid} valid"
+            f" rows of shape {routed_shape} ({encoding})."
+        )
+      object.__setattr__(self, "_values", None)
+      object.__setattr__(self, "packed_values", packed_values)
+      object.__setattr__(
+          self, "routed_shape", (int(routed_shape[0]), int(routed_shape[1]))
+      )
+    else:
+      raise ValueError(
+          f"Unsupported CompactRoutedExperts encoding: {encoding!r}."
+      )
+    object.__setattr__(self, "valid", valid)
+    object.__setattr__(self, "encoding", encoding)
+
+  @classmethod
+  def pack(
+      cls,
+      values: np.ndarray,
+      valid: np.ndarray,
+      *,
+      mode: str = "uint10",
+      strip_unrouted: bool = True,
+  ) -> "CompactRoutedExperts":
+    """Packs `[N, num_layers, top_k]` routing with optional unrouted stripping and bit-packing."""
+    # Validate inputs using standard int16 constructor rules first.
+    base = cls(values=values, valid=valid)
+    vals = base.values
+    val_mask = base.valid
+    routed_shape = base.routed_shape
+    if strip_unrouted and vals.shape[0] > 0:
+      routed_rows = np.any(vals != UNSET_ROUTED_EXPERT, axis=(1, 2))
+      if not np.all(routed_rows):
+        new_valid = np.zeros_like(val_mask)
+        new_valid[val_mask] = routed_rows
+        val_mask = new_valid
+        vals = vals[routed_rows]
+    norm_mode = mode.strip().lower()
+    if norm_mode == "auto":
+      max_v = int(vals.max()) if vals.size > 0 else -1
+      if max_v <= 254:
+        norm_mode = "uint8"
+      elif max_v <= 1022:
+        norm_mode = "uint10"
+      else:
+        norm_mode = "int16"
+    if norm_mode == "int16":
+      return cls(values=vals, valid=val_mask)
+    if norm_mode == "uint8":
+      if vals.size > 0:
+        min_v = int(vals.min())
+        max_v = int(vals.max())
+        if min_v < UNSET_ROUTED_EXPERT or max_v > 254:
+          raise ValueError(
+              "uint8 CompactRoutedExperts requires expert ids in [-1, 254];"
+              f" got range [{min_v}, {max_v}]."
+          )
+      packed = (vals.astype(np.int16, copy=False) + 1).astype(np.uint8).ravel()
+      return cls(
+          valid=val_mask,
+          packed_values=packed,
+          routed_shape=routed_shape,
+          encoding="uint8",
+      )
+    if norm_mode == "uint10":
+      packed = _pack_uint10(vals)
+      return cls(
+          valid=val_mask,
+          packed_values=packed,
+          routed_shape=routed_shape,
+          encoding="uint10",
+      )
+    raise ValueError(f"Unknown CompactRoutedExperts pack mode: {mode!r}.")
+
+  @classmethod
+  def from_values(
+      cls, values: np.ndarray, valid: np.ndarray
+  ) -> "CompactRoutedExperts":
+    """Constructs `CompactRoutedExperts` honoring `TUNIX_COMPACT_ROUTED_EXPERTS_MODE`."""
+    env_mode = os.environ.get("TUNIX_COMPACT_ROUTED_EXPERTS_MODE", "").strip().lower()
+    if not env_mode or env_mode in ("0", "false", "off", "int16"):
+      return cls(values=values, valid=valid)
+    return cls.pack(values, valid, mode=env_mode, strip_unrouted=True)
+
+  @property
+  def values(self) -> np.ndarray:
+    """Returns the `[N, num_layers, top_k]` int16 routing values for `valid`."""
+    if self._values is not None:
+      return self._values
+    num_valid = int(np.count_nonzero(self.valid))
+    num_layers, top_k = self.routed_shape
+    target_shape = (num_valid, num_layers, top_k)
+    assert self.packed_values is not None
+    if self.encoding == "uint8":
+      if self.packed_values.size == 0:
+        return np.zeros(target_shape, dtype=np.int16)
+      return (self.packed_values.astype(np.int16) - 1).reshape(target_shape)
+    if self.encoding == "uint10":
+      return _unpack_uint10(self.packed_values, target_shape)
+    raise ValueError(f"Unsupported encoding: {self.encoding!r}")
+
+  @property
+  def shape(self) -> tuple[int, int, int, int]:
+    """Shape of the dense `[B, T, num_layers, top_k]` tensor it represents."""
+    b, t = self.valid.shape
+    num_layers, top_k = self.routed_shape
+    return (b, t, num_layers, top_k)
+
+  @property
+  def dtype(self) -> np.dtype:
+    return np.dtype(np.int16)
+
+  @property
+  def nbytes(self) -> int:
+    payload_bytes = (
+        self.packed_values.nbytes
+        if self.packed_values is not None
+        else (self._values.nbytes if self._values is not None else 0)
+    )
+    return payload_bytes + self.valid.nbytes
+
+  def materialize(self) -> np.ndarray:
+    """Returns the dense `[B, T, num_layers, top_k]` int16 routing tensor."""
+    dense = np.full(self.shape, UNSET_ROUTED_EXPERT, dtype=np.int16)
+    dense[self.valid] = self.values
+    return dense
 
 
 # Re-export assistant_text from canonical agent_types module.
@@ -550,11 +821,15 @@ class RLTrainerPayload(TrainerPayload):
     ref_per_token_logps: Optional [B, C] reference model log-probabilities.
     old_per_token_logps: Optional [B, C] behavior policy log-probabilities.
     sampler_is_weights: Optional [B, C] importance sampling weights.
-    routed_experts: Optional `[B, T, num_layers, top_k]` MoE expert ids captured
-      during rollout. When set, a training engine that supports router replay
-      forces these experts instead of re-running its own gate, so the training
-      forward pass matches the routing the rollout actually used. `-1` marks a
-      padded or unused slot.
+    routed_experts: Optional MoE expert ids captured during rollout. When set,
+      a training engine that supports router replay forces these experts
+      instead of re-running its own gate, so the training forward pass matches
+      the routing the rollout actually used. `-1` marks a padded or unused
+      slot. An unbatched payload carries a dense `[p + c, num_layers, top_k]`
+      array; a batch assembler emits `CompactRoutedExperts` for the batched
+      `[B, T, num_layers, top_k]` routing so the padding never crosses the RPC,
+      and `TrainerWorker` materializes it before handing the payload to its
+      trainer.
     returns: Optional [B, C] value baseline returns (for PPO / Critic).
     old_values: Optional [B, C] critic value estimates (for PPO / Critic).
     num_segments: Optional static upper bound on number of segments in packed
@@ -582,7 +857,7 @@ class RLTrainerPayload(TrainerPayload):
   # runs with those features disabled.
   rollout_per_token_logps: ArrayLike | None = None
   overlong: ArrayLike | None = None
-  routed_experts: ArrayLike | None = None
+  routed_experts: ArrayLike | CompactRoutedExperts | None = None
   returns: ArrayLike | None = None
   old_values: ArrayLike | None = None
   num_segments: int | None = flax.struct.field(default=None, pytree_node=False)
@@ -601,7 +876,7 @@ class TrainRequest(Request):
     target_policy_version: Version of the policy weights to train.
   """
 
-  payload: TrainerPayload
+  payload: TrainerPayload | None
   target_policy_version: int = 0
 
 
@@ -624,7 +899,8 @@ class LogprobsRequest(Request):
     segment_positions: Optional packing local position indices (sequence
       packing); trainer path only.
     routed_experts: Optional `[B, T, num_layers, top_k]` MoE expert routing
-      captured during rollout for router replay.
+      captured during rollout for router replay, dense or as the batch's
+      `CompactRoutedExperts` (the scorer materializes it).
   """
 
   prompt_tokens: ArrayLike
@@ -635,7 +911,7 @@ class LogprobsRequest(Request):
   eos_id: int | None = None
   segment_ids: ArrayLike | None = None
   segment_positions: ArrayLike | None = None
-  routed_experts: ArrayLike | None = None
+  routed_experts: ArrayLike | CompactRoutedExperts | None = None
 
 
 ##### Inference DTOs #####
