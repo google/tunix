@@ -663,6 +663,17 @@ class MaxTextUtilsTest(absltest.TestCase):
       ):
         self._build_config_argv()
 
+  def test_vllm_additional_config_returns_routed_experts_only_when_asked(self):
+    default = maxtext_utils.build_vllm_maxtext_additional_config(
+        "qwen3-30b-a3b"
+    )
+    self.assertNotIn("return_routed_experts", default["maxtext_config"])
+
+    enabled = maxtext_utils.build_vllm_maxtext_additional_config(
+        "qwen3-30b-a3b", return_routed_experts=True
+    )
+    self.assertIs(enabled["maxtext_config"]["return_routed_experts"], True)
+
 
 if __name__ == "__main__":
   absltest.main()
