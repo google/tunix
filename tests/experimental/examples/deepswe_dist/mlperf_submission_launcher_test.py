@@ -80,6 +80,9 @@ _MAXTEXT_DEFAULTS = {
     "gdn_bwd_natural_layout": "off",
     "gdn_gated_norm_layout": "auto",
     "context_parallel_attention_load_balance_order": "dual_chunk_swap",
+    "gdn_conv1d_natural_layout": "false",
+    "gdn_fwd_kernel_head_group_size": "0",
+    "gdn_in_proj_kernel_order": "false",
     # remat_policy=custom's per-tensor keys (MaxText base.yml).
     "query_proj": "remat",
     "key_proj": "remat",
@@ -134,6 +137,9 @@ _TUNED_KEYS = {
         "dual_chunk_swap",
         "dual_chunk_swap_local_self",
     ),
+    "gdn_conv1d_natural_layout": ("false", "true"),
+    "gdn_fwd_kernel_head_group_size": ("0", "4"),
+    "gdn_in_proj_kernel_order": ("false", "true"),
 }
 # Tuned keys that MaxText before AI-Hypercomputer/maxtext#5721 (e.g. e526ea02)
 # does not define: two from AI-Hypercomputer/maxtext#5698 and seven from
@@ -150,7 +156,9 @@ _TUNED_KEYS = {
 # which only the commits after 1bf840cff define, and moe_fp8_token_all_gather,
 # gdn_bwd_natural_layout and gdn_gated_norm_layout, which only the commits after
 # 6679552770a0 define, and context_parallel_attention_load_balance_order, which
-# only the commits after ae5257c1f define.
+# only the commits after ae5257c1f define, and gdn_conv1d_natural_layout,
+# gdn_fwd_kernel_head_group_size and gdn_in_proj_kernel_order, which only the
+# commits after 8c56959ae define.
 # MaxText refuses a key it does not define when the trainer starts, so only
 # TRAINER_TUNED_FLAGS=true may pass them.
 _BENCH_MAXTEXT_KEYS = (
@@ -181,6 +189,9 @@ _BENCH_MAXTEXT_KEYS = (
     "gdn_bwd_natural_layout",
     "gdn_gated_norm_layout",
     "context_parallel_attention_load_balance_order",
+    "gdn_conv1d_natural_layout",
+    "gdn_fwd_kernel_head_group_size",
+    "gdn_in_proj_kernel_order",
 )
 # The custom mesh rule TRAINER_TUNED_FLAGS=true selects, which
 # AI-Hypercomputer/maxtext#5783 (in #5721) defines and MaxText before #5721
@@ -247,6 +258,9 @@ _FINAL_KEYS = {
     "context_parallel_attention_load_balance_order": (
         "dual_chunk_swap_local_self"
     ),
+    "gdn_conv1d_natural_layout": "true",
+    "gdn_fwd_kernel_head_group_size": "4",
+    "gdn_in_proj_kernel_order": "true",
 }
 _FP8_ONLY = ("moe_fp8_bwd_dispatch", "moe_fp8_token_all_gather")
 _RS_FLAG = "--xla_tpu_use_single_sparse_core_for_reduce_scatter_offload"
@@ -1003,6 +1017,34 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(values(_jobset(exported, "train")), ["chunk_f32"])
     own_env = _render(TRAINER_EXTRA_ENV=f"{_HEAD_GRAD_SCATTER}=off")
     self.assertEqual(values(_jobset(own_env, "train")), ["off"])
+
+  def test_gdn_kernel_keys_follow_the_reorder_key_with_their_prerequisites(self):
+    # At 32x2x4 with the tuned flags, the GDN forward-kernel keys and the in-projection
+    # order come right after context_parallel_attention_load_balance_order, in the order
+    # the TPU runs appended them, and the flags carry what MaxText requires for them:
+    # gdn_cp_pass1_states_and_bf16_qkv=true (the natural layout's bf16 DMA buffer), the GDN
+    # kernel, and sequence-sharded GDN context parallelism (the base flags' gdn_cp_mode=head
+    # is overridden by the tuned block's seq; MaxText keeps the last value).
+    timed = [
+        "context_parallel_attention_load_balance_order=dual_chunk_swap_local_self",
+        "gdn_conv1d_natural_layout=true",
+        "gdn_fwd_kernel_head_group_size=4",
+        "gdn_in_proj_kernel_order=true",
+    ]
+    at_32x2x4 = {
+        "default": self.default,
+        "bench": self.bench_on,
+        "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
+    }
+    for name, render in at_32x2x4.items():
+      trainer = _jobset(render, "train")
+      tokens = re.search(r'MAXTEXT_EXTRA_FLAGS="([^"]*)"', trainer).group(1).split()
+      start = tokens.index(timed[0])
+      self.assertEqual(tokens[start : start + len(timed)], timed, name)
+      flags = _maxtext_flags(trainer)
+      self.assertEqual(flags["gdn_cp_pass1_states_and_bf16_qkv"], "true", name)
+      self.assertEqual(flags["use_gdn_kernel"], "true", name)
+      self.assertEqual(flags["gdn_cp_mode"], "seq", name)
 
   def test_tuned_flags_false_leaves_the_256_chip_meshes_alone(self):
     for mesh in (_MESH_32X2X8, _MESH_64X1X8):

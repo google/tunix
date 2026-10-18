@@ -463,6 +463,25 @@ fi
 #     bits: precision class, not bit-identical (its numerics run passed, below). tunix
 #     refuses it with the sharded head off, so the block sets it only with
 #     TUNIX_LOGPS_SHARDED_HEAD=fused, the head it was timed with.
+#   gdn_conv1d_natural_layout=true with gdn_fwd_kernel_head_group_size=4: the prefill-only
+#     GDN forward kernels (context-parallel pass 1 and pass 2) run their causal Conv1D + SiLU
+#     on the bfloat16 [chunk, dim] qkv buffer they DMA, with tokens on sublanes (each shifted
+#     tap a sublane rotation, added in the same order with the same segment masks), instead
+#     of storing each token into a compact float32 scratch and loading q, k and v back row by
+#     row, and they process 4 kq heads (with their value heads) per group instead of all 16
+#     at once. The same values: on CPU the conv stage, and the whole forward and states-only
+#     kernels in TPU interpret mode, are bit-identical with the keys on and off. MaxText
+#     refuses the first unless gdn_cp_pass1_states_and_bf16_qkv=true (its bf16 DMA buffer),
+#     as here, and a group size that does not divide the kq heads (16 here).
+#   gdn_in_proj_kernel_order=true: the GDN in_proj_qkvz is two matmuls whose outputs are
+#     already in the Pallas kernel's order, qkv = [q | k | v] (all heads of each) and z, from
+#     the column-permuted kernel gathered once, instead of one matmul in the per-key-head
+#     [q | k | v | z] order followed by a per-head split, transposes and a concatenation into
+#     the kernel's qkv (and their assembly back in the backward). On CPU the forward values
+#     and the parameter gradients are bit-identical; the input gradient is one float32 sum of
+#     the two partial products, so it matches to float32 summation order (its numerics run
+#     passed, below). MaxText refuses it unless use_gdn_kernel=true with sequence-sharded GDN
+#     context parallelism, as here (gdn_cp_mode=seq).
 # These on the bench, regular micro-batch or s/step as above, 0 tokens dropped:
 #   moe_routing_index_math=count 10.022 -> 9.875 s (o275x-mf-cnt-prof),
 #     moe_unsplit_prefused_wi with two exact rewrites this block leaves off 10.022 ->
@@ -554,6 +573,13 @@ fi
 #   The two together on top of all of the keys above: 71.771 -> 71.229 s/step (o275x-mg5-ctl
 #     -> o275x-mg5-all, 4,109 -> 4,140 tokens/s/chip), 71.025 in a replicate in a new pod
 #     (o275x-mg5-allr), numerics 6 of 6 (nx-mg5-all).
+#   On top of all of the keys above, each against the same code without it in one pod
+#   (o275x-w28s-ctl: 71.180 s/step, 4,143 tokens/s/chip):
+#   gdn_conv1d_natural_layout with gdn_fwd_kernel_head_group_size=4: 69.707 s/step
+#     (o275x-gc-on, -1.474 s/step, 4,231 tokens/s/chip), numerics 6 of 6 (nx-gc-on).
+#   gdn_in_proj_kernel_order: 69.979 s/step (o275x-qkv-on, -1.201 s/step, 4,214
+#     tokens/s/chip), numerics 6 of 6 (nx-qkv-on).
+#   The two together have not run on TPU.
 #   custom_mesh_and_rule=cp-as-ep-dense-no-cp, on the code of
 #     AI-Hypercomputer/maxtext#5758 at this cell without
 #     context_parallel_attention_load_balance_hoist_ids, moe_wo_gmm_fused_dswiglu and
@@ -609,8 +635,10 @@ fi
 # commits after 1bf840cff (which lacks all seven), and moe_fp8_token_all_gather,
 # gdn_bwd_natural_layout and gdn_gated_norm_layout, from the commits after 6679552770a0 (which
 # lacks all three), and context_parallel_attention_load_balance_order, from the commits after
-# ae5257c1f (which lacks it). MaxText refuses a key it does not define when the trainer
-# starts, so an older MaxText needs TRAINER_TUNED_FLAGS=false.
+# ae5257c1f (which lacks it), and gdn_conv1d_natural_layout, gdn_fwd_kernel_head_group_size
+# and gdn_in_proj_kernel_order, from the commits after 8c56959ae (which lacks all three).
+# MaxText refuses a key it does not define when the trainer starts, so an older MaxText
+# needs TRAINER_TUNED_FLAGS=false.
 # The 256-chip trainer (TRAINER_TPU_SLICE=tpu7x:4x8x8, 512 devices), from Rohan Bierneni's
 # 256-chip trainer runs (2026-10-15, RL trainer bench, 9 micro-batches of 64 rows, steps 1-4):
 # 32x2x8 60.62 s/step and 64x1x8 55.97 s/step, against 82.17 s/step for 32x2x4 on 128 chips.
@@ -687,6 +715,14 @@ if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
       export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV} TUNIX_LOGPS_HEAD_GRAD_SCATTER=${TUNIX_LOGPS_HEAD_GRAD_SCATTER:-chunk}"
     fi
     unset _logps_head_mode
+  fi
+  # Three more timed on top of those, only at that mesh, right after the re-order key (the order
+  # the TPU runs used): the GDN forward kernels' natural-layout Conv1D with 4 kq heads per group
+  # (MaxText refuses the first without gdn_cp_pass1_states_and_bf16_qkv=true, set above), and
+  # the GDN in-projection computed in the kernel's q|k|v order (MaxText refuses it with
+  # head-sharded GDN context parallelism; the block sets gdn_cp_mode=seq).
+  if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} gdn_conv1d_natural_layout=true gdn_fwd_kernel_head_group_size=4 gdn_in_proj_kernel_order=true"
   fi
 fi
 export DEBUG=${DEBUG:-0}
