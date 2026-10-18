@@ -4,9 +4,10 @@
 # context_parallel_attention_load_balance_hoist_ids, query_proj_kernel_gather_once, fp8_fake_quant_hoist,
 # wi_tile_fwd_rhs_buffer_count, gdn_cp_m_scan, gdn_cp_pass1_states_and_bf16_qkv, gdn_out_proj_token_minor,
 # moe_fp8_bwd_dispatch, ragged_unsort_spread_masked_indices, moe_fallback_topk_capacity, fp32_master_storage,
-# gdn_cp_fast_state_passing, moe_fp8_token_all_gather, gdn_bwd_natural_layout and gdn_gated_norm_layout.
-maxtext @ git+https://github.com/google/maxtext.git@ae5257c1ff8181d25514da1ec289bc49a0f25d6d
-maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@ae5257c1ff8181d25514da1ec289bc49a0f25d6d#subdirectory=src/maxtext/integration/vllm
+# gdn_cp_fast_state_passing, moe_fp8_token_all_gather, gdn_bwd_natural_layout, gdn_gated_norm_layout and
+# context_parallel_attention_load_balance_order.
+maxtext @ git+https://github.com/google/maxtext.git@8c56959ae732a3e152ca898a9d04caee39f7aee1
+maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@8c56959ae732a3e152ca898a9d04caee39f7aee1#subdirectory=src/maxtext/integration/vllm
 aqtp
 cheroot
 cloud-accelerator-diagnostics

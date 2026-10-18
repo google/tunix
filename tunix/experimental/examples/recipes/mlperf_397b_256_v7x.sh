@@ -447,6 +447,22 @@ fi
 #     by up to one bfloat16 ulp, and the TPU backward program changes, so bit-identity on
 #     TPU is not established. MaxText refuses it unless gdn_out_proj_token_minor=true,
 #     as here.
+#   context_parallel_attention_load_balance_order=dual_chunk_swap_local_self: the attention
+#     layers' re-order into and out of the load-balanced token order leaves out of its two
+#     collective-permutes the pairs in which a rank sends its own half to itself (a local
+#     copy inside the permute); that rank takes its half with a select. The same token order
+#     and values: forward and gradients bit-identical on CPU. MaxText refuses it unless
+#     context_parallel_attention_load_balance=true with an even context parallelism, as here.
+#   TUNIX_LOGPS_HEAD_GRAD_SCATTER=chunk, an environment variable of the trainer process
+#     (tunix/rl/common.py), not a MaxText key, so the block appends it to TRAINER_EXTRA_ENV:
+#     the log-prob head's backward reduce-scatters each chunk's vocabulary-table gradient
+#     inside its chunk loop and keeps only this device's float32 shard, instead of adding
+#     every chunk into a full-size float32 accumulator (3.8 GiB per device for the
+#     [4096, 248320] table) and reduce-scattering it once after the loop. The reduce-scatter
+#     runs in bfloat16, the dtype the head's vjp returns, so the gradient changes in its low
+#     bits: precision class, not bit-identical (its numerics run passed, below). tunix
+#     refuses it with the sharded head off, so the block sets it only with
+#     TUNIX_LOGPS_SHARDED_HEAD=fused, the head it was timed with.
 # These on the bench, regular micro-batch or s/step as above, 0 tokens dropped:
 #   moe_routing_index_math=count 10.022 -> 9.875 s (o275x-mf-cnt-prof),
 #     moe_unsplit_prefused_wi with two exact rewrites this block leaves off 10.022 ->
@@ -528,8 +544,16 @@ fi
 #     numerics 6 of 6 (nx-mg3-all); without that key, on top of moe_fp8_token_all_gather:
 #     72.554 -> 72.268 s/step (o275x-mg4-ctl -> o275x-mg4-nat).
 #   gdn_gated_norm_layout=token_minor on top of both: 72.442 -> 71.700 s/step
-#     (o275x-mg4-natc -> o275x-mg4-c0, 4,071 -> 4,113 tokens/s/chip). The three together have
-#     no numerics run yet.
+#     (o275x-mg4-natc -> o275x-mg4-c0, 4,071 -> 4,113 tokens/s/chip), 71.779 in a replicate
+#     in a new pod (o275x-mg4-c0r); the three together: numerics 6 of 6 (nx-mg4-c0).
+#   context_parallel_attention_load_balance_order=dual_chunk_swap_local_self, on that whole
+#     stack without the three keys just above: 73.633 -> 73.375 s/step (o275x-hs-ctl ->
+#     o275x-hs-p1a).
+#   TUNIX_LOGPS_HEAD_GRAD_SCATTER=chunk, on that stack without the three keys too: 73.146 ->
+#     72.865 s/step (o275x-hr-ctl -> o275x-hr-chunk).
+#   The two together on top of all of the keys above: 71.771 -> 71.229 s/step (o275x-mg5-ctl
+#     -> o275x-mg5-all, 4,109 -> 4,140 tokens/s/chip), 71.025 in a replicate in a new pod
+#     (o275x-mg5-allr), numerics 6 of 6 (nx-mg5-all).
 #   custom_mesh_and_rule=cp-as-ep-dense-no-cp, on the code of
 #     AI-Hypercomputer/maxtext#5758 at this cell without
 #     context_parallel_attention_load_balance_hoist_ids, moe_wo_gmm_fused_dswiglu and
@@ -584,8 +608,9 @@ fi
 # moe_fallback_topk_capacity, fp32_master_storage and gdn_cp_fast_state_passing, from the
 # commits after 1bf840cff (which lacks all seven), and moe_fp8_token_all_gather,
 # gdn_bwd_natural_layout and gdn_gated_norm_layout, from the commits after 6679552770a0 (which
-# lacks all three). MaxText refuses a key it does not define when the trainer starts, so an
-# older MaxText needs TRAINER_TUNED_FLAGS=false.
+# lacks all three), and context_parallel_attention_load_balance_order, from the commits after
+# ae5257c1f (which lacks it). MaxText refuses a key it does not define when the trainer
+# starts, so an older MaxText needs TRAINER_TUNED_FLAGS=false.
 # The 256-chip trainer (TRAINER_TPU_SLICE=tpu7x:4x8x8, 512 devices), from Rohan Bierneni's
 # 256-chip trainer runs (2026-10-15, RL trainer bench, 9 micro-batches of 64 rows, steps 1-4):
 # 32x2x8 60.62 s/step and 64x1x8 55.97 s/step, against 82.17 s/step for 32x2x4 on 128 chips.
@@ -648,6 +673,20 @@ if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
       export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} moe_fp8_token_all_gather=true"
     fi
     export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} gdn_bwd_natural_layout=states gdn_gated_norm_layout=token_minor"
+  fi
+  # Two more timed on top of those, only at that mesh: the attention re-order without its
+  # self-copy (MaxText refuses it without context_parallel_attention_load_balance=true, which
+  # the recipe sets), and the per-chunk reduce-scatter of the log-prob head's table gradient,
+  # which the trainer process reads from its environment (TRAINER_EXTRA_ENV), only with the
+  # fused head (tunix refuses it with the sharded head off). A value the caller set, in
+  # TRAINER_EXTRA_ENV or as TUNIX_LOGPS_HEAD_GRAD_SCATTER, is kept.
+  if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_attention_load_balance_order=dual_chunk_swap_local_self"
+    _logps_head_mode="$(printf '%s' "${TUNIX_LOGPS_SHARDED_HEAD:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+    if [[ "${_logps_head_mode}" == "fused" && " ${TRAINER_EXTRA_ENV} " != *" TUNIX_LOGPS_HEAD_GRAD_SCATTER="* ]]; then
+      export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV} TUNIX_LOGPS_HEAD_GRAD_SCATTER=${TUNIX_LOGPS_HEAD_GRAD_SCATTER:-chunk}"
+    fi
+    unset _logps_head_mode
   fi
 fi
 export DEBUG=${DEBUG:-0}

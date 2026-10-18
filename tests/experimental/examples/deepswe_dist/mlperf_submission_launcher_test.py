@@ -79,6 +79,7 @@ _MAXTEXT_DEFAULTS = {
     "moe_fp8_token_all_gather": "false",
     "gdn_bwd_natural_layout": "off",
     "gdn_gated_norm_layout": "auto",
+    "context_parallel_attention_load_balance_order": "dual_chunk_swap",
     # remat_policy=custom's per-tensor keys (MaxText base.yml).
     "query_proj": "remat",
     "key_proj": "remat",
@@ -129,6 +130,10 @@ _TUNED_KEYS = {
     "moe_fp8_token_all_gather": ("false", "true"),
     "gdn_bwd_natural_layout": ("off", "states"),
     "gdn_gated_norm_layout": ("auto", "token_minor"),
+    "context_parallel_attention_load_balance_order": (
+        "dual_chunk_swap",
+        "dual_chunk_swap_local_self",
+    ),
 }
 # Tuned keys that MaxText before AI-Hypercomputer/maxtext#5721 (e.g. e526ea02)
 # does not define: two from AI-Hypercomputer/maxtext#5698 and seven from
@@ -144,7 +149,8 @@ _TUNED_KEYS = {
 # moe_fallback_topk_capacity, fp32_master_storage and gdn_cp_fast_state_passing,
 # which only the commits after 1bf840cff define, and moe_fp8_token_all_gather,
 # gdn_bwd_natural_layout and gdn_gated_norm_layout, which only the commits after
-# 6679552770a0 define.
+# 6679552770a0 define, and context_parallel_attention_load_balance_order, which
+# only the commits after ae5257c1f define.
 # MaxText refuses a key it does not define when the trainer starts, so only
 # TRAINER_TUNED_FLAGS=true may pass them.
 _BENCH_MAXTEXT_KEYS = (
@@ -174,6 +180,7 @@ _BENCH_MAXTEXT_KEYS = (
     "moe_fp8_token_all_gather",
     "gdn_bwd_natural_layout",
     "gdn_gated_norm_layout",
+    "context_parallel_attention_load_balance_order",
 )
 # The custom mesh rule TRAINER_TUNED_FLAGS=true selects, which
 # AI-Hypercomputer/maxtext#5783 (in #5721) defines and MaxText before #5721
@@ -237,9 +244,17 @@ _FINAL_KEYS = {
     "moe_fp8_token_all_gather": "true",
     "gdn_bwd_natural_layout": "states",
     "gdn_gated_norm_layout": "token_minor",
+    "context_parallel_attention_load_balance_order": (
+        "dual_chunk_swap_local_self"
+    ),
 }
 _FP8_ONLY = ("moe_fp8_bwd_dispatch", "moe_fp8_token_all_gather")
 _RS_FLAG = "--xla_tpu_use_single_sparse_core_for_reduce_scatter_offload"
+# The per-chunk reduce-scatter of the log-prob head's table gradient: an env
+# var of the trainer process (tunix/rl/common.py) that TRAINER_TUNED_FLAGS adds
+# to the trainer env only at the 128-chip 32x2x4 mesh with the fused head, the
+# cell it was timed at.
+_HEAD_GRAD_SCATTER = "TUNIX_LOGPS_HEAD_GRAD_SCATTER"
 
 
 def _render(recipe: Path = _RECIPE, **overrides: str) -> str:
@@ -320,7 +335,8 @@ def _flag_changes(
 
 
 def _without_tuned_flags(trainer: str) -> str:
-  """Returns the trainer JobSet without the libtpu flag and MaxText flags."""
+  """Returns the trainer JobSet without the tuned libtpu flags, env and MaxText flags."""
+  trainer = trainer.replace(f" {_HEAD_GRAD_SCATTER}=chunk", "")  # trainer env
   trainer = re.sub(rf'\n *- "{re.escape(_SC_FLAG)}"', "", trainer)  # proxy arg
   trainer = trainer.replace(f" {_SC_FLAG}", "")  # trainer and worker env
   trainer = trainer.replace(f"{_RS_FLAG}=true", f"{_RS_FLAG}=false")  # all three
@@ -952,6 +968,42 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(trainer.count(f"{_RS_FLAG}=false"), 3)
     self.assertNotIn(f"{_RS_FLAG}=true", trainer)
 
+  def test_head_grad_scatter_only_at_the_timed_cell(self):
+    # Once, chunk, in the trainer env of the 32x2x4 trainer with the tuned flags
+    # and the fused log-prob head (the default render, the bench cell, and the
+    # bench cell with TRAINER_FP8=false, which it does not depend on); never in
+    # the orchestrator or rollout JobSets.
+    def values(trainer):
+      return re.findall(rf"\b{_HEAD_GRAD_SCATTER}=([A-Za-z0-9_]+)", trainer)
+
+    at_32x2x4 = {
+        "default": self.default,
+        "bench": self.bench_on,
+        "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
+    }
+    for name, render in at_32x2x4.items():
+      self.assertEqual(values(_jobset(render, "train")), ["chunk"], name)
+      for suffix in ("orch", "roll-0"):
+        self.assertNotIn(_HEAD_GRAD_SCATTER, _jobset(render, suffix), name)
+    # Nowhere else: tuned flags off, the 256-chip meshes, and the 32x2x4 trainer
+    # with the "local" head or with the head off (tunix refuses the switch then).
+    others = {
+        "tuned off": self.default_off,
+        "bench, tuned off": self.bench_off,
+        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
+        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
+        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
+        "local head": _render(TUNIX_LOGPS_SHARDED_HEAD="local"),
+        "head off": _render(TUNIX_LOGPS_SHARDED_HEAD="0"),
+    }
+    for name, render in others.items():
+      self.assertNotIn(_HEAD_GRAD_SCATTER, render, name)
+    # A value the caller set is kept, exported or in TRAINER_EXTRA_ENV.
+    exported = _render(TUNIX_LOGPS_HEAD_GRAD_SCATTER="chunk_f32")
+    self.assertEqual(values(_jobset(exported, "train")), ["chunk_f32"])
+    own_env = _render(TRAINER_EXTRA_ENV=f"{_HEAD_GRAD_SCATTER}=off")
+    self.assertEqual(values(_jobset(own_env, "train")), ["off"])
+
   def test_tuned_flags_false_leaves_the_256_chip_meshes_alone(self):
     for mesh in (_MESH_32X2X8, _MESH_64X1X8):
       flags = _maxtext_flags(
@@ -998,6 +1050,7 @@ class SubmissionLauncherTest(absltest.TestCase):
     ):
       render = _render(_RECIPE.with_name(name))
       self.assertNotIn("TUNIX_LOGPS_SHARDED_HEAD", render, name)
+      self.assertNotIn(_HEAD_GRAD_SCATTER, render, name)
       orch = _jobset(render, "orch")
       self.assertIn("--no-pipeline_step_boundary", orch, name)
       self.assertIn("--no-stage_next_microbatch", orch, name)
