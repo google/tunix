@@ -83,6 +83,8 @@ _MAXTEXT_DEFAULTS = {
     "gdn_conv1d_natural_layout": "false",
     "gdn_fwd_kernel_head_group_size": "0",
     "gdn_in_proj_kernel_order": "false",
+    "dense_grad_reduce": "reduce_scatter",
+    "optimizer_device_resident_gib": "0.0",
     # remat_policy=custom's per-tensor keys (MaxText base.yml).
     "query_proj": "remat",
     "key_proj": "remat",
@@ -140,6 +142,8 @@ _TUNED_KEYS = {
     "gdn_conv1d_natural_layout": ("false", "true"),
     "gdn_fwd_kernel_head_group_size": ("0", "4"),
     "gdn_in_proj_kernel_order": ("false", "true"),
+    "dense_grad_reduce": ("reduce_scatter", "all_reduce"),
+    "optimizer_device_resident_gib": ("0.0", "6"),
 }
 # Tuned keys that MaxText before AI-Hypercomputer/maxtext#5721 (e.g. e526ea02)
 # does not define: two from AI-Hypercomputer/maxtext#5698 and seven from
@@ -158,7 +162,8 @@ _TUNED_KEYS = {
 # 6679552770a0 define, and context_parallel_attention_load_balance_order, which
 # only the commits after ae5257c1f define, and gdn_conv1d_natural_layout,
 # gdn_fwd_kernel_head_group_size and gdn_in_proj_kernel_order, which only the
-# commits after 8c56959ae define.
+# commits after 8c56959ae define, and dense_grad_reduce and
+# optimizer_device_resident_gib, which only the commits after d7c75f205 define.
 # MaxText refuses a key it does not define when the trainer starts, so only
 # TRAINER_TUNED_FLAGS=true may pass them.
 _BENCH_MAXTEXT_KEYS = (
@@ -192,6 +197,8 @@ _BENCH_MAXTEXT_KEYS = (
     "gdn_conv1d_natural_layout",
     "gdn_fwd_kernel_head_group_size",
     "gdn_in_proj_kernel_order",
+    "dense_grad_reduce",
+    "optimizer_device_resident_gib",
 )
 # The custom mesh rule TRAINER_TUNED_FLAGS=true selects, which
 # AI-Hypercomputer/maxtext#5783 (in #5721) defines and MaxText before #5721
@@ -261,6 +268,8 @@ _FINAL_KEYS = {
     "gdn_conv1d_natural_layout": "true",
     "gdn_fwd_kernel_head_group_size": "4",
     "gdn_in_proj_kernel_order": "true",
+    "dense_grad_reduce": "all_reduce",
+    "optimizer_device_resident_gib": "6",
 }
 _FP8_ONLY = ("moe_fp8_bwd_dispatch", "moe_fp8_token_all_gather")
 _RS_FLAG = "--xla_tpu_use_single_sparse_core_for_reduce_scatter_offload"
@@ -269,6 +278,13 @@ _RS_FLAG = "--xla_tpu_use_single_sparse_core_for_reduce_scatter_offload"
 # to the trainer env only at the 128-chip 32x2x4 mesh with the fused head, the
 # cell it was timed at.
 _HEAD_GRAD_SCATTER = "TUNIX_LOGPS_HEAD_GRAD_SCATTER"
+# The MoE ragged buffer factor that TRAINER_TUNED_FLAGS sets at the 128-chip
+# 32x2x4 mesh, where it was timed, only with the dropless retry and a finite
+# buffer factor (an overflowing micro-batch is then rerun dropless). Not in
+# _TUNED_KEYS: without the switch the value is the launch's own (2.75 at the
+# bench cell, -1 fully dropless).
+_BUFFER_FACTOR = "ragged_buffer_factor"
+_TUNED_BUFFER_FACTOR = "2.0"
 
 
 def _render(recipe: Path = _RECIPE, **overrides: str) -> str:
@@ -371,7 +387,8 @@ class SubmissionLauncherTest(absltest.TestCase):
   def test_the_default_trainer_is_the_measured_bench_cell(self):
     trainer = _jobset(self.default, "train")
     flags = _maxtext_flags(trainer)
-    self.assertEqual(flags["ragged_buffer_factor"], "2.75")
+    # The launcher's 2.75, replaced by the tuned block's timed value (retry on).
+    self.assertEqual(flags[_BUFFER_FACTOR], _TUNED_BUFFER_FACTOR)
     self.assertEqual(flags["retry_when_tokens_dropped"], "true")
     self.assertEqual(flags["retry_num_moe_token_chunks"], "8")
     self.assertEqual(flags["context"], "device")
@@ -430,7 +447,7 @@ class SubmissionLauncherTest(absltest.TestCase):
     trainer = _jobset(_render(NUM_MOE_TOKEN_CHUNKS="8"), "train")
     flags = _maxtext_flags(trainer)
     self.assertEqual(flags["num_moe_token_chunks"], "8")
-    self.assertEqual(flags["ragged_buffer_factor"], "2.75")
+    self.assertEqual(flags[_BUFFER_FACTOR], _TUNED_BUFFER_FACTOR)
     self.assertEqual(flags["context"], "device")
 
   def test_finite_buffer_factor_needs_the_retry_to_stay_dropless(self):
@@ -489,7 +506,8 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(flags["moe_exclude_padding_from_routing"], "true")
     self.assertEqual(flags["log_moe_drops"], "true")
     self.assertEqual(flags["retry_dropless_final_micro_batch"], "true")
-    self.assertEqual(flags["ragged_buffer_factor"], "2.75")
+    # The tuned block sets its buffer factor at 32x2x4 whenever the retry is on.
+    self.assertEqual(flags[_BUFFER_FACTOR], _TUNED_BUFFER_FACTOR)
     # The fully dropless final program keeps the layout's four chunks and
     # context offload; two chunks were measured without it.
     self.assertEqual(flags["num_moe_token_chunks"], "4")
@@ -500,7 +518,7 @@ class SubmissionLauncherTest(absltest.TestCase):
         _jobset(_render(FIRST_PHASE_RAGGED_BUFFER_FACTOR="4.0"), "train")
     )
     self.assertEqual(flags["first_phase_ragged_buffer_factor"], "4.0")
-    self.assertEqual(flags["ragged_buffer_factor"], "2.75")
+    self.assertEqual(flags[_BUFFER_FACTOR], _TUNED_BUFFER_FACTOR)
     self.assertEqual(flags["num_moe_token_chunks"], "4")
     self.assertEqual(flags["context"], "offload")
 
@@ -672,7 +690,10 @@ class SubmissionLauncherTest(absltest.TestCase):
   def test_tuned_flags_set_exactly_the_tuned_keys_at_the_bench_cell(self):
     before = _maxtext_flags(_jobset(self.bench_off, "train"))
     after = _maxtext_flags(_jobset(self.bench_on, "train"))
-    self.assertEqual(_flag_changes(before, after), _TUNED_KEYS)
+    self.assertEqual(
+        _flag_changes(before, after),
+        {**_TUNED_KEYS, _BUFFER_FACTOR: ("2.75", _TUNED_BUFFER_FACTOR)},
+    )
 
   def test_tuned_flags_leave_moe_route_at_its_default(self):
     # moe_route=device was inert in the bench's MaxText and is live at the pin.
@@ -767,6 +788,8 @@ class SubmissionLauncherTest(absltest.TestCase):
     expected[_GDN_M_SCAN] = ("true", "false")
     for key, value in _FINAL_KEYS.items():
       expected[key] = (value, _MAXTEXT_DEFAULTS[key])
+    # The bench cell's own buffer factor: the tuned block sets 2.0 at 32x2x4.
+    expected[_BUFFER_FACTOR] = (_TUNED_BUFFER_FACTOR, "2.75")
     self.assertEqual(_flag_changes(before, flags), expected)
     self.assertNotIn("query_proj_kernel_gather_once", flags)
     self.assertNotIn(_FQ_HOIST, flags)
@@ -798,6 +821,8 @@ class SubmissionLauncherTest(absltest.TestCase):
     expected[_GDN_M_SCAN] = ("true", "false")
     for key, value in _FINAL_KEYS.items():
       expected[key] = (value, _MAXTEXT_DEFAULTS[key])
+    # The bench cell's own buffer factor: the tuned block sets 2.0 at 32x2x4.
+    expected[_BUFFER_FACTOR] = (_TUNED_BUFFER_FACTOR, "2.75")
     self.assertEqual(_flag_changes(before, flags), expected)
     self.assertNotIn("query_proj_kernel_gather_once", flags)
     self.assertNotIn(_FQ_HOIST, flags)
@@ -1045,6 +1070,55 @@ class SubmissionLauncherTest(absltest.TestCase):
       self.assertEqual(flags["gdn_cp_pass1_states_and_bf16_qkv"], "true", name)
       self.assertEqual(flags["use_gdn_kernel"], "true", name)
       self.assertEqual(flags["gdn_cp_mode"], "seq", name)
+
+  def test_dense_resident_and_buffer_keys_follow_the_gdn_keys(self):
+    # At 32x2x4 with the tuned flags, dense_grad_reduce=all_reduce, the
+    # optimizer's device-resident budget and the ragged buffer factor 2.0 come
+    # right after the GDN keys, in the order the TPU runs appended them, with
+    # what MaxText requires for the first two: a rule set that maps embed_grad
+    # (cp-as-ep-dense-no-cp) and optimizer_memory_host_offload=true. The buffer
+    # factor comes only with the dropless retry and a finite
+    # RAGGED_BUFFER_FACTOR.
+    timed = [
+        "gdn_in_proj_kernel_order=true",
+        "dense_grad_reduce=all_reduce",
+        "optimizer_device_resident_gib=6",
+        f"{_BUFFER_FACTOR}={_TUNED_BUFFER_FACTOR}",
+    ]
+    at_32x2x4 = {
+        "default": self.default,
+        "bench": self.bench_on,
+        "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
+    }
+    for name, render in at_32x2x4.items():
+      trainer = _jobset(render, "train")
+      tokens = re.search(r'MAXTEXT_EXTRA_FLAGS="([^"]*)"', trainer).group(1).split()
+      start = tokens.index(timed[0])
+      self.assertEqual(tokens[start : start + len(timed)], timed, name)
+      flags = _maxtext_flags(trainer)
+      self.assertEqual(flags["custom_mesh_and_rule"], _BENCH_MESH_RULE, name)
+      self.assertEqual(flags["optimizer_memory_host_offload"], "true", name)
+      self.assertEqual(flags["retry_when_tokens_dropped"], "true", name)
+      self.assertEqual(flags[_BUFFER_FACTOR], _TUNED_BUFFER_FACTOR, name)
+    # Fully dropless, or without the retry: the launch's own buffer factor.
+    for name, overrides, own in (
+        ("fully dropless", {"RAGGED_BUFFER_FACTOR": "-1"}, "-1"),
+        (
+            "no retry",
+            {"DROPLESS": "false", "RAGGED_BUFFER_FACTOR": "3.0"},
+            "3.0",
+        ),
+    ):
+      trainer = _jobset(_render(**overrides), "train")
+      self.assertEqual(
+          _maxtext_flag_tokens(trainer, _BUFFER_FACTOR),
+          [f"{_BUFFER_FACTOR}={own}"],
+          name,
+      )
+      flags = _maxtext_flags(trainer)
+      self.assertNotIn("retry_when_tokens_dropped", flags, name)
+      self.assertEqual(flags["dense_grad_reduce"], "all_reduce", name)
+      self.assertEqual(flags["optimizer_device_resident_gib"], "6", name)
 
   def test_tuned_flags_false_leaves_the_256_chip_meshes_alone(self):
     for mesh in (_MESH_32X2X8, _MESH_64X1X8):

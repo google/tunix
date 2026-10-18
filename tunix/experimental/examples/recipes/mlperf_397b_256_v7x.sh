@@ -482,6 +482,23 @@ fi
 #     the two partial products, so it matches to float32 summation order (its numerics run
 #     passed, below). MaxText refuses it unless use_gdn_kernel=true with sequence-sharded GDN
 #     context parallelism, as here (gdn_cp_mode=seq).
+#   dense_grad_reduce=all_reduce: cp-as-ep-dense-no-cp replicates the dense weights over
+#     context, and by default each of their gradients is reduce-scattered over all devices and
+#     then all-gathered over context (per micro-batch at this cell, 240 small 256-way
+#     reduce-scatters, 240 collective-permutes and 240 all-gathers). all_reduce drops the
+#     embed_grad rule, so each of these gradients is reduced by one all-reduce instead. The
+#     forward is unchanged and the gradients differ in summation order only (its numerics runs
+#     passed, below). MaxText refuses it under a rule set that does not map embed_grad.
+#   optimizer_device_resident_gib=6: with optimizer_memory_host_offload=true (as here) every
+#     optimizer leaf crosses the host link twice per step; this keeps the largest leaves, up
+#     to 6 GiB per device, in device memory between updates, where the update reads and writes
+#     them in place. Placement only: the same values. The 6 GiB stay in device memory for the
+#     whole step. MaxText refuses it without optimizer_memory_host_offload=true.
+#   ragged_buffer_factor=2.0 (the submission launcher's default is 2.75): smaller MoE ragged
+#     buffers. Only with RETRY_WHEN_TOKENS_DROPPED=true and a finite RAGGED_BUFFER_FACTOR: a
+#     micro-batch whose routing overflows the buffer is then rerun with the dropless program,
+#     so no token is dropped. RAGGED_BUFFER_FACTOR=-1 (fully dropless) and launches without
+#     the retry keep their own value.
 # These on the bench, regular micro-batch or s/step as above, 0 tokens dropped:
 #   moe_routing_index_math=count 10.022 -> 9.875 s (o275x-mf-cnt-prof),
 #     moe_unsplit_prefused_wi with two exact rewrites this block leaves off 10.022 ->
@@ -579,7 +596,15 @@ fi
 #     (o275x-gc-on, -1.474 s/step, 4,231 tokens/s/chip), numerics 6 of 6 (nx-gc-on).
 #   gdn_in_proj_kernel_order: 69.979 s/step (o275x-qkv-on, -1.201 s/step, 4,214
 #     tokens/s/chip), numerics 6 of 6 (nx-qkv-on).
-#   The two together have not run on TPU.
+#   dense_grad_reduce=all_reduce: 69.446 s/step (o275x-w27d-ar, -1.734 s/step, 4,247
+#     tokens/s/chip).
+#   optimizer_device_resident_gib=6: 70.576 s/step (o275x-or-k6, -0.604 s/step, 4,179
+#     tokens/s/chip).
+#   The four together, on the bench's production routing table, against the same code with
+#   the four off in the same pod: 69.339 -> 64.271 s/step (o275x-m6q-ctl -> o275x-m6p4,
+#   -5.068 s/step, 4,253 -> 4,589 tokens/s/chip). Numerics 6 of 6 with the four (nx-m6p4)
+#   and with all but optimizer_device_resident_gib (nx-m6p3). The two GDN keys together
+#   without the other two have not run on TPU.
 #   custom_mesh_and_rule=cp-as-ep-dense-no-cp, on the code of
 #     AI-Hypercomputer/maxtext#5758 at this cell without
 #     context_parallel_attention_load_balance_hoist_ids, moe_wo_gmm_fused_dswiglu and
@@ -636,9 +661,10 @@ fi
 # gdn_bwd_natural_layout and gdn_gated_norm_layout, from the commits after 6679552770a0 (which
 # lacks all three), and context_parallel_attention_load_balance_order, from the commits after
 # ae5257c1f (which lacks it), and gdn_conv1d_natural_layout, gdn_fwd_kernel_head_group_size
-# and gdn_in_proj_kernel_order, from the commits after 8c56959ae (which lacks all three).
-# MaxText refuses a key it does not define when the trainer starts, so an older MaxText
-# needs TRAINER_TUNED_FLAGS=false.
+# and gdn_in_proj_kernel_order, from the commits after 8c56959ae (which lacks all three), and
+# dense_grad_reduce and optimizer_device_resident_gib, from the commits after d7c75f205 (which
+# lacks both). MaxText refuses a key it does not define when the trainer starts, so an older
+# MaxText needs TRAINER_TUNED_FLAGS=false.
 # The 256-chip trainer (TRAINER_TPU_SLICE=tpu7x:4x8x8, 512 devices), from Rohan Bierneni's
 # 256-chip trainer runs (2026-10-15, RL trainer bench, 9 micro-batches of 64 rows, steps 1-4):
 # 32x2x8 60.62 s/step and 64x1x8 55.97 s/step, against 82.17 s/step for 32x2x4 on 128 chips.
@@ -652,7 +678,8 @@ fi
 # the default custom_mesh_and_rule=cp-as-ep, and MaxText keeps the last value of a repeated key:
 # the dense weights (attention and shared-expert projections, the MoE router and the shared-expert
 # gate) are sharded over fsdp x expert and replicated over context, their gradients reduce-scattered
-# over all devices and then all-gathered over context; the GDN projections (embed_gdn), routed
+# over all devices and then all-gathered over context (at 32x2x4 all-reduced instead, by
+# dense_grad_reduce=all_reduce below); the GDN projections (embed_gdn), routed
 # experts, embeddings and activations stay as under cp-as-ep. 128 chips: 82.185 -> 81.253 s/step.
 if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
   export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_strategy=all_gather sa_fuse_reciprocal=true gdn_cp_mode=seq gdn_cp_state=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true wi_tile_dlhs_mlp_dim=2048 decoder_layer_input=device moe_routing_maps=device moe_gmm_v2_dlhs_transpose_rhs=true moe_routing_index_math=count moe_unsplit_prefused_wi=true moe_roe_packed_routing_gather=${_moe_chunk_pipeline} moe_router_grad_from_wo_input=true moe_wi_gmm_fused_swiglu=true gdn_conv1d_input_in_qkv_dtype=true gdn_conv1d_dense_token_stack=true wi_tile_fwd_batch_seq=512 wi_tile_drhs_batch_seq=512 wo_tile_fwd_batch_seq=512 wo_tile_dlhs_batch_seq=512 wo_tile_drhs_batch_seq=512 context_parallel_attention_load_balance_hoist_ids=true moe_wo_gmm_fused_dswiglu=true custom_mesh_and_rule=cp-as-ep-dense-no-cp"
@@ -723,6 +750,21 @@ if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
   # head-sharded GDN context parallelism; the block sets gdn_cp_mode=seq).
   if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
     export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} gdn_conv1d_natural_layout=true gdn_fwd_kernel_head_group_size=4 gdn_in_proj_kernel_order=true"
+  fi
+  # Three more timed on top of those, only at that mesh, after the GDN keys and in the order the
+  # TPU runs appended them: the dense-weight gradients reduced by all-reduce (MaxText refuses it
+  # under a rule set without embed_grad; the block sets cp-as-ep-dense-no-cp), the largest
+  # optimizer leaves kept in device memory between updates, up to the GiB per device on the
+  # second line (MaxText refuses it without optimizer_memory_host_offload=true, which the
+  # recipe sets), and the MoE ragged buffer factor 2.0, only with the dropless retry and a
+  # finite buffer factor (an overflowing micro-batch is then rerun dropless, so no token is
+  # dropped; RAGGED_BUFFER_FACTOR=-1 and launches without the retry keep their own value).
+  if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} dense_grad_reduce=all_reduce"
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} optimizer_device_resident_gib=6"
+    if [[ "${RAGGED_BUFFER_FACTOR}" != "-1" && "${RETRY_WHEN_TOKENS_DROPPED:-false}" == "true" ]]; then
+      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} ragged_buffer_factor=2.0"
+    fi
   fi
 fi
 export DEBUG=${DEBUG:-0}
