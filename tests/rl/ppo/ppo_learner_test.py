@@ -671,6 +671,82 @@ class PPOLearnerTest(parameterized.TestCase):
         expected_rollout_worker_logps_fn_call_at_step,
     )
 
+  def test_eval_mode_uses_eval_rollout_config(self):
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    ref_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    value_model = utils.create_critic_model(model)
+    reward_model = tc.ToyTransformerWithScoreHead(
+        tc.ToyTransformer(
+            config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+            rngs=nnx.Rngs(2),
+        ),
+        nnx.Rngs(1),
+    )
+    mesh = pxla.thread_resources.env.physical_mesh
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=model,
+        critic=value_model,
+        reference=ref_model,
+        reward=reward_model,
+        tokenizer=vocab,
+        cluster_config=rl_engine_lib.ClusterConfig(
+            role_to_mesh={
+                rl_engine_lib.Role.ACTOR: mesh,
+                rl_engine_lib.Role.CRITIC: mesh,
+                rl_engine_lib.Role.REFERENCE: mesh,
+                rl_engine_lib.Role.ROLLOUT: mesh,
+                rl_engine_lib.Role.REWARD: mesh,
+            },
+            rollout_engine='vanilla',
+            offload_to_cpu=False,
+            training_config=rl_engine_lib.RLTrainingConfig(
+                actor_optimizer=optax.sgd(1e-3),
+                critic_optimizer=optax.sgd(1e-3),
+                eval_every_n_steps=2,
+                max_steps=10,
+                gradient_accumulation_steps=None,
+            ),
+            rollout_config={
+                rl_engine_lib.Mode.TRAIN: base_rollout.RolloutConfig(
+                    max_tokens_to_generate=10,
+                    max_prompt_length=256,
+                    kv_cache_size=1024,
+                    temperature=0.9,
+                ),
+                rl_engine_lib.Mode.EVAL: base_rollout.RolloutConfig(
+                    max_tokens_to_generate=10,
+                    max_prompt_length=256,
+                    kv_cache_size=1024,
+                    temperature=0.5,
+                ),
+            },
+        ),
+    )
+    ppo_learner = ppo_lib.PPOLearner(
+        rl_engine=rl_engine, algo_config=ppo_lib.PPOConfig(num_iterations=1)
+    )
+
+    temperatures = []
+    rollout_generate = rl_engine.rollout.generate
+
+    def spy_generate(prompts, rollout_config, **kwargs):
+      temperatures.append(rollout_config.temperature)
+      return rollout_generate(prompts, rollout_config, **kwargs)
+
+    rl_engine.rollout.generate = spy_generate
+
+    for mode in (rl_engine_lib.Mode.TRAIN, rl_engine_lib.Mode.EVAL):
+      ppo_learner._generate_and_compute_advantage(
+          {'prompts': ['input string', 'hello world']}, mode
+      )
+
+    self.assertEqual(temperatures, [0.9, 0.5])
+
 
 if __name__ == '__main__':
   absltest.main()

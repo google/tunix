@@ -273,6 +273,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     # "experiences".
     rollout_output = self.rl_engine.generate(
         prompts=training_input["prompts"],  # pyrefly: ignore[bad-argument-type]
+        mode=mode,
         micro_batch_size=self._rollout_micro_batch_size,
     )
     padded_completion_ids = np.array([
