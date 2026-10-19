@@ -927,6 +927,8 @@ class MaxTextUtilsTest(absltest.TestCase):
 
     mock_cfg = mock.MagicMock()
     mock_cfg.weight_dtype = "bfloat16"
+    # A real MaxText config always has fp32_master_storage (default "f32"); a MagicMock attribute is not a storage.
+    mock_cfg.fp32_master_storage = "f32"
     mock_cfg.float32_gate_logits = True
     mock_cfg.checkpoint_dir = "/tmp/ckpts"
     mock_mesh = mock.MagicMock()

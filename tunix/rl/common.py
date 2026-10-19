@@ -1085,6 +1085,50 @@ def sharded_head_mode() -> str | None:
   )
 
 
+# Per-chunk reduce-scatter of the sharded head's parameter gradients, opt-in via
+# TUNIX_LOGPS_HEAD_GRAD_SCATTER (it needs TUNIX_LOGPS_SHARDED_HEAD on).
+#
+# Off, the head's backward adds every chunk's parameter gradient into a
+# full-size float32 accumulator per device and reduce-scatters it once, after
+# the chunk loop. For a [4096, 248320] vocabulary table that accumulator is
+# 3.8 GiB per device, and XLA may keep it live past the decoder's backward and
+# lower the reduce-scatter as an all-reduce plus a slice. On, each chunk's
+# gradient is reduce-scattered inside the chunk loop and each device keeps only
+# its float32 shard (1 / devices of each parameter):
+#   chunk: reduce-scatter the gradient in the dtype the head's vjp returns it
+#     in (the gather dtype: bfloat16 for MaxText's vocabulary table), then add
+#     the shard to the float32 accumulator. The cross-device sum then runs in
+#     that dtype, so the gradient changes in its low bits.
+#   chunk_f32: cast the gradient to float32 before the reduce-scatter: the same
+#     float32 sums as off in another order, at twice the wire bytes of chunk
+#     for a bfloat16 gradient.
+#   chunk_unroll: chunk with the chunk loop unrolled, so that the scheduler can
+#     overlap one chunk's reduce-scatter with the next chunk's matmuls.
+# Like the head's switch, it is read when the caller is traced.
+HEAD_GRAD_SCATTER_ENV = "TUNIX_LOGPS_HEAD_GRAD_SCATTER"
+HEAD_GRAD_SCATTER_MODES = ("chunk", "chunk_f32", "chunk_unroll")
+
+
+def head_grad_scatter_mode() -> str | None:
+  """Returns None (off), "chunk", "chunk_f32" or "chunk_unroll".
+
+  From TUNIX_LOGPS_HEAD_GRAD_SCATTER; case and surrounding whitespace are
+  ignored. Off: unset, empty or off.
+
+  Raises:
+    ValueError: The variable has any other value.
+  """
+  value = os.environ.get(HEAD_GRAD_SCATTER_ENV, "").strip().lower()
+  if value in ("", "off"):
+    return None
+  if value in HEAD_GRAD_SCATTER_MODES:
+    return value
+  raise ValueError(
+      f"{HEAD_GRAD_SCATTER_ENV}={value!r}: expected"
+      f" {', '.join(HEAD_GRAD_SCATTER_MODES)} (on), or empty or off (off)."
+  )
+
+
 # Fused scoring for the sharded head: TUNIX_LOGPS_SHARDED_HEAD=fused.
 #
 # With "local" the head scores each chunk with `selective_log_softmax` (and
@@ -1390,17 +1434,37 @@ def maybe_compute_sharded_chunked_logps(
     `hidden_states[:, j - 1]` (index 0 is 0), plus the entropy [B, T] if
     `return_entropy`.
 
+  With TUNIX_LOGPS_HEAD_GRAD_SCATTER on (see `head_grad_scatter_mode`), the
+  backward reduce-scatters each chunk's parameter gradient inside the chunk
+  loop instead of accumulating full-size float32 gradients, and logs one
+  "[logps-head] table-gradient scatter <mode>: ..." warning per trace.
+
   Raises:
-    ValueError: TUNIX_LOGPS_SHARDED_HEAD has an unrecognized value.
+    ValueError: TUNIX_LOGPS_SHARDED_HEAD or TUNIX_LOGPS_HEAD_GRAD_SCATTER has an
+      unrecognized value, or TUNIX_LOGPS_HEAD_GRAD_SCATTER is on while
+      TUNIX_LOGPS_SHARDED_HEAD is off.
   """
   mode = sharded_head_mode()
+  grad_scatter = head_grad_scatter_mode()
   if mode is None:
+    if grad_scatter is not None:
+      raise ValueError(
+          f"{HEAD_GRAD_SCATTER_ENV}={grad_scatter} needs the sharded head: set"
+          f" {SHARDED_HEAD_ENV} to local or fused, or unset"
+          f" {HEAD_GRAD_SCATTER_ENV}."
+      )
     return None
 
   def fallback(reason):
     logging.warning(
         "[logps-head] sharded head off, using compute_chunked_logps: %s", reason
     )
+    if grad_scatter is not None:
+      logging.warning(
+          "[logps-head] %s=%s has no effect: the sharded head is off",
+          HEAD_GRAD_SCATTER_ENV,
+          grad_scatter,
+      )
     return None
 
   mesh = jax.sharding.get_abstract_mesh()
@@ -1465,6 +1529,24 @@ def maybe_compute_sharded_chunked_logps(
       [(p.shape, str(d)) for p, d in zip(params, gather_dtypes)],
       gather_axes,
   )
+  grad_shard_shapes = [
+      tuple(n // num_devices if k == d else n for k, n in enumerate(p.shape))
+      for p, d in zip(params, gather_dims)
+  ]
+  if grad_scatter is not None:
+    logging.warning(
+        "[logps-head] table-gradient scatter %s: each of the %d chunks'"
+        " parameter gradients is reduce-scattered over %s inside the backward's"
+        " chunk loop (wire %s), accumulated in float32 shards %s%s",
+        grad_scatter,
+        -(-local_len // chunk),
+        gather_axes,
+        "float32"
+        if grad_scatter == "chunk_f32"
+        else [str(d) for d in gather_dtypes],
+        grad_shard_shapes,
+        "; chunk loop unrolled" if grad_scatter == "chunk_unroll" else "",
+    )
 
   def merged(full):
     # Only the head leaves carry values. The others stay ShapeDtypeStruct
@@ -1501,6 +1583,28 @@ def maybe_compute_sharded_chunked_logps(
     return jax.lax.psum_scatter(
         g, gather_axes, scatter_dimension=dim, tiled=True
     )
+
+  # TUNIX_LOGPS_HEAD_GRAD_SCATTER on: the chunk loop's carry is each
+  # parameter's float32 shard, and each chunk's gradient is reduce-scattered
+  # (in float32 for chunk_f32, else in the dtype it arrives in) and added to it.
+  def chunk_grad_acc_init():
+    return tuple(jnp.zeros(s, jnp.float32) for s in grad_shard_shapes)
+
+  def chunk_grad_acc_add(acc, d_full):
+    out = []
+    for a, g, d in zip(acc, d_full, gather_dims):
+      if grad_scatter == "chunk_f32":
+        g = g.astype(jnp.float32)
+      # The barrier keeps XLA's while-loop all-reduce code motion from moving
+      # the reduce-scatter after the loop, which would bring back the full-size
+      # accumulator (and, with the cast below, fails a RET_CHECK on TPU).
+      shard = jax.lax.optimization_barrier(scatter(g, d))
+      out.append(a + shard.astype(jnp.float32))
+    return tuple(out)
+
+  chunk_scan_kwargs = (
+      {"unroll": True} if grad_scatter == "chunk_unroll" else {}
+  )
 
   def chunk_outputs_fused(full, hs, ids, with_stats):
     # `chunk_outputs` for "fused", plus each token's max and exp-sum when the
@@ -1594,17 +1698,28 @@ def maybe_compute_sharded_chunked_logps(
       # 1024: 0.47 GiB fewer temporaries and a third fewer transcendentals).
       d_logits = jax.lax.optimization_barrier(d_logits.astype(raw.dtype))
       d_full, d_hs = vjp(d_logits)
-      acc = tuple(a + gg.astype(jnp.float32) for a, gg in zip(acc, d_full))
+      if grad_scatter is None:
+        acc = tuple(a + gg.astype(jnp.float32) for a, gg in zip(acc, d_full))
+      else:
+        acc = chunk_grad_acc_add(acc, d_full)
       dh = jax.lax.dynamic_update_slice_in_dim(
           dh, d_hs.astype(dh.dtype), start, axis=1
       )
       return (acc, dh), None
 
-    acc = tuple(jnp.zeros(f.shape, jnp.float32) for f in full)
-    (acc, dh), _ = jax.lax.scan(
-        step, (acc, jnp.zeros_like(h)), jnp.arange(h.shape[1] // chunk)
-    )
-    acc = [scatter(a, d) for a, d in zip(acc, gather_dims)]
+    if grad_scatter is None:
+      acc = tuple(jnp.zeros(f.shape, jnp.float32) for f in full)
+      (acc, dh), _ = jax.lax.scan(
+          step, (acc, jnp.zeros_like(h)), jnp.arange(h.shape[1] // chunk)
+      )
+      acc = [scatter(a, d) for a, d in zip(acc, gather_dims)]
+    else:
+      (acc, dh), _ = jax.lax.scan(
+          step,
+          (chunk_grad_acc_init(), jnp.zeros_like(h)),
+          jnp.arange(h.shape[1] // chunk),
+          **chunk_scan_kwargs,
+      )
     return (dh, None, *[a.astype(dt) for a, dt in zip(acc, param_dtypes)])
 
   def head_local_bwd(res, cts):
@@ -1653,17 +1768,28 @@ def maybe_compute_sharded_chunked_logps(
 
       _, vjp = jax.vjp(outputs_fn, list(full), hs)
       d_full, d_hs = vjp(tuple(cot))
-      acc = tuple(a + g.astype(jnp.float32) for a, g in zip(acc, d_full))
+      if grad_scatter is None:
+        acc = tuple(a + g.astype(jnp.float32) for a, g in zip(acc, d_full))
+      else:
+        acc = chunk_grad_acc_add(acc, d_full)
       dh = jax.lax.dynamic_update_slice_in_dim(
           dh, d_hs.astype(dh.dtype), start, axis=1
       )
       return (acc, dh), None
 
-    acc = tuple(jnp.zeros(f.shape, jnp.float32) for f in full)
-    (acc, dh), _ = jax.lax.scan(
-        step, (acc, jnp.zeros_like(h)), jnp.arange(h.shape[1] // chunk)
-    )
-    acc = [scatter(a, d) for a, d in zip(acc, gather_dims)]
+    if grad_scatter is None:
+      acc = tuple(jnp.zeros(f.shape, jnp.float32) for f in full)
+      (acc, dh), _ = jax.lax.scan(
+          step, (acc, jnp.zeros_like(h)), jnp.arange(h.shape[1] // chunk)
+      )
+      acc = [scatter(a, d) for a, d in zip(acc, gather_dims)]
+    else:
+      (acc, dh), _ = jax.lax.scan(
+          step,
+          (chunk_grad_acc_init(), jnp.zeros_like(h)),
+          jnp.arange(h.shape[1] // chunk),
+          **chunk_scan_kwargs,
+      )
     d_params = [a.astype(dt) for a, dt in zip(acc, param_dtypes)]
     return (dh, None, *d_params)
 

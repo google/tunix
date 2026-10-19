@@ -51,9 +51,12 @@ _MAXTEXT_DEFAULTS = {
     "cast_grads_after_all_reduce": "false",
     "gdn_cp_matmul_precision": "highest",
     "gdn_cp_state": "remat",
-    # Defaults in the MaxText of AI-Hypercomputer/maxtext#5698 and #5758; see
-    # _BENCH_MAXTEXT_KEYS.
+    # Defaults in the MaxText of AI-Hypercomputer/maxtext#5698, #5758 and the
+    # change on top of #5721; see _BENCH_MAXTEXT_KEYS.
+    "context_parallel_attention_load_balance_hoist_ids": "false",
+    "fp8_fake_quant_hoist": "off",
     "gdn_conv1d_dense_token_stack": "false",
+    "gdn_cp_m_scan": "false",
     "gdn_conv1d_input_in_qkv_dtype": "false",
     "moe_gmm_v2_dlhs_transpose_rhs": "false",
     "moe_roe_packed_routing_gather": "false",
@@ -62,6 +65,26 @@ _MAXTEXT_DEFAULTS = {
     "moe_routing_maps": "remat",
     "moe_unsplit_prefused_wi": "false",
     "moe_wi_gmm_fused_swiglu": "false",
+    "moe_wo_gmm_fused_dswiglu": "false",
+    "query_proj_kernel_gather_once": "false",
+    "wi_tile_fwd_rhs_buffer_count": "0",
+    "fp32_master_storage": "f32",
+    "gdn_cp_dh_scan": "false",
+    "gdn_cp_fast_state_passing": "false",
+    "gdn_cp_pass1_states_and_bf16_qkv": "false",
+    "gdn_out_proj_token_minor": "false",
+    "moe_fallback_topk_capacity": "0",
+    "moe_fp8_bwd_dispatch": "false",
+    "ragged_unsort_spread_masked_indices": "false",
+    "moe_fp8_token_all_gather": "false",
+    "gdn_bwd_natural_layout": "off",
+    "gdn_gated_norm_layout": "auto",
+    "context_parallel_attention_load_balance_order": "dual_chunk_swap",
+    "gdn_conv1d_natural_layout": "false",
+    "gdn_fwd_kernel_head_group_size": "0",
+    "gdn_in_proj_kernel_order": "false",
+    "dense_grad_reduce": "reduce_scatter",
+    "optimizer_device_resident_gib": "0.0",
     # remat_policy=custom's per-tensor keys (MaxText base.yml).
     "query_proj": "remat",
     "key_proj": "remat",
@@ -71,11 +94,14 @@ _MAXTEXT_DEFAULTS = {
 }
 _TUNED_KEYS = {
     "cast_grads_after_all_reduce": ("false", "true"),
+    "context_parallel_attention_load_balance_hoist_ids": ("false", "true"),
     "context_parallel_strategy": ("ring", "all_gather"),
     "custom_mesh_and_rule": ("cp-as-ep", "cp-as-ep-dense-no-cp"),
     "decoder_layer_input": ("offload", "device"),
+    "fp8_fake_quant_hoist": ("off", "gather8"),
     "gdn_conv1d_dense_token_stack": ("false", "true"),
     "gdn_conv1d_input_in_qkv_dtype": ("false", "true"),
+    "gdn_cp_m_scan": ("false", "true"),
     "gdn_cp_matmul_precision": ("highest", "high"),
     "gdn_cp_mode": ("head", "seq"),
     "gdn_cp_state": ("remat", "device"),
@@ -86,23 +112,66 @@ _TUNED_KEYS = {
     "moe_routing_maps": ("remat", "device"),
     "moe_unsplit_prefused_wi": ("false", "true"),
     "moe_wi_gmm_fused_swiglu": ("false", "true"),
+    "moe_wo_gmm_fused_dswiglu": ("false", "true"),
     "num_moe_token_chunks": ("4", "2"),
+    "query_proj_kernel_gather_once": ("false", "true"),
     "sa_fuse_reciprocal": ("false", "true"),
     "wi_tile_dlhs_mlp_dim": ("1024", "2048"),
     "wi_tile_drhs_batch_seq": ("256", "512"),
     "wi_tile_fwd_batch_seq": ("256", "512"),
+    "wi_tile_fwd_mlp_dim": ("1024", "2048"),
+    "wi_tile_fwd_rhs_buffer_count": ("0", "2"),
     "wo_tile_dlhs_batch_seq": ("256", "512"),
     "wo_tile_drhs_batch_seq": ("256", "512"),
     "wo_tile_fwd_batch_seq": ("256", "512"),
+    "gdn_cp_dh_scan": ("false", "true"),
+    "gdn_cp_pass1_states_and_bf16_qkv": ("false", "true"),
+    "gdn_out_proj_token_minor": ("false", "true"),
+    "moe_fp8_bwd_dispatch": ("false", "true"),
+    "ragged_unsort_spread_masked_indices": ("false", "true"),
+    "moe_fallback_topk_capacity": ("0", "128"),
+    "gdn_cp_fast_state_passing": ("false", "true"),
+    "fp32_master_storage": ("f32", "residual16"),
+    "moe_fp8_token_all_gather": ("false", "true"),
+    "gdn_bwd_natural_layout": ("off", "states"),
+    "gdn_gated_norm_layout": ("auto", "token_minor"),
+    "context_parallel_attention_load_balance_order": (
+        "dual_chunk_swap",
+        "dual_chunk_swap_local_self",
+    ),
+    "gdn_conv1d_natural_layout": ("false", "true"),
+    "gdn_fwd_kernel_head_group_size": ("0", "4"),
+    "gdn_in_proj_kernel_order": ("false", "true"),
+    "dense_grad_reduce": ("reduce_scatter", "all_reduce"),
+    "optimizer_device_resident_gib": ("0.0", "6"),
 }
 # Tuned keys that MaxText before AI-Hypercomputer/maxtext#5721 (e.g. e526ea02)
 # does not define: two from AI-Hypercomputer/maxtext#5698 and seven from
-# AI-Hypercomputer/maxtext#5758, which is on top of it. MaxText refuses a key it
-# does not define when the trainer starts, so only TRAINER_TUNED_FLAGS=true may
-# pass them.
+# AI-Hypercomputer/maxtext#5758, which is on top of it, and
+# context_parallel_attention_load_balance_hoist_ids, moe_wo_gmm_fused_dswiglu and
+# query_proj_kernel_gather_once, which only the MaxText change on top of #5721
+# defines (the pinned parambole/rl-4600-final-maxtext; atwigg/mlperf at bbd0f6f10
+# does not), and fp8_fake_quant_hoist, wi_tile_fwd_rhs_buffer_count and
+# gdn_cp_m_scan (with gdn_cp_dh_scan), which only later commits of that branch
+# define (94f11c09d defines none of them, e1cd8bf1d only the first, 15285fd74
+# not the scans), and gdn_cp_pass1_states_and_bf16_qkv, gdn_out_proj_token_minor,
+# moe_fp8_bwd_dispatch, ragged_unsort_spread_masked_indices,
+# moe_fallback_topk_capacity, fp32_master_storage and gdn_cp_fast_state_passing,
+# which only the commits after 1bf840cff define, and moe_fp8_token_all_gather,
+# gdn_bwd_natural_layout and gdn_gated_norm_layout, which only the commits after
+# 6679552770a0 define, and context_parallel_attention_load_balance_order, which
+# only the commits after ae5257c1f define, and gdn_conv1d_natural_layout,
+# gdn_fwd_kernel_head_group_size and gdn_in_proj_kernel_order, which only the
+# commits after 8c56959ae define, and dense_grad_reduce and
+# optimizer_device_resident_gib, which only the commits after d7c75f205 define.
+# MaxText refuses a key it does not define when the trainer starts, so only
+# TRAINER_TUNED_FLAGS=true may pass them.
 _BENCH_MAXTEXT_KEYS = (
+    "context_parallel_attention_load_balance_hoist_ids",
+    "fp8_fake_quant_hoist",
     "gdn_conv1d_dense_token_stack",
     "gdn_conv1d_input_in_qkv_dtype",
+    "gdn_cp_m_scan",
     "moe_gmm_v2_dlhs_transpose_rhs",
     "moe_roe_packed_routing_gather",
     "moe_router_grad_from_wo_input",
@@ -110,10 +179,30 @@ _BENCH_MAXTEXT_KEYS = (
     "moe_routing_maps",
     "moe_unsplit_prefused_wi",
     "moe_wi_gmm_fused_swiglu",
+    "moe_wo_gmm_fused_dswiglu",
+    "query_proj_kernel_gather_once",
+    "wi_tile_fwd_rhs_buffer_count",
+    "gdn_cp_dh_scan",
+    "gdn_cp_pass1_states_and_bf16_qkv",
+    "gdn_out_proj_token_minor",
+    "moe_fp8_bwd_dispatch",
+    "ragged_unsort_spread_masked_indices",
+    "moe_fallback_topk_capacity",
+    "gdn_cp_fast_state_passing",
+    "fp32_master_storage",
+    "moe_fp8_token_all_gather",
+    "gdn_bwd_natural_layout",
+    "gdn_gated_norm_layout",
+    "context_parallel_attention_load_balance_order",
+    "gdn_conv1d_natural_layout",
+    "gdn_fwd_kernel_head_group_size",
+    "gdn_in_proj_kernel_order",
+    "dense_grad_reduce",
+    "optimizer_device_resident_gib",
 )
 # The custom mesh rule TRAINER_TUNED_FLAGS=true selects, which
-# AI-Hypercomputer/maxtext#5783 (on top of #5758) defines and the pin does
-# not: only TRAINER_TUNED_FLAGS=true may pass it.
+# AI-Hypercomputer/maxtext#5783 (in #5721) defines and MaxText before #5721
+# does not: only TRAINER_TUNED_FLAGS=true may pass it.
 _BENCH_MESH_RULE = "cp-as-ep-dense-no-cp"
 # The launch whose trainer the RL trainer bench (AI-Hypercomputer/maxtext#5701)
 # measured TRAINER_TUNED_FLAGS on: the replay layout (buffer factor 2.75 with
@@ -144,6 +233,58 @@ _MESH_64X1X8 = {
     "TRAINER_MESH_CONTEXT": "8",
 }
 _PROJ_KEYS = ("query_proj", "key_proj", "value_proj", "out_proj", "qkv_proj")
+# TRAINER_TUNED_FLAGS adds fp8_fake_quant_hoist only at the 128-chip 32x2x4
+# mesh, where it was timed, and only with the trainer's fp8 fake-quant on.
+_FQ_HOIST = "fp8_fake_quant_hoist"
+# TRAINER_TUNED_FLAGS sets the recipe's wi_tile_fwd_mlp_dim to 2048 (one value,
+# not an override) and adds wi_tile_fwd_rhs_buffer_count=2, which that tile
+# needs to fit VMEM, only at the 128-chip 32x2x4 mesh, where they were timed.
+_WI_TILE = "wi_tile_fwd_mlp_dim"
+_WI_BUFFERS = "wi_tile_fwd_rhs_buffer_count"
+# TRAINER_TUNED_FLAGS adds gdn_cp_m_scan only at the 128-chip 32x2x4 mesh, where
+# it was timed, and never its backward twin gdn_cp_dh_scan, which made the step
+# slower on the bench.
+_GDN_M_SCAN = "gdn_cp_m_scan"
+_GDN_DH_SCAN = "gdn_cp_dh_scan"
+# The final stack's keys, which TRAINER_TUNED_FLAGS adds only at the 128-chip
+# 32x2x4 mesh, where they were timed (moe_fp8_bwd_dispatch and
+# moe_fp8_token_all_gather only with the trainer's fp8 fake-quant on), next to
+# the single-SparseCore reduce-scatter libtpu flag that gdn_cp_dh_scan needs.
+_FINAL_KEYS = {
+    "gdn_cp_dh_scan": "true",
+    "gdn_cp_pass1_states_and_bf16_qkv": "true",
+    "gdn_out_proj_token_minor": "true",
+    "moe_fp8_bwd_dispatch": "true",
+    "ragged_unsort_spread_masked_indices": "true",
+    "moe_fallback_topk_capacity": "128",
+    "gdn_cp_fast_state_passing": "true",
+    "fp32_master_storage": "residual16",
+    "moe_fp8_token_all_gather": "true",
+    "gdn_bwd_natural_layout": "states",
+    "gdn_gated_norm_layout": "token_minor",
+    "context_parallel_attention_load_balance_order": (
+        "dual_chunk_swap_local_self"
+    ),
+    "gdn_conv1d_natural_layout": "true",
+    "gdn_fwd_kernel_head_group_size": "4",
+    "gdn_in_proj_kernel_order": "true",
+    "dense_grad_reduce": "all_reduce",
+    "optimizer_device_resident_gib": "6",
+}
+_FP8_ONLY = ("moe_fp8_bwd_dispatch", "moe_fp8_token_all_gather")
+_RS_FLAG = "--xla_tpu_use_single_sparse_core_for_reduce_scatter_offload"
+# The per-chunk reduce-scatter of the log-prob head's table gradient: an env
+# var of the trainer process (tunix/rl/common.py) that TRAINER_TUNED_FLAGS adds
+# to the trainer env only at the 128-chip 32x2x4 mesh with the fused head, the
+# cell it was timed at.
+_HEAD_GRAD_SCATTER = "TUNIX_LOGPS_HEAD_GRAD_SCATTER"
+# The MoE ragged buffer factor that TRAINER_TUNED_FLAGS sets at the 128-chip
+# 32x2x4 mesh, where it was timed, only with the dropless retry and a finite
+# buffer factor (an overflowing micro-batch is then rerun dropless). Not in
+# _TUNED_KEYS: without the switch the value is the launch's own (2.75 at the
+# bench cell, -1 fully dropless).
+_BUFFER_FACTOR = "ragged_buffer_factor"
+_TUNED_BUFFER_FACTOR = "2.0"
 
 
 def _render(recipe: Path = _RECIPE, **overrides: str) -> str:
@@ -197,6 +338,12 @@ def _maxtext_flags(trainer: str) -> dict[str, str]:
   return dict(token.split("=", 1) for token in flags.split())
 
 
+def _maxtext_flag_tokens(trainer: str, key: str) -> list[str]:
+  """Returns every `key=...` token of the trainer's MaxText flags, in order."""
+  flags = re.search(r'MAXTEXT_EXTRA_FLAGS="([^"]*)"', trainer).group(1)
+  return [token for token in flags.split() if token.split("=", 1)[0] == key]
+
+
 def _vllm_config(rollout: str) -> dict:
   return json.loads(re.search(r"--vllm_config_json='([^']*)'", rollout).group(1))
 
@@ -218,9 +365,11 @@ def _flag_changes(
 
 
 def _without_tuned_flags(trainer: str) -> str:
-  """Returns the trainer JobSet without the libtpu flag and MaxText flags."""
+  """Returns the trainer JobSet without the tuned libtpu flags, env and MaxText flags."""
+  trainer = trainer.replace(f" {_HEAD_GRAD_SCATTER}=chunk", "")  # trainer env
   trainer = re.sub(rf'\n *- "{re.escape(_SC_FLAG)}"', "", trainer)  # proxy arg
   trainer = trainer.replace(f" {_SC_FLAG}", "")  # trainer and worker env
+  trainer = trainer.replace(f"{_RS_FLAG}=true", f"{_RS_FLAG}=false")  # all three
   return re.sub(r'MAXTEXT_EXTRA_FLAGS="[^"]*"', "MAXTEXT_EXTRA_FLAGS=", trainer)
 
 
@@ -238,7 +387,8 @@ class SubmissionLauncherTest(absltest.TestCase):
   def test_the_default_trainer_is_the_measured_bench_cell(self):
     trainer = _jobset(self.default, "train")
     flags = _maxtext_flags(trainer)
-    self.assertEqual(flags["ragged_buffer_factor"], "2.75")
+    # The launcher's 2.75, replaced by the tuned block's timed value (retry on).
+    self.assertEqual(flags[_BUFFER_FACTOR], _TUNED_BUFFER_FACTOR)
     self.assertEqual(flags["retry_when_tokens_dropped"], "true")
     self.assertEqual(flags["retry_num_moe_token_chunks"], "8")
     self.assertEqual(flags["context"], "device")
@@ -249,6 +399,10 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(flags["sa_use_base2_exp"], "true")
     # The block's mesh rule replaces the recipe's cp-as-ep.
     self.assertEqual(flags["custom_mesh_and_rule"], _BENCH_MESH_RULE)
+    # query_proj_kernel_gather_once needs the backward to replay the query
+    # projection: query_proj stays at its default, remat.
+    self.assertEqual(flags["query_proj_kernel_gather_once"], "true")
+    self.assertNotIn("query_proj", flags)
     self.assertIn("--compute_logps_chunk_size=4096 ", trainer)
     self.assertRegex(trainer, r"\bTUNIX_LOGPS_SHARDED_HEAD=fused\b")
     self.assertRegex(
@@ -293,7 +447,7 @@ class SubmissionLauncherTest(absltest.TestCase):
     trainer = _jobset(_render(NUM_MOE_TOKEN_CHUNKS="8"), "train")
     flags = _maxtext_flags(trainer)
     self.assertEqual(flags["num_moe_token_chunks"], "8")
-    self.assertEqual(flags["ragged_buffer_factor"], "2.75")
+    self.assertEqual(flags[_BUFFER_FACTOR], _TUNED_BUFFER_FACTOR)
     self.assertEqual(flags["context"], "device")
 
   def test_finite_buffer_factor_needs_the_retry_to_stay_dropless(self):
@@ -352,7 +506,8 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(flags["moe_exclude_padding_from_routing"], "true")
     self.assertEqual(flags["log_moe_drops"], "true")
     self.assertEqual(flags["retry_dropless_final_micro_batch"], "true")
-    self.assertEqual(flags["ragged_buffer_factor"], "2.75")
+    # The tuned block sets its buffer factor at 32x2x4 whenever the retry is on.
+    self.assertEqual(flags[_BUFFER_FACTOR], _TUNED_BUFFER_FACTOR)
     # The fully dropless final program keeps the layout's four chunks and
     # context offload; two chunks were measured without it.
     self.assertEqual(flags["num_moe_token_chunks"], "4")
@@ -363,7 +518,7 @@ class SubmissionLauncherTest(absltest.TestCase):
         _jobset(_render(FIRST_PHASE_RAGGED_BUFFER_FACTOR="4.0"), "train")
     )
     self.assertEqual(flags["first_phase_ragged_buffer_factor"], "4.0")
-    self.assertEqual(flags["ragged_buffer_factor"], "2.75")
+    self.assertEqual(flags[_BUFFER_FACTOR], _TUNED_BUFFER_FACTOR)
     self.assertEqual(flags["num_moe_token_chunks"], "4")
     self.assertEqual(flags["context"], "offload")
 
@@ -535,7 +690,10 @@ class SubmissionLauncherTest(absltest.TestCase):
   def test_tuned_flags_set_exactly_the_tuned_keys_at_the_bench_cell(self):
     before = _maxtext_flags(_jobset(self.bench_off, "train"))
     after = _maxtext_flags(_jobset(self.bench_on, "train"))
-    self.assertEqual(_flag_changes(before, after), _TUNED_KEYS)
+    self.assertEqual(
+        _flag_changes(before, after),
+        {**_TUNED_KEYS, _BUFFER_FACTOR: ("2.75", _TUNED_BUFFER_FACTOR)},
+    )
 
   def test_tuned_flags_leave_moe_route_at_its_default(self):
     # moe_route=device was inert in the bench's MaxText and is live at the pin.
@@ -552,6 +710,8 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertNotIn("offloading_copy_to_sparsecore", off)
     # The trainer env, the Pathways worker env and the Pathways proxy args.
     self.assertEqual(on.count(_SC_FLAG), 3)
+    self.assertEqual(on.count(f"{_RS_FLAG}=true"), 3)
+    self.assertEqual(off.count(f"{_RS_FLAG}=false"), 3)
     self.assertEqual(_without_tuned_flags(on), _without_tuned_flags(off))
 
   def test_tuned_flags_false_turns_the_block_off(self):
@@ -618,10 +778,25 @@ class SubmissionLauncherTest(absltest.TestCase):
     flags = _maxtext_flags(
         _jobset(_render(**_BENCH_CELL, **_MESH_32X2X8), "train")
     )
-    self.assertEqual(
-        _flag_changes(before, flags),
-        {key: ("remat", "device") for key in _PROJ_KEYS},
-    )
+    expected = {key: ("remat", "device") for key in _PROJ_KEYS}
+    # MaxText refuses query_proj_kernel_gather_once with query_proj=device.
+    expected["query_proj_kernel_gather_once"] = ("true", "false")
+    # fp8_fake_quant_hoist, the 2048 tile and its buffer count only at 32x2x4.
+    expected[_FQ_HOIST] = ("gather8", "off")
+    expected[_WI_TILE] = ("2048", "1024")
+    expected[_WI_BUFFERS] = ("2", "0")
+    expected[_GDN_M_SCAN] = ("true", "false")
+    for key, value in _FINAL_KEYS.items():
+      expected[key] = (value, _MAXTEXT_DEFAULTS[key])
+    # The bench cell's own buffer factor: the tuned block sets 2.0 at 32x2x4.
+    expected[_BUFFER_FACTOR] = (_TUNED_BUFFER_FACTOR, "2.75")
+    self.assertEqual(_flag_changes(before, flags), expected)
+    self.assertNotIn("query_proj_kernel_gather_once", flags)
+    self.assertNotIn(_FQ_HOIST, flags)
+    self.assertNotIn(_WI_BUFFERS, flags)
+    self.assertNotIn(_GDN_M_SCAN, flags)
+    for key in _FINAL_KEYS:
+      self.assertNotIn(key, flags)
     self.assertEqual(flags["num_moe_token_chunks"], "2")
     self.assertEqual(flags["moe_chunk_pipeline"], "true")
     self.assertEqual(flags["moe_roe_packed_routing_gather"], "true")
@@ -637,7 +812,24 @@ class SubmissionLauncherTest(absltest.TestCase):
     expected["num_moe_token_chunks"] = ("2", "1")
     expected["moe_chunk_pipeline"] = ("true", "false")
     expected["moe_roe_packed_routing_gather"] = ("true", "false")
+    # MaxText refuses query_proj_kernel_gather_once with query_proj=device.
+    expected["query_proj_kernel_gather_once"] = ("true", "false")
+    # fp8_fake_quant_hoist, the 2048 tile and its buffer count only at 32x2x4.
+    expected[_FQ_HOIST] = ("gather8", "off")
+    expected[_WI_TILE] = ("2048", "1024")
+    expected[_WI_BUFFERS] = ("2", "0")
+    expected[_GDN_M_SCAN] = ("true", "false")
+    for key, value in _FINAL_KEYS.items():
+      expected[key] = (value, _MAXTEXT_DEFAULTS[key])
+    # The bench cell's own buffer factor: the tuned block sets 2.0 at 32x2x4.
+    expected[_BUFFER_FACTOR] = (_TUNED_BUFFER_FACTOR, "2.75")
     self.assertEqual(_flag_changes(before, flags), expected)
+    self.assertNotIn("query_proj_kernel_gather_once", flags)
+    self.assertNotIn(_FQ_HOIST, flags)
+    self.assertNotIn(_WI_BUFFERS, flags)
+    self.assertNotIn(_GDN_M_SCAN, flags)
+    for key in _FINAL_KEYS:
+      self.assertNotIn(key, flags)
 
   def test_tuned_flags_keep_an_explicit_chunk_count_at_64x1x8(self):
     flags = _maxtext_flags(
@@ -651,6 +843,282 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(flags["moe_roe_packed_routing_gather"], "true")
     for key in _PROJ_KEYS:
       self.assertEqual(flags[key], "device", key)
+    self.assertNotIn("query_proj_kernel_gather_once", flags)
+    self.assertNotIn(_FQ_HOIST, flags)
+    self.assertEqual(flags[_WI_TILE], "1024")
+    self.assertNotIn(_WI_BUFFERS, flags)
+    self.assertNotIn(_GDN_M_SCAN, flags)
+    for key in _FINAL_KEYS:
+      self.assertNotIn(key, flags)
+
+  def test_fp8_fake_quant_hoist_only_at_the_timed_cell(self):
+    # Once, with gather8, in the 32x2x4 trainer with the tuned flags (the
+    # default render and the bench cell), next to fp8_moe_fake_quant=true.
+    for render in (self.default, self.bench_on):
+      trainer = _jobset(render, "train")
+      self.assertEqual(
+          _maxtext_flag_tokens(trainer, _FQ_HOIST), [f"{_FQ_HOIST}=gather8"]
+      )
+      self.assertEqual(_maxtext_flags(trainer)["fp8_moe_fake_quant"], "true")
+    # Nowhere else: tuned flags off, the 256-chip meshes, TRAINER_FP8=false.
+    others = {
+        "tuned off": self.default_off,
+        "bench, tuned off": self.bench_off,
+        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
+        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
+        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
+        "32x2x8, tuned off": _render(
+            TRAINER_TUNED_FLAGS="false", **_MESH_32X2X8
+        ),
+    }
+    for name, render in others.items():
+      self.assertNotIn(_FQ_HOIST, render, name)
+    # Without the trainer's fp8 fake-quant, MaxText would raise on the key.
+    no_fp8 = _jobset(_render(TRAINER_FP8="false", **_BENCH_CELL), "train")
+    self.assertNotIn("fp8_moe_fake_quant", _maxtext_flags(no_fp8))
+    self.assertNotIn(_FQ_HOIST, no_fp8)
+
+  def test_wi_tile_2048_with_two_weight_buffers_only_at_the_timed_mesh(self):
+    # In the 32x2x4 trainer with the tuned flags (the default render, the bench
+    # cell, and the bench cell with TRAINER_FP8=false, which the tile does not
+    # depend on): the tile once, at 2048 (the recipe's 1024 replaced, not
+    # overridden), and the buffer count once, at 2.
+    at_32x2x4 = {
+        "default": self.default,
+        "bench": self.bench_on,
+        "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
+    }
+    for name, render in at_32x2x4.items():
+      trainer = _jobset(render, "train")
+      self.assertEqual(
+          _maxtext_flag_tokens(trainer, _WI_TILE), [f"{_WI_TILE}=2048"], name
+      )
+      self.assertEqual(
+          _maxtext_flag_tokens(trainer, _WI_BUFFERS), [f"{_WI_BUFFERS}=2"], name
+      )
+    # Elsewhere the recipe's tile, once, and no buffer count: tuned flags off,
+    # the 256-chip meshes.
+    others = {
+        "tuned off": self.default_off,
+        "bench, tuned off": self.bench_off,
+        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
+        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
+        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
+        "32x2x8, tuned off": _render(
+            TRAINER_TUNED_FLAGS="false", **_MESH_32X2X8
+        ),
+    }
+    for name, render in others.items():
+      trainer = _jobset(render, "train")
+      self.assertEqual(
+          _maxtext_flag_tokens(trainer, _WI_TILE), [f"{_WI_TILE}=1024"], name
+      )
+      self.assertNotIn(_WI_BUFFERS, render, name)
+
+  def test_gdn_cp_m_scan_only_at_the_timed_mesh(self):
+    # Once, in the 32x2x4 trainer with the tuned flags (the default render, the
+    # bench cell, and the bench cell with TRAINER_FP8=false, which it does not
+    # depend on); its backward twin gdn_cp_dh_scan only there too
+    # (test_final_stack_keys_only_at_the_timed_mesh).
+    at_32x2x4 = {
+        "default": self.default,
+        "bench": self.bench_on,
+        "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
+    }
+    for name, render in at_32x2x4.items():
+      trainer = _jobset(render, "train")
+      self.assertEqual(
+          _maxtext_flag_tokens(trainer, _GDN_M_SCAN),
+          [f"{_GDN_M_SCAN}=true"],
+          name,
+      )
+    # Nowhere else: tuned flags off, the 256-chip meshes.
+    others = {
+        "tuned off": self.default_off,
+        "bench, tuned off": self.bench_off,
+        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
+        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
+        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
+        "32x2x8, tuned off": _render(
+            TRAINER_TUNED_FLAGS="false", **_MESH_32X2X8
+        ),
+    }
+    for name, render in others.items():
+      self.assertNotIn(_GDN_M_SCAN, render, name)
+      self.assertNotIn(_GDN_DH_SCAN, render, name)
+
+  def test_final_stack_keys_only_at_the_timed_mesh(self):
+    # Each key once, with its value, in the 32x2x4 trainer with the tuned flags
+    # (the default render, the bench cell, and the bench cell with
+    # TRAINER_FP8=false, where only moe_fp8_bwd_dispatch and
+    # moe_fp8_token_all_gather are absent); nowhere
+    # else: tuned flags off, the 256-chip meshes.
+    at_32x2x4 = {
+        "default": self.default,
+        "bench": self.bench_on,
+        "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
+    }
+    for name, render in at_32x2x4.items():
+      trainer = _jobset(render, "train")
+      for key, value in _FINAL_KEYS.items():
+        want = [] if key in _FP8_ONLY and "TRAINER_FP8" in name else [f"{key}={value}"]
+        self.assertEqual(_maxtext_flag_tokens(trainer, key), want, f"{name}: {key}")
+    others = {
+        "tuned off": self.default_off,
+        "bench, tuned off": self.bench_off,
+        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
+        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
+        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
+        "32x2x8, tuned off": _render(
+            TRAINER_TUNED_FLAGS="false", **_MESH_32X2X8
+        ),
+    }
+    for name, render in others.items():
+      for key in _FINAL_KEYS:
+        self.assertNotIn(key, render, f"{name}: {key}")
+
+  def test_single_sparse_core_reduce_scatter_only_at_the_timed_mesh(self):
+    # true in the trainer env, the Pathways worker env and the Pathways proxy args
+    # of the 32x2x4 trainer with the tuned flags, which also sets gdn_cp_dh_scan;
+    # false (the recipe's value) everywhere else, and a caller's own
+    # TRAINER_LIBTPU_INIT_ARGS is kept.
+    at_32x2x4 = {
+        "default": self.default,
+        "bench": self.bench_on,
+        "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
+    }
+    for name, render in at_32x2x4.items():
+      trainer = _jobset(render, "train")
+      self.assertEqual(trainer.count(f"{_RS_FLAG}=true"), 3, name)
+      self.assertNotIn(f"{_RS_FLAG}=false", trainer, name)
+    others = {
+        "tuned off": self.default_off,
+        "bench, tuned off": self.bench_off,
+        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
+        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
+        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
+    }
+    for name, render in others.items():
+      trainer = _jobset(render, "train")
+      self.assertEqual(trainer.count(f"{_RS_FLAG}=false"), 3, name)
+      self.assertNotIn(f"{_RS_FLAG}=true", render, name)
+    own = f"{_RS_FLAG}=false --xla_tpu_scoped_vmem_limit_kib=65472"
+    trainer = _jobset(_render(TRAINER_LIBTPU_INIT_ARGS=own), "train")
+    self.assertEqual(trainer.count(f"{_RS_FLAG}=false"), 3)
+    self.assertNotIn(f"{_RS_FLAG}=true", trainer)
+
+  def test_head_grad_scatter_only_at_the_timed_cell(self):
+    # Once, chunk, in the trainer env of the 32x2x4 trainer with the tuned flags
+    # and the fused log-prob head (the default render, the bench cell, and the
+    # bench cell with TRAINER_FP8=false, which it does not depend on); never in
+    # the orchestrator or rollout JobSets.
+    def values(trainer):
+      return re.findall(rf"\b{_HEAD_GRAD_SCATTER}=([A-Za-z0-9_]+)", trainer)
+
+    at_32x2x4 = {
+        "default": self.default,
+        "bench": self.bench_on,
+        "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
+    }
+    for name, render in at_32x2x4.items():
+      self.assertEqual(values(_jobset(render, "train")), ["chunk"], name)
+      for suffix in ("orch", "roll-0"):
+        self.assertNotIn(_HEAD_GRAD_SCATTER, _jobset(render, suffix), name)
+    # Nowhere else: tuned flags off, the 256-chip meshes, and the 32x2x4 trainer
+    # with the "local" head or with the head off (tunix refuses the switch then).
+    others = {
+        "tuned off": self.default_off,
+        "bench, tuned off": self.bench_off,
+        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
+        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
+        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
+        "local head": _render(TUNIX_LOGPS_SHARDED_HEAD="local"),
+        "head off": _render(TUNIX_LOGPS_SHARDED_HEAD="0"),
+    }
+    for name, render in others.items():
+      self.assertNotIn(_HEAD_GRAD_SCATTER, render, name)
+    # A value the caller set is kept, exported or in TRAINER_EXTRA_ENV.
+    exported = _render(TUNIX_LOGPS_HEAD_GRAD_SCATTER="chunk_f32")
+    self.assertEqual(values(_jobset(exported, "train")), ["chunk_f32"])
+    own_env = _render(TRAINER_EXTRA_ENV=f"{_HEAD_GRAD_SCATTER}=off")
+    self.assertEqual(values(_jobset(own_env, "train")), ["off"])
+
+  def test_gdn_kernel_keys_follow_the_reorder_key_with_their_prerequisites(self):
+    # At 32x2x4 with the tuned flags, the GDN forward-kernel keys and the in-projection
+    # order come right after context_parallel_attention_load_balance_order, in the order
+    # the TPU runs appended them, and the flags carry what MaxText requires for them:
+    # gdn_cp_pass1_states_and_bf16_qkv=true (the natural layout's bf16 DMA buffer), the GDN
+    # kernel, and sequence-sharded GDN context parallelism (the base flags' gdn_cp_mode=head
+    # is overridden by the tuned block's seq; MaxText keeps the last value).
+    timed = [
+        "context_parallel_attention_load_balance_order=dual_chunk_swap_local_self",
+        "gdn_conv1d_natural_layout=true",
+        "gdn_fwd_kernel_head_group_size=4",
+        "gdn_in_proj_kernel_order=true",
+    ]
+    at_32x2x4 = {
+        "default": self.default,
+        "bench": self.bench_on,
+        "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
+    }
+    for name, render in at_32x2x4.items():
+      trainer = _jobset(render, "train")
+      tokens = re.search(r'MAXTEXT_EXTRA_FLAGS="([^"]*)"', trainer).group(1).split()
+      start = tokens.index(timed[0])
+      self.assertEqual(tokens[start : start + len(timed)], timed, name)
+      flags = _maxtext_flags(trainer)
+      self.assertEqual(flags["gdn_cp_pass1_states_and_bf16_qkv"], "true", name)
+      self.assertEqual(flags["use_gdn_kernel"], "true", name)
+      self.assertEqual(flags["gdn_cp_mode"], "seq", name)
+
+  def test_dense_resident_and_buffer_keys_follow_the_gdn_keys(self):
+    # At 32x2x4 with the tuned flags, dense_grad_reduce=all_reduce, the
+    # optimizer's device-resident budget and the ragged buffer factor 2.0 come
+    # right after the GDN keys, in the order the TPU runs appended them, with
+    # what MaxText requires for the first two: a rule set that maps embed_grad
+    # (cp-as-ep-dense-no-cp) and optimizer_memory_host_offload=true. The buffer
+    # factor comes only with the dropless retry and a finite
+    # RAGGED_BUFFER_FACTOR.
+    timed = [
+        "gdn_in_proj_kernel_order=true",
+        "dense_grad_reduce=all_reduce",
+        "optimizer_device_resident_gib=6",
+        f"{_BUFFER_FACTOR}={_TUNED_BUFFER_FACTOR}",
+    ]
+    at_32x2x4 = {
+        "default": self.default,
+        "bench": self.bench_on,
+        "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
+    }
+    for name, render in at_32x2x4.items():
+      trainer = _jobset(render, "train")
+      tokens = re.search(r'MAXTEXT_EXTRA_FLAGS="([^"]*)"', trainer).group(1).split()
+      start = tokens.index(timed[0])
+      self.assertEqual(tokens[start : start + len(timed)], timed, name)
+      flags = _maxtext_flags(trainer)
+      self.assertEqual(flags["custom_mesh_and_rule"], _BENCH_MESH_RULE, name)
+      self.assertEqual(flags["optimizer_memory_host_offload"], "true", name)
+      self.assertEqual(flags["retry_when_tokens_dropped"], "true", name)
+      self.assertEqual(flags[_BUFFER_FACTOR], _TUNED_BUFFER_FACTOR, name)
+    # Fully dropless, or without the retry: the launch's own buffer factor.
+    for name, overrides, own in (
+        ("fully dropless", {"RAGGED_BUFFER_FACTOR": "-1"}, "-1"),
+        (
+            "no retry",
+            {"DROPLESS": "false", "RAGGED_BUFFER_FACTOR": "3.0"},
+            "3.0",
+        ),
+    ):
+      trainer = _jobset(_render(**overrides), "train")
+      self.assertEqual(
+          _maxtext_flag_tokens(trainer, _BUFFER_FACTOR),
+          [f"{_BUFFER_FACTOR}={own}"],
+          name,
+      )
+      flags = _maxtext_flags(trainer)
+      self.assertNotIn("retry_when_tokens_dropped", flags, name)
+      self.assertEqual(flags["dense_grad_reduce"], "all_reduce", name)
+      self.assertEqual(flags["optimizer_device_resident_gib"], "6", name)
 
   def test_tuned_flags_false_leaves_the_256_chip_meshes_alone(self):
     for mesh in (_MESH_32X2X8, _MESH_64X1X8):
@@ -698,6 +1166,7 @@ class SubmissionLauncherTest(absltest.TestCase):
     ):
       render = _render(_RECIPE.with_name(name))
       self.assertNotIn("TUNIX_LOGPS_SHARDED_HEAD", render, name)
+      self.assertNotIn(_HEAD_GRAD_SCATTER, render, name)
       orch = _jobset(render, "orch")
       self.assertIn("--no-pipeline_step_boundary", orch, name)
       self.assertIn("--no-stage_next_microbatch", orch, name)
@@ -734,6 +1203,14 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(flags["num_moe_token_chunks"], "1")
     self.assertEqual(flags["moe_chunk_pipeline"], "false")
     self.assertEqual(flags["query_proj"], "device")
+    self.assertNotIn("query_proj_kernel_gather_once", flags)
+    self.assertNotIn(_FQ_HOIST, flags)
+    self.assertEqual(flags[_WI_TILE], "1024")
+    self.assertNotIn(_WI_BUFFERS, flags)
+    self.assertNotIn(_GDN_M_SCAN, flags)
+    for key in _FINAL_KEYS:
+      self.assertNotIn(key, flags)
+    self.assertNotIn(f"{_RS_FLAG}=true", trainer)
 
   def test_pad_start_with_finite_moe_capacity_requires_exclude_padding(self):
     with self.assertRaisesRegex(
