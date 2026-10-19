@@ -734,7 +734,11 @@ class PPOLearnerTest(parameterized.TestCase):
     temperatures = []
     rollout_generate = rl_engine.rollout.generate
 
-    def spy_generate(prompts, rollout_config, **kwargs):
+    def spy_generate(
+        prompts: list[str],
+        rollout_config: base_rollout.RolloutConfig,
+        **kwargs,
+    ) -> base_rollout.RolloutOutput:
       temperatures.append(rollout_config.temperature)
       return rollout_generate(prompts, rollout_config, **kwargs)
 
