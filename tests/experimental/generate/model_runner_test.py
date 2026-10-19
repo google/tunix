@@ -645,9 +645,9 @@ class ExecuteStepTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, 'sampling params'):
       self._execute(runner, (_params(),))
 
-  def test_multiple_scheduler_steps_are_not_supported_yet(self):
-    with self.assertRaisesRegex(NotImplementedError, 'num_scheduler_steps'):
-      _runner(_NextTokenTransformer(), num_scheduler_steps=2)
+  def test_non_positive_num_scheduler_steps_raises(self):
+    with self.assertRaisesRegex(ValueError, 'num_scheduler_steps'):
+      _runner(_NextTokenTransformer(), num_scheduler_steps=0)
 
 
 class ExecuteStepSeedTest(absltest.TestCase):
@@ -691,6 +691,148 @@ class ExecuteStepSeedTest(absltest.TestCase):
 
     self.assertFalse(np.array_equal(tokens, other))
 
+def _fake_step_fn(params, cache, tokens, metadata, sampling_metadata, rng):
+  """A stand-in for `ModelRunner._model_step_fn` that always samples token 1."""
+  del params, tokens, sampling_metadata
+  rng, _ = jax.random.split(rng)
+  num_rows = len(metadata.query_lens)
+  return jnp.ones((num_rows,), dtype=jnp.int32), None, None, cache, rng
+
+
+class MultiStepExecuteTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    # A decode continuing from 4, a chunked prefill ending in 4, a full
+    # prefill ending in 9, and a padding row.
+    self.metadata = _rpa_metadata(
+        kv_lens=[6, 4, 3, 0], query_lens=[1, 4, 3, 0], distribution=[1, 2, 3]
+    )
+    self.tokens = jnp.array([4, 1, 2, 3, 4, 7, 8, 9], dtype=jnp.int32)
+    self.greedy = (_params(temperature=0.0),) * 3
+
+  def _execute(self, runner):
+    return runner.execute_step(
+        cache=_positions_cache(8),
+        tokens=self.tokens,
+        metadata=self.metadata,
+        sampling_params=self.greedy,
+    )
+
+  def test_surviving_rows_keep_decoding(self):
+    runner = _runner(_NextTokenTransformer(), num_scheduler_steps=3)
+
+    tokens, _, _, cache = self._execute(runner)
+
+    np.testing.assert_array_equal(tokens[0], [5, 6, 7])
+    np.testing.assert_array_equal(tokens[2], [10, 11, 12])
+    # The last step decoded the two survivors at the ends of their sequences.
+    np.testing.assert_array_equal(cache['positions'][:2], [7, 4])
+
+  def test_returns_logits_and_logprobs_for_every_step(self):
+    runner = _runner(
+        _NextTokenTransformer(),
+        num_scheduler_steps=3,
+        return_logits=True,
+        return_logprobs=True,
+    )
+
+    _, logits, logp, _ = self._execute(runner)
+
+    self.assertEqual(logits.shape, (4, 3, _VOCAB_SIZE))
+    self.assertEqual(logp.shape, (4, 3))
+    # The full prefill's second step decoded 10, so it favours 11.
+    np.testing.assert_array_equal(np.argmax(logits[2, 1]), 11)
+    expected = jax.nn.log_softmax(
+        10.0 * jax.nn.one_hot(11, _VOCAB_SIZE)
+        + 5.0 * jax.nn.one_hot(12, _VOCAB_SIZE)
+    )[11]
+    np.testing.assert_allclose(logp[2, 1], expected, rtol=1e-6)
+
+  def test_the_metadata_advances_between_steps(self):
+    runner = _runner(_NextTokenTransformer(), num_scheduler_steps=3)
+    mock_step = mock.Mock(wraps=_fake_step_fn)
+    runner._model_step_fn = mock_step
+    runner._compiled_model_step_fn = mock_step
+
+    # The decode loop is a compiled `scan`, so its metadata is only concrete
+    # with tracing turned off.
+    with jax.disable_jit():
+      self._execute(runner)
+
+    step_metadata = [call.args[3] for call in mock_step.call_args_list]
+    self.assertLen(step_metadata, 3)
+    # The scheduled batch runs as-is.
+    np.testing.assert_array_equal(step_metadata[0].query_lens, [1, 4, 3, 0])
+    np.testing.assert_array_equal(step_metadata[0].distribution, [1, 2, 3])
+    # The chunked prefill drops out and the rest decode one token per step.
+    for metadata in step_metadata[1:]:
+      np.testing.assert_array_equal(metadata.query_lens, [1, 1, 0, 0])
+      np.testing.assert_array_equal(metadata.distribution, [2, 2, 2])
+      self.assertEqual(metadata.query_lens.dtype, jnp.int32)
+      self.assertEqual(metadata.kv_lens.dtype, jnp.int32)
+      self.assertEqual(metadata.distribution.dtype, jnp.int32)
+      self.assertEqual(metadata.page_indices['layer_0'].dtype, jnp.int32)
+    np.testing.assert_array_equal(step_metadata[1].kv_lens, [7, 4, 0, 0])
+    np.testing.assert_array_equal(step_metadata[2].kv_lens, [8, 5, 0, 0])
+    # The full prefill's pages move up with it into the second row.
+    np.testing.assert_array_equal(
+        step_metadata[1].page_indices['layer_0'][:2], [[0, 1], [4, 5]]
+    )
+    step_rngs = [call.args[5] for call in mock_step.call_args_list]
+    self.assertFalse(np.array_equal(step_rngs[0], step_rngs[1]))
+    self.assertFalse(np.array_equal(step_rngs[1], step_rngs[2]))
+
+  def test_sampling_settings_follow_their_rows(self):
+    runner = _runner(_NextTokenTransformer(), num_scheduler_steps=2)
+    mock_step = mock.Mock(wraps=_fake_step_fn)
+    runner._model_step_fn = mock_step
+    runner._compiled_model_step_fn = mock_step
+
+    with jax.disable_jit():
+      runner.execute_step(
+          cache=_positions_cache(8),
+          tokens=self.tokens,
+          metadata=self.metadata,
+          sampling_params=(
+              _params(temperature=0.5, top_k=2),
+              _params(temperature=0.9),
+              _params(temperature=0.7, top_p=0.8),
+          ),
+      )
+
+    decode_sampling_metadata = mock_step.call_args_list[1].args[4]
+    # The full prefill's settings move up with it, and the vacated rows sample
+    # greedily like any other padding row.
+    np.testing.assert_allclose(
+        decode_sampling_metadata.temperature, [0.5, 0.7, 0.0, 0.0]
+    )
+    np.testing.assert_allclose(
+        decode_sampling_metadata.top_p, [1.0, 0.8, 1.0, 1.0]
+    )
+    np.testing.assert_array_equal(decode_sampling_metadata.top_k, [2, 8, 1, 1])
+    self.assertEqual(decode_sampling_metadata.temperature.dtype, jnp.float32)
+    self.assertEqual(decode_sampling_metadata.top_p.dtype, jnp.float32)
+    self.assertEqual(decode_sampling_metadata.top_k.dtype, jnp.int32)
+
+  def test_stops_when_every_row_drops_out(self):
+    # A batch of nothing but chunked prefills has no row left to decode, so
+    # only the scheduled step runs.
+    runner = _runner(_NextTokenTransformer(), num_scheduler_steps=4)
+    runner._compiled_decode_loop_fn = mock.Mock()
+
+    tokens, _, _, _ = runner.execute_step(
+        cache=_positions_cache(8),
+        tokens=self.tokens,
+        metadata=_rpa_metadata(
+            kv_lens=[4, 4, 0], query_lens=[4, 4, 0], distribution=[0, 2, 2]
+        ),
+        sampling_params=self.greedy[:2],
+    )
+
+    runner._compiled_decode_loop_fn.assert_not_called()
+    self.assertEqual(tokens.shape, (3, 4))
+    np.testing.assert_array_equal(tokens[:, 1:], 0)
 
 if __name__ == '__main__':
   absltest.main()
