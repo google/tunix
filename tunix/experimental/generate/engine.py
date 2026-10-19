@@ -25,7 +25,9 @@ from flax import nnx
 from flax.nnx import graph
 from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import model_runner as model_runner_lib
+from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import scheduler as scheduler_lib
+from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.generate import utils
 
 
@@ -148,7 +150,115 @@ class LLMEngine:
           f' {num_device_pages} device pages.'
       )
 
+    # Requests submitted since the last step, in submission order.
+    self._queued_requests: list[request_lib.RequestState] = []
+    # Requests that are neither finished nor aborted, by request id. Entries are
+    # removed when aborted in `abort_request` or when finished in `step`.
+    self._requests: dict[str, request_lib.RequestState] = {}
+
   def model_def_and_state(
       self,
   ) -> tuple[graph.GraphDef[nnx.Module], list[nnx.Variable]]:
     return self._model_runner.model_def_and_state()
+
+  def add_request(self, request: request_lib.EngineRequest) -> None:
+    """Submits a request, to be scheduled from the next step on."""
+    request_id = request.request_id
+    if request_id in self._requests:
+      raise ValueError(f'Request {request_id} is already running.')
+    sampling_params = request.sampling_params
+    self._check_sampling_params(request_id, sampling_params)
+
+    prompt_token_ids = request.prompt_token_ids
+    if not prompt_token_ids:
+      raise ValueError(f'Request {request_id} has an empty prompt.')
+    max_len = len(prompt_token_ids) + sampling_params.max_tokens
+    if max_len > self._max_model_len:
+      raise ValueError(
+          f'Request {request_id} has a prompt of {len(prompt_token_ids)}'
+          f' tokens and generates up to {sampling_params.max_tokens} tokens,'
+          f' {max_len} in total, over max_model_len={self._max_model_len}.'
+      )
+
+    req = request_lib.RequestState(
+        request_id, prompt_token_ids, sampling_params
+    )
+    self._requests[request_id] = req
+    self._queued_requests.append(req)
+
+  def _check_sampling_params(
+      self, request_id: str, params: sampler_lib.SamplingParams
+  ) -> None:
+    """Raises a ValueError if the engine cannot sample with `params`."""
+    if params.max_tokens < 1:
+      raise ValueError(
+          f'Request {request_id} has max_tokens={params.max_tokens}; it must'
+          ' be positive.'
+      )
+    if params.temperature < 0.0:
+      raise ValueError(
+          f'Request {request_id} has temperature={params.temperature}; it'
+          ' must be non-negative.'
+      )
+    if params.top_p is not None and not 0.0 < params.top_p <= 1.0:
+      raise ValueError(
+          f'Request {request_id} has top_p={params.top_p}; it must be in'
+          ' (0, 1].'
+      )
+    if params.top_k is not None:
+      max_top_k = self._model_runner_config.max_top_k
+      if max_top_k > 0 and params.top_k > max_top_k:
+        raise ValueError(
+            f'Request {request_id} has top_k={params.top_k}, over'
+            f' max_top_k={max_top_k}.'
+        )
+
+    unsupported = {
+        'cache_salt': params.cache_salt is not None,
+        'beam_size': params.beam_size is not None,
+        'return_routed_experts': params.return_routed_experts,
+        'routed_experts_prompt_start': params.routed_experts_prompt_start != 0,
+    }
+    for name, is_set in unsupported.items():
+      if is_set:
+        raise ValueError(
+            f'Request {request_id} sets {name}, which the engine does not'
+            ' support.'
+        )
+    # The model runner config fixes the outputs of every step, so a request
+    # must ask for exactly those.
+    config = self._model_runner_config
+    if params.return_logprobs != config.return_logprobs:
+      raise ValueError(
+          f'Request {request_id} has return_logprobs={params.return_logprobs},'
+          f' but the engine has return_logprobs={config.return_logprobs}.'
+      )
+    if params.return_logits != config.return_logits:
+      raise ValueError(
+          f'Request {request_id} has return_logits={params.return_logits},'
+          f' but the engine has return_logits={config.return_logits}.'
+      )
+
+  def abort_request(self, request_id: str) -> None:
+    """Aborts a request. Has no effect if it is unknown or already done.
+
+    A request still in `_queued_requests` is removed immediately. A request the
+    scheduler already holds keeps its KV cache pages until the next step, which
+    releases them.
+
+    Args:
+      request_id: The id of the request to abort.
+    """
+    req = self._requests.pop(request_id, None)
+    if req is None:
+      return
+    if req in self._queued_requests:
+      self._queued_requests.remove(req)
+    self._scheduler.abort_request(req)
+
+  def has_unfinished_requests(self) -> bool:
+    """Whether stepping the engine has work left to do."""
+    return (
+        any(not req.is_done for req in self._queued_requests)
+        or self._scheduler.num_active_requests > 0
+    )

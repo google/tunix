@@ -24,7 +24,9 @@ import numpy as np
 from tunix.experimental.generate import engine as engine_lib
 from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import model_runner as model_runner_lib
+from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import scheduler as scheduler_lib
+from tunix.experimental.rollout import sampler as sampler_lib
 
 VOCAB_SIZE = 32
 PAGE_SIZE = 4
@@ -117,6 +119,25 @@ class PagedSumTransformer(nnx.Module):
     return logits, new_cache
 
 
+class WhitespaceTokenizer:
+  """A tokenizer whose text is token ids separated by spaces, e.g. '1 2 3'."""
+
+  def encode(self, text: str) -> list[int]:
+    return [int(token) for token in text.split()]
+
+  def decode(self, ids: list[int]) -> str:
+    return ' '.join(str(token) for token in ids)
+
+  def bos_id(self) -> int:
+    return 0
+
+  def eos_id(self) -> int:
+    return 1
+
+  def pad_id(self) -> int:
+    return 0
+
+
 def make_engine(
     transformer: nnx.Module | None = None,
     *,
@@ -151,4 +172,17 @@ def make_engine(
           num_scheduler_steps=num_scheduler_steps,
       ),
       max_model_len=max_model_len,
+  )
+
+
+def make_request(
+    request_id: str, prompt: list[int], **sampling_kwargs
+) -> request_lib.EngineRequest:
+  """Returns a greedy request, generating up to 8 tokens by default."""
+  sampling_kwargs.setdefault('max_tokens', 8)
+  sampling_kwargs.setdefault('temperature', 0.0)
+  return request_lib.EngineRequest(
+      request_id=request_id,
+      prompt_token_ids=list(prompt),
+      sampling_params=sampler_lib.SamplingParams(**sampling_kwargs),
   )

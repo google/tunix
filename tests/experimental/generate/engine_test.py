@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from absl.testing import absltest
+from absl.testing import parameterized
 from flax import nnx
 import jax.numpy as jnp
 import numpy as np
@@ -82,6 +83,123 @@ class LLMEngineTest(absltest.TestCase):
 
     self.assertEqual(engine._scheduler_config.max_chunked_prefill_length, 8)
     self.assertEqual(engine._scheduler._config.max_chunked_prefill_length, 8)
+
+
+class AddRequestTest(parameterized.TestCase):
+
+  def test_new_request_is_unfinished(self):
+    engine = testing_utils.make_engine()
+    self.assertFalse(engine.has_unfinished_requests())
+
+    engine.add_request(testing_utils.make_request('0', [1, 2]))
+
+    self.assertTrue(engine.has_unfinished_requests())
+
+  def test_empty_prompt_raises(self):
+    with self.assertRaisesRegex(ValueError, 'empty prompt'):
+      testing_utils.make_engine().add_request(testing_utils.make_request('0', []))
+
+  def test_request_over_max_model_len_raises(self):
+    engine = testing_utils.make_engine(max_model_len=10)
+    engine.add_request(testing_utils.make_request('fits', [1] * 4, max_tokens=6))
+
+    with self.assertRaisesRegex(ValueError, 'max_model_len'):
+      engine.add_request(testing_utils.make_request('0', [1] * 5, max_tokens=6))
+
+  def test_top_k_over_max_top_k_raises(self):
+    engine = testing_utils.make_engine(max_top_k=4)
+    engine.add_request(testing_utils.make_request('fits', [1], top_k=4))
+
+    with self.assertRaisesRegex(ValueError, 'max_top_k'):
+      engine.add_request(testing_utils.make_request('0', [1], top_k=5))
+
+  def test_any_top_k_is_allowed_without_a_max_top_k(self):
+    engine = testing_utils.make_engine(max_top_k=-1)
+
+    engine.add_request(testing_utils.make_request('0', [1], top_k=1000))
+
+    self.assertTrue(engine.has_unfinished_requests())
+
+  @parameterized.named_parameters(
+      ('zero_max_tokens', dict(max_tokens=0), 'max_tokens'),
+      ('negative_temperature', dict(temperature=-0.1), 'temperature'),
+      ('zero_top_p', dict(top_p=0.0), 'top_p'),
+      ('top_p_over_one', dict(top_p=1.5), 'top_p'),
+      ('beam_size', dict(beam_size=2), 'beam_size'),
+      ('routed_experts', dict(return_routed_experts=True), 'routed_experts'),
+      (
+          'routed_experts_prompt_start',
+          dict(routed_experts_prompt_start=1),
+          'routed_experts_prompt_start',
+      ),
+      ('logprobs', dict(return_logprobs=True), 'return_logprobs'),
+      ('logits', dict(return_logits=True), 'return_logits'),
+  )
+  def test_unsupported_sampling_params_raise(self, sampling_kwargs, message):
+    with self.assertRaisesRegex(ValueError, message):
+      testing_utils.make_engine().add_request(testing_utils.make_request('0', [1], **sampling_kwargs))
+
+  def test_request_must_ask_for_the_configured_outputs(self):
+    engine = testing_utils.make_engine(return_logprobs=True, return_logits=True)
+    engine.add_request(
+        testing_utils.make_request('fits', [1], return_logprobs=True, return_logits=True)
+    )
+
+    with self.assertRaisesRegex(ValueError, 'return_logprobs'):
+      engine.add_request(testing_utils.make_request('0', [1], return_logits=True))
+
+  def test_running_request_id_raises(self):
+    engine = testing_utils.make_engine()
+    engine.add_request(testing_utils.make_request('0', [1, 2]))
+
+    with self.assertRaisesRegex(ValueError, 'already running'):
+      engine.add_request(testing_utils.make_request('0', [3]))
+
+  def test_aborted_request_id_can_be_reused(self):
+    engine = testing_utils.make_engine()
+    engine.add_request(testing_utils.make_request('0', [1, 2]))
+    engine.abort_request('0')
+
+    engine.add_request(testing_utils.make_request('0', [3]))
+
+    self.assertTrue(engine.has_unfinished_requests())
+
+
+class AbortRequestTest(absltest.TestCase):
+
+  def test_aborting_a_new_request_withdraws_it(self):
+    engine = testing_utils.make_engine()
+    engine.add_request(testing_utils.make_request('0', [1, 2]))
+
+    engine.abort_request('0')
+
+    self.assertFalse(engine.has_unfinished_requests())
+
+  def test_aborting_leaves_other_requests_unfinished(self):
+    engine = testing_utils.make_engine()
+    engine.add_request(testing_utils.make_request('0', [1, 2]))
+    engine.add_request(testing_utils.make_request('1', [1, 2]))
+
+    engine.abort_request('0')
+
+    self.assertTrue(engine.has_unfinished_requests())
+
+  def test_aborting_a_done_request_does_nothing(self):
+    engine = testing_utils.make_engine()
+    engine.add_request(testing_utils.make_request('0', [1, 2]))
+    engine.abort_request('0')
+
+    engine.abort_request('0')
+
+    self.assertFalse(engine.has_unfinished_requests())
+
+  def test_aborting_an_unknown_request_does_nothing(self):
+    engine = testing_utils.make_engine()
+    engine.add_request(testing_utils.make_request('0', [1, 2]))
+
+    engine.abort_request('unknown')
+
+    self.assertTrue(engine.has_unfinished_requests())
 
 
 if __name__ == '__main__':
