@@ -37,8 +37,8 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.orchestrator import worker_registry
-from tunix.experimental.worker import actor_pool
 from tunix.experimental.worker import remote_execution
+from tunix.experimental.worker import task_session
 
 _summarize_list = logging_utils.summarize_list
 
@@ -82,9 +82,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       weight_sync_coordinator: Any = None,
   ):
     self._registry = registry
-    self._rollout_session = actor_pool.PoolExecutionSession(
-        actors_fn=self._rollout_handles
-    )
+    self._rollout_session = task_session.TaskSession(self._rollout_handles)
     self._policy_version = 0
     self._weight_sync_coordinator = weight_sync_coordinator
     self._restored_checkpoint_metadata: dict[str, Any] | None = None
@@ -391,10 +389,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
     results = await asyncio.gather(
         *(
-            self._rollout_session.asubmit(
+            self._rollout_session.route(req.traj_id).asubmit(
                 "generate",
                 requests=[req],
-                route_key=req.traj_id,
             )
             for req in requests
         )

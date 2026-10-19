@@ -26,9 +26,9 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
 import portpicker
-from tunix.experimental.worker import actor_pool
 from tunix.experimental.worker import network as network_lib
 from tunix.experimental.worker import remote_execution as remote_lib
+from tunix.experimental.worker import task_session
 from tunix.rl import packing
 
 
@@ -1445,10 +1445,9 @@ class RemoteExecutionTest(parameterized.TestCase):
         # Cached bulk port must be invalidated after push failure.
         self.assertIsNone(handle._bulk_port)
 
-        # Verify PoolExecutionSession rolls back _in_flight when dispatch_task
+        # Verify TaskSession rolls back _in_flight when dispatch_task
         # fails due to an unreachable bulk port.
-        pool = actor_pool.RoutingActorPool([handle])
-        async with pool.execution_session() as session:
+        async with task_session.TaskSession([handle]) as session:
           handle._bulk_port = dead_port
           with self.assertRaises(OSError):
             await session.submit("req_fail_bulk", "echo", {"tensor": arr})
