@@ -24,7 +24,12 @@ Lifecycle:
   3. It is released once the request finishes or is aborted.
 """
 
+import dataclasses
 import enum
+from typing import Literal, SupportsFloat
+
+import numpy as np
+from tunix.experimental.rollout import sampler as sampler_lib
 
 
 class RequestStatus(enum.Enum):
@@ -34,21 +39,81 @@ class RequestStatus(enum.Enum):
   PENDING = enum.auto()
   # Scheduled, and holds KV cache pages.
   RUNNING = enum.auto()
+  # Sampled one of the engine's EOS tokens.
+  FINISHED_EOS = enum.auto()
+  # Generated `max_tokens` tokens.
+  FINISHED_LENGTH = enum.auto()
   # Aborted by the caller.
   ABORTED = enum.auto()
 
 
-_DONE_STATUSES = frozenset({RequestStatus.ABORTED})
+_DONE_STATUSES = frozenset({
+    RequestStatus.FINISHED_EOS,
+    RequestStatus.FINISHED_LENGTH,
+    RequestStatus.ABORTED,
+})
 
 
+FinishReason = Literal['stop', 'length']
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class EngineRequest:
+  """A request to submit to the engine."""
+
+  # Unique identifier of the request.
+  request_id: str
+  # The prompt tokens.
+  prompt_token_ids: list[int]
+  # Sampling parameters for the request.
+  sampling_params: sampler_lib.SamplingParams
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class EngineResponse:
+  """The result of a finished request."""
+
+  # The id of the request this is the result of.
+  request_id: str
+  # The generated tokens, detokenized.
+  text: str
+  # The prompt tokens, as the engine tokenized them.
+  prompt_token_ids: np.ndarray
+  # The generated tokens. A sampled EOS token is kept.
+  token_ids: np.ndarray
+  # The log probability of each generated token, if the engine returns them.
+  logprobs: np.ndarray | None
+  # The logits each generated token was sampled from, if the engine returns
+  # them.
+  logits: np.ndarray | None
+  # Why the request finished.
+  finish_reason: FinishReason
+
+
+# TODO(yatlas): Rename RequestState to TaskState.
 class RequestState:
   """Mutable runtime state for a single request."""
 
-  def __init__(self, req_id: str, prompt_token_ids: list[int]):
+  def __init__(
+      self,
+      req_id: str,
+      prompt_token_ids: list[int],
+      sampling_params: sampler_lib.SamplingParams,
+  ):
     # Unique identifier of the request.
     self._request_id = req_id
+    # Number of tokens in the prompt.
+    self.prompt_length = len(prompt_token_ids)
+    # Sampling parameters for the request.
+    self.sampling_params = sampling_params
+
     # The prompt tokens followed by any tokens generated so far.
     self.token_ids = list(prompt_token_ids)
+    # Token log probabilities, if requested.
+    self.logprobs: list[SupportsFloat] = []
+    # Token logits, if requested.
+    self.logits: list[np.ndarray] = []
+
     # Number of tokens whose KV cache is computed. This includes tokens that
     # were speculatively scheduled and are in flight.
     self.num_computed_tokens = 0
@@ -63,7 +128,7 @@ class RequestState:
 
   @property
   def is_done(self) -> bool:
-    """Whether the request has been aborted."""
+    """Whether the request has finished or been aborted."""
     return self.status in _DONE_STATUSES
 
   @property
