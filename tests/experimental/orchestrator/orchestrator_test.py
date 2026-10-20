@@ -98,7 +98,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
         [actor_info, critic_info, ref_info, rollout_info],
     )
 
-  def test_create_engine_with_weight_sync_shim_registrations(self):
+  def test_create_engine_with_weight_sync_handle_registrations(self):
     mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
     mock_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
 
@@ -114,16 +114,11 @@ class ClusterOrchestratorTest(absltest.TestCase):
     engine = orch._create_engine()
     self.assertIsNotNone(engine._weight_sync_coordinator)
 
-    # Assert they are properly shimmed in the registry group
     self.assertIn("actor-0", orch.registry.worker_ids())
     self.assertIn("rollout-0", orch.registry.worker_ids())
-    self.assertIsInstance(
-        orch.registry.group(datatypes.Role.ACTOR).members()[0],
-        worker_registry.RemoteWorkerShim,
-    )
-    self.assertIsInstance(
-        orch.registry.group(datatypes.Role.ROLLOUT).members()[0],
-        worker_registry.RemoteWorkerShim,
+    self.assertEqual(orch.registry.handles(datatypes.Role.ACTOR), [mock_actor])
+    self.assertEqual(
+        orch.registry.handles(datatypes.Role.ROLLOUT), [mock_rollout]
     )
 
   def test_bring_up_and_shutdown_remote_worker_handles(self):

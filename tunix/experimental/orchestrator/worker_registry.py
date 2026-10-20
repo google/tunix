@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Worker registry and role groups for the orchestrator control plane.
+"""Worker registry for the orchestrator control plane.
 
-The orchestrator addresses workers by role, not by identity: a group like
+The orchestrator addresses workers by role, not by identity: a role like
 "trainer" or "inference" is the unit it schedules against. The `WorkerRegistry`
 owns all cluster `ActorHandle`s and `WorkerInfo`s indexed by id and by declared
 role, so a fused worker (e.g. one serving both "trainer" and "inference") joins
@@ -23,86 +23,15 @@ every matching role query. Role membership is snapshotted at registration time.
 
 import asyncio
 import collections
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 import pickle
 import threading
-from typing import Any, cast
+from typing import Any
 
 from absl import logging
 from tunix.experimental.common import datatypes
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
-
-
-# TODO(tunix-dev): remove this after raiden weight sync redesign.
-class RemoteWorkerShim:
-  """Presents a remote ActorHandle as a weight sync participant."""
-
-  def __init__(
-      self, handle: remote_execution.ActorHandle, info: datatypes.WorkerInfo
-  ):
-    self._handle = handle
-    self._info = info
-
-  def info(self) -> datatypes.WorkerInfo:
-    return self._info
-
-  async def prepare_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("prepare_weight_sync", *args, **kwargs)
-
-  async def release_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("release_weight_sync", *args, **kwargs)
-
-  async def bind_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("bind_weight_sync", *args, **kwargs)
-
-  async def get_weight_sync_metadata(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit(
-        "get_weight_sync_metadata", *args, **kwargs
-    )
-
-  async def pre_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("pre_weight_sync", *args, **kwargs)
-
-  async def weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("weight_sync", *args, **kwargs)
-
-  async def post_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("post_weight_sync", *args, **kwargs)
-
-  async def abort_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("abort_weight_sync", *args, **kwargs)
-
-  async def get_weight_sync_status(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("get_weight_sync_status", *args, **kwargs)
-
-
-class WorkerGroup:
-  """An ordered, immutable view of the weight-sync participants serving a role."""
-
-  def __init__(
-      self,
-      role: str,
-      members: Sequence[abstract_worker.Worker | RemoteWorkerShim],
-  ):
-    self._role = role
-    self._members = list(members)
-
-  @property
-  def role(self) -> str:
-    return self._role
-
-  def members(self) -> list[abstract_worker.Worker | RemoteWorkerShim]:
-    return list(self._members)
-
-  def is_empty(self) -> bool:
-    return not self._members
-
-  def __len__(self) -> int:
-    return len(self._members)
-
-  def __iter__(self) -> Iterator[abstract_worker.Worker | RemoteWorkerShim]:
-    return iter(self._members)
 
 
 class WorkerRegistry:
@@ -345,20 +274,6 @@ class WorkerRegistry:
       else:
         ids = sorted(self._role_to_ids.get(role, set()))
       return [self._infos[i] for i in ids]
-
-  def group(self, role: datatypes.Role | str) -> WorkerGroup:
-    """Returns the (possibly empty) group of weight-sync participants serving `role`."""
-    with self._lock:
-      ids = sorted(self._role_to_ids.get(role, set()))
-      members = [
-          cast(abstract_worker.Worker, handle.server.bound_instance)
-          if isinstance(
-              handle := self._handles[i], remote_execution.InProcessActorHandle
-          )
-          else RemoteWorkerShim(handle, self._infos[i])
-          for i in ids
-      ]
-      return WorkerGroup(role, members)
 
   def roles(self) -> set[str]:
     with self._lock:

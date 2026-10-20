@@ -967,8 +967,12 @@ class ProtocolRejectionTest(CoordinatorTestBase):
         timeouts=FAST_TIMEOUTS,
     )
 
-    with self.assertRaisesRegex(TypeError, "prepare_weight_sync"):
+    with self.assertRaises(WeightSyncError) as ctx:
       asyncio.run(coordinator.sync(1))
+
+    self.assertTrue(
+        any("prepare_weight_sync" in f for f in ctx.exception.result.failures)
+    )
 
   def test_destination_missing_the_lifecycle_is_rejected(self):
     class MetadataOnly:
@@ -989,8 +993,12 @@ class ProtocolRejectionTest(CoordinatorTestBase):
         timeouts=FAST_TIMEOUTS,
     )
 
-    with self.assertRaisesRegex(TypeError, "destination protocol"):
+    with self.assertRaises(WeightSyncError) as ctx:
       asyncio.run(coordinator.sync(1))
+
+    self.assertTrue(
+        any("bind_weight_sync" in f for f in ctx.exception.result.failures)
+    )
 
   def test_missing_role_is_reported(self):
     wire = Wire()
