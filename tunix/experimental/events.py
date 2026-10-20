@@ -403,10 +403,15 @@ def health() -> dict:
 
 
 def set_expected(**role_counts: int | None) -> None:
-  """Records how many files per role the orchestrator's manifest expects."""
+  """Records how many files per role the orchestrator's manifest expects.
+
+  A count already set from `TUNIX_EVENTS_EXPECTED` (e.g. an emulation that
+  packs several engines into one process) is kept.
+  """
   st = _state
   if st is not None:
-    st.expected.update({k: v for k, v in role_counts.items()})
+    for k, v in role_counts.items():
+      st.expected.setdefault(k, v)
 
 
 # ---------------------------------------------------------------------------

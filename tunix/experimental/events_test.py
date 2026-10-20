@@ -929,6 +929,7 @@ class ManifestTest(_Base):
       self.assertEqual(p.returncode, 0, err)
     os.environ["TUNIX_EVENTS_EXPECTED"] = "orch=1,rollout=2,trainer=1"
     self.configure(role="orch", pod="o0")
+    events.set_expected(orch=1, rollout=8, trainer=1)  # the env's counts win
     for i in range(7):
       events.emit("ckpt", step=i)
     events.shutdown()
