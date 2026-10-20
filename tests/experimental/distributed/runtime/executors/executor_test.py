@@ -15,7 +15,6 @@
 """Unit tests for local and Kubernetes process executors."""
 
 import argparse
-from unittest import mock
 
 from absl.testing import absltest
 import portpicker
