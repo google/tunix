@@ -1019,21 +1019,23 @@ class RLProgramTest(absltest.TestCase):
     program.engine = self.mock_engine
     return program
 
-  def _scored_item(self, group_idx: int) -> datatypes.TrajectoryItem:
+  def _scored_item(self, group_idx: int) -> rl_program.ScoredGroup:
     item = datatypes.TrajectoryItem(
         group_index=0,
         prompt_id=f"prompt_{group_idx}",
         start_step=0,
         traj=_scored_traj(),
     )
-    item.payload = datatypes.RLTrainerPayload(
+    payload = datatypes.RLTrainerPayload(
         prompt_ids=np.array([1, 2], dtype=np.int32),
         prompt_mask=np.array([1.0, 1.0], dtype=np.float32),
         completion_ids=np.array([3, 4], dtype=np.int32),
         completion_mask=np.array([1.0, 1.0], dtype=np.float32),
         advantages=np.array([1.0, 1.0], dtype=np.float32),
     )
-    return item
+    return rl_program.ScoredGroup(
+        payloads=(payload,), items=(item,), rewards=(1.0,)
+    )
 
   def test_dispatch_window_admits_max_staleness_batches_ahead(self):
     async def _run():
@@ -1142,17 +1144,24 @@ class RLProgramTest(absltest.TestCase):
       )
       program.engine = self.mock_engine
 
-      for group_index in range(2):
-        item = datatypes.TrajectoryItem(
-            group_index=group_index,
-            prompt_id="prompt_0",
-            start_step=0,
-            traj=_scored_traj(),
-        )
-        item.payload = self.mock_algo.create_trainer_payloads.return_value[
-            group_index
-        ]
-        await program.scored_q.put(item)
+      items = tuple(
+          datatypes.TrajectoryItem(
+              group_index=group_index,
+              prompt_id="prompt_0",
+              start_step=0,
+              traj=_scored_traj(),
+          )
+          for group_index in range(2)
+      )
+      await program.scored_q.put(
+          rl_program.ScoredGroup(
+              payloads=tuple(
+                  self.mock_algo.create_trainer_payloads.return_value[:2]
+              ),
+              items=items,
+              rewards=(1.0, 1.0),
+          )
+      )
 
       await program.train_stage()
 
@@ -1272,17 +1281,24 @@ class RLProgramTest(absltest.TestCase):
       self.mock_engine.train_step = mock.AsyncMock(side_effect=_fake_train_step)
       program.engine = self.mock_engine
 
-      for group_index in range(2):
-        item = datatypes.TrajectoryItem(
-            group_index=group_index,
-            prompt_id="prompt_0",
-            start_step=0,
-            traj=_scored_traj(),
-        )
-        item.payload = self.mock_algo.create_trainer_payloads.return_value[
-            group_index
-        ]
-        await program.scored_q.put(item)
+      items = tuple(
+          datatypes.TrajectoryItem(
+              group_index=group_index,
+              prompt_id="prompt_0",
+              start_step=0,
+              traj=_scored_traj(),
+          )
+          for group_index in range(2)
+      )
+      await program.scored_q.put(
+          rl_program.ScoredGroup(
+              payloads=tuple(
+                  self.mock_algo.create_trainer_payloads.return_value[:2]
+              ),
+              items=items,
+              rewards=(1.0, 1.0),
+          )
+      )
 
       main_tid = threading.get_ident()
       await program.train_stage()
@@ -1393,27 +1409,39 @@ class RLProgramTest(absltest.TestCase):
       program.engine = self.mock_engine
 
       for prompt_idx in range(2):
+        items = []
+        payloads = []
         for group_index in range(2):
-          item = datatypes.TrajectoryItem(
-              group_index=group_index,
-              prompt_id=f"prompt_{prompt_idx}",
-              start_step=0,
-              traj={
-                  **_scored_traj(),
-                  "logprobs": np.array([-0.1, -0.2], dtype=np.float32),
-              },
-              prompt_tokens=np.array([1, 2], dtype=np.int32),
-              completion_tokens=np.array([3, 4], dtype=np.int32),
+          items.append(
+              datatypes.TrajectoryItem(
+                  group_index=group_index,
+                  prompt_id=f"prompt_{prompt_idx}",
+                  start_step=0,
+                  traj={
+                      **_scored_traj(),
+                      "logprobs": np.array([-0.1, -0.2], dtype=np.float32),
+                  },
+                  prompt_tokens=np.array([1, 2], dtype=np.int32),
+                  completion_tokens=np.array([3, 4], dtype=np.int32),
+              )
           )
-          item.payload = datatypes.RLTrainerPayload(
-              prompt_ids=np.array([1, 2], dtype=np.int32),
-              prompt_mask=np.ones(2, dtype=np.float32),
-              completion_ids=np.array([3, 4], dtype=np.int32),
-              completion_mask=np.ones(2, dtype=np.float32),
-              advantages=np.ones(2, dtype=np.float32),
-              old_per_token_logps=np.array([-0.1, -0.2], dtype=np.float32),
+          payloads.append(
+              datatypes.RLTrainerPayload(
+                  prompt_ids=np.array([1, 2], dtype=np.int32),
+                  prompt_mask=np.ones(2, dtype=np.float32),
+                  completion_ids=np.array([3, 4], dtype=np.int32),
+                  completion_mask=np.ones(2, dtype=np.float32),
+                  advantages=np.ones(2, dtype=np.float32),
+                  old_per_token_logps=np.array([-0.1, -0.2], dtype=np.float32),
+              )
           )
-          await program.scored_q.put(item)
+        await program.scored_q.put(
+            rl_program.ScoredGroup(
+                payloads=tuple(payloads),
+                items=tuple(items),
+                rewards=(1.0, 1.0),
+            )
+        )
       await program.scored_q.close()
 
       await program.train_stage()
@@ -1488,17 +1516,24 @@ class RLProgramTest(absltest.TestCase):
       self.mock_engine.train_step = mock.AsyncMock(side_effect=_slow_train_step)
       program.engine = self.mock_engine
 
-      for group_index in range(2):
-        item = datatypes.TrajectoryItem(
-            group_index=group_index,
-            prompt_id="prompt_0",
-            start_step=0,
-            traj=_scored_traj(),
-        )
-        item.payload = self.mock_algo.create_trainer_payloads.return_value[
-            group_index
-        ]
-        await program.scored_q.put(item)
+      items = tuple(
+          datatypes.TrajectoryItem(
+              group_index=group_index,
+              prompt_id="prompt_0",
+              start_step=0,
+              traj=_scored_traj(),
+          )
+          for group_index in range(2)
+      )
+      await program.scored_q.put(
+          rl_program.ScoredGroup(
+              payloads=tuple(
+                  self.mock_algo.create_trainer_payloads.return_value[:2]
+              ),
+              items=items,
+              rewards=(1.0, 1.0),
+          )
+      )
 
       with self.assertRaisesRegex(RuntimeError, "packing failed on mb_1"):
         await program.train_stage()
@@ -1527,27 +1562,36 @@ class RLProgramTest(absltest.TestCase):
       )
       program.engine = self.mock_engine
 
-      def _make_item(group_idx, item_idx):
-        payload = datatypes.RLTrainerPayload(
-            prompt_ids=np.array([1, 2], dtype=np.int32),
-            prompt_mask=np.array([1.0, 1.0], dtype=np.float32),
-            completion_ids=np.array([3, 4], dtype=np.int32),
-            completion_mask=np.array([1.0, 1.0], dtype=np.float32),
-            advantages=np.array([1.0, 1.0], dtype=np.float32),
+      def _make_group(group_idx):
+        payloads = []
+        items = []
+        for item_idx in range(2):
+          payloads.append(
+              datatypes.RLTrainerPayload(
+                  prompt_ids=np.array([1, 2], dtype=np.int32),
+                  prompt_mask=np.array([1.0, 1.0], dtype=np.float32),
+                  completion_ids=np.array([3, 4], dtype=np.int32),
+                  completion_mask=np.array([1.0, 1.0], dtype=np.float32),
+                  advantages=np.array([1.0, 1.0], dtype=np.float32),
+              )
+          )
+          items.append(
+              datatypes.TrajectoryItem(
+                  group_index=item_idx,
+                  prompt_id=f"prompt_{group_idx}",
+                  start_step=0,
+                  traj=_scored_traj(),
+              )
+          )
+        return rl_program.ScoredGroup(
+            payloads=tuple(payloads),
+            items=tuple(items),
+            rewards=(1.0, 1.0),
         )
-        item = datatypes.TrajectoryItem(
-            group_index=item_idx,
-            prompt_id=f"prompt_{group_idx}",
-            start_step=0,
-            traj=_scored_traj(),
-        )
-        item.payload = payload
-        return item
 
       # Enqueue 4 groups of 2 rollouts each = 8 rollouts
       for g in range(4):
-        for i in range(2):
-          await program.scored_q.put(_make_item(g, i))
+        await program.scored_q.put(_make_group(g))
 
       await program.train_stage()
 
@@ -1594,22 +1638,33 @@ class RLProgramTest(absltest.TestCase):
       program.engine = self.mock_engine
 
       for group_idx in range(4):
+        payloads = []
+        items = []
         for item_idx in range(2):
-          payload = datatypes.RLTrainerPayload(
-              prompt_ids=np.array([1, 2], dtype=np.int32),
-              prompt_mask=np.ones(2, dtype=np.float32),
-              completion_ids=np.array([3, 4], dtype=np.int32),
-              completion_mask=np.ones(2, dtype=np.float32),
-              advantages=np.ones(2, dtype=np.float32),
+          payloads.append(
+              datatypes.RLTrainerPayload(
+                  prompt_ids=np.array([1, 2], dtype=np.int32),
+                  prompt_mask=np.ones(2, dtype=np.float32),
+                  completion_ids=np.array([3, 4], dtype=np.int32),
+                  completion_mask=np.ones(2, dtype=np.float32),
+                  advantages=np.ones(2, dtype=np.float32),
+              )
           )
-          item = datatypes.TrajectoryItem(
-              group_index=item_idx,
-              prompt_id=f"prompt_{group_idx}",
-              start_step=0,
-              traj=_scored_traj(),
+          items.append(
+              datatypes.TrajectoryItem(
+                  group_index=item_idx,
+                  prompt_id=f"prompt_{group_idx}",
+                  start_step=0,
+                  traj=_scored_traj(),
+              )
           )
-          item.payload = payload
-          await program.scored_q.put(item)
+        await program.scored_q.put(
+            rl_program.ScoredGroup(
+                payloads=tuple(payloads),
+                items=tuple(items),
+                rewards=(1.0, 1.0),
+            )
+        )
 
       await program.train_stage()
 
@@ -1678,8 +1733,9 @@ class RLProgramTest(absltest.TestCase):
             start_step=0,
             traj=_scored_traj(),
         )
-        item.payload = payload
-        return item
+        return rl_program.ScoredGroup(
+            payloads=(payload,), items=(item,), rewards=(1.0,)
+        )
 
       # Only 3 groups available (3 rollouts) instead of mini_batch_size=4 (4 rollouts)
       # Since batch_size=4, feed() buffers all 3 without emitting.
@@ -1745,8 +1801,9 @@ class RLProgramTest(absltest.TestCase):
             start_step=0,
             traj=_scored_traj(),
         )
-        item.payload = payload
-        return item
+        return rl_program.ScoredGroup(
+            payloads=(payload,), items=(item,), rewards=(1.0,)
+        )
 
       # 2 groups available = exactly 1 mini-batch (mini_batch_size=2).
       # full_batch_size=4, so groups_consumed (2) < full_batch_size (4).
@@ -1794,8 +1851,11 @@ class RLProgramTest(absltest.TestCase):
           start_step=0,
           traj=_scored_traj(),
       )
-      item.payload = payload
-      await program.scored_q.put(item)
+      await program.scored_q.put(
+          rl_program.ScoredGroup(
+              payloads=(payload,), items=(item,), rewards=(1.0,)
+          )
+      )
       await program.scored_q.close()
 
       await program.train_stage()
@@ -1831,26 +1891,34 @@ class RLProgramTest(absltest.TestCase):
       )
       program.engine = self.mock_engine
 
-      def _make_item(item_idx):
-        payload = datatypes.RLTrainerPayload(
-            prompt_ids=np.array([1, 2, 3], dtype=np.int32),
-            prompt_mask=np.ones(3, dtype=np.float32),
-            completion_ids=np.array([4, 5, 6, 7], dtype=np.int32),
-            completion_mask=np.ones(4, dtype=np.float32),
-            advantages=np.ones(4, dtype=np.float32),
-        )
-        item = datatypes.TrajectoryItem(
-            group_index=item_idx,
-            prompt_id="prompt_0",
-            start_step=0,
-            traj=_scored_traj(),
-        )
-        item.payload = payload
-        return item
-
       # Enqueue 1 prompt group with 3 rollouts of length 7 each (total 21 tokens > 16)
-      for i in range(3):
-        await program.scored_q.put(_make_item(i))
+      payloads = []
+      items = []
+      for item_idx in range(3):
+        payloads.append(
+            datatypes.RLTrainerPayload(
+                prompt_ids=np.array([1, 2, 3], dtype=np.int32),
+                prompt_mask=np.ones(3, dtype=np.float32),
+                completion_ids=np.array([4, 5, 6, 7], dtype=np.int32),
+                completion_mask=np.ones(4, dtype=np.float32),
+                advantages=np.ones(4, dtype=np.float32),
+            )
+        )
+        items.append(
+            datatypes.TrajectoryItem(
+                group_index=item_idx,
+                prompt_id="prompt_0",
+                start_step=0,
+                traj=_scored_traj(),
+            )
+        )
+      await program.scored_q.put(
+          rl_program.ScoredGroup(
+              payloads=tuple(payloads),
+              items=tuple(items),
+              rewards=(1.0, 1.0, 1.0),
+          )
+      )
 
       await program.train_stage()
 
@@ -1891,29 +1959,39 @@ class RLProgramTest(absltest.TestCase):
       )
       program.engine = self.mock_engine
 
-      def _make_item(group_idx, item_idx, length):
-        payload = datatypes.RLTrainerPayload(
-            prompt_ids=np.full(1, group_idx + 1, dtype=np.int32),
-            prompt_mask=np.ones(1, dtype=np.float32),
-            completion_ids=np.full(length - 1, group_idx + 1, dtype=np.int32),
-            completion_mask=np.ones(length - 1, dtype=np.float32),
-            advantages=np.ones(length - 1, dtype=np.float32),
+      def _make_group(group_idx, length):
+        payloads = []
+        items = []
+        for item_idx in range(2):
+          payloads.append(
+              datatypes.RLTrainerPayload(
+                  prompt_ids=np.full(1, group_idx + 1, dtype=np.int32),
+                  prompt_mask=np.ones(1, dtype=np.float32),
+                  completion_ids=np.full(
+                      length - 1, group_idx + 1, dtype=np.int32
+                  ),
+                  completion_mask=np.ones(length - 1, dtype=np.float32),
+                  advantages=np.ones(length - 1, dtype=np.float32),
+              )
+          )
+          items.append(
+              datatypes.TrajectoryItem(
+                  group_index=item_idx,
+                  prompt_id=f"prompt_{group_idx}",
+                  start_step=0,
+                  traj=_scored_traj(),
+              )
+          )
+        return rl_program.ScoredGroup(
+            payloads=tuple(payloads),
+            items=tuple(items),
+            rewards=(1.0, 1.0),
         )
-        item = datatypes.TrajectoryItem(
-            group_index=item_idx,
-            prompt_id=f"prompt_{group_idx}",
-            start_step=0,
-            traj=_scored_traj(),
-        )
-        item.payload = payload
-        return item
 
       # Group 0: 2 items of 2 tokens = 4 tokens
-      for i in range(2):
-        await program.scored_q.put(_make_item(0, i, length=2))
+      await program.scored_q.put(_make_group(0, length=2))
       # Group 1: 2 items of 3 tokens = 6 tokens
-      for i in range(2):
-        await program.scored_q.put(_make_item(1, i, length=3))
+      await program.scored_q.put(_make_group(1, length=3))
 
       await program.train_stage()
 
@@ -1951,30 +2029,38 @@ class RLProgramTest(absltest.TestCase):
       )
       program.engine = self.mock_engine
 
-      def _make_item(prompt_id, idx, length):
-        payload = datatypes.RLTrainerPayload(
-            prompt_ids=np.full(1, idx + 1, dtype=np.int32),
-            prompt_mask=np.ones(1, dtype=np.float32),
-            completion_ids=np.full(length - 1, idx + 1, dtype=np.int32),
-            completion_mask=np.ones(length - 1, dtype=np.float32),
-            advantages=np.ones(length - 1, dtype=np.float32),
+      def _make_group(prompt_id, length):
+        payloads = []
+        items = []
+        for idx in range(2):
+          payloads.append(
+              datatypes.RLTrainerPayload(
+                  prompt_ids=np.full(1, idx + 1, dtype=np.int32),
+                  prompt_mask=np.ones(1, dtype=np.float32),
+                  completion_ids=np.full(length - 1, idx + 1, dtype=np.int32),
+                  completion_mask=np.ones(length - 1, dtype=np.float32),
+                  advantages=np.ones(length - 1, dtype=np.float32),
+              )
+          )
+          items.append(
+              datatypes.TrajectoryItem(
+                  group_index=idx,
+                  prompt_id=prompt_id,
+                  start_step=0,
+                  traj=_scored_traj(),
+              )
+          )
+        return rl_program.ScoredGroup(
+            payloads=tuple(payloads),
+            items=tuple(items),
+            rewards=(1.0, 1.0),
         )
-        item = datatypes.TrajectoryItem(
-            group_index=idx,
-            prompt_id=prompt_id,
-            start_step=0,
-            traj=_scored_traj(),
-        )
-        item.payload = payload
-        return item
 
       # Each item has 10 tokens. Since 10 + 10 = 20 > 16, each item requires its own bin.
       # 4 items -> 4 bins.
       # With batch_size=2, these 4 bins form 2 microbatches of shape [2, 16].
-      for i in range(2):
-        await program.scored_q.put(_make_item("prompt_0", i, length=10))
-      for i in range(2):
-        await program.scored_q.put(_make_item("prompt_1", i, length=10))
+      await program.scored_q.put(_make_group("prompt_0", length=10))
+      await program.scored_q.put(_make_group("prompt_1", length=10))
 
       await program.train_stage()
 
@@ -2020,29 +2106,37 @@ class RLProgramTest(absltest.TestCase):
       )
       program.engine = self.mock_engine
 
-      def _make_item(idx, length):
-        payload = datatypes.RLTrainerPayload(
-            prompt_ids=np.full(1, idx + 1, dtype=np.int32),
-            prompt_mask=np.ones(1, dtype=np.float32),
-            completion_ids=np.full(length - 1, idx + 1, dtype=np.int32),
-            completion_mask=np.ones(length - 1, dtype=np.float32),
-            advantages=np.ones(length - 1, dtype=np.float32),
-        )
-        item = datatypes.TrajectoryItem(
-            group_index=idx,
-            prompt_id="prompt_0",
-            start_step=0,
-            traj=_scored_traj(),
-        )
-        item.payload = payload
-        return item
-
       # 3 items of 10 tokens each. Each requires its own bin.
       # 3 bins with batch_size=2 produces:
       # Microbatch 0: 2 bins (shape [2, 16])
       # Microbatch 1: 1 bin + 1 zero-padded trailing row (shape [2, 16])
-      for i in range(3):
-        await program.scored_q.put(_make_item(i, length=10))
+      payloads = []
+      items = []
+      for idx in range(3):
+        payloads.append(
+            datatypes.RLTrainerPayload(
+                prompt_ids=np.full(1, idx + 1, dtype=np.int32),
+                prompt_mask=np.ones(1, dtype=np.float32),
+                completion_ids=np.full(9, idx + 1, dtype=np.int32),
+                completion_mask=np.ones(9, dtype=np.float32),
+                advantages=np.ones(9, dtype=np.float32),
+            )
+        )
+        items.append(
+            datatypes.TrajectoryItem(
+                group_index=idx,
+                prompt_id="prompt_0",
+                start_step=0,
+                traj=_scored_traj(),
+            )
+        )
+      await program.scored_q.put(
+          rl_program.ScoredGroup(
+              payloads=tuple(payloads),
+              items=tuple(items),
+              rewards=(1.0, 1.0, 1.0),
+          )
+      )
 
       await program.train_stage()
 
@@ -2111,17 +2205,24 @@ class RLProgramTest(absltest.TestCase):
       )
       program.engine = self.mock_engine
 
-      for group_index in range(2):
-        item = datatypes.TrajectoryItem(
-            group_index=group_index,
-            prompt_id="prompt_0",
-            start_step=0,
-            traj=_scored_traj(),
-        )
-        item.payload = self.mock_algo.create_trainer_payloads.return_value[
-            group_index
-        ]
-        await program.scored_q.put(item)
+      items = tuple(
+          datatypes.TrajectoryItem(
+              group_index=group_index,
+              prompt_id="prompt_0",
+              start_step=0,
+              traj=_scored_traj(),
+          )
+          for group_index in range(2)
+      )
+      await program.scored_q.put(
+          rl_program.ScoredGroup(
+              payloads=tuple(
+                  self.mock_algo.create_trainer_payloads.return_value[:2]
+              ),
+              items=items,
+              rewards=(1.0, 1.0),
+          )
+      )
 
       with self.assertLogs(level="INFO") as logs:
         await program.train_stage()
@@ -2163,29 +2264,37 @@ class RLProgramTest(absltest.TestCase):
       )
       program.engine = self.mock_engine
 
-      def _make_item(group_idx, item_idx):
-        payload = datatypes.RLTrainerPayload(
-            prompt_ids=np.array([1, 2], dtype=np.int32),
-            prompt_mask=np.array([1.0, 1.0], dtype=np.float32),
-            completion_ids=np.array([3, 4], dtype=np.int32),
-            completion_mask=np.array([1.0, 1.0], dtype=np.float32),
-            advantages=np.array([1.0, 1.0], dtype=np.float32),
+      def _make_group(group_idx):
+        payloads = []
+        items = []
+        for item_idx in range(2):
+          payloads.append(
+              datatypes.RLTrainerPayload(
+                  prompt_ids=np.array([1, 2], dtype=np.int32),
+                  prompt_mask=np.array([1.0, 1.0], dtype=np.float32),
+                  completion_ids=np.array([3, 4], dtype=np.int32),
+                  completion_mask=np.array([1.0, 1.0], dtype=np.float32),
+                  advantages=np.array([1.0, 1.0], dtype=np.float32),
+              )
+          )
+          items.append(
+              datatypes.TrajectoryItem(
+                  group_index=item_idx,
+                  prompt_id=f"prompt_{group_idx}",
+                  start_step=0,
+                  traj=_scored_traj(),
+              )
+          )
+        return rl_program.ScoredGroup(
+            payloads=tuple(payloads),
+            items=tuple(items),
+            rewards=(1.0, 1.0),
         )
-        item = datatypes.TrajectoryItem(
-            group_index=item_idx,
-            prompt_id=f"prompt_{group_idx}",
-            start_step=0,
-            traj=_scored_traj(),
-        )
-        item.payload = payload
-        return item
 
       # Group 0: 2 items
-      for i in range(2):
-        await program.scored_q.put(_make_item(0, i))
+      await program.scored_q.put(_make_group(0))
       # Group 1: 2 items
-      for i in range(2):
-        await program.scored_q.put(_make_item(1, i))
+      await program.scored_q.put(_make_group(1))
 
       with self.assertLogs(level="INFO") as logs:
         await program.train_stage()
@@ -3277,7 +3386,6 @@ class RLProgramTest(absltest.TestCase):
           completion_tokens=None,
           traj={"trajectory_reward": 1.0},
       )
-      traj_item_0.payload = payload_0
       traj_item_1 = datatypes.TrajectoryItem(
           group_index=1,
           prompt_id="prompt_0",
@@ -3286,7 +3394,6 @@ class RLProgramTest(absltest.TestCase):
           completion_tokens=None,
           traj={"trajectory_reward": 1.0},
       )
-      traj_item_1.payload = payload_1
       self.mock_algo.create_trainer_payloads.return_value = [
           payload_0,
           payload_1,
@@ -3313,23 +3420,22 @@ class RLProgramTest(absltest.TestCase):
 
   def test_sequence_packed_payload_metric_computation(self):
     async def _run():
-      # Sequence-packed payload where prompts are masked with 0 in completion_mask
-      # and identified via segment_ids > 0.
+      # Payloads produced by critique_stage before sequence packing have
+      # unbatched prompt_mask (2 active tokens) and completion_mask (3 active
+      # tokens, 2 masked tokens).
       payload_0 = datatypes.RLTrainerPayload(
-          prompt_ids=np.zeros(0, dtype=np.int32),
-          prompt_mask=np.zeros(0, dtype=np.float32),
-          completion_ids=np.arange(7, dtype=np.int32),
-          completion_mask=np.array([0, 0, 1, 1, 1, 0, 0], dtype=np.float32),
-          segment_ids=np.array([1, 1, 1, 1, 1, 0, 0], dtype=np.int32),
-          advantages=np.ones(7, dtype=np.float32),
+          prompt_ids=np.arange(2, dtype=np.int32),
+          prompt_mask=np.ones(2, dtype=np.float32),
+          completion_ids=np.arange(5, dtype=np.int32),
+          completion_mask=np.array([1, 1, 1, 0, 0], dtype=np.float32),
+          advantages=np.ones(5, dtype=np.float32),
       )
       payload_1 = datatypes.RLTrainerPayload(
-          prompt_ids=np.zeros(0, dtype=np.int32),
-          prompt_mask=np.zeros(0, dtype=np.float32),
-          completion_ids=np.arange(7, dtype=np.int32),
-          completion_mask=np.array([0, 0, 1, 1, 1, 0, 0], dtype=np.float32),
-          segment_ids=np.array([1, 1, 1, 1, 1, 0, 0], dtype=np.int32),
-          advantages=np.ones(7, dtype=np.float32),
+          prompt_ids=np.arange(2, dtype=np.int32),
+          prompt_mask=np.ones(2, dtype=np.float32),
+          completion_ids=np.arange(5, dtype=np.int32),
+          completion_mask=np.array([1, 1, 1, 0, 0], dtype=np.float32),
+          advantages=np.ones(5, dtype=np.float32),
       )
       traj_item_0 = datatypes.TrajectoryItem(
           group_index=0,
@@ -3339,7 +3445,6 @@ class RLProgramTest(absltest.TestCase):
           completion_tokens=None,
           traj={"trajectory_reward": 1.0},
       )
-      traj_item_0.payload = payload_0
       traj_item_1 = datatypes.TrajectoryItem(
           group_index=1,
           prompt_id="prompt_0",
@@ -3348,7 +3453,6 @@ class RLProgramTest(absltest.TestCase):
           completion_tokens=None,
           traj={"trajectory_reward": 1.0},
       )
-      traj_item_1.payload = payload_1
       self.mock_algo.create_trainer_payloads.return_value = [
           payload_0,
           payload_1,
@@ -3616,17 +3720,24 @@ class RLProgramTest(absltest.TestCase):
       )
       program.engine = self.mock_engine
       for prompt_idx in range(2):
-        for group_index in range(2):
-          item = datatypes.TrajectoryItem(
-              group_index=group_index,
-              prompt_id=f"prompt_{prompt_idx}",
-              start_step=0,
-              traj=_scored_traj(),
-          )
-          item.payload = self.mock_algo.create_trainer_payloads.return_value[
-              group_index
-          ]
-          await program.scored_q.put(item)
+        items = tuple(
+            datatypes.TrajectoryItem(
+                group_index=group_index,
+                prompt_id=f"prompt_{prompt_idx}",
+                start_step=0,
+                traj=_scored_traj(),
+            )
+            for group_index in range(2)
+        )
+        await program.scored_q.put(
+            rl_program.ScoredGroup(
+                payloads=tuple(
+                    self.mock_algo.create_trainer_payloads.return_value[:2]
+                ),
+                items=items,
+                rewards=(1.0, 1.0),
+            )
+        )
       await program.scored_q.close()
 
       await program.train_stage()
@@ -4885,11 +4996,13 @@ class RLProgramTest(absltest.TestCase):
       await program.raw_q.close()
 
       await program.critique_stage()
-      scored_group = await program.scored_q.get_group()
+      scored_group = await program.scored_q.get()
+      self.assertIsNotNone(scored_group)
+      assert scored_group is not None
 
       # Token-mode turns live in `conversation_text`; an empty `steps` list
       # would read as a rollout with no turns.
-      for item in scored_group:
+      for item in scored_group.items:
         self.assertNotIn("steps", item.traj)
       program.close()
 
@@ -4987,17 +5100,10 @@ class RLProgramTest(absltest.TestCase):
     asyncio.run(_run())
 
   def _masked_metrics_items(self):
-    """One healthy and one masked-out item, each carrying a trainer payload."""
+    """One healthy and one masked-out item."""
     items = []
     for group_index, mask in enumerate([np.ones(2), np.zeros(2)]):
       item = self._scoring_item(group_index, masked=not mask.any())
-      item.payload = datatypes.RLTrainerPayload(
-          prompt_ids=np.array([1, 2], dtype=np.int32),
-          prompt_mask=np.ones(2, dtype=np.float32),
-          completion_ids=np.array([3, 4], dtype=np.int32),
-          completion_mask=mask.astype(np.float32),
-          advantages=np.zeros(2, dtype=np.float32),
-      )
       items.append(item)
     return items
 
@@ -5093,18 +5199,16 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(metrics_summary["filtered_trajectories_count"], 3)
     program.close()
 
-  def test_drain_filtered_groups_drains_both_queues(self):
+  def test_drain_filtered_groups_drains_raw_queue(self):
     program = self._create_program()
 
     item0 = self._scoring_item(0)
-    item1 = self._scoring_item(1)
 
     async def _test():
       program.raw_q._filtered_groups.append([item0])
-      program.scored_q._filtered_groups.append([item1])
 
       drained = await program._drain_filtered_groups()
-      self.assertEqual(drained, [[item0], [item1]])
+      self.assertEqual(drained, [[item0]])
 
       # Subsequent drain should be empty
       drained_again = await program._drain_filtered_groups()
@@ -5167,13 +5271,15 @@ class RLProgramTest(absltest.TestCase):
       await program.raw_q.close()
 
       await program.critique_stage()
-      scored_group = await program.scored_q.get_group()
+      scored_group = await program.scored_q.get()
+      self.assertIsNotNone(scored_group)
+      assert scored_group is not None
 
-      self.assertTrue(scored_group[0].is_valid)
-      self.assertFalse(scored_group[1].is_valid)
+      self.assertTrue(scored_group.items[0].is_valid)
+      self.assertFalse(scored_group.items[1].is_valid)
 
       program._collect_and_log_step_metrics(
-          all_step_items=scored_group,
+          all_step_items=list(scored_group.items),
           step_rewards=[1.0, 0.0],
           step_advantages=[0.0, 0.0],
           step_result=None,
@@ -5193,6 +5299,57 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(
           logger.get_metric("rewards", "mean", "train"), 1.0
       )
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_critique_stage_raises_on_payload_count_mismatch_without_enqueuing(
+      self,
+  ):
+    async def _run():
+      self.mock_algo.create_trainer_payloads.return_value = [
+          self.mock_algo.create_trainer_payloads.return_value[0]
+      ]
+      program = self._create_program(reward_fns=[])
+      program.engine = self.mock_engine
+      await program.raw_q.put(self._scoring_item(0))
+      await program.raw_q.put(self._scoring_item(1))
+      await program.raw_q.close()
+
+      with self.assertRaisesRegex(
+          ValueError,
+          r"create_trainer_payloads returned 1 payloads for a group of 2 items",
+      ):
+        await program.critique_stage()
+
+      await program.scored_q.close()
+      self.assertIsNone(await program.scored_q.get())
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_critique_stage_raises_on_raw_group_size_mismatch_without_enqueuing(
+      self,
+  ):
+    async def _run():
+      program = self._create_program(reward_fns=[])
+      program.engine = self.mock_engine
+      program.raw_q = rl_program.TrajectoryQueueManager.create(
+          num_generations=2,
+          filter_fn=lambda g: g[:1],
+      )
+      await program.raw_q.put(self._scoring_item(0))
+      await program.raw_q.put(self._scoring_item(1))
+      await program.raw_q.close()
+
+      with self.assertRaisesRegex(
+          ValueError,
+          r"raw_q returned a group of 1 items; expected num_generations=2",
+      ):
+        await program.critique_stage()
+
+      await program.scored_q.close()
+      self.assertIsNone(await program.scored_q.get())
       program.close()
 
     asyncio.run(_run())
@@ -5983,23 +6140,25 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
       # Run critique_stage concurrently with raw_q kept open so its coroutine
       # frame stays suspended at `await self.raw_q.get_group()` during training.
       critique_task = asyncio.create_task(program.critique_stage())
-      scored_batch = await program.scored_q.get_batch(num_groups=1)
+      scored_group = await program.scored_q.get()
       mock_algo.create_trainer_payloads.return_value = None
       mock_algo.create_trainer_payloads.reset_mock()
       self.assertNotIn("routed_experts", src_item.traj)
       self.assertNotIn("routed_experts", src_item.metadata)
 
-      self.assertLen(scored_batch, 1)
-      scored_item = scored_batch[0]
-      self.assertIsNone(getattr(scored_item, "routed_experts", None))
-      self.assertNotIn("routed_experts", scored_item.metadata)
-      self.assertNotIn("routed_experts", scored_item.traj)
-      self.assertIsNotNone(scored_item.payload.routed_experts)
+      self.assertIsNotNone(scored_group)
+      assert scored_group is not None
+      self.assertIsNone(getattr(scored_group.items[0], "routed_experts", None))
+      self.assertNotIn("routed_experts", scored_group.items[0].metadata)
+      self.assertNotIn("routed_experts", scored_group.items[0].traj)
+      self.assertIsNotNone(scored_group.payloads[0].routed_experts)
       self.assertIsNotNone(routed_ref())
 
       # Re-enqueue for train_stage consumption while critique_task remains
-      # suspended on raw_q.
-      await program.scored_q.put(scored_item)
+      # suspended on raw_q, then drop local test references so train_stage owns
+      # the only remaining reference to scored_group.
+      await program.scored_q.put(scored_group)
+      del scored_group
 
       await program.train_stage()
       await program.raw_q.close()
@@ -6016,7 +6175,6 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
       self.assertEqual(batched_alive_during_ckpt, [False])
       self.assertEqual(routed_alive_during_sync, [False])
       self.assertEqual(batched_alive_during_sync, [False])
-      self.assertIsNone(scored_item.payload.routed_experts)
       self.assertIsNone(routed_ref())
       logged_row = program.trajectory_logger.log_item_async.call_args.args[0]
       self.assertNotIn("routed_experts", logged_row["metadata"])
@@ -6058,7 +6216,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       batch_idx: int,
       reward: float = 1.0,
       policy_version: int = 0,
-  ) -> datatypes.TrajectoryItem:
+      group_index: int = 0,
+  ) -> rl_program.ScoredGroup:
     payload = datatypes.RLTrainerPayload(
         prompt_ids=np.array([1, 2], dtype=np.int32),
         prompt_mask=np.array([1, 1], dtype=np.int32),
@@ -6069,14 +6228,15 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     )
     item = datatypes.TrajectoryItem(
         prompt_id=prompt_id,
-        group_index=0,
+        group_index=group_index,
         start_step=0,
         policy_version=policy_version,
         traj=_scored_traj(reward),
         metadata={"batch_idx": batch_idx},
     )
-    item.payload = payload  # pyrefly: ignore[missing-attribute]
-    return item
+    return rl_program.ScoredGroup(
+        payloads=(payload,), items=(item,), rewards=(reward,)
+    )
 
   def test_defaults_to_trajectory_completion_and_prompt_arrival_builds_ordered_queue(
       self,
@@ -6091,7 +6251,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     )
     self.assertIsInstance(
         default_prog.scored_q,
-        rl_program.trajectory_queue_manager.TrajectoryQueueManager,
+        rl_program.trajectory_queue_manager.FifoGroupQueue,
     )
     default_prog.close()
 
@@ -6111,7 +6271,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     )
     self.assertIsInstance(
         ordered_prog.scored_q,
-        rl_program.trajectory_queue_manager.BatchOrderedQueueManager,
+        rl_program.trajectory_queue_manager.BatchOrderedGroupQueue,
     )
     self.assertEqual(ordered_prog.scored_q.full_batch_size, 4)
     ordered_prog.close()
@@ -6169,7 +6329,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       program.engine = self.mock_engine
       assert isinstance(
           program.scored_q,
-          rl_program.trajectory_queue_manager.BatchOrderedQueueManager,
+          rl_program.trajectory_queue_manager.BatchOrderedGroupQueue,
       )
       await program.scored_q.put(
           self._make_scored_item("p0", batch_idx=0, reward=2.5)
@@ -6195,7 +6355,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     )
     assert isinstance(
         program.scored_q,
-        rl_program.trajectory_queue_manager.BatchOrderedQueueManager,
+        rl_program.trajectory_queue_manager.BatchOrderedGroupQueue,
     )
     self.assertEqual(program.dispatch_window.next_batch, 0)
 
@@ -6760,6 +6920,128 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       finally:
         program.close()
         await engine.close()
+
+    asyncio.run(_run())
+
+  def test_scored_group_validation(self):
+    """Verifies ScoredGroup invariants."""
+    dummy_payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        prompt_mask=np.array([1, 1], dtype=np.int32),
+        completion_ids=np.array([3, 4], dtype=np.int32),
+        completion_mask=np.array([1, 1], dtype=np.int32),
+        advantages=np.array([1.0, 1.0], dtype=np.float32),
+    )
+    item_p0 = datatypes.TrajectoryItem(
+        prompt_id="p0", group_index=0, start_step=0, traj=_scored_traj()
+    )
+    item_p1 = datatypes.TrajectoryItem(
+        prompt_id="p1", group_index=1, start_step=0, traj=_scored_traj()
+    )
+    with self.assertRaisesRegex(ValueError, "equal-length"):
+      rl_program.ScoredGroup(
+          payloads=(dummy_payload,),
+          items=(item_p0, item_p0),
+          rewards=(1.0,),
+      )
+    with self.assertRaisesRegex(ValueError, "at least one rollout"):
+      rl_program.ScoredGroup(payloads=(), items=(), rewards=())
+    with self.assertRaisesRegex(ValueError, "share a single prompt_id"):
+      rl_program.ScoredGroup(
+          payloads=(dummy_payload, dummy_payload),
+          items=(item_p0, item_p1),
+          rewards=(1.0, 1.0),
+      )
+
+  def test_critique_emits_one_scored_group_per_group(self):
+    """Verifies critique emission and group ordering across both GroupOrders."""
+
+    async def _run():
+      self.mock_algo.num_generations = 2
+
+      def _create_payloads(group, rewards=None):
+        return [
+            datatypes.RLTrainerPayload(
+                prompt_ids=np.array([idx, idx], dtype=np.int32),
+                prompt_mask=np.array([1, 1], dtype=np.int32),
+                completion_ids=np.array([3, 4], dtype=np.int32),
+                completion_mask=np.array([1, 1], dtype=np.int32),
+                advantages=np.array([r, r], dtype=np.float32),
+            )
+            for idx, r in enumerate(rewards)
+        ]
+
+      self.mock_algo.create_trainer_payloads.side_effect = _create_payloads
+
+      for order, expected_prompts in (
+          (rl_program.GroupOrder.TRAJECTORY_COMPLETION, ["p2", "p0"]),
+          (rl_program.GroupOrder.PROMPT_ARRIVAL, ["p0", "p1"]),
+      ):
+        program = rl_program.StandardRLProgram(
+            algo=self.mock_algo,
+            dataset=["p0", "p1", "p2"],
+            batch_size=2,
+            reward_fns=[],
+            group_order=order,
+        )
+        program.engine = self.mock_engine
+
+        def _raw_item(pid, batch_idx, g_idx, reward):
+          return datatypes.TrajectoryItem(
+              prompt_id=pid,
+              group_index=g_idx,
+              start_step=0,
+              traj=_scored_traj(reward),
+              metadata={"batch_idx": batch_idx},
+          )
+
+        # Complete p2 (batch 1) first, then p0 and p1 (batch 0).
+        await program.raw_q.put(
+            _raw_item("p2", batch_idx=1, g_idx=0, reward=3.0)
+        )
+        await program.raw_q.put(
+            _raw_item("p2", batch_idx=1, g_idx=1, reward=4.0)
+        )
+        await program.raw_q.put(
+            _raw_item("p0", batch_idx=0, g_idx=0, reward=1.0)
+        )
+        await program.raw_q.put(
+            _raw_item("p0", batch_idx=0, g_idx=1, reward=2.0)
+        )
+        await program.raw_q.put(
+            _raw_item("p1", batch_idx=0, g_idx=0, reward=5.0)
+        )
+        await program.raw_q.put(
+            _raw_item("p1", batch_idx=0, g_idx=1, reward=6.0)
+        )
+        await program.raw_q.close()
+
+        await program.critique_stage()
+
+        g1 = await asyncio.wait_for(program.scored_q.get(), timeout=1.0)
+        g2 = await asyncio.wait_for(program.scored_q.get(), timeout=1.0)
+        assert g1 is not None and g2 is not None
+        self.assertEqual(
+            [g1.items[0].prompt_id, g2.items[0].prompt_id],
+            expected_prompts,
+        )
+        self.assertEqual([it.group_index for it in g1.items], [0, 1])
+        self.assertEqual(
+            [int(p.prompt_ids[0]) for p in g1.payloads],
+            [0, 1],
+        )
+        if order == rl_program.GroupOrder.PROMPT_ARRIVAL:
+          self.assertEqual(g1.rewards, (1.0, 2.0))
+          self.assertEqual(g2.rewards, (5.0, 6.0))
+          # Batch 0 has served full_batch_size=2 groups, so get() returns None
+          # until commit advances to batch 1.
+          self.assertIsNone(await program.scored_q.get())
+          program.scored_q.commit(0)
+          g3 = await asyncio.wait_for(program.scored_q.get(), timeout=1.0)
+          assert g3 is not None
+          self.assertEqual(g3.items[0].prompt_id, "p2")
+          self.assertEqual(g3.rewards, (3.0, 4.0))
+        program.close()
 
     asyncio.run(_run())
 
