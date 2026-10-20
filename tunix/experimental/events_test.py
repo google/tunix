@@ -879,6 +879,26 @@ class LogAndEmitTest(_Base):
       root.setLevel(old)
     return records
 
+  def test_the_sites_own_logging_function_is_called(self):
+    # A test (or tool) that patches `logging.info` at a site still sees the
+    # call, with the same arguments.
+    for level in ("off", "on"):
+      events._reset_for_tests()
+      if level == "on":
+        self.configure()
+      with mock.patch.object(absl_logging, "info") as info, \
+          mock.patch.object(absl_logging, "warning") as warning:
+        events.log_and_emit(absl_logging, absl_logging.INFO, "a=%d", "ckpt",
+                            text_args=(1,), names=("step",))
+        events.log_and_emit(absl_logging, absl_logging.WARNING, "b=%s",
+                            "ckpt", text_args=(2,), names=("step",))
+      info.assert_called_once_with("a=%d", 1)
+      warning.assert_called_once_with("b=%s", 2)
+      with mock.patch.object(logging, "info") as std_info:
+        events.log_and_emit(logging, logging.INFO, "c=%d", "ckpt",
+                            text_args=(3,), names=("step",))
+      std_info.assert_called_once_with("c=%d", 3, stacklevel=2)
+
   def test_text_and_location_identical_off_and_on(self):
     std = logging.getLogger("events_test.std")
     for level in ("off", "on"):

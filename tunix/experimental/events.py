@@ -94,6 +94,17 @@ except Exception:  # pylint: disable=broad-except
   _absl_logging = None
   _ABSL_LOGGER_CLS = None
 
+# Level constant -> the logging function a site calls. absl and stdlib levels
+# differ (absl INFO is 0, stdlib INFO is 20); each table is keyed by its own.
+_STD_LEVEL_FN = {_std_logging.DEBUG: "debug", _std_logging.INFO: "info",
+                 _std_logging.WARNING: "warning", _std_logging.ERROR: "error",
+                 _std_logging.CRITICAL: "critical"}
+_ABSL_LEVEL_FN = {}
+if _absl_logging is not None:
+  _ABSL_LEVEL_FN = {_absl_logging.DEBUG: "debug", _absl_logging.INFO: "info",
+                    _absl_logging.WARNING: "warning",
+                    _absl_logging.ERROR: "error"}
+
 
 # ---------------------------------------------------------------------------
 # Schema registry.
@@ -359,11 +370,21 @@ def log_and_emit(logger: Any, level: int, fmt: str, ev: str, /, *,
   the event's fields are `zip(names, text_args)` (a `None` name skips that
   argument) plus `**fields`; when off nothing beyond the log call runs.
   """
+  # The site's own call (`logging.info(...)`, `logger.warning(...)`), so the
+  # record and anything that patches that function see what they saw before.
   if logger is _absl_logging or (_ABSL_LOGGER_CLS is not None and isinstance(
       logger, _ABSL_LOGGER_CLS)):
-    logger.log(level, fmt, *text_args)  # absl skips this frame (registered)
+    fn = getattr(logger, _ABSL_LEVEL_FN.get(level, ""), None)
+    if fn is None:
+      logger.log(level, fmt, *text_args)  # absl skips this frame (registered)
+    else:
+      fn(fmt, *text_args)
   else:  # a stdlib Logger, or the stdlib `logging` module itself
-    logger.log(level, fmt, *text_args, stacklevel=2)
+    fn = getattr(logger, _STD_LEVEL_FN.get(level, ""), None)
+    if fn is None:
+      logger.log(level, fmt, *text_args, stacklevel=2)
+    else:
+      fn(fmt, *text_args, stacklevel=2)
   if ON:
     try:
       if names:
