@@ -19,7 +19,8 @@ Drives the exact production sequence against a real `PeftTrainer` on CPU:
 1. `LifecycleDriver.bring_up`: `initialize()`, `compile(None)`, `start()`.
 2. `DistributedRLEngine.configure_worker`: `with_loss_fn`,
    `with_gen_model_input_fn`, then `compile(assembler.build_dummy_payload())`.
-3. First real microbatch from `GRPOAdapter` + the same assembler.
+3. First real microbatch from `batch_assembly.create_trainer_payloads` + the
+   same assembler.
 
 and asserts step 3 triggers neither a new trace nor an XLA backend compile of
 any trainer step executable (`fwd_bwd`, `update`, `eval`).
@@ -37,7 +38,6 @@ import jax
 import numpy as np
 import optax
 from tunix.dist_rl.common import datatypes
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import distributed_rl_engine
 from tunix.dist_rl.orchestrator import worker_registry
@@ -340,30 +340,23 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
         routed_experts_encode_mode=routed_experts_encode_mode,
     )
     algo_cfg.temperature = 1.0
-    adapter = algorithm_adapter.GRPOAdapter(
-        algo_config=algo_cfg,
-        mini_batch_size=1,
-        train_micro_batch_size=2,
-        max_packed_len=8,
-        max_response_length=3,
-    )
     assembler = _make_assembler(assembler_kind)
     self.compiled_fns.clear()
     engine.configure_worker(
         role=datatypes.Role.ACTOR,
-        algo=adapter,
+        algo_config=algo_cfg,
         assembler=assembler,
         can_fuse_agreement_in_loss=can_fuse_agreement_in_loss,
         precompile=precompile,
         return_routed_experts=routed_experts_shape is not None,
     )
-    return worker, adapter, assembler
+    return worker, algo_cfg, assembler
 
   def _run_first_real_step(
       self,
       worker,
       trainer,
-      adapter,
+      algo_cfg,
       assembler,
       *,
       can_fuse_agreement_in_loss: bool = True,
@@ -372,9 +365,10 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
   ) -> int:
     (assembled,) = list(
         assembler.feed(
-            adapter.create_trainer_payloads(
+            batch_assembly.create_trainer_payloads(
                 _rollouts(routed_experts_shape, num_experts=num_experts),
                 [1.0, 0.0],
+                algo_config=algo_cfg,
             )
         )
     )

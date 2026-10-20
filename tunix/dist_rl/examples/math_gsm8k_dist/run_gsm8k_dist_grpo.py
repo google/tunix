@@ -49,7 +49,6 @@ if REPO_ROOT not in sys.path:
 from tunix.dist_rl.common import datatypes  # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.distributed.runtime import context as runtime_context  # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.examples.math_gsm8k_dist import gsm8k  # pylint: disable=g-import-not-at-top
-from tunix.dist_rl.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.orchestrator import dataset_utils  # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.orchestrator import orchestrator  # pylint: disable=g-import-not-at-top
@@ -310,25 +309,14 @@ def _trajectory_store_config(
   return config
 
 
-def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
-  """Builds the GRPO algorithm adapter from CLI arguments."""
-  algo_config = algorithm_config.GRPOConfig(
+def _build_algo(args: argparse.Namespace) -> algorithm_config.GRPOConfig:
+  """Builds the GRPO algorithm config from CLI arguments."""
+  return algorithm_config.GRPOConfig(
       num_generations=args.num_generations,
       epsilon=args.epsilon,
       beta=args.beta,
       use_rollout_logps=args.use_rollout_logps,
       reward_mode=args.reward_mode,
-  )
-  return algorithm_adapter.GRPOAdapter(
-      algo_config=algo_config,
-      mini_batch_size=args.mini_batch_size,
-      train_micro_batch_size=args.train_micro_batch_size,
-      max_packed_len=(
-          args.max_seq_token_per_tpu
-          if args.max_seq_token_per_tpu is not None
-          else args.max_prompt_length + args.max_response_length
-      ),
-      max_response_length=args.max_response_length,
   )
 
 
@@ -481,7 +469,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       "Registered Orchestrator V2 workers: %s", cluster.registry.infos()
   )
 
-  algo = _build_algo(args)
+  algo_config = _build_algo(args)
 
   metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
       log_dir=args.log_dir,
@@ -507,14 +495,17 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       return_logprobs=True,
   )
   program = rl_program.StandardRLProgram(
-      algo=algo,
+      algo_config=algo_config,
       dataset=_iter_prompt_items(args),
       max_steps=args.max_steps,
       reward_fns=reward_fns,
       generation_args=generation_args,
       batch_size=args.batch_size,
       batch_config=batch_assembly.BatchConfig(
+          mini_batch_size=args.mini_batch_size,
+          train_micro_batch_size=args.train_micro_batch_size,
           pad_id=pad_id,
+          eos_id=eos_id,
           max_prompt_length=args.max_prompt_length,
           max_response_length=args.max_response_length,
           max_seq_token_per_tpu=args.max_seq_token_per_tpu,

@@ -23,6 +23,7 @@ import asyncio
 import collections
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 import contextlib
+import copy
 import dataclasses
 import os
 import threading
@@ -35,13 +36,13 @@ from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import dispatch_window
 from tunix.dist_rl.common import logging_utils
 from tunix.dist_rl.common import tagging
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import dataset_utils
 from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.dist_rl.orchestrator import step_telemetry
 from tunix.dist_rl.queue_manager import trajectory_queue_manager
 from tunix.dist_rl.trajectory import store as trajectory_store_lib
+from tunix.rl import algorithm_config
 from tunix.rl import common as rl_common
 from tunix.rl import function_registry
 from tunix.rl import reward_manager as reward_manager_lib
@@ -338,7 +339,7 @@ class StandardRLProgram(RLProgram):
 
   def __init__(
       self,
-      algo: algorithm_adapter.AlgorithmAdapter,
+      algo_config: algorithm_config.AlgorithmConfig,
       dataset: Iterable[Any] | None = None,
       max_steps: int | None = None,
       reward_fns: (
@@ -368,39 +369,34 @@ class StandardRLProgram(RLProgram):
       raise ValueError("max_staleness must be non-negative.")
     self.dataset = dataset
     self.max_steps = max_steps
-    self.algo = algo
-    algo_config = getattr(self.algo, "algo_config", None)
-    algo_max_response_length = getattr(self.algo, "max_response_length", None)
-    if algo_max_response_length is None and algo_config is not None:
-      algo_max_response_length = getattr(
-          algo_config, "max_response_length", None
-      )
-    self.max_response_length = algo_max_response_length
+    self.algo_config = copy.copy(algo_config)
+    self.batch_config = batch_config or batch_assembly.BatchConfig()
+    self.max_response_length = self.batch_config.max_response_length
+    if self.max_response_length is None and assembler is not None:
+      asm_max_resp = getattr(assembler, "max_response_length", None)
+      if isinstance(asm_max_resp, int) and not isinstance(asm_max_resp, bool):
+        self.max_response_length = asm_max_resp
     self.generation_args = generation_args or datatypes.GenerationArgs()
 
-    if self.algo.algo_config.temperature is not None:
+    if self.algo_config.temperature is not None:
       raise ValueError(
           "Do not set temperature on AlgorithmConfig; configure it via"
           " generation_args on StandardRLProgram."
       )
     gen_temp = self.generation_args.temperature
     if gen_temp is not None:
-      self.algo.algo_config.temperature = gen_temp
+      self.algo_config.temperature = gen_temp
 
     self.generation_args = dataclasses.replace(
         self.generation_args,
-        return_logprobs=self.algo.algo_config.use_rollout_logps,
+        return_logprobs=self.algo_config.use_rollout_logps,
     )
-    self.sampler_is = getattr(self.algo.algo_config, "sampler_is", None)
-    self.sampler_is_threshold = getattr(
-        self.algo.algo_config, "sampler_is_threshold", 2.0
-    )
-    self.sampler_rs = getattr(self.algo.algo_config, "sampler_rs", None)
-    self.sampler_rs_min = getattr(self.algo.algo_config, "sampler_rs_min", None)
-    self.sampler_rs_max = getattr(self.algo.algo_config, "sampler_rs_max", None)
-    raw_seq_err_thresh = getattr(
-        self.algo.algo_config, "seq_logprob_error_threshold", None
-    )
+    self.sampler_is = self.algo_config.sampler_is
+    self.sampler_is_threshold = self.algo_config.sampler_is_threshold
+    self.sampler_rs = self.algo_config.sampler_rs
+    self.sampler_rs_min = self.algo_config.sampler_rs_min
+    self.sampler_rs_max = self.algo_config.sampler_rs_max
+    raw_seq_err_thresh = self.algo_config.seq_logprob_error_threshold
     self.seq_logprob_error_threshold = (
         float(raw_seq_err_thresh)
         if isinstance(raw_seq_err_thresh, (int, float))
@@ -408,16 +404,28 @@ class StandardRLProgram(RLProgram):
     )
 
     reward_manager_fn = function_registry.get_reward_manager(
-        self.algo.algo_config.reward_mode
+        self.algo_config.reward_mode
     )
     self.reward_manager: reward_manager_lib.AbstractRewardManager = (
         reward_manager_fn(
             reward_fns=reward_fns,
-            algo_config=self.algo.algo_config,
+            algo_config=self.algo_config,
         )
     )
-    self.num_generations = algo.num_generations
-    self.mini_batch_size = algo.mini_batch_size
+    self.num_generations = self.algo_config.num_generations
+    asm_mbs = (
+        getattr(assembler, "mini_batch_size", None)
+        if assembler is not None
+        else None
+    )
+    if (
+        batch_config is None
+        and isinstance(asm_mbs, int)
+        and not isinstance(asm_mbs, bool)
+    ):
+      self.mini_batch_size = asm_mbs
+    else:
+      self.mini_batch_size = self.batch_config.mini_batch_size
     if self.mini_batch_size <= 0 or self.num_generations <= 0:
       raise ValueError("mini_batch_size and num_generations must be positive.")
     self.full_batch_size = (
@@ -434,12 +442,10 @@ class StandardRLProgram(RLProgram):
           f"mini_batch_size={self.mini_batch_size}."
       )
     self.can_fuse_agreement_in_loss = (
-        algo_config is not None
-        and getattr(algo_config, "policy_loss_fn", "grpo") == "grpo"
-        and getattr(algo_config, "num_iterations", 1) == 1
+        self.algo_config.policy_loss_fn == "grpo"
+        and self.algo_config.num_iterations == 1
         and self.mini_batch_size >= self.full_batch_size
     )
-    self.batch_config = batch_config or batch_assembly.BatchConfig()
     if self.batch_config.max_response_length is None:
       self.batch_config = dataclasses.replace(
           self.batch_config,
@@ -452,8 +458,6 @@ class StandardRLProgram(RLProgram):
     else:
       self.assembler = batch_assembly.create_batch_assembler(
           num_generations=self.num_generations,
-          mini_batch_size=self.mini_batch_size,
-          train_micro_batch_size=getattr(algo, "train_micro_batch_size", 1),
           batch_config=self.batch_config,
       )
     self.max_staleness = max_staleness
@@ -660,9 +664,7 @@ class StandardRLProgram(RLProgram):
         dispatch_kwargs: dict[str, Any] = {
             "num_generations": self.num_generations,
             "policy_version": self.policy_version,
-            "exact_token_continuity": getattr(
-                self.algo.algo_config, "exact_token_continuity", True
-            ),
+            "exact_token_continuity": self.algo_config.exact_token_continuity,
         }
         if self.generation_args is not None:
           dispatch_kwargs["generation_args"] = self.generation_args
@@ -781,7 +783,11 @@ class StandardRLProgram(RLProgram):
             self._score_group, group
         )
 
-        raw_payloads = self.algo.create_trainer_payloads(group, rewards=rewards)
+        raw_payloads = batch_assembly.create_trainer_payloads(
+            group,
+            rewards=rewards,
+            algo_config=self.algo_config,
+        )
         if len(raw_payloads) != len(group):
           raise ValueError(
               f"create_trainer_payloads returned {len(raw_payloads)} payloads"
@@ -1536,7 +1542,7 @@ class StandardRLProgram(RLProgram):
             if mb is None:
               break
             batch = mb.payload
-            if getattr(self.algo, "requires_reference_kl", False):
+            if self.algo_config.requires_reference_kl:
               if not isinstance(batch, datatypes.RLTrainerPayload):
                 raise TypeError(
                     "Reference KL requires an assembler that returns "
@@ -1553,12 +1559,10 @@ class StandardRLProgram(RLProgram):
                   time.monotonic() - reference_start
               )
               batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
-            algo_config = getattr(self.algo, "algo_config", None)
             if (
                 isinstance(batch, datatypes.RLTrainerPayload)
                 and batch.old_per_token_logps is not None
-                and algo_config is not None
-                and algo_config.use_rollout_logps
+                and self.algo_config.use_rollout_logps
                 and not self.can_fuse_agreement_in_loss
             ):
               await _await_pending_train()
@@ -1752,7 +1756,7 @@ class StandardRLProgram(RLProgram):
 
     engine.configure_worker(
         role=datatypes.Role.ACTOR,
-        algo=self.algo,
+        algo_config=self.algo_config,
         assembler=self.assembler,
         can_fuse_agreement_in_loss=self.can_fuse_agreement_in_loss,
         precompile=self.precompile_trainer,

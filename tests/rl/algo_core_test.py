@@ -1191,8 +1191,126 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
     )
     self.assertTrue(bool(jnp.isfinite(out_ppo.primary_loss.compute())))
 
+  def test_trainer_model_input_builders_and_registry_lookup(self):
+    from tunix.rl import algorithm_config  # pylint: disable=g-import-not-at-top
+    from tunix.rl import function_registry  # pylint: disable=g-import-not-at-top
+
+    cfg = algorithm_config.GRPOConfig(num_generations=2)
+    self.assertIs(
+        function_registry.get_policy_loss_fn(cfg.policy_loss_fn),
+        algo_core.grpo_loss_fn,
+    )
+
+    with self.assertRaisesRegex(
+        ValueError, 'Trainer temperature is unset on algo_config'
+    ):
+      algo_core.build_gen_model_input_fn(cfg, pad_id=0, eos_id=2)
+
+    # Passing temperature explicitly clones cfg without mutating caller's cfg.
+    gen_fn_override = algo_core.build_gen_model_input_fn(
+        cfg, pad_id=0, eos_id=2, temperature=0.6
+    )
+    self.assertIsNone(cfg.temperature)
+    dummy_batch = object()
+    override_out = gen_fn_override(dummy_batch)
+    self.assertIs(override_out['train_example'], dummy_batch)
+    self.assertIsNot(override_out['algo_config'], cfg)
+    self.assertEqual(override_out['algo_config'].temperature, 0.6)
+    self.assertEqual(override_out['pad_id'], 0)
+    self.assertEqual(override_out['eos_id'], 2)
+
+    cfg.temperature = 0.8
+    gen_fn = algo_core.build_gen_model_input_fn(cfg, pad_id=0, eos_id=2)
+    self.assertEqual(
+        gen_fn(dummy_batch),
+        {
+            'train_example': dummy_batch,
+            'algo_config': cfg,
+            'pad_id': 0,
+            'eos_id': 2,
+        },
+    )
+
+    # Critic model input helper requires PPOConfig.
+    with self.assertRaisesRegex(ValueError, 'requires a PPOConfig'):
+      algo_core.build_critic_model_input_fn(cfg, pad_id=0, eos_id=2)
+
+    ppo_cfg = algorithm_config.PPOConfig(clip_range_value=0.3)
+    self.assertIs(
+        function_registry.get_value_loss_fn(ppo_cfg.value_loss_fn),
+        algo_core.ppo_value_loss_fn,
+    )
+    critic_gen_fn = algo_core.build_critic_model_input_fn(
+        ppo_cfg, pad_id=5, eos_id=6
+    )
+    self.assertEqual(
+        critic_gen_fn(dummy_batch),
+        {
+            'train_example': dummy_batch,
+            'clip_range_value': 0.3,
+            'pad_id': 5,
+            'eos_id': 6,
+        },
+    )
+
+    estimator = function_registry.get_advantage_estimator(
+        cfg.advantage_estimator
+    )
+    rewards = np.array([1.0, 3.0], dtype=np.float32)
+    adv = estimator(rewards, num_generations=cfg.num_generations)
+    expected = algo_core.compute_advantages(rewards, num_generations=2)
+    np.testing.assert_allclose(adv, expected, rtol=1e-5)
+
+    # Verify valid_mask forwarding through registered advantage estimator.
+    rewards_4 = np.array([1.0, 2.0, 3.0, -999.0], dtype=np.float32)
+    valid_mask_4 = np.array([True, True, True, False])
+    cfg_4 = algorithm_config.GRPOConfig(num_generations=4)
+    adv_masked = estimator(
+        rewards_4,
+        num_generations=cfg_4.num_generations,
+        valid_mask=valid_mask_4,
+    )
+    np.testing.assert_allclose(
+        adv_masked,
+        np.array([-1.0, 0.0, 1.0, 0.0], dtype=np.float32),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+  def test_grpo_loss_fn_asymmetric_and_dual_clipping(self):
+    lp = self.trainer_logp
+    # Seq 0: positive advantage (2.0), ratio = exp(1.0) ~= 2.718
+    # (> 1 + epsilon_high = 1.5).
+    # Seq 1: negative advantage (-2.0), ratio = exp(1.5) ~= 4.481
+    # (> epsilon_c = 3.0).
+    rollout = jnp.array(
+        [
+            [lp - 1.0, lp - 1.0, lp - 1.0],
+            [lp - 1.5, lp - 1.5, lp - 1.5],
+        ],
+        dtype=jnp.float32,
+    )
+    ex = self._example(
+        completion_mask=jnp.ones((2, 3), dtype=jnp.float32),
+        advantages=jnp.array([2.0, -2.0], dtype=jnp.float32),
+        old_per_token_logps=rollout,
+    )
+    cfg = self._config(
+        epsilon=0.2,
+        epsilon_high=0.5,
+        epsilon_c=3.0,
+    )
+    out = algo_core.grpo_loss_fn(self.model, ex, cfg, pad_id=0, eos_id=-1)
+    # Seq 0 clipped at 1 + epsilon_high = 1.5 -> -2.0 * 1.5 = -3.0
+    # Seq 1 dual-clipped at epsilon_c = 3.0 -> -(-2.0) * 3.0 = 6.0
+    # Mean over 2 sequences = (-3.0 + 6.0) / 2 = 1.5
+    np.testing.assert_allclose(
+        float(out.primary_loss.compute()), 1.5, rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        float(out.aux_metrics['pg_clipfrac_lower'].compute()), 0.5, rtol=1e-5
+    )
+
 
 if __name__ == '__main__':
   absltest.main()
-
-

@@ -266,9 +266,9 @@ class FrozenLakeDistTest(absltest.TestCase):
     )
     self.assertFalse(args_no_precompile.trainer_precompile)
 
-    algo = run_frozenlake_dist._build_algo(args)
-    self.assertEqual(algo.algo_config.sampler_is, "token")
-    self.assertEqual(algo.algo_config.sampler_is_threshold, 2.0)
+    algo_config = run_frozenlake_dist._build_algo(args)
+    self.assertEqual(algo_config.sampler_is, "token")
+    self.assertEqual(algo_config.sampler_is_threshold, 2.0)
 
   def test_qwen3_8b_supported_by_distributed_workers(self):
     config = automodel.call_model_config("qwen3-8b")

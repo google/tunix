@@ -18,9 +18,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.metrics import metrics as exp_metrics
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.worker import remote_execution
+from tunix.rl import algorithm_config
 
 
 @runtime_checkable
@@ -145,7 +145,7 @@ class AbstractRLEngine(Protocol):
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
       *,
-      algo: algorithm_adapter.AlgorithmAdapter,
+      algo_config: algorithm_config.AlgorithmConfig,
       assembler: batch_assembly.BatchAssembler[Any],
       **kwargs: Any,
   ) -> None:

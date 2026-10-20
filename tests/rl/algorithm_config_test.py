@@ -310,6 +310,45 @@ class AlgorithmConfigTest(parameterized.TestCase):
       ):
         algorithm_config.GRPOConfig(routed_experts_num_experts=bad_num)
 
+  def test_requires_reference_kl(self):
+    self.assertFalse(
+        algorithm_config.AlgorithmConfig(
+            beta=0.0, force_compute_kl=False
+        ).requires_reference_kl
+    )
+    self.assertTrue(
+        algorithm_config.AlgorithmConfig(
+            beta=0.04, force_compute_kl=False
+        ).requires_reference_kl
+    )
+    self.assertTrue(
+        algorithm_config.AlgorithmConfig(
+            beta=0.0, force_compute_kl=True
+        ).requires_reference_kl
+    )
+
+  def test_ppo_config_defaults_and_validation(self):
+    cfg = algorithm_config.PPOConfig()
+    self.assertEqual(cfg.algo_variant, "ppo")
+    self.assertEqual(cfg.advantage_estimator, "gae")
+    self.assertEqual(cfg.policy_loss_fn, "ppo")
+    self.assertEqual(cfg.value_loss_fn, "ppo")
+    self.assertEqual(cfg.epsilon_low, 0.2)
+    self.assertEqual(cfg.epsilon_high, 0.2)
+
+    cfg_eps = algorithm_config.PPOConfig(epsilon=0.1)
+    self.assertEqual(cfg_eps.epsilon_low, 0.1)
+    self.assertEqual(cfg_eps.epsilon_high, 0.1)
+
+    with self.assertRaisesRegex(ValueError, "Invalid KL method"):
+      algorithm_config.PPOConfig(kl_method="bad_kl")
+    with self.assertRaisesRegex(
+        ValueError, "`epsilon_c` must be greater than 1"
+    ):
+      algorithm_config.PPOConfig(epsilon_c=1.0)
+    with self.assertRaisesRegex(ValueError, "value_loss_fn must be one of"):
+      algorithm_config.PPOConfig(value_loss_fn="bad_value_loss")
+
 
 if __name__ == "__main__":
   absltest.main()
