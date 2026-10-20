@@ -1,0 +1,1187 @@
+{
+ "base": "2d3d00ab8",
+ "sites": [
+  {
+   "args": [
+    "request.extra_config.get('round_index', -1)",
+    "request.extra_config.get('req_id', '')",
+    "elapsed_abort_s",
+    "_format_timeout(self._timeouts.abort)",
+    "len(destinations)"
+   ],
+   "consts": {
+    "phase": "abort"
+   },
+   "ev": "wsync_phase",
+   "extra": false,
+   "fields": [
+    "phase"
+   ],
+   "file": "tunix/experimental/weight_sync/weight_sync_coordinator.py",
+   "fmt": "WEIGHT_SYNC_PHASE round=%s req_id=%s phase=abort elapsed_s=%.3f timeout=%s workers=%d",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "round",
+    "req_id",
+    "elapsed_s",
+    "timeout",
+    "workers"
+   ]
+  },
+  {
+   "args": [
+    "round_index",
+    "req_id",
+    "t_bind_s",
+    "_format_timeout(self._timeouts.bind)",
+    "len(destinations)"
+   ],
+   "consts": {
+    "phase": "bind"
+   },
+   "ev": "wsync_phase",
+   "extra": false,
+   "fields": [
+    "phase"
+   ],
+   "file": "tunix/experimental/weight_sync/weight_sync_coordinator.py",
+   "fmt": "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=bind elapsed_s=%.3f timeout=%s workers=%d",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "round",
+    "req_id",
+    "elapsed_s",
+    "timeout",
+    "workers"
+   ]
+  },
+  {
+   "args": [
+    "round_index",
+    "req_id",
+    "t_metadata_s",
+    "_format_timeout(self._timeouts.metadata)",
+    "len(destinations)"
+   ],
+   "consts": {
+    "phase": "metadata"
+   },
+   "ev": "wsync_phase",
+   "extra": false,
+   "fields": [
+    "phase"
+   ],
+   "file": "tunix/experimental/weight_sync/weight_sync_coordinator.py",
+   "fmt": "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=metadata elapsed_s=%.3f timeout=%s workers=%d",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "round",
+    "req_id",
+    "elapsed_s",
+    "timeout",
+    "workers"
+   ]
+  },
+  {
+   "args": [
+    "round_index",
+    "req_id",
+    "t_source_prepare_s",
+    "_format_timeout(self._timeouts.source_prepare)",
+    "len(sources)"
+   ],
+   "consts": {
+    "phase": "source_prepare"
+   },
+   "ev": "wsync_phase",
+   "extra": false,
+   "fields": [
+    "phase"
+   ],
+   "file": "tunix/experimental/weight_sync/weight_sync_coordinator.py",
+   "fmt": "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=source_prepare elapsed_s=%.3f timeout=%s workers=%d",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "round",
+    "req_id",
+    "elapsed_s",
+    "timeout",
+    "workers"
+   ]
+  },
+  {
+   "args": [
+    "round_index",
+    "req_id",
+    "t_register_s",
+    "len(registration_metadata)"
+   ],
+   "consts": {
+    "phase": "register"
+   },
+   "ev": "wsync_phase",
+   "extra": false,
+   "fields": [
+    "phase"
+   ],
+   "file": "tunix/experimental/weight_sync/weight_sync_coordinator.py",
+   "fmt": "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=register elapsed_s=%.3f units=%d",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "round",
+    "req_id",
+    "elapsed_s",
+    "units"
+   ]
+  },
+  {
+   "args": [
+    "round_index",
+    "req_id",
+    "t_transfer_s",
+    "_format_timeout(self._timeouts.transfer)",
+    "transfer.success if transfer is not None else False"
+   ],
+   "consts": {
+    "phase": "transfer"
+   },
+   "ev": "wsync_phase",
+   "extra": false,
+   "fields": [
+    "phase"
+   ],
+   "file": "tunix/experimental/weight_sync/weight_sync_coordinator.py",
+   "fmt": "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=transfer elapsed_s=%.3f timeout=%s success=%s",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "round",
+    "req_id",
+    "elapsed_s",
+    "timeout",
+    "success"
+   ]
+  },
+  {
+   "args": [
+    "round_index",
+    "req_id",
+    "t_transfer_s",
+    "_format_timeout(self._timeouts.transfer)"
+   ],
+   "consts": {
+    "outcome": "timeout_or_unknown",
+    "phase": "transfer"
+   },
+   "ev": "wsync_phase",
+   "extra": false,
+   "fields": [
+    "outcome",
+    "phase"
+   ],
+   "file": "tunix/experimental/weight_sync/weight_sync_coordinator.py",
+   "fmt": "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=transfer elapsed_s=%.3f timeout=%s outcome=timeout_or_unknown",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "round",
+    "req_id",
+    "elapsed_s",
+    "timeout"
+   ]
+  },
+  {
+   "args": [
+    "round_index",
+    "req_id",
+    "t_pre_s",
+    "_format_timeout(self._timeouts.pre)",
+    "len(destinations)",
+    "len(pre_failures)"
+   ],
+   "consts": {
+    "phase": "pre"
+   },
+   "ev": "wsync_phase",
+   "extra": false,
+   "fields": [
+    "phase"
+   ],
+   "file": "tunix/experimental/weight_sync/weight_sync_coordinator.py",
+   "fmt": "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=pre elapsed_s=%.3f timeout=%s workers=%d failures=%d",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "round",
+    "req_id",
+    "elapsed_s",
+    "timeout",
+    "workers",
+    "failures"
+   ]
+  },
+  {
+   "args": [
+    "round_index",
+    "req_id",
+    "uuid"
+   ],
+   "consts": {
+    "note": "uuid_not_positive",
+    "phase": "parallel_h2h_fallback"
+   },
+   "ev": "wsync_phase",
+   "extra": false,
+   "fields": [
+    "note",
+    "phase"
+   ],
+   "file": "tunix/experimental/weight_sync/weight_sync_coordinator.py",
+   "fmt": "WEIGHT_SYNC_PHASE round=%d req_id=%s parallel_h2h=True requested, but uuid=%d is not positive; falling back to sequential quiesce-before-transfer order.",
+   "level": "WARNING",
+   "logger": "logging",
+   "names": [
+    "round",
+    "req_id",
+    "uuid"
+   ]
+  },
+  {
+   "args": [
+    "round_index",
+    "req_id",
+    "', '.join(unsafe_units)"
+   ],
+   "consts": {
+    "note": "auto_h2d_unconfirmed",
+    "phase": "parallel_h2h_fallback"
+   },
+   "ev": "wsync_phase",
+   "extra": false,
+   "fields": [
+    "note",
+    "phase"
+   ],
+   "file": "tunix/experimental/weight_sync/weight_sync_coordinator.py",
+   "fmt": "WEIGHT_SYNC_PHASE round=%d req_id=%s parallel_h2h=True requested, but destination unit(s) did not confirm auto_h2d=False (%s); falling back to sequential quiesce-before-transfer order to avoid writing into live HBM during serving.",
+   "level": "WARNING",
+   "logger": "logging",
+   "names": [
+    "round",
+    "req_id",
+    "unsafe_units"
+   ]
+  },
+  {
+   "args": [
+    "round_index",
+    "req_id",
+    "t_h2d_s",
+    "_format_timeout(self._timeouts.h2d)",
+    "len(destinations)",
+    "len(h2d_failures)"
+   ],
+   "consts": {
+    "phase": "h2d"
+   },
+   "ev": "wsync_phase",
+   "extra": false,
+   "fields": [
+    "phase"
+   ],
+   "file": "tunix/experimental/weight_sync/weight_sync_coordinator.py",
+   "fmt": "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=h2d elapsed_s=%.3f timeout=%s workers=%d failures=%d",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "round",
+    "req_id",
+    "elapsed_s",
+    "timeout",
+    "workers",
+    "failures"
+   ]
+  },
+  {
+   "args": [
+    "round_index",
+    "req_id",
+    "t_post_s",
+    "_format_timeout(self._timeouts.post)",
+    "len(destinations)",
+    "len(failed_posts)"
+   ],
+   "consts": {
+    "phase": "post"
+   },
+   "ev": "wsync_phase",
+   "extra": false,
+   "fields": [
+    "phase"
+   ],
+   "file": "tunix/experimental/weight_sync/weight_sync_coordinator.py",
+   "fmt": "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=post elapsed_s=%.3f timeout=%s workers=%d failures=%d",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "round",
+    "req_id",
+    "elapsed_s",
+    "timeout",
+    "workers",
+    "failures"
+   ]
+  },
+  {
+   "args": [
+    "round_index",
+    "req_id",
+    "t_release_s",
+    "_format_timeout(self._timeouts.release)",
+    "len(sources)"
+   ],
+   "consts": {
+    "phase": "release"
+   },
+   "ev": "wsync_phase",
+   "extra": false,
+   "fields": [
+    "phase"
+   ],
+   "file": "tunix/experimental/weight_sync/weight_sync_coordinator.py",
+   "fmt": "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=release elapsed_s=%.3f timeout=%s workers=%d",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "round",
+    "req_id",
+    "elapsed_s",
+    "timeout",
+    "workers"
+   ]
+  },
+  {
+   "args": [
+    "round_index",
+    "req_id",
+    "policy_version",
+    "state.value",
+    "t_bind_s",
+    "t_metadata_s",
+    "t_source_prepare_s",
+    "t_register_s",
+    "t_pre_s",
+    "t_transfer_s",
+    "t_h2d_s",
+    "t_post_s",
+    "self._current_round_abort_s",
+    "t_release_s",
+    "t_prepare_s",
+    "t_h2d_s",
+    "t_post_s",
+    "t_e2e_s"
+   ],
+   "consts": {},
+   "ev": "wsync_round",
+   "extra": true,
+   "fields": [],
+   "file": "tunix/experimental/weight_sync/weight_sync_coordinator.py",
+   "fmt": "WEIGHT_SYNC_PROFILE round=%d req_id=%s policy_version=%d state=%s bind_s=%.3f metadata_s=%.3f source_prepare_s=%.3f register_s=%.3f pre_s=%.3f transfer_s=%.3f h2d_s=%.3f post_s=%.3f abort_s=%.3f release_s=%.3f prepare_write_s=%.3f h2d_read_s=%.3f post_verify_s=%.3f e2e_s=%.3f",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "round",
+    "req_id",
+    "policy_version",
+    "state",
+    "bind_s",
+    "metadata_s",
+    "source_prepare_s",
+    "register_s",
+    "pre_s",
+    "transfer_s",
+    "h2d_s",
+    "post_s",
+    "abort_s",
+    "release_s",
+    "prepare_write_s",
+    "h2d_read_s",
+    "post_verify_s",
+    "e2e_s"
+   ]
+  },
+  {
+   "args": [
+    "round_index",
+    "req_id",
+    "policy_version",
+    "state.value",
+    "t_bind_s",
+    "_format_timeout(self._timeouts.bind)",
+    "t_metadata_s",
+    "_format_timeout(self._timeouts.metadata)",
+    "t_source_prepare_s",
+    "_format_timeout(self._timeouts.source_prepare)",
+    "t_register_s",
+    "t_pre_s",
+    "_format_timeout(self._timeouts.pre)",
+    "t_transfer_s",
+    "_format_timeout(self._timeouts.transfer)",
+    "t_h2d_s",
+    "_format_timeout(self._timeouts.h2d)",
+    "t_post_s",
+    "_format_timeout(self._timeouts.post)",
+    "self._current_round_abort_s",
+    "_format_timeout(self._timeouts.abort)",
+    "t_release_s",
+    "_format_timeout(self._timeouts.release)",
+    "t_e2e_s"
+   ],
+   "consts": {},
+   "ev": "wsync_timings",
+   "extra": false,
+   "fields": [],
+   "file": "tunix/experimental/weight_sync/weight_sync_coordinator.py",
+   "fmt": "WEIGHT_SYNC_PHASE_TIMINGS round=%d req_id=%s policy_version=%d state=%s bind=%.3fs(timeout=%s,WEIGHT_SYNC_BIND_TIMEOUT_S) metadata=%.3fs(timeout=%s,WEIGHT_SYNC_METADATA_TIMEOUT_S) source_prepare=%.3fs(timeout=%s,WEIGHT_SYNC_SOURCE_PREPARE_TIMEOUT_S) register=%.3fs pre=%.3fs(timeout=%s,WEIGHT_SYNC_PRE_TIMEOUT_S) transfer=%.3fs(timeout=%s,WEIGHT_SYNC_TRANSFER_TIMEOUT_S) h2d=%.3fs(timeout=%s,WEIGHT_SYNC_H2D_TIMEOUT_S) post=%.3fs(timeout=%s,WEIGHT_SYNC_POST_TIMEOUT_S) abort=%.3fs(timeout=%s,WEIGHT_SYNC_ABORT_TIMEOUT_S) release=%.3fs(timeout=%s,WEIGHT_SYNC_RELEASE_TIMEOUT_S) e2e=%.3fs",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "round",
+    "req_id",
+    "policy_version",
+    "state",
+    "bind_s",
+    "bind_timeout",
+    "metadata_s",
+    "metadata_timeout",
+    "source_prepare_s",
+    "source_prepare_timeout",
+    "register_s",
+    "pre_s",
+    "pre_timeout",
+    "transfer_s",
+    "transfer_timeout",
+    "h2d_s",
+    "h2d_timeout",
+    "post_s",
+    "post_timeout",
+    "abort_s",
+    "abort_timeout",
+    "release_s",
+    "release_timeout",
+    "e2e_s"
+   ]
+  },
+  {
+   "args": [
+    "policy_version",
+    "failed_worker_ids"
+   ],
+   "consts": {
+    "action": "pending_sync_abandoned"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/weight_sync/weight_sync_coordinator.py",
+   "fmt": "[rollout-ft] action=pending_sync_abandoned policy_version=%d evicted=%s; ACTIVE rollout workers keep serving.",
+   "level": "WARNING",
+   "logger": "logging",
+   "names": [
+    "policy_version",
+    "evicted"
+   ]
+  },
+  {
+   "args": [
+    "getattr(actor, 'worker_id', None) or actor",
+    "active_count"
+   ],
+   "consts": {
+    "action": "join"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/worker/remote_execution.py",
+   "fmt": "[rollout-ft] action=join worker=%s active_workers=%d",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "worker",
+    "active_workers"
+   ]
+  },
+  {
+   "args": [
+    "req_id",
+    "self._task_retries.get(req_id, 0)",
+    "self._max_task_retries",
+    "exc"
+   ],
+   "consts": {
+    "action": "requeue"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/worker/remote_execution.py",
+   "fmt": "[rollout-ft] action=requeue request_id=%s retry=%d/%d reason=%r",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "req_id",
+    "retry",
+    "retry_max",
+    "reason"
+   ]
+  },
+  {
+   "args": [
+    "getattr(actor, 'worker_id', None) or actor",
+    "active_count",
+    "exc"
+   ],
+   "consts": {
+    "action": "leave"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/worker/remote_execution.py",
+   "fmt": "[rollout-ft] action=leave worker=%s active_workers=%d reason=%r",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "worker",
+    "active_workers",
+    "reason"
+   ]
+  },
+  {
+   "args": [
+    "actor",
+    "exc"
+   ],
+   "consts": {
+    "action": "evict"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/worker/remote_execution.py",
+   "fmt": "[rollout-ft] action=evict worker=%s reason=%r",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "worker",
+    "reason"
+   ]
+  },
+  {
+   "args": [
+    "request_id",
+    "self._task_retries[request_id]",
+    "self._max_task_retries",
+    "exc"
+   ],
+   "consts": {
+    "action": "requeue"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/worker/remote_execution.py",
+   "fmt": "[rollout-ft] action=requeue request_id=%s retry=%d/%d reason=%r",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "req_id",
+    "retry",
+    "retry_max",
+    "reason"
+   ]
+  },
+  {
+   "args": [
+    "getattr(actor, 'worker_id', None) or actor",
+    "sorted(expired_rids)",
+    "len(dispatched_set) - len(expired_rids)",
+    "timeout_s"
+   ],
+   "consts": {
+    "action": "partial_timeout"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/worker/remote_execution.py",
+   "fmt": "[rollout-ft] action=partial_timeout worker=%s expired_requests=%s remaining_in_flight=%d task_timeout_s=%s",
+   "level": "WARNING",
+   "logger": "logging",
+   "names": [
+    "worker",
+    "expired_requests",
+    "remaining_in_flight",
+    "task_timeout_s"
+   ]
+  },
+  {
+   "args": [
+    "getattr(actor, 'worker_id', None) or actor",
+    "sorted(expired_rids)",
+    "len(dispatched_set) - len(expired_rids)",
+    "self._task_timeout_s"
+   ],
+   "consts": {
+    "action": "partial_timeout"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/worker/remote_execution.py",
+   "fmt": "[rollout-ft] action=partial_timeout worker=%s expired_requests=%s remaining_in_flight=%d task_timeout_s=%s",
+   "level": "WARNING",
+   "logger": "logging",
+   "names": [
+    "worker",
+    "expired_requests",
+    "remaining_in_flight",
+    "task_timeout_s"
+   ]
+  },
+  {
+   "args": [
+    "self._max_zero_worker_wait_s"
+   ],
+   "consts": {
+    "action": "zero_workers_wait"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/orchestrator/distributed_rl_engine.py",
+   "fmt": "[rollout-ft] action=zero_workers_wait max_zero_worker_wait_s=%.2f",
+   "level": "WARNING",
+   "logger": "logging",
+   "names": [
+    "max_zero_worker_wait_s"
+   ]
+  },
+  {
+   "args": [
+    "len(requests)",
+    "self._policy_version",
+    "self._actor_busy_count",
+    "self._actor_weights_dirty",
+    "self._weights_consistent"
+   ],
+   "consts": {
+    "action": "concurrent_dispatch_during_sync"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/orchestrator/distributed_rl_engine.py",
+   "fmt": "[rollout-ft] action=concurrent_dispatch_during_sync requests=%d policy_version=%d actor_busy_count=%d actor_weights_dirty=%s weights_consistent=%s",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "requests",
+    "policy_version",
+    "actor_busy_count",
+    "actor_weights_dirty",
+    "weights_consistent"
+   ]
+  },
+  {
+   "args": [
+    "req.request_id",
+    "req.prompt_id",
+    "req.group_index",
+    "req.target_policy_version",
+    "task_exc"
+   ],
+   "consts": {
+    "action": "terminal_fail"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/orchestrator/distributed_rl_engine.py",
+   "fmt": "[rollout-ft] action=terminal_fail request_id=%s prompt_id=%s group_index=%d policy_version=%d reason=%r",
+   "level": "WARNING",
+   "logger": "logging",
+   "names": [
+    "req_id",
+    "prompt_id",
+    "group_index",
+    "policy_version",
+    "reason"
+   ]
+  },
+  {
+   "args": [
+    "self._policy_version"
+   ],
+   "consts": {
+    "action": "wait_pending_sync"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/orchestrator/distributed_rl_engine.py",
+   "fmt": "[rollout-ft] action=wait_pending_sync reason=pending_weight_sync_in_flight policy_version=%d",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "policy_version"
+   ]
+  },
+  {
+   "args": [
+    "target_policy_version",
+    "self._actor_busy_count",
+    "self._actor_weights_dirty"
+   ],
+   "consts": {
+    "action": "defer_pending_sync"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/orchestrator/distributed_rl_engine.py",
+   "fmt": "[rollout-ft] action=defer_pending_sync policy_version=%d actor_busy_count=%d actor_weights_dirty=%s",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "policy_version",
+    "actor_busy_count",
+    "actor_weights_dirty"
+   ]
+  },
+  {
+   "args": [
+    "target_policy_version",
+    "exc"
+   ],
+   "consts": {
+    "action": "pending_sync_deferred"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/orchestrator/distributed_rl_engine.py",
+   "fmt": "[rollout-ft] action=pending_sync_deferred policy_version=%d error=%r; falling back to the next end-of-step sync_weights().",
+   "level": "WARNING",
+   "logger": "logging",
+   "names": [
+    "policy_version",
+    "error"
+   ]
+  },
+  {
+   "args": [
+    "'rejoin' if incarnation > 1 else 'join'",
+    "worker_id",
+    "incarnation",
+    "initial_state.value"
+   ],
+   "consts": {},
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [],
+   "file": "tunix/experimental/orchestrator/orchestrator.py",
+   "fmt": "[rollout-ft] action=%s worker_id=%s incarnation=%d state=%s",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "action",
+    "worker",
+    "incarnation",
+    "state"
+   ]
+  },
+  {
+   "args": [
+    "'rejoin' if (incarnation or 0) > 1 else 'join'",
+    "worker_id",
+    "incarnation",
+    "target_state.value"
+   ],
+   "consts": {},
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [],
+   "file": "tunix/experimental/orchestrator/orchestrator.py",
+   "fmt": "[rollout-ft] action=%s worker_id=%s incarnation=%s state=%s",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "action",
+    "worker",
+    "incarnation",
+    "state"
+   ]
+  },
+  {
+   "args": [
+    "worker_id",
+    "incarnation"
+   ],
+   "consts": {
+    "action": "leave"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/orchestrator/orchestrator.py",
+   "fmt": "[rollout-ft] action=leave worker_id=%s incarnation=%d",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "worker",
+    "incarnation"
+   ]
+  },
+  {
+   "args": [
+    "wid",
+    "stage_name",
+    "err"
+   ],
+   "consts": {
+    "action": "evict"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/orchestrator/orchestrator.py",
+   "fmt": "[rollout-ft] action=evict worker_id=%s stage=%s reason=bring_up_failed err=%r",
+   "level": "ERROR",
+   "logger": "logging",
+   "names": [
+    "worker",
+    "stage",
+    "error"
+   ]
+  },
+  {
+   "args": [
+    "worker_id",
+    "self.registry.incarnation(worker_id)"
+   ],
+   "consts": {
+    "action": "promote"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/orchestrator/orchestrator.py",
+   "fmt": "[rollout-ft] action=promote worker_id=%s incarnation=%s",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "worker",
+    "incarnation"
+   ]
+  },
+  {
+   "args": [
+    "worker_id",
+    "self.registry.incarnation(worker_id)"
+   ],
+   "consts": {
+    "action": "evict"
+   },
+   "ev": "worker_ft",
+   "extra": false,
+   "fields": [
+    "action"
+   ],
+   "file": "tunix/experimental/orchestrator/orchestrator.py",
+   "fmt": "[rollout-ft] action=evict worker_id=%s incarnation=%s",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "worker",
+    "incarnation"
+   ]
+  },
+  {
+   "args": [
+    "batch_idx",
+    "due - now",
+    "self.initial_dispatch_first_stagger_s",
+    "self.initial_dispatch_stagger_s"
+   ],
+   "consts": {},
+   "ev": "stagger_hold",
+   "extra": false,
+   "fields": [],
+   "file": "tunix/experimental/orchestrator/rl_program.py",
+   "fmt": "[pipeline] STAGGER batch_idx=%d held %.1f s (initial_dispatch_first_stagger_s=%.1f initial_dispatch_stagger_s=%.1f)",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "batch",
+    "held_s",
+    "first_s",
+    "rest_s"
+   ]
+  },
+  {
+   "args": [
+    "prompt_item.get('prompt_id') if isinstance(prompt_item, dict) else getattr(prompt_item, 'prompt_id', '')",
+    "coordinates['prompt_idx']",
+    "coordinates['batch_idx']",
+    "coordinates['intra_batch_idx']",
+    "rollout_policy_version",
+    "self._next_batch"
+   ],
+   "consts": {},
+   "ev": "dispatch",
+   "extra": false,
+   "fields": [],
+   "file": "tunix/experimental/orchestrator/rl_program.py",
+   "fmt": "[pipeline] DISPATCH prompt_id=%s prompt_idx=%d batch_idx=%d intra_batch_idx=%d policy_version=%d next_batch=%d",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "prompt_id",
+    "prompt_idx",
+    "batch",
+    "intra_batch_idx",
+    "policy_version",
+    "next_batch"
+   ]
+  },
+  {
+   "args": [
+    "getattr(group[0], 'prompt_id', '')",
+    "first_meta.get('prompt_idx')",
+    "first_meta.get('batch_idx')",
+    "first_meta.get('intra_batch_idx')",
+    "getattr(group[0], 'policy_version', 0)",
+    "first_meta.get('worker_id')"
+   ],
+   "consts": {},
+   "ev": "arrive",
+   "extra": false,
+   "fields": [],
+   "file": "tunix/experimental/orchestrator/rl_program.py",
+   "fmt": "[pipeline] ARRIVE prompt_id=%s prompt_idx=%s batch_idx=%s intra_batch_idx=%s policy_version=%d worker_id=%s",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "prompt_id",
+    "prompt_idx",
+    "batch",
+    "intra_batch_idx",
+    "policy_version",
+    "worker"
+   ]
+  },
+  {
+   "args": [
+    "len(mb.trajectory_ids)",
+    "logging_utils.summarize_list(list(mb.trajectory_ids))",
+    "mb.padding_stats.padding_ratio",
+    "mb.padding_stats.row_imbalance"
+   ],
+   "consts": {},
+   "ev": "pack",
+   "extra": true,
+   "fields": [],
+   "file": "tunix/experimental/orchestrator/rl_program.py",
+   "fmt": "Packed %d trajectories into microbatch: %s (padding_ratio=%.3f, row_imbalance=%.3f)",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "n_traj",
+    "traj_ids",
+    "padding_ratio",
+    "row_imbalance"
+   ]
+  },
+  {
+   "args": [
+    "len(mb.trajectory_ids)",
+    "logging_utils.summarize_list(list(mb.trajectory_ids))"
+   ],
+   "consts": {},
+   "ev": "pack",
+   "extra": true,
+   "fields": [],
+   "file": "tunix/experimental/orchestrator/rl_program.py",
+   "fmt": "Packed %d trajectories into microbatch: %s",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "n_traj",
+    "traj_ids"
+   ]
+  },
+  {
+   "args": [
+    "step_num",
+    "manifest_file"
+   ],
+   "consts": {},
+   "ev": "ckpt",
+   "extra": true,
+   "fields": [],
+   "file": "tunix/experimental/examples/deepswe_dist/run_deepswe_dist.py",
+   "fmt": "Appended checkpoint manifest entry for step=%d to %s",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "step",
+    "path"
+   ]
+  },
+  {
+   "args": [
+    "traj_id",
+    "self.policy_version",
+    "status_str",
+    "self.agent.trajectory.reward",
+    "num_steps",
+    "total_time",
+    "m_lat",
+    "total_env_time",
+    "total_reward_time",
+    "mean_step_lat",
+    "comp_toks",
+    "p_cnt",
+    "tps",
+    "tpot_ms"
+   ],
+   "consts": {},
+   "ev": "trajectory",
+   "extra": false,
+   "fields": [],
+   "file": "tunix/rl/agentic/trajectory/trajectory_collect_engine.py",
+   "fmt": "[DEBUG_INFERENCE][Trajectory] traj_id=%s, global_step=%s, status=%s, reward=%s, steps=%d, total_time=%.3fs, model_time=%.3fs, env_time=%.3fs, reward_time=%.3fs, mean_step_latency=%.3fs, completion_tokens=%d, preemptions=%d, tps=%.2f, tpot=%.2fms",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "traj",
+    "policy_version",
+    "status",
+    "reward",
+    "turns",
+    "wall_s",
+    "model_s",
+    "env_s",
+    "reward_s",
+    "mean_step_s",
+    "completion_tokens",
+    "preemptions",
+    "tps",
+    "tpot_ms"
+   ]
+  },
+  {
+   "args": [
+    "traj_id",
+    "turn_idx",
+    "step_latency",
+    "env_lat",
+    "turn_total",
+    "prompt_len",
+    "comp_len",
+    "preempt",
+    "turn_tps",
+    "turn_tpot_ms"
+   ],
+   "consts": {},
+   "ev": "turn",
+   "extra": false,
+   "fields": [],
+   "file": "tunix/rl/agentic/trajectory/trajectory_collect_engine.py",
+   "fmt": "[DEBUG_INFERENCE][Turn] traj_id=%s, turn=%d, model_time=%.3fs, env_time=%.3fs, total_time=%.3fs, prompt_tokens=%d, completion_tokens=%d, preemptions=%d, tps=%.2f, tpot=%.2fms",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "traj",
+    "turn",
+    "model_s",
+    "env_s",
+    "total_s",
+    "prompt_tokens",
+    "completion_tokens",
+    "preemptions",
+    "tps",
+    "tpot_ms"
+   ]
+  },
+  {
+   "args": [
+    "len(results)",
+    "sample_duration",
+    "tot_prompt_toks",
+    "tot_comp_toks",
+    "tot_preempts",
+    "s_tps",
+    "s_tpot_ms"
+   ],
+   "consts": {},
+   "ev": "sampler_call",
+   "extra": false,
+   "fields": [],
+   "file": "tunix/experimental/rollout/vllm_sampler_v2.py",
+   "fmt": "[DEBUG_INFERENCE][Sampler] requests=%d, duration=%.3fs, prompt_tokens=%d, completion_tokens=%d, preemptions=%d, tps=%.2f, tpot=%.2fms",
+   "level": "INFO",
+   "logger": "logger",
+   "names": [
+    "requests",
+    "dur_s",
+    "prompt_tokens",
+    "completion_tokens",
+    "preemptions",
+    "tps",
+    "tpot_ms"
+   ]
+  }
+ ]
+}
