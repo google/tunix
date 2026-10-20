@@ -377,6 +377,13 @@ if [[ "${_stage_next_microbatch_on}" == "true" && "${_pipeline_step_boundary_on}
   exit 1
 fi
 unset _pipeline_step_boundary_on _stage_next_microbatch_on
+# Structured run events (TUNIX_EVENTS=on or full; empty = off): every process writes one JSONL stream to
+# ${MAXTEXT_OUTPUT_DIR}/events (TUNIX_EVENTS_GCS_DIR). Text logs do not change. See tunix/experimental/events.py.
+export TUNIX_EVENTS=${TUNIX_EVENTS:-}
+if [[ -n "${TUNIX_EVENTS}" ]] && ! [[ "${TUNIX_EVENTS}" =~ ^(off|on|full)$ ]]; then
+  echo "TUNIX_EVENTS must be off, on or full, got '${TUNIX_EVENTS}'" >&2
+  exit 1
+fi
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-prompt_batch}
 
 # Trajectory Store: flag to disable writing to trajectory store entirely (file and SQL).
