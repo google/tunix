@@ -354,11 +354,11 @@ def log_and_emit(logger: Any, level: int, fmt: str, ev: str, /, *,
   the event's fields are `zip(names, text_args)` (a `None` name skips that
   argument) plus `**fields`; when off nothing beyond the log call runs.
   """
-  if isinstance(logger, _std_logging.Logger) and not (
-      _ABSL_LOGGER_CLS is not None and isinstance(logger, _ABSL_LOGGER_CLS)):
+  if logger is _absl_logging or (_ABSL_LOGGER_CLS is not None and isinstance(
+      logger, _ABSL_LOGGER_CLS)):
+    logger.log(level, fmt, *text_args)  # absl skips this frame (registered)
+  else:  # a stdlib Logger, or the stdlib `logging` module itself
     logger.log(level, fmt, *text_args, stacklevel=2)
-  else:
-    logger.log(level, fmt, *text_args)
   if ON:
     try:
       if names:

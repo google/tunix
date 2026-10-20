@@ -855,6 +855,10 @@ class LogAndEmitTest(_Base):
     events.log_and_emit(logger, logging.INFO, "STD round=%d", "wsync_phase",
                         text_args=(rnd,), names=("round",), req_id="q")
 
+  def _site_std_module(self, rnd):
+    events.log_and_emit(logging, logging.INFO, "MOD round=%d", "wsync_phase",
+                        text_args=(rnd,), names=("round",), req_id="m")
+
   def _capture(self, fn):
     records = []
 
@@ -882,21 +886,24 @@ class LogAndEmitTest(_Base):
       if level == "on":
         self.configure()
       recs = self._capture(lambda: (self._site_absl(4, "r4"),
-                                    self._site_std(std, 5)))
+                                    self._site_std(std, 5),
+                                    self._site_std_module(6)))
       self.assertEqual(
           [r.getMessage() for r in recs],
           ["WEIGHT_SYNC_PHASE round=4 req_id=r4 phase=bind elapsed_s=1.235",
-           "STD round=5"])
+           "STD round=5", "MOD round=6"])
       for r in recs:
         self.assertEqual(r.filename, os.path.basename(__file__), level)
-        self.assertIn(r.funcName, ("_site_absl", "_site_std"), level)
+        self.assertIn(r.funcName,
+                      ("_site_absl", "_site_std", "_site_std_module"), level)
       self.assertEqual(recs[0].levelno, logging.INFO)
       self.assertEqual(recs[1].levelno, logging.INFO)
     events.flush(timeout=10)
     ws = [x for x in _lines(self.path()) if x["ev"] == "wsync_phase"]
     self.assertEqual(
         [{k: x[k] for k in ("round", "req_id") if k in x} for x in ws],
-        [{"round": 4, "req_id": "r4"}, {"round": 5, "req_id": "q"}])
+        [{"round": 4, "req_id": "r4"}, {"round": 5, "req_id": "q"},
+         {"round": 6, "req_id": "m"}])
     self.assertEqual(ws[0]["elapsed_s"], 1.23456)
 
 
