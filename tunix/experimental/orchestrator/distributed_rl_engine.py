@@ -42,6 +42,7 @@ from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.weight_sync import weight_sync_coordinator as weight_sync_coordinator_lib
 from tunix.experimental.worker import remote_execution
+from tunix.experimental import events
 
 _summarize_list = logging_utils.summarize_list
 
@@ -333,9 +334,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       )
 
     wait_start = time.monotonic()
-    logging.warning(
+    events.log_and_emit(
+        logging,
+        logging.WARNING,
         "[rollout-ft] action=zero_workers_wait max_zero_worker_wait_s=%.2f",
-        self._max_zero_worker_wait_s,
+        "worker_ft",
+        text_args=(
+            self._max_zero_worker_wait_s,
+        ),
+        names=("max_zero_worker_wait_s",),
+        action="zero_workers_wait",
     )
 
     while not self._rollout_workers:
@@ -398,15 +406,25 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         self._weight_sync_coordinator is not None
         and self._weight_sync_coordinator.in_flight
     ):
-      logging.info(
+      events.log_and_emit(
+          logging,
+          logging.INFO,
           "[rollout-ft] action=concurrent_dispatch_during_sync requests=%d"
           " policy_version=%d actor_busy_count=%d actor_weights_dirty=%s"
           " weights_consistent=%s",
-          len(requests),
-          self._policy_version,
-          self._actor_busy_count,
-          self._actor_weights_dirty,
-          self._weights_consistent,
+          "worker_ft",
+          text_args=(
+              len(requests),
+              self._policy_version,
+              self._actor_busy_count,
+              self._actor_weights_dirty,
+              self._weights_consistent,
+          ),
+          names=(
+              "requests", "policy_version", "actor_busy_count",
+              "actor_weights_dirty", "weights_consistent",
+          ),
+          action="concurrent_dispatch_during_sync",
       )
     logging.info(
         "Dispatching %d rollout request(s) across %d worker(s).",
@@ -628,14 +646,24 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       _, _, orig_kwargs = payload
       for req in orig_kwargs["requests"]:
         self._terminal_failed_trajectories_total += 1
-        logging.warning(
+        events.log_and_emit(
+            logging,
+            logging.WARNING,
             "[rollout-ft] action=terminal_fail request_id=%s prompt_id=%s"
             " group_index=%d policy_version=%d reason=%r",
-            req.request_id,
-            req.prompt_id,
-            req.group_index,
-            req.target_policy_version,
-            task_exc,
+            "worker_ft",
+            text_args=(
+                req.request_id,
+                req.prompt_id,
+                req.group_index,
+                req.target_policy_version,
+                task_exc,
+            ),
+            names=(
+                "req_id", "prompt_id", "group_index", "policy_version",
+                "reason",
+            ),
+            action="terminal_fail",
         )
         err_resp = datatypes.RolloutResponse(
             request_id=req.request_id,
@@ -851,10 +879,17 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   async def _await_pending_weight_sync(self) -> None:
     """Waits if a mid-step `sync_pending_weights` round is currently in flight."""
     while self._pending_sync_lock.locked():
-      logging.info(
+      events.log_and_emit(
+          logging,
+          logging.INFO,
           "[rollout-ft] action=wait_pending_sync"
           " reason=pending_weight_sync_in_flight policy_version=%d",
-          self._policy_version,
+          "worker_ft",
+          text_args=(
+              self._policy_version,
+          ),
+          names=("policy_version",),
+          action="wait_pending_sync",
       )
       async with self._pending_sync_lock:
         pass
@@ -1385,12 +1420,19 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       )
       if self._last_deferred_pending_sync_state != defer_state:
         self._last_deferred_pending_sync_state = defer_state
-        logging.info(
+        events.log_and_emit(
+            logging,
+            logging.INFO,
             "[rollout-ft] action=defer_pending_sync policy_version=%d"
             " actor_busy_count=%d actor_weights_dirty=%s",
-            target_policy_version,
-            self._actor_busy_count,
-            self._actor_weights_dirty,
+            "worker_ft",
+            text_args=(
+                target_policy_version,
+                self._actor_busy_count,
+                self._actor_weights_dirty,
+            ),
+            names=("policy_version", "actor_busy_count", "actor_weights_dirty"),
+            action="defer_pending_sync",
         )
       return None
     if (
@@ -1444,11 +1486,18 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         # was evicted) must not interrupt the step: the next end-of-step
         # sync_weights() targets ACTIVE and PENDING_WEIGHT_SYNC workers alike
         # and brings any survivor up to date.
-        logging.warning(
+        events.log_and_emit(
+            logging,
+            logging.WARNING,
             "[rollout-ft] action=pending_sync_deferred policy_version=%d"
             " error=%r; falling back to the next end-of-step sync_weights().",
-            target_policy_version,
-            exc,
+            "worker_ft",
+            text_args=(
+                target_policy_version,
+                exc,
+            ),
+            names=("policy_version", "error"),
+            action="pending_sync_deferred",
         )
         return None
       self._rollout_session._schedule_drain_pending()

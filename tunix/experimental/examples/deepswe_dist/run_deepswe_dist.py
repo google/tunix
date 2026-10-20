@@ -50,6 +50,7 @@ from tunix.experimental.worker import remote_execution
 from tunix.rl import algorithm_config
 from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.utils import mllog_utils
+from tunix.experimental import events
 
 # pylint: enable=g-import-not-at-top
 
@@ -917,6 +918,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   ), "Require discovery API, but process context doesn't support."
 
   args = _parse_args(argv)
+  if events.ON:
+    events.set_expected(orch=1, rollout=int(args.rollout_replicas))
   logging.basicConfig(
       level=logging.DEBUG if args.debug else logging.INFO,
       format="%(asctime)s - [DeepSWEOrchestrator] %(message)s",
@@ -1202,11 +1205,20 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           ),
       }
       mllog_utils.append_checkpoint_manifest(manifest_file, record)
-      logging.info(
+      events.log_and_emit(
+          logging,
+          logging.INFO,
           "Appended checkpoint manifest entry for step=%d to %s",
-          step_num,
-          manifest_file,
+          "ckpt",
+          text_args=(
+              step_num,
+              manifest_file,
+          ),
+          names=("step", "path"),
+          **({"manifest_ts_ms": record.get("timestamp_ms")} if events.ON else {}),
       )
+      if events.ON:
+        events.flush(upload=True)
 
     def _on_train_start(step: int) -> None:
       nonlocal fleet, prompt_stream, prewarm_thread

@@ -65,6 +65,7 @@ from typing import (
 from absl import logging
 import cloudpickle
 import numpy as np
+from tunix.experimental import events
 
 try:
   import grpc as _grpc_lib
@@ -1995,10 +1996,17 @@ class PoolExecutionSession:
       self._known_actors.add(actor)
       active_count = len(self._pool.actors)
     if not was_in_pool:
-      logging.info(
+      events.log_and_emit(
+          logging,
+          logging.INFO,
           "[rollout-ft] action=join worker=%s active_workers=%d",
-          getattr(actor, "worker_id", None) or actor,
-          active_count,
+          "worker_ft",
+          text_args=(
+              getattr(actor, "worker_id", None) or actor,
+              active_count,
+          ),
+          names=("worker", "active_workers"),
+          action="join",
       )
 
     def _apply() -> None:
@@ -2057,12 +2065,19 @@ class PoolExecutionSession:
         if count_retry:
           self._task_retries[req_id] = retries + 1
         self._retries_total += 1
-        logging.info(
+        events.log_and_emit(
+            logging,
+            logging.INFO,
             "[rollout-ft] action=requeue request_id=%s retry=%d/%d reason=%r",
-            req_id,
-            self._task_retries.get(req_id, 0),
-            self._max_task_retries,
-            exc,
+            "worker_ft",
+            text_args=(
+                req_id,
+                self._task_retries.get(req_id, 0),
+                self._max_task_retries,
+                exc,
+            ),
+            names=("req_id", "retry", "retry_max", "reason"),
+            action="requeue",
         )
         self._pending_queue.appendleft(req_id)
       else:
@@ -2095,11 +2110,18 @@ class PoolExecutionSession:
     if not was_tracked:
       return False
     if removed_from_pool:
-      logging.info(
+      events.log_and_emit(
+          logging,
+          logging.INFO,
           "[rollout-ft] action=leave worker=%s active_workers=%d reason=%r",
-          getattr(actor, "worker_id", None) or actor,
-          active_count,
-          exc,
+          "worker_ft",
+          text_args=(
+              getattr(actor, "worker_id", None) or actor,
+              active_count,
+              exc,
+          ),
+          names=("worker", "active_workers", "reason"),
+          action="leave",
       )
 
     failure_exc = (
@@ -2111,10 +2133,17 @@ class PoolExecutionSession:
     def _apply() -> None:
       self._worker_max_in_flight.pop(actor, None)
       self._evictions_total += 1
-      logging.info(
+      events.log_and_emit(
+          logging,
+          logging.INFO,
           "[rollout-ft] action=evict worker=%s reason=%r",
-          actor,
-          exc,
+          "worker_ft",
+          text_args=(
+              actor,
+              exc,
+          ),
+          names=("worker", "reason"),
+          action="evict",
       )
       self._cancel_worker_polling(actor)
       dispatched_set = self._dispatched_tasks.pop(actor, None)
@@ -2266,12 +2295,19 @@ class PoolExecutionSession:
             self._task_retries.get(request_id, 0) + 1
         )
         self._retries_total += 1
-        logging.info(
+        events.log_and_emit(
+            logging,
+            logging.INFO,
             "[rollout-ft] action=requeue request_id=%s retry=%d/%d reason=%r",
-            request_id,
-            self._task_retries[request_id],
-            self._max_task_retries,
-            exc,
+            "worker_ft",
+            text_args=(
+                request_id,
+                self._task_retries[request_id],
+                self._max_task_retries,
+                exc,
+            ),
+            names=("req_id", "retry", "retry_max", "reason"),
+            action="requeue",
         )
         self._pending_queue.appendleft(request_id)
         if not self._pool.actors:
@@ -2421,14 +2457,24 @@ class PoolExecutionSession:
                 # out while younger tasks remain in flight: re-queue or fail
                 # just the expired request_ids without evicting the worker and
                 # discarding its healthy in-flight tasks.
-                logging.warning(
+                events.log_and_emit(
+                    logging,
+                    logging.WARNING,
                     "[rollout-ft] action=partial_timeout worker=%s"
                     " expired_requests=%s remaining_in_flight=%d"
                     " task_timeout_s=%s",
-                    getattr(actor, "worker_id", None) or actor,
-                    sorted(expired_rids),
-                    len(dispatched_set) - len(expired_rids),
-                    timeout_s,
+                    "worker_ft",
+                    text_args=(
+                        getattr(actor, "worker_id", None) or actor,
+                        sorted(expired_rids),
+                        len(dispatched_set) - len(expired_rids),
+                        timeout_s,
+                    ),
+                    names=(
+                        "worker", "expired_requests", "remaining_in_flight",
+                        "task_timeout_s",
+                    ),
+                    action="partial_timeout",
                 )
                 dispatched_set.difference_update(expired_rids)
                 for rid in expired_rids:
@@ -2507,14 +2553,24 @@ class PoolExecutionSession:
                   f"Task(s) {sorted(expired_rids)} on worker {actor}"
                   f" exceeded task_timeout_s={self._task_timeout_s}s."
               )
-              logging.warning(
+              events.log_and_emit(
+                  logging,
+                  logging.WARNING,
                   "[rollout-ft] action=partial_timeout worker=%s"
                   " expired_requests=%s remaining_in_flight=%d"
                   " task_timeout_s=%s",
-                  getattr(actor, "worker_id", None) or actor,
-                  sorted(expired_rids),
-                  len(dispatched_set) - len(expired_rids),
-                  self._task_timeout_s,
+                  "worker_ft",
+                  text_args=(
+                      getattr(actor, "worker_id", None) or actor,
+                      sorted(expired_rids),
+                      len(dispatched_set) - len(expired_rids),
+                      self._task_timeout_s,
+                  ),
+                  names=(
+                      "worker", "expired_requests", "remaining_in_flight",
+                      "task_timeout_s",
+                  ),
+                  action="partial_timeout",
               )
               dispatched_set.difference_update(expired_rids)
               for rid in expired_rids:
