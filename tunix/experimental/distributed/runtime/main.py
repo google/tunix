@@ -218,6 +218,19 @@ def main(argv: list[str]) -> None:
       prepare_process(slice_argv)
       for slice_argv in split_process_argv(processes_argv)
   ]
+  # Structured run events (off unless TUNIX_EVENTS is on or full), one stream
+  # per OS process, named after the first process's role. Imported here, after
+  # the process mains, so the import order is unchanged.
+  from tunix.experimental import events  # pylint: disable=g-import-not-at-top
+
+  events.configure_from_env(
+      events.role_for_process_main(
+          prepared_processes[0].context_args.process_main
+          if prepared_processes
+          else ""
+      ),
+      argv=argv,
+  )
 
   if len(prepared_processes) == 1:
     prepared = prepared_processes[0]
