@@ -149,6 +149,7 @@ def make_engine(
     max_top_k: int = 4,
     return_logprobs: bool = False,
     return_logits: bool = False,
+    eos_token_ids: frozenset[int] = frozenset(),
 ) -> engine_lib.LLMEngine:
   """Returns an engine running `transformer`, a `PagedSumTransformer` if None."""
   return engine_lib.LLMEngine(
@@ -172,6 +173,7 @@ def make_engine(
           num_scheduler_steps=num_scheduler_steps,
       ),
       max_model_len=max_model_len,
+      eos_token_ids=eos_token_ids,
   )
 
 

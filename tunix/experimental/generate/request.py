@@ -75,8 +75,6 @@ class EngineResponse:
 
   # The id of the request this is the result of.
   request_id: str
-  # The generated tokens, detokenized.
-  text: str
   # The prompt tokens, as the engine tokenized them.
   prompt_token_ids: np.ndarray
   # The generated tokens. A sampled EOS token is kept.

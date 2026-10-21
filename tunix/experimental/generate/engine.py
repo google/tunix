@@ -20,15 +20,24 @@ batch of requests, the `KVCacheManager` maps them onto KV cache pages, and the
 """
 
 import dataclasses
+import itertools
 
 from flax import nnx
 from flax.nnx import graph
+import jax
+import numpy as np
 from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import scheduler as scheduler_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.generate import utils
+
+
+_FINISH_REASONS: dict[request_lib.RequestStatus, request_lib.FinishReason] = {
+    request_lib.RequestStatus.FINISHED_EOS: 'stop',
+    request_lib.RequestStatus.FINISHED_LENGTH: 'length',
+}
 
 
 def _instantiate_components(
@@ -93,6 +102,14 @@ def _instantiate_components(
   return model_runner, kv_cache_manager, scheduler
 
 
+def _next_power_of_2(x: int) -> int:
+  """Returns the next power of 2 that is not smaller than x."""
+  x = int(x)
+  if x <= 1:
+    return 1
+  return 1 << (x - 1).bit_length()
+
+
 class LLMEngine:
   """A continuous batching engine."""
 
@@ -103,6 +120,7 @@ class LLMEngine:
       scheduler_config: scheduler_lib.SchedulerConfig,
       model_runner_config: model_runner_lib.ModelRunnerConfig,
       max_model_len: int,
+      eos_token_ids: frozenset[int] = frozenset(),
   ):
     """Initializes the engine.
 
@@ -114,6 +132,7 @@ class LLMEngine:
       model_runner_config: The model runner config.
       max_model_len: The maximum number of tokens a sequence may hold (prompt +
         generated).
+      eos_token_ids: Token ids that finish a request once sampled.
 
     Raises:
       ValueError: If `max_model_len` is not positive, or the scheduler and
@@ -132,6 +151,10 @@ class LLMEngine:
     )
     self._scheduler_config = self._scheduler._config  # pylint: disable=protected-access
     self._model_runner_config = model_runner_config
+    self._eos_token_ids = eos_token_ids
+    self._replicated_sharding = jax.sharding.NamedSharding(
+        model_runner_config.mesh, jax.sharding.PartitionSpec()
+    )
 
     # The maximum number of tokens a sequence may hold (prompt + generated).
     self._max_model_len = max_model_len
@@ -262,3 +285,213 @@ class LLMEngine:
         any(not req.is_done for req in self._queued_requests)
         or self._scheduler.num_active_requests > 0
     )
+
+  def step(self) -> list[request_lib.EngineResponse]:
+    """Runs one step of the continuous batch.
+
+    Returns:
+      The outputs of the requests that finished during this step.
+    """
+    new_requests = [req for req in self._queued_requests if not req.is_done]
+    self._queued_requests = []
+
+    scheduled, distribution = self._scheduler.schedule_step(new_requests)
+    if not scheduled:
+      return []
+
+    tokens, metadata = self._prepare_batch(scheduled, distribution)
+    generated_tokens, logits, logprobs, pages = (
+        self._model_runner.execute_step(
+            cache=self._kv_cache_manager.get_physical_pages(),
+            tokens=tokens,
+            metadata=metadata,
+            sampling_params=tuple(req.sampling_params for req in scheduled),
+        )
+    )
+
+    # JAX functions cannot have side effects, so the model runner returns the
+    # updated pages rather than writing them in place. They must be written back
+    # to the KV cache manager here.
+    self._kv_cache_manager.update_device_pool(pages)
+
+    generated_tokens, logits, logprobs = jax.device_get(
+        (generated_tokens, logits, logprobs)
+    )
+
+    # The runner pads its outputs to `max_num_seqs` rows. Drop the
+    # padding.
+    n = len(scheduled)
+    finished = self._update_from_output(
+        scheduled,
+        distribution,
+        generated_tokens[:n],
+        None if logits is None else logits[:n],
+        None if logprobs is None else logprobs[:n],
+    )
+
+    for req in finished:
+      del self._requests[req.request_id]
+    return [self._make_output(req) for req in finished]
+
+  def _update_from_output(
+      self,
+      scheduled: tuple[request_lib.RequestState, ...],
+      distribution: tuple[int, int, int],
+      generated_tokens: np.ndarray,
+      logits: np.ndarray | None = None,
+      logprobs: np.ndarray | None = None,
+  ) -> list[request_lib.RequestState]:
+    """Updates request state based on a sampler output."""
+    i, j, k = distribution
+    completed_reqs = []
+    for row in itertools.chain(range(i), range(j, k)):
+      req = scheduled[row]
+      if req.is_done:
+        req.num_in_flight_tokens = 0
+        continue
+
+      self._update_req_from_output(
+          req,
+          generated_tokens[row],
+          logits[row] if logits is not None else None,
+          logprobs[row] if logprobs is not None else None,
+      )
+
+      if req.is_done:
+        completed_reqs.append(req)
+
+    return completed_reqs
+
+  def _update_req_from_output(
+      self,
+      req: request_lib.RequestState,
+      generated_tokens: np.ndarray,
+      logits: np.ndarray | None = None,
+      logprobs: np.ndarray | None = None,
+  ) -> None:
+    """Updates request state based on a sampler output."""
+    req.num_in_flight_tokens = 0
+    if req.is_done:
+      return
+
+    # Gather the new tokens generated for this request. The model runner
+    # does not check for EOS and may produce garbage tokens.
+    new_tokens = []
+    for new_token in generated_tokens:
+      token_id = int(new_token)
+      new_tokens.append(token_id)
+      if token_id in self._eos_token_ids:
+        req.status = request_lib.RequestStatus.FINISHED_EOS
+        break
+
+    # Truncate the new tokens if the request has reached its max length.
+    n_generated = (
+        len(req.token_ids) + len(new_tokens) - req.prompt_length
+    )
+    n_overflow = n_generated - req.sampling_params.max_tokens
+    if n_overflow > 0:
+      new_tokens = new_tokens[:-n_overflow]
+      req.status = request_lib.RequestStatus.FINISHED_LENGTH
+    elif n_overflow == 0 and not req.is_done:
+      req.status = request_lib.RequestStatus.FINISHED_LENGTH
+
+    # Add the new tokens to the request.
+    num_added = len(new_tokens)
+    req.token_ids.extend(new_tokens)
+    if logprobs is not None:
+      req.logprobs.extend(logprobs[:num_added])
+    if logits is not None:
+      req.logits.extend(logits[:num_added])
+
+  def _make_output(
+      self, req: request_lib.RequestState
+  ) -> request_lib.EngineResponse:
+    """Returns the output of the finished request `req`."""
+    generated = req.token_ids[req.prompt_length :]
+    return request_lib.EngineResponse(
+        request_id=req.request_id,
+        prompt_token_ids=np.asarray(
+            req.token_ids[: req.prompt_length], dtype=np.int32
+        ),
+        token_ids=np.asarray(generated, dtype=np.int32),
+        logprobs=(
+            np.asarray(req.logprobs, dtype=np.float32)
+            if self._model_runner_config.return_logprobs
+            else None
+        ),
+        logits=(
+            np.asarray(req.logits)
+            if self._model_runner_config.return_logits
+            else None
+        ),
+        finish_reason=_FINISH_REASONS[req.status],
+    )
+
+  def _prepare_batch(
+      self,
+      scheduled: tuple[request_lib.RequestState, ...],
+      distribution: tuple[int, int, int],
+  ) -> tuple[jax.Array, model_runner_lib.RPAMetadata]:
+    """Packs the scheduled requests into the model runner's inputs.
+
+    Every row buffer spans `max_num_seqs` rows and every page table
+    `max_pages_per_seq` pages, so their shapes never change.
+
+    Args:
+      scheduled: The scheduled requests, ordered as decodes, chunked prefills
+        and full prefills.
+      distribution: The row layout returned by the scheduler.
+
+    Returns:
+      A tuple of (the packed tokens each row runs this step, the ragged
+      execution metadata).
+    """
+    num_rows = self._scheduler_config.max_num_seqs
+    query_lens = np.zeros((num_rows,), dtype=np.int32)
+    kv_lens = np.zeros((num_rows,), dtype=np.int32)
+    page_indices = {
+        cache_name: np.full(
+            (num_rows, self._max_pages_per_seq), -1, dtype=np.int32
+        )
+        for cache_name in self._kv_cache_manager.cache_names
+    }
+
+    batch_tokens: list[int] = []
+    for row, req in enumerate(scheduled):
+      start = req.num_computed_tokens
+
+      if req.is_chunked_prefill:
+        end = start + self._scheduler.chunked_prefill_length
+        req.num_computed_tokens = end
+        req.num_in_flight_tokens = 0
+      else:
+        end = len(req.token_ids)
+        req.num_in_flight_tokens = self._scheduler_config.num_scheduler_steps
+        req.num_computed_tokens = end + req.num_in_flight_tokens - 1
+
+      batch_tokens.extend(req.token_ids[start:end])
+      query_lens[row] = end - start
+      kv_lens[row] = end
+      for cache_name, idxs in self._kv_cache_manager.get_page_idxs(req).items():
+        page_indices[cache_name][row, : len(idxs)] = idxs
+
+    # Pad the tokens to a power of 2 to limit jax recompilation in the model
+    # runner.
+    num_tokens = min(
+        _next_power_of_2(len(batch_tokens)),
+        self._scheduler_config.max_num_batched_tokens,
+    )
+    tokens = np.zeros((num_tokens,), dtype=np.int32)
+    tokens[: len(batch_tokens)] = batch_tokens
+
+    metadata = model_runner_lib.RPAMetadata(
+        page_indices={
+            cache_name: table for cache_name, table in page_indices.items()
+        },
+        kv_lens=kv_lens,
+        query_lens=query_lens,
+        distribution=np.asarray(distribution, dtype=np.int32),
+        chunk_prefill_size=self._scheduler.chunked_prefill_length,
+    )
+    device_tokens = jax.device_put(tokens, self._replicated_sharding)
+    return device_tokens, metadata

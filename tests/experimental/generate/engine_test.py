@@ -12,14 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import itertools
+from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
+import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.generate import engine as engine_lib
 from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import model_runner as model_runner_lib
+from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import scheduler as scheduler_lib
 from tunix.experimental.generate import testing_utils
 
@@ -200,6 +205,284 @@ class AbortRequestTest(absltest.TestCase):
     engine.abort_request('unknown')
 
     self.assertTrue(engine.has_unfinished_requests())
+
+
+def reference_generate(
+    prompt: list[int],
+    max_tokens: int = 8,
+    offset: float = 0.0,
+    eos_token_ids: frozenset[int] = frozenset(),
+) -> list[int]:
+  """Returns what `PagedSumTransformer` generates greedily for `prompt`."""
+  total = sum(token + offset for token in prompt)
+  generated = []
+  while len(generated) < max_tokens:
+    next_token = round(total) % testing_utils.VOCAB_SIZE
+    generated.append(next_token)
+    if next_token in eos_token_ids:
+      break
+    total += next_token + offset
+  return generated
+
+
+def drive(
+    engine: engine_lib.LLMEngine,
+) -> dict[str, request_lib.EngineResponse]:
+  """Steps the engine until it runs out of work, returning what finished."""
+  finished = {}
+  while engine.has_unfinished_requests():
+    for output in engine.step():
+      finished[output.request_id] = output
+  return finished
+
+
+def spy_on_execute_step(engine: engine_lib.LLMEngine) -> mock.MagicMock:
+  model_runner = engine._model_runner  # pylint: disable=protected-access
+  spy = mock.patch.object(
+      model_runner, 'execute_step', wraps=model_runner.execute_step
+  ).start()
+  return spy
+
+
+_PROMPTS = ([5], [1, 2, 3, 4, 5], [9, 8, 7, 6, 5, 4, 3, 2, 1])
+
+
+class StepTest(parameterized.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self._request_counter = itertools.count()
+
+  def tearDown(self):
+    mock.patch.stopall()
+    super().tearDown()
+
+  def _run(self, engine, prompts, **sampling_kwargs) -> list[list[int]]:
+    """Runs `prompts` to completion, returning the tokens each generated."""
+    request_ids = [str(next(self._request_counter)) for _ in prompts]
+    for request_id, prompt in zip(request_ids, prompts):
+      engine.add_request(
+          testing_utils.make_request(
+              request_id, list(prompt), **sampling_kwargs
+          )
+      )
+    finished = drive(engine)
+    self.assertCountEqual(finished, request_ids)
+    return [finished[request_id].token_ids.tolist() for request_id in request_ids]
+
+  def test_step_without_requests_does_nothing(self):
+    self.assertEmpty(testing_utils.make_engine().step())
+
+  def test_generates_the_reference_continuation(self):
+    generated = self._run(testing_utils.make_engine(), _PROMPTS)
+
+    self.assertEqual(generated, [reference_generate(p) for p in _PROMPTS])
+
+  def test_output_describes_the_request(self):
+    engine = testing_utils.make_engine()
+    engine.add_request(
+        testing_utils.make_request('text', [1, 2, 3], max_tokens=4)
+    )
+
+    output = drive(engine)['text']
+
+    expected = reference_generate([1, 2, 3], 4)
+    self.assertEqual(output.request_id, 'text')
+    np.testing.assert_array_equal(output.prompt_token_ids, [1, 2, 3])
+    np.testing.assert_array_equal(output.token_ids, expected)
+    self.assertEqual(output.finish_reason, 'length')
+    self.assertIsNone(output.logprobs)
+    self.assertIsNone(output.logits)
+
+  def test_each_request_stops_at_its_own_token_limit(self):
+    engine = testing_utils.make_engine()
+    engine.add_request(testing_utils.make_request('short', [1, 2], max_tokens=2))
+    engine.add_request(testing_utils.make_request('long', [1, 2], max_tokens=7))
+
+    finished = drive(engine)
+
+    self.assertEqual(
+        finished['short'].token_ids.tolist(), reference_generate([1, 2], 2)
+    )
+    self.assertEqual(
+        finished['long'].token_ids.tolist(), reference_generate([1, 2], 7)
+    )
+
+  def test_stops_at_an_eos_token(self):
+    prompt = [1, 2, 3]
+    unbounded = reference_generate(prompt)
+    eos = unbounded[2]
+    engine = testing_utils.make_engine(eos_token_ids=frozenset({eos}))
+    engine.add_request(testing_utils.make_request('0', prompt))
+
+    output = drive(engine)['0']
+
+    # The EOS token is kept.
+    self.assertEqual(
+        output.token_ids.tolist(), unbounded[: unbounded.index(eos) + 1]
+    )
+    self.assertEqual(output.finish_reason, 'stop')
+
+  def test_chunked_prefill(self):
+    engine = testing_utils.make_engine(
+        max_num_batched_tokens=8, chunked_prefill_length=4
+    )
+    spy = spy_on_execute_step(engine)
+    prompt = list(range(1, 15))
+
+    generated = self._run(engine, [prompt])
+
+    self.assertEqual(generated, [reference_generate(prompt)])
+    first_metadata = spy.call_args_list[0].kwargs['metadata']
+    self.assertEqual(first_metadata.query_lens[0], 4)
+
+  def test_page_table_leaves_room_for_the_decode_steps(self):
+    engine = testing_utils.make_engine(max_model_len=15, num_scheduler_steps=2)
+    spy = spy_on_execute_step(engine)
+
+    self._run(engine, [[1, 2, 3]], max_tokens=4)
+
+    # 15 tokens plus 2 decode steps span 5 pages of 4 slots.
+    metadata = spy.call_args_list[0].kwargs['metadata']
+    self.assertEqual(metadata.page_indices['layer_0'].shape, (4, 5))
+
+  @parameterized.named_parameters(
+      ('within_the_window', 16, 16),
+      # Truncated to the largest power of 2 within the window.
+      ('past_the_window', 12, 8),
+  )
+  def test_chunk_fits_in_the_smallest_window(self, window_size, expected):
+    geometries = {
+        'full': kv_cache_manager_lib.CacheGeometry(num_kv_heads=1, head_dim=1),
+        'sliding': kv_cache_manager_lib.CacheGeometry(
+            num_kv_heads=1, head_dim=1, window_size=window_size
+        ),
+    }
+    engine = testing_utils.make_engine(
+        testing_utils.PagedSumTransformer(geometries=geometries),
+        chunked_prefill_length=16,
+    )
+    spy = spy_on_execute_step(engine)
+    engine.add_request(testing_utils.make_request('0', [1, 2, 3]))
+
+    engine.step()
+
+    metadata = spy.call_args_list[0].kwargs['metadata']
+    self.assertEqual(metadata.chunk_prefill_size, expected)
+
+  @parameterized.parameters(2, 3)
+  def test_multi_step_decode(self, num_scheduler_steps):
+    engine = testing_utils.make_engine(num_scheduler_steps=num_scheduler_steps)
+    spy = spy_on_execute_step(engine)
+
+    generated = self._run(engine, _PROMPTS)
+
+    self.assertEqual(generated, [reference_generate(p) for p in _PROMPTS])
+    # One prefill step, then `num_scheduler_steps` tokens per step.
+    self.assertLess(spy.call_count, 8)
+
+  def test_preempted_requests_resume(self):
+    # Eight pages hold every request's prompt, but not what they generate.
+    engine = testing_utils.make_engine(
+        max_device_size_gib=8 * testing_utils.GIB_PER_PAGE
+    )
+    preempt_spy = mock.patch.object(
+        engine._scheduler,  # pylint: disable=protected-access
+        '_preempt',
+        wraps=engine._scheduler._preempt,  # pylint: disable=protected-access
+    ).start()
+    prompts = [[i, i + 1, i + 2, i + 3, i + 4, i + 5] for i in range(4)]
+
+    generated = self._run(engine, prompts)
+
+    preempt_spy.assert_called()
+    self.assertEqual(generated, [reference_generate(p) for p in prompts])
+
+  def test_prefix_cache_hit_skips_the_cached_tokens(self):
+    engine = testing_utils.make_engine()
+    prompt = list(range(1, 10))
+    self._run(engine, [prompt])
+    spy = spy_on_execute_step(engine)
+
+    generated = self._run(engine, [prompt])
+
+    self.assertEqual(generated, [reference_generate(prompt)])
+    # Two full pages are cached; the rest of the prompt still runs.
+    first_metadata = spy.call_args_list[0].kwargs['metadata']
+    self.assertEqual(
+        first_metadata.query_lens[0], len(prompt) - 2 * testing_utils.PAGE_SIZE
+    )
+
+  def test_requests_join_a_running_batch(self):
+    engine = testing_utils.make_engine()
+    engine.add_request(testing_utils.make_request('first', [1, 2, 3]))
+    engine.step()
+    engine.step()
+    engine.add_request(testing_utils.make_request('second', [4, 5]))
+
+    finished = drive(engine)
+
+    self.assertEqual(
+        finished['first'].token_ids.tolist(), reference_generate([1, 2, 3])
+    )
+    self.assertEqual(
+        finished['second'].token_ids.tolist(), reference_generate([4, 5])
+    )
+
+  def test_returns_logits_and_logprobs(self):
+    engine = testing_utils.make_engine(return_logits=True, return_logprobs=True)
+    engine.add_request(
+        testing_utils.make_request(
+            '0', [1, 2, 3], return_logits=True, return_logprobs=True
+        )
+    )
+
+    output = drive(engine)['0']
+
+    tokens = output.token_ids
+    logits, logprobs = output.logits, output.logprobs
+    assert logits is not None and logprobs is not None
+    self.assertLen(logits, len(tokens))
+    self.assertLen(logprobs, len(tokens))
+    np.testing.assert_array_equal(np.argmax(logits, axis=-1), tokens)
+    expected_logprob = float(
+        jax.nn.log_softmax(10.0 * jax.nn.one_hot(0, testing_utils.VOCAB_SIZE))[
+            0
+        ]
+    )
+    np.testing.assert_allclose(
+        logprobs,
+        np.full((len(tokens),), expected_logprob),
+        atol=1e-5,
+    )
+
+  def test_aborted_request_stops_generating(self):
+    engine = testing_utils.make_engine()
+    engine.add_request(testing_utils.make_request('kept', [1, 2, 3]))
+    engine.add_request(testing_utils.make_request('aborted', [4, 5, 6]))
+    engine.step()
+
+    engine.abort_request('aborted')
+    finished = drive(engine)
+
+    self.assertEqual(list(finished), ['kept'])
+
+  def test_aborted_request_is_not_unfinished(self):
+    engine = testing_utils.make_engine()
+    engine.add_request(testing_utils.make_request('0', [1, 2, 3]))
+    engine.step()
+    engine.abort_request('0')
+
+    self.assertFalse(engine.has_unfinished_requests())
+    self.assertEmpty(engine.step())
+
+  def test_aborting_a_finished_request_does_nothing(self):
+    engine = testing_utils.make_engine()
+    self._run(engine, [[1, 2]])
+
+    engine.abort_request('0')
+
+    self.assertFalse(engine.has_unfinished_requests())
 
 
 if __name__ == '__main__':
