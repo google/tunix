@@ -16,6 +16,7 @@
 
 import asyncio
 from typing import Any, Optional
+from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.experimental.worker import remote_execution as remote_lib
@@ -683,6 +684,412 @@ class TaskSessionTest(parameterized.TestCase):
           self.assertIsNone(res)
           self.assertIsInstance(exc, RuntimeError)
           self.assertIn("unknown or missing request_id", str(exc))
+
+    asyncio.run(_run())
+
+  def test_task_session_invalid_poll_retry_params_raise(self):
+    with self.assertRaisesRegex(ValueError, "poll_retry_budget_s"):
+      task_session.TaskSession([], poll_retry_budget_s=-1.0)
+    with self.assertRaisesRegex(ValueError, "poll_retry_initial_backoff_s"):
+      task_session.TaskSession([], poll_retry_initial_backoff_s=0.0)
+    with self.assertRaisesRegex(ValueError, "poll_retry_max_backoff_s"):
+      task_session.TaskSession(
+          [],
+          poll_retry_initial_backoff_s=2.0,
+          poll_retry_max_backoff_s=1.0,
+      )
+
+  def test_task_session_poll_retries_transient_error_and_succeeds(self):
+    class FlakyPollHandle(remote_lib.ActorHandle):
+
+      def __init__(self, failures_before_success: int):
+        self.failures_remaining = failures_before_success
+        self.poll_attempts = 0
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        self.poll_attempts += 1
+        if self.failures_remaining > 0:
+          self.failures_remaining -= 1
+          raise remote_lib.TransientTransportError("transient UNAVAILABLE")
+        return remote_lib.ExecutionResponse(
+            request_id="req_1", result="recovered_ok"
+        )
+
+    async def _run():
+      handle = FlakyPollHandle(failures_before_success=3)
+      async with task_session.TaskSession(
+          [handle],
+          poll_retry_budget_s=5.0,
+          poll_retry_initial_backoff_s=0.01,
+          poll_retry_max_backoff_s=0.02,
+      ) as session:
+        await session.submit("req_1", "generate")
+        batch = await session.poll_completed(timeout_s=2.0)
+        self.assertEqual(batch, [("recovered_ok", None)])
+        self.assertEqual(handle.poll_attempts, 4)
+        self.assertEqual(session._in_flight, 0)
+
+    asyncio.run(_run())
+
+  def test_task_session_poll_retry_budget_exhaustion_raises_worker_unreachable(
+      self,
+  ):
+    class AlwaysUnavailableHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self.poll_attempts = 0
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        self.poll_attempts += 1
+        raise remote_lib.TransientTransportError(
+            f"UNAVAILABLE attempt {self.poll_attempts}"
+        )
+
+    async def _run():
+      handle = AlwaysUnavailableHandle()
+      release_healthy = asyncio.Event()
+
+      class HealthyParkedHandle(remote_lib.ActorHandle):
+
+        def submit(self, method_name=None, *args, **kwargs):
+          raise NotImplementedError()
+
+        async def asubmit(self, method_name=None, *args, **kwargs):
+          raise NotImplementedError()
+
+        async def dispatch_task(
+            self, request_id=None, method_name=None, *args, **kwargs
+        ) -> str:
+          del method_name, args, kwargs
+          return request_id or ""
+
+        async def poll_responses(self, timeout_s=50.0):
+          del timeout_s
+          await release_healthy.wait()
+          return remote_lib.ExecutionResponse(
+              request_id="req_healthy", result="healthy_ok"
+          )
+
+      healthy = HealthyParkedHandle()
+      async with task_session.TaskSession(
+          [handle, healthy],
+          route_fn=lambda actors, key: actors[0 if key != "healthy" else 1],
+          poll_retry_budget_s=0.05,
+          poll_retry_initial_backoff_s=0.015,
+          poll_retry_max_backoff_s=0.02,
+      ) as session:
+        await session.submit("req_1", "generate", route_key="fail")
+        await session.submit("req_2", "generate", route_key="fail")
+        await session.submit("req_healthy", "generate", route_key="healthy")
+        self.assertEqual(session._in_flight, 3)
+
+        failed_batch = []
+        while len(failed_batch) < 2:
+          failed_batch.extend(await session.poll_completed(timeout_s=2.0))
+        self.assertLen(failed_batch, 2)
+        for res, exc in failed_batch:
+          self.assertIsNone(res)
+          self.assertIsInstance(exc, task_session.WorkerUnreachableError)
+          self.assertIsInstance(
+              exc.__cause__, remote_lib.TransientTransportError
+          )
+        # Failing the 2 tasks on `handle` must decrement _in_flight by exactly 2
+        # (from 3 to 1), leaving `healthy`'s in-flight task accounted for.
+        self.assertEqual(session._in_flight, 1)
+        release_healthy.set()
+        healthy_batch = await session.poll_completed(timeout_s=2.0)
+        self.assertEqual(healthy_batch, [("healthy_ok", None)])
+        self.assertGreaterEqual(handle.poll_attempts, 2)
+        self.assertEqual(session._in_flight, 0)
+
+    asyncio.run(_run())
+
+  def test_task_session_evicted_actor_fails_immediately_on_transient_error(
+      self,
+  ):
+    class EvictedOnPollHandle(remote_lib.ActorHandle):
+
+      def __init__(self, on_first_poll):
+        self._on_first_poll = on_first_poll
+        self.poll_attempts = 0
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        self.poll_attempts += 1
+        self._on_first_poll()
+        raise remote_lib.TransientTransportError("worker evicted mid-poll")
+
+    async def _run():
+      live_actors: list[remote_lib.ActorHandle] = []
+      handle = EvictedOnPollHandle(on_first_poll=live_actors.clear)
+      live_actors.append(handle)
+      async with task_session.TaskSession(
+          lambda: list(live_actors),
+          poll_retry_budget_s=60.0,
+          poll_retry_initial_backoff_s=10.0,
+          poll_retry_max_backoff_s=10.0,
+      ) as session:
+        await session.submit("req_1", "generate")
+        batch = await session.poll_completed(timeout_s=1.0)
+        self.assertLen(batch, 1)
+        res, exc = batch[0]
+        self.assertIsNone(res)
+        self.assertIsInstance(exc, task_session.WorkerUnreachableError)
+        self.assertIsInstance(exc.__cause__, remote_lib.TransientTransportError)
+        self.assertEqual(handle.poll_attempts, 1)
+
+    asyncio.run(_run())
+
+  def test_task_session_close_during_retry_backoff_exits_promptly(self):
+    first_poll_failed = asyncio.Event()
+
+    class SlowBackoffHandle(remote_lib.ActorHandle):
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        first_poll_failed.set()
+        raise remote_lib.TransientTransportError("UNAVAILABLE")
+
+    async def _run():
+      handle = SlowBackoffHandle()
+      session = task_session.TaskSession(
+          [handle],
+          poll_retry_budget_s=60.0,
+          poll_retry_initial_backoff_s=30.0,
+          poll_retry_max_backoff_s=30.0,
+      )
+      await session.submit("req_1", "generate")
+      await asyncio.wait_for(first_poll_failed.wait(), timeout=1.0)
+      await asyncio.sleep(0.01)
+      t0 = asyncio.get_running_loop().time()
+      await asyncio.wait_for(session.close(), timeout=1.0)
+      self.assertLess(asyncio.get_running_loop().time() - t0, 0.5)
+
+    asyncio.run(_run())
+
+  def test_task_session_successful_poll_resets_outage_budget(self):
+    fake_now = [100.0]
+
+    def _fake_monotonic() -> float:
+      return fake_now[0]
+
+    class IntermittentHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        # Burst 1: err1 at t=100.0, err2 at t=102.0 (elapsed=2.0s < 3.0s budget)
+        # -> empty poll (None) at t=103.0 resets outage_start.
+        # Burst 2: err1 at t=104.0, err2 at t=106.0 (elapsed=2.0s < 3.0s budget;
+        # would be 6.0s >= 3.0s budget if None had not reset outage_start!)
+        # -> real response succeeds.
+        self._script = [
+            (0.0, remote_lib.TransientTransportError("burst1_err1")),
+            (2.0, remote_lib.TransientTransportError("burst1_err2")),
+            (1.0, None),
+            (1.0, remote_lib.TransientTransportError("burst2_err1")),
+            (2.0, remote_lib.TransientTransportError("burst2_err2")),
+            (
+                1.0,
+                remote_lib.ExecutionResponse(request_id="req_1", result="done"),
+            ),
+        ]
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        advance_s, item = self._script.pop(0)
+        fake_now[0] += advance_s
+        if isinstance(item, BaseException):
+          raise item
+        return item
+
+    async def _run():
+      handle = IntermittentHandle()
+      with mock.patch.object(
+          task_session, "_monotonic", side_effect=_fake_monotonic
+      ):
+        async with task_session.TaskSession(
+            [handle],
+            poll_retry_budget_s=3.0,
+            poll_retry_initial_backoff_s=0.001,
+            poll_retry_max_backoff_s=0.001,
+        ) as session:
+          await session.submit("req_1", "generate")
+          batch = await session.poll_completed(timeout_s=2.0)
+          self.assertEqual(batch, [("done", None)])
+
+    asyncio.run(_run())
+
+  def test_task_session_unexpected_cancelled_error_from_handle_fails_tasks(
+      self,
+  ):
+    class SpuriousCancelHandle(remote_lib.ActorHandle):
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        raise asyncio.CancelledError("channel closed underneath poll")
+
+    async def _run():
+      handle = SpuriousCancelHandle()
+      async with task_session.TaskSession([handle]) as session:
+        await session.submit("req_1", "generate")
+        batch = await session.poll_completed(timeout_s=1.0)
+        self.assertLen(batch, 1)
+        res, exc = batch[0]
+        self.assertIsNone(res)
+        self.assertIsInstance(exc, RuntimeError)
+        self.assertIn("unexpected CancelledError", str(exc))
+        self.assertEqual(session._in_flight, 0)
+
+    asyncio.run(_run())
+
+  def test_task_session_poll_retry_exponent_clamped_and_closed_mid_poll_exits(
+      self,
+  ):
+    # 1. Verify retry_attempts > 1024 does not raise OverflowError when
+    # computing 2 ** min(retry_attempts - 1, 60) * initial_backoff_s.
+    class HighRetryCountHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self.calls = 0
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        self.calls += 1
+        if self.calls <= 1030:
+          raise remote_lib.TransientTransportError(f"err_{self.calls}")
+        return remote_lib.ExecutionResponse(request_id="req_1", result="ok")
+
+    # 2. Verify that if session._closed becomes True while poll_responses is
+    # raising TransientTransportError, _poll_worker_loop breaks cleanly without
+    # enqueueing a failure into _response_queue.
+    class ClosedOnTransientErrorHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self.session_ref: Optional[task_session.TaskSession] = None
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        assert self.session_ref is not None
+        self.session_ref._closed = True
+        raise remote_lib.TransientTransportError("closing transient error")
+
+    async def _run():
+      high_retry_handle = HighRetryCountHandle()
+      async with task_session.TaskSession(
+          [high_retry_handle],
+          poll_retry_budget_s=60.0,
+          poll_retry_initial_backoff_s=1e-7,
+          poll_retry_max_backoff_s=1e-7,
+      ) as session:
+        await session.submit("req_1", "generate")
+        batch = await session.poll_completed(timeout_s=5.0)
+        self.assertEqual(batch, [("ok", None)])
+        self.assertEqual(high_retry_handle.calls, 1031)
+
+      closed_handle = ClosedOnTransientErrorHandle()
+      session2 = task_session.TaskSession([closed_handle])
+      closed_handle.session_ref = session2
+      await session2.submit("req_2", "generate")
+      await asyncio.gather(*list(session2._poll_tasks), return_exceptions=True)
+      self.assertTrue(session2._response_queue.empty())
+      await session2.close()
 
     asyncio.run(_run())
 

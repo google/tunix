@@ -81,6 +81,10 @@ set_bulk_lz4_enabled = network.set_bulk_lz4_enabled
 _BULK_CAPABILITY_METADATA = (("x-tunix-bulk", "1"),)
 
 
+class TransientTransportError(ConnectionError):
+  """Raised when a remote transport operation fails with a retryable status."""
+
+
 def _running_loop() -> Optional["asyncio.AbstractEventLoop"]:
   """Returns the currently running event loop, or None if there is none."""
   try:
@@ -1251,7 +1255,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       old_channel = self._channel
       self._channel = _grpc_aio_lib.insecure_channel(
           self._host_port,
-          options=network._grpc_options(self._max_message_bytes),  # pylint: disable=protected-access
+          options=network._grpc_channel_options(self._max_message_bytes),  # pylint: disable=protected-access
       )
       self._channel_loop = current_loop
       self._rpc = self._make_rpc(self._channel)
@@ -1349,7 +1353,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     if self._sync_rpc is None:
       self._sync_channel = _grpc_aio_lib.insecure_channel(
           self._host_port,
-          options=network._grpc_options(self._max_message_bytes),  # pylint: disable=protected-access
+          options=network._grpc_channel_options(self._max_message_bytes),  # pylint: disable=protected-access
       )
       self._sync_rpc = self._make_rpc(self._sync_channel)
       self._sync_get_bulk_port_rpc = self._make_get_bulk_port_rpc(
@@ -1413,8 +1417,28 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
           bulk_hosts=self._active_bulk_hosts,
           seen_bulk_targets=self._seen_bulk_targets,
       )
-    except network._BulkTransportError:  # pylint: disable=protected-access
+    except network._BulkTransportError as exc:  # pylint: disable=protected-access
       self._invalidate_bulk_port()
+      if hasattr(call, "cancel"):
+        call.cancel()
+      raise TransientTransportError(
+          f"Transient bulk transport error polling {self._host_port}: {exc}"
+      ) from exc
+    except BaseException as exc:  # pylint: disable=broad-exception-caught
+      if (
+          _grpc_lib is not None
+          and _grpc_aio_lib is not None
+          and isinstance(exc, _grpc_aio_lib.AioRpcError)
+          and exc.code()
+          in (
+              _grpc_lib.StatusCode.UNAVAILABLE,
+              _grpc_lib.StatusCode.DEADLINE_EXCEEDED,
+          )
+      ):
+        raise TransientTransportError(
+            f"Transient gRPC error polling {self._host_port}:"
+            f" {exc.code().name} ({exc.details()})"
+        ) from exc
       raise
 
   async def close(self) -> None:

@@ -16,6 +16,8 @@
 
 import asyncio
 import hashlib
+import random
+import time
 from typing import (
     Any,
     AsyncIterator,
@@ -28,13 +30,25 @@ from typing import (
     Union,
 )
 
+from absl import logging
 from tunix.experimental.worker import remote_execution
 
 ActorHandle = remote_execution.ActorHandle
 ExecutionResponse = remote_execution.ExecutionResponse
 LONG_POLL_TIMEOUT_S = remote_execution.LONG_POLL_TIMEOUT_S
+TransientTransportError = remote_execution.TransientTransportError
+
+DEFAULT_POLL_RETRY_BUDGET_S: float = 300.0
+DEFAULT_POLL_RETRY_INITIAL_BACKOFF_S: float = 0.5
+DEFAULT_POLL_RETRY_MAX_BACKOFF_S: float = 10.0
+
+_monotonic: Callable[[], float] = time.monotonic
 
 RouteFn = Callable[[Sequence[ActorHandle], Optional[Any]], ActorHandle]
+
+
+class WorkerUnreachableError(ConnectionError):
+  """Raised when a worker remains unreachable past the poll retry budget."""
 
 
 def stable_route_hash(route_key: Any) -> int:
@@ -109,6 +123,9 @@ class TaskSession:
       ],
       *,
       route_fn: Optional[RouteFn] = None,
+      poll_retry_budget_s: float = DEFAULT_POLL_RETRY_BUDGET_S,
+      poll_retry_initial_backoff_s: float = DEFAULT_POLL_RETRY_INITIAL_BACKOFF_S,
+      poll_retry_max_backoff_s: float = DEFAULT_POLL_RETRY_MAX_BACKOFF_S,
   ):
     """Initializes the task execution session.
 
@@ -117,11 +134,35 @@ class TaskSession:
         returning the current sequence of `ActorHandle`s.
       route_fn: Optional routing callable `(actors, route_key) -> ActorHandle`.
         Defaults to `DefaultRouter()`.
+      poll_retry_budget_s: Maximum wall-clock duration in seconds to retry
+        consecutive `TransientTransportError` failures when polling a worker
+        before failing all of its in-flight tasks with `WorkerUnreachableError`.
+        Set to `0.0` to fail immediately on the first transient poll error.
+      poll_retry_initial_backoff_s: Initial exponential backoff delay in seconds
+        after the first transient poll failure.
+      poll_retry_max_backoff_s: Maximum backoff delay cap in seconds between
+        transient poll retries.
 
     Raises:
       TypeError: If any item in a static `actors` sequence is not an
         `ActorHandle`.
+      ValueError: If any poll retry parameter is invalid.
     """
+    if poll_retry_budget_s < 0.0:
+      raise ValueError(
+          f"poll_retry_budget_s must be >= 0.0, got {poll_retry_budget_s}."
+      )
+    if poll_retry_initial_backoff_s <= 0.0:
+      raise ValueError(
+          "poll_retry_initial_backoff_s must be > 0.0, got"
+          f" {poll_retry_initial_backoff_s}."
+      )
+    if poll_retry_max_backoff_s < poll_retry_initial_backoff_s:
+      raise ValueError(
+          "poll_retry_max_backoff_s"
+          f" ({poll_retry_max_backoff_s}) must be >="
+          f" poll_retry_initial_backoff_s ({poll_retry_initial_backoff_s})."
+      )
     if callable(actors):
       self._actors_fn: Callable[[], Sequence[ActorHandle]] = actors
     else:
@@ -134,6 +175,9 @@ class TaskSession:
     self._route_fn: RouteFn = (
         route_fn if route_fn is not None else DefaultRouter()
     )
+    self._poll_retry_budget_s = float(poll_retry_budget_s)
+    self._poll_retry_initial_backoff_s = float(poll_retry_initial_backoff_s)
+    self._poll_retry_max_backoff_s = float(poll_retry_max_backoff_s)
     self._response_queue: asyncio.Queue[Any] = asyncio.Queue()
     self._active_workers: set[ActorHandle] = set()
     self._dispatched_tasks: Dict[ActorHandle, set[str]] = {}
@@ -218,15 +262,46 @@ class TaskSession:
     self._poll_tasks.add(task)
     task.add_done_callback(self._poll_tasks.discard)
 
+  def _fail_dispatched_tasks(
+      self, dispatched_set: set[str], exc: Exception
+  ) -> None:
+    """Fails all currently dispatched tasks for a worker with `exc`."""
+    failed_count = len(dispatched_set)
+    dispatched_set.clear()
+    if failed_count > 0:
+      for _ in range(failed_count):
+        self._response_queue.put_nowait((None, exc))
+      self._in_flight = max(0, self._in_flight - failed_count)
+      self._notify_if_zero_flight()
+
   async def _poll_worker_loop(self, actor: ActorHandle) -> None:
     """Long-polls a single active worker until its in-flight set drains."""
+    # TODO: b/532723235 - Add ACK-based response redelivery so a response whose
+    # final frame was handed to the server transport just before a connection
+    # drop is retained until acknowledged by the client. Currently no outer
+    # orchestrator timeout covers this window, so a lost response stalls
+    # polling_stage until ACK redelivery lands.
+    # TODO: b/532723235 - Detect in-place worker restarts. If a worker process
+    # restarts at the same address within `poll_retry_budget_s` (e.g., a k8s
+    # `restartPolicy: OnFailure` container restart), the reconnected poll
+    # returns `None` from the new process's empty response queue and resets
+    # the outage budget below, so tasks dispatched to the old process are
+    # never completed or failed. Planned fix: have the server attach a
+    # per-process incarnation token to `PollResponses` and `DispatchTask`
+    # responses, and raise a non-transient `WorkerRestartedError` from
+    # `GrpcRemoteActorHandle` when it changes.
+    outage_start: Optional[float] = None
+    retry_attempts = 0
     try:
       while not self._closed:
         dispatched_set = self._dispatched_tasks.setdefault(actor, set())
         if not dispatched_set:
           break
+        backoff_s: Optional[float] = None
         try:
           response = await actor.poll_responses(timeout_s=LONG_POLL_TIMEOUT_S)
+          outage_start = None
+          retry_attempts = 0
           if isinstance(response, ExecutionResponse):
             if (
                 not response.request_id
@@ -245,19 +320,83 @@ class TaskSession:
             except Exception as exc:  # pylint: disable=broad-exception-caught
               self._response_queue.put_nowait((None, exc))
             self._notify_if_zero_flight()
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+          curr_task = asyncio.current_task()
+          if self._closed or (
+              curr_task is not None and curr_task.cancelling() > 0
+          ):
+            break
+          cancel_err = RuntimeError(
+              f"Worker {actor!r} poll_responses raised unexpected"
+              " CancelledError while session is active."
+          )
+          cancel_err.__cause__ = exc
+          self._fail_dispatched_tasks(dispatched_set, cancel_err)
           break
+        except TransientTransportError as exc:
+          if self._closed:
+            break
+          if actor not in self._actors_fn():
+            evicted_err = WorkerUnreachableError(
+                f"Worker {actor!r} was removed from the session's active"
+                f" actors during a transient poll error: {exc}"
+            )
+            evicted_err.__cause__ = exc
+            self._fail_dispatched_tasks(dispatched_set, evicted_err)
+            break
+          now = _monotonic()
+          if outage_start is None:
+            outage_start = now
+          elapsed_s = now - outage_start
+          retry_attempts += 1
+          if (
+              self._poll_retry_budget_s <= 0.0
+              or elapsed_s >= self._poll_retry_budget_s
+          ):
+            unreachable_err = WorkerUnreachableError(
+                f"Worker {actor!r} remained unreachable for {elapsed_s:.1f}s"
+                f" (budget {self._poll_retry_budget_s:.1f}s) across"
+                f" {retry_attempts} poll retry attempt(s): {exc}"
+            )
+            unreachable_err.__cause__ = exc
+            self._fail_dispatched_tasks(dispatched_set, unreachable_err)
+            break
+          remaining_budget_s = self._poll_retry_budget_s - elapsed_s
+          raw_backoff_s = min(
+              self._poll_retry_max_backoff_s,
+              self._poll_retry_initial_backoff_s
+              * (2 ** min(retry_attempts - 1, 60)),
+          )
+          jittered_backoff_s = raw_backoff_s * random.uniform(0.8, 1.0)
+          backoff_s = min(jittered_backoff_s, remaining_budget_s)
+          if retry_attempts == 1:
+            logging.warning(
+                "Transient transport error polling worker %r (attempt %d,"
+                " retrying in %.2fs, budget=%.1fs): %s",
+                actor,
+                retry_attempts,
+                backoff_s,
+                self._poll_retry_budget_s,
+                exc,
+            )
+          else:
+            logging.debug(
+                "Transient transport error polling worker %r (attempt %d,"
+                " elapsed=%.1fs/%.1fs, retrying in %.2fs): %s",
+                actor,
+                retry_attempts,
+                elapsed_s,
+                self._poll_retry_budget_s,
+                backoff_s,
+                exc,
+            )
         except Exception as exc:  # pylint: disable=broad-exception-caught
-          # Transport or polling failure on this worker; fail all dispatched
-          # tasks on this worker.
-          failed_count = len(dispatched_set)
-          dispatched_set.clear()
-          if failed_count > 0:
-            for _ in range(failed_count):
-              self._response_queue.put_nowait((None, exc))
-            self._in_flight = max(0, self._in_flight - failed_count)
-            self._notify_if_zero_flight()
+          # Non-transient transport or polling failure on this worker; fail all
+          # dispatched tasks on this worker immediately.
+          self._fail_dispatched_tasks(dispatched_set, exc)
           break
+        if backoff_s is not None:
+          await asyncio.sleep(backoff_s)
     finally:
       self._active_workers.discard(actor)
 

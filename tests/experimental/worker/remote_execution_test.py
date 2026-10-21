@@ -746,10 +746,77 @@ class RemoteExecutionTest(parameterized.TestCase):
 
   def test_grpc_options_tolerate_client_keepalive_pings(self):
     options = dict(network_lib._grpc_options())
+    self.assertEqual(options["grpc.keepalive_time_ms"], 60000)
+    self.assertEqual(options["grpc.keepalive_timeout_ms"], 60000)
     self.assertEqual(
-        options["grpc.http2.min_recv_ping_interval_without_data_ms"], 5000
+        options["grpc.http2.min_ping_interval_without_data_ms"], 5000
     )
     self.assertEqual(options["grpc.http2.max_ping_strikes"], 0)
+    self.assertNotIn(
+        "grpc.http2.min_recv_ping_interval_without_data_ms", options
+    )
+    self.assertNotIn("grpc.tcp_user_timeout_ms", options)
+    self.assertNotIn("grpc.service_config", options)
+
+    channel_options = dict(network_lib._grpc_channel_options())
+    self.assertEqual(channel_options["grpc.keepalive_time_ms"], 60000)
+    self.assertEqual(channel_options["grpc.keepalive_timeout_ms"], 60000)
+    self.assertEqual(channel_options["grpc.max_reconnect_backoff_ms"], 10000)
+
+  def test_grpc_poll_responses_maps_unavailable_and_deadline_to_transient_error(
+      self,
+  ):
+    async def _run():
+      # 1. UNAVAILABLE: connecting to an unused port fails with UNAVAILABLE.
+      unused_port = portpicker.pick_unused_port()
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{unused_port}",
+          rpc_timeout_s=0.5,
+          enable_bulk_transport=False,
+      )
+      try:
+        with self.assertRaises(remote_lib.TransientTransportError) as cm:
+          await handle.poll_responses(timeout_s=0.1)
+        self.assertIsNotNone(cm.exception.__cause__)
+        self.assertIn("UNAVAILABLE", str(cm.exception))
+      finally:
+        await handle.close()
+
+      # 2. DEADLINE_EXCEEDED: a live server with an empty response queue
+      # long-polls for timeout_s=5.0 while the client RPC deadline is capped
+      # at rpc_timeout_s=0.3s.
+      engine = StubWorkerEngine("empty_poll_worker")
+      async with running_grpc_server(engine, rpc_timeout_s=0.3) as (
+          _,
+          live_handle,
+      ):
+        with self.assertRaises(remote_lib.TransientTransportError) as cm_dl:
+          await live_handle.poll_responses(timeout_s=5.0)
+        self.assertIsNotNone(cm_dl.exception.__cause__)
+        self.assertIn("DEADLINE_EXCEEDED", str(cm_dl.exception))
+
+        # 3. _BulkTransportError during poll_responses: invalidates bulk port,
+        # cancels the active gRPC stream call, and raises TransientTransportError
+        # chained to _BulkTransportError.
+        live_handle._bulk_port = 12345
+        fake_call = mock.MagicMock()
+        with (
+            mock.patch.object(live_handle, "_poll_rpc", return_value=fake_call),
+            mock.patch.object(
+                remote_lib.ExecutionResponse,
+                "deserialize_async_chunks",
+                side_effect=network_lib._BulkTransportError("bulk pull reset"),
+            ),
+        ):
+          with self.assertRaises(remote_lib.TransientTransportError) as cm_bulk:
+            await live_handle.poll_responses(timeout_s=1.0)
+          self.assertIsInstance(
+              cm_bulk.exception.__cause__, network_lib._BulkTransportError
+          )
+          self.assertIsNone(live_handle._bulk_port)
+          fake_call.cancel.assert_called_once()
+
+    asyncio.run(_run())
 
   def test_grpc_sync_start_serving_actually_serves(self):
     port = portpicker.pick_unused_port()
