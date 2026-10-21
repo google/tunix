@@ -225,22 +225,30 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
     Args:
       task: Container holding run_id, metadata, and optional step.
     """
-    run_id = task.run_id
-    assert run_id is not None
     traj_id = task.trajectory_id
     now_dt = datetime.datetime.now(datetime.timezone.utc)
 
-    metadata_payload = task.metadata.model_dump(mode="json", exclude_none=True)
-
-    with self._engine.begin() as conn:
-      self._ensure_run_exists(conn, run_id, task.metadata, now_dt)
-      self._upsert_trajectory(
-          conn, run_id, traj_id, task.metadata, metadata_payload, now_dt
+    if task.metadata is not None:
+      run_id = task.run_id
+      assert run_id is not None
+      metadata_payload = task.metadata.model_dump(
+          mode="json", exclude_none=True
       )
-      if task.step is not None:
-        self._upsert_step(conn, run_id, traj_id, task.step)
 
-    self._cache_committed_state(run_id, traj_id, metadata_payload)
+      with self._engine.begin() as conn:
+        self._ensure_run_exists(conn, run_id, task.metadata, now_dt)
+        self._upsert_trajectory(
+            conn, run_id, traj_id, task.metadata, metadata_payload, now_dt
+        )
+        if task.step is not None:
+          self._upsert_step(conn, run_id, traj_id, task.step)
+
+      self._cache_committed_state(run_id, traj_id, metadata_payload)
+    elif task.step is not None:
+      run_id = task.run_id
+      assert run_id is not None
+      with self._engine.begin() as conn:
+        self._upsert_step(conn, run_id, traj_id, task.step)
 
   def _ensure_run_exists(
       self,
