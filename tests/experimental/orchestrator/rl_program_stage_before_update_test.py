@@ -73,19 +73,21 @@ def _run(sc: boundary_test._Scenario, **kwargs: Any) -> boundary_test._Run:
   """A harness run with the default hook: stage before the update."""
   program_kwargs = dict(_SBU)
   program_kwargs.update(kwargs.pop("program_kwargs", None) or {})
-  return boundary_test._run(sc, program_kwargs=program_kwargs, **kwargs)
+  with mock.patch.object(rl_program, "_release_host_memory", lambda: None):
+    return boundary_test._run(sc, program_kwargs=program_kwargs, **kwargs)
 
 
 def _base(
     sc: boundary_test._Scenario, trainer_cls: type[boundary_test._Trainer]
 ) -> boundary_test._Run:
   """The frozen base loop's run of `sc` against `trainer_cls`."""
-  return boundary_test._run(
-      sc,
-      pipelined=False,
-      program_cls=boundary_test._BaseLoopProgram,
-      trainer_cls=trainer_cls,
-  )
+  with mock.patch.object(rl_program, "_release_host_memory", lambda: None):
+    return boundary_test._run(
+        sc,
+        pipelined=False,
+        program_cls=boundary_test._BaseLoopProgram,
+        trainer_cls=trainer_cls,
+    )
 
 
 def _worker_of(run: boundary_test._Run):
