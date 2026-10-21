@@ -184,6 +184,11 @@ register("trainer_mb", {"mb_idx": "int"},
 register("trainer_step", {"step": "int"},
          {"policy_version": "int", "n_mb": "int", "update_s": "float",
           "rtt_s": "float", "complete": "bool", "update_present": "str"})
+register("trainer_step_incomplete", {"step": "int"},
+         {"n_mb": "int", "update_present": "str"})
+register("trainer_timer_warning", {"kind": "str"},
+         {"trainer": "str", "token": "str", "recorded": "int", "ran": "int",
+          "missed": "str", "via": "str"})
 register("wsync_phase", {"round": "int", "req_id": "str"},
          {"phase": "str", "elapsed_s": "float", "timeout": "str",
           "workers": "int", "units": "int", "failures": "int",
