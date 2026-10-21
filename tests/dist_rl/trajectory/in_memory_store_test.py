@@ -80,6 +80,19 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     self.assertEqual(stored_meta.notes, "initial notes")
     self.assertEqual(stored_meta.extra["count"], 1)
 
+  def test_metrics_mutation_isolation(self) -> None:
+    """Verifies that mutating returned metrics does not alter internal store state."""
+    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    metrics = trajectory_lib.TrajectoryMetrics(extra={"tags": ["a", "b"]})
+    mem_store.update_metrics("t1", metrics)
+
+    retrieved = mem_store.get_trajectories_metrics(["t1"])["t1"]
+    assert retrieved.extra is not None
+    retrieved.extra["tags"].append("c")
+
+    re_read = mem_store.get_trajectories_metrics(["t1"])["t1"]
+    self.assertEqual(re_read.extra["tags"], ["a", "b"])
+
 
 class InMemoryTrajectoryStoreMetadataClsTest(
     store_testing.TrajectoryStoreMetadataClsTestCase

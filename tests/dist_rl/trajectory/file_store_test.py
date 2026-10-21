@@ -1218,6 +1218,78 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     )
     self.assertEmpty(store_instance.get_trajectories_metadata())
 
+  def test_update_metrics_creates_metrics_json_file(self) -> None:
+    """Verifies update_metrics writes metrics.json inside trajectory dir."""
+    metrics = trajectory_lib.TrajectoryMetrics(extra={"score": 99.5})
+    self.file_s.update_metrics(trajectory_testing.TRAJECTORY_ID_1, metrics)
+    self.file_s.flush()
+
+    metrics_path = self.file_s.get_trajectory_metrics_path(
+        trajectory_testing.TRAJECTORY_ID_1
+    )
+    self.assertTrue(metrics_path.exists())
+    read_metrics = self.file_s.get_trajectories_metrics(
+        [trajectory_testing.TRAJECTORY_ID_1]
+    )
+    self.assertEqual(read_metrics[trajectory_testing.TRAJECTORY_ID_1], metrics)
+
+  def test_update_metrics_cold_start_preserves_persisted_keys(self) -> None:
+    """Verifies cold-start update_metrics merges with existing metrics on disk."""
+    metrics_initial = trajectory_lib.TrajectoryMetrics(
+        extra={"checkpoint_acc": 0.85, "run_time": 120}
+    )
+    self.file_s.update_metrics(
+        trajectory_testing.TRAJECTORY_ID_1, metrics_initial
+    )
+    self.file_s.flush()
+    self.file_s.close()
+
+    # Simulate process restart by opening a new store on the same directory.
+    new_store = file_store.FileTrajectoryStore(root_dir=self.tmp_dir)
+    self.addCleanup(new_store.close)
+
+    metrics_update = trajectory_lib.TrajectoryMetrics(
+        extra={"eval_score": 95.0, "run_time": 150}
+    )
+    new_store.update_metrics(trajectory_testing.TRAJECTORY_ID_1, metrics_update)
+    new_store.flush()
+
+    retrieved = new_store.get_trajectories_metrics(
+        [trajectory_testing.TRAJECTORY_ID_1]
+    )
+    expected = trajectory_lib.TrajectoryMetrics(
+        extra={"checkpoint_acc": 0.85, "run_time": 150, "eval_score": 95.0}
+    )
+    self.assertEqual(retrieved[trajectory_testing.TRAJECTORY_ID_1], expected)
+
+  def test_metrics_only_directory_does_not_break_get_trajectories_metadata(
+      self,
+  ) -> None:
+    """Verifies a metrics-only trajectory directory is skipped by metadata listing."""
+    metrics = trajectory_lib.TrajectoryMetrics(extra={"isolated_metric": 42})
+    self.file_s.update_metrics("metrics_only_traj", metrics)
+    self.file_s.flush()
+
+    metas = self.file_s.get_trajectories_metadata()
+    self.assertNotIn("metrics_only_traj", [m.trajectory_id for m in metas])
+
+    # But metrics query can retrieve it
+    retrieved = self.file_s.get_trajectories_metrics(["metrics_only_traj"])
+    self.assertEqual(retrieved["metrics_only_traj"], metrics)
+
+    # get_trajectories_metrics() with None lists it
+    all_metrics = self.file_s.get_trajectories_metrics()
+    self.assertIn("metrics_only_traj", all_metrics)
+    self.assertEqual(all_metrics["metrics_only_traj"], metrics)
+
+  def test_get_trajectories_metrics_nonexistent_root_dir_returns_empty(
+      self,
+  ) -> None:
+    """Verifies get_trajectories_metrics on a non-existent root_dir returns empty dict."""
+    nonexistent_root = self.tmp_dir / "does_not_exist"
+    store_instance = file_store.FileTrajectoryStore(root_dir=nonexistent_root)
+    self.assertEqual(store_instance.get_trajectories_metrics(), {})
+
 
 class FileTrajectoryStoreMetadataClsTest(
     store_testing.PersistentTrajectoryStoreMetadataClsTestCase

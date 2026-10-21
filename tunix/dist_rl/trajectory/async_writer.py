@@ -5,7 +5,7 @@ import atexit
 import dataclasses
 import queue
 import threading
-from typing import Any, Final, Generic, TypeVar
+from typing import Any, Final, Generic, TypeVar, cast
 import weakref
 
 from absl import logging
@@ -21,12 +21,16 @@ from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 # workers) observed in 9,856-trajectory load testing.
 DEFAULT_MAX_QUEUE_SIZE: Final[int] = 10_000
 
-# Fraction of `max_queue_size` available for `Step` writes (90%, or 9,000 slots
-# at the default 10,000 limit). The remaining 10% (1,000 slots, < 1 MB RAM) is
-# reserved for metadata-only updates (`task.step is None`) so trajectory
-# records and final episode statuses are preserved when step writes fill the
-# queue.
-_STEP_QUEUE_CAPACITY_RATIO: Final[float] = 0.9
+# Fraction of `max_queue_size` available for `Step` writes (80%, or 8,000 slots
+# at the default 10,000 limit).
+_STEP_QUEUE_CAPACITY_RATIO: Final[float] = 0.8
+
+# Fraction of `max_queue_size` available for `TrajectoryMetrics` writes (95%, or
+# 9,500 slots at the default 10,000 limit). The remaining 5% (500 slots) is
+# reserved for metadata-only updates (`task.step is None and task.metrics is None`)
+# so trajectory records and final episode statuses are preserved when metrics
+# and step writes fill the queue.
+_METRICS_QUEUE_CAPACITY_RATIO: Final[float] = 0.95
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -35,20 +39,34 @@ class WriteTask:
 
   Encapsulates all necessary data transferred across the thread boundary from
   the frontend calling thread (e.g. rollout worker) to the background worker
-  thread. `metadata` and `step` are private deep copies owned by the task.
+  thread. `metadata`, `step`, and `metrics` are private deep copies owned by
+  the task.
   """
 
-  metadata: trajectory_lib.TrajectoryMetadata
+  metadata: trajectory_lib.TrajectoryMetadata | None = None
   step: trajectory_lib.Step | None = None
   run_id: str | None = None
+  trajectory_id: str = ""
+  metrics: trajectory_lib.TrajectoryMetrics | None = None
 
   def __post_init__(self) -> None:
     """Deep copies the payload so later caller mutations cannot leak in."""
-    object.__setattr__(
-        self, "metadata", trajectory_lib.deep_copy(self.metadata)
-    )
+    if self.metadata is not None:
+      object.__setattr__(
+          self, "metadata", trajectory_lib.deep_copy(self.metadata)
+      )
+      if not self.trajectory_id and self.metadata.trajectory_id:
+        object.__setattr__(self, "trajectory_id", self.metadata.trajectory_id)
     if self.step is not None:
       object.__setattr__(self, "step", trajectory_lib.deep_copy(self.step))
+    if self.metrics is not None:
+      object.__setattr__(
+          self, "metrics", trajectory_lib.deep_copy(self.metrics)
+      )
+    if not self.trajectory_id:
+      if self.metadata is not None:
+        raise ValueError("WriteTask requires metadata.trajectory_id.")
+      raise ValueError("WriteTask requires trajectory_id.")
 
   def to_atif(self) -> None:
     """Projects `metadata` and `step` to base ATIF models in-place.
@@ -56,21 +74,10 @@ class WriteTask:
     Called by the background worker thread before processing the task. Mutates
     the frozen instance in-place to avoid a second deep copy.
     """
-    object.__setattr__(self, "metadata", self.metadata.to_atif_metadata())
+    if self.metadata is not None:
+      object.__setattr__(self, "metadata", self.metadata.to_atif_metadata())
     if self.step is not None:
       object.__setattr__(self, "step", self.step.to_atif_step())
-
-  @property
-  def trajectory_id(self) -> str:
-    """Returns the trajectory this task writes, derived from `metadata`.
-
-    Raises:
-      ValueError: If `metadata` carries no trajectory_id.
-    """
-    traj_id = self.metadata.trajectory_id
-    if traj_id is None:
-      raise ValueError("WriteTask requires metadata.trajectory_id.")
-    return traj_id
 
 
 _TaskT = TypeVar("_TaskT", bound=WriteTask)
@@ -116,18 +123,21 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
        per-record locking, while keeping memory and thread overhead minimal in
        distributed training environments.
 
-    2. Bounded Queue Capacity with Metadata Reserve:
+    2. Bounded Queue Capacity with Three-Tier Admission:
        To prevent unbounded memory growth or caller-thread blocking during
        storage latency spikes, the queue enforces a hard capacity of
-       `max_queue_size`:
+       `max_queue_size` with a 3-tier admission policy:
          - Step tasks (`task.step is not None`) are admitted below
-           `step_queue_limit` (90% of `max_queue_size`) and dropped
+           `step_queue_limit` (80% of `max_queue_size`) and dropped
            non-blockingly with a warning once `step_queue_limit` is reached.
-         - Metadata-only tasks (`task.step is None`) may use the remaining 10%
-           reserve up to `max_queue_size` so parent trajectory records and
-           final episode statuses are preserved when step writes fill the
-           queue. At `max_queue_size`, all incoming tasks are dropped
-           non-blockingly with a warning.
+         - Metrics tasks (`task.metrics is not None`) are admitted below
+           `metrics_queue_limit` (95% of `max_queue_size`) and dropped
+           non-blockingly with a warning once `metrics_queue_limit` is reached.
+         - Metadata-only tasks (`task.step is None and task.metrics is None`)
+           may use the remaining 5% reserve up to `max_queue_size` so parent
+           trajectory records and final episode statuses are preserved when
+           step or metrics writes fill the queue. At `max_queue_size`, all
+           incoming tasks are dropped non-blockingly with a warning.
 
     3. Lazy Worker Thread Initialization:
        The worker thread is not spawned during `__init__`. Instead, it is
@@ -177,10 +187,13 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
     self._step_queue_limit = max(
         1, int(max_queue_size * _STEP_QUEUE_CAPACITY_RATIO)
     )
+    self._metrics_queue_limit = max(
+        1, int(max_queue_size * _METRICS_QUEUE_CAPACITY_RATIO)
+    )
     # FIFO queue for passing write tasks to the worker thread. Capacity limits
-    # (`_step_queue_limit` and `_max_queue_size`) are enforced under
-    # `self._lock` in `_enqueue` so that `close()` can always append the `None`
-    # shutdown sentinel without blocking when the queue is full.
+    # (`_step_queue_limit`, `_metrics_queue_limit`, and `_max_queue_size`) are
+    # enforced under `self._lock` in `_enqueue` so that `close()` can always
+    # append the `None` shutdown sentinel without blocking when the queue is full.
     self._queue: queue.Queue[_TaskT | None] = queue.Queue()
     # Lock protecting lazy thread spawning, queue admission, and closed state.
     self._lock = threading.Lock()
@@ -205,6 +218,11 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
   def step_queue_limit(self) -> int:
     """Returns the queue limit above which step tasks are dropped."""
     return self._step_queue_limit
+
+  @property
+  def metrics_queue_limit(self) -> int:
+    """Returns the queue limit above which metrics tasks are dropped."""
+    return self._metrics_queue_limit
 
   @property
   def is_closed(self) -> bool:
@@ -241,6 +259,17 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
             qsize,
             self._step_queue_limit,
             task.step.step_id,
+            traj_id,
+        )
+        return
+
+      if task.metrics is not None and qsize >= self._metrics_queue_limit:
+        logging.warning(
+            "%s metrics queue reached capacity (%d/%d); dropped metrics"
+            " for trajectory_id=%s.",
+            self._thread_name,
+            qsize,
+            self._metrics_queue_limit,
             traj_id,
         )
         return
@@ -324,6 +353,58 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
         task.trajectory_id,
         step_id,
     )
+
+  def _create_metrics_task(
+      self,
+      trajectory_id: str,
+      metrics: trajectory_lib.TrajectoryMetrics,
+  ) -> _TaskT:
+    """Factory creating a WriteTask instance for metrics updates.
+
+    Subclasses can override this to construct backend-specific WriteTask
+    types if needed.
+
+    Args:
+      trajectory_id: Identifier of the trajectory to update.
+      metrics: TrajectoryMetrics instance.
+
+    Returns:
+      A WriteTask (or subclass) instance.
+    """
+    return cast(_TaskT, WriteTask(trajectory_id=trajectory_id, metrics=metrics))
+
+  def update_metrics(
+      self,
+      trajectory_id: str,
+      metrics: trajectory_lib.TrajectoryMetrics,
+  ) -> None:
+    """Enqueues a TrajectoryMetrics update operation.
+
+    Identifiers and types are validated on the calling thread so malformed
+    writes fail fast with actionable errors.
+
+    Args:
+      trajectory_id: Identifier of trajectory to update.
+      metrics: TrajectoryMetrics containing final summary metrics to merge.
+
+    Raises:
+      TypeError: If metrics is not an instance of TrajectoryMetrics.
+      ValueError: If trajectory_id is empty or whitespace.
+      RuntimeError: If the writer has already been closed.
+    """
+    if not isinstance(metrics, trajectory_lib.TrajectoryMetrics):
+      raise TypeError(
+          "metrics must be an instance of TrajectoryMetrics, got"
+          f" {type(metrics)!r}."
+      )
+    if not trajectory_id or not trajectory_id.strip():
+      raise ValueError("trajectory_id must be a non-empty string.")
+
+    task = self._create_metrics_task(
+        trajectory_id=trajectory_id.strip(),
+        metrics=metrics,
+    )
+    self._enqueue(task)
 
   def flush(self) -> None:
     """Blocks until all queued write operations have been processed.
