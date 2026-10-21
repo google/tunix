@@ -977,6 +977,88 @@ class ManifestTest(_Base):
 
 
 # ---------------------------------------------------------------------------
+# The GCS path, against a fake google.cloud.storage (no network).
+
+
+class _FakeBlob:
+
+  def __init__(self, store, bucket, name):
+    self.store, self.bucket, self.name = store, bucket, name
+
+  @property
+  def size(self):
+    return len(self.store[(self.bucket, self.name)])
+
+  def upload_from_filename(self, path):
+    with open(path, "rb") as f:
+      self.store[(self.bucket, self.name)] = f.read()
+
+  def download_as_bytes(self, start=None):
+    return self.store[(self.bucket, self.name)][start or 0:]
+
+
+class _FakeBucket:
+
+  def __init__(self, store, name):
+    self.store, self.name = store, name
+
+  def blob(self, path):
+    return _FakeBlob(self.store, self.name, path)
+
+
+class _FakeClient:
+  store: dict = {}
+  calls: list = []
+
+  def bucket(self, name):
+    return _FakeBucket(self.store, name)
+
+  def list_blobs(self, bucket, prefix=""):
+    self.calls.append(("list_blobs", bucket, prefix))
+    return [_FakeBlob(self.store, b, n) for (b, n) in sorted(self.store)
+            if b == bucket and n.startswith(prefix)]
+
+
+class GcsPathTest(_Base):
+
+  def test_upload_list_manifest_through_fake_gcs(self):
+    _FakeClient.store, _FakeClient.calls = {}, []
+    fake_storage = mock.MagicMock()
+    fake_storage.Client = _FakeClient
+    fake_cloud = mock.MagicMock(storage=fake_storage)
+    events._upload_fn = events._default_upload
+    events._list_tails_fn = events._default_list_tails
+    events._gcs_client_cache.clear()
+    # A worker's stream already in the bucket, and an unrelated object.
+    _FakeClient.store[("bkt", "maxtext/job/events/rollout-r0.jsonl")] = (
+        b'{"v":1,"ev":"ckpt"}\n{"v":1,"ev":"events_health","emitted":1,'
+        b'"dropped":0,"errors":0,"lost":0,"final":true,"role":"rollout",'
+        b'"pod":"r0"}\n')
+    _FakeClient.store[("bkt", "maxtext/job/events/sub/x.jsonl")] = b"{}\n"
+    _FakeClient.store[("bkt", "maxtext/job/mllog/m.txt")] = b"x"
+    with mock.patch.dict(sys.modules, {"google.cloud": fake_cloud,
+                                       "google.cloud.storage": fake_storage}):
+      os.environ["TUNIX_EVENTS_EXPECTED"] = "orch=1,rollout=1"
+      self.configure(role="orch", pod="o0", gcs_dir="gs://bkt/maxtext/job/events/")
+      events.emit("ckpt", step=1)
+      events.flush(upload=True, timeout=10)
+      self.assertIn(("bkt", "maxtext/job/events/orch-o0.jsonl"),
+                    _FakeClient.store)
+      events.shutdown()
+      man = json.loads(_FakeClient.store[("bkt",
+                                          "maxtext/job/events/manifest.json")])
+      self.assertEqual(sorted(man["files"]),
+                       ["orch-o0.jsonl", "rollout-r0.jsonl"])
+      self.assertEqual(man["files"]["rollout-r0.jsonl"]["events"], 1)
+      self.assertEqual(man["files"]["orch-o0.jsonl"]["events"], 2)  # config, ckpt
+      self.assertIn(("list_blobs", "bkt", "maxtext/job/events/"),
+                    _FakeClient.calls)
+      self.assertEqual(
+          events.verify_manifest("gs://bkt/maxtext/job/events")["problems"], [])
+    self.assertEqual(events.health()["errors"], 0)
+
+
+# ---------------------------------------------------------------------------
 # Step 2: overhead.
 
 
