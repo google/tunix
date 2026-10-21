@@ -1058,6 +1058,43 @@ class GcsPathTest(_Base):
     self.assertEqual(events.health()["errors"], 0)
 
 
+class PodNameTest(_Base):
+  """The stream's pod name (with hostNetwork, HOSTNAME is the node name)."""
+
+  JOBSET = {"JOBSET_NAME": "siv-x-roll-79", "REPLICATED_JOB_NAME": "proc",
+            "JOB_INDEX": "0", "POD_INDEX": "0",
+            "HOSTNAME": "gke-tpu-0d95389d-08n7"}
+
+  def test_order_of_sources(self):
+    f = events.pod_name_from_env
+    self.assertEqual(f(dict(self.JOBSET, TUNIX_EVENTS_POD="emu-3",
+                            POD_NAME="siv-x-roll-79-proc-0-0-86kmf")), "emu-3")
+    self.assertEqual(f(dict(self.JOBSET, POD_NAME="siv-x-roll-79-proc-0-0-86kmf")),
+                     "siv-x-roll-79-proc-0-0-86kmf")
+    self.assertEqual(f(dict(self.JOBSET)), "siv-x-roll-79-proc-0-0")
+    self.assertEqual(f(dict(self.JOBSET, POD_NAME="")), "siv-x-roll-79-proc-0-0")
+    partial = dict(self.JOBSET)
+    del partial["POD_INDEX"]
+    self.assertEqual(f(partial), "gke-tpu-0d95389d-08n7")
+    self.assertEqual(f({"HOSTNAME": "h1"}), "h1")
+    with mock.patch("socket.gethostname", return_value="sock-host"):
+      self.assertEqual(f({}), "sock-host")
+
+  def test_configure_from_env_names_the_stream_by_pod(self):
+    os.environ.update(self.JOBSET)
+    os.environ.update({"TUNIX_EVENTS": "on", "JOB_PREFIX": "siv-x",
+                       "TUNIX_EVENTS_LOCAL_DIR": self.tmp})
+    for k in ("TUNIX_EVENTS_POD", "POD_NAME", "TUNIX_EVENTS_GCS_DIR"):
+      os.environ.pop(k, None)
+    events.configure_from_env("rollout", argv=["main.py"])
+    events.flush(timeout=10)
+    recs = _lines(self.path("rollout", "siv-x-roll-79-proc-0-0"))
+    self.assertEqual({r["pod"] for r in recs}, {"siv-x-roll-79-proc-0-0"})
+    cfg = [r for r in recs if r["ev"] == "config"][0]
+    self.assertEqual(cfg["env"]["JOBSET_NAME"], "siv-x-roll-79")
+    self.assertEqual(cfg["env"]["HOSTNAME"], "gke-tpu-0d95389d-08n7")
+
+
 # ---------------------------------------------------------------------------
 # Node shutdown: the trainer and rollout nodes replace the events SIGTERM
 # handler with an asyncio one (loop.add_signal_handler); their `finally` calls
