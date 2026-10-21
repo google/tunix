@@ -17,9 +17,7 @@
 from __future__ import annotations
 
 import collections
-import dataclasses
 import inspect
-import ipaddress
 import os
 import re
 import socket
@@ -27,7 +25,6 @@ from typing import Any, List, Optional, Tuple
 
 from absl import logging
 import jax
-from jax.experimental import compute_on
 import jax.numpy as jnp
 from tunix.experimental.weight_sync import weight_sync
 from tunix.utils import mesh
@@ -151,17 +148,6 @@ def local_ip() -> str:
     except OSError:
       continue
   return "localhost"
-
-
-def unpack_ip(row: Any) -> str:
-  """Unpacks an IP address from the FFI synchronizer metadata row."""
-  raw_bytes = b"".join(
-      int(x).to_bytes(4, byteorder="little", signed=True) for x in row[:4]
-  )
-  if raw_bytes[:10] == b"\x00" * 10 and raw_bytes[10:12] == b"\xff\xff":
-    return str(ipaddress.IPv4Address(raw_bytes[12:16]))
-  addr_str = str(ipaddress.IPv6Address(raw_bytes))
-  return f"[{addr_str}]" if ":" in addr_str else addr_str
 
 
 def flatten_weights(state: Any) -> Tuple[List[str], List[Any]]:
@@ -477,10 +463,8 @@ class RaidenSynchronizer:
     self._parallelism = parallelism
     self._sync: Any = None
     self._ips: List[str] = []
-    self._unique_listeners: List[str] = []
-    self._listeners: List[str] = []
+    self._control_addr: str = ""
     self._ffi_mesh: Any = None
-    self._ffi_shard_idx: Any = None
     self._global_shard_indices: Optional[List[int]] = None
     if state is not None:
       self.bind(state)
@@ -507,48 +491,25 @@ class RaidenSynchronizer:
       raise RuntimeError(
           "weight_synchronizer_ffi is not available for FFI weight sync."
       )
-
-    import numpy as np  # pylint: disable=g-import-not-at-top
-    from jax.experimental import multihost_utils  # pylint: disable=g-import-not-at-top
+    api_version = getattr(raiden_ffi, "ENDPOINTS_API_VERSION", None)
+    if api_version != 1:
+      raise RuntimeError(
+          "Incompatible tpu_sync weight_synchronizer_ffi"
+          f" (ENDPOINTS_API_VERSION={api_version!r}, expected 1); reinstall"
+          " via scripts/install_raiden.sh."
+      )
 
     _ensure_ffi_compute_on_compat()
-    mesh = getattr(getattr(self.arrays[0], "sharding", None), "mesh", None)
-    if mesh is None:
-      raise ValueError("Arrays must be sharded on a Mesh for FFI weight sync.")
+    sharding = self.arrays[0].sharding
+    if not isinstance(sharding, jax.sharding.NamedSharding):
+      raise ValueError(
+          "Arrays must use NamedSharding for FFI weight sync, got"
+          f" {type(sharding).__name__}."
+      )
+    array_mesh = sharding.mesh
 
-    slice_byte_sizes = [
-        int(np.prod(arr.sharding.shard_shape(arr.shape)) * arr.dtype.itemsize)
-        for arr in self.arrays
-    ]
-    sizes_sharding = jax.sharding.NamedSharding(
-        mesh, jax.sharding.PartitionSpec(None)
-    )
-    slice_byte_sizes_sharded = jax.device_put(
-        jnp.array(slice_byte_sizes, dtype=jnp.int32), sizes_sharding
-    )
-
-    task_mesh_shape = tuple(mesh.shape[a] for a in mesh.axis_names)
-    # Mesh POSITION, not device id. The controller indexes a source shard by
-    # its position in the mesh (`_get_global_indices` walks
-    # physical_mesh_shape), while the native layer keys staging off whatever we
-    # pass here -- slot = shard_idx % num_shards, submanager = shard_idx /
-    # num_shards, and SetGlobalShardIndices records it as the global index.
-    # create_device_mesh reorders devices for topology (a 2x2x2 v5p slice comes
-    # back as ids [0,1,3,2,6,7,5,4]), so keying off d.id labels each slice with
-    # the wrong global index. A 2x2x1 slice happens to be identity-ordered,
-    # which is why this only ever showed up multi-host.
-    global_ids = jnp.arange(mesh.devices.size, dtype=jnp.int32).reshape(
-        task_mesh_shape
-    )
-    shard_idx = jax.device_put(
-        global_ids,
-        jax.sharding.NamedSharding(
-            mesh, jax.sharding.PartitionSpec(*mesh.axis_names)
-        ),
-    )
-
-    src_devices = mesh.devices.flatten()
-    devices_per_host = _devices_per_host(list(src_devices))
+    src_devices = list(array_mesh.devices.flat)
+    devices_per_host = _devices_per_host(src_devices)
     # Loud on purpose: a wrong value here is silent, and costs exactly the
     # shards of every host but one.
     logging.warning(
@@ -558,111 +519,33 @@ class RaidenSynchronizer:
         sorted({getattr(d, "task_id", None) for d in src_devices}, key=str),
     )
 
-    if is_d2h:
-      logging.info(
-          "Initializing Pathways weight synchronizer and executing D2H via FFI"
-          " (%d layers, %d devices/host)",
-          len(self.arrays),
-          devices_per_host,
-      )
-      ws_info = raiden_ffi.init_weight_synchronizer_and_d2h(
-          device_arrays=self.arrays,
-          shard_idx=shard_idx,
-          mesh=mesh,
-          slice_byte_sizes=slice_byte_sizes_sharded,
-          parallelism=self._parallelism,
-          num_layers=len(self.arrays),
-          listener_port=0,
-          num_shards=devices_per_host,
-      )
-    else:
-      logging.info(
-          "Initializing Pathways weight synchronizer for H2D via FFI (%d"
-          " layers, %d devices/host)",
-          len(self.arrays),
-          devices_per_host,
-      )
-
-      # TODO(b/557061810): Re-enable this once the bug is fixed and the FFI
-      # call is verified to work.
-      # ws_info = _raiden_ffi.init_weight_synchronizer(
-      #     device_array=self.arrays[0],
-      #     shard_idx=shard_idx,
-      #     mesh=mesh,
-      #     slice_byte_sizes=slice_byte_sizes_sharded,
-      #     parallelism=self._parallelism,
-      #     num_layers=len(self.arrays),
-      #     listener_port=0,
-      #     num_shards=devices_per_host,
-      # )
-
-      @compute_on.compute_on(
-          compute_type="device_host",
-          out_memory_spaces=jax.memory.Space.Device,
-      )
-      def _local_init(anchor, s_idx, sizes):
-        axis_names = mesh.axis_names
-        out_shape = tuple([1] * len(axis_names)) + (6,)
-        return jax.ffi.ffi_call(
-            "init_weight_synchronizer",
-            jax.ShapeDtypeStruct(out_shape, jnp.int32),
-            has_side_effect=True,
-        )(
-            anchor,
-            s_idx,
-            sizes,
-            local_port=np.int32(0),
-            parallelism=np.int32(self._parallelism),
-            num_layers=np.int32(len(self.arrays)),
-            listener_port=np.int32(0),
-            num_shards=np.int32(devices_per_host),
-        )
-
-      ws_info = jax.shard_map(
-          _local_init,
-          mesh=mesh,
-          in_specs=(
-              self.arrays[0].sharding.spec,
-              jax.sharding.PartitionSpec(*mesh.axis_names),
-              jax.sharding.PartitionSpec(None),
-          ),
-          out_specs=jax.sharding.PartitionSpec(*mesh.axis_names, None),
-      )(self.arrays[0], shard_idx, slice_byte_sizes_sharded)
-
-    local_ws_info = multihost_utils.global_array_to_host_local_array(
-        ws_info,
-        mesh,
-        jax.sharding.PartitionSpec(*mesh.axis_names, None),
+    logging.info(
+        "Initializing Pathways weight synchronizer via FFI (d2h=%s, %d layers,"
+        " %d devices/host)",
+        is_d2h,
+        len(self.arrays),
+        devices_per_host,
     )
-    gathered_ws_info = multihost_utils.process_allgather(local_ws_info).reshape(
-        -1, 6
+    eps = raiden_ffi.start_weight_synchronizer(
+        self.arrays,
+        array_mesh,
+        d2h=is_d2h,
+        parallelism=self._parallelism,
+        listener_port=0,
+        num_shards=devices_per_host,
     )
-
-    self._ips, listeners = [], []
-    for row in gathered_ws_info:
-      ip = unpack_ip(row)
-      self._ips.append(f"{ip}:{int(row[4])}")
-      listeners.append(f"{ip}:{int(row[5])}")
-    self._listeners = listeners
-
-    self._unique_listeners = []
-    for listener in listeners:
-      if listener not in self._unique_listeners:
-        self._unique_listeners.append(listener)
-    # The controller addresses source shard j by shards[j], indexing by MESH
-    # position; this list is assembled by process_allgather, which orders by
-    # PROCESS. Under Pathways there is a single client process, so verify both
-    # that all devices reported and that entry j lines up with mesh device j.
+    self._ips, self._control_addr = eps.single_unit_registration()
     logging.warning(
-        "raiden ffi endpoints: %d row(s) for %d mesh device(s); mesh ids=%s;"
-        " endpoints=%s",
-        len(gathered_ws_info),
+        "raiden ffi endpoints: %d shard(s) across %d host(s) for %d mesh"
+        " device(s); mesh ids=%s; endpoints=%s; control=%s",
+        len(self._ips),
+        len(eps.hosts),
         len(src_devices),
         [d.id for d in src_devices],
         self._ips,
+        self._control_addr,
     )
-    self._ffi_mesh = mesh
-    self._ffi_shard_idx = shard_idx
+    self._ffi_mesh = array_mesh
 
   def _ffi_h2d(self) -> None:
     raiden_ffi = _get_raiden_ffi()
@@ -670,10 +553,10 @@ class RaidenSynchronizer:
       raise RuntimeError(
           "weight_synchronizer_ffi is not available for FFI weight sync."
       )
-    if self._ffi_mesh is None or self._ffi_shard_idx is None:
+    if self._ffi_mesh is None:
       raise RuntimeError(f"{self.job_name}: bind() must run before h2d()")
     self.arrays = list(
-        raiden_ffi.multi_h2d(self.arrays, self._ffi_shard_idx, self._ffi_mesh)
+        raiden_ffi.multi_h2d(self.arrays, mesh=self._ffi_mesh)
     )
     jax.block_until_ready(self.arrays)
 
@@ -705,14 +588,14 @@ class RaidenSynchronizer:
     )
     if self._is_proxy:
       self._ips = []
-      self._unique_listeners = []
+      self._control_addr = ""
       if self._auto_h2d:
         self._init_ffi_transport(is_d2h=False)
         logging.info(
             "%s FFI destination transport ready: shards=%s control=%s",
             self.job_name,
             self._ips,
-            self._unique_listeners,
+            self._control_addr,
         )
       return
     ws_lib = _get_ws_lib()
@@ -771,7 +654,7 @@ class RaidenSynchronizer:
         logging.info(
             "FFI D2H complete. Shards: %s, Control plane: %s",
             self._ips,
-            self._unique_listeners,
+            self._control_addr,
         )
         return
       except Exception:
@@ -886,9 +769,9 @@ class RaidenSynchronizer:
   def work_unit_metadata_all(self) -> List[weight_sync.WorkUnitMetadata]:
     """Returns work unit metadata for registration.
 
-    In proxy/FFI mode, control_addr contains all comma-separated unique listener
-    addresses. The coordinator registers a single work unit and the Raiden
-    controller broadcasts to all listeners in parallel.
+    In proxy/FFI mode, control_plane_rpc_address contains comma-separated
+    per-host control addresses. The coordinator registers a single work unit and
+    the Raiden controller broadcasts to all hosts in parallel.
     """
     return [self.work_unit_metadata()]
 
@@ -962,9 +845,7 @@ class RaidenSynchronizer:
     )
     if self._is_proxy:
       shards = tuple(self._ips)
-      control_addr = (
-          ",".join(self._unique_listeners) if self._unique_listeners else ""
-      )
+      control_addr = self._control_addr
     else:
       control_addr = (
           f"{self.ip}:{self._sync.listener_port}"

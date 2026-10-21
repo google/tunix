@@ -14,15 +14,18 @@
 
 """Tests for RaidenSynchronizer."""
 
+import socket
+import struct
 from unittest import mock
-
-import numpy as np
 
 from absl.testing import absltest
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from tunix.experimental.weight_sync import raiden_synchronizer
+
+jax.config.update("jax_num_cpu_devices", 8)
 
 
 class _FakeWeightSynchronizer:
@@ -361,12 +364,12 @@ class RaidenSynchronizerTest(absltest.TestCase):
 
     ready = _ReadyArray()
     sync._ffi_mesh = object()
-    sync._ffi_shard_idx = object()
     with mock.patch.object(
         raiden_synchronizer, "_raiden_ffi", autospec=True
     ) as ffi:
       ffi.multi_h2d.return_value = [ready]
       sync._ffi_h2d()
+      ffi.multi_h2d.assert_called_once_with([], mesh=sync._ffi_mesh)
     self.assertEqual(ready.ready_calls, 1)
 
   def test_ffi_source_routes_through_d2h_init(self):
@@ -417,7 +420,7 @@ class RaidenSynchronizerTest(absltest.TestCase):
     sync = raiden_synchronizer.RaidenSynchronizer("trainer")
     sync._is_proxy = True
     sync._ips = ["10.0.0.1:8000", "10.0.0.2:8000"]
-    sync._unique_listeners = ["10.0.0.1:9001", "10.0.0.2:9002"]
+    sync._control_addr = "10.0.0.1:9001,10.0.0.2:9002"
     metadata = sync.work_unit_metadata()
     self.assertEqual(
         metadata.control_plane_rpc_address, "10.0.0.1:9001,10.0.0.2:9002"
@@ -447,6 +450,8 @@ class RaidenSynchronizerTest(absltest.TestCase):
       )
 
   def test_devices_per_host_proxy_defaults(self):
+    ffi_mod = raiden_synchronizer._get_raiden_ffi()
+    self.assertIsNotNone(ffi_mod)
     with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
       sync = raiden_synchronizer.RaidenSynchronizer("trainer")
       mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
@@ -454,22 +459,191 @@ class RaidenSynchronizerTest(absltest.TestCase):
       arr = jax.device_put(jnp.ones((2, 4), jnp.float32), sharding)
       sync.arrays = [arr]
 
-      fake_info = np.zeros((1, 6), dtype=np.int32)
+      fake_eps = ffi_mod.SyncEndpoints(
+          hosts=(
+              ffi_mod.HostEndpoints(
+                  host_index=0,
+                  control_address="10.128.0.1:9000",
+                  shards=(
+                      ffi_mod.ShardEndpoint(
+                          mesh_index=0,
+                          device=mesh.devices.flat[0],
+                          data_address="10.0.0.1:8000",
+                      ),
+                  ),
+              ),
+          )
+      )
       with mock.patch.object(
           raiden_synchronizer, "_raiden_ffi", autospec=True
-      ) as ffi, mock.patch(
-          "jax.experimental.multihost_utils.global_array_to_host_local_array",
-          return_value=fake_info,
-      ), mock.patch(
-          "jax.experimental.multihost_utils.process_allgather",
-          return_value=fake_info,
-      ):
+      ) as ffi:
+        ffi.ENDPOINTS_API_VERSION = 1
+        ffi.start_weight_synchronizer.return_value = fake_eps
         # One device on one task_id -> one shard per host.
         sync._init_ffi_transport(is_d2h=True)
-        self.assertEqual(
-            ffi.init_weight_synchronizer_and_d2h.call_args.kwargs["num_shards"],
-            1,
+        ffi.start_weight_synchronizer.assert_called_once_with(
+            sync.arrays,
+            mesh,
+            d2h=True,
+            parallelism=sync._parallelism,
+            listener_port=0,
+            num_shards=1,
         )
+      md = sync.work_unit_metadata()
+      self.assertEqual(md.shards, ("10.0.0.1:8000",))
+      self.assertEqual(md.control_plane_rpc_address, "10.128.0.1:9000")
+
+  def test_ffi_rejects_incompatible_endpoints_api_version(self):
+    with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+      mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
+      sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+      sync.arrays = [jax.device_put(jnp.ones((2, 4), jnp.float32), sharding)]
+      with mock.patch.object(
+          raiden_synchronizer, "_raiden_ffi", autospec=True
+      ) as ffi:
+        ffi.ENDPOINTS_API_VERSION = None
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"ENDPOINTS_API_VERSION=None.*scripts/install_raiden\.sh",
+        ):
+          sync._init_ffi_transport(is_d2h=True)
+
+  def test_ffi_endpoints_api_version_and_multihost_contract(self):
+    ffi_mod = raiden_synchronizer._get_raiden_ffi()
+    self.assertIsNotNone(ffi_mod)
+    self.assertEqual(ffi_mod.ENDPOINTS_API_VERSION, 1)
+
+    def _ip_words(ip: str) -> list[int]:
+      packed = b"\x00" * 10 + b"\xff\xff" + socket.inet_pton(socket.AF_INET, ip)
+      return list(struct.unpack("<4i", packed))
+
+    # 8 devices across 2 hosts (4 shards/host) on a 7-axis mesh matching
+    # tpu-inference's rollout mesh rank, with 2D and 1D weights (rank < mesh
+    # rank, regression-testing b/557061810 through the real shard_map in
+    # init_weight_synchronizer and init_weight_synchronizer_and_d2h).
+    axis_names = (
+        "data",
+        "attn_dp",
+        "attn_dp_expert",
+        "expert",
+        "model",
+        "dcp",
+        "pcp",
+    )
+    devices = np.array(jax.devices()[:8]).reshape(2, 1, 1, 1, 4, 1, 1)
+    mesh = jax.sharding.Mesh(devices, axis_names)
+    w0 = jax.device_put(
+        jnp.ones((4, 8), jnp.bfloat16),
+        jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec("data", "model")
+        ),
+    )
+    w1 = jax.device_put(
+        jnp.ones((8,), jnp.bfloat16),
+        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("model")),
+    )
+    state = {"w0": w0, "w1": w1}
+
+    rows = []
+    for host in range(2):
+      for slot in range(4):
+        data_ip = f"10.0.{host}.{2 if slot < 2 else 4}"
+        ctrl_ip = f"10.128.{host}.5"
+        m = host * 4 + slot
+        rows.append(
+            _ip_words(data_ip) + [8000 + m, 39000 + host] + _ip_words(ctrl_ip)
+        )
+    ws_rows = jnp.asarray(rows, dtype=jnp.int32)  # shape (8, 10)
+
+    ffi_calls = []
+    # Packed shard descriptor from weight_synchronizer_ffi._prepare_shard_info:
+    # [shard_idx, local_slot, host_idx, global_mesh_idx, numa_0..numa_{n-1}].
+    num_shards_per_host = 4
+    descriptor_width = 4 + num_shards_per_host
+    global_mesh_idx_col = 3
+
+    def _fake_ffi_call(target_name, result_type, **_):
+      def _call(*args, **kwargs):
+        ffi_calls.append((target_name, kwargs))
+        if isinstance(result_type, tuple):
+          return tuple(
+              jnp.full(t.shape, 7.0, dtype=t.dtype) for t in result_type
+          )
+        s_idx = next(
+            a
+            for a in args
+            if a.dtype == jnp.int32 and a.shape[-1] == descriptor_width
+        )
+        global_mesh_idx = jnp.reshape(s_idx, (-1,))[global_mesh_idx_col]
+        return ws_rows[global_mesh_idx].reshape(result_type.shape)
+
+      return _call
+
+    expected_shards = (
+        "10.0.0.2:8000",
+        "10.0.0.2:8001",
+        "10.0.0.4:8002",
+        "10.0.0.4:8003",
+        "10.0.1.2:8004",
+        "10.0.1.2:8005",
+        "10.0.1.4:8006",
+        "10.0.1.4:8007",
+    )
+    expected_control = "10.128.0.5:39000,10.128.1.5:39001"
+
+    with (
+        mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}),
+        mock.patch.object(
+            raiden_synchronizer, "_devices_per_host", return_value=4
+        ),
+        mock.patch.object(
+            ffi_mod.compute_on,
+            "compute_on",
+            side_effect=lambda *a, **kw: (lambda f: f),
+        ),
+        mock.patch.object(jax.ffi, "ffi_call", side_effect=_fake_ffi_call),
+    ):
+      # 1. Source (trainer): bind() defers FFI init until d2h(), which traces
+      # start_weight_synchronizer -> init_weight_synchronizer_and_d2h's real
+      # shard_map over the 7-axis mesh.
+      trainer = raiden_synchronizer.RaidenSynchronizer("trainer", parallelism=6)
+      trainer.bind(state)
+      self.assertEmpty(ffi_calls)
+      trainer.d2h()
+      trainer_md = trainer.work_unit_metadata()
+      self.assertEqual(trainer_md.shards, expected_shards)
+      self.assertEqual(trainer_md.control_plane_rpc_address, expected_control)
+      self.assertEqual(trainer_md.mesh_shape, (2, 1, 1, 1, 4, 1, 1))
+      self.assertEqual(trainer_md.mesh_axes, axis_names)
+
+      # 2. Destination (rollout): auto_h2d=True runs FFI init at bind() via
+      # start_weight_synchronizer -> init_weight_synchronizer's real shard_map
+      # over the 7-axis mesh, and h2d() traces multi_h2d's real shard_map.
+      rollout = raiden_synchronizer.RaidenSynchronizer(
+          "rollout", auto_h2d=True, parallelism=6
+      )
+      rollout.bind(state)
+      rollout_md = rollout.work_unit_metadata()
+      self.assertEqual(rollout_md.shards, expected_shards)
+      self.assertEqual(rollout_md.control_plane_rpc_address, expected_control)
+      rollout.h2d()
+      for arr in rollout.arrays:
+        np.testing.assert_array_equal(np.asarray(arr), 7.0)
+
+    self.assertEqual(
+        [name for name, _ in ffi_calls],
+        [
+            "init_weight_synchronizer_and_d2h",
+            "init_weight_synchronizer",
+            "ws_multi_h2d",
+        ],
+    )
+    for _, kwargs in ffi_calls[:2]:
+      self.assertEqual(int(kwargs["parallelism"]), 6)
+      self.assertEqual(int(kwargs["num_layers"]), 2)
+      self.assertEqual(int(kwargs["listener_port"]), 0)
+      self.assertEqual(int(kwargs["num_shards"]), 4)
 
   def test_devices_per_host_pathways_logical_task(self):
     class FakePathwaysDevice:
@@ -528,7 +702,7 @@ class RaidenSynchronizerTest(absltest.TestCase):
       with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
         sync_ffi = raiden_synchronizer.RaidenSynchronizer("trainer")
       sync_ffi._ips = ["10.0.0.1:8000"]
-      sync_ffi._unique_listeners = ["10.0.0.1:9000"]
+      sync_ffi._control_addr = "10.0.0.1:9000"
       meta_ffi = sync_ffi.work_unit_metadata()
       self.assertEqual(meta_ffi.shards, ("10.0.0.1:8000",))
       self.assertEqual(meta_ffi.control_plane_rpc_address, "10.0.0.1:9000")

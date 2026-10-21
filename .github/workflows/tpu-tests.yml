@@ -361,7 +361,7 @@ jobs:
       # Running it last ensures no background processes or chip locks affect
       # earlier single-process tests.
       #
-      # To lift it back out into its own job, move these five steps verbatim
+      # To lift it back out into its own job, move these seven steps verbatim
       # into a new job using the same image; nothing else depends on them.
       # Keeps the name it had as a standalone job. The pip upgrade, editable
       # install and NumPy pin it used to carry are now done once, by the shared
@@ -375,6 +375,16 @@ jobs:
 
       - name: Install Raiden weight sync library
         run: bash scripts/install_raiden.sh
+
+      # Runs before the multi-process smoke recipes below so no leftover
+      # trainer / rollout processes or chip locks can affect it. In OSS this
+      # covers the native transport; the FFI cases skip because the standalone
+      # wheel registers its FFI handlers outside JAX's XLA registry, and run in
+      # the internal raiden_integration_test instead.
+      - name: Run Raiden weight sync unit and TPU integration tests
+        run: |
+          JAX_PLATFORMS=cpu python3 -m pytest tests/experimental/weight_sync/raiden_synchronizer_test.py -v --tb=short
+          python3 -m pytest tests/experimental/weight_sync/raiden_integration_test.py -v --tb=short
 
       - name: Verify TPU runtime preflight
         run: |
