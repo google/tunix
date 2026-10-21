@@ -14,7 +14,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Fill these before you run.
 # k8s has a 63 char limit on total label name, so keep job_prefix unique to your job and short
-export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/tsbao_google_com/trellis-35b@sha256:c13de5e0a33d48767affa542c590dc24bb1a3b22f194e4cb03cbbdff02ceb975}"
+export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/tsbao_google_com/trellis-35b@sha256:59867dadfe1995922268aff873e00f21b502942764f8ad2d2d236a064c794688}"
 export JOB_PREFIX="${JOB_PREFIX:-${USER}}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-35b}"
 
