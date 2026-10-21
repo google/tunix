@@ -1391,6 +1391,18 @@ class NodeStopTest(_Base):
       events.set_process_count(1)
     self.assertFalse(st.stopped.is_set())
 
+  def test_nodes_call_the_hooks_in_their_finally(self):
+    for node in ("run_trainer_node.py", "run_rollout_node.py"):
+      src = (TUNIX_ROOT / "experimental" / "examples" / "common" / node
+             ).read_text()
+      fin = src[src.index("loop.add_signal_handler(sig, stop_event.set)"):]
+      fin = fin[fin.index("finally:"):]
+      a = fin.index("await _events_node_stopping()")
+      b = fin.index("worker_service.stop()")
+      c = fin.index("await server.stop_serving()")
+      d = fin.index("await _events_node_stopped()")
+      self.assertTrue(a < b < c < d, node)
+
 
 # ---------------------------------------------------------------------------
 # The orchestrator's manifest at about 160 streams: sidecars read in parallel
