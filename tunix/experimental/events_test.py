@@ -1059,6 +1059,250 @@ class GcsPathTest(_Base):
 
 
 # ---------------------------------------------------------------------------
+# Node shutdown: the trainer and rollout nodes replace the events SIGTERM
+# handler with an asyncio one (loop.add_signal_handler); their `finally` calls
+# node_stopping() before the drain and node_stopped() after it.
+
+# A google.cloud.storage stand-in for a child process: objects land under
+# $G/<bucket>/<path>.
+_CHILD_FAKE_GCS = """
+import os, sys, types
+_G = os.environ["G"]
+class _Blob:
+    def __init__(self, b, n): self.bucket_name, self.name = b, n
+    def _p(self): return os.path.join(_G, self.bucket_name, self.name)
+    @property
+    def size(self): return os.path.getsize(self._p())
+    def upload_from_filename(self, path):
+        os.makedirs(os.path.dirname(self._p()), exist_ok=True)
+        with open(path, "rb") as s, open(self._p() + ".part", "wb") as d:
+            d.write(s.read())
+        os.replace(self._p() + ".part", self._p())
+    def download_as_bytes(self, start=None):
+        with open(self._p(), "rb") as f:
+            return f.read()[start or 0:]
+class _Bucket:
+    def __init__(self, n): self.n = n
+    def blob(self, p): return _Blob(self.n, p)
+class Client:
+    def bucket(self, n): return _Bucket(n)
+    def list_blobs(self, b, prefix=""):
+        root = os.path.join(_G, b)
+        out = []
+        for d, _, fs in os.walk(root):
+            for f in fs:
+                n = os.path.relpath(os.path.join(d, f), root)
+                if n.startswith(prefix) and not n.endswith(".part"):
+                    out.append(_Blob(b, n))
+        return sorted(out, key=lambda x: x.name)
+_st = types.ModuleType("google.cloud.storage"); _st.Client = Client
+_gc = types.ModuleType("google.cloud"); _gc.storage = _st
+_g = types.ModuleType("google"); _g.cloud = _gc
+sys.modules.update({"google": _g, "google.cloud": _gc, "google.cloud.storage": _st})
+"""
+
+# The shape of run_trainer_node.py / run_rollout_node.py grpc_server_main().
+_CHILD_NODE = _CHILD_FAKE_GCS + """
+import asyncio, signal, time
+events.configure("run-n", "rollout", "pod-n", "gs://bkt/run-n/events", "on",
+                 local_dir=os.environ["D"], flush_interval_s=60.0,
+                 upload_interval_s=600.0, health_interval_s=600.0)
+DRAIN = os.environ.get("DRAIN", "ok")
+
+async def main():
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop_event.set)
+    for i in range(500):
+        events.emit("ckpt", step=i)
+    print("ready", flush=True)
+    try:
+        await stop_event.wait()
+    finally:
+        await asyncio.to_thread(events.node_stopping)
+        print("draining", flush=True)
+        if DRAIN == "hang":
+            await asyncio.sleep(600)
+        for i in range(500, 510):  # events emitted during the drain
+            events.emit("ckpt", step=i)
+        await asyncio.to_thread(events.node_stopped)
+
+asyncio.run(main())
+print("returned", flush=True)
+os._exit(0)  # skips atexit: everything must come from the node's handler path
+"""
+
+
+class NodeStopTest(_Base):
+
+  def _start(self, drain):
+    g = os.path.join(self.tmp, "gcs")
+    p = _run_child(_CHILD_NODE, env={"D": self.tmp, "G": g, "DRAIN": drain})
+    self.assertEqual(p.stdout.readline().strip(), "ready")
+    p.send_signal(signal.SIGTERM)
+    return p, os.path.join(g, "bkt", "run-n", "events")
+
+  def test_node_handler_writes_final_health_and_uploads(self):
+    p, gdir = self._start("ok")
+    out, err = p.communicate(timeout=60)
+    self.assertEqual(p.returncode, 0, err)
+    self.assertIn("returned", out)
+    local = os.path.join(self.tmp, "rollout-pod-n.jsonl")
+    recs = _lines(local)
+    self.assertEqual([x["step"] for x in recs if x["ev"] == "ckpt"],
+                     list(range(510)))
+    self.assertEqual(recs[-1]["ev"], "events_health")
+    self.assertTrue(recs[-1]["final"])
+    self.assertEqual(recs[-1]["emitted"], 511)  # config + 510
+    self.assertEqual(recs[-1]["dropped"], 0)
+    self.assertEqual(recs[-1]["errors"], 0)
+    with open(local, "rb") as a, open(
+        os.path.join(gdir, "rollout-pod-n.jsonl"), "rb") as b:
+      self.assertEqual(a.read(), b.read())  # the upload is the final file
+    side = json.load(open(os.path.join(gdir, "_health", "rollout-pod-n.json")))
+    self.assertTrue(side["final"])
+    self.assertEqual(side["emitted"], 511)
+
+  def test_kill_during_drain_keeps_pre_drain_upload(self):
+    p, gdir = self._start("hang")
+    self.assertEqual(p.stdout.readline().strip(), "draining")
+    p.kill()  # the grace period ran out during the drain
+    p.wait(30)
+    recs = _lines(os.path.join(gdir, "rollout-pod-n.jsonl"))
+    self.assertEqual([x["step"] for x in recs if x["ev"] == "ckpt"],
+                     list(range(500)))
+
+  def test_node_stop_is_bounded_and_does_not_raise(self):
+    st = self.configure(role="rollout", pod="p", gcs_dir="gs://bkt/x")
+    gate = threading.Event()
+    events._upload_fn = lambda src, dst: gate.wait(30)  # a hung upload
+    events.emit("ckpt", step=1)
+    t0 = time.monotonic()
+    events.node_stopping(timeout=0.3)
+    events.node_stopped(timeout=0.3)
+    self.assertLess(time.monotonic() - t0, 3.0)
+    self.assertFalse(events.ON)
+    gate.set()
+    st.stopped.wait(10)
+
+  def test_shared_process_only_flushes(self):
+    st = self.configure(role="rollout", pod="p")
+    events.set_process_count(2)
+    try:
+      events.emit("ckpt", step=1)
+      events.node_stopped(timeout=5)
+      self.assertTrue(events.ON)  # the other process main keeps the stream
+      self.assertTrue(any(x["ev"] == "ckpt" for x in _lines(self.path(
+          "rollout", "p"))))
+    finally:
+      events.set_process_count(1)
+    self.assertFalse(st.stopped.is_set())
+
+
+# ---------------------------------------------------------------------------
+# The orchestrator's manifest at about 160 streams: sidecars read in parallel
+# within a budget; a partial manifest when the budget runs out.
+
+
+class ManifestScaleTest(_Base):
+
+  def _streams(self, d, n):
+    os.makedirs(os.path.join(d, events.HEALTH_DIR), exist_ok=True)
+    for i in range(n):
+      name = f"rollout-r{i}"
+      with open(os.path.join(d, name + ".jsonl"), "w") as f:
+        f.write('{"v":1,"ev":"ckpt"}\n{"v":1,"ev":"events_health","emitted":1,'
+                '"dropped":0,"errors":0,"lost":0,"final":true}\n')
+      json.dump({"v": 1, "role": "rollout", "pod": f"r{i}", "emitted": 1,
+                 "dropped": 0, "errors": 0, "lost": 0, "final": True},
+                open(os.path.join(d, events.HEALTH_DIR, name + ".json"), "w"))
+
+  def test_160_streams_with_slow_reads_complete_within_budget(self):
+    d = os.path.join(self.tmp, "ev")
+    self._streams(d, 160)
+    real = events._default_read_health
+
+    def slow(dir_uri, name, size):
+      time.sleep(0.05)  # a GCS round trip
+      return real(dir_uri, name, size)
+
+    events._read_health_fn = slow
+    try:
+      partial = []
+      t0 = time.monotonic()
+      man = events.build_manifest(d, "run", {"rollout": 160}, budget_s=10.0,
+                                  on_partial=partial.append)
+      dt = time.monotonic() - t0
+    finally:
+      events._read_health_fn = real
+    self.assertLess(dt, 2.0)  # 160 x 50 ms serially would be 8 s
+    self.assertTrue(man["complete"])
+    self.assertEqual(man["listed"], 160)
+    self.assertEqual(man["unread"], [])
+    self.assertTrue(all(r["events"] == 1 and r["health"] == "sidecar"
+                        for r in man["files"].values()))
+    self.assertEqual(len(partial), 1)
+    self.assertFalse(partial[0]["complete"])
+    self.assertEqual(len(partial[0]["unread"]), 160)
+
+  def test_budget_exhausted_writes_partial_manifest(self):
+    d = os.path.join(self.tmp, "ev")
+    self._streams(d, 40)
+    real = events._default_read_health
+    gate = threading.Event()
+
+    def some_hang(dir_uri, name, size):
+      if name.endswith(("7.jsonl", "3.jsonl")):
+        gate.wait(30)
+      return real(dir_uri, name, size)
+
+    events._read_health_fn = some_hang
+    try:
+      t0 = time.monotonic()
+      man = events.build_manifest(d, "run", {"rollout": 40}, budget_s=0.5)
+      self.assertLess(time.monotonic() - t0, 3.0)
+    finally:
+      gate.set()
+      events._read_health_fn = real
+    self.assertFalse(man["complete"])
+    self.assertEqual(man["unread"], sorted(
+        n for n in man["files"] if n.endswith(("7.jsonl", "3.jsonl"))))
+    self.assertIn("partial", man["note"])
+    self.assertEqual(man["listed"], 40)
+
+  def test_orchestrator_atexit_manifest_lists_all_and_is_complete(self):
+    # The orchestrator writes its manifest from atexit (after
+    # concurrent.futures stops accepting work), in its own process.
+    d = os.path.join(self.tmp, "ev")
+    self._streams(d, 160)
+    code = """
+        import os
+        os.environ["TUNIX_EVENTS_EXPECTED"] = "orch=1,rollout=160"
+        events.configure("run-o", "orch", "o0", None, "on",
+                         local_dir=os.environ["D"])
+        events.emit("ckpt", step=1)
+    """
+    p = _run_child(code, env={"D": d})
+    _, err = p.communicate(timeout=60)
+    self.assertEqual(p.returncode, 0, err)
+    man = json.load(open(os.path.join(d, events.MANIFEST_NAME)))
+    self.assertTrue(man["complete"], man.get("note"))
+    self.assertEqual(len(man["files"]), 161)
+    self.assertEqual(man["files"]["orch-o0.jsonl"]["health"], "own")
+    self.assertEqual(events.verify_manifest(d)["problems"], [])
+
+  def test_verify_reports_partial_manifest(self):
+    d = os.path.join(self.tmp, "ev")
+    self._streams(d, 2)
+    man = events.build_manifest(d, "run", {}, budget_s=0.0)
+    with open(os.path.join(d, events.MANIFEST_NAME), "w") as f:
+      json.dump(man, f)
+    probs = events.verify_manifest(d)["problems"]
+    self.assertTrue(any(x.startswith("partial manifest") for x in probs), probs)
+
+
+# ---------------------------------------------------------------------------
 # Step 2: overhead.
 
 
