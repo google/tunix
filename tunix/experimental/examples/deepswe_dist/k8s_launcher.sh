@@ -536,7 +536,7 @@ start_orchestrator() {
         ${LOG_DIR:+--log_dir=\"${LOG_DIR}\"} \
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
         ${trajectory_logging_arg} \
-        ${TRAJECTORY_STORE_ROOT_DIR:+--enable_trajectory_store --trajectory_store_dir=\"${TRAJECTORY_STORE_ROOT_DIR}\"} \
+        ${TRAJECTORY_STORE_ROOT_DIR:+--enable_trajectory_store --trajectory_store_dir=\"${TRAJECTORY_STORE_ROOT_DIR}\" --run_id=\"${JOB_PREFIX}\"} \
         --flush_every_n_steps=${FLUSH_EVERY_N_STEPS} \
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
