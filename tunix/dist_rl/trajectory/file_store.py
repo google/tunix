@@ -230,11 +230,12 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
       task.traj_dir.mkdir(parents=True, exist_ok=True)
 
     # Only write metadata.json if metadata content has changed.
-    meta_json = _dump_json(task.metadata)
-    meta_hash = hash(meta_json)
-    if self._metadata_hash_by_trajectory_id.get(traj_id) != meta_hash:
-      task.meta_path.write_text(meta_json)
-      self._metadata_hash_by_trajectory_id[traj_id] = meta_hash
+    if task.metadata is not None:
+      meta_json = _dump_json(task.metadata)
+      meta_hash = hash(meta_json)
+      if self._metadata_hash_by_trajectory_id.get(traj_id) != meta_hash:
+        task.meta_path.write_text(meta_json)
+        self._metadata_hash_by_trajectory_id[traj_id] = meta_hash
 
     # Write step file if provided. `step_path` is set by `to_atif()`.
     if task.step is not None:
