@@ -59,7 +59,7 @@ class PagedSumTransformer(nnx.Module):
 
   def __init__(
       self,
-      offset: float = 0.0,
+      offset: jax.typing.ArrayLike = 0.0,
       dtype: jax.typing.DTypeLike = jnp.float32,
       geometries: Mapping[str, kv_cache_manager_lib.CacheGeometry] = GEOMETRIES,
   ):

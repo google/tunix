@@ -485,5 +485,107 @@ class StepTest(parameterized.TestCase):
     self.assertFalse(engine.has_unfinished_requests())
 
 
+
+def new_weights(offset: float) -> nnx.State:
+  return nnx.variables(testing_utils.PagedSumTransformer(offset=offset), nnx.Param)
+
+
+class UpdateParamsTest(parameterized.TestCase):
+
+  def tearDown(self):
+    mock.patch.stopall()
+    super().tearDown()
+
+  def test_replaces_the_weights(self):
+    engine = testing_utils.make_engine()
+
+    engine.update_params(new_weights(2.0))
+
+    engine.add_request(testing_utils.make_request('0', [1, 2, 3]))
+    self.assertEqual(
+        drive(engine)['0'].token_ids.tolist(),
+        reference_generate([1, 2, 3], offset=2.0),
+    )
+
+  @parameterized.named_parameters(
+      ('one_request', 1),
+      # Identical prompts share their prefix pages, which must be released
+      # only once.
+      ('shared_prefix', 3),
+  )
+  def test_mid_decode_update_resumes_under_the_new_weights(
+      self, num_requests
+  ):
+    engine = testing_utils.make_engine()
+    prompt = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    request_ids = [str(i) for i in range(num_requests)]
+    for request_id in request_ids:
+      engine.add_request(testing_utils.make_request(request_id, list(prompt)))
+    # One prefill step, then two decode steps, each sampling one token.
+    for _ in range(3):
+      engine.step()
+    before_sync = reference_generate(prompt, 3)
+
+    engine.update_params(new_weights(1.0))
+    finished = drive(engine)
+
+    # Tokens sampled before the sync are kept, and the continuation must be
+    # what the new weights generate from the same tokens. It is not if a
+    # request decodes on KV left from the old weights.
+    after_sync = reference_generate(prompt + before_sync, 5, offset=1.0)
+    for request_id in request_ids:
+      self.assertEqual(
+          finished[request_id].token_ids.tolist(), before_sync + after_sync
+      )
+
+  def test_rewinds_running_requests(self):
+    engine = testing_utils.make_engine()
+    engine.add_request(testing_utils.make_request('0', [1, 2, 3, 4, 5]))
+    for _ in range(3):
+      engine.step()
+    req = engine._requests['0']  # pylint: disable=protected-access
+    self.assertGreater(req.num_computed_tokens, 0)
+    self.assertTrue(engine.has_unfinished_requests())
+
+    engine.update_params(new_weights(1.0))
+
+    self.assertEqual(req.num_computed_tokens, 0)
+    self.assertTrue(engine.has_unfinished_requests())
+
+  def test_clears_the_prefix_cache(self):
+    engine = testing_utils.make_engine()
+    prompt = list(range(1, 10))
+    engine.add_request(testing_utils.make_request('warm', list(prompt)))
+    drive(engine)
+
+    engine.update_params(new_weights(1.0))
+    spy = spy_on_execute_step(engine)
+    engine.add_request(testing_utils.make_request('fresh', list(prompt)))
+    finished = drive(engine)
+
+    # Pages cached under the old weights must not be hit.
+    first_metadata = spy.call_args_list[0].kwargs['metadata']
+    self.assertEqual(first_metadata.query_lens[0], len(prompt))
+    self.assertEqual(
+        finished['fresh'].token_ids.tolist(),
+        reference_generate(prompt, offset=1.0),
+    )
+
+  def test_failed_update_is_engine_noop(self):
+    engine = testing_utils.make_engine()
+    engine.add_request(testing_utils.make_request('0', [1, 2, 3]))
+    engine.step()
+    mismatched = nnx.variables(
+        testing_utils.PagedSumTransformer(offset=np.zeros((2,))), nnx.Param
+    )
+
+    with self.assertRaisesRegex(ValueError, 'Shape mismatch|shape'):
+      engine.update_params(mismatched)
+
+    self.assertEqual(
+        drive(engine)['0'].token_ids.tolist(), reference_generate([1, 2, 3])
+    )
+
+
 if __name__ == '__main__':
   absltest.main()

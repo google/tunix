@@ -21,10 +21,12 @@ batch of requests, the `KVCacheManager` maps them onto KV cache pages, and the
 
 import dataclasses
 import itertools
+from typing import Any
 
 from flax import nnx
 from flax.nnx import graph
 import jax
+import jaxtyping
 import numpy as np
 from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import model_runner as model_runner_lib
@@ -183,6 +185,37 @@ class LLMEngine:
       self,
   ) -> tuple[graph.GraphDef[nnx.Module], list[nnx.Variable]]:
     return self._model_runner.model_def_and_state()
+
+  def update_params(
+      self,
+      updated_weights: jaxtyping.PyTree,
+      filter_types: tuple[Any, ...] | None = None,
+  ) -> None:
+    """Syncs new weights into the model the engine runs.
+
+    Every in-flight request is preempted: the KV it holds was computed with
+    the previous weights, so it is discarded, and the request re-prefills its
+    prompt and the tokens sampled so far with the new weights. Tokens already
+    sampled are kept. The prefix cache is cleared for the same reason.
+
+    Args:
+      updated_weights: The new weights, either all of the model's parameters
+        or its LoRA parameters alone.
+      filter_types: The variable types to update. All of them when None.
+    """
+    # Only the weight update can fail, so running it first leaves the engine
+    # usable if it does.
+    self._model_runner.update_params(updated_weights, filter_types)
+    self.reset_kv_caches()
+
+  def reset_kv_caches(self) -> None:
+    """Discards all KV, for after the weights change in place.
+
+    Every in-flight request is preempted, and re-prefills its prompt and the
+    tokens sampled so far. The prefix cache is cleared.
+    """
+    self._scheduler.preempt_all()
+    self._kv_cache_manager.reset_kv_caches()
 
   def add_request(self, request: request_lib.EngineRequest) -> None:
     """Submits a request, to be scheduled from the next step on."""
