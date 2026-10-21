@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import asyncio
-import time
 import types
 import unittest
 from unittest import mock
@@ -913,7 +912,11 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(traj.metadata["policy_versions"], [0, 1])
 
   async def test_fr1_synthetic_straggler_ab_benchmark(self):
-    async def _run_scenario(partial_rollout: bool) -> tuple[float, list[int]]:
+
+    async def _run_scenario(partial_rollout: bool) -> list[int]:
+      straggler_entered = asyncio.Event()
+      release_straggler = asyncio.Event()
+
       sampler = _PauseTrackingSampler()
       manager = manager_lib.RolloutManager(
           config=rollout_worker.RolloutConfig(partial_rollout=partial_rollout),
@@ -936,10 +939,11 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
 
         async def run_episode(self):
           start_v = sampler.policy_version
-          delay_s = float(self.request.metadata.get("delay_s", 0.01))
-          await asyncio.sleep(delay_s)
+          if self.request.metadata.get("is_straggler", False):
+            straggler_entered.set()
+            await release_straggler.wait()
           while not sampler._unpaused.is_set():
-            await asyncio.sleep(0.002)
+            await asyncio.sleep(0.001)
           return datatypes.TrajectoryItem(
               prompt_id=self.request.prompt_id,
               group_index=self.request.group_index,
@@ -948,24 +952,24 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
           )
 
       requests = []
-      # Group 0: 4 fast rollouts (10ms)
+      # Group 0: 4 fast rollouts
       for g_idx in range(4):
         requests.append(
             datatypes.RolloutRequest(
                 prompt="g0",
                 prompt_id="group_0",
                 group_index=g_idx,
-                metadata={"delay_s": 0.01},
+                metadata={},
             )
         )
-      # Group 1: 3 fast rollouts (10ms) + 1 straggler rollout (200ms)
+      # Group 1: 3 fast rollouts + 1 straggler rollout
       for g_idx in range(4):
         requests.append(
             datatypes.RolloutRequest(
                 prompt="g1",
                 prompt_id="group_1",
                 group_index=g_idx,
-                metadata={"delay_s": 0.20 if g_idx == 3 else 0.01},
+                metadata={"is_straggler": True} if g_idx == 3 else {},
             )
         )
 
@@ -975,28 +979,49 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
           _StragglerCollector,
       ):
         tasks = [asyncio.create_task(manager.generate(r)) for r in requests]
-        # Wait for Group 0 (first 4 tasks) to finish (~10ms).
-        await asyncio.gather(*tasks[:4])
+        # Wait for the 7 fast tasks to complete and the straggler to enter.
+        await asyncio.gather(*tasks[:7])
+        await straggler_entered.wait()
 
-        t0 = time.perf_counter()
-        await manager.pre_weight_sync()
-        await manager.weight_sync(types.SimpleNamespace(version=1))
-        await manager.post_weight_sync()
-        sync_wall_s = time.perf_counter() - t0
+        if not partial_rollout:
+          # Wait mode (partial_rollout=False): pre_weight_sync drains all
+          # in-flight work before returning.
+          pre_sync_task = asyncio.create_task(manager.pre_weight_sync())
+          for _ in range(3):
+            await asyncio.sleep(0)
+          self.assertFalse(pre_sync_task.done())
+          release_straggler.set()
+          await asyncio.wait_for(pre_sync_task, timeout=5.0)
+          self.assertTrue(tasks[7].done())
+          self.assertEqual(sampler.pause_calls, [("wait", True)])
+          await manager.weight_sync(types.SimpleNamespace(version=1))
+          await manager.post_weight_sync()
+          self.assertEqual(sampler.resume_calls, 1)
+        else:
+          # Keep mode (partial_rollout=True): pre_weight_sync completes
+          # immediately while the straggler stays in-flight and is held by
+          # the paused sampler until post_weight_sync resumes it.
+          pre_sync_task = asyncio.create_task(manager.pre_weight_sync())
+          for _ in range(3):
+            await asyncio.sleep(0)
+          self.assertTrue(pre_sync_task.done())
+          await pre_sync_task
+          self.assertEqual(sampler.pause_calls, [("keep", False)])
+          self.assertFalse(sampler._unpaused.is_set())
+          release_straggler.set()
+          for _ in range(3):
+            await asyncio.sleep(0.002)
+          self.assertFalse(tasks[7].done())
+          await manager.weight_sync(types.SimpleNamespace(version=1))
+          await manager.post_weight_sync()
+          self.assertEqual(sampler.resume_calls, 1)
 
         results = await asyncio.gather(*tasks)
-        versions = [r.policy_version for r in results]
-        return sync_wall_s, versions
+        return [r.policy_version for r in results]
 
-    wait_sync_s, wait_versions = await _run_scenario(partial_rollout=False)
-    keep_sync_s, keep_versions = await _run_scenario(partial_rollout=True)
+    wait_versions = await _run_scenario(partial_rollout=False)
+    keep_versions = await _run_scenario(partial_rollout=True)
 
-    # With partial_rollout=False (mode="wait"), pre_weight_sync blocks for the
-    # remaining ~190ms of Group 1's straggler.
-    self.assertGreaterEqual(wait_sync_s, 0.12)
-    # With partial_rollout=True (mode="keep"), weight sync completes without
-    # waiting for the straggler (>80% latency reduction).
-    self.assertLess(keep_sync_s, wait_sync_s * 0.2)
     self.assertEqual(wait_versions, [0] * 8)
     self.assertEqual(keep_versions, [0] * 8)
 

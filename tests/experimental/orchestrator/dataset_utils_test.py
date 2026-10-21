@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import asyncio
-import time
+import threading
 
 from absl.testing import absltest
 from tunix.experimental.orchestrator import dataset_utils
@@ -42,25 +42,35 @@ class DatasetUtilsTest(absltest.TestCase):
     asyncio.run(_run())
 
   def test_blocking_generator_dataset_does_not_freeze_event_loop(self):
-    sleep_per_item_s = 0.025
     num_items = 4
+    entered_block = threading.Event()
+    release_block = threading.Event()
 
     def _blocking_gen():
       for i in range(num_items):
-        time.sleep(sleep_per_item_s)
+        entered_block.set()
+        self.assertTrue(
+            release_block.wait(timeout=5.0),
+            "Event loop was blocked while next() ran in worker thread.",
+        )
+        release_block.clear()
         yield f"prompt_{i}"
 
     async def _run():
-      heartbeat_gaps_s: list[float] = []
+      ticks_while_blocked = 0
       stop_hb = False
 
       async def _heartbeat():
-        last = time.perf_counter()
+        nonlocal ticks_while_blocked
         while not stop_hb:
-          await asyncio.sleep(0.002)
-          now = time.perf_counter()
-          heartbeat_gaps_s.append(now - last)
-          last = now
+          if entered_block.is_set():
+            entered_block.clear()
+            for _ in range(3):
+              await asyncio.sleep(0)
+              ticks_while_blocked += 1
+            release_block.set()
+          else:
+            await asyncio.sleep(0.001)
 
       hb_task = asyncio.create_task(_heartbeat())
       try:
@@ -77,8 +87,7 @@ class DatasetUtilsTest(absltest.TestCase):
           collected,
           [(0, "prompt_0"), (1, "prompt_1"), (2, "prompt_2"), (3, "prompt_3")],
       )
-      self.assertGreaterEqual(len(heartbeat_gaps_s), 10)
-      self.assertLess(max(heartbeat_gaps_s), sleep_per_item_s * 1.8)
+      self.assertEqual(ticks_while_blocked, num_items * 3)
 
     asyncio.run(_run())
 
