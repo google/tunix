@@ -280,7 +280,8 @@ register("events_health",
 # and the values of all secret-named env vars are scrubbed from argv.
 
 CONFIG_ENV_ALLOWLIST = (
-    "JOB_PREFIX", "HOSTNAME", "TUNIX_EVENTS", "TUNIX_EVENTS_GCS_DIR",
+    "JOB_PREFIX", "HOSTNAME", "POD_NAME", "JOBSET_NAME", "TUNIX_EVENTS",
+    "TUNIX_EVENTS_GCS_DIR", "TUNIX_EVENTS_POD",
     "TUNIX_STAGE_BATCH", "TUNIX_WSYNC_PLAN_WARMUP", "TUNIX_WSYNC_PER_ENGINE",
     "TUNIX_DEBUG_INFERENCE_LOGS", "IN_FLIGHT_WEIGHT_UPDATES",
     "WEIGHT_SYNC_PARALLEL_H2H", "WEIGHT_SYNC_DISABLE_TIMEOUTS",
@@ -1213,15 +1214,37 @@ def configure(run: str, role: str, pod: str, gcs_dir: str | None,
     _count_error("configure", e)
 
 
-def configure_from_env(role: str, argv: list[str] | None = None) -> None:
-  """configure() from the launcher env: JOB_PREFIX, TUNIX_EVENTS_POD or
-  HOSTNAME, TUNIX_EVENTS_GCS_DIR. Returns at once when `TUNIX_EVENTS` is off."""
-  if _parse_level(None) == "off":
-    return
-  pod = os.environ.get("TUNIX_EVENTS_POD") or os.environ.get("HOSTNAME") or ""
+_JOBSET_POD_ENV = ("JOBSET_NAME", "REPLICATED_JOB_NAME", "JOB_INDEX",
+                   "POD_INDEX")
+
+
+def pod_name_from_env(env: Any = None) -> str:
+  """The stream's pod name: TUNIX_EVENTS_POD, else POD_NAME (downward API
+  `metadata.name`), else `<jobset>-<replicated job>-<job index>-<pod index>`
+  from the JobSet env the launcher already sets (the pod name without its
+  random suffix), else HOSTNAME, else the host name. With hostNetwork,
+  HOSTNAME is the node's name, so it is the last resort."""
+  env = os.environ if env is None else env
+  pod = (env.get("TUNIX_EVENTS_POD") or env.get("POD_NAME") or "").strip()
+  if pod:
+    return pod
+  parts = [(env.get(k) or "").strip() for k in _JOBSET_POD_ENV]
+  if all(parts):
+    return "-".join(parts)
+  pod = (env.get("HOSTNAME") or "").strip()
   if not pod:
     import socket  # pylint: disable=g-import-not-at-top
     pod = socket.gethostname()
+  return pod
+
+
+def configure_from_env(role: str, argv: list[str] | None = None) -> None:
+  """configure() from the launcher env: JOB_PREFIX, the pod name
+  (pod_name_from_env), TUNIX_EVENTS_GCS_DIR. Returns at once when
+  `TUNIX_EVENTS` is off."""
+  if _parse_level(None) == "off":
+    return
+  pod = pod_name_from_env()
   configure(run=os.environ.get("JOB_PREFIX", ""), role=role, pod=pod,
             gcs_dir=os.environ.get("TUNIX_EVENTS_GCS_DIR") or None,
             argv=argv)
