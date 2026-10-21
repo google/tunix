@@ -266,7 +266,7 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     )
     self.assertIsInstance(orch.trajectory_store, file_store.FileTrajectoryStore)
     self.assertIs(
-        orch.trajectory_store._metadata_cls,  # pylint: disable=protected-access
+        orch.trajectory_store.bound_metadata_cls,
         trajectory_lib.TunixTrajectoryMetadata,
     )
     orch.shutdown()

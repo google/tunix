@@ -209,7 +209,7 @@ class FromConfigTest(absltest.TestCase):
     store = store_lib.TunixTrajectoryStore.from_config(self._file_config())
     self.assertIsInstance(store, file_store.FileTrajectoryStore)
     self.assertIs(
-        store._metadata_cls,  # pylint: disable=protected-access
+        store.bound_metadata_cls,
         trajectory_lib.TunixTrajectoryMetadata,
     )
     with self.assertRaisesRegex(
@@ -224,6 +224,36 @@ class FromConfigTest(absltest.TestCase):
           )
       )
     store.close()
+
+  def test_bound_metadata_cls_property_reports_bound_metadata_class(self):
+    file_s = store_lib.TunixTrajectoryStore.from_config(self._file_config())
+    self.assertIs(
+        file_s.bound_metadata_cls, trajectory_lib.TunixTrajectoryMetadata
+    )
+    file_s.close()
+
+    mem_s = store_lib.TunixTrajectoryStore.from_config({"backend": "memory"})
+    self.assertIs(
+        mem_s.bound_metadata_cls, trajectory_lib.TunixTrajectoryMetadata
+    )
+
+    subscripted_mem = in_memory_store.InMemoryTrajectoryStore[
+        trajectory_lib.TunixTrajectoryMetadata
+    ]()
+    self.assertIs(
+        subscripted_mem.bound_metadata_cls,
+        trajectory_lib.TunixTrajectoryMetadata,
+    )
+
+    unbound_mem = in_memory_store.InMemoryTrajectoryStore()
+    self.assertIsNone(unbound_mem.bound_metadata_cls)
+
+    base_meta_mem = in_memory_store.InMemoryTrajectoryStore[
+        trajectory_lib.TrajectoryMetadata
+    ]()
+    self.assertIs(
+        base_meta_mem.bound_metadata_cls, trajectory_lib.TrajectoryMetadata
+    )
 
 
 class GenericTypeParametersTest(absltest.TestCase):

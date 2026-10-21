@@ -244,6 +244,11 @@ class TrajectoryStore(
         self._metadata_cls = self._extract_metadata_cls(orig_class)
     return self._metadata_cls
 
+  @property
+  def bound_metadata_cls(self) -> type[MetadataT] | None:
+    """The TrajectoryMetadata class bound to this store, or None if unbound."""
+    return self._get_bound_metadata_cls()
+
   def _validate_and_bind_metadata(self, metadata: MetadataT) -> None:
     """Validates and binds the store instance's single TrajectoryMetadata type.
 
@@ -386,18 +391,12 @@ class TrajectoryStore(
     return cast(Self, store)
 
 
-# TODO(tunix-dev): Consider overriding __instancecheck__ (via a metaclass) so
-# `isinstance(store, TunixTrajectoryStore)` returns True for stores bound to
-# `TunixTrajectoryMetadata`.
 class TunixTrajectoryStore(
     TrajectoryStore[trajectory_lib.TunixTrajectoryMetadata],
-    abc.ABC,
 ):
   """TrajectoryStore bound to TunixTrajectoryMetadata.
 
   `TunixTrajectoryStore.from_config(config)` instantiates the configured backend
   (`FileTrajectoryStore`, `SqlTrajectoryStore`, or `InMemoryTrajectoryStore`)
-  and binds it to `TunixTrajectoryMetadata`. Note that the returned instance is
-  a subclass of `TrajectoryStore` (and of the selected backend), not a runtime
-  subclass of `TunixTrajectoryStore`.
+  and binds it to `TunixTrajectoryMetadata`.
   """

@@ -15,7 +15,8 @@ import datetime
 import enum
 import functools
 import math
-from typing import Annotated, Any, ClassVar, Final, Generic, Literal, Self, TypeVar, TypedDict, get_args
+import sys
+from typing import Annotated, Any, ClassVar, Final, Generic, Literal, Self, TypeVar, TypedDict, cast, get_args
 import weakref
 
 import numpy as np
@@ -795,6 +796,12 @@ class TrajectoryMetadata(pydantic.BaseModel):
       MutableMapping[type[TrajectoryMetadata], frozenset[str]]
   ] = weakref.WeakKeyDictionary()
 
+  # Maps each registered TrajectoryMetadata subclass to its paired Trajectory
+  # subclass. WeakKeyDictionary avoids keeping dynamically defined/test classes alive.
+  _PAIRED_TRAJECTORY_CLASSES: ClassVar[
+      MutableMapping[type[TrajectoryMetadata], type[Trajectory[Any]]]
+  ] = weakref.WeakKeyDictionary()
+
   @classmethod
   def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
     """Validates `EXTENSIONS_KEY` and registers extension fields for subclasses.
@@ -812,9 +819,17 @@ class TrajectoryMetadata(pydantic.BaseModel):
     # `TrajectoryMetadata` to share root-level ATIF fields, but represent full
     # trajectories rather than standalone metadata classes.
     trajectory_base = globals().get("Trajectory")
-    if cls.__name__ == "Trajectory" or (
-        trajectory_base is not None and issubclass(cls, trajectory_base)
-    ):
+    if cls.__name__ == "Trajectory":
+      return
+    if trajectory_base is not None and issubclass(cls, trajectory_base):
+      for base in cls.__bases__:
+        if (
+            isinstance(base, type)
+            and issubclass(base, TrajectoryMetadata)
+            and base is not TrajectoryMetadata
+            and not issubclass(base, trajectory_base)
+        ):
+          TrajectoryMetadata._PAIRED_TRAJECTORY_CLASSES[base] = cls
       return
     _validate_subclass_extensions_key(cls)
     extension_fields = frozenset(
@@ -977,8 +992,8 @@ class TrajectoryMetadata(pydantic.BaseModel):
     """Constructs `trajectory_cls` from this metadata, steps, and subagents.
 
     Verifies that `trajectory_cls` is a subclass of `type(self)` before
-    instantiation so a `TrajectoryMetadata` subclass that does not override
-    `create_trajectory()` raises `TypeError`.
+    instantiation so passing an incompatible trajectory class raises
+    `TypeError`.
 
     Args:
       trajectory_cls: Concrete Trajectory class to build.
@@ -1010,10 +1025,43 @@ class TrajectoryMetadata(pydantic.BaseModel):
       data["subagent_trajectories"] = list(subagent_trajectories)
     return trajectory_cls(**data)
 
-  # TODO(tunix-dev): Auto-pair or synthesize a Trajectory subclass when a
-  # TrajectoryMetadata subclass does not require custom step upcasting, removing
-  # the need to manually define a Trajectory subclass and override
-  # create_trajectory.
+  @classmethod
+  def _get_or_create_paired_trajectory_cls(cls) -> type[Trajectory[Any]]:
+    """Resolves or dynamically synthesizes a paired Trajectory subclass for cls."""
+    trajectory_base = globals().get("Trajectory")
+    if trajectory_base is None:
+      raise RuntimeError("Trajectory class is not yet defined.")
+    if cls is TrajectoryMetadata:
+      return trajectory_base
+    if issubclass(cls, trajectory_base):
+      return cls
+    paired_cls = TrajectoryMetadata._PAIRED_TRAJECTORY_CLASSES.get(cls)
+    if paired_cls is not None:
+      return paired_cls
+    for subcls in cls.__subclasses__():
+      if issubclass(subcls, trajectory_base):
+        TrajectoryMetadata._PAIRED_TRAJECTORY_CLASSES[cls] = subcls
+        return subcls
+    paired_cls = cast(
+        type[Trajectory[Any]],
+        type(
+            f"{cls.__name__}Trajectory",
+            (cls, trajectory_base),
+            {
+                "__module__": cls.__module__,
+                "__doc__": (
+                    f"Auto-synthesized Trajectory paired with {cls.__name__}."
+                ),
+            },
+        ),
+    )
+    paired_cls.model_rebuild()
+    parent_module = sys.modules.get(cls.__module__)
+    if parent_module is not None:
+      setattr(parent_module, paired_cls.__name__, paired_cls)
+    TrajectoryMetadata._PAIRED_TRAJECTORY_CLASSES[cls] = paired_cls
+    return paired_cls
+
   def create_trajectory(
       self,
       steps: Sequence[Any] | None = None,
@@ -1021,12 +1069,10 @@ class TrajectoryMetadata(pydantic.BaseModel):
   ) -> Trajectory[Any]:
     """Creates a full Trajectory from this metadata, steps, and subagents.
 
-    Subclasses must override this method to construct their corresponding
-    `Trajectory` subclass via `_create_paired_trajectory`. Persistent stores
-    (`FileTrajectoryStore`, `SqlTrajectoryStore`) pass deserialized base ATIF
-    `Step` instances into `steps`; subclasses that also define custom `Step`
-    subclasses should rehydrate them here (see
-    `TunixTrajectoryMetadata.create_trajectory`).
+    When called on a `TrajectoryMetadata` subclass that does not override
+    this method, automatically resolves or synthesizes the paired `Trajectory`
+    subclass. Subclasses with custom step upcasting should override this
+    method (see `TunixTrajectoryMetadata.create_trajectory`).
 
     Args:
       steps: Sequence of step instances, or None.
@@ -1035,8 +1081,9 @@ class TrajectoryMetadata(pydantic.BaseModel):
     Returns:
       The constructed trajectory instance.
     """
+    trajectory_cls = self._get_or_create_paired_trajectory_cls()
     return self._create_paired_trajectory(
-        Trajectory, steps, subagent_trajectories
+        trajectory_cls, steps, subagent_trajectories
     )
 
 

@@ -331,7 +331,7 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
         worker.trajectory_store, file_store.FileTrajectoryStore
     )
     self.assertIs(
-        worker.trajectory_store._metadata_cls,  # pylint: disable=protected-access
+        worker.trajectory_store.bound_metadata_cls,
         trajectory_lib.TunixTrajectoryMetadata,
     )
     worker.stop()

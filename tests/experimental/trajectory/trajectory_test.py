@@ -3,6 +3,8 @@ from collections.abc import Iterator
 import copy
 import json
 import os
+import pickle
+import sys
 from typing import Any
 from unittest import mock
 
@@ -547,6 +549,12 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
     self.assertIsNot(copied_ids_by_pair[(1, 2)], ids_by_pair[(1, 2)])
 
 
+class _ModuleAutoPairMetadata(trajectory.TrajectoryMetadata):
+  EXTENSIONS_KEY = "_test_autopair_extensions"
+  custom_value: int = 123
+  label: str = "default_label"
+
+
 class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
   sample_atif_trajectory: trajectory.Trajectory
 
@@ -1034,27 +1042,34 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     with self.assertRaisesRegex(ValueError, "Unsupported step source"):
       meta.create_trajectory(steps=[unknown_source_step])
 
-  def test_create_trajectory_rejects_unpaired_subclass_without_fields(self):
-    """Without the check this would silently yield a plain Trajectory."""
+  def test_create_trajectory_auto_pairs_subclass_without_fields(self):
+    """Subclass without fields auto-pairs and preserves custom methods."""
 
     class _NoNewFields(trajectory.TrajectoryMetadata):
-      """Adds behavior but no fields, and forgets to override."""
+      """Adds behavior but no fields, and inherits create_trajectory."""
 
       EXTENSIONS_KEY = "_test_extensions"
 
       def is_interesting(self) -> bool:
         return self.notes is not None
 
-    meta = _NoNewFields(agent=trajectory.Agent(name="a", version="1.0"))
+    meta = _NoNewFields(
+        agent=trajectory.Agent(name="a", version="1.0"),
+        notes="sample note",
+    )
+    traj = meta.create_trajectory()
+    self.assertIsInstance(traj, _NoNewFields)
+    self.assertIsInstance(traj, trajectory.Trajectory)
+    self.assertTrue(traj.is_interesting())
 
     with self.assertRaisesRegex(
         TypeError,
-        "Expected trajectory_cls to be a subclass of _NoNewFields"
+        "Expected trajectory_cls to be a subclass of _NoNewFields",
     ):
-      meta.create_trajectory()
+      meta._create_paired_trajectory(trajectory.Trajectory, None, None)
 
-  def test_create_trajectory_rejects_unpaired_subclass_with_fields(self):
-    """A subclass adding fields reports the pairing, not the rejected field."""
+  def test_create_paired_trajectory_rejects_incompatible_trajectory_cls(self):
+    """_create_paired_trajectory enforces that trajectory_cls subclasses type(self)."""
 
     class _NewField(trajectory.TrajectoryMetadata):
       EXTENSIONS_KEY = "_test_extensions"
@@ -1069,7 +1084,12 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
       with self.assertRaisesRegex(
           TypeError, "Expected trajectory_cls to be a subclass of _NewField"
       ):
-        meta.create_trajectory()
+        meta._create_paired_trajectory(trajectory.Trajectory, None, None)
+
+      traj = meta.create_trajectory()
+      self.assertIsInstance(traj, _NewField)
+      self.assertIsInstance(traj, trajectory.Trajectory)
+      self.assertEqual(traj.custom_tag, "experiment_42")
     finally:
       trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(_NewField, None)
 
@@ -2567,6 +2587,89 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
     finally:
       trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(
           DefaultedTagMetadata, None
+      )
+      trajectory.TrajectoryMetadata._PAIRED_TRAJECTORY_CLASSES.pop(
+          DefaultedTagMetadata, None
+      )
+
+  def test_create_trajectory_auto_synthesizes_paired_trajectory_subclass(self):
+    try:
+      meta = _ModuleAutoPairMetadata(
+          trajectory_id="autopair_1",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+          custom_value=456,
+          label="test_label",
+      )
+      traj = meta.create_trajectory([trajectory_testing.STEP_1_1])
+      self.assertIsInstance(traj, _ModuleAutoPairMetadata)
+      self.assertIsInstance(traj, trajectory.Trajectory)
+      self.assertEqual(traj.trajectory_id, "autopair_1")
+      self.assertEqual(traj.custom_value, 456)
+      self.assertEqual(traj.label, "test_label")
+      self.assertEqual(len(traj.steps), 1)
+      self.assertEqual(traj.steps[0].step_id, 1)
+
+      # Verify that multiple calls on the same metadata class reuse the synthesized type.
+      meta2 = _ModuleAutoPairMetadata(
+          trajectory_id="autopair_2",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+      )
+      traj2 = meta2.create_trajectory([trajectory_testing.STEP_1_1])
+      self.assertIs(type(traj), type(traj2))
+
+      # Verify that the synthesized trajectory subclass is pickleable across
+      # process boundaries (e.g. multiprocessing.Queue / Ray in rollout workers).
+      pickled = pickle.dumps(traj)
+      unpickled = pickle.loads(pickled)
+      self.assertEqual(unpickled.trajectory_id, "autopair_1")
+      self.assertEqual(unpickled.custom_value, 456)
+      self.assertEqual(unpickled.label, "test_label")
+      self.assertEqual(len(unpickled.steps), 1)
+      self.assertEqual(unpickled.steps[0].step_id, 1)
+
+      # Verify round-trip conversion to base ATIF and back.
+      atif = traj.to_atif_metadata()
+      self.assertEqual(
+          atif.extra[_ModuleAutoPairMetadata.EXTENSIONS_KEY]["custom_value"],
+          456,
+      )
+      resolved_cls = trajectory.TrajectoryMetadata.resolve_subclass(atif)
+      self.assertIs(resolved_cls, _ModuleAutoPairMetadata)
+      rehydrated = resolved_cls.from_atif_metadata(atif)
+      self.assertEqual(rehydrated.custom_value, 456)
+      self.assertEqual(rehydrated.label, "test_label")
+    finally:
+      trajectory.TrajectoryMetadata._PAIRED_TRAJECTORY_CLASSES.pop(
+          _ModuleAutoPairMetadata, None
+      )
+      mod = sys.modules.get(__name__)
+      if mod is not None:
+        mod.__dict__.pop(f"{_ModuleAutoPairMetadata.__name__}Trajectory", None)
+
+  def test_create_trajectory_resolves_existing_paired_trajectory_subclass(self):
+    class ManualPairMetadata(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_manual_pair_extensions"
+      tag: str = "manual_tag"
+
+    class ManualPairTrajectory(ManualPairMetadata, trajectory.Trajectory):
+      pass
+
+    try:
+      meta = ManualPairMetadata(
+          trajectory_id="manual_pair_1",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+          tag="custom_manual",
+      )
+      traj = meta.create_trajectory([trajectory_testing.STEP_1_1])
+      self.assertIsInstance(traj, ManualPairTrajectory)
+      self.assertIs(type(traj), ManualPairTrajectory)
+      self.assertEqual(traj.tag, "custom_manual")
+    finally:
+      trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(
+          ManualPairMetadata, None
+      )
+      trajectory.TrajectoryMetadata._PAIRED_TRAJECTORY_CLASSES.pop(
+          ManualPairMetadata, None
       )
 
   def test_resolve_subclass_breaks_ties_in_favor_of_target_cls(self):
