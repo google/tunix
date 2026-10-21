@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import threading
+import time
 
 from absl.testing import absltest
 from tunix.experimental.generate import driver as driver_lib
@@ -201,6 +202,58 @@ class VanillaInProcessDriverTest(absltest.TestCase):
       bad.result(timeout=_TIMEOUT_S)
     with self.assertRaisesRegex(ValueError, 'empty'):
       other.result(timeout=_TIMEOUT_S)
+
+
+class SubmissionBatchingTest(absltest.TestCase):
+
+  def make_driver(self, **kwargs) -> driver_lib.VanillaInProcessDriver:
+    driver = driver_lib.VanillaInProcessDriver(
+        testing_utils.make_engine(), **kwargs
+    )
+    self.addCleanup(driver.shutdown)
+    return driver
+
+  def test_negative_threshold_raises(self):
+    with self.assertRaisesRegex(ValueError, 'submission_threshold'):
+      self.make_driver(submission_threshold=-1)
+
+  def test_negative_timeout_raises(self):
+    with self.assertRaisesRegex(ValueError, 'submission_timeout_s'):
+      self.make_driver(submission_timeout_s=-1.0)
+
+  def test_requests_wait_for_the_threshold(self):
+    driver = self.make_driver(submission_threshold=2)
+    driver.start()
+    first = driver.submit_request(testing_utils.make_request('0', [1, 2]))
+    time.sleep(0.2)
+    self.assertFalse(first.done())
+
+    second = driver.submit_request(testing_utils.make_request('1', [3]))
+
+    self.assertEqual(first.result(timeout=_TIMEOUT_S).request_id, '0')
+    self.assertEqual(second.result(timeout=_TIMEOUT_S).request_id, '1')
+
+  def test_a_batch_reaching_the_threshold_is_submitted(self):
+    driver = self.make_driver(submission_threshold=2)
+    driver.start()
+
+    futures = driver.submit_requests([
+        testing_utils.make_request('0', [1, 2]),
+        testing_utils.make_request('1', [3]),
+    ])
+
+    for future in futures:
+      future.result(timeout=_TIMEOUT_S)
+
+  def test_timeout_submits_a_partial_batch(self):
+    driver = self.make_driver(
+        submission_threshold=100, submission_timeout_s=0.05
+    )
+    driver.start()
+
+    future = driver.submit_request(testing_utils.make_request('0', [1, 2]))
+
+    self.assertEqual(future.result(timeout=_TIMEOUT_S).request_id, '0')
 
 
 if __name__ == '__main__':

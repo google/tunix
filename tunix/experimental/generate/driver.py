@@ -22,6 +22,7 @@ runs its continuous batching loop until each request finishes.
 from collections.abc import Sequence
 from concurrent import futures
 import threading
+import time
 
 from tunix.experimental.generate import engine as engine_lib
 from tunix.experimental.generate import request as request_lib
@@ -37,6 +38,8 @@ class VanillaInProcessDriver:
       self,
       engine: engine_lib.LLMEngine,
       poll_interval_s: float = 0.004,
+      submission_threshold: int = 0,
+      submission_timeout_s: float = 0.0,
   ):
     """Initializes the driver.
 
@@ -45,14 +48,31 @@ class VanillaInProcessDriver:
         into the engine directly races with the loop thread.
       poll_interval_s: How long the loop waits for new work before looking
         again.
+      submission_threshold: Only hand queued requests to the engine once this
+        many have accumulated. 0 submits them as soon as they arrive.
+      submission_timeout_s: Submit a partial batch anyway once this many
+        seconds have elapsed since the first request of the current window
+        arrived. 0 disables the timeout, so a partial batch waits until the
+        threshold is reached.
 
     Raises:
-      ValueError: If `poll_interval_s` is not positive.
+      ValueError: If `poll_interval_s` is not positive, or the threshold or
+        timeout is negative.
     """
     if poll_interval_s <= 0:
       raise ValueError(f'poll_interval_s must be > 0. Got {poll_interval_s}.')
+    if submission_threshold < 0:
+      raise ValueError(
+          f'submission_threshold must be >= 0. Got {submission_threshold}.'
+      )
+    if submission_timeout_s < 0:
+      raise ValueError(
+          f'submission_timeout_s must be >= 0. Got {submission_timeout_s}.'
+      )
 
     self._poll_interval_s = poll_interval_s
+    self._submission_threshold = submission_threshold
+    self._submission_timeout_s = submission_timeout_s
     self._engine = engine
 
     # Serializes every touch of the engine and of the state below, so that
@@ -70,6 +90,9 @@ class VanillaInProcessDriver:
     self._pending: dict[str, RequestFuture] = {}
     # Requests submitted but not yet handed to the engine, in submission order.
     self._submission_queue: list[request_lib.EngineRequest] = []
+    # Monotonic timestamp of the first request in the current submission
+    # window, used to flush a partial batch. Reset on each drain.
+    self._submission_window_start: float | None = None
 
   @property
   def engine(self) -> engine_lib.LLMEngine:
@@ -88,13 +111,17 @@ class VanillaInProcessDriver:
     """
     with self._queue_lock:
       future = self._queue_request_locked(request)
-      self._work_event.set()
+      if self._submission_queue_ready_locked():
+        self._work_event.set()
     return future
 
   def submit_requests(
       self, requests: Sequence[request_lib.EngineRequest]
   ) -> list[RequestFuture]:
     """Submits a batch of requests for sampling.
+
+    Submitting as a batch keeps the requests in one submission window, so they
+    reach the engine together and share a continuous batch.
 
     Args:
       requests: The requests to sample.
@@ -111,33 +138,53 @@ class VanillaInProcessDriver:
       if len(set(request_ids)) != len(request_ids):
         raise ValueError(f'Request ids must be unique, got {request_ids}.')
       for request in requests:
-        self._check_submittable_locked(request)
+        if request.request_id in self._pending:
+          raise ValueError(f'Request {request.request_id} is still pending.')
+
       future_list = [
           self._queue_request_locked(request) for request in requests
       ]
-      if future_list:
-        self._work_event.set()
-    return future_list
 
-  def _check_submittable_locked(
-      self, request: request_lib.EngineRequest
-  ) -> None:
-    if request.request_id in self._pending:
-      raise ValueError(f'Request {request.request_id} is still pending.')
+      if self._submission_queue_ready_locked():
+        self._work_event.set()
+
+    return future_list
 
   def _queue_request_locked(
       self, request: request_lib.EngineRequest
   ) -> RequestFuture:
-    """Parks a request until the loop hands it to the engine."""
-    self._check_submittable_locked(request)
+    """Adds a request to the submission queue."""
+    if request.request_id in self._pending:
+      raise ValueError(f'Request {request.request_id} is still pending.')
     future: RequestFuture = futures.Future()
     self._pending[request.request_id] = future
+    if self._submission_window_start is None:
+      self._submission_window_start = time.perf_counter()
     self._submission_queue.append(request)
     return future
 
+  def _submission_queue_ready_locked(self) -> bool:
+    """Whether the queued requests should be handed to the engine now."""
+    if not self._submission_queue:
+      return False
+    if len(self._submission_queue) >= self._submission_threshold:
+      return True
+
+    # Without the timeout, a window that never reaches the threshold would
+    # stall in the queue indefinitely.
+    return (
+        self._submission_timeout_s > 0
+        and self._submission_window_start is not None
+        and time.perf_counter() - self._submission_window_start
+        >= self._submission_timeout_s
+    )
+
   def _drain_submission_queue_locked(self) -> None:
+    if not self._submission_queue_ready_locked():
+      return
     queued_requests = self._submission_queue
     self._submission_queue = []
+    self._submission_window_start = None
     for request in queued_requests:
       self._engine.add_request(request)
 
@@ -170,6 +217,7 @@ class VanillaInProcessDriver:
     self.stop()
     with self._engine_lock, self._queue_lock:
       self._submission_queue.clear()
+      self._submission_window_start = None
       pending = list(self._pending.items())
       self._pending.clear()
       for request_id, _ in pending:
@@ -192,6 +240,7 @@ class VanillaInProcessDriver:
     except Exception as e:  # pylint: disable=broad-exception-caught
       with self._queue_lock:
         self._submission_queue.clear()
+        self._submission_window_start = None
         pending = list(self._pending.values())
         self._pending.clear()
       for future in pending:
@@ -200,7 +249,10 @@ class VanillaInProcessDriver:
       raise
 
   def _has_work_locked(self) -> bool:
-    return bool(self._submission_queue) or self._engine.has_unfinished_requests()
+    return (
+        self._submission_queue_ready_locked()
+        or self._engine.has_unfinished_requests()
+    )
 
   def _wait_for_work(self) -> bool:
     """Blocks until there is something to do, or the driver is stopping."""
