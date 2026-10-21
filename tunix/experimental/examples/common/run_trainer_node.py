@@ -206,6 +206,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--mesh_fsdp", type=int, default=2)
   parser.add_argument("--mesh_tp", type=int, default=1)
   parser.add_argument("--mesh_expert", type=int, default=1)
+  parser.add_argument(
+      "--maxtext_mesh_context",
+      type=int,
+      default=1,
+      help="ICI context-parallelism degree. MaxText backend only.",
+  )
   parser.add_argument("--max_prompt_length", type=int, default=512)
   parser.add_argument("--max_response_length", type=int, default=128)
   parser.add_argument(
@@ -457,6 +463,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       nargs="?",
       const=True,
       help="Use weight converter for MaxText weight synchronization.",
+  )
+  parser.add_argument(
+      "--maxtext_attention",
+      type=str,
+      default="",
+      help=(
+          "MaxText attention kernel override (e.g. flash, dot_product)."
+          " Defaults to dot_product when empty. MaxText backend only."
+      ),
+  )
+  parser.add_argument(
+      "--maxtext_base_num_kv_heads",
+      type=int,
+      default=0,
+      help=(
+          "Explicit base_num_kv_heads override for MaxText trainer. MaxText"
+          " backend only."
+      ),
   )
   parser.add_argument(
       "--debug",
@@ -765,6 +789,7 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       mesh_fsdp=args.mesh_fsdp,
       mesh_tp=args.mesh_tp,
       mesh_expert=args.mesh_expert,
+      mesh_context=args.maxtext_mesh_context,
       num_devices=jax.device_count(),
       max_prompt_length=args.max_prompt_length,
       max_response_length=args.max_response_length,
@@ -777,11 +802,13 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       gradient_accumulation_steps=grad_accumulation_steps,
       checkpointing_options=checkpointing_options,
       profiling_options=profiling_options,
+      base_num_kv_heads=args.maxtext_base_num_kv_heads,
       rollout_mesh_tp=args.rollout_mesh_tp,
       prefuse_moe_weights=args.prefuse_moe_weights,
       use_weight_converter=args.use_weight_converter,
       max_seq_token_per_tpu=args.max_seq_token_per_tpu,
       weight_dtype=args.model_load_dtype,
+      attention=args.maxtext_attention,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)

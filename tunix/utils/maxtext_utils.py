@@ -93,6 +93,8 @@ def build_vllm_maxtext_additional_config(
     attention: str = "",
     prefuse_moe_weights: bool | None = None,
     return_routed_experts: bool = False,
+    float32_gate_logits: bool | None = None,
+    float32_logits: bool | None = None,
 ) -> dict[str, Any]:
   """Builds the vLLM `additional_config` a MaxText rollout model reads.
 
@@ -110,6 +112,10 @@ def build_vllm_maxtext_additional_config(
     return_routed_experts: Whether the MaxText MoE layers return the experts
       each token was routed to, for router replay. Only written when True, so
       MaxText versions that predate this key keep working by default.
+    float32_gate_logits: Whether MaxText runs the MoE gate (router) in float32.
+      None leaves the model YAML default in place.
+    float32_logits: Whether dot-product attention casts its softmax inputs to
+      float32. None leaves the model YAML default in place.
 
   Returns:
     The `additional_config` mapping to hand to the vLLM engine.
@@ -117,11 +123,16 @@ def build_vllm_maxtext_additional_config(
   overrides: dict[str, Any] = {
       "model_name": model_name,
       "model_call_mode": "inference",
+      "scan_layers": False,
       "enable_dp_attention": False,
       "allow_split_physical_axes": True,
       "log_config": False,
       "weight_dtype": DEFAULT_ROLLOUT_WEIGHT_DTYPE,
   }
+  if float32_gate_logits is not None:
+    overrides["float32_gate_logits"] = float32_gate_logits
+  if float32_logits is not None:
+    overrides["float32_logits"] = float32_logits
   if prefuse_moe_weights is not None:
     overrides["prefuse_moe_weights"] = prefuse_moe_weights
   if attention:
@@ -150,6 +161,7 @@ def build_maxtext_config(
     checkpointing_options: Any = None,
     profiling_options: ProfilerOptions | None = None,
     *,
+    mesh_context: int = 1,
     base_num_kv_heads: int = 0,
     kv_tp_size: int = 0,
     moe_mlp_tp_size: int = 0,
@@ -159,8 +171,15 @@ def build_maxtext_config(
     max_seq_token_per_tpu: int | None = 0,
     adamw_options: AdamWOptions | None = None,
     weight_dtype: str = DEFAULT_TRAINER_WEIGHT_DTYPE,
+    attention: str = "",
 ) -> Any:
-  """Builds the MaxText HyperParameters the training engine runs on."""
+  """Builds the MaxText HyperParameters the training engine runs on.
+
+  Note on keyword-only options:
+    mesh_context: ICI context-parallelism degree; when > 1, disables
+      `context_parallel_load_balance` because Tunix RL feeds batches in natural
+      token order rather than MaxText's grain `DUAL_CHUNK_SWAP` order.
+  """
   pyconfig, _, _ = maxtext_modules()
 
   # Backward compatibility: if rollout_mesh_tp was provided, default kv_tp_size and moe_mlp_tp_size
@@ -177,6 +196,8 @@ def build_maxtext_config(
       )
       moe_mlp_tp_size = rollout_mesh_tp
 
+  if mesh_context <= 0:
+    raise ValueError(f"mesh_context must be positive, got {mesh_context}")
   if padded_moe_mlp_dim < 0:
     raise ValueError(
         f"padded_moe_mlp_dim must be non-negative, got {padded_moe_mlp_dim}"
@@ -259,16 +280,19 @@ def build_maxtext_config(
       logging.warning("Model config file not found at %s", model_yml)
 
   # 1. Resolve KV head replication:
+  yaml_kv_heads = 0
   if effective_kv_heads <= 0 and kv_tp_size > 0:
     if model_data:
-      effective_kv_heads = int(model_data.get("base_num_kv_heads") or 0)
+      yaml_kv_heads = int(model_data.get("base_num_kv_heads") or 0)
+      effective_kv_heads = yaml_kv_heads
     if effective_kv_heads <= 0:
       raise ValueError(
           f"kv_tp_size ({kv_tp_size}) requires base_num_kv_heads > 0, but could"
           f" not determine base_num_kv_heads from config or {model_name}.yml."
-          " Please specify --base_num_kv_heads."
+          " Please specify --maxtext_base_num_kv_heads."
       )
 
+  kv_heads_replicated = False
   if effective_kv_heads > 0 and kv_tp_size > effective_kv_heads:
     if kv_tp_size % effective_kv_heads != 0:
       raise ValueError(
@@ -276,6 +300,23 @@ def build_maxtext_config(
           f"base_num_kv_heads ({effective_kv_heads})."
       )
     effective_kv_heads = kv_tp_size
+    kv_heads_replicated = True
+
+  # Emit `base_num_kv_heads` on the CLI only when the caller explicitly passed
+  # `base_num_kv_heads > 0` or when KV replication increased the head count
+  # above the model YAML's `base_num_kv_heads`. When `base_num_kv_heads == 0`
+  # and `kv_tp_size <= yaml_kv_heads`, the model YAML value is already
+  # sufficient and omitting the CLI override keeps MaxText's
+  # `validate_no_keys_overridden_twice` guard intact for all other keys.
+  emit_kv_heads_override = base_num_kv_heads > 0 or kv_heads_replicated
+  if emit_kv_heads_override:
+    logging.info(
+        "Enabling override_model_config=True for base_num_kv_heads=%d"
+        " (explicit=%d, replicated=%s).",
+        effective_kv_heads,
+        base_num_kv_heads,
+        kv_heads_replicated,
+    )
 
   # 2. Resolve padded MoE MLP dimension before pyconfig initialization:
   if not effective_padded_moe_mlp_dim and moe_mlp_tp_size > 0:
@@ -424,10 +465,11 @@ def build_maxtext_config(
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
       "skip_jax_distributed_system=True",
+      "allow_split_physical_axes=True",
       f"per_device_batch_size={per_device_batch_size}",
       f"gradient_accumulation_steps={gradient_accumulation_steps}",
       f"max_target_length={max_target_length}",
-      "attention=dot_product",
+      f"attention={attention or 'dot_product'}",
       "use_tokamax_gmm=true",
       "use_gmm_v2=true",
       f"ici_fsdp_parallelism={mesh_fsdp}",
@@ -443,11 +485,20 @@ def build_maxtext_config(
       # fallback when that is not available.
       *(
           [f"base_num_kv_heads={effective_kv_heads}"]
-          if effective_kv_heads
+          if emit_kv_heads_override
           else []
       ),
+      # MaxText's `pyconfig.validate_no_keys_overridden_twice` rejects any CLI
+      # key that also appears in `{model_name}.yml` (including
+      # `base_num_kv_heads`) unless `override_model_config=True` is set.
+      *(["override_model_config=True"] if emit_kv_heads_override else []),
       f"ici_tensor_parallelism={mesh_tp}",
       f"ici_expert_parallelism={mesh_expert}",
+      f"ici_context_parallelism={mesh_context}",
+      # MaxText's context_parallel_load_balance=True assumes the training batch
+      # arrives in DUAL_CHUNK_SWAP token order from MaxText's grain pipeline;
+      # Tunix RL feeds batches in natural token order.
+      *(["context_parallel_load_balance=False"] if mesh_context > 1 else []),
       f"learning_rate={learning_rate}",
       f"warmup_steps_fraction={warmup_steps_fraction}",
       "dtype=bfloat16",

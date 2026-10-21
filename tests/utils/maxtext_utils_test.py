@@ -199,6 +199,11 @@ class MaxTextUtilsTest(absltest.TestCase):
             argv,
             f"{name}: base_num_kv_heads mismatch in argv",
         )
+        self.assertIn(
+            "override_model_config=True",
+            argv,
+            f"{name}: override_model_config=True missing in argv",
+        )
 
   def test_indivisible_kv_heads_fails_fast(self):
     # tp=3, ep=1, base_num_kv_heads=2 -> 3 % 2 != 0 -> must raise ValueError
@@ -689,6 +694,91 @@ class MaxTextUtilsTest(absltest.TestCase):
         vllm_cfg["maxtext_config"]["weight_dtype"],
         maxtext_utils.DEFAULT_ROLLOUT_WEIGHT_DTYPE,
     )
+
+  def test_build_maxtext_config_defaults_omit_optional_knobs(self):
+    argv = self._build_config_argv()
+    self.assertIn("allow_split_physical_axes=True", argv)
+    self.assertIn("attention=dot_product", argv)
+    self.assertIn("ici_context_parallelism=1", argv)
+    self.assertNotIn("context_parallel_load_balance=False", argv)
+    self.assertNotIn("override_model_config=True", argv)
+
+  def test_build_maxtext_config_context_parallelism_disables_load_balance(self):
+    argv = self._build_config_argv(mesh_context=2)
+    self.assertIn("ici_context_parallelism=2", argv)
+    self.assertIn("context_parallel_load_balance=False", argv)
+
+  def test_build_maxtext_config_base_num_kv_heads_enables_override_model_config(
+      self,
+  ):
+    argv = self._build_config_argv(base_num_kv_heads=8)
+    self.assertIn("base_num_kv_heads=8", argv)
+    self.assertIn("override_model_config=True", argv)
+
+  def test_build_maxtext_config_yaml_kv_heads_override_only_when_replicated(
+      self,
+  ):
+    mock_pyconfig = mock.MagicMock()
+    mock_pyconfig.initialize.return_value = mock.MagicMock()
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+    ), mock.patch("os.path.exists", return_value=True), mock.patch(
+        "builtins.open",
+        mock.mock_open(read_data="base_num_kv_heads: 4\n"),
+    ):
+      # kv_tp_size == YAML heads (4): no replication, so neither
+      # base_num_kv_heads nor override_model_config is emitted.
+      maxtext_utils.build_maxtext_config(
+          model_name="qwen3-test",
+          base_num_kv_heads=0,
+          kv_tp_size=4,
+      )
+      argv_no_rep = mock_pyconfig.initialize.call_args[0][0]
+      self.assertEmpty(
+          [a for a in argv_no_rep if a.startswith("base_num_kv_heads=")]
+      )
+      self.assertNotIn("override_model_config=True", argv_no_rep)
+
+      # kv_tp_size > YAML heads (8 > 4): KV replication occurs, so both
+      # base_num_kv_heads=8 and override_model_config=True are emitted.
+      mock_pyconfig.reset_mock()
+      maxtext_utils.build_maxtext_config(
+          model_name="qwen3-test",
+          base_num_kv_heads=0,
+          kv_tp_size=8,
+      )
+      argv_rep = mock_pyconfig.initialize.call_args[0][0]
+      self.assertIn("base_num_kv_heads=8", argv_rep)
+      self.assertIn("override_model_config=True", argv_rep)
+
+  def test_build_maxtext_config_explicit_attention_override(self):
+    argv = self._build_config_argv(attention="flash")
+    self.assertIn("attention=flash", argv)
+    self.assertNotIn("attention=dot_product", argv)
+
+  def test_build_maxtext_config_mesh_context_validation(self):
+    with self.assertRaisesRegex(ValueError, "mesh_context must be positive"):
+      self._build_config_argv(mesh_context=0)
+
+  def test_vllm_additional_config_scan_layers_and_float32_logit_knobs(self):
+    default_cfg = maxtext_utils.build_vllm_maxtext_additional_config(
+        "qwen3.5-35b-a3b"
+    )["maxtext_config"]
+    self.assertIs(default_cfg["scan_layers"], False)
+    self.assertNotIn("float32_gate_logits", default_cfg)
+    self.assertNotIn("float32_logits", default_cfg)
+
+    explicit_cfg = maxtext_utils.build_vllm_maxtext_additional_config(
+        "qwen3.5-35b-a3b",
+        float32_gate_logits=True,
+        float32_logits=False,
+    )["maxtext_config"]
+    self.assertIs(explicit_cfg["float32_gate_logits"], True)
+    self.assertIs(explicit_cfg["float32_logits"], False)
 
 
 if __name__ == "__main__":

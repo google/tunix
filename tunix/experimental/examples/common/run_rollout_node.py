@@ -238,6 +238,28 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--maxtext_float32_gate_logits",
+      type=_str2bool,
+      default=None,
+      nargs="?",
+      const=True,
+      help=(
+          "Whether MaxText inference runs the MoE gate (router) in float32"
+          " (None keeps the model config default)."
+      ),
+  )
+  parser.add_argument(
+      "--maxtext_float32_logits",
+      type=_str2bool,
+      default=None,
+      nargs="?",
+      const=True,
+      help=(
+          "Whether MaxText inference dot-product attention casts its softmax"
+          " inputs to float32 (None keeps the model config default)."
+      ),
+  )
+  parser.add_argument(
       "--chat_parser",
       type=str,
       default=os.getenv("CHAT_PARSER", "auto"),
@@ -722,6 +744,8 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
             attention=args.maxtext_attention,
             prefuse_moe_weights=args.prefuse_moe_weights,
             return_routed_experts=args.return_routed_experts,
+            float32_gate_logits=args.maxtext_float32_gate_logits,
+            float32_logits=args.maxtext_float32_logits,
         )
     )
 
@@ -868,6 +892,8 @@ def _create_vllm_sampler(args, tokenizer):
             attention=args.maxtext_attention,
             prefuse_moe_weights=args.prefuse_moe_weights,
             return_routed_experts=args.return_routed_experts,
+            float32_gate_logits=args.maxtext_float32_gate_logits,
+            float32_logits=args.maxtext_float32_logits,
         )
     )
   engine_args = AsyncEngineArgs(**engine_kwargs)  # type: ignore[arg-type]

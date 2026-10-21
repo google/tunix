@@ -206,6 +206,42 @@ class RunRolloutNodeTest(absltest.TestCase):
         True,
     )
 
+  def test_vllm_samplers_plumb_float32_logit_flags_when_set(self):
+    default_kwargs = _vllm_engine_kwargs(["--maxtext_model_name=qwen3-30b-a3b"])
+    default_mt_cfg = default_kwargs["additional_config"]["maxtext_config"]
+    self.assertNotIn("float32_gate_logits", default_mt_cfg)
+    self.assertNotIn("float32_logits", default_mt_cfg)
+
+    argv = [
+        "--maxtext_model_name=qwen3-30b-a3b",
+        "--maxtext_float32_gate_logits=true",
+        "--maxtext_float32_logits=false",
+    ]
+    vllm_kwargs = _vllm_engine_kwargs(argv)
+    vllm_mt_cfg = vllm_kwargs["additional_config"]["maxtext_config"]
+    self.assertIs(vllm_mt_cfg["float32_gate_logits"], True)
+    self.assertIs(vllm_mt_cfg["float32_logits"], False)
+
+    vllm_sampler = mock.Mock()
+    with (
+        mock.patch.object(
+            run_rollout_node, "_import_vllm_sampler", return_value=vllm_sampler
+        ),
+        mock.patch.object(run_rollout_node, "_create_rollout_mesh"),
+        mock.patch.object(
+            inprocess_vllm_sampler_adapter, "InprocessVllmSamplerAdapter"
+        ),
+    ):
+      run_rollout_node._create_inprocess_vllm_sampler(
+          run_rollout_node._parse_args(argv),
+          tokenizer=None,
+      )
+    inproc_mt_cfg = vllm_sampler.VllmConfig.call_args.kwargs[
+        "additional_config"
+    ]["maxtext_config"]
+    self.assertIs(inproc_mt_cfg["float32_gate_logits"], True)
+    self.assertIs(inproc_mt_cfg["float32_logits"], False)
+
   def test_main_restores_jax_cache_before_jax_init(self):
     events: list[str] = []
     context = mock.Mock()
