@@ -24,6 +24,7 @@ from absl.testing import absltest
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import test_utils as mocks
+from tunix.experimental.common import timeouts
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.rollout import collector
@@ -245,7 +246,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
         chat_parser=_RecordingParser(),
     )
     self.assertEqual(
-        engine1.episode_timeout, collector._DEFAULT_EPISODE_TIMEOUT_SECS
+        engine1.episode_timeout, timeouts.DEFAULT_EPISODE_TIMEOUT_S
     )
 
     req_none_meta = datatypes.RolloutRequest(
@@ -263,7 +264,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
         chat_parser=_RecordingParser(),
     )
     self.assertEqual(
-        engine2.episode_timeout, collector._DEFAULT_EPISODE_TIMEOUT_SECS
+        engine2.episode_timeout, timeouts.DEFAULT_EPISODE_TIMEOUT_S
     )
 
   def test_episode_timeout_invalid_raises_value_error(self):

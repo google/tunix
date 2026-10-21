@@ -30,6 +30,7 @@ from typing import Any
 
 from tunix.common import datatypes as common_datatypes
 from tunix.experimental.common import gcs_cache
+from tunix.experimental.common import timeouts
 from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
 from tunix.models import automodel
@@ -285,6 +286,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Maximum concurrent trajectory collections inside this worker.",
   )
   parser.add_argument(
+      "--episode_timeout_secs",
+      type=float,
+      default=float(
+          os.getenv(
+              "EPISODE_TIMEOUT_SECS",
+              str(int(timeouts.DEFAULT_EPISODE_TIMEOUT_S)),
+          )
+      ),
+      help=(
+          "Per-episode timeout in seconds used to derive the rollout worker's"
+          " soft pre-weight-sync drain window (`episode_timeout_secs + 60s`)."
+      ),
+  )
+  parser.add_argument(
       "--enable_thinking",
       action=argparse.BooleanOptionalAction,
       default=False,
@@ -416,6 +431,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--return_routed_experts needs a vLLM sampler; the vanilla sampler"
         " does not capture routed experts."
     )
+  try:
+    args.episode_timeout_secs = timeouts.validate_positive_finite(
+        args.episode_timeout_secs, "episode_timeout_secs"
+    )
+  except ValueError as exc:
+    parser.error(str(exc))
   _get_tensor_parallel_size(args)
   return args
 
@@ -512,9 +533,8 @@ def _rollout_config_kwargs(
       "env_name": args.env_name,
       "agent_name": args.agent_name,
       "agent_config": _agent_config(args),
-      "partial_rollout": bool(
-          getattr(args, "in_flight_weight_updates", False)
-      ),
+      "partial_rollout": bool(getattr(args, "in_flight_weight_updates", False)),
+      "drain_timeout_s": timeouts.drain_timeout_for(args.episode_timeout_secs),
       "trajectory_store_config": _trajectory_store_config(args),
       "return_routed_experts": args.return_routed_experts,
       "routed_experts_encode_mode": args.routed_experts_encode_mode,

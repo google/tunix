@@ -19,6 +19,7 @@ import logging
 import time
 from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Union
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import timeouts as timeouts_lib
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import collector as collector_lib
 from tunix.experimental.rollout import sampler as sampler_lib
@@ -50,7 +51,7 @@ class RolloutManager:
       max_concurrency: int = 64,
       tokenizer: Any = None,
       chat_parser: Any = None,
-      drain_timeout_s: float = 300.0,
+      drain_timeout_s: float = timeouts_lib.DEFAULT_DRAIN_TIMEOUT_S,
       trajectory_store: Optional[store.TrajectoryWriter] = None,
   ):
     """Initializes the RolloutManager.
@@ -63,11 +64,16 @@ class RolloutManager:
       max_concurrency: Maximum number of concurrent episodes.
       tokenizer: Tokenizer for prompt/response encoding.
       chat_parser: Chat parser for conversation templating.
-      drain_timeout_s: How long pre_weight_sync waits for in-flight trajectories
-        before pausing the stragglers, roughly one worst-case trajectory.
+      drain_timeout_s: Soft drain window (seconds) in `pre_weight_sync` when
+        `partial_rollout` is False. Waits up to `drain_timeout_s` for in-flight
+        trajectories to finish naturally before `pause_all()` pauses remaining
+        stragglers.
       trajectory_store: Optional TrajectoryWriter for persisting rollout steps
         and episode metadata.
     """
+    self._drain_timeout_s = timeouts_lib.validate_positive_finite(
+        drain_timeout_s, "drain_timeout_s"
+    )
     self.config = config
     self._partial_rollout: bool = (
         bool(getattr(config, "partial_rollout", False))
@@ -173,7 +179,14 @@ class RolloutManager:
     self._active_tasks: Dict[str, asyncio.Task[Any]] = {}
     self._completed_queue: asyncio.Queue[TrajectoryOrError] = asyncio.Queue()
     self._traffic_inst = None
-    self._drain_timeout_s = drain_timeout_s
+
+  @property
+  def drain_timeout_s(self) -> float:
+    return self._drain_timeout_s
+
+  @property
+  def partial_rollout(self) -> bool:
+    return self._partial_rollout
 
   @property
   def _traffic(self) -> traffic_controller_lib.TrafficController:

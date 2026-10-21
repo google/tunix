@@ -79,6 +79,7 @@ SANDBOX_NODE_SELECTOR_KEY=${SANDBOX_NODE_SELECTOR_KEY:-}
 SANDBOX_NODE_SELECTOR_VAL=${SANDBOX_NODE_SELECTOR_VAL:-}
 STEP_TIMEOUT_SECS=${STEP_TIMEOUT_SECS:-1800}
 REWARD_TIMEOUT_SECS=${REWARD_TIMEOUT_SECS:-1800}
+EPISODE_TIMEOUT_SECS=${EPISODE_TIMEOUT_SECS:-1800}
 ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-64}
 
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-deepswe}
@@ -322,6 +323,7 @@ echo "Launching DeepSWE rollout node..."
     --env_name=deepswe_env
     --agent_name=deepswe_agent
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
+    --episode_timeout_secs="$EPISODE_TIMEOUT_SECS"
   )
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)
@@ -387,6 +389,7 @@ echo "Launching CPU orchestrator..."
     --scaffold="$SCAFFOLD"
     --step_timeout_secs="$STEP_TIMEOUT_SECS"
     --reward_timeout_secs="$REWARD_TIMEOUT_SECS"
+    --episode_timeout_secs="$EPISODE_TIMEOUT_SECS"
     --flush_every_n_steps="$FLUSH_EVERY_N_STEPS"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --stop_workers_on_exit

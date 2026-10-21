@@ -135,6 +135,7 @@ def build_prompt_item(
     scaffold: str,
     env_verbose: bool,
     overlong_filter: bool = False,
+    episode_timeout_secs: int | None = None,
 ) -> dict[str, Any]:
   """Builds one StandardRLProgram prompt item for a DeepSWE task."""
   problem = _problem_statement(entry)
@@ -151,6 +152,20 @@ def build_prompt_item(
       "verbose": env_verbose,
   }
   agent_config = {"scaffold": scaffold}
+  metadata: dict[str, Any] = {
+      "instance_id": prompt_id,
+      "problem_statement": problem,
+      "env_config": env_config,
+      "agent_config": agent_config,
+      # Read by TrajectoryCollectorEngine to decide which terminal statuses
+      # get their policy loss mask zeroed out.
+      "overlong_filter": overlong_filter,
+  }
+  # When `episode_timeout_secs` is None, `"episode_timeout"` is omitted from
+  # `metadata` so `TrajectoryCollectorEngine` uses its default
+  # (`timeouts.DEFAULT_EPISODE_TIMEOUT_S`).
+  if episode_timeout_secs is not None:
+    metadata["episode_timeout"] = episode_timeout_secs
   return {
       "prompt": problem,
       "prompt_id": prompt_id,
@@ -163,15 +178,7 @@ def build_prompt_item(
           "top_k": top_k,
           "return_logprobs": True,
       },
-      "metadata": {
-          "instance_id": prompt_id,
-          "problem_statement": problem,
-          "env_config": env_config,
-          "agent_config": agent_config,
-          # Read by TrajectoryCollectorEngine to decide which terminal statuses
-          # get their policy loss mask zeroed out.
-          "overlong_filter": overlong_filter,
-      },
+      "metadata": metadata,
   }
 
 
@@ -193,6 +200,7 @@ def iter_prompt_items(
     env_verbose: bool,
     overlong_filter: bool = False,
     max_staleness: int = 0,
+    episode_timeout_secs: int | None = None,
 ) -> Iterator[dict[str, Any]]:
   """Yields one full-batch worth of prompt groups per RL step plus off-policy lookahead."""
   dataset_size = len(dataset)
@@ -213,6 +221,7 @@ def iter_prompt_items(
         top_k=top_k,
         step_timeout_secs=step_timeout_secs,
         reward_timeout_secs=reward_timeout_secs,
+        episode_timeout_secs=episode_timeout_secs,
         env_backend=env_backend,
         use_agent_sandbox=use_agent_sandbox,
         scaffold=scaffold,

@@ -61,10 +61,13 @@ class LifecycleDriver:
 
     def _init_worker(wid: str) -> None:
       resp = self._registry.handle(wid).submit("initialize")
-      if "trajectory_store_config" in resp.metadata:
-        self._registry.info(wid).resources["trajectory_store_config"] = (
-            resp.metadata["trajectory_store_config"]
-        )
+      for key in (
+          "trajectory_store_config",
+          "drain_timeout_s",
+          "partial_rollout",
+      ):
+        if key in resp.metadata:
+          self._registry.info(wid).resources[key] = resp.metadata[key]
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=self._max_workers

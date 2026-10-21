@@ -1042,6 +1042,26 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(captured_kwargs["routed_experts_encode_mode"], "uint10")
     self.assertEqual(captured_kwargs["routed_experts_num_experts"], 384)
 
+  async def test_drain_timeout_default_and_validation(self):
+    manager = manager_lib.RolloutManager(
+        sampler=_PauseTrackingSampler(),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    self.assertEqual(manager.drain_timeout_s, 660.0)
+    self.assertFalse(manager.partial_rollout)
+
+    for invalid in (0, -5.0, float("nan"), float("inf"), True, False):
+      with self.assertRaisesRegex(
+          ValueError, "drain_timeout_s must be a positive finite number"
+      ):
+        manager_lib.RolloutManager(
+            sampler=_PauseTrackingSampler(),
+            tokenizer="mock",
+            chat_parser="mock",
+            drain_timeout_s=invalid,
+        )
+
 
 if __name__ == "__main__":
   absltest.main()

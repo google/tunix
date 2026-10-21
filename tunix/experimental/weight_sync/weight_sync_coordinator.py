@@ -132,6 +132,7 @@ from typing import Any, Optional, Sequence
 
 from absl import logging
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import timeouts as timeouts_lib
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import remote_execution
@@ -472,19 +473,41 @@ class PhaseTimeouts:
   enough for D2H, transfer, or H2D, and a too-short deadline turns a slow
   round into a spurious rollback. These deadlines govern the coordinator's
   waiting only; a remote worker adapter must configure its own RPC deadline
-  at least this large.
+  at least `max_rpc_phase_s()`.
   """
 
-  bind: float = 60.0
-  metadata: float = 60.0
+  bind: float = 300.0
+  metadata: float = 300.0
   source_prepare: float = 900.0
-  pre: float = 180.0
+  pre: float = timeouts_lib.DEFAULT_PRE_WEIGHT_SYNC_TIMEOUT_S
   transfer: float = 1800.0
   h2d: float = 1800.0
   post: float = 300.0
   abort: float = 180.0
   status: float = 30.0
   release: float = 120.0
+
+  @classmethod
+  def for_drain_timeout(cls, drain_timeout_s: float) -> PhaseTimeouts:
+    """Builds `PhaseTimeouts` with `pre` sized for a rollout `drain_timeout_s`."""
+    required_pre = timeouts_lib.pre_weight_sync_timeout_for(drain_timeout_s)
+    return cls(
+        pre=max(timeouts_lib.DEFAULT_PRE_WEIGHT_SYNC_TIMEOUT_S, required_pre)
+    )
+
+  def max_rpc_phase_s(self) -> float:
+    """Returns the largest deadline among worker-RPC-backed phases."""
+    return max(
+        self.bind,
+        self.metadata,
+        self.source_prepare,
+        self.pre,
+        self.h2d,
+        self.post,
+        self.abort,
+        self.status,
+        self.release,
+    )
 
 
 @dataclasses.dataclass(frozen=True)

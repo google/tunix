@@ -19,6 +19,7 @@ from typing import Any, Callable, Collection, List, Mapping, Optional, Sequence
 from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import timeouts
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.trajectory import base_store as store
 from tunix.experimental.trajectory import converter as converter_lib
@@ -26,8 +27,6 @@ from tunix.rl import packing
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine as rl_collect_engine
 from tunix.rl.rollout import base_rollout
-
-_DEFAULT_EPISODE_TIMEOUT_SECS: float = 600.0
 
 
 def _build_prompt(chat_parser: Any, chat_completions: Any) -> Any:
@@ -162,7 +161,7 @@ class TrajectoryCollectorEngine:
     metadata = request.metadata or {}
     timeout = metadata.get("episode_timeout")
     self.episode_timeout = float(
-        timeout if timeout is not None else _DEFAULT_EPISODE_TIMEOUT_SECS
+        timeout if timeout is not None else timeouts.DEFAULT_EPISODE_TIMEOUT_S
     )
     if self.episode_timeout <= 0:
       raise ValueError("episode_timeout must be positive.")

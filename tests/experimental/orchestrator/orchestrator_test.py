@@ -26,6 +26,7 @@ from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory import trajectory_testing
+from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
 
@@ -394,6 +395,140 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     ):
       orch.bring_up_workers()
     orch.shutdown()
+
+  def test_bring_up_workers_raises_when_pre_timeout_shorter_than_drain(self):
+    # Rollout worker drain_timeout_s=1860s with default PhaseTimeouts
+    # (pre=900s) and partial_rollout=False raises ValueError.
+    orch_mismatch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        monitor=mock.MagicMock(),
+        weight_sync_mode="fallback",
+    )
+    mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout.submit.side_effect = [
+        datatypes.Response(
+            metadata={"drain_timeout_s": 1860.0, "partial_rollout": False}
+        ),
+        datatypes.Response(),
+        datatypes.Response(),
+        datatypes.Response(),
+    ]
+    orch_mismatch.registry.register_handle(
+        "rollout-slow", [datatypes.Role.ROLLOUT], mock_rollout
+    )
+    with self.assertRaisesRegex(
+        ValueError,
+        "Rollout worker 'rollout-slow' has drain_timeout_s=1860.0"
+        " \\(partial_rollout=False\\), which requires PhaseTimeouts.pre >="
+        " 2100.0s, but orchestrator weight_sync_timeouts.pre is 900.0s",
+    ):
+      orch_mismatch.bring_up_workers()
+    orch_mismatch.shutdown()
+
+  def test_bring_up_workers_accepts_aligned_weight_sync_timeouts(self):
+    # Rollout worker drain_timeout_s=1860s with aligned
+    # PhaseTimeouts.for_drain_timeout(1860.0) succeeds and forwards timeouts
+    # to WeightSyncCoordinator.
+    aligned_timeouts = weight_sync_coordinator.PhaseTimeouts.for_drain_timeout(
+        1860.0
+    )
+    orch_aligned = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        monitor=mock.MagicMock(),
+        weight_sync_mode="fallback",
+        weight_sync_timeouts=aligned_timeouts,
+    )
+    mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout.submit.side_effect = [
+        datatypes.Response(
+            metadata={"drain_timeout_s": 1860.0, "partial_rollout": False}
+        ),
+        datatypes.Response(),
+        datatypes.Response(),
+        datatypes.Response(),
+    ]
+    orch_aligned.registry.register_handle(
+        "rollout-aligned", [datatypes.Role.ROLLOUT], mock_rollout
+    )
+    orch_aligned.bring_up_workers()
+    assert orch_aligned.engine is not None
+    assert orch_aligned.engine._weight_sync_coordinator is not None  # pylint: disable=protected-access
+    self.assertEqual(
+        orch_aligned.engine._weight_sync_coordinator._timeouts,  # pylint: disable=protected-access
+        aligned_timeouts,
+    )
+    orch_aligned.shutdown()
+
+  def test_bring_up_workers_skips_drain_check_for_partial_rollout(self):
+    # Rollout worker drain_timeout_s=1860s with partial_rollout=True does not
+    # drain in pre_weight_sync, so default PhaseTimeouts (pre=900s) is accepted.
+    orch_partial = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        monitor=mock.MagicMock(),
+        weight_sync_mode="fallback",
+    )
+    mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout.submit.side_effect = [
+        datatypes.Response(
+            metadata={"drain_timeout_s": 1860.0, "partial_rollout": True}
+        ),
+        datatypes.Response(),
+        datatypes.Response(),
+        datatypes.Response(),
+    ]
+    orch_partial.registry.register_handle(
+        "rollout-partial", [datatypes.Role.ROLLOUT], mock_rollout
+    )
+    orch_partial.bring_up_workers()
+    orch_partial.shutdown()
+
+  def test_bring_up_workers_raises_when_rollout_missing_timeout_metadata(self):
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        monitor=mock.MagicMock(),
+        weight_sync_mode="fallback",
+    )
+    mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout.submit.return_value = datatypes.Response()
+    orch.registry.register_handle(
+        "rollout-incomplete",
+        [datatypes.Role.ROLLOUT],
+        mock_rollout,
+        resources={"secret_key": "secret_password"},
+    )
+    with self.assertRaises(ValueError) as ctx:
+      orch.bring_up_workers()
+    self.assertIn(
+        "Rollout worker 'rollout-incomplete' is missing required resource key",
+        str(ctx.exception),
+    )
+    self.assertIn("secret_key", str(ctx.exception))
+    self.assertNotIn("secret_password", str(ctx.exception))
+    orch.shutdown()
+
+  def test_bring_up_workers_skips_timeout_check_when_weight_sync_mode_none(
+      self,
+  ):
+    for mode in (None, "none"):
+      orch = orchestrator.ClusterOrchestrator(
+          registry=worker_registry.WorkerRegistry(),
+          monitor=mock.MagicMock(),
+          weight_sync_mode=mode,
+      )
+      mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+      mock_rollout.submit.side_effect = [
+          datatypes.Response(
+              metadata={"drain_timeout_s": 1860.0, "partial_rollout": False}
+          ),
+          datatypes.Response(),
+          datatypes.Response(),
+          datatypes.Response(),
+      ]
+      orch.registry.register_handle(
+          "rollout-nosync", [datatypes.Role.ROLLOUT], mock_rollout
+      )
+      orch.bring_up_workers()
+      orch.shutdown()
 
 
 if __name__ == "__main__":

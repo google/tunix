@@ -422,6 +422,36 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     )
     worker_enabled.stop()
 
+  def test_rollout_config_drain_timeout_forwarded_and_reported(self):
+    worker_default = _worker()
+    self.assertEqual(worker_default.manager.drain_timeout_s, 660.0)
+    self.assertEqual(worker_default.info().resources["drain_timeout_s"], 660.0)
+    self.assertFalse(worker_default.info().resources["partial_rollout"])
+    init_meta = worker_default.initialize().metadata
+    self.assertEqual(init_meta["drain_timeout_s"], 660.0)
+    self.assertFalse(init_meta["partial_rollout"])
+    worker_default.stop()
+
+    worker_custom = _worker(
+        config=rollout_worker.RolloutConfig(
+            drain_timeout_s=1860.0,
+            partial_rollout=True,
+        )
+    )
+    self.assertEqual(worker_custom.manager.drain_timeout_s, 1860.0)
+    self.assertEqual(worker_custom.info().resources["drain_timeout_s"], 1860.0)
+    self.assertTrue(worker_custom.info().resources["partial_rollout"])
+    custom_meta = worker_custom.initialize().metadata
+    self.assertEqual(custom_meta["drain_timeout_s"], 1860.0)
+    self.assertTrue(custom_meta["partial_rollout"])
+    worker_custom.stop()
+
+    for invalid in (0, -10.0, float("nan"), float("inf"), True, False):
+      with self.assertRaisesRegex(
+          ValueError, "drain_timeout_s must be a positive finite number"
+      ):
+        rollout_worker.RolloutConfig(drain_timeout_s=invalid)
+
 
 if __name__ == "__main__":
   absltest.main()

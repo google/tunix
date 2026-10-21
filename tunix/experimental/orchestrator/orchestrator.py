@@ -23,6 +23,7 @@ from typing import Any, Mapping
 
 from absl import logging
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import timeouts
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import health_monitor
 from tunix.experimental.orchestrator import lifecycle
@@ -30,6 +31,7 @@ from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.orchestrator import startup_validation
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.trajectory import store as trajectory_store_lib
+from tunix.experimental.weight_sync import weight_sync_coordinator
 
 
 class ClusterOrchestrator:
@@ -43,6 +45,7 @@ class ClusterOrchestrator:
       monitor: health_monitor.HealthMonitor | None = None,
       weight_sync_mode: str | None = None,
       trajectory_store_config: Mapping[str, Any] | None = None,
+      weight_sync_timeouts: weight_sync_coordinator.PhaseTimeouts | None = None,
   ):
     """Initializes ClusterOrchestrator.
 
@@ -52,12 +55,13 @@ class ClusterOrchestrator:
       lifecycle_driver: Lifecycle driver to use; one is created if omitted.
       monitor: Health monitor to use; one is created if omitted.
       weight_sync_mode: Weight sync mode, if any.
-      trajectory_store_config: Trajectory Store configuration for this
-        process, or None to run without a store. See
-        `store.TrajectoryStore.from_config`. Pass the same config to every
-        process in the run: for the file backend it is the shared root_dir
-        and run_id that will make the workers' writes visible to this
-        process's reads once read/write wiring is connected.
+      trajectory_store_config: Trajectory Store configuration for this process,
+        or None to run without a store. See `store.TrajectoryStore.from_config`.
+        Pass the same config to every process in the run: for the file backend
+        it is the shared root_dir and run_id that will make the workers' writes
+        visible to this process's reads once read/write wiring is connected.
+      weight_sync_timeouts: Per-phase deadlines forwarded to
+        `WeightSyncCoordinator`, or None to use `PhaseTimeouts()` defaults.
     """
     self.config = config
     self.registry = (
@@ -70,6 +74,7 @@ class ClusterOrchestrator:
     self.engine: distributed_rl_engine.DistributedRLEngine | None = None
     mode = getattr(weight_sync_mode, "value", weight_sync_mode)
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
+    self._weight_sync_timeouts = weight_sync_timeouts
     # The sole construction site for this process's Trajectory Store: one
     # ClusterOrchestrator exists per orchestrator process, so building it
     # here — once, in __init__ — is the whole guard. Its lifetime is meant
@@ -108,6 +113,7 @@ class ClusterOrchestrator:
     )
     self.lifecycle_driver.bring_up(dummy_data)
     self._verify_rollout_trajectory_store_configs()
+    self._verify_rollout_weight_sync_timeouts()
     self.engine = self._create_engine()
     logging.info("All workers brought up successfully.")
 
@@ -125,6 +131,33 @@ class ClusterOrchestrator:
             f"Rollout worker {info.worker_id!r} trajectory_store_config "
             f"{worker_config!r} does not match orchestrator "
             f"trajectory_store_config {expected_config!r}."
+        )
+
+  def _verify_rollout_weight_sync_timeouts(self) -> None:
+    """Verifies that Coordinator `PhaseTimeouts.pre` covers each rollout worker's soft drain window."""
+    if self._weight_sync_mode in (None, "none"):
+      return
+    timeouts_cfg = (
+        self._weight_sync_timeouts or weight_sync_coordinator.PhaseTimeouts()
+    )
+    for info in self.registry.infos(datatypes.Role.ROLLOUT):
+      for key in ("partial_rollout", "drain_timeout_s"):
+        if key not in info.resources:
+          raise ValueError(
+              f"Rollout worker {info.worker_id!r} is missing required resource"
+              f" key {key!r} in info.resources (present keys:"
+              f" {sorted(info.resources)!r})."
+          )
+      if info.resources["partial_rollout"]:
+        continue
+      drain_timeout_s = info.resources["drain_timeout_s"]
+      required_pre_s = timeouts.pre_weight_sync_timeout_for(drain_timeout_s)
+      if required_pre_s > timeouts_cfg.pre:
+        raise ValueError(
+            f"Rollout worker {info.worker_id!r} has"
+            f" drain_timeout_s={drain_timeout_s} (partial_rollout=False),"
+            f" which requires PhaseTimeouts.pre >= {required_pre_s}s, but"
+            f" orchestrator weight_sync_timeouts.pre is {timeouts_cfg.pre}s."
         )
 
   def shutdown(self) -> None:
@@ -150,8 +183,6 @@ class ClusterOrchestrator:
     """Constructs a DistributedRLEngine from the registered role groups."""
     coordinator = None
     if self._weight_sync_mode not in (None, "none"):
-      from tunix.experimental.weight_sync import weight_sync_coordinator
-
       handler = weight_sync_coordinator.create_default_handler(
           mode=self._weight_sync_mode
       )
@@ -159,6 +190,7 @@ class ClusterOrchestrator:
           registry=self.registry,
           handler=handler,
           controller_id="auto-coordinator",
+          timeouts=self._weight_sync_timeouts,
       )
 
     return distributed_rl_engine.DistributedRLEngine(

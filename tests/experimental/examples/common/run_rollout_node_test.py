@@ -16,6 +16,7 @@
 
 import contextlib
 import io
+import os
 import sys
 import types
 from unittest import mock
@@ -231,6 +232,27 @@ class RunRolloutNodeTest(absltest.TestCase):
     mock_restore.assert_called_once()
     self.assertEqual(mock_restore.call_args.kwargs["params"].sampler, "vanilla")
     self.assertEqual(events, ["restore:vanilla", "jax_init"])
+
+  def test_episode_timeout_derives_drain_timeout_in_rollout_config(self):
+    with mock.patch.dict(os.environ, {}, clear=False):
+      os.environ.pop("EPISODE_TIMEOUT_SECS", None)
+      defaults = run_rollout_node._rollout_config_kwargs(
+          run_rollout_node._parse_args([])
+      )
+    self.assertEqual(defaults["drain_timeout_s"], 660.0)
+
+    deepswe_cfg = run_rollout_node._rollout_config_kwargs(
+        run_rollout_node._parse_args(["--episode_timeout_secs=1800"])
+    )
+    self.assertEqual(deepswe_cfg["drain_timeout_s"], 1860.0)
+
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+      run_rollout_node._parse_args(["--episode_timeout_secs=0"])
+    self.assertIn(
+        "episode_timeout_secs must be a positive finite number",
+        stderr.getvalue(),
+    )
 
 
 if __name__ == "__main__":

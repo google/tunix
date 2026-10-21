@@ -1853,5 +1853,34 @@ class SourcePrepareTimeoutTest(CoordinatorTestBase):
     self.assertEqual(slow_source.release_calls, 1)
 
 
+class PhaseTimeoutsTest(absltest.TestCase):
+
+  def test_defaults_align_with_default_rollout_drain(self):
+    t = PhaseTimeouts()
+    self.assertEqual(t.bind, 300.0)
+    self.assertEqual(t.metadata, 300.0)
+    self.assertEqual(t.source_prepare, 900.0)
+    self.assertEqual(t.pre, 900.0)
+    self.assertEqual(t.transfer, 1800.0)
+    self.assertEqual(t.h2d, 1800.0)
+    self.assertEqual(t.post, 300.0)
+    self.assertEqual(t.abort, 180.0)
+    self.assertEqual(t.status, 30.0)
+    self.assertEqual(t.release, 120.0)
+    self.assertEqual(t.max_rpc_phase_s(), 1800.0)
+
+  def test_for_drain_timeout_scales_pre_and_max_rpc_phase(self):
+    t_small = PhaseTimeouts.for_drain_timeout(120.0)
+    self.assertEqual(t_small.pre, 900.0)
+    self.assertEqual(t_small.max_rpc_phase_s(), 1800.0)
+
+    t_deepswe = PhaseTimeouts.for_drain_timeout(1860.0)
+    self.assertEqual(t_deepswe.pre, 2100.0)
+    self.assertEqual(t_deepswe.max_rpc_phase_s(), 2100.0)
+
+    with self.assertRaises(ValueError):
+      PhaseTimeouts.for_drain_timeout(0.0)
+
+
 if __name__ == "__main__":
   absltest.main()

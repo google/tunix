@@ -37,6 +37,7 @@ if REPO_ROOT not in sys.path:
 # pylint: disable=g-import-not-at-top
 from tunix.common import configs as common_configs
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import timeouts
 from tunix.experimental.distributed.runtime import context as runtime_context
 from tunix.experimental.examples.frozenlake_dist import frozenlake
 from tunix.experimental.orchestrator import algorithm_adapter
@@ -44,6 +45,7 @@ from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.weight_sync import weight_sync
+from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import remote_execution
 from tunix.rl import algorithm_config
 from tunix.sft import metrics_logger as metrics_logger_lib
@@ -124,7 +126,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       action=argparse.BooleanOptionalAction,
       default=True,
   )
-  parser.add_argument("--episode_timeout_secs", type=int, default=600)
+  parser.add_argument(
+      "--episode_timeout_secs",
+      type=int,
+      default=int(os.getenv("EPISODE_TIMEOUT_SECS", "600")),
+  )
   parser.add_argument(
       "--use_rollout_logps",
       action=argparse.BooleanOptionalAction,
@@ -167,7 +173,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=os.getenv("WANDB_RUN_NAME", ""),
   )
   parser.add_argument("--flush_every_n_steps", type=int, default=1)
-  parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
+  parser.add_argument("--rpc_timeout_s", type=float, default=None)
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   parser.add_argument("--debug", action="store_true")
@@ -244,7 +250,10 @@ def _trajectory_store_config(
   return config
 
 
-def _validate_args(args: argparse.Namespace) -> None:
+def _validate_args(
+    args: argparse.Namespace,
+) -> weight_sync_coordinator.PhaseTimeouts:
+  """Validates FrozenLake arguments and derives aligned `PhaseTimeouts`."""
   if args.num_generations <= 1:
     raise ValueError("num_generations must be greater than 1 for GRPO.")
   if args.batch_size <= 0:
@@ -290,6 +299,22 @@ def _validate_args(args: argparse.Namespace) -> None:
         "weight_sync_mode=fallback does not transfer weights; use none for a "
         "smoke test or raiden for multi-step training."
     )
+  weight_sync_timeouts = (
+      weight_sync_coordinator.PhaseTimeouts.for_drain_timeout(
+          timeouts.drain_timeout_for(args.episode_timeout_secs)
+      )
+  )
+  min_rpc_s = weight_sync_timeouts.max_rpc_phase_s()
+  if args.rpc_timeout_s is None:
+    args.rpc_timeout_s = max(1800.0, min_rpc_s)
+  else:
+    timeouts.validate_positive_finite(args.rpc_timeout_s, "rpc_timeout_s")
+    if args.rpc_timeout_s < min_rpc_s:
+      raise ValueError(
+          f"rpc_timeout_s ({args.rpc_timeout_s}) must be >="
+          f" weight_sync_timeouts.max_rpc_phase_s() ({min_rpc_s})."
+      )
+  return weight_sync_timeouts
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
@@ -342,7 +367,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   ), "Require discovery API, but process context doesn't support."
 
   args = _parse_args(argv)
-  _validate_args(args)
+  weight_sync_timeouts = _validate_args(args)
   logging.basicConfig(
       level=logging.DEBUG if args.debug else logging.INFO,
       format="%(asctime)s - [FrozenLakeOrchestrator] %(message)s",
@@ -392,6 +417,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   cluster = orchestrator.ClusterOrchestrator(
       weight_sync_mode=args.weight_sync_mode,
       trajectory_store_config=trajectory_store_config,
+      weight_sync_timeouts=weight_sync_timeouts,
   )
   context.ipc.discovery.on_register(
       functools.partial(

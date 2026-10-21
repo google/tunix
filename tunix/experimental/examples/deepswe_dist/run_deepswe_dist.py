@@ -36,6 +36,7 @@ if REPO_ROOT not in sys.path:
 
 # pylint: disable=g-import-not-at-top
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import timeouts
 from tunix.experimental.distributed.runtime import context as runtime_context
 from tunix.experimental.examples.deepswe_dist import deepswe
 from tunix.experimental.orchestrator import algorithm_adapter
@@ -43,6 +44,7 @@ from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.weight_sync import weight_sync
+from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import remote_execution
 from tunix.rl import algorithm_config
 from tunix.sft import metrics_logger as metrics_logger_lib
@@ -177,6 +179,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--max_turns", type=int, default=50)
   parser.add_argument("--step_timeout_secs", type=int, default=30 * 60)
   parser.add_argument("--reward_timeout_secs", type=int, default=30 * 60)
+  parser.add_argument(
+      "--episode_timeout_secs",
+      type=int,
+      default=int(os.getenv("EPISODE_TIMEOUT_SECS", str(30 * 60))),
+  )
   parser.add_argument("--env_backend", type=str, default="kubernetes")
   parser.add_argument(
       "--scaffold", choices=("r2egym", "sweagent"), default="r2egym"
@@ -226,7 +233,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " than training on them."
       ),
   )
-  parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
+  parser.add_argument("--rpc_timeout_s", type=float, default=None)
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   parser.add_argument("--debug", action="store_true")
@@ -267,7 +274,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " ahead of time during worker configuration."
       ),
   )
-  return parser.parse_args(argv)
+  args = parser.parse_args(argv)
+  return args
 
 
 def _str2bool(v: str | bool) -> bool:
@@ -342,6 +350,47 @@ def _configure_trainer_loss(
   )
 
 
+def _validate_args(
+    args: argparse.Namespace,
+) -> weight_sync_coordinator.PhaseTimeouts:
+  """Validates DeepSWE arguments and derives aligned `PhaseTimeouts`."""
+  if args.mini_batch_size is None:
+    args.mini_batch_size = args.batch_size
+  if args.num_generations <= 1:
+    raise ValueError("num_generations must be greater than 1 for GRPO.")
+  if args.batch_size <= 0:
+    raise ValueError("batch_size must be positive.")
+  if args.max_staleness < 0:
+    raise ValueError("offpolicy/max_staleness must be non-negative.")
+  if args.step_timeout_secs <= 0:
+    raise ValueError("step_timeout_secs must be positive.")
+  if args.reward_timeout_secs <= 0:
+    raise ValueError("reward_timeout_secs must be positive.")
+  if args.episode_timeout_secs <= 0:
+    raise ValueError("episode_timeout_secs must be positive.")
+  if args.episode_timeout_secs < args.step_timeout_secs:
+    raise ValueError(
+        f"episode_timeout_secs ({args.episode_timeout_secs}) must be >="
+        f" step_timeout_secs ({args.step_timeout_secs})."
+    )
+  weight_sync_timeouts = (
+      weight_sync_coordinator.PhaseTimeouts.for_drain_timeout(
+          timeouts.drain_timeout_for(args.episode_timeout_secs)
+      )
+  )
+  min_rpc_s = weight_sync_timeouts.max_rpc_phase_s()
+  if args.rpc_timeout_s is None:
+    args.rpc_timeout_s = max(1800.0, min_rpc_s)
+  else:
+    timeouts.validate_positive_finite(args.rpc_timeout_s, "rpc_timeout_s")
+    if args.rpc_timeout_s < min_rpc_s:
+      raise ValueError(
+          f"rpc_timeout_s ({args.rpc_timeout_s}) must be >="
+          f" weight_sync_timeouts.max_rpc_phase_s() ({min_rpc_s})."
+      )
+  return weight_sync_timeouts
+
+
 def main(argv: list[str], context: ProcessContext | None = None) -> None:
   assert (
       context and context.ipc and context.ipc.discovery
@@ -354,14 +403,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       force=True,
   )
 
-  if args.mini_batch_size is None:
-    args.mini_batch_size = args.batch_size
-  if args.num_generations <= 1:
-    raise ValueError("num_generations must be greater than 1 for GRPO.")
-  if args.batch_size <= 0:
-    raise ValueError("batch_size must be positive.")
-  if args.max_staleness < 0:
-    raise ValueError("offpolicy/max_staleness must be non-negative.")
+  weight_sync_timeouts = _validate_args(args)
 
   logging.info("=== Starting Distributed DeepSWE GRPO Orchestrator ===")
   logging.info(
@@ -422,6 +464,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   cluster = orchestrator.ClusterOrchestrator(
       weight_sync_mode=args.weight_sync_mode,
       trajectory_store_config=trajectory_store_config,
+      weight_sync_timeouts=weight_sync_timeouts,
   )
   context.ipc.discovery.on_register(
       functools.partial(
@@ -466,6 +509,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           top_k=0 if args.top_k < 0 else args.top_k,
           step_timeout_secs=args.step_timeout_secs,
           reward_timeout_secs=args.reward_timeout_secs,
+          episode_timeout_secs=args.episode_timeout_secs,
           env_backend=args.env_backend,
           use_agent_sandbox=args.use_agent_sandbox,
           scaffold=args.scaffold,

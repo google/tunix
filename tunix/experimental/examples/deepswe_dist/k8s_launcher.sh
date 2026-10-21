@@ -87,6 +87,7 @@ export SANDBOX_NODE_SELECTOR_KEY=${SANDBOX_NODE_SELECTOR_KEY:-}
 export SANDBOX_NODE_SELECTOR_VAL=${SANDBOX_NODE_SELECTOR_VAL:-}
 export STEP_TIMEOUT_SECS=${STEP_TIMEOUT_SECS:-1800}
 export REWARD_TIMEOUT_SECS=${REWARD_TIMEOUT_SECS:-1800}
+export EPISODE_TIMEOUT_SECS=${EPISODE_TIMEOUT_SECS:-1800}
 export ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-64}
 export FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-0}
@@ -263,6 +264,7 @@ start_orchestrator() {
         --scaffold=${SCAFFOLD} \
         --step_timeout_secs=${STEP_TIMEOUT_SECS} \
         --reward_timeout_secs=${REWARD_TIMEOUT_SECS} \
+        --episode_timeout_secs=${EPISODE_TIMEOUT_SECS} \
         --flush_every_n_steps=${FLUSH_EVERY_N_STEPS} \
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
@@ -504,6 +506,7 @@ start_rollout() {
         --env_name=deepswe_env \
         --agent_name=deepswe_agent \
         --max_concurrency=${ROLLOUT_MAX_CONCURRENCY} \
+        --episode_timeout_secs=${EPISODE_TIMEOUT_SECS} \
         --enable_trajectory_store=${TRAJECTORY_STORE_ENABLED} \
         --trajectory_store_backend=${TRAJECTORY_STORE_BACKEND} \
         --trajectory_store_dir=\"${TRAJECTORY_STORE_DIR}\" \

@@ -22,6 +22,7 @@ from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import gcs_cache
+from tunix.experimental.common import timeouts
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.trajectory import store as trajectory_store_lib
@@ -53,6 +54,8 @@ class RolloutConfig(base_rollout.RolloutConfig):
       visible to the orchestrator's reads.
     partial_rollout: Whether to freeze in-flight trajectories in-place during
       weight synchronization instead of draining them to completion first.
+    drain_timeout_s: Soft drain window (seconds) in `pre_weight_sync` when
+      `partial_rollout` is False before remaining stragglers are paused.
   """
 
   sampler_type: str = "vanilla"
@@ -63,6 +66,13 @@ class RolloutConfig(base_rollout.RolloutConfig):
   agent_config: dict[str, Any] = dataclasses.field(default_factory=dict)
   trajectory_store_config: Mapping[str, Any] | None = None
   partial_rollout: bool = False
+  drain_timeout_s: float = timeouts.DEFAULT_DRAIN_TIMEOUT_S
+
+  def __post_init__(self) -> None:
+    super().__post_init__()
+    self.drain_timeout_s = timeouts.validate_positive_finite(
+        self.drain_timeout_s, "drain_timeout_s"
+    )
 
 
 TrajectoryOrError = Union[
@@ -123,6 +133,11 @@ class RolloutWorker(abstract_worker.Worker):
           worker_id,
           self._trajectory_store.to_redacted_config(),
       )
+    drain_timeout_s = (
+        config.drain_timeout_s
+        if config is not None
+        else timeouts.DEFAULT_DRAIN_TIMEOUT_S
+    )
     self.manager = manager_lib.RolloutManager(
         config=config,
         sampler=sampler,
@@ -131,6 +146,7 @@ class RolloutWorker(abstract_worker.Worker):
         max_concurrency=max_concurrency,
         tokenizer=tokenizer,
         chat_parser=chat_parser,
+        drain_timeout_s=drain_timeout_s,
         trajectory_store=self._trajectory_store,
     )
 
@@ -160,6 +176,8 @@ class RolloutWorker(abstract_worker.Worker):
                 if self._trajectory_store is not None
                 else None
             ),
+            "drain_timeout_s": self.manager.drain_timeout_s,
+            "partial_rollout": self.manager.partial_rollout,
         },
     )
 
@@ -189,11 +207,17 @@ class RolloutWorker(abstract_worker.Worker):
             initialized=True,
             ready=True,
             trajectory_store_config=trajectory_store_config,
+            drain_timeout_s=self.manager.drain_timeout_s,
+            partial_rollout=self.manager.partial_rollout,
         )
       self.state = WorkerState.INITIALIZING
       try:
         self.sampler.initialize()
-        return self._response(trajectory_store_config=trajectory_store_config)
+        return self._response(
+            trajectory_store_config=trajectory_store_config,
+            drain_timeout_s=self.manager.drain_timeout_s,
+            partial_rollout=self.manager.partial_rollout,
+        )
       except Exception:
         self.state = WorkerState.ERROR
         raise
