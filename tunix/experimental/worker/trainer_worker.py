@@ -90,7 +90,10 @@ class StepTimer:
       return len(self._mb) - 1
 
   def fwd_bwd_dispatched(
-      self, idx: int, token: Any = None, dispatched_at: float | None = None
+      self,
+      idx: int,
+      token: jax.Array | None = None,
+      dispatched_at: float | None = None,
   ) -> None:
     with self._lock:
       self._mb[idx]["dispatch_end"] = (
@@ -115,7 +118,9 @@ class StepTimer:
           "via": via,
       }
 
-  def update_dispatched(self, train_step: int | None, token: Any = None) -> None:
+  def update_dispatched(
+      self, train_step: int | None, token: jax.Array | None = None
+  ) -> None:
     with self._lock:
       if self._update is not None:
         self._update["dispatch_end"] = time.monotonic()
@@ -139,7 +144,9 @@ class StepTimer:
 
   # -- readiness watcher -----------------------------------------------------
   @staticmethod
-  def _watch_ready(token: Any, on_ready: Callable[[float], None]) -> None:
+  def _watch_ready(
+      token: jax.Array | None, on_ready: Callable[[float], None]
+  ) -> None:
     """Stamps `on_ready(t)` when `token` (a JAX array) is ready on device."""
     if token is None or not isinstance(token, jax.Array):
       return
@@ -228,9 +235,9 @@ class TrainerWorker(abstract_worker.Worker):
     self._trainer_factory = trainer_factory
     self._trainer: abstract_trainer.AbstractTrainer | None = None
     self._pending_loss_fn: tuple[Callable[..., Any], bool] | None = None
-    self._pending_gen_model_input_fn: (
-        Callable[[Any], dict[str, Any]] | None
-    ) = None
+    self._pending_gen_model_input_fn: Callable[[Any], dict[str, Any]] | None = (
+        None
+    )
     self._logps_chunk_size = logps_chunk_size
     self._logps_micro_batch_size = logps_micro_batch_size
     self._is_running = False
@@ -511,7 +518,7 @@ class TrainerWorker(abstract_worker.Worker):
     otherwise just come out short (or empty) with nothing said.
     """
     ran = self._step_mb_via
-    recorded = [m.get("via") for m in timing["mb"]]
+    recorded = [m["via"] for m in timing["mb"]]
     if len(recorded) < len(ran):
       missed = collections.Counter(ran) - collections.Counter(recorded)
       logging.warning(

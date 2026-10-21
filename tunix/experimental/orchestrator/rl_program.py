@@ -2017,7 +2017,7 @@ class StandardRLProgram(RLProgram):
         rtt_s,
         json.dumps(timing, separators=(",", ":")),
     )
-    if not timing.get("mb") or timing.get("update") is None:
+    if not timing["mb"] or timing["update"] is None:
       # The step trained, so an empty `mb` or no `update` is the timer
       # missing work; the trainer worker's log names the call that skipped it.
       logging.warning(
@@ -2025,8 +2025,8 @@ class StandardRLProgram(RLProgram):
           " entries, update %s); see the trainer log for the call that"
           " skipped the step timer.",
           step,
-          len(timing.get("mb") or []),
-          "missing" if timing.get("update") is None else "present",
+          len(timing["mb"]),
+          "missing" if timing["update"] is None else "present",
       )
 
   async def _await_pending_sync(self) -> None:

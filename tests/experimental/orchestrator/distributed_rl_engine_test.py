@@ -2666,5 +2666,64 @@ class DistributedRLEngineTest(absltest.TestCase):
     asyncio.run(_run())
 
 
+class GetStepTimingTest(absltest.TestCase):
+  """`get_step_timing` tolerates only a trainer worker that predates it."""
+
+  def setUp(self):
+    super().setUp()
+    self.mock_actor = MockActorHandle()
+
+  def _get_step_timing(self):
+    async def _run():
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+      )
+      try:
+        return await engine.get_step_timing(role=datatypes.Role.ACTOR)
+      finally:
+        await engine.close()
+
+    return asyncio.run(_run())
+
+  def test_returns_the_worker_timing_and_rtt(self):
+    timing = {"v": 1, "train_step": 3, "mb": [], "update": None}
+    self.mock_actor.get_step_timing = mock.AsyncMock(return_value=timing)
+    got, rtt_s = self._get_step_timing()
+    self.assertEqual(got, timing)
+    self.assertGreaterEqual(rtt_s, 0.0)
+
+  def test_in_process_worker_without_the_method_returns_none(self):
+    self.mock_actor.get_step_timing = mock.AsyncMock(
+        side_effect=AttributeError("get_step_timing")
+    )
+    got, _ = self._get_step_timing()
+    self.assertIsNone(got)
+
+  def test_remote_worker_without_the_method_returns_none(self):
+    self.mock_actor.get_step_timing = mock.AsyncMock(
+        side_effect=RuntimeError(
+            "RemoteExecutionError [AttributeError]: 'TrainerWorker' object has"
+            " no attribute 'get_step_timing'"
+        )
+    )
+    got, _ = self._get_step_timing()
+    self.assertIsNone(got)
+
+  def test_other_remote_failures_propagate(self):
+    self.mock_actor.get_step_timing = mock.AsyncMock(
+        side_effect=RuntimeError("RemoteExecutionError [KeyError]: 'mb'")
+    )
+    with self.assertRaisesRegex(RuntimeError, r"\[KeyError\]"):
+      self._get_step_timing()
+
+  def test_other_local_failures_propagate(self):
+    self.mock_actor.get_step_timing = mock.AsyncMock(
+        side_effect=ValueError("bad step timer")
+    )
+    with self.assertRaisesRegex(ValueError, "bad step timer"):
+      self._get_step_timing()
+
+
 if __name__ == "__main__":
   absltest.main()

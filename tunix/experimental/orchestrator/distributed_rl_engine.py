@@ -1216,7 +1216,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     t0 = time.monotonic()
     try:
       timing = await self._invoke_worker(worker, "get_step_timing")
-    except Exception as exc:  # pylint: disable=broad-except
+    except (AttributeError, RuntimeError) as exc:
+      # Only a worker that predates `get_step_timing` is tolerated: in process
+      # that raises AttributeError, over RPC `RemoteExecutionError
+      # [AttributeError]`. Any other failure propagates.
+      if isinstance(exc, RuntimeError) and "AttributeError" not in str(exc):
+        raise
       logging.warning("get_step_timing unavailable on %s worker: %s", role, exc)
       return None, time.monotonic() - t0
     return timing, time.monotonic() - t0
