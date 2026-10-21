@@ -28,6 +28,7 @@ import logging
 import math
 import os
 import pathlib
+import shutil
 import signal
 import subprocess
 import sys
@@ -1171,6 +1172,29 @@ class PodNameTest(_Base):
     with mock.patch("socket.gethostname", return_value="sock-host"):
       self.assertEqual(f({}), "sock-host")
 
+  def test_run_name_order_of_sources(self):
+    f = events.run_name_from_env
+    self.assertEqual(f({"TUNIX_EVENTS_RUN": "siv-r", "JOB_PREFIX": "siv-j",
+                        "JOBSET_NAME": "siv-x-train"}), "siv-r")
+    self.assertEqual(f({"JOB_PREFIX": "siv-j", "JOBSET_NAME": "siv-x-train"}),
+                     "siv-j")
+    # The trainer pod had no JOB_PREFIX (siv-events-parity): from the JobSet.
+    for js in ("siv-x-train", "siv-x-orch", "siv-x-roll-79", "siv-x-roll-0"):
+      self.assertEqual(f({"JOBSET_NAME": js}), "siv-x", js)
+    self.assertEqual(f({"JOBSET_NAME": "siv-x-roll-79x"}), "siv-x-roll-79x")
+    self.assertEqual(f({}), "")
+
+  def test_configure_from_env_sets_the_run_without_job_prefix(self):
+    os.environ.update(dict(self.JOBSET, JOBSET_NAME="siv-x-train"))
+    os.environ.update({"TUNIX_EVENTS": "on", "TUNIX_EVENTS_LOCAL_DIR": self.tmp})
+    for k in ("JOB_PREFIX", "TUNIX_EVENTS_RUN", "TUNIX_EVENTS_POD", "POD_NAME",
+              "TUNIX_EVENTS_GCS_DIR"):
+      os.environ.pop(k, None)
+    events.configure_from_env("trainer", argv=["main.py"])
+    events.flush(timeout=10)
+    recs = _lines(self.path("trainer", "siv-x-train-proc-0-0"))
+    self.assertEqual({r["run"] for r in recs}, {"siv-x"})
+
   def test_configure_from_env_names_the_stream_by_pod(self):
     os.environ.update(self.JOBSET)
     os.environ.update({"TUNIX_EVENTS": "on", "JOB_PREFIX": "siv-x",
@@ -1300,6 +1324,46 @@ class NodeStopTest(_Base):
     recs = _lines(os.path.join(gdir, "rollout-pod-n.jsonl"))
     self.assertEqual([x["step"] for x in recs if x["ev"] == "ckpt"],
                      list(range(500)))
+    # node_stopping() wrote a health line after the queued events and before
+    # the upload, so the killed pod's stream still ends on one that counts
+    # them; the verifier reports it as unfinished rather than truncated.
+    last = recs[-1]
+    self.assertEqual(last["ev"], "events_health")
+    self.assertTrue(last["stopping"])
+    self.assertFalse(last["final"])
+    self.assertEqual(last["emitted"], 501)  # config + 500
+    self.assertEqual(last["dropped"], 0)
+    side = json.load(open(os.path.join(gdir, "_health", "rollout-pod-n.json")))
+    self.assertFalse(side["final"])
+    self.assertEqual(side["emitted"], 501)
+    local = os.path.join(self.tmp, "verify")
+    os.makedirs(local)
+    shutil.copy(os.path.join(gdir, "rollout-pod-n.jsonl"), local)
+    with open(os.path.join(local, events.MANIFEST_NAME), "w") as f:
+      json.dump({"v": 1, "run": "run-n", "complete": True,
+                 "expected": {"rollout": 1},
+                 "files": {"rollout-pod-n.jsonl": {
+                     "events": 500, "dropped": 0, "errors": 0}}}, f)
+    self.assertEqual(events.verify_manifest(local)["problems"],
+                     ["unfinished: rollout-pod-n.jsonl ends on its pre-drain"
+                      " events_health line (no final line)"])
+
+  def test_node_stopping_health_line_precedes_the_drain_events(self):
+    p, _ = self._start("ok")
+    out, err = p.communicate(timeout=60)
+    self.assertEqual(p.returncode, 0, err)
+    recs = _lines(os.path.join(self.tmp, "rollout-pod-n.jsonl"))
+    hs = [i for i, x in enumerate(recs) if x["ev"] == "events_health"]
+    self.assertEqual(len(hs), 2)  # the pre-drain line and the final line
+    pre, fin = recs[hs[0]], recs[hs[1]]
+    self.assertTrue(pre["stopping"])
+    self.assertFalse(pre["final"])
+    self.assertEqual(pre["emitted"], 501)
+    self.assertEqual([x["step"] for x in recs[:hs[0]] if x["ev"] == "ckpt"],
+                     list(range(500)))
+    self.assertTrue(fin["final"])
+    self.assertNotIn("stopping", fin)
+    self.assertEqual(hs[1], len(recs) - 1)
 
   def test_node_stop_is_bounded_and_does_not_raise(self):
     st = self.configure(role="rollout", pod="p", gcs_dir="gs://bkt/x")
