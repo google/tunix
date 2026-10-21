@@ -7,8 +7,8 @@
 # gdn_cp_fast_state_passing, moe_fp8_token_all_gather, gdn_bwd_natural_layout, gdn_gated_norm_layout,
 # context_parallel_attention_load_balance_order, gdn_conv1d_natural_layout, gdn_fwd_kernel_head_group_size,
 # gdn_in_proj_kernel_order, dense_grad_reduce and optimizer_device_resident_gib.
-maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@498efb5b7063c939dd3f5214379d622361235129
-maxtext-vllm-adapter @ git+https://github.com/AI-Hypercomputer/maxtext.git@498efb5b7063c939dd3f5214379d622361235129#subdirectory=src/maxtext/integration/vllm
+maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@c7131f8be6ab589f0a13cb7594397864ab2ea066
+maxtext-vllm-adapter @ git+https://github.com/AI-Hypercomputer/maxtext.git@c7131f8be6ab589f0a13cb7594397864ab2ea066#subdirectory=src/maxtext/integration/vllm
 aqtp
 cheroot
 cloud-accelerator-diagnostics
