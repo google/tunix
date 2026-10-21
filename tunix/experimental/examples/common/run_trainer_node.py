@@ -781,6 +781,7 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       prefuse_moe_weights=args.prefuse_moe_weights,
       use_weight_converter=args.use_weight_converter,
       max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+      weight_dtype=args.model_load_dtype,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)

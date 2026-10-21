@@ -83,6 +83,9 @@ def get_tokenizer_pad_id(
 # vLLM implementation. Pass it as the engine's `hf_overrides`.
 VLLM_MAXTEXT_HF_OVERRIDES = {"architectures": ["MaxTextForCausalLM"]}
 
+DEFAULT_TRAINER_WEIGHT_DTYPE = "float32"
+DEFAULT_ROLLOUT_WEIGHT_DTYPE = "bfloat16"
+
 
 def build_vllm_maxtext_additional_config(
     model_name: str,
@@ -117,7 +120,7 @@ def build_vllm_maxtext_additional_config(
       "enable_dp_attention": False,
       "allow_split_physical_axes": True,
       "log_config": False,
-      "weight_dtype": "bfloat16",
+      "weight_dtype": DEFAULT_ROLLOUT_WEIGHT_DTYPE,
   }
   if prefuse_moe_weights is not None:
     overrides["prefuse_moe_weights"] = prefuse_moe_weights
@@ -155,6 +158,7 @@ def build_maxtext_config(
     use_weight_converter: bool = True,
     max_seq_token_per_tpu: int | None = 0,
     adamw_options: AdamWOptions | None = None,
+    weight_dtype: str = DEFAULT_TRAINER_WEIGHT_DTYPE,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
@@ -447,7 +451,8 @@ def build_maxtext_config(
       f"learning_rate={learning_rate}",
       f"warmup_steps_fraction={warmup_steps_fraction}",
       "dtype=bfloat16",
-      "weight_dtype=bfloat16",
+      f"weight_dtype={weight_dtype}",
+      f"rollout_weight_dtype={DEFAULT_ROLLOUT_WEIGHT_DTYPE}",
       "grad_dtype=float32",
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",

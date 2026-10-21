@@ -63,7 +63,8 @@ class MaxTextUtilsTest(absltest.TestCase):
       self.assertIn("ici_tensor_parallelism=4", argv)
       self.assertIn("ici_fsdp_parallelism=2", argv)
       self.assertIn("dtype=bfloat16", argv)
-      self.assertIn("weight_dtype=bfloat16", argv)
+      self.assertIn("weight_dtype=float32", argv)
+      self.assertIn("rollout_weight_dtype=bfloat16", argv)
       self.assertIn("grad_dtype=float32", argv)
       self.assertIn("prefuse_moe_weights=True", argv)
       self.assertIn("use_weight_converter=False", argv)
@@ -673,6 +674,21 @@ class MaxTextUtilsTest(absltest.TestCase):
         "qwen3-30b-a3b", return_routed_experts=True
     )
     self.assertIs(enabled["maxtext_config"]["return_routed_experts"], True)
+
+  def test_weight_dtype_override_and_rollout_weight_dtype_parity(self):
+    argv = self._build_config_argv(weight_dtype="bfloat16")
+    self.assertIn("weight_dtype=bfloat16", argv)
+    self.assertIn(
+        f"rollout_weight_dtype={maxtext_utils.DEFAULT_ROLLOUT_WEIGHT_DTYPE}",
+        argv,
+    )
+    vllm_cfg = maxtext_utils.build_vllm_maxtext_additional_config(
+        model_name="gemma2-9b"
+    )
+    self.assertEqual(
+        vllm_cfg["maxtext_config"]["weight_dtype"],
+        maxtext_utils.DEFAULT_ROLLOUT_WEIGHT_DTYPE,
+    )
 
 
 if __name__ == "__main__":
