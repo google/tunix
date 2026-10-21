@@ -38,8 +38,8 @@ export PRIORITY_CLASS="medium"
 export KUEUE_PRIORITY_CLASS="medium"
 export SERVICE_ACCOUNT="xpk-sa"
 export CPU_MACHINE="n2d-standard-64"
-export CPU_NODEPOOL="cpu-np"
-export CPU_MEMORY="220Gi"
+export CPU_NODEPOOL="cpu-highmem-np"
+export CPU_MEMORY="300Gi"
 export USER_CONTAINER_MEMORY="160G"
 export USER_CONTAINER_MEMORY_LIMIT="260G"
 
@@ -75,6 +75,9 @@ export CHECKPOINT_MAX_TO_KEEP="30"
 export CHECKPOINT_ABANDON_FAILED_SAVES="true"
 export CHECKPOINT_OPTIMIZER_INTERVAL_STEPS="0"
 export CKPT_D2H_CONCURRENT_GB="32"
+export COLOCATED_PYTHON_SIDECAR_IMAGE="gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner@sha256:6682fc0f364d2246a8768265c8c06ef50e213d86e1639d367543c78a90a8f0f2"
+export COLOCATED_PYTHON_SIDECAR_MEMORY="16Gi"
+export COLOCATED_PYTHON_SIDECAR_SHM="1"
 
 export WANDB_ENTITY="google-trellis"
 export WANDB_PROJECT="trellis-deepswe"
@@ -144,18 +147,20 @@ export RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER="0"
 export TRAINER_FP8="true"
 export REMAT_POLICY="custom"
 export TRAINER_MAXTEXT_ATTENTION="flash"
-export COMPUTE_LOGPS_CHUNK_SIZE="1024"
-export TUNIX_LOGPS_SHARDED_HEAD="local"
+export COMPUTE_LOGPS_CHUNK_SIZE="4096"
+export TUNIX_LOGPS_SHARDED_HEAD="fused"
 export TRAINER_WARMUP_COMPILE="true"
 
-_TRAINER_LIBTPU_INIT_ARGS="--DANGEROUS_tpu_runtime_abi_verification_disabled=true --xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=false --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=false --xla_tpu_scoped_vmem_limit_kib=65472 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=false --xla_tpu_dvfs_p_state=7 --xla_tpu_max_hbm_size_mib=84992 --xla_tpu_enable_offloading_copy_to_sparsecore=false"
+_TRAINER_LIBTPU_INIT_ARGS="--DANGEROUS_tpu_runtime_abi_verification_disabled=true --xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=false --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=false --xla_tpu_scoped_vmem_limit_kib=65472 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=true --xla_tpu_dvfs_p_state=7 --xla_tpu_max_hbm_size_mib=84992 --xla_tpu_enable_offloading_copy_to_sparsecore=false"
 
-export PATHWAYS_PROXY_EXTRA_ARGS="--xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=false --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=false --xla_tpu_scoped_vmem_limit_kib=65472 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=false --xla_tpu_dvfs_p_state=7 --xla_tpu_max_hbm_size_mib=84992 --xla_tpu_enable_offloading_copy_to_sparsecore=false"
+export PATHWAYS_PROXY_EXTRA_ARGS="--xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=false --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=false --xla_tpu_scoped_vmem_limit_kib=65472 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=true --xla_tpu_dvfs_p_state=7 --xla_tpu_max_hbm_size_mib=84992 --xla_tpu_enable_offloading_copy_to_sparsecore=false"
 
-export TRAINER_EXTRA_ENV="ONEHOT_MOE_PERMUTE_THRESHOLD=2048 ENABLE_MULTI_NUMA=0 TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_HOST_RATIO=1.0 RAIDEN_BROADCAST_PIPELINE_STAGES=4 LIBTPU_INIT_ARGS='${_TRAINER_LIBTPU_INIT_ARGS}' TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=120000 TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=5 RAIDEN_PARALLELISM=16 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16"
+export TRAINER_EXTRA_ENV="ONEHOT_MOE_PERMUTE_THRESHOLD=2048 ENABLE_MULTI_NUMA=0 TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_HOST_RATIO=1.0 RAIDEN_BROADCAST_PIPELINE_STAGES=4 LIBTPU_INIT_ARGS='${_TRAINER_LIBTPU_INIT_ARGS}' TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=120000 TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=5 TUNIX_LOGPS_HEAD_GRAD_SCATTER=chunk RAIDEN_PARALLELISM=16 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16"
 
 export PATHWAYS_WORKER_EXTRA_ENV="LIBTPU_INIT_ARGS=${_TRAINER_LIBTPU_INIT_ARGS} --megascale_port=-1 --xprof_compress_jftrace=true
 SKIP_MEGASCALE_PJRT_CLIENT=true
+ENABLE_MULTI_NUMA=0
+TPU_RAIDEN_DATA_NICS=eth0
 RAIDEN_BROADCAST_HOST_RATIO=1.0
 RAIDEN_BROADCAST_PIPELINE_STAGES=4
 TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=120000
@@ -166,33 +171,48 @@ unset _TRAINER_LIBTPU_INIT_ARGS
 
 export ORCHESTRATOR_EXTRA_ENV="WEIGHT_SYNC_BIND_TIMEOUT_S=900 WEIGHT_SYNC_METADATA_TIMEOUT_S=900 WEIGHT_SYNC_H2D_TIMEOUT_S=3600 WEIGHT_SYNC_TRANSFER_TIMEOUT_S=7200 RAIDEN_PARALLELISM=16 TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_HOST_RATIO=1.0 RAIDEN_BROADCAST_PIPELINE_STAGES=4 TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=120000 TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=5"
 
-export MAXTEXT_EXTRA_FLAGS="custom_mesh_and_rule=cp-as-ep \
-use_gdn_kernel=true gdn_cp_mode=seq gdn_cp_state=device gdn_cp_matmul_precision=high gdn_chunk_size=64 \
+export MAXTEXT_EXTRA_FLAGS="custom_mesh_and_rule=cp-as-ep use_gdn_kernel=true gdn_cp_mode=head gdn_chunk_size=64 \
 decoder_layer_input=offload context=device gdn=remat gdn_conv=remat gdn_states=remat \
 megablox=true sparse_matmul=true use_tokamax_gmm=true use_gmm_v2=true \
-use_gmm_v2_heuristic_tiling=false merge_gating_gmm=false \
-wi_tile_fwd_batch_seq=256 wi_tile_fwd_embed_dim=4096 wi_tile_fwd_mlp_dim=1024 \
-wi_tile_dlhs_batch_seq=256 wi_tile_dlhs_embed_dim=4096 wi_tile_dlhs_mlp_dim=1024 \
-wi_tile_drhs_batch_seq=256 wi_tile_drhs_embed_dim=4096 wi_tile_drhs_mlp_dim=1024 \
-wo_tile_fwd_batch_seq=256 wo_tile_fwd_embed_dim=4096 wo_tile_fwd_mlp_dim=1024 \
-wo_tile_dlhs_batch_seq=256 wo_tile_dlhs_embed_dim=4096 wo_tile_dlhs_mlp_dim=1024 \
-wo_tile_drhs_batch_seq=256 wo_tile_drhs_embed_dim=4096 wo_tile_drhs_mlp_dim=1024 \
-use_ring_of_experts=true num_moe_token_chunks=2 moe_chunk_barrier=false \
-ring_of_experts_local_routing=true moe_expert_weight_prefetch=forward \
-moe_chunk_pipeline=true ring_of_experts_row_major_reduce_scatter=true \
-use_ragged_sort=true use_custom_sort_vjp=false ragged_buffer_factor=2.75 \
+use_gmm_v2_heuristic_tiling=false merge_gating_gmm=false wi_tile_fwd_batch_seq=256 \
+wi_tile_fwd_embed_dim=4096 wi_tile_fwd_mlp_dim=2048 wi_tile_dlhs_batch_seq=256 \
+wi_tile_dlhs_embed_dim=4096 wi_tile_dlhs_mlp_dim=1024 wi_tile_drhs_batch_seq=256 \
+wi_tile_drhs_embed_dim=4096 wi_tile_drhs_mlp_dim=1024 wo_tile_fwd_batch_seq=256 \
+wo_tile_fwd_embed_dim=4096 wo_tile_fwd_mlp_dim=1024 wo_tile_dlhs_batch_seq=256 \
+wo_tile_dlhs_embed_dim=4096 wo_tile_dlhs_mlp_dim=1024 wo_tile_drhs_batch_seq=256 \
+wo_tile_drhs_embed_dim=4096 wo_tile_drhs_mlp_dim=1024 use_ring_of_experts=true \
+num_moe_token_chunks=2 moe_chunk_barrier=false ring_of_experts_local_routing=true \
+moe_expert_weight_prefetch=forward moe_chunk_pipeline=true \
+ring_of_experts_row_major_reduce_scatter=true use_ragged_sort=true use_custom_sort_vjp=false \
+ragged_buffer_factor=2.75 use_tokamax_splash=true use_splash_scheduler=true sa_block_q=1024 \
+sa_block_kv=4096 sa_block_kv_compute=512 sa_block_q_dkv=2048 sa_block_kv_dkv=2048 \
+sa_block_kv_dkv_compute=512 sa_fuse_reciprocal=false sa_use_base2_exp=true \
+dq_reduction_steps=3 context_parallel_strategy=ring context_parallel_load_balance=false \
+allow_split_physical_axes=false context_parallel_attention_load_balance=true \
+num_vocab_tiling=16 use_iota_embed=false mu_dtype=float32 grad_dtype=float32 \
+checkpoint_storage_concurrent_gb=96 packing=True optimizer_memory_host_offload=true \
 retry_when_tokens_dropped=true retry_num_moe_token_chunks=8 \
 moe_exclude_padding_from_routing=true log_moe_drops=true \
-use_tokamax_splash=true use_splash_scheduler=true \
-sa_block_q=1024 sa_block_kv=4096 sa_block_kv_compute=512 \
-sa_block_q_dkv=2048 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=512 \
-sa_fuse_reciprocal=true sa_use_base2_exp=false dq_reduction_steps=3 \
-context_parallel_strategy=all_gather context_parallel_load_balance=false allow_split_physical_axes=false \
-context_parallel_attention_load_balance=true \
-num_vocab_tiling=16 use_iota_embed=false mu_dtype=float32 grad_dtype=float32 cast_grads_after_all_reduce=true \
-checkpoint_storage_concurrent_gb=96 \
-packing=True optimizer_memory_host_offload=true \
-kv_tp_size=8 rollout_fp8_moe=true fp8_moe_fake_quant=true"
+context_parallel_strategy=all_gather sa_fuse_reciprocal=true gdn_cp_mode=seq \
+gdn_cp_state=device gdn_cp_matmul_precision=high cast_grads_after_all_reduce=true \
+wi_tile_dlhs_mlp_dim=2048 decoder_layer_input=device moe_routing_maps=device \
+moe_gmm_v2_dlhs_transpose_rhs=true moe_routing_index_math=count moe_unsplit_prefused_wi=true \
+moe_roe_packed_routing_gather=true moe_router_grad_from_wo_input=true \
+moe_wi_gmm_fused_swiglu=true gdn_conv1d_input_in_qkv_dtype=true \
+gdn_conv1d_dense_token_stack=true wi_tile_fwd_batch_seq=512 wi_tile_drhs_batch_seq=512 \
+wo_tile_fwd_batch_seq=512 wo_tile_dlhs_batch_seq=512 wo_tile_drhs_batch_seq=512 \
+context_parallel_attention_load_balance_hoist_ids=true moe_wo_gmm_fused_dswiglu=true \
+custom_mesh_and_rule=cp-as-ep-dense-no-cp query_proj_kernel_gather_once=true \
+fp8_fake_quant_hoist=gather8 wi_tile_fwd_rhs_buffer_count=2 gdn_cp_m_scan=true \
+gdn_cp_dh_scan=true gdn_cp_pass1_states_and_bf16_qkv=true gdn_out_proj_token_minor=true \
+moe_fp8_bwd_dispatch=true ragged_unsort_spread_masked_indices=true \
+moe_fallback_topk_capacity=128 gdn_cp_fast_state_passing=true fp32_master_storage=residual16 \
+moe_fp8_token_all_gather=true gdn_bwd_natural_layout=states \
+gdn_gated_norm_layout=token_minor \
+context_parallel_attention_load_balance_order=dual_chunk_swap_local_self \
+gdn_conv1d_natural_layout=true gdn_fwd_kernel_head_group_size=4 \
+gdn_in_proj_kernel_order=true dense_grad_reduce=all_reduce optimizer_device_resident_gib=6 \
+ragged_buffer_factor=2.0 kv_tp_size=8 rollout_fp8_moe=true fp8_moe_fake_quant=true"
 
 # ==============================================================================
 # 6. Rollout (vLLM) Flags, Environment & JAX Cache
@@ -239,7 +259,9 @@ export TPU_MOE_LOWTOK="1"
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="1800"
 
 export LIBTPU_INIT_ARGS=" --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false --xla_tpu_dvfs_p_state=7"
-export ROLLOUT_EXTRA_ENV="USE_BATCHED_RPA_LONG_CTX_KERNEL=true VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 RAIDEN_BROADCAST_HOST_RATIO=1.0 RAIDEN_BROADCAST_PIPELINE_STAGES=4 TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=120000 TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=5 RAIDEN_PARALLELISM=16 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16"
+export VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY="RAIDEN_,TPU_,WEIGHT_SYNC_"
+export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="USE_BATCHED_RPA_LONG_CTX_KERNEL,ONEHOT_MOE_PERMUTE_THRESHOLD,LIBTPU_INIT_ARGS,RAY_memory_monitor_refresh_ms,VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,ENABLE_MULTI_NUMA,TPU_RAIDEN_DATA_NICS,FLOAT32_GATE_LOGITS,FLOAT32_LOGITS,NEW_MODEL_DESIGN,ATTN_BUCKETIZED_NUM_REQS,ATTN_CUSTOM_NUM_REQS_BUCKETS,VLLM_MOE_CHUNK_SIZE,SLICE_ROPE_CACHE,DP_SCHED_BATCH_PREFILL,TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS,TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS,WEIGHT_SYNC_PARALLEL_H2H,RAGGED_GATHER_REDUCE_VERSION,TPU_SMALL_ALL_REDUCE,TPU_MOE_SINGLE_SORT,TPU_MOE_ROUTER_TOPK,TPU_MOE_LOWTOK"
+export ROLLOUT_EXTRA_ENV="USE_BATCHED_RPA_LONG_CTX_KERNEL=true ONEHOT_MOE_PERMUTE_THRESHOLD=2048 RAY_memory_monitor_refresh_ms=0 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 ENABLE_MULTI_NUMA=0 TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_HOST_RATIO=1.0 RAIDEN_BROADCAST_PIPELINE_STAGES=4 TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=120000 TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=5 RAIDEN_PARALLELISM=16 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16"
 
 # JAX Compilation Cache
 export ROLLOUT_JAX_CACHE_GCS_DIR="${BUCKET}/jax_cache/v7x/qwen3.5-397b-a17b/rollout_2x2x1_ep8_tp1_44402c2102"
@@ -258,7 +280,7 @@ export TRAIN_MICRO_BATCH_SIZE="64"
 export LEARNING_RATE="2.121320343559642e-06"
 export MAX_GRAD_NORM="0.05892556509887896"
 
-export INITIAL_DISPATCH_FIRST_STAGGER_S="75"
+export INITIAL_DISPATCH_FIRST_STAGGER_S="175"
 export INITIAL_DISPATCH_STAGGER_S="75"
 export MAX_STALENESS="2"
 export ROLLOUT_PRIORITY_SCHEDULING="true"
@@ -271,6 +293,7 @@ export TRAJECTORY_GROUP_ORDER="prompt_batch"
 # Sequence packing
 export MAX_SEQ_TOKEN_PER_TPU="65536"
 export MAX_SEGMENTS_PER_PACKED_ROW="16"
+export PACK_PAD_POSITION="start"
 
 # Sampling Parameters
 export TEMPERATURE="1.0"
@@ -303,6 +326,8 @@ export WARMUP_STEPS_FRACTION="0.0"
 export LEARNING_RATE_FINAL_FRACTION="1.0"
 export SKIP_STEP_ON_SPIKES="false"
 export SKIP_STEP_ON_NAN="true"
+export PROFILER_STEPS="0"
+export SKIP_FIRST_N_PROFILER_STEPS="-1"
 
 # DeepSWE Environment & Agent Sandbox
 export DATASET_PATH="gs://mlperf_dataset/benchmark-r2e-gym-easy"
@@ -314,7 +339,8 @@ export SANDBOX_NAMESPACE="${K8S_NAMESPACE:-trellis}"
 export MAX_WARMPOOL_REPLICAS="16"
 export SANDBOX_WAIT_INITIAL="false"
 export SANDBOX_IMAGE_PULL_POLICY="IfNotPresent"
-export PREPULL_SANDBOX_IMAGES="false"
+export PREPULL_SANDBOX_IMAGES="true"
+export PREPULL_IMAGES_FILE="${DATASET_PATH}/sandbox_images.txt"
 export PREWARM_IMAGES_FILE="${DATASET_PATH}/sandbox_images.txt"
 export PREWARM_MAX_WORKERS="32"
 export ROLLOUT_MAX_CONCURRENCY="256"
