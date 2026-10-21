@@ -231,6 +231,7 @@ def main(argv: list[str]) -> None:
       ),
       argv=argv,
   )
+  events.set_process_count(len(prepared_processes))
 
   if len(prepared_processes) == 1:
     prepared = prepared_processes[0]
