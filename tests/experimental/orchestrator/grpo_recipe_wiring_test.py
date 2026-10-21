@@ -14,6 +14,8 @@
 
 """Unit tests for wiring the sequence-level GRPO options to the loss."""
 
+import ast
+import inspect
 import os
 import re
 
@@ -696,6 +698,107 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
     ])
     self.assertTrue(parsed.trainer_warmup_compile)
     self.assertTrue(parsed.trainer_warmup_routed_experts)
+
+  def test_k8s_launcher_wires_the_packed_row_pad_position(self):
+    block = _deepswe_k8s_orchestrator_block()
+    for flag in ("--pack_pad_position=", "--pack_pad_align="):
+      self.assertIn(flag, block, f"deepswe k8s_launcher does not pass {flag}")
+
+    parse = run_deepswe_dist._parse_args  # pylint: disable=protected-access
+    build = run_deepswe_dist._batch_config  # pylint: disable=protected-access
+    defaults = parse([])
+    self.assertEqual(defaults.pack_pad_position, "end")
+    self.assertEqual(defaults.pack_pad_align, 4096)
+    # The default command line gives the BatchConfig the program had before
+    # the two options existed, field for field.
+    self.assertEqual(
+        build(defaults, pad_id=7),
+        batch_assembly.BatchConfig(
+            pad_id=7,
+            max_prompt_length=defaults.max_prompt_length,
+            max_response_length=defaults.max_response_length,
+            max_seq_token_per_tpu=None,
+            max_segments_per_packed_row=None,
+            trainer_fsdp=None,
+            trainer_dp=None,
+            trainer_expert=None,
+        ),
+    )
+    config = build(
+        parse([
+            "--max_seq_token_per_tpu=65536",
+            "--max_segments_per_packed_row=16",
+            "--pack_pad_position=start",
+            "--pack_pad_align=8192",
+        ]),
+        pad_id=7,
+    )
+    self.assertEqual(config.pack_pad_position, "start")
+    self.assertEqual(config.pack_pad_align, 8192)
+    self.assertEqual(config.max_seq_token_per_tpu, 65536)
+    self.assertEqual(config.max_segments_per_packed_row, 16)
+    self.assertEqual(config.pad_id, 7)
+    with self.assertRaises(SystemExit):
+      parse(["--pack_pad_position=middle"])
+
+  def test_the_parsed_pad_position_packs_rows_with_the_padding_first(self):
+    # The equality checks above cannot tell 8192 from 8192.0, and only an int
+    # can index a row: pack two rollouts with the assembler that the program
+    # builds from the same BatchConfig.
+    parse = run_deepswe_dist._parse_args  # pylint: disable=protected-access
+    build = run_deepswe_dist._batch_config  # pylint: disable=protected-access
+    for argv, budget, first_token in (
+        (["--max_seq_token_per_tpu=8192"], 8192, 0),
+        # PACK_PAD_POSITION=start with PACK_PAD_ALIGN unset.
+        (
+            ["--max_seq_token_per_tpu=8192", "--pack_pad_position=start"],
+            8192,
+            4096,
+        ),
+        (
+            [
+                "--max_seq_token_per_tpu=16384",
+                "--pack_pad_position=start",
+                "--pack_pad_align=8192",
+            ],
+            16384,
+            8192,
+        ),
+    ):
+      with self.subTest(argv=argv):
+        assembler = batch_assembly.create_batch_assembler(
+            num_generations=2,
+            mini_batch_size=1,
+            train_micro_batch_size=1,
+            batch_config=build(parse(argv), pad_id=0),
+        )
+        (batch,) = assembler.feed([_row(8), _row(8)]) + assembler.flush()
+        segment_ids = np.asarray(batch.payload.segment_ids)
+        # One row holds both 10-token rollouts, at [0, 10) and [64, 74) before
+        # it moves.
+        self.assertEqual(segment_ids.shape, (1, budget))
+        self.assertEqual(np.count_nonzero(segment_ids), 20)
+        self.assertEqual(int(np.flatnonzero(segment_ids[0])[0]), first_token)
+
+  def test_main_gives_the_program_the_batch_config_of_the_command_line(self):
+    # main() needs a cluster, so the tests above check _batch_config instead;
+    # this checks that main() hands the program what _batch_config returns. A
+    # BatchConfig written out in main() would drop --pack_pad_position with
+    # every test above still passing.
+    tree = ast.parse(inspect.getsource(run_deepswe_dist.main))
+    programs = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and ast.unparse(node.func) == "rl_program.StandardRLProgram"
+    ]
+    self.assertLen(programs, 1)
+    batch_configs = [
+        ast.unparse(keyword.value)
+        for keyword in programs[0].keywords
+        if keyword.arg == "batch_config"
+    ]
+    self.assertEqual(batch_configs, ["_batch_config(args, pad_id)"])
 
 
 class AuxMetricForwardingTest(absltest.TestCase):

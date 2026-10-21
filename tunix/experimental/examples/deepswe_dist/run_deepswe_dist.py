@@ -48,6 +48,7 @@ from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import remote_execution
 from tunix.rl import algorithm_config
+from tunix.rl import packing
 from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.utils import mllog_utils
 
@@ -210,6 +211,29 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       type=int,
       default=None,
       help="Maximum segments per packed row when sequence packing is enabled.",
+  )
+  parser.add_argument(
+      "--pack_pad_position",
+      choices=packing.PAD_POSITIONS,
+      default=packing.DEFAULT_PAD_POSITION,
+      help=(
+          "Where each packed row's padding goes when sequence packing is"
+          " enabled: 'end' (default), or 'start', which moves the row right by"
+          " its trailing padding rounded down to a multiple of"
+          " --pack_pad_align so that the padding comes first. Under"
+          " load-balanced context parallelism this evens out the attention"
+          " work of the context ranks (see tunix/rl/packing.py)."
+      ),
+  )
+  parser.add_argument(
+      "--pack_pad_align",
+      type=int,
+      default=packing.DEFAULT_PAD_ALIGN,
+      help=(
+          "With --pack_pad_position=start, rows move by a multiple of this"
+          " many tokens (default 4096, the largest Splash block of the"
+          " Qwen3.5-397B-A17B recipe)."
+      ),
   )
   # TODO(tunix-dev): Clean up worker specific configuration to orchestrator.
   parser.add_argument(
@@ -829,6 +853,24 @@ def _build_trajectory_store_config(
   return [file_cfg, sql_cfg]
 
 
+def _batch_config(
+    args: argparse.Namespace, pad_id: int
+) -> batch_assembly.BatchConfig:
+  """Returns the program's BatchConfig: the command line plus the pad id."""
+  return batch_assembly.BatchConfig(
+      pad_id=pad_id,
+      max_prompt_length=args.max_prompt_length,
+      max_response_length=args.max_response_length,
+      max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+      max_segments_per_packed_row=args.max_segments_per_packed_row,
+      trainer_fsdp=args.trainer_fsdp,
+      trainer_dp=args.trainer_dp,
+      trainer_expert=args.trainer_expert,
+      pack_pad_position=args.pack_pad_position,
+      pack_pad_align=args.pack_pad_align,
+  )
+
+
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   algo_config = algorithm_config.GRPOConfig(
       num_generations=args.num_generations,
@@ -1310,16 +1352,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         ),
         reward_fns=[],
         batch_size=args.batch_size,
-        batch_config=batch_assembly.BatchConfig(
-            pad_id=pad_id,
-            max_prompt_length=args.max_prompt_length,
-            max_response_length=args.max_response_length,
-            max_seq_token_per_tpu=args.max_seq_token_per_tpu,
-            max_segments_per_packed_row=args.max_segments_per_packed_row,
-            trainer_fsdp=args.trainer_fsdp,
-            trainer_dp=args.trainer_dp,
-            trainer_expert=args.trainer_expert,
-        ),
+        batch_config=_batch_config(args, pad_id),
         metrics_logging_options=metrics_logging_options,
         trajectory_log_dir=args.trajectory_log_dir,
         trajectory_store=cluster.trajectory_store,

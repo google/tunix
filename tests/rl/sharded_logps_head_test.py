@@ -14,13 +14,14 @@
 
 """Tests for the sharded chunked log-prob head (TUNIX_LOGPS_SHARDED_HEAD).
 
-The tests need 8 CPU devices, and JAX fixes the device count when its backend
-starts. This module never sets the count at import, because in a shared pytest
-process that would change it for every other test module. Run directly, it sets
-8 CPU devices for its own process. Under pytest, ShardedLogpsHeadTest runs in
-the current process only if that process already has 8 CPU devices; otherwise
-it is skipped and ChildProcessTest runs this file in a child process that has
-them.
+ShardedLogpsHeadTest tests the head, in its "local" and "fused" modes, on a
+mesh of 8 CPU devices; FusedScoringTest tests the "fused" mode's chunk scoring
+on one device. JAX fixes the device count when its backend starts. This module
+never sets the count at import, because in a shared pytest process that would
+change it for every other test module. Run directly, it sets 8 CPU devices for
+its own process. Under pytest, ShardedLogpsHeadTest runs in the current process
+only if that process already has 8 CPU devices; otherwise it is skipped and
+ChildProcessTest runs this file in a child process that has them.
 """
 
 import contextlib
@@ -189,6 +190,7 @@ class ShardedLogpsHeadTest(parameterized.TestCase):
       legacy_mesh=False,
       differentiate=('logps', 'entropy'),
       nonfinite=(),
+      lower=False,
   ):
     """Returns (log-probs, entropy, grads) of a loss weighting both outputs.
 
@@ -197,6 +199,8 @@ class ShardedLogpsHeadTest(parameterized.TestCase):
         enter it under `stop_gradient` (GRPO differentiates the log-probs only).
       nonfinite: (row, position) pairs whose hidden state is NaN. The scores
         computed from them get loss weight 0, as padding does.
+      lower: Return the StableHLO text of the jitted value_and_grad instead of
+        running it; 'jaxpr': return its jaxpr.
     """
     model = _HeadOnly(dtype, batch, seq)
     if nonfinite:
@@ -238,9 +242,12 @@ class ShardedLogpsHeadTest(parameterized.TestCase):
       return value, (logps, entropy)
 
     with self._head_switch(mode, rules, expect, legacy_mesh):
-      (_, (logps, entropy)), grads = jax.jit(
-          jax.value_and_grad(loss, has_aux=True)
-      )(state)
+      if lower == 'jaxpr':
+        return jax.make_jaxpr(jax.value_and_grad(loss, has_aux=True))(state)
+      step = jax.jit(jax.value_and_grad(loss, has_aux=True))
+      if lower:
+        return step.lower(state).as_text()
+      (_, (logps, entropy)), grads = step(state)
     return logps, entropy, grads
 
   def _assert_parity(self, got, want, entropy=True):
@@ -461,12 +468,14 @@ class ShardedLogpsHeadTest(parameterized.TestCase):
       ('local', 'local'),
       (' Local ', 'local'),
       ('TRUE', 'local'),
+      ('fused', 'fused'),
+      (' Fused ', 'fused'),
   )
   def test_mode_parsing(self, value, want):
     with mock.patch.dict(os.environ, {common.SHARDED_HEAD_ENV: value}):
       self.assertEqual(common.sharded_head_mode(), want)
 
-  @parameterized.parameters('locla', '2')
+  @parameterized.parameters('locla', '2', 'fuse', 'local,fused')
   def test_mode_parsing_rejects_unknown(self, value):
     with mock.patch.dict(os.environ, {common.SHARDED_HEAD_ENV: value}):
       with self.assertRaisesRegex(ValueError, common.SHARDED_HEAD_ENV):
@@ -495,6 +504,348 @@ class ShardedLogpsHeadTest(parameterized.TestCase):
     with nn.logical_axis_rules(rules):
       got = common._token_partition(self.mesh, batch, seq)  # pylint: disable=protected-access
     self.assertEqual(got, want)
+
+  def _assert_fused_parity(self, got, want, entropy=True):
+    """Asserts that "fused" matches "local": log-probs, entropy and grads.
+
+    The log-probs and gradients are the same f32 operations, but the exp-sum is
+    reduced in another fusion, so they may differ in their last bits; the
+    entropy comes from another formula.
+
+    Args:
+      got: (log-probs, entropy, grads) with "fused".
+      want: The same with "local".
+      entropy: Whether to compare the entropy.
+    """
+    np.testing.assert_allclose(got[0], want[0], rtol=1e-6, atol=2e-6)
+    if entropy:
+      np.testing.assert_allclose(got[1], want[1], rtol=1e-5, atol=1e-6)
+    for name in ('h', 'scale', 'table'):
+      g = np.asarray(got[2][name][...], np.float32)
+      w = np.asarray(want[2][name][...], np.float32)
+      np.testing.assert_allclose(
+          g, w, rtol=1e-5, atol=1e-6 * np.abs(w).max(), err_msg=name
+      )
+
+  @parameterized.named_parameters(
+      ('logps_only_as_in_grpo', ('logps',), 8, 0.7),
+      ('logps_only_uneven_chunk', ('logps',), 12, 1.0),
+      ('logps_only_one_step', ('logps',), 64, 0.7),
+      ('logps_and_entropy', ('logps', 'entropy'), 8, 0.7),
+      ('entropy_only', ('entropy',), 12, 1.0),
+  )
+  def test_fused_matches_local(self, differentiate, chunk_size, temperature):
+    # With only the log-probs differentiated the backward forms the logits'
+    # cotangent in one pass; a differentiated entropy takes the autodiff
+    # backward. Chunk 12 does not divide the 32 local positions (padding).
+    kwargs = dict(
+        differentiate=differentiate,
+        chunk_size=chunk_size,
+        temperature=temperature,
+    )
+    want = self._run('local', **kwargs)
+    got = self._run('fused', **kwargs)
+    self._assert_fused_parity(got, want)
+
+  def test_fused_matches_scan_head(self):
+    want = self._run(None, differentiate=('logps',))
+    got = self._run('fused', differentiate=('logps',))
+    self._assert_parity(got, want)
+
+  def test_fused_logps_only_output(self):
+    # return_entropy=False: one output, and _head_logps_stats skips the entropy.
+    want = self._run('local', return_entropy=False, differentiate=('logps',))
+    got = self._run('fused', return_entropy=False, differentiate=('logps',))
+    self._assert_fused_parity(got, want, entropy=False)
+
+  def test_fused_nonfinite_hidden_states_at_masked_positions(self):
+    bad = ((0, 5), (1, 31), (1, 32), (2, 40), (3, 63), (3, 0))
+    want = self._run('local', nonfinite=bad, differentiate=('logps',))
+    got = self._run('fused', nonfinite=bad, differentiate=('logps',))
+    for name in ('h', 'scale', 'table'):
+      self.assertTrue(np.all(np.isfinite(got[2][name][...])), name)
+    self.assertTrue(np.all(np.isfinite(got[0])))
+    self._assert_fused_parity(got, want)
+
+  def test_fused_bf16_matches_local(self):
+    want = self._run('local', dtype=jnp.bfloat16, differentiate=('logps',))
+    got = self._run('fused', dtype=jnp.bfloat16, differentiate=('logps',))
+    self._assert_fused_parity(got, want)
+
+  @parameterized.parameters(True, False)
+  def test_fused_forward_only_matches_local(self, return_entropy):
+    # No gradient: the custom_vjp's primal body runs, scoring with
+    # _head_logps_stats and keeping no max or exp-sum.
+    model = _HeadOnly(jnp.float32)
+    graphdef, state = nnx.split(model)
+    tokens, segment_ids, positions, _ = self._inputs(_B, _T)
+
+    def logps(mode):
+      with self._head_switch(mode):
+        return jax.jit(
+            lambda st: common.compute_per_token_logps(
+                graphdef,
+                st,
+                jnp.zeros((_B, 0), jnp.int32),
+                tokens,
+                pad_id=0,
+                eos_id=-1,
+                stop_gradient=True,
+                return_entropy=return_entropy,
+                segment_ids=segment_ids,
+                segment_positions=positions,
+                temperature=0.7,
+                chunk_size=8,
+            )
+        )(state)
+
+    want, got = logps('local'), logps('fused')
+    self.assertEqual(jax.tree.structure(got), jax.tree.structure(want))
+    got_logps, want_logps = jax.tree.leaves(got)[0], jax.tree.leaves(want)[0]
+    np.testing.assert_allclose(got_logps, want_logps, rtol=1e-6, atol=2e-6)
+    if return_entropy:
+      np.testing.assert_allclose(got[1], want[1], rtol=1e-5, atol=1e-6)
+
+  @parameterized.named_parameters(
+      ('fused_logps_only_as_in_grpo', 'fused', ('logps',), False),
+      ('fused_entropy_differentiated', 'fused', ('logps', 'entropy'), True),
+      ('local', 'local', ('logps',), True),
+  )
+  def test_scatter_only_in_autodiff_backward(
+      self, mode, differentiate, scatter
+  ):
+    # "fused" reads the target logit with a one-hot select-sum, and when only
+    # the log-probs are differentiated its backward forms the logits' cotangent
+    # in one pass behind one optimization barrier: the program gathers nothing
+    # and scatters nothing. A differentiated entropy, like "local", takes the
+    # autodiff backward, which transposes take_along_axis into a scatter.
+    text = self._run(mode, differentiate=differentiate, lower=True)
+    count = {
+        op: len(re.findall(rf'\bstablehlo\.{op}\b', text))
+        for op in ('gather', 'scatter', 'optimization_barrier')
+    }
+    if scatter:
+      self.assertGreater(count['scatter'], 0, count)
+      self.assertEqual(count['optimization_barrier'], 0, count)
+    else:
+      self.assertEqual(
+          count, {'gather': 0, 'scatter': 0, 'optimization_barrier': 1}
+      )
+    if mode == 'local':
+      self.assertGreater(count['gather'], 0, count)
+
+
+  @contextlib.contextmanager
+  def _grad_scatter(self, value):
+    """Sets TUNIX_LOGPS_HEAD_GRAD_SCATTER (None: unset) for the body."""
+    with mock.patch.dict(os.environ):
+      if value is None:
+        os.environ.pop(common.HEAD_GRAD_SCATTER_ENV, None)
+      else:
+        os.environ[common.HEAD_GRAD_SCATTER_ENV] = value
+      yield
+
+  @parameterized.parameters(
+      ('', None),
+      ('off', None),
+      (' Off ', None),
+      ('chunk', 'chunk'),
+      (' CHUNK ', 'chunk'),
+      ('chunk_f32', 'chunk_f32'),
+      ('chunk_unroll', 'chunk_unroll'),
+  )
+  def test_grad_scatter_mode_parsing(self, value, want):
+    with self._grad_scatter(value):
+      self.assertEqual(common.head_grad_scatter_mode(), want)
+
+  @parameterized.parameters('chunks', '1', 'on', 'true', 'chunk-f32', 'chunk,chunk_f32')
+  def test_grad_scatter_mode_rejects_unknown(self, value):
+    with self._grad_scatter(value):
+      with self.assertRaisesRegex(ValueError, common.HEAD_GRAD_SCATTER_ENV):
+        common.head_grad_scatter_mode()
+
+  @parameterized.parameters(None, 'off')
+  def test_grad_scatter_needs_sharded_head(self, head):
+    with self._grad_scatter('chunk'):
+      with self.assertRaisesRegex(ValueError, common.HEAD_GRAD_SCATTER_ENV):
+        self._run(head)
+
+  def test_grad_scatter_off_is_the_default_program(self):
+    # Unset and "off" lower to the same program.
+    with self._grad_scatter(None):
+      want = self._run('fused', differentiate=('logps',), lower=True)
+    with self._grad_scatter('off'):
+      got = self._run('fused', differentiate=('logps',), lower=True)
+    self.assertEqual(got, want)
+
+  @parameterized.product(
+      scatter=('chunk', 'chunk_f32', 'chunk_unroll'),
+      config=(('fused', ('logps',)), ('fused', ('logps', 'entropy')),
+              ('local', ('logps',))),
+  )
+  def test_grad_scatter_matches_off(self, scatter, config):
+    # An f32 table is gathered and reduce-scattered in f32 in every mode, so
+    # the modes differ from off only in the order of the f32 sums. Chunk 12
+    # leaves a padded last chunk.
+    mode, differentiate = config
+    kwargs = dict(differentiate=differentiate, chunk_size=12)
+    with self._grad_scatter(None):
+      want = self._run(mode, **kwargs)
+    with self._grad_scatter(scatter):
+      got = self._run(mode, **kwargs)
+    self._assert_fused_parity(got, want)
+
+  @parameterized.parameters('chunk', 'chunk_f32', 'chunk_unroll')
+  def test_grad_scatter_bf16_table(self, scatter):
+    # A bf16 head: the table's gradient arrives in bf16. chunk reduce-scatters
+    # it in bf16 (a precision change), chunk_f32 casts it to f32 first. The
+    # hidden-state gradient does not depend on the accumulator; unrolling the
+    # loop may re-order its sums.
+    kwargs = dict(dtype=jnp.bfloat16, differentiate=('logps',))
+    with self._grad_scatter(None):
+      want = self._run('fused', **kwargs)
+    with self._grad_scatter(scatter):
+      got = self._run('fused', **kwargs)
+    np.testing.assert_array_equal(got[0], want[0])
+    g, w = (np.asarray(x[2]['table'][...], np.float32) for x in (got, want))
+    err = np.linalg.norm(g - w) / np.linalg.norm(w)
+    self.assertLess(err, 1e-6 if scatter == 'chunk_f32' else 2.0**-6)
+    g, w = (np.asarray(x[2]['h'][...], np.float32) for x in (got, want))
+    if scatter == 'chunk_unroll':
+      self.assertLess(np.linalg.norm(g - w) / np.linalg.norm(w), 1e-3)
+    else:
+      np.testing.assert_array_equal(g, w)
+
+  @parameterized.parameters(
+      (None, False, False),
+      ('chunk', True, False),
+      ('chunk_f32', True, False),
+      ('chunk_unroll', True, True),
+  )
+  def test_grad_scatter_placement(self, scatter, in_loop, unrolled):
+    # Off: one reduce-scatter per head parameter after the chunk loop. On: one
+    # per parameter inside the loop body (unrolled for chunk_unroll).
+    found = []
+
+    def walk(jaxpr, path):
+      for eqn in jaxpr.eqns:
+        if eqn.primitive.name == 'reduce_scatter':
+          found.append(tuple(path))
+        for v in eqn.params.values():
+          for sub in v if isinstance(v, (list, tuple)) else [v]:
+            sub = getattr(sub, 'jaxpr', sub)
+            if hasattr(sub, 'eqns'):
+              unroll = eqn.params.get('unroll', 1)
+              walk(sub, path + [(eqn.primitive.name, unroll)])
+
+    with self._grad_scatter(scatter):
+      walk(self._run('fused', differentiate=('logps',), lower='jaxpr').jaxpr, [])
+    self.assertLen(found, 2)
+    for path in found:
+      scans = [u for name, u in path if name == 'scan']
+      self.assertEqual(bool(scans), in_loop, path)
+      if in_loop:
+        self.assertEqual(scans[-1] not in (1, False), unrolled, path)
+
+  def test_grad_scatter_banner(self):
+    with self._grad_scatter('chunk'):
+      with self.assertLogs(level='WARNING') as logs:
+        self._run('fused', differentiate=('logps',))
+    self.assertIn(
+        '[logps-head] table-gradient scatter chunk:', '\n'.join(logs.output)
+    )
+
+  def test_grad_scatter_fallback_warns(self):
+    # The head falls back (no token layout): the switch has no effect.
+    with self._grad_scatter('chunk'):
+      with self.assertLogs(level='WARNING') as logs:
+        self._run('local', batch=3, seq=63, chunk_size=7, expect=[False])
+    self.assertIn('has no effect', '\n'.join(logs.output))
+
+
+class FusedScoringTest(parameterized.TestCase):
+  """The "fused" head's chunk scoring against what it replaces.
+
+  `_head_logps_stats` and `_head_logps_cotangent` against
+  `selective_log_softmax`, `compute_entropy_from_logits` and `jax.vjp` of
+  `selective_log_softmax`, on logits with non-finite entries and on target ids
+  outside the vocabulary. One device is enough.
+  """
+
+  _V = 50
+
+  def _inputs(self):
+    """[2, 9, 50] logits, [2, 9] target ids and [2, 9] log-prob cotangents."""
+    rng = np.random.default_rng(1)
+    logits = 4.0 * rng.normal(size=(2, 9, self._V)).astype(np.float32)
+    logits[0, 0, 7] = np.inf
+    logits[0, 1, 8] = -np.inf
+    logits[0, 2, 9] = np.nan
+    logits[1, 4, :] = -np.inf  # no finite logit in the row
+    ids = rng.integers(0, self._V, (2, 9)).astype(np.int32)
+    # Targets on the non-finite entries; ids counting from the end; and ids
+    # outside [-V, V), which take_along_axis reads as NaN.
+    ids[0] = [7, 8, 9, self._V, -1, -self._V, -self._V - 1, 2**30, 0]
+    g = rng.normal(size=(2, 9)).astype(np.float32)
+    return jnp.asarray(logits), jnp.asarray(ids), jnp.asarray(g)
+
+  def test_target_hit(self):
+    ids = jnp.array([0, 4, 5, -1, -5, -6, 2**30], jnp.int32)
+    hit, valid = common._target_hit(ids, (7, 5))  # pylint: disable=protected-access
+    want = np.zeros((7, 5), bool)
+    for row, v in ((0, 0), (1, 4), (3, 4), (4, 0)):
+      want[row, v] = True
+    np.testing.assert_array_equal(hit, want)
+    np.testing.assert_array_equal(
+        valid, [True, True, False, True, True, False, False]
+    )
+
+  @parameterized.parameters(True, False)
+  def test_stats_match_selective_log_softmax(self, with_entropy):
+    logits, ids, _ = self._inputs()
+    stats = jax.jit(common._head_logps_stats, static_argnums=2)  # pylint: disable=protected-access
+    logps, entropy, m, s = stats(logits, ids, with_entropy)
+    want = common.selective_log_softmax(logits, ids)
+    # NaN exactly where take_along_axis reads outside the vocabulary.
+    np.testing.assert_array_equal(np.isnan(logps), np.isnan(want))
+    self.assertEqual(int(np.isnan(want).sum()), 3)
+    np.testing.assert_allclose(logps, want, rtol=1e-6, atol=1e-6)
+    x = np.where(np.isfinite(logits), logits, 0.0)
+    np.testing.assert_array_equal(m, x.max(-1))
+    shifted = (x - x.max(-1, keepdims=True)).astype(np.float64)
+    np.testing.assert_allclose(s, np.exp(shifted).sum(-1), rtol=1e-5)
+    if with_entropy:
+      np.testing.assert_allclose(
+          entropy,
+          common.compute_entropy_from_logits(logits),
+          rtol=1e-5,
+          atol=1e-6,
+      )
+    else:
+      self.assertIsNone(entropy)
+
+  def test_cotangent_matches_autodiff(self):
+    logits, ids, g = self._inputs()
+    _, _, m, s = common._head_logps_stats(logits, ids, False)  # pylint: disable=protected-access
+    got = jax.jit(common._head_logps_cotangent)(logits, ids, g, m, s)  # pylint: disable=protected-access
+    _, vjp = jax.vjp(lambda x: common.selective_log_softmax(x, ids), logits)
+    (want,) = vjp(g)
+    np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-6)
+    got = np.asarray(got)
+    # A non-finite logit gets no cotangent (the transpose of the isfinite mask).
+    self.assertTrue(np.all(got[~np.isfinite(logits)] == 0.0))
+    # Over a row of finite logits the cotangent sums to g - g * sum(p) = 0, or
+    # to -g when the id is outside the vocabulary, whose g the gather's
+    # transpose drops.
+    outside = np.zeros(g.shape, bool)
+    outside[0, [3, 6, 7]] = True  # ids V, -V - 1 and 2**30
+    finite = np.all(np.isfinite(logits), axis=-1)
+    np.testing.assert_allclose(
+        got.sum(-1)[outside], -np.asarray(g)[outside], rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        got.sum(-1)[finite & ~outside], 0.0, rtol=0, atol=1e-5
+    )
 
 
 class ChildProcessTest(absltest.TestCase):

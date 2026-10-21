@@ -1,8 +1,14 @@
 # TODO(maxtext-dev): Update the commits after all code changes land.
-# atwigg/mlperf at AI-Hypercomputer/maxtext#5718's merge commit (prepare_fwd_bwd_input,
-# wait_for_device for the staged step boundary).
-maxtext @ git+https://github.com/google/maxtext.git@e526ea02dea8498a9391e5934398db5c409d1944
-maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@e526ea02dea8498a9391e5934398db5c409d1944#subdirectory=src/maxtext/integration/vllm
+# Branch parambole/rl-4600-final-maxtext of AI-Hypercomputer/maxtext: atwigg/mlperf at the merge of AI-Hypercomputer/maxtext#5721
+# (bbd0f6f10; includes the #5698 port, #5758, #5783 and GDN/MoE trainer perf) plus moe_wo_gmm_fused_dswiglu,
+# context_parallel_attention_load_balance_hoist_ids, query_proj_kernel_gather_once, fp8_fake_quant_hoist,
+# wi_tile_fwd_rhs_buffer_count, gdn_cp_m_scan, gdn_cp_pass1_states_and_bf16_qkv, gdn_out_proj_token_minor,
+# moe_fp8_bwd_dispatch, ragged_unsort_spread_masked_indices, moe_fallback_topk_capacity, fp32_master_storage,
+# gdn_cp_fast_state_passing, moe_fp8_token_all_gather, gdn_bwd_natural_layout, gdn_gated_norm_layout,
+# context_parallel_attention_load_balance_order, gdn_conv1d_natural_layout, gdn_fwd_kernel_head_group_size,
+# gdn_in_proj_kernel_order, dense_grad_reduce and optimizer_device_resident_gib.
+maxtext @ git+https://github.com/google/maxtext.git@1667e6dee879bec5c9a079bfdc33b75defad9668
+maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@1667e6dee879bec5c9a079bfdc33b75defad9668#subdirectory=src/maxtext/integration/vllm
 aqtp
 cheroot
 cloud-accelerator-diagnostics
