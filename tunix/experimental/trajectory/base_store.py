@@ -43,6 +43,14 @@ class TrajectoryMetadataNotFoundError(KeyError):
     self.trajectory_id = trajectory_id
 
 
+class TrajectoryMetricsNotFoundError(KeyError):
+  """Raised when requested trajectory metrics are not found in the store."""
+
+  def __init__(self, trajectory_id: str) -> None:
+    super().__init__(f"Trajectory metrics for ID '{trajectory_id}' not found.")
+    self.trajectory_id = trajectory_id
+
+
 # ==============================================================================
 # Protocols (Structural Interfaces)
 # ==============================================================================
@@ -89,6 +97,26 @@ class TrajectoryReader(Protocol[MetadataT]):
     """
     ...
 
+  def get_trajectories_metrics(
+      self, trajectory_ids: list[str] | None = None
+  ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
+    """Retrieves metrics for trajectories in the run.
+
+    Args:
+      trajectory_ids: Optional list of unique trajectory identifiers. If
+        specified, only metrics for these IDs are returned. If None, metrics for
+        all trajectories in the run with recorded metrics are returned.
+
+    Returns:
+      A dictionary mapping trajectory IDs to TrajectoryMetrics objects for the
+      requested trajectories, in the order of `trajectory_ids` if specified.
+
+    Raises:
+      TrajectoryMetricsNotFoundError: If any requested trajectory ID does not
+        have recorded metrics.
+    """
+    ...
+
 
 @runtime_checkable
 class TrajectoryWriter(Protocol[MetadataT]):
@@ -125,6 +153,31 @@ class TrajectoryWriter(Protocol[MetadataT]):
 
     Args:
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
+    """
+    ...
+
+  def update_metrics(
+      self,
+      trajectory_id: str,
+      metrics: trajectory_lib.TrajectoryMetrics,
+  ) -> None:
+    """Updates (or creates) trajectory metrics.
+
+    If metrics already exist for `trajectory_id`, implementations perform a
+    shallow top-level dictionary merge (`existing.extra.update(metrics.extra)`)
+    into the existing `extra` dictionary, allowing rollout workers and RL
+    trainers to record metrics independently without overwriting each other's
+    keys. Top-level keys in `metrics.extra` (including nested dicts) overwrite
+    matching top-level keys in the existing `extra` dictionary. If
+    `metrics.extra` is `None` when metrics already exist for `trajectory_id`,
+    the existing `extra` dictionary remains unchanged.
+
+    Implementations snapshot `metrics` at call time, so callers may keep
+    mutating it afterwards without affecting what was logged.
+
+    Args:
+      trajectory_id: Unique identifier for the trajectory.
+      metrics: TrajectoryMetrics containing the metrics data to record.
     """
     ...
 
@@ -344,6 +397,24 @@ class TrajectoryStore(
       accepted by `from_config`.
     """
     return self.to_config()
+
+  def get_trajectories_metrics(
+      self, trajectory_ids: list[str] | None = None
+  ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
+    """Retrieves metrics for trajectories in the run."""
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement get_trajectories_metrics."
+    )
+
+  def update_metrics(
+      self,
+      trajectory_id: str,
+      metrics: trajectory_lib.TrajectoryMetrics,
+  ) -> None:
+    """Updates (or creates) trajectory metrics."""
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement update_metrics."
+    )
 
   @classmethod
   def from_config(cls, config: Mapping[str, Any] | None) -> Self | None:

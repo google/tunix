@@ -110,9 +110,7 @@ class FromConfigTest(absltest.TestCase):
     store.close()
 
   def test_memory_backend_needs_no_other_keys(self):
-    store = store_lib.TrajectoryStore.from_config(
-        {"backend": "memory"}
-    )
+    store = store_lib.TrajectoryStore.from_config({"backend": "memory"})
     self.assertIsInstance(store, in_memory_store.InMemoryTrajectoryStore)
 
   def test_sql_backend_is_scoped_by_run_id(self):
@@ -123,9 +121,7 @@ class FromConfigTest(absltest.TestCase):
 
   def test_unknown_backend_raises(self):
     with self.assertRaisesRegex(ValueError, "Unknown Trajectory Store"):
-      store_lib.TrajectoryStore.from_config(
-          {"backend": "sqlite"}
-      )
+      store_lib.TrajectoryStore.from_config({"backend": "sqlite"})
 
   def test_missing_backend_raises(self):
     with self.assertRaisesRegex(ValueError, "Unknown Trajectory Store"):
@@ -202,6 +198,16 @@ class FromConfigTest(absltest.TestCase):
           "backend": "custom_test_backend",
       })
       self.assertIsInstance(store, CustomStore)
+      with self.assertRaisesRegex(
+          NotImplementedError,
+          "CustomStore does not implement get_trajectories_metrics.",
+      ):
+        store.get_trajectories_metrics()
+      with self.assertRaisesRegex(
+          NotImplementedError,
+          "CustomStore does not implement update_metrics.",
+      ):
+        store.update_metrics("t_1", trajectory_lib.TrajectoryMetrics())
     finally:
       store_lib.TrajectoryStore._REGISTRY.pop("custom_test_backend", None)
 
@@ -605,6 +611,11 @@ class ExceptionsTest(absltest.TestCase):
     err = store_lib.TrajectoryMetadataNotFoundError("t_456")
     self.assertEqual(err.trajectory_id, "t_456")
     self.assertIn("t_456", str(err))
+
+  def test_trajectory_metrics_not_found_error(self):
+    err = store_lib.TrajectoryMetricsNotFoundError("t_789")
+    self.assertEqual(err.trajectory_id, "t_789")
+    self.assertIn("t_789", str(err))
 
 
 if __name__ == "__main__":
