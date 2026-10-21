@@ -71,6 +71,16 @@ ENCODE_INTERVAL_S = 0.1
 ENCODE_CHUNK = 64
 YIELD_S = 0.0002
 EXIT_TIMEOUT_S = 20.0
+# A node (trainer, rollout) that replaces the SIGTERM handler with its own calls
+# node_stopping() before its drain and node_stopped() after it; each waits at
+# most this long for the writer (TUNIX_EVENTS_NODE_STOP_TIMEOUT_S overrides).
+NODE_STOP_TIMEOUT_S = 10.0
+# The orchestrator's manifest: one listing, then the per-stream health sidecars
+# read in parallel, all within MANIFEST_BUDGET_S (a partial manifest is written
+# first, so an exit that cuts this short still leaves one that says so).
+MANIFEST_BUDGET_S = 12.0
+MANIFEST_READERS = 32
+HEALTH_DIR = "_health"  # <gcs_dir>/_health/<role>-<pod>.json, per stream
 MAX_EVENT_BYTES = 256 * 1024
 REASON_MAX_CHARS = 200
 ENVELOPE = ("v", "t", "m", "ev", "run", "role", "pod")
@@ -538,12 +548,8 @@ def _default_upload(local_path: str, dest_uri: str) -> None:
       dst.write(src.read())
     os.replace(tmp, dest_uri)
     return
-  from google.cloud import storage  # pylint: disable=g-import-not-at-top
   bucket, path = _gcs_split(dest_uri)
-  client = _gcs_client_cache.get("c")
-  if client is None:
-    client = _gcs_client_cache["c"] = storage.Client()
-  client.bucket(bucket).blob(path).upload_from_filename(local_path)
+  _gcs_client().bucket(bucket).blob(path).upload_from_filename(local_path)
 
 
 _gcs_client_cache: dict[str, Any] = {}
@@ -570,23 +576,125 @@ def _default_list_tails(dir_uri: str) -> dict[str, tuple[int, bytes]]:
       n_events = data.count(b"\n") - data.count(b'"ev":"events_health"')
       out[name] = (n_events, data[-65536:])
     return out
-  from google.cloud import storage  # pylint: disable=g-import-not-at-top
   bucket, path = _gcs_split(dir_uri.rstrip("/") + "/")
+  blobs = [b for b in _gcs_client().list_blobs(bucket, prefix=path)
+           if "/" not in b.name[len(path):] and b.name.endswith(".jsonl")]
+
+  def tail_of(blob):
+    size = blob.size or 0
+    return blob.download_as_bytes(start=max(0, size - 65536)) if size else b""
+
+  for blob, (ok, tail) in zip(blobs, _parallel(tail_of, blobs, None)):
+    if not ok:
+      raise tail
+    out[blob.name[len(path):]] = (-1, tail)
+  return out
+
+
+def _parallel(fn: Callable[[Any], Any], items: list, timeout: float | None,
+              workers: int = MANIFEST_READERS) -> list:
+  """[(True, fn(x)) or (False, exception) or None (not done in time)].
+
+  Daemon threads rather than concurrent.futures: the orchestrator builds its
+  manifest from atexit, after concurrent.futures refuses new work, and a read
+  that hangs must not hold the interpreter's exit.
+  """
+  results: list = [None] * len(items)
+  nxt = [0]
+  lock = threading.Lock()
+  done = threading.Event()
+  left = [len(items)]
+
+  def work():
+    while True:
+      with lock:
+        i = nxt[0]
+        nxt[0] += 1
+      if i >= len(items):
+        return
+      try:
+        r = (True, fn(items[i]))
+      except Exception as e:  # pylint: disable=broad-except
+        r = (False, e)
+      with lock:
+        results[i] = r
+        left[0] -= 1
+        if left[0] == 0:
+          done.set()
+  if not items:
+    return results
+  for _ in range(min(workers, len(items))):
+    threading.Thread(target=work, name="tunix-events-read", daemon=True).start()
+  done.wait(timeout)
+  with lock:
+    return list(results)
+
+
+def _gcs_client():
+  from google.cloud import storage  # pylint: disable=g-import-not-at-top
   client = _gcs_client_cache.get("c")
   if client is None:
     client = _gcs_client_cache["c"] = storage.Client()
-  for blob in client.list_blobs(bucket, prefix=path):
+  return client
+
+
+def _default_list_streams(dir_uri: str) -> dict[str, int]:
+  """{basename: size in bytes} of the *.jsonl streams directly under dir_uri
+  (one listing, no reads)."""
+  if not dir_uri.startswith("gs://"):
+    if not os.path.isdir(dir_uri):
+      return {}
+    return {n: os.path.getsize(os.path.join(dir_uri, n))
+            for n in sorted(os.listdir(dir_uri)) if n.endswith(".jsonl")}
+  bucket, path = _gcs_split(dir_uri.rstrip("/") + "/")
+  out = {}
+  for blob in _gcs_client().list_blobs(bucket, prefix=path):
     name = blob.name[len(path):]
-    if "/" in name or not name.endswith(".jsonl"):
-      continue
-    size = blob.size or 0
-    tail = blob.download_as_bytes(start=max(0, size - 65536)) if size else b""
-    out[name] = (-1, tail)
+    if "/" not in name and name.endswith(".jsonl"):
+      out[name] = int(blob.size or 0)
   return out
+
+
+def _default_read_health(dir_uri: str, name: str,
+                         size: int | None) -> tuple[dict | None, str]:
+  """(the last health record of stream `name`, where it came from).
+
+  The writer's sidecar (`<dir>/_health/<role>-<pod>.json`) when there is one,
+  else the last `events_health` line in the stream's last 64 KiB (a writer that
+  never uploaded a sidecar), else (None, "absent").
+  """
+  rel = f"{HEALTH_DIR}/{name[:-len('.jsonl')]}.json"
+  if not dir_uri.startswith("gs://"):
+    p = os.path.join(dir_uri, rel)
+    if os.path.exists(p):
+      with open(p, encoding="utf-8") as f:
+        return json.load(f), "sidecar"
+    sp = os.path.join(dir_uri, name)
+    if not os.path.exists(sp):
+      return None, "absent"
+    with open(sp, "rb") as f:
+      f.seek(max(0, os.path.getsize(sp) - 65536))
+      h = _last_health(f.read())
+    return h, ("tail" if h is not None else "absent")
+  bucket, path = _gcs_split(dir_uri.rstrip("/") + "/" + rel)
+  b = _gcs_client().bucket(bucket)
+  try:
+    return json.loads(b.blob(path).download_as_bytes()), "sidecar"
+  except Exception as e:  # pylint: disable=broad-except
+    if type(e).__name__ not in ("NotFound", "KeyError"):
+      raise
+  _, spath = _gcs_split(dir_uri.rstrip("/") + "/" + name)
+  if not size:
+    return None, "absent"
+  h = _last_health(b.blob(spath).download_as_bytes(start=max(0, size - 65536)))
+  return h, ("tail" if h is not None else "absent")
 
 
 _list_tails_fn: Callable[[str], dict[str, tuple[int, bytes]]] = \
     _default_list_tails
+_list_streams_fn: Callable[[str], dict[str, int]] = _default_list_streams
+_read_health_fn: Callable[[str, str, int | None],
+                          tuple[dict | None, str]] = _default_read_health
 
 
 def _last_health(tail: bytes) -> dict | None:
@@ -600,37 +708,82 @@ def _last_health(tail: bytes) -> dict | None:
   return None
 
 
+def _file_entry(h: dict | None, size: int | None, src: str) -> dict:
+  if h is None:
+    return {"v": V, "events": None, "dropped": None, "errors": None,
+            "final": False, "lines": -1, "size": size, "health": src}
+  return {
+      "v": h.get("v", V), "role": h.get("role"), "pod": h.get("pod"),
+      "events": int(h["emitted"]) - int(h["dropped"]) - int(h.get("lost", 0)),
+      "dropped": int(h["dropped"]), "errors": int(h["errors"]),
+      "final": bool(h.get("final")), "lines": -1, "size": size,
+      "health": src,
+  }
+
+
 def build_manifest(dir_uri: str, run: str, expected: dict,
-                   own: dict[str, dict] | None = None) -> dict:
-  """The manifest of the stream files under `dir_uri` (counts from each file's
-  last `events_health` line; `own` overrides with exact in-process counts)."""
-  files: dict[str, dict] = {}
-  for name, (n_lines, tail) in _list_tails_fn(dir_uri).items():
-    h = _last_health(tail)
-    if h is None:
-      files[name] = {"v": V, "events": None, "dropped": None, "errors": None,
-                     "final": False, "lines": n_lines}
-      continue
-    files[name] = {
-        "v": h.get("v", V), "role": h.get("role"), "pod": h.get("pod"),
-        "events": int(h["emitted"]) - int(h["dropped"]) - int(h.get("lost", 0)),
-        "dropped": int(h["dropped"]), "errors": int(h["errors"]),
-        "final": bool(h.get("final")), "lines": n_lines,
-    }
+                   own: dict[str, dict] | None = None,
+                   budget_s: float | None = None,
+                   on_partial: Callable[[dict], None] | None = None) -> dict:
+  """The manifest of the stream files under `dir_uri`.
+
+  One listing of the streams, then each stream's health sidecar (its last
+  `events_health` record, uploaded by its writer after each stream upload),
+  read in parallel within `budget_s`. `own` overrides with exact in-process
+  counts. `on_partial(manifest)` is called with the listing-only manifest
+  (`complete: false`) before any sidecar is read. A sidecar not read in time is
+  listed under `unread` and the manifest says `complete: false`.
+  """
+  budget_s = MANIFEST_BUDGET_S if budget_s is None else budget_s
+  t0 = time.monotonic()
+  sizes = _list_streams_fn(dir_uri)
+  for name in own or {}:
+    sizes.setdefault(name, None)
+  files: dict[str, dict] = {
+      n: {"v": V, "events": None, "dropped": None, "errors": None,
+          "final": False, "lines": -1, "size": sz, "health": "unread"}
+      for n, sz in sizes.items()}
   for name, rec in (own or {}).items():
-    files[name] = {**files.get(name, {}), **rec}
-  return {"v": V, "run": run, "written_t": time.time(),
-          "expected": dict(expected), "files": files}
+    files[name] = {**files[name], **rec, "health": "own"}
+
+  def man(complete, unread, note=None):
+    m = {"v": V, "run": run, "written_t": time.time(),
+         "expected": dict(expected), "complete": complete,
+         "listed": len(sizes), "unread": sorted(unread), "files": files}
+    if note:
+      m["note"] = note
+    return m
+
+  todo = [n for n in sizes if n not in (own or {})]
+  if on_partial is not None:
+    try:
+      on_partial(man(False, todo, "partial: listing only, sidecars not read"))
+    except Exception as e:  # pylint: disable=broad-except
+      _count_error("manifest", e)
+  if not todo:
+    return man(True, [])
+  left = max(0.0, budget_s - (time.monotonic() - t0))
+  unread = set()
+  for n, r in zip(todo, _parallel(
+      lambda n: _read_health_fn(dir_uri, n, sizes[n]), todo, left)):
+    if r is None:
+      unread.add(n)
+    elif r[0]:
+      files[n] = _file_entry(r[1][0], sizes[n], r[1][1])
+    else:
+      _count_error("manifest_read", r[1])
+      files[n]["health"] = f"error: {type(r[1]).__name__}"
+  note = None
+  if unread:
+    note = (f"partial: {len(unread)} of {len(todo)} sidecars not read within"
+            f" {budget_s:.1f} s")
+  return man(not unread, unread, note)
 
 
 def _read_manifest(dir_uri: str) -> dict:
   if dir_uri.startswith("gs://"):
-    from google.cloud import storage  # pylint: disable=g-import-not-at-top
     bucket, path = _gcs_split(dir_uri.rstrip("/") + "/" + MANIFEST_NAME)
-    client = _gcs_client_cache.get("c")
-    if client is None:
-      client = _gcs_client_cache["c"] = storage.Client()
-    return json.loads(client.bucket(bucket).blob(path).download_as_bytes())
+    return json.loads(_gcs_client().bucket(bucket).blob(path).download_as_bytes())
   with open(os.path.join(dir_uri, MANIFEST_NAME), encoding="utf-8") as f:
     return json.load(f)
 
@@ -646,6 +799,9 @@ def verify_manifest(dir_uri: str) -> dict:
   man = _read_manifest(dir_uri)
   tails = _list_tails_fn(dir_uri)
   problems = []
+  if man.get("complete") is False:
+    problems.append(f"partial manifest: {man.get('note') or 'incomplete'}"
+                    f" (unread: {len(man.get('unread') or [])})")
   for role, n in sorted(man.get("expected", {}).items()):
     found = sum(1 for name in tails if name.startswith(role + "-"))
     if n is not None and found < n:
@@ -795,7 +951,7 @@ class _State:
       if stop:
         self._safely(self.drain)
         self._safely(lambda: self.write_health(final=True))
-        self._safely(self.upload)
+        self._safely(lambda: self.upload(final=True))
         self._safely(self.write_manifest)
       elif upload or now >= self.next_upload:
         self.next_upload = now + self.upload_s
@@ -927,13 +1083,34 @@ class _State:
     line = self._encode(time.time(), time.monotonic(), "events_health", fields)
     self._write([line])
 
-  def upload(self) -> None:
-    if not self.gcs_dir or not os.path.exists(self.local_path):
+  def upload(self, final: bool = False) -> None:
+    """Uploads the stream, then its health sidecar (the sidecar is also kept
+    in `<local_dir>/_health/`, which is the manifest's source without GCS)."""
+    if not os.path.exists(self.local_path):
       return
+    if self.gcs_dir:
+      try:
+        _upload_fn(self.local_path, f"{self.gcs_dir}/{self.name}")
+      except Exception as e:  # pylint: disable=broad-except
+        _count_error("upload", e)
+        return
+    # After the stream it describes: the orchestrator's manifest reads these
+    # small files rather than ~160 stream tails.
     try:
-      _upload_fn(self.local_path, f"{self.gcs_dir}/{self.name}")
+      h = self.health()
+      side = {"v": V, "run": self.run, "role": self.role, "pod": self.pod,
+              "name": self.name, "t": time.time(), "final": final, **h}
+      base = self.name[:-len(".jsonl")]
+      hdir = os.path.join(self.local_dir, HEALTH_DIR)
+      os.makedirs(hdir, exist_ok=True)
+      local = os.path.join(hdir, f"{base}.json")
+      with open(local + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(side, f, sort_keys=True)
+      os.replace(local + ".tmp", local)
+      if self.gcs_dir:
+        _upload_fn(local, f"{self.gcs_dir}/{HEALTH_DIR}/{base}.json")
     except Exception as e:  # pylint: disable=broad-except
-      _count_error("upload", e)
+      _count_error("upload_health", e)
 
   def write_manifest(self) -> None:
     if self.role != "orch":
@@ -945,12 +1122,19 @@ class _State:
                          "events": h["emitted"] - h["dropped"] - h["lost"],
                          "dropped": h["dropped"], "errors": h["errors"],
                          "final": True}}
-      man = build_manifest(d, self.run, self.expected, own)
       tmp = os.path.join(self.local_dir, MANIFEST_NAME)
-      with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(man, f, indent=1, sort_keys=True)
-      if self.gcs_dir:
-        _upload_fn(tmp, f"{self.gcs_dir}/{MANIFEST_NAME}")
+
+      def put(man):
+        with open(tmp + ".tmp", "w", encoding="utf-8") as f:
+          json.dump(man, f, indent=1, sort_keys=True)
+        os.replace(tmp + ".tmp", tmp)
+        if self.gcs_dir:
+          _upload_fn(tmp, f"{self.gcs_dir}/{MANIFEST_NAME}")
+
+      budget = float(os.environ.get("TUNIX_EVENTS_MANIFEST_BUDGET_S",
+                                    MANIFEST_BUDGET_S))
+      put(build_manifest(d, self.run, self.expected, own, budget_s=budget,
+                         on_partial=put))
     except Exception as e:  # pylint: disable=broad-except
       _count_error("manifest", e)
 
@@ -1087,6 +1271,61 @@ def shutdown(timeout: float = EXIT_TIMEOUT_S) -> None:
     st.request(upload=True, timeout=timeout, stop=True)
   except Exception as e:  # pylint: disable=broad-except
     _count_error("shutdown", e)
+
+
+_n_mains = 1  # process mains sharing this OS process's stream
+
+
+def set_process_count(n: int) -> None:
+  """How many process mains run in this OS process (runtime main sets it)."""
+  global _n_mains
+  try:
+    _n_mains = max(1, int(n))
+  except Exception:  # pylint: disable=broad-except
+    pass
+
+
+def _node_timeout(timeout: float | None) -> float:
+  if timeout is not None:
+    return timeout
+  try:
+    return float(os.environ.get("TUNIX_EVENTS_NODE_STOP_TIMEOUT_S",
+                                NODE_STOP_TIMEOUT_S))
+  except Exception:  # pylint: disable=broad-except
+    return NODE_STOP_TIMEOUT_S
+
+
+def node_stopping(timeout: float | None = None) -> None:
+  """A node's own SIGTERM/SIGINT handler fired and its drain is about to run.
+
+  Writes and uploads what is queued now (so a pod killed during a long drain
+  keeps everything up to here), waiting at most `timeout` seconds. Never raises.
+  """
+  if not ON:
+    return
+  try:
+    flush(upload=True, timeout=_node_timeout(timeout))
+  except Exception as e:  # pylint: disable=broad-except
+    _count_error("node_stop", e)
+
+
+def node_stopped(timeout: float | None = None) -> None:
+  """A node finished draining: final write, final health line and upload.
+
+  Waits at most `timeout` seconds and never raises. When several process mains
+  share this OS process, only writes and uploads (the stream stays on for the
+  others; atexit writes the final line).
+  """
+  if not ON:
+    return
+  try:
+    t = _node_timeout(timeout)
+    if _n_mains > 1:
+      flush(upload=True, timeout=t)
+    else:
+      shutdown(t)
+  except Exception as e:  # pylint: disable=broad-except
+    _count_error("node_stop", e)
 
 
 def _on_atexit() -> None:
