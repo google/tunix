@@ -702,6 +702,7 @@ def _pack_bits(bits: Any, axis: int) -> Any:
   """Packs a bool array 8 to a uint8 along `axis` (padded to a multiple of 8); every other axis unchanged."""
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
 
+  axis = axis % bits.ndim
   n = bits.shape[axis]
   groups = -(-n // 8)
   b = bits.astype(jnp.uint8)
@@ -722,6 +723,7 @@ def _unpack_bits(packed: Any, axis: int, n: int) -> Any:
   import jax  # pylint: disable=g-import-not-at-top
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
 
+  axis = axis % packed.ndim
   shifts = jnp.arange(8, dtype=jnp.uint8).reshape(
       (1,) * (axis + 1) + (8,) + (1,) * (packed.ndim - axis - 1)
   )
@@ -960,7 +962,7 @@ def create_maxtext_engine(
   if use_fp32_master:
     # MaxText `fp32_master_storage`: "f32" (default) keeps a float32 master per bf16 weight; "residual16" stores the
     # scanned layers' masters as the 16 bits the bf16 weight does not hold plus one packed bit (bit-identical masters).
-    master_storage = str(getattr(maxtext_config, "fp32_master_storage", "f32"))
+    master_storage = str(maxtext_config.fp32_master_storage)
     if master_storage == "f32":
       fp32_optimizer_cls = _build_fp32_master_optimizer_cls(
           getattr(maxtext_engine, "nnx", None)
@@ -969,7 +971,7 @@ def create_maxtext_engine(
       fp32_optimizer_cls = _build_fp32_master_optimizer_cls(
           getattr(maxtext_engine, "nnx", None),
           master_storage=master_storage,
-          scan_axis=int(getattr(maxtext_config, "param_scan_axis", 1)),
+          scan_axis=int(maxtext_config.param_scan_axis),
       )
 
     class _Fp32MasterMaxTextTrainingEngine(

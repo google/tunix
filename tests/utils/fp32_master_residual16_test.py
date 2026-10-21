@@ -73,9 +73,9 @@ class Residual16BitsTest(absltest.TestCase):
     not_rebuilt = _bits(rebuilt) != _bits(master)
     self.assertTrue(np.all(np.isnan(master[not_rebuilt])))
     self.assertEqual(int(bad), int(np.sum(not_rebuilt)))
-    return int(bad)
     self.assertEqual(lo.dtype, jnp.uint16)
     self.assertEqual(up.dtype, jnp.bool_)
+    return int(bad)
 
   def test_rebuilds_every_non_nan_float32_from_its_bfloat16_cast(self):
     rng = np.random.default_rng(0)
@@ -91,7 +91,7 @@ class Residual16BitsTest(absltest.TestCase):
   def test_pack_unpack_round_trip(self):
     rng = np.random.default_rng(1)
     for n in (1, 7, 8, 9, 15, 16, 17):
-      for axis in (0, 1, 2):
+      for axis in (0, 1, 2, -3, -2, -1):
         shape = [3, 4, 5]
         shape[axis] = n
         bits = jnp.asarray(rng.random(shape) < 0.5)
