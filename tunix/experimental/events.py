@@ -272,7 +272,8 @@ register("ckpt", {"step": "int"}, {"path": "str", "manifest_ts_ms": "int"})
 register("events_health",
          {"emitted": "int", "dropped": "int", "errors": "int",
           "queue_hwm": "int"},
-         {"written": "int", "lost": "int", "bytes": "int", "final": "bool"})
+         {"written": "int", "lost": "int", "bytes": "int", "final": "bool",
+          "stopping": "bool"})
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +283,7 @@ register("events_health",
 
 CONFIG_ENV_ALLOWLIST = (
     "JOB_PREFIX", "HOSTNAME", "POD_NAME", "JOBSET_NAME", "TUNIX_EVENTS",
+    "TUNIX_EVENTS_RUN",
     "TUNIX_EVENTS_GCS_DIR", "TUNIX_EVENTS_POD",
     "TUNIX_STAGE_BATCH", "TUNIX_WSYNC_PLAN_WARMUP", "TUNIX_WSYNC_PER_ENGINE",
     "TUNIX_DEBUG_INFERENCE_LOGS", "IN_FLIGHT_WEIGHT_UPDATES",
@@ -822,6 +824,12 @@ def verify_manifest(dir_uri: str) -> dict:
     if want is not None and n_lines >= 0 and n_lines < want:
       problems.append(f"truncated: {name} has {n_lines} event lines, the"
                       f" manifest counts {want}")
+    elif (h is not None and h.get("stopping") and not h.get("final")
+          and tail.endswith(b"\n")):
+      # Killed during its drain, after node_stopping(): everything up to the
+      # drain is there and counted, the final line is not.
+      problems.append(f"unfinished: {name} ends on its pre-drain"
+                      f" events_health line (no final line)")
     elif h is None or not h.get("final") or not tail.endswith(b"\n"):
       problems.append(f"truncated: {name} has no final events_health line")
     if rec.get("dropped"):
@@ -863,6 +871,7 @@ class _State:
     self.lock = threading.Lock()  # guards dropped and the request fields
     self.req_upload = False
     self.req_stop = False
+    self.req_health = False  # node_stopping(): a pre-drain health line
     self.req_gen = 0
     self.done_gen = 0
     self.done_cv = threading.Condition(self.lock)
@@ -886,12 +895,13 @@ class _State:
       self.dropped += 1
 
   def request(self, upload: bool, timeout: float | None,
-              stop: bool = False) -> bool:
+              stop: bool = False, health: bool = False) -> bool:
     with self.lock:
       self.req_gen += 1
       gen = self.req_gen
       self.req_upload = self.req_upload or upload
       self.req_stop = self.req_stop or stop
+      self.req_health = self.req_health or health
     self.wake.set()
     if timeout is None or self.thread is None:
       return False
@@ -942,7 +952,9 @@ class _State:
       gen = self.req_gen
       upload = self.req_upload
       stop = self.req_stop
+      want_health = self.req_health
       self.req_upload = False
+      self.req_health = False
     requested = gen != self.done_gen
     try:
       if now >= self.next_encode or len(self.q) >= self.wake_at:
@@ -954,6 +966,12 @@ class _State:
       if now >= self.next_health and not stop:
         self.next_health = now + self.health_s
         self.write_health(final=False)
+      if want_health and not stop:
+        # node_stopping(): the events queued so far are written (drain above),
+        # then a health line, then the upload below, so a pod killed during
+        # its drain still ends on a health line that counts them.
+        self.next_health = now + self.health_s
+        self.write_health(final=False, stopping=True)
       if stop:
         self._safely(self.drain)
         self._safely(lambda: self.write_health(final=True))
@@ -1084,12 +1102,14 @@ class _State:
       self._fh = None
       return False
 
-  def write_health(self, final: bool) -> None:
+  def write_health(self, final: bool, stopping: bool = False) -> None:
     h = self.health()
     fields = {"emitted": h["emitted"], "dropped": h["dropped"],
               "errors": h["errors"], "queue_hwm": h["queue_hwm"],
               "written": h["written"], "lost": h["lost"], "bytes": h["bytes"],
               "final": final}
+    if stopping:
+      fields["stopping"] = True
     line = self._encode(time.time(), time.monotonic(), "events_health", fields)
     self._write([line])
 
@@ -1256,14 +1276,29 @@ def pod_name_from_env(env: Any = None) -> str:
   return pod
 
 
+_JOBSET_ROLE_SUFFIX = re.compile(r"-(orch|train|roll-\d+|eval)$")
+
+
+def run_name_from_env(env: Any = None) -> str:
+  """The stream's run: TUNIX_EVENTS_RUN (the launcher sets it on every
+  process), else JOB_PREFIX, else JOBSET_NAME without its role suffix
+  (`<prefix>-orch`, `-train`, `-roll-<i>`), else empty."""
+  env = os.environ if env is None else env
+  run = (env.get("TUNIX_EVENTS_RUN") or env.get("JOB_PREFIX") or "").strip()
+  if run:
+    return run
+  js = (env.get("JOBSET_NAME") or "").strip()
+  return _JOBSET_ROLE_SUFFIX.sub("", js)
+
+
 def configure_from_env(role: str, argv: list[str] | None = None) -> None:
-  """configure() from the launcher env: JOB_PREFIX, the pod name
-  (pod_name_from_env), TUNIX_EVENTS_GCS_DIR. Returns at once when
+  """configure() from the launcher env: the run (run_name_from_env), the pod
+  name (pod_name_from_env), TUNIX_EVENTS_GCS_DIR. Returns at once when
   `TUNIX_EVENTS` is off."""
   if _parse_level(None) == "off":
     return
   pod = pod_name_from_env()
-  configure(run=os.environ.get("JOB_PREFIX", ""), role=role, pod=pod,
+  configure(run=run_name_from_env(), role=role, pod=pod,
             gcs_dir=os.environ.get("TUNIX_EVENTS_GCS_DIR") or None,
             argv=argv)
 
@@ -1339,13 +1374,17 @@ def _node_timeout(timeout: float | None) -> float:
 def node_stopping(timeout: float | None = None) -> None:
   """A node's own SIGTERM/SIGINT handler fired and its drain is about to run.
 
-  Writes and uploads what is queued now (so a pod killed during a long drain
-  keeps everything up to here), waiting at most `timeout` seconds. Never raises.
+  Writes what is queued now, then an `events_health` line with
+  `stopping: true`, then uploads (so a pod killed during a long drain keeps
+  everything up to here and its stream still ends on a health line), waiting
+  at most `timeout` seconds. Never raises.
   """
   if not ON:
     return
   try:
-    flush(upload=True, timeout=_node_timeout(timeout))
+    st = _state
+    if st is not None:
+      st.request(upload=True, timeout=_node_timeout(timeout), health=True)
   except Exception as e:  # pylint: disable=broad-except
     _count_error("node_stop", e)
 
