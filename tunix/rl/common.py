@@ -125,6 +125,10 @@ class TrainExample:
   # to dampen positions where the trainer's recomputed log-probability
   # diverges from the rollout sampler's. ``None`` disables the correction.
   sampler_is_weights: ArrayType | None = None
+  # `[B, ...]` Image tensor or precomputed visual features associated with
+  # multimodal prompts, forwarded to models accepting visual inputs.
+  images: ArrayType | None = None
+
   # `[B, P + C, num_layers, top_k]` MoE experts the rollout routed through,
   # laid out over the same `[prompt | completion]` padding as the token ids.
   # When set, a model that accepts `forced_routed_experts` replays these
