@@ -74,6 +74,7 @@ class RunStatsJson(TypedDict):
   """JSON form of `RunStats`."""
 
   num_trajectories: int
+  num_total_trajectories: int
   steps: StepCountsJson
   tokens: TokenCountsJson | None
   num_with_tokens: int
@@ -387,13 +388,20 @@ class RunStats:
       Unreported quantities are null.
     tool_counts: Read-only mapping from tool name to its number of calls across
       the run, keyed in first-seen order.
+    num_total_trajectories: Total number of trajectories in the run, or None if
+      equal to the number of loaded trajectories in `df`.
   """
 
   df: pd.DataFrame
   tool_counts: Mapping[str, int]
+  num_total_trajectories: int | None = None
 
   @classmethod
-  def from_trajectories(cls, trajectories: Iterable[_Trajectory]) -> RunStats:
+  def from_trajectories(
+      cls,
+      trajectories: Iterable[_Trajectory],
+      num_total_trajectories: int | None = None,
+  ) -> RunStats:
     """Derives per-trajectory and aggregate statistics for `trajectories`."""
     rows = []
     tool_counts = collections.Counter[str]()
@@ -404,7 +412,15 @@ class RunStats:
     df = pd.DataFrame(rows, columns=list(COLUMN_DTYPES)).astype(
         dict(COLUMN_DTYPES)
     )
-    return cls(df=df, tool_counts=types.MappingProxyType(tool_counts))
+    return cls(
+        df=df,
+        tool_counts=types.MappingProxyType(tool_counts),
+        num_total_trajectories=(
+            num_total_trajectories
+            if num_total_trajectories is not None
+            else len(df)
+        ),
+    )
 
   @property
   def num_trajectories(self) -> int:
@@ -471,6 +487,11 @@ class RunStats:
     tool_counts = collections.Counter(self.tool_counts).most_common()
     return RunStatsJson(
         num_trajectories=self.num_trajectories,
+        num_total_trajectories=(
+            self.num_total_trajectories
+            if self.num_total_trajectories is not None
+            else self.num_trajectories
+        ),
         steps=self.steps.to_json_dict(),
         tokens=self.tokens.to_json_dict() if self.tokens is not None else None,
         num_with_tokens=self.num_with_tokens,

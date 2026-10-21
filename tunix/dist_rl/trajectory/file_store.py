@@ -546,14 +546,14 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         stay alive until the returned iterator is exhausted.
 
     Returns:
-      An iterator over the trajectory IDs, in the order that
-      `root_dir.iterdir()` lists them.
+      An iterator over the trajectory IDs, sorted by trajectory ID.
     """
     candidates = [
         (match.group("trajectory_id"), executor.submit(entry.is_dir))
         for entry in self.root_dir.iterdir()
         if (match := _TRAJECTORY_DIR_REGEX.match(entry.name))
     ]
+    candidates.sort(key=lambda item: item[0])
     return (
         trajectory_id
         for trajectory_id, is_dir_future in candidates

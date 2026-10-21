@@ -112,6 +112,28 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     metas = self.file_s.get_trajectories_metadata()
     self.assertEqual(metas, [trajectory_testing.METADATA_1])
 
+  def test_get_trajectories_metadata_lists_in_sorted_order(self) -> None:
+    """Verifies trajectories are listed in deterministic sorted ID order."""
+    meta_b = trajectory_testing.METADATA_1.model_copy(
+        update={"trajectory_id": "traj_b"}
+    )
+    meta_a = trajectory_testing.METADATA_1.model_copy(
+        update={"trajectory_id": "traj_a"}
+    )
+    meta_c = trajectory_testing.METADATA_1.model_copy(
+        update={"trajectory_id": "traj_c"}
+    )
+    self.file_s.update_metadata(meta_b)
+    self.file_s.update_metadata(meta_c)
+    self.file_s.update_metadata(meta_a)
+    self.file_s.flush()
+
+    metas = self.file_s.get_trajectories_metadata()
+    self.assertEqual(
+        [m.trajectory_id for m in metas],
+        ["traj_a", "traj_b", "traj_c"],
+    )
+
   def test_skips_files_matching_trajectory_dir_prefix(self) -> None:
     """Verifies files matching the trajectory directory prefix are skipped during metadata listing."""
     self.file_s.add_step(

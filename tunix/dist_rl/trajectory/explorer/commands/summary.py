@@ -16,8 +16,10 @@
 
 import dataclasses
 import json
+import sys
 
 import pandas as pd
+import simple_parsing
 from tunix.dist_rl.trajectory import store
 from tunix.dist_rl.trajectory.explorer.commands import base
 from tunix.dist_rl.trajectory.explorer.commands import formatting
@@ -27,6 +29,11 @@ from tunix.dist_rl.trajectory.explorer.diagnostics import stats
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class SummaryCommand(base.BaseCommand):
   """Prints one line per trajectory plus totals over the run."""
+
+  limit: int | None = simple_parsing.field(
+      default=None,
+      help="Maximum number of trajectories to load and display.",
+  )
 
   def execute(
       self, reader: store.TrajectoryReader, output_json: bool = False
@@ -40,17 +47,30 @@ class SummaryCommand(base.BaseCommand):
     Returns:
       Process exit code (0 for success).
     """
+    if self.limit is not None and self.limit < 0:
+      print(
+          "trajectory-explore: error: --limit must be non-negative, got"
+          f" {self.limit}",
+          file=sys.stderr,
+      )
+      return 2
+
     # TODO(tunix-dev): `TrajectoryReader.get_trajectories` requires an explicit
     # ID list, so listing the run costs two passes over its metadata (the file
     # and SQL backends re-read every trajectory's metadata in the second call).
     # Extend `get_trajectories` to accept `None` for "all", as
     # `get_trajectories_metadata` already does, and call it directly here.
-    ids = [
+    all_ids = [
         m.trajectory_id
         for m in reader.get_trajectories_metadata()
         if m.trajectory_id is not None
     ]
-    run_stats = stats.RunStats.from_trajectories(reader.get_trajectories(ids))
+    total_count = len(all_ids)
+    ids = all_ids[: self.limit] if self.limit is not None else all_ids
+    run_stats = stats.RunStats.from_trajectories(
+        reader.get_trajectories(ids),
+        num_total_trajectories=total_count,
+    )
     if output_json:
       # `to_dict` yields native Python values (unlike `to_json`, which rounds
       # floats to 10 significant digits); only the nulls need mapping to None.
@@ -64,7 +84,7 @@ class SummaryCommand(base.BaseCommand):
               "trajectories": records,
           })
       )
-    elif run_stats.num_trajectories == 0:
+    elif total_count == 0:
       print("No trajectories found.")
     else:
       print(_table(run_stats.df), "", *_totals(run_stats), sep="\n")
@@ -97,9 +117,14 @@ def _table(df: pd.DataFrame) -> str:
 def _totals(run_stats: stats.RunStats) -> list[str]:
   """Returns one line per run-level total."""
   n = run_stats.num_trajectories
+  total = run_stats.num_total_trajectories
+  if total is not None and n < total:
+    trajectories_line = f"Trajectories: {n} (of {total})"
+  else:
+    trajectories_line = f"Trajectories: {n}"
   statuses = {s.name: c for s, c in run_stats.status_counts.items()}
   lines = [
-      f"Trajectories: {n}",
+      trajectories_line,
       f"Steps: {run_stats.steps}",
       (
           f"Tokens: {formatting.format_optional(run_stats.tokens)}"

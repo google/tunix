@@ -512,6 +512,7 @@ class RunStatsTest(parameterized.TestCase):
         run.to_json_dict(),
         {
             "num_trajectories": 2,
+            "num_total_trajectories": 2,
             "steps": {
                 "total": 1,
                 "agent": 1,
@@ -528,6 +529,16 @@ class RunStatsTest(parameterized.TestCase):
             "tool_counts": {},
         },
     )
+
+  def test_from_trajectories_with_num_total_trajectories(self) -> None:
+    run = stats_lib.RunStats.from_trajectories(
+        [_tunix_trajectory()], num_total_trajectories=10
+    )
+    self.assertEqual(run.num_trajectories, 1)
+    self.assertEqual(run.num_total_trajectories, 10)
+    json_dict = run.to_json_dict()
+    self.assertEqual(json_dict["num_trajectories"], 1)
+    self.assertEqual(json_dict["num_total_trajectories"], 10)
 
 
 class JsonDictTest(absltest.TestCase):

@@ -29,7 +29,7 @@
 | Command | What it prints |
 |---|---|
 | `ping` | Store connectivity and the number of trajectories. |
-| `summary` | One row per trajectory (status, steps by source, tokens, tool calls, reward) followed by run totals: steps, tokens, status counts, mean reward and per-tool call counts. Under `--json`, the rows are the records of `RunStats.df`. |
+| `summary [--limit=<N>]` | One row per trajectory (status, steps by source, tokens, tool calls, reward) followed by run totals: steps, tokens, status counts, mean reward and per-tool call counts. Optional `--limit` bounds trajectory loading and table size. Under `--json`, the rows are the records of `RunStats.df`. |
 | `show --trajectory_id=<id>` | A trajectory's header (status, reward, steps, tokens, subagents), every step with its message, reasoning, tool calls and observations (truncated to `--max_chars`, `0` for no truncation), and the tool-call sequence. |
 
 ---
