@@ -76,8 +76,9 @@ EXIT_TIMEOUT_S = 20.0
 # most this long for the writer (TUNIX_EVENTS_NODE_STOP_TIMEOUT_S overrides).
 NODE_STOP_TIMEOUT_S = 10.0
 # The orchestrator's manifest: one listing, then the per-stream health sidecars
-# read in parallel, all within MANIFEST_BUDGET_S (a partial manifest is written
-# first, so an exit that cuts this short still leaves one that says so).
+# read in parallel, all within MANIFEST_BUDGET_S. A listing-only partial
+# manifest is written first, before the orchestrator's own final upload, so an
+# exit that cuts the upload or the reads short still leaves one that says so.
 MANIFEST_BUDGET_S = 12.0
 MANIFEST_READERS = 32
 HEALTH_DIR = "_health"  # <gcs_dir>/_health/<role>-<pod>.json, per stream
@@ -725,7 +726,8 @@ def _file_entry(h: dict | None, size: int | None, src: str) -> dict:
 def build_manifest(dir_uri: str, run: str, expected: dict,
                    own: dict[str, dict] | None = None,
                    budget_s: float | None = None,
-                   on_partial: Callable[[dict], None] | None = None) -> dict:
+                   on_partial: Callable[[dict], None] | None = None,
+                   listing_only: bool = False) -> dict:
   """The manifest of the stream files under `dir_uri`.
 
   One listing of the streams, then each stream's health sidecar (its last
@@ -734,6 +736,7 @@ def build_manifest(dir_uri: str, run: str, expected: dict,
   counts. `on_partial(manifest)` is called with the listing-only manifest
   (`complete: false`) before any sidecar is read. A sidecar not read in time is
   listed under `unread` and the manifest says `complete: false`.
+  `listing_only` returns that listing-only manifest and reads no sidecar.
   """
   budget_s = MANIFEST_BUDGET_S if budget_s is None else budget_s
   t0 = time.monotonic()
@@ -756,6 +759,8 @@ def build_manifest(dir_uri: str, run: str, expected: dict,
     return m
 
   todo = [n for n in sizes if n not in (own or {})]
+  if listing_only:
+    return man(False, todo, "partial: listing only, sidecars not read")
   if on_partial is not None:
     try:
       on_partial(man(False, todo, "partial: listing only, sidecars not read"))
@@ -952,8 +957,12 @@ class _State:
       if stop:
         self._safely(self.drain)
         self._safely(lambda: self.write_health(final=True))
+        # Orchestrator: the listing-only manifest goes first, so that a hung
+        # upload of its own stream cannot use up the exit join and leave no
+        # manifest at all.
+        self._safely(lambda: self.write_manifest(listing_only=True))
         self._safely(lambda: self.upload(final=True))
-        self._safely(self.write_manifest)
+        self._safely(lambda: self.write_manifest(partial_written=True))
       elif upload or now >= self.next_upload:
         self.next_upload = now + self.upload_s
         self.drain()
@@ -1113,7 +1122,12 @@ class _State:
     except Exception as e:  # pylint: disable=broad-except
       _count_error("upload_health", e)
 
-  def write_manifest(self) -> None:
+  def write_manifest(self, listing_only: bool = False,
+                     partial_written: bool = False) -> None:
+    """The orchestrator's manifest. `listing_only`: one listing, no sidecar
+    read (written before the final upload of its own stream).
+    `partial_written`: that manifest is already written, so the full build
+    does not write its own listing-only one again."""
     if self.role != "orch":
       return
     try:
@@ -1132,10 +1146,14 @@ class _State:
         if self.gcs_dir:
           _upload_fn(tmp, f"{self.gcs_dir}/{MANIFEST_NAME}")
 
+      if listing_only:
+        put(build_manifest(d, self.run, self.expected, own,
+                           listing_only=True))
+        return
       budget = float(os.environ.get("TUNIX_EVENTS_MANIFEST_BUDGET_S",
                                     MANIFEST_BUDGET_S))
       put(build_manifest(d, self.run, self.expected, own, budget_s=budget,
-                         on_partial=put))
+                         on_partial=None if partial_written else put))
     except Exception as e:  # pylint: disable=broad-except
       _count_error("manifest", e)
 

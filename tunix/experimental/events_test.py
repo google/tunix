@@ -1058,6 +1058,97 @@ class GcsPathTest(_Base):
     self.assertEqual(events.health()["errors"], 0)
 
 
+class OrchStopManifestTest(_Base):
+  """The orchestrator writes the listing-only manifest before its own final
+  upload, so a hung upload of its stream still leaves a manifest."""
+
+  def _fake_gcs(self):
+    _FakeClient.store, _FakeClient.calls = {}, []
+    fake_storage = mock.MagicMock()
+    fake_storage.Client = _FakeClient
+    fake_cloud = mock.MagicMock(storage=fake_storage)
+    events._list_tails_fn = events._default_list_tails
+    events._gcs_client_cache.clear()
+    _FakeClient.store[("bkt", "maxtext/job/events/rollout-r0.jsonl")] = (
+        b'{"v":1,"ev":"ckpt"}\n{"v":1,"ev":"events_health","emitted":1,'
+        b'"dropped":0,"errors":0,"lost":0,"final":true,"role":"rollout",'
+        b'"pod":"r0"}\n')
+    return mock.patch.dict(sys.modules, {"google.cloud": fake_cloud,
+                                         "google.cloud.storage": fake_storage})
+
+  def test_hung_orch_upload_still_leaves_a_manifest(self):
+    gate = threading.Event()
+    order = []
+
+    def upload(src, dst):
+      order.append(dst.rsplit("/", 1)[-1])
+      if dst.endswith("/orch-o0.jsonl"):
+        gate.wait(30)  # the orchestrator's own final upload hangs
+      events._default_upload(src, dst)
+
+    with self._fake_gcs():
+      events._upload_fn = upload
+      os.environ["TUNIX_EVENTS_EXPECTED"] = "orch=1,rollout=1"
+      st = self.configure(role="orch", pod="o0",
+                          gcs_dir="gs://bkt/maxtext/job/events")
+      events.emit("ckpt", step=1)
+      t0 = time.monotonic()
+      events.shutdown(timeout=1.0)  # the exit join runs out during the upload
+      self.assertLess(time.monotonic() - t0, 3.0)
+      key = ("bkt", "maxtext/job/events/manifest.json")
+      self.assertIn(key, _FakeClient.store)
+      man = json.loads(_FakeClient.store[key])
+      self.assertFalse(man["complete"])
+      self.assertIn("listing only", man["note"])
+      self.assertEqual(sorted(man["files"]),
+                       ["orch-o0.jsonl", "rollout-r0.jsonl"])
+      self.assertEqual(man["files"]["orch-o0.jsonl"]["health"], "own")
+      self.assertEqual(man["files"]["orch-o0.jsonl"]["events"], 2)
+      self.assertEqual(man["unread"], ["rollout-r0.jsonl"])
+      self.assertEqual(man["expected"], {"orch": 1, "rollout": 1})
+      self.assertNotIn(("bkt", "maxtext/job/events/orch-o0.jsonl"),
+                       _FakeClient.store)
+      self.assertEqual(order, ["manifest.json", "orch-o0.jsonl"])
+      # Once the upload returns, the full manifest replaces the partial one.
+      gate.set()
+      self.assertTrue(st.stopped.wait(10))
+      man = json.loads(_FakeClient.store[key])
+      self.assertTrue(man["complete"], man.get("note"))
+      self.assertEqual(man["files"]["rollout-r0.jsonl"]["events"], 1)
+      self.assertEqual(
+          events.verify_manifest("gs://bkt/maxtext/job/events")["problems"], [])
+    self.assertEqual(order, ["manifest.json", "orch-o0.jsonl",
+                             "orch-o0.json", "manifest.json"])
+
+  def test_partial_manifest_precedes_the_final_upload(self):
+    order = []
+
+    def upload(src, dst):
+      order.append(dst.rsplit("/", 1)[-1])
+      events._default_upload(src, dst)
+
+    with self._fake_gcs():
+      events._upload_fn = upload
+      self.configure(role="orch", pod="o0",
+                     gcs_dir="gs://bkt/maxtext/job/events")
+      events.emit("ckpt", step=1)
+      events.shutdown(timeout=10)
+    # partial manifest, own stream, its sidecar, full manifest (the full
+    # build does not write a second listing-only one).
+    self.assertEqual(order, ["manifest.json", "orch-o0.jsonl",
+                             "orch-o0.json", "manifest.json"])
+    self.assertEqual(events.health()["errors"], 0)
+
+  def test_non_orch_roles_write_no_manifest(self):
+    order = []
+    with self._fake_gcs():
+      events._upload_fn = lambda src, dst: order.append(dst.rsplit("/", 1)[-1])
+      self.configure(role="rollout", pod="r1",
+                     gcs_dir="gs://bkt/maxtext/job/events")
+      events.shutdown(timeout=10)
+    self.assertEqual(order, ["rollout-r1.jsonl", "rollout-r1.json"])
+
+
 class PodNameTest(_Base):
   """The stream's pod name (with hostNetwork, HOSTNAME is the node name)."""
 
