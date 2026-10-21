@@ -110,8 +110,8 @@ export TRAJECTORY_GROUP_ORDER="${TRAJECTORY_GROUP_ORDER:-prompt_batch}"
 export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-64}"
 export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"
 export REMAT_POLICY="${REMAT_POLICY:-custom}"
-export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-use_gdn_kernel=true gdn_cp_mode=head gdn_chunk_size=64 \
-decoder_layer_input=offload context=remat gdn=remat gdn_conv=remat gdn_states=remat \
+export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-gdn_chunk_size=64 \
+decoder_layer_input=offload context=remat \
 megablox=true sparse_matmul=true use_tokamax_gmm=true use_gmm_v2=true \
 use_gmm_v2_heuristic_tiling=true merge_gating_gmm=false \
 use_ragged_sort=false use_custom_sort_vjp=false \
@@ -120,7 +120,7 @@ sa_block_q=1024 sa_block_kv=4096 sa_block_kv_compute=512 \
 sa_block_q_dkv=2048 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=512 \
 sa_fuse_reciprocal=false sa_use_base2_exp=true dq_reduction_steps=3 \
 context_parallel_strategy=ring context_parallel_load_balance=false allow_split_physical_axes=true \
-context_parallel_attention_load_balance=true \
+\
 num_vocab_tiling=16 use_iota_embed=false mu_dtype=float32 grad_dtype=float32 \
 checkpoint_storage_concurrent_gb=96 \
 checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false \

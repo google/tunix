@@ -584,7 +584,6 @@ start_trainer() {
       ${REMAT_POLICY:+"remat_policy=${REMAT_POLICY}"}
       ${LEARNING_RATE_FINAL_FRACTION:+"learning_rate_final_fraction=${LEARNING_RATE_FINAL_FRACTION}"}
       ${SKIP_STEP_ON_SPIKES:+"skip_step_on_spikes=${SKIP_STEP_ON_SPIKES}"}
-      ${SKIP_STEP_ON_NAN:+"skip_step_on_nan=${SKIP_STEP_ON_NAN}"}
       ${SKIP_STEP_INTERVAL:+"skip_step_interval=${SKIP_STEP_INTERVAL}"}
       ${SKIP_STEP_SCALING_FACTOR:+"skip_step_scaling_factor=${SKIP_STEP_SCALING_FACTOR}"}
       "float32_gate_logits=${FLOAT32_GATE_LOGITS:-true}"
