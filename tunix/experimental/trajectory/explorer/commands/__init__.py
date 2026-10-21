@@ -16,7 +16,9 @@
 
 from tunix.experimental.trajectory.explorer.commands import base
 from tunix.experimental.trajectory.explorer.commands import ping
+from tunix.experimental.trajectory.explorer.commands import summary
 
 COMMAND_REGISTRY: dict[str, type[base.BaseCommand]] = {
     "ping": ping.PingCommand,
+    "summary": summary.SummaryCommand,
 }
