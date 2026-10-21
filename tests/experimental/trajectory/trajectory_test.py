@@ -356,6 +356,16 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
           model=trajectory_testing.PAIRED_ATIF_TRAJECTORY,
       ),
       dict(
+          testcase_name="trajectory_metrics",
+          model=trajectory.TrajectoryMetrics(
+              extra={
+                  "reward": 1.0,
+                  "breakdown": {"format": 0.2},
+                  "latencies": np.array([0.1, 0.2], dtype=np.float32),
+              }
+          ),
+      ),
+      dict(
           testcase_name="mixed_extra",
           model=trajectory.TunixAgentStep(
               step_id=0,
@@ -3033,6 +3043,68 @@ class Int3DArraySerializationTest(parameterized.TestCase):
           prefill_start=0,
           prefill_num_context=0,
       )
+
+
+class TrajectoryMetricsTest(parameterized.TestCase):
+  """Tests for the standalone TrajectoryMetrics model."""
+
+  def test_init_default_sets_extra_to_none(self) -> None:
+    metrics = trajectory.TrajectoryMetrics()
+
+    self.assertIsNone(metrics.extra)
+    self.assertEqual(metrics.model_dump(exclude_none=True), {})
+
+  def test_model_dump_and_validate_with_fields_round_trips(self) -> None:
+    metrics = trajectory.TrajectoryMetrics(
+        extra={
+            "trajectory_reward": 1.0,
+            "reward_breakdown": {"format": 0.2, "accuracy": 0.8},
+            "advantage": 1.45,
+            "global_step": 12,
+            "step_latencies": np.array([0.1, 0.2]),
+        },
+    )
+    expected_extra = {
+        "trajectory_reward": 1.0,
+        "reward_breakdown": {"format": 0.2, "accuracy": 0.8},
+        "advantage": 1.45,
+        "global_step": 12,
+        "step_latencies": [0.1, 0.2],
+    }
+
+    serialized = metrics.model_dump(mode="json")
+    restored = trajectory.TrajectoryMetrics.model_validate(serialized)
+    self.assertEqual(restored.extra, expected_extra)
+
+    json_payload = metrics.model_dump_json()
+    restored_from_json = trajectory.TrajectoryMetrics.model_validate_json(
+        json_payload
+    )
+    self.assertEqual(restored_from_json.extra, expected_extra)
+
+    copied = trajectory.deep_copy(metrics)
+    assert metrics.extra is not None
+    metrics.extra["reward_breakdown"]["format"] = 999.0
+    metrics.extra["step_latencies"][0] = 999.0
+    assert copied.extra is not None
+    self.assertEqual(
+        copied.extra["reward_breakdown"],
+        {"format": 0.2, "accuracy": 0.8},
+    )
+    np.testing.assert_array_equal(
+        copied.extra["step_latencies"],
+        np.array([0.1, 0.2]),
+    )
+    restored_from_copied_json = (
+        trajectory.TrajectoryMetrics.model_validate_json(
+            copied.model_dump_json()
+        )
+    )
+    self.assertEqual(restored_from_copied_json.extra, expected_extra)
+
+  def test_unknown_top_level_field_raises_validation_error(self) -> None:
+    with self.assertRaisesRegex(pydantic.ValidationError, "extra_forbidden"):
+      trajectory.TrajectoryMetrics.model_validate({"unknown_metric": 1})
 
 
 if __name__ == "__main__":
