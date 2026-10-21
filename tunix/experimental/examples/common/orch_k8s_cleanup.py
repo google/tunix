@@ -315,7 +315,16 @@ def shutdown_cluster_and_workers(
     stop_deadline_s: Passed to :func:`wait_until_workers_stopped`.
   """
   # Snapshot before shutdown(): it may unregister handles while stopping.
-  handles = dict(cluster.remote_worker_handles())
+  if hasattr(cluster, "remote_worker_handles"):
+    handles = dict(cluster.remote_worker_handles())
+  elif hasattr(cluster, "registry"):
+    handles = {
+        info.worker_id: cluster.registry.handle(info.worker_id)
+        for info in cluster.registry.infos()
+        if info.resources.get("remote")
+    }
+  else:
+    handles = {}
   try:
     logging.info("Shutting down cluster workers...")
     cluster.shutdown()

@@ -14,9 +14,11 @@
 
 """Tests for the self-contained distributed FrozenLake recipe."""
 
+import os
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 from absl.testing import absltest
 
@@ -212,7 +214,9 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertLen(offpolicy_items, 30)
 
   def test_recipe_defaults_match_reference(self):
-    args = run_frozenlake_dist._parse_args([])
+    with mock.patch.dict(os.environ, {}, clear=False):
+      os.environ.pop("EPISODE_TIMEOUT_SECS", None)
+      args = run_frozenlake_dist._parse_args([])
     self.assertEqual(args.model_id, "Qwen/Qwen3-8B")
     self.assertEqual(args.batch_size, 64)
     self.assertEqual(args.mini_batch_size, 64)
@@ -230,6 +234,37 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertEqual(args.sampler_is_threshold, 2.0)
     self.assertEqual(args.grid_size_range, (2, 9))
     self.assertEqual(args.wandb_project, "tunix-frozenlake")
+    self.assertTrue(args.trainer_precompile)
+    self.assertEqual(args.episode_timeout_secs, 600)
+    self.assertIsNone(args.rpc_timeout_s)
+    ws_timeouts = run_frozenlake_dist._validate_args(args)
+    self.assertEqual(args.rpc_timeout_s, 1800.0)
+    self.assertEqual(ws_timeouts.pre, 900.0)
+
+    args_long_ep = run_frozenlake_dist._parse_args(
+        ["--episode_timeout_secs=1800"]
+    )
+    ws_long = run_frozenlake_dist._validate_args(args_long_ep)
+    self.assertEqual(args_long_ep.rpc_timeout_s, 2100.0)
+    self.assertEqual(ws_long.pre, 2100.0)
+
+    args_bad_rpc = run_frozenlake_dist._parse_args(
+        ["--episode_timeout_secs=1800", "--rpc_timeout_s=1800"]
+    )
+    with self.assertRaisesRegex(ValueError, "rpc_timeout_s"):
+      run_frozenlake_dist._validate_args(args_bad_rpc)
+
+    for bad_rpc in ("0", "-1", "nan", "inf"):
+      args_invalid_rpc = run_frozenlake_dist._parse_args(
+          [f"--rpc_timeout_s={bad_rpc}"]
+      )
+      with self.assertRaisesRegex(ValueError, "rpc_timeout_s"):
+        run_frozenlake_dist._validate_args(args_invalid_rpc)
+
+    args_no_precompile = run_frozenlake_dist._parse_args(
+        ["--trainer_precompile=false"]
+    )
+    self.assertFalse(args_no_precompile.trainer_precompile)
 
     algo = run_frozenlake_dist._build_algo(args)
     self.assertEqual(algo.algo_config.sampler_is, "token")
@@ -260,6 +295,9 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertIn("--agent_name=frozenlake_agent", launcher)
     self.assertEqual(launcher.count('--mini_batch_size="$MINI_BATCH_SIZE"'), 2)
     self.assertEqual(launcher.count('--num_generations="$NUM_GENERATIONS"'), 2)
+    self.assertEqual(
+        launcher.count('--episode_timeout_secs="$EPISODE_TIMEOUT_SECS"'), 2
+    )
     self.assertIn("WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}", launcher)
     self.assertIn("MODEL_DTYPE=${MODEL_DTYPE:-float32}", launcher)
     self.assertIn('--model_dtype="$MODEL_DTYPE"', launcher)

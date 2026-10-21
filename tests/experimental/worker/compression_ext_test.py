@@ -188,7 +188,30 @@ class CompressionExtTest(absltest.TestCase):
           raw_i16,
       )
 
-    # 2. High-entropy incompressible float32 buffer is bypassed (< 2 us probe).
+    # 2. Power-of-two batched tensor (B=64) with high-entropy prefix and
+    # row-tail padding (-1) does not alias with the prime-13 sample probe.
+    row_tail_i16 = np.full((64, 512, 8, 8), -1, dtype=np.int16)
+    row_tail_i16[:, :280, :, :] = rng.integers(
+        0, 896, size=(64, 280, 8, 8), dtype=np.int16
+    )
+    row_tail_u10 = packing.encode_routed_experts(
+        row_tail_i16, num_experts=896, batched=True
+    )
+    row_tail_mv = memoryview(row_tail_u10).cast("B")
+    try:
+      comp_tail = _compression_ext.try_compress_bulk_buffer(
+          row_tail_mv, 0.85, 256 * 1024
+      )
+    finally:
+      row_tail_mv.release()
+    self.assertIsNotNone(comp_tail)
+    out_tail = np.empty(row_tail_u10.nbytes, dtype=np.uint8)
+    _compression_ext.decompress_bulk_buffer(comp_tail, out_tail)
+    np.testing.assert_array_equal(
+        out_tail.reshape(row_tail_u10.shape), row_tail_u10
+    )
+
+    # 3. High-entropy incompressible float32 buffer is bypassed (< 2 us probe).
     incomp = rng.standard_normal(256 * 1024, dtype=np.float32)
     incomp_mv = memoryview(incomp).cast("B")
     try:

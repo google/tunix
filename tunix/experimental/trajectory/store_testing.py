@@ -30,51 +30,11 @@ class CustomMetadata(trajectory_lib.TrajectoryMetadata):
 
   custom_tag: str = ""
 
-  def create_trajectory(
-      self,
-      steps: Sequence[Any] | None = None,
-      subagent_trajectories: Sequence[Any] | None = None,
-  ) -> "CustomTrajectory":
-    """Creates a CustomTrajectory, mirroring TunixTrajectoryMetadata."""
-    return self._create_paired_trajectory(
-        CustomTrajectory, steps, subagent_trajectories
-    )
-
-
-class CustomTrajectory(
-    CustomMetadata, trajectory_lib.Trajectory[trajectory_lib.Step]
-):
-  """Trajectory paired with CustomMetadata."""
-
-  subagent_trajectories: list["CustomTrajectory"] | None = None
-
-
-CustomTrajectory.model_rebuild()
-
 
 class ExtendedCustomMetadata(CustomMetadata):
   """Child metadata subclass extending CustomMetadata."""
 
   priority: int = 0
-
-  def create_trajectory(
-      self,
-      steps: Sequence[Any] | None = None,
-      subagent_trajectories: Sequence[Any] | None = None,
-  ) -> "ExtendedCustomTrajectory":
-    """Creates an ExtendedCustomTrajectory."""
-    return self._create_paired_trajectory(
-        ExtendedCustomTrajectory, steps, subagent_trajectories
-    )
-
-
-class ExtendedCustomTrajectory(ExtendedCustomMetadata, CustomTrajectory):
-  """Trajectory paired with ExtendedCustomMetadata."""
-
-  subagent_trajectories: list["ExtendedCustomTrajectory"] | None = None
-
-
-ExtendedCustomTrajectory.model_rebuild()
 
 
 class OptionalOnlyMetadata(trajectory_lib.TrajectoryMetadata):
@@ -83,27 +43,6 @@ class OptionalOnlyMetadata(trajectory_lib.TrajectoryMetadata):
   EXTENSIONS_KEY = "_optional_only_extensions"
 
   opt_tag: str | None = None
-
-  def create_trajectory(
-      self,
-      steps: Sequence[Any] | None = None,
-      subagent_trajectories: Sequence[Any] | None = None,
-  ) -> "OptionalOnlyTrajectory":
-    """Creates an OptionalOnlyTrajectory."""
-    return self._create_paired_trajectory(
-        OptionalOnlyTrajectory, steps, subagent_trajectories
-    )
-
-
-class OptionalOnlyTrajectory(
-    OptionalOnlyMetadata, trajectory_lib.Trajectory[trajectory_lib.Step]
-):
-  """Trajectory paired with OptionalOnlyMetadata."""
-
-  subagent_trajectories: list["OptionalOnlyTrajectory"] | None = None
-
-
-OptionalOnlyTrajectory.model_rebuild()
 
 
 class TrajectoryReaderTestCase(
@@ -710,7 +649,8 @@ class TrajectoryStoreMetadataClsTestCase(
 
     trajs = custom_store.get_trajectories(["custom_1"])
     self.assertLen(trajs, 1)
-    self.assertIsInstance(trajs[0], CustomTrajectory)
+    self.assertIsInstance(trajs[0], CustomMetadata)
+    self.assertIsInstance(trajs[0], trajectory_lib.Trajectory)
     self.assertEqual(trajs[0].custom_tag, "experiment_42")
     self.assertLen(trajs[0].steps, 1)
     self.assertEqual(trajs[0].steps[0].message, "custom step")
@@ -739,8 +679,8 @@ class TrajectoryStoreMetadataClsTestCase(
 
     trajs = ext_store.get_trajectories(["ext_custom_1"])
     self.assertLen(trajs, 1)
-    self.assertIsInstance(trajs[0], ExtendedCustomTrajectory)
-    self.assertIs(type(trajs[0]), ExtendedCustomTrajectory)
+    self.assertIsInstance(trajs[0], ExtendedCustomMetadata)
+    self.assertIsInstance(trajs[0], trajectory_lib.Trajectory)
     self.assertEqual(trajs[0].custom_tag, "inherited_tag")
     self.assertEqual(trajs[0].priority, 5)
     self.assertLen(trajs[0].steps, 1)
@@ -874,7 +814,8 @@ class PersistentTrajectoryStoreMetadataClsTestCase(
     self.assertIs(type(read_meta), OptionalOnlyMetadata)
     self.assertIsNone(read_meta.opt_tag)
     (read_traj,) = reader.get_trajectories(["persisted_opt_none"])
-    self.assertIs(type(read_traj), OptionalOnlyTrajectory)
+    self.assertIsInstance(read_traj, OptionalOnlyMetadata)
+    self.assertIsInstance(read_traj, trajectory_lib.Trajectory)
 
 
 class TrajectoryStoreConfigTestCase(
@@ -953,8 +894,7 @@ class TrajectoryStoreConfigTestCase(
     self.addCleanup(built.close)
 
     self.assertIs(
-        built._metadata_cls,  # pylint: disable=protected-access
-        trajectory_lib.TunixTrajectoryMetadata,
+        built.bound_metadata_cls, trajectory_lib.TunixTrajectoryMetadata
     )
     with self.assertRaisesRegex(TypeError, "is bound to metadata type"):
       built.update_metadata(cast(Any, trajectory_testing.METADATA_1))

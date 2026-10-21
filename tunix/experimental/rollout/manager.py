@@ -16,19 +16,16 @@
 
 import asyncio
 import logging
-import math
-import os
 import time
 from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Union
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import timeouts as timeouts_lib
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import collector as collector_lib
 from tunix.experimental.rollout import sampler as sampler_lib
-from tunix.experimental.rollout import vanilla_sampler_adapter
 from tunix.experimental.trajectory import base_store as store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.weight_sync import weight_sync
-from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import traffic_controller as traffic_controller_lib
 from tunix.rl.rollout import base_rollout
 
@@ -54,7 +51,7 @@ class RolloutManager:
       max_concurrency: int = 64,
       tokenizer: Any = None,
       chat_parser: Any = None,
-      drain_timeout_s: Optional[float] = None,
+      drain_timeout_s: float = timeouts_lib.DEFAULT_DRAIN_TIMEOUT_S,
       trajectory_store: Optional[store.TrajectoryWriter] = None,
   ):
     """Initializes the RolloutManager.
@@ -67,11 +64,16 @@ class RolloutManager:
       max_concurrency: Maximum number of concurrent episodes.
       tokenizer: Tokenizer for prompt/response encoding.
       chat_parser: Chat parser for conversation templating.
-      drain_timeout_s: How long pre_weight_sync waits for in-flight trajectories
-        before pausing the stragglers, roughly one worst-case trajectory.
+      drain_timeout_s: Soft drain window (seconds) in `pre_weight_sync` when
+        `partial_rollout` is False. Waits up to `drain_timeout_s` for in-flight
+        trajectories to finish naturally before `pause_all()` pauses remaining
+        stragglers.
       trajectory_store: Optional TrajectoryWriter for persisting rollout steps
         and episode metadata.
     """
+    self._drain_timeout_s = timeouts_lib.validate_positive_finite(
+        drain_timeout_s, "drain_timeout_s"
+    )
     self.config = config
     self._partial_rollout: bool = (
         bool(getattr(config, "partial_rollout", False))
@@ -90,6 +92,9 @@ class RolloutManager:
         config.routed_experts_num_experts if config is not None else None
     )
     self._policy_version: int = 0
+    # TODO(tunix-dev): Require all callers to pass a non-None, pre-constructed
+    # sampler with RaidenWeightSyncDelegate already applied, and remove this
+    # lazy sampler construction fallback from RolloutManager.
     if sampler is None:
       sampler_type = getattr(config, "sampler_type", "vanilla")
       weight_sync_mode = getattr(
@@ -139,21 +144,9 @@ class RolloutManager:
             **adapter_kwargs
         )
       elif "vanilla" in sampler_type:
-        raiden_delegate = None
-        if weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN:
-          from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
-
-          raiden_delegate = (
-              raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
-                  server_id="vanilla_sampler"
-              )
-          )
-
-        sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(
-            server_id="vanilla_sampler",
-            tokenizer=tokenizer,
-            config=config,
-            raiden_sync_delegate=raiden_delegate,
+        raise ValueError(
+            "VanillaSampler requires an explicit pre-constructed sampler"
+            " instance with an initialized transformer model."
         )
       else:
         raise ValueError(f"Unknown sampler_type: {sampler_type}")
@@ -186,16 +179,14 @@ class RolloutManager:
     self._active_tasks: Dict[str, asyncio.Task[Any]] = {}
     self._completed_queue: asyncio.Queue[TrajectoryOrError] = asyncio.Queue()
     self._traffic_inst = None
-    episode_timeout_s = weight_sync_coordinator._env_float(
-        "EPISODE_TIMEOUT_SECS",
-        collector_lib.DEFAULT_EPISODE_TIMEOUT_SECS,
-    )
-    if drain_timeout_s is None:
-      if weight_sync_coordinator.is_weight_sync_timeouts_disabled():
-        drain_timeout_s = float("inf")
-      else:
-        drain_timeout_s = episode_timeout_s + 60.0
-    self._drain_timeout_s = float(drain_timeout_s)
+
+  @property
+  def drain_timeout_s(self) -> float:
+    return self._drain_timeout_s
+
+  @property
+  def partial_rollout(self) -> bool:
+    return self._partial_rollout
 
   @property
   def _traffic(self) -> traffic_controller_lib.TrafficController:
@@ -320,8 +311,13 @@ class RolloutManager:
       resolve_cb: Callable[[TrajectoryOrError], None],
   ) -> None:
     """Runs episode loop, removes active tracking, and resolves callbacks/streams."""
+    run_start = time.perf_counter()
     try:
       trajectory: TrajectoryOrError = await collector.run_episode()
+      if isinstance(trajectory, datatypes.TrajectoryItem) and isinstance(
+          trajectory.traj, dict
+      ):
+        trajectory.traj["execution_time_s"] = time.perf_counter() - run_start
     except Exception as e:  # pylint: disable=broad-exception-caught
       error_metadata = dict(request.metadata or {})
       error_metadata["prompt_id"] = request.prompt_id

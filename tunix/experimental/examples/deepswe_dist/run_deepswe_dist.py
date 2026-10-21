@@ -38,6 +38,7 @@ if REPO_ROOT not in sys.path:
 
 # pylint: disable=g-import-not-at-top
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import timeouts
 from tunix.experimental.distributed.runtime import context as runtime_context
 from tunix.experimental.examples.deepswe_dist import deepswe
 from tunix.experimental.orchestrator import algorithm_adapter
@@ -152,6 +153,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           "Trainer expert-parallel mesh dimension. Included in the sequence"
           " packing row count because MaxText's MoE shards the batch axis over"
           " ('fsdp', 'expert') jointly."
+      ),
+  )
+  parser.add_argument(
+      "--num_data_shards",
+      type=int,
+      default=None,
+      help=(
+          "Total number of trainer data-parallel shards (e.g. fsdp * dp *"
+          " expert) used as the sequence packing pack_size."
       ),
   )
   parser.add_argument(
@@ -299,7 +309,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--disable_weight_sync_timeouts",
       action=argparse.BooleanOptionalAction,
-      default=weight_sync_coordinator.is_weight_sync_timeouts_disabled(),
+      default=os.getenv("WEIGHT_SYNC_DISABLE_TIMEOUTS", "0").strip().lower() in ("1", "true", "yes"),
       help="Disable weight-sync phase and RPC timeouts.",
   )
   parser.add_argument("--dataset_path", type=str, default="")
@@ -416,7 +426,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " than training on them."
       ),
   )
-  parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
+  parser.add_argument("--rpc_timeout_s", type=float, default=None)
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   parser.add_argument(
@@ -468,7 +478,28 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
       help="Total number of MoE experts per layer for routed_experts_encode_mode=auto.",
   )
-  return parser.parse_args(argv)
+  parser.add_argument(
+      "--trainer_precompile",
+      type=_str2bool,
+      default=_str2bool(os.getenv("TRAINER_PRECOMPILE", "true")),
+      nargs="?",
+      const=True,
+      help=(
+          "Precompile the trainer step executables (fwd_bwd, update, eval)"
+          " ahead of time during worker configuration."
+      ),
+  )
+  args = parser.parse_args(argv)
+  if args.num_data_shards is None and any(
+      x is not None
+      for x in (args.trainer_fsdp, args.trainer_dp, args.trainer_expert)
+  ):
+    args.num_data_shards = (
+        (args.trainer_fsdp or 1)
+        * (args.trainer_dp or 1)
+        * (args.trainer_expert or 1)
+    )
+  return args
 
 
 def _str2bool(v: str | bool) -> bool:
@@ -590,6 +621,47 @@ def _configure_trainer_loss(
   )
 
 
+def _validate_args(
+    args: argparse.Namespace,
+) -> weight_sync_coordinator.PhaseTimeouts:
+  """Validates DeepSWE arguments and derives aligned `PhaseTimeouts`."""
+  if args.mini_batch_size is None:
+    args.mini_batch_size = args.batch_size
+  if args.num_generations <= 1:
+    raise ValueError("num_generations must be greater than 1 for GRPO.")
+  if args.batch_size <= 0:
+    raise ValueError("batch_size must be positive.")
+  if args.max_staleness < 0:
+    raise ValueError("offpolicy/max_staleness must be non-negative.")
+  if args.step_timeout_secs <= 0:
+    raise ValueError("step_timeout_secs must be positive.")
+  if args.reward_timeout_secs <= 0:
+    raise ValueError("reward_timeout_secs must be positive.")
+  if args.episode_timeout_secs <= 0:
+    raise ValueError("episode_timeout_secs must be positive.")
+  if args.episode_timeout_secs < args.step_timeout_secs:
+    raise ValueError(
+        f"episode_timeout_secs ({args.episode_timeout_secs}) must be >="
+        f" step_timeout_secs ({args.step_timeout_secs})."
+    )
+  weight_sync_timeouts = (
+      weight_sync_coordinator.PhaseTimeouts.for_drain_timeout(
+          timeouts.drain_timeout_for(args.episode_timeout_secs)
+      )
+  )
+  min_rpc_s = weight_sync_timeouts.max_rpc_phase_s()
+  if args.rpc_timeout_s is None:
+    args.rpc_timeout_s = max(1800.0, min_rpc_s)
+  else:
+    timeouts.validate_positive_finite(args.rpc_timeout_s, "rpc_timeout_s")
+    if args.rpc_timeout_s < min_rpc_s:
+      raise ValueError(
+          f"rpc_timeout_s ({args.rpc_timeout_s}) must be >="
+          f" weight_sync_timeouts.max_rpc_phase_s() ({min_rpc_s})."
+      )
+  return weight_sync_timeouts
+
+
 def main(argv: list[str], context: ProcessContext | None = None) -> None:
   assert (
       context and context.ipc and context.ipc.discovery
@@ -602,14 +674,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       force=True,
   )
 
-  if args.mini_batch_size is None:
-    args.mini_batch_size = args.batch_size
-  if args.num_generations <= 1:
-    raise ValueError("num_generations must be greater than 1 for GRPO.")
-  if args.batch_size <= 0:
-    raise ValueError("batch_size must be positive.")
-  if args.max_staleness < 0:
-    raise ValueError("offpolicy/max_staleness must be non-negative.")
+  weight_sync_timeouts = _validate_args(args)
 
   logging.info("=== Starting Distributed DeepSWE GRPO Orchestrator ===")
   logging.info(
@@ -670,10 +735,11 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   cluster = orchestrator.ClusterOrchestrator(
       weight_sync_mode=args.weight_sync_mode,
       trajectory_store_config=trajectory_store_config,
+      weight_sync_timeouts=weight_sync_timeouts,
   )
   context.ipc.discovery.on_register(
       functools.partial(
-          cluster.register_worker_from_hostname,
+          cluster.registry.register_from_hostname,
           rpc_timeout_s=args.rpc_timeout_s,
       )
   )
@@ -718,9 +784,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
             max_seq_token_per_tpu=args.max_seq_token_per_tpu,
             max_segments_per_packed_row=args.max_segments_per_packed_row,
             segment_alignment_boundary=args.segment_alignment_boundary,
-            trainer_fsdp=args.trainer_fsdp,
-            trainer_dp=args.trainer_dp,
-            trainer_expert=args.trainer_expert,
+            num_data_shards=args.num_data_shards,
         ),
         metrics_logging_options=metrics_logging_options,
         # "" (not None) disables the logger: StandardRLProgram only falls back
@@ -732,6 +796,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         max_staleness=args.max_staleness,
         group_order=args.trajectory_group_order,
         sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
+        precompile_trainer=args.trainer_precompile,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",
             step,
@@ -744,18 +809,17 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         ),
     )
 
-    cluster.wait_for_workers(
+    cluster.registry.wait_for_workers(
         min_workers={
             datatypes.Role.ACTOR: 1,
             datatypes.Role.ROLLOUT: max(1, int(args.rollout_replicas)),
             datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
         },
         timeout=args.init_timeout_s,
-        poll_interval_s=1.0,
     )
-    logging.info("Registered workers: %s", cluster.worker_infos())
+    logging.info("Registered workers: %s", cluster.registry.infos())
 
-    trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
+    trainer_handles = cluster.registry.handles(datatypes.Role.ACTOR)
     if len(trainer_handles) != 1:
       raise ValueError(f"Expected 1 trainer worker, got {len(trainer_handles)}.")
     _configure_trainer_loss(

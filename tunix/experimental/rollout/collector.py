@@ -16,41 +16,17 @@
 
 import asyncio
 from typing import Any, Callable, Collection, List, Mapping, Optional, Sequence
-import zlib
 from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import timeouts
 from tunix.experimental.rollout import sampler as sampler_lib
-from tunix.experimental.rollout import vanilla_sampler_adapter
 from tunix.experimental.trajectory import base_store as store
 from tunix.experimental.trajectory import converter as converter_lib
 from tunix.rl import packing
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine as rl_collect_engine
 from tunix.rl.rollout import base_rollout
-
-DEFAULT_EPISODE_TIMEOUT_SECS: float = 600.0
-_DEFAULT_EPISODE_TIMEOUT_SECS: float = DEFAULT_EPISODE_TIMEOUT_SECS
-
-
-def generate_vanilla_rollout_seed(
-    prompt_id: str | int,
-    group_index: int = 0,
-) -> int:
-  """Generates a deterministic rollout seed for vanilla samplers.
-
-  Computes `seed = (crc32(prompt_id) & 0x7FFFFFFF + group_index) & 0x7FFFFFFF`.
-
-  Args:
-    prompt_id: Prompt identifier string or integer (e.g. 'prompt_0', 42,
-      'gsm8k_q1').
-    group_index: The index of the rollout within its group (group_index >= 0).
-
-  Returns:
-    A deterministic 31-bit non-negative integer seed for the rollout request.
-  """
-  prompt_hash = zlib.crc32(str(prompt_id).encode("utf-8")) & 0x7FFFFFFF
-  return (prompt_hash + group_index) & 0x7FFFFFFF
 
 
 def _build_prompt(chat_parser: Any, chat_completions: Any) -> Any:
@@ -172,7 +148,6 @@ class TrajectoryCollectorEngine:
     self._unpaused.set()
     self._episode_cache_salt: str | None = None
     self._turn_policy_versions: list[int] = []
-    self._turn_sampled_lengths: list[int] = []
     self._inner_engine: Optional[rl_collect_engine.TrajectoryCollectEngine] = (
         None
     )
@@ -186,7 +161,7 @@ class TrajectoryCollectorEngine:
     metadata = request.metadata or {}
     timeout = metadata.get("episode_timeout")
     self.episode_timeout = float(
-        timeout if timeout is not None else _DEFAULT_EPISODE_TIMEOUT_SECS
+        timeout if timeout is not None else timeouts.DEFAULT_EPISODE_TIMEOUT_S
     )
     if self.episode_timeout <= 0:
       raise ValueError("episode_timeout must be positive.")
@@ -220,7 +195,6 @@ class TrajectoryCollectorEngine:
     """Executes multi-turn agentic rollout episode and returns TrajectoryItem."""
     self._episode_cache_salt = None
     self._turn_policy_versions = []
-    self._turn_sampled_lengths = []
 
     # Note: model_call is an async coroutine callback invoked directly by
     # TrajectoryCollectEngine on the asyncio event loop without blocking
@@ -260,19 +234,6 @@ class TrajectoryCollectorEngine:
       generation_kwargs["max_tokens"] = effective_max_tokens
 
       seed = generation_kwargs.get("seed", None)
-      if isinstance(
-          self.sampler, vanilla_sampler_adapter.VanillaSamplerAdapter
-      ):
-        # TODO(tunix-dev): make vanilla sampler stateful with internal RNG key
-        if seed is None and self.request.prompt_id is not None:
-          seed = generate_vanilla_rollout_seed(
-              self.request.prompt_id, self.request.group_index
-          )
-        if seed is None:
-          raise ValueError(
-              "Vanilla sampler requires a seed or valid prompt_id to generate"
-              " diverse rollouts, but got seed=None."
-          )
 
       req_policy_version = int(self.request.target_policy_version or 0)
       turn_policy_version = (
@@ -322,7 +283,6 @@ class TrajectoryCollectorEngine:
       res = await self.sampler.sample(sampling_req, **generation_kwargs)
       text = res if isinstance(res, str) else getattr(res, "text", str(res))
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
-      self._turn_sampled_lengths.append(len(tokens))
       logprobs = getattr(res, "logprobs", None)
       routed_experts = getattr(res, "routed_experts", None)
       raw_prompt_tokens = getattr(res, "prompt_token_ids", None)
@@ -374,9 +334,6 @@ class TrajectoryCollectorEngine:
       if self._turn_policy_versions:
         rl_traj["policy_version"] = int(self._turn_policy_versions[0])
         rl_traj["policy_versions"] = list(self._turn_policy_versions)
-      # Kept apart from `conversation_masks`, which the overlong filter zeroes,
-      # so consumers still see how long a masked-out rollout's turns ran.
-      rl_traj["assistant_turn_lengths"] = list(self._turn_sampled_lengths)
       routed_experts = rl_traj.get("routed_experts")
       if routed_experts is not None:
         if (

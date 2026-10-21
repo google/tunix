@@ -21,12 +21,13 @@ import os
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 import unittest
 import numpy as np
+from tunix.common import configs
 from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import sampler as base_sampler_lib
-from tunix.experimental.rollout import vanilla_sampler_adapter as sampler_lib
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.worker import remote_execution
+from tunix.experimental.worker import task_session
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
@@ -138,8 +139,8 @@ class MockChatParser:
     return tokens, 0
 
 
-class MockBaseSamplerImpl(sampler_lib.VanillaSamplerAdapter):
-  """Mock BaseSamplerImpl simulating LLM generation and Raiden KV transfer."""
+class MockBaseSamplerImpl(base_sampler_lib.Sampler):
+  """Mock Sampler simulating LLM generation and Raiden KV transfer."""
 
   def __init__(
       self,
@@ -148,7 +149,8 @@ class MockBaseSamplerImpl(sampler_lib.VanillaSamplerAdapter):
       server_id: str = "mock_server",
       **kwargs,
   ):
-    super().__init__(server_id=server_id or sampler_name, **kwargs)
+    self.server_id = server_id or sampler_name
+    self.config = kwargs.pop("config", None) or configs.RolloutConfig()
     self.sampler_name = sampler_name
     self.default_delay = default_delay
     self.migration_history: List[Dict[str, Any]] = []
@@ -159,6 +161,53 @@ class MockBaseSamplerImpl(sampler_lib.VanillaSamplerAdapter):
 
   def initialize(self) -> None:
     pass
+
+  async def start(self, **kwargs) -> Any:
+    del kwargs
+    return True
+
+  async def stop(self, **kwargs) -> Any:
+    del kwargs
+    return True
+
+  async def pause(self, **kwargs) -> Any:
+    del kwargs
+    return True
+
+  async def resume(self, **kwargs) -> Any:
+    del kwargs
+    return True
+
+  async def get_mesh(self, **kwargs) -> Any:
+    del kwargs
+    return None
+
+  def get_target_state(self) -> Any:
+    return None
+
+  async def get_weight_sync_metadata(self, **kwargs) -> Any:
+    del kwargs
+    return []
+
+  async def bind_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    del sync_request, kwargs
+    return None
+
+  async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    del sync_request, kwargs
+    return True
+
+  async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    del sync_request, kwargs
+    return True
+
+  async def get_transfer_status(self, req_id: str | Any, **kwargs) -> str | Any:
+    del req_id, kwargs
+    return "SUCCESS"
+
+  async def get_load_info(self, **kwargs) -> base_sampler_lib.LoadInfo:
+    del kwargs
+    return base_sampler_lib.LoadInfo()
 
   async def sample(
       self,
@@ -327,7 +376,6 @@ class MockGlobalOrchestrator:
       self.trainer_handle = trainer
     else:
       self.trainer_handle = getattr(trainer, "actor_handle", None)
-    self.worker_pool = remote_execution.RoutingActorPool(self.actor_handles)
 
   def start_workers(self) -> None:
     """Starts all managed rollout worker instances via actor handles."""
@@ -369,13 +417,14 @@ class MockGlobalOrchestrator:
           )
       else:
         fanned_out_requests.append(req)
-    tasks: List[Tuple[str, str, Sequence[Any], Dict[str, Any]]] = [
-        (req.request_id or "req", "generate", (req,), {})
-        for req in fanned_out_requests
-    ]
     trajectories: List[TrajectoryOrError] = []
-    async for traj in self.worker_pool.as_completed_stream(tasks):
-      trajectories.append(traj)
+    async with task_session.TaskSession(self.actor_handles) as session:
+      for req in fanned_out_requests:
+        await session.submit(req.request_id or "req", "generate", req)
+      async for traj, exc in session.as_completed():
+        if exc is not None:
+          raise exc
+        trajectories.append(traj)
 
     return trajectories
 

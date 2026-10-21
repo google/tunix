@@ -119,16 +119,10 @@ maxtext_trainer_flags() {
     ${TRAINER_PADDED_MOE_MLP_DIM:+--maxtext_padded_moe_mlp_dim=${TRAINER_PADDED_MOE_MLP_DIM}} \
     ${MAXTEXT_WARMUP_STEPS_FRACTION:+--maxtext_warmup_steps_fraction=${MAXTEXT_WARMUP_STEPS_FRACTION}} \
     ${TRAINER_MAXTEXT_ATTENTION:+--maxtext_attention=${TRAINER_MAXTEXT_ATTENTION}} \
-    ${TRAINER_BASE_NUM_KV_HEADS:+--base_num_kv_heads=${TRAINER_BASE_NUM_KV_HEADS}} \
-    ${REMAT_POLICY:+--remat_policy=${REMAT_POLICY}} \
-    ${LEARNING_RATE_FINAL_FRACTION:+--learning_rate_final_fraction=${LEARNING_RATE_FINAL_FRACTION}} \
+    ${TRAINER_BASE_NUM_KV_HEADS:+--maxtext_base_num_kv_heads=${TRAINER_BASE_NUM_KV_HEADS}} \
     ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
     ${USE_WEIGHT_CONVERTER:+--use_weight_converter=${USE_WEIGHT_CONVERTER}} \
     ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
-    ${SKIP_STEP_ON_SPIKES:+--maxtext_skip_step_on_spikes=${SKIP_STEP_ON_SPIKES}} \
-    ${SKIP_STEP_ON_NAN:+--maxtext_skip_step_on_nan=${SKIP_STEP_ON_NAN}} \
-    ${SKIP_STEP_INTERVAL:+--maxtext_skip_step_interval=${SKIP_STEP_INTERVAL}} \
-    ${SKIP_STEP_SCALING_FACTOR:+--maxtext_skip_step_scaling_factor=${SKIP_STEP_SCALING_FACTOR}} \
     ${profiler_flags} \
   "
 }
@@ -139,5 +133,7 @@ maxtext_rollout_flags() {
   printf '%s' " \
     --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
     ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
+    ${FLOAT32_GATE_LOGITS:+--maxtext_float32_gate_logits=${FLOAT32_GATE_LOGITS}} \
+    ${FLOAT32_LOGITS:+--maxtext_float32_logits=${FLOAT32_LOGITS}} \
   "
 }

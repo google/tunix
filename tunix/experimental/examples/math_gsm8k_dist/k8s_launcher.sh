@@ -50,6 +50,7 @@ export SEGMENT_ALIGNMENT_BOUNDARY=${SEGMENT_ALIGNMENT_BOUNDARY:-}
 
 # Set to tunix to run Tunix's PeftTrainer, and maxtext to run MaxText's MaxTextTrainingEngine
 export TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
+export TRAINER_PRECOMPILE=${TRAINER_PRECOMPILE:-true}
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-${BATCH_SIZE}}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 export OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
@@ -248,6 +249,7 @@ start_orchestrator() {
         --max_staleness=${MAX_STALENESS} \
         --trajectory_group_order=${TRAJECTORY_GROUP_ORDER} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
+        --trainer_precompile=${TRAINER_PRECOMPILE} \
         --stop_workers_on_exit \
         --enable_trajectory_store=${TRAJECTORY_STORE_ENABLED} \
         --trajectory_store_backend=${TRAJECTORY_STORE_BACKEND} \
@@ -259,7 +261,7 @@ start_orchestrator() {
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${SEGMENT_ALIGNMENT_BOUNDARY:+--segment_alignment_boundary=${SEGMENT_ALIGNMENT_BOUNDARY}} \
-        ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
+        --num_data_shards=$(( ${TRAINER_MESH_FSDP:-1} * ${TRAINER_MESH_EXPERT:-1} )) \
         ${debug_flag} \
     " \
     | apply_manifest

@@ -577,15 +577,17 @@ nb::object TryCompressBulkBufferFast(nb::object src_obj,
   bool rejected = false;
   {
     nb::gil_scoped_release release;
-    // Fast 4x4 KiB odd-eighth sample probe (at 1/8, 3/8, 5/8, 7/8 of the
-    // buffer) to accurately estimate compressibility across batched `(B, T,
-    // ...)` tensors while rejecting high-entropy float32 buffers in < 2 us
-    // before allocating output memory.
+    // Fast 4x4 KiB prime-thirteenth sample probe (at 2/13, 5/13, 8/13, 11/13
+    // of the buffer) to accurately estimate compressibility across batched
+    // `(B, T, ...)` tensors without aliasing with power-of-two batch sizes
+    // (`B = 8, 16, 32, 64, 128, ...` or `T = 2^m` sub-blocks) while rejecting
+    // high-entropy float32 buffers in < 2 us before allocating output memory.
     if (raw_size >= kLz4SampleProbeTriggerBytes) {
       uint8_t probe_dst[kLz4SampleProbeSize];
       size_t probe_total_out = 0;
-      for (size_t k = 1; k <= 7; k += 2) {
-        size_t probe_off = ((raw_size * k) / 8) & ~size_t{63};
+      for (size_t k : {size_t{2}, size_t{5}, size_t{8}, size_t{11}}) {
+        size_t probe_off =
+            ((raw_size / 13) * k + ((raw_size % 13) * k) / 13) & ~size_t{63};
         if (probe_off + kLz4SampleProbeSize > raw_size) {
           probe_off = raw_size - kLz4SampleProbeSize;
         }

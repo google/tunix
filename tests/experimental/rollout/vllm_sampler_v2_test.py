@@ -18,6 +18,8 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
+from typing import Any
+from unittest import mock
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
@@ -37,10 +39,35 @@ def _version_shim(pkg):
     return _orig_meta_version(pkg)
 importlib.metadata.version = _version_shim
 
-if "openai_harmony" not in sys.modules:
-    sys.modules["openai_harmony"] = MagicMock()
+try:
+  import openai_harmony  # pylint: disable=g-import-not-at-top,unused-import
+except ImportError:
+  # openai_harmony is not installed in every environment this test runs in,
+  # so stub it only when it is missing; where it is installed, a stub would
+  # shadow the real package. vLLM uses openai_harmony.Message as a pydantic
+  # field type (ChatCompletionMessageParam), so the stub's Message must be a
+  # type pydantic can build a schema for. A MagicMock attribute makes
+  # importing vLLM fail with PydanticSchemaGenerationError.
+  _openai_harmony_stub = MagicMock()
+  _openai_harmony_stub.Message = Any
+  sys.modules["openai_harmony"] = _openai_harmony_stub
+
+for _name in (
+    "xgrammar",
+    "xgrammar.structural_tag",
+    "xgrammar.openai_tool_call_schema",
+):
+  try:
+    importlib.import_module(_name)
+  except ImportError:
+    sys.modules[_name] = MagicMock()
+
+# Import before vllm so vLLM patches it directly instead of adding an import
+# hook, which breaks under TAP's import profiler.
+importlib.import_module("torch._inductor.pattern_matcher")
 
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.async_llm_engine import AsyncLLMEngine  # pylint: disable=g-import-not-at-top
 
 from tunix.experimental.rollout.vllm_sampler_v2 import RLVllmSampler
 
@@ -381,89 +408,92 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
         self.assertEqual(
             getattr(vllm_params, "routed_experts_prompt_start", 0), 48
         )
-
-    @patch("tunix.experimental.rollout.vllm_sampler_v2.asyncio.sleep", new_callable=AsyncMock)
-    @patch("tunix.experimental.rollout.vllm_sampler_v2.AsyncLLMEngine.from_engine_args")
-    def test_start_retries_on_engine_core_init_failure(
-        self, mock_from_engine_args, mock_sleep
-    ):
-        """Verifies start() retries when EngineCore child initialization fails transiently."""
-        mock_engine = MagicMock()
-        mock_from_engine_args.side_effect = [
-            RuntimeError(
-                "Engine core initialization failed. See root cause above. "
-                "Failed core proc(s): {}"
-            ),
-            mock_engine,
-        ]
-        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
-        sampler = RLVllmSampler(engine_args=args)
-
-        async def run_test():
-            await sampler.start()
-            self.assertTrue(sampler._is_running)
-            self.assertIs(sampler._engine, mock_engine)
-            self.assertEqual(mock_from_engine_args.call_count, 2)
-            mock_sleep.assert_awaited_once_with(
-                RLVllmSampler._START_RETRY_DELAY_SECONDS
-            )
-            await sampler.stop()
-
-        asyncio.run(run_test())
-
-    @patch("tunix.experimental.rollout.vllm_sampler_v2.asyncio.sleep", new_callable=AsyncMock)
-    @patch("tunix.experimental.rollout.vllm_sampler_v2.AsyncLLMEngine.from_engine_args")
-    def test_start_raises_after_exhausting_retries(
-        self, mock_from_engine_args, mock_sleep
-    ):
-        """Verifies start() re-raises after exhausting _START_MAX_ATTEMPTS."""
-        mock_from_engine_args.side_effect = RuntimeError(
-            "Engine core initialization failed. See root cause above. "
-            "Failed core proc(s): {}"
-        )
-        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
-        sampler = RLVllmSampler(engine_args=args)
-
-        async def run_test():
-            with self.assertRaisesRegex(
-                RuntimeError, "Engine core initialization failed"
-            ):
-                await sampler.start()
-            self.assertFalse(sampler._is_running)
-            self.assertEqual(
-                mock_from_engine_args.call_count,
-                RLVllmSampler._START_MAX_ATTEMPTS,
-            )
-            self.assertEqual(
-                mock_sleep.await_count,
-                RLVllmSampler._START_MAX_ATTEMPTS - 1,
-            )
-
-        asyncio.run(run_test())
-
-    @patch("tunix.experimental.rollout.vllm_sampler_v2.asyncio.sleep", new_callable=AsyncMock)
-    @patch("tunix.experimental.rollout.vllm_sampler_v2.AsyncLLMEngine.from_engine_args")
-    def test_start_does_not_retry_unrelated_runtime_error(
-        self, mock_from_engine_args, mock_sleep
-    ):
-        """Verifies start() fails fast on unrelated RuntimeErrors."""
-        mock_from_engine_args.side_effect = RuntimeError(
-            "Invalid model configuration"
-        )
-        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
-        sampler = RLVllmSampler(engine_args=args)
-
-        async def run_test():
-            with self.assertRaisesRegex(
-                RuntimeError, "Invalid model configuration"
-            ):
-                await sampler.start()
-            self.assertFalse(sampler._is_running)
-            self.assertEqual(mock_from_engine_args.call_count, 1)
-            mock_sleep.assert_not_awaited()
-
-        asyncio.run(run_test())
     # pylint: enable=bad-indentation
+
+
+# pylint: disable=bad-indentation
+class TestRLVllmSamplerLogStats(unittest.TestCase):
+    """Tests the periodic flush of vLLM engine stats while the sampler runs."""
+
+    def setUp(self):
+        super().setUp()
+        interval_patcher = patch("vllm.envs.VLLM_LOG_STATS_INTERVAL", 0.01)
+        interval_patcher.start()
+        self.addCleanup(interval_patcher.stop)
+        self.mock_engine = mock.create_autospec(AsyncLLMEngine, instance=True)
+        engine_cls_patcher = patch(
+            "tunix.experimental.rollout.vllm_sampler_v2.AsyncLLMEngine"
+        )
+        mock_engine_cls = engine_cls_patcher.start()
+        self.addCleanup(engine_cls_patcher.stop)
+        mock_engine_cls.from_engine_args.return_value = self.mock_engine
+        self.sampler = RLVllmSampler(
+            engine_args=AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        )
+
+    def test_start_flushes_stats_until_stop(self):
+        """start() flushes engine stats periodically; stop() cancels it."""
+
+        async def run_test():
+            flushed = asyncio.Event()
+            self.mock_engine.do_log_stats.side_effect = flushed.set
+
+            await self.sampler.start()
+            await asyncio.wait_for(flushed.wait(), timeout=5)
+            log_stats_task = self.sampler._log_stats_task
+            await self.sampler.stop()
+
+            self.assertTrue(log_stats_task.cancelled())
+            self.assertIsNone(self.sampler._log_stats_task)
+
+        asyncio.run(run_test())
+
+    def test_failed_flush_is_logged_and_flushing_continues(self):
+        """A failing flush is logged and does not end the periodic flush."""
+
+        async def run_test():
+            recovered = asyncio.Event()
+            num_flushes = 0
+
+            def flaky_flush():
+                nonlocal num_flushes
+                num_flushes += 1
+                if num_flushes == 1:
+                    raise RuntimeError("stats unavailable")
+                recovered.set()
+
+            self.mock_engine.do_log_stats.side_effect = flaky_flush
+
+            with self.assertLogs(
+                RLVllmSampler.__module__, level="ERROR"
+            ) as logs:
+                await self.sampler.start()
+                await asyncio.wait_for(recovered.wait(), timeout=5)
+            await self.sampler.stop()
+
+            self.assertIsInstance(logs.records[0].exc_info[1], RuntimeError)
+
+        asyncio.run(run_test())
+
+    def test_stop_propagates_its_own_cancellation(self):
+        """Cancelling stop() is not swallowed, and a retried stop() finishes."""
+
+        async def run_test():
+            await self.sampler.start()
+            stop_task = asyncio.create_task(self.sampler.stop())
+            # Lets stop() run until it waits for the flush task to finish.
+            await asyncio.sleep(0)
+            self.assertTrue(self.sampler._log_stats_task.cancelling())
+            stop_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await stop_task
+
+            await self.sampler.stop()
+            self.assertFalse(self.sampler._is_running)
+            self.assertIsNone(self.sampler._log_stats_task)
+
+        asyncio.run(run_test())
+# pylint: enable=bad-indentation
 
 
 if __name__ == "__main__":

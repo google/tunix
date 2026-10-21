@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest import mock
-
 from absl.testing import absltest
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
@@ -21,9 +19,20 @@ from tunix.experimental.orchestrator import step_telemetry
 
 
 def _rollout_lineage(
-    dispatch_s: float, finish_s: float, worker_id: str = "rollout-0"
+    dispatch_s: float,
+    finish_s: float,
+    worker_id: str = "rollout-0",
+    *,
+    execution_time_s: float | None = None,
+    batch_idx: int | None = None,
 ) -> lineage.LineageContext:
   """Lineage as a rollout carries it back: dispatched, then finished."""
+  dispatch_attrs = {}
+  if batch_idx is not None:
+    dispatch_attrs["batch_idx"] = batch_idx
+  finish_attrs: dict[str, float | str] = {"worker_id": worker_id}
+  if execution_time_s is not None:
+    finish_attrs["execution_time_s"] = execution_time_s
   return lineage.LineageContext(
       tracking_id="traj",
       events=[
@@ -31,12 +40,13 @@ def _rollout_lineage(
               component="engine.dispatch",
               operation="rollout",
               timestamp_s=dispatch_s,
+              attributes=dispatch_attrs,
           ),
           lineage.LineageEvent(
               component="worker.rollout",
               operation="generate",
               timestamp_s=finish_s,
-              attributes={"worker_id": worker_id},
+              attributes=finish_attrs,
           ),
       ],
   )
@@ -50,6 +60,10 @@ def _health_item(
     turn_lengths=None,
     window=None,
     worker_id="rollout-0",
+    execution_time_s=None,
+    batch_idx=None,
+    env_time=None,
+    reward_time=None,
 ):
   """A scored rollout carrying what the rollout health metrics read."""
   traj = {"trajectory_reward": 1.0, "status": status}
@@ -60,9 +74,20 @@ def _health_item(
     ] * num_turns
   if turn_lengths is not None:
     traj["assistant_turn_lengths"] = list(turn_lengths)
+  if env_time is not None:
+    traj["env_time"] = env_time
+  if reward_time is not None:
+    traj["reward_time"] = reward_time
   metadata = {}
+  if batch_idx is not None:
+    metadata["batch_idx"] = batch_idx
   if window is not None:
-    metadata["lineage"] = _rollout_lineage(*window, worker_id=worker_id)
+    metadata["lineage"] = _rollout_lineage(
+        *window,
+        worker_id=worker_id,
+        execution_time_s=execution_time_s,
+        batch_idx=batch_idx,
+    )
   return datatypes.TrajectoryItem(
       prompt_id="p0", group_index=group_index, traj=traj, metadata=metadata
   )
@@ -140,6 +165,7 @@ class RolloutHealthTest(absltest.TestCase):
     )
 
     self.assertEqual(health.metrics["rollout/status/succeeded_frac"], 0.75)
+    self.assertEqual(health.metrics["rollout/success_rate"], 0.75)
     self.assertEqual(
         health.metrics["rollout/status/max_context_limit_reached_frac"], 0.25
     )
@@ -216,6 +242,57 @@ class RolloutHealthTest(absltest.TestCase):
     self.assertEqual(health.metrics["rollout/tail_sec"], 15.0)
     self.assertEqual(health.metrics["rollout/batch_wall_sec"], 50.0)
 
+  def test_separates_worker_execution_from_queue_wait_and_logs_env_reward_time(
+      self,
+  ):
+    health = step_telemetry.rollout_health(
+        _facts(
+            _health_item(
+                0,
+                window=(100.0, 130.0),
+                execution_time_s=10.0,
+                env_time={
+                    "reset_latency": 1.0,
+                    "step_latency": [2.0, 3.0],
+                    "close_latency": 0.5,
+                },
+                reward_time={"reward_latency": 0.25},
+            ),
+            _health_item(
+                1,
+                window=(100.0, 150.0),
+                execution_time_s=20.0,
+                env_time={
+                    "reset_latency": 1.5,
+                    "step_latency": [4.0],
+                    "close_latency": 1.0,
+                },
+                reward_time={"reward_latency": 0.75},
+            ),
+        )
+    )
+
+    self.assertEqual(health.metrics["rollout/execution_sec/p50"], 15.0)
+    self.assertEqual(health.metrics["rollout/execution_sec/max"], 20.0)
+    # Total durations are 30s and 50s; execution times are 10s and 20s, so
+    # queue wait times are 20s and 30s.
+    self.assertEqual(health.metrics["rollout/queue_wait_sec/p50"], 25.0)
+    self.assertEqual(health.metrics["rollout/queue_wait_sec/max"], 30.0)
+    self.assertEqual(health.metrics["rollout/env_time_sec/mean"], 6.5)
+    self.assertEqual(health.metrics["rollout/reward_time_sec/mean"], 0.5)
+
+  def test_groups_batch_wall_sec_by_batch_idx_cohort(self):
+    # Cohort 0 ran in [100, 140] (40s); cohort 1 ran in [300, 330] (30s).
+    # Grouping by `batch_idx` reports max(40, 30) = 40s rather than 330 - 100.
+    health = step_telemetry.rollout_health(
+        _facts(
+            _health_item(0, window=(100.0, 140.0), batch_idx=0),
+            _health_item(1, window=(300.0, 330.0), batch_idx=1),
+        )
+    )
+
+    self.assertEqual(health.metrics["rollout/batch_wall_sec"], 40.0)
+
   def test_omits_families_without_inputs(self):
     health = step_telemetry.rollout_health(_facts(_health_item(0)))
 
@@ -248,6 +325,12 @@ class SlowestRolloutsSummaryTest(absltest.TestCase):
             1,
             status=datatypes.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
             window=(0.0, 300.0),
+            execution_time_s=280.0,
+            env_time={
+                "reset_latency": 1.0,
+                "step_latency": [14.0],
+                "close_latency": 0.0,
+            },
             num_turns=1,
             turn_lengths=[57344],
             worker_id="w1",
@@ -259,7 +342,7 @@ class SlowestRolloutsSummaryTest(absltest.TestCase):
 
     self.assertEqual(
         summary,
-        "slowest 2 of 3: traj_p0_g1 dur=300.0s"
+        "slowest 2 of 3: traj_p0_g1 dur=300.0s exec=280.0s env=15.0s"
         " status=MAX_CONTEXT_LIMIT_REACHED turns=1 max_turn_length=57344"
         " worker=w1 | traj_p0_g2 dur=50.0s status=SUCCEEDED worker=w2",
     )
@@ -268,148 +351,6 @@ class SlowestRolloutsSummaryTest(absltest.TestCase):
     self.assertIsNone(
         step_telemetry.slowest_rollouts_summary(_facts(_health_item(0)), k=3)
     )
-
-
-class OutstandingPromptsTest(absltest.TestCase):
-  """Covers `OutstandingPrompts`, the in-flight view behind progress logs."""
-
-  def test_oldest_is_the_earliest_prompt_with_rollouts_left(self):
-    prompts = step_telemetry.OutstandingPrompts()
-    prompts.dispatched("p0", 2)
-    prompts.dispatched("p1", 2)
-
-    prompts.returned("p0")
-    oldest = prompts.oldest()
-    self.assertEqual(oldest.prompt_id, "p0")
-    self.assertEqual(oldest.rollouts_left, 1)
-    self.assertGreaterEqual(oldest.age_s, 0.0)
-
-    prompts.returned("p0")
-    self.assertEqual(prompts.oldest().prompt_id, "p1")
-    self.assertLen(prompts, 1)
-
-  def test_nothing_out_has_no_oldest(self):
-    prompts = step_telemetry.OutstandingPrompts()
-
-    self.assertIsNone(prompts.oldest())
-    self.assertEmpty(prompts)
-
-  def test_returns_for_unknown_prompts_are_counted_and_warned_about(self):
-    # A late return after a re-dispatch, or a response that lost its prompt id,
-    # must not raise: that would drop the rest of the polled batch.
-    prompts = step_telemetry.OutstandingPrompts()
-    prompts.dispatched("p0", 1)
-
-    with mock.patch.object(
-        step_telemetry.logging, "log_first_n"
-    ) as log_first_n:
-      prompts.returned("")
-
-    self.assertEqual(prompts.untracked_returns, 1)
-    self.assertEqual(prompts.oldest().rollouts_left, 1)
-    log_first_n.assert_called_once()
-    self.assertEqual(
-        log_first_n.call_args.args[0], step_telemetry.logging.WARNING
-    )
-
-  def test_redispatch_restarts_the_prompt_at_the_back(self):
-    prompts = step_telemetry.OutstandingPrompts()
-    prompts.dispatched("p0", 1)
-    prompts.dispatched("p1", 1)
-
-    with mock.patch.object(
-        step_telemetry.logging, "log_first_n"
-    ) as log_first_n:
-      prompts.dispatched("p0", 2)
-
-    log_first_n.assert_called_once()
-    self.assertEqual(
-        log_first_n.call_args.args[0], step_telemetry.logging.WARNING
-    )
-    self.assertEqual(prompts.oldest().prompt_id, "p1")
-    prompts.returned("p1")
-    self.assertEqual(prompts.oldest().prompt_id, "p0")
-    self.assertEqual(prompts.oldest().rollouts_left, 2)
-
-
-def _health(metrics=None, **counts):
-  """A `RolloutHealth` with the given metrics and lowercase status counts."""
-  status_counts = {status.name: 0 for status in datatypes.TrajectoryStatus}
-  for name, count in counts.items():
-    status_counts[datatypes.TrajectoryStatus[name.upper()].name] = count
-  return step_telemetry.RolloutHealth(
-      metrics=metrics or {}, status_counts=status_counts
-  )
-
-
-class StepSummaryTest(absltest.TestCase):
-  """Covers `step_summary`, the one-line per-step log."""
-
-  def test_summarizes_timing_rollouts_and_eta(self):
-    summary = step_telemetry.step_summary(
-        step=36,
-        step_time_sec=963.0,
-        step_times=step_telemetry.StepTimes(
-            exposed_generation_time=900.1,
-            policy_training_time=40.2,
-            checkpoint_time=5.0,
-            weight_sync_time=15.3,
-        ),
-        health=_health(
-            {
-                "rollout/duration_sec/p50": 199.0,
-                "rollout/duration_sec/max": 963.0,
-                "rollout/num_turns_mean": 27.6,
-                "rollout/num_turns_max": 50.0,
-                "rollout/turn_length/p99": 8000.0,
-                "rollout/turn_length/max": 57344.0,
-            },
-            succeeded=64,
-            max_context_limit_reached=128,
-            timeout=64,
-        ),
-        steps_left=12,
-        mean_step_sec=1000.0,
-    )
-
-    # Statuses are counted, most common first; ties keep enum order.
-    self.assertEqual(
-        summary,
-        "step=36 time=963.0s (wait=900.1s train=40.2s ref=0.0s"
-        " agreement=0.0s ckpt=5.0s sync=15.3s) | rollouts=256"
-        " max_context_limit_reached=128 succeeded=64 timeout=64"
-        " | dur_p50=199.0s dur_max=963.0s | turns_mean=27.6 turns_max=50"
-        " | turn_len_p99=8000 turn_len_max=57344 | eta=3.3h steps_left=12",
-    )
-
-  def test_durations_switch_units_where_rounding_would_print_60(self):
-    for seconds, expected in (
-        (59.4, "59s"),
-        (59.5, "1m"),
-        (3569.0, "59m"),
-        (3570.0, "1.0h"),
-        (12000.0, "3.3h"),
-    ):
-      with self.subTest(seconds=seconds):
-        self.assertEqual(step_telemetry.format_duration(seconds), expected)
-
-  def test_omits_missing_families_and_eta_without_steps_left(self):
-    for steps_left in (None, 0):
-      with self.subTest(steps_left=steps_left):
-        summary = step_telemetry.step_summary(
-            step=0,
-            step_time_sec=1.0,
-            step_times=step_telemetry.StepTimes(),
-            health=_health(succeeded=2),
-            steps_left=steps_left,
-            mean_step_sec=1.0,
-        )
-
-        self.assertEqual(
-            summary,
-            "step=0 time=1.0s (wait=0.0s train=0.0s ref=0.0s agreement=0.0s"
-            " ckpt=0.0s sync=0.0s) | rollouts=2 succeeded=2",
-        )
 
 
 if __name__ == "__main__":

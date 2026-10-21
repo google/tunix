@@ -17,8 +17,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Mapping, Sequence
 import dataclasses
 import inspect
+import multiprocessing
+from multiprocessing import connection
+import threading
+import time
 from typing import Any, Optional
 
 from absl.testing import absltest
@@ -31,7 +36,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.rollout import inprocess_vllm_sampler_adapter
 from tunix.experimental.rollout import sampler as base_sampler_lib
-from tunix.experimental.rollout import vanilla_sampler_adapter
+from tunix.experimental.rollout import vanilla_sampler
 from tunix.experimental.train import peft_trainer_v2
 from tunix.experimental.weight_sync import raiden_handler
 from tunix.experimental.weight_sync import raiden_synchronizer
@@ -41,19 +46,24 @@ from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import rollout_worker
 from tunix.experimental.worker import trainer_worker
 from tunix.generate import base_sampler
-from tunix.generate import sampler as vanilla_sampler_lib
 from tunix.generate import utils as gen_utils
 from tunix.rl import reshard
 from tunix.tests import test_common
-
-# pylint: disable=g-import-not-at-top
-import multiprocessing
 
 TrainingConfig = peft_trainer_v2.TrainingConfig
 PeftTrainer = peft_trainer_v2.PeftTrainer
 TrainerWorker = trainer_worker.TrainerWorker
 RolloutConfig = rollout_worker.RolloutConfig
 WeightSyncMode = weight_sync.WeightSyncMode
+
+# How long a worker process gets to answer one request. The first request also
+# covers starting the interpreter and importing JAX; the toy model answers every
+# later request in well under a second.
+_WORKER_REPLY_TIMEOUT_SECS = 180.0
+# How often a pending request checks that the worker process is still alive.
+_WORKER_LIVENESS_POLL_SECS = 1.0
+# How long a worker gets to exit after "stop" before it is terminated.
+_WORKER_STOP_GRACE_SECS = 5.0
 
 
 def _tensor(**overrides) -> weight_sync.TensorMetadata:
@@ -292,6 +302,8 @@ def _trainer_process_fn(
         conn.send(("error", str(e)))
     elif cmd == "stop":
       break
+    else:
+      conn.send(("error", f"unknown command {cmd!r}"))
 
 
 def _rollout_process_fn(
@@ -302,27 +314,19 @@ def _rollout_process_fn(
   model_config = test_common.ModelConfig(**model_config_kwargs)
   sampler_type = adapter_config_kwargs.get("sampler_type", "inprocess_vllm")
   delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
-  adapter_config = RolloutConfig(**adapter_config_kwargs)
+  adapter_config = RolloutConfig(kv_cache_size=64, **adapter_config_kwargs)
 
   if sampler_type == "vanilla":
     vanilla_model = test_common.ToyTransformer(model_config, rngs=nnx.Rngs(1))
     vanilla_model(
         jnp.zeros((1, 4), dtype=jnp.int32), jnp.zeros((1, 4), dtype=jnp.int32)
     )
-    adapter = vanilla_sampler_adapter.VanillaSamplerAdapter(
+    adapter = vanilla_sampler.VanillaSampler(
         server_id="vanilla_sampler_coord_0",
-        config=adapter_config,
-        raiden_sync_delegate=delegate,
-    )
-    adapter.sampler = vanilla_sampler_lib.Sampler(
         transformer=vanilla_model,
         tokenizer=test_common.MockVocab(),
-        cache_config=vanilla_sampler_lib.CacheConfig(
-            cache_size=64,
-            num_layers=model_config.num_layers,
-            num_kv_heads=model_config.num_kv_heads,
-            head_dim=model_config.head_dim,
-        ),
+        config=adapter_config,
+        raiden_sync_delegate=delegate,
     )
   else:
     mock_vllm_sampler = MockVllmSampler(model_config, rngs=nnx.Rngs(1))
@@ -387,97 +391,282 @@ def _rollout_process_fn(
       conn.send(("ok", delegate.is_bounded()))
     elif cmd == "stop":
       break
+    else:
+      conn.send(("error", f"unknown command {cmd!r}"))
+
+
+def _spawn_context() -> multiprocessing.context.SpawnContext:
+  """Returns the context that starts each worker in a fresh interpreter."""
+  return multiprocessing.get_context("spawn")
+
+
+class _WorkerProcess:
+  """A worker in a spawned process, driven by blocking request/reply messages.
+
+  No wait for a reply is unbounded, so a worker that crashes or wedges fails
+  the test promptly instead of hanging it until the CI job is killed:
+
+  * Only the child keeps its end of the pipe, so a worker that exits shows up
+    as a closed connection rather than as a reply that never comes.
+  * Every reply has a deadline, and a pending request notices within
+    `_WORKER_LIVENESS_POLL_SECS` that the worker process has died.
+  * After a failed request the worker refuses further requests: the failed
+    request may still be in flight, and its late reply would otherwise be read
+    as the answer to the next one.
+  * `shutdown()` escalates to SIGTERM and then SIGKILL. A worker left running
+    would otherwise hang the interpreter at exit, where `multiprocessing` joins
+    non-daemon children without a timeout.
+
+  Requests block the calling thread, including the event loop when the async
+  proxies below issue them. That suits these tests, whose coordinator drives
+  one source and one destination through one phase at a time, but it also
+  means the coordinator's own asyncio phase deadlines cannot fire while a
+  request is pending; the reply deadline is what bounds it.
+  """
+
+  def __init__(
+      self, name: str, target: Callable[..., None], *args: Any
+  ) -> None:
+    """Starts `target(conn, *args)` in a spawned process.
+
+    Args:
+      name: Name of the process, also used in error messages.
+      target: Module-level request loop to run in the child. It receives the
+        child's end of the pipe followed by `args`.
+      *args: Picklable arguments forwarded to `target`.
+    """
+    ctx = _spawn_context()
+    self._name = name
+    self._failure: Optional[str] = None
+    self._conn, child_conn = ctx.Pipe()
+    self._process = ctx.Process(
+        target=target, args=(child_conn, *args), name=name
+    )
+    try:
+      self._process.start()
+    finally:
+      child_conn.close()
+
+  @property
+  def name(self) -> str:
+    return self._name
+
+  @property
+  def process(self) -> multiprocessing.process.BaseProcess:
+    """The underlying process, for tests that observe or kill it directly."""
+    return self._process
+
+  def request(
+      self,
+      command: str,
+      *payload: Any,
+      timeout: float = _WORKER_REPLY_TIMEOUT_SECS,
+  ) -> Any:
+    """Sends one request to the worker and returns the result it replies with.
+
+    Args:
+      command: Name of the request, as understood by the worker's loop.
+      *payload: Picklable request arguments.
+      timeout: Seconds to wait for the reply.
+
+    Returns:
+      The result in the worker's ("ok", result) reply.
+
+    Raises:
+      RuntimeError: The worker replied with an error, exited before replying,
+        or is unusable because an earlier request failed.
+      TimeoutError: No reply arrived within `timeout` seconds.
+    """
+    if self._failure is not None:
+      raise RuntimeError(
+          f"{self._name} is unusable after an earlier failed request:"
+          f" {self._failure}"
+      )
+    try:
+      status, result = self._round_trip(command, payload, timeout)
+    except BaseException as e:
+      self._failure = f"{command!r}: {e}"
+      raise
+    if status != "ok":
+      raise RuntimeError(f"{self._name} failed {command!r}: {result}")
+    return result
+
+  def _round_trip(
+      self, command: str, payload: tuple[Any, ...], timeout: float
+  ) -> tuple[str, Any]:
+    try:
+      self._conn.send((command, *payload))
+    except (BrokenPipeError, ConnectionResetError) as e:
+      raise self._exit_error(command) from e
+    deadline = time.monotonic() + timeout
+    while not self._conn.poll(
+        min(_WORKER_LIVENESS_POLL_SECS, max(0.0, deadline - time.monotonic()))
+    ):
+      if not self._process.is_alive() and not self._conn.poll(0):
+        raise self._exit_error(command)
+      if time.monotonic() >= deadline:
+        raise TimeoutError(
+            f"{self._name} did not answer {command!r} within {timeout:g}s"
+        )
+    try:
+      return self._conn.recv()
+    except (EOFError, OSError) as e:
+      # EOF, a reset, or a message cut short: the worker died while answering.
+      raise self._exit_error(command) from e
+
+  def _exit_error(self, command: str) -> RuntimeError:
+    self._process.join(_WORKER_STOP_GRACE_SECS)
+    return RuntimeError(
+        f"{self._name} exited with code {self._process.exitcode} before"
+        f" answering {command!r}"
+    )
+
+  def shutdown(self) -> None:
+    """Stops the worker, escalating to SIGTERM and SIGKILL if it lingers.
+
+    Safe to call more than once.
+    """
+    try:
+      if self._failure is None and self._process.is_alive():
+        try:
+          self._conn.send(("stop",))
+        except OSError:
+          pass  # The worker already exited; there is nothing left to stop.
+        self._process.join(_WORKER_STOP_GRACE_SECS)
+      if self._process.is_alive():
+        self._process.terminate()
+        self._process.join(_WORKER_STOP_GRACE_SECS)
+      if self._process.is_alive():
+        self._process.kill()
+        self._process.join(_WORKER_STOP_GRACE_SECS)
+    finally:
+      self._conn.close()
+
+
+def _never_answer(conn: connection.Connection) -> None:
+  """Request loop of a worker stuck in a native call: it never replies."""
+  del conn
+  threading.Event().wait()
 
 
 class RemoteTrainerWorker:
   """Proxy to communicate with TrainerWorker running in a separate process."""
 
-  def __init__(self, conn):
-    self._conn = conn
+  def __init__(self, worker: _WorkerProcess):
+    self._worker = worker
     self._info = datatypes.WorkerInfo(
-        worker_id="trainer_proc_0",
+        worker_id=worker.name,
         roles=frozenset({datatypes.Role.ACTOR.value}),
     )
 
   def info(self) -> datatypes.WorkerInfo:
     return self._info
 
-  async def prepare_weight_sync(self, sync_request: Any = None, **kwargs):
-    self._conn.send(("prepare_weight_sync", sync_request))
-    status, res = self._conn.recv()
-    if status != "ok":
-      raise RuntimeError(f"Trainer prepare failed: {res}")
-    return res
+  async def prepare_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Sequence[weight_sync.WorkUnitMetadata]:
+    del kwargs  # Unused.
+    return self._worker.request("prepare_weight_sync", sync_request)
 
-  async def release_weight_sync(self, sync_request: Any = None, **kwargs):
-    self._conn.send(("release_weight_sync", sync_request))
-    status, res = self._conn.recv()
-    if status != "ok":
-      raise RuntimeError(f"Trainer release failed: {res}")
-    return res
+  async def release_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    del kwargs  # Unused.
+    return self._worker.request("release_weight_sync", sync_request)
 
 
 class RemoteRolloutWorker:
   """Proxy to communicate with RolloutWorker running in a separate process."""
 
-  def __init__(self, conn):
-    self._conn = conn
+  def __init__(self, worker: _WorkerProcess):
+    self._worker = worker
     self._info = datatypes.WorkerInfo(
-        worker_id="rollout_proc_0",
+        worker_id=worker.name,
         roles=frozenset({datatypes.Role.ROLLOUT.value}),
     )
 
   def info(self) -> datatypes.WorkerInfo:
     return self._info
 
-  async def bind_weight_sync(self, *args, **kwargs):
-    self._conn.send(("bind_weight_sync",))
-    status, res = self._conn.recv()
-    if status != "ok":
-      raise RuntimeError(f"Rollout bind failed: {res}")
-    return res
+  async def bind_weight_sync(self) -> None:
+    self._worker.request("bind_weight_sync")
 
-  async def get_weight_sync_metadata(self, *args, **kwargs):
-    self._conn.send(("get_weight_sync_metadata",))
-    status, res = self._conn.recv()
-    if status != "ok":
-      raise RuntimeError(f"Rollout metadata failed: {res}")
-    return res
+  async def get_weight_sync_metadata(
+      self,
+  ) -> Sequence[weight_sync.WorkUnitMetadata]:
+    return self._worker.request("get_weight_sync_metadata")
 
-  async def pre_weight_sync(self, sync_request: Any = None, **kwargs):
-    self._conn.send(("pre_weight_sync", sync_request))
-    status, res = self._conn.recv()
-    if status != "ok":
-      raise RuntimeError(f"Rollout pre_weight_sync failed: {res}")
-    return res
+  async def pre_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    del kwargs  # Unused.
+    return self._worker.request("pre_weight_sync", sync_request)
 
-  async def weight_sync(self, sync_request: Any = None, **kwargs):
-    self._conn.send(("weight_sync", sync_request))
-    status, res = self._conn.recv()
-    if status != "ok":
-      raise RuntimeError(f"Rollout weight_sync failed: {res}")
-    return res
+  async def weight_sync(self, sync_request: Any = None, **kwargs: Any) -> Any:
+    del kwargs  # Unused.
+    return self._worker.request("weight_sync", sync_request)
 
-  async def post_weight_sync(self, sync_request: Any = None, **kwargs):
-    self._conn.send(("post_weight_sync", sync_request))
-    status, res = self._conn.recv()
-    if status != "ok":
-      raise RuntimeError(f"Rollout post_weight_sync failed: {res}")
-    return res
+  async def post_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    del kwargs  # Unused.
+    return self._worker.request("post_weight_sync", sync_request)
 
-  async def abort_weight_sync(self, sync_request: Any = None, **kwargs):
-    self._conn.send(("abort_weight_sync", sync_request))
-    status, res = self._conn.recv()
-    if status != "ok":
-      raise RuntimeError(f"Rollout abort failed: {res}")
-    return res
+  async def abort_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    del kwargs  # Unused.
+    return self._worker.request("abort_weight_sync", sync_request)
 
-  async def get_weight_sync_status(self, *args, **kwargs):
-    self._conn.send(("get_weight_sync_status",))
-    status, res = self._conn.recv()
-    if status != "ok":
-      raise RuntimeError(f"Rollout status failed: {res}")
-    return res
+  async def get_weight_sync_status(self) -> Mapping[str, Any]:
+    return self._worker.request("get_weight_sync_status")
+
+
+class WorkerProcessTest(absltest.TestCase):
+  """A broken worker fails the request quickly instead of hanging the test."""
+
+  def test_request_to_exited_worker_fails_fast(self):
+    worker = _WorkerProcess("exited_worker", _never_answer)
+    self.addCleanup(worker.shutdown)
+    worker.process.kill()
+    worker.process.join()
+    start = time.monotonic()
+
+    with self.assertRaisesRegex(
+        RuntimeError, "exited_worker exited with code -9 before answering"
+    ):
+      worker.request("ping", timeout=600)
+
+    self.assertLess(time.monotonic() - start, 60)
+    with self.assertRaisesRegex(RuntimeError, "unusable after an earlier"):
+      worker.request("ping")
+
+  def test_worker_dying_mid_request_fails_fast(self):
+    worker = _WorkerProcess("dying_worker", _never_answer)
+    self.addCleanup(worker.shutdown)
+    # The request is sent and left unanswered, then the worker dies: the
+    # crash-while-a-request-is-pending case. Were the kill to land before the
+    # send, the send would fail with the same error.
+    killer = threading.Timer(0.5, worker.process.kill)
+    self.addCleanup(killer.cancel)
+    killer.start()
+
+    with self.assertRaisesRegex(
+        RuntimeError, "dying_worker exited with code -9 before answering 'ping'"
+    ):
+      worker.request("ping", timeout=600)
+
+  def test_unanswered_request_times_out_and_shutdown_stops_worker(self):
+    worker = _WorkerProcess("wedged_worker", _never_answer)
+    self.addCleanup(worker.shutdown)
+
+    with self.assertRaisesRegex(
+        TimeoutError, "wedged_worker did not answer 'ping' within 0.2s"
+    ):
+      worker.request("ping", timeout=0.2)
+    worker.shutdown()
+
+    self.assertFalse(worker.process.is_alive())
 
 
 class WeightSyncE2ETest(absltest.TestCase):
@@ -496,27 +685,20 @@ class WeightSyncE2ETest(absltest.TestCase):
     )
 
   def test_fallback_mode_weight_sync_with_vanilla_adapter(self):
-    """Verifies Fallback mode weight transfer from PeftTrainer to VanillaSamplerAdapter."""
+    """Verifies Fallback mode weight transfer from PeftTrainer to VanillaSampler."""
     adapter_config = RolloutConfig(
         sampler_type="vanilla",
+        kv_cache_size=64,
         weight_sync_mode=WeightSyncMode.FALLBACK,
     )
     vanilla_model = test_common.ToyTransformer(
         self.model_config, rngs=nnx.Rngs(2)
     )
-    adapter = vanilla_sampler_adapter.VanillaSamplerAdapter(
+    adapter = vanilla_sampler.VanillaSampler(
         server_id="vanilla_sampler_fallback_0",
         config=adapter_config,
-    )
-    adapter.sampler = vanilla_sampler_lib.Sampler(
         transformer=vanilla_model,
         tokenizer=test_common.MockVocab(),
-        cache_config=vanilla_sampler_lib.CacheConfig(
-            cache_size=64,
-            num_layers=self.model_config.num_layers,
-            num_kv_heads=self.model_config.num_kv_heads,
-            head_dim=self.model_config.head_dim,
-        ),
     )
 
     trainer_config = TrainingConfig(
@@ -541,8 +723,8 @@ class WeightSyncE2ETest(absltest.TestCase):
     result = asyncio.run(adapter.weight_sync(sync_request))
     self.assertTrue(result)
 
-    # Verify adapter sampler received the updated weights directly
-    tgt_flat = _to_flat_dict(adapter.sampler.transformer_state)
+    # Verify sampler received the updated weights directly
+    tgt_flat = _to_flat_dict(adapter.transformer_state)
     np.testing.assert_allclose(
         np.array(tgt_flat["emb.embedding"].value),
         np.array(new_embedding),
@@ -595,10 +777,6 @@ class WeightSyncE2ETest(absltest.TestCase):
   )
   def test_raiden_mode_multiprocess_weight_sync_with_vanilla_sampler(self):
     """Verifies end-to-end Raiden weight sync with VanillaSampler across separate processes."""
-    ctx = multiprocessing.get_context("spawn")
-    rollout_parent_conn, rollout_child_conn = ctx.Pipe()
-    trainer_parent_conn, trainer_child_conn = ctx.Pipe()
-
     model_config_dict = dataclasses.asdict(self.model_config)
     adapter_config = RolloutConfig(
         sampler_type="vanilla",
@@ -607,32 +785,30 @@ class WeightSyncE2ETest(absltest.TestCase):
     adapter_config_dict = dataclasses.asdict(adapter_config)
 
     # 1. Start Rollout Process
-    rollout_proc = ctx.Process(
-        target=_rollout_process_fn,
-        args=(rollout_child_conn, model_config_dict, adapter_config_dict),
+    rollout_proc = _WorkerProcess(
+        "rollout_proc_0",
+        _rollout_process_fn,
+        model_config_dict,
+        adapter_config_dict,
     )
-    rollout_proc.start()
+    self.addCleanup(rollout_proc.shutdown)
 
     # Extract target state structure from Rollout Process
-    rollout_parent_conn.send(("get_target_state",))
-    status, target_state = rollout_parent_conn.recv()
-    self.assertEqual(status, "ok")
+    target_state = rollout_proc.request("get_target_state")
 
     # 2. Start Trainer Process
-    trainer_proc = ctx.Process(
-        target=_trainer_process_fn,
-        args=(
-            trainer_child_conn,
-            model_config_dict,
-            adapter_config.sampler_type,
-            target_state,
-        ),
+    trainer_proc = _WorkerProcess(
+        "trainer_proc_0",
+        _trainer_process_fn,
+        model_config_dict,
+        adapter_config.sampler_type,
+        target_state,
     )
-    trainer_proc.start()
+    self.addCleanup(trainer_proc.shutdown)
 
     # 3. Register remote workers in orchestrator registry
-    trainer_worker_proxy = RemoteTrainerWorker(trainer_parent_conn)
-    rollout_worker_proxy = RemoteRolloutWorker(rollout_parent_conn)
+    trainer_worker_proxy = RemoteTrainerWorker(trainer_proc)
+    rollout_worker_proxy = RemoteRolloutWorker(rollout_proc)
 
     registry = worker_registry.WorkerRegistry()
     registry.register(trainer_worker_proxy)
@@ -640,23 +816,17 @@ class WeightSyncE2ETest(absltest.TestCase):
 
     # 4. Run real RaidenHandler and WeightSyncCoordinator in main process
     handler = raiden_handler.RaidenHandler(port=0)
+    self.addCleanup(handler.close)
+    coordinator = weight_sync_coordinator.WeightSyncCoordinator(
+        registry=registry,
+        handler=handler,
+    )
     try:
-      coordinator = weight_sync_coordinator.WeightSyncCoordinator(
-          registry=registry,
-          handler=handler,
-      )
-      try:
-        result = asyncio.run(coordinator.sync(policy_version=1))
-        self.assertTrue(result)
-        self.assertEqual(coordinator.last_committed_version, 1)
-      except weight_sync_coordinator.WeightSyncError as e:
-        self.fail(f"WeightSync failed with issues: {e.result.failures}")
-    finally:
-      handler.close()
-      trainer_parent_conn.send(("stop",))
-      rollout_parent_conn.send(("stop",))
-      trainer_proc.join(timeout=5)
-      rollout_proc.join(timeout=5)
+      result = asyncio.run(coordinator.sync(policy_version=1))
+      self.assertTrue(result.success)
+      self.assertEqual(coordinator.last_committed_version, 1)
+    except weight_sync_coordinator.WeightSyncError as e:
+      self.fail(f"WeightSync failed with issues: {e.result.failures}")
 
   @absltest.skipIf(
       raiden_synchronizer._ws_lib is None,
@@ -664,10 +834,6 @@ class WeightSyncE2ETest(absltest.TestCase):
   )
   def test_raiden_mode_multiprocess_weight_sync_with_vllm_sampler(self):
     """Verifies end-to-end Raiden weight sync with vLLM Sampler across separate processes."""
-    ctx = multiprocessing.get_context("spawn")
-    rollout_parent_conn, rollout_child_conn = ctx.Pipe()
-    trainer_parent_conn, trainer_child_conn = ctx.Pipe()
-
     model_config_dict = dataclasses.asdict(self.model_config)
     adapter_config = RolloutConfig(
         sampler_type="inprocess_vllm",
@@ -676,32 +842,30 @@ class WeightSyncE2ETest(absltest.TestCase):
     adapter_config_dict = dataclasses.asdict(adapter_config)
 
     # 1. Start Rollout Process
-    rollout_proc = ctx.Process(
-        target=_rollout_process_fn,
-        args=(rollout_child_conn, model_config_dict, adapter_config_dict),
+    rollout_proc = _WorkerProcess(
+        "rollout_proc_0",
+        _rollout_process_fn,
+        model_config_dict,
+        adapter_config_dict,
     )
-    rollout_proc.start()
+    self.addCleanup(rollout_proc.shutdown)
 
     # Extract target state structure from Rollout Process
-    rollout_parent_conn.send(("get_target_state",))
-    status, target_state = rollout_parent_conn.recv()
-    self.assertEqual(status, "ok")
+    target_state = rollout_proc.request("get_target_state")
 
     # 2. Start Trainer Process
-    trainer_proc = ctx.Process(
-        target=_trainer_process_fn,
-        args=(
-            trainer_child_conn,
-            model_config_dict,
-            adapter_config.sampler_type,
-            target_state,
-        ),
+    trainer_proc = _WorkerProcess(
+        "trainer_proc_0",
+        _trainer_process_fn,
+        model_config_dict,
+        adapter_config.sampler_type,
+        target_state,
     )
-    trainer_proc.start()
+    self.addCleanup(trainer_proc.shutdown)
 
     # 3. Register remote workers in orchestrator registry
-    trainer_worker_proxy = RemoteTrainerWorker(trainer_parent_conn)
-    rollout_worker_proxy = RemoteRolloutWorker(rollout_parent_conn)
+    trainer_worker_proxy = RemoteTrainerWorker(trainer_proc)
+    rollout_worker_proxy = RemoteRolloutWorker(rollout_proc)
 
     registry = worker_registry.WorkerRegistry()
     registry.register(trainer_worker_proxy)
@@ -709,20 +873,17 @@ class WeightSyncE2ETest(absltest.TestCase):
 
     # 4. Run real RaidenHandler and WeightSyncCoordinator in main process
     handler = raiden_handler.RaidenHandler(port=0)
+    self.addCleanup(handler.close)
+    coordinator = weight_sync_coordinator.WeightSyncCoordinator(
+        registry=registry,
+        handler=handler,
+    )
     try:
-      coordinator = weight_sync_coordinator.WeightSyncCoordinator(
-          registry=registry,
-          handler=handler,
-      )
       result = asyncio.run(coordinator.sync(policy_version=1))
-      self.assertTrue(result)
+      self.assertTrue(result.success)
       self.assertEqual(coordinator.last_committed_version, 1)
-    finally:
-      handler.close()
-      trainer_parent_conn.send(("stop",))
-      rollout_parent_conn.send(("stop",))
-      trainer_proc.join(timeout=5)
-      rollout_proc.join(timeout=5)
+    except weight_sync_coordinator.WeightSyncError as e:
+      self.fail(f"WeightSync failed with issues: {e.result.failures}")
 
 
 if __name__ == "__main__":

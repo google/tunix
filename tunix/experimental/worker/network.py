@@ -189,6 +189,10 @@ def _grpc_options(
     max_message_bytes: int = _MAX_MESSAGE_BYTES,
 ) -> List[Tuple[str, int]]:
   """Channel/server options lifting the message-size cap and enabling keepalive."""
+  # Note: On POSIX sockets, gRPC C-core (`socket_utils_common_posix.cc`) sets
+  # kernel `TCP_USER_TIMEOUT` equal to `grpc.keepalive_timeout_ms` whenever
+  # `grpc.keepalive_time_ms` is enabled, yielding ~120s dead-peer detection
+  # without premature connection resets under heavy CPU/network load.
   return [
       ("grpc.max_send_message_length", max_message_bytes),
       ("grpc.max_receive_message_length", max_message_bytes),
@@ -197,13 +201,22 @@ def _grpc_options(
           "grpc.experimental.tcp_max_read_chunk_size",
           _GRPC_TCP_MAX_READ_CHUNK_BYTES,
       ),
-      ("grpc.keepalive_time_ms", 20000),
-      ("grpc.keepalive_timeout_ms", 10000),
+      ("grpc.keepalive_time_ms", 60000),
+      ("grpc.keepalive_timeout_ms", 60000),
       ("grpc.keepalive_permit_without_calls", 1),
       ("grpc.http2.max_pings_without_data", 0),
       ("grpc.http2.max_ping_strikes", 0),
       ("grpc.http2.min_ping_interval_without_data_ms", 5000),
-      ("grpc.http2.min_recv_ping_interval_without_data_ms", 5000),
+  ]
+
+
+def _grpc_channel_options(
+    max_message_bytes: int = _MAX_MESSAGE_BYTES,
+) -> List[Tuple[str, int]]:
+  """Client channel options extending `_grpc_options` with reconnect bounds."""
+  return [
+      *_grpc_options(max_message_bytes),
+      ("grpc.max_reconnect_backoff_ms", 10000),
   ]
 
 

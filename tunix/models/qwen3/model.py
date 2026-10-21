@@ -93,7 +93,7 @@ class SplashAttentionImpl(enum.Enum):
   """Backend implementation to use for splash (flash) attention.
 
   JAX: `jax.experimental.pallas.ops.tpu.splash_attention`.
-  TOKAMAX: `tokamax._src.ops.experimental.tpu.splash_attention`.
+  TOKAMAX: `tokamax._src.ops.splash_attention`.
   """
 
   JAX = 'jax'
@@ -103,8 +103,8 @@ class SplashAttentionImpl(enum.Enum):
 def _tokamax_splash_libs():
   """Lazy import for Tokamax splash attention libraries."""
   try:
-    from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_lib  # pylint: disable=g-import-not-at-top
-    from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask_lib  # pylint: disable=g-import-not-at-top
+    from tokamax._src.ops.splash_attention import splash_attention_kernel as tokamax_splash_lib  # pylint: disable=g-import-not-at-top
+    from tokamax._src.ops.splash_attention import splash_attention_mask as tokamax_splash_mask_lib  # pylint: disable=g-import-not-at-top
   except ImportError as e:
     raise ImportError(
         "The Tokamax splash_attention backend requires the 'tokamax' package."

@@ -118,14 +118,14 @@ class HealthMonitor:
       if abort_event.is_set():
         return wid, None
       try:
-        worker = self._registry.get(wid)
+        handle = self._registry.handle(wid)
       except KeyError:
         logging.warning(
             "Worker %r unregistered concurrently, skipping poll.", wid
         )
         return wid, None
       try:
-        return wid, worker.heartbeat()
+        return wid, handle.submit("heartbeat")
       except BaseException:
         abort_event.set()
         raise

@@ -88,8 +88,7 @@ two-chip actor and rollout meshes, and one prompt group (8 trajectories) per
 microbatch. The benchmark injects timing hooks through `TRAINER_PROCESS_MAIN`,
 `ROLLOUT_PROCESS_MAIN`, and `ORCHESTRATOR_PROCESS_MAIN`.
 
-Use one dedicated four-chip TPU host with a pre-downloaded model, and a Raiden
-build whose `RaidenController.register_work_unit` accepts `host_subgrid`. Keep
+Use one dedicated four-chip TPU host with a pre-downloaded model. Keep
 code, dependencies, and flags fixed across the runs you compare, and use a new
 `--output` for every run. Without `--execute`, `run` only writes the plan.
 

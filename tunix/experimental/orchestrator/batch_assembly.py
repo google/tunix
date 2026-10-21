@@ -27,6 +27,7 @@ potentially move to a common library.
 import collections
 from collections.abc import Iterator, Mapping, Sequence
 import dataclasses
+import functools
 from typing import Any, Generic, NamedTuple, Protocol, TypeVar
 from absl import logging
 import numpy as np
@@ -171,6 +172,35 @@ class AssembledBatch(NamedTuple):
   trajectory_ids: tuple[str, ...] = ()
 
 
+def _zeros_or_none(
+    enabled: bool, shape: tuple[int, ...]
+) -> np.ndarray | None:
+  return np.zeros(shape, dtype=np.float32) if enabled else None
+
+
+def _dummy_routed_experts_and_metadata(
+    with_routed_experts: bool,
+    batch_size: int,
+    seq_len: int,
+    routed_experts_encode_mode: packing.RoutedExpertsEncodeMode,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+  if not with_routed_experts:
+    return None, {}
+  packing.validate_routed_experts_encode_config(
+      routed_experts_encode_mode, None
+  )
+  return (
+      np.empty((batch_size, seq_len, 0, 0), dtype=np.int16),
+      {
+          "routed_experts_encode_fn": functools.partial(
+              packing.encode_routed_experts,
+              mode=routed_experts_encode_mode,
+              batched=True,
+          )
+      },
+  )
+
+
 @dataclasses.dataclass
 class BatchConfig:
   """Configuration for batch assembly.
@@ -187,11 +217,13 @@ class BatchConfig:
       packing is enabled.
     segment_alignment_boundary: Enforces that every packed sequence starts at an
       index that is a multiple of this value, padding any gaps. By default (1),
-      sequences are packed tightly back-to-back. Use larger values to align
-      with chunk boundaries for models with chunked processing (e.g., 64 for
-      Qwen3.5 GatedDeltaNet).
-    trainer_fsdp: Trainer FSDP mesh dimension size for sequence packing.
-    trainer_dp: Trainer DP mesh dimension size for sequence packing.
+      sequences are packed tightly back-to-back. Use larger values to align with
+      chunk boundaries for models with chunked processing (e.g., 64 for Qwen3.5
+      GatedDeltaNet).
+    num_data_shards: Total number of data-parallel shards on the trainer across
+      all batch-sharded mesh axes (e.g., `fsdp * dp * fsdp_transpose * expert`
+      in MaxText). Used as `pack_size` when sequence packing is enabled so the
+      packed row count is evenly divisible by the trainer's batch sharding.
   """
 
   pad_id: int = 0
@@ -200,10 +232,7 @@ class BatchConfig:
   max_seq_token_per_tpu: int | None = None
   max_segments_per_packed_row: int | None = None
   segment_alignment_boundary: int = packing.DEFAULT_SEGMENT_ALIGNMENT_BOUNDARY
-  trainer_fsdp: int | None = None
-  trainer_dp: int | None = None
-  trainer_expert: int | None = None
-  trainer_fsdp_transpose: int | None = None
+  num_data_shards: int | None = None
 
 
 def _extract_trajectory_id(item: Any) -> str:
@@ -218,6 +247,7 @@ class BatchAssembler(Generic[T], Protocol):
   Attributes:
     num_generations: Number of rollout trajectories / generations generated per
       prompt group (G). Must be a positive integer.
+    mini_batch_size: Number of prompt groups per optimizer update.
   """
 
   num_generations: int
@@ -239,6 +269,48 @@ class BatchAssembler(Generic[T], Protocol):
       self,
   ) -> Iterator[AssembledBatch]:
     """Drains remaining buffered items, padding to the required static tensor shape."""
+    ...
+
+  def build_dummy_payload(
+      self,
+      *,
+      with_old_per_token_logps: bool,
+      with_ref_per_token_logps: bool,
+      with_sampler_is_weights: bool = False,
+      sampler_agreement_applied: bool = False,
+      with_routed_experts: bool = False,
+      routed_experts_encode_mode: packing.RoutedExpertsEncodeMode = "auto",
+  ) -> datatypes.RLTrainerPayload:
+    """Builds a synthetic microbatch with the exact static layout `feed()` emits.
+
+    The trainer compiles one executable per payload pytree structure (field
+    presence, shapes, dtypes), so a payload built here lets the trainer compile
+    ahead of time and serve the first real microbatch from its JIT cache. Must
+    not touch buffered rollouts or lineage counters.
+
+    Args:
+      with_old_per_token_logps: Whether real payloads carry behavior-policy
+        logps (`old_per_token_logps`), i.e. the algorithm uses rollout logps.
+      with_ref_per_token_logps: Whether real payloads carry reference-model
+        logps (`ref_per_token_logps`), i.e. the algorithm needs a KL term.
+      with_sampler_is_weights: Whether real payloads carry pre-computed
+        importance/rejection-sampling weights (`sampler_is_weights`) from the
+        non-fused sampler-trainer agreement path.
+      sampler_agreement_applied: Value of the static `sampler_agreement_applied`
+        pytree metadata flag on the payload.
+      with_routed_experts: Whether real payloads carry MoE router indices
+        (`routed_experts`) for router replay. When True, populates a 4D `[B, S,
+        0, 0]` `int16` placeholder and a `routed_experts_encode_fn` entry in
+        `metadata` so the trainer can expand and compact-encode the placeholder
+        using its model config during `compile()`.
+      routed_experts_encode_mode: Compact wire encoding mode (`"auto"`,
+        `"uint8"`, `"uint10"`, or `"int16"`) bound into
+        `metadata["routed_experts_encode_fn"]` when `with_routed_experts=True`.
+
+    Returns:
+      A batched payload whose `jax.tree.structure`, shapes and dtypes match
+      what `feed()` / `flush()` yield under the same configuration.
+    """
     ...
 
   # TODO (tunix-dev): we should not allow `start_batch_index` to be None once failure recovery logic is implemented.
@@ -536,68 +608,6 @@ def to_rl_trainer_payload(
   )
 
 
-def _log_router_replay_coverage(
-    payload: datatypes.RLTrainerPayload, *, batch_id: str, num_segments: int
-) -> None:
-  """Logs how many real packed tokens the trainer will actually replay.
-
-  Judged on layer 0 only so it stays cheap on `[B, T, L, K]` payloads. The MoE
-  layer forces a token only if all `top_k` slots are `>= 0` and distinct, and
-  re-gates it otherwise. A trajectory's last token has no routing (vLLM routes
-  `P + G - 1` positions), so correctly aligned routing forces
-  `real - segments` tokens.
-
-  Args:
-    payload: Packed payload carrying `routed_experts` and `segment_ids`.
-    batch_id: Microbatch tracking id for the log line.
-    num_segments: Number of trajectories packed into the payload.
-  """
-  ext = packing._packing_ext  # pylint: disable=protected-access
-  routed_raw = np.asarray(payload.routed_experts)
-  if routed_raw.dtype == np.uint8 and (
-      routed_raw.ndim == 4
-      or (routed_raw.ndim == 5 and routed_raw.shape[4] == 5)
-  ):
-    routed_arr = np.ascontiguousarray(routed_raw, dtype=np.uint8)
-  else:
-    routed_arr = np.ascontiguousarray(routed_raw, dtype=np.int16)
-  seg_arr = np.ascontiguousarray(payload.segment_ids, dtype=np.int32)
-  if (
-      ext is not None
-      and (
-          (routed_arr.dtype == np.int16 and routed_arr.ndim == 4)
-          or (routed_arr.dtype == np.uint8 and routed_arr.ndim in (4, 5))
-      )
-      and seg_arr.ndim == 2
-  ):
-    num_forced, num_real = ext.count_router_replay_forced_tokens(
-        routed_arr, seg_arr
-    )
-  else:
-    layer0_encoded = (
-        routed_arr[..., 0:1, :, :]
-        if (routed_arr.dtype == np.uint8 and routed_arr.ndim == 5)
-        else routed_arr[..., 0:1, :]
-    )
-    decoded_layer0 = packing.decode_routed_experts(layer0_encoded, batched=True)
-    assert decoded_layer0 is not None
-    real = seg_arr > 0
-    layer0 = np.sort(decoded_layer0[..., 0, :], axis=-1)
-    forced = np.all(layer0 >= 0, axis=-1) & ~np.any(
-        layer0[..., 1:] == layer0[..., :-1], axis=-1
-    )
-    num_forced = int(np.count_nonzero(forced & real))
-    num_real = int(np.count_nonzero(real))
-  logging.info(
-      "Router replay: %d/%d real tokens forced in %s (%d segments; aligned"
-      " routing forces real - segments).",
-      num_forced,
-      num_real,
-      batch_id,
-      num_segments,
-  )
-
-
 def _merge_batch_lineage(
     items: Sequence[Any],
     *,
@@ -747,10 +757,6 @@ class SequencePackedBatchAssembler:
         trajectory_ids=traj_ids,
         lineage_context=merged_lineage,
     )
-    if payload.routed_experts is not None:
-      _log_router_replay_coverage(
-          payload, batch_id=batch_tracking_id, num_segments=len(placed)
-      )
     return AssembledBatch(
         payload=payload,
         is_final_batch=is_final_batch,
@@ -916,6 +922,44 @@ class SequencePackedBatchAssembler:
     self._rollouts_since_update = 0
     return self._drain_buffer(drain_all=True)
 
+  def build_dummy_payload(
+      self,
+      *,
+      with_old_per_token_logps: bool,
+      with_ref_per_token_logps: bool,
+      with_sampler_is_weights: bool = False,
+      sampler_agreement_applied: bool = False,
+      with_routed_experts: bool = False,
+      routed_experts_encode_mode: packing.RoutedExpertsEncodeMode = "auto",
+  ) -> datatypes.RLTrainerPayload:
+    """Builds a zero-filled `[batch_size, max_packed_len]` dummy payload."""
+    shape = (self.batch_size, self.max_packed_len)
+    max_segments = packing.effective_max_segments(
+        self.max_packed_len, self.max_segments_per_packed_row
+    )
+    routed_experts, metadata = _dummy_routed_experts_and_metadata(
+        with_routed_experts,
+        self.batch_size,
+        self.max_packed_len,
+        routed_experts_encode_mode,
+    )
+    return datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((self.batch_size, 0), dtype=np.int32),
+        prompt_mask=np.zeros((self.batch_size, 0), dtype=np.float32),
+        completion_ids=np.zeros(shape, dtype=np.int32),
+        completion_mask=np.zeros(shape, dtype=np.float32),
+        advantages=np.zeros(shape, dtype=np.float32),
+        segment_ids=np.zeros(shape, dtype=np.int32),
+        segment_positions=np.zeros(shape, dtype=np.int32),
+        num_segments=max_segments + 1,
+        old_per_token_logps=_zeros_or_none(with_old_per_token_logps, shape),
+        ref_per_token_logps=_zeros_or_none(with_ref_per_token_logps, shape),
+        sampler_is_weights=_zeros_or_none(with_sampler_is_weights, shape),
+        sampler_agreement_applied=sampler_agreement_applied,
+        routed_experts=routed_experts,
+        metadata=metadata,
+    )
+
   def reset(self, *, start_batch_index: int | None = None) -> None:
     """Resets the internal buffer and optimizer-update rollout counter.
 
@@ -1044,6 +1088,45 @@ class PaddedBatchAssembler:
     """Flushes any remaining items padded to batch_size."""
     self._rollouts_since_update = 0
     return self._drain_buffer(drain_all=True)
+
+  def build_dummy_payload(
+      self,
+      *,
+      with_old_per_token_logps: bool,
+      with_ref_per_token_logps: bool,
+      with_sampler_is_weights: bool = False,
+      sampler_agreement_applied: bool = False,
+      with_routed_experts: bool = False,
+      routed_experts_encode_mode: packing.RoutedExpertsEncodeMode = "auto",
+  ) -> datatypes.RLTrainerPayload:
+    """Builds a zero-filled `[batch_size, P]` / `[batch_size, C]` dummy payload."""
+    prompt_shape = (self.batch_size, self.max_prompt_length)
+    completion_shape = (self.batch_size, self.max_response_length)
+    routed_experts, metadata = _dummy_routed_experts_and_metadata(
+        with_routed_experts,
+        self.batch_size,
+        self.max_seq_len,
+        routed_experts_encode_mode,
+    )
+    return datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros(prompt_shape, dtype=np.int32),
+        prompt_mask=np.zeros(prompt_shape, dtype=np.float32),
+        completion_ids=np.zeros(completion_shape, dtype=np.int32),
+        completion_mask=np.zeros(completion_shape, dtype=np.float32),
+        advantages=np.zeros(completion_shape, dtype=np.float32),
+        old_per_token_logps=_zeros_or_none(
+            with_old_per_token_logps, completion_shape
+        ),
+        ref_per_token_logps=_zeros_or_none(
+            with_ref_per_token_logps, completion_shape
+        ),
+        sampler_is_weights=_zeros_or_none(
+            with_sampler_is_weights, completion_shape
+        ),
+        sampler_agreement_applied=sampler_agreement_applied,
+        routed_experts=routed_experts,
+        metadata=metadata,
+    )
 
   def reset(self, *, start_batch_index: int | None = None) -> None:
     """Resets internal buffering state, discarding all pending rollouts.
@@ -1422,8 +1505,8 @@ def create_batch_assembler(
 
   If `batch_config.max_seq_token_per_tpu` is provided, a
   `SequencePackedBatchAssembler` is used. The packing `batch_size` (pack_size)
-  is computed from `batch_config.trainer_fsdp` and `batch_config.trainer_dp`
-  (or defaults to `train_micro_batch_size` with a warning if neither is set).
+  is set to `batch_config.num_data_shards` (or defaults to
+  `train_micro_batch_size` with a warning if not set).
   The packing budget is validated against `batch_config.max_prompt_length` and
   `max_response_length`.
 
@@ -1437,32 +1520,22 @@ def create_batch_assembler(
     num_generations: Number of rollout generations per prompt group (G).
     mini_batch_size: Number of prompt groups per model update.
     train_micro_batch_size: Micro-batch size for training.
-    batch_config: BatchConfig containing packing, padding, and mesh dimension
+    batch_config: BatchConfig containing packing, padding, and data shard
       settings.
 
   Returns:
     A BatchAssembler instance.
   """
   if batch_config.max_seq_token_per_tpu is not None:
-    if (
-        batch_config.trainer_fsdp is None
-        and batch_config.trainer_dp is None
-        and batch_config.trainer_expert is None
-        and batch_config.trainer_fsdp_transpose is None
-    ):
+    if batch_config.num_data_shards is None:
       logging.warning(
-          "no trainer mesh dimensions are set, defaulting pack_size to "
+          "num_data_shards is not set, defaulting pack_size to "
           "train_micro_batch_size=%d.",
           train_micro_batch_size,
       )
       pack_size = train_micro_batch_size
     else:
-      pack_size = (
-          (batch_config.trainer_fsdp or 1)
-          * (batch_config.trainer_dp or 1)
-          * (batch_config.trainer_fsdp_transpose or 1)
-          * (batch_config.trainer_expert or 1)
-      )
+      pack_size = batch_config.num_data_shards
 
     if (
         batch_config.max_prompt_length is not None

@@ -14,13 +14,37 @@
 
 """Tests for distributed rollout model-family configuration."""
 
+import contextlib
+import io
+import os
+import sys
+import types
 from unittest import mock
 
 from absl.testing import absltest
 from tunix.experimental.common import gcs_cache
 from tunix.experimental.examples.common import run_rollout_node
+from tunix.experimental.rollout import inprocess_vllm_sampler_adapter
+from tunix.experimental.rollout import vllm_sampler_adapter
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.utils import maxtext_utils
+
+_ROUTED_EXPERTS_ARGV = (
+    "--maxtext_model_name=qwen3-30b-a3b",
+    "--return_routed_experts",
+)
+
+
+def _vllm_engine_kwargs(argv: list[str]) -> dict[str, object]:
+  """Returns the AsyncEngineArgs kwargs `_create_vllm_sampler` builds."""
+  arg_utils = types.ModuleType("vllm.engine.arg_utils")
+  arg_utils.AsyncEngineArgs = mock.Mock()
+  with mock.patch.dict(sys.modules, {"vllm.engine.arg_utils": arg_utils}):
+    with mock.patch.object(vllm_sampler_adapter, "VllmSamplerAdapter"):
+      run_rollout_node._create_vllm_sampler(
+          run_rollout_node._parse_args(argv), tokenizer=None
+      )
+  return arg_utils.AsyncEngineArgs.call_args.kwargs
 
 
 class RunRolloutNodeTest(absltest.TestCase):
@@ -110,6 +134,114 @@ class RunRolloutNodeTest(absltest.TestCase):
     kwargs_enabled = run_rollout_node._rollout_config_kwargs(args_enabled)
     self.assertTrue(kwargs_enabled["partial_rollout"])
 
+  def test_routed_experts_flags_reach_rollout_config(self):
+    defaults = run_rollout_node._rollout_config_kwargs(
+        run_rollout_node._parse_args([])
+    )
+    self.assertFalse(defaults["return_routed_experts"])
+    self.assertEqual(defaults["routed_experts_encode_mode"], "auto")
+    self.assertIsNone(defaults["routed_experts_num_experts"])
+
+    enabled = run_rollout_node._rollout_config_kwargs(
+        run_rollout_node._parse_args([
+            "--return_routed_experts",
+            "--routed_experts_encode_mode=uint10",
+            "--routed_experts_num_experts=256",
+        ])
+    )
+    self.assertTrue(enabled["return_routed_experts"])
+    self.assertEqual(enabled["routed_experts_encode_mode"], "uint10")
+    self.assertEqual(enabled["routed_experts_num_experts"], 256)
+
+  def test_unknown_routed_experts_encode_mode_is_rejected(self):
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+      run_rollout_node._parse_args(["--routed_experts_encode_mode=int8"])
+    self.assertIn("invalid choice: 'int8'", stderr.getvalue())
+
+  def test_vanilla_sampler_rejects_return_routed_experts(self):
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+      run_rollout_node._parse_args(
+          ["--sampler=vanilla", "--return_routed_experts"]
+      )
+    self.assertIn("needs a vLLM sampler", stderr.getvalue())
+
+  def test_vllm_sampler_captures_routed_experts_only_when_asked(self):
+    default = _vllm_engine_kwargs(["--maxtext_model_name=qwen3-30b-a3b"])
+    self.assertNotIn("enable_return_routed_experts", default)
+    self.assertNotIn(
+        "return_routed_experts", default["additional_config"]["maxtext_config"]
+    )
+
+    enabled = _vllm_engine_kwargs(list(_ROUTED_EXPERTS_ARGV))
+    self.assertIs(enabled["enable_return_routed_experts"], True)
+    self.assertIs(
+        enabled["additional_config"]["maxtext_config"]["return_routed_experts"],
+        True,
+    )
+
+  def test_inprocess_vllm_sampler_captures_routed_experts(self):
+    vllm_sampler = mock.Mock()
+    with (
+        mock.patch.object(
+            run_rollout_node, "_import_vllm_sampler", return_value=vllm_sampler
+        ),
+        mock.patch.object(run_rollout_node, "_create_rollout_mesh"),
+        mock.patch.object(
+            inprocess_vllm_sampler_adapter, "InprocessVllmSamplerAdapter"
+        ),
+    ):
+      run_rollout_node._create_inprocess_vllm_sampler(
+          run_rollout_node._parse_args(list(_ROUTED_EXPERTS_ARGV)),
+          tokenizer=None,
+      )
+
+    config_kwargs = vllm_sampler.VllmConfig.call_args.kwargs
+    self.assertIs(config_kwargs["return_routed_experts"], True)
+    self.assertIs(
+        config_kwargs["additional_config"]["maxtext_config"][
+            "return_routed_experts"
+        ],
+        True,
+    )
+
+  def test_vllm_samplers_plumb_float32_logit_flags_when_set(self):
+    default_kwargs = _vllm_engine_kwargs(["--maxtext_model_name=qwen3-30b-a3b"])
+    default_mt_cfg = default_kwargs["additional_config"]["maxtext_config"]
+    self.assertNotIn("float32_gate_logits", default_mt_cfg)
+    self.assertNotIn("float32_logits", default_mt_cfg)
+
+    argv = [
+        "--maxtext_model_name=qwen3-30b-a3b",
+        "--maxtext_float32_gate_logits=true",
+        "--maxtext_float32_logits=false",
+    ]
+    vllm_kwargs = _vllm_engine_kwargs(argv)
+    vllm_mt_cfg = vllm_kwargs["additional_config"]["maxtext_config"]
+    self.assertIs(vllm_mt_cfg["float32_gate_logits"], True)
+    self.assertIs(vllm_mt_cfg["float32_logits"], False)
+
+    vllm_sampler = mock.Mock()
+    with (
+        mock.patch.object(
+            run_rollout_node, "_import_vllm_sampler", return_value=vllm_sampler
+        ),
+        mock.patch.object(run_rollout_node, "_create_rollout_mesh"),
+        mock.patch.object(
+            inprocess_vllm_sampler_adapter, "InprocessVllmSamplerAdapter"
+        ),
+    ):
+      run_rollout_node._create_inprocess_vllm_sampler(
+          run_rollout_node._parse_args(argv),
+          tokenizer=None,
+      )
+    inproc_mt_cfg = vllm_sampler.VllmConfig.call_args.kwargs[
+        "additional_config"
+    ]["maxtext_config"]
+    self.assertIs(inproc_mt_cfg["float32_gate_logits"], True)
+    self.assertIs(inproc_mt_cfg["float32_logits"], False)
+
   def test_main_restores_jax_cache_before_jax_init(self):
     events: list[str] = []
     context = mock.Mock()
@@ -136,6 +268,27 @@ class RunRolloutNodeTest(absltest.TestCase):
     mock_restore.assert_called_once()
     self.assertEqual(mock_restore.call_args.kwargs["params"].sampler, "vanilla")
     self.assertEqual(events, ["restore:vanilla", "jax_init"])
+
+  def test_episode_timeout_derives_drain_timeout_in_rollout_config(self):
+    with mock.patch.dict(os.environ, {}, clear=False):
+      os.environ.pop("EPISODE_TIMEOUT_SECS", None)
+      defaults = run_rollout_node._rollout_config_kwargs(
+          run_rollout_node._parse_args([])
+      )
+    self.assertEqual(defaults["drain_timeout_s"], 660.0)
+
+    deepswe_cfg = run_rollout_node._rollout_config_kwargs(
+        run_rollout_node._parse_args(["--episode_timeout_secs=1800"])
+    )
+    self.assertEqual(deepswe_cfg["drain_timeout_s"], 1860.0)
+
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+      run_rollout_node._parse_args(["--episode_timeout_secs=0"])
+    self.assertIn(
+        "episode_timeout_secs must be a positive finite number",
+        stderr.getvalue(),
+    )
 
 
 if __name__ == "__main__":

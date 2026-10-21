@@ -173,7 +173,10 @@ class QwenChatTemplateParserTest(absltest.TestCase):
     p = parser.QwenChatTemplateParser(self.mock_tokenizer)
     for messages in (
         [{'role': 'user', 'content': 'x'}],
-        [{'role': 'assistant', 'content': 'x'}, {'role': 'tool', 'content': 'y'}],
+        [
+            {'role': 'assistant', 'content': 'x'},
+            {'role': 'tool', 'content': 'y'},
+        ],
         [
             {'role': 'tool', 'content': 'a'},
             {'role': 'user', 'content': 'b'},
@@ -220,7 +223,6 @@ class QwenChatTemplateParserTest(absltest.TestCase):
     result = p.parse(messages, is_first_msg=True)
     self.assertIn('\n<tool_call>\n<function=execute_bash>', result)
     self.assertIn('</function>\n</tool_call><|im_end|>', result)
-
 
 
 class LlamaChatTemplateParserTest(absltest.TestCase):

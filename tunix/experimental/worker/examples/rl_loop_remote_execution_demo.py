@@ -29,6 +29,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
+from tunix.experimental.worker import task_session
 
 
 class MockRolloutWorker(abstract_worker.Worker):
@@ -181,8 +182,11 @@ async def run_rl_training_loop(
     num_epochs: int = 2,
     batch_size: int = 4,
 ) -> List[Dict[str, Any]]:
-  """Runs a sample RL training loop using remote_execution and ActorPool."""
-  pool = remote_execution.RoutingActorPool(worker_addresses)
+  """Runs a sample RL training loop using remote_execution and TaskSession."""
+  handles = [
+      remote_execution.ActorHandle.from_address(addr)
+      for addr in worker_addresses
+  ]
   data_loader = random_prompt_loader(
       num_batches=num_epochs, batch_size=batch_size
   )
@@ -201,8 +205,8 @@ async def run_rl_training_loop(
     completed_rollouts = []
     failed_requests = 0
 
-    # Execute rollout requests across the worker pool with fault isolation
-    async with pool.execution_session() as session:
+    # Execute rollout requests across the worker handles with fault isolation
+    async with task_session.TaskSession(handles) as session:
       # 1. Dynamically submit rollout tasks for the batch
       for idx, prompt_item in enumerate(batch):
         req_id = f"epoch_{epoch_idx}_req_{idx}"
@@ -274,7 +278,7 @@ async def run_rl_training_loop(
 
     # 4. Advance policy version and sync weights across workers
     policy_version += 1
-    for actor in pool._actors:
+    for actor in handles:
       await actor.asubmit("sync_weights", policy_version)
 
   return epoch_metrics

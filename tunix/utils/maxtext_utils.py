@@ -21,12 +21,6 @@ import logging
 import os
 from typing import Any
 
-# Mirrors maxtext `pathways_checkpointing_impl`. Duplicated as literals rather than
-# imported: this module must stay importable without maxtext installed.
-_PERSISTENCE_IMPL = "persistence"
-_COLOCATED_PYTHON_IMPL = "colocated_python"
-_PATHWAYS_CHECKPOINTING_IMPLS = (_PERSISTENCE_IMPL, _COLOCATED_PYTHON_IMPL)
-
 
 @dataclasses.dataclass(frozen=True)
 class ProfilerOptions:
@@ -37,6 +31,27 @@ class ProfilerOptions:
   profiler_steps: int
   # If positive, profile every N steps.
   profiler_period: int = -1
+  # TPU advanced profiling options, meant to bound XSpace proto size and
+  # extend the SparseCore trace window across multi-second training micro-steps.
+  # MaxText's training engine profiler (MicroStepProfiler) does not read these
+  # or upload_all_profiler_results yet: it honors only the step settings above
+  # and traces only host 0.
+  enable_tpu_profiling_options: bool = True
+  tpu_num_chips_to_profile_per_task: int = 1
+  tpu_num_sparse_cores_to_trace: int = 1
+  tpu_num_sparse_core_tiles_to_trace: int = 1
+  upload_all_profiler_results: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class AdamWOptions:
+  """AdamW hyperparameters that replace MaxText's base.yml defaults."""
+  b1: float
+  b2: float
+  eps: float
+  weight_decay: float
+  # Global-norm clipping threshold; 0 disables clipping.
+  gradient_clipping_threshold: float
 
 
 def maxtext_modules():
@@ -68,19 +83,8 @@ def get_tokenizer_pad_id(
 # vLLM implementation. Pass it as the engine's `hf_overrides`.
 VLLM_MAXTEXT_HF_OVERRIDES = {"architectures": ["MaxTextForCausalLM"]}
 
-
-def _resolve_bool_config(
-    value: bool | None, env_var: str, default: bool | None = None
-) -> bool | None:
-  """Resolves an optional boolean parameter from an explicit arg or env var."""
-  if value is not None:
-    return bool(value)
-  raw = os.environ.get(env_var, "").strip().lower()
-  if raw in ("1", "true", "yes"):
-    return True
-  if raw in ("0", "false", "no"):
-    return False
-  return default
+DEFAULT_TRAINER_WEIGHT_DTYPE = "float32"
+DEFAULT_ROLLOUT_WEIGHT_DTYPE = "bfloat16"
 
 
 def build_vllm_maxtext_additional_config(
@@ -88,17 +92,34 @@ def build_vllm_maxtext_additional_config(
     *,
     attention: str = "",
     prefuse_moe_weights: bool | None = None,
-    return_routed_experts: bool | None = None,
+    return_routed_experts: bool = False,
     float32_gate_logits: bool | None = None,
     float32_logits: bool | None = None,
 ) -> dict[str, Any]:
-  """Builds the vLLM `additional_config` a MaxText rollout model reads."""
-  effective_float32_gate_logits = _resolve_bool_config(
-      float32_gate_logits, "FLOAT32_GATE_LOGITS", default=True
-  )
-  effective_float32_logits = _resolve_bool_config(
-      float32_logits, "FLOAT32_LOGITS", default=None
-  )
+  """Builds the vLLM `additional_config` a MaxText rollout model reads.
+
+  `MaxTextForCausalLM` builds its own MaxText config from
+  `additional_config["maxtext_config"]`; these are the inference-side overrides
+  that make it match the trainer's model. Kept here so the in-process and
+  server-mode samplers cannot drift apart.
+
+  Args:
+    model_name: MaxText model name, e.g. `qwen3-1.7b`.
+    attention: MaxText attention kernel override; MaxText's default is used when
+      empty.
+    prefuse_moe_weights: Whether the rollout expects w0/w1 pre-fused into the
+      TPU GMM layout. None leaves MaxText's default in place.
+    return_routed_experts: Whether the MaxText MoE layers return the experts
+      each token was routed to, for router replay. Only written when True, so
+      MaxText versions that predate this key keep working by default.
+    float32_gate_logits: Whether MaxText runs the MoE gate (router) in float32.
+      None leaves the model YAML default in place.
+    float32_logits: Whether dot-product attention casts its softmax inputs to
+      float32. None leaves the model YAML default in place.
+
+  Returns:
+    The `additional_config` mapping to hand to the vLLM engine.
+  """
   overrides: dict[str, Any] = {
       "model_name": model_name,
       "model_call_mode": "inference",
@@ -106,18 +127,18 @@ def build_vllm_maxtext_additional_config(
       "enable_dp_attention": False,
       "allow_split_physical_axes": True,
       "log_config": False,
-      "weight_dtype": "bfloat16",
+      "weight_dtype": DEFAULT_ROLLOUT_WEIGHT_DTYPE,
   }
-  if effective_float32_gate_logits is not None:
-    overrides["float32_gate_logits"] = effective_float32_gate_logits
-  if effective_float32_logits is not None:
-    overrides["float32_logits"] = effective_float32_logits
+  if float32_gate_logits is not None:
+    overrides["float32_gate_logits"] = float32_gate_logits
+  if float32_logits is not None:
+    overrides["float32_logits"] = float32_logits
   if prefuse_moe_weights is not None:
     overrides["prefuse_moe_weights"] = prefuse_moe_weights
-  if return_routed_experts is not None:
-    overrides["return_routed_experts"] = return_routed_experts
   if attention:
     overrides["attention"] = attention
+  if return_routed_experts:
+    overrides["return_routed_experts"] = True
   return {"maxtext_config": overrides}
 
 
@@ -128,7 +149,6 @@ def build_maxtext_config(
     mesh_fsdp: int = 1,
     mesh_tp: int = 1,
     mesh_expert: int = 1,
-    mesh_context: int = 1,
     num_devices: int = 1,
     max_prompt_length: int = 512,
     max_response_length: int = 128,
@@ -141,6 +161,7 @@ def build_maxtext_config(
     checkpointing_options: Any = None,
     profiling_options: ProfilerOptions | None = None,
     *,
+    mesh_context: int = 1,
     base_num_kv_heads: int = 0,
     kv_tp_size: int = 0,
     moe_mlp_tp_size: int = 0,
@@ -148,23 +169,17 @@ def build_maxtext_config(
     prefuse_moe_weights: bool = False,
     use_weight_converter: bool = True,
     max_seq_token_per_tpu: int | None = 0,
-    trainable_parameters_mask: list[str] | str | None = None,
-    attention: str | None = None,
-    remat_policy: str = "",
-    learning_rate_final_fraction: float | None = None,
-    adam_b1: float | None = None,
-    adam_b2: float | None = None,
-    adam_eps: float | None = None,
-    adam_weight_decay: float | None = None,
-    gradient_clipping_threshold: float | None = None,
-    skip_step_on_spikes: bool = False,
-    skip_step_on_nan: bool = True,
-    skip_step_interval: int = 128,
-    skip_step_scaling_factor: float = 6.0,
-    float32_gate_logits: bool | None = None,
-    float32_logits: bool | None = None,
+    adamw_options: AdamWOptions | None = None,
+    weight_dtype: str = DEFAULT_TRAINER_WEIGHT_DTYPE,
+    attention: str = "",
 ) -> Any:
-  """Builds the MaxText HyperParameters the training engine runs on."""
+  """Builds the MaxText HyperParameters the training engine runs on.
+
+  Note on keyword-only options:
+    mesh_context: ICI context-parallelism degree; when > 1, disables
+      `context_parallel_load_balance` because Tunix RL feeds batches in natural
+      token order rather than MaxText's grain `DUAL_CHUNK_SWAP` order.
+  """
   pyconfig, _, _ = maxtext_modules()
 
   # Backward compatibility: if rollout_mesh_tp was provided, default kv_tp_size and moe_mlp_tp_size
@@ -181,6 +196,8 @@ def build_maxtext_config(
       )
       moe_mlp_tp_size = rollout_mesh_tp
 
+  if mesh_context <= 0:
+    raise ValueError(f"mesh_context must be positive, got {mesh_context}")
   if padded_moe_mlp_dim < 0:
     raise ValueError(
         f"padded_moe_mlp_dim must be non-negative, got {padded_moe_mlp_dim}"
@@ -205,18 +222,24 @@ def build_maxtext_config(
         f" {max_seq_token_per_tpu}"
     )
 
+  num_data_shards = mesh_fsdp * mesh_expert
   if max_seq_token_per_tpu is not None and max_seq_token_per_tpu > 0:
     # When sequence packing is enabled, the batch assembler feeds 1 packed row
-    # per data-parallel shard (global batch size = mesh_fsdp * mesh_expert),
-    # independent of train_micro_batch_size.
+    # per data shard (global batch size = mesh_fsdp * mesh_expert), independent
+    # of train_micro_batch_size.
     # TODO(maxtext-team): verify this is the desired behavior.
-    per_device_batch_size = (mesh_fsdp * mesh_expert) / num_devices
+    per_device_batch_size = num_data_shards / num_devices
   else:
-    if train_micro_batch_size % mesh_fsdp:
+    # MaxText shards the batch dimension over the mesh axes behind
+    # `activation_embed_and_logits_batch`; of those, this config sets fsdp and
+    # expert. A micro-batch that does not divide their product is replicated
+    # across them instead, and every device computes all of it.
+    if train_micro_batch_size % num_data_shards:
       raise ValueError(
           f"train_micro_batch_size={train_micro_batch_size} must be a multiple"
-          f" of mesh_fsdp={mesh_fsdp}; MaxText shards the batch dimension"
-          " across it."
+          f" of mesh_fsdp * mesh_expert = {mesh_fsdp} * {mesh_expert} ="
+          f" {num_data_shards}; MaxText shards the batch dimension across both"
+          " axes."
       )
     per_device_batch_size = train_micro_batch_size / num_devices
 
@@ -257,16 +280,19 @@ def build_maxtext_config(
       logging.warning("Model config file not found at %s", model_yml)
 
   # 1. Resolve KV head replication:
+  yaml_kv_heads = 0
   if effective_kv_heads <= 0 and kv_tp_size > 0:
     if model_data:
-      effective_kv_heads = int(model_data.get("base_num_kv_heads") or 0)
+      yaml_kv_heads = int(model_data.get("base_num_kv_heads") or 0)
+      effective_kv_heads = yaml_kv_heads
     if effective_kv_heads <= 0:
       raise ValueError(
           f"kv_tp_size ({kv_tp_size}) requires base_num_kv_heads > 0, but could"
           f" not determine base_num_kv_heads from config or {model_name}.yml."
-          " Please specify --base_num_kv_heads."
+          " Please specify --maxtext_base_num_kv_heads."
       )
 
+  kv_heads_replicated = False
   if effective_kv_heads > 0 and kv_tp_size > effective_kv_heads:
     if kv_tp_size % effective_kv_heads != 0:
       raise ValueError(
@@ -274,6 +300,23 @@ def build_maxtext_config(
           f"base_num_kv_heads ({effective_kv_heads})."
       )
     effective_kv_heads = kv_tp_size
+    kv_heads_replicated = True
+
+  # Emit `base_num_kv_heads` on the CLI only when the caller explicitly passed
+  # `base_num_kv_heads > 0` or when KV replication increased the head count
+  # above the model YAML's `base_num_kv_heads`. When `base_num_kv_heads == 0`
+  # and `kv_tp_size <= yaml_kv_heads`, the model YAML value is already
+  # sufficient and omitting the CLI override keeps MaxText's
+  # `validate_no_keys_overridden_twice` guard intact for all other keys.
+  emit_kv_heads_override = base_num_kv_heads > 0 or kv_heads_replicated
+  if emit_kv_heads_override:
+    logging.info(
+        "Enabling override_model_config=True for base_num_kv_heads=%d"
+        " (explicit=%d, replicated=%s).",
+        effective_kv_heads,
+        base_num_kv_heads,
+        kv_heads_replicated,
+    )
 
   # 2. Resolve padded MoE MLP dimension before pyconfig initialization:
   if not effective_padded_moe_mlp_dim and moe_mlp_tp_size > 0:
@@ -383,22 +426,41 @@ def build_maxtext_config(
 
   if profiling_options is not None:
     argv.extend([
+        "profiler=xplane",
         f"profiler_steps={profiling_options.profiler_steps}",
         f"skip_first_n_steps_for_profiler={profiling_options.skip_first_n_steps}",
         f"profile_periodically_period={profiling_options.profiler_period}",
+        f"upload_all_profiler_results={str(profiling_options.upload_all_profiler_results).lower()}",
+    ])
+    if profiling_options.enable_tpu_profiling_options:
+      argv.extend([
+          "enable_tpu_profiling_options=true",
+          f"tpu_num_chips_to_profile_per_task={profiling_options.tpu_num_chips_to_profile_per_task}",
+          f"tpu_num_sparse_cores_to_trace={profiling_options.tpu_num_sparse_cores_to_trace}",
+          f"tpu_num_sparse_core_tiles_to_trace={profiling_options.tpu_num_sparse_core_tiles_to_trace}",
+      ])
+    else:
+      argv.append("enable_tpu_profiling_options=false")
+  else:
+    argv.extend([
+        "profiler=''",
+        "profiler_steps=0",
+        "skip_first_n_steps_for_profiler=-1",
     ])
 
-  effective_attention = (
-      attention
-      or os.environ.get("TRAINER_MAXTEXT_ATTENTION", "").strip()
-      or "dot_product"
-  )
-  effective_float32_gate_logits = _resolve_bool_config(
-      float32_gate_logits, "FLOAT32_GATE_LOGITS", default=True
-  )
-  effective_float32_logits = _resolve_bool_config(
-      float32_logits, "FLOAT32_LOGITS", default=None
-  )
+  # Without options, MaxText trains with its base.yml optimizer defaults.
+  # opt_type is left at MaxText's default, adamw (callers validate the flag),
+  # so an M_OPT_TYPE env override of it still works.
+  if adamw_options is not None:
+    argv.extend([
+        f"adam_b1={adamw_options.b1}",
+        f"adam_b2={adamw_options.b2}",
+        f"adam_eps={adamw_options.eps}",
+        f"adam_weight_decay={adamw_options.weight_decay}",
+        "gradient_clipping_threshold="
+        f"{adamw_options.gradient_clipping_threshold}",
+    ])
+
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
@@ -407,13 +469,7 @@ def build_maxtext_config(
       f"per_device_batch_size={per_device_batch_size}",
       f"gradient_accumulation_steps={gradient_accumulation_steps}",
       f"max_target_length={max_target_length}",
-      f"attention={effective_attention}",
-      *([f"remat_policy={remat_policy}"] if remat_policy else []),
-      *(
-          [f"learning_rate_final_fraction={learning_rate_final_fraction}"]
-          if learning_rate_final_fraction is not None
-          else []
-      ),
+      f"attention={attention or 'dot_product'}",
       "use_tokamax_gmm=true",
       "use_gmm_v2=true",
       f"ici_fsdp_parallelism={mesh_fsdp}",
@@ -422,44 +478,33 @@ def build_maxtext_config(
           if effective_padded_moe_mlp_dim
           else []
       ),
+      # The vLLM rollout replicates KV heads up to kv_tp_size (tp*ep) when the
+      # model has fewer -- see maxtext_vllm_adapter. Weight sync pairs by name,
+      # so the trainer must build the same shape. Prefer attention DP on the
+      # rollout instead, which avoids the replication entirely; this is the
+      # fallback when that is not available.
       *(
-          [
-              f"base_num_kv_heads={effective_kv_heads}",
-              "override_model_config=true",
-          ]
-          if effective_kv_heads
+          [f"base_num_kv_heads={effective_kv_heads}"]
+          if emit_kv_heads_override
           else []
       ),
+      # MaxText's `pyconfig.validate_no_keys_overridden_twice` rejects any CLI
+      # key that also appears in `{model_name}.yml` (including
+      # `base_num_kv_heads`) unless `override_model_config=True` is set.
+      *(["override_model_config=True"] if emit_kv_heads_override else []),
       f"ici_tensor_parallelism={mesh_tp}",
       f"ici_expert_parallelism={mesh_expert}",
       f"ici_context_parallelism={mesh_context}",
+      # MaxText's context_parallel_load_balance=True assumes the training batch
+      # arrives in DUAL_CHUNK_SWAP token order from MaxText's grain pipeline;
+      # Tunix RL feeds batches in natural token order.
       *(["context_parallel_load_balance=False"] if mesh_context > 1 else []),
       f"learning_rate={learning_rate}",
       f"warmup_steps_fraction={warmup_steps_fraction}",
-      *(
-          f"{key}={value}"
-          for key, value in (
-              ("adam_b1", adam_b1),
-              ("adam_b2", adam_b2),
-              ("adam_eps", adam_eps),
-              ("adam_weight_decay", adam_weight_decay),
-              ("gradient_clipping_threshold", gradient_clipping_threshold),
-          )
-          if value is not None
-      ),
       "dtype=bfloat16",
-      "weight_dtype=float32",
+      f"weight_dtype={weight_dtype}",
+      f"rollout_weight_dtype={DEFAULT_ROLLOUT_WEIGHT_DTYPE}",
       "grad_dtype=float32",
-      *(
-          [f"float32_gate_logits={effective_float32_gate_logits}"]
-          if effective_float32_gate_logits is not None
-          else []
-      ),
-      *(
-          [f"float32_logits={effective_float32_logits}"]
-          if effective_float32_logits is not None
-          else []
-      ),
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
       "init_weights_seed=42",
@@ -472,99 +517,19 @@ def build_maxtext_config(
           if (rollout_mesh_tp or kv_tp_size or moe_mlp_tp_size) > 0
           else []
       ),
-      *(
-          [f"trainable_parameters_mask={trainable_parameters_mask}"]
-          if trainable_parameters_mask
-          else []
-      ),
-      *(["skip_step_on_spikes=True"] if skip_step_on_spikes else []),
-      *(["skip_step_on_nan=True"] if skip_step_on_nan else ["skip_step_on_nan=False"]),
-      *(
-          [
-              f"skip_step_interval={skip_step_interval}",
-              f"skip_step_scaling_factor={skip_step_scaling_factor}",
-          ]
-          if skip_step_on_spikes
-          else []
-      ),
   ])
   # Pathways persistence: let the TPU workers write the checkpoint themselves
   # The persistence handler rejects the OCDBT/zarr3 layout MaxText writes by
   # default (see maxtext/common/checkpoint_context.py), so both must be off
   if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") == "1":
-    if save_interval_steps > 0 and not output_dir.startswith("gs://"):
-      raise ValueError(
-          "ENABLE_PATHWAYS_PERSISTENCE=1 with save_interval_steps > 0 "
-          "requires a gs:// base_output_directory so all pathways-worker pods "
-          f"write to shared GCS storage; got {output_dir!r}. "
-          "Set MAXTEXT_OUTPUT_DIR=gs://..."
-      )
-
-    impl = (
-        os.environ.get("PATHWAYS_CHECKPOINTING_IMPL", "").strip()
-        or _PERSISTENCE_IMPL
-    )
-    if impl not in _PATHWAYS_CHECKPOINTING_IMPLS:
-      raise ValueError(
-          f"PATHWAYS_CHECKPOINTING_IMPL={impl!r} is not recognised; "
-          f"expected one of {_PATHWAYS_CHECKPOINTING_IMPLS}."
-      )
-    if (
-        impl == _COLOCATED_PYTHON_IMPL
-        and not os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip()
-    ):
-      raise ValueError(
-          "PATHWAYS_CHECKPOINTING_IMPL=colocated_python requires "
-          "COLOCATED_PYTHON_SIDECAR_IMAGE to be set so the sidecar container is"
-          " added to the pathways-worker pods. Without it Orbax silently falls"
-          " back to controller-side host staging, which OOMs the proxy pod at"
-          " 397B scale."
-      )
-    argv.append(f"pathways_checkpointing_impl={impl}")
-
-    # OCDBT packfile layout: colocated_python can write OCDBT (fewer GCS objects,
-    # no metadata-QPS bursts at scale); persistence rejects it. Default off
-    # (plain Zarr v2) because OCDBT checkpoints are NOT restorable by Pathways
-    # persistence.
-    use_ocdbt = os.environ.get("CKPT_USE_OCDBT", "0").strip().lower() in (
-        "1",
-        "true",
-    )
-    ocdbt_on = impl == _COLOCATED_PYTHON_IMPL and use_ocdbt
-    if use_ocdbt and not ocdbt_on:
-      logging.warning(
-          "CKPT_USE_OCDBT=1 ignored: Pathways persistence (impl=%s) rejects"
-          " OCDBT/zarr3; forcing both off.",
-          impl,
-      )
     logging.info(
-        "ENABLE_PATHWAYS_PERSISTENCE=1 (impl=%s, CKPT_USE_OCDBT=%d); %s OCDBT"
-        " packfile layout (zarr3 off).",
-        impl,
-        int(use_ocdbt),
-        "enabling" if ocdbt_on else "disabling",
+        "ENABLE_PATHWAYS_PERSISTENCE=1; disabling OCDBT/zarr3 so the Pathways "
+        "persistence handler can save directly from the TPU workers."
     )
     argv.extend([
-        f"checkpoint_storage_use_ocdbt={str(ocdbt_on).lower()}",
+        "checkpoint_storage_use_ocdbt=false",
         "checkpoint_storage_use_zarr3=false",
     ])
-
-  _ckpt_async = os.environ.get("CHECKPOINT_ASYNC", "").strip()
-  if _ckpt_async:
-    argv.append(f"async_checkpointing={_ckpt_async}")
-
-  # An async save whose background half outlives async_checkpointing_timeout_secs
-  # (1200 s) raises from the next checkpoint call, which takes the trainer worker
-  # and the run down. `true` logs and drops that save instead; the training state
-  # in memory is intact and the next save proceeds.
-  #
-  # Emitted even when unset, pinned to the pre-AI-Hypercomputer/maxtext#5494
-  # behaviour, so a run that does not ask for abandonment keeps aborting on a
-  # failed save whatever MaxText's own default becomes.
-  _abandon_failed_saves = (
-      os.environ.get("CHECKPOINT_ABANDON_FAILED_SAVES", "").strip() or "false"
-  )
-  argv.append(f"abandon_failed_checkpoint_saves={_abandon_failed_saves}")
 
   _d2h_gb = os.environ.get("CKPT_D2H_CONCURRENT_GB", "").strip()
   if _d2h_gb:
@@ -575,9 +540,6 @@ def build_maxtext_config(
     )
     argv.append(f"checkpoint_storage_device_host_concurrent_gb={_d2h_gb}")
 
-  if os.environ.get("OVERRIDE_MODEL_CONFIG", "").lower() in ("1", "true") and "override_model_config=true" not in argv:
-    argv.append("override_model_config=true")
-
   _extra = os.environ.get("MAXTEXT_EXTRA_FLAGS", "").strip()
   if _extra:
     _pairs = [tok for tok in _extra.split() if tok]
@@ -587,30 +549,13 @@ def build_maxtext_config(
           "MAXTEXT_EXTRA_FLAGS entries must be key=value, got: "
           f"{' '.join(_bad)}"
       )
-    logging.info("MAXTEXT_EXTRA_FLAGS adding %d flag(s): %s", len(_pairs), _pairs)
+    logging.info(
+        "MAXTEXT_EXTRA_FLAGS adding %d flag(s): %s", len(_pairs), _pairs
+    )
     argv.extend(_pairs)
 
   logging.info("MaxText config argv: %s", argv)
-  try:
-    return pyconfig.initialize(argv)
-  except ValueError as e:
-    if "pathways_checkpointing_impl" not in str(e):
-      raise
-    if f"pathways_checkpointing_impl={_COLOCATED_PYTHON_IMPL}" in argv:
-      raise ValueError(
-          "PATHWAYS_CHECKPOINTING_IMPL='colocated_python' was requested, but "
-          "the installed MaxText does not recognize 'pathways_checkpointing_impl'."
-      ) from e
-    argv = [
-        arg
-        for arg in argv
-        if not arg.startswith("pathways_checkpointing_impl=")
-    ]
-    logging.warning(
-        "Installed MaxText does not recognize 'pathways_checkpointing_impl'. "
-        "Retrying initialization without it."
-    )
-    return pyconfig.initialize(argv)
+  return pyconfig.initialize(argv)
 
 
 def create_maxtext_mesh(maxtext_config: Any) -> Any:
@@ -659,71 +604,6 @@ def create_maxtext_engine(
         wrap_with_tunix_adapter=wrap_with_tunix_adapter,
         tokenizer_pad_id=tokenizer_pad_id,
     )
-
-  # cl/995291149 sets trainer weight_dtype=float32 so master weights and AdamW
-  # moments stay in FP32, while the vLLM rollout model uses weight_dtype=bfloat16
-  # (with float32_gate_logits keeping norm/gate/router/GDN/logits_dense modules
-  # in FP32). Ensure target-free weight conversion exports exact rollout dtypes.
-  direct_converter = getattr(
-      getattr(engine, "_weight_converter", None), "_direct", None
-  )
-  if direct_converter is not None:
-    import jax  # pylint: disable=g-import-not-at-top
-    from jax import numpy as jnp  # pylint: disable=g-import-not-at-top
-
-    direct_converter.target_dtype = "bfloat16"
-    orig_exec_target_free = getattr(
-        direct_converter, "_execute_group_target_free", None
-    )
-    if callable(orig_exec_target_free):
-      fp32_gate_logits = bool(
-          getattr(maxtext_config, "float32_gate_logits", False)
-      )
-      fp32_modules = frozenset({
-          "norm",
-          "input_layernorm",
-          "post_attention_layernorm",
-          "gate",
-          "router",
-          "shared_expert_gate",
-          "A_log",
-          "dt_bias",
-          "conv1d",
-          "logits_dense",
-      })
-
-      def _exec_target_free_rollout_dtypes(group: Any, src_flat: Any) -> Any:
-        keep_fp32 = fp32_gate_logits and bool(
-            fp32_modules.intersection(
-                str(part) for part in group.source_keys[0]
-            )
-        )
-        desired_dtype = jnp.float32 if keep_fp32 else jnp.bfloat16
-        prev_target_dtype = direct_converter.target_dtype
-        direct_converter.target_dtype = "float32" if keep_fp32 else "bfloat16"
-        try:
-          outs = orig_exec_target_free(group, src_flat)
-        finally:
-          direct_converter.target_dtype = prev_target_dtype
-        if getattr(group, "quantize_to_fp8", False):
-          return outs
-        fixed = []
-        for tgt_key, val in outs:
-          if hasattr(val, "dtype") and val.dtype != desired_dtype:
-            if isinstance(val, jax.ShapeDtypeStruct):
-              val = jax.ShapeDtypeStruct(
-                  val.shape,
-                  desired_dtype,
-                  sharding=getattr(val, "sharding", None),
-              )
-            else:
-              val = val.astype(desired_dtype)
-          fixed.append((tgt_key, val))
-        return fixed
-
-      direct_converter._execute_group_target_free = (
-          _exec_target_free_rollout_dtypes
-      )
 
   model_type = type(engine.model).__name__
   logging.info(

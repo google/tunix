@@ -12,7 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Type-agnostic core packing utilities."""
+"""Type-agnostic core packing utilities.
+
+When the compiled C++ extension (`_packing_ext`) is available, row population
+for chunks writing at least `_packing_ext.MIN_PARALLEL_BYTES` (4 MiB) across at
+least 2 rows is parallelized across a persistent C++ worker pool of up to
+`_packing_ext.MAX_PACKING_THREADS` (16) threads. The pool size is initialized
+automatically from the process CPU affinity mask (`sched_getaffinity`) or
+hardware concurrency, and each chunk automatically scales its active thread
+count to `min(num_rows, total_bytes // MIN_BYTES_PER_THREAD, pool_threads)` and
+wakes only the active worker slots (can also be overridden programmatically via
+`_packing_ext.set_packing_threads(n)`).
+"""
 
 from __future__ import annotations
 
@@ -25,7 +36,7 @@ from tunix.rl.agentic.agents import agent_types
 
 try:
   from tunix.rl import _packing_ext  # pylint: disable=g-import-not-at-top
-except ImportError:
+except ModuleNotFoundError:
   _packing_ext = None
 
 ROUTED_EXPERTS_ENCODE_MODES = common_datatypes.ROUTED_EXPERTS_ENCODE_MODES
@@ -824,6 +835,11 @@ def pack_chunk(
         # the segment remain `UNSET_ROUTED_EXPERT`.
         r_item = item.routed_experts
         m = r_item.shape[0]
+        if m > n:
+          raise ValueError(
+              f"PackItem.routed_experts token length {m} exceeds segment"
+              f" token length {n}."
+          )
         item_enc = routed_experts_encoding(r_item, batched=False)
         if routed_mode == "int16" and item_enc != "int16":
           r_item = decode_routed_experts(r_item, batched=False)

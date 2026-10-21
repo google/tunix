@@ -60,7 +60,6 @@ class FileTrajectoryStoreConfig:
       if not run_path.exists():
         raise ValueError(f"Run directory does not exist: {run_path}")
     return {
-        "enabled": True,
         "backend": "file",
         "root_dir": self.root_dir,
         "run_id": self.run_id,
@@ -74,7 +73,6 @@ class InMemoryTrajectoryStoreConfig:
   def build_store_config(self) -> dict[str, Any]:
     """Returns the `from_config` dict for the in-memory backend."""
     return {
-        "enabled": True,
         "backend": "memory",
     }
 

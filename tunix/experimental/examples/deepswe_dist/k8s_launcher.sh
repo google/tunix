@@ -162,6 +162,7 @@ export OPENHANDS_SERVER_IMAGE=${OPENHANDS_SERVER_IMAGE:-}
 export IMAGE_REWRITE_PREFIX=${IMAGE_REWRITE_PREFIX:-}
 export STEP_TIMEOUT_SECS=${STEP_TIMEOUT_SECS:-1800}
 export REWARD_TIMEOUT_SECS=${REWARD_TIMEOUT_SECS:-1800}
+export EPISODE_TIMEOUT_SECS=${EPISODE_TIMEOUT_SECS:-1800}
 export ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-64}
 export MAX_CONCURRENCY=${MAX_CONCURRENCY:-${ROLLOUT_MAX_CONCURRENCY}}
 export FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
@@ -577,6 +578,22 @@ start_trainer() {
   maxtext_require_ckpt
   local maxtext_args
   maxtext_args="$(maxtext_trainer_flags)"
+  local effective_maxtext_extra_flags="${MAXTEXT_EXTRA_FLAGS}"
+  if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
+    local _mt_extra=(
+      ${REMAT_POLICY:+"remat_policy=${REMAT_POLICY}"}
+      ${LEARNING_RATE_FINAL_FRACTION:+"learning_rate_final_fraction=${LEARNING_RATE_FINAL_FRACTION}"}
+      ${SKIP_STEP_ON_SPIKES:+"skip_step_on_spikes=${SKIP_STEP_ON_SPIKES}"}
+      ${SKIP_STEP_ON_NAN:+"skip_step_on_nan=${SKIP_STEP_ON_NAN}"}
+      ${SKIP_STEP_INTERVAL:+"skip_step_interval=${SKIP_STEP_INTERVAL}"}
+      ${SKIP_STEP_SCALING_FACTOR:+"skip_step_scaling_factor=${SKIP_STEP_SCALING_FACTOR}"}
+      "float32_gate_logits=${FLOAT32_GATE_LOGITS:-true}"
+      "float32_logits=${FLOAT32_LOGITS:-true}"
+    )
+    if [[ ${#_mt_extra[@]} -gt 0 ]]; then
+      effective_maxtext_extra_flags="${effective_maxtext_extra_flags:+${effective_maxtext_extra_flags} }${_mt_extra[*]}"
+    fi
+  fi
   local opt_chain_args=""
   if [[ -n "${OPT_CHAIN_TYPE}" ]]; then
     opt_chain_args=" \
@@ -587,6 +604,10 @@ start_trainer() {
   local lora_args=""
   if [[ "${USE_LORA}" == "1" || "${USE_LORA}" == "true" || "${USE_LORA}" == "True" ]]; then
     lora_args="--use_lora"
+  fi
+  local debug_arg=""
+  if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
+    debug_arg="--debug"
   fi
   local debug_arg=""
   if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
@@ -634,7 +655,7 @@ start_trainer() {
       ${CKPT_USE_OCDBT:+CKPT_USE_OCDBT=${CKPT_USE_OCDBT}} \
       ${TRAINER_MAXTEXT_ATTENTION:+TRAINER_MAXTEXT_ATTENTION=\"${TRAINER_MAXTEXT_ATTENTION}\"} \
       ${raiden_env} \
-      ${MAXTEXT_EXTRA_FLAGS:+MAXTEXT_EXTRA_FLAGS=\"${MAXTEXT_EXTRA_FLAGS}\"} \
+      ${effective_maxtext_extra_flags:+MAXTEXT_EXTRA_FLAGS=\"${effective_maxtext_extra_flags}\"} \
       ${TRAINER_EXTRA_ENV:+${TRAINER_EXTRA_ENV}} \
       RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} \
       USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER} \
@@ -654,7 +675,7 @@ start_trainer() {
         --mesh_fsdp=${TRAINER_MESH_FSDP} \
         --mesh_tp=${TRAINER_MESH_TP} \
         --mesh_expert=${TRAINER_MESH_EXPERT} \
-      $( [[ "${TRAINER_MESH_CONTEXT:-1}" -gt 1 ]] && echo "--mesh_context=${TRAINER_MESH_CONTEXT}" ) \
+      $( [[ "${TRAINER_MESH_CONTEXT:-1}" -gt 1 ]] && echo "--maxtext_mesh_context=${TRAINER_MESH_CONTEXT}" ) \
         --trainer_backend=${TRAINER_BACKEND} \
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
@@ -909,12 +930,13 @@ if cfg:
           --env_name=deepswe_env \
           --agent_name=${ROLLOUT_AGENT_NAME} \
           --max_concurrency=${ROLLOUT_MAX_CONCURRENCY} \
+          --episode_timeout_secs=${EPISODE_TIMEOUT_SECS} \
           ${TRAJECTORY_STORE_ROOT_DIR:+--enable_trajectory_store --trajectory_store_dir=\"${TRAJECTORY_STORE_ROOT_DIR}\" --run_id=\"${JOB_PREFIX}\"} \
           --seed=${SEED} \
           ${lora_args} \
           ${maxtext_args} \
           ${vllm_args} \
-          ${DEBUG:+--debug} \
+          ${debug_arg} \
       "
   ) || return $?
 

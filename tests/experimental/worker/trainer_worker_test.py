@@ -38,6 +38,7 @@ from tunix.tests import test_common as tc
 class FakeTrainer(abstract_trainer.AbstractTrainer):
 
   def __init__(self):
+    self.compile_calls = []
     self.fwd_bwd_calls = []
     self.eval_step_calls = []
     self.fwd_only_calls = []
@@ -48,7 +49,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     self.gen_model_input_fn = None
 
   def compile(self, dummy_data=None):
-    pass
+    self.compile_calls.append(dummy_data)
 
   def with_loss_fn(self, loss_fn, has_aux=False):
     self.loss_fn = loss_fn
@@ -193,6 +194,13 @@ class TrainerWorkerTest(absltest.TestCase):
     self.worker.with_loss_fn(fn)
 
     self.assertIs(self.fake_trainer.loss_fn, fn)
+
+  def test_compile_forwards_dummy_data_to_trainer(self):
+    dummy = {"dummy": 1}
+    resp = self.worker.compile(dummy)
+    self.assertTrue(resp.metadata["compiled"])
+    self.assertEqual(self.worker.state, datatypes.WorkerState.READY)
+    self.assertEqual(self.fake_trainer.compile_calls, [dummy])
 
   def test_with_loss_fn_chunked_grpo_loss_matches_unchunked(self):
     batch, prompt_len, completion_len = 2, 3, 4

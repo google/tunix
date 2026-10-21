@@ -112,23 +112,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " back; use 64 for Qwen3.5 GatedDeltaNet (gdn_chunk_size=64)."
       ),
   )
-  # TODO(tunix-dev): Clean up worker specific configuration to orchestrator.
   parser.add_argument(
-      "--trainer_fsdp",
+      "--num_data_shards",
       type=int,
       default=None,
       help=(
-          "Trainer FSDP mesh dimension size for sequence packing pack_size"
-          " computation."
-      ),
-  )
-  parser.add_argument(
-      "--trainer_dp",
-      type=int,
-      default=None,
-      help=(
-          "Trainer DP mesh dimension size for sequence packing pack_size"
-          " computation."
+          "Total number of trainer data-parallel shards (e.g. fsdp * dp *"
+          " expert) used as the sequence packing pack_size."
       ),
   )
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
@@ -277,6 +267,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default="",
       help="Root directory for the file-backed TrajectoryStore.",
   )
+  parser.add_argument(
+      "--trainer_precompile",
+      type=_str2bool,
+      default=_str2bool(os.getenv("TRAINER_PRECOMPILE", "true")),
+      nargs="?",
+      const=True,
+      help=(
+          "Precompile the trainer step executables (fwd_bwd, update, eval)"
+          " ahead of time during worker configuration."
+      ),
+  )
   return parser.parse_args(argv)
 
 
@@ -298,7 +299,6 @@ def _trajectory_store_config(
   if not getattr(args, "enable_trajectory_store", False):
     return None
   config: dict[str, Any] = {
-      "enabled": True,
       "backend": getattr(args, "trajectory_store_backend", "file") or "file",
   }
   root_dir = getattr(args, "trajectory_store_dir", "")
@@ -461,22 +461,23 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
   context.ipc.discovery.on_register(
       functools.partial(
-          cluster.register_worker_from_hostname,
+          cluster.registry.register_from_hostname,
           rpc_timeout_s=args.rpc_timeout_s,
       )
   )
 
   logging.info("Waiting for workers to register via discovery service...")
-  cluster.wait_for_workers(
+  cluster.registry.wait_for_workers(
       min_workers={
           datatypes.Role.ACTOR: 1,
           datatypes.Role.ROLLOUT: args.rollout_replicas,
           datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
       },
       timeout=args.init_timeout_s,
-      poll_interval_s=1.0,
   )
-  logging.info("Registered Orchestrator V2 workers: %s", cluster.worker_infos())
+  logging.info(
+      "Registered Orchestrator V2 workers: %s", cluster.registry.infos()
+  )
 
   algo = _build_algo(args)
 
@@ -517,8 +518,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           max_seq_token_per_tpu=args.max_seq_token_per_tpu,
           max_segments_per_packed_row=args.max_segments_per_packed_row,
           segment_alignment_boundary=args.segment_alignment_boundary,
-          trainer_fsdp=args.trainer_fsdp,
-          trainer_dp=args.trainer_dp,
+          num_data_shards=args.num_data_shards,
       ),
       metrics_logging_options=metrics_logging_options,
       trajectory_log_dir=args.trajectory_log_dir,
@@ -526,6 +526,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       max_staleness=args.max_staleness,
       group_order=args.trajectory_group_order,
       sync_weights=(args.weight_sync_mode != "none"),
+      precompile_trainer=args.trainer_precompile,
       on_step_begin=lambda step: logging.info(
           ">>> Step %d starting | Policy Version: %d",
           step,
@@ -543,7 +544,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     cluster.bring_up_workers(dummy_data=None)
     logging.info(
         "Cluster workers ready: %s. Starting StandardRLProgram execution...",
-        [w.worker_id for w in cluster.worker_infos()],
+        [w.worker_id for w in cluster.registry.infos()],
     )
     cluster.run(
         program=program,

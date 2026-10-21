@@ -176,7 +176,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--model_load_dtype",
       choices=("bfloat16", "float32"),
-      default=os.getenv("MODEL_LOAD_DTYPE", "float32"),
+      default=os.getenv("MODEL_LOAD_DTYPE") or "float32",
       help=(
           "Parameter loading and master weight storage dtype. Defaults to"
           " float32 so mixed-precision training (--model_dtype=bfloat16)"
@@ -206,7 +206,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--mesh_fsdp", type=int, default=2)
   parser.add_argument("--mesh_tp", type=int, default=1)
   parser.add_argument("--mesh_expert", type=int, default=1)
-  parser.add_argument("--mesh_context", type=int, default=1)
+  parser.add_argument(
+      "--maxtext_mesh_context",
+      type=int,
+      default=1,
+      help="ICI context-parallelism degree. MaxText backend only.",
+  )
   parser.add_argument("--max_prompt_length", type=int, default=512)
   parser.add_argument("--max_response_length", type=int, default=128)
   parser.add_argument(
@@ -306,7 +311,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " (e.g. constant_schedule, warmup_cosine_decay_schedule). Empty"
           " keeps the constant --optimizer_learning_rate. Only applies to"
           " --trainer_backend=tunix; the maxtext backend builds its own"
-          " optimizer."
+          " learning-rate schedule."
       ),
   )
   parser.add_argument(
@@ -462,70 +467,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--maxtext_attention",
       type=str,
-      default=os.environ.get("TRAINER_MAXTEXT_ATTENTION", ""),
-      help="MaxText attention implementation (e.g. flash, dot_product).",
-  )
-  parser.add_argument(
-      "--remat_policy",
-      type=str,
       default="",
-      help="Rematerialization policy (e.g. full, minimal, decoder, custom).",
+      help=(
+          "MaxText attention kernel override (e.g. flash, dot_product)."
+          " Defaults to dot_product when empty. MaxText backend only."
+      ),
   )
   parser.add_argument(
-      "--learning_rate_final_fraction",
-      "--maxtext_learning_rate_final_fraction",
-      dest="learning_rate_final_fraction",
-      type=float,
-      default=None,
-      help="Final learning rate fraction for MaxText LR schedule.",
-  )
-  parser.add_argument(
-      "--base_num_kv_heads",
+      "--maxtext_base_num_kv_heads",
       type=int,
       default=0,
-      help="Explicit base_num_kv_heads override for MaxText trainer.",
-  )
-  parser.add_argument(
-      "--maxtext_skip_step_on_spikes",
-      "--skip_step_on_spikes",
-      dest="maxtext_skip_step_on_spikes",
-      type=_str2bool,
-      default=False,
-      nargs="?",
-      const=True,
-      help="If True, skips the training step in MaxText when a loss/grad spike is detected.",
-  )
-  parser.add_argument(
-      "--maxtext_skip_step_on_nan",
-      "--skip_step_on_nan",
-      dest="maxtext_skip_step_on_nan",
-      type=_str2bool,
-      default=True,
-      nargs="?",
-      const=True,
-      help="If True, skips the training step in MaxText when gradient norm is NaN or Inf.",
-  )
-  parser.add_argument(
-      "--maxtext_skip_step_interval",
-      "--skip_step_interval",
-      dest="maxtext_skip_step_interval",
-      type=int,
-      default=128,
-      help="Rolling window interval for MaxText skip_step_on_spikes.",
-  )
-  parser.add_argument(
-      "--maxtext_skip_step_scaling_factor",
-      "--skip_step_scaling_factor",
-      dest="maxtext_skip_step_scaling_factor",
-      type=float,
-      default=6.0,
-      help="Scaling factor for MaxText skip_step_on_spikes.",
-  )
-  parser.add_argument(
-      "--trainable_parameters_mask",
-      type=str,
-      default=None,
-      help="Trainable parameters regex mask for freezing weights.",
+      help=(
+          "Explicit base_num_kv_heads override for MaxText trainer. MaxText"
+          " backend only."
+      ),
   )
   parser.add_argument(
       "--debug",
@@ -549,6 +504,46 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       type=int,
       default=-1,
       help="Profile every N steps. If negative, profile only once.",
+  )
+  parser.add_argument(
+      "--enable_tpu_profiling_options",
+      type=_str2bool,
+      default=True,
+      nargs="?",
+      const=True,
+      help=(
+          "Pass the --tpu_num_* TPU profiling options to MaxText when"
+          " profiling. MaxText's training engine profiler ignores them for now."
+      ),
+  )
+  parser.add_argument(
+      "--tpu_num_chips_to_profile_per_task",
+      type=int,
+      default=1,
+      help="Number of TPU chips to profile per host task.",
+  )
+  parser.add_argument(
+      "--tpu_num_sparse_cores_to_trace",
+      type=int,
+      default=1,
+      help="Number of TPU SparseCores to trace per chip.",
+  )
+  parser.add_argument(
+      "--tpu_num_sparse_core_tiles_to_trace",
+      type=int,
+      default=1,
+      help="Number of TPU SparseCore tiles to trace per SparseCore.",
+  )
+  parser.add_argument(
+      "--upload_all_profiler_results",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help=(
+          "Ask MaxText to upload profiles from all hosts, not only host 0."
+          " MaxText's training engine profiler ignores this for now."
+      ),
   )
   return parser.parse_args(argv)
 
@@ -642,7 +637,7 @@ def _load_actor_model(args, mesh: Mesh, *, lora: bool):
       mesh=mesh,
       model_path=args.model_dir,
       dtype=args.model_dtype,
-      load_dtype=args.model_load_dtype or "float32",
+      load_dtype=args.model_load_dtype,
       remat_config=args.remat_config,
       use_flash_attention=args.use_flash_attention,
       flash_attention_block_size=args.flash_attention_block_size,
@@ -701,9 +696,66 @@ def _checkpoint_root_directory(args) -> str | None:
   return None
 
 
+def _maxtext_adamw_options(
+    args: argparse.Namespace,
+) -> maxtext_utils.AdamWOptions:
+  """Maps the `--optimizer_*` flags onto MaxText's AdamW configuration.
+
+  Only AdamW, optionally behind global-norm clipping, is mapped. Any other
+  optimizer or chained transformation fails here instead of silently training
+  with MaxText's defaults.
+
+  Args:
+    args: Parsed CLI namespace.
+
+  Returns:
+    The AdamW options for `maxtext_utils.build_maxtext_config`.
+
+  Raises:
+    ValueError: If the flags ask for an unmapped optimizer or chained
+      transformation, or clip without a positive max_norm.
+  """
+  hint = (
+      " For other MaxText optimizer settings, drop this flag and set them in"
+      ' MAXTEXT_EXTRA_FLAGS instead (e.g. MAXTEXT_EXTRA_FLAGS="opt_type=sgd").'
+  )
+  if args.optimizer_opt_type.lower() != "adamw":
+    raise ValueError(
+        f"--optimizer_opt_type={args.optimizer_opt_type} is not supported by"
+        " the maxtext backend, which maps only adamw." + hint
+    )
+  chain = args.optimizer_opt_chain_type
+  if not chain:
+    # Unchained, as in the tunix backend.
+    clipping_threshold = 0.0
+  elif chain.lower() == "clip_by_global_norm":
+    if "max_norm" not in args.optimizer_chain_kwargs:
+      raise ValueError(
+          f"--optimizer_opt_chain_type={chain} needs a max_norm in"
+          " --optimizer_chain_kwargs."
+      )
+    clipping_threshold = float(args.optimizer_chain_kwargs["max_norm"])
+    # MaxText reads 0 as "do not clip", where optax would zero every update.
+    if clipping_threshold <= 0:
+      raise ValueError(f"max_norm must be positive, got {clipping_threshold}.")
+  else:
+    raise ValueError(
+        f"--optimizer_opt_chain_type={chain} is not supported by the maxtext"
+        " backend, which maps only clip_by_global_norm." + hint
+    )
+  return maxtext_utils.AdamWOptions(
+      b1=args.optimizer_b1,
+      b2=args.optimizer_b2,
+      eps=args.optimizer_eps,
+      weight_decay=args.optimizer_weight_decay,
+      gradient_clipping_threshold=clipping_threshold,
+  )
+
+
 def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
   """Creates the trainer factory function and mesh for MaxText's MaxTextTrainingEngine."""
   logging.info("Trainer backend: MaxText's MaxTextTrainingEngine.")
+  adamw_options = _maxtext_adamw_options(args)
   pad_id = maxtext_utils.get_tokenizer_pad_id(
       args.model_id, args.tokenizer_path, args.model_dir
   )
@@ -712,8 +764,8 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
   if args.optimizer_schedule_type:
     logging.warning(
         "--optimizer_schedule_type=%s is ignored by the maxtext backend, which"
-        " builds its own optimizer from --optimizer_learning_rate and"
-        " --maxtext_warmup_steps_fraction.",
+        " builds its own learning-rate schedule from --optimizer_learning_rate"
+        " and --maxtext_warmup_steps_fraction.",
         args.optimizer_schedule_type,
     )
 
@@ -723,19 +775,12 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
         skip_first_n_steps=args.skip_first_n_profiler_steps,
         profiler_steps=args.profiler_steps,
         profiler_period=args.profiler_period,
+        enable_tpu_profiling_options=args.enable_tpu_profiling_options,
+        tpu_num_chips_to_profile_per_task=args.tpu_num_chips_to_profile_per_task,
+        tpu_num_sparse_cores_to_trace=args.tpu_num_sparse_cores_to_trace,
+        tpu_num_sparse_core_tiles_to_trace=args.tpu_num_sparse_core_tiles_to_trace,
+        upload_all_profiler_results=args.upload_all_profiler_results,
     )
-
-  grad_clip = None
-  if (
-      args.optimizer_opt_chain_type
-      and args.optimizer_opt_chain_type.lower() == "clip_by_global_norm"
-  ):
-    if "max_norm" not in args.optimizer_chain_kwargs:
-      raise ValueError(
-          "--optimizer_opt_chain_type=clip_by_global_norm needs max_norm in"
-          " --optimizer_chain_kwargs."
-      )
-    grad_clip = args.optimizer_chain_kwargs["max_norm"]
 
   maxtext_config = maxtext_utils.build_maxtext_config(
       model_name=args.maxtext_model_name,
@@ -744,36 +789,26 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       mesh_fsdp=args.mesh_fsdp,
       mesh_tp=args.mesh_tp,
       mesh_expert=args.mesh_expert,
-      mesh_context=args.mesh_context,
+      mesh_context=args.maxtext_mesh_context,
       num_devices=jax.device_count(),
       max_prompt_length=args.max_prompt_length,
       max_response_length=args.max_response_length,
       learning_rate=args.optimizer_learning_rate,
       warmup_steps_fraction=args.maxtext_warmup_steps_fraction,
+      adamw_options=adamw_options,
       load_parameters_path=args.maxtext_ckpt_path,
       padded_moe_mlp_dim=args.maxtext_padded_moe_mlp_dim,
       base_output_directory=args.maxtext_output_directory,
       gradient_accumulation_steps=grad_accumulation_steps,
       checkpointing_options=checkpointing_options,
       profiling_options=profiling_options,
-      base_num_kv_heads=args.base_num_kv_heads,
+      base_num_kv_heads=args.maxtext_base_num_kv_heads,
       rollout_mesh_tp=args.rollout_mesh_tp,
       prefuse_moe_weights=args.prefuse_moe_weights,
       use_weight_converter=args.use_weight_converter,
       max_seq_token_per_tpu=args.max_seq_token_per_tpu,
-      trainable_parameters_mask=args.trainable_parameters_mask,
-      attention=args.maxtext_attention or None,
-      remat_policy=args.remat_policy,
-      learning_rate_final_fraction=args.learning_rate_final_fraction,
-      adam_b1=args.optimizer_b1,
-      adam_b2=args.optimizer_b2,
-      adam_eps=args.optimizer_eps,
-      adam_weight_decay=args.optimizer_weight_decay,
-      gradient_clipping_threshold=grad_clip,
-      skip_step_on_spikes=args.maxtext_skip_step_on_spikes,
-      skip_step_on_nan=args.maxtext_skip_step_on_nan,
-      skip_step_interval=args.maxtext_skip_step_interval,
-      skip_step_scaling_factor=args.maxtext_skip_step_scaling_factor,
+      weight_dtype=args.model_load_dtype,
+      attention=args.maxtext_attention,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)

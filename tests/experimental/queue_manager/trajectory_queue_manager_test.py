@@ -294,37 +294,82 @@ class QueueManagerTest(absltest.TestCase):
     asyncio.run(_run_test())
 
 
+class FifoGroupQueueTest(absltest.TestCase):
+
+  def test_serves_groups_in_fifo_order_and_returns_none_at_eof(self):
+    async def _run_test():
+      q: trajectory_queue_manager.FifoGroupQueue[str] = (
+          trajectory_queue_manager.FifoGroupQueue.create()
+      )
+      await q.put("g0")
+      await q.put("g1")
+      self.assertEqual(q.ready_groups_count, 2)
+
+      self.assertEqual(await q.get(), "g0")
+      self.assertEqual(await q.get(), "g1")
+      self.assertEqual(q.ready_groups_count, 0)
+
+      await q.close()
+      self.assertIsNone(await q.get())
+
+      with self.assertRaises(RuntimeError):
+        await q.put("g2")
+
+    asyncio.run(_run_test())
+
+  def test_abort_unblocks_waiting_get_and_raises_on_future_ops(self):
+    async def _run_test():
+      q: trajectory_queue_manager.FifoGroupQueue[str] = (
+          trajectory_queue_manager.FifoGroupQueue.create()
+      )
+      waiter = asyncio.ensure_future(q.get())
+      await asyncio.sleep(0)
+      self.assertFalse(waiter.done())
+
+      await q.abort(ValueError("FIFO aborted"))
+      with self.assertRaisesRegex(ValueError, "FIFO aborted"):
+        await waiter
+
+      await q.clear()
+      await q.put("g_after_clear")
+      self.assertEqual(await q.get(), "g_after_clear")
+
+    asyncio.run(_run_test())
+
+
 def _create_batch_manager(
     full_batch_size: int = 2,
-    num_generations: int = 1,
-    filter_fn=None,
-) -> trajectory_queue_manager.BatchOrderedQueueManager:
-  """Helper to create a BatchOrderedQueueManager for testing."""
-  return trajectory_queue_manager.BatchOrderedQueueManager(
+) -> trajectory_queue_manager.BatchOrderedGroupQueue[
+    list[datatypes.TrajectoryItem]
+]:
+  """Helper to create a BatchOrderedGroupQueue for testing."""
+  return trajectory_queue_manager.BatchOrderedGroupQueue.create(
       full_batch_size=full_batch_size,
-      num_generations=num_generations,
-      filter_fn=filter_fn,
+      batch_idx_fn=lambda group: trajectory_queue_manager.default_batch_idx_fn(
+          group[0]
+      ),
   )
 
 
 async def _put_group(
-    manager: trajectory_queue_manager.BatchOrderedQueueManager,
+    manager: trajectory_queue_manager.BatchOrderedGroupQueue[
+        list[datatypes.TrajectoryItem]
+    ],
     prompt_id: str,
     batch_idx: int,
     num_generations: int = 1,
     reward: float = 1.0,
 ) -> list[datatypes.TrajectoryItem]:
-  """Puts one whole group of `num_generations` items, and returns it."""
+  """Puts one whole pre-formed group of `num_generations` items, and returns it."""
   group = [
       _create_item(prompt_id, group_index=i, reward=reward, batch_idx=batch_idx)
       for i in range(num_generations)
   ]
-  for item in group:
-    await manager.put(item)
+  await manager.put(group)
   return group
 
 
-class BatchOrderedQueueManagerTest(absltest.TestCase):
+class BatchOrderedGroupQueueTest(absltest.TestCase):
 
   def test_serves_batches_in_order_regardless_of_arrival(self):
     """Tests a later batch arriving first is still served second."""
@@ -392,9 +437,10 @@ class BatchOrderedQueueManagerTest(absltest.TestCase):
 
       self.assertEqual(manager.next_batch_idx, 2)
 
-      # A group of an already-passed batch is discarded, not staged.
+      # A group of an already-passed batch is discarded and counted, not staged.
       await _put_group(manager, "p1", batch_idx=1)
       self.assertEqual(manager.pending_groups_count, 0)
+      self.assertEqual(manager.dropped_late_groups_count, 1)
 
       resumed = await _put_group(manager, "p2", batch_idx=2)
       self.assertEqual(await manager.get_ordered_group(), (2, resumed))
@@ -429,6 +475,9 @@ class BatchOrderedQueueManagerTest(absltest.TestCase):
       await manager.close()
       self.assertIsNone(await manager.get_ordered_group())
 
+      with self.assertRaises(RuntimeError):
+        await _put_group(manager, "p_after_close", batch_idx=0)
+
     asyncio.run(_run_test())
 
   def test_abort_unblocks_a_waiting_consumer(self):
@@ -447,63 +496,59 @@ class BatchOrderedQueueManagerTest(absltest.TestCase):
     asyncio.run(_run_test())
 
   def test_requires_batch_idx_metadata(self):
-    """Tests an untagged item failing loudly instead of being mis-routed."""
+    """Tests an untagged group failing loudly instead of being mis-routed."""
 
     async def _run_test():
       manager = _create_batch_manager(full_batch_size=1)
 
       with self.assertRaises(ValueError):
-        await manager.put(_create_item("p0"))
+        await manager.put([_create_item("p0")])
 
     asyncio.run(_run_test())
 
   def test_each_class_has_its_own_create(self):
-    """Tests both factories returning a single concrete class, not a union."""
-    arrival = trajectory_queue_manager.TrajectoryQueueManager.create(
+    """Tests factories returning concrete queue classes."""
+    raw = trajectory_queue_manager.TrajectoryQueueManager.create(
         num_generations=2
     )
-    self.assertIsInstance(
-        arrival, trajectory_queue_manager.TrajectoryQueueManager
-    )
-    self.assertNotIsInstance(
-        arrival, trajectory_queue_manager.BatchOrderedQueueManager
-    )
+    self.assertIsInstance(raw, trajectory_queue_manager.TrajectoryQueueManager)
 
-    ordered = trajectory_queue_manager.BatchOrderedQueueManager.create(
-        num_generations=2, full_batch_size=4
+    fifo = trajectory_queue_manager.FifoGroupQueue.create()
+    self.assertIsInstance(fifo, trajectory_queue_manager.FifoGroupQueue)
+
+    ordered = trajectory_queue_manager.BatchOrderedGroupQueue.create(
+        full_batch_size=4,
+        batch_idx_fn=lambda x: 0,
     )
     self.assertIsInstance(
-        ordered, trajectory_queue_manager.BatchOrderedQueueManager
-    )
-    self.assertNotIsInstance(
-        ordered, trajectory_queue_manager.TrajectoryQueueManager
+        ordered, trajectory_queue_manager.BatchOrderedGroupQueue
     )
     self.assertEqual(ordered.full_batch_size, 4)
 
     with self.assertRaises(ValueError):
-      trajectory_queue_manager.BatchOrderedQueueManager.create(
-          num_generations=2, full_batch_size=0
+      trajectory_queue_manager.BatchOrderedGroupQueue.create(
+          full_batch_size=0,
+          batch_idx_fn=lambda x: 0,
       )
 
-  def test_ordered_queue_get_batch_stops_at_batch_boundary_until_commit(self):
-    """Tests get_batch draining the active batch without crossing into the next batch."""
+  def test_ordered_queue_get_stops_at_batch_boundary_until_commit(self):
+    """Tests get() draining the active batch without crossing into the next batch."""
 
     async def _run_test():
-      manager = _create_batch_manager(num_generations=2, full_batch_size=1)
+      manager = _create_batch_manager(full_batch_size=1)
       b1_g0 = await _put_group(manager, "p1", batch_idx=1, num_generations=2)
       b0_g0 = await _put_group(manager, "p0", batch_idx=0, num_generations=2)
 
-      # First get_batch(2) returns the only group of batch 0.
-      self.assertEqual(await manager.get_batch(2), b0_g0)
-      # Second get_batch(2) before commit() returns [] even though batch 1 is
-      # ready.
-      self.assertEqual(await manager.get_batch(2), [])
+      # First get() returns the only group of batch 0.
+      self.assertEqual(await manager.get(), b0_g0)
+      # Second get() before commit() returns None even though batch 1 is ready.
+      self.assertIsNone(await manager.get())
       self.assertEqual(manager.next_batch_idx, 0)
 
-      # After commit(), get_batch(2) advances to batch 1.
+      # After commit(), get() advances to batch 1.
       manager.commit(step=0)
       self.assertEqual(manager.next_batch_idx, 1)
-      self.assertEqual(await manager.get_batch(2), b1_g0)
+      self.assertEqual(await manager.get(), b1_g0)
 
     asyncio.run(_run_test())
 
@@ -511,22 +556,22 @@ class BatchOrderedQueueManagerTest(absltest.TestCase):
     """Tests clear() emptying _pending and resetting _served_in_batch and _next_batch_idx."""
 
     async def _run_test():
-      manager = _create_batch_manager(num_generations=2, full_batch_size=2)
+      manager = _create_batch_manager(full_batch_size=2)
       await _put_group(manager, "p0", batch_idx=0, num_generations=2)
       await _put_group(manager, "p1", batch_idx=1, num_generations=2)
-      await manager.put(_create_item("incomplete", group_index=0, batch_idx=0))
 
       # Serve one group of batch 0 and advance cursor to batch 1.
       self.assertIsNotNone(await manager.get_ordered_group())
       manager.commit_batch(0)
+      await _put_group(manager, "p_late", batch_idx=0, num_generations=2)
       self.assertEqual(manager.next_batch_idx, 1)
       self.assertEqual(manager.pending_groups_count, 1)
-      self.assertEqual(manager.incomplete_buckets_count, 1)
+      self.assertEqual(manager.dropped_late_groups_count, 1)
 
       await manager.clear()
       self.assertEqual(manager.next_batch_idx, 0)
       self.assertEqual(manager.pending_groups_count, 0)
-      self.assertEqual(manager.incomplete_buckets_count, 0)
+      self.assertEqual(manager.dropped_late_groups_count, 0)
 
       fresh = await _put_group(
           manager, "p_fresh", batch_idx=0, num_generations=2

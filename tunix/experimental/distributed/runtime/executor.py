@@ -14,5 +14,8 @@
 
 """Exports distributed runtime process executors."""
 
-from .executors.k8s_executor import K8sExecutor
-from .executors.local_executor import LocalExecutor
+from tunix.experimental.distributed.runtime.executors import k8s_executor
+from tunix.experimental.distributed.runtime.executors import local_executor
+
+K8sExecutor = k8s_executor.K8sExecutor
+LocalExecutor = local_executor.LocalExecutor

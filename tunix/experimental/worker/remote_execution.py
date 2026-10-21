@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Universal Actor Model abstraction layer (`RemoteExecutionServer`, `ActorHandle`, `ActorPool`).
+"""Universal Actor Model abstraction layer (`RemoteExecutionServer`, `ActorHandle`).
 
 Eliminates RPC boilerplate (`rpc_generate`, `rpc_sync_weights`, etc.) across
 worker types by serializing arbitrary method invocations (`submit`, `asubmit`)
@@ -36,7 +36,6 @@ Security Notes / Trust Boundaries:
 import abc
 import asyncio
 import contextlib
-import hashlib
 import inspect
 import pickle
 import threading
@@ -80,6 +79,10 @@ is_bulk_lz4_enabled = network.is_bulk_lz4_enabled
 set_bulk_lz4_enabled = network.set_bulk_lz4_enabled
 
 _BULK_CAPABILITY_METADATA = (("x-tunix-bulk", "1"),)
+
+
+class TransientTransportError(ConnectionError):
+  """Raised when a remote transport operation fails with a retryable status."""
 
 
 def _running_loop() -> Optional["asyncio.AbstractEventLoop"]:
@@ -806,6 +809,10 @@ class ActorHandle(abc.ABC):
     """Long-polls remote server response queue for completed result."""
     pass
 
+  async def close(self) -> None:
+    """Releases any underlying transport resources held by this handle."""
+    pass
+
 
 class RemoteActorHandle(ActorHandle):
   """ActorHandle targeting a remote network worker address over gRPC/Stubby."""
@@ -1248,7 +1255,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       old_channel = self._channel
       self._channel = _grpc_aio_lib.insecure_channel(
           self._host_port,
-          options=network._grpc_options(self._max_message_bytes),  # pylint: disable=protected-access
+          options=network._grpc_channel_options(self._max_message_bytes),  # pylint: disable=protected-access
       )
       self._channel_loop = current_loop
       self._rpc = self._make_rpc(self._channel)
@@ -1346,7 +1353,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     if self._sync_rpc is None:
       self._sync_channel = _grpc_aio_lib.insecure_channel(
           self._host_port,
-          options=network._grpc_options(self._max_message_bytes),  # pylint: disable=protected-access
+          options=network._grpc_channel_options(self._max_message_bytes),  # pylint: disable=protected-access
       )
       self._sync_rpc = self._make_rpc(self._sync_channel)
       self._sync_get_bulk_port_rpc = self._make_get_bulk_port_rpc(
@@ -1410,8 +1417,28 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
           bulk_hosts=self._active_bulk_hosts,
           seen_bulk_targets=self._seen_bulk_targets,
       )
-    except network._BulkTransportError:  # pylint: disable=protected-access
+    except network._BulkTransportError as exc:  # pylint: disable=protected-access
       self._invalidate_bulk_port()
+      if hasattr(call, "cancel"):
+        call.cancel()
+      raise TransientTransportError(
+          f"Transient bulk transport error polling {self._host_port}: {exc}"
+      ) from exc
+    except BaseException as exc:  # pylint: disable=broad-exception-caught
+      if (
+          _grpc_lib is not None
+          and _grpc_aio_lib is not None
+          and isinstance(exc, _grpc_aio_lib.AioRpcError)
+          and exc.code()
+          in (
+              _grpc_lib.StatusCode.UNAVAILABLE,
+              _grpc_lib.StatusCode.DEADLINE_EXCEEDED,
+          )
+      ):
+        raise TransientTransportError(
+            f"Transient gRPC error polling {self._host_port}:"
+            f" {exc.code().name} ({exc.details()})"
+        ) from exc
       raise
 
   async def close(self) -> None:
@@ -1423,7 +1450,16 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self._invalidate_bulk_port()
     self._seen_bulk_targets.clear()
     if self._channel is not None:
-      await self._channel.close()
+      # `self._channel` is lazily created on the caller's event loop (e.g.
+      # `RLProgram.run()`), which is typically already closed by the time
+      # `WorkerRegistry.close()` runs on a fresh shutdown loop. Calling
+      # `channel.close()` releases the underlying C-core channel so the
+      # interpreter does not hang at exit, while ignoring cross-loop poller
+      # cleanup errors so shutdown can proceed to `_sync_loop` teardown.
+      try:
+        await self._channel.close()
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
       self._channel = None
       self._channel_loop = None
       self._rpc = None
@@ -1522,422 +1558,6 @@ class InProcessActorHandle(ActorHandle):
   async def _run_async(self, request: ExecutionRequest) -> Any:
     response = await self.server.execute_request(request)
     return response.unwrap()
-
-
-class ActorPool(abc.ABC):
-  """Stateless load-balanced routing across worker farms with out-of-order task streaming."""
-
-  @abc.abstractmethod
-  def add_actor(self, actor: Union[str, ActorHandle]) -> None:
-    """Adds a worker actor handle or string URI target address to the pool."""
-    pass
-
-  @abc.abstractmethod
-  def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
-    """Submits request to least-loaded or next available worker in the pool."""
-    pass
-
-  @abc.abstractmethod
-  async def asubmit(
-      self, method_name: Optional[str] = None, *args, **kwargs
-  ) -> Any:
-    """Asynchronously submits request and returns completed result."""
-    pass
-
-  @abc.abstractmethod
-  def as_completed_stream(
-      self,
-      tasks: Sequence[
-          Tuple[str, str, Sequence[Any], Dict[str, Any]]
-      ],
-  ) -> AsyncIterator[Any]:
-    """Dispatches a batch of tasks across pool and yields results strictly out-of-order.
-
-    Args:
-      tasks: Sequence of task specifications formatted as 4-tuples:
-        `(request_id, method_name, args, kwargs)`, where:
-          - request_id: Unique request identifier string.
-          - method_name: Target remote method name to execute on the worker.
-          - args: Positional arguments sequence passed to the remote method.
-          - kwargs: Keyword arguments dictionary passed to the remote method.
-    """
-    raise NotImplementedError
-
-
-def stable_route_hash(route_key: Any) -> int:
-  """Maps a sticky routing key to a process-stable non-negative integer.
-
-  Args:
-    route_key: The sticky routing key. Non-negative integers are returned
-      as-is; any other value is hashed via its `str()` representation.
-
-  Returns:
-    A non-negative integer suitable for `% num_actors` bucketing.
-
-  Raises:
-    ValueError: If `route_key` is a negative integer.
-  """
-  if isinstance(route_key, int):
-    if route_key < 0:
-      raise ValueError(
-          "An integer route_key is an explicit shard index and must be"
-          f" non-negative, got {route_key}."
-      )
-    return route_key
-  digest = hashlib.blake2b(str(route_key).encode("utf-8"), digest_size=8)
-  return int.from_bytes(digest.digest(), "big")
-
-
-class RoutingActorPool(ActorPool):
-  """ActorPool with smart task routing (`route_key affinity, round-robin fallback`).
-
-  Args:
-    actors: Initial sequence of worker actor handles or string URI targets.
-    router: Optional custom routing callable `(actors, method_name, args,
-      kwargs) -> ActorHandle` or router module/object providing per-method
-      handlers matching `method_name` with signature `(actors, args, kwargs) ->
-      ActorHandle`.
-  """
-
-  def __init__(
-      self,
-      actors: Optional[Sequence[Union[str, ActorHandle]]] = None,
-      *,
-      router: Optional[Union[Callable[..., ActorHandle], Any]] = None,
-  ):
-    self._actors: List[ActorHandle] = []
-    for a in actors or []:
-      self.add_actor(a)
-    self._idx = 0
-    self.router = router
-
-  def add_actor(self, actor: Union[str, ActorHandle]) -> None:
-    if isinstance(actor, str):
-      self._actors.append(ActorHandle.from_address(actor))
-    elif isinstance(actor, ActorHandle):
-      self._actors.append(actor)
-    else:
-      raise TypeError(f"Expected str or ActorHandle, got {type(actor)}")
-
-  def _get_next_actor(
-      self,
-      method_name: Optional[str] = None,
-      args: Sequence[Any] = (),
-      kwargs: Optional[Dict[str, Any]] = None,
-  ) -> ActorHandle:
-    """Selects target actor via custom router, route_key affinity, or round-robin.
-
-    Args:
-      method_name: Target remote method being invoked.
-      args: Positional arguments passed to the method call.
-      kwargs: Keyword arguments passed to the method call. If this dictionary
-        contains `route_key`, process-stable hash routing
-        (`stable_route_hash(route_key) % N`) is used for sticky endpoint
-        affinity (popped prior to remote dispatch).
-
-    Returns:
-      The selected `ActorHandle` target worker.
-
-    Raises:
-      RuntimeError: If the pool contains no registered ActorHandles.
-    """
-
-    if not self._actors:
-
-      raise RuntimeError(
-          "RoutingActorPool contains no registered ActorHandles."
-      )
-
-    kwargs = kwargs or {}
-    if self.router is not None:
-      if (
-          method_name
-          and hasattr(self.router, method_name)
-          and callable(getattr(self.router, method_name))
-      ):
-        return getattr(self.router, method_name)(self._actors, args, kwargs)
-      elif callable(self.router):
-        return self.router(self._actors, method_name, args, kwargs)
-      else:
-        raise TypeError(
-            f"Router object {type(self.router)} must provide a method matching "
-            f"'{method_name}' or be callable."
-        )
-
-    # Check for sticky routing key (e.g. route_key for KV-cache locality)
-    route_key = kwargs.get("route_key")
-
-    if route_key is not None:
-      # Not builtin `hash()`: it salts `str` per process, so placement would
-      # not survive a restart.
-      # TODO(tunix-dev): `% len(self._actors)` remaps every key when pool
-      # membership changes, not just the keys on the affected actor. Switch to
-      # rendezvous (HRW) hashing before adding actor eviction.
-      return self._actors[stable_route_hash(route_key) % len(self._actors)]
-
-    # Default fallback: round-robin load balancing across all endpoints
-    actor = self._actors[self._idx % len(self._actors)]
-    self._idx += 1
-    return actor
-
-  def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
-    actor = self._get_next_actor(method_name, args, kwargs)
-    kwargs.pop("route_key", None)
-    return actor.submit(method_name, *args, **kwargs)
-
-  async def asubmit(
-      self, method_name: Optional[str] = None, *args, **kwargs
-  ) -> Any:
-    actor = self._get_next_actor(method_name, args, kwargs)
-    kwargs.pop("route_key", None)
-    return await actor.asubmit(method_name, *args, **kwargs)
-
-  async def as_completed_stream(
-      self,
-      tasks: Sequence[
-          Tuple[str, str, Sequence[Any], Dict[str, Any]]
-      ],
-  ) -> AsyncIterator[Any]:
-    """Dispatches a static batch of tasks across pool workers and yields results as they complete.
-
-    Intended Use Case:
-      Simple, one-shot static batch processing where the full list of tasks is
-      known upfront (similar to `asyncio.as_completed`). This convenience
-      wrapper provides fail-fast behavior: if any task raises an exception, the
-      exception is immediately re-raised in the caller's stream and remaining
-      tasks are cancelled.
-
-      For dynamic task enqueuing (e.g. submitting new tasks as existing ones
-      finish) or fault-isolated streaming (where individual task errors do not
-      terminate the stream), use `execution_session()` instead.
-
-    Args:
-      tasks: Sequence of task specifications formatted as 4-tuples:
-        `(request_id, method_name, args, kwargs)`, where:
-          - request_id: Unique request identifier string.
-          - method_name: Target remote method name to execute on the worker.
-          - args: Positional arguments sequence passed to the remote method.
-          - kwargs: Keyword arguments dictionary passed to the remote method.
-    """
-    if not self._actors:
-      raise RuntimeError(
-          "RoutingActorPool contains no registered ActorHandles."
-      )
-    if not tasks:
-      return
-    async with self.execution_session(tasks) as session:
-      async for result, exc in session.as_completed():
-        if exc is not None:
-          raise exc
-        yield result
-
-  @contextlib.asynccontextmanager
-  async def execution_session(
-      self,
-      initial_tasks: Optional[
-          Sequence[Tuple[str, str, Sequence[Any], Dict[str, Any]]]
-      ] = None,
-  ) -> AsyncIterator["PoolExecutionSession"]:
-    """Creates a dynamic, fault-isolated execution session over the worker pool.
-
-    Intended Use Case:
-      Long-running worker pipelines, dynamic task enqueuing, and fault-tolerant
-      batch processing. Within the `async with` session block, callers can:
-        1. Dynamically enqueue new tasks at any time via `await
-        session.submit()`.
-        2. Consume completions out-of-order via `session.as_completed()`, which
-           yields `(result, exception)` tuples without terminating the stream
-           when an individual task fails.
-        3. Rely on automatic background worker polling and clean task
-        cancellation
-           upon session exit.
-
-    Args:
-      initial_tasks: Optional sequence of initial task specifications to
-        dispatch upon entering the session, formatted as 4-tuples
-        `(request_id, method_name, args, kwargs)`, where:
-          - request_id: Unique request identifier string.
-          - method_name: Target remote method name to execute on the worker.
-          - args: Positional arguments sequence passed to the remote method.
-          - kwargs: Keyword arguments dictionary passed to the remote method.
-    """
-    session = PoolExecutionSession(self)
-    try:
-      if initial_tasks:
-        for request_id, method_name, args, kwargs in initial_tasks:
-          await session.submit(request_id, method_name, *args, **kwargs)
-      yield session
-    finally:
-      await session.close()
-
-
-class PoolExecutionSession:
-  """Dynamic, fault-isolated execution session for a RoutingActorPool.
-
-  Intended Use Case:
-    Managed by `RoutingActorPool.execution_session()`. Provides an interactive
-    handle to submit tasks (`submit`) and consume out-of-order completions and
-    exceptions (`as_completed`) without terminating the stream on individual
-    task
-    failures.
-  """
-
-  def __init__(self, pool: RoutingActorPool):
-    self._pool = pool
-    self._response_queue: asyncio.Queue[Any] = asyncio.Queue()
-    self._active_workers: set[ActorHandle] = set()
-    self._dispatched_tasks: Dict[ActorHandle, set[str]] = {}
-    self._poll_tasks: set[asyncio.Task[Any]] = set()
-    self._in_flight = 0
-    self._closed = False
-    self._sentinel = object()
-
-  def _notify_if_zero_flight(self) -> None:
-    if self._in_flight == 0:
-      self._response_queue.put_nowait(self._sentinel)
-
-  async def submit(
-      self,
-      request_id: str,
-      method_name: Optional[str] = None,
-      *args,
-      **kwargs,
-  ) -> str:
-    """Dispatches a task to a worker in the pool and tracks its completion."""
-    if self._closed:
-      raise RuntimeError("PoolExecutionSession is closed.")
-    actor = self._pool._get_next_actor(method_name, args, kwargs)
-    kwargs.pop("route_key", None)  # remove route_key from worker method args
-
-    # Increment in_flight and register request_id BEFORE awaiting dispatch_task
-    # so a fast worker completing before dispatch_task's coroutine resumes
-    # always finds request_id in _dispatched_tasks[actor].
-    self._in_flight += 1
-    dispatched_set = self._dispatched_tasks.setdefault(actor, set())
-    dispatched_set.add(request_id)
-    self._ensure_worker_polling(actor)
-
-    try:
-      await actor.dispatch_task(
-          request_id, method_name, *args, **kwargs
-      )
-      # Re-ensure worker polling is active in case the previous polling loop
-      # exited or died while dispatch_task was awaiting.
-      self._ensure_worker_polling(actor)
-      return request_id
-    except BaseException:
-      # Roll back _in_flight on any exception or cancellation if
-      # _poll_worker_loop hasn't already failed and cleared it.
-      if request_id in dispatched_set:
-        dispatched_set.remove(request_id)
-        self._in_flight = max(0, self._in_flight - 1)
-        self._notify_if_zero_flight()
-      raise
-
-  def _ensure_worker_polling(self, actor: ActorHandle) -> None:
-    if actor in self._active_workers:
-      return
-    self._active_workers.add(actor)
-    task = asyncio.create_task(self._poll_worker_loop(actor))
-    self._poll_tasks.add(task)
-    task.add_done_callback(self._poll_tasks.discard)
-
-  async def _poll_worker_loop(self, actor: ActorHandle) -> None:
-    try:
-      while not self._closed:
-        dispatched_set = self._dispatched_tasks.setdefault(actor, set())
-        if not dispatched_set:
-          break
-        try:
-          response = await actor.poll_responses(timeout_s=LONG_POLL_TIMEOUT_S)
-          if isinstance(response, ExecutionResponse):
-            try:
-              res = response.unwrap()
-              self._response_queue.put_nowait((res, None))
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-              self._response_queue.put_nowait((None, exc))
-            if response.request_id and response.request_id in dispatched_set:
-              dispatched_set.remove(response.request_id)
-              self._in_flight = max(0, self._in_flight - 1)
-            elif dispatched_set:
-              dispatched_set.pop()
-              self._in_flight = max(0, self._in_flight - 1)
-            self._notify_if_zero_flight()
-        except asyncio.CancelledError:
-          break
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-          # Transport or polling failure on this worker; fail all dispatched tasks on this worker.
-          failed_count = len(dispatched_set)
-          dispatched_set.clear()
-          if failed_count > 0:
-            for _ in range(failed_count):
-              self._response_queue.put_nowait((None, exc))
-            self._in_flight = max(0, self._in_flight - failed_count)
-            self._notify_if_zero_flight()
-          break
-    finally:
-      self._active_workers.discard(actor)
-
-  async def poll_completed(
-      self, timeout_s: float = LONG_POLL_TIMEOUT_S
-  ) -> List[Tuple[Any, Optional[Exception]]]:
-    """Waits up to `timeout_s` for the first completion, then drains ready items."""
-    if self._closed:
-      return []
-
-    batch: List[Tuple[Any, Optional[Exception]]] = []
-    # When idle (_in_flight == 0), yield briefly (<= 50ms) so concurrent dispatch
-    # coroutines can run without stalling for the full 50s long-poll timeout.
-    wait_s = (
-        min(timeout_s, 0.05)
-        if (self._in_flight == 0 and self._response_queue.empty())
-        else timeout_s
-    )
-    try:
-      # Block until the first real (result, exc) completion arrives.
-      while not batch:
-        item = await asyncio.wait_for(
-            self._response_queue.get(), timeout=wait_s
-        )
-        if item is self._sentinel:
-          # Sentinel marks _in_flight reaching 0 or session close; return early if drained,
-          # otherwise skip stale sentinels when new tasks are in flight or queued behind it.
-          if self._in_flight == 0 and self._response_queue.empty():
-            return []
-          continue
-        batch.append(item)
-    except asyncio.TimeoutError:
-      return []
-
-    # Greedily drain any additional completions already queued by background worker loops.
-    while not self._response_queue.empty():
-      item = self._response_queue.get_nowait()
-      if item is not self._sentinel:
-        batch.append(item)
-    return batch
-
-  async def as_completed(
-      self,
-  ) -> AsyncIterator[Tuple[Any, Optional[Exception]]]:
-    """Yields (result, exception) tuples as tasks complete out-of-order."""
-    while not self._closed:
-      item = await self._response_queue.get()
-      if item is self._sentinel:
-        if self._in_flight == 0 and self._response_queue.empty():
-          break
-        continue
-      result, exc = item
-      yield result, exc
-
-  async def close(self) -> None:
-    """Closes the session and cancels all background polling tasks."""
-    self._closed = True
-    self._response_queue.put_nowait(self._sentinel)
-    for t in list(self._poll_tasks):
-      if not t.done():
-        t.cancel()
-    if self._poll_tasks:
-      await asyncio.gather(*self._poll_tasks, return_exceptions=True)
 
 
 def remote(

@@ -30,6 +30,7 @@ from tunix.experimental.examples.common import run_trainer_node
 from tunix.experimental.train import peft_trainer_v2
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker
+from tunix.utils import maxtext_utils
 
 
 class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
@@ -163,14 +164,18 @@ class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
 class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
 
   def test_model_loading_separates_compute_and_parameter_dtypes(self):
-    for load_dtype in (None, "float32"):
+    for load_dtype, expected_load_dtype in (
+        (None, "float32"),
+        ("float32", "float32"),
+        ("bfloat16", "bfloat16"),
+    ):
       with self.subTest(load_dtype=load_dtype):
         argv = ["--model_dir=/tmp/model", "--model_dtype=bfloat16"]
         if load_dtype:
           argv.append(f"--model_load_dtype={load_dtype}")
-        args = run_trainer_node._parse_args(argv)
-        # Avoid depending on the caller's MODEL_LOAD_DTYPE environment.
-        args.model_load_dtype = load_dtype
+        with mock.patch.dict("os.environ", {}, clear=False):
+          run_trainer_node.os.environ.pop("MODEL_LOAD_DTYPE", None)
+          args = run_trainer_node._parse_args(argv)
         with mock.patch.object(
             run_trainer_node.automodel.AutoModel,
             "from_pretrained",
@@ -182,7 +187,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         self.assertIs(model, mock.sentinel.model)
         self.assertEqual(load.call_args.kwargs["dtype"], "bfloat16")
         self.assertEqual(
-            load.call_args.kwargs["load_dtype"], load_dtype or "bfloat16"
+            load.call_args.kwargs["load_dtype"], expected_load_dtype
         )
 
   def setUp(self):
@@ -459,8 +464,172 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     run_trainer_node._create_maxtext_trainer_factory(args)
     mock_build_cfg.assert_called_once()
     self.assertEqual(
-        mock_build_cfg.call_args.kwargs.get("max_seq_token_per_tpu"), 4096
+        mock_build_cfg.call_args.kwargs["max_seq_token_per_tpu"], 4096
     )
+
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_plumbs_profiler_and_tpu_options(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    del mock_create_mesh, mock_get_pad_id
+    args = run_trainer_node._parse_args([
+        "--profiler_steps",
+        "3",
+        "--skip_first_n_profiler_steps",
+        "8",
+        "--profiler_period",
+        "10",
+        "--enable_tpu_profiling_options=false",
+        "--tpu_num_chips_to_profile_per_task",
+        "2",
+        "--tpu_num_sparse_cores_to_trace",
+        "3",
+        "--tpu_num_sparse_core_tiles_to_trace",
+        "4",
+        "--upload_all_profiler_results=true",
+    ])
+    run_trainer_node._create_maxtext_trainer_factory(args)
+    mock_build_cfg.assert_called_once()
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs["profiling_options"],
+        run_trainer_node.maxtext_utils.ProfilerOptions(
+            skip_first_n_steps=8,
+            profiler_steps=3,
+            profiler_period=10,
+            enable_tpu_profiling_options=False,
+            tpu_num_chips_to_profile_per_task=2,
+            tpu_num_sparse_cores_to_trace=3,
+            tpu_num_sparse_core_tiles_to_trace=4,
+            upload_all_profiler_results=True,
+        ),
+    )
+
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_plumbs_adamw_options(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    del mock_create_mesh, mock_get_pad_id  # Unused.
+    args = run_trainer_node._parse_args(["--optimizer_b2=0.98"])
+    run_trainer_node._create_maxtext_trainer_factory(args)
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs["adamw_options"],
+        maxtext_utils.AdamWOptions(
+            b1=0.9,
+            b2=0.98,
+            eps=1e-8,
+            weight_decay=0.0,
+            gradient_clipping_threshold=0.0,
+        ),
+    )
+
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_plumbs_weight_dtype(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    del mock_create_mesh, mock_get_pad_id  # Unused.
+    args = run_trainer_node._parse_args(["--model_load_dtype=bfloat16"])
+    run_trainer_node._create_maxtext_trainer_factory(args)
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs["weight_dtype"], "bfloat16"
+    )
+
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_plumbs_optional_maxtext_knobs(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    del mock_create_mesh, mock_get_pad_id  # Unused.
+    args = run_trainer_node._parse_args([
+        "--maxtext_mesh_context=2",
+        "--maxtext_base_num_kv_heads=8",
+        "--maxtext_attention=flash",
+    ])
+    run_trainer_node._create_maxtext_trainer_factory(args)
+    kwargs = mock_build_cfg.call_args.kwargs
+    self.assertEqual(kwargs["mesh_context"], 2)
+    self.assertEqual(kwargs["base_num_kv_heads"], 8)
+    self.assertEqual(kwargs["attention"], "flash")
+
+  def test_maxtext_adamw_options_follow_optimizer_flags(self):
+    # Names are case-insensitive, as cli.config.create_optimizer reads them.
+    args = run_trainer_node._parse_args([
+        "--optimizer_opt_type=AdamW",
+        "--optimizer_b1=0.8",
+        "--optimizer_b2=0.98",
+        "--optimizer_eps=1e-6",
+        "--optimizer_weight_decay=0.05",
+        "--optimizer_opt_chain_type=CLIP_BY_GLOBAL_NORM",
+        "--optimizer_chain_kwargs={'max_norm': 0.125}",
+    ])
+    self.assertEqual(
+        run_trainer_node._maxtext_adamw_options(args),
+        maxtext_utils.AdamWOptions(
+            b1=0.8,
+            b2=0.98,
+            eps=1e-6,
+            weight_decay=0.05,
+            gradient_clipping_threshold=0.125,
+        ),
+    )
+
+  def test_maxtext_adamw_options_without_chain_disable_clipping(self):
+    # Like the tunix backend, an unchained optimizer does not clip; MaxText's
+    # own defaults (b2=0.95, weight_decay=0.1, clipping at 1.0) never apply.
+    options = run_trainer_node._maxtext_adamw_options(
+        run_trainer_node._parse_args([])
+    )
+    self.assertEqual(
+        (options.b2, options.weight_decay, options.gradient_clipping_threshold),
+        (0.999, 0.0, 0.0),
+    )
+
+  def test_maxtext_adamw_options_reject_unmapped_flags(self):
+    for argv, error in (
+        (["--optimizer_opt_type=sgd"], "maps only adamw.*MAXTEXT_EXTRA_FLAGS"),
+        (
+            ["--optimizer_opt_chain_type=clip"],
+            "maps only clip_by_global_norm.*MAXTEXT_EXTRA_FLAGS",
+        ),
+        (
+            ["--optimizer_opt_chain_type=clip_by_global_norm"],
+            "needs a max_norm",
+        ),
+        (
+            [
+                "--optimizer_opt_chain_type=clip_by_global_norm",
+                "--optimizer_chain_kwargs={'max_norm': 0}",
+            ],
+            "must be positive",
+        ),
+    ):
+      with self.subTest(argv=argv):
+        with self.assertRaisesRegex(ValueError, error):
+          run_trainer_node._maxtext_adamw_options(
+              run_trainer_node._parse_args(argv)
+          )
 
   @mock.patch.object(
       run_trainer_node,
@@ -586,6 +755,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args.optimizer_chain_kwargs, {})
     self.assertFalse(args.use_lora)
     self.assertEqual(args.model_dtype, "float32")
+    self.assertEqual(args.model_load_dtype, "float32")
     self.assertEqual(args.rollout_mesh_tp, 0)
     self.assertFalse(args.prefuse_moe_weights)
     self.assertTrue(args.use_weight_converter)

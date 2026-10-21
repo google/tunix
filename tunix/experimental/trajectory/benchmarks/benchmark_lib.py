@@ -1,7 +1,10 @@
 """Benchmark engine for progressive recovery load testing on Trajectory Store."""
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+import concurrent.futures
 import dataclasses
+import itertools
+import threading
 import time
 
 import termcolor
@@ -90,36 +93,97 @@ class BenchmarkReport:
   checkpoints: list[BenchmarkCheckpointMetrics]
 
 
+def _write_trajectory(
+    writer: store.TrajectoryWriter,
+    metadata: trajectory_lib.TrajectoryMetadata,
+    steps: list[trajectory_lib.Step],
+) -> tuple[int, int]:
+  """Writes all trajectory steps and returns (step_count, byte_count)."""
+  step_bytes = 0
+  for step in steps:
+    writer.add_step(step, metadata)
+    # Generated steps consist solely of string messages; see
+    # data_generator.generate_trajectories for details.
+    step_bytes += len(step.message)
+  return len(steps), step_bytes
+
+
+def _drain_trajectories(
+    writer: store.TrajectoryWriter,
+    trajectories: Iterator[
+        tuple[trajectory_lib.TrajectoryMetadata, list[trajectory_lib.Step]]
+    ],
+    lock: threading.Lock,
+) -> tuple[int, int]:
+  """Writes trajectories from a shared iterator until it is exhausted.
+
+  Each worker pulls one trajectory at a time under `lock`, so at most one
+  trajectory per worker is materialized and `writer` is used by this worker
+  only.
+
+  Args:
+    writer: The writer dedicated to this worker for the whole checkpoint.
+    trajectories: Iterator shared by all workers of the checkpoint.
+    lock: Serializes `next()` calls because generators are not thread-safe.
+
+  Returns:
+    The (step_count, byte_count) written by this worker.
+  """
+  total_steps = 0
+  total_bytes = 0
+  while True:
+    with lock:
+      item = next(trajectories, None)
+    if item is None:
+      return total_steps, total_bytes
+    metadata, steps = item
+    steps_written, bytes_written = _write_trajectory(writer, metadata, steps)
+    total_steps += steps_written
+    total_bytes += bytes_written
+
+
 def _run_checkpoint(
     reader: store.TrajectoryReader,
-    writer: store.TrajectoryWriter,
+    writers: Sequence[store.TrajectoryWriter],
     data_iter: Iterator[
         tuple[trajectory_lib.TrajectoryMetadata, list[trajectory_lib.Step]]
     ],
     current_traj_count: int,
     target_traj_count: int,
+    executor: concurrent.futures.ThreadPoolExecutor,
+    num_workers: int,
 ) -> BenchmarkCheckpointMetrics:
   """Executes write, flush, read scan, and validation for a single checkpoint."""
   total_steps = 0
   total_bytes = 0
   checkpoint_write_count = target_traj_count - current_traj_count
+  checkpoint_trajectories = itertools.islice(data_iter, checkpoint_write_count)
+  lock = threading.Lock()
 
   # 1. Write + Flush Phase using generator iterator
   print(
       f"  ├─ Writing {checkpoint_write_count:,d} trajectories"
-      f" ({current_traj_count + 1:,d}..{target_traj_count:,d})..."
+      f" ({current_traj_count + 1:,d}..{target_traj_count:,d}) across"
+      f" {num_workers} worker(s) ({len(writers)} writer(s))..."
   )
   with Timer() as write_timer:
-    for _, (metadata, steps) in zip(
-        range(current_traj_count, target_traj_count), data_iter
-    ):
-      for step in steps:
-        writer.add_step(step, metadata)
-        total_steps += 1
-        # We assume generated steps consist solely of string messages.
-        # Check data_generator.generate_trajectories for details.
-        total_bytes += len(step.message)
-    writer.flush()
+    # `writers` holds either one shared writer or one writer per worker; see
+    # `run_recovery_benchmark`.
+    futures = [
+        executor.submit(
+            _drain_trajectories,
+            writers[worker_idx % len(writers)],
+            checkpoint_trajectories,
+            lock,
+        )
+        for worker_idx in range(num_workers)
+    ]
+    for future in futures:
+      steps_written, bytes_written = future.result()
+      total_steps += steps_written
+      total_bytes += bytes_written
+    for w in writers:
+      w.flush()
 
   write_duration = write_timer.duration_sec
   write_qps = (
@@ -173,10 +237,35 @@ def _run_checkpoint(
 
 def run_recovery_benchmark(
     reader: store.TrajectoryReader,
-    writer: store.TrajectoryWriter,
+    writer: store.TrajectoryWriter | Sequence[store.TrajectoryWriter],
     workload: data_generator.WorkloadConfig,
 ) -> BenchmarkReport:
-  """Runs progressive recovery benchmarks across all checkpoints."""
+  """Runs progressive recovery benchmarks across all checkpoints.
+
+  Args:
+    reader: Store used for the recovery read and validation phases.
+    writer: A single shared writer, or one writer per worker when
+      `workload.writer_per_worker` is set.
+    workload: Workload shape, including the worker topology.
+
+  Returns:
+    The report with one entry per checkpoint.
+
+  Raises:
+    ValueError: If the number of writers does not match the worker topology
+      requested by `workload`.
+  """
+  writers: Sequence[store.TrajectoryWriter] = (
+      (writer,) if isinstance(writer, store.TrajectoryWriter) else tuple(writer)
+  )
+  expected_writers = workload.num_workers if workload.writer_per_worker else 1
+  if len(writers) != expected_writers:
+    raise ValueError(
+        f"Expected {expected_writers} writer(s) for num_workers="
+        f"{workload.num_workers} and writer_per_worker="
+        f"{workload.writer_per_worker}, got {len(writers)}."
+    )
+
   total_checkpoints = len(workload.cumulative_trajectory_checkpoints)
   print(
       termcolor.colored(
@@ -191,37 +280,44 @@ def run_recovery_benchmark(
   current_traj_count = 0
   checkpoints = []
 
-  for idx, target_traj_count in enumerate(
-      workload.cumulative_trajectory_checkpoints, start=1
-  ):
-    print(
-        termcolor.colored(
-            f"[{idx}/{total_checkpoints}] Processing checkpoint target:"
-            f" {target_traj_count:,d} trajectories...",
-            "yellow",
-            attrs=["bold"],
-        )
-    )
-    checkpoint = _run_checkpoint(
-        reader=reader,
-        writer=writer,
-        data_iter=data_iter,
-        current_traj_count=current_traj_count,
-        target_traj_count=target_traj_count,
-    )
-    status_color = "green" if checkpoint.validation_passed else "red"
-    print(
-        termcolor.colored(
-            f"[{idx}/{total_checkpoints}] Checkpoint {target_traj_count:,d}"
-            f" finished (Write QPS={checkpoint.write_qps:,.1f},"
-            f" Write MB/s={checkpoint.write_mb_per_sec:,.2f},"
-            f" Meta Scan={checkpoint.metadata_scan_latency_ms:,.1f}ms,"
-            f" Load={checkpoint.trajectory_load_latency_ms:,.1f}ms)",
-            status_color,
-        )
-    )
-    checkpoints.append(checkpoint)
-    current_traj_count = target_traj_count
+  # One pool for the whole run so thread startup and shutdown stay outside
+  # every timed checkpoint section.
+  with concurrent.futures.ThreadPoolExecutor(
+      max_workers=workload.num_workers
+  ) as executor:
+    for idx, target_traj_count in enumerate(
+        workload.cumulative_trajectory_checkpoints, start=1
+    ):
+      print(
+          termcolor.colored(
+              f"[{idx}/{total_checkpoints}] Processing checkpoint target:"
+              f" {target_traj_count:,d} trajectories...",
+              "yellow",
+              attrs=["bold"],
+          )
+      )
+      checkpoint = _run_checkpoint(
+          reader=reader,
+          writers=writers,
+          data_iter=data_iter,
+          current_traj_count=current_traj_count,
+          target_traj_count=target_traj_count,
+          executor=executor,
+          num_workers=workload.num_workers,
+      )
+      status_color = "green" if checkpoint.validation_passed else "red"
+      print(
+          termcolor.colored(
+              f"[{idx}/{total_checkpoints}] Checkpoint {target_traj_count:,d}"
+              f" finished (Write QPS={checkpoint.write_qps:,.1f},"
+              f" Write MB/s={checkpoint.write_mb_per_sec:,.2f},"
+              f" Meta Scan={checkpoint.metadata_scan_latency_ms:,.1f}ms,"
+              f" Load={checkpoint.trajectory_load_latency_ms:,.1f}ms)",
+              status_color,
+          )
+      )
+      checkpoints.append(checkpoint)
+      current_traj_count = target_traj_count
 
   print(
       termcolor.colored(
@@ -232,7 +328,7 @@ def run_recovery_benchmark(
   )
 
   reader_type = type(reader).__name__
-  writer_type = type(writer).__name__
+  writer_type = type(writers[0]).__name__
   return BenchmarkReport(
       reader_type=reader_type,
       writer_type=writer_type,

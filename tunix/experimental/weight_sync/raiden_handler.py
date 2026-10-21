@@ -84,7 +84,7 @@ def make_host_staged_transfer_options(
   """Transfer options for host-staged (CPU) weight sources.
 
   The controller derives skip_tiling from slice geometry when none is
-  given, marking aligned tensors as pre-tiled -- but a host-staged source
+  given, marking aligned tensors as pre-tiled — but a host-staged source
   can only stage logical bytes, so the derived plan installs permuted
   data. An explicit all-False map keeps every tensor on the logical path.
 
@@ -198,7 +198,7 @@ class _RaidenTransport:
   @staticmethod
   def _to_variable_proto(tensor: weight_sync.TensorMetadata) -> Any:
     """Converts a TensorMetadata object to a VariableMetadataProto."""
-    var_proto = raiden_service_pb2.VariableMetadataProto(
+    return raiden_service_pb2.VariableMetadataProto(
         name=tensor.name,
         shape=list(tensor.shape),
         mesh_shape=list(tensor.mesh_shape),
@@ -206,10 +206,8 @@ class _RaidenTransport:
         item_size=tensor.item_size,
         layer_idx=tensor.layer_idx,
         sharding_spec=list(tensor.sharding_spec),
+        global_shard_indices=list(tensor.global_shard_indices),
     )
-    if hasattr(tensor, "global_shard_indices") and tensor.global_shard_indices:
-      var_proto.global_shard_indices.extend(tensor.global_shard_indices)
-    return var_proto
 
   def register_work_unit(self, metadata: weight_sync.WorkUnitMetadata) -> None:
     """Registers a work unit and its shard addresses with the controller."""
@@ -233,9 +231,6 @@ class _RaidenTransport:
             [self._to_variable_proto(tensor) for tensor in metadata.variables]
             if metadata.variables
             else None
-        ),
-        host_subgrid=(
-            list(metadata.host_subgrid) if metadata.host_subgrid else None
         ),
     )
     with self._registered_lock:

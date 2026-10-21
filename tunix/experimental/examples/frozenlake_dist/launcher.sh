@@ -305,6 +305,7 @@ TRAINER_PID=$!
     --env_name=frozenlake_env
     --agent_name=frozenlake_agent
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
+    --episode_timeout_secs="$EPISODE_TIMEOUT_SECS"
     --vllm_hbm_utilization="$VLLM_HBM_UTILIZATION"
     --vllm_max_num_seqs="$VLLM_MAX_NUM_SEQS"
     --vllm_max_num_batched_tokens="$VLLM_MAX_NUM_BATCHED_TOKENS"
@@ -377,7 +378,7 @@ cmd=(
   --sampler_is_threshold="$SAMPLER_IS_THRESHOLD"
   --seed="$SEED"
   --weight_sync_mode="$WEIGHT_SYNC_MODE"
-  --trainer_fsdp="$TRAINER_FSDP"
+  --num_data_shards="$(( ${TRAINER_FSDP:-1} * ${TRAINER_EXPERT:-1} ))"
   --grid_size_range $GRID_SIZE_RANGE
   --stop_workers_on_exit
   --enable_trajectory_store="$TRAJECTORY_STORE_ENABLED"

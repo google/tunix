@@ -28,7 +28,9 @@ import signal
 import sys
 from typing import Any
 
+from tunix.common import datatypes as common_datatypes
 from tunix.experimental.common import gcs_cache
+from tunix.experimental.common import timeouts
 from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
 from tunix.models import automodel
@@ -46,12 +48,6 @@ REPO_ROOT = os.path.abspath(
 # rollout process can start with non-vLLM samplers in environments where vLLM is
 # not installed.
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-if os.environ.get("WEIGHT_SYNC_PARALLEL_H2H", ""):
-  _ray_extra_vars = os.environ.get("VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", "")
-  _ray_parts = [p.strip() for p in _ray_extra_vars.split(",") if p.strip()]
-  if "WEIGHT_SYNC_PARALLEL_H2H" not in _ray_parts:
-    _ray_parts.append("WEIGHT_SYNC_PARALLEL_H2H")
-    os.environ["VLLM_RAY_EXTRA_ENV_VARS_TO_COPY"] = ",".join(_ray_parts)
 
 CHAT_PARSERS = {
     "gemma-4": chat_parser_lib.Gemma4ChatTemplateParser,
@@ -307,6 +303,28 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--maxtext_float32_gate_logits",
+      type=_str2bool,
+      default=None,
+      nargs="?",
+      const=True,
+      help=(
+          "Whether MaxText inference runs the MoE gate (router) in float32"
+          " (None keeps the model config default)."
+      ),
+  )
+  parser.add_argument(
+      "--maxtext_float32_logits",
+      type=_str2bool,
+      default=None,
+      nargs="?",
+      const=True,
+      help=(
+          "Whether MaxText inference dot-product attention casts its softmax"
+          " inputs to float32 (None keeps the model config default)."
+      ),
+  )
+  parser.add_argument(
       "--chat_parser",
       type=str,
       default=os.getenv("CHAT_PARSER", "auto"),
@@ -355,6 +373,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Maximum concurrent trajectory collections inside this worker.",
   )
   parser.add_argument(
+      "--episode_timeout_secs",
+      type=float,
+      default=float(
+          os.getenv(
+              "EPISODE_TIMEOUT_SECS",
+              str(int(timeouts.DEFAULT_EPISODE_TIMEOUT_S)),
+          )
+      ),
+      help=(
+          "Per-episode timeout in seconds used to derive the rollout worker's"
+          " soft pre-weight-sync drain window (`episode_timeout_secs + 60s`)."
+      ),
+  )
+  parser.add_argument(
       "--enable_thinking",
       action=argparse.BooleanOptionalAction,
       default=False,
@@ -385,6 +417,33 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       nargs="?",
       const=True,
       help="Enable KV prefix caching in vLLM sampler.",
+  )
+  parser.add_argument(
+      "--return_routed_experts",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help=(
+          "Capture the MoE experts each token was routed to, so the trainer"
+          " can replay them. Replay needs the MaxText trainer backend."
+      ),
+  )
+  parser.add_argument(
+      "--routed_experts_encode_mode",
+      choices=common_datatypes.ROUTED_EXPERTS_ENCODE_MODES,
+      default="auto",
+      help="Compact encoding for captured routed experts.",
+  )
+  parser.add_argument(
+      "--routed_experts_num_experts",
+      type=int,
+      default=None,
+      help=(
+          "Experts per MoE layer (E); captured ids >= E are rejected. With"
+          " --routed_experts_encode_mode=auto, the tier comes from E instead"
+          " of the ids seen. Set the same value on the orchestrator."
+      ),
   )
   parser.add_argument(
       "--in_flight_weight_updates",
@@ -454,36 +513,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Root directory for the file-backed TrajectoryStore.",
   )
   parser.add_argument(
-      "--return_routed_experts",
-      type=_str2bool,
-      default=_str2bool(os.getenv("RETURN_ROUTED_EXPERTS", "false")),
-      nargs="?",
-      const=True,
-      help="Return MoE routed expert IDs from vLLM sampler for router replay.",
-  )
-  parser.add_argument(
       "--store_routed_experts",
       type=_str2bool,
       default=_str2bool(os.getenv("STORE_ROUTED_EXPERTS", "false")),
       nargs="?",
       const=True,
       help="Persist routed_experts in TrajectoryStore.",
-  )
-  parser.add_argument(
-      "--routed_experts_encode_mode",
-      type=str,
-      default=os.getenv("ROUTED_EXPERTS_ENCODE_MODE", "auto"),
-      help="Compact encoding mode for MoE routed_experts (auto, uint8, uint10, int16).",
-  )
-  parser.add_argument(
-      "--routed_experts_num_experts",
-      type=lambda v: None if v is None or str(v).strip() == "" or str(v).strip().lower() == "none" else int(v),
-      default=(
-          int(os.getenv("ROUTED_EXPERTS_NUM_EXPERTS"))
-          if os.getenv("ROUTED_EXPERTS_NUM_EXPERTS", "").strip()
-          else None
-      ),
-      help="Total number of MoE experts per layer for routed_experts_encode_mode=auto.",
   )
   parser.add_argument(
       "--free_kv_cache_during_weight_sync",
@@ -514,6 +549,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Base random seed for the rollout sampler engine.",
   )
   args = parser.parse_args(argv)
+  if args.return_routed_experts and args.sampler == "vanilla":
+    parser.error(
+        "--return_routed_experts needs a vLLM sampler; the vanilla sampler"
+        " does not capture routed experts."
+    )
+  try:
+    args.episode_timeout_secs = timeouts.validate_positive_finite(
+        args.episode_timeout_secs, "episode_timeout_secs"
+    )
+  except ValueError as exc:
+    parser.error(str(exc))
   _get_tensor_parallel_size(args)
   return args
 
@@ -546,7 +592,6 @@ def _trajectory_store_config(
   if not getattr(args, "enable_trajectory_store", False):
     return None
   config: dict[str, Any] = {
-      "enabled": True,
       "backend": getattr(args, "trajectory_store_backend", "file") or "file",
   }
   root_dir = getattr(args, "trajectory_store_dir", "")
@@ -556,9 +601,9 @@ def _trajectory_store_config(
       getattr(args, "run_id", "")
       or os.getenv("RUN_ID", "")
       or os.getenv("JOB_PREFIX", "")
-      or "default"
   )
-  config["run_id"] = run_id
+  if run_id:
+    config["run_id"] = run_id
   return config
 
 
@@ -615,14 +660,13 @@ def _rollout_config_kwargs(
       "env_name": args.env_name,
       "agent_name": args.agent_name,
       "agent_config": _agent_config(args),
+      "partial_rollout": bool(getattr(args, "in_flight_weight_updates", False)),
+      "drain_timeout_s": timeouts.drain_timeout_for(args.episode_timeout_secs),
+      "trajectory_store_config": _trajectory_store_config(args),
       "return_routed_experts": args.return_routed_experts,
       "store_routed_experts": args.store_routed_experts,
       "routed_experts_encode_mode": args.routed_experts_encode_mode,
       "routed_experts_num_experts": args.routed_experts_num_experts,
-      "partial_rollout": bool(
-          getattr(args, "in_flight_weight_updates", False)
-      ),
-      "trajectory_store_config": _trajectory_store_config(args),
   }
 
 
@@ -648,7 +692,7 @@ def _create_rollout_mesh(args) -> Any:
 def _create_vanilla_worker(args, tokenizer):
   """Creates a vanilla sampler rollout worker instance."""
   from tunix.experimental.rollout import (  # pylint: disable=g-import-not-at-top
-      vanilla_sampler_adapter,
+      vanilla_sampler,
   )
   from tunix.experimental.worker import (  # pylint: disable=g-import-not-at-top
       rollout_worker,
@@ -669,13 +713,13 @@ def _create_vanilla_worker(args, tokenizer):
     )
   config = rollout_worker.RolloutConfig(
       sampler_type="vanilla",
+      kv_cache_size=args.max_prompt_length + args.max_response_length,
       **_rollout_config_kwargs(args, tokenizer),
   )
-  sampler_adapter = vanilla_sampler_adapter.VanillaSamplerAdapter(
+  sampler = vanilla_sampler.VanillaSampler(
       server_id=args.worker_id,
       transformer=model,
       tokenizer=tokenizer,
-      cache_config=args.max_prompt_length + args.max_response_length,
       config=config,
   )
 
@@ -689,7 +733,7 @@ def _create_vanilla_worker(args, tokenizer):
   return rollout_worker.RolloutWorker(
       worker_id=args.worker_id,
       config=config,
-      sampler=sampler_adapter,
+      sampler=sampler,
       tokenizer=rollout_tokenizer,
       chat_parser=chat_parser,
       max_concurrency=args.max_concurrency,
@@ -805,6 +849,9 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
             args.maxtext_model_name,
             attention=args.maxtext_attention,
             prefuse_moe_weights=args.prefuse_moe_weights,
+            return_routed_experts=args.return_routed_experts,
+            float32_gate_logits=args.maxtext_float32_gate_logits,
+            float32_logits=args.maxtext_float32_logits,
         )
     )
 
@@ -841,6 +888,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       tensor_parallel_size=tp_size,
       data_parallel_size=args.mesh_fsdp,
       return_logprobs=True,
+      return_routed_experts=args.return_routed_experts,
       init_with_random_weights=args.vllm_init_with_random_weights,
       hbm_utilization=args.vllm_hbm_utilization,
       lora_config=lora_config,
@@ -945,7 +993,6 @@ def _create_vllm_sampler(args, tokenizer):
       max_loras=1 if args.use_lora else None,
       enable_prefix_caching=enable_prefix_caching,
       async_scheduling=args.vllm_async_scheduling,
-      enable_return_routed_experts=args.return_routed_experts,
       scheduling_policy=scheduling_policy,
       max_logprobs=1,
       logprobs_mode="processed_logprobs",
@@ -964,11 +1011,14 @@ def _create_vllm_sampler(args, tokenizer):
     engine_kwargs["max_num_seqs"] = args.vllm_max_num_seqs
   if args.vllm_max_num_batched_tokens is not None:
     engine_kwargs["max_num_batched_tokens"] = args.vllm_max_num_batched_tokens
+  if args.return_routed_experts:
+    engine_kwargs["enable_return_routed_experts"] = True
   prefuse_moe = vllm_overrides.pop(
       "prefuse_moe_weights", args.prefuse_moe_weights
   )
   maxtext_additional_config = {}
   if args.maxtext_model_name:
+    # The architectures override is applied by `_vllm_hf_overrides`.
     logging.info(
         "Loading MaxText model %r natively via maxtext_vllm_adapter's"
         " MaxTextForCausalLM (architectures override).",
@@ -980,6 +1030,8 @@ def _create_vllm_sampler(args, tokenizer):
             attention=args.maxtext_attention,
             prefuse_moe_weights=prefuse_moe,
             return_routed_experts=args.return_routed_experts,
+            float32_gate_logits=args.maxtext_float32_gate_logits,
+            float32_logits=args.maxtext_float32_logits,
         )
     )
   vllm_additional_config = vllm_overrides.pop("additional_config", None)

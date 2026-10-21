@@ -18,16 +18,12 @@ Supervises WorkerRegistry, LifecycleDriver, HealthMonitor, and StartupValidator.
 Provides supervised RL program execution (`run`).
 """
 
-import collections
-from collections.abc import Sequence
-from concurrent import futures
 import contextlib
-import pickle
-import time
 from typing import Any, Mapping
 
 from absl import logging
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import timeouts
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import health_monitor
 from tunix.experimental.orchestrator import lifecycle
@@ -35,11 +31,7 @@ from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.orchestrator import startup_validation
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.trajectory import store as trajectory_store_lib
-from tunix.experimental.worker import abstract_worker
-from tunix.experimental.worker import remote_execution
-
-
-_STOP_TIMEOUT_S = 60.0  # Timeout for stopping remote workers. 60 should not be touched for any healthy stop.
+from tunix.experimental.weight_sync import weight_sync_coordinator
 
 
 class ClusterOrchestrator:
@@ -53,6 +45,7 @@ class ClusterOrchestrator:
       monitor: health_monitor.HealthMonitor | None = None,
       weight_sync_mode: str | None = None,
       trajectory_store_config: Mapping[str, Any] | None = None,
+      weight_sync_timeouts: weight_sync_coordinator.PhaseTimeouts | None = None,
   ):
     """Initializes ClusterOrchestrator.
 
@@ -62,29 +55,26 @@ class ClusterOrchestrator:
       lifecycle_driver: Lifecycle driver to use; one is created if omitted.
       monitor: Health monitor to use; one is created if omitted.
       weight_sync_mode: Weight sync mode, if any.
-      trajectory_store_config: Trajectory Store configuration for this
-        process, or None to run without a store. See
-        `store.TrajectoryStore.from_config`. Pass the same config to every
-        process in the run: for the file backend it is the shared root_dir
-        and run_id that will make the workers' writes visible to this
-        process's reads once read/write wiring is connected.
+      trajectory_store_config: Trajectory Store configuration for this process,
+        or None to run without a store. See `store.TrajectoryStore.from_config`.
+        Pass the same config to every process in the run: for the file backend
+        it is the shared root_dir and run_id that will make the workers' writes
+        visible to this process's reads once read/write wiring is connected.
+      weight_sync_timeouts: Per-phase deadlines forwarded to
+        `WeightSyncCoordinator`, or None to use `PhaseTimeouts()` defaults.
     """
     self.config = config
-    self.registry = registry or worker_registry.WorkerRegistry()
+    self.registry = (
+        registry if registry is not None else worker_registry.WorkerRegistry()
+    )
     self.lifecycle_driver = lifecycle_driver or lifecycle.LifecycleDriver(
         self.registry
     )
     self.monitor = monitor or health_monitor.HealthMonitor(self.registry)
-    self._remote_worker_handles: dict[
-        str, list[remote_execution.ActorHandle]
-    ] = collections.defaultdict(list)
-    self._remote_worker_handles_by_id: dict[
-        str, remote_execution.ActorHandle
-    ] = {}
-    self._remote_worker_infos: dict[str, datatypes.WorkerInfo] = {}
     self.engine: distributed_rl_engine.DistributedRLEngine | None = None
     mode = getattr(weight_sync_mode, "value", weight_sync_mode)
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
+    self._weight_sync_timeouts = weight_sync_timeouts
     # The sole construction site for this process's Trajectory Store: one
     # ClusterOrchestrator exists per orchestrator process, so building it
     # here — once, in __init__ — is the whole guard. Its lifetime is meant
@@ -115,189 +105,15 @@ class ClusterOrchestrator:
   def __exit__(self, exc_type, exc_val, exc_tb) -> None:
     self.shutdown()
 
-  def register_worker_from_hostname(
-      self,
-      hostname: str,
-      _: int,
-      metadata: bytes,
-      rpc_timeout_s: float = 1800.0,
-  ) -> None:
-    """Registers a remote worker handle from a hostname and metadata."""
-    md = pickle.loads(metadata)
-
-    # NB: this should align with workers
-    service_type = md["service_type"]
-    service_address = f"{hostname}:{md['service_port']}"
-    worker_id = md["worker_id"]
-
-    logging.info(
-        "Discovered %s service (%s) at %s.",
-        service_type,
-        worker_id,
-        service_address,
-    )
-
-    match service_type:
-      case "trainer":
-        role = datatypes.Role.ACTOR
-      case "rollout":
-        role = datatypes.Role.ROLLOUT
-      case "inference":
-        role = datatypes.Role.REFERENCE
-      case _:
-        raise RuntimeError(f"unknown service type {service_type}")
-
-    resources = {"address": service_address}
-    if "trajectory_store_config" in md:
-      resources["trajectory_store_config"] = md["trajectory_store_config"]
-    self.register_worker_handle(
-        worker_id=worker_id,
-        roles=[role],
-        handle=remote_execution.ActorHandle.from_address(
-            f"grpc://{service_address}",
-            rpc_timeout_s=rpc_timeout_s,
-        ),
-        resources=resources,
-    )
-
-  def register_worker(
-      self, worker: abstract_worker.Worker
-  ) -> datatypes.WorkerInfo:
-    """Registers a worker in the WorkerRegistry."""
-    return self.registry.register(worker)
-
-  def register_worker_handle(
-      self,
-      worker_id: str,
-      roles: Sequence[datatypes.Role | str],
-      handle: remote_execution.ActorHandle,
-      resources: dict[str, Any] | None = None,
-  ) -> datatypes.WorkerInfo:
-    """Registers a remote worker handle used directly by DistributedRLEngine."""
-    if not roles:
-      raise ValueError(f"worker {worker_id!r} declares no roles")
-    if not isinstance(handle, remote_execution.ActorHandle):
-      raise TypeError(
-          "register_worker_handle expects a remote_execution.ActorHandle, got "
-          f"{type(handle)}"
-      )
-    if (
-        worker_id in self._remote_worker_infos
-        or worker_id in self.registry.worker_ids()
-    ):
-      raise ValueError(f"duplicate worker_id: {worker_id!r}")
-    role_names = frozenset(
-        role.value if isinstance(role, datatypes.Role) else role
-        for role in roles
-    )
-    info = datatypes.WorkerInfo(
-        worker_id=worker_id,
-        roles=role_names,
-        resources={"remote": True, **dict(resources or {})},
-    )
-    for role in role_names:
-      self._remote_worker_handles[role].append(handle)
-    self._remote_worker_handles_by_id[worker_id] = handle
-    self._remote_worker_infos[worker_id] = info
-    logging.info(
-        "Registered remote worker %r with roles %s.",
-        worker_id,
-        sorted(role_names),
-    )
-    return info
-
-  def unregister_worker(self, worker_id: str) -> None:
-    """Unregisters a worker by its id."""
-    if worker_id in self._remote_worker_infos:
-      info = self._remote_worker_infos.pop(worker_id)
-      handle = self._remote_worker_handles_by_id.pop(worker_id)
-      for role in info.roles:
-        handles = self._remote_worker_handles.get(role)
-        if handles is not None:
-          self._remote_worker_handles[role] = [
-              h for h in handles if h is not handle
-          ]
-          if not self._remote_worker_handles[role]:
-            del self._remote_worker_handles[role]
-      return
-    self.registry.unregister(worker_id)
-
-  def wait_for_workers(
-      self,
-      min_workers: dict[datatypes.Role | str, int],
-      timeout: float | None = None,
-      poll_interval_s: float = 0.5,
-  ) -> None:
-    """Waits for registered workers to meet the minimum required counts.
-
-    Args:
-      min_workers: A dictionary mapping Role or role name to the minimum number
-        of workers required.
-      timeout: Maximum duration to wait in seconds before raising TimeoutError.
-        If None, waits indefinitely until requirements are met.
-      poll_interval_s: Time in seconds between polling attempts.
-
-    Raises:
-      TimeoutError: If the required worker counts are not met within timeout.
-    """
-    start_time = time.monotonic()
-    while True:
-      current_counts = {
-          role: len(self.worker_handles(role)) for role in min_workers
-      }
-      if all(
-          current_counts[role] >= target_count
-          for role, target_count in min_workers.items()
-      ):
-        logging.info(
-            "All required workers are ready. Current counts: %s",
-            current_counts,
-        )
-        return
-
-      if timeout is not None and (time.monotonic() - start_time) >= timeout:
-        raise TimeoutError(
-            f"Timed out after {timeout}s waiting for workers. "
-            f"Required: {min_workers}, Current: {current_counts}"
-        )
-
-      sleep_duration = poll_interval_s
-      if timeout is not None:
-        remaining = timeout - (time.monotonic() - start_time)
-        sleep_duration = min(poll_interval_s, max(0.0, remaining))
-
-      time.sleep(sleep_duration)
-
-  def worker_infos(self) -> list[datatypes.WorkerInfo]:
-    """Returns local and remote worker metadata registered with the orchestrator."""
-    registry_ids = self.registry.worker_ids()
-    return self.registry.infos() + [
-        self._remote_worker_infos[worker_id]
-        for worker_id in sorted(self._remote_worker_infos)
-        if worker_id not in registry_ids
-    ]
-
-  def worker_handles(
-      self, role: datatypes.Role | str
-  ) -> list[remote_execution.ActorHandle]:
-    """Returns handles for all workers (remote and local) registered under the given role."""
-    return self._get_actor_handles(role)
-
-  def remote_worker_handles(
-      self,
-  ) -> dict[str, remote_execution.ActorHandle]:
-    """Returns a copy of worker_id -> ActorHandle for all registered remote workers."""
-    return dict(self._remote_worker_handles_by_id)
-
   def bring_up_workers(self, dummy_data: Any = None) -> None:
     """Brings up all registered workers through lifecycle initialization."""
     logging.info(
         "Bringing up %d registered worker(s)...",
-        len(self.worker_infos()),
+        len(self.registry),
     )
     self.lifecycle_driver.bring_up(dummy_data)
-    self._bring_up_remote_workers(dummy_data)
     self._verify_rollout_trajectory_store_configs()
+    self._verify_rollout_weight_sync_timeouts()
     self.engine = self._create_engine()
     logging.info("All workers brought up successfully.")
 
@@ -308,47 +124,52 @@ class ClusterOrchestrator:
         if self.trajectory_store is not None
         else None
     )
-    for worker in self._get_role_members(datatypes.Role.ROLLOUT):
-      info = worker.info()
-      resources = getattr(info, "resources", None) or {}
-      if "trajectory_store_config" in resources:
-        worker_config = resources["trajectory_store_config"]
-      elif hasattr(worker, "trajectory_store"):
-        store = getattr(worker, "trajectory_store")
-        worker_config = store.to_config() if store is not None else None
-      else:
-        worker_config = None
+    for info in self.registry.infos(datatypes.Role.ROLLOUT):
+      worker_config = info.resources.get("trajectory_store_config")
       if worker_config != expected_config:
         raise ValueError(
             f"Rollout worker {info.worker_id!r} trajectory_store_config "
             f"{worker_config!r} does not match orchestrator "
             f"trajectory_store_config {expected_config!r}."
         )
-    for worker_id in sorted(self._remote_worker_infos):
-      info = self._remote_worker_infos[worker_id]
-      if (
-          datatypes.Role.ROLLOUT.value not in info.roles
-          and datatypes.Role.ROLLOUT not in info.roles
-      ):
+
+  def _verify_rollout_weight_sync_timeouts(self) -> None:
+    """Verifies that Coordinator `PhaseTimeouts.pre` covers each rollout worker's soft drain window."""
+    if self._weight_sync_mode in (None, "none"):
+      return
+    timeouts_cfg = (
+        self._weight_sync_timeouts or weight_sync_coordinator.PhaseTimeouts()
+    )
+    for info in self.registry.infos(datatypes.Role.ROLLOUT):
+      for key in ("partial_rollout", "drain_timeout_s"):
+        if key not in info.resources:
+          raise ValueError(
+              f"Rollout worker {info.worker_id!r} is missing required resource"
+              f" key {key!r} in info.resources (present keys:"
+              f" {sorted(info.resources)!r})."
+          )
+      if info.resources["partial_rollout"]:
         continue
-      worker_config = info.resources.get("trajectory_store_config")
-      if worker_config != expected_config:
+      drain_timeout_s = info.resources["drain_timeout_s"]
+      required_pre_s = timeouts.pre_weight_sync_timeout_for(drain_timeout_s)
+      if required_pre_s > timeouts_cfg.pre:
         raise ValueError(
-            f"Rollout worker {worker_id!r} trajectory_store_config "
-            f"{worker_config!r} does not match orchestrator "
-            f"trajectory_store_config {expected_config!r}."
+            f"Rollout worker {info.worker_id!r} has"
+            f" drain_timeout_s={drain_timeout_s} (partial_rollout=False),"
+            f" which requires PhaseTimeouts.pre >= {required_pre_s}s, but"
+            f" orchestrator weight_sync_timeouts.pre is {timeouts_cfg.pre}s."
         )
 
   def shutdown(self) -> None:
-    """Shuts down all workers and closes health monitoring resources."""
+    """Shuts down all workers, closes handles, and closes health monitoring resources."""
     logging.info("Shutting down all workers...")
     with contextlib.ExitStack() as stack:
       # Registered in reverse order of execution (LIFO) so that every stage
       # runs even if a preceding stage raises an exception.
       if self.trajectory_store is not None:
         stack.callback(self.trajectory_store.close)
+      stack.callback(self.registry.close)
       stack.callback(self.lifecycle_driver.shutdown)
-      stack.callback(self._shutdown_remote_workers)
       stack.callback(self.monitor.close)
     logging.info("Shutdown complete.")
 
@@ -358,137 +179,22 @@ class ClusterOrchestrator:
         self.registry, alg_config, training_config
     )
 
-  def _get_role_members(self, role: datatypes.Role | str) -> list[Any]:
-    role_key = role.value if isinstance(role, datatypes.Role) else role
-    members = self.registry.group(role_key).members()
-
-    # Fallback in case workers were registered with the enum object directly
-    if not members and isinstance(role, datatypes.Role):
-      members = self.registry.group(role).members()
-    return members
-
-  def _get_actor_handles(
-      self, role: datatypes.Role | str
-  ) -> list[remote_execution.ActorHandle]:
-    role_key = role.value if isinstance(role, datatypes.Role) else role
-    handles = list(self._remote_worker_handles.get(role_key, ()))
-    handles.extend(
-        remote_execution.InProcessActorHandle(
-            remote_execution.InProcessRemoteExecutionServer(worker)
-        )
-        for worker in self._get_role_members(role)
-    )
-    return handles
-
-  def _bring_up_remote_workers(self, dummy_data: Any = None) -> None:
-    """Runs lifecycle hooks concurrently across remote worker handles."""
-    worker_ids = sorted(self._remote_worker_infos)
-    if not worker_ids:
-      return
-
-    # Each worker_id is an independent slice/replica; cross-worker weight-sync
-    # pairing runs via WeightSyncCoordinator after bring_up_workers() returns.
-    def _bring_up_worker(worker_id: str) -> None:
-      handle = self._remote_worker_handles_by_id[worker_id]
-      logging.info("Initializing remote worker %s.", worker_id)
-      init_resp = handle.submit("initialize")
-      init_metadata = getattr(init_resp, "metadata", None)
-      if (
-          isinstance(init_metadata, Mapping)
-          and "trajectory_store_config" in init_metadata
-      ):
-        self._remote_worker_infos[worker_id].resources[
-            "trajectory_store_config"
-        ] = init_metadata["trajectory_store_config"]
-      logging.info("Compiling remote worker %s.", worker_id)
-      handle.submit("compile", dummy_data)
-      logging.info("Starting remote worker %s.", worker_id)
-      handle.submit("start")
-
-    failures: list[tuple[str, BaseException]] = []
-    with futures.ThreadPoolExecutor(max_workers=len(worker_ids)) as pool:
-      fut_to_wid = {
-          pool.submit(_bring_up_worker, wid): wid for wid in worker_ids
-      }
-      for fut in futures.as_completed(fut_to_wid):
-        wid = fut_to_wid[fut]
-        try:
-          fut.result()
-        except Exception as err:  # pylint: disable=broad-except
-          logging.error("Remote worker %s failed bring-up: %r", wid, err)
-          failures.append((wid, err))
-
-    if failures:
-      failures.sort(key=lambda item: item[0])
-      raise lifecycle.LifecycleError("bring_up", failures) from failures[0][1]
-
-  def _shutdown_remote_workers(self) -> None:
-    """Stops remote worker handles best-effort, with a hard timeout."""
-    pool = futures.ThreadPoolExecutor(
-        max_workers=max(1, len(self._remote_worker_infos))
-    )
-    stops = {
-        worker_id: pool.submit(
-            self._remote_worker_handles_by_id[worker_id].submit, "stop"
-        )
-        for worker_id in sorted(self._remote_worker_infos)
-    }
-    for worker_id, fut in stops.items():
-      try:
-        fut.result(timeout=_STOP_TIMEOUT_S)
-      except Exception as err:  # pylint: disable=broad-except
-        logging.warning("Failed to stop remote worker %s: %r", worker_id, err)
-    pool.shutdown(wait=False)
-
   def _create_engine(self) -> distributed_rl_engine.DistributedRLEngine:
     """Constructs a DistributedRLEngine from the registered role groups."""
-    rollout_workers = self._get_actor_handles(datatypes.Role.ROLLOUT)
-    actor_workers = self._get_actor_handles(datatypes.Role.ACTOR)
-    critic_workers = self._get_actor_handles(datatypes.Role.CRITIC)
-    reference_workers = self._get_actor_handles(datatypes.Role.REFERENCE)
-
-    trainer_workers = {}
-    if actor_workers:
-      trainer_workers[datatypes.Role.ACTOR] = actor_workers[0]
-    if critic_workers:
-      trainer_workers[datatypes.Role.CRITIC] = critic_workers[0]
-
-    inference_workers = {}
-    if reference_workers:
-      inference_workers[datatypes.Role.REFERENCE] = reference_workers[0]
-
     coordinator = None
     if self._weight_sync_mode not in (None, "none"):
-      from tunix.experimental.weight_sync import weight_sync_coordinator
-
       handler = weight_sync_coordinator.create_default_handler(
           mode=self._weight_sync_mode
       )
-
-      handle_to_id = {
-          v: k for k, v in self._remote_worker_handles_by_id.items()
-      }
-      for role, handles in [
-          (datatypes.Role.ACTOR, actor_workers),
-          (datatypes.Role.ROLLOUT, rollout_workers),
-      ]:
-        for h in handles:
-          w_id = handle_to_id.get(h, f"local-{role.value}-{id(h)}")
-          info = self._remote_worker_infos.get(w_id) or datatypes.WorkerInfo(
-              worker_id=w_id, roles=frozenset({role.value})
-          )
-          self.registry.register(weight_sync_coordinator.RemoteWorkerShim(h, info), override=True)  # pyrefly: ignore[bad-argument-type]
-
       coordinator = weight_sync_coordinator.WeightSyncCoordinator(
           registry=self.registry,
           handler=handler,
           controller_id="auto-coordinator",
+          timeouts=self._weight_sync_timeouts,
       )
 
     return distributed_rl_engine.DistributedRLEngine(
-        rollout_workers=rollout_workers,
-        trainer_workers=trainer_workers,
-        inference_workers=inference_workers,
+        registry=self.registry,
         weight_sync_coordinator=coordinator,
     )
 

@@ -15,6 +15,9 @@
 """Tests for the type-agnostic packing core logic."""
 
 import dataclasses
+import os
+import signal
+import time
 from absl.testing import absltest
 import numpy as np
 from tunix.rl import packing
@@ -935,6 +938,262 @@ class PackSegmentAlignmentTest(absltest.TestCase):
           np.testing.assert_array_equal(re_batched_i16, raw_batched_k8)
         finally:
           packing._packing_ext = orig_ext
+
+
+class ParallelPackingPoolTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.assertIsNotNone(packing._packing_ext)
+    self._orig_threads = packing._packing_ext.get_packing_threads()
+    packing._packing_ext.set_packing_threads(4)
+
+  def tearDown(self):
+    if packing._packing_ext is not None:
+      packing._packing_ext.set_packing_threads(self._orig_threads)
+    super().tearDown()
+
+  def test_set_packing_threads_validation(self):
+    self.assertEqual(packing._packing_ext.get_packing_threads(), 4)
+    self.assertEqual(
+        packing._packing_ext.MIN_BYTES_PER_THREAD, 2 * 1024 * 1024
+    )
+    self.assertEqual(
+        packing._packing_ext.MIN_PARALLEL_BYTES,
+        2 * packing._packing_ext.MIN_BYTES_PER_THREAD,
+    )
+    max_t = packing._packing_ext.MAX_PACKING_THREADS
+    for invalid_n in (0, -1, max_t + 1):
+      with self.assertRaisesRegex(ValueError, "num_threads must be in"):
+        packing._packing_ext.set_packing_threads(invalid_n)
+    self.assertEqual(packing._packing_ext.get_packing_threads(), 4)
+    self.assertIsNotNone(packing._packing_ext)
+
+  def test_parallel_chunk_population_across_routed_encodings(self):
+    rng = np.random.default_rng(2026)
+    n_bins = 8
+    budget = 4096
+    top_k = 8
+    num_layers = 16
+    min_bytes_per_token = 28 + num_layers * top_k
+    self.assertGreaterEqual(
+        n_bins * budget * min_bytes_per_token,
+        packing._packing_ext.MIN_PARALLEL_BYTES,
+    )
+    self.assertGreaterEqual(packing._packing_ext.MAX_PACKING_THREADS, 1)
+    modes = (
+        "int16",
+        "uint8",
+        "uint10",
+        "mixed_u8_u10",
+        "mixed_u8_i16",
+        "mixed_u10_i16",
+    )
+    for mode in modes:
+      with self.subTest(mode=mode):
+        items: list[packing.PackItem] = []
+        for idx in range(20):
+          p_len = int(rng.integers(128, 384))
+          c_len = int(rng.integers(512, 1024))
+          seq_len = p_len + c_len
+          prompt_ids = rng.integers(1, 1000, size=p_len, dtype=np.int32)
+          completion_ids = rng.integers(1, 1000, size=c_len, dtype=np.int32)
+          completion_mask = np.ones(c_len, dtype=np.float32)
+          advantages = rng.standard_normal(c_len).astype(np.float32)
+          old_logps = rng.standard_normal(c_len).astype(np.float32)
+
+          if idx == 3:
+            routed = None
+          else:
+            if mode == "uint8":
+              item_tier = "uint8"
+            elif mode == "uint10":
+              item_tier = "uint10"
+            elif mode == "int16":
+              item_tier = "int16"
+            elif mode == "mixed_u8_u10":
+              item_tier = "uint8" if idx % 2 == 0 else "uint10"
+            elif mode == "mixed_u8_i16":
+              item_tier = "uint8" if idx % 2 == 0 else "int16"
+            else:  # mixed_u10_i16
+              item_tier = "uint10" if idx % 2 == 0 else "int16"
+
+            max_exp = 200 if item_tier == "uint8" else 800
+            raw_r = rng.integers(
+                -1,
+                max_exp,
+                size=(seq_len - 1, num_layers, top_k),
+                dtype=np.int16,
+            )
+            if item_tier == "int16":
+              routed = raw_r
+            elif item_tier == "uint8":
+              routed = packing.encode_routed_experts(raw_r, mode="uint8")
+            else:
+              routed = packing.encode_routed_experts(raw_r, mode="uint10")
+
+          items.append(
+              packing.PackItem(
+                  prompt_ids=prompt_ids,
+                  completion_ids=completion_ids,
+                  completion_mask=completion_mask,
+                  advantages=advantages,
+                  per_token={"old_per_token_logps": old_logps},
+                  routed_experts=routed,
+              )
+          )
+
+        cpp_chunks = packing.pack_core(
+            items,
+            budget=budget,
+            pack_size=n_bins,
+            pad_id=0,
+            segment_alignment_boundary=64,
+        )
+        orig_ext = packing._packing_ext
+        try:
+          packing._packing_ext = None
+          py_chunks = packing.pack_core(
+              items,
+              budget=budget,
+              pack_size=n_bins,
+              pad_id=0,
+              segment_alignment_boundary=64,
+          )
+        finally:
+          packing._packing_ext = orig_ext
+
+        self.assertEqual(len(cpp_chunks), len(py_chunks))
+        for cpp_c, py_c in zip(cpp_chunks, py_chunks):
+          np.testing.assert_array_equal(cpp_c.ids, py_c.ids)
+          np.testing.assert_array_equal(cpp_c.prompt_mask, py_c.prompt_mask)
+          np.testing.assert_array_equal(
+              cpp_c.completion_mask, py_c.completion_mask
+          )
+          np.testing.assert_array_equal(cpp_c.advantages, py_c.advantages)
+          np.testing.assert_array_equal(cpp_c.segment_ids, py_c.segment_ids)
+          np.testing.assert_array_equal(
+              cpp_c.segment_positions, py_c.segment_positions
+          )
+          np.testing.assert_array_equal(
+              cpp_c.per_token["old_per_token_logps"],
+              py_c.per_token["old_per_token_logps"],
+          )
+          np.testing.assert_array_equal(
+              cpp_c.routed_experts, py_c.routed_experts
+          )
+
+  def test_overlong_routed_experts_rejected_in_cpp_and_python(self):
+    bad_item = _item([1, 2], [3, 4], routed=_routed(4, 1))
+    object.__setattr__(bad_item, "routed_experts", _routed(5, 1))
+    # 1. C++ single-row path.
+    with self.assertRaisesRegex(ValueError, "exceeds segment token length"):
+      packing.pack_chunk([[bad_item]], budget=8, pad_id=0, carried=())
+
+    # 2. Pure-Python fallback path.
+    orig_ext = packing._packing_ext
+    try:
+      packing._packing_ext = None
+      with self.assertRaisesRegex(ValueError, "exceeds segment token length"):
+        packing.pack_chunk([[bad_item]], budget=8, pad_id=0, carried=())
+    finally:
+      packing._packing_ext = orig_ext
+
+    # 3. C++ multi-row parallel worker pool path (>= 4 * MIN_BYTES_PER_THREAD,
+    # 4 threads) with the bad item in the last row so the exception crosses a
+    # background worker thread via `worker_exc_` and rethrows as ValueError.
+    good_parallel = _item(
+        [1, 2], [3, 4], routed=np.ones((4, 32, 8), dtype=np.int16)
+    )
+    bad_parallel = _item(
+        [1, 2], [3, 4], routed=np.ones((4, 32, 8), dtype=np.int16)
+    )
+    object.__setattr__(
+        bad_parallel, "routed_experts", np.ones((5, 32, 8), dtype=np.int16)
+    )
+    parallel_bins = [
+        [good_parallel],
+        [good_parallel],
+        [good_parallel],
+        [bad_parallel],
+    ]
+    budget = 4096
+    bytes_per_token = 24 + 32 * 8 * 2
+    self.assertGreaterEqual(
+        len(parallel_bins) * budget * bytes_per_token,
+        4 * packing._packing_ext.MIN_BYTES_PER_THREAD,
+    )
+    with self.assertRaisesRegex(ValueError, "exceeds segment token length"):
+      packing.pack_chunk(parallel_bins, budget=budget, pad_id=0, carried=())
+
+  def test_fork_safety_resets_worker_pool_in_child(self):
+    if packing._packing_ext.THREAD_SANITIZER:
+      self.skipTest(
+          "ThreadSanitizer does not support starting threads after"
+          " multi-threaded fork without exec"
+      )
+    if not hasattr(os, "fork"):
+      self.skipTest("os.fork not supported on this platform")
+
+    rng = np.random.default_rng(999)
+    n_bins = 4
+    budget = 4096
+    bytes_per_token = 24 + 32 * 8
+    self.assertGreaterEqual(
+        n_bins * budget * bytes_per_token,
+        packing._packing_ext.MIN_PARALLEL_BYTES,
+    )
+    bins = [
+        [
+            _item(
+                rng.integers(1, 100, size=512, dtype=np.int32),
+                rng.integers(1, 100, size=1024, dtype=np.int32),
+                routed=packing.encode_routed_experts(
+                    rng.integers(0, 128, size=(1536, 32, 8), dtype=np.int16),
+                    mode="uint8",
+                ),
+            )
+        ]
+        for _ in range(n_bins)
+    ]
+    # Warm up the persistent worker pool in the parent process before forking.
+    parent_chunk = packing.pack_chunk(
+        bins, budget=budget, pad_id=0, carried=()
+    )
+
+    pid = os.fork()
+    if pid == 0:
+      # Child process: must re-initialize its worker pool and produce identical
+      # output without deadlocking on the parent's futexes.
+      try:
+        child_chunk = packing.pack_chunk(
+            bins, budget=budget, pad_id=0, carried=()
+        )
+        ok = np.array_equal(
+            child_chunk.ids, parent_chunk.ids
+        ) and np.array_equal(
+            child_chunk.routed_experts, parent_chunk.routed_experts
+        )
+        os._exit(0 if ok else 1)
+      except BaseException:  # pylint: disable=broad-exception-caught
+        os._exit(2)
+    else:
+      deadline = time.monotonic() + 30.0
+      status = None
+      while time.monotonic() < deadline:
+        waited_pid, waited_status = os.waitpid(pid, os.WNOHANG)
+        if waited_pid == pid:
+          status = waited_status
+          break
+        time.sleep(0.01)
+      if status is None:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        self.fail("Child process timed out after fork()")
+      self.assertTrue(
+          os.WIFEXITED(status), f"Child did not exit cleanly: {status}"
+      )
+      self.assertEqual(os.WEXITSTATUS(status), 0)
 
 
 if __name__ == "__main__":

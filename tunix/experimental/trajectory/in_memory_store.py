@@ -55,7 +55,6 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
   def to_config(self) -> dict[str, Any]:
     """Returns the config dict that rebuilds an equivalent store."""
     return {
-        "enabled": True,
         "backend": self.BACKEND,
     }
 

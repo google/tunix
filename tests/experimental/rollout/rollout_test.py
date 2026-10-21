@@ -27,6 +27,7 @@ from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.trajectory import store as trajectory_store_lib
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import rollout_worker as worker
+from tunix.experimental.worker import task_session
 
 
 class RolloutWorkerTest(parameterized.TestCase):
@@ -273,13 +274,13 @@ class RolloutWorkerTest(parameterized.TestCase):
       self.assertIsInstance(traj, datatypes.RolloutResponse)
       self.assertEqual(traj.request_id, "traj_prompt_native_actor_g0")
 
-      # Direct RoutingActorPool out-of-order streaming and string URI support
-      pool = remote_execution.RoutingActorPool([handle])
-      pool.add_actor("grpc://rollout-pod-2:50051")
-      tasks = [(req.prompt_id, "generate", (req,), {})]
+      # Direct TaskSession out-of-order streaming over ActorHandle
       results = []
-      async for res in pool.as_completed_stream(tasks):
-        results.append(res)
+      async with task_session.TaskSession([handle]) as session:
+        await session.submit(req.prompt_id, "generate", req)
+        async for res, exc in session.as_completed():
+          self.assertIsNone(exc)
+          results.append(res)
       self.assertLen(results, 1)
       self.assertEqual(results[0].request_id, "traj_prompt_native_actor_g0")
 
@@ -292,7 +293,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       svc = worker.RolloutWorker(
           worker_id="test_store_worker",
           config=worker.RolloutConfig(
-              trajectory_store_config={"backend": "memory", "enabled": True}
+              trajectory_store_config={"backend": "memory"}
           ),
           sampler=self.sampler,
           env_pool=self.env_pool,
@@ -367,7 +368,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       svc = worker.RolloutWorker(
           worker_id="test_store_worker_grp",
           config=worker.RolloutConfig(
-              trajectory_store_config={"backend": "memory", "enabled": True}
+              trajectory_store_config={"backend": "memory"}
           ),
           sampler=self.sampler,
           env_pool=self.env_pool,
@@ -411,7 +412,6 @@ class RolloutWorkerTest(parameterized.TestCase):
     temp_dir = self.create_tempdir().full_path
     file_store_cfg = {
         "backend": "file",
-        "enabled": True,
         "root_dir": temp_dir,
         "run_id": "test_cancel_and_max_steps",
     }
@@ -467,7 +467,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       max_steps_svc = worker.RolloutWorker(
           worker_id="test_max_steps_worker",
           config=worker.RolloutConfig(
-              trajectory_store_config={"backend": "memory", "enabled": True}
+              trajectory_store_config={"backend": "memory"}
           ),
           sampler=self.sampler,
           env_pool=max_steps_pool,

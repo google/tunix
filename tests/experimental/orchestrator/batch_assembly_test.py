@@ -19,6 +19,7 @@ import tracemalloc
 from unittest import mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
 import jax
 import numpy as np
 from tunix.experimental.common import datatypes
@@ -2459,7 +2460,7 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
 
 class CreateBatchAssemblerTest(absltest.TestCase):
 
-  def test_create_sequence_packed_assembler_with_mesh_dims(self):
+  def test_create_sequence_packed_assembler_with_num_data_shards(self):
     assembler = batch_assembly.create_batch_assembler(
         num_generations=2,
         mini_batch_size=2,
@@ -2470,8 +2471,7 @@ class CreateBatchAssemblerTest(absltest.TestCase):
             max_response_length=256,
             max_seq_token_per_tpu=1024,
             max_segments_per_packed_row=8,
-            trainer_fsdp=2,
-            trainer_dp=4,
+            num_data_shards=8,
         ),
     )
     self.assertIsInstance(
@@ -2704,36 +2704,6 @@ class SequencePackedRoutingTest(absltest.TestCase):
         ValueError, "segment_alignment_boundary must be positive"
     ):
       self._assembler(segment_alignment_boundary=0)
-
-  def test_router_replay_coverage_logs_for_top_k_1_2_and_4(self):
-    for top_k in (1, 2, 4):
-      routed = np.zeros((1, 4, 2, top_k), dtype=np.int16)
-      routed[0, :3] = np.arange(top_k, dtype=np.int16)
-      routed[0, 3:] = _UNSET
-      # Token 1 has duplicate expert ID when top_k >= 2.
-      if top_k >= 2:
-        routed[0, 1, 0, 1] = routed[0, 1, 0, 0]
-      seg_ids = np.array([[1, 1, 1, 0]], dtype=np.int32)
-      payload = datatypes.RLTrainerPayload(
-          prompt_ids=np.zeros((1, 0), dtype=np.int32),
-          prompt_mask=np.zeros((1, 0), dtype=np.float32),
-          completion_ids=np.ones((1, 4), dtype=np.int32),
-          completion_mask=np.ones((1, 4), dtype=np.float32),
-          advantages=np.zeros((1, 4), dtype=np.float32),
-          segment_ids=seg_ids,
-          routed_experts=routed,
-      )
-      with self.assertLogs(level="INFO") as logs:
-        batch_assembly._log_router_replay_coverage(
-            payload, batch_id="test_b0", num_segments=1
-        )
-      expected = (
-          "3/3 real tokens forced" if top_k == 1 else "2/3 real tokens forced"
-      )
-      self.assertTrue(
-          any(expected in msg for msg in logs.output),
-          f"Expected {expected!r} in {logs.output}",
-      )
 
   def _assert_batches_identical(
       self,
@@ -3033,7 +3003,7 @@ class SequencePackedRoutingTest(absltest.TestCase):
     self._assert_batches_identical([pb_mix], [pb_mix_py])
     self._assert_batches_identical([pb_mix_i16_cpp], [pb_mix_i16_py])
 
-  def test_k5_uint8_routed_experts_round_trip_and_coverage_logging(self):
+  def test_k5_uint8_routed_experts_round_trip(self):
     # Regression test for K=5 (E <= 255) where batched uint8 has shape
     # (B, T, L, 5) and must never be misclassified as 4D unbatched uint10.
     raw_k5_a = np.array(
@@ -3094,14 +3064,6 @@ class SequencePackedRoutingTest(absltest.TestCase):
     orig_ext = packing._packing_ext
     try:
       packing._packing_ext = None
-      with self.assertLogs(level="INFO") as logs:
-        batch_assembly._log_router_replay_coverage(
-            b_k5.payload, batch_id="k5_py_fallback", num_segments=2
-        )
-      self.assertTrue(
-          any("10/12 real tokens forced" in msg for msg in logs.output),
-          f"Unexpected coverage log: {logs.output}",
-      )
       seq_k5_py = batch_assembly.SequencePackedBatchAssembler(
           batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=16
       )
@@ -3120,6 +3082,527 @@ class SequencePackedRoutingTest(absltest.TestCase):
 
     self._assert_batches_identical([b_k5], [b_k5_py])
     self._assert_batches_identical([pb_k5], [pb_k5_py])
+
+  def test_parallel_padded_batch_assembler_cpp_and_python_parity(self):
+    self.assertIsNotNone(packing._packing_ext)
+    orig_threads = packing._packing_ext.get_packing_threads()
+    packing._packing_ext.set_packing_threads(4)
+    try:
+      batch_size = 8
+      max_p = 1024
+      max_r = 1024
+      seq_cap = max_p + max_r
+      rng = np.random.default_rng(2027)
+      top_k = 8
+      num_layers = 32
+      self.assertGreaterEqual(
+          batch_size * seq_cap * num_layers * top_k,
+          packing._packing_ext.MIN_PARALLEL_BYTES,
+      )
+      # 6 real items into batch_size=8 leaves 2 empty tail rows on flush;
+      # lengths include prompt truncation (>1024) and response truncation
+      # (>1024).
+      lengths = [
+          (512, 600),
+          (1200, 700),   # prompt truncated to 1024
+          (400, 1300),   # response truncated to 1024
+          (1150, 1180),  # both prompt and response truncated
+          (1024, 1024),  # exact capacity
+          (300, 450),
+      ]
+      modes = (
+          "uint8",
+          "uint10",
+          "mixed_u8_u10",
+          "mixed_u8_i16",
+          "mixed_u10_i16",
+          "partial_none_disables_routing",
+      )
+      for mode in modes:
+        with self.subTest(mode=mode):
+          payloads: list[datatypes.RLTrainerPayload] = []
+          for idx, (p_len, c_len) in enumerate(lengths):
+            full_len = p_len + c_len
+            routed_len = full_len - (idx % 2)
+            if mode == "partial_none_disables_routing" and idx == 4:
+              routed = None
+            else:
+              if mode in ("uint8", "partial_none_disables_routing"):
+                tier = "uint8"
+              elif mode == "uint10":
+                tier = "uint10"
+              elif mode == "mixed_u8_u10":
+                tier = "uint8" if idx % 2 == 0 else "uint10"
+              elif mode == "mixed_u8_i16":
+                tier = "uint8" if idx % 2 == 0 else "int16"
+              else:
+                tier = "uint10" if idx % 2 == 0 else "int16"
+              max_exp = 200 if tier == "uint8" else 700
+              raw_r = rng.integers(
+                  -1,
+                  max_exp,
+                  size=(routed_len, num_layers, top_k),
+                  dtype=np.int16,
+              )
+              if tier == "int16":
+                routed = raw_r
+              elif tier == "uint8":
+                routed = packing.encode_routed_experts(raw_r, mode="uint8")
+              else:
+                routed = packing.encode_routed_experts(raw_r, mode="uint10")
+
+            payloads.append(
+                datatypes.RLTrainerPayload(
+                    prompt_ids=rng.integers(
+                        1, 500, size=p_len, dtype=np.int32
+                    ),
+                    prompt_mask=(
+                        rng.integers(0, 2, size=p_len).astype(np.float32)
+                        if idx % 2 == 0
+                        else np.ones(p_len, dtype=np.float32)
+                    ),
+                    completion_ids=rng.integers(
+                        1, 500, size=c_len, dtype=np.int32
+                    ),
+                    completion_mask=(
+                        rng.integers(0, 2, size=full_len).astype(np.float32)
+                        if idx % 3 == 0
+                        else np.ones(c_len, dtype=np.float32)
+                    ),
+                    advantages=(
+                        np.array([float(idx + 1) * 0.5], dtype=np.float32)
+                        if idx % 2 == 1
+                        else rng.standard_normal(full_len).astype(np.float32)
+                    ),
+                    old_per_token_logps=rng.standard_normal(c_len).astype(
+                        np.float32
+                    ),
+                    ref_per_token_logps=rng.standard_normal(c_len).astype(
+                        np.float32
+                    ),
+                    returns=rng.standard_normal(full_len).astype(np.float32),
+                    old_values=rng.standard_normal(full_len).astype(
+                        np.float32
+                    ),
+                    sampler_is_weights=rng.standard_normal(full_len).astype(
+                        np.float32
+                    ),
+                    routed_experts=routed,
+                    metadata={"traj_id": f"pad_parallel_{mode}_{idx}"},
+                )
+            )
+
+          def _run(
+              batch_items: list[datatypes.RLTrainerPayload],
+          ) -> list[batch_assembly.AssembledBatch]:
+            asm = batch_assembly.PaddedBatchAssembler(
+                batch_size=batch_size,
+                max_prompt_length=max_p,
+                max_response_length=max_r,
+                pad_id=7,
+                num_generations=2,
+                mini_batch_size=4,
+            )
+            out = list(asm.feed(batch_items))
+            out.extend(asm.flush())
+            return out
+
+          cpp_batches = _run(payloads)
+          orig_ext = packing._packing_ext
+          try:
+            packing._packing_ext = None
+            py_batches = _run(payloads)
+          finally:
+            packing._packing_ext = orig_ext
+
+          self.assertLen(cpp_batches, 1)
+          routed_out = cpp_batches[0].payload.routed_experts
+          if mode == "partial_none_disables_routing":
+            self.assertIsNone(routed_out)
+          elif mode == "uint8":
+            self.assertIsNotNone(routed_out)
+            self.assertEqual(routed_out.dtype, np.uint8)
+            self.assertEqual(
+                routed_out.shape, (batch_size, seq_cap, num_layers, top_k)
+            )
+          elif mode in ("uint10", "mixed_u8_u10"):
+            self.assertIsNotNone(routed_out)
+            self.assertEqual(routed_out.dtype, np.uint8)
+            self.assertEqual(
+                routed_out.shape,
+                (batch_size, seq_cap, num_layers, top_k // 4, 5),
+            )
+          else:  # mixed_u8_i16, mixed_u10_i16
+            self.assertIsNotNone(routed_out)
+            self.assertEqual(routed_out.dtype, np.int16)
+            self.assertEqual(
+                routed_out.shape, (batch_size, seq_cap, num_layers, top_k)
+            )
+
+          self._assert_batches_identical(cpp_batches, py_batches)
+    finally:
+      packing._packing_ext.set_packing_threads(orig_threads)
+
+
+class BuildDummyPayloadTest(parameterized.TestCase):
+  """`build_dummy_payload` must be a JIT-cache-exact stand-in for `feed()`."""
+
+  _FLAG_COMBOS = (
+      (False, False, False, False),
+      (True, False, False, False),
+      (False, True, False, False),
+      (True, True, False, False),
+      (True, False, False, True),
+      (True, True, True, True),
+  )
+
+  def _real_microbatch(
+      self,
+      assembler,
+      *,
+      prompt_len: int,
+      completion_len: int,
+      with_old_per_token_logps: bool,
+      with_ref_per_token_logps: bool,
+      with_sampler_is_weights: bool = False,
+      sampler_agreement_applied: bool = False,
+      routed_experts_shape: tuple[int, int] | None = None,
+  ) -> datatypes.RLTrainerPayload:
+    """Runs real rollouts through `feed()` the way `RLProgram` does."""
+    old_logps = (
+        np.full(completion_len, -0.5, dtype=np.float32)
+        if with_old_per_token_logps
+        else None
+    )
+    routed_experts = (
+        np.zeros(
+            (prompt_len + completion_len, *routed_experts_shape),
+            dtype=np.int16,
+        )
+        if routed_experts_shape is not None
+        else None
+    )
+    payloads = [
+        dataclasses.replace(
+            _make_payload(prompt_len, completion_len, old_logps=old_logps),
+            routed_experts=routed_experts,
+        )
+        for _ in range(assembler.rollouts_per_optimizer_update)
+    ]
+    batches = list(assembler.feed(payloads))
+    self.assertNotEmpty(batches)
+    payload = batches[0].payload
+    if with_ref_per_token_logps:
+      payload = batch_assembly.with_ref_per_token_logps(
+          payload,
+          np.zeros(np.asarray(payload.completion_ids).shape, dtype=np.float32),
+      )
+    if with_sampler_is_weights or sampler_agreement_applied:
+      payload = dataclasses.replace(
+          payload,
+          sampler_is_weights=(
+              np.zeros(
+                  np.asarray(payload.completion_ids).shape, dtype=np.float32
+              )
+              if with_sampler_is_weights
+              else None
+          ),
+          sampler_agreement_applied=sampler_agreement_applied,
+      )
+    return payload
+
+  def _assert_same_jit_signature(self, dummy, real):
+    # `PeftTrainer._prepare_payload` drops `metadata` (trajectory ids, lineage)
+    # before the jitted step, so it is not part of the JIT cache key.
+    dummy = dataclasses.replace(dummy, metadata={})
+    real = dataclasses.replace(real, metadata={})
+    self.assertEqual(jax.tree.structure(dummy), jax.tree.structure(real))
+    dummy_leaves = jax.tree.leaves(dummy)
+    real_leaves = jax.tree.leaves(real)
+    for d, r in zip(dummy_leaves, real_leaves, strict=True):
+      d, r = np.asarray(d), np.asarray(r)
+      self.assertEqual(d.shape, r.shape)
+      self.assertEqual(d.dtype, r.dtype)
+
+  @parameterized.named_parameters(
+      (
+          "padded",
+          batch_assembly.PaddedBatchAssembler,
+          dict(
+              batch_size=3,
+              max_prompt_length=8,
+              max_response_length=6,
+              pad_id=7,
+              num_generations=3,
+              mini_batch_size=1,
+          ),
+          5,
+          4,
+          (3, 8),
+          (3, 6),
+          None,
+      ),
+      (
+          "packed",
+          batch_assembly.SequencePackedBatchAssembler,
+          dict(
+              batch_size=2,
+              num_generations=4,
+              mini_batch_size=1,
+              max_packed_len=16,
+              pad_id=7,
+              max_segments_per_packed_row=3,
+              segment_alignment_boundary=4,
+          ),
+          3,
+          2,
+          (2, 0),
+          (2, 16),
+          4,
+      ),
+  )
+  def test_dummy_payload_matches_feed_output(
+      self,
+      assembler_cls,
+      kwargs,
+      prompt_len,
+      completion_len,
+      expected_prompt_shape,
+      expected_completion_shape,
+      expected_num_segments,
+  ):
+    for (
+        with_old,
+        with_ref,
+        with_is_weights,
+        agreement_applied,
+    ) in self._FLAG_COMBOS:
+      with self.subTest(
+          with_old=with_old,
+          with_ref=with_ref,
+          with_is_weights=with_is_weights,
+          agreement_applied=agreement_applied,
+      ):
+        dummy = assembler_cls(**kwargs).build_dummy_payload(
+            with_old_per_token_logps=with_old,
+            with_ref_per_token_logps=with_ref,
+            with_sampler_is_weights=with_is_weights,
+            sampler_agreement_applied=agreement_applied,
+        )
+        real = self._real_microbatch(
+            assembler_cls(**kwargs),
+            prompt_len=prompt_len,
+            completion_len=completion_len,
+            with_old_per_token_logps=with_old,
+            with_ref_per_token_logps=with_ref,
+            with_sampler_is_weights=with_is_weights,
+            sampler_agreement_applied=agreement_applied,
+        )
+        self._assert_same_jit_signature(dummy, real)
+        self.assertEqual(dummy.prompt_ids.shape, expected_prompt_shape)
+        self.assertEqual(dummy.completion_ids.shape, expected_completion_shape)
+        self.assertEqual(dummy.num_segments, expected_num_segments)
+        self.assertEqual(dummy.old_per_token_logps is not None, with_old)
+        self.assertEqual(dummy.ref_per_token_logps is not None, with_ref)
+        self.assertEqual(dummy.sampler_is_weights is not None, with_is_weights)
+        self.assertEqual(dummy.sampler_agreement_applied, agreement_applied)
+        self.assertIsNone(dummy.routed_experts)
+
+  def test_padded_with_routed_experts_builds_placeholder(self):
+    assembler = batch_assembly.create_batch_assembler(
+        batch_config=batch_assembly.BatchConfig(
+            pad_id=7,
+            max_prompt_length=8,
+            max_response_length=6,
+        ),
+        train_micro_batch_size=3,
+        num_generations=3,
+        mini_batch_size=1,
+    )
+    dummy = assembler.build_dummy_payload(
+        with_old_per_token_logps=True,
+        with_ref_per_token_logps=False,
+        with_routed_experts=True,
+    )
+    self.assertIsNotNone(dummy.routed_experts)
+    self.assertEqual(dummy.routed_experts.shape, (3, 14, 0, 0))
+    self.assertEqual(dummy.routed_experts.dtype, np.int16)
+    self.assertIn("routed_experts_encode_fn", dummy.metadata)
+
+  def test_packed_with_routed_experts_builds_placeholder(self):
+    assembler = batch_assembly.create_batch_assembler(
+        batch_config=batch_assembly.BatchConfig(
+            pad_id=7,
+            max_seq_token_per_tpu=16,
+            max_segments_per_packed_row=3,
+            segment_alignment_boundary=4,
+        ),
+        train_micro_batch_size=2,
+        num_generations=4,
+        mini_batch_size=1,
+    )
+    dummy = assembler.build_dummy_payload(
+        with_old_per_token_logps=True,
+        with_ref_per_token_logps=True,
+        with_routed_experts=True,
+    )
+    self.assertIsNotNone(dummy.routed_experts)
+    self.assertEqual(dummy.routed_experts.shape, (2, 16, 0, 0))
+    self.assertEqual(dummy.routed_experts.dtype, np.int16)
+    self.assertIn("routed_experts_encode_fn", dummy.metadata)
+
+  @parameterized.named_parameters(
+      ("padded_auto_u8", "padded", "auto", 8, 2, (3, 14, 3, 2), np.uint8),
+      (
+          "padded_auto_u10",
+          "padded",
+          "auto",
+          256,
+          4,
+          (3, 14, 3, 1, 5),
+          np.uint8,
+      ),
+      ("padded_u8", "padded", "uint8", 8, 2, (3, 14, 3, 2), np.uint8),
+      ("padded_u10", "padded", "uint10", 256, 4, (3, 14, 3, 1, 5), np.uint8),
+      ("padded_i16", "padded", "int16", 256, 4, (3, 14, 3, 4), np.int16),
+      ("packed_auto_u8", "packed", "auto", 8, 2, (2, 16, 3, 2), np.uint8),
+      (
+          "packed_auto_u10",
+          "packed",
+          "auto",
+          256,
+          4,
+          (2, 16, 3, 1, 5),
+          np.uint8,
+      ),
+      ("packed_i16", "packed", "int16", 8, 2, (2, 16, 3, 2), np.int16),
+  )
+  def test_routed_experts_encode_fn_matches_real_feed_across_modes(
+      self,
+      assembler_kind,
+      encode_mode,
+      num_experts,
+      top_k,
+      expected_shape,
+      expected_dtype,
+  ):
+    num_layers = 3
+    if assembler_kind == "padded":
+      make_asm = lambda: batch_assembly.PaddedBatchAssembler(
+          batch_size=3,
+          max_prompt_length=8,
+          max_response_length=6,
+          pad_id=7,
+          num_generations=3,
+          mini_batch_size=1,
+      )
+    else:
+      make_asm = lambda: batch_assembly.SequencePackedBatchAssembler(
+          batch_size=2,
+          num_generations=4,
+          mini_batch_size=1,
+          max_packed_len=16,
+          pad_id=7,
+          max_segments_per_packed_row=3,
+          segment_alignment_boundary=4,
+      )
+    dummy = make_asm().build_dummy_payload(
+        with_old_per_token_logps=True,
+        with_ref_per_token_logps=False,
+        with_routed_experts=True,
+        routed_experts_encode_mode=encode_mode,
+    )
+    batch_size, seq_len = dummy.routed_experts.shape[:2]
+    expanded = np.zeros(
+        (batch_size, seq_len, num_layers, top_k),
+        dtype=dummy.routed_experts.dtype,
+    )
+    encode_fn = dummy.metadata["routed_experts_encode_fn"]
+    resolved_routed = encode_fn(expanded, num_experts=num_experts)
+    self.assertEqual(resolved_routed.shape, expected_shape)
+    self.assertEqual(resolved_routed.dtype, expected_dtype)
+    resolved_dummy = dataclasses.replace(
+        dummy, routed_experts=resolved_routed, metadata={}
+    )
+
+    asm = make_asm()
+    raw_routed = np.zeros((9, num_layers, top_k), dtype=np.int16)
+    encoded_item_routed = packing.encode_routed_experts(
+        raw_routed,
+        mode=encode_mode,
+        num_experts=num_experts,
+    )
+    old_logps = np.full(4, -0.5, dtype=np.float32)
+    payloads = [
+        dataclasses.replace(
+            _make_payload(5, 4, old_logps=old_logps),
+            routed_experts=encoded_item_routed,
+        )
+        for _ in range(asm.rollouts_per_optimizer_update)
+    ]
+    batches = list(asm.feed(payloads))
+    self.assertNotEmpty(batches)
+    self._assert_same_jit_signature(resolved_dummy, batches[0].payload)
+
+  def test_build_dummy_payload_rejects_invalid_routed_experts_encode_mode(self):
+    asm = batch_assembly.PaddedBatchAssembler(
+        batch_size=2,
+        max_prompt_length=4,
+        max_response_length=4,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=1,
+    )
+    with self.assertRaisesRegex(
+        ValueError, "routed_experts_encode_mode must be one of"
+    ):
+      asm.build_dummy_payload(
+          with_old_per_token_logps=True,
+          with_ref_per_token_logps=False,
+          with_routed_experts=True,
+          routed_experts_encode_mode="bad_mode",
+      )
+
+  def test_padded_leaves_assembler_state_untouched(self):
+    asm = batch_assembly.PaddedBatchAssembler(
+        batch_size=2,
+        max_prompt_length=4,
+        max_response_length=4,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=1,
+        start_batch_index=5,
+    )
+    asm.feed([_make_payload(2, 2)])  # One buffered, not yet emitted.
+    asm.build_dummy_payload(
+        with_old_per_token_logps=True, with_ref_per_token_logps=True
+    )
+    self.assertEqual(asm._batch_counter, 5)
+    self.assertLen(asm._buffer, 1)
+    self.assertEqual(asm._rollouts_since_update, 1)
+    (batch,) = list(asm.feed([_make_payload(2, 2)]))
+    self.assertEqual(batch.payload.metadata["trajectory_ids"], ("", ""))
+    self.assertEqual(asm._batch_counter, 6)
+
+  def test_packed_leaves_assembler_state_untouched(self):
+    asm = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1,
+        num_generations=2,
+        mini_batch_size=1,
+        max_packed_len=16,
+        pad_id=0,
+        start_batch_index=5,
+    )
+    asm.feed([_make_payload(2, 2)])  # One buffered, not yet emitted.
+    asm.build_dummy_payload(
+        with_old_per_token_logps=True, with_ref_per_token_logps=True
+    )
+    self.assertEqual(asm._batch_counter, 5)
+    self.assertLen(asm._buffer, 1)
+    self.assertEqual(asm._rollouts_since_update, 1)
+    batches = list(asm.feed([_make_payload(2, 2)]))
+    self.assertLen(batches, 1)
+    self.assertEqual(asm._batch_counter, 6)
 
 
 if __name__ == "__main__":

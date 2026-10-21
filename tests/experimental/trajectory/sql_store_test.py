@@ -967,7 +967,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(
         redacted_config,
         {
-            "enabled": True,
             "backend": "sql",
             "db_url": "postgresql+psycopg2://user:***@host/db",
             "run_id": "redact_run",
@@ -1134,7 +1133,6 @@ class SqlTrajectoryStoreConfigTest(store_testing.TrajectoryStoreConfigTestCase):
   def _create_config(self) -> dict[str, Any]:
     db_path = os.path.join(self.create_tempdir().full_path, "store.db")
     return {
-        "enabled": True,
         "backend": "sql",
         "db_url": f"sqlite:///{db_path}",
         "run_id": "run_1",

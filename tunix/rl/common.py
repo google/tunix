@@ -1899,7 +1899,7 @@ def mean_of_means(values: Iterable[Any]) -> np.ndarray:
   divided per micro-batch), then averaged. For plain scalars this is exactly
   np.mean, so it is a safe drop-in replacement.
   """
-  return np.mean([np.asarray(_metric_scalar(v)) for v in values])
+  return np.mean([np.asarray(_metric_scalar(v)) for v in values])  # pyrefly: ignore[bad-return]
 
 
 def global_weighted_mean(values: Iterable[utils.WeightedMetric]) -> float:

@@ -53,7 +53,8 @@ _extract_scalar = metrics_logger_lib.extract_scalar
 BatchConfig = batch_assembly.BatchConfig
 GroupOrder = trajectory_queue_manager.GroupOrder
 TrajectoryQueueManager = trajectory_queue_manager.TrajectoryQueueManager
-BatchOrderedQueueManager = trajectory_queue_manager.BatchOrderedQueueManager
+FifoGroupQueue = trajectory_queue_manager.FifoGroupQueue
+BatchOrderedGroupQueue = trajectory_queue_manager.BatchOrderedGroupQueue
 
 
 def _next_microbatch(
@@ -131,10 +132,6 @@ def _generation_metrics(
 
 # Rollouts named per step in the `[rollout] ... slowest` log line.
 _NUM_SLOWEST_ROLLOUTS_LOGGED = 3
-
-
-# How often the train stage logs progress while it waits for rollouts.
-_PROGRESS_LOG_INTERVAL_SEC = 60.0
 
 
 def _extract_reward(item: Any) -> float:
@@ -229,6 +226,51 @@ def _format_rollout_completion(conversation: Any) -> str:
   return "\n".join(lines)
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True, eq=False)
+class ScoredGroup:
+  """A scored prompt group of rollouts with group-relative advantages computed.
+
+  Used by `StandardRLProgram.scored_q` between `critique_stage` and
+  `train_stage` so `RLTrainerPayload` is never monkeypatched onto
+  `TrajectoryItem` and completed prompt groups are queued as a unit without
+  re-bucketing individual trajectories by `prompt_id`.
+
+  Attributes:
+    payloads: Trainer tensor DTOs for the group's rollouts (`len == G`),
+      produced by `algo.create_trainer_payloads`. Single owner of each rollout's
+      `routed_experts` until packed by the batch assembler.
+    items: Telemetry and lineage views of the group's rollouts with
+      `routed_experts` stripped (`len == G`).
+    rewards: Scalar rewards computed by `critique_stage` (`len == G`), also
+      stamped into each `item.traj["trajectory_reward"]` for downstream logging.
+  """
+
+  payloads: tuple[datatypes.RLTrainerPayload, ...]
+  items: tuple[datatypes.TrajectoryItem, ...]
+  rewards: tuple[float, ...]
+
+  def __post_init__(self) -> None:
+    if not (len(self.payloads) == len(self.items) == len(self.rewards)):
+      raise ValueError(
+          "ScoredGroup requires equal-length payloads, items, and rewards;"
+          f" got {len(self.payloads)}, {len(self.items)}, {len(self.rewards)}."
+      )
+    if not self.items:
+      raise ValueError("ScoredGroup must contain at least one rollout.")
+    first_prompt_id = self.items[0].prompt_id
+    for item in self.items[1:]:
+      if item.prompt_id != first_prompt_id:
+        raise ValueError(
+            "ScoredGroup requires all items to share a single prompt_id;"
+            f" got {first_prompt_id!r} and {item.prompt_id!r}."
+        )
+
+
+def _scored_group_batch_idx(group: ScoredGroup) -> int:
+  """Extracts the prompt-batch index for a `ScoredGroup`."""
+  return trajectory_queue_manager.default_batch_idx_fn(group.items[0])
+
+
 @dataclasses.dataclass(kw_only=True)
 class RLStepResult:
   """Summary of a completed RL training step."""
@@ -294,6 +336,7 @@ class StandardRLProgram(RLProgram):
       batch_size: int | None = None,
       max_staleness: int = 0,
       sync_weights: bool = True,
+      precompile_trainer: bool = True,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       trajectory_log_dir: str | None = None,
       trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
@@ -366,6 +409,12 @@ class StandardRLProgram(RLProgram):
           f"batch_size={self.full_batch_size}, "
           f"mini_batch_size={self.mini_batch_size}."
       )
+    self.can_fuse_agreement_in_loss = (
+        algo_config is not None
+        and getattr(algo_config, "policy_loss_fn", "grpo") == "grpo"
+        and getattr(algo_config, "num_iterations", 1) == 1
+        and self.mini_batch_size >= self.full_batch_size
+    )
     self.batch_config = batch_config or batch_assembly.BatchConfig()
     if self.batch_config.max_response_length is None:
       self.batch_config = dataclasses.replace(
@@ -385,6 +434,7 @@ class StandardRLProgram(RLProgram):
       )
     self.max_staleness = max_staleness
     self.sync_weights = sync_weights
+    self.precompile_trainer = precompile_trainer
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     if trajectory_log_dir is None and metrics_logging_options is not None:
       log_dir = getattr(metrics_logging_options, "log_dir", "")
@@ -420,27 +470,30 @@ class StandardRLProgram(RLProgram):
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
     self._in_flight_rollouts = 0
-    self._outstanding_prompts = step_telemetry.OutstandingPrompts()
     self._dispatch_done = asyncio.Event()
     self._assembler_lock = threading.Lock()
-    self.scored_q: TrajectoryQueueManager | BatchOrderedQueueManager
+    self.scored_q: (
+        FifoGroupQueue[ScoredGroup] | BatchOrderedGroupQueue[ScoredGroup]
+    )
+    self.raw_q: TrajectoryQueueManager
     if self.group_order == GroupOrder.PROMPT_ARRIVAL:
-      self.scored_q = BatchOrderedQueueManager.create(
-          num_generations=self.num_generations,
-          full_batch_size=self.full_batch_size,
+      ordered_q: BatchOrderedGroupQueue[ScoredGroup] = (
+          BatchOrderedGroupQueue.create(
+              full_batch_size=self.full_batch_size,
+              batch_idx_fn=_scored_group_batch_idx,
+          )
       )
+      self.scored_q = ordered_q
       self.raw_q = TrajectoryQueueManager.create(
           num_generations=self.num_generations,
       )
       self.dispatch_window = dispatch_window.DispatchWindow(
           max_staleness=max_staleness,
-          next_batch_fn=lambda: self.scored_q.next_batch_idx,  # pyrefly: ignore[missing-attribute]
+          next_batch_fn=lambda: ordered_q.next_batch_idx,
           full_batch_size=self.full_batch_size,
       )
     else:
-      self.scored_q = TrajectoryQueueManager.create(
-          num_generations=self.num_generations,
-      )
+      self.scored_q = FifoGroupQueue.create()
       self.dispatch_window = dispatch_window.DispatchWindow(
           max_staleness=max_staleness,
           next_batch_fn=lambda: self._step,
@@ -490,8 +543,8 @@ class StandardRLProgram(RLProgram):
       return
     self._step = restored_step
     self.policy_version = restored_step
-    if self.group_order == GroupOrder.PROMPT_ARRIVAL:
-      self.scored_q.skip(0, restored_step)  # pyrefly: ignore[missing-attribute]
+    if isinstance(self.scored_q, BatchOrderedGroupQueue):
+      self.scored_q.skip(0, restored_step)
     ckpt_meta = self.engine.restored_checkpoint_metadata
     if (
         isinstance(ckpt_meta, Mapping)
@@ -577,9 +630,6 @@ class StandardRLProgram(RLProgram):
             self.dispatch_window.next_batch,
         )
         self._in_flight_rollouts += self.num_generations
-        self._outstanding_prompts.dispatched(
-            str(prompt_id), self.num_generations
-        )
         dispatch_kwargs: dict[str, Any] = {
             "num_generations": self.num_generations,
             "policy_version": self.policy_version,
@@ -601,20 +651,11 @@ class StandardRLProgram(RLProgram):
     assert self.engine is not None
     try:
       while not self._dispatch_done.is_set() or self._in_flight_rollouts > 0:
-
-        try:
-          completed = await self.engine.poll_rollouts()
-          if isinstance(completed, list) and completed:
-            # TODO: Fault-tolerance must either decrement `_in_flight_rollouts` for failed
-            # requests or retry them internally. Otherwise, a dropped RPC will cause
-            # `_in_flight_rollouts` to never reach 0, hanging the EOF cascade.
-            self._in_flight_rollouts -= len(completed)
-            for item in completed:
-              self._outstanding_prompts.returned(str(item.prompt_id))
-              await self.raw_q.put(item)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-          logging.warning("Error in polling_stage: %s", exc)
-          await asyncio.sleep(0.01)
+        completed = await self.engine.poll_rollouts()
+        if isinstance(completed, list) and completed:
+          self._in_flight_rollouts -= len(completed)
+          for item in completed:
+            await self.raw_q.put(item)
     finally:
       # NB: We currently assume it's safe to silently drop partial groups upon EOF.
       await self.raw_q.close()
@@ -630,6 +671,12 @@ class StandardRLProgram(RLProgram):
             break
         except Exception:
           break
+
+        if len(group) != self.num_generations:
+          raise ValueError(
+              f"raw_q returned a group of {len(group)} items; expected"
+              f" num_generations={self.num_generations}."
+          )
 
         rewards = []
         for item in group:
@@ -647,13 +694,20 @@ class StandardRLProgram(RLProgram):
           rewards.append(float(r))
           del item
 
-        trainer_payloads = collections.deque(
-            self.algo.create_trainer_payloads(group, rewards=rewards)
-        )
+        raw_payloads = self.algo.create_trainer_payloads(group, rewards=rewards)
+        if len(raw_payloads) != len(group):
+          raise ValueError(
+              f"create_trainer_payloads returned {len(raw_payloads)} payloads"
+              f" for a group of {len(group)} items."
+          )
+        trainer_payloads = collections.deque(raw_payloads)
+        del raw_payloads
+        group_payloads: list[datatypes.RLTrainerPayload] = []
+        group_items: list[datatypes.TrajectoryItem] = []
         for idx in range(len(trainer_payloads)):
           payload = trainer_payloads.popleft()
-          reward_val = rewards[idx] if idx < len(rewards) else 0.0
-          src_item = group[idx] if idx < len(group) else None
+          reward_val = rewards[idx]
+          src_item = group[idx]
           src_traj = getattr(src_item, "traj", None)
           if isinstance(src_traj, dict):
             raw_status = src_traj.get("status") or getattr(
@@ -710,13 +764,22 @@ class StandardRLProgram(RLProgram):
               routed_experts=None,
               policy_version=src_policy_version,
               metadata=metadata,
-              # TODO: b/552087289 - Stream RLTrainerPayload directly instead of
-              # re-wrapping in TrajectoryItem.
+              # TODO: b/552087289 - Replace TrajectoryItem with a compact typed
+              # telemetry record (identity + reward + generation facts +
+              # RolloutFacts).
           )
-          item.payload = payload  # pyrefly: ignore[missing-attribute]
-          del payload, src_item, src_traj, src_metadata, traj_dict, metadata
-          await self.scored_q.put(item)
-          del item
+          group_payloads.append(payload)
+          group_items.append(item)
+          del payload, src_item, src_traj, src_metadata
+          del traj_dict, metadata, item
+        scored_group = ScoredGroup(
+            payloads=tuple(group_payloads),
+            items=tuple(group_items),
+            rewards=tuple(rewards),
+        )
+        del group_payloads, group_items, trainer_payloads
+        await self.scored_q.put(scored_group)
+        del scored_group
         if group:
           first_meta = getattr(group[0], "metadata", None) or {}
           first_policy_version = getattr(group[0], "policy_version", None)
@@ -731,7 +794,7 @@ class StandardRLProgram(RLProgram):
               first_meta.get("intra_batch_idx"),
               int(first_policy_version or 0),
           )
-        del group, rewards, trainer_payloads
+        del group, rewards
     finally:
       await self.scored_q.close()
 
@@ -760,11 +823,8 @@ class StandardRLProgram(RLProgram):
   async def _drain_filtered_groups(
       self,
   ) -> list[list[datatypes.TrajectoryItem]]:
-    """Drains and returns all filtered groups across raw and scored queues."""
-    filtered: list[list[datatypes.TrajectoryItem]] = []
-    filtered.extend(await self.raw_q.get_filtered_groups())
-    filtered.extend(await self.scored_q.get_filtered_groups())
-    return filtered
+    """Drains and returns all filtered groups from the raw trajectory queue."""
+    return await self.raw_q.get_filtered_groups()
 
   def _collect_and_log_step_metrics(
       self,
@@ -772,6 +832,8 @@ class StandardRLProgram(RLProgram):
       all_step_items: Sequence[datatypes.TrajectoryItem],
       step_rewards: Sequence[float],
       step_advantages: Sequence[float] | None = None,
+      prompt_lengths: Sequence[int] = (),
+      completion_lengths: Sequence[int] = (),
       generation_metrics: Mapping[str, float] | None = None,
       step_result: Any = None,
       trainer_metrics: Any = None,
@@ -804,65 +866,12 @@ class StandardRLProgram(RLProgram):
     global step boundary.
     """
     # --- 1. Rollout metrics & Ingestion Staleness ---
-    prompt_lengths = []
-    completion_lengths = []
-    total_lengths = []
-    successes = []
+    total_lengths = [
+        p_len + c_len
+        for p_len, c_len in zip(prompt_lengths, completion_lengths, strict=True)
+    ]
     staleness_list = []
     for item in all_step_items:
-      p_len = None
-      prompt_tokens = getattr(item, "prompt_tokens", None)
-      if prompt_tokens is not None:
-        p_len = len(prompt_tokens)
-      elif hasattr(item, "payload"):
-        segment_ids = getattr(item.payload, "segment_ids", None)
-        prompt_mask = getattr(item.payload, "prompt_mask", None)
-        completion_mask = getattr(item.payload, "completion_mask", None)
-        if segment_ids is not None and completion_mask is not None:
-          p_len = int(
-              np.sum(
-                  (np.asarray(segment_ids) > 0)
-                  & (np.asarray(completion_mask) == 0)
-              )
-          )
-        elif prompt_mask is not None and np.size(prompt_mask):
-          p_len = int(np.sum(np.asarray(prompt_mask) > 0))
-
-      c_len = None
-      completion_tokens = getattr(item, "completion_tokens", None)
-      if completion_tokens is not None:
-        c_len = len(completion_tokens)
-      elif (
-          hasattr(item, "payload")
-          and getattr(item.payload, "completion_mask", None) is not None
-      ):
-        c_len = int(np.sum(np.asarray(item.payload.completion_mask) > 0))
-
-      if p_len is not None:
-        prompt_lengths.append(p_len)
-      if c_len is not None:
-        completion_lengths.append(c_len)
-      if p_len is not None and c_len is not None:
-        total_lengths.append(p_len + c_len)
-
-      traj = getattr(item, "traj", None)
-      if isinstance(traj, dict):
-        status = traj.get("status") or getattr(item, "status", None)
-      elif traj is not None:
-        status = getattr(traj, "status", None) or getattr(item, "status", None)
-      else:
-        status = getattr(item, "status", None)
-      if status is not None:
-        if isinstance(status, datatypes.TrajectoryStatus):
-          if status != datatypes.TrajectoryStatus.RUNNING:
-            is_succ = status == datatypes.TrajectoryStatus.SUCCEEDED
-            successes.append(1.0 if is_succ else 0.0)
-        elif isinstance(status, str):
-          status_str = status.upper()
-          if status_str != "RUNNING":
-            is_succ = status_str in ("COMPLETED", "SUCCEEDED", "SUCCESS")
-            successes.append(1.0 if is_succ else 0.0)
-
       # Batch ingestion staleness: consumed_policy_version - item.policy_version
       pol_ver = getattr(item, "policy_version", None)
       if (
@@ -910,12 +919,6 @@ class StandardRLProgram(RLProgram):
       self._log_metric(
           "rollout/total_tokens_mean",
           float(np.mean(total_lengths)),
-          log_step,
-      )
-    if successes:
-      self._log_metric(
-          "rollout/success_rate",
-          float(np.mean(successes)),
           log_step,
       )
     if staleness_list:
@@ -1027,7 +1030,7 @@ class StandardRLProgram(RLProgram):
       self._log_metric(f"orchestrator/{tag}", val, log_step)
     if step_times is not None:
       for tag, val in dataclasses.asdict(step_times).items():
-        self._log_metric(f"orchestrator/{tag}", val, log_step)
+        self._log_metric(f"perf/{tag}", val, log_step)
     if padding_stats:
       for tag, val in batch_assembly.summarize_padding_stats(
           padding_stats
@@ -1162,7 +1165,6 @@ class StandardRLProgram(RLProgram):
         "perplexity_val": perplexity_val,
         "filtered_groups_count": filtered_groups_count,
         "filtered_trajectories_count": filtered_trajectories_count,
-        "rollout_health": rollout_health,
     }
 
   async def _apply_sampler_trainer_agreement(
@@ -1288,85 +1290,15 @@ class StandardRLProgram(RLProgram):
       }
       self.trajectory_logger.log_item_async(row)
 
-  async def _wait_for_scored_group(
-      self, step: int, groups_consumed: int
-  ) -> list[datatypes.TrajectoryItem]:
-    """Awaits the next scored group, logging progress while it waits.
-
-    A step held up by slow rollouts would otherwise log nothing for minutes.
-
-    Args:
-      step: The train step being assembled.
-      groups_consumed: Groups the step already holds.
-
-    Returns:
-      The next scored group, or an empty list once the queue is closed.
-    """
-    get_group = asyncio.create_task(
-        self.scored_q.get_batch(self.num_generations)
-    )
-    wait_start = time.monotonic()
-    try:
-      while True:
-        done, _ = await asyncio.wait(
-            {get_group}, timeout=_PROGRESS_LOG_INTERVAL_SEC
-        )
-        if done:
-          return get_group.result()
-        self._log_wait_progress(
-            step, groups_consumed, time.monotonic() - wait_start
-        )
-    finally:
-      # A no-op once the group arrived. If this wait was cancelled, it keeps
-      # the getter from outliving it and taking a later group. A group the
-      # getter took just before the cancel is dropped with it, which only
-      # happens while `run_async` tears the train stage down.
-      get_group.cancel()
-
-  def _log_wait_progress(
-      self, step: int, groups_consumed: int, waited_s: float
-  ) -> None:
-    """Logs what the train stage has been waiting on, and for how long."""
-    oldest = self._outstanding_prompts.oldest()
-    if oldest is None:
-      oldest_desc = "none"
-    else:
-      oldest_desc = (
-          f"{oldest.prompt_id}(age={oldest.age_s:.0f}s,"
-          f"left={oldest.rollouts_left})"
-      )
-    # The waiting reader takes any group it can use, so the groups counted
-    # here are ones it cannot: prompt_arrival holds later batches' groups
-    # until the cursor reaches them.
-    if isinstance(self.scored_q, BatchOrderedQueueManager):
-      scored_fields = (
-          f"scored_staged_groups={self.scored_q.pending_groups_count}"
-          f" scored_batch={self.scored_q.next_batch_idx}"
-      )
-    else:
-      scored_fields = f"scored_ready_groups={self.scored_q.ready_groups_count}"
-    logging.info(
-        "[progress] step=%d waited=%.0fs groups=%d/%d in_flight=%d"
-        " prompts_in_flight=%d untracked_returns=%d raw_ready_groups=%d"
-        " raw_partial_groups=%d %s scored_partial_groups=%d oldest=%s",
-        step,
-        waited_s,
-        groups_consumed,
-        self.full_batch_size,
-        self._in_flight_rollouts,
-        len(self._outstanding_prompts),
-        self._outstanding_prompts.untracked_returns,
-        self.raw_q.ready_groups_count,
-        self.raw_q.incomplete_buckets_count,
-        scored_fields,
-        self.scored_q.incomplete_buckets_count,
-        oldest_desc,
-    )
-
   async def _timed_train_step(
       self, batch: datatypes.RLTrainerPayload, *, apply_optimizer: bool
   ) -> tuple[Any, float]:
-    """Runs one microbatch's `train_step`; returns its result and seconds."""
+    """Runs one microbatch's `train_step`; returns its result and seconds.
+
+    Intermediate microbatches (`apply_optimizer=False`) intentionally return
+    once `fwd_bwd` is dispatched so the next microbatch's RPC, host-to-device
+    input sharding, and XLA launch stay pipelined with TPU execution.
+    """
     assert self.engine is not None
     start = time.monotonic()
     result = await self.engine.train_step(
@@ -1392,9 +1324,6 @@ class StandardRLProgram(RLProgram):
         step_result, train_sec = await task
         step_times.policy_training_time += train_sec
 
-    # For the ETA in each step's summary line.
-    run_start = time.monotonic()
-    steps_run = 0
     try:
       while self.max_steps is None or self._step < self.max_steps:
         current_step = self._step
@@ -1402,18 +1331,20 @@ class StandardRLProgram(RLProgram):
         step_times = step_telemetry.StepTimes()
         consumed_policy_version = self.policy_version
 
-        uncommitted_groups = []
+        uncommitted_groups: list[list[datatypes.TrajectoryItem]] = []
         step_result = None
         trainer_metrics = None
         step_sampler_agreement: dict[str, tuple[Any, list[Any]]] = {}
-        step_rewards = []
-        step_advantages = []
+        step_rewards: list[float] = []
+        step_advantages: list[float] = []
+        step_prompt_lengths: list[int] = []
+        step_completion_lengths: list[int] = []
         num_microbatches = 0
         step_padding_stats: list[batch_assembly.PaddingStats] = []
         step_packing_time_sec = 0.0
         num_rollouts = 0
-        all_step_items = []
-        scored_items = []
+        all_step_items: list[datatypes.TrajectoryItem] = []
+        had_scored_items = False
         groups_consumed = 0
         checkpoint_saved = False
         final_minibatch_completed = False
@@ -1445,47 +1376,49 @@ class StandardRLProgram(RLProgram):
 
         while groups_consumed < self.full_batch_size:
           wait_start = time.monotonic()
-          scored_items = await self._wait_for_scored_group(
-              current_step, groups_consumed
-          )
+          scored_group = await self.scored_q.get()
           step_times.exposed_generation_time += time.monotonic() - wait_start
-          if not scored_items:
+          had_scored_items = scored_group is not None
+          if scored_group is None:
             batch_iter = iter(self.assembler.flush())
           else:
             if groups_consumed == 0 and self.on_step_begin:
               self.on_step_begin(current_step)
 
             groups_consumed += 1
-            uncommitted_groups.append(scored_items)
-            all_step_items.extend(scored_items)
-            num_rollouts += len(scored_items)
-            for item in scored_items:
-              step_rewards.append(_extract_reward(item))
-              payload = getattr(item, "payload", None)
-              if (
-                  payload is not None
-                  and payload.advantages is not None
-                  and payload.advantages.size > 0
-              ):
-                step_advantages.append(float(np.mean(payload.advantages)))
-
-            payloads = []
-            for item in scored_items:
-              payload = getattr(item, "payload", None)
-              if isinstance(payload, datatypes.RLTrainerPayload):
-                if payload.routed_experts is not None:
-                  item.payload = dataclasses.replace(  # pyrefly: ignore[missing-attribute]
-                      payload, routed_experts=None
-                  )
-                payload = dataclasses.replace(
-                    payload,
-                    metadata={
-                        **payload.metadata,
-                        "traj_id": item.traj_id,
-                    },
-                )
+            group_items = list(scored_group.items)
+            payloads: list[datatypes.RLTrainerPayload] = []
+            for item, payload, reward_val in zip(
+                scored_group.items,
+                scored_group.payloads,
+                scored_group.rewards,
+                strict=True,
+            ):
+              step_rewards.append(reward_val)
+              advantages = np.asarray(payload.advantages)
+              if advantages.size > 0:
+                step_advantages.append(float(np.mean(advantages)))
+              del advantages
+              step_prompt_lengths.append(
+                  int(np.count_nonzero(payload.prompt_mask))
+              )
+              step_completion_lengths.append(
+                  int(np.count_nonzero(payload.completion_mask))
+              )
+              payload = dataclasses.replace(
+                  payload,
+                  metadata={
+                      **payload.metadata,
+                      "traj_id": item.traj_id,
+                  },
+              )
               payloads.append(payload)
-              del payload
+              del item, payload, reward_val
+            del scored_group
+            uncommitted_groups.append(group_items)
+            all_step_items.extend(group_items)
+            num_rollouts += len(group_items)
+            del group_items
             batch_iter = iter(self.assembler.feed(payloads))
             del payloads
 
@@ -1518,18 +1451,12 @@ class StandardRLProgram(RLProgram):
               )
               batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
             algo_config = getattr(self.algo, "algo_config", None)
-            can_fuse_agreement_in_loss = (
-                algo_config is not None
-                and getattr(algo_config, "policy_loss_fn", "grpo") == "grpo"
-                and getattr(algo_config, "num_iterations", 1) == 1
-                and self.mini_batch_size >= self.full_batch_size
-            )
             if (
                 isinstance(batch, datatypes.RLTrainerPayload)
                 and batch.old_per_token_logps is not None
                 and algo_config is not None
                 and algo_config.use_rollout_logps
-                and not can_fuse_agreement_in_loss
+                and not self.can_fuse_agreement_in_loss
             ):
               await _await_pending_train()
               agreement_start = time.monotonic()
@@ -1575,13 +1502,14 @@ class StandardRLProgram(RLProgram):
               # abort the entire program. Make it configurable on whether to
               # fail or continue.
               full_batch_complete = (
-                  groups_consumed >= self.full_batch_size or not scored_items
+                  groups_consumed >= self.full_batch_size
+                  or not had_scored_items
               )
               if full_batch_complete:
                 await _maybe_save_checkpoint()
           del batch_iter
 
-          if not scored_items or groups_consumed >= self.full_batch_size:
+          if not had_scored_items or groups_consumed >= self.full_batch_size:
             if not checkpoint_saved and final_minibatch_completed:
               await _maybe_save_checkpoint()
             break
@@ -1642,6 +1570,8 @@ class StandardRLProgram(RLProgram):
             all_step_items=all_step_items,
             step_rewards=step_rewards,
             step_advantages=step_advantages,
+            prompt_lengths=step_prompt_lengths,
+            completion_lengths=step_completion_lengths,
             generation_metrics=generation_metrics,
             step_result=step_result,
             trainer_metrics=trainer_metrics,
@@ -1688,22 +1618,6 @@ class StandardRLProgram(RLProgram):
               f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
               step_time_sec,
           )
-        steps_run += 1
-        logging.info(
-            "[step] %s",
-            step_telemetry.step_summary(
-                step=current_step,
-                step_time_sec=step_time_sec,
-                step_times=step_times,
-                health=metrics_summary["rollout_health"],
-                steps_left=(
-                    None
-                    if self.max_steps is None
-                    else self.max_steps - current_step - 1
-                ),
-                mean_step_sec=(time.monotonic() - run_start) / steps_run,
-            ),
-        )
 
         if self.on_step_end:
           self.on_step_end(current_step, step_result)
@@ -1736,6 +1650,11 @@ class StandardRLProgram(RLProgram):
         role=datatypes.Role.ACTOR,
         algo=self.algo,
         assembler=self.assembler,
+        can_fuse_agreement_in_loss=self.can_fuse_agreement_in_loss,
+        precompile=self.precompile_trainer,
+        return_routed_experts=bool(
+            self.generation_args.return_routed_experts
+        ),
     )
 
     if self.sync_weights:

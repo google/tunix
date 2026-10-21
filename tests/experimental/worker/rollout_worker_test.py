@@ -89,6 +89,9 @@ class RolloutWorkerTest(absltest.TestCase):
       self.assertEqual(
           worker_event.attributes.get("worker_id"), "rollout_worker_42"
       )
+      self.assertGreaterEqual(
+          worker_event.attributes.get("execution_time_s", -1.0), 0.0
+      )
 
     asyncio.run(_run())
 
@@ -314,18 +317,10 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     worker = _worker(config=rollout_worker.RolloutConfig())
     self.assertIsNone(worker.trajectory_store)
 
-  def test_disabled_trajectory_store_config_means_no_store(self):
-    config = rollout_worker.RolloutConfig(
-        trajectory_store_config={"enabled": False, "backend": "file"}
-    )
-    worker = _worker(config=config)
-    self.assertIsNone(worker.trajectory_store)
-
   def test_enabled_file_backend_builds_store_once(self):
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
     config = rollout_worker.RolloutConfig(
         trajectory_store_config={
-            "enabled": True,
             "backend": "file",
             "root_dir": str(tmp_dir),
             "run_id": "worker_run",
@@ -336,7 +331,7 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
         worker.trajectory_store, file_store.FileTrajectoryStore
     )
     self.assertIs(
-        worker.trajectory_store._metadata_cls,  # pylint: disable=protected-access
+        worker.trajectory_store.bound_metadata_cls,
         trajectory_lib.TunixTrajectoryMetadata,
     )
     worker.stop()
@@ -347,7 +342,6 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     # would build its own store exactly once, in its own __init__.
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
     config = {
-        "enabled": True,
         "backend": "file",
         "root_dir": str(tmp_dir),
         "run_id": "shared",
@@ -368,7 +362,6 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
     config = rollout_worker.RolloutConfig(
         trajectory_store_config={
-            "enabled": True,
             "backend": "file",
             "root_dir": str(tmp_dir),
             "run_id": "worker_run",
@@ -410,7 +403,6 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
 
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
     input_cfg = {
-        "enabled": True,
         "backend": "file",
         "root_dir": str(tmp_dir),
         "run_id": "handshake_run",
@@ -429,6 +421,36 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
         input_cfg,
     )
     worker_enabled.stop()
+
+  def test_rollout_config_drain_timeout_forwarded_and_reported(self):
+    worker_default = _worker()
+    self.assertEqual(worker_default.manager.drain_timeout_s, 660.0)
+    self.assertEqual(worker_default.info().resources["drain_timeout_s"], 660.0)
+    self.assertFalse(worker_default.info().resources["partial_rollout"])
+    init_meta = worker_default.initialize().metadata
+    self.assertEqual(init_meta["drain_timeout_s"], 660.0)
+    self.assertFalse(init_meta["partial_rollout"])
+    worker_default.stop()
+
+    worker_custom = _worker(
+        config=rollout_worker.RolloutConfig(
+            drain_timeout_s=1860.0,
+            partial_rollout=True,
+        )
+    )
+    self.assertEqual(worker_custom.manager.drain_timeout_s, 1860.0)
+    self.assertEqual(worker_custom.info().resources["drain_timeout_s"], 1860.0)
+    self.assertTrue(worker_custom.info().resources["partial_rollout"])
+    custom_meta = worker_custom.initialize().metadata
+    self.assertEqual(custom_meta["drain_timeout_s"], 1860.0)
+    self.assertTrue(custom_meta["partial_rollout"])
+    worker_custom.stop()
+
+    for invalid in (0, -10.0, float("nan"), float("inf"), True, False):
+      with self.assertRaisesRegex(
+          ValueError, "drain_timeout_s must be a positive finite number"
+      ):
+        rollout_worker.RolloutConfig(drain_timeout_s=invalid)
 
 
 if __name__ == "__main__":

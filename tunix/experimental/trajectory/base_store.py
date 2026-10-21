@@ -43,6 +43,14 @@ class TrajectoryMetadataNotFoundError(KeyError):
     self.trajectory_id = trajectory_id
 
 
+class TrajectoryMetricsNotFoundError(KeyError):
+  """Raised when requested trajectory metrics are not found in the store."""
+
+  def __init__(self, trajectory_id: str) -> None:
+    super().__init__(f"Trajectory metrics for ID '{trajectory_id}' not found.")
+    self.trajectory_id = trajectory_id
+
+
 # ==============================================================================
 # Protocols (Structural Interfaces)
 # ==============================================================================
@@ -89,6 +97,26 @@ class TrajectoryReader(Protocol[MetadataT]):
     """
     ...
 
+  def get_trajectories_metrics(
+      self, trajectory_ids: list[str] | None = None
+  ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
+    """Retrieves metrics for trajectories in the run.
+
+    Args:
+      trajectory_ids: Optional list of unique trajectory identifiers. If
+        specified, only metrics for these IDs are returned. If None, metrics for
+        all trajectories in the run with recorded metrics are returned.
+
+    Returns:
+      A dictionary mapping trajectory IDs to TrajectoryMetrics objects for the
+      requested trajectories, in the order of `trajectory_ids` if specified.
+
+    Raises:
+      TrajectoryMetricsNotFoundError: If any requested trajectory ID does not
+        have recorded metrics.
+    """
+    ...
+
 
 @runtime_checkable
 class TrajectoryWriter(Protocol[MetadataT]):
@@ -125,6 +153,31 @@ class TrajectoryWriter(Protocol[MetadataT]):
 
     Args:
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
+    """
+    ...
+
+  def update_metrics(
+      self,
+      trajectory_id: str,
+      metrics: trajectory_lib.TrajectoryMetrics,
+  ) -> None:
+    """Updates (or creates) trajectory metrics.
+
+    If metrics already exist for `trajectory_id`, implementations perform a
+    shallow top-level dictionary merge (`existing.extra.update(metrics.extra)`)
+    into the existing `extra` dictionary, allowing rollout workers and RL
+    trainers to record metrics independently without overwriting each other's
+    keys. Top-level keys in `metrics.extra` (including nested dicts) overwrite
+    matching top-level keys in the existing `extra` dictionary. If
+    `metrics.extra` is `None` when metrics already exist for `trajectory_id`,
+    the existing `extra` dictionary remains unchanged.
+
+    Implementations snapshot `metrics` at call time, so callers may keep
+    mutating it afterwards without affecting what was logged.
+
+    Args:
+      trajectory_id: Unique identifier for the trajectory.
+      metrics: TrajectoryMetrics containing the metrics data to record.
     """
     ...
 
@@ -165,9 +218,8 @@ class TrajectoryStore(
   growing a shared config object that knows about every backend's fields.
 
   `from_config` is the single construction entry point for the processes that
-  make up a run, and doubles as the on/off gate: a config of None, or one whose
-  "enabled" is false, yields None, leaving every store-guarded call site a
-  no-op.
+  make up a run, and doubles as the on/off gate: a config of None yields None,
+  leaving every store-guarded call site a no-op.
   """
 
   # The value of the config's "backend" key that selects this class.
@@ -244,6 +296,11 @@ class TrajectoryStore(
       if orig_class is not None:
         self._metadata_cls = self._extract_metadata_cls(orig_class)
     return self._metadata_cls
+
+  @property
+  def bound_metadata_cls(self) -> type[MetadataT] | None:
+    """The TrajectoryMetadata class bound to this store, or None if unbound."""
+    return self._get_bound_metadata_cls()
 
   def _validate_and_bind_metadata(self, metadata: MetadataT) -> None:
     """Validates and binds the store instance's single TrajectoryMetadata type.
@@ -341,6 +398,24 @@ class TrajectoryStore(
     """
     return self.to_config()
 
+  def get_trajectories_metrics(
+      self, trajectory_ids: list[str] | None = None
+  ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
+    """Retrieves metrics for trajectories in the run."""
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement get_trajectories_metrics."
+    )
+
+  def update_metrics(
+      self,
+      trajectory_id: str,
+      metrics: trajectory_lib.TrajectoryMetrics,
+  ) -> None:
+    """Updates (or creates) trajectory metrics."""
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement update_metrics."
+    )
+
   @classmethod
   def from_config(cls, config: Mapping[str, Any] | None) -> Self | None:
     """Builds the store described by `config`, or None when it is disabled.
@@ -352,19 +427,27 @@ class TrajectoryStore(
     construct once.
 
     Args:
-      config: Configuration mapping, or None. The "backend" key selects the
-        implementation; "enabled" turns the store off without removing the rest
-        of the config.
+      config: Configuration mapping, or None to run without a store. The
+        "backend" key selects the implementation.
 
     Returns:
-      A store instance, or None if `config` is None or not enabled.
+      A store instance, or None if `config` is None.
 
     Raises:
-      ValueError: If "backend" names no known implementation, or the selected
-        backend rejects the rest of the config.
+      ValueError: If `config` contains the removed "enabled" key, "backend"
+        names no known implementation, or the selected backend rejects the
+        rest of the config.
     """
-    if config is None or not config.get("enabled", False):
+    if config is None:
       return None
+    # Backends ignore keys they do not read, so a leftover "enabled": False
+    # would otherwise build an active store. Reject the key so such configs
+    # fail loudly instead.
+    if "enabled" in config:
+      raise ValueError(
+          "The 'enabled' key is no longer supported in TrajectoryStore"
+          " configs; pass None to disable the store."
+      )
 
     backend = config.get("backend")
     if backend not in cls._REGISTRY:
@@ -379,18 +462,12 @@ class TrajectoryStore(
     return cast(Self, store)
 
 
-# TODO(tunix-dev): Consider overriding __instancecheck__ (via a metaclass) so
-# `isinstance(store, TunixTrajectoryStore)` returns True for stores bound to
-# `TunixTrajectoryMetadata`.
 class TunixTrajectoryStore(
     TrajectoryStore[trajectory_lib.TunixTrajectoryMetadata],
-    abc.ABC,
 ):
   """TrajectoryStore bound to TunixTrajectoryMetadata.
 
   `TunixTrajectoryStore.from_config(config)` instantiates the configured backend
   (`FileTrajectoryStore`, `SqlTrajectoryStore`, or `InMemoryTrajectoryStore`)
-  and binds it to `TunixTrajectoryMetadata`. Note that the returned instance is
-  a subclass of `TrajectoryStore` (and of the selected backend), not a runtime
-  subclass of `TunixTrajectoryStore`.
+  and binds it to `TunixTrajectoryMetadata`.
   """

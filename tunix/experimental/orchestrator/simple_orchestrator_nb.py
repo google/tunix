@@ -143,9 +143,9 @@ def main():
   rollout_1 = SimulatedRolloutWorker("rollout_1")
   actor_trainer = SimulatedTrainerWorker("actor_0", datatypes.Role.ACTOR)
 
-  orch.register_worker(rollout_0)
-  orch.register_worker(rollout_1)
-  orch.register_worker(actor_trainer)
+  orch.registry.register(rollout_0)
+  orch.registry.register(rollout_1)
+  orch.registry.register(actor_trainer)
 
   print(f"Registered roles in cluster: {orch.registry.roles()}")
 

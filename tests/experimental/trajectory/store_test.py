@@ -71,7 +71,6 @@ class FromConfigTest(absltest.TestCase):
 
   def _file_config(self, **overrides):
     config = {
-        "enabled": True,
         "backend": "file",
         "root_dir": str(self.tmp_dir),
         "run_id": "run_1",
@@ -81,7 +80,6 @@ class FromConfigTest(absltest.TestCase):
 
   def _sql_config(self, **overrides):
     config = {
-        "enabled": True,
         "backend": "sql",
         "db_url": f"sqlite:///{self.tmp_dir / 'test.db'}",
         "run_id": "run_1",
@@ -92,17 +90,18 @@ class FromConfigTest(absltest.TestCase):
   def test_none_config_disables_the_store(self):
     self.assertIsNone(store_lib.TrajectoryStore.from_config(None))
 
-  def test_missing_enabled_key_disables_the_store(self):
-    self.assertIsNone(
-        store_lib.TrajectoryStore.from_config({"backend": "memory"})
-    )
-
-  def test_enabled_false_disables_the_store(self):
-    # The rest of the config stays valid and unused, so a run can be turned
-    # off without unsetting its root_dir and run_id.
-    self.assertIsNone(
-        store_lib.TrajectoryStore.from_config(self._file_config(enabled=False))
-    )
+  def test_from_config_with_enabled_key_raises(self):
+    # A leftover "enabled": False must not silently build an active store,
+    # and "enabled": True is rejected the same way so the key is gone for
+    # good rather than half-supported.
+    for enabled in (False, True):
+      with self.subTest(enabled=enabled):
+        with self.assertRaisesRegex(
+            ValueError, "'enabled' key is no longer supported"
+        ):
+          store_lib.TrajectoryStore.from_config(
+              self._file_config(enabled=enabled)
+          )
 
   def test_file_backend_is_scoped_by_run_id(self):
     store = store_lib.TrajectoryStore.from_config(self._file_config())
@@ -111,9 +110,7 @@ class FromConfigTest(absltest.TestCase):
     store.close()
 
   def test_memory_backend_needs_no_other_keys(self):
-    store = store_lib.TrajectoryStore.from_config(
-        {"enabled": True, "backend": "memory"}
-    )
+    store = store_lib.TrajectoryStore.from_config({"backend": "memory"})
     self.assertIsInstance(store, in_memory_store.InMemoryTrajectoryStore)
 
   def test_sql_backend_is_scoped_by_run_id(self):
@@ -124,13 +121,11 @@ class FromConfigTest(absltest.TestCase):
 
   def test_unknown_backend_raises(self):
     with self.assertRaisesRegex(ValueError, "Unknown Trajectory Store"):
-      store_lib.TrajectoryStore.from_config(
-          {"enabled": True, "backend": "sqlite"}
-      )
+      store_lib.TrajectoryStore.from_config({"backend": "sqlite"})
 
   def test_missing_backend_raises(self):
     with self.assertRaisesRegex(ValueError, "Unknown Trajectory Store"):
-      store_lib.TrajectoryStore.from_config({"enabled": True})
+      store_lib.TrajectoryStore.from_config({})
 
   def test_file_backend_without_root_dir_raises(self):
     with self.assertRaisesRegex(ValueError, "'root_dir'"):
@@ -177,7 +172,6 @@ class FromConfigTest(absltest.TestCase):
 
       def to_config(self):
         return {
-            "enabled": True,
             "backend": self.BACKEND,
         }
 
@@ -201,10 +195,19 @@ class FromConfigTest(absltest.TestCase):
 
     try:
       store = store_lib.TrajectoryStore.from_config({
-          "enabled": True,
           "backend": "custom_test_backend",
       })
       self.assertIsInstance(store, CustomStore)
+      with self.assertRaisesRegex(
+          NotImplementedError,
+          "CustomStore does not implement get_trajectories_metrics.",
+      ):
+        store.get_trajectories_metrics()
+      with self.assertRaisesRegex(
+          NotImplementedError,
+          "CustomStore does not implement update_metrics.",
+      ):
+        store.update_metrics("t_1", trajectory_lib.TrajectoryMetrics())
     finally:
       store_lib.TrajectoryStore._REGISTRY.pop("custom_test_backend", None)
 
@@ -212,7 +215,7 @@ class FromConfigTest(absltest.TestCase):
     store = store_lib.TunixTrajectoryStore.from_config(self._file_config())
     self.assertIsInstance(store, file_store.FileTrajectoryStore)
     self.assertIs(
-        store._metadata_cls,  # pylint: disable=protected-access
+        store.bound_metadata_cls,
         trajectory_lib.TunixTrajectoryMetadata,
     )
     with self.assertRaisesRegex(
@@ -227,6 +230,36 @@ class FromConfigTest(absltest.TestCase):
           )
       )
     store.close()
+
+  def test_bound_metadata_cls_property_reports_bound_metadata_class(self):
+    file_s = store_lib.TunixTrajectoryStore.from_config(self._file_config())
+    self.assertIs(
+        file_s.bound_metadata_cls, trajectory_lib.TunixTrajectoryMetadata
+    )
+    file_s.close()
+
+    mem_s = store_lib.TunixTrajectoryStore.from_config({"backend": "memory"})
+    self.assertIs(
+        mem_s.bound_metadata_cls, trajectory_lib.TunixTrajectoryMetadata
+    )
+
+    subscripted_mem = in_memory_store.InMemoryTrajectoryStore[
+        trajectory_lib.TunixTrajectoryMetadata
+    ]()
+    self.assertIs(
+        subscripted_mem.bound_metadata_cls,
+        trajectory_lib.TunixTrajectoryMetadata,
+    )
+
+    unbound_mem = in_memory_store.InMemoryTrajectoryStore()
+    self.assertIsNone(unbound_mem.bound_metadata_cls)
+
+    base_meta_mem = in_memory_store.InMemoryTrajectoryStore[
+        trajectory_lib.TrajectoryMetadata
+    ]()
+    self.assertIs(
+        base_meta_mem.bound_metadata_cls, trajectory_lib.TrajectoryMetadata
+    )
 
 
 class GenericTypeParametersTest(absltest.TestCase):
@@ -578,6 +611,11 @@ class ExceptionsTest(absltest.TestCase):
     err = store_lib.TrajectoryMetadataNotFoundError("t_456")
     self.assertEqual(err.trajectory_id, "t_456")
     self.assertIn("t_456", str(err))
+
+  def test_trajectory_metrics_not_found_error(self):
+    err = store_lib.TrajectoryMetricsNotFoundError("t_789")
+    self.assertEqual(err.trajectory_id, "t_789")
+    self.assertIn("t_789", str(err))
 
 
 if __name__ == "__main__":

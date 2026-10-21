@@ -12,15 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from unittest import mock
 
-try:
-  from absl.testing import absltest
-except ImportError:
-  import unittest as absltest
-
+from absl.testing import absltest
 from tunix.utils import maxtext_utils
+
+# MaxText optimizer config keys. `AdamWOptions` sets all but opt_type, which
+# stays at MaxText's default (adamw) so env overrides of it keep working.
+_OPTIMIZER_KEYS = ("opt_type=", "adam_", "gradient_clipping_threshold=")
 
 
 class MaxTextUtilsTest(absltest.TestCase):
@@ -63,6 +62,10 @@ class MaxTextUtilsTest(absltest.TestCase):
       self.assertIn("base_num_kv_heads=8", argv)
       self.assertIn("ici_tensor_parallelism=4", argv)
       self.assertIn("ici_fsdp_parallelism=2", argv)
+      self.assertIn("dtype=bfloat16", argv)
+      self.assertIn("weight_dtype=float32", argv)
+      self.assertIn("rollout_weight_dtype=bfloat16", argv)
+      self.assertIn("grad_dtype=float32", argv)
       self.assertIn("prefuse_moe_weights=True", argv)
       self.assertIn("use_weight_converter=False", argv)
       self.assertIn("rollout_tensor_parallelism=4", argv)
@@ -77,6 +80,7 @@ class MaxTextUtilsTest(absltest.TestCase):
 
     mock_compute = mock.MagicMock(return_value=2304)
 
+    mock_convert_utils = mock.MagicMock(compute_padded_moe_mlp_dim=mock_compute)
     with mock.patch.object(
         maxtext_utils,
         "maxtext_modules",
@@ -87,9 +91,10 @@ class MaxTextUtilsTest(absltest.TestCase):
     ), mock.patch.dict(
         "sys.modules",
         {
-            "maxtext.integration.vllm.convert_utils": mock.MagicMock(
-                compute_padded_moe_mlp_dim=mock_compute
-            )
+            "maxtext.src.maxtext.integration.vllm.convert_utils": (
+                mock_convert_utils
+            ),
+            "maxtext.integration.vllm.convert_utils": mock_convert_utils,
         },
     ):
       cfg = maxtext_utils.build_maxtext_config(
@@ -149,6 +154,9 @@ class MaxTextUtilsTest(absltest.TestCase):
           moe_mlp_tp_size, exp_moe_tp, f"{name}: moe_mlp_tp_size mismatch"
       )
 
+      mock_convert_utils = mock.MagicMock(
+          compute_padded_moe_mlp_dim=mock_compute_padded_moe_mlp_dim
+      )
       with mock.patch.object(
           maxtext_utils,
           "maxtext_modules",
@@ -161,9 +169,10 @@ class MaxTextUtilsTest(absltest.TestCase):
       ), mock.patch.dict(
           "sys.modules",
           {
-              "maxtext.integration.vllm.convert_utils": mock.MagicMock(
-                  compute_padded_moe_mlp_dim=mock_compute_padded_moe_mlp_dim
-              )
+              "maxtext.src.maxtext.integration.vllm.convert_utils": (
+                  mock_convert_utils
+              ),
+              "maxtext.integration.vllm.convert_utils": mock_convert_utils,
           },
       ):
         maxtext_utils.build_maxtext_config(
@@ -189,6 +198,11 @@ class MaxTextUtilsTest(absltest.TestCase):
             f"base_num_kv_heads={exp_kv_heads}",
             argv,
             f"{name}: base_num_kv_heads mismatch in argv",
+        )
+        self.assertIn(
+            "override_model_config=True",
+            argv,
+            f"{name}: override_model_config=True missing in argv",
         )
 
   def test_indivisible_kv_heads_fails_fast(self):
@@ -221,6 +235,29 @@ class MaxTextUtilsTest(absltest.TestCase):
             train_micro_batch_size=5,
             mesh_fsdp=2,
         )
+
+  def test_batch_size_must_divide_fsdp_times_expert(self):
+    # MaxText shards the batch over fsdp and expert together: 6 rows divide
+    # fsdp=2 but cannot be split across fsdp=2 x expert=2 = 4 batch shards.
+    with self.assertRaisesRegex(
+        ValueError, r"mesh_fsdp \* mesh_expert = 2 \* 2 = 4"
+    ):
+      self._build_config_argv(
+          train_micro_batch_size=6,
+          mesh_fsdp=2,
+          mesh_tp=2,
+          mesh_expert=2,
+          num_devices=8,
+      )
+    argv = self._build_config_argv(
+        train_micro_batch_size=8,
+        mesh_fsdp=2,
+        mesh_tp=2,
+        mesh_expert=2,
+        num_devices=8,
+    )
+    self.assertIn("per_device_batch_size=1.0", argv)
+    self.assertIn("ici_expert_parallelism=2", argv)
 
   def test_build_maxtext_config_range_validations(self):
     mock_pyconfig = mock.MagicMock()
@@ -268,6 +305,11 @@ class MaxTextUtilsTest(absltest.TestCase):
     mock_pyconfig.initialize.return_value = mock_cfg
     mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
 
+    mock_convert_utils = mock.MagicMock(
+        compute_padded_moe_mlp_dim=mock.MagicMock(
+            side_effect=ValueError("Padding failure")
+        )
+    )
     with mock.patch.object(
         maxtext_utils,
         "maxtext_modules",
@@ -278,11 +320,10 @@ class MaxTextUtilsTest(absltest.TestCase):
     ), mock.patch.dict(
         "sys.modules",
         {
-            "maxtext.integration.vllm.convert_utils": mock.MagicMock(
-                compute_padded_moe_mlp_dim=mock.MagicMock(
-                    side_effect=ValueError("Padding failure")
-                )
-            )
+            "maxtext.src.maxtext.integration.vllm.convert_utils": (
+                mock_convert_utils
+            ),
+            "maxtext.integration.vllm.convert_utils": mock_convert_utils,
         },
     ):
       with self.assertRaisesRegex(
@@ -321,6 +362,7 @@ class MaxTextUtilsTest(absltest.TestCase):
     mock_file = mock.mock_open(
         read_data="base_num_kv_heads: 4\nbase_moe_mlp_dim: 1024\n"
     )
+    mock_convert_utils = mock.MagicMock(compute_padded_moe_mlp_dim=mock_compute)
     with mock.patch.object(
         maxtext_utils,
         "maxtext_modules",
@@ -330,9 +372,10 @@ class MaxTextUtilsTest(absltest.TestCase):
     ), mock.patch.dict(
         "sys.modules",
         {
-            "maxtext.integration.vllm.convert_utils": mock.MagicMock(
-                compute_padded_moe_mlp_dim=mock_compute
-            )
+            "maxtext.src.maxtext.integration.vllm.convert_utils": (
+                mock_convert_utils
+            ),
+            "maxtext.integration.vllm.convert_utils": mock_convert_utils,
         },
     ), self.assertLogs(
         level="INFO"
@@ -369,7 +412,10 @@ class MaxTextUtilsTest(absltest.TestCase):
         ),
     ), mock.patch.dict(
         "sys.modules",
-        {"maxtext.integration.vllm.convert_utils": None},
+        {
+            "maxtext.src.maxtext.integration.vllm.convert_utils": None,
+            "maxtext.integration.vllm.convert_utils": None,
+        },
     ), self.assertLogs(
         level="WARNING"
     ) as logs:
@@ -436,6 +482,32 @@ class MaxTextUtilsTest(absltest.TestCase):
           max_seq_token_per_tpu=-1,
       )
 
+  def test_adamw_options_override_maxtext_optimizer_defaults(self):
+    argv = self._build_config_argv(
+        adamw_options=maxtext_utils.AdamWOptions(
+            b1=0.8,
+            b2=0.999,
+            eps=1e-6,
+            weight_decay=0.0,
+            gradient_clipping_threshold=0.125,
+        )
+    )
+    # Exactly once each: MaxText's CLI parsing keeps the last duplicate.
+    self.assertEqual(
+        [a for a in argv if a.startswith(_OPTIMIZER_KEYS)],
+        [
+            "adam_b1=0.8",
+            "adam_b2=0.999",
+            "adam_eps=1e-06",
+            "adam_weight_decay=0.0",
+            "gradient_clipping_threshold=0.125",
+        ],
+    )
+
+  def test_without_adamw_options_keeps_maxtext_optimizer_defaults(self):
+    argv = self._build_config_argv()
+    self.assertEmpty([a for a in argv if a.startswith(_OPTIMIZER_KEYS)])
+
   def test_checkpoint_save_interval_zero_keeps_restore_but_disables_saving(
       self,
   ):
@@ -499,285 +571,214 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertIn("per_device_batch_size=0.25", argv)
     self.assertIn("max_target_length=4096", argv)
 
-  def test_max_seq_token_per_tpu_scales_with_mesh_expert(self):
+  def test_max_seq_token_per_tpu_includes_mesh_expert_in_per_device_batch_size(
+      self,
+  ):
     argv = self._build_config_argv(
-        train_micro_batch_size=64,
-        mesh_fsdp=32,
-        mesh_tp=1,
+        train_micro_batch_size=1,
+        mesh_fsdp=2,
+        mesh_tp=2,
         mesh_expert=2,
-        mesh_context=4,
-        num_devices=256,
-        max_prompt_length=4096,
-        max_response_length=61440,
-        max_seq_token_per_tpu=65536,
+        num_devices=8,
+        max_prompt_length=512,
+        max_response_length=512,
+        max_seq_token_per_tpu=4096,
     )
-    self.assertIn("per_device_batch_size=0.25", argv)
-    self.assertIn("max_target_length=65536", argv)
+    self.assertIn("per_device_batch_size=0.5", argv)
+    self.assertIn("max_target_length=4096", argv)
 
-  def test_pathways_persistence_requires_gs_output_dir_when_saving_enabled(self):
-    with mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
-      with self.assertRaisesRegex(
-          ValueError, "requires a gs:// base_output_directory"
-      ):
-        self._build_config_argv(
-            base_output_directory="artifacts/math_gsm8k_dist/maxtext",
-            checkpointing_options=mock.MagicMock(
-                save_interval_steps=1, max_to_keep=2
-            ),
-        )
-
-  def test_pathways_persistence_with_gs_output_dir_sets_ocdbt_and_zarr3_false(
+  def test_build_maxtext_config_profiling_options_enables_xplane_and_tpu_options(
       self,
   ):
-    with mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
-      argv = self._build_config_argv(
-          base_output_directory="gs://bucket/trellis/0921",
-          checkpointing_options=mock.MagicMock(
-              save_interval_steps=1, max_to_keep=2
-          ),
-      )
-    self.assertIn("base_output_directory=gs://bucket/trellis/0921", argv)
-    self.assertIn("checkpoint_storage_use_ocdbt=false", argv)
-    self.assertIn("checkpoint_storage_use_zarr3=false", argv)
+    argv = self._build_config_argv(
+        profiling_options=maxtext_utils.ProfilerOptions(
+            skip_first_n_steps=8,
+            profiler_steps=3,
+            profiler_period=-1,
+        ),
+    )
+    self.assertIn("profiler=xplane", argv)
+    self.assertIn("profiler_steps=3", argv)
+    self.assertIn("skip_first_n_steps_for_profiler=8", argv)
+    self.assertIn("profile_periodically_period=-1", argv)
+    self.assertIn("upload_all_profiler_results=false", argv)
+    self.assertIn("enable_tpu_profiling_options=true", argv)
+    self.assertIn("tpu_num_chips_to_profile_per_task=1", argv)
+    self.assertIn("tpu_num_sparse_cores_to_trace=1", argv)
+    self.assertIn("tpu_num_sparse_core_tiles_to_trace=1", argv)
 
-  def test_pathways_persistence_allows_local_output_dir_when_save_interval_zero(
+  def test_build_maxtext_config_profiling_options_custom_tpu_and_upload_flags(
+      self,
+  ):
+    argv = self._build_config_argv(
+        profiling_options=maxtext_utils.ProfilerOptions(
+            skip_first_n_steps=5,
+            profiler_steps=6,
+            profiler_period=10,
+            enable_tpu_profiling_options=True,
+            tpu_num_chips_to_profile_per_task=2,
+            tpu_num_sparse_cores_to_trace=2,
+            tpu_num_sparse_core_tiles_to_trace=16,
+            upload_all_profiler_results=True,
+        ),
+    )
+    self.assertIn("profiler=xplane", argv)
+    self.assertIn("profiler_steps=6", argv)
+    self.assertIn("skip_first_n_steps_for_profiler=5", argv)
+    self.assertIn("profile_periodically_period=10", argv)
+    self.assertIn("upload_all_profiler_results=true", argv)
+    self.assertIn("enable_tpu_profiling_options=true", argv)
+    self.assertIn("tpu_num_chips_to_profile_per_task=2", argv)
+    self.assertIn("tpu_num_sparse_cores_to_trace=2", argv)
+    self.assertIn("tpu_num_sparse_core_tiles_to_trace=16", argv)
+
+    argv_disabled_tpu = self._build_config_argv(
+        profiling_options=maxtext_utils.ProfilerOptions(
+            skip_first_n_steps=1,
+            profiler_steps=2,
+            enable_tpu_profiling_options=False,
+        ),
+    )
+    self.assertIn("profiler=xplane", argv_disabled_tpu)
+    self.assertIn("enable_tpu_profiling_options=false", argv_disabled_tpu)
+    self.assertEmpty([a for a in argv_disabled_tpu if a.startswith("tpu_num_")])
+
+  def test_build_maxtext_config_profiling_options_none_disables_profiler(self):
+    argv = self._build_config_argv(profiling_options=None)
+    self.assertIn("profiler=''", argv)
+    self.assertIn("profiler_steps=0", argv)
+    self.assertIn("skip_first_n_steps_for_profiler=-1", argv)
+    self.assertNotIn("profiler=xplane", argv)
+
+  def test_build_maxtext_config_maxtext_extra_flags_passthrough_and_validation(
       self,
   ):
     with mock.patch.dict(
         "os.environ",
-        {"ENABLE_PATHWAYS_PERSISTENCE": "1", "CHECKPOINT_ASYNC": "false"},
+        {"MAXTEXT_EXTRA_FLAGS": "use_ring_of_experts=true sa_block_q=512"},
     ):
-      argv = self._build_config_argv(
-          base_output_directory="artifacts/math_gsm8k_dist/maxtext",
-          load_parameters_path="gs://bucket/ckpt",
-          checkpointing_options=None,
-      )
-    self.assertIn("checkpoint_storage_use_ocdbt=false", argv)
-    self.assertIn("checkpoint_storage_use_zarr3=false", argv)
-    self.assertIn("async_checkpointing=false", argv)
+      argv = self._build_config_argv()
+    self.assertEqual(argv[-2:], ["use_ring_of_experts=true", "sa_block_q=512"])
 
-  def test_checkpoint_abandon_failed_saves_reaches_maxtext(self):
-    with mock.patch.dict(
-        "os.environ", {"CHECKPOINT_ABANDON_FAILED_SAVES": "true"}, clear=False
-    ):
-      argv = self._build_config_argv(base_output_directory="gs://bucket/out")
-    self.assertIn("abandon_failed_checkpoint_saves=true", argv)
-
-  def test_checkpoint_abandon_failed_saves_unset_pins_pre_5494_behaviour(self):
-    # Skipping the variable must keep aborting the run on a failed save even if
-    # MaxText later flips its own default, so the flag is emitted either way.
-    with mock.patch.dict("os.environ", {}, clear=False):
-      os.environ.pop("CHECKPOINT_ABANDON_FAILED_SAVES", None)
-      argv = self._build_config_argv(base_output_directory="gs://bucket/out")
-    self.assertIn("abandon_failed_checkpoint_saves=false", argv)
-
-  def test_pathways_checkpointing_impl_defaults_to_persistence(self):
-    with mock.patch.dict(
-        "os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"}, clear=False
-    ):
-      os.environ.pop("PATHWAYS_CHECKPOINTING_IMPL", None)
-      argv = self._build_config_argv(
-          base_output_directory="gs://bucket/out",
-          checkpointing_options=mock.MagicMock(
-              save_interval_steps=1, max_to_keep=2
-          ),
-      )
-    self.assertIn("pathways_checkpointing_impl=persistence", argv)
-
-  def test_colocated_python_requires_sidecar_image(self):
-    """Requesting colocated with no sidecar is exactly the silent NO_DISPATCHER OOM."""
     with mock.patch.dict(
         "os.environ",
-        {
-            "ENABLE_PATHWAYS_PERSISTENCE": "1",
-            "PATHWAYS_CHECKPOINTING_IMPL": "colocated_python",
-        },
-        clear=False,
-    ):
-      os.environ.pop("COLOCATED_PYTHON_SIDECAR_IMAGE", None)
-      with self.assertRaisesRegex(
-          ValueError, r"requires COLOCATED_PYTHON_SIDECAR_IMAGE"
-      ):
-        self._build_config_argv(
-            base_output_directory="gs://bucket/out",
-            checkpointing_options=mock.MagicMock(
-                save_interval_steps=1, max_to_keep=2
-            ),
-        )
-
-  def test_colocated_python_emits_impl_and_keeps_layout_identical(self):
-    with mock.patch.dict(
-        "os.environ",
-        {
-            "ENABLE_PATHWAYS_PERSISTENCE": "1",
-            "PATHWAYS_CHECKPOINTING_IMPL": "colocated_python",
-            "COLOCATED_PYTHON_SIDECAR_IMAGE": (
-                "us-docker.pkg.dev/proj/repo/sidecar:tag"
-            ),
-        },
-        clear=False,
-    ):
-      os.environ.pop("CKPT_USE_OCDBT", None)
-      argv = self._build_config_argv(
-          base_output_directory="gs://bucket/out",
-          checkpointing_options=mock.MagicMock(
-              save_interval_steps=1, max_to_keep=2
-          ),
-      )
-    self.assertIn("pathways_checkpointing_impl=colocated_python", argv)
-    # With CKPT_USE_OCDBT unset, both modes default to plain Zarr v2 so
-    # cross-mode restore stays safe.
-    self.assertIn("checkpoint_storage_use_ocdbt=false", argv)
-    self.assertIn("checkpoint_storage_use_zarr3=false", argv)
-
-  def test_unknown_pathways_checkpointing_impl_raises(self):
-    with mock.patch.dict(
-        "os.environ",
-        {
-            "ENABLE_PATHWAYS_PERSISTENCE": "1",
-            "PATHWAYS_CHECKPOINTING_IMPL": "remote_python",
-        },
-        clear=False,
+        {"MAXTEXT_EXTRA_FLAGS": "use_ring_of_experts=true invalid_flag"},
     ):
       with self.assertRaisesRegex(
-          ValueError, r"PATHWAYS_CHECKPOINTING_IMPL='remote_python'"
+          ValueError, "MAXTEXT_EXTRA_FLAGS entries must be key=value"
       ):
-        self._build_config_argv(
-            base_output_directory="gs://bucket/out",
-            checkpointing_options=mock.MagicMock(
-                save_interval_steps=1, max_to_keep=2
-            ),
-        )
+        self._build_config_argv()
 
-  def test_impl_not_emitted_without_pathways_persistence(self):
-    """The selector is meaningless unless Pathways checkpointing is on."""
-    with mock.patch.dict(
-        "os.environ",
-        {"PATHWAYS_CHECKPOINTING_IMPL": "colocated_python"},
-        clear=False,
-    ):
-      os.environ.pop("ENABLE_PATHWAYS_PERSISTENCE", None)
-      argv = self._build_config_argv(
-          base_output_directory="gs://bucket/out",
-          checkpointing_options=mock.MagicMock(
-              save_interval_steps=1, max_to_keep=2
-          ),
-      )
-    self.assertFalse(
-        any(a.startswith("pathways_checkpointing_impl=") for a in argv)
+  def test_vllm_additional_config_returns_routed_experts_only_when_asked(self):
+    default = maxtext_utils.build_vllm_maxtext_additional_config(
+        "qwen3-30b-a3b"
     )
+    self.assertNotIn("return_routed_experts", default["maxtext_config"])
 
-  def test_pathways_ocdbt_selection(self):
-    """CKPT_USE_OCDBT only enables OCDBT under colocated_python."""
-    ckpt_opts = mock.MagicMock(save_interval_steps=1, max_to_keep=2)
-    colocated_env = {
-        "ENABLE_PATHWAYS_PERSISTENCE": "1",
-        "PATHWAYS_CHECKPOINTING_IMPL": "colocated_python",
-        "COLOCATED_PYTHON_SIDECAR_IMAGE": "sidecar:tag",
-    }
+    enabled = maxtext_utils.build_vllm_maxtext_additional_config(
+        "qwen3-30b-a3b", return_routed_experts=True
+    )
+    self.assertIs(enabled["maxtext_config"]["return_routed_experts"], True)
 
-    # colocated_python + CKPT_USE_OCDBT=1 -> OCDBT on, zarr3 off.
-    with mock.patch.dict(
-        "os.environ", {**colocated_env, "CKPT_USE_OCDBT": "1"}, clear=False
-    ):
-      argv = self._build_config_argv(
-          base_output_directory="gs://bucket/out", checkpointing_options=ckpt_opts
-      )
-    self.assertIn("checkpoint_storage_use_ocdbt=true", argv)
-    self.assertIn("checkpoint_storage_use_zarr3=false", argv)
-    self.assertNotIn("checkpoint_storage_use_ocdbt=false", argv)
-
-    # persistence + CKPT_USE_OCDBT=1 -> ignored (persistence rejects OCDBT).
-    with mock.patch.dict(
-        "os.environ",
-        {
-            "ENABLE_PATHWAYS_PERSISTENCE": "1",
-            "PATHWAYS_CHECKPOINTING_IMPL": "persistence",
-            "CKPT_USE_OCDBT": "1",
-        },
-        clear=False,
-    ):
-      argv = self._build_config_argv(
-          base_output_directory="gs://bucket/out", checkpointing_options=ckpt_opts
-      )
-    self.assertIn("checkpoint_storage_use_ocdbt=false", argv)
-    self.assertNotIn("checkpoint_storage_use_ocdbt=true", argv)
-
-    # MAXTEXT_EXTRA_FLAGS is appended last, so it wins over the derived value
-    # (pyconfig parses argv last-wins).
-    with mock.patch.dict(
-        "os.environ",
-        {
-            **colocated_env,
-            "MAXTEXT_EXTRA_FLAGS": "checkpoint_storage_use_ocdbt=false",
-            "CKPT_USE_OCDBT": "1",
-        },
-        clear=False,
-    ):
-      argv = self._build_config_argv(
-          base_output_directory="gs://bucket/out", checkpointing_options=ckpt_opts
-      )
-    ocdbt_entries = [
-        a for a in argv if a.startswith("checkpoint_storage_use_ocdbt=")
-    ]
+  def test_weight_dtype_override_and_rollout_weight_dtype_parity(self):
+    argv = self._build_config_argv(weight_dtype="bfloat16")
+    self.assertIn("weight_dtype=bfloat16", argv)
+    self.assertIn(
+        f"rollout_weight_dtype={maxtext_utils.DEFAULT_ROLLOUT_WEIGHT_DTYPE}",
+        argv,
+    )
+    vllm_cfg = maxtext_utils.build_vllm_maxtext_additional_config(
+        model_name="gemma2-9b"
+    )
     self.assertEqual(
-        ocdbt_entries,
-        [
-            "checkpoint_storage_use_ocdbt=true",
-            "checkpoint_storage_use_ocdbt=false",
-        ],
+        vllm_cfg["maxtext_config"]["weight_dtype"],
+        maxtext_utils.DEFAULT_ROLLOUT_WEIGHT_DTYPE,
     )
 
-  def test_old_maxtext_without_impl_key(self):
-    ckpt_opts = mock.MagicMock(save_interval_steps=1, max_to_keep=2)
+  def test_build_maxtext_config_defaults_omit_optional_knobs(self):
+    argv = self._build_config_argv()
+    self.assertIn("allow_split_physical_axes=True", argv)
+    self.assertIn("attention=dot_product", argv)
+    self.assertIn("ici_context_parallelism=1", argv)
+    self.assertNotIn("context_parallel_load_balance=False", argv)
+    self.assertNotIn("override_model_config=True", argv)
+
+  def test_build_maxtext_config_context_parallelism_disables_load_balance(self):
+    argv = self._build_config_argv(mesh_context=2)
+    self.assertIn("ici_context_parallelism=2", argv)
+    self.assertIn("context_parallel_load_balance=False", argv)
+
+  def test_build_maxtext_config_base_num_kv_heads_enables_override_model_config(
+      self,
+  ):
+    argv = self._build_config_argv(base_num_kv_heads=8)
+    self.assertIn("base_num_kv_heads=8", argv)
+    self.assertIn("override_model_config=True", argv)
+
+  def test_build_maxtext_config_yaml_kv_heads_override_only_when_replicated(
+      self,
+  ):
     mock_pyconfig = mock.MagicMock()
+    mock_pyconfig.initialize.return_value = mock.MagicMock()
     mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
 
-    def build(env):
-      with (
-          mock.patch.dict("os.environ", env, clear=False),
-          mock.patch.object(
-              maxtext_utils,
-              "maxtext_modules",
-              return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
-          ),
-          mock.patch("os.path.exists", return_value=True),
-      ):
-        for key in ("PATHWAYS_CHECKPOINTING_IMPL", "CKPT_USE_OCDBT"):
-          if key not in env:
-            os.environ.pop(key, None)
-        return maxtext_utils.build_maxtext_config(
-            model_name="gemma2-9b",
-            base_output_directory="gs://bucket/out",
-            checkpointing_options=ckpt_opts,
-        )
-
-    # persistence: retried without the unknown key.
-    mock_pyconfig.initialize.side_effect = [
-        ValueError("Unknown parameter pathways_checkpointing_impl"),
-        mock.sentinel.config,
-    ]
-    self.assertIs(
-        build({"ENABLE_PATHWAYS_PERSISTENCE": "1"}), mock.sentinel.config
-    )
-    retry_argv = mock_pyconfig.initialize.call_args[0][0]
-    self.assertFalse(
-        any(a.startswith("pathways_checkpointing_impl=") for a in retry_argv)
-    )
-
-    # colocated_python: fails loudly instead of silently falling back.
-    mock_pyconfig.initialize.side_effect = ValueError(
-        "Unknown parameter pathways_checkpointing_impl"
-    )
-    with self.assertRaisesRegex(
-        ValueError,
-        "PATHWAYS_CHECKPOINTING_IMPL='colocated_python' was requested",
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+    ), mock.patch("os.path.exists", return_value=True), mock.patch(
+        "builtins.open",
+        mock.mock_open(read_data="base_num_kv_heads: 4\n"),
     ):
-      build({
-          "ENABLE_PATHWAYS_PERSISTENCE": "1",
-          "PATHWAYS_CHECKPOINTING_IMPL": "colocated_python",
-          "COLOCATED_PYTHON_SIDECAR_IMAGE": "sidecar:tag",
-      })
+      # kv_tp_size == YAML heads (4): no replication, so neither
+      # base_num_kv_heads nor override_model_config is emitted.
+      maxtext_utils.build_maxtext_config(
+          model_name="qwen3-test",
+          base_num_kv_heads=0,
+          kv_tp_size=4,
+      )
+      argv_no_rep = mock_pyconfig.initialize.call_args[0][0]
+      self.assertEmpty(
+          [a for a in argv_no_rep if a.startswith("base_num_kv_heads=")]
+      )
+      self.assertNotIn("override_model_config=True", argv_no_rep)
+
+      # kv_tp_size > YAML heads (8 > 4): KV replication occurs, so both
+      # base_num_kv_heads=8 and override_model_config=True are emitted.
+      mock_pyconfig.reset_mock()
+      maxtext_utils.build_maxtext_config(
+          model_name="qwen3-test",
+          base_num_kv_heads=0,
+          kv_tp_size=8,
+      )
+      argv_rep = mock_pyconfig.initialize.call_args[0][0]
+      self.assertIn("base_num_kv_heads=8", argv_rep)
+      self.assertIn("override_model_config=True", argv_rep)
+
+  def test_build_maxtext_config_explicit_attention_override(self):
+    argv = self._build_config_argv(attention="flash")
+    self.assertIn("attention=flash", argv)
+    self.assertNotIn("attention=dot_product", argv)
+
+  def test_build_maxtext_config_mesh_context_validation(self):
+    with self.assertRaisesRegex(ValueError, "mesh_context must be positive"):
+      self._build_config_argv(mesh_context=0)
+
+  def test_vllm_additional_config_scan_layers_and_float32_logit_knobs(self):
+    default_cfg = maxtext_utils.build_vllm_maxtext_additional_config(
+        "qwen3.5-35b-a3b"
+    )["maxtext_config"]
+    self.assertIs(default_cfg["scan_layers"], False)
+    self.assertNotIn("float32_gate_logits", default_cfg)
+    self.assertNotIn("float32_logits", default_cfg)
+
+    explicit_cfg = maxtext_utils.build_vllm_maxtext_additional_config(
+        "qwen3.5-35b-a3b",
+        float32_gate_logits=True,
+        float32_logits=False,
+    )["maxtext_config"]
+    self.assertIs(explicit_cfg["float32_gate_logits"], True)
+    self.assertIs(explicit_cfg["float32_logits"], False)
 
 
 if __name__ == "__main__":

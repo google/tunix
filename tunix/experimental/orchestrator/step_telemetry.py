@@ -15,18 +15,16 @@
 """Per-step telemetry for `StandardRLProgram`.
 
 Types and pure functions that turn a train step's phase times and scored
-rollouts into the metrics and log lines its train stage emits, and
-`OutstandingPrompts`, which tracks dispatched prompts for the progress lines
-logged while the stage waits for rollouts. None of them reach into the
-program, so they are tested here rather than through a running program.
+rollouts into the metrics and log lines its train stage emits. None of them
+touch the program's state, so they are tested here rather than through a
+running program.
 """
 
+import collections
 from collections.abc import Mapping, Sequence
 import dataclasses
-import time
 from typing import Any
 
-from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
@@ -34,7 +32,7 @@ from tunix.experimental.common import lineage
 
 @dataclasses.dataclass(kw_only=True)
 class StepTimes:
-  """Seconds the train stage waited on each phase, logged as `orchestrator/*`.
+  """Seconds the train stage waited on each phase, logged as `perf/*`.
 
   `exposed_generation_time`, `policy_training_time` and `weight_sync_time`
   match the MLPerf branch so dashboards compare across branches. Each is how
@@ -84,11 +82,17 @@ class RolloutWindow:
     dispatch_time_s: Unix time of the rollout's `engine.dispatch` event.
     finish_time_s: Unix time of its last `worker.rollout` event.
     worker_id: The rollout worker that handed the trajectory back.
+    execution_time_s: Worker-side episode execution duration in seconds, or
+      None when not stamped.
+    batch_idx: Prompt cohort index from `engine.dispatch` or item metadata,
+      or None when untagged.
   """
 
   dispatch_time_s: float
   finish_time_s: float
   worker_id: str
+  execution_time_s: float | None = None
+  batch_idx: int | None = None
 
   @property
   def duration_s(self) -> float:
@@ -102,7 +106,8 @@ def _rollout_window(item: datatypes.TrajectoryItem) -> RolloutWindow | None:
   `DistributedRLEngine` records `engine.dispatch` when it builds the request,
   and the rollout worker records `worker.rollout` when it hands the finished
   trajectory back. The two timestamps come from different hosts' clocks, so a
-  duration includes their skew.
+  duration includes their skew; `execution_time_s` (when stamped by the worker)
+  measures episode execution on the worker's own monotonic clock.
 
   Args:
     item: A scored rollout.
@@ -126,11 +131,39 @@ def _rollout_window(item: datatypes.TrajectoryItem) -> RolloutWindow | None:
   ]
   if not dispatched or not finished:
     return None
+  dispatch_attrs = dispatched[0].attributes
+  finish_attrs = finished[-1].attributes
+  raw_exec = finish_attrs.get("execution_time_s")
+  raw_batch_idx = dispatch_attrs.get("batch_idx")
+  if raw_batch_idx is None:
+    raw_batch_idx = item.metadata.get("batch_idx")
   return RolloutWindow(
       dispatch_time_s=dispatched[0].timestamp_s,
       finish_time_s=finished[-1].timestamp_s,
-      worker_id=str(finished[-1].attributes["worker_id"]),
+      worker_id=str(finish_attrs["worker_id"]),
+      execution_time_s=float(raw_exec) if raw_exec is not None else None,
+      batch_idx=int(raw_batch_idx) if raw_batch_idx is not None else None,
   )
+
+
+def _env_time_s(traj: Mapping[str, Any]) -> float | None:
+  """Sums `reset_latency`, `step_latency`, and `close_latency` from `env_time`."""
+  env_time = traj.get("env_time")
+  if env_time is None:
+    return None
+  return float(
+      env_time["reset_latency"]
+      + sum(env_time["step_latency"])
+      + env_time["close_latency"]
+  )
+
+
+def _reward_time_s(traj: Mapping[str, Any]) -> float | None:
+  """Reads `reward_latency` from `reward_time`."""
+  reward_time = traj.get("reward_time")
+  if reward_time is None:
+    return None
+  return float(reward_time["reward_latency"])
 
 
 def _num_turns(traj: Mapping[str, Any]) -> int | None:
@@ -165,6 +198,10 @@ class RolloutFacts:
       them. They do not depend on the training mask, so rollouts that were
       masked out still have them.
     window: Dispatch and finish times from lineage, or None without them.
+    env_time_s: Total environment interaction wall time (`reset` + `step` +
+      `close`) in seconds, or None without `env_time`.
+    reward_time_s: Final reward evaluation wall time in seconds, or None
+      without `reward_time`.
   """
 
   traj_id: str
@@ -172,6 +209,8 @@ class RolloutFacts:
   num_turns: int | None
   turn_lengths: Sequence[int] | None
   window: RolloutWindow | None
+  env_time_s: float | None = None
+  reward_time_s: float | None = None
 
   @classmethod
   def of(cls, item: datatypes.TrajectoryItem) -> "RolloutFacts":
@@ -198,6 +237,8 @@ class RolloutFacts:
         num_turns=_num_turns(traj),
         turn_lengths=traj.get("assistant_turn_lengths"),
         window=_rollout_window(item),
+        env_time_s=_env_time_s(traj),
+        reward_time_s=_reward_time_s(traj),
     )
 
 
@@ -226,17 +267,24 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
       status to RUNNING, so a nonzero `running_frac` points at the producer.
       Unlike `rollout/success_rate`, these keep such rollouts in the
       denominator.
+    * `rollout/success_rate`: share of non-`RUNNING` rollouts that ended in
+      `SUCCEEDED`.
     * `rollout/num_turns_{mean,max}`: assistant turns per rollout, counted in
       `conversation_text`.
     * `rollout/turn_length/{mean,p50,p99,max}`: tokens sampled per assistant
       turn, pooled over the step.
+    * `rollout/env_time_sec/{mean,p50,p99,max}` and
+      `rollout/reward_time_sec/{mean,p50,p99,max}`: environment (`reset` +
+      `step` + `close`) and final-reward wall time per rollout.
     * `rollout/duration_sec/{p50,p90,p99,max}`: seconds from the engine
       building a rollout's request to its worker handing the trajectory back,
       as the orchestrator sees it: queueing before the worker starts, pauses
       for weight sync and clock skew between hosts are all included.
-      `rollout/tail_sec` is max - p50, and `rollout/batch_wall_sec` runs from
-      the step's first dispatch to its last finish, which can span several
-      train steps when `max_staleness > 0`.
+      `rollout/execution_sec/{p50,p90,p99,max}` is the worker-side episode
+      execution duration, and `rollout/queue_wait_sec/{p50,p90,p99,max}` is
+      `max(0, duration_sec - execution_sec)`. `rollout/tail_sec` is max - p50,
+      and `rollout/batch_wall_sec` is the maximum cohort span from first
+      dispatch to last finish within each `batch_idx` cohort.
 
   The turn and duration families skip rollouts that lack their inputs and are
   omitted when no rollout has them.
@@ -251,6 +299,8 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
   turns: list[int] = []
   turn_lengths: list[int] = []
   windows: list[RolloutWindow] = []
+  env_times: list[float] = []
+  reward_times: list[float] = []
   for fact in facts:
     status_counts[fact.status] += 1
     if fact.num_turns is not None:
@@ -259,11 +309,22 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
       turn_lengths.extend(fact.turn_lengths)
     if fact.window is not None:
       windows.append(fact.window)
+    if fact.env_time_s is not None:
+      env_times.append(fact.env_time_s)
+    if fact.reward_time_s is not None:
+      reward_times.append(fact.reward_time_s)
 
   metrics: dict[str, float] = {}
   if facts:
     for name, count in status_counts.items():
       metrics[f"rollout/status/{name.lower()}_frac"] = count / len(facts)
+    finished = (
+        len(facts) - status_counts[datatypes.TrajectoryStatus.RUNNING.name]
+    )
+    if finished > 0:
+      metrics["rollout/success_rate"] = (
+          status_counts[datatypes.TrajectoryStatus.SUCCEEDED.name] / finished
+      )
   if turns:
     metrics["rollout/num_turns_mean"] = float(np.mean(turns))
     metrics["rollout/num_turns_max"] = float(np.max(turns))
@@ -273,6 +334,18 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
     metrics["rollout/turn_length/p50"] = float(p50)
     metrics["rollout/turn_length/p99"] = float(p99)
     metrics["rollout/turn_length/max"] = float(np.max(turn_lengths))
+  if env_times:
+    p50, p99 = np.percentile(env_times, [50, 99])
+    metrics["rollout/env_time_sec/mean"] = float(np.mean(env_times))
+    metrics["rollout/env_time_sec/p50"] = float(p50)
+    metrics["rollout/env_time_sec/p99"] = float(p99)
+    metrics["rollout/env_time_sec/max"] = float(np.max(env_times))
+  if reward_times:
+    p50, p99 = np.percentile(reward_times, [50, 99])
+    metrics["rollout/reward_time_sec/mean"] = float(np.mean(reward_times))
+    metrics["rollout/reward_time_sec/p50"] = float(p50)
+    metrics["rollout/reward_time_sec/p99"] = float(p99)
+    metrics["rollout/reward_time_sec/max"] = float(np.max(reward_times))
   if windows:
     durations = np.array([window.duration_s for window in windows])
     p50, p90, p99 = np.percentile(durations, [50, 90, 99])
@@ -281,10 +354,41 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
     metrics["rollout/duration_sec/p99"] = float(p99)
     metrics["rollout/duration_sec/max"] = float(np.max(durations))
     metrics["rollout/tail_sec"] = float(np.max(durations) - p50)
-    metrics["rollout/batch_wall_sec"] = float(
-        max(window.finish_time_s for window in windows)
-        - min(window.dispatch_time_s for window in windows)
+    cohorts: collections.defaultdict[int | None, list[RolloutWindow]] = (
+        collections.defaultdict(list)
     )
+    for window in windows:
+      cohorts[window.batch_idx].append(window)
+    metrics["rollout/batch_wall_sec"] = float(
+        max(
+            max(w.finish_time_s for w in cohort)
+            - min(w.dispatch_time_s for w in cohort)
+            for cohort in cohorts.values()
+        )
+    )
+    exec_durations = [
+        window.execution_time_s
+        for window in windows
+        if window.execution_time_s is not None
+    ]
+    if exec_durations:
+      exec_p50, exec_p90, exec_p99 = np.percentile(
+          exec_durations, [50, 90, 99]
+      )
+      metrics["rollout/execution_sec/p50"] = float(exec_p50)
+      metrics["rollout/execution_sec/p90"] = float(exec_p90)
+      metrics["rollout/execution_sec/p99"] = float(exec_p99)
+      metrics["rollout/execution_sec/max"] = float(np.max(exec_durations))
+      queue_waits = [
+          max(0.0, window.duration_s - window.execution_time_s)
+          for window in windows
+          if window.execution_time_s is not None
+      ]
+      wait_p50, wait_p90, wait_p99 = np.percentile(queue_waits, [50, 90, 99])
+      metrics["rollout/queue_wait_sec/p50"] = float(wait_p50)
+      metrics["rollout/queue_wait_sec/p90"] = float(wait_p90)
+      metrics["rollout/queue_wait_sec/p99"] = float(wait_p99)
+      metrics["rollout/queue_wait_sec/max"] = float(np.max(queue_waits))
   return RolloutHealth(metrics=metrics, status_counts=status_counts)
 
 
@@ -312,8 +416,12 @@ def slowest_rollouts_summary(
     fields = [
         fact.traj_id,
         f"dur={window.duration_s:.1f}s",
-        f"status={fact.status}",
     ]
+    if window.execution_time_s is not None:
+      fields.append(f"exec={window.execution_time_s:.1f}s")
+    if fact.env_time_s is not None:
+      fields.append(f"env={fact.env_time_s:.1f}s")
+    fields.append(f"status={fact.status}")
     if fact.num_turns is not None:
       fields.append(f"turns={fact.num_turns}")
     if fact.turn_lengths:
@@ -321,174 +429,3 @@ def slowest_rollouts_summary(
     fields.append(f"worker={window.worker_id}")
     described.append(" ".join(fields))
   return f"slowest {len(described)} of {len(timed)}: " + " | ".join(described)
-
-
-def format_duration(seconds: float) -> str:
-  """Formats seconds as a short duration such as `45s`, `12m` or `3.3h`."""
-  # Each unit starts where rounding the smaller one would print 60.
-  if seconds >= 59.5 * 60:
-    return f"{seconds / 3600:.1f}h"
-  if seconds >= 59.5:
-    return f"{seconds / 60:.0f}m"
-  return f"{seconds:.0f}s"
-
-
-def step_summary(
-    *,
-    step: int,
-    step_time_sec: float,
-    step_times: StepTimes,
-    health: RolloutHealth,
-    steps_left: int | None,
-    mean_step_sec: float,
-) -> str:
-  """Renders the one-line summary logged after each train step.
-
-  Args:
-    step: The step that finished.
-    step_time_sec: Its wall-clock duration.
-    step_times: Its per-phase times.
-    health: Its `rollout_health`.
-    steps_left: Steps still to run, or None without `max_steps`.
-    mean_step_sec: Mean step duration so far in this run, for the ETA. It
-      includes the slower first steps, so early ETAs run high.
-
-  Returns:
-    `|`-separated groups of key=value fields, with rollouts counted per
-    status, most common first. Rollout families without metrics, and the ETA
-    once no steps are left, are omitted.
-  """
-  parts = [
-      f"step={step} time={step_time_sec:.1f}s"
-      f" (wait={step_times.exposed_generation_time:.1f}s"
-      f" train={step_times.policy_training_time:.1f}s"
-      f" ref={step_times.reference_logps_time:.1f}s"
-      f" agreement={step_times.sampler_agreement_time:.1f}s"
-      f" ckpt={step_times.checkpoint_time:.1f}s"
-      f" sync={step_times.weight_sync_time:.1f}s)"
-  ]
-  counted = [
-      (name, count) for name, count in health.status_counts.items() if count
-  ]
-  # Most common first; `list.sort` is stable, so ties keep enum order.
-  counted.sort(key=lambda pair: -pair[1])
-  parts.append(
-      " ".join(
-          [f"rollouts={sum(health.status_counts.values())}"]
-          + [f"{name.lower()}={count}" for name, count in counted]
-      )
-  )
-  metrics = health.metrics
-  if "rollout/duration_sec/max" in metrics:
-    parts.append(
-        f"dur_p50={metrics['rollout/duration_sec/p50']:.1f}s"
-        f" dur_max={metrics['rollout/duration_sec/max']:.1f}s"
-    )
-  if "rollout/num_turns_max" in metrics:
-    parts.append(
-        f"turns_mean={metrics['rollout/num_turns_mean']:.1f}"
-        f" turns_max={metrics['rollout/num_turns_max']:.0f}"
-    )
-  if "rollout/turn_length/max" in metrics:
-    parts.append(
-        f"turn_len_p99={metrics['rollout/turn_length/p99']:.0f}"
-        f" turn_len_max={metrics['rollout/turn_length/max']:.0f}"
-    )
-  if steps_left:
-    parts.append(
-        f"eta={format_duration(steps_left * mean_step_sec)}"
-        f" steps_left={steps_left}"
-    )
-  return " | ".join(parts)
-
-
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class OldestOutstanding:
-  """The dispatched prompt that has waited longest for its rollouts.
-
-  Attributes:
-    prompt_id: The prompt's id.
-    age_s: Seconds since the prompt was last dispatched.
-    rollouts_left: Its rollouts that have not come back yet.
-  """
-
-  prompt_id: str
-  age_s: float
-  rollouts_left: int
-
-
-class OutstandingPrompts:
-  """Dispatched prompts whose rollouts have not all come back.
-
-  Entries stay in dispatch order, so the first one is the oldest.
-  """
-
-  def __init__(self) -> None:
-    # Prompt id -> (monotonic dispatch time, rollouts still out).
-    self._entries: dict[str, tuple[float, int]] = {}
-    self._untracked_returns = 0
-
-  def __len__(self) -> int:
-    return len(self._entries)
-
-  @property
-  def untracked_returns(self) -> int:
-    """Returned rollouts whose prompt was not outstanding."""
-    return self._untracked_returns
-
-  def dispatched(self, prompt_id: str, num_rollouts: int) -> None:
-    """Records `num_rollouts` rollouts of `prompt_id` going out now."""
-    if prompt_id in self._entries:
-      # Late returns from the earlier dispatch will count against this one.
-      logging.log_first_n(
-          logging.WARNING,
-          "Prompt %s was dispatched again with %d rollouts of the previous"
-          " dispatch still out.",
-          5,
-          prompt_id,
-          self._entries[prompt_id][1],
-      )
-      # Restart the clock and move the prompt to the back.
-      del self._entries[prompt_id]
-    self._entries[prompt_id] = (time.monotonic(), num_rollouts)
-
-  def returned(self, prompt_id: str) -> None:
-    """Records one rollout of `prompt_id` coming back.
-
-    A rollout of a prompt that is not outstanding (a late return after a
-    re-dispatch, or a response that lost its prompt id) is counted and warned
-    about but never raised on: polling must not drop the rest of its batch over
-    progress bookkeeping.
-
-    Args:
-      prompt_id: The returned rollout's prompt id.
-    """
-    if prompt_id not in self._entries:
-      self._untracked_returns += 1
-      logging.log_first_n(
-          logging.WARNING,
-          "A rollout of prompt %r came back without an outstanding dispatch"
-          " (%d so far); in-flight progress may be off.",
-          5,
-          prompt_id,
-          self._untracked_returns,
-      )
-      return
-    dispatched_at, rollouts_left = self._entries[prompt_id]
-    if rollouts_left <= 1:
-      del self._entries[prompt_id]
-    else:
-      self._entries[prompt_id] = (dispatched_at, rollouts_left - 1)
-
-  def oldest(self) -> OldestOutstanding | None:
-    """Returns the longest-waiting prompt, or None when nothing is out."""
-    if not self._entries:
-      return None
-    prompt_id, (dispatched_at, rollouts_left) = next(
-        iter(self._entries.items())
-    )
-    return OldestOutstanding(
-        prompt_id=prompt_id,
-        age_s=time.monotonic() - dispatched_at,
-        rollouts_left=rollouts_left,
-    )

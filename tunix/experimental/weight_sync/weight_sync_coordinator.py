@@ -131,11 +131,11 @@ import time
 from typing import Any, Optional, Sequence
 
 from absl import logging
-import math
-import os
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import timeouts as timeouts_lib
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.weight_sync import weight_sync
+from tunix.experimental.worker import remote_execution
 
 
 class NullHandler(weight_sync.WeightSyncHandler):
@@ -185,54 +185,7 @@ def create_default_handler(
     raise ValueError(f"Unknown weight sync mode: {mode_name!r}")
 
 
-class RemoteWorkerShim:
-  """Presents a generic remote RPC handle as a weight sync participant."""
-
-  def __init__(self, handle: Any, info: datatypes.WorkerInfo):
-    self._handle = handle
-    self._info = info
-
-  def info(self) -> datatypes.WorkerInfo:
-    return self._info
-
-  def heartbeat(self, *args, **kwargs) -> Any:
-    return self._handle.submit("heartbeat", *args, **kwargs)
-
-  def stop(self, *args, **kwargs) -> Any:
-    return self._handle.submit("stop", *args, **kwargs)
-
-  async def prepare_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("prepare_weight_sync", *args, **kwargs)
-
-  async def release_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("release_weight_sync", *args, **kwargs)
-
-  async def bind_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("bind_weight_sync", *args, **kwargs)
-
-  async def get_weight_sync_metadata(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit(
-        "get_weight_sync_metadata", *args, **kwargs
-    )
-
-  async def pre_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("pre_weight_sync", *args, **kwargs)
-
-  async def weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("weight_sync", *args, **kwargs)
-
-  async def post_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("post_weight_sync", *args, **kwargs)
-
-  async def abort_weight_sync(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("abort_weight_sync", *args, **kwargs)
-
-  async def get_weight_sync_status(self, *args, **kwargs) -> Any:
-    return await self._handle.asubmit("get_weight_sync_status", *args, **kwargs)
-
-
-weight_sync.WeightSyncSource.register(RemoteWorkerShim)
-weight_sync.WeightSyncDestination.register(RemoteWorkerShim)
+_Participant = tuple[str, remote_execution.ActorHandle]
 
 
 # The worker-report phases a failed RPC may be reconciled against, per
@@ -343,22 +296,6 @@ def _manifest_mismatches(
           f" destination {dst_item}"
       )
   return problems
-
-
-def _worker_id(member: object) -> str:
-  """Best-effort worker id, for error messages only.
-
-  `WorkerRegistry.register` calls `worker.info()`, so anything in the registry
-  has one. A member that failed a protocol check may still be an arbitrary
-  object, and this must not be the thing that raises.
-  """
-  info = getattr(member, "info", None)
-  if callable(info):
-    try:
-      return getattr(info(), "worker_id", repr(member))
-    except Exception:  # pylint: disable=broad-except
-      pass
-  return repr(member)
 
 
 class StaleRoundError(RuntimeError):
@@ -528,59 +465,6 @@ _POISONING_STATES = frozenset({
 })
 
 
-_TRUTHY_ENV_VALUES = ("1", "true", "yes", "on")
-_INFINITE_ENV_VALUES = (
-    "inf",
-    "+inf",
-    "infinity",
-    "+infinity",
-    "none",
-    "off",
-    "disable",
-    "disabled",
-)
-
-
-def is_weight_sync_timeouts_disabled() -> bool:
-  """Returns True if weight-sync phase timeouts are disabled via env."""
-  for name in ("WEIGHT_SYNC_DISABLE_TIMEOUTS", "DISABLE_WEIGHT_SYNC_TIMEOUTS"):
-    val = os.getenv(name)
-    if val is not None and val.strip().lower() in _TRUTHY_ENV_VALUES:
-      return True
-  return False
-
-
-def _env_float(name: str, default: float) -> float:
-  val = os.getenv(name)
-  if val is None or not val.strip():
-    return default
-  stripped = val.strip().lower()
-  if stripped in _INFINITE_ENV_VALUES:
-    return float("inf")
-  try:
-    return float(val)
-  except ValueError:
-    logging.warning(
-        "Invalid float for %s=%r; using default %f", name, val, default
-    )
-    return default
-
-
-def _timeout_env_float(name: str, default: float) -> float:
-  if is_weight_sync_timeouts_disabled():
-    return float("inf")
-  parsed = _env_float(name, default)
-  if parsed <= 0:
-    return float("inf")
-  return parsed
-
-
-async def _wait_for(aw: Any, timeout: Optional[float]) -> Any:
-  if timeout is None or math.isinf(timeout) or timeout <= 0:
-    return await aw
-  return await asyncio.wait_for(aw, timeout)
-
-
 @dataclasses.dataclass(frozen=True)
 class PhaseTimeouts:
   """Per-phase deadlines, in seconds.
@@ -589,60 +473,41 @@ class PhaseTimeouts:
   enough for D2H, transfer, or H2D, and a too-short deadline turns a slow
   round into a spurious rollback. These deadlines govern the coordinator's
   waiting only; a remote worker adapter must configure its own RPC deadline
-  at least this large.
+  at least `max_rpc_phase_s()`.
   """
 
-  bind: float = dataclasses.field(
-      default_factory=lambda: _timeout_env_float(
-          "WEIGHT_SYNC_BIND_TIMEOUT_S", 300.0
-      )
-  )
-  metadata: float = dataclasses.field(
-      default_factory=lambda: _timeout_env_float(
-          "WEIGHT_SYNC_METADATA_TIMEOUT_S", 300.0
-      )
-  )
-  source_prepare: float = dataclasses.field(
-      default_factory=lambda: _timeout_env_float(
-          "WEIGHT_SYNC_SOURCE_PREPARE_TIMEOUT_S", 900.0
-      )
-  )
-  pre: float = dataclasses.field(
-      default_factory=lambda: _timeout_env_float(
-          "WEIGHT_SYNC_PRE_TIMEOUT_S",
-          _env_float("EPISODE_TIMEOUT_SECS", 600.0) + 300.0,
-      )
-  )
-  transfer: float = dataclasses.field(
-      default_factory=lambda: _timeout_env_float(
-          "WEIGHT_SYNC_TRANSFER_TIMEOUT_S", 1800.0
-      )
-  )
-  h2d: float = dataclasses.field(
-      default_factory=lambda: _timeout_env_float(
-          "WEIGHT_SYNC_H2D_TIMEOUT_S", 1800.0
-      )
-  )
-  post: float = dataclasses.field(
-      default_factory=lambda: _timeout_env_float(
-          "WEIGHT_SYNC_POST_TIMEOUT_S", 300.0
-      )
-  )
-  abort: float = dataclasses.field(
-      default_factory=lambda: _timeout_env_float(
-          "WEIGHT_SYNC_ABORT_TIMEOUT_S", 180.0
-      )
-  )
-  status: float = dataclasses.field(
-      default_factory=lambda: _timeout_env_float(
-          "WEIGHT_SYNC_STATUS_TIMEOUT_S", 30.0
-      )
-  )
-  release: float = dataclasses.field(
-      default_factory=lambda: _timeout_env_float(
-          "WEIGHT_SYNC_RELEASE_TIMEOUT_S", 120.0
-      )
-  )
+  bind: float = 300.0
+  metadata: float = 300.0
+  source_prepare: float = 900.0
+  pre: float = timeouts_lib.DEFAULT_PRE_WEIGHT_SYNC_TIMEOUT_S
+  transfer: float = 1800.0
+  h2d: float = 1800.0
+  post: float = 300.0
+  abort: float = 180.0
+  status: float = 30.0
+  release: float = 120.0
+
+  @classmethod
+  def for_drain_timeout(cls, drain_timeout_s: float) -> PhaseTimeouts:
+    """Builds `PhaseTimeouts` with `pre` sized for a rollout `drain_timeout_s`."""
+    required_pre = timeouts_lib.pre_weight_sync_timeout_for(drain_timeout_s)
+    return cls(
+        pre=max(timeouts_lib.DEFAULT_PRE_WEIGHT_SYNC_TIMEOUT_S, required_pre)
+    )
+
+  def max_rpc_phase_s(self) -> float:
+    """Returns the largest deadline among worker-RPC-backed phases."""
+    return max(
+        self.bind,
+        self.metadata,
+        self.source_prepare,
+        self.pre,
+        self.h2d,
+        self.post,
+        self.abort,
+        self.status,
+        self.release,
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -774,35 +639,20 @@ class WeightSyncCoordinator:
 
   # ---------------------------------------------------------------- lookup
 
-  def _members(self, role: str) -> list[Any]:
-    group = self._registry.group(role)
-    if group.is_empty():
+  def _members(self, role: str) -> list[_Participant]:
+    infos = self._registry.infos(role)
+    if not infos:
       raise ValueError(f"no workers registered for role {role!r}")
-    return list(group)
+    return [
+        (info.worker_id, self._registry.handle(info.worker_id))
+        for info in infos
+    ]
 
-  def _sources(self) -> list[WeightSyncSource]:
-    members = self._members(self._source_role)
-    for member in members:
-      if not isinstance(member, WeightSyncSource):
-        raise TypeError(
-            f"worker {_worker_id(member)!r} serves role"
-            f" {self._source_role!r} but does not implement"
-            " prepare_weight_sync / release_weight_sync"
-        )
-    return members
+  def _sources(self) -> list[_Participant]:
+    return self._members(self._source_role)
 
-  def _destinations(self) -> list[WeightSyncDestination]:
-    members = self._members(self._destination_role)
-    for member in members:
-      if not isinstance(member, WeightSyncDestination):
-        raise TypeError(
-            f"worker {_worker_id(member)!r} serves role"
-            f" {self._destination_role!r} but does not implement the"
-            " bind / metadata / pre_weight_sync / weight_sync /"
-            " post_weight_sync / abort_weight_sync / get_weight_sync_status"
-            " destination protocol"
-        )
-    return members
+  def _destinations(self) -> list[_Participant]:
+    return self._members(self._destination_role)
 
   # ---------------------------------------------------------------- request
 
@@ -833,13 +683,14 @@ class WeightSyncCoordinator:
 
   async def _worker_phase(
       self,
-      destination: WeightSyncDestination,
+      destination: _Participant,
       request: datatypes.WeightSyncRequest,
   ) -> Optional[str]:
     """The worker's self-reported phase for THIS round, or None if unknown."""
+    _, handle = destination
     try:
-      report = await _wait_for(
-          destination.get_weight_sync_status(), self._timeouts.status
+      report = await asyncio.wait_for(
+          handle.asubmit("get_weight_sync_status"), self._timeouts.status
       )
     except Exception:  # pylint: disable=broad-except
       return None
@@ -851,7 +702,7 @@ class WeightSyncCoordinator:
 
   async def _call_phase(
       self,
-      destination: WeightSyncDestination,
+      destination: _Participant,
       method_name: str,
       request: datatypes.WeightSyncRequest,
       timeout: float,
@@ -863,10 +714,10 @@ class WeightSyncCoordinator:
     error means the reply is lost, not that the work did not happen, and for
     `post_weight_sync` in particular the work may be a completed publish.
     """
-    method = getattr(destination, method_name)
+    wid, handle = destination
     accepts = _PHASE_ACCEPTS.get(method_name)
     try:
-      await _wait_for(method(request), timeout)
+      await asyncio.wait_for(handle.asubmit(method_name, request), timeout)
       return None
     except asyncio.CancelledError:
       raise
@@ -880,7 +731,7 @@ class WeightSyncCoordinator:
               "%s on %s failed (%r) but the worker reports phase %s for this"
               " round; treating as success",
               method_name,
-              _worker_id(destination),
+              wid,
               e,
               phase,
           )
@@ -889,11 +740,11 @@ class WeightSyncCoordinator:
 
   async def _phase_results(
       self,
-      destinations: Sequence[WeightSyncDestination],
+      destinations: Sequence[_Participant],
       method_name: str,
       request: datatypes.WeightSyncRequest,
       timeout: float,
-  ) -> list[tuple[WeightSyncDestination, Optional[BaseException]]]:
+  ) -> list[tuple[_Participant, Optional[BaseException]]]:
     errors = await asyncio.gather(*[
         self._call_phase(d, method_name, request, timeout) for d in destinations
     ])
@@ -901,13 +752,13 @@ class WeightSyncCoordinator:
 
   async def _phase_on_all(
       self,
-      destinations: Sequence[WeightSyncDestination],
+      destinations: Sequence[_Participant],
       method_name: str,
       request: datatypes.WeightSyncRequest,
       timeout: float,
   ) -> list[str]:
     return [
-        f"{_worker_id(destination)}: {method_name}: {error!r}"
+        f"{destination[0]}: {method_name}: {error!r}"
         for destination, error in await self._phase_results(
             destinations, method_name, request, timeout
         )
@@ -916,7 +767,7 @@ class WeightSyncCoordinator:
 
   async def _abort_all(
       self,
-      destinations: Sequence[WeightSyncDestination],
+      destinations: Sequence[_Participant],
       request: datatypes.WeightSyncRequest,
   ) -> list[str]:
     """Rolls back every destination given, returning rollback failures.
@@ -1032,7 +883,7 @@ class WeightSyncCoordinator:
 
     async def record_workers(final_error: str = "") -> None:
       for destination in destinations:
-        wid = _worker_id(destination)
+        wid = destination[0]
         if wid in worker_reports:
           continue
         phase = await self._worker_phase(
@@ -1060,23 +911,27 @@ class WeightSyncCoordinator:
       # registration cost no downtime. Failures here need no rollback either.
       try:
         await asyncio.gather(*[
-            _wait_for(d.bind_weight_sync(), self._timeouts.bind)
-            for d in destinations
+            asyncio.wait_for(
+                handle.asubmit("bind_weight_sync"), self._timeouts.bind
+            )
+            for _, handle in destinations
         ])
         dst_meta_lists = await asyncio.gather(*[
-            _wait_for(
-                d.get_weight_sync_metadata(), self._timeouts.metadata
+            asyncio.wait_for(
+                handle.asubmit("get_weight_sync_metadata"),
+                self._timeouts.metadata,
             )
-            for d in destinations
+            for _, handle in destinations
         ])
         # Metadata is collected exactly once and the same objects flow to both
         # registration and the request. Collecting twice would hand the
         # controller endpoints from a different rebind than the one staged.
         src_meta_lists = await asyncio.gather(*[
-            _wait_for(
-                s.prepare_weight_sync(request), self._timeouts.source_prepare
+            asyncio.wait_for(
+                handle.asubmit("prepare_weight_sync", request),
+                self._timeouts.source_prepare,
             )
-            for s in sources
+            for _, handle in sources
         ])
       except asyncio.CancelledError:
         raise
@@ -1262,7 +1117,7 @@ class WeightSyncCoordinator:
       state = RoundState.TRANSFERRING
       transfer_in_flight = True
       try:
-        transfer = await _wait_for(
+        transfer = await asyncio.wait_for(
             loop.run_in_executor(
                 None,
                 functools.partial(
@@ -1358,8 +1213,7 @@ class WeightSyncCoordinator:
 
       state = RoundState.COMMITTED
       self._last_committed_version = policy_version
-      for destination in destinations:
-        wid = _worker_id(destination)
+      for wid, _ in destinations:
         worker_reports.setdefault(
             wid, WorkerRoundReport(worker_id=wid, phase="committed")
         )
@@ -1409,10 +1263,10 @@ class WeightSyncCoordinator:
             # publish. Aborting it could roll back a publish that happened.
             # Only a positively confirmed quiesced-and-unpublished worker
             # is an abort candidate, on this path like every other.
-            committed_ws: list[WeightSyncDestination] = []
-            recovered_ws: list[WeightSyncDestination] = []
-            abortable: list[WeightSyncDestination] = []
-            unknown_ws: list[WeightSyncDestination] = []
+            committed_ws: list[_Participant] = []
+            recovered_ws: list[_Participant] = []
+            abortable: list[_Participant] = []
+            unknown_ws: list[_Participant] = []
             for destination in destinations:
               phase = await self._worker_phase(destination, prepared_request)
               if phase == "committed":
@@ -1423,9 +1277,9 @@ class WeightSyncCoordinator:
                 abortable.append(destination)
               else:
                 unknown_ws.append(destination)
-            for destination in unknown_ws:
+            for wid, _ in unknown_ws:
               failures.append(
-                  f"{_worker_id(destination)}: state unknown at"
+                  f"{wid}: state unknown at"
                   " cancellation; not aborted (an abort could roll back a"
                   " publish that happened)"
               )
@@ -1452,10 +1306,11 @@ class WeightSyncCoordinator:
               rechecked = list(zip(abortable, recheck))
               abortable = []
               for destination, phase in rechecked:
+                wid = destination[0]
                 if phase == "committed":
                   committed_ws.append(destination)
                   failures.append(
-                      f"{_worker_id(destination)}: abort returned cleanly"
+                      f"{wid}: abort returned cleanly"
                       " but the worker reports committed; the publish"
                       " stands and was NOT rolled back"
                   )
@@ -1464,14 +1319,14 @@ class WeightSyncCoordinator:
                 else:
                   unknown_ws.append(destination)
                   failures.append(
-                      f"{_worker_id(destination)}: rollback unconfirmed"
+                      f"{wid}: rollback unconfirmed"
                       " after a clean abort; the worker reports"
                       f" {phase or 'unknown'!r}"
                   )
             elif abortable:
-              for destination in abortable:
+              for wid, _ in abortable:
                 failures.append(
-                    f"{_worker_id(destination)}: left quiesced, not aborted:"
+                    f"{wid}: left quiesced, not aborted:"
                     " the round has a commit or an unknown elsewhere, and"
                     " reopening this worker on the old policy would serve"
                     " mixed versions"
@@ -1532,11 +1387,11 @@ class WeightSyncCoordinator:
         # next round's prepare, or a close() that frees what it is reading.
         release_gather = asyncio.gather(
             *[
-                _wait_for(
-                    s.release_weight_sync(release_request),
+                asyncio.wait_for(
+                    handle.asubmit("release_weight_sync", release_request),
                     self._timeouts.release,
                 )
-                for s in sources
+                for _, handle in sources
             ],
             return_exceptions=True,
         )
@@ -1544,21 +1399,21 @@ class WeightSyncCoordinator:
           release_errors = await asyncio.shield(release_gather)
         except asyncio.CancelledError:
           release_errors = await release_gather
-          for source, error in zip(sources, release_errors):
+          for (wid, _), error in zip(sources, release_errors):
             if isinstance(error, BaseException):
               logging.warning(
                   "source %s failed to release round %d staging during a"
                   " cancellation: %r",
-                  _worker_id(source),
+                  wid,
                   round_index,
                   error,
               )
           raise
-        for source, error in zip(sources, release_errors):
+        for (wid, _), error in zip(sources, release_errors):
           if isinstance(error, BaseException):
             logging.warning(
                 "source %s failed to release round %d staging: %r",
-                _worker_id(source),
+                wid,
                 round_index,
                 error,
             )
@@ -1571,8 +1426,8 @@ class WeightSyncCoordinator:
 
   async def _resolve_post_failures(
       self,
-      destinations: Sequence[WeightSyncDestination],
-      failed_posts: Sequence[tuple[WeightSyncDestination, BaseException]],
+      destinations: Sequence[_Participant],
+      failed_posts: Sequence[tuple[_Participant, BaseException]],
       request: datatypes.WeightSyncRequest,
       failures: list[str],
       worker_reports: dict[str, WorkerRoundReport],
@@ -1599,12 +1454,12 @@ class WeightSyncCoordinator:
     FAILED_NEEDS_RESTART. Nobody committed and everyone alive -> rollback ->
     ABORTED. Some committed and some not -> PARTIALLY_COMMITTED.
     """
-    retryable: list[WeightSyncDestination] = []
-    rolled_back: list[WeightSyncDestination] = []
-    unknown: list[WeightSyncDestination] = []
+    retryable: list[_Participant] = []
+    rolled_back: list[_Participant] = []
+    unknown: list[_Participant] = []
     for destination, error in failed_posts:
       phase = await self._worker_phase(destination, request)
-      wid = _worker_id(destination)
+      wid = destination[0]
       if phase == "committed":
         # The RPC failed but the worker finished publishing between
         # _call_phase's reconciliation poll and this one -- a timed-out post
@@ -1637,13 +1492,13 @@ class WeightSyncCoordinator:
             needs_restart=True,
         )
 
-    still_failed: list[WeightSyncDestination] = []
+    still_failed: list[_Participant] = []
     if retryable:
       logging.warning(
           "retrying post_weight_sync on %d destination(s) that report"
           " h2d_done: %s",
           len(retryable),
-          [_worker_id(d) for d in retryable],
+          [d[0] for d in retryable],
       )
       retry_results = await self._phase_results(
           destinations=retryable,
@@ -1653,7 +1508,7 @@ class WeightSyncCoordinator:
       )
       for destination, error in retry_results:
         if error is not None:
-          wid = _worker_id(destination)
+          wid = destination[0]
           # Classify by the worker's CURRENT report, not the pre-retry one:
           # the same late-completion and out-of-band-abort races apply here,
           # and so does the unknown rule -- a worker that was h2d_done before
@@ -1718,8 +1573,7 @@ class WeightSyncCoordinator:
         phase_name = (
             "aborted" if rollback_state is RoundState.ABORTED else "committed"
         )
-        for destination in to_abort:
-          wid = _worker_id(destination)
+        for wid, _ in to_abort:
           previous = worker_reports.get(wid)
           worker_reports[wid] = WorkerRoundReport(
               worker_id=wid,
@@ -1732,7 +1586,7 @@ class WeightSyncCoordinator:
 
   async def _rollback(
       self,
-      destinations: Sequence[WeightSyncDestination],
+      destinations: Sequence[_Participant],
       request: datatypes.WeightSyncRequest,
       failures: list[str],
       *,
@@ -1780,12 +1634,12 @@ class WeightSyncCoordinator:
         *[self._worker_phase(d, request) for d in destinations]
     )
     published = [
-        _worker_id(d)
+        d[0]
         for d, phase in zip(destinations, phases)
         if phase == "committed"
     ]
     unconfirmed = [
-        _worker_id(d)
+        d[0]
         for d, phase in zip(destinations, phases)
         if phase not in ("committed", "aborted")
     ]

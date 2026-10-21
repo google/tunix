@@ -122,11 +122,12 @@ if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
   # MaxText config names are lowercase. Passed to both the trainer and the
   # rollout, so the two cannot drift.
   MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
-  # MaxText shards the batch dimension of every loss input across the fsdp
-  # axis, so the microbatch has to be a multiple of it. The trainer node
-  # enforces this too.
-  if [[ -z "${MAX_SEQ_TOKEN_PER_TPU:-}" ]] && (( TRAIN_MICRO_BATCH_SIZE % TRAINER_FSDP != 0 )); then
-    TRAIN_MICRO_BATCH_SIZE=$TRAINER_FSDP
+  # MaxText shards the batch dimension of every loss input across the fsdp and
+  # expert axes, so the microbatch has to be a multiple of their product. The
+  # trainer node enforces this too.
+  TRAINER_NUM_DATA_SHARDS=$(( ${TRAINER_FSDP:-1} * ${TRAINER_EXPERT:-1} ))
+  if [[ -z "${MAX_SEQ_TOKEN_PER_TPU:-}" ]] && (( TRAIN_MICRO_BATCH_SIZE % TRAINER_NUM_DATA_SHARDS != 0 )); then
+    TRAIN_MICRO_BATCH_SIZE=$TRAINER_NUM_DATA_SHARDS
   fi
   if [[ -z "$MAXTEXT_CKPT" ]]; then
     echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
@@ -854,7 +855,7 @@ echo "Launching CPU orchestrator..."
     ORCHESTRATOR_CMD+=(--segment_alignment_boundary="$SEGMENT_ALIGNMENT_BOUNDARY")
   fi
   if [[ -n "$TRAINER_FSDP" ]]; then
-    ORCHESTRATOR_CMD+=(--trainer_fsdp="$TRAINER_FSDP")
+    ORCHESTRATOR_CMD+=(--num_data_shards="$(( ${TRAINER_FSDP:-1} * ${TRAINER_EXPERT:-1} ))")
   fi
   if [[ -n "$TRAJECTORY_LOG_DIR" ]]; then
     ORCHESTRATOR_CMD+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")

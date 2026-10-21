@@ -353,6 +353,57 @@ def _default_weight_sync_worker() -> Any:
   return raiden_synchronizer.RaidenSynchronizer("trainer")
 
 
+def _cast_state_to_target_dtypes(
+    src_state: nnx.State, target_state: nnx.State
+) -> nnx.State:
+  """Matches `src_state` to `target_state` by path and casts floating leaves."""
+  is_var_leaf = lambda x: isinstance(x, nnx.Variable)
+  src_leaves_with_path, src_treedef = jax.tree_util.tree_flatten_with_path(
+      src_state, is_leaf=is_var_leaf
+  )
+  tgt_leaves_with_path, _ = jax.tree_util.tree_flatten_with_path(
+      target_state, is_leaf=is_var_leaf
+  )
+
+  src_by_key = {
+      jax.tree_util.keystr(path): leaf for path, leaf in src_leaves_with_path
+  }
+  tgt_by_key = {
+      jax.tree_util.keystr(path): leaf for path, leaf in tgt_leaves_with_path
+  }
+
+  missing_in_src = sorted(set(tgt_by_key) - set(src_by_key))
+  extra_in_src = sorted(set(src_by_key) - set(tgt_by_key))
+  if missing_in_src or extra_in_src:
+    raise ValueError(
+        "Direct weight sync state path mismatch between trainer and target:"
+        f" missing_in_source={missing_in_src}, extra_in_source={extra_in_src}"
+    )
+
+  converted_leaves = []
+  for path, src_leaf in src_leaves_with_path:
+    key = jax.tree_util.keystr(path)
+    tgt_leaf = tgt_by_key[key]
+    src_arr = src_leaf.value
+    tgt_spec = tgt_leaf.value
+
+    if src_arr.shape != tgt_spec.shape:
+      raise ValueError(
+          f"Direct weight sync shape mismatch at {key}: trainer shape"
+          f" {src_arr.shape} != target shape {tgt_spec.shape}"
+      )
+
+    if (
+        jnp.issubdtype(src_arr.dtype, jnp.floating)
+        and src_arr.dtype != tgt_spec.dtype
+    ):
+      converted_leaves.append(src_leaf.replace(src_arr.astype(tgt_spec.dtype)))
+    else:
+      converted_leaves.append(src_leaf)
+
+  return jax.tree_util.tree_unflatten(src_treedef, converted_leaves)
+
+
 class PeftTrainer(abstract_trainer.AbstractTrainer):
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
 
@@ -1152,8 +1203,58 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return self._record_update(grad_norm)
 
   @override
-  def compile(self, dummy_data: Any) -> None:
-    pass
+  def compile(
+      self, dummy_data: datatypes.TrainerPayload | None = None
+  ) -> None:
+    """Pre-compiles jitted trainer step executables ahead of time."""
+    if dummy_data is None:
+      return
+
+    def _resolve_dummy_routed_experts(data: Any) -> Any:
+      if not isinstance(data, datatypes.RLTrainerPayload):
+        return data
+      if data.routed_experts is None:
+        return data
+      routed_experts = np.asarray(data.routed_experts)
+      if routed_experts.size != 0:
+        return data
+      assert hasattr(self.model, "config")
+      cfg = self.model.config
+      batch_size, seq_len = routed_experts.shape[:2]
+      expanded = np.zeros(
+          (batch_size, seq_len, cfg.num_layers, cfg.num_experts_per_tok),
+          dtype=routed_experts.dtype,
+      )
+      metadata = dict(data.metadata)
+      if "routed_experts_encode_fn" in metadata:
+        encode_fn = metadata.pop("routed_experts_encode_fn")
+        expanded = encode_fn(expanded, num_experts=cfg.num_experts)
+      return dataclasses.replace(
+          data, routed_experts=expanded, metadata=metadata
+      )
+
+    self._ensure_persistent_grad_accumulator()
+    fwd_bwd_step, update_step, eval_step = (
+        self.jit_fwd_bwd_update_and_eval_step()
+    )
+    inputs = self._prepare_payload(_resolve_dummy_routed_experts(dummy_data))
+    # maybe_cache_and_partial wraps nnx.cached_partial(jitted, ...) in
+    # functools.partial so the jitted fn stays reachable via .func;
+    # .func.__wrapped__ is the nnx.jit whose cache serves the real steps.
+    update_step.func.__wrapped__.lower(
+        self.model,
+        self.optimizer,
+        self.grad_accumulator,
+    ).compile()
+    fwd_bwd_step.func.__wrapped__.lower(
+        self.model,
+        grad_accumulator=self.grad_accumulator,
+        inputs=inputs,
+    ).compile()
+    eval_step.func.__wrapped__.lower(
+        self.model,
+        inputs,
+    ).compile()
 
   @override
   def eval_step(
@@ -1330,7 +1431,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       worker.bind(converted_state)
     else:
       # TODO(lancewang): Handle LoRA parameter synchronization.
-      worker.bind(nnx.state(self.model))
+      src_state = nnx.state(self.model)
+      if self._target_state is not None:
+        src_state = _cast_state_to_target_dtypes(src_state, self._target_state)
+      worker.bind(src_state)
 
     worker.d2h()
     if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
