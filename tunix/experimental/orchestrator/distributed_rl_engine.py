@@ -277,7 +277,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       already been evicted (the call is then a no-op).
     """
     removed = self._rollout_session.remove_actor(handle, exc=exc)
-    if removed and not self._rollout_workers and self._zero_worker_since is None:
+    if (
+        removed
+        and not self._rollout_workers
+        and self._zero_worker_since is None
+    ):
       self._zero_worker_since = time.monotonic()
     return removed
 
@@ -1101,6 +1105,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       call_kwargs = {"request": request}
     async with self._actor_busy_guard(is_actor):
       t_rpc = time.monotonic()
+      request_id = (
+          staged_request_id
+          if staged_request_id is not None
+          else call_kwargs["request"].request_id
+      )
       fwd_bwd_result = await self._invoke_worker(
           worker,
           method,
@@ -1124,7 +1133,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           " (request_id=%s, apply_optimizer=%s)",
           role_name,
           time.monotonic() - t_rpc,
-          staged_request_id if staged_request_id is not None else request.request_id,
+          request_id,
           apply_optimizer,
       )
       if is_actor:
@@ -1187,11 +1196,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   ) -> bool:
     """Waits until any in-flight request-stream upload to `role`'s worker has finished."""
     worker = self._trainer_workers.get(role)
-    wait_fn = getattr(worker, "wait_for_upload_idle", None)
-    if not inspect.iscoroutinefunction(wait_fn):
+    if worker is None:
       return False
-    await wait_fn()
-    return True
+    return await worker.wait_for_upload_idle()
 
   async def get_step_timing(
       self, role: datatypes.Role = datatypes.Role.ACTOR
@@ -1578,9 +1585,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     try:
       raw_next_batch = metadata.get("next_batch_idx")
       restored_next_batch_idx = (
-          int(raw_next_batch)
-          if raw_next_batch is not None
-          else restored_step
+          int(raw_next_batch) if raw_next_batch is not None else restored_step
       )
     except (TypeError, ValueError):
       logging.warning(

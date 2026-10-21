@@ -1761,9 +1761,6 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-
-
-
   def test_pool_execution_session_least_loaded_routes_to_idlest_actor(self):
     """least_loaded=True fills actors evenly but keeps route_key affinity."""
 
@@ -1807,12 +1804,10 @@ class RemoteExecutionTest(absltest.TestCase):
       session = remote_lib.PoolExecutionSession(pool, least_loaded=True)
 
       # Keys 0, 3, 6 all hash to actor 0 under plain hash routing.
-      await asyncio.gather(
-          *(
-              session.submit(f"req_{i}", "generate", route_key=3 * i)
-              for i in range(9)
-          )
-      )
+      await asyncio.gather(*(
+          session.submit(f"req_{i}", "generate", route_key=3 * i)
+          for i in range(9)
+      ))
       self.assertEqual([len(h.received) for h in handles], [3, 3, 3])
 
       # Free up actor 2; a new key must go there.
@@ -2606,7 +2601,9 @@ class RemoteExecutionTest(absltest.TestCase):
       self.assertEqual(session.in_flight_count, 0)
 
       failed = session.pop_failed_tasks()
-      self.assertEqual([req_id for req_id, _, _ in failed], ["req_q1", "req_q2"])
+      self.assertEqual(
+          [req_id for req_id, _, _ in failed], ["req_q1", "req_q2"]
+      )
       await session.close()
 
     asyncio.run(_run())
@@ -3175,7 +3172,9 @@ class RemoteExecutionTest(absltest.TestCase):
 
       # Dispatch stuck task at t=0, then healthy task at t=0.08 on the same
       # worker, and add backup worker so the timed-out task can be re-queued.
-      await session.submit("req_stuck", "compute_trajectory", "p_stuck", turns=1)
+      await session.submit(
+          "req_stuck", "compute_trajectory", "p_stuck", turns=1
+      )
       await asyncio.sleep(0.08)
       await session.submit(
           "req_healthy", "compute_trajectory", "p_healthy", turns=1
@@ -3272,9 +3271,7 @@ class RemoteExecutionTest(absltest.TestCase):
         self.assertEqual(got_kw, {"apply_optimizer": False})
         self.assertEqual(got_req["routed_experts"].dtype, np.int16)
         np.testing.assert_array_equal(got_req["routed_experts"], routed)
-        np.testing.assert_array_equal(
-            got_req["prompt_ids"], req["prompt_ids"]
-        )
+        np.testing.assert_array_equal(got_req["prompt_ids"], req["prompt_ids"])
 
     asyncio.run(_run())
 
@@ -3319,6 +3316,39 @@ class RemoteExecutionTest(absltest.TestCase):
     self.assertLess(start2 - end1, 0.025)
     np.testing.assert_array_equal(r1, routed)
     np.testing.assert_array_equal(r2, routed + 1)
+
+  def test_upload_lock_released_if_rpc_raises_before_iterating_stream(self):
+    async def _run():
+      async with running_grpc_server(StubWorkerEngine("w0")) as (_, handle):
+        await handle._ensure_async_channel()  # pylint: disable=protected-access
+        real_rpc = handle._rpc  # pylint: disable=protected-access
+
+        def _raising_rpc(_stream, **_kwargs):
+          raise RuntimeError("rpc setup failed before stream iteration")
+
+        # 1. _execute_rpc with track_upload=True releases upload_lock on raise.
+        with self.assertRaisesRegex(RuntimeError, "rpc setup failed"):
+          await handle._execute_rpc(  # pylint: disable=protected-access
+              _raising_rpc, "ping", (), {}, max_retries=0, track_upload=True
+          )
+        lock, idle = handle._get_upload_sync()  # pylint: disable=protected-access
+        self.assertFalse(lock.locked())
+        self.assertTrue(idle.is_set())
+
+        # 2. send_prepacked also releases upload_lock on pre-iteration raise.
+        packed = remote_lib._pack_args_kwargs(  # pylint: disable=protected-access
+            (), {"x": np.zeros((4,), dtype=np.int32)}
+        )
+        handle._rpc = _raising_rpc  # pylint: disable=protected-access
+        try:
+          with self.assertRaisesRegex(RuntimeError, "rpc setup failed"):
+            await handle.send_prepacked("ping", packed, max_retries=0)
+        finally:
+          handle._rpc = real_rpc  # pylint: disable=protected-access
+        self.assertFalse(lock.locked())
+        self.assertTrue(idle.is_set())
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

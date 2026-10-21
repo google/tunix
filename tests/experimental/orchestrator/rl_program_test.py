@@ -275,6 +275,10 @@ class RLProgramTest(absltest.TestCase):
     self.mock_engine.prepare_rollout_policy = mock.AsyncMock(return_value=0)
     self.mock_engine.sync_weights = mock.AsyncMock(return_value=1)
     self.mock_engine.get_metrics = mock.AsyncMock(return_value=None)
+    self.mock_engine.get_step_timing = mock.AsyncMock(return_value=(None, 0.0))
+    self.mock_engine.wait_for_actor_upload_idle = mock.AsyncMock(
+        return_value=False
+    )
     self.mock_engine.poll_rollouts = mock.AsyncMock(side_effect=_mock_poll)
     self.mock_engine.cancel_rollouts = mock.AsyncMock(return_value=0)
     self.mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
@@ -962,9 +966,7 @@ class RLProgramTest(absltest.TestCase):
           side_effect=mock_sync_weights
       )
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
-      program = self._create_program(
-          sync_weights=True, async_weight_sync=True
-      )
+      program = self._create_program(sync_weights=True, async_weight_sync=True)
 
       with self.assertRaisesRegex(RuntimeError, "transfer failed"):
         await program.run_async(self.mock_engine)
@@ -1083,9 +1085,7 @@ class RLProgramTest(absltest.TestCase):
         return policy_version or 1
 
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
-      program = self._create_program(
-          sync_weights=True, async_weight_sync=True
-      )
+      program = self._create_program(sync_weights=True, async_weight_sync=True)
 
       async def mock_get_metrics(*args, **kwargs):
         del args, kwargs
@@ -1740,8 +1740,10 @@ class RLProgramTest(absltest.TestCase):
     self._run_dispatch(program)
 
     self.assertEqual(
-        [prompt["metadata"]["batch_idx"] for prompt in
-         self._dispatched_prompts()],
+        [
+            prompt["metadata"]["batch_idx"]
+            for prompt in self._dispatched_prompts()
+        ],
         [0, 0, 0, 0],
     )
 
@@ -1872,8 +1874,10 @@ class RLProgramTest(absltest.TestCase):
     # num_generations=2, so each prompt fans out to two requests that must
     # carry identical coordinates.
     self.assertEqual(
-        [(req.metadata["batch_idx"], req.metadata["intra_batch_idx"])
-         for req in requests],
+        [
+            (req.metadata["batch_idx"], req.metadata["intra_batch_idx"])
+            for req in requests
+        ],
         [(0, 0), (0, 0), (0, 1), (0, 1), (1, 0), (1, 0)],
     )
     self.assertEqual(
@@ -2327,9 +2331,7 @@ class RLProgramTest(absltest.TestCase):
       program._step = 2
       rounds[2].set()
       await asyncio.sleep(0.05)
-      self.assertEqual(
-          dispatched[4:], [(2, 2), (2, 2), (3, 2), (3, 2)]
-      )
+      self.assertEqual(dispatched[4:], [(2, 2), (2, 2), (3, 2), (3, 2)])
 
       dispatch_task.cancel()
       await asyncio.gather(dispatch_task, return_exceptions=True)
@@ -2392,9 +2394,7 @@ class RLProgramTest(absltest.TestCase):
       program._step = 2
       rounds[2].set()
       await asyncio.sleep(0.05)
-      self.assertEqual(
-          dispatched[4:], [(2, 2), (2, 2), (3, 2), (3, 2)]
-      )
+      self.assertEqual(dispatched[4:], [(2, 2), (2, 2), (3, 2), (3, 2)])
 
       dispatch_task.cancel()
       await asyncio.gather(dispatch_task, return_exceptions=True)
@@ -3594,7 +3594,9 @@ class RLProgramTest(absltest.TestCase):
       self.assembler.feed = mock.MagicMock(
           return_value=[
               batch_assembly.AssembledBatch(
-                  payload={"raw": "batch"},  # pyrefly: ignore[bad-argument-type]
+                  payload={
+                      "raw": "batch"
+                  },  # pyrefly: ignore[bad-argument-type]
                   is_final_batch=True,
                   padding_stats=_padding_stats(),
                   trajectory_ids=(),
@@ -3765,18 +3767,14 @@ class RLProgramTest(absltest.TestCase):
 
       # 1. Trainer Metrics (retrieved from TrainerWorker.get_metrics)
       self.assertTrue(logger.metric_exists("actor", "loss", "train"))
-      self.assertAlmostEqual(
-          logger.get_metric("actor", "loss", "train"), 0.5
-      )
+      self.assertAlmostEqual(logger.get_metric("actor", "loss", "train"), 0.5)
       self.assertTrue(logger.metric_exists("actor", "perplexity", "train"))
       self.assertAlmostEqual(
           logger.get_metric("actor", "perplexity", "train"),
           float(np.exp(0.5)),
           places=5,
       )
-      self.assertTrue(
-          logger.metric_exists("actor", "learning_rate", "train")
-      )
+      self.assertTrue(logger.metric_exists("actor", "learning_rate", "train"))
       self.assertAlmostEqual(
           logger.get_metric("actor", "learning_rate", "train"), 1e-4
       )
@@ -3789,9 +3787,7 @@ class RLProgramTest(absltest.TestCase):
 
       # 2. Reward Metrics
       self.assertTrue(logger.metric_exists("rewards", "mean", "train"))
-      self.assertAlmostEqual(
-          logger.get_metric("rewards", "mean", "train"), 2.5
-      )
+      self.assertAlmostEqual(logger.get_metric("rewards", "mean", "train"), 2.5)
       self.assertTrue(logger.metric_exists("rewards", "std", "train"))
       self.assertAlmostEqual(logger.get_metric("rewards", "std", "train"), 0.0)
       self.assertTrue(logger.metric_exists("rewards", "min", "train"))
@@ -3808,21 +3804,15 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(
           logger.get_metric("rewards", "advantage/mean", "train"), 1.0
       )
-      self.assertTrue(
-          logger.metric_exists("rewards", "advantage/max", "train")
-      )
+      self.assertTrue(logger.metric_exists("rewards", "advantage/max", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rewards", "advantage/max", "train"), 1.0
       )
-      self.assertTrue(
-          logger.metric_exists("rewards", "advantage/min", "train")
-      )
+      self.assertTrue(logger.metric_exists("rewards", "advantage/min", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rewards", "advantage/min", "train"), 1.0
       )
-      self.assertTrue(
-          logger.metric_exists("rewards", "advantage/std", "train")
-      )
+      self.assertTrue(logger.metric_exists("rewards", "advantage/std", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rewards", "advantage/std", "train"), 0.0
       )
@@ -3859,15 +3849,11 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(
           logger.get_metric("rollout", "staleness_mean", "train"), 0.0
       )
-      self.assertTrue(
-          logger.metric_exists("rollout", "staleness_max", "train")
-      )
+      self.assertTrue(logger.metric_exists("rollout", "staleness_max", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rollout", "staleness_max", "train"), 0.0
       )
-      self.assertTrue(
-          logger.metric_exists("rollout", "staleness_min", "train")
-      )
+      self.assertTrue(logger.metric_exists("rollout", "staleness_min", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rollout", "staleness_min", "train"), 0.0
       )
@@ -3951,21 +3937,15 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(
           logger.get_metric("rewards", "advantage/mean", "train"), 0.5
       )
-      self.assertTrue(
-          logger.metric_exists("rewards", "advantage/max", "train")
-      )
+      self.assertTrue(logger.metric_exists("rewards", "advantage/max", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rewards", "advantage/max", "train"), 1.5
       )
-      self.assertTrue(
-          logger.metric_exists("rewards", "advantage/min", "train")
-      )
+      self.assertTrue(logger.metric_exists("rewards", "advantage/min", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rewards", "advantage/min", "train"), -0.5
       )
-      self.assertTrue(
-          logger.metric_exists("rewards", "advantage/std", "train")
-      )
+      self.assertTrue(logger.metric_exists("rewards", "advantage/std", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rewards", "advantage/std", "train"), 1.0
       )
@@ -4049,9 +4029,7 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(
           logger.get_metric("actor_mesh/rewards", "mean", "eval"), 3.0
       )
-      self.assertTrue(
-          logger.metric_exists("actor_mesh/actor", "loss", "eval")
-      )
+      self.assertTrue(logger.metric_exists("actor_mesh/actor", "loss", "eval"))
       self.assertAlmostEqual(
           logger.get_metric("actor_mesh/actor", "loss", "eval"), 0.2
       )
@@ -4279,9 +4257,7 @@ class RLProgramTest(absltest.TestCase):
       await program.run_async(self.mock_engine)
 
       logger = program.metrics_logger
-      self.assertFalse(
-          logger.metric_exists("rollout", "success_rate", "train")
-      )
+      self.assertFalse(logger.metric_exists("rollout", "success_rate", "train"))
 
     asyncio.run(_run())
 
@@ -4364,9 +4340,7 @@ class RLProgramTest(absltest.TestCase):
       await program.run_async(self.mock_engine)
 
       logger = program.metrics_logger
-      self.assertAlmostEqual(
-          logger.get_metric("actor", "loss", "train"), 0.35
-      )
+      self.assertAlmostEqual(logger.get_metric("actor", "loss", "train"), 0.35)
       self.assertAlmostEqual(
           logger.get_metric("actor", "learning_rate", "train"), 5e-5
       )
@@ -5578,7 +5552,8 @@ class RLProgramTest(absltest.TestCase):
           logger.get_metric("rollout", "filtered_groups_count", "train"), 1
       )
       self.assertEqual(
-          logger.get_metric("rollout", "filtered_trajectories_count", "train"), 1
+          logger.get_metric("rollout", "filtered_trajectories_count", "train"),
+          1,
       )
       program.close()
 
@@ -5631,9 +5606,7 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(
           logger.get_metric("rollout", "invalid_trajectory_frac", "train"), 0.5
       )
-      self.assertAlmostEqual(
-          logger.get_metric("rewards", "mean", "train"), 1.0
-      )
+      self.assertAlmostEqual(logger.get_metric("rewards", "mean", "train"), 1.0)
       program.close()
 
     asyncio.run(_run())
@@ -6340,6 +6313,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     )
     self.mock_engine.train_step.return_value = {"loss": 0.1}
     self.mock_engine.get_metrics.return_value = {"loss": 0.1}
+    self.mock_engine.get_step_timing.return_value = (None, 0.0)
+    self.mock_engine.wait_for_actor_upload_idle.return_value = False
     self.mock_engine.sync_weights.return_value = None
 
   def _make_scored_item(
@@ -6456,7 +6431,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       )
       program.engine = self.mock_engine
       assert isinstance(
-          program.scored_q, rl_program.trajectory_queue_manager.BatchOrderedQueueManager
+          program.scored_q,
+          rl_program.trajectory_queue_manager.BatchOrderedQueueManager,
       )
       program.scored_q.expect(0, num_groups=1)
       await program.scored_q.put(
@@ -6482,7 +6458,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
         group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
     )
     assert isinstance(
-        program.scored_q, rl_program.trajectory_queue_manager.BatchOrderedQueueManager
+        program.scored_q,
+        rl_program.trajectory_queue_manager.BatchOrderedQueueManager,
     )
     self.assertEqual(program._next_batch, 0)
     self.assertFalse(program._window_release.is_set())
@@ -6517,15 +6494,21 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
         )
 
       # Batch 0: both groups are stale (policy_version=1, staleness=4 > 1) -> hole!
-      await program.raw_q.put(_make_raw_item("p0", batch_idx=0, policy_version=1))
-      await program.raw_q.put(_make_raw_item("p1", batch_idx=0, policy_version=1))
+      await program.raw_q.put(
+          _make_raw_item("p0", batch_idx=0, policy_version=1)
+      )
+      await program.raw_q.put(
+          _make_raw_item("p1", batch_idx=0, policy_version=1)
+      )
 
       # Hole in batch 0 immediately advances scored_q.next_batch_idx to 1 and releases window.
       self.assertEqual(program._next_batch, 1)
       self.assertTrue(program._window_release.is_set())
 
       # Batch 1: p2 is dropped as stale by raw_q; p3 survives and reaches scored_q.
-      await program.raw_q.put(_make_raw_item("p2", batch_idx=1, policy_version=1))
+      await program.raw_q.put(
+          _make_raw_item("p2", batch_idx=1, policy_version=1)
+      )
       await program.scored_q.put(
           self._make_scored_item(
               "p3", batch_idx=1, reward=3.0, policy_version=5
@@ -6770,12 +6753,8 @@ class ExtractScalarTest(absltest.TestCase):
         return self.val
 
     m = _MockMetric(np.array([1.0, 5.0, 3.0]))
-    self.assertEqual(
-        rl_program._extract_scalar(m, "mult_prob_error_max"), 5.0
-    )
-    self.assertEqual(
-        rl_program._extract_scalar(m, "mult_prob_error_min"), 1.0
-    )
+    self.assertEqual(rl_program._extract_scalar(m, "mult_prob_error_max"), 5.0)
+    self.assertEqual(rl_program._extract_scalar(m, "mult_prob_error_min"), 1.0)
     self.assertAlmostEqual(
         rl_program._extract_scalar(m, "mult_prob_error_mean"), 3.0
     )
@@ -6792,15 +6771,9 @@ class ExtractScalarTest(absltest.TestCase):
       def compute(self):
         return np.array([4.2])
 
-    self.assertAlmostEqual(
-        rl_program._extract_scalar(_MockScalarMetric()), 4.2
-    )
-    self.assertAlmostEqual(
-        rl_program._extract_scalar(3.14), 3.14
-    )
-
+    self.assertAlmostEqual(rl_program._extract_scalar(_MockScalarMetric()), 4.2)
+    self.assertAlmostEqual(rl_program._extract_scalar(3.14), 3.14)
 
 
 if __name__ == "__main__":
   absltest.main()
-

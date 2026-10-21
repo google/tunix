@@ -119,7 +119,10 @@ def _extract_scalar(val: Any, name: str | None = None) -> float | None:
     pass
   return metrics_logger_lib.extract_scalar(val)
 
-def _prompt_coordinates(prompt_idx: int, full_batch_size: int) -> dict[str, int]:
+
+def _prompt_coordinates(
+    prompt_idx: int, full_batch_size: int
+) -> dict[str, int]:
   """Returns the dataset coordinates of the prompt at `prompt_idx`.
 
   The coordinates are derived purely from dataset position, so they are stable
@@ -235,9 +238,7 @@ def _generation_metrics(
     return {}
   return {
       "rollout/completions/clip_ratio": float(np.mean(clip_ratios)),
-      "rollout/completions/mean_raw_length": float(
-          np.mean(group_mean_lengths)
-      ),
+      "rollout/completions/mean_raw_length": float(np.mean(group_mean_lengths)),
       "rollout/completions/max_raw_length": float(np.max(all_lengths)),
       "rollout/completions/min_raw_length": float(np.min(all_lengths)),
   }
@@ -1099,7 +1100,8 @@ class StandardRLProgram(RLProgram):
         except Exception:
           self._in_flight_rollouts = max(
               0,
-              self._in_flight_rollouts - self._effective_generations_to_dispatch,
+              self._in_flight_rollouts
+              - self._effective_generations_to_dispatch,
           )
           raise
       if last_coordinates is not None and isinstance(
@@ -1303,9 +1305,7 @@ class StandardRLProgram(RLProgram):
         prefix = "global"
     if self.metrics_prefix:
       prefix = (
-          f"{self.metrics_prefix}/{prefix}"
-          if prefix
-          else self.metrics_prefix
+          f"{self.metrics_prefix}/{prefix}" if prefix else self.metrics_prefix
       )
     self.metrics_logger.log(prefix, metric_name, scalar_value, self.mode, step)
 
@@ -1681,9 +1681,7 @@ class StandardRLProgram(RLProgram):
       if loss_val is not None:
         self._log_metric("loss", loss_val, log_step, prefix="actor")
         perplexity_val = float(np.exp(loss_val))
-        self._log_metric(
-            "perplexity", perplexity_val, log_step, prefix="actor"
-        )
+        self._log_metric("perplexity", perplexity_val, log_step, prefix="actor")
 
       # Learning Rate
       raw_lr = scalar_metrics.pop(
@@ -1723,9 +1721,7 @@ class StandardRLProgram(RLProgram):
       for k, v in weighted_metrics.items():
         val = _extract_scalar(v, k)
         if val is not None:
-          clean_key = (
-              k.removeprefix("trainer/").removeprefix("actor/")
-          )
+          clean_key = k.removeprefix("trainer/").removeprefix("actor/")
           self._log_metric(clean_key, val, log_step, prefix="actor")
 
       # Auxiliary scalar metrics
@@ -1734,9 +1730,7 @@ class StandardRLProgram(RLProgram):
           continue
         val = _extract_scalar(v, k)
         if val is not None:
-          clean_key = (
-              k.removeprefix("trainer/").removeprefix("actor/")
-          )
+          clean_key = k.removeprefix("trainer/").removeprefix("actor/")
           if clean_key.startswith(self._SAMPLER_IS_ATTR_PREFIXES):
             self._log_metric(
                 clean_key.removeprefix("sampler_is/"),
@@ -1903,8 +1897,7 @@ class StandardRLProgram(RLProgram):
           or f"worker{group_index}"
       )
       traj_id = (
-          getattr(item, "traj_id", None)
-          or f"traj_{prompt_id}_g{group_index}"
+          getattr(item, "traj_id", None) or f"traj_{prompt_id}_g{group_index}"
       )
       row = {
           "global_step": log_step,
@@ -2228,13 +2221,11 @@ class StandardRLProgram(RLProgram):
           step_result, elapsed = await inflight
           policy_training_time += elapsed
         if self._pending_train is not None:
-          wait_upload = getattr(
-              self.engine, "wait_for_actor_upload_idle", None
-          )
-          can_overlap_upload = (
-              self.pipeline_train_microbatches
-              and callable(wait_upload)
-              and await wait_upload(role=datatypes.Role.ACTOR)
+          can_overlap_upload = self.pipeline_train_microbatches and (
+              await self.engine.wait_for_actor_upload_idle(
+                  role=datatypes.Role.ACTOR
+              )
+              is True
           )
           if can_overlap_upload:
             if self._pending_train.done():
@@ -3292,9 +3283,9 @@ class StandardRLProgram(RLProgram):
     assert self.engine is not None
     if self._pending_train is None or self._inflight_train is not None:
       return
-    wait_upload = getattr(self.engine, "wait_for_actor_upload_idle", None)
-    if not callable(wait_upload) or not await wait_upload(
-        role=datatypes.Role.ACTOR
+    if (
+        await self.engine.wait_for_actor_upload_idle(role=datatypes.Role.ACTOR)
+        is not True
     ):
       return
     if not self._intake_done():
@@ -3334,7 +3325,7 @@ class StandardRLProgram(RLProgram):
         and st.groups_consumed < self.full_batch_size
     ):
       self._intake_task = asyncio.create_task(self._prepack(st))
-    await wait_upload(role=datatypes.Role.ACTOR)
+    await self.engine.wait_for_actor_upload_idle(role=datatypes.Role.ACTOR)
 
   async def run_async(
       self,

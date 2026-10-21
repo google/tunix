@@ -446,7 +446,9 @@ def _pack_args_kwargs(
       return _encode_wire_chunk(item)
 
     if len(work_items) > 1:
-      encoded_chunks = tuple(_WIRE_ENCODE_EXECUTOR.map(_encode_item, work_items))
+      encoded_chunks = tuple(
+          _WIRE_ENCODE_EXECUTOR.map(_encode_item, work_items)
+      )
     else:
       encoded_chunks = tuple(_encode_item(it) for it in work_items)
     return _PrepackedArgsKwargs(
@@ -533,9 +535,9 @@ def _iter_serialized_chunks(
       yield _flush_pending_views(pending_views)
 
   def _gen() -> Iterator[bytes]:
-    in_flight: collections.deque[Union[bytes, concurrent.futures.Future[bytes]]] = (
-        collections.deque()
-    )
+    in_flight: collections.deque[
+        Union[bytes, concurrent.futures.Future[bytes]]
+    ] = collections.deque()
     raw_it = _iter_raw_items()
 
     def _fill_window() -> None:
@@ -546,7 +548,9 @@ def _iter_serialized_chunks(
         if isinstance(item, bytes):
           in_flight.append(item)
         elif len(item) >= _TRB_BLOCK_BYTES:
-          in_flight.append(_WIRE_ENCODE_EXECUTOR.submit(_encode_wire_chunk, item))
+          in_flight.append(
+              _WIRE_ENCODE_EXECUTOR.submit(_encode_wire_chunk, item)
+          )
         else:
           in_flight.append(item.tobytes())
 
@@ -1149,7 +1153,11 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       return await super().execute_request(request)
     target_name = request.method_name or "__call__"
     method = getattr(self._instance, target_name, None)
-    if method is None or not callable(method) or inspect.iscoroutinefunction(method):
+    if (
+        method is None
+        or not callable(method)
+        or inspect.iscoroutinefunction(method)
+    ):
       return await super().execute_request(request)
     try:
       loop = asyncio.get_running_loop()
@@ -1344,6 +1352,10 @@ class ActorHandle(abc.ABC):
     """Long-polls remote server response queue for completed result."""
     pass
 
+  async def wait_for_upload_idle(self) -> bool:
+    """Waits until any tracked request-stream upload finishes; False if untracked."""
+    return False
+
 
 class RemoteActorHandle(ActorHandle):
   """ActorHandle targeting a remote network worker address over gRPC/Stubby."""
@@ -1438,13 +1450,14 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       self._upload_sync_loop = loop
     return self._upload_lock, self._upload_idle_event
 
-  async def wait_for_upload_idle(self) -> None:
+  async def wait_for_upload_idle(self) -> bool:
     """Waits until any in-flight request-stream upload on this handle has finished."""
     await asyncio.sleep(0)
     _, upload_idle = self._get_upload_sync()
     while self._active_uploads > 0 and upload_idle is not None:
       await upload_idle.wait()
       _, upload_idle = self._get_upload_sync()
+    return True
 
   def _make_rpc(self, channel: Any) -> Any:
     return channel.stream_stream(
@@ -1511,6 +1524,19 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         self._get_upload_sync() if track_upload else (None, None)
     )
     upload_released = not track_upload
+    lock_acquired = False
+
+    def _release_upload() -> None:
+      nonlocal upload_released, lock_acquired
+      if not upload_released:
+        self._active_uploads = max(0, self._active_uploads - 1)
+        if self._active_uploads == 0 and upload_idle is not None:
+          upload_idle.set()
+        upload_released = True
+      if lock_acquired and upload_lock is not None:
+        upload_lock.release()
+        lock_acquired = False
+
     try:
       for attempt in range(max_retries + 1):
         try:
@@ -1527,13 +1553,11 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
                 upload_idle.clear()
               upload_released = False
             await upload_lock.acquire()
+            lock_acquired = True
 
             async def _tracked_chunks(
                 inner: AsyncIterator[bytes],
-                lock: asyncio.Lock,
-                idle_ev: Optional[asyncio.Event],
             ) -> AsyncIterator[bytes]:
-              nonlocal upload_released
               try:
                 async for chunk in inner:
                   yield chunk
@@ -1541,16 +1565,9 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
                 if hasattr(inner, "aclose"):
                   with contextlib.suppress(Exception):
                     await inner.aclose()
-                if not upload_released:
-                  self._active_uploads = max(0, self._active_uploads - 1)
-                  if self._active_uploads == 0 and idle_ev is not None:
-                    idle_ev.set()
-                  upload_released = True
-                lock.release()
+                _release_upload()
 
-            stream_it: AsyncIterator[bytes] = _tracked_chunks(
-                chunks, upload_lock, upload_idle
-            )
+            stream_it: AsyncIterator[bytes] = _tracked_chunks(chunks)
           else:
             stream_it = chunks
           call = rpc(stream_it, timeout=self._rpc_timeout_s)
@@ -1558,14 +1575,15 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
           assert response is not None
           return response.unwrap()
         except _grpc_aio_lib.AioRpcError as err:
+          _release_upload()
           if (
               err.code() == _grpc_lib.StatusCode.UNAVAILABLE
               and attempt < max_retries
           ):
             backoff = 0.5 * (2**attempt)
             logging.warning(
-                "RPC %s to %s failed with %s; refreshing channel and retrying in"
-                " %.2fs (attempt %d/%d)...",
+                "RPC %s to %s failed with %s; refreshing channel and retrying"
+                " in %.2fs (attempt %d/%d)...",
                 method_name,
                 self._host_port,
                 err.details(),
@@ -1577,7 +1595,8 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
             if rpc is self._sync_rpc:
               old_sync = self._sync_channel
               self._sync_channel = _grpc_aio_lib.insecure_channel(
-                  self._host_port, options=_grpc_options(self._max_message_bytes)
+                  self._host_port,
+                  options=_grpc_options(self._max_message_bytes),
               )
               self._sync_rpc = self._make_rpc(self._sync_channel)
               rpc = self._sync_rpc
@@ -1592,11 +1611,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
             continue
           raise
     finally:
-      if not upload_released:
-        self._active_uploads = max(0, self._active_uploads - 1)
-        if self._active_uploads == 0 and upload_idle is not None:
-          upload_idle.set()
-        upload_released = True
+      _release_upload()
 
   async def send_prepacked(
       self,
@@ -1607,11 +1622,24 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       max_retries: int = 3,
   ) -> Any:
     """Streams a `_PrepackedArgsKwargs` payload over gRPC and unwraps response."""
-    _, upload_idle = self._get_upload_sync()
+    upload_lock, upload_idle = self._get_upload_sync()
     self._active_uploads += 1
     if upload_idle is not None:
       upload_idle.clear()
     upload_released = False
+    lock_acquired = False
+
+    def _release_upload() -> None:
+      nonlocal upload_released, lock_acquired
+      if not upload_released:
+        self._active_uploads = max(0, self._active_uploads - 1)
+        if self._active_uploads == 0 and upload_idle is not None:
+          upload_idle.set()
+        upload_released = True
+      if lock_acquired and upload_lock is not None:
+        upload_lock.release()
+        lock_acquired = False
+
     try:
       await self._ensure_async_channel()
       upload_lock, upload_idle = self._get_upload_sync()
@@ -1631,33 +1659,25 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
             upload_released = False
           if upload_lock is not None:
             await upload_lock.acquire()
+            lock_acquired = True
 
-          async def _prepacked_stream(
-              lock: Optional[asyncio.Lock],
-              idle_ev: Optional[asyncio.Event],
-          ) -> AsyncIterator[bytes]:
-            nonlocal upload_released
+          async def _prepacked_stream() -> AsyncIterator[bytes]:
             try:
               yield manifest
               for chunk in packed.encoded_chunks:
                 yield chunk
             finally:
-              if not upload_released:
-                self._active_uploads = max(0, self._active_uploads - 1)
-                if self._active_uploads == 0 and idle_ev is not None:
-                  idle_ev.set()
-                upload_released = True
-              if lock is not None:
-                lock.release()
+              _release_upload()
 
           call = self._rpc(
-              _prepacked_stream(upload_lock, upload_idle),
+              _prepacked_stream(),
               timeout=self._rpc_timeout_s,
           )
           response = await ExecutionResponse.deserialize_async_chunks(call)
           assert response is not None
           return response.unwrap()
         except _grpc_aio_lib.AioRpcError as err:
+          _release_upload()
           if (
               err.code() == _grpc_lib.StatusCode.UNAVAILABLE
               and attempt < max_retries
@@ -1667,11 +1687,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
             continue
           raise
     finally:
-      if not upload_released:
-        self._active_uploads = max(0, self._active_uploads - 1)
-        if self._active_uploads == 0 and upload_idle is not None:
-          upload_idle.set()
-        upload_released = True
+      _release_upload()
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
     """Blocking gRPC invocation; safe to call repeatedly.
@@ -2018,7 +2034,9 @@ class RoutingActorPool(ActorPool):
       ):
         return getattr(self.router, method_name)(self._actors, args, kwargs)
       elif callable(self.router):
-        return self.router(self._actors, method_name, args, kwargs)  # pyrefly: ignore[bad-return]
+        return self.router(
+            self._actors, method_name, args, kwargs
+        )  # pyrefly: ignore[bad-return]
       else:
         raise TypeError(
             f"Router object {type(self.router)} must provide a method matching "
@@ -2527,7 +2545,9 @@ class PoolExecutionSession:
         self._in_flight = max(0, self._in_flight - 1)
         cancelled_count += 1
         if result_factory is not None:
-          self._response_queue.put_nowait((result_factory(req_id, payload), None))
+          self._response_queue.put_nowait(
+              (result_factory(req_id, payload), None)
+          )
       else:
         kept.append(req_id)
     self._pending_queue = kept
