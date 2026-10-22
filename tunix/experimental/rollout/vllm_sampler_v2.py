@@ -268,14 +268,14 @@ class RLVllmSampler:
                 _get_val(kwargs, "include_stop_str_in_output", True),
             )
         ),
-        # Off by default so token-only callers skip detokenization; callers
-        # that read `SamplingResponse.text` request it via the `detokenize`
-        # kwarg (e.g. `VllmSamplerAdapter(detokenize=True)`).
+        # Detokenize by default so callers that read `SamplingResponse.text`
+        # (e.g. agentic rollouts) receive populated text, matching vLLM's
+        # default. Token-only callers can opt out by passing `detokenize=False`.
         detokenize=bool(
             _get_val(
                 sparams,
                 "detokenize",
-                _get_val(kwargs, "detokenize", False),
+                _get_val(kwargs, "detokenize", True),
             )
         ),
         logprobs=1

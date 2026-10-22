@@ -409,36 +409,49 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
             getattr(vllm_params, "routed_experts_prompt_start", 0), 48
         )
 
-    def test_build_vllm_params_does_not_detokenize_by_default(self):
+    def test_build_vllm_params_detokenizes_by_default(self):
+        """Tunix SamplingParams carry no detokenize field; text must still be returned."""
         args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
         sampler = RLVllmSampler(engine_args=args)
         req = SimpleNamespace(
             sampling_params=SimpleNamespace(max_tokens=32, temperature=0.6)
         )
         vllm_params = sampler._build_vllm_params(req, {})
-        self.assertFalse(vllm_params.detokenize)
+        self.assertTrue(vllm_params.detokenize)
 
-    def test_build_vllm_params_detokenizes_when_sampling_params_request_it(
-        self,
-    ):
+    def test_build_vllm_params_detokenize_opt_out_via_sampling_params(self):
+        """An explicit detokenize=False from sampling_params is honored."""
         args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
         sampler = RLVllmSampler(engine_args=args)
         req = SimpleNamespace(
             sampling_params=SimpleNamespace(
-                max_tokens=32, temperature=0.6, detokenize=True
+                max_tokens=32, temperature=0.6, detokenize=False
             )
         )
         vllm_params = sampler._build_vllm_params(req, {})
-        self.assertTrue(vllm_params.detokenize)
+        self.assertFalse(vllm_params.detokenize)
 
-    def test_build_vllm_params_detokenizes_when_kwargs_request_it(self):
+    def test_build_vllm_params_detokenize_opt_out_via_kwargs(self):
+        """An explicit detokenize=False from kwargs is honored."""
         args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
         sampler = RLVllmSampler(engine_args=args)
         req = SimpleNamespace(
             sampling_params=SimpleNamespace(max_tokens=32, temperature=0.6)
         )
+        vllm_params = sampler._build_vllm_params(req, {"detokenize": False})
+        self.assertFalse(vllm_params.detokenize)
+
+    def test_build_vllm_params_sampling_params_overrides_kwargs(self):
+        """sampling_params.detokenize takes precedence over conflicting kwargs."""
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+        req = SimpleNamespace(
+            sampling_params=SimpleNamespace(
+                max_tokens=32, temperature=0.6, detokenize=False
+            )
+        )
         vllm_params = sampler._build_vllm_params(req, {"detokenize": True})
-        self.assertTrue(vllm_params.detokenize)
+        self.assertFalse(vllm_params.detokenize)
     # pylint: enable=bad-indentation
 
 
