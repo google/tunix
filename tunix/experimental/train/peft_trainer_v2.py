@@ -403,6 +403,7 @@ def _cast_state_to_target_dtypes(
 
   return jax.tree_util.tree_unflatten(src_treedef, converted_leaves)
 
+# TODO: Construct the use the training config to control PW or McJax
 
 class PeftTrainer(abstract_trainer.AbstractTrainer):
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
