@@ -1165,6 +1165,28 @@ class FailFastRenderTest(parameterized.TestCase):
           yaml.safe_dump(doc),
       )
 
+class RolloutTerminationGraceTest(absltest.TestCase):
+  """jobset.tpu.yaml (the rollout pods): 30 s by default, so the vLLM drain
+  (~5 s) and the final events upload fit before the kubelet's SIGKILL."""
+
+  def test_default_and_override(self):
+    with mock.patch.dict(os.environ, {}, clear=False):
+      os.environ.pop("ROLLOUT_TERMINATION_GRACE_SECONDS", None)
+      rendered = _render("jobset.tpu.yaml", "tpuv5:2x2x1")
+      self.assertEqual(rendered.count("terminationGracePeriodSeconds: 30"), 1)
+      self.assertNotIn("terminationGracePeriodSeconds: 10", rendered)
+      rendered = _render("jobset.tpu.yaml", "tpuv5:2x2x1",
+                         "--rollout_termination_grace_seconds=45")
+      self.assertEqual(rendered.count("terminationGracePeriodSeconds: 45"), 1)
+      os.environ["ROLLOUT_TERMINATION_GRACE_SECONDS"] = "50"
+      rendered = _render("jobset.tpu.yaml", "tpuv5:2x2x1")
+      self.assertEqual(rendered.count("terminationGracePeriodSeconds: 50"), 1)
+
+  def test_pathways_templates_keep_their_own_grace(self):
+    rendered = _render("jobset.pathways.yaml", "tpuv5p:8x16x16",
+                       "--rollout_termination_grace_seconds=45")
+    self.assertNotIn("terminationGracePeriodSeconds: 45", rendered)
+
 
 if __name__ == "__main__":
   absltest.main()

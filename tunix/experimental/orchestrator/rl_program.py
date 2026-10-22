@@ -42,6 +42,7 @@ from tunix.experimental.trajectory import store as trajectory_store_lib
 from tunix.rl import common as rl_common
 from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.utils import trajectory_logger
+from tunix.experimental import events
 
 MetricsLogger = metrics_logger_lib.MetricsLogger
 MetricsLoggerOptions = metrics_logger_lib.MetricsLoggerOptions
@@ -900,14 +901,20 @@ class StandardRLProgram(RLProgram):
       return
     if batch_idx not in self._initial_stagger_logged:
       self._initial_stagger_logged.add(batch_idx)
-      logging.info(
+      events.log_and_emit(
+          logging,
+          logging.INFO,
           "[pipeline] STAGGER batch_idx=%d held %.1f s"
           " (initial_dispatch_first_stagger_s=%.1f"
           " initial_dispatch_stagger_s=%.1f)",
-          batch_idx,
-          due - now,
-          self.initial_dispatch_first_stagger_s,
-          self.initial_dispatch_stagger_s,
+          "stagger_hold",
+          text_args=(
+              batch_idx,
+              due - now,
+              self.initial_dispatch_first_stagger_s,
+              self.initial_dispatch_stagger_s,
+          ),
+          names=("batch", "held_s", "first_s", "rest_s"),
       )
     await asyncio.sleep(due - now)
     if self._sync_error is not None:
@@ -1054,17 +1061,26 @@ class StandardRLProgram(RLProgram):
         # What the rollouts actually hold. While a background sync is in
         # flight the trainer is already a version ahead of them.
         rollout_policy_version = self.policy_version - self._unsynced_steps
-        logging.info(
+        events.log_and_emit(
+            logging,
+            logging.INFO,
             "[pipeline] DISPATCH prompt_id=%s prompt_idx=%d batch_idx=%d"
             " intra_batch_idx=%d policy_version=%d next_batch=%d",
-            prompt_item.get("prompt_id")
-            if isinstance(prompt_item, dict)
-            else getattr(prompt_item, "prompt_id", ""),
-            coordinates["prompt_idx"],
-            coordinates["batch_idx"],
-            coordinates["intra_batch_idx"],
-            rollout_policy_version,
-            self._next_batch,
+            "dispatch",
+            text_args=(
+                prompt_item.get("prompt_id")
+                if isinstance(prompt_item, dict)
+                else getattr(prompt_item, "prompt_id", ""),
+                coordinates["prompt_idx"],
+                coordinates["batch_idx"],
+                coordinates["intra_batch_idx"],
+                rollout_policy_version,
+                self._next_batch,
+            ),
+            names=(
+                "prompt_id", "prompt_idx", "batch", "intra_batch_idx",
+                "policy_version", "next_batch",
+            ),
         )
         self._in_flight_rollouts += self._effective_generations_to_dispatch
         dispatch_kwargs: dict[str, Any] = {
@@ -1256,15 +1272,24 @@ class StandardRLProgram(RLProgram):
           await self.scored_q.put(item)
         if group:
           first_meta = getattr(group[0], "metadata", None) or {}
-          logging.info(
+          events.log_and_emit(
+              logging,
+              logging.INFO,
               "[pipeline] ARRIVE prompt_id=%s prompt_idx=%s batch_idx=%s"
               " intra_batch_idx=%s policy_version=%d worker_id=%s",
-              getattr(group[0], "prompt_id", ""),
-              first_meta.get("prompt_idx"),
-              first_meta.get("batch_idx"),
-              first_meta.get("intra_batch_idx"),
-              getattr(group[0], "policy_version", 0),
-              first_meta.get("worker_id"),
+              "arrive",
+              text_args=(
+                  getattr(group[0], "prompt_id", ""),
+                  first_meta.get("prompt_idx"),
+                  first_meta.get("batch_idx"),
+                  first_meta.get("intra_batch_idx"),
+                  getattr(group[0], "policy_version", 0),
+                  first_meta.get("worker_id"),
+              ),
+              names=(
+                  "prompt_id", "prompt_idx", "batch", "intra_batch_idx",
+                  "policy_version", "worker",
+              ),
           )
         group = None
         trainer_payloads = None
@@ -2665,19 +2690,33 @@ class StandardRLProgram(RLProgram):
     st.num_microbatches += 1
     if mb.padding_stats is not None:
       st.padding_stats.append(mb.padding_stats)
-      logging.info(
+      events.log_and_emit(
+          logging,
+          logging.INFO,
           "Packed %d trajectories into microbatch: %s (padding_ratio=%.3f,"
           " row_imbalance=%.3f)",
-          len(mb.trajectory_ids),
-          logging_utils.summarize_list(list(mb.trajectory_ids)),
-          mb.padding_stats.padding_ratio,
-          mb.padding_stats.row_imbalance,
+          "pack",
+          text_args=(
+              len(mb.trajectory_ids),
+              logging_utils.summarize_list(list(mb.trajectory_ids)),
+              mb.padding_stats.padding_ratio,
+              mb.padding_stats.row_imbalance,
+          ),
+          names=("n_traj", "traj_ids", "padding_ratio", "row_imbalance"),
+          **({"mb_idx": st.num_microbatches - 1} if events.ON else {}),
       )
     else:
-      logging.info(
+      events.log_and_emit(
+          logging,
+          logging.INFO,
           "Packed %d trajectories into microbatch: %s",
-          len(mb.trajectory_ids),
-          logging_utils.summarize_list(list(mb.trajectory_ids)),
+          "pack",
+          text_args=(
+              len(mb.trajectory_ids),
+              logging_utils.summarize_list(list(mb.trajectory_ids)),
+          ),
+          names=("n_traj", "traj_ids"),
+          **({"mb_idx": st.num_microbatches - 1} if events.ON else {}),
       )
 
   def _optimizer_step_after(self, step_result: Any) -> int:

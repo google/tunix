@@ -20,6 +20,7 @@ import math
 import os
 import time
 from typing import Any, Callable, Iterable, Mapping, Optional
+from tunix.experimental import events
 import jax
 import numpy as np
 
@@ -339,6 +340,8 @@ def run_start():
   if _is_master_process() and mllogger is not None:
     run_start_key = getattr(constants, "RUN_START", "run_start")
     mllogger.start(key=run_start_key)
+    if events.ON:
+      events.emit("run_start", mllog_time_ms=int(time.time() * 1000))
 
 
 def block_start(args=None, step: int = 0, samples_count: Optional[int] = None):
@@ -746,6 +749,10 @@ def check_eval(
             getattr(constants, "SAMPLES_COUNT", "samples_count"): current_samples,
         },
     )
+    if events.ON:
+      events.emit(
+          "run_stop", mllog_time_ms=int(time.time() * 1000), status="success"
+      )
   else:
     mllogger.start(
         key=getattr(constants, "BLOCK_START", "block_start"),
@@ -1236,6 +1243,13 @@ def run_stop(
         metadata=metadata,
         **extra_kwargs,
     )
+    if events.ON:
+      events.emit(
+          "run_stop",
+          mllog_time_ms=int(time_ms if time_ms is not None
+                            else time.time() * 1000),
+          status=status,
+      )
     _flush_to_gcs_if_needed()
 
 

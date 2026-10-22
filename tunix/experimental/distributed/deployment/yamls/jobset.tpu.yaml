@@ -42,7 +42,7 @@ ${FAIL_FAST_LINE_DISABLE}    maxRestarts: 3
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: ${FAIL_FAST_WORKER_RESTART_POLICY}
-            terminationGracePeriodSeconds: 10
+            terminationGracePeriodSeconds: ${ROLLOUT_TERMINATION_GRACE_SECONDS}
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}${TPU_TOPOLOGY_SELECTOR}${RESERVATION_SELECTOR}
 ${TPU_AFFINITY}            # tolerations:
