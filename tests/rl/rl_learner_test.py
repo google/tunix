@@ -118,6 +118,7 @@ class RLLearnerTest(parameterized.TestCase):
     mock_engine.cluster_config.training_config = config
     mock_engine.cluster_config.rollout_config.max_prompt_length = 32
     mock_engine.cluster_config.rollout_config.max_tokens_to_generate = 32
+    mock_engine.cluster_config.rollout_config.return_routed_experts = False
     mock_engine.actor_trainer.train_steps = 0
     mock_engine.actor_trainer.iter_steps = 0
 
@@ -139,6 +140,29 @@ class RLLearnerTest(parameterized.TestCase):
     mock_global_step.assert_called_once()
     # Arg 3 of _run_global_step is iterator_steps_per_mini_batch (8 // 8 == 1)
     self.assertEqual(mock_global_step.call_args.args[3], 1)
+
+  def test_sequence_packing_rejects_router_replay(self):
+    config = rl_engine_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        max_seq_token_per_tpu=128,
+        eval_every_n_steps=1,
+        max_steps=1,
+    )
+    mock_engine = mock.MagicMock()
+    mock_engine.actor_trainer.model = DummyModel()
+    mock_engine.rollout.model.return_value = DummyModel()
+    mock_engine.cluster_config.training_config = config
+    mock_engine.cluster_config.rollout_config.max_prompt_length = 32
+    mock_engine.cluster_config.rollout_config.max_tokens_to_generate = 32
+    mock_engine.cluster_config.rollout_config.return_routed_experts = True
+
+    with self.assertRaisesRegex(ValueError, 'return_routed_experts'):
+      DummyLearner(
+          rl_engine=mock_engine,
+          algo_config=DummyConfig(),
+          reward_fns=lambda prompts, completions, **kwargs: [1.0]
+          * len(prompts),
+      )
 
   def test_train_closes_engine_on_exception(self):
     config = rl_engine_lib.RLTrainingConfig(

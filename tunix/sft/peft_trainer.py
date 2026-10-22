@@ -801,8 +801,17 @@ class PeftTrainer:
     self._buffered_train_metrics = None
 
   def _write_metrics(self, metrics_buffer: MetricsBuffer):
+    # Fetch every buffered value in one batched transfer. Converting the device
+    # arrays one by one below would block on a separate device-to-host copy for
+    # each value.
+    metrics_buffer.losses, metrics_buffer.additional_metrics = jax.device_get(
+        (metrics_buffer.losses, metrics_buffer.additional_metrics)
+    )
+
     def _to_np_array(v):
-      if isinstance(v, jax.Array):
+      # After the fetch above, values that were device arrays are numpy arrays.
+      # Cast both kinds, so bf16 metrics are still reduced in float32.
+      if isinstance(v, (jax.Array, np.ndarray, np.generic)):
         return np.asarray(v, dtype=np.float32)
       elif isinstance(v, list):
         return [_to_np_array(x) for x in v]
@@ -938,7 +947,9 @@ class PeftTrainer:
           break
 
         train_example = self._prepare_inputs(train_example)
-        train_example = sharding_utils.shard_input(
+        # `is_update_step` is read below from the unsharded input, so a host
+        # flag (e.g. in packed RL chunks) is not copied back from the devices.
+        sharded_example = sharding_utils.shard_input(
             train_example, self.config.data_sharding_axis
         )
 
@@ -1016,7 +1027,7 @@ class PeftTrainer:
             tags=tags,
         ) as span_v2:
           train_loss, aux, grad_norm = train_step(
-              train_example,
+              sharded_example,
               is_update_step=jnp.array(is_update_step_val, dtype=jnp.bool_),
           )
           span.device_end([train_loss])
