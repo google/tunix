@@ -595,9 +595,11 @@ def create_maxtext_engine(
     log_shapes: bool = True,
 ) -> Any:
   """Builds and initializes a MaxTextTrainingEngine within the given mesh."""
+  from flax.core.spmd import logical_axis_rules  # pylint: disable=g-import-not-at-top
+
   _, maxtext_engine, _ = maxtext_modules()
 
-  with mesh:
+  with mesh, logical_axis_rules(maxtext_config.logical_axis_rules):
     engine = maxtext_engine.MaxTextTrainingEngine(
         maxtext_config,
         mesh=mesh,
