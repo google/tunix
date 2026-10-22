@@ -1452,6 +1452,8 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
     """
     if jax.default_backend() != 'tpu' or len(jax.devices()) < 4:
       self.skipTest('TPU-only timing A/B; the bitwise check runs on CPU.')
+    if not os.environ.get('ZERO_TIM_TPU_BENCH'):
+      self.skipTest('Set ZERO_TIM_TPU_BENCH=1 to run full-scale TPU benchmarks.')
     self.assertEqual(qwen3_canon.FORWARD_TP_SUM_SCATTER_MIN_M, 4096)
     workload = _perf_workload('L=8, B=32, T=256 (224+32)')
     zero_tim = 'canon_all_enabled (Zero-TIM)'
@@ -1570,6 +1572,8 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
     """
     if jax.default_backend() != 'tpu' or len(jax.devices()) < 4:
       self.skipTest('TPU-only timing attribution.')
+    if not os.environ.get('ZERO_TIM_TPU_BENCH'):
+      self.skipTest('Set ZERO_TIM_TPU_BENCH=1 to run full-scale TPU benchmarks.')
     workload = _perf_workload('L=8, B=32, T=256 (224+32)')
     zero_tim = 'canon_all_enabled (Zero-TIM)'
     loo_configs = tuple(
@@ -1637,6 +1641,8 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
     """Full-size suite, drift-regime and scaling reports on 4 TPU devices."""
     if jax.default_backend() != 'tpu' or len(jax.devices()) < 4:
       self.skipTest('Requires 4 TPU devices; the mini suite covers CPU.')
+    if not os.environ.get('ZERO_TIM_TPU_BENCH'):
+      self.skipTest('Set ZERO_TIM_TPU_BENCH=1 to run full-scale TPU benchmarks.')
     rows = qwen3_canon_benchmark.run_benchmark_suite(
         preset='qwen3_0p6b_2l',
         batch_size=4,
