@@ -14,9 +14,14 @@
 
 """Unit tests for SummaryCommand execution."""
 
+import contextlib
+import io
 import json
+from typing import Any
 
 from absl.testing import absltest
+from tunix.dist_rl.trajectory import store
+from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
 from tunix.dist_rl.trajectory.explorer.commands import summary
 from tunix.dist_rl.trajectory.explorer.commands import testing
@@ -25,6 +30,33 @@ _NO_OUTCOME_TRAJECTORY_1 = trajectory_testing.TRAJECTORY_1
 _NO_OUTCOME_TRAJECTORY_2 = trajectory_testing.TRAJECTORY_2
 _TOOL_CALLING_TRAJECTORY = trajectory_testing.PAIRED_ATIF_TRAJECTORY
 _SUCCEEDED_TRAJECTORY = trajectory_testing.PAIRED_TUNIX_TRAJECTORY
+
+
+class TrackingReader(store.TrajectoryReader[trajectory_lib.TrajectoryMetadata]):
+  """Tracks which trajectory IDs were requested via get_trajectories."""
+
+  def __init__(self, delegate: store.TrajectoryReader[Any]) -> None:
+    self._delegate = delegate
+    self.requested_ids: list[list[str]] = []
+
+  def get_trajectories_metadata(
+      self,
+      trajectory_ids: list[str] | None = None,
+  ) -> list[trajectory_lib.TrajectoryMetadata]:
+    return self._delegate.get_trajectories_metadata(trajectory_ids)
+
+  def get_trajectories(
+      self,
+      trajectory_ids: list[str],
+  ) -> list[trajectory_lib.Trajectory[Any]]:
+    self.requested_ids.append(trajectory_ids)
+    return self._delegate.get_trajectories(trajectory_ids)
+
+  def get_trajectories_metrics(
+      self,
+      trajectory_ids: list[str] | None = None,
+  ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
+    return self._delegate.get_trajectories_metrics(trajectory_ids)
 
 
 class SummaryTest(absltest.TestCase):
@@ -175,6 +207,91 @@ class SummaryTest(absltest.TestCase):
     data = json.loads(out)
     self.assertEqual(data["trajectories"][0]["total_reward"], 1 / 3)
     self.assertEqual(data["run"]["mean_reward"], 1 / 3)
+
+  def test_limit_truncates_loaded_trajectories_and_updates_totals(self) -> None:
+    mem_store = testing.create_store(
+        trajectories=[
+            _NO_OUTCOME_TRAJECTORY_1,
+            _NO_OUTCOME_TRAJECTORY_2,
+            _TOOL_CALLING_TRAJECTORY,
+        ]
+    )
+    cmd = summary.SummaryCommand(limit=2)
+    exit_code, out = testing.execute_command(cmd, mem_store)
+    self.assertEqual(exit_code, 0)
+    self.assertIn(_NO_OUTCOME_TRAJECTORY_1.trajectory_id, out)
+    self.assertIn(_NO_OUTCOME_TRAJECTORY_2.trajectory_id, out)
+    self.assertNotIn(_TOOL_CALLING_TRAJECTORY.trajectory_id, out)
+    self.assertIn("Trajectories: 2 (of 3)", out)
+
+  def test_limit_bounds_get_trajectories_call(self) -> None:
+    mem_store = testing.create_store(
+        trajectories=[_NO_OUTCOME_TRAJECTORY_1, _NO_OUTCOME_TRAJECTORY_2]
+    )
+    tracking_reader = TrackingReader(mem_store)
+    cmd = summary.SummaryCommand(limit=1)
+    exit_code, _ = testing.execute_command(cmd, tracking_reader)
+    self.assertEqual(exit_code, 0)
+    self.assertEqual(
+        tracking_reader.requested_ids,
+        [[_NO_OUTCOME_TRAJECTORY_1.trajectory_id]],
+    )
+
+  def test_limit_json_output(self) -> None:
+    mem_store = testing.create_store(
+        trajectories=[_NO_OUTCOME_TRAJECTORY_1, _TOOL_CALLING_TRAJECTORY]
+    )
+    cmd = summary.SummaryCommand(limit=1)
+    exit_code, out = testing.execute_command(cmd, mem_store, output_json=True)
+    self.assertEqual(exit_code, 0)
+    data = json.loads(out)
+    self.assertEqual(data["run"]["num_trajectories"], 1)
+    self.assertEqual(data["run"]["num_total_trajectories"], 2)
+    self.assertLen(data["trajectories"], 1)
+    self.assertEqual(
+        data["trajectories"][0]["trajectory_id"],
+        _NO_OUTCOME_TRAJECTORY_1.trajectory_id,
+    )
+
+  def test_limit_greater_than_total_shows_normal_totals(self) -> None:
+    mem_store = testing.create_store(
+        trajectories=[_NO_OUTCOME_TRAJECTORY_1, _NO_OUTCOME_TRAJECTORY_2]
+    )
+    cmd = summary.SummaryCommand(limit=5)
+    exit_code, out = testing.execute_command(cmd, mem_store)
+    self.assertEqual(exit_code, 0)
+    self.assertIn("Trajectories: 2", out)
+    self.assertNotIn("(of 2)", out)
+
+  def test_limit_zero_with_trajectories(self) -> None:
+    mem_store = testing.create_store(
+        trajectories=[_NO_OUTCOME_TRAJECTORY_1, _NO_OUTCOME_TRAJECTORY_2]
+    )
+    cmd = summary.SummaryCommand(limit=0)
+    exit_code, out = testing.execute_command(cmd, mem_store)
+    self.assertEqual(exit_code, 0)
+    self.assertIn("Trajectories: 0 (of 2)", out)
+
+    exit_code, json_out = testing.execute_command(
+        cmd, mem_store, output_json=True
+    )
+    self.assertEqual(exit_code, 0)
+    data = json.loads(json_out)
+    self.assertEqual(data["run"]["num_trajectories"], 0)
+    self.assertEqual(data["run"]["num_total_trajectories"], 2)
+    self.assertEmpty(data["trajectories"])
+
+  def test_negative_limit_exits_2(self) -> None:
+    mem_store = testing.create_store(trajectories=[_NO_OUTCOME_TRAJECTORY_1])
+    cmd = summary.SummaryCommand(limit=-1)
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+      exit_code = cmd.execute(mem_store)
+    self.assertEqual(exit_code, 2)
+    self.assertIn(
+        "trajectory-explore: error: --limit must be non-negative, got -1",
+        stderr.getvalue(),
+    )
 
 
 if __name__ == "__main__":
