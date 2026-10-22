@@ -1,0 +1,1806 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Peft trainer unittest."""
+
+import contextlib
+import dataclasses
+import functools
+import os
+import tempfile
+from typing import Any, Tuple
+from unittest import mock
+from absl.testing import absltest
+from absl.testing import parameterized
+import chex
+from flax import nnx
+import jax
+import jax.numpy as jnp
+import jax.sharding as shd
+import numpy as np
+import optax
+import orbax.checkpoint as ocp
+from tunix.dist_rl.train import peft_trainer_v2
+from tunix.sft import checkpoint_manager
+from tunix.sft import hooks
+from tunix.sft import peft_trainer
+from tunix.sft import profiler
+from tunix.sft import utils as sft_utils
+from tunix.tests import test_common as tc
+from tunix.utils import compat
+
+TEST_LEARNING_RATE = 1e-3
+
+# CPU environment setup to simulate multi device env.
+os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
+
+
+def create_sharded_model(model_ctor, rngs, mesh):
+  @nnx.jit(static_argnums=(0,))
+  def _create_sharded_model(model_ctor, rngs):
+    model = model_ctor(config=tc.ModelConfig(), rngs=rngs)
+    state = nnx.state(model)
+    pspecs = nnx.get_partition_spec(state)
+    sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+    nnx.update(model, sharded_state)
+    return model, state
+
+  with compat.set_mesh(mesh):
+    model, state = _create_sharded_model(model_ctor, rngs)
+  state_sharding = nnx.get_named_sharding(state, mesh)
+  return model, state_sharding
+
+
+def dummy_gen_model_input_fn(x: peft_trainer.TrainingInput):
+  return {
+      'input_tokens': x.input_tokens,
+      'input_mask': x.input_mask,
+      'positions': jnp.arange(x.input_tokens.shape[1]),
+      'attention_mask': jnp.ones_like(x.input_tokens),
+  }
+
+
+def dummy_datasets(batch_size: int, repeat: int = 1):
+  # (num_batch, batch_size, seq_len)
+  dummy_input = np.arange(128).reshape((-1, batch_size, 16))
+  return [
+      peft_trainer.TrainingInput(
+          input_tokens=x, input_mask=jnp.ones(x.shape, dtype=jnp.int32)
+      )
+      for x in dummy_input
+  ] * repeat
+
+
+global_counter = 0
+
+
+def _injected_sgd() -> optax.GradientTransformationExtraArgs:
+  """Returns an SGD whose learning rate is tracked in the optimizer state."""
+  return optax.inject_hyperparams(optax.sgd)(
+      learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
+  )
+
+
+class PeftTrainerTest(parameterized.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    try:
+      self.temp_path = self.create_tempdir().full_path
+    except Exception:
+      self.temp_path = tempfile.TemporaryDirectory().name
+
+    # CPU env setup to simulate multi device env. Won't affect TPU env. But
+    # need to be careful not to use self.num_cpus in TPU env.
+    self.num_cpus = 4
+    tc.safe_set_n_cpu_devices(self.num_cpus)
+
+    self.eval_ds = self.train_ds = dummy_datasets(batch_size=4)
+    total_devices = jax.device_count()
+    self.mesh = shd.Mesh(
+        devices=np.array(jax.devices()).reshape(2, total_devices // 2),
+        axis_names=('fsdp', 'tp'),
+    )
+
+    self.eval_ds = self.train_ds = dummy_datasets(batch_size=4)
+
+  def test_compile_once(self):
+    class CountCompiledTimesTrainer(peft_trainer_v2.PeftTrainer):
+
+      def _fwd_bwd_step(self, model, grad_accumulator, inputs):
+        global global_counter
+        global_counter += 1
+        return super()._fwd_bwd_step(model, grad_accumulator, inputs)
+
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    rngs = nnx.Rngs(0)
+    model = tc.get_lora_model(
+        tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs), mesh=self.mesh
+    )
+    trainer = CountCompiledTimesTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    global global_counter
+    global_counter = 0  # make mypy happy
+    with self.mesh:
+      trainer.train(self.train_ds, self.eval_ds)
+    self.assertEqual(global_counter, 1)
+
+  @parameterized.named_parameters(
+      ('cache_nnx_graph', True),
+      ('no_cache_nnx_graph', False),
+  )
+  def test_basic_training(self, cache_nnx_graph: bool):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+    optimizer = optax.inject_hyperparams(optax.sgd)(
+        learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
+    )
+    trainer = peft_trainer_v2.PeftTrainer(model, optimizer, config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    trainer.train(self.train_ds, self.eval_ds, cache_nnx_graph=cache_nnx_graph)
+    variables = nnx.state(model, nnx.Param)
+
+    jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
+
+    self.assertGreater(
+        trainer.metrics_logger.get_metric('', 'perplexity', 'train'), 0  # pyrefly: ignore[missing-attribute]
+    )
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),  # pyrefly: ignore[missing-attribute]
+        TEST_LEARNING_RATE,
+    )
+    self.assertGreater(
+        trainer.metrics_logger.get_metric('', 'perplexity', 'eval'), 0  # pyrefly: ignore[missing-attribute]
+    )
+    self.assertGreater(trainer._train_steps, 0)
+
+    self.assertLen(
+        trainer.metrics_logger.get_metric_history('', 'perplexity', 'train'),  # pyrefly: ignore[missing-attribute]
+        trainer._train_steps,
+    )
+
+    trainer.train(self.train_ds)  # No eval dataset.
+
+  def test_fwd_only_hands_live_model_and_shards_arrays(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    tokens = np.arange(8, dtype=np.int32).reshape(2, 4)
+    empty = np.zeros((2, 0), dtype=np.int32)
+
+    def fn(m, x, *, y, pad_id, opt=None):
+      return m, x, y, pad_id, opt
+
+    with self.mesh:
+      fn_model, fn_x, fn_y, fn_pad, fn_opt = trainer.fwd_only(
+          fn, tokens, y=empty, pad_id=0
+      )
+
+    # The trainer model itself is passed (no copy, no split).
+    self.assertIs(fn_model, model)
+    # Array leaves become sharded device arrays; scalars / None pass through.
+    self.assertIsInstance(fn_x, jax.Array)
+    np.testing.assert_array_equal(np.asarray(fn_x), tokens)
+    self.assertIsInstance(fn_x.sharding, shd.NamedSharding)
+    self.assertEqual(
+        fn_x.sharding.spec,
+        shd.PartitionSpec(config.data_sharding_axis),
+    )
+    self.assertEqual(fn_y.shape, (2, 0))
+    self.assertEqual(fn_pad, 0)
+    self.assertIsNone(fn_opt)
+
+  def test_fwd_only_runs_jitted_scorer_read_only(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    before = jax.tree.map(np.asarray, nnx.state(model, nnx.Param))
+
+    @nnx.jit
+    def logits_sum(m, tokens):
+      logits, _ = m(
+          tokens,
+          positions=jnp.arange(tokens.shape[1])[None, :],
+          attention_mask=jnp.ones((1, 4, 4), dtype=jnp.bool_),
+          cache=None,
+      )
+      return logits.sum()
+
+    out = trainer.fwd_only(logits_sum, np.arange(1, 5, dtype=np.int32)[None])
+
+    self.assertTrue(np.isfinite(float(out)))
+    after = jax.tree.map(np.asarray, nnx.state(model, nnx.Param))
+    jax.tree.map(np.testing.assert_array_equal, before, after)
+
+  @parameterized.named_parameters(
+      ('lora_disabled_distributed', False, True),
+      ('lora_disabled_single_device', False, False),
+      ('lora_enabled_distributed', True, True),
+      ('lora_enabled_single_device', True, False),
+  )
+  def test_checkpoint_save_and_restore(
+      self, enable_lora: bool, distributed: bool
+  ):
+    def create_model_and_optimizer():
+      rngs = nnx.Rngs(0)
+      if distributed:
+        model, _ = create_sharded_model(tc.ToyTransformer, rngs, self.mesh)
+      else:
+        model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+      if enable_lora:
+        model = tc.get_lora_model(model)
+
+      optimizer = optax.inject_hyperparams(optax.adamw)(
+          learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
+      )
+      return model, optimizer
+
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=100,
+        checkpoint_root_directory=f'{self.temp_path}/{self.id()}/checkpoints',
+    )
+
+    model, optimizer = create_model_and_optimizer()
+    original_model_state = jax.tree.map(
+        jnp.copy, nnx.state(model, nnx.LoRAParam if enable_lora else nnx.Param)
+    )
+
+    trainer = peft_trainer_v2.PeftTrainer(model, optimizer, config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    ctx = self.mesh if distributed else contextlib.nullcontext()
+
+    with ctx:
+      trainer.train(self.train_ds, self.eval_ds, cache_nnx_graph=True)
+    trained_model_state = nnx.state(
+        model, nnx.LoRAParam if enable_lora else nnx.Param
+    )
+    trained_opt_state = nnx.state(trainer.optimizer, nnx.optimizer.OptState)
+
+    jax.tree.map_with_path(
+        tc.assert_not_equal, original_model_state, trained_model_state
+    )
+
+    # Resume from checkpoint with a new model and optimizer, and check that
+    # the model and optimizer states are the same as the trained ones.
+    new_model, new_optimizer = create_model_and_optimizer()
+
+    resumed_trainer = peft_trainer_v2.PeftTrainer(
+        new_model, new_optimizer, config
+    )
+    resumed_model_state = nnx.state(
+        resumed_trainer.model, nnx.LoRAParam if enable_lora else nnx.Param
+    )
+    resumed_opt_state = nnx.state(
+        resumed_trainer.optimizer, nnx.optimizer.OptState
+    )
+
+    jax.tree.map_with_path(
+        tc.assert_equal, trained_model_state, resumed_model_state
+    )
+    jax.tree.map_with_path(
+        tc.assert_equal, trained_opt_state, resumed_opt_state
+    )
+
+    resumed_trainer = resumed_trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    )
+    with ctx:
+      resumed_trainer.train(self.train_ds, self.eval_ds, cache_nnx_graph=True)
+
+    resumed_opt_state = nnx.state(
+        resumed_trainer.optimizer, nnx.optimizer.OptState
+    )
+
+    jax.tree.map(
+        lambda x, y: self.assertTrue(
+            x.sharding.is_equivalent_to(y.sharding, ndim=x.ndim)
+        ),
+        trained_opt_state,
+        resumed_opt_state,
+    )
+
+  def test_reusing_trainer(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(self.train_ds, None)
+
+    previous_jit_func = trainer._jitted_fwd_bwd_step_fn
+    self.assertIsNotNone(previous_jit_func)
+
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(self.train_ds, None)
+    curr_jit_func = trainer._jitted_fwd_bwd_step_fn
+    self.assertIsNotNone(curr_jit_func)
+    self.assertIsNot(previous_jit_func, curr_jit_func)
+
+  @mock.patch.object(profiler, 'Profiler')
+  def test_basic_training_with_profiler(self, mock_profiler_init):
+    mock_profiler_instance = mock.MagicMock()
+    mock_profiler_init.return_value = mock_profiler_instance
+    mock_profiler_instance.should_activate.side_effect = (
+        lambda step: step == profiler_options.skip_first_n_steps
+    )
+    mock_profiler_instance.should_deactivate.side_effect = (
+        lambda step: step
+        == (
+            profiler_options.skip_first_n_steps
+            + profiler_options.profiler_steps
+        )
+    )
+    profiler_options = profiler.ProfilerOptions(
+        '/tmp/profiler', skip_first_n_steps=2, profiler_steps=3
+    )
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=2, max_steps=100, profiler_options=profiler_options
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    train_ds = dummy_datasets(batch_size=4, repeat=4)
+    trainer.train(train_ds)  # No eval dataset.
+
+    mock_profiler_init.assert_called_once_with(
+        initial_step=0,
+        max_step=config.max_steps,
+        profiler_options=profiler_options,
+    )
+    expected_calls = (
+        # steps 0 through 8.
+        [mock.call.maybe_activate(step) for step in range(8)]
+        # steps 1 through 9 as step number is incremented during each step.
+        + [mock.call.maybe_deactivate(step) for step in range(1, 9)]
+    )
+    mock_profiler_instance.assert_has_calls(
+        expected_calls,
+        any_order=True,
+    )
+
+  def test_dist_training(self):
+    rngs = nnx.Rngs(0)
+    model, _ = create_sharded_model(tc.ToyTransformer, rngs, self.mesh)
+    original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    with self.mesh:
+      trainer.train(self.train_ds, self.eval_ds)
+    variables = nnx.state(model, nnx.Param)
+
+    self.assertEqual(
+        variables.layers[0].w1.kernel.value.sharding.spec,
+        shd.PartitionSpec('fsdp', 'tp'),
+    )
+    self.assertEqual(
+        variables.layers[0].w2.kernel.value.sharding.spec,
+        shd.PartitionSpec('tp', 'fsdp'),
+    )
+
+    jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
+
+    # compare with unsharded model
+    rngs = nnx.Rngs(0)
+    unsharded_model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer_v2.PeftTrainer(
+        unsharded_model, optax.sgd(1e-3), config
+    )
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(self.train_ds, self.eval_ds)
+    unsharded_variables = nnx.state(unsharded_model, nnx.Param)
+    self.assertIsInstance(
+        unsharded_variables.layers[0].w1.kernel.value.sharding,
+        jax.sharding.SingleDeviceSharding,
+    )
+    jax.tree.map_with_path(tc.assert_close, variables, unsharded_variables)
+
+  def test_custom_loss_fn(self):
+    def custom_loss_fn(
+        model: nnx.Module,
+        input_tokens: jax.Array,
+        input_mask: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+    ) -> jax.Array:
+      logits, _ = model(input_tokens, positions, None, attention_mask)
+      logits = logits[:, :-1, :]
+      target_tokens = input_tokens[:, 1:]
+      target_mask = input_mask[:, 1:]
+      one_hot = jax.nn.one_hot(target_tokens, logits.shape[-1])
+      one_hot = one_hot * target_mask.astype(one_hot.dtype)[..., None]
+      return optax.softmax_cross_entropy(logits, one_hot).mean()
+
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(custom_loss_fn)
+    trainer.train(self.train_ds, self.eval_ds)
+    variables = nnx.state(model, nnx.Param)
+
+    jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
+
+  @parameterized.named_parameters(
+      ('scalar', TEST_LEARNING_RATE),
+      ('constant_schedule', optax.constant_schedule(TEST_LEARNING_RATE)),
+  )
+  def test_lora_training(self, learning_rate_scheduler):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    rngs = nnx.Rngs(0)
+    model = tc.get_lora_model(
+        tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    )
+
+    original_params = jax.tree.map(
+        jnp.copy, nnx.state(model, (nnx.filterlib.Not(nnx.LoRAParam)))
+    )
+    original_lora_params = jax.tree.map(
+        jnp.copy, nnx.state(model, nnx.LoRAParam)
+    )
+    optimizer = optax.inject_hyperparams(optax.sgd)(
+        learning_rate=learning_rate_scheduler
+    )
+    trainer = peft_trainer_v2.PeftTrainer(model, optimizer, config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    trainer.train(self.train_ds, self.eval_ds)
+    params = nnx.state(model, (nnx.filterlib.Not(nnx.LoRAParam)))
+    lora_params = nnx.state(model, nnx.LoRAParam)
+
+    jax.tree.map_with_path(tc.assert_equal, original_params, params)
+    jax.tree.map_with_path(
+        tc.assert_not_equal, original_lora_params, lora_params
+    )
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),  # pyrefly: ignore[missing-attribute]
+        TEST_LEARNING_RATE,
+    )
+
+  @parameterized.named_parameters(
+      ('scalar', TEST_LEARNING_RATE),
+      ('constant_schedule', optax.constant_schedule(TEST_LEARNING_RATE)),
+  )
+  def test_gradient_accumulation(self, learning_rate_schedule):
+    def train(
+        train_ds,
+        gradient_accumulation_steps: int | None,
+        learning_rate_schedule: int | optax.Schedule,
+    ):
+      config = peft_trainer_v2.TrainingConfig(
+          eval_every_n_steps=2,
+          max_steps=100,
+          gradient_accumulation_steps=gradient_accumulation_steps,
+      )
+      rngs = nnx.Rngs(0)
+      model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+
+      optimizer = optax.inject_hyperparams(optax.sgd)(
+          learning_rate=learning_rate_schedule
+      )
+      trainer = peft_trainer_v2.PeftTrainer(model, optimizer, config)
+      trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+      trainer.train(train_ds, self.eval_ds)
+      self.assertEqual(
+          trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),  # pyrefly: ignore[missing-attribute]
+          TEST_LEARNING_RATE,
+      )
+      return nnx.state(model, nnx.Param), trainer
+
+    train_ds = dummy_datasets(batch_size=4, repeat=4)
+    params, trainer = train(
+        train_ds,
+        gradient_accumulation_steps=None,
+        learning_rate_schedule=learning_rate_schedule,
+    )
+    params_with_grad_accumulation, grad_accu_trainer = train(
+        dummy_datasets(batch_size=2, repeat=4),
+        gradient_accumulation_steps=2,
+        learning_rate_schedule=learning_rate_schedule,
+    )
+    jax.tree.map_with_path(
+        functools.partial(tc.assert_close, atol=1e-7, rtol=1e-7),
+        params,
+        params_with_grad_accumulation,
+    )
+    self.assertEqual(trainer.train_steps, grad_accu_trainer.train_steps)
+    self.assertEqual(trainer.iter_steps * 2, grad_accu_trainer.iter_steps)
+    np.testing.assert_allclose(
+        trainer.metrics_logger.get_metric('', 'loss', 'train'),
+        grad_accu_trainer.metrics_logger.get_metric('', 'loss', 'train'),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='without_grad_accu',
+          grad_accu=1,
+          resume_step=0,
+          expected_save_steps=[1, 2, 3, 4],
+      ),
+      dict(
+          testcase_name='grad_accu',
+          grad_accu=2,
+          resume_step=0,
+          expected_save_steps=[1, 2],
+      ),
+      dict(
+          testcase_name='with_resume',
+          grad_accu=1,
+          resume_step=1,
+          expected_save_steps=[2, 3, 4],
+      ),
+      dict(
+          testcase_name='with_resume_and_grad_accu',
+          grad_accu=2,
+          resume_step=1,
+          expected_save_steps=[2],
+      ),
+  )
+  @mock.patch.object(checkpoint_manager, 'CheckpointManager')
+  def test_checkpointing(
+      self,
+      mock_checkpoint_manager_init,
+      grad_accu,
+      resume_step,
+      expected_save_steps,
+  ):
+    mock_checkpoint_manager = mock.MagicMock()
+    mock_checkpoint_manager_init.return_value = mock_checkpoint_manager
+    mock_checkpoint_manager.maybe_restore.return_value = (resume_step, {})
+    mock_checkpoint_manager.save.return_value = True
+    mock_checkpoint_manager.latest_step.return_value = (
+        expected_save_steps[-1] - 1
+    )  # force save at close
+    checkpoint_options = ocp.CheckpointManagerOptions()
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=100,
+        gradient_accumulation_steps=grad_accu,
+        checkpoint_root_directory='/tmp/checkpoint',
+        checkpointing_options=checkpoint_options,
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.get_lora_model(
+        tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    )
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    train_ds = eval_ds = dummy_datasets(batch_size=2, repeat=1)  # 4 batches
+    trainer.train(train_ds, eval_ds)
+
+    mock_checkpoint_manager_init.assert_called_once_with(
+        root_directory='/tmp/checkpoint', options=checkpoint_options
+    )
+    # Assert that the checkpoint manager is called with the correct arguments
+    # and does not have any unexpected calls.
+    mock_checkpoint_manager.assert_has_calls(
+        [
+            mock.call.maybe_restore(
+                mock.ANY, mock.ANY, restore_only_lora_params=True
+            ),
+            *[
+                mock.call.save(
+                    i,
+                    mock.ANY,
+                    mock.ANY,
+                    save_only_lora_params=True,
+                    custom_metadata={},
+                )
+                for i in expected_save_steps
+            ],
+            mock.call.latest_step(),
+            mock.call.save(
+                expected_save_steps[-1],
+                mock.ANY,
+                mock.ANY,
+                save_only_lora_params=True,
+                force=True,
+            ),
+            mock.call.close(),
+        ],
+        any_order=False,
+    )
+
+  def test_loss_fn_with_aux(self):
+    def custom_loss_fn(
+        model: nnx.Module,
+        input_tokens: jax.Array,
+        input_mask: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+    ) -> Tuple[jax.Array, Any]:
+      del model, input_tokens, input_mask, positions, attention_mask
+      return jnp.array(1.0), {'foo': 1, 'bar': 2}
+
+    train_invoke = {'foo': 0, 'bar': 0}
+    eval_invoke = {'foo': 1, 'bar': 1}
+
+    class CustomTrainer(peft_trainer_v2.PeftTrainer):
+
+      def _post_process_train_step(self, aux):
+        train_invoke['foo'] += aux['foo']
+        train_invoke['bar'] += aux['bar']
+
+      def _post_process_eval_step(self, aux):
+        eval_invoke['foo'] *= aux['foo']
+        eval_invoke['bar'] *= aux['bar']
+
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+
+    trainer = CustomTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(custom_loss_fn, has_aux=True)
+
+    trainer.train(self.train_ds, self.eval_ds)
+    self.assertEqual(train_invoke, {'foo': 2, 'bar': 4})
+    self.assertEqual(eval_invoke, {'foo': 1, 'bar': 16})
+
+  @mock.patch.object(checkpoint_manager, 'CheckpointManager')
+  def test_explicit_save_checkpoint(self, mock_checkpoint_manager_init):
+    mock_cm = mock.MagicMock()
+    mock_checkpoint_manager_init.return_value = mock_cm
+    mock_cm.save.return_value = True
+    mock_cm.maybe_restore.return_value = (0, {})
+
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=100,
+        checkpoint_root_directory='/tmp/checkpoint',
+        checkpointing_options=ocp.CheckpointManagerOptions(),
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    custom_metadata = {'step': 10, 'global_step': 42, 'role': 'actor'}
+    trainer.save_checkpoint(metadata=custom_metadata, force=True)
+
+    mock_cm.save.assert_called_once_with(
+        10,
+        trainer.model,
+        trainer.optimizer,
+        save_only_lora_params=False,
+        custom_metadata=custom_metadata,
+        force=True,
+    )
+
+  @mock.patch.object(checkpoint_manager, 'CheckpointManager')
+  def test_save_checkpoint_default_step_from_train_steps(
+      self, mock_checkpoint_manager_init
+  ):
+    mock_cm = mock.MagicMock()
+    mock_checkpoint_manager_init.return_value = mock_cm
+    mock_cm.save.return_value = True
+    mock_cm.maybe_restore.return_value = (0, {})
+
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=100,
+        checkpoint_root_directory='/tmp/checkpoint',
+        checkpointing_options=ocp.CheckpointManagerOptions(),
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    trainer.save_checkpoint(force=True)
+
+    mock_cm.save.assert_called_once_with(
+        0,
+        trainer.model,
+        trainer.optimizer,
+        save_only_lora_params=False,
+        custom_metadata={},
+        force=True,
+    )
+
+  @mock.patch.object(checkpoint_manager, 'CheckpointManager')
+  def test_save_checkpoint_step_kwarg_and_optional_params(
+      self, mock_checkpoint_manager_init
+  ):
+    mock_cm = mock.MagicMock()
+    mock_checkpoint_manager_init.return_value = mock_cm
+    mock_cm.save.return_value = True
+    mock_cm.maybe_restore.return_value = (0, {})
+
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=100,
+        checkpoint_root_directory='/tmp/checkpoint',
+        checkpointing_options=ocp.CheckpointManagerOptions(),
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    custom_metadata = {'step': 25, 'policy_version': 3}
+    trainer.save_checkpoint(
+        metadata=custom_metadata,
+        save_only_lora_params=True,
+        force=True,
+    )
+
+    mock_cm.save.assert_called_once_with(
+        25,
+        trainer.model,
+        trainer.optimizer,
+        save_only_lora_params=True,
+        custom_metadata=custom_metadata,
+        force=True,
+    )
+
+  def _external_resume_trainer(
+      self, root, *, implicit_resume, gradient_accumulation_steps=None
+  ):
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=1000,
+        max_steps=100,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        checkpoint_root_directory=root,
+        checkpointing_options=ocp.CheckpointManagerOptions(
+            save_interval_steps=1, max_to_keep=5
+        ),
+        resume_from_checkpoint_on_init=implicit_resume,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    optimizer = optax.inject_hyperparams(optax.adamw)(
+        learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
+    )
+    trainer = peft_trainer_v2.PeftTrainer(model, optimizer, config)
+    trainer.is_managed_externally = True
+    return trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+  def _write_one_checkpoint(self, root, *, implicit_resume=True):
+    trainer = self._external_resume_trainer(
+        root, implicit_resume=implicit_resume
+    )
+    trainer.fwd_bwd(self.train_ds[0])
+    train_steps = trainer.update()
+    trainer.save_checkpoint(
+        metadata={
+            'step': train_steps,
+            'policy_version': train_steps,
+            'num_rollouts': 8,
+        }
+    )
+    trained_state = jax.tree.map(jnp.copy, nnx.state(trainer.model, nnx.Param))
+    trainer.close()
+    return train_steps, trained_state
+
+  def test_restore_checkpoint_reports_step_and_custom_metadata(self):
+    root = f'{self.temp_path}/{self.id()}/checkpoints'
+
+    fresh = self._external_resume_trainer(root, implicit_resume=True)
+    self.assertEqual(fresh.restore_checkpoint(), {'step': 0})
+    del fresh
+
+    train_steps, _ = self._write_one_checkpoint(root)
+
+    resumed = self._external_resume_trainer(root, implicit_resume=True)
+    self.assertEqual(resumed.train_steps, train_steps)
+    self.assertEqual(
+        resumed.restore_checkpoint(),
+        {'step': 1, 'policy_version': 1, 'num_rollouts': 8},
+    )
+
+  def test_implicit_resume_disabled_leaves_trainer_at_zero(self):
+    root = f'{self.temp_path}/{self.id()}/checkpoints'
+    train_steps, trained_state = self._write_one_checkpoint(root)
+    self.assertEqual(train_steps, 1)
+
+    trainer = self._external_resume_trainer(root, implicit_resume=False)
+    self.assertEqual(trainer.train_steps, 0)
+    self.assertEqual(trainer._iter_steps, 0)
+    # Weights are the freshly initialised ones, not the checkpoint's.
+    jax.tree.map_with_path(
+        tc.assert_not_equal, trained_state, nnx.state(trainer.model, nnx.Param)
+    )
+
+  def test_explicit_restore_after_disabled_implicit_resume(self):
+    root = f'{self.temp_path}/{self.id()}/checkpoints'
+    train_steps, trained_state = self._write_one_checkpoint(root)
+
+    trainer = self._external_resume_trainer(root, implicit_resume=False)
+    self.assertEqual(trainer.train_steps, 0)
+
+    metadata = trainer.restore_checkpoint()
+
+    self.assertEqual(metadata['step'], train_steps)
+    self.assertEqual(trainer.train_steps, train_steps)
+    jax.tree.map_with_path(
+        tc.assert_equal, trained_state, nnx.state(trainer.model, nnx.Param)
+    )
+
+  def test_explicit_restore_refreshes_step_derived_state(self):
+    root = f'{self.temp_path}/{self.id()}/checkpoints'
+    self._write_one_checkpoint(root)
+
+    trainer = self._external_resume_trainer(
+        root, implicit_resume=False, gradient_accumulation_steps=4
+    )
+
+    self.assertEqual(trainer._iter_steps, 0)
+    profiler_before = trainer._prof
+
+    trainer.restore_checkpoint()
+
+    self.assertEqual(trainer.train_steps, 1)
+    self.assertEqual(trainer._iter_steps, 4)  # 1 update * 4 accumulation steps
+    self.assertIsNot(trainer._prof, profiler_before)
+
+  def test_restore_checkpoint_accepts_explicit_step(self):
+    root = f'{self.temp_path}/{self.id()}/checkpoints'
+    trainer = self._external_resume_trainer(root, implicit_resume=True)
+    states = {}
+    for _ in range(2):
+      trainer.fwd_bwd(self.train_ds[0])
+      step = trainer.update()
+      trainer.save_checkpoint(metadata={'step': step, 'marker': step})
+      states[step] = jax.tree.map(jnp.copy, nnx.state(trainer.model, nnx.Param))
+    trainer.close()
+
+    rolled_back = self._external_resume_trainer(root, implicit_resume=False)
+    metadata = rolled_back.restore_checkpoint(step=1)
+
+    self.assertEqual(metadata['step'], 1)
+    self.assertEqual(metadata['marker'], 1)
+    self.assertEqual(rolled_back.train_steps, 1)
+    jax.tree.map_with_path(
+        tc.assert_equal, states[1], nnx.state(rolled_back.model, nnx.Param)
+    )
+
+  def test_restore_checkpoint_accepts_unexpected_kwargs(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=1000)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    metadata = trainer.restore_checkpoint(
+        checkpoint_directory='/somewhere/else'
+    )
+    self.assertEqual(metadata, {'step': 0})
+
+  def test_restore_checkpoint_without_configured_directory_is_a_noop(self):
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=1000, resume_from_checkpoint_on_init=False
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    self.assertEqual(trainer.restore_checkpoint(), {'step': 0})
+    self.assertEqual(trainer.train_steps, 0)
+
+  def test_loss_output_aux_retention(self):
+    def custom_loss_fn(
+        model: nnx.Module,
+        input_tokens: jax.Array,
+        input_mask: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+    ) -> sft_utils.LossOutput:
+      del model, input_tokens, input_mask, positions, attention_mask
+      return sft_utils.LossOutput(
+          primary_loss=sft_utils.WeightedMetric(
+              jnp.array(2.0, dtype=jnp.float32),
+              jnp.array(2.0, dtype=jnp.float32),
+          ),
+          aux_metrics={
+              'foo': sft_utils.WeightedMetric(
+                  jnp.array(10.0, dtype=jnp.float32),
+                  jnp.array(5.0, dtype=jnp.float32),
+              ),
+              'bar': sft_utils.WeightedMetric(
+                  jnp.array(6.0, dtype=jnp.float32),
+                  jnp.array(2.0, dtype=jnp.float32),
+              ),
+          },
+      )
+
+    train_invoke = {'foo': 0.0, 'bar': 0.0}
+    eval_invoke = {'foo': 0.0, 'bar': 0.0}
+    test_case = self
+
+    class CustomTrainer(peft_trainer_v2.PeftTrainer):
+
+      def _post_process_train_step(self, aux):
+        test_case.assertIsInstance(aux['foo'], sft_utils.WeightedMetric)
+        test_case.assertIsInstance(aux['bar'], sft_utils.WeightedMetric)
+        train_invoke['foo'] += aux['foo'].compute()
+        train_invoke['bar'] += aux['bar'].compute()
+        if self._buffered_train_metrics is not None:
+          self._buffered_train_metrics.additional_metrics['foo'] = (
+              [aux['foo']],
+              lambda xs: xs[-1],  # pyrefly: ignore[bad-index]
+          )
+
+      def _post_process_eval_step(self, aux):
+        test_case.assertIsInstance(aux['foo'], sft_utils.WeightedMetric)
+        test_case.assertIsInstance(aux['bar'], sft_utils.WeightedMetric)
+        eval_invoke['foo'] += aux['foo'].compute()
+        eval_invoke['bar'] += aux['bar'].compute()
+        if self._buffered_eval_metrics is not None:
+          self._buffered_eval_metrics.additional_metrics['foo'] = (
+              [aux['foo']],
+              lambda xs: xs[-1],  # pyrefly: ignore[bad-index]
+          )
+
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+
+    trainer = CustomTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(custom_loss_fn)
+
+    trainer.train(self.train_ds, self.eval_ds)
+    self.assertEqual(train_invoke, {'foo': 4.0, 'bar': 6.0})
+    self.assertEqual(eval_invoke, {'foo': 8.0, 'bar': 12.0})
+    metrics = trainer.get_metrics()
+    self.assertIn('foo', metrics.weighted_metrics)
+    self.assertIsInstance(
+        metrics.weighted_metrics['foo'], sft_utils.WeightedMetric
+    )
+
+  def test_weighted_metric_loss_reduction_across_unequal_microbatches(self):
+    def custom_loss_fn(
+        model: nnx.Module,
+        input_tokens: jax.Array,
+        input_mask: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+    ) -> sft_utils.LossOutput:
+      del model, positions, attention_mask
+      denom = jnp.sum(input_mask).astype(jnp.float32)
+      # Make microbatches with different valid token counts have distinct means:
+      # sum = denom * denom -> microbatch mean = denom, global weighted mean =
+      # (d1^2 + d2^2) / (d1 + d2).
+      unreduced_sum = denom * denom + 0.0 * jnp.sum(
+          input_tokens.astype(jnp.float32)
+      )
+      return sft_utils.LossOutput(
+          primary_loss=sft_utils.WeightedMetric(unreduced_sum, denom),
+          aux_metrics={
+              'unreduced_pg_loss': sft_utils.WeightedMetric(
+                  unreduced_sum, denom
+              ),
+          },
+      )
+
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=2,
+        gradient_accumulation_steps=1,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(custom_loss_fn)
+
+    mb_small = peft_trainer_v2.TrainingInput(
+        input_tokens=jnp.ones((2, 4), dtype=jnp.int32),
+        input_mask=jnp.array(
+            [[1, 0, 0, 0], [1, 0, 0, 0]], dtype=jnp.int32
+        ),  # denom = 2
+    )
+    mb_large = peft_trainer_v2.TrainingInput(
+        input_tokens=jnp.ones((2, 4), dtype=jnp.int32),
+        input_mask=jnp.ones((2, 4), dtype=jnp.int32),  # denom = 8
+    )
+    expected_weighted_loss = (2.0**2 + 8.0**2) / (2.0 + 8.0)  # 68 / 10 = 6.8
+
+    # Step 1 (two dynamic microbatches with unequal denominators: 2 and 8).
+    trainer.fwd_bwd(mb_small)
+    trainer.fwd_bwd(mb_large)
+    trainer.update()
+    # Step 2 flushes Step 1's buffered train metrics.
+    trainer.fwd_bwd(mb_small)
+    trainer.update()
+    train_metrics = trainer.get_metrics()
+    np.testing.assert_allclose(
+        train_metrics.scalar_metrics['loss'],
+        expected_weighted_loss,
+        rtol=1e-5,
+    )
+    np.testing.assert_allclose(
+        train_metrics.scalar_metrics['loss'],
+        train_metrics.scalar_metrics['unreduced_pg_loss'],
+        rtol=1e-5,
+    )
+
+    with trainer.eval_context():
+      trainer.eval_step(mb_small)
+      trainer.eval_step(mb_large)
+    eval_metrics = trainer.get_metrics()
+    np.testing.assert_allclose(
+        eval_metrics.scalar_metrics['loss'],
+        expected_weighted_loss,
+        rtol=1e-5,
+    )
+    np.testing.assert_allclose(
+        eval_metrics.scalar_metrics['loss'],
+        eval_metrics.scalar_metrics['unreduced_pg_loss'],
+        rtol=1e-5,
+    )
+
+  def test_metrics_buffer_rejects_mixed_metric_kinds(self):
+    weighted = sft_utils.WeightedMetric(jnp.array(1.0), jnp.array(1.0))
+    buffer = peft_trainer_v2.MetricsBuffer(
+        step=0,
+        losses=[jnp.array(1.0), weighted],
+    )
+    with self.assertRaisesRegex(TypeError, 'must not mix'):
+      _ = buffer.loss
+
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(
+        model,
+        optax.sgd(1e-3),
+        peft_trainer_v2.TrainingConfig(eval_every_n_steps=100, max_steps=100),
+    )
+    weighted_buffer = trainer._buffer_metrics(
+        None,
+        loss=weighted,
+        step=0,
+    )
+    with self.assertRaisesRegex(TypeError, 'loss values must not mix'):
+      trainer._buffer_metrics(
+          weighted_buffer,
+          loss=jnp.array(1.0),
+          step=0,
+      )
+
+    buffer = trainer._buffer_metrics(
+        None,
+        loss=jnp.array(1.0),
+        step=0,
+        additional_metrics={'metric': (jnp.array(1.0), np.mean)},
+    )
+    with self.assertRaisesRegex(TypeError, "additional metric 'metric'"):
+      trainer._buffer_metrics(
+          buffer,
+          loss=jnp.array(1.0),
+          step=0,
+          additional_metrics={
+              'metric': (weighted, sft_utils.weighted_metric_mean),
+          },
+      )
+
+    mixed_buffer = peft_trainer_v2.MetricsBuffer(
+        step=0,
+        losses=[jnp.array(1.0)],
+        additional_metrics={
+            'metric': ([weighted, jnp.array(1.0)], np.mean),
+        },
+    )
+    with self.assertRaisesRegex(TypeError, 'metrics must not mix'):
+      trainer._write_metrics(mixed_buffer)
+
+  def test_empty_eval_dataset(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer._run_eval([])
+    self.assertIsNone(trainer._buffered_eval_metrics)
+
+  def test_get_metrics(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=10)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    # Before any steps, get_metrics returns empty buffer with id=-1
+    self.assertEqual(trainer.get_metrics().id, -1)
+
+    # Run evaluation inside eval_context to buffer and write eval metrics immediately
+    eval_example = next(iter(self.eval_ds))
+    with trainer.eval_context():
+      trainer.eval_step(eval_example)
+
+    metrics = trainer.get_metrics()
+    self.assertEqual(metrics.id, 0)
+    self.assertEqual(metrics.mode, 'eval')
+    self.assertIn('loss', metrics.scalar_metrics)
+    self.assertGreater(metrics.scalar_metrics['loss'], 0)  # pyrefly: ignore[no-matching-overload]
+
+    # After calling get_metrics, the buffer should be cleared
+    self.assertEqual(trainer.get_metrics().id, -1)
+
+    # Also check training metrics during train loop
+    trainer.train(self.train_ds)
+    train_metrics = trainer.get_metrics()
+    self.assertNotEqual(train_metrics.id, -1)
+    self.assertEqual(train_metrics.mode, 'train')
+    self.assertIn('loss', train_metrics.scalar_metrics)
+    self.assertIn('grad_norm', train_metrics.scalar_metrics)
+    self.assertGreater(train_metrics.scalar_metrics['loss'], 0)  # pyrefly: ignore[no-matching-overload]
+
+  def test_injected_params(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+
+    learning_rate_scheduler = optax.constant_schedule(TEST_LEARNING_RATE)
+    optimizer = optax.inject_hyperparams(optax.sgd)(
+        momentum=0.001,
+        learning_rate=learning_rate_scheduler,
+    )
+
+    trainer = peft_trainer_v2.PeftTrainer(model, optimizer, config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(self.train_ds, self.eval_ds)
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),  # pyrefly: ignore[missing-attribute]
+        TEST_LEARNING_RATE,
+    )
+
+  def test_injected_params_with_chained_transformation(self):
+    """Learning rate is logged when a transformation precedes the optimizer."""
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+
+    # `clip_by_global_norm` keeps an empty state and runs ahead of the
+    # optimizer, so the learning rate lives in the second chain part.
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.inject_hyperparams(optax.sgd)(
+            learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
+        ),
+    )
+
+    trainer = peft_trainer_v2.PeftTrainer(model, optimizer, config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(self.train_ds, self.eval_ds)
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),  # pyrefly: ignore[missing-attribute]
+        TEST_LEARNING_RATE,
+    )
+
+  @parameterized.named_parameters(
+      ('no_chain', _injected_sgd, TEST_LEARNING_RATE),
+      (
+          'stateless_chain_part',
+          lambda: optax.chain(optax.clip_by_global_norm(1.0), _injected_sgd()),
+          TEST_LEARNING_RATE,
+      ),
+      (
+          'stateful_chain_part',
+          lambda: optax.chain(optax.scale_by_adam(), _injected_sgd()),
+          TEST_LEARNING_RATE,
+      ),
+      (
+          'injected_chain_part_without_learning_rate',
+          lambda: optax.chain(
+              optax.inject_hyperparams(optax.clip_by_global_norm)(max_norm=1.0),
+              _injected_sgd(),
+          ),
+          TEST_LEARNING_RATE,
+      ),
+      (
+          'multisteps_chain_part',
+          lambda: optax.MultiSteps(
+              optax.chain(optax.clip_by_global_norm(1.0), _injected_sgd()),
+              every_k_schedule=4,
+          ),
+          TEST_LEARNING_RATE,
+      ),
+      ('not_injected', lambda: optax.sgd(TEST_LEARNING_RATE), None),
+      ('not_injected_adam', lambda: optax.adam(TEST_LEARNING_RATE), None),
+      (
+          'injected_without_learning_rate',
+          optax.inject_hyperparams(optax.adafactor),
+          None,
+      ),
+      (
+          'not_injected_chain',
+          lambda: optax.chain(
+              optax.clip_by_global_norm(1.0), optax.sgd(TEST_LEARNING_RATE)
+          ),
+          None,
+      ),
+  )
+  def test_try_get_learning_rate(self, make_optimizer, expected):
+    """The learning rate is found in any chain part, or reported as absent."""
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, make_optimizer(), config)
+
+    learning_rate: Any = trainer._try_get_learning_rate()  # pylint: disable=protected-access
+
+    if expected is None:
+      self.assertIsNone(learning_rate)
+    else:
+      self.assertIsNotNone(learning_rate)
+      self.assertAlmostEqual(float(learning_rate), expected)
+
+
+class OptimizerMemoryTest(parameterized.TestCase):
+  """Optimizer-state dtype preservation across v2 update paths."""
+
+  def _bf16_model(self):
+    return nnx.Linear(
+        in_features=4,
+        out_features=2,
+        rngs=nnx.Rngs(0),
+        param_dtype=jnp.bfloat16,
+    )
+
+  def _opt_state_dtypes(self, trainer):
+    return jax.tree_util.tree_map(
+        lambda value: value[...].dtype,
+        nnx.state(trainer.optimizer, nnx.optimizer.OptState),
+        is_leaf=lambda value: isinstance(value, nnx.Variable),
+    )
+
+  def _get_mu_nu_dtypes(self, trainer):
+    dtypes = self._opt_state_dtypes(trainer)
+    mu_dtypes = []
+    nu_dtypes = []
+
+    def _find(tree):
+      if isinstance(tree, (dict, nnx.State)):
+        if 'mu' in tree and 'nu' in tree:
+          mu_dtypes.extend(jax.tree_util.tree_leaves(tree['mu']))
+          nu_dtypes.extend(jax.tree_util.tree_leaves(tree['nu']))
+        else:
+          for v in tree.values():
+            _find(v)
+      elif isinstance(tree, (list, tuple)):
+        for v in tree:
+          _find(v)
+
+    _find(dtypes)
+    return mu_dtypes, nu_dtypes
+
+  def _run_update(self, trainer, inputs, gradient_accumulation_steps):
+    if gradient_accumulation_steps == 1:
+      trainer.train_step(inputs)
+      return
+
+    for _ in range(gradient_accumulation_steps):
+      trainer.fwd_bwd(inputs)
+    trainer.update()
+
+  @parameterized.product(
+      optimizer_kind=('direct', 'injected'),
+      gradient_accumulation_steps=(1, 2),
+  )
+  def test_preserves_bf16_optimizer_state_dtypes_under_jit(
+      self, optimizer_kind, gradient_accumulation_steps
+  ):
+    """Jitted fused and split updates preserve optimizer-state dtypes."""
+    model = self._bf16_model()
+    if optimizer_kind == 'direct':
+      tx = optax.adamw(
+          lambda _: jnp.asarray(0.1, dtype=jnp.float32),
+          mu_dtype=jnp.bfloat16,
+      )
+    else:
+      tx = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(  # pyrefly: ignore[bad-argument-type]
+          learning_rate=0.1
+      )
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+    )
+    trainer = peft_trainer_v2.PeftTrainer(model, tx, config)
+    trainer.with_loss_fn(lambda m, x, y: jnp.sum((m(x) - y) ** 2))
+
+    initial_opt_state_dtypes = self._opt_state_dtypes(trainer)
+    initial_mu_dtypes, initial_nu_dtypes = self._get_mu_nu_dtypes(trainer)
+    self.assertNotEmpty(initial_mu_dtypes)
+    self.assertNotEmpty(initial_nu_dtypes)
+    self.assertEqual(set(initial_mu_dtypes), {jnp.dtype(jnp.bfloat16)})
+    self.assertEqual(set(initial_nu_dtypes), {jnp.dtype(jnp.bfloat16)})
+
+    initial_params = jax.tree_util.tree_map(
+        lambda value: jnp.copy(value[...]),
+        nnx.state(model, nnx.Param),
+        is_leaf=lambda value: isinstance(value, nnx.Variable),
+    )
+    inputs = {
+        'x': jnp.ones((2, 4), dtype=jnp.bfloat16),
+        'y': jnp.ones((2, 2), dtype=jnp.bfloat16),
+    }
+
+    self._run_update(trainer, inputs, gradient_accumulation_steps)
+
+    self.assertEqual(self._opt_state_dtypes(trainer), initial_opt_state_dtypes)
+    final_mu_dtypes, final_nu_dtypes = self._get_mu_nu_dtypes(trainer)
+    self.assertEqual(set(final_mu_dtypes), {jnp.dtype(jnp.bfloat16)})
+    self.assertEqual(set(final_nu_dtypes), {jnp.dtype(jnp.bfloat16)})
+
+    updated_params = nnx.state(model, nnx.Param)
+    self.assertTrue(
+        any(
+            not np.array_equal(before, after[...])
+            for before, after in zip(
+                jax.tree_util.tree_leaves(initial_params),
+                jax.tree_util.tree_leaves(
+                    updated_params,
+                    is_leaf=lambda value: isinstance(value, nnx.Variable),
+                ),
+            )
+        )
+    )
+    self.assertEqual(
+        trainer._last_update_grad_norm.dtype,  # pylint: disable=protected-access # pyrefly: ignore[missing-attribute]
+        jnp.float32,
+    )
+    self.assertEqual(float(trainer.grad_accumulator.denom[...]), 0.0)
+
+  def test_preserves_default_fp32_optimizer_state_dtypes_under_jit(self):
+    """The default f32 optimizer state remains f32."""
+    model = nnx.Linear(
+        in_features=4,
+        out_features=2,
+        rngs=nnx.Rngs(0),
+        param_dtype=jnp.float32,
+    )
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=100, max_steps=1)
+    trainer = peft_trainer_v2.PeftTrainer(
+        model,
+        optax.adamw(0.1),
+        config,
+    )
+    trainer.with_loss_fn(lambda m, x, y: jnp.sum((m(x) - y) ** 2))
+    initial_opt_state_dtypes = self._opt_state_dtypes(trainer)
+    initial_mu_dtypes, initial_nu_dtypes = self._get_mu_nu_dtypes(trainer)
+    self.assertNotEmpty(initial_mu_dtypes)
+    self.assertNotEmpty(initial_nu_dtypes)
+    self.assertEqual(set(initial_mu_dtypes), {jnp.dtype(jnp.float32)})
+    self.assertEqual(set(initial_nu_dtypes), {jnp.dtype(jnp.float32)})
+
+    self._run_update(
+        trainer,
+        {
+            'x': jnp.ones((2, 4), dtype=jnp.float32),
+            'y': jnp.ones((2, 2), dtype=jnp.float32),
+        },
+        gradient_accumulation_steps=1,
+    )
+
+    self.assertEqual(self._opt_state_dtypes(trainer), initial_opt_state_dtypes)
+    final_mu_dtypes, final_nu_dtypes = self._get_mu_nu_dtypes(trainer)
+    self.assertEqual(set(final_mu_dtypes), {jnp.dtype(jnp.float32)})
+    self.assertEqual(set(final_nu_dtypes), {jnp.dtype(jnp.float32)})
+
+    floating_dtypes = {
+        dtype
+        for dtype in jax.tree_util.tree_leaves(initial_opt_state_dtypes)
+        if jnp.issubdtype(dtype, jnp.floating)
+    }
+    self.assertEqual(floating_dtypes, {jnp.dtype(jnp.float32)})
+
+  def test_prepare_payload_clears_metadata(self):
+    @dataclasses.dataclass
+    class DummyPayload:
+      x: jax.Array
+      metadata: dict[str, Any]
+
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    payload = DummyPayload(
+        x=jnp.ones((2, 4)),
+        metadata={'lineage': 'ctx_123', 'trajectory_ids': ('t1', 't2')},
+    )
+    prepared = trainer._prepare_payload(payload)
+
+    self.assertEqual(prepared.metadata, {})
+    self.assertEqual(
+        payload.metadata,
+        {'lineage': 'ctx_123', 'trajectory_ids': ('t1', 't2')},
+    )
+
+
+class V1ParityTest(parameterized.TestCase):
+  """Parity tests for PeftTrainerV2 against PeftTrainer before the migration to v2 is fully done."""
+
+  def _make_trainer_v2(self, model, accum_steps=None, max_steps=4):
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=1,
+        max_steps=max_steps,
+        gradient_accumulation_steps=accum_steps,
+    )
+    trainer = peft_trainer_v2.PeftTrainer(
+        model, optax.sgd(TEST_LEARNING_RATE), config
+    )
+    return trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+  def _two_identical_models(self):
+    graphdef, state = nnx.split(
+        tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    )
+    state = jax.tree.map(lambda x: x.astype(jnp.float32), state)
+    return (
+        nnx.merge(graphdef, jax.tree.map(jnp.copy, state)),
+        nnx.merge(graphdef, jax.tree.map(jnp.copy, state)),
+    )
+
+  def _make_v1_trainer(self, model, accum_steps=None):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=1,
+        max_steps=1,
+        gradient_accumulation_steps=accum_steps,
+    )
+    trainer = peft_trainer.PeftTrainer(
+        model, optax.sgd(TEST_LEARNING_RATE), config
+    )
+    return trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+  def _assert_fp32_weights_close(self, weights_v1, weights_v2):
+    """Checks the scale-relative weight difference used by the debug run."""
+    max_relative_difference = 1e-6
+
+    def assert_leaf_close(path, v1, v2):
+      v1 = np.asarray(jax.device_get(v1))
+      v2 = np.asarray(jax.device_get(v2))
+      self.assertEqual(v1.dtype, np.dtype(np.float32), f'v1 dtype at {path}')
+      self.assertEqual(v2.dtype, np.dtype(np.float32), f'v2 dtype at {path}')
+      difference = float(np.max(np.abs(v1.astype(np.float64) - v2)))
+      scale = float(np.max(np.abs(v1.astype(np.float64))))
+      if scale == 0.0:
+        self.assertEqual(difference, 0.0, f'mismatch at zero leaf {path}')
+      else:
+        self.assertLessEqual(
+            difference / scale,
+            max_relative_difference,
+            f'weight difference exceeds tolerance at {path}',
+        )
+
+    jax.tree.map_with_path(assert_leaf_close, weights_v1, weights_v2)
+
+  def _assert_weights_changed(self, initial_weights, updated_weights):
+    initial_leaves = jax.tree_util.tree_leaves(jax.device_get(initial_weights))
+    updated_leaves = jax.tree_util.tree_leaves(jax.device_get(updated_weights))
+    self.assertTrue(
+        any(
+            np.any(np.asarray(initial) != np.asarray(updated))
+            for initial, updated in zip(initial_leaves, updated_leaves)
+        ),
+        'the optimizer update did not change any weight',
+    )
+
+  def test_fp32_single_step_parity_with_v1(self):
+    model_v1, model_fused = self._two_identical_models()
+    initial_weights = jax.tree.map(jnp.copy, nnx.state(model_v1, nnx.Param))
+    trainer_v1 = self._make_v1_trainer(model_v1)
+    trainer_fused = self._make_trainer_v2(model_fused, max_steps=1)
+    batch = dummy_datasets(batch_size=4)[0]
+
+    trainer_v1.train([batch])
+    trainer_fused.train([batch])
+
+    weights_v1 = nnx.state(model_v1, nnx.Param)
+    weights_fused = nnx.state(model_fused, nnx.Param)
+    self.assertEqual(trainer_v1.train_steps, 1)
+    self.assertEqual(trainer_fused.train_steps, 1)
+    self.assertEqual(float(trainer_v1.grad_accumulator.denom[...]), 0.0)
+    self.assertEqual(float(trainer_fused.grad_accumulator.denom[...]), 0.0)
+    self._assert_weights_changed(initial_weights, weights_v1)
+    self._assert_weights_changed(initial_weights, weights_fused)
+    self._assert_fp32_weights_close(weights_v1, weights_fused)
+    jax.tree.map_with_path(
+        tc.assert_close,
+        nnx.state(trainer_v1.optimizer),
+        nnx.state(trainer_fused.optimizer),
+    )
+    loss_v1 = trainer_v1.metrics_logger.get_metric('', 'loss', 'train')
+    loss_fused = trainer_fused.metrics_logger.get_metric('', 'loss', 'train')
+    np.testing.assert_allclose(loss_v1, loss_fused, atol=1e-5)
+
+  def test_fp32_multiple_step_parity_with_v1(self):
+    accum_steps = 4
+    batches = dummy_datasets(batch_size=4, repeat=2)[:accum_steps]
+    self.assertLen(batches, accum_steps)
+    model_v1, model_split = self._two_identical_models()
+    initial_weights = jax.tree.map(jnp.copy, nnx.state(model_v1, nnx.Param))
+    trainer_v1 = self._make_v1_trainer(model_v1, accum_steps=accum_steps)
+    trainer_split = self._make_trainer_v2(
+        model_split, accum_steps=accum_steps, max_steps=1
+    )
+
+    trainer_v1.train(batches)
+    for batch in batches:
+      trainer_split.fwd_bwd(batch)
+    self.assertEqual(trainer_split.train_steps, 0)
+    trainer_split.update()
+
+    weights_v1 = nnx.state(model_v1, nnx.Param)
+    weights_split = nnx.state(model_split, nnx.Param)
+    self.assertEqual(trainer_v1.train_steps, 1)
+    self.assertEqual(trainer_split.train_steps, 1)
+    self.assertEqual(float(trainer_v1.grad_accumulator.denom[...]), 0.0)
+    self.assertEqual(float(trainer_split.grad_accumulator.denom[...]), 0.0)
+    self._assert_weights_changed(initial_weights, weights_v1)
+    self._assert_weights_changed(initial_weights, weights_split)
+    self._assert_fp32_weights_close(weights_v1, weights_split)
+
+  def test_fused_unavailable_when_accumulating(self):
+    model, _ = self._two_identical_models()
+    trainer = self._make_trainer_v2(model, accum_steps=2)
+    trainer.jit_fwd_bwd_update_and_eval_step()
+    self.assertIsNone(trainer._jitted_train_step_fn)
+    with self.assertRaisesRegex(ValueError, 'one micro-batch per update'):
+      trainer.train_step(dummy_datasets(batch_size=4)[0])
+
+  def test_train_uses_fused_path_at_depth1(self):
+    """`train()` must route through the fused step, not fwd_bwd + update."""
+    model, _ = self._two_identical_models()
+    trainer = self._make_trainer_v2(model)
+    with mock.patch.object(
+        trainer, 'train_step', wraps=trainer.train_step
+    ) as fused, mock.patch.object(
+        trainer, 'update', wraps=trainer.update
+    ) as split:
+      trainer.train(dummy_datasets(batch_size=4))
+    self.assertGreater(fused.call_count, 0)
+    split.assert_not_called()
+    self.assertFalse(trainer.grad_accumulator.persistent)
+
+  def test_split_fwd_bwd_and_update_at_depth1_with_cached_nnx_graph(self):
+    """Split fwd_bwd() + update() works at depth 1 with cache_nnx_graph=True."""
+    model_fused, model_split = self._two_identical_models()
+    trainer_fused = self._make_trainer_v2(model_fused, max_steps=2)
+    trainer_split = self._make_trainer_v2(model_split, max_steps=2)
+    batches = dummy_datasets(batch_size=4)[:2]
+
+    self.assertFalse(trainer_split.grad_accumulator.persistent)
+    for batch in batches:
+      trainer_fused.train_step(batch)
+      trainer_split.fwd_bwd(batch)
+      trainer_split.update()
+
+    self.assertTrue(trainer_split.grad_accumulator.persistent)
+    self.assertEqual(trainer_fused.train_steps, 2)
+    self.assertEqual(trainer_split.train_steps, 2)
+    self.assertEqual(float(trainer_split.grad_accumulator.denom[...]), 0.0)
+    self._assert_fp32_weights_close(
+        nnx.state(model_fused, nnx.Param),
+        nnx.state(model_split, nnx.Param),
+    )
+
+  def test_split_fwd_bwd_dynamic_microsteps_at_depth1_with_cached_nnx_graph(
+      self,
+  ):
+    """Dynamic sequence-packing microsteps work when grad_accum_steps == 1."""
+    model_accum, model_dynamic = self._two_identical_models()
+    trainer_accum = self._make_trainer_v2(
+        model_accum, accum_steps=2, max_steps=1
+    )
+    # Distributed RL with sequence packing sets gradient_accumulation_steps=1
+    # and max_seq_token_per_tpu=None on TrainingConfig while invoking fwd_bwd()
+    # a dynamic number of times per update().
+    trainer_dynamic = self._make_trainer_v2(
+        model_dynamic, accum_steps=1, max_steps=1
+    )
+    batches = dummy_datasets(batch_size=4)[:2]
+
+    for batch in batches:
+      trainer_accum.fwd_bwd(batch)
+      trainer_dynamic.fwd_bwd(batch)
+    trainer_accum.update()
+    trainer_dynamic.update()
+
+    self.assertTrue(trainer_dynamic.grad_accumulator.persistent)
+    self.assertEqual(trainer_dynamic.train_steps, 1)
+    self.assertEqual(float(trainer_dynamic.grad_accumulator.denom[...]), 0.0)
+    self._assert_fp32_weights_close(
+        nnx.state(model_accum, nnx.Param),
+        nnx.state(model_dynamic, nnx.Param),
+    )
+
+  def test_compile_with_none_dummy_data_is_noop(self):
+    model, _ = self._two_identical_models()
+    initial_weights = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+    trainer = self._make_trainer_v2(model, accum_steps=1)
+
+    trainer.compile(None)
+
+    self.assertIsNone(trainer._jitted_fwd_bwd_step_fn)
+    self.assertIsNone(trainer._jitted_update_step_fn)
+    self.assertIsNone(trainer._jitted_eval_step_fn)
+    self.assertEqual(trainer.train_steps, 0)
+    self._assert_fp32_weights_close(
+        initial_weights, nnx.state(model, nnx.Param)
+    )
+
+  def test_compile_with_dummy_batch_compiles_all_steps_without_mutating_state(
+      self,
+  ):
+    for accum_steps in (1, 2):
+      with self.subTest(accum_steps=accum_steps):
+        model, _ = self._two_identical_models()
+        initial_weights = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+        trainer = self._make_trainer_v2(model, accum_steps=accum_steps)
+        batch = dummy_datasets(batch_size=4)[0]
+
+        fwd_bwd_traces = 0
+        update_traces = 0
+
+        def traced_fwd_bwd(*args, _orig=trainer._fwd_bwd_step, **kwargs):
+          nonlocal fwd_bwd_traces
+          fwd_bwd_traces += 1
+          return _orig(*args, **kwargs)
+
+        def traced_update(*args, _orig=trainer._update_step, **kwargs):
+          nonlocal update_traces
+          update_traces += 1
+          return _orig(*args, **kwargs)
+
+        with (
+            mock.patch.object(
+                trainer, 'create_fwd_bwd_step_fn', return_value=traced_fwd_bwd
+            ),
+            mock.patch.object(
+                trainer, 'create_update_step_fn', return_value=traced_update
+            ),
+        ):
+          trainer.compile(batch)
+          self.assertEqual(fwd_bwd_traces, 1)
+          self.assertEqual(update_traces, 1)
+
+          self.assertIsNotNone(trainer._jitted_fwd_bwd_step_fn)
+          self.assertIsNotNone(trainer._jitted_update_step_fn)
+          self.assertIsNotNone(trainer._jitted_eval_step_fn)
+          self.assertTrue(trainer.grad_accumulator.persistent)
+          self.assertTrue(
+              jax.tree_util.tree_leaves(trainer.grad_accumulator.grads)
+          )
+          self.assertEqual(trainer.train_steps, 0)
+          self.assertEqual(trainer.iter_steps, 0)
+          self._assert_fp32_weights_close(
+              initial_weights, nnx.state(model, nnx.Param)
+          )
+
+          # Verify split fwd_bwd + update executes cleanly after AOT compile
+          # without re-tracing either step function.
+          for _ in range(accum_steps):
+            trainer.fwd_bwd(batch)
+          trainer.update()
+          self.assertEqual(fwd_bwd_traces, 1)
+          self.assertEqual(update_traces, 1)
+        self.assertEqual(trainer.train_steps, 1)
+        self._assert_weights_changed(
+            initial_weights, nnx.state(model, nnx.Param)
+        )
+
+  def test_compile_expands_routed_experts_placeholder_from_model_config(
+      self,
+  ):
+    @dataclasses.dataclass(kw_only=True)
+    class _MoEModelConfig(tc.ModelConfig):
+      num_experts_per_tok: int = 2
+
+    model, _ = self._two_identical_models()
+    model.config = _MoEModelConfig(num_layers=3, num_experts_per_tok=2)
+    trainer = self._make_trainer_v2(model, accum_steps=1)
+    dummy = peft_trainer_v2.datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((2, 4), dtype=np.int32),
+        prompt_mask=np.zeros((2, 4), dtype=np.float32),
+        completion_ids=np.zeros((2, 6), dtype=np.int32),
+        completion_mask=np.zeros((2, 6), dtype=np.float32),
+        advantages=np.zeros((2, 6), dtype=np.float32),
+        routed_experts=np.empty((2, 10, 0, 0), dtype=np.int16),
+    )
+
+    prepared: list[Any] = []
+
+    def _capture_prepare(payload):
+      prepared.append(payload)
+      return dummy_datasets(batch_size=2)[0]
+
+    with mock.patch.object(
+        trainer, '_prepare_payload', side_effect=_capture_prepare
+    ):
+      trainer.compile(dummy)
+
+    self.assertLen(prepared, 1)
+    self.assertIsNotNone(prepared[0].routed_experts)
+    self.assertEqual(prepared[0].routed_experts.shape, (2, 10, 3, 2))
+    self.assertEqual(prepared[0].routed_experts.dtype, np.int16)
+
+  def test_compile_encodes_routed_experts_placeholder_via_metadata_encode_fn(
+      self,
+  ):
+    @dataclasses.dataclass(kw_only=True)
+    class _MoEModelConfig(tc.ModelConfig):
+      num_experts: int = 8
+      num_experts_per_tok: int = 2
+
+    model, _ = self._two_identical_models()
+    model.config = _MoEModelConfig(
+        num_layers=3, num_experts=8, num_experts_per_tok=2
+    )
+    trainer = self._make_trainer_v2(model, accum_steps=1)
+
+    seen_encode_calls: list[tuple[tuple[int, ...], np.dtype, int | None]] = []
+
+    def _encode_fn(
+        arr: np.ndarray, *, num_experts: int | None = None
+    ) -> np.ndarray:
+      seen_encode_calls.append((arr.shape, arr.dtype, num_experts))
+      return arr.astype(np.uint8)
+
+    dummy = peft_trainer_v2.datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((2, 4), dtype=np.int32),
+        prompt_mask=np.zeros((2, 4), dtype=np.float32),
+        completion_ids=np.zeros((2, 6), dtype=np.int32),
+        completion_mask=np.zeros((2, 6), dtype=np.float32),
+        advantages=np.zeros((2, 6), dtype=np.float32),
+        routed_experts=np.empty((2, 10, 0, 0), dtype=np.int16),
+        metadata={'routed_experts_encode_fn': _encode_fn, 'keep_key': 42},
+    )
+
+    prepared: list[Any] = []
+
+    def _capture_prepare(payload):
+      prepared.append(payload)
+      return dummy_datasets(batch_size=2)[0]
+
+    with mock.patch.object(
+        trainer, '_prepare_payload', side_effect=_capture_prepare
+    ):
+      trainer.compile(dummy)
+
+    self.assertEqual(
+        seen_encode_calls, [((2, 10, 3, 2), np.dtype(np.int16), 8)]
+    )
+    self.assertLen(prepared, 1)
+    self.assertIsNotNone(prepared[0].routed_experts)
+    self.assertEqual(prepared[0].routed_experts.shape, (2, 10, 3, 2))
+    self.assertEqual(prepared[0].routed_experts.dtype, np.uint8)
+    self.assertNotIn('routed_experts_encode_fn', prepared[0].metadata)
+    self.assertEqual(prepared[0].metadata['keep_key'], 42)
+    self.assertIn('routed_experts_encode_fn', dummy.metadata)
+
+
+class GradientAccumulatorTest(parameterized.TestCase):
+
+  def test_gradient_accumulator_param_dtypes_resolution(self):
+    rngs = nnx.Rngs(0)
+    model = nnx.Linear(
+        in_features=4, out_features=2, rngs=rngs, param_dtype=jnp.bfloat16
+    )
+    acc = peft_trainer_v2.GradientAccumulator(model, nnx.Param)
+    param_dtypes = jax.tree_util.tree_leaves(acc._param_dtypes)
+    self.assertNotEmpty(param_dtypes)
+    for dt in param_dtypes:
+      self.assertEqual(dt, jnp.bfloat16)
+
+
+if __name__ == '__main__':
+  absltest.main()

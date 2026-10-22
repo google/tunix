@@ -33,7 +33,7 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
-from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.rl import reshard
 from tunix.rl import utils as rl_utils
 

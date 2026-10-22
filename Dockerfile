@@ -105,7 +105,7 @@ COPY . .
 
 # Compile proto buffer for discovery service, this has to be the last step.
 RUN uv pip install grpcio-tools
-RUN cd /app && find tunix/experimental/distributed -name "*.proto" -exec python -m grpc_tools.protoc -I/app --python_out=/app --grpc_python_out=/app {} +
+RUN cd /app && find tunix/dist_rl/distributed -name "*.proto" -exec python -m grpc_tools.protoc -I/app --python_out=/app --grpc_python_out=/app {} +
 
 # Install Tunix in editable mode
 RUN uv pip install --no-deps -e .

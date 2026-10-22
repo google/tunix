@@ -1,0 +1,545 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the tpu-inference project
+"""Unit tests for RLVllmSampler dynamic duck typing and weight sync."""
+
+import asyncio
+import unittest
+from types import SimpleNamespace
+from typing import Any
+from unittest import mock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import numpy as np
+
+# Ensure transformers (which sets up GOOGLE_INTERNAL_PACKAGE_PATH_version monkeypatch) is loaded
+import sys
+import importlib.metadata
+try:
+    import transformers  # pylint: disable=g-import-not-at-top
+except ImportError:
+    pass
+
+_orig_meta_version = importlib.metadata.version
+def _version_shim(pkg):
+    if pkg == "transformers":
+        return "5.0.0"
+    return _orig_meta_version(pkg)
+importlib.metadata.version = _version_shim
+
+try:
+  import openai_harmony  # pylint: disable=g-import-not-at-top,unused-import
+except ImportError:
+  # openai_harmony is not installed in every environment this test runs in,
+  # so stub it only when it is missing; where it is installed, a stub would
+  # shadow the real package. vLLM uses openai_harmony.Message as a pydantic
+  # field type (ChatCompletionMessageParam), so the stub's Message must be a
+  # type pydantic can build a schema for. A MagicMock attribute makes
+  # importing vLLM fail with PydanticSchemaGenerationError.
+  _openai_harmony_stub = MagicMock()
+  _openai_harmony_stub.Message = Any
+  sys.modules["openai_harmony"] = _openai_harmony_stub
+
+for _name in (
+    "xgrammar",
+    "xgrammar.structural_tag",
+    "xgrammar.openai_tool_call_schema",
+):
+  try:
+    importlib.import_module(_name)
+  except ImportError:
+    sys.modules[_name] = MagicMock()
+
+# Import before vllm so vLLM patches it directly instead of adding an import
+# hook, which breaks under TAP's import profiler.
+importlib.import_module("torch._inductor.pattern_matcher")
+
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.async_llm_engine import AsyncLLMEngine  # pylint: disable=g-import-not-at-top
+
+from tunix.dist_rl.rollout.vllm_sampler_v2 import RLVllmSampler
+
+
+class TestRLVllmSamplerDuckTyping(unittest.TestCase):
+    """Tests dynamic attribute handling of arbitrary request objects and dicts."""
+
+    def test_duck_typed_request_processing(self):
+        """Verifies that sample() handles raw objects with attributes or dicts."""
+        SimpleNamespace(
+            prompt="Solve 2+2",
+            request_id="req_attr_1",
+            sampling_params=SimpleNamespace(
+                max_tokens=64,
+                temperature=0.5,
+                top_p=0.9,
+                top_k=-1,
+                stop_sequences=[],
+                return_logprobs=True,
+            ),
+        )
+
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+        self.assertIsNotNone(sampler)
+        self.assertEqual(sampler.engine_args.model, "Qwen/Qwen2.5-1.5B")
+
+
+class TestRLVllmSamplerInference(unittest.TestCase):
+    """Tests sampling batch processing, text decoding, and logprob conversion."""
+
+    def test_sample_with_mocked_engine(self):
+        """Verifies full sample() execution flow with a mocked AsyncLLMEngine."""
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+
+        # Construct mock AsyncLLMEngine
+        mock_engine = MagicMock()
+
+        async def mock_generate_stream(prompt, sampling_params, request_id):
+            mock_output_choice = SimpleNamespace(
+                text=f"Completion for {request_id}",
+                token_ids=[101, 202, 303],
+                cumulative_logprob=-0.45,
+                finish_reason="stop",
+                logprobs=[{
+                    101: SimpleNamespace(logprob=-0.1)
+                }, {
+                    202: SimpleNamespace(logprob=-0.25)
+                }, {
+                    303: SimpleNamespace(logprob=-0.1)
+                }],
+            )
+            step_out = SimpleNamespace(outputs=[mock_output_choice])
+            yield step_out
+
+        mock_engine.generate.side_effect = mock_generate_stream
+        sampler._engine = mock_engine
+        sampler._is_running = True
+
+        async def run_sample_test():
+            reqs = [
+                SimpleNamespace(
+                    prompt="What is GRPO?",
+                    request_id="req_001",
+                    sampling_params=SimpleNamespace(max_tokens=64,
+                                                    temperature=0.7,
+                                                    top_p=0.9,
+                                                    return_logprobs=True),
+                )
+            ]
+            results = await sampler.sample(reqs)
+            self.assertEqual(len(results), 1)
+            res = results[0]
+            self.assertEqual(res.request_id, "req_001")
+            self.assertEqual(res.text, "Completion for req_001")
+            self.assertTrue(
+                np.array_equal(res.token_ids,
+                               np.array([101, 202, 303], dtype=np.int32)))
+            self.assertIsNotNone(res.logprobs)
+            self.assertAlmostEqual(res.cumulative_logprob, -0.45)
+            self.assertTrue(hasattr(res, "routed_experts"))
+            self.assertIsNone(res.error)
+
+        asyncio.run(run_sample_test())
+
+    def test_sample_raw_string_mode(self):
+        """Verifies sampling when prompt lists are raw strings."""
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+
+        mock_engine = MagicMock()
+
+        async def mock_generate_stream(prompt, sampling_params, request_id):
+            yield SimpleNamespace(outputs=[
+                SimpleNamespace(text="Output text",
+                                token_ids=[1, 2],
+                                cumulative_logprob=-0.1,
+                                finish_reason="stop",
+                                logprobs=None)
+            ])
+
+        mock_engine.generate.side_effect = mock_generate_stream
+        sampler._engine = mock_engine
+        sampler._is_running = True
+
+        async def run_raw_test():
+            texts = await sampler.sample(
+                ["Prompt string 1", "Prompt string 2"], max_tokens=16)
+            self.assertEqual(len(texts), 2)
+            self.assertEqual(texts[0], "Output text")
+            self.assertEqual(texts[1], "Output text")
+
+        asyncio.run(run_raw_test())
+
+    def test_sample_error_resilience(self):
+        """Verifies error isolation when an individual generator stream raises an exception."""
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+
+        mock_engine = MagicMock()
+
+        async def mock_failing_stream(prompt, sampling_params, request_id):
+            raise RuntimeError("OOM on sequence generation")
+            yield None
+
+        mock_engine.generate.side_effect = mock_failing_stream
+        sampler._engine = mock_engine
+        sampler._is_running = True
+
+        async def run_err_test():
+            reqs = [
+                SimpleNamespace(prompt="Test error prompt",
+                                request_id="err_req",
+                                sampling_params=None)
+            ]
+            results = await sampler.sample(reqs)
+            self.assertEqual(len(results), 1)
+            res = results[0]
+            self.assertIsNotNone(res.error)
+            self.assertEqual(res.error.error_type, "RuntimeError")
+            self.assertIn("OOM", res.error.message)
+            self.assertTrue(res.error.retryable)
+
+        asyncio.run(run_err_test())
+
+
+class TestRLVllmSamplerWeightSync(unittest.TestCase):
+    """Tests RLVllmSampler weight synchronization with duck-typed requests."""
+
+    @patch(
+        "tunix.dist_rl.rollout.vllm_sampler_v2.RLVllmSampler._call_worker_method"
+    )
+    def test_weight_sync_calls_tpu_worker_apis(self, mock_call_worker_method):
+
+        mock_call_worker_method.return_value = []
+
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B",
+                               tensor_parallel_size=2)
+        sampler = RLVllmSampler(engine_args=args)
+
+        mock_engine = MagicMock()
+        mock_engine.pause_background_loop = AsyncMock()
+        mock_engine.resume_background_loop = AsyncMock()
+        mock_engine.reset_prefix_cache = AsyncMock()
+        sampler._engine = mock_engine
+        sampler._is_running = True
+
+        async def run_sync_test():
+            req_pre = SimpleNamespace(
+                model_path="Qwen/Qwen2.5-1.5B",
+                controller_id="ctrl_0",
+                policy_version=12,
+                req_id="transfer_99",
+            )
+            self.assertEqual(await sampler.get_transfer_status("transfer_99"),
+                             "MISSING")
+
+            await sampler.pre_weight_sync(req_pre)
+            mock_engine.pause_background_loop.assert_called_once()
+            mock_call_worker_method.assert_called_once_with(
+                "start_weight_update", free_kv_cache=False)
+            self.assertEqual(await sampler.get_transfer_status("transfer_99"),
+                             "IN_PROGRESS")
+
+            mock_call_worker_method.reset_mock()
+            req_sync = {"extra_config": {"dma_channel": 1}}
+            await sampler.weight_sync(req_sync)
+            mock_call_worker_method.assert_called_once_with(
+                "update_weights", {"dma_channel": 1})
+
+            mock_call_worker_method.reset_mock()
+            req_post = SimpleNamespace(req_id="transfer_99")
+            await sampler.post_weight_sync(req_post)
+            mock_call_worker_method.assert_called_once_with(
+                "finish_weight_update")
+            mock_engine.reset_prefix_cache.assert_called_once()
+            mock_engine.resume_background_loop.assert_called_once()
+            self.assertEqual(await sampler.get_transfer_status("transfer_99"),
+                             "SUCCESS")
+
+            mock_call_worker_method.reset_mock()
+            await sampler.pre_weight_sync(req_pre, free_kv_cache=True)
+            mock_call_worker_method.assert_called_once_with(
+                "start_weight_update", free_kv_cache=True)
+
+        asyncio.run(run_sync_test())
+
+    def test_get_weight_sync_metadata(self):
+        """Verifies get_weight_sync_metadata structure."""
+
+        async def run_test():
+            args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B",
+                                   tensor_parallel_size=4)
+            sampler = RLVllmSampler(engine_args=args)
+
+            metadata = await sampler.get_weight_sync_metadata()
+            expected_sharding = {
+                "tensor_parallel_size": 4,
+                "data_parallel_size": 1,
+                "expert_parallel_size": 1,
+            }
+            self.assertEqual(metadata["sharding"], expected_sharding)
+            self.assertEqual(metadata["model_path"], "Qwen/Qwen2.5-1.5B")
+            self.assertIn("policy_version", metadata)
+
+        asyncio.run(run_test())
+
+    def test_pause_resume_and_clear_cache(self):
+        """Verifies engine background loop control and prefix cache clearing."""
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+        mock_engine = MagicMock()
+        mock_engine.pause_background_loop = AsyncMock()
+        mock_engine.resume_background_loop = AsyncMock()
+        mock_engine.reset_prefix_cache = AsyncMock()
+        sampler._engine = mock_engine
+
+        async def run_lifecycle_test():
+            await sampler.pause()
+            self.assertTrue(sampler._is_paused)
+            mock_engine.pause_background_loop.assert_called_once()
+
+            await sampler._clear_prefix_cache()
+            mock_engine.reset_prefix_cache.assert_called_once()
+
+            await sampler.resume()
+            self.assertFalse(sampler._is_paused)
+            mock_engine.resume_background_loop.assert_called_once()
+
+        asyncio.run(run_lifecycle_test())
+
+    @patch("tunix.dist_rl.rollout.vllm_sampler_v2."
+           "RLVllmSampler._call_worker_method")
+    def test_raiden_h2d_forwards_uuid(self, mock_call_worker_method):
+        """Verifies raiden_h2d threads the transfer generation to the worker."""
+        mock_call_worker_method.return_value = []
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+
+        async def run_test():
+            await sampler.raiden_h2d(uuid=123)
+            mock_call_worker_method.assert_called_once_with("raiden_h2d",
+                                                            uuid=123)
+
+        asyncio.run(run_test())
+
+    @patch("tunix.dist_rl.rollout.vllm_sampler_v2."
+           "RLVllmSampler._call_worker_method")
+    def test_raiden_h2d_defaults_uuid_to_none(self, mock_call_worker_method):
+        """Omitting uuid still reaches the worker, which waits untargeted."""
+        mock_call_worker_method.return_value = []
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+
+        async def run_test():
+            await sampler.raiden_h2d()
+            mock_call_worker_method.assert_called_once_with("raiden_h2d",
+                                                            uuid=None)
+
+        asyncio.run(run_test())
+
+    # pylint: disable=bad-indentation
+    @patch(
+        "tunix.dist_rl.rollout.vllm_sampler_v2"
+        ".RLVllmSampler._call_worker_method"
+    )
+    def test_partial_rollout_uses_pause_generation_keep_and_preserves_cache(
+        self, mock_call_worker_method
+    ):
+        mock_call_worker_method.return_value = []
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args, partial_rollout=True)
+
+        mock_engine = MagicMock()
+        mock_engine.pause_generation = AsyncMock()
+        mock_engine.resume_generation = AsyncMock()
+        mock_engine.reset_prefix_cache = AsyncMock()
+        sampler._engine = mock_engine
+        sampler._is_running = True
+
+        async def run_test():
+            req = SimpleNamespace(req_id="r_partial", policy_version=3)
+            await sampler.pre_weight_sync(req, free_kv_cache=False)
+            mock_engine.pause_generation.assert_awaited_once_with(
+                mode="keep", clear_cache=False
+            )
+            mock_engine.reset_prefix_cache.assert_not_awaited()
+
+            await sampler.post_weight_sync(req)
+            mock_engine.reset_prefix_cache.assert_not_awaited()
+            mock_engine.resume_generation.assert_awaited_once()
+
+        asyncio.run(run_test())
+
+    def test_build_vllm_params_forwards_cache_salt(self):
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args, partial_rollout=True)
+        req_params = SimpleNamespace(
+            max_tokens=32,
+            temperature=0.6,
+            cache_salt="policy_v4",
+        )
+        req = SimpleNamespace(sampling_params=req_params)
+        vllm_params = sampler._build_vllm_params(req, {})
+        self.assertEqual(getattr(vllm_params, "cache_salt", None), "policy_v4")
+
+    def test_build_vllm_params_forwards_routed_experts_prompt_start(self):
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+        req_params = SimpleNamespace(
+            max_tokens=32,
+            temperature=0.6,
+            routed_experts_prompt_start=48,
+        )
+        req = SimpleNamespace(sampling_params=req_params)
+        vllm_params = sampler._build_vllm_params(req, {})
+        self.assertEqual(
+            getattr(vllm_params, "routed_experts_prompt_start", 0), 48
+        )
+
+    def test_build_vllm_params_detokenizes_by_default(self):
+        """Tunix SamplingParams carry no detokenize field; text must still be returned."""
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+        req = SimpleNamespace(
+            sampling_params=SimpleNamespace(max_tokens=32, temperature=0.6)
+        )
+        vllm_params = sampler._build_vllm_params(req, {})
+        self.assertTrue(vllm_params.detokenize)
+
+    def test_build_vllm_params_detokenize_opt_out_via_sampling_params(self):
+        """An explicit detokenize=False from sampling_params is honored."""
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+        req = SimpleNamespace(
+            sampling_params=SimpleNamespace(
+                max_tokens=32, temperature=0.6, detokenize=False
+            )
+        )
+        vllm_params = sampler._build_vllm_params(req, {})
+        self.assertFalse(vllm_params.detokenize)
+
+    def test_build_vllm_params_detokenize_opt_out_via_kwargs(self):
+        """An explicit detokenize=False from kwargs is honored."""
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+        req = SimpleNamespace(
+            sampling_params=SimpleNamespace(max_tokens=32, temperature=0.6)
+        )
+        vllm_params = sampler._build_vllm_params(req, {"detokenize": False})
+        self.assertFalse(vllm_params.detokenize)
+
+    def test_build_vllm_params_sampling_params_overrides_kwargs(self):
+        """sampling_params.detokenize takes precedence over conflicting kwargs."""
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+        req = SimpleNamespace(
+            sampling_params=SimpleNamespace(
+                max_tokens=32, temperature=0.6, detokenize=False
+            )
+        )
+        vllm_params = sampler._build_vllm_params(req, {"detokenize": True})
+        self.assertFalse(vllm_params.detokenize)
+    # pylint: enable=bad-indentation
+
+
+# pylint: disable=bad-indentation
+class TestRLVllmSamplerLogStats(unittest.TestCase):
+    """Tests the periodic flush of vLLM engine stats while the sampler runs."""
+
+    def setUp(self):
+        super().setUp()
+        interval_patcher = patch("vllm.envs.VLLM_LOG_STATS_INTERVAL", 0.01)
+        interval_patcher.start()
+        self.addCleanup(interval_patcher.stop)
+        self.mock_engine = mock.create_autospec(AsyncLLMEngine, instance=True)
+        engine_cls_patcher = patch(
+            "tunix.dist_rl.rollout.vllm_sampler_v2.AsyncLLMEngine"
+        )
+        mock_engine_cls = engine_cls_patcher.start()
+        self.addCleanup(engine_cls_patcher.stop)
+        mock_engine_cls.from_engine_args.return_value = self.mock_engine
+        self.sampler = RLVllmSampler(
+            engine_args=AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        )
+
+    def test_start_flushes_stats_until_stop(self):
+        """start() flushes engine stats periodically; stop() cancels it."""
+
+        async def run_test():
+            flushed = asyncio.Event()
+            self.mock_engine.do_log_stats.side_effect = flushed.set
+
+            await self.sampler.start()
+            await asyncio.wait_for(flushed.wait(), timeout=5)
+            log_stats_task = self.sampler._log_stats_task
+            await self.sampler.stop()
+
+            self.assertTrue(log_stats_task.cancelled())
+            self.assertIsNone(self.sampler._log_stats_task)
+
+        asyncio.run(run_test())
+
+    def test_failed_flush_is_logged_and_flushing_continues(self):
+        """A failing flush is logged and does not end the periodic flush."""
+
+        async def run_test():
+            recovered = asyncio.Event()
+            num_flushes = 0
+
+            def flaky_flush():
+                nonlocal num_flushes
+                num_flushes += 1
+                if num_flushes == 1:
+                    raise RuntimeError("stats unavailable")
+                recovered.set()
+
+            self.mock_engine.do_log_stats.side_effect = flaky_flush
+
+            with self.assertLogs(
+                RLVllmSampler.__module__, level="ERROR"
+            ) as logs:
+                await self.sampler.start()
+                await asyncio.wait_for(recovered.wait(), timeout=5)
+            await self.sampler.stop()
+
+            self.assertIsInstance(logs.records[0].exc_info[1], RuntimeError)
+
+        asyncio.run(run_test())
+
+    def test_stop_propagates_its_own_cancellation(self):
+        """Cancelling stop() is not swallowed, and a retried stop() finishes."""
+
+        async def run_test():
+            await self.sampler.start()
+            stop_task = asyncio.create_task(self.sampler.stop())
+            # Lets stop() run until it waits for the flush task to finish.
+            await asyncio.sleep(0)
+            self.assertTrue(self.sampler._log_stats_task.cancelling())
+            stop_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await stop_task
+
+            await self.sampler.stop()
+            self.assertFalse(self.sampler._is_running)
+            self.assertIsNone(self.sampler._log_stats_task)
+
+        asyncio.run(run_test())
+# pylint: enable=bad-indentation
+
+
+if __name__ == "__main__":
+    unittest.main()
+

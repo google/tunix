@@ -53,7 +53,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tunix/rl/_packing_ext.cc")
     install(TARGETS ${name} LIBRARY DESTINATION tunix/${package})
   endfunction()
 
-  tunix_add_nanobind_extension(experimental/worker _compression_ext)
+  tunix_add_nanobind_extension(dist_rl/worker _compression_ext)
   tunix_add_nanobind_extension(rl _packing_ext)
   tunix_add_nanobind_extension(utils _trajectory_logger_ext)
 endif()

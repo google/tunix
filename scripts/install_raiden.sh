@@ -56,19 +56,19 @@ compile_protos() {
   echo "Compiling distributed runtime gRPC protobuf definitions..."
   python3 -m pip install grpcio-tools
 
-  local proto_dir="${ROOT_DIR}/tunix/experimental/distributed"
+  local proto_dir="${ROOT_DIR}/tunix/dist_rl/distributed"
   if [[ ! -d "${proto_dir}" ]]; then
-    proto_dir="${ROOT_DIR}/../tunix/experimental/distributed"
+    proto_dir="${ROOT_DIR}/../tunix/dist_rl/distributed"
   fi
   local base_dir
   base_dir=$(cd "${proto_dir}/../../.." && pwd)
 
   (
     cd "${base_dir}"
-    find tunix/experimental/distributed -name "*.proto" -exec \
+    find tunix/dist_rl/distributed -name "*.proto" -exec \
       python3 -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. {} +
   )
-  python3 -c "import tunix.experimental.distributed.runtime.discovery.discovery_service_pb2"
+  python3 -c "import tunix.dist_rl.distributed.runtime.discovery.discovery_service_pb2"
   echo "Distributed protobuf definitions compiled and verified."
 }
 

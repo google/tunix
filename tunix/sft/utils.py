@@ -231,10 +231,10 @@ _WEIGHTED_METRIC_FIELDS = ("unreduced_sum", "denominator", "eps", "min_denom")
 def is_weighted_metric(value: Any) -> bool:
   """Structurally identifies an unreduced weighted metric.
 
-  `tunix.experimental.metrics.WeightedMetric` mirrors `WeightedMetric` field for
+  `tunix.dist_rl.metrics.WeightedMetric` mirrors `WeightedMetric` field for
   field without inheriting from it, so reducers have to accept both. Matching on
   the fields rather than the type covers either one without `sft.utils` taking a
-  dependency on `experimental`.
+  dependency on `dist_rl`.
 
   Args:
     value: Candidate metric value to inspect.

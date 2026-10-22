@@ -331,8 +331,8 @@ class PeftTrainer:
       raise ValueError(
           "resume_from_checkpoint_on_init=False is not supported in SFT"
           " PeftTrainer (v1). Checkpoint restoration control is only supported"
-          " in experimental PeftTrainer v2"
-          " (tunix.experimental.train.peft_trainer_v2)."
+          " in distributed RL PeftTrainer v2"
+          " (tunix.dist_rl.train.peft_trainer_v2)."
       )
 
     self.model = model

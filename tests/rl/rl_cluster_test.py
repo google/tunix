@@ -28,7 +28,7 @@ from jax import numpy as jnp
 import numpy as np
 import optax
 from transformers import tokenization_utils_base
-from tunix.experimental.orchestrator import rl_engine_interface
+from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.generate import mappings
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils

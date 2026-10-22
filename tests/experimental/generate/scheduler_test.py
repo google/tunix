@@ -21,7 +21,7 @@ import jax.numpy as jnp
 from tunix.experimental.generate import kv_cache_manager
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import scheduler
-from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.dist_rl.rollout import sampler as sampler_lib
 
 
 def _create_cache_config(

@@ -15,8 +15,8 @@
 """GSM8K "VTC" recipe: prompt template, reward, rollout metrics, raw parser.
 
 Single source of truth for the GSM8K GRPO recipe, shared by
-`examples/math_gsm8k/qwen3_grpo_demo.py` and the distributed experimental
-example (`tunix/experimental/examples/math_gsm8k_dist/gsm8k.py`) so the two
+`examples/math_gsm8k/qwen3_grpo_demo.py` and the distributed RL
+example (`tunix/dist_rl/examples/math_gsm8k_dist/gsm8k.py`) so the two
 cannot drift.
 
 The recipe's contract, all in one place:

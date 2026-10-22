@@ -29,9 +29,9 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tup
 
 from absl import logging
 import numpy as np
-from tunix.experimental.trajectory import base_store as store_lib
-from tunix.experimental.trajectory import converter as converter_lib
-from tunix.experimental.trajectory import trajectory as trajectory_lib
+from tunix.dist_rl.trajectory import base_store as store_lib
+from tunix.dist_rl.trajectory import converter as converter_lib
+from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.generate import utils as generate_utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2

@@ -169,7 +169,7 @@ jobs:
       - name: Run tunix tests not covered by the above categories
         run: |
           # This category is to catch tests added but not covered by CI yet. Whenever you add new folders under tests/, please add a new category above and skip those tests here.
-          python -m pytest tests/ -v --tb=short --ignore=tests/perf/ --ignore=tests/model_alignment/ --ignore=tests/models/ --ignore=tests/cli/ --ignore=tests/utils/mesh_utils_test.py --ignore=tests/utils/topology_test.py --ignore=tests/generate/ --ignore=tests/sft/ --ignore=tests/distillation/ --ignore=tests/rl/ --ignore=tests/smoke_tests/ --ignore=tests/experimental/ --ignore=tests/zero_tim_kernel/ || code=$?
+          python -m pytest tests/ -v --tb=short --ignore=tests/perf/ --ignore=tests/model_alignment/ --ignore=tests/models/ --ignore=tests/cli/ --ignore=tests/utils/mesh_utils_test.py --ignore=tests/utils/topology_test.py --ignore=tests/generate/ --ignore=tests/sft/ --ignore=tests/distillation/ --ignore=tests/rl/ --ignore=tests/smoke_tests/ --ignore=tests/dist_rl/ --ignore=tests/experimental/ --ignore=tests/zero_tim_kernel/ || code=$?
           if [ "${code:-0}" = "5" ]; then
             echo "No tests collected (expected)."
             exit 0
@@ -383,8 +383,8 @@ jobs:
       # the internal raiden_integration_test instead.
       - name: Run Raiden weight sync unit and TPU integration tests
         run: |
-          JAX_PLATFORMS=cpu python3 -m pytest tests/experimental/weight_sync/raiden_synchronizer_test.py -v --tb=short
-          python3 -m pytest tests/experimental/weight_sync/raiden_integration_test.py -v --tb=short
+          JAX_PLATFORMS=cpu python3 -m pytest tests/dist_rl/weight_sync/raiden_synchronizer_test.py -v --tb=short
+          python3 -m pytest tests/dist_rl/weight_sync/raiden_integration_test.py -v --tb=short
 
       - name: Verify TPU runtime preflight
         run: |
@@ -404,7 +404,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          ./tunix/experimental/examples/recipes/ci_smoke_gsm8k_qwen3_0p6b.sh
+          ./tunix/dist_rl/examples/recipes/ci_smoke_gsm8k_qwen3_0p6b.sh
 
       - name: Install MaxText dependencies
         run: |
@@ -416,7 +416,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          ./tunix/experimental/examples/recipes/ci_smoke_gsm8k_qwen3_0p6b_maxtext.sh
+          ./tunix/dist_rl/examples/recipes/ci_smoke_gsm8k_qwen3_0p6b_maxtext.sh
 
       # Fires for any failure in this job, not just the smoke test above; the
       # `|| true` guards make that harmless when the logs do not exist.
@@ -424,8 +424,8 @@ jobs:
         if: ${{ failure() }}
         run: |
           echo "==================== TRAINER LOG ===================="
-          cat tunix/experimental/examples/math_gsm8k_dist/trainer.log || true
+          cat tunix/dist_rl/examples/math_gsm8k_dist/trainer.log || true
           echo "==================== ROLLOUT LOG ===================="
-          cat tunix/experimental/examples/math_gsm8k_dist/rollout.log || true
+          cat tunix/dist_rl/examples/math_gsm8k_dist/rollout.log || true
           echo "==================== ORCHESTRATOR LOG ===================="
-          cat tunix/experimental/examples/math_gsm8k_dist/orchestrator.log || true
+          cat tunix/dist_rl/examples/math_gsm8k_dist/orchestrator.log || true

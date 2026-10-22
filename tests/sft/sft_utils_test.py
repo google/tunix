@@ -304,9 +304,9 @@ class MetricReducerTest(absltest.TestCase):
     self.assertIs(utils.metric_reducer(jnp.array(1.0)), np.mean)
 
   def test_identifies_a_field_compatible_metric_from_another_module(self):
-    # `tunix.experimental.metrics.WeightedMetric` mirrors `WeightedMetric`
+    # `tunix.dist_rl.metrics.WeightedMetric` mirrors `WeightedMetric`
     # without inheriting from it, so the check has to be structural. Stand in
-    # for it here rather than importing `experimental` from an `sft` test.
+    # for it here rather than importing `dist_rl` from an `sft` test.
     class ForeignWeightedMetric:
 
       def __init__(self):

@@ -1,0 +1,3636 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Unit tests for universal Actor Model (`remote_execution.py`)."""
+
+import asyncio
+import contextlib
+import socket
+import struct
+import threading
+import time
+from typing import Any, Optional
+from unittest import mock
+from absl.testing import absltest
+from absl.testing import parameterized
+import numpy as np
+import portpicker
+from tunix.dist_rl.worker import network as network_lib
+from tunix.dist_rl.worker import remote_execution as remote_lib
+from tunix.dist_rl.worker import task_session
+from tunix.rl import packing
+
+
+class StubWorkerEngine:
+  """Mock backend domain instance for verifying dynamic remote method execution."""
+
+  def __init__(self, worker_id: str, latency: float = 0.01):
+    self.worker_id = worker_id
+    self.latency = latency
+    self.call_count = 0
+    self.is_paused = False
+
+  async def compute_trajectory(
+      self, prompt_id: str = "default_prompt", turns: int = 3
+  ) -> str:
+    await asyncio.sleep(self.latency)
+    self.call_count += 1
+    if self.is_paused:
+      raise RuntimeError(f"Worker [{self.worker_id}] is currently paused.")
+    return (
+        f"[{self.worker_id}] Trajectory for prompt {prompt_id} ({turns} turns)"
+    )
+
+  async def __call__(
+      self, prompt_id: str = "default_prompt", turns: int = 3
+  ) -> str:
+    return await self.compute_trajectory(prompt_id, turns)
+
+  def pause(self) -> None:
+    self.is_paused = True
+
+  def resume(self) -> None:
+    self.is_paused = False
+
+  def get_status(self) -> str:
+    return (
+        f"worker_id={self.worker_id}, count={self.call_count},"
+        f" paused={self.is_paused}"
+    )
+
+  def kv_cache_aware(self, prompt: str = "test") -> str:
+    return f"[{self.worker_id}] KV-cache aware routing for {prompt}"
+
+  def echo(self, payload: Any) -> Any:
+    return payload
+
+
+def _wait_for_port(host: str, port: int, timeout: float = 10.0) -> bool:
+  """Polls a TCP socket until it is open and accepting connections.
+
+  This prevents race conditions when starting a server in a background thread,
+  ensuring the client doesn't attempt to connect before the server is fully
+  bound.
+  """
+  deadline = time.time() + timeout
+  while time.time() < deadline:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+      s.settimeout(0.2)
+      if s.connect_ex((host, port)) == 0:
+        return True
+    time.sleep(0.05)
+  return False
+
+
+@contextlib.contextmanager
+def background_server(engine, port):
+  """Starts a gRPC server on an isolated background event loop and thread.
+
+  Because `GrpcRemoteActorHandle.submit()` throws a RuntimeError if called
+  from within an active asyncio event loop, tests verifying synchronous
+  `submit()`
+  must be completely synchronous in the main thread. This context manager runs
+  the mocked gRPC server in the background so the main thread remains clean.
+
+  Yields:
+    (server, loop) so the caller can drive blocking client calls
+    from the main thread while the server runs asynchronously elsewhere.
+  """
+  server = remote_lib.GrpcRemoteExecutionServer(engine)
+  loop = asyncio.new_event_loop()
+  ready = threading.Event()
+
+  def _runner():
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(server.start_serving_async(port))
+    loop.call_soon(ready.set)
+    loop.run_forever()
+
+  thread = threading.Thread(target=_runner, daemon=True)
+  thread.start()
+  ready.wait(timeout=10)
+  try:
+    yield server, loop
+  finally:
+    asyncio.run_coroutine_threadsafe(server.stop_serving(), loop).result(
+        timeout=5
+    )
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(timeout=5)
+    loop.close()
+
+
+def create_in_process_handle(
+    engine: Any,
+) -> remote_lib.InProcessActorHandle:
+  """Helper creating an InProcessActorHandle bound to an InProcessRemoteExecutionServer."""
+  server = remote_lib.InProcessRemoteExecutionServer(engine)
+  return remote_lib.InProcessActorHandle(server)
+
+
+@contextlib.asynccontextmanager
+async def running_grpc_server(
+    engine: Any,
+    rpc_timeout_s: Optional[float] = remote_lib.RPC_TIMEOUT_S,
+):
+  """Async context manager managing lifecycle of a GrpcRemoteExecutionServer and handle."""
+  port = portpicker.pick_unused_port()
+  server = remote_lib.GrpcRemoteExecutionServer(engine)
+  await server.start_serving_async(port=port)
+  handle = remote_lib.GrpcRemoteActorHandle(
+      target_address=f"grpc://localhost:{port}",
+      rpc_timeout_s=rpc_timeout_s,
+  )
+  try:
+    yield server, handle
+  finally:
+    await handle.close()
+    await server.stop_serving()
+
+
+class _LockReturner:
+
+  def get(self):
+    return threading.Lock()  # not serializable by (cloud)pickle
+
+
+class RemoteExecutionTest(parameterized.TestCase):
+  """Tests verifying ActorHandle and RemoteExecutionServer."""
+
+  def test_execution_request_serialization(self):
+    req = remote_lib.ExecutionRequest(
+        request_id="req_100",
+        method_name="compute_trajectory",
+        args=("prompt_1",),
+        kwargs={"turns": 5},
+    )
+    chunks = list(req.serialize_chunks())
+    restored = remote_lib.ExecutionRequest.deserialize_chunks(chunks)
+    self.assertEqual(restored.method_name, "compute_trajectory")
+    self.assertEqual(restored.args, ("prompt_1",))
+    self.assertEqual(restored.kwargs, {"turns": 5})
+    self.assertEqual(restored.request_id, "req_100")
+
+    with self.assertRaises(ValueError) as ctx:
+      remote_lib.ExecutionRequest(
+          method_name="compute",
+          args=("data",),
+          kwargs={"request_id": "disallowed"},
+      )
+    self.assertIn("reserved framework parameter", str(ctx.exception))
+
+  def test_execution_request_default_call(self):
+    req = remote_lib.ExecutionRequest()
+    self.assertEqual(req.method_name, "__call__")
+
+    handle = create_in_process_handle(StubWorkerEngine("actor_call"))
+
+    res = handle.submit()
+    self.assertEqual(
+        res, "[actor_call] Trajectory for prompt default_prompt (3 turns)"
+    )
+
+  def test_actor_handle_sync_and_async_invocation(self):
+    async def _run_test():
+      engine = StubWorkerEngine("actor_01", latency=0.01)
+      handle = create_in_process_handle(engine)
+
+      # Test async execution via asubmit
+      res = await handle.asubmit("compute_trajectory", "prompt_a", turns=2)
+      self.assertEqual(
+          res, "[actor_01] Trajectory for prompt prompt_a (2 turns)"
+      )
+
+      # Test sync execution via submit
+      status = handle.submit("get_status")
+      self.assertIn("count=1", status)
+
+      # Test sync execution of a coroutine from inside an event loop raises
+      # RuntimeError
+      with self.assertRaisesRegex(
+          RuntimeError,
+          "submit\\(\\) cannot be called from a running async event loop",
+      ):
+        handle.submit("compute_trajectory", "prompt_c")
+
+      # Test exception propagation when paused
+      await handle.asubmit("pause")
+      with self.assertRaises(RuntimeError) as cm:
+        await handle.asubmit("compute_trajectory", "prompt_b")
+      self.assertIn("currently paused", str(cm.exception))
+
+    asyncio.run(_run_test())
+
+  def test_server_register_instance(self):
+    server = remote_lib.InProcessRemoteExecutionServer()
+    self.assertIsNone(server.bound_instance)
+
+    engine = StubWorkerEngine("dynamic_worker")
+    server.register_instance(engine)
+    self.assertIsNotNone(server.bound_instance)
+
+    handle = remote_lib.InProcessActorHandle(server)
+    self.assertIn("dynamic_worker", handle.submit("get_status"))
+
+  def test_ray_style_remote_decorators(self):
+    """Verifies @remote, @grpc, and @stubby decorators turning classes/funcs into actors."""
+
+    @remote_lib.remote(transport="inprocess")
+    class DecoratedWorker:
+
+      def __init__(self, name: str):
+        self.name = name
+
+      def greet(self, msg: str) -> str:
+        return f"Hello {msg} from {self.name}"
+
+    @remote_lib.remote
+    def standalone_task(x: int) -> int:
+      return x * 10
+
+    @remote_lib.remote
+    async def async_standalone_task(x: int) -> int:
+      await asyncio.sleep(0.001)
+      return x * 20
+
+    @remote_lib.remote("grpc://fake-pod:50051")
+    class GrpcWorker:
+      pass
+
+    @remote_lib.remote(address="grpc://fake-pod:50051")
+    class ExplicitGrpcWorker:
+      pass
+
+    @remote_lib.remote(transport="grpc")
+    class DynamicWorker:
+      pass
+
+    # Verify class actor factory (inprocess)
+    actor_handle = DecoratedWorker.remote("WorkerX")
+    self.assertIsInstance(actor_handle, remote_lib.InProcessActorHandle)
+    self.assertEqual(
+        actor_handle.submit("greet", "World"), "Hello World from WorkerX"
+    )
+
+    # Verify standalone function task (inprocess)
+    self.assertEqual(standalone_task.remote(5), 50)
+    self.assertEqual(async_standalone_task.remote(5), 100)
+
+    # Verify coroutine function task when called inside an active async event
+    # loop
+    async def _verify_in_loop():
+      res = await async_standalone_task.remote(7)
+      self.assertEqual(res, 140)
+
+    asyncio.run(_verify_in_loop())
+
+    # Verify grpc class actor factory (remote gRPC target via string address)
+    grpc_handle = GrpcWorker.remote()
+
+    self.assertIsInstance(grpc_handle, remote_lib.GrpcRemoteActorHandle)
+    self.assertEqual(grpc_handle.target_address, "grpc://fake-pod:50051")
+
+    # Verify grpc class actor factory (remote gRPC target via explicit address
+    # kwarg)
+    explicit_handle = ExplicitGrpcWorker.remote()
+    self.assertIsInstance(explicit_handle, remote_lib.GrpcRemoteActorHandle)
+    self.assertEqual(explicit_handle.target_address, "grpc://fake-pod:50051")
+
+    # Verify late address binding (dynamic pod allocation at runtime)
+    late_handle = DynamicWorker.remote(address="grpc://allocated-pod:50051")
+    self.assertIsInstance(late_handle, remote_lib.GrpcRemoteActorHandle)
+    self.assertEqual(late_handle.target_address, "grpc://allocated-pod:50051")
+
+    # Verify standalone function with non-inprocess transport raises
+    # NotImplementedError
+    with self.assertRaises(NotImplementedError):
+
+      @remote_lib.remote("grpc://fake-pod:50051")
+      def remote_grpc_func(x: int) -> int:
+        return x * 2
+
+  def test_remote_decorator_invalid_transport_raises(self):
+    @remote_lib.remote(transport="invalid")
+    class BrokenWorker:
+      pass
+
+    with self.assertRaisesRegex(ValueError, "Unsupported transport: invalid"):
+      BrokenWorker.remote()
+
+  def test_remote_decorator_invalid_target_type_raises(self):
+    with self.assertRaisesRegex(
+        TypeError, "@remote expects a class or function"
+    ):
+      remote_lib.remote(12345)
+
+  def test_remote_actor_handle_submit_not_implemented(self):
+    handle = remote_lib.RemoteActorHandle("tcp://dummy")
+    with self.assertRaisesRegex(
+        NotImplementedError,
+        "Remote execution over tcp://dummy not initialized.",
+    ):
+      handle.submit("method")
+
+  def test_remote_actor_handle_asubmit_not_implemented(self):
+    handle = remote_lib.RemoteActorHandle("tcp://dummy")
+
+    async def _run():
+      with self.assertRaisesRegex(
+          NotImplementedError,
+          "Remote execution over tcp://dummy not initialized.",
+      ):
+        await handle.asubmit("method")
+
+    asyncio.run(_run())
+
+  def test_real_grpc_tcp_execution(self):
+    """Verifies GrpcRemoteExecutionServer and GrpcRemoteActorHandle over physical TCP sockets."""
+
+    async def _run_test():
+      with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("localhost", 0))
+        port = s.getsockname()[1]
+
+      engine = StubWorkerEngine("grpc_worker_01", latency=0.01)
+      server = remote_lib.GrpcRemoteExecutionServer(engine)
+      await server.start_serving_async(port=port)
+
+      try:
+        handle = remote_lib.ActorHandle.from_address(f"grpc://localhost:{port}")
+        self.assertIsInstance(handle, remote_lib.GrpcRemoteActorHandle)
+
+        res = await handle.asubmit("compute_trajectory", "prompt_grpc", turns=4)
+        self.assertEqual(
+            res, "[grpc_worker_01] Trajectory for prompt prompt_grpc (4 turns)"
+        )
+
+        status = await handle.asubmit("get_status")
+        self.assertIn("count=1", status)
+
+        # Test GrpcRemoteActorHandle.submit cannot be called inside an event
+        # loop
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "GrpcRemoteActorHandle.submit\\(\\) is blocking and cannot be"
+            " called from a running event loop",
+        ):
+          handle.submit("get_status")
+
+        # Test GrpcRemoteExecutionServer.start_serving cannot be called inside
+        # an event loop
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "GrpcRemoteExecutionServer.start_serving\\(\\) is blocking and"
+            " cannot be called from a running event loop",
+        ):
+          server.start_serving(port)
+
+        await handle.close()
+      finally:
+        await server.stop_serving()
+
+    asyncio.run(_run_test())
+
+  def test_server_side_queue_and_polling_in_process(self):
+    async def _run():
+      engine = StubWorkerEngine("async_worker", latency=0.02)
+      handle = create_in_process_handle(engine)
+
+      task_id = await handle.dispatch_task(
+          None, "compute_trajectory", "prompt_async", turns=2
+      )
+      self.assertTrue(task_id.startswith("task_"))
+
+      # Poll response queue asynchronously
+      resp = await handle.poll_responses(timeout_s=1.0)
+      self.assertIsNotNone(resp)
+      self.assertEqual(resp.request_id, task_id)
+      self.assertEqual(
+          resp.unwrap(),
+          "[async_worker] Trajectory for prompt prompt_async (2 turns)",
+      )
+
+    asyncio.run(_run())
+
+  def test_dispatch_task_custom_request_id_in_process(self):
+    async def _run():
+      engine = StubWorkerEngine("custom_id_worker", latency=0.01)
+      handle = create_in_process_handle(engine)
+
+      custom_id = "req_rollout_10042"
+      req_id = await handle.dispatch_task(
+          custom_id, "compute_trajectory", "prompt_custom", turns=1
+      )
+      self.assertEqual(req_id, custom_id)
+
+      resp = await handle.poll_responses(timeout_s=1.0)
+      self.assertIsNotNone(resp)
+      self.assertEqual(resp.request_id, custom_id)
+      self.assertEqual(
+          resp.unwrap(),
+          "[custom_id_worker] Trajectory for prompt prompt_custom (1 turns)",
+      )
+
+    asyncio.run(_run())
+
+  def test_grpc_dispatch_task_and_long_polling(self):
+    """Verifies dispatch_task and poll_responses over real gRPC TCP channels."""
+
+    async def _run_test():
+      engine = StubWorkerEngine("grpc_async_worker", latency=0.05)
+      async with running_grpc_server(engine) as (_, handle):
+        task_id = await handle.dispatch_task(
+            None, "compute_trajectory", "prompt_grpc_async", turns=3
+        )
+        self.assertTrue(task_id.startswith("task_"))
+
+        # Long-poll response queue over gRPC
+        resp = await handle.poll_responses(timeout_s=2.0)
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp.request_id, task_id)
+        self.assertEqual(
+            resp.unwrap(),
+            "[grpc_async_worker] Trajectory for prompt prompt_grpc_async (3"
+            " turns)",
+        )
+
+    asyncio.run(_run_test())
+
+  def test_grpc_dispatch_task_custom_request_id(self):
+    """Verifies client-provided request_id correlates with ExecutionResponse over gRPC."""
+
+    async def _run_test():
+      engine = StubWorkerEngine("grpc_custom_worker", latency=0.02)
+      async with running_grpc_server(engine) as (_, handle):
+        custom_id = "rollout_req_grpc_99"
+        req_id = await handle.dispatch_task(
+            custom_id, "compute_trajectory", "prompt_grpc_custom", turns=2
+        )
+        self.assertEqual(req_id, custom_id)
+
+        resp = await handle.poll_responses(timeout_s=2.0)
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp.request_id, custom_id)
+        self.assertEqual(
+            resp.unwrap(),
+            "[grpc_custom_worker] Trajectory for prompt prompt_grpc_custom (2"
+            " turns)",
+        )
+
+    asyncio.run(_run_test())
+
+  def test_dispatch_task_method_accepting_domain_request_id(self):
+    class WorkerWithRequestIdParam:
+
+      def process(self, data: str, domain_req_id: str) -> str:
+        return f"Processed {data} with domain_id={domain_req_id}"
+
+    async def _run():
+      handle = create_in_process_handle(WorkerWithRequestIdParam())
+      rpc_req_id = await handle.dispatch_task(
+          "rpc_req_55", "process", "my_data", domain_req_id="domain_req_99"
+      )
+      self.assertEqual(rpc_req_id, "rpc_req_55")
+
+      resp = await handle.poll_responses(timeout_s=1.0)
+      self.assertIsNotNone(resp)
+      self.assertEqual(resp.request_id, "rpc_req_55")
+      self.assertEqual(
+          resp.unwrap(), "Processed my_data with domain_id=domain_req_99"
+      )
+
+    asyncio.run(_run())
+
+  def test_polling_timeout_returns_none(self):
+    """Verifies poll_responses(timeout_s=0.0) and 0.01 return None when queue is empty."""
+
+    async def _run():
+      engine = StubWorkerEngine("slow_worker", latency=2.0)
+      # Test in-process handle (QueueEmpty via get_nowait)
+      handle_inproc = create_in_process_handle(engine)
+      await handle_inproc.dispatch_task(None, "compute_trajectory", "p1")
+      self.assertIsNone(await handle_inproc.poll_responses(timeout_s=0.0))
+      self.assertIsNone(await handle_inproc.poll_responses(timeout_s=0.01))
+
+      # Test over real gRPC TCP channels
+      async with running_grpc_server(engine) as (_, handle_grpc):
+        await handle_grpc.dispatch_task(None, "compute_trajectory", "p2")
+        self.assertIsNone(await handle_grpc.poll_responses(timeout_s=0.0))
+        self.assertIsNone(await handle_grpc.poll_responses(timeout_s=0.01))
+
+    asyncio.run(_run())
+
+  def test_execution_response_error_round_trips(self):
+    resp = remote_lib.ExecutionResponse(
+        error_message="worker 1 is paused!",
+        error_type="ValueError",
+        traceback="Traceback: ...",
+        retryable=True,
+    )
+
+    restored = remote_lib.ExecutionResponse.deserialize_chunks(
+        resp.serialize_chunks()
+    )
+
+    self.assertEqual(restored.error_type, "ValueError")
+    self.assertEqual(restored.error_message, "worker 1 is paused!")
+    self.assertEqual(restored.traceback, "Traceback: ...")
+    self.assertTrue(restored.retryable)
+    with self.assertRaises(RuntimeError):
+      restored.unwrap()
+
+  def test_execution_response_serialization_success(self):
+    res_success = remote_lib.ExecutionResponse(result=42)
+    chunks = list(res_success.serialize_chunks())
+    restored = remote_lib.ExecutionResponse.deserialize_chunks(chunks)
+    self.assertEqual(restored.unwrap(), 42)
+
+  def test_execute_request_captures_traceback(self):
+    async def _run():
+      engine = StubWorkerEngine("worker_1")
+      engine.pause()
+      server = remote_lib.InProcessRemoteExecutionServer(engine)
+      resp = await server.execute_request(
+          remote_lib.ExecutionRequest(
+              request_id="req_tb_1", method_name="compute_trajectory"
+          )
+      )
+      self.assertEqual(resp.error_type, "RuntimeError")
+      self.assertIn("currently paused", resp.error_message)
+      self.assertIsNotNone(resp.traceback)
+      self.assertIn("compute_trajectory", resp.traceback)
+      self.assertEqual(resp.request_id, "req_tb_1")
+
+    asyncio.run(_run())
+
+  def test_server_error_no_instance_bound_sync(self):
+    server = remote_lib.InProcessRemoteExecutionServer()
+    req = remote_lib.ExecutionRequest(
+        request_id="req_err_1", method_name="any_method"
+    )
+    resp1 = server.execute_sync_request(req)
+    self.assertEqual(resp1.error_type, "InstanceNotBoundError")
+    self.assertEqual(
+        resp1.error_message, "RemoteExecutionServer has no registered instance."
+    )
+    self.assertEqual(resp1.request_id, "req_err_1")
+
+  def test_server_error_no_instance_bound_async(self):
+    server = remote_lib.InProcessRemoteExecutionServer()
+    req = remote_lib.ExecutionRequest(
+        request_id="req_err_2", method_name="any_method"
+    )
+
+    async def _run_async_err():
+      resp6 = await server.execute_request(req)
+      self.assertEqual(resp6.error_type, "InstanceNotBoundError")
+      self.assertEqual(
+          resp6.error_message,
+          "RemoteExecutionServer has no registered instance.",
+      )
+      self.assertEqual(resp6.request_id, "req_err_2")
+
+    asyncio.run(_run_async_err())
+
+  def test_server_error_method_not_found_sync(self):
+    server = remote_lib.InProcessRemoteExecutionServer(
+        StubWorkerEngine("worker_01")
+    )
+    resp2 = server.execute_sync_request(
+        remote_lib.ExecutionRequest(
+            request_id="req_err_3", method_name="missing_method"
+        )
+    )
+    self.assertEqual(resp2.error_type, "AttributeError")
+    self.assertEqual(
+        resp2.error_message,
+        "Method 'missing_method' not found on bound instance.",
+    )
+    self.assertEqual(resp2.request_id, "req_err_3")
+
+  def test_server_error_method_not_found_async(self):
+    server = remote_lib.InProcessRemoteExecutionServer(
+        StubWorkerEngine("worker_01")
+    )
+
+    async def _run_async_err():
+      resp7 = await server.execute_request(
+          remote_lib.ExecutionRequest(
+              request_id="req_err_4", method_name="missing"
+          )
+      )
+      self.assertEqual(resp7.error_type, "AttributeError")
+      self.assertEqual(
+          resp7.error_message, "Method 'missing' not found on bound instance."
+      )
+      self.assertEqual(resp7.request_id, "req_err_4")
+
+    asyncio.run(_run_async_err())
+
+  def test_server_error_exception_during_sync_execution(self):
+    class ThrowingWorker:
+
+      def fail(self):
+        raise ValueError("Intentional failure")
+
+    server = remote_lib.InProcessRemoteExecutionServer(ThrowingWorker())
+    resp4 = server.execute_sync_request(
+        remote_lib.ExecutionRequest(
+            request_id="req_err_5", method_name="fail"
+        )
+    )
+    self.assertEqual(resp4.error_type, "ValueError")
+    self.assertEqual(resp4.error_message, "Intentional failure")
+    self.assertEqual(resp4.request_id, "req_err_5")
+
+  def test_handle_execute_returns_error_for_unserializable_result(self):
+    async def _run():
+      server = remote_lib.GrpcRemoteExecutionServer(_LockReturner())
+      req = remote_lib.ExecutionRequest(
+          request_id="req_err_6", method_name="get"
+      )
+
+      async def _req_stream():
+        for chunk in req.serialize_chunks():
+          yield chunk
+
+      resp = await remote_lib.ExecutionResponse.deserialize_async_chunks(
+          server._handle_execute(_req_stream(), context=None)
+      )
+      self.assertIsNotNone(resp)
+      self.assertEqual(resp.error_type, "ExecutionResponseSerializationError")
+      self.assertIsNotNone(resp.error_message)
+      self.assertEqual(resp.request_id, "req_err_6")
+
+    asyncio.run(_run())
+
+  def test_serialize_returns_error_for_unserializable_result(self):
+    resp = remote_lib.ExecutionResponse(
+        request_id="req_unser_chunks", result=_LockReturner().get()
+    )
+    chunks = list(resp.serialize_chunks(chunk_size=1024))
+    restored = remote_lib.ExecutionResponse.deserialize_chunks(chunks)
+    self.assertEqual(restored.request_id, "req_unser_chunks")
+    self.assertEqual(restored.error_type, "ExecutionResponseSerializationError")
+    self.assertIn("failed to serialize result", restored.error_message)
+
+  def test_handle_poll_responses_returns_error_for_unserializable_result(self):
+    async def _run():
+      server = remote_lib.GrpcRemoteExecutionServer(_LockReturner())
+      request = remote_lib.ExecutionRequest(
+          request_id="req_err_7", method_name="get"
+      )
+      await server.dispatch_task(request)
+
+      resp = await remote_lib.ExecutionResponse.deserialize_async_chunks(
+          server._handle_poll_responses(b"", context=None)
+      )
+      self.assertIsNotNone(resp)
+      self.assertEqual(resp.error_type, "ExecutionResponseSerializationError")
+      self.assertIsNotNone(resp.error_message)
+      self.assertEqual(resp.request_id, "req_err_7")
+
+    asyncio.run(_run())
+
+  def test_grpc_large_payload_round_trips(self):
+    async def _run():
+      engine = StubWorkerEngine("worker_1")
+      async with running_grpc_server(engine) as (_, handle):
+        # 8 MiB exceeds gRPC's default ~4 MiB message cap.
+        blob = "x" * (8 * 1024 * 1024)
+        echoed = await handle.asubmit("kv_cache_aware", blob)
+        self.assertTrue(echoed.endswith(blob))
+        self.assertGreater(len(echoed), len(blob))
+
+    asyncio.run(_run())
+
+  def test_grpc_asubmit_times_out_on_slow_worker(self):
+    async def _run():
+      engine = StubWorkerEngine("slow_worker", latency=2.0)
+      async with running_grpc_server(engine, rpc_timeout_s=0.3) as (
+          _,
+          handle,
+      ):
+        with self.assertRaises(Exception) as cm:
+          await handle.asubmit("compute_trajectory", "p", turns=1)
+        self.assertIn("deadline", str(cm.exception).lower())
+
+    asyncio.run(_run())
+
+  def test_grpc_sync_submit_survives_repeated_calls(self):
+    port = portpicker.pick_unused_port()
+    with background_server(StubWorkerEngine("sync_worker"), port):
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{port}"
+      )
+      try:
+        first = handle.submit("compute_trajectory", "p1", turns=1)
+        self.assertIn("sync_worker", first)
+        # The 2nd blocking call reuses the handle's persistent submit loop and
+        # its channel; it must not rebuild the channel or fail on a stale loop.
+        second = handle.submit("compute_trajectory", "p2", turns=1)
+        self.assertIn("sync_worker", second)
+      finally:
+        asyncio.run(handle.close())  # tears down the persistent submit loop
+
+  def test_grpc_options_tolerate_client_keepalive_pings(self):
+    options = dict(network_lib._grpc_options())
+    self.assertEqual(options["grpc.keepalive_time_ms"], 60000)
+    self.assertEqual(options["grpc.keepalive_timeout_ms"], 60000)
+    self.assertEqual(
+        options["grpc.http2.min_ping_interval_without_data_ms"], 5000
+    )
+    self.assertEqual(options["grpc.http2.max_ping_strikes"], 0)
+    self.assertNotIn(
+        "grpc.http2.min_recv_ping_interval_without_data_ms", options
+    )
+    self.assertNotIn("grpc.tcp_user_timeout_ms", options)
+    self.assertNotIn("grpc.service_config", options)
+
+    channel_options = dict(network_lib._grpc_channel_options())
+    self.assertEqual(channel_options["grpc.keepalive_time_ms"], 60000)
+    self.assertEqual(channel_options["grpc.keepalive_timeout_ms"], 60000)
+    self.assertEqual(channel_options["grpc.max_reconnect_backoff_ms"], 10000)
+
+  def test_grpc_poll_responses_maps_unavailable_and_deadline_to_transient_error(
+      self,
+  ):
+    async def _run():
+      # 1. UNAVAILABLE: connecting to an unused port fails with UNAVAILABLE.
+      unused_port = portpicker.pick_unused_port()
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{unused_port}",
+          rpc_timeout_s=0.5,
+          enable_bulk_transport=False,
+      )
+      try:
+        with self.assertRaises(remote_lib.TransientTransportError) as cm:
+          await handle.poll_responses(timeout_s=0.1)
+        self.assertIsNotNone(cm.exception.__cause__)
+        self.assertIn("UNAVAILABLE", str(cm.exception))
+      finally:
+        await handle.close()
+
+      # 2. DEADLINE_EXCEEDED: a live server with an empty response queue
+      # long-polls for timeout_s=5.0 while the client RPC deadline is capped
+      # at rpc_timeout_s=0.3s.
+      engine = StubWorkerEngine("empty_poll_worker")
+      async with running_grpc_server(engine, rpc_timeout_s=0.3) as (
+          _,
+          live_handle,
+      ):
+        with self.assertRaises(remote_lib.TransientTransportError) as cm_dl:
+          await live_handle.poll_responses(timeout_s=5.0)
+        self.assertIsNotNone(cm_dl.exception.__cause__)
+        self.assertIn("DEADLINE_EXCEEDED", str(cm_dl.exception))
+
+        # 3. _BulkTransportError during poll_responses: invalidates bulk port,
+        # cancels the active gRPC stream call, and raises TransientTransportError
+        # chained to _BulkTransportError.
+        live_handle._bulk_port = 12345
+        fake_call = mock.MagicMock()
+        with (
+            mock.patch.object(live_handle, "_poll_rpc", return_value=fake_call),
+            mock.patch.object(
+                remote_lib.ExecutionResponse,
+                "deserialize_async_chunks",
+                side_effect=network_lib._BulkTransportError("bulk pull reset"),
+            ),
+        ):
+          with self.assertRaises(remote_lib.TransientTransportError) as cm_bulk:
+            await live_handle.poll_responses(timeout_s=1.0)
+          self.assertIsInstance(
+              cm_bulk.exception.__cause__, network_lib._BulkTransportError
+          )
+          self.assertIsNone(live_handle._bulk_port)
+          fake_call.cancel.assert_called_once()
+
+    asyncio.run(_run())
+
+  def test_grpc_sync_start_serving_actually_serves(self):
+    port = portpicker.pick_unused_port()
+    server = remote_lib.GrpcRemoteExecutionServer(
+        StubWorkerEngine("blocking_worker")
+    )
+    thread = threading.Thread(
+        target=server.start_serving, kwargs={"port": port}, daemon=True
+    )
+    thread.start()
+    try:
+      self.assertTrue(
+          _wait_for_port("localhost", port),
+          "start_serving() never began accepting connections",
+      )
+
+      async def _call():
+        handle = remote_lib.GrpcRemoteActorHandle(
+            target_address=f"grpc://localhost:{port}"
+        )
+        try:
+          return await handle.asubmit("compute_trajectory", "p", turns=1)
+        finally:
+          await handle.close()
+
+      result = asyncio.run(_call())
+      self.assertIn("blocking_worker", result)
+    finally:
+      serve_loop = server.serve_loop
+      if serve_loop is not None:
+        asyncio.run_coroutine_threadsafe(
+            server.stop_serving(), serve_loop
+        ).result(timeout=5)
+      thread.join(timeout=5)
+
+  def test_chunked_serialization_roundtrip_with_numpy_and_empty_buffers(self):
+    rng = np.random.default_rng(42)
+    packed_tokens = rng.integers(0, 32000, size=(16, 1024), dtype=np.int32)
+    empty_prompts = np.zeros((16, 0), dtype=np.int32)
+    strided_view = rng.standard_normal((32, 256), dtype=np.float32)[:, ::2]
+    advantages = rng.standard_normal((16, 1024), dtype=np.float32)
+
+    payload = {
+        "completion_ids": packed_tokens,
+        "prompt_ids": empty_prompts,
+        "strided_logps": strided_view,
+        "advantages": advantages,
+        "metadata": {"step": 7, "packed": True},
+    }
+    req = remote_lib.ExecutionRequest(
+        request_id="req_chunked_1",
+        method_name="train_step",
+        args=(payload,),
+        kwargs={"lr": 1e-4},
+    )
+    chunks = list(req.serialize_chunks(chunk_size=4096))
+    self.assertGreater(len(chunks), 10)
+    self.assertTrue(all(len(c) <= 4096 for c in chunks))
+
+    restored_req = remote_lib.ExecutionRequest.deserialize_chunks(chunks)
+    self.assertEqual(restored_req.request_id, "req_chunked_1")
+    self.assertEqual(restored_req.method_name, "train_step")
+    self.assertEqual(restored_req.kwargs, {"lr": 1e-4})
+
+    restored_payload = restored_req.args[0]
+    np.testing.assert_array_equal(
+        restored_payload["completion_ids"], packed_tokens
+    )
+    self.assertEqual(restored_payload["prompt_ids"].shape, (16, 0))
+    np.testing.assert_array_equal(
+        restored_payload["strided_logps"], strided_view
+    )
+    np.testing.assert_array_equal(restored_payload["advantages"], advantages)
+    self.assertEqual(
+        restored_payload["metadata"], {"step": 7, "packed": True}
+    )
+    # Reconstructed arrays backed by released bytearrays must be writable.
+    restored_payload["completion_ids"][0, 0] = 999
+    self.assertEqual(restored_payload["completion_ids"][0, 0], 999)
+
+  def test_grpc_streaming_payload_exceeds_max_message_bytes(self):
+    class PackedBatchWorker:
+
+      def echo_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "completion_ids": batch["completion_ids"] + 1,
+            "prompt_ids": batch["prompt_ids"],
+            "advantages": batch["advantages"] * 2.0,
+        }
+
+    rng = np.random.default_rng(123)
+    # ~4 MiB total payload, while max_message_bytes is capped at 512 KiB and
+    # stream_chunk_bytes is 128 KiB. A unary RPC would fail with
+    # RESOURCE_EXHAUSTED, whereas chunked streaming succeeds.
+    batch = {
+        "completion_ids": rng.integers(
+            0, 50000, size=(32, 16384), dtype=np.int32
+        ),
+        "prompt_ids": np.zeros((32, 0), dtype=np.int32),
+        "advantages": rng.standard_normal((32, 16384), dtype=np.float32),
+    }
+
+    max_msg_bytes = 512 * 1024
+    chunk_bytes = 128 * 1024
+    port = portpicker.pick_unused_port()
+    server = remote_lib.GrpcRemoteExecutionServer(
+        PackedBatchWorker(),
+        stream_chunk_bytes=chunk_bytes,
+        max_message_bytes=max_msg_bytes,
+    )
+
+    async def _run_async():
+      await server.start_serving_async(port=port)
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{port}",
+          stream_chunk_bytes=chunk_bytes,
+          max_message_bytes=max_msg_bytes,
+      )
+      try:
+        # 1. Verify bidirectional streaming via asubmit (ExecuteStream)
+        out = await handle.asubmit("echo_batch", batch)
+        np.testing.assert_array_equal(
+            out["completion_ids"], batch["completion_ids"] + 1
+        )
+        self.assertEqual(out["prompt_ids"].shape, (32, 0))
+        np.testing.assert_array_equal(
+            out["advantages"], batch["advantages"] * 2.0
+        )
+
+        # 2. Verify client-streaming dispatch + server-streaming poll
+        ack_id = await handle.dispatch_task(
+            "req_stream_1", "echo_batch", batch
+        )
+        self.assertEqual(ack_id, "req_stream_1")
+        polled = await handle.poll_responses(timeout_s=5.0)
+        self.assertIsNotNone(polled)
+        self.assertEqual(polled.request_id, "req_stream_1")
+        polled_out = polled.unwrap()
+        np.testing.assert_array_equal(
+            polled_out["completion_ids"], batch["completion_ids"] + 1
+        )
+        np.testing.assert_array_equal(
+            polled_out["advantages"], batch["advantages"] * 2.0
+        )
+      finally:
+        await handle.close()
+        await server.stop_serving()
+
+    asyncio.run(_run_async())
+
+  def test_chunk_reassembler_rejects_malformed_truncated_and_overflow_streams(
+      self,
+  ):
+    with self.assertRaisesRegex(
+        ValueError, "Cannot deserialize from an empty chunk stream"
+    ):
+      remote_lib.ExecutionRequest.deserialize_chunks([])
+
+    with self.assertRaisesRegex(ValueError, "Invalid chunk stream manifest"):
+      remote_lib.ExecutionRequest.deserialize_chunks([b"not-a-valid-pickle"])
+
+    with self.assertRaisesRegex(
+        ValueError, "Invalid header_len in chunk stream manifest"
+    ):
+      bad_manifest = remote_lib.cloudpickle.dumps((0, ()))
+      remote_lib.ExecutionRequest.deserialize_chunks([bad_manifest])
+
+    with self.assertRaisesRegex(
+        ValueError, "Invalid buffer_lengths in chunk stream manifest"
+    ):
+      bad_manifest = remote_lib.cloudpickle.dumps((16, (-4,)))
+      remote_lib.ExecutionRequest.deserialize_chunks([bad_manifest])
+
+    req = remote_lib.ExecutionRequest(
+        request_id="r1",
+        method_name="m",
+        args=(np.arange(128, dtype=np.int32),),
+    )
+    valid_chunks = list(req.serialize_chunks(chunk_size=64))
+
+    # Truncated stream raises ValueError
+    with self.assertRaisesRegex(
+        ValueError, "Stream ended before all declared buffer bytes"
+    ):
+      remote_lib.ExecutionRequest.deserialize_chunks(valid_chunks[:-1])
+
+    # Extra trailing bytes raise ValueError
+    with self.assertRaisesRegex(
+        ValueError, "Received more chunk bytes than declared"
+    ):
+      remote_lib.ExecutionRequest.deserialize_chunks(valid_chunks + [b"extra"])
+
+  def test_stream_config_validation_rejects_invalid_bounds(self):
+    with self.assertRaisesRegex(ValueError, "stream_chunk_bytes must be"):
+      remote_lib.GrpcRemoteExecutionServer(stream_chunk_bytes=0)
+
+    with self.assertRaisesRegex(ValueError, "max_message_bytes must be"):
+      remote_lib.GrpcRemoteExecutionServer(max_message_bytes=0)
+
+    with self.assertRaisesRegex(
+        ValueError, "stream_chunk_bytes .* must not exceed max_message_bytes"
+    ):
+      remote_lib.GrpcRemoteActorHandle(
+          "grpc://localhost:50051",
+          stream_chunk_bytes=2 * 1024 * 1024,
+          max_message_bytes=1 * 1024 * 1024,
+      )
+
+  def test_unserializable_request_arg_raises_immediately_on_client(self):
+    async def _run():
+      engine = StubWorkerEngine("worker_1")
+      async with running_grpc_server(engine) as (_, handle):
+        with self.assertRaises(TypeError):
+          await handle.asubmit("compute_trajectory", threading.Lock())
+        with self.assertRaises(TypeError):
+          await handle.dispatch_task(
+              "req_bad", "compute_trajectory", threading.Lock()
+          )
+
+    asyncio.run(_run())
+
+  def test_interrupted_poll_responses_requeues_completed_response(self):
+    async def _run():
+      engine = StubWorkerEngine("requeue_worker", latency=0.01)
+      server = remote_lib.GrpcRemoteExecutionServer(
+          engine,
+          stream_chunk_bytes=16,
+      )
+      await server.dispatch_task(
+          remote_lib.ExecutionRequest(
+              request_id="req_requeue_1",
+              method_name="compute_trajectory",
+              args=("prompt_requeue",),
+              kwargs={"turns": 2},
+          )
+      )
+      await asyncio.sleep(0.05)
+
+      # Simulate a client disconnecting after reading only the first chunk
+      stream = server._handle_poll_responses(b"", context=None)
+      first_chunk = await stream.__anext__()
+      self.assertNotEmpty(first_chunk)
+      await stream.aclose()
+
+      # Subsequent poll must still receive the re-queued response
+      recovered = await remote_lib.ExecutionResponse.deserialize_async_chunks(
+          server._handle_poll_responses(b"", context=None)
+      )
+      self.assertIsNotNone(recovered)
+      self.assertEqual(recovered.request_id, "req_requeue_1")
+      self.assertIn("prompt_requeue", recovered.unwrap())
+
+    asyncio.run(_run())
+
+  def test_grpc_actor_handle_survives_multiple_asyncio_run_loops(self):
+    port = portpicker.pick_unused_port()
+    with background_server(StubWorkerEngine("multi_loop_worker"), port):
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{port}"
+      )
+      res1 = asyncio.run(handle.asubmit("compute_trajectory", "p1", turns=1))
+      self.assertIn("multi_loop_worker", res1)
+
+      # Second asyncio.run() creates a brand-new event loop; handle must
+      # transparently rebind its async channel to the new loop.
+      res2 = asyncio.run(handle.asubmit("compute_trajectory", "p2", turns=2))
+      self.assertIn("multi_loop_worker", res2)
+      asyncio.run(handle.close())
+
+  def test_iter_async_from_chunk_specs_releases_views_on_early_exit(self):
+    arr = np.arange(512 * 1024, dtype=np.int32)
+    _, manifest, views, raw_buffers, spec_iter = (
+        network_lib._prepare_serialized_chunk_specs(
+            {"tensor": arr}, chunk_size=256 * 1024
+        )
+    )
+
+    async def _run():
+      ait = network_lib._iter_async_from_chunk_specs(
+          manifest, views, raw_buffers, spec_iter, offload=True
+      )
+      first = await ait.__anext__()
+      self.assertEqual(first, manifest)
+      header_chunk = await ait.__anext__()
+      self.assertNotEmpty(header_chunk)
+      data_chunk = await ait.__anext__()
+      self.assertLen(data_chunk, 256 * 1024)
+      await ait.aclose()
+      await asyncio.get_running_loop().run_in_executor(
+          network_lib._SERDE_EXECUTOR, lambda: None
+      )
+      deadline = time.monotonic() + 2.0
+      while time.monotonic() < deadline:
+        try:
+          _ = views[0].nbytes
+        except ValueError:
+          break
+        await asyncio.sleep(0.005)
+      for mv in views:
+        with self.assertRaises(ValueError):
+          _ = mv.nbytes
+
+    asyncio.run(_run())
+
+  def test_iter_serialized_chunks_with_size_preserves_by_value_and_size(
+      self,
+  ):
+    arr = np.arange(128, dtype=np.int32)
+    total_bytes, chunks_it = network_lib._iter_serialized_chunks_with_size(
+        {"tokens": arr, "step": 3}
+    )
+    chunks = list(chunks_it)
+    self.assertGreater(total_bytes, arr.nbytes)
+    restored = network_lib._deserialize_from_chunks(chunks)
+    np.testing.assert_array_equal(restored["tokens"], arr)
+    self.assertEqual(restored["step"], 3)
+
+    # Verify both local closures and functions simulated in `__main__` are
+    # serialized by value via cloudpickle so remote workers without the caller's
+    # `__main__` attribute can deserialize and execute them.
+    multiplier = 7
+
+    def _main_fn(x: int) -> int:
+      return x * multiplier
+
+    _main_fn.__module__ = "__main__"
+    closure_payload = {
+        "arr": np.ones(16, dtype=np.float32),
+        "fn": _main_fn,
+    }
+    closure_bytes, closure_it = network_lib._iter_serialized_chunks_with_size(
+        closure_payload
+    )
+    self.assertGreater(closure_bytes, 64)
+    restored_closure = network_lib._deserialize_from_chunks(list(closure_it))
+    self.assertEqual(restored_closure["fn"](6), 42)
+    np.testing.assert_array_equal(
+        restored_closure["arr"], np.ones(16, dtype=np.float32)
+    )
+
+  def test_small_payload_serialize_async_chunks_runs_inline_and_closes(self):
+    async def _run():
+      req = remote_lib.ExecutionRequest(
+          request_id="req_inline",
+          method_name="compute_trajectory",
+          args=("prompt_inline", np.arange(32, dtype=np.int32)),
+          kwargs={"turns": 2},
+      )
+      with mock.patch.object(
+          network_lib._SERDE_EXECUTOR,
+          "submit",
+          wraps=network_lib._SERDE_EXECUTOR.submit,
+      ) as mock_submit:
+        ait = req.serialize_async_chunks(chunk_size=64)
+        first = await ait.__anext__()
+        self.assertNotEmpty(first)
+        await ait.aclose()
+        with self.assertRaises(StopAsyncIteration):
+          await ait.__anext__()
+        restored_req = (
+            await remote_lib.ExecutionRequest.deserialize_async_chunks(
+                req.serialize_async_chunks()
+            )
+        )
+        # Payloads < _ASYNC_OFFLOAD_THRESHOLD_BYTES run inline without executor.
+        mock_submit.assert_not_called()
+      self.assertEqual(restored_req.request_id, "req_inline")
+      self.assertEqual(restored_req.args[0], "prompt_inline")
+      np.testing.assert_array_equal(
+          restored_req.args[1], np.arange(32, dtype=np.int32)
+      )
+
+    asyncio.run(_run())
+
+  def test_copy_view_slice_nogil_matches_memoryview_tobytes(self):
+    raw = np.arange(512 * 1024, dtype=np.int16).tobytes()
+    mv = memoryview(raw)
+    try:
+      # Small slice (< _NOGIL_COPY_THRESHOLD_BYTES)
+      small = network_lib._copy_view_slice_nogil(mv, 128, 4096)
+      self.assertEqual(small, raw[128 : 128 + 4096])
+      # Large slice (>= _NOGIL_COPY_THRESHOLD_BYTES) with non-zero offset
+      large_len = network_lib._NOGIL_COPY_THRESHOLD_BYTES + 8192
+      large = network_lib._copy_view_slice_nogil(mv, 1024, large_len)
+      self.assertEqual(large, raw[1024 : 1024 + large_len])
+    finally:
+      mv.release()
+
+  def test_parallel_chunk_reassembly_and_concurrent_adaptive_slicing(self):
+    arr_a = np.arange(1500 * 1024, dtype=np.int16)  # ~3 MiB
+    arr_b = np.arange(1500 * 1024, dtype=np.int16) + 7
+    req_a = remote_lib.ExecutionRequest(
+        request_id="conc_a",
+        method_name="step",
+        args=({"routed": arr_a},),
+        kwargs={},
+    )
+    req_b = remote_lib.ExecutionRequest(
+        request_id="conc_b",
+        method_name="step",
+        args=({"routed": arr_b},),
+        kwargs={},
+    )
+
+    async def _roundtrip(req: remote_lib.ExecutionRequest):
+      chunks = []
+      async for c in req.serialize_async_chunks(chunk_size=4 * 1024 * 1024):
+        chunks.append(c)
+
+      async def _gen():
+        for c in chunks:
+          yield c
+
+      restored = await remote_lib.ExecutionRequest.deserialize_async_chunks(
+          _gen()
+      )
+      return chunks, restored
+
+    async def _run():
+      (_, res_a), (chunks_b, res_b) = await asyncio.gather(
+          _roundtrip(req_a), _roundtrip(req_b)
+      )
+      # Concurrent streams sub-slice chunks at <= _CONCURRENT_STREAM_CHUNK_BYTES
+      max_data_chunk_b = max(len(c) for c in chunks_b[1:])
+      self.assertLessEqual(
+          max_data_chunk_b, network_lib._CONCURRENT_STREAM_CHUNK_BYTES
+      )
+      np.testing.assert_array_equal(res_a.args[0]["routed"], arr_a)
+      np.testing.assert_array_equal(res_b.args[0]["routed"], arr_b)
+      # Verify restored arrays remain writable
+      res_a.args[0]["routed"][0] = 999
+      self.assertEqual(res_a.args[0]["routed"][0], 999)
+
+    asyncio.run(_run())
+    self.assertEqual(network_lib._ACTIVE_ASYNC_SERDE_STREAMS, 0)
+
+  def test_bulk_transfer_does_not_overwrite_held_result_arrays(self):
+    bulk_server = network_lib._BulkTransferServer()
+    bulk_server.start()
+    try:
+      arr1 = np.arange(512 * 1024, dtype=np.int32)  # 2 MiB >= 512 KiB threshold
+      arr2 = arr1 + 100
+      req1 = remote_lib.ExecutionRequest(
+          request_id="bulk_push_1",
+          method_name="echo",
+          args=({"tensor": arr1},),
+          kwargs={},
+      )
+      req2 = remote_lib.ExecutionRequest(
+          request_id="bulk_push_2",
+          method_name="echo",
+          args=({"tensor": arr2},),
+          kwargs={},
+      )
+      resp = remote_lib.ExecutionResponse(result={"tensor": arr1 + 5})
+
+      async def _push_req_chunks(
+          r: remote_lib.ExecutionRequest, host: str, port: int
+      ) -> list[bytes]:
+        _, _, views, raw_buffers, _ = (
+            network_lib._prepare_serialized_chunk_specs(r._as_tuple())
+        )
+        return [
+            c
+            async for c in network_lib._stream_bulk_push_chunks(
+                views, raw_buffers, (host,), port
+            )
+        ]
+
+      async def _run():
+        # 1. First _OP_PUSH (Client -> Server) yields a tiny manifest chunk
+        push_chunks_1 = await _push_req_chunks(
+            req1, "localhost", bulk_server.port
+        )
+        self.assertLen(push_chunks_1, 1)
+        self.assertLess(len(push_chunks_1[0]), 4096)
+
+        async def _push_gen_1():
+          for c in push_chunks_1:
+            yield c
+
+        restored_req_1 = (
+            await remote_lib.ExecutionRequest.deserialize_async_chunks(
+                _push_gen_1(), bulk_server=bulk_server
+            )
+        )
+        held_tensor_1 = restored_req_1.args[0]["tensor"]
+        np.testing.assert_array_equal(held_tensor_1, arr1)
+
+        # 2. Second _OP_PUSH of identical size while `held_tensor_1` is still
+        # referenced must NOT overwrite `held_tensor_1` in-place.
+        push_chunks_2 = await _push_req_chunks(
+            req2, "localhost", bulk_server.port
+        )
+
+        async def _push_gen_2():
+          for c in push_chunks_2:
+            yield c
+
+        restored_req_2 = (
+            await remote_lib.ExecutionRequest.deserialize_async_chunks(
+                _push_gen_2(), bulk_server=bulk_server
+            )
+        )
+        np.testing.assert_array_equal(restored_req_2.args[0]["tensor"], arr2)
+        np.testing.assert_array_equal(held_tensor_1, arr1)
+
+        # 3. Verify _OP_PULL (Server -> Client)
+        async def _pull_gen():
+          async for c in resp.serialize_async_chunks(bulk_server=bulk_server):
+            yield c
+
+        restored_resp = (
+            await remote_lib.ExecutionResponse.deserialize_async_chunks(
+                _pull_gen(), bulk_hosts=("localhost",)
+            )
+        )
+        assert restored_resp is not None
+        np.testing.assert_array_equal(
+            restored_resp.unwrap()["tensor"], arr1 + 5
+        )
+
+      asyncio.run(_run())
+    finally:
+      bulk_server.stop()
+
+  def test_bulk_transfer_non_localhost_socket_pool_reuse_without_timeout_lag(
+      self,
+  ):
+    bulk_server = network_lib._BulkTransferServer()
+    bulk_server.start()
+    try:
+      arr = np.arange(256 * 1024, dtype=np.int32)  # 1 MiB >= 512 KiB
+      req = remote_lib.ExecutionRequest(
+          request_id="non_localhost_req",
+          method_name="echo",
+          args=({"tensor": arr},),
+          kwargs={},
+      )
+      resp = remote_lib.ExecutionResponse(result={"tensor": arr + 3})
+
+      async def _run():
+        # Using 127.0.0.2 exercises the non-localhost socket.create_connection
+        # path in _BulkSocketPool._connect. Two rounds of push + pull must
+        # reuse the pooled socket in microseconds without stalling on
+        # _is_socket_alive.
+        for _ in range(2):
+          t0 = time.monotonic()
+          _, _, views, raw_buffers, _ = (
+              network_lib._prepare_serialized_chunk_specs(req._as_tuple())
+          )
+          push_chunks = [
+              c
+              async for c in network_lib._stream_bulk_push_chunks(
+                  views, raw_buffers, ("127.0.0.2",), bulk_server.port
+              )
+          ]
+
+          async def _push_gen(items=push_chunks):
+            for c in items:
+              yield c
+
+          restored_req = (
+              await remote_lib.ExecutionRequest.deserialize_async_chunks(
+                  _push_gen(), bulk_server=bulk_server
+              )
+          )
+          np.testing.assert_array_equal(restored_req.args[0]["tensor"], arr)
+
+          async def _pull_gen():
+            async for c in resp.serialize_async_chunks(bulk_server=bulk_server):
+              yield c
+
+          restored_resp = (
+              await remote_lib.ExecutionResponse.deserialize_async_chunks(
+                  _pull_gen(), bulk_hosts=("127.0.0.2",)
+              )
+          )
+          assert restored_resp is not None
+          np.testing.assert_array_equal(
+              restored_resp.unwrap()["tensor"], arr + 3
+          )
+          elapsed = time.monotonic() - t0
+          self.assertLess(elapsed, 2.0)
+
+      asyncio.run(_run())
+    finally:
+      network_lib._DEFAULT_BULK_SOCKET_POOL.close_target(
+          "127.0.0.2", bulk_server.port
+      )
+      bulk_server.stop()
+
+  def test_multi_stripe_bulk_push_and_pull(self):
+    bulk_server = network_lib._BulkTransferServer()
+    bulk_server.start()
+    try:
+      with mock.patch.object(network_lib, "_MIN_BULK_STRIPE_BYTES", 512 * 1024):
+        arr = np.arange(512 * 1024, dtype=np.int32)  # 2 MiB -> 4 stripes
+        stripes = network_lib._plan_bulk_stripes([arr.nbytes])
+        self.assertLen(stripes, 4)
+
+        req = remote_lib.ExecutionRequest(
+            request_id="multi_stripe_req",
+            method_name="echo",
+            args=({"tensor": arr},),
+            kwargs={},
+        )
+        resp = remote_lib.ExecutionResponse(result={"tensor": arr + 9})
+
+        async def _run():
+          _, _, views, raw_buffers, _ = (
+              network_lib._prepare_serialized_chunk_specs(req._as_tuple())
+          )
+          push_chunks = [
+              c
+              async for c in network_lib._stream_bulk_push_chunks(
+                  views, raw_buffers, ("localhost",), bulk_server.port
+              )
+          ]
+
+          async def _push_gen():
+            for c in push_chunks:
+              yield c
+
+          restored_req = (
+              await remote_lib.ExecutionRequest.deserialize_async_chunks(
+                  _push_gen(), bulk_server=bulk_server
+              )
+          )
+          np.testing.assert_array_equal(restored_req.args[0]["tensor"], arr)
+
+          async def _pull_gen():
+            async for c in resp.serialize_async_chunks(bulk_server=bulk_server):
+              yield c
+
+          restored_resp = (
+              await remote_lib.ExecutionResponse.deserialize_async_chunks(
+                  _pull_gen(), bulk_hosts=("localhost",)
+              )
+          )
+          assert restored_resp is not None
+          np.testing.assert_array_equal(
+              restored_resp.unwrap()["tensor"], arr + 9
+          )
+
+        asyncio.run(_run())
+    finally:
+      bulk_server.stop()
+
+  def test_bulk_transfer_token_isolation_and_bounds_validation(self):
+    tid1 = network_lib._allocate_transfer_id()
+    tid2 = network_lib._allocate_transfer_id()
+    self.assertIsInstance(tid1, bytes)
+    self.assertLen(tid1, 16)
+    self.assertNotEqual(tid1, tid2)
+
+    bulk_server = network_lib._BulkTransferServer()
+    bulk_server.start()
+    try:
+      entry = bulk_server._get_or_create_incoming(tid1, 1024)
+      assert entry is not None
+      with self.assertRaisesRegex(ValueError, "Conflicting total_bytes"):
+        bulk_server._get_or_create_incoming(tid1, 2048)
+
+      mv = entry.get_or_alloc_view(0, 1024)
+      self.assertLen(mv, 1024)
+      with self.assertRaisesRegex(ValueError, "Mismatched buf_total_len"):
+        entry.get_or_alloc_view(0, 512)
+      with self.assertRaisesRegex(
+          ValueError, "Invalid bulk buffer allocation exceeds declared"
+      ):
+        entry.get_or_alloc_view(1, 512)
+      with self.assertRaisesRegex(ValueError, "Invalid bulk buffer"):
+        entry.get_or_alloc_view(2, 4096)
+      entry.release_views()
+    finally:
+      bulk_server.stop()
+
+  def test_unreachable_bulk_port_surfaces_connection_error_and_rolls_back_session(
+      self,
+  ):
+    async def _run():
+      engine = StubWorkerEngine("worker_unreachable_bulk")
+      async with running_grpc_server(engine) as (_, handle):
+        dead_port = portpicker.pick_unused_port()
+        # Force a stale/unreachable bulk port on the handle to simulate a
+        # firewall block or server restart on a new ephemeral bulk port.
+        handle._bulk_port = dead_port
+        arr = np.ones(256 * 1024, dtype=np.int32)  # 1 MiB >= 512 KiB
+
+        with self.assertRaises(OSError):
+          await handle.asubmit("echo", {"tensor": arr})
+        # Cached bulk port must be invalidated after push failure.
+        self.assertIsNone(handle._bulk_port)
+
+        # Verify TaskSession rolls back _in_flight when dispatch_task
+        # fails due to an unreachable bulk port.
+        async with task_session.TaskSession([handle]) as session:
+          handle._bulk_port = dead_port
+          with self.assertRaises(OSError):
+            await session.submit("req_fail_bulk", "echo", {"tensor": arr})
+          self.assertEqual(session._in_flight, 0)
+          self.assertEmpty(session._dispatched_tasks.get(handle, set()))
+
+    asyncio.run(_run())
+
+  def test_stale_server_bulk_port_mismatch_invalidates_and_recovers_on_retry(
+      self,
+  ):
+    # V2 + W5#3 regression test: When client has a cached _bulk_port pointing to
+    # an auxiliary bulk server (simulating a worker restart onto a new bulk
+    # port), both SubmitTask and DispatchTask reject the push manifest with
+    # FAILED_PRECONDITION, the client invalidates _bulk_port, and the next
+    # asubmit() / dispatch_task() re-discovers the real bulk port and succeeds.
+    aux_bulk_server = network_lib._BulkTransferServer()
+    aux_port = aux_bulk_server.start()
+    try:
+      async def _run():
+        engine = StubWorkerEngine("worker_port_mismatch")
+        port = portpicker.pick_unused_port()
+        server = remote_lib.GrpcRemoteExecutionServer(engine)
+        await server.start_serving_async(port=port)
+        handle = remote_lib.GrpcRemoteActorHandle(
+            target_address=f"grpc://127.0.0.2:{port}"
+        )
+        try:
+          arr = np.arange(256 * 1024, dtype=np.int32)  # 1 MiB
+          # 1. SubmitTask with stale _bulk_port
+          handle._bulk_port = aux_port
+          handle._seen_bulk_targets.add(("127.0.0.2", aux_port))
+          with self.assertRaisesRegex(
+              ConnectionError, "Bulk push manifest port mismatch"
+          ):
+            await handle.asubmit("echo", {"tensor": arr})
+          self.assertIsNone(handle._bulk_port)
+
+          recovered = await handle.asubmit("echo", {"tensor": arr + 7})
+          np.testing.assert_array_equal(recovered["tensor"], arr + 7)
+          assert server._bulk_server is not None
+          self.assertEqual(handle._bulk_port, server._bulk_server.port)
+
+          # 2. DispatchTask with stale _bulk_port
+          handle._bulk_port = aux_port
+          handle._seen_bulk_targets.add(("127.0.0.2", aux_port))
+          with self.assertRaisesRegex(
+              ConnectionError, "Bulk push manifest port mismatch"
+          ):
+            await handle.dispatch_task(
+                "req_mismatch_dt", "echo", {"tensor": arr}
+            )
+          self.assertIsNone(handle._bulk_port)
+
+          ack = await handle.dispatch_task(
+              "req_recovered_dt", "echo", {"tensor": arr + 9}
+          )
+          self.assertEqual(ack, "req_recovered_dt")
+          polled = await handle.poll_responses(timeout_s=5.0)
+          self.assertIsNotNone(polled)
+          np.testing.assert_array_equal(polled.unwrap()["tensor"], arr + 9)
+          self.assertEqual(handle._bulk_port, server._bulk_server.port)
+        finally:
+          await handle.close()
+          await server.stop_serving(grace=0.0)
+
+      asyncio.run(_run())
+    finally:
+      aux_bulk_server.stop()
+
+  def test_cancelling_unrelated_rpc_preserves_cached_bulk_port_and_pool(self):
+    # V4 + W5#1 regression test: Cancelling an in-flight RPC must not invalidate
+    # _bulk_port or tear down the shared bulk socket pool for the target.
+    async def _run():
+      started = asyncio.Event()
+      release = asyncio.Event()
+
+      class _SlowEngine(StubWorkerEngine):
+
+        async def slow_op(self, x: int) -> int:
+          started.set()
+          await release.wait()
+          return x + 1
+
+      engine = _SlowEngine("slow_cancel_worker")
+      port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(engine)
+      await server.start_serving_async(port=port)
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://127.0.0.2:{port}"
+      )
+      try:
+        arr = np.arange(256 * 1024, dtype=np.int32)
+        out = await handle.asubmit("echo", {"tensor": arr})
+        np.testing.assert_array_equal(out["tensor"], arr)
+        assert server._bulk_server is not None
+        expected_bulk_port = server._bulk_server.port
+        self.assertEqual(handle._bulk_port, expected_bulk_port)
+        pool_key = ("127.0.0.2", expected_bulk_port)
+        self.assertNotEmpty(
+            network_lib._DEFAULT_BULK_SOCKET_POOL._pools.get(pool_key, ())
+        )
+
+        slow_task = asyncio.create_task(handle.asubmit("slow_op", 41))
+        await asyncio.wait_for(started.wait(), timeout=5.0)
+        slow_task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+          await slow_task
+        release.set()
+
+        # _bulk_port, _seen_bulk_targets, and pooled sockets must remain intact.
+        self.assertEqual(handle._bulk_port, expected_bulk_port)
+        self.assertIn(pool_key, handle._seen_bulk_targets)
+        self.assertNotEmpty(
+            network_lib._DEFAULT_BULK_SOCKET_POOL._pools.get(pool_key, ())
+        )
+      finally:
+        release.set()
+        await handle.close()
+        await server.stop_serving(grace=0.0)
+
+    asyncio.run(_run())
+
+  def test_bulk_server_stop_wakes_threads_and_evicts_stale_incoming(self):
+    # W7 + L5 regression test: Background _cleanup_loop evicts expired unclaimed
+    # entries automatically without requiring a subsequent push.
+    bulk_server = network_lib._BulkTransferServer()
+    port = bulk_server.start()
+    client_sock = socket.create_connection(("127.0.0.1", port), timeout=5.0)
+    try:
+      stale_tid = network_lib._allocate_transfer_id()
+      stale_entry = bulk_server._get_or_create_incoming(stale_tid, 1024)
+      assert stale_entry is not None
+      _ = stale_entry.get_or_alloc_view(0, 1024)
+      self.assertEqual(bulk_server._unclaimed_bytes, 1024)
+      # Backdate created_at past _INCOMING_TTL_S after asserting
+      # _unclaimed_bytes so there is no race window between allocation and the
+      # assertion.
+      stale_entry.created_at = (
+          time.monotonic() - network_lib._INCOMING_TTL_S - 10.0
+      )
+
+      deadline = time.monotonic() + 2.0
+      while stale_tid in bulk_server._incoming and time.monotonic() < deadline:
+        time.sleep(0.02)
+      self.assertNotIn(stale_tid, bulk_server._incoming)
+      self.assertEqual(bulk_server._unclaimed_bytes, 0)
+
+      t0 = time.monotonic()
+      bulk_server.stop()
+      stop_elapsed = time.monotonic() - t0
+      self.assertLess(stop_elapsed, 1.0)
+      if bulk_server._accept_thread is not None:
+        self.assertFalse(bulk_server._accept_thread.is_alive())
+      if bulk_server._cleanup_thread is not None:
+        self.assertFalse(bulk_server._cleanup_thread.is_alive())
+      for t in list(bulk_server._conn_threads):
+        self.assertFalse(t.is_alive())
+    finally:
+      client_sock.close()
+
+  def test_recv_into_exact_handles_max_rw_count_and_short_reads(self):
+    payload = np.arange(1024, dtype=np.uint8).tobytes()
+    with mock.patch.object(network_lib, "_MAX_SOCKET_RW_CHUNK_BYTES", 256):
+      s_left, s_right = socket.socketpair()
+      try:
+        s_left.settimeout(2.0)
+        s_right.settimeout(2.0)
+        s_left.sendall(payload)
+        s_left.shutdown(socket.SHUT_WR)
+
+        dst = bytearray(len(payload))
+        mv = memoryview(dst)
+        try:
+          self.assertEqual(network_lib._recv_into_exact(s_right, mv, 0), 0)
+          got = network_lib._recv_into_exact(s_right, mv, len(payload))
+        finally:
+          mv.release()
+        self.assertLen(payload, got)
+        self.assertEqual(bytes(dst), payload)
+
+        # Verify EOF branch returns partial read count when peer closes early.
+        eof_dst = bytearray(64)
+        eof_mv = memoryview(eof_dst)
+        try:
+          eof_got = network_lib._recv_into_exact(s_right, eof_mv, 64)
+        finally:
+          eof_mv.release()
+        self.assertEqual(eof_got, 0)
+      finally:
+        s_left.close()
+        s_right.close()
+
+    # Deterministic short-read fake socket (7 bytes per recv_into call) +
+    # kernel SO_RCVTIMEO BlockingIOError -> TimeoutError conversion.
+    class _ShortReadFakeSocket:
+
+      def __init__(self, data: bytes, step: int = 7) -> None:
+        self._data = data
+        self._pos = 0
+        self._step = step
+
+      def recv_into(
+          self,
+          buf: memoryview,  # pylint: disable=g-bare-generic
+          nbytes: int,
+          flags: int = 0,
+      ) -> int:
+        del flags
+        if self._pos >= len(self._data):
+          return 0
+        take = min(nbytes, self._step, len(self._data) - self._pos)
+        buf[:take] = self._data[self._pos : self._pos + take]
+        self._pos += take
+        return take
+
+    fake_sock: Any = _ShortReadFakeSocket(payload, step=7)
+    short_dst = bytearray(len(payload))
+    short_mv = memoryview(short_dst)
+    try:
+      got_short = network_lib._recv_into_exact(
+          fake_sock, short_mv, len(payload)
+      )
+    finally:
+      short_mv.release()
+    self.assertLen(payload, got_short)
+    self.assertEqual(bytes(short_dst), payload)
+
+    # W5#2 + Simplification K: Partial sendmsg fake socket (11 bytes per call)
+    # across a multi-segment _SegmentedBulkView with > _MAX_SENDMSG_IOVS IOVs.
+    class _PartialSendmsgSocket:
+
+      def __init__(self, step: int = 11) -> None:
+        self.sent = bytearray()
+        self._step = step
+
+      def sendmsg(self, buffers: list[memoryview]) -> int:  # pylint: disable=g-bare-generic
+        rem = self._step
+        total = 0
+        for b in buffers:
+          take = min(len(b), rem)
+          self.sent.extend(b[:take])
+          total += take
+          rem -= take
+          if rem == 0:
+            break
+        return total
+
+    seg_arrays = [bytearray([i % 251, (i * 7) % 251, 9]) for i in range(600)]
+    seg_mvs = [memoryview(b) for b in seg_arrays]
+    try:
+      multi_seg = network_lib._SegmentedBulkView(seg_mvs)
+      partial_sock: Any = _PartialSendmsgSocket(step=11)
+      network_lib._send_bulk_view_slice(
+          partial_sock, multi_seg, 5, multi_seg.total_len - 10
+      )
+      expected_bytes = b"".join(bytes(b) for b in seg_arrays)[
+          5 : multi_seg.total_len - 5
+      ]
+      self.assertEqual(bytes(partial_sock.sent), expected_bytes)
+      with self.assertRaisesRegex(ValueError, "slice_iov out of bounds"):
+        multi_seg.slice_iov(-1, 4)
+      with self.assertRaisesRegex(ValueError, "slice_iov out of bounds"):
+        multi_seg.slice_iov(0, multi_seg.total_len + 1)
+    finally:
+      for m in seg_mvs:
+        m.release()
+
+    class _TimeoutFakeSocket:
+
+      def recv_into(
+          self,
+          buf: memoryview,  # pylint: disable=g-bare-generic
+          nbytes: int,
+          flags: int = 0,
+      ) -> int:
+        del buf, nbytes, flags
+        raise BlockingIOError("Resource temporarily unavailable")
+
+      def sendall(self, data: bytes) -> None:
+        del data
+        raise BlockingIOError("Resource temporarily unavailable")
+
+      def sendmsg(self, buffers: list[memoryview]) -> int:  # pylint: disable=g-bare-generic
+        del buffers
+        raise BlockingIOError("Resource temporarily unavailable")
+
+    timeout_sock: Any = _TimeoutFakeSocket()
+    err_dst = bytearray(16)
+    err_mv = memoryview(err_dst)
+    try:
+      with self.assertRaises(TimeoutError):
+        network_lib._recv_into_exact(timeout_sock, err_mv, 16)
+      with self.assertRaises(TimeoutError):
+        network_lib._sendall_with_timeout(timeout_sock, b"ping")
+      seg_view = network_lib._SegmentedBulkView([err_mv])
+      with self.assertRaises(TimeoutError):
+        network_lib._send_bulk_view_slice(timeout_sock, seg_view, 0, 16)
+    finally:
+      err_mv.release()
+
+  def test_non_loopback_handle_discovers_probes_and_streams_bulk_e2e(self):
+    port = portpicker.pick_unused_port()
+    engine = StubWorkerEngine("non_loopback_worker")
+    with background_server(engine, port) as (srv, _):
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://127.0.0.2:{port}"
+      )
+      try:
+        with mock.patch.object(
+            network_lib, "_MIN_BULK_STRIPE_BYTES", 512 * 1024
+        ):
+          arr = np.arange(512 * 1024, dtype=np.int32)  # 2 MiB -> 4 stripes
+          small_meta = [
+              np.full(128, idx + 1, dtype=np.float32) for idx in range(8)
+          ]
+          payload = {"tensor": arr, "small_meta": small_meta}
+
+          # 1. Blocking submit() over 127.0.0.2 with multi-stripe bulk transfer
+          sync_out = handle.submit("echo", payload)
+          np.testing.assert_array_equal(sync_out["tensor"], arr)
+          for idx, m in enumerate(sync_out["small_meta"]):
+            np.testing.assert_array_equal(m, small_meta[idx])
+          assert srv._bulk_server is not None
+          self.assertEqual(handle._bulk_port, srv._bulk_server.port)
+          self.assertIn(
+              ("127.0.0.2", srv._bulk_server.port), handle._seen_bulk_targets
+          )
+          # Verify multiple sockets were pooled from parallel stripes.
+          pool_key = ("127.0.0.2", srv._bulk_server.port)
+          pooled_socks = network_lib._DEFAULT_BULK_SOCKET_POOL._pools.get(
+              pool_key, ()
+          )
+          self.assertGreaterEqual(len(pooled_socks), 2)
+
+          # 2. Async asubmit() + dispatch_task/poll_responses over 127.0.0.2
+          async def _run_async():
+            out = await handle.asubmit("echo", payload)
+            np.testing.assert_array_equal(out["tensor"], arr)
+            ack = await handle.dispatch_task("req_nl_1", "echo", payload)
+            self.assertEqual(ack, "req_nl_1")
+            polled = await handle.poll_responses(timeout_s=5.0)
+            self.assertIsNotNone(polled)
+            np.testing.assert_array_equal(polled.unwrap()["tensor"], arr)
+
+          asyncio.run(_run_async())
+      finally:
+        asyncio.run(handle.close())
+
+  def test_bulk_probe_failure_negative_caches_and_recovers_for_small_req_large_resp(
+      self,
+  ):
+    # W1 + N1 + R1 + R2' + T2(c) regression test:
+    # - Covers GetBulkPort UNIMPLEMENTED (permanently disables bulk with inf
+    #   cooldown), short-response handling, negative-caching, and non-blocking
+    #   background re-probe recovery on a small-request / large-response
+    #   workload after _BULK_PROBE_RETRY_COOLDOWN_S expires.
+    # - Covers R2' (Option X): cancelling an in-flight background re-probe when
+    #   a short-lived asyncio.run() loop exits keeps the 60s cooldown active so
+    #   repeated short-lived asyncio.run() calls do not spam GetBulkPort on
+    #   every call.
+    class _LargeRespEngine(StubWorkerEngine):
+
+      def make_large(self, seed: int) -> dict[str, Any]:
+        return {"big": np.full(256 * 1024, seed, dtype=np.int32)}
+
+    async def _run():
+      engine = _LargeRespEngine("probe_fallback_worker")
+      port = portpicker.pick_unused_port()
+      pinned_bulk_port = portpicker.pick_unused_port()
+      dead_bulk_port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(
+          engine, bulk_port=pinned_bulk_port
+      )
+      real_get_bulk_port = server._handle_get_bulk_port
+      get_port_calls = 0
+      mode = "unimplemented"
+      reprobe_hold = asyncio.Event()
+
+      async def _fake_get_bulk_port(
+          request_bytes: bytes, context: Any
+      ) -> bytes:
+        nonlocal get_port_calls
+        get_port_calls += 1
+        if mode == "unimplemented":
+          await context.abort(
+              remote_lib._grpc_lib.StatusCode.UNIMPLEMENTED,
+              "GetBulkPort not implemented",
+          )
+        if mode == "short":
+          return b"\x01\x02"
+        if mode == "dead":
+          return network_lib._encode_bulk_port_response(dead_bulk_port)
+        if mode == "real_hold":
+          await reprobe_hold.wait()
+        return await real_get_bulk_port(request_bytes, context)
+
+      server._handle_get_bulk_port = _fake_get_bulk_port
+      await server.start_serving_async(port=port)
+      assert server._bulk_server is not None
+      self.assertEqual(server._bulk_server.port, pinned_bulk_port)
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://127.0.0.2:{port}"
+      )
+      try:
+        arr = np.arange(256 * 1024, dtype=np.int32)  # 1 MiB
+        # 1. UNIMPLEMENTED sets _bulk_port = 0 with infinite cooldown so legacy
+        # servers are never re-probed.
+        res_unimp = await handle.asubmit("echo", {"tensor": arr})
+        np.testing.assert_array_equal(res_unimp["tensor"], arr)
+        self.assertEqual(handle._bulk_port, 0)
+        self.assertEqual(handle._bulk_probe_failed_until, float("inf"))
+        self.assertEqual(get_port_calls, 1)
+        _ = await handle.asubmit("echo", {"tensor": arr + 1})
+        self.assertEqual(get_port_calls, 1)
+
+        # 2. Short (<8B) response negative-caches _bulk_port = 0.
+        handle._invalidate_bulk_port()
+        mode = "short"
+        res0 = await handle.asubmit("echo", {"tensor": arr})
+        np.testing.assert_array_equal(res0["tensor"], arr)
+        self.assertEqual(handle._bulk_port, 0)
+        self.assertEqual(get_port_calls, 2)
+
+        # 3. Dead bulk port fails probe and stays negative-cached for 3 calls.
+        handle._invalidate_bulk_port()
+        mode = "dead"
+        for i in range(3):
+          res = await handle.asubmit("echo", {"tensor": arr + i})
+          np.testing.assert_array_equal(res["tensor"], arr + i)
+        self.assertEqual(handle._bulk_port, 0)
+        self.assertEqual(get_port_calls, 3)
+        self.assertEmpty(handle._seen_bulk_targets)
+
+        # 4. W1 + N1 + T2(c): Hold the background re-probe task on
+        # `reprobe_hold` so `big_first` deterministically completes via gRPC
+        # chunks (`mock_pull.call_count == 0`); then release `reprobe_hold`,
+        # await `_resolve_task`, and verify `big_out` uses `_OP_PULL`.
+        reprobe_hold.clear()
+        mode = "real_hold"
+        handle._bulk_probe_failed_until = time.monotonic() - 1.0
+        with mock.patch.object(
+            network_lib,
+            "_pull_stripe_sync",
+            wraps=network_lib._pull_stripe_sync,
+        ) as mock_pull:
+          big_first = await handle.asubmit("make_large", 18)
+          np.testing.assert_array_equal(
+              big_first["big"], np.full(256 * 1024, 18, dtype=np.int32)
+          )
+          self.assertEqual(mock_pull.call_count, 0)
+          reprobe_hold.set()
+          if handle._resolve_task is not None:
+            await handle._resolve_task
+          self.assertEqual(handle._bulk_port, pinned_bulk_port)
+          self.assertEqual(get_port_calls, 4)
+
+          mode = "real"
+          mock_pull.reset_mock()
+          big_out = await handle.asubmit("make_large", 19)
+          np.testing.assert_array_equal(
+              big_out["big"], np.full(256 * 1024, 19, dtype=np.int32)
+          )
+          self.assertGreaterEqual(mock_pull.call_count, 1)
+      finally:
+        await handle.close()
+        await server.stop_serving(grace=0.0)
+
+    asyncio.run(_run())
+
+    # 5. R2' (Option X) regression test: When a background re-probe task spawned
+    # inside a short-lived `asyncio.run()` loop is cancelled upon loop close,
+    # `_bulk_probe_failed_until` stays at the 60s cooldown so repeated short
+    # `asyncio.run()` calls do not fire `GetBulkPort` on every call; once the
+    # cooldown expires, the next loop re-probes and recovers `_bulk_port`.
+    r2_port = portpicker.pick_unused_port()
+    with background_server(StubWorkerEngine("r2_loop_worker"), r2_port) as (
+        r2_srv,
+        _,
+    ):
+      r2_handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://127.0.0.2:{r2_port}"
+      )
+      try:
+        r2_handle._bulk_port = 0
+        r2_handle._bulk_probe_failed_until = time.monotonic() - 1.0
+        probe_calls = 0
+
+        async def _slow_probe(host: str, port: int) -> None:
+          nonlocal probe_calls
+          del host, port
+          probe_calls += 1
+          await asyncio.sleep(10.0)
+
+        with mock.patch.object(
+            network_lib._DEFAULT_BULK_SOCKET_POOL,
+            "probe_async",
+            side_effect=_slow_probe,
+        ):
+          first_resolve_task = None
+          for idx in range(3):
+            out = asyncio.run(
+                r2_handle.asubmit("compute_trajectory", f"r2_p{idx}", turns=1)
+            )
+            self.assertIn(f"r2_p{idx}", out)
+            if idx == 0:
+              first_resolve_task = r2_handle._resolve_task
+              self.assertIsNotNone(first_resolve_task)
+            else:
+              self.assertIs(r2_handle._resolve_task, first_resolve_task)
+        # Only the first short-lived asyncio.run() spawned a re-probe; the next
+        # two respected the 60s cooldown instead of spamming GetBulkPort.
+        self.assertEqual(probe_calls, 1)
+        self.assertEqual(r2_handle._bulk_port, 0)
+        self.assertGreater(r2_handle._bulk_probe_failed_until, time.monotonic())
+
+        # Expire cooldown and verify recovery on the next loop.
+        r2_handle._bulk_probe_failed_until = time.monotonic() - 1.0
+
+        async def _recover_loop() -> None:
+          out2 = await r2_handle.asubmit(
+              "compute_trajectory", "r2_rec", turns=1
+          )
+          self.assertIn("r2_rec", out2)
+          if r2_handle._resolve_task is not None:
+            await r2_handle._resolve_task
+
+        asyncio.run(_recover_loop())
+        assert r2_srv._bulk_server is not None
+        self.assertEqual(r2_handle._bulk_port, r2_srv._bulk_server.port)
+      finally:
+        asyncio.run(r2_handle.close())
+
+  def test_bulk_probe_single_flight_shielding_and_invalidate_mid_probe(self):
+    # R2 + R4 regression test:
+    # 1. R2: Cancelling one concurrent cold-start caller while the single-flight
+    #    `_resolve_task` is in flight must not cancel the probe for remaining
+    #    callers.
+    # 2. R4: Calling `_invalidate_bulk_port()` (or externally cancelling the
+    #    inner `_resolve_task`) while concurrent callers are awaiting
+    #    `_ensure_bulk_port()` must NOT raise `CancelledError` in those callers;
+    #    they must cleanly receive 0 and fall back to gRPC chunks.
+    class _LargeRespEngine(StubWorkerEngine):
+
+      def make_large(self, seed: int) -> dict[str, Any]:
+        return {"big": np.full(256 * 1024, seed, dtype=np.int32)}
+
+    async def _run():
+      engine = _LargeRespEngine("r2_r4_worker")
+      port = portpicker.pick_unused_port()
+      pinned_bulk_port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(
+          engine, bulk_port=pinned_bulk_port
+      )
+      real_get_bulk_port = server._handle_get_bulk_port
+      get_port_calls = 0
+      probe_entered = asyncio.Event()
+      probe_hold = asyncio.Event()
+
+      async def _fake_get_bulk_port(
+          request_bytes: bytes, context: Any
+      ) -> bytes:
+        nonlocal get_port_calls
+        get_port_calls += 1
+        probe_entered.set()
+        await probe_hold.wait()
+        return await real_get_bulk_port(request_bytes, context)
+
+      server._handle_get_bulk_port = _fake_get_bulk_port
+      await server.start_serving_async(port=port)
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://127.0.0.2:{port}"
+      )
+      try:
+        # 1. R2: Cancel task_a mid-probe; task_b must still complete and cache
+        # pinned_bulk_port with a single GetBulkPort call.
+        task_a = asyncio.create_task(handle.asubmit("make_large", 30))
+        task_b = asyncio.create_task(handle.asubmit("make_large", 31))
+        await asyncio.wait_for(probe_entered.wait(), timeout=5.0)
+        task_a.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+          await task_a
+        probe_hold.set()
+        out_b = await task_b
+        np.testing.assert_array_equal(
+            out_b["big"], np.full(256 * 1024, 31, dtype=np.int32)
+        )
+        self.assertEqual(handle._bulk_port, pinned_bulk_port)
+        self.assertEqual(get_port_calls, 1)
+
+        # 2. R4: Call _invalidate_bulk_port() while both asubmit() and
+        # poll_responses() are awaiting _ensure_bulk_port(). Neither waiter may
+        # raise CancelledError; both must fall back to gRPC chunks and succeed.
+        ack = await handle.dispatch_task("req_r4_poll", "make_large", 42)
+        self.assertEqual(ack, "req_r4_poll")
+        handle._invalidate_bulk_port()
+        probe_entered.clear()
+        probe_hold.clear()
+
+        submit_waiter = asyncio.create_task(handle.asubmit("make_large", 41))
+        poll_waiter = asyncio.create_task(handle.poll_responses(timeout_s=5.0))
+        await asyncio.wait_for(probe_entered.wait(), timeout=5.0)
+        # Invalidate mid-probe while both waiters are blocked on _resolve_task.
+        handle._invalidate_bulk_port()
+        probe_hold.set()
+
+        out_submit, out_poll = await asyncio.gather(submit_waiter, poll_waiter)
+        np.testing.assert_array_equal(
+            out_submit["big"], np.full(256 * 1024, 41, dtype=np.int32)
+        )
+        self.assertIsNotNone(out_poll)
+        np.testing.assert_array_equal(
+            out_poll.unwrap()["big"], np.full(256 * 1024, 42, dtype=np.int32)
+        )
+        # Stale probe generation must not have written back _bulk_port.
+        self.assertIsNone(handle._bulk_port)
+
+        # 3. Hardening check: When `handle.close()` cancels an active
+        # `_resolve_task` on the running loop while a non-cancelled caller
+        # awaits `_ensure_bulk_port()`, `_ensure_bulk_port()` returns 0 instead
+        # of raising `CancelledError`, and `_resolve_task` is cancelled cleanly.
+        probe_entered.clear()
+        probe_hold.clear()
+        ensure_waiter = asyncio.create_task(
+            handle._ensure_bulk_port(handle._get_bulk_port_rpc)
+        )
+        await asyncio.wait_for(probe_entered.wait(), timeout=5.0)
+        in_flight_resolve = handle._resolve_task
+        self.assertIsNotNone(in_flight_resolve)
+        await handle.close()
+        self.assertEqual(await ensure_waiter, 0)
+        assert in_flight_resolve is not None
+        self.assertTrue(in_flight_resolve.cancelled())
+      finally:
+        probe_hold.set()
+        await handle.close()
+        await server.stop_serving(grace=0.0)
+
+    asyncio.run(_run())
+
+  def test_bulk_pull_failure_invalidates_port_while_user_setstate_error_preserves_it(
+      self,
+  ):
+    class _BadUnpicklePayload:
+
+      def __reduce__(self):
+        return (_BadUnpicklePayload, (), {"x": 1})
+
+      def __setstate__(self, state: Any) -> None:
+        del state
+        raise OSError("simulated user __setstate__ error")
+
+    class _LargeRespEngine(StubWorkerEngine):
+
+      def make_large(self, seed: int) -> dict[str, Any]:
+        if seed == -999:
+          return {
+              "big": np.full(256 * 1024, 1, dtype=np.int32),
+              "bad": _BadUnpicklePayload(),
+          }
+        return {"big": np.full(256 * 1024, seed, dtype=np.int32)}
+
+    async def _run():
+      engine = _LargeRespEngine("pull_invalidation_worker")
+      port = portpicker.pick_unused_port()
+      pinned_bulk_port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(
+          engine, bulk_port=pinned_bulk_port
+      )
+      await server.start_serving_async(port=port)
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://127.0.0.2:{port}"
+      )
+      try:
+        out = await handle.asubmit("make_large", 1)
+        np.testing.assert_array_equal(
+            out["big"], np.full(256 * 1024, 1, dtype=np.int32)
+        )
+        self.assertEqual(handle._bulk_port, pinned_bulk_port)
+
+        # 1. OSError raised inside user `__setstate__` during response
+        # unpickling must NOT invalidate `_bulk_port`.
+        with self.assertRaisesRegex(OSError, "simulated user __setstate__"):
+          await handle.asubmit("make_large", -999)
+        self.assertEqual(handle._bulk_port, pinned_bulk_port)
+
+        # 2. T1(b): PULL failure inside asubmit() and poll_responses() must
+        # automatically call handle._invalidate_bulk_port().
+        def _fail_pull(*args, **kwargs):
+          del args, kwargs
+          raise ConnectionError("Simulated mid-pull socket drop")
+
+        with mock.patch.object(
+            network_lib, "_pull_stripe_sync", side_effect=_fail_pull
+        ):
+          with self.assertRaises(ConnectionError):
+            await handle.asubmit("make_large", 20)
+          self.assertIsNone(handle._bulk_port)
+
+        ack = await handle.dispatch_task("req_pull_fail", "make_large", 21)
+        self.assertEqual(ack, "req_pull_fail")
+        with mock.patch.object(
+            network_lib, "_pull_stripe_sync", side_effect=_fail_pull
+        ):
+          with self.assertRaises(ConnectionError):
+            await handle.poll_responses(timeout_s=5.0)
+          self.assertIsNone(handle._bulk_port)
+      finally:
+        await handle.close()
+        await server.stop_serving(grace=0.0)
+
+    asyncio.run(_run())
+
+  def test_enable_bulk_transport_false_negotiation_client_and_server(self):
+    arr = np.arange(256 * 1024, dtype=np.int32)  # 1 MiB
+
+    with self.assertRaisesRegex(
+        ValueError,
+        "bulk_hosts cannot be specified when enable_bulk_transport=False",
+    ):
+      remote_lib.GrpcRemoteExecutionServer(
+          StubWorkerEngine("srv_invalid_bulk_hosts"),
+          enable_bulk_transport=False,
+          bulk_hosts=("127.0.0.2",),
+      )
+    with self.assertRaisesRegex(
+        ValueError,
+        "bulk_hosts cannot be specified when enable_bulk_transport=False",
+    ):
+      remote_lib.GrpcRemoteActorHandle(
+          target_address="grpc://127.0.0.2:50051",
+          enable_bulk_transport=False,
+          bulk_hosts=("127.0.0.2",),
+      )
+
+    # Case 1: Client disables bulk transport while server has it enabled.
+    port1 = portpicker.pick_unused_port()
+    with background_server(StubWorkerEngine("srv_bulk_on"), port1):
+      hdl_client_off = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://127.0.0.2:{port1}",
+          enable_bulk_transport=False,
+      )
+      try:
+        out_sync = hdl_client_off.submit("echo", payload := {"tensor": arr})
+        np.testing.assert_array_equal(out_sync["tensor"], payload["tensor"])
+
+        async def _client_off_async():
+          out_a = await hdl_client_off.asubmit("echo", {"tensor": arr + 1})
+          np.testing.assert_array_equal(out_a["tensor"], arr + 1)
+          await hdl_client_off.dispatch_task(
+              "req_off_1", "echo", {"tensor": arr + 2}
+          )
+          polled = await hdl_client_off.poll_responses(timeout_s=5.0)
+          self.assertIsNotNone(polled)
+          np.testing.assert_array_equal(polled.unwrap()["tensor"], arr + 2)
+
+        asyncio.run(_client_off_async())
+        self.assertIsNone(hdl_client_off._bulk_port)
+        self.assertEmpty(hdl_client_off._seen_bulk_targets)
+        self.assertEqual(hdl_client_off._active_bulk_hosts, ())
+        hdl_client_off._invalidate_bulk_port()
+        self.assertEqual(hdl_client_off._active_bulk_hosts, ())
+      finally:
+        asyncio.run(hdl_client_off.close())
+
+    # Case 2: Server disables bulk transport while client has it enabled.
+    async def _server_off_async():
+      port2 = portpicker.pick_unused_port()
+      srv_off = remote_lib.GrpcRemoteExecutionServer(
+          StubWorkerEngine("srv_bulk_off"),
+          enable_bulk_transport=False,
+      )
+      await srv_off.start_serving_async(port=port2)
+      self.assertIsNone(srv_off._bulk_server)
+      hdl_client_on = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://127.0.0.2:{port2}",
+          enable_bulk_transport=True,
+      )
+      try:
+        out_a = await hdl_client_on.asubmit("echo", {"tensor": arr + 3})
+        np.testing.assert_array_equal(out_a["tensor"], arr + 3)
+        await hdl_client_on.dispatch_task(
+            "req_srv_off", "echo", {"tensor": arr + 4}
+        )
+        polled = await hdl_client_on.poll_responses(timeout_s=5.0)
+        self.assertIsNotNone(polled)
+        np.testing.assert_array_equal(polled.unwrap()["tensor"], arr + 4)
+        self.assertEqual(hdl_client_on._bulk_port, 0)
+        self.assertEmpty(hdl_client_on._seen_bulk_targets)
+      finally:
+        await hdl_client_on.close()
+        await srv_off.stop_serving(grace=0.0)
+
+    asyncio.run(_server_off_async())
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="boundary_4mib_minus_1_vs_4mib",
+          header_len=128,
+          buffer_lengths=(
+              network_lib._BULK_PACK_MAX_BYTES - 1,
+              network_lib._BULK_PACK_MAX_BYTES,
+              30 * 1024 * 1024,
+              0,
+              4096,
+          ),
+          expected_packed_indices={0, 4},
+          expected_nonzero_bulk_count=3,
+      ),
+      dict(
+          testcase_name="w4_1024_x_1mib_coalesced_into_single_packed_tail",
+          header_len=128,
+          buffer_lengths=tuple([1024 * 1024] * 1024),
+          expected_packed_indices=set(range(1024)),
+          expected_nonzero_bulk_count=1,
+      ),
+  )
+  def test_plan_bulk_buffer_layout_boundaries(
+      self,
+      header_len: int,
+      buffer_lengths: tuple[int, ...],
+      expected_packed_indices: set[int],
+      expected_nonzero_bulk_count: int,
+  ):
+    layout = network_lib._plan_bulk_buffer_layout(header_len, buffer_lengths)
+    self.assertEqual(set(layout.packed_offsets.keys()), expected_packed_indices)
+    for idx, off in layout.packed_offsets.items():
+      self.assertEqual(off % network_lib._BULK_PACK_ALIGN, 0)
+      self.assertEqual(layout.bulk_lengths[idx], 0)
+    nonzero_bulk = [n for n in layout.bulk_lengths if n > 0]
+    self.assertLen(nonzero_bulk, expected_nonzero_bulk_count)
+    if expected_nonzero_bulk_count == 1:
+      stripes = network_lib._plan_bulk_stripes(layout.bulk_lengths)
+      self.assertLessEqual(len(stripes), network_lib._MAX_BULK_STRIPES)
+
+  def test_bulk_transfer_mixed_large_and_many_small_buffers_segmented_sendmsg(
+      self,
+  ):
+    # V1 + V3 + W3 + W4 + N2 + T1(f) regression test:
+    # 4,096 small arrays (including odd-sized uint8 and float64 arrays to test
+    # 64-byte alignment padding) + pickle header > 64 KiB + zero-length array
+    # + standalone 4 MiB array (>= _BULK_PACK_MAX_BYTES) coalesced via
+    # _SegmentedBulkView and vectored sendmsg.
+    bulk_server = network_lib._BulkTransferServer()
+    bulk_server.start()
+    try:
+      large_arr = np.arange(1024 * 1024, dtype=np.int32)  # 4 MiB standalone
+      small_arrays = [
+          np.arange((idx % 7) + 1, dtype=np.uint8)
+          if idx % 2 == 0
+          else np.full(32, idx + 0.5, dtype=np.float64)
+          for idx in range(4096)
+      ]
+      empty_arr = np.array([], dtype=np.float32)
+      payload = {
+          "large": large_arr,
+          "small_list": small_arrays,
+          "empty": empty_arr,
+      }
+      req = remote_lib.ExecutionRequest(
+          request_id="req_coalesce",
+          method_name="echo",
+          args=(payload,),
+          kwargs={},
+      )
+      resp = remote_lib.ExecutionResponse(result=payload)
+
+      async def _run():
+        with mock.patch.object(
+            network_lib, "_MIN_BULK_STRIPE_BYTES", 256 * 1024
+        ):
+          _, _, req_views, req_raw_buffers, _ = (
+              network_lib._prepare_serialized_chunk_specs(req._as_tuple())
+          )
+          push_chunks = [
+              c
+              async for c in network_lib._stream_bulk_push_chunks(
+                  req_views, req_raw_buffers, ("127.0.0.1",), bulk_server.port
+              )
+          ]
+          # Bulk transfer must NOT fall back to multi-chunk gRPC even when the
+          # pickle header exceeds 64 KiB and there are 4,096 small buffers.
+          self.assertLen(push_chunks, 1)
+          meta = remote_lib.pickle.loads(push_chunks[0])
+          self.assertIsInstance(meta, network_lib._BulkManifest)
+          self.assertEqual(meta.op, network_lib._OP_PUSH)
+          layout = network_lib._validate_bulk_manifest(meta)
+          self.assertGreater(meta.header_len, 64 * 1024)
+          self.assertLen(meta.buffer_lengths, 4098)
+          self.assertGreater(meta.total_bulk_bytes, 4 * 1024 * 1024)
+          # 2 non-zero bulk views: 1 for large_arr (4 MiB) + 1 trailing
+          # _SegmentedBulkView split across multiple stripes.
+          self.assertLen([n for n in layout.bulk_lengths if n > 0], 2)
+          stripes = network_lib._plan_bulk_stripes(layout.bulk_lengths)
+          self.assertGreater(len(stripes), 2)
+
+          async def _push_gen():
+            for c in push_chunks:
+              yield c
+
+          restored_req = (
+              await remote_lib.ExecutionRequest.deserialize_async_chunks(
+                  _push_gen(), bulk_server=bulk_server
+              )
+          )
+          restored_push = restored_req.args[0]
+          np.testing.assert_array_equal(restored_push["large"], large_arr)
+          self.assertEqual(restored_push["large"].ctypes.data % 64, 0)
+          self.assertEqual(restored_push["empty"].size, 0)
+          self.assertLen(restored_push["small_list"], 4096)
+          for idx in (0, 1, 2, 3, 511, 512, 2048, 4095):
+            arr_out = restored_push["small_list"][idx]
+            np.testing.assert_array_equal(arr_out, small_arrays[idx])
+            self.assertEqual(arr_out.ctypes.data % 64, 0)
+          # Zero-copy slice views must share the underlying packed buffer, while
+          # standalone >= 4 MiB arrays do not share the packed tail buffer.
+          self.assertIsNotNone(restored_push["small_list"][1].base)
+          self.assertIsNot(
+              restored_push["large"].base,
+              restored_push["small_list"][1].base,
+          )
+
+          # Verify _OP_PULL with the same >64 KiB header and 4,096 small arrays.
+          async def _pull_gen():
+            async for c in resp.serialize_async_chunks(bulk_server=bulk_server):
+              yield c
+
+          restored_resp = (
+              await remote_lib.ExecutionResponse.deserialize_async_chunks(
+                  _pull_gen(), bulk_hosts=("127.0.0.1",)
+              )
+          )
+          assert restored_resp is not None
+          restored_pull = restored_resp.unwrap()
+          np.testing.assert_array_equal(restored_pull["large"], large_arr)
+          self.assertEqual(restored_pull["large"].ctypes.data % 64, 0)
+          self.assertEqual(restored_pull["empty"].size, 0)
+          for idx in (0, 1, 2, 3, 511, 512, 2048, 4095):
+            arr_out = restored_pull["small_list"][idx]
+            np.testing.assert_array_equal(arr_out, small_arrays[idx])
+            self.assertEqual(arr_out.ctypes.data % 64, 0)
+
+      asyncio.run(_run())
+    finally:
+      bulk_server.stop()
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="invalid_op_code",
+          op=99,
+          port=5000,
+          total_bulk_bytes=1088,
+          header_len=64,
+          buffer_lengths=(1024,),
+          err_regex="Invalid bulk manifest header fields",
+      ),
+      dict(
+          testcase_name="bool_op_rejected",
+          op=True,
+          port=5000,
+          total_bulk_bytes=1088,
+          header_len=64,
+          buffer_lengths=(1024,),
+          err_regex="Invalid bulk manifest header fields",
+      ),
+      dict(
+          testcase_name="bool_port_rejected",
+          op=network_lib._OP_PULL,
+          port=True,
+          total_bulk_bytes=1088,
+          header_len=64,
+          buffer_lengths=(1024,),
+          err_regex="Invalid bulk manifest header fields",
+      ),
+      dict(
+          testcase_name="port_out_of_range",
+          op=network_lib._OP_PULL,
+          port=70000,
+          total_bulk_bytes=1088,
+          header_len=64,
+          buffer_lengths=(1024,),
+          err_regex="Invalid bulk manifest header fields",
+      ),
+      dict(
+          testcase_name="zero_header_len",
+          op=network_lib._OP_PULL,
+          port=5000,
+          total_bulk_bytes=1024,
+          header_len=0,
+          buffer_lengths=(1024,),
+          err_regex="Invalid bulk manifest header_len",
+      ),
+      dict(
+          testcase_name="bool_header_len_rejected",
+          op=network_lib._OP_PULL,
+          port=5000,
+          total_bulk_bytes=1088,
+          header_len=True,
+          buffer_lengths=(1024,),
+          err_regex="Invalid bulk manifest header_len",
+      ),
+      dict(
+          testcase_name="negative_buffer_length",
+          op=network_lib._OP_PULL,
+          port=5000,
+          total_bulk_bytes=1088,
+          header_len=64,
+          buffer_lengths=(-4,),
+          err_regex="Invalid bulk manifest buffer_lengths",
+      ),
+      dict(
+          testcase_name="bool_buffer_length_rejected",
+          op=network_lib._OP_PULL,
+          port=5000,
+          total_bulk_bytes=1088,
+          header_len=64,
+          buffer_lengths=(True,),
+          err_regex="Invalid bulk manifest buffer_lengths",
+      ),
+      dict(
+          testcase_name="mismatched_total_bulk_bytes",
+          op=network_lib._OP_PUSH,
+          port=5000,
+          total_bulk_bytes=999999,
+          header_len=16,
+          buffer_lengths=(4 * 1024 * 1024,),
+          err_regex="Mismatched total_bulk_bytes in bulk manifest",
+      ),
+  )
+  def test_validate_bulk_manifest_rejects_invalid_fields(
+      self,
+      op: Any,
+      port: Any,
+      total_bulk_bytes: Any,
+      header_len: Any,
+      buffer_lengths: Any,
+      err_regex: str,
+  ):
+    tid = network_lib._allocate_transfer_id()
+    manifest = network_lib._BulkManifest(
+        op, tid, port, total_bulk_bytes, header_len, buffer_lengths
+    )
+    with self.assertRaisesRegex(ValueError, err_regex):
+      network_lib._validate_bulk_manifest(manifest)
+
+  def test_bulk_manifest_deserialize_rejects_corrupt_and_port_mismatch(self):
+    bulk_server = network_lib._BulkTransferServer()
+    bulk_server.start()
+    try:
+      tid = network_lib._allocate_transfer_id()
+
+      async def _single_chunk(data: bytes):
+        yield data
+
+      async def _run():
+        with self.assertRaisesRegex(
+            ValueError, "Invalid stream manifest header"
+        ):
+          await network_lib._deserialize_from_async_chunks(
+              _single_chunk(b"\xff\xfe\xfd")
+          )
+
+        wrong_port_push = remote_lib.pickle.dumps(
+            network_lib._BulkManifest(
+                network_lib._OP_PUSH,
+                tid,
+                bulk_server.port + 1,
+                4 * 1024 * 1024 + 16,
+                16,
+                (4 * 1024 * 1024,),
+            )
+        )
+        with self.assertRaisesRegex(
+            network_lib._BulkTransportError, "Bulk push manifest port mismatch"
+        ):
+          await network_lib._deserialize_from_async_chunks(
+              _single_chunk(wrong_port_push), bulk_server=bulk_server
+          )
+        with self.assertRaisesRegex(
+            network_lib._BulkTransportError,
+            "server bulk transport is disabled",
+        ):
+          await network_lib._deserialize_from_async_chunks(
+              _single_chunk(wrong_port_push), bulk_server=None
+          )
+
+      asyncio.run(_run())
+    finally:
+      bulk_server.stop()
+
+  def test_bulk_wire_protocol_fault_injection_and_ttl_eviction(self):
+    bulk_server = network_lib._BulkTransferServer()
+    port = bulk_server.start()
+    try:
+      async def _run():
+        loop = asyncio.get_running_loop()
+
+        # 1. Invalid OP_PULL bounds fails outgoing transfer future immediately.
+        raw_data = bytearray(1024)
+        mv = memoryview(raw_data)
+        try:
+          out_tid, out_fut = bulk_server.register_outgoing(
+              [network_lib._SegmentedBulkView((mv,))], 1024, loop
+          )
+          with socket.create_connection(("127.0.0.1", port), timeout=2.0) as s:
+            # Out-of-bounds offset + length > 1024
+            s.sendall(
+                network_lib._BULK_CMD_STRUCT.pack(
+                    network_lib._OP_PULL, out_tid, 0, 0, 1024, 512, 1024
+                )
+            )
+          with self.assertRaisesRegex(ValueError, "Invalid OP_PULL bounds"):
+            await asyncio.wait_for(out_fut, timeout=2.0)
+          bulk_server.unregister_outgoing(out_tid)
+        finally:
+          mv.release()
+
+        # 2. Truncated OP_PUSH fails wait_incoming immediately.
+        trunc_tid = network_lib._allocate_transfer_id()
+        with socket.create_connection(("127.0.0.1", port), timeout=2.0) as s:
+          s.sendall(
+              network_lib._BULK_CMD_STRUCT.pack(
+                  network_lib._OP_PUSH, trunc_tid, 1024, 0, 1024, 0, 1024
+              )
+          )
+          s.sendall(b"x" * 128)
+        # Wait briefly for _serve_conn to observe EOF and mark_failed.
+        await asyncio.sleep(0.05)
+        with self.assertRaisesRegex(ConnectionError, "Bulk push truncated"):
+          await bulk_server.wait_incoming(trunc_tid, 1024, [1024])
+
+        # 3. Calling wait_incoming again on an already-completed tid raises
+        # RuntimeError immediately instead of hanging.
+        with self.assertRaisesRegex(
+            RuntimeError, "already completed or evicted"
+        ):
+          await bulk_server.wait_incoming(trunc_tid, 1024, [1024])
+
+        # 4. V5 + Simplification J regression test: Cumulative buffer allocation
+        # across multiple buf_idx values exceeding total_bytes closes the
+        # connection (EOF b"") and fails wait_incoming.
+        over_tid = network_lib._allocate_transfer_id()
+        with socket.create_connection(("127.0.0.1", port), timeout=2.0) as s:
+          s.sendall(
+              network_lib._BULK_CMD_STRUCT.pack(
+                  network_lib._OP_PUSH, over_tid, 1024, 0, 1024, 0, 512
+              )
+          )
+          s.sendall(b"a" * 512)
+          ack1 = s.recv(1)
+          self.assertEqual(ack1, b"\x01")
+          # Second command on same tid requests buf_idx=1 with
+          # buf_total_len=1024 (cumulative 2048 > total_bytes 1024) -> EOF.
+          s.sendall(
+              network_lib._BULK_CMD_STRUCT.pack(
+                  network_lib._OP_PUSH, over_tid, 1024, 1, 1024, 0, 512
+              )
+          )
+          ack2 = s.recv(1)
+          self.assertEqual(ack2, b"")
+        with self.assertRaisesRegex(
+            ValueError, "Invalid bulk buffer allocation exceeds declared"
+        ):
+          await bulk_server.wait_incoming(over_tid, 1024, [512, 512])
+
+      asyncio.run(_run())
+    finally:
+      bulk_server.stop()
+
+  def test_bulk_unclaimed_budget_wait_and_wakeup(self):
+    # H1 + R3 + R3' + T2(d) deterministic thread regression test:
+    # 1. Case 1 (R3): While unclaimed orphan `tid_a` occupies budget, a stripe
+    #    thread calling `_get_or_create_incoming(tid_b, ..., claim=False)`
+    #    blocks inside `_cond.wait_for`. When `tid_a` is claimed, `tid_b`'s
+    #    stripe thread wakes up immediately (<< 5s) and allocates `tid_b`.
+    # 2. Case 2 (R3'): While unclaimed orphan `tid_orphan` continues occupying
+    #    budget, a stripe thread calling `_get_or_create_incoming(tid_c, ...,
+    #    claim=False)` blocks inside `_cond.wait_for`. When `wait_incoming`
+    #    calls `_get_or_create_incoming(tid_c, ..., claim=True)`, inserting the
+    #    claimed entry notifies `_cond` and wakes `tid_c`'s stripe thread
+    #    immediately (<< 5s) even though `tid_orphan` is still unclaimed.
+    # 3. Case 3: When an orphan is never claimed and `tid` is never claimed,
+    #    `_get_or_create_incoming` raises `MemoryError` after timeout.
+    bulk_server = network_lib._BulkTransferServer()
+    bulk_server.start()
+    try:
+      with (
+          mock.patch.object(network_lib, "_MAX_UNCLAIMED_INCOMING_BYTES", 2048),
+          mock.patch.object(network_lib, "_UNCLAIMED_BUDGET_WAIT_S", 5.0),
+      ):
+        # --- Case 1: Claiming orphan A wakes waiting stripe thread for B ---
+        tid_a = network_lib._allocate_transfer_id()
+        entry_a = bulk_server._get_or_create_incoming(tid_a, 1500, claim=False)
+        self.assertIsNotNone(entry_a)
+        self.assertEqual(bulk_server._unclaimed_bytes, 1500)
+
+        tid_b = network_lib._allocate_transfer_id()
+        res_b: list[Optional[network_lib._IncomingBulkTransfer]] = []
+        entered_b = threading.Event()
+        real_wait_for = bulk_server._cond.wait_for
+
+        def _hooked_wait_for(predicate, timeout=None):
+          entered_b.set()
+          return real_wait_for(predicate, timeout=timeout)
+
+        with mock.patch.object(
+            bulk_server._cond, "wait_for", side_effect=_hooked_wait_for
+        ):
+          t_b = threading.Thread(
+              target=lambda: res_b.append(
+                  bulk_server._get_or_create_incoming(tid_b, 1000, claim=False)
+              ),
+              daemon=True,
+          )
+          t_b.start()
+          self.assertTrue(entered_b.wait(timeout=2.0))
+          t0 = time.monotonic()
+          # Claiming tid_a releases its 1500 unclaimed bytes and notifies _cond.
+          claimed_a = bulk_server._get_or_create_incoming(
+              tid_a, 1500, claim=True
+          )
+          self.assertIs(claimed_a, entry_a)
+          t_b.join(timeout=2.0)
+          self.assertFalse(t_b.is_alive())
+          self.assertLess(time.monotonic() - t0, 0.5)
+          self.assertLen(res_b, 1)
+          self.assertIsNotNone(res_b[0])
+
+        # Clean up tid_b (1000 unclaimed bytes) by claiming it.
+        bulk_server._get_or_create_incoming(tid_b, 1000, claim=True)
+        self.assertEqual(bulk_server._unclaimed_bytes, 0)
+
+        # --- Case 2 (R3'): Claiming C itself wakes C's stripe thread while
+        # orphan remains unclaimed ---
+        tid_orphan = network_lib._allocate_transfer_id()
+        entry_orphan = bulk_server._get_or_create_incoming(
+            tid_orphan, 1500, claim=False
+        )
+        self.assertIsNotNone(entry_orphan)
+        self.assertEqual(bulk_server._unclaimed_bytes, 1500)
+
+        tid_c = network_lib._allocate_transfer_id()
+        res_c: list[Optional[network_lib._IncomingBulkTransfer]] = []
+        entered_c = threading.Event()
+
+        def _hooked_wait_for_c(predicate, timeout=None):
+          entered_c.set()
+          return real_wait_for(predicate, timeout=timeout)
+
+        with mock.patch.object(
+            bulk_server._cond, "wait_for", side_effect=_hooked_wait_for_c
+        ):
+          t_c = threading.Thread(
+              target=lambda: res_c.append(
+                  bulk_server._get_or_create_incoming(tid_c, 1000, claim=False)
+              ),
+              daemon=True,
+          )
+          t_c.start()
+          self.assertTrue(entered_c.wait(timeout=2.0))
+          t1 = time.monotonic()
+          # Simulate wait_incoming(tid_c) arriving while tid_orphan still holds
+          # the unclaimed budget.
+          claimed_c = bulk_server._get_or_create_incoming(
+              tid_c, 1000, claim=True
+          )
+          self.assertIsNotNone(claimed_c)
+          t_c.join(timeout=2.0)
+          self.assertFalse(t_c.is_alive())
+          self.assertLess(time.monotonic() - t1, 0.5)
+          self.assertLen(res_c, 1)
+          self.assertIs(res_c[0], claimed_c)
+
+        # --- Case 3: Unclaimed budget timeout raises MemoryError ---
+        with mock.patch.object(network_lib, "_UNCLAIMED_BUDGET_WAIT_S", 0.03):
+          tid_d = network_lib._allocate_transfer_id()
+          with self.assertRaisesRegex(MemoryError, "byte budget exceeded"):
+            bulk_server._get_or_create_incoming(tid_d, 1000, claim=False)
+    finally:
+      bulk_server.stop()
+
+  def test_bulk_transfer_cancellation_aborts_sockets_without_blocking_event_loop(
+      self,
+  ):
+    # Create a raw listening TCP socket that accepts connections and holds them
+    # open without sending/acking, using an Event to synchronize before cancel.
+    stall_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    stall_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    stall_listener.bind(("127.0.0.1", 0))
+    stall_listener.listen(8)
+    stall_port = int(stall_listener.getsockname()[1])
+    accepted_conns: list[socket.socket] = []
+    pull_accepted_event = threading.Event()
+    push_accepted_event = threading.Event()
+
+    def _accept_loop() -> None:
+      while True:
+        try:
+          conn, _ = stall_listener.accept()
+          accepted_conns.append(conn)
+          op_byte = conn.recv(1)
+          if op_byte == bytes([network_lib._OP_PULL]):
+            pull_accepted_event.set()
+          elif op_byte == bytes([network_lib._OP_PUSH]):
+            push_accepted_event.set()
+        except OSError:
+          break
+
+    accept_thread = threading.Thread(target=_accept_loop, daemon=True)
+    accept_thread.start()
+
+    try:
+      async def _run():
+        # 1. Cancel _OP_PULL blocked on recv_into; use a real threading.Event
+        # set in the finally block of _pull_stripe_sync (V6) to synchronize on
+        # worker thread exit before checking the socket pool.
+        tid = network_lib._allocate_transfer_id()
+        header_bytes = remote_lib.cloudpickle.dumps(
+            ("ok", None, None, None, False, "r1")
+        )
+        pull_manifest = remote_lib.pickle.dumps(
+            network_lib._BulkManifest(
+                network_lib._OP_PULL,
+                tid,
+                stall_port,
+                4 * 1024 * 1024 + len(header_bytes),
+                len(header_bytes),
+                (4 * 1024 * 1024,),
+            )
+        )
+
+        async def _chunk_gen():
+          yield pull_manifest
+
+        pull_layout = network_lib._validate_bulk_manifest(
+            remote_lib.pickle.loads(pull_manifest)
+        )
+        expected_pull_stripes = len(
+            network_lib._plan_bulk_stripes(pull_layout.bulk_lengths)
+        )
+        pull_remaining = expected_pull_stripes
+        pull_lock = threading.Lock()
+        pull_stripe_exited = threading.Event()
+        real_pull_stripe = network_lib._pull_stripe_sync
+
+        def _wrapped_pull_stripe(*args, **kwargs) -> None:
+          nonlocal pull_remaining
+          try:
+            real_pull_stripe(*args, **kwargs)
+          finally:
+            with pull_lock:
+              pull_remaining -= 1
+              if pull_remaining == 0:
+                pull_stripe_exited.set()
+
+        with mock.patch.object(
+            network_lib, "_pull_stripe_sync", side_effect=_wrapped_pull_stripe
+        ):
+          pull_task = asyncio.create_task(
+              remote_lib.ExecutionResponse.deserialize_async_chunks(
+                  _chunk_gen(), bulk_hosts=("127.0.0.1",)
+              )
+          )
+          self.assertTrue(
+              await asyncio.to_thread(pull_accepted_event.wait, 5.0)
+          )
+          t0 = time.monotonic()
+          pull_task.cancel()
+          with self.assertRaises(asyncio.CancelledError):
+            await pull_task
+          self.assertLess(time.monotonic() - t0, 1.0)
+          self.assertTrue(await asyncio.to_thread(pull_stripe_exited.wait, 5.0))
+        self.assertEmpty(
+            network_lib._DEFAULT_BULK_SOCKET_POOL._pools.get(
+                ("127.0.0.1", stall_port), ()
+            )
+        )
+
+        # 2. Cancel _OP_PUSH blocked waiting for the 1-byte server ACK; use a
+        # real threading.Event set in the finally block of _push_stripe_sync.
+        arr = np.ones(256 * 1024, dtype=np.int32)
+        req = remote_lib.ExecutionRequest(
+            request_id="req_cancel_push",
+            method_name="echo",
+            args=({"tensor": arr},),
+            kwargs={},
+        )
+        push_tracker = network_lib._BulkPushTracker()
+        push_stripe_exited = threading.Event()
+        real_push_stripe = network_lib._push_stripe_sync
+
+        def _wrapped_push_stripe(*args, **kwargs) -> None:
+          try:
+            real_push_stripe(*args, **kwargs)
+          finally:
+            push_stripe_exited.set()
+
+        async def _drain_push():
+          _, _, views, raw_buffers, _ = (
+              network_lib._prepare_serialized_chunk_specs(req._as_tuple())
+          )
+          async for _ in network_lib._stream_bulk_push_chunks(
+              views,
+              raw_buffers,
+              ("127.0.0.1",),
+              stall_port,
+              push_tracker=push_tracker,
+          ):
+            pass
+
+        with mock.patch.object(
+            network_lib, "_push_stripe_sync", side_effect=_wrapped_push_stripe
+        ):
+          push_task = asyncio.create_task(_drain_push())
+          self.assertTrue(
+              await asyncio.to_thread(push_accepted_event.wait, 5.0)
+          )
+          t1 = time.monotonic()
+          push_task.cancel()
+          with self.assertRaises(asyncio.CancelledError):
+            await push_task
+          self.assertLess(time.monotonic() - t1, 1.0)
+          self.assertTrue(await asyncio.to_thread(push_stripe_exited.wait, 5.0))
+        self.assertEmpty(
+            network_lib._DEFAULT_BULK_SOCKET_POOL._pools.get(
+                ("127.0.0.1", stall_port), ()
+            )
+        )
+
+        # 3. W6 + T1(a) + T2(a) regression test: Cancel _stream_bulk_pull_chunks
+        # on server side using deterministic Event synchronization while a
+        # client connection is actively inside vectored sendmsg() on a 256 MiB
+        # packed tail, ensuring _release_views does not raise BufferError and
+        # propagates CancelledError cleanly.
+        bulk_server = network_lib._BulkTransferServer()
+        bulk_server.start()
+        try:
+          obj = {
+              "small": [
+                  np.full(64 * 1024, i, dtype=np.float32) for i in range(1024)
+              ]
+          }
+          _, _, views, raw_buffers, _ = (
+              network_lib._prepare_serialized_chunk_specs(obj)
+          )
+          pull_gen = network_lib._stream_bulk_pull_chunks(
+              views, raw_buffers, bulk_server
+          )
+          first_chunk = await pull_gen.__anext__()
+          _, pull_tid, pull_port, total_bulk, _, buf_lens, *_ = (
+              remote_lib.pickle.loads(first_chunk)
+          )
+          packed_idx = len(buf_lens)
+          entered_sendmsg = threading.Event()
+          real_send_slice = network_lib._send_bulk_view_slice
+
+          def _notify_send_slice(
+              sock: socket.socket,
+              view: network_lib._SegmentedBulkView,
+              offset: int,
+              length: int,
+          ) -> None:
+            entered_sendmsg.set()
+            real_send_slice(sock, view, offset, length)
+
+          with mock.patch.object(
+              network_lib,
+              "_send_bulk_view_slice",
+              side_effect=_notify_send_slice,
+          ):
+            with socket.create_connection(
+                ("127.0.0.1", pull_port), timeout=2.0
+            ) as raw_s:
+              raw_s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+              raw_s.sendall(
+                  network_lib._BULK_CMD_STRUCT.pack(
+                      network_lib._OP_PULL,
+                      pull_tid,
+                      0,
+                      packed_idx,
+                      total_bulk,
+                      0,
+                      total_bulk,
+                  )
+              )
+              await asyncio.to_thread(entered_sendmsg.wait, 5.0)
+              waiter = asyncio.create_task(pull_gen.__anext__())
+              await asyncio.sleep(0)
+              waiter.cancel()
+              with self.assertRaises(asyncio.CancelledError):
+                await waiter
+              for mv in views:
+                with self.assertRaises(ValueError):
+                  _ = mv.nbytes
+        finally:
+          bulk_server.stop()
+
+      asyncio.run(_run())
+    finally:
+      stall_listener.close()
+      for c in accepted_conns:
+        c.close()
+
+  def test_bulk_socket_pool_evicts_expired_idle_sockets_and_handles_fork(self):
+    bulk_server = network_lib._BulkTransferServer()
+    port = bulk_server.start()
+    pool = network_lib._BulkSocketPool()
+    try:
+      s1 = pool.acquire("127.0.0.1", port)
+      pool.release("127.0.0.1", port, s1)
+      # Backdate s1's release timestamp past _MAX_IDLE_SOCKET_AGE_S.
+      key = ("127.0.0.1", port)
+      sock_obj, _ = pool._pools[key].pop()
+      pool._pools[key].append((
+          sock_obj,
+          time.monotonic() - network_lib._MAX_IDLE_SOCKET_AGE_S - 5.0,
+      ))
+      s2 = pool.acquire("127.0.0.1", port)
+      self.assertIsNot(s2, s1)
+      self.assertEqual(s1.fileno(), -1)
+      pool.release("127.0.0.1", port, s2)
+
+      # Simulate os.fork() PID change: inherited sockets must be closed and
+      # cleared on next pool operation.
+      pool._pid = -1
+      s3 = pool.acquire("127.0.0.1", port)
+      self.assertIsNot(s3, s2)
+      self.assertEqual(s2.fileno(), -1)
+      pool.release("127.0.0.1", port, s3)
+
+      # Verify GrpcRemoteExecutionServer(bulk_port=port).start_serving_async()
+      # rolls back cleanly when `port` is already in use by `bulk_server`.
+      async def _check_port_conflict() -> None:
+        grpc_port = portpicker.pick_unused_port()
+        conflict_srv = remote_lib.GrpcRemoteExecutionServer(
+            StubWorkerEngine("conflict_worker"), bulk_port=port
+        )
+        with self.assertRaises(OSError):
+          await conflict_srv.start_serving_async(port=grpc_port)
+        self.assertIsNone(conflict_srv._bulk_server)
+        self.assertIsNone(conflict_srv._server)
+
+      asyncio.run(_check_port_conflict())
+    finally:
+      pool.close_target("127.0.0.1", port)
+      bulk_server.stop()
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="grpc_ipv6_with_port",
+          target="grpc://[::1]:50051",
+          expected=("::1", 50051),
+      ),
+      dict(
+          testcase_name="bare_ipv6_with_port",
+          target="[2001:db8::1]:8080",
+          expected=("2001:db8::1", 8080),
+      ),
+      dict(
+          testcase_name="bare_ipv6_without_port",
+          target="[::1]",
+          expected=("::1", None),
+      ),
+      dict(
+          testcase_name="bare_ipv4_with_port",
+          target="10.0.0.5:9000",
+          expected=("10.0.0.5", 9000),
+      ),
+      dict(
+          testcase_name="bare_hostname_without_port",
+          target="localhost",
+          expected=("localhost", None),
+      ),
+  )
+  def test_extract_host_and_port_valid(
+      self, target: str, expected: tuple[str, Optional[int]]
+  ):
+    self.assertEqual(network_lib._extract_host_and_port(target), expected)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="http_scheme", target="http://10.0.0.5:9000"),
+      dict(testcase_name="dns_scheme", target="dns:///worker.ns.svc:50051"),
+      dict(testcase_name="ipv4_scheme", target="ipv4:10.0.0.5:9000"),
+      dict(testcase_name="unbracketed_ipv6", target="::1:50051"),
+      dict(testcase_name="empty_brackets", target="[]:50051"),
+      dict(testcase_name="port_zero", target="localhost:0"),
+      dict(testcase_name="port_above_65535", target="localhost:70000"),
+      dict(testcase_name="fullwidth_unicode_port", target="localhost:５０"),
+  )
+  def test_extract_host_and_port_invalid(self, target: str):
+    with self.assertRaises(ValueError):
+      network_lib._extract_host_and_port(target)
+
+  def test_non_host_port_grpc_scheme_allowed_when_bulk_disabled(self):
+    # A1 regression test: non-host[:port] gRPC target schemes (e.g. dns:/// or
+    # unix:) are rejected with a clear message when enable_bulk_transport=True,
+    # and accepted when enable_bulk_transport=False.
+    with self.assertRaisesRegex(
+        ValueError, "pass enable_bulk_transport=False"
+    ):
+      remote_lib.GrpcRemoteActorHandle(
+          "grpc://dns:///worker.ns.svc:50051", enable_bulk_transport=True
+      )
+    hdl = remote_lib.GrpcRemoteActorHandle(
+        "grpc://dns:///worker.ns.svc:50051", enable_bulk_transport=False
+    )
+    self.assertEqual(hdl._host_port, "dns:///worker.ns.svc:50051")
+    self.assertEqual(hdl._bulk_host, "")
+    self.assertFalse(hdl._enable_bulk_transport)
+
+    # Non-host:port gRPC target is also accepted with enable_bulk_transport=True
+    # when explicit bulk_hosts are provided.
+    hdl_with_bulk_hosts = remote_lib.GrpcRemoteActorHandle(
+        "grpc://dns:///worker.ns.svc:50051",
+        enable_bulk_transport=True,
+        bulk_hosts=("127.0.0.2", "127.0.0.3"),
+    )
+    self.assertEqual(hdl_with_bulk_hosts._bulk_host, "127.0.0.2")
+    self.assertEqual(
+        hdl_with_bulk_hosts._configured_bulk_hosts, ("127.0.0.2", "127.0.0.3")
+    )
+    self.assertEqual(
+        hdl_with_bulk_hosts._active_bulk_hosts, ("127.0.0.2", "127.0.0.3")
+    )
+
+  def test_validate_bulk_hosts_and_bulk_port_wire_codec(self):
+    self.assertEqual(network_lib._validate_bulk_hosts(None), ())
+    self.assertEqual(network_lib._validate_bulk_hosts(()), ())
+    self.assertEqual(
+        network_lib._validate_bulk_hosts([
+            "10.0.0.1",
+            "10.0.0.2",
+            "10.0.0.1",
+            "[2001:DB8::1]",
+            "2001:db8::1",
+            "::1",
+            "::1%lo",
+            "[FE80::1%eth0]",
+            "fe80::1%eth0",
+            "worker-nic0.internal.",
+        ]),
+        (
+            "10.0.0.1",
+            "10.0.0.2",
+            "2001:db8::1",
+            "::1",
+            "::1%lo",
+            "fe80::1%eth0",
+            "worker-nic0.internal.",
+        ),
+    )
+
+    for bad_hosts in (
+        "10.0.0.1",
+        b"10.0.0.1",
+        [""],
+        ["10.0.0.1:50051"],
+        ["[::1]:50051"],
+        ["[10.0.0.1]"],
+        ["999.999.999.999"],
+        ["10.0.0.1]"],
+        ["host\x00"],
+        ["-leading-hyphen"],
+        ["trailing-hyphen-"],
+        ["[::1%]"],
+        ["[::1%lo%eth0]"],
+        ["http://10.0.0.1"],
+        ["grpc://10.0.0.1"],
+        ["10.0.0.1/path"],
+        ["10.0.0.1\n10.0.0.2"],
+        ["10.0.0.1 "],
+        ["2001:db8::zzz"],
+    ):
+      with self.subTest(bad_hosts=bad_hosts):
+        with self.assertRaises(ValueError):
+          network_lib._validate_bulk_hosts(bad_hosts)  # type: ignore[arg-type]
+
+    with self.assertRaisesRegex(ValueError, "bulk_hosts must not be empty"):
+      network_lib._validate_bulk_hosts(None, allow_empty=False)
+    with self.assertRaisesRegex(ValueError, "bulk_hosts must not be empty"):
+      network_lib._validate_bulk_hosts((), allow_empty=False)
+    with self.assertRaisesRegex(ValueError, "bulk_hosts must not be empty"):
+      remote_lib.GrpcRemoteExecutionServer(
+          StubWorkerEngine("bad_srv"), bulk_hosts=()
+      )
+    with self.assertRaisesRegex(ValueError, "bulk_hosts must not be empty"):
+      remote_lib.GrpcRemoteActorHandle("grpc://127.0.0.1:50051", bulk_hosts=())
+
+    # Wire codec roundtrip: legacy 8-byte port only, port=0, and multi-NIC
+    raw_legacy = network_lib._encode_bulk_port_response(51234)
+    self.assertLen(raw_legacy, 8)
+    self.assertEqual(
+        network_lib._decode_bulk_port_response(raw_legacy), (51234, ())
+    )
+    raw_zero = network_lib._encode_bulk_port_response(
+        0, ("10.0.0.1", "10.0.0.2")
+    )
+    self.assertLen(raw_zero, 8)
+    self.assertEqual(network_lib._decode_bulk_port_response(raw_zero), (0, ()))
+
+    raw_multi = network_lib._encode_bulk_port_response(
+        51234,
+        network_lib._validate_bulk_hosts(
+            ("10.0.0.1", "[2001:DB8::2]", "10.0.0.1")
+        ),
+    )
+    self.assertGreater(len(raw_multi), 8)
+    self.assertEqual(
+        network_lib._decode_bulk_port_response(raw_multi),
+        (51234, ("10.0.0.1", "2001:db8::2")),
+    )
+
+    for bad_port in (-1, 70000, True):
+      with self.subTest(bad_port=bad_port):
+        with self.assertRaises(ValueError):
+          network_lib._encode_bulk_port_response(bad_port)  # type: ignore[arg-type]
+
+    for bad_wire in (
+        b"\x01\x02\x03",
+        struct.pack("<Q", 70000),
+        raw_legacy + b"\xff\xfe",
+        raw_legacy + b"\n\n",
+        raw_legacy + b"10.0.0.1:5000",
+    ):
+      with self.subTest(bad_wire=bad_wire):
+        with self.assertRaises(ValueError):
+          network_lib._decode_bulk_port_response(bad_wire)
+
+  def test_plan_bulk_stripes_scales_with_num_hosts(self):
+    buf_len = 512 * 1024 * 1024  # 512 MiB
+    stripes_1 = network_lib._plan_bulk_stripes([buf_len], num_hosts=1)
+    stripes_2 = network_lib._plan_bulk_stripes([buf_len], num_hosts=2)
+    stripes_4 = network_lib._plan_bulk_stripes([buf_len], num_hosts=4)
+    stripes_8 = network_lib._plan_bulk_stripes([buf_len], num_hosts=8)
+    self.assertLen(stripes_1, 4)
+    self.assertLen(stripes_2, 8)
+    self.assertLen(stripes_4, 16)
+    self.assertLen(stripes_8, 16)  # Capped at _MAX_TOTAL_BULK_STRIPES = 16
+    for bad_num in (0, -1, True):
+      with self.subTest(bad_num=bad_num):
+        with self.assertRaises(ValueError):
+          network_lib._plan_bulk_stripes([buf_len], num_hosts=bad_num)  # type: ignore[arg-type]
+
+    # R1.3: Verify multi-buffer payloads (e.g. 5 x 40 MiB = 200 MiB across 2
+    # hosts) balance cumulative bytes across NICs via _assign_stripe_hosts
+    # instead of skewing 4:1 on stripe index modulo.
+    multi_buf_lens = [40 * 1024 * 1024] * 5
+    multi_stripes = network_lib._plan_bulk_stripes(multi_buf_lens, num_hosts=2)
+    hosts = ("10.0.0.1", "10.0.0.2")
+    assigned_hosts = network_lib._assign_stripe_hosts(multi_stripes, hosts)
+    self.assertLen(assigned_hosts, len(multi_stripes))
+    bytes_by_host = {"10.0.0.1": 0, "10.0.0.2": 0}
+    for (_, _, _, take), h in zip(multi_stripes, assigned_hosts):
+      bytes_by_host[h] += take
+    self.assertEqual(
+        bytes_by_host["10.0.0.1"] + bytes_by_host["10.0.0.2"],
+        sum(multi_buf_lens),
+    )
+    # Least-loaded byte assignment keeps per-NIC volume within 1 stripe (24 MiB)
+    # of an exact 100 MiB / 100 MiB split (112 MiB vs 88 MiB).
+    self.assertLessEqual(
+        abs(bytes_by_host["10.0.0.1"] - bytes_by_host["10.0.0.2"]),
+        24 * 1024 * 1024,
+    )
+
+  def test_dual_nic_bulk_striping_e2e_server_advertised_and_client_configured(
+      self,
+  ):
+    port = portpicker.pick_unused_port()
+    engine = StubWorkerEngine("dual_nic_worker")
+    dual_hosts = ("127.0.0.2", "127.0.0.3")
+
+    async def _run():
+      server = remote_lib.GrpcRemoteExecutionServer(
+          engine, bulk_hosts=dual_hosts
+      )
+      await server.start_serving_async(port=port)
+      assert server._bulk_server is not None
+      bulk_port = server._bulk_server.port
+
+      # 1. Client connects via 127.0.0.1 without explicit bulk_hosts and
+      # auto-discovers ("127.0.0.2", "127.0.0.3") from GetBulkPort.
+      handle_auto = remote_lib.ActorHandle.from_address(
+          f"grpc://127.0.0.1:{port}"
+      )
+      assert isinstance(handle_auto, remote_lib.GrpcRemoteActorHandle)
+      # 2. Client explicitly configures bulk_hosts=("127.0.0.3", "127.0.0.2"),
+      # taking precedence over server-advertised order.
+      handle_explicit = remote_lib.ActorHandle.from_address(
+          f"grpc://127.0.0.1:{port}",
+          bulk_hosts=("127.0.0.3", "127.0.0.2"),
+      )
+      assert isinstance(handle_explicit, remote_lib.GrpcRemoteActorHandle)
+
+      try:
+        with mock.patch.object(
+            network_lib, "_MIN_BULK_STRIPE_BYTES", 256 * 1024
+        ):
+          # 2 MiB array -> 8 stripes across 2 NICs (256 KiB per stripe).
+          arr = np.arange(512 * 1024, dtype=np.int32)
+          push_stripes_seen: list[tuple[str, int, int]] = []
+          pull_stripes_seen: list[tuple[str, int, int]] = []
+          real_push = network_lib._push_stripe_sync
+          real_pull = network_lib._pull_stripe_sync
+
+          def _spy_push(host: str, *args: Any, **kwargs: Any) -> None:
+            # args: (port, tid, total_bytes, buf_idx, buf_total_len, view,
+            # offset, length, active_socks)
+            push_stripes_seen.append((host, int(args[3]), int(args[6])))
+            real_push(host, *args, **kwargs)
+
+          def _spy_pull(host: str, *args: Any, **kwargs: Any) -> None:
+            # args: (port, tid, buf_idx, buf_total_len, inc_state, offset,
+            # length, active_socks)
+            pull_stripes_seen.append((host, int(args[2]), int(args[5])))
+            real_pull(host, *args, **kwargs)
+
+          with (
+              mock.patch.object(
+                  network_lib, "_push_stripe_sync", side_effect=_spy_push
+              ),
+              mock.patch.object(
+                  network_lib, "_pull_stripe_sync", side_effect=_spy_pull
+              ),
+          ):
+            out = await handle_auto.asubmit("echo", {"tensor": arr})
+            np.testing.assert_array_equal(out["tensor"], arr)
+
+            auto_push_hosts = [h for h, _, _ in push_stripes_seen]
+            auto_pull_hosts = [h for h, _, _ in pull_stripes_seen]
+            self.assertEqual(handle_auto._active_bulk_hosts, dual_hosts)
+            self.assertIn("127.0.0.2", auto_push_hosts)
+            self.assertIn("127.0.0.3", auto_push_hosts)
+            self.assertIn("127.0.0.2", auto_pull_hosts)
+            self.assertIn("127.0.0.3", auto_pull_hosts)
+            # First stripe (lowest (buf_idx, offset)) routes to primary host
+            # 127.0.0.2 when server-advertised order is ("127.0.0.2",
+            # "127.0.0.3").
+            auto_push_map = {(b, o): h for h, b, o in push_stripes_seen}
+            auto_pull_map = {(b, o): h for h, b, o in pull_stripes_seen}
+            self.assertEqual(auto_push_map[min(auto_push_map)], "127.0.0.2")
+            self.assertEqual(auto_pull_map[min(auto_pull_map)], "127.0.0.2")
+            # 8 stripes for the 2 MiB tensor + header tail
+            self.assertGreaterEqual(len(push_stripes_seen), 8)
+            self.assertGreaterEqual(len(pull_stripes_seen), 8)
+            for host in dual_hosts:
+              self.assertIn((host, bulk_port), handle_auto._seen_bulk_targets)
+              self.assertNotEmpty(
+                  network_lib._DEFAULT_BULK_SOCKET_POOL._pools.get(
+                      (host, bulk_port), ()
+                  )
+              )
+
+            # Verify dispatch_task + poll_responses with client bulk_hosts
+            # ("127.0.0.3", "127.0.0.2") routes the first stripe (offset=0) to
+            # 127.0.0.3 first on both push and pull.
+            push_stripes_seen.clear()
+            pull_stripes_seen.clear()
+            ack = await handle_explicit.dispatch_task(
+                "req_dual_explicit", "echo", {"tensor": arr + 5}
+            )
+            self.assertEqual(ack, "req_dual_explicit")
+            polled = await handle_explicit.poll_responses(timeout_s=5.0)
+            self.assertIsNotNone(polled)
+            np.testing.assert_array_equal(polled.unwrap()["tensor"], arr + 5)
+            self.assertEqual(
+                handle_explicit._active_bulk_hosts, ("127.0.0.3", "127.0.0.2")
+            )
+            exp_push_hosts = [h for h, _, _ in push_stripes_seen]
+            exp_pull_hosts = [h for h, _, _ in pull_stripes_seen]
+            self.assertIn("127.0.0.3", exp_push_hosts)
+            self.assertIn("127.0.0.2", exp_push_hosts)
+            self.assertIn("127.0.0.3", exp_pull_hosts)
+            self.assertIn("127.0.0.2", exp_pull_hosts)
+            self.assertGreaterEqual(len(push_stripes_seen), 8)
+            self.assertGreaterEqual(len(pull_stripes_seen), 8)
+            exp_push_map = {(b, o): h for h, b, o in push_stripes_seen}
+            exp_pull_map = {(b, o): h for h, b, o in pull_stripes_seen}
+            self.assertEqual(exp_push_map[min(exp_push_map)], "127.0.0.3")
+            self.assertEqual(exp_pull_map[min(exp_pull_map)], "127.0.0.3")
+
+          # Invalidating bulk port must close pooled sockets for BOTH NIC IPs.
+          handle_auto._invalidate_bulk_port()
+          for host in dual_hosts:
+            self.assertEmpty(
+                network_lib._DEFAULT_BULK_SOCKET_POOL._pools.get(
+                    (host, bulk_port), ()
+                )
+            )
+      finally:
+        await handle_auto.close()
+        await handle_explicit.close()
+        await server.stop_serving(grace=0.0)
+
+    asyncio.run(_run())
+
+  def test_partial_nic_probe_failure_continues_on_healthy_nic_and_falls_back(
+      self,
+  ):
+    port = portpicker.pick_unused_port()
+    engine = StubWorkerEngine("partial_nic_worker")
+
+    async def _run():
+      server = remote_lib.GrpcRemoteExecutionServer(
+          engine, bulk_hosts=("127.0.0.2", "127.0.0.3")
+      )
+      await server.start_serving_async(port=port)
+      assert server._bulk_server is not None
+      bulk_port = server._bulk_server.port
+      real_probe = network_lib._DEFAULT_BULK_SOCKET_POOL.probe_async
+      fail_hosts: set[str] = {"127.0.0.3"}
+
+      async def _selective_probe(host: str, p: int) -> None:
+        if host in fail_hosts:
+          raise ConnectionRefusedError(f"Simulated NIC down on {host}:{p}")
+        await real_probe(host, p)
+
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://127.0.0.1:{port}"
+      )
+      try:
+        arr = np.arange(256 * 1024, dtype=np.int32)  # 1 MiB
+        with mock.patch.object(
+            network_lib._DEFAULT_BULK_SOCKET_POOL,
+            "probe_async",
+            side_effect=_selective_probe,
+        ):
+          # 1. Partial NIC failure (127.0.0.3 down, 127.0.0.2 up): logs warning
+          # naming the failed NIC and continues using bulk TCP transport on
+          # ("127.0.0.2",).
+          with self.assertLogs(level="WARNING") as cm_partial:
+            out = await handle.asubmit("echo", {"tensor": arr})
+          partial_logs = "\n".join(cm_partial.output)
+          self.assertIn("127.0.0.3", partial_logs)
+          np.testing.assert_array_equal(out["tensor"], arr)
+          self.assertEqual(handle._bulk_port, bulk_port)
+          self.assertEqual(handle._active_bulk_hosts, ("127.0.0.2",))
+          self.assertIn(("127.0.0.2", bulk_port), handle._seen_bulk_targets)
+          self.assertNotIn(("127.0.0.3", bulk_port), handle._seen_bulk_targets)
+
+          # 2. All NICs down: logs warning naming all failed NICs,
+          # negative-caches _bulk_port = 0, and falls back to gRPC chunks.
+          handle._invalidate_bulk_port()
+          fail_hosts.add("127.0.0.2")
+          with self.assertLogs(level="WARNING") as cm_all:
+            out_fallback = await handle.asubmit("echo", {"tensor": arr + 11})
+          all_logs = "\n".join(cm_all.output)
+          self.assertIn("127.0.0.2", all_logs)
+          self.assertIn("127.0.0.3", all_logs)
+          np.testing.assert_array_equal(out_fallback["tensor"], arr + 11)
+          self.assertEqual(handle._bulk_port, 0)
+      finally:
+        await handle.close()
+        await server.stop_serving(grace=0.0)
+
+    asyncio.run(_run())
+
+  def test_bulk_transfer_lz4_compression_push_and_pull_roundtrip(self):
+    bulk_server = network_lib._BulkTransferServer()
+    bulk_server.start()
+    prev_lz4 = network_lib.is_bulk_lz4_enabled()
+    try:
+      network_lib.set_bulk_lz4_enabled(True)
+      self.assertTrue(remote_lib.is_bulk_lz4_enabled())
+      with self.assertRaisesRegex(ValueError, "enabled must be a bool"):
+        network_lib.set_bulk_lz4_enabled(1)  # type: ignore[arg-type]
+
+      rng = np.random.default_rng(77)
+      expert_tuples = np.array(
+          [
+              [0, 1, 2, 3, 4, 5, 6, 7],
+              [0, 1, 2, 3, 11, 19, 23, 31],
+              [1, 2, 4, 8, 16, 23, 31, 64],
+              [0, 2, 4, 6, 8, 12, 16, 24],
+          ],
+          dtype=np.int16,
+      )
+      # Standalone 8 MiB compressible Phase A uint8 routed_experts tensor.
+      raw_u8_i16 = np.full((16, 2048, 32, 8), -1, dtype=np.int16)
+      idx_u8 = rng.integers(0, len(expert_tuples), size=(16, 1100, 32))
+      raw_u8_i16[:, :1100, :, :] = expert_tuples[idx_u8]
+      packed_u8 = packing.encode_routed_experts(
+          raw_u8_i16, num_experts=128, batched=True
+      )
+      self.assertEqual(packed_u8.nbytes, 8 * 1024 * 1024)
+
+      # Packed-tail 1.25 MiB (< 4 MiB) compressible Phase A uint10 tensor.
+      raw_u10_i16 = np.full((4, 1024, 32, 8), -1, dtype=np.int16)
+      idx_u10 = rng.integers(0, len(expert_tuples), size=(4, 512, 32))
+      raw_u10_i16[:, :512, :, :] = expert_tuples[idx_u10] * 3
+      packed_u10 = packing.encode_routed_experts(
+          raw_u10_i16, num_experts=384, batched=True
+      )
+      self.assertEqual(packed_u10.nbytes, 1280 * 1024)
+
+      # Standalone 4 MiB incompressible random float32 logprobs tensor.
+      random_logps = rng.standard_normal(1024 * 1024, dtype=np.float32)
+      self.assertEqual(random_logps.nbytes, 4 * 1024 * 1024)
+
+      # Small < 512 KiB metadata array (stays zero-copy uncompressed).
+      small_meta = np.arange(1024, dtype=np.int32)
+
+      payload = {
+          "routed_u8": packed_u8,
+          "routed_u10": packed_u10,
+          "logps": random_logps,
+          "small": small_meta,
+      }
+      req = remote_lib.ExecutionRequest(
+          request_id="req_lz4",
+          method_name="train_step",
+          args=(payload,),
+          kwargs={},
+      )
+      resp = remote_lib.ExecutionResponse(result=payload)
+
+      async def _run():
+        _, _, req_views, req_raw_buffers, _ = (
+            network_lib._prepare_serialized_chunk_specs(req._as_tuple())
+        )
+        push_chunks = [
+            c
+            async for c in network_lib._stream_bulk_push_chunks(
+                req_views, req_raw_buffers, ("127.0.0.1",), bulk_server.port
+            )
+        ]
+        self.assertLen(push_chunks, 1)
+        meta = remote_lib.pickle.loads(push_chunks[0])
+        self.assertIsInstance(meta, network_lib._BulkManifest)
+        self.assertIsNotNone(meta.compressed_lengths)
+        assert meta.compressed_lengths is not None
+        # Compressible buffers have compressed_lengths > 0 and < 40% of raw;
+        # incompressible float32 and small < 512 KiB array have 0.
+        comp_non_zero = [c for c in meta.compressed_lengths if c > 0]
+        self.assertLen(comp_non_zero, 2)
+        uncompressed_total = meta.header_len + sum(meta.buffer_lengths)
+        self.assertLess(meta.total_bulk_bytes, int(uncompressed_total * 0.55))
+
+        async def _push_gen():
+          for c in push_chunks:
+            yield c
+
+        restored_req = (
+            await remote_lib.ExecutionRequest.deserialize_async_chunks(
+                _push_gen(), bulk_server=bulk_server
+            )
+        )
+        out_push = restored_req.args[0]
+        for key in ("routed_u8", "routed_u10", "logps", "small"):
+          np.testing.assert_array_equal(out_push[key], payload[key])
+          self.assertEqual(out_push[key].ctypes.data % 64, 0)
+          self.assertTrue(out_push[key].flags.writeable)
+        np.testing.assert_array_equal(
+            packing.decode_routed_experts(out_push["routed_u8"], batched=True),
+            raw_u8_i16,
+        )
+        np.testing.assert_array_equal(
+            packing.decode_routed_experts(out_push["routed_u10"], batched=True),
+            raw_u10_i16,
+        )
+
+        # Verify _OP_PULL path with LZ4 compression as well.
+        async def _pull_gen():
+          async for c in resp.serialize_async_chunks(bulk_server=bulk_server):
+            yield c
+
+        restored_resp = (
+            await remote_lib.ExecutionResponse.deserialize_async_chunks(
+                _pull_gen(), bulk_hosts=("127.0.0.1",)
+            )
+        )
+        assert restored_resp is not None
+        out_pull = restored_resp.unwrap()
+        for key in ("routed_u8", "routed_u10", "logps", "small"):
+          np.testing.assert_array_equal(out_pull[key], payload[key])
+          self.assertEqual(out_pull[key].ctypes.data % 64, 0)
+          self.assertTrue(out_pull[key].flags.writeable)
+
+        # Verify disabling the knob via set_bulk_lz4_enabled(False) bypasses
+        # LZ4 compression completely and sends raw uncompressed buffers.
+        remote_lib.set_bulk_lz4_enabled(False)
+        self.assertFalse(network_lib.is_bulk_lz4_enabled())
+        _, _, nolz4_views, nolz4_raw_buffers, _ = (
+            network_lib._prepare_serialized_chunk_specs(req._as_tuple())
+        )
+        nolz4_chunks = [
+            c
+            async for c in network_lib._stream_bulk_push_chunks(
+                nolz4_views,
+                nolz4_raw_buffers,
+                ("127.0.0.1",),
+                bulk_server.port,
+            )
+        ]
+        meta_nolz4 = remote_lib.pickle.loads(nolz4_chunks[0])
+        self.assertIsNone(meta_nolz4.compressed_lengths)
+        self.assertGreaterEqual(meta_nolz4.total_bulk_bytes, uncompressed_total)
+
+        async def _nolz4_gen():
+          for c in nolz4_chunks:
+            yield c
+
+        restored_nolz4 = (
+            await remote_lib.ExecutionRequest.deserialize_async_chunks(
+                _nolz4_gen(), bulk_server=bulk_server
+            )
+        )
+        np.testing.assert_array_equal(
+            restored_nolz4.args[0]["routed_u8"], packed_u8
+        )
+
+      asyncio.run(_run())
+    finally:
+      network_lib.set_bulk_lz4_enabled(prev_lz4)
+      bulk_server.stop()
+
+
+if __name__ == "__main__":
+  absltest.main()

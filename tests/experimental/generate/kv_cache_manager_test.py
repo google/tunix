@@ -27,7 +27,7 @@ import numpy as np
 from tunix.experimental.generate import kv_cache_manager
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import single_type_kv_cache_manager
-from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.dist_rl.rollout import sampler as sampler_lib
 
 # Sharding tests need up to 4 devices.
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"

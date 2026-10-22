@@ -29,7 +29,7 @@ import enum
 from typing import Literal, SupportsFloat
 
 import numpy as np
-from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.dist_rl.rollout import sampler as sampler_lib
 
 
 class RequestStatus(enum.Enum):

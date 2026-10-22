@@ -19,8 +19,8 @@ from unittest import mock
 from absl.testing import absltest
 import jax.numpy as jnp
 import numpy as np
-from tunix.experimental.trajectory import converter as converter_lib
-from tunix.experimental.trajectory import in_memory_store
+from tunix.dist_rl.trajectory import converter as converter_lib
+from tunix.dist_rl.trajectory import in_memory_store
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl.agentic import utils

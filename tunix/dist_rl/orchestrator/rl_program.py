@@ -1,0 +1,1726 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Multi-stage reinforcement learning programs.
+
+Provides modular program abstractions for orchestrating  RL training
+pipelines.
+"""
+
+import abc
+import asyncio
+import collections
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+import contextlib
+import dataclasses
+import os
+import threading
+import time
+from typing import Any
+
+from absl import logging
+import numpy as np
+from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.common import dispatch_window
+from tunix.dist_rl.common import logging_utils
+from tunix.dist_rl.common import tagging
+from tunix.dist_rl.orchestrator import algorithm_adapter
+from tunix.dist_rl.orchestrator import batch_assembly
+from tunix.dist_rl.orchestrator import dataset_utils
+from tunix.dist_rl.orchestrator import rl_engine_interface
+from tunix.dist_rl.orchestrator import step_telemetry
+from tunix.dist_rl.queue_manager import trajectory_queue_manager
+from tunix.dist_rl.trajectory import store as trajectory_store_lib
+from tunix.rl import common as rl_common
+from tunix.sft import metrics_logger as metrics_logger_lib
+from tunix.utils import trajectory_logger
+
+MetricsLogger = metrics_logger_lib.MetricsLogger
+MetricsLoggerOptions = metrics_logger_lib.MetricsLoggerOptions
+Mode = metrics_logger_lib.Mode
+_extract_scalar = metrics_logger_lib.extract_scalar
+BatchConfig = batch_assembly.BatchConfig
+GroupOrder = trajectory_queue_manager.GroupOrder
+TrajectoryQueueManager = trajectory_queue_manager.TrajectoryQueueManager
+FifoGroupQueue = trajectory_queue_manager.FifoGroupQueue
+BatchOrderedGroupQueue = trajectory_queue_manager.BatchOrderedGroupQueue
+
+
+def _next_microbatch(
+    batch_iter: Iterator[batch_assembly.AssembledBatch],
+    lock: threading.Lock,
+) -> list[batch_assembly.AssembledBatch | None]:
+  """Advances `batch_iter` in a 1-element list so `.pop()` frees thread refs."""
+  with lock:
+    return [next(batch_iter, None)]
+
+
+def _generation_metrics(
+    groups: Sequence[Sequence[Any]],
+) -> dict[str, float]:
+  """Computes the step's `rollout/completions/*` metrics, grouped by prompt.
+
+  Matches `agentic_grpo_learner.GRPOLearner._process_results`: the two means are
+  per group, not per rollout, so a short group still weighs the same as a full
+  one. Max and min are unaffected by grouping.
+
+  `clipped` / `raw_length` come from the collector, which derives them with
+  `collector.response_budget_facts` and records them on
+  `TrajectoryItem.metadata`, because only the producer knows the budget a
+  rollout was held to -- `DistributedRLEngine` lets a dataset item override
+  `max_response_length`. Raw length counts env and tool tokens, per the
+  rLLM/VERL `response_length` convention.
+
+  Args:
+    groups: Trajectory items for the step, grouped by prompt.
+
+  Returns:
+    Fully-qualified metric name to step value; empty when no rollout carried
+    the annotations.
+  """
+  clip_ratios: list[float] = []
+  group_mean_lengths: list[float] = []
+  all_lengths: list[int] = []
+  for group in groups:
+    clipped = 0
+    lengths: list[int] = []
+    for item in group:
+      # Token mode yields a dict; Trajectory mode yields a dataclass, which
+      # never carries these. Both keys are required: a rollout annotated with
+      # only one of them is a producer bug, and dropping it keeps that bug from
+      # taking down the training step over a metric.
+      traj = item.traj
+      if not isinstance(traj, dict):
+        continue
+      meta = getattr(item, "metadata", None)
+      if not isinstance(meta, dict):
+        continue
+      if meta.get("clipped") is None or meta.get("raw_length") is None:
+        continue
+      # A zero-length response is a rollout that ran and produced nothing; it
+      # stays in the denominator, matching the agentic learner.
+      lengths.append(int(meta["raw_length"]))
+      clipped += int(meta["clipped"])
+    if not lengths:
+      continue
+    clip_ratios.append(clipped / len(lengths))
+    group_mean_lengths.append(float(np.mean(lengths)))
+    all_lengths.extend(lengths)
+
+  if not all_lengths:
+    return {}
+  return {
+      "rollout/completions/clip_ratio": float(np.mean(clip_ratios)),
+      "rollout/completions/mean_raw_length": float(
+          np.mean(group_mean_lengths)
+      ),
+      "rollout/completions/max_raw_length": float(np.max(all_lengths)),
+      "rollout/completions/min_raw_length": float(np.min(all_lengths)),
+  }
+
+
+# Rollouts named per step in the `[rollout] ... slowest` log line.
+_NUM_SLOWEST_ROLLOUTS_LOGGED = 3
+
+
+def _extract_reward(item: Any) -> float:
+  """Extracts the scalar trajectory reward from a TrajectoryItem.
+
+  The orchestrator consumes only "Token"-mode trajectories, which are plain
+  dicts carrying `trajectory_reward` (see
+  `tunix.rl.agentic.trajectory.trajectory_collect_engine`). Anything else is
+  rejected rather than coerced.
+
+  There is deliberately no default to avoid a silent failure.
+
+  Args:
+    item: A `TrajectoryItem`, or a raw trajectory mapping.
+
+  Returns:
+    The trajectory reward as a float.
+
+  Raises:
+    TypeError: If the trajectory is not a mapping.
+    KeyError: If the mapping has no `trajectory_reward` entry.
+  """
+  traj = getattr(item, "traj", item)
+  if not isinstance(traj, dict):
+    raise TypeError(
+        f"Expected a Token-mode trajectory mapping, got {type(traj).__name__}."
+    )
+  if "trajectory_reward" not in traj:
+    raise KeyError(
+        "Trajectory is missing the 'trajectory_reward' key; present"
+        f" keys are {sorted(traj)}. Rollout backends and critique stage must"
+        " stamp the trajectory reward under 'trajectory_reward'."
+    )
+  return float(traj["trajectory_reward"])
+
+
+def _invoke_reward_fn(
+    fn: Callable[[str, Mapping[str, Any]], float],
+    item: datatypes.TrajectoryItem,
+) -> float:
+  """Scores `item`'s assistant completion string with `fn(completion, metadata)`."""
+  if not isinstance(item.traj, dict):
+    raise TypeError(
+        "Expected a Token-mode trajectory mapping, got"
+        f" {type(item.traj).__name__}."
+    )
+  completion = datatypes.assistant_text(item.traj.get("conversation_text", ""))
+  return float(fn(completion, item.metadata))
+
+
+def _format_rollout_completion(conversation: Any) -> str:
+  """Renders post-prompt interaction (assistant + env) for trajectory logging.
+
+  In single-turn tasks (e.g. GSM8K), this yields the assistant's completion.
+  In multi-turn agentic environments (e.g. ToolAgent, DeepSWE), this preserves
+  both the assistant's turns and subsequent environment/tool feedback while
+  excluding the initial prompt.
+
+  Args:
+    conversation: Either a list of chat messages or an already-rendered string.
+
+  Returns:
+    The rendered completion string for trajectory logging.
+  """
+  if not isinstance(conversation, list):
+    return str(conversation)
+
+  # Find the end of the initial prompt (first user turn).
+  prompt_end_idx = 0
+  for idx, msg in enumerate(conversation):
+    if isinstance(msg, dict) and msg.get("role") == "user":
+      prompt_end_idx = idx + 1
+      break
+
+  post_prompt = conversation[prompt_end_idx:]
+  if not post_prompt:
+    return datatypes.assistant_text(conversation)
+
+  # For a single assistant turn (e.g. single-turn math), return raw content directly.
+  if len(post_prompt) == 1 and isinstance(post_prompt[0], dict):
+    return str(post_prompt[0].get("content", ""))
+
+  # For multi-turn interactions, include role labels so env observations and assistant actions are distinguishable.
+  lines = []
+  for msg in post_prompt:
+    if not isinstance(msg, dict):
+      continue
+    role = msg.get("role", "unknown")
+    content = str(msg.get("content", ""))
+    label = "environment" if role == "user" else role
+    lines.append(f"[{label}]: {content}")
+  return "\n".join(lines)
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True, eq=False)
+class ScoredGroup:
+  """A scored prompt group of rollouts with group-relative advantages computed.
+
+  Used by `StandardRLProgram.scored_q` between `critique_stage` and
+  `train_stage` so `RLTrainerPayload` is never monkeypatched onto
+  `TrajectoryItem` and completed prompt groups are queued as a unit without
+  re-bucketing individual trajectories by `prompt_id`.
+
+  Attributes:
+    payloads: Trainer tensor DTOs for the group's rollouts (`len == G`),
+      produced by `algo.create_trainer_payloads`. Single owner of each rollout's
+      `routed_experts` until packed by the batch assembler.
+    items: Telemetry and lineage views of the group's rollouts with
+      `routed_experts` stripped (`len == G`).
+    rewards: Scalar rewards computed by `critique_stage` (`len == G`), also
+      stamped into each `item.traj["trajectory_reward"]` for downstream logging.
+  """
+
+  payloads: tuple[datatypes.RLTrainerPayload, ...]
+  items: tuple[datatypes.TrajectoryItem, ...]
+  rewards: tuple[float, ...]
+
+  def __post_init__(self) -> None:
+    if not (len(self.payloads) == len(self.items) == len(self.rewards)):
+      raise ValueError(
+          "ScoredGroup requires equal-length payloads, items, and rewards;"
+          f" got {len(self.payloads)}, {len(self.items)}, {len(self.rewards)}."
+      )
+    if not self.items:
+      raise ValueError("ScoredGroup must contain at least one rollout.")
+    first_prompt_id = self.items[0].prompt_id
+    for item in self.items[1:]:
+      if item.prompt_id != first_prompt_id:
+        raise ValueError(
+            "ScoredGroup requires all items to share a single prompt_id;"
+            f" got {first_prompt_id!r} and {item.prompt_id!r}."
+        )
+
+
+def _scored_group_batch_idx(group: ScoredGroup) -> int:
+  """Extracts the prompt-batch index for a `ScoredGroup`."""
+  return trajectory_queue_manager.default_batch_idx_fn(group.items[0])
+
+
+@dataclasses.dataclass(kw_only=True)
+class RLStepResult:
+  """Summary of a completed RL training step."""
+
+  step: int
+  policy_version: int
+  num_rollouts: int
+  num_microbatches: int
+  reward_mean: float
+  reward_std: float
+  advantage_mean: float = 0.0
+  advantage_std: float = 0.0
+  train_result: Any = None
+
+
+class RLProgram(abc.ABC):
+  """Base class for multi-stage DAG workflows."""
+
+  def __init__(self):
+    self._is_running = False
+    self._step = 0
+    self.policy_version = 0
+    self.last_step_result: RLStepResult | None = None
+    self.engine: rl_engine_interface.AbstractRLEngine | None = None
+
+  @property
+  def step(self) -> int:
+    return self._step
+
+  @abc.abstractmethod
+  def run(
+      self,
+      engine: rl_engine_interface.AbstractRLEngine,
+      **kwargs: Any,
+  ) -> None:
+    """Entry point running all stages on an event loop."""
+    raise NotImplementedError("Subclasses must implement run.")
+
+  def close(self) -> None:
+    """Closes and releases program resources."""
+    pass
+
+
+class StandardRLProgram(RLProgram):
+  """Standard RL program handling common multi-stage training workflows asynchronously.
+
+  Runs 4 concurrent stages:
+  1. Rollout dispatch stage: Fire-and-forget requests across worker pool.
+  2. Polling stage: Long-polls completed rollout responses into grouping queue.
+  3. Critique stage: Scores rewards, PRMs, and reference KL logprobs.
+  4. Train stage: Streaming gradient accumulation over microbatches.
+  """
+
+  def __init__(
+      self,
+      algo: algorithm_adapter.AlgorithmAdapter,
+      dataset: Iterable[Any] | None = None,
+      max_steps: int | None = None,
+      reward_fns: Sequence[Callable[..., Any]] | None = None,
+      assembler: batch_assembly.BatchAssembler | None = None,
+      batch_config: batch_assembly.BatchConfig | None = None,
+      generation_args: datatypes.GenerationArgs | None = None,
+      batch_size: int | None = None,
+      max_staleness: int = 0,
+      sync_weights: bool = True,
+      precompile_trainer: bool = True,
+      metrics_logging_options: MetricsLoggerOptions | None = None,
+      trajectory_log_dir: str | None = None,
+      trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
+      metrics_prefix: str = "",
+      mode: Mode | str = Mode.TRAIN,
+      group_order: GroupOrder | str = GroupOrder.TRAJECTORY_COMPLETION,
+      on_step_begin: Callable[[int], None] | None = None,
+      on_step_end: Callable[[int, Any], None] | None = None,
+  ):
+    super().__init__()
+    self.engine: rl_engine_interface.AbstractRLEngine | None = None
+    if max_staleness < 0:
+      raise ValueError("max_staleness must be non-negative.")
+    self.dataset = dataset
+    self.max_steps = max_steps
+    self.algo = algo
+    algo_config = getattr(self.algo, "algo_config", None)
+    algo_max_response_length = getattr(self.algo, "max_response_length", None)
+    if algo_max_response_length is None and algo_config is not None:
+      algo_max_response_length = getattr(
+          algo_config, "max_response_length", None
+      )
+    self.max_response_length = algo_max_response_length
+    self.generation_args = generation_args or datatypes.GenerationArgs()
+
+    if self.algo.algo_config.temperature is not None:
+      raise ValueError(
+          "Do not set temperature on AlgorithmConfig; configure it via"
+          " generation_args on StandardRLProgram."
+      )
+    gen_temp = self.generation_args.temperature
+    if gen_temp is not None:
+      self.algo.algo_config.temperature = gen_temp
+
+    self.generation_args = dataclasses.replace(
+        self.generation_args,
+        return_logprobs=self.algo.algo_config.use_rollout_logps,
+    )
+    self.sampler_is = getattr(self.algo.algo_config, "sampler_is", None)
+    self.sampler_is_threshold = getattr(
+        self.algo.algo_config, "sampler_is_threshold", 2.0
+    )
+    self.sampler_rs = getattr(self.algo.algo_config, "sampler_rs", None)
+    self.sampler_rs_min = getattr(self.algo.algo_config, "sampler_rs_min", None)
+    self.sampler_rs_max = getattr(self.algo.algo_config, "sampler_rs_max", None)
+    raw_seq_err_thresh = getattr(
+        self.algo.algo_config, "seq_logprob_error_threshold", None
+    )
+    self.seq_logprob_error_threshold = (
+        float(raw_seq_err_thresh)
+        if isinstance(raw_seq_err_thresh, (int, float))
+        else None
+    )
+
+    self.reward_fns = list(reward_fns) if reward_fns else []
+    self.num_generations = algo.num_generations
+    self.mini_batch_size = algo.mini_batch_size
+    if self.mini_batch_size <= 0 or self.num_generations <= 0:
+      raise ValueError("mini_batch_size and num_generations must be positive.")
+    self.full_batch_size = (
+        self.mini_batch_size if batch_size is None else batch_size
+    )
+    # Keep batch_size as a public alias for callers that use recipe naming.
+    self.batch_size = self.full_batch_size
+    if self.full_batch_size <= 0:
+      raise ValueError("batch_size must be positive.")
+    if self.full_batch_size % self.mini_batch_size != 0:
+      raise ValueError(
+          "batch_size must be divisible by mini_batch_size; got "
+          f"batch_size={self.full_batch_size}, "
+          f"mini_batch_size={self.mini_batch_size}."
+      )
+    self.can_fuse_agreement_in_loss = (
+        algo_config is not None
+        and getattr(algo_config, "policy_loss_fn", "grpo") == "grpo"
+        and getattr(algo_config, "num_iterations", 1) == 1
+        and self.mini_batch_size >= self.full_batch_size
+    )
+    self.batch_config = batch_config or batch_assembly.BatchConfig()
+    if self.batch_config.max_response_length is None:
+      self.batch_config = dataclasses.replace(
+          self.batch_config,
+          max_response_length=self.max_response_length,
+      )
+    if assembler is not None:
+      self.assembler = assembler
+      self.assembler.num_generations = self.num_generations
+      self.assembler.mini_batch_size = self.mini_batch_size
+    else:
+      self.assembler = batch_assembly.create_batch_assembler(
+          num_generations=self.num_generations,
+          mini_batch_size=self.mini_batch_size,
+          train_micro_batch_size=getattr(algo, "train_micro_batch_size", 1),
+          batch_config=self.batch_config,
+      )
+    self.max_staleness = max_staleness
+    self.sync_weights = sync_weights
+    self.precompile_trainer = precompile_trainer
+    self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
+    if trajectory_log_dir is None and metrics_logging_options is not None:
+      log_dir = getattr(metrics_logging_options, "log_dir", "")
+      if log_dir:
+        trajectory_log_dir = os.path.join(log_dir, "trajectories")
+    self.trajectory_logger = (
+        trajectory_logger.AsyncTrajectoryLogger(trajectory_log_dir)
+        if trajectory_log_dir
+        else None
+    )
+    if trajectory_log_dir:
+      logging.info(
+          "Trajectory logging enabled; resolved trajectory_log_dir=%s",
+          trajectory_log_dir,
+      )
+    else:
+      logging.info("Trajectory logging disabled; no trajectory_log_dir set.")
+    # Received, not built: the orchestrator running this program owns the
+    # Trajectory Store's construction and lifecycle (ClusterOrchestrator, one
+    # per process), since a store's lifetime should span the whole
+    # orchestrator process rather than just one program run. This program
+    # only uses it; close() below does not close it.
+    # TODO(sizhi): Wire active trajectory store reads/writes in pipeline stages
+    # in follow-up CLs.
+    self._trajectory_store = trajectory_store
+    self.metrics_prefix = metrics_prefix
+    self.mode = mode if isinstance(mode, Mode) else Mode(mode)
+    self.group_order = (
+        group_order
+        if isinstance(group_order, GroupOrder)
+        else GroupOrder(group_order)
+    )
+    self.on_step_begin = on_step_begin
+    self.on_step_end = on_step_end
+    self._in_flight_rollouts = 0
+    self._dispatch_done = asyncio.Event()
+    self._assembler_lock = threading.Lock()
+    self.scored_q: (
+        FifoGroupQueue[ScoredGroup] | BatchOrderedGroupQueue[ScoredGroup]
+    )
+    self.raw_q: TrajectoryQueueManager
+    if self.group_order == GroupOrder.PROMPT_ARRIVAL:
+      ordered_q: BatchOrderedGroupQueue[ScoredGroup] = (
+          BatchOrderedGroupQueue.create(
+              full_batch_size=self.full_batch_size,
+              batch_idx_fn=_scored_group_batch_idx,
+          )
+      )
+      self.scored_q = ordered_q
+      self.raw_q = TrajectoryQueueManager.create(
+          num_generations=self.num_generations,
+      )
+      self.dispatch_window = dispatch_window.DispatchWindow(
+          max_staleness=max_staleness,
+          next_batch_fn=lambda: ordered_q.next_batch_idx,
+          full_batch_size=self.full_batch_size,
+      )
+    else:
+      self.scored_q = FifoGroupQueue.create()
+      self.dispatch_window = dispatch_window.DispatchWindow(
+          max_staleness=max_staleness,
+          next_batch_fn=lambda: self._step,
+          full_batch_size=self.full_batch_size,
+          out_of_order_resume=True,
+      )
+      self.raw_q = TrajectoryQueueManager.create(
+          num_generations=self.num_generations,
+          max_staleness=max_staleness,
+          current_policy_version=lambda: self.policy_version,
+          on_group_filtered=self.dispatch_window.on_group_filtered,
+      )
+
+  @property
+  def trajectory_store(self) -> trajectory_store_lib.TrajectoryStore | None:
+    return self._trajectory_store
+
+  def close(self) -> None:
+    """Flushes and closes the metrics logger and associated resources.
+
+    Does not close `self._trajectory_store`: this program does not own it
+    (see `__init__`), and closing a store the orchestrator may still be
+    using — e.g. across a second `run_program()` call — would be wrong.
+    """
+    if self.trajectory_logger is not None:
+      self.trajectory_logger.stop()
+    if self.metrics_logger is not None:
+      self.metrics_logger.close()
+
+  async def _resume_from_checkpoint(self) -> None:
+    """Realigns program orchestration state with the engine's restored checkpoint.
+
+    Delegates the mesh-level work (restoring the trainer checkpoint and, when
+    `sync_weights` is enabled, resyncing rollout worker weights to the restored
+    policy) to the engine, then translates the restored step into program
+    orchestration state: the train-loop bound (`_step`), the exact set of
+    committed and skipped `prompt_id`s (when off-policy state was persisted),
+    or the dataset prefix to skip (resumed `_step` if any).
+    """
+    assert self.engine is not None
+    restored = await self.engine.resume_from_checkpoint(
+        role=datatypes.Role.ACTOR,
+        resync_rollout_weights=self.sync_weights,
+    )
+    restored_step = restored[0] if isinstance(restored, tuple) else restored
+    if restored_step <= 0:
+      return
+    self._step = restored_step
+    self.policy_version = restored_step
+    if isinstance(self.scored_q, BatchOrderedGroupQueue):
+      self.scored_q.skip(0, restored_step)
+    ckpt_meta = self.engine.restored_checkpoint_metadata
+    if (
+        isinstance(ckpt_meta, Mapping)
+        and ckpt_meta.get("policy_version") is not None
+    ):
+      self.policy_version = int(ckpt_meta["policy_version"])
+    if self.dispatch_window.restore_checkpoint_metadata(ckpt_meta):
+      logging.info(
+          "Resuming from off-policy checkpoint: step=%d policy_version=%d"
+          " (committed=%d, skipped=%d).",
+          restored_step,
+          self.policy_version,
+          len(self.dispatch_window.committed_prompt_ids),
+          len(self.dispatch_window.skipped_prompt_ids),
+      )
+      return
+    logging.info(
+        "Resuming from checkpoint: step=%d policy_version=%d (skipping %d"
+        " already-trained dataset items).",
+        restored_step,
+        self.policy_version,
+        self.dispatch_window.next_batch * self.full_batch_size,
+    )
+
+  async def rollout_dispatch_stage(self) -> None:
+    """Stage 1A: Dispatches rollout requests across workers asynchronously.
+
+    Ensures that all dataset items carry unique, collision-free `prompt_id`s
+    (e.g., `f"prompt_{prompt_idx}"`) before dispatching to the engine layer,
+    satisfying the engine's strict `prompt_id` contract.
+
+    Also stamps each prompt's dataset coordinates (`prompt_idx`, `batch_idx`,
+    `intra_batch_idx`) into its metadata, where they ride along untouched to the
+    queue managers. Consumers that order or account per prompt batch read them;
+    nothing upstream of the dispatcher knows dataset position.
+    """
+    assert self.engine is not None
+    if self.dataset is None:
+      raise ValueError(
+          "StandardRLProgram requires a dataset either at init or in run()."
+      )
+
+    try:
+      async for prompt_idx, prompt_item in dataset_utils.iter_dataset_async(
+          self.dataset,
+          skip_count=self.dispatch_window.dataset_skip_count,
+          prefetch_size=max(1, self.full_batch_size),
+      ):
+        if not await self.dispatch_window.admit(prompt_idx, prompt_item):
+          continue
+        coordinates = tagging.prompt_coordinates(
+            prompt_idx, self.full_batch_size
+        )
+        if isinstance(prompt_item, dict):
+          prompt_item = dict(prompt_item)
+          prompt_item.setdefault("prompt_id", f"prompt_{prompt_idx}")
+          if self.max_response_length is not None:
+            prompt_item.setdefault(
+                "max_response_length", self.max_response_length
+            )
+        elif not hasattr(prompt_item, "prompt_id"):
+          prompt_item = {
+              "prompt": prompt_item,
+              "prompt_id": f"prompt_{prompt_idx}",
+          }
+          if self.max_response_length is not None:
+            prompt_item["max_response_length"] = self.max_response_length
+
+        prompt_item = tagging.tag_prompt(prompt_item, coordinates)
+        prompt_id = (
+            prompt_item["prompt_id"]
+            if isinstance(prompt_item, dict)
+            else prompt_item.prompt_id
+        )
+        logging.info(
+            "[pipeline] DISPATCH prompt_id=%s prompt_idx=%d batch_idx=%d"
+            " intra_batch_idx=%d policy_version=%d next_batch=%d",
+            prompt_id,
+            coordinates["prompt_idx"],
+            coordinates["batch_idx"],
+            coordinates["intra_batch_idx"],
+            self.policy_version,
+            self.dispatch_window.next_batch,
+        )
+        self._in_flight_rollouts += self.num_generations
+        dispatch_kwargs: dict[str, Any] = {
+            "num_generations": self.num_generations,
+            "policy_version": self.policy_version,
+            "exact_token_continuity": getattr(
+                self.algo.algo_config, "exact_token_continuity", True
+            ),
+        }
+        if self.generation_args is not None:
+          dispatch_kwargs["generation_args"] = self.generation_args
+        await self.engine.dispatch_rollouts(
+            [prompt_item],
+            **dispatch_kwargs,
+        )
+    finally:
+      self._dispatch_done.set()
+
+  async def polling_stage(self) -> None:
+    """Stage 1B: Long-polls completed worker rollout responses into the queue."""
+    assert self.engine is not None
+    try:
+      while not self._dispatch_done.is_set() or self._in_flight_rollouts > 0:
+        completed = await self.engine.poll_rollouts()
+        if isinstance(completed, list) and completed:
+          self._in_flight_rollouts -= len(completed)
+          for item in completed:
+            await self.raw_q.put(item)
+    finally:
+      # NB: We currently assume it's safe to silently drop partial groups upon EOF.
+      await self.raw_q.close()
+
+  async def critique_stage(self) -> None:
+    """Stage 2: Scores rewards, PRMs, and reference KL logprobs."""
+    assert self.engine is not None
+    try:
+      while True:
+        try:
+          group = await self.raw_q.get_group()
+          if not group:
+            break
+        except Exception:
+          break
+
+        if len(group) != self.num_generations:
+          raise ValueError(
+              f"raw_q returned a group of {len(group)} items; expected"
+              f" num_generations={self.num_generations}."
+          )
+
+        rewards = []
+        for item in group:
+          # Skip reward evaluation or extraction for failed, timed-out, or
+          # masked-out trajectories (`not item.is_valid`): although the payload
+          # still goes through trainer fwd/bwd to keep static batch shapes, its
+          # advantage and completion_mask are zeroed out, so scoring it is
+          # wasted work (and an aborted trajectory may lack trajectory_reward).
+          if not item.is_valid:
+            r = 0.0
+          elif self.reward_fns:
+            r = sum(_invoke_reward_fn(fn, item) for fn in self.reward_fns)
+          else:
+            r = _extract_reward(item)
+          rewards.append(float(r))
+          del item
+
+        raw_payloads = self.algo.create_trainer_payloads(group, rewards=rewards)
+        if len(raw_payloads) != len(group):
+          raise ValueError(
+              f"create_trainer_payloads returned {len(raw_payloads)} payloads"
+              f" for a group of {len(group)} items."
+          )
+        trainer_payloads = collections.deque(raw_payloads)
+        del raw_payloads
+        group_payloads: list[datatypes.RLTrainerPayload] = []
+        group_items: list[datatypes.TrajectoryItem] = []
+        for idx in range(len(trainer_payloads)):
+          payload = trainer_payloads.popleft()
+          reward_val = rewards[idx]
+          src_item = group[idx]
+          src_traj = getattr(src_item, "traj", None)
+          if isinstance(src_traj, dict):
+            raw_status = src_traj.get("status") or getattr(
+                src_item, "status", None
+            )
+            traj_dict = dict(src_traj)
+          elif src_traj is not None:
+            raw_status = getattr(src_traj, "status", None) or getattr(
+                src_item, "status", None
+            )
+            traj_dict = (
+                src_traj.to_dict() if hasattr(src_traj, "to_dict") else {}
+            )
+          else:
+            raw_status = getattr(src_item, "status", None)
+            traj_dict = {}
+          if isinstance(raw_status, datatypes.TrajectoryStatus):
+            status = raw_status
+          elif isinstance(raw_status, str):
+            status = getattr(
+                datatypes.TrajectoryStatus,
+                raw_status.upper(),
+                datatypes.TrajectoryStatus.SUCCEEDED
+                if raw_status.upper() in ("COMPLETED", "SUCCESS")
+                else datatypes.TrajectoryStatus.RUNNING,
+            )
+          else:
+            status = datatypes.TrajectoryStatus.RUNNING
+          src_metadata = getattr(src_item, "metadata", None)
+          metadata = dict(src_metadata) if src_metadata else {}
+          metadata.pop("routed_experts", None)
+          traj_dict.pop("routed_experts", None)
+          if isinstance(src_traj, dict):
+            src_traj.pop("routed_experts", None)
+          if isinstance(src_metadata, dict):
+            src_metadata.pop("routed_experts", None)
+          src_policy_version = getattr(src_item, "policy_version", None)
+          if src_policy_version is None:
+            src_policy_version = metadata.get("policy_version", 0)
+          src_policy_version = int(src_policy_version or 0)
+          traj_dict["trajectory_reward"] = reward_val
+          traj_dict["status"] = status
+          traj_dict["conversation_masks"] = payload.completion_mask
+          traj_dict["policy_version"] = src_policy_version
+          item = datatypes.TrajectoryItem(
+              prompt_id=getattr(src_item, "prompt_id", ""),
+              group_index=getattr(src_item, "group_index", 0),
+              start_step=0,
+              traj=traj_dict,
+              is_valid=getattr(src_item, "is_valid", True),
+              prompt_tokens=getattr(src_item, "prompt_tokens", None),
+              completion_tokens=getattr(src_item, "completion_tokens", None),
+              action_mask=getattr(src_item, "action_mask", None),
+              routed_experts=None,
+              policy_version=src_policy_version,
+              metadata=metadata,
+              # TODO: b/552087289 - Replace TrajectoryItem with a compact typed
+              # telemetry record (identity + reward + generation facts +
+              # RolloutFacts).
+          )
+          group_payloads.append(payload)
+          group_items.append(item)
+          del payload, src_item, src_traj, src_metadata
+          del traj_dict, metadata, item
+        scored_group = ScoredGroup(
+            payloads=tuple(group_payloads),
+            items=tuple(group_items),
+            rewards=tuple(rewards),
+        )
+        del group_payloads, group_items, trainer_payloads
+        await self.scored_q.put(scored_group)
+        del scored_group
+        if group:
+          first_meta = getattr(group[0], "metadata", None) or {}
+          first_policy_version = getattr(group[0], "policy_version", None)
+          if first_policy_version is None:
+            first_policy_version = first_meta.get("policy_version", 0)
+          logging.info(
+              "[pipeline] ARRIVED prompt_id=%s prompt_idx=%s batch_idx=%s"
+              " intra_batch_idx=%s policy_version=%d",
+              getattr(group[0], "prompt_id", ""),
+              first_meta.get("prompt_idx"),
+              first_meta.get("batch_idx"),
+              first_meta.get("intra_batch_idx"),
+              int(first_policy_version or 0),
+          )
+        del group, rewards
+    finally:
+      await self.scored_q.close()
+
+  def _log_metric(
+      self,
+      metric_name: str,
+      scalar_value: float | np.ndarray,
+      step: int,
+      *,
+      prefix: str | None = None,
+  ) -> None:
+    """Logs a scalar metric using RLEngine-compatible '<prefix>/<mode>/<name>' layout."""
+    if prefix is None:
+      if "/" in metric_name:
+        prefix, metric_name = metric_name.split("/", maxsplit=1)
+      else:
+        prefix = "global"
+    if self.metrics_prefix:
+      prefix = (
+          f"{self.metrics_prefix}/{prefix}"
+          if prefix
+          else self.metrics_prefix
+      )
+    self.metrics_logger.log(prefix, metric_name, scalar_value, self.mode, step)
+
+  async def _drain_filtered_groups(
+      self,
+  ) -> list[list[datatypes.TrajectoryItem]]:
+    """Drains and returns all filtered groups from the raw trajectory queue."""
+    return await self.raw_q.get_filtered_groups()
+
+  def _collect_and_log_step_metrics(
+      self,
+      *,
+      all_step_items: Sequence[datatypes.TrajectoryItem],
+      step_rewards: Sequence[float],
+      step_advantages: Sequence[float] | None = None,
+      prompt_lengths: Sequence[int] = (),
+      completion_lengths: Sequence[int] = (),
+      generation_metrics: Mapping[str, float] | None = None,
+      step_result: Any = None,
+      trainer_metrics: Any = None,
+      num_rollouts: int,
+      num_microbatches: int,
+      padding_stats: Sequence[batch_assembly.PaddingStats],
+      packing_time_sec: float,
+      step_time_sec: float,
+      consumed_policy_version: int,
+      log_step: int,
+      sampler_agreement: dict[str, tuple[Any, list[Any]]] | None = None,
+      filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]] = (),
+      step_times: step_telemetry.StepTimes | None = None,
+  ) -> dict[str, Any]:
+    """Logs rollout, reward, trainer, and orchestrator metrics.
+
+    TODO: b/552087289 - All metrics in this program are currently aggregated
+    and flushed at the trainer's global step T boundary, which relies on an
+    ON-POLICY assumption.
+    In off-policy / asynchronous RL:
+     1. Rollout/critique workers run asynchronously and may produce or buffer
+        data across multiple steps; data generated during global step T might
+        only be consumed at later steps (T+1, T+2, ...) or discarded.
+     2. The batch consumed at step T directly updates the policy to pi_{T+1},
+        but logging worker/rollout metrics at step T couples worker generation
+        timelines to the trainer clock.
+    Future work under b/552087289 will decouple metric logging so workers emit
+    their own generation metrics independently (keyed by policy version or
+    sample count), rather than forcing all worker metrics into the trainer's
+    global step boundary.
+    """
+    # --- 1. Rollout metrics & Ingestion Staleness ---
+    total_lengths = [
+        p_len + c_len
+        for p_len, c_len in zip(prompt_lengths, completion_lengths, strict=True)
+    ]
+    staleness_list = []
+    for item in all_step_items:
+      # Batch ingestion staleness: consumed_policy_version - item.policy_version
+      pol_ver = getattr(item, "policy_version", None)
+      if (
+          pol_ver is None
+          and hasattr(item, "metadata")
+          and isinstance(item.metadata, dict)
+      ):
+        pol_ver = item.metadata.get("policy_version")
+      if pol_ver is not None:
+        staleness_list.append(float(max(0, consumed_policy_version - pol_ver)))
+
+    if prompt_lengths:
+      self._log_metric(
+          "rollout/prompts/mean_length",
+          float(np.mean(prompt_lengths)),
+          log_step,
+      )
+      self._log_metric(
+          "rollout/prompts/max_length",
+          float(np.max(prompt_lengths)),
+          log_step,
+      )
+      self._log_metric(
+          "rollout/prompts/min_length",
+          float(np.min(prompt_lengths)),
+          log_step,
+      )
+    if completion_lengths:
+      self._log_metric(
+          "rollout/completions/mean_length",
+          float(np.mean(completion_lengths)),
+          log_step,
+      )
+      self._log_metric(
+          "rollout/completions/max_length",
+          float(np.max(completion_lengths)),
+          log_step,
+      )
+      self._log_metric(
+          "rollout/completions/min_length",
+          float(np.min(completion_lengths)),
+          log_step,
+      )
+    if total_lengths:
+      self._log_metric(
+          "rollout/total_tokens_mean",
+          float(np.mean(total_lengths)),
+          log_step,
+      )
+    if staleness_list:
+      staleness_stats = {
+          "staleness_mean": float(np.mean(staleness_list)),
+          "staleness_max": float(np.max(staleness_list)),
+          "staleness_min": float(np.min(staleness_list)),
+      }
+      for tag, val in staleness_stats.items():
+        self._log_metric(f"rollout/{tag}", val, log_step)
+
+    rollout_facts = [
+        step_telemetry.RolloutFacts.of(item) for item in all_step_items
+    ]
+    rollout_health = step_telemetry.rollout_health(rollout_facts)
+    for tag, val in rollout_health.metrics.items():
+      self._log_metric(tag, val, log_step)
+    slowest = step_telemetry.slowest_rollouts_summary(
+        rollout_facts, k=_NUM_SLOWEST_ROLLOUTS_LOGGED
+    )
+    if slowest is not None:
+      logging.info("[rollout] step=%d %s", log_step, slowest)
+
+    # Generation/rollout metrics grouped under rollout/*.
+    if generation_metrics:
+      for tag, val in generation_metrics.items():
+        if tag.startswith("generation/"):
+          tag = "rollout/" + tag.removeprefix("generation/")
+        self._log_metric(tag, val, log_step)
+
+    filtered_groups_count = len(filtered_groups)
+    filtered_trajectories_count = sum(len(g) for g in filtered_groups)
+    self._log_metric(
+        "rollout/filtered_groups_count",
+        float(filtered_groups_count),
+        log_step,
+    )
+    self._log_metric(
+        "rollout/filtered_trajectories_count",
+        float(filtered_trajectories_count),
+        log_step,
+    )
+
+    # --- 2. Reward Metrics ---
+    rewards_to_log = step_rewards
+    if all_step_items:
+      valid_flags = [item.is_valid for item in all_step_items]
+      self._log_metric(
+          "rollout/invalid_trajectory_frac",
+          1.0 - float(np.mean(valid_flags)),
+          log_step,
+      )
+      rewards_to_log = [
+          reward
+          for reward, is_valid in zip(step_rewards, valid_flags)
+          if is_valid
+      ]
+
+    reward_mean = float(np.mean(rewards_to_log)) if rewards_to_log else 0.0
+    reward_std = float(np.std(rewards_to_log)) if rewards_to_log else 0.0
+    reward_min = float(np.min(rewards_to_log)) if rewards_to_log else 0.0
+    reward_max = float(np.max(rewards_to_log)) if rewards_to_log else 0.0
+    reward_sum = float(np.sum(rewards_to_log)) if rewards_to_log else 0.0
+    if rewards_to_log:
+      reward_stats = {
+          "mean": reward_mean,
+          "std": reward_std,
+          "min": reward_min,
+          "max": reward_max,
+          "sum": reward_sum,
+      }
+      for tag, val in reward_stats.items():
+        self._log_metric(f"rewards/{tag}", val, log_step)
+
+    # --- Advantage Metrics ---
+    advantage_mean = float(np.mean(step_advantages)) if step_advantages else 0.0
+    advantage_std = float(np.std(step_advantages)) if step_advantages else 0.0
+    advantage_min = float(np.min(step_advantages)) if step_advantages else 0.0
+    advantage_max = float(np.max(step_advantages)) if step_advantages else 0.0
+    advantage_abs_mean = (
+        float(np.mean(np.abs(step_advantages))) if step_advantages else 0.0
+    )
+    advantage_nonzero_frac = (
+        float(np.mean(np.abs(step_advantages) > 1e-8))
+        if step_advantages
+        else 0.0
+    )
+    if step_advantages:
+      advantage_stats = {
+          "mean": advantage_mean,
+          "max": advantage_max,
+          "min": advantage_min,
+          "std": advantage_std,
+          "abs_mean": advantage_abs_mean,
+          "nonzero_frac": advantage_nonzero_frac,
+      }
+      for tag, val in advantage_stats.items():
+        self._log_metric(f"rewards/advantage/{tag}", val, log_step)
+
+    # --- 3. Perf & Orchestrator Metrics ---
+    self._log_metric("perf/global_step_time", float(step_time_sec), log_step)
+    orchestrator_stats = {
+        "policy_version": float(self.policy_version),
+        "num_rollouts": float(num_rollouts),
+        "num_microbatches": float(num_microbatches),
+        "step_time_sec": float(step_time_sec),
+    }
+    for tag, val in orchestrator_stats.items():
+      self._log_metric(f"orchestrator/{tag}", val, log_step)
+    if step_times is not None:
+      for tag, val in dataclasses.asdict(step_times).items():
+        self._log_metric(f"perf/{tag}", val, log_step)
+    if padding_stats:
+      for tag, val in batch_assembly.summarize_padding_stats(
+          padding_stats
+      ).items():
+        self._log_metric(f"efficiency/padding/{tag}", val, log_step)
+      packing_stats = {
+          "time_sec_total": float(packing_time_sec),
+          "time_sec_mean": float(packing_time_sec) / len(padding_stats),
+      }
+      for tag, val in packing_stats.items():
+        self._log_metric(f"efficiency/packing/{tag}", val, log_step)
+
+    # --- 4. Actor Trainer Metrics ---
+    loss_val = None
+    perplexity_val = None
+    if trainer_metrics is None:
+      if isinstance(step_result, dict):
+        trainer_metrics = step_result.get("metrics")
+      elif step_result is not None:
+        trainer_metrics = step_result
+
+    if trainer_metrics is not None:
+      scalar_metrics = {}
+      weighted_metrics = {}
+      if hasattr(trainer_metrics, "scalar_metrics"):
+        scalar_metrics.update(getattr(trainer_metrics, "scalar_metrics", {}))
+      if hasattr(trainer_metrics, "weighted_metrics"):
+        weighted_metrics.update(
+            getattr(trainer_metrics, "weighted_metrics", {})
+        )
+      if isinstance(trainer_metrics, dict):
+        if (
+            "scalar_metrics" in trainer_metrics
+            or "weighted_metrics" in trainer_metrics
+        ):
+          scalar_metrics.update(trainer_metrics.get("scalar_metrics") or {})
+          weighted_metrics.update(trainer_metrics.get("weighted_metrics") or {})
+        else:
+          for k, v in trainer_metrics.items():
+            if k == "metrics":
+              continue
+            scalar_metrics[k] = v
+
+      # Loss & Perplexity
+      raw_loss = scalar_metrics.pop(
+          "loss",
+          scalar_metrics.pop(
+              "trainer/loss", scalar_metrics.pop("actor/loss", None)
+          ),
+      )
+      if raw_loss is None and "loss" in weighted_metrics:
+        raw_loss = weighted_metrics.pop("loss")
+      elif raw_loss is None and "trainer/loss" in weighted_metrics:
+        raw_loss = weighted_metrics.pop("trainer/loss")
+      elif raw_loss is None and "actor/loss" in weighted_metrics:
+        raw_loss = weighted_metrics.pop("actor/loss")
+
+      loss_val = _extract_scalar(raw_loss)
+      if loss_val is not None:
+        self._log_metric("loss", loss_val, log_step, prefix="actor")
+        perplexity_val = float(np.exp(loss_val))
+        self._log_metric(
+            "perplexity", perplexity_val, log_step, prefix="actor"
+        )
+
+      # Learning Rate
+      raw_lr = scalar_metrics.pop(
+          "learning_rate",
+          scalar_metrics.pop(
+              "trainer/learning_rate",
+              scalar_metrics.pop("actor/learning_rate", None),
+          ),
+      )
+      lr_val = _extract_scalar(raw_lr)
+      if lr_val is not None:
+        self._log_metric("learning_rate", lr_val, log_step, prefix="actor")
+
+      # Grad Norm
+      raw_gn = scalar_metrics.pop(
+          "grad_norm",
+          scalar_metrics.pop(
+              "trainer/grad_norm", scalar_metrics.pop("actor/grad_norm", None)
+          ),
+      )
+      gn_val = _extract_scalar(raw_gn)
+      if gn_val is not None:
+        self._log_metric("grad_norm", gn_val, log_step, prefix="actor")
+
+      # Auxiliary weighted metrics
+      for k, v in weighted_metrics.items():
+        val = _extract_scalar(v)
+        if val is not None:
+          clean_key = (
+              k.removeprefix("trainer/").removeprefix("actor/")
+          )
+          self._log_metric(clean_key, val, log_step, prefix="actor")
+
+      # Auxiliary scalar metrics
+      for k, v in scalar_metrics.items():
+        if k in ("perplexity", "trainer/perplexity", "actor/perplexity"):
+          continue
+        val = _extract_scalar(v)
+        if val is not None:
+          clean_key = (
+              k.removeprefix("trainer/").removeprefix("actor/")
+          )
+          if clean_key.startswith((
+              "sampler_trainer/",
+              "sampler_is/",
+              "sampler_rs/",
+          )):
+            self._log_metric(clean_key, val, log_step)
+          else:
+            self._log_metric(clean_key, val, log_step, prefix="actor")
+
+    # --- 5. Sampler/Trainer Agreement Metrics ---
+    # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``,
+    # ``sampler_rs/*``) by the shared helper; reduce each metric's
+    # per-microbatch values with the aggregation fn the helper paired with it.
+    if sampler_agreement:
+      for name, (agg_fn, values) in sampler_agreement.items():
+        if not values:
+          continue
+        self._log_metric(name, float(agg_fn(values)), log_step)
+
+    return {
+        "reward_mean": reward_mean,
+        "reward_std": reward_std,
+        "advantage_mean": advantage_mean,
+        "advantage_std": advantage_std,
+        "loss_val": loss_val,
+        "perplexity_val": perplexity_val,
+        "filtered_groups_count": filtered_groups_count,
+        "filtered_trajectories_count": filtered_trajectories_count,
+    }
+
+  async def _apply_sampler_trainer_agreement(
+      self,
+      batch: datatypes.RLTrainerPayload,
+      accumulator: dict[str, tuple[Any, list[Any]]],
+  ) -> datatypes.RLTrainerPayload:
+    """Records sampler-vs-trainer agreement and feeds IS/RS weights into a batch.
+
+    Recomputes per-token log-probs under the trainer's live (actor) weights and
+    compares them against the sampler's recorded ``old_per_token_logps`` to
+    quantify sampler-vs-trainer drift, appending the resulting metrics to
+    ``accumulator`` (keyed by the shared helper's already-namespaced names).
+    When ``sampler_is == "token"`` or ``sampler_rs is not None`` it also writes
+    importance-sampling / rejection-sampling weights and overwrites
+    ``old_per_token_logps`` with the trainer logps so the policy loss can
+    correct for off-policy drift, matching the agentic learner.
+
+    Args:
+      batch: The microbatch to score; must carry ``old_per_token_logps``.
+      accumulator: Per-step map of metric name -> (agg_fn, values) to extend.
+
+    Returns:
+      The batch, marked with ``sampler_agreement_applied=True`` and updated with
+      IS/RS weights and trainer logps when configured.
+    """
+    assert self.engine is not None
+    gen_temp = self.generation_args.temperature
+    logps_req = datatypes.LogprobsRequest(
+        prompt_tokens=batch.prompt_ids,
+        completion_tokens=batch.completion_ids,
+        temperature=gen_temp if gen_temp is not None else 1.0,
+        model_role="actor",
+        pad_id=self.batch_config.pad_id,
+        eos_id=getattr(self.assembler, "eos_id", self.batch_config.pad_id),
+        segment_ids=batch.segment_ids,
+        segment_positions=batch.segment_positions,
+        # Score under the same replayed routing the loss will use, so the
+        # agreement / TIS check compares the sampler against the trainer's
+        # actual training forward rather than a freshly re-gated one.
+        routed_experts=batch.routed_experts,
+    )
+    trainer_logps = await self.engine.per_token_logps(
+        datatypes.Role.ACTOR, items=logps_req
+    )
+    trainer_logps = np.asarray(trainer_logps.per_token_logps, dtype=np.float32)
+    sa_metrics, sampler_is_weights, filtered_completion_mask = (
+        rl_common.sampler_trainer_agreement(
+            batch.old_per_token_logps,
+            trainer_logps,
+            batch.completion_mask,
+            sampler_is=self.sampler_is,
+            sampler_is_threshold=self.sampler_is_threshold,
+            sampler_rs=self.sampler_rs,
+            sampler_rs_min=self.sampler_rs_min,
+            sampler_rs_max=self.sampler_rs_max,
+            seq_logprob_error_threshold=self.seq_logprob_error_threshold,
+            segment_ids=batch.segment_ids,
+        )
+    )
+    for name, (value, agg_fn) in sa_metrics.items():
+      accumulator.setdefault(name, (agg_fn, []))[1].append(value)
+
+    updates: dict[str, Any] = {"sampler_agreement_applied": True}
+    if self.seq_logprob_error_threshold is not None:
+      updates["completion_mask"] = filtered_completion_mask
+    if sampler_is_weights is not None:
+      updates["sampler_is_weights"] = sampler_is_weights
+    if (
+        self.sampler_is == "token"
+        or self.sampler_rs is not None
+        or self.seq_logprob_error_threshold is not None
+    ):
+      updates["old_per_token_logps"] = trainer_logps
+    batch = dataclasses.replace(batch, **updates)
+    return batch
+
+  def _log_consumed_trajectories(
+      self,
+      all_step_items: Sequence[datatypes.TrajectoryItem],
+      *,
+      log_step: int,
+      consumed_policy_version: int,
+  ) -> None:
+    """Persists one row per consumed rollout when trajectory logging is enabled."""
+    if self.trajectory_logger is None:
+      return
+    for item in all_step_items:
+      metadata = dict(getattr(item, "metadata", None) or {})
+      metadata.pop("routed_experts", None)
+      env_config = metadata.get("env_config")
+      if not isinstance(env_config, dict):
+        env_config = {}
+      # Logging must never take down a training step, so read defensively
+      # rather than reusing the strict `_extract_reward` above.
+      traj = dict(getattr(item, "traj", None) or {})
+      traj.pop("routed_experts", None)
+      status = traj.get("status", None)
+      reward = traj.get("trajectory_reward", None)
+      if isinstance(status, datatypes.TrajectoryStatus):
+        status = status.name
+      row = {
+          "global_step": log_step,
+          "consumed_policy_version": consumed_policy_version,
+          "prompt_id": getattr(item, "prompt_id", ""),
+          "group_index": getattr(item, "group_index", 0),
+          "rollout_policy_version": getattr(item, "policy_version", 0),
+          "status": status or "UNKNOWN",
+          "reward": float(reward) if reward is not None else None,
+          "question": metadata.get("question", env_config.get("question", "")),
+          "prompt": metadata.get("prompt", env_config.get("prompt", "")),
+          "completion": _format_rollout_completion(
+              traj.get("conversation_text", "")
+          ),
+          "gold_answer": metadata.get(
+              "gold_answer",
+              metadata.get("answer", env_config.get("gold_answer", "")),
+          ),
+          "prompt_tokens": getattr(item, "prompt_tokens", None),
+          "completion_tokens": getattr(item, "completion_tokens", None),
+          "metadata": metadata,
+          "trajectory": traj,
+      }
+      self.trajectory_logger.log_item_async(row)
+
+  async def _timed_train_step(
+      self, batch: datatypes.RLTrainerPayload, *, apply_optimizer: bool
+  ) -> tuple[Any, float]:
+    """Runs one microbatch's `train_step`; returns its result and seconds.
+
+    Intermediate microbatches (`apply_optimizer=False`) intentionally return
+    once `fwd_bwd` is dispatched so the next microbatch's RPC, host-to-device
+    input sharding, and XLA launch stay pipelined with TPU execution.
+    """
+    assert self.engine is not None
+    start = time.monotonic()
+    result = await self.engine.train_step(
+        batch,
+        role=datatypes.Role.ACTOR,
+        accumulate_gradients=True,
+        apply_optimizer=apply_optimizer,
+    )
+    return result, time.monotonic() - start
+
+  async def train_stage(self) -> None:
+    """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
+    assert self.engine is not None
+
+    pending_train: asyncio.Task[tuple[Any, float]] | None = None
+    step_result: Any = None
+    step_times = step_telemetry.StepTimes()
+
+    async def _await_pending_train() -> None:
+      nonlocal pending_train, step_result
+      task, pending_train = pending_train, None
+      if task is not None:
+        step_result, train_sec = await task
+        step_times.policy_training_time += train_sec
+
+    try:
+      while self.max_steps is None or self._step < self.max_steps:
+        current_step = self._step
+        step_start_time = time.monotonic()
+        step_times = step_telemetry.StepTimes()
+        consumed_policy_version = self.policy_version
+
+        uncommitted_groups: list[list[datatypes.TrajectoryItem]] = []
+        step_result = None
+        trainer_metrics = None
+        step_sampler_agreement: dict[str, tuple[Any, list[Any]]] = {}
+        step_rewards: list[float] = []
+        step_advantages: list[float] = []
+        step_prompt_lengths: list[int] = []
+        step_completion_lengths: list[int] = []
+        num_microbatches = 0
+        step_padding_stats: list[batch_assembly.PaddingStats] = []
+        step_packing_time_sec = 0.0
+        num_rollouts = 0
+        all_step_items: list[datatypes.TrajectoryItem] = []
+        had_scored_items = False
+        groups_consumed = 0
+        checkpoint_saved = False
+        final_minibatch_completed = False
+
+        async def _maybe_save_checkpoint() -> None:
+          nonlocal checkpoint_saved
+          optimizer_step = self.step + 1
+          if (
+              isinstance(step_result, dict)
+              and step_result.get("train_step") is not None
+          ):
+            optimizer_step = int(step_result["train_step"])
+          checkpoint_start = time.monotonic()
+          await self.engine.save_checkpoint(
+              role=datatypes.Role.ACTOR,
+              metadata={
+                  "step": optimizer_step,
+                  "global_step": self.step + 1,
+                  "policy_version": self.policy_version + 1,
+                  "num_rollouts": num_rollouts,
+                  "num_microbatches": num_microbatches,
+                  **self.dispatch_window.checkpoint_metadata(
+                      uncommitted_groups
+                  ),
+              },
+          )
+          step_times.checkpoint_time += time.monotonic() - checkpoint_start
+          checkpoint_saved = True
+
+        while groups_consumed < self.full_batch_size:
+          wait_start = time.monotonic()
+          scored_group = await self.scored_q.get()
+          step_times.exposed_generation_time += time.monotonic() - wait_start
+          had_scored_items = scored_group is not None
+          if scored_group is None:
+            batch_iter = iter(self.assembler.flush())
+          else:
+            if groups_consumed == 0 and self.on_step_begin:
+              self.on_step_begin(current_step)
+
+            groups_consumed += 1
+            group_items = list(scored_group.items)
+            payloads: list[datatypes.RLTrainerPayload] = []
+            for item, payload, reward_val in zip(
+                scored_group.items,
+                scored_group.payloads,
+                scored_group.rewards,
+                strict=True,
+            ):
+              step_rewards.append(reward_val)
+              advantages = np.asarray(payload.advantages)
+              if advantages.size > 0:
+                step_advantages.append(float(np.mean(advantages)))
+              del advantages
+              step_prompt_lengths.append(
+                  int(np.count_nonzero(payload.prompt_mask))
+              )
+              step_completion_lengths.append(
+                  int(np.count_nonzero(payload.completion_mask))
+              )
+              payload = dataclasses.replace(
+                  payload,
+                  metadata={
+                      **payload.metadata,
+                      "traj_id": item.traj_id,
+                  },
+              )
+              payloads.append(payload)
+              del item, payload, reward_val
+            del scored_group
+            uncommitted_groups.append(group_items)
+            all_step_items.extend(group_items)
+            num_rollouts += len(group_items)
+            del group_items
+            batch_iter = iter(self.assembler.feed(payloads))
+            del payloads
+
+          while True:
+            packing_start_time = time.perf_counter()
+            mb = (
+                await asyncio.to_thread(
+                    _next_microbatch, batch_iter, self._assembler_lock
+                )
+            ).pop()
+            step_packing_time_sec += time.perf_counter() - packing_start_time
+            if mb is None:
+              break
+            batch = mb.payload
+            if getattr(self.algo, "requires_reference_kl", False):
+              if not isinstance(batch, datatypes.RLTrainerPayload):
+                raise TypeError(
+                    "Reference KL requires an assembler that returns "
+                    "datatypes.RLTrainerPayload microbatches; got "
+                    f"{type(batch).__name__}."
+                )
+              reference_start = time.monotonic()
+              ref_logps = await self.engine.per_token_logps(
+                  datatypes.Role.REFERENCE,
+                  items=batch,
+                  temperature=self.generation_args.temperature,
+              )
+              step_times.reference_logps_time += (
+                  time.monotonic() - reference_start
+              )
+              batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
+            algo_config = getattr(self.algo, "algo_config", None)
+            if (
+                isinstance(batch, datatypes.RLTrainerPayload)
+                and batch.old_per_token_logps is not None
+                and algo_config is not None
+                and algo_config.use_rollout_logps
+                and not self.can_fuse_agreement_in_loss
+            ):
+              await _await_pending_train()
+              agreement_start = time.monotonic()
+              batch = await self._apply_sampler_trainer_agreement(
+                  batch, step_sampler_agreement
+              )
+              step_times.sampler_agreement_time += (
+                  time.monotonic() - agreement_start
+              )
+
+            num_microbatches += 1
+            step_padding_stats.append(mb.padding_stats)
+            logging.info(
+                "Packed %d trajectories into microbatch: %s"
+                " (padding_ratio=%.3f, row_imbalance=%.3f)",
+                len(mb.trajectory_ids),
+                logging_utils.summarize_list(list(mb.trajectory_ids)),
+                mb.padding_stats.padding_ratio,
+                mb.padding_stats.row_imbalance,
+            )
+            is_final_batch = mb.is_final_batch
+            await _await_pending_train()
+            pending_train = asyncio.create_task(
+                self._timed_train_step(batch, apply_optimizer=is_final_batch)
+            )
+            del batch, mb
+            if is_final_batch:
+              await _await_pending_train()
+              metrics_start = time.monotonic()
+              trainer_metrics = await self.engine.get_metrics(
+                  role=datatypes.Role.ACTOR
+              )
+              step_times.policy_training_time += (
+                  time.monotonic() - metrics_start
+              )
+              final_minibatch_completed = True
+              # TODO(tunix-dev): Configurable checkpointing frequency. Today we
+              # checkpoint at the same frequency as the weight update.
+              # Save only at a resumable full-batch boundary. An optimizer step
+              # can occur earlier when a full batch contains multiple mini
+              # batches, but the dataset resume cursor advances in full batches.
+              # TODO(tunix-dev): For now any failures in save_checkpoint will
+              # abort the entire program. Make it configurable on whether to
+              # fail or continue.
+              full_batch_complete = (
+                  groups_consumed >= self.full_batch_size
+                  or not had_scored_items
+              )
+              if full_batch_complete:
+                await _maybe_save_checkpoint()
+          del batch_iter
+
+          if not had_scored_items or groups_consumed >= self.full_batch_size:
+            if not checkpoint_saved and final_minibatch_completed:
+              await _maybe_save_checkpoint()
+            break
+
+        await _await_pending_train()
+
+        if not all_step_items:
+          logging.info(
+              "Dataset exhausted at step %d before max_steps.", current_step
+          )
+          break
+
+        if self.sync_weights:
+          # TODO(tunix-dev): Split into drain/transfer/publish once
+          # `sync_weights` reports per-phase times; draining in-flight rollouts
+          # can dominate this.
+          sync_start = time.monotonic()
+          new_version = await self.engine.sync_weights(
+              role=datatypes.Role.ACTOR
+          )
+          step_times.weight_sync_time += time.monotonic() - sync_start
+          self.policy_version = (
+              new_version
+              if new_version is not None
+              else self.policy_version + 1
+          )
+
+        # Before `commit()`, which will eventually take ownership of the groups.
+        generation_metrics = _generation_metrics(uncommitted_groups)
+        logging.info(
+            "[pipeline] COMMIT step=%d batch_idx=%s consumed_version=%d"
+            " rollout_versions=%s groups=%s",
+            current_step,
+            self.dispatch_window.next_batch,
+            consumed_policy_version,
+            [
+                getattr(g[0], "policy_version", 0)
+                for g in uncommitted_groups
+                if g
+            ],
+            [
+                (
+                    getattr(g[0], "prompt_id", ""),
+                    (getattr(g[0], "metadata", None) or {}).get("batch_idx"),
+                )
+                for g in uncommitted_groups
+                if g
+            ],
+        )
+        self.dispatch_window.record_committed_groups(uncommitted_groups)
+        self.scored_q.commit(current_step, groups=uncommitted_groups)
+
+        step_time_sec = time.monotonic() - step_start_time
+
+        filtered_groups = await self._drain_filtered_groups()
+
+        metrics_summary = self._collect_and_log_step_metrics(
+            all_step_items=all_step_items,
+            step_rewards=step_rewards,
+            step_advantages=step_advantages,
+            prompt_lengths=step_prompt_lengths,
+            completion_lengths=step_completion_lengths,
+            generation_metrics=generation_metrics,
+            step_result=step_result,
+            trainer_metrics=trainer_metrics,
+            num_rollouts=num_rollouts,
+            num_microbatches=num_microbatches,
+            padding_stats=step_padding_stats,
+            packing_time_sec=step_packing_time_sec,
+            step_time_sec=step_time_sec,
+            consumed_policy_version=consumed_policy_version,
+            log_step=current_step,
+            sampler_agreement=step_sampler_agreement,
+            filtered_groups=filtered_groups,
+            step_times=step_times,
+        )
+        del filtered_groups
+        self._log_consumed_trajectories(
+            all_step_items,
+            log_step=current_step,
+            consumed_policy_version=consumed_policy_version,
+        )
+
+        self.last_step_result = RLStepResult(
+            step=current_step,
+            policy_version=self.policy_version,
+            num_rollouts=num_rollouts,
+            num_microbatches=num_microbatches,
+            reward_mean=metrics_summary["reward_mean"],
+            reward_std=metrics_summary["reward_std"],
+            advantage_mean=metrics_summary["advantage_mean"],
+            advantage_std=metrics_summary["advantage_std"],
+            train_result=step_result,
+        )
+
+        loss_val = metrics_summary["loss_val"]
+        perplexity_val = metrics_summary["perplexity_val"]
+        if self.mode == Mode.TRAIN:
+          logging.info(
+              "Train step %d - loss: %s - reward_mean: %.4f - advantage_mean:"
+              " %.4f - perplexity: %s - step_time: %.2fs",
+              current_step,
+              f"{loss_val:.4f}" if loss_val is not None else "N/A",
+              metrics_summary["reward_mean"],
+              metrics_summary["advantage_mean"],
+              f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
+              step_time_sec,
+          )
+
+        if self.on_step_end:
+          self.on_step_end(current_step, step_result)
+        self._step += 1
+        # Strictly after the increment: the dispatcher re-reads `next_batch` on
+        # waking, and waking it on the old value would park it again with no one
+        # left to set the event.
+        self.dispatch_window.release()
+    finally:
+      if pending_train is not None:
+        pending_train.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+          await _await_pending_train()
+
+  async def run_async(
+      self,
+      engine: rl_engine_interface.AbstractRLEngine,
+      **kwargs: Any,
+  ) -> None:
+    """Launches all stages concurrently on event loop."""
+    del kwargs
+    self.engine = engine
+    # Must happen before any stage starts: train_stage reads `_step` for its
+    # loop bound and rollout_dipatch_stage reads resumed `_step` to skip
+    # the dataset prefix the previous run already consumed.
+    await self._resume_from_checkpoint()
+    logging.info("Starting StandardRLProgram concurrent stages...")
+
+    engine.configure_worker(
+        role=datatypes.Role.ACTOR,
+        algo=self.algo,
+        assembler=self.assembler,
+        can_fuse_agreement_in_loss=self.can_fuse_agreement_in_loss,
+        precompile=self.precompile_trainer,
+        return_routed_experts=bool(
+            self.generation_args.return_routed_experts
+        ),
+    )
+
+    if self.sync_weights:
+      await engine.prepare_rollout_policy(
+          role=datatypes.Role.ACTOR,
+          sync_weights=True,
+          policy_version=self.policy_version,
+      )
+
+    train_task = asyncio.create_task(self.train_stage())
+    tasks = [
+        asyncio.create_task(self.rollout_dispatch_stage()),
+        asyncio.create_task(self.polling_stage()),
+        asyncio.create_task(self.critique_stage()),
+        train_task,
+    ]
+
+    pending_tasks = set(tasks)
+    try:
+      while not train_task.done() and pending_tasks:
+        done, pending_tasks = await asyncio.wait(
+            pending_tasks, return_when=asyncio.FIRST_COMPLETED, timeout=0.05
+        )
+        for task in done:
+          if task.exception():
+            raise task.exception()  # pyrefly: ignore[bad-raise]
+      if train_task.exception():
+        raise train_task.exception()  # pyrefly: ignore[bad-raise]
+    except Exception as exc:
+      logging.error("Exception in StandardRLProgram execution: %s", exc)
+      for task in tasks:
+        if not task.done():
+          task.cancel()
+      await self.raw_q.abort(exc)
+      await self.scored_q.abort(exc)
+      with contextlib.suppress(asyncio.CancelledError, Exception):
+        await train_task
+      with self._assembler_lock:
+        self.assembler.reset()
+      raise
+    finally:
+      for task in tasks:
+        if not task.done():
+          task.cancel()
+
+  def run(
+      self,
+      engine: rl_engine_interface.AbstractRLEngine,
+      **kwargs: Any,
+  ) -> None:
+    """Synchronous entry point running all stages on an event loop."""
+    try:
+      loop = asyncio.get_running_loop()
+    except RuntimeError:
+      loop = None
+
+    def _retrieve_task_exception(t: asyncio.Task[Any]) -> None:
+      try:
+        t.result()
+      except Exception:  # pylint: disable=broad-except
+        # Exception is already logged inside run_async, we just need to
+        # retrieve it so asyncio doesn't complain about unretrieved exceptions.
+        pass
+
+    if loop and loop.is_running():
+      self._bg_task = asyncio.create_task(self.run_async(engine, **kwargs))
+      self._bg_task.add_done_callback(_retrieve_task_exception)
+    else:
+      asyncio.run(self.run_async(engine, **kwargs))
