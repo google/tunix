@@ -43,6 +43,7 @@ from tunix.experimental.weight_sync import raiden_synchronizer
 from tunix.experimental.weight_sync import raiden_weight_sync_delegate
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.weight_sync import weight_sync_coordinator
+from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import rollout_worker
 from tunix.experimental.worker import trainer_worker
 from tunix.generate import base_sampler
@@ -314,7 +315,7 @@ def _rollout_process_fn(
   model_config = test_common.ModelConfig(**model_config_kwargs)
   sampler_type = adapter_config_kwargs.get("sampler_type", "inprocess_vllm")
   delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
-  adapter_config = RolloutConfig(kv_cache_size=64, **adapter_config_kwargs)
+  adapter_config = RolloutConfig(**adapter_config_kwargs)
 
   if sampler_type == "vanilla":
     vanilla_model = test_common.ToyTransformer(model_config, rngs=nnx.Rngs(1))
@@ -549,18 +550,50 @@ def _never_answer(conn: connection.Connection) -> None:
   threading.Event().wait()
 
 
-class RemoteTrainerWorker:
-  """Proxy to communicate with TrainerWorker running in a separate process."""
+class _RemoteWorkerProxy(abstract_worker.Worker):
+  """Base proxy for a worker running in a separate test process."""
 
-  def __init__(self, worker: _WorkerProcess):
+  def __init__(self, worker: _WorkerProcess, role: datatypes.Role):
     self._worker = worker
     self._info = datatypes.WorkerInfo(
         worker_id=worker.name,
-        roles=frozenset({datatypes.Role.ACTOR.value}),
+        roles=frozenset({role.value}),
     )
 
   def info(self) -> datatypes.WorkerInfo:
     return self._info
+
+  def initialize(self) -> datatypes.Response:
+    raise NotImplementedError(
+        "Lifecycle methods are not used in WeightSyncE2ETest."
+    )
+
+  def compile(self, dummy_data: Any) -> datatypes.Response:
+    raise NotImplementedError(
+        "Lifecycle methods are not used in WeightSyncE2ETest."
+    )
+
+  def start(self) -> datatypes.Response:
+    raise NotImplementedError(
+        "Lifecycle methods are not used in WeightSyncE2ETest."
+    )
+
+  def stop(self) -> datatypes.Response:
+    raise NotImplementedError(
+        "Lifecycle methods are not used in WeightSyncE2ETest."
+    )
+
+  def heartbeat(self) -> datatypes.HealthReport:
+    raise NotImplementedError(
+        "Lifecycle methods are not used in WeightSyncE2ETest."
+    )
+
+
+class RemoteTrainerWorker(_RemoteWorkerProxy):
+  """Proxy to communicate with TrainerWorker running in a separate process."""
+
+  def __init__(self, worker: _WorkerProcess):
+    super().__init__(worker, datatypes.Role.ACTOR)
 
   async def prepare_weight_sync(
       self, sync_request: Any = None, **kwargs: Any
@@ -575,18 +608,11 @@ class RemoteTrainerWorker:
     return self._worker.request("release_weight_sync", sync_request)
 
 
-class RemoteRolloutWorker:
+class RemoteRolloutWorker(_RemoteWorkerProxy):
   """Proxy to communicate with RolloutWorker running in a separate process."""
 
   def __init__(self, worker: _WorkerProcess):
-    self._worker = worker
-    self._info = datatypes.WorkerInfo(
-        worker_id=worker.name,
-        roles=frozenset({datatypes.Role.ROLLOUT.value}),
-    )
-
-  def info(self) -> datatypes.WorkerInfo:
-    return self._info
+    super().__init__(worker, datatypes.Role.ROLLOUT)
 
   async def bind_weight_sync(self) -> None:
     self._worker.request("bind_weight_sync")
@@ -780,6 +806,7 @@ class WeightSyncE2ETest(absltest.TestCase):
     model_config_dict = dataclasses.asdict(self.model_config)
     adapter_config = RolloutConfig(
         sampler_type="vanilla",
+        kv_cache_size=64,
         weight_sync_mode=WeightSyncMode.RAIDEN,
     )
     adapter_config_dict = dataclasses.asdict(adapter_config)
@@ -811,6 +838,7 @@ class WeightSyncE2ETest(absltest.TestCase):
     rollout_worker_proxy = RemoteRolloutWorker(rollout_proc)
 
     registry = worker_registry.WorkerRegistry()
+    self.addCleanup(registry.close)
     registry.register(trainer_worker_proxy)
     registry.register(rollout_worker_proxy)
 
@@ -837,6 +865,7 @@ class WeightSyncE2ETest(absltest.TestCase):
     model_config_dict = dataclasses.asdict(self.model_config)
     adapter_config = RolloutConfig(
         sampler_type="inprocess_vllm",
+        kv_cache_size=64,
         weight_sync_mode=WeightSyncMode.RAIDEN,
     )
     adapter_config_dict = dataclasses.asdict(adapter_config)
@@ -868,6 +897,7 @@ class WeightSyncE2ETest(absltest.TestCase):
     rollout_worker_proxy = RemoteRolloutWorker(rollout_proc)
 
     registry = worker_registry.WorkerRegistry()
+    self.addCleanup(registry.close)
     registry.register(trainer_worker_proxy)
     registry.register(rollout_worker_proxy)
 
