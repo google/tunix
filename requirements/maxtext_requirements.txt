@@ -6,9 +6,9 @@
 # moe_fp8_bwd_dispatch, ragged_unsort_spread_masked_indices, moe_fallback_topk_capacity, fp32_master_storage,
 # gdn_cp_fast_state_passing, moe_fp8_token_all_gather, gdn_bwd_natural_layout, gdn_gated_norm_layout,
 # context_parallel_attention_load_balance_order, gdn_conv1d_natural_layout, gdn_fwd_kernel_head_group_size,
-# gdn_in_proj_kernel_order, dense_grad_reduce and optimizer_device_resident_gib.
-maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@c7131f8be6ab589f0a13cb7594397864ab2ea066
-maxtext-vllm-adapter @ git+https://github.com/AI-Hypercomputer/maxtext.git@c7131f8be6ab589f0a13cb7594397864ab2ea066#subdirectory=src/maxtext/integration/vllm
+# gdn_in_proj_kernel_order, dense_grad_reduce, optimizer_device_resident_gib, and #5571 step-timing readiness tokens.
+maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@c1bd7476280c96a71aa1c0251cc05f85968abb23
+maxtext-vllm-adapter @ git+https://github.com/AI-Hypercomputer/maxtext.git@c1bd7476280c96a71aa1c0251cc05f85968abb23#subdirectory=src/maxtext/integration/vllm
 aqtp
 cheroot
 cloud-accelerator-diagnostics
