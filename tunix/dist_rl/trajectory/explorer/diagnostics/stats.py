@@ -17,10 +17,8 @@
 `TrajectoryStats.from_trajectory` summarizes a single trajectory (steps, tokens,
 tool calls, status, reward); `RunStats.from_trajectories` aggregates a
 collection of them (a "run") into a per-trajectory `pandas.DataFrame`. A
-quantity a trajectory does not report (status, reward, token counts) is `None`
-rather than 0 (a null in the DataFrame). Token counts are reported as a unit:
-once a trajectory reports any token field, the fields it omits are 0. See
-`TokenCounts`.
+quantity a trajectory does not report (status, reward, each token count) is
+`None` rather than 0 (a null in the DataFrame). See `TokenCounts`.
 """
 
 from __future__ import annotations
@@ -51,12 +49,16 @@ class StepCountsJson(TypedDict):
 
 
 class TokenCountsJson(TypedDict):
-  """JSON form of `TokenCounts`, plus the derived `total`."""
+  """JSON form of `TokenCounts`, plus the derived `total`.
 
-  prompt: int
-  completion: int
-  cached: int
-  total: int
+  A count the source does not report is null, and so is `total` unless both
+  `prompt` and `completion` are reported.
+  """
+
+  prompt: int | None
+  completion: int | None
+  cached: int | None
+  total: int | None
 
 
 class TrajectoryStatsJson(TypedDict):
@@ -155,8 +157,11 @@ class StepCounts(NamedTuple):
 class TokenCounts(NamedTuple):
   """Token counts reported by a step, a trajectory, or a run.
 
-  A source either reports token counts or it does not (`TokenCounts | None`).
-  Once a source reports any token field, the fields it leaves unset count as 0.
+  Each count is None when the source does not report it, never a fabricated
+  0: a source may report some counts and not others (e.g. an RL rollout
+  reports only the completion tokens it generated). At least one count is
+  reported: build instances with `from_fields`, `from_metrics` or
+  `from_trajectory`, which return None instead of an all-None `TokenCounts`.
 
   Attributes:
     prompt: Input tokens, cached and non-cached.
@@ -164,22 +169,24 @@ class TokenCounts(NamedTuple):
     cached: A subset of prompt tokens that hit the cache.
   """
 
-  prompt: int = 0
-  completion: int = 0
-  cached: int = 0
+  prompt: int | None = None
+  completion: int | None = None
+  cached: int | None = None
 
   @classmethod
   def from_fields(
       cls, prompt: int | None, completion: int | None, cached: int | None
   ) -> TokenCounts | None:
-    """Returns counts from optional fields, or None if all are unset."""
-    if prompt is None and completion is None and cached is None:
-      return None
-    return cls(
-        prompt=prompt if prompt is not None else 0,
-        completion=completion if completion is not None else 0,
-        cached=cached if cached is not None else 0,
-    )
+    """Returns counts from optional fields, or None if all are unset.
+
+    Fields may also be nullable pandas values, e.g. `RunStats.df` cells:
+    `pd.NA` counts as unset, and numpy integers are converted to `int`.
+    """
+    fields = [
+        None if v is None or pd.isna(v) else int(v)
+        for v in (prompt, completion, cached)
+    ]
+    return None if all(v is None for v in fields) else cls(*fields)
 
   @classmethod
   def from_metrics(
@@ -201,8 +208,11 @@ class TokenCounts(NamedTuple):
     """Returns the token counts a trajectory reports, or None if unreported.
 
     `final_metrics` is the producer's own sum over steps, so when it reports
-    any token field it is used as a whole. Otherwise the per-step `metrics`
-    are summed.
+    any token field it is used as a whole (the fields it omits stay None).
+    Otherwise each of `prompt`, `completion` and `cached` is summed over the
+    steps whose `metrics` report it, and stays None if no step does. When
+    steps report different fields, the sums (and hence `total`) cover
+    different steps.
 
     Args:
       trajectory: The trajectory to inspect.
@@ -216,32 +226,34 @@ class TokenCounts(NamedTuple):
       )
       if from_final is not None:
         return from_final
-    return cls.sum_reported(
-        cls.from_metrics(step.metrics) for step in trajectory.steps
-    )
-
-  @classmethod
-  def sum_reported(
-      cls, counts: Iterable[TokenCounts | None]
-  ) -> TokenCounts | None:
-    """Returns the sum of the non-None `counts`, or None if there are none."""
-    reported = [c for c in counts if c is not None]
-    if not reported:
-      return None
-    return cls(
-        prompt=sum(c.prompt for c in reported),
-        completion=sum(c.completion for c in reported),
-        cached=sum(c.cached for c in reported),
+    step_counts = [cls.from_metrics(step.metrics) for step in trajectory.steps]
+    reported = [c for c in step_counts if c is not None]
+    return cls.from_fields(
+        prompt=_sum_reported(c.prompt for c in reported),
+        completion=_sum_reported(c.completion for c in reported),
+        cached=_sum_reported(c.cached for c in reported),
     )
 
   @property
-  def total(self) -> int:
-    """Returns `prompt + completion`."""
+  def total(self) -> int | None:
+    """Returns `prompt + completion`, or None unless both are reported."""
+    if self.prompt is None or self.completion is None:
+      return None
     return self.prompt + self.completion
 
   def __str__(self) -> str:
-    """Formats the counts as `total (prompt+completion)`."""
-    return f"{self.total} ({self.prompt}+{self.completion})"
+    """Returns the counts formatted as `total (prompt+completion)`.
+
+    Without both `prompt` and `completion` there is no total, so the reported
+    counts are named instead, e.g. `50 completion`.
+    """
+    if self.total is not None:
+      return f"{self.total} ({self.prompt}+{self.completion})"
+    return ", ".join(
+        f"{count} {name}"
+        for name, count in self._asdict().items()
+        if count is not None
+    )
 
   def to_json_dict(self) -> TokenCountsJson:
     """Returns the counts as a plain JSON-serializable dict."""
@@ -251,6 +263,12 @@ class TokenCounts(NamedTuple):
         cached=self.cached,
         total=self.total,
     )
+
+
+def _sum_reported(values: Iterable[int | None]) -> int | None:
+  """Returns the sum of the non-None `values`, or None if none is reported."""
+  reported = [v for v in values if v is not None]
+  return sum(reported) if reported else None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -367,8 +385,8 @@ COLUMN_DTYPES: Mapping[str, str] = types.MappingProxyType({
     "status": "string",
     "total_reward": "float64",
     **{f"steps_{field}": "int64" for field in StepCounts._fields},
-    # Capitalized "Int64" is pandas' nullable integer dtype: `tokens` may be
-    # unreported.
+    # Capitalized "Int64" is pandas' nullable integer dtype: each token count
+    # may be unreported.
     **{f"tokens_{field}": "Int64" for field in TokenCounts._fields},
     "num_tool_calls": "int64",
 })
@@ -423,18 +441,22 @@ class RunStats:
 
   @property
   def num_with_tokens(self) -> int:
-    """Returns the number of trajectories that report token counts."""
-    return int(self.df["tokens_prompt"].notna().sum())
+    """Returns the number of trajectories that report any token count."""
+    token_columns = [f"tokens_{field}" for field in TokenCounts._fields]
+    return int(self.df[token_columns].notna().any(axis=1).sum())
 
   @property
   def tokens(self) -> TokenCounts | None:
-    """Returns the token counts summed across the run, or None if none reported."""
-    if self.num_with_tokens == 0:
-      return None
-    return TokenCounts(
-        prompt=int(self.df["tokens_prompt"].sum()),
-        completion=int(self.df["tokens_completion"].sum()),
-        cached=int(self.df["tokens_cached"].sum()),
+    """Returns the token counts summed across the run, or None if none reported.
+
+    Each of `prompt`, `completion` and `cached` is summed over the trajectories
+    that report it, and stays None if none of them does. A run normally comes
+    from one producer; if its trajectories report different fields, the sums
+    (and hence `total`) cover different trajectories.
+    """
+    # `min_count=1` keeps a field with no reported value null instead of 0.
+    return TokenCounts.from_fields(
+        *(self.df[f"tokens_{f}"].sum(min_count=1) for f in TokenCounts._fields)
     )
 
   @property
