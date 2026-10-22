@@ -268,6 +268,9 @@ class RLVllmSampler:
                 _get_val(kwargs, "include_stop_str_in_output", True),
             )
         ),
+        # Off by default so token-only callers skip detokenization; callers
+        # that read `SamplingResponse.text` request it via the `detokenize`
+        # kwarg (e.g. `VllmSamplerAdapter(detokenize=True)`).
         detokenize=bool(
             _get_val(
                 sparams,

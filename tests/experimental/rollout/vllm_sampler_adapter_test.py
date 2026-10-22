@@ -64,6 +64,38 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     self.assertEqual(response.finish_reason, "stop")
     self.mock_sampler_instance.sample.assert_called_once_with(req)
 
+  def test_detokenize_off_by_default(self):
+    self.mock_sampler_instance.sample.return_value = SimpleNamespace(
+        request_id="req_01", token_ids=np.array([1], dtype=np.int32)
+    )
+    req = base_sampler_lib.SamplingRequest(prompt="hi")
+    asyncio.run(self.sampler_adapter.sample(req))
+    self.mock_sampler_instance.sample.assert_called_once_with(req)
+
+  def test_detokenize_enabled_is_forwarded_to_sampler(self):
+    sampler = mock.AsyncMock()
+    sampler.sample.return_value = SimpleNamespace(
+        request_id="req_01", token_ids=np.array([1], dtype=np.int32)
+    )
+    adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+        server_id="vllm_slice_01", sampler_instance=sampler, detokenize=True
+    )
+    req = base_sampler_lib.SamplingRequest(prompt="hi")
+    asyncio.run(adapter.sample(req))
+    sampler.sample.assert_called_once_with(req, detokenize=True)
+
+  def test_explicit_detokenize_kwarg_wins_over_adapter_default(self):
+    sampler = mock.AsyncMock()
+    sampler.sample.return_value = SimpleNamespace(
+        request_id="req_01", token_ids=np.array([1], dtype=np.int32)
+    )
+    adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+        server_id="vllm_slice_01", sampler_instance=sampler, detokenize=True
+    )
+    req = base_sampler_lib.SamplingRequest(prompt="hi")
+    asyncio.run(adapter.sample(req, detokenize=False))
+    sampler.sample.assert_called_once_with(req, detokenize=False)
+
   def test_batch_sampling_requests(self):
     mock_responses = [
         SimpleNamespace(

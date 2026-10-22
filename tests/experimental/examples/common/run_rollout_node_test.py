@@ -134,6 +134,13 @@ class RunRolloutNodeTest(absltest.TestCase):
     kwargs_enabled = run_rollout_node._rollout_config_kwargs(args_enabled)
     self.assertTrue(kwargs_enabled["partial_rollout"])
 
+  def test_detokenize_flag_defaults_off(self):
+    self.assertFalse(run_rollout_node._parse_args([]).detokenize)
+    self.assertTrue(
+        run_rollout_node._parse_args(["--detokenize=true"]).detokenize
+    )
+    self.assertTrue(run_rollout_node._parse_args(["--detokenize"]).detokenize)
+
   def test_routed_experts_flags_reach_rollout_config(self):
     defaults = run_rollout_node._rollout_config_kwargs(
         run_rollout_node._parse_args([])

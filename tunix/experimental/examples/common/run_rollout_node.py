@@ -346,6 +346,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Prefuse MoE weights for MaxText inference in vLLM.",
   )
   parser.add_argument(
+      "--detokenize",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help=(
+          "Detokenize vLLM outputs so `SamplingResponse.text` is populated"
+          " (--sampler=vllm only). Agentic recipes that parse the action from"
+          " the completion text need this; token-only workflows can leave it"
+          " off."
+      ),
+  )
+  parser.add_argument(
       "--enable_prefix_caching",
       type=_str2bool,
       default=False,
@@ -903,6 +916,7 @@ def _create_vllm_sampler(args, tokenizer):
       model_name=vllm_model,
       weight_sync_mode=args.weight_sync_mode,
       partial_rollout=partial_rollout,
+      detokenize=args.detokenize,
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="vllm",
