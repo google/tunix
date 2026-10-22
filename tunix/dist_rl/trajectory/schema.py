@@ -134,6 +134,36 @@ TRAJECTORIES_TABLE = sa.Table(
     sa.Index("idx_trajectories_created_at", "run_id", "created_at"),
 )
 
+TRAJECTORY_METRICS_TABLE = sa.Table(
+    "trajectory_metrics",
+    METADATA,
+    sa.Column("run_id", sa.String(128), nullable=False),
+    sa.Column("trajectory_id", sa.String(128), nullable=False),
+    sa.Column("payload", _JSON_TYPE, nullable=False),
+    sa.Column(
+        "created_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.Column(
+        "updated_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+        onupdate=sa.func.now(),
+    ),
+    sa.PrimaryKeyConstraint(
+        "run_id", "trajectory_id", name="pk_trajectory_metrics"
+    ),
+    sa.ForeignKeyConstraint(
+        ["run_id"],
+        ["runs.run_id"],
+        name="fk_trajectory_metrics_runs",
+        ondelete="CASCADE",
+    ),
+)
+
 # 16 (2^4) fixed hash buckets reduce per-partition row count and B-tree index
 # size by 16x and allow parallel autovacuum across buckets while keeping
 # unpruned operations (`drop_all`, `pg_dump`) at 2 * 16 + 1 = 33 relation locks,
