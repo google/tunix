@@ -102,6 +102,10 @@ jobs:
             python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. {} +
 
       - name: Run dist_rl and experimental tests
+        env:
+          # Configs with a Hugging Face hub tokenizer require HF_TOKEN at
+          # resolution time; these tests do not download anything.
+          HF_TOKEN: ${{ secrets.HF_TOKEN || 'dist_rl_config_test_token' }}
         run: |
           # TODO(tunix-dev): add back raiden tests after tpu_sync lib is ready.
           python -m pytest tests/dist_rl/ tests/experimental/ -v --tb=short \
