@@ -180,6 +180,9 @@ class TrajectoryCollectEngine:
     # This turn's raw prefill routing as (rows, prefill_start,
     # prefill_num_context), persisted as-is on the turn's agent step.
     self._current_prefill: Optional[Tuple[np.ndarray, int, int]] = None
+    # This turn's prompt length as reported by the inference backend, persisted
+    # as the turn's agent step `metrics.prompt_tokens`.
+    self._current_prompt_tokens: Optional[int] = None
     self.env_time = {
         "reset_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
         "step_latency": [],  # List of per-step wall-clock times, ordered by step index
@@ -387,6 +390,7 @@ class TrajectoryCollectEngine:
           prefill_routed_experts=prefill_rows,
           prefill_start=prefill_start,
           prefill_num_context=prefill_num_context,
+          prompt_tokens=self._current_prompt_tokens,
       )
       if agent_step is not None:
         self._sync_trajectory_metadata(include_timings=False)
@@ -751,6 +755,7 @@ class TrajectoryCollectEngine:
     self._current_step_initial_routed_experts = None
     self._has_routed_experts = False
     self._current_prefill = None
+    self._current_prompt_tokens = None
     self.env_time = {
         "reset_latency": 0.0,
         "step_latency": [],
@@ -1026,6 +1031,12 @@ class TrajectoryCollectEngine:
 
     self._current_step_initial_routed_experts = None
     self._current_prefill = None
+    # The whole context so far: the prompt plus every earlier turn's tokens.
+    self._current_prompt_tokens = (
+        int(rollout_output.prompt_lengths[0])
+        if rollout_output.prompt_lengths is not None
+        else None
+    )
     routed = (
         rollout_output.routed_experts[0]
         if rollout_output.routed_experts

@@ -82,8 +82,22 @@ def _to_float_list(
 def _extract_metrics(
     assistant_tokens: Any,
     logprobs: Any,
+    prompt_tokens: int | None = None,
 ) -> trajectory_lib.Metrics | None:
-  """Builds a Metrics object from assistant_tokens and logprobs if present."""
+  """Builds a turn's Metrics from its token counts and logprobs, if present.
+
+  Args:
+    assistant_tokens: The turn's assistant token IDs, or None.
+    logprobs: The log probabilities of `assistant_tokens`, or None.
+    prompt_tokens: Input tokens of the turn's model call, or None if the
+      inference backend does not report them.
+
+  Returns:
+    The turn's Metrics, or None if none of them is present.
+
+  Raises:
+    ValueError: If `assistant_tokens` and `logprobs` differ in length.
+  """
   completion_tokens = None
   completion_token_ids = None
   logprobs_list = None
@@ -107,14 +121,23 @@ def _extract_metrics(
         f" length of logprobs ({len(logprobs_list)})."
     )
 
-  if completion_tokens is None and logprobs_list is None:
+  if (
+      prompt_tokens is None
+      and completion_tokens is None
+      and logprobs_list is None
+  ):
     return None
 
-  return trajectory_lib.Metrics.model_construct(
+  metrics = trajectory_lib.Metrics.model_construct(
       completion_tokens=completion_tokens,
       completion_token_ids=completion_token_ids,
       logprobs=logprobs_list,
   )
+  # Assigned only when reported, so that turns from backends that do not report
+  # prompt lengths keep exactly their previous fields.
+  if prompt_tokens is not None:
+    metrics.prompt_tokens = prompt_tokens
+  return metrics
 
 
 def _extract_observation(obs_val: Any) -> trajectory_lib.Observation | None:
@@ -170,6 +193,7 @@ def create_agent_step(
     prefill_routed_experts: np.ndarray | None = None,
     prefill_start: int | None = None,
     prefill_num_context: int | None = None,
+    prompt_tokens: int | None = None,
 ) -> trajectory_lib.TunixAgentStep | None:
   """Converts a Tunix agent_types.Step into an agent turn Step.
 
@@ -187,6 +211,9 @@ def create_agent_step(
     prefill_start: Sequence position of the first `prefill_routed_experts` row.
     prefill_num_context: Number of leading `prefill_routed_experts` rows that
       cover tokens before this turn's generation.
+    prompt_tokens: Input tokens of this turn's model call (the prompt plus every
+      earlier turn), as reported by the inference backend, or None if it does
+      not report them. Recorded as `metrics.prompt_tokens`.
 
   Returns:
     The converted TunixAgentStep (with step_id = 2 * tunix_step_id + 1), or None
@@ -223,7 +250,9 @@ def create_agent_step(
       message=step.model_response,
       reasoning_content=(step.thought if step.thought is not None else None),
       tool_calls=action_converter.extract_tool_calls(step.action),
-      metrics=_extract_metrics(step.assistant_tokens, step.logprobs),
+      metrics=_extract_metrics(
+          step.assistant_tokens, step.logprobs, prompt_tokens=prompt_tokens
+      ),
       assistant_tokens=step.assistant_tokens,
       assistant_masks=step.assistant_masks,
       logprobs=step.logprobs,

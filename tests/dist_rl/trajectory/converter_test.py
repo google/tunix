@@ -240,6 +240,39 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
         {"completion_tokens", "completion_token_ids", "logprobs"},
     )
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="with_completion",
+          assistant_tokens=np.array([101, 102]),
+          expected=trajectory_lib.Metrics(
+              prompt_tokens=7,
+              completion_tokens=2,
+              completion_token_ids=[101, 102],
+          ),
+      ),
+      dict(
+          testcase_name="without_completion",
+          assistant_tokens=None,
+          expected=trajectory_lib.Metrics(prompt_tokens=7),
+      ),
+  )
+  def test_create_agent_step_records_reported_prompt_tokens(
+      self,
+      assistant_tokens: np.ndarray | None,
+      expected: trajectory_lib.Metrics,
+  ) -> None:
+    """Verifies a reported prompt length is recorded as `prompt_tokens`."""
+    rl_step = agent_types.Step(
+        model_response="resp", assistant_tokens=assistant_tokens
+    )
+
+    metrics = converter.create_agent_step(
+        rl_step, tunix_step_id=0, prompt_tokens=7
+    ).metrics
+
+    self.assertEqual(metrics, expected)
+    self.assertIn("prompt_tokens", metrics.model_fields_set)
+
   def test_create_agent_step_with_masked_token_raises_mask_error(self) -> None:
     """Verifies token IDs in a masked array with a masked entry are rejected."""
     rl_step = agent_types.Step(
