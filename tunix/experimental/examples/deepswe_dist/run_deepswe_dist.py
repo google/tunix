@@ -315,6 +315,7 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       use_rollout_logps=args.use_rollout_logps,
       routed_experts_encode_mode=args.routed_experts_encode_mode,
       routed_experts_num_experts=args.routed_experts_num_experts,
+      reward_manager="agentic-sequence-level",
   )
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,

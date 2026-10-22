@@ -15,17 +15,19 @@
 """Reward output for RL."""
 
 import abc
+from collections.abc import Sequence
 from dataclasses import asdict
 import inspect
-import multiprocessing
 import os
-from typing import Any, Callable, Dict, List, Sequence
+from typing import Any, Callable, ClassVar, Dict, List
 import weakref
 
 from absl import logging
 import numpy as np
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import function_registry
+
+import multiprocessing
 
 RewardFn = Callable[..., Any]
 
@@ -75,25 +77,23 @@ class AbstractRewardManager(abc.ABC):
 
   def __init__(
       self,
-      reward_fns: RewardFn | List[RewardFn],
+      reward_fns: RewardFn | Sequence[RewardFn] | None,
       algo_config: algo_config_lib.AlgorithmConfig,
   ):
     """Initializes the manager with a list of callable reward function objects.
 
     Args:
-        reward_fns: A list of reward functions or models.
+        reward_fns: A list of reward functions or models, or None when rewards
+          are supplied externally (e.g. environment trajectory rewards).
         algo_config: The algorithm config to use for reward function
           configuration.
     """
-    self.reward_fns = (
-        [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
-    )
-
-    if not self.reward_fns:
-      raise ValueError(
-          "reward_fns cannot be empty. You must provide at least one reward"
-          " function."
-      )
+    if reward_fns is None:
+      self.reward_fns = []
+    elif callable(reward_fns):
+      self.reward_fns = [reward_fns]
+    else:
+      self.reward_fns = list(reward_fns)
     self.algo_config = algo_config
 
   @abc.abstractmethod
@@ -116,28 +116,38 @@ class AbstractRewardManager(abc.ABC):
     """
     pass
 
+  def close(self) -> None:
+    """Releases any resources held by the reward manager."""
+
 
 @function_registry.register_reward_manager("sequence-level")
 class SequenceRewardManager(AbstractRewardManager):
   """Reward manager for sequence-level rewards only."""
 
+  _require_reward_fns: ClassVar[bool] = True
+
   def __init__(
       self,
-      reward_fns: RewardFn | List[RewardFn],
+      reward_fns: RewardFn | Sequence[RewardFn] | None,
       algo_config: algo_config_lib.AlgorithmConfig,
       **kwargs,
   ):
     """Initializes the manager with a list of callable reward function objects."""
     super().__init__(reward_fns, algo_config)
+    if self._require_reward_fns and not self.reward_fns:
+      raise ValueError(
+          "reward_fns cannot be empty for SequenceRewardManager"
+          " ('sequence-level'). Provide at least one reward function, or set"
+          " algo_config.reward_manager='agentic-sequence-level' to use"
+          " environment trajectory rewards."
+      )
     self._pool = None
     # Reward fns that must be evaluated in the parent process, learned at
     # runtime: fns that are unpicklable, or that spawn subprocesses of their
     # own (which the pool's daemonic workers forbid).
     self._parent_only_fns = set()
     self._parallel_disabled = False
-    self._worker_timeout = getattr(
-        algo_config, "reward_worker_timeout_seconds", 180.0
-    )
+    self._worker_timeout = algo_config.reward_worker_timeout_seconds
 
   def _parallel_enabled(self) -> bool:
     return (
@@ -148,7 +158,7 @@ class SequenceRewardManager(AbstractRewardManager):
 
   def _num_workers(self) -> int:
     """Resolves `reward_num_workers`; -1 means one worker per CPU."""
-    n = getattr(self.algo_config, "reward_num_workers", 0)
+    n = self.algo_config.reward_num_workers
     cpus = os.cpu_count() or 1
     if n == -1:
       return cpus
@@ -178,11 +188,10 @@ class SequenceRewardManager(AbstractRewardManager):
       weakref.finalize(self, _terminate_pool, self._pool)
     return self._pool
 
-  def close(self):
+  def close(self) -> None:
     """Shuts down the reward worker pool, if one was created."""
-    pool = getattr(self, "_pool", None)
-    if pool is not None:
-      pool.terminate()
+    if self._pool is not None:
+      self._pool.terminate()
       self._pool = None
 
   def _call_reward_fn(
@@ -287,22 +296,30 @@ class SequenceRewardManager(AbstractRewardManager):
 
     # Compute all rewards for each prompt-completion pair.
     for i, reward_fn in enumerate(self.reward_fns):
-      # Update the kwargs with the algo_config parameters.
       signature = inspect.signature(reward_fn)
-      reward_fn_config_params = {}
-      # Iterate over the function's expected parameters
-      for name, _ in signature.parameters.items():
-        # Skip standard parameters that are always passed (self, prompts, completions, kwargs)
-        if name in ["self", "prompts", "completions", "kwargs"]:
+      accepts_var_keyword = any(
+          param.kind == inspect.Parameter.VAR_KEYWORD
+          for param in signature.parameters.values()
+      )
+      call_kwargs = (
+          base_kwargs.copy()
+          if accepts_var_keyword
+          else {
+              k: v
+              for k, v in base_kwargs.items()
+              if k in signature.parameters
+              and k not in ("self", "prompts", "completions")
+          }
+      )
+      # Fill declared parameters that the caller did not pass from algo_config.
+      for name, param in signature.parameters.items():
+        if name in ("self", "prompts", "completions") or param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
           continue
-
-        # Check if the parameter name matches a key in the algo_config dict. If
-        # so, set the value to the algo_config parameter value, otherwise respect the value in the base_kwargs.
-        if name in algo_config_params and name not in base_kwargs:
-          reward_fn_config_params[name] = algo_config_params[name]
-
-      call_kwargs = base_kwargs.copy()
-      call_kwargs.update(reward_fn_config_params)
+        if name in algo_config_params and name not in call_kwargs:
+          call_kwargs[name] = algo_config_params[name]
 
       r = self._call_reward_fn(reward_fn, prompts, completions, call_kwargs)
 
@@ -390,17 +407,7 @@ class AgenticSequenceRewardManager(SequenceRewardManager):
   and the fn computation step is skipped entirely.
   """
 
-  def __init__(
-      self,
-      reward_fns: RewardFn | List[RewardFn] | None,
-      algo_config: algo_config_lib.AlgorithmConfig,
-      **kwargs,
-  ):
-    if reward_fns is None:
-      self.reward_fns = []
-      self.algo_config = algo_config
-    else:
-      super().__init__(reward_fns, algo_config)
+  _require_reward_fns: ClassVar[bool] = False
 
   def __call__(
       self,
@@ -413,7 +420,7 @@ class AgenticSequenceRewardManager(SequenceRewardManager):
 
     # Extract trajectory rewards from kwargs and log them. Even trajectory rewards will be all zero if not provided.
     trajectory_rewards = kwargs.pop("trajectory_rewards")
-    trajectory_rewards_array = np.asarray(trajectory_rewards)
+    trajectory_rewards_array = np.asarray(trajectory_rewards, dtype=np.float64)
     # Log trajectory rewards separately
     log_metrics.update(
         _calculate_scalar_reward_log_metrics(
@@ -424,7 +431,7 @@ class AgenticSequenceRewardManager(SequenceRewardManager):
 
     if self.reward_fns:
       rewards_info = self._compute_rewards(prompts, completions, **kwargs)
-      final_rewards += rewards_info["rewards"]
+      final_rewards = trajectory_rewards_array + rewards_info["rewards"]
       log_metrics.update(rewards_info["log_metrics"])
 
     return {"rewards": final_rewards, "log_metrics": log_metrics}

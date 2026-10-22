@@ -107,27 +107,34 @@ def gsm8k_env_reward(
 
 def make_gsm8k_reward_fn(
     debug: bool = False,
-) -> collections.abc.Callable[[str, collections.abc.Mapping[str, Any]], float]:
+) -> collections.abc.Callable[..., list[float]]:
   """Creates an orchestrator-side reward function scoring completions against gold answers."""
 
   def reward_fn(
-      completion: str,
-      metadata: collections.abc.Mapping[str, Any],
-  ) -> float:
-    gold_answer = metadata.get("answer", metadata.get("gold_answer"))
-    reward, _ = score_gsm8k_completion(completion, gold_answer)
-    if debug:
-      prompt_id = metadata.get("prompt_id", "unknown")
-      logging.debug(
-          "[Orchestrator] Sampler response for %s:\n"
-          "[Sampled Response] ---\n%s\n--- [End Response] ---\n"
-          "Gold Answer: %s, Extracted Answer: %s",
-          prompt_id,
-          completion,
-          gold_answer,
-          extract_boxed_answer(completion),
-      )
-    return reward
+      prompts: collections.abc.Sequence[str],
+      completions: collections.abc.Sequence[str],
+      answer: collections.abc.Sequence[str],
+      prompt_id: collections.abc.Sequence[str],
+      **kwargs: Any,
+  ) -> list[float]:
+    del prompts, kwargs
+    rewards: list[float] = []
+    for pid, completion, gold_answer in zip(
+        prompt_id, completions, answer, strict=True
+    ):
+      reward, _ = score_gsm8k_completion(completion, gold_answer)
+      if debug:
+        logging.debug(
+            "[Orchestrator] Sampler response for %s:\n"
+            "[Sampled Response] ---\n%s\n--- [End Response] ---\n"
+            "Gold Answer: %s, Extracted Answer: %s",
+            pid,
+            completion,
+            gold_answer,
+            extract_boxed_answer(completion),
+        )
+      rewards.append(reward)
+    return rewards
 
   return reward_fn
 

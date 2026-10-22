@@ -235,12 +235,31 @@ class SequenceRewardManagerTest(parameterized.TestCase):
           **(kwargs or {}),
       )
 
-  def test_no_reward_fns_raises_error(self):
+  @parameterized.parameters(([],), (None,))
+  def test_no_reward_fns_raises_error(self, empty_fns):
     with self.assertRaisesRegex(ValueError, "reward_fns cannot be empty"):
       reward_manager.SequenceRewardManager(
-          reward_fns=[],
+          reward_fns=empty_fns,
           algo_config=self.test_algo_config,
       )
+
+  def test_reward_fn_without_var_keyword_ignores_extra_kwargs(self):
+    def strict_two_arg_reward(prompts: List[str], completions: List[str]):
+      return [float(len(p) + len(c)) for p, c in zip(prompts, completions)]
+
+    manager = reward_manager.SequenceRewardManager(
+        reward_fns=[strict_two_arg_reward],
+        algo_config=self.test_algo_config,
+    )
+    rewards_info = manager(
+        self.prompts,
+        self.completions,
+        mode="train",
+        answer=["42", "42"],
+        trajectory_rewards=[1.0, 2.0],
+    )
+    npt.assert_allclose(rewards_info["rewards"], [2.0 + 7.0, 3.0 + 2.0])
+    manager.close()
 
 
 class AgenticSequenceRewardManagerTest(parameterized.TestCase):
@@ -282,6 +301,38 @@ class AgenticSequenceRewardManagerTest(parameterized.TestCase):
     self.assertIn("trajectory_rewards/sum", log_metrics)
     self.assertIn("trajectory_rewards/mean", log_metrics)
     self.assertNotIn("rewards/sum", log_metrics)
+
+  def test_empty_list_reward_fns(self):
+    manager = reward_manager.AgenticSequenceRewardManager(
+        reward_fns=[],
+        algo_config=self.test_algo_config,
+    )
+    self.assertEqual(manager.reward_fns, [])
+    traj_rewards = [1.0, 2.0]
+    rewards_info = manager(
+        self.prompts, self.completions, trajectory_rewards=traj_rewards
+    )
+    npt.assert_allclose(rewards_info["rewards"], [1.0, 2.0])
+    manager.close()
+
+  def test_int_and_ndarray_trajectory_rewards_not_mutated_with_reward_fns(self):
+    manager = reward_manager.AgenticSequenceRewardManager(
+        reward_fns=[len_reward],
+        algo_config=self.test_algo_config,
+    )
+    int_rewards = [1, 2]
+    res_int = manager(
+        self.prompts, self.completions, trajectory_rewards=int_rewards
+    )
+    npt.assert_allclose(res_int["rewards"], [1.0 + 7.0, 2.0 + 2.0])
+
+    arr_rewards = np.array([10.0, 20.0])
+    res_arr = manager(
+        self.prompts, self.completions, trajectory_rewards=arr_rewards
+    )
+    npt.assert_allclose(res_arr["rewards"], [17.0, 22.0])
+    npt.assert_allclose(arr_rewards, [10.0, 20.0])
+    manager.close()
 
 
 def answer_reward(

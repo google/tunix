@@ -66,7 +66,7 @@ USE_LORA=${USE_LORA:-0}
 CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
 CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
 CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${REPO_ROOT}/checkpoints"}
-REWARD_MODE=${REWARD_MODE:-env}
+REWARD_MANAGER=${REWARD_MANAGER:-agentic-sequence-level}
 TFDS_DATA_DIR=${TFDS_DATA_DIR:-"${ARTIFACT_ROOT}/data"}
 TFDS_SPLIT=${TFDS_SPLIT:-train}
 SEED=${SEED:-42}
@@ -431,7 +431,7 @@ echo "  train micro:    $TRAIN_MICRO_BATCH_SIZE"
 echo "  mini batch:     $MINI_BATCH_SIZE"
 echo "  beta:           $BETA"
 echo "  epsilon:        $EPSILON"
-echo "  reward mode:    $REWARD_MODE"
+echo "  reward manager: $REWARD_MANAGER"
 echo "  max staleness:  $MAX_STALENESS"
 echo "  traj order:     $TRAJECTORY_GROUP_ORDER"
 echo "  tfds split:     $TFDS_SPLIT"
@@ -822,7 +822,7 @@ echo "Launching CPU orchestrator..."
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --beta="$BETA"
     --epsilon="$EPSILON"
-    --reward_mode="$REWARD_MODE"
+    --reward_manager="$REWARD_MANAGER"
     --max_staleness="$MAX_STALENESS"
     --trajectory_group_order="$TRAJECTORY_GROUP_ORDER"
     --flush_metrics_every_n_steps="$FLUSH_METRICS_EVERY_N_STEPS"

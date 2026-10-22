@@ -50,8 +50,9 @@ validate_routed_experts_encode_config = (
 UNSET_ROUTED_EXPERT = -1
 
 
-# Re-export assistant_text from canonical agent_types module.
+# Re-export assistant_text and prompt_text from canonical agent_types module.
 assistant_text = agent_types.assistant_text
+prompt_text = agent_types.prompt_text
 
 
 ##### Common DTOs (Data Transfer Objects) #####

@@ -170,7 +170,7 @@ def main():
   program = rl_program.StandardRLProgram(
       algo=algo,
       dataset=train_dataset,
-      reward_fns=[lambda x: 1.0],
+      reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
       assembler=assembler,
       generation_args=datatypes.GenerationArgs(temperature=1.0),
       max_steps=2,
