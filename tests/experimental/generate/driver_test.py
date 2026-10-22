@@ -16,6 +16,7 @@ import threading
 import time
 
 from absl.testing import absltest
+from flax import nnx
 from tunix.experimental.generate import driver as driver_lib
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import testing_utils
@@ -254,6 +255,79 @@ class SubmissionBatchingTest(absltest.TestCase):
     future = driver.submit_request(testing_utils.make_request('0', [1, 2]))
 
     self.assertEqual(future.result(timeout=_TIMEOUT_S).request_id, '0')
+
+
+class CancelTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.driver = driver_lib.VanillaInProcessDriver(testing_utils.make_engine())
+    self.addCleanup(self.driver.shutdown)
+
+  def test_cancelling_a_queued_request_withdraws_it(self):
+    cancelled = self.driver.submit_request(
+        testing_utils.make_request('cancelled', [1, 2])
+    )
+    kept = self.driver.submit_request(testing_utils.make_request('kept', [3]))
+
+    self.driver.cancel('cancelled')
+    self.driver.start()
+
+    self.assertTrue(cancelled.cancelled())
+    self.assertEqual(kept.result(timeout=_TIMEOUT_S).request_id, 'kept')
+
+  def test_cancelling_a_running_request_aborts_it(self):
+    future = self.driver.submit_request(
+        testing_utils.make_request('0', [1, 2])
+    )
+    # Hands the request to the engine and runs a step, without the loop.
+    self.driver._step_engine()  # pylint: disable=protected-access
+    self.assertTrue(self.driver.engine.has_unfinished_requests())
+
+    self.driver.cancel('0')
+
+    self.assertTrue(future.cancelled())
+    self.assertFalse(self.driver.engine.has_unfinished_requests())
+
+  def test_cancelling_an_unknown_request_does_nothing(self):
+    future = self.driver.submit_request(testing_utils.make_request('0', [1]))
+
+    self.driver.cancel('unknown')
+    self.driver.start()
+
+    self.assertEqual(future.result(timeout=_TIMEOUT_S).request_id, '0')
+
+  def test_cancelling_a_resolved_request_does_nothing(self):
+    self.driver.start()
+    future = self.driver.submit_request(testing_utils.make_request('0', [1]))
+    output = future.result(timeout=_TIMEOUT_S)
+
+    self.driver.cancel('0')
+
+    self.assertIs(future.result(), output)
+
+
+class UpdateParamsTest(absltest.TestCase):
+
+  def test_requests_run_under_the_new_weights(self):
+    driver = driver_lib.VanillaInProcessDriver(testing_utils.make_engine())
+    self.addCleanup(driver.shutdown)
+    driver.start()
+    request = testing_utils.make_request('0', [1, 2, 3])
+
+    driver.update_params(
+        nnx.variables(testing_utils.PagedSumTransformer(offset=1.0), nnx.Param)
+    )
+    output = driver.submit_request(request).result(timeout=_TIMEOUT_S)
+
+    reference = testing_utils.make_engine(
+        testing_utils.PagedSumTransformer(offset=1.0)
+    )
+    reference.add_request(request)
+    expected = []
+    while reference.has_unfinished_requests():
+      expected.extend(reference.step())
+    self.assertEqual(output.token_ids.tolist(), expected[0].token_ids.tolist())
 
 
 if __name__ == '__main__':

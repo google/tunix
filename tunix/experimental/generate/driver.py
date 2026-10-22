@@ -23,7 +23,9 @@ from collections.abc import Sequence
 from concurrent import futures
 import threading
 import time
+from typing import Any
 
+import jaxtyping
 from tunix.experimental.generate import engine as engine_lib
 from tunix.experimental.generate import request as request_lib
 
@@ -76,7 +78,8 @@ class VanillaInProcessDriver:
     self._engine = engine
 
     # Serializes every touch of the engine and of the state below, so that
-    # submission never interleaves with a step.
+    # submission, cancellation and weight updates never interleave with a
+    # step.
     self._engine_lock = threading.Lock()
     # Protects `_pending` and the submission queue so `submit_request(s)` can
     # enqueue without waiting for an in-flight `engine.step()`. Acquired after
@@ -200,6 +203,60 @@ class VanillaInProcessDriver:
         target=self._loop, name='VanillaInProcessDriverLoop', daemon=True
     )
     self._loop_thread.start()
+
+  def _find_req_idx(self, request_id: str) -> int | None:
+    """Returns the index of `request_id` in the submission queue, or None."""
+    for i, request in enumerate(self._submission_queue):
+      if request.request_id == request_id:
+        return i
+    return None
+
+  def cancel(self, request_id: str) -> None:
+    """Withdraws a request and cancels its future.
+
+    Has no effect if the request is unknown or already resolved.
+    """
+
+    with self._queue_lock:
+      future = self._pending.get(request_id)
+      if future is None:
+        return
+      idx = self._find_req_idx(request_id)
+      if idx is not None:
+        del self._submission_queue[idx]
+        if not self._submission_queue:
+          self._submission_window_start = None
+        del self._pending[request_id]
+
+    if idx is not None:
+      future.cancel()
+      return
+
+    with self._engine_lock, self._queue_lock:
+      if self._pending.get(request_id) is not future:
+        return
+
+      del self._pending[request_id]
+      self._engine.abort_request(request_id)
+    future.cancel()
+
+  def update_params(
+      self,
+      updated_weights: jaxtyping.PyTree,
+      filter_types: tuple[Any, ...] | None = None,
+  ) -> None:
+    """Syncs new weights into the model the engine samples from.
+
+    The update takes the engine lock, so it lands between steps rather than
+    underneath one.
+
+    Args:
+      updated_weights: The new weights, either all of the model's parameters
+        or its LoRA parameters alone.
+      filter_types: The variable types to update. All of them when None.
+    """
+    with self._engine_lock:
+      self._engine.update_params(updated_weights, filter_types)
 
   def stop(self) -> None:
     """Stops the loop thread, leaving pending futures untouched."""
