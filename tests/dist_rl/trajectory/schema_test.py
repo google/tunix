@@ -78,6 +78,27 @@ class SchemaCompilationTest(parameterized.TestCase):
         traj_ddl,
     )
 
+    metrics_ddl = str(
+        sa.schema.CreateTable(schema.TRAJECTORY_METRICS_TABLE).compile(
+            dialect=spec.dialect
+        )
+    )
+    self.assertIn("CREATE TABLE trajectory_metrics", metrics_ddl)
+    self.assertIn("run_id VARCHAR(128) NOT NULL", metrics_ddl)
+    self.assertIn("trajectory_id VARCHAR(128) NOT NULL", metrics_ddl)
+    self.assertIn("payload", metrics_ddl)
+    self.assertIn(spec.expected_json, metrics_ddl)
+    self.assertIn(spec.expected_timestamp, metrics_ddl)
+    self.assertIn(
+        "CONSTRAINT pk_trajectory_metrics PRIMARY KEY (run_id, trajectory_id)",
+        metrics_ddl,
+    )
+    self.assertIn(
+        "CONSTRAINT fk_trajectory_metrics_runs FOREIGN KEY(run_id) REFERENCES"
+        " runs (run_id) ON DELETE CASCADE",
+        metrics_ddl,
+    )
+
     steps_ddl = str(
         sa.schema.CreateTable(schema.STEPS_TABLE).compile(dialect=spec.dialect)
     )
@@ -126,6 +147,7 @@ class SchemaCompilationTest(parameterized.TestCase):
     full_create_script = "\n".join(ddl_statements)
     self.assertIn("CREATE TABLE runs", full_create_script)
     self.assertIn("CREATE TABLE trajectories", full_create_script)
+    self.assertIn("CREATE TABLE trajectory_metrics", full_create_script)
     self.assertIn("CREATE TABLE steps", full_create_script)
     self.assertIn("CREATE INDEX idx_runs_status", full_create_script)
     self.assertIn("CREATE INDEX idx_trajectories_status", full_create_script)
@@ -152,6 +174,7 @@ class SchemaCompilationTest(parameterized.TestCase):
 
     full_drop_script = "\n".join(ddl_statements)
     self.assertIn("DROP TABLE steps", full_drop_script)
+    self.assertIn("DROP TABLE trajectory_metrics", full_drop_script)
     self.assertIn("DROP TABLE trajectories", full_drop_script)
     self.assertIn("DROP TABLE runs", full_drop_script)
 

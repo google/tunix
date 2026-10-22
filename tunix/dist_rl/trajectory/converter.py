@@ -18,6 +18,7 @@ from typing import Any, TypeGuard
 
 import numpy as np
 from tunix.dist_rl.trajectory import action_converter
+from tunix.dist_rl.trajectory import async_writer
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.rl.agentic.agents import agent_types
 
@@ -82,8 +83,17 @@ def _to_float_list(
 def _extract_metrics(
     assistant_tokens: Any,
     logprobs: Any,
+    *,
+    include_token_arrays: bool = False,
 ) -> trajectory_lib.Metrics | None:
-  """Builds a Metrics object from assistant_tokens and logprobs if present."""
+  """Builds a Metrics object from assistant_tokens and logprobs if present.
+
+  When `include_token_arrays` is False (default), `completion_tokens` is
+  recorded
+  as a scalar count while `completion_token_ids` and `logprobs` arrays are
+  omitted
+  from `Metrics` to avoid 2x storage duplication against `TunixAgentStep`.
+  """
   completion_tokens = None
   completion_token_ids = None
   logprobs_list = None
@@ -91,30 +101,42 @@ def _extract_metrics(
   if assistant_tokens is not None and isinstance(
       assistant_tokens, (list, tuple, np.ndarray)
   ):
+    if isinstance(assistant_tokens, np.ma.MaskedArray) and np.ma.is_masked(
+        assistant_tokens
+    ):
+      raise np.ma.MaskError("Cannot convert a masked element to a Python int.")
     completion_tokens = len(assistant_tokens)
-    completion_token_ids = _to_int_list(assistant_tokens)
+    if include_token_arrays:
+      completion_token_ids = _to_int_list(assistant_tokens)
 
   if logprobs is not None and isinstance(logprobs, (list, tuple, np.ndarray)):
-    logprobs_list = _to_float_list(logprobs)
+    if include_token_arrays:
+      logprobs_list = _to_float_list(logprobs)
 
   if (
-      completion_token_ids is not None
-      and logprobs_list is not None
-      and len(completion_token_ids) != len(logprobs_list)
+      assistant_tokens is not None
+      and logprobs is not None
+      and isinstance(assistant_tokens, (list, tuple, np.ndarray))
+      and isinstance(logprobs, (list, tuple, np.ndarray))
+      and len(assistant_tokens) != len(logprobs)
   ):
     raise ValueError(
-        f"Length of assistant_tokens ({len(completion_token_ids)}) must match"
-        f" length of logprobs ({len(logprobs_list)})."
+        f"Length of assistant_tokens ({len(assistant_tokens)}) must match"
+        f" length of logprobs ({len(logprobs)})."
     )
 
   if completion_tokens is None and logprobs_list is None:
     return None
 
-  return trajectory_lib.Metrics.model_construct(
-      completion_tokens=completion_tokens,
-      completion_token_ids=completion_token_ids,
-      logprobs=logprobs_list,
-  )
+  fields: dict[str, Any] = {}
+  if completion_tokens is not None:
+    fields["completion_tokens"] = completion_tokens
+  if completion_token_ids is not None:
+    fields["completion_token_ids"] = completion_token_ids
+  if logprobs_list is not None:
+    fields["logprobs"] = logprobs_list
+
+  return trajectory_lib.Metrics.model_construct(**fields)
 
 
 def _extract_observation(obs_val: Any) -> trajectory_lib.Observation | None:
@@ -170,6 +192,8 @@ def create_agent_step(
     prefill_routed_experts: np.ndarray | None = None,
     prefill_start: int | None = None,
     prefill_num_context: int | None = None,
+    include_token_arrays: bool = False,
+    step_array_filter: async_writer.StepArrayFilter | None = None,
 ) -> trajectory_lib.TunixAgentStep | None:
   """Converts a Tunix agent_types.Step into an agent turn Step.
 
@@ -187,6 +211,11 @@ def create_agent_step(
     prefill_start: Sequence position of the first `prefill_routed_experts` row.
     prefill_num_context: Number of leading `prefill_routed_experts` rows that
       cover tokens before this turn's generation.
+    include_token_arrays: If True, populates completion_token_ids and logprobs
+      in Step.metrics (duplicating assistant_tokens/logprobs). Defaults to False
+      to avoid 2x storage duplication.
+    step_array_filter: Optional configuration for stripping per-token array
+      fields from the converted step.
 
   Returns:
     The converted TunixAgentStep (with step_id = 2 * tunix_step_id + 1), or None
@@ -217,13 +246,17 @@ def create_agent_step(
     effective_policy_version = extra["policy_version"]
 
   converted_step_id = 2 * tunix_step_id + 1
-  return trajectory_lib.TunixAgentStep(
+  agent_step = trajectory_lib.TunixAgentStep(
       step_id=converted_step_id,
       source=trajectory_lib.Source.AGENT,
       message=step.model_response,
       reasoning_content=(step.thought if step.thought is not None else None),
       tool_calls=action_converter.extract_tool_calls(step.action),
-      metrics=_extract_metrics(step.assistant_tokens, step.logprobs),
+      metrics=_extract_metrics(
+          step.assistant_tokens,
+          step.logprobs,
+          include_token_arrays=include_token_arrays,
+      ),
       assistant_tokens=step.assistant_tokens,
       assistant_masks=step.assistant_masks,
       logprobs=step.logprobs,
@@ -233,11 +266,18 @@ def create_agent_step(
       prefill_num_context=prefill_num_context,
       extra=extra or None,
   )
+  if step_array_filter is not None:
+    filtered = async_writer.filter_step_arrays(agent_step, step_array_filter)
+    assert isinstance(filtered, trajectory_lib.TunixAgentStep)
+    return filtered
+  return agent_step
 
 
 def create_env_step(
     step: agent_types.Step | None,
     tunix_step_id: int,
+    *,
+    step_array_filter: async_writer.StepArrayFilter | None = None,
 ) -> trajectory_lib.TunixEnvStep | None:
   """Converts a Tunix agent_types.Step into an environment turn Step.
 
@@ -248,6 +288,8 @@ def create_env_step(
   Args:
     step: The Tunix RL step to convert, or None.
     tunix_step_id: 0-based turn index of the step in the Tunix trajectory.
+    step_array_filter: Optional configuration for stripping per-token array
+      fields from the converted step.
 
   Returns:
     The converted TunixEnvStep (with step_id = 2 * tunix_step_id + 2), or None
@@ -258,7 +300,7 @@ def create_env_step(
 
   obs_str = str(step.observation) if step.observation is not None else ""
   converted_step_id = 2 * tunix_step_id + 2
-  return trajectory_lib.TunixEnvStep(
+  env_step = trajectory_lib.TunixEnvStep(
       step_id=converted_step_id,
       source=trajectory_lib.Source.SYSTEM,
       message=obs_str,
@@ -269,6 +311,11 @@ def create_env_step(
       env_masks=step.env_masks,
       extra=step.info or None,
   )
+  if step_array_filter is not None:
+    filtered = async_writer.filter_step_arrays(env_step, step_array_filter)
+    assert isinstance(filtered, trajectory_lib.TunixEnvStep)
+    return filtered
+  return env_step
 
 
 def _filter_extra_info(extra: dict[str, Any] | None) -> dict[str, Any]:
@@ -691,6 +738,8 @@ def update_trajectory_metadata(
     gamma: float | None = None,
     env_time: dict[str, Any] | None = None,
     reward_time: dict[str, Any] | None = None,
+    final_metrics: trajectory_lib.FinalMetrics | None = None,
+    include_final_metrics: bool = True,
     extra: dict[str, Any] | None = None,
 ) -> trajectory_lib.TrajectoryMetadata:
   """Updates an existing TrajectoryMetadata with latest agent/trajectory state.
@@ -704,6 +753,8 @@ def update_trajectory_metadata(
     gamma: Optional discount factor for Monte Carlo return calculation.
     env_time: Optional explicit environment timing dictionary.
     reward_time: Optional explicit reward timing dictionary.
+    final_metrics: Optional explicit FinalMetrics instance override.
+    include_final_metrics: If True, computes and populates final_metrics.
     extra: Optional dictionary of extra metadata fields to merge.
 
   Returns:
@@ -777,9 +828,190 @@ def update_trajectory_metadata(
     if hasattr(metadata, "reward_time") and reward_time is not None:
       setattr(metadata, "reward_time", reward_time)
 
+  if include_final_metrics and hasattr(metadata, "final_metrics"):
+    if final_metrics is not None:
+      setattr(metadata, "final_metrics", final_metrics)
+    elif traj_obj is not None:
+      prompt_tokens = getattr(traj_obj, "prompt_tokens", None)
+      prompt_len = getattr(traj_obj, "prompt_length", None)
+      total_prompt_tokens = None
+      if prompt_len is not None:
+        total_prompt_tokens = int(prompt_len)
+      elif prompt_tokens is not None and len(prompt_tokens) > 0:
+        total_prompt_tokens = len(prompt_tokens)
+
+      steps_list = getattr(traj_obj, "steps", None) or []
+      completion_counts = [
+          len(s.assistant_tokens)
+          for s in steps_list
+          if getattr(s, "assistant_tokens", None) is not None
+      ]
+      total_completion_tokens = (
+          sum(completion_counts) if completion_counts else None
+      )
+
+      task_val = getattr(traj_obj, "task", None)
+      has_prompt = task_val is not None or (
+          prompt_tokens is not None and len(prompt_tokens) > 0
+      )
+      total_steps = (1 if has_prompt else 0) + 2 * len(steps_list)
+
+      setattr(
+          metadata,
+          "final_metrics",
+          trajectory_lib.FinalMetrics(
+              total_prompt_tokens=total_prompt_tokens,
+              total_completion_tokens=total_completion_tokens,
+              total_steps=total_steps,
+          ),
+      )
+
   if extra:
     if metadata.extra is None:
       metadata.extra = {}
     metadata.extra.update(extra)
 
   return metadata
+
+
+def from_tunix_trajectory(
+    traj: agent_types.Trajectory,
+    *,
+    traj_id: str = "",
+    agent: Any = None,
+    policy_version: int | None = None,
+    target_policy_versions: list[int] | None = None,
+    status: str | agent_types.TrajectoryStatus | None = None,
+    gamma: float | None = None,
+    include_token_arrays: bool = False,
+    step_array_filter: async_writer.StepArrayFilter | None = None,
+    extra: dict[str, Any] | None = None,
+) -> trajectory_lib.TunixTrajectory:
+  """Converts a Tunix agent_types.Trajectory into an ATIF TunixTrajectory.
+
+  Constructs converted steps (task step, agent steps, env steps) and populates
+  aggregate trajectory statistics in `final_metrics`:
+  - `total_prompt_tokens`: Count of prompt tokens.
+  - `total_completion_tokens`: Sum of assistant completion tokens across steps.
+  - `total_steps`: Total count of converted ATIF steps in the trajectory.
+
+  Args:
+    traj: The Tunix agent_types.Trajectory instance.
+    traj_id: Optional unique trajectory identifier.
+    agent: Optional Agent instance or object with name and version.
+    policy_version: Optional policy version.
+    target_policy_versions: Optional list of target policy versions.
+    status: Optional explicit trajectory status override.
+    gamma: Optional discount factor.
+    include_token_arrays: If True, populates completion_token_ids and logprobs
+      in Step.metrics (duplicating assistant_tokens/logprobs). Defaults to False
+      to avoid 2x storage duplication.
+    step_array_filter: Optional configuration for stripping per-token array
+      fields from the converted steps.
+    extra: Optional dictionary of extra metadata.
+
+  Returns:
+    A TunixTrajectory instance populated with steps and final_metrics.
+  """
+  steps: list[trajectory_lib.Step] = []
+
+  task_step = None
+  if traj.task is not None:
+    task_step = create_task_step(traj.task)
+  if traj.prompt_tokens is not None and len(traj.prompt_tokens) > 0:
+    if task_step is None:
+      task_step = trajectory_lib.TunixEnvStep(
+          step_id=0,
+          source=trajectory_lib.Source.USER,
+          message="",
+      )
+    if step_array_filter is None or not step_array_filter.filter_tokens:
+      task_step.env_tokens = np.asarray(traj.prompt_tokens)
+  if task_step is not None:
+    steps.append(task_step)
+
+  for turn_idx, step in enumerate(traj.steps or []):
+    agent_step = create_agent_step(
+        step,
+        tunix_step_id=turn_idx,
+        policy_version=policy_version,
+        include_token_arrays=include_token_arrays,
+        step_array_filter=step_array_filter,
+    )
+    if agent_step is not None:
+      steps.append(agent_step)
+
+    env_step = create_env_step(
+        step,
+        tunix_step_id=turn_idx,
+        step_array_filter=step_array_filter,
+    )
+    if env_step is not None:
+      steps.append(env_step)
+
+  total_prompt_tokens = None
+  if traj.prompt_length is not None:
+    total_prompt_tokens = int(traj.prompt_length)
+  elif traj.prompt_tokens is not None and len(traj.prompt_tokens) > 0:
+    total_prompt_tokens = len(traj.prompt_tokens)
+  elif (
+      task_step is not None
+      and task_step.env_tokens is not None
+      and len(task_step.env_tokens) > 0
+  ):
+    total_prompt_tokens = len(task_step.env_tokens)
+
+  completion_counts = []
+  for s in steps:
+    if isinstance(s, trajectory_lib.TunixAgentStep):
+      if s.metrics is not None and s.metrics.completion_tokens is not None:
+        completion_counts.append(s.metrics.completion_tokens)
+      elif s.assistant_tokens is not None:
+        completion_counts.append(len(s.assistant_tokens))
+  total_completion_tokens = (
+      sum(completion_counts) if completion_counts else None
+  )
+
+  final_metrics = trajectory_lib.FinalMetrics(
+      total_prompt_tokens=total_prompt_tokens,
+      total_completion_tokens=total_completion_tokens,
+      total_steps=len(steps),
+  )
+
+  effective_status = status if status is not None else traj.status
+  status_str = (
+      effective_status.name
+      if hasattr(effective_status, "name")
+      else str(effective_status)
+  )
+
+  if isinstance(agent, trajectory_lib.Agent):
+    agent_obj = agent
+  elif agent is not None:
+    agent_obj = trajectory_lib.Agent(
+        name=getattr(agent, "name", "agent"),
+        version=getattr(agent, "version", "1.0"),
+    )
+  else:
+    agent_obj = trajectory_lib.Agent(name="agent", version="1.0")
+
+  eff_target_policy_versions = (
+      list(target_policy_versions)
+      if target_policy_versions is not None
+      else ([policy_version] if policy_version is not None else None)
+  )
+
+  return trajectory_lib.TunixTrajectory(
+      trajectory_id=traj_id,
+      agent=agent_obj,
+      status=status_str,
+      total_reward=traj.reward,
+      gamma=gamma,
+      masked_out=traj.masked_out,
+      env_time=traj.env_time or None,
+      reward_time=traj.reward_time or None,
+      target_policy_versions=eff_target_policy_versions,
+      final_metrics=final_metrics,
+      steps=steps,
+      extra=extra or None,
+  )

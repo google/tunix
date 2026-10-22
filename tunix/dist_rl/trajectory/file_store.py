@@ -19,6 +19,7 @@ from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)
 
 _METADATA_FILENAME: Final[str] = "metadata.json"
+_METRICS_FILENAME: Final[str] = "metrics.json"
 _TRAJECTORY_DIR_PREFIX: Final[str] = "traj_"
 # Characters allowed in a trajectory_id: ASCII letters, digits, underscores, and
 # hyphens. Shared between `_TRAJECTORY_ID_REGEX` and `_TRAJECTORY_DIR_REGEX` so
@@ -119,7 +120,8 @@ class _FileWriteTask(async_writer.WriteTask):
   """File-specific write task containing filesystem destination paths."""
 
   traj_dir: epath.Path
-  meta_path: epath.Path
+  meta_path: epath.Path | None = None
+  metrics_path: epath.Path | None = None
   step_path: epath.Path | None = dataclasses.field(default=None, init=False)
 
   def to_atif(self) -> None:
@@ -141,23 +143,56 @@ def _resolve_target_path(task: _FileWriteTask) -> epath.Path:
   Args:
     task: The write task.
   """
+  if task.metrics is not None and task.metrics_path is not None:
+    return task.metrics_path
   if task.step is None:
-    return task.meta_path
+    return task.meta_path if task.meta_path is not None else task.traj_dir
   if task.step_path is None:
     return task.traj_dir
   return task.step_path
 
 
 class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
-  """Asynchronously writes trajectory metadata and step files to disk."""
+  """Asynchronously writes trajectory metadata, metrics, and step files to disk."""
 
-  def __init__(self):
+  def __init__(
+      self,
+      root_dir: epath.Path | None = None,
+      step_array_filter: async_writer.StepArrayFilter | None = None,
+  ):
     """Initializes _AsyncFileWriter without starting the background worker."""
-    super().__init__()
+    super().__init__(step_array_filter=step_array_filter)
+    self._root_dir = root_dir
     # In-memory cache mapping trajectory_id to the hash of its last written
     # metadata JSON. Used by the worker thread to skip redundant metadata.json
     # disk writes across steps.
     self._metadata_hash_by_trajectory_id: dict[str, int] = {}
+    # In-memory cache mapping trajectory_id to its merged TrajectoryMetrics.
+    self._metrics_by_trajectory_id: dict[
+        str, trajectory_lib.TrajectoryMetrics
+    ] = {}
+    # In-memory cache mapping trajectory_id to the hash of its last written
+    # metrics JSON.
+    self._metrics_hash_by_trajectory_id: dict[str, int] = {}
+
+  def _create_metrics_task(
+      self,
+      trajectory_id: str,
+      metrics: trajectory_lib.TrajectoryMetrics,
+  ) -> _FileWriteTask:
+    """Factory creating a _FileWriteTask instance for metrics updates."""
+    if self._root_dir is None:
+      raise RuntimeError(
+          "_AsyncFileWriter requires root_dir to process metrics tasks."
+      )
+    traj_dir = self._root_dir / f"{_TRAJECTORY_DIR_PREFIX}{trajectory_id}"
+    metrics_path = traj_dir / _METRICS_FILENAME
+    return _FileWriteTask(
+        trajectory_id=trajectory_id,
+        metrics=metrics,
+        traj_dir=traj_dir,
+        metrics_path=metrics_path,
+    )
 
   def enqueue_write(
       self,
@@ -199,21 +234,26 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
         meta_path=meta_path,
         metadata=metadata,
         step=step,
+        step_array_filter=self._step_array_filter,
     )
     self._enqueue(task)
 
   def _process_task(self, task: _FileWriteTask) -> None:
-    """Processes a single write task by writing metadata and step files.
+    """Processes a single write task by writing metadata, metrics, or step files.
 
     Optimizations:
       - Directory Creation: `mkdir` is executed only once per trajectory on the
         first step for local (`file://`) filesystems, tracked by
-        `_metadata_hash_by_trajectory_id`.
+        `_metadata_hash_by_trajectory_id` and `_metrics_hash_by_trajectory_id`.
       - Metadata Caching: `metadata.json` is only written when its serialized
         content changes, minimizing redundant writes across multi-step turns.
+      - Metrics Caching & Cold-Start Merging: `metrics.json` is shallowly merged
+        with existing cached or on-disk metrics, and only written when content
+        changes.
 
     Args:
-      task: Container holding directory paths, metadata, and step payload.
+      task: Container holding directory paths, metadata, metrics, and step
+        payload.
 
     Raises:
       RuntimeError: If the task has a step but `to_atif()` was not called first,
@@ -221,20 +261,54 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
     """
     traj_id = task.trajectory_id
 
-    # Create directory on first step of this trajectory for local filesystems.
+    # Create directory on first step or metrics write of this trajectory for local filesystems.
     # Remote object stores use a flat object namespace where writing
     # metadata.json materializes the prefix without a 0-byte directory marker.
-    if traj_id not in self._metadata_hash_by_trajectory_id and _requires_mkdir(
-        task.traj_dir
+    if (
+        traj_id not in self._metadata_hash_by_trajectory_id
+        and traj_id not in self._metrics_hash_by_trajectory_id
+        and _requires_mkdir(task.traj_dir)
     ):
       task.traj_dir.mkdir(parents=True, exist_ok=True)
 
+    # Process metrics write if metrics are provided.
+    if task.metrics is not None:
+      metrics_path = task.metrics_path or (task.traj_dir / _METRICS_FILENAME)
+      existing = self._metrics_by_trajectory_id.get(traj_id)
+      if existing is None:
+        disk_text = _read_text_or_none(metrics_path)
+        if disk_text is not None:
+          existing = trajectory_lib.TrajectoryMetrics.model_validate_json(
+              disk_text
+          )
+
+      if existing is not None:
+        if existing.extra is None and task.metrics.extra is None:
+          merged_extra = None
+        else:
+          merged_extra = {
+              **(existing.extra or {}),
+              **(task.metrics.extra or {}),
+          }
+        merged_metrics = trajectory_lib.TrajectoryMetrics(extra=merged_extra)
+      else:
+        merged_metrics = task.metrics.model_copy(deep=True)
+
+      self._metrics_by_trajectory_id[traj_id] = merged_metrics
+      metrics_json = merged_metrics.model_dump_json()
+      metrics_hash = hash(metrics_json)
+      if self._metrics_hash_by_trajectory_id.get(traj_id) != metrics_hash:
+        metrics_path.write_text(metrics_json)
+        self._metrics_hash_by_trajectory_id[traj_id] = metrics_hash
+
     # Only write metadata.json if metadata content has changed.
-    meta_json = _dump_json(task.metadata)
-    meta_hash = hash(meta_json)
-    if self._metadata_hash_by_trajectory_id.get(traj_id) != meta_hash:
-      task.meta_path.write_text(meta_json)
-      self._metadata_hash_by_trajectory_id[traj_id] = meta_hash
+    if task.metadata is not None:
+      meta_path = task.meta_path or (task.traj_dir / _METADATA_FILENAME)
+      meta_json = _dump_json(task.metadata)
+      meta_hash = hash(meta_json)
+      if self._metadata_hash_by_trajectory_id.get(traj_id) != meta_hash:
+        meta_path.write_text(meta_json)
+        self._metadata_hash_by_trajectory_id[traj_id] = meta_hash
 
     # Write step file if provided. `step_path` is set by `to_atif()`.
     if task.step is not None:
@@ -248,13 +322,16 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
     Args:
       task: The write task that failed to process.
     """
-    step_info = (
-        f"step {task.step.step_id}" if task.step is not None else "metadata"
-    )
+    if task.step is not None:
+      task_info = f"step {task.step.step_id}"
+    elif task.metrics is not None:
+      task_info = "metrics"
+    else:
+      task_info = "metadata"
     logging.exception(
         "%s failed to write trajectory %s (trajectory_id=%s) to %s.",
         self._thread_name,
-        step_info,
+        task_info,
         task.trajectory_id,
         _resolve_target_path(task),
     )
@@ -290,6 +367,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       self,
       root_dir: epath.PathLike,
       run_id: str | None = None,
+      step_array_filter: async_writer.StepArrayFilter | None = None,
   ) -> None:
     """Initializes FileTrajectoryStore.
 
@@ -300,6 +378,8 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         scoped under root_dir / run_id. This ID MUST stay the same when
         recovering from failures or process restarts as long as the same RL
         process is being continued.
+      step_array_filter: Optional configuration for stripping per-token array
+        fields before enqueuing or writing steps.
 
     Raises:
       ValueError: If root_dir is empty, or run_id is given but cannot be used as
@@ -320,7 +400,9 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       )
     self._raw_root_dir = epath.Path(root_dir)
     self._run_id = run_id
-    self._writer = _AsyncFileWriter()
+    self._writer = _AsyncFileWriter(
+        root_dir=self.root_dir, step_array_filter=step_array_filter
+    )
 
   @classmethod
   def _from_config(
@@ -393,6 +475,10 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     """Returns the file path for a given trajectory ID's metadata."""
     return self.get_trajectory_dir(trajectory_id) / _METADATA_FILENAME
 
+  def get_trajectory_metrics_path(self, trajectory_id: str) -> epath.Path:
+    """Returns the file path for a given trajectory ID's metrics."""
+    return self.get_trajectory_dir(trajectory_id) / _METRICS_FILENAME
+
   def get_step_path(self, trajectory_id: str, step_id: int) -> epath.Path:
     """Returns the file path for a given trajectory ID and ATIF step ID.
 
@@ -459,12 +545,87 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         traj_id, meta_text_future = pending_reads.popleft()
         meta_text = meta_text_future.result()
         if meta_text is None:
+          if trajectory_ids is not None:
+            raise store.TrajectoryMetadataNotFoundError(traj_id)
+          # A directory containing only metrics.json (e.g. from update_metrics
+          # called without steps) is skipped during metadata listing.
+          traj_dir = self.get_trajectory_dir(traj_id)
+          if self.get_trajectory_metrics_path(traj_id).exists() and not any(
+              _STEP_FILENAME_REGEX.match(p.name) for p in traj_dir.iterdir()
+          ):
+            continue
           raise store.TrajectoryMetadataNotFoundError(traj_id)
         metas.append(self._parse_metadata(meta_text))
       return metas
     finally:
       # Skips the reads that have not started and waits for the running ones,
       # so that no reader thread outlives the call.
+      executor.shutdown(cancel_futures=True)
+
+  def get_trajectories_metrics(
+      self, trajectory_ids: list[str] | None = None
+  ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
+    """Retrieves metrics for trajectories in the run.
+
+    Files are read in parallel to hide the latency of remote filesystems such
+    as GCS. Errors are raised for the first failing trajectory in order, as if
+    the files were read one by one.
+
+    Args:
+      trajectory_ids: Optional list of unique trajectory identifiers. If
+        specified, only metrics for these IDs is returned. If None, metrics for
+        all trajectories in the run with recorded metrics is returned.
+
+    Returns:
+      A dictionary mapping trajectory IDs to TrajectoryMetrics objects for the
+      requested trajectories.
+
+    Raises:
+      store.TrajectoryMetricsNotFoundError: If any requested trajectory ID does
+        not have recorded metrics.
+      RuntimeError: If the reader threads cannot be started, e.g. during
+        interpreter shutdown.
+    """
+    if trajectory_ids is None and not self.root_dir.exists():
+      return {}
+    if trajectory_ids is not None and not trajectory_ids:
+      return {}
+
+    executor = futures.ThreadPoolExecutor(
+        max_workers=_MAX_READ_WORKERS,
+        thread_name_prefix=_READ_THREAD_NAME_PREFIX,
+    )
+    try:
+      ids_to_read: Iterable[str] = (
+          self._list_trajectory_ids(executor)
+          if trajectory_ids is None
+          else trajectory_ids
+      )
+      pending_reads = collections.deque(
+          (
+              traj_id,
+              executor.submit(
+                  _read_text_or_none, self.get_trajectory_metrics_path(traj_id)
+              ),
+          )
+          for traj_id in ids_to_read
+      )
+      result: dict[str, trajectory_lib.TrajectoryMetrics] = {}
+      missing_ids: list[str] = []
+      while pending_reads:
+        traj_id, metrics_text_future = pending_reads.popleft()
+        metrics_text = metrics_text_future.result()
+        if metrics_text is None:
+          if trajectory_ids is not None:
+            missing_ids.append(traj_id)
+          continue
+        result[traj_id] = trajectory_lib.TrajectoryMetrics.model_validate_json(
+            metrics_text
+        )
+      if missing_ids:
+        raise store.TrajectoryMetricsNotFoundError(missing_ids)
+      return result
+    finally:
       executor.shutdown(cancel_futures=True)
 
   def get_trajectories(
@@ -643,6 +804,35 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         metadata=metadata,
         step=step,
     )
+
+  def update_metrics(
+      self,
+      trajectory_id: str,
+      metrics: trajectory_lib.TrajectoryMetrics,
+  ) -> None:
+    """Updates final trajectory metrics asynchronously.
+
+    Performs synchronous frontend validation of the trajectory ID and metrics on
+    the calling thread so invalid arguments fail fast with actionable errors,
+    then delegates asynchronous queuing and non-blocking background I/O to the
+    `_AsyncFileWriter`.
+
+    Args:
+      trajectory_id: Unique trajectory identifier.
+      metrics: TrajectoryMetrics object containing metrics to merge.
+
+    Raises:
+      TypeError: If metrics is not a TrajectoryMetrics instance.
+      ValueError: If trajectory_id is empty, None, or contains characters that
+        cannot be encoded in a trajectory directory name.
+    """
+    if not isinstance(metrics, trajectory_lib.TrajectoryMetrics):
+      raise TypeError(
+          "metrics must be an instance of TrajectoryMetrics, got"
+          f" {type(metrics)!r}."
+      )
+    traj_id = _validate_trajectory_id(trajectory_id)
+    self._writer.update_metrics(traj_id, metrics)
 
   def flush(self) -> None:
     """Flushes any pending or asynchronous writes to persistent storage.

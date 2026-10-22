@@ -3,6 +3,7 @@
 import collections
 from typing import Any, ClassVar, Mapping, TypeVar
 
+from tunix.dist_rl.trajectory import async_writer
 from tunix.dist_rl.trajectory import base_store as store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 
@@ -36,13 +37,20 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
 
   BACKEND: ClassVar[str] = "memory"
 
-  def __init__(self) -> None:
+  def __init__(
+      self,
+      step_array_filter: async_writer.StepArrayFilter | None = None,
+  ) -> None:
     """Initializes the InMemoryTrajectoryStore."""
     super().__init__()
+    self._step_array_filter = step_array_filter
     self._metadata_by_trajectory_id: dict[str, MetadataT] = {}
     self._steps_by_trajectory_id: dict[str, list[trajectory_lib.Step]] = (
         collections.defaultdict(list)
     )
+    self._metrics_by_trajectory_id: dict[
+        str, trajectory_lib.TrajectoryMetrics
+    ] = {}
 
   @classmethod
   def _from_config(
@@ -112,6 +120,42 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
       result.append(meta.create_trajectory(steps=steps))
     return result
 
+  def get_trajectories_metrics(
+      self, trajectory_ids: list[str] | None = None
+  ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
+    """Retrieves trajectory metrics for the requested or all trajectories.
+
+    Args:
+      trajectory_ids: Optional list of unique trajectory identifiers. If
+        specified, only metrics for these IDs is returned. If None, metrics for
+        all trajectories with recorded metrics is returned.
+
+    Returns:
+      A mapping from trajectory_id to TrajectoryMetrics.
+
+    Raises:
+      store.TrajectoryMetricsNotFoundError: If any requested trajectory ID does
+        not exist in the store.
+    """
+    if trajectory_ids is None:
+      return {
+          traj_id: trajectory_lib.deep_copy(m)
+          for traj_id, m in self._metrics_by_trajectory_id.items()
+      }
+    missing = [
+        traj_id
+        for traj_id in trajectory_ids
+        if traj_id not in self._metrics_by_trajectory_id
+    ]
+    if missing:
+      raise store.TrajectoryMetricsNotFoundError(missing)
+    return {
+        traj_id: trajectory_lib.deep_copy(
+            self._metrics_by_trajectory_id[traj_id]
+        )
+        for traj_id in trajectory_ids
+    }
+
   def add_step(
       self,
       step: trajectory_lib.Step,
@@ -135,7 +179,10 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
     """
     self.update_metadata(metadata)
     traj_id = _validate_trajectory_id(metadata.trajectory_id)
-    step_copy = trajectory_lib.deep_copy(step)
+    filtered_step = async_writer.filter_step_arrays(
+        step, self._step_array_filter
+    )
+    step_copy = trajectory_lib.deep_copy(filtered_step)
     steps = self._steps_by_trajectory_id[traj_id]
     for idx, s in enumerate(steps):
       if s.step_id == step_copy.step_id:
@@ -166,6 +213,47 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
     self._metadata_by_trajectory_id[traj_id] = trajectory_lib.deep_copy(
         metadata
     )
+
+  def update_metrics(
+      self,
+      trajectory_id: str,
+      metrics: trajectory_lib.TrajectoryMetrics,
+  ) -> None:
+    """Updates (or creates) trajectory metrics for a trajectory.
+
+    The metrics object is deep copied, so later mutations of the caller's
+    object do not retroactively change what this store reports.
+
+    Args:
+      trajectory_id: Unique identifier of the trajectory.
+      metrics: TrajectoryMetrics containing trajectory-level metrics.
+
+    Raises:
+      TypeError: If metrics is not a TrajectoryMetrics instance.
+      ValueError: If trajectory_id is empty or whitespace.
+    """
+    if not isinstance(metrics, trajectory_lib.TrajectoryMetrics):
+      raise TypeError(
+          f"Expected TrajectoryMetrics instance, got {type(metrics).__name__}."
+      )
+    if not trajectory_id or not trajectory_id.strip():
+      raise ValueError("trajectory_id must be non-empty.")
+
+    copied = trajectory_lib.deep_copy(metrics)
+    if trajectory_id in self._metrics_by_trajectory_id:
+      existing = self._metrics_by_trajectory_id[trajectory_id]
+      if existing.extra is None and copied.extra is None:
+        merged_extra = None
+      else:
+        merged_extra = {
+            **(existing.extra or {}),
+            **(copied.extra or {}),
+        }
+      self._metrics_by_trajectory_id[trajectory_id] = (
+          trajectory_lib.TrajectoryMetrics(extra=merged_extra)
+      )
+    else:
+      self._metrics_by_trajectory_id[trajectory_id] = copied
 
   def flush(self) -> None:
     """Flushes any pending or asynchronous writes to persistent storage."""
