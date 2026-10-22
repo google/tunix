@@ -333,10 +333,10 @@ out_data = sampler(
 ### Trajectory Logging
 
 During reinforcement learning (RL) training, it is often useful to analyze the
-generated trajectories (prompts, responses, rewards, etc.). Tunix provides an
-`AsyncTrajectoryLogger` to log this data asynchronously to CSV files without
-blocking the training loop. It's enabled in agentic_grpo_learner by default, if
-you provide a log directory in your cluster configuration training config.
+generated trajectories (prompts, responses, rewards, etc.). Tunix provides a
+`TrajectoryStore` to log this data asynchronously without blocking the training
+loop. It's enabled in agentic_grpo_learner by default, if you provide a log
+directory in your cluster configuration training config.
 
 ```python
 # In your cluster configuration setup
@@ -345,8 +345,9 @@ cluster_config.training_config.metrics_logging_options.log_dir = "./logs"
 ```
 
 When enabled, the learner will automatically log trajectories during the
-training process. Users can then consume the logged data by loading the CSV
-files into a pandas DataFrame or other query engine.
+training process. Users can then consume the logged data by querying
+`TrajectoryStore` or exporting to a pandas DataFrame using
+`export_trajectories_df(reader)`.
 
 ## Quick Start: Multi-Node Training
 Tunix supports running on a multi-node setup using Pathways in GKE ([more details](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)). This is a
