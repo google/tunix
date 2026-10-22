@@ -37,6 +37,7 @@ from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.dist_rl.rollout import vanilla_sampler
+from tunix.dist_rl.testing import worker_registry_testing
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.weight_sync import raiden_handler
 from tunix.dist_rl.weight_sync import raiden_synchronizer
@@ -844,6 +845,10 @@ class WeightSyncE2ETest(absltest.TestCase):
     self.addCleanup(registry.close)
     registry.register(trainer_worker_proxy)
     registry.register(rollout_worker_proxy)
+    for wid in registry.worker_ids():
+      worker_registry_testing.set_status(
+          registry, wid, worker_registry.AdmissionStatus.ACTIVE
+      )
 
     # 4. Run real RaidenHandler and WeightSyncCoordinator in main process
     handler = raiden_handler.RaidenHandler(port=0)
@@ -903,6 +908,10 @@ class WeightSyncE2ETest(absltest.TestCase):
     self.addCleanup(registry.close)
     registry.register(trainer_worker_proxy)
     registry.register(rollout_worker_proxy)
+    for wid in registry.worker_ids():
+      worker_registry_testing.set_status(
+          registry, wid, worker_registry.AdmissionStatus.ACTIVE
+      )
 
     # 4. Run real RaidenHandler and WeightSyncCoordinator in main process
     handler = raiden_handler.RaidenHandler(port=0)

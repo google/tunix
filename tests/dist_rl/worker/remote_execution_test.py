@@ -743,6 +743,43 @@ class RemoteExecutionTest(parameterized.TestCase):
       finally:
         asyncio.run(handle.close())  # tears down the persistent submit loop
 
+  def test_grpc_sync_submit_in_flight_aborts_cleanly_on_close(self):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _BlockingWorker:
+
+      async def block(self):
+        entered.set()
+        while not release.is_set():
+          await asyncio.sleep(0.01)
+        return "done"
+
+    port = portpicker.pick_unused_port()
+    with background_server(_BlockingWorker(), port):
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{port}"
+      )
+      errors: list[BaseException] = []
+
+      def _call_submit() -> None:
+        try:
+          handle.submit("block")
+        except BaseException as exc:  # pylint: disable=broad-exception-caught
+          errors.append(exc)
+
+      caller = threading.Thread(target=_call_submit, daemon=True)
+      try:
+        caller.start()
+        self.assertTrue(entered.wait(timeout=5.0))
+        handle.sync_close()
+        caller.join(timeout=5.0)
+        self.assertFalse(caller.is_alive())
+        self.assertLen(errors, 1)
+      finally:
+        release.set()
+        caller.join(timeout=5.0)
+
   def test_grpc_handle_does_not_reopen_channels_after_close(self):
     handle = remote_lib.GrpcRemoteActorHandle(
         target_address=f"grpc://localhost:{portpicker.pick_unused_port()}"
@@ -799,6 +836,29 @@ class RemoteExecutionTest(parameterized.TestCase):
     self.assertEqual(channel_options["grpc.keepalive_time_ms"], 60000)
     self.assertEqual(channel_options["grpc.keepalive_timeout_ms"], 60000)
     self.assertEqual(channel_options["grpc.max_reconnect_backoff_ms"], 10000)
+    self.assertEqual(channel_options["grpc.use_local_subchannel_pool"], 1)
+
+    server_options = dict(network_lib._grpc_server_options())
+    self.assertEqual(server_options["grpc.so_reuseport"], 0)
+
+  def test_grpc_server_rejects_duplicate_live_port_bind(self):
+    async def _run():
+      port = portpicker.pick_unused_port()
+      server1 = remote_lib.GrpcRemoteExecutionServer(
+          StubWorkerEngine("worker_bind_1")
+      )
+      server2 = remote_lib.GrpcRemoteExecutionServer(
+          StubWorkerEngine("worker_bind_2")
+      )
+      await server1.start_serving_async(port=port)
+      try:
+        with self.assertRaises(RuntimeError):
+          await server2.start_serving_async(port=port)
+      finally:
+        await server2.stop_serving()
+        await server1.stop_serving()
+
+    asyncio.run(_run())
 
   def test_grpc_poll_responses_maps_unavailable_and_deadline_to_transient_error(
       self,

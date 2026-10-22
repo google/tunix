@@ -23,6 +23,7 @@ from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import orchestrator
 from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.orchestrator import worker_registry
+from tunix.dist_rl.testing import worker_registry_testing
 from tunix.dist_rl.trajectory import file_store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
@@ -53,12 +54,27 @@ class ClusterOrchestratorTest(absltest.TestCase):
 
   def test_bring_up_and_shutdown(self):
     self.orch.bring_up_workers("dummy_warmup_data")
+    self.mock_lifecycle.enable_late_registration.assert_called_once_with(
+        require_weight_sync=False
+    )
     self.mock_lifecycle.bring_up.assert_called_once_with("dummy_warmup_data")
 
     self.orch.shutdown()
     self.mock_monitor.close.assert_called_once()
     self.mock_lifecycle.shutdown.assert_called_once()
     self.mock_registry.close.assert_called_once()
+
+    mock_lifecycle_ws = mock.MagicMock()
+    orch_ws = orchestrator.ClusterOrchestrator(
+        registry=self.mock_registry,
+        lifecycle_driver=mock_lifecycle_ws,
+        monitor=self.mock_monitor,
+        weight_sync_mode="fallback",
+    )
+    orch_ws.bring_up_workers("dummy_warmup_data")
+    mock_lifecycle_ws.enable_late_registration.assert_called_once_with(
+        require_weight_sync=True
+    )
 
   def test_create_engine(self):
     mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
@@ -80,6 +96,10 @@ class ClusterOrchestratorTest(absltest.TestCase):
     ref_info = orch.registry.register_handle(
         "reference-0", [datatypes.Role.REFERENCE], mock_ref
     )
+    for wid in orch.registry.worker_ids():
+      worker_registry_testing.set_status(
+          orch.registry, wid, worker_registry.AdmissionStatus.ACTIVE
+      )
 
     engine = orch._create_engine()
     self.assertEqual(
@@ -111,6 +131,10 @@ class ClusterOrchestratorTest(absltest.TestCase):
         "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout
     )
     orch.registry.register_handle("actor-0", [datatypes.Role.ACTOR], mock_actor)
+    for wid in orch.registry.worker_ids():
+      worker_registry_testing.set_status(
+          orch.registry, wid, worker_registry.AdmissionStatus.ACTIVE
+      )
 
     engine = orch._create_engine()
     self.assertIsNotNone(engine._weight_sync_coordinator)
@@ -187,6 +211,9 @@ class ClusterOrchestratorTest(absltest.TestCase):
 
     registry = worker_registry.WorkerRegistry()
     registry.register(LocalWorker())
+    worker_registry_testing.set_status(
+        registry, "rollout-0", worker_registry.AdmissionStatus.ACTIVE
+    )
 
     orch = orchestrator.ClusterOrchestrator(registry=registry)
     engine = orch._create_engine()
@@ -197,16 +224,16 @@ class ClusterOrchestratorTest(absltest.TestCase):
   def test_create_engine_forwards_fault_tolerance_config(self):
     registry = worker_registry.WorkerRegistry()
     ft_config = datatypes.FaultToleranceConfig(
-        enabled=True, max_task_retries=2, poll_retry_budget_s=45.0
+        enabled=False, max_task_retries=5
     )
     orch = orchestrator.ClusterOrchestrator(
         registry=registry,
         fault_tolerance_config=ft_config,
     )
     engine = orch._create_engine()
-    self.assertEqual(engine._fault_tolerance_config, ft_config)
-    self.assertEqual(engine._rollout_session._max_task_retries, 2)
-    self.assertEqual(engine._rollout_session._poll_retry_budget_s, 45.0)
+    self.assertIs(engine._fault_tolerance_manager, orch.fault_tolerance_manager)
+    self.assertEqual(engine._fault_tolerance_manager.config, ft_config)
+    self.assertEqual(engine._rollout_session._max_task_retries, 0)
 
   def test_run_with_bring_up(self):
     mock_program = mock.MagicMock(spec=rl_program.RLProgram)
@@ -605,6 +632,56 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
       )
       orch.bring_up_workers()
       orch.shutdown()
+
+  def test_rollout_worker_registering_during_bring_up_is_brought_up_late(self):
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        monitor=mock.MagicMock(),
+        weight_sync_mode="fallback",
+    )
+    mock_rollout_0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout_1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout_1.submit.side_effect = [
+        datatypes.Response(
+            metadata={"drain_timeout_s": 120.0, "partial_rollout": False}
+        ),
+        datatypes.Response(),
+        datatypes.Response(),
+        datatypes.Response(),
+    ]
+
+    def _r0_submit(method_name, *args, **kwargs):
+      del args, kwargs
+      if method_name == "initialize":
+        orch.registry.register_handle(
+            "rollout-1", [datatypes.Role.ROLLOUT], mock_rollout_1
+        )
+        return datatypes.Response(
+            metadata={"drain_timeout_s": 120.0, "partial_rollout": False}
+        )
+      return datatypes.Response()
+
+    mock_rollout_0.submit.side_effect = _r0_submit
+    orch.registry.register_handle(
+        "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout_0
+    )
+
+    orch.bring_up_workers(dummy_data="warmup_batch")
+    orch.registry.wait_for_workers(
+        {datatypes.Role.ROLLOUT: 1},
+        statuses=(worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,),
+        timeout=5.0,
+    )
+
+    self.assertEqual(
+        orch.registry.status("rollout-0"),
+        worker_registry.AdmissionStatus.ACTIVE,
+    )
+    self.assertEqual(
+        orch.registry.status("rollout-1"),
+        worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+    )
+    orch.shutdown()
 
 
 if __name__ == "__main__":

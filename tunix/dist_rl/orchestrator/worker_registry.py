@@ -21,8 +21,8 @@ role, so a fused worker (e.g. one serving both "trainer" and "inference") joins
 every matching role query. Role membership is snapshotted at registration time.
 """
 
-import collections
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
+import dataclasses
 import pickle
 import threading
 from typing import Any
@@ -32,6 +32,19 @@ from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.worker import abstract_worker
 from tunix.dist_rl.worker import remote_execution
 
+_LIVENESS_PROBE_TIMEOUT_S = 5.0
+
+AdmissionStatus = datatypes.AdmissionStatus
+
+
+@dataclasses.dataclass
+class _WorkerEntry:
+  """Internal registry record for a single registered worker."""
+
+  info: datatypes.WorkerInfo
+  handle: remote_execution.ActorHandle
+  status: AdmissionStatus = AdmissionStatus.REGISTERED
+
 
 class WorkerRegistry:
   """Single source of truth owning all cluster ActorHandles and WorkerInfos."""
@@ -39,15 +52,45 @@ class WorkerRegistry:
   def __init__(self):
     self._lock = threading.Lock()
     self._condition = threading.Condition(self._lock)
-    self._handles: dict[str, remote_execution.ActorHandle] = {}
-    self._infos: dict[str, datatypes.WorkerInfo] = {}
-    self._role_to_ids: dict[str, set[str]] = collections.defaultdict(set)
-    # Worker ids evicted after a data-plane fault (`unregister_handle`).
-    # TODO(b/577214994): Replace with staged rejoin (initialize -> compile ->
-    # weight sync -> ACTIVE) once dynamic rollout worker rejoin lands; until
-    # then a restarted worker must not become routable without bring-up and
-    # a committed weight sync.
-    self._evicted_ids: set[str] = set()
+    self._entries: dict[str, _WorkerEntry] = {}
+    self._closed: bool = False
+
+  @property
+  def is_closed(self) -> bool:
+    """Returns whether worker registration has been closed."""
+    with self._lock:
+      return self._closed
+
+  def close_registration(self) -> None:
+    """Closes the registry to any further worker registrations."""
+    with self._condition:
+      self._closed = True
+      self._condition.notify_all()
+
+  def wait_for_registered(
+      self, exclude: Collection[remote_execution.ActorHandle]
+  ) -> list[tuple[datatypes.WorkerInfo, remote_execution.ActorHandle]]:
+    """Blocks until some `REGISTERED` worker's handle is not in `exclude`.
+
+    Args:
+      exclude: Handles the caller is already handling.
+
+    Returns:
+      Every `REGISTERED` worker, including those in `exclude`, sorted by
+      worker_id; or an empty list once registration is closed.
+    """
+    with self._condition:
+      while not self._closed:
+        registered = [
+            (entry.info, entry.handle)
+            for entry in self._matching_entries_locked(
+                statuses=(AdmissionStatus.REGISTERED,)
+            )
+        ]
+        if any(handle not in exclude for _, handle in registered):
+          return registered
+        self._condition.wait()
+      return []
 
   def _insert_locked(
       self,
@@ -56,34 +99,22 @@ class WorkerRegistry:
       override: bool,
   ) -> remote_execution.ActorHandle | None:
     worker_id = info.worker_id
-    if worker_id in self._handles and not override:
-      raise ValueError(f"duplicate worker_id: {worker_id!r}")
-    if worker_id in self._evicted_ids and not override:
-      raise ValueError(
-          f"worker_id {worker_id!r} was evicted after a fault and cannot"
-          " re-register: dynamic rollout worker rejoin (initialize, compile,"
-          " and weight sync before receiving tasks) is not supported yet."
-      )
     if not info.roles:
       raise ValueError(f"worker {worker_id!r} declares no roles")
-    self._evicted_ids.discard(worker_id)
+    if self._closed:
+      raise RuntimeError(
+          f"Worker registration is closed; cannot register {worker_id!r}."
+      )
+    if worker_id in self._entries and not override:
+      raise ValueError(f"duplicate worker_id: {worker_id!r}")
 
-    displaced_handle: remote_execution.ActorHandle | None = None
-    if worker_id in self._infos:
-      old_handle = self._handles.get(worker_id)
-      if old_handle is not None and old_handle is not handle:
-        displaced_handle = old_handle
-      old_info = self._infos[worker_id]
-      for role in old_info.roles:
-        if role in self._role_to_ids:
-          self._role_to_ids[role].discard(worker_id)
-          if not self._role_to_ids[role]:
-            del self._role_to_ids[role]
-
-    self._handles[worker_id] = handle
-    self._infos[worker_id] = info
-    for role in info.roles:
-      self._role_to_ids[role].add(worker_id)
+    old_entry = self._entries.get(worker_id)
+    displaced_handle = (
+        old_entry.handle
+        if old_entry is not None and old_entry.handle is not handle
+        else None
+    )
+    self._entries[worker_id] = _WorkerEntry(info=info, handle=handle)
     self._condition.notify_all()
     return displaced_handle
 
@@ -102,14 +133,19 @@ class WorkerRegistry:
 
     Raises:
       ValueError: If the worker declares no roles, or its id is already
-        registered (and override is False).
+        registered (and `override` is False).
+      RuntimeError: If worker registration has been closed.
     """
     info = worker.info()
     handle = remote_execution.InProcessActorHandle(
         remote_execution.InProcessRemoteExecutionServer(worker)
     )
-    with self._condition:
-      displaced_handle = self._insert_locked(info, handle, override=override)
+    try:
+      with self._condition:
+        displaced_handle = self._insert_locked(info, handle, override=override)
+    except BaseException:
+      handle.sync_close()
+      raise
     if displaced_handle is not None:
       displaced_handle.sync_close()
     return info
@@ -148,6 +184,20 @@ class WorkerRegistry:
     )
     return info
 
+  def _is_remote_worker_alive(self, address: str) -> bool:
+    """Probes `address` via a short-timeout `heartbeat` RPC."""
+    probe = remote_execution.ActorHandle.from_address(
+        f"grpc://{address}",
+        rpc_timeout_s=_LIVENESS_PROBE_TIMEOUT_S,
+    )
+    try:
+      probe.submit("heartbeat")
+      return True
+    except Exception:  # pylint: disable=broad-exception-caught
+      return False
+    finally:
+      probe.sync_close()
+
   def register_from_hostname(
       self,
       hostname: str,
@@ -155,7 +205,26 @@ class WorkerRegistry:
       metadata: bytes,
       rpc_timeout_s: float = 1800.0,
   ) -> datatypes.WorkerInfo:
-    """Registers a remote worker handle from a hostname and metadata."""
+    """Registers a remote worker handle from a hostname and metadata.
+
+    A rollout worker re-registering under an existing `worker_id` replaces the
+    existing entry if it reuses the same address, or if the existing worker at a
+    different address fails a `heartbeat` liveness probe.
+
+    Args:
+      hostname: Discovered peer hostname or IP address.
+      _: Unused discovery server port supplied by the discovery callback.
+      metadata: Pickled worker registration metadata dictionary.
+      rpc_timeout_s: Per-RPC timeout in seconds for the created `ActorHandle`.
+
+    Returns:
+      The registered `WorkerInfo`.
+
+    Raises:
+      RuntimeError: If `service_type` is unknown or registration is closed.
+      ValueError: If `worker_id` collides with a non-rollout worker or a live
+        rollout worker at a different address.
+    """
     md = pickle.loads(metadata)
 
     # NB: this should align with workers
@@ -180,23 +249,75 @@ class WorkerRegistry:
       case _:
         raise RuntimeError(f"unknown service type {service_type}")
 
-    resources: dict[str, Any] = {"address": service_address}
+    resources: dict[str, Any] = {"remote": True, "address": service_address}
     if "trajectory_store_config" in md:
       resources["trajectory_store_config"] = md["trajectory_store_config"]
-    return self.register_handle(
+    info = datatypes.WorkerInfo(
         worker_id=worker_id,
-        roles=[role],
-        handle=remote_execution.ActorHandle.from_address(
-            f"grpc://{service_address}",
-            rpc_timeout_s=rpc_timeout_s,
-        ),
+        roles=frozenset({role.value}),
         resources=resources,
     )
+    handle = remote_execution.ActorHandle.from_address(
+        f"grpc://{service_address}",
+        rpc_timeout_s=rpc_timeout_s,
+    )
+    displaced_handle: remote_execution.ActorHandle | None = None
+    try:
+      with self._condition:
+        existing = self._entries.get(worker_id)
+        # TODO(linchai): Support re-registration for non-rollout roles once
+        # trainer/reference worker fault tolerance is implemented.
+        if existing is not None and (
+            role != datatypes.Role.ROLLOUT or existing.info.roles != info.roles
+        ):
+          raise ValueError(
+              f"duplicate worker_id {worker_id!r} for role {role.value!r}"
+              f" (existing roles {sorted(existing.info.roles)}); only rollout"
+              " workers support re-registration"
+          )
+        # A remote worker at a different address may still be alive: probe it
+        # outside the lock before replacing it.
+        to_probe: tuple[remote_execution.ActorHandle, str] | None = None
+        if existing is not None:
+          existing_addr = existing.info.resources.get("address")
+          if existing_addr and existing_addr != service_address:
+            to_probe = (existing.handle, existing_addr)
+        if to_probe is None:
+          displaced_handle = self._insert_locked(info, handle, override=True)
+      if to_probe is not None:
+        existing_handle, existing_addr = to_probe
+        if self._is_remote_worker_alive(existing_addr):
+          raise ValueError(
+              f"duplicate worker_id {worker_id!r}: existing rollout worker at"
+              f" {existing_addr} is still alive when {service_address}"
+              " attempted to register"
+          )
+        with self._condition:
+          current = self._entries.get(worker_id)
+          if current is not None and current.handle is not existing_handle:
+            raise ValueError(
+                f"duplicate worker_id {worker_id!r}: re-registered"
+                f" concurrently while {service_address} was registering"
+            )
+          displaced_handle = self._insert_locked(info, handle, override=True)
+    except BaseException:
+      handle.sync_close()
+      raise
+    if displaced_handle is not None:
+      displaced_handle.sync_close()
+    logging.info(
+        "Registered remote worker %r with roles %s.",
+        worker_id,
+        sorted(info.roles),
+    )
+    return info
 
   def wait_for_workers(
       self,
       min_workers: Mapping[datatypes.Role | str, int],
       timeout: float | None = None,
+      *,
+      statuses: Collection[AdmissionStatus] | None = None,
   ) -> None:
     """Waits for registered workers to meet the minimum required counts.
 
@@ -205,6 +326,7 @@ class WorkerRegistry:
         workers required.
       timeout: Maximum duration to wait in seconds before raising TimeoutError.
         If None, waits indefinitely until requirements are met.
+      statuses: If set, only counts workers in one of these statuses.
 
     Raises:
       TimeoutError: If the required worker counts are not met within timeout.
@@ -213,7 +335,7 @@ class WorkerRegistry:
 
       def _counts() -> dict[datatypes.Role | str, int]:
         return {
-            role: len(self._role_to_ids.get(role, set()))
+            role: len(self._matching_entries_locked(role, statuses))
             for role in min_workers
         }
 
@@ -244,38 +366,60 @@ class WorkerRegistry:
   ) -> bool:
     """Updates `info.resources` for `worker_id` under the registry lock if `expected_handle` matches."""
     with self._lock:
-      if self._handles.get(worker_id) is not expected_handle:
+      entry = self._entries.get(worker_id)
+      if entry is None or entry.handle is not expected_handle:
         return False
-      self._infos[worker_id].resources.update(resources)
+      entry.info.resources.update(resources)
       return True
 
-  def _pop_worker_locked(self, worker_id: str) -> remote_execution.ActorHandle:
-    info = self._infos.pop(worker_id)
-    handle = self._handles.pop(worker_id)
-    for role in info.roles:
-      members = self._role_to_ids.get(role)
-      if members is not None:
-        members.discard(worker_id)
-        if not members:
-          del self._role_to_ids[role]
-    self._condition.notify_all()
-    return handle
+  def status(self, worker_id: str) -> AdmissionStatus:
+    """Returns the current `AdmissionStatus` for `worker_id`."""
+    with self._lock:
+      return self._entries[worker_id].status
+
+  def set_status(
+      self,
+      worker_id: str,
+      status: AdmissionStatus,
+      *,
+      expected_handle: remote_execution.ActorHandle,
+      expected_status: AdmissionStatus,
+  ) -> bool:
+    """Moves `worker_id` from `expected_status` to `status`.
+
+    Args:
+      worker_id: The worker to update.
+      status: The new status.
+      expected_handle: The handle `worker_id` must still be registered with.
+      expected_status: The status `worker_id` must currently be in.
+
+    Returns:
+      Whether the status changed: False if `worker_id` is no longer registered
+      with `expected_handle` or is not in `expected_status`.
+    """
+    with self._condition:
+      entry = self._entries.get(worker_id)
+      if (
+          entry is None
+          or entry.handle is not expected_handle
+          or entry.status is not expected_status
+      ):
+        return False
+      entry.status = status
+      self._condition.notify_all()
+      return True
 
   def unregister(self, worker_id: str) -> None:
     """Removes a worker from the registry and closes its ActorHandle outside the lock."""
     with self._condition:
-      handle = self._pop_worker_locked(worker_id)
+      handle = self._entries.pop(worker_id).handle
+      self._condition.notify_all()
     handle.sync_close()
 
   def unregister_handle(
       self, handle: remote_execution.ActorHandle
   ) -> str | None:
     """Evicts the worker owning `handle` (if still registered) and closes it.
-
-    The evicted `worker_id` is remembered: a later registration under the same
-    id (for example, a restarted process re-registering through discovery) is
-    rejected unless `override=True`, so the restarted worker never receives
-    tasks without bring-up and weight sync.
 
     Args:
       handle: The `ActorHandle` of the worker to evict.
@@ -285,23 +429,21 @@ class WorkerRegistry:
     """
     with self._condition:
       worker_id = next(
-          (wid for wid, h in self._handles.items() if h is handle), None
+          (wid for wid, e in self._entries.items() if e.handle is handle), None
       )
       if worker_id is None:
         return None
-      self._pop_worker_locked(worker_id)
-      self._evicted_ids.add(worker_id)
+      self._entries.pop(worker_id)
+      self._condition.notify_all()
     handle.sync_close()
     return worker_id
 
   def close(self) -> None:
     """Closes all registered ActorHandles outside the lock and clears registry state."""
     with self._condition:
-      handles = [self._handles[wid] for wid in sorted(self._handles)]
-      self._handles.clear()
-      self._infos.clear()
-      self._role_to_ids.clear()
-      self._evicted_ids.clear()
+      handles = [self._entries[wid].handle for wid in sorted(self._entries)]
+      self._entries.clear()
+      self._closed = True
       self._condition.notify_all()
 
     errors: list[BaseException] = []
@@ -315,57 +457,87 @@ class WorkerRegistry:
           f"Failed to close {len(errors)} ActorHandle(s): {errors!r}"
       ) from errors[0]
 
+  def _matching_entries_locked(
+      self,
+      role: datatypes.Role | str | None = None,
+      statuses: Collection[AdmissionStatus] | None = None,
+  ) -> list[_WorkerEntry]:
+    """Returns entries sorted by `worker_id` matching `role` and `statuses`."""
+    allowed = None if statuses is None else frozenset(statuses)
+    return [
+        entry
+        for _, entry in sorted(self._entries.items())
+        if (role is None or role in entry.info.roles)
+        and (allowed is None or entry.status in allowed)
+    ]
+
+  def _matching_entries(
+      self,
+      role: datatypes.Role | str | None = None,
+      statuses: Collection[AdmissionStatus] | None = None,
+  ) -> list[_WorkerEntry]:
+    with self._lock:
+      return self._matching_entries_locked(role, statuses)
+
   def handle(self, worker_id: str) -> remote_execution.ActorHandle:
     with self._lock:
-      return self._handles[worker_id]
+      return self._entries[worker_id].handle
 
   def handles(
-      self, role: datatypes.Role | str
+      self,
+      role: datatypes.Role | str,
+      *,
+      statuses: Collection[AdmissionStatus] | None = (AdmissionStatus.ACTIVE,),
   ) -> list[remote_execution.ActorHandle]:
-    """Returns the (possibly empty) list of ActorHandles serving `role`."""
-    with self._lock:
-      ids = sorted(self._role_to_ids.get(role, set()))
-      return [self._handles[i] for i in ids]
+    """Returns the (possibly empty) list of ActorHandles serving `role`.
+
+    Args:
+      role: Role to look up.
+      statuses: Statuses to include. Defaults to `ACTIVE` only, so data-plane
+        callers never route to workers that are not yet admitted; pass `None` to
+        include every registered worker (e.g. before bring-up).
+    """
+    return [entry.handle for entry in self._matching_entries(role, statuses)]
 
   def info(self, worker_id: str) -> datatypes.WorkerInfo:
     with self._lock:
-      return self._infos[worker_id]
+      return self._entries[worker_id].info
 
   def infos(
       self, role: datatypes.Role | str | None = None
   ) -> list[datatypes.WorkerInfo]:
     """Returns WorkerInfos sorted by worker_id (all workers when role is None, or filtered by role)."""
-    with self._lock:
-      if role is None:
-        ids = sorted(self._infos)
-      else:
-        ids = sorted(self._role_to_ids.get(role, set()))
-      return [self._infos[i] for i in ids]
+    return [entry.info for entry in self._matching_entries(role)]
 
   def targets(
-      self, role: datatypes.Role | str | None = None
+      self,
+      role: datatypes.Role | str | None = None,
+      *,
+      statuses: Collection[AdmissionStatus] | None,
   ) -> list[tuple[datatypes.WorkerInfo, remote_execution.ActorHandle]]:
-    """Returns `(WorkerInfo, ActorHandle)` pairs sorted by worker_id."""
-    with self._lock:
-      ids = (
-          sorted(self._infos)
-          if role is None
-          else sorted(self._role_to_ids.get(role, set()))
-      )
-      return [(self._infos[i], self._handles[i]) for i in ids]
+    """Returns `(WorkerInfo, ActorHandle)` pairs sorted by worker_id.
+
+    Args:
+      role: Role to filter by, or None for all roles.
+      statuses: Statuses to include, or None for every registered worker.
+    """
+    return [
+        (entry.info, entry.handle)
+        for entry in self._matching_entries(role, statuses)
+    ]
 
   def roles(self) -> set[str]:
     with self._lock:
-      return set(self._role_to_ids)
+      return set().union(*(e.info.roles for e in self._entries.values()))
 
   def worker_ids(self) -> list[str]:
     with self._lock:
-      return sorted(self._handles)
+      return sorted(self._entries)
 
   def __len__(self) -> int:
     with self._lock:
-      return len(self._handles)
+      return len(self._entries)
 
   def __contains__(self, worker_id: str) -> bool:
     with self._lock:
-      return worker_id in self._handles
+      return worker_id in self._entries
