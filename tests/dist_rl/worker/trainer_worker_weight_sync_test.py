@@ -16,6 +16,7 @@
 
 from absl.testing import absltest
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.worker import trainer_worker as trainer_worker_lib
 
 WorkerState = datatypes.WorkerState
@@ -32,6 +33,16 @@ class _FakeTrainer:
 
 
 class _ReleasingTrainer(_FakeTrainer):
+
+  def __init__(self, metadata=None):
+    super().__init__()
+    self.metadata = (
+        metadata if metadata is not None else [{"unit": "trainer0"}]
+    )
+
+  def prepare_weight_sync(self, sync_request=None, **kwargs):
+    self.calls.append("prepare")
+    return self.metadata
 
   def release_weight_sync(self, **kwargs):
     self.calls.append("release")
@@ -90,6 +101,31 @@ class WeightSyncStagingTest(absltest.TestCase):
     worker.prepare_weight_sync()
     worker.release_weight_sync(request)
     self.assertIs(trainer.release_kwargs["sync_request"], request)
+
+  def test_prepare_release_after_stage_success(self):
+    unit = weight_sync.WorkUnitMetadata(
+        unit=weight_sync.WorkUnitId("trainer"),
+        staged_on_host=True,
+    )
+    trainer = _ReleasingTrainer(metadata=[unit])
+    worker = self._worker(trainer)
+    res = worker.prepare_weight_sync(release_after_stage=True)
+    self.assertEqual(res, [unit])
+    self.assertEqual(worker.state, WorkerState.READY)
+    self.assertEqual(trainer.calls, ["prepare", "release"])
+
+  def test_prepare_release_after_stage_failure_unstaged_or_none(self):
+    for staged in (False, None):
+      with self.subTest(staged=staged):
+        unit = weight_sync.WorkUnitMetadata(
+            unit=weight_sync.WorkUnitId("trainer"),
+            staged_on_host=staged,
+        )
+        trainer = _ReleasingTrainer(metadata=[unit])
+        worker = self._worker(trainer)
+        with self.assertRaisesRegex(RuntimeError, "staged_on_host=True"):
+          worker.prepare_weight_sync(release_after_stage=True)
+        self.assertEqual(worker.state, WorkerState.ERROR)
 
 
 if __name__ == "__main__":

@@ -78,6 +78,12 @@ per-worker record and `state` the round-level summary:
                         was aborted and source staging was NOT released;
                         anything else would destroy memory in use.
 
+In synchronous rounds (the default), the source is released during round
+teardown once all destinations publish or roll back. When `source_staged` is
+provided, `prepare_weight_sync(release_after_stage=True)` releases source
+staging in-place upon host staging completion so the trainer can resume
+immediately without a teardown release RPC.
+
 After any of the last three, the coordinator is poisoned: further `sync()`
 calls raise until `reset_after_recovery()` is called, because starting a new
 round against workers in unknown states can corrupt them further (or regress
@@ -786,6 +792,8 @@ class WeightSyncCoordinator:
   async def sync(
       self,
       policy_version: int = 0,
+      *,
+      source_staged: Optional[asyncio.Event] = None,
       **extra_config,
   ) -> WeightSyncResult:
     """Runs one full round; returns only if it committed.
@@ -798,6 +806,9 @@ class WeightSyncCoordinator:
       policy_version: Version of the weights being pushed. Must not regress
         below the last committed version; pushing the same version again is
         allowed (it is how a failed round is retried).
+      source_staged: Optional event set as soon as the source finishes staging
+        to host memory and self-releases, enabling the trainer to resume
+        training concurrently with rollout weight sync.
       **extra_config: Carried to the workers in the request.
     """
     if self._poisoned:
@@ -821,7 +832,9 @@ class WeightSyncCoordinator:
     self._in_flight = True
     start_time = time.monotonic()
     try:
-      return await self._run_round(policy_version, extra_config)
+      return await self._run_round(
+          policy_version, extra_config, source_staged=source_staged
+      )
     finally:
       elapsed_time = time.monotonic() - start_time
       logging.info("Weight sync finished in %.2f seconds.", elapsed_time)
@@ -831,6 +844,8 @@ class WeightSyncCoordinator:
       self,
       policy_version: int,
       extra_config: dict[str, Any],
+      *,
+      source_staged: Optional[asyncio.Event] = None,
   ) -> WeightSyncResult:
     round_index = self._round_index
     self._round_index += 1
@@ -926,13 +941,21 @@ class WeightSyncCoordinator:
         # Metadata is collected exactly once and the same objects flow to both
         # registration and the request. Collecting twice would hand the
         # controller endpoints from a different rebind than the one staged.
+        release_after_stage = source_staged is not None
+        prepare_kwargs = (
+            {"release_after_stage": True} if release_after_stage else {}
+        )
         src_meta_lists = await asyncio.gather(*[
             asyncio.wait_for(
-                handle.asubmit("prepare_weight_sync", request),
+                handle.asubmit(
+                    "prepare_weight_sync", request, **prepare_kwargs
+                ),
                 self._timeouts.source_prepare,
             )
             for _, handle in sources
         ])
+        if release_after_stage:
+          release_source = False
       except asyncio.CancelledError:
         raise
       except Exception as e:  # pylint: disable=broad-except
@@ -959,6 +982,14 @@ class WeightSyncCoordinator:
             " destination unit(s)"
         )
         raise fail("metadata collection returned an empty side")
+      if source_staged is not None:
+        if not all(bool(m.staged_on_host) for m in src_metadata):
+          failures.append("source metadata does not report staged_on_host=True")
+          raise fail(
+              "async weight sync requires staged_on_host=True on all source"
+              " units; no destination was quiesced"
+          )
+        source_staged.set()
       source_units = tuple(m.unit for m in src_metadata)
       destination_units = tuple(m.unit for m in dst_metadata)
       # Diagnostics only (--v=1). Raiden partitions across units sharing a
@@ -1417,7 +1448,7 @@ class WeightSyncCoordinator:
                 round_index,
                 error,
             )
-      else:
+      elif state is RoundState.UNKNOWN_TRANSFER_STATE:
         logging.error(
             "round %d: source staging deliberately NOT released; a timed-out"
             " transfer may still be reading it",

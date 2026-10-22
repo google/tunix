@@ -14,6 +14,7 @@
 
 """TrainerWorker implementation for role-based isolation."""
 
+from collections.abc import Sequence
 import contextlib
 import functools
 from typing import Any, Callable, ContextManager, cast
@@ -24,6 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.train import abstract_trainer
+from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.worker import abstract_worker
 from tunix.rl import common as rl_common
 from tunix.rl import packing
@@ -94,6 +96,10 @@ class TrainerWorker(abstract_worker.Worker):
     self._worker_id = worker_id
     self._state = WorkerState.PENDING
     self._last_error: str | None = None
+
+  @property
+  def worker_id(self) -> str:
+    return self._worker_id
 
   def _policy_version(self) -> int:
     if self._trainer is None:
@@ -430,7 +436,13 @@ class TrainerWorker(abstract_worker.Worker):
     """Restore state from latest checkpoint and return the metadata pytree."""
     return self._ensure_ready().restore_checkpoint(**kwargs)
 
-  def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  def prepare_weight_sync(
+      self,
+      sync_request: Any = None,
+      *,
+      release_after_stage: bool = False,
+      **kwargs,
+  ) -> Any:
     """Stages weights for transfer and returns their metadata."""
     trainer = self._ensure_ready()
     self.state = WorkerState.SYNCING
@@ -439,6 +451,19 @@ class TrainerWorker(abstract_worker.Worker):
         kwargs["sync_request"] = sync_request
       metadata = trainer.prepare_weight_sync(**kwargs)
       self._last_error = None
+      if release_after_stage:
+        units = (
+            [weight_sync.dict_to_metadata(m) for m in metadata]
+            if isinstance(metadata, Sequence)
+            else []
+        )
+        if not units or not all(bool(u.staged_on_host) for u in units):
+          raise RuntimeError(
+              f"{self.worker_id}: async_weight_sync (release_after_stage=True)"
+              " requires all source work units to report staged_on_host=True,"
+              f" got {[u.staged_on_host for u in units]!r}."
+          )
+        self.release_weight_sync(sync_request=sync_request)
       if metadata is not None:
         return metadata
       return self._response(weight_sync_ready=True)

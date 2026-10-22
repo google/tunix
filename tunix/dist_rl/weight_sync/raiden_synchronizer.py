@@ -433,6 +433,20 @@ def _tensor_metadata(name: str, arr: Any, layer_idx: int):
   )
 
 
+def _is_direct_device_buffer_enabled() -> bool:
+  """Returns True if Raiden FFI zero-copy direct device buffer mode is active."""
+  raiden_ffi = _get_raiden_ffi()
+  use_direct_fn = getattr(raiden_ffi, "_use_direct_device_buffer", None)
+  if callable(use_direct_fn):
+    return bool(use_direct_fn())
+  val = (
+      os.environ.get("RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER", "0")
+      .strip()
+      .lower()
+  )
+  return val in ("1", "true", "yes", "on")
+
+
 class RaidenSynchronizer:
   """One host's weights on the raiden transport, plus its registration metadata.
 
@@ -462,6 +476,7 @@ class RaidenSynchronizer:
     self._is_proxy = is_proxy
     self._parallelism = parallelism
     self._sync: Any = None
+    self._d2h_done: bool = False
     self._ips: List[str] = []
     self._control_addr: str = ""
     self._ffi_mesh: Any = None
@@ -567,6 +582,7 @@ class RaidenSynchronizer:
     # copies in host memory during rebinds.
     self.names = []
     self.arrays = []
+    self._d2h_done = False
     self.names, self.arrays = _filter_bindable(
         # Proxy arrays are bindable only under FFI, which binds them in place;
         # a non-Pathways process should not be seeing them at all.
@@ -666,6 +682,7 @@ class RaidenSynchronizer:
         raise
 
     self._require_sync("d2h()").d2h()
+    self._d2h_done = True
 
   def h2d(self) -> None:
     if not self.bound:
@@ -860,6 +877,16 @@ class RaidenSynchronizer:
         job_name=self.job_name,
         job_replica_id=str(self.worker_index) if self.worker_index else "",
     )
+    if self._is_proxy:
+      staged_on_host = bool(
+          self._ips and not _is_direct_device_buffer_enabled()
+      )
+    else:
+      staged_on_host = bool(
+          self._d2h_done
+          and self._sync is not None
+          and not _is_direct_device_buffer_enabled()
+      )
     return weight_sync.WorkUnitMetadata(
         unit=unit,
         shards=shards,
@@ -869,6 +896,7 @@ class RaidenSynchronizer:
         mesh_axes=mesh_axes or None,
         transport_mode="ffi" if self._is_proxy else "tcp",
         use_ffi=self._is_proxy,
+        staged_on_host=staged_on_host,
     )
 
 
