@@ -199,6 +199,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
       free_kv_cache: bool = False,
       partial_rollout: bool = False,
+      detokenize: bool = False,
       **kwargs,
   ):
     self.server_id = server_id
@@ -219,6 +220,10 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     # reallocating the KV cache pool on every sync step is unnecessary.
     self.free_kv_cache = free_kv_cache
     self.partial_rollout: bool = bool(partial_rollout)
+    # Off by default so token-only callers skip detokenization. Agentic
+    # rollouts read the action from `SamplingResponse.text`, so their launchers
+    # should enable it.
+    self.detokenize: bool = bool(detokenize)
 
     # Defaults to RAIDEN when unspecified: RLVllmSampler drives weight sync
     # through its own native Raiden hooks, so callers that construct the
@@ -363,6 +368,8 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       raise ValueError("sampling_requests cannot be None.")
 
     is_sequence = isinstance(sampling_requests, (list, tuple))
+    if self.detokenize:
+      kwargs.setdefault("detokenize", True)
     raw_responses = await self._require_sampler().sample(
         sampling_requests, **kwargs
     )
