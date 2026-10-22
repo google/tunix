@@ -93,7 +93,7 @@ class GrpoPipeline(base_rl_pipeline.BasePipeline):
       )
 
     # Strip helper keys that are not GRPOConfig fields
-    valid = {f.name for f in dataclasses.fields(GRPOConfig)}
+    valid = {f.name for f in dataclasses.fields(GRPOConfig) if f.init}
     cfg.pop("max_turns", None)
     return GRPOConfig(**{k: v for k, v in cfg.items() if k in valid})
 
@@ -127,13 +127,13 @@ class GrpoPipeline(base_rl_pipeline.BasePipeline):
         custom_batch_fn=custom_batch_fn,
     )
 
-    rl_cluster = self.create_rl_cluster(tokenizer)
+    rl_engine = self.create_rl_engine(tokenizer)
 
     if mode == "grpo":
       from tunix.rl.grpo import grpo_learner  # pylint: disable=g-import-not-at-top
 
       grpo_trainer = grpo_learner.GrpoLearner(
-          rl_cluster=rl_cluster,
+          rl_engine=rl_engine,
           reward_fns=self.obtain_reward_fn(),
           algo_config=grpo_learner.GrpoConfig(
               **self._config_mapping("grpo_config")
@@ -155,7 +155,7 @@ class GrpoPipeline(base_rl_pipeline.BasePipeline):
     )
 
     learner_kwargs: dict[str, Any] = dict(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         algo_config=algo_config,
         reward_fns=reward_fns,
         chat_parser=chat_parser,
@@ -194,6 +194,8 @@ def main(argv, **kwargs):
       pipeline.config,
   )
   pipeline.run_trainer()
+  return
+
 
 if __name__ == "__main__":
   app.run(main)

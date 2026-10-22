@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, Tuple
 
 from tunix.utils.env_utils import SGLANG_JAX_TP_AXIS_NAME

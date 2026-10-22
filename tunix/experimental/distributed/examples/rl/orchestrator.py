@@ -28,7 +28,7 @@ class RolloutClient:
         return response.completion
       except grpc.RpcError as e:
         raise RuntimeError(
-            f"generate failed: {e.code()} - {e.details()}"  # pytype: disable=attribute-error
+            f"generate failed: {e.code()} - {e.details()}"  # pyrefly: ignore[missing-attribute]
         )
 
 
@@ -48,7 +48,7 @@ class TrainerClient:
         return response.weights
       except grpc.RpcError as e:
         raise RuntimeError(
-            f"train failed: {e.code()} - {e.details()}"  # pytype: disable=attribute-error
+            f"train failed: {e.code()} - {e.details()}"  # pyrefly: ignore[missing-attribute]
         )
 
 

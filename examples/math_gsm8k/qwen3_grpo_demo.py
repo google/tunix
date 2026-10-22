@@ -34,10 +34,8 @@ import gc
 import logging
 import math
 import os
-import re
 import sys
 import time
-from typing import Any
 
 from absl import logging as absl_logging
 
@@ -70,13 +68,14 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from jax.sharding import Mesh
-import numpy as np
 import optax
 from orbax import checkpoint as ocp
 import tensorflow_datasets as tfds
-
-# For OSS usage
-# import tensorflow_datasets.text.gsm8k
+try:
+  # For OSS usage
+  import tensorflow_datasets.text.gsm8k  # pylint: disable=unused-import
+except (ImportError, ModuleNotFoundError):
+  pass
 from transformers import AutoTokenizer
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -98,17 +97,17 @@ for root in [
 
 _DISTRIBUTED_INITIALIZED = False
 try:
-  import tunix  # pytype: disable=import-error  # noqa: F401
+  import tunix  # noqa: F401
 except Exception:
   pass
 
 try:
-  import r2egym  # pytype: disable=import-error  # noqa: F401
+  import r2egym  # noqa: F401  # pyrefly: ignore[missing-import]
 except Exception:
   pass
 
 try:
-  import pathwaysutils  # pytype: disable=import-error
+  import pathwaysutils
 
   pathwaysutils.initialize()
   _DISTRIBUTED_INITIALIZED = True
@@ -127,10 +126,11 @@ from tunix.cli.utils import model as model_utils
 from tunix.models.qwen3 import model as qwen3_model_lib
 from tunix.models.qwen3 import params as qwen3_params_lib
 from tunix.oss import utils as oss_utils
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
+from tunix.utils import gsm8k_vtc
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
 from tunix.sft import utils as sft_utils
@@ -235,15 +235,22 @@ if ENABLE_CHECKPOINTING:
 
 show_hbm_usage = sft_utils.show_hbm_usage
 
-VTC_PROMPT_TEMPLATE = """Solve the following math problem.
-First, put your detailed step-by-step reasoning process inside <reasoning>...</reasoning> tags.
-Then, put your final numerical answer inside <answer>\\boxed{{}}</answer> tags. Do not put anything else in the answer tags.
-
-Problem: {}
-<reasoning>
-"""
-
-_metric_call_idx = 0
+# The GSM8K VTC recipe (prompt template, reward, metrics, raw parser) lives in
+# tunix.utils.gsm8k_vtc and is shared with the distributed experimental example
+# so the two stay in parity by construction.
+VTC_PROMPT_TEMPLATE = gsm8k_vtc.VTC_PROMPT_TEMPLATE
+_as_text = gsm8k_vtc.as_text
+extract_hash_answer = gsm8k_vtc.extract_hash_answer
+build_prompt = gsm8k_vtc.build_prompt
+_normalize_example_value = gsm8k_vtc.normalize_example_value
+normalize_single_example = gsm8k_vtc.normalize_single_example
+extract_boxed_answer = gsm8k_vtc.extract_boxed_answer
+is_vtc_format_correct = gsm8k_vtc.is_vtc_format_correct
+normalize_answer = gsm8k_vtc.normalize_answer
+_vtc_completion_outcome = gsm8k_vtc.vtc_completion_outcome
+vtc_env_reward = gsm8k_vtc.vtc_env_reward
+vtc_metric_fn = gsm8k_vtc.vtc_metric_fn
+VTCRawTextParser = gsm8k_vtc.VTCRawTextParser
 
 
 # ====== Shared Mesh ======
@@ -270,20 +277,6 @@ print(f"shared_mesh.devices.shape={shared_mesh.devices.shape}")
 
 
 # ====== Data ======
-def _as_text(value: Any) -> str:
-  return value if isinstance(value, str) else value.decode("utf-8")
-
-
-def extract_hash_answer(text: str) -> str | None:
-  if "####" not in text:
-    return None
-  return text.split("####", 1)[1].strip()
-
-
-def build_prompt(question: str) -> str:
-  return VTC_PROMPT_TEMPLATE.format(question)
-
-
 def build_gsm8k_dataset(
     *,
     split: str,
@@ -332,155 +325,7 @@ def create_datasets() -> tuple[grain.MapDataset, grain.MapDataset]:
   return train_dataset, eval_dataset
 
 
-def _normalize_example_value(value: Any) -> Any:
-  if isinstance(value, np.ndarray):
-    flat = value.reshape(-1).tolist()
-    if len(flat) == 1:
-      return _normalize_example_value(flat[0])
-    return [_normalize_example_value(v) for v in flat]
-  if isinstance(value, np.bytes_):
-    return value.tobytes().decode("utf-8")
-  if isinstance(value, bytes):
-    return value.decode("utf-8")
-  return value
-
-
-def normalize_single_example(example: dict[str, Any]) -> dict[str, Any]:
-  return {
-      key: _normalize_example_value(value) for key, value in example.items()
-  }
-
-
 # ====== Reward + Metrics ======
-def extract_boxed_answer(text: str) -> str | None:
-  answer_blocks = re.findall(r"<answer>(.*?)</answer>", text, re.DOTALL)
-  content = answer_blocks[-1] if answer_blocks else text
-
-  boxed = []
-  stack = []
-  for i, ch in enumerate(content):
-    if ch == "{":
-      stack.append(i)
-    elif ch == "}":
-      if not stack:
-        continue
-      open_idx = stack.pop()
-      if content[:open_idx].endswith(r"\boxed"):
-        boxed.append(content[open_idx + 1 : i].strip())
-  if boxed:
-    return boxed[-1]
-
-  fallback = re.search(r"\\boxed\s*\{?\s*([a-zA-Z0-9\.,\-]+)\s*\}?", content)
-  if fallback:
-    return fallback.group(1).strip()
-  return None
-
-
-def is_vtc_format_correct(text: str) -> bool:
-  has_reasoning = text.count("</reasoning>") == 1
-  has_answer = text.count("<answer>") == 1 and text.count("</answer>") == 1
-  reasoning_end = text.find("</reasoning>")
-  answer_open = text.find("<answer>")
-  answer_close = text.find("</answer>")
-  return (
-      has_reasoning
-      and has_answer
-      and reasoning_end != -1
-      and answer_open != -1
-      and answer_close != -1
-      and reasoning_end < answer_open < answer_close
-  )
-
-
-def normalize_answer(text: str | None) -> str | None:
-  if text is None:
-    return None
-  return str(text).replace(",", "").strip()
-
-
-def _vtc_completion_outcome(
-    completion: str, gold: Any
-) -> tuple[float, bool, bool, bool]:
-  format_ok = is_vtc_format_correct(completion)
-  pred = normalize_answer(extract_boxed_answer(completion))
-  true = normalize_answer(_normalize_example_value(gold))
-  answer_ok = pred is not None and true is not None and pred == true
-  extracted_ok = pred is not None
-
-  if format_ok and answer_ok:
-    score = 1.0
-  elif format_ok and not answer_ok:
-    score = 0.1
-  elif not format_ok and answer_ok:
-    score = 0.5
-  else:
-    score = 0.0
-  return score, format_ok, answer_ok, extracted_ok
-
-
-def vtc_env_reward(task, action):
-  gold = task.get("answer")
-  completion = action.action if hasattr(action, "action") else action
-  score, _, _, _ = _vtc_completion_outcome(completion, gold)
-  return score
-
-
-def vtc_metric_fn(prompts, completions, rewards, advantages, answer, **kwargs):
-  del prompts, completions, advantages, answer, kwargs
-  global _metric_call_idx
-  _metric_call_idx += 1
-
-  rewards = np.asarray(rewards, dtype=np.float32)
-  solve_all = bool(np.all(rewards > 0.1))
-  solve_none = bool(np.all(np.isclose(rewards, 0.0)))
-  solve_partial = (not solve_all) and (not solve_none)
-  solve_ratio = float(np.mean(rewards > 0.1))
-  reward_mean = float(rewards.mean())
-  reward_max = float(rewards.max())
-
-  absl_logging.info(
-      "[rollout-metric] call=%d n=%d solve_ratio=%.3f reward_mean=%.3f"
-      " reward_max=%.3f solve_all=%d solve_none=%d",
-      _metric_call_idx,
-      len(rewards),
-      solve_ratio,
-      reward_mean,
-      reward_max,
-      int(solve_all),
-      int(solve_none),
-  )
-  return {
-      "rewards/solve_all": (1 if solve_all else 0, np.mean),
-      "rewards/solve_none": (1 if solve_none else 0, np.mean),
-      "rewards/solve_partial": (1 if solve_partial else 0, np.mean),
-      "rewards/solve_ratio": (solve_ratio, np.mean),
-  }
-
-
-# ====== Tokenizer / Model ======
-class VTCRawTextParser:
-  """Raw-text prompt parser matching NeMo's vtc_raw_text_processor style."""
-
-  def parse(
-      self,
-      messages,
-      add_generation_prompt: bool = False,
-      is_first_msg: bool = False,
-  ) -> str:
-    del add_generation_prompt, is_first_msg
-    parts = []
-    for message in messages:
-      role = message.get("role")
-      content = message.get("content", "")
-      if role == "system" and content:
-        parts.append(content)
-      elif role == "user":
-        parts.append(content)
-      elif role == "assistant" and content:
-        parts.append(content)
-    return "\n".join(parts)
-
-
 class VTCGRPOLearner(GRPOLearner):
   """Demo-local learner that normalizes TFDS string payloads to Python str."""
 
@@ -537,10 +382,10 @@ def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module]:
   config.param_dtype = jnp.float32
 
   reference = qwen3_params_lib.create_model_from_safe_tensors(
-      MODEL_DOWNLOAD_DIR, config, mesh, dtype=MODEL_DTYPE
+      MODEL_DOWNLOAD_DIR, config, mesh, dtype=MODEL_DTYPE  # pyrefly: ignore[bad-argument-type]
   )
   actor_base = qwen3_params_lib.create_model_from_safe_tensors(
-      MODEL_DOWNLOAD_DIR, config, mesh, dtype=jnp.float32
+      MODEL_DOWNLOAD_DIR, config, mesh, dtype=jnp.float32  # pyrefly: ignore[bad-argument-type]
   )
 
   reference = put_model_on_device(reference)
@@ -592,8 +437,8 @@ def create_optimizer() -> optax.GradientTransformation:
   return optax.chain(optax.clip_by_global_norm(MAX_GRAD_NORM), optimizer)
 
 
-def _shutdown_rollout_runtime(rl_cluster) -> None:
-  rollout = getattr(rl_cluster, "rollout", None)
+def _shutdown_rollout_runtime(rl_engine) -> None:
+  rollout = getattr(rl_engine, "rollout", None)
   if rollout is not None:
     for method_name in ("close", "stop", "shutdown"):
       method = getattr(rollout, method_name, None)
@@ -625,7 +470,7 @@ def main() -> None:
       trust_remote_code=True,
   )
   chat_parser = VTCRawTextParser()
-  qwen_eos_tokens = tokenizer.encode("<|im_end|>", add_special_tokens=False)
+  qwen_eos_tokens = tokenizer.encode("<|im_end|>", add_special_tokens=False)  # pyrefly: ignore[missing-attribute]
 
   reference, actor = create_reference_and_actor(shared_mesh)
   show_hbm_usage("after loading qwen_ref / qwen_actor")
@@ -695,15 +540,15 @@ def main() -> None:
   else:
     raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
 
-  cluster_config = rl_cluster_lib.ClusterConfig(
+  cluster_config = rl_engine_lib.ClusterConfig(
       role_to_mesh={
-          rl_cluster_lib.Role.ACTOR: shared_mesh,
-          rl_cluster_lib.Role.REFERENCE: shared_mesh,
-          rl_cluster_lib.Role.ROLLOUT: shared_mesh,
+          rl_engine_lib.Role.ACTOR: shared_mesh,
+          rl_engine_lib.Role.REFERENCE: shared_mesh,
+          rl_engine_lib.Role.ROLLOUT: shared_mesh,
       },
       rollout_engine=ROLLOUT_ENGINE,
       offload_to_cpu=False,
-      training_config=rl_cluster_lib.RLTrainingConfig(
+      training_config=rl_engine_lib.RLTrainingConfig(
           actor_optimizer=create_optimizer(),
           eval_every_n_steps=EVAL_EVERY_N_STEPS,
           max_steps=MAX_STEPS,
@@ -718,8 +563,8 @@ def main() -> None:
           checkpointing_options=checkpointing_options,
       ),
       rollout_config={
-          rl_cluster_lib.Mode.TRAIN: train_rollout_config,
-          rl_cluster_lib.Mode.EVAL: eval_rollout_config,
+          rl_engine_lib.Mode.TRAIN: train_rollout_config,
+          rl_engine_lib.Mode.EVAL: eval_rollout_config,
       },
   )
 
@@ -739,17 +584,17 @@ def main() -> None:
       loss_agg_mode="sequence-mean-token-mean",
   )
 
-  rl_cluster = rl_cluster_lib.RLCluster(
+  rl_engine = rl_engine_lib.RLEngine(
       actor=actor,
       reference=reference,
       tokenizer=tokenizer,
       cluster_config=cluster_config,
   )
-  show_hbm_usage("after RLCluster creation")
+  show_hbm_usage("after RLEngine creation")
 
   # ====== Trainer ======
   grpo_trainer = VTCGRPOLearner(
-      rl_cluster=rl_cluster,
+      rl_engine=rl_engine,
       algo_config=grpo_config,
       chat_parser=chat_parser,
       metric_fns=[vtc_metric_fn],
@@ -782,10 +627,10 @@ def main() -> None:
   try:
     grpo_trainer.train(train_dataset, eval_dataset=eval_dataset)
   except Exception:
-    rl_cluster.close()
+    rl_engine.close()
     raise
   finally:
-    _shutdown_rollout_runtime(rl_cluster)
+    _shutdown_rollout_runtime(rl_engine)
 
 
 if __name__ == "__main__":

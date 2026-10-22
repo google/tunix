@@ -31,7 +31,7 @@ class ProfilerOptions:
   skip_first_n_steps: int
   # Number of steps to profile.
   profiler_steps: int
-  # Whether to set the profile options.
+  # Whether to set tracer level options (host_tracer_level, python_tracer_level).
   set_profile_options: bool = True
   # https://github.com/jax-ml/jax/blob/0b1b909dd66a113ee0d7e54e55d0efef480e2a8a/docs/profiling.md?plain=1#L285
   host_tracer_level: int = 2  # set to 2 to capture HBM profiles.
@@ -40,7 +40,8 @@ class ProfilerOptions:
   # Maximum number of hosts to profile. Only supported for Pathways workloads
   # using pathwaysutils.
   max_num_hosts: int | None = None
-
+  # Whether to enable continuous profiling via JAX advanced_configuration.
+  enable_continuous_profiling: bool = False
 
 class Profiler:
   """Activate/deactivate a profiler based on the ProfilerOptions."""
@@ -70,10 +71,22 @@ class Profiler:
     )
     # We use >= instead of > because last_profile_step is step number + 1.
     if self._first_profile_step >= self._last_profile_step:
-      raise ValueError(
-          f"First profile step {self._first_profile_step} cannot be greater"
-          f" than the last profile step {self._last_profile_step}."
+      # An empty profiling window is a misconfiguration of the profiler, not
+      # of the training run: warn and skip profiling rather than abort a run
+      # that would otherwise train fine.
+      logging.warning(
+          "Profiler disabled: first profile step %d is not before the last"
+          " profile step %d (initial_step=%d, max_step=%d,"
+          " skip_first_n_steps=%d, profiler_steps=%d).",
+          self._first_profile_step,
+          self._last_profile_step,
+          initial_step,
+          max_step,
+          profiler_options.skip_first_n_steps,
+          profiler_options.profiler_steps,
       )
+      self._do_not_profile = True
+      return
     self._started_by_this_instance = False
 
   def _check_if_max_num_hosts_supported(self) -> bool:
@@ -104,7 +117,7 @@ class Profiler:
   ) -> None:
     """Starts JAX trace, conditionally passing max_num_hosts if supported."""
     if self._check_if_max_num_hosts_supported():
-      jax.profiler.start_trace(  # pytype: disable=wrong-keyword-args
+      jax.profiler.start_trace(
           log_dir=log_dir,
           profiler_options=profiler_options,
           max_num_hosts=self._profiler_options.max_num_hosts,  # pyrefly: ignore[unexpected-keyword]
@@ -127,19 +140,26 @@ class Profiler:
         )
         return
       logging.info("Starting JAX profiler at step %d.", step)
-      if self._profiler_options.set_profile_options:
+      profile_options = None
+      if (
+          self._profiler_options.set_profile_options
+          or self._profiler_options.enable_continuous_profiling
+      ):
         profile_options = jax.profiler.ProfileOptions()
-        profile_options.host_tracer_level = (
-            self._profiler_options.host_tracer_level
-        )
-        profile_options.python_tracer_level = (
-            self._profiler_options.python_tracer_level
-        )
-        self._start_trace(
-            log_dir=self._output_path, profiler_options=profile_options
-        )
-      else:
-        self._start_trace(log_dir=self._output_path)
+        if self._profiler_options.set_profile_options:
+          profile_options.host_tracer_level = (
+              self._profiler_options.host_tracer_level
+          )
+          profile_options.python_tracer_level = (
+              self._profiler_options.python_tracer_level
+          )
+        if self._profiler_options.enable_continuous_profiling:
+          profile_options.advanced_configuration = {
+              "enable_continuous_profiling": True
+          }
+      self._start_trace(
+          log_dir=self._output_path, profiler_options=profile_options
+      )
       Profiler._is_active = True
       self._started_by_this_instance = True
 

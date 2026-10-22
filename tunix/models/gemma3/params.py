@@ -69,12 +69,12 @@ def _get_param_dtype(
     return default_dtype
 
   if keys[0] == 'vision_encoder':
-    return jnp.float32
+    return jnp.float32  # pyrefly: ignore[bad-return]
 
   if keys[0] == 'embedder':
     # mm_input_projection and mm_soft_embedding_norm
     if len(keys) > 1 and str(keys[1]).startswith('mm_'):
-      return jnp.float32
+      return jnp.float32  # pyrefly: ignore[bad-return]
 
   return default_dtype
 
@@ -83,7 +83,7 @@ def create_model_from_checkpoint(
     checkpoint_path: str,
     model_config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
-    dtype: jnp.dtype = jnp.bfloat16,
+    dtype: jnp.dtype = jnp.bfloat16,  # pyrefly: ignore[bad-function-definition]
 ) -> model_lib.Gemma3:
   """Load a Gemma3 model from a checkpoint."""
   abs_model = nnx.eval_shape(

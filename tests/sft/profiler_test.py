@@ -60,6 +60,74 @@ class ProfilerTest(parameterized.TestCase):
     p.maybe_deactivate(15)  # Deactivate at the correct step
     mock_stop_trace.assert_called_once()
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='no_options_set',
+          set_profile_options=False,
+          enable_continuous_profiling=False,
+          expect_profile_options=False,
+          expected_advanced_config=None,
+      ),
+      dict(
+          testcase_name='only_set_profile_options',
+          set_profile_options=True,
+          enable_continuous_profiling=False,
+          expect_profile_options=True,
+          expected_advanced_config={},
+      ),
+      dict(
+          testcase_name='only_enable_continuous_profiling',
+          set_profile_options=False,
+          enable_continuous_profiling=True,
+          expect_profile_options=True,
+          expected_advanced_config={'enable_continuous_profiling': True},
+      ),
+      dict(
+          testcase_name='both_options_enabled',
+          set_profile_options=True,
+          enable_continuous_profiling=True,
+          expect_profile_options=True,
+          expected_advanced_config={'enable_continuous_profiling': True},
+      ),
+  )
+  @mock.patch.object(jax, 'process_index', return_value=0)
+  @mock.patch.object(jax.profiler, 'start_trace')
+  def test_profiler_active_with_profile_options_or_continuous_profiling(
+      self,
+      mock_start_trace,
+      _,
+      set_profile_options,
+      enable_continuous_profiling,
+      expect_profile_options,
+      expected_advanced_config,
+  ):
+    profiler_options = profiler.ProfilerOptions(
+        log_dir=self.log_dir,
+        skip_first_n_steps=10,
+        profiler_steps=5,
+        set_profile_options=set_profile_options,
+        host_tracer_level=3,
+        python_tracer_level=2,
+        enable_continuous_profiling=enable_continuous_profiling,
+    )
+    p = profiler.Profiler(
+        initial_step=0, max_step=100, profiler_options=profiler_options
+    )
+    p.maybe_activate(10)
+
+    mock_start_trace.assert_called_once()
+    called_options = mock_start_trace.call_args.kwargs['profiler_options']
+    if not expect_profile_options:
+      self.assertIsNone(called_options)
+    else:
+      self.assertIsNotNone(called_options)
+      self.assertEqual(
+          called_options.advanced_configuration, expected_advanced_config
+      )
+      if set_profile_options:
+        self.assertEqual(called_options.host_tracer_level, 3)
+        self.assertEqual(called_options.python_tracer_level, 2)
+
   @mock.patch.object(jax, 'process_index', return_value=1)
   @mock.patch.object(jax.profiler, 'start_trace')
   @mock.patch.object(jax.profiler, 'stop_trace')
@@ -289,20 +357,33 @@ class ProfilerTest(parameterized.TestCase):
           profiler_steps=0,
       ),
   )
-  def test_invalid_step_numbers(
-      self, max_step, initial_step, skip_first_n_steps, profiler_steps
+  @mock.patch.object(jax, 'process_index', return_value=0)
+  @mock.patch.object(jax.profiler, 'start_trace')
+  def test_invalid_step_numbers_disable_profiling(
+      self,
+      mock_start_trace,
+      _,
+      max_step,
+      initial_step,
+      skip_first_n_steps,
+      profiler_steps,
   ):
     profiler_options = profiler.ProfilerOptions(
         log_dir=self.log_dir,
         skip_first_n_steps=skip_first_n_steps,
         profiler_steps=profiler_steps,
     )
-    with self.assertRaises(ValueError):
-      profiler.Profiler(
+    with self.assertLogs(level='WARNING') as logs:
+      p = profiler.Profiler(
           initial_step=initial_step,
           max_step=max_step,
           profiler_options=profiler_options,
       )
+    self.assertTrue(any('Profiler disabled' in line for line in logs.output))
+    self.assertTrue(p._do_not_profile)
+
+    p.maybe_activate(initial_step + skip_first_n_steps)
+    mock_start_trace.assert_not_called()
 
   def test_profiler_with_max_num_hosts_supported(self):
     def dummy_start_trace(

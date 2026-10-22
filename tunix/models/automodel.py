@@ -452,6 +452,8 @@ class AutoModel:
         **kwargs: Additional keyword arguments passed to the underlying model
           creation functions. - For ModelSource.KAGGLE, Gemma models:
           `intermediate_ckpt_dir` , `rng_seed`
+          - For ModelSource.MAXTEXT: `checkpoint_storage_use_ocdbt`,
+          `checkpoint_storage_use_zarr3`, `skip_jax_distributed_system`
 
     Returns:
         The loaded nnx.Module model.
@@ -472,24 +474,26 @@ class AutoModel:
       )
 
     # Download the model
-    if model_path:
-      model_id_or_path = model_path
+    if model_path and os.path.isdir(model_path):
+      resolved_model_path = model_path
     else:
-      if model_source in (
-          ModelSource.INTERNAL,
-          ModelSource.GCS,
-          ModelSource.KAGGLE,
-      ):
-        raise ValueError(
-            'model_path is required for model_source: '
-            f'{model_source}. Please provide a valid model_path.'
-        )
-      model_id_or_path = model_id
-    resolved_model_path = download_model(
-        model_id_or_path, model_download_path, model_source
-    )
+      if model_path:
+        model_id_or_path = model_path
+      else:
+        if model_source in (
+            ModelSource.INTERNAL,
+            ModelSource.GCS,
+            ModelSource.KAGGLE,
+        ):
+          raise ValueError(
+              'model_path is required for model_source: '
+              f'{model_source}. Please provide a valid model_path.'
+          )
+        model_id_or_path = model_id
+      resolved_model_path = download_model(
+          model_id_or_path, model_download_path, model_source
+      )
 
-    # Case 1: MaxText models
     if model_source == ModelSource.MAXTEXT:
       if maxtext_pipeline_config is not None:
         maxtext_pipeline_config.validate_mesh(mesh)
@@ -506,14 +510,11 @@ class AutoModel:
           )
         kwargs.update(pipeline_overrides)
 
-      try:
-        import maxtext.configs.pyconfig as pyconfig  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
-        from maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
-        from maxtext.utils import model_creation_utils as maxtext_model_creation_utils  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
-      except ImportError:
-        from maxtext.src.maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
-        from maxtext.src.maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top
-        from maxtext.src.maxtext.utils import model_creation_utils as maxtext_model_creation_utils  # pylint: disable=g-import-not-at-top
+      import maxtext  # pylint: disable=g-import-not-at-top
+
+      MaxTextConfig = maxtext.MaxTextConfig
+      pyconfig = maxtext.pyconfig
+      maxtext_model_creation_utils = maxtext.model_creation_utils
 
       # We provide load_parameters_path instead of model_path since that's what maxtext expects.
       argv = [
@@ -538,14 +539,28 @@ class AutoModel:
       elif hasattr(MaxTextConfig, '__annotations__'):
         valid_keys = set(MaxTextConfig.__annotations__.keys())
 
+      # Explicitly allow checkpoint storage format overrides if provided
+      valid_keys.update({
+          'checkpoint_storage_use_ocdbt',
+          'checkpoint_storage_use_zarr3',
+      })
+
       for k, v in kwargs.items():
         if v is not None and k in valid_keys:
           val_str = str(v).lower() if isinstance(v, bool) else str(v)
           argv.append(f'{k}={val_str}')
 
+      tokenizer_pad_id = kwargs.pop('tokenizer_pad_id', None)
       maxtext_config = pyconfig.initialize(argv)
+      model_creation_kwargs = {
+          'mesh': mesh,
+          'wrap_with_tunix_adapter': True,
+      }
+      if tokenizer_pad_id is not None:
+        model_creation_kwargs['tokenizer_pad_id'] = tokenizer_pad_id
       model = maxtext_model_creation_utils.from_pretrained(
-          maxtext_config, mesh=mesh, wrap_with_tunix_adapter=True
+          maxtext_config,
+          **model_creation_kwargs,
       )
       return model, resolved_model_path
     # For other native Tunix models with special handling cases for Gemma3 models
@@ -605,10 +620,16 @@ class AutoModel:
             params_path=resolved_model_path,
             model_name=naming_info.model_name,  # pyrefly: ignore[bad-argument-type]
         )
+      elif model_source == ModelSource.HUGGINGFACE:
+        logging.info(
+            'Gemma source %s is HUGGINGFACE, falling through to SafeTensors'
+            ' loader.',
+            model_source,
+        )
       else:
         raise NotImplementedError(
-            'Gemma models are only supported from KAGGLE or INTERNAL.'
-            f' Specified model source: {model_source}'
+            'Gemma models are only supported from KAGGLE, INTERNAL, or'
+            f' HUGGINGFACE. Specified model source: {model_source}'
         )
     # TODO(b/467448875): Add support for other models from KAGGLE/GCS.
     elif model_source in (ModelSource.KAGGLE, ModelSource.GCS):
@@ -628,7 +649,7 @@ class AutoModel:
       # Get load_dtype explicitly from kwargs
       load_dtype_str = kwargs.get('load_dtype')
       try:
-        load_dtype = getattr(jnp, load_dtype_str)
+        load_dtype = getattr(jnp, load_dtype_str)  # pyrefly: ignore[bad-argument-type]
       except AttributeError:
         raise ValueError(
             f'Invalid load_dtype: {load_dtype_str}. Must be a valid'
@@ -650,13 +671,13 @@ class AutoModel:
             overrides['remat_config'], str
         ):
           model_module = get_model_module(
-              naming_info.model_name, ModelModule.MODEL
+              naming_info.model_name, ModelModule.MODEL  # pyrefly: ignore[bad-argument-type]
           )
           if hasattr(model_module, 'RematConfig'):
             remat_cfg_str = overrides['remat_config']
             try:
               overrides['remat_config'] = getattr(
-                  model_module.RematConfig, remat_cfg_str
+                  model_module.RematConfig, remat_cfg_str.upper()
               )
             except AttributeError:
               raise ValueError(

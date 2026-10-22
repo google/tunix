@@ -51,7 +51,6 @@ class SglangJaxRollout(base_rollout.BaseRollout):
             init_with_random_weights=rollout_config.rollout_sglang_jax_init_with_random_weights,
             disable_radix_cache=rollout_config.rollout_sglang_jax_disable_radix_cache,
             enable_deterministic_sampling=rollout_config.rollout_sglang_jax_enable_deterministic_sampling,
-            use_sort_for_toppk_minp=rollout_config.rollout_sglang_jax_use_sort_for_toppk_minp,
             enable_static_lora=rollout_config.rollout_sglang_jax_enable_static_lora,
             enable_single_process=rollout_config.rollout_sglang_jax_enable_single_process,
             lora_target_modules=rollout_config.rollout_sglang_jax_lora_target_modules,
@@ -72,11 +71,15 @@ class SglangJaxRollout(base_rollout.BaseRollout):
 
   def generate(
       self,
-      prompts: list[str],
+      prompts: list[str] | None,
       rollout_config: base_rollout.RolloutConfig,
+      *,
+      prompt_token_ids=None,
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     """Generates samples from the model."""
+    if prompt_token_ids is not None:
+      kwargs["prompt_token_ids"] = prompt_token_ids
     self.output = self._sampler(
         input_strings=prompts,
         max_generation_steps=rollout_config.max_tokens_to_generate,
@@ -96,6 +99,7 @@ class SglangJaxRollout(base_rollout.BaseRollout):
         tokens=self.output.tokens,
         left_padded_prompt_tokens=self.output.padded_prompt_tokens,
         logprobs=self.output.logprobs,
+        prompt_lengths=self.output.prompt_lengths,
     )
 
   def get_per_token_logps(

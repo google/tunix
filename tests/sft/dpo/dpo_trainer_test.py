@@ -261,8 +261,8 @@ class DPOTrainerTest(parameterized.TestCase):
         input_ids=jnp.arange(0, 32).reshape(8, 4),
         positions=jnp.ones((8, 4)),
         attention_mask=jnp.ones((8, 4, 4)),
-        ref_chosen_logps=ref_per_token_logps[:4],
-        ref_rejected_logps=ref_per_token_logps[4:],
+        ref_chosen_logps=ref_per_token_logps[:4],  # pyrefly: ignore[bad-argument-type]
+        ref_rejected_logps=ref_per_token_logps[4:],  # pyrefly: ignore[bad-argument-type]
         logits_to_keep=4,
         completion_mask=jnp.ones((8, 4)),
     )

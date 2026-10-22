@@ -218,6 +218,24 @@ class ModelTest(parameterized.TestCase):
           apply_lora=False,
           model_display=True,
       ),
+      dict(
+          testcase_name='flash_attention_custom',
+          model_config={
+              'model_name': 'llama-3.1-8b',
+              'model_source': 'huggingface',
+              'model_id': 'meta-llama/Llama-3.1-8B',
+              'model_display': False,
+              'use_flash_attention': True,
+              'flash_attention_block_size': 512,
+              'flash_attention_compute_block_size': 128,
+              'flash_attention_bwd_block_size': 128,
+              'flash_attention_use_fused_bwd': True,
+          },
+          tokenizer_config={'tokenizer_path': model._DEFAULT_TOKENIZER_PATH},
+          expected_tokenizer_path=model._DEFAULT_TOKENIZER_PATH,
+          apply_lora=False,
+          model_display=False,
+      ),
   )
   @mock.patch.object(model, 'apply_lora_to_model', autospec=True)
   @mock.patch.object(automodel, 'AutoModel', autospec=True)
@@ -255,7 +273,36 @@ class ModelTest(parameterized.TestCase):
     )
 
     self.assertEqual(tokenizer_path, expected_tokenizer_path)
-    mock_automodel.from_pretrained.assert_called_once()
+    mock_automodel.from_pretrained.assert_called_once_with(
+        model_id=model_config['model_id'],
+        mesh=mesh,
+        model_source=mock.ANY,
+        model_download_path=model_config.get('model_download_path'),
+        intermediate_ckpt_dir=model_config.get('intermediate_ckpt_dir'),
+        rng_seed=model_config.get('rng_seed', 0),
+        model_path=model_config.get('model_path'),
+        use_flash_attention=model_config.get('use_flash_attention', False),
+        flash_attention_block_size=model_config.get(
+            'flash_attention_block_size', 1024
+        ),
+        remat_config=model_config.get('remat_config', 1),
+        dtype=model_config.get('dtype'),
+        load_dtype=model_config.get('load_dtype'),
+        use_sliding_window_kv_cache=model_config.get(
+            'use_sliding_window_kv_cache'
+        ),
+        remat_policy=model_config.get('remat_policy', 'nothing_saveable'),
+        flash_attention_use_fused_bwd=model_config.get(
+            'flash_attention_use_fused_bwd', False
+        ),
+        flash_attention_compute_block_size=model_config.get(
+            'flash_attention_compute_block_size', 256
+        ),
+        flash_attention_bwd_block_size=model_config.get(
+            'flash_attention_bwd_block_size', 256
+        ),
+        use_split_attention=model_config.get('use_split_attention', False),
+    )
     if apply_lora:
       mock_apply_lora.assert_called_once_with(
           mock_model, mesh, model_config['lora_config'], rng_seed=0

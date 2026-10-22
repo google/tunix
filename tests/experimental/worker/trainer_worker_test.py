@@ -1,0 +1,614 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Unit tests for TrainerWorker.
+
+Verifies TrainerWorker RPC request unpacking (TrainRequest), delegation to
+AbstractTrainer (fwd_bwd, eval_step, update), response metadata stamping, and
+per-token log-prob scorer run through AbstractTrainer.fwd_only.
+"""
+
+import dataclasses
+from typing import Any
+
+from absl.testing import absltest
+from flax import nnx
+import jax.numpy as jnp
+import numpy as np
+from tunix.experimental.common import datatypes
+from tunix.experimental.train import abstract_trainer
+from tunix.experimental.worker import trainer_worker
+from tunix.rl import algo_core
+from tunix.rl import algorithm_config
+from tunix.rl import common as rl_common
+from tunix.tests import test_common as tc
+
+
+class FakeTrainer(abstract_trainer.AbstractTrainer):
+
+  def __init__(self):
+    self.compile_calls = []
+    self.fwd_bwd_calls = []
+    self.eval_step_calls = []
+    self.fwd_only_calls = []
+    self.model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    self.policy_version = 3
+    self.step_count = 10
+    self.target_state = None
+    self.gen_model_input_fn = None
+
+  def compile(self, dummy_data=None):
+    self.compile_calls.append(dummy_data)
+
+  def with_loss_fn(self, loss_fn, has_aux=False):
+    self.loss_fn = loss_fn
+    self.has_aux = has_aux
+
+  def with_gen_model_input_fn(self, gen_model_input_fn):
+    self.gen_model_input_fn = gen_model_input_fn
+
+  def fwd_bwd(self, payload, **kwargs):
+    self.fwd_bwd_calls.append((payload, kwargs))
+
+  def update(self, **kwargs):
+    self.step_count += 1
+    return self.step_count
+
+  def eval_step(self, payload, **kwargs):
+    self.eval_step_calls.append((payload, kwargs))
+
+  def fwd_only(self, fn, *args, **kwargs):
+    self.fwd_only_calls.append((args, kwargs))
+    return fn(self.model, *args, **kwargs)
+
+  def save_checkpoint(self, metadata, **kwargs):
+    pass
+
+  def restore_checkpoint(self, **kwargs):
+    return {}
+
+  def get_metrics(self):
+    return {"loss": 0.25}
+
+  def prepare_weight_sync(self, **kwargs):
+    pass
+
+  def set_target_state(self, target_state: Any) -> None:
+    self.target_state = target_state
+
+  def close(self):
+    pass
+
+
+class TrainerWorkerTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.fake_trainer = FakeTrainer()
+    self.worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer,
+        worker_id="trainer_0",
+    )
+    self.worker.initialize()
+
+  def test_trainer_factory_deferred_until_initialize(self):
+    calls = []
+
+    def _factory():
+      calls.append("called")
+      return self.fake_trainer
+
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=_factory, worker_id="lazy_trainer"
+    )
+    gen_fn = lambda x: {"input": x}
+    worker.with_gen_model_input_fn(gen_fn)
+    self.assertEmpty(calls)
+    self.assertEqual(worker.state, datatypes.WorkerState.PENDING)
+    self.assertEqual(worker.heartbeat().policy_version, 0)
+    self.assertEqual(worker.info().resources["trainer"], "UninitializedTrainer")
+
+    worker.initialize()
+    self.assertEqual(calls, ["called"])
+    self.assertEqual(worker.state, datatypes.WorkerState.READY)
+    self.assertEqual(worker.heartbeat().policy_version, 3)
+    self.assertEqual(worker.info().resources["trainer"], "FakeTrainer")
+    self.assertIs(self.fake_trainer.gen_model_input_fn, gen_fn)
+
+  def test_initialize_failure_sets_error_state(self):
+    def _failing_factory():
+      raise RuntimeError("weight load failed")
+
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=_failing_factory, worker_id="bad_trainer"
+    )
+    with self.assertRaisesRegex(RuntimeError, "weight load failed"):
+      worker.initialize()
+    self.assertEqual(worker.state, datatypes.WorkerState.ERROR)
+    self.assertEqual(worker.heartbeat().last_error, "weight load failed")
+
+    # Verify a failure in a pending hook leaves _trainer as None so a retry
+    # re-runs initialization cleanly.
+    should_fail = True
+    orig_with_loss_fn = self.fake_trainer.with_loss_fn
+
+    def _flaky_with_loss_fn(loss_fn, has_aux=False):
+      if should_fail:
+        raise RuntimeError("loss hook failed")
+      orig_with_loss_fn(loss_fn, has_aux)
+
+    self.fake_trainer.with_loss_fn = _flaky_with_loss_fn
+    retry_worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer, worker_id="retry_trainer"
+    )
+    retry_worker.with_loss_fn(lambda m, **kw: kw)
+    with self.assertRaisesRegex(RuntimeError, "loss hook failed"):
+      retry_worker.initialize()
+    self.assertIsNone(retry_worker._trainer)
+    self.assertEqual(retry_worker.state, datatypes.WorkerState.ERROR)
+
+    should_fail = False
+    retry_worker._state = datatypes.WorkerState.PENDING
+    retry_worker.initialize()
+    self.assertIs(retry_worker._trainer, self.fake_trainer)
+    self.assertEqual(retry_worker.state, datatypes.WorkerState.READY)
+    self.assertIsNotNone(self.fake_trainer.loss_fn)
+
+  def test_with_loss_fn_binds_logps_chunk_size(self):
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer, logps_chunk_size=2048
+    )
+    worker.with_loss_fn(lambda model, **kwargs: kwargs, has_aux=True)
+    worker.initialize()
+
+    self.assertTrue(self.fake_trainer.has_aux)
+    self.assertEqual(
+        self.fake_trainer.loss_fn(None, pad_id=0),
+        {"pad_id": 0, "compute_logps_chunk_size": 2048},
+    )
+
+  def test_with_loss_fn_per_call_chunk_size_wins(self):
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer, logps_chunk_size=2048
+    )
+    worker.with_loss_fn(lambda model, **kwargs: kwargs)
+    worker.initialize()
+
+    kwargs = self.fake_trainer.loss_fn(None, compute_logps_chunk_size=512)
+
+    self.assertEqual(kwargs["compute_logps_chunk_size"], 512)
+
+  def test_with_loss_fn_unchanged_without_chunk_size(self):
+    fn = lambda model, **kwargs: kwargs
+    self.worker.with_loss_fn(fn)
+
+    self.assertIs(self.fake_trainer.loss_fn, fn)
+
+  def test_compile_forwards_dummy_data_to_trainer(self):
+    dummy = {"dummy": 1}
+    resp = self.worker.compile(dummy)
+    self.assertTrue(resp.metadata["compiled"])
+    self.assertEqual(self.worker.state, datatypes.WorkerState.READY)
+    self.assertEqual(self.fake_trainer.compile_calls, [dummy])
+
+  def test_with_loss_fn_chunked_grpo_loss_matches_unchunked(self):
+    batch, prompt_len, completion_len = 2, 3, 4
+    example = datatypes.RLTrainerPayload(
+        prompt_ids=np.arange(1, 1 + batch * prompt_len, dtype=np.int32).reshape(
+            batch, prompt_len
+        ),
+        prompt_mask=np.ones((batch, prompt_len), dtype=np.int32),
+        completion_ids=np.arange(
+            1, 1 + batch * completion_len, dtype=np.int32
+        ).reshape(batch, completion_len),
+        completion_mask=np.ones((batch, completion_len), dtype=np.int32),
+        advantages=np.array([1.0, -1.0], dtype=np.float32),
+    )
+    algo_config = algorithm_config.GRPOConfig(beta=0.0)
+    algo_config.temperature = 1.0
+
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer, logps_chunk_size=3
+    )
+    worker.with_loss_fn(algo_core.grpo_loss_fn)
+    worker.initialize()
+    chunked_fn = self.fake_trainer.loss_fn
+    self.assertEqual(chunked_fn.keywords, {"compute_logps_chunk_size": 3})
+
+    kwargs = dict(
+        train_example=example, algo_config=algo_config, pad_id=0, eos_id=0
+    )
+    chunked = chunked_fn(self.fake_trainer.model, **kwargs)
+    unchunked = algo_core.grpo_loss_fn(self.fake_trainer.model, **kwargs)
+
+    np.testing.assert_allclose(
+        np.asarray(chunked.primary_loss.compute()),
+        np.asarray(unchunked.primary_loss.compute()),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+  def test_fwd_bwd_with_train_request(self):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1, 2], [1, 2]], dtype=np.int32),
+        prompt_mask=np.ones((2, 2), dtype=np.float32),
+        completion_ids=np.array([[3, 4], [3, 4]], dtype=np.int32),
+        completion_mask=np.array([[1, 1], [1, 0]], dtype=np.float32),
+        advantages=np.array([1.0, 2.0], dtype=np.float32),
+        metadata={"step": 1},
+    )
+    request = datatypes.TrainRequest(
+        request_id="req-train-123",
+        payload=payload,
+        metadata={"batch_id": "b0"},
+    )
+
+    resp = self.worker.fwd_bwd(request=request)
+
+    self.assertIsInstance(resp, datatypes.Response)
+    self.assertEqual(resp.request_id, "req-train-123")
+    self.assertEqual(resp.metadata["worker_id"], "trainer_0")
+    self.assertEqual(resp.metadata["batch_id"], "b0")
+    self.assertEqual(resp.metadata["policy_version"], 3)
+    self.assertTrue(resp.metadata["queued"])
+    self.assertLen(self.fake_trainer.fwd_bwd_calls, 1)
+    self.assertIs(self.fake_trainer.fwd_bwd_calls[0][0], payload)
+
+  def test_eval_step_with_train_request(self):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1]], dtype=np.int32),
+        prompt_mask=np.ones((1, 1), dtype=np.float32),
+        completion_ids=np.array([[2]], dtype=np.int32),
+        completion_mask=np.array([[1]], dtype=np.float32),
+        advantages=np.array([1.0], dtype=np.float32),
+    )
+    request = datatypes.TrainRequest(
+        request_id="req-eval-456",
+        payload=payload,
+        metadata={"eval_split": "val"},
+    )
+
+    resp = self.worker.eval_step(request=request)
+
+    self.assertIsInstance(resp, datatypes.Response)
+    self.assertEqual(resp.request_id, "req-eval-456")
+    self.assertEqual(resp.metadata["eval_split"], "val")
+    self.assertTrue(resp.metadata["evaluated"])
+    self.assertLen(self.fake_trainer.eval_step_calls, 1)
+    self.assertIs(self.fake_trainer.eval_step_calls[0][0], payload)
+
+  def test_update_returns_step_count(self):
+    step = self.worker.update()
+    self.assertEqual(step, 11)
+
+  def test_set_target_state_configures_trainer(self):
+    target_state = {"params": np.zeros((4, 4))}
+    resp = self.worker.set_target_state(target_state=target_state)
+
+    self.assertIsInstance(resp, datatypes.Response)
+    self.assertTrue(resp.metadata["target_state_configured"])
+    self.assertEqual(self.fake_trainer.target_state, target_state)
+
+  def test_set_target_state_raises_when_trainer_unsupported(self):
+    self.fake_trainer.set_target_state = None
+    with self.assertRaises(AttributeError):
+      self.worker.set_target_state(target_state={"params": 1})
+
+  def _expected_logps(self, request, chunk_size=0):
+    graphdef, state = nnx.split(self.fake_trainer.model)
+    return np.asarray(
+        rl_common.compute_per_token_logps(
+            graphdef,
+            state,
+            prompt_tokens=jnp.asarray(request.prompt_tokens),
+            completion_tokens=jnp.asarray(request.completion_tokens),
+            pad_id=request.pad_id,
+            eos_id=request.eos_id,
+            stop_gradient=True,
+            temperature=request.temperature,
+            chunk_size=chunk_size,
+            segment_ids=(
+                None
+                if request.segment_ids is None
+                else jnp.asarray(request.segment_ids)
+            ),
+            segment_positions=(
+                None
+                if request.segment_positions is None
+                else jnp.asarray(request.segment_positions)
+            ),
+        )
+    )
+
+  def _unpacked_request(self, temperature=1.0):
+    batch, prompt_len, completion_len = 3, 3, 4
+    return datatypes.LogprobsRequest(
+        prompt_tokens=np.arange(
+            1, 1 + batch * prompt_len, dtype=np.int32
+        ).reshape(batch, prompt_len),
+        completion_tokens=np.arange(
+            1, 1 + batch * completion_len, dtype=np.int32
+        ).reshape(batch, completion_len),
+        temperature=temperature,
+        pad_id=0,
+        eos_id=0,
+    )
+
+  def test_per_token_logps_matches_reference_scorer(self):
+    request = self._unpacked_request()
+
+    result = self.worker.per_token_logps(items=request)
+
+    self.assertIsInstance(result, datatypes.LogprobsResponse)
+    self.assertEqual(result.request_id, request.request_id)
+    self.assertEqual(result.model_version, self.fake_trainer.policy_version)
+    self.assertIsInstance(result.per_token_logps, np.ndarray)
+    self.assertEqual(result.per_token_logps.dtype, np.float32)
+    self.assertEqual(result.per_token_logps.shape, (3, 4))
+    # Whole request in one forward by default.
+    self.assertLen(self.fake_trainer.fwd_only_calls, 1)
+    np.testing.assert_allclose(
+        result.per_token_logps,
+        self._expected_logps(request),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+  def test_per_token_logps_micro_batches_in_order(self):
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer,
+        worker_id="trainer_1",
+        logps_micro_batch_size=2,
+    )
+    worker.initialize()
+    request = self._unpacked_request()
+
+    result = worker.per_token_logps(items=request)
+
+    self.assertLen(self.fake_trainer.fwd_only_calls, 2)
+    first_args, _ = self.fake_trainer.fwd_only_calls[0]
+    second_args, _ = self.fake_trainer.fwd_only_calls[1]
+    np.testing.assert_array_equal(first_args[1], request.completion_tokens[:2])
+    np.testing.assert_array_equal(second_args[1], request.completion_tokens[2:])
+    np.testing.assert_allclose(
+        result.per_token_logps,
+        self._expected_logps(request),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+  def test_per_token_logps_temperature_and_chunked_vocab(self):
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer,
+        worker_id="trainer_2",
+        logps_chunk_size=3,
+    )
+    worker.initialize()
+    request = self._unpacked_request(temperature=0.7)
+
+    result = worker.per_token_logps(items=request)
+
+    _, kwargs = self.fake_trainer.fwd_only_calls[0]
+    self.assertEqual(kwargs["temperature"], 0.7)
+    self.assertEqual(kwargs["chunk_size"], 3)
+    np.testing.assert_allclose(
+        result.per_token_logps,
+        self._expected_logps(request, chunk_size=3),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+    np.testing.assert_allclose(
+        result.per_token_logps,
+        self._expected_logps(request),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+  def test_per_token_logps_packed_request(self):
+    request = datatypes.LogprobsRequest(
+        prompt_tokens=np.zeros((2, 0), dtype=np.int32),
+        completion_tokens=np.array([[3, 4, 5], [3, 4, 0]], dtype=np.int32),
+        temperature=1.0,
+        pad_id=0,
+        eos_id=0,
+        segment_ids=np.array([[1, 1, 1], [1, 1, 0]], dtype=np.int32),
+        segment_positions=np.array([[0, 1, 2], [0, 1, 0]], dtype=np.int32),
+    )
+
+    result = self.worker.per_token_logps(items=request)
+
+    self.assertEqual(result.per_token_logps.shape, (2, 3))
+    np.testing.assert_allclose(
+        result.per_token_logps,
+        self._expected_logps(request),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+  def test_per_token_logps_empty_batch_raises(self):
+    request = datatypes.LogprobsRequest(
+        prompt_tokens=np.zeros((0, 3), dtype=np.int32),
+        completion_tokens=np.zeros((0, 4), dtype=np.int32),
+        temperature=1.0,
+        pad_id=0,
+        eos_id=0,
+    )
+    with self.assertRaises(ValueError):
+      self.worker.per_token_logps(items=request)
+    self.assertEmpty(self.fake_trainer.fwd_only_calls)
+    self.assertEqual(self.worker.state, datatypes.WorkerState.ERROR)
+
+  def test_per_token_logps_requires_pad_and_eos(self):
+    request = datatypes.LogprobsRequest(
+        prompt_tokens=np.zeros((1, 0), dtype=np.int32),
+        completion_tokens=np.array([[3, 4]], dtype=np.int32),
+        temperature=1.0,
+    )
+    with self.assertRaises(ValueError):
+      self.worker.per_token_logps(items=request)
+    self.assertEmpty(self.fake_trainer.fwd_only_calls)
+
+  def test_per_token_logps_without_routing_passes_none(self):
+    self.worker.per_token_logps(items=self._unpacked_request())
+    _, kwargs = self.fake_trainer.fwd_only_calls[0]
+    self.assertIsNone(kwargs["routed_experts"])
+
+  def test_per_token_logps_forwards_routed_experts_per_micro_batch(self):
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer,
+        worker_id="trainer_3",
+        logps_micro_batch_size=2,
+    )
+    worker.initialize()
+    request = self._unpacked_request()
+    batch, seq_len = 3, 3 + 4
+    # Row i routes every token to expert i, so a mis-sliced row is visible.
+    routed = np.broadcast_to(
+        np.arange(batch, dtype=np.int32).reshape(batch, 1, 1, 1),
+        (batch, seq_len, 2, 2),
+    )
+    request = dataclasses.replace(request, routed_experts=routed)
+
+    result = worker.per_token_logps(items=request)
+
+    self.assertLen(self.fake_trainer.fwd_only_calls, 2)
+    _, first_kwargs = self.fake_trainer.fwd_only_calls[0]
+    _, second_kwargs = self.fake_trainer.fwd_only_calls[1]
+    self.assertEqual(first_kwargs["routed_experts"].dtype, np.int16)
+    np.testing.assert_array_equal(first_kwargs["routed_experts"], routed[:2])
+    np.testing.assert_array_equal(second_kwargs["routed_experts"], routed[2:])
+    # The fake model does not accept `forced_routed_experts`, so scoring is
+    # unchanged; the routing is only forwarded.
+    np.testing.assert_allclose(
+        result.per_token_logps,
+        self._expected_logps(request),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+    # Also verify compact uint8 (4D) and uint10 (5D) routed_experts are kept
+    # in compact uint8 form without widening to int16.
+    for shape in ((batch, seq_len, 2, 4), (batch, seq_len, 2, 1, 5)):
+      self.fake_trainer.fwd_only_calls.clear()
+      compact_routed = np.ones(shape, dtype=np.uint8)
+      compact_req = dataclasses.replace(request, routed_experts=compact_routed)
+      worker.per_token_logps(items=compact_req)
+      self.assertLen(self.fake_trainer.fwd_only_calls, 2)
+      _, kw0 = self.fake_trainer.fwd_only_calls[0]
+      _, kw1 = self.fake_trainer.fwd_only_calls[1]
+      self.assertEqual(kw0["routed_experts"].dtype, np.uint8)
+      self.assertEqual(kw0["routed_experts"].shape, (2,) + shape[1:])
+      self.assertEqual(kw1["routed_experts"].dtype, np.uint8)
+      self.assertEqual(kw1["routed_experts"].shape, (1,) + shape[1:])
+
+
+class TrainerWorkerExecutionContextTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.events = []
+
+    class TrackingContext:
+
+      def __init__(self, events):
+        self._events = events
+
+      def __enter__(self):
+        self._events.append("enter_ctx")
+        return self
+
+      def __exit__(self, *args):
+        self._events.append("exit_ctx")
+
+    self.ctx = TrackingContext(self.events)
+    self.fake_trainer = FakeTrainer()
+
+    def _factory():
+      self.events.append("create_trainer")
+      return self.fake_trainer
+
+    self.worker = trainer_worker.TrainerWorker(
+        trainer_factory=_factory,
+        worker_id="trainer_ctx",
+        execution_context=self.ctx,
+    )
+
+  def test_trainer_factory_runs_within_execution_context_on_initialize(self):
+    self.assertEmpty(self.events)
+    self.worker.initialize()
+    self.assertEqual(self.events, ["enter_ctx", "create_trainer", "exit_ctx"])
+
+  def test_all_worker_operations_run_within_execution_context(self):
+    self.events.clear()
+    self.worker.initialize()
+    self.assertEqual(self.events, ["enter_ctx", "create_trainer", "exit_ctx"])
+
+    # Verify per_token_logps runs inside execution_context.
+    self.events.clear()
+    logps_req = datatypes.LogprobsRequest(
+        prompt_tokens=np.zeros((1, 0), dtype=np.int32),
+        completion_tokens=np.array([[3, 4]], dtype=np.int32),
+        temperature=1.0,
+        pad_id=0,
+        eos_id=1,
+    )
+    self.worker.per_token_logps(items=logps_req)
+    self.assertEqual(self.events, ["enter_ctx", "exit_ctx"])
+
+    # Verify fwd_bwd runs inside execution_context.
+    self.events.clear()
+    train_req = datatypes.TrainRequest(
+        request_id="req-1",
+        payload=datatypes.RLTrainerPayload(
+            prompt_ids=np.array([[1]], dtype=np.int32),
+            prompt_mask=np.ones((1, 1), dtype=np.float32),
+            completion_ids=np.array([[2]], dtype=np.int32),
+            completion_mask=np.array([[1]], dtype=np.float32),
+            advantages=np.array([1.0], dtype=np.float32),
+        ),
+    )
+    self.worker.fwd_bwd(request=train_req)
+    self.assertEqual(self.events, ["enter_ctx", "exit_ctx"])
+
+    # Verify update, checkpoints, weight sync, and stop operations.
+    for op in [
+        self.worker.update,
+        lambda: self.worker.save_checkpoint(metadata={"step": 1}),
+        lambda: self.worker.restore_checkpoint(step=1),
+        self.worker.prepare_weight_sync,
+        self.worker.release_weight_sync,
+        self.worker.stop,
+    ]:
+      self.events.clear()
+      op()
+      self.assertEqual(self.events, ["enter_ctx", "exit_ctx"])
+
+  def test_execution_context_exits_cleanly_on_exception(self):
+    self.worker.initialize()
+    self.events.clear()
+
+    def _failing_save(*args, **kwargs):
+      del args, kwargs
+      self.events.append("save_failed")
+      raise RuntimeError("Disk full")
+
+    self.fake_trainer.save_checkpoint = _failing_save
+    with self.assertRaisesRegex(RuntimeError, "Disk full"):
+      self.worker.save_checkpoint(metadata={"step": 1})
+
+    self.assertEqual(self.events, ["enter_ctx", "save_failed", "exit_ctx"])
+
+
+if __name__ == "__main__":
+  absltest.main()

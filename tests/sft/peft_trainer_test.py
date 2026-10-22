@@ -47,6 +47,7 @@ os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 # Set Precision to highest for numeric stability across different hardware.
 jax.config.update('jax_default_matmul_precision', 'highest')
 
+
 def create_sharded_model(model_ctor, rngs, mesh):
   @nnx.jit(static_argnums=(0,))
   def _create_sharded_model(model_ctor, rngs):
@@ -86,6 +87,13 @@ def dummy_datasets(batch_size: int, repeat: int = 1):
 global_counter = 0
 
 
+def _injected_sgd() -> optax.GradientTransformationExtraArgs:
+  """Returns an SGD whose learning rate is tracked in the optimizer state."""
+  return optax.inject_hyperparams(optax.sgd)(
+      learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
+  )
+
+
 class PeftTrainerTest(parameterized.TestCase):
 
   def setUp(self):
@@ -98,7 +106,7 @@ class PeftTrainerTest(parameterized.TestCase):
     # CPU env setup to simulate multi device env. Won't affect TPU env. But
     # need to be careful not to use self.num_cpus in TPU env.
     self.num_cpus = 4
-    chex.set_n_cpu_devices(self.num_cpus)
+    tc.safe_set_n_cpu_devices(self.num_cpus)
 
     self.eval_ds = self.train_ds = dummy_datasets(batch_size=4)
     total_devices = jax.device_count()
@@ -130,6 +138,39 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
     global global_counter
     global_counter = 0  # make mypy happy
+    with self.mesh:
+      trainer.train(self.train_ds, self.eval_ds)
+    self.assertEqual(global_counter, 1)
+
+  def test_compile_once_on_cond_path(self):
+    """Depth>1 (accumulator + nnx.cond path) also traces exactly once.
+
+    Guards the moment-dtype change (bf16 by default on the cond path) against
+    re-tracing: the cond path must still compile just once.
+    """
+
+    class CountCompiledTimesTrainer(peft_trainer.PeftTrainer):
+
+      def _train_step(
+          self, model, optimizer, grad_accumulator, inputs, is_update_step
+      ):
+        global global_counter
+        global_counter += 1
+        return super()._train_step(
+            model, optimizer, grad_accumulator, inputs, is_update_step
+        )
+
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=2, max_steps=100, gradient_accumulation_steps=2
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.get_lora_model(
+        tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs), mesh=self.mesh
+    )
+    trainer = CountCompiledTimesTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    global global_counter
+    global_counter = 0
     with self.mesh:
       trainer.train(self.train_ds, self.eval_ds)
     self.assertEqual(global_counter, 1)
@@ -642,6 +683,20 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertEqual(train_invoke, {'foo': 2, 'bar': 4})
     self.assertEqual(eval_invoke, {'foo': 1, 'bar': 16})
 
+  def test_resume_from_checkpoint_on_init_false_raises_value_error(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=100,
+        resume_from_checkpoint_on_init=False,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    with self.assertRaisesRegex(
+        ValueError,
+        "resume_from_checkpoint_on_init=False is not supported in SFT"
+        " PeftTrainer",
+    ):
+      peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+
   def test_loss_output_format(self):
     def custom_loss_fn(
         model: nnx.Module,
@@ -702,10 +757,155 @@ class PeftTrainerTest(parameterized.TestCase):
     # Since eval_ds is length 2, it evaluates at step 2.
     self.assertEqual(eval_invoke, {'foo': 8.0, 'bar': 12.0})
 
+  def test_loss_output_metrics_support_plain_scalars(self):
+    def custom_loss_fn(
+        model: nnx.Module,
+        input_tokens: jax.Array,
+        input_mask: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+        images: jax.Array | None = None,
+    ) -> utils.LossOutput:
+      del model, input_tokens, input_mask, positions, attention_mask, images
+      return utils.LossOutput(
+          primary_loss=utils.WeightedMetric(
+              jnp.array(2.0, dtype=jnp.float32),
+              jnp.array(2.0, dtype=jnp.float32),
+          ),
+          aux_metrics={
+              'weighted': utils.WeightedMetric(
+                  jnp.array(10.0, dtype=jnp.float32),
+                  jnp.array(5.0, dtype=jnp.float32),
+              ),
+              'plain': jnp.array(4.0, dtype=jnp.float32),
+          },
+      )
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(custom_loss_fn)
+
+    trainer.train(self.train_ds, self.eval_ds)
+
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'weighted', 'train'), 2.0
+    )
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'plain', 'train'), 4.0
+    )
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'weighted', 'eval'), 2.0
+    )
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'plain', 'eval'), 4.0
+    )
+
+  def test_metrics_buffer_rejects_mixed_metric_kinds(self):
+    weighted = utils.WeightedMetric(jnp.array(1.0), jnp.array(1.0))
+    buffer = peft_trainer.MetricsBuffer(
+        step=0,
+        losses=[jnp.array(1.0), weighted],
+    )
+    with self.assertRaisesRegex(TypeError, 'must not mix'):
+      _ = buffer.loss
+
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model,
+        optax.sgd(1e-3),
+        peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=100),
+    )
+    weighted_buffer = trainer._buffer_metrics(
+        None,
+        loss=weighted,
+        step=0,
+    )
+    with self.assertRaisesRegex(TypeError, 'loss values must not mix'):
+      trainer._buffer_metrics(
+          weighted_buffer,
+          loss=jnp.array(1.0),
+          step=0,
+      )
+
+    buffer = trainer._buffer_metrics(
+        None,
+        loss=jnp.array(1.0),
+        step=0,
+        additional_metrics={'metric': (jnp.array(1.0), np.mean)},
+    )
+    with self.assertRaisesRegex(TypeError, "additional metric 'metric'"):
+      trainer._buffer_metrics(
+          buffer,
+          loss=jnp.array(1.0),
+          step=0,
+          additional_metrics={
+              'metric': (weighted, utils.weighted_metric_mean),
+          },
+      )
+
+  def test_write_metrics_handles_reducer_edge_cases(self):
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model,
+        optax.sgd(1e-3),
+        peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=100),
+    )
+    weighted = utils.WeightedMetric(jnp.array(2.0), jnp.array(2.0))
+
+    mixed_buffer = peft_trainer.MetricsBuffer(
+        step=0,
+        losses=[jnp.array(1.0)],
+        additional_metrics={
+            'metric': ([weighted, jnp.array(1.0)], np.mean),
+        },
+    )
+    with self.assertRaisesRegex(TypeError, 'metrics must not mix'):
+      trainer._write_metrics(mixed_buffer)
+
+    def count_values(values):
+      return len(values)
+
+    class ForeignWeightedMetric:
+
+      def __init__(self, unreduced_sum: float, denominator: float):
+        self.unreduced_sum = jnp.array(unreduced_sum)
+        self.denominator = jnp.array(denominator)
+        self.eps = None
+        self.min_denom = None
+
+      def compute(self):
+        return self.unreduced_sum / self.denominator
+
+    foreign = ForeignWeightedMetric(6.0, 2.0)
+    edge_buffer = peft_trainer.MetricsBuffer(
+        step=0,
+        losses=[weighted, foreign],
+        additional_metrics={
+            'empty': ([], count_values),
+            'fallback': ([weighted, foreign], np.mean),
+            'weighted': ([weighted, foreign], utils.weighted_metric_mean),
+        },
+    )
+    with mock.patch.object(trainer, '_log_metrics') as log_metrics:
+      trainer._write_metrics(edge_buffer)
+
+    self.assertEqual(log_metrics.call_args.kwargs['loss'], 2.0)
+    additional_metrics = log_metrics.call_args.kwargs['additional_metrics']
+    self.assertEqual(additional_metrics['empty'], 0)
+    self.assertEqual(additional_metrics['fallback'], 2.0)
+    self.assertEqual(additional_metrics['weighted'], 2.0)
+
   def test_loss_output_gradient_scaling(self):
-    # Covers the manual gradient scaling in _train_step: grad(unreduced_sum) *
-    # (1/d) must equal grad(sum/d). Uses a parameter-dependent loss because the
-    # original test's constant loss has zero gradient and can't exercise it.
+    # _train_step accumulates grad(unreduced_sum) with the metric's denominator
+    # and defers the division into the accumulator (Sum grads / Sum denom), so a
+    # LossOutput with denominator d must yield the same update as the reduced
+    # scalar loss sum/d. With a constant d (=2 here) the global-weighted and the
+    # old mean-of-means recipes coincide, so this equivalence is stable across
+    # that change. Uses a parameter-dependent loss because the original test's
+    # constant loss has zero gradient and can't exercise it.
     def param_dependent_sum(model, input_tokens, positions):
       logits, _ = model(input_tokens, positions)
       return jnp.sum(logits)  # depends on the parameters
@@ -724,7 +924,11 @@ class PeftTrainerTest(parameterized.TestCase):
 
     def make_reduced_loss_fn(denominator):
       def reduced_loss_fn(
-          model, input_tokens, input_mask, positions, attention_mask,
+          model,
+          input_tokens,
+          input_mask,
+          positions,
+          attention_mask,
           images=None,
       ):
         del input_mask, attention_mask, images
@@ -770,6 +974,71 @@ class PeftTrainerTest(parameterized.TestCase):
     # the scale is applied.
     self.assertGreater(max_abs_diff(params_a, params_b1), 1e-6)
 
+  def test_loss_output_metrics_use_global_denominator(self):
+    inputs = jnp.array(
+        [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [2.0, -1.0]],
+        dtype=jnp.float32,
+    )
+    targets = jnp.array([[0.5], [-0.5], [1.0], [-1.0]], dtype=jnp.float32)
+    weights = jnp.array([0.1, 0.0, 0.2, 0.3], dtype=jnp.float32)
+
+    def weighted_loss_sum(model, x, y, example_weights):
+      per_example = jnp.sum(jnp.square(model(x) - y), axis=-1)
+      return jnp.sum(per_example * example_weights)
+
+    def loss_fn(model, x, y, example_weights):
+      metric = utils.WeightedMetric(
+          weighted_loss_sum(model, x, y, example_weights),
+          jnp.sum(example_weights),
+      )
+      return utils.LossOutput(
+          primary_loss=metric,
+          aux_metrics={'weighted_mse': metric},
+      )
+
+    reference_model = nnx.Linear(2, 1, rngs=nnx.Rngs(0))
+    expected = weighted_loss_sum(
+        reference_model, inputs, targets, weights
+    ) / jnp.sum(weights)
+    model = nnx.Linear(2, 1, rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model,
+        optax.sgd(0.0),
+        peft_trainer.TrainingConfig(
+            eval_every_n_steps=1,
+            max_steps=1,
+            gradient_accumulation_steps=2,
+        ),
+    ).with_loss_fn(loss_fn)
+    training_hooks = mock.create_autospec(hooks.TrainingHooks)
+    trainer.with_training_hooks(training_hooks)
+    batches = [
+        {
+            'x': inputs[start : start + 2],
+            'y': targets[start : start + 2],
+            'example_weights': weights[start : start + 2],
+        }
+        for start in (0, 2)
+    ]
+
+    trainer.train(batches, batches)
+
+    for mode in ('train', 'eval'):
+      np.testing.assert_allclose(
+          trainer.metrics_logger.get_metric('', 'loss', mode),
+          expected,
+          rtol=1e-6,
+      )
+      np.testing.assert_allclose(
+          trainer.metrics_logger.get_metric('', 'weighted_mse', mode),
+          expected,
+          rtol=1e-6,
+      )
+
+    self.assertLen(training_hooks.on_eval_step_end.call_args_list, 2)
+    for eval_call in training_hooks.on_eval_step_end.call_args_list:
+      np.testing.assert_allclose(eval_call.args[1], expected, rtol=1e-6)
+
   def test_stream_train_step_returns_raw_weighted_metric_aux(self):
     # Since _compute_legacy_aux was dropped, the (stream) _train_step returns
     # the raw aux with WeightedMetric preserved, so the metric ops can reduce
@@ -801,17 +1070,107 @@ class PeftTrainerTest(parameterized.TestCase):
         trainer.model, trainer.optimizer, acc, self.train_ds[0], jnp.array(True)
     )
 
+    self.assertIsInstance(aux, utils.LossOutput)
+    aux_metrics = aux.aux_metrics
     # aux values stay raw WeightedMetric (not pre-divided to scalars).
-    self.assertIsInstance(aux['foo'], utils.WeightedMetric)
-    self.assertIsInstance(aux['bar'], utils.WeightedMetric)
+    self.assertIsInstance(aux_metrics['foo'], utils.WeightedMetric)
+    self.assertIsInstance(aux_metrics['bar'], utils.WeightedMetric)
     # Metric ops reduce the raw WeightedMetric correctly across micro-batches.
     self.assertAlmostEqual(
-        float(common.mean_of_means([aux['foo'], aux['foo']])), 2.0, places=5
+        float(common.mean_of_means([aux_metrics['foo'], aux_metrics['foo']])),
+        2.0,
+        places=5,
     )  # mean(10/5, 10/5)
     self.assertAlmostEqual(
-        float(common.global_weighted_mean([aux['bar'], aux['bar']])), 3.0,
+        float(
+            common.global_weighted_mean(
+                [aux_metrics['bar'], aux_metrics['bar']]
+            )
+        ),
+        3.0,
         places=5,
     )  # (6+6)/(2+2)
+
+  @parameterized.named_parameters(
+      dict(testcase_name='integer_denoms', d1=2.0, d2=6.0),
+      dict(testcase_name='fractional_denoms', d1=0.2, d2=0.3),
+  )
+  def test_train_step_denom_is_global_weighted(self, d1, d2):
+    # Two micro-batches with UNEQUAL denominators on the SAME input (so both
+    # gradients equal g = d(sum_logits)/dparam) accumulate into one accumulator
+    # WITHOUT applying (is_update=False, so the model is unchanged between the
+    # two calls). The fixed recipe adds the raw grad(sum) with the real denom,
+    # so acc.get() == (g + g) / (d1 + d2) [global weighted], NOT
+    # (g/d1 + g/d2) / 2 [the old mean-of-means, which pre-scaled by 1/denom and
+    # accumulated with denom=1]. Fails on the pre-fix code.
+    def make_loss(denom):
+      def loss_fn(
+          model,
+          input_tokens,
+          input_mask,
+          positions,
+          attention_mask,
+          images=None,
+      ):
+        del input_mask, attention_mask, images
+        logits, _ = model(input_tokens, positions)
+        return utils.LossOutput(
+            primary_loss=utils.WeightedMetric(
+                jnp.sum(logits), jnp.asarray(denom, jnp.float32)
+            ),
+            aux_metrics={},
+        )
+
+      return loss_fn
+
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100, max_steps=100, gradient_accumulation_steps=2
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model, optax.sgd(1e-3), config
+    ).with_gen_model_input_fn(dummy_gen_model_input_fn)
+    acc = peft_trainer.GradientAccumulator(trainer.model, nnx.Param)
+    inp = self.train_ds[0]
+
+    # `with_loss_fn` mutates the trainer (returns self) and `_train_step` is
+    # eager, so swapping the loss between the two accumulate-only calls is safe.
+    trainer.with_loss_fn(make_loss(d1))._train_step(
+        trainer.model, trainer.optimizer, acc, inp, jnp.array(False)
+    )
+    trainer.with_loss_fn(make_loss(d2))._train_step(
+        trainer.model, trainer.optimizer, acc, inp, jnp.array(False)
+    )
+    result = _unwrap(acc.get())
+
+    # Reference g = grad of sum(logits) on the (unchanged) model, matching
+    # diff_fn which differentiates primary_loss.unreduced_sum.
+    processed = dummy_gen_model_input_fn(inp)
+
+    def loss_sum(m):
+      logits, _ = m(processed['input_tokens'], processed['positions'])
+      return jnp.sum(logits)
+
+    _, g = nnx.value_and_grad(loss_sum)(trainer.model)
+    g = _unwrap(g)
+    global_weighted = jax.tree_util.tree_map(lambda a: (a + a) / (d1 + d2), g)
+    mean_of_means = jax.tree_util.tree_map(lambda a: (a / d1 + a / d2) / 2.0, g)
+
+    # Now equals the global weighting ...
+    jax.tree_util.tree_map(
+        lambda a, e: np.testing.assert_allclose(a, e, rtol=1e-5, atol=1e-5),
+        result,
+        global_weighted,
+    )
+    # ... and is NOT the old mean-of-means (uneven denoms).
+    max_diff = jax.tree_util.tree_reduce(
+        jnp.maximum,
+        jax.tree_util.tree_map(
+            lambda a, b: jnp.max(jnp.abs(a - b)), result, mean_of_means
+        ),
+        initializer=jnp.asarray(0.0),
+    )
+    self.assertGreater(float(max_diff), 1e-4)
 
   def test_injected_params(self):
 
@@ -831,6 +1190,85 @@ class PeftTrainerTest(parameterized.TestCase):
         trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
         TEST_LEARNING_RATE,
     )
+
+  def test_injected_params_with_chained_transformation(self):
+    """Learning rate is logged when a transformation precedes the optimizer."""
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+
+    # `clip_by_global_norm` keeps an empty state and runs ahead of the
+    # optimizer, so the learning rate lives in the second chain part.
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.inject_hyperparams(optax.sgd)(
+            learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
+        ),
+    )
+
+    trainer = peft_trainer.PeftTrainer(model, optimizer, config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(self.train_ds, self.eval_ds)
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
+        TEST_LEARNING_RATE,
+    )
+
+  @parameterized.named_parameters(
+      ('no_chain', _injected_sgd, TEST_LEARNING_RATE),
+      (
+          'stateless_chain_part',
+          lambda: optax.chain(optax.clip_by_global_norm(1.0), _injected_sgd()),
+          TEST_LEARNING_RATE,
+      ),
+      (
+          'stateful_chain_part',
+          lambda: optax.chain(optax.scale_by_adam(), _injected_sgd()),
+          TEST_LEARNING_RATE,
+      ),
+      (
+          'injected_chain_part_without_learning_rate',
+          lambda: optax.chain(
+              optax.inject_hyperparams(optax.clip_by_global_norm)(max_norm=1.0),
+              _injected_sgd(),
+          ),
+          TEST_LEARNING_RATE,
+      ),
+      (
+          'multisteps_chain_part',
+          lambda: optax.MultiSteps(
+              optax.chain(optax.clip_by_global_norm(1.0), _injected_sgd()),
+              every_k_schedule=4,
+          ),
+          TEST_LEARNING_RATE,
+      ),
+      ('not_injected', lambda: optax.sgd(TEST_LEARNING_RATE), None),
+      ('not_injected_adam', lambda: optax.adam(TEST_LEARNING_RATE), None),
+      (
+          'injected_without_learning_rate',
+          optax.inject_hyperparams(optax.adafactor),
+          None,
+      ),
+      (
+          'not_injected_chain',
+          lambda: optax.chain(
+              optax.clip_by_global_norm(1.0), optax.sgd(TEST_LEARNING_RATE)
+          ),
+          None,
+      ),
+  )
+  def test_try_get_learning_rate(self, make_optimizer, expected):
+    """The learning rate is found in any chain part, or reported as absent."""
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, make_optimizer(), config)
+
+    learning_rate: Any = trainer._try_get_learning_rate()  # pylint: disable=protected-access
+
+    if expected is None:
+      self.assertIsNone(learning_rate)
+    else:
+      self.assertIsNotNone(learning_rate)
+      self.assertAlmostEqual(float(learning_rate), expected)
 
 
 def _unwrap(state):
@@ -875,7 +1313,7 @@ class GradientAccumulatorTest(parameterized.TestCase):
     Matches ``optax.MultiSteps`` semantics: K micro-steps of size B/K are
     equivalent to a single step on a batch of size B when the loss
     function returns a per-batch scalar (mean) value. ``get()`` returns
-    ``(Σ_i grads_i) / max(Σ_i 1, 1)``; here K=2 and the per-step grads
+    ``(Σ_i grads_i) / Σ_i 1``; here K=2 and the per-step grads
     have scale 1.0 and 2.0, so the mean is 1.5.
     """
     model, acc = self._make_accumulator()
@@ -887,10 +1325,56 @@ class GradientAccumulatorTest(parameterized.TestCase):
         out,
     )
 
+  def test_setitem_vs_set_value_write_equivalence(self):
+    """set_value(x) stores the same value/dtype/type as `v[...] = x`."""
+    v_setitem = nnx.Variable(jnp.arange(6, dtype=jnp.float32).reshape(2, 3))
+    v_setvalue = nnx.Variable(jnp.arange(6, dtype=jnp.float32).reshape(2, 3))
+    new = jnp.full((2, 3), 7.0, dtype=jnp.float32)
+    v_setitem[...] = new
+    v_setvalue.set_value(new)
+    np.testing.assert_array_equal(v_setitem[...], v_setvalue[...])
+    self.assertEqual(v_setitem[...].dtype, v_setvalue[...].dtype)
+    self.assertIs(type(v_setitem), type(v_setvalue))
+
+  def test_depth1_single_add_denom_one_is_identity(self):
+    """At depth 1, add(g, denom=1) -> get() returns g exactly (fast-path premise)."""
+    model, acc = self._make_accumulator()
+    grads = self._ones_like_params(model, scale=2.5)
+    acc.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+    out = _unwrap(acc.get())
+    jax.tree_util.tree_map(
+        lambda g, o: np.testing.assert_allclose(o, g, rtol=1e-7, atol=1e-7),
+        _unwrap(grads),
+        out,
+    )
+
+  def test_single_add_weighted_is_grads_over_denom(self):
+    """A single add(grads, denom=d) then get() returns grads / d.
+
+    The weighted (denom != 1) case of a one-micro-batch update: the global-
+    weighted mean ``Sum grads / Sum denom`` collapses to ``grads / denom``
+    for a single add. This is the premise the depth-1 fast path relies on when
+    ``gradient_accumulation_steps == 1`` -- updating directly from
+    ``grads / denom`` (skipping the accumulator + nnx.cond) must equal
+    the accumulator path. Here grads=6.0 and denom=4.0, so get()=6/4=1.5;
+    the "pre-scale by 1/d then divide again" bug would give a different value.
+    """
+    model, acc = self._make_accumulator()
+    acc.add(
+        self._ones_like_params(model, scale=6.0),
+        denom=jnp.asarray(4.0, dtype=jnp.float32),
+    )
+    out = _unwrap(acc.get())
+    jax.tree_util.tree_map(
+        lambda v: np.testing.assert_allclose(v, 1.5 * jnp.ones_like(v)),
+        out,
+    )
+
   @parameterized.named_parameters(
       dict(testcase_name='equal_denoms', denoms=(4.0, 4.0, 4.0, 4.0)),
       dict(testcase_name='varying_denoms', denoms=(1.0, 7.0, 3.0, 5.0)),
       dict(testcase_name='extreme_variance', denoms=(1.0, 1.0, 100.0, 1.0)),
+      dict(testcase_name='fractional_denoms', denoms=(0.05, 0.1, 0.2, 0.25)),
   )
   def test_explicit_denom_matches_single_step_baseline(self, denoms):
     """Passing explicit denom matches the equivalent single-step batch.
@@ -949,6 +1433,18 @@ class GradientAccumulatorTest(parameterized.TestCase):
               'is degenerate.'
           ),
       )
+
+  def test_zero_denom_returns_zero_grads(self):
+    model, acc = self._make_accumulator()
+    acc.add(self._ones_like_params(model), denom=jnp.asarray(0.0, jnp.float32))
+
+    jax.tree_util.tree_map(
+        lambda value: np.testing.assert_array_equal(
+            value[...], jnp.zeros_like(value[...])
+        ),
+        acc.get(),
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
 
   def test_reset_clears_denom(self):
     model, acc = self._make_accumulator()
@@ -1308,13 +1804,11 @@ class GradientAccumulatorTest(parameterized.TestCase):
     for d in float_dtypes:
       self.assertEqual(d, jnp.bfloat16)
 
-  def test_peft_trainer_promotes_bf16_opt_state_floats_to_float32(self):
-    """`PeftTrainer.__init__` casts float opt_state leaves to float32.
+  def test_peft_trainer_keeps_bf16_moments_on_cond_path(self):
+    """Default None keeps bf16 moments on the cond path, even with an fp32
 
-    `optax.adam` / `optax.adamw` promote their floating-point moments
-    (`mu`, `nu`) to float32 inside `update` whenever the learning rate is
-    a float32 tracer (as produced by `optax.inject_hyperparams`). This test
-    verifies that the trainer casts these to float32 in-place during init.
+    inject_hyperparams learning rate. Depth>1 (and packing) take the `nnx.cond`
+    path; bf16 moments trace fine there, so nothing is promoted to float32.
     """
     rngs = nnx.Rngs(0)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
@@ -1326,10 +1820,12 @@ class GradientAccumulatorTest(parameterized.TestCase):
     )
     nnx.update(model, bf16_state)
 
-    tx = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(
+    tx = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(  # pyrefly: ignore[bad-argument-type]
         learning_rate=1e-3
     )
-    config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=1)
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100, max_steps=1, gradient_accumulation_steps=2
+    )  # depth>1 -> cond path; moments stay bf16 (param dtype)
     trainer = peft_trainer.PeftTrainer(model, tx, config)
 
     opt_state_dtypes = jax.tree_util.tree_leaves(
@@ -1339,12 +1835,437 @@ class GradientAccumulatorTest(parameterized.TestCase):
             is_leaf=lambda x: isinstance(x, nnx.Variable),
         )
     )
-    float_dtypes = [
-        d for d in opt_state_dtypes if jnp.issubdtype(d, jnp.floating)
-    ]
-    self.assertNotEmpty(float_dtypes)
-    for d in float_dtypes:
-      self.assertEqual(d, jnp.float32)
+    float_dtypes = {
+        str(d) for d in opt_state_dtypes if jnp.issubdtype(d, jnp.floating)
+    }
+    # Moments (mu/nu, the bulk of opt-state) stay bf16 — not promoted to fp32.
+    # The only fp32 float leaf is the injected learning rate (hyperparam_dtype).
+    self.assertIn('bfloat16', float_dtypes)
+    self.assertEqual(float_dtypes - {'bfloat16'}, {'float32'})
+
+
+class Depth1FastPathTest(parameterized.TestCase):
+  """Depth-1 fast path: numeric equivalence, accumulator untouched, no
+
+  `cond` in the depth-1 jaxpr, packing keeps the cond path.
+  """
+
+  def _make_trainer(self, accum_steps=None, max_seq_token=None):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=1,
+        max_steps=4,
+        gradient_accumulation_steps=accum_steps,
+        max_seq_token_per_tpu=max_seq_token,
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    return trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+  def _train_step_primitives(self, trainer):
+    """Top-level jaxpr primitive names of one traced `_train_step` call."""
+    x = dummy_datasets(batch_size=4)[0]
+    graphdef, state = nnx.split(
+        (trainer.model, trainer.optimizer, trainer.grad_accumulator)
+    )
+
+    def pure_step(state, tokens, mask, flag):
+      model, optimizer, accumulator = nnx.merge(graphdef, state)
+      out = trainer._train_step(
+          model,
+          optimizer,
+          accumulator,
+          peft_trainer.TrainingInput(input_tokens=tokens, input_mask=mask),
+          flag,
+      )
+      _, new_state = nnx.split((model, optimizer, accumulator))
+      return out, new_state
+
+    jaxpr = jax.make_jaxpr(pure_step)(
+        state, x.input_tokens, x.input_mask, jnp.array(True)
+    )
+    return {eqn.primitive.name for eqn in jaxpr.eqns}
+
+  def test_depth1_fast_path_matches_accumulator_path(self):
+    """Direct update from grads matches add(1) -> get() -> update -> reset."""
+    rngs_a, rngs_b = nnx.Rngs(0), nnx.Rngs(0)
+    model_a = nnx.Linear(in_features=4, out_features=2, rngs=rngs_a)
+    model_b = nnx.Linear(in_features=4, out_features=2, rngs=rngs_b)
+    opt_a = nnx.Optimizer(model_a, optax.adamw(1e-3), wrt=nnx.Param)
+    opt_b = nnx.Optimizer(model_b, optax.adamw(1e-3), wrt=nnx.Param)
+    grads = jax.tree_util.tree_map(
+        lambda x: 0.5 * jnp.ones_like(x), nnx.state(model_a, nnx.Param)
+    )
+
+    # Old accumulator path (what depth 1 used to run).
+    acc = peft_trainer.GradientAccumulator(model_a, nnx.Param)
+    acc.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+    acc_grads = acc.get()
+    norm_a = optax.global_norm(
+        jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads)
+    )
+    opt_a.update(model_a, acc_grads)
+    acc.reset()
+
+    # New fast path (direct update).
+    norm_b = optax.global_norm(
+        jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
+    )
+    opt_b.update(model_b, grads)
+
+    np.testing.assert_allclose(norm_a, norm_b, rtol=1e-7)
+    jax.tree_util.tree_map(
+        lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-6, atol=1e-6),
+        _unwrap(nnx.state(model_a, nnx.Param)),
+        _unwrap(nnx.state(model_b, nnx.Param)),
+    )
+
+  def test_depth1_accumulator_untouched(self):
+    """Depth-1 training must not write the accumulator (keeps shardings stable)."""
+    trainer = self._make_trainer(accum_steps=None)
+    trainer.train(dummy_datasets(batch_size=4))
+    jax.tree_util.tree_map(
+        lambda v: np.testing.assert_array_equal(v, jnp.zeros_like(v)),
+        _unwrap(trainer.grad_accumulator.grads),
+    )
+    np.testing.assert_array_equal(trainer.grad_accumulator.denom[...], 0.0)
+
+  def test_zero_denom_produces_zero_update(self):
+    def zero_weight_loss(
+        model, input_tokens, input_mask, positions, attention_mask, images=None
+    ):
+      del input_mask, attention_mask, images
+      logits, _ = model(input_tokens, positions)
+      return utils.LossOutput(
+          primary_loss=utils.WeightedMetric(
+              jnp.sum(logits), jnp.asarray(0.0, jnp.float32)
+          ),
+          aux_metrics={},
+      )
+
+    trainer = self._make_trainer().with_loss_fn(zero_weight_loss)
+    before = _unwrap(nnx.state(trainer.model, nnx.Param))
+    loss, _, grad_norm = trainer._train_step(
+        trainer.model,
+        trainer.optimizer,
+        trainer.grad_accumulator,
+        dummy_datasets(batch_size=4)[0],
+        jnp.array(True),
+    )
+
+    np.testing.assert_array_equal(loss, 0.0)
+    np.testing.assert_array_equal(grad_norm, 0.0)
+    jax.tree_util.tree_map(
+        np.testing.assert_array_equal,
+        before,
+        _unwrap(nnx.state(trainer.model, nnx.Param)),
+    )
+
+  def test_depth1_jaxpr_has_no_cond(self):
+    """Sentinel: the depth-1 step jaxpr must contain no `cond` primitive."""
+    self.assertNotIn('cond', self._train_step_primitives(self._make_trainer()))
+
+  def test_depth_gt1_jaxpr_has_cond(self):
+    """Depth>1 keeps the cond path (update cadence needs it)."""
+    self.assertIn(
+        'cond', self._train_step_primitives(self._make_trainer(accum_steps=2))
+    )
+
+  def test_packing_config_keeps_cond_path(self):
+    """Packing keeps the cond path at depth 1 (data-driven update cadence)."""
+    trainer = self._make_trainer(accum_steps=None, max_seq_token=64)
+    self.assertIn('cond', self._train_step_primitives(trainer))
+
+  def test_packing_config_respects_skip_step(self):
+    """With packing config, is_update_step=False must not update weights."""
+    trainer = self._make_trainer(accum_steps=None, max_seq_token=64)
+    before = jax.tree.map(
+        jnp.copy, _unwrap(nnx.state(trainer.model, nnx.Param))
+    )
+    _, _, grad_norm = trainer._train_step(
+        trainer.model,
+        trainer.optimizer,
+        trainer.grad_accumulator,
+        dummy_datasets(batch_size=4)[0],
+        jnp.array(False),
+    )
+    np.testing.assert_array_equal(grad_norm, 0.0)
+    jax.tree_util.tree_map(
+        np.testing.assert_array_equal,
+        before,
+        _unwrap(nnx.state(trainer.model, nnx.Param)),
+    )
+
+  def test_data_driven_false_flag_raises_on_fast_path_config(self):
+    """A data-driven is_update_step=False must fail loudly at depth 1."""
+
+    class _FlaggedInput:
+
+      def __init__(self, base):
+        self.input_tokens = base.input_tokens
+        self.input_mask = base.input_mask
+        self.is_update_step = False
+
+    trainer = self._make_trainer(accum_steps=None)
+    ds = [_FlaggedInput(dummy_datasets(batch_size=4)[0])]
+    with self.assertRaisesRegex(ValueError, 'is_update_step=False'):
+      trainer.train(ds)
+
+  def test_depth2_cadence(self):
+    """Depth 2: skip step accumulates only; update step applies and resets."""
+    trainer = self._make_trainer(accum_steps=2)
+    ds = dummy_datasets(batch_size=4)
+    before = jax.tree.map(
+        jnp.copy, _unwrap(nnx.state(trainer.model, nnx.Param))
+    )
+
+    # Micro-step 1: accumulate only.
+    trainer._train_step(
+        trainer.model,
+        trainer.optimizer,
+        trainer.grad_accumulator,
+        ds[0],
+        jnp.array(False),
+    )
+    jax.tree_util.tree_map(
+        np.testing.assert_array_equal,
+        before,
+        _unwrap(nnx.state(trainer.model, nnx.Param)),
+    )
+    np.testing.assert_array_equal(trainer.grad_accumulator.denom[...], 60.0)
+
+    # Micro-step 2: update and reset.
+    trainer._train_step(
+        trainer.model,
+        trainer.optimizer,
+        trainer.grad_accumulator,
+        ds[1],
+        jnp.array(True),
+    )
+    with self.assertRaises(AssertionError):
+      jax.tree_util.tree_map(
+          np.testing.assert_array_equal,
+          before,
+          _unwrap(nnx.state(trainer.model, nnx.Param)),
+      )
+    jax.tree_util.tree_map(
+        lambda v: np.testing.assert_array_equal(v, jnp.zeros_like(v)),
+        _unwrap(trainer.grad_accumulator.grads),
+    )
+    np.testing.assert_array_equal(trainer.grad_accumulator.denom[...], 0.0)
+
+
+class OptimizerMemoryTest(parameterized.TestCase):
+  """Optimizer-state HBM knobs: moment dtype + depth-1 accumulator skip."""
+
+  def _bf16_model(self):
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    state = nnx.state(model, nnx.Param)
+    state = jax.tree.map(
+        lambda v: v.astype(jnp.bfloat16)
+        if jnp.issubdtype(v.dtype, jnp.floating)
+        else v,
+        state,
+    )
+    nnx.update(model, state)
+    return model
+
+  def _moment_float_dtypes(self, trainer):
+    st = nnx.state(trainer.optimizer, nnx.optimizer.OptState)
+    return {
+        str(x.dtype)
+        for x in jax.tree_util.tree_leaves(st)
+        if hasattr(x, 'dtype') and jnp.issubdtype(x.dtype, jnp.floating)
+    }
+
+  def test_peft_trainer_keeps_param_dtype_on_fast_path(self):
+    """Default keeps moments at the param dtype (no forced fp32)."""
+    model = self._bf16_model()  # bf16 params
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=1)
+    trainer = peft_trainer.PeftTrainer(model, optax.adamw(1e-3), config)
+    # bf16 params -> bf16 moments (matching optax), NOT promoted to fp32.
+    self.assertEqual(self._moment_float_dtypes(trainer), {'bfloat16'})
+
+  def test_peft_trainer_keeps_param_dtype_on_cond_path(self):
+    """Default + depth>1 keeps moments at the param dtype (no forced fp32)."""
+    model = self._bf16_model()  # bf16 params
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100, max_steps=1, gradient_accumulation_steps=2
+    )
+    trainer = peft_trainer.PeftTrainer(model, optax.adamw(1e-3), config)
+    # bf16 params -> bf16 moments on the cond path too.
+    self.assertEqual(self._moment_float_dtypes(trainer), {'bfloat16'})
+
+  @parameterized.product(
+      optimizer_kind=('direct', 'injected'),
+      gradient_accumulation_steps=(1, 2),
+  )
+  def test_preserves_bf16_optimizer_state_dtypes_under_jit(
+      self, optimizer_kind, gradient_accumulation_steps
+  ):
+    """Jitted direct and conditional updates preserve optimizer-state dtypes."""
+    model = nnx.Linear(
+        in_features=4,
+        out_features=2,
+        rngs=nnx.Rngs(0),
+        param_dtype=jnp.bfloat16,
+    )
+    if optimizer_kind == 'direct':
+      tx = optax.adamw(
+          lambda _: jnp.asarray(0.1, dtype=jnp.float32),
+          mu_dtype=jnp.bfloat16,
+      )
+    else:
+      tx = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(  # pyrefly: ignore[bad-argument-type]
+          learning_rate=0.1
+      )
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+    )
+    trainer = peft_trainer.PeftTrainer(model, tx, config)
+    trainer.with_loss_fn(lambda m, x, y: jnp.sum((m(x) - y) ** 2))
+
+    def opt_state_dtypes():
+      return jax.tree_util.tree_map(
+          lambda value: value[...].dtype,
+          nnx.state(trainer.optimizer, nnx.optimizer.OptState),
+          is_leaf=lambda value: isinstance(value, nnx.Variable),
+      )
+
+    initial_opt_state_dtypes = opt_state_dtypes()
+    initial_params = jax.tree_util.tree_map(
+        lambda value: jnp.copy(value[...]),
+        nnx.state(model, nnx.Param),
+        is_leaf=lambda value: isinstance(value, nnx.Variable),
+    )
+    train_step, _ = trainer.jit_train_and_eval_step()
+    inputs = {
+        'x': jnp.ones((2, 4), dtype=jnp.bfloat16),
+        'y': jnp.ones((2, 2), dtype=jnp.bfloat16),
+    }
+
+    for micro_step in range(gradient_accumulation_steps):
+      is_update_step = micro_step == gradient_accumulation_steps - 1
+      _, _, grad_norm = train_step(
+          inputs, is_update_step=jnp.asarray(is_update_step)
+      )
+      self.assertEqual(grad_norm.dtype, jnp.float32)
+      if not is_update_step:
+        for before, after in zip(
+            jax.tree_util.tree_leaves(initial_params),
+            jax.tree_util.tree_leaves(
+                nnx.state(model, nnx.Param),
+                is_leaf=lambda value: isinstance(value, nnx.Variable),
+            ),
+        ):
+          np.testing.assert_array_equal(before, after[...])
+
+    self.assertEqual(opt_state_dtypes(), initial_opt_state_dtypes)
+    updated_params = nnx.state(model, nnx.Param)
+    self.assertTrue(
+        any(
+            not np.array_equal(before, after[...])
+            for before, after in zip(
+                jax.tree_util.tree_leaves(initial_params),
+                jax.tree_util.tree_leaves(
+                    updated_params,
+                    is_leaf=lambda value: isinstance(value, nnx.Variable),
+                ),
+            )
+        )
+    )
+    self.assertEqual(float(trainer.grad_accumulator.denom[...]), 0.0)
+
+  def test_accumulator_grads_skipped_at_depth1(self):
+    """At depth-1 (non-packing) the accumulator grad tree is not allocated."""
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100, max_steps=1
+    )  # gradient_accumulation_steps=None -> depth 1
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    self.assertEmpty(jax.tree_util.tree_leaves(trainer.grad_accumulator.grads))
+
+  @parameterized.named_parameters(
+      ('depth2', 2, None),
+      ('packing', None, 16),
+  )
+  def test_accumulator_grads_allocated_when_used(self, steps, max_seq_token):
+    """Depth>1 or packing keeps the accumulator grad tree allocated."""
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=steps,
+        max_seq_token_per_tpu=max_seq_token,
+    )
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    leaves = jax.tree_util.tree_leaves(trainer.grad_accumulator.grads)
+    self.assertNotEmpty(leaves)
+    for leaf in leaves:
+      if hasattr(leaf, 'dtype') and jnp.issubdtype(leaf.dtype, jnp.floating):
+        self.assertEqual(leaf.dtype, jnp.float32)
+
+
+class TrainStepGlobalWeightedTest(parameterized.TestCase):
+  """Pins that _train_step accumulates the GLOBAL weighted mean, not a mean-of-means.
+
+  Emulates the _train_step recipe: grad(unreduced_sum_i) accumulated with the
+  loss's real per-micro-batch denom -> get() = Sum grads / Sum denom. With
+  uneven denoms this must equal the global weighting and differ from the old
+  mean-of-means (grad_i/denom_i averaged equally).
+  """
+
+  @staticmethod
+  def _unwrap(state):
+    return jax.tree_util.tree_map(
+        lambda v: v[...] if isinstance(v, nnx.Variable) else v,
+        state,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+
+  @staticmethod
+  def _loss_sum(model, x, y):
+    return jnp.sum((model(x) - y) ** 2)
+
+  def test_train_step_recipe_is_global_weighted(self):
+    d1, d2 = 2, 6  # uneven micro-batch denominators
+    rngs = nnx.Rngs(0)
+    model = nnx.Linear(in_features=4, out_features=2, rngs=rngs)
+    k = jax.random.split(jax.random.PRNGKey(0), 2)
+    x = jax.random.normal(k[0], (d1 + d2, 4))
+    y = jax.random.normal(k[1], (d1 + d2, 2))
+    grad_fn = nnx.value_and_grad(self._loss_sum)
+    _, g1 = grad_fn(model, x[:d1], y[:d1])
+    _, g2 = grad_fn(model, x[d1:], y[d1:])
+    g1, g2 = self._unwrap(g1), self._unwrap(g2)
+    # New recipe: NO local 1/denom scale; add grad(sum) with the real denom.
+    acc = peft_trainer.GradientAccumulator(model, nnx.Param)
+    acc.add(g1, denom=jnp.asarray(float(d1)))
+    acc.add(g2, denom=jnp.asarray(float(d2)))
+    result = self._unwrap(acc.get())
+    global_weighted = jax.tree_util.tree_map(
+        lambda a, b: (a + b) / (d1 + d2), g1, g2
+    )
+    mean_of_means = jax.tree_util.tree_map(
+        lambda a, b: (a / d1 + b / d2) / 2.0, g1, g2
+    )
+    # Now equals the global weighting ...
+    jax.tree_util.tree_map(
+        lambda a, e: np.testing.assert_allclose(a, e, rtol=1e-6, atol=1e-6),
+        result,
+        global_weighted,
+    )
+    # ... and is NOT the old mean-of-means (uneven denoms).
+    max_diff = jax.tree_util.tree_reduce(
+        jnp.maximum,
+        jax.tree_util.tree_map(
+            lambda a, b: jnp.max(jnp.abs(a - b)), result, mean_of_means
+        ),
+        initializer=jnp.asarray(0.0),
+    )
+    self.assertGreater(float(max_diff), 1e-3)
 
 
 if __name__ == '__main__':

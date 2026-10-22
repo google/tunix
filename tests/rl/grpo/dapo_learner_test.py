@@ -62,13 +62,14 @@ class DAPOlearnerTest(parameterized.TestCase):
     example.segment_ids = None
     example.segment_positions = None
     example.sampler_is_weights = None
+    example.routed_experts = None
     return example
 
   def test_diff_loss(self):
     dapo_config = dapo_lib.DAPOConfig()
     grpo_config = grpo_lib.GRPOConfig()
-    dapo_config.temperature = 1.0  # pyrefly: ignore[missing-attribute]
-    grpo_config.temperature = 1.0  # pyrefly: ignore[missing-attribute]
+    dapo_config.temperature = 1.0
+    grpo_config.temperature = 1.0
 
     dapo_loss_fn_impl = fr.default_registry.get(
         "policy_loss_fn", dapo_config.policy_loss_fn
@@ -133,6 +134,10 @@ class TestDAPOConfigPostInit(parameterized.TestCase):
     except ValueError as e:
       self.fail(f"DAPOConfig raised ValueError on default initialization: {e}")
 
+  def test_beta_defaults_to_zero(self):
+    """DAPO has no KL term; beta must be 0.0 so learners skip the ref model."""
+    self.assertEqual(dapo_lib.DAPOConfig().beta, 0.0)
+
   @parameterized.named_parameters(
       dict(testcase_name="custom_epsilons", epsilon=0.1, epsilon_high=0.15),
       dict(testcase_name="epsilons_equal", epsilon=0.1, epsilon_high=0.1),
@@ -159,6 +164,16 @@ class TestDAPOConfigPostInit(parameterized.TestCase):
       self.fail(f"DAPOConfig raised ValueError for valid case {kwargs}: {e}")
 
   @parameterized.named_parameters(
+      dict(
+          testcase_name="nonzero_beta",
+          config_kwargs=dict(beta=0.1),
+          expected_regex="beta must be 0.0",
+      ),
+      dict(
+          testcase_name="base_validation_num_generations",
+          config_kwargs=dict(num_generations=1),
+          expected_regex="num_generations must be greater than 1",
+      ),
       dict(
           testcase_name="invalid_epsilon_high",
           config_kwargs=dict(epsilon=0.2, epsilon_high=0.1),

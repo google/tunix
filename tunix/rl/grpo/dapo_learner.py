@@ -15,9 +15,10 @@
 
 import dataclasses
 from typing import Any, Dict, List, Optional, Sequence
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import rl_learner
 from tunix.rl.grpo import grpo_learner as grpo_learner_lib
+from tunix.utils import compat
 
 TrainingInputT = rl_learner.TrainingInputT
 RewardFn = rl_learner.RewardFn
@@ -41,7 +42,7 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
    num_iterations: The number of iterations per batch (𝜇 in GRPO algo 1).
    beta: The coefficient for the KL divergence penalty (𝛽) in the GRPO loss
      function. This term prevents policy updates from deviating too far from the
-     reference model. A value of 0.0 means no KL penalty is applied. Always None
+     reference model. A value of 0.0 means no KL penalty is applied. Always 0.0
      for DAPO.
    epsilon: Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to
      PPO, it ensures stable updates.
@@ -59,7 +60,7 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
   reward_manager: str = "sequence-level"
   num_generations: int = 2
   num_iterations: int = 1
-  beta: None = None  # No KL term.
+  beta: float = 0.0  # No KL term.
   epsilon: float = 0.2
   epsilon_high: float = 0.28  # Clip higher
   dynamic_sampling: bool = True  # TODO(sizhi): Add dynamic sampling.
@@ -73,9 +74,10 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
   )
 
   def __post_init__(self):
-    if self.beta is not None:
+    if self.beta != 0.0:
       raise ValueError(
-          "DAPO does not support KL penalty, so beta must be None."
+          "DAPO does not use a KL penalty, so beta must be 0.0. Received:"
+          f" {self.beta}"
       )
     if self.epsilon_high < self.epsilon:
       raise ValueError("epsilon_high must be greater than or equal to epsilon.")
@@ -101,11 +103,13 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
       if buffer["max_response_length"] <= 0:
         raise ValueError("max_response_length must be positive.")
 
+    super().__post_init__()
+
 
 def reward_shaping(
     prompts: List[str],
     completions: List[str],
-    mode: rl_cluster_lib.Mode,
+    mode: rl_engine_lib.Mode,
     overlong_buffer: Dict[str, Any] | None = None,
     **kwargs,
 ) -> List[float]:
@@ -133,9 +137,10 @@ def reward_shaping(
 class DAPOLearner(grpo_learner_lib.GrpoLearner[DAPOConfig]):
   """DAPO learner."""
 
+  @compat.alias_init_param("rl_cluster", "rl_engine")
   def __init__(
       self,
-      rl_cluster: rl_cluster_lib.RLCluster,
+      rl_engine: rl_engine_lib.RLEngine,
       algo_config: DAPOConfig,
       reward_fns: RewardFn | List[RewardFn],
       metric_fns: Sequence[MetricFn] | None = None,
@@ -148,7 +153,7 @@ class DAPOLearner(grpo_learner_lib.GrpoLearner[DAPOConfig]):
     if algo_config.overlong_buffer and algo_config.overlong_buffer["enable"]:
       reward_fns.append(reward_shaping)
     super().__init__(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         algo_config=algo_config,
         reward_fns=reward_fns,
         metric_fns=metric_fns,

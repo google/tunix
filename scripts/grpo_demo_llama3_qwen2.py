@@ -49,7 +49,7 @@ from tunix.models.qwen3 import params as qwen3_params
 from tunix.perf import export as perf_export
 from tunix.perf import metrics as perf_metrics
 from tunix.perf.experimental import export as perf_export_v2
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
@@ -1172,15 +1172,15 @@ def get_rollout_config(engine: str) -> base_rollout.RolloutConfig:
 
 
 # Training config
-cluster_config = rl_cluster_lib.ClusterConfig(
+cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: training_mesh,
-        rl_cluster_lib.Role.REFERENCE: ref_mesh,
-        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+        rl_engine_lib.Role.ACTOR: training_mesh,
+        rl_engine_lib.Role.REFERENCE: ref_mesh,
+        rl_engine_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=args.rollout_engine,
     offload_to_cpu=False,
-    training_config=rl_cluster_lib.RLTrainingConfig(
+    training_config=rl_engine_lib.RLTrainingConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
@@ -1221,8 +1221,8 @@ if args.enable_perf_v2:
       ).export_metrics
   )
 
-# RL cluster
-rl_cluster = rl_cluster_lib.RLCluster(
+# RL engine
+rl_engine = rl_engine_lib.RLEngine(
     actor=training_model,
     reference=ref_model,
     tokenizer=model_tokenizer,
@@ -1232,7 +1232,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
 
 # GRPO Trainer
 grpo_trainer = grpo_learner.GRPOLearner(
-    rl_cluster=rl_cluster,
+    rl_engine=rl_engine,
     reward_fns=[
         match_format_exactly,
         match_format_approximately,
@@ -1245,7 +1245,7 @@ grpo_trainer = grpo_learner.GRPOLearner(
 show_hbm_usage("After creating the learner")
 
 
-rollout_sampler = rl_cluster._rollout._sampler  # pylint: disable=protected-access
+rollout_sampler = rl_engine._rollout._sampler  # pylint: disable=protected-access
 (eval_corr, eval_total, eval_accuracy, eval_partial_accuracy, eval_format_accuracy) = evaluate(  # pylint: disable=unbalanced-tuple-unpacking
     test_dataset,
     rollout_sampler,

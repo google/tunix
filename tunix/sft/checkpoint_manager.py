@@ -23,9 +23,60 @@ from typing import Any
 from absl import logging
 from flax import nnx
 import jax
+import numpy as np
 from orbax.checkpoint import pathways as ocp_pathways
+from orbax.checkpoint import utils as ocp_utils
 from orbax.checkpoint import v1 as ocp
 from tunix.sft import checkpoint_options
+
+
+def _convert_host_local_array(x: Any) -> Any:
+  """Converts host-local arrays to global arrays in multi-device/multi-host settings."""
+  if (
+      isinstance(x, jax.Array)
+      and len(x.devices()) == 1
+      and len(jax.devices()) > 1
+  ):
+    mesh = jax.sharding.Mesh(np.array(jax.devices()), axis_names=('x',))
+    replicated_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec()
+    )
+    if not x.shape:
+      val = x.item()
+      return jax.device_put(val, replicated_sharding)
+    else:
+      try:
+        return ocp_utils.fully_replicated_host_local_array_to_global_array(x)
+      except ValueError:
+        return jax.device_put(np.asarray(x), replicated_sharding)
+  return x
+
+
+def _replicate_if_pspec_uses_unknown_mesh_axis(
+    pspec: jax.sharding.PartitionSpec | None,
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
+) -> jax.sharding.PartitionSpec:
+  if pspec is None:
+    return jax.sharding.PartitionSpec()
+  for axis_name in pspec:
+    if axis_name is None:
+      continue
+    axis_names = axis_name if isinstance(axis_name, tuple) else (axis_name,)
+    if any(name is not None and name not in mesh.shape for name in axis_names):
+      return jax.sharding.PartitionSpec()
+  return pspec
+
+
+def _get_named_sharding(
+    state: Any, mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh
+) -> Any:
+  partition_specs = nnx.get_partition_spec(state)
+  return jax.tree_util.tree_map(
+      lambda pspec: jax.sharding.NamedSharding(
+          mesh, _replicate_if_pspec_uses_unknown_mesh_axis(pspec, mesh)
+      ),
+      partition_specs,
+  )
 
 
 def _fix_sharding(state: Any) -> Any:
@@ -58,7 +109,7 @@ def _fix_sharding(state: Any) -> Any:
     )
     return state
 
-  target_shardings = nnx.get_named_sharding(state, mesh)  # pyrefly: ignore[bad-argument-type]
+  target_shardings = _get_named_sharding(state, mesh)
   return jax.tree_util.tree_map(
       lambda x, shd: jax.ShapeDtypeStruct(
           getattr(x, 'shape', ()),
@@ -199,9 +250,12 @@ class CheckpointManager:
       params = nnx.state(model)
 
     if optimizer is not None:
+      optimizer_state = nnx.state(optimizer, nnx.optimizer.OptState)
+      # Convert host-local arrays in state PyTree to global arrays.
+      optimizer_state = jax.tree.map(_convert_host_local_array, optimizer_state)
       checkpointables = {
           'model_params': params,
-          'optimizer_state': nnx.state(optimizer, nnx.optimizer.OptState),
+          'optimizer_state': optimizer_state,
       }
     else:
       checkpointables = {
@@ -284,11 +338,11 @@ class CheckpointManager:
         ) from e
       raise e
 
-    if optimizer is not None and 'optimizer_state' in restored_checkpointables:  # pyrefly: ignore[not-iterable]
-      nnx.update(optimizer, restored_checkpointables['optimizer_state'])  # pyrefly: ignore[missing-attribute]
+    if optimizer is not None and 'optimizer_state' in restored_checkpointables:
+      nnx.update(optimizer, restored_checkpointables['optimizer_state'])
 
     # Update the model state with params from the restored checkpoint.
-    nnx.update(model, restored_checkpointables['model_params'])  # pyrefly: ignore[missing-attribute]
+    nnx.update(model, restored_checkpointables['model_params'])
     logging.info(
         'Restored params from step: %d in %.3f seconds',
         step,

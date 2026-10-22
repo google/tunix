@@ -22,18 +22,24 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.common import rpc_utils
 from tunix.experimental.worker import inference_worker as inference_lib
 
+WorkerState = datatypes.WorkerState
+
 
 class _StubCore:
   """Deterministic, row-independent stand-in for the real inference core."""
 
   def __init__(self):
     self.calls = 0
+    self.last_prompt_tokens = None
+    self.last_completion_tokens = None
 
   def get_ref_per_token_logps(
       self, prompt_tokens, completion_tokens, pad_id, eos_id, temperature=1.0
   ):
-    del prompt_tokens, pad_id, eos_id
+    del pad_id, eos_id
     self.calls += 1
+    self.last_prompt_tokens = np.asarray(prompt_tokens, dtype=np.int32)
+    self.last_completion_tokens = np.asarray(completion_tokens, dtype=np.int32)
     return jnp.asarray(completion_tokens, dtype=jnp.float32) * temperature
 
   def get_rewards(self, prompt_tokens, completion_tokens, pad_id, eos_id):
@@ -45,6 +51,7 @@ class _StubCore:
 def _worker(core=None, chunk_size=None):
   return inference_lib.InferenceWorker(
       core if core is not None else _StubCore(),
+      worker_id="test_worker_1",
       pad_id=0,
       eos_id=1,
       model_version=3,
@@ -96,6 +103,44 @@ class InferenceWorkerTest(absltest.TestCase):
     )
     self.assertEqual(core_single.calls, 1)  # single pass
     self.assertEqual(core_chunked.calls, 3)  # 6 rows / 2 = 3 micro-batches
+
+  def test_per_token_logps_uses_padded_batch_without_repadding(self):
+    core = _StubCore()
+    batch = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[0, 0, 5, 6], [0, 7, 8, 9]], dtype=np.int32),
+        prompt_mask=np.array([[0, 0, 1, 1], [0, 1, 1, 1]], dtype=np.float32),
+        completion_ids=np.array([[10, 11, 0], [12, 0, 0]], dtype=np.int32),
+        completion_mask=np.array([[1, 1, 0], [1, 0, 0]], dtype=np.float32),
+        advantages=np.ones((2, 3), dtype=np.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=None,
+    )
+
+    result = _worker(core).per_token_logps(batch, temperature=2.0)
+
+    np.testing.assert_array_equal(core.last_prompt_tokens, batch.prompt_ids)
+    np.testing.assert_array_equal(
+        core.last_completion_tokens, batch.completion_ids
+    )
+    np.testing.assert_allclose(
+        result, batch.completion_ids.astype(np.float32) * 2.0
+    )
+
+  def test_per_token_logps_rejects_unpadded_trajectory_items(self):
+    item = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj=datatypes.Trajectory(
+            reward=1.0,
+            status=datatypes.TrajectoryStatus.SUCCEEDED,
+        ),
+        prompt_tokens=np.array([5, 6], dtype=np.int32),
+        completion_tokens=np.array([7, 8], dtype=np.int32),
+        action_mask=np.array([1, 1], dtype=np.float32),
+    )
+    with self.assertRaisesRegex(TypeError, "BatchAssembler"):
+      _worker().per_token_logps([item])
 
   def test_compute_logps_rejects_non_reference_role(self):
     result = _worker().compute_logps(_logprobs_request(model_role="policy"))
@@ -160,6 +205,45 @@ class InferenceWorkerTest(absltest.TestCase):
     np.testing.assert_array_equal(
         restored.per_token_logps, result.per_token_logps
     )
+
+  def test_heartbeat_reports_current_state(self):
+    worker = _worker()
+    worker.state = WorkerState.INITIALIZING
+    worker.state = WorkerState.READY
+    worker.state = WorkerState.COMPILING
+    self.assertEqual(worker.heartbeat().state, "COMPILING")
+
+  def test_execution_context_wraps_compute_logps_and_score(self):
+    events = []
+
+    class TrackingContext:
+
+      def __enter__(self):
+        events.append("enter_ctx")
+        return self
+
+      def __exit__(self, *args):
+        events.append("exit_ctx")
+
+    worker = inference_lib.InferenceWorker(
+        _StubCore(),
+        worker_id="test_worker_ctx",
+        pad_id=0,
+        eos_id=1,
+        execution_context=TrackingContext(),
+    )
+
+    worker.compute_logps(_logprobs_request(batch=2))
+    self.assertEqual(events, ["enter_ctx", "exit_ctx"])
+
+    events.clear()
+    req = datatypes.ScoreRequest(
+        request_id="s1",
+        prompt_tokens=np.ones((2, 2), dtype=np.int32),
+        completion_tokens=np.ones((2, 3), dtype=np.int32),
+    )
+    worker.score(req)
+    self.assertEqual(events, ["enter_ctx", "exit_ctx"])
 
 
 if __name__ == "__main__":

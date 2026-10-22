@@ -60,23 +60,25 @@ class ShardingConfig:
   act_btd: Tuple[str | None, ...]
   act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
+  score_weight_d1: Tuple[str | None, ...] | None = None
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
 
     return ShardingConfig(
-        emb_vd=P('tp', fsdp),
-        emb_dv=P(fsdp, 'tp'),
-        q_weight_dnh=P(fsdp, 'tp', None),
-        kv_weight_dnh=P(fsdp, 'tp', None),
-        o_weight_nhd=P('tp', None, fsdp),
-        ffw_weight_df=P(fsdp, 'tp'),
-        ffw_weight_fd=P('tp', fsdp),
-        rms_norm_weight=P('tp',),
-        act_btd=P('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=P('fsdp', None, 'tp'),
-        act_btnh=P('fsdp', None, 'tp', None),
+        emb_vd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        emb_dv=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        q_weight_dnh=P(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        kv_weight_dnh=P(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        o_weight_nhd=P('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_df=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_fd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        rms_norm_weight=P('tp',),  # pyrefly: ignore[bad-argument-type]
+        act_btd=P('fsdp', None, None if is_sampling else 'tp'),  # pyrefly: ignore[bad-argument-type]
+        act_btf=P('fsdp', None, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        act_btnh=P('fsdp', None, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        score_weight_d1=P(fsdp, None),  # pyrefly: ignore[bad-argument-type]
     )
 
 
@@ -237,7 +239,7 @@ class Embedder(nnx.Module):
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
     x = shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
-    return x
+    return x  # pyrefly: ignore[bad-return]
 
   @jax.named_scope('embedder_decode')
   def decode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
@@ -673,7 +675,7 @@ class Llama3(BackendMappingMixin, nnx.Module):
           attention_mask,
       )
       if cache is not None:
-        new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
+        new_cache[layer_name] = layer_cache  # pyrefly: ignore[unsupported-operation]
 
     x = self.final_norm(x)
 
@@ -681,7 +683,7 @@ class Llama3(BackendMappingMixin, nnx.Module):
       return x, new_cache
 
     logits = self.compute_final_logits(x)
-    return logits, new_cache  # pytype: disable=bad-return-type
+    return logits, new_cache
 
   def compute_final_logits(
       self,

@@ -16,7 +16,7 @@
 
 import abc
 import dataclasses
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from flax import nnx
 from flax.nnx import statelib
@@ -46,6 +46,14 @@ class SamplerOutput:
   padded_prompt_tokens: np.ndarray
 
   logprobs: Optional[list[list[float]]]
+
+  # Per-generation MoE routing decisions, each `[length, num_layers, top_k]`.
+  # None unless the backend was asked to capture them. Used to replay the
+  # rollout's expert choices during training instead of re-routing.
+  routed_experts: Optional[list[np.ndarray | None]] = None
+
+  # Valid prompt length per row, before left padding (not a pad-ID count).
+  prompt_lengths: np.ndarray | None = None
 
 
 class BaseSampler(ABC):
@@ -82,3 +90,22 @@ class BaseSampler(ABC):
   @abstractmethod
   def tokenize(self, input_string: str) -> np.ndarray | list[int]:
     """Returns the tokenized the input string."""
+
+  def update_params(
+      self,
+      updated_weights: Any,
+      filter_types: Optional[tuple[Any, ...]] = None,
+  ) -> None:
+    """Updates model parameters in the sampler."""
+    del updated_weights, filter_types
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement update_params."
+    )
+
+  def delete_cache(self) -> None:
+    """Deletes KV cache to free up memory before weight sync."""
+    pass
+
+  def reinitialize_cache(self) -> None:
+    """Reinitializes KV cache after weight sync."""
+    pass

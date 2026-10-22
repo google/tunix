@@ -107,6 +107,14 @@ def _get_all_models_test_parameters():
       dict(testcase_name="qwen3-30b-a3b", model_name="qwen3-30b-a3b"),
       dict(testcase_name="qwen3-32b", model_name="qwen3-32b"),
       dict(testcase_name="Qwen3-32B", model_name="Qwen3-32B"),
+      dict(
+          testcase_name="qwen3.5-35b-a3b",
+          model_name="qwen3.5-35b-a3b",
+      ),
+      dict(
+          testcase_name="qwen3.5-397b-a17b",
+          model_name="qwen3.5-397b-a17b",
+      ),
   )
 
 
@@ -135,50 +143,25 @@ class AutoModelTest(parameterized.TestCase):
   def test_from_pretrained_maxtext(self, mock_download):
 
     m_maxtext = types.ModuleType("maxtext")
-    m_maxtext_configs = types.ModuleType("maxtext.configs")
-    m_maxtext_configs_pyconfig = types.ModuleType("maxtext.configs.pyconfig")
-    m_maxtext_configs_types = types.ModuleType("maxtext.configs.types")
-    m_maxtext_utils = types.ModuleType("maxtext.utils")
-    m_maxtext_utils_model_creation_utils = types.ModuleType(
-        "maxtext.utils.model_creation_utils"
-    )
+    m_pyconfig = mock.MagicMock()
+    m_model_creation_utils = mock.MagicMock()
 
-    with mock.patch.dict(
-        "sys.modules",
-        {
-            "maxtext": m_maxtext,
-            "maxtext.configs": m_maxtext_configs,
-            "maxtext.configs.pyconfig": m_maxtext_configs_pyconfig,
-            "maxtext.configs.types": m_maxtext_configs_types,
-            "maxtext.utils": m_maxtext_utils,
-            "maxtext.utils.model_creation_utils": (
-                m_maxtext_utils_model_creation_utils
-            ),
-        },
-    ):
-      setattr(
-          m_maxtext_utils,
-          "model_creation_utils",
-          m_maxtext_utils_model_creation_utils,
-      )
-      setattr(m_maxtext_configs, "pyconfig", m_maxtext_configs_pyconfig)
-      setattr(m_maxtext_configs, "types", m_maxtext_configs_types)
-      setattr(m_maxtext, "configs", m_maxtext_configs)
-      setattr(m_maxtext, "utils", m_maxtext_utils)
+    class MockMaxTextConfig:
+      model_fields = {
+          "skip_jax_distributed_system": True,
+          "hf_access_token": "mock",
+      }
 
+    m_maxtext.MaxTextConfig = MockMaxTextConfig
+    m_maxtext.pyconfig = m_pyconfig
+    m_maxtext.model_creation_utils = m_model_creation_utils
+
+    with mock.patch.dict("sys.modules", {"maxtext": m_maxtext}):
       mock_config = mock.MagicMock()
-      m_maxtext_configs_pyconfig.initialize = mock.MagicMock(
+      m_pyconfig.initialize = mock.MagicMock(
           return_value=mock_config
       )
-      m_maxtext_utils_model_creation_utils.from_pretrained = mock.MagicMock()
-
-      class MockMaxTextConfig:
-        model_fields = {
-            "skip_jax_distributed_system": True,
-            "hf_access_token": "mock",
-        }
-
-      m_maxtext_configs_types.MaxTextConfig = MockMaxTextConfig
+      m_model_creation_utils.from_pretrained = mock.MagicMock()
 
       mock_mesh = mock.MagicMock()
       with mock.patch.dict(os.environ, {"HF_TOKEN": "mock_token"}):
@@ -189,11 +172,13 @@ class AutoModelTest(parameterized.TestCase):
             use_flash_attention=True,
             tunix_fake_arg_that_should_be_dropped=False,
             skip_jax_distributed_system=False,
+            checkpoint_storage_use_ocdbt=False,
+            checkpoint_storage_use_zarr3=False,
         )
 
-      m_maxtext_configs_pyconfig.initialize.assert_called_once()
+      m_pyconfig.initialize.assert_called_once()
 
-      called_argv = m_maxtext_configs_pyconfig.initialize.call_args[0][0]
+      called_argv = m_pyconfig.initialize.call_args[0][0]
 
       self.assertIn("model_name=qwen2.5-0.5b", called_argv)
       has_load_params = any(
@@ -203,13 +188,15 @@ class AutoModelTest(parameterized.TestCase):
       self.assertIn("hf_access_token=mock_token", called_argv)
 
       self.assertIn("skip_jax_distributed_system=false", called_argv)
+      self.assertIn("checkpoint_storage_use_ocdbt=false", called_argv)
+      self.assertIn("checkpoint_storage_use_zarr3=false", called_argv)
 
       self.assertNotIn("use_flash_attention=true", called_argv)
 
       for arg in called_argv:
         self.assertNotIn("tunix_fake_arg_that_should_be_dropped", arg)
 
-      m_maxtext_utils_model_creation_utils.from_pretrained.assert_called_once_with(
+      m_model_creation_utils.from_pretrained.assert_called_once_with(
           mock_config, mesh=mock_mesh, wrap_with_tunix_adapter=True
       )
 
@@ -220,10 +207,7 @@ class AutoModelTest(parameterized.TestCase):
   def test_from_pretrained_maxtext_pipeline_config(self, mock_download):
     del mock_download
     m_maxtext = types.ModuleType("maxtext")
-    m_configs = types.ModuleType("maxtext.configs")
     m_pyconfig = types.ModuleType("maxtext.configs.pyconfig")
-    m_types = types.ModuleType("maxtext.configs.types")
-    m_utils = types.ModuleType("maxtext.utils")
     m_creation = types.ModuleType("maxtext.utils.model_creation_utils")
 
     config = maxtext_parallelism.MaxTextPipelineConfig(
@@ -251,25 +235,12 @@ class AutoModelTest(parameterized.TestCase):
     mock_config = mock.MagicMock()
     m_pyconfig.initialize = mock.MagicMock(return_value=mock_config)
     m_creation.from_pretrained = mock.MagicMock()
-    m_types.MaxTextConfig = MockMaxTextConfig
     m_pyconfig.__file__ = "/opt/maxtext/configs/pyconfig.py"
-    m_configs.pyconfig = m_pyconfig
-    m_configs.types = m_types
-    m_utils.model_creation_utils = m_creation
-    m_maxtext.configs = m_configs
-    m_maxtext.utils = m_utils
+    m_maxtext.MaxTextConfig = MockMaxTextConfig
+    m_maxtext.pyconfig = m_pyconfig
+    m_maxtext.model_creation_utils = m_creation
 
-    with mock.patch.dict(
-        "sys.modules",
-        {
-            "maxtext": m_maxtext,
-            "maxtext.configs": m_configs,
-            "maxtext.configs.pyconfig": m_pyconfig,
-            "maxtext.configs.types": m_types,
-            "maxtext.utils": m_utils,
-            "maxtext.utils.model_creation_utils": m_creation,
-        },
-    ):
+    with mock.patch.dict("sys.modules", {"maxtext": m_maxtext}):
       automodel.AutoModel.from_pretrained(
           "Qwen/Qwen3-8B",
           mesh=mesh,
@@ -519,6 +490,33 @@ class AutoModelTest(parameterized.TestCase):
     self.assertEqual(called_config.flash_attention_block_size, 512)
     self.assertFalse(hasattr(called_config, "invalid_param"))
 
+  @mock.patch.object(automodel, "download_model", autospec=True)
+  @mock.patch.object(automodel, "create_model_from_safe_tensors", autospec=True)
+  def test_from_pretrained_with_local_model_path_and_remat(
+      self,
+      mock_create_model,
+      mock_download_model,
+  ):
+    local_dir = self.create_tempdir().full_path
+    mesh = jax.sharding.Mesh(jax.devices(), ("devices",))
+    automodel.AutoModel.from_pretrained(
+        model_id="Qwen/Qwen3-1.7B",
+        mesh=mesh,
+        model_path=local_dir,
+        load_dtype="float32",
+        remat_config="decoder",
+        use_flash_attention=True,
+        flash_attention_block_size=256,
+    )
+    mock_download_model.assert_not_called()
+    mock_create_model.assert_called_once()
+    args, kwargs = mock_create_model.call_args
+    self.assertEqual(args[0], "qwen3-1.7b")
+    self.assertEqual(args[1], local_dir)
+    self.assertEqual(args[2].remat_config.name, "DECODER")
+    self.assertTrue(args[2].use_flash_attention)
+    self.assertEqual(args[2].flash_attention_block_size, 256)
+    self.assertEqual(kwargs["dtype"], jax.numpy.float32)
 
 if __name__ == "__main__":
   absltest.main()

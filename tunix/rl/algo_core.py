@@ -135,7 +135,8 @@ def masked_mean(
 ) -> jax.Array:
   """Compute the mean of a masked array."""
   cast_mask = mask.astype(x.dtype)
-  return jnp.sum(x * cast_mask, axis=axis) / (
+  safe_x = jnp.where(cast_mask > 0, x, 0.0)
+  return jnp.sum(safe_x, axis=axis) / (
       jnp.sum(cast_mask, axis=axis) + 1e-8
   )
 
@@ -151,10 +152,13 @@ def masked_var(
   if mean is None:
     mean = masked_mean(x, cast_mask)
 
-  variance = masked_mean(jnp.square(x - mean), cast_mask)
+  diff = jnp.where(cast_mask > 0, x - mean, 0.0)
+  variance = masked_mean(jnp.square(diff), cast_mask)
 
   mask_sum = cast_mask.sum()
-  bessel_corr = mask_sum / (mask_sum - 1)
+  bessel_corr = jnp.where(
+      mask_sum > 1.0, mask_sum / jnp.maximum(mask_sum - 1.0, 1.0), 1.0
+  )
   return variance * bessel_corr
 
 
@@ -191,6 +195,7 @@ def ppo_policy_loss_fn(
       eos_id=eos_id,
       stop_gradient=False,
       return_entropy=return_entropy,
+      temperature=getattr(algo_config, "temperature", None),
       segment_ids=getattr(train_example, "segment_ids", None),
       segment_positions=getattr(train_example, "segment_positions", None),
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
@@ -200,11 +205,28 @@ def ppo_policy_loss_fn(
   else:
     per_token_logps = outputs
 
-
-  advantages = train_example.advantages
   old_per_token_logps = train_example.old_per_token_logps
+  active_mask = (
+      (completion_mask > 0)
+      & jnp.isfinite(per_token_logps)
+      & jnp.isfinite(old_per_token_logps)
+  )
+  safe_per_token_logps = jnp.where(active_mask, per_token_logps, 0.0)
+  safe_old_per_token_logps = jnp.where(active_mask, old_per_token_logps, 0.0)
+  raw_adv = (
+      train_example.advantages
+      if train_example.advantages.ndim == 2
+      else jnp.expand_dims(train_example.advantages, -1)
+  )
+  advantages = jnp.where(
+      active_mask & jnp.isfinite(raw_adv),
+      raw_adv,
+      0.0,
+  )
 
-  seq_importance_ratio = jnp.exp(per_token_logps - old_per_token_logps)
+  seq_importance_ratio = jnp.exp(
+      jnp.clip(safe_per_token_logps - safe_old_per_token_logps, -20.0, 20.0)
+  )
 
   # Compute pg_clipfrac
   pg_losses_1 = -seq_importance_ratio * advantages
@@ -223,7 +245,6 @@ def ppo_policy_loss_fn(
     pg_loss_3 = per_token_loss
   unreduced_pg_clipfrac_lower = jnp.sum(
       ((per_token_loss > pg_loss_3) & (advantages < 0.0)).astype(jnp.float32)
-      * completion_mask
   )
 
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
@@ -232,9 +253,8 @@ def ppo_policy_loss_fn(
   denominator = jnp.sum(completion_mask)
   unreduced_pg_clipfrac = jnp.sum(
       jnp.greater(pg_losses_2, pg_losses_1).astype(jnp.float32)
-      * completion_mask
   )
-  unreduced_policy_loss = jnp.sum(pg_losses * completion_mask)
+  unreduced_policy_loss = jnp.sum(pg_losses)
 
   aux = {
       "pg_clipfrac": sft_utils.WeightedMetric(
@@ -246,7 +266,9 @@ def ppo_policy_loss_fn(
   }
 
   if return_entropy:
-    unreduced_entropy = jnp.sum(token_entropy * completion_mask)
+    unreduced_entropy = jnp.sum(
+        jnp.where(active_mask, token_entropy, 0.0)  # pyrefly: ignore[unbound-name]
+    )
     unreduced_policy_loss = (
         unreduced_policy_loss - entropy_coef * unreduced_entropy
     )
@@ -263,7 +285,7 @@ def ppo_policy_loss_fn(
         "kl",
         clamp_value=getattr(algo_config, "kl_clamp_value", None),
     )
-    unreduced_kl = jnp.sum(kl * completion_mask)
+    unreduced_kl = jnp.sum(jnp.where(active_mask, kl, 0.0))
     unreduced_policy_loss = unreduced_policy_loss + kl_coef * unreduced_kl
     aux["kl"] = sft_utils.WeightedMetric(
         unreduced_kl, denominator, min_denom=1.0
@@ -321,21 +343,35 @@ def ppo_value_loss_fn(
   if segment_ids is not None:
     # Pad the first token's value with 0.0, since it has no preceding token to predict it.
     vpreds = jnp.pad(vpreds, ((0, 0), (1, 0)), constant_values=0.0)
-  vpred_clipped = jnp.clip(
-      vpreds, values - clip_range_value, values + clip_range_value
+  active_mask = (
+      (completion_mask > 0)
+      & jnp.isfinite(values)
+      & jnp.isfinite(returns)
+      & jnp.isfinite(vpreds)
   )
-  vf_losses1 = jnp.square(vpreds - returns)
-  vf_losses2 = jnp.square(vpred_clipped - returns)
+  safe_values = jnp.where(active_mask, values, 0.0)
+  safe_returns = jnp.where(active_mask, returns, 0.0)
+  safe_vpreds = jnp.where(active_mask, vpreds, 0.0)
+  if clip_range_value is not None:
+    vpred_clipped = jnp.clip(
+        safe_vpreds,
+        safe_values - clip_range_value,
+        safe_values + clip_range_value,
+    )
+  else:
+    vpred_clipped = safe_vpreds
+  vf_losses1 = jnp.square(safe_vpreds - safe_returns)
+  vf_losses2 = jnp.square(vpred_clipped - safe_returns)
 
   clipped_vf_losses = jnp.maximum(vf_losses1, vf_losses2)
 
   denominator = jnp.sum(completion_mask)
-  unreduced_vf_loss = 0.5 * jnp.sum(clipped_vf_losses * completion_mask)
-  unreduced_vpred_mean = jnp.sum(vpreds * completion_mask)
+  unreduced_vf_loss = 0.5 * jnp.sum(clipped_vf_losses)
+  unreduced_vpred_mean = jnp.sum(safe_vpreds)
   unreduced_vf_clipfrac = jnp.sum(
-      jnp.greater(vf_losses2, vf_losses1).astype(jnp.float32) * completion_mask
+      jnp.greater(vf_losses2, vf_losses1).astype(jnp.float32)
   )
-  unreduced_return_mean = jnp.sum(returns * completion_mask)
+  unreduced_return_mean = jnp.sum(safe_returns)
 
   primary_loss = sft_utils.WeightedMetric(
       unreduced_vf_loss, denominator, min_denom=1.0
@@ -403,9 +439,23 @@ def grpo_loss_fn(
       train_example.completion_ids,
       train_example.completion_mask,
   )
+  # Packing metadata: `segment_ids` labels each token's sequence within a packed
+  # row; `num_segments` is the static segment-bucket count. Both are None when
+  # not packing, in which case every aggregate_loss/reduced_loss_agg below (and
+  # the gspo-token pooling) takes its per-row branch unchanged.
+  segment_ids = getattr(train_example, "segment_ids", None)
+  num_segments = getattr(train_example, "num_segments", None)
 
   # TODO(tsbao): split can be avoided with updated peft_trainer model handling.
   graphdef, state = nnx.split(model)
+  completion_attention_mask = getattr(
+      train_example, "completion_attention_mask", None
+  )
+  token_mask = None
+  if isinstance(completion_attention_mask, (jax.Array, np.ndarray)):
+    token_mask = jnp.concatenate(
+        [train_example.prompt_mask, completion_attention_mask], axis=1
+    )
   per_token_logps, token_entropy = common.compute_per_token_logps(
       graphdef,
       state,
@@ -415,47 +465,129 @@ def grpo_loss_fn(
       eos_id=eos_id,
       stop_gradient=False,
       return_entropy=True,
-      segment_ids=getattr(train_example, "segment_ids", None),
+      segment_ids=segment_ids,
       segment_positions=getattr(train_example, "segment_positions", None),
       temperature=algo_config.temperature,
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
+      routed_experts=getattr(train_example, "routed_experts", None),
+      token_mask=token_mask,
   )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   # TODO(tsbao): We should handle token level advantages.
   advantages = jnp.astype(train_example.advantages, jnp.float32)
 
-  if train_example.old_per_token_logps is None:
+  sampler_is_weights = train_example.sampler_is_weights
+  sa_metrics = {}
+  should_fuse_sampler_agreement = (
+      algo_config.use_rollout_logps
+      and train_example.old_per_token_logps is not None
+      and sampler_is_weights is None
+      and not train_example.sampler_agreement_applied
+  )
+  if should_fuse_sampler_agreement:
+    rollout_per_token_logps = jnp.astype(
+        train_example.old_per_token_logps, jnp.float32
+    )
+    trainer_per_token_logps = jax.lax.stop_gradient(per_token_logps)
+    sa_metrics, computed_is_weights, filtered_completion_mask = (
+        common.compute_sampler_trainer_agreement_jax(
+            rollout_per_token_logps,
+            trainer_per_token_logps,
+            completion_mask,
+            sampler_is=algo_config.sampler_is,
+            sampler_is_threshold=algo_config.sampler_is_threshold,
+            sampler_rs=algo_config.sampler_rs,
+            sampler_rs_min=algo_config.sampler_rs_min,
+            sampler_rs_max=algo_config.sampler_rs_max,
+            seq_logprob_error_threshold=algo_config.seq_logprob_error_threshold,
+            segment_ids=segment_ids,
+            num_segments=num_segments,
+        )
+    )
+    if algo_config.seq_logprob_error_threshold is not None:
+      completion_mask = filtered_completion_mask
+    if computed_is_weights is not None:
+      sampler_is_weights = computed_is_weights
+
+  # Use on-policy stop_gradient(per_token_logps) as the PPO ratio baseline when:
+  # 1. No rollout/old logps were provided, or
+  # 2. Fused in-loss IS/RS/error-masking is active (since sampler_is_weights
+  #    already corrects for trainer-vs-sampler divergence outside the PPO clip).
+  use_on_policy_old_logps = (
+      train_example.old_per_token_logps is None
+      or (
+          should_fuse_sampler_agreement
+          and (
+              algo_config.sampler_is is not None
+              or algo_config.sampler_rs is not None
+              or algo_config.seq_logprob_error_threshold is not None
+          )
+      )
+  )
+  if use_on_policy_old_logps:
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
   else:
     old_per_token_logps = jnp.astype(
         train_example.old_per_token_logps, jnp.float32
     )
 
-  seq_importance_ratio = per_token_logps - old_per_token_logps
+  active_mask = (
+      (completion_mask > 0)
+      & jnp.isfinite(per_token_logps)
+      & jnp.isfinite(old_per_token_logps)
+  )
+  safe_per_token_logps = jnp.where(active_mask, per_token_logps, 0.0)
+  safe_old_per_token_logps = jnp.where(active_mask, old_per_token_logps, 0.0)
+  seq_importance_ratio = safe_per_token_logps - safe_old_per_token_logps
   # Record KL divergence before clipping.
   token_denom = jnp.sum(completion_mask)
-  unreduced_ppo_kl = jnp.sum(-seq_importance_ratio * completion_mask)
+  unreduced_ppo_kl = jnp.sum(-seq_importance_ratio)
 
   seq_importance_ratio = jnp.clip(seq_importance_ratio, max=20.0, min=-20.0)
 
   # TODO(sizhi): Refactor this to a separate function.
   if loss_algo == "gspo-token":
-    seq_importance_ratio = (seq_importance_ratio * completion_mask).sum(
-        axis=-1
-    ) / jnp.clip(completion_mask.sum(-1), min=1)
+    if segment_ids is None:
+      # Per-row mean log-ratio: each row is exactly one sequence.
+      seq_mean_ratio = jnp.sum(seq_importance_ratio, axis=-1) / jnp.clip(
+          completion_mask.sum(-1), min=1
+      )
+      seq_mean_ratio = jnp.expand_dims(seq_mean_ratio, axis=-1)
+    else:
+      # Per-SEGMENT mean log-ratio: a packed row holds K sequences, so pooling
+      # per row would mix them into one biased ratio. Pool per segment, then
+      # scatter each token its own segment's mean via take_along_axis. Padding
+      # (segment 0, mask 0) yields 0 and is masked out downstream.
+      per_seg_sum = common.segmented_sum(
+          seq_importance_ratio,
+          segment_ids,
+          num_segments,  # pyrefly: ignore[bad-argument-type]
+      )
+      per_seg_count = common.segmented_count(
+          segment_ids, num_segments, mask=completion_mask  # pyrefly: ignore[bad-argument-type]
+      )
+      per_seg_mean = per_seg_sum / jnp.clip(per_seg_count, min=1.0)
+      seq_mean_ratio = jnp.take_along_axis(
+          per_seg_mean, segment_ids.astype(jnp.int32), axis=1
+      )
+    # Sequence-level VALUE, per-token GRADIENT (stop-gradient trick): the
+    # `x - stop_grad(x)` term is 0 in value but carries d/dtheta per token.
     seq_importance_ratio = (
-        per_token_logps
-        - jax.lax.stop_gradient(per_token_logps)
-        + jnp.expand_dims(jax.lax.stop_gradient(seq_importance_ratio), axis=-1)
+        safe_per_token_logps
+        - jax.lax.stop_gradient(safe_per_token_logps)
+        + jax.lax.stop_gradient(seq_mean_ratio)
     )
-    seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
+    seq_importance_ratio = jnp.clip(seq_importance_ratio, min=-10.0, max=10.0)
 
   is_ratio = jnp.exp(seq_importance_ratio)
 
   # Advantages must be broadcast against seq_length.
   # When sequence packing is used, advantages are already 2D [B, seq_length].
   # When unpacked, they are 1D [B].
-  adv = advantages if advantages.ndim == 2 else jnp.expand_dims(advantages, 1)
+  raw_adv = (
+      advantages if advantages.ndim == 2 else jnp.expand_dims(advantages, 1)
+  )
+  adv = jnp.where(active_mask & jnp.isfinite(raw_adv), raw_adv, 0.0)
 
   pg_loss_1 = -adv * is_ratio
   pg_loss_2 = -adv * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
@@ -463,7 +595,7 @@ def grpo_loss_fn(
   per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
 
   unreduced_clip_frac = jnp.sum(
-      jnp.greater(pg_loss_2, pg_loss_1).astype(jnp.float32) * completion_mask
+      jnp.greater(pg_loss_2, pg_loss_1).astype(jnp.float32)
   )
 
   # dual-clip ppo loss
@@ -479,50 +611,76 @@ def grpo_loss_fn(
       (per_token_loss > pg_loss_3) & (adv < 0.0)
   ).astype(jnp.float32)
   pg_clipfrac_lower = common.aggregate_loss(
-      per_token_pg_clipfrac_lower, completion_mask, loss_aggregation_mode
+      per_token_pg_clipfrac_lower,
+      completion_mask,
+      loss_aggregation_mode,
+      segment_ids=segment_ids,
+      num_segments=num_segments,
   )
 
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
   per_token_loss = jnp.where(adv < 0.0, pg_loss_clipped_dual, per_token_loss)
 
-  # Optional truncated importance-sampling (TIS) correction for the residual
-  # sampler-vs-trainer log-probability mismatch. The weights are precomputed
-  # upstream (already detached and threshold-clipped) and applied per token
-  # BEFORE loss aggregation so they affect the gradient through the loss
-  # magnitude only, not as a stop-gradient bias on the ratio.
-  sampler_is_weights = getattr(train_example, "sampler_is_weights", None)
+  # Optional truncated importance-sampling (TIS) and/or rejection-sampling (RS)
+  # correction for the residual sampler-vs-trainer log-probability mismatch.
+  # The weights are precomputed upstream or computed in-loss above (detached)
+  # and applied per token BEFORE loss aggregation so they affect the gradient
+  # through the loss magnitude only, not as a stop-gradient bias on the ratio.
   if sampler_is_weights is not None:
-    per_token_loss = per_token_loss * sampler_is_weights.astype(jnp.float32)
+    safe_sis = jnp.where(
+        active_mask & jnp.isfinite(sampler_is_weights),
+        sampler_is_weights.astype(jnp.float32),
+        0.0,
+    )
+    per_token_loss = per_token_loss * safe_sis
 
   # Two independent aggregations of the same policy loss (equal today):
   #   unreduced (sum/denom, deferred) — feeds the gradient
   #   reduced   (eager per-sequence mean, pre-CL form) — metric only
   unreduced_pg_loss = common.aggregate_loss(
-      per_token_loss, completion_mask, loss_aggregation_mode
+      per_token_loss,
+      completion_mask,
+      loss_aggregation_mode,
+      segment_ids=segment_ids,
+      num_segments=num_segments,
   )
   reduced_pg_loss = common.reduced_loss_agg(
-      per_token_loss, completion_mask, loss_aggregation_mode
+      per_token_loss,
+      completion_mask,
+      loss_aggregation_mode,
+      segment_ids=segment_ids,
+      num_segments=num_segments,
   )
-  total_loss = unreduced_pg_loss  # KL added below when beta != 0; feeds gradient
+  total_loss = (
+      unreduced_pg_loss  # KL added below when beta != 0; feeds gradient
+  )
   # Per-token diagnostics — log only over assistant tokens (completion_mask).
-  is_ratio_mean = masked_mean(is_ratio, completion_mask)
-  is_ratio_max = jnp.max(jnp.where(completion_mask > 0, is_ratio, 0.0))
-  is_ratio_min = jnp.min(
-      jnp.where(completion_mask > 0, is_ratio, jnp.inf)
+  has_valid = jnp.any(active_mask)
+  is_ratio_mean = masked_mean(is_ratio, active_mask)
+  is_ratio_max = jnp.max(jnp.where(active_mask, is_ratio, 0.0))
+  is_ratio_min = jnp.where(
+      has_valid,
+      jnp.min(jnp.where(active_mask, is_ratio, jnp.inf)),
+      0.0,
   )
-  log_ratio_abs_mean = masked_mean(
-      jnp.abs(seq_importance_ratio), completion_mask
+  log_ratio_abs_mean = masked_mean(jnp.abs(seq_importance_ratio), active_mask)
+  pg_loss_1_mean = masked_mean(pg_loss_1, active_mask)
+  pg_loss_2_mean = masked_mean(pg_loss_2, active_mask)
+  adv_abs_mean = masked_mean(jnp.abs(adv), active_mask)
+  adv_max = jnp.where(
+      has_valid,
+      jnp.max(jnp.where(active_mask, adv, -jnp.inf)),
+      0.0,
   )
-  pg_loss_1_mean = masked_mean(pg_loss_1, completion_mask)
-  pg_loss_2_mean = masked_mean(pg_loss_2, completion_mask)
-  adv_broadcast = jnp.broadcast_to(adv, completion_mask.shape)
-  adv_abs_mean = masked_mean(jnp.abs(adv_broadcast), completion_mask)
-  adv_max = jnp.max(jnp.where(completion_mask > 0, adv_broadcast, -jnp.inf))
-  adv_min = jnp.min(jnp.where(completion_mask > 0, adv_broadcast, jnp.inf))
+  adv_min = jnp.where(
+      has_valid,
+      jnp.min(jnp.where(active_mask, adv, jnp.inf)),
+      0.0,
+  )
   nonzero_adv_frac = masked_mean(
-      (jnp.abs(adv_broadcast) > 1e-8).astype(jnp.float32), completion_mask
+      (jnp.abs(adv) > 1e-8).astype(jnp.float32), active_mask
   )
-  aux = {
+  aux: dict[str, jax.Array | sft_utils.WeightedMetric] = {
       "kl": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
       "kl_loss": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
       "reduced_pg_loss": reduced_pg_loss,
@@ -548,14 +706,21 @@ def grpo_loss_fn(
       "advantage/nonzero_frac": nonzero_adv_frac,
   }
   if sampler_is_weights is not None:
-    sis = sampler_is_weights.astype(jnp.float32)
-    aux["sampler_is/weight_mean"] = masked_mean(sis, completion_mask)
-    aux["sampler_is/weight_min"] = jnp.min(
-        jnp.where(completion_mask > 0, sis, jnp.inf)
+    aux["sampler_is/weight_mean"] = sft_utils.WeightedMetric(
+        jnp.sum(safe_sis), token_denom, min_denom=1.0  # pyrefly: ignore[unbound-name]
+    )
+    aux["sampler_is/weight_min"] = jnp.where(
+        has_valid,
+        jnp.min(jnp.where(active_mask, safe_sis, jnp.inf)),  # pyrefly: ignore[unbound-name]
+        0.0,
     )
   else:
-    aux["sampler_is/weight_mean"] = jnp.float32(1.0)
+    aux["sampler_is/weight_mean"] = sft_utils.WeightedMetric(
+        token_denom, token_denom, min_denom=1.0
+    )
     aux["sampler_is/weight_min"] = jnp.float32(1.0)
+  for metric_name, (metric_val, _) in sa_metrics.items():
+    aux[metric_name] = metric_val
   # We do not always compute KL divergence (e.g. when beta is 0.0 unless
   # force_compute_kl is True).
   if train_example.ref_per_token_logps is not None:
@@ -565,52 +730,187 @@ def grpo_loss_fn(
         algo_config.kl_loss_mode,
         clamp_value=algo_config.kl_clamp_value,
     )
-    unreduced_kl = jnp.astype(jnp.sum(kl * completion_mask), jnp.float32)
+    kl = jnp.where(active_mask, kl, 0.0)
+    unreduced_kl = jnp.astype(jnp.sum(kl), jnp.float32)
     aux["kl"] = sft_utils.WeightedMetric(
         unreduced_kl, token_denom, min_denom=1.0
     )
-    kl_loss = common.aggregate_loss(kl, completion_mask, loss_aggregation_mode)
-    aux["kl_loss"] = kl_loss  # pyrefly: ignore[bad-assignment]
-    if beta is not None and beta != 0.0:
-      total_loss = sft_utils.WeightedMetric(
-          unreduced_pg_loss.unreduced_sum + beta * kl_loss.unreduced_sum,
-          unreduced_pg_loss.denominator,
-          eps=unreduced_pg_loss.eps,
-          min_denom=unreduced_pg_loss.min_denom,
-      )
+    kl_loss = common.aggregate_loss(
+        kl,
+        completion_mask,
+        loss_aggregation_mode,
+        segment_ids=segment_ids,
+        num_segments=num_segments,
+    )
+    aux["kl_loss"] = kl_loss
+  if beta is not None and beta != 0.0:
+    total_loss = sft_utils.WeightedMetric(
+        unreduced_pg_loss.unreduced_sum + beta * kl_loss.unreduced_sum,  # pyrefly: ignore[unbound-name]
+        unreduced_pg_loss.denominator,
+        eps=unreduced_pg_loss.eps,
+        min_denom=unreduced_pg_loss.min_denom,
+    )
 
   entropy_loss = common.aggregate_loss(
-      token_entropy, completion_mask, loss_aggregation_mode
+      jnp.where(active_mask, token_entropy, 0.0),
+      completion_mask,
+      loss_aggregation_mode,
+      segment_ids=segment_ids,
+      num_segments=num_segments,
   )
   aux["entropy"] = entropy_loss
 
   return sft_utils.LossOutput(primary_loss=total_loss, aux_metrics=aux)
 
 
+MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE: int = 2
+
+
+def _grouped_valid_stats(
+    rewards: np.ndarray | jax.Array,
+    valid_mask: np.ndarray | jax.Array,
+    num_generations: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+  """Reshapes rewards into groups and computes valid-only group statistics.
+
+  Args:
+    rewards: Flat `[num_groups * num_generations]` rewards.
+    valid_mask: Flat `[num_groups * num_generations]` boolean mask; `True` marks
+      a trajectory that should contribute to (and receive) an advantage.
+    num_generations: Group size `G`.
+
+  Returns:
+    Tuple `(grouped_rewards, grouped_mask, valid_counts, masked_sum)` where the
+    grouped arrays are `[num_groups, num_generations]` and `valid_counts` /
+    `masked_sum` are `[num_groups, 1]`. Rewards of invalid trajectories are
+    zeroed in `grouped_rewards` and excluded from `masked_sum`.
+  """
+  grouped_rewards = np.asarray(rewards, dtype=np.float32).reshape(
+      -1, num_generations
+  )
+  grouped_mask = (
+      np.asarray(valid_mask).astype(bool).reshape(-1, num_generations)
+  )
+  grouped_mask = grouped_mask & np.isfinite(grouped_rewards)
+  grouped_rewards = np.where(grouped_mask, grouped_rewards, 0.0)
+  valid_counts = grouped_mask.sum(axis=-1, keepdims=True)
+  masked_sum = grouped_rewards.sum(axis=-1, keepdims=True)
+  return grouped_rewards, grouped_mask, valid_counts, masked_sum
+
+
 @function_registry.register_advantage_estimator("grpo")
-def compute_advantages(rewards: np.ndarray, num_generations: int) -> np.ndarray:
+def compute_advantages(
+    rewards: np.ndarray,
+    num_generations: int,
+    valid_mask: np.ndarray | jax.Array | None = None,
+) -> np.ndarray:
   """Compute group relative advantages.
 
   Args:
     rewards: reward functions output.
     num_generations: Number of generations.
+    valid_mask: Optional boolean mask, same shape as `rewards`, marking the
+      trajectories that are healthy enough to be trained on. When provided, the
+      group mean and (sample, `ddof=1`) std are computed over valid trajectories
+      only, invalid trajectories get a `0.0` advantage, and groups with fewer
+      than `MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE` valid trajectories are zeroed
+      out entirely (a sample std is undefined there).
 
   Returns:
     Group relative advantages.
   """
-  mean_grouped_rewards = rewards.reshape(-1, num_generations).mean(axis=-1)
-  std_grouped_rewards = rewards.reshape(-1, num_generations).std(
-      axis=-1, ddof=1
-  )
+  if valid_mask is None:
+    valid_mask = np.ones_like(rewards, dtype=bool)
 
-  mean_grouped_rewards = mean_grouped_rewards.repeat(num_generations)
-  std_grouped_rewards = std_grouped_rewards.repeat(num_generations)
-  return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-6)
+  grouped_rewards, grouped_mask, valid_counts, masked_sum = (
+      _grouped_valid_stats(rewards, valid_mask, num_generations)
+  )
+  mean_grouped_rewards = masked_sum / np.maximum(valid_counts, 1)
+  squared_deviations = np.where(
+      grouped_mask, (grouped_rewards - mean_grouped_rewards) ** 2, 0.0
+  ).sum(axis=-1, keepdims=True)
+  std_grouped_rewards = np.sqrt(
+      squared_deviations / np.maximum(valid_counts - 1, 1)
+  )
+  advantages = (grouped_rewards - mean_grouped_rewards) / (
+      std_grouped_rewards + 1e-6
+  )
+  advantages = np.where(
+      grouped_mask & (valid_counts >= MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE),
+      advantages,
+      0.0,
+  )
+  return advantages.reshape(np.shape(rewards)).astype(np.float32)
+
+
+@function_registry.register_advantage_estimator("grpo-loo")
+def compute_grpo_loo_advantages(
+    rewards: np.ndarray,
+    num_generations: int,
+    valid_mask: np.ndarray | jax.Array | None = None,
+) -> np.ndarray:
+  """GRPO advantages with leave-one-out centering and std normalization.
+
+  Combines RLOO's unbiased baseline with GRPO's variance normalization. In
+  plain GRPO the sample `r_i` appears in its own baseline `mean(r)` with weight
+  `1/k`, which shrinks every residual by `(k - 1) / k`; divided by the sample
+  std (`ddof=1`), `A_i = ((k - 1) / k) * (r_i - mean_{-i}) / std(r)`. At small
+  valid group sizes (`k = 2..4`, or larger groups after invalid trajectories are
+  masked out) that `(k - 1) / k` factor attenuates the advantage by 25%--50% as
+  a pure function of how many peers survived. Using the leave-one-out mean
+  `mean_{-i}` removes the self-inclusion bias while keeping the group-std
+  scaling that makes advantages comparable across prompts of different
+  difficulty:
+
+    `A_i = (r_i - mean_{j != i, valid} r_j) / (std_{valid}(r) + 1e-6)`
+
+  Equivalently, `A_i = (k / (k - 1)) * A_i^{grpo}` for a group with `k` valid
+  trajectories.
+
+  Args:
+    rewards: reward functions output.
+    num_generations: Number of generations `G`.
+    valid_mask: Optional boolean mask, same shape as `rewards`, marking the
+      trajectories that are healthy enough to be trained on. Invalid
+      trajectories are excluded from every peer's leave-one-out mean and from
+      the group std, receive a `0.0` advantage themselves, and groups with fewer
+      than `MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE` valid trajectories are zeroed
+      out entirely.
+
+  Returns:
+    Leave-one-out, std-normalized group advantages (`float32` ndarray).
+  """
+  if num_generations < MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE:
+    return np.zeros_like(rewards, dtype=np.float32)
+
+  if valid_mask is None:
+    valid_mask = np.ones_like(rewards, dtype=bool)
+
+  grouped_rewards, grouped_mask, valid_counts, masked_sum = (
+      _grouped_valid_stats(rewards, valid_mask, num_generations)
+  )
+  loo_mean = (masked_sum - grouped_rewards) / np.maximum(valid_counts - 1, 1)
+  group_mean = masked_sum / np.maximum(valid_counts, 1)
+  squared_deviations = np.where(
+      grouped_mask, (grouped_rewards - group_mean) ** 2, 0.0
+  ).sum(axis=-1, keepdims=True)
+  std_grouped_rewards = np.sqrt(
+      squared_deviations / np.maximum(valid_counts - 1, 1)
+  )
+  advantages = (grouped_rewards - loo_mean) / (std_grouped_rewards + 1e-6)
+  advantages = np.where(
+      grouped_mask & (valid_counts >= MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE),
+      advantages,
+      0.0,
+  )
+  return advantages.reshape(np.shape(rewards)).astype(np.float32)
 
 
 @function_registry.register_advantage_estimator("rloo")
 def compute_rloo_advantages(
-    rewards: jax.Array, num_generations: int
+    rewards: jax.Array,
+    num_generations: int,
+    valid_mask: np.ndarray | jax.Array | None = None,
 ) -> jax.Array:
   """Compute RLOO (REINFORCE Leave-One-Out) advantages.
 
@@ -620,21 +920,36 @@ def compute_rloo_advantages(
   Args:
     rewards: reward functions output.
     num_generations: Number of generations.
+    valid_mask: Optional boolean mask, same shape as `rewards`, marking the
+      trajectories that are healthy enough to be trained on. When provided, the
+      leave-one-out baseline averages valid peers only, invalid trajectories get
+      a `0.0` advantage, and groups with fewer than
+      `MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE` valid trajectories are zeroed out
+      entirely (no peer is left to form a baseline).
 
   Returns:
     RLOO advantages.
   """
-  if num_generations < 2:
+  if num_generations < MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE:
     # RLOO requires at least 2 samples to calculate a baseline.
     return jnp.zeros_like(rewards)
 
-  reshaped_rewards = rewards.reshape(-1, num_generations)
-  loo_mean = (
-      reshaped_rewards.sum(axis=-1, keepdims=True) - reshaped_rewards
-  ) / (num_generations - 1)
-  rloo_advantages = reshaped_rewards - loo_mean
+  if valid_mask is None:
+    valid_mask = np.ones_like(rewards, dtype=bool)
 
-  return rloo_advantages.flatten()
+  grouped_rewards, grouped_mask, valid_counts, masked_sum = (
+      _grouped_valid_stats(rewards, valid_mask, num_generations)
+  )
+  loo_mean = (masked_sum - grouped_rewards) / np.maximum(valid_counts - 1, 1)
+  rloo_advantages = grouped_rewards - loo_mean
+  rloo_advantages = np.where(
+      grouped_mask & (valid_counts >= MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE),
+      rloo_advantages,
+      0.0,
+  )
+  return jnp.asarray(
+      rloo_advantages.reshape(np.shape(rewards)), dtype=jnp.float32
+  )
 
 
 # ==============================================================================
@@ -644,16 +959,36 @@ def compute_rloo_advantages(
 
 @function_registry.register_advantage_estimator("drgrpo")
 def compute_drgrpo_advantages(
-    rewards: jax.Array, num_generations: int
+    rewards: jax.Array,
+    num_generations: int,
+    valid_mask: np.ndarray | jax.Array | None = None,
 ) -> jax.Array:
   """Group relative advantages -- done right.
 
   Args:
     rewards: reward functions output.
     num_generations: Number of generations.
+    valid_mask: Optional boolean mask, same shape as `rewards`, marking the
+      trajectories that are healthy enough to be trained on. When provided, the
+      group mean is computed over valid trajectories only, invalid trajectories
+      get a `0.0` advantage, and groups with fewer than
+      `MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE` valid trajectories are zeroed out
+      entirely (a single valid trajectory has zero deviation from its own mean).
 
   Returns:
     Group relative advantages.
   """
-  mean_grouped_rewards = rewards.reshape(-1, num_generations).mean(axis=1)
-  return rewards - mean_grouped_rewards.repeat(num_generations)
+  if valid_mask is None:
+    valid_mask = np.ones_like(rewards, dtype=bool)
+
+  grouped_rewards, grouped_mask, valid_counts, masked_sum = (
+      _grouped_valid_stats(rewards, valid_mask, num_generations)
+  )
+  mean_grouped_rewards = masked_sum / np.maximum(valid_counts, 1)
+  advantages = grouped_rewards - mean_grouped_rewards
+  advantages = np.where(
+      grouped_mask & (valid_counts >= MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE),
+      advantages,
+      0.0,
+  )
+  return jnp.asarray(advantages.reshape(np.shape(rewards)), dtype=jnp.float32)

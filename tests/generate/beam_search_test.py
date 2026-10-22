@@ -51,7 +51,7 @@ class BeamSearchTest(absltest.TestCase):
         batch_size=self.batch_size,
         num_kv_heads=2,
         head_dim=128,
-        dtype=jnp.float32,
+        dtype=jnp.float32,  # pyrefly: ignore[bad-argument-type]
     )
     token_buffer = jnp.arange(self.batch_size * self.vocab_size).reshape(
         (self.batch_size, self.vocab_size)

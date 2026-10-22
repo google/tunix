@@ -55,7 +55,7 @@ else:  # oss
 
 # %%
 with adhoc_context:
-  from tunix.rl import rl_cluster as rl_cluster_lib
+  from tunix.rl import rl_cluster as rl_engine_lib
   from tunix.rl.rollout import base_rollout
   from tunix.sft import metrics_logger
   from tunix.rl.agentic.parser.chat_template_parser import parser
@@ -291,7 +291,7 @@ MODEL_CONFIG = {
 def get_ref_model():
   """Loads the reference model, from CNS in g3 or Kaggle in OSS."""
   mesh = jax.make_mesh(
-      *MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0])
+      *MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0])  # pyrefly: ignore[bad-argument-type]
   )
 
   if ENV == 'g3':
@@ -536,15 +536,15 @@ if MAX_GRAD_NORM is not None:
 
 # %%
 # Training config
-cluster_config = rl_cluster_lib.ClusterConfig(
+cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: mesh,
-        rl_cluster_lib.Role.REFERENCE: mesh,
-        rl_cluster_lib.Role.ROLLOUT: mesh,
+        rl_engine_lib.Role.ACTOR: mesh,
+        rl_engine_lib.Role.REFERENCE: mesh,
+        rl_engine_lib.Role.ROLLOUT: mesh,
     },
     rollout_engine='vanilla',
     offload_to_cpu=False,
-    training_config=rl_cluster_lib.RLTrainingConfig(
+    training_config=rl_engine_lib.RLTrainingConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
@@ -585,7 +585,7 @@ chat_parser = parser.GemmaChatTemplateParser(tokenizer)
 
 # %%
 # RL cluster
-rl_cluster = rl_cluster_lib.RLCluster(
+rl_engine = rl_engine_lib.RLEngine(
     actor=lora_gemma,
     reference=gemma,
     tokenizer=tokenizer,
@@ -595,7 +595,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
 # %%
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
-    rl_cluster=rl_cluster,
+    rl_engine=rl_engine,
     reward_fns=[
         match_format_exactly,
         match_format_approximately,

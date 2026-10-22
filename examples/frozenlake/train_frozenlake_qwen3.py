@@ -40,11 +40,11 @@ print("Logging configured at INFO level.")
 
 from tunix.models.qwen3 import params as params_lib
 from tunix.models.qwen3 import model as model_lib
-from tunix.oss import utils as oss_utils
+from tunix.google.stubs import utils_stub as oss_utils
 from tunix.sft import metrics_logger
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import utils as sft_utils
 from tunix.cli.utils import data as data_lib
@@ -441,11 +441,11 @@ elif ROLLOUT_ENGINE == "vanilla":
 else:
   raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
 
-cluster_config = rl_cluster_lib.ClusterConfig(
+cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: shared_mesh,
-        rl_cluster_lib.Role.REFERENCE: shared_mesh,
-        rl_cluster_lib.Role.ROLLOUT: shared_mesh,
+        rl_engine_lib.Role.ACTOR: shared_mesh,
+        rl_engine_lib.Role.REFERENCE: shared_mesh,
+        rl_engine_lib.Role.ROLLOUT: shared_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
     # Keep actor weights resident on device. With ``delete_dst_buffers=True``
@@ -453,7 +453,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     # host-offload workaround previously used to relieve HBM pressure during
     # sync is no longer necessary on this hardware.
     offload_to_cpu=False,
-    training_config=rl_cluster_lib.RLTrainingConfig(
+    training_config=rl_engine_lib.RLTrainingConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
@@ -502,13 +502,13 @@ grpo_config = GRPOConfig(
     advantage_estimator=args.advantage_estimator,
 )
 
-rl_cluster = rl_cluster_lib.RLCluster(
+rl_engine = rl_engine_lib.RLEngine(
     actor=qwen_actor,
     reference=qwen_ref,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
 )
-show_hbm_usage("after RLCluster creation")
+show_hbm_usage("after RLEngine creation")
 
 
 _metric_call_idx = 0
@@ -539,7 +539,7 @@ def metric_fn(prompts, completions, rewards, advantages, **kwargs):
 
 
 grpo_trainer = GRPOLearner(
-    rl_cluster=rl_cluster,
+    rl_engine=rl_engine,
     agent_class=FrozenLakeAgent,
     agent_kwargs={"use_multistep_prompt": True},
     env_class=FrozenLakeEnv,

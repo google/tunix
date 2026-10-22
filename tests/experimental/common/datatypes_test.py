@@ -14,117 +14,125 @@
 
 """Serialization-discipline tests for the common wire DTOs."""
 
+import time
+
 from absl.testing import absltest
 import cloudpickle
+import jax
 import numpy as np
 from tunix.experimental.common import datatypes
 
+WorkerState = datatypes.WorkerState
 
-def _sample_result() -> datatypes.RolloutResult:
-  return datatypes.RolloutResult(
+
+def _rollout_response_dto() -> datatypes.RolloutResponse:
+  traj_item = datatypes.TrajectoryItem(
+      prompt_id="req-rollout-42",
+      group_index=1,
+      start_step=0,
+      traj=datatypes.Trajectory(
+          reward=1.25,
+          status=datatypes.TrajectoryStatus.SUCCEEDED,
+      ),
+      prompt_tokens=np.array([10, 11, 12], dtype=np.int32),
+      completion_tokens=np.array([20, 21], dtype=np.int32),
+      action_mask=np.array([1, 1], dtype=np.float32),
+      policy_version=7,
+      metadata={"response_time": 0.5},
+  )
+  return datatypes.RolloutResponse(
       request_id="req-1",
       status="SUCCEEDED",
-      prompt_tokens=np.array([10, 11, 12], dtype=np.int32),
-      segments=[
-          datatypes.TokenSegment(
-              source="assistant",
-              tokens=np.array([20, 21], dtype=np.int32),
-              loss_mask=np.array([1, 1], dtype=np.int32),
-              logps=np.array([-0.5, -1.5], dtype=np.float32),
-          ),
-          datatypes.TokenSegment(
-              source="env",
-              tokens=np.array([30], dtype=np.int32),
-              loss_mask=np.array([0], dtype=np.int32),
-          ),
-      ],
-      env_reward=1.25,
-      policy_version=7,
+      payload=traj_item,
+      metadata={"response_time": 0.5},
   )
 
 
-def _sample_dto() -> datatypes.SamplingResult:
-  return datatypes.SamplingResult(
-      request_id="sample-req-1",
-      text="Hello from Tunix sampler!",
-      token_ids=np.array([101, 102, 103], dtype=np.int32),
-      logprobs=np.array([-0.1, -0.2, -0.05], dtype=np.float32),
-      finish_reason="stop",
-  )
-
-
-def _sampling_request_dto() -> datatypes.SamplingRequest:
-  return datatypes.SamplingRequest(
+def _rollout_request_dto() -> datatypes.RolloutRequest:
+  return datatypes.RolloutRequest(
+      request_id="req-123",
       prompt="Solve 2+2",
-      request_id="req-sample-42",
-      sampling_params=datatypes.SamplingParams(max_tokens=64, temperature=0.7),
-  )
-
-
-def _weight_sync_request_dto() -> datatypes.WeightSyncRequest:
-  return datatypes.WeightSyncRequest(
-      controller_id="raiden-ctrl-0",
-      policy_version=14,
-      source_metadata={"mesh": "2x4"},
-      extra_config={"timeout": 30.0},
+      prompt_id="req-rollout-42",
+      group_index=1,
+      generation_kwargs={"max_tokens": 128, "temperature": 0.5},
+      max_turns=5,
+      target_policy_version=3,
+      metadata={"env": "math"},
   )
 
 
 class WireSerializationTest(absltest.TestCase):
 
-  def test_weight_sync_request_round_trips_through_cloudpickle(self):
-    original = _weight_sync_request_dto()
-
-    restored = cloudpickle.loads(cloudpickle.dumps(original))
-
-    self.assertEqual(restored.controller_id, original.controller_id)
-    self.assertEqual(restored.policy_version, original.policy_version)
-    self.assertEqual(restored.source_metadata, original.source_metadata)
-    self.assertEqual(restored.extra_config, original.extra_config)
-
-  def test_sampling_request_round_trips_through_cloudpickle(self):
-    original = _sampling_request_dto()
+  def test_rollout_request_round_trips_through_cloudpickle(self):
+    original = _rollout_request_dto()
 
     restored = cloudpickle.loads(cloudpickle.dumps(original))
 
     self.assertEqual(restored.request_id, original.request_id)
     self.assertEqual(restored.prompt, original.prompt)
-    self.assertIsNotNone(restored.sampling_params)
+    self.assertEqual(restored.prompt_id, original.prompt_id)
+    self.assertEqual(restored.group_index, original.group_index)
+    self.assertEqual(restored.generation_kwargs, original.generation_kwargs)
+    self.assertEqual(restored.max_turns, original.max_turns)
     self.assertEqual(
-        restored.sampling_params.max_tokens, original.sampling_params.max_tokens
+        restored.target_policy_version, original.target_policy_version
     )
-    self.assertEqual(
-        restored.sampling_params.temperature,
-        original.sampling_params.temperature,
+    self.assertEqual(restored.metadata, original.metadata)
+
+  def test_train_request_round_trips_through_cloudpickle(self):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1], [2]], dtype=np.int32),
+        prompt_mask=np.ones((2, 1), dtype=np.float32),
+        completion_ids=np.array([[3], [4]], dtype=np.int32),
+        completion_mask=np.ones((2, 1), dtype=np.float32),
+        advantages=np.array([1.0, 2.0], dtype=np.float32),
+        metadata={"step": 42},
+    )
+    original = datatypes.TrainRequest(
+        request_id="train-req-1",
+        payload=payload,
+        target_policy_version=2,
+        metadata={"lineage_id": "batch_0"},
     )
 
-  def test_trajectory_result_round_trips_through_cloudpickle(self):
-    original = _sample_result()
+    restored = cloudpickle.loads(cloudpickle.dumps(original))
+
+    self.assertEqual(restored.request_id, "train-req-1")
+    self.assertEqual(restored.target_policy_version, 2)
+    self.assertEqual(restored.metadata, {"lineage_id": "batch_0"})
+    np.testing.assert_allclose(restored.payload.advantages, [1.0, 2.0])
+    np.testing.assert_array_equal(restored.payload.completion_mask, [[1], [1]])
+
+  def test_trajectory_response_round_trips_through_cloudpickle(self):
+    original = _rollout_response_dto()
 
     restored = cloudpickle.loads(cloudpickle.dumps(original))
 
     self.assertEqual(restored.request_id, original.request_id)
     self.assertEqual(restored.status, original.status)
-    self.assertEqual(restored.env_reward, original.env_reward)
-    self.assertEqual(restored.policy_version, original.policy_version)
+    self.assertEqual(restored.metadata, original.metadata)
     self.assertIsNone(restored.error)
+    self.assertIsNotNone(restored.payload)
+    self.assertEqual(restored.payload.prompt_id, original.payload.prompt_id)
+    self.assertEqual(restored.payload.group_index, original.payload.group_index)
+    self.assertEqual(
+        restored.payload.policy_version, original.payload.policy_version
+    )
+    self.assertEqual(
+        restored.payload.traj.reward, original.payload.traj.reward
+    )
     np.testing.assert_array_equal(
-        restored.prompt_tokens, original.prompt_tokens
-    )
-    self.assertLen(restored.segments, 2)
-    np.testing.assert_array_equal(
-        restored.segments[0].tokens, original.segments[0].tokens
+        restored.payload.prompt_tokens, original.payload.prompt_tokens
     )
     np.testing.assert_array_equal(
-        restored.segments[0].loss_mask, original.segments[0].loss_mask
+        restored.payload.completion_tokens, original.payload.completion_tokens
     )
-    np.testing.assert_allclose(
-        restored.segments[0].logps, original.segments[0].logps
+    np.testing.assert_array_equal(
+        restored.payload.action_mask, original.payload.action_mask
     )
-    self.assertIsNone(restored.segments[1].logps)
 
   def test_error_result_round_trips(self):
-    result = datatypes.RolloutResult(
+    result = datatypes.RolloutResponse(
         request_id="req-2",
         status="TIMEOUT",
         error=datatypes.ErrorInfo(
@@ -139,8 +147,7 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(restored.status, "TIMEOUT")
     self.assertEqual(restored.error.error_type, "TimeoutError")
     self.assertTrue(restored.error.retryable)
-    self.assertEqual(restored.prompt_tokens.size, 0)
-    self.assertEmpty(restored.segments)
+    self.assertIsNone(restored.payload)
 
   def test_token_segment_enforces_shapes(self):
     with self.assertRaisesRegex(
@@ -152,9 +159,7 @@ class WireSerializationTest(absltest.TestCase):
           loss_mask=np.array([1]),
       )
 
-    with self.assertRaisesRegex(
-        ValueError, "logps shape .* != tokens shape"
-    ):
+    with self.assertRaisesRegex(ValueError, "logps shape .* != tokens shape"):
       datatypes.TokenSegment(
           source="assistant",
           tokens=np.array([1, 2]),
@@ -162,72 +167,175 @@ class WireSerializationTest(absltest.TestCase):
           logps=np.array([0.5]),
       )
 
-  def test_from_trajectory(self):
-    step1 = datatypes.Step(
-        assistant_tokens=np.array([20, 21], dtype=np.int32),
-        assistant_masks=np.array([1, 1], dtype=np.int32),
-        logprobs=np.array([-0.5, -1.5], dtype=np.float32),
-        env_tokens=np.array([30], dtype=np.int32),
-        env_masks=np.array([0], dtype=np.int32),
-    )
-    traj = datatypes.Trajectory(
-        steps=[step1],
-        reward=1.25,
-        status=datatypes.TrajectoryStatus.SUCCEEDED,
-    )
-    request = datatypes.RolloutRequest(
-        request_id="req-1",
-        prompt_text="hello",
-        sampling_params=datatypes.SamplingParams(max_tokens=10),
-    )
 
-    result = datatypes.RolloutResult.from_trajectory(
-        request_id=request.request_id,
+
+  def test_trajectory_item_to_and_from_dict(self):
+    traj = {
+        "reward": 2.5,
+        "status": datatypes.TrajectoryStatus.SUCCEEDED,
+        "prompt_tokens": np.array([1, 2], dtype=np.int32),
+        "completion_tokens": np.array([3, 4], dtype=np.int32),
+        "action_mask": np.array([1.0, 1.0], dtype=np.float32),
+        "policy_version": 3,
+    }
+    item = datatypes.TrajectoryItem(
+        prompt_id="task_42",
+        group_index=1,
+        start_step=0,
         traj=traj,
-        prompt_tokens=np.array([10, 11, 12], dtype=np.int32),
-        policy_version=7,
+        metadata={"key": "val"},
+    )
+    d = item.to_dict()
+    self.assertEqual(d["prompt_id"], "task_42")
+    self.assertEqual(d["group_index"], 1)
+    self.assertEqual(d["traj"]["policy_version"], 3)
+    self.assertEqual(d["metadata"], {"key": "val"})
+
+    restored = datatypes.TrajectoryItem.from_dict(d)
+    self.assertEqual(restored.prompt_id, "task_42")
+    self.assertEqual(restored.group_index, 1)
+    self.assertEqual(restored.policy_version, 3)
+    self.assertEqual(restored.metadata, {"key": "val"})
+    np.testing.assert_array_equal(restored.prompt_tokens, item.prompt_tokens)
+    np.testing.assert_array_equal(
+        restored.completion_tokens, item.completion_tokens
     )
 
-    self.assertEqual(result.request_id, "req-1")
-    self.assertEqual(result.status, "SUCCEEDED")
-    self.assertEqual(result.env_reward, 1.25)
-    self.assertEqual(result.policy_version, 7)
-    np.testing.assert_array_equal(result.prompt_tokens, [10, 11, 12])
+  def test_health_report_defaults_heartbeat_unix_s_to_current_time(self):
+    before = time.time()
+    report = datatypes.HealthReport(state=WorkerState.READY)
+    after = time.time()
+    self.assertGreaterEqual(report.heartbeat_unix_s, before)
+    self.assertLessEqual(report.heartbeat_unix_s, after)
 
-    self.assertLen(result.segments, 2)
+  def test_request_defaults_request_id_to_uuid(self):
+    req1 = datatypes.Request()
+    req2 = datatypes.Request()
+    self.assertTrue(req1.request_id.startswith("req_"))
+    self.assertTrue(req2.request_id.startswith("req_"))
+    self.assertNotEqual(req1.request_id, req2.request_id)
 
-    # Assistant segment
-    self.assertEqual(result.segments[0].source, "assistant")
-    np.testing.assert_array_equal(result.segments[0].tokens, [20, 21])
-    np.testing.assert_array_equal(result.segments[0].loss_mask, [1, 1])
-    np.testing.assert_allclose(result.segments[0].logps, [-0.5, -1.5])
+  def test_rollout_request_traj_id_formatting(self):
+    # Default group_index is 0
+    r_default = datatypes.RolloutRequest(prompt_id="42")
+    self.assertEqual(r_default.traj_id, "traj_42_g0")
 
-    # Env segment
-    self.assertEqual(result.segments[1].source, "env")
-    np.testing.assert_array_equal(result.segments[1].tokens, [30])
-    np.testing.assert_array_equal(result.segments[1].loss_mask, [0])
-    self.assertIsNone(result.segments[1].logps)
+    # String prompt ID
+    r_str = datatypes.RolloutRequest(prompt_id="math_101")
+    self.assertEqual(r_str.traj_id, "traj_math_101_g0")
 
-  def test_sampling_result_round_trips_through_cloudpickle(self):
-    original = _sample_dto()
+    # Grouped at index 1
+    r_grouped_1 = datatypes.RolloutRequest(prompt_id="42", group_index=1)
+    self.assertEqual(r_grouped_1.traj_id, "traj_42_g1")
 
-    restored = cloudpickle.loads(cloudpickle.dumps(original))
+    # TrajectoryItem traj_id
+    item = datatypes.TrajectoryItem(prompt_id="42", group_index=2, traj={})
+    self.assertEqual(item.traj_id, "traj_42_g2")
 
-    self.assertEqual(restored.request_id, original.request_id)
-    self.assertEqual(restored.text, original.text)
-    self.assertEqual(restored.finish_reason, original.finish_reason)
-    self.assertIsNone(restored.error)
-    np.testing.assert_array_equal(restored.token_ids, original.token_ids)
-    np.testing.assert_allclose(restored.logprobs, original.logprobs)
 
-  def test_sampling_result_enforces_shapes(self):
-    with self.assertRaisesRegex(
-        ValueError, "logprobs shape .* != token_ids shape"
-    ):
-      datatypes.SamplingResult(
-          token_ids=np.array([1, 2, 3]),
-          logprobs=np.array([-0.1, -0.2]),
+  def test_trajectory_item_fields(self):
+    item = datatypes.TrajectoryItem(prompt_id="prompt_88", group_index=4, traj={})
+    self.assertEqual(item.prompt_id, "prompt_88")
+    self.assertEqual(item.group_index, 4)
+
+    item_default = datatypes.TrajectoryItem(prompt_id="prompt_99", traj={})
+    self.assertEqual(item_default.prompt_id, "prompt_99")
+    self.assertEqual(item_default.group_index, 0)
+
+
+class RLTrainerPayloadTest(absltest.TestCase):
+
+  def test_rl_trainer_payload_fields_and_replace(self):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        prompt_mask=np.ones(2, dtype=np.float32),
+        completion_ids=np.array([3, 4], dtype=np.int32),
+        completion_mask=np.ones(2, dtype=np.float32),
+        advantages=np.array([1.5, 1.5], dtype=np.float32),
+        num_segments=3,
+        metadata={"step": 1},
+    )
+    self.assertEqual(payload.num_segments, 3)
+    self.assertEqual(payload.metadata, {"step": 1})
+
+    replaced = payload.replace(num_segments=4)
+    self.assertEqual(replaced.num_segments, 4)
+    np.testing.assert_array_equal(replaced.prompt_ids, payload.prompt_ids)
+
+  def test_rl_trainer_payload_pytree_structure(self):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        prompt_mask=np.ones(2, dtype=np.float32),
+        completion_ids=np.array([3, 4], dtype=np.int32),
+        completion_mask=np.ones(2, dtype=np.float32),
+        advantages=np.array([1.0, 2.0], dtype=np.float32),
+        num_segments=5,
+        metadata={"key": "value"},
+    )
+    leaves, treedef = jax.tree_util.tree_flatten(payload)
+    # num_segments and metadata are pytree_node=False, so they are not in leaves
+    for leaf in leaves:
+      if leaf is not None:
+        self.assertIsInstance(leaf, np.ndarray)
+
+    # Tree unflatten restores full object
+    restored = jax.tree_util.tree_unflatten(treedef, leaves)
+    self.assertEqual(restored.num_segments, 5)
+    self.assertEqual(restored.metadata, {"key": "value"})
+    np.testing.assert_allclose(restored.advantages, [1.0, 2.0])
+
+  def test_rl_trainer_payload_cloudpickle_roundtrip(self):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([10, 20], dtype=np.int32),
+        prompt_mask=np.ones(2, dtype=np.float32),
+        completion_ids=np.array([30, 40], dtype=np.int32),
+        completion_mask=np.ones(2, dtype=np.float32),
+        advantages=np.array([0.5, -0.5], dtype=np.float32),
+        segment_ids=np.array([1, 1], dtype=np.int32),
+        segment_positions=np.array([0, 1], dtype=np.int32),
+        num_segments=2,
+        metadata={"tag": "eval"},
+    )
+    restored = cloudpickle.loads(cloudpickle.dumps(payload))
+    self.assertEqual(restored.num_segments, 2)
+    self.assertEqual(restored.metadata, {"tag": "eval"})
+    np.testing.assert_array_equal(restored.prompt_ids, payload.prompt_ids)
+    np.testing.assert_allclose(restored.advantages, payload.advantages)
+
+
+class TokenSegmentRoutingTest(absltest.TestCase):
+  """`routed_experts` must line up with the tokens it describes."""
+
+  def test_rejects_length_mismatch(self):
+    """Only the per-token axis is checked; trailing axes are model-specific."""
+    tokens = np.arange(4, dtype=np.int32)
+    with self.assertRaisesRegex(ValueError, "routed_experts shape"):
+      datatypes.TokenSegment(
+          source="assistant",
+          tokens=tokens,
+          loss_mask=np.ones_like(tokens),
+          routed_experts=np.zeros((3, 2, 2), dtype=np.int32),
       )
+
+
+class GenerationArgsTest(absltest.TestCase):
+
+  def test_generation_args_as_kwargs(self):
+    args = datatypes.GenerationArgs(
+        max_generation_steps=128,
+        temperature=0.7,
+        top_p=0.95,
+        return_logprobs=True,
+        return_routed_experts=True,
+    )
+    expected = {
+        "max_generation_steps": 128,
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "return_logprobs": True,
+        "return_routed_experts": True,
+    }
+    self.assertEqual(args.as_kwargs(), expected)
 
 
 if __name__ == "__main__":

@@ -175,7 +175,7 @@ class LoraParamsTestBase(absltest.TestCase, abc.ABC):
         model_class=self.get_model_class(),
         config=self.config,
         mesh=None,
-        dtype=jnp.float32,
+        dtype=jnp.float32,  # pyrefly: ignore[bad-argument-type]
         random_seed=self.random_seed,
         scale=self.base_model_scale,
     )

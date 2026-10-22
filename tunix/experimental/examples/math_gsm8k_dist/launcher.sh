@@ -1,0 +1,885 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+#!/bin/bash
+
+set -Ee
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${DIR}/../../../.." && pwd)"
+LOG_ROOT=${LOG_ROOT:-"${DIR}"}
+
+ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-orchestrator}
+ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-30000}
+TRAINER_PORT=${TRAINER_PORT:-20000}
+ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
+INFERENCE_PORT=${INFERENCE_PORT:-20002}
+RUN_INFERENCE_NODE=${RUN_INFERENCE_NODE:-0}
+INFERENCE_ADDR=${INFERENCE_ADDR:-}
+MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
+MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
+ARTIFACT_ROOT=${ARTIFACT_ROOT:-"${REPO_ROOT}/artifacts/qwen3_dist_gsm8k"}
+MODEL_DIR=${MODEL_DIR:-${MODEL_DOWNLOAD_DIR:-"${ARTIFACT_ROOT}/models"}}
+TOKENIZER_PATH=${TOKENIZER_PATH:-$MODEL_DIR}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
+MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
+MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
+SEGMENT_ALIGNMENT_BOUNDARY=${SEGMENT_ALIGNMENT_BOUNDARY:-}
+BATCH_SIZE=${BATCH_SIZE:-4}
+NUM_GENERATIONS=${NUM_GENERATIONS:-8}
+MAX_STEPS=${MAX_STEPS:-1}
+TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
+MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-2}
+EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-50}
+OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
+MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
+ADAM_B1=${ADAM_B1:-0.9}
+ADAM_B2=${ADAM_B2:-0.999}
+ADAM_EPS=${ADAM_EPS:-1.0e-8}
+WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
+LEARNING_RATE=${LEARNING_RATE:-2.0e-7}
+# The default is applied with `-` rather than `:-` so that an explicitly empty
+# SCHEDULE_TYPE selects the constant learning rate instead of the default.
+SCHEDULE_TYPE=${SCHEDULE_TYPE-warmup_cosine_decay_schedule}
+LR_INIT_VALUE=${LR_INIT_VALUE:-0.0}
+LR_PEAK_VALUE=${LR_PEAK_VALUE:-$LEARNING_RATE}
+LR_END_VALUE=${LR_END_VALUE:-0.0}
+LR_DECAY_STEPS=${LR_DECAY_STEPS:-500}
+WARMUP_STEPS=${WARMUP_STEPS:-$(((LR_DECAY_STEPS + 9) / 10))}
+LORA_RANK=${LORA_RANK:-64}
+LORA_ALPHA=${LORA_ALPHA:-64.0}
+MODEL_DTYPE=${MODEL_DTYPE:-float32}
+MODEL_LOAD_DTYPE=${MODEL_LOAD_DTYPE:-float32}
+USE_LORA=${USE_LORA:-0}
+CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
+CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
+CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${REPO_ROOT}/checkpoints"}
+REWARD_MODE=${REWARD_MODE:-env}
+TFDS_DATA_DIR=${TFDS_DATA_DIR:-"${ARTIFACT_ROOT}/data"}
+TFDS_SPLIT=${TFDS_SPLIT:-train}
+SEED=${SEED:-42}
+SHUFFLE=${SHUFFLE:-true}
+BETA=${BETA:-0.04}
+EPSILON=${EPSILON:-0.2}
+FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
+MAX_STALENESS=${MAX_STALENESS:-0}
+TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-trajectory_completion}
+WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
+WANDB_API_KEY=${WANDB_API_KEY:-}
+TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+RUN_ID=${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_$$}
+TRAJECTORY_STORE_ENABLED=${TRAJECTORY_STORE_ENABLED:-false}
+TRAJECTORY_STORE_BACKEND=${TRAJECTORY_STORE_BACKEND:-file}
+TRAJECTORY_STORE_DIR=${TRAJECTORY_STORE_DIR:-"${LOG_DIR:-${LOG_ROOT}}/trajectory_store"}
+SAMPLER=${SAMPLER:-inprocess_vllm}
+WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
+USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
+CHAT_PARSER=${CHAT_PARSER:-raw}
+# Model-specific EOS token IDs (comma-separated), fetched from HuggingFace
+# `generation_config.json`. Empty string falls back to the tokenizer's default EOS token.
+EOS_TOKENS=${EOS_TOKENS-'151645,151643'}
+MAXTEXT_ATTENTION=${MAXTEXT_ATTENTION:-}
+USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER:-true}
+VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
+MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-"${ARTIFACT_ROOT}/maxtext_out"}
+PYTHON_BIN=${PYTHON_BIN:-python3}
+WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
+WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
+WAIT_DEBUG_EVERY_POLLS=${WAIT_DEBUG_EVERY_POLLS:-6}
+WAIT_LOG_TAIL_LINES=${WAIT_LOG_TAIL_LINES:-40}
+TRAINER_SHUTDOWN_GRACE_SECS=${TRAINER_SHUTDOWN_GRACE_SECS:-900}
+WORKER_SHUTDOWN_GRACE_SECS=${WORKER_SHUTDOWN_GRACE_SECS:-10}
+# Time after the first interrupt. During this time, a second one is gnored.
+# So a double-tapped Ctrl+C cannot discard a checkpoint that is still being
+# written.
+FORCE_ARM_SECS=${FORCE_ARM_SECS:-5}
+SHUTDOWN_SIGNAL_COUNT=0
+DRAIN_START_SECONDS=0
+FORCE_KILL=0
+
+TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
+TRAINER_FSDP=${TRAINER_FSDP:-1}
+TRAINER_TP=${TRAINER_TP:-2}
+
+# tunix runs Tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
+TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
+MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
+if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
+  # MaxText config names are lowercase. Passed to both the trainer and the
+  # rollout, so the two cannot drift.
+  MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
+  # MaxText shards the batch dimension of every loss input across the fsdp and
+  # expert axes, so the microbatch has to be a multiple of their product. The
+  # trainer node enforces this too.
+  TRAINER_NUM_DATA_SHARDS=$(( ${TRAINER_FSDP:-1} * ${TRAINER_EXPERT:-1} ))
+  if [[ -z "${MAX_SEQ_TOKEN_PER_TPU:-}" ]] && (( TRAIN_MICRO_BATCH_SIZE % TRAINER_NUM_DATA_SHARDS != 0 )); then
+    TRAIN_MICRO_BATCH_SIZE=$TRAINER_NUM_DATA_SHARDS
+  fi
+  if [[ -z "$MAXTEXT_CKPT" ]]; then
+    echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
+    exit 1
+  fi
+elif [[ "$TRAINER_BACKEND" == "tunix" ]]; then
+  # Must stay empty on the tunix backend. A non-empty value puts the rollout on
+  # MaxText's MaxTextForCausalLM while the trainer still emits tunix/vllm_jax
+  # tensor names, and Raiden pairs tensors by exact name, so zero of them match.
+  # Export it explicitly to override.
+  MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME-}
+else
+  echo "Error: Unsupported TRAINER_BACKEND='$TRAINER_BACKEND' (expected 'tunix' or 'maxtext')." >&2
+  exit 1
+fi
+ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
+ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
+ROLLOUT_TP=${ROLLOUT_TP:-2}
+INFERENCE_TPU_CHIPS=${INFERENCE_TPU_CHIPS:-}
+TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,2,1}
+TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
+# If OOM, try the following settings (assume 8 chips per host):
+# TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1,2,3}
+# TRAINER_FSDP=${TRAINER_FSDP:-1}
+# TRAINER_TP=${TRAINER_TP:-4}
+# ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-4,5,6,7}
+# ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
+# ROLLOUT_TP=${ROLLOUT_TP:-4}
+# INFERENCE_TPU_CHIPS=${INFERENCE_TPU_CHIPS:-}
+# TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,4,1}
+# TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
+
+TRAINER_LOG="${LOG_ROOT}/trainer.log"
+ROLLOUT_LOG="${LOG_ROOT}/rollout.log"
+INFERENCE_LOG="${LOG_ROOT}/inference.log"
+ORCHESTRATOR_LOG="${LOG_ROOT}/orchestrator.log"
+
+print_section() {
+  echo
+  echo "================ $1 ================"
+}
+
+print_command() {
+  local label="$1"
+  shift
+  echo "$label:"
+  printf '  %q' "$@"
+  echo
+}
+
+print_file_debug() {
+  local label="$1"
+  local file_path="$2"
+  echo "$label log path: $file_path"
+  if [[ -f "$file_path" ]]; then
+    ls -lh "$file_path" 2>/dev/null || true
+    echo "$label log last ${WAIT_LOG_TAIL_LINES} lines:"
+    tail -n "$WAIT_LOG_TAIL_LINES" "$file_path" 2>/dev/null || true
+  else
+    echo "$label log does not exist yet."
+  fi
+}
+
+print_process_debug() {
+  local label="$1"
+  local pid="$2"
+  echo "$label pid=$pid"
+  ps -fp "$pid" 2>/dev/null || true
+  ps -o pid,ppid,stat,etime,pcpu,pmem,rss,args -p "$pid" 2>/dev/null || true
+}
+
+print_port_debug() {
+  local port="$1"
+  echo "Port $port listeners:"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp 2>/dev/null | grep -E "(:${port}\\b|:${port} )" || true
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
+  else
+    echo "Neither ss nor lsof is available."
+  fi
+}
+
+print_related_processes() {
+  echo "Related processes:"
+  pgrep -af "run_trainer_node.py|run_rollout_node.py|run_inference_node.py|run_gsm8k_dist_grpo.py|vllm" 2>/dev/null || true
+}
+
+dump_debug_snapshot() {
+  print_section "process snapshot"
+  if [[ -n "${TRAINER_PID:-}" ]]; then
+    print_process_debug "trainer" "$TRAINER_PID"
+  fi
+  if [[ -n "${ROLLOUT_PID:-}" ]]; then
+    print_process_debug "rollout" "$ROLLOUT_PID"
+  fi
+  if [[ -n "${INFERENCE_PID:-}" ]]; then
+    print_process_debug "inference" "$INFERENCE_PID"
+  fi
+  print_related_processes
+  print_section "port snapshot"
+  print_port_debug "$TRAINER_PORT"
+  print_port_debug "$ROLLOUT_PORT"
+  print_port_debug "$INFERENCE_PORT"
+  print_section "log snapshot"
+  print_file_debug "trainer" "$TRAINER_LOG"
+  print_file_debug "rollout" "$ROLLOUT_LOG"
+  print_file_debug "inference" "$INFERENCE_LOG"
+  print_file_debug "orchestrator" "$ORCHESTRATOR_LOG"
+}
+
+on_error() {
+  local exit_code="$?"
+  print_section "launcher error"
+  echo "Launcher failed with exit code $exit_code."
+  dump_debug_snapshot
+  exit "$exit_code"
+}
+
+print_safetensors_candidates() {
+  local root="$1"
+  if [[ ! -d "$root" ]]; then
+    echo "MODEL_DIR does not exist yet; no nested safetensors to inspect."
+    return
+  fi
+  local candidates
+  candidates="$(
+    find "$root" -mindepth 2 -maxdepth 5 -type f -name '*.safetensors' -print 2>/dev/null \
+      | sed 's#/[^/]*$##' \
+      | sort \
+      | uniq -c \
+      | sort -nr \
+      | head -20 || true
+  )"
+  if [[ -n "$candidates" ]]; then
+    echo "Found nested safetensors directories. The trainer expects MODEL_DIR"
+    echo "to be one of these directories, not their parent:"
+    echo "$candidates" | sed 's/^/  /'
+  else
+    echo "No nested safetensors were found under MODEL_DIR either."
+  fi
+}
+
+has_direct_safetensors() {
+  [[ -d "$MODEL_DIR" ]] && [[ -n "$(
+    find "$MODEL_DIR" -maxdepth 1 -type f -name '*.safetensors' -print -quit 2>/dev/null || true
+  )" ]]
+}
+
+download_model_dir() {
+  echo "Downloading $MODEL_ID to MODEL_DIR: $MODEL_DIR"
+  PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "$PYTHON_BIN" - "$MODEL_ID" "$MODEL_DIR" <<'PY'
+import os
+import sys
+
+from tunix.oss import utils as oss_utils
+
+model_id, model_dir = sys.argv[1], sys.argv[2]
+os.makedirs(model_dir, exist_ok=True)
+oss_utils.hf_pipeline(model_id, model_dir)
+PY
+}
+
+ensure_model_dir() {
+  if [[ -e "$MODEL_DIR" && ! -d "$MODEL_DIR" ]]; then
+    echo "Error: MODEL_DIR exists but is not a directory: $MODEL_DIR"
+    exit 1
+  fi
+
+  if has_direct_safetensors; then
+    return
+  fi
+
+  echo "No '*.safetensors' files found directly in MODEL_DIR: $MODEL_DIR"
+  echo "The JAX trainer loader uses a non-recursive '*.safetensors' lookup."
+  print_safetensors_candidates "$MODEL_DIR"
+  download_model_dir
+
+  if ! has_direct_safetensors; then
+    echo "Error: download finished but MODEL_DIR still has no direct '*.safetensors': $MODEL_DIR"
+    print_safetensors_candidates "$MODEL_DIR"
+    exit 1
+  fi
+}
+
+convert_maxtext_ckpt() {
+  if [[ "$TRAINER_BACKEND" != "maxtext" ]]; then
+    return
+  fi
+  if [[ "$MAXTEXT_CKPT" =~ ^gs:// ]]; then
+    echo "Using GCS MAXTEXT_CKPT: $MAXTEXT_CKPT"
+    return
+  fi
+  if [[ -d "$MAXTEXT_CKPT" ]]; then
+    echo "Found existing local MAXTEXT_CKPT: $MAXTEXT_CKPT"
+    return
+  fi
+  local ckpt_base
+  ckpt_base="$(dirname "$(dirname "$MAXTEXT_CKPT")")"
+  echo "Converting HF checkpoint $MODEL_DIR to MaxText Orbax checkpoint at $ckpt_base..."
+  mkdir -p "$ckpt_base"
+  JAX_PLATFORMS=cpu PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "$PYTHON_BIN" \
+    -m maxtext.checkpoint_conversion.to_maxtext \
+    model_name="${MAXTEXT_MODEL_NAME}" \
+    --hf_model_path="${MODEL_DIR}" \
+    base_output_directory="${ckpt_base}" \
+    scan_layers=True \
+    skip_jax_distributed_system=True \
+    checkpoint_storage_use_zarr3=false \
+    checkpoint_storage_use_ocdbt=false
+  if [[ ! -d "$MAXTEXT_CKPT" ]]; then
+    echo "Error: MaxText checkpoint conversion did not produce expected directory: $MAXTEXT_CKPT"
+    exit 1
+  fi
+}
+
+dump_logs() {
+  print_section "trainer.log tail"
+  tail -n 200 "$TRAINER_LOG" 2>/dev/null || true
+  print_section "rollout.log tail"
+  tail -n 200 "$ROLLOUT_LOG" 2>/dev/null || true
+  print_section "inference.log tail"
+  tail -n 200 "$INFERENCE_LOG" 2>/dev/null || true
+  print_section "orchestrator.log tail"
+  tail -n 200 "$ORCHESTRATOR_LOG" 2>/dev/null || true
+}
+
+check_process_alive() {
+  local name="$1"
+  local pid="$2"
+  local log_file="$3"
+  local process_state
+  process_state="$(ps -o stat= -p "$pid" 2>/dev/null || true)"
+  if [[ -z "$process_state" || "$process_state" == Z* ]]; then
+    echo "Error: $name process exited before gRPC port became ready (pid=$pid)."
+    print_file_debug "$name" "$log_file"
+    dump_debug_snapshot
+    exit 1
+  fi
+}
+
+wait_for_port() {
+  local name="$1"
+  local port="$2"
+  local pid="$3"
+  local log_file="$4"
+  local elapsed=0
+  local poll_count=0
+  while true; do
+    check_process_alive "$name" "$pid" "$log_file"
+    if "$PYTHON_BIN" - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+try:
+  socket.create_connection(("localhost", port), timeout=1).close()
+except OSError:
+  sys.exit(1)
+PY
+    then
+      echo "$name port $port is ready after ${elapsed}s."
+      return
+    fi
+    if (( elapsed >= WAIT_TIMEOUT_SECS )); then
+      echo "Error: timed out waiting ${WAIT_TIMEOUT_SECS}s for $name port $port."
+      dump_debug_snapshot
+      exit 1
+    fi
+    echo "Waiting for $name port $port... elapsed=${elapsed}s pid=$pid log=$log_file"
+    if (( poll_count == 0 || poll_count % WAIT_DEBUG_EVERY_POLLS == 0 )); then
+      print_process_debug "$name" "$pid"
+      print_port_debug "$port"
+      print_file_debug "$name" "$log_file"
+    fi
+    sleep "$WAIT_POLL_SECS"
+    elapsed=$((elapsed + WAIT_POLL_SECS))
+    poll_count=$((poll_count + 1))
+  done
+}
+
+echo "=================================================="
+echo "Starting distributed GSM8K GRPO chain demo locally"
+echo "  rollout engine: vLLM"
+echo "  model dir:      $MODEL_DIR"
+echo "  tokenizer path: $TOKENIZER_PATH"
+echo "  python:         $PYTHON_BIN"
+echo "  trajectories:   $((BATCH_SIZE * NUM_GENERATIONS)) per step"
+echo "  batch size:     $BATCH_SIZE"
+echo "  generations:    $NUM_GENERATIONS"
+echo "  max steps:      $MAX_STEPS"
+echo "  eval interval:  $EVAL_EVERY_N_STEPS"
+echo "  learning rate:  $LEARNING_RATE"
+echo "  lr schedule:    ${SCHEDULE_TYPE:-<constant>} (warmup $WARMUP_STEPS, decay $LR_DECAY_STEPS)"
+echo "  prompt length:  $MAX_PROMPT_LENGTH"
+echo "  response len:   $MAX_RESPONSE_LENGTH"
+echo "  max seq token:  ${MAX_SEQ_TOKEN_PER_TPU:-<unset>}"
+echo "  max segments:   ${MAX_SEGMENTS_PER_PACKED_ROW:-<unset>}"
+echo "  segment align:  ${SEGMENT_ALIGNMENT_BOUNDARY:-<unset>}"
+echo "  train micro:    $TRAIN_MICRO_BATCH_SIZE"
+echo "  mini batch:     $MINI_BATCH_SIZE"
+echo "  beta:           $BETA"
+echo "  epsilon:        $EPSILON"
+echo "  reward mode:    $REWARD_MODE"
+echo "  max staleness:  $MAX_STALENESS"
+echo "  traj order:     $TRAJECTORY_GROUP_ORDER"
+echo "  tfds split:     $TFDS_SPLIT"
+echo "  tfds data dir:  $TFDS_DATA_DIR"
+echo "  shuffle:        $SHUFFLE"
+echo "  use lora:       $USE_LORA"
+echo "  ckpt interval:  $CHECKPOINT_SAVE_INTERVAL_STEPS"
+echo "  ckpt max keep:  $CHECKPOINT_MAX_TO_KEEP"
+echo "  ckpt root dir:  $CHECKPOINT_ROOT_DIRECTORY"
+echo "  sampler:        $SAMPLER"
+echo "  weight sync:    $WEIGHT_SYNC_MODE"
+echo "  chat parser:    $CHAT_PARSER"
+echo "  eos tokens:     ${EOS_TOKENS:-<tokenizer default>}"
+echo "  trainer backend:$TRAINER_BACKEND"
+echo "  maxtext model:  ${MAXTEXT_MODEL_NAME:-<unset>}"
+echo "  maxtext ckpt:   ${MAXTEXT_CKPT:-<unset>}"
+echo "  trainer chips:  $TRAINER_TPU_CHIPS"
+echo "  trainer mesh:   fsdp=$TRAINER_FSDP tp=$TRAINER_TP"
+echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
+echo "  rollout mesh:   fsdp=$ROLLOUT_FSDP tp=$ROLLOUT_TP"
+echo "  inference:      $RUN_INFERENCE_NODE"
+echo "  inference addr: ${INFERENCE_ADDR:-<none>}"
+echo "  inference chips:${INFERENCE_TPU_CHIPS:-<unset>}"
+echo "  chip bounds:    $TPU_CHIPS_PER_HOST_BOUNDS"
+echo "  host bounds:    $TPU_HOST_BOUNDS"
+echo "  wait timeout:   ${WAIT_TIMEOUT_SECS}s"
+echo "  wait poll:      ${WAIT_POLL_SECS}s"
+echo "  log tail lines: $WAIT_LOG_TAIL_LINES"
+echo "  wandb project:  ${WANDB_PROJECT:-<none>}"
+echo "  wandb run name: ${WANDB_RUN_NAME:-<auto>}"
+echo "  trainer log:    $TRAINER_LOG"
+echo "  rollout log:    $ROLLOUT_LOG"
+echo "  orch log:       $ORCHESTRATOR_LOG"
+echo "=================================================="
+
+if [[ "$BETA" != "0" && "$BETA" != "0.0" && -z "$INFERENCE_ADDR" ]]; then
+  if [[ "$RUN_INFERENCE_NODE" != "1" &&
+        "$RUN_INFERENCE_NODE" != "true" &&
+        "$RUN_INFERENCE_NODE" != "True" ]]; then
+    echo "Error: BETA=$BETA requires a reference inference worker."
+    echo "Set RUN_INFERENCE_NODE=1 with INFERENCE_TPU_CHIPS, pass INFERENCE_ADDR,"
+    echo "or use BETA=0 for a trainer+rollout smoke run."
+    exit 1
+  fi
+fi
+
+ensure_model_dir
+convert_maxtext_ckpt
+mkdir -p "${LOG_ROOT}"
+
+: > "$TRAINER_LOG"
+: > "$ROLLOUT_LOG"
+: > "$INFERENCE_LOG"
+: > "$ORCHESTRATOR_LOG"
+
+print_section "runtime context"
+date
+pwd
+"$PYTHON_BIN" --version 2>&1 || true
+git -C "$DIR" rev-parse --short HEAD 2>/dev/null || true
+git -C "$DIR" status --short --branch 2>/dev/null || true
+echo "MODEL_DIR exists? $(if [[ -d "$MODEL_DIR" ]]; then echo yes; else echo no; fi)"
+echo "TOKENIZER_PATH exists? $(if [[ -d "$TOKENIZER_PATH" ]]; then echo yes; else echo no; fi)"
+echo "Initial LIBTPU_INIT_ARGS=${LIBTPU_INIT_ARGS:-}"
+print_related_processes
+print_port_debug "$TRAINER_PORT"
+print_port_debug "$ROLLOUT_PORT"
+print_port_debug "$INFERENCE_PORT"
+
+echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
+(
+  TRAINER_CMD=(
+    "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
+    --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
+    --process_main=tunix.experimental.examples.common.run_trainer_node.main
+
+    --port="$TRAINER_PORT"
+    --mesh_fsdp="$TRAINER_FSDP"
+    --mesh_tp="$TRAINER_TP"
+    --model_id="$MODEL_ID"
+    --model_dir="$MODEL_DIR"
+    --model_name="$MODEL_NAME"
+    --sampler_type="$SAMPLER"
+    --tokenizer_path="$TOKENIZER_PATH"
+    --max_prompt_length="$MAX_PROMPT_LENGTH"
+    --max_response_length="$MAX_RESPONSE_LENGTH"
+    --mini_batch_size="$MINI_BATCH_SIZE"
+    --num_generations="$NUM_GENERATIONS"
+    --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+    --model_dtype="$MODEL_DTYPE"
+    --model_load_dtype="$MODEL_LOAD_DTYPE"
+    --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
+    --optimizer_b1="$ADAM_B1"
+    --optimizer_b2="$ADAM_B2"
+    --optimizer_eps="$ADAM_EPS"
+    --optimizer_weight_decay="$WEIGHT_DECAY"
+    --optimizer_learning_rate="$LEARNING_RATE"
+    --optimizer_schedule_type="$SCHEDULE_TYPE"
+    --optimizer_init_value="$LR_INIT_VALUE"
+    --optimizer_peak_value="$LR_PEAK_VALUE"
+    --optimizer_end_value="$LR_END_VALUE"
+    --optimizer_warmup_steps="$WARMUP_STEPS"
+    --optimizer_decay_steps="$LR_DECAY_STEPS"
+    --lora_rank="$LORA_RANK"
+    --lora_alpha="$LORA_ALPHA"
+    --trainer_backend="$TRAINER_BACKEND"
+    --checkpoint_save_interval_steps="$CHECKPOINT_SAVE_INTERVAL_STEPS"
+    --checkpoint_max_to_keep="$CHECKPOINT_MAX_TO_KEEP"
+    --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
+  )
+  if [[ -n "$OPT_CHAIN_TYPE" ]]; then
+    TRAINER_CMD+=(
+      --optimizer_opt_chain_type="$OPT_CHAIN_TYPE"
+      --optimizer_chain_kwargs="{'max_norm': $MAX_GRAD_NORM}"
+    )
+  fi
+  if [[ -n "$MAXTEXT_CKPT" ]]; then
+    TRAINER_CMD+=(--maxtext_ckpt_path="$MAXTEXT_CKPT")
+  fi
+  if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
+    TRAINER_CMD+=(--maxtext_model_name="$MAXTEXT_MODEL_NAME")
+  fi
+  if [[ -n "$MAXTEXT_OUTPUT_DIR" ]]; then
+    TRAINER_CMD+=(--maxtext_output_directory="$MAXTEXT_OUTPUT_DIR")
+  fi
+  if [[ -n "$ROLLOUT_TP" ]]; then
+    TRAINER_CMD+=(--rollout_mesh_tp="$ROLLOUT_TP")
+  fi
+  if [[ -n "$USE_WEIGHT_CONVERTER" ]]; then
+    TRAINER_CMD+=(--use_weight_converter="$USE_WEIGHT_CONVERTER")
+  fi
+  if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
+    TRAINER_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
+  fi
+  if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
+    TRAINER_CMD+=(--use_lora)
+  fi
+
+  if [[ -n "$PROFILER_STEPS" ]]; then
+    TRAINER_CMD+=(--profiler_steps=$PROFILER_STEPS)
+  fi
+  if [[ -n "$SKIP_FIRST_N_PROFILER_STEPS" ]]; then
+    TRAINER_CMD+=(--skip_first_n_profiler_steps=$SKIP_FIRST_N_PROFILER_STEPS)
+  fi
+  if [[ -n "$PROFILER_PERIOD" ]]; then
+    TRAINER_CMD+=(--profiler_period=$PROFILER_PERIOD)
+  fi
+
+  if [[ "${TRAINER_PATHWAYS:-0}" == "1" ]]; then
+    # Chips 0-3 belong to the local Pathways worker container; the trainer
+    # is a proxy client and must not grab them.
+    export JAX_PLATFORMS=proxy,cpu
+    export JAX_BACKEND_TARGET=${JAX_BACKEND_TARGET:-grpc://127.0.0.1:29000}
+    export TRAINER_PATHWAYS_LOCAL_INIT=1
+    unset TPU_VISIBLE_DEVICES TPU_VISIBLE_CHIPS LIBTPU_INIT_ARGS
+  else
+    export JAX_PLATFORMS=tpu,cpu
+    export TPU_VISIBLE_DEVICES=${TRAINER_TPU_CHIPS}
+    export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
+    export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
+    export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
+    export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
+  fi
+  export VERIFY_WEIGHTS=${VERIFY_WEIGHTS}
+  export PYTHONUNBUFFERED=1
+  env | egrep 'JAX|TPU'
+  print_command "Trainer command" "${TRAINER_CMD[@]}"
+  exec "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1
+) &
+TRAINER_PID=$!
+echo "Trainer pid=$TRAINER_PID log=$TRAINER_LOG"
+print_process_debug "trainer" "$TRAINER_PID"
+
+echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHIPS..."
+(
+  ROLLOUT_CMD=(
+    "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
+    --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
+    --process_main=tunix.experimental.examples.common.run_rollout_node.main
+
+    --port="$ROLLOUT_PORT"
+    --model_id="$MODEL_ID"
+    --model_dir="$MODEL_DIR"
+    --model_name="$MODEL_NAME"
+    --sampler="$SAMPLER"
+    --mesh_fsdp="$ROLLOUT_FSDP"
+    --mesh_tp="$ROLLOUT_TP"
+    --tokenizer_path="$TOKENIZER_PATH"
+    --max_prompt_length="$MAX_PROMPT_LENGTH"
+    --max_response_length="$MAX_RESPONSE_LENGTH"
+    --lora_rank="$LORA_RANK"
+    --lora_alpha="$LORA_ALPHA"
+    --weight_sync_mode="$WEIGHT_SYNC_MODE"
+    --in_flight_weight_updates="$IN_FLIGHT_WEIGHT_UPDATES"
+    --chat_parser="$CHAT_PARSER"
+  )
+  if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
+    ROLLOUT_CMD+=( --maxtext_model_name="$MAXTEXT_MODEL_NAME" )
+  fi
+  if [[ -n "$MAXTEXT_ATTENTION" ]]; then
+    ROLLOUT_CMD+=( --maxtext_attention="$MAXTEXT_ATTENTION" )
+  fi
+  if [[ -n "$EOS_TOKENS" ]]; then
+    ROLLOUT_CMD+=( --eos_tokens="$EOS_TOKENS" )
+  fi
+  if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
+    ROLLOUT_CMD+=(--use_lora)
+  fi
+  ROLLOUT_CMD+=(
+    --enable_trajectory_store="$TRAJECTORY_STORE_ENABLED"
+    --trajectory_store_backend="$TRAJECTORY_STORE_BACKEND"
+    --trajectory_store_dir="$TRAJECTORY_STORE_DIR"
+    --run_id="$RUN_ID"
+  )
+
+  export JAX_PLATFORMS=tpu,cpu
+  export SKIP_JAX_PRECOMPILE=1
+  export TPU_VISIBLE_DEVICES=${ROLLOUT_TPU_CHIPS}
+  export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
+  export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
+  export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
+  export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
+  export VERIFY_WEIGHTS=${VERIFY_WEIGHTS}
+  export PYTHONUNBUFFERED=1
+  env | egrep 'JAX|TPU'
+  print_command "Rollout command" "${ROLLOUT_CMD[@]}"
+  exec "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1
+) &
+ROLLOUT_PID=$!
+echo "Rollout pid=$ROLLOUT_PID log=$ROLLOUT_LOG"
+print_process_debug "rollout" "$ROLLOUT_PID"
+
+
+on_shutdown_signal() {
+  SHUTDOWN_SIGNAL_COUNT=$((SHUTDOWN_SIGNAL_COUNT + 1))
+  if (( SHUTDOWN_SIGNAL_COUNT == 1 )); then
+    DRAIN_START_SECONDS=$seconds
+    print_setion "graceful shutdown"
+    echo "Received $1. Draining workers so the trainer can finalize its"
+    echo "checkpoint. Press Ctrl+C again (after ${FORCE_ARM_SECS}s) to ABADON"
+    echo "the in-flight checkpoint and kill workers immediately."
+    exit 130
+  elif (( SECONDS - DRAIN_START_SECONDS < FORCE_ARM_SECS )); then
+    echo "Ignoring rapid $1 (within the ${FORCE_ARM_SECS}s grace period)."
+    echo "Press Ctrl+C again if you really want to abandon the checkpoint."
+  else
+    echo "Received $1. Killing workers immediately."
+    FORCE_KILL=1
+  fi
+}
+
+cleanup() {
+  trap - EXIT ERR
+  local trainer_pids=()
+  local worker_pids=()
+  local all_pids=()
+
+  if [[ -n "${TRAINER_PID:-}" ]]; then
+    trainer_pids+=("$TRAINER_PID")
+    all_pids+=("$TRAINER_PID")
+  fi
+  for pid in "${ROLLOUT_PID:-}" "${INFERENCE_PID:-}"; do
+    if [[ -n "$pid" ]]; then
+      worker_pids+=("$pid")
+      all_pids+=("$pid")
+    fi
+  done
+
+  if (( ${#all_pids[@]} == 0 )); then
+    return
+  fi
+
+  echo "Cleaning up worker processes: ${all_pids[*]}"
+  echo "Waiting worker processes shutdown (grace period: ${TRAINER_SHUTDOWN_GRACE_SECS} seconds)"
+  # SIGTERM only: the trainer installs a SIGTERM handler that finalizes any
+  # in-flight checkpoint before exiting. Wait (without a hard timeout, capped by
+  # TRAINER_SHUTDOWN_GRACE_SECS) so the checkpoint can be finalized.
+  # Non-trainer workers (rollout, inference) do not perform checkpoint
+  # finalization and are forcefully killed after WORKER_SHUTDOWN_GRACE_SECS if
+  # they fail to exit promptly.
+  kill "${all_pids[@]}" 2>/dev/null || true
+  local waited=0
+  local poll_interval=2
+  while true; do
+    if (( FORCE_KILL == 1 )); then
+      echo "Aborting after ${waited}s at user request."
+      break
+    fi
+    local alive=0
+    for pid in "${worker_pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        if (( waited >= WORKER_SHUTDOWN_GRACE_SECS )); then
+          kill -9 "$pid" 2>/dev/null || true
+        else
+          alive=1
+        fi
+      fi
+    done
+    for pid in "${trainer_pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        if (( waited >= TRAINER_SHUTDOWN_GRACE_SECS )); then
+          kill -9 "$pid" 2>/dev/null || true
+        else
+          alive=1
+        fi
+      fi
+    done
+    if (( alive == 0 )); then
+      break
+    fi
+    sleep "$poll_interval" || true
+    waited=$((waited + poll_interval))
+  done
+  for pid in "${all_pids[@]}"; do
+    kill -9 "$pid" 2>/dev/null || true
+  done
+  wait "${all_pids[@]}" 2>/dev/null || true
+  echo "Workers stopped after ${waited}s of graceful drain."
+}
+trap on_error ERR
+trap cleanup EXIT
+trap 'on_shutdown_signal SIGINT' INT
+trap 'on_shutdown_signal SIGTERM' TERM
+
+if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_INFERENCE_NODE" == "True" ]]; then
+  if [[ -z "$INFERENCE_TPU_CHIPS" ]]; then
+    echo "Error: RUN_INFERENCE_NODE requires INFERENCE_TPU_CHIPS to avoid TPU contention."
+    exit 1
+  fi
+  echo "Launching reference inference node on TPU chips $INFERENCE_TPU_CHIPS..."
+  (
+    INFERENCE_CMD=(
+      "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
+      --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
+      --process_main=tunix.experimental.examples.common.run_inference_node.main
+
+      --port="$INFERENCE_PORT"
+      --model_name="$MODEL_NAME"
+      --model_id="$MODEL_ID"
+      --model_dir="$MODEL_DIR"
+      --tokenizer_path="$TOKENIZER_PATH"
+      --compute_logps_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+      --max_prompt_length="$MAX_PROMPT_LENGTH"
+      --max_response_length="$MAX_RESPONSE_LENGTH"
+    )
+
+    export JAX_PLATFORMS=tpu,cpu
+    export TPU_VISIBLE_DEVICES=${INFERENCE_TPU_CHIPS}
+    export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
+    export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
+    export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
+    export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
+    export PYTHONUNBUFFERED=1
+    env | egrep 'JAX|TPU'
+    print_command "Inference command" "${INFERENCE_CMD[@]}"
+    exec "${INFERENCE_CMD[@]}" > "$INFERENCE_LOG" 2>&1
+  ) &
+  INFERENCE_PID=$!
+  INFERENCE_ADDR="localhost:$INFERENCE_PORT"
+  echo "Inference pid=$INFERENCE_PID log=$INFERENCE_LOG"
+  print_process_debug "inference" "$INFERENCE_PID"
+fi
+
+echo "Waiting for gRPC servers to bind..."
+wait_for_port "trainer" "$TRAINER_PORT" "$TRAINER_PID" "$TRAINER_LOG"
+wait_for_port "rollout" "$ROLLOUT_PORT" "$ROLLOUT_PID" "$ROLLOUT_LOG"
+if [[ -n "${INFERENCE_PID:-}" ]]; then
+  wait_for_port "inference" "$INFERENCE_PORT" "$INFERENCE_PID" "$INFERENCE_LOG"
+fi
+dump_debug_snapshot
+
+echo "Launching CPU orchestrator..."
+(
+  ORCHESTRATOR_CMD=(
+    "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
+    --discovery_id="${ORCHESTRATOR_ID}"
+    --discovery_port="${ORCHESTRATOR_PORT}"
+    --process_main=tunix.experimental.examples.math_gsm8k_dist.run_gsm8k_dist_grpo.main
+
+    --model_id="$MODEL_ID"
+    --tokenizer_path="$TOKENIZER_PATH"
+    --batch_size="$BATCH_SIZE"
+    --mini_batch_size="$MINI_BATCH_SIZE"
+    --num_generations="$NUM_GENERATIONS"
+    --max_steps="$MAX_STEPS"
+    --max_prompt_length="$MAX_PROMPT_LENGTH"
+    --max_response_length="$MAX_RESPONSE_LENGTH"
+    --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+    --beta="$BETA"
+    --epsilon="$EPSILON"
+    --reward_mode="$REWARD_MODE"
+    --max_staleness="$MAX_STALENESS"
+    --trajectory_group_order="$TRAJECTORY_GROUP_ORDER"
+    --flush_metrics_every_n_steps="$FLUSH_METRICS_EVERY_N_STEPS"
+    --tfds_data_dir="$TFDS_DATA_DIR"
+    --tfds_split="$TFDS_SPLIT"
+    --seed="$SEED"
+    --weight_sync_mode="$WEIGHT_SYNC_MODE"
+    --stop_workers_on_exit
+  )
+  if [[ "$SHUFFLE" == "0" || "$SHUFFLE" == "false" || "$SHUFFLE" == "False" ]]; then
+    ORCHESTRATOR_CMD+=(--no-shuffle)
+  else
+    ORCHESTRATOR_CMD+=(--shuffle)
+  fi
+  if [[ -n "$INFERENCE_ADDR" ]]; then
+    ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
+  fi
+  if [[ "$USE_ROLLOUT_LOGPS" == "false" || "$USE_ROLLOUT_LOGPS" == "False" || "$USE_ROLLOUT_LOGPS" == "0" ]]; then
+    ORCHESTRATOR_CMD+=(--no-use_rollout_logps)
+  else
+    ORCHESTRATOR_CMD+=(--use_rollout_logps)
+  fi
+  if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
+    ORCHESTRATOR_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
+  fi
+  if [[ -n "$MAX_SEGMENTS_PER_PACKED_ROW" ]]; then
+    ORCHESTRATOR_CMD+=(--max_segments_per_packed_row="$MAX_SEGMENTS_PER_PACKED_ROW")
+  fi
+  if [[ -n "$SEGMENT_ALIGNMENT_BOUNDARY" ]]; then
+    ORCHESTRATOR_CMD+=(--segment_alignment_boundary="$SEGMENT_ALIGNMENT_BOUNDARY")
+  fi
+  if [[ -n "$TRAINER_FSDP" ]]; then
+    ORCHESTRATOR_CMD+=(--num_data_shards="$(( ${TRAINER_FSDP:-1} * ${TRAINER_EXPERT:-1} ))")
+  fi
+  if [[ -n "$TRAJECTORY_LOG_DIR" ]]; then
+    ORCHESTRATOR_CMD+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")
+  fi
+  ORCHESTRATOR_CMD+=(
+    --enable_trajectory_store="$TRAJECTORY_STORE_ENABLED"
+    --trajectory_store_backend="$TRAJECTORY_STORE_BACKEND"
+    --trajectory_store_dir="$TRAJECTORY_STORE_DIR"
+    --run_id="$RUN_ID"
+  )
+
+  export JAX_PLATFORMS=cpu
+  export PYTHONUNBUFFERED=1
+  export WANDB_PROJECT="$WANDB_PROJECT"
+  export WANDB_RUN_NAME="$WANDB_RUN_NAME"
+  export WANDB_API_KEY="$WANDB_API_KEY"
+  env | egrep 'JAX|TPU'
+  print_command "Orchestrator command" "${ORCHESTRATOR_CMD[@]}"
+  "${ORCHESTRATOR_CMD[@]}" > "$ORCHESTRATOR_LOG" 2>&1
+) || {
+  exit_code="$?"
+  echo "Error: CPU orchestrator failed with exit code $exit_code."
+  print_file_debug "orchestrator" "$ORCHESTRATOR_LOG"
+  exit "$exit_code"
+}
+
+echo "Distributed GSM8K GRPO chain demo (vLLM) finished successfully."

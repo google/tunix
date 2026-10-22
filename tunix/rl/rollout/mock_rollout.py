@@ -332,13 +332,13 @@ class MockRollout(base_rollout.BaseRollout):
   def pad_id(self) -> int:
     if self._tokenizer is not None and hasattr(self._tokenizer, "pad_id"):
       pad_id_attr = self._tokenizer.pad_id
-      return pad_id_attr() if callable(pad_id_attr) else pad_id_attr  # pyrefly: ignore[bad-return]
+      return pad_id_attr() if callable(pad_id_attr) else pad_id_attr
     return self._pad_id
 
   def eos_id(self) -> int:
     if self._tokenizer is not None and hasattr(self._tokenizer, "eos_id"):
       eos_id_attr = self._tokenizer.eos_id
-      return eos_id_attr() if callable(eos_id_attr) else eos_id_attr  # pyrefly: ignore[bad-return]
+      return eos_id_attr() if callable(eos_id_attr) else eos_id_attr
     return self._eos_id
 
   def model(self) -> Any:

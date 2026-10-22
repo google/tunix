@@ -21,8 +21,8 @@ import os
 
 import numpy as np
 import pandas as pd
-import datasets as datasets_lib
-import grain
+import datasets as datasets_lib  # pyrefly: ignore[missing-import]
+import grain  # pyrefly: ignore[missing-import]
 
 
 DEFAULT_DIR = os.getcwd()
@@ -44,7 +44,7 @@ def get_frozenlake_dict(seed: int, size: int, p: float) -> dict:
 
 
 def generate_dataset_parameters(
-    size: int, random_seed: int = 42
+    size: int, random_seed: int = 42, grid_size_range: tuple[int, int] = (2, 9)
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
   """Generate random parameters for FrozenLake environments.
 
@@ -56,13 +56,16 @@ def generate_dataset_parameters(
   Args:
       size: Number of environment configurations to generate
       random_seed: Random seed for reproducible parameter generation
+      grid_size_range: Lower (inclusive) and upper (exclusive) grid size bounds
 
   Returns:
       Tuple of (seeds, sizes, p_values) numpy arrays
   """
   np.random.seed(random_seed)
   seeds = np.random.randint(0, 100000, size=size)
-  sizes = np.random.randint(2, 10, size=size)  # Grid sizes from 2x2 to 9x9
+  sizes = np.random.randint(
+      *grid_size_range, size=size
+  )  # Grid sizes from 2x2 to 9x9
   p_values = np.random.uniform(
       0.6, 0.85, size=size
   )  # Slip probability between 0.15-0.4
@@ -92,19 +95,22 @@ def create_dataset(
     seed: int = 42,
     train_size: int = 10000,
     test_size: int = 100,
+    grid_size_range: tuple[int, int] = (2, 9),
     **kwargs
 ) -> grain.MapDataset:
   """Lively generates the dataset, saves it to a local directory, and returns a MapDataset.
-  
+
   This function acts as the entry point for the Tunix GRPO pipeline.
   """
   os.makedirs(data_dir, exist_ok=True)
   filepath = os.path.join(data_dir, f"{split}.parquet")
-  
+
   if not os.path.exists(filepath):
     size = train_size if split == "train" else test_size
     print(f"Dynamically generating {size} instances for '{split}' split...")
-    seeds, sizes, ps = generate_dataset_parameters(size, random_seed=seed)
+    seeds, sizes, ps = generate_dataset_parameters(
+        size, random_seed=seed, grid_size_range=grid_size_range
+    )
     data = [
         get_frozenlake_dict(s, sizes[idx], ps[idx])
         for idx, s in enumerate(seeds)
@@ -112,15 +118,15 @@ def create_dataset(
     save_dataset(data, filepath)
   else:
     print(f"Loading existing dataset from {filepath}")
-    
+
   df = pd.read_parquet(filepath)
   hf_ds = datasets_lib.Dataset.from_pandas(df)
-  
+
   def process_item(item):
     item["prompts"] = ""
     return item
-    
-  return grain.MapDataset.source(hf_ds).map(process_item)
+
+  return grain.MapDataset.source(hf_ds).map(process_item)  # pyrefly: ignore[bad-argument-type]
 
 
 def main():

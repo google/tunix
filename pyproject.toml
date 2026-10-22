@@ -5,16 +5,16 @@ authors = [
   { name = "Tunix Developers", email = "tunix-dev@google.com" },
 ]
 description = "A lightweight JAX-native LLM post-training framework."
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
@@ -26,7 +26,9 @@ dependencies = [
   "hf_transfer",  # Huggingface caching in CI
   "huggingface_hub",
   "importlib_resources",
-  "jax[tpu]>=0.6.0,!=0.7.2,<0.11.0", # Jax 0.7.2 has performance regression on OSS, 0.11.0 breaks vLLM of nightly-20260406-581c4d4-f6983f0.
+  # Jax 0.7.2 has performance regression on OSS
+  # Jax 0.11.1 removed jax.experimental.hijax.MutableHiType, which flax (through 0.12.8, the newest release) still subclasses
+  "jax[tpu]>=0.6.0,!=0.7.2,<0.11.1",
   "jaxtyping",
   "jinja2",  # Huggingface chat template
   "kagglehub",
@@ -34,12 +36,14 @@ dependencies = [
   "omegaconf", # CLI config
   "orbax-checkpoint>=0.12.0",
   "pillow",  # Image processing
+  "pydantic",  # data modeling and serialization for agent trajectories
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
   "perfetto",  # Perfetto trace writer for metrics export
   "qwix>=0.1.6",
   "sentencepiece",
   "safetensors<0.8", # higher versions breaks with jax >=0.9
+  "sqlalchemy",
   "sympy",  # Eval result parsing
   "tensorflow_datasets",
   "tqdm",
@@ -69,27 +73,49 @@ test = [
   "pytest-xdist",
   "gcsfs",
   "chex",
+  "opentelemetry-sdk>=1.25.0",
+  "wandb",  # Offline end-to-end test for the OpenTelemetry W&B exporter
 ]
 cli = [
   "tensorflow",
+]
+otel = [
+  # Experimental OpenTelemetry double-write path for MetricsLogger.
+  "opentelemetry-api>=1.25.0",
+  "opentelemetry-sdk>=1.25.0",
 ]
 frozenlake = [
   "gymnasium",
 ]
 experimental = [
+  "absl-py",
   "cloudpickle",  # serialization envelope for the remote-execution actor protocol
+  "etils[epath]",  # path abstraction for local and GCS trajectory stores
   "grpcio",  # transport for cross-process worker execution
+  "grpcio-tools",
+  "pandas",  # tabular run statistics for the trajectory explorer
+  "simple_parsing",  # Argument parsing for CLI
+  "termcolor",  # terminal formatting for CLI subcommands
 ]
 
 [project.urls]
 Source = "https://github.com/google/tunix"
 
 [build-system]
-requires = ["setuptools >= 77.0.3"]
-build-backend = "setuptools.build_meta"
+requires = [
+  "scikit-build-core >= 0.10",
+  "nanobind >= 2.5.0",
+  "cmake >= 3.19",
+  "ninja",
+]
+build-backend = "scikit_build_core.build"
 
-[tool.setuptools.packages.find]
-include = ["tunix*"]
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["tunix"]
+wheel.py-api = "cp312"
+editable.mode = "inplace"
 
 [tool.pyink]
 line-length = 80
@@ -119,3 +145,4 @@ known_third_party = ["tunix"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+addopts = ["--import-mode=importlib"]

@@ -94,6 +94,12 @@ class RecentMessagesTest(parameterized.TestCase):
     self.assertEqual(
         utils.get_recent_assistant_user_messages(messages), expected_output
     )
+    self.assertEqual(
+        utils.get_recent_assistant_message(messages), expected_output[0]
+    )
+    self.assertEqual(
+        utils.get_recent_env_messages(messages), expected_output[1]
+    )
 
 
 class ConvertMessagesToStringTest(parameterized.TestCase):
@@ -356,6 +362,88 @@ class MessagesToTokensTest(unittest.TestCase):
     self.assertEqual(tokens, expected_tokens)
     self.assertEqual(masks, [0] * len(expected_tokens))
     mock_tokenizer_simple.encode.assert_called_with(expected_text)
+
+
+class TokenContinuityTest(absltest.TestCase):
+  """The later-turn prompt is the owned first prompt plus every recorded turn."""
+
+  @staticmethod
+  def _step(sampled, suffix, env):
+    from tunix.rl.agentic.agents import agent_types  # pylint: disable=g-import-not-at-top
+
+    return agent_types.Step(
+        assistant_tokens=np.array(sampled + suffix, dtype=np.int32),
+        env_tokens=np.array(env, dtype=np.int32),
+    )
+
+  def test_continuation_is_prompt_plus_assistant_suffix_and_environment(self):
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+
+    trajectory = SimpleNamespace(
+        prompt_tokens=np.array([0, 0, 0, 100, 101]),  # left padded
+        prompt_length=3,
+        steps=[
+            self._step([10, 11], [90], [20, 21]),
+            self._step([12], [90], [22]),
+        ],
+    )
+    expected = [0, 100, 101, 10, 11, 90, 20, 21, 12, 90, 22]
+    result = utils.continuation_prompt_tokens(trajectory)
+    np.testing.assert_array_equal(result, expected)
+    trajectory.steps[0].assistant_tokens[0] += 1  # result must not alias steps
+    np.testing.assert_array_equal(result, expected)
+
+  def test_parser_may_only_append_to_sampled_tokens(self):
+    np.testing.assert_array_equal(
+        utils.assistant_with_suffix([0, 7], [0, 7, 9], 1), [0, 7, 9]
+    )
+    with self.assertRaisesRegex(ValueError, 'only append'):
+      utils.assistant_with_suffix([1], [2, 9], 1)  # prefix changed
+    with self.assertRaisesRegex(ValueError, 'only append'):
+      utils.assistant_with_suffix([1], [1, 9], 0)  # miscounted suffix
+
+  def test_continuation_prompt_tokens_handles_none_env_tokens(self):
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+    from tunix.rl.agentic.agents import agent_types  # pylint: disable=g-import-not-at-top
+
+    trajectory = SimpleNamespace(
+        prompt_tokens=np.array([0, 0, 100, 101]),
+        prompt_length=2,
+        steps=[
+            agent_types.Step(
+                assistant_tokens=np.array([10, 11, 90], dtype=np.int32),
+                env_tokens=None,
+            )
+        ],
+    )
+    result = utils.continuation_prompt_tokens(trajectory)
+    np.testing.assert_array_equal(result, [100, 101, 10, 11, 90])
+
+  def test_tokenize_and_generate_masks_dedup_bos_slices_masks(self):
+    mock_tokenizer = mock.MagicMock()
+    mock_tokenizer.encode.side_effect = [
+        [2, 2, 10, 11],  # two leading BOS tokens (id=2)
+        [20, 21],
+    ]
+    mock_tokenizer.dedup_bos_ids.side_effect = lambda toks: toks[1:]
+    mock_parser = mock.MagicMock()
+    mock_parser.preprocess_messages.side_effect = lambda m: m
+    mock_parser.assistant_token = '<assistant>'
+    mock_parser.parse.return_value = 'parsed'
+
+    messages = [
+        {'role': 'user', 'content': 'hello'},
+        {'role': 'assistant', 'content': 'world'},
+    ]
+    tokens, masks = utils.tokenize_and_generate_masks(
+        messages,
+        tokenizer=mock_tokenizer,
+        parser=mock_parser,
+        contains_first_msg=True,
+        contains_generation_msg=False,
+    )
+    self.assertEqual(tokens, [2, 10, 11, 20, 21])
+    self.assertEqual(masks, [0, 0, 0, 1, 1])
 
 
 if __name__ == '__main__':

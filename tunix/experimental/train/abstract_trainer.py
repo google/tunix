@@ -18,7 +18,7 @@ Defines the pure ML algorithmic core of a trainer.
 """
 
 import abc
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics
@@ -80,15 +80,21 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def compile(self, dummy_data: Any) -> None:
-    """Triggers JAX compilation. `with_loss_fn` must be called first.
+  def compile(
+      self, dummy_data: datatypes.TrainerPayload | None = None
+  ) -> None:
+    """Triggers ahead-of-time JAX compilation. `with_loss_fn` must be called first.
 
-    Idempotent; safe to call multiple times. Under JAX jit semantics, XLA
-    compilation itself still happens on the first call per input shape; this
-    method constructs the jitted callables and applies optimizer sharding so
-    the first step avoids double compilation. Does NOT restore checkpoints.
+    Idempotent; safe to call multiple times. When `dummy_data` is `None`,
+    compilation is deferred (no-op) until a concrete payload is supplied.
+    When `dummy_data` is provided, lowers and compiles the trainer step
+    executables (`fwd_bwd`, `update`, and `eval`) ahead of time so the first
+    real step hits the JIT cache without mutating model or optimizer state.
+    Does NOT restore checkpoints.
+
     Args:
-      dummy_data: A dummy batch of data to trigger compilation.
+      dummy_data: Optional dummy batch of data to lower and compile step
+        executables ahead of time. If `None`, compilation is deferred.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement compile."
@@ -139,6 +145,26 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
+  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Read-only.
+
+    Runs a forward pass with the trainer model and caller-supplied function.
+
+    The trainer owns model access and shards `args`/`kwargs` on its data axis;
+    `fn` owns the computation and must not mutate the model.
+    Args:
+      fn: Called as `fn(model, *args, **kwargs)`.
+      *args: Positional arguments forwarded to `fn` after sharding.
+      **kwargs: Keyword arguments forwarded to `fn` after sharding.
+
+    Returns:
+      Whatever `fn` returns.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement fwd_only."
+    )
+
+  @abc.abstractmethod
   def save_checkpoint(self, metadata: Any, **kwargs) -> None:
     """Force the trainer to serialize its state (model + optimizer).
 
@@ -152,11 +178,15 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def restore_checkpoint(self, **kwargs) -> Any:
-    """Restore state from latest checkpoint and return the metadata pytree.
+  def restore_checkpoint(
+      self, step: int | None = None, **kwargs
+  ) -> Any:
+    """Restore state from checkpoint and return the metadata pytree.
 
     The metadata is the same as what is used on save_checkpoint.
     Args:
+      step: Checkpoint step to restore. If None, restores from the latest
+        checkpoint.
       **kwargs: Implementation-specific options.
 
     Returns:
@@ -165,6 +195,17 @@ class AbstractTrainer(abc.ABC):
     raise NotImplementedError(
         f"{type(self).__name__} does not implement restore_checkpoint."
     )
+
+  def set_target_state(self, target_state: Any) -> None:
+    """Stores target state shape/dtype pytree for rollout parameter conversion.
+
+    Default implementation is a no-op for trainers that do not require state
+    conversion before weight synchronization.
+
+    Args:
+      target_state: The target state pytree from the rollout worker.
+    """
+    pass
 
   @abc.abstractmethod
   def prepare_weight_sync(self, **kwargs) -> None:

@@ -20,8 +20,11 @@ import grain
 import tensorflow_datasets as tfds
 from tunix.utils import token_sanitization
 
-# For OSS usage
-import tensorflow_datasets.text.gsm8k
+try:
+  # For OSS usage
+  import tensorflow_datasets.text.gsm8k  # pylint: disable=unused-import
+except (ImportError, ModuleNotFoundError):
+  pass
 
 reasoning_start = "<reasoning>"
 reasoning_end = "</reasoning>"
@@ -150,7 +153,7 @@ def get_huggingface_dataset(
       split=split,
   )
   data = data.shuffle(seed=shuffle_seed)
-  return grain.MapDataset.source(data)  # pyrefly: ignore[bad-argument-type]
+  return grain.MapDataset.source(data)
 
 
 def create_dataset(
@@ -195,7 +198,11 @@ def create_dataset(
     ds = get_huggingface_dataset(dataset_name=dataset, split=split)
   # tfds dataset
   elif data_source == "tfds" and dataset in ["gsm8k"]:
-    data_dir = os.path.join("./data", split) if tfds_download else None
+    data_dir = (
+        os.environ.get("TFDS_DATA_DIR") or os.path.join("./data", split)
+        if tfds_download
+        else None
+    )
     ds = get_tfds_dataset(
         dataset_name=dataset,
         data_dir=data_dir,

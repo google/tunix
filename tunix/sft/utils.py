@@ -15,11 +15,12 @@
 """Simple utils used by SFT."""
 
 import collections
+from collections.abc import Iterable, Mapping
 import contextlib
 import functools
 import gc
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from absl import logging
 from flax import nnx
@@ -27,6 +28,7 @@ import flax.struct
 import humanize
 import jax
 import jax.numpy as jnp
+import numpy as np
 from tunix.oss import utils as google_utils
 
 
@@ -219,6 +221,78 @@ class WeightedMetric:
     return self.unreduced_sum * self.compute_scale()
 
 
+# The full field contract `weighted_metric_mean` relies on. Checking all four
+# rather than just the two unreduced ones keeps the predicate honest: anything
+# it admits can be reduced end to end without tripping over a missing bound
+# partway through.
+_WEIGHTED_METRIC_FIELDS = ("unreduced_sum", "denominator", "eps", "min_denom")
+
+
+def is_weighted_metric(value: Any) -> bool:
+  """Structurally identifies an unreduced weighted metric.
+
+  `tunix.experimental.metrics.WeightedMetric` mirrors `WeightedMetric` field for
+  field without inheriting from it, so reducers have to accept both. Matching on
+  the fields rather than the type covers either one without `sft.utils` taking a
+  dependency on `experimental`.
+
+  Args:
+    value: Candidate metric value to inspect.
+
+  Returns:
+    True if `value` exposes all `_WEIGHTED_METRIC_FIELDS`.
+  """
+  return all(hasattr(value, field) for field in _WEIGHTED_METRIC_FIELDS)
+
+
+def weighted_metric_mean(values: Iterable[Any]) -> float:
+  """Aggregates unreduced metrics without microbatch-mean bias.
+
+  Sums numerators and denominators before dividing, rather than averaging
+  per-microbatch means, which would weight microbatches with unequal
+  denominators incorrectly. Subclasses of `WeightedMetric` may define a custom
+  `reduce(cls, values)` classmethod for non-linear sufficient-statistic
+  reductions across microbatches.
+
+  Args:
+    values: Sequence of unreduced `WeightedMetric` values across microbatches.
+
+  Returns:
+    The global weighted mean across microbatches.
+  """
+  values = list(values)
+  if not values:
+    return 0.0
+  if not all(is_weighted_metric(value) for value in values):
+    raise TypeError("weighted metrics must not include scalar values")
+
+  eps = values[0].eps
+  min_denom = values[0].min_denom
+  if any(
+      value.eps != eps or value.min_denom != min_denom for value in values[1:]
+  ):
+    raise ValueError("weighted metrics must use consistent denominator bounds")
+
+  reduce_fn: Callable[[Any], float] | None = getattr(
+      type(values[0]), "reduce", None
+  )
+  if reduce_fn is not None:
+    return float(reduce_fn(values))
+
+  numerator = sum(float(np.asarray(value.unreduced_sum)) for value in values)
+  denominator = sum(float(np.asarray(value.denominator)) for value in values)
+  if eps is not None:
+    denominator += eps
+  if min_denom is not None:
+    denominator = max(denominator, min_denom)
+  return numerator / denominator if denominator else 0.0
+
+
+def metric_reducer(metric: Any) -> Callable[[Any], Any]:
+  """Selects the reduction that matches a buffered auxiliary metric."""
+  return weighted_metric_mean if is_weighted_metric(metric) else np.mean
+
+
 @flax.struct.dataclass
 class LossOutput:
   """Output of a loss function containing unreduced primary loss and aux metrics.
@@ -229,4 +303,35 @@ class LossOutput:
   """
 
   primary_loss: WeightedMetric
-  aux_metrics: Dict[str, WeightedMetric]
+  aux_metrics: Mapping[str, WeightedMetric | jax.Array]
+
+
+_WRAPPER_ATTRS = (
+    "inner_opt_state",
+    "inner_state",
+    "inner_states",
+    "fast_state",
+)
+
+
+def try_get_learning_rate(opt_state: Any) -> float | jax.Array | None:
+  """Extracts the last injected learning rate from an optax state tree."""
+  def _walk(state: Any) -> Iterable[Any]:
+    if (
+        isinstance(hp := getattr(state, "hyperparams", None), Mapping)
+        and "learning_rate" in hp
+    ):
+      yield getattr(hp["learning_rate"], "value", hp["learning_rate"])
+    if isinstance(state, tuple) and not hasattr(state, "_fields"):
+      children = state
+    elif isinstance(state, Mapping):
+      children = state.values()
+    else:
+      children = (
+          getattr(state, a) for a in _WRAPPER_ATTRS if hasattr(state, a)
+      )
+    for child in children:
+      yield from _walk(child)
+
+  lrs = list(_walk(opt_state))
+  return lrs[-1] if lrs else None

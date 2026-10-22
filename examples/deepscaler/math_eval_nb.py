@@ -330,7 +330,7 @@ class Qwen25MathEvaluator:
           model=self.model,
           backend="vllm_jax",
       )
-      self.sampler_vllm = vllm_sampler.VllmSampler(  # pyrefly: ignore[bad-instantiation]
+      self.sampler_vllm = vllm_sampler.VllmSampler(
           tokenizer=self.tokenizer,
           config=vllm_sampler.VllmConfig(
               mesh=self.mesh,

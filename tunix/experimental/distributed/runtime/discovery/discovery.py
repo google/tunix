@@ -79,6 +79,7 @@ class DiscoveryServer:
     if self._server:
       self._server.stop(timeout)
       self._server.wait_for_termination(timeout)
+      self._server = None
 
 
 def register(
@@ -110,16 +111,20 @@ def register(
     )
 
     delay = 1
+    count = 0
     while True:
       try:
         stub.Register(request)
         break
       except grpc.RpcError as e:
-        if e.code() == grpc.StatusCode.UNAVAILABLE:  # pytype: disable=attribute-error
+        if e.code() == grpc.StatusCode.UNAVAILABLE:  # pyrefly: ignore[missing-attribute]
           time.sleep(delay)
-          delay = min(delay * 2, 300)
+          count += 1
+          if count >= 60:
+            delay = min(delay * 2, 300)
+            count = 0
           continue
         else:
           raise RuntimeError(
-              f"discovery register failed: {e.code()} - {e.details()}"  # pytype: disable=attribute-error
+              f"discovery register failed: {e.code()} - {e.details()}"  # pyrefly: ignore[missing-attribute]
           )

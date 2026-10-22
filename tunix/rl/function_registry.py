@@ -132,6 +132,11 @@ def register_policy_loss_fn(
   return default_registry.register(_POLICY_LOSS_FN_CATEGORY, name)
 
 
+def list_policy_loss_fns() -> List[str]:
+  """Lists the names of all registered policy loss functions."""
+  return default_registry.list_functions(_POLICY_LOSS_FN_CATEGORY)
+
+
 def get_advantage_estimator(name: str) -> Callable[..., Any]:
   """Returns the advantage estimator function by name."""
   return default_registry.get(_ADVANTAGE_ESTIMATOR_CATEGORY, name)
@@ -142,6 +147,11 @@ def register_advantage_estimator(
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
   """Returns a decorator to register an advantage estimator function by name."""
   return default_registry.register(_ADVANTAGE_ESTIMATOR_CATEGORY, name)
+
+
+def list_advantage_estimators() -> List[str]:
+  """Lists the names of all registered advantage estimator functions."""
+  return default_registry.list_functions(_ADVANTAGE_ESTIMATOR_CATEGORY)
 
 
 def get_reward_manager(name: str) -> Callable[..., Any]:

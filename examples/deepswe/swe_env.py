@@ -1,20 +1,55 @@
-import json
-import os
-from typing import Any, Optional, cast
-import numpy as np
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
+"""Software Engineering Environment (SWEEnv) for code-related tasks."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import time
+from typing import Any, Optional, cast
+
+import numpy as np
+from examples.deepswe import sandbox_utils
+from tunix.rl.agentic.environments.base_environment import BaseTaskEnv
+from tunix.rl.agentic.environments.base_environment import EnvStepResult
+
+# Re-exports for backward compatibility
+PrewarmDatasetIterator = sandbox_utils.PrewarmDatasetIterator
+_init_global_fleet = sandbox_utils.init_global_fleet
+_get_global_fleet = sandbox_utils.get_global_fleet
+_teardown_global_fleet = sandbox_utils.teardown_global_fleet
+_patch_r2egym_for_agent_sandbox = sandbox_utils.patch_r2egym_for_agent_sandbox
+_normalize_tasks_for_fleet = sandbox_utils.normalize_tasks_for_fleet
+_get_image_rewrite_fn = sandbox_utils.get_image_rewrite_fn
+_MAX_IN_FLIGHT_BATCHES = 2
+_GLOBAL_FLEET = None
+
+
+# pylint: disable=g-import-not-at-top,g-blanket-type-suppression,g-multiple-import
 try:
-  import r2egym  # pytype: disable=import-error
-  from r2egym.agenthub.action import Action  # pytype: disable=import-error
-  from r2egym.agenthub.environment.env import EnvArgs, RepoEnv  # pytype: disable=import-error
+  import r2egym
+  from r2egym.agenthub.action import Action
+  from r2egym.agenthub.environment.env import EnvArgs, RepoEnv
 except ImportError:
   r2egym = cast(Any, None)
   EnvArgs = cast(Any, None)
   RepoEnv = cast(Any, None)
   Action = cast(Any, None)
-
-from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
-
+# pylint: enable=g-import-not-at-top,g-blanket-type-suppression,g-multiple-import
 
 if r2egym:
   R2EGYM_PATH = os.path.dirname(r2egym.__file__)
@@ -67,6 +102,8 @@ class SWEEnv(BaseTaskEnv):
       verbose: bool = False,
       scaffold: str = "r2egym",
       max_steps: int = 1,
+      use_agent_sandbox: bool = False,
+      fleet: Any | None = None,
   ):
     """Initialize the SWE environment.
 
@@ -78,6 +115,12 @@ class SWEEnv(BaseTaskEnv):
         reward_timeout: Timeout for reward computation in seconds.
         backend: Backend to use for the environment.
         delete_image: Whether to delete the Docker image after closing.
+        verbose: Verbose output toggle.
+        scaffold: Scaffold tool set ('r2egym' or 'sweagent').
+        max_steps: Maximum interaction steps.
+        use_agent_sandbox: If True, strictly forces SandboxFleet and
+          AgentSandboxRuntime.
+        fleet: Optional SandboxFleet instance to use.
     """
     self.entry = _unpack_entry(entry)
     self.step_timeout = step_timeout
@@ -85,9 +128,13 @@ class SWEEnv(BaseTaskEnv):
     self.total_steps = 0
     self.delete_image = delete_image
     self.backend = backend
-    self.env = None
+    self.env: Any = None
+    self.handle: Any = None
     self.verbose = verbose
     self.scaffold = scaffold
+    self.use_agent_sandbox = use_agent_sandbox
+    self.fleet = fleet
+
     assert scaffold in [
         "r2egym",
         "sweagent",
@@ -100,37 +147,114 @@ class SWEEnv(BaseTaskEnv):
     self.extra_kwargs["group_id"] = group_id
     self.extra_kwargs["pair_index"] = pair_index
 
-  def _initial_observation(self) -> Any:
-    if not self.env:
-      # Initialize environment if not created yet.
-      env_args = EnvArgs(ds=self.entry)
-      self.env = RepoEnv(
-          env_args,
-          backend=self.backend,
-          step_timeout=self.step_timeout,
-          reward_timeout=self.reward_timeout,
-          verbose=self.verbose,
-      )
-    else:
-      self.env.reset()
-    self.final_reward_fn = self.env.compute_reward
+  def _init_agent_sandbox_env(self) -> None:
+    sandbox_utils.patch_r2egym_for_agent_sandbox()
+    from agent_sandbox_rl import Task  # pyrefly: ignore[missing-import]
+    from agent_sandbox_rl.adapters.r2egym import (  # pyrefly: ignore[missing-import]
+        make_fleet_repo_env,
+        r2egym_command_files,
+    )
+
+    fleet = self.fleet or sandbox_utils.get_global_fleet()
+    msg = "[SWEEnv] Acquiring SandboxHandle from SandboxFleet!"
+    logging.info(msg)
+    task_id = str(
+        self.entry.get("instance_id", self.entry.get("docker_image", "default"))
+    )
+    task_img = self.entry.get("docker_image", "default")
+    if isinstance(task_img, (list, np.ndarray)):
+      task_img = task_img[0] if len(task_img) > 0 else "default"
+    task_img_str = str(task_img)
+    rewrite_fn = _get_image_rewrite_fn(
+        getattr(fleet, "_image_rewrite_fn", None)
+    )
+    if rewrite_fn:
+      task_img_str = rewrite_fn(task_img_str)
+    task = Task(
+        id=task_id,
+        image=task_img_str,
+        metadata={"ds": self.entry},
+    )
+    max_acquire_retries = 5
+    for attempt in range(max_acquire_retries):
+      try:
+        self.handle = fleet.acquire(task)
+        break
+      except Exception as e:
+        if attempt < max_acquire_retries - 1:
+          logging.warning(
+              "[SWEEnv] fleet.acquire failed (attempt %d/%d): %s; retrying in"
+              " %ds...",
+              attempt + 1,
+              max_acquire_retries,
+              e,
+              5 * (attempt + 1),
+          )
+          time.sleep(5 * (attempt + 1))
+        else:
+          raise
+    try:
+      cmd_files = r2egym_command_files()
+    except Exception:  # pylint: disable=broad-exception-caught
+      cmd_files = None
+    self.env = make_fleet_repo_env(
+        self.handle,
+        command_files=cmd_files,
+        step_timeout=self.step_timeout,
+        reward_timeout=self.reward_timeout,
+        verbose=self.verbose,
+    )
+
+  def _init_local_repo_env(self) -> None:
+    # Initialize standard local Docker RepoEnv
+    global EnvArgs, RepoEnv, Action
+    if EnvArgs is None:
+      from r2egym.agenthub.action import Action
+      from r2egym.agenthub.environment.env import EnvArgs, RepoEnv
+    env_args = EnvArgs(ds=self.entry)
+    self.env = RepoEnv(
+        env_args,
+        backend=self.backend,
+        step_timeout=self.step_timeout,
+        reward_timeout=self.reward_timeout,
+        verbose=self.verbose,
+    )
     if self.scaffold == "r2egym":
       self.env.add_commands(R2EGYM_COMMAND_FILES)
-    else:
+    elif self.scaffold == "sweagent":
       self.env.add_commands(SWEAGENT_COMMAND_FILES)
+
+  def _initial_observation(self) -> Any:
+    if not self.env:
+      if self.use_agent_sandbox:
+        self._init_agent_sandbox_env()
+      else:
+        self._init_local_repo_env()
+    else:
+      self.env.reset()
+
+    self.final_reward_fn = self.env.compute_reward  # pyrefly: ignore[missing-attribute]
     self.total_steps = 0
 
     # Polls docker runtime to get task instruction.
-    return self.env.get_task_instruction()
+    return self.env.get_task_instruction()  # pyrefly: ignore[missing-attribute]
 
   def _step_impl(self, action: Any) -> EnvStepResult:
+    global Action
+    if Action is None:
+      from r2egym.agenthub.action import Action
     if isinstance(action, str):
       action_obj = Action.from_string(action)
     else:
       action_obj = action
 
     if not action_obj.function_name:
-      return EnvStepResult(observation="", reward=0, done=False, info={})
+      return EnvStepResult(
+          observation="",
+          reward=0,
+          done=False,
+          info={"max_steps": self.max_steps},
+      )
 
     # RepoEnv always returns 0 reward, must be evaluated by DockerRuntime.
     if not self.env:
@@ -148,9 +272,26 @@ class SWEEnv(BaseTaskEnv):
     if self.env is not None:
       self.env.close()
 
-    if self.delete_image and self.env:
-      docker_image = self.env.runtime.docker_image
-      os.system(f"docker rmi {docker_image}")
+    fleet = self.fleet or getattr(sandbox_utils, "_GLOBAL_FLEET", None)
+    if (
+        hasattr(self, "handle")
+        and self.handle is not None
+        and fleet is not None
+    ):
+      msg = "[SWEEnv] Releasing SandboxHandle back to SandboxFleet."
+      logging.info(msg)
+      fleet.release(self.handle)
+      self.handle = None
+
+    if (
+        self.delete_image
+        and not self.use_agent_sandbox
+        and self.env
+        and hasattr(self.env, "runtime")
+    ):
+      docker_image = getattr(self.env.runtime, "docker_image", None)
+      if docker_image:
+        os.system(f"docker rmi {docker_image}")
 
   @staticmethod
   def from_dict(extra_info: dict | str) -> "SWEEnv":  # pyrefly: ignore[bad-override]

@@ -20,7 +20,10 @@ set -euo pipefail
 set -x
 
 # Install uv
-curl -LsSf https://astral.sh/uv/install.sh | sh
+if ! command -v uv &> /dev/null; then
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  source $HOME/.local/bin/env
+fi
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 REQ_FILE=${REQ_FILE:-"${ROOT_DIR}/requirements/requirements.txt"}

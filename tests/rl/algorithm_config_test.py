@@ -15,6 +15,7 @@
 from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.rl import algorithm_config
+from tunix.rl import function_registry
 
 class AlgorithmConfigTest(parameterized.TestCase):
 
@@ -41,6 +42,12 @@ class AlgorithmConfigTest(parameterized.TestCase):
           algo="gspo-token",
           adv="grpo",
           loss="ppo",
+      ),
+      dict(
+          testcase_name="grpo_grpo_loo_grpo",
+          algo="grpo",
+          adv="grpo-loo",
+          loss="grpo",
       ),
   )
   def test_valid_combinations(self, algo: str, adv: str, loss: str):
@@ -156,6 +163,116 @@ class AlgorithmConfigTest(parameterized.TestCase):
     """`kl_clamp_value` is stored as-set on the config."""
     config = algorithm_config.AlgorithmConfig(kl_clamp_value=value)
     self.assertEqual(config.kl_clamp_value, value)
+
+  def test_grpo_config_defaults(self):
+    """Verifies GRPOConfig default values."""
+    config = algorithm_config.GRPOConfig()
+    self.assertEqual(config.algo_variant, "grpo")
+    self.assertEqual(config.num_generations, 2)
+    self.assertEqual(config.beta, 0.04)
+    self.assertEqual(config.epsilon, 0.2)
+    self.assertEqual(config.epsilon_high, 0.2)
+    self.assertIsNone(config.epsilon_c)
+    self.assertEqual(config.kl_loss_mode, "kl")
+    self.assertEqual(config.loss_agg_mode, "sequence-mean-token-mean")
+    self.assertIsNone(config.sampler_is)
+    self.assertEqual(config.sampler_is_threshold, 2.0)
+    self.assertIsNone(config.sampler_rs)
+    self.assertIsNone(config.sampler_rs_min)
+    self.assertIsNone(config.sampler_rs_max)
+
+  def test_grpo_config_validation(self):
+    """Verifies GRPOConfig parameter validation."""
+    with self.assertRaisesRegex(
+        ValueError, "num_generations must be greater than 1"
+    ):
+      algorithm_config.GRPOConfig(num_generations=1)
+
+    with self.assertRaisesRegex(ValueError, "loss_algo should be either"):
+      algorithm_config.GRPOConfig(loss_algo="invalid_algo")
+
+    with self.assertRaisesRegex(ValueError, "sampler_is should be either"):
+      algorithm_config.GRPOConfig(sampler_is="invalid_is")
+
+  def test_grpo_config_sampler_is_and_rs_validation(self):
+    """Verifies orthogonal sampler_is and sampler_rs validations."""
+    with self.assertRaisesRegex(ValueError, "sampler_is_threshold must be > 0"):
+      algorithm_config.GRPOConfig(sampler_is="token", sampler_is_threshold=0.0)
+    with self.assertRaisesRegex(ValueError, "must be set together"):
+      algorithm_config.GRPOConfig(sampler_rs_min=0.5)
+    with self.assertRaisesRegex(ValueError, "sampler_rs_min must be >= 0.0"):
+      algorithm_config.GRPOConfig(sampler_rs_min=-0.5, sampler_rs_max=2.0)
+    with self.assertRaisesRegex(ValueError, "must not exceed"):
+      algorithm_config.GRPOConfig(sampler_rs_min=2.0, sampler_rs_max=1.0)
+    with self.assertRaisesRegex(
+        ValueError, "sampler_rs should be None, 'geometric', or 'token'"
+    ):
+      algorithm_config.GRPOConfig(
+          sampler_rs="bad", sampler_rs_min=0.5, sampler_rs_max=2.0
+      )
+    with self.assertRaisesRegex(ValueError, "requires a keep-band"):
+      algorithm_config.GRPOConfig(sampler_rs="geometric")
+
+    # Orthogonal combinations: token IS + geometric RS (both capped and unclipped)
+    cfg_seq_mask_tis = algorithm_config.GRPOConfig(
+        sampler_is="token",
+        sampler_is_threshold=None,
+        sampler_rs="geometric",
+        sampler_rs_min=0.5,
+        sampler_rs_max=2.0,
+    )
+    self.assertEqual(cfg_seq_mask_tis.sampler_is, "token")
+    self.assertIsNone(cfg_seq_mask_tis.sampler_is_threshold)
+    self.assertEqual(cfg_seq_mask_tis.sampler_rs, "geometric")
+    self.assertEqual(cfg_seq_mask_tis.sampler_rs_min, 0.5)
+    self.assertEqual(cfg_seq_mask_tis.sampler_rs_max, 2.0)
+
+    cfg_capped_seq_mask_tis = algorithm_config.GRPOConfig(
+        sampler_is="token",
+        sampler_is_threshold=5.0,
+        sampler_rs="geometric",
+        sampler_rs_min=0.5,
+        sampler_rs_max=2.0,
+    )
+    self.assertEqual(cfg_capped_seq_mask_tis.sampler_is_threshold, 5.0)
+
+  def test_grpo_config_custom_policy_loss_and_advantage(self):
+    """Verifies GRPOConfig supports dynamically registered custom functions."""
+    function_registry.register_policy_loss_fn("chicken_loss_custom_123")(
+        lambda *args, **kwargs: None
+    )
+    function_registry.register_advantage_estimator("chicken_adv_custom_456")(
+        lambda *args, **kwargs: None
+    )
+    config = algorithm_config.GRPOConfig(
+        policy_loss_fn="chicken_loss_custom_123",
+        advantage_estimator="chicken_adv_custom_456",
+    )
+    self.assertEqual(config.policy_loss_fn, "chicken_loss_custom_123")
+    self.assertEqual(config.advantage_estimator, "chicken_adv_custom_456")
+
+  def test_routed_experts_encode_config_validation(self):
+    cfg = algorithm_config.GRPOConfig()
+    self.assertEqual(cfg.routed_experts_encode_mode, "auto")
+    self.assertIsNone(cfg.routed_experts_num_experts)
+
+    cfg_det = algorithm_config.GRPOConfig(
+        routed_experts_encode_mode="uint10",
+        routed_experts_num_experts=256,
+    )
+    self.assertEqual(cfg_det.routed_experts_encode_mode, "uint10")
+    self.assertEqual(cfg_det.routed_experts_num_experts, 256)
+
+    with self.assertRaisesRegex(
+        ValueError, "routed_experts_encode_mode must be one of"
+    ):
+      algorithm_config.GRPOConfig(routed_experts_encode_mode="bad")
+
+    for bad_num in (0, -4, True, False):
+      with self.assertRaisesRegex(
+          ValueError, "routed_experts_num_experts must be a positive int"
+      ):
+        algorithm_config.GRPOConfig(routed_experts_num_experts=bad_num)
 
 
 if __name__ == "__main__":

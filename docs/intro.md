@@ -76,10 +76,25 @@ See [Design Overview](design.md) for more details on the architecture.
         up to thousands of devices
     -   [Checkpointing and Fault Tolerance](reliability.md)
 
-## Get Started
+## Getting Started
 
-Jump to [Quick Start](quickstart.md) to install Tunix and run your first training
+**Installation:** Jump to [Installation](https://tunix.readthedocs.io/en/latest/quickstart.html#installation) to install Tunix and run your first training
 job.
+
+For TPU users integrating `vllm` and `tpu-inference`, there are two supported
+setup paths:
+
+- Docker image builds use [Dockerfile](https://github.com/google/tunix/blob/main/Dockerfile) and install
+    the pinned dependencies directly from `requirements/requirements.txt` and
+    `requirements/special_requirements.txt`.
+- Local TPU VM or developer-machine installs can use
+    [scripts/install_tunix_vllm_requirement.sh](https://github.com/google/tunix/blob/main/scripts/install_tunix_vllm_requirement.sh),
+    which installs the same requirement files outside Docker.
+
+These are separate entry points. If you are building the Docker image, you do
+not need to run the install script inside the container build.
+
+**Examples:** To get started, we have a number of detailed examples and tutorials. You can see [Quick Start](https://tunix.readthedocs.io/en/latest/quickstart.html) for a great set of starting examples and [Examples and Guides](https://tunix.readthedocs.io/en/latest/examples.html) for a comprehensive list of all the notebooks and examples we have.
 
 ## Supported Models
 

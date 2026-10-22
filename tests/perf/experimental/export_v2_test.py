@@ -18,10 +18,10 @@ import time
 from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
+import jax
 from tunix.perf.experimental import export
 from tunix.perf.experimental import tracer
-import jax
-from tunix.rl import rl_cluster
+from tunix.rl import rl_cluster as rl_engine_lib
 
 
 class ExportTest(parameterized.TestCase):
@@ -130,11 +130,11 @@ class ExportTest(parameterized.TestCase):
     mock_mesh_2.devices = np.array([["tpu4", "tpu5"], ["tpu6", "tpu7"]])
 
     mock_cluster_config = mock.create_autospec(
-        rl_cluster.ClusterConfig, instance=True
+        rl_engine_lib.ClusterConfig, instance=True
     )
     mock_cluster_config.role_to_mesh = {
-        rl_cluster.Role.ACTOR: mock_mesh_1,
-        rl_cluster.Role.ROLLOUT: mock_mesh_2,
+        rl_engine_lib.Role.ACTOR: mock_mesh_1,
+        rl_engine_lib.Role.ROLLOUT: mock_mesh_2,
     }
 
     exporter = export.PerfMetricsExport.from_cluster_config(
@@ -182,7 +182,7 @@ class ExportTest(parameterized.TestCase):
   )
   def test_from_cluster_config_no_role_to_mesh(self, mock_writer_cls):
     mock_cluster_config = mock.create_autospec(
-        rl_cluster.ClusterConfig, instance=True, spec_set=True
+        rl_engine_lib.ClusterConfig, instance=True, spec_set=True
     )
     del mock_cluster_config.role_to_mesh
 

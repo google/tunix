@@ -17,6 +17,7 @@ Tunix supports the following models:
 | Llama 3.2 | 1B, 3B |
 | Qwen 2.5 | 0.5B, 1.5B, 3B, 7B |
 | Qwen 3 | 0.6B, 1.7B, 4B, 8B, 14B, 30B, 32B |
+| Qwen 3.5 | 35B, 397B |
 
 ### Model Sources
 

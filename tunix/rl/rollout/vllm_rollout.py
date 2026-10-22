@@ -45,15 +45,17 @@ class VllmRollout(base_rollout.BaseRollout):
         config=vllm_sampler.VllmConfig(
             server_mode=rollout_config.rollout_vllm_server_mode,
             server_mode_submission_threshold=(
-              rollout_config.rollout_vllm_server_mode_submission_threshold
+                rollout_config.rollout_vllm_server_mode_submission_threshold
             ),
             server_mode_submission_timeout_s=(
-              rollout_config.rollout_vllm_server_mode_submission_timeout_s
+                rollout_config.rollout_vllm_server_mode_submission_timeout_s
             ),
             mapping_config=mapping_config,
             return_logprobs=rollout_config.return_logprobs,
+            return_routed_experts=rollout_config.return_routed_experts,
+            eos_tokens=rollout_config.eos_tokens,
             init_with_random_weights=rollout_config.rollout_vllm_init_with_random_weights,
-            tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,
+            tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,  # pyrefly: ignore[bad-argument-type]
             additional_config=rollout_config.rollout_vllm_additional_config,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
             hbm_utilization=rollout_config.rollout_vllm_hbm_utilization,
@@ -64,6 +66,12 @@ class VllmRollout(base_rollout.BaseRollout):
             expert_parallel_size=rollout_config.expert_parallel_size,
             delete_dst_buffers=rollout_config.rollout_vllm_delete_dst_buffers,
             reshard_chunk_size=rollout_config.rollout_vllm_reshard_chunk_size,
+            free_kv_cache_during_weight_sync=(
+                rollout_config.rollout_vllm_free_kv_cache_during_weight_sync
+            ),
+            overlap_postprocessing=(
+                rollout_config.rollout_vllm_overlap_postprocessing
+            ),
             engine_kwargs={
                 "model": rollout_config.rollout_vllm_model_version,
                 "max_model_len": cache_config_or_size,
@@ -93,30 +101,38 @@ class VllmRollout(base_rollout.BaseRollout):
 
   def generate(
       self,
-      prompts: list[str],
+      prompts: list[str] | None,
       rollout_config: base_rollout.RolloutConfig,
+      *,
+      prompt_token_ids=None,
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     """Generates samples from the model."""
-    self.output = self._sampler(
+    if prompt_token_ids is not None:
+      kwargs["prompt_token_ids"] = prompt_token_ids
+    output = self._sampler(
         input_strings=prompts,
         max_generation_steps=rollout_config.max_tokens_to_generate,
         max_prompt_length=rollout_config.max_prompt_length,
         temperature=rollout_config.temperature,
         top_p=rollout_config.top_p,
         top_k=rollout_config.top_k,
-        seed=rollout_config.seed,
+        seed=rollout_config.seed,  # pyrefly: ignore[bad-argument-type]
         echo=False,
         pad_output=True,
         **kwargs,
     )
+    # The legacy last-output accessor is not a per-request identity source.
+    self.output = output
 
     return base_rollout.RolloutOutput(
-        text=self.output.text,
+        text=output.text,
         logits=None,
-        tokens=self.output.tokens,
-        left_padded_prompt_tokens=self.output.padded_prompt_tokens,
-        logprobs=self.output.logprobs,
+        tokens=output.tokens,  # pyrefly: ignore[bad-argument-type]
+        left_padded_prompt_tokens=output.padded_prompt_tokens,
+        logprobs=output.logprobs,  # pyrefly: ignore[bad-argument-type]
+        routed_experts=output.routed_experts,
+        prompt_lengths=output.prompt_lengths,
     )
 
   def get_per_token_logps(

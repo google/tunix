@@ -198,7 +198,20 @@ def create_model(
       remat_config=model_config.get('remat_config', 1),
       dtype=model_config.get('dtype'),
       load_dtype=model_config.get('load_dtype'),
-      use_sliding_window_kv_cache=model_config.get('use_sliding_window_kv_cache'),
+      use_sliding_window_kv_cache=model_config.get(
+          'use_sliding_window_kv_cache'
+      ),
+      remat_policy=model_config.get('remat_policy', 'nothing_saveable'),
+      flash_attention_use_fused_bwd=model_config.get(
+          'flash_attention_use_fused_bwd', False
+      ),
+      flash_attention_compute_block_size=model_config.get(
+          'flash_attention_compute_block_size', 256
+      ),
+      flash_attention_bwd_block_size=model_config.get(
+          'flash_attention_bwd_block_size', 256
+      ),
+      use_split_attention=model_config.get('use_split_attention', False),
   )
 
   if model_config.get('lora_config'):

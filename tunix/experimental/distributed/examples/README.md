@@ -10,10 +10,11 @@ The Tunix distributed process runtime provides a **platform-agnostic execution f
 - [Prerequisites & Proto Compilation](#prerequisites--proto-compilation)
 - [Example 1: Minimal Process](#example-1-minimal-process)
 - [Example 2: Process with CLI Flags](#example-2-process-with-cli-flags)
-- [Example 3: Peer Discovery and Inter-Process Communication](#example-3-peer-discovery-and-inter-process-communication)
-- [Example 4: Simulated Distributed RL Workload (Local)](#example-4-simulated-distributed-rl-workload-local)
-- [Example 5: Simulated Distributed RL Workload on Kubernetes](#example-5-simulated-distributed-rl-workload-on-kubernetes)
-- [Example 6: Distributed RL Generation with vLLM Workers](#example-6-distributed-rl-generation-with-vllm-workers)
+- [Example 3: Process with TPUs](#example-3-process-with-tpus)
+- [Example 4: Peer Discovery and Inter-Process Communication](#example-4-peer-discovery-and-inter-process-communication)
+- [Example 5: Simulated Distributed RL Workload (Local)](#example-5-simulated-distributed-rl-workload-local)
+- [Example 6: Simulated Distributed RL Workload on Kubernetes](#example-6-simulated-distributed-rl-workload-on-kubernetes)
+- [Example 7: Distributed RL Generation with vLLM Workers](#example-7-distributed-rl-generation-with-vllm-workers)
 
 
 ---
@@ -27,7 +28,7 @@ Before running any examples, generate the required protobuf Python stubs from th
 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. \
     tunix/experimental/distributed/runtime/discovery/discovery_service.proto
 
-# Compile the RL simulation service proto (required for Examples 4 & 5)
+# Compile the RL simulation service proto (required for Examples 5 & 6)
 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. \
     tunix/experimental/distributed/examples/rl/service.proto
 ```
@@ -96,7 +97,90 @@ hello flag
 
 ---
 
-## Example 3: Peer Discovery and Inter-Process Communication
+## Example 3: Process with TPUs
+
+This example demonstrates how worker processes can execute with isolated TPU device visibility via environment variables:
+
+```python
+import jax
+import os
+import time
+
+from tunix.experimental.distributed.runtime.context import ProcessContext
+
+def main(argv, context: ProcessContext | None) -> None:
+  for device in jax.devices():
+    print(repr(device))
+```
+
+### Run Locally
+
+#### Case 1: Start a process with all TPUs
+
+```shell
+python -m tunix.experimental.distributed.runtime.main \
+    --process_main=tunix.experimental.distributed.examples.basics.tpu.main
+```
+
+#### Case 2: Start two processes, each with 2 TPUs
+
+Process 1 (TPUs 0 and 1 visible):
+
+```shell
+TPU_VISIBLE_DEVICES=0,1 \
+TPU_VISIBLE_CHIPS=$TPU_VISIBLE_DEVICES \
+TPU_CHIPS_PER_HOST_BOUNDS=1,2,1 \
+TPU_HOST_BOUNDS=1,1,1 \
+LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=$TPU_CHIPS_PER_HOST_BOUNDS,deepsea_host_bounds=$TPU_HOST_BOUNDS \
+python -m tunix.experimental.distributed.runtime.main \
+    --process_main=tunix.experimental.distributed.examples.basics.tpu.main
+```
+
+Process 2 (TPUs 2 and 3 visible):
+
+```shell
+TPU_VISIBLE_DEVICES=2,3 \
+TPU_VISIBLE_CHIPS=$TPU_VISIBLE_DEVICES \
+TPU_CHIPS_PER_HOST_BOUNDS=1,2,1 \
+TPU_HOST_BOUNDS=1,1,1 \
+LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=$TPU_CHIPS_PER_HOST_BOUNDS,deepsea_host_bounds=$TPU_HOST_BOUNDS \
+python -m tunix.experimental.distributed.runtime.main \
+    --process_main=tunix.experimental.distributed.examples.basics.tpu.main
+```
+
+### Expected Output
+
+#### Case 1 (All TPUs)
+```
+TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0)
+TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0)
+TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0)
+TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0)
+TpuDevice(id=4, process_index=0, coords=(0,2,0), core_on_chip=0)
+TpuDevice(id=5, process_index=0, coords=(1,2,0), core_on_chip=0)
+TpuDevice(id=6, process_index=0, coords=(0,3,0), core_on_chip=0)
+TpuDevice(id=7, process_index=0, coords=(1,3,0), core_on_chip=0)
+```
+
+#### Case 2 (2 TPUs per Process)
+
+Process 1 Terminal
+
+```
+TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0)
+TpuDevice(id=1, process_index=0, coords=(0,1,0), core_on_chip=0)
+```
+
+Process 2 Terminal
+
+```
+TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0)
+TpuDevice(id=1, process_index=0, coords=(0,1,0), core_on_chip=0)
+```
+
+---
+
+## Example 4: Peer Discovery and Inter-Process Communication
 
 This example shows how two independent processes (`door` and `knocker`) discover each other dynamically and exchange metadata over gRPC.
 
@@ -156,7 +240,7 @@ registered to discovery server at localhost:12345
 
 ---
 
-## Example 4: Simulated Distributed RL Workload (Local)
+## Example 5: Simulated Distributed RL Workload (Local)
 
 This example simulates a distributed reinforcement learning (RL) training workflow across **4 collaborating processes**:
 
@@ -209,7 +293,7 @@ python -m tunix.experimental.distributed.runtime.main \
 
 ---
 
-## Example 5: Simulated Distributed RL Workload on Kubernetes
+## Example 6: Simulated Distributed RL Workload on Kubernetes
 
 You can execute the exact same distributed RL simulation on a Kubernetes cluster using the `K8sExecutor` and JobSet deployment templates.
 
@@ -230,7 +314,7 @@ bash tunix/experimental/distributed/examples/rl/launcher.sh --role=trainer
 
 ---
 
-## Example 6: Distributed RL Generation with vLLM Workers
+## Example 7: Distributed RL Generation with vLLM Workers
 
 This example demonstrates a distributed reinforcement learning generation pipeline using **vLLM** and the Tunix remote execution framework (`remote_execution.GrpcRemoteExecutionServer` / `ActorHandle`).
 
@@ -283,5 +367,6 @@ Sample Response: To solve the problem, we need to add the two numbers 123 and 45
 ------------------------
 
 ```
+
 
 

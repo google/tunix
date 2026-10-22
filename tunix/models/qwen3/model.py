@@ -89,6 +89,31 @@ class RematConfig(enum.Enum):
   DECODER = enum.auto()  # Remat the entire decoder layer (attn + ffw).
 
 
+class SplashAttentionImpl(enum.Enum):
+  """Backend implementation to use for splash (flash) attention.
+
+  JAX: `jax.experimental.pallas.ops.tpu.splash_attention`.
+  TOKAMAX: `tokamax._src.ops.splash_attention`.
+  """
+
+  JAX = 'jax'
+  TOKAMAX = 'tokamax'
+
+
+def _tokamax_splash_libs():
+  """Lazy import for Tokamax splash attention libraries."""
+  try:
+    from tokamax._src.ops.splash_attention import splash_attention_kernel as tokamax_splash_lib  # pylint: disable=g-import-not-at-top
+    from tokamax._src.ops.splash_attention import splash_attention_mask as tokamax_splash_mask_lib  # pylint: disable=g-import-not-at-top
+  except ImportError as e:
+    raise ImportError(
+        "The Tokamax splash_attention backend requires the 'tokamax' package."
+        "Install it with `pip install tokamax` or keep the default"
+        " `splash_attention_impl=SplashAttentionImpl.JAX`"
+    ) from e
+  return tokamax_splash_lib, tokamax_splash_mask_lib
+
+
 @dataclasses.dataclass(slots=True, frozen=True)
 class ShardingConfig:
   """Sharding configuration for Qwen3 model."""
@@ -104,9 +129,9 @@ class ShardingConfig:
   act_btd: Tuple[str | None, ...]
   act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
-  score_weight_d1: Tuple[str | None, ...]
   exp_weight_edf: Tuple[str | None, ...]
   exp_weight_efd: Tuple[str | None, ...]
+  score_weight_d1: Tuple[str | None, ...] | None = None
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False, enable_sp: bool = False):
@@ -115,20 +140,22 @@ class ShardingConfig:
     fsdp = (fsdp, sp) if fsdp and sp else fsdp
 
     return ShardingConfig(
-        emb_vd=P('tp', fsdp),
-        emb_dv=P(fsdp, 'tp'),
-        q_weight_dnh=P(fsdp, 'tp', None),
-        kv_weight_dnh=P(fsdp, 'tp', None),
-        o_weight_nhd=P('tp', None, fsdp),
-        ffw_weight_df=P(fsdp, 'tp'),
-        ffw_weight_fd=P('tp', fsdp),
-        rms_norm_weight=P('tp',),
-        act_btd=P('fsdp', sp, None if is_sampling else 'tp'),
-        act_btf=P('fsdp', sp, 'tp'),
-        act_btnh=P('fsdp', sp, 'tp', None),
-        score_weight_d1=P(fsdp, None),
-        exp_weight_edf=P('fsdp', None, 'tp'),
-        exp_weight_efd=P('fsdp', 'tp', None),
+        emb_vd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        emb_dv=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        q_weight_dnh=P(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        kv_weight_dnh=P(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        o_weight_nhd=P('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_df=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_fd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        rms_norm_weight=P(  # pyrefly: ignore[bad-argument-type]
+            'tp',
+        ),
+        act_btd=P('fsdp', sp, None if is_sampling else 'tp'),  # pyrefly: ignore[bad-argument-type]
+        act_btf=P('fsdp', sp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        act_btnh=P('fsdp', sp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        score_weight_d1=P(fsdp, None),  # pyrefly: ignore[bad-argument-type]
+        exp_weight_edf=P('fsdp', None, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        exp_weight_efd=P('fsdp', 'tp', None),  # pyrefly: ignore[bad-argument-type]
     )
 
 
@@ -150,11 +177,13 @@ class ModelConfig:
   num_experts_per_tok: int | None = None
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
-  dtype: jnp.dtype = jnp.float32
-  param_dtype: jnp.dtype = jnp.float32
+  dtype: jnp.dtype = jnp.float32  # pyrefly: ignore[bad-assignment]
+  param_dtype: jnp.dtype = jnp.float32  # pyrefly: ignore[bad-assignment]
   use_flash_attention: bool = False
   flash_attention_block_size: int = 1024
-
+  # Backend implementation for splash (flash) attention when
+  # `use_flash_attention` is True.
+  splash_attention_impl: SplashAttentionImpl = SplashAttentionImpl.JAX
 
   @classmethod
   def qwen3_0p6b(cls):  # qwen3-0.6B
@@ -292,6 +321,38 @@ class ModelConfig:
         rope_theta=1_000_000,
     )
 
+  @classmethod
+  def qwen3p5_35b_a3b(cls):  # Qwen3.5-35B-A3B
+    return cls(
+        num_layers=40,
+        vocab_size=248320,
+        embed_dim=2048,
+        hidden_dim=512,
+        num_heads=16,
+        head_dim=256,
+        num_kv_heads=2,
+        norm_eps=1e-06,
+        rope_theta=10_000_000,
+        num_experts=256,
+        num_experts_per_tok=8,
+    )
+
+  @classmethod
+  def qwen3p5_397b_a17b(cls):  # Qwen3.5-397B-A17B
+    return cls(
+        num_layers=60,
+        vocab_size=248320,
+        embed_dim=4096,
+        hidden_dim=1024,
+        num_heads=32,
+        head_dim=256,
+        num_kv_heads=2,
+        norm_eps=1e-06,
+        rope_theta=10_000_000,
+        num_experts=512,
+        num_experts_per_tok=10,
+    )
+
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
@@ -406,7 +467,9 @@ class RMSNorm(nnx.Module):
       param_dtype: jnp.dtype,
   ):
     self.w = nnx.Param(
-        nnx.initializers.ones_init()(rngs.params(), dim, param_dtype),  # pyrefly: ignore[bad-argument-type]
+        nnx.initializers.ones_init()(
+            rngs.params(), dim, param_dtype  # pyrefly: ignore[bad-argument-type]
+        ),
         sharding=shd_config.rms_norm_weight,
     )
     self.norm_eps = norm_eps
@@ -497,19 +560,27 @@ class Attention(nnx.Module):
     key_proj = self.k_norm(self.k_proj(x))
     value_proj = self.v_proj(x)
 
-    query_proj = shard(query_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
-    key_proj = shard(key_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
-    value_proj = shard(value_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    query_proj = shard(
+        query_proj, self.shd_config.act_btnh  # pyrefly: ignore[bad-argument-type]
+    )
+    key_proj = shard(
+        key_proj, self.shd_config.act_btnh  # pyrefly: ignore[bad-argument-type]
+    )
+    value_proj = shard(
+        value_proj, self.shd_config.act_btnh  # pyrefly: ignore[bad-argument-type]
+    )
 
     query_proj = apply_rope(
         query_proj,
         segment_pos,
         head_dim=self.head_dim,
+        rope_theta=self.config.rope_theta,
     )
     key_proj = apply_rope(
         key_proj,
         segment_pos,
         head_dim=self.head_dim,
+        rope_theta=self.config.rope_theta,
     )
 
     if cache is not None:
@@ -541,39 +612,107 @@ class Attention(nnx.Module):
       query_proj = query_proj * self.scale
 
       mesh = pxla.thread_resources.env.physical_mesh
-      causal_mask = mask_lib.CausalMask((seq_len, seq_len))
-      multi_head_mask = mask_lib.MultiHeadMask([causal_mask for _ in range(qh)])
-
-      block_sizes = splash.BlockSizes(
-          block_q=self.config.flash_attention_block_size,
-          block_kv=self.config.flash_attention_block_size,
-          block_q_dkv=self.config.flash_attention_block_size,
-          block_kv_dkv=self.config.flash_attention_block_size,
-          block_kv_dkv_compute=self.config.flash_attention_block_size,
-          block_q_dq=self.config.flash_attention_block_size,
-          block_kv_dq=self.config.flash_attention_block_size,
-      )
+      if mesh.empty:
+        try:
+          abs_mesh = jax.sharding.get_abstract_mesh()
+          if abs_mesh is not None and not abs_mesh.empty:
+            mesh = abs_mesh
+          else:
+            ctx_mesh = jax.sharding.get_mesh()
+            if ctx_mesh is not None and not ctx_mesh.empty:
+              mesh = ctx_mesh
+        except Exception:
+          pass
 
       shd_b, shd_t, shd_n, shd_h = self.shd_config.act_btnh
+      if mesh is None or not mesh.shape:
+        shd_b = shd_t = shd_n = shd_h = None
+      else:
+        if shd_b is not None and (shd_b not in mesh.shape or b % mesh.shape[shd_b] != 0):
+          shd_b = None
+        if shd_t is not None and shd_t not in mesh.shape:
+          shd_t = None
+        if shd_n is not None and shd_n not in mesh.shape:
+          shd_n = None
+        if shd_h is not None and shd_h not in mesh.shape:
+          shd_h = None
+
       head_shards = (
-          mesh.shape[shd_n] if shd_n is not None and shd_n in mesh.shape else 1
+          mesh.shape[shd_n] if mesh is not None and shd_n is not None and shd_n in mesh.shape else 1
       )
       q_seq_shards = (
-          mesh.shape[shd_t] if shd_t is not None and shd_t in mesh.shape else 1
+          mesh.shape[shd_t] if mesh is not None and shd_t is not None and shd_t in mesh.shape else 1
       )
 
-      splash_attn_kernel = splash.make_splash_mha(
-          multi_head_mask,
-          block_sizes=block_sizes,
-          head_shards=head_shards,
-          q_seq_shards=q_seq_shards,
-      )
+      bs = self.config.flash_attention_block_size
+      if self.config.splash_attention_impl == SplashAttentionImpl.TOKAMAX:
+        # Tokamax splash attention takes a single 2D mask (shared across heads),
+        # a `SplashConfig` for the tile sizes, and only supports sharding over
+        # the query sequence dimension.
+        tokamax_splash, tokamax_mask_lib = _tokamax_splash_libs()
+        tokamax_mask = tokamax_mask_lib.make_causal_mask((seq_len, seq_len))
+        splash_config = tokamax_splash.SplashConfig(
+            block_q=bs,
+            block_kv=bs,
+            block_kv_compute=bs,
+            block_q_dkv=bs,
+            block_kv_dkv=bs,
+            block_kv_dkv_compute=bs,
+            # use_base2 can improve performance but reduce numeric precision.
+            use_base2_exp=False,
+        )
+        splash_attn_kernel = tokamax_splash.make_splash_mha(
+            tokamax_mask,
+            config=splash_config,
+            q_seq_shards=q_seq_shards,
+        )
+        kernel_spec = (
+            splash_attn_kernel.manual_sharding_spec(
+                shd.NamedSharding(mesh, P(shd_t))
+            )
+            if mesh is not None
+            else None
+        )
+        segment_ids_cls = tokamax_splash.SegmentIds
+      else:
+        causal_mask = mask_lib.CausalMask((seq_len, seq_len))
+        multi_head_mask = mask_lib.MultiHeadMask([causal_mask for _ in range(qh)])
+
+        block_sizes = splash.BlockSizes(
+            block_q=bs,
+            block_kv=bs,
+            block_q_dkv=bs,
+            block_kv_dkv=bs,
+            block_kv_dkv_compute=bs,
+            block_q_dq=bs,
+            block_kv_dq=bs,
+        )
+
+        splash_attn_kernel = splash.make_splash_mha(
+            multi_head_mask,
+            block_sizes=block_sizes,
+            head_shards=head_shards,
+            q_seq_shards=q_seq_shards,
+        )
+        kernel_spec = (
+            splash_attn_kernel.manual_sharding_spec(
+                shd.NamedSharding(mesh, P(shd_n, shd_t))
+            )
+            if mesh is not None
+            else None
+        )
+        segment_ids_cls = splash.SegmentIds
 
       shd_spec = P(shd_b, shd_n, shd_t, shd_h)
-      unsharded_seq = P(shd_b, shd_n, None, shd_h)
-      kernel_spec = splash_attn_kernel.manual_sharding_spec(
-          shd.NamedSharding(mesh, P(shd_n, shd_t))
+      shd_n_kv = (
+          shd_n
+          if mesh is not None
+          and shd_n is not None
+          and shd_n in mesh.shape
+          and kh % mesh.shape[shd_n] == 0
+          else None
       )
+      unsharded_seq_kv = P(shd_b, shd_n_kv, None, shd_h)
 
       # Per-position segment ids let splash suppress cross-segment attention
       # (e.g. real-token to pad-token, or sequence-packing cross-boundary).
@@ -589,8 +728,8 @@ class Attention(nnx.Module):
             in_specs=(
                 kernel_spec,
                 shd_spec,
-                unsharded_seq,
-                unsharded_seq,
+                unsharded_seq_kv,
+                unsharded_seq_kv,
                 seg_spec,
                 unsharded_seg_spec,
             ),
@@ -600,7 +739,7 @@ class Attention(nnx.Module):
         def sharded_splash_attn(
             kernel, q_block, k_block, v_block, q_seg_block, kv_seg_block
         ):
-          seg_ids = splash.SegmentIds(q=q_seg_block, kv=kv_seg_block)
+          seg_ids = segment_ids_cls(q=q_seg_block, kv=kv_seg_block)
           return jax.vmap(kernel)(
               q_block, k_block, v_block, segment_ids=seg_ids
           )
@@ -618,7 +757,12 @@ class Attention(nnx.Module):
         @partial(
             shard_map,
             mesh=mesh,
-            in_specs=(kernel_spec, shd_spec, unsharded_seq, unsharded_seq),
+            in_specs=(
+                kernel_spec,
+                shd_spec,
+                unsharded_seq_kv,
+                unsharded_seq_kv,
+            ),
             out_specs=shd_spec,
             check_rep=False,
         )
@@ -637,6 +781,10 @@ class Attention(nnx.Module):
       if attn_mask is not None:
         attn = jnp.where(attn_mask[:, None, None, :, :], attn, K_MASK)
 
+      if segment_ids is not None:
+        seg_mask = segment_ids[:, :, None] == segment_ids[:, None, :]
+        attn = jnp.where(seg_mask[:, None, None, :, :], attn, K_MASK)
+
       attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
           key_proj.dtype
       )
@@ -645,7 +793,9 @@ class Attention(nnx.Module):
       qkv = qkv.reshape((b, t, qh, d))
 
     outputs = self.o_proj(qkv)
-    outputs = shard(outputs, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+    outputs = shard(
+        outputs, self.shd_config.act_btd  # pyrefly: ignore[bad-argument-type]
+    )
 
     if cache is not None:
       new_cache = {
@@ -681,7 +831,9 @@ class Attention(nnx.Module):
           state, x, segment_pos, cache, attn_mask, segment_ids=segment_ids
       )
     else:
-      return self.block(x, segment_pos, cache, attn_mask, segment_ids=segment_ids)
+      return self.block(
+          x, segment_pos, cache, attn_mask, segment_ids=segment_ids
+      )
 
   @property
   def head_dim(self):
@@ -742,7 +894,8 @@ class MoELayer(nnx.Module):
   def __call__(self, x, use_megablox=True):
     scores = self.router(x).astype(jnp.float32)  # [B,T,E]
     routing_weights, routing_idx = jax.lax.top_k(
-        jax.nn.softmax(scores, axis=-1), self.experts_per_tok  # pyrefly: ignore[bad-argument-type]
+        jax.nn.softmax(scores, axis=-1),
+        self.experts_per_tok,  # pyrefly: ignore[bad-argument-type]
     )
     routing_weights = (
         routing_weights / jnp.sum(routing_weights, axis=-1, keepdims=True)
@@ -757,7 +910,9 @@ class MoELayer(nnx.Module):
     # -------------------------------------------------------------
     if not use_megablox or (mesh.empty or jax.devices()[0].platform == 'cpu'):
       dispatch_mask = jax.nn.one_hot(
-          routing_idx, num_classes=self.num_experts, dtype=self.dtype  # pyrefly: ignore[bad-argument-type]
+          routing_idx,
+          num_classes=self.num_experts,  # pyrefly: ignore[bad-argument-type]
+          dtype=self.dtype,
       )  # [B, T, K, E]
       dispatch_mask = jnp.swapaxes(dispatch_mask, -1, -2)  # [B, T, E, K]
       dispatched_input = jnp.einsum(
@@ -830,10 +985,14 @@ class MoELayer(nnx.Module):
         num_ep = 1
         ep_shard_idx = 0
 
-      num_local_experts = self.num_experts // num_ep  # pyrefly: ignore[unsupported-operation]
+      num_local_experts = (
+          self.num_experts // num_ep  # pyrefly: ignore[unsupported-operation]
+      )
 
       flat_repeated_inputs = jnp.repeat(
-          inputs.reshape(B * T, D_global), self.experts_per_tok, axis=0  # pyrefly: ignore[bad-argument-type]
+          inputs.reshape(B * T, D_global),
+          self.experts_per_tok,  # pyrefly: ignore[bad-argument-type]
+          axis=0,
       )
       flat_selected_indices = indices.reshape(-1)
 
@@ -866,7 +1025,10 @@ class MoELayer(nnx.Module):
         local_output_offsets = global_out_offsets[ep_shard_idx]
 
         output_buffer_size = (
-            min(self.experts_per_tok, num_local_experts) * B * T * num_ep  # pyrefly: ignore[bad-specialization]
+            min(self.experts_per_tok, num_local_experts)  # pyrefly: ignore[bad-specialization]
+            * B
+            * T
+            * num_ep
         )
         output_buffer = jax.lax.empty(
             shape=(output_buffer_size, D_global), dtype=inputs.dtype
@@ -1039,7 +1201,9 @@ class MLP(nnx.Module):
       x: jaxtyping.Array,
   ) -> jaxtyping.Array:
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
-    activations = shard(activations, self.shd_config.act_btf)  # pyrefly: ignore[bad-argument-type]
+    activations = shard(
+        activations, self.shd_config.act_btf  # pyrefly: ignore[bad-argument-type]
+    )
     outputs = self.down_proj(activations)
     return outputs
 
@@ -1203,7 +1367,7 @@ class Qwen3(BackendMappingMixin, nnx.Module):
         f'layer_{i}': {
             'k': jnp.zeros(shape, dtype=config.dtype),
             'v': jnp.zeros(shape, dtype=config.dtype),
-            'end_index': jnp.zeros((batch_size,), dtype=jnp.int32)
+            'end_index': jnp.zeros((batch_size,), dtype=jnp.int32),
         }
         for i in range(config.num_layers)
     }
@@ -1253,7 +1417,7 @@ class Qwen3(BackendMappingMixin, nnx.Module):
           segment_ids=segment_ids,
       )
       if cache is not None:
-        new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
+        new_cache[layer_name] = layer_cache  # pyrefly: ignore[unsupported-operation]
 
     x = self.final_norm(x)
     if output_hidden_states:
@@ -1264,7 +1428,7 @@ class Qwen3(BackendMappingMixin, nnx.Module):
 
     logits = self.compute_final_logits(x)
 
-    return logits, new_cache  # pytype: disable=bad-return-type
+    return logits, new_cache
 
   def compute_final_logits(
       self,

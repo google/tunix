@@ -70,9 +70,7 @@ class CheckpointOptionsTest(parameterized.TestCase):
         opts.save_decision_policy,
         ocp.training.save_decision_policies.ContinuousCheckpointingPolicy,
     )
-    # pytype: disable=attribute-error
     self.assertEqual(opts.save_decision_policy.minimum_interval_secs, 10)
-    # pytype: enable=attribute-error
 
   def test_resolve_checkpointing_defaults_with_async_timeout(self):
     async_opts = ocp.options.AsyncOptions(timeout_secs=5000)
@@ -127,6 +125,46 @@ class CheckpointOptionsTest(parameterized.TestCase):
         ocp.training.preservation_policies.LatestN(10),
     )
     self.assertFalse(opts.enable_async_checkpointing)
+
+  def test_checkpointing_options_from_dict(self):
+    opts_dict = {
+        'max_to_keep': 5,
+        'save_interval_steps': 10,
+        'enable_async_checkpointing': False,
+    }
+    opts = checkpoint_options.checkpointing_options_from_dict(opts_dict)
+    self.assertIsInstance(opts, checkpoint_options.TunixCheckpointingOptions)
+
+    self.assertIsInstance(
+        opts.save_decision_policy,
+        ocp.training.save_decision_policies.FixedIntervalPolicy,
+    )
+    self.assertIsInstance(
+        opts.preservation_policy,
+        ocp.training.preservation_policies.LatestN,
+    )
+    self.assertFalse(opts.enable_async_checkpointing)
+
+  def test_to_v1_options_with_timeout_secs_from_dict(self):
+    opts_dict = {'timeout_secs': 900}
+    opts = checkpoint_options.checkpointing_options_from_dict(opts_dict)
+    assert opts.async_options is not None
+    self.assertEqual(opts.async_options.timeout_secs, 900)
+
+  def test_checkpointing_options_from_dict_with_async_timeout(self):
+    opts_dict = {'enable_async_checkpointing': True, 'timeout_secs': 900}
+    opts = checkpoint_options.checkpointing_options_from_dict(opts_dict)
+    self.assertTrue(opts.enable_async_checkpointing)
+    assert opts.async_options is not None
+    self.assertEqual(opts.async_options.timeout_secs, 900)
+
+  def test_checkpointing_options_from_dict_invalid_keys(self):
+    opts_dict = {'invalid_key': 5}
+    with self.assertRaisesRegex(
+        ValueError, "The following options {'invalid_key'} are not supported"
+    ):
+      checkpoint_options.checkpointing_options_from_dict(opts_dict)
+
 
 if __name__ == '__main__':
   absltest.main()

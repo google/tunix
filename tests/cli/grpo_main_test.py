@@ -26,8 +26,7 @@ from absl.testing import absltest
 import omegaconf
 from tunix.cli import base_rl_pipeline
 from tunix.cli import grpo_main
-from tunix.rl import rl_cluster as rl_cluster_lib
-
+from tunix.rl import rl_cluster as rl_engine_lib
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -495,8 +494,8 @@ verl_compatible: false
               ):
                 with mock.patch.object(
                     pipeline,
-                    "create_rl_cluster",
-                    return_value=mock.sentinel.rl_cluster,
+                    "create_rl_engine",
+                    return_value=mock.sentinel.rl_engine,
                 ):
                   with self.assertRaisesRegex(
                       ValueError, "Unsupported training_mode 'bad_mode'"
@@ -584,7 +583,7 @@ vllm_config:
 """
     p = _make_pipeline_with_cli_args(extra, ["rollout_engine=vllm"])
     role_to_mesh = {
-        rl_cluster_lib.Role.ROLLOUT: mock.Mock(
+        rl_engine_lib.Role.ROLLOUT: mock.Mock(
             devices=mock.Mock(shape=(1, 1))
         )
     }
@@ -745,7 +744,7 @@ vllm_config:
         [
             device.id
             for device in (
-                role_to_mesh[rl_cluster_lib.Role.ACTOR]
+                role_to_mesh[rl_engine_lib.Role.ACTOR]
                 .devices.flatten()
                 .tolist()
             )
@@ -756,7 +755,7 @@ vllm_config:
         [
             device.id
             for device in (
-                role_to_mesh[rl_cluster_lib.Role.ROLLOUT]
+                role_to_mesh[rl_engine_lib.Role.ROLLOUT]
                 .devices.flatten()
                 .tolist()
             )
@@ -764,16 +763,16 @@ vllm_config:
         [2, 3],
     )
     self.assertEqual(
-        role_to_mesh[rl_cluster_lib.Role.ACTOR].devices.shape,
+        role_to_mesh[rl_engine_lib.Role.ACTOR].devices.shape,
         (2, 1),
     )
     self.assertEqual(
-        role_to_mesh[rl_cluster_lib.Role.ROLLOUT].devices.shape,
+        role_to_mesh[rl_engine_lib.Role.ROLLOUT].devices.shape,
         (1, 2),
     )
     self.assertIs(
-        role_to_mesh[rl_cluster_lib.Role.REFERENCE],
-        role_to_mesh[rl_cluster_lib.Role.ACTOR],
+        role_to_mesh[rl_engine_lib.Role.REFERENCE],
+        role_to_mesh[rl_engine_lib.Role.ACTOR],
     )
 
   def test_create_role_to_mesh_passes_configured_allocation_policy(self):

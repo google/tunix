@@ -36,9 +36,9 @@ Config API:
       ...
     perf_config.custom_export_fn = my_custom_export_fn
 
-    # 3. Pass the PerfMetricsConfig when creating rl cluster.
+    # 3. Pass the PerfMetricsConfig when creating rl engine.
 
-    rl_cluster.RLCluster(..., perf_config=perf_config)
+    rl_engine_lib.RLEngine(..., perf_config=perf_config)
 """
 
 from __future__ import annotations

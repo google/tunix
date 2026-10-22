@@ -27,6 +27,8 @@ model_name="${model_name:-qwen3-8b}"
 model_id="${model_id:-/tmp/maxtext_qwen3_8b}"
 tokenizer_path="${tokenizer_path:-$model_id}"
 
+base_emb_dim="${base_emb_dim:-4096}"
+
 batch_size="${batch_size:-8}"
 num_batches="${num_batches:-934}"
 num_train_epochs="${num_train_epochs:-1}"
@@ -80,7 +82,7 @@ python -m tunix.cli.grpo_main \
   model_config.remat_config=3 \
   model_config.model_download_path="/tmp/models/${model_name}" \
   `# -- Maxtext specific configs mapping ---------------------------------` \
-  model_config.kwargs.base_emb_dim=4096 \
+  model_config.kwargs.base_emb_dim="$base_emb_dim" \
   model_config.kwargs.sparse_matmul=true \
   model_config.kwargs.remat_policy="minimal" \
   `# -- Mesh configurations ----------------------------------------------` \

@@ -1,0 +1,183 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Simple Cluster Orchestrator Example Notebook / Script (V2 Architecture)."""
+
+from typing import Any
+from absl import logging
+import numpy as np
+from tunix.experimental.common import datatypes
+from tunix.experimental.orchestrator import algorithm_adapter
+from tunix.experimental.orchestrator import batch_assembly
+from tunix.experimental.orchestrator import orchestrator
+from tunix.experimental.orchestrator import rl_program
+from tunix.experimental.worker import abstract_worker
+from tunix.rl import algorithm_config
+
+
+class SimulatedRolloutWorker(abstract_worker.Worker):
+  """Simulated RolloutWorker generating synthetic token responses."""
+
+  def __init__(self, worker_id: str):
+    self.worker_id = worker_id
+
+  def info(self) -> datatypes.WorkerInfo:
+    return datatypes.WorkerInfo(
+        worker_id=self.worker_id,
+        roles=frozenset([datatypes.Role.ROLLOUT]),
+    )
+
+  def initialize(self) -> datatypes.Response:
+    return datatypes.Response()
+
+  def compile(self, dummy_data: Any = None) -> datatypes.Response:
+    del dummy_data
+    return datatypes.Response()
+
+  def start(self) -> datatypes.Response:
+    return datatypes.Response()
+
+  def stop(self) -> datatypes.Response:
+    return datatypes.Response()
+
+  def generate(
+      self,
+      requests: datatypes.RolloutRequest | list[datatypes.RolloutRequest],
+  ) -> datatypes.RolloutResponse | list[datatypes.RolloutResponse]:
+    req_list = requests if isinstance(requests, list) else [requests]
+    logging.info(
+        "[%s] Generating rollouts for %d request(s)",
+        self.worker_id,
+        len(req_list),
+    )
+    responses = []
+    for idx, req in enumerate(req_list):
+      prompt_id = getattr(req, "prompt_id", f"prompt_{idx}")
+      group_index = getattr(req, "group_index", 0)
+      request_id = getattr(req, "request_id", f"req_{idx}")
+      responses.append(
+          datatypes.RolloutResponse(
+              request_id=request_id,
+              status="COMPLETED",
+              payload=datatypes.TrajectoryItem(
+                  prompt_id=prompt_id,
+                  group_index=group_index,
+                  start_step=0,
+                  traj={
+                      "reward": 1.0,
+                      "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                  },
+                  prompt_tokens=np.array([10, 11], dtype=np.int32),
+                  completion_tokens=np.array([20, 21], dtype=np.int32),
+                  action_mask=np.array([1.0, 1.0], dtype=np.float32),
+                  metadata={"prompt_id": prompt_id},
+              ),
+              metadata={"prompt_id": prompt_id},
+          )
+      )
+    return responses if isinstance(requests, list) else responses[0]
+
+  def heartbeat(self) -> datatypes.HealthReport:
+    return datatypes.HealthReport(state=datatypes.WorkerState.READY)
+
+
+class SimulatedTrainerWorker(abstract_worker.Worker):
+  """Simulated TrainerWorker executing gradient updates and weight sync staging."""
+
+  def __init__(self, worker_id: str, role: datatypes.Role):
+    self.worker_id = worker_id
+    self._role = role
+
+  def info(self) -> datatypes.WorkerInfo:
+    return datatypes.WorkerInfo(
+        worker_id=self.worker_id,
+        roles=frozenset([self._role]),
+    )
+
+  def initialize(self) -> datatypes.Response:
+    return datatypes.Response()
+
+  def compile(self, dummy_data: Any = None) -> datatypes.Response:
+    del dummy_data
+    return datatypes.Response()
+
+  def start(self) -> datatypes.Response:
+    return datatypes.Response()
+
+  def stop(self) -> datatypes.Response:
+    return datatypes.Response()
+
+  def fwd_bwd(self, batch: Any, accumulate_gradients: bool = False, apply_optimizer: bool = True, skip_jit: bool = False) -> dict[str, float]:
+    del batch, accumulate_gradients, apply_optimizer, skip_jit
+    logging.info("[%s] Executing gradient update (fwd_bwd)", self.worker_id)
+    return {"loss": 0.25, "grad_norm": 1.2}
+
+  def prepare_weight_sync(self) -> datatypes.WeightSyncMetadata:
+    logging.info("[%s] Staging weights for sync", self.worker_id)
+    meta = datatypes.WeightSyncMetadata(
+        new_policy_version=1,
+        transfer_mode="p2p",
+        source_endpoints=["trainer:50051"],
+    )
+    return meta
+
+  def heartbeat(self) -> datatypes.HealthReport:
+    return datatypes.HealthReport(state=datatypes.WorkerState.READY)
+
+
+def main():
+  orch = orchestrator.ClusterOrchestrator()
+
+  rollout_0 = SimulatedRolloutWorker("rollout_0")
+  rollout_1 = SimulatedRolloutWorker("rollout_1")
+  actor_trainer = SimulatedTrainerWorker("actor_0", datatypes.Role.ACTOR)
+
+  orch.registry.register(rollout_0)
+  orch.registry.register(rollout_1)
+  orch.registry.register(actor_trainer)
+
+  print(f"Registered roles in cluster: {orch.registry.roles()}")
+
+  algo_config = algorithm_config.GRPOConfig(
+      num_generations=2,
+  )
+  algo = algorithm_adapter.GRPOAdapter(
+      algo_config=algo_config,
+      mini_batch_size=1,
+      max_packed_len=32,
+  )
+  assembler = batch_assembly.SequencePackedBatchAssembler(
+      batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=32
+  )
+
+  train_dataset = [
+      ["Solve 2 + 2", "Solve 3 * 4"],
+      ["Solve 10 / 2", "Solve 7 - 5"],
+  ]
+
+  print("Executing Run via ClusterOrchestrator...")
+  program = rl_program.StandardRLProgram(
+      algo=algo,
+      dataset=train_dataset,
+      reward_fns=[lambda x: 1.0],
+      assembler=assembler,
+      generation_args=datatypes.GenerationArgs(temperature=1.0),
+      max_steps=2,
+  )
+  orch.run(program=program)
+  print("Execution completed successfully!")
+
+
+if __name__ == "__main__":
+  main()

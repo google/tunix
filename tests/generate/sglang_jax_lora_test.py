@@ -120,6 +120,9 @@ class SglangJaxLoRATest(absltest.TestCase):
       sampler = sglang_jax_sampler.SglangJaxSampler(
           tokenizer=self.tokenizer,
           config=sampler_config,
+          # Skip XLA precompilation: this test only verifies weight transfer via
+          # `update_params` and never calls autoregressive generation.
+          disable_precompile=True,
       )
 
       # Get the LoRA state from trainer model and modify it

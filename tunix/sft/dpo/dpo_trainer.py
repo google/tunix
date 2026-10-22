@@ -256,9 +256,9 @@ class DPOTrainer(peft_trainer.PeftTrainer):
 
     if self.algorithm == "orpo":
       self.with_gen_model_input_fn(
-          lambda x: {  # pyrefly: ignore[bad-argument-type]
+          lambda x: {
               "train_example": x,
-              "algorithm": "orpo",
+              "algorithm": "orpo",  # pyrefly: ignore[bad-assignment]
               "lambda_orpo": self.dpo_config.lambda_orpo,
               "label_smoothing": self.dpo_config.label_smoothing,
               "enable_prompt_loss_orpo": (
@@ -277,9 +277,9 @@ class DPOTrainer(peft_trainer.PeftTrainer):
       }
     else:
       self.with_gen_model_input_fn(
-          lambda x: {  # pyrefly: ignore[bad-argument-type]
+          lambda x: {
               "train_example": x,
-              "algorithm": "dpo",
+              "algorithm": "dpo",  # pyrefly: ignore[bad-assignment]
               "beta": self.dpo_config.beta,
               "label_smoothing": self.dpo_config.label_smoothing,
               "enable_prompt_loss_orpo": False,
@@ -341,9 +341,9 @@ class DPOTrainer(peft_trainer.PeftTrainer):
         )
 
       training_input = process_dpo_record(
-          record={  # pyrefly: ignore[bad-argument-type]
+          record={
               "prompts": training_input.prompts,
-              "images": training_input.images,
+              "images": training_input.images,  # pyrefly: ignore[bad-assignment]
               "chosen_responses": training_input.chosen_responses,
               "rejected_responses": training_input.rejected_responses,
           },

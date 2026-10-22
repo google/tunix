@@ -114,7 +114,6 @@ python -m tunix.cli.grpo_main \
   sglang_jax_config.enable_deterministic_sampling=false \
   sglang_jax_config.chunked_prefill_size=2048 \
   sglang_jax_config.page_size=128 \
-  sglang_jax_config.use_sort_for_toppk_minp=false \
   \
   `# ── vLLM (used when rollout_engine=vllm) ─────────────────────────────` \
   vllm_config.hbm_utilization=0.4 \

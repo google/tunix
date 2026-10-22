@@ -22,14 +22,22 @@ from tunix.rl.agentic.queue_manager import group_queue_manager
 
 
 def _create_item(
-    group_id: str, pair_index: int = 0
+    prompt_id: str, group_index: int = 0
 ) -> agent_types.TrajectoryItem:
   """Helper to create a TrajectoryItem for testing."""
   return agent_types.TrajectoryItem(
-      pair_index=pair_index,
-      group_id=group_id,
+      group_index=group_index,
+      prompt_id=prompt_id,
       start_step=0,
       traj=None,
+  )
+
+
+def _create_manager(num_generations: int) -> group_queue_manager.GroupQueueManager:
+  """Helper to create a GroupQueueManager with the default test key_fn."""
+  return group_queue_manager.GroupQueueManager(
+      key_fn=lambda x: getattr(x, "prompt_id", id(x)),
+      num_generations=num_generations,
   )
 
 
@@ -39,9 +47,29 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests basic put and get functionality."""
 
     async def _run_test():
-      manager = group_queue_manager.GroupQueueManager(group_size=2)
+      manager = _create_manager(num_generations=2)
       item1 = _create_item("g1", 0)
       item2 = _create_item("g1", 1)
+
+      await manager.put(item1)
+      self.assertEmpty(manager._ready_groups)
+
+      await manager.put(item2)
+      self.assertLen(manager._ready_groups, 1)
+
+      batch = await manager.get_batch(2)
+      self.assertLen(batch, 2)
+      self.assertCountEqual([item1, item2], batch)
+
+    asyncio.run(_run_test())
+
+  def test_falsy_integer_prompt_id_grouping(self):
+    """Tests that prompt_id=0 (integer zero) is correctly grouped and not treated as falsy fallback."""
+
+    async def _run_test():
+      manager = _create_manager(num_generations=2)
+      item1 = _create_item(prompt_id=0, group_index=0)
+      item2 = _create_item(prompt_id=0, group_index=1)
 
       await manager.put(item1)
       self.assertEmpty(manager._ready_groups)
@@ -59,7 +87,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests that get_batch waits until a group is ready."""
 
     async def _run_test():
-      manager = group_queue_manager.GroupQueueManager(group_size=2)
+      manager = _create_manager(num_generations=2)
       item1 = _create_item("g1", 0)
       item2 = _create_item("g1", 1)
 
@@ -81,22 +109,20 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests batching where a group is split across two get_batch calls."""
 
     async def _run_test():
-      manager = group_queue_manager.GroupQueueManager(group_size=3)
+      manager = _create_manager(num_generations=3)
       items = [_create_item("g1", i) for i in range(3)]
       for item in items:
         await manager.put(item)
 
-      self.assertEmpty(manager._batch_buf)
       batch1 = await manager.get_batch(2)
       self.assertLen(batch1, 2)
       self.assertCountEqual(items[:2], batch1)
-      self.assertLen(manager._batch_buf, 1)
-      self.assertEqual(manager._batch_buf[0], items[2])
+      self.assertLen(manager._ready_groups, 1)
 
       batch2 = await manager.get_batch(1)
       self.assertLen(batch2, 1)
       self.assertEqual(batch2[0], items[2])
-      self.assertEmpty(manager._batch_buf)
+      self.assertEmpty(manager._ready_groups)
 
     asyncio.run(_run_test())
 
@@ -104,7 +130,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests that an exception is propagated to put and get calls."""
 
     async def _run_test():
-      manager = group_queue_manager.GroupQueueManager(group_size=2)
+      manager = _create_manager(num_generations=2)
       exc = ValueError("Test Exception")
       await manager.put_exception(exc)
 
@@ -113,6 +139,161 @@ class GroupQueueManagerTest(absltest.TestCase):
 
       with self.assertRaises(ValueError):
         await manager.get_batch(1)
+
+    asyncio.run(_run_test())
+
+  def test_invalid_init_raises_value_error(self):
+    """Tests that init raises ValueError if neither num_generations nor group_fn is given."""
+    with self.assertRaises(ValueError):
+      group_queue_manager.GroupQueueManager()
+
+  def test_concurrent_consumers_with_leftovers(self):
+    """Tests that leftover items notify concurrent consumers via _have_ready."""
+
+    async def _run_test():
+      manager = _create_manager(num_generations=4)
+      items = [_create_item("g1", i) for i in range(4)]
+
+      # Consumer 2 waits for 1 item
+      consumer2_task = asyncio.create_task(manager.get_batch(1))
+      await asyncio.sleep(0.01)
+
+      # Put 4 items to make a ready group of 4
+      for item in items:
+        await manager.put(item)
+
+      # Consumer 1 takes 3 items (leaving 1 leftover in _ready_groups)
+      batch1 = await manager.get_batch(3)
+      self.assertLen(batch1, 3)
+
+      # Consumer 2 should unblock and receive the leftover 1 item
+      batch2 = await asyncio.wait_for(consumer2_task, timeout=1.0)
+      self.assertLen(batch2, 1)
+      self.assertEqual(batch2[0], items[3])
+
+    asyncio.run(_run_test())
+
+  def test_prepare_clear_and_clear(self):
+    """Tests prepare_clear interrupts operations and clear resets state."""
+
+    async def _run_test():
+      manager = _create_manager(num_generations=2)
+      item1 = _create_item("g1", 0)
+
+      # Start a consumer waiting for a batch
+      consumer_task = asyncio.create_task(manager.get_batch(2))
+      await asyncio.sleep(0.01)
+
+      # Prepare clear unblocks consumer returning empty list
+      await manager.prepare_clear()
+      batch = await asyncio.wait_for(consumer_task, timeout=1.0)
+      self.assertEmpty(batch)
+
+      # Subsequent put during clearing does nothing
+      await manager.put(item1)
+      self.assertEmpty(manager._buckets)
+
+      # Clear resets clearing flag and state
+      await manager.clear()
+      self.assertFalse(manager._clearing)
+      self.assertEmpty(manager._buckets)
+
+    asyncio.run(_run_test())
+
+  def test_close(self):
+    """Tests that close unblocks consumers and returns empty lists."""
+
+    async def _run_test():
+      manager = _create_manager(num_generations=2)
+
+      # Start a consumer waiting for a batch
+      consumer_task = asyncio.create_task(manager.get_batch(2))
+      await asyncio.sleep(0.01)
+
+      # Close unblocks consumer returning empty list
+      await manager.close()
+      batch = await asyncio.wait_for(consumer_task, timeout=1.0)
+      self.assertEmpty(batch)
+
+      # Subsequent gets return early with empty lists
+      batch2 = await manager.get_batch(2)
+      self.assertEmpty(batch2)
+
+      # Attempting to put into a closed queue should raise a RuntimeError
+      with self.assertRaisesRegex(RuntimeError, "Cannot put into a closed"):
+        await manager.put(_create_item("g1", 0))
+
+    asyncio.run(_run_test())
+
+  def test_custom_key_fn(self):
+    """Tests that a custom key_fn correctly groups items."""
+
+    async def _run_test():
+      def my_key_fn(item):
+        return getattr(item, "custom_id", id(item))
+
+      manager = group_queue_manager.GroupQueueManager(
+          num_generations=2, key_fn=my_key_fn
+      )
+
+      class MockItem:
+
+        def __init__(self, custom_id):
+          self.custom_id = custom_id
+
+      item1 = MockItem("group_A")
+      item2 = MockItem("group_A")
+      item3 = MockItem("group_B")
+
+      await manager.put(item1)
+      self.assertEmpty(manager._ready_groups)
+
+      await manager.put(item3)
+      self.assertEmpty(manager._ready_groups)
+
+      await manager.put(item2)
+      self.assertLen(manager._ready_groups, 1)
+
+      batch = await manager.get_batch(2)
+      self.assertLen(batch, 2)
+      self.assertCountEqual([item1, item2], batch)
+
+    asyncio.run(_run_test())
+
+  def test_on_group_filtered_callback(self):
+    """Tests that on_group_filtered fires only when a whole group is dropped."""
+
+    async def _run_test():
+      dropped_callbacks = []
+
+      def filter_fn(group):
+        valid = [x for x in group if x.group_index >= 0]
+        filtered = [x for x in group if x.group_index < 0]
+        return valid, filtered
+
+      manager = group_queue_manager.GroupQueueManager(
+          num_generations=2,
+          key_fn=lambda x: x.prompt_id,
+          filter_fn=filter_fn,
+          on_group_filtered=dropped_callbacks.append,
+      )
+
+      # Group 1: both items filtered out -> on_group_filtered called once.
+      drop1 = _create_item("g_drop", -1)
+      drop2 = _create_item("g_drop", -2)
+      await manager.put(drop1)
+      self.assertEmpty(dropped_callbacks)
+      await manager.put(drop2)
+      self.assertEqual(dropped_callbacks, [[drop1, drop2]])
+      self.assertEmpty(manager._ready_groups)
+
+      # Group 2: 1 valid, 1 filtered out -> callback not called.
+      keep1 = _create_item("g_partial", 0)
+      drop3 = _create_item("g_partial", -1)
+      await manager.put(keep1)
+      await manager.put(drop3)
+      self.assertLen(dropped_callbacks, 1)
+      self.assertLen(manager._ready_groups, 1)
 
     asyncio.run(_run_test())
 

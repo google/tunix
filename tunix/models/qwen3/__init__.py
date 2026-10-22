@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Qwen2 API."""
+"""Qwen3 API."""
 
 from tunix.models.qwen3 import mapping_sglang_jax
 from tunix.models.qwen3 import mapping_vllm_jax

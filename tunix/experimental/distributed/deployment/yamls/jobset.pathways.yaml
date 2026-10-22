@@ -16,11 +16,12 @@ apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
   name: ${JOBSET_NAME}
-  namespace: default
-spec:
+  namespace: ${NAMESPACE}
+${QUEUE_LABEL}spec:
   coordinator:
     replicatedJob: proc
   failurePolicy:
+    maxRestarts: 3
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true
@@ -60,12 +61,29 @@ spec:
                       operator: In
                       values:
                       - pw-node
+            volumes:
+            # Memory-backed directory shared by the user container (IFRT proxy
+            # client) and pathways-proxy. Host buffers of at least
+            # IFRT_PROXY_GRPC_LARGE_TRANSFER_OPTIMIZATION_THRESHOLD_BYTES are
+            # written here and mmap'ed by the proxy instead of being streamed
+            # over localhost gRPC. Its pages are charged to the user container.
+            - name: ifrt-proxy-large-transfer
+              emptyDir:
+                medium: Memory
+                sizeLimit: ${USER_CONTAINER_MEMORY_LIMIT}
             containers:
             - name: pathways-rm
               image: ${SERVER_IMAGE}
               imagePullPolicy: IfNotPresent
               restartPolicy: Always
+              # requests set the scheduling floor; limits stay generous so the
+              # container is burstable. Omitting requests makes Kubernetes
+              # default them to limits, which over-reserves this node because
+              # podAffinity co-locates the head pod with pw-node.
               resources:
+                requests:
+                  cpu: "2"
+                  memory: ${PATHWAYS_RM_MEMORY}
                 limits:
                   cpu: "24"
                   memory: 32G
@@ -100,6 +118,9 @@ spec:
               imagePullPolicy: IfNotPresent
               restartPolicy: Always
               resources:
+                requests:
+                  cpu: "4"
+                  memory: ${PATHWAYS_PROXY_MEMORY}
                 limits:
                   cpu: "16"
                   memory: ${PATHWAYS_PROXY_MEMORY_LIMIT}
@@ -113,18 +134,24 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: IFRT_PROXY_GRPC_LARGE_TRANSFER_OPTIMIZATION_DIRECTORY
+                value: /ifrt_proxy_large_transfer
               ports:
               - containerPort: 29000
                 protocol: TCP
+              volumeMounts:
+              - name: ifrt-proxy-large-transfer
+                mountPath: /ifrt_proxy_large_transfer
             - name: ${USER_CONTAINER}
               image: ${USER_CONTAINER_IMAGE}
               imagePullPolicy: Always
               securityContext:
                 privileged: true
-              # resources:
-              #   limits:
-              #     cpu: "24"
-              #     memory: 32G
+              resources:
+                requests:
+                  memory: ${USER_CONTAINER_MEMORY}
+                limits:
+                  memory: ${USER_CONTAINER_MEMORY_LIMIT}
               command:
                 - bash
                 - -c
@@ -134,6 +161,18 @@ spec:
                   # Polling sleep loop ensures bash wakes up promptly to run trap handler.
 
                   echo "Program Start: $$(date)"
+                  # pathways-proxy runs as another user (uid 99 in the Cloud
+                  # image) and deletes the large-transfer files this container
+                  # writes. tmpfs mounts are 1777 (sticky bit), which only lets
+                  # a file's owner delete it, so the files and their memory
+                  # would pile up until OOM. Drop the sticky bit, and refuse to
+                  # start if that fails while the transfers are on (threshold
+                  # below the generator's "off" value 2**63 - 1).
+                  if ! chmod 0777 /ifrt_proxy_large_transfer &&
+                      (( IFRT_PROXY_GRPC_LARGE_TRANSFER_OPTIMIZATION_THRESHOLD_BYTES < 9223372036854775807 )); then
+                    echo "Cannot drop the sticky bit of /ifrt_proxy_large_transfer." >&2
+                    exit 1
+                  fi
                   _sigterm() (kill -SIGTERM $$! 2>/dev/null)
                   trap _sigterm SIGTERM
 
@@ -177,9 +216,16 @@ spec:
                 value: "grpc://localhost:29000"
               - name: VLLM_ENABLE_V1_MULTIPROCESSING
                 value: "0"
+              - name: IFRT_PROXY_GRPC_LARGE_TRANSFER_OPTIMIZATION_DIRECTORY
+                value: /ifrt_proxy_large_transfer
+              - name: IFRT_PROXY_GRPC_LARGE_TRANSFER_OPTIMIZATION_THRESHOLD_BYTES
+                value: "${IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES}"
               ports:
               - containerPort: ${USER_CONTAINER_PORT}
                 name: grpc # Naming it 'grpc' tells GKE to optimize for HTTP/2
+              volumeMounts:
+              - name: ifrt-proxy-large-transfer
+                mountPath: /ifrt_proxy_large_transfer
   - name: pw-node
     replicas: ${REPLICAS}
     template:
@@ -293,6 +339,7 @@ spec:
                   google.com/tpu: "4"
                 requests:
                   google.com/tpu: "4"
+                  memory: ${PATHWAYS_WORKER_MEMORY}
               volumeMounts:
               - mountPath: /tmp
                 name: shared-tmp

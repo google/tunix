@@ -70,7 +70,7 @@ from tunix.oss import utils as oss_utils
 from tunix.sft import metrics_logger
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import utils as sft_utils
 from tunix.cli.utils import data as data_lib
@@ -334,8 +334,8 @@ def create_datasets(
     item["prompts"] = ""
     return item
 
-  train_ds = grain.MapDataset.source(train_ds).map(process_item)
-  test_ds = grain.MapDataset.source(test_ds).map(process_item)
+  train_ds = grain.MapDataset.source(train_ds).map(process_item)  # pyrefly: ignore[bad-argument-type]
+  test_ds = grain.MapDataset.source(test_ds).map(process_item)  # pyrefly: ignore[bad-argument-type]
   return train_ds, test_ds
 
 
@@ -349,7 +349,7 @@ chat_parser = parser.Gemma4ChatTemplateParser(tokenizer, enable_thinking=False)
 train_dataset, test_dataset = create_datasets()
 train_dataset, val_dataset = data_lib.post_init_dataset(
     train_dataset,
-    tokenizer,
+    tokenizer,  # pyrefly: ignore[bad-argument-type]
     batch_size=BATCH_SIZE,
     num_batches=NUM_BATCHES,
     max_prompt_length=MAX_PROMPT_LENGTH,
@@ -358,7 +358,7 @@ train_dataset, val_dataset = data_lib.post_init_dataset(
 )
 test_dataset, _ = data_lib.post_init_dataset(
     test_dataset,
-    tokenizer,
+    tokenizer,  # pyrefly: ignore[bad-argument-type]
     batch_size=BATCH_SIZE,
     num_batches=NUM_TEST_BATCHES,
     max_prompt_length=MAX_PROMPT_LENGTH,
@@ -492,11 +492,11 @@ elif ROLLOUT_ENGINE == "vanilla":
 else:
   raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
 
-cluster_config = rl_cluster_lib.ClusterConfig(
+cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: trainer_mesh,
-        rl_cluster_lib.Role.REFERENCE: trainer_mesh,
-        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+        rl_engine_lib.Role.ACTOR: trainer_mesh,
+        rl_engine_lib.Role.REFERENCE: trainer_mesh,
+        rl_engine_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
     # Keep actor weights resident on device. With ``delete_dst_buffers=True``
@@ -504,7 +504,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     # host-offload workaround previously used to relieve HBM pressure during
     # sync is no longer necessary on this hardware.
     offload_to_cpu=False,
-    training_config=rl_cluster_lib.RLTrainingConfig(
+    training_config=rl_engine_lib.RLTrainingConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
@@ -560,13 +560,13 @@ grpo_config = GRPOConfig(
     advantage_estimator=args.advantage_estimator,
 )
 
-rl_cluster = rl_cluster_lib.RLCluster(
+rl_engine = rl_engine_lib.RLEngine(
     actor=gemma4_actor,
     reference=gemma4_ref,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
 )
-show_hbm_usage("after RLCluster creation")
+show_hbm_usage("after RLEngine creation")
 
 
 _metric_call_idx = 0
@@ -597,7 +597,7 @@ def metric_fn(prompts, completions, rewards, advantages, **kwargs):
 
 
 grpo_trainer = GRPOLearner(
-    rl_cluster=rl_cluster,
+    rl_engine=rl_engine,
     agent_class=FrozenLakeAgent,
     agent_kwargs={"use_multistep_prompt": True},
     env_class=FrozenLakeEnv,

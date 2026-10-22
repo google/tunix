@@ -62,30 +62,30 @@ class ShardingConfig:
   act_btd: Tuple[str | None, ...]
   act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
-  score_weight_d1: Tuple[str | None, ...]
   vision_proj: Tuple[str | None, ...]
   vision_soft_emb_norm_weight: Tuple[str | None, ...]
   siglip: vision.SigLIPShardingConfig | None
+  score_weight_d1: Tuple[str | None, ...] | None = None
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
 
     return ShardingConfig(
-        emb_vd=P('tp', fsdp),
-        q_weight_ndh=P('tp', fsdp, None),
-        kv_weight_cndh=P(None, 'tp', fsdp, None),
-        qkv_weight_cndh=P(None, 'tp', fsdp, None),
-        o_weight_nhd=P('tp', None, fsdp),
-        ffw_weight_df=P(fsdp, 'tp'),
-        ffw_weight_fd=P('tp', fsdp),
-        rms_norm_weight=P('tp',),
-        act_btd=P('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=P('fsdp', None, 'tp'),
-        act_btnh=P('fsdp', None, 'tp', None),
-        score_weight_d1=P(fsdp, None),
-        vision_proj=P(fsdp, 'tp'),
-        vision_soft_emb_norm_weight=P('tp',),
+        emb_vd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        q_weight_ndh=P('tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
+        kv_weight_cndh=P(None, 'tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
+        qkv_weight_cndh=P(None, 'tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
+        o_weight_nhd=P('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_df=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_fd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        rms_norm_weight=P('tp',),  # pyrefly: ignore[bad-argument-type]
+        act_btd=P('fsdp', None, None if is_sampling else 'tp'),  # pyrefly: ignore[bad-argument-type]
+        act_btf=P('fsdp', None, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        act_btnh=P('fsdp', None, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        score_weight_d1=P(fsdp, None),  # pyrefly: ignore[bad-argument-type]
+        vision_proj=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        vision_soft_emb_norm_weight=P('tp',),  # pyrefly: ignore[bad-argument-type]
         siglip=vision.SigLIPShardingConfig.get_default_sharding(is_sampling),
     )
 
@@ -124,7 +124,7 @@ class ModelConfig:
 
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
-  param_dtype: jnp.dtype = jnp.bfloat16
+  param_dtype: jnp.dtype = jnp.bfloat16  # pyrefly: ignore[bad-assignment]
 
   @classmethod
   def gemma3_270m(
@@ -326,7 +326,7 @@ class Embedder(nnx.Module):
       *,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
-      param_dtype: jnp.dtype = jnp.bfloat16,
+      param_dtype: jnp.dtype = jnp.bfloat16,  # pyrefly: ignore[bad-function-definition]
   ):
     self.input_embedding = nnx.Param(
         nnx.initializers.normal(dtype=param_dtype)(
@@ -353,8 +353,8 @@ class Embedder(nnx.Module):
   @jax.named_scope('embedder_encode')
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
-    x *= jnp.sqrt(x.shape[-1]).astype(x.dtype)
-    x = sharding_utils.shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+    x *= jnp.sqrt(x.shape[-1]).astype(x.dtype)  # pyrefly: ignore[missing-attribute]
+    x = sharding_utils.shard(x, self.shd_config.act_btd)
     return x
 
   @jax.named_scope('embedder_decode')
@@ -386,7 +386,7 @@ class Einsum(nnx.Module):
       *,
       rngs: nnx.Rngs,
       sharding: Tuple[str | None, ...],
-      param_dtype: jnp.dtype = jnp.bfloat16,
+      param_dtype: jnp.dtype = jnp.bfloat16,  # pyrefly: ignore[bad-function-definition]
   ):
     self.einsum_str = einsum_str
     self.shape = shape
@@ -514,7 +514,7 @@ class Attention(nnx.Module):
       query_pre_attn_norm: QueryPreAttentionNormalisation,
       shd_config: ShardingConfig,
       remat_config: RematConfig,
-      param_dtype: jnp.dtype = jnp.bfloat16,
+      param_dtype: jnp.dtype = jnp.bfloat16,  # pyrefly: ignore[bad-function-definition]
   ):
     if attn_type == AttentionType.LOCAL_SLIDING and sliding_window_size is None:
       raise ValueError(
@@ -579,9 +579,9 @@ class Attention(nnx.Module):
       query_proj = self.q_einsum(x)
       key_proj, value_proj = self.kv_einsum(x)
 
-    query_proj = sharding_utils.shard(query_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
-    key_proj = sharding_utils.shard(key_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
-    value_proj = sharding_utils.shard(value_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    query_proj = sharding_utils.shard(query_proj, self.shd_config.act_btnh)
+    key_proj = sharding_utils.shard(key_proj, self.shd_config.act_btnh)
+    value_proj = sharding_utils.shard(value_proj, self.shd_config.act_btnh)
 
     query_proj = self._query_norm(query_proj)
     key_proj = self._key_norm(key_proj)
@@ -660,7 +660,7 @@ class Attention(nnx.Module):
       encoded = jnp.einsum('BTNS,BSNH->BTNH', probs, value_proj)
 
     attn_output = self.attn_vec_einsum(encoded)
-    attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+    attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)
 
     if cache is not None:
       new_cache = {
@@ -791,7 +791,7 @@ class FeedForward(nnx.Module):
     ff1 = self.up_proj(x)
     activations = gate_value * ff1
     activations = sharding_utils.shard(
-        activations, self.config.shd_config.act_btf  # pyrefly: ignore[bad-argument-type]
+        activations, self.config.shd_config.act_btf
     )
     outputs = self.down_proj(activations)
     return outputs
@@ -930,7 +930,7 @@ class RMSNorm(nnx.Module):
       *,
       rngs: nnx.Rngs,
       sharding: tuple[str, ...] = (),
-      param_dtype: jnp.dtype = jnp.bfloat16,
+      param_dtype: jnp.dtype = jnp.bfloat16,  # pyrefly: ignore[bad-function-definition]
   ):
     self.scale = nnx.Param(
         nnx.initializers.zeros_init()(rngs.params(), dim).astype(param_dtype),  # pyrefly: ignore[bad-argument-type]
@@ -1002,6 +1002,7 @@ class Gemma3(BackendMappingMixin, nnx.Module):
       attention_mask: jaxtyping.Array | None = None,  # [B, L, L']
       output_hidden_states: bool = False,
       skip_lm_head: bool = False,
+      decode_only_last_token: bool = False,
       *,
       images: jaxtyping.Array | None = None,  # [B, H, W, C] or [B, N, H, W, C]
   ) -> tuple[jaxtyping.Array, Cache | None]:
@@ -1017,6 +1018,10 @@ class Gemma3(BackendMappingMixin, nnx.Module):
       attention_mask: transformer input mask.
       output_hidden_states: whether to output the hidden states.
       skip_lm_head: whether to skip the final lm head.
+      decode_only_last_token: whether to only compute the logits for the last
+        token of the sequence. This saves a large amount of memory and compute
+        during prefill, where only the last token's logits are used to sample
+        the next token.
       images: Input images. If None, the model will not process images.
 
     Returns:
@@ -1042,7 +1047,7 @@ class Gemma3(BackendMappingMixin, nnx.Module):
             attention_mask,  # pyrefly: ignore[bad-argument-type]
         )
       if cache is not None:
-        new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
+        new_cache[layer_name] = layer_cache  # pyrefly: ignore[unsupported-operation]
 
     x = self.final_norm(x)
     if output_hidden_states:
@@ -1051,8 +1056,14 @@ class Gemma3(BackendMappingMixin, nnx.Module):
     if skip_lm_head:
       return x, new_cache
 
+    if decode_only_last_token:
+      # Only compute logits for the last token. This can significantly reduce
+      # memory requirements during prefill (when sampling), since we only need
+      # the logits for the last token to sample from.
+      x = x[:, -1:, :]
+
     logits = self.compute_final_logits(x)
-    return logits, new_cache  # pytype: disable=bad-return-type
+    return logits, new_cache
 
   def compute_final_logits(
       self,
@@ -1080,7 +1091,7 @@ class Gemma3(BackendMappingMixin, nnx.Module):
     # Encode the vision tokens and merge them with the text embeddings.
     if images is not None:
       x = self._merge_mm_embeddings(tokens=tokens, embeddings=x, images=images)
-    return x  # pytype: disable=bad-return-type  # jax-arraylike
+    return x  # pyrefly: ignore[bad-return]
 
   def _assert_support_mm(self) -> None:
     if self.vision_encoder is None:

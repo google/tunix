@@ -17,7 +17,7 @@ def main(argv, context: ProcessContext | None) -> None:
   knock_future = futures.Future()
   assert context is not None
   context.ipc.discovery.on_register(
-      callback=lambda hostname, _, metadata: (
+      callback=lambda hostname, _, metadata: (  # pyrefly: ignore[bad-argument-type]
           logging.info(
               f"{hostname} knocked and said: {pickle.loads(metadata)}"
           ),

@@ -499,7 +499,7 @@ class MeshUtilsTest(absltest.TestCase):
 
     allocated, _ = mesh._allocate_devices_by_coords(fake_devices, 2)
 
-    self.assertEqual([device.id for device in allocated], [0, 1])
+    self.assertEqual([device.id for device in allocated], [0, 1])  # pyrefly: ignore[not-iterable]
 
   def test_allocate_named_mesh_device_slices_prefers_coord_boxes(self):
     class FakeDevice:
@@ -701,7 +701,7 @@ class MeshUtilsTest(absltest.TestCase):
         allocation_policy="COMPACT",
     )
 
-    allocated_coords = [device.coords for device in allocated]
+    allocated_coords = [device.coords for device in allocated]  # pyrefly: ignore[not-iterable]
     mins = tuple(
         min(coords[dim] for coords in allocated_coords) for dim in range(3)
     )

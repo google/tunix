@@ -7,8 +7,9 @@ from absl.testing import parameterized
 from flax import nnx
 import optax
 from tunix.rl import algorithm_config as algo_config_lib
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import rl_learner
+
 
 class DummyModel(nnx.Module):
   pass
@@ -52,7 +53,7 @@ class RLLearnerTest(parameterized.TestCase):
       expected_values,
       expect_failure,
   ):
-    config = rl_cluster_lib.RLTrainingConfig(
+    config = rl_engine_lib.RLTrainingConfig(
         actor_optimizer=optax.sgd(1e-3),
         mini_batch_size=mini_batch_size,
         train_micro_batch_size=train_micro_batch_size,
@@ -64,15 +65,15 @@ class RLLearnerTest(parameterized.TestCase):
 
     actor_model = DummyModel()
     rollout_model = DummyModel()
-    mock_cluster = mock.MagicMock()
-    mock_cluster.actor_trainer.model = actor_model
-    mock_cluster.rollout.model.return_value = rollout_model
-    mock_cluster.cluster_config.training_config = config
-    mock_cluster.actor_trainer.train_steps = 0
-    mock_cluster.actor_trainer.iter_steps = 0
+    mock_engine = mock.MagicMock()
+    mock_engine.actor_trainer.model = actor_model
+    mock_engine.rollout.model.return_value = rollout_model
+    mock_engine.cluster_config.training_config = config
+    mock_engine.actor_trainer.train_steps = 0
+    mock_engine.actor_trainer.iter_steps = 0
 
     learner = DummyLearner(
-        rl_cluster=mock_cluster,
+        rl_engine=mock_engine,
         algo_config=DummyConfig(),
         reward_fns=lambda prompts, completions, **kwargs: [1.0] * len(prompts),
     )
@@ -96,6 +97,78 @@ class RLLearnerTest(parameterized.TestCase):
       self.assertEqual(
           learner._compute_logps_micro_batch_size, expected_compute_logps_micro
       )
+
+  def test_sequence_packing_ignores_train_micro_batch_size(self):
+    config = rl_engine_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        mini_batch_size=8,
+        train_micro_batch_size=3,
+        rollout_micro_batch_size=None,
+        compute_logps_micro_batch_size=None,
+        max_seq_token_per_tpu=128,
+        eval_every_n_steps=1,
+        max_steps=1,
+    )
+
+    actor_model = DummyModel()
+    rollout_model = DummyModel()
+    mock_engine = mock.MagicMock()
+    mock_engine.actor_trainer.model = actor_model
+    mock_engine.rollout.model.return_value = rollout_model
+    mock_engine.cluster_config.training_config = config
+    mock_engine.cluster_config.rollout_config.max_prompt_length = 32
+    mock_engine.cluster_config.rollout_config.max_tokens_to_generate = 32
+    mock_engine.actor_trainer.train_steps = 0
+    mock_engine.actor_trainer.iter_steps = 0
+
+    learner = DummyLearner(
+        rl_engine=mock_engine,
+        algo_config=DummyConfig(),
+        reward_fns=lambda prompts, completions, **kwargs: [1.0] * len(prompts),
+    )
+    self.assertTrue(learner._packing_enabled)
+
+    full_batch_size = 32
+    train_ds = [{'prompts': [''] * full_batch_size}]
+    with mock.patch.object(learner, '_run_global_step') as mock_global_step:
+      mock_engine.actor_trainer.train_steps = 1
+      learner.train(train_ds)
+
+    self.assertEqual(learner._rollout_micro_batch_size, 8)
+    self.assertEqual(learner._compute_logps_micro_batch_size, 8)
+    mock_global_step.assert_called_once()
+    # Arg 3 of _run_global_step is iterator_steps_per_mini_batch (8 // 8 == 1)
+    self.assertEqual(mock_global_step.call_args.args[3], 1)
+
+  def test_train_closes_engine_on_exception(self):
+    config = rl_engine_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        eval_every_n_steps=1,
+        max_steps=10,
+    )
+    mock_engine = mock.MagicMock()
+    mock_engine.actor_trainer.model = DummyModel()
+    mock_engine.rollout.model.return_value = DummyModel()
+    mock_engine.cluster_config.training_config = config
+    mock_engine.actor_trainer.train_steps = 0
+    mock_engine.actor_trainer.iter_steps = 0
+
+    learner = DummyLearner(
+        rl_engine=mock_engine,
+        algo_config=DummyConfig(),
+        reward_fns=lambda prompts, completions, **kwargs: [1.0] * len(prompts),
+    )
+
+    full_batch_size = 8
+    train_ds = [{'prompts': [''] * full_batch_size}]
+
+    with mock.patch.object(
+        learner, '_run_global_step', side_effect=RuntimeError('Loop crash')
+    ):
+      with self.assertRaises(RuntimeError):
+        learner.train(train_ds)
+
+    mock_engine.close.assert_called_once()
 
 
 if __name__ == '__main__':

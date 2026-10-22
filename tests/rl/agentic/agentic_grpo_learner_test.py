@@ -15,6 +15,7 @@
 """Tests for agentic_grpo_learner."""
 
 import asyncio
+from collections.abc import Sequence
 import functools
 import os
 import queue
@@ -42,7 +43,7 @@ from tunix.generate import tokenizer_adapter
 from tunix.rl import algo_core
 from tunix.rl import common as rl_common
 from tunix.rl import function_registry
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic.agents.agent_types import Action, Step
 from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
@@ -85,38 +86,55 @@ _MOCK_RESPONSES = [
 
 
 def _mock_generate(
-    prompts: list[str] | list[list[dict[str, str]]],
+    prompts: list[str] | list[list[dict[str, str]]] | None = None,
     apply_chat_template: bool = False,
-    mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
+    mode: rl_engine_lib.Mode = rl_engine_lib.Mode.TRAIN,
     micro_batch_size: int | None = None,
     trace_tags: dict[str, Any] | None = None,
     output_logprobs: bool = True,
     tokenizer: Any | None = None,
+    max_generation_steps: int | None = None,
+    prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None = None,
     **kwargs,
 ) -> base_rollout.RolloutOutput:
-  del apply_chat_template, mode, micro_batch_size, trace_tags
+  del apply_chat_template, mode, micro_batch_size, trace_tags, kwargs
   assert tokenizer is not None
-  if isinstance(prompts, str):
-    prompts = [prompts]
-  batch_size = len(prompts)
+  if prompt_token_ids is not None:
+    prompt_tokens = [
+        np.asarray(pt, dtype=np.int32).tolist() for pt in prompt_token_ids
+    ]
+  else:
+    assert prompts is not None
+    if isinstance(prompts, str):
+      prompts = [prompts]
+    prompt_tokens = []
+    for p in prompts:
+      if isinstance(p, str):
+        prompt_tokens.append(tokenizer.encode(p))
+      else:
+        prompt_tokens.append(
+            tokenizer.encode(" ".join(m["content"] for m in p))
+        )
+  batch_size = len(prompt_tokens)
   text = [random.choice(_MOCK_RESPONSES) for _ in range(batch_size)]
   tokens = [tokenizer.encode(text_i) for text_i in text]
+  if max_generation_steps is not None:
+    tokens = [t[:max_generation_steps] for t in tokens]
   logprobs = [-np.random.rand(len(tokens[i])) for i in range(batch_size)]
-  prompt_tokens = []
-  for p in prompts:
-    if isinstance(p, str):
-      prompt_tokens.append(tokenizer.encode(p))
-    else:
-      prompt_tokens.append(tokenizer.encode(" ".join(m["content"] for m in p)))
+  prompt_lengths = np.array([len(pt) for pt in prompt_tokens], dtype=np.int32)
   max_p_len = max(len(pt) for pt in prompt_tokens)
-  padded_prompts = np.array([
-      np.pad(pt, (max(0, max_p_len - len(pt)), 0), constant_values=0)
-      for pt in prompt_tokens
-  ], dtype=np.int32)
+  padded_prompts = np.array(
+      [
+          np.pad(pt, (max(0, max_p_len - len(pt)), 0), constant_values=0)
+          for pt in prompt_tokens
+      ],
+      dtype=np.int32,
+  )
   return base_rollout.RolloutOutput(
       text=text,
       tokens=tokens,
       left_padded_prompt_tokens=padded_prompts,
+      prompt_lengths=prompt_lengths,
       logits=None,
       logprobs=logprobs if output_logprobs else None,
   )
@@ -227,7 +245,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    chex.set_n_cpu_devices(2)
+    test_common.safe_set_n_cpu_devices(2)
     cls.device_count = jax.device_count()
 
   def setUp(self):
@@ -244,7 +262,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
       def __init__(self, algo_config):
         self.algo_config = algo_config
-        self.rl_cluster = mock.Mock()
+        self.rl_engine = mock.Mock()
         self.metric_fns = []
         self._process_in_consumer = False
 
@@ -347,15 +365,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine="vanilla",
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=100,  # do not run eval
             max_steps=10,
@@ -370,7 +388,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             kv_cache_size=1024,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=tokenizer,
@@ -384,7 +402,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         max_response_length=10,
     )
     grpo_learner = agentic_grpo_learner.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
@@ -402,10 +420,10 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             wraps=grpo_learner._batch_to_train_example,
         ) as mock_b2te,
         mock.patch.object(
-            rl_cluster, "update_actor", wraps=rl_cluster.update_actor
+            rl_engine, "update_actor", wraps=rl_engine.update_actor
         ) as mock_update_actor,
         mock.patch.object(
-            rl_cluster,
+            rl_engine,
             "generate",
             side_effect=self._mock_generate,
         ),
@@ -436,15 +454,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine="vanilla",
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=100,
             max_steps=10,
@@ -459,7 +477,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             kv_cache_size=1024,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=tokenizer,
@@ -473,7 +491,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         max_response_length=10,
     )
     grpo_learner = agentic_grpo_learner.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
@@ -491,17 +509,17 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             wraps=grpo_learner._batch_to_train_example,
         ) as mock_b2te,
         mock.patch.object(
-            rl_cluster, "update_actor", wraps=rl_cluster.update_actor
+            rl_engine, "update_actor", wraps=rl_engine.update_actor
         ) as mock_update_actor,
         mock.patch.object(
-            rl_cluster,
+            rl_engine,
             "generate",
             side_effect=self._mock_generate,
         ),
         mock.patch.object(
-            rl_cluster,
+            rl_engine,
             "get_ref_per_token_logps",
-            wraps=rl_cluster.get_ref_per_token_logps,
+            wraps=rl_engine.get_ref_per_token_logps,
         ) as mock_get_ref,
     ):
       grpo_learner.train(train_ds)
@@ -540,15 +558,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine="vanilla",
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=100,
             max_steps=1,
@@ -564,7 +582,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             kv_cache_size=1024,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=tokenizer,
@@ -578,16 +596,14 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         max_response_length=10,
     )
     grpo_learner = agentic_grpo_learner.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
         chat_parser=MockChatParser(),
     )
 
-    train_ds = _dummy_dataset(
-        MySource(data=["1", "2"], repeat=1), batch_size=2
-    )
+    train_ds = _dummy_dataset(MySource(data=["1", "2"], repeat=1), batch_size=2)
 
     with (
         mock.patch.object(
@@ -596,7 +612,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             wraps=rl_common.compute_per_token_logps,
         ) as mock_compute_logps,
         mock.patch.object(
-            rl_cluster,
+            rl_engine,
             "generate",
             side_effect=self._mock_generate,
         ),
@@ -639,9 +655,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       def __init__(self, *, rngs: nnx.Rngs):
         self.lm_head = 1
 
-      def __call__(
-          self, inputs, positions, cache, attention_mask, **kwargs
-      ):
+      def __call__(self, inputs, positions, cache, attention_mask, **kwargs):
         del kwargs
         return (
             jnp.full(
@@ -703,9 +717,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       def __init__(self, *, rngs: nnx.Rngs):
         self.lm_head = 1
 
-      def __call__(
-          self, inputs, positions, cache, attention_mask, **kwargs
-      ):
+      def __call__(self, inputs, positions, cache, attention_mask, **kwargs):
         del kwargs
         return (
             jnp.full(
@@ -809,14 +821,14 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         rngs=nnx.Rngs(0),
     )
     mesh = pxla.thread_resources.env.physical_mesh
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine="vanilla",
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=100,
         ),
@@ -826,7 +838,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             return_logprobs=True,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=tokenizer,
@@ -841,7 +853,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
 
     learner = agentic_grpo_learner.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=None,
         algo_config=grpo_config,
         chat_parser=MockChatParser(),
@@ -851,7 +863,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         learner, "_compute_rewards", side_effect=mock_compute_rewards
     ):
       with mock.patch.object(
-          learner.rl_cluster,
+          learner.rl_engine,
           "get_ref_per_token_logps",
           return_value=jnp.zeros((2, 10)),
           autospec=True,
@@ -859,6 +871,163 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         learner._process_results(trajectories)
 
     self.assertEqual(extracted_completions, ["msg 0", "msg 1"])
+
+  def test_compute_packed_logps_uses_the_packed_buffer(self):
+    """Deferred logps must be recomputed against the packed representation."""
+    mesh = pxla.thread_resources.env.physical_mesh
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=32), rngs=nnx.Rngs(0)
+    )
+    ref_model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=32), rngs=nnx.Rngs(0)
+    )
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=100,
+            max_seq_token_per_tpu=16,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=8, max_tokens_to_generate=8, return_logprobs=True
+        ),
+    )
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=model,
+        reference=ref_model,
+        tokenizer=test_common.MockVocab(),
+        cluster_config=cluster_config,
+    )
+    learner = agentic_grpo_learner.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=None,
+        algo_config=agentic_grpo_learner.GRPOConfig(
+            beta=0.1,
+            epsilon=0.2,
+            num_generations=2,
+            num_iterations=2,
+            loss_algo="grpo",
+            max_response_length=8,
+            use_rollout_logps=False,
+        ),
+        chat_parser=MockChatParser(),
+    )
+
+    segment_ids = jnp.array([[1, 1, 1, 2, 2, 0, 0, 0]])
+    example = agentic_grpo_learner.TrainExample(
+        prompt_ids=jnp.ones((1, 4), jnp.int32),
+        prompt_mask=jnp.ones((1, 4), jnp.int32),
+        completion_ids=jnp.ones((1, 4), jnp.int32),
+        completion_mask=jnp.ones((1, 4), jnp.int32),
+        advantages=jnp.zeros((1,)),
+        old_per_token_logps=None,
+        ref_per_token_logps=None,
+        segment_ids=segment_ids,
+        segment_positions=jnp.arange(8).reshape(1, 8),
+    )
+
+    with (
+        mock.patch.object(
+            rl_engine,
+            "get_actor_per_token_logps",
+            return_value=jnp.zeros((1, 8)),
+        ) as actor_call,
+        mock.patch.object(
+            rl_engine,
+            "get_ref_per_token_logps",
+            return_value=jnp.zeros((1, 8)),
+        ) as ref_call,
+    ):
+      out = learner._compute_packed_logps(example)
+
+    for call in (actor_call, ref_call):
+      self.assertTrue(call.called)
+      self.assertIsNotNone(
+          call.call_args.kwargs.get("segment_ids"),
+          "the recompute ran without segment_ids, so it treated the packed row"
+          " as a single sequence",
+      )
+    self.assertIsNotNone(out.old_per_token_logps)
+    self.assertIsNotNone(out.ref_per_token_logps)
+
+  def test_rollout_logps_trainer_recompute_is_packed_too(self):
+    """With rollout logps and num_iterations > 1, the trainer recompute must use the packed row too."""
+    mesh = pxla.thread_resources.env.physical_mesh
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=32), rngs=nnx.Rngs(0)
+    )
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=100,
+            max_seq_token_per_tpu=16,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=8, max_tokens_to_generate=8, return_logprobs=True
+        ),
+    )
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=model,
+        reference=model,
+        tokenizer=test_common.MockVocab(),
+        cluster_config=cluster_config,
+    )
+    learner = agentic_grpo_learner.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=None,
+        algo_config=agentic_grpo_learner.GRPOConfig(
+            beta=0.0,
+            epsilon=0.2,
+            num_generations=2,
+            num_iterations=2,
+            loss_algo="grpo",
+            max_response_length=8,
+            use_rollout_logps=True,
+            sampler_is="token",
+        ),
+        chat_parser=MockChatParser(),
+    )
+
+    rollout_logps = jnp.full((1, 8), -0.5)
+    example = agentic_grpo_learner.TrainExample(
+        prompt_ids=jnp.ones((1, 4), jnp.int32),
+        prompt_mask=jnp.ones((1, 4), jnp.int32),
+        completion_ids=jnp.ones((1, 4), jnp.int32),
+        completion_mask=jnp.ones((1, 8), jnp.int32),
+        advantages=jnp.zeros((1,)),
+        old_per_token_logps=rollout_logps,
+        ref_per_token_logps=None,
+        segment_ids=jnp.array([[1, 1, 1, 2, 2, 0, 0, 0]]),
+        segment_positions=jnp.arange(8).reshape(1, 8),
+    )
+    trainer_logps = jnp.full((1, 8), -0.25)
+
+    with mock.patch.object(
+        rl_engine, "get_actor_per_token_logps", return_value=trainer_logps
+    ) as actor_call:
+      out = learner._compute_packed_logps(example)
+
+    self.assertTrue(
+        actor_call.called,
+        "the trainer recompute never ran, so sampler_is has nothing to correct",
+    )
+    self.assertIsNotNone(
+        actor_call.call_args.kwargs.get("segment_ids"),
+        "the recompute ran unpacked, which is the memory cost packing removes",
+    )
+    np.testing.assert_allclose(out.old_per_token_logps, trainer_logps)
+    self.assertIsNotNone(out.sampler_is_weights)
 
   def test_process_results_zero_advantage_group(self):
     class MockTraj:
@@ -906,15 +1075,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         rngs=nnx.Rngs(0),
     )
     mesh = pxla.thread_resources.env.physical_mesh
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine="vanilla",
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=100,
         ),
@@ -924,7 +1093,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             return_logprobs=True,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=tokenizer,
@@ -939,14 +1108,14 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
 
     learner = agentic_grpo_learner.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=None,
         algo_config=grpo_config,
         chat_parser=MockChatParser(),
     )
 
     with mock.patch.object(
-        learner.rl_cluster,
+        learner.rl_engine,
         "get_ref_per_token_logps",
         return_value=jnp.zeros((2, 10)),
         autospec=True,
@@ -995,15 +1164,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       )
 
       mesh = pxla.thread_resources.env.physical_mesh
-      cluster_config = rl_cluster_lib.ClusterConfig(
+      cluster_config = rl_engine_lib.ClusterConfig(
           role_to_mesh={
-              rl_cluster_lib.Role.ACTOR: mesh,
-              rl_cluster_lib.Role.REFERENCE: mesh,
-              rl_cluster_lib.Role.ROLLOUT: mesh,
+              rl_engine_lib.Role.ACTOR: mesh,
+              rl_engine_lib.Role.REFERENCE: mesh,
+              rl_engine_lib.Role.ROLLOUT: mesh,
           },
           rollout_engine="vanilla",
           offload_to_cpu=False,
-          training_config=rl_cluster_lib.RLTrainingConfig(
+          training_config=rl_engine_lib.RLTrainingConfig(
               actor_optimizer=optax.sgd(1e-3),
               eval_every_n_steps=2,
               max_steps=max_steps,
@@ -1024,7 +1193,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
               temperature=0.5,
           ),
       )
-      rl_cluster = rl_cluster_lib.RLCluster(
+      rl_engine = rl_engine_lib.RLEngine(
           actor=model,
           reference=ref_model,
           tokenizer=tokenizer,
@@ -1037,7 +1206,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           max_response_length=10,
       )
       grpo_learner = agentic_grpo_learner.GRPOLearner(
-          rl_cluster=rl_cluster,
+          rl_engine=rl_engine,
           reward_fns=reward_fn_1,
           algo_config=grpo_config,
           chat_parser=MockChatParser(),
@@ -1050,17 +1219,17 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     ]
 
     grpo_learner = create_learner(ckpt_dir, max_steps=10)
-    self.assertEqual(grpo_learner.rl_cluster.global_steps, 0)
+    self.assertEqual(grpo_learner.rl_engine.global_steps, 0)
     # Train for 1 step.
     grpo_learner.train(train_ds[0:1])
-    self.assertEqual(grpo_learner.rl_cluster.global_steps, 1)
+    self.assertEqual(grpo_learner.rl_engine.global_steps, 1)
 
     # Resume training with a new learner.
     grpo_learner2 = create_learner(ckpt_dir, max_steps=3)
-    self.assertEqual(grpo_learner2.rl_cluster.global_steps, 1)
+    self.assertEqual(grpo_learner2.rl_engine.global_steps, 1)
 
     grpo_learner2.train(train_ds)
-    self.assertEqual(grpo_learner2.rl_cluster.global_steps, 3)
+    self.assertEqual(grpo_learner2.rl_engine.global_steps, 3)
 
   @parameterized.named_parameters(
       dict(
@@ -1103,15 +1272,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       )
 
       mesh = pxla.thread_resources.env.physical_mesh
-      cluster_config = rl_cluster_lib.ClusterConfig(
+      cluster_config = rl_engine_lib.ClusterConfig(
           role_to_mesh={
-              rl_cluster_lib.Role.ACTOR: mesh,
-              rl_cluster_lib.Role.REFERENCE: mesh,
-              rl_cluster_lib.Role.ROLLOUT: mesh,
+              rl_engine_lib.Role.ACTOR: mesh,
+              rl_engine_lib.Role.REFERENCE: mesh,
+              rl_engine_lib.Role.ROLLOUT: mesh,
           },
           rollout_engine="vanilla",
           offload_to_cpu=False,
-          training_config=rl_cluster_lib.RLTrainingConfig(
+          training_config=rl_engine_lib.RLTrainingConfig(
               actor_optimizer=optax.sgd(1e-3),
               eval_every_n_steps=10,
               max_steps=20,
@@ -1126,7 +1295,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
               temperature=0.5,
           ),
       )
-      rl_cluster = rl_cluster_lib.RLCluster(
+      rl_engine = rl_engine_lib.RLEngine(
           actor=model,
           reference=ref_model,
           tokenizer=tokenizer,
@@ -1139,7 +1308,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           max_response_length=10,
       )
       grpo_learner = agentic_grpo_learner.GRPOLearner(
-          rl_cluster=rl_cluster,
+          rl_engine=rl_engine,
           reward_fns=reward_fn,
           algo_config=grpo_config,
           chat_parser=MockChatParser(),
@@ -1172,10 +1341,10 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     self.assertEqual(base_trajectories, micro_batch_trajectories)
     self.assertEqual(
-        grpo_learner_base.rl_cluster.global_steps,
-        grpo_learner_micro.rl_cluster.global_steps,
+        grpo_learner_base.rl_engine.global_steps,
+        grpo_learner_micro.rl_engine.global_steps,
     )
-    self.assertEqual(grpo_learner_base.rl_cluster.global_steps, 1)
+    self.assertEqual(grpo_learner_base.rl_engine.global_steps, 1)
 
   def test_resume_training(self):
     ckpt_dir = tempfile.mkdtemp()
@@ -1205,7 +1374,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         )
       else:
         checkpointing_options = None
-      training_config = rl_cluster_lib.RLTrainingConfig(
+      training_config = rl_engine_lib.RLTrainingConfig(
           actor_optimizer=optax.sgd(1e-3),
           eval_every_n_steps=10,  # avoid eval
           max_steps=max_steps,
@@ -1216,11 +1385,11 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           checkpointing_options=checkpointing_options,
           checkpoint_root_directory=ckpt_dir,
       )
-      cluster_config = rl_cluster_lib.ClusterConfig(
+      cluster_config = rl_engine_lib.ClusterConfig(
           role_to_mesh={
-              rl_cluster_lib.Role.ACTOR: mesh,
-              rl_cluster_lib.Role.REFERENCE: mesh,
-              rl_cluster_lib.Role.ROLLOUT: mesh,
+              rl_engine_lib.Role.ACTOR: mesh,
+              rl_engine_lib.Role.REFERENCE: mesh,
+              rl_engine_lib.Role.ROLLOUT: mesh,
           },
           rollout_engine="vanilla",
           offload_to_cpu=False,
@@ -1233,7 +1402,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
               temperature=0.5,
           ),
       )
-      rl_cluster = rl_cluster_lib.RLCluster(
+      rl_engine = rl_engine_lib.RLEngine(
           actor=model,
           reference=ref_model,
           tokenizer=tokenizer,
@@ -1246,7 +1415,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           max_response_length=10,
       )
       grpo_learner = agentic_grpo_learner.GRPOLearner(
-          rl_cluster=rl_cluster,
+          rl_engine=rl_engine,
           reward_fns=reward_fn,
           algo_config=grpo_config,
           chat_parser=MockChatParser(),
@@ -1261,20 +1430,20 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     # 1. Train in one go
     grpo_learner_full, model_full = create_learner(ckpt_dir=None, max_steps=2)
     grpo_learner_full.train(train_ds)
-    self.assertEqual(grpo_learner_full.rl_cluster.global_steps, 2)
+    self.assertEqual(grpo_learner_full.rl_engine.global_steps, 2)
 
     # 2. Train interrupted
     grpo_learner_interrupt, _ = create_learner(ckpt_dir=ckpt_dir, max_steps=1)
     grpo_learner_interrupt.train(train_ds)
-    self.assertEqual(grpo_learner_interrupt.rl_cluster.global_steps, 1)
+    self.assertEqual(grpo_learner_interrupt.rl_engine.global_steps, 1)
 
     # 3. Resume training
     grpo_learner_resume, model_resume = create_learner(
         ckpt_dir=ckpt_dir, max_steps=2
     )
-    self.assertEqual(grpo_learner_resume.rl_cluster.global_steps, 1)
+    self.assertEqual(grpo_learner_resume.rl_engine.global_steps, 1)
     grpo_learner_resume.train(train_ds)
-    self.assertEqual(grpo_learner_resume.rl_cluster.global_steps, 2)
+    self.assertEqual(grpo_learner_resume.rl_engine.global_steps, 2)
 
     # 4. Compare weights
     params1 = nnx.state(model_full, nnx.Param)
@@ -1313,15 +1482,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         rngs=nnx.Rngs(0),
     )
     mesh = pxla.thread_resources.env.physical_mesh
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine="vanilla",
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=10,
             max_steps=10,
@@ -1332,7 +1501,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             return_logprobs=True,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=tokenizer,
@@ -1347,7 +1516,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         num_iterations=1,
     )
     learner = agentic_grpo_learner.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
         chat_parser=MockChatParser(),
@@ -1374,7 +1543,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     trajectories = [MockTraj(0), MockTraj(1)]
 
     with mock.patch.object(
-        rl_cluster,
+        rl_engine,
         "get_ref_per_token_logps",
         return_value=jnp.zeros((2, 10)),
         autospec=True,
@@ -1395,17 +1564,30 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           testcase_name="use_rollout_logps_true",
           use_rollout_logps=True,
           return_logprobs=True,
+          num_iterations=1,
           expect_get_actor_logps=False,
       ),
       dict(
-          testcase_name="use_rollout_logps_false",
+          testcase_name="use_rollout_logps_false_single_iter_fuses_in_loss",
           use_rollout_logps=False,
           return_logprobs=False,
+          num_iterations=1,
+          expect_get_actor_logps=False,
+      ),
+      dict(
+          testcase_name="use_rollout_logps_false_multi_iter_recomputes",
+          use_rollout_logps=False,
+          return_logprobs=False,
+          num_iterations=2,
           expect_get_actor_logps=True,
       ),
   )
   def test_use_rollout_logps(
-      self, use_rollout_logps, return_logprobs, expect_get_actor_logps
+      self,
+      use_rollout_logps,
+      return_logprobs,
+      num_iterations,
+      expect_get_actor_logps,
   ):
     vocab = _mock_vocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
@@ -1418,15 +1600,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         rngs=nnx.Rngs(0),
     )
     mesh = pxla.thread_resources.env.physical_mesh
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine="vanilla",
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=10,
             max_steps=10,
@@ -1437,7 +1619,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             return_logprobs=return_logprobs,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=tokenizer,
@@ -1449,11 +1631,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         force_compute_kl=False,
         max_response_length=10,
         num_generations=2,
-        num_iterations=1,
+        num_iterations=num_iterations,
         use_rollout_logps=use_rollout_logps,
+        exact_token_continuity=False,
     )
     learner = agentic_grpo_learner.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
         chat_parser=MockChatParser(),
@@ -1482,7 +1665,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     trajectories = [MockTraj(0), MockTraj(1)]
 
     with mock.patch.object(
-        rl_cluster,
+        rl_engine,
         "get_actor_per_token_logps",
         return_value=jnp.full((2, 10), -1.0),
         autospec=True,
@@ -1525,15 +1708,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         rngs=nnx.Rngs(0),
     )
     mesh = pxla.thread_resources.env.physical_mesh
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine="vanilla",
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             max_steps=2,
             eval_every_n_steps=10,
@@ -1545,7 +1728,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             kv_cache_size=256,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=tokenizer,
@@ -1553,7 +1736,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
     grpo_config = agentic_grpo_learner.GRPOConfig(max_response_length=10)
     learner = _LearnerWithException(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
         chat_parser=MockChatParser(),
@@ -1599,15 +1782,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine="vanilla",
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=2,
             max_steps=20,
@@ -1620,13 +1803,13 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             kv_cache_size=1024,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=tokenizer,
         cluster_config=cluster_config,
     )
-    rl_cluster.with_external_metrics_logger(print)
+    rl_engine.with_external_metrics_logger(print)
 
     grpo_config = agentic_grpo_learner.GRPOConfig(
         num_generations=2,
@@ -1635,7 +1818,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         max_response_length=20,
     )
     grpo_learner = agentic_grpo_learner.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_fns,
         algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
@@ -1646,7 +1829,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     eval_ds = _dummy_dataset(batch_size=1)
 
     with mock.patch.object(
-        rl_cluster,
+        rl_engine,
         "generate",
         side_effect=functools.partial(
             self._mock_generate,
@@ -1661,11 +1844,11 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
 
     self.assertEqual(
-        grpo_learner.rl_cluster.global_steps,
+        grpo_learner.rl_engine.global_steps,
         20,
     )
 
-    rl_metric_logger = grpo_learner.rl_cluster._rl_metrics_logger
+    rl_metric_logger = grpo_learner.rl_engine._rl_metrics_logger
 
     rewards_metrics = (
         ("rewards/" + f.__name__ for f in reward_fns)
@@ -1699,7 +1882,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           len(
               rl_metric_logger.get_metric_history(prefix, metric_name, "train")
           ),
-          grpo_learner.rl_cluster.global_steps,
+          grpo_learner.rl_engine.global_steps,
           msg=f"metric_name: {metric_name}",
       )
 
@@ -1714,11 +1897,11 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
     # self.assertGreater(np.sum(clip_ratio_history), 0)
 
-    metric_logger = grpo_learner.rl_cluster.actor_trainer.metrics_logger
+    metric_logger = grpo_learner.rl_engine.actor_trainer.metrics_logger
     for metric_name in ["loss", "kl", "entropy", "pg_clipfrac"]:
       self.assertLen(
           metric_logger.get_metric_history("actor", metric_name, "train"),
-          grpo_learner.rl_cluster.actor_trainer.train_steps,
+          grpo_learner.rl_engine.actor_trainer.train_steps,
           msg=f"metric_name: {metric_name}",
       )
       self.assertLen(
@@ -1728,7 +1911,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       )
     self.assertLen(
         metric_logger.get_metric_history("actor", "grad_norm", "train"),
-        grpo_learner.rl_cluster.actor_trainer.train_steps,
+        grpo_learner.rl_engine.actor_trainer.train_steps,
     )
 
   @parameterized.named_parameters(
@@ -1759,15 +1942,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine="vanilla",
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=2,
             max_steps=4,
@@ -1780,7 +1963,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             kv_cache_size=1024,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=tokenizer,
@@ -1795,7 +1978,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         max_response_length=10,
     )
     grpo_learner = agentic_grpo_learner.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
@@ -1805,7 +1988,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     eval_ds = _dummy_dataset(batch_size=1)
 
     with mock.patch.object(
-        rl_cluster, "generate", side_effect=self._mock_generate
+        rl_engine, "generate", side_effect=self._mock_generate
     ):
       grpo_learner.train(train_ds, eval_ds)
 
@@ -1815,7 +1998,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
 
     self.assertEqual(
-        grpo_learner.rl_cluster.global_steps,
+        grpo_learner.rl_engine.global_steps,
         4,
     )
 
@@ -1832,14 +2015,14 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine="vanilla",
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=10,
         ),
@@ -1848,7 +2031,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             return_logprobs=True,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=tokenizer,
@@ -1857,7 +2040,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     grpo_config = agentic_grpo_learner.GRPOConfig(max_response_length=512)
     grpo_learner = agentic_grpo_learner.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
         chat_parser=MockChatParser(),
@@ -1890,15 +2073,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine="vanilla",
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=2,
             max_steps=1,
@@ -1914,12 +2097,13 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             kv_cache_size=1024,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
-        actor=model,
-        reference=ref_model,
-        tokenizer=tokenizer,
-        cluster_config=cluster_config,
-    )
+    with mock.patch.object(jax.monitoring, "register_scalar_listener"):
+      rl_engine = rl_engine_lib.RLEngine(
+          actor=model,
+          reference=ref_model,
+          tokenizer=tokenizer,
+          cluster_config=cluster_config,
+      )
 
     grpo_config = agentic_grpo_learner.GRPOConfig(
         num_generations=2,
@@ -1928,7 +2112,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         max_response_length=10,
     )
     grpo_learner = agentic_grpo_learner.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
@@ -1939,13 +2123,13 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     with (
         mock.patch.object(trajectory_logger, "log_item") as mock_log_item,
         mock.patch.object(
-            rl_cluster, "generate", side_effect=self._mock_generate
+            rl_engine, "generate", side_effect=self._mock_generate
         ),
     ):
       grpo_learner.train(train_ds)
       if grpo_learner._trajectory_logger:
         grpo_learner._trajectory_logger.stop()
-      self.assertEqual(grpo_learner.rl_cluster.global_steps, 1)
+      self.assertEqual(grpo_learner.rl_engine.global_steps, 1)
       self.assertEqual(mock_log_item.call_count, 1)
 
       logged_items = mock_log_item.call_args_list[0][0][1]
@@ -1990,15 +2174,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     original_lora_variables = jax.tree.map(
         jnp.copy, nnx.state(actor_model, nnx.LoRAParam)
     )
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh1,
-            rl_cluster_lib.Role.REFERENCE: mesh1,
-            rl_cluster_lib.Role.ROLLOUT: mesh2,
+            rl_engine_lib.Role.ACTOR: mesh1,
+            rl_engine_lib.Role.REFERENCE: mesh1,
+            rl_engine_lib.Role.ROLLOUT: mesh2,
         },
         rollout_engine="vanilla",
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=10,
             max_steps=10,
@@ -2010,7 +2194,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             kv_cache_size=1024,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=actor_model,
         reference=ref_model,
         tokenizer=tokenizer,
@@ -2023,7 +2207,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
 
     grpo_learner = agentic_grpo_learner.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
         chat_parser=MockChatParser(),
@@ -2031,16 +2215,16 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     self.assertTrue(grpo_learner.should_sync_weights)
     train_ds = _dummy_dataset(MySource(repeat=10), batch_size=2)
     with mock.patch.object(
-        rl_cluster, "generate", side_effect=self._mock_generate
+        rl_engine, "generate", side_effect=self._mock_generate
     ):
       grpo_learner.train(train_ds, None)
 
     base_params = nnx.state(
-        rl_cluster.actor_trainer.model, filterlib.Not(nnx.LoRAParam)
+        rl_engine.actor_trainer.model, filterlib.Not(nnx.LoRAParam)
     )
-    lora_params = nnx.state(rl_cluster.actor_trainer.model, nnx.LoRAParam)
+    lora_params = nnx.state(rl_engine.actor_trainer.model, nnx.LoRAParam)
     lora_params_from_sampler = nnx.state(
-        grpo_learner.rl_cluster.rollout.model(), nnx.LoRAParam
+        grpo_learner.rl_engine.rollout.model(), nnx.LoRAParam
     )
     jax.tree.map_with_path(
         test_common.assert_not_equal, original_lora_variables, lora_params
@@ -2111,15 +2295,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine="vanilla",
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=2,
             max_steps=20,
@@ -2132,13 +2316,13 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             kv_cache_size=1024,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=tokenizer,
         cluster_config=cluster_config,
     )
-    rl_cluster.with_external_metrics_logger(print)
+    rl_engine.with_external_metrics_logger(print)
 
     grpo_config = agentic_grpo_learner.GRPOConfig(
         num_generations=2,
@@ -2148,7 +2332,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         max_concurrency=1,  # so the output is deterministic.
     )
     grpo_learner = agentic_grpo_learner.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
@@ -2189,7 +2373,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     eval_ds = _dummy_dataset(batch_size=1)
 
     with mock.patch.object(
-        rl_cluster, "generate", side_effect=self._mock_generate
+        rl_engine, "generate", side_effect=self._mock_generate
     ):
       grpo_learner.train(train_ds, eval_ds)
 
@@ -2219,6 +2403,291 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     self.assertEqual(
         decoded_completion.count("Assistant:"), 2
     )  # 3 turns but terminal env obs does not append generation msg
+
+  def test_single_iteration_fuses_agreement_and_bypasses_actor_recompute(self):
+    """Verifies single-iteration GRPO fuses agreement/TIS into grpo_loss_fn with 0 extra passes."""
+    vocab = _mock_vocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    ref_model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=10,
+            max_steps=10,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=32,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
+        ),
+    )
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=model,
+        reference=ref_model,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+    )
+    grpo_config = agentic_grpo_learner.GRPOConfig(
+        beta=0.0,
+        force_compute_kl=False,
+        max_response_length=10,
+        num_generations=2,
+        num_iterations=1,
+        use_rollout_logps=True,
+        sampler_is="token",
+        seq_logprob_error_threshold=2.0,
+    )
+    learner = agentic_grpo_learner.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=reward_fn_1,
+        algo_config=grpo_config,
+        chat_parser=MockChatParser(),
+    )
+
+    class MockTraj:
+
+      def __init__(self, index):
+        self.traj = {
+            "conversation_text": [
+                {"role": "assistant", "content": f"msg {index}"}
+            ],
+            "conversation_tokens": np.array([1, 2, 3]),
+            "conversation_masks": np.array([1, 1, 1]),
+            "old_logprobs": np.full(3, -0.5, dtype=np.float32),
+            "policy_version": 0,
+            "trajectory_reward": 1.0,
+            "prompt_tokens": np.array([4, 5]),
+            "original_input": {"prompts": "hello"},
+            "group_id": "test_group",
+        }
+
+    trajectories = [MockTraj(0), MockTraj(1)]
+
+    with mock.patch.object(
+        rl_engine,
+        "get_actor_per_token_logps",
+        return_value=jnp.full((2, 10), -1.0),
+        autospec=True,
+    ) as mock_get_actor_logps:
+      results = learner._process_results(trajectories, expected_step=1)
+      self.assertLen(results, 1)
+      train_example = results[0]
+
+      # 1. Asserts 0 extra trainer forward passes!
+      mock_get_actor_logps.assert_not_called()
+
+      # 2. Preserves rollout logps with sampler_agreement_applied=False so
+      # grpo_loss_fn fuses agreement, TIS, and on-policy ratio in the loss step.
+      self.assertIsNotNone(train_example.old_per_token_logps)
+      self.assertFalse(train_example.sampler_agreement_applied)
+      self.assertIsNone(train_example.sampler_is_weights)
+
+
+class ExactTokenContinuityBatchTest(absltest.TestCase):
+  """Real batch construction on a recorded exact trajectory; no model training."""
+
+  @staticmethod
+  def _raw_trajectory():
+    return {
+        "prompt_tokens": np.array([0, 0, 5, 100, 101], np.int32),
+        "prompt_length": 3,
+        "conversation_tokens": np.array(
+            [10, 11, 90, 20, 21, 12, 90, 22, 13, 14, 90], np.int32
+        ),
+        "conversation_masks": np.array(
+            [1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0], np.int32
+        ),
+        "old_logprobs": (
+            np.array([1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0], np.float32) * -0.5
+        ),
+        "conversation_text": [{"role": "assistant", "content": "action"}],
+        "policy_version": 7,
+        "trajectory_reward": 1.0,
+        "original_input": {"prompts": ["fixture"]},
+    }
+
+  def _make_batch(self, *, exact=True, packed=False, raw=None):
+    import copy  # pylint: disable=g-import-not-at-top
+    from tunix.perf.experimental import tracer  # pylint: disable=g-import-not-at-top
+    from tunix.rl.agentic.agents import agent_types  # pylint: disable=g-import-not-at-top
+
+    obj = object.__new__(agentic_grpo_learner.GRPOLearner)
+    obj.algo_config = agentic_grpo_learner.GRPOConfig(
+        exact_token_continuity=exact,
+        max_response_length=20,
+        beta=0.0,
+        use_rollout_logps=True,
+    )
+    obj._trajectory_logger = None
+    obj._full_batch_size = 0
+    obj.metric_fns = []
+    obj._compute_rewards = lambda **kw: jnp.array([0.0, 1.0])
+    obj.rl_engine = types.SimpleNamespace(
+        rollout=types.SimpleNamespace(pad_id=lambda: 0, eos_id=lambda: 255),
+        r2m={rl_engine_lib.Role.ACTOR: None},
+        perf_v2=tracer.NoopTracer(),
+        buffer_metrics_async=mock.Mock(),
+        cluster_config=types.SimpleNamespace(
+            rollout_config=base_rollout.RolloutConfig(max_prompt_length=5),
+            training_config=types.SimpleNamespace(
+                max_seq_token_per_tpu=32 if packed else None,
+                compute_logps_micro_batch_size=1,
+                mini_batch_size=None,
+            ),
+        ),
+    )
+    record = self._raw_trajectory() if raw is None else raw
+    items = [
+        agent_types.TrajectoryItem(traj=copy.deepcopy(record)) for _ in range(2)
+    ]
+    return obj._process_results(items)[0]
+
+  def test_exact_batch_keeps_recorded_ids_masks_and_logprobs(self):
+    raw = self._raw_trajectory()
+    batch = self._make_batch()
+    count = len(raw["conversation_tokens"])
+    np.testing.assert_array_equal(batch.prompt_ids[0], [0, 0, 5, 100, 101])
+    np.testing.assert_array_equal(batch.prompt_mask[0], [0, 0, 1, 1, 1])
+    np.testing.assert_array_equal(
+        batch.completion_ids[0, :count], raw["conversation_tokens"]
+    )
+    np.testing.assert_array_equal(
+        batch.completion_mask[0, :count], raw["conversation_masks"]
+    )
+    np.testing.assert_array_equal(
+        batch.old_per_token_logps[0, :count], raw["old_logprobs"]
+    )
+    np.testing.assert_array_equal(batch.completion_mask[0, count:], 0)
+
+  def test_exact_batch_never_silently_truncates(self):
+    raw = self._raw_trajectory()
+    raw.update(
+        conversation_tokens=np.arange(1, 22),
+        conversation_masks=np.ones(21, np.int32),
+        old_logprobs=np.zeros(21),
+    )
+    with self.assertRaisesRegex(ValueError, "exceeds training padding budget"):
+      self._make_batch(raw=raw)
+
+  def test_validity_mask_is_separate_from_loss_mask_and_survives_packing(self):
+    from tunix.rl import utils as rl_utils  # pylint: disable=g-import-not-at-top
+
+    raw = self._raw_trajectory()
+    raw["conversation_tokens"] = raw["conversation_tokens"].copy()
+    raw["conversation_tokens"][
+        -2
+    ] = 0  # a real token equal to the pad id stays valid
+    batch = self._make_batch(raw=raw)
+    count = len(raw["conversation_tokens"])
+    np.testing.assert_array_equal(
+        batch.completion_ids[0, :count], raw["conversation_tokens"]
+    )
+    np.testing.assert_array_equal(
+        batch.completion_mask[0, :count], raw["conversation_masks"]
+    )
+    np.testing.assert_array_equal(
+        batch.completion_attention_mask[0], [1] * count + [0] * (20 - count)
+    )
+    np.testing.assert_array_equal(batch.prompt_mask[0], [0, 0, 1, 1, 1])
+    unpadded = rl_utils.unpad_train_example(batch)[0]
+    np.testing.assert_array_equal(
+        unpadded["completion_ids"], raw["conversation_tokens"]
+    )
+    np.testing.assert_array_equal(
+        unpadded["old_per_token_logps"], raw["old_logprobs"]
+    )
+
+    packed = list(
+        rl_utils.pack_sequences(
+            iter([[self._make_batch(packed=True, raw=raw)]]),
+            max_token_budget=64,
+            sequences_per_update=2,
+        )
+    )[0][0]
+    expected = [5, 100, 101] + list(raw["conversation_tokens"])
+    for segment in (1, 2):
+      positions = np.asarray(packed.segment_ids[0]) == segment
+      np.testing.assert_array_equal(
+          packed.completion_ids[0][positions], expected
+      )
+      np.testing.assert_array_equal(
+          packed.completion_mask[0][positions],
+          [0, 0, 0] + list(raw["conversation_masks"]),
+      )
+
+  def test_native_default_keeps_pad_id_validity(self):
+    from tunix.rl import utils as rl_utils  # pylint: disable=g-import-not-at-top
+
+    batch = self._make_batch(exact=False)
+    self.assertIsNone(batch.completion_attention_mask)
+    np.testing.assert_array_equal(batch.prompt_mask[0], [0, 0, 1, 1, 1])
+    self.assertLen(rl_utils.unpad_train_example(batch)[0]["completion_ids"], 5)
+
+  def test_actor_ref_and_loss_consume_token_mask(self):
+    from tunix.rl import common  # pylint: disable=g-import-not-at-top
+    from tunix.rl import rl_cluster as rl_cluster_lib  # pylint: disable=g-import-not-at-top
+
+    class PositionModel(nnx.Module):
+      """Logits that only depend on the attention positions the model sees."""
+
+      def __init__(self):
+        self.scale = nnx.Param(jnp.ones((1,), jnp.float32))
+
+      def __call__(
+          self,
+          tokens,
+          positions,
+          cache=None,
+          attention_mask=None,
+          segment_ids=None,
+      ):
+        del cache, attention_mask, segment_ids
+        base = jnp.zeros(tokens.shape + (256,), jnp.float32)
+        return (
+            base.at[..., 1].set(positions.astype(jnp.float32) * self.scale[0]),
+            None,
+        )
+
+    raw = self._raw_trajectory()
+    raw["conversation_tokens"] = raw["conversation_tokens"].copy()
+    raw["conversation_tokens"][-2] = 0
+    batch = self._make_batch(raw=raw)
+    graph, state = nnx.split(PositionModel())
+    mask = jnp.concatenate(
+        [batch.prompt_mask, batch.completion_attention_mask], axis=1
+    )
+    with_mask = common.compute_per_token_logps(
+        graph,
+        state,
+        batch.prompt_ids,
+        batch.completion_ids,
+        0,
+        255,
+        token_mask=mask,
+    )
+    without_mask = common.compute_per_token_logps(
+        graph, state, batch.prompt_ids, batch.completion_ids, 0, 255
+    )
+    # The pad-valued real token shifts positions of everything after it
+    # without the explicit mask; with it, positions are contiguous.
+    self.assertFalse(
+        np.array_equal(np.asarray(with_mask), np.asarray(without_mask))
+    )
 
 
 if __name__ == "__main__":

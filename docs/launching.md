@@ -353,6 +353,8 @@ before performing a parameter update (simulates larger batch sizes).
 * **`checkpointing_options`**:
   * `max_to_keep`: Number of recent checkpoints to retain.
   * `save_interval_steps`: How often to save a checkpoint.
+  * `enable_async_checkpointing`: Boolean to toggle asynchronous checkpointing execution.
+  * `timeout_secs`: Maximum time permitted for asynchronous writes natively.
 
 
 * **`metrics_logging_options`**: Settings for logging. Includes project name, run name, and flush frequency.
@@ -385,7 +387,7 @@ Specific parameters for Proximal Policy Optimization (PPO).
 
 * **`num_iterations`**: (PPO specific) The number of iterations per batch (corresponds to $\varmu$ in the paper)
 
-* **`lambda`**: The lambda parameter for Generalized Advantage Estimation (GAE). 
+* **`lambda`**: The lambda parameter for Generalized Advantage Estimation (GAE).
 
 * **`gamma`**: The discount factor for future rewards in GAE.
 

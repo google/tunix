@@ -18,11 +18,12 @@
 from collections import abc
 import functools
 import gc
-from absl import logging
 import math
+import numbers
 import re
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
+from absl import logging
 from flax import nnx
 from flax import traverse_util
 import jax
@@ -88,6 +89,16 @@ def next_power_of_2(x: int) -> int:
   if x == 0:
     return 1
   return int(2 ** int(jnp.ceil(jnp.log2(x))))
+
+
+def cdiv(a: int, b: int) -> int:
+  """Returns the ceiling of `a / b` for integers."""
+  return -(-a // b)
+
+
+def get_dtype_packing(dtype: jax.typing.DTypeLike) -> int:
+  """Returns the number of elements of `dtype` packed into 32 bits."""
+  return max(1, 32 // jax.dtypes.itemsize_bits(dtype))
 
 
 def pad_to_length(
@@ -157,7 +168,8 @@ def np_find_first_non_pad_idx(ids: np.ndarray, pad_id: int) -> int:
 
 
 def np_find_first_eos_idx(
-    ids: np.ndarray, eos_id: int | jax.Array,
+    ids: np.ndarray,
+    eos_id: int | jax.Array,
 ) -> int:
   """Numpy version of find_first_eos_idx. Works on CPU arrays."""
   assert ids.ndim == 1, f'ids should be a 1d array. Got: {ids.shape}'
@@ -200,6 +212,7 @@ def padded_fill_tokens_and_logits(
     eos_value: int | jax.Array,
     max_prompt_length: int,
     max_total_length: int,
+    prompt_lengths: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array | None]:
   """Truncates the token_buffers and logits_buffers to the valid output.
 
@@ -216,6 +229,9 @@ def padded_fill_tokens_and_logits(
     eos_value: The value to use for EOS.
     max_prompt_length: The maximum length of the input prompt.
     max_total_length: The maximum total length of the output.
+    prompt_lengths: Optional true prompt lengths per row. When provided, echo
+      starts at `max_prompt_length - prompt_length` instead of scanning for
+      `pad_value`.
 
   Returns:
     The shape of the valid output tokens, the output tokens and the output
@@ -223,7 +239,7 @@ def padded_fill_tokens_and_logits(
   """
   return jax.vmap(
       single_padded_fill_tokens_and_logits,
-      in_axes=(0, 0, None, None, None, None, None, None),
+      in_axes=(0, 0, None, None, None, None, None, None, 0),
       out_axes=(0, 0, 0),
   )(
       token_buffers,
@@ -234,6 +250,7 @@ def padded_fill_tokens_and_logits(
       eos_value,
       max_prompt_length,
       max_total_length,
+      prompt_lengths,
   )
 
 
@@ -246,13 +263,15 @@ def single_padded_fill_tokens_and_logits(
     eos_value: int | jax.Array,
     max_prompt_length: int,
     max_total_length: int,
+    prompt_length: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array | None]:
   """Generates tokens and logits from the input token_buffer and logits_buffer."""
-  start_idx = (
-      find_first_non_pad_idx(token_buffer, pad_value)
-      if echo
-      else max_prompt_length
-  )
+  if not echo:
+    start_idx = max_prompt_length
+  elif prompt_length is not None:
+    start_idx = max_prompt_length - prompt_length
+  else:
+    start_idx = find_first_non_pad_idx(token_buffer, pad_value)
   end_idx = (
       find_first_eos_idx(token_buffer[max_prompt_length:], eos_value)
       + max_prompt_length
@@ -384,7 +403,7 @@ def build_flat_dict(
   unmapped_paths = []
   for keys, v in flat_state:
     # Convert key tuple ('model', 'layers', '0') to string 'model.layers.0'
-    path = '.'.join(str(key) for key in keys)
+    path = keys if isinstance(keys, str) else '.'.join(str(key) for key in keys)
     mapped = False
     for src, regex, sharding in compiled_mappings:
       matched = regex.match(path)
@@ -461,6 +480,25 @@ def _get_layer_axis_from_sharding_spec(sharding_spec) -> Optional[int]:
   return None
 
 
+@functools.partial(jax.jit, static_argnums=1)
+def _jit_unstack(x: jax.Array, axis: int) -> Tuple[jax.Array, ...]:
+  return tuple(jnp.unstack(x, axis=axis))
+
+
+def _unroll_layer_axis(val: Any, axis: int) -> Tuple[Any, ...]:
+  """Splits `val` along `axis` into one array per layer.
+
+  `jnp.unstack` outside of jit issues one slice op per layer, and each of
+  them is a separate dispatch (a ~15 ms round trip under a Pathways proxy).
+  Running the unstack inside one jitted call returns every layer slice from a
+  single dispatch, so a 28-layer model with ~10 scanned parameters no longer
+  spends ~4 s of every weight sync here. numpy inputs are sliced directly.
+  """
+  if isinstance(val, jax.Array):
+    return _jit_unstack(val, axis)
+  return tuple(np.moveaxis(val, axis, 0))
+
+
 def _unroll_scanned_layers(
     src_state: Any,
     src_to_tgt_map: Dict,
@@ -478,8 +516,19 @@ def _unroll_scanned_layers(
 
   unscanned_flat = {}
 
-  for src_keys, src_val in src_state.flat_state():
-    src_key = '.'.join(str(k) for k in src_keys)
+  if hasattr(src_state, 'flat_state'):
+    src_items = src_state.flat_state()
+  elif isinstance(src_state, dict):
+    src_items = src_state.items()
+  else:
+    src_items = nnx.to_flat_state(src_state)
+
+  for src_keys, src_val in src_items:
+    src_key = (
+        src_keys
+        if isinstance(src_keys, str)
+        else '.'.join(str(k) for k in src_keys)
+    )
 
     # Skip RNG parameters silently
     if 'rng' in src_key:
@@ -496,18 +545,16 @@ def _unroll_scanned_layers(
     # Check if this is a scanned layer that needs unrolling
     layer_axis = _get_layer_axis_from_sharding_spec(sharding_spec)
 
+    val = src_val.value if hasattr(src_val, 'value') else src_val
     if layer_axis is not None:
-      # Unroll the scanned layer dimension
-      num_layers = src_val.value.shape[layer_axis]
-      for i in range(num_layers):
-        idx = [slice(None)] * src_val.value.ndim
-        idx[layer_axis] = i
-        layer_val = src_val.value[tuple(idx)]
+      # Unroll the scanned layer dimension: one call per scanned parameter
+      # instead of one slice dispatch per layer.
+      for i, layer_val in enumerate(_unroll_layer_axis(val, layer_axis)):
         layer_key = tgt_path[i]
         unscanned_flat[(src_key, layer_key)] = (layer_val, tgt_param[i])
     else:
       # No unrolling needed
-      unscanned_flat[(src_key, tgt_path)] = (src_val.value, tgt_param)
+      unscanned_flat[(src_key, tgt_path)] = (val, tgt_param)
 
   return unscanned_flat
 
@@ -618,7 +665,9 @@ def _align_shape(
         val = jnp.reshape(val, (kwargs['num_kv_heads'], kwargs['head_dim']))
         new_tgt_shape = tgt_shape
 
-    elif re.compile(r'layers\..*\.attn\.(q|k|v|o)_proj').match(src_key):
+    elif re.compile(
+        r'layers\..*\.attn\.(q|k|v|o)_proj|layers\..*\.attn\..*einsum.*'
+    ).match(src_key):
       if math.prod(tgt_shape) == math.prod(val.shape):
         logging.debug(
             'Reshaping attention proj on %s: %s -> %s',
@@ -637,7 +686,7 @@ def _align_shape(
             f'Unexpected attention proj shape: {val.shape} and target shape:'
             f' {tgt_shape}'
         )
-        if 'o_proj' in src_key:
+        if 'o_proj' in src_key or 'attn_vec_einsum' in src_key:
           # for output proj, head dim is dim(-2)
           padded_dim = (val.shape[-2] + 127) // 128 * 128
           repeated_dim = tgt_shape[-1] // padded_dim
@@ -649,16 +698,24 @@ def _align_shape(
           new_tgt_shape = tgt_shape[:-1] + (repeated_dim, padded_dim)
     elif re.compile(r'layers\..*\.moe\.gating_einsum').match(src_key):
       tp_size = kwargs['tp_size']
-      num_experts, expert_dim, embed_dim = val.shape[0], val.shape[2], val.shape[3]
+      num_experts, expert_dim, embed_dim = (
+          val.shape[0],
+          val.shape[2],
+          val.shape[3],
+      )
       gate_chunks, up_chunks = val[:, 0, :, :], val[:, 1, :, :]
       chunk_size = expert_dim // tp_size
-      padded_expert_chunk_dim = ((chunk_size + 127)//128)*128
+      padded_expert_chunk_dim = ((chunk_size + 127) // 128) * 128
       pad_amount = padded_expert_chunk_dim - chunk_size
       gate_chunks = gate_chunks.reshape(num_experts, tp_size, -1, embed_dim)
       up_chunks = up_chunks.reshape(num_experts, tp_size, -1, embed_dim)
       if pad_amount > 0:
-        gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
-        up_chunks = jnp.pad(up_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+        gate_chunks = jnp.pad(
+            gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0))
+        )
+        up_chunks = jnp.pad(
+            up_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0))
+        )
       val_chunks = jnp.stack([gate_chunks, up_chunks], axis=2)
       val_chunks = val_chunks.reshape(num_experts, -1, embed_dim)
       val_chunks = val_chunks.transpose(0, 2, 1)
@@ -668,9 +725,7 @@ def _align_shape(
           f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
       )
   elif re.compile(r'layers\..*\.attn\.(k|v)_bias').match(src_key):
-    logging.debug(
-        'Handling 1-D KV bias for %s in SGLangJAX rollout.', src_key
-    )
+    logging.debug('Handling 1-D KV bias for %s in SGLangJAX rollout.', src_key)
     assert tgt_shape[0] > val.shape[0] and tgt_shape[0] % val.shape[0] == 0, (
         f'Unexpected attention bias shape: {val.shape} and target shape:'
         f' {tgt_shape}'
@@ -688,8 +743,9 @@ def _align_shape(
     return jnp.reshape(val_2d, tgt_shape)
 
   attention_patterns = [
-      r'.*(q|k|v|o)_proj.*',
-      r'.*(q|k|v|o)_bias.*',
+      r'.*(q|k|v|o|qkv)_proj.*',
+      r'.*(q|k|v|o|qkv)_bias.*',
+      r'.*attn.*einsum.*',
       r'.*(key|query|value|output).*',
   ]
   if not any(re.match(pattern, src_key) for pattern in attention_patterns):
@@ -787,7 +843,11 @@ def _sync_tied_lm_head_if_needed(
   embed_param = None
   lm_head_param = None
   for flat_key, tgt_param in tgt_flat_list:
-    path = '.'.join(str(k) for k in flat_key)
+    path = (
+        flat_key
+        if isinstance(flat_key, str)
+        else '.'.join(str(k) for k in flat_key)
+    )
     if path.endswith(('embedding', 'embed_tokens.weight')):
       embed_param = tgt_param
     elif path.endswith(('lm_head', 'lm_head.weight')):
@@ -834,7 +894,11 @@ def transfer_state_with_mappings(
     The target state with the transferred values.
   """
   # Get flat target state
-  tgt_flat_list = dst_state.flat_state()
+  tgt_flat_list = (
+      dst_state.flat_state()
+      if hasattr(dst_state, 'flat_state')
+      else list(dst_state.items())
+  )
 
   # Build sharding dictionary if resharding is needed
   sharding_dict = None
@@ -850,7 +914,7 @@ def transfer_state_with_mappings(
     }
 
   # Build source-to-target mapping
-  src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
+  src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)  # type: ignore
 
   # Unroll scanned layers and flatten source state
   unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)
@@ -869,15 +933,22 @@ def transfer_state_with_mappings(
       val = key_mapping_hook_fns[flat_src_key](val)
 
     # Align shapes (padding/repeating as needed)
+    tgt_val = tgt_param.value if hasattr(tgt_param, 'value') else tgt_param
     val = _align_shape(
-        val, tgt_param.value.shape, flat_src_key, rollout_engine, **kwargs
+        val, tgt_val.shape, flat_src_key, rollout_engine, **kwargs
     )
 
     # Cast to target dtype
-    val = _apply_dtype_cast(val, tgt_param.value.dtype, flat_src_key)
+    val = _apply_dtype_cast(val, tgt_val.dtype, flat_src_key)
 
     # Assign transformed value
-    tgt_param.value = val
+    if hasattr(tgt_param, 'value'):
+      tgt_param.value = val
+    else:
+      for idx, (tk, _) in enumerate(tgt_flat_list):
+        if tk == flat_tgt_key:
+          tgt_flat_list[idx] = (tk, val)
+          break
     transferred_target_keys.add(flat_tgt_key)
 
   # Target rollout engine might have different implementation and have materialized lm_head
@@ -906,16 +977,36 @@ def transfer_state_with_mappings(
         _delete_target_buffers(sharding_dict, tgt_flat_dict)  # pyrefly: ignore[bad-argument-type]
       resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
 
-    for tgt_key, tgt_param in tgt_flat_list:
-      assert (
-          tgt_key in resharded_values_flat_dict
-      ), f'Key {tgt_key} not in resharded values'
+    for idx, (tgt_key, tgt_param) in enumerate(tgt_flat_list):
+      val = resharded_values_flat_dict.get(tgt_key)
+      if val is None:
+        alt_keys = (
+            [tuple(tgt_key.split('.')), (tgt_key,)]
+            if isinstance(tgt_key, str)
+            else ['.'.join(str(k) for k in tgt_key)]
+        )
+        for alt_key in alt_keys:
+          if (val := resharded_values_flat_dict.get(alt_key)) is not None:
+            break
+      assert val is not None, f'Key {tgt_key} not in resharded values'
       if hasattr(tgt_param, 'value'):
-        tgt_param.value = resharded_values_flat_dict[tgt_key]
+        tgt_param.value = val
       else:
-        tgt_param = resharded_values_flat_dict[tgt_key]
+        tgt_flat_list[idx] = (tgt_key, val)
 
-  return dst_state.from_flat_path(tgt_flat_list)
+  if hasattr(dst_state, 'from_flat_path'):
+    return dst_state.from_flat_path(tgt_flat_list)
+  elif isinstance(dst_state, dict):
+    return {
+        (
+            '.'.join(str(k) for k in key)
+            if isinstance(key, (tuple, list))
+            else key
+        ): val
+        for key, val in tgt_flat_list
+    }
+  else:
+    return nnx.State.from_flat_path(tgt_flat_list)
 
 
 def _shapes_are_repeatable(
@@ -973,11 +1064,13 @@ def _unstack_scanned_param(
         if _shapes_are_repeatable(candidate, tgt_shape):
           scan_axis = i
           break
-    
+
     if scan_axis is not None:
       # Transpose the scanned axis to the 0th position
       if scan_axis != 0:
-        perm = (scan_axis,) + tuple(i for i in range(len(src_shape)) if i != scan_axis)
+        perm = (scan_axis,) + tuple(
+            i for i in range(len(src_shape)) if i != scan_axis
+        )
         if hasattr(src_val, 'transpose'):
           src_val = src_val.transpose(perm)
         elif isinstance(src_val, np.ndarray):
@@ -991,19 +1084,22 @@ def _unstack_scanned_param(
         elif hasattr(jnp, 'unstack'):
           return jnp.unstack(src_val)
         else:
-           # Fallback for older JAX versions
+          # Fallback for older JAX versions
           return [src_val[i] for i in range(src_val.shape[0])]  # pyrefly: ignore[bad-return]
       except Exception as e:
         logging.debug(
             "Failed to unstack parameter '%s'. Error: %s. Using original.",
-            key_path, e
+            key_path,
+            e,
         )
         return (src_val,)
     else:
       logging.warning(
           "Shape mismatch in scanned param '%s'. Src: %s, Tgt: %s. Cannot"
           ' determine scan axis.',
-          key_path, src_shape, tgt_shape,
+          key_path,
+          src_shape,
+          tgt_shape,
       )
 
   return (src_val,)
@@ -1112,7 +1208,7 @@ def _align_per_axis(
     return arr
   if len(arr.shape) != len(tgt_shape):
     raise ShapeMismatchError(
-        f"Rank mismatch for {key_path}: src={arr.shape} vs tgt={tgt_shape}"
+        f'Rank mismatch for {key_path}: src={arr.shape} vs tgt={tgt_shape}'
     )
 
   mismatches = []
@@ -1121,7 +1217,7 @@ def _align_per_axis(
       continue
     if t < s:
       raise ShapeMismatchError(
-          f"Cannot shrink axis {axis} for {key_path}: src={s} -> tgt={t}"
+          f'Cannot shrink axis {axis} for {key_path}: src={s} -> tgt={t}'
       )
     mismatches.append((axis, s, t))
   if not mismatches:
@@ -1136,16 +1232,16 @@ def _align_per_axis(
         n_shards = _partition_size(_spec_at_axis(tgt_sharding, axis), mesh)  # pyrefly: ignore[bad-argument-type]
         if t % n_shards != 0:
           raise ValueError(
-              f"Target dimension {t} on axis {axis} for {key_path} is not "
-              f"divisible by n_shards={n_shards}; the target shape itself "
-              f"is misconfigured for the requested sharding."
+              f'Target dimension {t} on axis {axis} for {key_path} is not '
+              f'divisible by n_shards={n_shards}; the target shape itself '
+              'is misconfigured for the requested sharding.'
           )
         if (t - s) % n_shards != 0 or s % n_shards != 0:
           raise ValueError(
-              f"Cannot interleave pad axis {axis} for {key_path}: src_dim "
-              f"({s}) or extra ({t - s}) is not cleanly divisible by "
-              f"n_shards ({n_shards}). Ensure the source tensor is evenly "
-              f"partitionable."
+              f'Cannot interleave pad axis {axis} for {key_path}: src_dim '
+              f'({s}) or extra ({t - s}) is not cleanly divisible by '
+              f'n_shards ({n_shards}). Ensure the source tensor is evenly '
+              'partitionable.'
           )
         pad_specs.append((axis, n_shards, (t - s) // n_shards))
     else:
@@ -1156,9 +1252,9 @@ def _align_per_axis(
   for axis, s, t in mismatches:
     if t % s != 0:
       raise ShapeMismatchError(
-          f"Cannot align axis {axis} for {key_path}: src={s} -> tgt={t} "
-          f"is not an integer multiple and the key is not a recognized "
-          f"MoE pattern."
+          f'Cannot align axis {axis} for {key_path}: src={s} -> tgt={t} '
+          'is not an integer multiple and the key is not a recognized '
+          'MoE pattern.'
       )
     repeats.append((axis, t // s))
   return _jit_repeat_axes(arr, tuple(repeats))
@@ -1170,17 +1266,29 @@ def _interleave_moe_weights(
     tgt_shape: Tuple[int, ...],
     n_shards: int,
     axis: Optional[int] = None,
+    lane_size: Optional[int] = 0,
 ) -> jax.Array | np.ndarray:
-  """Interleaves wi_0 and wi_1 per-shard into a single tensor."""
+  """Interleaves wi_0 and wi_1 per-shard into a single tensor matching TPU GMM layout.
+
+  When lane_size > 0, Gate and Up alternate in lane_size chunks along the inner
+  dimension.
+  When lane_size == 0 or None, each TP shard is plain concatenation [local_gate,
+  local_up].
+  """
+  if lane_size is None:
+    lane_size = 0
+
   if axis is None:
     axis = len(tgt_shape) - 1
-    
+  elif axis < 0:
+    axis = len(tgt_shape) + axis
+
   target_half_dim = tgt_shape[axis] // 2
+  target_chunk_size = target_half_dim // n_shards
 
   def _pad_and_chunk(arr):
     current_total_size = arr.shape[axis]
     chunk_size = current_total_size // n_shards
-    target_chunk_size = target_half_dim // n_shards
 
     # Safely reshape to expose per-shard chunk without assuming the last axis
     new_shape = list(arr.shape)
@@ -1198,8 +1306,20 @@ def _interleave_moe_weights(
   p_wi_0 = _pad_and_chunk(wi_0)
   p_wi_1 = _pad_and_chunk(wi_1)
 
-  # Interleave along the chunked dimension
-  combined = jnp.concatenate([p_wi_0, p_wi_1], axis=axis + 1)
+  if lane_size > 0 and target_chunk_size % lane_size == 0:
+    # Interleave in 128-lane chunks within each shard:
+    # [Gate_c0 (128), Up_c0 (128), Gate_c1 (128), Up_c1 (128), ...]
+    num_lanes = target_chunk_size // lane_size
+    shape_lanes = list(p_wi_0.shape)
+    shape_lanes[axis + 1] = num_lanes
+    shape_lanes.insert(axis + 2, lane_size)
+    p_wi_0 = p_wi_0.reshape(shape_lanes)
+    p_wi_1 = p_wi_1.reshape(shape_lanes)
+    combined = jnp.stack([p_wi_0, p_wi_1], axis=axis + 2)
+  else:
+    # Fallback when dimension is not divisible by lane_size:
+    combined = jnp.concatenate([p_wi_0, p_wi_1], axis=axis + 1)
+
   return combined.reshape(tgt_shape)
 
 
@@ -1288,7 +1408,7 @@ def _scanned_sharding_from_per_layer(
   )
 
 
-@functools.partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7))
+@functools.partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7, 8))
 def _jit_fuse_and_unstack_moe(
     wi_0: jax.Array | np.ndarray,
     wi_1: jax.Array | np.ndarray,
@@ -1298,6 +1418,7 @@ def _jit_fuse_and_unstack_moe(
     tgt_shape: Tuple[int, ...],
     scan_padded_axis: int,
     tgt_padded_axis: int,
+    lane_size: Optional[int] = 0,
 ) -> Tuple[jax.Array | np.ndarray, ...]:
   """Fuses wi_0/wi_1 along the padded axis, then unstacks along scan_axis.
 
@@ -1305,15 +1426,18 @@ def _jit_fuse_and_unstack_moe(
   avoids materializing the full concatenated intermediate on device.
 
   Args:
-    wi_0: First MoE gate weight; per-layer layout matches `tgt_shape`
-      (with the padded dim halved), with `num_layers` inserted at `scan_axis`.
+    wi_0: First MoE gate weight; per-layer layout matches `tgt_shape` (with the
+      padded dim halved), with `num_layers` inserted at `scan_axis`.
     wi_1: Second MoE gate weight, same layout as `wi_0`.
     scan_axis: Axis at which `num_layers` is stacked in `wi_0` / `wi_1`.
     num_layers: Number of layers (== `wi_0.shape[scan_axis]`).
     n_shards: Mesh shards along the per-layer fused/padded axis.
-    tgt_shape: Per-layer fused target shape (fused mlp dim on `tgt_padded_axis`).
+    tgt_shape: Per-layer fused target shape (fused mlp dim on
+      `tgt_padded_axis`).
     scan_padded_axis: Position of the padded axis in the scanned layout.
     tgt_padded_axis: Position of the padded axis in the per-layer layout.
+    lane_size: Subcore lane size for interleaving (defaults to 0 for TPU GMM
+      layout concatenation).
 
   Returns:
     Tuple of `num_layers` per-layer arrays, each with shape `tgt_shape`.
@@ -1323,7 +1447,12 @@ def _jit_fuse_and_unstack_moe(
   fused_shape[scan_padded_axis] = tgt_shape[tgt_padded_axis]
 
   fused = _interleave_moe_weights(
-      wi_0, wi_1, tuple(fused_shape), n_shards, axis=scan_padded_axis
+      wi_0,
+      wi_1,
+      tuple(fused_shape),
+      n_shards,
+      axis=scan_padded_axis,
+      lane_size=lane_size,
   )
   return jnp.unstack(fused, axis=scan_axis)
 
@@ -1331,6 +1460,7 @@ def _jit_fuse_and_unstack_moe(
 def _fuse_moe_weights(
     src_flat: Dict[Tuple[str, ...], jax.Array | np.ndarray],
     tgt_flat: Dict[Tuple[str, ...], jax.Array | np.ndarray],
+    lane_size: Optional[int] = 0,
 ) -> Dict[Tuple[str, ...], jax.Array | np.ndarray]:
   """Fuses unscanned wi_0/wi_1 into wi for unscanned-fused targets.
 
@@ -1343,6 +1473,8 @@ def _fuse_moe_weights(
   Args:
     src_flat: Flat dict of source key tuples to JAX arrays.
     tgt_flat: Flat dict of target key tuples to target leaves.
+    lane_size: Subcore lane size for interleaving (defaults to 0 for TPU GMM
+      layout concatenation).
 
   Returns:
     A new flat dict with wi_0/wi_1 fused into wi at matching prefixes. Any
@@ -1370,10 +1502,13 @@ def _fuse_moe_weights(
     logging.info(
         'Fusing MoE %s: wi_0=%s, wi_1=%s -> %s on axis %d',
         '.'.join(str(k) for k in tgt_key),
-        wi_0.shape, wi_1.shape, tgt_val.shape, axis,
+        wi_0.shape,
+        wi_1.shape,
+        tgt_val.shape,
+        axis,
     )
     new_src_flat[tgt_key] = _interleave_moe_weights(
-        wi_0, wi_1, tgt_val.shape, n_shards, axis=axis
+        wi_0, wi_1, tgt_val.shape, n_shards, axis=axis, lane_size=lane_size
     )
     del wi_0, wi_1  # Free memory immediately after fusion.
   return new_src_flat
@@ -1398,7 +1533,7 @@ def _collect_src_buffer_ids(
       try:
         ids.add(shard.data.unsafe_buffer_pointer())
       except jax.errors.JaxRuntimeError as e:
-        if "PjRt-compatible backend only" in str(e):
+        if 'PjRt-compatible backend only' in str(e):
           # Backend doesn't support unsafe pointers (e.g., disaggregated Pathways setup).
           # Fast-fail and return None to signal that aliasing checks should be skipped.
           return None
@@ -1419,9 +1554,10 @@ def _delete_target_buffers(
   for tgt_val in spec_flat.values():
     tgt_arr = tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
     # Skip if the array cannot be deleted or is already deleted
-    if not hasattr(tgt_arr, 'delete') or getattr(
-        tgt_arr, 'is_deleted', lambda: False
-    )():
+    if (
+        not hasattr(tgt_arr, 'delete')
+        or getattr(tgt_arr, 'is_deleted', lambda: False)()
+    ):
       continue
     # Check for aliasing only if the backend supports buffer pointer tracking
     if src_buffer_ids is not None and hasattr(tgt_arr, 'addressable_shards'):
@@ -1449,7 +1585,9 @@ def _snapshot_dst_sharding(
   ):
     return arr
 
-  assert hasattr(arr, 'sharding'), f'Expected array with sharding, got {type(arr)}'
+  assert hasattr(
+      arr, 'sharding'
+  ), f'Expected array with sharding, got {type(arr)}'
   s = arr.sharding
 
   if isinstance(
@@ -1460,12 +1598,14 @@ def _snapshot_dst_sharding(
 
 
 def _reshard_in_chunks(
-    src_flat: Dict[Tuple[str, ...], jax.Array | np.ndarray],
-    spec_flat: Dict[Tuple[str, ...], jax.Array | np.ndarray | nnx.Variable],
+    src_flat: Dict[Union[str, Tuple[str, ...]], jax.Array | np.ndarray],
+    spec_flat: Dict[
+        Union[str, Tuple[str, ...]], jax.Array | np.ndarray | nnx.Variable
+    ],
     reshard_fn: Callable[..., Mapping[str, Any]],
     chunk_size: int,
     delete_spec_buffers: bool = False,
-) -> Dict[Tuple[str, ...], jax.Array | np.ndarray]:
+) -> Dict[Union[str, Tuple[str, ...]], jax.Array | np.ndarray]:
   """Reshards a flat weight dict in sequential chunks to reduce peak HBM pressure.
 
   Instead of issuing one large jax.device_put for the entire model, this helper
@@ -1489,7 +1629,7 @@ def _reshard_in_chunks(
     A flat dict with the same keys as src_flat, containing resharded arrays.
   """
   keys = list(src_flat.keys())
-  resharded: Dict[Tuple[str, ...], jax.Array | np.ndarray] = {}
+  resharded: Dict[Any, jax.Array | np.ndarray] = {}
   for start in range(0, len(keys), chunk_size):
     chunk_keys = keys[start : start + chunk_size]
     chunk_src_flat = {}
@@ -1506,11 +1646,20 @@ def _reshard_in_chunks(
     if delete_spec_buffers:
       _delete_target_buffers(chunk_spec_flat, chunk_src_flat)
 
-    chunk_src = traverse_util.unflatten_dict(chunk_src_flat)
-    chunk_dst_shardings = traverse_util.unflatten_dict(chunk_dst_shardings_flat)
+    def _to_tuple_key(k):
+      return tuple(k.split('.')) if isinstance(k, str) else k
+
+    chunk_src_tuples = {_to_tuple_key(k): v for k, v in chunk_src_flat.items()}
+    chunk_spec_tuples = {
+        _to_tuple_key(k): v for k, v in chunk_dst_shardings_flat.items()
+    }
+    chunk_src = traverse_util.unflatten_dict(chunk_src_tuples)
+    chunk_dst_shardings = traverse_util.unflatten_dict(chunk_spec_tuples)
     chunk_resharded = reshard_fn(source=chunk_src, target=chunk_dst_shardings)
     jax.block_until_ready(chunk_resharded)
-    resharded.update(traverse_util.flatten_dict(chunk_resharded))
+    for k, v in traverse_util.flatten_dict(chunk_resharded).items():
+      resharded[k] = v
+      resharded['.'.join(str(p) for p in k)] = v
 
     del (  # pyrefly: ignore[unsupported-delete]
         chunk_src,
@@ -1530,14 +1679,20 @@ def transfer_state_directly(
     scan_axis: int = 1,
     delete_dst_buffers: bool = False,
     reshard_chunk_size: Optional[int] = None,
+    moe_lane_size: Optional[int] = 0,
 ) -> None:
   """Transfers state directly by matching structure, stripping wrappers.
 
-  This handles the logic for syncing weights where no explicit mapping is provided,
-  common in MaxText -> MaxText workflows. This method should work for all MaxText models.
-  It automatically unwraps common containers present in MaxText models like 'base'
-  (MaxText TrainState) and nested 'model' keys (vLLM wrappers). Additionally, it handles
-  multiple mapping types including dicts, nnx.State, and nnx.Dict. Mismatches in keys are
+  This handles the logic for syncing weights where no explicit mapping is
+  provided,
+  common in MaxText -> MaxText workflows. This method should work for all
+  MaxText models.
+  It automatically unwraps common containers present in MaxText models like
+  'base'
+  (MaxText TrainState) and nested 'model' keys (vLLM wrappers). Additionally, it
+  handles
+  multiple mapping types including dicts, nnx.State, and nnx.Dict. Mismatches in
+  keys are
   logged for debugging and handled by intersecting the source and target trees.
 
   Args:
@@ -1549,15 +1704,18 @@ def transfer_state_directly(
       before resharding to save HBM. Buffers that physically alias a source
       shard are preserved automatically (see `_delete_target_buffers`).
     reshard_chunk_size: When set, the final reshard is split into sequential
-      groups of this many flat keys instead of one monolithic call. This
-      reduces peak contiguous HBM pressure, which prevents XLA allocator
-      fragmentation on large models. The unit is *number of flat keys per
-      chunk* — per-layer key counts vary by architecture (MQA vs GQA, biases
-      on/off, dense vs MoE, fused vs split MoE gates), so as a rule of thumb
-      start with roughly `10 * num_layers` for a dense transformer and tune
-      downward if you still see fragmentation. When None (default) the
-      original single-call reshard behavior is preserved.
+      groups of this many flat keys instead of one monolithic call. This reduces
+      peak contiguous HBM pressure, which prevents XLA allocator fragmentation
+      on large models. The unit is *number of flat keys per chunk* — per-layer
+      key counts vary by architecture (MQA vs GQA, biases on/off, dense vs MoE,
+      fused vs split MoE gates), so as a rule of thumb start with roughly `10 *
+      num_layers` for a dense transformer and tune downward if you still see
+      fragmentation. When None (default) the original single-call reshard
+      behavior is preserved.
+    moe_lane_size: Subcore lane size for MoE weight interleaving (defaults to 0
+      for TPU GMM layout concatenation).
   """
+
   def safe_has_key(obj: Mapping[str, Any], key: str) -> bool:
     if isinstance(obj, dict):
       return key in obj
@@ -1565,16 +1723,12 @@ def transfer_state_directly(
     return hasattr(obj, key)
 
   # Unwrap Source (Remove 'base' wrapper from MaxText)
-  if isinstance(src_state, abc.Mapping) and safe_has_key(
-      src_state, 'base'
-  ):
+  if isinstance(src_state, abc.Mapping) and safe_has_key(src_state, 'base'):
     logging.info("Unwrapping 'base' key from source state.")
     src_state = src_state['base']
 
   # Unwrap Target (Remove nested 'model' wrappers from vLLM)
-  while isinstance(dst_state, abc.Mapping) and safe_has_key(
-      dst_state, 'model'
-  ):
+  while isinstance(dst_state, abc.Mapping) and safe_has_key(dst_state, 'model'):
     logging.info("Unwrapping nested 'model' key from target state.")
     dst_state = dst_state['model']
 
@@ -1606,7 +1760,9 @@ def transfer_state_directly(
     Uses flat dictionary traversal for efficiency.
     """
     # Fast path for non-dict inputs (leaves)
-    if not isinstance(src, abc.Mapping) or not isinstance(tgt_spec, abc.Mapping):
+    if not isinstance(src, abc.Mapping) or not isinstance(
+        tgt_spec, abc.Mapping
+    ):
       return src, tgt_spec
 
     # Flatten both structures to (path_tuple) -> value
@@ -1614,7 +1770,7 @@ def transfer_state_directly(
     src_flat = traverse_util.flatten_dict(src)
     tgt_flat = traverse_util.flatten_dict(tgt_spec)
 
-    src_flat = _fuse_moe_weights(src_flat, tgt_flat)
+    src_flat = _fuse_moe_weights(src_flat, tgt_flat, lane_size=moe_lane_size)
 
     filtered_src_flat = {}
     filtered_tgt_flat = {}
@@ -1679,7 +1835,7 @@ def transfer_state_directly(
             # Cast the bulk tensor once before unstacking.
             src_val = _apply_dtype_cast(src_val, tgt_val.dtype, candidate_path)
             scanned_per_layer_shape = (
-                src_val.shape[:scan_axis] + src_val.shape[scan_axis + 1:]
+                src_val.shape[:scan_axis] + src_val.shape[scan_axis + 1 :]
             )
             if scanned_per_layer_shape == tgt_val.shape:
               # Pure unstack — no alignment needed.
@@ -1692,7 +1848,9 @@ def transfer_state_directly(
               # one bulk op + free unstack.
               logging.info(
                   'Bulk-aligning scanned %s: %s -> per-layer %s',
-                  candidate_path, src_val.shape, tgt_val.shape,
+                  candidate_path,
+                  src_val.shape,
+                  tgt_val.shape,
               )
               unstacked_cache[cache_key] = _bulk_align_and_unstack(
                   src_val, scan_axis, tgt_val, candidate_path
@@ -1712,7 +1870,9 @@ def transfer_state_directly(
         # allocations that cause compilation pressure and memory fragmentation.
         if key_tuple and key_tuple[-1] == 'wi':
           scanned_prefix = (
-              key_tuple[:match_index] + ('layers',) + key_tuple[match_index + 1:-1]
+              key_tuple[:match_index]
+              + ('layers',)
+              + key_tuple[match_index + 1 : -1]
           )
           wi_0_key = scanned_prefix + ('wi_0',)
           wi_1_key = scanned_prefix + ('wi_1',)
@@ -1721,28 +1881,54 @@ def transfer_state_directly(
             fused_scanned_key = scanned_prefix + ('wi_fused',)
             if fused_scanned_key not in unstacked_cache:
               scanned_prefix_path = '.'.join(str(k) for k in scanned_prefix)
-              logging.info('Fusing scanned MoE weights for %s', scanned_prefix_path)
+              logging.info(
+                  'Fusing scanned MoE weights for %s', scanned_prefix_path
+              )
               wi_0_full = _apply_dtype_cast(
-                  src_flat[wi_0_key], tgt_val.dtype, '.'.join(str(k) for k in wi_0_key)
+                  src_flat[wi_0_key],
+                  tgt_val.dtype,
+                  '.'.join(str(k) for k in wi_0_key),
               )
               wi_1_full = _apply_dtype_cast(
-                  src_flat[wi_1_key], tgt_val.dtype, '.'.join(str(k) for k in wi_1_key)
+                  src_flat[wi_1_key],
+                  tgt_val.dtype,
+                  '.'.join(str(k) for k in wi_1_key),
               )
               num_layers = src_flat[wi_0_key].shape[scan_axis]
-              
+
               # Remove scan_axis to compare against the per-layer tgt_val shape
-              wi_0_single_shape = wi_0_full.shape[:scan_axis] + wi_0_full.shape[scan_axis + 1:]
+              wi_0_single_shape = (
+                  wi_0_full.shape[:scan_axis] + wi_0_full.shape[scan_axis + 1 :]
+              )
               mismatched_axes = [
-                  i for i, (s, t) in enumerate(zip(wi_0_single_shape, tgt_val.shape)) if s != t
+                  i
+                  for i, (s, t) in enumerate(
+                      zip(wi_0_single_shape, tgt_val.shape)
+                  )
+                  if s != t
               ]
-              tgt_axis = mismatched_axes[-1] if mismatched_axes else len(tgt_val.shape) - 1
+              tgt_axis = (
+                  mismatched_axes[-1]
+                  if mismatched_axes
+                  else len(tgt_val.shape) - 1
+              )
               n_shards = _get_n_shards(tgt_val, tgt_axis)
-              
+
               # Offset the axis by 1 if it falls after the scan axis in the bulk tensor
-              scan_padded_axis = tgt_axis if tgt_axis < scan_axis else tgt_axis + 1
+              scan_padded_axis = (
+                  tgt_axis if tgt_axis < scan_axis else tgt_axis + 1
+              )
 
               unstacked_cache[fused_scanned_key] = _jit_fuse_and_unstack_moe(
-                  wi_0_full, wi_1_full, scan_axis, num_layers, n_shards, tgt_val.shape, scan_padded_axis, tgt_axis
+                  wi_0_full,
+                  wi_1_full,
+                  scan_axis,
+                  num_layers,
+                  n_shards,
+                  tgt_val.shape,
+                  scan_padded_axis,
+                  tgt_axis,
+                  lane_size=moe_lane_size,
               )
               del wi_0_full, wi_1_full
 
@@ -1782,7 +1968,10 @@ def transfer_state_directly(
         reshard_chunk_size,
         delete_dst_buffers,
     )
-    resharded_weights = traverse_util.unflatten_dict(resharded_flat)
+    resharded_flat_tuples = {
+        k: v for k, v in resharded_flat.items() if isinstance(k, tuple)
+    }
+    resharded_weights = traverse_util.unflatten_dict(resharded_flat_tuples)
   else:
     src_flat = traverse_util.flatten_dict(final_source)
     spec_flat = traverse_util.flatten_dict(final_spec)
@@ -1834,20 +2023,20 @@ def resolve_parallelism_sizes(
 
   if total_mesh_devices % expert_parallel_size != 0:
     raise ValueError(
-        f"Total mesh devices ({total_mesh_devices}) must be divisible by"
-        f" expert_parallel_size ({expert_parallel_size})."
+        f'Total mesh devices ({total_mesh_devices}) must be divisible by'
+        f' expert_parallel_size ({expert_parallel_size}).'
     )
 
   if tensor_parallel_size == -1 and data_parallel_size == -1:
     tensor_parallel_size = total_mesh_devices // expert_parallel_size
     data_parallel_size = 1
   elif tensor_parallel_size == -1:
-    tensor_parallel_size = (
-        total_mesh_devices // (data_parallel_size * expert_parallel_size)
+    tensor_parallel_size = total_mesh_devices // (
+        data_parallel_size * expert_parallel_size
     )
   elif data_parallel_size == -1:
-    data_parallel_size = (
-        total_mesh_devices // (tensor_parallel_size * expert_parallel_size)
+    data_parallel_size = total_mesh_devices // (
+        tensor_parallel_size * expert_parallel_size
     )
 
   return tensor_parallel_size, data_parallel_size, expert_parallel_size
@@ -1885,7 +2074,6 @@ def verify_state_closeness(golden_state, state, atol=1e-2):
   # Check that weights match
   matched = True
   for key in golden_state_flatten.keys():
-
     if golden_state_flatten[key].value.shape != state_flatten[key].value.shape:
       logging.info(
           'Shape mismatch for key %s: golden %s, loaded %s',
@@ -1906,3 +2094,190 @@ def verify_state_closeness(golden_state, state, atol=1e-2):
       logging.info('Loaded state: %s', state_flatten[key].value.ravel()[:10])
       matched = False
   return matched
+
+
+def detach_incompatible_vllm_cleanup_finalizer(llm_engine: Any) -> None:
+  """Removes vLLM's torch-only cleanup hook for TPU/JAX model objects."""
+  get_model = getattr(llm_engine, '_get_driver_model_for_cleanup', None)
+  if not callable(get_model):
+    return
+
+  model = get_model()
+  if model is None or hasattr(model, 'modules'):
+    return
+
+  finalizer = getattr(llm_engine, '_finalizer', None)
+  detach = getattr(finalizer, 'detach', None)
+  if not callable(detach):
+    return
+
+  detach()
+  logging.info(
+      'Detached vLLM cleanup finalizer for non-torch model type %s.',
+      type(model).__name__,
+  )
+
+
+def is_token_id_sequence(prompt: Any) -> bool:
+  """Returns True if prompt is a 1D integer array or sequence of token IDs."""
+  if isinstance(prompt, np.ndarray):
+    return prompt.ndim == 1 and np.issubdtype(prompt.dtype, np.integer)
+  return (
+      isinstance(prompt, (list, tuple))
+      and bool(prompt)
+      and isinstance(prompt[0], (int, np.integer))
+  )
+
+
+def as_token_ids(value) -> np.ndarray:
+  """Copies token IDs into an owned 1-D int32 array.
+
+  Raises:
+    ValueError: `value` is not one-dimensional.
+  """
+  array = np.array(value, dtype=np.int32)
+  if array.ndim != 1:
+    raise ValueError(f'token ids must be 1-D, got shape {array.shape}')
+  return array
+
+
+def unpad_prompt(padded_tokens, length: int) -> np.ndarray:
+  """Returns the last `length` tokens of a left-padded prompt row."""
+  arr = as_token_ids(padded_tokens)
+  if length <= 0:
+    return np.zeros(0, dtype=np.int32)
+  return arr[-int(length) :]
+
+
+def unpad_prompt_tokens(
+    padded_tokens: Any,
+    pad_id: int | None = None,
+    prompt_length: int | None = None,
+) -> np.ndarray:
+  """Returns sampler-tokenized prompt ids without backend left padding."""
+  if prompt_length is not None:
+    return unpad_prompt(padded_tokens, int(prompt_length))
+  arr = np.asarray(padded_tokens, dtype=np.int32).reshape(-1)
+  if not isinstance(pad_id, numbers.Integral):
+    return arr
+  non_pad = np.flatnonzero(arr != pad_id)
+  if non_pad.size == 0:
+    return np.zeros(0, dtype=np.int32)
+  return arr[non_pad[0] :]
+
+
+def resolve_prompt_tokens(
+    input_strings: str | Sequence[str] | np.ndarray | None,
+    prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | np.ndarray | None,
+    tokenize_fn: Callable[[str], Any],
+    *,
+    max_generation_steps: int = 0,
+    max_total_length: int | None = None,
+    max_length_name: str = 'max_model_len',
+    single_output_per_row: bool = True,
+) -> list[np.ndarray]:
+  """Validates and converts either `input_strings` or `prompt_token_ids` into token ID rows."""
+  if (input_strings is None) == (prompt_token_ids is None):
+    raise ValueError('Provide exactly one of input_strings or prompt_token_ids')
+  if prompt_token_ids is not None:
+    if len(prompt_token_ids) == 0:
+      raise ValueError('prompt_token_ids must not be empty')
+    if not single_output_per_row:
+      raise ValueError('prompt_token_ids requires exactly one output per row')
+    prompt_ids = [as_token_ids(row) for row in prompt_token_ids]
+    if max_total_length is not None and any(
+        len(row) + max_generation_steps > max_total_length for row in prompt_ids
+    ):
+      raise ValueError(
+          f'prompt plus max_generation_steps exceeds {max_length_name}'
+      )
+    return prompt_ids
+  assert input_strings is not None
+  if isinstance(input_strings, np.ndarray):
+    input_strings = input_strings.tolist()
+  if isinstance(input_strings, str):
+    input_strings = [input_strings]
+  if len(input_strings) == 0:
+    raise ValueError('input_strings must not be empty')
+  return [np.asarray(tokenize_fn(str(x)), dtype=np.int32) for x in input_strings]
+
+
+def left_pad_prompt_tokens(
+    prompt_ids: Sequence[Sequence[int] | np.ndarray],
+    max_prompt_length: int | None,
+    pad_value: int,
+    *,
+    max_allowed_length: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, int]:
+  """Computes `prompt_lengths`, target `max_prompt_length`, and left-padded `all_input_ids`."""
+  prompt_lengths = np.array([len(x) for x in prompt_ids], dtype=np.int32)
+  max_tokens_length = int(prompt_lengths.max())
+  if max_prompt_length is None or max_prompt_length < max_tokens_length:
+    max_prompt_length = next_power_of_2(max_tokens_length)
+    if (
+        max_allowed_length is not None
+        and max_tokens_length <= max_allowed_length
+    ):
+      max_prompt_length = min(max_prompt_length, max_allowed_length)
+  all_input_ids = np.array(
+      [
+          pad_to_length(
+              np.asarray(x, dtype=np.int32),
+              target_length=max_prompt_length,
+              pad_value=pad_value,
+              left=True,
+          )
+          for x in prompt_ids
+      ],
+      dtype=np.int32,
+  )
+  return all_input_ids, prompt_lengths, max_prompt_length
+
+
+def _get_field(obj: Any, key: str, default: Any = None) -> Any:
+  return (
+      obj.get(key, default)
+      if isinstance(obj, dict)
+      else getattr(obj, key, default)
+  )
+
+
+def check_prompt_echo(
+    expected_ids: Sequence[np.ndarray],
+    outputs: Sequence[Any],
+    *,
+    backend_name: str = 'Engine',
+) -> None:
+  """Validates that engine outputs match expected prompt count, request IDs, and prompt tokens."""
+  if len(outputs) != len(expected_ids):
+    raise ValueError(
+        f'{backend_name} result count differs from submitted token rows:'
+        f' Expected {len(expected_ids)} outputs, got {len(outputs)}'
+    )
+  seen_ids = set()
+  for expected, output in zip(expected_ids, outputs):
+    meta_info = _get_field(output, 'meta_info') or {}
+    request_id = _get_field(output, 'request_id', _get_field(meta_info, 'id'))
+    if request_id is None:
+      raise ValueError(f'{backend_name} output is missing request_id')
+    if request_id in seen_ids:
+      raise ValueError(
+          f'{backend_name} returned duplicate request ids'
+          f' (Duplicate request_id: {request_id})'
+      )
+    seen_ids.add(request_id)
+    echoed = _get_field(
+        output, 'prompt_token_ids', _get_field(meta_info, 'prompt_tokens')
+    )
+    if echoed is None:
+      raise ValueError(
+          f'{backend_name} output is missing prompt echo / prompt_token_ids'
+      )
+    if isinstance(echoed, (int, np.integer)):
+      matches = int(echoed) == len(expected)
+    else:
+      matches = np.array_equal(as_token_ids(echoed), expected)
+    if not matches:
+      raise ValueError(
+          f'{backend_name} prompt echo / prompt_token_ids differed from input'
+      )

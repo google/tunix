@@ -14,11 +14,42 @@
 
 """TrainerWorker implementation for role-based isolation."""
 
-from typing import Any, Callable, List
+import contextlib
+import functools
+from typing import Any, Callable, ContextManager, cast
 
+from flax import nnx
+import jax
+import jax.numpy as jnp
+import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
 from tunix.experimental.worker import abstract_worker
+from tunix.rl import common as rl_common
+from tunix.rl import packing
+
+WorkerState = datatypes.WorkerState
+
+
+def _compute_per_token_logps(
+    model: nnx.Module, *args: Any, **kwargs: Any
+) -> jax.Array:
+  """Computes per-token log-probabilities under live model weights.
+
+  Args:
+    model: The NNX Module instance to score with.
+    *args: Positional arguments forwarded to
+      `rl_common.compute_per_token_logps`.
+    **kwargs: Keyword arguments forwarded to
+      `rl_common.compute_per_token_logps`.
+
+  Returns:
+    A JAX Array containing the computed per-token log-probabilities.
+  """
+  graphdef, state = nnx.split(model)
+  return rl_common.compute_per_token_logps(
+      graphdef, state, *args, stop_gradient=True, **kwargs
+  )
 
 
 class TrainerWorker(abstract_worker.Worker):
@@ -30,71 +61,400 @@ class TrainerWorker(abstract_worker.Worker):
   """
 
   def __init__(
-      self, trainer_factory: Callable[[], abstract_trainer.AbstractTrainer]
+      self,
+      trainer_factory: Callable[[], abstract_trainer.AbstractTrainer],
+      *,
+      worker_id: str = "trainer_worker",
+      logps_chunk_size: int = 0,
+      logps_micro_batch_size: int | None = None,
+      execution_context: Any = None,
   ):
     """Initializes the TrainerWorker.
 
     Args:
       trainer_factory: A callable that returns an instantiated AbstractTrainer.
+      worker_id: Unique identifier for this worker.
+      execution_context: Optional context manager or zero-arg callable returning
+        a context manager (e.g., a JAX Mesh) to enter during trainer
+        initialization and worker method execution.
+      logps_chunk_size: Optionally chunk the vocab (final-logits) computation.
+      logps_micro_batch_size: Row chunk size for `per_token_logps`.
+        If `None`, the whole request is scored in one forward.
     """
-    self._trainer = trainer_factory()
+    self._execution_context = execution_context
+    self._trainer_factory = trainer_factory
+    self._trainer: abstract_trainer.AbstractTrainer | None = None
+    self._pending_loss_fn: tuple[Callable[..., Any], bool] | None = None
+    self._pending_gen_model_input_fn: Callable[[Any], dict[str, Any]] | None = (
+        None
+    )
+    self._logps_chunk_size = logps_chunk_size
+    self._logps_micro_batch_size = logps_micro_batch_size
     self._is_running = False
+    self._worker_id = worker_id
+    self._state = WorkerState.PENDING
+    self._last_error: str | None = None
 
-  def initialize(self) -> None:
+  def _policy_version(self) -> int:
+    if self._trainer is None:
+      return 0
+    return int(getattr(self._trainer, "policy_version", 0))
+
+  def _response(self, **metadata: Any) -> datatypes.Response:
+    return datatypes.Response(
+        metadata={
+            "worker_id": self._worker_id,
+            "state": self.state.value,
+            "policy_version": self._policy_version(),
+            **metadata,
+        }
+    )
+
+  def _ensure_ready(self) -> abstract_trainer.AbstractTrainer:
+    if self.state == WorkerState.PENDING:
+      self.initialize()
+    if self.state != WorkerState.READY or self._trainer is None:
+      raise RuntimeError(f"TrainerWorker is not ready: {self.state.value}.")
+    return self._trainer
+
+  def initialize(self) -> datatypes.Response:
     """Initializes the worker and the underlying trainer."""
-    pass
+    if self.state == WorkerState.READY:
+      return self._response(initialized=True, ready=True)
+    self.state = WorkerState.INITIALIZING
+    try:
+      if self._trainer is None:
+        with self.execution_context():
+          trainer = self._trainer_factory()
+          if self._pending_loss_fn is not None:
+            trainer.with_loss_fn(*self._pending_loss_fn)
+            self._pending_loss_fn = None
+          if self._pending_gen_model_input_fn is not None:
+            trainer.with_gen_model_input_fn(
+                self._pending_gen_model_input_fn
+            )
+            self._pending_gen_model_input_fn = None
+          self._trainer = trainer
+      self._last_error = None
+      return self._response(initialized=True)
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
+    finally:
+      if self.state == WorkerState.INITIALIZING:
+        self.state = WorkerState.READY
 
-  def compile(self, dummy_data: Any) -> None:
+  def compile(self, dummy_data: Any = None) -> datatypes.Response:
     """Triggers JIT compilation using the provided dummy_data."""
-    self._trainer.compile(dummy_data)
+    trainer = self._ensure_ready()
+    self.state = WorkerState.COMPILING
+    try:
+      trainer.compile(dummy_data)
+      return self._response(compiled=True)
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
+    finally:
+      if self.state == WorkerState.COMPILING:
+        self.state = WorkerState.READY
 
-  def start(self) -> None:
+  def start(self) -> datatypes.Response:
     """Starts the worker's main loop."""
+    self._ensure_ready()
     self._is_running = True
+    return self._response(started=True)
 
-  def stop(self) -> None:
+  def stop(self) -> datatypes.Response:
     """Gracefully stops the worker."""
+    if self.state == WorkerState.STOPPED:
+      return self._response(stopped=True, already_stopped=True)
     self._is_running = False
-    self._trainer.close()
+    if self.state == WorkerState.READY:
+      self.state = WorkerState.DRAINING
+    if self._trainer is not None:
+      self._trainer.close()
+    self.state = WorkerState.STOPPED
+    return self._response(stopped=True)
+
+  def info(self) -> datatypes.WorkerInfo:
+    return datatypes.WorkerInfo(
+        worker_id=self._worker_id,
+        roles=frozenset({"trainer", "weight_sync"}),
+        resources={
+            "trainer": (
+                type(self._trainer).__name__
+                if self._trainer is not None
+                else "UninitializedTrainer"
+            ),
+            "policy_version": self._policy_version(),
+        },
+    )
+
+  def heartbeat(self) -> datatypes.HealthReport:
+    return datatypes.HealthReport(
+        state=self.state,
+        policy_version=self._policy_version(),
+        last_error=self._last_error,
+    )
 
   def with_loss_fn(
       self, loss_fn: Callable[..., Any], has_aux: bool = False
-  ) -> "TrainerWorker":
-    """Sets the loss function used by `fwd_bwd` (and evaluation)."""
-    self._trainer.with_loss_fn(loss_fn, has_aux)
-    return self
+  ) -> datatypes.Response:
+    """Sets the loss function used by `fwd_bwd` (and evaluation).
+
+    When the worker was built with a positive `logps_chunk_size`, it is bound
+    into the loss as `compute_logps_chunk_size` (as the agentic GRPO learner
+    does), so the training loss chunks the final-logits computation the same
+    way `per_token_logps` does. A value supplied per call by
+    `gen_model_input_fn` still takes precedence.
+
+    Args:
+      loss_fn: The loss function; must accept `compute_logps_chunk_size` as a
+        keyword argument (or `**kwargs`) when chunking is enabled.
+      has_aux: Whether `loss_fn` returns auxiliary outputs.
+
+    Returns:
+      A response confirming the loss function was configured.
+    """
+    if self._logps_chunk_size and self._logps_chunk_size > 0:
+      loss_fn = functools.partial(
+          loss_fn, compute_logps_chunk_size=self._logps_chunk_size
+      )
+    if self._trainer is None:
+      self._pending_loss_fn = (loss_fn, has_aux)
+    else:
+      self._trainer.with_loss_fn(loss_fn, has_aux)
+    return self._response(loss_fn_configured=True)
 
   def with_gen_model_input_fn(
       self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
-  ) -> "TrainerWorker":
+  ) -> datatypes.Response:
     """Sets the last-mile adapter mapping a payload to the loss fn's kwargs."""
-    self._trainer.with_gen_model_input_fn(gen_model_input_fn)
-    return self
+    if self._trainer is None:
+      self._pending_gen_model_input_fn = gen_model_input_fn
+    else:
+      self._trainer.with_gen_model_input_fn(gen_model_input_fn)
+    return self._response(gen_model_input_fn_configured=True)
 
-  def fwd_bwd(self, payload: datatypes.TrainerPayload, **kwargs) -> None:
-    """Executes forward and backward passes."""
-    self._trainer.fwd_bwd(payload, **kwargs)
+  def set_target_state(self, target_state: Any) -> datatypes.Response:
+    """Stores rollout target_state so trainer-side weight sync can convert."""
+    trainer = self._ensure_ready()
+    setter = getattr(trainer, "set_target_state", None)
+    if not callable(setter):
+      raise AttributeError(
+          f"{type(trainer).__name__} does not support set_target_state"
+      )
+    setter(target_state)
+    return self._response(target_state_configured=True)
+
+  def fwd_bwd(
+      self,
+      request: datatypes.TrainRequest,
+      **kwargs: Any,
+  ) -> datatypes.Response:
+    """Executes one forward/backward pass."""
+    trainer = self._ensure_ready()
+    req_metadata = dict(request.metadata) if request.metadata else {}
+    kwargs.pop("skip_jit", None)
+    try:
+      trainer.fwd_bwd(request.payload, **kwargs)
+      self._last_error = None
+      resp = self._response(queued=True, **req_metadata)
+      resp.request_id = request.request_id
+      return resp
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
 
   def update(self, **kwargs) -> int:
     """Applies the accumulated (mean) gradients as one optimizer update."""
-    return self._trainer.update(**kwargs)
+    trainer = self._ensure_ready()
+    try:
+      train_step = trainer.update(**kwargs)
+      self._last_error = None
+      return train_step
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
 
-  def eval_step(self, payload: datatypes.TrainerPayload, **kwargs) -> None:
+  def eval_step(
+      self,
+      request: datatypes.TrainRequest,
+      **kwargs: Any,
+  ) -> datatypes.Response:
     """Executes one evaluation step on the given payload."""
-    self._trainer.eval_step(payload, **kwargs)
+    trainer = self._ensure_ready()
+    req_metadata = dict(request.metadata) if request.metadata else {}
+    try:
+      trainer.eval_step(request.payload, **kwargs)
+      self._last_error = None
+      resp = self._response(evaluated=True, **req_metadata)
+      resp.request_id = request.request_id
+      return resp
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
 
-  def save_checkpoint(self, metadata: Any, **kwargs) -> None:
+  def run_eval(self, eval_ds: Any, **kwargs) -> datatypes.Response:
+    """Runs an explicit evaluation phase over eval micro-batches."""
+    trainer = self._ensure_ready()
+    if eval_ds is None:
+      return self._response(evaluated=True, eval_batches=0)
+    try:
+      run_eval = getattr(trainer, "run_eval", None)
+      if callable(run_eval):
+        run_eval(eval_ds, **kwargs)
+        self._last_error = None
+        return self._response(evaluated=True)
+
+      eval_context = getattr(trainer, "eval_context", None)
+      context = (
+          cast(ContextManager[Any], eval_context())
+          if callable(eval_context)
+          else contextlib.nullcontext()
+      )
+      eval_batches = 0
+      with context:
+        for payload in eval_ds:
+          trainer.eval_step(payload, **kwargs)
+          eval_batches += 1
+      self._last_error = None
+      return self._response(evaluated=True, eval_batches=eval_batches)
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
+
+  def per_token_logps(
+      self, items: datatypes.LogprobsRequest, **kwargs: Any
+  ) -> datatypes.LogprobsResponse:
+    """Scores per-token log-probs for a padded request under live weights.
+
+    Read-only: unlike the frozen reference scorer this uses the trainer's
+    current (actor) parameters, but it must not mutate trainer state. Accepts a
+    ``LogprobsRequest`` composed by the orchestrator; the actor path sets
+    ``pad_id``/``eos_id`` (and any packing fields) explicitly.
+
+    Args:
+      items: The log-probabilities request payload containing token sequences.
+      **kwargs: Unused keyword arguments accepted for forwarding parity.
+
+    Returns:
+      A LogprobsResponse containing per-token log-probabilities and model
+      version.
+    """
+    del kwargs  # Accepted for engine-forwarding parity; unused.
+    trainer = self._ensure_ready()
+    if items.pad_id is None or items.eos_id is None:
+      raise ValueError(
+          "TrainerWorker.per_token_logps requires pad_id and eos_id to be set "
+          "on the LogprobsRequest; the actor scoring path must compose them."
+      )
+    try:
+      prompt = np.asarray(items.prompt_tokens, dtype=np.int32)
+      completion = np.asarray(items.completion_tokens, dtype=np.int32)
+      batch_size = prompt.shape[0]
+      if batch_size == 0:
+        raise ValueError("per_token_logps requires a non-empty batch.")
+      temperature = (
+          1.0 if items.temperature is None else float(items.temperature)
+      )
+      seg_ids = (
+          None
+          if items.segment_ids is None
+          else np.asarray(items.segment_ids, dtype=np.int32)
+      )
+      seg_pos = (
+          None
+          if items.segment_positions is None
+          else np.asarray(items.segment_positions, dtype=np.int32)
+      )
+      if items.routed_experts is None:
+        routed = None
+      else:
+        routed_raw = np.asarray(items.routed_experts)
+        routed_enc = packing.routed_experts_encoding(routed_raw, batched=True)
+        routed = (
+            routed_raw
+            if routed_enc in ("uint8", "uint10")
+            else np.asarray(routed_raw, dtype=np.int16)
+        )
+      micro_batch_size = self._logps_micro_batch_size or batch_size
+      outs = []
+      for start in range(0, batch_size, micro_batch_size):
+        sl = slice(start, start + micro_batch_size)
+        outs.append(
+            trainer.fwd_only(
+                _compute_per_token_logps,
+                prompt[sl],
+                completion[sl],
+                pad_id=items.pad_id,
+                eos_id=items.eos_id,
+                temperature=temperature,
+                chunk_size=self._logps_chunk_size,
+                segment_ids=None if seg_ids is None else seg_ids[sl],
+                segment_positions=None if seg_pos is None else seg_pos[sl],
+                routed_experts=None if routed is None else routed[sl],
+            )
+        )
+      result = np.asarray(jnp.concatenate(outs, axis=0), dtype=np.float32)
+      self._last_error = None
+      return datatypes.LogprobsResponse(
+          request_id=items.request_id,
+          per_token_logps=result,
+          model_version=self._policy_version(),
+      )
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
+
+  def save_checkpoint(self, metadata: Any, **kwargs) -> datatypes.Response:
     """Force the trainer to serialize its state (model + optimizer)."""
-    self._trainer.save_checkpoint(metadata, **kwargs)
+    trainer = self._ensure_ready()
+    try:
+      trainer.save_checkpoint(metadata, **kwargs)
+      self._last_error = None
+      return self._response(checkpoint_saved=True)
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
 
   def restore_checkpoint(self, **kwargs) -> Any:
     """Restore state from latest checkpoint and return the metadata pytree."""
-    return self._trainer.restore_checkpoint(**kwargs)
+    return self._ensure_ready().restore_checkpoint(**kwargs)
 
-  def prepare_weight_sync(self, **kwargs) -> None:
-    """Stages weights for transfer and returns coordinates/metadata for Rollouts to pull."""
-    self._trainer.prepare_weight_sync(**kwargs)
+  def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Stages weights for transfer and returns their metadata."""
+    trainer = self._ensure_ready()
+    self.state = WorkerState.SYNCING
+    try:
+      if sync_request is not None:
+        kwargs["sync_request"] = sync_request
+      metadata = trainer.prepare_weight_sync(**kwargs)
+      self._last_error = None
+      if metadata is not None:
+        return metadata
+      return self._response(weight_sync_ready=True)
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
+
+  def release_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Releases this round's staging and restores READY."""
+    release = getattr(self._trainer, "release_weight_sync", None)
+    result = release(sync_request=sync_request, **kwargs) if release else None
+    if self.state == WorkerState.SYNCING:
+      self.state = WorkerState.READY
+    return result
 
   def get_metrics(self) -> Any:
     """Returns and clears the recently collected step metric records."""
-    return self._trainer.get_metrics()
+    return self._ensure_ready().get_metrics()

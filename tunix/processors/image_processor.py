@@ -17,7 +17,7 @@
 from typing import Any
 import numpy as np
 from PIL import Image
-from tunix.models.gemma4.model import PreprocessedVisionInput
+from tunix.models.gemma4 import config as gemma4_config_lib
 
 
 class ImageProcessor:
@@ -123,12 +123,12 @@ class ImageProcessor:
           (self._height, self._width, self._channels), dtype=np.float32
       )
     elif isinstance(image, str):
-      image = Image.open(image)
+      image = Image.open(image)  # pyrefly: ignore[bad-assignment]
     elif isinstance(image, np.ndarray):
-      image = Image.fromarray(image)
+      image = Image.fromarray(image)  # pyrefly: ignore[bad-assignment]
 
     # Resize the image.
-    image = image.resize(
+    image = image.resize(  # pyrefly: ignore[missing-attribute]
         (self._width, self._height),  # Weird gotcha: PIL expects width first.
         resample=Image.Resampling.BILINEAR,
     )
@@ -241,7 +241,7 @@ def aspect_ratio_preserving_resize(
 
   pil_image = Image.fromarray(image)
   pil_image = pil_image.resize(
-      (target_width, target_height), resample=Image.BICUBIC
+      (target_width, target_height), resample=Image.BICUBIC  # pyrefly: ignore[missing-attribute]
   )
   return np.array(pil_image)
 
@@ -443,7 +443,7 @@ def add_variable_extra_tokens_for_images(
         count = counts[image_idx]  # pyrefly: ignore[bad-index]
         expanded.append(double_new_line_token)
         expanded.append(start_token)
-        expanded.extend([soft_token_placeholder] * count)  # pyrefly: ignore[unsupported-operation]
+        expanded.extend([soft_token_placeholder] * count)
         expanded.append(end_token)
         expanded.append(double_new_line_token)
         image_idx += 1
@@ -553,7 +553,7 @@ def process_gemma4_inputs(
         dtype=jnp.int32,
     )
 
-  processed_images = PreprocessedVisionInput(
+  processed_images = gemma4_config_lib.PreprocessedVisionInput(
       patches=patches,
       positions_xy=positions_xy,
       soft_token_counts=tuple(all_soft_token_counts),

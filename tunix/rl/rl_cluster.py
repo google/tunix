@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Client facing abstraction for interacting with RL training cluster."""
+"""Client facing abstraction for interacting with RL training engine."""
 
 import collections
 import contextlib
@@ -24,7 +24,7 @@ import gc
 import itertools
 import operator
 import os
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence, cast
 
 from absl import logging
 import flax
@@ -38,7 +38,10 @@ from jax.sharding import Mesh  # pylint: disable=g-importing-member
 import jaxtyping
 import numpy as np
 import optax
+from tunix.common import configs
+from tunix.common import datatypes
 from tunix.generate import tokenizer_adapter
+from tunix.generate import utils as generate_utils
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
@@ -49,6 +52,7 @@ from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
 from tunix.rl.inference import inference_worker
+from tunix.rl.profiler import profiler as profiler_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import vanilla_rollout
 from tunix.sft import metrics_logger
@@ -56,139 +60,47 @@ from tunix.sft import peft_trainer
 from tunix.sft import sharding_utils
 from tunix.sft import utils as sft_utils
 
+Mode = datatypes.Mode
+Role = datatypes.Role
+
+
+RLTrainingConfig = configs.RLTrainingConfig
+RLProfileConfig = configs.RLProfileConfig
+RLProfiler = profiler_lib.RLProfiler
+ProfileScope = profiler_lib.ProfileScope
+ClusterConfig = configs.ClusterConfig
+
 ModelOrPath = nnx.Module | str
 MetricsT = perf_metrics.MetricsT
 MetricsBuffer = perf_metrics.MetricsBuffer
 
 
-class Mode(enum.Enum):
-  """Mode of RolloutConfig."""
+@contextlib.contextmanager
+def _profile_scope(
+    engine: Any,
+    role: Role | str,
+    future_output: Any = None,
+):
+  """Context manager to activate and deactivate targeted profiling around a role execution block.
 
-  TRAIN = "train"
-  EVAL = "eval"
-
-  def __str__(self):
-    return self.value
-
-
-class Role(enum.Enum):
-  """Role of the model."""
-
-  ACTOR = "actor"  # policy model
-  CRITIC = "critic"  # value model (only for PPO-style algos, not for GRPO)
-  REFERENCE = "reference"  # kept fixed during training
-  REWARD = "reward"
-  ROLLOUT = "rollout"
-
-
-@dataclasses.dataclass(slots=True, kw_only=True)
-class RLTrainingConfig(peft_trainer.TrainingConfig):
-  """RLTraining config.
-
-  Attributes:
-    actor_optimizer: Optimizer for the actor model.
-    critic_optimizer: Optimizer for the critic model. If None, the critic model
-      will be trained in the same optimizer as the actor model.
-    mini_batch_size: The mini-batch size used for policy weight updates. One
-      mini-batch corresponds to one optimizer update. `mini_batch_size` must be
-      divisible by the global batch size.
-    train_micro_batch_size: The micro-batch size used for gradient accumulation
-      at training time. `train_micro_batch_size` must be divisible by
-      `mini_batch_size`.
-    rollout_micro_batch_size: The micro-batch size used for model rollouts.
-    compute_logps_micro_batch_size: The micro-batch size used for computing log
-      probabilities (e.g. for reference and old policy models).
-    compute_logps_chunk_size: The chunk size used for computing log
-      probabilities. Instead of using final logits from model, where size is [B,
-      T, V], this will use the last hidden output with size [B, T, D] from model
-      and compute logps in a chunked manner. Good values to pick are like 256,
-      512, etc. When value is 0, it means this feature is disabled. This also
-      requires model to support `skip_lm_head` in its `__call__` method and have
-      a `compute_final_logits` method.
+  Acts as a nullcontext if engine has no profiler.
   """
+  profiler = getattr(engine, "profiler", None)
+  scope = ProfileScope(future_output)
+  if not profiler:
+    yield scope
+    return
 
-  actor_optimizer: optax.GradientTransformation
-  critic_optimizer: optax.GradientTransformation | None = None
-  mini_batch_size: int | None = None
-  train_micro_batch_size: int | None = None
-  rollout_micro_batch_size: int | None = None
-  compute_logps_micro_batch_size: int | None = None
-  compute_logps_chunk_size: int = 0
-
-  def __post_init__(self):
-    """Validates the configuration after initialization."""
-    for name in [
-        "mini_batch_size",
-        "train_micro_batch_size",
-        "rollout_micro_batch_size",
-        "compute_logps_micro_batch_size",
-    ]:
-      rl_utils.is_positive_integer(getattr(self, name), name)
-
-    if self.gradient_accumulation_steps is not None:
-      raise ValueError(
-          "For RL training, gradient_accumulation_steps should be None. It is "
-          "automatically derived from: "
-          "`mini_batch_size // train_micro_batch_size`."
-      )
-
-    if self.train_micro_batch_size is not None:
-      if self.mini_batch_size is None:
-        raise ValueError(
-            "For RL training, `mini_batch_size` must be set when"
-            " `train_micro_batch_size` is set."
-        )
-      rl_utils.check_divisibility(
-          self.train_micro_batch_size,
-          self.mini_batch_size,
-          f"{self.train_micro_batch_size=}",
-          f"{self.mini_batch_size=}",
-      )
-      self.gradient_accumulation_steps = (
-          self.mini_batch_size // self.train_micro_batch_size
-      )
+  role_str = role.value if isinstance(role, Role) else role
+  profiler.maybe_activate(role_str)
+  try:
+    yield scope
+  finally:
+    profiler.maybe_deactivate(role_str, future_output=scope.future_output)
 
 
-@dataclasses.dataclass(kw_only=True, frozen=True)
-class ClusterConfig:
-  """Cluster config.
-
-  Attributes:
-    role_to_mesh: Mapping from model role to mesh. Key config for colocated vs
-      disaggregated setup.
-    role_to_logical_axis_rule: Mapping from model role to logical axis rule.
-      This is used when models are sharded with logical axis and expects a
-      logical to physical axis mapping at runtime.
-    rollout_engine: Rollout engine to use. E.g. "vanilla", "vllm", "sglang_jax".
-      Alternatively, if a subclass of `base_rollout.BaseRollout` is provided, it
-      will be used as the rollout engine.
-    offload_to_cpu: Whether to offload models to CPU at each step..
-    training_config: RL training config.
-    rollout_config: Rollout config. It may be different for different modes,
-      e.g. TRAIN vs EVAL.
-    rollout_vllm_model_version: Model version for vllm rollout engine.
-    rollout_vllm_lora_config: LoRA config for vllm rollout engine.
-    rollout_vllm_hbm_utilization: The percentage of TPU/GPU HBM allocated the
-      vllm rollout engine.
-    rollout_vllm_init_with_random_weights: Init the vllm TPU backend model with
-      random weights instead of loading from the given path.
-    rollout_vllm_tpu_backend_type: The TPU Jax backend type for vllm rollout
-      engine, E.g. "jax", "torchax" or "pytorch_xla".
-  """
-
-  role_to_mesh: dict[Role, Mesh]
-  role_to_logical_axis_rule: dict[Role, flax.typing.LogicalRules] | None = None
-  rollout_engine: str | type[base_rollout.BaseRollout] = "vanilla"
-  offload_to_cpu: bool = False
-
-  training_config: RLTrainingConfig
-  rollout_config: (
-      dict[Mode, base_rollout.RolloutConfig] | base_rollout.RolloutConfig
-  )
-
-
-class RLCluster:
-  """RLCluster."""
+class RLEngine:
+  """RLEngine."""
 
   def __init__(
       self,
@@ -204,6 +116,13 @@ class RLCluster:
     self.cluster_config = cluster_config
     self.perf_config = perf_config
     self.r2m = cluster_config.role_to_mesh
+
+    self.profiler = None
+    if getattr(cluster_config.training_config, "rl_profiler_config", None):
+      self.profiler = RLProfiler(
+          cluster_config.training_config.rl_profiler_config
+      )
+
     self._init_backbone_sharing_map(actor, reference)
     self._anchor_policy_state = None
 
@@ -266,7 +185,7 @@ class RLCluster:
     self._buffered_eval_metrics: list[MetricsBuffer] = []
     self._external_metrics_logger = None
 
-    self._init_cluster()
+    self._init_engine()
     gc.collect()
 
     # NB: global steps should be adjusted properly based on the actual RL
@@ -367,8 +286,8 @@ class RLCluster:
     else:
       raise NotImplementedError("Loading from path is not supported yet.")
 
-  def _init_cluster(self):
-    """Initializes the RL cluster."""
+  def _init_engine(self):
+    """Initializes the RL engine."""
     # 1. Initialize rollout.
     if isinstance(
         self.cluster_config.rollout_engine, str
@@ -429,7 +348,7 @@ class RLCluster:
         # the rollout mesh. This is important for out-of-tree models in vLLM
         # that are implemented with custom logical axis rules, like is the case
         # for MaxText models.
-        from tunix.rl.rollout import vllm_rollout  # pylint: disable=g-import-not-at-top  # pytype: disable=import-error
+        from tunix.rl.rollout import vllm_rollout  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-module-attribute]
 
         self._rollout = vllm_rollout.VllmRollout(
             self.rollout_actor,
@@ -700,11 +619,14 @@ class RLCluster:
     return self._perf_v2
 
   def close(self):
+    """Closes engine components and flushes buffered metrics and profiler traces."""
     for m in self._buffered_train_metrics + self._buffered_eval_metrics:
       self._log_metrics(m)
     self.actor_trainer.close()
     if getattr(self, "critic_trainer", None):
       self.critic_trainer.close()
+    if self.profiler:
+      self.profiler.close()
 
   def _log_metrics(self, metrics_buffer: MetricsBuffer) -> None:
     """Log metrics."""
@@ -857,12 +779,56 @@ class RLCluster:
       for m in [self._buffered_eval_metrics.pop(0)]:
         self._log_metrics(m)
 
+  def train(
+      self,
+      role: Role,
+      train_ds: Any,
+      eval_ds: Any,
+      skip_jit: bool = False,
+  ) -> None:
+    """Runs a training update for the specified role."""
+    if role == Role.ACTOR:
+      self.update_actor(train_ds, eval_ds, skip_jit=skip_jit)
+    elif role == Role.CRITIC:
+      self.update_critic(train_ds, eval_ds, skip_jit=skip_jit)
+    else:
+      raise ValueError(f"Unsupported role for train: {role}")
+
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
-    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
-      self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
-      with self._perf.span_group("actor_training"):
-        self.actor_trainer.train(train_ds, eval_ds, skip_jit)
-      self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
+    """Runs a training update step for the actor model."""
+    with _profile_scope(
+        self, Role.ACTOR, future_output=self.actor_trainer.model
+    ):
+      with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
+        self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
+        with self._perf.span_group("actor_training"):
+          self.actor_trainer.train(train_ds, eval_ds, skip_jit)
+        self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
+
+  def eval_actor(self, eval_ds: Any) -> Any:
+    """Runs an explicit actor evaluation phase."""
+    if eval_ds is None:
+      return None
+
+    with _profile_scope(
+        self, Role.ACTOR, future_output=self.actor_trainer.model
+    ):
+      with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
+        self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
+        run_eval = getattr(self.actor_trainer, "_run_eval", None)
+        if callable(run_eval):
+          res = run_eval(eval_ds)
+        else:
+          eval_step = getattr(self.actor_trainer, "eval_step", None)
+          if not callable(eval_step):
+            raise TypeError(
+                "actor_trainer must expose _run_eval(...) or eval_step(...)."
+            )
+          res = None
+          for chunk in eval_ds:
+            eval_step(chunk)
+        self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
+        return res
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
     with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
@@ -873,12 +839,14 @@ class RLCluster:
 
   def generate(
       self,
-      prompts: list[str] | list[list[dict[str, str]]],
+      prompts: list[str] | list[list[dict[str, str]]] | None = None,
       apply_chat_template: bool = False,
       mode: Mode = Mode.TRAIN,
       micro_batch_size: int | None = None,
       trace_tags: Mapping[str, Any] | None = None,
       max_generation_steps: int | None = None,
+      *,
+      prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None = None,
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
@@ -892,28 +860,43 @@ class RLCluster:
       micro_batch_size: The micro-batch size for generation. If None, no
         micro-batching is performed.
       trace_tags: Optional tags to add to the performance tracer.
+      prompt_token_ids: Explicit unpadded token rows. Mutually exclusive with
+        text prompts and chat templating; requires backend token-input support.
 
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
     """
-    if apply_chat_template:
-      if self.tokenizer is None:
-        raise ValueError("Tokenizer must be initialized to use chat templates.")
-      string_prompts = [
-          self.tokenizer.apply_chat_template(
-              prompt,  # pytype: disable=wrong-arg-types
-              add_generation_prompt=True,
-              tokenize=False,
-              enable_thinking=False,
-          )
-          for prompt in prompts
+    exact_input = prompt_token_ids is not None
+    if exact_input:
+      if prompts is not None:
+        raise ValueError("Provide exactly one of prompts or prompt_token_ids.")
+      prompt_rows: list[Any] = [
+          generate_utils.as_token_ids(row)
+          for row in prompt_token_ids
       ]
     else:
-      string_prompts = prompts  # pytype: disable=annotation-type-mismatch
+      if prompts is None:
+        raise ValueError("Cannot generate from an empty list of prompts.")
+      if apply_chat_template:
+        if self.tokenizer is None:
+          raise ValueError(
+              "Tokenizer must be initialized to use chat templates."
+          )
+        prompt_rows = [
+            self.tokenizer.apply_chat_template(
+                prompt,  # pyrefly: ignore[bad-argument-type]
+                add_generation_prompt=True,
+                tokenize=False,
+                enable_thinking=False,
+            )
+            for prompt in prompts
+        ]
+      else:
+        prompt_rows = list(prompts)
 
-    if len(string_prompts) == 0:
+    if len(prompt_rows) == 0:
       raise ValueError("Cannot generate from an empty list of prompts.")
-    micro_batch_size = micro_batch_size or len(string_prompts)
+    micro_batch_size = micro_batch_size or len(prompt_rows)
 
     with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT) as (mesh, _):
       model = self.rollout.model()
@@ -938,19 +921,31 @@ class RLCluster:
       if trace_tags:
         perf_tags.update(trace_tags)
 
-      with self._perf.span("rollout", mesh.devices) as span, self._perf_v2.span(
-          perf_constants.ROLLOUT,
-          mesh.devices,
-          tags=perf_tags,
-      ) as span_v2:
-        outputs = [
-            self.rollout.generate(string_prompts[s], rollout_config)
-            for s in rl_utils.chunk_slices_by_size(
-                stop=len(string_prompts), step=micro_batch_size
-            )
-        ]
-        span.device_end([o.tokens for o in outputs])
-        span_v2.async_end([o.tokens for o in outputs])
+      with _profile_scope(self, Role.ROLLOUT) as scope:
+        with self._perf.span(
+            "rollout", mesh.devices
+        ) as span, self._perf_v2.span(
+            perf_constants.ROLLOUT,
+            mesh.devices,
+            tags=perf_tags,
+        ) as span_v2:
+          outputs = [
+              self.rollout.generate(
+                  cast(Any, None),
+                  rollout_config,
+                  prompt_token_ids=prompt_rows[s],
+              )
+              if exact_input
+              else self.rollout.generate(
+                  cast(list[str], prompt_rows[s]), rollout_config
+              )
+              for s in rl_utils.chunk_slices_by_size(
+                  stop=len(prompt_rows), step=micro_batch_size
+              )
+          ]
+          scope.set_future_output([o.tokens for o in outputs])
+          span.device_end([o.tokens for o in outputs])
+          span_v2.async_end([o.tokens for o in outputs])
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
@@ -967,7 +962,13 @@ class RLCluster:
     logits = None
     if outputs[0].logits is not None:
       logits = list(
-          itertools.chain.from_iterable(out.logits for out in outputs)
+          itertools.chain.from_iterable(out.logits for out in outputs)  # pyrefly: ignore[bad-argument-type]
+      )
+
+    prompt_lengths = None
+    if all(out.prompt_lengths is not None for out in outputs):
+      prompt_lengths = np.concatenate(
+          [cast(np.ndarray, out.prompt_lengths) for out in outputs]
       )
 
     return base_rollout.RolloutOutput(
@@ -980,7 +981,43 @@ class RLCluster:
             [out.left_padded_prompt_tokens for out in outputs], axis=0
         ),
         logprobs=logprobs,
+        prompt_lengths=prompt_lengths,
     )
+
+  def per_token_logps(
+      self,
+      role: Role,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      pad_id: int,
+      eos_id: int,
+      micro_batch_size: int | None = None,
+      segment_ids: jax.Array | None = None,
+      **kwargs: Any,
+  ) -> jax.Array:
+    """Computes per-token logprobs under the specified model role."""
+    if role == Role.REFERENCE:
+      return self.get_ref_per_token_logps(
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          micro_batch_size=micro_batch_size,
+          segment_ids=segment_ids,
+          **kwargs,
+      )
+    elif role == Role.ACTOR:
+      return self.get_actor_per_token_logps(
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          micro_batch_size=micro_batch_size,
+          segment_ids=segment_ids,
+          **kwargs,
+      )
+    else:
+      raise ValueError(f"Unsupported role for per_token_logps: {role}")
 
   def get_ref_per_token_logps(
       self,
@@ -989,6 +1026,9 @@ class RLCluster:
       pad_id: int,
       eos_id: int,
       micro_batch_size: int | None = None,
+      segment_ids: jax.Array | None = None,
+      segment_positions: jax.Array | None = None,
+      token_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Gets the per-token logps of the reference model."""
     batch_size = prompt_tokens.shape[0]
@@ -1009,6 +1049,29 @@ class RLCluster:
           completion_tokens,
           self.cluster_config.training_config.data_sharding_axis,
       )
+      dest_segment_ids = (
+          None
+          if segment_ids is None
+          else sharding_utils.shard_input(
+              segment_ids,
+              self.cluster_config.training_config.data_sharding_axis,
+          )
+      )
+      dest_segment_positions = (
+          None
+          if segment_positions is None
+          else sharding_utils.shard_input(
+              segment_positions,
+              self.cluster_config.training_config.data_sharding_axis,
+          )
+      )
+      dest_token_mask = (
+          None
+          if token_mask is None
+          else sharding_utils.shard_input(
+              token_mask, self.cluster_config.training_config.data_sharding_axis
+          )
+      )
       self._maybe_load_model_from_cpu(
           self.inference_worker.get_model("reference"), Role.REFERENCE
       )
@@ -1024,6 +1087,21 @@ class RLCluster:
                 pad_id,
                 eos_id,
                 temperature=temperature,
+                segment_ids=(
+                    None
+                    if dest_segment_ids is None
+                    else dest_segment_ids[batch_slice]
+                ),
+                segment_positions=(
+                    None
+                    if dest_segment_positions is None
+                    else dest_segment_positions[batch_slice]
+                ),
+                token_mask=(
+                    None
+                    if dest_token_mask is None
+                    else dest_token_mask[batch_slice]
+                ),
             )
         )
       ref_per_token_logps = jnp.concatenate(outs, axis=0)
@@ -1075,6 +1153,9 @@ class RLCluster:
       eos_id: int,
       micro_batch_size: int | None = None,
       temperature: float | None = None,
+      segment_ids: jax.Array | None = None,
+      segment_positions: jax.Array | None = None,
+      token_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Gets per-token logps from the actor model on the trainer side.
 
@@ -1105,6 +1186,30 @@ class RLCluster:
       dest_completion_tokens = sharding_utils.shard_input(
           completion_tokens,
           self.cluster_config.training_config.data_sharding_axis,
+      )
+      dest_segment_ids = (
+          None
+          if segment_ids is None
+          else sharding_utils.shard_input(
+              segment_ids,
+              self.cluster_config.training_config.data_sharding_axis,
+          )
+      )
+      dest_segment_positions = (
+          None
+          if segment_positions is None
+          else sharding_utils.shard_input(
+              segment_positions,
+              self.cluster_config.training_config.data_sharding_axis,
+          )
+      )
+
+      dest_token_mask = (
+          None
+          if token_mask is None
+          else sharding_utils.shard_input(
+              token_mask, self.cluster_config.training_config.data_sharding_axis
+          )
       )
 
       # Use the anchor (start-of-global-step) actor weights so old_per_token_logps
@@ -1141,13 +1246,31 @@ class RLCluster:
                 stop_gradient=True,
                 temperature=temperature,
                 chunk_size=self.cluster_config.training_config.compute_logps_chunk_size,
+                segment_ids=(
+                    None
+                    if dest_segment_ids is None
+                    else dest_segment_ids[batch_slice]
+                ),
+                segment_positions=(
+                    None
+                    if dest_segment_positions is None
+                    else dest_segment_positions[batch_slice]
+                ),
+                token_mask=(
+                    None
+                    if dest_token_mask is None
+                    else dest_token_mask[batch_slice]
+                ),
             )
         )
       actor_per_token_logps = jnp.concatenate(outs, axis=0)
       if not anchor_on_device:
         del anchor_policy_state
-      gc.collect()
       if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
+        # Release the host-side references the log-prob pass leaves behind
+        # before the model moves back; without offloading there is nothing
+        # to reclaim and a full collection is a pure stall.
+        gc.collect()
         self._put_model_on_memory_kind(
             self.actor_trainer.model, self._default_memory_kind
         )
@@ -1169,7 +1292,8 @@ class RLCluster:
       )
       src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
       self.rollout.update_params(src_filtered_params, filter_types)
-      gc.collect()
+      if self.cluster_config.gc_collect_after_weight_sync:
+        gc.collect()
       # The anchor policy state is snapshotted from actor_trainer.model.
       self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
           nnx.state(self.actor_trainer.model), "pinned_host"
@@ -1236,3 +1360,7 @@ class RLCluster:
           stack.enter_context(self.cluster_config.role_to_mesh[role]),
           stack.enter_context(logical_axis_rule_ctx),
       )
+
+
+# Alias for backward compatibility.
+RLCluster = RLEngine

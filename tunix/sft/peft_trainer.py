@@ -14,12 +14,12 @@
 
 """PEFT trainer."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 import contextlib
 import dataclasses
 import functools
 import time
-from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple
+from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple, cast
 
 from absl import logging
 import flax
@@ -29,8 +29,10 @@ from jax.interpreters import pxla
 import jax.numpy as jnp
 import jax.sharding as shd
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
+from jax.typing import DTypeLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
+from tunix.common import configs
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -45,55 +47,14 @@ from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
 from tunix.sft import utils
 
+TrainingConfig = configs.TrainingConfig
+
 _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
-
-
-@dataclasses.dataclass(slots=True, kw_only=True)
-class TrainingConfig:
-  """Configuration for the trainer."""
-
-  eval_every_n_steps: int
-  max_steps: int | None = None
-  gradient_accumulation_steps: int | None = None
-
-  # If set, the checkpoints will be saved to this path. Checkpoints
-  # contains the model params and the train data iterator state.
-  checkpoint_root_directory: str | None = None
-  # Checkpoint configurations. If None, the default options will be used.
-  checkpointing_options: checkpoint_options.CheckpointingOptions | None = None
-
-  # Configs for the metrics logger.
-  metrics_logging_options: MetricsLoggerOptions | None = None
-
-  # Configs for the profiler.
-  profiler_options: profiler.ProfilerOptions | None = None
-
-  # Configs for performance metrics.
-  perf_metrics_options: perf_metrics.PerfMetricsOptions | None = None
-
-  data_sharding_axis: Tuple[str, ...] = ("fsdp",)
-
-  # Controls how many train_steps can be scheduled ahead of time.
-  max_inflight_computations: int = 2
-
-  # Prefix for metric names for logging. Not sticking it in
-  # `metrics_logging_options` because the latter is optional.
-  metrics_prefix: str = ""
-
-  # Progress bar description.
-  pbar_description: str | None = "Training"
-
-  # Sequence packing configuration.
-  max_seq_token_per_tpu: int | None = None
-
-  def get_with_default(self, key: str, default: Any) -> Any:
-    val = getattr(self, key)
-    if val is None:
-      return default
-    return val
+_MetricValue = ArrayLike | utils.WeightedMetric | Any
+_MetricReducer = Callable[[Any], Any]
 
 
 @flax.struct.dataclass(frozen=True)
@@ -122,14 +83,19 @@ class MetricsBuffer:
   """
 
   step: int
-  losses: List[ArrayLike]
-  additional_metrics: Dict[
-      str, Tuple[List[ArrayLike], Callable[[ArrayLike], ArrayLike]]
-  ] = dataclasses.field(default_factory=dict)
+  losses: List[_MetricValue]
+  additional_metrics: Dict[str, Tuple[List[_MetricValue], _MetricReducer]] = (
+      dataclasses.field(default_factory=dict)
+  )
 
   @property
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
+    weighted = [utils.is_weighted_metric(value) for value in self.losses]
+    if any(weighted):
+      if not all(weighted):
+        raise TypeError("loss values must not mix weighted and scalar metrics")
+      return utils.weighted_metric_mean(self.losses)
     return np.mean(np.array([np.array(x) for x in self.losses]))
 
 
@@ -164,6 +130,37 @@ def _calculate_global_batch_size(train_example: Any) -> int:
   )
 
 
+def _zero_safe_reciprocal(denom: jax.Array) -> jax.Array:
+  return jnp.where(denom == 0, jnp.zeros_like(denom), 1.0 / denom)
+
+
+def _opt_state_dtypes(optimizer: nnx.Optimizer) -> Any:
+  """Returns the array dtype of every optimizer-state variable."""
+  return jax.tree_util.tree_map(
+      lambda value: value.get_value().dtype,
+      nnx.state(optimizer, nnx.optimizer.OptState),
+      is_leaf=lambda value: isinstance(value, nnx.Variable),
+  )
+
+
+def _restore_opt_state_float_dtypes(
+    optimizer: nnx.Optimizer, dtypes: Any
+) -> None:
+  """Restores floating optimizer-state leaves to their pre-update dtypes."""
+
+  def _restore(value, dtype):
+    array = value.get_value()
+    if jnp.issubdtype(array.dtype, jnp.floating) and array.dtype != dtype:
+      value.set_value(array.astype(dtype))
+
+  jax.tree_util.tree_map(
+      _restore,
+      nnx.state(optimizer, nnx.optimizer.OptState),
+      dtypes,
+      is_leaf=lambda value: isinstance(value, nnx.Variable),
+  )
+
+
 class GradientAccumulator(nnx.Module):
   """Accumulates gradients over multiple micro-steps.
 
@@ -189,15 +186,60 @@ class GradientAccumulator(nnx.Module):
     sizes.
   """
 
-  def __init__(self, model: nnx.Module, wrt: type[nnx.Variable]):
+  def __init__(
+      self,
+      model: nnx.Module,
+      wrt: type[nnx.Variable],
+      *,
+      allocate_grads: bool = True,
+      accumulator_dtype: DTypeLike = jnp.float32,
+  ):
+    """Initializes the gradient accumulator.
+
+    Args:
+      model: The model whose state to accumulate gradients for.
+      wrt: The target variable type (e.g., `nnx.Param` or `nnx.LoRAParam`).
+      allocate_grads: Whether to allocate an accumulated gradient buffer
+        matching the model's parameter structure. When `False` (used on depth-1
+        fast paths where accumulation is skipped), an empty dictionary is
+        allocated to save HBM without altering the JIT signature.
+      accumulator_dtype: The dtype used for accumulated gradient buffers.
+        Defaults to `jnp.float32` to prevent low-precision underflow and
+        rounding errors during multi-step accumulation. When returning
+        accumulated gradients via `get`, they are cast back to the model's
+        native parameter dtypes (e.g. `bfloat16`). Using lower-precision dtypes
+        saves HBM but incurs numerical precision trade-offs without upcasting
+        for large gradients.
+    """
     state = nnx.state(model, wrt)
-    self.grads = nnx.data(jax.tree_util.tree_map(jnp.zeros_like, state))
+    self._param_dtypes = nnx.data(
+        jax.tree_util.tree_map(
+            lambda x: getattr(getattr(x, "value", x), "dtype", None),
+            state,
+            is_leaf=lambda x: isinstance(x, nnx.Variable),
+        )
+    )
+    if allocate_grads:
+      self.grads = nnx.data(
+          jax.tree_util.tree_map(
+              lambda x: jnp.zeros_like(x, dtype=accumulator_dtype), state
+          )
+      )
+    else:
+      # Fast path never reads the accumulator: skip the model-sized grad-tree
+      # allocation. Empty grads keep it a valid tiny jit arg (signature and
+      # compilation unchanged).
+      self.grads = nnx.data({})
+      self._param_dtypes = nnx.data({})
     self.denom = nnx.Variable(jnp.zeros((), dtype=jnp.float32))
 
   def add(self, grads: Any, denom: jax.Array | None = None):
     def _add(acc_var, g_var):
       g = g_var[...] if isinstance(g_var, nnx.Variable) else g_var
-      acc_var[...] = acc_var[...] + g
+      # set_value (no index) avoids the indexed __setitem__ "slow" path, whose
+      # `.sharding` check on tracers triggers a per-leaf provenance scan that
+      # dominates trace time; the stored value is identical.
+      acc_var.set_value(acc_var[...] + g)
 
     jax.tree_util.tree_map(
         _add,
@@ -210,50 +252,33 @@ class GradientAccumulator(nnx.Module):
       denom_val = jnp.asarray(1.0, dtype=jnp.float32)
     else:
       denom_val = denom.astype(jnp.float32)
-    self.denom[...] = self.denom[...] + denom_val
+    self.denom.set_value(self.denom[...] + denom_val)
 
   def get(self):
-    scale = 1.0 / jnp.maximum(self.denom[...], jnp.asarray(1.0, jnp.float32))
+    scale = _zero_safe_reciprocal(self.denom[...])
+
+    def _scale_and_cast(v, target_dtype):
+      res = v[...] * scale.astype(v[...].dtype)
+      return type(v)(res.astype(target_dtype) if target_dtype else res)
 
     return jax.tree_util.tree_map(
-        lambda v: type(v)(v[...] * scale.astype(v[...].dtype)),
+        _scale_and_cast,
         self.grads,
+        self._param_dtypes,
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
 
   def reset(self):
     def _zero_in_place(v):
-      v[...] = jnp.zeros_like(v[...])
+      # set_value (no index); see `add` for why.
+      v.set_value(jnp.zeros_like(v[...]))
 
     jax.tree_util.tree_map(
         _zero_in_place,
         self.grads,
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
-    self.denom[...] = jnp.zeros_like(self.denom[...])
-
-
-def _promote_opt_state_floats_to_float32(optimizer: nnx.Optimizer) -> None:
-  """Cast the optimizer state's floating-point leaves to float32 in-place.
-
-  Args:
-    optimizer: The nnx.Optimizer instance whose state will be modified.
-  """
-
-  def _cast(v):
-    if isinstance(v, nnx.Variable):
-      val = v.value
-      if (
-          hasattr(val, "dtype")
-          and jnp.issubdtype(val.dtype, jnp.floating)
-          and val.dtype != jnp.float32
-      ):
-        v.value = val.astype(jnp.float32)
-
-  opt_state = nnx.state(optimizer, nnx.optimizer.OptState)
-  jax.tree_util.tree_map(
-      _cast, opt_state, is_leaf=lambda x: isinstance(x, nnx.Variable)
-  )
+    self.denom.set_value(jnp.zeros_like(self.denom[...]))
 
 
 class PeftTrainer:
@@ -300,16 +325,32 @@ class PeftTrainer:
           "Sequence packing is not supported in SFT PeftTrainer yet."
       )
 
+    if not training_config.get_with_default(
+        "resume_from_checkpoint_on_init", True
+    ):
+      raise ValueError(
+          "resume_from_checkpoint_on_init=False is not supported in SFT"
+          " PeftTrainer (v1). Checkpoint restoration control is only supported"
+          " in experimental PeftTrainer v2"
+          " (tunix.experimental.train.peft_trainer_v2)."
+      )
+
     self.model = model
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
-    # Promote floating-point leaves to float32 in-place to match the dtype of
-    # the optimizer update function branch (which is float32 due to
-    # `optax.inject_hyperparams`).
-    _promote_opt_state_floats_to_float32(self.optimizer)
-    self.grad_accumulator = GradientAccumulator(self.model, wrt_target)
+    # Adam moments follow the param dtype by default (optax inits them as
+    # zeros_like(params)).
+    # Depth-1 non-packing fast path never reads the accumulator; skip its
+    # model-sized grad-tree allocation there.
+    _uses_cond_path = not (
+        self.config.get_with_default("gradient_accumulation_steps", 1) == 1
+        and self.config.max_seq_token_per_tpu is None
+    )
+    self.grad_accumulator = GradientAccumulator(
+        self.model, wrt_target, allocate_grads=_uses_cond_path
+    )
 
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
@@ -451,7 +492,8 @@ class PeftTrainer:
       if isinstance(out, utils.LossOutput):
         return out.primary_loss.unreduced_sum, out
       elif self._has_aux:
-        return out[0], out[1]
+        out_tuple = cast(Tuple[Any, Any], out)
+        return out_tuple[0], out_tuple[1]
       else:
         return out, None
 
@@ -463,15 +505,8 @@ class PeftTrainer:
     (loss_val, aux), grads = grad_fn(model, **inputs)
 
     if isinstance(aux, utils.LossOutput):
-      # Scale the unreduced gradients using the metric's scale computation
-      scale = aux.primary_loss.compute_scale()
-      grads = jax.tree.map(lambda g: g * scale, grads)
-
-      # Compute exactly equivalent legacy loss val
+      # Compute exactly equivalent legacy loss val for logging.
       loss_val = aux.primary_loss.compute()
-
-    # TODO(b/491970038): update denom for sequence packing.
-    grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
 
     def apply_updates(model, optimizer, grad_accumulator):
       acc_grads = grad_accumulator.get()
@@ -482,34 +517,65 @@ class PeftTrainer:
       norm = optax.global_norm(
           jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads)
       )
+      opt_state_dtypes = _opt_state_dtypes(optimizer)
       optimizer.update(model, acc_grads)
+      _restore_opt_state_float_dtypes(optimizer, opt_state_dtypes)
       grad_accumulator.reset()
       return norm
 
     def skip_updates(model, optimizer, grad_accumulator):
       return jnp.array(0.0, dtype=jnp.float32)
 
-    # If the mesh is not empty, then we need to replicate the is_update_step
-    # across all devices to avoid deadlock so that all devices see the same
-    # update step.
-    mesh = pxla.thread_resources.env.physical_mesh
-    if not mesh.empty:
-      is_update_step = jax.lax.with_sharding_constraint(
-          is_update_step, jax.sharding.PartitionSpec()
+    # At depth 1 the accumulator is a no-op and the cond predicate is always
+    # True, so update directly from `grads` (no per-leaf accumulator writes,
+    # no XLA Conditional, accumulator shardings untouched); sequence packing
+    # keeps the cond path since its cadence comes from `is_update_step`.
+    if (
+        self.config.get_with_default("gradient_accumulation_steps", 1) == 1
+        and self.config.max_seq_token_per_tpu is None
+    ):
+      if isinstance(aux, utils.LossOutput):
+        denom = jnp.asarray(aux.primary_loss.denominator, dtype=jnp.float32)
+        scale = _zero_safe_reciprocal(denom)
+        grads = jax.tree_util.tree_map(
+            lambda x: x * scale.astype(x.dtype), grads
+        )
+      grad_norm = optax.global_norm(
+          jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
+      )
+      opt_state_dtypes = _opt_state_dtypes(optimizer)
+      optimizer.update(model, grads)
+      _restore_opt_state_float_dtypes(optimizer, opt_state_dtypes)
+    else:
+      if isinstance(aux, utils.LossOutput):
+        # Accumulate the UNREDUCED gradients (d/dparam of the sum) weighted by the
+        # loss's real denominator, so the optimizer step sees the GLOBAL weighted
+        # mean (Sum grads / Sum denom) across micro-batches rather than a
+        # mean-of-means.
+        grad_accumulator.add(grads, denom=aux.primary_loss.denominator)
+      else:
+        grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+
+      # If the mesh is not empty, then we need to replicate the is_update_step
+      # across all devices to avoid deadlock so that all devices see the same
+      # update step.
+      mesh = pxla.thread_resources.env.physical_mesh
+      if not mesh.empty:
+        is_update_step = jax.lax.with_sharding_constraint(
+            is_update_step, jax.sharding.PartitionSpec()
+        )
+
+      grad_norm = nnx.cond(
+          is_update_step,
+          apply_updates,
+          skip_updates,
+          model,
+          optimizer,
+          grad_accumulator,
       )
 
-    grad_norm = nnx.cond(
-        is_update_step,
-        apply_updates,
-        skip_updates,
-        model,
-        optimizer,
-        grad_accumulator,
-    )
-
     if isinstance(aux, utils.LossOutput):
-      # Return the raw aux (WeightedMetric preserved); metric ops reduce them.
-      return loss_val, aux.aux_metrics, grad_norm
+      return loss_val, aux, grad_norm
     elif self._has_aux:
       return loss_val, aux, grad_norm
     else:
@@ -521,7 +587,7 @@ class PeftTrainer:
     inputs = self.gen_model_input_fn(inputs)
     out = self.eval_loss_fn(model, **inputs)
     if isinstance(out, utils.LossOutput):
-      return out.primary_loss.compute(), out.aux_metrics
+      return out.primary_loss.compute(), out
     elif self._has_aux:
       loss, aux = out  # pyrefly: ignore[not-iterable]
       return loss, aux
@@ -538,7 +604,7 @@ class PeftTrainer:
       self,
   ) -> Callable[..., ArrayLike | Tuple[ArrayLike, Any]]:
     """Creates the eval step function."""
-    return self._eval_step  # pyrefly: ignore[bad-return]
+    return self._eval_step
 
   def _shard_optimizer(self, mesh: shd.Mesh) -> None:
     """Optimizer states should be sharded before calling the jit function.
@@ -552,7 +618,7 @@ class PeftTrainer:
       return
 
     def _shard(x, p):
-      if not isinstance(x, (jax.Array, np.ndarray)):
+      if not isinstance(x, jax.Array):
         return x
       if p is None:
         p = shd.PartitionSpec()
@@ -639,17 +705,9 @@ class PeftTrainer:
     """Override this function for post processing aux data from eval step."""
     pass
 
-  def _try_get_learning_rate(self) -> float | None:
+  def _try_get_learning_rate(self) -> float | jax.Array | None:
     """Returns the learning rate from the optimizer state if available."""
-    try:
-      return self.optimizer.opt_state.hyperparams["learning_rate"].value
-    except AttributeError:
-      for chainpart in self.optimizer.opt_state:
-        if isinstance(chainpart, optax.EmptyState):
-          break
-        if hasattr(chainpart, "hyperparams"):
-          return chainpart.hyperparams["learning_rate"].value
-      return None
+    return utils.try_get_learning_rate(self.optimizer.opt_state)
 
   def _log_metrics(
       self,
@@ -681,15 +739,19 @@ class PeftTrainer:
           perplexity,
       )
     for k, v in (additional_metrics or {}).items():
-      self.metrics_logger.log(self.metrics_prefix, k, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
+      if k.startswith(("sampler_trainer/", "sampler_is/", "sampler_rs/")):
+        prefix, metric_name = k.split("/", maxsplit=1)
+        self.metrics_logger.log(prefix, metric_name, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
+      else:
+        self.metrics_logger.log(self.metrics_prefix, k, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
 
   def _buffer_metrics(
       self,
       metrics_buffer: MetricsBuffer | None,
-      loss: ArrayLike,
+      loss: _MetricValue,
       step: int,
       additional_metrics: (
-          dict[str, Tuple[ArrayLike, Callable[[ArrayLike], ArrayLike]]] | None
+          Mapping[str, Tuple[_MetricValue, _MetricReducer]] | None
       ) = None,
   ) -> MetricsBuffer:
     """Buffers metrics for the current step."""
@@ -700,13 +762,23 @@ class PeftTrainer:
       )
     else:
       assert metrics_buffer.step == step
+      if utils.is_weighted_metric(
+          metrics_buffer.losses[0]
+      ) != utils.is_weighted_metric(loss):
+        raise TypeError("loss values must not mix weighted and scalar metrics")
       metrics_buffer.losses.append(loss)
     if additional_metrics is not None:
       for k, (v, op) in additional_metrics.items():
         if k not in metrics_buffer.additional_metrics:
           metrics_buffer.additional_metrics[k] = ([v], op)
         else:
-          metrics_buffer.additional_metrics[k][0].append(v)
+          values = metrics_buffer.additional_metrics[k][0]
+          if utils.is_weighted_metric(values[0]) != utils.is_weighted_metric(v):
+            raise TypeError(
+                f"additional metric {k!r} must not mix weighted and scalar"
+                " values"
+            )
+          values.append(v)
     return metrics_buffer
 
   def _write_train_metrics(self):
@@ -737,13 +809,18 @@ class PeftTrainer:
       return v
 
     def _apply_op(v, op):
-      if isinstance(v, list) and v and isinstance(v[0], utils.WeightedMetric):
-        if getattr(op, "__name__", "") in (
-            "global_weighted_mean",
-            "mean_of_means",
-        ):
-          return op(v)
-        v = [x.compute() for x in v]
+      if isinstance(v, list) and v:
+        weighted = [utils.is_weighted_metric(x) for x in v]
+        if any(weighted) and not all(weighted):
+          raise TypeError("metrics must not mix weighted and scalar values")
+        if all(weighted):
+          if getattr(op, "__name__", "") in (
+              "weighted_metric_mean",
+              "global_weighted_mean",
+              "mean_of_means",
+          ):
+            return op(v)
+          v = [x.compute() for x in v]
       return op(_to_np_array(v))
 
     self._log_metrics(
@@ -803,7 +880,7 @@ class PeftTrainer:
         skip_jit, cache_nnx_graph
     )
     if not skip_jit:
-      cache_size = train_step.func.jitted_fn._cache_size()  # pytype: disable=attribute-error
+      cache_size = train_step.func.jitted_fn._cache_size()
       logging.log_if(
           logging.INFO,
           f"Compiled train_step cache size: {cache_size}",
@@ -916,6 +993,19 @@ class PeftTrainer:
               % self.config.get_with_default("gradient_accumulation_steps", 1)
               == 0
           )
+        elif (
+            not is_update_step_val
+            and self.config.get_with_default("gradient_accumulation_steps", 1)
+            == 1
+            and self.config.max_seq_token_per_tpu is None
+        ):
+          # The depth-1 direct-update path in `_train_step` updates on every
+          # step; a data-driven skip flag would be silently ignored there.
+          raise ValueError(
+              "data-driven is_update_step=False conflicts with the depth-1"
+              " direct-update path; set gradient_accumulation_steps>1 or"
+              " max_seq_token_per_tpu."
+          )
 
         with self._perf_tracer.span(
             "peft_train_step",
@@ -933,14 +1023,29 @@ class PeftTrainer:
           span_v2.async_end([train_loss])
 
         self._throttler.add_computation(train_loss)
+        buffered_loss = (
+            aux.primary_loss
+            if isinstance(aux, utils.LossOutput)
+            else train_loss
+        )
+        additional_metrics: dict[str, tuple[_MetricValue, _MetricReducer]] = {
+            "grad_norm": (grad_norm, np.mean)
+        }
+        post_process_aux = aux
+        if isinstance(aux, utils.LossOutput):
+          additional_metrics.update({
+              name: (metric, utils.metric_reducer(metric))
+              for name, metric in aux.aux_metrics.items()
+          })
+          post_process_aux = aux.aux_metrics
         self._buffered_train_metrics = self._buffer_metrics(
             self._buffered_train_metrics,
-            loss=train_loss,
+            loss=buffered_loss,
             step=self._train_steps,
-            additional_metrics={"grad_norm": (grad_norm, np.mean)},
+            additional_metrics=additional_metrics,
         )
         # NB: put this after self._buffer_metrics is important
-        self._post_process_train_step(aux)
+        self._post_process_train_step(post_process_aux)
 
         if is_update_step_val:
           self._train_steps += 1
@@ -1022,6 +1127,7 @@ class PeftTrainer:
     eval_iterator = iter(eval_ds)
     with self._switch_mode(sft_metrics_logger.Mode.EVAL):
       eval_loss, eval_steps = 0, 0
+      uses_weighted_loss = False
       while True:
         if self.data_hooks:
           eval_example = self.data_hooks.load_next_eval_batch(self)
@@ -1040,12 +1146,27 @@ class PeftTrainer:
           self.training_hooks.on_eval_step_start(self)
         loss, aux = eval_step_fn(eval_example)
         loss = jax.lax.stop_gradient(loss)
+        buffered_loss = (
+            aux.primary_loss if isinstance(aux, utils.LossOutput) else loss
+        )
+        additional_metrics: (
+            dict[str, tuple[_MetricValue, _MetricReducer]] | None
+        ) = None
+        post_process_aux = aux
+        if isinstance(aux, utils.LossOutput):
+          uses_weighted_loss = True
+          additional_metrics = {
+              name: (metric, utils.metric_reducer(metric))
+              for name, metric in aux.aux_metrics.items()
+          }
+          post_process_aux = aux.aux_metrics
         self._buffered_eval_metrics = self._buffer_metrics(
             self._buffered_eval_metrics,
-            loss=loss,
+            loss=buffered_loss,
             step=self._train_steps,
+            additional_metrics=additional_metrics,
         )
-        self._post_process_eval_step(aux)
+        self._post_process_eval_step(post_process_aux)
         eval_loss += loss
         eval_steps += 1
 
@@ -1055,7 +1176,11 @@ class PeftTrainer:
         )
         return
 
-      self._write_metrics(self._buffered_eval_metrics)  # pyrefly: ignore[bad-argument-type]
+      metrics_buffer = self._buffered_eval_metrics
+      assert metrics_buffer is not None
+      if uses_weighted_loss:
+        eval_loss = metrics_buffer.loss
+      self._write_metrics(metrics_buffer)
       logging.info(
           "Train step %d eval loss: %f - eval perplexity: %f",
           self._train_steps,

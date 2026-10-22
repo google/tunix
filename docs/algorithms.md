@@ -93,13 +93,13 @@ or injecting custom reward functions.
 
 ```python
 class MyNewAlgorithmLearner(RLLearner):
-    def __init__(self, rl_cluster, algo_config: MyNewAlgoConfig, reward_fns, ...):
+    def __init__(self, rl_engine, algo_config: MyNewAlgoConfig, reward_fns, ...):
         # Custom initialization (e.g., adding specific reward shaping)
         if algo_config.my_hyperparam > 0.1:
             reward_fns.append(my_custom_reward_fn)
 
         super().__init__(
-            rl_cluster=rl_cluster,
+            rl_engine=rl_engine,
             algo_config=algo_config,
             reward_fns=reward_fns,
             ...

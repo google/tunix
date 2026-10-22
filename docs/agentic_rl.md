@@ -120,7 +120,7 @@ Tunix supports batching of agentic trajectories through the `GroupQueueManager`.
 This component, used within the `RolloutOrchestrator`, collects `TrajectoryItem`
 instances into buckets based on a configurable `group_key` (e.g., prompt ID via
 `env.task["group_id"]`) and `episode_id`. Once a bucket reaches a predefined
-`group_size` (e.g., `num_generations` in GRPO), it is marked as a "ready group"
+`num_generations` (as in GRPO), it is marked as a "ready group"
 and made available for downstream processing by `yield_batches`. This mechanism
 is essential for algorithms like GRPO which require multiple trajectory samples
 for each prompt, and improves efficiency by yielding full groups of trajectories

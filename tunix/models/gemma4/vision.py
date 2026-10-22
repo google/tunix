@@ -231,8 +231,8 @@ class Einsum(nnx.Module):
       shape: tuple[int, ...],
       *,
       rngs: nnx.Rngs,
-      dtype: jnp.dtype = jnp.float32,
-      param_dtype: jnp.dtype = jnp.float32,
+      dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       w_scale: float | None = None,
       initializer: Any = None,
       sharding: tuple[str | None, ...] | None = None,
@@ -263,8 +263,8 @@ class ClippedEinsum(nnx.Module):
       shape: tuple[int, ...],
       *,
       rngs: nnx.Rngs,
-      dtype: jnp.dtype = jnp.float32,
-      param_dtype: jnp.dtype = jnp.float32,
+      dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       w_scale: float | None = None,
       initializer: Any = None,
       sharding: tuple[str | None, ...] | None = None,
@@ -304,8 +304,8 @@ class RMSNorm(nnx.Module):
       dim: int,
       *,
       rngs: nnx.Rngs,
-      dtype: jnp.dtype = jnp.float32,
-      param_dtype: jnp.dtype = jnp.float32,
+      dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       with_scale: bool = True,
       sharding: tuple[str | None, ...] | None = None,
   ):
@@ -334,7 +334,7 @@ class Standardize(nnx.Module):
       dim: int,
       *,
       rngs: nnx.Rngs,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       sharding: tuple[str | None, ...] | None = None,
   ):
     self.scale = nnx.Param(jnp.ones((dim,), dtype=param_dtype), sharding=sharding)
@@ -361,7 +361,7 @@ class Attention(nnx.Module):
       rope_scale_factor: float = 1.0,
       use_qk_norm: bool = False,
       use_clipped_linears: bool = False,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: VisionShardingConfig | None = None,
   ):
     self.num_heads = num_heads
@@ -424,9 +424,9 @@ class Attention(nnx.Module):
     value_proj = self.value_norm(value_proj)
 
     if self.shd_config:
-      query_proj = sharding_utils.shard(query_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
-      key_proj = sharding_utils.shard(key_proj, self.shd_config.act_bskh)  # pyrefly: ignore[bad-argument-type]
-      value_proj = sharding_utils.shard(value_proj, self.shd_config.act_bskh)  # pyrefly: ignore[bad-argument-type]
+      query_proj = sharding_utils.shard(query_proj, self.shd_config.act_btnh)
+      key_proj = sharding_utils.shard(key_proj, self.shd_config.act_bskh)
+      value_proj = sharding_utils.shard(value_proj, self.shd_config.act_bskh)
 
     query_proj = apply_multidimensional_rope(
         query_proj,
@@ -446,11 +446,11 @@ class Attention(nnx.Module):
     )
 
     if self.shd_config:
-      attn_vec = sharding_utils.shard(attn_vec, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+      attn_vec = sharding_utils.shard(attn_vec, self.shd_config.act_btnh)
 
     attn_output = self.attn_vec_einsum('BTNH,NHD->BTD', attn_vec)
     if self.shd_config:
-      attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)
     return attn_output
 
   def _compute_attn_vec(
@@ -488,7 +488,7 @@ class Attention(nnx.Module):
         attn_logits += attn_mask[:, None, None, :, :]
 
     if self.shd_config:
-      attn_logits = sharding_utils.shard(attn_logits, self.shd_config.act_bkgts)  # pyrefly: ignore[bad-argument-type]
+      attn_logits = sharding_utils.shard(attn_logits, self.shd_config.act_bkgts)
 
     attn_weights = jax.nn.softmax(attn_logits, axis=-1).astype(v.dtype)
     result = jnp.einsum('bkgts,bskh->btkgh', attn_weights, v)
@@ -505,7 +505,7 @@ class FeedForward(nnx.Module):
       *,
       rngs: nnx.Rngs,
       use_clipped_linears: bool = False,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: VisionShardingConfig | None = None,
   ):
     linear_cls = ClippedEinsum if use_clipped_linears else Einsum
@@ -527,10 +527,10 @@ class FeedForward(nnx.Module):
     gate = self.gating_einsum('btd,cfd->btcf', x)
     activations = nnx.gelu(gate[..., 0, :]) * gate[..., 1, :]
     if self.shd_config:
-      activations = sharding_utils.shard(activations, self.shd_config.act_btf)  # pyrefly: ignore[bad-argument-type]
+      activations = sharding_utils.shard(activations, self.shd_config.act_btf)
     out = self.linear('btf,fd->btd', activations)
     if self.shd_config:
-      out = sharding_utils.shard(out, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      out = sharding_utils.shard(out, self.shd_config.act_btd)
     return out
 
 
@@ -547,7 +547,7 @@ class VisionBlock(nnx.Module):
       *,
       rngs: nnx.Rngs,
       use_clipped_linears: bool = False,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: VisionShardingConfig | None = None,
   ):
     self.pre_attention_norm = RMSNorm(
@@ -604,11 +604,11 @@ class VisionBlock(nnx.Module):
       attn_mask: jax.Array | None,
   ) -> jax.Array:
     if self.shd_config:
-      inputs = sharding_utils.shard(inputs, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      inputs = sharding_utils.shard(inputs, self.shd_config.act_btd)
     normed_inputs = self.pre_attention_norm(inputs)
     if self.shd_config:
       normed_inputs = sharding_utils.shard(
-          normed_inputs, self.shd_config.act_btd  # pyrefly: ignore[bad-argument-type]
+          normed_inputs, self.shd_config.act_btd
       )
     attn_output = self.attn(
         x=normed_inputs,
@@ -617,15 +617,15 @@ class VisionBlock(nnx.Module):
     )
     attn_output = self.post_attention_norm(attn_output)
     if self.shd_config:
-      attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)
     attn_output += inputs
     outputs = self.pre_ffw_norm(attn_output)
     if self.shd_config:
-      outputs = sharding_utils.shard(outputs, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      outputs = sharding_utils.shard(outputs, self.shd_config.act_btd)
     outputs = self.mlp(outputs)
     outputs = self.post_ffw_norm(outputs)
     if self.shd_config:
-      outputs = sharding_utils.shard(outputs, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      outputs = sharding_utils.shard(outputs, self.shd_config.act_btd)
     outputs += attn_output
     return outputs
 
@@ -640,7 +640,7 @@ class VisionEntry(nnx.Module):
       pos_emb_shape_yx: tuple[int, int],
       *,
       rngs: nnx.Rngs,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: VisionShardingConfig | None = None,
   ):
     self.patch_size = patch_size
@@ -671,15 +671,15 @@ class VisionEntry(nnx.Module):
     patches = 2.0 * (patches - 0.5)
     x = self.input_projection('btm,md->btd', patches)
     if self.shd_config:
-      x = sharding_utils.shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      x = sharding_utils.shard(x, self.shd_config.act_btd)
     pos_embed = factorized_posemb(self.pos_emb.value, positions_xy).astype(
         x.dtype
     )
     if self.shd_config:
-      pos_embed = sharding_utils.shard(pos_embed, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      pos_embed = sharding_utils.shard(pos_embed, self.shd_config.act_btd)
     out = x + pos_embed
     if self.shd_config:
-      out = sharding_utils.shard(out, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      out = sharding_utils.shard(out, self.shd_config.act_btd)
     return out
 
 
@@ -690,7 +690,7 @@ class VisionExit(nnx.Module):
       self,
       d_model: int,
       output_length: int | tuple[int, ...],
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
   ):
     self.d_model = d_model
     self.output_length = output_length
@@ -749,7 +749,7 @@ class VisionEncoder(nnx.Module):
       *,
       rngs: nnx.Rngs,
       config: VisionEncoderConfig,
-      param_dtype: jnp.dtype = jnp.float32,
+      param_dtype: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
       shd_config: VisionShardingConfig | None = None,
   ):
     self.config = config
@@ -841,7 +841,7 @@ class VisionEncoder(nnx.Module):
     if self.shd_config:
       sharded_outputs = []
       for emb, mask in outputs:
-        emb = sharding_utils.shard(emb, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+        emb = sharding_utils.shard(emb, self.shd_config.act_btd)
         sharded_outputs.append((emb, mask))
       outputs = tuple(sharded_outputs)
 

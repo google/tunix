@@ -14,6 +14,7 @@
 """Utils for OSS code."""
 
 import os
+import shutil
 from typing import Any
 
 from absl import logging
@@ -25,7 +26,7 @@ def pathways_available() -> bool:
   if 'proxy' not in os.getenv('JAX_PLATFORMS', ''):
     return False
   try:
-    import pathwaysutils  # pylint: disable=g-import-not-at-top, unused-import # pytype: disable=import-error
+    import pathwaysutils  # pylint: disable=g-import-not-at-top, unused-import  # pyrefly: ignore[missing-import]
 
     return True
   except ImportError:
@@ -58,7 +59,7 @@ def load_file_from_gcs(file_dir: str, target_dir: str | None = None) -> str:
 def kaggle_pipeline(model_id: str, model_download_path: str):
   """Download model from Kaggle."""
   try:
-    import kagglesdk.kaggle_env  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
+    import kagglesdk.kaggle_env  # pylint: disable=g-import-not-at-top
     if not hasattr(kagglesdk.kaggle_env, 'get_web_endpoint') and hasattr(kagglesdk.kaggle_env, 'get_endpoint'):
       kagglesdk.kaggle_env.get_web_endpoint = kagglesdk.kaggle_env.get_endpoint
   except Exception:  # pylint: disable=broad-exception-caught
@@ -79,11 +80,24 @@ def hf_pipeline(model_id: str, model_download_path: str):
   all_files = hf.list_repo_files(model_id)
   filtered_files = [f for f in all_files if not f.startswith('original/')]
   for filename in filtered_files:
-    hf.hf_hub_download(
+    dst = os.path.join(model_download_path, filename)
+    if os.path.exists(dst) and os.path.getsize(dst) > 0:
+      continue
+    cached_path = hf.hf_hub_download(
         repo_id=model_id,
         filename=filename,
-        local_dir=model_download_path,
     )
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    try:
+      os.remove(dst)
+    except FileNotFoundError:
+      pass
+    try:
+      os.link(os.path.realpath(cached_path), dst)
+    except FileExistsError:
+      pass  # Another process already linked it successfully
+    except OSError:
+      shutil.copy2(cached_path, dst)
   logging.info(
       'Downloaded %s to: %s',
       filtered_files,

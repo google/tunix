@@ -218,7 +218,7 @@ class LogitStrategyTest(parameterized.TestCase):
     npt.assert_allclose(teacher_output, inputs["teacher_output"], rtol=1e-6)
     npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
     # Check keys match
-    self.assertEqual(expected_metrics.keys(), computed_metrics.keys())
+    self.assertEqual(expected_metrics.keys(), computed_metrics.keys())  # pyrefly: ignore[missing-attribute]
 
   def test_get_eval_loss(self):
     strategy = LogitStrategy(

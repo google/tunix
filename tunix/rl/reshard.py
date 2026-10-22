@@ -80,7 +80,7 @@ def _get_reshard_fn_pathwaysutils(
   # This import is expected to fail sometimes internally if pathwaysutils is
   # not linked to the binary.
   try:
-    from pathwaysutils.experimental import reshard as experimental_reshard  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
+    from pathwaysutils.experimental import reshard as experimental_reshard  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
   except ImportError:
     logging.info(
         'Cannot import PathwaysUtils and experimental reshard API.'
@@ -168,7 +168,6 @@ def _get_reshard_fn(
 
   raise ValueError('Could not find a reshard function from {get_reshard_fns=}.')
 
-
 def reshard_pytree(
     source: jaxtyping.PyTree,
     target: jaxtyping.PyTree,
@@ -224,8 +223,33 @@ def reshard_pytree(
   )
 
   start = time.time()
+  def _is_prng_key(x):
+    """Check if an array is a JAX PRNG key."""
+    return hasattr(x, 'dtype') and jax.dtypes.issubdtype(
+        x.dtype, jax.dtypes.prng_key
+    )
 
-  resharded_array = reshard_fn(source, dst_shardings)
+  impl_tree = jax.tree.map(
+      lambda x: jax.random.key_impl(x) if _is_prng_key(x) else None,
+      source,
+  )
+  unwrapped_tree = jax.tree.map(
+      lambda x: jax.random.key_data(x) if _is_prng_key(x) else x,
+      source,
+  )
+
+  resharded_tree = reshard_fn(
+      unwrapped_tree,
+      dst_shardings,
+  )
+
+  resharded_array = jax.tree.map(
+      lambda val, impl: (
+          jax.random.wrap_key_data(val, impl=impl) if impl is not None else val
+      ),
+      resharded_tree,
+      impl_tree,
+  )
 
   callback_on_ready(
       resharded_array,

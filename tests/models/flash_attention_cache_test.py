@@ -25,7 +25,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import pytest
-
+from tunix.models.gemma4 import attention as gemma4_attention
 from tunix.models.gemma4 import model as gemma4_model
 from tunix.models.qwen2 import model as qwen2_model
 from tunix.models.qwen3 import model as qwen3_model
@@ -153,7 +153,7 @@ def _tiny_gemma4_model():
   config.attention_pattern = (gemma4_model.AttentionType.GLOBAL,)
   config.use_flash_attention = True
   model = gemma4_model.Gemma4(config, rngs=nnx.Rngs(0))
-  return model, config, gemma4_model
+  return model, config, gemma4_attention
 
 
 def _make_model_cache(model, config, batch_size: int, cache_size: int):

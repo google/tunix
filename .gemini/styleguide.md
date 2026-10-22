@@ -72,9 +72,13 @@ If the formatting is off, please instruct the user to run the linter/formatter. 
 
 ## 5. Other generic advice
 
-### Type hints
+### Type hints & Strict Typing
 
-* **Use type hints:**  Type hints improve code readability and help catch errors early.
+* **Use strict, specific type hints:** Always annotate function signatures,
+  attributes, and data structures with concrete, specific types (dataclasses,
+  `TypedDict`, `Protocol`, `jax.Array`, `jaxtyping`) rather than `Any` or
+  untyped `dict`/`object`. Avoid `Any` whenever a specific type can be
+  expressed.
 
 ### Comments
 
@@ -87,6 +91,17 @@ If the formatting is off, please instruct the user to run the linter/formatter. 
 * **Log at appropriate levels:** DEBUG, INFO, WARNING, ERROR, CRITICAL
 * **Provide context:** Include relevant information in log messages to aid debugging.
 
-### Error Handling
-* **Use specific exceptions:** Avoid using broad exceptions like `Exception`.
-* **Handle exceptions gracefully:** Provide informative error messages and avoid crashing the program.
+### Error Handling & One Well-Lit Path (Fail Loud)
+
+* **One well-lit path (No defensive fallbacks):** Never use speculative
+  `getattr(obj, "field", default)`, `dict.get("key", default)` on structured
+  schemas, `dict(getattr(obj, "metadata", None) or {})`, `.setdefault(...)`
+  with fabricated defaults (`""`, `0`, `False`), or
+  `isinstance(..., Mapping)` duck-typing branches. Access attributes and keys
+  directly (`obj.field`) on a single, strictly typed contract.
+* **Fail loud and fast:** Never mask missing attributes, invalid types, or
+  broken invariants with silent default values. Let Python raise
+  `AttributeError`, `KeyError`, `TypeError`, or raise an explicit `ValueError`
+  / specific exception immediately.
+* **Use specific exceptions:** Avoid catching or raising overly broad
+  exceptions like bare `Exception` to swallow errors.

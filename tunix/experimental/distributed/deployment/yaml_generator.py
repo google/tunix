@@ -44,6 +44,16 @@ def main() -> None:
       default=None,
       help="CPU machine type (e.g. n2-standard-64)",
   )
+  parser.add_argument(
+      "--namespace",
+      default=os.environ.get("K8S_NAMESPACE", "default"),
+      help="Kubernetes namespace to deploy into.",
+  )
+  parser.add_argument(
+      "--queue_name",
+      default=os.environ.get("KUEUE_QUEUE_NAME", ""),
+      help="Kueue local queue name for scheduling (optional).",
+  )
 
   parser.add_argument(
       "--pathways_server_image",
@@ -67,6 +77,50 @@ def main() -> None:
       default="100G",
       help="Memory limit of the Pathways proxy container",
   )
+  parser.add_argument(
+      "--pathways_proxy_memory",
+      default="16G",
+      help=(
+          "Memory request for the Pathways proxy container. Kept well below"
+          " --pathways_proxy_memory_limit: requests are the scheduling floor,"
+          " and the head pod is co-located with pw-node via podAffinity, so"
+          " requesting the full limit over-reserves the node."
+      ),
+  )
+  parser.add_argument(
+      "--pathways_rm_memory",
+      default="4G",
+      help="Memory request for the pathways-rm container",
+  )
+  parser.add_argument(
+      "--user_container_memory",
+      default="48G",
+      help="Memory request for the user/worker container",
+  )
+  parser.add_argument(
+      "--user_container_memory_limit",
+      default="70G",
+      help="Memory limit for the user/worker container",
+  )
+  parser.add_argument(
+      "--pathways_worker_memory",
+      default="100G",
+      help="Memory request for the pathways-worker container",
+  )
+  parser.add_argument(
+      "--ifrt_proxy_large_transfer_threshold_bytes",
+      type=int,
+      default=2**63 - 1,
+      help=(
+          "Pathways templates: host buffers of at least this many bytes go"
+          " from the user container to pathways-proxy through a shared"
+          " memory-backed directory instead of localhost gRPC (a 31 GB batch"
+          " took ~1-1.6 s instead of ~6-10 s on v5p). Each such buffer also"
+          " takes memory in the user container until it has been sent to the"
+          " workers. The default, like the IFRT proxy client's, turns this"
+          " off."
+      ),
+  )
 
   parser.add_argument(
       "--worker_container_name",
@@ -89,8 +143,24 @@ def main() -> None:
       default="sleep infinity",
       help="Command to run on startup",
   )
+  parser.add_argument(
+      "--ray_head_pre_init_command",
+      default="",
+      help="Command to run on the Ray head pod before starting Ray.",
+  )
+  parser.add_argument(
+      "--ray_worker_pre_init_command",
+      default="",
+      help="Command to run on Ray worker pods before joining the Ray cluster.",
+  )
 
   args = parser.parse_args()
+  if not 0 < args.ifrt_proxy_large_transfer_threshold_bytes <= 2**63 - 1:
+    # The IFRT proxy client parses the value as a positive int64.
+    parser.error(
+        "--ifrt_proxy_large_transfer_threshold_bytes must be in [1, 2**63 - 1],"
+        f" got {args.ifrt_proxy_large_transfer_threshold_bytes}"
+    )
 
   tpu_type = None
   tpu_topology = None
@@ -110,7 +180,7 @@ def main() -> None:
       tpu_machine = "tpu7x-standard-4t"
       tpu_type = "tpu7x"
       pw_instance_type = "tpu7x"
-    elif tpu_type in ("tpuv5", "tpu-v5p-slice"):
+    elif tpu_type in ("tpuv5", "tpuv5p", "tpu-v5p-slice"):
       slice_topology = tpu_topology
       slice_size = num_chips // 4
       tpu_machine = "ct5p-hightpu-4t"
@@ -141,15 +211,32 @@ def main() -> None:
   if args.jobset_name is None:
     jobset_name = f"{os.environ.get('USER')}-{pw_instance_type}-{num_chips}"
 
+  queue_label = (
+      f"  labels:\n    kueue.x-k8s.io/queue-name: {args.queue_name}\n"
+      if args.queue_name
+      else ""
+  )
+
   with open(args.template_file, "r") as f:
     template = string.Template(f.read())
     content = template.substitute(
         JOBSET_NAME=jobset_name,
         USER=os.environ.get("USER"),
+        NAMESPACE=args.namespace,
+        QUEUE_NAME=args.queue_name,
+        QUEUE_LABEL=queue_label,
         SERVER_IMAGE=args.pathways_server_image,
         PROXY_IMAGE=args.pathways_proxy_server_image,
         GCS_SCRATCH_LOCATION=args.pathways_gcs_scratch_location,
         PATHWAYS_PROXY_MEMORY_LIMIT=args.pathways_proxy_memory_limit,
+        PATHWAYS_PROXY_MEMORY=args.pathways_proxy_memory,
+        PATHWAYS_RM_MEMORY=args.pathways_rm_memory,
+        USER_CONTAINER_MEMORY=args.user_container_memory,
+        USER_CONTAINER_MEMORY_LIMIT=args.user_container_memory_limit,
+        PATHWAYS_WORKER_MEMORY=args.pathways_worker_memory,
+        IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES=(
+            args.ifrt_proxy_large_transfer_threshold_bytes
+        ),
         CPU_MACHINE=args.cpu_machine,
         TPU_MACHINE=tpu_machine,
         TPU_TYPE=tpu_type,
@@ -164,6 +251,8 @@ def main() -> None:
         USER_CONTAINER_IMAGE=args.worker_container_image,
         USER_CONTAINER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
+        RAY_HEAD_PRE_INIT_COMMAND=args.ray_head_pre_init_command,
+        RAY_WORKER_PRE_INIT_COMMAND=args.ray_worker_pre_init_command,
     )
     print(content)
 
