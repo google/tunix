@@ -780,6 +780,59 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertIs(explicit_cfg["float32_gate_logits"], True)
     self.assertIs(explicit_cfg["float32_logits"], False)
 
+  def test_create_maxtext_engine_enters_mesh_and_logical_axis_rules(self):
+    from flax.core import spmd  # pylint: disable=g-import-not-at-top
+
+    expected_rules = (("batch", ("data", "fsdp")), ("embed", "tensor"))
+    mock_cfg = mock.MagicMock()
+    mock_cfg.logical_axis_rules = expected_rules
+    mock_mesh = mock.MagicMock()
+    captured = {}
+
+    class TunixMaxTextAdapter:
+      pass
+
+    def fake_engine_ctor(
+        cfg, *, mesh, wrap_with_tunix_adapter, tokenizer_pad_id
+    ):
+      captured["cfg"] = cfg
+      captured["mesh"] = mesh
+      captured["wrap_with_tunix_adapter"] = wrap_with_tunix_adapter
+      captured["tokenizer_pad_id"] = tokenizer_pad_id
+      captured["active_rules"] = spmd.get_logical_axis_rules()
+      captured["mesh_entered"] = mock_mesh.__enter__.call_count
+      captured["mesh_exited"] = mock_mesh.__exit__.call_count
+      engine = mock.MagicMock()
+      engine.model = TunixMaxTextAdapter()
+      return engine
+
+    mock_engine_mod = mock.MagicMock()
+    mock_engine_mod.MaxTextTrainingEngine.side_effect = fake_engine_ctor
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock.MagicMock(), mock_engine_mod, mock.MagicMock()),
+    ):
+      engine = maxtext_utils.create_maxtext_engine(
+          mock_cfg,
+          mock_mesh,
+          tokenizer_pad_id=42,
+          wrap_with_tunix_adapter=True,
+          log_shapes=False,
+      )
+
+    self.assertIsInstance(engine.model, TunixMaxTextAdapter)
+    self.assertEqual(captured["cfg"], mock_cfg)
+    self.assertEqual(captured["mesh"], mock_mesh)
+    self.assertIs(captured["wrap_with_tunix_adapter"], True)
+    self.assertEqual(captured["tokenizer_pad_id"], 42)
+    self.assertEqual(captured["active_rules"], expected_rules)
+    self.assertEqual(captured["mesh_entered"], 1)
+    self.assertEqual(captured["mesh_exited"], 0)
+    mock_mesh.__exit__.assert_called_once()
+    self.assertEqual(spmd.get_logical_axis_rules(), ())
+
 
 if __name__ == "__main__":
   absltest.main()
