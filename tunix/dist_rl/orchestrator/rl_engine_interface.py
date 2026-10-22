@@ -14,6 +14,7 @@
 
 """The RL engine interface (Layer 1 Compute Routing Protocol) following Orchestrator V2."""
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 from tunix.dist_rl.common import datatypes
@@ -159,6 +160,8 @@ class AbstractRLEngine(Protocol):
       role: datatypes.Role = datatypes.Role.ACTOR,
       sync_weights: bool = True,
       policy_version: int | None = None,
+      *,
+      source_staged: asyncio.Event | None = None,
       **kwargs: Any,
   ) -> int | None:
     """Bootstraps rollout-facing policy state before step 0 dispatch begins."""
@@ -169,6 +172,8 @@ class AbstractRLEngine(Protocol):
       role: datatypes.Role = datatypes.Role.ACTOR,
       target_roles: Sequence[datatypes.Role] | None = None,
       policy_version: int | None = None,
+      *,
+      source_staged: asyncio.Event | None = None,
       **kwargs: Any,
   ) -> int:
     """Coordinates decentralized peer-to-peer weight sync across worker roles."""

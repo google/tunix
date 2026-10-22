@@ -196,6 +196,9 @@ class WorkUnitMetadata:
       unreported, not a default. Source and destination need not match.
     use_ffi: `transport_mode == "ffi"` as a bool, for consumers that would
       otherwise compare strings. None when unreported.
+    staged_on_host: True if weights are fully staged on host DRAM (e.g. Raiden
+      proxy/FFI mode without direct device buffer zero-copy) and source device
+      HBM can be safely released before destination transfer completes.
   """
 
   unit: WorkUnitId
@@ -209,6 +212,7 @@ class WorkUnitMetadata:
   mesh_axes: Optional[tuple[str, ...]] = None
   transport_mode: Optional[str] = None
   use_ffi: Optional[bool] = None
+  staged_on_host: Optional[bool] = None
 
   @classmethod
   def from_dict(cls, d: Any) -> WorkUnitMetadata:
@@ -282,6 +286,7 @@ class WorkUnitMetadata:
         ),
         transport_mode=d.get("transport_mode"),
         use_ffi=d.get("use_ffi"),
+        staged_on_host=d.get("staged_on_host"),
     )
 
 
@@ -390,6 +395,12 @@ class WeightSyncSource(Protocol):
     possibly-live transfer may still be reading the staging). Idempotent, and
     must be safe to call while a timed-out prepare for the same round is still
     running remotely.
+
+    When `prepare_weight_sync` is called with `release_after_stage=True`, the
+    source validates that all returned `WorkUnitMetadata` have
+    `staged_on_host=True` and executes `release_weight_sync` in-place before
+    returning from `prepare_weight_sync`, so the coordinator does not send a
+    second `release_weight_sync` RPC at the end of the round.
 
     Args:
       sync_request: Optional request context for the sync round.

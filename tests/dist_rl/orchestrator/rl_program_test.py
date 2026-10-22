@@ -141,7 +141,11 @@ def _create_rollout_response(
     group_index: int = 0,
     policy_version: int = 0,
     reward: float = 1.0,
+    batch_idx: int | None = None,
 ) -> datatypes.RolloutResponse:
+  metadata = {"prompt_id": prompt_id, "group_index": group_index}
+  if batch_idx is not None:
+    metadata["batch_idx"] = batch_idx
   traj_item = datatypes.TrajectoryItem(
       prompt_id=prompt_id,
       group_index=group_index,
@@ -154,7 +158,7 @@ def _create_rollout_response(
       completion_tokens=np.array([3, 4], dtype=np.int32),
       action_mask=np.array([1, 1], dtype=np.float32),
       policy_version=policy_version,
-      metadata={"prompt_id": prompt_id, "group_index": group_index},
+      metadata=metadata,
   )
   return datatypes.RolloutResponse(
       request_id=request_id,
@@ -168,6 +172,7 @@ def _make_trajectory_group(
     prompt_id: str = "prompt_0",
     num_generations: int = 2,
     reward: float = 1.0,
+    batch_idx: int | None = None,
 ) -> list[datatypes.TrajectoryItem]:
   return [
       distributed_rl_engine._response_to_trajectory_item(
@@ -176,6 +181,7 @@ def _make_trajectory_group(
               prompt_id,
               group_index=idx,
               reward=reward,
+              batch_idx=batch_idx,
           )
       )
       for idx in range(num_generations)
@@ -276,8 +282,26 @@ class RLProgramTest(absltest.TestCase):
       await asyncio.sleep(0.01)
       return []
 
-    self.mock_engine.prepare_rollout_policy = mock.AsyncMock(return_value=0)
-    self.mock_engine.sync_weights = mock.AsyncMock(return_value=1)
+    async def _mock_prepare_rollout_policy(*args, **kwargs):
+      del args
+      source_staged = kwargs.get("source_staged")
+      if source_staged is not None:
+        source_staged.set()
+      return 0
+
+    async def _mock_sync_weights(*args, **kwargs):
+      del args
+      source_staged = kwargs.get("source_staged")
+      if source_staged is not None:
+        source_staged.set()
+      return 1
+
+    self.mock_engine.prepare_rollout_policy = mock.AsyncMock(
+        side_effect=_mock_prepare_rollout_policy
+    )
+    self.mock_engine.sync_weights = mock.AsyncMock(
+        side_effect=_mock_sync_weights
+    )
     self.mock_engine.get_metrics = mock.AsyncMock(return_value=None)
     self.mock_engine.poll_rollouts = mock.AsyncMock(side_effect=_mock_poll)
     self.mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
@@ -545,8 +569,8 @@ class RLProgramTest(absltest.TestCase):
       self.mock_engine.sync_weights = mock.AsyncMock(return_value=None)
       _set_mock_poll_batches(
           self.mock_engine,
-          _make_trajectory_group("prompt_0"),
-          _make_trajectory_group("prompt_1"),
+          _make_trajectory_group("prompt_0", batch_idx=0),
+          _make_trajectory_group("prompt_1", batch_idx=1),
       )
       program = self._create_program(
           dataset=["prompt_data_0", "prompt_data_1"],
@@ -2507,8 +2531,8 @@ class RLProgramTest(absltest.TestCase):
       self.mock_algo.mini_batch_size = 2
       _set_mock_poll_batches(
           self.mock_engine,
-          _make_trajectory_group("prompt_0"),
-          _make_trajectory_group("prompt_1"),
+          _make_trajectory_group("prompt_0", batch_idx=0),
+          _make_trajectory_group("prompt_1", batch_idx=1),
       )
       assembler = batch_assembly.SequencePackedBatchAssembler(
           batch_size=1,
@@ -2539,8 +2563,8 @@ class RLProgramTest(absltest.TestCase):
       self.mock_algo.mini_batch_size = 2
       _set_mock_poll_batches(
           self.mock_engine,
-          _make_trajectory_group("prompt_0"),
-          _make_trajectory_group("prompt_1"),
+          _make_trajectory_group("prompt_0", batch_idx=0),
+          _make_trajectory_group("prompt_1", batch_idx=1),
       )
       assembler = batch_assembly.SequencePackedBatchAssembler(
           batch_size=2,
@@ -7035,6 +7059,243 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
           self.assertEqual(g3.items[0].prompt_id, "p2")
           self.assertEqual(g3.rewards, (3.0, 4.0))
         program.close()
+
+    asyncio.run(_run())
+
+
+class AsyncWeightSyncTest(RLProgramTest):
+
+  def test_async_weight_sync_without_sync_weights_raises_value_error(self):
+    with self.assertRaisesRegex(ValueError, "requires sync_weights=True"):
+      self._create_program(async_weight_sync=True, sync_weights=False)
+
+  def test_async_weight_sync_multistep_liveness_and_version_equality(self):
+    async def _run():
+      current_v = 0
+
+      async def _sync_weights(*unused_args, **kwargs):
+        nonlocal current_v
+        source_staged = kwargs.get("source_staged")
+        if source_staged is not None:
+          source_staged.set()
+        current_v += 1
+        return current_v
+
+      self.mock_engine.sync_weights = mock.AsyncMock(side_effect=_sync_weights)
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0"),
+          _make_trajectory_group("prompt_1"),
+          _make_trajectory_group("prompt_2"),
+      )
+      program = self._create_program(
+          dataset=["p0", "p1", "p2"],
+          max_steps=3,
+          sync_weights=True,
+          async_weight_sync=True,
+      )
+      await program.run_async(self.mock_engine)
+
+      self.assertEqual(program.step, 3)
+      self.assertEqual(program.policy_version, 3)
+      self.assertIsNotNone(program.last_step_result)
+      self.assertEqual(program.last_step_result.policy_version, 3)
+
+    asyncio.run(_run())
+
+  def test_async_weight_sync_max_staleness_1_overlap_and_window_clamp(self):
+    async def _run():
+      step0_sync_started = asyncio.Event()
+      step0_sync_gate = asyncio.Event()
+      step1_train_started = asyncio.Event()
+
+      sync_call_count = 0
+
+      async def _sync_weights(*unused_args, **kwargs):
+        nonlocal sync_call_count
+        source_staged = kwargs.get("source_staged")
+        sync_call_count += 1
+        if sync_call_count == 1:
+          if source_staged is not None:
+            source_staged.set()
+          step0_sync_started.set()
+          await step0_sync_gate.wait()
+          return 1
+        else:
+          if source_staged is not None:
+            source_staged.set()
+          return 2
+
+      orig_train_step = self.mock_engine.train_step
+      train_step_count = 0
+
+      async def _train_step(*args, **kwargs):
+        nonlocal train_step_count
+        train_step_count += 1
+        if train_step_count == 2:
+          step1_train_started.set()
+          step0_sync_gate.set()
+        return await orig_train_step(*args, **kwargs)
+
+      self.mock_engine.sync_weights = mock.AsyncMock(side_effect=_sync_weights)
+      self.mock_engine.train_step = mock.AsyncMock(side_effect=_train_step)
+
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0", batch_idx=0),
+          _make_trajectory_group("prompt_1", batch_idx=1),
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=["p0", "p1"],
+          max_steps=2,
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=self.assembler,
+          sync_weights=True,
+          async_weight_sync=True,
+          max_staleness=1,
+      )
+
+      await program.run_async(self.mock_engine)
+
+      self.assertTrue(step1_train_started.is_set())
+      self.assertEqual(program.step, 2)
+      self.assertEqual(program.policy_version, 2)
+      self.assertIsNotNone(program.last_step_result)
+      self.assertEqual(program.last_step_result.policy_version, 2)
+
+    asyncio.run(_run())
+
+  def test_async_weight_sync_prompt_arrival_group_order(self):
+    async def _run():
+      current_v = 0
+
+      async def _sync_weights(*unused_args, **kwargs):
+        nonlocal current_v
+        source_staged = kwargs.get("source_staged")
+        if source_staged is not None:
+          source_staged.set()
+        current_v += 1
+        return current_v
+
+      self.mock_engine.sync_weights = mock.AsyncMock(side_effect=_sync_weights)
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0", batch_idx=0),
+          _make_trajectory_group("prompt_1", batch_idx=1),
+      )
+      program = self._create_program(
+          dataset=["p0", "p1"],
+          max_steps=2,
+          sync_weights=True,
+          async_weight_sync=True,
+          group_order=rl_program.GroupOrder.PROMPT_ARRIVAL,
+      )
+      await program.run_async(self.mock_engine)
+
+      self.assertEqual(program.step, 2)
+      self.assertEqual(program.policy_version, 2)
+      self.assertIsNotNone(program.last_step_result)
+      self.assertEqual(program.last_step_result.policy_version, 2)
+
+    asyncio.run(_run())
+
+  def test_async_weight_sync_pre_staging_failure_aborts_immediately(self):
+    async def _run():
+      async def _failing_sync(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("pre-staging sync error")
+
+      self.mock_engine.sync_weights = mock.AsyncMock(side_effect=_failing_sync)
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0"),
+      )
+      program = self._create_program(
+          dataset=["p0"],
+          max_steps=1,
+          sync_weights=True,
+          async_weight_sync=True,
+      )
+      with self.assertRaisesRegex(RuntimeError, "pre-staging sync error"):
+        await program.run_async(self.mock_engine)
+
+    asyncio.run(_run())
+
+  def test_async_weight_sync_post_staging_failure_aborts_scored_q(self):
+    async def _run():
+      async def _post_staging_fail(*unused_args, **kwargs):
+        source_staged = kwargs.get("source_staged")
+        if source_staged is not None:
+          source_staged.set()
+        await asyncio.sleep(0.01)
+        raise RuntimeError("post-staging network sync failure")
+
+      self.mock_engine.sync_weights = mock.AsyncMock(
+          side_effect=_post_staging_fail
+      )
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0", batch_idx=0),
+          _make_trajectory_group("prompt_1", batch_idx=1),
+      )
+      program = self._create_program(
+          dataset=["p0", "p1"],
+          max_steps=2,
+          sync_weights=True,
+          async_weight_sync=True,
+      )
+      with self.assertRaisesRegex(
+          RuntimeError, "post-staging network sync failure"
+      ):
+        await program.run_async(self.mock_engine)
+
+    asyncio.run(_run())
+
+  def test_async_weight_sync_checkpoint_drains_in_flight_sync(self):
+    async def _run():
+      sync_in_flight = False
+      checkpoint_recorded_policy_versions = []
+
+      async def _sync_weights(*unused_args, **kwargs):
+        nonlocal sync_in_flight
+        source_staged = kwargs.get("source_staged")
+        if source_staged is not None:
+          source_staged.set()
+        sync_in_flight = True
+        await asyncio.sleep(0.05)
+        sync_in_flight = False
+        return 1
+
+      async def _save_checkpoint(*unused_args, **kwargs):
+        self.assertFalse(sync_in_flight)
+        metadata = kwargs.get("metadata", {})
+        checkpoint_recorded_policy_versions.append(
+            metadata.get("policy_version")
+        )
+        return {"checkpoint_saved": True}
+
+      self.mock_engine.sync_weights = mock.AsyncMock(side_effect=_sync_weights)
+      self.mock_engine.save_checkpoint = mock.AsyncMock(
+          side_effect=_save_checkpoint
+      )
+
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0", batch_idx=0),
+          _make_trajectory_group("prompt_1", batch_idx=1),
+      )
+      program = self._create_program(
+          dataset=["p0", "p1"],
+          max_steps=2,
+          sync_weights=True,
+          async_weight_sync=True,
+      )
+      await program.run_async(self.mock_engine)
+
+      self.assertEqual(program.step, 2)
+      self.assertNotEmpty(checkpoint_recorded_policy_versions)
+      self.assertEqual(checkpoint_recorded_policy_versions[-1], 2)
 
     asyncio.run(_run())
 
