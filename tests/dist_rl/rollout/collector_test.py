@@ -1259,6 +1259,63 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
     )
     np.testing.assert_array_equal(item.traj["prompt_tokens"], [10, 11])
 
+  class _NoPromptIdsSampler(sampler_lib.Sampler):
+    """A backend that does not echo the prompt it was given."""
+
+    async def sample(self, req, **kwargs):
+      del kwargs
+      return sampler_lib.SamplingResponse(
+          request_id=req.request_id,
+          text="ans",
+          token_ids=np.array([21, 22], dtype=np.int32),
+      )
+
+  def _no_prompt_ids_engine(self, req, store):
+    return collector.TrajectoryCollectorEngine(
+        traj_id="traj_no_prompt_ids",
+        request=req,
+        sampler=self._NoPromptIdsSampler(),
+        env_client=_MultiStepEnv(task={"question": "q0"}, max_steps=1),
+        agent=model_agent.ModelAgent("sys"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+        trajectory_store=store,
+    )
+
+  def test_run_episode_leaves_prompt_tokens_none_when_sampler_omits_prompt_token_ids(
+      self,
+  ):
+    store = in_memory_store.InMemoryTrajectoryStore()
+    req = datatypes.RolloutRequest(
+        prompt_id="p_no_prompt_ids",
+        prompt="q0",
+        max_response_length=64,
+        # Only text-in mode tolerates a backend that does not echo the prompt.
+        exact_token_continuity=False,
+    )
+    asyncio.run(self._no_prompt_ids_engine(req, store).run_episode())
+    (stored,) = store.get_trajectories(["traj_no_prompt_ids"])
+    agent_steps = [s for s in stored.steps if s.source.value == "agent"]
+    self.assertLen(agent_steps, 1)
+    self.assertIsNotNone(agent_steps[0].metrics)
+    self.assertIsNone(agent_steps[0].metrics.prompt_tokens)
+    self.assertEqual(agent_steps[0].metrics.completion_tokens, 2)
+
+  def test_exact_token_continuity_rejects_sampler_that_omits_prompt_token_ids(
+      self,
+  ):
+    req = datatypes.RolloutRequest(
+        prompt_id="p_no_prompt_ids",
+        prompt="q0",
+        max_response_length=64,
+    )
+    self.assertTrue(req.exact_token_continuity)
+    engine = self._no_prompt_ids_engine(
+        req, in_memory_store.InMemoryTrajectoryStore()
+    )
+    with self.assertRaisesRegex(ValueError, "prompt_lengths.* at turn 0"):
+      asyncio.run(engine.run_episode())
+
   def test_partial_rollout_pins_turn1_cache_salt_and_tracks_policy_versions(
       self,
   ):

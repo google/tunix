@@ -1807,6 +1807,8 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     # Turn 0 agent step (step_id=1) and env step (step_id=2)
     self.assertIsNotNone(stored_traj.steps[1].assistant_tokens)
     self.assertIsNotNone(stored_traj.steps[1].assistant_masks)
+    # The mock backend reports no prompt lengths, so none is recorded.
+    self.assertIsNone(stored_traj.steps[1].metrics.prompt_tokens)
     self.assertEqual(stored_traj.steps[2].reward, 1.0)
     self.assertIsNotNone(stored_traj.steps[2].env_tokens)
     self.assertIsNotNone(stored_traj.steps[2].env_masks)
@@ -1831,6 +1833,46 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         [step.mc_return for step in rehydrated_traj.steps],
         [step.mc_return for step in traj.steps],
     )
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_trajectory_store_ignores_empty_or_zero_prompt_lengths(
+      self, mock_convert
+  ):
+    self.mock_model_call.side_effect = None
+    for unreported_lengths in (
+        np.array([], dtype=np.int32),
+        np.array([0], dtype=np.int32),
+    ):
+      with self.subTest(unreported_lengths=unreported_lengths.tolist()):
+        mock_convert.side_effect = [
+            ([101], [1]),
+            ([301, 302], [1, 1]),
+        ]
+        self.mock_env.step.side_effect = [('obs1', 1.0, True, {})]
+        self.mock_model_call.return_value = RolloutOutput(
+            text=['action_1'],
+            logits=None,
+            tokens=[np.array([201, 202])],
+            left_padded_prompt_tokens=np.array([[0]]),
+            prompt_lengths=unreported_lengths,
+            logprobs=[np.array([-0.1, -0.2])],
+        )
+        sub_store = in_memory_store.InMemoryTrajectoryStore()
+        sub_meta = converter_lib.create_trajectory_metadata(
+            traj_id='traj_unreported_len'
+        )
+        sub_engine = trajectory_collect_engine.TrajectoryCollectEngine(
+            agent=self.mock_agent,
+            env=self.mock_env,
+            model_call=self.mock_model_call,
+            tokenizer=self.mock_tokenizer,
+            chat_parser=self.mock_chat_parser,
+            trajectory_store=sub_store,
+            metadata=sub_meta,
+        )
+        asyncio.run(self._run_collect(sub_engine, mode='Trajectory'))
+        (stored_sub,) = sub_store.get_trajectories(['traj_unreported_len'])
+        self.assertIsNone(stored_sub.steps[1].metrics.prompt_tokens)
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_trajectory_store_syncs_policy_version_across_turns(
@@ -2188,12 +2230,17 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
       )
       if poison == 'history' and index == 1:
         agent.chat_completions[0]['content'] += ' edited'
+      prompt_lengths = np.array([len(echoed)], np.int32)
+      if poison == 'no_prompt_lengths':
+        prompt_lengths = None  # a backend that never reports them
+      elif poison == 'empty_prompt_lengths' and index == 1:
+        prompt_lengths = np.array([], np.int32)  # dropped mid-episode
       return base_rollout.RolloutOutput(
           text=[text],
           logits=None,
           tokens=[np.array(samples[index], np.int32)],
           left_padded_prompt_tokens=np.array([[0, 0] + echoed], np.int32),
-          prompt_lengths=np.array([len(echoed)], np.int32),
+          prompt_lengths=prompt_lengths,
           logprobs=None
           if poison == 'logprobs'
           else [np.full(len(samples[index]), -0.5)],
@@ -2344,6 +2391,27 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
     np.testing.assert_array_equal(rehydrated.prompt_tokens, expected)
     self.assertEqual(rehydrated.prompt_length, result['prompt_length'])
 
+  def test_trajectory_store_records_prompt_tokens_of_each_model_call(self):
+    agent, env = self._frozenlake()
+    engine, _, _ = self._collector(agent, env)
+    store = in_memory_store.InMemoryTrajectoryStore()
+    engine.trajectory_store = store
+    engine.metadata = converter_lib.create_trajectory_metadata(
+        traj_id='traj_prompt_tokens'
+    )
+    result = asyncio.run(engine.collect(mode='Token'))
+    (stored,) = store.get_trajectories(['traj_prompt_tokens'])
+    # Agent steps have odd step IDs (2 * turn + 1).
+    agent_metrics = [step.metrics for step in stored.steps[1::2]]
+    # Each call's prompt is the whole context so far: the 3 prompt tokens, then
+    # + 3 assistant (2 sampled + 1 suffix) + 2 env, then + 2 assistant + 1 env.
+    self.assertEqual([m.prompt_tokens for m in agent_metrics], [3, 8, 11])
+    # The last call's prompt and completion cover the whole episode.
+    self.assertEqual(
+        agent_metrics[-1].prompt_tokens + agent_metrics[-1].completion_tokens,
+        result['prompt_length'] + len(result['conversation_tokens']),
+    )
+
   def test_first_turn_terminal_keeps_suffix_without_env_encoding(self):
     agent, env = self._frozenlake()
     env.max_steps = 1
@@ -2359,6 +2427,10 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
         ('echo', 'differs from recorded history'),
         ('history', 'rewrote previously recorded'),
         ('suffix', 'must only append'),
+        # Unreported prompt lengths fail at the first turn that omits them,
+        # whether that is the owned first prompt or a later replayed one.
+        ('no_prompt_lengths', 'report prompt_lengths.* at turn 0'),
+        ('empty_prompt_lengths', 'report prompt_lengths.* at turn 1'),
     ):
       agent, env = self._frozenlake()
       engine, _, _ = self._collector(agent, env, poison=poison)
