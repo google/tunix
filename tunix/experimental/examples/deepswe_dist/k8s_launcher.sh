@@ -206,6 +206,9 @@ export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
 
 export WANDB_PROJECT=${WANDB_PROJECT:-trellis-deepswe}
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
+if [[ -z "${WANDB_API_KEY:-}" && -f "${HOME}/.netrc" ]]; then
+  WANDB_API_KEY=$(python3 -c 'import netrc; auth = netrc.netrc().authenticators("api.wandb.ai"); print(auth[2] if auth else "")' 2>/dev/null || true)
+fi
 export WANDB_API_KEY=${WANDB_API_KEY:-}
 export WANDB_ENTITY=${WANDB_ENTITY:-}
 export LOG_DIR=${LOG_DIR:-}
