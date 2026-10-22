@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Demonstration of an RL training loop using remote_execution and an ActorPool.
+"""Demonstration of an RL training loop using remote_execution and TaskSession.
 
 Shows how an Orchestrator pulls prompt batches from a random data loader,
 submits rollout requests across a pool of worker servers, and processes
-trajectories out-of-order using PoolExecutionSession while dynamically
+trajectories out-of-order using TaskSession while dynamically
 instantiating registered agent and environment pairs locally on worker nodes.
 """
 

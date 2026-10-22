@@ -242,7 +242,7 @@ class RolloutWorkerTest(parameterized.TestCase):
     asyncio.run(_run_test())
 
   def test_actor_handle_native_invocations(self):
-    """Verifies direct Actor-native protocol using ActorHandle and RoutingActorPool."""
+    """Verifies direct Actor-native protocol using ActorHandle and TaskSession."""
 
     async def _run_test():
       assert self.actor_handle is not None

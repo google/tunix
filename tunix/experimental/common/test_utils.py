@@ -336,7 +336,7 @@ class MockGlobalOrchestrator:
   """TOP-LEVEL DRIVER NODE IN DISTRIBUTED-RL.
 
   Coordinates the RL training loop across distributed RolloutWorker
-  actor handles (Phase 1: Rollout generation via ActorPool) and Trainer
+  actor handles (Phase 1: Rollout generation via TaskSession) and Trainer
   instances (Phase 2: Training & Phase 3: Weight Synchronization).
   """
 
@@ -398,7 +398,7 @@ class MockGlobalOrchestrator:
       requests: Sequence[datatypes.RolloutRequest],
       num_generations: int = 1,
   ) -> List[TrajectoryOrError]:
-    """Dispatches requests via ActorPool and collects out-of-order results."""
+    """Dispatches requests via TaskSession and collects out-of-order results."""
     if not self.actor_handles:
       raise ValueError(
           "No valid ActorHandles available in MockGlobalOrchestrator."

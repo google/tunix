@@ -12,76 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Health monitor with per-state deadlines for the control plane.
+"""Health monitor for the control plane.
 
-Polls each worker's `heartbeat()` and tracks how long it has been in its current
-coarse state. Transient states (e.g. COMPILING, SYNCING, DRAINING) carry a
-deadline; a worker that dwells past its state's deadline is reported as overdue
-so the orchestrator can fence or fail it. Steady states (e.g. READY) have no
-deadline. Time comes from an injectable monotonic clock so the policy is
-testable without sleeping.
+Concurrently polls each worker's `heartbeat()` across the WorkerRegistry.
 """
 
-from collections.abc import Callable
 import concurrent.futures
-import dataclasses
 import logging
 import threading
-import time
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import worker_registry
 
-WorkerState = datatypes.WorkerState
-
-# Default max seconds a worker may dwell in a transient state before it is
-# considered overdue. States absent here (e.g. "READY", "STOPPED") are untimed.
-DEFAULT_STATE_DEADLINES_S: dict[WorkerState, float] = {
-    WorkerState.COMPILING: 30 * 60.0,
-    WorkerState.SYNCING: 10 * 60.0,
-    WorkerState.DRAINING: 5 * 60.0,
-}
-
-
-@dataclasses.dataclass(kw_only=True)
-class OverdueWorker:
-  """A worker that has exceeded the deadline for its current state.
-
-  Attributes:
-    worker_id: The worker's id.
-    state: The state it is stuck in.
-    elapsed_s: How long it has been in that state.
-    deadline_s: The deadline for that state.
-  """
-
-  worker_id: str
-  state: str
-  elapsed_s: float
-  deadline_s: float
-
 
 class HealthMonitor:
-  """Polls worker health and flags workers overdue in a transient state."""
+  """Polls registered workers' heartbeat RPCs using a thread pool."""
 
   def __init__(
       self,
       registry: worker_registry.WorkerRegistry,
       *,
-      state_deadlines_s: dict[WorkerState, float] | None = None,
-      clock: Callable[[], float] = time.monotonic,
       max_workers: int = 32,
       executor: concurrent.futures.ThreadPoolExecutor | None = None,
   ):
     self._registry = registry
     self._max_workers = max_workers
-    self._deadlines = (
-        dict(DEFAULT_STATE_DEADLINES_S)
-        if state_deadlines_s is None
-        else dict(state_deadlines_s)
-    )
-    self._clock = clock
-    # worker_id -> (state, timestamp it entered that state).
-    self._state_since: dict[str, tuple[str, float]] = {}
     if executor is not None:
       self._executor = executor
       self._owns_executor = False
@@ -104,14 +59,13 @@ class HealthMonitor:
     return False
 
   def poll(self) -> dict[str, datatypes.HealthReport]:
-    """Polls every worker once, updating state-entry timestamps.
+    """Polls every worker once.
 
     Returns:
       A mapping of worker_id -> the HealthReport captured this poll.
     """
     reports: dict[str, datatypes.HealthReport] = {}
     worker_ids = self._registry.worker_ids()
-    live_ids = set(worker_ids)
     abort_event = threading.Event()
 
     def _poll_worker(wid: str) -> tuple[str, datatypes.HealthReport | None]:
@@ -139,38 +93,9 @@ class HealthMonitor:
         if report is None:
           continue
         reports[wid] = report
-        previous = self._state_since.get(wid)
-        if previous is None or previous[0] != report.state:
-          self._state_since[wid] = (report.state, self._clock())
     finally:
       abort_event.set()
       for future in futures:
         future.cancel()
 
-    # Forget workers that have left the registry.
-    for worker_id in self._state_since.keys() - live_ids:
-      del self._state_since[worker_id]
     return reports
-
-  def overdue(self) -> list[OverdueWorker]:
-    """Returns workers past the deadline for their current state.
-
-    Based on state-entry times recorded by the most recent `poll()` calls.
-    """
-    now = self._clock()
-    result: list[OverdueWorker] = []
-    for worker_id, (state, since) in sorted(self._state_since.items()):
-      deadline = self._deadlines.get(state)  # pyrefly: ignore[bad-argument-type]
-      if deadline is None:
-        continue
-      elapsed = now - since
-      if elapsed > deadline:
-        result.append(
-            OverdueWorker(
-                worker_id=worker_id,
-                state=state,
-                elapsed_s=elapsed,
-                deadline_s=deadline,
-            )
-        )
-    return result

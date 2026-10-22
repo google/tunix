@@ -276,13 +276,6 @@ class RLProgramTest(absltest.TestCase):
       await asyncio.sleep(0.01)
       return []
 
-    async def _mock_sync_weights(*args, policy_version=None, **kwargs):
-      del args, kwargs
-      return 1 if policy_version is None else policy_version
-
-    self.mock_engine.sync_weights = mock.AsyncMock(
-        side_effect=_mock_sync_weights
-    )
     self.mock_engine.prepare_rollout_policy = mock.AsyncMock(return_value=0)
     self.mock_engine.sync_weights = mock.AsyncMock(return_value=1)
     self.mock_engine.get_metrics = mock.AsyncMock(return_value=None)

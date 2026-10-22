@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the HealthMonitor per-state deadline policy."""
+"""Unit tests for concurrent heartbeat polling and executor lifecycle."""
 
 import concurrent.futures
 from unittest import mock
@@ -23,15 +23,6 @@ from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.worker import mock_worker
 
 WorkerState = datatypes.WorkerState
-
-
-class _FakeClock:
-
-  def __init__(self):
-    self.t = 0.0
-
-  def __call__(self) -> float:
-    return self.t
 
 
 class HealthMonitorTest(absltest.TestCase):
@@ -47,34 +38,6 @@ class HealthMonitorTest(absltest.TestCase):
     monitor = health_monitor.HealthMonitor(self._registry(worker))
     reports = monitor.poll()
     self.assertEqual(reports["w0"].state, WorkerState.READY)
-    self.assertEmpty(monitor.overdue())
-
-  def test_worker_overdue_past_state_deadline(self):
-    worker = mock_worker.MockWorker("w0", roles={"trainer"})
-    worker._state = WorkerState.COMPILING
-    clock = _FakeClock()
-    monitor = health_monitor.HealthMonitor(
-        self._registry(worker),
-        state_deadlines_s={WorkerState.COMPILING: 100.0},
-        clock=clock,
-    )
-    monitor.poll()  # Enters COMPILING at t=0.
-    self.assertEmpty(monitor.overdue())
-
-    clock.t = 100.5  # Past the 100s deadline.
-    overdue = monitor.overdue()
-    self.assertLen(overdue, 1)
-    self.assertEqual(overdue[0].worker_id, "w0")
-    self.assertEqual(overdue[0].state, WorkerState.COMPILING)
-
-  def test_steady_state_is_never_overdue(self):
-    worker = mock_worker.MockWorker("w0", roles={"trainer"})
-    worker._state = WorkerState.READY
-    clock = _FakeClock()
-    monitor = health_monitor.HealthMonitor(self._registry(worker), clock=clock)
-    monitor.poll()
-    clock.t = 10_000_000.0
-    self.assertEmpty(monitor.overdue())
 
   def test_poll_skips_unregistered_worker(self):
     registry = worker_registry.WorkerRegistry()
@@ -84,24 +47,6 @@ class HealthMonitorTest(absltest.TestCase):
         reports = monitor.poll()
       self.assertEmpty(reports)
       self.assertIn("unregistered concurrently", logs.output[0])
-
-  def test_state_change_resets_the_deadline_timer(self):
-    worker = mock_worker.MockWorker("w0", roles={"trainer"})
-    worker._state = WorkerState.COMPILING
-    clock = _FakeClock()
-    monitor = health_monitor.HealthMonitor(
-        self._registry(worker),
-        state_deadlines_s={WorkerState.COMPILING: 100.0},
-        clock=clock,
-    )
-    monitor.poll()  # COMPILING since t=0.
-    clock.t = 90.0
-    worker._state = WorkerState.READY
-    monitor.poll()  # Transitions to READY at t=90.
-    clock.t = (
-        200.0  # Well past the COMPILING deadline, but no longer COMPILING.
-    )
-    self.assertEmpty(monitor.overdue())
 
   def test_close_shuts_down_owned_executor(self):
     registry = worker_registry.WorkerRegistry()
