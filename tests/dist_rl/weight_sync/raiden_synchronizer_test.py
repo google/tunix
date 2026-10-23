@@ -14,6 +14,7 @@
 
 """Tests for RaidenSynchronizer."""
 
+import os
 import socket
 import struct
 from unittest import mock
@@ -846,6 +847,46 @@ class RaidenSynchronizerTest(absltest.TestCase):
     self.assertEqual(
         sync.work_unit_metadata().shards, ("1.2.3.4:12345", "10.0.1.1:40001")
     )
+
+  def test_work_unit_metadata_staged_on_host(self):
+    sync = raiden_synchronizer.RaidenSynchronizer(
+        "trainer", self._state(), bind_ip="1.2.3.4"
+    )
+
+    # 1. _is_proxy=True, non-empty _ips, and direct buffer "0" -> True
+    sync._is_proxy = True
+    sync._ips = ["10.0.0.1:1234"]
+    with mock.patch.dict(
+        os.environ, {"RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER": "0"}
+    ):
+      self.assertTrue(sync.work_unit_metadata().staged_on_host)
+
+    # 2. RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER="1" -> False
+    with mock.patch.dict(
+        os.environ, {"RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER": "1"}
+    ):
+      self.assertFalse(sync.work_unit_metadata().staged_on_host)
+
+    # 3. _is_proxy=True and _ips=[] (before d2h) -> False
+    sync._is_proxy = True
+    sync._ips = []
+    with mock.patch.dict(
+        os.environ, {"RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER": "0"}
+    ):
+      self.assertFalse(sync.work_unit_metadata().staged_on_host)
+
+    # 4. _is_proxy=False: False before d2h(), True after d2h() when disabled
+    sync._is_proxy = False
+    with mock.patch.dict(
+        os.environ, {"RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER": "0"}
+    ):
+      self.assertFalse(sync.work_unit_metadata().staged_on_host)
+      sync.d2h()
+      self.assertTrue(sync.work_unit_metadata().staged_on_host)
+    with mock.patch.dict(
+        os.environ, {"RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER": "1"}
+    ):
+      self.assertFalse(sync.work_unit_metadata().staged_on_host)
 
 
 if __name__ == "__main__":
