@@ -1219,6 +1219,15 @@ class GRPOLearnerTest(parameterized.TestCase):
           batch_size=8,
           mini_batch_size=4,
       ),
+      dict(
+          # The last step is not on the save interval, so it is only saved by
+          # the final checkpoint in close(). That checkpoint must carry the
+          # global step of the last update, not one recomputed in close().
+          testcase_name='final_step_off_save_interval',
+          max_steps=6,
+          batch_size=8,
+          mini_batch_size=8,
+      ),
   )
 
   def test_checkpoint_with_mini_batch(
