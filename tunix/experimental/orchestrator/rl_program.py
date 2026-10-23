@@ -467,6 +467,9 @@ class StandardRLProgram(RLProgram):
       trainer_warmup_payload: datatypes.RLTrainerPayload | None = None,
       num_generations_to_dispatch: int | None = None,
       prefer_valid_rollouts: bool = True,
+      filter_zero_variance: bool = False,
+      max_dispatch_ahead_batches: int | None = None,
+      pass_rate_log_path: str | None = None,
       pipeline_step_boundary: bool = False,
       stage_next_microbatch: bool = False,
       stage_before_update: bool = True,
@@ -750,6 +753,51 @@ class StandardRLProgram(RLProgram):
     self._pending_cancel_tasks: set[asyncio.Task[int]] = set()
     self._window_release = asyncio.Event()
     self._dispatch_done = asyncio.Event()
+    self.filter_zero_variance = bool(filter_zero_variance)
+    self._dropped_groups_count = 0
+    self._pass_rate_log_path = (pass_rate_log_path or "").strip()
+    self._pass_rate_buffer: list[dict[str, Any]] = []
+    self._pass_rate_last_flush = time.monotonic()
+    self._pass_rate_part = 0
+    self._pass_rate_run_id = time.strftime("%Y%m%dT%H%M%S")
+    default_ahead = 1 if self.filter_zero_variance else self.max_staleness
+    resolved_ahead = (
+        default_ahead
+        if max_dispatch_ahead_batches is None
+        else max_dispatch_ahead_batches
+    )
+    self.max_dispatch_ahead_batches = min(
+        self.max_staleness,
+        max(0, int(resolved_ahead)),
+    )
+
+    def _zero_variance_filter(
+        group: Sequence[datatypes.TrajectoryItem],
+    ) -> tuple[list[datatypes.TrajectoryItem], list[datatypes.TrajectoryItem]]:
+      if not group:
+        return [], []
+      valid_rewards = [
+          _extract_reward(it)
+          for it in group
+          if getattr(it, "is_valid", True)
+      ]
+      if len(valid_rewards) < 2 or float(np.ptp(valid_rewards)) <= 1e-8:
+        first_meta = getattr(group[0], "metadata", None) or {}
+        logging.info(
+            "[DynamicSampling] Filtered zero-variance group prompt_id=%s"
+            " batch_idx=%s valid=%d/%d reward=%s",
+            getattr(group[0], "prompt_id", ""),
+            first_meta.get("batch_idx"),
+            len(valid_rewards),
+            len(group),
+            valid_rewards[0] if valid_rewards else None,
+        )
+        return [], list(group)
+      return list(group), []
+
+    scored_filter_fn = (
+        _zero_variance_filter if self.filter_zero_variance else None
+    )
 
     self.scored_q: (
         trajectory_queue_manager.TrajectoryQueueManager
@@ -762,15 +810,24 @@ class StandardRLProgram(RLProgram):
           full_batch_size=self.full_batch_size,
           max_staleness=max_staleness,
           current_policy_version=lambda: self.policy_version,
+          filter_fn=scored_filter_fn,
           on_cursor_advance=lambda _: self._release_window(),
       )
       self.scored_q = ordered_q
       on_drop = ordered_q.dropped
     else:
+
+      def _on_arrival_drop(_batch_idx: int, num_groups: int = 1) -> None:
+        self._dropped_groups_count += num_groups
+        self._release_window()
+
+      on_drop = _on_arrival_drop
       self.scored_q = trajectory_queue_manager.TrajectoryQueueManager.create(
           num_generations=self.num_generations,
           max_staleness=max_staleness,
           current_policy_version=lambda: self.policy_version,
+          filter_fn=scored_filter_fn,
+          on_drop=on_drop,
       )
     self.raw_q = trajectory_queue_manager.TrajectoryQueueManager.create(
         num_generations=self.num_generations,
@@ -817,13 +874,46 @@ class StandardRLProgram(RLProgram):
         self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
     ):
       return self.scored_q.next_batch_idx
+    if self._dropped_groups_count > 0:
+      return self._step + (
+          self._dropped_groups_count // self.full_batch_size
+      )
     return self._step
 
   def _release_window(self) -> None:
     """Wakes the dispatcher after `_next_batch` advances."""
     self._window_release.set()
 
-  async def _wait_for_dispatch_window(self, batch_idx: int) -> None:
+  def _dispatch_window_closed(
+      self, batch_idx: int, prompt_idx: int | None
+  ) -> bool:
+    if self._unsynced_steps or self._round_due:
+      return True
+    if (
+        not isinstance(
+            self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+        )
+        and prompt_idx is not None
+    ):
+      max_allowed_prompt_idx = (
+          (
+              self._step
+              - self._unsynced_steps
+              + 1
+              + self.max_dispatch_ahead_batches
+          )
+          * self.full_batch_size
+          + self._dropped_groups_count
+      )
+      return prompt_idx >= max_allowed_prompt_idx
+    return (
+        batch_idx
+        > self._next_batch - self._unsynced_steps + self.max_dispatch_ahead_batches
+    )
+
+  async def _wait_for_dispatch_window(
+      self, batch_idx: int, prompt_idx: int | None = None
+  ) -> None:
     """Blocks until `batch_idx` is inside the policy-staleness window.
 
     The dispatcher may run `max_staleness` prompt batches past the batch the
@@ -831,6 +921,7 @@ class StandardRLProgram(RLProgram):
 
     Args:
       batch_idx: The prompt batch the dispatcher is about to emit into.
+      prompt_idx: Optional global prompt index for exact group-level windowing.
     """
     # Checked up front too: a batch already inside the window would otherwise
     # skip the loop and keep dispatching after a sync round failed.
@@ -838,18 +929,13 @@ class StandardRLProgram(RLProgram):
       raise self._sync_error
     await self._hold_initial_stagger(batch_idx)
     if self.partial_rollout:
-      await self._wait_for_partial_dispatch_window(batch_idx)
+      await self._wait_for_partial_dispatch_window(batch_idx, prompt_idx)
       return
     # Nothing goes out while a background round is in flight. The rollouts
     # cannot start a request until the round commits anyway, and one that
     # lands before they close admission is drained on the old weights,
     # idling every other worker until it finishes.
-    while (
-        self._unsynced_steps
-        or self._round_due
-        or batch_idx
-        > self._next_batch - self._unsynced_steps + self.max_staleness
-    ):
+    while self._dispatch_window_closed(batch_idx, prompt_idx):
       if self._sync_error is not None:
         raise self._sync_error
       # Wait first, clear second. The reverse loses a release that lands
@@ -889,7 +975,7 @@ class StandardRLProgram(RLProgram):
     if (
         self.initial_dispatch_stagger_s <= 0
         and self.initial_dispatch_first_stagger_s <= 0
-    ) or self._next_batch > 0:
+    ) or self._step > 0 or (batch_idx > 1 and self._dropped_groups_count > 0):
       return
     if batch_idx == 0:
       if self._initial_dispatch_t0 is None:
@@ -917,7 +1003,33 @@ class StandardRLProgram(RLProgram):
     if self._sync_error is not None:
       raise self._sync_error
 
-  async def _wait_for_partial_dispatch_window(self, batch_idx: int) -> None:
+  def _partial_dispatch_window_closed(
+      self, batch_idx: int, prompt_idx: int | None
+  ) -> bool:
+    """Partial-rollout gate: staleness bound plus the dispatch-ahead bound."""
+    if (
+        batch_idx
+        > self._next_batch - self._unsynced_steps + self.max_staleness
+    ):
+      return True
+    if (
+        not isinstance(
+            self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+        )
+        and prompt_idx is not None
+    ):
+      # Rollouts hold at most `max_dispatch_ahead_batches` full batches beyond
+      # the one being trained, plus one slot per dropped group, which bounds
+      # the orchestrator's host memory (routed_experts per trajectory).
+      max_allowed_prompt_idx = (
+          self._step + 1 + self.max_dispatch_ahead_batches
+      ) * self.full_batch_size + self._dropped_groups_count
+      return prompt_idx >= max_allowed_prompt_idx
+    return batch_idx > self._next_batch + self.max_dispatch_ahead_batches
+
+  async def _wait_for_partial_dispatch_window(
+      self, batch_idx: int, prompt_idx: int | None = None
+  ) -> None:
     """Per-batch dispatch gate for partial rollout.
 
     A paused request resumes on the new weights rather than draining on the
@@ -929,12 +1041,9 @@ class StandardRLProgram(RLProgram):
 
     Args:
       batch_idx: The prompt batch the dispatcher is about to emit into.
+      prompt_idx: Optional global prompt index for group-level windowing.
     """
-    while (
-        batch_idx > self._next_batch + self.max_staleness
-        or batch_idx - self.max_staleness
-        > self.policy_version - self._unsynced_steps
-    ):
+    while self._partial_dispatch_window_closed(batch_idx, prompt_idx):
       if self._sync_error is not None:
         raise self._sync_error
       await self._window_release.wait()
@@ -974,6 +1083,10 @@ class StandardRLProgram(RLProgram):
         self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
     ):
       self.scored_q.skip(0, restored_next_batch_idx)
+    elif restored_next_batch_idx > restored_step:
+      self._dropped_groups_count = (
+          restored_next_batch_idx - restored_step
+      ) * self.full_batch_size
     logging.info(
         "Resuming from checkpoint: step=%d policy_version=%d (skipping %d"
         " already-trained dataset items).",
@@ -1024,7 +1137,9 @@ class StandardRLProgram(RLProgram):
             break
 
         coordinates = _prompt_coordinates(prompt_idx, self.full_batch_size)
-        await self._wait_for_dispatch_window(coordinates["batch_idx"])
+        await self._wait_for_dispatch_window(
+            coordinates["batch_idx"], coordinates["prompt_idx"]
+        )
         # Off the event loop: dataset iterators such as the DeepSWE
         # PrewarmDatasetIterator make blocking K8s calls here, which would
         # otherwise stall the train loop and the polling stage.
@@ -1034,7 +1149,9 @@ class StandardRLProgram(RLProgram):
         # Again: the fetch yielded, and the train loop may have started a
         # round meanwhile. Nothing below awaits before the dispatch, so the
         # window cannot shut between this check and the request going out.
-        await self._wait_for_dispatch_window(coordinates["batch_idx"])
+        await self._wait_for_dispatch_window(
+            coordinates["batch_idx"], coordinates["prompt_idx"]
+        )
         prompt_idx += 1
         last_coordinates = coordinates
         if isinstance(prompt_item, dict):
@@ -1158,6 +1275,70 @@ class StandardRLProgram(RLProgram):
       # NB: We currently assume it's safe to silently drop partial groups upon EOF.
       await self.raw_q.close()
 
+  def _record_pass_rate(
+      self,
+      group: Sequence[datatypes.TrajectoryItem],
+      rewards: Sequence[float],
+  ) -> None:
+    """Buffers one group's per-sample rewards for the pass-rate log.
+
+    Enabled by `PASS_RATE_LOG_PATH` (a local or gs:// directory). Each record
+    is one prompt group: its prompt id, dataset coordinates and the reward
+    and validity of every sample, so per-task pass rates can be computed
+    offline (e.g. for difficulty filtering). Records are flushed as JSONL
+    part files, since GCS objects cannot be appended to.
+    """
+    if not group:
+      return
+    first = group[0]
+    meta = getattr(first, "metadata", None) or {}
+    statuses = []
+    for item in group:
+      traj = getattr(item, "traj", None)
+      status = traj.get("status") if isinstance(traj, dict) else None
+      statuses.append(getattr(status, "name", None) or (str(status) if status else None))
+    self._pass_rate_buffer.append({
+        "prompt_id": str(getattr(first, "prompt_id", "")),
+        "prompt_idx": meta.get("prompt_idx"),
+        "batch_idx": meta.get("batch_idx"),
+        "policy_version": int(getattr(first, "policy_version", 0) or 0),
+        "rewards": [float(r) for r in rewards],
+        "is_valid": [bool(getattr(it, "is_valid", True)) for it in group],
+        "statuses": statuses,
+        "time": time.time(),
+    })
+    now = time.monotonic()
+    if (
+        len(self._pass_rate_buffer) >= 32
+        or now - self._pass_rate_last_flush > 120
+    ):
+      self._flush_pass_rate()
+
+  def _flush_pass_rate(self) -> None:
+    """Writes buffered pass-rate records as one JSONL part file."""
+    if not self._pass_rate_buffer:
+      return
+    records, self._pass_rate_buffer = self._pass_rate_buffer, []
+    self._pass_rate_last_flush = time.monotonic()
+    self._pass_rate_part += 1
+    path = (
+        f"{self._pass_rate_log_path.rstrip('/')}/"
+        f"part-{self._pass_rate_run_id}-{self._pass_rate_part:06d}.jsonl"
+    )
+    payload = "".join(json.dumps(r) + "\n" for r in records)
+
+    def _write() -> None:
+      try:
+        from etils import epath  # pylint: disable=g-import-not-at-top
+
+        p = epath.Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(payload)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("[PassRate] failed to write %s: %s", path, e)
+
+    threading.Thread(target=_write, daemon=True).start()
+
   async def critique_stage(self) -> None:
     """Stage 2: Scores rewards, PRMs, and reference KL logprobs."""
     assert self.engine is not None
@@ -1185,6 +1366,64 @@ class StandardRLProgram(RLProgram):
           else:
             r = _extract_reward(item)
           rewards.append(float(r))
+
+        if self._pass_rate_log_path:
+          self._record_pass_rate(group, rewards)
+
+        if self.filter_zero_variance:
+          valid_rewards = [
+              rewards[idx]
+              for idx, it in enumerate(group)
+              if getattr(it, "is_valid", True)
+          ]
+          if len(valid_rewards) < 2 or float(np.ptp(valid_rewards)) <= 1e-8:
+            for idx, src_item in enumerate(group):
+              reward_val = rewards[idx] if idx < len(rewards) else 0.0
+              src_metadata = getattr(src_item, "metadata", None)
+              if isinstance(src_metadata, dict):
+                src_metadata.pop("routed_experts", None)
+              src_traj = getattr(src_item, "traj", None)
+              if isinstance(src_traj, dict):
+                src_traj.pop("routed_experts", None)
+              src_item.routed_experts = None
+              src_item.prompt_tokens = None
+              src_item.completion_tokens = None
+              src_item.action_mask = None
+              stub = datatypes.TrajectoryItem(
+                  prompt_id=getattr(src_item, "prompt_id", ""),
+                  group_index=getattr(src_item, "group_index", 0),
+                  start_step=0,
+                  traj={"trajectory_reward": reward_val},
+                  is_valid=getattr(src_item, "is_valid", True),
+                  prompt_tokens=None,
+                  completion_tokens=None,
+                  action_mask=None,
+                  routed_experts=None,
+                  policy_version=getattr(src_item, "policy_version", 0),
+                  metadata={
+                      "batch_idx": (
+                          src_metadata.get("batch_idx")
+                          if isinstance(src_metadata, dict)
+                          else None
+                      ),
+                      "prompt_idx": (
+                          src_metadata.get("prompt_idx")
+                          if isinstance(src_metadata, dict)
+                          else None
+                      ),
+                      "intra_batch_idx": (
+                          src_metadata.get("intra_batch_idx")
+                          if isinstance(src_metadata, dict)
+                          else None
+                      ),
+                  },
+              )
+              await self.scored_q.put(stub)
+            group = None
+            src_item = None
+            stub = None
+            _release_host_memory()
+            continue
 
         trainer_payloads = self.algo.create_trainer_payloads(
             group, rewards=rewards
@@ -1277,6 +1516,8 @@ class StandardRLProgram(RLProgram):
         payload = None
         item = None
     finally:
+      if self._pass_rate_log_path:
+        self._flush_pass_rate()
       await self.scored_q.close()
 
   _SAMPLER_IS_ATTR_PREFIXES = (
@@ -1563,14 +1804,44 @@ class StandardRLProgram(RLProgram):
           if is_valid
       ]
 
-    reward_mean = float(np.mean(rewards_to_log)) if rewards_to_log else 0.0
+    reward_kept_mean = float(np.mean(rewards_to_log)) if rewards_to_log else 0.0
     reward_std = float(np.std(rewards_to_log)) if rewards_to_log else 0.0
     reward_min = float(np.min(rewards_to_log)) if rewards_to_log else 0.0
     reward_max = float(np.max(rewards_to_log)) if rewards_to_log else 0.0
     reward_sum = float(np.sum(rewards_to_log)) if rewards_to_log else 0.0
+
+    # `rewards/train/mean` (`rewards/mean`) counts all valid generated rollouts
+    # (including zero-variance and stale groups filtered out during this step),
+    # giving the policy's unfiltered success rate across all generated rollouts.
+    # `rewards/train_kept_mean` (`rewards/kept_mean`) reports the mean over only
+    # the kept prompts that passed filtering and were trained on.
+    filtered_rewards: list[float] = []
+    filtered_all_correct = 0
+    filtered_all_wrong = 0
+    for group in filtered_groups:
+      group_rewards = []
+      for item in group:
+        if not getattr(item, "is_valid", True):
+          continue
+        try:
+          group_rewards.append(float(_extract_reward(item)))
+        except (KeyError, TypeError):
+          continue
+      filtered_rewards.extend(group_rewards)
+      if group_rewards and float(np.ptp(group_rewards)) <= 1e-8:
+        if group_rewards[0] > 0.5:
+          filtered_all_correct += 1
+        else:
+          filtered_all_wrong += 1
+    all_rewards = list(rewards_to_log) + filtered_rewards
+    reward_mean_all = float(np.mean(all_rewards)) if all_rewards else 0.0
+    reward_mean = reward_kept_mean
+
+    if all_rewards:
+      self._log_metric("rewards/mean", reward_mean_all, log_step)
     if rewards_to_log:
       reward_stats = {
-          "mean": reward_mean,
+          "kept_mean": reward_kept_mean,
           "std": reward_std,
           "min": reward_min,
           "max": reward_max,
@@ -1578,6 +1849,26 @@ class StandardRLProgram(RLProgram):
       }
       for tag, val in reward_stats.items():
         self._log_metric(f"rewards/{tag}", val, log_step)
+      rewards_prefix = (
+          f"{self.metrics_prefix}/rewards"
+          if self.metrics_prefix
+          else "rewards"
+      )
+      metrics_logger_lib.jax.monitoring.record_scalar(
+          f"{rewards_prefix}/{self.mode}_kept_mean",
+          reward_kept_mean,
+          step=log_step,
+      )
+    self._log_metric(
+        "rollout/filtered_all_correct_groups",
+        float(filtered_all_correct),
+        log_step,
+    )
+    self._log_metric(
+        "rollout/filtered_all_wrong_groups",
+        float(filtered_all_wrong),
+        log_step,
+    )
 
     # --- Advantage Metrics ---
     advantage_mean = float(np.mean(step_advantages)) if step_advantages else 0.0
@@ -1789,6 +2080,7 @@ class StandardRLProgram(RLProgram):
 
     return {
         "reward_mean": reward_mean,
+        "reward_mean_all": reward_mean_all,
         "reward_std": reward_std,
         "advantage_mean": advantage_mean,
         "advantage_std": advantage_std,
@@ -2213,6 +2505,7 @@ class StandardRLProgram(RLProgram):
         if task is not None:
           step_result, elapsed = await task
           policy_training_time += elapsed
+          _release_host_memory()
 
       async def _await_train_upload_slot() -> None:
         nonlocal step_result, policy_training_time
@@ -2564,11 +2857,13 @@ class StandardRLProgram(RLProgram):
       grad_norm_val = metrics_summary["grad_norm_val"]
       if self.mode == Mode.TRAIN:
         logging.info(
-            "Train step %d - loss: %s - reward_mean: %.4f - advantage_mean:"
-            " %.4f - grad_norm: %s - perplexity: %s - step_time: %.2fs",
+            "Train step %d - loss: %s - reward_mean: %.4f - reward_mean_all:"
+            " %.4f - advantage_mean: %.4f - grad_norm: %s - perplexity: %s -"
+            " step_time: %.2fs",
             current_step,
             f"{loss_val:.4f}" if loss_val is not None else "N/A",
             metrics_summary["reward_mean"],
+            metrics_summary["reward_mean_all"],
             metrics_summary["advantage_mean"],
             f"{grad_norm_val:.4g}" if grad_norm_val is not None else "N/A",
             f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
