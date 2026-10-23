@@ -77,6 +77,7 @@ class FakeSource:
       variables: Sequence[weight_sync.TensorMetadata] = (),
       prepare_delay: float = 0.0,
       transport_mode: Optional[str] = None,
+      staged_on_host: Optional[bool] = None,
   ):
     self._info = datatypes.WorkerInfo(
         worker_id=worker_id, roles=frozenset({datatypes.Role.ACTOR.value})
@@ -86,6 +87,7 @@ class FakeSource:
     self._hosts = hosts
     self._variables = tuple(variables)
     self._transport_mode = transport_mode
+    self._staged_on_host = staged_on_host
     self.release_gate = None
     self.release_entered = None
     self._prepare_delay = prepare_delay
@@ -96,7 +98,13 @@ class FakeSource:
   def info(self) -> datatypes.WorkerInfo:
     return self._info
 
-  async def prepare_weight_sync(self, sync_request: Any = None, **kwargs):
+  async def prepare_weight_sync(
+      self,
+      sync_request: Any = None,
+      *,
+      release_after_stage: bool = False,
+      **kwargs,
+  ):
     del kwargs
     self.prepare_calls += 1
     if self._prepare_delay:
@@ -106,7 +114,7 @@ class FakeSource:
         sync_request.policy_version * 1000.0 + i for i in range(4)
     ]
     self._log.append(f"{self._info.worker_id}:prepare")
-    return [
+    units = [
         weight_sync.WorkUnitMetadata(
             unit=WorkUnitId(
                 job_name=self._info.worker_id, job_replica_id=str(host)
@@ -119,9 +127,20 @@ class FakeSource:
             item_size=4,
             variables=self._variables,
             transport_mode=self._transport_mode,
+            staged_on_host=self._staged_on_host,
         )
         for host in range(self._hosts)
     ]
+    if release_after_stage:
+      if not units or not all(bool(u.staged_on_host) for u in units):
+        raise RuntimeError(
+            f"{self._info.worker_id}: async_weight_sync"
+            " (release_after_stage=True) requires all source work units to"
+            f" report staged_on_host=True, got"
+            f" {[u.staged_on_host for u in units]!r}."
+        )
+      await self.release_weight_sync(sync_request=sync_request)
+    return units
 
   async def release_weight_sync(self, sync_request: Any = None, **kwargs):
     del sync_request, kwargs
@@ -549,6 +568,54 @@ class SuccessPathTest(CoordinatorTestBase):
     self.sync()
 
     self.assertEqual(self.sources[0].release_calls, 1)
+
+  def test_source_staged_releases_source_in_prepare_and_fires_event(self):
+    dest = FakeDestination("sampler", [])
+    source = FakeSource("trainer", Wire(), [], staged_on_host=True)
+    self.make(dest, sources=[source])
+
+    source_rpc_after_staged = []
+
+    async def scenario():
+      staged = asyncio.Event()
+
+      orig_prepare = source.prepare_weight_sync
+      orig_release = source.release_weight_sync
+
+      async def tracked_prepare(*args, **kwargs):
+        if staged.is_set():
+          source_rpc_after_staged.append("prepare")
+        return await orig_prepare(*args, **kwargs)
+
+      async def tracked_release(*args, **kwargs):
+        if staged.is_set():
+          source_rpc_after_staged.append("release")
+        return await orig_release(*args, **kwargs)
+
+      source.prepare_weight_sync = tracked_prepare
+      source.release_weight_sync = tracked_release
+
+      result = await self.coordinator.sync(1, source_staged=staged)
+      return result, staged.is_set()
+
+    result, is_staged = asyncio.run(scenario())
+
+    self.assertTrue(result.success)
+    self.assertTrue(is_staged)
+    self.assertEqual(source.prepare_calls, 1)
+    self.assertEqual(source.release_calls, 1)
+    self.assertEmpty(source_rpc_after_staged)
+
+  def test_source_staged_failure_when_not_staged_on_host(self):
+    dest = FakeDestination("sampler", [])
+    source = FakeSource("trainer", Wire(), [], staged_on_host=False)
+    self.make(dest, sources=[source])
+
+    staged = asyncio.Event()
+    with self.assertRaises(WeightSyncError):
+      asyncio.run(self.coordinator.sync(1, source_staged=staged))
+
+    self.assertFalse(staged.is_set())
 
   def test_fresh_req_id_and_uuid_even_for_the_same_policy_version(self):
     dest = FakeDestination("sampler", [])

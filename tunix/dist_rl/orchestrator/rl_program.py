@@ -336,6 +336,7 @@ class StandardRLProgram(RLProgram):
       batch_size: int | None = None,
       max_staleness: int = 0,
       sync_weights: bool = True,
+      async_weight_sync: bool = False,
       precompile_trainer: bool = True,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       trajectory_log_dir: str | None = None,
@@ -350,6 +351,8 @@ class StandardRLProgram(RLProgram):
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
     if max_staleness < 0:
       raise ValueError("max_staleness must be non-negative.")
+    if async_weight_sync and not sync_weights:
+      raise ValueError("async_weight_sync=True requires sync_weights=True.")
     self.dataset = dataset
     self.max_steps = max_steps
     self.algo = algo
@@ -434,6 +437,7 @@ class StandardRLProgram(RLProgram):
       )
     self.max_staleness = max_staleness
     self.sync_weights = sync_weights
+    self.async_weight_sync = async_weight_sync
     self.precompile_trainer = precompile_trainer
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     if trajectory_log_dir is None and metrics_logging_options is not None:
@@ -487,16 +491,28 @@ class StandardRLProgram(RLProgram):
       self.raw_q = TrajectoryQueueManager.create(
           num_generations=self.num_generations,
       )
+      cursor_fn = lambda: ordered_q.next_batch_idx
+      next_batch_fn = (
+          (lambda: min(cursor_fn(), self.policy_version))
+          if self.async_weight_sync
+          else cursor_fn
+      )
       self.dispatch_window = dispatch_window.DispatchWindow(
           max_staleness=max_staleness,
-          next_batch_fn=lambda: ordered_q.next_batch_idx,
+          next_batch_fn=next_batch_fn,
           full_batch_size=self.full_batch_size,
       )
     else:
       self.scored_q = FifoGroupQueue.create()
+      cursor_fn = lambda: self._step
+      next_batch_fn = (
+          (lambda: min(cursor_fn(), self.policy_version))
+          if self.async_weight_sync
+          else cursor_fn
+      )
       self.dispatch_window = dispatch_window.DispatchWindow(
           max_staleness=max_staleness,
-          next_batch_fn=lambda: self._step,
+          next_batch_fn=next_batch_fn,
           full_batch_size=self.full_batch_size,
           out_of_order_resume=True,
       )
@@ -1324,6 +1340,28 @@ class StandardRLProgram(RLProgram):
         step_result, train_sec = await task
         step_times.policy_training_time += train_sec
 
+    pending_sync: asyncio.Task[None] | None = None
+
+    async def _await_pending_sync() -> None:
+      nonlocal pending_sync
+      task, pending_sync = pending_sync, None
+      if task is not None:
+        await task
+
+    async def _sync_in_background(staged: asyncio.Event) -> None:
+      try:
+        new_version = await self.engine.sync_weights(
+            role=datatypes.Role.ACTOR,
+            source_staged=staged,
+        )
+      except Exception as exc:
+        await self.scored_q.abort(exc)
+        raise
+      self.policy_version = (
+          new_version if new_version is not None else self.policy_version + 1
+      )
+      self.dispatch_window.release()
+
     try:
       while self.max_steps is None or self._step < self.max_steps:
         current_step = self._step
@@ -1351,6 +1389,7 @@ class StandardRLProgram(RLProgram):
 
         async def _maybe_save_checkpoint() -> None:
           nonlocal checkpoint_saved
+          await _await_pending_sync()
           optimizer_step = self.step + 1
           if (
               isinstance(step_result, dict)
@@ -1527,15 +1566,34 @@ class StandardRLProgram(RLProgram):
           # `sync_weights` reports per-phase times; draining in-flight rollouts
           # can dominate this.
           sync_start = time.monotonic()
-          new_version = await self.engine.sync_weights(
-              role=datatypes.Role.ACTOR
-          )
-          step_times.weight_sync_time += time.monotonic() - sync_start
-          self.policy_version = (
-              new_version
-              if new_version is not None
-              else self.policy_version + 1
-          )
+          if self.async_weight_sync:
+            await _await_pending_sync()
+            consumed_policy_version = self.policy_version
+            staged = asyncio.Event()
+            pending_sync = asyncio.create_task(_sync_in_background(staged))
+            staged_wait = asyncio.create_task(staged.wait())
+            try:
+              await asyncio.wait(
+                  {staged_wait, pending_sync},
+                  return_when=asyncio.FIRST_COMPLETED,
+              )
+            finally:
+              staged_wait.cancel()
+              with contextlib.suppress(asyncio.CancelledError):
+                await staged_wait
+            if not staged.is_set():
+              await _await_pending_sync()
+            step_times.weight_sync_time += time.monotonic() - sync_start
+          else:
+            new_version = await self.engine.sync_weights(
+                role=datatypes.Role.ACTOR
+            )
+            step_times.weight_sync_time += time.monotonic() - sync_start
+            self.policy_version = (
+                new_version
+                if new_version is not None
+                else self.policy_version + 1
+            )
 
         # Before `commit()`, which will eventually take ownership of the groups.
         generation_metrics = _generation_metrics(uncommitted_groups)
@@ -1593,9 +1651,14 @@ class StandardRLProgram(RLProgram):
             consumed_policy_version=consumed_policy_version,
         )
 
+        step_policy_version = (
+            consumed_policy_version + 1
+            if (self.sync_weights and self.async_weight_sync)
+            else self.policy_version
+        )
         self.last_step_result = RLStepResult(
             step=current_step,
-            policy_version=self.policy_version,
+            policy_version=step_policy_version,
             num_rollouts=num_rollouts,
             num_microbatches=num_microbatches,
             reward_mean=metrics_summary["reward_mean"],
@@ -1626,11 +1689,16 @@ class StandardRLProgram(RLProgram):
         # waking, and waking it on the old value would park it again with no one
         # left to set the event.
         self.dispatch_window.release()
+      await _await_pending_sync()
     finally:
       if pending_train is not None:
         pending_train.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
           await _await_pending_train()
+      if pending_sync is not None:
+        pending_sync.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+          await _await_pending_sync()
 
   async def run_async(
       self,
@@ -1658,11 +1726,19 @@ class StandardRLProgram(RLProgram):
     )
 
     if self.sync_weights:
-      await engine.prepare_rollout_policy(
-          role=datatypes.Role.ACTOR,
-          sync_weights=True,
-          policy_version=self.policy_version,
-      )
+      if self.async_weight_sync:
+        await engine.prepare_rollout_policy(
+            role=datatypes.Role.ACTOR,
+            sync_weights=True,
+            policy_version=self.policy_version,
+            source_staged=asyncio.Event(),
+        )
+      else:
+        await engine.prepare_rollout_policy(
+            role=datatypes.Role.ACTOR,
+            sync_weights=True,
+            policy_version=self.policy_version,
+        )
 
     train_task = asyncio.create_task(self.train_stage())
     tasks = [
