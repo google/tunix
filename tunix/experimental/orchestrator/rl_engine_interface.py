@@ -145,6 +145,20 @@ class AbstractRLEngine(Protocol):
     """Retrieves step metrics from the worker for the specified role."""
     ...
 
+  async def get_step_timing(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+  ) -> tuple[dict[str, Any] | None, float]:
+    """Retrieves the trainer-side timeline of the last optimizer step and RTT."""
+    return None, 0.0
+
+  async def wait_for_actor_upload_idle(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+  ) -> bool:
+    """Waits until any tracked request-stream upload to `role`'s worker finishes."""
+    return False
+
   def configure_worker(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,

@@ -39,6 +39,7 @@ import collections
 import concurrent.futures
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import inspect
 import json
@@ -108,6 +109,10 @@ _ASYNC_OFFLOAD_THRESHOLD_BYTES = 512 * 1024
 _SERDE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=8, thread_name_prefix="tunix-rpc-serde"
 )
+_WIRE_ENCODE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=8, thread_name_prefix="tunix-wire-encode"
+)
+_WIRE_ENCODE_PIPELINE_DEPTH = 8
 
 
 def _grpc_options(
@@ -172,6 +177,292 @@ def _flush_pending_views(pending_views: List[memoryview]) -> bytes:
   return data
 
 
+# L3-cache 256 KiB block wire codec for int16 router-replay buffers
+# (`routed_experts`, where active tokens are in 0..511 and padding is -1).
+# Operates per streaming chunk and decodes directly in-place into
+# `_ChunkReassembler`'s target NumPy buffer without allocating a second
+# multi-gigabyte array.
+_TRB_MAGIC = b"\x89TRB\r\n\x1a\n\x00\x01"
+_TRB_BLOCK_BYTES = 256 * 1024
+_TRB_MASK_HI7 = np.uint64(0xFE00FE00FE00FE00)
+_TRB_ALL_FF = np.uint64(0xFFFFFFFFFFFFFFFF)
+_TRB_LUT64 = (
+    np.ascontiguousarray(
+        (
+            (
+                np.arange(256, dtype=np.uint8)[:, None]
+                >> np.arange(7, -1, -1, dtype=np.uint8)
+            )
+            & 1
+        ).astype(np.uint8)
+    )
+    .view(np.uint64)
+    .reshape(256)
+)
+_TRB_LUT64_FF = (_TRB_LUT64 * np.uint64(0xFF)).astype(np.uint64)
+
+
+def _encode_wire_chunk(raw_mv: memoryview) -> bytes:
+  """Bit-packs 256 KiB blocks of 9-bit int16s (0..511) and -1 padding (0xFFFF)."""
+  n = len(raw_mv)
+  if (
+      n < _TRB_BLOCK_BYTES
+      or (n % _TRB_BLOCK_BYTES) != 0
+      or n > 64 * _TRB_BLOCK_BYTES
+  ):
+    return raw_mv.tobytes()
+  if ((raw_mv[1] + 1) & 0xFF) > 2 and ((raw_mv[-1] + 1) & 0xFF) > 2:
+    return raw_mv.tobytes()
+  n_blocks = n // _TRB_BLOCK_BYTES
+  u64 = np.frombuffer(raw_mv, dtype=np.uint64).reshape(n_blocks, 32768)
+  is_ff = np.all(u64 == _TRB_ALL_FF, axis=1)
+  if bool(np.all(is_ff)):
+    modes = np.ones(n_blocks, dtype=np.uint8)
+    return _TRB_MAGIC + bytes([n_blocks]) + modes.tobytes()
+  or_u64 = np.bitwise_or.reduce(u64, axis=1)
+  is_9bit = (or_u64 & _TRB_MASK_HI7) == 0
+  u8 = np.frombuffer(raw_mv, dtype=np.uint8).reshape(n_blocks, 131072, 2)
+  is_mix = np.zeros(n_blocks, dtype=bool)
+  rem_idx = np.flatnonzero(~(is_ff | is_9bit))
+  if len(rem_idx) > 0:
+    hi_rem = u8[rem_idx, :, 1]
+    is_mix[rem_idx] = np.all(np.uint8(hi_rem + 1) <= 2, axis=1)
+  n_ff = int(np.sum(is_ff))
+  n_9bit = int(np.sum(is_9bit))
+  n_mix = int(np.sum(is_mix))
+  saved_bytes = (
+      n_ff * _TRB_BLOCK_BYTES
+      + n_9bit * (_TRB_BLOCK_BYTES - 147456)
+      + n_mix * (_TRB_BLOCK_BYTES - 163840)
+  )
+  if saved_bytes < 65536:
+    return raw_mv.tobytes()
+  modes = np.zeros(n_blocks, dtype=np.uint8)
+  modes[is_ff] = 1
+  modes[is_9bit] = 2
+  modes[is_mix] = 3
+  parts = [_TRB_MAGIC, bytes([n_blocks]), modes.tobytes()]
+  if n_9bit > 0:
+    idx_9 = np.flatnonzero(is_9bit)
+    if int(idx_9[-1] - idx_9[0] + 1) == n_9bit:
+      s9, e9 = int(idx_9[0]), int(idx_9[-1]) + 1
+      active_u8 = u8[s9:e9]
+    else:
+      active_u8 = u8[is_9bit]
+    parts.append(np.ascontiguousarray(active_u8[:, :, 0]).tobytes())
+    parts.append(
+        np.packbits(np.ascontiguousarray(active_u8[:, :, 1])).tobytes()
+    )
+  if n_mix > 0:
+    mix_u8 = u8[is_mix]
+    parts.append(np.ascontiguousarray(mix_u8[:, :, 0]).tobytes())
+    hi_mix = mix_u8[:, :, 1]
+    parts.append(np.packbits(np.ascontiguousarray(hi_mix & 1)).tobytes())
+    parts.append(np.packbits(np.ascontiguousarray(hi_mix >> 7)).tobytes())
+  n_raw = n_blocks - n_ff - n_9bit - n_mix
+  if n_raw > 0:
+    is_raw = modes == 0
+    raw_u8 = u8.reshape(n_blocks, _TRB_BLOCK_BYTES)[is_raw]
+    parts.append(np.ascontiguousarray(raw_u8).tobytes())
+  return b"".join(parts)
+
+
+def _try_decode_wire_chunk_into(
+    chunk: bytes,
+    target_buf: np.ndarray,
+    target_offset: int,
+    remaining: int,
+) -> int:
+  """Decodes a `_TRB_MAGIC` block-encoded chunk in-place into `target_buf`."""
+  chunk_len = len(chunk)
+  if chunk_len < 12 or chunk[:10] != _TRB_MAGIC:
+    return 0
+  n_blocks = chunk[10]
+  decoded_bytes = n_blocks * _TRB_BLOCK_BYTES
+  if (
+      n_blocks < 1
+      or n_blocks > 64
+      or remaining < decoded_bytes
+      or chunk_len < 11 + n_blocks
+  ):
+    return 0
+  modes = np.frombuffer(chunk, dtype=np.uint8, count=n_blocks, offset=11)
+  if bool(np.any(modes > 3)):
+    return 0
+  idx_ff = np.flatnonzero(modes == 1)
+  n_ff = len(idx_ff)
+  idx_9bit = np.flatnonzero(modes == 2)
+  n_9bit = len(idx_9bit)
+  idx_mix = np.flatnonzero(modes == 3)
+  n_mix = len(idx_mix)
+  n_raw = n_blocks - n_ff - n_9bit - n_mix
+  expected_len = (
+      11
+      + n_blocks
+      + n_9bit * 147456
+      + n_mix * 163840
+      + n_raw * _TRB_BLOCK_BYTES
+  )
+  if chunk_len != expected_len:
+    return 0
+  pos = 11 + n_blocks
+  out_all = target_buf[target_offset : target_offset + decoded_bytes].reshape(
+      n_blocks, _TRB_BLOCK_BYTES
+  )
+  if n_ff > 0:
+    if int(idx_ff[-1] - idx_ff[0] + 1) == n_ff:
+      out_all[int(idx_ff[0]) : int(idx_ff[-1]) + 1, :] = 0xFF
+    else:
+      for b in idx_ff:
+        out_all[int(b), :] = 0xFF
+  if n_9bit > 0:
+    n_lo = n_9bit * 131072
+    n_hi = n_9bit * 16384
+    if int(idx_9bit[-1] - idx_9bit[0] + 1) == n_9bit:
+      s9, e9 = int(idx_9bit[0]), int(idx_9bit[-1]) + 1
+      out_2d = out_all[s9:e9].reshape(n_lo, 2)
+      out_2d[:, 0] = np.frombuffer(
+          chunk, dtype=np.uint8, count=n_lo, offset=pos
+      )
+      pos += n_lo
+      p_hi = np.frombuffer(chunk, dtype=np.uint8, count=n_hi, offset=pos)
+      pos += n_hi
+      out_2d[:, 1] = _TRB_LUT64[p_hi].view(np.uint8)
+    else:
+      lo_all = np.frombuffer(
+          chunk, dtype=np.uint8, count=n_lo, offset=pos
+      ).reshape(n_9bit, 131072)
+      pos += n_lo
+      p_hi = np.frombuffer(chunk, dtype=np.uint8, count=n_hi, offset=pos)
+      pos += n_hi
+      hi_all = _TRB_LUT64[p_hi].view(np.uint8).reshape(n_9bit, 131072)
+      for i, b in enumerate(idx_9bit):
+        out_2d = out_all[int(b)].reshape(131072, 2)
+        out_2d[:, 0] = lo_all[i]
+        out_2d[:, 1] = hi_all[i]
+  if n_mix > 0:
+    n_mlo = n_mix * 131072
+    n_mhi = n_mix * 16384
+    mlo_all = np.frombuffer(
+        chunk, dtype=np.uint8, count=n_mlo, offset=pos
+    ).reshape(n_mix, 131072)
+    pos += n_mlo
+    p_b0 = np.frombuffer(chunk, dtype=np.uint8, count=n_mhi, offset=pos)
+    pos += n_mhi
+    p_b7 = np.frombuffer(chunk, dtype=np.uint8, count=n_mhi, offset=pos)
+    pos += n_mhi
+    mhi_all = (
+        (_TRB_LUT64[p_b0] | _TRB_LUT64_FF[p_b7])
+        .view(np.uint8)
+        .reshape(n_mix, 131072)
+    )
+    for i, b in enumerate(idx_mix):
+      out_2d = out_all[int(b)].reshape(131072, 2)
+      out_2d[:, 0] = mlo_all[i]
+      out_2d[:, 1] = mhi_all[i]
+  if n_raw > 0:
+    idx_raw = np.flatnonzero(modes == 0)
+    raw_all = np.frombuffer(
+        chunk, dtype=np.uint8, count=n_raw * _TRB_BLOCK_BYTES, offset=pos
+    ).reshape(n_raw, _TRB_BLOCK_BYTES)
+    for i, b in enumerate(idx_raw):
+      out_all[int(b), :] = raw_all[i]
+  return decoded_bytes
+
+
+@dataclasses.dataclass(frozen=True)
+class _PrepackedArgsKwargs:
+  """Pre-serialized and wire-encoded `(args, kwargs)` payload for `send_prepacked`."""
+
+  header_len: int
+  buffer_lengths: Tuple[int, ...]
+  encoded_chunks: Tuple[bytes, ...]
+
+  def __len__(self) -> int:
+    return len(self.encoded_chunks)
+
+
+def _pack_args_kwargs(
+    args: Sequence[Any] = (),
+    kwargs: Optional[Dict[str, Any]] = None,
+    *,
+    chunk_size: int = _STREAM_CHUNK_BYTES,
+) -> _PrepackedArgsKwargs:
+  """Pre-pickles `(args, kwargs)` and wire-encodes all chunks in parallel."""
+  if chunk_size <= 0:
+    raise ValueError(f"chunk_size must be positive, got {chunk_size}.")
+  norm_kwargs = dict(kwargs or {})
+  if "request_id" in norm_kwargs:
+    raise ValueError(
+        "'request_id' is a reserved framework parameter for remote execution "
+        "and cannot be passed in method kwargs."
+    )
+  raw_buffers: List[pickle.PickleBuffer] = []
+  views: List[memoryview] = []  # pylint: disable=g-bare-generic
+  try:
+    header_bytes = cloudpickle.dumps(
+        (tuple(args or ()), norm_kwargs),
+        protocol=5,
+        buffer_callback=raw_buffers.append,
+    )
+    views.append(memoryview(header_bytes))
+    for pb in raw_buffers:
+      try:
+        views.append(pb.raw())
+      except BufferError:
+        with memoryview(pb) as view:
+          views.append(memoryview(view.tobytes()))
+    header_len = len(views[0])
+    buffer_lengths = tuple(len(v) for v in views[1:])
+    coalesce_limit = min(chunk_size, _COALESCE_THRESHOLD_BYTES)
+    pending_views: List[memoryview] = []
+    pending_bytes = 0
+    work_items: List[Union[bytes, memoryview]] = []
+    for mv in views:
+      mv_len = len(mv)
+      if mv_len == 0:
+        continue
+      if mv_len >= coalesce_limit:
+        if pending_views:
+          work_items.append(_flush_pending_views(pending_views))
+          pending_bytes = 0
+        if mv_len <= chunk_size:
+          work_items.append(mv)
+        else:
+          for offset in range(0, mv_len, chunk_size):
+            work_items.append(mv[offset : offset + chunk_size])
+      else:
+        if pending_bytes + mv_len > chunk_size and pending_views:
+          work_items.append(_flush_pending_views(pending_views))
+          pending_bytes = 0
+        pending_views.append(mv)
+        pending_bytes += mv_len
+    if pending_views:
+      work_items.append(_flush_pending_views(pending_views))
+
+    def _encode_item(item: Union[bytes, memoryview]) -> bytes:
+      if isinstance(item, bytes):
+        return item
+      return _encode_wire_chunk(item)
+
+    if len(work_items) > 1:
+      encoded_chunks = tuple(
+          _WIRE_ENCODE_EXECUTOR.map(_encode_item, work_items)
+      )
+    else:
+      encoded_chunks = tuple(_encode_item(it) for it in work_items)
+    return _PrepackedArgsKwargs(
+        header_len=header_len,
+        buffer_lengths=buffer_lengths,
+        encoded_chunks=encoded_chunks,
+    )
+  finally:
+    for mv in views:
+      mv.release()
+    for pb in raw_buffers:
+      pb.release()
+
+
 def _iter_serialized_chunks(
     obj: Any,
     chunk_size: int = _STREAM_CHUNK_BYTES,
@@ -217,34 +508,70 @@ def _iter_serialized_chunks(
       pb.release()
     raise
 
+  def _iter_raw_items() -> Iterator[Union[bytes, memoryview]]:
+    coalesce_limit = min(chunk_size, _COALESCE_THRESHOLD_BYTES)
+    pending_views: List[memoryview] = []
+    pending_bytes = 0
+    for mv in views:
+      mv_len = len(mv)
+      if mv_len == 0:
+        continue
+      if mv_len >= coalesce_limit:
+        if pending_views:
+          yield _flush_pending_views(pending_views)
+          pending_bytes = 0
+        if mv_len <= chunk_size:
+          yield mv
+        else:
+          for offset in range(0, mv_len, chunk_size):
+            yield mv[offset : offset + chunk_size]
+      else:
+        if pending_bytes + mv_len > chunk_size and pending_views:
+          yield _flush_pending_views(pending_views)
+          pending_bytes = 0
+        pending_views.append(mv)
+        pending_bytes += mv_len
+    if pending_views:
+      yield _flush_pending_views(pending_views)
+
   def _gen() -> Iterator[bytes]:
+    in_flight: collections.deque[
+        Union[bytes, concurrent.futures.Future[bytes]]
+    ] = collections.deque()
+    raw_it = _iter_raw_items()
+
+    def _fill_window() -> None:
+      while len(in_flight) < _WIRE_ENCODE_PIPELINE_DEPTH:
+        item = next(raw_it, None)
+        if item is None:
+          break
+        if isinstance(item, bytes):
+          in_flight.append(item)
+        elif len(item) >= _TRB_BLOCK_BYTES:
+          in_flight.append(
+              _WIRE_ENCODE_EXECUTOR.submit(_encode_wire_chunk, item)
+          )
+        else:
+          in_flight.append(item.tobytes())
+
     try:
       yield manifest
-      coalesce_limit = min(chunk_size, _COALESCE_THRESHOLD_BYTES)
-      pending_views: List[memoryview] = []
-      pending_bytes = 0
-      for mv in views:
-        mv_len = len(mv)
-        if mv_len == 0:
-          continue
-        if mv_len >= coalesce_limit:
-          if pending_views:
-            yield _flush_pending_views(pending_views)
-            pending_bytes = 0
-          if mv_len <= chunk_size:
-            yield mv.tobytes()
-          else:
-            for offset in range(0, mv_len, chunk_size):
-              yield mv[offset : offset + chunk_size].tobytes()
+      _fill_window()
+      while in_flight:
+        head = in_flight.popleft()
+        _fill_window()
+        if isinstance(head, bytes):
+          yield head
         else:
-          if pending_bytes + mv_len > chunk_size and pending_views:
-            yield _flush_pending_views(pending_views)
-            pending_bytes = 0
-          pending_views.append(mv)
-          pending_bytes += mv_len
-      if pending_views:
-        yield _flush_pending_views(pending_views)
+          yield head.result()
     finally:
+      for entry in in_flight:
+        if not isinstance(entry, bytes):
+          entry.cancel()
+      for entry in in_flight:
+        if not isinstance(entry, bytes):
+          with contextlib.suppress(Exception):
+            entry.result()
       for mv in views:
         mv.release()
       for pb in raw_buffers:
@@ -295,9 +622,18 @@ class _ChunkReassembler:
 
   def __init__(self, manifest_bytes: bytes):
     try:
-      header_len, buffer_lengths = cloudpickle.loads(  # pylint: disable=g-unsafe-pickle-load
+      unpacked_manifest = cloudpickle.loads(  # pylint: disable=g-unsafe-pickle-load
           manifest_bytes
       )
+      if isinstance(unpacked_manifest, tuple) and len(unpacked_manifest) == 4:
+        header_len, buffer_lengths, req_id, method_name = unpacked_manifest
+        self._envelope: Optional[Tuple[Optional[str], Optional[str]]] = (
+            req_id,
+            method_name,
+        )
+      else:
+        header_len, buffer_lengths = unpacked_manifest
+        self._envelope = None
     except Exception as exc:
       raise ValueError("Invalid chunk stream manifest.") from exc
 
@@ -346,11 +682,23 @@ class _ChunkReassembler:
         )
       target_len = self._target_lengths[self._target_idx]
       remaining = target_len - self._target_offset
-      take = min(chunk_len - chunk_pos, remaining)
       target_buf = self._targets[self._target_idx]
       if target_buf is None:
         target_buf = np.empty(target_len, dtype=np.uint8)
         self._targets[self._target_idx] = target_buf
+      if chunk_pos == 0:
+        decoded = _try_decode_wire_chunk_into(
+            chunk, target_buf, self._target_offset, remaining
+        )
+        if decoded > 0:
+          self._target_offset += decoded
+          chunk_pos = chunk_len
+          if self._target_offset == target_len:
+            self._target_idx += 1
+            self._target_offset = 0
+            self._advance_empty_targets()
+          continue
+      take = min(chunk_len - chunk_pos, remaining)
       # NumPy slice assignment releases the GIL (NPY_BEGIN_ALLOW_THREADS).
       target_buf[self._target_offset : self._target_offset + take] = (
           np.frombuffer(chunk, dtype=np.uint8, count=take, offset=chunk_pos)
@@ -372,9 +720,14 @@ class _ChunkReassembler:
     for buf in self._targets:
       assert buf is not None
       completed_buffers.append(buf)
-    return cloudpickle.loads(  # pylint: disable=g-unsafe-pickle-load
+    obj = cloudpickle.loads(  # pylint: disable=g-unsafe-pickle-load
         completed_buffers[0], buffers=completed_buffers[1:]
     )
+    if self._envelope is not None:
+      req_id, method_name = self._envelope
+      args, kwargs = obj
+      return (req_id, method_name, args, kwargs)
+    return obj
 
 
 def _deserialize_from_chunks(chunks: Iterable[bytes]) -> Any:
@@ -777,6 +1130,50 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     self._serve_loop: Optional[Any] = None
     self._stream_chunk_bytes = stream_chunk_bytes
     self._max_message_bytes = max_message_bytes
+    self._sync_exec_pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="tunix-grpc-exec"
+    )
+    self._sync_exec_lock: Optional[asyncio.Lock] = None
+    self._sync_exec_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+
+  def _get_sync_exec_lock(self) -> asyncio.Lock:
+    loop = _running_loop()
+    if self._sync_exec_lock is None or (
+        loop is not None and self._sync_exec_lock_loop is not loop
+    ):
+      self._sync_exec_lock = asyncio.Lock()
+      self._sync_exec_lock_loop = loop
+    return self._sync_exec_lock
+
+  async def execute_request(
+      self, request: ExecutionRequest
+  ) -> ExecutionResponse:
+    """Executes method on bound instance without blocking the gRPC event loop."""
+    if self._instance is None:
+      return await super().execute_request(request)
+    target_name = request.method_name or "__call__"
+    method = getattr(self._instance, target_name, None)
+    if (
+        method is None
+        or not callable(method)
+        or inspect.iscoroutinefunction(method)
+    ):
+      return await super().execute_request(request)
+    try:
+      loop = asyncio.get_running_loop()
+      async with self._get_sync_exec_lock():
+        result = await loop.run_in_executor(
+            self._sync_exec_pool,
+            functools.partial(method, *request.args, **request.kwargs),
+        )
+      return ExecutionResponse(result=result, request_id=request.request_id)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      return ExecutionResponse(
+          error_message=str(e),
+          error_type=type(e).__name__,
+          traceback=traceback_lib.format_exc(),
+          request_id=request.request_id,
+      )
 
   async def _handle_execute(
       self, request_iterator: AsyncIterator[bytes], context: Any
@@ -955,6 +1352,10 @@ class ActorHandle(abc.ABC):
     """Long-polls remote server response queue for completed result."""
     pass
 
+  async def wait_for_upload_idle(self) -> bool:
+    """Waits until any tracked request-stream upload finishes; False if untracked."""
+    return False
+
 
 class RemoteActorHandle(ActorHandle):
   """ActorHandle targeting a remote network worker address over gRPC/Stubby."""
@@ -1030,6 +1431,33 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self._sync_channel: Optional[Any] = None
     self._sync_rpc: Optional[Any] = None
     self._sync_lock = threading.Lock()
+    self._upload_lock: Optional[asyncio.Lock] = None
+    self._upload_idle_event: Optional[asyncio.Event] = None
+    self._upload_sync_loop: Optional[asyncio.AbstractEventLoop] = None
+    self._active_uploads: int = 0
+
+  def _get_upload_sync(
+      self,
+  ) -> Tuple[Optional[asyncio.Lock], Optional[asyncio.Event]]:
+    loop = _running_loop()
+    if loop is None:
+      return None, None
+    if self._upload_lock is None or self._upload_sync_loop is not loop:
+      self._upload_lock = asyncio.Lock()
+      self._upload_idle_event = asyncio.Event()
+      if self._active_uploads <= 0:
+        self._upload_idle_event.set()
+      self._upload_sync_loop = loop
+    return self._upload_lock, self._upload_idle_event
+
+  async def wait_for_upload_idle(self) -> bool:
+    """Waits until any in-flight request-stream upload on this handle has finished."""
+    await asyncio.sleep(0)
+    _, upload_idle = self._get_upload_sync()
+    while self._active_uploads > 0 and upload_idle is not None:
+      await upload_idle.wait()
+      _, upload_idle = self._get_upload_sync()
+    return True
 
   def _make_rpc(self, channel: Any) -> Any:
     return channel.stream_stream(
@@ -1088,49 +1516,178 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       args: Sequence[Any],
       kwargs: Dict[str, Any],
       max_retries: int = 3,
+      *,
+      track_upload: bool = False,
   ) -> Any:
     """Streams an ExecutionRequest over `rpc` and unwraps the ExecutionResponse."""
-    for attempt in range(max_retries + 1):
-      try:
-        request = ExecutionRequest(
-            method_name=method_name, args=args, kwargs=kwargs
-        )
-        chunks = request.serialize_async_chunks(chunk_size=self._stream_chunk_bytes)
-        call = rpc(chunks, timeout=self._rpc_timeout_s)
-        response = await ExecutionResponse.deserialize_async_chunks(call)
-        assert response is not None
-        return response.unwrap()
-      except _grpc_aio_lib.AioRpcError as err:
-        if err.code() == _grpc_lib.StatusCode.UNAVAILABLE and attempt < max_retries:
-          backoff = 0.5 * (2 ** attempt)
-          logging.warning(
-              "RPC %s to %s failed with %s; refreshing channel and retrying in"
-              " %.2fs (attempt %d/%d)...",
-              method_name,
-              self._host_port,
-              err.details(),
-              backoff,
-              attempt + 1,
-              max_retries,
+    upload_lock, upload_idle = (
+        self._get_upload_sync() if track_upload else (None, None)
+    )
+    upload_released = not track_upload
+    lock_acquired = False
+
+    def _release_upload() -> None:
+      nonlocal upload_released, lock_acquired
+      if not upload_released:
+        self._active_uploads = max(0, self._active_uploads - 1)
+        if self._active_uploads == 0 and upload_idle is not None:
+          upload_idle.set()
+        upload_released = True
+      if lock_acquired and upload_lock is not None:
+        upload_lock.release()
+        lock_acquired = False
+
+    try:
+      for attempt in range(max_retries + 1):
+        try:
+          request = ExecutionRequest(
+              method_name=method_name, args=args, kwargs=kwargs
           )
-          await asyncio.sleep(backoff)
-          if rpc is self._sync_rpc:
-            old_sync = self._sync_channel
-            self._sync_channel = _grpc_aio_lib.insecure_channel(
-                self._host_port, options=_grpc_options(self._max_message_bytes)
-            )
-            self._sync_rpc = self._make_rpc(self._sync_channel)
-            rpc = self._sync_rpc
-            if old_sync is not None:
+          chunks = request.serialize_async_chunks(
+              chunk_size=self._stream_chunk_bytes
+          )
+          if track_upload and upload_lock is not None:
+            if upload_released:
+              self._active_uploads += 1
+              if upload_idle is not None:
+                upload_idle.clear()
+              upload_released = False
+            await upload_lock.acquire()
+            lock_acquired = True
+
+            async def _tracked_chunks(
+                inner: AsyncIterator[bytes],
+            ) -> AsyncIterator[bytes]:
               try:
-                await asyncio.wait_for(old_sync.close(), timeout=1.0)
-              except Exception:  # pylint: disable=broad-exception-caught
-                pass
+                async for chunk in inner:
+                  yield chunk
+              finally:
+                if hasattr(inner, "aclose"):
+                  with contextlib.suppress(Exception):
+                    await inner.aclose()
+                _release_upload()
+
+            stream_it: AsyncIterator[bytes] = _tracked_chunks(chunks)
           else:
+            stream_it = chunks
+          call = rpc(stream_it, timeout=self._rpc_timeout_s)
+          response = await ExecutionResponse.deserialize_async_chunks(call)
+          assert response is not None
+          return response.unwrap()
+        except _grpc_aio_lib.AioRpcError as err:
+          _release_upload()
+          if (
+              err.code() == _grpc_lib.StatusCode.UNAVAILABLE
+              and attempt < max_retries
+          ):
+            backoff = 0.5 * (2**attempt)
+            logging.warning(
+                "RPC %s to %s failed with %s; refreshing channel and retrying"
+                " in %.2fs (attempt %d/%d)...",
+                method_name,
+                self._host_port,
+                err.details(),
+                backoff,
+                attempt + 1,
+                max_retries,
+            )
+            await asyncio.sleep(backoff)
+            if rpc is self._sync_rpc:
+              old_sync = self._sync_channel
+              self._sync_channel = _grpc_aio_lib.insecure_channel(
+                  self._host_port,
+                  options=_grpc_options(self._max_message_bytes),
+              )
+              self._sync_rpc = self._make_rpc(self._sync_channel)
+              rpc = self._sync_rpc
+              if old_sync is not None:
+                try:
+                  await asyncio.wait_for(old_sync.close(), timeout=1.0)
+                except Exception:  # pylint: disable=broad-exception-caught
+                  pass
+            else:
+              await self._ensure_async_channel(force=True)
+              rpc = self._rpc
+            continue
+          raise
+    finally:
+      _release_upload()
+
+  async def send_prepacked(
+      self,
+      method_name: Optional[str],
+      packed: _PrepackedArgsKwargs,
+      *,
+      request_id: Optional[str] = None,
+      max_retries: int = 3,
+  ) -> Any:
+    """Streams a `_PrepackedArgsKwargs` payload over gRPC and unwraps response."""
+    upload_lock, upload_idle = self._get_upload_sync()
+    self._active_uploads += 1
+    if upload_idle is not None:
+      upload_idle.clear()
+    upload_released = False
+    lock_acquired = False
+
+    def _release_upload() -> None:
+      nonlocal upload_released, lock_acquired
+      if not upload_released:
+        self._active_uploads = max(0, self._active_uploads - 1)
+        if self._active_uploads == 0 and upload_idle is not None:
+          upload_idle.set()
+        upload_released = True
+      if lock_acquired and upload_lock is not None:
+        upload_lock.release()
+        lock_acquired = False
+
+    try:
+      await self._ensure_async_channel()
+      upload_lock, upload_idle = self._get_upload_sync()
+      target_method = method_name or "__call__"
+      manifest = cloudpickle.dumps((
+          packed.header_len,
+          packed.buffer_lengths,
+          request_id,
+          target_method,
+      ))
+      for attempt in range(max_retries + 1):
+        try:
+          if upload_released:
+            self._active_uploads += 1
+            if upload_idle is not None:
+              upload_idle.clear()
+            upload_released = False
+          if upload_lock is not None:
+            await upload_lock.acquire()
+            lock_acquired = True
+
+          async def _prepacked_stream() -> AsyncIterator[bytes]:
+            try:
+              yield manifest
+              for chunk in packed.encoded_chunks:
+                yield chunk
+            finally:
+              _release_upload()
+
+          call = self._rpc(
+              _prepacked_stream(),
+              timeout=self._rpc_timeout_s,
+          )
+          response = await ExecutionResponse.deserialize_async_chunks(call)
+          assert response is not None
+          return response.unwrap()
+        except _grpc_aio_lib.AioRpcError as err:
+          _release_upload()
+          if (
+              err.code() == _grpc_lib.StatusCode.UNAVAILABLE
+              and attempt < max_retries
+          ):
+            await asyncio.sleep(0.5 * (2**attempt))
             await self._ensure_async_channel(force=True)
-            rpc = self._rpc
-          continue
-        raise
+            continue
+          raise
+    finally:
+      _release_upload()
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
     """Blocking gRPC invocation; safe to call repeatedly.
@@ -1181,8 +1738,20 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       self, method_name: Optional[str] = None, *args, **kwargs
   ) -> Any:
     """Asynchronously invokes remote method over gRPC."""
-    await self._ensure_async_channel()
-    return await self._execute_rpc(self._rpc, method_name, args, kwargs)
+    _, upload_idle = self._get_upload_sync()
+    self._active_uploads += 1
+    if upload_idle is not None:
+      upload_idle.clear()
+    try:
+      await self._ensure_async_channel()
+    except Exception:
+      self._active_uploads = max(0, self._active_uploads - 1)
+      if self._active_uploads == 0 and upload_idle is not None:
+        upload_idle.set()
+      raise
+    return await self._execute_rpc(
+        self._rpc, method_name, args, kwargs, track_upload=True
+    )
 
   async def dispatch_task(
       self,
@@ -1465,7 +2034,9 @@ class RoutingActorPool(ActorPool):
       ):
         return getattr(self.router, method_name)(self._actors, args, kwargs)
       elif callable(self.router):
-        return self.router(self._actors, method_name, args, kwargs)  # pyrefly: ignore[bad-return]
+        return self.router(
+            self._actors, method_name, args, kwargs
+        )  # pyrefly: ignore[bad-return]
       else:
         raise TypeError(
             f"Router object {type(self.router)} must provide a method matching "
@@ -1974,7 +2545,9 @@ class PoolExecutionSession:
         self._in_flight = max(0, self._in_flight - 1)
         cancelled_count += 1
         if result_factory is not None:
-          self._response_queue.put_nowait((result_factory(req_id, payload), None))
+          self._response_queue.put_nowait(
+              (result_factory(req_id, payload), None)
+          )
       else:
         kept.append(req_id)
     self._pending_queue = kept

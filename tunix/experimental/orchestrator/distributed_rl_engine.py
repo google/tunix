@@ -277,7 +277,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       already been evicted (the call is then a no-op).
     """
     removed = self._rollout_session.remove_actor(handle, exc=exc)
-    if removed and not self._rollout_workers and self._zero_worker_since is None:
+    if (
+        removed
+        and not self._rollout_workers
+        and self._zero_worker_since is None
+    ):
       self._zero_worker_since = time.monotonic()
     return removed
 
@@ -1100,6 +1104,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       method = "fwd_bwd"
       call_kwargs = {"request": request}
     async with self._actor_busy_guard(is_actor):
+      t_rpc = time.monotonic()
+      request_id = (
+          staged_request_id
+          if staged_request_id is not None
+          else call_kwargs["request"].request_id
+      )
       fwd_bwd_result = await self._invoke_worker(
           worker,
           method,
@@ -1113,6 +1123,18 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           # retried blindly.
           apply_optimizer=apply_optimizer,
           **kwargs,
+      )
+      # The RPC returns when the worker has dispatched the step, not when the
+      # device finished it; TRAINER_STEP_TIMING carries the device-side
+      # instants. With apply_optimizer the worker also ran (and, with a
+      # readiness token, waited for) the optimizer update inside this RPC.
+      logging.info(
+          "train_step fwd_bwd RPC returned on %s worker in %.3fs"
+          " (request_id=%s, apply_optimizer=%s)",
+          role_name,
+          time.monotonic() - t_rpc,
+          request_id,
+          apply_optimizer,
       )
       if is_actor:
         self._actor_weights_dirty = True
@@ -1152,7 +1174,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         # Set only by a worker that waited for the update to land on device.
         update_ready = bool(fwd_bwd_result.metadata.get("update_ready"))
       else:
+        t_rpc = time.monotonic()
         train_step = await self._invoke_worker(worker, "update")
+        logging.info(
+            "train_step update RPC returned on %s worker in %.3fs"
+            " (train_step=%s)",
+            role_name,
+            time.monotonic() - t_rpc,
+            train_step,
+        )
       return {
           "fwd_bwd": fwd_bwd_result,
           "updated": True,
@@ -1160,6 +1190,41 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           "accumulated": accumulate_gradients,
           "update_ready": update_ready,
       }
+
+  async def wait_for_actor_upload_idle(
+      self, role: datatypes.Role = datatypes.Role.ACTOR
+  ) -> bool:
+    """Waits until any in-flight request-stream upload to `role`'s worker has finished."""
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      return False
+    return await worker.wait_for_upload_idle()
+
+  async def get_step_timing(
+      self, role: datatypes.Role = datatypes.Role.ACTOR
+  ) -> tuple[dict[str, Any] | None, float]:
+    """Trainer-side timeline of the last optimizer step, plus the RPC's RTT.
+
+    Returns `(timing, rtt_s)`; `timing` is `TrainerWorker.get_step_timing()`'s
+    snapshot (instants as seconds before the worker handled the call), or None
+    when the worker predates it. Anchor an instant on the orchestrator clock as
+    `t_return - rtt_s / 2 - ago_s`.
+    """
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+    t0 = time.monotonic()
+    try:
+      timing = await self._invoke_worker(worker, "get_step_timing")
+    except (AttributeError, RuntimeError) as exc:
+      # Only a worker that predates `get_step_timing` is tolerated: in process
+      # that raises AttributeError, over RPC `RemoteExecutionError
+      # [AttributeError]`. Any other failure propagates.
+      if isinstance(exc, RuntimeError) and "AttributeError" not in str(exc):
+        raise
+      logging.warning("get_step_timing unavailable on %s worker: %s", role, exc)
+      return None, time.monotonic() - t0
+    return timing, time.monotonic() - t0
 
   async def get_metrics(
       self,
@@ -1525,9 +1590,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     try:
       raw_next_batch = metadata.get("next_batch_idx")
       restored_next_batch_idx = (
-          int(raw_next_batch)
-          if raw_next_batch is not None
-          else restored_step
+          int(raw_next_batch) if raw_next_batch is not None else restored_step
       )
     except (TypeError, ValueError):
       logging.warning(

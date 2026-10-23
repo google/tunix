@@ -664,7 +664,79 @@ def log_param_shapes(model: Any) -> None:
   logging.info("MaxText model has %d parameter arrays.", len(shapes))
 
 
-def _build_fp32_master_optimizer_cls(nnx_mod: Any | None = None) -> type[Any]:
+FP32_MASTER_STORAGES = ("f32", "residual16")
+
+
+def _residual16_split(master_f32: Any, param: Any) -> tuple[Any, Any, Any]:
+  """Splits a float32 master into what its bfloat16 weight does not already hold.
+
+  `param` is the master cast to bfloat16 (any rounding of the magnitude to one of its two bfloat16 neighbours).
+  Returns `(lo, up, bad)`: `lo` uint16, the low 16 bits of the master; `up` bool, True where the cast rounded the
+  magnitude up, so the master's high 16 bits are the weight's minus one; `bad` int32, the number of elements whose
+  weight is neither neighbour (NaN, or a cast that flushed a denormal), which `_residual16_join` cannot rebuild.
+  Every other float32 value is rebuilt bit for bit: high = weight bits - up, low = lo.
+  """
+  import jax  # pylint: disable=g-import-not-at-top
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+
+  bits = jax.lax.bitcast_convert_type(master_f32, jnp.uint32)
+  high = bits >> 16
+  weight_bits = jax.lax.bitcast_convert_type(param, jnp.uint16).astype(jnp.uint32)
+  lo = (bits & jnp.uint32(0xFFFF)).astype(jnp.uint16)
+  up = weight_bits != high
+  bad = jnp.sum((weight_bits - high > jnp.uint32(1)).astype(jnp.int32))
+  return lo, up, bad
+
+
+def _residual16_join(param: Any, lo: Any, up: Any) -> Any:
+  """Rebuilds the float32 master from its bfloat16 weight and `_residual16_split`'s `lo` and `up`."""
+  import jax  # pylint: disable=g-import-not-at-top
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+
+  weight_bits = jax.lax.bitcast_convert_type(param, jnp.uint16).astype(jnp.uint32)
+  high = weight_bits - up.astype(jnp.uint32)
+  return jax.lax.bitcast_convert_type((high << 16) | lo.astype(jnp.uint32), jnp.float32)
+
+
+def _pack_bits(bits: Any, axis: int) -> Any:
+  """Packs a bool array 8 to a uint8 along `axis` (padded to a multiple of 8); every other axis unchanged."""
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+
+  axis = axis % bits.ndim
+  n = bits.shape[axis]
+  groups = -(-n // 8)
+  b = bits.astype(jnp.uint8)
+  if groups * 8 != n:
+    pad = [(0, 0)] * b.ndim
+    pad[axis] = (0, groups * 8 - n)
+    b = jnp.pad(b, pad)
+  b = b.reshape(b.shape[:axis] + (groups, 8) + b.shape[axis + 1 :])
+  weights = (jnp.uint8(1) << jnp.arange(8, dtype=jnp.uint8)).reshape(
+      (1,) * (axis + 1) + (8,) + (1,) * (b.ndim - axis - 2)
+  )
+  # The 8 terms of a sum carry distinct bits, so the uint8 sum is their OR and never overflows.
+  return jnp.sum(b * weights, axis=axis + 1, dtype=jnp.uint8)
+
+
+def _unpack_bits(packed: Any, axis: int, n: int) -> Any:
+  """Inverse of `_pack_bits`: the first `n` bools along `axis`."""
+  import jax  # pylint: disable=g-import-not-at-top
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+
+  axis = axis % packed.ndim
+  shifts = jnp.arange(8, dtype=jnp.uint8).reshape(
+      (1,) * (axis + 1) + (8,) + (1,) * (packed.ndim - axis - 1)
+  )
+  b = (jnp.expand_dims(packed, axis + 1) >> shifts) & jnp.uint8(1)
+  b = b.reshape(packed.shape[:axis] + (packed.shape[axis] * 8,) + packed.shape[axis + 1 :])
+  return jax.lax.slice_in_dim(b, 0, n, axis=axis).astype(jnp.bool_)
+
+
+def _build_fp32_master_optimizer_cls(
+    nnx_mod: Any | None = None,
+    master_storage: str = "f32",
+    scan_axis: int | None = None,
+) -> type[Any]:
   """Builds an `nnx.Optimizer` subclass that maintains FP32 master weights.
 
   When `weight_dtype=bfloat16`, standard `nnx.Optimizer` initializes Optax's
@@ -678,6 +750,18 @@ def _build_fp32_master_optimizer_cls(nnx_mod: Any | None = None) -> type[Any]:
   backward, and weight sync, while storing a `float32` master copy and `float32`
   Optax state in `self.opt_state`. Each `update()` step updates the `float32`
   master weights and casts them back to each model parameter's dtype.
+
+  `master_storage="residual16"` (MaxText `fp32_master_storage`) stores the master
+  of a scanned-layer weight (a `layers` entry in its path, stacked along
+  `scan_axis`) as the 16 bits its bfloat16 weight does not hold -- `lo`, uint16,
+  same shape -- plus one bit per element that says whether the cast rounded the
+  magnitude up, packed 8 to a byte along `scan_axis` (`master_up`). The update
+  rebuilds the float32 master from the weight and these, bit for bit, so the
+  arithmetic and every result are unchanged; only the bytes stored (2.13 instead
+  of 4 per element; with `optimizer_memory_host_offload`, the bytes copied to and
+  from host memory at every update) shrink. Other bfloat16 weights keep a
+  float32 master. `opt_state["residual16_violations"]` counts elements that
+  could not be rebuilt (NaN, or a cast that flushed a denormal); it must stay 0.
   """
   from flax.nnx.training import optimizer as nnx_opt  # pylint: disable=g-import-not-at-top
   import jax  # pylint: disable=g-import-not-at-top
@@ -686,11 +770,32 @@ def _build_fp32_master_optimizer_cls(nnx_mod: Any | None = None) -> type[Any]:
 
   if nnx_mod is None:
     from flax import nnx as nnx_mod  # pylint: disable=g-import-not-at-top
+  if master_storage not in FP32_MASTER_STORAGES:
+    raise ValueError(
+        f"master_storage must be one of {FP32_MASTER_STORAGES}, got {master_storage!r}"
+    )
+  residual16 = master_storage == "residual16"
+  if residual16 and scan_axis is None:
+    raise ValueError("master_storage='residual16' needs the scanned layers' axis (MaxText param_scan_axis).")
 
   opt_state_var_cls = getattr(
       nnx_opt, "OptState", getattr(nnx_mod, "Variable", None)
   )
   to_opt_state_fn = getattr(nnx_opt, "to_opt_state", lambda x: x)
+
+  def _is_scanned_layer_path(path: Any) -> bool:
+    names = [getattr(k, "key", getattr(k, "name", None)) for k in path]
+    return "layers" in names
+
+  def _packs(path: Any, x: Any) -> bool:
+    """Whether `x`'s master is stored as residual16: a bfloat16 scanned-layer weight with a stack axis."""
+    return (
+        residual16
+        and x.dtype == jnp.bfloat16
+        and _is_scanned_layer_path(path)
+        and x.ndim > scan_axis
+        and x.shape[scan_axis] > 1
+    )
 
   class Fp32MasterOptimizer(nnx_mod.Optimizer):
     """NNX Optimizer that keeps FP32 master weights and FP32 Optax state."""
@@ -721,12 +826,43 @@ def _build_fp32_master_optimizer_cls(nnx_mod: Any | None = None) -> type[Any]:
           master_params,
       )
       inner_state = tx.init(full_f32_params)
+      if residual16:
+        # At init the master is the weight exactly (float32(bf16) is exact): lo 0, no rounding up. zeros_like and
+        # a slice of the unsharded stack axis keep the weight's sharding on the stored leaves.
+        def _lo_or_master(path, x, mp):
+          return jnp.zeros_like(x, dtype=jnp.uint16) if _packs(path, x) else mp
+
+        def _up(path, x):
+          if not _packs(path, x):
+            return None
+          return jax.lax.slice_in_dim(
+              jnp.zeros_like(x, dtype=jnp.uint8), 0, -(-x.shape[scan_axis] // 8), axis=scan_axis
+          )
+
+        master_params = jax.tree_util.tree_map_with_path(_lo_or_master, params_state, master_params)
+        master_up = jax.tree_util.tree_map_with_path(_up, params_state)
+        packed = [x for path, x in jax.tree_util.tree_leaves_with_path(params_state) if _packs(path, x)]
+        kept = [x for path, x in jax.tree_util.tree_leaves_with_path(params_state)
+                if x.dtype != jnp.float32 and not _packs(path, x)]
+        logging.info(
+            "[residual16] fp32_master_storage=residual16: %d bf16 scanned-layer weights store their fp32 master"
+            " as uint16 + 1 packed bit per element (%.3f -> %.3f GiB global); %d other bf16 weights keep an"
+            " fp32 master (%.3f GiB global).",
+            len(packed),
+            sum(4 * x.size for x in packed) / 2**30,
+            sum(2 * x.size + -(-x.shape[scan_axis] // 8) * x.size // x.shape[scan_axis] for x in packed) / 2**30,
+            len(kept),
+            sum(4 * x.size for x in kept) / 2**30,
+        )
       opt_state: dict[str, Any] = {
           "master_params": master_params,
           "inner": inner_state,
       }
       if isinstance(inner_state, dict) and "is_skipped" in inner_state:
         opt_state["is_skipped"] = inner_state["is_skipped"]
+      if residual16:
+        opt_state["master_up"] = master_up
+        opt_state["residual16_violations"] = jnp.zeros((), jnp.int32)
       self.opt_state = nnx_mod.data(to_opt_state_fn(opt_state))
 
     def update(self, model: Any, grads: Any, /, **kwargs: Any) -> Any:
@@ -737,11 +873,23 @@ def _build_fp32_master_optimizer_cls(nnx_mod: Any | None = None) -> type[Any]:
 
       master_params = opt_state_arrays["master_params"]
       inner_state = opt_state_arrays["inner"]
-      full_f32_params = jax.tree.map(
-          lambda p, mp: p if mp is None else mp,
-          param_arrays,
-          master_params,
-      )
+      if residual16:
+        master_up = opt_state_arrays["master_up"]
+
+        def _master(p, mp, mu):
+          if mp is None:  # a float32 weight is its own master
+            return p
+          if mu is None:  # a float32 master
+            return mp
+          return _residual16_join(p, mp, _unpack_bits(mu, scan_axis, p.shape[scan_axis]))
+
+        full_f32_params = jax.tree.map(_master, param_arrays, master_params, master_up)
+      else:
+        full_f32_params = jax.tree.map(
+            lambda p, mp: p if mp is None else mp,
+            param_arrays,
+            master_params,
+        )
       grads_f32 = jax.tree.map(lambda g: g.astype(jnp.float32), grad_arrays)
 
       updates, new_inner = self.tx.update(
@@ -764,6 +912,31 @@ def _build_fp32_master_optimizer_cls(nnx_mod: Any | None = None) -> type[Any]:
       }
       if isinstance(new_inner, dict) and "is_skipped" in new_inner:
         new_opt_state["is_skipped"] = new_inner["is_skipped"]
+      if residual16:
+        # Store each packed master as what its new bf16 weight does not hold; the rest as before.
+        split = jax.tree.map(
+            lambda np_, m, mp, mu: None if mu is None else _residual16_split(m, np_),
+            new_params,
+            updated_f32_params,
+            master_params,
+            master_up,
+        )
+        new_opt_state["master_params"] = jax.tree.map(
+            lambda nm, s: nm if s is None else s[0],
+            new_master,
+            split,
+            is_leaf=lambda s: s is None or isinstance(s, tuple),
+        )
+        new_opt_state["master_up"] = jax.tree.map(
+            lambda p, s: None if s is None else _pack_bits(s[1], scan_axis),
+            param_arrays,
+            split,
+            is_leaf=lambda s: s is None or isinstance(s, tuple),
+        )
+        bad = [s[2] for s in jax.tree.leaves(split, is_leaf=lambda s: isinstance(s, tuple)) if s is not None]
+        new_opt_state["residual16_violations"] = opt_state_arrays["residual16_violations"] + sum(
+            bad, jnp.zeros((), jnp.int32)
+        )
 
       nnx_mod.update(model, new_params)
       nnx_mod.update(self.opt_state, nnx_mod.state(new_opt_state))
@@ -787,9 +960,19 @@ def create_maxtext_engine(
   use_fp32_master = weight_dtype_str in ("bfloat16", "bf16")
 
   if use_fp32_master:
-    fp32_optimizer_cls = _build_fp32_master_optimizer_cls(
-        getattr(maxtext_engine, "nnx", None)
-    )
+    # MaxText `fp32_master_storage`: "f32" (default) keeps a float32 master per bf16 weight; "residual16" stores the
+    # scanned layers' masters as the 16 bits the bf16 weight does not hold plus one packed bit (bit-identical masters).
+    master_storage = str(maxtext_config.fp32_master_storage)
+    if master_storage == "f32":
+      fp32_optimizer_cls = _build_fp32_master_optimizer_cls(
+          getattr(maxtext_engine, "nnx", None)
+      )
+    else:
+      fp32_optimizer_cls = _build_fp32_master_optimizer_cls(
+          getattr(maxtext_engine, "nnx", None),
+          master_storage=master_storage,
+          scan_axis=int(maxtext_config.param_scan_axis),
+      )
 
     class _Fp32MasterMaxTextTrainingEngine(
         maxtext_engine.MaxTextTrainingEngine

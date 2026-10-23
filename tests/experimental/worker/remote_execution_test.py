@@ -1761,9 +1761,6 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-
-
-
   def test_pool_execution_session_least_loaded_routes_to_idlest_actor(self):
     """least_loaded=True fills actors evenly but keeps route_key affinity."""
 
@@ -1807,12 +1804,10 @@ class RemoteExecutionTest(absltest.TestCase):
       session = remote_lib.PoolExecutionSession(pool, least_loaded=True)
 
       # Keys 0, 3, 6 all hash to actor 0 under plain hash routing.
-      await asyncio.gather(
-          *(
-              session.submit(f"req_{i}", "generate", route_key=3 * i)
-              for i in range(9)
-          )
-      )
+      await asyncio.gather(*(
+          session.submit(f"req_{i}", "generate", route_key=3 * i)
+          for i in range(9)
+      ))
       self.assertEqual([len(h.received) for h in handles], [3, 3, 3])
 
       # Free up actor 2; a new key must go there.
@@ -2606,7 +2601,9 @@ class RemoteExecutionTest(absltest.TestCase):
       self.assertEqual(session.in_flight_count, 0)
 
       failed = session.pop_failed_tasks()
-      self.assertEqual([req_id for req_id, _, _ in failed], ["req_q1", "req_q2"])
+      self.assertEqual(
+          [req_id for req_id, _, _ in failed], ["req_q1", "req_q2"]
+      )
       await session.close()
 
     asyncio.run(_run())
@@ -3175,7 +3172,9 @@ class RemoteExecutionTest(absltest.TestCase):
 
       # Dispatch stuck task at t=0, then healthy task at t=0.08 on the same
       # worker, and add backup worker so the timed-out task can be re-queued.
-      await session.submit("req_stuck", "compute_trajectory", "p_stuck", turns=1)
+      await session.submit(
+          "req_stuck", "compute_trajectory", "p_stuck", turns=1
+      )
       await asyncio.sleep(0.08)
       await session.submit(
           "req_healthy", "compute_trajectory", "p_healthy", turns=1
@@ -3205,6 +3204,151 @@ class RemoteExecutionTest(absltest.TestCase):
   def test_grpc_options_isolates_subchannel_pool(self):
     options = dict(remote_lib._grpc_options())  # pylint: disable=protected-access
     self.assertEqual(options.get("grpc.use_local_subchannel_pool"), 1)
+
+  def test_trb_wire_codec_round_trip_bit_identical(self):
+    rng = np.random.default_rng(42)
+    active = rng.integers(0, 512, size=(4, 512, 32, 8), dtype=np.int16)
+    pad = np.full((4, 256, 32, 8), -1, dtype=np.int16)
+    routed = np.concatenate([active, pad], axis=1)
+    raw = memoryview(routed).cast("B")
+    encoded = remote_lib._encode_wire_chunk(raw)  # pylint: disable=protected-access
+    self.assertEqual(encoded[: len(remote_lib._TRB_MAGIC)], remote_lib._TRB_MAGIC)  # pylint: disable=protected-access
+    self.assertLess(len(encoded), int(len(raw) * 0.62))
+
+    dst_u8 = np.empty(len(raw), dtype=np.uint8)
+    decoded_n = remote_lib._try_decode_wire_chunk_into(  # pylint: disable=protected-access
+        encoded, dst_u8, 0, len(raw)
+    )
+    self.assertEqual(decoded_n, len(raw))
+    dst = dst_u8.view(np.int16).reshape(routed.shape)
+    self.assertEqual(dst.dtype, np.int16)
+    np.testing.assert_array_equal(dst, routed)
+
+    # Out-of-range int16 values fall back cleanly to raw passthrough.
+    wide = np.full((1, 512, 32, 8), 1024, dtype=np.int16)
+    wide_raw = memoryview(wide).cast("B")
+    self.assertEqual(
+        remote_lib._encode_wire_chunk(wide_raw),  # pylint: disable=protected-access
+        wide_raw.tobytes(),
+    )
+
+  def test_pack_args_kwargs_and_send_prepacked_over_grpc(self):
+    rng = np.random.default_rng(7)
+    routed = np.concatenate(
+        [
+            rng.integers(0, 512, size=(2, 256, 32, 8), dtype=np.int16),
+            np.full((2, 128, 32, 8), -1, dtype=np.int16),
+        ],
+        axis=1,
+    )
+    received = []
+
+    class EchoTrainerWorker:
+
+      def stage_fwd_bwd(self, request, **kwargs):
+        received.append((request, kwargs))
+        return {"staged": True, "request_id": request["request_id"]}
+
+    async def _run():
+      async with running_grpc_server(EchoTrainerWorker()) as (_, handle):
+        req = {
+            "request_id": "mb-0",
+            "routed_experts": routed,
+            "prompt_ids": rng.integers(0, 1000, size=(2, 128), dtype=np.int32),
+        }
+        prepacked = remote_lib._pack_args_kwargs(  # pylint: disable=protected-access
+            (), {"request": req, "apply_optimizer": False}
+        )
+        self.assertIsInstance(prepacked, remote_lib._PrepackedArgsKwargs)  # pylint: disable=protected-access
+        task = asyncio.create_task(
+            handle.send_prepacked("stage_fwd_bwd", prepacked)
+        )
+        await handle.wait_for_upload_idle()
+        res = await task
+        self.assertEqual(res, {"staged": True, "request_id": "mb-0"})
+        self.assertLen(received, 1)
+        got_req, got_kw = received[0]
+        self.assertEqual(got_kw, {"apply_optimizer": False})
+        self.assertEqual(got_req["routed_experts"].dtype, np.int16)
+        np.testing.assert_array_equal(got_req["routed_experts"], routed)
+        np.testing.assert_array_equal(got_req["prompt_ids"], req["prompt_ids"])
+
+    asyncio.run(_run())
+
+  def test_grpc_server_streams_next_microbatch_while_sync_fwd_bwd_blocks(self):
+    rng = np.random.default_rng(99)
+    routed = rng.integers(0, 512, size=(4, 512, 32, 8), dtype=np.int16)
+    spans = []
+
+    class BlockingTrainerWorker:
+
+      def fwd_bwd(self, request, **kwargs):
+        del kwargs
+        t0 = time.monotonic()
+        time.sleep(0.20)
+        t1 = time.monotonic()
+        spans.append((request["id"], t0, t1, request["routed_experts"]))
+        return {"id": request["id"]}
+
+    async def _run():
+      async with running_grpc_server(BlockingTrainerWorker()) as (_, handle):
+        p1 = remote_lib._pack_args_kwargs(  # pylint: disable=protected-access
+            (), {"request": {"id": 1, "routed_experts": routed}}
+        )
+        p2 = remote_lib._pack_args_kwargs(  # pylint: disable=protected-access
+            (), {"request": {"id": 2, "routed_experts": routed + 1}}
+        )
+        t1 = asyncio.create_task(handle.send_prepacked("fwd_bwd", p1))
+        await handle.wait_for_upload_idle()
+        # Start uploading mb2 while mb1 is still blocked in fwd_bwd on server!
+        t2 = asyncio.create_task(handle.send_prepacked("fwd_bwd", p2))
+        await handle.wait_for_upload_idle()
+        await asyncio.gather(t1, t2)
+
+    asyncio.run(_run())
+    self.assertLen(spans, 2)
+    _, _, end1, r1 = spans[0]
+    _, start2, _, r2 = spans[1]
+    # Because mb2 finished uploading and deserializing on the server's asyncio
+    # loop while mb1 was sleeping on _sync_exec_pool, mb2 starts immediately
+    # after mb1 finishes (< 25ms gap).
+    self.assertGreaterEqual(start2, end1)
+    self.assertLess(start2 - end1, 0.025)
+    np.testing.assert_array_equal(r1, routed)
+    np.testing.assert_array_equal(r2, routed + 1)
+
+  def test_upload_lock_released_if_rpc_raises_before_iterating_stream(self):
+    async def _run():
+      async with running_grpc_server(StubWorkerEngine("w0")) as (_, handle):
+        await handle._ensure_async_channel()  # pylint: disable=protected-access
+        real_rpc = handle._rpc  # pylint: disable=protected-access
+
+        def _raising_rpc(_stream, **_kwargs):
+          raise RuntimeError("rpc setup failed before stream iteration")
+
+        # 1. _execute_rpc with track_upload=True releases upload_lock on raise.
+        with self.assertRaisesRegex(RuntimeError, "rpc setup failed"):
+          await handle._execute_rpc(  # pylint: disable=protected-access
+              _raising_rpc, "ping", (), {}, max_retries=0, track_upload=True
+          )
+        lock, idle = handle._get_upload_sync()  # pylint: disable=protected-access
+        self.assertFalse(lock.locked())
+        self.assertTrue(idle.is_set())
+
+        # 2. send_prepacked also releases upload_lock on pre-iteration raise.
+        packed = remote_lib._pack_args_kwargs(  # pylint: disable=protected-access
+            (), {"x": np.zeros((4,), dtype=np.int32)}
+        )
+        handle._rpc = _raising_rpc  # pylint: disable=protected-access
+        try:
+          with self.assertRaisesRegex(RuntimeError, "rpc setup failed"):
+            await handle.send_prepacked("ping", packed, max_retries=0)
+        finally:
+          handle._rpc = real_rpc  # pylint: disable=protected-access
+        self.assertFalse(lock.locked())
+        self.assertTrue(idle.is_set())
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

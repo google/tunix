@@ -82,7 +82,6 @@ from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker as trainer_worker_lib
 
-
 NUM_GENERATIONS = 2
 ROW_TOKENS = 64
 
@@ -1212,7 +1211,8 @@ def _run(
       feeder.cancel()
 
   try:
-    asyncio.run(_main())
+    with mock.patch.object(rl_program, "_release_host_memory", lambda: None):
+      asyncio.run(_main())
   except Exception as exc:  # pylint: disable=broad-exception-caught
     if errors is None:
       raise
@@ -2662,7 +2662,6 @@ class StepTimeTest(absltest.TestCase):
             self.assertLess(starts[k], callbacks[k - 1])
           else:
             self.assertGreaterEqual(starts[k], callbacks[k - 1])
-
 
   def test_each_step_starts_where_the_previous_one_ended(self):
     # step_time spans the same work in every mode. Groups up front: with the
