@@ -58,14 +58,7 @@ def _check_divisibility(small_size, big_size, small_size_name, big_size_name):
     )
 
 
-@dataclasses.dataclass(frozen=True)
-class CacheConfig:
-  """Configuration for the KV cache."""
-
-  cache_size: int
-  num_layers: int
-  num_kv_heads: int
-  head_dim: int
+CacheConfig = datatypes.CacheConfig
 
 
 @dataclasses.dataclass

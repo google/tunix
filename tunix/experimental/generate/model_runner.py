@@ -34,6 +34,7 @@ import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 from tunix.dist_rl.rollout import sampler as sampler_lib
+from tunix.models import paged_attention
 from tunix.rl import reshard
 from tunix.rl import utils as rl_utils
 
@@ -200,30 +201,6 @@ def sample(
 
 Cache = dict[str, jax.Array]
 _PyTree = TypeVar('_PyTree')
-
-
-@struct.dataclass
-class RPAMetadata:
-  """Execution metadata for the Ragged Paged Attention kernel.
-
-  Rows are ordered `[decodes, chunked prefills, full prefills]`, followed by
-  padding rows up to the batch's row capacity.
-  """
-
-  # `[num_rows, max_pages_per_seq]` physical page indices of each row, keyed by
-  # the name of the KV cache they index.
-  page_indices: dict[str, jax.Array | np.ndarray]
-  # `[num_rows]` KV length of each row, including the tokens it runs this step.
-  kv_lens: jax.Array | np.ndarray
-  # `[num_rows]` number of tokens each row runs this step.
-  query_lens: jax.Array | np.ndarray
-  # `[3]` row layout `(num_decodes, num_chunked_end, num_seqs)`: the decodes
-  # are rows `[0, i)`, the chunked prefills `[i, j)` and the full prefills
-  # `[j, k)`.
-  distribution: jax.Array | np.ndarray
-  chunk_prefill_size: int | None = struct.field(
-      default=None, pytree_node=False
-  )
 
 
 @functools.partial(jax.jit, static_argnames=['num_steps'])
@@ -450,7 +427,7 @@ class ModelRunner:
   def _get_token_positions(
       self,
       tokens: jax.Array,
-      metadata: RPAMetadata,
+      metadata: paged_attention.PagedAttnMetadata,
   ) -> jax.Array:
     """Returns the positions of each token within its sequence."""
     total_capacity = tokens.shape[0]
@@ -487,7 +464,7 @@ class ModelRunner:
       params: list[nnx.Variable],
       cache: Cache,
       tokens: jax.Array,
-      metadata: RPAMetadata,
+      metadata: paged_attention.PagedAttnMetadata,
       sampling_metadata: SamplingMetadata,
       rng: jax.Array,
   ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache, jax.Array]:
@@ -543,7 +520,7 @@ class ModelRunner:
       params: list[nnx.Variable],
       cache: Cache,
       next_tokens: jax.Array,
-      metadata: RPAMetadata,
+      metadata: paged_attention.PagedAttnMetadata,
       sampling_metadata: SamplingMetadata,
       rng: jax.Array,
       num_steps: int,
@@ -593,7 +570,7 @@ class ModelRunner:
         )
         + query_lens
     )
-    decode_metadata = RPAMetadata(
+    decode_metadata = paged_attention.PagedAttnMetadata(
         page_indices={
             cache_name: jnp.asarray(idxs, dtype=jnp.int32)[order]
             for cache_name, idxs in metadata.page_indices.items()
@@ -603,7 +580,6 @@ class ModelRunner:
         distribution=jnp.full_like(
             distribution, num_surviving, dtype=jnp.int32
         ),
-        chunk_prefill_size=metadata.chunk_prefill_size,
     )
 
     # Each surviving request's sampling settings move along with its row. The
@@ -671,7 +647,7 @@ class ModelRunner:
       self,
       cache: Cache,
       tokens: jax.Array,
-      metadata: RPAMetadata,
+      metadata: paged_attention.PagedAttnMetadata,
       sampling_params: Sequence[sampler_lib.SamplingParams],
   ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache]:
     """Runs model forward passes on a batch of requests, and samples tokens.
