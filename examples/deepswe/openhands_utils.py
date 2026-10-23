@@ -985,8 +985,20 @@ def evaluate_patch_in_fresh_container(
     untracked_files = [
         f.strip() for f in git_ls_output.splitlines() if f.strip()
     ]
+    exclude_args = []
+    # Exclude newly added agent scratch test scripts from git apply so test
+    # runners (e.g. pytest) do not discover and execute them during evaluation.
+    for m in re.finditer(
+        r'^diff --git "?a/(\S+?)"? "?b/\1"?\n(?:old mode .*\n)?new file mode [0-9]+\n',
+        patch,
+        re.MULTILINE,
+    ):
+      filename = m.group(1)
+      if re.search(r"(?:^|/)test_[^/]*\.py$|_test\.py$", filename):
+        exclude_args.append(f"--exclude={filename}")
+    exclude_args.extend(f"--exclude={f}" for f in untracked_files)
     exclude_str = " ".join(
-        shlex.quote(f"--exclude={f}") for f in untracked_files
+        shlex.quote(arg) for arg in exclude_args
     )
 
     patch_path = "/tmp/model.patch"

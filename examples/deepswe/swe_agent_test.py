@@ -1616,7 +1616,11 @@ class SweAgentTest(absltest.TestCase):
     mock_runtime._target_container = sandbox_utils.RUNTIME_CONTAINER_NAME
     reward = openhands_utils.evaluate_patch_in_fresh_container(
         mock_eval_env,
-        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n",
+        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+        "diff --git a/test_scratch.py b/test_scratch.py\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/test_scratch.py\n",
         orig_reward,
     )
     self.assertEqual(reward, 1.0)
@@ -1633,6 +1637,7 @@ class SweAgentTest(absltest.TestCase):
     apply_cmd = mock_runtime.run.call_args_list[1][0][0]
     self.assertEqual(ls_cmd, "git ls-files --others --exclude-standard")
     self.assertIn("git apply --whitespace=fix", apply_cmd)
+    self.assertIn("--exclude=test_scratch.py", apply_cmd)
     self.assertIn("--exclude=run_tests.sh", apply_cmd)
     self.assertIn("--exclude=expected_test_output.json", apply_cmd)
     self.assertIn("--exclude=untracked file.txt", apply_cmd)
@@ -1690,6 +1695,18 @@ class SweAgentTest(absltest.TestCase):
           "@@ -1 +1 @@\n"
           "-val = 1\n"
           "+val = 99\n"
+          "diff --git a/test_issue_reproduction.py b/test_issue_reproduction.py\n"
+          "new file mode 100644\n"
+          "--- /dev/null\n"
+          "+++ b/test_issue_reproduction.py\n"
+          "@@ -0,0 +1 @@\n"
+          "+import time; time.sleep(50)\n"
+          "diff --git a/comprehensive_test.py b/comprehensive_test.py\n"
+          "new file mode 100644\n"
+          "--- /dev/null\n"
+          "+++ b/comprehensive_test.py\n"
+          "@@ -0,0 +1 @@\n"
+          "+import time; time.sleep(50)\n"
       )
       res_reward = openhands_utils.evaluate_patch_in_fresh_container(
           real_eval_env,
@@ -1700,6 +1717,12 @@ class SweAgentTest(absltest.TestCase):
       self.assertFalse(os.path.exists("/tmp/model.patch"))
       with open(target_file, "r", encoding="utf-8") as f:
         self.assertEqual(f.read(), "val = 99\n")
+      self.assertFalse(
+          os.path.exists(os.path.join(repo, "test_issue_reproduction.py"))
+      )
+      self.assertFalse(
+          os.path.exists(os.path.join(repo, "comprehensive_test.py"))
+      )
 
       # 5. Large patch (>64KB base64) chunked write path + extract_agent_patch
       # ignoring bash_events/, conversations/, and install.sh
