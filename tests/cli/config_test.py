@@ -22,6 +22,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
 import jax
+from omegaconf import errors as omegaconf_errors
 import optax
 from tunix.cli import config
 from tunix.sft import peft_trainer
@@ -870,6 +871,169 @@ class ConfigTest(parameterized.TestCase):
         ValueError, "Expected dictionary for checkpointing_options"
     ):
       hp.obtain_training_config_dict("training_config")
+
+  def test_default_base_config_and_normalize_argv(self):
+    base_yaml = pathlib.Path(config.__file__).parent / "base_config.yaml"
+    hp = config.initialize(
+        [
+            "resolve_config",
+            "model_config.model_name=qwen2.5-0.5b",
+            "model_config.model_source=maxtext",
+        ],
+        default_base_config=base_yaml,
+    )
+    self.assertEqual(
+        hp.config_mapping("model_config")["model_name"], "qwen2.5-0.5b"
+    )
+    self.assertEqual(
+        hp.config_mapping("actor_model_config")["model_name"], "qwen2.5-0.5b"
+    )
+
+  def test_merge_replace_keys_and_multiple_override_files(self):
+    base_yaml = pathlib.Path(config.__file__).parent / "base_config.yaml"
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      ov1 = pathlib.Path(tmp_dir) / "ov1.yaml"
+      ov2 = pathlib.Path(tmp_dir) / "ov2.yaml"
+      ov1.write_text("rl_training_config:\n  max_steps: 25\n")
+      ov2.write_text("rl_training_config:\n  eval_every_n_steps: 5\n")
+      hp = config.initialize(
+          [
+              "resolve_config",
+              f"override_config_file={ov1}",
+              f"override_config_file={ov2}",
+          ],
+          default_base_config=base_yaml,
+          merge_replace_keys=True,
+          validate_nested=True,
+      )
+    rl_train = hp.config_mapping("rl_training_config")
+    self.assertEqual(rl_train["max_steps"], 25)
+    self.assertEqual(rl_train["eval_every_n_steps"], 5)
+    self.assertIn("actor_optimizer_config", rl_train)
+
+  def test_validate_nested_keys_and_deep_role_propagation(self):
+    base_yaml = pathlib.Path(config.__file__).parent / "base_config.yaml"
+    with self.assertRaises(omegaconf_errors.ConfigKeyError):
+      config.initialize(
+          ["resolve_config", "rollout_config.unknown_nested_key=1"],
+          default_base_config=base_yaml,
+          merge_replace_keys=True,
+          validate_nested=True,
+      )
+
+    hp = config.initialize(
+        [
+            "resolve_config",
+            "model_config.model_name=qwen2.5-0.5b",
+            "model_config.model_source=maxtext",
+            "model_config.model_path=/gs/base_ckpt",
+            "model_config.mesh.shape=(4,1)",
+            "actor_model_config.model_name=llama-3.1-8b",
+            "actor_model_config.model_source=huggingface",
+            'actor_model_config.model_path=""',
+            "rollout_model_config.mesh.axis_names=('dp','tp')",
+            "model_config.lora_config.rank=8",
+        ],
+        default_base_config=base_yaml,
+        merge_replace_keys=True,
+        validate_nested=True,
+    )
+    self.assertEqual(
+        hp.config_mapping("actor_model_config")["model_name"], "llama-3.1-8b"
+    )
+    self.assertEqual(hp.config_mapping("actor_model_config")["model_path"], "")
+    self.assertEqual(
+        hp.config_mapping("rollout_model_config")["model_name"], "qwen2.5-0.5b"
+    )
+    self.assertEqual(
+        hp.mesh_axes("actor_model_config"),
+        {"fsdp": 4, "tp": 1, "expert": 1, "dp": 0},
+    )
+    self.assertEqual(
+        hp.mesh_axes("rollout_model_config"),
+        {"fsdp": 1, "tp": 1, "expert": 1, "dp": 4},
+    )
+    self.assertEqual(
+        hp.config_mapping("actor_model_config")["lora_config"]["rank"], 8
+    )
+
+  def test_default_path_partial_role_mesh_override_is_not_merged(self):
+    # A role that overrides only part of `mesh` keeps the rest of its own
+    # mesh; it must not pick up `axis_names` from a differently shaped
+    # `model_config.mesh`.
+    hp = self.initialize_config([
+        'model_config.mesh.shape="(8,)"',
+        "model_config.mesh.axis_names=\"('fsdp',)\"",
+        'rollout_model_config.mesh.shape="(2,4)"',
+    ])
+    self.assertEqual(
+        hp.parse_mesh_config("rollout_model_config"),
+        ((2, 4), ("fsdp", "tp")),
+    )
+    self.assertEqual(
+        hp.parse_mesh_config("actor_model_config"), ((8,), ("fsdp",))
+    )
+
+  def test_default_path_partial_role_lora_override_is_not_merged(self):
+    hp = self.initialize_config([
+        "model_config.lora_config.rank=16",
+        "model_config.lora_config.alpha=2.0",
+        'model_config.lora_config.module_path=".*q_einsum"',
+        "actor_model_config.lora_config.rank=8",
+    ])
+    self.assertEqual(
+        hp.config_mapping("actor_model_config")["lora_config"], {"rank": 8}
+    )
+    self.assertEqual(
+        hp.config_mapping("rollout_model_config")["lora_config"],
+        {"rank": 16, "alpha": 2.0, "module_path": ".*q_einsum"},
+    )
+
+  def test_merge_path_explicit_role_override_equal_to_base_is_kept(self):
+    # `llama-3.1-8b` is the base `model_config.model_name`. With
+    # `merge_replace_keys=True`, an explicit role override with that value is
+    # not replaced by the updated `model_config.model_name`.
+    base_yaml = pathlib.Path(config.__file__).parent / "base_config.yaml"
+    hp = config.initialize(
+        [
+            "resolve_config",
+            "model_config.model_name=gemma-3-12b",
+            "model_config.model_source=gcs",
+            "actor_model_config.model_name=llama-3.1-8b",
+        ],
+        default_base_config=base_yaml,
+        merge_replace_keys=True,
+    )
+    self.assertEqual(
+        hp.config_mapping("actor_model_config")["model_name"], "llama-3.1-8b"
+    )
+    self.assertEqual(
+        hp.config_mapping("rollout_model_config")["model_name"], "gemma-3-12b"
+    )
+
+  def test_validate_nested_rejects_unknown_key_in_override_file(self):
+    base_yaml = pathlib.Path(config.__file__).parent / "base_config.yaml"
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      ov = pathlib.Path(tmp_dir) / "ov.yaml"
+      ov.write_text("rollout_config:\n  not_a_real_key: 1\n")
+      with self.assertRaises(omegaconf_errors.ConfigKeyError):
+        config.initialize(
+            ["resolve_config", f"override_config_file={ov}"],
+            default_base_config=base_yaml,
+            validate_nested=True,
+        )
+
+  def test_default_path_rejects_multiple_override_files(self):
+    with self.assertRaisesRegex(
+        ValueError, "Only one override_config_file argument is allowed"
+    ):
+      self.initialize_config(
+          ["override_config_file=a.yaml", "override_config_file=b.yaml"]
+      )
+
+  def test_empty_override_config_file_path_raises(self):
+    with self.assertRaisesRegex(ValueError, "Empty path in override_config_file"):
+      self.initialize_config(["override_config_file="])
 
 
 if __name__ == "__main__":
