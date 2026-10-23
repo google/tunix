@@ -305,43 +305,45 @@ def get_image_rewrite_fn(
   return None
 
 
+def _normalize_extracted_img(img: Any) -> Any:
+  if isinstance(img, str) and "swesmith" in img.lower() and ":" not in img:
+    return f"{img}:latest"
+  return img
+
+
 def extract_task_image(item: dict[str, Any]) -> Any | None:
   """Safely extract docker_image or image name from an item dictionary."""
-  # 1. Direct docker_image / image
-  img = item.get("docker_image")
-  if img is None:
-    img = item.get("image")
-  if img is not None:
-    return img
+  # 1. Direct docker_image / image / image_name
+  for key in ("docker_image", "image", "image_name"):
+    img = item.get(key)
+    if img is not None and str(img).strip():
+      return _normalize_extracted_img(img)
 
   # 2. Inside metadata
   meta = item.get("metadata")
   if isinstance(meta, dict):
-    img = meta.get("docker_image")
-    if img is None:
-      img = meta.get("image")
-    if img is not None:
-      return img
+    for key in ("docker_image", "image", "image_name"):
+      img = meta.get(key)
+      if img is not None and str(img).strip():
+        return _normalize_extracted_img(img)
     env_cfg = meta.get("env_config")
     if isinstance(env_cfg, dict):
       entry = env_cfg.get("entry")
       if isinstance(entry, dict):
-        img = entry.get("docker_image")
-        if img is None:
-          img = entry.get("image")
-        if img is not None:
-          return img
+        for key in ("docker_image", "image", "image_name"):
+          img = entry.get(key)
+          if img is not None and str(img).strip():
+            return _normalize_extracted_img(img)
 
   # 3. Inside env_config
   env_cfg = item.get("env_config")
   if isinstance(env_cfg, dict):
     entry = env_cfg.get("entry")
     if isinstance(entry, dict):
-      img = entry.get("docker_image")
-      if img is None:
-        img = entry.get("image")
-      if img is not None:
-        return img
+      for key in ("docker_image", "image", "image_name"):
+        img = entry.get(key)
+        if img is not None and str(img).strip():
+          return _normalize_extracted_img(img)
 
   return None
 
