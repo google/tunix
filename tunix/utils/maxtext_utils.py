@@ -335,13 +335,25 @@ def build_maxtext_config(
           ) from e
 
   output_dir = base_output_directory or "/tmp/maxtext"
+  run_name = worker_id or "tunix_maxtext"
   argv = [
       "maxtext_trainer",
       base_yml,
       f"model_name={model_name}",
-      f"run_name={worker_id or 'tunix_maxtext'}",
+      f"run_name={run_name}",
       f"base_output_directory={output_dir}",
   ]
+  # Checkpoints can live apart from the other outputs (metrics, mllog,
+  # profiles), e.g. on a GCSFuse mount of a zonal Rapid bucket. Laid out like
+  # the derived <base_output_directory>/<run_name>/checkpoints/.
+  checkpoint_base_dir = os.environ.get("MAXTEXT_CHECKPOINT_DIR", "").strip()
+  checkpoint_dir = (
+      os.path.join(checkpoint_base_dir, run_name, "checkpoints", "")
+      if checkpoint_base_dir
+      else ""
+  )
+  if checkpoint_dir:
+    argv.append(f"checkpoint_dir={checkpoint_dir}")
   if load_parameters_path:
     argv.append(f"load_parameters_path={load_parameters_path}")
   # Checkpointing configs. `save_interval_steps=0` means "never save"
@@ -542,6 +554,20 @@ def build_maxtext_config(
       raise ValueError(
           f"PATHWAYS_CHECKPOINTING_IMPL={impl!r} is not recognised; "
           f"expected one of {_PATHWAYS_CHECKPOINTING_IMPLS}."
+      )
+    # Persistence writes from the pathways-worker's C++ runtime, which only
+    # speaks gs://; the colocated-python sidecars write through TensorStore,
+    # so they can use a mount that the launcher adds to every sidecar.
+    if (
+        save_interval_steps > 0
+        and checkpoint_dir
+        and not checkpoint_dir.startswith("gs://")
+        and impl != _COLOCATED_PYTHON_IMPL
+    ):
+      raise ValueError(
+          f"MAXTEXT_CHECKPOINT_DIR={checkpoint_base_dir!r} is not a gs://"
+          " URI, which requires"
+          f" PATHWAYS_CHECKPOINTING_IMPL=colocated_python; got {impl!r}."
       )
     if impl == _COLOCATED_PYTHON_IMPL and not os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip():
       raise ValueError(

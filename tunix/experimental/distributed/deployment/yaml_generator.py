@@ -728,6 +728,65 @@ def main() -> None:
       else ""
   )
 
+  # GCSFuse mount for checkpoints, e.g. a zonal Rapid bucket in the TPUs' zone.
+  # Only the colocated-python sidecars (array data) and the head's user
+  # container (Orbax metadata, commit rename) touch checkpoint files, so only
+  # they mount it, at the same path. The pathways-worker's own persistence
+  # writer needs gs://.
+  #
+  # `hostNetworkPodKSA` lets the gcsfuse sidecar use the pod's KSA (Workload
+  # Identity) even though these pods run with hostNetwork. The gcsfuse sidecar's
+  # own resource limits are lifted, since a checkpoint burst would otherwise be
+  # throttled by them.
+  gcsfuse_bucket = (
+      os.environ.get("CKPT_GCSFUSE_BUCKET", "")
+      .strip()
+      .removeprefix("gs://")
+      .rstrip("/")
+  )
+  gcsfuse_mount_path = os.environ.get(
+      "CKPT_GCSFUSE_MOUNT_PATH", "/gcs/ckpt"
+  ).strip()
+  gcsfuse_mount_options = os.environ.get(
+      "CKPT_GCSFUSE_MOUNT_OPTIONS",
+      "implicit-dirs,metadata-cache:negative-ttl-secs:0",
+  ).strip()
+  gcsfuse_pod_annotations = (
+      '\n              gke-gcsfuse/volumes: "true"'
+      '\n              gke-gcsfuse/cpu-limit: "0"'
+      '\n              gke-gcsfuse/memory-limit: "0"'
+      '\n              gke-gcsfuse/ephemeral-storage-limit: "0"'
+      if gcsfuse_bucket
+      else ""
+  )
+  gcsfuse_volume = (
+      "\n            - name: ckpt-gcsfuse"
+      "\n              csi:"
+      "\n                driver: gcsfuse.csi.storage.gke.io"
+      "\n                volumeAttributes:"
+      f"\n                  bucketName: {gcsfuse_bucket}"
+      f"\n                  mountOptions: {json.dumps(gcsfuse_mount_options)}"
+      '\n                  hostNetworkPodKSA: "true"'
+      if gcsfuse_bucket
+      else ""
+  )
+  gcsfuse_volume_mount = (
+      f"\n              - mountPath: {gcsfuse_mount_path}"
+      "\n                name: ckpt-gcsfuse"
+      if gcsfuse_bucket
+      else ""
+  )
+  # The user container is the last entry of the head pod, so its volumeMounts
+  # and the pod's volumes are emitted together.
+  gcsfuse_proc_mount = (
+      f"              volumeMounts:{gcsfuse_volume_mount}"
+      f"\n            volumes:{gcsfuse_volume}"
+      if gcsfuse_bucket
+      else ""
+  )
+  if gcsfuse_bucket:
+    colocated_python_sidecar_block += gcsfuse_volume_mount
+
   # RAIDEN_BROADCAST_K, TPU_RAIDEN_DATA_NICS, and ENABLE_MULTI_NUMA are set in
   # every container env of the jobset templates; rendering them again here would
   # duplicate the entry.
@@ -807,6 +866,27 @@ def main() -> None:
             f"COLOCATED_PYTHON_SIDECAR_IMAGE is set, but template "
             f"{args.template_file} lacks {', '.join(missing_placeholders)}"
         )
+    if is_pathways and gcsfuse_bucket:
+      if not sidecar_image:
+        raise SystemExit(
+            "CKPT_GCSFUSE_BUCKET is set, but COLOCATED_PYTHON_SIDECAR_IMAGE is "
+            "not: only the colocated-python sidecar can write checkpoints to a "
+            "GCSFuse mount."
+        )
+      missing_placeholders = [
+          p
+          for p in (
+              "${GCSFUSE_POD_ANNOTATIONS}",
+              "${GCSFUSE_PROC_MOUNT}",
+              "${GCSFUSE_VOLUME}",
+          )
+          if p not in template_text
+      ]
+      if missing_placeholders:
+        raise SystemExit(
+            "CKPT_GCSFUSE_BUCKET is set, but template "
+            f"{args.template_file} lacks {', '.join(missing_placeholders)}"
+        )
     template = string.Template(template_text)
     content = template.substitute(
         JOBSET_NAME=jobset_name,
@@ -844,6 +924,9 @@ def main() -> None:
         COLOCATED_PYTHON_SIDECAR_VOLUME=colocated_python_sidecar_volume,
         COLOCATED_PYTHON_WORKER_ARGS=colocated_python_worker_args,
         COLOCATED_PYTHON_PROXY_ARGS=colocated_python_proxy_args,
+        GCSFUSE_POD_ANNOTATIONS=gcsfuse_pod_annotations,
+        GCSFUSE_PROC_MOUNT=gcsfuse_proc_mount,
+        GCSFUSE_VOLUME=gcsfuse_volume,
         TERMINATION_GRACE_SECONDS=args.termination_grace_seconds,
         PW_INSTANCE_TYPE=pw_instance_type,
         REPLICAS=1,
