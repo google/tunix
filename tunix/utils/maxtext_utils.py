@@ -541,30 +541,33 @@ def build_maxtext_config(
   # The persistence handler rejects the OCDBT/zarr3 layout MaxText writes by
   # default (see maxtext/common/checkpoint_context.py), so both must be off
   if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") == "1":
+    if save_interval_steps > 0 and not output_dir.startswith("gs://"):
+      raise ValueError(
+          "ENABLE_PATHWAYS_PERSISTENCE=1 with save_interval_steps > 0 "
+          "requires a gs:// base_output_directory so all pathways-worker pods "
+          f"write to shared GCS storage; got {output_dir!r}. "
+          "Set MAXTEXT_OUTPUT_DIR=gs://..."
+      )
+
     impl = os.environ.get("PATHWAYS_CHECKPOINTING_IMPL", "").strip() or _PERSISTENCE_IMPL
     if impl not in _PATHWAYS_CHECKPOINTING_IMPLS:
       raise ValueError(
           f"PATHWAYS_CHECKPOINTING_IMPL={impl!r} is not recognised; "
           f"expected one of {_PATHWAYS_CHECKPOINTING_IMPLS}."
       )
-    if checkpoint_dir and not checkpoint_dir.startswith("gs://"):
-      # Persistence writes from the pathways-worker's C++ runtime, which only
-      # speaks gs://; the colocated-python sidecars write through TensorStore,
-      # so they can use a mount that the launcher adds to every sidecar.
-      if save_interval_steps > 0 and impl != _COLOCATED_PYTHON_IMPL:
-        raise ValueError(
-            f"MAXTEXT_CHECKPOINT_DIR={checkpoint_base_dir!r} is not a gs://"
-            " URI, which requires"
-            f" PATHWAYS_CHECKPOINTING_IMPL=colocated_python; got {impl!r}."
-        )
-    elif save_interval_steps > 0 and not (
-        checkpoint_dir or output_dir
-    ).startswith("gs://"):
+    # Persistence writes from the pathways-worker's C++ runtime, which only
+    # speaks gs://; the colocated-python sidecars write through TensorStore,
+    # so they can use a mount that the launcher adds to every sidecar.
+    if (
+        save_interval_steps > 0
+        and checkpoint_dir
+        and not checkpoint_dir.startswith("gs://")
+        and impl != _COLOCATED_PYTHON_IMPL
+    ):
       raise ValueError(
-          "ENABLE_PATHWAYS_PERSISTENCE=1 with save_interval_steps > 0 "
-          "requires a gs:// base_output_directory so all pathways-worker pods "
-          f"write to shared GCS storage; got {output_dir!r}. "
-          "Set MAXTEXT_OUTPUT_DIR=gs://..."
+          f"MAXTEXT_CHECKPOINT_DIR={checkpoint_base_dir!r} is not a gs://"
+          " URI, which requires"
+          f" PATHWAYS_CHECKPOINTING_IMPL=colocated_python; got {impl!r}."
       )
     if impl == _COLOCATED_PYTHON_IMPL and not os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip():
       raise ValueError(

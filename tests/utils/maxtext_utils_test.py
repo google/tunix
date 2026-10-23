@@ -771,6 +771,31 @@ class MaxTextUtilsTest(absltest.TestCase):
             ),
         )
 
+  def test_local_output_dir_with_local_checkpoint_dir_raises(self):
+    # Metrics, mllog and profiles still go to base_output_directory, which
+    # pods without the checkpoint mount read, so it must stay on GCS.
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "ENABLE_PATHWAYS_PERSISTENCE": "1",
+            "PATHWAYS_CHECKPOINTING_IMPL": "colocated_python",
+            "COLOCATED_PYTHON_SIDECAR_IMAGE": (
+                "us-docker.pkg.dev/proj/repo/sidecar:tag"
+            ),
+            "MAXTEXT_CHECKPOINT_DIR": "/gcs/ckpt/maxtext/job",
+        },
+        clear=False,
+    ):
+      with self.assertRaisesRegex(
+          ValueError, r"requires a gs:// base_output_directory"
+      ):
+        self._build_config_argv(
+            base_output_directory="/tmp/out",
+            checkpointing_options=mock.MagicMock(
+                save_interval_steps=1, max_to_keep=2
+            ),
+        )
+
   def test_checkpoint_dir_unset_emits_no_checkpoint_dir(self):
     with mock.patch.dict("os.environ", {}, clear=False):
       os.environ.pop("MAXTEXT_CHECKPOINT_DIR", None)
