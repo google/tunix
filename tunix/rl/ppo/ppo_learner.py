@@ -362,7 +362,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     # 2. A positive reward is given only at the final timestep, so we add that
     # to the tensor of zeros.
     # 3. Subtract KL divergence from the reward tensor.
-    rewards = jnp.zeros_like(jax_completion_ids)
+    rewards = jnp.zeros_like(jax_completion_ids, dtype=jnp.float32)
     rewards = rewards.at[jnp.arange(batch_size), eos_idx].add(
         jax_last_token_scores
     )
