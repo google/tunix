@@ -327,6 +327,81 @@ class ConfigTest(parameterized.TestCase):
     updates, _ = optimizer.update(grads, optimizer.init(params), params)
     self.assertAlmostEqual(float(optax.global_norm(updates)), 100.0, places=4)
 
+  @parameterized.named_parameters(
+      dict(testcase_name="float32", dtype=jax.numpy.float32, places=4),
+      dict(testcase_name="bfloat16", dtype=jax.numpy.bfloat16, places=2),
+  )
+  def test_create_optimizer_clips_by_max_grad_norm(self, dtype, places):
+    """`max_grad_norm` chains global-norm clipping ahead of the optimizer."""
+    optimizer = config.create_optimizer(
+        {"opt_type": "sgd", "learning_rate": 1.0, "max_grad_norm": 1.0},
+        "test_config_path",
+    )
+    params = {"w": jax.numpy.zeros((2,), dtype=dtype)}
+    grads = {"w": jax.numpy.array([60.0, 80.0], dtype=dtype)}
+    updates, _ = optimizer.update(grads, optimizer.init(params), params)
+    self.assertAlmostEqual(
+        float(optax.global_norm(updates)), 1.0, places=places
+    )
+
+  def test_create_optimizer_null_max_grad_norm_is_unchained(self):
+    optimizer = config.create_optimizer(
+        {"opt_type": "sgd", "learning_rate": 1.0, "max_grad_norm": None},
+        "test_config_path",
+    )
+    params = {"w": jax.numpy.zeros((2,))}
+    grads = {"w": jax.numpy.array([60.0, 80.0])}
+    updates, _ = optimizer.update(grads, optimizer.init(params), params)
+    self.assertAlmostEqual(float(optax.global_norm(updates)), 100.0, places=4)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="zero", max_grad_norm=0.0),
+      dict(testcase_name="negative", max_grad_norm=-1.0),
+      dict(testcase_name="string", max_grad_norm="1.0"),
+      dict(testcase_name="bool", max_grad_norm=True),
+  )
+  def test_create_optimizer_rejects_invalid_max_grad_norm(self, max_grad_norm):
+    with self.assertRaisesRegex(ValueError, "max_grad_norm"):
+      config.create_optimizer(
+          {
+              "opt_type": "sgd",
+              "learning_rate": 1.0,
+              "max_grad_norm": max_grad_norm,
+          },
+          "test_config_path",
+      )
+
+  def test_create_optimizer_opt_chain_type_wins_over_max_grad_norm(self):
+    optimizer = config.create_optimizer(
+        {
+            "opt_type": "sgd",
+            "learning_rate": 1.0,
+            "max_grad_norm": 0.1,
+            "opt_chain_type": "clip_by_global_norm",
+            "chain_kwargs": {"max_norm": 1.0},
+        },
+        "test_config_path",
+    )
+    params = {"w": jax.numpy.zeros((2,))}
+    grads = {"w": jax.numpy.array([60.0, 80.0])}
+    updates, _ = optimizer.update(grads, optimizer.init(params), params)
+    self.assertAlmostEqual(float(optax.global_norm(updates)), 1.0, places=4)
+
+  def test_base_config_optimizer_clips_by_max_grad_norm(self):
+    """base_config.yaml sets `max_grad_norm: 0.1`, which must take effect."""
+    hp = self.initialize_config([])
+    self.assertEqual(hp.config["optimizer_config"]["max_grad_norm"], 0.1)
+    optimizer = hp.create_optimizer("optimizer_config")
+    params = {"w": jax.numpy.zeros((2,))}
+    grads = {"w": jax.numpy.array([60.0, 80.0])}
+    _, state = optimizer.update(grads, optimizer.init(params), params)
+    # adamw's first moment after one step is (1 - b1) * clipped gradient,
+    # i.e. (1 - 0.9) * 0.1, rather than (1 - 0.9) * 100 unclipped.
+    first_moment = optax.tree.get(state, "mu")
+    self.assertAlmostEqual(
+        float(optax.global_norm(first_moment)), 0.01, places=5
+    )
+
   def test_create_optimizer_rejects_unknown_opt_chain_type(self):
     with self.assertRaisesRegex(ValueError, "not_a_transformation"):
       config.create_optimizer(
