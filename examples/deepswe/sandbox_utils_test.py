@@ -790,6 +790,7 @@ class SandboxUtilsTest(absltest.TestCase):
         "sys.modules",
         {
             "agent_sandbox_rl": fake_asrl,
+            "agent_sandbox_rl.constants": None,
             "agent_sandbox_rl.resources": fake_resources_mod,
         },
     ):
@@ -812,6 +813,68 @@ class SandboxUtilsTest(absltest.TestCase):
       self.assertEqual(eval_ctr["image"], "img:v1")
       self.assertEqual(eval_ctr["command"], ["sleep", "infinity"])
       self.assertNotIn("volumeMounts", eval_ctr)
+
+  def test_patch_agent_sandbox_rl_templates_skips_when_sdk_supports_task_image_placeholder(self):
+    class _FakeResources:
+
+      def _template_manifest(self, image, template_name, template):
+        return (image, template_name, template)
+
+    orig_fn = _FakeResources._template_manifest
+    fake_resources_mod = mock.MagicMock()
+    fake_resources_mod.Resources = _FakeResources
+    fake_constants_mod = mock.MagicMock()
+    fake_constants_mod.TASK_IMAGE_PLACEHOLDER = "{task_image}"
+    fake_asrl = mock.MagicMock()
+    fake_asrl.resources = fake_resources_mod
+    fake_asrl.constants = fake_constants_mod
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "agent_sandbox_rl": fake_asrl,
+            "agent_sandbox_rl.constants": fake_constants_mod,
+            "agent_sandbox_rl.resources": fake_resources_mod,
+        },
+    ):
+      sandbox_utils.patch_agent_sandbox_rl_templates()
+      self.assertIs(_FakeResources._template_manifest, orig_fn)
+
+  def test_get_template_uses_direct_sdk_fields_and_task_image_sidecar(self):
+    from examples.deepswe import template as template_mod  # pylint: disable=g-import-not-at-top
+
+    captured_resource_kwargs = {}
+    captured_template_kwargs = {}
+
+    def _fake_resource_spec(**kwargs):
+      captured_resource_kwargs.update(kwargs)
+      return kwargs
+
+    def _fake_template_spec(**kwargs):
+      captured_template_kwargs.update(kwargs)
+      return kwargs
+
+    fake_asrl = mock.MagicMock()
+    fake_asrl.ResourceSpec.side_effect = _fake_resource_spec
+    fake_asrl.TemplateSpec.side_effect = _fake_template_spec
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": fake_asrl}):
+      oh_tmpl = template_mod.get_template("openhands")
+      self.assertEqual(oh_tmpl["network_policy_management"], "Unmanaged")
+      self.assertFalse(oh_tmpl["automount_service_account_token"])
+      self.assertFalse(oh_tmpl["share_process_namespace"])
+      self.assertEqual(captured_resource_kwargs["cpu_limit"], "2")
+      self.assertEqual(captured_resource_kwargs["memory_limit"], "4Gi")
+      oh_containers = oh_tmpl["extra_pod_spec"]["containers"]
+      self.assertLen(oh_containers, 2)
+      self.assertEqual(oh_containers[0]["name"], "agent-runtime")
+      self.assertEqual(oh_containers[1]["name"], "eval")
+      self.assertEqual(oh_containers[1]["image"], "{task_image}")
+
+      r2e_tmpl = template_mod.get_template("r2egym")
+      self.assertEqual(r2e_tmpl["network_policy_management"], "Unmanaged")
+      r2e_containers = r2e_tmpl["extra_pod_spec"]["containers"]
+      self.assertLen(r2e_containers, 1)
+      self.assertEqual(r2e_containers[0]["name"], "eval")
+      self.assertEqual(r2e_containers[0]["image"], "{task_image}")
 
   def test_patch_r2egym_for_agent_sandbox_routes_container_and_defers_setup_env(self):
     class _FakeCoreV1Api:
@@ -846,6 +909,7 @@ class SandboxUtilsTest(absltest.TestCase):
     with mock.patch.dict(
         "sys.modules",
         {
+            "agent_sandbox_rl.handles": None,
             "kubernetes": fake_k8s,
             "kubernetes.client": fake_k8s_client,
             "r2egym": mock.MagicMock(),
@@ -861,10 +925,12 @@ class SandboxUtilsTest(absltest.TestCase):
 
       rt = _FakeDockerRuntime(backend="kubernetes-sandbox")
       handle = mock.MagicMock()
+      handle.target_container = sandbox_utils.EVAL_CONTAINER_NAME
       handle._target_container = sandbox_utils.EVAL_CONTAINER_NAME
       handle._defer_setup_env = True
       rt._handle = handle
       rt.start_container("img:v1", ["/bin/bash"], "pod-1")
+      self.assertEqual(rt._container, sandbox_utils.EVAL_CONTAINER_NAME)
       self.assertEqual(rt._target_container, sandbox_utils.EVAL_CONTAINER_NAME)
       _, kw_eval = rt.client.connect_get_namespaced_pod_exec("pod-1", "default")
       self.assertEqual(kw_eval["container"], sandbox_utils.EVAL_CONTAINER_NAME)

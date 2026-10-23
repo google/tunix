@@ -955,8 +955,10 @@ def evaluate_patch_in_fresh_container(
   original_container = sandbox_utils.RUNTIME_CONTAINER_NAME
   runtime_obj = getattr(eval_env, "runtime", None) or eval_env
   if runtime_obj is not None:
-    original_container = getattr(
-        runtime_obj, "_target_container", sandbox_utils.RUNTIME_CONTAINER_NAME
+    original_container = (
+        getattr(runtime_obj, "_container", None)
+        or getattr(runtime_obj, "_target_container", None)
+        or sandbox_utils.RUNTIME_CONTAINER_NAME
     )
 
   sandbox_utils.set_runtime_container(

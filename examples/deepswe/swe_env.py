@@ -229,19 +229,36 @@ class SWEEnv(BaseTaskEnv):
         cmd_files = r2egym_command_files()
       except Exception:  # pylint: disable=broad-exception-caught
         cmd_files = None
+    target_container = (
+        sandbox_utils.EVAL_CONTAINER_NAME
+        if is_openhands
+        else sandbox_utils.RUNTIME_CONTAINER_NAME
+    )
     if is_openhands and self.handle is not None:
+      self.handle.target_container = sandbox_utils.EVAL_CONTAINER_NAME
       self.handle._target_container = sandbox_utils.EVAL_CONTAINER_NAME
       self.handle._defer_setup_env = True
     try:
-      self.env = make_fleet_repo_env(
-          self.handle,
-          command_files=cmd_files,
-          step_timeout=self.step_timeout,
-          reward_timeout=self.reward_timeout,
-          verbose=self.verbose,
-      )
+      try:
+        self.env = make_fleet_repo_env(
+            self.handle,
+            command_files=cmd_files,
+            step_timeout=self.step_timeout,
+            reward_timeout=self.reward_timeout,
+            verbose=self.verbose,
+            container=target_container,
+        )
+      except TypeError:
+        self.env = make_fleet_repo_env(
+            self.handle,
+            command_files=cmd_files,
+            step_timeout=self.step_timeout,
+            reward_timeout=self.reward_timeout,
+            verbose=self.verbose,
+        )
     finally:
       if is_openhands and self.handle is not None:
+        self.handle.target_container = sandbox_utils.RUNTIME_CONTAINER_NAME
         self.handle._target_container = sandbox_utils.RUNTIME_CONTAINER_NAME
         self.handle._defer_setup_env = False
     if is_openhands:
