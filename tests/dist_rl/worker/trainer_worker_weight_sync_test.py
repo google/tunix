@@ -16,6 +16,7 @@
 
 from absl.testing import absltest
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.train import abstract_trainer
 from tunix.dist_rl.worker import trainer_worker as trainer_worker_lib
 
 WorkerState = datatypes.WorkerState
@@ -26,21 +27,25 @@ class _FakeTrainer:
   def __init__(self):
     self.calls = []
 
-  def prepare_weight_sync(self, sync_request=None, **kwargs):
+  def prepare_weight_sync(self, sync_request=None):
+    del sync_request
     self.calls.append("prepare")
     return [{"unit": "trainer0"}]
+
+  # Not overridden: the AbstractTrainer default every trainer inherits.
+  release_weight_sync = abstract_trainer.AbstractTrainer.release_weight_sync
 
 
 class _ReleasingTrainer(_FakeTrainer):
 
-  def release_weight_sync(self, **kwargs):
+  def release_weight_sync(self, sync_request=None):
     self.calls.append("release")
-    self.release_kwargs = kwargs
+    self.release_request = sync_request
     return "released"
 
 class _FailingTrainer(_FakeTrainer):
 
-  def prepare_weight_sync(self, sync_request=None, **kwargs):
+  def prepare_weight_sync(self, sync_request=None):
     raise RuntimeError("boom")
 
 
@@ -77,7 +82,7 @@ class WeightSyncStagingTest(absltest.TestCase):
     self.assertEqual(worker.state, WorkerState.READY)
     self.assertEqual(trainer.calls, ["prepare", "release"])
 
-  def test_release_without_trainer_hook(self):
+  def test_release_with_default_trainer_hook(self):
     worker = self._worker(_FakeTrainer())
     worker.prepare_weight_sync()
     self.assertIsNone(worker.release_weight_sync())
@@ -89,7 +94,7 @@ class WeightSyncStagingTest(absltest.TestCase):
     request = object()
     worker.prepare_weight_sync()
     worker.release_weight_sync(request)
-    self.assertIs(trainer.release_kwargs["sync_request"], request)
+    self.assertIs(trainer.release_request, request)
 
 
 if __name__ == "__main__":

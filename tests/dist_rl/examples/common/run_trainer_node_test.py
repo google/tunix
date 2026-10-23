@@ -49,7 +49,7 @@ class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
     self.worker.initialize()
     self.mock_mesh.reset_mock()
 
-  def test_save_checkpoint_runs_within_mesh_context_and_propagates_kwargs(self):
+  def test_save_checkpoint_runs_within_mesh_context_and_propagates_args(self):
     call_order = []
     self.mock_mesh.__enter__.side_effect = (
         lambda: call_order.append("enter_mesh")
@@ -62,12 +62,10 @@ class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
     )
 
     metadata = {"step": 10, "policy_version": 2, "num_rollouts": 4}
-    self.worker.save_checkpoint(
-        metadata=metadata, force=True, save_only_lora_params=True
-    )
+    self.worker.save_checkpoint(metadata=metadata, step=10, force=True)
 
     self.mock_trainer.save_checkpoint.assert_called_once_with(
-        metadata, force=True, save_only_lora_params=True
+        metadata, step=10, force=True
     )
     self.assertEqual(
         call_order, ["enter_mesh", "save_checkpoint", "exit_mesh"]
@@ -81,7 +79,7 @@ class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
     self.mock_mesh.__enter__.assert_called_once()
     self.mock_mesh.__exit__.assert_called_once()
 
-  def test_restore_checkpoint_runs_within_mesh_context_and_propagates_kwargs(
+  def test_restore_checkpoint_runs_within_mesh_context_and_propagates_step(
       self,
   ):
     call_order = []
@@ -116,24 +114,24 @@ class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
 
   def test_fwd_bwd_runs_within_mesh(self):
     req = mock.MagicMock(payload="payload", metadata={}, request_id="r1")
-    self.worker.fwd_bwd(req, skip_jit=False)
+    self.worker.fwd_bwd(req)
     self.mock_mesh.__enter__.assert_called_once()
     self.mock_trainer.fwd_bwd.assert_called_once_with("payload")
     self.mock_mesh.__exit__.assert_called_once()
 
   def test_update_runs_within_mesh(self):
     self.mock_trainer.update.return_value = 5
-    result = self.worker.update(custom_kw=True)
+    result = self.worker.update()
     self.assertEqual(result, 5)
     self.mock_mesh.__enter__.assert_called_once()
-    self.mock_trainer.update.assert_called_once_with(custom_kw=True)
+    self.mock_trainer.update.assert_called_once_with()
     self.mock_mesh.__exit__.assert_called_once()
 
   def test_eval_step_runs_within_mesh(self):
     req = mock.MagicMock(payload="eval_payload", metadata={}, request_id="r2")
-    self.worker.eval_step(req, arg1=1)
+    self.worker.eval_step(req)
     self.mock_mesh.__enter__.assert_called_once()
-    self.mock_trainer.eval_step.assert_called_once_with("eval_payload", arg1=1)
+    self.mock_trainer.eval_step.assert_called_once_with("eval_payload")
     self.mock_mesh.__exit__.assert_called_once()
 
   def test_compile_runs_within_mesh(self):

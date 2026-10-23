@@ -488,8 +488,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       role: datatypes.Role = datatypes.Role.ACTOR,
       accumulate_gradients: bool = False,
       apply_optimizer: bool = True,
-      skip_jit: bool = False,
-      **kwargs: Any,
   ) -> Any:
     """Executes atomic gradient accumulation / update on TrainerWorker."""
     worker = self._role_handle(role)
@@ -510,11 +508,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         metadata=metadata,
     )
     fwd_bwd_result = await self._invoke_worker(
-        worker,
-        "fwd_bwd",
-        request=request,
-        skip_jit=skip_jit,
-        **kwargs,
+        worker, "fwd_bwd", request=request
     )
     if not apply_optimizer:
       return fwd_bwd_result
@@ -733,7 +727,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
       metadata: Any = None,
-      **kwargs: Any,
+      *,
+      step: int | None = None,
+      force: bool = False,
   ) -> Any:
     """Requests the trainer worker for `role` to save a checkpoint."""
     worker = self._role_handle(role)
@@ -745,19 +741,19 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         role_name,
     )
     return await self._invoke_worker(
-        worker, "save_checkpoint", metadata=metadata, **kwargs
+        worker, "save_checkpoint", metadata=metadata, step=step, force=force
     )
 
   async def _restore_checkpoint(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
-      **kwargs: Any,
+      step: int | None = None,
   ) -> Any:
     role_name = role.name
     worker = self._role_handle(role)
     if worker is None:
       raise ValueError(f"No trainer worker registered for role {role_name}")
-    return await self._invoke_worker(worker, "restore_checkpoint", **kwargs)
+    return await self._invoke_worker(worker, "restore_checkpoint", step=step)
 
   async def resume_from_checkpoint(
       self,

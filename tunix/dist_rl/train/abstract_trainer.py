@@ -115,7 +115,7 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def fwd_bwd(self, payload: datatypes.TrainerPayload, **kwargs) -> None:
+  def fwd_bwd(self, payload: datatypes.TrainerPayload) -> None:
     """Executes forward and backward passes.
 
     Metrics are cached to overlap train steps.
@@ -124,19 +124,17 @@ class AbstractTrainer(abc.ABC):
     caller-driven: one `update()` per N `fwd_bwd()` calls.
     Args:
       payload: A packed micro-batch ready for gradient descent.
-      **kwargs: Implementation-specific options.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement fwd_bwd."
     )
 
   @abc.abstractmethod
-  def update(self, **kwargs) -> int:
+  def update(self) -> int:
     """Applies the accumulated (mean) gradients as one optimizer update.
 
     Must be preceded by at least one `fwd_bwd()` call since the last update.
-    Args:
-      **kwargs: Implementation-specific options.
+
     Returns:
       The new train step count (number of optimizer updates applied).
     """
@@ -145,14 +143,13 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def eval_step(self, payload: datatypes.TrainerPayload, **kwargs) -> None:
+  def eval_step(self, payload: datatypes.TrainerPayload) -> None:
     """Executes one evaluation step on the given payload.
 
     Must not mutate any trainer state, including gradient accumulation
     buffers.
     Args:
       payload: A packed micro-batch ready for evaluation.
-      **kwargs: Implementation-specific options.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement eval_step."
@@ -179,29 +176,35 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def save_checkpoint(self, metadata: Any, **kwargs) -> None:
+  def save_checkpoint(
+      self,
+      metadata: Any,
+      *,
+      step: int | None = None,
+      force: bool = False,
+  ) -> None:
     """Force the trainer to serialize its state (model + optimizer).
 
     Checkpoint cadence/policy is the caller's responsibility.
     Args:
       metadata: The metadata pytree to save alongside the checkpoint.
-      **kwargs: Implementation-specific options.
+      step: The step to save under. If None, implementations use
+        `metadata["step"]` when present, else their current train step.
+      force: Save even if the checkpoint manager's save policy (e.g. a save
+        interval) would skip this step.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement save_checkpoint."
     )
 
   @abc.abstractmethod
-  def restore_checkpoint(
-      self, step: int | None = None, **kwargs
-  ) -> Any:
+  def restore_checkpoint(self, step: int | None = None) -> Any:
     """Restore state from checkpoint and return the metadata pytree.
 
     The metadata is the same as what is used on save_checkpoint.
     Args:
       step: Checkpoint step to restore. If None, restores from the latest
         checkpoint.
-      **kwargs: Implementation-specific options.
 
     Returns:
       The restored metadata pytree (global_step, etc.).
@@ -222,16 +225,34 @@ class AbstractTrainer(abc.ABC):
     pass
 
   @abc.abstractmethod
-  def prepare_weight_sync(self, **kwargs) -> None:
+  def prepare_weight_sync(self, sync_request: Any = None) -> Any:
     """Stages weights for transfer and returns coordinates/metadata for Rollouts to pull.
 
     For a Raiden based implementation, trigger the d2h weight transfer here.
     Args:
-      **kwargs: Implementation-specific options.
+      sync_request: The round's request from `WeightSyncCoordinator`.
+
+    Returns:
+      The staged weights' transfer metadata (e.g. work-unit metadata).
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement prepare_weight_sync."
     )
+
+  def release_weight_sync(self, sync_request: Any = None) -> Any:
+    """Ends the staging hold taken by `prepare_weight_sync`.
+
+    Called once the round's transfer is complete. Default implementation is a
+    no-op for trainers that hold nothing between prepare and release.
+
+    Args:
+      sync_request: The same request passed to `prepare_weight_sync`.
+
+    Returns:
+      An implementation-defined acknowledgement.
+    """
+    del sync_request
+    return None
 
   @abc.abstractmethod
   def get_metrics(self) -> metrics.MetricsBuffer:
