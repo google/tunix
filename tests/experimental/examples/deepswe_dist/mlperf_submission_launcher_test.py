@@ -1138,6 +1138,35 @@ class SubmissionLauncherTest(absltest.TestCase):
       self.assertIn("--stage_next_microbatch", orch, name)
       self.assertRegex(orch, r"--pack_pad_position=start\b", name)
 
+  def test_warmup_and_raiden_parallelism_in_all_397b_v7x_recipes(self):
+    for name in (
+        "mlperf_397b_256_v7x.sh",
+        "mlperf_397b_512_v7x.sh",
+        "mlperf_397b_1024_v7x.sh",
+        "mlperf_gbs512.sh",
+        "mlperf_gbs1024_submission.sh",
+    ):
+      render = _render(_RECIPE.with_name(name))
+      orch = _jobset(render, "orch")
+      self.assertIn("--trainer_warmup_compile", orch, name)
+      self.assertIn("--trainer_warmup_routed_experts", orch, name)
+      self.assertRegex(orch, r"\bRAIDEN_PARALLELISM=16\b", name)
+      self.assertRegex(_jobset(render, "roll-0"), r"\bRAIDEN_PARALLELISM=16\b", name)
+      trainer = _jobset(render, "train")
+      self.assertRegex(trainer, r"\bRAIDEN_PARALLELISM=16\b", name)
+      worker = trainer[trainer.index("name: pathways-worker") :]
+      self.assertRegex(
+          worker, r'name: RAIDEN_PARALLELISM\s+value: "16"', name
+      )
+    # An explicit RAIDEN_PARALLELISM reaches the Pathways worker too.
+    trainer = _jobset(_render(RAIDEN_PARALLELISM="8"), "train")
+    worker = trainer[trainer.index("name: pathways-worker") :]
+    self.assertRegex(worker, r'name: RAIDEN_PARALLELISM\s+value: "8"')
+    # Warm-up compile can still be turned off.
+    orch = _jobset(_render(TRAINER_WARMUP_COMPILE="false"), "orch")
+    self.assertNotIn("--trainer_warmup_compile", orch)
+    self.assertNotIn("--trainer_warmup_routed_experts", orch)
+
   def test_trajectory_store_is_enabled_by_default(self):
     orch = _jobset(self.default, "orch")
     self.assertIn("--no-disable_trajectory_store", orch)
