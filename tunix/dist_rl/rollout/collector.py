@@ -293,15 +293,17 @@ class TrajectoryCollectorEngine:
       prompt_len = int(prompt_tokens.size)
       if prompt_tokens.size:
         prompt_tokens = prompt_tokens.reshape(1, -1)
+        prompt_lengths = np.asarray([prompt_len], dtype=np.int32)
       else:
         prompt_tokens = np.array([[0]], dtype=np.int32)
+        prompt_lengths = None
 
       return base_rollout.RolloutOutput(
           text=[text],
           logits=None,
           tokens=[tokens],
           left_padded_prompt_tokens=prompt_tokens,
-          prompt_lengths=np.asarray([prompt_len], dtype=np.int32),
+          prompt_lengths=prompt_lengths,
           logprobs=[logprobs] if logprobs is not None else None,
           routed_experts=[routed_experts]
           if routed_experts is not None
