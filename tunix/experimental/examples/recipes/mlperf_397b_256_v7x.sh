@@ -62,10 +62,11 @@ export MAXTEXT_MODEL_NAME="qwen3.5-397b-a17b"
 #     With TRAINER_TUNED_FLAGS=true: FSDP=64, TP=1, EP=1, CP=8 (num_moe_token_chunks=1).
 #     With TRAINER_TUNED_FLAGS=false: FSDP=32, TP=1, EP=2, CP=8.
 # Mesh rule: cp-as-ep (cp-as-ep-dense-no-cp with TRAINER_TUNED_FLAGS=true, see below).
+export TRAINER_TUNED_FLAGS="${TRAINER_TUNED_FLAGS:-true}"
 export TRAINER_JOBSET_YAML="${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}"
 export TRAINER_TPU_SLICE="${TRAINER_TPU_SLICE:-tpu7x:4x4x8}"
 if [[ "${TRAINER_TPU_SLICE}" == "tpu7x:4x8x8" ]]; then
-  if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
+  if [[ "${TRAINER_TUNED_FLAGS}" == "true" ]]; then
     export TRAINER_MESH_FSDP="${TRAINER_MESH_FSDP:-64}"
     export TRAINER_MESH_TP="${TRAINER_MESH_TP:-1}"
     export TRAINER_MESH_EXPERT="${TRAINER_MESH_EXPERT:-1}"
@@ -82,6 +83,67 @@ else
   export TRAINER_MESH_EXPERT="${TRAINER_MESH_EXPERT:-2}"
   export TRAINER_MESH_CONTEXT="${TRAINER_MESH_CONTEXT:-4}"
 fi
+
+if [[ "${TRAINER_TUNED_FLAGS}" == "true" ]]; then
+  _logps_head="$(printf '%s' "${TUNIX_LOGPS_SHARDED_HEAD:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  case "${_logps_head}" in
+    0|false|off|no) export COMPUTE_LOGPS_CHUNK_SIZE="${COMPUTE_LOGPS_CHUNK_SIZE:-1024}" ;;
+  esac
+  export COMPUTE_LOGPS_CHUNK_SIZE="${COMPUTE_LOGPS_CHUNK_SIZE:-4096}"
+  export PACK_PAD_POSITION="${PACK_PAD_POSITION:-start}"
+fi
+export DROPLESS="${DROPLESS:-true}"
+case "${DROPLESS}" in
+  true)
+    if [[ "${TRAINER_TUNED_FLAGS}" == "true" ]]; then
+      export RAGGED_BUFFER_FACTOR="${RAGGED_BUFFER_FACTOR:-2.75}"
+    fi
+    export RAGGED_BUFFER_FACTOR="${RAGGED_BUFFER_FACTOR:--1}"
+    if [[ "${TRAINER_TUNED_FLAGS}" == "true" && "${RAGGED_BUFFER_FACTOR}" != "-1" ]]; then
+      export RETRY_WHEN_TOKENS_DROPPED="${RETRY_WHEN_TOKENS_DROPPED:-true}"
+      export MOE_EXCLUDE_PADDING="${MOE_EXCLUDE_PADDING:-true}"
+      export LOG_MOE_DROPS="${LOG_MOE_DROPS:-true}"
+      if [[ "${RETRY_DROPLESS_FINAL_MICRO_BATCH:-false}" != "true" \
+            && -z "${FIRST_PHASE_RAGGED_BUFFER_FACTOR:-}" ]]; then
+        export REMAT_CONTEXT="${REMAT_CONTEXT:-device}"
+        if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "64x1x8" ]]; then
+          export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-1}"
+        fi
+        export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
+      fi
+    fi
+    export REMAT_CONTEXT="${REMAT_CONTEXT:-offload}"
+    export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-4}"
+    export TRAINER_MAX_HBM_SIZE_MIB="${TRAINER_MAX_HBM_SIZE_MIB:-84992}"
+    if [[ "${RAGGED_BUFFER_FACTOR}" != "-1" && "${RETRY_WHEN_TOKENS_DROPPED:-false}" != "true" ]]; then
+      echo "ERROR: DROPLESS=true with RAGGED_BUFFER_FACTOR=${RAGGED_BUFFER_FACTOR} drops tokens;" \
+           "set RETRY_WHEN_TOKENS_DROPPED=true or DROPLESS=false" >&2
+      exit 1
+    fi
+    if [[ "${PACK_PAD_POSITION:-end}" == "start" \
+          && "${RAGGED_BUFFER_FACTOR}" != "-1" \
+          && "${MOE_EXCLUDE_PADDING:-false}" != "true" ]]; then
+      echo "ERROR: PACK_PAD_POSITION=start with finite MoE capacity requires" \
+           "MOE_EXCLUDE_PADDING=true (or RAGGED_BUFFER_FACTOR=-1) so leading" \
+           "padding tokens do not fill expert buffers ahead of real tokens" >&2
+      exit 1
+    fi
+    ;;
+  false)
+    ;;
+  *)
+    echo "ERROR: DROPLESS must be true or false, got '${DROPLESS}'" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "${TRAINER_TUNED_FLAGS}" == "true" ]]; then
+  export TUNIX_LOGPS_SHARDED_HEAD="${TUNIX_LOGPS_SHARDED_HEAD:-fused}"
+fi
+export TUNIX_LOGPS_SHARDED_HEAD="${TUNIX_LOGPS_SHARDED_HEAD:-local}"
+export PIPELINE_TRAIN_MICROBATCHES="${PIPELINE_TRAIN_MICROBATCHES:-true}"
+export PIPELINE_STEP_BOUNDARY="${PIPELINE_STEP_BOUNDARY:-1}"
+export STAGE_NEXT_MICROBATCH="${STAGE_NEXT_MICROBATCH:-${PIPELINE_STEP_BOUNDARY}}"
 
 # Rollout: 8 chips = 16 devices = 2 hosts per replica. dp * tp * expert must equal
 # the DEVICE count, so expert=16 on 8 chips. Scaled rollout recipes
@@ -113,15 +175,17 @@ export ORCHESTRATOR_EXTRA_ENV="${ORCHESTRATOR_EXTRA_ENV:-WEIGHT_SYNC_BIND_TIMEOU
 export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-USE_BATCHED_RPA_LONG_CTX_KERNEL=${USE_BATCHED_RPA_LONG_CTX_KERNEL} ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD} RAY_memory_monitor_refresh_ms=0 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 ENABLE_MULTI_NUMA=${ENABLE_MULTI_NUMA} TPU_RAIDEN_DATA_NICS=${TPU_RAIDEN_DATA_NICS} RAIDEN_BROADCAST_HOST_RATIO=${RAIDEN_BROADCAST_HOST_RATIO} RAIDEN_BROADCAST_PIPELINE_STAGES=${RAIDEN_BROADCAST_PIPELINE_STAGES}${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS:+ TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS}}${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS:+ TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS}}}"
 # Rollout (vLLM) libtpu flags; mlperf_base.sh only applies its default when unset.
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false --xla_tpu_dvfs_p_state=7}"
-# TRAINER_TUNED_FLAGS=true at the 128-chip trainer mesh 32x2x4 sets
-# --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=true in the default trainer libtpu
-# flags below (false elsewhere, as before): XLA issues every offloaded reduce-scatter on one
-# SparseCore. On its own it made the step slower on the bench (about +0.9 s/step); with
+# TRAINER_TUNED_FLAGS=true at the 128-chip (32x2x4) and 256-chip (32x2x8, 64x1x8) trainer meshes
+# sets --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=true in the default trainer
+# libtpu flags below (false elsewhere, as before): XLA issues every offloaded reduce-scatter on
+# one SparseCore. On its own it made the step slower on the bench (about +0.9 s/step); with
 # gdn_cp_dh_scan, which the block also sets only there (part 2), the two together are faster
 # (numbers in part 2). A TRAINER_LIBTPU_INIT_ARGS set by the caller is kept as it is.
-if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" \
-      && "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
-  _single_sc_reduce_scatter=true
+if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
+  case "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" in
+    32x2x4|32x2x8|64x1x8) _single_sc_reduce_scatter=true ;;
+    *) _single_sc_reduce_scatter=false ;;
+  esac
 else
   _single_sc_reduce_scatter=false
 fi
@@ -136,8 +200,8 @@ fi
 # TRAINER_TUNED_FLAGS (true or false): trainer settings measured on the RL trainer
 # bench (AI-Hypercomputer/maxtext#5701) at this recipe's 128-chip trainer cell. Most
 # are settings of the MaxText pretraining recipe for this model
-# (AI-Hypercomputer/maxtext#5409) that this recipe does not use yet. Off here and in
-# the recipes that source this one; on in mlperf_gbs1024_submission.sh. Part 1, the
+# (AI-Hypercomputer/maxtext#5409). On by default here and in the recipes that source
+# this one. Part 1, the
 # trainer libtpu flag, is appended here so the trainer env, the Pathways workers and
 # the proxy (which compiles the trainer program) all copy it. A value already in
 # TRAINER_LIBTPU_INIT_ARGS is kept.
@@ -205,13 +269,15 @@ if [[ "${NUM_MOE_TOKEN_CHUNKS}" == "1" ]]; then
 else
   _moe_chunk_pipeline=true
 fi
-# TRAINER_TUNED_FLAGS=true at the 128-chip trainer mesh 32x2x4 gives the fused wi forward
-# GMM N tiles of 2048 instead of 1024 (wi_tile_fwd_mlp_dim below, one value), next to the
-# 2-deep weight pipeline that tile needs to fit VMEM (wi_tile_fwd_rhs_buffer_count=2, at
-# the end of the TRAINER_TUNED_FLAGS block).
-if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" \
-      && "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
-  _wi_tile_fwd_mlp_dim=2048
+# TRAINER_TUNED_FLAGS=true at the 128-chip (32x2x4) and 256-chip (32x2x8, 64x1x8) trainer
+# meshes gives the fused wi forward GMM N tiles of 2048 instead of 1024 (wi_tile_fwd_mlp_dim
+# below, one value), next to the 2-deep weight pipeline that tile needs to fit VMEM
+# (wi_tile_fwd_rhs_buffer_count=2, at the end of the TRAINER_TUNED_FLAGS block).
+if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
+  case "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" in
+    32x2x4|32x2x8|64x1x8) _wi_tile_fwd_mlp_dim=2048 ;;
+    *) _wi_tile_fwd_mlp_dim=1024 ;;
+  esac
 else
   _wi_tile_fwd_mlp_dim=1024
 fi
@@ -693,79 +759,36 @@ if [[ "${TRAINER_TUNED_FLAGS:-false}" == "true" ]]; then
       export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} query_proj_kernel_gather_once=true"
       ;;
   esac
-  # fp8_fake_quant_hoist only at the mesh it was timed at, and only with the trainer's fp8
-  # fake-quant on (fp8_moe.sh: TRAINER_FP8 defaults to true), without which MaxText raises.
-  if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" \
-        && "${TRAINER_FP8:-true}" == "true" ]]; then
-    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} fp8_fake_quant_hoist=gather8"
-  fi
-  # wi_tile_fwd_rhs_buffer_count=2 only at the mesh it was timed at, where the recipe's
-  # wi_tile_fwd_mlp_dim is 2048 (above): that tile needs the 2-deep weight pipeline to
-  # fit VMEM.
-  if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
-    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} wi_tile_fwd_rhs_buffer_count=2"
-  fi
-  # gdn_cp_m_scan only at the mesh it was timed at.
-  if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
-    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} gdn_cp_m_scan=true"
-  fi
-  # The final stack's keys only at the mesh they were timed at, where part 1 also sets the
-  # single-SparseCore reduce-scatter flag that gdn_cp_dh_scan needs; moe_fp8_bwd_dispatch only
-  # with the trainer's fp8 fake-quant on, the cell its numerics were measured on.
-  if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
-    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} gdn_cp_dh_scan=true gdn_cp_pass1_states_and_bf16_qkv=true gdn_out_proj_token_minor=true"
-    if [[ "${TRAINER_FP8:-true}" == "true" ]]; then
-      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} moe_fp8_bwd_dispatch=true"
-    fi
-    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} ragged_unsort_spread_masked_indices=true moe_fallback_topk_capacity=128 gdn_cp_fast_state_passing=true fp32_master_storage=residual16"
-  fi
-  # Three keys timed on top of the final stack, only at that mesh: moe_fp8_token_all_gather only
-  # with the trainer's fp8 fake-quant on (lossy; its numerics run used that cell), then
-  # gdn_bwd_natural_layout=states and gdn_gated_norm_layout=token_minor (which MaxText refuses
-  # without gdn_out_proj_token_minor=true, set just above).
-  if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
-    if [[ "${TRAINER_FP8:-true}" == "true" ]]; then
-      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} moe_fp8_token_all_gather=true"
-    fi
-    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} gdn_bwd_natural_layout=states gdn_gated_norm_layout=token_minor"
-  fi
-  # Two more timed on top of those, only at that mesh: the attention re-order without its
-  # self-copy (MaxText refuses it without context_parallel_attention_load_balance=true, which
-  # the recipe sets), and the per-chunk reduce-scatter of the log-prob head's table gradient,
-  # which the trainer process reads from its environment (TRAINER_EXTRA_ENV), only with the
-  # fused head (tunix refuses it with the sharded head off). A value the caller set, in
-  # TRAINER_EXTRA_ENV or as TUNIX_LOGPS_HEAD_GRAD_SCATTER, is kept.
-  if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
-    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_attention_load_balance_order=dual_chunk_swap_local_self"
-    _logps_head_mode="$(printf '%s' "${TUNIX_LOGPS_SHARDED_HEAD:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
-    if [[ "${_logps_head_mode}" == "fused" && " ${TRAINER_EXTRA_ENV} " != *" TUNIX_LOGPS_HEAD_GRAD_SCATTER="* ]]; then
-      export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV} TUNIX_LOGPS_HEAD_GRAD_SCATTER=${TUNIX_LOGPS_HEAD_GRAD_SCATTER:-chunk}"
-    fi
-    unset _logps_head_mode
-  fi
-  # Three more timed on top of those, only at that mesh, right after the re-order key (the order
-  # the TPU runs used): the GDN forward kernels' natural-layout Conv1D with 4 kq heads per group
-  # (MaxText refuses the first without gdn_cp_pass1_states_and_bf16_qkv=true, set above), and
-  # the GDN in-projection computed in the kernel's q|k|v order (MaxText refuses it with
-  # head-sharded GDN context parallelism; the block sets gdn_cp_mode=seq).
-  if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
-    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} gdn_conv1d_natural_layout=true gdn_fwd_kernel_head_group_size=4 gdn_in_proj_kernel_order=true"
-  fi
-  # Three more timed on top of those, only at that mesh, after the GDN keys and in the order the
-  # TPU runs appended them: the dense-weight gradients reduced by all-reduce (MaxText refuses it
-  # under a rule set without embed_grad; the block sets cp-as-ep-dense-no-cp), the largest
-  # optimizer leaves kept in device memory between updates, up to the GiB per device on the
-  # second line (MaxText refuses it without optimizer_memory_host_offload=true, which the
-  # recipe sets), and the MoE ragged buffer factor 2.0, only with the dropless retry and a
-  # finite buffer factor (an overflowing micro-batch is then rerun dropless, so no token is
-  # dropped; RAGGED_BUFFER_FACTOR=-1 and launches without the retry keep their own value).
-  if [[ "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" == "32x2x4" ]]; then
-    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} dense_grad_reduce=all_reduce"
-    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} optimizer_device_resident_gib=6"
-    if [[ "${RAGGED_BUFFER_FACTOR}" != "-1" && "${RETRY_WHEN_TOKENS_DROPPED:-false}" == "true" ]]; then
-      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} ragged_buffer_factor=2.0"
-    fi
-  fi
+  case "${TRAINER_MESH_FSDP}x${TRAINER_MESH_EXPERT}x${TRAINER_MESH_CONTEXT}" in
+    32x2x4|32x2x8|64x1x8)
+      if [[ "${TRAINER_FP8:-true}" == "true" ]]; then
+        export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} fp8_fake_quant_hoist=gather8"
+      fi
+      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} wi_tile_fwd_rhs_buffer_count=2"
+      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} gdn_cp_m_scan=true"
+      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} gdn_cp_dh_scan=true gdn_cp_pass1_states_and_bf16_qkv=true gdn_out_proj_token_minor=true"
+      if [[ "${TRAINER_FP8:-true}" == "true" ]]; then
+        export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} moe_fp8_bwd_dispatch=true"
+      fi
+      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} ragged_unsort_spread_masked_indices=true moe_fallback_topk_capacity=128 gdn_cp_fast_state_passing=true fp32_master_storage=residual16"
+      if [[ "${TRAINER_FP8:-true}" == "true" ]]; then
+        export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} moe_fp8_token_all_gather=true"
+      fi
+      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} gdn_bwd_natural_layout=states gdn_gated_norm_layout=token_minor"
+      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} context_parallel_attention_load_balance_order=dual_chunk_swap_local_self"
+      _logps_head_mode="$(printf '%s' "${TUNIX_LOGPS_SHARDED_HEAD:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+      if [[ "${_logps_head_mode}" == "fused" && " ${TRAINER_EXTRA_ENV} " != *" TUNIX_LOGPS_HEAD_GRAD_SCATTER="* ]]; then
+        export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV} TUNIX_LOGPS_HEAD_GRAD_SCATTER=${TUNIX_LOGPS_HEAD_GRAD_SCATTER:-chunk}"
+      fi
+      unset _logps_head_mode
+      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} gdn_conv1d_natural_layout=true gdn_fwd_kernel_head_group_size=4 gdn_in_proj_kernel_order=true"
+      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} dense_grad_reduce=all_reduce"
+      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} optimizer_device_resident_gib=6"
+      if [[ "${RAGGED_BUFFER_FACTOR}" != "-1" && "${RETRY_WHEN_TOKENS_DROPPED:-false}" == "true" ]]; then
+        export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} ragged_buffer_factor=2.0"
+      fi
+      ;;
+  esac
 fi
 export DEBUG=${DEBUG:-0}
 

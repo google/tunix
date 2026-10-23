@@ -781,22 +781,15 @@ class SubmissionLauncherTest(absltest.TestCase):
     expected = {key: ("remat", "device") for key in _PROJ_KEYS}
     # MaxText refuses query_proj_kernel_gather_once with query_proj=device.
     expected["query_proj_kernel_gather_once"] = ("true", "false")
-    # fp8_fake_quant_hoist, the 2048 tile and its buffer count only at 32x2x4.
-    expected[_FQ_HOIST] = ("gather8", "off")
-    expected[_WI_TILE] = ("2048", "1024")
-    expected[_WI_BUFFERS] = ("2", "0")
-    expected[_GDN_M_SCAN] = ("true", "false")
-    for key, value in _FINAL_KEYS.items():
-      expected[key] = (value, _MAXTEXT_DEFAULTS[key])
-    # The bench cell's own buffer factor: the tuned block sets 2.0 at 32x2x4.
-    expected[_BUFFER_FACTOR] = (_TUNED_BUFFER_FACTOR, "2.75")
     self.assertEqual(_flag_changes(before, flags), expected)
     self.assertNotIn("query_proj_kernel_gather_once", flags)
-    self.assertNotIn(_FQ_HOIST, flags)
-    self.assertNotIn(_WI_BUFFERS, flags)
-    self.assertNotIn(_GDN_M_SCAN, flags)
-    for key in _FINAL_KEYS:
-      self.assertNotIn(key, flags)
+    self.assertEqual(flags[_FQ_HOIST], "gather8")
+    self.assertEqual(flags[_WI_TILE], "2048")
+    self.assertEqual(flags[_WI_BUFFERS], "2")
+    self.assertEqual(flags[_GDN_M_SCAN], "true")
+    for key, value in _FINAL_KEYS.items():
+      self.assertEqual(flags[key], value, key)
+    self.assertEqual(flags[_BUFFER_FACTOR], _TUNED_BUFFER_FACTOR)
     self.assertEqual(flags["num_moe_token_chunks"], "2")
     self.assertEqual(flags["moe_chunk_pipeline"], "true")
     self.assertEqual(flags["moe_roe_packed_routing_gather"], "true")
@@ -814,22 +807,15 @@ class SubmissionLauncherTest(absltest.TestCase):
     expected["moe_roe_packed_routing_gather"] = ("true", "false")
     # MaxText refuses query_proj_kernel_gather_once with query_proj=device.
     expected["query_proj_kernel_gather_once"] = ("true", "false")
-    # fp8_fake_quant_hoist, the 2048 tile and its buffer count only at 32x2x4.
-    expected[_FQ_HOIST] = ("gather8", "off")
-    expected[_WI_TILE] = ("2048", "1024")
-    expected[_WI_BUFFERS] = ("2", "0")
-    expected[_GDN_M_SCAN] = ("true", "false")
-    for key, value in _FINAL_KEYS.items():
-      expected[key] = (value, _MAXTEXT_DEFAULTS[key])
-    # The bench cell's own buffer factor: the tuned block sets 2.0 at 32x2x4.
-    expected[_BUFFER_FACTOR] = (_TUNED_BUFFER_FACTOR, "2.75")
     self.assertEqual(_flag_changes(before, flags), expected)
     self.assertNotIn("query_proj_kernel_gather_once", flags)
-    self.assertNotIn(_FQ_HOIST, flags)
-    self.assertNotIn(_WI_BUFFERS, flags)
-    self.assertNotIn(_GDN_M_SCAN, flags)
-    for key in _FINAL_KEYS:
-      self.assertNotIn(key, flags)
+    self.assertEqual(flags[_FQ_HOIST], "gather8")
+    self.assertEqual(flags[_WI_TILE], "2048")
+    self.assertEqual(flags[_WI_BUFFERS], "2")
+    self.assertEqual(flags[_GDN_M_SCAN], "true")
+    for key, value in _FINAL_KEYS.items():
+      self.assertEqual(flags[key], value, key)
+    self.assertEqual(flags[_BUFFER_FACTOR], _TUNED_BUFFER_FACTOR)
 
   def test_tuned_flags_keep_an_explicit_chunk_count_at_64x1x8(self):
     flags = _maxtext_flags(
@@ -844,29 +830,32 @@ class SubmissionLauncherTest(absltest.TestCase):
     for key in _PROJ_KEYS:
       self.assertEqual(flags[key], "device", key)
     self.assertNotIn("query_proj_kernel_gather_once", flags)
-    self.assertNotIn(_FQ_HOIST, flags)
-    self.assertEqual(flags[_WI_TILE], "1024")
-    self.assertNotIn(_WI_BUFFERS, flags)
-    self.assertNotIn(_GDN_M_SCAN, flags)
-    for key in _FINAL_KEYS:
-      self.assertNotIn(key, flags)
+    self.assertEqual(flags[_FQ_HOIST], "gather8")
+    self.assertEqual(flags[_WI_TILE], "2048")
+    self.assertEqual(flags[_WI_BUFFERS], "2")
+    self.assertEqual(flags[_GDN_M_SCAN], "true")
+    for key, value in _FINAL_KEYS.items():
+      self.assertEqual(flags[key], value, key)
 
   def test_fp8_fake_quant_hoist_only_at_the_timed_cell(self):
-    # Once, with gather8, in the 32x2x4 trainer with the tuned flags (the
-    # default render and the bench cell), next to fp8_moe_fake_quant=true.
-    for render in (self.default, self.bench_on):
+    # Once, with gather8, in the 32x2x4, 32x2x8, and 64x1x8 trainers with the
+    # tuned flags, next to fp8_moe_fake_quant=true.
+    for render in (
+        self.default,
+        self.bench_on,
+        _render(**_BENCH_CELL, **_MESH_32X2X8),
+        _render(**_BENCH_CELL, **_MESH_64X1X8),
+        _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
+    ):
       trainer = _jobset(render, "train")
       self.assertEqual(
           _maxtext_flag_tokens(trainer, _FQ_HOIST), [f"{_FQ_HOIST}=gather8"]
       )
       self.assertEqual(_maxtext_flags(trainer)["fp8_moe_fake_quant"], "true")
-    # Nowhere else: tuned flags off, the 256-chip meshes, TRAINER_FP8=false.
+    # Nowhere else: tuned flags off, TRAINER_FP8=false.
     others = {
         "tuned off": self.default_off,
         "bench, tuned off": self.bench_off,
-        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
-        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
-        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
         "32x2x8, tuned off": _render(
             TRAINER_TUNED_FLAGS="false", **_MESH_32X2X8
         ),
@@ -879,16 +868,15 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertNotIn(_FQ_HOIST, no_fp8)
 
   def test_wi_tile_2048_with_two_weight_buffers_only_at_the_timed_mesh(self):
-    # In the 32x2x4 trainer with the tuned flags (the default render, the bench
-    # cell, and the bench cell with TRAINER_FP8=false, which the tile does not
-    # depend on): the tile once, at 2048 (the recipe's 1024 replaced, not
-    # overridden), and the buffer count once, at 2.
-    at_32x2x4 = {
+    at_tuned_meshes = {
         "default": self.default,
         "bench": self.bench_on,
         "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
+        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
+        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
+        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
     }
-    for name, render in at_32x2x4.items():
+    for name, render in at_tuned_meshes.items():
       trainer = _jobset(render, "train")
       self.assertEqual(
           _maxtext_flag_tokens(trainer, _WI_TILE), [f"{_WI_TILE}=2048"], name
@@ -896,14 +884,9 @@ class SubmissionLauncherTest(absltest.TestCase):
       self.assertEqual(
           _maxtext_flag_tokens(trainer, _WI_BUFFERS), [f"{_WI_BUFFERS}=2"], name
       )
-    # Elsewhere the recipe's tile, once, and no buffer count: tuned flags off,
-    # the 256-chip meshes.
     others = {
         "tuned off": self.default_off,
         "bench, tuned off": self.bench_off,
-        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
-        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
-        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
         "32x2x8, tuned off": _render(
             TRAINER_TUNED_FLAGS="false", **_MESH_32X2X8
         ),
@@ -916,29 +899,24 @@ class SubmissionLauncherTest(absltest.TestCase):
       self.assertNotIn(_WI_BUFFERS, render, name)
 
   def test_gdn_cp_m_scan_only_at_the_timed_mesh(self):
-    # Once, in the 32x2x4 trainer with the tuned flags (the default render, the
-    # bench cell, and the bench cell with TRAINER_FP8=false, which it does not
-    # depend on); its backward twin gdn_cp_dh_scan only there too
-    # (test_final_stack_keys_only_at_the_timed_mesh).
-    at_32x2x4 = {
+    at_tuned_meshes = {
         "default": self.default,
         "bench": self.bench_on,
         "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
+        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
+        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
+        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
     }
-    for name, render in at_32x2x4.items():
+    for name, render in at_tuned_meshes.items():
       trainer = _jobset(render, "train")
       self.assertEqual(
           _maxtext_flag_tokens(trainer, _GDN_M_SCAN),
           [f"{_GDN_M_SCAN}=true"],
           name,
       )
-    # Nowhere else: tuned flags off, the 256-chip meshes.
     others = {
         "tuned off": self.default_off,
         "bench, tuned off": self.bench_off,
-        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
-        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
-        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
         "32x2x8, tuned off": _render(
             TRAINER_TUNED_FLAGS="false", **_MESH_32X2X8
         ),
@@ -948,17 +926,15 @@ class SubmissionLauncherTest(absltest.TestCase):
       self.assertNotIn(_GDN_DH_SCAN, render, name)
 
   def test_final_stack_keys_only_at_the_timed_mesh(self):
-    # Each key once, with its value, in the 32x2x4 trainer with the tuned flags
-    # (the default render, the bench cell, and the bench cell with
-    # TRAINER_FP8=false, where only moe_fp8_bwd_dispatch and
-    # moe_fp8_token_all_gather are absent); nowhere
-    # else: tuned flags off, the 256-chip meshes.
-    at_32x2x4 = {
+    at_tuned_meshes = {
         "default": self.default,
         "bench": self.bench_on,
         "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
+        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
+        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
+        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
     }
-    for name, render in at_32x2x4.items():
+    for name, render in at_tuned_meshes.items():
       trainer = _jobset(render, "train")
       for key, value in _FINAL_KEYS.items():
         want = [] if key in _FP8_ONLY and "TRAINER_FP8" in name else [f"{key}={value}"]
@@ -966,9 +942,6 @@ class SubmissionLauncherTest(absltest.TestCase):
     others = {
         "tuned off": self.default_off,
         "bench, tuned off": self.bench_off,
-        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
-        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
-        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
         "32x2x8, tuned off": _render(
             TRAINER_TUNED_FLAGS="false", **_MESH_32X2X8
         ),
@@ -978,25 +951,21 @@ class SubmissionLauncherTest(absltest.TestCase):
         self.assertNotIn(key, render, f"{name}: {key}")
 
   def test_single_sparse_core_reduce_scatter_only_at_the_timed_mesh(self):
-    # true in the trainer env, the Pathways worker env and the Pathways proxy args
-    # of the 32x2x4 trainer with the tuned flags, which also sets gdn_cp_dh_scan;
-    # false (the recipe's value) everywhere else, and a caller's own
-    # TRAINER_LIBTPU_INIT_ARGS is kept.
-    at_32x2x4 = {
+    at_tuned_meshes = {
         "default": self.default,
         "bench": self.bench_on,
         "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
+        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
+        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
+        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
     }
-    for name, render in at_32x2x4.items():
+    for name, render in at_tuned_meshes.items():
       trainer = _jobset(render, "train")
       self.assertEqual(trainer.count(f"{_RS_FLAG}=true"), 3, name)
       self.assertNotIn(f"{_RS_FLAG}=false", trainer, name)
     others = {
         "tuned off": self.default_off,
         "bench, tuned off": self.bench_off,
-        "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
-        "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
-        "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
     }
     for name, render in others.items():
       trainer = _jobset(render, "train")
@@ -1008,30 +977,24 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertNotIn(f"{_RS_FLAG}=true", trainer)
 
   def test_head_grad_scatter_only_at_the_timed_cell(self):
-    # Once, chunk, in the trainer env of the 32x2x4 trainer with the tuned flags
-    # and the fused log-prob head (the default render, the bench cell, and the
-    # bench cell with TRAINER_FP8=false, which it does not depend on); never in
-    # the orchestrator or rollout JobSets.
     def values(trainer):
       return re.findall(rf"\b{_HEAD_GRAD_SCATTER}=([A-Za-z0-9_]+)", trainer)
 
-    at_32x2x4 = {
+    at_tuned_meshes = {
         "default": self.default,
         "bench": self.bench_on,
         "bench, TRAINER_FP8=false": _render(TRAINER_FP8="false", **_BENCH_CELL),
-    }
-    for name, render in at_32x2x4.items():
-      self.assertEqual(values(_jobset(render, "train")), ["chunk"], name)
-      for suffix in ("orch", "roll-0"):
-        self.assertNotIn(_HEAD_GRAD_SCATTER, _jobset(render, suffix), name)
-    # Nowhere else: tuned flags off, the 256-chip meshes, and the 32x2x4 trainer
-    # with the "local" head or with the head off (tunix refuses the switch then).
-    others = {
-        "tuned off": self.default_off,
-        "bench, tuned off": self.bench_off,
         "32x2x8": _render(**_BENCH_CELL, **_MESH_32X2X8),
         "64x1x8": _render(**_BENCH_CELL, **_MESH_64X1X8),
         "256-chip slice": _render(TRAINER_TPU_SLICE="tpu7x:4x8x8"),
+    }
+    for name, render in at_tuned_meshes.items():
+      self.assertEqual(values(_jobset(render, "train")), ["chunk"], name)
+      for suffix in ("orch", "roll-0"):
+        self.assertNotIn(_HEAD_GRAD_SCATTER, _jobset(render, suffix), name)
+    others = {
+        "tuned off": self.default_off,
+        "bench, tuned off": self.bench_off,
         "local head": _render(TUNIX_LOGPS_SHARDED_HEAD="local"),
         "head off": _render(TUNIX_LOGPS_SHARDED_HEAD="0"),
     }
@@ -1142,35 +1105,38 @@ class SubmissionLauncherTest(absltest.TestCase):
     for key in _PROJ_KEYS:
       self.assertNotIn(key, flags)
 
-  def test_tuned_flags_are_off_in_the_other_397b_v7x_recipes(self):
+  def test_tuned_flags_are_on_in_all_397b_v7x_recipes(self):
     for name in (
         "mlperf_397b_256_v7x.sh",
+        "mlperf_397b_512_v7x.sh",
         "mlperf_397b_1024_v7x.sh",
         "mlperf_gbs512.sh",
     ):
       render = _render(_RECIPE.with_name(name))
-      self.assertNotIn("offloading_copy_to_sparsecore", render, name)
-      flags = _maxtext_flags(_jobset(render, "train"))
-      for key, (off, _) in _TUNED_KEYS.items():
-        if key != "num_moe_token_chunks":  # two in these recipes either way
-          self.assertEqual(_value(flags, key), off, f"{name}: {key}")
-      for key in _BENCH_MAXTEXT_KEYS:
-        self.assertNotIn(key, flags, name)
-      self.assertNotIn(_BENCH_MESH_RULE, render, name)
+      trainer = _jobset(render, "train")
+      self.assertEqual(trainer.count(_SC_FLAG), 3, name)
+      self.assertEqual(trainer.count(f"{_RS_FLAG}=true"), 3, name)
+      flags = _maxtext_flags(trainer)
+      for key, (_, on) in _TUNED_KEYS.items():
+        self.assertEqual(_value(flags, key), on, f"{name}: {key}")
+      self.assertEqual(flags["custom_mesh_and_rule"], _BENCH_MESH_RULE, name)
 
-  def test_head_and_staging_are_off_in_the_other_397b_v7x_recipes(self):
+  def test_head_and_staging_are_on_in_all_397b_v7x_recipes(self):
     for name in (
         "mlperf_397b_256_v7x.sh",
+        "mlperf_397b_512_v7x.sh",
         "mlperf_397b_1024_v7x.sh",
         "mlperf_gbs512.sh",
     ):
       render = _render(_RECIPE.with_name(name))
-      self.assertNotIn("TUNIX_LOGPS_SHARDED_HEAD", render, name)
-      self.assertNotIn(_HEAD_GRAD_SCATTER, render, name)
+      trainer = _jobset(render, "train")
+      self.assertRegex(trainer, r"\bTUNIX_LOGPS_SHARDED_HEAD=fused\b", name)
+      self.assertRegex(trainer, rf"\b{_HEAD_GRAD_SCATTER}=chunk\b", name)
       orch = _jobset(render, "orch")
-      self.assertIn("--no-pipeline_step_boundary", orch, name)
-      self.assertIn("--no-stage_next_microbatch", orch, name)
-      self.assertNotIn("--pack_pad_position", orch, name)
+      self.assertIn("--pipeline_train_microbatches", orch, name)
+      self.assertIn("--pipeline_step_boundary", orch, name)
+      self.assertIn("--stage_next_microbatch", orch, name)
+      self.assertRegex(orch, r"--pack_pad_position=start\b", name)
 
   def test_trajectory_store_is_enabled_by_default(self):
     orch = _jobset(self.default, "orch")
@@ -1204,13 +1170,13 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(flags["moe_chunk_pipeline"], "false")
     self.assertEqual(flags["query_proj"], "device")
     self.assertNotIn("query_proj_kernel_gather_once", flags)
-    self.assertNotIn(_FQ_HOIST, flags)
-    self.assertEqual(flags[_WI_TILE], "1024")
-    self.assertNotIn(_WI_BUFFERS, flags)
-    self.assertNotIn(_GDN_M_SCAN, flags)
-    for key in _FINAL_KEYS:
-      self.assertNotIn(key, flags)
-    self.assertNotIn(f"{_RS_FLAG}=true", trainer)
+    self.assertEqual(flags[_FQ_HOIST], "gather8")
+    self.assertEqual(flags[_WI_TILE], "2048")
+    self.assertEqual(flags[_WI_BUFFERS], "2")
+    self.assertEqual(flags[_GDN_M_SCAN], "true")
+    for key, value in _FINAL_KEYS.items():
+      self.assertEqual(flags[key], value, key)
+    self.assertEqual(trainer.count(f"{_RS_FLAG}=true"), 3)
 
   def test_pad_start_with_finite_moe_capacity_requires_exclude_padding(self):
     with self.assertRaisesRegex(
