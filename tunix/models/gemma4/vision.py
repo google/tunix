@@ -415,7 +415,8 @@ class Attention(nnx.Module):
       attn_mask: jax.Array | None,
   ) -> jax.Array:
     query_proj = self.q_einsum('BTD,NDH->BTNH', x)
-    key_proj, value_proj = self.kv_einsum('BSD,CKDH->CBSKH', x)
+    kv_proj = self.kv_einsum('BSD,CKDH->CBSKH', x)
+    key_proj, value_proj = kv_proj[0], kv_proj[1]
 
     if self.use_qk_norm:
       query_proj = self.query_norm(query_proj)
