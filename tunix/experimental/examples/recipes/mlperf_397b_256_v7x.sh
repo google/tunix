@@ -144,6 +144,10 @@ export TUNIX_LOGPS_SHARDED_HEAD="${TUNIX_LOGPS_SHARDED_HEAD:-local}"
 export PIPELINE_TRAIN_MICROBATCHES="${PIPELINE_TRAIN_MICROBATCHES:-true}"
 export PIPELINE_STEP_BOUNDARY="${PIPELINE_STEP_BOUNDARY:-1}"
 export STAGE_NEXT_MICROBATCH="${STAGE_NEXT_MICROBATCH:-${PIPELINE_STEP_BOUNDARY}}"
+# Compile the trainer before run_start. With RETURN_ROUTED_EXPERTS=true (mlperf_base.sh),
+# k8s_launcher.sh also passes --trainer_warmup_routed_experts, so the warm-up micro-batch
+# carries routed_experts and s=0 does not recompile for router replay.
+export TRAINER_WARMUP_COMPILE="${TRAINER_WARMUP_COMPILE:-true}"
 
 # Rollout: 8 chips = 16 devices = 2 hosts per replica. dp * tp * expert must equal
 # the DEVICE count, so expert=16 on 8 chips. Scaled rollout recipes
