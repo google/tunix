@@ -15,6 +15,7 @@
 """Protocols and factory registry for Trajectory Store implementations."""
 
 from tunix.dist_rl.trajectory import base_store
+from tunix.dist_rl.trajectory import export
 from tunix.dist_rl.trajectory import file_store
 from tunix.dist_rl.trajectory import in_memory_store
 from tunix.dist_rl.trajectory import sql_store
@@ -36,3 +37,5 @@ TrajectoryReader = base_store.TrajectoryReader
 TrajectoryWriter = base_store.TrajectoryWriter
 TrajectoryStore = base_store.TrajectoryStore
 TunixTrajectoryStore = base_store.TunixTrajectoryStore
+export_trajectories_df = export.export_trajectories_df
+export_trajectories_metadata_df = export.export_trajectories_metadata_df

@@ -46,9 +46,18 @@ class TrajectoryMetadataNotFoundError(KeyError):
 class TrajectoryMetricsNotFoundError(KeyError):
   """Raised when requested trajectory metrics are not found in the store."""
 
-  def __init__(self, trajectory_id: str) -> None:
-    super().__init__(f"Trajectory metrics for ID '{trajectory_id}' not found.")
-    self.trajectory_id = trajectory_id
+  def __init__(self, trajectory_id: str | list[str]) -> None:
+    if isinstance(trajectory_id, list):
+      ids_str = ", ".join(trajectory_id)
+      super().__init__(f"Trajectory metrics for IDs '{ids_str}' not found.")
+      self.trajectory_id = trajectory_id[0] if trajectory_id else ""
+      self.trajectory_ids = trajectory_id
+    else:
+      super().__init__(
+          f"Trajectory metrics for ID '{trajectory_id}' not found."
+      )
+      self.trajectory_id = trajectory_id
+      self.trajectory_ids = [trajectory_id]
 
 
 # ==============================================================================
@@ -117,7 +126,6 @@ class TrajectoryReader(Protocol[MetadataT]):
     """
     ...
 
-
 @runtime_checkable
 class TrajectoryWriter(Protocol[MetadataT]):
   """Structural protocol defining write Trajectory Store operations."""
@@ -180,7 +188,6 @@ class TrajectoryWriter(Protocol[MetadataT]):
       metrics: TrajectoryMetrics containing the metrics data to record.
     """
     ...
-
   def flush(self) -> None:
     """Flushes any pending or asynchronous writes to persistent storage.
 
@@ -362,6 +369,42 @@ class TrajectoryStore(
           f" {bound_cls.__name__}, got {resolved_cls.__name__}."
       )
     return resolved_cls.from_atif_metadata(atif_metadata)
+
+  def update_metrics(
+      self,
+      trajectory_id: str,
+      metrics: trajectory_lib.TrajectoryMetrics,
+  ) -> None:
+    """Updates (or creates) trajectory-level metrics.
+
+    Args:
+      trajectory_id: Unique identifier of the trajectory.
+      metrics: TrajectoryMetrics containing trajectory-level metrics.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement update_metrics."
+    )
+
+  def get_trajectories_metrics(
+      self, trajectory_ids: list[str] | None = None
+  ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
+    """Retrieves metrics for trajectories in the run.
+
+    Args:
+      trajectory_ids: Optional list of unique trajectory identifiers. If
+        specified, only metrics for these IDs is returned. If None, metrics for
+        all trajectories with recorded metrics is returned.
+
+    Returns:
+      A mapping from trajectory_id to TrajectoryMetrics.
+
+    Raises:
+      TrajectoryMetricsNotFoundError: If any requested trajectory ID does not
+        exist.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement get_trajectories_metrics."
+    )
 
   @classmethod
   @abc.abstractmethod

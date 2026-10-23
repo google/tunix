@@ -1818,6 +1818,10 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertEqual(metas[0].trajectory_id, 'traj_test_123')
     self.assertEqual(metas[0].status, 'SUCCEEDED')
     self.assertEqual(metas[0].total_reward, 3.5)
+    self.assertIsNotNone(metas[0].final_metrics)
+    self.assertEqual(metas[0].final_metrics.total_prompt_tokens, 1)
+    self.assertEqual(metas[0].final_metrics.total_completion_tokens, 4)
+    self.assertEqual(metas[0].final_metrics.total_steps, 5)
     self.assertFalse(metas[0].masked_out)
     self.assertEqual(metas[0].target_policy_versions, [42])
     self.assertLen(metas[0].env_time['step_latency'], 2)
@@ -2235,7 +2239,7 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
         beta=0.0,
         use_rollout_logps=True,
     )
-    learner._trajectory_logger = None
+    learner._trajectory_store = None
     learner._full_batch_size = 0
     learner.metric_fns = []
     learner._compute_rewards = lambda **kw: np.array([0.0, 1.0])
