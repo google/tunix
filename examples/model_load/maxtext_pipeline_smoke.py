@@ -31,12 +31,16 @@ import types
 
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--pipeline-stages", type=int, choices=(2, 4), required=True)
+  parser.add_argument(
+      "--pipeline-stages", type=int, choices=(2, 4), required=True
+  )
   parser.add_argument("--output", type=Path, required=True)
   parser.add_argument(
       "--targeted-imports",
       action="store_true",
-      help="Load real submodules without executing the unrelated top-level API.",
+      help=(
+          "Load real submodules without executing the unrelated top-level API."
+      ),
   )
   args = parser.parse_args()
   root = Path(__file__).resolve().parents[2]
@@ -49,9 +53,11 @@ def main():
       "training_throughput_claim": False,
       "pipeline_stages": args.pipeline_stages,
       "tensor_parallelism": 8 // args.pipeline_stages,
-      "tunix_commit": subprocess.check_output(
-          ["git", "rev-parse", "HEAD"], cwd=root, text=True
-      ).strip(),
+      "tunix_commit": (
+          subprocess.check_output(
+              ["git", "rev-parse", "HEAD"], cwd=root, text=True
+          ).strip()
+      ),
       "source_sha256": {
           name: hashlib.sha256((root / name).read_bytes()).hexdigest()
           for name in (
@@ -69,10 +75,10 @@ def main():
       )
       sys.modules["tunix"] = package
     sys.path.insert(0, str(root))
-    import jax  # pylint: disable=g-import-not-at-top
-    import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
     from flax import linen as nn  # pylint: disable=g-import-not-at-top
     from flax import nnx  # pylint: disable=g-import-not-at-top
+    import jax  # pylint: disable=g-import-not-at-top
+    import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
     import maxtext  # pylint: disable=g-import-not-at-top
     import optax  # pylint: disable=g-import-not-at-top
     from tunix.models import automodel  # pylint: disable=g-import-not-at-top
@@ -86,7 +92,8 @@ def main():
         "maxtext_direct_url": json.loads(
             importlib.metadata.distribution("maxtext").read_text(
                 "direct_url.json"
-            ) or "null"
+            )
+            or "null"
         ),
         "device_count": len(devices),
         "device_kinds": [device.device_kind for device in devices],
@@ -144,8 +151,7 @@ def main():
       leaves = jax.tree.leaves(nnx.state(model, nnx.Param))
       for axis in ("stage", "tensor"):
         count = sum(
-            axis in str(getattr(value.sharding, "spec", ""))
-            for value in leaves
+            axis in str(getattr(value.sharding, "spec", "")) for value in leaves
         )
         report[f"{axis}_sharded_leaves"] = count
         assert count > 0, f"No parameters are sharded over {axis}"
