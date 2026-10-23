@@ -1382,11 +1382,33 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         metadata=metadata,
         policy_version=42,
     )
+    step_meta_jsons: list[str] = []
+    orig_add_step = store.add_step
+
+    def _recording_add_step(step, meta):
+      step_meta_jsons.append(
+          meta.model_dump_json(exclude_none=True)
+      )
+      return orig_add_step(step, meta)
+
     with (
+        mock.patch.object(
+            store, 'add_step', side_effect=_recording_add_step
+        ),
+        mock.patch.object(
+            engine,
+            '_store_update_metadata',
+            wraps=engine._store_update_metadata,
+        ) as mock_update_metadata,
         mock.patch.object(store, 'flush', wraps=store.flush) as mock_flush,
         mock.patch.object(store, 'close', wraps=store.close) as mock_close,
     ):
       asyncio.run(self._run_collect(engine, mode='Trajectory'))
+      # Metadata must remain unchanged across all add_step calls so
+      # FileTrajectoryStore only writes metadata.json once at episode start and
+      # once on update_metadata at episode end.
+      self.assertLen(set(step_meta_jsons), 1)
+      mock_update_metadata.assert_called_once()
       mock_flush.assert_not_called()
       mock_close.assert_not_called()
 
@@ -1404,6 +1426,8 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertEqual(metas[0].trajectory_id, 'traj_test_123')
     self.assertEqual(metas[0].status, 'SUCCEEDED')
     self.assertEqual(metas[0].target_policy_versions, [42])
+    self.assertLen(metas[0].env_time['step_latency'], 2)
+    self.assertIn('reward_latency', metas[0].reward_time)
 
   def test_trajectory_store_list_writes_to_all_non_none_stores(self):
     store_file = in_memory_store.InMemoryTrajectoryStore()
