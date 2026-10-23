@@ -149,8 +149,17 @@ def build_filter(
     if filter_fn is not None:
       res = filter_fn(valid)
       if isinstance(res, tuple):
-        return res[0], list(res[1]) + filtered
-      return res, filtered
+        valid, extra_filtered = res[0], list(res[1])
+        filtered = extra_filtered + filtered
+      else:
+        valid = res
+    for item in filtered:
+      item.routed_experts = None
+      item.prompt_tokens = None
+      item.completion_tokens = None
+      item.action_mask = None
+      if hasattr(item, "payload"):
+        item.payload = None
     return valid, filtered
 
   return _staleness_filter

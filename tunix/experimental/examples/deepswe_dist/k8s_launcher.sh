@@ -542,6 +542,10 @@ start_orchestrator() {
         ${ADVANTAGE_ESTIMATOR:+--advantage_estimator=${ADVANTAGE_ESTIMATOR}} \
         ${overlong_arg} \
         ${overlong_filter_arg} \
+        $([[ "${DYNAMIC_SAMPLING}" == "true" || "${DYNAMIC_SAMPLING}" == "True" || "${DYNAMIC_SAMPLING}" == "1" ]] && echo --dynamic_sampling || echo --no-dynamic_sampling) \
+        ${MAX_DISPATCH_AHEAD_BATCHES:+--max_dispatch_ahead_batches=${MAX_DISPATCH_AHEAD_BATCHES}} \
+        ${MIN_ROLLOUT_REPLICAS:+--min_rollout_replicas=${MIN_ROLLOUT_REPLICAS}} \
+        ${PASS_RATE_LOG_PATH:+--pass_rate_log_path=\"${PASS_RATE_LOG_PATH}\"} \
         ${SEQ_LOGPROB_ERROR_THRESHOLD:+--seq_logprob_error_threshold=${SEQ_LOGPROB_ERROR_THRESHOLD}} \
         ${TIS_TYPE:+--truncated_importance_sampling_type=${TIS_TYPE}} \
         ${TIS_RATIO_MIN:+--truncated_importance_sampling_ratio_min=${TIS_RATIO_MIN}} \

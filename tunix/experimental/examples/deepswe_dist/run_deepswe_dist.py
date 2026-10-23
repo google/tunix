@@ -465,6 +465,44 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--dynamic_sampling",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "DAPO-style dynamic sampling: filter out zero-variance prompt groups"
+          " (where all valid rollouts have identical reward, e.g. 0/G or G/G)"
+          " and replenish from the prompt stream."
+      ),
+  )
+  parser.add_argument(
+      "--max_dispatch_ahead_batches",
+      type=int,
+      default=None,
+      help=(
+          "Maximum number of prompt batches beyond the currently training"
+          " batch that may be dispatched concurrently (capped at"
+          " max_staleness)."
+      ),
+  )
+  parser.add_argument(
+      "--min_rollout_replicas",
+      type=int,
+      default=None,
+      help=(
+          "Minimum number of rollout replicas required to register before"
+          " starting training. Defaults to rollout_replicas."
+      ),
+  )
+  parser.add_argument(
+      "--pass_rate_log_path",
+      type=str,
+      default="",
+      help=(
+          "Optional local or gs:// directory where per-group pass-rate JSONL"
+          " part files are written."
+      ),
+  )
+  parser.add_argument(
       "--seq_logprob_error_threshold",
       type=float,
       default=None,
@@ -1078,10 +1116,15 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     logging.info(
         "Waiting for workers to register (before MLPerf init_start)..."
     )
+    min_rollout_replicas = (
+        args.min_rollout_replicas
+        if args.min_rollout_replicas is not None
+        else args.rollout_replicas
+    )
     cluster.wait_for_workers(
         min_workers={
             datatypes.Role.ACTOR: 1,
-            datatypes.Role.ROLLOUT: args.rollout_replicas,
+            datatypes.Role.ROLLOUT: min_rollout_replicas,
             datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
         },
         timeout=args.init_timeout_s,
@@ -1320,6 +1363,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           overlong_filter=args.overlong_filter,
           exact_token_continuity=args.exact_token_continuity,
           max_staleness=args.max_staleness,
+          dynamic_sampling=args.dynamic_sampling,
       )
       if args.use_agent_sandbox:
         prompt_stream = swe_env.PrewarmDatasetIterator(
@@ -1359,6 +1403,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         max_staleness=args.max_staleness,
         num_generations_to_dispatch=args.num_generations_to_dispatch,
         prefer_valid_rollouts=args.prefer_valid_rollouts,
+        filter_zero_variance=args.dynamic_sampling,
+        max_dispatch_ahead_batches=args.max_dispatch_ahead_batches,
+        pass_rate_log_path=args.pass_rate_log_path,
         group_order=args.trajectory_group_order,
         sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
         checkpoint_optimizer_interval_steps=(
