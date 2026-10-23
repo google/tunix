@@ -472,10 +472,29 @@ class WeightSyncModeTest(absltest.TestCase):
       )
 
   @mock.patch(
+      "tunix.dist_rl.rollout.inprocess_vllm_sampler._get_vllm_sampler_cls"
+  )
+  def test_config_weight_sync_mode_inprocess_vllm_fallback(
+      self, mock_get_vllm
+  ):
+    mock_lib = mock.MagicMock()
+    mock_lib.VllmSampler.return_value = mock.MagicMock()
+    mock_get_vllm.return_value = mock_lib
+    config = rollout_worker.RolloutConfig(
+        sampler_type="inprocess_vllm",
+        weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+    )
+    manager = manager_lib.RolloutManager(
+        config=config, tokenizer="mock", chat_parser="mock"
+    )
+    self.assertFalse(manager.sampler.enable_raiden)
+    self.assertIsNone(manager.sampler.raiden_sync_delegate)
+
+  @mock.patch(
       "tunix.dist_rl.weight_sync.raiden_weight_sync_delegate.RaidenWeightSyncDelegate"
   )
   @mock.patch(
-      "tunix.dist_rl.rollout.inprocess_vllm_sampler_adapter._get_vllm_sampler_cls"
+      "tunix.dist_rl.rollout.inprocess_vllm_sampler._get_vllm_sampler_cls"
   )
   def test_config_weight_sync_mode_inprocess_vllm_raiden(
       self, mock_get_vllm, mock_delegate_cls

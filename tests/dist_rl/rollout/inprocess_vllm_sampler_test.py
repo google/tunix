@@ -12,20 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for InprocessVllmSamplerAdapter with Tunix VllmSampler and Raiden delegate."""
+"""Tests for InprocessVllmSampler with Tunix VllmSampler and Raiden delegate."""
 
 import asyncio
+import dataclasses
 from unittest import mock
+
 from absl.testing import absltest
 import numpy as np
-from tunix.dist_rl.rollout import inprocess_vllm_sampler_adapter
+from tunix.common import configs
+from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.dist_rl.weight_sync import raiden_weight_sync_delegate
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.generate import base_sampler
 
 
-class InprocessVllmSamplerAdapterTest(absltest.TestCase):
+@dataclasses.dataclass
+class _EngineOnlyConfig:
+  """A config without a `weight_sync_mode` field, like `VllmConfig`.
+
+  `partial_rollout` is the only field `InprocessVllmSampler.__init__` reads.
+  The real `VllmConfig` can't be imported here: its module imports vLLM, which
+  needs Transformers v5, and this target links v4.
+  """
+
+  partial_rollout: bool = False
+
+
+class InprocessVllmSamplerTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -42,7 +57,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     self.mock_vllm_lib.VllmSampler.return_value = self.mock_vllm_sampler
 
     self.patcher = mock.patch.object(
-        inprocess_vllm_sampler_adapter,
+        inprocess_vllm_sampler,
         "_get_vllm_sampler_cls",
         return_value=self.mock_vllm_lib,
     )
@@ -52,21 +67,19 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     self.mock_config = mock.MagicMock()
     self.mock_config.enable_raiden = False
 
-    self.sampler_adapter = (
-        inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-            server_id="vllm_slice_01",
-            tokenizer=self.mock_tokenizer,
-            config=self.mock_config,
-        )
+    self.sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="vllm_slice_01",
+        tokenizer=self.mock_tokenizer,
+        config=self.mock_config,
     )
-    self.sampler_adapter.initialize()
+    self.sampler.initialize()
 
   def tearDown(self):
     self.patcher.stop()
     super().tearDown()
 
   def test_implements_sampler_protocol(self):
-    self.assertIsInstance(self.sampler_adapter, base_sampler_lib.Sampler)
+    self.assertIsInstance(self.sampler, base_sampler_lib.Sampler)
 
   def test_explicit_weight_sync_mode_overrides_config(self):
     fallback_config = mock.MagicMock()
@@ -74,7 +87,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     mock_delegate = mock.MagicMock(
         spec=raiden_weight_sync_delegate.RaidenWeightSyncDelegate
     )
-    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_raiden_slice",
         tokenizer=self.mock_tokenizer,
         config=fallback_config,
@@ -82,32 +95,58 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
         weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
     )
     self.assertEqual(
-        adapter.weight_sync_mode, weight_sync.WeightSyncMode.RAIDEN
+        sampler.weight_sync_mode, weight_sync.WeightSyncMode.RAIDEN
     )
-    self.assertTrue(adapter.enable_raiden)
+    self.assertTrue(sampler.enable_raiden)
 
   def test_real_raiden_delegate_instantiation(self):
     raiden_config = mock.MagicMock()
     raiden_config.weight_sync_mode = weight_sync.WeightSyncMode.RAIDEN
-    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_raiden_slice",
         tokenizer=self.mock_tokenizer,
         config=raiden_config,
     )
-    self.assertTrue(adapter.enable_raiden)
-    self.assertIsNotNone(adapter.raiden_sync_delegate)
+    self.assertTrue(sampler.enable_raiden)
+    self.assertIsNotNone(sampler.raiden_sync_delegate)
     self.assertEqual(
-        adapter.raiden_sync_delegate._synchronizers[0].job_name,
+        sampler.raiden_sync_delegate._synchronizers[0].job_name,
         "vllm_raiden_slice",
     )
-    self.assertFalse(adapter.raiden_sync_delegate.is_bounded())
+    self.assertFalse(sampler.raiden_sync_delegate.is_bounded())
+
+  def test_weight_sync_mode_defaults_to_fallback_without_config(self):
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(server_id="no_cfg")
+    self.assertEqual(
+        sampler.weight_sync_mode, weight_sync.DEFAULT_WEIGHT_SYNC_MODE
+    )
+    self.assertFalse(sampler.enable_raiden)
+    self.assertIsNone(sampler.raiden_sync_delegate)
+
+  def test_engine_config_without_weight_sync_mode_defaults_to_fallback(self):
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="engine_cfg", config=_EngineOnlyConfig()
+    )
+    self.assertEqual(
+        sampler.weight_sync_mode, weight_sync.DEFAULT_WEIGHT_SYNC_MODE
+    )
+    self.assertFalse(sampler.enable_raiden)
+    self.assertIsNone(sampler.raiden_sync_delegate)
+
+  def test_weight_sync_mode_read_from_rollout_config(self):
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="rollout_cfg",
+        config=configs.RolloutConfig(weight_sync_mode="none"),
+    )
+    self.assertEqual(sampler.weight_sync_mode, weight_sync.WeightSyncMode.NONE)
+    self.assertFalse(sampler.enable_raiden)
 
   def test_lifecycle_methods(self):
-    self.assertTrue(asyncio.run(self.sampler_adapter.start()))
-    self.assertTrue(asyncio.run(self.sampler_adapter.pause()))
-    self.assertTrue(asyncio.run(self.sampler_adapter.resume()))
-    self.assertEqual(asyncio.run(self.sampler_adapter.get_mesh()), "mock_mesh")
-    self.assertTrue(asyncio.run(self.sampler_adapter.stop()))
+    self.assertTrue(asyncio.run(self.sampler.start()))
+    self.assertTrue(asyncio.run(self.sampler.pause()))
+    self.assertTrue(asyncio.run(self.sampler.resume()))
+    self.assertEqual(asyncio.run(self.sampler.get_mesh()), "mock_mesh")
+    self.assertTrue(asyncio.run(self.sampler.stop()))
     self.mock_vllm_sampler.stop.assert_called_once()
 
   def test_single_sampling_request(self):
@@ -119,7 +158,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
             temperature=0.7,
         ),
     )
-    response = asyncio.run(self.sampler_adapter.sample(req))
+    response = asyncio.run(self.sampler.sample(req))
     self.assertIsInstance(response, base_sampler_lib.SamplingResponse)
     self.assertEqual(response.request_id, "vllm_req_01")
     self.assertEqual(response.text, "completion 1")
@@ -148,7 +187,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
             prompt="prompt 2",
         ),
     ]
-    responses = asyncio.run(self.sampler_adapter.sample(reqs))
+    responses = asyncio.run(self.sampler.sample(reqs))
     self.assertIsInstance(responses, list)
     self.assertLen(responses, 2)
     self.assertEqual(responses[0].text, "completion 1")
@@ -159,24 +198,24 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
   def test_weight_sync_without_raiden_delegate(self):
     mock_weights = {"layer1": "weights"}
     req = base_sampler_lib.WeightSyncRequest(weights=mock_weights)
-    res = asyncio.run(self.sampler_adapter.weight_sync(sync_request=req))
+    res = asyncio.run(self.sampler.weight_sync(sync_request=req))
     self.assertTrue(res)
     self.mock_vllm_sampler.update_params.assert_called_once_with(mock_weights)
 
     # Missing sync_request should raise ValueError
     with self.assertRaises(ValueError):
-      asyncio.run(self.sampler_adapter.weight_sync(sync_request=None))
+      asyncio.run(self.sampler.weight_sync(sync_request=None))
 
     # Missing weights in sync_request should raise ValueError
     empty_req = base_sampler_lib.WeightSyncRequest()
     with self.assertRaises(ValueError):
-      asyncio.run(self.sampler_adapter.weight_sync(sync_request=empty_req))
+      asyncio.run(self.sampler.weight_sync(sync_request=empty_req))
 
-    self.assertIsNone(asyncio.run(self.sampler_adapter.bind_weight_sync()))
-    self.assertTrue(asyncio.run(self.sampler_adapter.pre_weight_sync()))
-    self.assertTrue(asyncio.run(self.sampler_adapter.post_weight_sync()))
+    self.assertIsNone(asyncio.run(self.sampler.bind_weight_sync()))
+    self.assertTrue(asyncio.run(self.sampler.pre_weight_sync()))
+    self.assertTrue(asyncio.run(self.sampler.post_weight_sync()))
     with self.assertRaises(NotImplementedError):
-      asyncio.run(self.sampler_adapter.get_weight_sync_metadata())
+      asyncio.run(self.sampler.get_weight_sync_metadata())
 
   def test_weight_sync_with_raiden_delegate(self):
     mock_delegate = mock.MagicMock(
@@ -197,19 +236,20 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
 
     raiden_config = mock.MagicMock()
     raiden_config.weight_sync_mode = weight_sync.WeightSyncMode.RAIDEN
+    raiden_config.partial_rollout = False
 
-    raiden_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+    raiden_sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_raiden_slice",
         tokenizer=self.mock_tokenizer,
         config=raiden_config,
         raiden_sync_delegate=mock_delegate,
     )
-    raiden_adapter.initialize()
+    raiden_sampler.initialize()
 
     sync_req = base_sampler_lib.WeightSyncRequest(policy_version=5)
 
     # 1. bind_weight_sync
-    asyncio.run(raiden_adapter.bind_weight_sync(sync_req))
+    asyncio.run(raiden_sampler.bind_weight_sync(sync_req))
     mock_delegate.bind_weight_sync.assert_awaited_once_with(
         sync_request=sync_req,
         state=fake_transformer_state,
@@ -218,22 +258,22 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     mock_delegate.is_bounded.return_value = True
 
     # 2. get_weight_sync_metadata
-    metadata = asyncio.run(raiden_adapter.get_weight_sync_metadata())
+    metadata = asyncio.run(raiden_sampler.get_weight_sync_metadata())
     self.assertEqual(metadata, [{"unit": "rollout"}])
 
     # 3. pre_weight_sync
-    self.assertTrue(asyncio.run(raiden_adapter.pre_weight_sync(sync_req)))
+    self.assertTrue(asyncio.run(raiden_sampler.pre_weight_sync(sync_req)))
     mock_delegate.pre_weight_sync.assert_awaited_once_with(
         sync_request=sync_req
     )
 
     # 4. weight_sync
-    version = asyncio.run(raiden_adapter.weight_sync(sync_req))
+    version = asyncio.run(raiden_sampler.weight_sync(sync_req))
     self.assertEqual(version, 5)
     mock_delegate.weight_sync.assert_awaited_once_with(sync_request=sync_req)
 
     # 5. post_weight_sync
-    self.assertTrue(asyncio.run(raiden_adapter.post_weight_sync(sync_req)))
+    self.assertTrue(asyncio.run(raiden_sampler.post_weight_sync(sync_req)))
     mock_delegate.post_weight_sync.assert_awaited_once_with(
         sync_request=sync_req
     )
@@ -249,15 +289,15 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     raiden_config = mock.MagicMock()
     raiden_config.weight_sync_mode = weight_sync.WeightSyncMode.RAIDEN
 
-    raiden_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+    raiden_sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_raiden_slice",
         tokenizer=self.mock_tokenizer,
         config=raiden_config,
         raiden_sync_delegate=mock_delegate,
     )
-    raiden_adapter.initialize()
+    raiden_sampler.initialize()
 
-    self.assertTrue(asyncio.run(raiden_adapter.bind_weight_sync()))
+    self.assertTrue(asyncio.run(raiden_sampler.bind_weight_sync()))
     mock_delegate.bind_weight_sync.assert_not_awaited()
 
   def test_raiden_bind_without_transformer_state_raises(self):
@@ -265,76 +305,86 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
         spec=raiden_weight_sync_delegate.RaidenWeightSyncDelegate
     )
     mock_delegate.is_bounded.return_value = False
-    # Ensure vllm_sampler has no transformer_state
     if hasattr(self.mock_vllm_sampler, "transformer_state"):
       del self.mock_vllm_sampler.transformer_state
 
     raiden_config = mock.MagicMock()
     raiden_config.weight_sync_mode = weight_sync.WeightSyncMode.RAIDEN
 
-    raiden_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+    raiden_sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_raiden_slice",
         tokenizer=self.mock_tokenizer,
         config=raiden_config,
         raiden_sync_delegate=mock_delegate,
     )
-    raiden_adapter.initialize()
+    raiden_sampler.initialize()
 
     with self.assertRaisesRegex(RuntimeError, "transformer_state"):
-      asyncio.run(raiden_adapter.bind_weight_sync())
+      asyncio.run(raiden_sampler.bind_weight_sync())
 
   def test_other_sampler_methods(self):
     self.assertEqual(
-        asyncio.run(self.sampler_adapter.get_transfer_status("req_1")),
+        asyncio.run(self.sampler.get_transfer_status("req_1")),
         "SUCCESS",
     )
     self.assertTrue(
         asyncio.run(
-            self.sampler_adapter.migrate_kv_cache(
+            self.sampler.migrate_kv_cache(
                 source_server_id="s1",
                 target_server_id="s2",
                 token_ids=[1, 2, 3],
             )
         )
     )
-    load_info = asyncio.run(self.sampler_adapter.get_load_info())
+    load_info = asyncio.run(self.sampler.get_load_info())
     self.assertIsInstance(load_info, base_sampler_lib.LoadInfo)
 
   def test_uninitialized_sampler_raises(self):
-    uninit = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="empty"
-    )
+    uninit = inprocess_vllm_sampler.InprocessVllmSampler(server_id="empty")
     with self.assertRaises(RuntimeError):
       asyncio.run(
           uninit.sample(base_sampler_lib.SamplingRequest(prompt="test"))
       )
 
+  def test_initialize_without_config_does_not_start_the_engine(self):
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="no_cfg", tokenizer=self.mock_tokenizer
+    )
+    engine_builds = self.mock_vllm_lib.VllmSampler.call_count
+    sampler.initialize()
+    self.assertIsNone(sampler.vllm_sampler)
+    self.assertEqual(self.mock_vllm_lib.VllmSampler.call_count, engine_builds)
+    with self.assertRaisesRegex(RuntimeError, "not initialized"):
+      asyncio.run(
+          sampler.sample(base_sampler_lib.SamplingRequest(prompt="test"))
+      )
+
   def test_sample_none_requests_raises(self):
     with self.assertRaises(ValueError):
-      asyncio.run(self.sampler_adapter.sample(None))
+      asyncio.run(self.sampler.sample(None))
 
   def test_vllm_sampler_deferred_to_initialize(self):
     self.mock_vllm_lib.VllmSampler.reset_mock()
-    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="deferred_slice",
         tokenizer=self.mock_tokenizer,
         config=self.mock_config,
     )
-    self.assertIsNone(adapter.vllm_sampler)
+    self.assertIsNone(sampler.vllm_sampler)
     self.mock_vllm_lib.VllmSampler.assert_not_called()
 
-    adapter.initialize()
-    self.assertIsNotNone(adapter.vllm_sampler)
+    sampler.initialize()
+    self.assertIsNotNone(sampler.vllm_sampler)
     self.mock_vllm_lib.VllmSampler.assert_called_once()
 
 
 class RoutedExpertsTest(absltest.TestCase):
   """Captured MoE routing must reach the matching response."""
 
-  def _adapter(self, routed_experts, engine_captures=True):
+  def _sampler(self, routed_experts, engine_captures=True):
     rows = len(routed_experts) if routed_experts else 1
-    sampler = mock.MagicMock()
-    sampler.return_value = base_sampler.SamplerOutput(
+    inner_sampler = mock.MagicMock()
+    inner_sampler.return_value = base_sampler.SamplerOutput(
         text=["c"] * rows,
         logits=None,
         tokens=[np.array([10, 20, 30], dtype=np.int32)] * rows,
@@ -344,12 +394,10 @@ class RoutedExpertsTest(absltest.TestCase):
         logprobs=None,
         routed_experts=routed_experts,
     )
-    sampler.config = mock.Mock(return_routed_experts=engine_captures)
-    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="rollout"
-    )
-    adapter.vllm_sampler = sampler
-    return adapter
+    inner_sampler.config = mock.Mock(return_routed_experts=engine_captures)
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(server_id="rollout")
+    sampler.vllm_sampler = inner_sampler
+    return sampler
 
   def _requests(self, n):
     return [
@@ -366,7 +414,7 @@ class RoutedExpertsTest(absltest.TestCase):
   def test_routing_reaches_each_response_in_order(self):
     """Row i's routing must land on row i, or replay trains the wrong tokens."""
     routed = [np.full((3, 2, 2), i, dtype=np.int32) for i in range(2)]
-    responses = asyncio.run(self._adapter(routed).sample(self._requests(2)))
+    responses = asyncio.run(self._sampler(routed).sample(self._requests(2)))
 
     self.assertLen(responses, 2)
     for i, response in enumerate(responses):
@@ -375,9 +423,9 @@ class RoutedExpertsTest(absltest.TestCase):
 
   def test_warns_when_engine_cannot_capture(self):
     """Silently returning None would look like a dense model to the trainer."""
-    adapter = self._adapter(None, engine_captures=False)
+    sampler = self._sampler(None, engine_captures=False)
     with self.assertLogs(level="WARNING") as logs:
-      asyncio.run(adapter.sample(self._requests(1)))
+      asyncio.run(sampler.sample(self._requests(1)))
     self.assertTrue(
         any("return_routed_experts" in line for line in logs.output),
         f"expected a warning about the engine setting, got {logs.output}",
@@ -385,7 +433,7 @@ class RoutedExpertsTest(absltest.TestCase):
 
   def test_forwards_routed_experts_prompt_start(self):
     """Cumulative prompt offset must be forwarded to the vLLM sampler as a list."""
-    adapter = self._adapter(None)
+    sampler = self._sampler(None)
     req = base_sampler_lib.SamplingRequest(
         request_id="req-0",
         prompt=np.array([1, 2, 3, 4], dtype=np.int32),
@@ -395,13 +443,13 @@ class RoutedExpertsTest(absltest.TestCase):
             routed_experts_prompt_start=12,
         ),
     )
-    asyncio.run(adapter.sample([req]))
-    call_kwargs = adapter.vllm_sampler.call_args.kwargs
+    asyncio.run(sampler.sample([req]))
+    call_kwargs = sampler.vllm_sampler.call_args.kwargs
     self.assertEqual(call_kwargs.get("routed_experts_prompt_start"), [12])
 
   def test_forwards_heterogeneous_batch_routed_experts_prompt_start(self):
     """Per-prompt offsets in heterogeneous batch must be preserved without collapse."""
-    adapter = self._adapter([None, None])
+    sampler = self._sampler([None, None])
     req0 = base_sampler_lib.SamplingRequest(
         request_id="req-0",
         prompt=np.array([1, 2, 3, 4], dtype=np.int32),
@@ -420,12 +468,12 @@ class RoutedExpertsTest(absltest.TestCase):
             routed_experts_prompt_start=14,
         ),
     )
-    asyncio.run(adapter.sample([req0, req1]))
-    call_kwargs = adapter.vllm_sampler.call_args.kwargs
+    asyncio.run(sampler.sample([req0, req1]))
+    call_kwargs = sampler.vllm_sampler.call_args.kwargs
     self.assertEqual(call_kwargs.get("routed_experts_prompt_start"), [8, 14])
 
   def test_concurrent_sample_calls_do_not_block_event_loop(self):
-    """Concurrent sample() calls must run in parallel on the adapter's executor."""
+    """Concurrent sample() calls must run in parallel on the sampler's executor."""
     import threading  # pylint: disable=g-import-not-at-top
 
     num_concurrent = 4
@@ -433,8 +481,6 @@ class RoutedExpertsTest(absltest.TestCase):
 
     def _blocking_vllm_call(**kwargs):
       del kwargs
-      # All 4 calls must enter _blocking_vllm_call concurrently; if sample()
-      # blocked the asyncio event loop, this barrier would time out at party 1.
       barrier.wait()
       return base_sampler.SamplerOutput(
           text=["parallel completion"],
@@ -444,13 +490,13 @@ class RoutedExpertsTest(absltest.TestCase):
           logprobs=None,
       )
 
-    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_concurrent_slice",
         tokenizer=None,
         config=None,
         max_concurrency=num_concurrent,
     )
-    adapter.vllm_sampler = mock.MagicMock(side_effect=_blocking_vllm_call)
+    sampler.vllm_sampler = mock.MagicMock(side_effect=_blocking_vllm_call)
 
     async def _run_concurrent():
       reqs = [
@@ -460,20 +506,18 @@ class RoutedExpertsTest(absltest.TestCase):
           )
           for i in range(num_concurrent)
       ]
-      return await asyncio.gather(*(adapter.sample(r) for r in reqs))
+      return await asyncio.gather(*(sampler.sample(r) for r in reqs))
 
     responses = asyncio.run(_run_concurrent())
     self.assertLen(responses, num_concurrent)
     for i, resp in enumerate(responses):
       self.assertEqual(resp.request_id, f"req-{i}")
       self.assertEqual(resp.text, "parallel completion")
-    asyncio.run(adapter.stop())
+    asyncio.run(sampler.stop())
 
   def test_sample_with_token_id_prompt_and_prompt_lengths(self):
-    # Left-padded prompt tokens where valid prompt starts with 0 (pad_id)
-    # and true prompt_lengths=[3] should preserve [0, 10, 20].
-    adapter = self._adapter(None)
-    adapter.vllm_sampler.return_value = base_sampler.SamplerOutput(
+    sampler = self._sampler(None)
+    sampler.vllm_sampler.return_value = base_sampler.SamplerOutput(
         text=["completion"],
         logits=None,
         tokens=[np.array([30, 40], dtype=np.int32)],
@@ -485,8 +529,8 @@ class RoutedExpertsTest(absltest.TestCase):
         request_id="req_tok",
         prompt=np.array([0, 10, 20], dtype=np.int32),
     )
-    resp = asyncio.run(adapter.sample(req))
-    call_kwargs = adapter.vllm_sampler.call_args.kwargs
+    resp = asyncio.run(sampler.sample(req))
+    call_kwargs = sampler.vllm_sampler.call_args.kwargs
     self.assertIsNone(call_kwargs["input_strings"])
     self.assertLen(call_kwargs["prompt_token_ids"], 1)
     np.testing.assert_array_equal(
@@ -507,15 +551,13 @@ class RoutedExpertsTest(absltest.TestCase):
 
     hf_tok = _DummyHFTokenizer()
 
-    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_hf_tok_slice",
         tokenizer=hf_tok,
     )
-    self.assertIsInstance(
-        adapter.tokenizer, tokenizer_adapter.TokenizerAdapter
-    )
-    sampler = mock.MagicMock()
-    sampler.return_value = base_sampler.SamplerOutput(
+    self.assertIsInstance(sampler.tokenizer, tokenizer_adapter.TokenizerAdapter)
+    inner_sampler = mock.MagicMock()
+    inner_sampler.return_value = base_sampler.SamplerOutput(
         text=["completion"],
         logits=None,
         tokens=[np.array([30, 40], dtype=np.int32)],
@@ -523,16 +565,16 @@ class RoutedExpertsTest(absltest.TestCase):
         prompt_lengths=np.array([2], dtype=np.int32),
         logprobs=None,
     )
-    adapter.vllm_sampler = sampler
+    sampler.vllm_sampler = inner_sampler
     req = base_sampler_lib.SamplingRequest(
         request_id="req_hf",
         prompt="hello world",
     )
-    resp = asyncio.run(adapter.sample(req))
+    resp = asyncio.run(sampler.sample(req))
     np.testing.assert_array_equal(resp.prompt_token_ids, [10, 20])
 
   def test_forwards_cache_salt_scalar_and_per_prompt(self):
-    adapter = self._adapter([None, None])
+    sampler = self._sampler([None, None])
     req_single = base_sampler_lib.SamplingRequest(
         request_id="req-0",
         prompt="prompt 0",
@@ -541,9 +583,9 @@ class RoutedExpertsTest(absltest.TestCase):
             cache_salt="policy_v2",
         ),
     )
-    asyncio.run(adapter.sample([req_single]))
+    asyncio.run(sampler.sample([req_single]))
     self.assertEqual(
-        adapter.vllm_sampler.call_args.kwargs.get("cache_salt"), "policy_v2"
+        sampler.vllm_sampler.call_args.kwargs.get("cache_salt"), "policy_v2"
     )
 
     req_a = base_sampler_lib.SamplingRequest(
@@ -562,9 +604,9 @@ class RoutedExpertsTest(absltest.TestCase):
             cache_salt="policy_v3",
         ),
     )
-    asyncio.run(adapter.sample([req_a, req_b]))
+    asyncio.run(sampler.sample([req_a, req_b]))
     self.assertEqual(
-        adapter.vllm_sampler.call_args.kwargs.get("cache_salt"),
+        sampler.vllm_sampler.call_args.kwargs.get("cache_salt"),
         ["policy_v2", "policy_v3"],
     )
 
@@ -576,29 +618,28 @@ class RoutedExpertsTest(absltest.TestCase):
     mock_delegate.post_weight_sync = mock.AsyncMock(return_value=True)
     mock_delegate.abort_weight_sync = mock.AsyncMock(return_value=True)
 
-    sampler = mock.MagicMock()
-    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+    inner_sampler = mock.MagicMock()
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="rollout",
         raiden_sync_delegate=mock_delegate,
         weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
         partial_rollout=True,
     )
-    adapter.vllm_sampler = sampler
+    sampler.vllm_sampler = inner_sampler
     sync_req = base_sampler_lib.WeightSyncRequest(policy_version=2)
 
-    asyncio.run(adapter.pre_weight_sync(sync_req))
-    sampler.pause.assert_called_once_with(mode="keep", clear_cache=False)
+    asyncio.run(sampler.pre_weight_sync(sync_req))
+    inner_sampler.pause.assert_called_once_with(mode="keep", clear_cache=False)
 
-    asyncio.run(adapter.post_weight_sync(sync_req))
-    sampler.resume.assert_called_once()
+    asyncio.run(sampler.post_weight_sync(sync_req))
+    inner_sampler.resume.assert_called_once()
 
-    sampler.reset_mock()
-    asyncio.run(adapter.pre_weight_sync(sync_req))
-    sampler.pause.assert_called_once_with(mode="keep", clear_cache=False)
-    asyncio.run(adapter.abort_weight_sync(sync_req))
-    sampler.resume.assert_called_once()
+    inner_sampler.reset_mock()
+    asyncio.run(sampler.pre_weight_sync(sync_req))
+    inner_sampler.pause.assert_called_once_with(mode="keep", clear_cache=False)
+    asyncio.run(sampler.abort_weight_sync(sync_req))
+    inner_sampler.resume.assert_called_once()
 
 
 if __name__ == "__main__":
   absltest.main()
-

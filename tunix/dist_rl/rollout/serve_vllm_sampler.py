@@ -35,7 +35,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from vllm.engine.arg_utils import AsyncEngineArgs
 
-from tunix.dist_rl.rollout.vllm_sampler_v2 import RLVllmSampler
+from tunix.dist_rl.rollout.vllm_sampler import VllmSampler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,8 +43,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="RLVllmSampler OpenAI-Compatible HTTP Server")
-sampler_instance: Optional[RLVllmSampler] = None
+app = FastAPI(title="VllmSampler OpenAI-Compatible HTTP Server")
+sampler_instance: Optional[VllmSampler] = None
 
 # ==============================================================================
 # Pydantic Request Models
@@ -111,7 +111,7 @@ async def health_check():
     """Health check endpoint."""
     if sampler_instance is None or not sampler_instance._is_running:
         raise HTTPException(status_code=503,
-                            detail="RLVllmSampler is not running.")
+                            detail="VllmSampler is not running.")
     model_name = sampler_instance.engine_args.model
     return {
         "status": "ok",
@@ -222,7 +222,7 @@ async def create_chat_completion(request: ChatCompletionRequest, req: Request):
     """OpenAI-compatible chat completion endpoint."""
     if sampler_instance is None or not sampler_instance._is_running:
         raise HTTPException(status_code=503,
-                            detail="RLVllmSampler server is not running.")
+                            detail="VllmSampler server is not running.")
 
     prompt_text = format_messages_to_prompt(request.messages)
     req_id = f"chatcmpl-{time.time_ns()}"
@@ -298,7 +298,7 @@ async def create_completion(request: CompletionRequest, req: Request):
     """OpenAI-compatible raw prompt completion endpoint."""
     if sampler_instance is None or not sampler_instance._is_running:
         raise HTTPException(status_code=503,
-                            detail="RLVllmSampler server is not running.")
+                            detail="VllmSampler server is not running.")
 
     prompt_text = request.prompt if isinstance(request.prompt,
                                                str) else request.prompt[0]
@@ -363,7 +363,7 @@ async def create_completion(request: CompletionRequest, req: Request):
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Launch RLVllmSampler HTTP Server for Agentic Benchmarking."
+        description="Launch VllmSampler HTTP Server for Agentic Benchmarking."
     )
     parser.add_argument("--host",
                         type=str,
@@ -420,18 +420,18 @@ def main() -> None:
         dtype=args.weight_dtype,
     )
 
-    logger.info("Initializing RLVllmSampler for server deployment...")
-    sampler_instance = RLVllmSampler(engine_args=engine_args)
+    logger.info("Initializing VllmSampler for server deployment...")
+    sampler_instance = VllmSampler(engine_args=engine_args)
 
     @app.on_event("startup")
     async def startup_event():
-        logger.info("Starting RLVllmSampler engine...")
+        logger.info("Starting VllmSampler engine...")
         await sampler_instance.start()
-        logger.info("RLVllmSampler engine online and ready to serve requests.")
+        logger.info("VllmSampler engine online and ready to serve requests.")
 
     @app.on_event("shutdown")
     async def shutdown_event():
-        logger.info("Stopping RLVllmSampler engine...")
+        logger.info("Stopping VllmSampler engine...")
         await sampler_instance.stop()
 
     uvicorn.run(app, host=args.host, port=args.port)

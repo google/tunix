@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Mixin class providing destination-side Raiden weight sync for rollout adapters."""
+"""Mixin providing destination-side Raiden weight sync for rollout samplers."""
 
 from __future__ import annotations
 
@@ -26,9 +26,10 @@ from tunix.dist_rl.weight_sync import weight_sync
 
 
 class RaidenDestinationWeightSyncMixin:
-  """Mixin providing destination-side weight sync hooks for sampler adapters."""
+  """Mixin providing destination-side weight sync hooks for samplers."""
 
   server_id: str
+  enable_raiden: bool
   raiden_sync_delegate: Any
 
   def _get_underlying_sampler(self) -> Any:
@@ -40,7 +41,7 @@ class RaidenDestinationWeightSyncMixin:
 
   def _check_weight_sync_boundness(self) -> None:
     """Verifies that the Raiden delegate has been bound before executing sync phases."""
-    if not getattr(self, "enable_raiden", False):
+    if not self.enable_raiden:
       return
 
     if not self.raiden_sync_delegate.is_bounded():
@@ -53,7 +54,7 @@ class RaidenDestinationWeightSyncMixin:
     """Returns sharding specs and layout metadata across devices for weights."""
     self._check_weight_sync_boundness()
 
-    if getattr(self, "enable_raiden", False):
+    if self.enable_raiden:
       return await self.raiden_sync_delegate.get_weight_sync_metadata(**kwargs)
 
     raise NotImplementedError(
@@ -67,7 +68,7 @@ class RaidenDestinationWeightSyncMixin:
       **kwargs,
   ) -> Any:
     """Binds destination-side transport resources for weight transfer."""
-    if getattr(self, "enable_raiden", False):
+    if self.enable_raiden:
       sampler = self._get_underlying_sampler()
       if sampler is None or not hasattr(sampler, "transformer_state"):
         raise RuntimeError(
@@ -108,6 +109,19 @@ class RaidenDestinationWeightSyncMixin:
         " target_state."
     )
 
+  # TODO(tunix-dev): Make `pause`/`resume` abstract (or type the host sampler
+  # with a Protocol) so a sampler that forgets to override them fails loudly
+  # instead of silently skipping the pause around in-place weight writes.
+  async def pause(self, **kwargs) -> str | None | Any:
+    """Pauses inference processing on this worker slice."""
+    del kwargs
+    return True
+
+  async def resume(self, **kwargs) -> str | None | Any:
+    """Resumes inference processing on this worker slice."""
+    del kwargs
+    return True
+
   async def pre_weight_sync(
       self,
       sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
@@ -115,8 +129,20 @@ class RaidenDestinationWeightSyncMixin:
   ) -> str | None | Any:
     """Prepares staging handshake prior to policy weight update."""
     self._check_weight_sync_boundness()
+    # TODO(tunix-dev): Hold a per-sampler lock across pause -> delegate here
+    # and delegate -> resume in post/abort. The coordinator requires
+    # destinations to serialize whole phase bodies, because a timed-out phase
+    # (e.g. a long pause drain) can still be running when the abort arrives.
+    partial_rollout = bool(getattr(self, "partial_rollout", False))
+    use_partial = bool(kwargs.get("partial_rollout", partial_rollout))
+    await self.pause(
+        mode="keep" if use_partial else "wait",
+        clear_cache=not use_partial,
+    )
+    if partial_rollout:
+      kwargs.setdefault("partial_rollout", True)
 
-    if getattr(self, "enable_raiden", False):
+    if self.enable_raiden:
       return await self.raiden_sync_delegate.pre_weight_sync(
           sync_request=sync_request, **kwargs
       )
@@ -130,7 +156,7 @@ class RaidenDestinationWeightSyncMixin:
     """Updates model weights in-place from the specified controller or request."""
     self._check_weight_sync_boundness()
 
-    if getattr(self, "enable_raiden", False):
+    if self.enable_raiden:
       return await self.raiden_sync_delegate.weight_sync(
           sync_request=sync_request, **kwargs
       )
@@ -142,7 +168,7 @@ class RaidenDestinationWeightSyncMixin:
         )
       sampler = self._get_underlying_sampler()
       if sampler and hasattr(sampler, "update_params"):
-        weights = getattr(sync_request, "weights", None)
+        weights = sync_request.weights
         if weights is None:
           raise ValueError(
               f"{self.__class__.__name__} [{self.server_id}] weight_sync:"
@@ -163,11 +189,14 @@ class RaidenDestinationWeightSyncMixin:
       **kwargs,
   ) -> str | None | Any:
     """Finalizes and switches active policy weights after transfer completion."""
-    if getattr(self, "enable_raiden", False):
-      return await self.raiden_sync_delegate.post_weight_sync(
-          sync_request=sync_request, **kwargs
-      )
-    return True
+    try:
+      if self.enable_raiden:
+        return await self.raiden_sync_delegate.post_weight_sync(
+            sync_request=sync_request, **kwargs
+        )
+      return True
+    finally:
+      await self.resume()
 
   async def abort_weight_sync(
       self,
@@ -175,11 +204,17 @@ class RaidenDestinationWeightSyncMixin:
       **kwargs,
   ) -> str | None | Any:
     """Safely aborts weight sync round."""
-    if getattr(self, "enable_raiden", False) and getattr(
-        self, "raiden_sync_delegate", None
-    ):
-      if hasattr(self.raiden_sync_delegate, "abort_weight_sync"):
+    try:
+      if self.enable_raiden and self.raiden_sync_delegate is not None:
         return await self.raiden_sync_delegate.abort_weight_sync(
             sync_request=sync_request, **kwargs
         )
-    return True
+      return True
+    finally:
+      await self.resume()
+
+  async def get_weight_sync_status(self) -> Any:
+    """Reports worker-side round status for coordinator recovery checks."""
+    if self.enable_raiden and self.raiden_sync_delegate is not None:
+      return self.raiden_sync_delegate.get_weight_sync_status()
+    return {}

@@ -25,6 +25,114 @@ from tunix.dist_rl.weight_sync import raiden_synchronizer
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
 
 
+def round_uuid(sync_request: Any) -> int:
+  """Extracts this weight-sync round's transfer generation.
+
+  The coordinator stamps each round with a monotonic `uuid` in
+  `extra_config` and passes that same value to Raiden as the transfer
+  `generation`, so it is what the destination must wait on to be sure it
+  observed *this* round's transfer rather than a neighbouring one.
+
+  Args:
+    sync_request: The `WeightSyncRequest` for this round, or any object carrying
+      an `extra_config` mapping.
+
+  Returns:
+    The round's transfer generation, always positive.
+
+  Raises:
+    ValueError: If the uuid is absent, non-positive, or malformed. This
+      mirrors the send side, which rejects a non-positive generation in
+      `raiden_handler.transfer`. Degrading to an untargeted wait instead
+      would silently reintroduce the cross-round race that waiting on a
+      specific generation exists to prevent, so it is refused loudly.
+  """
+  extra = getattr(sync_request, "extra_config", None) or {}
+  raw = extra.get("uuid")
+  if raw is None:
+    raise ValueError(
+        "weight sync round is missing a usable transfer uuid:"
+        " extra_config['uuid'] is unset. The coordinator always stamps one;"
+        " a hand-built WeightSyncRequest must supply one too."
+    )
+  try:
+    uuid = int(raw)
+  except (TypeError, ValueError) as e:
+    raise ValueError(
+        f"weight sync round is missing a usable transfer uuid: got {raw!r},"
+        " which is not an integer."
+    ) from e
+  if uuid <= 0:
+    raise ValueError(
+        f"weight sync round carries a non-positive transfer uuid ({uuid});"
+        " Raiden generations start at 1, and 0 is WorkerRoundTracker's"
+        " 'no round' sentinel."
+    )
+  return uuid
+
+
+def canonicalize_variable_names(entry: Mapping[str, Any]) -> Mapping[str, Any]:
+  """Rewrites destination variable names into the canonical dotted key format.
+
+  The weight-sync controller pairs source and destination variables by exact
+  name. `tpu_inference.rl.raiden_worker_sync` formats destination variable names
+  with brackets and quotes (e.g. ['base']['decoder']...), whereas
+  `raiden_synchronizer` expects canonical dotted keys (e.g. decoder...). This
+  function canonicalizes names using `raiden_synchronizer._param_key`.
+
+  Args:
+    entry: One worker's Raiden registration metadata, with its destination
+      variables under `"variables"`.
+
+  Returns:
+    `entry` unchanged if it has no variables, otherwise a copy whose variable
+    names are canonical dotted keys.
+
+  Raises:
+    ValueError: If a variable name canonicalizes to an empty key, or two names
+      canonicalize to the same key.
+  """
+  variables = entry.get("variables")
+  if not variables:
+    return entry
+
+  canonical = []
+  renamed = 0
+  seen: dict[str, str] = {}
+  for v in variables:
+    if isinstance(v, Mapping) and v.get("name"):
+      original = v["name"]
+      key = raiden_synchronizer._param_key(original)  # pylint: disable=protected-access
+      if not key:
+        raise ValueError(
+            "Raiden destination variable name canonicalised to an empty key: "
+            f"{original!r}. Refusing to publish a manifest that cannot pair."
+        )
+      if seen.setdefault(key, original) != original:
+        raise ValueError(
+            f"Raiden destination variables {seen[key]!r} and {original!r} both "
+            f"canonicalise to {key!r}. Refusing to publish an ambiguous "
+            "manifest."
+        )
+      if key != original:
+        renamed += 1
+      v = {**v, "name": key}
+    canonical.append(v)
+
+  if renamed:
+    logging.info(
+        "Canonicalised %d/%d destination variable names for manifest pairing"
+        " (e.g. %r -> %r).",
+        renamed,
+        len(canonical),
+        variables[0].get("name"),
+        canonical[0].get("name"),
+    )
+  out = dict(entry)
+  out["variables"] = canonical
+  return out
+
+
 def _free_kv_cache_during_weight_sync(sampler: Any) -> bool:
   """Whether `sampler` wants its KV cache freed around the weight sync.
 
@@ -43,7 +151,7 @@ def _partial_rollout_enabled(sampler: Any, default: bool = False) -> bool:
 
 
 class RaidenWeightSyncDelegate:
-  """Manages weight synchronization over Raiden for sampler adapters.
+  """Manages weight synchronization over Raiden for rollout samplers.
 
   The destination side of a weight sync round: bind_weight_sync binds the
   sampler's transformer state to the raiden transport, the transfer lands

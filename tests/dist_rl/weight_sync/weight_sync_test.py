@@ -34,7 +34,7 @@ import numpy as np
 import optax
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import worker_registry
-from tunix.dist_rl.rollout import inprocess_vllm_sampler_adapter
+from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.dist_rl.rollout import vanilla_sampler
 from tunix.dist_rl.train import peft_trainer_v2
@@ -331,7 +331,7 @@ def _rollout_process_fn(
     )
   else:
     mock_vllm_sampler = MockVllmSampler(model_config, rngs=nnx.Rngs(1))
-    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+    adapter = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_sampler_coord_0",
         config=adapter_config,
         raiden_sync_delegate=delegate,
@@ -757,12 +757,12 @@ class WeightSyncE2ETest(absltest.TestCase):
     )
 
   def test_fallback_mode_weight_sync_with_vllm_adapter(self):
-    """Verifies Fallback mode weight transfer from PeftTrainer to InprocessVllmSamplerAdapter."""
+    """Verifies Fallback mode weight transfer from PeftTrainer to InprocessVllmSampler."""
     adapter_config = RolloutConfig(
         sampler_type="inprocess_vllm",
         weight_sync_mode=WeightSyncMode.FALLBACK,
     )
-    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+    adapter = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_sampler_fallback_0",
         config=adapter_config,
     )

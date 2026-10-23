@@ -382,7 +382,7 @@ async def run_worker(args: argparse.Namespace):
   from transformers import AutoTokenizer
   from tunix.dist_rl.common import datatypes
   from tunix.dist_rl.examples.deepswe_dist import deepswe
-  from tunix.dist_rl.rollout import inprocess_vllm_sampler_adapter
+  from tunix.dist_rl.rollout import inprocess_vllm_sampler
   from tunix.dist_rl.worker import remote_execution, rollout_worker
   from tunix.generate import tokenizer_adapter
   from tunix.rl.agentic.parser.chat_template_parser import parser
@@ -416,9 +416,12 @@ async def run_worker(args: argparse.Namespace):
           "dtype": "bfloat16",
       },
   )
-  sampler = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-      server_id="deepswe-eval", tokenizer=tokenizer, config=config,
-      weight_sync_mode="none", max_concurrency=args.max_concurrent,
+  sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+      server_id="deepswe-eval",
+      tokenizer=tokenizer,
+      config=config,
+      weight_sync_mode="none",
+      max_concurrency=args.max_concurrent,
   )
   env_name = deepswe.DEEPSWE_ENV_NAME
   if args.enable_guard:

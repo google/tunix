@@ -12,17 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""In-process vLLM Sampler adapter integrating with Tunix VllmSampler."""
+"""In-process vLLM rollout sampler."""
 
-import abc
 import asyncio
+from collections.abc import Sequence
 from concurrent import futures
 import functools
-from typing import Any, List, Sequence
+from typing import Any
+
 from absl import logging
-from flax import nnx
-import jax
 import numpy as np
+from tunix.common import configs
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.dist_rl.rollout.raiden_weight_sync_mixin import (
     RaidenDestinationWeightSyncMixin,
@@ -41,10 +41,21 @@ def _get_vllm_sampler_cls():
   return generate_vllm_lib
 
 
-class InprocessVllmSamplerAdapter(
-    RaidenDestinationWeightSyncMixin, Sampler, abc.ABC
-):
-  """Sampler adapter wrapping Tunix VllmSampler."""
+class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
+  """Rollout sampler that runs the vLLM engine inside the rollout process.
+
+  This is the default rollout sampler for RL training with the Tunix trainer.
+  Use `VllmSampler` instead to keep the engine in its own process, or with a
+  trainer that emits weights in the rollout model's layout, such as MaxText.
+
+  Because the rollout weights live in this process, every weight-sync path
+  works: Raiden binds the live weights, `get_target_state()` returns the weight
+  tree the trainer converts to, and the non-Raiden `update_params` fallback
+  works. Multi-host TPU works through vLLM's Ray executor
+  (`TPU_MULTIHOST_BACKEND=ray`).
+
+  `get_load_info()` and `get_transfer_status()` return placeholders.
+  """
 
   def __init__(
       self,
@@ -67,12 +78,21 @@ class InprocessVllmSamplerAdapter(
       except ValueError:
         pass
     self.tokenizer: Any = tokenizer
+    # Only a config the caller passed (or the `VllmConfig` that `initialize()`
+    # builds from `model_name`) starts the engine. The `RolloutConfig` default
+    # below only supplies settings, so a sampler built without a config stays
+    # uninitialized and `sample()` reports that clearly.
+    self._config_given: bool = config is not None
+    if config is None:
+      config = configs.RolloutConfig(
+          weight_sync_mode=weight_sync.DEFAULT_WEIGHT_SYNC_MODE
+      )
     self.config = config
     self.model_name = model_name or kwargs.get("model", "")
     self.vllm_sampler = None
     self.raiden_sync_delegate = raiden_sync_delegate
     self.max_concurrency = max_concurrency
-    cfg_partial = getattr(config, "partial_rollout", False)
+    cfg_partial = self.config.partial_rollout
     self.partial_rollout: bool = bool(
         partial_rollout or (isinstance(cfg_partial, bool) and cfg_partial)
     )
@@ -81,7 +101,9 @@ class InprocessVllmSamplerAdapter(
         thread_name_prefix=f"{self.server_id}_vllm_worker",
     )
     if weight_sync_mode is None:
-      weight_sync_mode = getattr(config, "weight_sync_mode", None)
+      # A `VllmConfig` carries no weight-sync mode; it resolves to
+      # DEFAULT_WEIGHT_SYNC_MODE below.
+      weight_sync_mode = getattr(self.config, "weight_sync_mode", None)
     if isinstance(weight_sync_mode, weight_sync.WeightSyncMode):
       self.weight_sync_mode = weight_sync_mode
     elif isinstance(weight_sync_mode, str):
@@ -94,8 +116,7 @@ class InprocessVllmSamplerAdapter(
 
     if self.enable_raiden:
       logging.info(
-          "InprocessVllmSamplerAdapter [%s] weight_sync: initializing Raiden"
-          " delegate",
+          "InprocessVllmSampler [%s] weight_sync: initializing Raiden delegate",
           self.server_id,
       )
 
@@ -113,7 +134,7 @@ class InprocessVllmSamplerAdapter(
 
     if not self.enable_raiden and self.raiden_sync_delegate:
       logging.warning(
-          "InprocessVllmSamplerAdapter [%s] raiden_sync_delegate is set but"
+          "InprocessVllmSampler [%s] raiden_sync_delegate is set but"
           " enable_raiden is False.",
           self.server_id,
       )
@@ -131,11 +152,12 @@ class InprocessVllmSamplerAdapter(
           server_mode=True,
           engine_kwargs={"model": self.model_name},
       )
+      self._config_given = True
 
     if (
         self.vllm_sampler is None
         and self.tokenizer is not None
-        and self.config is not None
+        and self._config_given
     ):
       # `sample()` dispatches concurrent requests across `self._executor` worker
       # threads. Force `server_mode=True` so `VllmSampler` uses
@@ -220,45 +242,6 @@ class InprocessVllmSamplerAdapter(
       await asyncio.to_thread(self.vllm_sampler.resume)
     return True
 
-  async def pre_weight_sync(
-      self,
-      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
-      **kwargs,
-  ) -> str | None | Any:
-    """Pauses the in-process driver and prepares staging prior to weight update."""
-    use_partial = bool(kwargs.get("partial_rollout", self.partial_rollout))
-    await self.pause(
-        mode="keep" if use_partial else "wait",
-        clear_cache=not use_partial,
-    )
-    if self.partial_rollout:
-      kwargs.setdefault("partial_rollout", True)
-    return await super().pre_weight_sync(sync_request=sync_request, **kwargs)
-
-  async def post_weight_sync(
-      self,
-      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
-      **kwargs,
-  ) -> str | None | Any:
-    """Finalizes weight update and resumes the in-process driver."""
-    try:
-      return await super().post_weight_sync(sync_request=sync_request, **kwargs)
-    finally:
-      await self.resume()
-
-  async def abort_weight_sync(
-      self,
-      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
-      **kwargs,
-  ) -> str | None | Any:
-    """Safely aborts weight sync round and resumes the in-process driver."""
-    try:
-      return await super().abort_weight_sync(
-          sync_request=sync_request, **kwargs
-      )
-    finally:
-      await self.resume()
-
   async def get_mesh(self, **kwargs) -> Any:
     """Returns the underlying device mesh topology."""
     del kwargs
@@ -278,13 +261,13 @@ class InprocessVllmSamplerAdapter(
       **kwargs,
   ) -> (
       base_sampler_lib.SamplingResponse
-      | List[base_sampler_lib.SamplingResponse]
+      | list[base_sampler_lib.SamplingResponse]
       | Any
   ):
     """Generates completions using underlying Tunix VllmSampler."""
     if not self.vllm_sampler:
       raise RuntimeError(
-          f"InprocessVllmSamplerAdapter [{self.server_id}] vllm_sampler is not"
+          f"InprocessVllmSampler [{self.server_id}] vllm_sampler is not"
           " initialized."
       )
 
@@ -292,7 +275,7 @@ class InprocessVllmSamplerAdapter(
       raise ValueError("sampling_requests cannot be None.")
 
     if isinstance(sampling_requests, base_sampler_lib.SamplingRequest):
-      requests: List[Any] = [sampling_requests]
+      requests: list[Any] = [sampling_requests]
       is_sequence = False
     elif isinstance(sampling_requests, (list, tuple)):
       requests = list(sampling_requests)
@@ -337,10 +320,8 @@ class InprocessVllmSamplerAdapter(
       seeds.append(sp.seed)
       return_logprobs_list.append(sp.return_logprobs)
       return_routed_experts_list.append(sp.return_routed_experts)
-      routed_experts_prompt_start_list.append(
-          getattr(sp, "routed_experts_prompt_start", 0)
-      )
-      cache_salt_list.append(getattr(sp, "cache_salt", None))
+      routed_experts_prompt_start_list.append(sp.routed_experts_prompt_start)
+      cache_salt_list.append(sp.cache_salt)
 
     max_generation_steps = max(max_gen_steps_list) if max_gen_steps_list else 64
     temperature = temps[0] if temps else 0.0
@@ -358,11 +339,12 @@ class InprocessVllmSamplerAdapter(
     # Capture is an engine-level vLLM setting, so it cannot be turned on
     # per request. Warn rather than silently handing back None routing, which
     # would look like a dense model to the trainer.
-    if any(return_routed_experts_list) and not getattr(
-        self.vllm_sampler.config, "return_routed_experts", False
+    if (
+        any(return_routed_experts_list)
+        and not self.vllm_sampler.config.return_routed_experts
     ):
       logging.warning(
-          "InprocessVllmSamplerAdapter [%s]: routed experts were requested per"
+          "InprocessVllmSampler [%s]: routed experts were requested per"
           " request, but the vLLM engine was built without"
           " return_routed_experts, so none will be returned. Set"
           " return_routed_experts on the sampler's VllmConfig.",
@@ -396,7 +378,7 @@ class InprocessVllmSamplerAdapter(
         functools.partial(self.vllm_sampler, **sampler_call_kwargs),
     )
 
-    prompt_lengths = getattr(sampler_output, "prompt_lengths", None)
+    prompt_lengths = sampler_output.prompt_lengths
     responses = []
     for i, req in enumerate(requests):
       req_id = getattr(req, "request_id", "")
@@ -415,7 +397,7 @@ class InprocessVllmSamplerAdapter(
       if sampler_output.logprobs and isinstance(sampler_output.logprobs, list):
         lps = sampler_output.logprobs[i]
 
-      routed_list = getattr(sampler_output, "routed_experts", None) or []
+      routed_list = sampler_output.routed_experts or []
       routed = routed_list[i] if i < len(routed_list) else None
 
       tok_ids = (
@@ -458,7 +440,7 @@ class InprocessVllmSamplerAdapter(
       self,
       source_server_id: str,
       target_server_id: str,
-      token_ids: List[int],
+      token_ids: list[int],
       **kwargs,
   ) -> bool:
     """Triggers KV-cache transfer across TPU slices."""

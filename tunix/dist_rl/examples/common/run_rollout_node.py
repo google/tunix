@@ -686,7 +686,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
   vllm_sampler = _import_vllm_sampler()
   import jax  # pylint: disable=g-import-not-at-top
   from tunix.dist_rl.rollout import (  # pylint: disable=g-import-not-at-top
-      inprocess_vllm_sampler_adapter,
+      inprocess_vllm_sampler,
   )
   from tunix.dist_rl.worker import (  # pylint: disable=g-import-not-at-top
       rollout_worker,
@@ -765,7 +765,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
   if multihost_backend:
     engine_kwargs["distributed_executor_backend"] = multihost_backend
   # Enable VLLMInProcessDriver (`server_mode=True`) on both single-host and
-  # multi-host TPUs so concurrent `InprocessVllmSamplerAdapter.sample()` worker
+  # multi-host TPUs so concurrent `InprocessVllmSampler.sample()` worker
   # threads submit into a single engine loop for continuous batching without
   # racing on donated JAX KV-cache buffers. `--no-vllm_server_mode` opts out.
   server_mode = (
@@ -806,7 +806,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       eos_tokens=_eos_token_ids(args, tokenizer),
       partial_rollout=partial_rollout,
   )
-  sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+  sampler = inprocess_vllm_sampler.InprocessVllmSampler(
       server_id=args.worker_id,
       tokenizer=tokenizer,
       config=vllm_config,
@@ -819,13 +819,13 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       rollout_vllm_model_version=vllm_model,
       **_rollout_config_kwargs(args, tokenizer),
   )
-  return sampler_adapter, config
+  return sampler, config
 
 
 def _create_vllm_sampler(args, tokenizer):
   """Creates a vLLM sampler rollout worker instance."""
   from tunix.dist_rl.rollout import (  # pylint: disable=g-import-not-at-top
-      vllm_sampler_adapter,
+      vllm_sampler,
   )
   from tunix.dist_rl.worker import (  # pylint: disable=g-import-not-at-top
       rollout_worker,
@@ -849,7 +849,7 @@ def _create_vllm_sampler(args, tokenizer):
   tp_size = _get_tensor_parallel_size(args)
   dp_size = max(1, int(getattr(args, "mesh_fsdp", 1) or 1))
   logging.info(
-      "Creating vLLM RLVllmSampler config for model=%s tensor_parallel_size=%d "
+      "Creating vLLM VllmSampler config for model=%s tensor_parallel_size=%d "
       "data_parallel_size=%d (%d chips) max_model_len=%d...",
       vllm_model,
       tp_size,
@@ -910,20 +910,21 @@ def _create_vllm_sampler(args, tokenizer):
         )
     )
   engine_args = AsyncEngineArgs(**engine_kwargs)  # type: ignore[arg-type]
-  sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(  # type: ignore[abstract]
-      server_id=args.worker_id,
-      engine_args=engine_args,
-      model_name=vllm_model,
-      weight_sync_mode=args.weight_sync_mode,
-      partial_rollout=partial_rollout,
-      detokenize=args.detokenize,
-  )
   config = rollout_worker.RolloutConfig(
       sampler_type="vllm",
       rollout_vllm_model_version=vllm_model,
       **_rollout_config_kwargs(args, tokenizer),
   )
-  return sampler_adapter, config
+  sampler = vllm_sampler.VllmSampler(
+      server_id=args.worker_id,
+      engine_args=engine_args,
+      model_name=vllm_model,
+      config=config,
+      weight_sync_mode=args.weight_sync_mode,
+      partial_rollout=partial_rollout,
+      detokenize=args.detokenize,
+  )
+  return sampler, config
 
 
 def _build_rollout_cache_params(

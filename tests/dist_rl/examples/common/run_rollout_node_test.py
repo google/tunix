@@ -24,8 +24,8 @@ from unittest import mock
 from absl.testing import absltest
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.examples.common import run_rollout_node
-from tunix.dist_rl.rollout import inprocess_vllm_sampler_adapter
-from tunix.dist_rl.rollout import vllm_sampler_adapter
+from tunix.dist_rl.rollout import inprocess_vllm_sampler
+from tunix.dist_rl.rollout import vllm_sampler
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.utils import maxtext_utils
 
@@ -40,7 +40,7 @@ def _vllm_engine_kwargs(argv: list[str]) -> dict[str, object]:
   arg_utils = types.ModuleType("vllm.engine.arg_utils")
   arg_utils.AsyncEngineArgs = mock.Mock()
   with mock.patch.dict(sys.modules, {"vllm.engine.arg_utils": arg_utils}):
-    with mock.patch.object(vllm_sampler_adapter, "VllmSamplerAdapter"):
+    with mock.patch.object(vllm_sampler, "VllmSampler"):
       run_rollout_node._create_vllm_sampler(
           run_rollout_node._parse_args(argv), tokenizer=None
       )
@@ -196,7 +196,7 @@ class RunRolloutNodeTest(absltest.TestCase):
         ),
         mock.patch.object(run_rollout_node, "_create_rollout_mesh"),
         mock.patch.object(
-            inprocess_vllm_sampler_adapter, "InprocessVllmSamplerAdapter"
+            inprocess_vllm_sampler, "InprocessVllmSampler"
         ),
     ):
       run_rollout_node._create_inprocess_vllm_sampler(
@@ -236,7 +236,7 @@ class RunRolloutNodeTest(absltest.TestCase):
         ),
         mock.patch.object(run_rollout_node, "_create_rollout_mesh"),
         mock.patch.object(
-            inprocess_vllm_sampler_adapter, "InprocessVllmSamplerAdapter"
+            inprocess_vllm_sampler, "InprocessVllmSampler"
         ),
     ):
       run_rollout_node._create_inprocess_vllm_sampler(

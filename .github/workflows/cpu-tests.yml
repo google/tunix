@@ -106,8 +106,8 @@ jobs:
           # TODO(tunix-dev): add back raiden tests after tpu_sync lib is ready.
           python -m pytest tests/dist_rl/ tests/experimental/ -v --tb=short \
             --ignore-glob='*/raiden_*.py' \
-            --ignore=tests/dist_rl/weight_sync/weight_sync_test.py \
-            --ignore=tests/dist_rl/rollout/vllm_sampler_v2_test.py
+            --ignore=tests/dist_rl/rollout/vllm_sampler_test.py \
+            --ignore=tests/dist_rl/weight_sync/weight_sync_test.py
 
   run_vllm:
     runs-on: ubuntu-latest
@@ -137,7 +137,7 @@ jobs:
 
       - name: Run vllm rollout experimental tests
         run: |
-          python3 -m pytest tests/dist_rl/rollout/vllm_sampler_v2_test.py -v --tb=short
+          python3 -m pytest tests/dist_rl/rollout/vllm_sampler_test.py -v --tb=short
 
   # ---------------------------------------------------------------------------
   # Job: run_dev

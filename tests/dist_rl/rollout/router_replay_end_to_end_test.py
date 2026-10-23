@@ -38,7 +38,7 @@ from jax.sharding import Mesh
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import batch_assembly
-from tunix.dist_rl.rollout import inprocess_vllm_sampler_adapter
+from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.generate import base_sampler
 from tunix.rl.agentic import utils as agentic_utils
@@ -175,9 +175,7 @@ class SamplerToPayloadTest(absltest.TestCase):
         routed_experts=[_routing(PROMPT_LEN + GEN_LEN, fill)],
     )
 
-    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="rollout"
-    )
+    adapter = inprocess_vllm_sampler.InprocessVllmSampler(server_id="rollout")
     adapter.vllm_sampler = stub
     request = base_sampler_lib.SamplingRequest(
         request_id="req-0",
@@ -247,9 +245,7 @@ class SamplerToPayloadTest(absltest.TestCase):
         ),
     ]
 
-    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="rollout"
-    )
+    adapter = inprocess_vllm_sampler.InprocessVllmSampler(server_id="rollout")
     adapter.vllm_sampler = stub
 
     req0 = base_sampler_lib.SamplingRequest(
@@ -341,9 +337,7 @@ class SamplerToPayloadTest(absltest.TestCase):
         routed_experts=[routing_a, routing_b],
     )
 
-    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="rollout"
-    )
+    adapter = inprocess_vllm_sampler.InprocessVllmSampler(server_id="rollout")
     adapter.vllm_sampler = stub
 
     req_a = base_sampler_lib.SamplingRequest(
@@ -462,9 +456,7 @@ class SamplerToPayloadTest(absltest.TestCase):
           tokenizer=_StubTokenizer(), config=config
       )
 
-    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="rollout"
-    )
+    adapter = inprocess_vllm_sampler.InprocessVllmSampler(server_id="rollout")
     adapter.vllm_sampler = sampler
 
     mock_agent = mock.MagicMock()

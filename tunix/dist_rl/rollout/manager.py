@@ -102,18 +102,19 @@ class RolloutManager:
       )
 
       if sampler_type == "vllm":
-        from tunix.dist_rl.rollout import vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
+        from tunix.dist_rl.rollout import vllm_sampler  # pylint: disable=g-import-not-at-top
 
-        adapter_kwargs: dict[str, Any] = {
+        sampler_kwargs: dict[str, Any] = {
             "server_id": "vllm_sampler",
             "model_name": getattr(config, "rollout_vllm_model_version", ""),
+            "config": self.config,
             "weight_sync_mode": weight_sync_mode,
         }
         if self._partial_rollout:
-          adapter_kwargs["partial_rollout"] = True
-        sampler = vllm_sampler_adapter.VllmSamplerAdapter(**adapter_kwargs)
+          sampler_kwargs["partial_rollout"] = True
+        sampler = vllm_sampler.VllmSampler(**sampler_kwargs)
       elif "inprocess_vllm" in sampler_type:
-        from tunix.dist_rl.rollout import inprocess_vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
+        from tunix.dist_rl.rollout import inprocess_vllm_sampler  # pylint: disable=g-import-not-at-top
 
         raiden_delegate = None
         if weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN:
@@ -130,7 +131,7 @@ class RolloutManager:
               )
           )
 
-        adapter_kwargs = {
+        sampler_kwargs = {
             "server_id": "inprocess_vllm_sampler",
             "tokenizer": tokenizer,
             "config": config,
@@ -139,10 +140,8 @@ class RolloutManager:
             "max_concurrency": max_concurrency,
         }
         if self._partial_rollout:
-          adapter_kwargs["partial_rollout"] = True
-        sampler = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
-            **adapter_kwargs
-        )
+          sampler_kwargs["partial_rollout"] = True
+        sampler = inprocess_vllm_sampler.InprocessVllmSampler(**sampler_kwargs)
       elif "vanilla" in sampler_type:
         raise ValueError(
             "VanillaSampler requires an explicit pre-constructed sampler"
