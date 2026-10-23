@@ -1611,8 +1611,12 @@ class SweAgentTest(absltest.TestCase):
     ]
     observed_container = []
     orig_reward.side_effect = lambda *a, **k: (
-        observed_container.append(mock_runtime._target_container) or 1.0
+        observed_container.append(
+            (mock_runtime._container, mock_runtime._target_container)
+        )
+        or 1.0
     )
+    mock_runtime._container = sandbox_utils.RUNTIME_CONTAINER_NAME
     mock_runtime._target_container = sandbox_utils.RUNTIME_CONTAINER_NAME
     reward = openhands_utils.evaluate_patch_in_fresh_container(
         mock_eval_env,
@@ -1622,7 +1626,14 @@ class SweAgentTest(absltest.TestCase):
     self.assertEqual(reward, 1.0)
     self.assertEqual(
         observed_container,
-        [sandbox_utils.EVAL_CONTAINER_NAME],
+        [(
+            sandbox_utils.EVAL_CONTAINER_NAME,
+            sandbox_utils.EVAL_CONTAINER_NAME,
+        )],
+    )
+    self.assertEqual(
+        mock_runtime._container,
+        sandbox_utils.RUNTIME_CONTAINER_NAME,
     )
     self.assertEqual(
         mock_runtime._target_container,
@@ -1822,9 +1833,9 @@ class SweAgentTest(absltest.TestCase):
     captured_handle_state = {}
 
     def _fake_make_fleet_repo_env(handle, **kwargs):
-      del kwargs
+      captured_handle_state["container_kwarg"] = kwargs.get("container")
       captured_handle_state["target_container"] = getattr(
-          handle, "_target_container", None
+          handle, "target_container", None
       )
       captured_handle_state["defer_setup_env"] = getattr(
           handle, "_defer_setup_env", None
@@ -1857,6 +1868,10 @@ class SweAgentTest(absltest.TestCase):
       obs, info = env.reset()
       self.assertEqual(obs, "Fix bug")
       self.assertEqual(info.get("base_commit"), "deadbeef1234567")
+      self.assertEqual(
+          captured_handle_state["container_kwarg"],
+          sandbox_utils.EVAL_CONTAINER_NAME,
+      )
       self.assertEqual(
           captured_handle_state["target_container"],
           sandbox_utils.EVAL_CONTAINER_NAME,

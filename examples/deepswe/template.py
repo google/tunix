@@ -1209,6 +1209,7 @@ DEFAULT_OPENHANDS_KEEPALIVE_CMD = [
 
 RUNTIME_CONTAINER_NAME = "agent-runtime"
 EVAL_CONTAINER_NAME = "eval"
+TASK_IMAGE_PLACEHOLDER = "{task_image}"
 DEFAULT_OPENHANDS_SERVER_IMAGE = (
     "gcr.io/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62"
 )
@@ -1217,6 +1218,93 @@ DEFAULT_OPENHANDS_SERVER_IMAGE = (
 def get_image_pull_policy() -> str:
   """Returns the container imagePullPolicy for sandbox pods."""
   return os.getenv("SANDBOX_IMAGE_PULL_POLICY", "IfNotPresent")
+
+
+def _build_eval_sidecar_container(
+    pull_policy: Optional[str] = None,
+    task_image: str = TASK_IMAGE_PLACEHOLDER,
+) -> dict[str, Any]:
+  """Builds the fresh 'eval' sidecar container spec for isolated grading."""
+  resolved_pull_policy = pull_policy or get_image_pull_policy()
+  return {
+      "name": EVAL_CONTAINER_NAME,
+      "image": task_image,
+      "imagePullPolicy": resolved_pull_policy,
+      "command": ["sleep", "infinity"],
+      "stdin": True,
+      "tty": True,
+      "resources": {
+          "requests": {
+              "cpu": os.getenv("SANDBOX_EVAL_CPU", "50m"),
+              "memory": os.getenv("SANDBOX_EVAL_MEM", "128Mi"),
+          },
+          "limits": {
+              "cpu": os.getenv("SANDBOX_CPU_LIMIT", "2"),
+              "memory": os.getenv("SANDBOX_MEM_LIMIT", "4Gi"),
+          },
+      },
+  }
+
+
+def _apply_sandbox_tolerations(
+    extra_pod_spec: dict[str, Any],
+    node_selector: Optional[dict[str, str]] = None,
+) -> None:
+  """Populates tolerations on `extra_pod_spec` from env or sandbox-np default."""
+  tolerations_raw = os.getenv("SANDBOX_TOLERATIONS")
+  if tolerations_raw:
+    try:
+      extra_pod_spec["tolerations"] = json.loads(tolerations_raw)
+    except Exception:  # pylint: disable=broad-exception-caught
+      try:
+        import ast  # pylint: disable=g-import-not-at-top
+
+        extra_pod_spec["tolerations"] = ast.literal_eval(tolerations_raw)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Failed to parse SANDBOX_TOLERATIONS: %s", e)
+
+  if (
+      "tolerations" not in extra_pod_spec
+      and node_selector
+      and node_selector.get("cloud.google.com/gke-nodepool") == "sandbox-np"
+  ):
+    extra_pod_spec["tolerations"] = [{
+        "key": "workload",
+        "operator": "Equal",
+        "value": "sandbox",
+        "effect": "NoSchedule",
+    }]
+
+
+def _build_resource_spec(resource_spec_cls: Any) -> Any:
+  """Constructs ResourceSpec with requests and limits via direct SDK fields."""
+  cpu = os.getenv("SANDBOX_CPU", "500m")
+  memory = os.getenv("SANDBOX_MEM", "1Gi")
+  cpu_limit = os.getenv("SANDBOX_CPU_LIMIT", "2")
+  memory_limit = os.getenv("SANDBOX_MEM_LIMIT", "4Gi")
+  try:
+    return resource_spec_cls(
+        cpu=cpu,
+        memory=memory,
+        cpu_limit=cpu_limit,
+        memory_limit=memory_limit,
+    )
+  except TypeError:
+    return resource_spec_cls(cpu=cpu, memory=memory)
+
+
+def _build_template_spec(template_spec_cls: Any, **kwargs: Any) -> Any:
+  """Constructs TemplateSpec using direct SDK fields with legacy fallback."""
+  direct_kwargs = {
+      **kwargs,
+      "network_policy_management": "Unmanaged",
+      "automount_service_account_token": False,
+      "share_process_namespace": False,
+  }
+  try:
+    return template_spec_cls(**direct_kwargs)
+  except TypeError:
+    return template_spec_cls(**kwargs)
 
 
 def get_openhands_pod_template(
@@ -1239,7 +1327,7 @@ def get_openhands_pod_template(
   if os.getenv("AGENT_SERVER_COMMAND"):
     try:
       keepalive_cmd = json.loads(os.environ["AGENT_SERVER_COMMAND"])
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
       keepalive_cmd = os.environ["AGENT_SERVER_COMMAND"].split()
   else:
     keepalive_cmd = list(DEFAULT_OPENHANDS_KEEPALIVE_CMD)
@@ -1253,7 +1341,7 @@ def get_openhands_pod_template(
 
   pull_policy = get_image_pull_policy()
 
-  extra_pod_spec = {
+  extra_pod_spec: dict[str, Any] = {
       "automountServiceAccountToken": False,
       "shareProcessNamespace": False,
       "initContainers": [{
@@ -1272,55 +1360,75 @@ def get_openhands_pod_template(
           "volumeMounts": [{"name": "oh", "mountPath": "/oh"}],
       }],
       "volumes": [{"name": "oh", "emptyDir": {}}],
-      "containers": [{
-          "imagePullPolicy": pull_policy,
-          "ports": [{"containerPort": 8000}],
-          "volumeMounts": [{"name": "oh", "mountPath": "/oh"}],
-          "readinessProbe": {
-              "httpGet": {"path": "/health", "port": 8000},
-              "periodSeconds": 2,
-              "failureThreshold": 150,
+      "containers": [
+          {
+              "name": RUNTIME_CONTAINER_NAME,
+              "imagePullPolicy": pull_policy,
+              "ports": [{"containerPort": 8000}],
+              "volumeMounts": [{"name": "oh", "mountPath": "/oh"}],
+              "readinessProbe": {
+                  "httpGet": {"path": "/health", "port": 8000},
+                  "periodSeconds": 2,
+                  "failureThreshold": 150,
+              },
+              "resources": {
+                  "limits": {
+                      "cpu": os.getenv("SANDBOX_CPU_LIMIT", "2"),
+                      "memory": os.getenv("SANDBOX_MEM_LIMIT", "4Gi"),
+                  }
+              },
+              "env": (
+                  [{"name": "OH_SESSION_API_KEYS_0", "value": session_key}]
+                  if session_key
+                  else []
+              ),
           },
-          "resources": {
-              "limits": {
-                  "cpu": os.getenv("SANDBOX_CPU_LIMIT", "2"),
-                  "memory": os.getenv("SANDBOX_MEM_LIMIT", "4Gi"),
-              }
-          },
-          "env": (
-              [{"name": "OH_SESSION_API_KEYS_0", "value": session_key}]
-              if session_key
-              else []
-          ),
-      }],
+          _build_eval_sidecar_container(pull_policy=pull_policy),
+      ],
   }
 
-  tolerations_raw = os.getenv("SANDBOX_TOLERATIONS")
-  if tolerations_raw:
-    try:
-      extra_pod_spec["tolerations"] = json.loads(tolerations_raw)
-    except Exception:
-      try:
-        import ast  # pylint: disable=g-import-not-at-top
-        extra_pod_spec["tolerations"] = ast.literal_eval(tolerations_raw)
-      except Exception as e:
-        logging.warning("Failed to parse SANDBOX_TOLERATIONS: %s", e)
+  _apply_sandbox_tolerations(extra_pod_spec, node_selector=node_selector)
 
-  if "tolerations" not in extra_pod_spec and node_selector and node_selector.get("cloud.google.com/gke-nodepool") == "sandbox-np":
-    extra_pod_spec["tolerations"] = [{
-        "key": "workload",
-        "operator": "Equal",
-        "value": "sandbox",
-        "effect": "NoSchedule",
-    }]
-
-  return TemplateSpec(
+  return _build_template_spec(
+      TemplateSpec,
       image_pull_policy=pull_policy,
       keepalive_command=keepalive_cmd,
-      resources=ResourceSpec(
-          cpu=os.getenv("SANDBOX_CPU", "500m"),
-          memory=os.getenv("SANDBOX_MEM", "1Gi"),
-      ),
+      resources=_build_resource_spec(ResourceSpec),
+      extra_pod_spec=extra_pod_spec,
+      node_selector=node_selector,
+  )
+
+
+def get_r2egym_pod_template(
+    node_selector: Optional[dict[str, str]] = None,
+) -> Any:
+  """Builds and returns the TemplateSpec for R2E-Gym / SWE-agent sandboxes."""
+  try:
+    from agent_sandbox_rl import (  # pytype: disable=import-error
+        ResourceSpec,
+        TemplateSpec,
+    )
+  except ImportError as e:
+    raise ImportError(
+        "use_agent_sandbox=True strictly requires the 'agent_sandbox_rl'"
+        " package. Install via: pip install"
+        " git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl"
+    ) from e
+
+  pull_policy = get_image_pull_policy()
+  extra_pod_spec: dict[str, Any] = {
+      "automountServiceAccountToken": False,
+      "shareProcessNamespace": False,
+      "containers": [
+          _build_eval_sidecar_container(pull_policy=pull_policy),
+      ],
+  }
+  _apply_sandbox_tolerations(extra_pod_spec, node_selector=node_selector)
+
+  return _build_template_spec(
+      TemplateSpec,
+      image_pull_policy=pull_policy,
+      resources=_build_resource_spec(ResourceSpec),
       extra_pod_spec=extra_pod_spec,
       node_selector=node_selector,
   )
@@ -1330,8 +1438,8 @@ def get_template(
     scaffold: str,
     node_selector: Optional[dict[str, str]] = None,
 ) -> Any:
-  """Returns the fleet TemplateSpec for the given scaffold, or None."""
+  """Returns the fleet TemplateSpec for the given scaffold."""
   if scaffold in OPENHANDS_SCAFFOLDS:
     return get_openhands_pod_template(node_selector=node_selector)
-  return None
+  return get_r2egym_pod_template(node_selector=node_selector)
 

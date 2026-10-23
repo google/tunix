@@ -40,17 +40,44 @@ _R2EGYM_PATCHED = False
 
 
 def set_runtime_container(target: Any, container_name: str) -> None:
-  """Configures an R2E-Gym runtime (or RepoEnv) to exec in `container_name`."""
+  """Configures an R2E-Gym runtime, RepoEnv, or SandboxHandle to exec in `container_name`."""
   if target is None:
     return
   runtime = getattr(target, "runtime", None) or target
   try:
+    # Direct attribute used by agent_sandbox_rl.adapters.r2egym.FleetDockerRuntime.
+    runtime._container = container_name
+    # Legacy attributes for older agent_sandbox_rl images and unit tests.
     runtime._target_container = container_name
+    if hasattr(target, "target_container"):
+      target.target_container = container_name
     client = getattr(runtime, "client", None)
     if client is not None:
       client._default_container = container_name
   except Exception as e:  # pylint: disable=broad-exception-caught
     logging.debug("[SandboxFleet] set_runtime_container note: %s", e)
+
+
+def _sdk_has_native_container_exec() -> bool:
+  """Returns True if agent_sandbox_rl natively routes multi-container pod exec."""
+  try:
+    from agent_sandbox_rl import handles as asrl_handles  # pyrefly: ignore[missing-import]
+
+    return callable(getattr(asrl_handles, "exec_container_kwargs", None))
+  except ImportError:
+    return False
+
+
+def _sdk_has_native_template_sidecars() -> bool:
+  """Returns True if agent_sandbox_rl natively supports TASK_IMAGE_PLACEHOLDER."""
+  try:
+    from agent_sandbox_rl import constants as asrl_constants  # pyrefly: ignore[missing-import]
+
+    return isinstance(
+        getattr(asrl_constants, "TASK_IMAGE_PLACEHOLDER", None), str
+    )
+  except ImportError:
+    return False
 
 
 def patch_r2egym_for_agent_sandbox() -> None:
@@ -80,31 +107,32 @@ def patch_r2egym_for_agent_sandbox() -> None:
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.debug("[SandboxFleet] HfFolder patch note: %s", e)
 
-  try:
-    from kubernetes import client as k8s_client  # pyrefly: ignore[missing-import]
+  if not _sdk_has_native_container_exec():
+    try:
+      from kubernetes import client as k8s_client  # pyrefly: ignore[missing-import]
 
-    orig_exec = getattr(
-        k8s_client.CoreV1Api, "_orig_connect_get_namespaced_pod_exec", None
-    )
-    if orig_exec is None and hasattr(
-        k8s_client.CoreV1Api, "connect_get_namespaced_pod_exec"
-    ):
-      k8s_client.CoreV1Api._orig_connect_get_namespaced_pod_exec = (
-          k8s_client.CoreV1Api.connect_get_namespaced_pod_exec
+      orig_exec = getattr(
+          k8s_client.CoreV1Api, "_orig_connect_get_namespaced_pod_exec", None
       )
+      if orig_exec is None and hasattr(
+          k8s_client.CoreV1Api, "connect_get_namespaced_pod_exec"
+      ):
+        k8s_client.CoreV1Api._orig_connect_get_namespaced_pod_exec = (
+            k8s_client.CoreV1Api.connect_get_namespaced_pod_exec
+        )
 
-      def _patched_connect_get_namespaced_pod_exec(self, *args, **kwargs):
-        if not kwargs.get("container"):
-          kwargs["container"] = getattr(
-              self, "_default_container", RUNTIME_CONTAINER_NAME
-          )
-        return self._orig_connect_get_namespaced_pod_exec(*args, **kwargs)
+        def _patched_connect_get_namespaced_pod_exec(self, *args, **kwargs):
+          if not kwargs.get("container"):
+            kwargs["container"] = getattr(
+                self, "_default_container", RUNTIME_CONTAINER_NAME
+            )
+          return self._orig_connect_get_namespaced_pod_exec(*args, **kwargs)
 
-      k8s_client.CoreV1Api.connect_get_namespaced_pod_exec = (
-          _patched_connect_get_namespaced_pod_exec
-      )
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    logging.debug("[SandboxFleet] CoreV1Api exec patch note: %s", e)
+        k8s_client.CoreV1Api.connect_get_namespaced_pod_exec = (
+            _patched_connect_get_namespaced_pod_exec
+        )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.debug("[SandboxFleet] CoreV1Api exec patch note: %s", e)
 
   try:
     from r2egym.agenthub.runtime import docker as docker_mod  # pyrefly: ignore[missing-import]
@@ -137,15 +165,16 @@ def patch_r2egym_for_agent_sandbox() -> None:
             or getattr(self, "backend", None) == "kubernetes-sandbox"
         ):
           res = self._start_kubernetes_sandbox()
+          handle = getattr(self, "_handle", None)
           target_ctr = (
-              getattr(self, "_target_container", None)
-              or getattr(
-                  getattr(self, "_handle", None),
-                  "_target_container",
-                  None,
-              )
+              getattr(self, "_container", None)
+              or getattr(self, "_target_container", None)
+              or getattr(handle, "target_container", None)
+              or getattr(handle, "_target_container", None)
+              or getattr(handle, "runtime_container", None)
               or RUNTIME_CONTAINER_NAME
           )
+          self._container = target_ctr
           self._target_container = target_ctr
           if getattr(self, "client", None) is not None:
             self.client._default_container = target_ctr
@@ -174,7 +203,8 @@ def patch_r2egym_for_agent_sandbox() -> None:
           logging.debug(
               "[SandboxFleet] Deferring setup_env on container '%s' until"
               " evaluation",
-              getattr(self, "_target_container", EVAL_CONTAINER_NAME),
+              getattr(self, "_container", None)
+              or getattr(self, "_target_container", EVAL_CONTAINER_NAME),
           )
           return None
         self._needs_deferred_setup_env = False
@@ -188,14 +218,16 @@ def patch_r2egym_for_agent_sandbox() -> None:
 
 
 def patch_agent_sandbox_rl_templates() -> None:
-  """Patches generated SandboxTemplates for network policy and fresh eval sidecar.
+  """Legacy fallback for agent_sandbox_rl versions without TASK_IMAGE_PLACEHOLDER.
 
-  1. Sets spec.networkPolicyManagement='Unmanaged' to avoid per-template
-     NetworkPolicy reconciliation churn on large GKE Dataplane V2 clusters.
-  2. Enforces pod-level isolation (automountServiceAccountToken=False,
-     shareProcessNamespace=False) and appends a fresh 'eval' container running
-     the same task image so grading executes in an unmutated container.
+  Modern agent_sandbox_rl (>= PR #1961) configures networkPolicyManagement,
+  pod security hardening, resource limits, and the `{task_image}` eval sidecar
+  directly via `TemplateSpec` and `ResourceSpec` in `template.get_template()`,
+  so no monkey-patching of `Resources._template_manifest` is performed when
+  `TASK_IMAGE_PLACEHOLDER` is supported.
   """
+  if _sdk_has_native_template_sidecars():
+    return
   try:
     from agent_sandbox_rl import resources as asrl_resources  # pyrefly: ignore[missing-import]
 
@@ -227,6 +259,10 @@ def patch_agent_sandbox_rl_templates() -> None:
         if containers:
           containers[0]["name"] = RUNTIME_CONTAINER_NAME
           containers[0].setdefault("imagePullPolicy", pull_policy)
+        for ctr in containers:
+          if isinstance(ctr, dict) and ctr.get("image") == "{task_image}":
+            ctr["image"] = image
+            ctr.setdefault("imagePullPolicy", pull_policy)
         if not any(
             "name" in c and c["name"] == EVAL_CONTAINER_NAME
             for c in containers
@@ -803,15 +839,25 @@ def init_global_fleet(
     except (ImportError, AttributeError):
       pass
 
-    fleet_cfg = FleetConfig(**fleet_kwargs)
+    # Share a deterministic per-job run_id across the orchestrator and rollout
+    # workers via FleetConfig(run_id=...) so multi-process pool sharing and
+    # teardown scoping are handled natively by agent_sandbox_rl.
+    run_id_seed = os.getenv("ASRL_RUN_ID") or clean_job or orchestrator_id
+    shared_run_id = (
+        hashlib.sha256(run_id_seed.encode("utf-8")).hexdigest()[:12]
+        if run_id_seed
+        else None
+    )
+    if shared_run_id:
+      try:
+        fleet_cfg = FleetConfig(**fleet_kwargs, run_id=shared_run_id)
+      except TypeError:
+        fleet_cfg = FleetConfig(**fleet_kwargs)
+    else:
+      fleet_cfg = FleetConfig(**fleet_kwargs)
     fleet_inst = SandboxFleet(fleet_cfg)
 
-    # Share a deterministic per-job run_id across the orchestrator and rollout
-    # workers so on-demand template reconciliation never stamps a conflicting
-    # run-id onto the orchestrator's SandboxTemplates (OwnedByAnotherRunError).
-    run_id_seed = os.getenv("ASRL_RUN_ID") or clean_job or orchestrator_id
-    if run_id_seed:
-      shared_run_id = hashlib.sha256(run_id_seed.encode("utf-8")).hexdigest()[:12]
+    if shared_run_id:
       run_id_label = "agents.x-k8s.io/asrl-run-id"
       try:
         from agent_sandbox_rl import constants as asrl_constants  # pyrefly: ignore[missing-import]
@@ -829,8 +875,6 @@ def init_global_fleet(
         if isinstance(getattr(res, "labels", None), dict):
           res.labels[run_id_label] = shared_run_id
 
-    # Workaround for agent-sandbox-rl teardown bug: scope teardown to this run's
-    # run-id selector so teardown does not delete other concurrent tenants' warm pools/templates.
     for c in getattr(fleet_inst, "registry", []):
       c.resources.managed_selector = fleet_inst.run_selector
 
