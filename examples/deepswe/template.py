@@ -1207,16 +1207,66 @@ DEFAULT_OPENHANDS_KEEPALIVE_CMD = [
 ]
 
 
+RELOCATED_TESTBED_VENV_PATH = "/opt/testbed-venv"
+
+# Moves the task image's virtualenv out of the repository so that the agent's
+# repo-wide searches (`find /testbed ...`, `grep -r ... /testbed`) skip it.
+# In R2E-Gym images (e.g. datalad) `/testbed/.venv` holds ~95% of the `.py`
+# files under /testbed, so `find /testbed -name '*.py' -exec grep ... {} \;`
+# starts ~6.7k grep processes instead of ~360.
+# - A symlink is left at /testbed/.venv, so the PATH export above, the venv's
+#   `#!/testbed/.venv/bin/python3` shebangs and `sys.prefix` keep working.
+#   `find` and `grep -r` don't follow symlinks below their start directory.
+# - The venv's own `.gitignore` ('*') no longer applies to a symlink, so
+#   `/.venv` is added to `.git/info/exclude`. This keeps the symlink out of the
+#   `git add -A` used to extract the agent's patch.
+# - Grading runs in the separate, unmutated `eval` container, which keeps the
+#   original venv.
+# - Renaming a directory from a lower overlayfs layer copies it up (~4 s for the
+#   536 MB datalad venv), and that happens before the agent server starts.
+# Any failure exits the keepalive command, so the sandbox fails visibly instead
+# of running with a half-moved venv.
+RELOCATE_TESTBED_VENV_CMD = (
+    "if [ -d /testbed/.venv ] && [ ! -L /testbed/.venv ]; then"
+    f" if [ -e {RELOCATED_TESTBED_VENV_PATH} ]; then"
+    " echo 'relocating /testbed/.venv failed: destination already exists'"
+    " >&2; exit 1;"
+    " fi;"
+    f" {{ mv /testbed/.venv {RELOCATED_TESTBED_VENV_PATH}"
+    f" && ln -s {RELOCATED_TESTBED_VENV_PATH} /testbed/.venv"
+    " && mkdir -p /testbed/.git/info"
+    " && echo '/.venv' >> /testbed/.git/info/exclude; }"
+    " || { echo 'relocating /testbed/.venv failed' >&2; exit 1; };"
+    " fi; "
+)
+
 RUNTIME_CONTAINER_NAME = "agent-runtime"
 EVAL_CONTAINER_NAME = "eval"
 DEFAULT_OPENHANDS_SERVER_IMAGE = (
     "gcr.io/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62"
 )
 
+_BOOL_ENV_VALUES = {"1": True, "true": True, "0": False, "false": False}
+
 
 def get_image_pull_policy() -> str:
   """Returns the container imagePullPolicy for sandbox pods."""
   return os.getenv("SANDBOX_IMAGE_PULL_POLICY", "IfNotPresent")
+
+
+def relocate_testbed_venv_enabled() -> bool:
+  """Returns whether SANDBOX_RELOCATE_VENV asks to move /testbed/.venv out.
+
+  Raises:
+    ValueError: if SANDBOX_RELOCATE_VENV is set to an unrecognized value.
+  """
+  raw = os.getenv("SANDBOX_RELOCATE_VENV", "0").strip().lower()
+  if raw not in _BOOL_ENV_VALUES:
+    raise ValueError(
+        f"SANDBOX_RELOCATE_VENV must be one of {sorted(_BOOL_ENV_VALUES)},"
+        f" got {raw!r}"
+    )
+  return _BOOL_ENV_VALUES[raw]
 
 
 def get_openhands_pod_template(
@@ -1236,13 +1286,22 @@ def get_openhands_pod_template(
     ) from e
 
   session_key = os.getenv("SANDBOX_SESSION_KEY", "")
+  relocate_venv = relocate_testbed_venv_enabled()
   if os.getenv("AGENT_SERVER_COMMAND"):
+    if relocate_venv:
+      raise ValueError(
+          "SANDBOX_RELOCATE_VENV only applies to the default keepalive command;"
+          " unset it or prepend RELOCATE_TESTBED_VENV_CMD to"
+          " AGENT_SERVER_COMMAND yourself."
+      )
     try:
       keepalive_cmd = json.loads(os.environ["AGENT_SERVER_COMMAND"])
     except Exception:
       keepalive_cmd = os.environ["AGENT_SERVER_COMMAND"].split()
   else:
     keepalive_cmd = list(DEFAULT_OPENHANDS_KEEPALIVE_CMD)
+    if relocate_venv:
+      keepalive_cmd[2] = RELOCATE_TESTBED_VENV_CMD + keepalive_cmd[2]
 
   server_image = (
       os.getenv("OPENHANDS_SERVER_IMAGE")
