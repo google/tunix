@@ -389,7 +389,7 @@ class Einsum(nnx.Module):
   @jax.named_scope('einsum')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = jnp.astype(x, self.dtype)
-    w = jnp.astype(self.w.value, self.dtype)
+    w = jnp.asarray(self.w.value, dtype=self.dtype)
     return jnp.einsum(self.einsum_str, x, w)
 
 
