@@ -19,6 +19,7 @@ from typing import Any
 from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
+from tunix.dist_rl.trajectory import trajectory_testing
 from tunix.dist_rl.trajectory.explorer.diagnostics import stats as stats_lib
 
 _AGENT = trajectory_lib.Agent(name="a", version="1.0")
@@ -92,11 +93,36 @@ class StepCountsTest(absltest.TestCase):
 
 class TokenCountsTest(parameterized.TestCase):
 
-  def test_str_shows_total_and_prompt_completion_split(self) -> None:
-    counts = stats_lib.TokenCounts(prompt=100, completion=50, cached=20)
-
-    self.assertEqual(str(counts), "150 (100+50)")
-    self.assertEqual(f"{counts}", str(counts))
+  @parameterized.named_parameters(
+      (
+          "prompt_and_completion",
+          stats_lib.TokenCounts(prompt=100, completion=50, cached=20),
+          150,
+          "150 (100+50)",
+      ),
+      # Without both prompt and completion there is no total to split.
+      (
+          "completion_only",
+          stats_lib.TokenCounts(completion=50),
+          None,
+          "50 completion",
+      ),
+      (
+          "prompt_and_cached",
+          stats_lib.TokenCounts(prompt=100, cached=20),
+          None,
+          "100 prompt, 20 cached",
+      ),
+  )
+  def test_total_and_str(
+      self,
+      counts: stats_lib.TokenCounts,
+      expected_total: int | None,
+      expected_str: str,
+  ) -> None:
+    self.assertEqual(counts.total, expected_total)
+    self.assertEqual(str(counts), expected_str)
+    self.assertEqual(f"{counts}", expected_str)
 
   @parameterized.named_parameters(
       ("no_metrics", None, None),
@@ -108,7 +134,7 @@ class TokenCountsTest(parameterized.TestCase):
       (
           "partial_token_fields",
           trajectory_lib.Metrics(prompt_tokens=7),
-          stats_lib.TokenCounts(prompt=7),
+          stats_lib.TokenCounts(prompt=7, completion=None, cached=None),
       ),
       (
           "all_token_fields",
@@ -195,7 +221,7 @@ class TokenCountsTest(parameterized.TestCase):
 
     tokens = stats_lib.TrajectoryStats.from_trajectory(trajectory).tokens
 
-    self.assertEqual(tokens, stats_lib.TokenCounts())
+    self.assertEqual(tokens, stats_lib.TokenCounts(prompt=0, completion=0))
 
   def test_steps_with_metrics_but_no_token_fields_are_unreported(self) -> None:
     trajectory = _trajectory([
@@ -330,8 +356,12 @@ class RunStatsTest(parameterized.TestCase):
         ],
         status="SUCCEEDED",
         total_reward=0.5,
+        # Every token count is reported: the row is compared with `to_row()`
+        # below, and a `pd.NA` cell cannot be compared with None.
         final_metrics=trajectory_lib.FinalMetrics(
-            total_prompt_tokens=5, total_completion_tokens=2
+            total_prompt_tokens=5,
+            total_completion_tokens=2,
+            total_cached_tokens=1,
         ),
     )
     silent = _tunix_trajectory(trajectory_id="traj_2")
@@ -393,15 +423,20 @@ class RunStatsTest(parameterized.TestCase):
             ),
         ),
         _trajectory([_step(1, trajectory_lib.Source.SYSTEM)]),
+        # A rollout reports only completion tokens: it adds to `completion`
+        # and to `num_with_tokens`, but not to `prompt` or `cached`.
+        trajectory_testing.TUNIX_ROLLOUT_TRAJECTORY,
     ])
 
-    self.assertEqual(run.num_trajectories, 3)
-    self.assertEqual(run.steps, stats_lib.StepCounts(agent=9, user=1, system=1))
+    self.assertEqual(run.num_trajectories, 4)
+    self.assertEqual(
+        run.steps, stats_lib.StepCounts(agent=11, user=2, system=3)
+    )
     self.assertEqual(
         run.tokens,
-        stats_lib.TokenCounts(prompt=700, completion=125, cached=220),
+        stats_lib.TokenCounts(prompt=700, completion=133, cached=220),
     )
-    self.assertEqual(run.num_with_tokens, 2)
+    self.assertEqual(run.num_with_tokens, 3)
 
   def test_mean_reward_averages_only_reporting_trajectories(self) -> None:
     run = stats_lib.RunStats.from_trajectories([
@@ -519,7 +554,12 @@ class RunStatsTest(parameterized.TestCase):
                 "system": 0,
                 "other": 0,
             },
-            "tokens": {"prompt": 5, "completion": 2, "cached": 0, "total": 7},
+            "tokens": {
+                "prompt": 5,
+                "completion": 2,
+                "cached": None,
+                "total": 7,
+            },
             "num_with_tokens": 1,
             "status_counts": {"SUCCEEDED": 1},
             "num_with_status": 1,
@@ -555,6 +595,14 @@ class JsonDictTest(absltest.TestCase):
             "tokens": None,
             "tool_call_names": [],
         },
+    )
+    # A rollout reports only completion tokens; the other counts stay null.
+    rollout_payload = stats_lib.TrajectoryStats.from_trajectory(
+        trajectory_testing.TUNIX_ROLLOUT_TRAJECTORY
+    ).to_json_dict()
+    self.assertEqual(
+        rollout_payload["tokens"],
+        {"prompt": None, "completion": 8, "cached": None, "total": None},
     )
 
   def test_stats_serialize_every_reported_quantity(self) -> None:

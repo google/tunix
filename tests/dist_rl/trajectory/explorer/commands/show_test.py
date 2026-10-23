@@ -29,6 +29,7 @@ from tunix.dist_rl.trajectory.explorer.commands import testing
 _NO_OUTCOME_TRAJECTORY = trajectory_testing.TRAJECTORY_2
 _TOOL_CALLING_TRAJECTORY = trajectory_testing.PAIRED_ATIF_TRAJECTORY
 _SUCCEEDED_TRAJECTORY = trajectory_testing.PAIRED_TUNIX_TRAJECTORY
+_ROLLOUT_TRAJECTORY = trajectory_testing.TUNIX_ROLLOUT_TRAJECTORY
 
 
 def _trajectory_id(trajectory: trajectory_lib.Trajectory[Any]) -> str:
@@ -99,6 +100,15 @@ class ShowTest(absltest.TestCase):
     self.assertIn("observation[call_1]: search result", out)
     self.assertIn("subagent: sub_traj_ref_1", out)
     self.assertIn("Tool sequence: search", out)
+    # A rollout reports only completion tokens, so no prompt count is shown.
+    rollout_store = testing.create_store(trajectories=[_ROLLOUT_TRAJECTORY])
+    rollout_cmd = show.ShowCommand(
+        trajectory_id=_trajectory_id(_ROLLOUT_TRAJECTORY)
+    )
+    _, rollout_out = testing.execute_command(rollout_cmd, rollout_store)
+    self.assertIn("Tokens: 8 completion", rollout_out)
+    self.assertIn("[1] agent  tokens 3 completion", rollout_out)
+    self.assertIn("[3] agent  tokens 5 completion", rollout_out)
 
   def test_tool_call_arguments_rendered_with_sorted_keys(self) -> None:
     step = trajectory_testing.STEP_1_1.model_copy(

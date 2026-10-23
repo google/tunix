@@ -25,6 +25,7 @@ _NO_OUTCOME_TRAJECTORY_1 = trajectory_testing.TRAJECTORY_1
 _NO_OUTCOME_TRAJECTORY_2 = trajectory_testing.TRAJECTORY_2
 _TOOL_CALLING_TRAJECTORY = trajectory_testing.PAIRED_ATIF_TRAJECTORY
 _SUCCEEDED_TRAJECTORY = trajectory_testing.PAIRED_TUNIX_TRAJECTORY
+_ROLLOUT_TRAJECTORY = trajectory_testing.TUNIX_ROLLOUT_TRAJECTORY
 
 
 class SummaryTest(absltest.TestCase):
@@ -96,6 +97,15 @@ class SummaryTest(absltest.TestCase):
         out,
     )
     self.assertIn("Tool calls: search x1", out)
+    # A rollout reports only completion tokens, so no prompt count is shown.
+    rollout_store = testing.create_store(trajectories=[_ROLLOUT_TRAJECTORY])
+    _, rollout_out = testing.execute_command(self.cmd, rollout_store)
+    self.assertRegex(
+        rollout_out.splitlines()[1],
+        rf"^\s*{_ROLLOUT_TRAJECTORY.trajectory_id}"
+        r"\s+-\s+5\s+2\s+3\s+8 completion\s+0\s+-$",
+    )
+    self.assertIn("Tokens: 8 completion reported by 1/1", rollout_out)
 
   def test_json_output(self) -> None:
     mem_store = testing.create_store(

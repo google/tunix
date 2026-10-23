@@ -247,6 +247,51 @@ PAIRED_ATIF_TRAJECTORY: Final[trajectory_lib.Trajectory] = to_atif_trajectory(
     PAIRED_TUNIX_TRAJECTORY
 )
 
+# A Tunix rollout with the token fields that the trajectory collector records:
+# step 0 carries the prompt token IDs, each agent step's metrics report only
+# completion tokens (no prompt tokens), and the terminal environment step
+# records no tokens.
+TUNIX_ROLLOUT_TRAJECTORY: Final[trajectory_lib.TunixTrajectory] = (
+    trajectory_lib.TunixTrajectory(
+        trajectory_id="t_rollout",
+        agent=trajectory_lib.Agent(name="agent_v1", version="1.0"),
+        steps=[
+            trajectory_lib.TunixEnvStep(
+                step_id=0,
+                source=trajectory_lib.Source.USER,
+                message="Task prompt",
+                env_tokens=np.array([1, 2, 3, 4]),
+            ),
+            trajectory_lib.TunixAgentStep(
+                step_id=1,
+                source=trajectory_lib.Source.AGENT,
+                message="Agent turn 0",
+                metrics=trajectory_lib.Metrics(completion_tokens=3),
+                assistant_tokens=np.array([10, 11, 12]),
+            ),
+            trajectory_lib.TunixEnvStep(
+                step_id=2,
+                source=trajectory_lib.Source.SYSTEM,
+                message="Observation 0",
+                env_tokens=np.array([20, 21]),
+            ),
+            trajectory_lib.TunixAgentStep(
+                step_id=3,
+                source=trajectory_lib.Source.AGENT,
+                message="Agent turn 1",
+                metrics=trajectory_lib.Metrics(completion_tokens=5),
+                assistant_tokens=np.array([30, 31, 32, 33, 34]),
+            ),
+            trajectory_lib.TunixEnvStep(
+                step_id=4,
+                source=trajectory_lib.Source.SYSTEM,
+                message="Observation 1",
+                done=True,
+            ),
+        ],
+    )
+)
+
 
 def make_metadata(
     trajectory_id: str | None = TRAJECTORY_ID_1,
