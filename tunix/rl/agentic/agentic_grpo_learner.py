@@ -37,6 +37,9 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.dist_rl.trajectory import file_store
+from tunix.dist_rl.trajectory import store as store_lib
+from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.generate import utils as generate_utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algo_core  # pylint: disable=unused-import
@@ -46,12 +49,13 @@ from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import agentic_rl_learner
 from tunix.rl.agentic import utils as agentic_utils
+from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.environments import task_environment
+from tunix.rl.agentic.pipeline import rollout_orchestrator
 from tunix.utils import compat
-from tunix.utils import trajectory_logger
 
 TrainingInputT = agentic_rl_learner.TrainingInputT
 RewardFn = agentic_rl_learner.RewardFn
@@ -166,6 +170,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           base_environment.BaseTaskEnv
       ] = task_environment.TaskEnvironment,
       env_kwargs: Dict[str, Any] | None = None,
+      trajectory_store: store_lib.TrajectoryWriter | None = None,
   ):
     """Initializes the `GRPOTrainer`.
 
@@ -190,6 +195,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       agent_kwargs: Keyword arguments to pass to the agent class.
       env_class: The class of the environment to be used.
       env_kwargs: Keyword arguments to pass to the environment class.
+      trajectory_store: Optional TrajectoryWriter to write trajectory steps and
+        metrics to.
     """  # fmt: skip
     super().__init__(
         rl_engine=rl_engine,
@@ -203,7 +210,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         env_kwargs=env_kwargs,
     )
 
-    self._trajectory_logger = None
+    self._trajectory_store = trajectory_store
+    self._owns_trajectory_store = False
     metrics_logger_options = (
         self.rl_engine.cluster_config.training_config.metrics_logging_options
     )
@@ -211,12 +219,17 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         metrics_logger_options.log_dir if metrics_logger_options else None
     )
 
-    if metrics_log_dir:
-      self._trajectory_logger = trajectory_logger.AsyncTrajectoryLogger(
-          metrics_log_dir
-      )
-    else:
-      logging.warning("Metrics log dir is None, skipping trajectory logging.")
+    if self._trajectory_store is None:
+      if metrics_log_dir:
+        self._trajectory_store = file_store.FileTrajectoryStore(
+            root_dir=metrics_log_dir
+        )
+        self._owns_trajectory_store = True
+      else:
+        logging.warning(
+            "Metrics log dir is None and no trajectory store provided, skipping"
+            " trajectory logging."
+        )
 
     self.algo_config.temperature = (
         self.rl_engine.get_rollout_config(
@@ -288,6 +301,28 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         if self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
         else None,
     ])
+
+  @property
+  def trajectory_store(self) -> store_lib.TrajectoryWriter | None:
+    """Returns the trajectory store used by the learner, if configured."""
+    return self._trajectory_store
+
+  @trajectory_store.setter
+  def trajectory_store(self, value: store_lib.TrajectoryWriter | None) -> None:
+    self._trajectory_store = value
+    self._owns_trajectory_store = False
+
+  def close(self) -> None:
+    """Closes resources managed by this learner."""
+    if self._owns_trajectory_store and self._trajectory_store is not None:
+      self._trajectory_store.close()
+
+  def _build_orchestrator(self) -> rollout_orchestrator.RolloutOrchestrator:
+    """Builds and configures a RolloutOrchestrator for parallel rollouts."""
+    orchestrator = super()._build_orchestrator()
+    if self._trajectory_store is not None:
+      orchestrator.engine_kwargs["trajectory_store"] = self._trajectory_store
+    return orchestrator
 
   def _have_actor_mesh(self) -> bool:
     """Whether a real actor mesh exists (the recompute needs one)."""
@@ -490,10 +525,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     policy_versions_list: List[int] = []
     trajectory_rewards_list: List[float] = []
     raw_completion_lengths: List[int] = []
-    trajectories_to_log = []
 
     for item in trajectories:
-      trajectories_to_log.append(item.traj)
       conversation = item.traj.get("conversation_text") or []
       assistant_text = next(
           (
@@ -522,11 +555,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         raise ValueError("policy_version is missing from trajectory task.")
       policy_versions_list.append(policy_version)
       trajectory_rewards_list.append(item.traj.get("trajectory_reward"))
-
-    # Log trajectory.
-    if self._trajectory_logger and trajectories_to_log:
-      for traj in trajectories_to_log:
-        self._trajectory_logger.log_item_async(traj)
 
     # Pad all prompts and completions to consistent lengths.
     rollout_config = self.rl_engine.cluster_config.rollout_config
@@ -795,6 +823,79 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       )
 
     logging.debug("Advantages computed: %s", advantages)
+
+    if self._trajectory_store is not None:
+      for idx, item in enumerate(trajectories):
+        traj_dict = item.traj if hasattr(item, "traj") else item
+        if hasattr(item, "traj_id") and item.traj_id:
+          traj_id = item.traj_id
+        elif isinstance(item, dict) and item.get("traj_id"):
+          traj_id = item["traj_id"]
+        elif (
+            hasattr(item, "traj")
+            and isinstance(item.traj, dict)
+            and item.traj.get("traj_id")
+        ):
+          traj_id = item.traj["traj_id"]
+        else:
+          prompt_id = getattr(item, "prompt_id", None)
+          if prompt_id is None and isinstance(item, dict):
+            prompt_id = item.get("prompt_id")
+          if (
+              prompt_id is None
+              and hasattr(item, "traj")
+              and isinstance(item.traj, dict)
+          ):
+            prompt_id = item.traj.get("prompt_id") or item.traj.get(
+                "group_id", ""
+            )
+          group_index = getattr(item, "group_index", None)
+          if group_index is None and isinstance(item, dict):
+            group_index = item.get("group_index", idx)
+          if (
+              group_index is None
+              and hasattr(item, "traj")
+              and isinstance(item.traj, dict)
+          ):
+            group_index = item.traj.get("group_index", idx)
+          traj_id = agent_types.format_traj_id(
+              prompt_id or "", group_index if group_index is not None else idx
+          )
+
+        adv_val = float(advantages[idx]) if idx < len(advantages) else 0.0
+        rew_val = (
+            float(rewards[idx])
+            if idx < len(rewards)
+            else float(traj_dict.get("trajectory_reward", 0.0))
+        )
+        policy_ver = (
+            policy_versions_list[idx]
+            if idx < len(policy_versions_list)
+            else None
+        )
+
+        metrics_extra = {
+            "global_step": expected_step,
+            "policy_version": policy_ver,
+            "status": traj_dict.get("status", "COMPLETED"),
+            "total_reward": rew_val,
+            "reward": rew_val,
+            "advantage": adv_val,
+            "mode": mode.name if hasattr(mode, "name") else str(mode),
+            "consumed": True,
+        }
+        if "env_time" in traj_dict:
+          metrics_extra["env_time"] = traj_dict["env_time"]
+        if "reward_time" in traj_dict:
+          metrics_extra["reward_time"] = traj_dict["reward_time"]
+        if "group_id" in traj_dict:
+          metrics_extra["group_id"] = traj_dict["group_id"]
+        if "conversation_text" in traj_dict:
+          metrics_extra["conversation_text"] = traj_dict["conversation_text"]
+
+        self._trajectory_store.update_metrics(
+            traj_id, trajectory_lib.TrajectoryMetrics(extra=metrics_extra)
+        )
 
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
 
