@@ -59,7 +59,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       self,
       rl_engine: rl_engine_lib.RLEngine,
       algo_config: TConfig,
-      reward_fns: RewardFn | List[RewardFn],
+      reward_fns: RewardFn | List[RewardFn] | None,
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
   ):
@@ -72,7 +72,9 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       reward_fns: A single callable or a list of callables that compute a scalar
         reward for given prompts and completions. Each function should accept
         `prompts`, `completions` and optional keyword arguments, and return a
-        list of float rewards.
+        list of float rewards. Pass `None` for learners that score completions
+        with a reward model on `rl_engine` instead (e.g. `PPOLearner`); no
+        reward manager is built in that case.
       metric_fns: A sequence of callables that compute metrics for the
         completions. Each callable should accept `prompts`, `completions`,
         `rewards`, `advantages` and optional keyword arguments, and return a
@@ -85,13 +87,15 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     self.rl_engine = rl_engine
     self.algo_config = algo_config
 
-    reward_manager_fn = function_registry.get_reward_manager(
-        algo_config.reward_manager
-    )
-    self.reward_manager = reward_manager_fn(
-        reward_fns=reward_fns,
-        algo_config=algo_config,
-    )
+    self.reward_manager: reward_manager.AbstractRewardManager | None = None
+    if reward_fns is not None:
+      reward_manager_fn = function_registry.get_reward_manager(
+          algo_config.reward_manager
+      )
+      self.reward_manager = reward_manager_fn(
+          reward_fns=reward_fns,
+          algo_config=algo_config,
+      )
 
     self.metric_fns = metric_fns or []
     self.rl_engine.actor_trainer.is_managed_externally = True
@@ -214,6 +218,10 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         result, or if the length of 'r' reward does not match the length of
         'prompts'.
     """
+    if self.reward_manager is None:
+      raise ValueError(
+          "reward_manager is not initialized because reward_fns was None."
+      )
     if "mode" in kwargs:
       raise ValueError(f"kwargs already contains mode as a key: {kwargs}")
     kwargs["mode"] = str(mode)
