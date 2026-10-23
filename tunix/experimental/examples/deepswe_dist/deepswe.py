@@ -213,6 +213,7 @@ def iter_prompt_items(
     overlong_filter: bool = False,
     exact_token_continuity: bool = True,
     max_staleness: int = 0,
+    dynamic_sampling: bool = False,
 ) -> Iterator[dict[str, Any]]:
   """Yields prompt groups needed for training, including max_staleness lookahead."""
   dataset_size = len(dataset)
@@ -222,7 +223,12 @@ def iter_prompt_items(
   # To avoid artificial tapering of generation workload near max_steps (MLPerf
   # training_rules.adoc:678), generate prompts for (max_steps + max_staleness)
   # steps so rollout workers continue at full capacity through the final step.
-  total_prompts = (max_steps + max(0, max_staleness)) * batch_size
+  # When dynamic_sampling (zero-variance filtering) is enabled, allocate 4x
+  # prompt capacity so filtered groups never exhaust the prompt stream early.
+  step_multiplier = 4 if dynamic_sampling else 1
+  total_prompts = (
+      max_steps * step_multiplier + max(0, max_staleness)
+  ) * batch_size
   for prompt_idx in range(total_prompts):
     yield build_prompt_item(
         entry=_entry_at(dataset, prompt_idx % dataset_size),

@@ -666,7 +666,7 @@ def truncated_importance_weights(
   safe_log_is = jnp.where(jnp.isfinite(log_is_raw), log_is_raw, 0.0)
   weights = jnp.where(
       jnp.isfinite(log_is_raw),
-      jnp.exp(jnp.clip(safe_log_is, -20.0, 20.0)),
+      jnp.exp(jnp.clip(safe_log_is, -20.0, jnp.log(5.0))),
       0.0,
   )
   return jax.lax.stop_gradient(weights * token_keep), oob_ratio
