@@ -1151,11 +1151,15 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self.clear_jit_cache()
 
   @override
-  def fwd_bwd(self, payload: datatypes.TrainerPayload | Any, **kwargs) -> None:
+  def fwd_bwd(
+      self,
+      payload: datatypes.TrainerPayload | Any,
+      *,
+      skip_jit: bool = False,
+      cache_nnx_graph: bool = True,
+  ) -> None:
     """Executes forward and backward passes."""
     self._ensure_persistent_grad_accumulator()
-    cache_nnx_graph = kwargs.pop("cache_nnx_graph", True)
-    skip_jit = kwargs.pop("skip_jit", False)
     fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step(
         skip_jit, cache_nnx_graph
     )
@@ -1167,17 +1171,21 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     )
 
   @override
-  def update(self, **kwargs) -> int:
+  def update(
+      self, *, skip_jit: bool = False, cache_nnx_graph: bool = True
+  ) -> int:
     """Applies the accumulated gradients."""
-    cache_nnx_graph = kwargs.pop("cache_nnx_graph", True)
-    skip_jit = kwargs.pop("skip_jit", False)
     _, update_step, _ = self.jit_fwd_bwd_update_and_eval_step(
         skip_jit, cache_nnx_graph
     )
     return self._record_update(update_step())
 
   def train_step(
-      self, payload: datatypes.TrainerPayload | Any, **kwargs
+      self,
+      payload: datatypes.TrainerPayload | Any,
+      *,
+      skip_jit: bool = False,
+      cache_nnx_graph: bool = True,
   ) -> int:
     """Runs forward, backward and update as a single executable.
 
@@ -1187,8 +1195,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     available in the single-microstep regime; when accumulating there is work
     between the two halves, so they must stay separate.
     """
-    cache_nnx_graph = kwargs.pop("cache_nnx_graph", True)
-    skip_jit = kwargs.pop("skip_jit", False)
     self.jit_fwd_bwd_update_and_eval_step(skip_jit, cache_nnx_graph)
     if self._jitted_train_step_fn is None:
       raise ValueError(
@@ -1258,7 +1264,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   @override
   def eval_step(
-      self, payload: datatypes.TrainerPayload | Any, **kwargs
+      self,
+      payload: datatypes.TrainerPayload | Any,
+      *,
+      skip_jit: bool = False,
+      cache_nnx_graph: bool = True,
   ) -> None:
     """Executes one eval micro-batch step.
 
@@ -1267,8 +1277,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     a sequence of eval_step calls with eval_context() so that the metrics
     mode is set to EVAL and buffered metrics are written on exit.
     """
-    skip_jit = kwargs.pop("skip_jit", False)
-    cache_nnx_graph = kwargs.pop("cache_nnx_graph", True)
     _, _, eval_step_fn = self.jit_fwd_bwd_update_and_eval_step(
         skip_jit=skip_jit, cache_nnx_graph=cache_nnx_graph,
     )
@@ -1331,38 +1339,53 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return fn(self.model, *args, **kwargs)
 
   @override
-  def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:
+  def save_checkpoint(
+      self,
+      metadata: Any = None,
+      *,
+      step: int | None = None,
+      force: bool = False,
+      save_only_lora_params: bool | None = None,
+  ) -> None:
     """Saves a checkpoint of the trainer state (model + optimizer).
 
     Vanilla implementation of save_checkpoint on a train_steps. Sub-batch
     checkpointing will be added later once it is supported in the checkpoint
     manager.
+
+    Args:
+      metadata: Metadata to save alongside the checkpoint. Defaults to
+        `custom_checkpoint_metadata()`.
+      step: The step to save under. Defaults to `metadata["step"]`, then to the
+        current train step.
+      force: Save even if the checkpoint manager's save interval would skip
+        this step.
+      save_only_lora_params: Save only the LoRA params. Defaults to whether
+        LoRA is enabled.
     """
     if metadata is None:
       metadata = self.custom_checkpoint_metadata()
-    step = None
-    if isinstance(metadata, (dict, Mapping)):
-      step = metadata.get("step", self._train_steps)
-    elif hasattr(metadata, "step"):
-      step = getattr(metadata, "step")
+    if step is None:
+      if isinstance(metadata, (dict, Mapping)):
+        step = metadata.get("step")
+      elif hasattr(metadata, "step"):
+        step = getattr(metadata, "step")
     if step is None:
       step = self._train_steps
-    save_only_lora_params = kwargs.pop(
-        "save_only_lora_params", self._lora_enabled
-    )
+    if save_only_lora_params is None:
+      save_only_lora_params = self._lora_enabled
     self.checkpoint_manager.save(
         step,
         self.model,
         self.optimizer,
         save_only_lora_params=save_only_lora_params,
+        force=force,
         custom_metadata=metadata,
-        **kwargs,
     )
 
   @override
-  def restore_checkpoint(self, step: int | None = None, **kwargs) -> Any:
+  def restore_checkpoint(self, step: int | None = None) -> Any:
     """Restores model, optimizer and step count from a checkpoint."""
-    del kwargs
     self._train_steps, self._restored_custom_metadata = (
         self.checkpoint_manager.maybe_restore(
             self.model,
@@ -1382,9 +1405,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return metadata
 
   @override
-  def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  def prepare_weight_sync(self, sync_request: Any = None) -> Any:
     """Stages this round's weights on the raiden transport, returns metadata."""
-    del sync_request, kwargs
+    del sync_request
     worker = self._weight_sync_worker
     if worker is None:
       worker = _default_weight_sync_worker()
@@ -1441,9 +1464,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       logging.info("source checksums: %s", worker.checksums())
     return [worker.work_unit_metadata()]
 
-  def release_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  @override
+  def release_weight_sync(self, sync_request: Any = None) -> Any:
     """Ends this round's staging hold."""
-    del sync_request, kwargs
+    del sync_request
     worker = self._weight_sync_worker
     if worker is not None and worker.bound:
       logging.vlog(1, "raiden metrics: %s", worker.metrics())

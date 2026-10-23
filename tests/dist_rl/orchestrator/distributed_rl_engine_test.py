@@ -414,11 +414,13 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertEqual(
           res, datatypes.Response(metadata={"checkpoint_saved": True})
       )
-      self.mock_actor.save_checkpoint.assert_called_once_with(metadata=metadata)
+      self.mock_actor.save_checkpoint.assert_called_once_with(
+          metadata=metadata, step=None, force=False
+      )
 
     asyncio.run(_run())
 
-  def test_save_checkpoint_propagates_step_and_optional_kwargs(self):
+  def test_save_checkpoint_propagates_step_and_force(self):
     async def _run():
       self.mock_actor.save_checkpoint.return_value = datatypes.Response(
           metadata={"checkpoint_saved": True}
@@ -429,19 +431,21 @@ class DistributedRLEngineTest(absltest.TestCase):
           metadata=metadata,
           step=10,
           force=True,
-          save_only_lora_params=True,
-          custom_flag="custom_val",
       )
       self.assertEqual(
           res, datatypes.Response(metadata={"checkpoint_saved": True})
       )
       self.mock_actor.save_checkpoint.assert_called_once_with(
-          metadata=metadata,
-          step=10,
-          force=True,
-          save_only_lora_params=True,
-          custom_flag="custom_val",
+          metadata=metadata, step=10, force=True
       )
+
+    asyncio.run(_run())
+
+  def test_save_checkpoint_rejects_undeclared_options(self):
+    async def _run():
+      with self.assertRaises(TypeError):
+        await self.engine.save_checkpoint(save_only_lora_params=True)
+      self.mock_actor.save_checkpoint.assert_not_called()
 
     asyncio.run(_run())
 
@@ -507,7 +511,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       # Engine aligns its own policy version and resyncs rollout weights.
       self.assertEqual(engine._policy_version, 3)
       self.assertEqual(coordinator.calls, [3])
-      self.mock_actor.restore_checkpoint.assert_called_once_with()
+      self.mock_actor.restore_checkpoint.assert_called_once_with(step=None)
       self.mock_rollout_1.get_target_state.assert_called_once_with()
       self.mock_actor.set_target_state.assert_called_once_with(
           target_state={"params": 1}
@@ -642,7 +646,7 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_train_step_propagates_optional_kwargs(self):
+  def test_train_step_sends_only_the_request_to_fwd_bwd(self):
     async def _run():
       self.mock_actor.fwd_bwd.return_value = {"loss": 0.5}
       mock_payload = mock.MagicMock(spec=datatypes.RLTrainerPayload)
@@ -652,13 +656,11 @@ class DistributedRLEngineTest(absltest.TestCase):
           role=datatypes.Role.ACTOR,
           accumulate_gradients=True,
           apply_optimizer=False,
-          custom_arg="test_arg",
       )
       self.assertEqual(res, {"loss": 0.5})
       self.mock_actor.fwd_bwd.assert_called_once()
       call_kwargs = self.mock_actor.fwd_bwd.call_args.kwargs
-      self.assertEqual(call_kwargs["skip_jit"], False)
-      self.assertEqual(call_kwargs["custom_arg"], "test_arg")
+      self.assertEqual(set(call_kwargs), {"request"})
       self.assertIsInstance(call_kwargs["request"], datatypes.TrainRequest)
       self.assertIs(call_kwargs["request"].payload, mock_payload)
 
