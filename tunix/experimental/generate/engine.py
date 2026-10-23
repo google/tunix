@@ -25,6 +25,7 @@ from typing import Any
 
 from flax import nnx
 from flax.nnx import graph
+from flax.nnx import statelib
 import jax
 import jaxtyping
 import numpy as np
@@ -185,6 +186,15 @@ class LLMEngine:
       self,
   ) -> tuple[graph.GraphDef[nnx.Module], list[nnx.Variable]]:
     return self._model_runner.model_def_and_state()
+
+  @property
+  def transformer_state(self) -> statelib.State:
+    """The weights the engine runs, which every step reads in place."""
+    return self._model_runner.transformer_state
+
+  @property
+  def mesh(self) -> jax.sharding.Mesh:
+    return self._model_runner_config.mesh
 
   def update_params(
       self,

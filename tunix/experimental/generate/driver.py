@@ -101,6 +101,15 @@ class VanillaInProcessDriver:
   def engine(self) -> engine_lib.LLMEngine:
     return self._engine
 
+  @property
+  def is_running(self) -> bool:
+    """Whether the background loop thread is currently running."""
+    return (
+        self._loop_thread is not None
+        and self._loop_thread.is_alive()
+        and not self._stop_event.is_set()
+    )
+
   def submit_request(
       self, request: request_lib.EngineRequest
   ) -> RequestFuture:
@@ -257,6 +266,14 @@ class VanillaInProcessDriver:
     """
     with self._engine_lock:
       self._engine.update_params(updated_weights, filter_types)
+
+  def reset_kv_caches(self) -> None:
+    """Discards the engine's KV between steps, for after the weights change.
+
+    In-flight requests re-prefill, as they do after `update_params`.
+    """
+    with self._engine_lock:
+      self._engine.reset_kv_caches()
 
   def stop(self) -> None:
     """Stops the loop thread, leaving pending futures untouched."""

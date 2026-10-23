@@ -587,5 +587,26 @@ class UpdateParamsTest(parameterized.TestCase):
     )
 
 
+class ResetKVCachesTest(absltest.TestCase):
+
+  def test_in_place_weight_change_resumes_under_the_new_weights(self):
+    engine = testing_utils.make_engine()
+    prompt = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    engine.add_request(testing_utils.make_request('0', list(prompt)))
+    # One prefill step, then two decode steps, each sampling one token.
+    for _ in range(3):
+      engine.step()
+    before_reset = reference_generate(prompt, 3)
+
+    engine.transformer_state['offset'].value = jnp.asarray(1.0)
+    engine.reset_kv_caches()
+    finished = drive(engine)
+
+    after_reset = reference_generate(prompt + before_reset, 5, offset=1.0)
+    self.assertEqual(
+        finished['0'].token_ids.tolist(), before_reset + after_reset
+    )
+
+
 if __name__ == '__main__':
   absltest.main()

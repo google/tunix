@@ -119,6 +119,22 @@ class PagedSumTransformer(nnx.Module):
     return logits, new_cache
 
 
+class UniformTransformer(PagedSumTransformer):
+  """A `PagedSumTransformer` that gives every token the same logit.
+
+  At a positive temperature it samples uniformly from the vocabulary, so
+  independent samples of the same prompt almost surely differ.
+  """
+
+  def __call__(
+      self, tokens, positions, cache, metadata, mesh, logits_idxs=None
+  ):
+    logits, new_cache = super().__call__(
+        tokens, positions, cache, metadata, mesh, logits_idxs=logits_idxs
+    )
+    return jnp.zeros_like(logits), new_cache
+
+
 class WhitespaceTokenizer:
   """A tokenizer whose text is token ids separated by spaces, e.g. '1 2 3'."""
 
@@ -128,8 +144,8 @@ class WhitespaceTokenizer:
   def decode(self, ids: list[int]) -> str:
     return ' '.join(str(token) for token in ids)
 
-  def bos_id(self) -> int:
-    return 0
+  def bos_id(self) -> int | None:
+    return None
 
   def eos_id(self) -> int:
     return 1
