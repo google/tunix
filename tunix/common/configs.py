@@ -153,6 +153,46 @@ class RolloutConfig:
   # uint10 across steps and trigger extra XLA compilations.
   routed_experts_num_experts: int | None = None
 
+  # Continuous batching engine configs (`rollout_engine='vanilla_v2'`).
+
+  # Whether to run the engine on a background loop, so that prompts submitted
+  # by separate callers share a continuous batch.
+  rollout_vanilla_v2_server_mode: bool = False
+
+  # Only hand queued requests to the engine once at least this many have
+  # accumulated. 0 disables the threshold. Server mode only.
+  rollout_vanilla_v2_server_mode_submission_threshold: int = 0
+
+  # Hand a partial batch to the engine anyway once this many seconds have
+  # elapsed since its first request arrived. 0 disables the timeout. Server
+  # mode only.
+  rollout_vanilla_v2_server_mode_submission_timeout_s: float = 0.0
+
+  # Allocated HBM fraction for the rollout engine, in (0, 1].
+  rollout_vanilla_v2_hbm_utilization: float = 0.2
+
+  # The maximum number of GiB of KV cache to allocate on the host.
+  rollout_vanilla_v2_host_size_gib: float = 0.0
+
+  # The number of tokens per KV cache page.
+  rollout_vanilla_v2_kv_cache_page_size: int = 16
+
+  # Whether requests with a common prefix may share KV cache pages.
+  rollout_vanilla_v2_enable_prefix_caching: bool = True
+
+  # The maximum number of sequences in a batch.
+  rollout_vanilla_v2_max_num_seqs: int = 32
+
+  # The maximum number of tokens in a batch.
+  rollout_vanilla_v2_max_num_batched_tokens: int = 2048
+
+  # The number of prompt tokens prefilled per chunk. Must be a power of 2, at
+  # most `rollout_vanilla_v2_max_num_batched_tokens`.
+  rollout_vanilla_v2_chunked_prefill_length: int = 512
+
+  # The number of model forward passes per engine step.
+  rollout_vanilla_v2_num_scheduler_steps: int = 1
+
   # vLLM specific rollout configs.
 
   # Whether to run rollout in vLLM server mode or batch inference mode.
