@@ -349,6 +349,70 @@ class ORPOTrainerTest(parameterized.TestCase):
     self.assertFalse(jnp.allclose(chosen_logps, prompt_chosen_logps))
     self.assertTrue(jnp.all(prompt_chosen_logps < chosen_logps))
 
+  def test_prompt_loss_skips_token_after_left_padding(self):
+    """The SFT term only scores tokens whose previous token is real."""
+    tokenizer = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=tokenizer.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    # Row 1 is left-padded: its first prompt token (1) follows a pad, so there
+    # is no real context to predict it from, as for row 0's first token.
+    input_ids = jnp.array([
+        [1, 2, 3, 4, 10, 11, 0],
+        [0, 1, 2, 3, 12, 13, 14],
+        [1, 2, 3, 4, 20, 21, 0],
+        [0, 1, 2, 3, 15, 0, 0],
+    ])
+    completion_mask = jnp.array([[1, 1, 0], [1, 1, 1], [1, 1, 0], [1, 0, 0]])
+    full_mask = (input_ids != 0).astype(jnp.int32)
+    positions = orpo_lib.common.build_positions_from_mask(full_mask)
+    attention_mask = orpo_lib.common.make_causal_attn_mask(full_mask)
+
+    token_logps = orpo_lib.common.get_per_token_logps(
+        model,
+        input_tokens=input_ids,
+        positions=positions,
+        attn_mask=attention_mask,
+        logits_to_keep=input_ids.shape[1] - 1,
+    )
+    scored = full_mask[:, 1:] * full_mask[:, :-1]
+    expected_logps = (token_logps * scored).sum(axis=-1)[:2]
+    expected_sft_loss = jnp.mean(-expected_logps / scored.sum(axis=-1)[:2])
+
+    _, _, prompt_chosen_logps = orpo_lib.compute_logps(
+        model,
+        input_ids,
+        positions,
+        attention_mask,
+        logits_to_keep=3,
+        completion_mask=completion_mask,
+        enable_prompt_loss_orpo=True,
+        full_mask=full_mask,
+    )
+    np.testing.assert_allclose(prompt_chosen_logps, expected_logps, rtol=1e-5)
+
+    train_example = orpo_lib.TrainExample(
+        input_ids=input_ids,
+        positions=positions,
+        attention_mask=attention_mask,
+        ref_chosen_logps=None,
+        ref_rejected_logps=None,
+        completion_mask=completion_mask,
+        logits_to_keep=3,
+        full_mask=full_mask,
+    )
+    out = orpo_lib.dpo_loss_fn(
+        model,
+        train_example,
+        algorithm="orpo",
+        enable_prompt_loss_orpo=True,
+        average_log_prob_orpo=True,
+    )
+    np.testing.assert_allclose(
+        out.aux_metrics["sft_loss"].compute(), expected_sft_loss, rtol=1e-5
+    )
+
   def test_orpo_loss_fn_with_prompt_loss(self):
     """Test ORPO loss function directly with enable_prompt_loss_orpo=True."""
     np.random.seed(0)
