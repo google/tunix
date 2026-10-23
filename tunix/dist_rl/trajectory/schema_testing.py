@@ -96,6 +96,13 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
               payload={"reward": 1.0, "observation": "initial"},
           )
       )
+      conn.execute(
+          schema.TRAJECTORY_METRICS_TABLE.insert().values(
+              run_id="run_alpha",
+              trajectory_id="traj_001",
+              payload={"extra": {"score": 10.0}},
+          )
+      )
 
       run_row = (
           conn.execute(
@@ -138,6 +145,24 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
           {"reward": 1.0, "observation": "initial"},
       )
 
+      metrics_row = (
+          conn.execute(
+              sa.select(schema.TRAJECTORY_METRICS_TABLE).where(
+                  (schema.TRAJECTORY_METRICS_TABLE.c.run_id == "run_alpha")
+                  & (
+                      schema.TRAJECTORY_METRICS_TABLE.c.trajectory_id
+                      == "traj_001"
+                  )
+              )
+          )
+          .mappings()
+          .one()
+      )
+      self.assertEqual(
+          metrics_row["payload"],
+          {"extra": {"score": 10.0}},
+      )
+
   def test_delete_run_cascades_to_trajectories_and_steps(self) -> None:
     """Verifies that deleting a run cascades to trajectories and steps."""
     with self.engine.begin() as conn:
@@ -162,6 +187,13 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
               payload={"reward": 1.0, "observation": "initial"},
           )
       )
+      conn.execute(
+          schema.TRAJECTORY_METRICS_TABLE.insert().values(
+              run_id="run_alpha",
+              trajectory_id="traj_001",
+              payload={"extra": {"score": 10.0}},
+          )
+      )
 
       conn.execute(
           schema.RUNS_TABLE.delete().where(
@@ -178,6 +210,14 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
       self.assertEqual(
           conn.execute(
               sa.select(sa.func.count()).select_from(schema.STEPS_TABLE)
+          ).scalar(),
+          0,
+      )
+      self.assertEqual(
+          conn.execute(
+              sa.select(sa.func.count()).select_from(
+                  schema.TRAJECTORY_METRICS_TABLE
+              )
           ).scalar(),
           0,
       )
@@ -226,6 +266,14 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
       self.assertEqual(
           conn.execute(
               sa.select(sa.func.count()).select_from(schema.STEPS_TABLE)
+          ).scalar(),
+          0,
+      )
+      self.assertEqual(
+          conn.execute(
+              sa.select(sa.func.count()).select_from(
+                  schema.TRAJECTORY_METRICS_TABLE
+              )
           ).scalar(),
           0,
       )
