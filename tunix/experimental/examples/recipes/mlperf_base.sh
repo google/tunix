@@ -324,6 +324,33 @@ export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
 # `false` is the pre-maxtext#5494 behaviour and is passed through explicitly.
 export CHECKPOINT_ABANDON_FAILED_SAVES="${CHECKPOINT_ABANDON_FAILED_SAVES:-false}"
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
+# `true` writes checkpoints to a zonal GCS Rapid bucket in the TPUs' zone through
+# a GCSFuse mount (GKE GCS FUSE CSI driver) on the head's user container and on
+# every colocated-python sidecar. Metrics, mllog and profiles stay on
+# MAXTEXT_OUTPUT_DIR. Only colocated_python can write to the mount (persistence
+# writes gs:// from the pathways-worker), so it is forced here, overriding the
+# submission recipes' persistence default. The pod's KSA needs
+# roles/storage.objectUser on the bucket.
+export CKPT_GCSFUSE="${CKPT_GCSFUSE:-false}"
+if [[ "${CKPT_GCSFUSE}" =~ ^(1|true|True|TRUE)$ ]]; then
+  case "${REGION:-}" in
+    us-east1) _default_ckpt_gcsfuse_bucket="atwigg-trellis-us-east1-fast" ;;  # us-east1-b, pod2
+    *) _default_ckpt_gcsfuse_bucket="" ;;
+  esac
+  export CKPT_GCSFUSE_BUCKET="${CKPT_GCSFUSE_BUCKET:-${_default_ckpt_gcsfuse_bucket}}"
+  if [[ -z "${CKPT_GCSFUSE_BUCKET}" ]]; then
+    echo "ERROR: CKPT_GCSFUSE=${CKPT_GCSFUSE} but no Rapid bucket is known for REGION='${REGION:-}'; set CKPT_GCSFUSE_BUCKET." >&2
+    exit 1
+  fi
+  export CKPT_GCSFUSE_MOUNT_PATH="${CKPT_GCSFUSE_MOUNT_PATH:-/gcs/ckpt}"
+  export MAXTEXT_CHECKPOINT_DIR="${MAXTEXT_CHECKPOINT_DIR:-${CKPT_GCSFUSE_MOUNT_PATH}/maxtext/${JOB_PREFIX}}"
+  if [[ "${PATHWAYS_CHECKPOINTING_IMPL:-}" != "colocated_python" ]]; then
+    echo "CKPT_GCSFUSE=${CKPT_GCSFUSE}: switching PATHWAYS_CHECKPOINTING_IMPL from '${PATHWAYS_CHECKPOINTING_IMPL:-}' to colocated_python."
+  fi
+  export PATHWAYS_CHECKPOINTING_IMPL="colocated_python"
+else
+  export CKPT_GCSFUSE_BUCKET=""
+fi
 export PATHWAYS_CHECKPOINTING_IMPL="${PATHWAYS_CHECKPOINTING_IMPL:-colocated_python}"
 if [[ "${PATHWAYS_CHECKPOINTING_IMPL}" == "colocated_python" ]]; then
   # Sidecar image must match TUNIX_IMAGE's Python/jax/jaxlib versions (Orbax dispatches via cloudpickle).

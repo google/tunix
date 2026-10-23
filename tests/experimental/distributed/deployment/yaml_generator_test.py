@@ -524,6 +524,83 @@ class YamlGeneratorTest(parameterized.TestCase):
         {"sidecar-shared-memory": "/tmp/sidecar"},
     )
 
+  def _render_pathways(self, env):
+    template_file = _get_template_path("jobset.pathways.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-pw-gcsfuse",
+        "--tpu_slice=tpuv5p:8x16x16",
+    ]
+    with mock.patch.dict(os.environ, env, clear=False):
+      with mock.patch.object(sys, "argv", argv):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+          yaml_generator.main()
+          return mock_stdout.getvalue()
+
+  def test_pathways_gcsfuse_mounts_head_user_container_and_sidecar(self):
+    import yaml  # pylint: disable=g-import-not-at-top
+
+    rendered = self._render_pathways({
+        "COLOCATED_PYTHON_SIDECAR_IMAGE": "sidecar:latest",
+        "CKPT_GCSFUSE_BUCKET": "gs://rapid-bucket/",
+        "CKPT_GCSFUSE_MOUNT_PATH": "/gcs/rapid",
+    })
+    jobs = {
+        j["name"]: j["template"]["spec"]["template"]
+        for j in yaml.safe_load(rendered)["spec"]["replicatedJobs"]
+    }
+    for name, pod in jobs.items():
+      with self.subTest(job=name):
+        self.assertEqual(
+            pod["metadata"]["annotations"]["gke-gcsfuse/volumes"], "true"
+        )
+        volume = next(
+            v for v in pod["spec"]["volumes"] if v["name"] == "ckpt-gcsfuse"
+        )
+        self.assertEqual(volume["csi"]["driver"], "gcsfuse.csi.storage.gke.io")
+        self.assertEqual(
+            volume["csi"]["volumeAttributes"]["bucketName"], "rapid-bucket"
+        )
+        self.assertEqual(
+            volume["csi"]["volumeAttributes"]["hostNetworkPodKSA"], "true"
+        )
+    user = next(
+        c for c in jobs["proc"]["spec"]["containers"] if c.get("volumeMounts")
+    )
+    self.assertEqual(
+        user["volumeMounts"],
+        [{"mountPath": "/gcs/rapid", "name": "ckpt-gcsfuse"}],
+    )
+    self.assertEqual(
+        self._get_sidecar_mounts(rendered),
+        {"sidecar-shared-memory": "/tmp/sidecar", "ckpt-gcsfuse": "/gcs/rapid"},
+    )
+    worker = next(
+        c
+        for c in jobs["pw-node"]["spec"]["containers"]
+        if c["name"] == "pathways-worker"
+    )
+    self.assertEqual(
+        [m["name"] for m in worker["volumeMounts"]],
+        ["shared-tmp", "sidecar-shared-memory"],
+    )
+
+  def test_pathways_gcsfuse_absent_unless_bucket_is_set(self):
+    with mock.patch.dict(os.environ, {}, clear=False):
+      os.environ.pop("CKPT_GCSFUSE_BUCKET", None)
+      rendered = self._render_pathways(
+          {"COLOCATED_PYTHON_SIDECAR_IMAGE": "sidecar:latest"}
+      )
+    self.assertNotIn("gke-gcsfuse", rendered)
+    self.assertNotIn("ckpt-gcsfuse", rendered)
+
+  def test_pathways_gcsfuse_requires_colocated_sidecar(self):
+    with mock.patch.dict(os.environ, {}, clear=False):
+      os.environ.pop("COLOCATED_PYTHON_SIDECAR_IMAGE", None)
+      with self.assertRaisesRegex(SystemExit, "COLOCATED_PYTHON_SIDECAR_IMAGE"):
+        self._render_pathways({"CKPT_GCSFUSE_BUCKET": "rapid-bucket"})
+
   def test_397b_termination_grace_period_default_and_override(self):
     for template_name in ("jobset.pathways.yaml", "jobset.pathways.qwen3.5-397b.yaml"):
       with self.subTest(template_name=template_name):

@@ -40,7 +40,7 @@ ${FAIL_FAST_LINE_DISABLE}    maxRestarts: 3
         template:
           metadata:
             annotations:
-              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"${GCSFUSE_POD_ANNOTATIONS}
           spec:
             priorityClassName: ${PRIORITY_CLASS}
             serviceAccountName: ${SERVICE_ACCOUNT}
@@ -200,6 +200,7 @@ ${FAIL_FAST_WRAPPER_POST}                  echo "Program End: $$(date)"
               ports:
               - containerPort: ${USER_CONTAINER_PORT}
                 name: grpc # Naming it 'grpc' tells GKE to optimize for HTTP/2
+${GCSFUSE_PROC_MOUNT}
   - name: pw-node
     replicas: ${REPLICAS}
     template:
@@ -211,7 +212,7 @@ ${FAIL_FAST_WRAPPER_POST}                  echo "Program End: $$(date)"
         template:
           metadata:
             annotations:
-              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"${TPU_ANNOTATIONS}
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"${TPU_ANNOTATIONS}${GCSFUSE_POD_ANNOTATIONS}
           spec:
             priorityClassName: ${PRIORITY_CLASS}
             serviceAccountName: ${SERVICE_ACCOUNT}
@@ -302,7 +303,7 @@ ${PW_NODE_AFFINITY}
             - name: shared-tmp
               hostPath:
                 path: /tmp
-                type: DirectoryOrCreate${COLOCATED_PYTHON_SIDECAR_VOLUME}
+                type: DirectoryOrCreate${COLOCATED_PYTHON_SIDECAR_VOLUME}${GCSFUSE_VOLUME}
   startupPolicy:
     startupPolicyOrder: AnyOrder
   successPolicy:

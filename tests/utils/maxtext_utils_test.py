@@ -727,6 +727,56 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertIn("checkpoint_storage_use_ocdbt=false", argv)
     self.assertIn("checkpoint_storage_use_zarr3=false", argv)
 
+  def test_checkpoint_dir_env_sets_checkpoint_dir_under_run_name(self):
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "ENABLE_PATHWAYS_PERSISTENCE": "1",
+            "PATHWAYS_CHECKPOINTING_IMPL": "colocated_python",
+            "COLOCATED_PYTHON_SIDECAR_IMAGE": (
+                "us-docker.pkg.dev/proj/repo/sidecar:tag"
+            ),
+            "MAXTEXT_CHECKPOINT_DIR": "/gcs/ckpt/maxtext/job",
+        },
+        clear=False,
+    ):
+      argv = self._build_config_argv(
+          base_output_directory="gs://bucket/out",
+          checkpointing_options=mock.MagicMock(
+              save_interval_steps=1, max_to_keep=2
+          ),
+      )
+    self.assertIn("base_output_directory=gs://bucket/out", argv)
+    self.assertIn(
+        "checkpoint_dir=/gcs/ckpt/maxtext/job/tunix_maxtext/checkpoints/", argv
+    )
+
+  def test_local_checkpoint_dir_env_requires_colocated_python(self):
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "ENABLE_PATHWAYS_PERSISTENCE": "1",
+            "PATHWAYS_CHECKPOINTING_IMPL": "persistence",
+            "MAXTEXT_CHECKPOINT_DIR": "/gcs/ckpt/maxtext/job",
+        },
+        clear=False,
+    ):
+      with self.assertRaisesRegex(
+          ValueError, r"requires PATHWAYS_CHECKPOINTING_IMPL=colocated_python"
+      ):
+        self._build_config_argv(
+            base_output_directory="gs://bucket/out",
+            checkpointing_options=mock.MagicMock(
+                save_interval_steps=1, max_to_keep=2
+            ),
+        )
+
+  def test_checkpoint_dir_unset_emits_no_checkpoint_dir(self):
+    with mock.patch.dict("os.environ", {}, clear=False):
+      os.environ.pop("MAXTEXT_CHECKPOINT_DIR", None)
+      argv = self._build_config_argv(base_output_directory="gs://bucket/out")
+    self.assertFalse([a for a in argv if a.startswith("checkpoint_dir=")])
+
   def test_unknown_pathways_checkpointing_impl_raises(self):
     with mock.patch.dict(
         "os.environ",
@@ -1256,5 +1306,3 @@ class MaxTextUtilsTest(absltest.TestCase):
 
 if __name__ == "__main__":
   absltest.main()
-
-

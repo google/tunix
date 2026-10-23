@@ -335,13 +335,25 @@ def build_maxtext_config(
           ) from e
 
   output_dir = base_output_directory or "/tmp/maxtext"
+  run_name = worker_id or "tunix_maxtext"
   argv = [
       "maxtext_trainer",
       base_yml,
       f"model_name={model_name}",
-      f"run_name={worker_id or 'tunix_maxtext'}",
+      f"run_name={run_name}",
       f"base_output_directory={output_dir}",
   ]
+  # Checkpoints can live apart from the other outputs (metrics, mllog,
+  # profiles), e.g. on a GCSFuse mount of a zonal Rapid bucket. Laid out like
+  # the derived <base_output_directory>/<run_name>/checkpoints/.
+  checkpoint_base_dir = os.environ.get("MAXTEXT_CHECKPOINT_DIR", "").strip()
+  checkpoint_dir = (
+      os.path.join(checkpoint_base_dir, run_name, "checkpoints", "")
+      if checkpoint_base_dir
+      else ""
+  )
+  if checkpoint_dir:
+    argv.append(f"checkpoint_dir={checkpoint_dir}")
   if load_parameters_path:
     argv.append(f"load_parameters_path={load_parameters_path}")
   # Checkpointing configs. `save_interval_steps=0` means "never save"
@@ -529,19 +541,30 @@ def build_maxtext_config(
   # The persistence handler rejects the OCDBT/zarr3 layout MaxText writes by
   # default (see maxtext/common/checkpoint_context.py), so both must be off
   if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") == "1":
-    if save_interval_steps > 0 and not output_dir.startswith("gs://"):
-      raise ValueError(
-          "ENABLE_PATHWAYS_PERSISTENCE=1 with save_interval_steps > 0 "
-          "requires a gs:// base_output_directory so all pathways-worker pods "
-          f"write to shared GCS storage; got {output_dir!r}. "
-          "Set MAXTEXT_OUTPUT_DIR=gs://..."
-      )
-
     impl = os.environ.get("PATHWAYS_CHECKPOINTING_IMPL", "").strip() or _PERSISTENCE_IMPL
     if impl not in _PATHWAYS_CHECKPOINTING_IMPLS:
       raise ValueError(
           f"PATHWAYS_CHECKPOINTING_IMPL={impl!r} is not recognised; "
           f"expected one of {_PATHWAYS_CHECKPOINTING_IMPLS}."
+      )
+    if checkpoint_dir and not checkpoint_dir.startswith("gs://"):
+      # Persistence writes from the pathways-worker's C++ runtime, which only
+      # speaks gs://; the colocated-python sidecars write through TensorStore,
+      # so they can use a mount that the launcher adds to every sidecar.
+      if save_interval_steps > 0 and impl != _COLOCATED_PYTHON_IMPL:
+        raise ValueError(
+            f"MAXTEXT_CHECKPOINT_DIR={checkpoint_base_dir!r} is not a gs://"
+            " URI, which requires"
+            f" PATHWAYS_CHECKPOINTING_IMPL=colocated_python; got {impl!r}."
+        )
+    elif save_interval_steps > 0 and not (
+        checkpoint_dir or output_dir
+    ).startswith("gs://"):
+      raise ValueError(
+          "ENABLE_PATHWAYS_PERSISTENCE=1 with save_interval_steps > 0 "
+          "requires a gs:// base_output_directory so all pathways-worker pods "
+          f"write to shared GCS storage; got {output_dir!r}. "
+          "Set MAXTEXT_OUTPUT_DIR=gs://..."
       )
     if impl == _COLOCATED_PYTHON_IMPL and not os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip():
       raise ValueError(
