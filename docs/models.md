@@ -156,6 +156,10 @@ model, model_path = AutoModel.from_pretrained(
 
 ##### Pipeline parallel MaxText models
 
+Use the MaxText revision pinned in `requirements/maxtext_requirements.txt`;
+logical mesh axes can change between MaxText releases. A small TPU example is
+available in `examples/model_load/maxtext_pipeline_smoke.ipynb`.
+
 Tunix can use MaxText's pipeline runtime for trainer forward and backward
 passes. Use `MaxTextPipelineConfig` to keep the MaxText config and JAX mesh in
 sync. The helper builds a mesh with MaxText's `stage` and `tensor` axis names;
