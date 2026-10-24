@@ -59,3 +59,35 @@ All examples are located in this
     </tr>
   </tbody>
 </table>
+
+## Choosing a GRPO entry point
+
+The [GSM8K shell recipes](https://github.com/google/tunix/tree/main/examples/rl/grpo/gsm8k/)
+and the [Python demo](https://github.com/google/tunix/blob/main/scripts/grpo_demo_llama3_qwen2.py)
+both use Tunix's GRPO learner. They differ in how they configure and assemble the
+training workflow.
+
+- Use the shell recipes to configure repeatable training jobs without editing
+  Python. They launch `python3 -m tunix.cli.grpo_main` with a base YAML file,
+  model-specific settings, and `key=value` overrides. For example,
+  [run_llama3.2_1b.sh](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/run_llama3.2_1b.sh)
+  loads `tunix/cli/base_config.yaml`, applies a model preset through
+  `override_config_file`, and then applies command-line overrides. The
+  configuration controls model loading, tokenization, data, reward modules,
+  optimizer settings, device meshes, logging, and checkpointing. See
+  [Launching jobs](launching.md) for CLI setup and usage.
+- Use `scripts/grpo_demo_llama3_qwen2.py` to study or modify the workflow directly
+  in Python. It constructs the models, optimizer, rollout configuration, and
+  learner explicitly, and defines its reward functions in the script. It uses
+  flags such as `--root-dir` and `--model-version`, together with constants in
+  the source, rather than the CLI YAML configuration. Its model table includes
+  selected Llama 3, Qwen 2.5, and Qwen 3 models. It also evaluates the model before
+  and after training. The demo is marked WIP and clears its configured training
+  checkpoint directory at startup; review its paths and defaults before running.
+
+Both entry points support `vanilla`, `vllm`, and `sglang_jax` rollout engines.
+The CLI selects the engine with `rollout_engine`; the demo uses
+`--rollout-engine`. SGLang-JAX is therefore available through the CLI as well as
+the demo. Backend dependencies, model weight mappings, and device requirements
+still apply, and defaults differ between the two entry points. See the
+[rollout guide](rollout.md) for backend setup and configuration.
