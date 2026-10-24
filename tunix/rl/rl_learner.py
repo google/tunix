@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import abc
 from concurrent import futures
+import gc
 import itertools
 import math
+import os
 from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, TypeVar
 
 from absl import logging
@@ -49,6 +51,100 @@ RewardFn = Callable[..., List[float]]
 MetricFn = Callable[..., rl_engine_lib.MetricsT]
 
 TConfig = TypeVar("TConfig", bound=algo_config_lib.AlgorithmConfig)
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+  """True iff the environment variable `name` is set to 1/true/True."""
+  return (os.environ.get(name, default) or default).strip() in (
+      "1",
+      "true",
+      "True",
+  )
+
+
+def _env_int(name: str, default: int) -> int:
+  """Parses a positive integer environment variable with a default."""
+  raw = (os.environ.get(name, "") or "").strip()
+  value = int(raw) if raw else default
+  if value < 1:
+    raise ValueError(f"{name}={value} must be >= 1")
+  return value
+
+
+class _GcFreeze:
+  """Freezes Python garbage collection after warm-up (TUNIX_GC_FREEZE=1).
+
+  After TUNIX_GC_FREEZE_AT completed global steps (default 8): `gc.collect()`,
+  `gc.freeze()` and, unless TUNIX_GC_FREEZE_DISABLE=0, `gc.disable()`, so no
+  automatic collection pauses rollout, training or the weight sync and later
+  collections only scan objects created after the freeze. Afterwards an
+  explicit `gc.collect()` runs every TUNIX_GC_FREEZE_EVERY steps (default 8;
+  with TUNIX_GC_FREEZE_REFREEZE=1 as unfreeze + collect + freeze, which also
+  reclaims frozen objects that died in reference cycles), plus a safety
+  collection in any step that saw no full collection (TUNIX_GC_FREEZE_SAFETY,
+  default 1; the stock `gc_collect_after_weight_sync` collection counts).
+  Host-only; changes when unreachable objects are reclaimed, not values.
+  """
+
+  def __init__(self):
+    self._freeze_at = _env_int("TUNIX_GC_FREEZE_AT", 8)
+    self._every = _env_int("TUNIX_GC_FREEZE_EVERY", 8)
+    self._refreeze = _env_flag("TUNIX_GC_FREEZE_REFREEZE")
+    self._disable = _env_flag("TUNIX_GC_FREEZE_DISABLE", "1")
+    self._safety = _env_flag("TUNIX_GC_FREEZE_SAFETY", "1")
+    self._steps = 0
+    self._frozen = False
+    self._was_enabled = gc.isenabled()
+    self._full_collections = 0
+    gc.callbacks.append(self._on_gc)
+    logging.info(
+        "TUNIX_GC_FREEZE: freeze after %d steps, collect every %d (refreeze=%s,"
+        " disable=%s, safety=%s).",
+        self._freeze_at,
+        self._every,
+        self._refreeze,
+        self._disable,
+        self._safety,
+    )
+
+  def _on_gc(self, phase: str, info: Dict[str, Any]) -> None:
+    if phase == "stop" and info.get("generation") == 2:
+      self._full_collections += 1
+
+  def step_end(self) -> None:
+    """Called once per completed global step."""
+    self._steps += 1
+    saw_full_collection = self._full_collections > 0
+    if self._frozen and self._disable and gc.isenabled():
+      gc.disable()  # Someone re-enabled automatic collection.
+    if not self._frozen and self._steps >= self._freeze_at:
+      collected = gc.collect()
+      gc.freeze()
+      if self._disable:
+        gc.disable()
+      self._frozen = True
+      logging.info(
+          "TUNIX_GC_FREEZE: froze %d objects after %d steps (collected %d).",
+          gc.get_freeze_count(),
+          self._steps,
+          collected,
+      )
+    elif self._frozen and self._steps % self._every == 0:
+      if self._refreeze:
+        gc.unfreeze()
+      gc.collect()
+      if self._refreeze:
+        gc.freeze()
+    elif self._frozen and self._safety and not saw_full_collection:
+      gc.collect()
+    self._full_collections = 0
+
+  def close(self) -> None:
+    """Removes the callback and restores automatic collection."""
+    if self._on_gc in gc.callbacks:
+      gc.callbacks.remove(self._on_gc)
+    if self._was_enabled and not gc.isenabled():
+      gc.enable()
 
 
 class RLLearner(abc.ABC, Generic[TConfig]):
@@ -608,6 +704,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           full_batch_iterator, iterator_batch_size
       )
 
+    gc_freeze = _GcFreeze() if _env_flag("TUNIX_GC_FREEZE") else None
     try:
       while True:  # loop over M
         try:
@@ -656,6 +753,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
               self.rl_engine.perf_v2.export(),
               mode=rl_engine_lib.Mode.TRAIN,
           )
+          if gc_freeze is not None:
+            gc_freeze.step_end()
 
           if (
               self.rl_engine.actor_trainer.train_steps  # pyrefly: ignore[unsupported-operation]
@@ -665,6 +764,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         except StopIteration:
           break
     finally:
+      if gc_freeze is not None:
+        gc_freeze.close()
       self.rl_engine.close()
 
   def _run_global_step(
