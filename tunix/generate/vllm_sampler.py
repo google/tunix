@@ -47,6 +47,14 @@ from vllm.sampling_params import SamplingParams
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 
+_TRUTHY = ("1", "true", "True")
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+  """True iff the environment variable `name` is set to 1/true/True."""
+  return (os.environ.get(name, default) or default).strip() in _TRUTHY
+
+
 @dataclasses.dataclass
 class VllmConfig:
   """Vllm rollout configuations."""
@@ -594,7 +602,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     """Text and per-token logprobs of one sampled completion."""
     text = self.tokenizer.decode(single_output.token_ids)
     logprobs = utils.get_logprobs_from_vllm_output(
-        list(single_output.token_ids), single_output.logprobs
+        list(single_output.token_ids),
+        single_output.logprobs,
+        fast=_env_flag("TUNIX_FAST_LOGPROBS"),
+        check=bool(self.__dict__.get("_fast_logprobs_check", False)),
     )
     return text, logprobs
 
@@ -727,6 +738,31 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       outputs.append(result)
     return outputs
 
+  def _request_flat_logprobs(self, sampling_params: SamplingParams) -> None:
+    """TUNIX_FAST_LOGPROBS=1: ask vLLM for `FlatLogprobs` containers.
+
+    FlatLogprobs keeps a request's logprobs in a few flat lists instead of one
+    dict per position (far fewer Python objects), and lets
+    `utils.get_logprobs_from_vllm_output` read the sampled-token values with
+    slicing. The first TUNIX_FAST_LOGPROBS_CHECK calls (default 1) also verify
+    every extraction against the per-position loop.
+
+    Args:
+      sampling_params: The request's sampling params (updated in place).
+    """
+    calls = self.__dict__.get("_fast_logprobs_calls", 0) + 1
+    self._fast_logprobs_calls = calls
+    checks = int(os.environ.get("TUNIX_FAST_LOGPROBS_CHECK", "1") or "0")
+    self._fast_logprobs_check = calls <= checks
+    fields = getattr(type(sampling_params), "__struct_fields__", ())
+    if "flat_logprobs" in fields:
+      sampling_params.flat_logprobs = True
+    elif calls == 1:
+      logging.warning(
+          "TUNIX_FAST_LOGPROBS: this vLLM has no SamplingParams.flat_logprobs;"
+          " logprobs stay per-position dicts (stock extraction)."
+      )
+
   def _eos_token_ids(self) -> List[int]:
     """Returns the token ids that terminate a generation.
 
@@ -832,6 +868,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       # at every turn boundary in the recorded sequence, biasing logp
       # recomputation against the model's actual sampling context.
       sampling_params.include_stop_str_in_output = True
+      if _env_flag("TUNIX_FAST_LOGPROBS"):
+        self._request_flat_logprobs(sampling_params)
 
       if top_p is not None:
         sampling_params.top_p = top_p

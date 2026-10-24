@@ -337,11 +337,105 @@ def check_sampling_mode_conflict(
     original_sampling_mode[0] = new_sampling_mode
 
 
+# TUNIX_FAST_LOGPROBS: set when a checked fast extraction disagreed.
+_FAST_LOGPROBS_STATE = {'off': False}
+
+
+def _same_floats(a: Sequence[Any], b: Sequence[Any]) -> bool:
+  """Equal length, element types and values; floats compared bitwise."""
+  if len(a) != len(b) or list(map(type, a)) != list(map(type, b)):
+    return False
+  try:
+    x, y = np.array(a, np.float64), np.array(b, np.float64)
+  except (TypeError, ValueError):
+    return list(a) == list(b)
+  return bool(np.array_equal(x.view(np.int64), y.view(np.int64)))
+
+
+def _flat_logprobs_fast(
+    token_ids: Sequence[int], logprobs: Any
+) -> Optional[List[float]]:
+  """Sampled-token logprobs straight from vLLM `FlatLogprobs` lists.
+
+  Same values as the per-position dict lookup of
+  `get_logprobs_from_vllm_output` (when a position lists a token twice the
+  last entry wins, as in the dict). Returns None for any irregular layout,
+  so the caller falls back to the stock loop.
+
+  Args:
+    token_ids: Sampled token ids.
+    logprobs: A vLLM `FlatLogprobs` (start/end indices and flat lists).
+
+  Returns:
+    The logprobs, or None.
+  """
+  starts = getattr(logprobs, 'start_indices', None)
+  ends = getattr(logprobs, 'end_indices', None)
+  ids = getattr(logprobs, 'token_ids', None)
+  values = getattr(logprobs, 'logprobs', None)
+  if not all(isinstance(x, list) for x in (starts, ends, ids, values)):
+    return None
+  n = len(starts)
+  if n == 0 or n != len(token_ids) or len(ends) != n:
+    return None
+  s0 = starts[0]
+  width = ends[0] - s0
+  stop = s0 + n * width
+  if (
+      width < 1
+      or len(ids) < stop
+      or starts != list(range(s0, stop, width))
+      or ends != list(range(s0 + width, stop + 1, width))
+  ):
+    return None
+  tokens = list(token_ids)
+  if ids[s0 + width - 1 : stop : width] == tokens:
+    return values[s0 + width - 1 : stop : width]
+  if width == 1:
+    return None
+  hit = np.array(ids[s0:stop]).reshape(n, width) == np.array(tokens).reshape(
+      n, 1
+  )
+  if not hit.any(1).all():
+    return None
+  last = s0 + width * np.arange(n) + (width - 1) - hit[:, ::-1].argmax(1)
+  return [values[i] for i in last.tolist()]
+
+
 def get_logprobs_from_vllm_output(
     token_ids: List[int],
     logprobs: List[Optional[Dict[int, Any]]],
+    *,
+    fast: bool = False,
+    check: bool = False,
 ) -> List[float]:
-  """Extracts the log probs from the vLLM output."""
+  """Extracts the log probs from the vLLM output.
+
+  Args:
+    token_ids: Sampled token ids.
+    logprobs: Per-position logprobs from vLLM.
+    fast: Read vLLM `FlatLogprobs` directly (TUNIX_FAST_LOGPROBS); irregular
+      inputs use the loop below.
+    check: Also run the loop below and compare bitwise; a mismatch returns the
+      loop's values and turns the fast path off for the process.
+
+  Returns:
+    The sampled tokens' logprobs.
+  """
+  if fast and not _FAST_LOGPROBS_STATE['off']:
+    extracted = _flat_logprobs_fast(token_ids, logprobs)
+    if extracted is not None:
+      if not check:
+        return extracted
+      reference = get_logprobs_from_vllm_output(token_ids, logprobs)
+      if _same_floats(extracted, reference):
+        return extracted
+      _FAST_LOGPROBS_STATE['off'] = True
+      logging.error(
+          'TUNIX_FAST_LOGPROBS: fast extraction differs from the reference;'
+          ' fast path off.'
+      )
+      return reference
   if not logprobs or logprobs[0] is None:
     logging.debug('Logprobs are missing')
     return []
