@@ -20,14 +20,68 @@ from __future__ import annotations
 
 import collections
 from collections.abc import Callable, Iterable, Iterator
+import dataclasses
 import hashlib
 import logging
 import os
 import re
 import threading
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
+from tunix.experimental.examples.deepswe_dist import openhands_template
+
+RUNTIME_CONTAINER_NAME = "agent-runtime"
+EVAL_CONTAINER_NAME = "eval"
+_LEGACY_ACQUIRE_RETRIES = 5
+
+
+def set_runtime_container(target: Any, container_name: str) -> None:
+  """Configures an R2E-Gym runtime (or RepoEnv) to exec in `container_name`."""
+  if target is None:
+    return
+  runtime = getattr(target, "runtime", None) or target
+  try:
+    runtime._target_container = container_name
+    client = getattr(runtime, "client", None)
+    if client is not None:
+      client._default_container = container_name
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logging.debug("[SandboxFleet] set_runtime_container note: %s", e)
+
+
+@dataclasses.dataclass(frozen=True)
+class SandboxFailFastConfig:
+  """Sandbox-side fail-fast settings (`FT_SANDBOX_*` in the launcher)."""
+
+  enabled: bool
+  ready_timeout_s: int | None
+  acquire_retries: int
+
+  @classmethod
+  def from_env(cls) -> SandboxFailFastConfig:
+    """Builds the config from FT_SANDBOX_* variables set by k8s_launcher.sh."""
+    flag = os.environ.get("FT_SANDBOX_FAIL_FAST")
+    if flag is None:
+      return cls(
+          enabled=False,
+          ready_timeout_s=None,
+          acquire_retries=_LEGACY_ACQUIRE_RETRIES,
+      )
+    if flag != "true":
+      raise ValueError(
+          f"FT_SANDBOX_FAIL_FAST must be 'true' or unset, got {flag!r}"
+      )
+    ready_timeout_s = int(os.environ["FT_SANDBOX_READY_TIMEOUT_S"])
+    acquire_retries = int(os.environ["FT_SANDBOX_ACQUIRE_RETRIES"])
+    config = cls(
+        enabled=True,
+        ready_timeout_s=ready_timeout_s,
+        acquire_retries=acquire_retries,
+    )
+    if ready_timeout_s <= 0 or acquire_retries < 1:
+      raise ValueError(f"Invalid sandbox fail-fast settings: {config}")
+    return config
 
 
 @runtime_checkable
@@ -147,6 +201,32 @@ def patch_r2egym_for_agent_sandbox() -> None:
     logging.debug("[SandboxFleet] HfFolder patch note: %s", e)
 
   try:
+    from kubernetes import client as k8s_client  # pyrefly: ignore[missing-import]
+
+    orig_exec = getattr(
+        k8s_client.CoreV1Api, "_orig_connect_get_namespaced_pod_exec", None
+    )
+    if orig_exec is None and hasattr(
+        k8s_client.CoreV1Api, "connect_get_namespaced_pod_exec"
+    ):
+      k8s_client.CoreV1Api._orig_connect_get_namespaced_pod_exec = (
+          k8s_client.CoreV1Api.connect_get_namespaced_pod_exec
+      )
+
+      def _patched_connect_get_namespaced_pod_exec(self, *args, **kwargs):
+        if not kwargs.get("container"):
+          kwargs["container"] = getattr(
+              self, "_default_container", RUNTIME_CONTAINER_NAME
+          )
+        return self._orig_connect_get_namespaced_pod_exec(*args, **kwargs)
+
+      k8s_client.CoreV1Api.connect_get_namespaced_pod_exec = (
+          _patched_connect_get_namespaced_pod_exec
+      )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logging.debug("[SandboxFleet] CoreV1Api exec patch note: %s", e)
+
+  try:
     from r2egym.agenthub.runtime import docker as docker_mod  # pyrefly: ignore[missing-import]
 
     if not hasattr(docker_mod.DockerRuntime, "_orig_init"):
@@ -174,12 +254,51 @@ def patch_r2egym_for_agent_sandbox() -> None:
         ) or (
             hasattr(self, "backend") and self.backend == "kubernetes-sandbox"
         ):
-          return self._start_kubernetes_sandbox()
+          res = self._start_kubernetes_sandbox()
+          target_ctr = (
+              getattr(self, "_target_container", None)
+              or getattr(
+                  getattr(self, "_handle", None),
+                  "_target_container",
+                  None,
+              )
+              or RUNTIME_CONTAINER_NAME
+          )
+          self._target_container = target_ctr
+          if getattr(self, "client", None) is not None:
+            self.client._default_container = target_ctr
+          return res
         return self._orig_start_container(
             docker_image, command, ctr_name, **kwargs
         )
 
       docker_mod.DockerRuntime.start_container = _patched_start_container
+
+    orig_setup_env = getattr(
+        docker_mod.DockerRuntime, "_orig_setup_env", None
+    )
+    if orig_setup_env is None and hasattr(
+        docker_mod.DockerRuntime, "setup_env"
+    ):
+      docker_mod.DockerRuntime._orig_setup_env = (
+          docker_mod.DockerRuntime.setup_env
+      )
+
+      def _patched_setup_env(self, *args, **kwargs):
+        if getattr(self, "_defer_setup_env", False) or getattr(
+            getattr(self, "_handle", None), "_defer_setup_env", False
+        ):
+          self._needs_deferred_setup_env = True
+          logging.debug(
+              "[SandboxFleet] Deferring setup_env on container '%s' until"
+              " evaluation",
+              getattr(self, "_target_container", EVAL_CONTAINER_NAME),
+          )
+          return None
+        self._needs_deferred_setup_env = False
+        return self._orig_setup_env(*args, **kwargs)
+
+      docker_mod.DockerRuntime.setup_env = _patched_setup_env
   except Exception as e:  # pylint: disable=broad-exception-caught
     logging.debug("[SandboxFleet] r2egym in-memory patch note: %s", e)
 
@@ -187,7 +306,7 @@ def patch_r2egym_for_agent_sandbox() -> None:
 
 
 def patch_agent_sandbox_rl_templates() -> None:
-  """Patches generated SandboxTemplates to disable per-template NetworkPolicy churn."""
+  """Patches generated SandboxTemplates for network policy and fresh eval sidecar."""
   try:
     from agent_sandbox_rl import resources as asrl_resources  # pyrefly: ignore[missing-import]
 
@@ -205,6 +324,36 @@ def patch_agent_sandbox_rl_templates() -> None:
         pod_spec = spec["podTemplate"]["spec"]
         pod_spec["automountServiceAccountToken"] = False
         pod_spec["shareProcessNamespace"] = False
+        containers = pod_spec["containers"]
+        if containers:
+          containers[0]["name"] = RUNTIME_CONTAINER_NAME
+        if not any(
+            "name" in c and c["name"] == EVAL_CONTAINER_NAME
+            for c in containers
+        ):
+          pull_policy = (
+              template.image_pull_policy
+              if template is not None and template.image_pull_policy
+              else "IfNotPresent"
+          )
+          containers.append({
+              "name": EVAL_CONTAINER_NAME,
+              "image": image,
+              "imagePullPolicy": pull_policy,
+              "command": ["sleep", "infinity"],
+              "stdin": True,
+              "tty": True,
+              "resources": {
+                  "requests": {
+                      "cpu": os.getenv("SANDBOX_EVAL_CPU", "50m"),
+                      "memory": os.getenv("SANDBOX_EVAL_MEM", "128Mi"),
+                  },
+                  "limits": {
+                      "cpu": os.getenv("SANDBOX_CPU_LIMIT", "2"),
+                      "memory": os.getenv("SANDBOX_MEM_LIMIT", "4Gi"),
+                  },
+              },
+          })
         return manifest
 
       asrl_resources.Resources._template_manifest = _patched_template_manifest
@@ -303,7 +452,9 @@ def normalize_tasks_for_fleet(
   return normalized
 
 
-def derive_job_run_id_and_prefix(job_id: str) -> tuple[str, str]:
+def derive_job_run_id_and_prefix(
+    job_id: str, scaffold: str = "r2egym"
+) -> tuple[str, str]:
   """Derives a deterministic 8-char hex `run_id` and DNS-1123 `template_name_prefix`."""
   stripped = job_id.strip()
   if not stripped:
@@ -319,7 +470,10 @@ def derive_job_run_id_and_prefix(job_id: str) -> tuple[str, str]:
         " sanitization."
     )
   shared_run_id = hashlib.sha256(stripped.encode("utf-8")).hexdigest()[:8]
-  return shared_run_id, f"r2e-{clean_job}-"
+  scaffold_prefix = (
+      "oh" if scaffold in openhands_template.OPENHANDS_SCAFFOLDS else "r2e"
+  )
+  return shared_run_id, f"{scaffold_prefix}-{clean_job}-"
 
 
 def _task_image_str(task: object) -> str | None:
@@ -436,7 +590,9 @@ def init_global_fleet(
     shared_run_id = ""
     template_prefix = ""
     if job_id is not None:
-      shared_run_id, template_prefix = derive_job_run_id_and_prefix(job_id)
+      shared_run_id, template_prefix = derive_job_run_id_and_prefix(
+          job_id, scaffold=scaffold
+      )
       fleet_kwargs["run_id"] = shared_run_id
       fleet_kwargs["template_name_prefix"] = template_prefix
       fleet_kwargs["labels"] = {
@@ -463,6 +619,14 @@ def init_global_fleet(
           fleet_ns,
           node_sel,
       )
+
+    fail_fast = SandboxFailFastConfig.from_env()
+    if fail_fast.ready_timeout_s is not None:
+      fleet_kwargs["ready_timeout"] = fail_fast.ready_timeout_s
+
+    template = openhands_template.get_template(scaffold, node_sel)
+    if template is not None:
+      fleet_kwargs["template"] = template
 
     fleet_cfg = FleetConfig(**fleet_kwargs)
     fleet_inst: SandboxFleetLike = SandboxFleet(fleet_cfg)

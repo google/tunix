@@ -14,6 +14,7 @@
 
 """Top-level RolloutWorker abstractions (Service vs Client Driver)."""
 
+import asyncio
 import dataclasses
 import threading
 from typing import Any, AsyncIterator, Callable, List, Mapping, Optional, Sequence, Union
@@ -107,6 +108,10 @@ class RolloutWorker(abstract_worker.Worker):
     self._policy_version = 0
     self._state = datatypes.WorkerState.PENDING
     self._init_lock = threading.Lock()
+    self._start_lock: Optional[asyncio.Lock] = None
+    self._start_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+    self._started = False
+    self._start_error: Optional[BaseException] = None
     self._sync_round = {"req_id": None, "uuid": 0, "phase": "idle"}
     self._jax_cache_syncer = gcs_cache.JaxCacheSyncer(
         worker_id, jax_cache_config
@@ -233,19 +238,36 @@ class RolloutWorker(abstract_worker.Worker):
     finally:
       self.state = WorkerState.READY
 
+  def _get_start_lock(self) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    if self._start_lock is None or self._start_lock_loop is not loop:
+      self._start_lock = asyncio.Lock()
+      self._start_lock_loop = loop
+    return self._start_lock
+
   async def start(self) -> datatypes.Response:
-    self._ensure_initialized()
-    try:
-      await self.sampler.start()
-      await self.manager.bind_weight_sync()
-      self._jax_cache_syncer.sync(wait=False)
-      return self._response(started=True)
-    except Exception:
-      self.state = WorkerState.ERROR
-      raise
+    async with self._get_start_lock():
+      if self._started:
+        return self._response(started=True)
+      if self._start_error is not None:
+        self.state = WorkerState.ERROR
+        raise self._start_error
+      self._ensure_initialized()
+      try:
+        await self.sampler.start()
+        await self.manager.bind_weight_sync()
+        self._jax_cache_syncer.sync(wait=False)
+        self._started = True
+        return self._response(started=True)
+      except Exception as e:
+        self._start_error = e
+        self.state = WorkerState.ERROR
+        raise
 
   def stop(self) -> datatypes.Response:
     self.state = WorkerState.STOPPED
+    self._started = False
+    self._start_error = None
     try:
       self.manager.cancel_all()
     finally:

@@ -62,6 +62,7 @@ class FakeFleetConfig:
   labels: dict[str, str] = dataclasses.field(
       default_factory=lambda: {"app": "agent-sandbox-rl"}
   )
+  pod_template: dict[str, object] | None = None
 
 
 @dataclasses.dataclass
@@ -69,6 +70,7 @@ class FakeClusterConfig:
   name: str = "default"
   namespace: str = "default"
   node_selector: dict[str, str] | None = None
+  tolerations: list[dict[str, object]] | None = None
   in_cluster: bool = False
 
 

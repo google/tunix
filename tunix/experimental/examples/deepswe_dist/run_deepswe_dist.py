@@ -267,7 +267,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--env_backend", type=str, default="kubernetes")
   parser.add_argument(
-      "--scaffold", choices=("r2egym", "sweagent"), default="r2egym"
+      "--scaffold",
+      choices=("r2egym", "sweagent", "openhands"),
+      default="r2egym",
   )
   parser.add_argument("--use_agent_sandbox", action="store_true")
   parser.add_argument(

@@ -254,6 +254,67 @@ class RolloutWorkerTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_start_only_runs_sampler_once_under_concurrency(self):
+    enter_start = asyncio.Event()
+    release_start = asyncio.Event()
+    start_calls = 0
+    bind_calls = 0
+
+    class _ConcurrentSampler(mocks.MockBaseSamplerImpl):
+
+      def __init__(self):
+        super().__init__(sampler_name="concurrent_sampler")
+
+      async def start(self):
+        nonlocal start_calls
+        start_calls += 1
+        enter_start.set()
+        await release_start.wait()
+
+      async def bind_weight_sync(self):
+        nonlocal bind_calls
+        bind_calls += 1
+
+    worker = rollout_worker.RolloutWorker(
+        worker_id="rollout_concurrent_start",
+        sampler=_ConcurrentSampler(),
+        tokenizer=self.tokenizer,
+        chat_parser=self.chat_parser,
+    )
+
+    async def _run():
+      t1 = asyncio.create_task(worker.start())
+      await enter_start.wait()
+      t2 = asyncio.create_task(worker.start())
+      release_start.set()
+      r1, r2 = await asyncio.gather(t1, t2)
+      r3 = await worker.start()
+      self.assertTrue(r1.metadata["started"])
+      self.assertTrue(r2.metadata["started"])
+      self.assertTrue(r3.metadata["started"])
+      self.assertEqual(start_calls, 1)
+      self.assertEqual(bind_calls, 1)
+
+    asyncio.run(_run())
+
+  def test_start_failure_is_sticky_until_stop(self):
+    call_count = 0
+
+    async def _failing_start():
+      nonlocal call_count
+      call_count += 1
+      raise RuntimeError("vllm start boom")
+
+    with mock.patch.object(
+        self.sampler, "start", side_effect=_failing_start
+    ):
+      with self.assertRaisesRegex(RuntimeError, "vllm start boom"):
+        asyncio.run(self.worker.start())
+      with self.assertRaisesRegex(RuntimeError, "vllm start boom"):
+        asyncio.run(self.worker.start())
+    self.assertEqual(call_count, 1)
+    self.assertEqual(self.worker.state, datatypes.WorkerState.ERROR)
+
   def test_initialize_failure_sets_error_state(self):
     with mock.patch.object(
         self.sampler, "initialize", side_effect=RuntimeError("vllm init boom")

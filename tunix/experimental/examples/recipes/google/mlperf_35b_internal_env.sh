@@ -34,6 +34,7 @@ export NODE_SELECTOR_VAL="${NODE_SELECTOR_VAL:-sandbox-cpu-pool}"
 export SANDBOX_NODE_SELECTOR_KEY="${SANDBOX_NODE_SELECTOR_KEY:-${NODE_SELECTOR_KEY}}"
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-${NODE_SELECTOR_VAL}}"
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
+export OPENHANDS_SERVER_IMAGE="${OPENHANDS_SERVER_IMAGE:-${IMAGE_REWRITE_PREFIX%/}/openhands-agent-server:0.62-chardet}"
 
 export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20261014183000}"
 export PATHWAYS_PROXY_IMAGE="${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20261014183000}"
