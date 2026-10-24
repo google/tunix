@@ -614,6 +614,7 @@ class PeftTrainerTest(parameterized.TestCase):
                     mock.ANY,
                     mock.ANY,
                     save_only_lora_params=True,
+                    force=False,
                     custom_metadata={},
                 )
                 for i in expected_save_steps
@@ -881,14 +882,14 @@ class PeftTrainerTest(parameterized.TestCase):
         tc.assert_equal, states[1], nnx.state(rolled_back.model, nnx.Param)
     )
 
-  def test_restore_checkpoint_accepts_unexpected_kwargs(self):
+  def test_restore_checkpoint_rejects_undeclared_options(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=1000)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
-    metadata = trainer.restore_checkpoint(
-        checkpoint_directory='/somewhere/else'
-    )
-    self.assertEqual(metadata, {'step': 0})
+    with self.assertRaises(TypeError):
+      trainer.restore_checkpoint(  # pylint: disable=unexpected-keyword-arg
+          checkpoint_directory='/somewhere/else'
+      )
 
   def test_restore_checkpoint_without_configured_directory_is_a_noop(self):
     config = peft_trainer_v2.TrainingConfig(

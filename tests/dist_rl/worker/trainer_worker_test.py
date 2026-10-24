@@ -21,6 +21,7 @@ per-token log-prob scorer run through AbstractTrainer.fwd_only.
 
 import dataclasses
 from typing import Any
+from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
@@ -300,10 +301,15 @@ class TrainerWorkerTest(absltest.TestCase):
     self.assertTrue(resp.metadata["target_state_configured"])
     self.assertEqual(self.fake_trainer.target_state, target_state)
 
-  def test_set_target_state_raises_when_trainer_unsupported(self):
-    self.fake_trainer.set_target_state = None
-    with self.assertRaises(AttributeError):
-      self.worker.set_target_state(target_state={"params": 1})
+  def test_set_target_state_falls_back_to_abstract_default(self):
+    with mock.patch.object(
+        FakeTrainer,
+        "set_target_state",
+        abstract_trainer.AbstractTrainer.set_target_state,
+    ):
+      resp = self.worker.set_target_state(target_state={"params": 1})
+    self.assertTrue(resp.metadata["target_state_configured"])
+    self.assertIsNone(self.fake_trainer.target_state)
 
   def _expected_logps(self, request, chunk_size=0):
     graphdef, state = nnx.split(self.fake_trainer.model)
