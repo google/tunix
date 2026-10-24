@@ -20,6 +20,7 @@ import abc
 from concurrent import futures
 import itertools
 import math
+import os
 from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, TypeVar
 
 from absl import logging
@@ -49,6 +50,101 @@ RewardFn = Callable[..., List[float]]
 MetricFn = Callable[..., rl_engine_lib.MetricsT]
 
 TConfig = TypeVar("TConfig", bound=algo_config_lib.AlgorithmConfig)
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+  """True iff the environment variable `name` is set to 1/true/True."""
+  return (os.environ.get(name, default) or default).strip() in (
+      "1",
+      "true",
+      "True",
+  )
+
+
+def per_host_learner_enabled() -> bool:
+  """Whether the per-host learner is on (TUNIX_PER_HOST_LEARNER=1, >1 process).
+
+  Multi-controller JAX (one process per host, `jax.distributed`, no Pathways)
+  with a host-local in-process rollout engine: every process feeds the same
+  global batch stream, takes its own 1/N prompt shard, rolls it out on its
+  own engine, computes rewards and advantages for it, and feeds it to the
+  shared train step as process-local data (`shard_input` assembles the global
+  array with `jax.make_array_from_process_local_data`). The train step's
+  gradient reduction is the only cross-host step of a cycle besides the
+  weight publish. All configured batch sizes stay GLOBAL and are divided by
+  the process count, so one optimizer update still covers one global
+  mini-batch.
+  """
+  return _env_flag("TUNIX_PER_HOST_LEARNER") and jax.process_count() > 1
+
+
+def shard_batch_by_process(
+    batch: TrainingInputT,
+    process_index: int,
+    process_count: int,
+    indices: Sequence[int] | None = None,
+) -> TrainingInputT:
+  """Returns one process's prompt shard of a global batch.
+
+  Shards before the per-prompt repeat (`num_generations`), so every group of a
+  prompt stays on one process and GRPO's within-group advantage is unchanged.
+
+  Args:
+    batch: A global batch; batch-aligned columns have `len(batch["prompts"])`
+      rows, other entries are passed through.
+    process_index: This process's index.
+    process_count: The number of processes.
+    indices: Rows of this process; defaults to the stride
+      `[process_index::process_count]`.
+
+  Returns:
+    The process-local batch.
+  """
+  if not isinstance(batch, dict) or "prompts" not in batch:
+    raise ValueError("per-host learner: batch must be a dict with 'prompts'.")
+  num_rows = len(batch["prompts"])
+  if num_rows % process_count:
+    raise ValueError(
+        f"per-host learner: global batch of {num_rows} prompts is not divisible"
+        f" by the {process_count} processes; every process must run the same"
+        " number of train steps."
+    )
+  if indices is None:
+    rows = slice(process_index, None, process_count)
+  else:
+    rows = np.asarray(indices, dtype=np.int64)
+  out = {}
+  for key, value in batch.items():
+    try:
+      aligned = len(value) == num_rows and not isinstance(value, (str, bytes))
+    except TypeError:
+      aligned = False
+    if not aligned:
+      out[key] = value
+    elif isinstance(value, (np.ndarray, jax.Array)):
+      out[key] = value[rows]
+    else:
+      value = list(value)
+      out[key] = (
+          value[rows] if isinstance(rows, slice) else [value[i] for i in rows]
+      )
+  return out
+
+
+class _ProcessShardedIterable:
+  """Re-iterable view of a batch iterable that yields this process's shards."""
+
+  def __init__(
+      self,
+      iterable: Iterable[TrainingInputT],
+      shard_fn: Callable[[TrainingInputT], TrainingInputT],
+  ):
+    self._iterable = iterable
+    self._shard_fn = shard_fn
+
+  def __iter__(self) -> Iterator[TrainingInputT]:
+    for batch in self._iterable:
+      yield self._shard_fn(batch)
 
 
 class RLLearner(abc.ABC, Generic[TConfig]):
@@ -551,18 +647,49 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       skip_jit: bool = False,
   ) -> None:
     """Main entry point for the training loop."""
+    per_host = per_host_learner_enabled()
+    local_size = self._per_host_size if per_host else (lambda size, _: size)
+    if per_host:
+      if self._packing_enabled:
+        raise NotImplementedError(
+            "TUNIX_PER_HOST_LEARNER=1 does not support sequence packing: the"
+            " number of packed chunks is data dependent, so processes would"
+            " run different numbers of train steps."
+        )
+      train_ds = _ProcessShardedIterable(
+          train_ds, self._shard_batch_for_process
+      )
+      if eval_ds is not None:
+        eval_ds = _ProcessShardedIterable(
+            eval_ds, self._shard_batch_for_process
+        )
+      self._rollout_micro_batch_size = local_size(
+          self._training_config.rollout_micro_batch_size,
+          "rollout_micro_batch_size",
+      )
+      self._compute_logps_micro_batch_size = local_size(
+          self._training_config.compute_logps_micro_batch_size,
+          "compute_logps_micro_batch_size",
+      )
     full_batch_iterator = iter(train_ds)
     first_item = next(full_batch_iterator)
     full_batch_size = len(first_item["prompts"])  # pyrefly: ignore[bad-argument-type]
     full_batch_iterator = itertools.chain([first_item], full_batch_iterator)
     # Initialize batch sizes.
-    mini_batch_size = self._training_config.mini_batch_size or full_batch_size
+    mini_batch_size = (
+        local_size(self._training_config.mini_batch_size, "mini_batch_size")
+        or full_batch_size
+    )
     if self._packing_enabled:
       train_micro_batch_size = None
       grad_acc_steps = None
     else:
       train_micro_batch_size = (
-          self._training_config.train_micro_batch_size or mini_batch_size
+          local_size(
+              self._training_config.train_micro_batch_size,
+              "train_micro_batch_size",
+          )
+          or mini_batch_size
       )
       grad_acc_steps = self._training_config.get_with_default(
           "gradient_accumulation_steps", 1
@@ -598,6 +725,24 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         self._rollout_micro_batch_size,
         self._compute_logps_micro_batch_size,
     )
+    if per_host:
+      self._check_per_host_data_axis(
+          iterator_batch_size, service_target_batch_size
+      )
+      logging.info(
+          "Per-host learner (TUNIX_PER_HOST_LEARNER=1): process %d/%d trains"
+          " on its own prompt shard: full_batch_size=%d mini_batch_size=%d"
+          " train_micro_batch_size=%s rollout_micro_batch_size=%d"
+          " compute_logps_micro_batch_size=%d (global sizes / %d).",
+          jax.process_index(),
+          jax.process_count(),
+          full_batch_size,
+          mini_batch_size,
+          train_micro_batch_size,
+          self._rollout_micro_batch_size,
+          self._compute_logps_micro_batch_size,
+          jax.process_count(),
+      )
 
     # if the iterator batch size is the same as the full batch size, we can
     # use the full batch iterator directly.
@@ -666,6 +811,64 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           break
     finally:
       self.rl_engine.close()
+
+  def _shard_batch_for_process(self, batch: TrainingInputT) -> TrainingInputT:
+    """This process's prompt shard of a global batch (per-host learner)."""
+    return shard_batch_by_process(
+        batch, jax.process_index(), jax.process_count()
+    )
+
+  def _per_host_size(self, size: int | None, name: str) -> int | None:
+    """Divides a configured global batch size by the process count."""
+    if size is None:
+      return None
+    process_count = jax.process_count()
+    if size % process_count:
+      raise ValueError(
+          f"TUNIX_PER_HOST_LEARNER=1: {name}={size} must be divisible by the"
+          f" {process_count} processes (batch sizes are global)."
+      )
+    return size // process_count
+
+  def _check_per_host_data_axis(
+      self, train_micro_batch_size: int, service_target_batch_size: int
+  ) -> None:
+    """Fails fast where `shard_input` would silently replicate local data.
+
+    `shard_input` falls back to a replicated sharding when the leading
+    dimension of the (process-local) input is not divisible by the global data
+    axis size. Process-local rows that differ between processes must never be
+    treated as replicated.
+
+    Args:
+      train_micro_batch_size: Per-host prompts per train micro-batch.
+      service_target_batch_size: Per-host prompts per rollout/logps batch.
+    """
+    mesh = self.rl_engine.cluster_config.role_to_mesh[rl_engine_lib.Role.ACTOR]
+    axis_size = 1
+    for axis in self._training_config.data_sharding_axis:
+      for name in axis if isinstance(axis, tuple) else (axis,):
+        if name is None:
+          continue
+        if name not in mesh.shape:
+          raise ValueError(
+              f"TUNIX_PER_HOST_LEARNER=1: data sharding axis {name!r} is not"
+              f" in the actor mesh {dict(mesh.shape)}; shard_input would"
+              " replicate process-local data."
+          )
+        axis_size *= mesh.shape[name]
+    generations = self._num_generations() or 1
+    for prompts, what in (
+        (train_micro_batch_size, "train micro-batch"),
+        (service_target_batch_size, "rollout/logps batch"),
+    ):
+      if (prompts * generations) % axis_size:
+        raise ValueError(
+            f"TUNIX_PER_HOST_LEARNER=1: the per-host {what} has"
+            f" {prompts * generations} rows, not divisible by the data axis"
+            f" size {axis_size}; shard_input would replicate process-local"
+            " data."
+        )
 
   def _run_global_step(
       self,
