@@ -132,6 +132,35 @@ def shard_batch_by_process(
   return out
 
 
+def balanced_shard_indices(
+    lengths: Sequence[int], process_count: int
+) -> List[List[int]]:
+  """Equal-count, length-balanced partition of rows over processes.
+
+  Sorts rows by length (longest first, ties by index) and deals them in rounds
+  of `process_count`, reversing the direction every round (snake). Every
+  process gets exactly `len(lengths) / process_count` rows when that divides,
+  and per-process length totals end up nearly equal. Deterministic, so every
+  process computes the same partition without communication.
+
+  Args:
+    lengths: Per-row length (a proxy for rollout cost).
+    process_count: The number of processes.
+
+  Returns:
+    For every process, its sorted row indices.
+  """
+  order = sorted(range(len(lengths)), key=lambda i: (-lengths[i], i))
+  bins = [[] for _ in range(process_count)]
+  for round_index, start in enumerate(range(0, len(order), process_count)):
+    hosts = range(process_count)
+    if round_index % 2:
+      hosts = reversed(hosts)
+    for host, row in zip(hosts, order[start : start + process_count]):
+      bins[host].append(row)
+  return [sorted(b) for b in bins]
+
+
 class _ProcessShardedIterable:
   """Re-iterable view of a batch iterable that yields this process's shards."""
 
@@ -827,9 +856,32 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       self.rl_engine.close()
 
   def _shard_batch_for_process(self, batch: TrainingInputT) -> TrainingInputT:
-    """This process's prompt shard of a global batch (per-host learner)."""
+    """This process's prompt shard of a global batch (per-host learner).
+
+    With TUNIX_PER_HOST_BALANCED_SHARD=1 the shard is length-balanced instead
+    of the `[process_index::process_count]` stride: the per-host rollouts end
+    together, so fewer hosts wait at the train step for the host with the
+    longest prompts. Same rows per process; the union is unchanged.
+
+    Args:
+      batch: A global batch.
+
+    Returns:
+      This process's shard.
+    """
+    indices = None
+    if _env_flag("TUNIX_PER_HOST_BALANCED_SHARD"):
+      lengths = []
+      for prompt in batch["prompts"]:  # pyrefly: ignore[not-iterable]
+        try:
+          lengths.append(len(prompt))
+        except TypeError:
+          lengths.append(0)
+      indices = balanced_shard_indices(lengths, jax.process_count())[
+          jax.process_index()
+      ]
     return shard_batch_by_process(
-        batch, jax.process_index(), jax.process_count()
+        batch, jax.process_index(), jax.process_count(), indices
     )
 
   def _per_host_size(self, size: int | None, name: str) -> int | None:
