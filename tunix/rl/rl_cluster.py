@@ -135,6 +135,9 @@ class RLEngine:
 
     self._init_backbone_sharing_map(actor, reference)
     self._anchor_policy_state = None
+    # TUNIX_PER_HOST_SAFE_LOGPS: the first per-host logps chunk is round-trip
+    # checked.
+    self._per_host_logps_checked = False
 
     self._default_memory_kind = jax.devices()[0].default_memory().kind
     self.train_actor = self._load_model(actor, self.r2m[Role.ACTOR])
@@ -1072,6 +1075,17 @@ class RLEngine:
           "Cannot get reference log probabilities from an empty batch."
       )
     micro_batch_size = micro_batch_size or batch_size
+    if sharding_utils.per_host_safe_logps_enabled():
+      return self._per_host_safe_ref_per_token_logps(
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          micro_batch_size=micro_batch_size,
+          segment_ids=segment_ids,
+          segment_positions=segment_positions,
+          token_mask=token_mask,
+      )
 
     with self._get_mesh_and_logical_axis_rules_cm(Role.REFERENCE):
       # This assumes reference model shards same data sharding as actor, which
@@ -1213,6 +1227,18 @@ class RLEngine:
           " first."
       )
     micro_batch_size = micro_batch_size or batch_size
+    if sharding_utils.per_host_safe_logps_enabled():
+      return self._per_host_safe_actor_per_token_logps(
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          micro_batch_size=micro_batch_size,
+          temperature=temperature,
+          segment_ids=segment_ids,
+          segment_positions=segment_positions,
+          token_mask=token_mask,
+      )
     with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR) as (mesh, _):
       dest_prompt_tokens = sharding_utils.shard_input(
           prompt_tokens,
@@ -1305,6 +1331,208 @@ class RLEngine:
         # Release the host-side references the log-prob pass leaves behind
         # before the model moves back; without offloading there is nothing
         # to reclaim and a full collection is a pure stall.
+        gc.collect()
+        self._put_model_on_memory_kind(
+            self.actor_trainer.model, self._default_memory_kind
+        )
+      return actor_per_token_logps
+
+  def _per_host_chunked_logps(
+      self,
+      compute_fn: Callable[..., jax.Array],
+      micro_batch_size: int,
+      **inputs: jax.Array | np.ndarray | None,
+  ) -> jax.Array:
+    """Per-token logps of this process's own rows (TUNIX_PER_HOST_SAFE_LOGPS=1).
+
+    Under the per-host learner (TUNIX_PER_HOST_LEARNER=1) every process
+    passes its own rows. The stock reference/actor paths globalise the whole
+    process-local batch with `shard_input` (local rows x process count) and
+    then slice the global array with process-local offsets, so every process
+    but the first would get another process's rows. Here the process-local
+    batch is chunked first; each chunk is globalised and run through
+    `compute_fn` on every process in lockstep (all processes hold the same
+    number of rows), and this process's rows of each result are copied back,
+    so the result is host-local like every other TrainExample field.
+
+    Args:
+      compute_fn: Called with the globalised chunk of every input (by name).
+      micro_batch_size: Process-local rows per chunk.
+      **inputs: Process-local inputs (None entries are passed through).
+
+    Returns:
+      This process's per-token logps, host-local.
+    """
+    axis = self.cluster_config.training_config.data_sharding_axis
+    pspec = jax.sharding.PartitionSpec(*axis)
+    batch_size = inputs["prompt_tokens"].shape[0]
+    for name, x in inputs.items():
+      if isinstance(x, jax.Array) and not x.is_fully_addressable:
+        raise ValueError(
+            f"TUNIX_PER_HOST_SAFE_LOGPS: {name} is a global array; the per-host"
+            " logps path expects process-local rows."
+        )
+    if batch_size % micro_batch_size:
+      raise ValueError(
+          f"TUNIX_PER_HOST_SAFE_LOGPS: the process-local batch of {batch_size}"
+          f" rows is not divisible by micro_batch_size={micro_batch_size};"
+          " every process must run the same number of equal chunks."
+      )
+    outs = []
+    for batch_slice in rl_utils.chunk_slices_by_size(
+        stop=batch_size, step=micro_batch_size
+    ):
+      chunk = {}
+      for name, x in inputs.items():
+        if x is None:
+          chunk[name] = None
+          continue
+        chunk[name] = sharding_utils.shard_input(x[batch_slice], axis)
+        if getattr(chunk[name].sharding, "spec", None) != pspec:
+          raise ValueError(
+              f"TUNIX_PER_HOST_SAFE_LOGPS: a {name} chunk of"
+              f" {micro_batch_size} rows per process got sharding"
+              f" {chunk[name].sharding}, not {pspec}; process-local rows must"
+              " never be treated as replicated."
+          )
+      out = compute_fn(**chunk)
+      local = sharding_utils.process_local_rows(out)
+      in_rows = sharding_utils.process_row_ranges(chunk["prompt_tokens"])
+      out_rows = (
+          sharding_utils.process_row_ranges(out)
+          if isinstance(out, jax.Array) and not out.is_fully_addressable
+          else None
+      )
+      if out_rows != in_rows or local.shape[0] != micro_batch_size:
+        raise RuntimeError(
+            f"TUNIX_PER_HOST_SAFE_LOGPS: output rows {out_rows} (shape"
+            f" {local.shape}) of process {jax.process_index()} do not match its"
+            f" input rows {in_rows}."
+        )
+      if not self._per_host_logps_checked:
+        # Host-local round trip: re-globalise this process's rows exactly as
+        # shard_input does and compare every addressable shard (no
+        # collective).
+        again = jax.make_array_from_process_local_data(
+            out.sharding, local, out.shape
+        )
+        got = sorted(out.addressable_shards, key=lambda z: z.device.id)
+        want = sorted(again.addressable_shards, key=lambda z: z.device.id)
+        if len(got) != len(want) or not all(
+            np.array_equal(np.asarray(a.data), np.asarray(b.data))
+            for a, b in zip(got, want)
+        ):
+          raise RuntimeError(
+              "TUNIX_PER_HOST_SAFE_LOGPS: host-local extraction does not invert"
+              " jax.make_array_from_process_local_data."
+          )
+        self._per_host_logps_checked = True
+        logging.info(
+            "TUNIX_PER_HOST_SAFE_LOGPS: per-host logps on process %d/%d: %d"
+            " local rows in chunks of %d, global chunk %s, round trip ok.",
+            jax.process_index(),
+            jax.process_count(),
+            batch_size,
+            micro_batch_size,
+            out.shape,
+        )
+      outs.append(local)
+    return jnp.asarray(np.concatenate(outs, axis=0))
+
+  def _per_host_safe_ref_per_token_logps(
+      self,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      pad_id: int,
+      eos_id: int,
+      micro_batch_size: int,
+      segment_ids: jax.Array | None,
+      segment_positions: jax.Array | None,
+      token_mask: jax.Array | None,
+  ) -> jax.Array:
+    """`get_ref_per_token_logps` under TUNIX_PER_HOST_SAFE_LOGPS=1."""
+    with self._get_mesh_and_logical_axis_rules_cm(Role.REFERENCE):
+      ref_model = self.inference_worker.get_model("reference")
+      self._maybe_load_model_from_cpu(ref_model, Role.REFERENCE)
+      temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
+
+      def compute(prompt_tokens, completion_tokens, **kwargs):
+        return self.inference_worker.get_ref_per_token_logps(
+            prompt_tokens,
+            completion_tokens,
+            pad_id,
+            eos_id,
+            temperature=temperature,
+            **kwargs,
+        )
+
+      ref_per_token_logps = self._per_host_chunked_logps(
+          compute,
+          micro_batch_size,
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          segment_ids=segment_ids,
+          segment_positions=segment_positions,
+          token_mask=token_mask,
+      )
+      self._maybe_offload_model_to_cpu(ref_model, Role.REFERENCE)
+      return ref_per_token_logps
+
+  def _per_host_safe_actor_per_token_logps(
+      self,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      pad_id: int,
+      eos_id: int,
+      micro_batch_size: int,
+      temperature: float,
+      segment_ids: jax.Array | None,
+      segment_positions: jax.Array | None,
+      token_mask: jax.Array | None,
+  ) -> jax.Array:
+    """`get_actor_per_token_logps` under TUNIX_PER_HOST_SAFE_LOGPS=1.
+
+    Same anchor-policy handling as the stock path; only the chunking and the
+    host-local result differ.
+    """
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
+      actor_trainer_state_on_device = self._is_state_on_device(
+          nnx.state(self.actor_trainer.model)
+      )
+      if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
+        self._put_model_on_memory_kind(self.actor_trainer.model, "pinned_host")
+        gc.collect()
+      graphdef, _ = nnx.split(self.actor_trainer.model)
+      anchor_on_device = self._is_state_on_device(self._anchor_policy_state)
+      if anchor_on_device:
+        anchor_policy_state = self._anchor_policy_state
+      else:
+        anchor_policy_state = rl_utils.put_params_on_memory_kind(
+            self._anchor_policy_state, self._default_memory_kind
+        )
+      compute = functools.partial(
+          common.compute_per_token_logps,
+          graphdef,
+          anchor_policy_state,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          stop_gradient=True,
+          temperature=temperature,
+          chunk_size=self.cluster_config.training_config.compute_logps_chunk_size,
+      )
+      actor_per_token_logps = self._per_host_chunked_logps(
+          compute,
+          micro_batch_size,
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          segment_ids=segment_ids,
+          segment_positions=segment_positions,
+          token_mask=token_mask,
+      )
+      del compute
+      if not anchor_on_device:
+        del anchor_policy_state
+      if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
         gc.collect()
         self._put_model_on_memory_kind(
             self.actor_trainer.model, self._default_memory_kind
