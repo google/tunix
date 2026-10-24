@@ -15,6 +15,7 @@
 """TrainerWorker implementation for role-based isolation."""
 
 import contextlib
+import dataclasses
 import functools
 from typing import Any, Callable, ContextManager, cast
 
@@ -145,11 +146,46 @@ class TrainerWorker(abstract_worker.Worker):
       if self.state == WorkerState.INITIALIZING:
         self.state = WorkerState.READY
 
+  def _resolve_dummy_routed_experts(self, trainer: Any, data: Any) -> Any:
+    if not isinstance(data, datatypes.RLTrainerPayload):
+      return data
+    if data.routed_experts is None:
+      return data
+    routed_experts = np.asarray(data.routed_experts)
+    if routed_experts.size != 0:
+      return data
+    cfg = getattr(trainer, "_config", None) or getattr(
+        getattr(trainer, "model", None), "config", None
+    )
+    if cfg is None:
+      return data
+    num_layers = getattr(cfg, "num_layers", None) or getattr(
+        cfg, "num_decoder_layers", None
+    )
+    num_experts_per_tok = getattr(cfg, "num_experts_per_tok", None)
+    if not num_layers or not num_experts_per_tok:
+      return data
+    batch_size, seq_len = routed_experts.shape[:2]
+    expanded = np.zeros(
+        (batch_size, seq_len, num_layers, num_experts_per_tok),
+        dtype=routed_experts.dtype,
+    )
+    metadata = dict(data.metadata)
+    if "routed_experts_encode_fn" in metadata:
+      encode_fn = metadata.pop("routed_experts_encode_fn")
+      expanded = encode_fn(
+          expanded, num_experts=getattr(cfg, "num_experts", None)
+      )
+    return dataclasses.replace(
+        data, routed_experts=expanded, metadata=metadata
+    )
+
   def compile(self, dummy_data: Any = None) -> datatypes.Response:
     """Triggers JIT compilation using the provided dummy_data."""
     trainer = self._ensure_ready()
     self.state = WorkerState.COMPILING
     try:
+      dummy_data = self._resolve_dummy_routed_experts(trainer, dummy_data)
       trainer.compile(dummy_data)
       return self._response(compiled=True)
     except Exception as exc:

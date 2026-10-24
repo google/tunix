@@ -202,6 +202,34 @@ class TrainerWorkerTest(absltest.TestCase):
     self.assertEqual(self.worker.state, datatypes.WorkerState.READY)
     self.assertEqual(self.fake_trainer.compile_calls, [dummy])
 
+  def test_compile_resolves_dummy_routed_experts_for_maxtext_engine(self):
+    class _Cfg:
+      num_decoder_layers = 40
+      num_experts_per_tok = 8
+      num_experts = 256
+
+    self.fake_trainer._config = _Cfg()
+    dummy = datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((2, 4), dtype=np.int32),
+        prompt_mask=np.ones((2, 4), dtype=np.int32),
+        completion_ids=np.zeros((2, 4), dtype=np.int32),
+        completion_mask=np.ones((2, 4), dtype=np.int32),
+        advantages=np.zeros((2, 8), dtype=np.float32),
+        routed_experts=np.zeros((2, 8, 0, 0), dtype=np.int32),
+        metadata={
+            "routed_experts_encode_fn": lambda x, num_experts=None: np.zeros(
+                (*x.shape[:3], 2, 5), dtype=np.uint8
+            )
+        },
+    )
+    resp = self.worker.compile(dummy)
+    self.assertTrue(resp.metadata["compiled"])
+    self.assertLen(self.fake_trainer.compile_calls, 1)
+    compiled_payload = self.fake_trainer.compile_calls[0]
+    self.assertEqual(compiled_payload.routed_experts.shape, (2, 8, 40, 2, 5))
+    self.assertEqual(compiled_payload.routed_experts.dtype, np.uint8)
+    self.assertNotIn("routed_experts_encode_fn", compiled_payload.metadata)
+
   def test_with_loss_fn_chunked_grpo_loss_matches_unchunked(self):
     batch, prompt_len, completion_len = 2, 3, 4
     example = datatypes.RLTrainerPayload(

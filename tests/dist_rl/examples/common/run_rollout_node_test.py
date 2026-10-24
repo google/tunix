@@ -16,6 +16,7 @@
 
 import contextlib
 import io
+import json
 import os
 import sys
 import types
@@ -296,6 +297,124 @@ class RunRolloutNodeTest(absltest.TestCase):
         "episode_timeout_secs must be a positive finite number",
         stderr.getvalue(),
     )
+
+  def test_vllm_config_json_merges_35b_recipe_config(self):
+    recipe_vllm_config = {
+        "enable_expert_parallel": True,
+        "prefix_cache_retention_interval": 0,
+        "mamba_cache_mode": "align",
+        "kv_cache_dtype": "bfloat16",
+        "block_size": 256,
+        "enable_chunked_prefill": True,
+        "language_model_only": True,
+        "reasoning_parser": "qwen3",
+        "limit_mm_per_prompt": {"image": 0, "video": 0},
+        "additional_config": {
+            "sharding": {
+                "sharding_strategy": {
+                    "expert_parallelism": 4,
+                    "tensor_parallelism": 1,
+                    "enable_dp_attention": True,
+                }
+            },
+            "custom_mamba_cache_multiplier": 16,
+            "maxtext_config": {
+                "use_multimodal": False,
+                "per_device_batch_size": 0.0,
+            },
+        },
+    }
+    kwargs = _vllm_engine_kwargs([
+        "--sampler=vllm",
+        "--maxtext_model_name=qwen3.5-35b-a3b",
+        "--maxtext_attention=vllm_rpa",
+        "--prefuse_moe_weights=true",
+        "--return_routed_experts=true",
+        "--maxtext_float32_gate_logits=true",
+        "--maxtext_float32_logits=true",
+        "--vllm_max_model_len=65536",
+        "--vllm_max_num_seqs=16",
+        "--vllm_max_num_batched_tokens=2048",
+        "--vllm_async_scheduling",
+        "--vllm_hbm_utilization=0.9",
+        "--enable_prefix_caching=true",
+        f"--vllm_config_json={json.dumps(recipe_vllm_config)}",
+    ])
+    self.assertEqual(kwargs["max_model_len"], 65536)
+    self.assertEqual(kwargs["max_num_seqs"], 16)
+    self.assertEqual(kwargs["max_num_batched_tokens"], 2048)
+    self.assertTrue(kwargs["async_scheduling"])
+    self.assertEqual(kwargs["gpu_memory_utilization"], 0.9)
+    self.assertTrue(kwargs["enable_prefix_caching"])
+    self.assertTrue(kwargs["enable_return_routed_experts"])
+    self.assertTrue(kwargs["enable_expert_parallel"])
+    self.assertEqual(kwargs["prefix_cache_retention_interval"], 0)
+    self.assertEqual(kwargs["mamba_cache_mode"], "align")
+    self.assertEqual(kwargs["kv_cache_dtype"], "bfloat16")
+    self.assertEqual(kwargs["block_size"], 256)
+    self.assertTrue(kwargs["enable_chunked_prefill"])
+    self.assertTrue(kwargs["language_model_only"])
+    self.assertEqual(kwargs["reasoning_parser"], "qwen3")
+    self.assertEqual(kwargs["limit_mm_per_prompt"], {"image": 0, "video": 0})
+    additional = kwargs["additional_config"]
+    self.assertIsInstance(additional, dict)
+    self.assertEqual(additional["custom_mamba_cache_multiplier"], 16)
+    self.assertEqual(
+        additional["sharding"],
+        {
+            "sharding_strategy": {
+                "expert_parallelism": 4,
+                "tensor_parallelism": 1,
+                "enable_dp_attention": True,
+            }
+        },
+    )
+    mt_cfg = additional["maxtext_config"]
+    self.assertFalse(mt_cfg["scan_layers"])
+    self.assertTrue(mt_cfg["allow_split_physical_axes"])
+    self.assertEqual(mt_cfg["attention"], "vllm_rpa")
+    self.assertTrue(mt_cfg["prefuse_moe_weights"])
+    self.assertTrue(mt_cfg["return_routed_experts"])
+    self.assertTrue(mt_cfg["float32_gate_logits"])
+    self.assertTrue(mt_cfg["float32_logits"])
+    self.assertFalse(mt_cfg["use_multimodal"])
+    self.assertEqual(mt_cfg["per_device_batch_size"], 0.0)
+
+  def test_vllm_config_json_rejected_for_non_vllm_sampler(self):
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+      run_rollout_node._parse_args(
+          ["--sampler=inprocess_vllm", "--vllm_config_json={}"]
+      )
+    self.assertIn(
+        "--vllm_config_json is only supported when --sampler=vllm",
+        stderr.getvalue(),
+    )
+
+  def test_vllm_config_json_rejects_forbidden_keys(self):
+    with self.assertRaisesRegex(ValueError, "must decode to a JSON object"):
+      _vllm_engine_kwargs(["--sampler=vllm", "--vllm_config_json=[1, 2]"])
+
+    for key in run_rollout_node._FORBIDDEN_VLLM_CONFIG_JSON_KEYS:
+      with self.subTest(top_level_key=key):
+        with self.assertRaisesRegex(
+            ValueError, "managed by dedicated CLI flags"
+        ):
+          _vllm_engine_kwargs([
+              "--sampler=vllm",
+              f"--vllm_config_json={json.dumps({key: 1})}",
+          ])
+
+    for mt_key in run_rollout_node._FORBIDDEN_MAXTEXT_CONFIG_JSON_KEYS:
+      with self.subTest(maxtext_key=mt_key):
+        payload = {"additional_config": {"maxtext_config": {mt_key: 1}}}
+        with self.assertRaisesRegex(
+            ValueError, "managed by dedicated CLI flags"
+        ):
+          _vllm_engine_kwargs([
+              "--sampler=vllm",
+              f"--vllm_config_json={json.dumps(payload)}",
+          ])
 
 
 if __name__ == "__main__":

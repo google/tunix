@@ -673,6 +673,171 @@ class RaidenSynchronizerTest(absltest.TestCase):
       v7x_devices = [FakePathwaysDevice(t) for t in [0] * 8 + [1] * 8]
       self.assertEqual(raiden_synchronizer._devices_per_host(v7x_devices), 8)
 
+  def test_derive_ffi_host_slots_groups_interleaved_pathways_hosts(self):
+    class FakePathwaysDevice:
+
+      def __init__(self, dev_id, logical_task, slice_id=0):
+        self.id = dev_id
+        self.slice_index = slice_id
+        self.process_index = 0
+        self._logical_task = logical_task
+        self._slice_id = slice_id
+
+      def __repr__(self):
+        return (
+            f"device({self.id},TPU,coords=[0,0,0],logical_task="
+            f"{self._logical_task},slice={self._slice_id})"
+        )
+
+    # Interleaved 2-host mesh (4 shards/host): [H0, H1, H0, H1, H0, H1, H0, H1]
+    interleaved = np.array(
+        [FakePathwaysDevice(i, i % 2) for i in range(8)], dtype=object
+    ).reshape(4, 2)
+    with mock.patch.object(
+        raiden_synchronizer.mesh.topology,
+        "_is_pathways_backend_used",
+        return_value=True,
+    ):
+      host_indices, local_slots = raiden_synchronizer._derive_ffi_host_slots(
+          interleaved, 4
+      )
+    np.testing.assert_array_equal(
+        host_indices, np.array([[0, 1], [0, 1], [0, 1], [0, 1]], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        local_slots, np.array([[0, 0], [1, 1], [2, 2], [3, 3]], dtype=np.int32)
+    )
+
+  def test_derive_ffi_host_slots_rejects_invalid_meshes(self):
+    dev_arr = np.array([object() for _ in range(8)], dtype=object).reshape(4, 2)
+    with mock.patch.object(
+        raiden_synchronizer.mesh, "device_host_key", return_value=None
+    ):
+      with self.assertRaisesRegex(
+          ValueError,
+          r"mesh\.device_host_key returned None for a multi-host mesh",
+      ):
+        raiden_synchronizer._derive_ffi_host_slots(dev_arr, 4)
+
+    with self.assertRaisesRegex(ValueError, "num_shards must be positive"):
+      raiden_synchronizer._derive_ffi_host_slots(dev_arr, 0)
+
+    with self.assertRaisesRegex(ValueError, "not a multiple of num_shards"):
+      raiden_synchronizer._derive_ffi_host_slots(dev_arr, 3)
+
+    unbalanced_keys = {
+        dev: (0, 0 if idx < 5 else 1) for idx, dev in enumerate(dev_arr.flat)
+    }
+    with mock.patch.object(
+        raiden_synchronizer.mesh,
+        "device_host_key",
+        side_effect=lambda d: unbalanced_keys[d],
+    ):
+      with self.assertRaisesRegex(
+          ValueError, "owns more than num_shards=4 mesh devices"
+      ):
+        raiden_synchronizer._derive_ffi_host_slots(dev_arr, 4)
+
+  def test_ffi_non_contiguous_mesh_orders_shards_and_global_indices_by_host(
+      self,
+  ):
+    ffi_mod = raiden_synchronizer._get_raiden_ffi()
+    self.assertIsNotNone(ffi_mod)
+
+    def _ip_words(ip: str) -> list[int]:
+      packed = b"\x00" * 10 + b"\xff\xff" + socket.inet_pton(socket.AF_INET, ip)
+      return list(struct.unpack("<4i", packed))
+
+    # 8 devices reshaped to (4, 2) where flat order interleaves hosts 0 and 1:
+    # flat_idx 0,2,4,6 belong to host 0; flat_idx 1,3,5,7 belong to host 1.
+    devices = np.array(jax.devices()[:8]).reshape(4, 2)
+    mesh = jax.sharding.Mesh(devices, ("fsdp", "context"))
+    w = jax.device_put(
+        jnp.ones((8, 4), jnp.bfloat16),
+        jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec("fsdp", "context")
+        ),
+    )
+    host_for_dev = {
+        dev: (flat_idx % 2) for flat_idx, dev in enumerate(devices.flat)
+    }
+
+    # Indexed by host-major global_mesh_idx = host_idx * 4 + local_slot.
+    rows = []
+    for host in range(2):
+      for slot in range(4):
+        data_ip = f"10.0.{host}.2"
+        ctrl_ip = f"10.128.{host}.5"
+        hm_idx = host * 4 + slot
+        rows.append(
+            _ip_words(data_ip)
+            + [8000 + hm_idx, 39000 + host]
+            + _ip_words(ctrl_ip)
+        )
+    ws_rows = jnp.asarray(rows, dtype=jnp.int32)
+
+    descriptor_width = 4 + 4
+    seen_descriptors = []
+
+    def _fake_ffi_call(target_name, result_type, **_):
+      del target_name
+
+      def _call(*args, **_):
+        s_idx = next(
+            a
+            for a in args
+            if a.dtype == jnp.int32 and a.shape[-1] == descriptor_width
+        )
+        seen_descriptors.append(s_idx)
+        vec = jnp.reshape(s_idx, (-1,))
+        global_mesh_idx = vec[3]
+        return ws_rows[global_mesh_idx].reshape(result_type.shape)
+
+      return _call
+
+    with (
+        mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}),
+        mock.patch.object(
+            raiden_synchronizer, "_devices_per_host", return_value=4
+        ),
+        mock.patch.object(
+            raiden_synchronizer.mesh,
+            "device_host_key",
+            side_effect=lambda d: (0, host_for_dev[d]),
+        ),
+        mock.patch.object(
+            ffi_mod.compute_on,
+            "compute_on",
+            side_effect=lambda *a, **kw: (lambda f: f),
+        ),
+        mock.patch.object(jax.ffi, "ffi_call", side_effect=_fake_ffi_call),
+    ):
+      trainer = raiden_synchronizer.RaidenSynchronizer("trainer")
+      trainer.bind({"w": w})
+      trainer.d2h()
+      md = trainer.work_unit_metadata()
+
+    # Host 0 owns flat mesh indices (0, 2, 4, 6); Host 1 owns (1, 3, 5, 7).
+    self.assertEqual(
+        md.shards,
+        (
+            "10.0.0.2:8000",
+            "10.0.0.2:8001",
+            "10.0.0.2:8002",
+            "10.0.0.2:8003",
+            "10.0.1.2:8004",
+            "10.0.1.2:8005",
+            "10.0.1.2:8006",
+            "10.0.1.2:8007",
+        ),
+    )
+    self.assertEqual(
+        md.control_plane_rpc_address, "10.128.0.5:39000,10.128.1.5:39001"
+    )
+    self.assertEqual(
+        md.variables[0].global_shard_indices, (0, 2, 4, 6, 1, 3, 5, 7)
+    )
+
   def test_metadata_transport_mode_follows_platform(self):
     fake_wheel = mock.MagicMock()
     with mock.patch.object(

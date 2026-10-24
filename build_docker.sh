@@ -13,16 +13,20 @@ INSTALL_MAXTEXT=false
 INSTALL_RAIDEN=false
 RAIDEN_WHEEL_DIR=/app/raiden_wheels
 INSTALL_DEEPSWE_DEPS=false
+TPU_INFERENCE_COMMIT=""
+MAXTEXT_COMMIT=""
 
 usage() {
     cat <<'MSG'
-Usage: bash build_docker.sh [--maxtext] [--raiden] [--raiden-wheel-dir PATH] [--deepswe]
+Usage: bash build_docker.sh [--maxtext] [--raiden] [--raiden-wheel-dir PATH] [--deepswe] [--tpu-inference-commit COMMIT] [--maxtext-commit COMMIT]
 
 Options:
-  --maxtext               Install MaxText-specific dependencies.
-  --raiden                Install Raiden-specific dependencies.
-  --raiden-wheel-dir PATH Use prebuilt Raiden wheels from PATH inside the Docker build context.
-  --deepswe               Install DeepSWE evaluation dependencies.
+  --maxtext                     Install MaxText-specific dependencies.
+  --raiden                      Install Raiden-specific dependencies.
+  --raiden-wheel-dir PATH       Use prebuilt Raiden wheels from PATH inside the Docker build context.
+  --deepswe                     Install DeepSWE evaluation dependencies.
+  --tpu-inference-commit COMMIT Override tpu-inference with a specific git commit.
+  --maxtext-commit COMMIT       Override maxtext with a specific git commit (when --maxtext is enabled).
 MSG
 }
 
@@ -40,6 +44,24 @@ while [[ "$#" -gt 0 ]]; do
             shift 2
             ;;
         --deepswe) INSTALL_DEEPSWE_DEPS=true; shift ;;
+        --tpu-inference-commit)
+            if [[ -z "$2" ]]; then
+                echo "Error: --tpu-inference-commit requires a commit hash"
+                usage
+                exit 1
+            fi
+            TPU_INFERENCE_COMMIT="$2"
+            shift 2
+            ;;
+        --maxtext-commit)
+            if [[ -z "$2" ]]; then
+                echo "Error: --maxtext-commit requires a commit hash"
+                usage
+                exit 1
+            fi
+            MAXTEXT_COMMIT="$2"
+            shift 2
+            ;;
         --help|-h)
             usage
             exit 0
@@ -96,6 +118,8 @@ MSG
         --build-arg INSTALL_RAIDEN=${INSTALL_RAIDEN} \
         --build-arg RAIDEN_WHEEL_DIR=${RAIDEN_WHEEL_DIR} \
         --build-arg INSTALL_DEEPSWE_DEPS=${INSTALL_DEEPSWE_DEPS} \
+        --build-arg TPU_INFERENCE_COMMIT="${TPU_INFERENCE_COMMIT}" \
+        --build-arg MAXTEXT_COMMIT="${MAXTEXT_COMMIT}" \
         -t ${LOCAL_IMAGE_NAME} \
         -f ${DOCKERFILE} .
 }

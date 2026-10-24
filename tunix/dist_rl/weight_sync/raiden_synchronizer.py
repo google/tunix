@@ -17,15 +17,17 @@
 from __future__ import annotations
 
 import collections
+import contextlib
 import inspect
 import os
 import re
 import socket
-from typing import Any, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Protocol, Sequence, Tuple
 
 from absl import logging
 import jax
 import jax.numpy as jnp
+import numpy as np
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.utils import mesh
 
@@ -318,6 +320,183 @@ def _devices_per_host(devices: List[Any]) -> int:
   return counts.pop()
 
 
+def _derive_ffi_host_slots(
+    devices: np.ndarray,
+    num_shards: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+  """Derives per-device (host_idx, local_slot) for FFI, grouping by physical host.
+
+  Under single-controller Pathways (`proxy` platform), every device reports
+  `process_index == 0`, and split-physical-axis meshes (e.g. a 4x4x4 v5p slice
+  reshaped to `(fsdp=32, context=2)`) interleave devices from different
+  physical hosts in `mesh.devices.flat`. Grouping by `mesh.device_host_key`
+  ensures all devices on a physical host join that host's
+  `WeightSynchronizerBase` instance (`submanager_idx = host_idx`,
+  `local_slot in 0..num_shards-1`) regardless of mesh axis ordering.
+
+  Args:
+    devices: NumPy object array of JAX devices from `mesh.devices`.
+    num_shards: Number of TPU devices per physical host.
+
+  Returns:
+    A tuple `(host_indices, local_slots)` of `int32` NumPy arrays with the same
+    shape as `devices`.
+  """
+  if num_shards <= 0:
+    raise ValueError(f"num_shards must be positive, got {num_shards}")
+  flat_devices = list(devices.flat)
+  num_devices = len(flat_devices)
+  if num_devices % num_shards != 0:
+    raise ValueError(
+        f"Mesh has {num_devices} devices, which is not a multiple of"
+        f" num_shards={num_shards}."
+    )
+  raw_keys = [mesh.device_host_key(d) for d in flat_devices]
+  if num_devices <= num_shards:
+    flat_indices = np.arange(num_devices, dtype=np.int32)
+    return (
+        (flat_indices // num_shards).reshape(devices.shape),
+        (flat_indices % num_shards).reshape(devices.shape),
+    )
+  if any(k is None for k in raw_keys):
+    raise ValueError(
+        "mesh.device_host_key returned None for a multi-host mesh of"
+        f" {num_devices} devices (num_shards={num_shards})."
+    )
+  if len(set(raw_keys)) == 1:
+    flat_indices = np.arange(num_devices, dtype=np.int32)
+    return (
+        (flat_indices // num_shards).reshape(devices.shape),
+        (flat_indices % num_shards).reshape(devices.shape),
+    )
+  host_id_map: dict[tuple[int, int], int] = {}
+  next_slot: dict[int, int] = {}
+  host_indices = np.empty(num_devices, dtype=np.int32)
+  local_slots = np.empty(num_devices, dtype=np.int32)
+  for flat_idx, key in enumerate(raw_keys):
+    assert key is not None
+    if key not in host_id_map:
+      host_id = len(host_id_map)
+      host_id_map[key] = host_id
+      next_slot[host_id] = 0
+    host_id = host_id_map[key]
+    slot = next_slot[host_id]
+    if slot >= num_shards:
+      raise ValueError(
+          f"Host {key!r} (host_idx={host_id}) owns more than"
+          f" num_shards={num_shards} mesh devices."
+      )
+    host_indices[flat_idx] = host_id
+    local_slots[flat_idx] = slot
+    next_slot[host_id] = slot + 1
+  for host_id, count in next_slot.items():
+    if count != num_shards:
+      raise ValueError(
+          f"Host index {host_id} owns {count} mesh devices, expected"
+          f" num_shards={num_shards}."
+      )
+  return (
+      host_indices.reshape(devices.shape),
+      local_slots.reshape(devices.shape),
+  )
+
+
+class _RaidenFfiModule(Protocol):
+  """Structural protocol for the `raiden_jax.ffi` module."""
+
+  _derive_host_slots: Callable[
+      [np.ndarray, int], Tuple[np.ndarray, np.ndarray]
+  ]
+  _prepare_shard_info: Callable[
+      [jax.Array, jax.sharding.Mesh, int], jax.Array
+  ]
+  _derive_slot_numa_nodes: Callable[
+      [np.ndarray, np.ndarray, np.ndarray, int], np.ndarray
+  ]
+  _resolve_device_numa_nodes: Callable[[jax.sharding.Mesh], np.ndarray]
+
+
+# TODO(b/557061810): Remove `_patch_ffi_host_slots` once the pinned
+# `tpu_sync_jax` wheel in `oss/scripts/install_raiden.sh` accepts explicit
+# `host_slots` in `start_weight_synchronizer`.
+@contextlib.contextmanager
+def _patch_ffi_host_slots(
+    raiden_ffi: _RaidenFfiModule,
+    host_indices: np.ndarray,
+    local_slots: np.ndarray,
+):
+  """Patches `raiden_ffi` so non-contiguous Pathways meshes group by host."""
+  orig_derive = raiden_ffi._derive_host_slots  # pylint: disable=protected-access
+  orig_prepare = raiden_ffi._prepare_shard_info  # pylint: disable=protected-access
+
+  def _derive_fixed(
+      devices: np.ndarray, num_shards: int
+  ) -> Tuple[np.ndarray, np.ndarray]:
+    del devices, num_shards
+    return host_indices, local_slots
+
+  def _prepare_host_major_shard_info(
+      shard_idx: jax.Array,
+      array_mesh: jax.sharding.Mesh,
+      num_shards: int,
+  ) -> jax.Array:
+    if shard_idx.ndim > len(array_mesh.axis_names) and shard_idx.shape[-1] >= 3:
+      return shard_idx
+    slot_numa_nodes_np = raiden_ffi._derive_slot_numa_nodes(  # pylint: disable=protected-access
+        raiden_ffi._resolve_device_numa_nodes(array_mesh),  # pylint: disable=protected-access
+        host_indices,
+        local_slots,
+        num_shards,
+    )
+    spec = jax.sharding.PartitionSpec(*array_mesh.axis_names)
+    sharding = jax.sharding.NamedSharding(array_mesh, spec)
+    local_slots_arr = jax.device_put(
+        jnp.array(local_slots, dtype=jnp.int32), sharding
+    )
+    host_indices_arr = jax.device_put(
+        jnp.array(host_indices, dtype=jnp.int32), sharding
+    )
+    # Assign host-major global_mesh_idx = host_idx * num_shards + local_slot in
+    # column 3 while keeping column 0 (`shard_idx`) as the flat mesh index.
+    global_mesh_indices_np = (
+        host_indices * np.int32(num_shards) + local_slots
+    ).astype(np.int32)
+    global_mesh_indices = jax.device_put(
+        jnp.array(global_mesh_indices_np, dtype=jnp.int32), sharding
+    )
+    slot_numa_nodes = jax.device_put(
+        jnp.array(slot_numa_nodes_np, dtype=jnp.int32),
+        jax.sharding.NamedSharding(
+            array_mesh, jax.sharding.PartitionSpec(*array_mesh.axis_names, None)
+        ),
+    )
+    if shard_idx.shape != array_mesh.devices.shape:
+      shard_idx = shard_idx.reshape(array_mesh.devices.shape)
+    return jnp.concatenate(
+        [
+            jnp.stack(
+                [
+                    shard_idx,
+                    local_slots_arr,
+                    host_indices_arr,
+                    global_mesh_indices,
+                ],
+                axis=-1,
+            ),
+            slot_numa_nodes,
+        ],
+        axis=-1,
+    )
+
+  raiden_ffi._derive_host_slots = _derive_fixed  # pylint: disable=protected-access
+  raiden_ffi._prepare_shard_info = _prepare_host_major_shard_info  # pylint: disable=protected-access
+  try:
+    yield
+  finally:
+    raiden_ffi._derive_host_slots = orig_derive  # pylint: disable=protected-access
+    raiden_ffi._prepare_shard_info = orig_prepare  # pylint: disable=protected-access
+
+
 def _compute_global_shard_index(
     indices: Tuple[slice, ...], shape: Tuple[int, ...]
 ) -> int:
@@ -334,29 +513,45 @@ def _compute_global_shard_index(
   return shard_idx
 
 
-def _global_shard_indices(arr: Any, sharding: Any) -> Tuple[int, ...]:
+def _global_shard_indices(
+    arr: Any,
+    sharding: Any,
+    devices: Optional[Sequence[jax.Device]] = None,
+) -> Tuple[int, ...]:
   """Grid index of each shard `arr` is published from, in shard order.
 
   A proxy (Pathways) array holds no local data, so the shards of every mesh
-  device are listed instead of the addressable ones.
+  device are listed instead of the addressable ones. When `devices` is supplied
+  (e.g. host-grouped FFI shard order), shard indices follow that exact device
+  sequence so `WorkUnitMetadata.variables[i].global_shard_indices[p]` aligns
+  with `WorkUnitMetadata.shards[p]`.
 
   Args:
     arr: The array.
     sharding: `arr.sharding`.
+    devices: Optional explicit device sequence overriding `mesh.devices.flat`.
 
   Returns:
     One flattened grid index per shard.
   """
   shape = tuple(arr.shape)
   index_map = sharding.devices_indices_map(shape)
+  if devices is not None:
+    return tuple(
+        _compute_global_shard_index(index_map[d], shape)
+        for d in devices
+        if d in index_map
+    )
   shards = getattr(arr, "addressable_shards", None)
   if shards and not any(s.device.platform == "proxy" for s in shards):
     return tuple(_compute_global_shard_index(s.index, shape) for s in shards)
   mesh_obj = getattr(sharding, "mesh", None)
-  devices = mesh_obj.devices.flat if hasattr(mesh_obj, "devices") else index_map
+  mesh_devices = (
+      mesh_obj.devices.flat if hasattr(mesh_obj, "devices") else index_map
+  )
   return tuple(
       _compute_global_shard_index(index_map[d], shape)
-      for d in devices
+      for d in mesh_devices
       if d in index_map
   )
 
@@ -399,7 +594,14 @@ def _routable_address(endpoint: str, ip: str) -> str:
   return endpoint
 
 
-def _tensor_metadata(name: str, arr: Any, layer_idx: int):
+def _tensor_metadata(
+    name: str,
+    arr: Any,
+    layer_idx: int,
+    *,
+    devices: Optional[Sequence[jax.Device]] = None,
+):
+  """Constructs `TensorMetadata` for `arr`."""
   sharding: Any = getattr(arr, "sharding", None)
   spec = tuple(getattr(sharding, "spec", ()) or ())
   spec = (spec + (None,) * arr.ndim)[: arr.ndim]
@@ -426,7 +628,7 @@ def _tensor_metadata(name: str, arr: Any, layer_idx: int):
       layer_idx=layer_idx,
       sharding_spec=tuple(_axis_name(a) for a in spec),
       global_shard_indices=(
-          _global_shard_indices(arr, sharding)
+          _global_shard_indices(arr, sharding, devices=devices)
           if hasattr(sharding, "devices_indices_map")
           else ()
       ),
@@ -465,6 +667,7 @@ class RaidenSynchronizer:
     self._ips: List[str] = []
     self._control_addr: str = ""
     self._ffi_mesh: Any = None
+    self._ffi_devices: Optional[Tuple[jax.Device, ...]] = None
     self._global_shard_indices: Optional[List[int]] = None
     if state is not None:
       self.bind(state)
@@ -526,15 +729,47 @@ class RaidenSynchronizer:
         len(self.arrays),
         devices_per_host,
     )
-    eps = raiden_ffi.start_weight_synchronizer(
-        self.arrays,
-        array_mesh,
-        d2h=is_d2h,
-        parallelism=self._parallelism,
-        listener_port=0,
-        num_shards=devices_per_host,
+    host_indices, local_slots = _derive_ffi_host_slots(
+        array_mesh.devices, devices_per_host
     )
-    self._ips, self._control_addr = eps.single_unit_registration()
+    contiguous_hosts = [
+        i // devices_per_host for i in range(len(src_devices))
+    ]
+    if host_indices.reshape(-1).tolist() == contiguous_hosts:
+      eps = raiden_ffi.start_weight_synchronizer(
+          self.arrays,
+          array_mesh,
+          d2h=is_d2h,
+          parallelism=self._parallelism,
+          listener_port=0,
+          num_shards=devices_per_host,
+      )
+      self._ips, self._control_addr = eps.single_unit_registration()
+      self._ffi_devices = None
+    else:
+      with _patch_ffi_host_slots(raiden_ffi, host_indices, local_slots):
+        eps = raiden_ffi.start_weight_synchronizer(
+            self.arrays,
+            array_mesh,
+            d2h=is_d2h,
+            parallelism=self._parallelism,
+            listener_port=0,
+            num_shards=devices_per_host,
+        )
+      ips: list[str] = []
+      ffi_devices: list[jax.Device] = []
+      for host in eps.hosts:
+        if len(host.shards) != devices_per_host:
+          raise RuntimeError(
+              f"Host {host.host_index} reported {len(host.shards)} shards,"
+              f" expected {devices_per_host}."
+          )
+        for s in host.shards:
+          ips.append(s.data_address)
+          ffi_devices.append(s.device)
+      self._ips = ips
+      self._control_addr = ",".join(h.control_address for h in eps.hosts)
+      self._ffi_devices = tuple(ffi_devices)
     logging.warning(
         "raiden ffi endpoints: %d shard(s) across %d host(s) for %d mesh"
         " device(s); mesh ids=%s; endpoints=%s; control=%s",
@@ -589,6 +824,7 @@ class RaidenSynchronizer:
     if self._is_proxy:
       self._ips = []
       self._control_addr = ""
+      self._ffi_devices = None
       if self._auto_h2d:
         self._init_ffi_transport(is_d2h=False)
         logging.info(
@@ -840,7 +1076,9 @@ class RaidenSynchronizer:
     # the nnx `.value` leaf). `_param_key` already normalises both away, so
     # canonicalising here is what makes the manifests line up.
     variables = tuple(
-        _tensor_metadata(_param_key(name), arr, idx)
+        _tensor_metadata(
+            _param_key(name), arr, idx, devices=self._ffi_devices
+        )
         for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
     )
     if self._is_proxy:
