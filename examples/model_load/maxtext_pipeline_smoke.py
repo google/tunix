@@ -66,6 +66,12 @@ def main():
           )
       },
   }
+  report["package_versions"] = {}
+  for name in ("jax", "jaxlib", "libtpu", "flax", "maxtext", "optax"):
+    try:
+      report["package_versions"][name] = importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+      report["package_versions"][name] = None
   try:
     if args.targeted_imports:
       package = types.ModuleType("tunix")
