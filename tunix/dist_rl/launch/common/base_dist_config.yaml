@@ -1,0 +1,340 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Base configuration for the distributed RL launchers in tunix/dist_rl/launch/.
+# Follows the exact section and key naming of tunix/cli/base_agentic_config.yaml,
+# with defaults matching the existing distributed RL launchers and worker nodes.
+
+################################## LOAD MODEL ##################################
+model_config: &base_model_config
+  model_name: "Qwen3-1.7B"
+  # Supported sources: "kaggle" | "huggingface" | "gcs" | "internal" | "maxtext"
+  model_source: "huggingface"
+  model_id: "Qwen/Qwen3-1.7B"
+  # If model_source is "maxtext", this is the Orbax checkpoint path.
+  model_path: ""
+  # Defaults to <artifact_root>/models/<model_name> when empty.
+  model_download_path: ""
+  rng_seed: 0
+  model_display: false
+  intermediate_ckpt_dir: "/tmp/intermediate_ckpt/"
+  dtype: "float32"
+  load_dtype: "float32"
+  remat_config: "none"
+  use_flash_attention: false
+  flash_attention_block_size: null
+  lora_config: {}
+  mesh:
+    shape: "(1,2)"
+    axis_names: "('fsdp','tp')"
+    allocation_policy: "COMPACT"
+  # Optional architecture / MaxText overrides (e.g. maxtext_model_name,
+  # maxtext_output_dir, padded_moe_mlp_dim, warmup_steps_fraction, attention).
+  kwargs: {}
+
+actor_model_config:
+  <<: *base_model_config
+
+critic_model_config: null
+
+reference_model_config:
+  <<: *base_model_config
+
+rollout_model_config:
+  <<: *base_model_config
+
+################################## Tokenizer ##################################
+tokenizer_config:
+  # A Hugging Face hub id requires `HF_TOKEN` (same check as `tunix.cli`); set a
+  # local, CNS, or GCS path to load the tokenizer without it.
+  tokenizer_path: "Qwen/Qwen3-1.7B"
+  tokenizer_type: "huggingface"
+  add_bos: true
+  add_eos: true
+
+################################## DATASET ##################################
+data_source: "tfds"
+data_directory: ""
+data_module: ""
+apply_chat_template_to_dataset: false
+data_config:
+  split: "train"
+  shuffle: true
+  seed: 42
+dataset_name: "gsm8k"
+batch_size: 4
+prompt_key: "prompts"
+max_target_length: 256
+num_train_epochs: 1
+train_fraction: 1.0
+num_test_batches: 100
+tfds_download: true
+num_batches: 0
+
+############################### Optimizer ###############################
+optimizer_config: &base_optimizer_config
+  learning_rate: 2.0e-7
+  opt_type: "adamw"
+  schedule_type: "warmup_cosine_decay_schedule"
+  value: null
+  peak_value: null
+  init_value: 0.0
+  end_value: 0.0
+  warmup_ratio: 0.1
+  b1: 0.9
+  b2: 0.999
+  eps: 1.0e-8
+  weight_decay: 0.01
+  warmup_steps: null
+  decay_steps: 500
+  # Gradient clipping, chained ahead of the optimizer (same contract as
+  # `tunix.cli.config.create_optimizer`).
+  opt_chain_type: "clip_by_global_norm"
+  chain_kwargs:
+    max_norm: 1.0
+
+############################### Training Config ###############################
+training_config: &base_training_config
+  eval_every_n_steps: 50
+  max_steps: 1
+  # Derived by RLTrainingConfig from mini_batch_size // train_micro_batch_size.
+  gradient_accumulation_steps: null
+  checkpoint_root_directory: ""
+  checkpointing_options:
+    max_to_keep: 10
+    save_interval_steps: 1
+    enable_async_checkpointing: true
+    timeout_secs: 1200
+  metrics_logging_options:
+    project_name: "trellis-gsm8k"
+    run_name: ""
+    log_dir: ""
+    flush_every_n_steps: 1
+  perf_metrics_options: {}
+  profiler_options:
+    log_dir: "/tmp/profiling"
+    skip_first_n_steps: 1
+    profiler_steps: 0
+  data_sharding_axis: ["fsdp"]
+  max_inflight_computations: 2
+  max_seq_token_per_tpu: null
+  max_segments_per_packed_row: null
+
+rl_training_config:
+  <<: *base_training_config
+  # Defaults to `batch_size` when null.
+  mini_batch_size: null
+  train_micro_batch_size: 1
+  rollout_micro_batch_size: null
+  compute_logps_micro_batch_size: 1
+  compute_logps_chunk_size: 0
+  actor_optimizer_config:
+    <<: *base_optimizer_config
+  critic_optimizer_config: null
+
+############################### PPO Config ###############################
+ppo_config:
+  num_iterations: 1
+  gae_lambda: 0.95
+  gamma: 1.0
+  beta: 0.08
+  epsilon: 0.2
+
+############################### GRPO Config ###############################
+grpo_config:
+  num_generations: 8
+  num_iterations: 1
+  beta: 0.04
+  epsilon: 0.2
+
+############################### Rollout Config ###############################
+rollout_config:
+  total_generation_steps: 1024
+  max_prompt_length: 1024
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  eos_tokens: "151645,151643"
+  return_logprobs: true
+
+############################### Other RL Config ###############################
+rollout_engine: "inprocess_vllm"
+sglang_jax_config: {}
+vllm_config:
+  model_version: ""
+  hbm_utilization: 0.5
+  tpu_backend_type: "jax"
+  init_with_random_weights: true
+  enable_prefix_caching: false
+  server_mode: null
+  async_scheduling: false
+  max_num_seqs: null
+  max_num_batched_tokens: null
+  max_model_len: null
+  data_parallel_size: null
+  tensor_parallel_size: null
+  dtype: "bfloat16"
+  kwargs: {}
+
+offload_to_cpu: false
+
+training_mode: "agentic_grpo"
+
+chat_parser_config:
+  type: "raw"
+  enable_thinking: false
+
+agent_class_path: "gsm8kagent"
+agent_kwargs: {}
+env_class_path: "gsm8kenv"
+env_kwargs: {}
+kubernetes_config: {}
+
+agentic_ppo_config: {}
+agentic_grpo_config:
+  num_generations: 8
+  num_iterations: 1
+  beta: 0.04
+  epsilon: 0.2
+  epsilon_high: 0.28
+  loss_algo: "grpo"
+  loss_agg_mode: "sequence-mean-token-mean"
+  kl_loss_mode: "low_var_kl"
+  advantage_estimator: "grpo"
+  sampler_is: "token"
+  sampler_is_threshold: 2.0
+  max_concurrency: 256
+  off_policy_steps: 0
+  trajectory_group_order: "trajectory_completion"
+  reward_mode: "env"
+  episode_timeout: 600
+  max_turns: 8
+  overlong_filter: false
+  use_rollout_logps: true
+
+############################# Reward Fns #############################
+verl_compatible: false
+reward_functions:
+  - tunix/cli/reward_fn/gsm8k.py
+
+######################## Distributed RL Extensions ########################
+# Trainer/orchestrator knobs that are not part of the `tunix.cli` training
+# config. Kept out of `rl_training_config` so the shared
+# `BasePipeline.create_rl_training_config()` builder accepts it unchanged.
+dist_training_config:
+  ckpt_d2h_concurrent_gb: 8
+  profiler_period: -1
+  segment_alignment_boundary: 1
+  # Precompile the trainer step before the first rollout batch arrives.
+  precompile_trainer: true
+  trajectory_log_dir: ""
+
+weight_sync_config:
+  mode: "none"
+  raiden_use_ffi: null
+  use_weight_converter: true
+  prefuse_moe_weights: true
+  verify_weights: false
+  in_flight_weight_updates: false
+
+trajectory_store_config:
+  enable: false
+  backend: "file"
+  dir: ""
+
+cluster_config:
+  target: "local"
+  # Shared orchestrator for every task; task-specific hooks come from
+  # `registry_module`.
+  orchestrator_main: "tunix.dist_rl.launch.common.orchestrator.main"
+  trainer_main: "tunix.dist_rl.launch.nodes.trainer.main"
+  rollout_main: "tunix.dist_rl.launch.nodes.rollout.main"
+  inference_main: "tunix.dist_rl.launch.nodes.inference.main"
+  # Example module (e.g. `examples/math_gsm8k_dist/gsm8k.py`): registers the
+  # example's environments and agents and implements the orchestrator's
+  # `TaskModule` hooks. Each example YAML sets its own value.
+  registry_module: "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
+  # Relative paths are resolved against the repo root on `target: local` and
+  # against the container working directory (repo root) on `target: k8s`.
+  # Each task recipe sets its own value.
+  artifact_root: "artifacts/dist_rl"
+  run_id: ""
+  # Print the commands (local) or manifests (k8s) instead of launching.
+  dry_run: false
+  debug: false
+  rpc_timeout_s: 1800.0
+  init_timeout_s: null
+  wait_timeout_secs: 1800
+  wait_poll_secs: 5
+  wait_debug_every_polls: 6
+  wait_log_tail_lines: 40
+  stop_workers_on_exit: true
+  run_inference_node: null
+  inference_addr: ""
+  ports:
+    orchestrator: 30000
+    trainer: 20000
+    rollout: 20001
+    inference: 20002
+  local:
+    auto_detect_pci_tpus: false
+    trainer_tpu_chips: "0,1"
+    rollout_tpu_chips: "2,3"
+    inference_tpu_chips: ""
+    tpu_chips_per_host_bounds: "1,2,1"
+    tpu_host_bounds: "1,1,1"
+    allow_multiple_libtpu_load: true
+    trainer_pathways: false
+    jax_backend_target: "grpc://127.0.0.1:29000"
+    worker_shutdown_grace_secs: 10
+    trainer_shutdown_grace_secs: 900
+    force_arm_secs: 5
+  k8s:
+    namespace: "default"
+    kueue_queue_name: ""
+    orchestrator_id: ""
+    trainer_id: ""
+    rollout_id: ""
+    inference_id: ""
+    cpu_machine: "n2-standard-64"
+    gcs_scratch_location: "gs://cloud-pathways-staging/tmp"
+    enable_pathways_persistence: false
+    trainer_extra_env: ""
+    # Container image for the trainer/rollout pods; required for target=k8s
+    # (`k8s.sh` fails fast when empty). Example launchers set it.
+    tunix_image: ""
+    pathways_server_image: "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest"
+    pathways_proxy_image: "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest"
+    pathways_proxy_memory_limit: "190G"
+    pathways_proxy_memory: "16G"
+    pathways_rm_memory: "4G"
+    user_container_memory: "48G"
+    user_container_memory_limit: "70G"
+    pathways_worker_memory: "100G"
+    jax_cache:
+      disable: false
+      local_dir: "/tmp/jax_cache"
+      gcs_dir: ""
+      rollout_gcs_dir: ""
+      bucket: ""
+      save: true
+      skip_jax_precompile: 1
+      rollout_skip_jax_precompile: 1
+    trainer:
+      jobset_yaml: "jobset.pathways.yaml"
+      tpu_slice: "tpuv5e:4x4"
+    rollout:
+      jobset_yaml: "leaderworkerset.mcjax.ray.yaml"
+      tpu_slice: "tpuv5e:4x4"
+      replicas: 1
