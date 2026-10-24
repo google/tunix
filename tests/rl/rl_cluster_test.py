@@ -1281,6 +1281,146 @@ class RlEngineTest(parameterized.TestCase):
       mock_restore.assert_called_once()
       self.assertFalse(rl_engine._rollout_released_for_training)
 
+  def test_colocated_vanilla_v2_actor_and_rollout_swap_weights_in_place(self):
+    if self.device_count < 2:
+      self.skipTest('Requires at least 2 devices.')
+    devices = np.array(jax.devices()[:2])
+    actor_mesh = Mesh(devices.reshape(2, 1), ('fsdp', 'tp'))
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    fsdp_sharding = jax.sharding.NamedSharding(
+        actor_mesh, jax.sharding.PartitionSpec('fsdp', 'tp')
+    )
+    model.lm_head.kernel = nnx.Param(
+        jax.device_put(model.lm_head.kernel.value, fsdp_sharding),
+        out_sharding=('fsdp', 'tp'),
+    )
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: actor_mesh,
+            rl_engine_lib.Role.REFERENCE: actor_mesh,
+            rl_engine_lib.Role.ROLLOUT: actor_mesh,
+        },
+        rollout_engine='vanilla_v2',
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=10,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+            data_type=jnp.float32,
+        ),
+    )
+    with mock.patch.object(
+        rl_engine_lib.vanilla_rollout_v2,
+        'VanillaRollout',
+        autospec=True,
+    ) as mock_vanilla_cls:
+      rollout_instance = mock_vanilla_cls.return_value
+
+      def _init_rollout(rollout_actor, *args, **kwargs):
+        del args, kwargs
+        rollout_instance.model.return_value = rollout_actor
+        return rollout_instance
+
+      mock_vanilla_cls.side_effect = _init_rollout
+      rl_engine = rl_engine_lib.RLEngine(
+          actor=model,
+          reference=model,
+          tokenizer=vocab,
+          cluster_config=cluster_config,
+      )
+
+    rollout_mesh = Mesh(devices.reshape(2, 1), ('dp', 'tp'))
+    self.assertEqual(
+        rl_engine._physical_r2m[rl_engine_lib.Role.ROLLOUT], actor_mesh
+    )
+    self.assertEqual(rl_engine.r2m[rl_engine_lib.Role.ROLLOUT], rollout_mesh)
+    self.assertNotIn(
+        rl_engine_lib.Role.ROLLOUT,
+        rl_engine._backbone_sharing_map[rl_engine_lib.Role.ACTOR],
+    )
+    self.assertIs(
+        rl_engine._weight_placement, rl_engine_lib.WeightPlacement.SWAPPED
+    )
+    self.assertFalse(rl_engine._rollout_released_for_training)
+    rollout_kernel = rollout_instance.model.return_value.lm_head.kernel.value
+    self.assertEqual(
+        rollout_kernel.sharding,
+        jax.sharding.NamedSharding(
+            rollout_mesh, jax.sharding.PartitionSpec(None, 'tp')
+        ),
+    )
+
+    # Only one copy of the weights is live: the actor's was donated.
+    self.assertTrue(
+        rl_engine.actor_trainer.model.lm_head.kernel.value.is_deleted()
+    )
+
+    def _update_rollout_model(new_params, filter_types=None):
+      del filter_types
+      nnx.update(rollout_instance.model.return_value, new_params)
+
+    rollout_instance.update_params.side_effect = _update_rollout_model
+
+    rl_engine.release_rollout_for_training()
+    rollout_instance.release_for_training.assert_called_once_with(
+        free_weights=False
+    )
+    self.assertTrue(rl_engine._rollout_released_for_training)
+    actor_kernel = rl_engine.actor_trainer.model.lm_head.kernel.value
+    self.assertFalse(actor_kernel.is_deleted())
+    self.assertEqual(actor_kernel.sharding, fsdp_sharding)
+    # The rollout kernel is not checked: on CPU, sharding a replicated array
+    # can slice its buffers without copying, so they stay alive.
+
+    rl_engine.sync_weights()
+    self.assertTrue(actor_kernel.is_deleted())
+    rollout_instance.update_params.assert_called_once()
+    self.assertLen(rollout_instance.update_params.call_args.args, 1)
+    synced_kernel = rollout_instance.update_params.call_args.args[0]['lm_head'][
+        'kernel'
+    ].value
+    self.assertFalse(synced_kernel.is_deleted())
+    self.assertEqual(
+        synced_kernel.sharding,
+        jax.sharding.NamedSharding(
+            rollout_mesh, jax.sharding.PartitionSpec(None, 'tp')
+        ),
+    )
+    self.assertEqual(rollout_instance.restore_after_training.call_count, 1)
+    self.assertFalse(rl_engine._rollout_released_for_training)
+
+    # Calling sync_weights() again while weights are already on rollout must
+    # not crash on deleted actor buffers.
+    rl_engine.sync_weights()
+    self.assertEqual(rollout_instance.update_params.call_count, 1)
+    self.assertEqual(rollout_instance.restore_after_training.call_count, 2)
+
+    # A second swap reshards onto the shardings of the deleted buffers again.
+    rl_engine.release_rollout_for_training()
+    actor_kernel = rl_engine.actor_trainer.model.lm_head.kernel.value
+    self.assertFalse(actor_kernel.is_deleted())
+    self.assertEqual(actor_kernel.sharding, fsdp_sharding)
+    rl_engine.sync_weights()
+    synced_kernel = rollout_instance.update_params.call_args.args[0]['lm_head'][
+        'kernel'
+    ].value
+    self.assertFalse(synced_kernel.is_deleted())
+    self.assertEqual(
+        synced_kernel.sharding,
+        jax.sharding.NamedSharding(
+            rollout_mesh, jax.sharding.PartitionSpec(None, 'tp')
+        ),
+    )
+
 
 class RlEngineTokenInputTest(parameterized.TestCase):
   """Explicit token rows through RLEngine.generate and VllmRollout.generate."""

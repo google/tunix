@@ -27,6 +27,7 @@ from absl import logging
 import jax
 import jaxtyping
 from flax import nnx
+from tunix.utils import sharding_utils
 
 
 def _get_pytree_mesh_info(tree: jaxtyping.PyTree) -> jax.sharding.Mesh | None:
@@ -277,6 +278,75 @@ def reshard_pytree(
   )
   return resharded_array
 
+
+def get_shardings_on_mesh(
+    state: jaxtyping.PyTree, mesh: jax.sharding.Mesh, memory_kind: str
+) -> jaxtyping.PyTree:
+  """Returns each variable's partition spec in `state` as a sharding on `mesh`.
+
+  Axes that `mesh` does not have are replicated; see
+  `sharding_utils.spec_on_mesh`.
+
+  Args:
+    state: The variables to shard.
+    mesh: The mesh to shard them on.
+    memory_kind: The memory kind to place them in.
+  """
+  return jax.tree.map(
+      lambda spec: jax.sharding.NamedSharding(
+          mesh,
+          sharding_utils.spec_on_mesh(spec, mesh),
+          memory_kind=memory_kind,
+      ),
+      nnx.get_partition_spec(state),
+  )
+
+
+def delete_unaliased(
+    arrays: jaxtyping.PyTree, keep: jaxtyping.PyTree
+) -> None:
+  """Deletes the buffers of `arrays` that no array in `keep` shares.
+
+  Donation is a hint that backends may ignore, and a reshard may reuse a buffer
+  of its input, e.g. a CPU shard of a replicated array.
+
+  Args:
+    arrays: The arrays to delete.
+    keep: The arrays whose buffers must stay alive.
+  """
+  kept_buffers = {
+      shard.data.unsafe_buffer_pointer()
+      for x in jax.tree.leaves(keep)
+      for shard in x.addressable_shards
+  }
+  for x in jax.tree.leaves(arrays):
+    if x.is_deleted():
+      continue
+    if any(
+        shard.data.unsafe_buffer_pointer() in kept_buffers
+        for shard in x.addressable_shards
+    ):
+      continue
+    x.delete()
+
+
+def reshard_in_place(
+    source: jaxtyping.PyTree, target: jaxtyping.PyTree
+) -> jaxtyping.PyTree:
+  """Reshards `source` to the `target` shardings, freeing the buffers of `source`.
+
+  Args:
+    source: The arrays to reshard. Their buffers are freed, except those the
+      result reuses.
+    target: The sharding of each resharded array.
+
+  Returns:
+    The resharded arrays.
+  """
+  resharded = reshard_pytree(source, target, donate_input=True)
+  jax.block_until_ready(resharded)
+  delete_unaliased(source, keep=resharded)
+  return resharded
 
 def reshard_model_to_mesh(model: nnx.Module, mesh: jax.sharding.Mesh):
   """Reshard the lora model if the mesh is specified and the lora model mesh is not the same as the input mesh."""

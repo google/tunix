@@ -75,6 +75,21 @@ MetricsT = perf_metrics.MetricsT
 MetricsBuffer = perf_metrics.MetricsBuffer
 
 
+class WeightPlacement(enum.Enum):
+  """How the actor and the rollout hold the policy weights."""
+
+  # The actor and rollout run the same arrays, with the same sharding, so
+  # syncing weights is a no-op.
+  SHARED = "shared"
+  # The actor and rollout hold one copy of the weights, which is resharded
+  # between their shardings in place: onto the actor before training and back
+  # onto the rollout when weights are synced.
+  SWAPPED = "swapped"
+  # The actor and rollout hold separate copies of the weights, so syncing
+  # weights copies the actor's into the rollout.
+  SEPARATE = "separate"
+
+
 @contextlib.contextmanager
 def _profile_scope(
     engine: Any,
@@ -115,19 +130,14 @@ class RLEngine:
   ):
     self.cluster_config = cluster_config
     self.perf_config = perf_config
-    self.r2m = cluster_config.role_to_mesh
+    self._physical_r2m = dict(cluster_config.role_to_mesh)
+    self.r2m = dict(cluster_config.role_to_mesh)
 
     self.profiler = None
     if getattr(cluster_config.training_config, "rl_profiler_config", None):
       self.profiler = RLProfiler(
           cluster_config.training_config.rl_profiler_config
       )
-
-    self._init_backbone_sharing_map(actor, reference)
-    self._anchor_policy_state = None
-
-    self._default_memory_kind = jax.devices()[0].default_memory().kind
-    self.train_actor = self._load_model(actor, self.r2m[Role.ACTOR])
 
     if self.cluster_config.rollout_config is None:
       raise ValueError("`cluster_config.rollout_config` cannot be None.")
@@ -139,7 +149,20 @@ class RLEngine:
           f" config: {self.cluster_config.rollout_config}"
       )
 
-    if Role.ROLLOUT in self._backbone_sharing_map[Role.ACTOR]:
+    self._default_memory_kind = jax.devices()[0].default_memory().kind
+    self.train_actor = self._load_model(actor, self.r2m[Role.ACTOR])
+    self._weight_placement: WeightPlacement = self._get_weight_placement(
+        self.train_actor
+    )
+    self._init_backbone_sharing_map(actor, reference)
+    self._anchor_policy_state = None
+
+    if self.cluster_config.rollout_engine == "vanilla_v2":
+      # The engine runs each DP rank on its own slice of the rollout devices,
+      # with weights replicated across ranks.
+      self.r2m[Role.ROLLOUT] = self._create_vanilla_v2_sharding_mesh()
+
+    if self._weight_placement is not WeightPlacement.SEPARATE:
       self.rollout_actor = self.train_actor
     elif self.cluster_config.rollout_engine in ("vanilla", "vanilla_v2"):
       rollout_data_type = (
@@ -204,13 +227,7 @@ class RLEngine:
         collections.defaultdict(list)
     )
 
-    if self.r2m[Role.ACTOR] == self.r2m[
-        Role.ROLLOUT
-    ] and self.cluster_config.rollout_engine in ("vanilla", "vanilla_v2"):
-      # Given that we load both actor trainer and rollout from `actor`,
-      # if the meshes are the same under `vanilla`/`vanilla_v2`, they are able
-      # to share the same model. External rollout engines (`vllm`, `sglang_jax`)
-      # allocate their own internal weight buffers.
+    if self._weight_placement is WeightPlacement.SHARED:
       self._backbone_sharing_map[Role.ACTOR].append(Role.ROLLOUT)
       self._backbone_sharing_map[Role.ROLLOUT].append(Role.ACTOR)
 
@@ -221,12 +238,41 @@ class RLEngine:
     ):
       return
     if sft_utils.is_lora_enabled(actor):
-      if reference and self.r2m[Role.ACTOR] == self.r2m[Role.REFERENCE]:
+      if (
+          reference
+          and self._physical_r2m[Role.ACTOR]
+          == self._physical_r2m[Role.REFERENCE]
+      ):
         self._backbone_sharing_map[Role.ACTOR].append(Role.REFERENCE)
         self._backbone_sharing_map[Role.REFERENCE].append(Role.ACTOR)
       # TODO(linchai): maybe support critic backbone sharing.
 
     self._propagate_backbone_sharing_map()
+
+  def _create_vanilla_v2_sharding_mesh(self) -> Mesh:
+    """Creates the `('dp', 'tp')` rollout sharding mesh from the physical rollout mesh and `RolloutConfig`."""
+    physical_mesh = self._physical_r2m[Role.ROLLOUT]
+    if physical_mesh.empty:
+      return physical_mesh
+    rollout_cfg = self.get_rollout_config(Mode.TRAIN)
+    num_devices = physical_mesh.devices.size
+    tp_size = rollout_cfg.tensor_parallel_size
+    dp_size = rollout_cfg.data_parallel_size
+    if tp_size == -1 and dp_size == -1:
+      tp_size = physical_mesh.shape.get("tp", 1)
+    if tp_size == -1:
+      tp_size = num_devices // dp_size
+    if dp_size == -1:
+      dp_size = num_devices // tp_size
+    if dp_size * tp_size != num_devices:
+      raise ValueError(
+          f"data_parallel_size ({dp_size}) * tensor_parallel_size ({tp_size})"
+          f" must equal the number of rollout devices ({num_devices})."
+      )
+    return Mesh(
+        physical_mesh.devices.reshape(dp_size, tp_size),
+        ("dp", "tp"),
+    )
 
   def is_colocated(self, role_a: Role, role_b: Role) -> bool:
     """Returns whether `role_a` and `role_b` share any physical JAX devices."""
@@ -240,14 +286,75 @@ class RLEngine:
     devices_b = set(mesh_b.devices.flatten().tolist())
     return bool(devices_a & devices_b)
 
+  def _get_weight_placement(self, actor: nnx.Module) -> WeightPlacement:
+    """Returns how the actor and rollout hold the policy weights.
+
+    Only `vanilla`/`vanilla_v2` rollouts on the actor's devices and in the
+    actor's dtype can hold the actor's weights; external rollout engines
+    (`vllm`, `sglang_jax`) allocate their own weight buffers. A `vanilla_v2`
+    rollout shards weights differently from the actor (replicated over `'dp'`,
+    sharded over `'tp'`), so it swaps a single copy with the actor, or keeps
+    its own copy when weights are offloaded to the host.
+
+    Args:
+      actor: The actor model.
+    """
+    rollout_cfg = self.get_rollout_config(Mode.TRAIN)
+    actor_dtype = jax.tree.leaves(nnx.state(actor, nnx.Param))[0].dtype
+    same_rollout_dtype = rollout_cfg.data_type is None or (
+        actor_dtype == jnp.dtype(rollout_cfg.data_type)
+    )
+    if (
+        not same_rollout_dtype
+        or self._physical_r2m[Role.ACTOR] != self._physical_r2m[Role.ROLLOUT]
+        or self.cluster_config.rollout_engine not in ("vanilla", "vanilla_v2")
+    ):
+      return WeightPlacement.SEPARATE
+    if self.cluster_config.rollout_engine == "vanilla_v2":
+      return (
+          WeightPlacement.SEPARATE
+          if self.cluster_config.offload_to_cpu
+          else WeightPlacement.SWAPPED
+      )
+    return WeightPlacement.SHARED
+
+  def _restore_resharded_rollout_weights(self) -> None:
+    """Reshards shared weights from `actor_trainer.model` back to `rollout` in place."""
+    self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+        nnx.state(self.actor_trainer.model), "pinned_host"
+    )
+    actor_params = nnx.state(self.actor_trainer.model, nnx.Param)
+    rollout_params = nnx.state(self.rollout.model(), nnx.Param)
+    # The rollout's buffers were donated to the actor, but keep their sharding.
+    resharded_rollout_params = reshard.reshard_in_place(
+        actor_params, jax.tree.map(lambda x: x.sharding, rollout_params)
+    )
+    self.rollout.update_params(resharded_rollout_params)
+    self.rollout.restore_after_training()
+    self._rollout_released_for_training = False
+
   def release_rollout_for_training(self) -> None:
     """Releases colocated rollout HBM (KV cache and unshared weights) before training."""
     if self._rollout_released_for_training:
       return
     if not self.is_colocated(Role.ACTOR, Role.ROLLOUT):
       return
+
+    if self._weight_placement is WeightPlacement.SWAPPED:
+      self.rollout.release_for_training(free_weights=False)
+      rollout_params = nnx.state(self.rollout.model(), nnx.Param)
+      actor_params = nnx.state(self.actor_trainer.model, nnx.Param)
+      # The actor's buffers were donated to the rollout, but keep their
+      # sharding.
+      resharded_actor_params = reshard.reshard_in_place(
+          rollout_params, jax.tree.map(lambda x: x.sharding, actor_params)
+      )
+      nnx.update(self.actor_trainer.model, resharded_actor_params)
+      self._rollout_released_for_training = True
+      return
+
     free_weights = (
-        Role.ROLLOUT not in self._backbone_sharing_map[Role.ACTOR]
+        self._weight_placement is WeightPlacement.SEPARATE
         and not self.cluster_config.offload_to_cpu
     )
     src_state = None
@@ -268,8 +375,11 @@ class RLEngine:
     """Restores rollout KV cache (and weights if needed) if released for training."""
     if not self._rollout_released_for_training:
       return
+    if self._weight_placement is WeightPlacement.SWAPPED:
+      self._restore_resharded_rollout_weights()
+      return
     if (
-        Role.ROLLOUT not in self._backbone_sharing_map[Role.ACTOR]
+        self._weight_placement is WeightPlacement.SEPARATE
         and not self.cluster_config.offload_to_cpu
     ):
       filter_types = (
@@ -328,15 +438,10 @@ class RLEngine:
       if not mesh.empty and model_mesh != mesh:
         logging.warning("Resharding model from %s to %s", model_mesh, mesh)
         graph, state = nnx.split(model_or_path)
-        dst_shardings = jax.tree_util.tree_map(
-            lambda x: jax.sharding.NamedSharding(
-                mesh,
-                x if x is not None else jax.sharding.PartitionSpec(),
-                memory_kind=self._default_memory_kind
-                if is_on_device
-                else "pinned_host",
-            ),
-            nnx.get_partition_spec(state),
+        dst_shardings = reshard.get_shardings_on_mesh(
+            state,
+            mesh,
+            self._default_memory_kind if is_on_device else "pinned_host",
         )
         if data_type and data_type != jax.tree.leaves(state)[0].dtype:
           tmp_state = jax.tree.map(lambda x: x.astype(data_type), state)
@@ -506,6 +611,25 @@ class RLEngine:
       else:
         train_cfg = self.cluster_config.rollout_config
         all_cfgs = [train_cfg]
+      if self._weight_placement is WeightPlacement.SWAPPED:
+        # Move the single weight copy from the actor sharding to the rollout
+        # sharding. `rollout_actor` becomes a separate module; the actor's
+        # buffers are donated and restored in `release_rollout_for_training`.
+        graph, params, rest = nnx.split(self.rollout_actor, nnx.Param, ...)
+        rollout_mesh = self.r2m[Role.ROLLOUT]
+        rollout_params = reshard.reshard_in_place(
+            params,
+            reshard.get_shardings_on_mesh(
+                params, rollout_mesh, self._default_memory_kind
+            ),
+        )
+        rollout_rest = reshard.reshard_pytree(
+            rest,
+            reshard.get_shardings_on_mesh(
+                rest, rollout_mesh, self._default_memory_kind
+            ),
+        )
+        self.rollout_actor = nnx.merge(graph, rollout_params, rollout_rest)
       # The engine is built once, from the train config. Configs passed to
       # `generate` only set per-request parameters, so sequences must fit the
       # longest prompt plus generation of any mode.
@@ -584,10 +708,16 @@ class RLEngine:
     del self.train_actor
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
     restored = self.actor_trainer.checkpoint_manager.latest_step() is not None
-    if restored and not rl_utils.is_sharing_weights(
-        self.actor_trainer.model, self.rollout.model()
+    if (
+        restored
+        and self._weight_placement is not WeightPlacement.SWAPPED
+        and not rl_utils.is_sharing_weights(
+            self.actor_trainer.model, self.rollout.model()
+        )
     ):
-      # The rollout was built from the actor's weights before the restore.
+      # The rollout was built from the actor's weights before the restore. A
+      # swapped rollout was built from the restored weights, and custom rollout
+      # engines may run the actor's arrays.
       self.sync_weights(increment_global_steps=False)
 
   def _propagate_backbone_sharing_map(self):
@@ -893,6 +1023,7 @@ class RLEngine:
     if eval_ds is None:
       return None
 
+    self.release_rollout_for_training()
     with _profile_scope(
         self, Role.ACTOR, future_output=self.actor_trainer.model
     ):
@@ -1262,6 +1393,7 @@ class RLEngine:
           "Anchor policy state is not initialized. Please run `sync_weights`"
           " first."
       )
+    self.release_rollout_for_training()
     micro_batch_size = micro_batch_size or batch_size
     with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR) as (mesh, _):
       dest_prompt_tokens = sharding_utils.shard_input(
@@ -1367,28 +1499,40 @@ class RLEngine:
     Args:
       increment_global_steps: Whether this sync ends a global step.
     """
-    if jax.devices() and jax.default_backend() not in ["tpu", "gpu"]:
+    if (
+        jax.devices()
+        and jax.default_backend() not in ["tpu", "gpu"]
+        and self._weight_placement is not WeightPlacement.SWAPPED
+    ):
       cm = contextlib.ExitStack()
       cm.enter_context(jax.transfer_guard_device_to_host("disallow_explicit"))
       cm.enter_context(jax.transfer_guard_host_to_device("disallow_explicit"))
     else:
       cm = contextlib.nullcontext()
     with cm:
-      filter_types = (
-          nnx.LoRAParam
-          if sft_utils.is_lora_enabled(self.actor_trainer.model)
-          else nnx.Param,
-      )
-      src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
-      self.rollout.update_params(src_filtered_params, filter_types)
-      self.rollout.restore_after_training()
-      self._rollout_released_for_training = False
+      if self._weight_placement is WeightPlacement.SWAPPED:
+        if self._rollout_released_for_training:
+          self._restore_resharded_rollout_weights()
+        else:
+          # The weights already live on the rollout; the actor has not trained
+          # since, as training requires `release_rollout_for_training`.
+          self.rollout.restore_after_training()
+      else:
+        filter_types = (
+            nnx.LoRAParam
+            if sft_utils.is_lora_enabled(self.actor_trainer.model)
+            else nnx.Param,
+        )
+        src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
+        self.rollout.update_params(src_filtered_params, filter_types)
+        self.rollout.restore_after_training()
+        self._rollout_released_for_training = False
+        # The anchor policy state is snapshotted from actor_trainer.model.
+        self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+            nnx.state(self.actor_trainer.model), "pinned_host"
+        )
       if self.cluster_config.gc_collect_after_weight_sync:
         gc.collect()
-      # The anchor policy state is snapshotted from actor_trainer.model.
-      self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
-          nnx.state(self.actor_trainer.model), "pinned_host"
-      )
 
     if increment_global_steps:
       # sync weights marks the end of a full batch, so increment the global
@@ -1450,7 +1594,7 @@ class RLEngine:
       )
     with contextlib.ExitStack() as stack:
       yield (
-          stack.enter_context(self.cluster_config.role_to_mesh[role]),
+          stack.enter_context(self.r2m[role]),
           stack.enter_context(logical_axis_rule_ctx),
       )
 
