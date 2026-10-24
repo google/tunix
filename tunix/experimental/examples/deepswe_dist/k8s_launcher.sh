@@ -1208,29 +1208,22 @@ start_eval() {
     echo "[launcher] Eval JAX cache GCS: ${eval_cache_dir} (save=${SAVE_JAX_CACHE:-true})" >&2
   fi
 
-  local idx=0
-  for ((i = start_index; i < replicas; i++)); do
-    local replica_id="${eval_name}"
-    if [[ ${replicas} -gt 1 ]]; then
-      replica_id="${eval_name}-${i}"
-    fi
-    local eval_cmd="tunix/experimental/examples/deepswe_dist/eval_launcher.py"
-    local role_arg=""
-    if [[ ${i} -gt 0 ]]; then
-      eval_cmd="tunix/experimental/examples/deepswe_dist/eval_deepswe.py"
-      role_arg="--role=worker"
-    fi
-
-    if [[ ${idx} -gt 0 ]]; then
-      echo "---"
-    fi
+  local rollout_jobset_yaml="${ROLLOUT_JOBSET_YAML:-jobset.tpu.yaml}"
+  local pathways_env=""
+  if [[ "${rollout_jobset_yaml}" == *pathways* ]]; then
+    pathways_env="VLLM_TPU_USING_PATHWAYS=1"
+  fi
+  local replica_placeholder="__TUNIX_REPLICA_ID__"
+  local cmd_placeholder="__TUNIX_EVAL_CMD__"
+  local manifest_template
+  manifest_template=$(
     COLOCATED_PYTHON_SIDECAR_IMAGE="" "$PYTHON_BIN" "$YAML_GENERATOR" \
-      "${YAML_DIR}/${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}" \
-      --jobset_name="${replica_id}" \
+      "${YAML_DIR}/${rollout_jobset_yaml}" \
+      --jobset_name="${replica_placeholder}" \
       --namespace="${K8S_NAMESPACE}" \
       ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
       ${GANG_ID:+--gang_id="${GANG_ID}"} \
-      --tpu_slice="${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}" \
+      --tpu_slice="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x1}" \
       --cpu_machine="${CPU_MACHINE}" \
       ${PATHWAYS_SERVER_IMAGE:+--pathways_server_image="${PATHWAYS_SERVER_IMAGE}"} \
       ${PATHWAYS_PROXY_IMAGE:+--pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}"} \
@@ -1251,7 +1244,7 @@ start_eval() {
         SAVE_JAX_CACHE=\"${SAVE_JAX_CACHE:-true}\" \
         TUNIX_IS_INTERNAL_ENV=false \
         ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
-        VLLM_TPU_USING_PATHWAYS=1 \
+        ${pathways_env} \
         ${sandbox_env} \
         ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
         ${OPENHANDS_MULTI_TOOL_CALLS:+OPENHANDS_MULTI_TOOL_CALLS=\"${OPENHANDS_MULTI_TOOL_CALLS}\"} \
@@ -1302,9 +1295,8 @@ start_eval() {
         ${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:+PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP}} \
         ${ROLLOUT_ENV_FLAGS} \
         ${ROLLOUT_EXTRA_ENV} \
-        SKIP_JAX_PRECOMPILE=${EVAL_SKIP_JAX_PRECOMPILE} python3 -u ${eval_cmd} \
-          ${role_arg} \
-          --worker_id=${replica_id} \
+        SKIP_JAX_PRECOMPILE=${EVAL_SKIP_JAX_PRECOMPILE} python3 -u ${cmd_placeholder} \
+          --worker_id=${replica_placeholder} \
           --worker_addresses ${worker_addrs} \
           --port=${eval_port} \
           --model_id=${MODEL_ID} \
@@ -1353,6 +1345,24 @@ start_eval() {
           --samples_count=${SAMPLES_COUNT:-0} \
           --is_last_checkpoint=${IS_LAST_CHECKPOINT:-false} \
       "
+  ) || return $?
+
+  local idx=0
+  for ((i = start_index; i < replicas; i++)); do
+    local replica_id="${eval_name}"
+    if [[ ${replicas} -gt 1 ]]; then
+      replica_id="${eval_name}-${i}"
+    fi
+    local eval_cmd="tunix/experimental/examples/deepswe_dist/eval_launcher.py"
+    if [[ ${i} -gt 0 ]]; then
+      eval_cmd="tunix/experimental/examples/deepswe_dist/eval_deepswe.py --role=worker"
+    fi
+    if [[ ${idx} -gt 0 ]]; then
+      echo "---"
+    fi
+    local rendered="${manifest_template//${replica_placeholder}/${replica_id}}"
+    rendered="${rendered//${cmd_placeholder}/${eval_cmd}}"
+    printf '%s\n' "${rendered}"
     ((idx++))
   done | apply_manifest
 }
