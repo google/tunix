@@ -242,6 +242,338 @@ def _multicontroller_reshard_leaf(
   return jax.device_put(replicated.addressable_data(0), sharding)
 
 
+# One jitted transfer for all leaves of a publish (TUNIX_BATCHED_PUBLISH).
+_BP_STATE: dict[str, Any] = {'pub': 0, 'exe': {}, 'off': None, 'nosync': False}
+
+
+def _batched_publish_mode() -> str:
+  """'' (off), or the TUNIX_BATCHED_PUBLISH value ('1'/'true' or '2')."""
+  mode = (os.environ.get('TUNIX_BATCHED_PUBLISH', '0') or '0').strip()
+  return mode if mode in ('1', '2', 'true', 'True') else ''
+
+
+def batched_publish_active() -> bool:
+  """Whether TUNIX_BATCHED_PUBLISH can batch this job's publishes.
+
+  True only where the batched path can actually run: the flag is on, the
+  multi-controller reshard is on (TUNIX_MULTI_CONTROLLER_RESHARD=1), the job
+  has more than one process, and no failed check has disabled batching
+  (that verdict is agreed on by every process).
+
+  Returns:
+    Whether batched publishing is active.
+  """
+  return bool(
+      _batched_publish_mode()
+      and _env_flag('TUNIX_MULTI_CONTROLLER_RESHARD')
+      and jax.process_count() > 1
+      and not _BP_STATE['off']
+  )
+
+
+def _bp_should_log(pub: int) -> bool:
+  return pub <= 3 or pub % 50 == 0
+
+
+def _bp_vote(ok: bool) -> list[int]:
+  """Every process's verdict (a collective when there are several)."""
+  if jax.process_count() == 1:
+    return [int(ok)]
+  from jax.experimental import multihost_utils  # pylint: disable=g-import-not-at-top
+
+  votes = multihost_utils.process_allgather(
+      np.asarray([int(ok)], np.int32), tiled=False
+  )
+  return [int(v) for v in np.asarray(votes).reshape(-1)]
+
+
+def _bp_decline(xs: list[Any], ts: list[Any]) -> str | None:
+  """Why a leaf would not take the per-leaf bridge (global metadata only)."""
+  if _BP_STATE['off']:
+    return 'disabled(%s)' % _BP_STATE['off']
+  if not xs:
+    return 'empty'
+  for x, s in zip(xs, ts):
+    if not isinstance(x, jax.Array) or not isinstance(s, jax.sharding.Sharding):
+      return 'non_array_or_non_sharding'
+    if jax.dtypes.issubdtype(x.dtype, jax.dtypes.extended):
+      return 'extended_dtype'
+    if x.is_fully_addressable:
+      return 'fully_addressable'
+    if not isinstance(x.sharding, jax.sharding.NamedSharding):
+      return 'src_not_named'
+    if not (s.device_set and s.device_set < x.sharding.device_set):
+      return 'not_bridge_topology'
+  return None
+
+
+def _bp_groups(xs: list[Any]) -> list[list[int]]:
+  """Leaf indices grouped by source mesh and TUNIX_BATCHED_PUBLISH_GROUP_MB."""
+  cap = (
+      float(os.environ.get('TUNIX_BATCHED_PUBLISH_GROUP_MB', '2048') or '2048')
+      * 2**20
+  )
+  groups, cur, cur_bytes, cur_mesh = [], [], 0, None
+  for i, x in enumerate(xs):
+    mesh = x.sharding.mesh
+    if cur and (mesh != cur_mesh or cur_bytes + x.nbytes > cap):
+      groups.append(cur)
+      cur, cur_bytes = [], 0
+    cur.append(i)
+    cur_bytes += x.nbytes
+    cur_mesh = mesh
+  if cur:
+    groups.append(cur)
+  return groups
+
+
+def _bp_place(
+    reps: list[Any], ts: list[Any], zero_copy: bool
+) -> tuple[list[Any], int]:
+  """Places replicated leaves on their targets; local only.
+
+  With `zero_copy`, a fully replicated target is assembled from the
+  replicated array's own shards on the target devices (no copy); everything
+  else is one batched `device_put` of a local replica.
+
+  Args:
+    reps: Leaves replicated over their source mesh.
+    ts: Target shardings.
+    zero_copy: Whether to alias replicated targets (TUNIX_BATCHED_PUBLISH=2).
+
+  Returns:
+    The placed leaves and how many were assembled without a copy.
+  """
+  outs, put = [None] * len(reps), []
+  for i, (r, s) in enumerate(zip(reps, ts)):
+    if zero_copy and s.is_fully_replicated:
+      by_device = {shard.device: shard.data for shard in r.addressable_shards}
+      devices = list(s.addressable_devices)
+      if all(d in by_device for d in devices):
+        outs[i] = jax.make_array_from_single_device_arrays(
+            r.shape, s, [by_device[d] for d in devices]
+        )
+        continue
+    put.append(i)
+  if put:
+    placed = jax.device_put(
+        [reps[i].addressable_data(0) for i in put], [ts[i] for i in put]
+    )
+    for i, y in zip(put, placed):
+      outs[i] = y
+  return outs, len(reps) - len(put)
+
+
+def _bp_check(pub: int, xs: list[Any], ts: list[Any], outs: list[Any]) -> bool:
+  """Byte-exact comparison against the per-leaf path; every process votes.
+
+  Checks up to four leaves (first, last, two inner; each at most
+  TUNIX_BATCHED_PUBLISH_CHECK_MB, default 64) on every local shard, that no
+  output aliases the reference, and that a one-bit flip is detected. The
+  per-leaf reference is a collective, so it runs unconditionally on every
+  process.
+
+  Args:
+    pub: Publish counter (for logging).
+    xs: Source leaves.
+    ts: Target shardings.
+    outs: Batched outputs.
+
+  Returns:
+    Whether all processes passed.
+  """
+  n = len(xs)
+  try:
+    cap = float(os.environ.get('TUNIX_BATCHED_PUBLISH_CHECK_MB', '64')) * 2**20
+  except ValueError:
+    cap = 64.0 * 2**20
+  sel = [
+      i for i in sorted({0, n // 3, 2 * n // 3, n - 1}) if xs[i].nbytes <= cap
+  ]
+  refs = [_multicontroller_reshard_leaf(xs[i], ts[i]) for i in sel]
+  shards = bad = alias = 0
+  negctl, note = 'not_run', ''
+  try:
+    jax.block_until_ready(refs)
+    meta = sum(
+        o.dtype != x.dtype or o.shape != x.shape or o.sharding != s
+        for o, x, s in zip(outs, xs, ts)
+    )
+    for k, i in enumerate(sel):
+      got = {sh.device.id: sh.data for sh in outs[i].addressable_shards}
+      want = {sh.device.id: sh.data for sh in refs[k].addressable_shards}
+      if set(got) != set(want) or outs[i].sharding != refs[k].sharding:
+        bad += 1
+        continue
+      for d in sorted(got):
+        alias += (
+            got[d].unsafe_buffer_pointer() == want[d].unsafe_buffer_pointer()
+        )
+        a, b = np.asarray(got[d]).tobytes(), np.asarray(want[d]).tobytes()
+        shards += 1
+        bad += a != b
+        if negctl == 'not_run' and b:
+          flipped = bytearray(b)
+          flipped[len(flipped) // 2] ^= 1
+          negctl = 'detected' if bytes(flipped) != a else 'blind'
+    ok = bool(
+        not meta and not bad and not alias and shards and negctl == 'detected'
+    )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    ok, note = False, ' error=%r' % (e,)
+  votes = _bp_vote(ok)
+  logging.info(
+      'TUNIX_BATCHED_PUBLISH check pub=%d leaves=%s shards=%d mismatched=%d'
+      ' aliased=%d negctl=%s processes_ok=%d/%d%s',
+      pub,
+      sel,
+      shards,
+      bad,
+      alias,
+      negctl,
+      sum(votes),
+      len(votes),
+      note,
+  )
+  return all(votes)
+
+
+def _batched_publish(source: Any, target: Any) -> Any:
+  """Moves every leaf of one publish with one jitted program per group.
+
+  Same transfer as `_multicontroller_reshard_leaf`, batched: one identity jit
+  per group of leaves (source shardings in, replicated over the source mesh
+  out), compiled once per group signature, then one local placement. All
+  decisions before the first collective use global metadata only, so every
+  process takes the same branch; new compilations are agreed on by a vote.
+  The first TUNIX_BATCHED_PUBLISH_CHECK publishes are compared byte-exactly
+  against the per-leaf path and a failed check disables batching for the
+  run. TUNIX_BATCHED_PUBLISH_NOSYNC=1 skips the timing-only syncs after the
+  checked publishes.
+
+  Args:
+    source: The source tree.
+    target: The tree of target shardings.
+
+  Returns:
+    The published tree, or None to fall back to the per-leaf path.
+  """
+  _BP_STATE['pub'] += 1
+  pub, t0, stage = _BP_STATE['pub'], time.perf_counter(), 'pre'
+  try:
+    checks = int(os.environ.get('TUNIX_BATCHED_PUBLISH_CHECK', '0') or '0')
+    xs, treedef = jax.tree_util.tree_flatten(source)
+    ts = treedef.flatten_up_to(target)
+    why = _bp_decline(xs, ts)
+    if why:
+      if _bp_should_log(pub):
+        logging.info(
+            'TUNIX_BATCHED_PUBLISH pub=%d: per-leaf path (%s), %d leaves.',
+            pub,
+            why,
+            len(xs),
+        )
+      return None
+    groups = _bp_groups(xs)
+    keys = [
+        tuple((xs[i].sharding, xs[i].shape, xs[i].dtype) for i in g)
+        for g in groups
+    ]
+    new, ok, err = {}, True, ''
+    for key, g in zip(keys, groups):
+      if key in _BP_STATE['exe'] or key in new:
+        continue
+      try:
+        ins = tuple(xs[i].sharding for i in g)
+        outs_sh = tuple(
+            jax.sharding.NamedSharding(s.mesh, jax.sharding.PartitionSpec())
+            for s in ins
+        )
+        fn = jax.jit(lambda *a: a, in_shardings=ins, out_shardings=outs_sh)
+        new[key] = fn.lower(*[xs[i] for i in g]).compile()
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        ok, err = False, repr(e)[:300]
+        break
+    if new or not ok:
+      stage = 'vote'
+      votes = _bp_vote(ok)
+      if not all(votes):
+        logging.warning(
+            'TUNIX_BATCHED_PUBLISH pub=%d: per-leaf path (compile votes %s):'
+            ' %s',
+            pub,
+            votes,
+            err,
+        )
+        return None
+      _BP_STATE['exe'].update(new)
+    t1 = time.perf_counter()
+    stage = 'gather'
+    sync = (
+        pub <= checks or os.environ.get('TUNIX_BATCHED_PUBLISH_NOSYNC') != '1'
+    )
+    if not sync and not _BP_STATE['nosync']:
+      _BP_STATE['nosync'] = True
+      logging.info('TUNIX_BATCHED_PUBLISH_NOSYNC=1 from pub=%d.', pub)
+    reps = [None] * len(xs)
+    for key, g in zip(keys, groups):
+      out = _BP_STATE['exe'][key](*[xs[i] for i in g])
+      if sync:
+        jax.block_until_ready(out)
+      for j, i in enumerate(g):
+        reps[i] = out[j]
+    t2 = time.perf_counter()
+    stage = 'place'
+    try:
+      outs, zero_copied = _bp_place(
+          reps, ts, _batched_publish_mode() == '2'
+      )
+      if sync:
+        jax.block_until_ready(outs)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      # Local-only recovery; never a collective.
+      logging.warning('TUNIX_BATCHED_PUBLISH pub=%d: place failed: %r', pub, e)
+      outs = [
+          jax.device_put(r.addressable_data(0), s) for r, s in zip(reps, ts)
+      ]
+      zero_copied = 0
+      jax.block_until_ready(outs)
+    del reps
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    if stage != 'pre':
+      # Past the first collective a per-leaf fallback on this process alone
+      # would run different collectives than its peers: fail loudly.
+      logging.error(
+          'TUNIX_BATCHED_PUBLISH pub=%d failed at %s: %r', pub, stage, e
+      )
+      raise
+    logging.warning('TUNIX_BATCHED_PUBLISH pub=%d: per-leaf path: %r', pub, e)
+    return None
+  t3 = time.perf_counter()
+  if _bp_should_log(pub):
+    logging.info(
+        'TUNIX_BATCHED_PUBLISH pub=%d: %d leaves in %d groups, %d bytes,'
+        ' zero-copy=%d, compile=%.1fms gather=%.1fms place=%.1fms',
+        pub,
+        len(xs),
+        len(groups),
+        sum(x.nbytes for x in xs),
+        zero_copied,
+        (t1 - t0) * 1e3,
+        (t2 - t1) * 1e3,
+        (t3 - t2) * 1e3,
+    )
+  if pub <= checks and not _bp_check(pub, xs, ts, outs):
+    _BP_STATE['off'] = 'check_failed_pub%d' % pub
+    logging.error(
+        'TUNIX_BATCHED_PUBLISH pub=%d: check failed; batching disabled for the'
+        ' run, redoing this publish per leaf.',
+        pub,
+    )
+    return None
+  return jax.tree_util.tree_unflatten(treedef, outs)
+
+
 def _get_reshard_fn_multicontroller(
     *,
     cache_resharding_plans: bool,
@@ -276,6 +608,10 @@ def _get_reshard_fn_multicontroller(
           ' multi-controller transfer on %d processes.',
           jax.process_count(),
       )
+    if _batched_publish_mode():
+      out = _batched_publish(x, sharding)
+      if out is not None:
+        return out
     return jax.tree.map(
         functools.partial(_multicontroller_reshard_leaf, donate=donate),
         x,

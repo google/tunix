@@ -494,13 +494,36 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           dst_state=self.transformer_state,
           reshard_fn=reshard.reshard_pytree,
           delete_dst_buffers=True,  # Ensure old weights are deleted to free up HBM memory
-          reshard_chunk_size=self.config.reshard_chunk_size,
+          reshard_chunk_size=self._direct_sync_chunk_size(),
       )
 
     if self.config.free_kv_cache_during_weight_sync and not keep_active_kv:
       self.reinitialize_cache()
     else:
       self.refresh_state_leaves()
+
+  def _direct_sync_chunk_size(self) -> Optional[int]:
+    """`reshard_chunk_size` for the direct (MaxText) weight sync.
+
+    TUNIX_BATCHED_PUBLISH moves all leaves of one reshard call together, which a
+    chunked sync would split. While batched publishing is active (flag on,
+    TUNIX_MULTI_CONTROLLER_RESHARD=1, more than one process, not disabled by a
+    failed check), chunking is disabled unless
+    TUNIX_BATCHED_PUBLISH_RESHARD_CHUNK is "keep" (use the config) or an
+    integer. Otherwise the configured chunk size, and with it the peak-HBM
+    bound of the chunked sync, is kept.
+
+    Returns:
+      The chunk size to use.
+    """
+    if not reshard.batched_publish_active():
+      return self.config.reshard_chunk_size
+    chunk = (
+        os.environ.get("TUNIX_BATCHED_PUBLISH_RESHARD_CHUNK", "none") or "none"
+    ).strip()
+    if chunk == "keep":
+      return self.config.reshard_chunk_size
+    return None if chunk == "none" else int(chunk)
 
   def _is_torchax_backend(self) -> bool:
     """True when tpu-inference runs the vLLM (torchax) model implementation.
