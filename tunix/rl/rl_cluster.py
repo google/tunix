@@ -14,6 +14,7 @@
 
 """Client facing abstraction for interacting with RL training engine."""
 
+import atexit
 import collections
 import contextlib
 import copy
@@ -24,6 +25,9 @@ import gc
 import itertools
 import operator
 import os
+import queue
+import threading
+import time
 from typing import Any, Callable, Mapping, Sequence, cast
 
 from absl import logging
@@ -76,6 +80,70 @@ MetricsT = perf_metrics.MetricsT
 MetricsBuffer = perf_metrics.MetricsBuffer
 
 
+def _env_flag(name: str, default: str = "0") -> bool:
+  """True iff the environment variable `name` is set to 1/true/True."""
+  return (os.environ.get(name, default) or default).strip() in (
+      "1",
+      "true",
+      "True",
+  )
+
+
+class _AsyncMetricsExporter:
+  """Runs metric flushes on one background thread (TUNIX_ASYNC_METRICS=1).
+
+  The queue is bounded (TUNIX_ASYNC_METRICS_QUEUE_DEPTH, default 3) and a
+  flush that does not fit is dropped with a warning: telemetry must never
+  block or crash training. `drain` waits for queued flushes (on `close` and
+  at exit).
+  """
+
+  def __init__(self, maxsize: int):
+    self._queue: queue.Queue[Callable[[], None]] = queue.Queue(maxsize=maxsize)
+    self._dropped = 0
+    self._worker = threading.Thread(
+        target=self._run, name="tunix-async-metrics", daemon=True
+    )
+    self._worker.start()
+    atexit.register(self.drain, 30.0)
+
+  def _run(self) -> None:
+    while True:
+      fn = self._queue.get()
+      try:
+        fn()
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.exception("TUNIX_ASYNC_METRICS: metrics flush failed.")
+      finally:
+        self._queue.task_done()
+
+  def submit(self, fn: Callable[[], None]) -> None:
+    try:
+      self._queue.put_nowait(fn)
+    except queue.Full:
+      self._dropped += 1
+      if self._dropped <= 3 or self._dropped % 50 == 0:
+        logging.warning(
+            "TUNIX_ASYNC_METRICS: queue full, dropped metrics flush #%d.",
+            self._dropped,
+        )
+
+  def drain(self, timeout_s: float) -> None:
+    deadline = time.monotonic() + timeout_s
+    with self._queue.all_tasks_done:
+      while self._queue.unfinished_tasks:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+          logging.warning(
+              "TUNIX_ASYNC_METRICS: %d metrics flushes still pending after"
+              " %.0fs.",
+              self._queue.unfinished_tasks,
+              timeout_s,
+          )
+          return
+        self._queue.all_tasks_done.wait(remaining)
+
+
 @contextlib.contextmanager
 def _profile_scope(
     engine: Any,
@@ -126,6 +194,7 @@ class RLEngine:
 
     self._init_backbone_sharing_map(actor, reference)
     self._anchor_policy_state = None
+    self._async_metrics_exporter: _AsyncMetricsExporter | None = None
 
     self._default_memory_kind = jax.devices()[0].default_memory().kind
     self.train_actor = self._load_model(actor, self.r2m[Role.ACTOR])
@@ -646,6 +715,9 @@ class RLEngine:
 
   def close(self):
     """Closes engine components and flushes buffered metrics and profiler traces."""
+    exporter = getattr(self, "_async_metrics_exporter", None)
+    if exporter is not None:
+      exporter.drain(timeout_s=30.0)
     for m in self._buffered_train_metrics + self._buffered_eval_metrics:
       self._log_metrics(m)
     self.actor_trainer.close()
@@ -704,6 +776,37 @@ class RLEngine:
     if self._external_metrics_logger is not None:
       self._external_metrics_logger(metrics_buffer)
 
+  def _flush_metrics_buffer(self, metrics_buffer: MetricsBuffer) -> None:
+    """Logs a completed metrics buffer.
+
+    With TUNIX_ASYNC_METRICS=1 the flush (metric conversion, the metrics
+    logger backends, e.g. a TensorBoard writer on remote storage, and the
+    external logger) runs on a background thread. Only the main process writes
+    metrics, so a synchronous flush stalls process 0 every step while the other
+    processes wait for it at the next collective; under multi-controller JAX
+    that stall becomes every host's step time. The buffer has already been
+    removed from the step buffers, so the background thread is its only user.
+
+    Args:
+      metrics_buffer: The completed buffer of one step.
+    """
+    if not _env_flag("TUNIX_ASYNC_METRICS"):
+      self._log_metrics(metrics_buffer)
+      return
+    if getattr(self, "_async_metrics_exporter", None) is None:
+      qdepth = int(
+          os.environ.get("TUNIX_ASYNC_METRICS_QUEUE_DEPTH", "3") or "3"
+      )
+      self._async_metrics_exporter = _AsyncMetricsExporter(max(1, qdepth))
+      logging.info(
+          "TUNIX_ASYNC_METRICS: metrics flushes run off the train loop"
+          " (queue depth %d).",
+          max(1, qdepth),
+      )
+    self._async_metrics_exporter.submit(
+        functools.partial(self._log_metrics, metrics_buffer)
+    )
+
   def with_external_metrics_logger(
       self, external_metrics_logger: Callable[[MetricsBuffer], None]
   ):
@@ -742,7 +845,7 @@ class RLEngine:
           if self._buffered_eval_metrics
           else []
       ):
-        self._log_metrics(m)
+        self._flush_metrics_buffer(m)
 
     cur_metrics = buffered_metrics[-1]
     for metric_name, (value, op) in metrics.items():
@@ -797,13 +900,13 @@ class RLEngine:
         and self._buffered_train_metrics[0].global_steps < self.global_steps
     ):
       for m in [self._buffered_train_metrics.pop(0)]:
-        self._log_metrics(m)
+        self._flush_metrics_buffer(m)
     if (
         self._buffered_eval_metrics
         and self._buffered_eval_metrics[0].global_steps < self.global_steps
     ):
       for m in [self._buffered_eval_metrics.pop(0)]:
-        self._log_metrics(m)
+        self._flush_metrics_buffer(m)
 
   def train(
       self,
