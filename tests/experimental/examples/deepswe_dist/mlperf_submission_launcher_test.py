@@ -1166,6 +1166,11 @@ class SubmissionLauncherTest(absltest.TestCase):
     orch = _jobset(_render(TRAINER_WARMUP_COMPILE="false"), "orch")
     self.assertNotIn("--trainer_warmup_compile", orch)
     self.assertNotIn("--trainer_warmup_routed_experts", orch)
+    # ORCHESTRATOR_EXTRA_ENV appends to rather than replacing the base vars.
+    orch = _jobset(_render(ORCHESTRATOR_EXTRA_ENV="CUSTOM_ORCH_VAR=42"), "orch")
+    self.assertRegex(orch, r"\bWEIGHT_SYNC_BIND_TIMEOUT_S=900\b")
+    self.assertRegex(orch, r"\bRAIDEN_PARALLELISM=16\b")
+    self.assertRegex(orch, r"\bCUSTOM_ORCH_VAR=42\b")
 
   def test_trajectory_store_is_enabled_by_default(self):
     orch = _jobset(self.default, "orch")
