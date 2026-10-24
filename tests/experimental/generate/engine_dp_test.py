@@ -15,13 +15,16 @@
 """Tests the engine with its KV caches split into data parallel ranks."""
 
 import os
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 import numpy as np
 
+from tunix.common import datatypes
 from tunix.common import routing
+from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import testing_utils
 from tunix.experimental.generate import utils
 
@@ -333,6 +336,49 @@ class EngineDPTest(parameterized.TestCase):
           output.logprobs, expected[request_id].logprobs
       )
       np.testing.assert_allclose(output.logits, expected[request_id].logits)
+
+  def test_page_indices_shared_within_cache_group_across_ranks(self):
+    geometries = {
+        "full_0": datatypes.CacheGeometry(num_kv_heads=1, head_dim=1),
+        "full_1": datatypes.CacheGeometry(num_kv_heads=1, head_dim=1),
+        "sliding_0": datatypes.CacheGeometry(
+            num_kv_heads=1, head_dim=1, window_size=8
+        ),
+        "sliding_1": datatypes.CacheGeometry(
+            num_kv_heads=1, head_dim=1, window_size=8
+        ),
+    }
+    engine = testing_utils.make_engine(
+        testing_utils.PagedSumTransformer(geometries=geometries),
+        max_device_size_gib=4 * 64 * testing_utils.GIB_PER_PAGE,
+        num_scheduler_steps=2,
+        dp_mesh=_dp_mesh(),
+    )
+    _add_requests(engine)
+
+    with mock.patch.object(
+        engine._model_runner,
+        "execute_step",
+        wraps=engine._model_runner.execute_step,
+    ) as spy:
+      outputs = _run(engine)
+
+    self.assertLen(outputs, len(_REQUESTS))
+    metadata = spy.call_args_list[0].kwargs["metadata"]
+    self.assertIsInstance(
+        metadata.page_indices, kv_cache_manager_lib.GroupedPageIndices
+    )
+    self.assertLen(jax.tree.leaves(metadata.page_indices), 2)
+    self.assertEqual(metadata.page_indices["full_0"].shape[0], _NUM_RANKS * 4)
+    self.assertIs(
+        metadata.page_indices["full_0"], metadata.page_indices["full_1"]
+    )
+    self.assertIs(
+        metadata.page_indices["sliding_0"], metadata.page_indices["sliding_1"]
+    )
+    self.assertIsNot(
+        metadata.page_indices["full_0"], metadata.page_indices["sliding_0"]
+    )
 
 
 if __name__ == "__main__":

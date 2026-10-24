@@ -94,7 +94,7 @@ class PagedSumTransformer(nnx.Module):
             P(dp_axes),
             P(dp_axes),
             cache_specs,
-            {name: P(dp_axes) for name in metadata.page_indices},
+            jax.tree.map(lambda _: P(dp_axes), metadata.page_indices),
             P(dp_axes),
             P(),
         ),
@@ -104,10 +104,7 @@ class PagedSumTransformer(nnx.Module):
         tokens,
         positions,
         cache,
-        {
-            name: jnp.asarray(table)
-            for name, table in metadata.page_indices.items()
-        },
+        jax.tree.map(jnp.asarray, metadata.page_indices),
         jnp.asarray(metadata.query_lens),
         self.offset.value,
     )

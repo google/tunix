@@ -711,10 +711,10 @@ class ModelRunner:
         + query_lens
     )
     decode_metadata = paged_attention.PagedAttnMetadata(
-        page_indices={
-            cache_name: jnp.asarray(idxs, dtype=jnp.int32)[order]
-            for cache_name, idxs in metadata.page_indices.items()
-        },
+        page_indices=jax.tree.map(
+            lambda idxs: jnp.asarray(idxs, dtype=jnp.int32)[order],
+            metadata.page_indices,
+        ),
         kv_lens=kv_lens,
         query_lens=query_lens,
         distribution=jnp.stack([num_surviving_per_group] * 3, axis=1),
