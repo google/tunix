@@ -27,6 +27,7 @@ from absl import logging
 import jax
 import jaxtyping
 from flax import nnx
+import numpy as np
 from tunix.rl import utils
 
 # TODO(tsbao): move this to util
@@ -137,6 +138,153 @@ def _get_reshard_fn_jax_device_put(
   )
 
 
+def _env_flag(name: str, default: str = '0') -> bool:
+  """True iff the environment variable `name` is set to 1/true/True."""
+  return (os.environ.get(name, default) or default).strip() in (
+      '1',
+      'true',
+      'True',
+  )
+
+
+# Multi-controller (jax.distributed, no Pathways) trainer -> in-process engine
+# weight publish. Enabled by TUNIX_MULTI_CONTROLLER_RESHARD=1.
+_MC_REPLICATE_FNS: dict[Any, Any] = {}
+_MC_STATE = {'barrier_done': False, 'logged': False}
+
+
+def _multicontroller_pre_reshard_barrier() -> None:
+  """Synchronizes all processes once before the first multi-controller publish.
+
+  The first trainer -> engine publish is the first collective that every
+  process must join after engine start-up. Hosts reach it with a start-up
+  spread wider than the runtime settle window, and a late peer could abort
+  the collective for everyone ("continuator has halted" on cold boots). A
+  device barrier plus a tiny all-gather first makes every host confirm it is
+  up and warms the collective path. One-time and best-effort; disable with
+  TUNIX_PRE_RESHARD_BARRIER=0.
+  """
+  if _MC_STATE['barrier_done']:
+    return
+  _MC_STATE['barrier_done'] = True
+  if not _env_flag('TUNIX_PRE_RESHARD_BARRIER', '1'):
+    return
+  if jax.process_count() <= 1:
+    return
+  from jax.experimental import multihost_utils  # pylint: disable=g-import-not-at-top
+
+  try:
+    multihost_utils.sync_global_devices('tunix_mc_pre_reshard')
+    gathered = multihost_utils.process_allgather(
+        np.asarray([jax.process_index()], dtype=np.int32)
+    )
+    np.asarray(gathered)
+    multihost_utils.sync_global_devices('tunix_mc_pre_reshard_done')
+    logging.info(
+        'Multi-controller pre-reshard barrier passed on %d processes.',
+        jax.process_count(),
+    )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logging.warning('Multi-controller pre-reshard barrier failed: %s', e)
+
+
+def _multicontroller_reshard_leaf(
+    x: Any, sharding: jax.sharding.Sharding, donate: bool = False
+) -> Any:
+  """Moves one trainer leaf onto an engine sharding of a subset of its devices.
+
+  Colocated multi-controller layout: the trainer array is sharded over every
+  device of the job, while each process's in-process engine holds its copy on
+  that process's local devices only. The source is therefore not fully
+  addressable from any process and `jax.device_put` refuses ("Cannot reshard
+  an input that is not fully addressable"). Instead every process runs the
+  same jitted identity whose input sharding is the source sharding and whose
+  output is replicated over the source mesh; XLA emits the all-gather over
+  ICI, after which each process copies its local replica onto the engine
+  devices (device to device, no host round-trip). The values are bit-exact;
+  only the transport changes.
+
+  Args:
+    x: The source leaf.
+    sharding: The target sharding.
+    donate: Forwarded to `jax.device_put` on the paths that use it.
+
+  Returns:
+    The leaf placed on `sharding`.
+  """
+  if not isinstance(x, jax.Array) or x.is_fully_addressable:
+    return jax.device_put(x, sharding, donate=donate)
+  src_sharding = x.sharding
+  src_devices = src_sharding.device_set
+  dst_devices = sharding.device_set
+  if not (
+      isinstance(src_sharding, jax.sharding.NamedSharding)
+      and dst_devices
+      and dst_devices < src_devices
+  ):
+    # Same device set (handled by device_put) or a layout this path does not
+    # cover; device_put raises a descriptive error in the latter case.
+    return jax.device_put(x, sharding, donate=donate)
+  key = (src_sharding, x.shape, str(x.dtype))
+  replicate = _MC_REPLICATE_FNS.get(key)
+  if replicate is None:
+    replicate = jax.jit(
+        lambda a: a,
+        in_shardings=src_sharding,
+        out_shardings=jax.sharding.NamedSharding(
+            src_sharding.mesh, jax.sharding.PartitionSpec()
+        ),
+    )
+    _MC_REPLICATE_FNS[key] = replicate
+  replicated = replicate(x)
+  # Bound the transient replicated copies to one leaf at a time.
+  jax.block_until_ready(replicated)
+  return jax.device_put(replicated.addressable_data(0), sharding)
+
+
+def _get_reshard_fn_multicontroller(
+    *,
+    cache_resharding_plans: bool,
+    donate: bool,
+    use_experimental_pre_reshard: bool,
+):
+  """Returns the multi-controller reshard function.
+
+  Enabled by TUNIX_MULTI_CONTROLLER_RESHARD=1.
+
+  Args:
+    cache_resharding_plans: Ignored; the jitted transfers are always cached.
+    donate: Forwarded to `jax.device_put` on the paths that use it.
+    use_experimental_pre_reshard: Ignored.
+
+  Raises:
+    EnvironmentError: The flag is off or the job has a single process, so the
+      next reshard function in the chain is used.
+  """
+  del cache_resharding_plans, use_experimental_pre_reshard
+  if not _env_flag('TUNIX_MULTI_CONTROLLER_RESHARD'):
+    raise EnvironmentError('TUNIX_MULTI_CONTROLLER_RESHARD is not set.')
+  if jax.process_count() <= 1:
+    raise EnvironmentError('Single-process job; no multi-controller reshard.')
+
+  def reshard_fn(x: Any, sharding: Any):
+    _multicontroller_pre_reshard_barrier()
+    if not _MC_STATE['logged']:
+      _MC_STATE['logged'] = True
+      logging.info(
+          'TUNIX_MULTI_CONTROLLER_RESHARD: publishing weights with the'
+          ' multi-controller transfer on %d processes.',
+          jax.process_count(),
+      )
+    return jax.tree.map(
+        functools.partial(_multicontroller_reshard_leaf, donate=donate),
+        x,
+        sharding,
+    )
+
+  return reshard_fn
+
+
 def _get_reshard_fn(
     cache_resharding_plans: bool,
     donate: bool,
@@ -218,6 +366,7 @@ def reshard_pytree(
       get_reshard_fns=[
           #
           _get_reshard_fn_pathwaysutils,
+          _get_reshard_fn_multicontroller,
           _get_reshard_fn_jax_device_put,
       ],
   )
