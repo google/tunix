@@ -583,6 +583,180 @@ class TrajectoryWriterTestCase(
       ):
         self.writer.add_step(trajectory_testing.STEP_1_1, traj)
 
+  def _skip_if_metrics_not_implemented(self) -> None:
+    if (
+        type(self.writer).update_metrics is store.TrajectoryStore.update_metrics
+        or type(self.reader).get_trajectories_metrics
+        is store.TrajectoryStore.get_trajectories_metrics
+    ):
+      self.skipTest(
+          f"{type(self.writer).__name__} does not implement TrajectoryMetrics"
+          " yet."
+      )
+
+  def test_update_metrics(self) -> None:
+    """Tests that update_metrics records metrics for a trajectory."""
+    self._skip_if_metrics_not_implemented()
+    metrics = trajectory_lib.TrajectoryMetrics(
+        extra={"reward": 1.0, "step": 10}
+    )
+    self.writer.update_metrics(trajectory_testing.TRAJECTORY_ID_1, metrics)
+    self.writer.flush()
+
+    retrieved = self.reader.get_trajectories_metrics(
+        [trajectory_testing.TRAJECTORY_ID_1]
+    )
+    self.assertEqual(retrieved, {trajectory_testing.TRAJECTORY_ID_1: metrics})
+
+  def test_update_metrics_shallow_merge_extra(self) -> None:
+    """Tests that subsequent update_metrics calls shallow-merge top-level extra keys."""
+    self._skip_if_metrics_not_implemented()
+    initial_metrics = trajectory_lib.TrajectoryMetrics(extra={"a": 1, "b": 2})
+    self.writer.update_metrics(
+        trajectory_testing.TRAJECTORY_ID_1, initial_metrics
+    )
+    self.writer.flush()
+
+    update_metrics = trajectory_lib.TrajectoryMetrics(extra={"b": 3, "c": 4})
+    self.writer.update_metrics(
+        trajectory_testing.TRAJECTORY_ID_1, update_metrics
+    )
+    self.writer.flush()
+
+    retrieved = self.reader.get_trajectories_metrics(
+        [trajectory_testing.TRAJECTORY_ID_1]
+    )
+    expected = trajectory_lib.TrajectoryMetrics(extra={"a": 1, "b": 3, "c": 4})
+    self.assertEqual(retrieved, {trajectory_testing.TRAJECTORY_ID_1: expected})
+
+  def test_update_metrics_preserves_none_values(self) -> None:
+    """Tests that updating a key with None preserves None rather than deleting it."""
+    self._skip_if_metrics_not_implemented()
+    initial_metrics = trajectory_lib.TrajectoryMetrics(extra={"a": 1, "b": 2})
+    self.writer.update_metrics(
+        trajectory_testing.TRAJECTORY_ID_1, initial_metrics
+    )
+    self.writer.flush()
+
+    update_metrics = trajectory_lib.TrajectoryMetrics(extra={"b": None})
+    self.writer.update_metrics(
+        trajectory_testing.TRAJECTORY_ID_1, update_metrics
+    )
+    self.writer.flush()
+
+    retrieved = self.reader.get_trajectories_metrics(
+        [trajectory_testing.TRAJECTORY_ID_1]
+    )
+    expected = trajectory_lib.TrajectoryMetrics(extra={"a": 1, "b": None})
+    self.assertEqual(retrieved, {trajectory_testing.TRAJECTORY_ID_1: expected})
+
+  def test_update_metrics_snapshots_metrics(self) -> None:
+    """Tests that mutating a TrajectoryMetrics object after logging does not alter stored state."""
+    self._skip_if_metrics_not_implemented()
+    metrics = trajectory_lib.TrajectoryMetrics(
+        extra={"a": 1, "tags": ["original"]}
+    )
+    self.writer.update_metrics(trajectory_testing.TRAJECTORY_ID_1, metrics)
+
+    # Mutate the caller's object
+    assert metrics.extra is not None
+    metrics.extra["a"] = 999
+    metrics.extra["tags"].append("mutated")
+    self.writer.flush()
+
+    retrieved = self.reader.get_trajectories_metrics(
+        [trajectory_testing.TRAJECTORY_ID_1]
+    )
+    expected = trajectory_lib.TrajectoryMetrics(
+        extra={"a": 1, "tags": ["original"]}
+    )
+    self.assertEqual(retrieved, {trajectory_testing.TRAJECTORY_ID_1: expected})
+
+  def test_get_trajectories_metrics_all_and_subsets(self) -> None:
+    """Tests get_trajectories_metrics with None (all) and explicit ID subsets."""
+    self._skip_if_metrics_not_implemented()
+    metrics_1 = trajectory_lib.TrajectoryMetrics(extra={"t": 1})
+    metrics_2 = trajectory_lib.TrajectoryMetrics(extra={"t": 2})
+
+    self.writer.update_metrics(trajectory_testing.TRAJECTORY_ID_1, metrics_1)
+    self.writer.update_metrics(trajectory_testing.TRAJECTORY_ID_2, metrics_2)
+    self.writer.flush()
+
+    # Get all
+    all_metrics = self.reader.get_trajectories_metrics(None)
+    self.assertEqual(
+        all_metrics,
+        {
+            trajectory_testing.TRAJECTORY_ID_1: metrics_1,
+            trajectory_testing.TRAJECTORY_ID_2: metrics_2,
+        },
+    )
+
+    # Get subset
+    subset = self.reader.get_trajectories_metrics(
+        [trajectory_testing.TRAJECTORY_ID_1]
+    )
+    self.assertEqual(
+        subset,
+        {trajectory_testing.TRAJECTORY_ID_1: metrics_1},
+    )
+
+    # Empty list
+    empty = self.reader.get_trajectories_metrics([])
+    self.assertEqual(empty, {})
+
+  def test_get_trajectories_metrics_missing_raises_error(self) -> None:
+    """Tests that requesting missing trajectory IDs raises TrajectoryMetricsNotFoundError."""
+    self._skip_if_metrics_not_implemented()
+    metrics_1 = trajectory_lib.TrajectoryMetrics(extra={"t": 1})
+    self.writer.update_metrics(trajectory_testing.TRAJECTORY_ID_1, metrics_1)
+    self.writer.flush()
+
+    with self.assertRaises(store.TrajectoryMetricsNotFoundError) as ctx:
+      self.reader.get_trajectories_metrics(["missing_id_1", "missing_id_2"])
+    self.assertCountEqual(
+        ctx.exception.trajectory_ids, ["missing_id_1", "missing_id_2"]
+    )
+
+  @parameterized.named_parameters(
+      ("empty", ""),
+      ("whitespace", "   "),
+  )
+  def test_update_metrics_invalid_trajectory_id(
+      self, trajectory_id: str
+  ) -> None:
+    """Tests that update_metrics with empty or whitespace trajectory ID raises ValueError."""
+    self._skip_if_metrics_not_implemented()
+    metrics = trajectory_lib.TrajectoryMetrics(extra={"score": 1.0})
+    with self.assertRaises(ValueError):
+      self.writer.update_metrics(trajectory_id, metrics)
+
+  def test_update_metrics_invalid_type_raises_type_error(self) -> None:
+    """Tests that passing a non-TrajectoryMetrics instance raises TypeError."""
+    self._skip_if_metrics_not_implemented()
+    with self.assertRaises(TypeError):
+      self.writer.update_metrics(
+          trajectory_testing.TRAJECTORY_ID_1,
+          {"not": "a_trajectory_metrics"},  # type: ignore
+      )
+
+  def test_update_metrics_standalone_does_not_affect_metadata_or_steps(
+      self,
+  ) -> None:
+    """Tests that update_metrics for a trajectory with no steps/metadata does not pollute get_trajectories_metadata."""
+    self._skip_if_metrics_not_implemented()
+    metrics = trajectory_lib.TrajectoryMetrics(extra={"score": 100})
+    self.writer.update_metrics("metrics_only_traj", metrics)
+    self.writer.flush()
+
+    # Metadata reader should return empty (or not include metrics_only_traj)
+    metas = self.reader.get_trajectories_metadata()
+    self.assertNotIn("metrics_only_traj", [m.trajectory_id for m in metas])
+
+    # Reading metrics alone should succeed
+    retrieved = self.reader.get_trajectories_metrics(["metrics_only_traj"])
+    self.assertEqual(retrieved, {"metrics_only_traj": metrics})
+
 
 class TrajectoryStoreMetadataClsTestCase(
     trajectory_testing.TrajectoryTestCase, metaclass=ParameterizedABCMeta

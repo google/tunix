@@ -292,6 +292,7 @@ class TrajectoryCollectEngine:
           gamma=self.gamma,
           env_time=self.env_time if include_timings else None,
           reward_time=self.reward_time if include_timings else None,
+          include_final_metrics=include_timings,
       )
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(

@@ -331,6 +331,59 @@ class GenericTypeParametersTest(absltest.TestCase):
     self.assertIsInstance(sql_s, store_lib.TrajectoryWriter)
     sql_s.close()
 
+  def test_trajectory_metrics_not_found_error(self) -> None:
+    """Verifies TrajectoryMetricsNotFoundError attributes and string representation."""
+    err_single = store_lib.TrajectoryMetricsNotFoundError("t1")
+    self.assertEqual(err_single.trajectory_ids, ["t1"])
+    self.assertIn("t1", str(err_single))
+
+    err_multi = store_lib.TrajectoryMetricsNotFoundError(["t1", "t2"])
+    self.assertEqual(err_multi.trajectory_ids, ["t1", "t2"])
+    self.assertIn("t1", str(err_multi))
+    self.assertIn("t2", str(err_multi))
+    self.assertIsInstance(err_multi, KeyError)
+
+  def test_base_trajectory_store_unimplemented_metrics_methods_raise(
+      self,
+  ) -> None:
+    """Verifies that TrajectoryStore base methods raise NotImplementedError."""
+
+    class MinimalStore(
+        store_lib.TrajectoryStore[trajectory_lib.TrajectoryMetadata]
+    ):
+      BACKEND = "minimal"
+
+      @classmethod
+      def _from_config(cls, config):
+        return cls()
+
+      def to_config(self):
+        return {"backend": "minimal"}
+
+      def get_trajectories_metadata(self, trajectory_ids=None):
+        return []
+
+      def get_trajectories(self, trajectory_ids):
+        return []
+
+      def add_step(self, step, metadata):
+        pass
+
+      def update_metadata(self, metadata):
+        pass
+
+      def flush(self):
+        pass
+
+      def close(self):
+        pass
+
+    s = MinimalStore()
+    with self.assertRaises(NotImplementedError):
+      s.update_metrics("t1", trajectory_lib.TrajectoryMetrics(extra={}))
+    with self.assertRaises(NotImplementedError):
+      s.get_trajectories_metrics()
+
   def test_subclassing_closes_type_parameters(self) -> None:
     """Verifies that concrete subclassing binds and closes type parameters."""
 

@@ -9,6 +9,7 @@ from unittest import mock
 from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
+import numpy as np
 from tunix.dist_rl.trajectory import async_writer
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
@@ -35,8 +36,13 @@ class _TestAsyncWriter(async_writer.AsyncWriter[_TestWriteTask]):
       thread_name: str | None = None,
       fail_on_step_id: int | None = None,
       max_queue_size: int = async_writer.DEFAULT_MAX_QUEUE_SIZE,
+      step_array_filter: async_writer.StepArrayFilter | None = None,
   ):
-    super().__init__(thread_name=thread_name, max_queue_size=max_queue_size)
+    super().__init__(
+        thread_name=thread_name,
+        max_queue_size=max_queue_size,
+        step_array_filter=step_array_filter,
+    )
     self.processed_tasks: list[_TestWriteTask] = []
     self.processing_thread_ids: list[int] = []
     self.fail_on_step_id = fail_on_step_id
@@ -64,6 +70,11 @@ class _TestAsyncWriter(async_writer.AsyncWriter[_TestWriteTask]):
     )
     self._enqueue(task)
     return task
+
+  def _create_metrics_task(
+      self, trajectory_id: str, metrics: trajectory_lib.TrajectoryMetrics
+  ) -> _TestWriteTask:
+    return _TestWriteTask(trajectory_id=trajectory_id, metrics=metrics)
 
   def _process_task(self, task: _TestWriteTask) -> None:
     if (
@@ -557,16 +568,190 @@ class AsyncWriterTest(trajectory_testing.TrajectoryTestCase):
     writer = self._create_writer()
 
     self.assertEqual(writer.max_queue_size, async_writer.DEFAULT_MAX_QUEUE_SIZE)
-    self.assertEqual(writer.step_queue_limit, 9_000)
+    self.assertEqual(writer.step_queue_limit, 8_000)
+    self.assertEqual(writer.metrics_queue_limit, 9_500)
 
-  @parameterized.parameters((10, 9), (1, 1))
+  @parameterized.parameters((10, 8, 9), (1, 1, 1))
   def test_writer_with_custom_max_queue_size_sets_queue_limits(
-      self, max_queue_size: int, expected_step_limit: int
+      self,
+      max_queue_size: int,
+      expected_step_limit: int,
+      expected_metrics_limit: int,
   ) -> None:
     writer = self._create_writer(max_queue_size=max_queue_size)
 
     self.assertEqual(writer.max_queue_size, max_queue_size)
     self.assertEqual(writer.step_queue_limit, expected_step_limit)
+    self.assertEqual(writer.metrics_queue_limit, expected_metrics_limit)
+
+  def test_write_task_metrics_only(self) -> None:
+    metrics = trajectory_lib.TrajectoryMetrics(extra={"scalar": 42.0})
+    task = async_writer.WriteTask(
+        trajectory_id="metrics_traj",
+        metrics=metrics,
+    )
+    self.assertEqual(task.trajectory_id, "metrics_traj")
+    self.assertIsNone(task.metadata)
+    self.assertIsNone(task.step)
+    self.assertEqual(task.metrics, metrics)
+    task.to_atif()
+    self.assertEqual(task.trajectory_id, "metrics_traj")
+    self.assertEqual(task.metrics, metrics)
+
+  def test_write_task_missing_trajectory_id_raises(self) -> None:
+    metrics = trajectory_lib.TrajectoryMetrics(extra={})
+    with self.assertRaises(ValueError):
+      async_writer.WriteTask(metrics=metrics)
+
+  def test_update_metrics_enqueues_and_processes(self) -> None:
+    writer = self._create_writer()
+    metrics = trajectory_lib.TrajectoryMetrics(extra={"reward": 1.0})
+    writer.update_metrics(trajectory_testing.TRAJECTORY_ID_1, metrics)
+    writer.flush()
+
+    self.assertLen(writer.processed_tasks, 1)
+    task = writer.processed_tasks[0]
+    self.assertEqual(task.trajectory_id, trajectory_testing.TRAJECTORY_ID_1)
+    self.assertEqual(task.metrics, metrics)
+    self.assertIsNone(task.metadata)
+    self.assertIsNone(task.step)
+
+  def test_update_metrics_snapshots_nested_dicts_and_numpy_arrays(self) -> None:
+    writer = self._create_writer()
+    arr = np.array([1.0, 2.0, 3.0])
+    metrics = trajectory_lib.TrajectoryMetrics(
+        extra={"arr": arr, "nested": {"val": 10}}
+    )
+    writer.update_metrics(trajectory_testing.TRAJECTORY_ID_1, metrics)
+
+    # Mutate caller's objects
+    arr[0] = 999.0
+    assert metrics.extra is not None
+    metrics.extra["nested"]["val"] = 999
+    writer.flush()
+
+    self.assertLen(writer.processed_tasks, 1)
+    task_metrics = writer.processed_tasks[0].metrics
+    assert task_metrics is not None
+    stored_extra = task_metrics.extra
+    assert stored_extra is not None
+    self.assertEqual(stored_extra["nested"]["val"], 10)
+    np.testing.assert_array_equal(
+        stored_extra["arr"], np.array([1.0, 2.0, 3.0])
+    )
+
+  def test_update_metrics_invalid_type_raises_type_error(self) -> None:
+    writer = self._create_writer()
+    with self.assertRaises(TypeError):
+      writer.update_metrics(
+          trajectory_testing.TRAJECTORY_ID_1, {"not": "metrics"}  # type: ignore
+      )
+
+  @parameterized.parameters("", "   ")
+  def test_update_metrics_invalid_trajectory_id_raises_value_error(
+      self, invalid_id: str
+  ) -> None:
+    writer = self._create_writer()
+    metrics = trajectory_lib.TrajectoryMetrics(extra={})
+    with self.assertRaises(ValueError):
+      writer.update_metrics(invalid_id, metrics)
+
+  def test_update_metrics_on_closed_writer_raises_runtime_error(self) -> None:
+    writer = self._create_writer()
+    writer.close()
+    metrics = trajectory_lib.TrajectoryMetrics(extra={})
+    with self.assertRaisesRegex(
+        RuntimeError, r"Cannot write to a closed writer"
+    ):
+      writer.update_metrics(trajectory_testing.TRAJECTORY_ID_1, metrics)
+
+  def test_three_tier_watermark_queue_admission(self) -> None:
+    writer = self._create_writer(max_queue_size=10)
+    worker_started = threading.Event()
+    unblock_worker = threading.Event()
+    self.addCleanup(unblock_worker.set)
+    original_process_task = writer._process_task
+
+    def stalled_process_task(task: _TestWriteTask) -> None:
+      if not worker_started.is_set():
+        worker_started.set()
+        unblock_worker.wait(timeout=_WORKER_BLOCK_TIMEOUT_S)
+      original_process_task(task)
+
+    with mock.patch.object(
+        writer, "_process_task", side_effect=stalled_process_task
+    ):
+      # Task 1 dequeued and stalls worker; tasks 2-9 fill 8 step slots.
+      writer.enqueue(step_id=1)
+      self.assertTrue(worker_started.wait(timeout=_WORKER_START_TIMEOUT_S))
+      for i in range(2, 10):
+        writer.enqueue(step_id=i)
+
+      # 9th slot in queue (current_size=8 >= step_queue_limit=8):
+      with mock.patch.object(logging, "warning") as mock_log_warning:
+        writer.enqueue(step_id=10)
+      mock_log_warning.assert_called_once_with(
+          "%s step queue reached capacity (%d/%d); dropped step_id=%s"
+          " for trajectory_id=%s.",
+          "_TestAsyncWriterWorker",
+          8,
+          8,
+          10,
+          trajectory_testing.TRAJECTORY_ID_1,
+      )
+
+      # Metrics task is admitted into the 9th slot (current_size=8 < metrics_queue_limit=9):
+      metrics = trajectory_lib.TrajectoryMetrics(extra={"score": 100})
+      writer.update_metrics(trajectory_testing.TRAJECTORY_ID_1, metrics)
+
+      # When current_size=9 (>= metrics_queue_limit=9), metrics task is dropped with warning:
+      with mock.patch.object(logging, "warning") as mock_log_warning:
+        writer.update_metrics(trajectory_testing.TRAJECTORY_ID_2, metrics)
+      mock_log_warning.assert_called_once_with(
+          "%s metrics queue reached capacity (%d/%d); dropped metrics"
+          " for trajectory_id=%s.",
+          "_TestAsyncWriterWorker",
+          9,
+          9,
+          trajectory_testing.TRAJECTORY_ID_2,
+      )
+
+      # Metadata task is admitted into the 10th slot (current_size=9 < max_queue_size=10):
+      completed_meta = trajectory_testing.make_metadata(
+          trajectory_id="completed_traj",
+          session_id="session_end",
+      )
+      writer.enqueue(metadata=completed_meta)
+
+      # When current_size=10 (>= max_queue_size=10), metadata task is dropped with warning:
+      with mock.patch.object(logging, "warning") as mock_log_warning:
+        writer.enqueue(metadata=completed_meta)
+      mock_log_warning.assert_called_once_with(
+          "%s queue is full (%d/%d); dropped metadata task for"
+          " trajectory_id=%s.",
+          "_TestAsyncWriterWorker",
+          10,
+          10,
+          "completed_traj",
+      )
+
+      unblock_worker.set()
+      writer.flush()
+
+    step_ids = [
+        t.step.step_id for t in writer.processed_tasks if t.step is not None
+    ]
+    self.assertEqual(step_ids, list(range(1, 10)))
+    metrics_tasks = [t for t in writer.processed_tasks if t.metrics is not None]
+    self.assertLen(metrics_tasks, 1)
+    metadata_tasks = [
+        t
+        for t in writer.processed_tasks
+        if t.metadata is not None and t.step is None and t.metrics is None
+    ]
+    self.assertLen(metadata_tasks, 1)
+    assert metadata_tasks[0].metadata is not None
+    self.assertEqual(metadata_tasks[0].metadata.session_id, "session_end")
 
   @parameterized.parameters(0, -1, -100)
   def test_writer_with_non_positive_max_queue_size_raises_value_error(
@@ -716,6 +901,125 @@ class AsyncWriterShutdownHookTest(parameterized.TestCase):
     mock_log_exception.assert_called_once()
     self.assertTrue(healthy_writer.is_closed)
     self.assertLen(healthy_writer.processed_tasks, 1)
+
+  # ============================================================================
+  # 8. Step Array Filtering & Pre-DeepCopy Stripping
+  # ============================================================================
+
+  def test_step_array_filter_has_filters(self) -> None:
+    empty_filter = async_writer.StepArrayFilter()
+    self.assertFalse(empty_filter.has_filters)
+
+    tokens_filter = async_writer.StepArrayFilter(filter_tokens=True)
+    self.assertTrue(tokens_filter.has_filters)
+
+    logprobs_filter = async_writer.StepArrayFilter(filter_logprobs=True)
+    self.assertTrue(logprobs_filter.has_filters)
+
+    masks_filter = async_writer.StepArrayFilter(filter_masks=True)
+    self.assertTrue(masks_filter.has_filters)
+
+    routed_filter = async_writer.StepArrayFilter(filter_routed_experts=True)
+    self.assertTrue(routed_filter.has_filters)
+
+  def test_filter_step_arrays_returns_original_when_no_filter(self) -> None:
+    step = trajectory_testing.STEP_1_1
+    self.assertIs(async_writer.filter_step_arrays(step, None), step)
+    empty_filter = async_writer.StepArrayFilter()
+    self.assertIs(async_writer.filter_step_arrays(step, empty_filter), step)
+    self.assertIsNone(async_writer.filter_step_arrays(None, empty_filter))
+
+  def test_filter_step_arrays_strips_tunix_agent_step_fields(self) -> None:
+    live_step = trajectory_lib.TunixAgentStep(
+        step_id=1,
+        source=trajectory_lib.Source.AGENT,
+        message="model call",
+        assistant_tokens=np.array([101, 102]),
+        assistant_masks=np.array([1, 1]),
+        logprobs=np.array([-0.1, -0.2]),
+        prefill_routed_experts=np.zeros((2, 2, 2), dtype=np.int16),
+        prefill_start=0,
+        prefill_num_context=1,
+        metrics=trajectory_lib.Metrics(
+            completion_tokens=2,
+            completion_token_ids=[101, 102],
+            logprobs=[-0.1, -0.2],
+        ),
+    )
+    filter_config = async_writer.StepArrayFilter(
+        filter_tokens=True,
+        filter_masks=True,
+        filter_logprobs=True,
+        filter_routed_experts=True,
+    )
+    filtered = async_writer.filter_step_arrays(live_step, filter_config)
+    self.assertIsNot(filtered, live_step)
+    self.assertIsInstance(filtered, trajectory_lib.TunixAgentStep)
+    self.assertIsNone(filtered.assistant_tokens)
+    self.assertIsNone(filtered.assistant_masks)
+    self.assertIsNone(filtered.logprobs)
+    self.assertIsNone(filtered.prefill_routed_experts)
+    self.assertIsNone(filtered.prefill_start)
+    self.assertIsNone(filtered.prefill_num_context)
+    self.assertIsNotNone(filtered.metrics)
+    self.assertIsNone(filtered.metrics.completion_token_ids)
+    self.assertIsNone(filtered.metrics.logprobs)
+    self.assertEqual(filtered.metrics.completion_tokens, 2)
+
+    # Caller's live step object was not mutated.
+    self.assertIsNotNone(live_step.assistant_tokens)
+    self.assertIsNotNone(live_step.logprobs)
+    self.assertIsNotNone(live_step.prefill_routed_experts)
+
+  def test_filter_step_arrays_strips_tunix_env_step_fields(self) -> None:
+    live_env = trajectory_lib.TunixEnvStep(
+        step_id=2,
+        source=trajectory_lib.Source.SYSTEM,
+        message="obs",
+        env_tokens=np.array([201, 202]),
+        env_masks=np.array([1, 1]),
+    )
+    filter_config = async_writer.StepArrayFilter(
+        filter_tokens=True,
+        filter_masks=True,
+    )
+    filtered = async_writer.filter_step_arrays(live_env, filter_config)
+    self.assertIsNot(filtered, live_env)
+    self.assertIsInstance(filtered, trajectory_lib.TunixEnvStep)
+    self.assertIsNone(filtered.env_tokens)
+    self.assertIsNone(filtered.env_masks)
+    # Live step remains untouched.
+    self.assertIsNotNone(live_env.env_tokens)
+
+  def test_write_task_filters_step_before_deep_copy(self) -> None:
+    live_step = trajectory_lib.TunixAgentStep(
+        step_id=1,
+        source=trajectory_lib.Source.AGENT,
+        message="msg",
+        assistant_tokens=np.array([101, 102]),
+        logprobs=np.array([-0.5, -0.5]),
+    )
+    filter_config = async_writer.StepArrayFilter(
+        filter_tokens=True,
+        filter_logprobs=True,
+    )
+    task = _TestWriteTask(
+        trajectory_id="traj_task",
+        step=live_step,
+        step_array_filter=filter_config,
+    )
+    self.assertIsNotNone(task.step)
+    self.assertIsInstance(task.step, trajectory_lib.TunixAgentStep)
+    self.assertIsNone(task.step.assistant_tokens)
+    self.assertIsNone(task.step.logprobs)
+    # Original live step was preserved.
+    self.assertIsNotNone(live_step.assistant_tokens)
+    self.assertIsNotNone(live_step.logprobs)
+
+  def test_writer_stores_step_array_filter_property(self) -> None:
+    filter_config = async_writer.StepArrayFilter(filter_tokens=True)
+    writer = _TestAsyncWriter(step_array_filter=filter_config)
+    self.assertEqual(writer.step_array_filter, filter_config)
 
 
 if __name__ == "__main__":
