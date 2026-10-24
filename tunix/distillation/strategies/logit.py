@@ -24,6 +24,17 @@ from tunix.distillation.strategies import base_strategy
 ModelForwardCallable = base_strategy.ModelForwardCallable
 
 
+def _masked_mean(values: jax.Array, labels: jax.Array) -> jax.Array:
+  """Means `values` over positions whose label row is non-zero.
+
+  Padding positions are expected to carry an all-zero label row (see
+  `examples/logit_distillation.ipynb`), so they are excluded from the mean.
+  Un-padded inputs, where every label row sums to 1, reduce to `jnp.mean`.
+  """
+  valid = (jnp.sum(labels, axis=-1) > 0).astype(values.dtype)
+  return jnp.sum(values * valid) / jnp.maximum(jnp.sum(valid), 1.0)
+
+
 class LogitStrategy(base_strategy.BaseStrategy):
   """Implements Logit Distillation.
 
@@ -87,7 +98,7 @@ class LogitStrategy(base_strategy.BaseStrategy):
 
     # Calculate Task Loss (Cross-Entropy on original student logits)
     ce_loss = optax.softmax_cross_entropy(logits=s_logits, labels=labels)
-    task_loss = jnp.mean(ce_loss)
+    task_loss = _masked_mean(ce_loss, labels)
 
     return task_loss, {}
 
@@ -144,15 +155,15 @@ class LogitStrategy(base_strategy.BaseStrategy):
     # Applying temperature scaling to KL loss as per
     # (https://arxiv.org/pdf/1503.02531)
     scaled_kl_loss = kl_loss * (self.temperature**2)
-    distillation_loss = jnp.mean(scaled_kl_loss)
+    distillation_loss = _masked_mean(scaled_kl_loss, labels)
 
     # Calculate Task Loss (Cross-Entropy on original student logits)
     ce_loss = optax.softmax_cross_entropy(logits=s_logits, labels=labels)
-    task_loss = jnp.mean(ce_loss)
+    task_loss = _masked_mean(ce_loss, labels)
 
     # Calculate Teacher Loss (For monitoring/verification only)
     ce_loss_teacher = optax.softmax_cross_entropy(logits=t_logits, labels=labels)
-    teacher_task_loss = jnp.mean(ce_loss_teacher)
+    teacher_task_loss = _masked_mean(ce_loss_teacher, labels)
 
     # Combine the losses
     combined_loss = (self.alpha * distillation_loss) + (
@@ -162,7 +173,7 @@ class LogitStrategy(base_strategy.BaseStrategy):
     metrics = {
         "distill/soft_loss": distillation_loss,
         "distill/hard_loss": task_loss,
-        "distill/kl_div": jnp.mean(kl_loss),
+        "distill/kl_div": _masked_mean(kl_loss, labels),
         "distill/teacher_loss": teacher_task_loss,
     }
 
