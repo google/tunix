@@ -76,6 +76,15 @@ MetricsT = perf_metrics.MetricsT
 MetricsBuffer = perf_metrics.MetricsBuffer
 
 
+def _env_flag(name: str, default: str = "0") -> bool:
+  """True iff the environment variable `name` is set to 1/true/True."""
+  return (os.environ.get(name, default) or default).strip() in (
+      "1",
+      "true",
+      "True",
+  )
+
+
 @contextlib.contextmanager
 def _profile_scope(
     engine: Any,
@@ -924,7 +933,7 @@ class RLEngine:
       raise ValueError("Cannot generate from an empty list of prompts.")
     micro_batch_size = micro_batch_size or len(prompt_rows)
 
-    with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT) as (mesh, _):
+    with self._generate_mesh_cm() as (mesh, _):
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
@@ -1364,6 +1373,27 @@ class RLEngine:
       return self.cluster_config.rollout_config[mode]
     else:
       return self.cluster_config.rollout_config
+
+  def _generate_mesh_cm(self):
+    """Mesh context for `generate`.
+
+    By default `generate` enters the ROLLOUT mesh and its logical axis rules.
+    With `TUNIX_ROLLOUT_NO_MESH_CONTEXT=1` it yields the ROLLOUT mesh without
+    entering it. A host-local in-process engine (TUNIX_VLLM_HOST_LOCAL_ENGINE=1)
+    sets its own per-process mesh inside `execute_model`; entering the global
+    ROLLOUT mesh around it makes jit read two meshes, and eager ops in the
+    engine's decode loop then fail on some processes with "Attempted to
+    execute with N argument lists when local device count is M". Other roles
+    and the ROLLOUT uses outside `generate` keep the normal context.
+
+    Returns:
+      A context manager yielding `(mesh, logical_axis_rules_or_None)`.
+    """
+    if _env_flag("TUNIX_ROLLOUT_NO_MESH_CONTEXT"):
+      return contextlib.nullcontext(
+          (self.cluster_config.role_to_mesh[Role.ROLLOUT], None)
+      )
+    return self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT)
 
   @contextlib.contextmanager
   def _get_mesh_and_logical_axis_rules_cm(self, role: Role):
