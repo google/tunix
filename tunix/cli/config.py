@@ -47,6 +47,183 @@ _SUPPORTED_MODEL_SOURCES = (
     "maxtext",
     "",
 )
+_OPEN_DICT_KEYS: frozenset[str] = frozenset({
+    "kwargs",
+    "chain_kwargs",
+    "lora_config",
+    "data_config",
+    "agent_kwargs",
+    "env_kwargs",
+    "kubernetes_config",
+    "sglang_jax_config",
+    "agentic_ppo_config",
+    "perf_metrics_options",
+})
+
+
+# Mesh axis names understood by `HyperParameters.mesh_axes`.
+_MESH_AXES: tuple[str, ...] = ("fsdp", "tp", "expert", "dp")
+# `mesh` sub-keys that are positionally coupled and so are inherited together.
+_MESH_PAIR_KEYS: tuple[str, ...] = ("shape", "axis_names")
+_ROLE_MODEL_CONFIG_KEYS: tuple[str, ...] = (
+    "actor_model_config",
+    "critic_model_config",
+    "reference_model_config",
+    "rollout_model_config",
+)
+
+
+def to_str_dict(cfg: object) -> dict[str, object]:
+  """Narrows a config value to `dict[str, object]`.
+
+  Config sections are loosely typed (`OrderedDict[str, Any]` values), so this
+  takes any value and fails loud unless it holds a mapping.
+
+  Args:
+    cfg: A `DictConfig` (converted with interpolations resolved, which yields
+      plain nested containers) or a mapping (copied shallowly).
+
+  Returns:
+    A new dictionary with the top-level keys converted to `str`.
+
+  Raises:
+    TypeError: If `cfg` does not hold a mapping.
+  """
+  container = (
+      omegaconf.OmegaConf.to_container(cfg, resolve=True)
+      if isinstance(cfg, omegaconf.DictConfig)
+      else cfg
+  )
+  if not isinstance(container, Mapping):
+    raise TypeError(f"Expected mapping container, got {type(container)!r}.")
+  return {str(k): v for k, v in container.items()}
+
+
+# TODO(noghabi): Let callers supply the open-section allowlist (e.g. a class
+# attribute) instead of the hard-coded _OPEN_DICT_KEYS.
+def _validate_nested_keys(
+    schema: Mapping[str, object],
+    candidate: Mapping[str, object],
+    prefix: str = "",
+    open_dict_keys: frozenset[str] = _OPEN_DICT_KEYS,
+) -> None:
+  """Validates that every key in `candidate` exists in `schema`, at any depth.
+
+  The schema is expected to be complete. A section is open (it accepts any
+  nested keys) when its name is in `open_dict_keys` or its schema value is an
+  empty mapping (`{}`). A null schema value also accepts any mapping, since it
+  carries no structure to check against.
+
+  Args:
+    schema: The base config to validate against.
+    candidate: The parsed overrides to validate.
+    prefix: The dotted path of `schema` and `candidate`; empty at the root.
+    open_dict_keys: Section names that accept any nested keys.
+
+  Raises:
+    ValueError: If `candidate` has a key that `schema` lacks, or nests keys
+      under a key whose schema value is neither a mapping nor null. The message
+      names the dotted path.
+  """
+  for key, value in candidate.items():
+    dotpath = f"{prefix}.{key}" if prefix else str(key)
+    if key not in schema:
+      raise ValueError(
+          f"Unknown configuration key '{dotpath}'. Allowed keys at"
+          f" '{prefix or '<root>'}': {sorted(schema.keys())}"
+      )
+    if key in open_dict_keys or not isinstance(value, Mapping):
+      continue
+    schema_val = schema[key]
+    if schema_val is None:
+      continue
+    if not isinstance(schema_val, Mapping):
+      raise ValueError(
+          f"'{dotpath}' is a {type(schema_val).__name__} in the base config;"
+          f" nested keys {sorted(value)} are not allowed."
+      )
+    if not schema_val:
+      continue
+    _validate_nested_keys(
+        to_str_dict(schema_val),
+        to_str_dict(value),
+        prefix=dotpath,
+        open_dict_keys=open_dict_keys,
+    )
+
+
+def _override_paths(
+    overrides: Sequence[str],
+) -> tuple[frozenset[str], frozenset[str]]:
+  """Returns the dotted paths that `overrides` assign and touch.
+
+  Args:
+    overrides: Flattened `key=value` overrides (override files, then CLI).
+
+  Returns:
+    A tuple `(assigned, touched)`. `assigned` holds every path that was set
+    directly: each override's left-hand side (so `x={}` and flow-style `x={...}`
+    count as assigning `x`) and every leaf of the parsed override tree, where
+    an empty mapping is a leaf. `touched` holds `assigned` plus all prefixes of
+    those paths.
+  """
+  assigned: set[str] = {arg.split("=", 1)[0] for arg in overrides}
+  pending: list[tuple[str, Mapping[str, object]]] = [
+      ("", to_str_dict(omegaconf.OmegaConf.from_cli(list(overrides))))
+  ]
+  while pending:
+    prefix, tree = pending.pop()
+    for key, value in tree.items():
+      path = f"{prefix}.{key}" if prefix else key
+      if isinstance(value, Mapping) and value:
+        pending.append((path, to_str_dict(value)))
+      else:
+        assigned.add(path)
+  touched: set[str] = set()
+  for path in assigned:
+    parts = path.split(".")
+    touched.update(".".join(parts[:i]) for i in range(1, len(parts) + 1))
+  return frozenset(assigned), frozenset(touched)
+
+
+def _inherits(
+    role: Mapping[str, object], base: Mapping[str, object], key: str
+) -> bool:
+  """Returns whether `role[key]` is absent or still equals `base[key]`."""
+  if key not in role:
+    return True
+  return key in base and role[key] == base[key]
+
+
+def normalize_argv(
+    argv: Sequence[str],
+    default_base_config: str | pathlib.Path,
+) -> list[str]:
+  """Normalizes `argv` into `[entry_point, base_yaml_path, *overrides]`.
+
+  Args:
+    argv: Command-line arguments. The first element is treated as the entry
+      point when it neither ends in `.yaml`/`.yml` nor contains `=`; otherwise
+      `"resolve_config"` is used. The next element is the base YAML when it does
+      not contain `=`.
+    default_base_config: Base YAML used when `argv` does not name one, or names
+      a file with the same basename.
+
+  Returns:
+    The normalized argument list.
+  """
+  args = list(argv)
+  entry_point = "resolve_config"
+  if args and not args[0].endswith((".yaml", ".yml")) and "=" not in args[0]:
+    entry_point = args[0] or "resolve_config"
+    args = args[1:]
+
+  default_path = pathlib.Path(default_base_config)
+  if not args or "=" in args[0]:
+    return [entry_point, str(default_path)] + args
+  if args[0] == default_path.name:
+    return [entry_point, str(default_path)] + args[1:]
+  return [entry_point, args[0]] + args[1:]
 
 
 def yaml_key_to_env_key(s: str) -> str:
@@ -149,6 +326,9 @@ def get_project_root() -> pathlib.Path:
   return pathlib.Path.cwd()
 
 
+# TODO(noghabi): Merge override files with OmegaConf.load/merge to keep value
+# types (quoted strings currently re-parse as YAML); affects the flags-off path,
+# so needs its own change.
 def _dict_to_cli_args(
     d: collections.abc.Mapping[str, Any], parent_key: str = "", sep: str = "."
 ) -> Iterator[str]:
@@ -393,17 +573,56 @@ class HyperParameters:
   Environment variables prefixed with `T_` can also be used to set parameters,
   but it is an error to set a parameter via both an environment variable and
   a command-line argument or override file.
+
+  Optional keyword-only flags (all off by default; existing CLI behavior is
+  unchanged when they are off):
+  * `default_base_config`: Base YAML used when `argv` does not name one.
+  * `merge_replace_keys`: Deep-merge instead of replace. Allows multiple
+    `override_config_file=` arguments, disables `replace_keys`, and merges
+    `model_config` into role configs per nested sub-key while preserving
+    explicit role overrides.
+    - "Explicit" means any role path set by an override file or the CLI,
+      including values that YAML anchors expand to in an override file (anchors
+      in the base YAML do not count). A role key set as a whole (`role.k=...`,
+      `role.k={}`, flow-style `role.k={...}`, or `k: {}` in an override file)
+      is never inherited; a nested sub-key is explicit when it or any of its
+      descendants was set.
+    - `mesh.shape` and `mesh.axis_names` are inherited as a pair: a role that
+      sets either one keeps both of its own. Other `mesh` sub-keys are merged
+      one by one.
+    - Overrides only add keys, so `x={}` cannot clear a mapping; use
+      `x=null` instead.
+  * `validate_nested`: Rejects override keys (at any depth) that are not in the
+    base YAML, and nested keys under scalar base values. The base YAML must be
+    a complete schema; sections listed in `_OPEN_DICT_KEYS`, empty (`{}`)
+    sections, and null entries accept any nested keys.
   """
 
-  config: collections.OrderedDict[str, Any]
+  # TODO(noghabi): Converge the default and merge-mode role-inheritance
+  # algorithms.
 
-  def __init__(self, argv: list[str], **kwargs):
+  config: collections.OrderedDict[str, Any]
+  replace_keys: set[str]
+
+  # TODO(noghabi): Reject unknown **kwargs (currently forwarded and discarded);
+  # agentic *_main entry points forward kwargs, so this needs its own change.
+  def __init__(
+      self,
+      argv: Sequence[str],
+      *,
+      default_base_config: str | pathlib.Path | None = None,
+      merge_replace_keys: bool = False,
+      validate_nested: bool = False,
+      **kwargs: object,
+  ):
     # Use omegaconf.OmegaConf.from_cli to capture CLI arguments.
 
     dotenv.load_dotenv()
     raw_keys = collections.OrderedDict()
 
-    if len(argv) < 2 or "=" in argv[1]:
+    if default_base_config is not None:
+      argv = normalize_argv(argv, default_base_config)
+    elif len(argv) < 2 or "=" in argv[1]:
       raise ValueError(
           "The first argument must be a path to a base config file."
       )
@@ -414,36 +633,52 @@ class HyperParameters:
       base_config_file = pathlib.Path(__file__).parent / argv[1]
     else:
       base_config_file = argv[1]
-    raw_data_from_yaml = self._load_config_from_yaml(base_config_file)  # pyrefly: ignore[bad-argument-type]
+    raw_data_from_yaml = self._load_config_from_yaml(str(base_config_file))
     self._validate_env_variable(raw_data_from_yaml)
     base_model_config = raw_data_from_yaml.get("model_config", {})
 
-    config_file_override = None
-    cli_overrides = []
+    config_file_overrides: list[str] = []
+    cli_overrides: list[str] = []
     for arg in argv[2:]:
       if arg.startswith("override_config_file="):
-        if config_file_override is not None:
+        if config_file_overrides and not merge_replace_keys:
           raise ValueError("Only one override_config_file argument is allowed.")
-        _, config_file_override = arg.split("=", 1)
+        _, override_path = arg.split("=", 1)
+        if not override_path:
+          raise ValueError("Empty path in override_config_file= argument.")
+        config_file_overrides.append(override_path)
       else:
+        if validate_nested and "=" not in arg:
+          raise ValueError(
+              f"Invalid CLI override argument {arg!r}; expected"
+              " 'section.key=value' or 'override_config_file=path.yaml'."
+          )
         cli_overrides.append(arg)
 
-    self.replace_keys = {
-        "lora_config",
-        "training_config",
-        "optimizer_config",
-        "profiler_options",
-        "rl_training_config",
-    }
+    if merge_replace_keys:
+      self.replace_keys = set()
+    else:
+      self.replace_keys = {
+          "lora_config",
+          "training_config",
+          "optimizer_config",
+          "profiler_options",
+          "rl_training_config",
+      }
 
-    all_overrides = []
-    if config_file_override:
+    all_overrides: list[str] = []
+    for config_file_override in config_file_overrides:
       next_conf = self._load_config_from_yaml(config_file_override)
       all_overrides.extend(_dict_to_cli_args(next_conf))
 
     # First we apply the file overrides, then the overrides from the command
     # line making the command line the highest priority.
     all_overrides.extend(cli_overrides)
+    if validate_nested:
+      _validate_nested_keys(
+          to_str_dict(raw_data_from_yaml),
+          to_str_dict(omegaconf.OmegaConf.from_cli(all_overrides)),
+      )
 
     keys_from_env_and_command_line = self._update_from_env_and_command_line(
         raw_keys, raw_data_from_yaml, all_overrides, **kwargs
@@ -453,25 +688,166 @@ class HyperParameters:
         keys_from_env_and_command_line,
     )
     self.config = raw_keys
-    # Inherit missing keys from model_config to actor_model_config, etc.
-    # Also update keys that were not explicitly overridden
-    current_model_config = self.config.get("model_config", {})
-    for config_key in [
-        "actor_model_config",
-        "critic_model_config",
-        "reference_model_config",
-        "rollout_model_config",
-    ]:
-      if config_key in self.config and self.config[config_key] is not None:
-        for k, v in current_model_config.items():
-          if k not in self.config[config_key] or self.config[config_key][
-              k
-          ] == base_model_config.get(k):
-            self.config[config_key][k] = v
+    if merge_replace_keys:
+      self._merge_model_config_into_roles(
+          to_str_dict(base_model_config), all_overrides
+      )
+    else:
+      # Inherit missing keys from model_config to actor_model_config, etc.
+      # Also update keys that were not explicitly overridden
+      current_model_config = self.config.get("model_config", {})
+      for config_key in [
+          "actor_model_config",
+          "critic_model_config",
+          "reference_model_config",
+          "rollout_model_config",
+      ]:
+        if config_key in self.config and self.config[config_key] is not None:
+          for k, v in current_model_config.items():
+            if k not in self.config[config_key] or self.config[config_key][
+                k
+            ] == base_model_config.get(k):
+              self.config[config_key][k] = v
     self._validate_tokenizer()
     self._validate_model_source(raw_keys)
     self.check_supported_workflow()
     self._validate_perf_metrics(entry_point=argv[0])
+
+  def _merge_model_config_into_roles(
+      self,
+      base_model_config: Mapping[str, object],
+      all_overrides: Sequence[str],
+  ) -> None:
+    """Merges `model_config` into role configs (`merge_replace_keys=True`).
+
+    Unlike the default inheritance, nested mappings (e.g. `mesh`,
+    `lora_config`, `kwargs`) are merged per sub-key, and any role key that was
+    explicitly overridden is preserved even if it equals the base default.
+
+    A role key is inherited from `model_config` only when it was not set
+    explicitly and is absent from the role or still equals the base
+    `model_config` value. "Explicit" covers every role path assigned by an
+    override file or the CLI, including values that YAML anchors expand to in
+    an override file:
+    * A role key assigned as a whole (`role.k=v`, `role.k=null`, `role.k={}`,
+      flow-style `role.k={...}`, or `k: {}` in an override file) is kept as is.
+    * A nested sub-key is kept when it or any of its descendants was assigned,
+      so depth-4 overrides such as `role.kwargs.rope.factor=2` count.
+    * `mesh.shape` and `mesh.axis_names` are one unit: if a role sets either,
+      it keeps its own pair and inherits neither.
+
+    Overrides only add keys, so `role.k={}` cannot clear a mapping that
+    `role.k` already holds; only `role.k=null` can.
+
+    Args:
+      base_model_config: `model_config` from the base YAML before overrides.
+      all_overrides: Flattened `key=value` overrides (files, then CLI).
+
+    Raises:
+      KeyError: If the config has no `model_config` section.
+      TypeError: If `model_config` is null or not a mapping.
+    """
+    current_model_config = self.config_mapping("model_config")
+    assigned, touched = _override_paths(all_overrides)
+    for config_key in _ROLE_MODEL_CONFIG_KEYS:
+      if config_key not in self.config or self.config[config_key] is None:
+        continue
+      role_cfg = self._mutable_config_mapping(config_key)
+      for k, v in current_model_config.items():
+        path = f"{config_key}.{k}"
+        if path in assigned:
+          continue
+        if (
+            isinstance(v, Mapping)
+            and k in role_cfg
+            and isinstance(role_cfg[k], Mapping)
+        ):
+          base_sub: Mapping[str, object] = {}
+          if k in base_model_config:
+            base_val = base_model_config[k]
+            if isinstance(base_val, Mapping):
+              base_sub = to_str_dict(base_val)
+          role_cfg[k] = self._merge_role_sub_keys(
+              path=path,
+              is_mesh=k == "mesh",
+              model_sub=to_str_dict(v),
+              role_sub=copy.deepcopy(to_str_dict(role_cfg[k])),
+              base_sub=base_sub,
+              touched=touched,
+          )
+        elif path not in touched and _inherits(role_cfg, base_model_config, k):
+          role_cfg[k] = copy.deepcopy(v)
+
+  @staticmethod
+  def _merge_role_sub_keys(
+      *,
+      path: str,
+      is_mesh: bool,
+      model_sub: Mapping[str, object],
+      role_sub: dict[str, object],
+      base_sub: Mapping[str, object],
+      touched: frozenset[str],
+  ) -> dict[str, object]:
+    """Merges one nested `model_config` mapping into a role's mapping.
+
+    Args:
+      path: Dotted path of the role's mapping, e.g. `actor_model_config.mesh`.
+      is_mesh: Whether the mapping is `mesh`, whose `shape` and `axis_names` are
+        inherited as one unit.
+      model_sub: The current `model_config` value of the mapping.
+      role_sub: A copy of the role's value of the mapping; updated in place.
+      base_sub: The base `model_config` value of the mapping.
+      touched: Paths assigned by the overrides, plus all their prefixes.
+
+    Returns:
+      `role_sub` with the inherited sub-keys applied.
+    """
+    units: list[tuple[str, ...]] = []
+    if is_mesh:
+      units.append(_MESH_PAIR_KEYS)
+    units.extend(
+        (sub_k,)
+        for sub_k in model_sub
+        if not (is_mesh and sub_k in _MESH_PAIR_KEYS)
+    )
+    for unit in units:
+      if any(f"{path}.{sub_k}" in touched for sub_k in unit):
+        continue
+      if not all(_inherits(role_sub, base_sub, sub_k) for sub_k in unit):
+        continue
+      for sub_k in unit:
+        if sub_k in model_sub:
+          role_sub[sub_k] = copy.deepcopy(model_sub[sub_k])
+    return role_sub
+
+  def config_mapping(self, key: str) -> dict[str, Any]:
+    """Returns a deep, plain-dictionary copy of a config section.
+
+    Unlike `_config_mapping`, a missing or null section is an error rather than
+    `{}`, and mutating the result never changes `self.config`.
+
+    Args:
+      key: Top-level config key of the section.
+
+    Returns:
+      A deep copy of the section. `DictConfig` sections are converted to plain
+      containers with interpolations resolved.
+
+    Raises:
+      KeyError: If `key` is not in the config.
+      TypeError: If the section is null or not a mapping.
+    """
+    value = self.config[key]
+    if value is None:
+      raise TypeError(f"Config section {key!r} is null.")
+    if not isinstance(value, Mapping):
+      raise TypeError(
+          f"Expected config section {key!r} to be a mapping, got"
+          f" {type(value).__name__}."
+      )
+    if isinstance(value, omegaconf.DictConfig):
+      return to_str_dict(value)
+    return copy.deepcopy(to_str_dict(value))
 
   def _config_mapping(self, key: str) -> dict[str, Any]:
     """Returns a config section as a plain dictionary.
@@ -835,6 +1211,40 @@ class HyperParameters:
           "must have the same length."
       )
     return tuple(axis_shapes), tuple(axis_names)
+
+  def mesh_axes(self, model_key: str) -> dict[str, int]:
+    """Returns the size of each named mesh axis for one model.
+
+    Reads only `self.config[model_key]["mesh"]`; `same_mesh_as` is not
+    resolved.
+
+    Args:
+      model_key: Config section name such as `actor_model_config`.
+
+    Returns:
+      A dictionary with exactly the keys `fsdp`, `tp`, `expert`, and `dp`.
+      Axes absent from `mesh.axis_names` have size 1.
+
+    Raises:
+      ValueError: If the mesh config is invalid (see `parse_mesh_config`), or
+        `mesh.axis_names` repeats a name or holds a name other than `fsdp`,
+        `tp`, `expert`, or `dp`.
+    """
+    axis_shapes, axis_names = self.parse_mesh_config(model_key)
+    duplicates = sorted({n for n in axis_names if axis_names.count(n) > 1})
+    if duplicates:
+      raise ValueError(
+          f"{model_key}.mesh.axis_names {axis_names} repeats {duplicates}."
+      )
+    unknown = sorted(set(axis_names) - set(_MESH_AXES))
+    if unknown:
+      raise ValueError(
+          f"{model_key}.mesh.axis_names {axis_names} has unknown axis names"
+          f" {unknown}; supported names are {list(_MESH_AXES)}."
+      )
+    axes = {name: 1 for name in _MESH_AXES}
+    axes.update(zip(axis_names, axis_shapes))
+    return axes
 
   def _parse_mesh_allocation_policy(self, model_key: str) -> str:
     """Validates and returns the mesh allocation policy for one model.
@@ -1219,5 +1629,18 @@ class HyperParameters:
       return None
 
 
-def initialize(argv, **kwargs):
-  return HyperParameters(argv, **kwargs)
+def initialize(
+    argv: Sequence[str],
+    *,
+    default_base_config: str | pathlib.Path | None = None,
+    merge_replace_keys: bool = False,
+    validate_nested: bool = False,
+    **kwargs: object,
+) -> HyperParameters:
+  return HyperParameters(
+      argv,
+      default_base_config=default_base_config,
+      merge_replace_keys=merge_replace_keys,
+      validate_nested=validate_nested,
+      **kwargs,
+  )
