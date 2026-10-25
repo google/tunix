@@ -170,6 +170,15 @@ class BaseEnv(abc.ABC):
     # Default implementation: nothing to clean up.
     return
 
+  def prewarm(self) -> None:
+    """Pre-warms background resources (e.g., sandboxes, containers, connections).
+
+    Default implementation is a no-op. Concrete environments that require heavy
+    initialization (such as Kubernetes sandbox provisioning) can override this
+    to start asynchronous preparation ahead of time.
+    """
+    pass
+
   @classmethod
   def from_dict(cls, env_args: Dict[str, Any]) -> "BaseEnv":
     """Create an environment instance from a configuration dictionary.
