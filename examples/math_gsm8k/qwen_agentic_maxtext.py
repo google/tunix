@@ -639,21 +639,6 @@ def vtc_env_reward(task, action):
 
 
 _metric_call_idx = 0
-_traj_logger = None
-
-
-def get_traj_logger():
-  global _traj_logger
-  if _traj_logger is None and args.metric_logger_dir:
-    try:
-      from tunix.utils import trajectory_logger
-
-      _traj_logger = trajectory_logger.AsyncTrajectoryLogger(
-          args.metric_logger_dir
-      )
-    except Exception as e:
-      absl_logging.warning(f"Failed to initialize AsyncTrajectoryLogger: {e}")
-  return _traj_logger
 
 
 def vtc_metric_fn(
@@ -708,25 +693,6 @@ def vtc_metric_fn(
           + "=" * 80
       )
 
-  # Log all trajectories to CSV in GCS
-  logger = get_traj_logger()
-  if logger is not None and completions is not None and len(completions) > 0:
-    for i in range(len(completions)):
-      p_str = (
-          str(prompts[i]) if prompts is not None and i < len(prompts) else ""
-      )
-      c_str = str(completions[i])
-      g_str = str(answer[i]) if answer is not None and i < len(answer) else ""
-      r_val = float(rewards[i]) if i < len(rewards) else 0.0
-      logger.log_item_async({
-          "call_idx": _metric_call_idx,
-          "sample_idx": i,
-          "reward": r_val,
-          "prompt": p_str,
-          "completion": c_str,
-          "gold": g_str,
-          "completion_len": len(c_str),
-      })
 
   return {
       "gsm8k/reward_mean": (reward_mean, np.mean),
