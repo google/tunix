@@ -151,8 +151,53 @@ def _union_metric_values(value_lists: Sequence[list[Any]]) -> list[Any]:
   return values
 
 
+# Gathered instead of `(values, reducer)` for a metric whose values this process
+# could not send (they cannot be pickled).
+_UNSENDABLE = "unsendable"
+# Gathered instead of `(values, reducer)` for a metric whose values are already
+# global on this process (computed by a multi-process program).
+_ALREADY_GLOBAL = "already global"
+
+
+def _dropped_metrics(
+    per_process: Sequence[Mapping[str, Any]],
+) -> dict[str, str]:
+  """The metrics of one buffer that no process may log, with the reason.
+
+  A metric is merged only if every process that buffered it sent its values,
+  and kept as buffered only if all of those processes report its values as
+  already global. Otherwise a logged value would cover only some processes'
+  rows, so the metric is dropped. Every process decides this from the same
+  gathered payloads, so all processes drop the same metrics.
+
+  Args:
+    per_process: The gathered `{name: (values, reducer) or _UNSENDABLE or
+      _ALREADY_GLOBAL}` of each process, in process order.
+
+  Returns:
+    `{name: reason}` of the metrics to drop.
+  """
+  dropped = {}
+  for name in dict.fromkeys(n for metrics in per_process for n in metrics):
+    status = collections.defaultdict(list)
+    for process, metrics in enumerate(per_process):
+      if name in metrics:
+        entry = metrics[name]
+        status[entry if isinstance(entry, str) else "sent"].append(process)
+    if _UNSENDABLE in status:
+      dropped[name] = (
+          f"its values could not be sent from process(es) {status[_UNSENDABLE]}"
+      )
+    elif len(status) > 1:
+      dropped[name] = (
+          "its values are already global on process(es) "
+          f"{status[_ALREADY_GLOBAL]} but not on process(es) {status['sent']}"
+      )
+  return dropped
+
+
 def _merge_process_metrics(
-    per_process: Sequence[Mapping[str, tuple[list[Any], Any]]],
+    per_process: Sequence[Mapping[str, Any]],
     local_ops: Mapping[str, Callable[..., Any]],
 ) -> dict[str, tuple[list[Any], Callable[..., Any]]]:
   """Merges the reducible metrics of one buffer across processes.
@@ -162,11 +207,14 @@ def _merge_process_metrics(
   per-example values is global sum / global count, min and max are global
   extrema, `WeightedMetric` values keep their real numerators and
   denominators, and a process that buffered nothing for a metric (no valid
-  items) contributes nothing.
+  items) contributes nothing. A metric that some process did not send (see
+  `_dropped_metrics`) is not merged.
 
   Args:
     per_process: `{name: (values, reducer or None)}` of each process, in
-      process order. A reducer is None if it could not be sent.
+      process order. A reducer is None if it could not be sent. A process
+      sends `_UNSENDABLE` or `_ALREADY_GLOBAL` instead of `(values, reducer)`
+      for a metric it could not send.
     local_ops: This process's reducer of each metric it buffered.
 
   Returns:
@@ -175,6 +223,8 @@ def _merge_process_metrics(
   merged = {}
   for name in dict.fromkeys(n for metrics in per_process for n in metrics):
     entries = [metrics[name] for metrics in per_process if name in metrics]
+    if any(isinstance(entry, str) for entry in entries):
+      continue  # Not sent by every process.
     op = local_ops.get(name) or next(
         (entry[1] for entry in entries if entry[1] is not None), None
     )
@@ -894,6 +944,14 @@ class RLEngine:
     that returns one scalar per call should return per-example values or a
     `WeightedMetric` when its denominator is data dependent.
 
+    A metric is dropped on every process, with a warning, if some process
+    could not send its values (they cannot be pickled), or if its values are
+    already global (computed by a multi-process program) on some processes but
+    not on others: its logged value would cover only some processes' rows.
+    All processes decide this from the same gathered payloads. A metric whose
+    values are already global on every process that buffered it is logged as
+    buffered.
+
     This is a collective: every process must call it at the same point, on
     the main thread, after the step's rollouts and train steps, so that every
     process gathers in the same order. Logging (also asynchronous logging)
@@ -916,10 +974,8 @@ class RLEngine:
       pending.append(((*step_key, occurrences[step_key]), buf))
       occurrences[step_key] += 1
     payload = {}
-    unsendable = {}
     for key, buf in pending:
       payload[key] = {}
-      unsendable[key] = []
       for name, (values, op) in buf.metrics.items():
         if op is None:
           continue
@@ -927,12 +983,15 @@ class RLEngine:
             isinstance(x, jax.Array) and not x.is_fully_addressable
             for x in jax.tree.leaves(values)
         ):
-          continue  # Computed by a multi-process program: already global.
+          # Computed by a multi-process program: already global.
+          payload[key][name] = _ALREADY_GLOBAL
+          continue
         try:
           entry = (jax.device_get(values), _sendable_op(op))
           pickle.dumps(entry)
         except Exception:  # pylint: disable=broad-exception-caught
-          unsendable[key].append(name)
+          # Tell the other processes, so that every process drops it.
+          payload[key][name] = _UNSENDABLE
           continue
         payload[key][name] = entry
     gathered = [
@@ -945,20 +1004,23 @@ class RLEngine:
       local_ops = {
           name: op for name, (_, op) in buf.metrics.items() if op is not None
       }
-      merged = _merge_process_metrics(
-          [metrics.get(key, {}) for metrics in gathered], local_ops
-      )
+      per_process = [metrics.get(key, {}) for metrics in gathered]
+      dropped = _dropped_metrics(per_process)
+      merged = _merge_process_metrics(per_process, local_ops)
       reduced = _GlobalMetrics()
       for name, entry in buf.metrics.items():
-        reduced[name] = merged.pop(name, entry)
+        if name not in dropped:
+          reduced[name] = merged.pop(name, entry)
       reduced.update(merged)  # Metrics only other processes buffered.
-      for name in unsendable[key]:
+      for name, reason in dropped.items():
         logging.warning(
-            "Per-host learner: not logging metric %s: its values cannot be"
-            " sent to other processes.",
+            "Per-host learner: not logging metric %s of %s step %d on any"
+            " process: %s.",
             name,
+            buf.mode,
+            buf.global_steps,
+            reason,
         )
-        reduced.pop(name)
       buf.metrics = reduced
     remote_only = set().union(*gathered) - set(payload)
     if remote_only:
