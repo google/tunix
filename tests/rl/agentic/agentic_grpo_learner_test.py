@@ -39,6 +39,10 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+from tunix.dist_rl.trajectory import file_store
+from tunix.dist_rl.trajectory import in_memory_store
+from tunix.dist_rl.trajectory import store as store_lib
+from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.generate import tokenizer_adapter
 from tunix.rl import algo_core
 from tunix.rl import common as rl_common
@@ -52,7 +56,6 @@ from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
 from tunix.tests import test_common
-from tunix.utils import trajectory_logger
 from typing_extensions import override
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
@@ -2120,28 +2123,61 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
     train_ds = _dummy_dataset(MySource(data=["1"], repeat=1), batch_size=1)
 
+    self.assertIsNotNone(grpo_learner.trajectory_store)
     with (
-        mock.patch.object(trajectory_logger, "log_item") as mock_log_item,
+        mock.patch.object(
+            grpo_learner.trajectory_store,
+            "update_metrics",
+            wraps=grpo_learner.trajectory_store.update_metrics,
+        ) as mock_update_metrics,
         mock.patch.object(
             rl_engine, "generate", side_effect=self._mock_generate
         ),
     ):
       grpo_learner.train(train_ds)
-      if grpo_learner._trajectory_logger:
-        grpo_learner._trajectory_logger.stop()
+      grpo_learner.close()
       self.assertEqual(grpo_learner.rl_engine.global_steps, 1)
-      self.assertEqual(mock_log_item.call_count, 1)
+      self.assertEqual(
+          mock_update_metrics.call_count, grpo_config.num_generations
+      )
 
-      logged_items = mock_log_item.call_args_list[0][0][1]
-      self.assertLen(logged_items, grpo_config.num_generations)
-
-      for traj in logged_items:
-        self.assertIn("conversation_text", traj)
-        conversation = traj["conversation_text"]
+      for call in mock_update_metrics.call_args_list:
+        traj_id, metrics = call.args
+        self.assertIn("conversation_text", metrics.extra)
+        conversation = metrics.extra["conversation_text"]
         assistant_msgs = [m for m in conversation if m["role"] == "assistant"]
         self.assertNotEmpty(assistant_msgs)
         self.assertIn(assistant_msgs[0]["content"], _MOCK_RESPONSES)
-        self.assertEqual(traj.get("policy_version"), 0)
+        self.assertEqual(metrics.extra.get("policy_version"), 0)
+        self.assertIn("reward", metrics.extra)
+        self.assertIn("advantage", metrics.extra)
+        self.assertEqual(metrics.extra.get("status"), "SUCCEEDED")
+
+  def test_trajectory_store_initialization_and_lifecycle(self):
+    # 1. Unowned injected store
+    injected_store = in_memory_store.InMemoryTrajectoryStore()
+    learner = object.__new__(agentic_grpo_learner.GRPOLearner)
+    learner._trajectory_store = injected_store
+    learner._owns_trajectory_store = False
+    self.assertIs(learner.trajectory_store, injected_store)
+    with mock.patch.object(injected_store, "close") as mock_close:
+      learner.close()
+      mock_close.assert_not_called()
+
+    # 2. Owned FileTrajectoryStore
+    temp_dir = self.create_tempdir().full_path
+    owned_store = file_store.FileTrajectoryStore(root_dir=temp_dir)
+    learner._trajectory_store = owned_store
+    learner._owns_trajectory_store = True
+    self.assertIs(learner.trajectory_store, owned_store)
+    with mock.patch.object(owned_store, "close") as mock_close:
+      learner.close()
+      mock_close.assert_called_once()
+
+    # 3. Setter resets ownership to False
+    learner.trajectory_store = injected_store
+    self.assertIs(learner.trajectory_store, injected_store)
+    self.assertFalse(learner._owns_trajectory_store)
 
   def test_grpo_with_lora_model(self):
     # reshard through default device_put.
@@ -2533,7 +2569,7 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
         beta=0.0,
         use_rollout_logps=True,
     )
-    obj._trajectory_logger = None
+    obj._trajectory_store = None
     obj._full_batch_size = 0
     obj.metric_fns = []
     obj._compute_rewards = lambda **kw: jnp.array([0.0, 1.0])
