@@ -24,6 +24,7 @@ import gc
 import itertools
 import operator
 import os
+import pickle
 from typing import Any, Callable, Mapping, Sequence, cast
 
 from absl import logging
@@ -34,6 +35,7 @@ from flax.nnx import filterlib
 from flax.nnx import statelib
 import jax
 import jax.numpy as jnp
+from jax.experimental import multihost_utils
 from jax.sharding import Mesh  # pylint: disable=g-importing-member
 import jaxtyping
 import numpy as np
@@ -74,6 +76,177 @@ ClusterConfig = configs.ClusterConfig
 ModelOrPath = nnx.Module | str
 MetricsT = perf_metrics.MetricsT
 MetricsBuffer = perf_metrics.MetricsBuffer
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+  """True iff the environment variable `name` is set to 1/true/True."""
+  return (os.environ.get(name, default) or default).strip() in (
+      "1",
+      "true",
+      "True",
+  )
+
+
+class _GlobalMetrics(dict):
+  """`MetricsBuffer.metrics` reduced across processes (per-host learner).
+
+  Marks a buffer whose reducible metrics already hold the values of every
+  process, so logging it needs no collective (it may run on a background
+  thread).
+  """
+
+
+def _allgather_bytes(payload: bytes) -> list[bytes]:
+  """Gathers one byte string from every JAX process, in process order.
+
+  This is a collective: every process must call it at the same point of the
+  program, from the thread that issues the other multi-process computations.
+
+  Args:
+    payload: This process's bytes.
+
+  Returns:
+    The payload of every process, indexed by process index.
+  """
+  local = np.frombuffer(payload, dtype=np.uint8)
+  with jax.transfer_guard("allow"):
+    sizes = np.asarray(
+        multihost_utils.process_allgather(np.asarray([local.size], np.int32))
+    ).reshape(-1)
+    # Pad to a power of two so the gather compiles for few distinct shapes.
+    width = 1 << max(int(sizes.max()) - 1, 0).bit_length()
+    padded = np.zeros((width,), np.uint8)
+    padded[: local.size] = local
+    gathered = np.asarray(multihost_utils.process_allgather(padded)).reshape(
+        sizes.size, width
+    )
+  return [gathered[i, : sizes[i]].tobytes() for i in range(sizes.size)]
+
+
+def _union_metric_values(value_lists: Sequence[list[Any]]) -> list[Any]:
+  """Concatenates every process's buffered values of one metric.
+
+  Numeric values of different shapes (per-example arrays of different lengths,
+  or an empty array from a process without valid items) are flattened into one
+  array, so an elementwise reducer (mean, min, max, sum) sees every value once
+  instead of failing on a ragged list.
+
+  Args:
+    value_lists: The buffered values of each process, in process order.
+
+  Returns:
+    The values of all processes.
+  """
+  values = [value for value_list in value_lists for value in value_list]
+  arrays = []
+  for value in values:
+    if isinstance(value, (str, bytes)) or sft_utils.is_weighted_metric(value):
+      return values
+    array = np.asarray(value)
+    if array.dtype.kind not in "biuf":
+      return values
+    arrays.append(array)
+  if len({array.shape for array in arrays}) > 1:
+    return [np.concatenate([array.reshape(-1) for array in arrays])]
+  return values
+
+
+# Gathered instead of `(values, reducer)` for a metric whose values this process
+# could not send (they cannot be pickled).
+_UNSENDABLE = "unsendable"
+# Gathered instead of `(values, reducer)` for a metric whose values are already
+# global on this process (computed by a multi-process program).
+_ALREADY_GLOBAL = "already global"
+
+
+def _dropped_metrics(
+    per_process: Sequence[Mapping[str, Any]],
+) -> dict[str, str]:
+  """The metrics of one buffer that no process may log, with the reason.
+
+  A metric is merged only if every process that buffered it sent its values,
+  and kept as buffered only if all of those processes report its values as
+  already global. Otherwise a logged value would cover only some processes'
+  rows, so the metric is dropped. Every process decides this from the same
+  gathered payloads, so all processes drop the same metrics.
+
+  Args:
+    per_process: The gathered `{name: (values, reducer) or _UNSENDABLE or
+      _ALREADY_GLOBAL}` of each process, in process order.
+
+  Returns:
+    `{name: reason}` of the metrics to drop.
+  """
+  dropped = {}
+  for name in dict.fromkeys(n for metrics in per_process for n in metrics):
+    status = collections.defaultdict(list)
+    for process, metrics in enumerate(per_process):
+      if name in metrics:
+        entry = metrics[name]
+        status[entry if isinstance(entry, str) else "sent"].append(process)
+    if _UNSENDABLE in status:
+      dropped[name] = (
+          f"its values could not be sent from process(es) {status[_UNSENDABLE]}"
+      )
+    elif len(status) > 1:
+      dropped[name] = (
+          "its values are already global on process(es) "
+          f"{status[_ALREADY_GLOBAL]} but not on process(es) {status['sent']}"
+      )
+  return dropped
+
+
+def _merge_process_metrics(
+    per_process: Sequence[Mapping[str, Any]],
+    local_ops: Mapping[str, Callable[..., Any]],
+) -> dict[str, tuple[list[Any], Callable[..., Any]]]:
+  """Merges the reducible metrics of one buffer across processes.
+
+  Every metric gets the values of all processes, so its reducer runs over what
+  one controller would have buffered for the whole global batch: a mean over
+  per-example values is global sum / global count, min and max are global
+  extrema, `WeightedMetric` values keep their real numerators and
+  denominators, and a process that buffered nothing for a metric (no valid
+  items) contributes nothing. A metric that some process did not send (see
+  `_dropped_metrics`) is not merged.
+
+  Args:
+    per_process: `{name: (values, reducer or None)}` of each process, in
+      process order. A reducer is None if it could not be sent. A process
+      sends `_UNSENDABLE` or `_ALREADY_GLOBAL` instead of `(values, reducer)`
+      for a metric it could not send.
+    local_ops: This process's reducer of each metric it buffered.
+
+  Returns:
+    `{name: (values of all processes, reducer)}`.
+  """
+  merged = {}
+  for name in dict.fromkeys(n for metrics in per_process for n in metrics):
+    entries = [metrics[name] for metrics in per_process if name in metrics]
+    if any(isinstance(entry, str) for entry in entries):
+      continue  # Not sent by every process.
+    op = local_ops.get(name) or next(
+        (entry[1] for entry in entries if entry[1] is not None), None
+    )
+    if op is None:
+      logging.warning(
+          "Per-host learner: skipping metric %s, its reducer is unknown on"
+          " process %d.",
+          name,
+          jax.process_index(),
+      )
+      continue
+    merged[name] = (_union_metric_values([entry[0] for entry in entries]), op)
+  return merged
+
+
+def _sendable_op(op: Callable[..., Any]) -> Callable[..., Any] | None:
+  """`op` if it can be pickled (sent to other processes), else None."""
+  try:
+    pickle.dumps(op)
+  except Exception:  # pylint: disable=broad-exception-caught
+    return None
+  return op
 
 
 @contextlib.contextmanager
@@ -126,6 +299,9 @@ class RLEngine:
 
     self._init_backbone_sharing_map(actor, reference)
     self._anchor_policy_state = None
+    # TUNIX_PER_HOST_SAFE_LOGPS: the first per-host logps chunk is round-trip
+    # checked.
+    self._per_host_logps_checked = False
 
     self._default_memory_kind = jax.devices()[0].default_memory().kind
     self.train_actor = self._load_model(actor, self.r2m[Role.ACTOR])
@@ -185,6 +361,9 @@ class RLEngine:
     self._buffered_train_metrics: list[MetricsBuffer] = []
     self._buffered_eval_metrics: list[MetricsBuffer] = []
     self._external_metrics_logger = None
+    # Per-host learner: RL metrics are reduced across processes before they
+    # are logged (see `reduce_metrics_across_processes`).
+    self._cross_process_metrics = False
 
     self._init_engine()
     gc.collect()
@@ -656,7 +835,17 @@ class RLEngine:
 
   def _log_metrics(self, metrics_buffer: MetricsBuffer) -> None:
     """Log metrics."""
+    cross_process = getattr(self, "_cross_process_metrics", False)
+    unreduced = cross_process and not isinstance(
+        metrics_buffer.metrics, _GlobalMetrics
+    )
+    skipped = []
     for metric_name, (value, op) in metrics_buffer.metrics.items():
+      if unreduced and op is not None:
+        # Per-host learner: these values cover this process's rows only;
+        # logging them under the global name would misreport the metric.
+        skipped.append(metric_name)
+        continue
       # Convert to numpy array immediately.
       # This handles nested lists, mixed types, and JAX arrays automatically.
       try:
@@ -668,11 +857,7 @@ class RLEngine:
         continue
 
       if agg_value.dtype.kind in {"U", "S"}:
-        logging.info(
-            "Rollout string metric %s: %s",
-            metric_name,
-            agg_value,
-        )
+        self._log_string_metric(metric_name, agg_value, cross_process)
         continue
 
       if agg_value.dtype.kind == "O":
@@ -680,7 +865,7 @@ class RLEngine:
         if agg_value.size > 0 and isinstance(
             agg_value.ravel()[0], (str, np.str_)
         ):
-          logging.info("Rollout string metric %s: %s", metric_name, agg_value)
+          self._log_string_metric(metric_name, agg_value, cross_process)
           continue
 
       # Apply aggregation and Log
@@ -701,8 +886,169 @@ class RLEngine:
           metrics_buffer.global_steps,
       )
 
+    if skipped:
+      logging.warning(
+          "Per-host learner: not logging %d metrics of %s step %d (%s): they"
+          " were not reduced across processes.",
+          len(skipped),
+          metrics_buffer.mode,
+          metrics_buffer.global_steps,
+          ", ".join(skipped),
+      )
+
     if self._external_metrics_logger is not None:
       self._external_metrics_logger(metrics_buffer)
+
+  def _log_string_metric(
+      self, metric_name: str, value: np.ndarray, cross_process: bool
+  ) -> None:
+    """Logs a string metric (e.g. prompts); never reduced across processes."""
+    if cross_process:
+      # Per-host learner: per-example data of this process's rows only.
+      logging.info(
+          "Rollout string metric %s (process %d of %d): %s",
+          metric_name,
+          jax.process_index(),
+          jax.process_count(),
+          value,
+      )
+    else:
+      logging.info("Rollout string metric %s: %s", metric_name, value)
+
+  def enable_cross_process_metrics(self) -> None:
+    """Turns on the per-host learner's cross-process metric contract.
+
+    Under the per-host learner (TUNIX_PER_HOST_LEARNER=1) every process
+    buffers RL metrics (rewards, completion lengths, user metrics, ...) of its
+    own prompt shard, and only process 0 exports them. Once this is on, a
+    buffer is logged only after `reduce_metrics_across_processes` replaced its
+    reducible metrics (those with a reducer) by their global values; reducible
+    metrics of a buffer that was not reduced are not logged. Metrics without a
+    reducer (prompts, completions and trajectory ids, perf timings) stay
+    host-local.
+    """
+    self._cross_process_metrics = True
+
+  def reduce_metrics_across_processes(
+      self, include_current: bool = False
+  ) -> None:
+    """Replaces the buffered RL metrics of completed steps by global values.
+
+    For the per-host learner (see `enable_cross_process_metrics`; a no-op
+    otherwise). Every reducible metric of every buffered, not yet reduced
+    step gets the buffered values of all processes (`_merge_process_metrics`)
+    and its reducer runs over them, as if one controller had buffered every
+    call of every process. A process without values for a metric contributes
+    nothing.
+
+    The exported value is exactly the one of the global batch for:
+      * per-example values (one value per row or item, e.g. the per-row
+        rewards behind `rewards/mean` and each reward fn's metric, or a
+        metric fn that returns an array) reduced by mean (global sum / global
+        count), min, max or sum;
+      * per-call extrema and sums (`np.min`, `np.max` or `np.sum` of each
+        call's values, reduced by the same function), e.g.
+        `completions/max_length`;
+      * `WeightedMetric` values, including `PearsonMetric` (e.g. the sampler
+        / trainer agreement metrics): their numerators and denominators (for
+        `PearsonMetric`, its sufficient statistics) are combined, so every
+        process is weighted by its real denominator.
+    A per-call scalar mean (`np.mean` of each call's values, reduced by
+    `np.mean`) becomes the unweighted mean of the per-process, per-call means,
+    as when one controller buffers several calls of a step. This equals the
+    global mean only if every call has the same denominator, e.g. a mean over
+    each call's rows such as GRPO's `completions/mean_length` (every process
+    holds the same number of rows). With a data-dependent denominator, e.g. a
+    mean over valid tokens or valid items such as PPO's `advantages/mean`, it
+    is a mean of per-process means, not the global mean. To export such a
+    metric exactly, buffer per-example values or a `WeightedMetric`.
+
+    A metric is dropped on every process, with a warning, if some process
+    could not send its values (they cannot be pickled), or if its values are
+    already global (computed by a multi-process program) on some processes but
+    not on others: its logged value would cover only some processes' rows.
+    All processes decide this from the same gathered payloads. A metric whose
+    values are already global on every process that buffered it is logged as
+    buffered.
+
+    This is a collective: every process must call it at the same point, on
+    the main thread, after the step's rollouts and train steps, so that every
+    process gathers in the same order. Logging (also asynchronous logging)
+    then needs no collective.
+
+    Args:
+      include_current: Also reduce the buffers of the current global step
+        (at the end of training).
+    """
+    if not getattr(self, "_cross_process_metrics", False):
+      return
+    pending = []
+    occurrences = collections.Counter()
+    for buf in self._buffered_train_metrics + self._buffered_eval_metrics:
+      if isinstance(buf.metrics, _GlobalMetrics) or (
+          not include_current and buf.global_steps >= self.global_steps
+      ):
+        continue
+      step_key = (buf.mode, buf.global_steps)
+      pending.append(((*step_key, occurrences[step_key]), buf))
+      occurrences[step_key] += 1
+    payload = {}
+    for key, buf in pending:
+      payload[key] = {}
+      for name, (values, op) in buf.metrics.items():
+        if op is None:
+          continue
+        if any(
+            isinstance(x, jax.Array) and not x.is_fully_addressable
+            for x in jax.tree.leaves(values)
+        ):
+          # Computed by a multi-process program: already global.
+          payload[key][name] = _ALREADY_GLOBAL
+          continue
+        try:
+          entry = (jax.device_get(values), _sendable_op(op))
+          pickle.dumps(entry)
+        except Exception:  # pylint: disable=broad-exception-caught
+          # Tell the other processes, so that every process drops it.
+          payload[key][name] = _UNSENDABLE
+          continue
+        payload[key][name] = entry
+    gathered = [
+        pickle.loads(data)
+        for data in _allgather_bytes(
+            pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+        )
+    ]
+    for key, buf in pending:
+      local_ops = {
+          name: op for name, (_, op) in buf.metrics.items() if op is not None
+      }
+      per_process = [metrics.get(key, {}) for metrics in gathered]
+      dropped = _dropped_metrics(per_process)
+      merged = _merge_process_metrics(per_process, local_ops)
+      reduced = _GlobalMetrics()
+      for name, entry in buf.metrics.items():
+        if name not in dropped:
+          reduced[name] = merged.pop(name, entry)
+      reduced.update(merged)  # Metrics only other processes buffered.
+      for name, reason in dropped.items():
+        logging.warning(
+            "Per-host learner: not logging metric %s of %s step %d on any"
+            " process: %s.",
+            name,
+            buf.mode,
+            buf.global_steps,
+            reason,
+        )
+      buf.metrics = reduced
+    remote_only = set().union(*gathered) - set(payload)
+    if remote_only:
+      logging.warning(
+          "Per-host learner: process %d has no metrics buffer for %s; their"
+          " metrics are not logged.",
+          jax.process_index(),
+          sorted(remote_only),
+      )
 
   def with_external_metrics_logger(
       self, external_metrics_logger: Callable[[MetricsBuffer], None]
@@ -924,7 +1270,7 @@ class RLEngine:
       raise ValueError("Cannot generate from an empty list of prompts.")
     micro_batch_size = micro_batch_size or len(prompt_rows)
 
-    with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT) as (mesh, _):
+    with self._generate_mesh_cm() as (mesh, _):
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
@@ -1063,6 +1409,17 @@ class RLEngine:
           "Cannot get reference log probabilities from an empty batch."
       )
     micro_batch_size = micro_batch_size or batch_size
+    if sharding_utils.per_host_safe_logps_enabled():
+      return self._per_host_safe_ref_per_token_logps(
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          micro_batch_size=micro_batch_size,
+          segment_ids=segment_ids,
+          segment_positions=segment_positions,
+          token_mask=token_mask,
+      )
 
     with self._get_mesh_and_logical_axis_rules_cm(Role.REFERENCE):
       # This assumes reference model shards same data sharding as actor, which
@@ -1204,6 +1561,18 @@ class RLEngine:
           " first."
       )
     micro_batch_size = micro_batch_size or batch_size
+    if sharding_utils.per_host_safe_logps_enabled():
+      return self._per_host_safe_actor_per_token_logps(
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          micro_batch_size=micro_batch_size,
+          temperature=temperature,
+          segment_ids=segment_ids,
+          segment_positions=segment_positions,
+          token_mask=token_mask,
+      )
     with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR) as (mesh, _):
       dest_prompt_tokens = sharding_utils.shard_input(
           prompt_tokens,
@@ -1302,6 +1671,208 @@ class RLEngine:
         )
       return actor_per_token_logps
 
+  def _per_host_chunked_logps(
+      self,
+      compute_fn: Callable[..., jax.Array],
+      micro_batch_size: int,
+      **inputs: jax.Array | np.ndarray | None,
+  ) -> jax.Array:
+    """Per-token logps of this process's own rows (TUNIX_PER_HOST_SAFE_LOGPS=1).
+
+    Under the per-host learner (TUNIX_PER_HOST_LEARNER=1) every process
+    passes its own rows. The stock reference/actor paths globalise the whole
+    process-local batch with `shard_input` (local rows x process count) and
+    then slice the global array with process-local offsets, so every process
+    but the first would get another process's rows. Here the process-local
+    batch is chunked first; each chunk is globalised and run through
+    `compute_fn` on every process in lockstep (all processes hold the same
+    number of rows), and this process's rows of each result are copied back,
+    so the result is host-local like every other TrainExample field.
+
+    Args:
+      compute_fn: Called with the globalised chunk of every input (by name).
+      micro_batch_size: Process-local rows per chunk.
+      **inputs: Process-local inputs (None entries are passed through).
+
+    Returns:
+      This process's per-token logps, host-local.
+    """
+    axis = self.cluster_config.training_config.data_sharding_axis
+    pspec = jax.sharding.PartitionSpec(*axis)
+    batch_size = inputs["prompt_tokens"].shape[0]
+    for name, x in inputs.items():
+      if isinstance(x, jax.Array) and not x.is_fully_addressable:
+        raise ValueError(
+            f"TUNIX_PER_HOST_SAFE_LOGPS: {name} is a global array; the per-host"
+            " logps path expects process-local rows."
+        )
+    if batch_size % micro_batch_size:
+      raise ValueError(
+          f"TUNIX_PER_HOST_SAFE_LOGPS: the process-local batch of {batch_size}"
+          f" rows is not divisible by micro_batch_size={micro_batch_size};"
+          " every process must run the same number of equal chunks."
+      )
+    outs = []
+    for batch_slice in rl_utils.chunk_slices_by_size(
+        stop=batch_size, step=micro_batch_size
+    ):
+      chunk = {}
+      for name, x in inputs.items():
+        if x is None:
+          chunk[name] = None
+          continue
+        chunk[name] = sharding_utils.shard_input(x[batch_slice], axis)
+        if getattr(chunk[name].sharding, "spec", None) != pspec:
+          raise ValueError(
+              f"TUNIX_PER_HOST_SAFE_LOGPS: a {name} chunk of"
+              f" {micro_batch_size} rows per process got sharding"
+              f" {chunk[name].sharding}, not {pspec}; process-local rows must"
+              " never be treated as replicated."
+          )
+      out = compute_fn(**chunk)
+      local = sharding_utils.process_local_rows(out)
+      in_rows = sharding_utils.process_row_ranges(chunk["prompt_tokens"])
+      out_rows = (
+          sharding_utils.process_row_ranges(out)
+          if isinstance(out, jax.Array) and not out.is_fully_addressable
+          else None
+      )
+      if out_rows != in_rows or local.shape[0] != micro_batch_size:
+        raise RuntimeError(
+            f"TUNIX_PER_HOST_SAFE_LOGPS: output rows {out_rows} (shape"
+            f" {local.shape}) of process {jax.process_index()} do not match its"
+            f" input rows {in_rows}."
+        )
+      if not self._per_host_logps_checked:
+        # Host-local round trip: re-globalise this process's rows exactly as
+        # shard_input does and compare every addressable shard (no
+        # collective).
+        again = jax.make_array_from_process_local_data(
+            out.sharding, local, out.shape
+        )
+        got = sorted(out.addressable_shards, key=lambda z: z.device.id)
+        want = sorted(again.addressable_shards, key=lambda z: z.device.id)
+        if len(got) != len(want) or not all(
+            np.array_equal(np.asarray(a.data), np.asarray(b.data))
+            for a, b in zip(got, want)
+        ):
+          raise RuntimeError(
+              "TUNIX_PER_HOST_SAFE_LOGPS: host-local extraction does not invert"
+              " jax.make_array_from_process_local_data."
+          )
+        self._per_host_logps_checked = True
+        logging.info(
+            "TUNIX_PER_HOST_SAFE_LOGPS: per-host logps on process %d/%d: %d"
+            " local rows in chunks of %d, global chunk %s, round trip ok.",
+            jax.process_index(),
+            jax.process_count(),
+            batch_size,
+            micro_batch_size,
+            out.shape,
+        )
+      outs.append(local)
+    return jnp.asarray(np.concatenate(outs, axis=0))
+
+  def _per_host_safe_ref_per_token_logps(
+      self,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      pad_id: int,
+      eos_id: int,
+      micro_batch_size: int,
+      segment_ids: jax.Array | None,
+      segment_positions: jax.Array | None,
+      token_mask: jax.Array | None,
+  ) -> jax.Array:
+    """`get_ref_per_token_logps` under TUNIX_PER_HOST_SAFE_LOGPS=1."""
+    with self._get_mesh_and_logical_axis_rules_cm(Role.REFERENCE):
+      ref_model = self.inference_worker.get_model("reference")
+      self._maybe_load_model_from_cpu(ref_model, Role.REFERENCE)
+      temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
+
+      def compute(prompt_tokens, completion_tokens, **kwargs):
+        return self.inference_worker.get_ref_per_token_logps(
+            prompt_tokens,
+            completion_tokens,
+            pad_id,
+            eos_id,
+            temperature=temperature,
+            **kwargs,
+        )
+
+      ref_per_token_logps = self._per_host_chunked_logps(
+          compute,
+          micro_batch_size,
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          segment_ids=segment_ids,
+          segment_positions=segment_positions,
+          token_mask=token_mask,
+      )
+      self._maybe_offload_model_to_cpu(ref_model, Role.REFERENCE)
+      return ref_per_token_logps
+
+  def _per_host_safe_actor_per_token_logps(
+      self,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      pad_id: int,
+      eos_id: int,
+      micro_batch_size: int,
+      temperature: float,
+      segment_ids: jax.Array | None,
+      segment_positions: jax.Array | None,
+      token_mask: jax.Array | None,
+  ) -> jax.Array:
+    """`get_actor_per_token_logps` under TUNIX_PER_HOST_SAFE_LOGPS=1.
+
+    Same anchor-policy handling as the stock path; only the chunking and the
+    host-local result differ.
+    """
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
+      actor_trainer_state_on_device = self._is_state_on_device(
+          nnx.state(self.actor_trainer.model)
+      )
+      if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
+        self._put_model_on_memory_kind(self.actor_trainer.model, "pinned_host")
+        gc.collect()
+      graphdef, _ = nnx.split(self.actor_trainer.model)
+      anchor_on_device = self._is_state_on_device(self._anchor_policy_state)
+      if anchor_on_device:
+        anchor_policy_state = self._anchor_policy_state
+      else:
+        anchor_policy_state = rl_utils.put_params_on_memory_kind(
+            self._anchor_policy_state, self._default_memory_kind
+        )
+      compute = functools.partial(
+          common.compute_per_token_logps,
+          graphdef,
+          anchor_policy_state,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          stop_gradient=True,
+          temperature=temperature,
+          chunk_size=self.cluster_config.training_config.compute_logps_chunk_size,
+      )
+      actor_per_token_logps = self._per_host_chunked_logps(
+          compute,
+          micro_batch_size,
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          segment_ids=segment_ids,
+          segment_positions=segment_positions,
+          token_mask=token_mask,
+      )
+      del compute
+      if not anchor_on_device:
+        del anchor_policy_state
+      if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
+        gc.collect()
+        self._put_model_on_memory_kind(
+            self.actor_trainer.model, self._default_memory_kind
+        )
+      return actor_per_token_logps
+
   def sync_weights(self):
     """Syncs the weights of between the sampler model and trainer model."""
     if jax.devices() and jax.default_backend() not in ["tpu", "gpu"]:
@@ -1364,6 +1935,27 @@ class RLEngine:
       return self.cluster_config.rollout_config[mode]
     else:
       return self.cluster_config.rollout_config
+
+  def _generate_mesh_cm(self):
+    """Mesh context for `generate`.
+
+    By default `generate` enters the ROLLOUT mesh and its logical axis rules.
+    With `TUNIX_ROLLOUT_NO_MESH_CONTEXT=1` it yields the ROLLOUT mesh without
+    entering it. A host-local in-process engine (TUNIX_VLLM_HOST_LOCAL_ENGINE=1)
+    sets its own per-process mesh inside `execute_model`; entering the global
+    ROLLOUT mesh around it makes jit read two meshes, and eager ops in the
+    engine's decode loop then fail on some processes with "Attempted to
+    execute with N argument lists when local device count is M". Other roles
+    and the ROLLOUT uses outside `generate` keep the normal context.
+
+    Returns:
+      A context manager yielding `(mesh, logical_axis_rules_or_None)`.
+    """
+    if _env_flag("TUNIX_ROLLOUT_NO_MESH_CONTEXT"):
+      return contextlib.nullcontext(
+          (self.cluster_config.role_to_mesh[Role.ROLLOUT], None)
+      )
+    return self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT)
 
   @contextlib.contextmanager
   def _get_mesh_and_logical_axis_rules_cm(self, role: Role):
