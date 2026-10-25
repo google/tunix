@@ -171,7 +171,11 @@ def create_default_handler(
     )
     logging.info("Built RaidenHandler natively; port %d", handler.port)
     return handler
-  elif mode_name in (weight_sync.WeightSyncMode.FALLBACK.value, "noop", "no-op"):
+  elif mode_name in (
+      weight_sync.WeightSyncMode.FALLBACK.value,
+      "noop",
+      "no-op",
+  ):
     logging.info(
         "Built fallback NullHandler; weight sync running protocol-only."
     )
@@ -1380,19 +1384,36 @@ class WeightSyncCoordinator:
     finally:
       if release_source:
         release_request = prepared_request or request
+
+        async def _release_one_source(wid: str, handle: Any) -> None:
+          for attempt in range(1, 4):
+            try:
+              await asyncio.wait_for(
+                  handle.asubmit("release_weight_sync", release_request),
+                  self._timeouts.release,
+              )
+              return
+            except asyncio.CancelledError:
+              raise
+            except Exception as e:  # pylint: disable=broad-except
+              if attempt == 3:
+                raise
+              logging.warning(
+                  "source %s failed to release round %d staging (attempt"
+                  " %d/3), retrying: %r",
+                  wid,
+                  round_index,
+                  attempt,
+                  e,
+              )
+
         # Shielded AND awaited to completion on cancellation. The shield
         # alone only stops the cancel from killing the release; the awaiting
         # coroutine still leaves immediately, so the release would run on
         # behind a round the caller already considers over -- overlapping the
         # next round's prepare, or a close() that frees what it is reading.
         release_gather = asyncio.gather(
-            *[
-                asyncio.wait_for(
-                    handle.asubmit("release_weight_sync", release_request),
-                    self._timeouts.release,
-                )
-                for _, handle in sources
-            ],
+            *[_release_one_source(wid, handle) for wid, handle in sources],
             return_exceptions=True,
         )
         try:
@@ -1634,9 +1655,7 @@ class WeightSyncCoordinator:
         *[self._worker_phase(d, request) for d in destinations]
     )
     published = [
-        d[0]
-        for d, phase in zip(destinations, phases)
-        if phase == "committed"
+        d[0] for d, phase in zip(destinations, phases) if phase == "committed"
     ]
     unconfirmed = [
         d[0]

@@ -32,11 +32,10 @@ import asyncio
 import dataclasses
 import threading
 import time
-import unittest
 from typing import Any, Mapping, Optional, Sequence
+import unittest
 
 from absl.testing import absltest
-
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import worker_registry
 
@@ -53,8 +52,15 @@ WeightSyncError = weight_sync_coordinator.WeightSyncError
 PhaseTimeouts = weight_sync_coordinator.PhaseTimeouts
 
 FAST_TIMEOUTS = PhaseTimeouts(
-    bind=5, metadata=5, source_prepare=5, pre=5, transfer=5, h2d=5, post=5,
-    abort=5, status=5,
+    bind=5,
+    metadata=5,
+    source_prepare=5,
+    pre=5,
+    transfer=5,
+    h2d=5,
+    post=5,
+    abort=5,
+    status=5,
 )
 
 
@@ -92,6 +98,7 @@ class FakeSource:
     self.port = 20000
     self.prepare_calls = 0
     self.release_calls = 0
+    self.release_failures_remaining = 0
 
   def info(self) -> datatypes.WorkerInfo:
     return self._info
@@ -126,6 +133,11 @@ class FakeSource:
   async def release_weight_sync(self, sync_request: Any = None, **kwargs):
     del sync_request, kwargs
     self._log.append(f"{self._info.worker_id}:release-start")
+    if self.release_failures_remaining > 0:
+      self.release_failures_remaining -= 1
+      raise ConnectionResetError(
+          f"{self._info.worker_id}: transient release failure"
+      )
     if self.release_gate is not None:
       self.release_entered.set()
       await self.release_gate.wait()
@@ -135,6 +147,7 @@ class FakeSource:
 
 class FakeDestination:
   """Sampler side, with real staging/serving double-buffer semantics and a
+
   real `WorkerRoundTracker` behind every phase.
 
   `fail_on` makes the named phase raise AFTER its partial work, which is the
@@ -435,7 +448,7 @@ class CoordinatorTestBase(absltest.TestCase):
 
   def phases(self, worker_id: str) -> list[str]:
     prefix = f"{worker_id}:"
-    return [e[len(prefix):] for e in self.log if e.startswith(prefix)]
+    return [e[len(prefix) :] for e in self.log if e.startswith(prefix)]
 
 
 class SuccessPathTest(CoordinatorTestBase):
@@ -519,7 +532,8 @@ class SuccessPathTest(CoordinatorTestBase):
 
     self.assertEqual(dest.bind_calls, 1)
     dst_addrs = {
-        m.shards[0] for m in self.handler.registered
+        m.shards[0]
+        for m in self.handler.registered
         if m.unit.job_name == "sampler"
     }
     self.assertLen(dst_addrs, 1)
@@ -534,12 +548,11 @@ class SuccessPathTest(CoordinatorTestBase):
     # The registered endpoints and the ones carried in the request are the
     # same collection, not two snapshots of a rebinding synchronizer.
     registered = [
-        m.shards[0] for m in self.handler.registered
+        m.shards[0]
+        for m in self.handler.registered
         if m.unit.job_name == "trainer"
     ]
-    in_request = [
-        m.shards[0] for m in dest.last_request.source_metadata
-    ]
+    in_request = [m.shards[0] for m in dest.last_request.source_metadata]
     self.assertEqual(registered, in_request)
 
   def test_source_release_runs_on_success(self):
@@ -549,6 +562,19 @@ class SuccessPathTest(CoordinatorTestBase):
     self.sync()
 
     self.assertEqual(self.sources[0].release_calls, 1)
+
+  def test_source_release_retries_on_transient_failure(self):
+    dest = FakeDestination("sampler", [])
+    self.make(dest)
+    self.sources[0].release_failures_remaining = 2
+
+    self.sync()
+
+    self.assertEqual(self.sources[0].release_calls, 1)
+    self.assertEqual(
+        self.log.count("trainer:release-start"),
+        3,
+    )
 
   def test_fresh_req_id_and_uuid_even_for_the_same_policy_version(self):
     dest = FakeDestination("sampler", [])
@@ -560,9 +586,7 @@ class SuccessPathTest(CoordinatorTestBase):
     self.assertNotEqual(r1.req_id, r2.req_id)
     self.assertNotEqual(r1.uuid, r2.uuid)
     transfers = self.handler.transfers
-    self.assertEqual(
-        [t["generation"] for t in transfers], [r1.uuid, r2.uuid]
-    )
+    self.assertEqual([t["generation"] for t in transfers], [r1.uuid, r2.uuid])
 
   def test_destination_phases_run_concurrently(self):
     # Each destination's pre waits for the other's to have started; serial
@@ -607,12 +631,20 @@ class MultiHostAndVariablesTest(CoordinatorTestBase):
   def test_variables_manifest_travels_to_registration(self):
     variables = (
         weight_sync.TensorMetadata(
-            name="w", shape=(8, 4), mesh_shape=(1, 1), layout=(1, 0),
-            item_size=4, layer_idx=0,
+            name="w",
+            shape=(8, 4),
+            mesh_shape=(1, 1),
+            layout=(1, 0),
+            item_size=4,
+            layer_idx=0,
         ),
         weight_sync.TensorMetadata(
-            name="b", shape=(4,), mesh_shape=(1,), layout=(0,),
-            item_size=2, layer_idx=1,
+            name="b",
+            shape=(4,),
+            mesh_shape=(1,),
+            layout=(0,),
+            item_size=2,
+            layer_idx=1,
         ),
     )
     # Both sides carry the SAME manifest: the preflight enforces exactly
@@ -635,8 +667,10 @@ class MultiHostAndVariablesTest(CoordinatorTestBase):
 
 class ManifestPreflightTest(CoordinatorTestBase):
   """The controller pairs variables by exact name and silently skips
+
   mismatches; the preflight turns that silent loss into a loud, zero-cost
-  failure BEFORE any destination is quiesced."""
+  failure BEFORE any destination is quiesced.
+  """
 
   def test_name_mismatch_fails_before_any_downtime(self):
     variables = (
@@ -691,9 +725,7 @@ class ManifestPreflightTest(CoordinatorTestBase):
     with self.assertRaises(WeightSyncError) as ctx:
       self.sync()
 
-    self.assertTrue(
-        any("shape" in f for f in ctx.exception.result.failures)
-    )
+    self.assertTrue(any("shape" in f for f in ctx.exception.result.failures))
     self.assertNotIn("pre", self.phases("sampler"))
     # Source staging is still released on this exit path.
     self.assertEqual(self.sources[0].release_calls, 1)
@@ -803,8 +835,9 @@ class FailurePathTest(CoordinatorTestBase):
     self.assertIsNone(self.coordinator.poisoned)
 
   def test_post_transient_failure_is_retried_to_commit(self):
-    dest = FakeDestination("sampler", [], fail_on="post",
-                           fail_persistently=False)
+    dest = FakeDestination(
+        "sampler", [], fail_on="post", fail_persistently=False
+    )
     self.make(dest)
 
     result = self.sync(policy_version=4)
@@ -825,17 +858,16 @@ class FailurePathTest(CoordinatorTestBase):
     self.assert_serving_old_weights(d2)
 
   def test_abort_failure_is_not_reported_as_a_clean_abort(self):
-    dest = FakeDestination("sampler", [], fail_on="abort",
-                           fail_persistently=True)
+    dest = FakeDestination(
+        "sampler", [], fail_on="abort", fail_persistently=True
+    )
     self.make(dest)
     self.handler.result_success = False
 
     with self.assertRaises(WeightSyncError) as ctx:
       self.sync()
 
-    self.assertIs(
-        ctx.exception.result.state, RoundState.FAILED_NEEDS_RESTART
-    )
+    self.assertIs(ctx.exception.result.state, RoundState.FAILED_NEEDS_RESTART)
 
   def test_source_release_runs_on_the_failure_path_too(self):
     dest = FakeDestination("sampler", [])
@@ -874,9 +906,7 @@ class RoundIdentityTest(CoordinatorTestBase):
     async def scenario():
       gate = asyncio.Event()
       dest._pre_await = gate  # pylint: disable=protected-access
-      task = asyncio.ensure_future(
-          coordinator.sync(1)
-      )
+      task = asyncio.ensure_future(coordinator.sync(1))
       for _ in range(50):
         await asyncio.sleep(0)
         if "sampler:pre" in self.log:
@@ -894,7 +924,8 @@ class RoundIdentityTest(CoordinatorTestBase):
     self.make(dest)
     self.sync(policy_version=1)
     old_addr = next(
-        m.shards[0] for m in self.handler.registered
+        m.shards[0]
+        for m in self.handler.registered
         if m.unit.job_name == "sampler"
     )
 
@@ -902,7 +933,8 @@ class RoundIdentityTest(CoordinatorTestBase):
     self.sync(policy_version=2)
 
     new_addr = [
-        m.shards[0] for m in self.handler.registered
+        m.shards[0]
+        for m in self.handler.registered
         if m.unit.job_name == "sampler"
     ][-1]
     self.assertNotEqual(old_addr, new_addr)
@@ -934,8 +966,10 @@ class TimeoutReconciliationTest(CoordinatorTestBase):
         [],
         delay_after_phase="pre",
         round_report_override={
-            "req_id": "someone-elses-round", "uuid": 999,
-            "phase": "prepared", "policy_version": 0,
+            "req_id": "someone-elses-round",
+            "uuid": 999,
+            "phase": "prepared",
+            "policy_version": 0,
         },
     )
     self.make(
@@ -953,6 +987,7 @@ class ProtocolRejectionTest(CoordinatorTestBase):
 
   def test_source_without_the_protocol_is_rejected(self):
     class Bare:
+
       def info(self):
         return datatypes.WorkerInfo(
             worker_id="bare", roles=frozenset({datatypes.Role.ACTOR.value})
@@ -963,7 +998,8 @@ class ProtocolRejectionTest(CoordinatorTestBase):
     registry.register(Bare())
     registry.register(dest)
     coordinator = weight_sync_coordinator.WeightSyncCoordinator(
-        registry=registry, handler=FakeHandler(Wire(), []),
+        registry=registry,
+        handler=FakeHandler(Wire(), []),
         timeouts=FAST_TIMEOUTS,
     )
 
@@ -976,6 +1012,7 @@ class ProtocolRejectionTest(CoordinatorTestBase):
 
   def test_destination_missing_the_lifecycle_is_rejected(self):
     class MetadataOnly:
+
       def info(self):
         return datatypes.WorkerInfo(
             worker_id="half", roles=frozenset({datatypes.Role.ROLLOUT.value})
@@ -989,7 +1026,8 @@ class ProtocolRejectionTest(CoordinatorTestBase):
     registry.register(FakeSource("trainer", wire, []))
     registry.register(MetadataOnly())
     coordinator = weight_sync_coordinator.WeightSyncCoordinator(
-        registry=registry, handler=FakeHandler(wire, []),
+        registry=registry,
+        handler=FakeHandler(wire, []),
         timeouts=FAST_TIMEOUTS,
     )
 
@@ -1005,7 +1043,8 @@ class ProtocolRejectionTest(CoordinatorTestBase):
     registry = worker_registry.WorkerRegistry()
     registry.register(FakeSource("trainer", wire, []))
     coordinator = weight_sync_coordinator.WeightSyncCoordinator(
-        registry=registry, handler=FakeHandler(wire, []),
+        registry=registry,
+        handler=FakeHandler(wire, []),
         timeouts=FAST_TIMEOUTS,
     )
 
@@ -1208,9 +1247,7 @@ class PostReconciliationTest(CoordinatorTestBase):
 
   def test_post_reply_lost_to_timeout_still_commits(self):
     dest = FakeDestination("sampler", [], delay_after_phase="post")
-    self.make(
-        dest, timeouts=dataclasses.replace(FAST_TIMEOUTS, post=0.05)
-    )
+    self.make(dest, timeouts=dataclasses.replace(FAST_TIMEOUTS, post=0.05))
 
     result = self.sync(policy_version=7)
 
@@ -1248,7 +1285,10 @@ class PostReconciliationTest(CoordinatorTestBase):
     # roll back a publish that happened. It gets needs_restart, not an abort.
     d1 = FakeDestination("s1", [])
     d2 = FakeDestination(
-        "s2", [], fail_on="post", fail_persistently=True,
+        "s2",
+        [],
+        fail_on="post",
+        fail_persistently=True,
         status_unreachable=True,
     )
     self.make(d1, d2)
@@ -1281,8 +1321,12 @@ class PostReconciliationTest(CoordinatorTestBase):
             dict(key, phase="h2d_done"),  # _call_phase reconcile, 1st post
             dict(key, phase="h2d_done"),  # classification -> retryable
             dict(key, phase="h2d_done"),  # _call_phase reconcile, retry
-            {"req_id": "someone-elses-round", "uuid": 999,
-             "phase": "prepared", "policy_version": 0},  # retry classify
+            {
+                "req_id": "someone-elses-round",
+                "uuid": 999,
+                "phase": "prepared",
+                "policy_version": 0,
+            },  # retry classify
         ],
     )
     self.make(dest)
@@ -1311,9 +1355,7 @@ class TransferTimeoutTest(CoordinatorTestBase):
     with self.assertRaises(WeightSyncError) as ctx:
       self.sync()
 
-    self.assertIs(
-        ctx.exception.result.state, RoundState.UNKNOWN_TRANSFER_STATE
-    )
+    self.assertIs(ctx.exception.result.state, RoundState.UNKNOWN_TRANSFER_STATE)
     # The thread may still be writing: aborting would discard buffers in use,
     # releasing source staging would pull memory out from under it.
     self.assertNotIn("abort", self.phases("sampler"))
@@ -1342,9 +1384,7 @@ class TransferOutcomeUnknownTest(CoordinatorTestBase):
     with self.assertRaises(WeightSyncError) as ctx:
       self.sync()
 
-    self.assertIs(
-        ctx.exception.result.state, RoundState.UNKNOWN_TRANSFER_STATE
-    )
+    self.assertIs(ctx.exception.result.state, RoundState.UNKNOWN_TRANSFER_STATE)
     self.assertNotIn("abort", self.phases("sampler"))
     self.assertEqual(self.sources[0].release_calls, 0)
     self.assertIsNotNone(self.coordinator.poisoned)
@@ -1361,9 +1401,7 @@ class CancellationTest(CoordinatorTestBase):
       gate = asyncio.Event()  # never set: pre blocks until cancelled
       dest._pre_gate = started  # pylint: disable=protected-access
       dest._pre_await = gate  # pylint: disable=protected-access
-      task = asyncio.ensure_future(
-          coordinator.sync(1)
-      )
+      task = asyncio.ensure_future(coordinator.sync(1))
       # Event-driven, not a capped yield loop: registration runs through the
       # executor, and on a slow machine a fixed number of bare yields can
       # expire before pre begins -- cancelling pre-quiesce, where there is
@@ -1395,9 +1433,7 @@ class CancellationTest(CoordinatorTestBase):
     async def scenario():
       source.release_gate = asyncio.Event()
       source.release_entered = asyncio.Event()
-      task = asyncio.ensure_future(
-          coordinator.sync(1)
-      )
+      task = asyncio.ensure_future(coordinator.sync(1))
       await asyncio.wait_for(source.release_entered.wait(), 10)
       task.cancel()
       # The cancellation must NOT come back while the release is still open.
@@ -1426,9 +1462,7 @@ class CancellationTest(CoordinatorTestBase):
       gate = asyncio.Event()  # never set: pre blocks until cancelled
       dest._pre_gate = started  # pylint: disable=protected-access
       dest._pre_await = gate  # pylint: disable=protected-access
-      task = asyncio.ensure_future(
-          coordinator.sync(1)
-      )
+      task = asyncio.ensure_future(coordinator.sync(1))
       await asyncio.wait_for(started.wait(), 10)
       task.cancel()
       with self.assertRaises(asyncio.CancelledError):
@@ -1448,9 +1482,7 @@ class CancellationTest(CoordinatorTestBase):
     self.handler.transfer_delay = 2.0
 
     async def scenario():
-      task = asyncio.ensure_future(
-          self.coordinator.sync(1)
-      )
+      task = asyncio.ensure_future(self.coordinator.sync(1))
       while "transfer" not in self.log:
         await asyncio.sleep(0.01)
       task.cancel()
@@ -1477,12 +1509,8 @@ class CancellationTest(CoordinatorTestBase):
     self.make(dest_a, dest_b)
 
     async def scenario():
-      task = asyncio.ensure_future(
-          self.coordinator.sync(1)
-      )
-      while not (
-          "sampler-a:post" in self.log and "sampler-b:post" in self.log
-      ):
+      task = asyncio.ensure_future(self.coordinator.sync(1))
+      while not ("sampler-a:post" in self.log and "sampler-b:post" in self.log):
         await asyncio.sleep(0.01)
       await asyncio.sleep(0.1)  # let B's failure reconcile; A still hangs
       task.cancel()
@@ -1510,19 +1538,17 @@ class CancellationTest(CoordinatorTestBase):
         fail_on="post",
         fail_persistently=True,
         round_report_override={
-            "req_id": "someone-elses-round", "uuid": 999,
-            "phase": "prepared", "policy_version": 0,
+            "req_id": "someone-elses-round",
+            "uuid": 999,
+            "phase": "prepared",
+            "policy_version": 0,
         },
     )
     self.make(dest_a, dest_b)
 
     async def scenario():
-      task = asyncio.ensure_future(
-          self.coordinator.sync(1)
-      )
-      while not (
-          "sampler-a:post" in self.log and "sampler-b:post" in self.log
-      ):
+      task = asyncio.ensure_future(self.coordinator.sync(1))
+      while not ("sampler-a:post" in self.log and "sampler-b:post" in self.log):
         await asyncio.sleep(0.01)
       await asyncio.sleep(0.1)  # let B's failure reconcile; A still hangs
       task.cancel()
@@ -1561,9 +1587,7 @@ class CancellationTest(CoordinatorTestBase):
     self.handler.register_work_unit = slow_register
 
     async def scenario():
-      task = asyncio.ensure_future(
-          self.coordinator.sync(1)
-      )
+      task = asyncio.ensure_future(self.coordinator.sync(1))
       while not entered.is_set():
         await asyncio.sleep(0.01)
       task.cancel()
@@ -1596,9 +1620,7 @@ class CancellationTest(CoordinatorTestBase):
     self.make(dest)
 
     async def scenario():
-      task = asyncio.ensure_future(
-          self.coordinator.sync(1)
-      )
+      task = asyncio.ensure_future(self.coordinator.sync(1))
       while "sampler:post" not in self.log:
         await asyncio.sleep(0.01)
       await asyncio.sleep(0.05)  # let the post body complete; reply hangs
@@ -1623,9 +1645,7 @@ class CancellationTest(CoordinatorTestBase):
     self.make(dest)
 
     async def scenario():
-      task = asyncio.ensure_future(
-          self.coordinator.sync(3)
-      )
+      task = asyncio.ensure_future(self.coordinator.sync(3))
       while "sampler:post" not in self.log:
         await asyncio.sleep(0.01)
       await asyncio.sleep(0.05)  # let the post body complete; reply hangs
@@ -1659,8 +1679,10 @@ class TerminalReconciliationTest(CoordinatorTestBase):
         fail_on="post",
         fail_persistently=True,
         round_report_override={
-            "req_id": "wsync-v1-r0", "uuid": 1,
-            "phase": "aborted", "policy_version": 0,
+            "req_id": "wsync-v1-r0",
+            "uuid": 1,
+            "phase": "aborted",
+            "policy_version": 0,
         },
     )
     self.make(dest)
@@ -1687,8 +1709,10 @@ class TerminalReconciliationTest(CoordinatorTestBase):
         fail_on="abort",
         fail_persistently=True,
         round_report_override={
-            "req_id": "wsync-v1-r0", "uuid": 1,
-            "phase": "committed", "policy_version": 1,
+            "req_id": "wsync-v1-r0",
+            "uuid": 1,
+            "phase": "committed",
+            "policy_version": 1,
         },
     )
     self.make(dest)
@@ -1698,9 +1722,7 @@ class TerminalReconciliationTest(CoordinatorTestBase):
     with self.assertRaises(WeightSyncError) as ctx:
       self.sync()
 
-    self.assertIs(
-        ctx.exception.result.state, RoundState.FAILED_NEEDS_RESTART
-    )
+    self.assertIs(ctx.exception.result.state, RoundState.FAILED_NEEDS_RESTART)
     self.assertIsNotNone(self.coordinator.poisoned)
 
   def test_rollback_over_late_commit_is_partial_not_aborted(self):
@@ -1755,8 +1777,12 @@ class TerminalReconciliationTest(CoordinatorTestBase):
             dict(key, phase="h2d_done"),  # classification -> retryable
             dict(key, phase="h2d_done"),  # _call_phase reconcile, retry
             dict(key, phase="h2d_done"),  # retry classify -> still_failed
-            {"req_id": "someone-elses-round", "uuid": 999,
-             "phase": "prepared", "policy_version": 0},  # rollback re-read
+            {
+                "req_id": "someone-elses-round",
+                "uuid": 999,
+                "phase": "prepared",
+                "policy_version": 0,
+            },  # rollback re-read
         ],
     )
     dest_b = FakeDestination(
@@ -1807,8 +1833,10 @@ class TerminalReconciliationTest(CoordinatorTestBase):
         fail_on="post",
         fail_persistently=True,
         round_report_override={
-            "req_id": "wsync-v1-r0", "uuid": 1,
-            "phase": "aborted", "policy_version": 0,
+            "req_id": "wsync-v1-r0",
+            "uuid": 1,
+            "phase": "aborted",
+            "policy_version": 0,
         },
     )
     dest_b = FakeDestination(
