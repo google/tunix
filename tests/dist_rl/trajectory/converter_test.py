@@ -20,6 +20,7 @@ from typing import Any
 from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
+from tunix.dist_rl.trajectory import async_writer
 from tunix.dist_rl.trajectory import converter
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
@@ -61,8 +62,6 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
         ],
         metrics=trajectory_lib.Metrics(
             completion_tokens=2,
-            completion_token_ids=[101, 102],
-            logprobs=[-0.1, -0.2],
         ),
         assistant_tokens=mock_agent_step.assistant_tokens,
         assistant_masks=mock_agent_step.assistant_masks,
@@ -73,6 +72,13 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
         },
     )
     self.assertStepEqual(agent_step, expected_step)
+
+    # With include_token_arrays=True, metrics duplicates token arrays.
+    agent_step_full = converter.create_agent_step(
+        mock_agent_step, tunix_step_id=0, include_token_arrays=True
+    )
+    self.assertEqual(agent_step_full.metrics.completion_token_ids, [101, 102])
+    self.assertEqual(agent_step_full.metrics.logprobs, [-0.1, -0.2])
 
   def test_create_agent_step_step_id_mapping(self):
     mock_agent_step = agent_types.Step(model_response="resp")
@@ -154,12 +160,22 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
         model_response="resp", assistant_tokens=assistant_tokens
     )
 
-    agent_step = converter.create_agent_step(rl_step, tunix_step_id=0)
+    agent_step = converter.create_agent_step(
+        rl_step, tunix_step_id=0, include_token_arrays=True
+    )
 
     token_ids = agent_step.metrics.completion_token_ids
     self.assertEqual(token_ids, expected_token_ids)
     self.assertEqual([type(t) for t in token_ids], [int] * len(token_ids))
     self.assertEqual(agent_step.metrics.completion_tokens, len(token_ids))
+
+    # By default (include_token_arrays=False), completion_token_ids is None to
+    # avoid duplicating assistant_tokens.
+    default_step = converter.create_agent_step(rl_step, tunix_step_id=0)
+    self.assertIsNone(default_step.metrics.completion_token_ids)
+    self.assertEqual(
+        default_step.metrics.completion_tokens, len(expected_token_ids)
+    )
 
   @parameterized.named_parameters(
       dict(
@@ -214,7 +230,9 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
     """Verifies logprobs are converted to a list of Python floats."""
     rl_step = agent_types.Step(model_response="resp", logprobs=logprobs)
 
-    agent_step = converter.create_agent_step(rl_step, tunix_step_id=0)
+    agent_step = converter.create_agent_step(
+        rl_step, tunix_step_id=0, include_token_arrays=True
+    )
 
     converted_logprobs = agent_step.metrics.logprobs
     np.testing.assert_array_equal(converted_logprobs, expected_logprobs)
@@ -222,6 +240,10 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
         [type(lp) for lp in converted_logprobs],
         [float] * len(converted_logprobs),
     )
+
+    # By default without assistant tokens, metrics is None.
+    default_step = converter.create_agent_step(rl_step, tunix_step_id=0)
+    self.assertIsNone(default_step.metrics)
 
   def test_create_agent_step_metrics_match_validated_metrics(self) -> None:
     """Verifies the unvalidated Metrics equals one built with validation."""
@@ -231,7 +253,9 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
         logprobs=np.array([-0.5, -1.5], dtype=np.float32),
     )
 
-    metrics = converter.create_agent_step(rl_step, tunix_step_id=0).metrics
+    metrics = converter.create_agent_step(
+        rl_step, tunix_step_id=0, include_token_arrays=True
+    ).metrics
 
     validated = trajectory_lib.Metrics.model_validate(metrics.model_dump())
     self.assertEqual(metrics, validated)
@@ -239,6 +263,11 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
         metrics.model_fields_set,
         {"completion_tokens", "completion_token_ids", "logprobs"},
     )
+
+    default_metrics = converter.create_agent_step(
+        rl_step, tunix_step_id=0
+    ).metrics
+    self.assertEqual(default_metrics.model_fields_set, {"completion_tokens"})
 
   def test_create_agent_step_with_masked_token_raises_mask_error(self) -> None:
     """Verifies token IDs in a masked array with a masked entry are rejected."""
@@ -1701,6 +1730,291 @@ class UpdateTrajectoryMetadataTest(parameterized.TestCase):
     # Later syncs without masked_out set leave the recorded value in place.
     converter.update_trajectory_metadata(metadata=meta, policy_version=1)
     self.assertTrue(meta.masked_out)
+
+  def test_update_trajectory_metadata_final_metrics(self):
+    mock_traj = agent_types.Trajectory(
+        task="Solve math",
+        prompt_tokens=np.array([101, 102]),
+        steps=[
+            agent_types.Step(
+                model_response="Step 1",
+                assistant_tokens=np.array([201, 202, 203]),
+            ),
+            agent_types.Step(
+                model_response="Step 2",
+                assistant_tokens=np.array([204, 205]),
+            ),
+        ],
+    )
+
+    class MockAgent:
+      trajectory = mock_traj
+
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="traj_fm",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+    )
+    # When include_final_metrics=False, final_metrics remains None
+    converter.update_trajectory_metadata(
+        metadata=meta, agent=MockAgent(), include_final_metrics=False
+    )
+    self.assertIsNone(meta.final_metrics)
+
+    # When include_final_metrics=True, final_metrics is computed
+    converter.update_trajectory_metadata(
+        metadata=meta, agent=MockAgent(), include_final_metrics=True
+    )
+    self.assertIsNotNone(meta.final_metrics)
+    self.assertEqual(meta.final_metrics.total_prompt_tokens, 2)
+    self.assertEqual(meta.final_metrics.total_completion_tokens, 5)
+    self.assertEqual(meta.final_metrics.total_steps, 5)
+
+    # Explicit override takes precedence
+    override_fm = trajectory_lib.FinalMetrics(
+        total_prompt_tokens=10,
+        total_completion_tokens=20,
+        total_steps=30,
+    )
+    converter.update_trajectory_metadata(
+        metadata=meta, final_metrics=override_fm
+    )
+    self.assertEqual(meta.final_metrics, override_fm)
+
+  def test_from_tunix_trajectory_populates_final_metrics_and_roundtrips(self):
+    orig_traj = agent_types.Trajectory(
+        task={"prompts": ["Solve puzzle"]},
+        prompt_tokens=np.array([101, 102, 103]),
+        reward=4.5,
+        status=agent_types.TrajectoryStatus.SUCCEEDED,
+        masked_out=False,
+        steps=[
+            agent_types.Step(
+                model_response="Thought and action 1",
+                assistant_tokens=np.array([201, 202]),
+                assistant_masks=np.array([1, 1]),
+                logprobs=np.array([-0.1, -0.2]),
+                reward=1.5,
+                action=agent_types.Action(
+                    action={"name": "test_tool", "arguments": {"x": 1}}
+                ),
+                observation="result 1",
+                env_tokens=np.array([301, 302]),
+                env_masks=np.array([1, 1]),
+            ),
+            agent_types.Step(
+                model_response="Final answer",
+                assistant_tokens=np.array([203, 204, 205]),
+                assistant_masks=np.array([1, 1, 1]),
+                logprobs=np.array([-0.05, -0.05, -0.05]),
+                reward=3.0,
+                done=True,
+                observation="done",
+            ),
+        ],
+    )
+
+    converted = converter.from_tunix_trajectory(
+        orig_traj,
+        traj_id="traj_roundtrip_1",
+        policy_version=5,
+    )
+
+    self.assertEqual(converted.trajectory_id, "traj_roundtrip_1")
+    self.assertEqual(converted.status, "SUCCEEDED")
+    self.assertEqual(converted.total_reward, 4.5)
+    self.assertEqual(converted.target_policy_versions, [5])
+    self.assertIsNotNone(converted.final_metrics)
+    self.assertEqual(converted.final_metrics.total_prompt_tokens, 3)
+    self.assertEqual(converted.final_metrics.total_completion_tokens, 5)
+    self.assertEqual(converted.final_metrics.total_steps, 5)
+
+    rehydrated = converter.to_tunix_trajectory(converted)
+    self.assertEqual(rehydrated.task, orig_traj.task)
+    self.assertEqual(rehydrated.status, orig_traj.status)
+    self.assertEqual(rehydrated.reward, orig_traj.reward)
+    np.testing.assert_array_equal(
+        rehydrated.prompt_tokens, orig_traj.prompt_tokens
+    )
+    self.assertLen(rehydrated.steps, 2)
+    self.assertEqual(rehydrated.steps[0].model_response, "Thought and action 1")
+    self.assertEqual(rehydrated.steps[0].reward, 1.5)
+    self.assertEqual(rehydrated.steps[1].reward, 3.0)
+    self.assertTrue(rehydrated.steps[1].done)
+
+  def test_from_tunix_trajectory_empty_steps(self):
+    orig_traj = agent_types.Trajectory(
+        task="Only task",
+        prompt_tokens=np.array([101]),
+        steps=[],
+    )
+    converted = converter.from_tunix_trajectory(orig_traj, traj_id="traj_empty")
+    self.assertIsNotNone(converted.final_metrics)
+    self.assertEqual(converted.final_metrics.total_prompt_tokens, 1)
+    self.assertIsNone(converted.final_metrics.total_completion_tokens)
+    self.assertEqual(converted.final_metrics.total_steps, 1)
+
+  def test_from_tunix_trajectory_none_assistant_tokens(self):
+    orig_traj = agent_types.Trajectory(
+        task="Task",
+        steps=[
+            agent_types.Step(
+                model_response="Step without tokens",
+                assistant_tokens=None,
+            )
+        ],
+    )
+    converted = converter.from_tunix_trajectory(orig_traj, traj_id="traj_none")
+    self.assertIsNotNone(converted.final_metrics)
+    self.assertIsNone(converted.final_metrics.total_prompt_tokens)
+    self.assertIsNone(converted.final_metrics.total_completion_tokens)
+    self.assertEqual(converted.final_metrics.total_steps, 3)
+
+  def test_serialized_step_payload_does_not_duplicate_arrays(self) -> None:
+    rl_step = agent_types.Step(
+        model_response="response",
+        assistant_tokens=np.array([101, 102], dtype=np.int32),
+        assistant_masks=np.array([1, 1], dtype=np.int32),
+        logprobs=np.array([-0.1, -0.2], dtype=np.float64),
+    )
+    agent_step = converter.create_agent_step(rl_step, tunix_step_id=0)
+    self.assertIsNotNone(agent_step)
+    atif_step = agent_step.to_atif_step()
+    dumped = atif_step.model_dump()
+
+    # Step.metrics has completion_tokens count, but NOT duplicate arrays.
+    self.assertEqual(dumped["metrics"]["completion_tokens"], 2)
+    self.assertIsNone(dumped["metrics"]["completion_token_ids"])
+    self.assertIsNone(dumped["metrics"]["logprobs"])
+
+    # Arrays are stored in the extensions payload under extra.
+    extensions = dumped["extra"][trajectory_lib.TUNIX_EXTENSIONS_KEY]
+    self.assertEqual(extensions["assistant_tokens"], [101, 102])
+    self.assertEqual(extensions["assistant_masks"], [1, 1])
+    self.assertEqual(extensions["logprobs"], [-0.1, -0.2])
+
+  def test_lossless_roundtrip_with_deduplicated_metrics(self) -> None:
+    orig_traj = agent_types.Trajectory(
+        task="Write a python function",
+        prompt_tokens=np.array([10, 20, 30]),
+        steps=[
+            agent_types.Step(
+                model_response="def foo(): pass",
+                thought="Thinking about foo",
+                action=agent_types.Action(action={"tool": "code"}),
+                observation="output 1",
+                reward=1.0,
+                done=False,
+                assistant_tokens=np.array([101, 102, 103]),
+                assistant_masks=np.array([1, 1, 1]),
+                logprobs=np.array([-0.1, -0.2, -0.3]),
+                env_tokens=np.array([201, 202]),
+                env_masks=np.array([1, 1]),
+            ),
+            agent_types.Step(
+                model_response="done",
+                observation="all done",
+                reward=2.0,
+                done=True,
+                assistant_tokens=np.array([104, 105]),
+                assistant_masks=np.array([1, 1]),
+                logprobs=np.array([-0.4, -0.5]),
+            ),
+        ],
+        reward=3.0,
+        status=agent_types.TrajectoryStatus.SUCCEEDED,
+    )
+    atif_traj = converter.from_tunix_trajectory(
+        orig_traj, traj_id="traj_lossless"
+    )
+    reconstructed = converter.to_tunix_trajectory(atif_traj)
+
+    self.assertEqual(
+        reconstructed.task, {"prompts": ["Write a python function"]}
+    )
+    self.assertEqual(
+        reconstructed.status, agent_types.TrajectoryStatus.SUCCEEDED
+    )
+    self.assertEqual(reconstructed.reward, 3.0)
+    self.assertEqual(reconstructed.prompt_length, 3)
+    np.testing.assert_array_equal(
+        reconstructed.prompt_tokens, np.array([10, 20, 30])
+    )
+    self.assertLen(reconstructed.steps, 2)
+    for orig_s, rec_s in zip(orig_traj.steps, reconstructed.steps):
+      self.assertEqual(rec_s.model_response, orig_s.model_response)
+      self.assertEqual(rec_s.thought, orig_s.thought)
+      self.assertEqual(rec_s.reward, orig_s.reward)
+      self.assertEqual(rec_s.done, orig_s.done)
+      np.testing.assert_array_equal(
+          rec_s.assistant_tokens, orig_s.assistant_tokens
+      )
+      np.testing.assert_array_equal(rec_s.logprobs, orig_s.logprobs)
+      if orig_s.env_tokens is not None:
+        np.testing.assert_array_equal(rec_s.env_tokens, orig_s.env_tokens)
+
+  def test_step_array_filter_in_create_agent_step(self) -> None:
+    prefill = np.zeros((4, 2, 2), dtype=np.int16)
+    rl_step = agent_types.Step(
+        model_response="resp",
+        assistant_tokens=np.array([101, 102]),
+        assistant_masks=np.array([1, 1]),
+        logprobs=np.array([-0.1, -0.2]),
+    )
+    agent_step = converter.create_agent_step(
+        rl_step,
+        tunix_step_id=0,
+        prefill_routed_experts=prefill,
+        prefill_start=0,
+        prefill_num_context=2,
+        step_array_filter=async_writer.StepArrayFilter(
+            filter_tokens=True,
+            filter_masks=True,
+            filter_logprobs=True,
+            filter_routed_experts=True,
+        ),
+    )
+    self.assertIsNotNone(agent_step)
+    self.assertIsNone(agent_step.assistant_tokens)
+    self.assertIsNone(agent_step.assistant_masks)
+    self.assertIsNone(agent_step.logprobs)
+    self.assertIsNone(agent_step.prefill_routed_experts)
+    self.assertIsNone(agent_step.prefill_start)
+    self.assertIsNone(agent_step.prefill_num_context)
+    # Live original step remains intact.
+    self.assertIsNotNone(rl_step.assistant_tokens)
+    self.assertIsNotNone(rl_step.logprobs)
+
+  def test_step_array_filter_in_from_tunix_trajectory(self) -> None:
+    orig_traj = agent_types.Trajectory(
+        task="Test prompt",
+        prompt_tokens=np.array([1, 2, 3]),
+        steps=[
+            agent_types.Step(
+                model_response="resp",
+                assistant_tokens=np.array([101, 102]),
+                assistant_masks=np.array([1, 1]),
+                logprobs=np.array([-0.1, -0.2]),
+                env_tokens=np.array([201, 202]),
+                env_masks=np.array([1, 1]),
+            )
+        ],
+    )
+    filtered_traj = converter.from_tunix_trajectory(
+        orig_traj,
+        traj_id="traj_filtered",
+        step_array_filter=async_writer.StepArrayFilter(
+            filter_tokens=True,
+            filter_masks=True,
+            filter_logprobs=True,
+        ),
+    )
+    # Prompt step env_tokens stripped
+    self.assertIsNone(filtered_traj.steps[0].env_tokens)
+    # Agent step tokens/logprobs stripped
+    self.assertIsNone(filtered_traj.steps[1].assistant_tokens)
+    self.assertIsNone(filtered_traj.steps[1].logprobs)
+    # Env step tokens stripped
+    self.assertIsNone(filtered_traj.steps[2].env_tokens)
 
 
 if __name__ == "__main__":
