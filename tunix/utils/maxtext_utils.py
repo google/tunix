@@ -555,7 +555,19 @@ def build_maxtext_config(
     argv.extend(_pairs)
 
   logging.info("MaxText config argv: %s", argv)
-  return pyconfig.initialize(argv)
+  try:
+    return pyconfig.initialize(argv)
+  except ValueError as e:
+    if "rollout_weight_dtype" not in str(e):
+      raise
+    argv = [
+        arg for arg in argv if not arg.startswith("rollout_weight_dtype=")
+    ]
+    logging.warning(
+        "Installed MaxText does not recognize 'rollout_weight_dtype'. "
+        "Retrying initialization without it."
+    )
+    return pyconfig.initialize(argv)
 
 
 def create_maxtext_mesh(maxtext_config: Any) -> Any:
@@ -606,6 +618,72 @@ def create_maxtext_engine(
         wrap_with_tunix_adapter=wrap_with_tunix_adapter,
         tokenizer_pad_id=tokenizer_pad_id,
     )
+
+  # cl/995291149 sets trainer weight_dtype=float32 so master weights and AdamW
+  # moments stay in FP32, while the vLLM rollout model uses weight_dtype=bfloat16
+  # (with float32_gate_logits keeping norm/gate/router/GDN/logits_dense modules
+  # in FP32). Ensure target-free weight conversion exports exact rollout dtypes.
+  direct_converter: Any = getattr(
+      getattr(engine, "_weight_converter", None), "_direct", None
+  )
+  if direct_converter is not None:
+    import jax  # pylint: disable=g-import-not-at-top
+    from jax import numpy as jnp  # pylint: disable=g-import-not-at-top
+
+    converter = direct_converter
+    converter.target_dtype = DEFAULT_ROLLOUT_WEIGHT_DTYPE
+    orig_exec_target_free = getattr(
+        converter, "_execute_group_target_free", None
+    )
+    if callable(orig_exec_target_free):
+      fp32_gate_logits = bool(
+          getattr(maxtext_config, "float32_gate_logits", False)
+      )
+      fp32_modules = frozenset({
+          "norm",
+          "input_layernorm",
+          "post_attention_layernorm",
+          "gate",
+          "router",
+          "shared_expert_gate",
+          "A_log",
+          "dt_bias",
+          "conv1d",
+          "logits_dense",
+      })
+
+      def _exec_target_free_rollout_dtypes(group: Any, src_flat: Any) -> Any:
+        keep_fp32 = fp32_gate_logits and bool(
+            fp32_modules.intersection(
+                str(part) for part in group.source_keys[0]
+            )
+        )
+        desired_dtype = jnp.float32 if keep_fp32 else jnp.bfloat16
+        prev_target_dtype = converter.target_dtype
+        converter.target_dtype = (
+            "float32" if keep_fp32 else DEFAULT_ROLLOUT_WEIGHT_DTYPE
+        )
+        try:
+          outs = orig_exec_target_free(group, src_flat)
+        finally:
+          converter.target_dtype = prev_target_dtype
+        if getattr(group, "quantize_to_fp8", False):
+          return outs
+        fixed = []
+        for tgt_key, val in outs:
+          if hasattr(val, "dtype") and val.dtype != desired_dtype:
+            if isinstance(val, jax.ShapeDtypeStruct):
+              val = jax.ShapeDtypeStruct(
+                  val.shape,
+                  desired_dtype,
+                  sharding=getattr(val, "sharding", None),
+              )
+            else:
+              val = val.astype(desired_dtype)
+          fixed.append((tgt_key, val))
+        return fixed
+
+      converter._execute_group_target_free = _exec_target_free_rollout_dtypes
 
   model_type = type(engine.model).__name__
   logging.info(

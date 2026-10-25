@@ -833,6 +833,103 @@ class MaxTextUtilsTest(absltest.TestCase):
     mock_mesh.__exit__.assert_called_once()
     self.assertEqual(spmd.get_logical_axis_rules(), ())
 
+  def test_build_maxtext_config_retries_without_rollout_weight_dtype(self):
+    mock_pyconfig = mock.MagicMock()
+    mock_cfg = mock.MagicMock()
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+    mock_pyconfig.initialize.side_effect = [
+        ValueError("Key rollout_weight_dtype does not exist in config"),
+        mock_cfg,
+    ]
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+    ), mock.patch("os.path.exists", return_value=True):
+      result = maxtext_utils.build_maxtext_config("qwen3.5-35b-a3b")
+    self.assertIs(result, mock_cfg)
+    self.assertEqual(mock_pyconfig.initialize.call_count, 2)
+    second_argv = mock_pyconfig.initialize.call_args_list[1][0][0]
+    self.assertFalse(
+        any(arg.startswith("rollout_weight_dtype=") for arg in second_argv)
+    )
+
+  def test_create_maxtext_engine_preserves_fp32_modules_in_target_free_converter(
+      self,
+  ):
+    import jax  # pylint: disable=g-import-not-at-top
+    from jax import numpy as jnp  # pylint: disable=g-import-not-at-top
+
+    mock_cfg = mock.MagicMock()
+    mock_cfg.logical_axis_rules = ()
+    mock_cfg.float32_gate_logits = True
+    mock_mesh = mock.MagicMock()
+
+    class TunixMaxTextAdapter:
+      pass
+
+    class DummyDirectConverter:
+
+      def __init__(self):
+        self.target_dtype = "float32"
+        self.seen_target_dtypes = []
+
+      def _execute_group_target_free(self, group, src_flat):
+        del src_flat
+        self.seen_target_dtypes.append(self.target_dtype)
+        return [
+            (
+                group.source_keys[0],
+                jax.ShapeDtypeStruct((4, 4), jnp.dtype(self.target_dtype)),
+            )
+        ]
+
+    direct = DummyDirectConverter()
+    engine = mock.MagicMock()
+    engine.model = TunixMaxTextAdapter()
+    engine._weight_converter._direct = direct
+
+    mock_engine_mod = mock.MagicMock()
+    mock_engine_mod.MaxTextTrainingEngine.return_value = engine
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock.MagicMock(), mock_engine_mod, mock.MagicMock()),
+    ):
+      maxtext_utils.create_maxtext_engine(
+          mock_cfg,
+          mock_mesh,
+          wrap_with_tunix_adapter=True,
+          log_shapes=False,
+      )
+
+    group_gate = mock.MagicMock(
+        source_keys=[("decoder", "layers", "mlp", "gate", "kernel")],
+        quantize_to_fp8=False,
+    )
+    group_norm = mock.MagicMock(
+        source_keys=[
+            ("decoder", "layers", "post_attention_layernorm", "scale")
+        ],
+        quantize_to_fp8=False,
+    )
+    group_wi = mock.MagicMock(
+        source_keys=[("decoder", "layers", "mlp", "wi_0")],
+        quantize_to_fp8=False,
+    )
+
+    out_gate = direct._execute_group_target_free(group_gate, {})
+    out_norm = direct._execute_group_target_free(group_norm, {})
+    out_wi = direct._execute_group_target_free(group_wi, {})
+
+    self.assertEqual(out_gate[0][1].dtype, jnp.float32)
+    self.assertEqual(out_norm[0][1].dtype, jnp.float32)
+    self.assertEqual(out_wi[0][1].dtype, jnp.bfloat16)
+    self.assertEqual(
+        direct.seen_target_dtypes, ["float32", "float32", "bfloat16"]
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

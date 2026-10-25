@@ -215,9 +215,9 @@ export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"
 export INIT_TIMEOUT_S="${INIT_TIMEOUT_S:-7200}"
 
 # vLLM Rollout Configuration
-export USE_BATCHED_RPA_LONG_CTX_KERNEL="${USE_BATCHED_RPA_LONG_CTX_KERNEL:-false}"
+export USE_BATCHED_RPA_LONG_CTX_KERNEL="${USE_BATCHED_RPA_LONG_CTX_KERNEL:-true}"
 if [[ "${USE_BATCHED_RPA_LONG_CTX_KERNEL}" == "1" || "${USE_BATCHED_RPA_LONG_CTX_KERNEL}" == "true" ]]; then
-  export ROLLOUT_MAXTEXT_ATTENTION="${ROLLOUT_MAXTEXT_ATTENTION:-vllm_batched_rpa}"
+  export ROLLOUT_MAXTEXT_ATTENTION="${ROLLOUT_MAXTEXT_ATTENTION:-vllm_batched_rpa_long_ctx}"
 else
   export ROLLOUT_MAXTEXT_ATTENTION="${ROLLOUT_MAXTEXT_ATTENTION:-vllm_rpa}"
 fi
@@ -233,7 +233,7 @@ fi
 python3 -c 'import json, sys; json.loads(sys.argv[1])' "${VLLM_CONFIG_JSON}"
 
 # Rollout Worker Flags & Raiden tuning
-export ONEHOT_MOE_PERMUTE_THRESHOLD="${ONEHOT_MOE_PERMUTE_THRESHOLD:-32768}"
+export ONEHOT_MOE_PERMUTE_THRESHOLD="${ONEHOT_MOE_PERMUTE_THRESHOLD:-2048}"
 export RAGGED_GATHER_REDUCE_VERSION="${RAGGED_GATHER_REDUCE_VERSION:-v2}"
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false}"
@@ -255,8 +255,8 @@ _trainer_xla_flags=""
 for _f in ${TRAINER_LIBTPU_INIT_ARGS}; do [[ "${_f}" == --xla_* ]] && _trainer_xla_flags+="${_f} "; done
 export PATHWAYS_PROXY_EXTRA_ARGS="${PATHWAYS_PROXY_EXTRA_ARGS:-${_trainer_xla_flags% }}"
 
-export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-remat_policy=custom gdn_chunk_size=64 \
-decoder_layer_input=offload context=remat \
+export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-remat_policy=custom use_gdn_kernel=true gdn_cp_mode=head gdn_chunk_size=64 \
+decoder_layer_input=offload context=remat gdn=remat gdn_conv=remat gdn_states=remat \
 megablox=true sparse_matmul=true use_tokamax_gmm=true use_gmm_v2=true \
 use_gmm_v2_heuristic_tiling=true merge_gating_gmm=false \
 use_ragged_sort=false use_custom_sort_vjp=false \
@@ -265,6 +265,7 @@ sa_block_q=1024 sa_block_kv=4096 sa_block_kv_compute=512 \
 sa_block_q_dkv=2048 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=512 \
 sa_fuse_reciprocal=false sa_use_base2_exp=true dq_reduction_steps=3 \
 context_parallel_strategy=ring context_parallel_load_balance=false allow_split_physical_axes=true \
+context_parallel_attention_load_balance=true \
 num_vocab_tiling=16 use_iota_embed=false mu_dtype=float32 grad_dtype=float32 \
 checkpoint_storage_concurrent_gb=96 \
 checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false \
