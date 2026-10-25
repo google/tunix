@@ -24,6 +24,7 @@ import gc
 import itertools
 import operator
 import os
+import pickle
 from typing import Any, Callable, Mapping, Sequence, cast
 
 from absl import logging
@@ -34,6 +35,7 @@ from flax.nnx import filterlib
 from flax.nnx import statelib
 import jax
 import jax.numpy as jnp
+from jax.experimental import multihost_utils
 from jax.sharding import Mesh  # pylint: disable=g-importing-member
 import jaxtyping
 import numpy as np
@@ -83,6 +85,118 @@ def _env_flag(name: str, default: str = "0") -> bool:
       "true",
       "True",
   )
+
+
+class _GlobalMetrics(dict):
+  """`MetricsBuffer.metrics` reduced across processes (per-host learner).
+
+  Marks a buffer whose reducible metrics already hold the values of every
+  process, so logging it needs no collective (it may run on a background
+  thread).
+  """
+
+
+def _allgather_bytes(payload: bytes) -> list[bytes]:
+  """Gathers one byte string from every JAX process, in process order.
+
+  This is a collective: every process must call it at the same point of the
+  program, from the thread that issues the other multi-process computations.
+
+  Args:
+    payload: This process's bytes.
+
+  Returns:
+    The payload of every process, indexed by process index.
+  """
+  local = np.frombuffer(payload, dtype=np.uint8)
+  with jax.transfer_guard("allow"):
+    sizes = np.asarray(
+        multihost_utils.process_allgather(np.asarray([local.size], np.int32))
+    ).reshape(-1)
+    # Pad to a power of two so the gather compiles for few distinct shapes.
+    width = 1 << max(int(sizes.max()) - 1, 0).bit_length()
+    padded = np.zeros((width,), np.uint8)
+    padded[: local.size] = local
+    gathered = np.asarray(multihost_utils.process_allgather(padded)).reshape(
+        sizes.size, width
+    )
+  return [gathered[i, : sizes[i]].tobytes() for i in range(sizes.size)]
+
+
+def _union_metric_values(value_lists: Sequence[list[Any]]) -> list[Any]:
+  """Concatenates every process's buffered values of one metric.
+
+  Numeric values of different shapes (per-example arrays of different lengths,
+  or an empty array from a process without valid items) are flattened into one
+  array, so an elementwise reducer (mean, min, max, sum) sees every value once
+  instead of failing on a ragged list.
+
+  Args:
+    value_lists: The buffered values of each process, in process order.
+
+  Returns:
+    The values of all processes.
+  """
+  values = [value for value_list in value_lists for value in value_list]
+  arrays = []
+  for value in values:
+    if isinstance(value, (str, bytes)) or sft_utils.is_weighted_metric(value):
+      return values
+    array = np.asarray(value)
+    if array.dtype.kind not in "biuf":
+      return values
+    arrays.append(array)
+  if len({array.shape for array in arrays}) > 1:
+    return [np.concatenate([array.reshape(-1) for array in arrays])]
+  return values
+
+
+def _merge_process_metrics(
+    per_process: Sequence[Mapping[str, tuple[list[Any], Any]]],
+    local_ops: Mapping[str, Callable[..., Any]],
+) -> dict[str, tuple[list[Any], Callable[..., Any]]]:
+  """Merges the reducible metrics of one buffer across processes.
+
+  Every metric gets the values of all processes, so its reducer runs over what
+  one controller would have buffered for the whole global batch: a mean over
+  per-example values is global sum / global count, min and max are global
+  extrema, `WeightedMetric` values keep their real numerators and
+  denominators, and a process that buffered nothing for a metric (no valid
+  items) contributes nothing.
+
+  Args:
+    per_process: `{name: (values, reducer or None)}` of each process, in
+      process order. A reducer is None if it could not be sent.
+    local_ops: This process's reducer of each metric it buffered.
+
+  Returns:
+    `{name: (values of all processes, reducer)}`.
+  """
+  merged = {}
+  for name in dict.fromkeys(n for metrics in per_process for n in metrics):
+    entries = [metrics[name] for metrics in per_process if name in metrics]
+    op = local_ops.get(name) or next(
+        (entry[1] for entry in entries if entry[1] is not None), None
+    )
+    if op is None:
+      logging.warning(
+          "Per-host learner: skipping metric %s, its reducer is unknown on"
+          " process %d.",
+          name,
+          jax.process_index(),
+      )
+      continue
+    merged[name] = (_union_metric_values([entry[0] for entry in entries]), op)
+  return merged
+
+
+def _sendable_op(op: Callable[..., Any]) -> Callable[..., Any] | None:
+  """`op` if it can be pickled (sent to other processes), else None."""
+  try:
+    pickle.dumps(op)
+  except Exception:  # pylint: disable=broad-exception-caught
+    return None
+  return op
 
 
 @contextlib.contextmanager
@@ -197,6 +311,9 @@ class RLEngine:
     self._buffered_train_metrics: list[MetricsBuffer] = []
     self._buffered_eval_metrics: list[MetricsBuffer] = []
     self._external_metrics_logger = None
+    # Per-host learner: RL metrics are reduced across processes before they
+    # are logged (see `reduce_metrics_across_processes`).
+    self._cross_process_metrics = False
 
     self._init_engine()
     gc.collect()
@@ -668,7 +785,17 @@ class RLEngine:
 
   def _log_metrics(self, metrics_buffer: MetricsBuffer) -> None:
     """Log metrics."""
+    cross_process = getattr(self, "_cross_process_metrics", False)
+    unreduced = cross_process and not isinstance(
+        metrics_buffer.metrics, _GlobalMetrics
+    )
+    skipped = []
     for metric_name, (value, op) in metrics_buffer.metrics.items():
+      if unreduced and op is not None:
+        # Per-host learner: these values cover this process's rows only;
+        # logging them under the global name would misreport the metric.
+        skipped.append(metric_name)
+        continue
       # Convert to numpy array immediately.
       # This handles nested lists, mixed types, and JAX arrays automatically.
       try:
@@ -680,11 +807,7 @@ class RLEngine:
         continue
 
       if agg_value.dtype.kind in {"U", "S"}:
-        logging.info(
-            "Rollout string metric %s: %s",
-            metric_name,
-            agg_value,
-        )
+        self._log_string_metric(metric_name, agg_value, cross_process)
         continue
 
       if agg_value.dtype.kind == "O":
@@ -692,7 +815,7 @@ class RLEngine:
         if agg_value.size > 0 and isinstance(
             agg_value.ravel()[0], (str, np.str_)
         ):
-          logging.info("Rollout string metric %s: %s", metric_name, agg_value)
+          self._log_string_metric(metric_name, agg_value, cross_process)
           continue
 
       # Apply aggregation and Log
@@ -713,8 +836,138 @@ class RLEngine:
           metrics_buffer.global_steps,
       )
 
+    if skipped:
+      logging.warning(
+          "Per-host learner: not logging %d metrics of %s step %d (%s): they"
+          " were not reduced across processes.",
+          len(skipped),
+          metrics_buffer.mode,
+          metrics_buffer.global_steps,
+          ", ".join(skipped),
+      )
+
     if self._external_metrics_logger is not None:
       self._external_metrics_logger(metrics_buffer)
+
+  def _log_string_metric(
+      self, metric_name: str, value: np.ndarray, cross_process: bool
+  ) -> None:
+    """Logs a string metric (e.g. prompts); never reduced across processes."""
+    if cross_process:
+      # Per-host learner: per-example data of this process's rows only.
+      logging.info(
+          "Rollout string metric %s (process %d of %d): %s",
+          metric_name,
+          jax.process_index(),
+          jax.process_count(),
+          value,
+      )
+    else:
+      logging.info("Rollout string metric %s: %s", metric_name, value)
+
+  def enable_cross_process_metrics(self) -> None:
+    """Turns on the per-host learner's cross-process metric contract.
+
+    Under the per-host learner (TUNIX_PER_HOST_LEARNER=1) every process
+    buffers RL metrics (rewards, completion lengths, user metrics, ...) of its
+    own prompt shard, and only process 0 exports them. Once this is on, a
+    buffer is logged only after `reduce_metrics_across_processes` replaced its
+    reducible metrics (those with a reducer) by their global values; reducible
+    metrics of a buffer that was not reduced are not logged. Metrics without a
+    reducer (prompts, completions and trajectory ids, perf timings) stay
+    host-local.
+    """
+    self._cross_process_metrics = True
+
+  def reduce_metrics_across_processes(
+      self, include_current: bool = False
+  ) -> None:
+    """Replaces the buffered RL metrics of completed steps by global values.
+
+    For the per-host learner (see `enable_cross_process_metrics`; a no-op
+    otherwise). Every reducible metric of every buffered, not yet reduced
+    step gets the values of all processes (`_merge_process_metrics`), so the
+    exported value of its reducer is the one of the global batch: a mean over
+    per-example values is global sum / global count, min and max are global
+    extrema, `WeightedMetric` values keep their real denominators, and a
+    process without values for a metric contributes nothing. A metric fn
+    that returns one scalar per call should return per-example values or a
+    `WeightedMetric` when its denominator is data dependent.
+
+    This is a collective: every process must call it at the same point, on
+    the main thread, after the step's rollouts and train steps, so that every
+    process gathers in the same order. Logging (also asynchronous logging)
+    then needs no collective.
+
+    Args:
+      include_current: Also reduce the buffers of the current global step
+        (at the end of training).
+    """
+    if not getattr(self, "_cross_process_metrics", False):
+      return
+    pending = []
+    occurrences = collections.Counter()
+    for buf in self._buffered_train_metrics + self._buffered_eval_metrics:
+      if isinstance(buf.metrics, _GlobalMetrics) or (
+          not include_current and buf.global_steps >= self.global_steps
+      ):
+        continue
+      step_key = (buf.mode, buf.global_steps)
+      pending.append(((*step_key, occurrences[step_key]), buf))
+      occurrences[step_key] += 1
+    payload = {}
+    unsendable = {}
+    for key, buf in pending:
+      payload[key] = {}
+      unsendable[key] = []
+      for name, (values, op) in buf.metrics.items():
+        if op is None:
+          continue
+        if any(
+            isinstance(x, jax.Array) and not x.is_fully_addressable
+            for x in jax.tree.leaves(values)
+        ):
+          continue  # Computed by a multi-process program: already global.
+        try:
+          entry = (jax.device_get(values), _sendable_op(op))
+          pickle.dumps(entry)
+        except Exception:  # pylint: disable=broad-exception-caught
+          unsendable[key].append(name)
+          continue
+        payload[key][name] = entry
+    gathered = [
+        pickle.loads(data)
+        for data in _allgather_bytes(
+            pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+        )
+    ]
+    for key, buf in pending:
+      local_ops = {
+          name: op for name, (_, op) in buf.metrics.items() if op is not None
+      }
+      merged = _merge_process_metrics(
+          [metrics.get(key, {}) for metrics in gathered], local_ops
+      )
+      reduced = _GlobalMetrics()
+      for name, entry in buf.metrics.items():
+        reduced[name] = merged.pop(name, entry)
+      reduced.update(merged)  # Metrics only other processes buffered.
+      for name in unsendable[key]:
+        logging.warning(
+            "Per-host learner: not logging metric %s: its values cannot be"
+            " sent to other processes.",
+            name,
+        )
+        reduced.pop(name)
+      buf.metrics = reduced
+    remote_only = set().union(*gathered) - set(payload)
+    if remote_only:
+      logging.warning(
+          "Per-host learner: process %d has no metrics buffer for %s; their"
+          " metrics are not logged.",
+          jax.process_index(),
+          sorted(remote_only),
+      )
 
   def with_external_metrics_logger(
       self, external_metrics_logger: Callable[[MetricsBuffer], None]
