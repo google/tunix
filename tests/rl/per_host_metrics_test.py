@@ -119,6 +119,11 @@ def _engine(cross_process: bool):
   return engine
 
 
+def _flush(engine, buffers):
+  """Logs the oldest buffer of `buffers` like a step flush, synchronously."""
+  engine._log_metrics(buffers.pop(0))
+
+
 def _history(engine, prefix, name, mode="train"):
   return [
       float(np.asarray(v))
@@ -135,9 +140,8 @@ class RLEngineCrossProcessMetricsTest(absltest.TestCase):
         "rewards/max": (np.array([1.0, 3.0]), np.max),
         "prompts": (["a", "b"], None),
     })
-    engine.global_steps = 1
     with self.assertLogs(level="INFO") as logs:
-      engine.buffer_metrics({"rewards/mean": (np.array([5.0]), np.mean)})
+      _flush(engine, engine._buffered_train_metrics)
     self.assertEqual(_history(engine, "rewards", "mean"), [2.0])
     self.assertEqual(_history(engine, "rewards", "max"), [3.0])
     self.assertIn(
@@ -192,7 +196,8 @@ class RLEngineCrossProcessMetricsTest(absltest.TestCase):
     self.assertEqual(sorted(payloads[1]), [("eval", 0, 0), ("train", 0, 0)])
     self.assertNotIn("prompts", payloads[1][("train", 0, 0)])  # Host-local.
     self.assertEqual(payloads[2], {})
-    engine.buffer_metrics({"rewards/mean": (np.array([9.0]), np.mean)})
+    _flush(engine, engine._buffered_train_metrics)
+    _flush(engine, engine._buffered_eval_metrics)
     self.assertEqual(_history(engine, "rewards", "mean"), [0.5])
     self.assertEqual(_history(engine, "rewards", "mean", "eval"), [3.0])
     self.assertEqual(_history(engine, "global", "only_remote"), [7.0])
