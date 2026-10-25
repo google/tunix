@@ -347,6 +347,30 @@ class AsyncMetricsExporterTest(absltest.TestCase):
 
     self.assertIsNone(owner_ref())
 
+  def test_idle_worker_releases_finished_callback_without_close(self):
+    class Owner:
+
+      def flush(self):
+        pass
+
+    owner = Owner()
+    owner_ref = weakref.ref(owner)
+    exporter = rl_engine_lib._AsyncMetricsExporter(maxsize=1)
+    try:
+      self.assertTrue(exporter.submit(owner.flush))
+      del owner
+      # Returns once the flush ran and the worker released it; the worker is
+      # then idle, waiting for the next flush.
+      exporter._queue.join()
+      gc.collect()
+
+      # An open exporter's idle worker must not keep the last callback (and
+      # the engine it is bound to) alive until close().
+      self.assertTrue(exporter._worker.is_alive())
+      self.assertIsNone(owner_ref())
+    finally:
+      self.assertTrue(exporter.close(timeout_s=10.0))
+
   def test_queue_full_drops_without_blocking(self):
     ran = []
     started = threading.Event()
