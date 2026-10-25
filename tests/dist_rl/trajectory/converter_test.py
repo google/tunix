@@ -1702,6 +1702,144 @@ class UpdateTrajectoryMetadataTest(parameterized.TestCase):
     converter.update_trajectory_metadata(metadata=meta, policy_version=1)
     self.assertTrue(meta.masked_out)
 
+  def test_update_trajectory_metadata_final_metrics(self):
+    mock_traj = agent_types.Trajectory(
+        task="Solve math",
+        prompt_tokens=np.array([101, 102]),
+        steps=[
+            agent_types.Step(
+                model_response="Step 1",
+                assistant_tokens=np.array([201, 202, 203]),
+            ),
+            agent_types.Step(
+                model_response="Step 2",
+                assistant_tokens=np.array([204, 205]),
+            ),
+        ],
+    )
+
+    class MockAgent:
+      trajectory = mock_traj
+
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="traj_fm",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+    )
+    # When include_final_metrics=False, final_metrics remains None
+    converter.update_trajectory_metadata(
+        metadata=meta, agent=MockAgent(), include_final_metrics=False
+    )
+    self.assertIsNone(meta.final_metrics)
+
+    # When include_final_metrics=True, final_metrics is computed
+    converter.update_trajectory_metadata(
+        metadata=meta, agent=MockAgent(), include_final_metrics=True
+    )
+    self.assertIsNotNone(meta.final_metrics)
+    self.assertEqual(meta.final_metrics.total_prompt_tokens, 2)
+    self.assertEqual(meta.final_metrics.total_completion_tokens, 5)
+    self.assertEqual(meta.final_metrics.total_steps, 5)
+
+    # Explicit override takes precedence
+    override_fm = trajectory_lib.FinalMetrics(
+        total_prompt_tokens=10,
+        total_completion_tokens=20,
+        total_steps=30,
+    )
+    converter.update_trajectory_metadata(
+        metadata=meta, final_metrics=override_fm
+    )
+    self.assertEqual(meta.final_metrics, override_fm)
+
+  def test_from_tunix_trajectory_populates_final_metrics_and_roundtrips(self):
+    orig_traj = agent_types.Trajectory(
+        task={"prompts": ["Solve puzzle"]},
+        prompt_tokens=np.array([101, 102, 103]),
+        reward=4.5,
+        status=agent_types.TrajectoryStatus.SUCCEEDED,
+        masked_out=False,
+        steps=[
+            agent_types.Step(
+                model_response="Thought and action 1",
+                assistant_tokens=np.array([201, 202]),
+                assistant_masks=np.array([1, 1]),
+                logprobs=np.array([-0.1, -0.2]),
+                reward=1.5,
+                action=agent_types.Action(
+                    action={"name": "test_tool", "arguments": {"x": 1}}
+                ),
+                observation="result 1",
+                env_tokens=np.array([301, 302]),
+                env_masks=np.array([1, 1]),
+            ),
+            agent_types.Step(
+                model_response="Final answer",
+                assistant_tokens=np.array([203, 204, 205]),
+                assistant_masks=np.array([1, 1, 1]),
+                logprobs=np.array([-0.05, -0.05, -0.05]),
+                reward=3.0,
+                done=True,
+                observation="done",
+            ),
+        ],
+    )
+
+    converted = converter.from_tunix_trajectory(
+        orig_traj,
+        traj_id="traj_roundtrip_1",
+        policy_version=5,
+    )
+
+    self.assertEqual(converted.trajectory_id, "traj_roundtrip_1")
+    self.assertEqual(converted.status, "SUCCEEDED")
+    self.assertEqual(converted.total_reward, 4.5)
+    self.assertEqual(converted.target_policy_versions, [5])
+    self.assertIsNotNone(converted.final_metrics)
+    self.assertEqual(converted.final_metrics.total_prompt_tokens, 3)
+    self.assertEqual(converted.final_metrics.total_completion_tokens, 5)
+    self.assertEqual(converted.final_metrics.total_steps, 5)
+
+    rehydrated = converter.to_tunix_trajectory(converted)
+    self.assertEqual(rehydrated.task, orig_traj.task)
+    self.assertEqual(rehydrated.status, orig_traj.status)
+    self.assertEqual(rehydrated.reward, orig_traj.reward)
+    np.testing.assert_array_equal(
+        rehydrated.prompt_tokens, orig_traj.prompt_tokens
+    )
+    self.assertLen(rehydrated.steps, 2)
+    self.assertEqual(rehydrated.steps[0].model_response, "Thought and action 1")
+    self.assertEqual(rehydrated.steps[0].reward, 1.5)
+    self.assertEqual(rehydrated.steps[1].reward, 3.0)
+    self.assertTrue(rehydrated.steps[1].done)
+
+  def test_from_tunix_trajectory_empty_steps(self):
+    orig_traj = agent_types.Trajectory(
+        task="Only task",
+        prompt_tokens=np.array([101]),
+        steps=[],
+    )
+    converted = converter.from_tunix_trajectory(orig_traj, traj_id="traj_empty")
+    self.assertIsNotNone(converted.final_metrics)
+    self.assertEqual(converted.final_metrics.total_prompt_tokens, 1)
+    self.assertIsNone(converted.final_metrics.total_completion_tokens)
+    self.assertEqual(converted.final_metrics.total_steps, 1)
+
+  def test_from_tunix_trajectory_none_assistant_tokens(self):
+    orig_traj = agent_types.Trajectory(
+        task="Task",
+        steps=[
+            agent_types.Step(
+                model_response="Step without tokens",
+                assistant_tokens=None,
+            )
+        ],
+    )
+    converted = converter.from_tunix_trajectory(orig_traj, traj_id="traj_none")
+    self.assertIsNotNone(converted.final_metrics)
+    self.assertIsNone(converted.final_metrics.total_prompt_tokens)
+    self.assertIsNone(converted.final_metrics.total_completion_tokens)
+    self.assertEqual(converted.final_metrics.total_steps, 3)
+
 
 if __name__ == "__main__":
   absltest.main()
