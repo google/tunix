@@ -44,11 +44,15 @@ import json
 import logging as _std_logging
 import os
 import re
+import shutil
 import signal
 import sys
 import threading
 import time
 from typing import Any, Callable
+
+# A decoded JSON object: an event record, a manifest or one of its file entries.
+JsonObj = dict[str, Any]
 
 # ---------------------------------------------------------------------------
 # Public state. `ON` is the off-mode guard: read it as `events.ON` (a module
@@ -88,7 +92,6 @@ ENVELOPE = ("v", "t", "m", "ev", "run", "role", "pod")
 MANIFEST_NAME = "manifest.json"
 
 _KT, _KM, _KE = " t", " m", " ev"  # envelope keys inside a queued item
-_LOG = _std_logging.getLogger(__name__)
 _FULL: bool = False
 _state: "_State | None" = None
 _strict: bool = False
@@ -104,6 +107,9 @@ try:  # absl is already imported by every caller; no I/O here.
 except Exception:  # pylint: disable=broad-except
   _absl_logging = None
   _ABSL_LOGGER_CLS = None
+# The module's own warnings go through absl, like the rest of Tunix.
+_LOG = (_absl_logging.get_absl_logger() if _absl_logging is not None
+        else _std_logging.getLogger(__name__))
 
 # Level constant -> the logging function a site calls. absl and stdlib levels
 # differ (absl INFO is 0, stdlib INFO is 20); each table is keyed by its own.
@@ -310,7 +316,7 @@ def _scrub(s: str, secrets: list[str]) -> str:
 
 
 def config_fields(argv: list[str] | None = None,
-                  allowlist: tuple[str, ...] = CONFIG_ENV_ALLOWLIST) -> dict:
+                  allowlist: tuple[str, ...] = CONFIG_ENV_ALLOWLIST) -> JsonObj:
   """Fields of the `config` event: argv and allowlisted env, secrets removed."""
   secrets = _secret_values()
   env = {}
@@ -428,7 +434,7 @@ def flush(upload: bool = False, timeout: float | None = None) -> None:
     _count_error("flush", e)
 
 
-def health() -> dict:
+def health() -> JsonObj:
   """Counters of this process's stream (all zero when never configured)."""
   st = _state
   if st is None:
@@ -474,7 +480,7 @@ def _count_error(kind: str, exc: BaseException | None = None) -> None:
     pass
 
 
-def _validate_strict(ev: str, fields: dict) -> None:
+def _validate_strict(ev: str, fields: JsonObj) -> None:
   s = SCHEMAS.get(ev)
   if s is None:
     raise SchemaError(f"unknown event {ev!r}")
@@ -548,8 +554,7 @@ def _default_upload(local_path: str, dest_uri: str) -> None:
   if not dest_uri.startswith("gs://"):
     os.makedirs(os.path.dirname(dest_uri) or ".", exist_ok=True)
     tmp = dest_uri + ".tmp"
-    with open(local_path, "rb") as src, open(tmp, "wb") as dst:
-      dst.write(src.read())
+    shutil.copyfile(local_path, tmp)
     os.replace(tmp, dest_uri)
     return
   bucket, path = _gcs_split(dest_uri)
@@ -595,15 +600,15 @@ def _default_list_tails(dir_uri: str) -> dict[str, tuple[int, bytes]]:
   return out
 
 
-def _parallel(fn: Callable[[Any], Any], items: list, timeout: float | None,
-              workers: int = MANIFEST_READERS) -> list:
+def _parallel(fn: Callable[[Any], Any], items: list[Any], timeout: float | None,
+              workers: int = MANIFEST_READERS) -> list[Any]:
   """[(True, fn(x)) or (False, exception) or None (not done in time)].
 
   Daemon threads rather than concurrent.futures: the orchestrator builds its
   manifest from atexit, after concurrent.futures refuses new work, and a read
   that hangs must not hold the interpreter's exit.
   """
-  results: list = [None] * len(items)
+  results: list[Any] = [None] * len(items)
   nxt = [0]
   lock = threading.Lock()
   done = threading.Event()
@@ -634,11 +639,18 @@ def _parallel(fn: Callable[[Any], Any], items: list, timeout: float | None,
     return list(results)
 
 
-def _gcs_client():
-  from google.cloud import storage  # pylint: disable=g-import-not-at-top
+_gcs_client_lock = threading.Lock()
+
+
+def _gcs_client() -> Any:
+  """One storage.Client per process; `_parallel` readers call this concurrently."""
   client = _gcs_client_cache.get("c")
   if client is None:
-    client = _gcs_client_cache["c"] = storage.Client()
+    with _gcs_client_lock:
+      client = _gcs_client_cache.get("c")
+      if client is None:
+        from google.cloud import storage  # pylint: disable=g-import-not-at-top
+        client = _gcs_client_cache["c"] = storage.Client()
   return client
 
 
@@ -698,10 +710,10 @@ _list_tails_fn: Callable[[str], dict[str, tuple[int, bytes]]] = \
     _default_list_tails
 _list_streams_fn: Callable[[str], dict[str, int]] = _default_list_streams
 _read_health_fn: Callable[[str, str, int | None],
-                          tuple[dict | None, str]] = _default_read_health
+                          tuple[JsonObj | None, str]] = _default_read_health
 
 
-def _last_health(tail: bytes) -> dict | None:
+def _last_health(tail: bytes) -> JsonObj | None:
   for line in reversed(tail.splitlines()):
     try:
       rec = json.loads(line)
@@ -712,24 +724,30 @@ def _last_health(tail: bytes) -> dict | None:
   return None
 
 
-def _file_entry(h: dict | None, size: int | None, src: str) -> dict:
+def _file_entry(h: JsonObj | None, size: int | None, src: str) -> JsonObj:
+  """The manifest entry of one stream from its last `events_health` record.
+
+  The envelope keys and the required `events_health` fields are read directly;
+  `lost` and `final` are optional in the `events_health` schema.
+  """
   if h is None:
     return {"v": V, "events": None, "dropped": None, "errors": None,
             "final": False, "lines": -1, "size": size, "health": src}
+  lost = int(h["lost"]) if "lost" in h else 0
   return {
-      "v": h.get("v", V), "role": h.get("role"), "pod": h.get("pod"),
-      "events": int(h["emitted"]) - int(h["dropped"]) - int(h.get("lost", 0)),
+      "v": h["v"], "role": h["role"], "pod": h["pod"],
+      "events": int(h["emitted"]) - int(h["dropped"]) - lost,
       "dropped": int(h["dropped"]), "errors": int(h["errors"]),
-      "final": bool(h.get("final")), "lines": -1, "size": size,
+      "final": "final" in h and bool(h["final"]), "lines": -1, "size": size,
       "health": src,
   }
 
 
-def build_manifest(dir_uri: str, run: str, expected: dict,
-                   own: dict[str, dict] | None = None,
+def build_manifest(dir_uri: str, run: str, expected: dict[str, int | None],
+                   own: dict[str, JsonObj] | None = None,
                    budget_s: float | None = None,
-                   on_partial: Callable[[dict], None] | None = None,
-                   listing_only: bool = False) -> dict:
+                   on_partial: Callable[[JsonObj], None] | None = None,
+                   listing_only: bool = False) -> JsonObj:
   """The manifest of the stream files under `dir_uri`.
 
   One listing of the streams, then each stream's health sidecar (its last
@@ -745,7 +763,7 @@ def build_manifest(dir_uri: str, run: str, expected: dict,
   sizes = _list_streams_fn(dir_uri)
   for name in own or {}:
     sizes.setdefault(name, None)
-  files: dict[str, dict] = {
+  files: dict[str, JsonObj] = {
       n: {"v": V, "events": None, "dropped": None, "errors": None,
           "final": False, "lines": -1, "size": sz, "health": "unread"}
       for n, sz in sizes.items()}
@@ -788,7 +806,7 @@ def build_manifest(dir_uri: str, run: str, expected: dict,
   return man(not unread, unread, note)
 
 
-def _read_manifest(dir_uri: str) -> dict:
+def _read_manifest(dir_uri: str) -> JsonObj:
   if dir_uri.startswith("gs://"):
     bucket, path = _gcs_split(dir_uri.rstrip("/") + "/" + MANIFEST_NAME)
     return json.loads(_gcs_client().bucket(bucket).blob(path).download_as_bytes())
@@ -796,7 +814,7 @@ def _read_manifest(dir_uri: str) -> dict:
     return json.load(f)
 
 
-def verify_manifest(dir_uri: str) -> dict:
+def verify_manifest(dir_uri: str) -> JsonObj:
   """Checks the files under `dir_uri` against its manifest.
 
   Returns {"manifest": ..., "problems": [...]}: a role with fewer files than
@@ -806,35 +824,38 @@ def verify_manifest(dir_uri: str) -> dict:
   """
   man = _read_manifest(dir_uri)
   tails = _list_tails_fn(dir_uri)
-  problems = []
-  if man.get("complete") is False:
-    problems.append(f"partial manifest: {man.get('note') or 'incomplete'}"
-                    f" (unread: {len(man.get('unread') or [])})")
-  for role, n in sorted(man.get("expected", {}).items()):
+  problems: list[str] = []
+  # build_manifest always writes v, run, written_t, expected, complete, listed,
+  # unread and files; only `note` is optional.
+  if not man["complete"]:
+    note = man["note"] if "note" in man else "incomplete"
+    problems.append(f"partial manifest: {note} (unread: {len(man['unread'])})")
+  for role, n in sorted(man["expected"].items()):
     found = sum(1 for name in tails if name.startswith(role + "-"))
     if n is not None and found < n:
       problems.append(f"missing: expected {n} {role} file(s), found {found}")
-  for name, rec in sorted(man.get("files", {}).items()):
+  for name, rec in sorted(man["files"].items()):
     if name not in tails:
       problems.append(f"missing: {name} (in the manifest, no file)")
       continue
     n_lines, tail = tails[name]
-    want = rec.get("events")
+    want = rec["events"]
     h = _last_health(tail)
+    final = h is not None and "final" in h and bool(h["final"])
+    stopping = h is not None and "stopping" in h and bool(h["stopping"])
     if want is not None and n_lines >= 0 and n_lines < want:
       problems.append(f"truncated: {name} has {n_lines} event lines, the"
                       f" manifest counts {want}")
-    elif (h is not None and h.get("stopping") and not h.get("final")
-          and tail.endswith(b"\n")):
+    elif stopping and not final and tail.endswith(b"\n"):
       # Killed during its drain, after node_stopping(): everything up to the
       # drain is there and counted, the final line is not.
       problems.append(f"unfinished: {name} ends on its pre-drain"
                       f" events_health line (no final line)")
-    elif h is None or not h.get("final") or not tail.endswith(b"\n"):
+    elif not final or not tail.endswith(b"\n"):
       problems.append(f"truncated: {name} has no final events_health line")
-    if rec.get("dropped"):
+    if rec["dropped"]:
       problems.append(f"dropped: {name} dropped {rec['dropped']}")
-    if rec.get("errors"):
+    if rec["errors"]:
       problems.append(f"errors: {name} counted {rec['errors']}")
   return {"manifest": man, "problems": problems}
 
@@ -916,7 +937,7 @@ class _State:
         self.done_cv.wait(left)
     return True
 
-  def health(self) -> dict:
+  def health(self) -> JsonObj:
     return {"emitted": self.popped + len(self.q) + self.dropped,
             "dropped": self.dropped, "errors": self.errors,
             "queue_hwm": self.hwm, "written": self.written, "lost": self.lost,
@@ -1004,13 +1025,13 @@ class _State:
     except Exception as e:  # pylint: disable=broad-except
       _count_error("writer", e)
 
-  def _encode_item(self, item: dict) -> str:
+  def _encode_item(self, item: JsonObj) -> str:
     t = item.pop(_KT)
     m = item.pop(_KM)
     ev = item.pop(_KE)
     return self._encode(t, m, ev, item)
 
-  def _encode(self, t: float, m: float, ev: str, fields: dict) -> str:
+  def _encode(self, t: float, m: float, ev: str, fields: JsonObj) -> str:
     rec: dict[str, Any] = {"v": V, "t": t, "m": m, "ev": ev, "run": self.run,
                            "role": self.role, "pod": self.pod}
     s = SCHEMAS.get(ev)
