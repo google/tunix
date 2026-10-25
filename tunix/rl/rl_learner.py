@@ -683,7 +683,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           "compute_logps_micro_batch_size",
       )
       # Rewards, completion lengths and metric fns see this process's shard
-      # only: reduce them across processes before they are logged.
+      # only: reduce them across processes before they are logged (see
+      # `RLEngine.reduce_metrics_across_processes` for which are exact).
       self.rl_engine.enable_cross_process_metrics()
     full_batch_iterator = iter(train_ds)
     first_item = next(full_batch_iterator)
