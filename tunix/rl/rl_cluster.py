@@ -936,13 +936,32 @@ class RLEngine:
 
     For the per-host learner (see `enable_cross_process_metrics`; a no-op
     otherwise). Every reducible metric of every buffered, not yet reduced
-    step gets the values of all processes (`_merge_process_metrics`), so the
-    exported value of its reducer is the one of the global batch: a mean over
-    per-example values is global sum / global count, min and max are global
-    extrema, `WeightedMetric` values keep their real denominators, and a
-    process without values for a metric contributes nothing. A metric fn
-    that returns one scalar per call should return per-example values or a
-    `WeightedMetric` when its denominator is data dependent.
+    step gets the buffered values of all processes (`_merge_process_metrics`)
+    and its reducer runs over them, as if one controller had buffered every
+    call of every process. A process without values for a metric contributes
+    nothing.
+
+    The exported value is exactly the one of the global batch for:
+      * per-example values (one value per row or item, e.g. the per-row
+        rewards behind `rewards/mean` and each reward fn's metric, or a
+        metric fn that returns an array) reduced by mean (global sum / global
+        count), min, max or sum;
+      * per-call extrema and sums (`np.min`, `np.max` or `np.sum` of each
+        call's values, reduced by the same function), e.g.
+        `completions/max_length`;
+      * `WeightedMetric` values, including `PearsonMetric` (e.g. the sampler
+        / trainer agreement metrics): their numerators and denominators (for
+        `PearsonMetric`, its sufficient statistics) are combined, so every
+        process is weighted by its real denominator.
+    A per-call scalar mean (`np.mean` of each call's values, reduced by
+    `np.mean`) becomes the unweighted mean of the per-process, per-call means,
+    as when one controller buffers several calls of a step. This equals the
+    global mean only if every call has the same denominator, e.g. a mean over
+    each call's rows such as GRPO's `completions/mean_length` (every process
+    holds the same number of rows). With a data-dependent denominator, e.g. a
+    mean over valid tokens or valid items such as PPO's `advantages/mean`, it
+    is a mean of per-process means, not the global mean. To export such a
+    metric exactly, buffer per-example values or a `WeightedMetric`.
 
     A metric is dropped on every process, with a warning, if some process
     could not send its values (they cannot be pickled), or if its values are
