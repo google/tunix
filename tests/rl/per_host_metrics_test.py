@@ -21,6 +21,8 @@ union of all processes' examples, including uneven completion lengths and a
 process without valid items, and that training itself is unchanged.
 """
 
+# pylint: disable=protected-access
+
 import json
 import os
 import socket
@@ -103,6 +105,37 @@ class MergeProcessMetricsTest(absltest.TestCase):
         {"m": common.global_weighted_mean},
     )
     self.assertAlmostEqual(_apply(*merged["m"]), 36.0 / 6.0)
+
+  def test_pearson_metric_of_the_union(self):
+    def pearson(x, y):
+      if not x.size:
+        return common.make_pearson_metric(*np.zeros(6, np.float32))
+      mx, my = x.mean(), y.mean()
+      return common.make_pearson_metric(
+          ((x - mx) * (y - my)).sum(),
+          ((x - mx) ** 2).sum(),
+          ((y - my) ** 2).sum(),
+          np.float32(x.size),
+          mx,
+          my,
+      )
+
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=9).astype(np.float32)
+    y = (0.5 * x + rng.normal(size=9)).astype(np.float32)
+    # Process 0 has no valid tokens; the others hold 4 and 5 of them.
+    shards = [
+        pearson(x[:0], y[:0]),
+        pearson(x[:4], y[:4]),
+        pearson(x[4:], y[4:]),
+    ]
+    merged = rl_engine_lib._merge_process_metrics(
+        [{"m": ([s], sft_utils.weighted_metric_mean)} for s in shards],
+        {"m": sft_utils.weighted_metric_mean},
+    )
+    self.assertAlmostEqual(
+        _apply(*merged["m"]), np.corrcoef(x, y)[0, 1], places=5
+    )
 
 
 def _engine(cross_process: bool):
@@ -396,7 +429,9 @@ def _run_child():
   if args["process_id"] == 0:
     np.savez(os.path.join(out_dir, "params.npz"), *params)
   with open(
-      os.path.join(out_dir, f"process{args['process_id']}.json"), "w"
+      os.path.join(out_dir, f"process{args['process_id']}.json"),
+      "w",
+      encoding="utf-8",
   ) as f:
     json.dump(
         {
@@ -457,7 +492,9 @@ def _run_job(out_dir: str, disable_reduction: bool = False) -> list[dict]:
     )
   results = []
   for process_id in range(_NUM_PROCESSES):
-    with open(os.path.join(out_dir, f"process{process_id}.json")) as f:
+    with open(
+        os.path.join(out_dir, f"process{process_id}.json"), encoding="utf-8"
+    ) as f:
       results.append(json.load(f))
   return results
 
