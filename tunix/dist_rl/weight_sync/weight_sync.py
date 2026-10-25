@@ -28,6 +28,7 @@ from __future__ import annotations
 import abc
 import dataclasses
 import enum
+import importlib
 from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
 
@@ -522,3 +523,34 @@ class WeightSyncDestination(Protocol):
     lost reply from unfinished work.
     """
     ...
+
+
+def create_weight_synchronizer(
+    mode: WeightSyncMode | str,
+    job_name: str,
+    state: Any = None,
+    *,
+    worker_index: int = 0,
+    staging_dir: Optional[str] = None,
+    **kwargs: Any,
+) -> Any:
+  """Factory creating a WeightSynchronizer for `MaxTextTrainingEngine`."""
+  del staging_dir
+  resolved_mode = (
+      mode if isinstance(mode, WeightSyncMode) else WeightSyncMode(str(mode))
+  )
+  if resolved_mode == WeightSyncMode.RAIDEN:
+    raiden_synchronizer = importlib.import_module(
+        f"{__package__}.raiden_synchronizer"
+    )
+    if state is not None:
+      kwargs["state"] = state
+    return raiden_synchronizer.RaidenSynchronizer(
+        job_name=job_name,
+        worker_index=worker_index,
+        **kwargs,
+    )
+  raise ValueError(
+      f"Unsupported WeightSyncMode {resolved_mode!r} for WeightSynchronizer."
+  )
+

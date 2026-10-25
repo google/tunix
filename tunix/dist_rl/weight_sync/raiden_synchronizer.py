@@ -883,7 +883,8 @@ class RaidenSynchronizer:
       )
     return self._sync
 
-  def d2h(self) -> None:
+  def d2h(self, sync_request: Any = None, **kwargs: Any) -> None:
+    del sync_request, kwargs
     if self._is_proxy:
       try:
         self._init_ffi_transport(is_d2h=True)
@@ -902,6 +903,13 @@ class RaidenSynchronizer:
         raise
 
     self._require_sync("d2h()").d2h()
+
+  def release_buffers(self) -> int:
+    """Releases staged array references held on this synchronizer."""
+    count = len(self.arrays)
+    self.names = []
+    self.arrays = []
+    return count
 
   def h2d(self) -> None:
     if not self.bound:
