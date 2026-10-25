@@ -144,14 +144,24 @@ class _AsyncMetricsExporter:
         del fn
         self._queue.task_done()
 
-  def submit(self, fn: Callable[[], None]) -> None:
-    """Queues `fn`, or drops it with a warning if the queue is full."""
+  def submit(self, fn: Callable[[], None]) -> bool:
+    """Queues `fn`, or drops it with a warning if the queue is full.
+
+    Args:
+      fn: The flush to run on the worker thread.
+
+    Returns:
+      False if the exporter is closed (`close` may run concurrently, e.g. as
+      the exit hook): `fn` was neither queued nor dropped, so the caller has
+      to run it. True if `fn` was queued (it runs before `close` returns) or
+      dropped because the queue was full.
+    """
     with self._lock:
       if self._closed:
-        raise RuntimeError("TUNIX_ASYNC_METRICS: exporter is closed.")
+        return False
       try:
         self._queue.put_nowait(fn)
-        return
+        return True
       except queue.Full:
         self._dropped += 1
         dropped = self._dropped
@@ -160,6 +170,7 @@ class _AsyncMetricsExporter:
           "TUNIX_ASYNC_METRICS: queue full, dropped metrics flush #%d.",
           dropped,
       )
+    return True
 
   def close(self, timeout_s: float = _ASYNC_METRICS_CLOSE_TIMEOUT_S) -> bool:
     """Runs every accepted flush, then stops the worker thread. Idempotent.
@@ -873,12 +884,13 @@ class RLEngine:
           " (queue depth %d).",
           max(1, qdepth),
       )
-    elif exporter.closed:
-      # `close` already ran: flush inline, as with the flag off, instead of
-      # starting another worker thread.
+    if not exporter.submit(
+        functools.partial(self._log_metrics, metrics_buffer)
+    ):
+      # `close` already ran, possibly on another thread after this flush
+      # started: flush inline, as with the flag off, instead of starting
+      # another worker thread.
       self._log_metrics(metrics_buffer)
-      return
-    exporter.submit(functools.partial(self._log_metrics, metrics_buffer))
 
   def with_external_metrics_logger(
       self, external_metrics_logger: Callable[[MetricsBuffer], None]

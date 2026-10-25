@@ -211,6 +211,36 @@ class AsyncMetricsShutdownTest(absltest.TestCase):
       self.assertIs(engine._async_metrics_exporter, exporter)
       self.assertFalse(exporter._worker.is_alive())
 
+  def test_flush_racing_close_runs_inline(self):
+    with _async_metrics_env(enabled=True):
+      recorder, records = _make_recorder()
+      engine = self._make_engine(recorder)
+      self._run_steps(engine, 2)
+      exporter = engine._async_metrics_exporter
+      submit = exporter.submit
+
+      def submit_after_concurrent_close(fn):
+        # close() (e.g. the exit hook, or close() on another thread) runs
+        # after the engine chose the exporter and before its submit().
+        closer = threading.Thread(target=exporter.close)
+        closer.start()
+        closer.join()
+        return submit(fn)
+
+      with mock.patch.object(exporter, "submit", submit_after_concurrent_close):
+        engine.global_steps = 2
+        # Flushes the step-1 buffer; must not raise.
+        engine.buffer_metrics({"loss": (2.0, np.mean)})
+
+      # Step 0 ran on the worker before close() returned; step 1 could no
+      # longer be queued and was flushed inline on the calling thread.
+      self.assertEqual(
+          records,
+          [(0, _WORKER_NAME), (1, threading.main_thread().name)],
+      )
+      self.assertIs(engine._async_metrics_exporter, exporter)
+      self.assertFalse(exporter._worker.is_alive())
+
   def test_flags_off_flushes_inline_without_worker(self):
     with _async_metrics_env(enabled=False):
       recorder, records = _make_recorder()
@@ -250,10 +280,55 @@ class AsyncMetricsExporterTest(absltest.TestCase):
     self.assertTrue(exporter.closed)
 
   def test_submit_after_close_fails_closed(self):
+    ran = []
     exporter = rl_engine_lib._AsyncMetricsExporter(maxsize=1)
     self.assertTrue(exporter.close(timeout_s=10.0))
-    with self.assertRaisesRegex(RuntimeError, "closed"):
-      exporter.submit(lambda: None)
+    # Neither queued nor dropped: the caller has to run it.
+    self.assertFalse(exporter.submit(lambda: ran.append("late")))
+    self.assertTrue(exporter._queue.empty())
+    self.assertEqual(ran, [])
+    self.assertEqual(exporter._dropped, 0)
+
+  def test_submit_racing_close_never_raises_or_loses_accepted_flushes(self):
+    # Large enough that nothing is dropped.
+    exporter = rl_engine_lib._AsyncMetricsExporter(maxsize=1_000_000)
+    ran, accepted, errors = [], [], []
+    start = threading.Barrier(5)
+
+    def producer(p):
+      # Submits until a few submits after close() are done.
+      start.wait()
+      after_close = 0
+      for i in range(50_000):
+        closed = exporter.closed
+        try:
+          if exporter.submit(lambda key=(p, i): ran.append(key)):
+            accepted.append((p, i))
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          errors.append(e)
+        after_close += closed
+        if after_close >= 10:
+          break
+
+    producers = [threading.Thread(target=producer, args=(p,)) for p in range(4)]
+    for t in producers:
+      t.start()
+    start.wait()
+    deadline = time.monotonic() + 60.0
+    while len(ran) < 100 and time.monotonic() < deadline:
+      time.sleep(0.001)
+    # close() races with the producers' submit() calls.
+    self.assertTrue(exporter.close(timeout_s=60.0))
+    ran_by_close = sorted(ran)
+    for t in producers:
+      t.join(60.0)
+
+    self.assertEqual(errors, [])
+    self.assertEqual(exporter._dropped, 0)
+    self.assertGreaterEqual(len(accepted), 100)
+    # Every accepted flush ran exactly once, before close() returned.
+    self.assertEqual(ran_by_close, sorted(accepted))
+    self.assertEqual(sorted(ran), ran_by_close)
 
   def test_close_releases_last_callback(self):
     class Owner:
@@ -283,11 +358,12 @@ class AsyncMetricsExporterTest(absltest.TestCase):
       release.wait(10.0)
       ran.append("blocked")
 
-    exporter.submit(blocked)
+    self.assertTrue(exporter.submit(blocked))
     self.assertTrue(started.wait(10.0))
-    exporter.submit(lambda: ran.append("queued"))
+    self.assertTrue(exporter.submit(lambda: ran.append("queued")))
     t0 = time.monotonic()
-    exporter.submit(lambda: ran.append("dropped"))
+    # Dropped by the exporter: the caller must not run it either.
+    self.assertTrue(exporter.submit(lambda: ran.append("dropped")))
     self.assertLess(time.monotonic() - t0, 1.0)
     self.assertEqual(exporter._dropped, 1)
 
