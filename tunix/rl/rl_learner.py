@@ -682,6 +682,9 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           self._training_config.compute_logps_micro_batch_size,
           "compute_logps_micro_batch_size",
       )
+      # Rewards, completion lengths and metric fns see this process's shard
+      # only: reduce them across processes before they are logged.
+      self.rl_engine.enable_cross_process_metrics()
     full_batch_iterator = iter(train_ds)
     first_item = next(full_batch_iterator)
     full_batch_size = len(first_item["prompts"])  # pyrefly: ignore[bad-argument-type]
@@ -807,6 +810,12 @@ class RLLearner(abc.ABC, Generic[TConfig]):
                   1  # manually increment the global steps.
               )
 
+          if per_host:
+            # Collective on the main thread, once per global step on every
+            # process: the completed step's metrics become global before the
+            # next `buffer_metrics` call flushes them.
+            self.rl_engine.reduce_metrics_across_processes()
+
           self.rl_engine.buffer_metrics(
               self.rl_engine.perf.export(),
               mode=rl_engine_lib.Mode.TRAIN,
@@ -823,6 +832,10 @@ class RLLearner(abc.ABC, Generic[TConfig]):
             break
         except StopIteration:
           break
+      if per_host:
+        # Every process leaves the loop at the same step; `close` logs the
+        # remaining buffers.
+        self.rl_engine.reduce_metrics_across_processes(include_current=True)
     finally:
       self.rl_engine.close()
 
