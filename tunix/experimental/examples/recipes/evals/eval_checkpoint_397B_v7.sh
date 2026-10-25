@@ -16,22 +16,26 @@
 set -e
 
 # ==============================================================================
-# Single-checkpoint MLPerf DeepSWE evaluation on 512 TPU v7x chips (397B)
+# Single-checkpoint MLPerf DeepSWE evaluation on TPU v7x (397B)
 # ==============================================================================
 # Usage:
 #   ./eval_checkpoint_397B_v7.sh gs://path_to_checkpoint [--dry-run] [--require-target]
 #   ./eval_checkpoint_397B_v7.sh stop_eval
 #
 # Behavior:
-# - Scales Qwen3.5-397B-A17B rollout evaluation to 512 TPU v7x chips by default
-#   (32 replicas x 16 chips tpu7x:2x2x4, BATCH_SIZE=128, MAX_CONCURRENCY=512,
-#   MAX_WARMPOOL_REPLICAS=32).
+# - Evaluates Qwen3.5-397B-A17B on 256 TPU v7x chips by default
+#   (16 replicas x 16 chips tpu7x:2x2x4, BATCH_SIZE=64, MAX_CONCURRENCY=256,
+#   MAX_WARMPOOL_REPLICAS=4, HEAD_NODEPOOL=sandbox-np so 0 cpu-np nodes are used).
 # - Auto-detects cluster/pod (us-east1 -> pod2, us-central1 -> pod1).
 # - Auto-discovers <run>/mllog/eval_checkpoints.jsonl when present so
 #   eval_start, eval_accuracy, eval_stop, and run_stop are appended to the
 #   training run's MLLOG file (seed_<seed>.out).
 # - Blocks until the evaluation JobSet completes, tears down the JobSets and
 #   sandboxes, and prints the evaluation metrics to stdout.
+# - K8S_NAMESPACE=<ns> (and optionally SANDBOX_NAMESPACE=<ns>) overrides the
+#   recipe's priority-dev namespace, e.g. to run on a calendar reservation
+#   namespace (res-trellis-1k-...) whose multislice-queue has reserved capacity.
+#   The same override must be passed to `stop_eval`.
 # ==============================================================================
 
 usage() {
@@ -45,10 +49,36 @@ Arguments:
   --dry-run, --render        Render K8s JobSet YAML without submitting to the cluster
   --require-target           Exit with code 2 if evaluation completes with target_reached=false
   stop, stop_eval            Tear down running evaluation JobSets and sandboxes
+
+Environment overrides (common):
+  K8S_NAMESPACE, SANDBOX_NAMESPACE   Target namespace(s) instead of priority-dev
+                                     (e.g. a calendar reservation namespace)
+  ROLLOUT_REPLICAS, TASKS_LIMIT      Scale down for smoke tests (e.g. 1 and 4)
+  RCP_LOGGING=false                  Do not append eval records to the MLLOG file
+  EVAL_OUTPUT_DIR                    Where summary.json is written
+  HEAD_NODEPOOL_CHECK=false          Skip the head-nodepool capacity guard
 EOF
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# mlperf_397b_v7x_eval.sh hardcodes K8S_NAMESPACE=priority-dev. Remember a
+# caller-provided namespace (e.g. a calendar reservation namespace such as
+# res-trellis-partial, whose multislice-queue maps to the reserved
+# ClusterQueue) so it can be re-applied after the recipe is sourced.
+#
+# The kubeconfig context namespace is deliberately left alone: the generated
+# JobSet manifests carry metadata.namespace and every kubectl call on the eval
+# path (launcher stop_eval, the polling loop below) passes -n explicitly.
+USER_K8S_NAMESPACE="${K8S_NAMESPACE:-}"
+USER_SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-}"
+
+apply_namespace_override() {
+  if [[ -n "${USER_K8S_NAMESPACE}" ]]; then
+    export K8S_NAMESPACE="${USER_K8S_NAMESPACE}"
+    export SANDBOX_NAMESPACE="${USER_SANDBOX_NAMESPACE:-${USER_K8S_NAMESPACE}}"
+  fi
+}
 
 if [[ "${1:-}" == "stop" || "${1:-}" == "stop_eval" ]]; then
   if [[ -z "${POD:-}" && -z "${REGION:-}" ]]; then
@@ -59,8 +89,13 @@ if [[ "${1:-}" == "stop" || "${1:-}" == "stop_eval" ]]; then
       export POD="pod2"
     fi
   fi
+  # Superset of the 16-replica launch default: stop_eval deletes
+  # ${EVAL_JOBSET_NAME}-0..N-1 with --ignore-not-found, so 32 also cleans up
+  # runs that were launched with a larger ROLLOUT_REPLICAS override.
   export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-32}"
-  exec bash "${SCRIPT_DIR}/mlperf_397b_v7x_eval.sh" stop_eval "${@:2}"
+  MLPERF_NO_LAUNCH=1 source "${SCRIPT_DIR}/mlperf_397b_v7x_eval.sh" >&2
+  apply_namespace_override
+  exec "${LAUNCHER}" --command stop_eval --image "${TUNIX_IMAGE}" "${@:2}"
 fi
 
 CKPT_ARG=""
@@ -135,14 +170,29 @@ if [[ "${POD:-pod2}" == "pod2" || "${POD:-}" == "2" || "${POD:-}" == "elm" || "$
 fi
 
 # ==============================================================================
-# 512 TPU v7x Chip Defaults (32 replicas x 16 chips tpu7x:2x2x4 = 512 chips)
+# 256 TPU v7x Chip Defaults (16 replicas x 16 chips tpu7x:2x2x4 = 256 chips)
 # ==============================================================================
 export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x4}"
-export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-32}"
+export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
+
+# yaml_generator.py splits the slice on ':' into <type>:<topology>; validate
+# here so a malformed override fails with a clear message instead of a bash
+# arithmetic error below.
+if [[ ! "${ROLLOUT_TPU_SLICE}" =~ ^[A-Za-z0-9._-]+:[0-9]+(x[0-9]+)*$ ]]; then
+  echo "[eval_checkpoint_397B_v7] ERROR: ROLLOUT_TPU_SLICE='${ROLLOUT_TPU_SLICE}' must be" \
+    "<type>:<topology> (e.g. tpu7x:2x2x4)." >&2
+  exit 1
+fi
+
+_slice_dims="${ROLLOUT_TPU_SLICE#*:}"
+_chips_per_replica=$(( ${_slice_dims//x/*} ))
+_total_chips=$(( ROLLOUT_REPLICAS * _chips_per_replica ))
+
 export NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
-export BATCH_SIZE="${BATCH_SIZE:-128}"
-export MAX_CONCURRENCY="${MAX_CONCURRENCY:-512}"
-export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-32}"
+export BATCH_SIZE="${BATCH_SIZE:-64}"
+export MAX_CONCURRENCY="${MAX_CONCURRENCY:-$(( ROLLOUT_REPLICAS * _chips_per_replica ))}"
+export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-${NUM_GENERATIONS}}"
+export HEAD_NODEPOOL="${HEAD_NODEPOOL:-sandbox-np}"
 
 # ==============================================================================
 # Auto-discover Manifest Metadata (<run>/mllog/eval_checkpoints.jsonl)
@@ -275,6 +325,7 @@ unset CHECKPOINT_MANIFEST_FILE
 # Redirect stdout to stderr so `kubectl config use-context` messages do not
 # pollute stdout metrics/YAML output.
 MLPERF_NO_LAUNCH=1 source "${SCRIPT_DIR}/mlperf_397b_v7x_eval.sh" >&2
+apply_namespace_override
 
 # eval_worker.py uses Pathways (JAX_PLATFORMS=proxy, VLLM_TPU_USING_PATHWAYS=1)
 # to expose all 32 devices across the 4-host tpu7x:2x2x4 slice; override
@@ -290,11 +341,32 @@ fi
 
 echo "[eval_checkpoint_397B_v7] Checkpoint:      ${MAXTEXT_CKPT}" >&2
 echo "[eval_checkpoint_397B_v7] Cluster / Pod:   ${CLUSTER} (${REGION}, ${POD})" >&2
-echo "[eval_checkpoint_397B_v7] Topology:        ${ROLLOUT_REPLICAS}x ${ROLLOUT_TPU_SLICE} (512 v7x chips), batch_size=${BATCH_SIZE}, max_concurrency=${MAX_CONCURRENCY}" >&2
+echo "[eval_checkpoint_397B_v7] Topology:        ${ROLLOUT_REPLICAS}x ${ROLLOUT_TPU_SLICE} (${_total_chips} v7x chips, head_nodepool=${HEAD_NODEPOOL}), batch_size=${BATCH_SIZE}, max_concurrency=${MAX_CONCURRENCY}, max_warmpool_replicas=${MAX_WARMPOOL_REPLICAS}" >&2
 echo "[eval_checkpoint_397B_v7] Output Dir:      ${EVAL_OUTPUT_DIR}" >&2
 
 if [[ "${DRY_RUN_MODE}" == "true" || "${DRY_RUN:-false}" == "true" ]]; then
   exec "${LAUNCHER}" --command eval --image "${TUNIX_IMAGE}" "${EXTRA_ARGS[@]}"
+fi
+
+# Each replica's Pathways head pod (proc-0-0) runs with hostNetwork and fixed
+# ports 29000-29002, so no two head pods can share a node: ROLLOUT_REPLICAS
+# needs at least that many ${HEAD_NODEPOOL} nodes (sandbox-np is 400 autoscaled
+# nodes on pod2 but 19 fixed nodes on pod1). Fail fast instead of leaving
+# Pending head pods behind admitted, idle TPU slices. HEAD_NODEPOOL_CHECK=false
+# skips the guard (e.g. nodepools that autoscale from zero).
+if [[ "${HEAD_NODEPOOL_CHECK:-true}" == "true" && -n "${HEAD_NODEPOOL:-}" ]]; then
+  if _head_nodes="$(kubectl get nodes -l "cloud.google.com/gke-nodepool=${HEAD_NODEPOOL}" -o name 2>/dev/null)"; then
+    _head_node_count="$(printf '%s\n' "${_head_nodes}" | sed '/^$/d' | wc -l | tr -d ' ')"
+    if [[ "${_head_node_count}" -lt "${ROLLOUT_REPLICAS}" ]]; then
+      echo "[eval_checkpoint_397B_v7] ERROR: ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS} needs one" \
+        "${HEAD_NODEPOOL} node per Pathways head pod, but ${CLUSTER} has only" \
+        "${_head_node_count}. Lower ROLLOUT_REPLICAS, set HEAD_NODEPOOL to a larger" \
+        "nodepool, or set HEAD_NODEPOOL_CHECK=false to launch anyway." >&2
+      exit 1
+    fi
+  else
+    echo "[eval_checkpoint_397B_v7] WARNING: could not list ${HEAD_NODEPOOL} nodes; skipping head nodepool capacity check." >&2
+  fi
 fi
 
 list_summaries() {
