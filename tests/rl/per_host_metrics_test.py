@@ -100,6 +100,35 @@ class MergeProcessMetricsTest(absltest.TestCase):
     )
     self.assertNotIn("m", merged)
 
+  def test_per_call_scalar_mean_becomes_a_mean_of_process_means(self):
+    # A data-dependent number of valid items: 1 on process 0, 3 on process 1.
+    shards = [np.array([4.0]), np.array([0.0, 0.0, 0.0])]
+    global_mean = np.concatenate(shards).mean()  # 1.0
+    # One np.mean per call: the documented mean of per-process means.
+    merged = rl_engine_lib._merge_process_metrics(
+        [{"m": ([np.mean(s)], np.mean)} for s in shards], {"m": np.mean}
+    )
+    self.assertEqual(_apply(*merged["m"]), 2.0)
+    self.assertNotEqual(global_mean, 2.0)
+    # Per-example values and WeightedMetric values give the global mean.
+    merged = rl_engine_lib._merge_process_metrics(
+        [{"m": ([s], np.mean)} for s in shards], {"m": np.mean}
+    )
+    self.assertEqual(_apply(*merged["m"]), global_mean)
+    merged = rl_engine_lib._merge_process_metrics(
+        [
+            {
+                "m": (
+                    [sft_utils.WeightedMetric(s.sum(), np.float32(s.size))],
+                    common.global_weighted_mean,
+                )
+            }
+            for s in shards
+        ],
+        {"m": common.global_weighted_mean},
+    )
+    self.assertEqual(_apply(*merged["m"]), global_mean)
+
   def test_metric_a_process_could_not_send_is_dropped(self):
     per_process = [
         {"m": ([1.0], np.mean), "ok": ([1.0], np.mean)},
