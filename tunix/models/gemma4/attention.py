@@ -250,7 +250,8 @@ class Attention(nnx.Module):
         key_proj = self.k_einsum(x)
         value_proj = key_proj
       else:
-        key_proj, value_proj = self.kv_einsum(x)
+        kv_proj = self.kv_einsum(x)
+        key_proj, value_proj = kv_proj[0], kv_proj[1]
 
       key_proj = shard(key_proj, self.config.shd_config.act_btnh)
       value_proj = shard(value_proj, self.config.shd_config.act_btnh)

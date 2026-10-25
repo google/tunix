@@ -17,8 +17,11 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
+from flax import nnx
 from flax.traverse_util import flatten_dict
+import jax.numpy as jnp
 import numpy as np
+from tunix.models.gemma4 import mapping_vllm_jax
 from tunix.models.gemma4 import params
 
 # Small array dimensions used across all fixtures.
@@ -575,6 +578,55 @@ class CreateModelTest(absltest.TestCase):
     )
     self.assertIs(result, self.fake_model)
 
+  def test_create_model_with_mesh_sharded_ingestion(self):
+    mock_mesh = mock.create_autospec(params.jax.sharding.Mesh, instance=True)
+    fake_sharding = mock.create_autospec(
+        params.jax.sharding.NamedSharding, instance=True
+    )
+    placed_array = jnp.array([1.0])
+    with mock.patch.object(
+        params.nnx,
+        'to_pure_dict',
+        side_effect=lambda x: x,
+        autospec=True,
+    ):
+      with mock.patch.object(
+          params.nnx,
+          'get_named_sharding',
+          return_value={'layers': {0: {'w': fake_sharding}}},
+      ):
+        with mock.patch.object(
+            params.jax, 'device_put', return_value=placed_array
+        ) as mock_device_put:
+          result = params.create_model_from_checkpoint(
+              self.checkpoint_path, self.config, mesh=mock_mesh
+          )
+          self.assertIs(result, self.fake_model)
+          mock_device_put.assert_called_once()
+          self.mock_update.assert_called_once_with(
+              self.fake_model, {'layers': {0: {'w': placed_array}}}
+          )
+
+  def test_create_model_with_mesh_missing_sharding_key_raises(self):
+    mock_mesh = mock.create_autospec(params.jax.sharding.Mesh, instance=True)
+    with mock.patch.object(
+        params.nnx,
+        'to_pure_dict',
+        side_effect=lambda x: x,
+        autospec=True,
+    ):
+      with mock.patch.object(
+          params.nnx,
+          'get_named_sharding',
+          return_value={'layers': {}},
+      ):
+        with self.assertRaisesRegex(
+            KeyError, 'Missing sharding specifications'
+        ):
+          params.create_model_from_checkpoint(
+              self.checkpoint_path, self.config, mesh=mock_mesh
+          )
+
   def test_create_model_text_only_flag(self):
     """Verifies text_only flag is propagated to Gemma4."""
     for flag in [True, False]:
@@ -618,6 +670,79 @@ class CreateModelTest(absltest.TestCase):
     mock_path_cls.assert_called_once_with('/fake/tokenizer.model')
     mock_processor.LoadFromSerializedProto.assert_called_once_with(fake_bytes)
     self.assertIs(result, mock_processor)
+
+  def test_preprocess_src_state_fuses_all_lora_layers(self):
+    """Verifies kv_einsum split, k_eq_v layers, immediate layers, and vision gating_einsum fuse LoRA weights."""
+    flat = [
+        # Layer 0: standard local sliding attention (kv_einsum -> k_einsum + v_einsum)
+        (('layers', 0, 'attn', 'q_einsum', 'w'), nnx.Param(jnp.zeros((4, 8, 4)))),
+        (('layers', 0, 'attn', 'q_einsum', 'w_lora_a'), nnx.Param(jnp.ones((8, 2)))),
+        (('layers', 0, 'attn', 'q_einsum', 'w_lora_b'), nnx.Param(jnp.ones((2, 4, 4)))),
+        (('layers', 0, 'attn', 'kv_einsum', 'w'), nnx.Param(jnp.zeros((2, 2, 8, 4)))),
+        (('layers', 0, 'attn', 'kv_einsum', 'w_lora_a'), nnx.Param(jnp.ones((8, 2)))),
+        (('layers', 0, 'attn', 'kv_einsum', 'w_lora_b'), nnx.Param(jnp.ones((2, 2, 2, 4)))),
+        (('layers', 0, 'attn', 'attn_vec_einsum', 'w'), nnx.Param(jnp.zeros((4, 4, 8)))),
+        (('layers', 0, 'attn', 'attn_vec_einsum', 'w_lora_a'), nnx.Param(jnp.ones((4, 4, 2)))),
+        (('layers', 0, 'attn', 'attn_vec_einsum', 'w_lora_b'), nnx.Param(jnp.ones((2, 8)))),
+        (('layers', 0, 'mlp', 'gate_proj', 'kernel'), nnx.Param(jnp.zeros((8, 16)))),
+        (('layers', 0, 'mlp', 'gate_proj', 'kernel_lora_a'), nnx.Param(jnp.ones((8, 2)))),
+        (('layers', 0, 'mlp', 'gate_proj', 'kernel_lora_b'), nnx.Param(jnp.ones((2, 16)))),
+        (('layers', 0, 'mlp', 'up_proj', 'kernel'), nnx.Param(jnp.zeros((8, 16)))),
+        (('layers', 0, 'mlp', 'up_proj', 'kernel_lora_a'), nnx.Param(jnp.ones((8, 2)))),
+        (('layers', 0, 'mlp', 'up_proj', 'kernel_lora_b'), nnx.Param(jnp.ones((2, 16)))),
+        (('layers', 0, 'mlp', 'down_proj', 'kernel'), nnx.Param(jnp.zeros((16, 8)))),
+        (('layers', 0, 'mlp', 'down_proj', 'kernel_lora_a'), nnx.Param(jnp.ones((16, 2)))),
+        (('layers', 0, 'mlp', 'down_proj', 'kernel_lora_b'), nnx.Param(jnp.ones((2, 8)))),
+        # Layer 1: global k_eq_v attention (q_einsum + k_einsum stay separate)
+        (('layers', 1, 'attn', 'q_einsum', 'w'), nnx.Param(jnp.zeros((4, 8, 4)))),
+        (('layers', 1, 'attn', 'q_einsum', 'w_lora_a'), nnx.Param(jnp.ones((8, 2)))),
+        (('layers', 1, 'attn', 'q_einsum', 'w_lora_b'), nnx.Param(jnp.ones((2, 4, 4)))),
+        (('layers', 1, 'attn', 'k_einsum', 'w'), nnx.Param(jnp.zeros((2, 8, 4)))),
+        (('layers', 1, 'attn', 'k_einsum', 'w_lora_a'), nnx.Param(jnp.ones((8, 2)))),
+        (('layers', 1, 'attn', 'k_einsum', 'w_lora_b'), nnx.Param(jnp.ones((2, 2, 4)))),
+        (('vision_encoder', 'layers', 0, 'mlp', 'gating_einsum', 'w'), nnx.Param(jnp.zeros((2, 16, 8)))),
+        (('vision_encoder', 'layers', 0, 'mlp', 'gating_einsum', 'w_lora_a'), nnx.Param(jnp.ones((8, 2)))),
+        (('vision_encoder', 'layers', 0, 'mlp', 'gating_einsum', 'w_lora_b'), nnx.Param(jnp.ones((2, 2, 16)))),
+    ]
+    state = nnx.State.from_flat_path(flat)
+    out = mapping_vllm_jax.preprocess_src_state(state, tp_size=2)
+    out_dict = {tuple(k): (v.value if hasattr(v, 'value') else v) for k, v in out.flat_state()}
+    self.assertIn(('layers', 0, 'attn', 'q_einsum', 'w'), out_dict)
+    self.assertIn(('layers', 0, 'attn', 'k_einsum', 'w'), out_dict)
+    self.assertIn(('layers', 0, 'attn', 'v_einsum', 'w'), out_dict)
+    self.assertNotIn(('layers', 0, 'attn', 'kv_einsum', 'w'), out_dict)
+    self.assertNotIn(('layers', 0, 'attn', 'qkv_einsum', 'w'), out_dict)
+    self.assertIn(('layers', 0, 'mlp', 'gate_up_proj', 'kernel'), out_dict)
+    self.assertIn(('layers', 0, 'attn', 'attn_vec_einsum', 'w'), out_dict)
+    self.assertIn(('layers', 0, 'mlp', 'down_proj', 'kernel'), out_dict)
+    self.assertIn(('layers', 1, 'attn', 'q_einsum', 'w'), out_dict)
+    self.assertIn(('layers', 1, 'attn', 'k_einsum', 'w'), out_dict)
+    self.assertNotIn(('layers', 1, 'attn', 'qkv_einsum', 'w'), out_dict)
+    self.assertIn(('vision_encoder', 'layers', 0, 'mlp', 'gate_proj', 'kernel'), out_dict)
+    self.assertIn(('vision_encoder', 'layers', 0, 'mlp', 'up_proj', 'kernel'), out_dict)
+    # With rank=2, default alpha=rank (scale=1.0), and ones(r=2) adapters, each
+    # inner product over r=2 equals 2.0.
+    np.testing.assert_allclose(out_dict[('layers', 0, 'attn', 'q_einsum', 'w')], 2.0)
+    np.testing.assert_allclose(out_dict[('layers', 0, 'attn', 'k_einsum', 'w')], 2.0)
+    np.testing.assert_allclose(out_dict[('layers', 0, 'attn', 'v_einsum', 'w')], 2.0)
+    np.testing.assert_allclose(out_dict[('layers', 0, 'mlp', 'gate_up_proj', 'kernel')], 2.0)
+    np.testing.assert_allclose(out_dict[('layers', 0, 'attn', 'attn_vec_einsum', 'w')], 2.0)
+    np.testing.assert_allclose(out_dict[('layers', 0, 'mlp', 'down_proj', 'kernel')], 2.0)
+    np.testing.assert_allclose(out_dict[('layers', 1, 'attn', 'q_einsum', 'w')], 2.0)
+    np.testing.assert_allclose(out_dict[('layers', 1, 'attn', 'k_einsum', 'w')], 2.0)
+    np.testing.assert_allclose(out_dict[('vision_encoder', 'layers', 0, 'mlp', 'gate_proj', 'kernel')], 2.0)
+    np.testing.assert_allclose(out_dict[('vision_encoder', 'layers', 0, 'mlp', 'up_proj', 'kernel')], 2.0)
+
+  def test_preprocess_src_state_incomplete_lora_raises(self):
+    """Verifies unfused/orphaned LoRA adapter pairs raise RuntimeError."""
+    flat = [
+        (('layers', 0, 'mlp', 'down_proj', 'kernel'), nnx.Param(jnp.zeros((16, 8)))),
+        (('layers', 0, 'mlp', 'down_proj', 'kernel_lora_a'), nnx.Param(jnp.ones((16, 2)))),
+        # Missing kernel_lora_b so the adapter pair cannot be fused.
+    ]
+    state = nnx.State.from_flat_path(flat)
+    with self.assertRaisesRegex(RuntimeError, 'LoRA fusion incomplete'):
+      mapping_vllm_jax.preprocess_src_state(state, tp_size=1)
 
 
 if __name__ == '__main__':
