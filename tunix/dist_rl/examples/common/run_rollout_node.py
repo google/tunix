@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import dataclasses
 import importlib
 import json
@@ -1138,22 +1137,6 @@ def main(argv: list[str], context: Any = None) -> None:
     )
     logging.info("Rollout worker is registered.")
 
-    eager_start_task: asyncio.Task[Any] | None = None
-    if args.sampler != "vanilla":
-
-      async def _eager_start() -> None:
-        try:
-          logging.info("Starting rollout worker eagerly during bring-up...")
-          await worker_service.start()
-          logging.info("Rollout worker eager start completed.")
-        except Exception:  # pylint: disable=broad-exception-caught
-          logging.exception(
-              "Eager rollout worker start failed; error will be surfaced on"
-              " orchestrator start() RPC."
-          )
-
-      eager_start_task = asyncio.create_task(_eager_start())
-
     # Shut down gracefully on SIGTERM/SIGINT.
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -1169,10 +1152,6 @@ def main(argv: list[str], context: Any = None) -> None:
       pass
     finally:
       logging.info("Draining rollout worker...")
-      if eager_start_task is not None and not eager_start_task.done():
-        eager_start_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-          await eager_start_task
       try:
         # Cancel in-flight trajectory collections
         worker_service.stop()

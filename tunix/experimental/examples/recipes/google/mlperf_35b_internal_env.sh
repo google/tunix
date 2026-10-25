@@ -42,3 +42,7 @@ export PATHWAYS_PROXY_IMAGE="${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu
 export BUCKET="${BUCKET:-gs://atwigg-trellis-europe-west4-dev}"
 export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items}"
 export DATASET_PATH="${DATASET_PATH:-gs://mlperf_dataset/benchmark-r2e-gym-easy}"
+
+if [[ -z "${WANDB_API_KEY:-}" && -f "${HOME}/.netrc" ]]; then
+  export WANDB_API_KEY="$(awk '/wandb\.ai/{getline; getline; print $2}' "${HOME}/.netrc" 2>/dev/null || true)"
+fi

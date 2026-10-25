@@ -35,7 +35,9 @@ Security Notes / Trust Boundaries:
 
 import abc
 import asyncio
+import concurrent.futures
 import contextlib
+import functools
 import inspect
 import pickle
 import threading
@@ -543,6 +545,55 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     self._max_message_bytes = max_message_bytes
     self._enable_bulk_transport = enable_bulk_transport
     self._configured_bulk_port = bulk_port
+    self._sync_exec_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
+    self._sync_exec_lock: Optional[asyncio.Lock] = None
+    self._sync_exec_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+
+  def _get_sync_exec_pool(self) -> concurrent.futures.ThreadPoolExecutor:
+    if self._sync_exec_pool is None:
+      self._sync_exec_pool = concurrent.futures.ThreadPoolExecutor(
+          max_workers=1, thread_name_prefix="tunix-grpc-exec"
+      )
+    return self._sync_exec_pool
+
+  def _get_sync_exec_lock(self) -> asyncio.Lock:
+    loop = _running_loop()
+    if self._sync_exec_lock is None or (
+        loop is not None and self._sync_exec_lock_loop is not loop
+    ):
+      self._sync_exec_lock = asyncio.Lock()
+      self._sync_exec_lock_loop = loop
+    return self._sync_exec_lock
+
+  async def execute_request(
+      self, request: ExecutionRequest
+  ) -> ExecutionResponse:
+    """Executes method on bound instance without blocking the gRPC event loop."""
+    if self._instance is None:
+      return await super().execute_request(request)
+    target_name = request.method_name or "__call__"
+    method = getattr(self._instance, target_name, None)
+    if (
+        method is None
+        or not callable(method)
+        or inspect.iscoroutinefunction(method)
+    ):
+      return await super().execute_request(request)
+    try:
+      loop = asyncio.get_running_loop()
+      async with self._get_sync_exec_lock():
+        result = await loop.run_in_executor(
+            self._get_sync_exec_pool(),
+            functools.partial(method, *request.args, **request.kwargs),
+        )
+      return ExecutionResponse(result=result, request_id=request.request_id)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      return ExecutionResponse(
+          error_message=str(e),
+          error_type=type(e).__name__,
+          traceback=traceback_lib.format_exc(),
+          request_id=request.request_id,
+      )
 
   async def _handle_get_bulk_port(
       self, request_bytes: bytes, context: Any
@@ -721,6 +772,9 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       if self._bulk_server is not None:
         self._bulk_server.stop()
         self._bulk_server = None
+      if self._sync_exec_pool is not None:
+        self._sync_exec_pool.shutdown(wait=False)
+        self._sync_exec_pool = None
       self._serve_loop = None
       asyncio.set_event_loop(None)
       loop.close()
@@ -732,6 +786,9 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       bulk_srv = self._bulk_server
       self._bulk_server = None
       await asyncio.get_running_loop().run_in_executor(None, bulk_srv.stop)
+    if self._sync_exec_pool is not None:
+      self._sync_exec_pool.shutdown(wait=False)
+      self._sync_exec_pool = None
 
 
 class ActorHandle(abc.ABC):
