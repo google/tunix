@@ -129,7 +129,7 @@ class StaticTwinTest(unittest.TestCase):
     current = [c for f in files for c in converted_calls(f)]
     want = collections.Counter(_key(s) for s in SITES)
     got = collections.Counter(_key(c) for c in current)
-    self.assertEqual(sum(want.values()), 44)
+    self.assertEqual(sum(want.values()), 46)
     missing = want - got
     extra = got - want
     self.assertEqual((list(missing), list(extra)), ([], []))
@@ -176,13 +176,12 @@ class StaticTwinTest(unittest.TestCase):
     self.assertEqual(leftover, [])
     golden = collections.Counter(_marker(s["fmt"]) for s in SITES)
     self.assertEqual(per_marker, golden)
-    # Per-marker counts at this base. TRAINER_STEP_TIMING and
-    # "stage_batch RPC returned" have no site here yet; they are converted
-    # when the step timer and the staging queue land.
+    # Per-marker counts at this base. "stage_batch RPC returned" has no site
+    # here yet; it is converted when the staging queue lands.
     self.assertEqual(golden["WEIGHT_SYNC_PHASE"], 14)
     self.assertEqual(golden["[rollout-ft]"], 20)
     self.assertEqual(golden["Packed "], 2)
-    self.assertEqual(golden["TRAINER_STEP_TIMING"], 0)
+    self.assertEqual(golden["TRAINER_STEP_TIMING"], 2)
 
   def test_1_1_4_lint_over_the_tree_with_call_sites(self):
     from tunix.experimental import events_test  # pylint: disable=g-import-not-at-top

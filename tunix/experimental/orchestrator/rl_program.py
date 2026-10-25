@@ -2035,23 +2035,38 @@ class StandardRLProgram(RLProgram):
     timing, rtt_s = await self.engine.get_step_timing(role=datatypes.Role.ACTOR)
     if timing is None:
       return
-    logging.info(
+    complete = bool(timing["mb"]) and timing["update"] is not None
+    events.log_and_emit(
+        logging,
+        logging.INFO,
         "TRAINER_STEP_TIMING step=%d policy_version=%d rtt_s=%.3f timing=%s",
-        step,
-        self.policy_version,
-        rtt_s,
-        json.dumps(timing, separators=(",", ":")),
+        "trainer_step",
+        text_args=(
+            step,
+            self.policy_version,
+            rtt_s,
+            json.dumps(timing, separators=(",", ":")),
+        ),
+        names=("step", "policy_version", "rtt_s", None),
+        **({"n_mb": len(timing["mb"]), "complete": complete}
+           if events.ON else {}),
     )
-    if not timing["mb"] or timing["update"] is None:
+    if not complete:
       # The step trained, so an empty `mb` or no `update` is the timer
       # missing work; the trainer worker's log names the call that skipped it.
-      logging.warning(
+      events.log_and_emit(
+          logging,
+          logging.WARNING,
           "TRAINER_STEP_TIMING step=%d is incomplete (%d micro-batch"
           " entries, update %s); see the trainer log for the call that"
           " skipped the step timer.",
-          step,
-          len(timing["mb"]),
-          "missing" if timing["update"] is None else "present",
+          "trainer_step_incomplete",
+          text_args=(
+              step,
+              len(timing["mb"]),
+              "missing" if timing["update"] is None else "present",
+          ),
+          names=("step", "n_mb", "update_present"),
       )
 
   async def _await_pending_sync(self) -> None:

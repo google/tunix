@@ -1,5 +1,5 @@
 {
- "base": "2d3d00ab8",
+ "base": "7c240a867",
  "sites": [
   {
    "args": [
@@ -1181,6 +1181,48 @@
     "preemptions",
     "tps",
     "tpot_ms"
+   ]
+  },
+  {
+   "args": [
+    "step",
+    "self.policy_version",
+    "rtt_s",
+    "json.dumps(timing, separators=(',', ':'))"
+   ],
+   "consts": {},
+   "ev": "trainer_step",
+   "extra": true,
+   "fields": [],
+   "file": "tunix/experimental/orchestrator/rl_program.py",
+   "fmt": "TRAINER_STEP_TIMING step=%d policy_version=%d rtt_s=%.3f timing=%s",
+   "level": "INFO",
+   "logger": "logging",
+   "names": [
+    "step",
+    "policy_version",
+    "rtt_s",
+    null
+   ]
+  },
+  {
+   "args": [
+    "step",
+    "len(timing['mb'])",
+    "'missing' if timing['update'] is None else 'present'"
+   ],
+   "consts": {},
+   "ev": "trainer_step_incomplete",
+   "extra": false,
+   "fields": [],
+   "file": "tunix/experimental/orchestrator/rl_program.py",
+   "fmt": "TRAINER_STEP_TIMING step=%d is incomplete (%d micro-batch entries, update %s); see the trainer log for the call that skipped the step timer.",
+   "level": "WARNING",
+   "logger": "logging",
+   "names": [
+    "step",
+    "n_mb",
+    "update_present"
    ]
   }
  ]
