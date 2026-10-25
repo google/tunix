@@ -289,7 +289,13 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     batch_size = padded_completion_ids.shape[0]
     logits_to_keep = padded_completion_ids.shape[1]
     prompt_mask = (prompt_ids != pad_value).astype("int32")
-    completion_mask = np.not_equal(padded_completion_ids, pad_value)
+    # Mask from the rollout's lengths, not `ids != pad_value`: the two differ
+    # when `pad_id == eos_id`, where the id comparison also masks out the
+    # generated EOS token.
+    completion_mask = common.make_completion_mask_from_lengths(
+        [len(t) for t in rollout_output.tokens],
+        rollout_config.max_tokens_to_generate,
+    )
 
     # Convert completion_ids and completion_mask to jax arrays
     jax_completion_ids = jnp.array(padded_completion_ids)
