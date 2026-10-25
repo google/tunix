@@ -651,6 +651,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       role: datatypes.Role = datatypes.Role.ACTOR,
       sync_weights: bool = True,
       policy_version: int | None = None,
+      *,
+      source_staged: asyncio.Event | None = None,
       **kwargs: Any,
   ) -> int | None:
     """Bootstraps the rollout-visible policy state before step 0."""
@@ -667,7 +669,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         self._policy_version if policy_version is None else policy_version
     )
     return await self.sync_weights(
-        role=role, policy_version=target_policy_version
+        role=role,
+        policy_version=target_policy_version,
+        source_staged=source_staged,
     )
 
   async def sync_weights(  # pyrefly: ignore[bad-override]
@@ -675,6 +679,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       role: datatypes.Role = datatypes.Role.ACTOR,
       target_roles: Sequence[datatypes.Role] | None = None,
       policy_version: int | None = None,
+      *,
+      source_staged: asyncio.Event | None = None,
   ) -> int:
     """Runs one weight sync round through the coordinator."""
     del role, target_roles
@@ -691,7 +697,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         next_policy_version,
     )
     result = await self._weight_sync_coordinator.sync(
-        policy_version=next_policy_version
+        policy_version=next_policy_version,
+        source_staged=source_staged,
     )
     self._policy_version = result.policy_version
     logging.info(

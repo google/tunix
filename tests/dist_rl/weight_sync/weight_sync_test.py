@@ -176,6 +176,22 @@ class NeutralContractTest(absltest.TestCase):
     self.assertLen(meta.variables, 1)
     self.assertEqual(meta.variables[0].global_shard_indices, (0, 2))
 
+  def test_from_dict_and_constructor_preserve_staged_on_host(self):
+    for staged in (True, False, None):
+      with self.subTest(staged=staged):
+        metadata = weight_sync.WorkUnitMetadata(
+            unit=weight_sync.WorkUnitId("trainer"),
+            staged_on_host=staged,
+        )
+        self.assertEqual(metadata.staged_on_host, staged)
+
+        d = {
+            "unit": {"job_name": "trainer"},
+            "staged_on_host": staged,
+        }
+        reconstructed = weight_sync.dict_to_metadata(d)
+        self.assertEqual(reconstructed.staged_on_host, staged)
+
   def test_handler_boundary_exposes_no_raiden_types(self):
     with self.assertRaises(TypeError):
       weight_sync.WeightSyncHandler()
