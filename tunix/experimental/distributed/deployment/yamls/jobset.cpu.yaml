@@ -86,6 +86,10 @@ ${QUEUE_LABEL}spec:
                   _sigterm() (kill -SIGTERM $$! 2>/dev/null)
                   trap _sigterm SIGTERM
 
+                  # Disable core dumps and remove stale core files from /tmp.
+                  ulimit -c 0
+                  rm -f /tmp/core*
+
                   (
                     ${STARTUP_COMMAND}
                   ) & PID=$$!
