@@ -62,6 +62,13 @@ def _apply(values, op):
   return op(np.array(values))
 
 
+class _Unpicklable(float):
+  """A metric value that works locally but cannot be sent to other processes."""
+
+  def __reduce_ex__(self, protocol):
+    raise TypeError("cannot pickle this metric value")
+
+
 class MergeProcessMetricsTest(absltest.TestCase):
 
   def test_per_example_values_of_uneven_and_empty_shards(self):
@@ -92,6 +99,48 @@ class MergeProcessMetricsTest(absltest.TestCase):
         [{}, {"m": ([1.0], None)}], {}
     )
     self.assertNotIn("m", merged)
+
+  def test_metric_a_process_could_not_send_is_dropped(self):
+    per_process = [
+        {"m": ([1.0], np.mean), "ok": ([1.0], np.mean)},
+        {"m": rl_engine_lib._UNSENDABLE, "ok": ([3.0], np.mean)},
+        {"m": ([2.0], np.mean)},
+    ]
+    dropped = rl_engine_lib._dropped_metrics(per_process)
+    self.assertEqual(list(dropped), ["m"])
+    self.assertIn("could not be sent from process(es) [1]", dropped["m"])
+    merged = rl_engine_lib._merge_process_metrics(
+        per_process, {"m": np.mean, "ok": np.mean}
+    )
+    self.assertNotIn("m", merged)
+    self.assertEqual(_apply(*merged["ok"]), 2.0)
+
+  def test_metric_already_global_on_some_processes_only_is_dropped(self):
+    per_process = [
+        {"m": rl_engine_lib._ALREADY_GLOBAL},
+        {},
+        {"m": ([2.0], np.mean)},
+    ]
+    dropped = rl_engine_lib._dropped_metrics(per_process)
+    self.assertIn(
+        "already global on process(es) [0] but not on process(es) [2]",
+        dropped["m"],
+    )
+    self.assertNotIn(
+        "m", rl_engine_lib._merge_process_metrics(per_process, {"m": np.mean})
+    )
+
+  def test_metric_already_global_on_every_process_is_kept(self):
+    per_process = [
+        {"m": rl_engine_lib._ALREADY_GLOBAL},
+        {"m": rl_engine_lib._ALREADY_GLOBAL},
+        {},
+    ]
+    self.assertEqual(rl_engine_lib._dropped_metrics(per_process), {})
+    # Not merged: every process logs the global value it buffered.
+    self.assertNotIn(
+        "m", rl_engine_lib._merge_process_metrics(per_process, {"m": np.mean})
+    )
 
   def test_weighted_metric_keeps_real_denominators(self):
     # Process 0 has no valid tokens (denominator 0).
@@ -164,6 +213,39 @@ def _history(engine, prefix, name, mode="train"):
   ]
 
 
+class _Gathered(Exception):
+  """Raised by the gather of the first pass of `_reduce_as_processes`."""
+
+
+def _reduce_as_processes(engines):
+  """Runs `reduce_metrics_across_processes` of `engines` as one gather.
+
+  Each engine stands for one process. A first pass collects the payload every
+  engine sends (the reduction changes nothing before its gather); the second
+  pass gives each engine the payloads of all of them.
+
+  Args:
+    engines: One engine per process, in process order.
+  """
+  payloads = []
+
+  def collect(payload):
+    payloads.append(payload)
+    raise _Gathered()
+
+  with mock.patch.object(rl_engine_lib, "_allgather_bytes", collect):
+    for engine in engines:
+      try:
+        engine.reduce_metrics_across_processes()
+      except _Gathered:
+        pass
+  with mock.patch.object(
+      rl_engine_lib, "_allgather_bytes", lambda payload: list(payloads)
+  ):
+    for engine in engines:
+      engine.reduce_metrics_across_processes()
+
+
 class RLEngineCrossProcessMetricsTest(absltest.TestCase):
 
   def test_flags_off_logging_is_unchanged(self):
@@ -234,6 +316,57 @@ class RLEngineCrossProcessMetricsTest(absltest.TestCase):
     self.assertEqual(_history(engine, "rewards", "mean"), [0.5])
     self.assertEqual(_history(engine, "rewards", "mean", "eval"), [3.0])
     self.assertEqual(_history(engine, "global", "only_remote"), [7.0])
+
+  def test_metric_one_process_cannot_send_is_dropped_on_every_process(self):
+    engines = [_engine(cross_process=True) for _ in range(2)]
+    for process, engine in enumerate(engines):
+      value_type = _Unpicklable if process == 1 else float
+      engine.buffer_metrics({
+          "rewards/mean": (np.array([float(process)] * 2), np.mean),
+          "custom/odd": (value_type(process + 1.0), np.mean),
+      })
+      engine.global_steps = 1
+    with self.assertLogs(level="WARNING") as logs:
+      _reduce_as_processes(engines)
+    for engine in engines:
+      _flush(engine, engine._buffered_train_metrics)
+      self.assertEqual(_history(engine, "rewards", "mean"), [0.5])
+      # Process 0 must not log its own value as the global one.
+      self.assertFalse(
+          engine._rl_metrics_logger.metric_exists("custom", "odd", "train")
+      )
+    self.assertIn(
+        "not logging metric custom/odd of train step 0 on any process: its"
+        " values could not be sent from process(es) [1]",
+        "\n".join(logs.output),
+    )
+
+  def test_metric_already_global_on_another_process_only_is_dropped(self):
+    engine = _engine(cross_process=True)
+    engine.buffer_metrics({
+        "rewards/mean": (np.array([1.0]), np.mean),
+        "rewards/max": (np.array([1.0]), np.max),
+    })
+    engine.global_steps = 1
+    remote = {
+        ("train", 0, 0): {
+            "rewards/mean": rl_engine_lib._ALREADY_GLOBAL,
+            "rewards/max": ([np.array([5.0])], np.max),
+        }
+    }
+    with mock.patch.object(
+        rl_engine_lib,
+        "_allgather_bytes",
+        lambda payload: [payload, rl_engine_lib.pickle.dumps(remote)],
+    ):
+      with self.assertLogs(level="WARNING") as logs:
+        engine.reduce_metrics_across_processes()
+    self.assertIn("rewards/mean", "\n".join(logs.output))
+    _flush(engine, engine._buffered_train_metrics)
+    self.assertFalse(
+        engine._rl_metrics_logger.metric_exists("rewards", "mean", "train")
+    )
+    self.assertEqual(_history(engine, "rewards", "max"), [5.0])
 
   def test_unreduced_buffer_is_not_logged_under_the_global_name(self):
     engine = _engine(cross_process=True)
@@ -345,6 +478,9 @@ def _run_child():
     }
     if valid.any():  # Not buffered at all by a process without valid items.
       metrics["custom/valid_max_len"] = (lengths[valid], np.max)
+    # Only process 1 cannot send this value: no process may log it.
+    value_type = _Unpicklable if args["process_id"] == 1 else float
+    metrics["custom/p1_unsendable"] = (value_type(lengths.mean()), np.mean)
     return metrics
 
   gather_threads = []
@@ -558,6 +694,11 @@ class PerHostLearnerMetricsTest(absltest.TestCase):
             err_msg=f"{mode}:{name}",
         )
     self.assertLen(exported["train:rewards/mean"], _TRAIN_STEPS)
+    # A metric that process 1 cannot send is dropped on every process instead
+    # of being logged with process 0's values only.
+    for result in results:
+      for mode in ("train", "eval"):
+        self.assertNotIn(f"{mode}:custom/p1_unsendable", result["exported"])
 
     # One gather per global step plus one at the end, on every process, all
     # on the main thread (never on a background metrics thread).
