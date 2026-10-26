@@ -790,6 +790,7 @@ class Sampler(base_sampler.BaseSampler):
       beam_size: int | None = None,
       seed: int | jax.Array | None = None,
       pad_output: bool = False,
+      include_eos: bool = False,
       images: (
           str
           | np.ndarray
@@ -1031,6 +1032,7 @@ class Sampler(base_sampler.BaseSampler):
       out_tokens = []
       out_logits = []
       out_logprobs = []
+      decoded_outputs = []
       token_buffers = jax.device_get(token_buffers)
       if return_logprobs:
         final_logprobs_buffer = jax.device_get(final_logprobs_buffer)
@@ -1040,6 +1042,15 @@ class Sampler(base_sampler.BaseSampler):
         start_idx, end_idx = _output_slice_bounds(
             token_buffer, int(prompt_lengths[i])
         )
+        decoded_outputs.append(
+            self.tokenizer.decode(token_buffer[start_idx:end_idx].tolist())
+        )
+        if (
+            include_eos
+            and end_idx < len(token_buffer)
+            and np.isin(token_buffer[end_idx], self.eos_ids)
+        ):
+          end_idx += 1
         out_tokens.append(token_buffer[start_idx:end_idx])
         if return_logits:
           out_logits.append(logits_buffers[i][start_idx:end_idx])
@@ -1048,10 +1059,6 @@ class Sampler(base_sampler.BaseSampler):
           out_logprobs.append(
               final_logprobs_buffer[i][start_idx:end_idx].tolist()
           )
-
-      decoded_outputs = [
-          self.tokenizer.decode(tokens.tolist()) for tokens in out_tokens
-      ]
 
     result = base_sampler.SamplerOutput(
         text=decoded_outputs,

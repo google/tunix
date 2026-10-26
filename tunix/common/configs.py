@@ -113,6 +113,9 @@ class RolloutConfig:
   # Whether to return logprobs from the sampler.
   return_logprobs: bool = False
 
+  # Whether to include the terminating EOS token in generated tokens/logprobs.
+  include_eos: bool = False
+
   # Whether to return output logits from the sampler.
   return_logits: bool = False
 

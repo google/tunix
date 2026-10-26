@@ -61,6 +61,7 @@ class VanillaRollout(base_rollout.BaseRollout):
         pad_output=False,
         eos_tokens=rollout_config.eos_tokens,
         return_logprobs=rollout_config.return_logprobs,
+        include_eos=rollout_config.include_eos,
         prompt_token_ids=prompt_token_ids,
     )
     return base_rollout.RolloutOutput(
