@@ -260,12 +260,12 @@ class Einsum(nnx.Module):
     )
 
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    w = self.w.value
-    if self.w_scale is not None:
-      w = w * self.w_scale
     x = jnp.astype(x, self.dtype)
-    w = jnp.astype(w, self.dtype)
-    return jnp.einsum(self.einsum_str, x, w)
+    w = jnp.astype(self.w.value, self.dtype)
+    out = jnp.einsum(self.einsum_str, x, w)
+    if self.w_scale is not None:
+      out = jnp.astype(out * self.w_scale, self.dtype)
+    return out
 
 
 class RMSNorm(nnx.Module):
@@ -326,8 +326,8 @@ def apply_rope(
   head_dim = inputs.shape[-1]
   rope_angles = int(rope_proportion * head_dim // 2)
   nope_angles = head_dim // 2 - rope_angles
-  freq_exponents = (2.0 / head_dim) * jnp.arange(
-      0, rope_angles, dtype=jnp.float32
+  freq_exponents = (2.0 / head_dim) * jnp.array(
+      tuple(range(rope_angles)), dtype=jnp.float32
   )
   timescale = jnp.pad(
       base_frequency**freq_exponents,
