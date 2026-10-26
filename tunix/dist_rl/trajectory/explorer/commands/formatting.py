@@ -18,7 +18,7 @@ import collections
 from collections.abc import Mapping
 from typing import Any
 
-from tunix.dist_rl.trajectory.explorer.diagnostics import stats
+from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_stats
 
 # Rendered in place of a quantity a trajectory does not report.
 MISSING = "-"
@@ -29,7 +29,7 @@ def format_optional(value: Any, spec: str = "") -> str:
   return MISSING if value is None else format(value, spec)
 
 
-def format_status(value: stats.TrajectoryStatus | None) -> str:
+def format_status(value: tunix_stats.TrajectoryStatus | None) -> str:
   """Renders a status by name, or `MISSING` for None."""
   return MISSING if value is None else value.name
 

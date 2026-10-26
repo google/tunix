@@ -16,7 +16,7 @@
 
 from absl.testing import absltest
 from tunix.dist_rl.trajectory.explorer.commands import formatting
-from tunix.dist_rl.trajectory.explorer.diagnostics import stats
+from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_stats
 
 
 class FormattingTest(absltest.TestCase):
@@ -32,16 +32,11 @@ class FormattingTest(absltest.TestCase):
     self.assertEqual(formatting.format_optional(2.0 / 3, ".3g"), "0.667")
 
   def test_status_renders_name(self) -> None:
+    status = tunix_stats.TrajectoryStatus
     self.assertEqual(formatting.format_status(None), formatting.MISSING)
-    self.assertEqual(
-        formatting.format_status(stats.TrajectoryStatus.RUNNING), "RUNNING"
-    )
-    self.assertEqual(
-        formatting.format_status(stats.TrajectoryStatus.SUCCEEDED), "SUCCEEDED"
-    )
-    self.assertEqual(
-        formatting.format_status(stats.TrajectoryStatus.TIMEOUT), "TIMEOUT"
-    )
+    self.assertEqual(formatting.format_status(status.RUNNING), "RUNNING")
+    self.assertEqual(formatting.format_status(status.SUCCEEDED), "SUCCEEDED")
+    self.assertEqual(formatting.format_status(status.TIMEOUT), "TIMEOUT")
 
   def test_counts_renders_empty_as_missing(self) -> None:
     self.assertEqual(formatting.format_counts({}), formatting.MISSING)

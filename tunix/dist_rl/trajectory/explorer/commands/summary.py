@@ -22,6 +22,7 @@ from tunix.dist_rl.trajectory import store
 from tunix.dist_rl.trajectory.explorer.commands import base
 from tunix.dist_rl.trajectory.explorer.commands import formatting
 from tunix.dist_rl.trajectory.explorer.diagnostics import stats
+from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_stats
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -79,15 +80,16 @@ def _table(df: pd.DataFrame) -> str:
       formatting.format_optional(stats.TokenCounts.from_fields(*row))
       for row in df[token_columns].itertuples(index=False)
   ]
+  reward = df[tunix_stats.column("total_reward")]
   table = pd.DataFrame({
       "trajectory": df["trajectory_id"],
-      "status": df["status"],
+      "status": df[tunix_stats.column("status")],
       "steps": steps.sum(axis=1),
       "agent": df["steps_agent"],
       "env": df["steps_user"] + df["steps_system"],
       "tokens": tokens,
       "tool calls": df["num_tool_calls"],
-      "reward": df["total_reward"].map("{:.3g}".format, na_action="ignore"),
+      "reward": reward.map("{:.3g}".format, na_action="ignore"),
   })
   table = table.astype("string").fillna(formatting.MISSING)
   return table.to_string(index=False)
@@ -96,7 +98,8 @@ def _table(df: pd.DataFrame) -> str:
 def _totals(run_stats: stats.RunStats) -> list[str]:
   """Returns one line per run-level total."""
   n = run_stats.num_trajectories
-  statuses = {s.name: c for s, c in run_stats.status_counts.items()}
+  tunix = run_stats.tunix
+  statuses = {s.name: c for s, c in tunix.status_counts.items()}
   lines = [
       f"Trajectories: {n}",
       f"Steps: {run_stats.steps}",
@@ -106,12 +109,12 @@ def _totals(run_stats: stats.RunStats) -> list[str]:
       ),
       (
           f"Statuses: {formatting.format_counts(statuses)}"
-          f" reported by {run_stats.num_with_status}/{n}"
+          f" reported by {tunix.num_with_status}/{n}"
       ),
       (
           "Mean reward:"
-          f" {formatting.format_optional(run_stats.mean_reward, '.3g')}"
-          f" reported by {run_stats.num_with_reward}/{n}"
+          f" {formatting.format_optional(tunix.mean_reward, '.3g')}"
+          f" reported by {tunix.num_with_reward}/{n}"
       ),
   ]
   if run_stats.tool_counts:
