@@ -303,22 +303,30 @@ class SequenceRewardManager(AbstractRewardManager):
 
     # Compute all rewards for each prompt-completion pair.
     for i, reward_fn in enumerate(self.reward_fns):
-      # Update the kwargs with the algo_config parameters.
       signature = inspect.signature(reward_fn)
-      reward_fn_config_params = {}
-      # Iterate over the function's expected parameters
-      for name, _ in signature.parameters.items():
-        # Skip standard parameters that are always passed (self, prompts, completions, kwargs)
-        if name in ["self", "prompts", "completions", "kwargs"]:
+      accepts_var_keyword = any(
+          param.kind == inspect.Parameter.VAR_KEYWORD
+          for param in signature.parameters.values()
+      )
+      call_kwargs = (
+          base_kwargs.copy()
+          if accepts_var_keyword
+          else {
+              k: v
+              for k, v in base_kwargs.items()
+              if k in signature.parameters
+              and k not in ("self", "prompts", "completions")
+          }
+      )
+      # Fill declared parameters that the caller did not pass from algo_config.
+      for name, param in signature.parameters.items():
+        if name in ("self", "prompts", "completions") or param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
           continue
-
-        # Check if the parameter name matches a key in the algo_config dict. If
-        # so, set the value to the algo_config parameter value, otherwise respect the value in the base_kwargs.
-        if name in algo_config_params and name not in base_kwargs:
-          reward_fn_config_params[name] = algo_config_params[name]
-
-      call_kwargs = base_kwargs.copy()
-      call_kwargs.update(reward_fn_config_params)
+        if name in algo_config_params and name not in call_kwargs:
+          call_kwargs[name] = algo_config_params[name]
 
       r = self._call_reward_fn(reward_fn, prompts, completions, call_kwargs)
 

@@ -253,6 +253,24 @@ class SequenceRewardManagerTest(parameterized.TestCase):
           algo_config=self.test_algo_config,
       )
 
+  def test_reward_fn_without_var_keyword_ignores_extra_kwargs(self):
+    def strict_two_arg_reward(prompts: List[str], completions: List[str]):
+      return [float(len(p) + len(c)) for p, c in zip(prompts, completions)]
+
+    manager = reward_manager.SequenceRewardManager(
+        reward_fns=[strict_two_arg_reward],
+        algo_config=self.test_algo_config,
+    )
+    rewards_info = manager(
+        self.prompts,
+        self.completions,
+        mode="train",
+        answer=["42", "42"],
+        trajectory_rewards=[1.0, 2.0],
+    )
+    npt.assert_allclose(rewards_info["rewards"], [2.0 + 7.0, 3.0 + 2.0])
+    manager.close()
+
 
 class AgenticSequenceRewardManagerTest(parameterized.TestCase):
 
