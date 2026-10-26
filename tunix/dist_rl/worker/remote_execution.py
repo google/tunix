@@ -35,7 +35,10 @@ Security Notes / Trust Boundaries:
 
 import abc
 import asyncio
+import concurrent.futures
 import contextlib
+import contextvars
+import functools
 import inspect
 import pickle
 import threading
@@ -55,6 +58,7 @@ from typing import (
     Sequence,
     Set,
     Tuple,
+    TypeVar,
     Union,
 )
 
@@ -79,6 +83,22 @@ is_bulk_lz4_enabled = network.is_bulk_lz4_enabled
 set_bulk_lz4_enabled = network.set_bulk_lz4_enabled
 
 _BULK_CAPABILITY_METADATA = (("x-tunix-bulk", "1"),)
+OFFLOAD_TO_THREAD_ATTR = "_tunix_offload_to_thread"
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def offload_to_thread(fn: _F) -> _F:
+  """Marks a sync worker method to run on `GrpcRemoteExecutionServer`'s executor thread."""
+  if inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn):
+    raise TypeError("offload_to_thread only applies to synchronous methods.")
+  setattr(fn, OFFLOAD_TO_THREAD_ATTR, True)
+  return fn
+
+
+def should_offload_to_thread(method: Callable[..., Any]) -> bool:
+  """Returns True if `method` opted in to worker-thread offloading."""
+  target = method.func if isinstance(method, functools.partial) else method
+  return bool(getattr(target, OFFLOAD_TO_THREAD_ATTR, False))
 
 
 class TransientTransportError(ConnectionError):
@@ -455,6 +475,20 @@ class RemoteExecutionServer(abc.ABC):
           request_id=request.request_id,
       )
 
+  async def _invoke_method(
+      self,
+      method: Callable[..., Any],
+      args: Tuple[Any, ...],
+      kwargs: Dict[str, Any],
+  ) -> Any:
+    """Invokes `method(*args, **kwargs)` and awaits any returned awaitable."""
+    if inspect.iscoroutinefunction(method):
+      return await method(*args, **kwargs)
+    result = method(*args, **kwargs)
+    if inspect.isawaitable(result):
+      return await result
+    return result
+
   async def execute_request(
       self, request: ExecutionRequest
   ) -> ExecutionResponse:
@@ -476,10 +510,7 @@ class RemoteExecutionServer(abc.ABC):
       )
 
     try:
-      if inspect.iscoroutinefunction(method):
-        result = await method(*request.args, **request.kwargs)
-      else:
-        result = method(*request.args, **request.kwargs)
+      result = await self._invoke_method(method, request.args, request.kwargs)
       return ExecutionResponse(result=result, request_id=request.request_id)
     except Exception as e:  # pylint: disable=broad-exception-caught
       return ExecutionResponse(
@@ -498,7 +529,18 @@ class InProcessRemoteExecutionServer(RemoteExecutionServer):
 
 
 class GrpcRemoteExecutionServer(RemoteExecutionServer):
-  """RemoteExecutionServer implementation speaking gRPC over physical TCP sockets."""
+  """RemoteExecutionServer implementation speaking gRPC over physical TCP sockets.
+
+  Threading contract:
+    Coroutine methods (`async def`) and unmarked synchronous methods execute
+    inline on the gRPC server's asyncio event loop thread. This preserves
+    loop-thread affinity for workers that mutate `asyncio` primitives (such as
+    `RolloutWorker.stop`, `pause`, and `resume`) and allows lightweight
+    read-only probes (`heartbeat`, `info`, `get_worker_id`) to complete without
+    waiting behind long-running work. Synchronous methods explicitly marked with
+    `@offload_to_thread` (or `_tunix_offload_to_thread = True`) execute in FIFO
+    order on a single-worker `ThreadPoolExecutor` with copied `contextvars`.
+  """
 
   def __init__(
       self,
@@ -543,6 +585,38 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     self._max_message_bytes = max_message_bytes
     self._enable_bulk_transport = enable_bulk_transport
     self._configured_bulk_port = bulk_port
+    self._sync_exec_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
+    self._stopped: bool = False
+
+  def _get_sync_exec_pool(self) -> concurrent.futures.ThreadPoolExecutor:
+    if self._stopped:
+      raise RuntimeError("GrpcRemoteExecutionServer is stopped.")
+    if self._sync_exec_pool is None:
+      self._sync_exec_pool = concurrent.futures.ThreadPoolExecutor(
+          max_workers=1, thread_name_prefix="tunix-grpc-exec"
+      )
+    return self._sync_exec_pool
+
+  async def _invoke_method(
+      self,
+      method: Callable[..., Any],
+      args: Tuple[Any, ...],
+      kwargs: Dict[str, Any],
+  ) -> Any:
+    """Offloads `@offload_to_thread` sync methods to the serialized worker thread."""
+    if not inspect.iscoroutinefunction(method) and should_offload_to_thread(
+        method
+    ):
+      loop = asyncio.get_running_loop()
+      ctx = contextvars.copy_context()
+      result = await loop.run_in_executor(
+          self._get_sync_exec_pool(),
+          functools.partial(ctx.run, method, *args, **kwargs),
+      )
+      if inspect.isawaitable(result):
+        return await result
+      return result
+    return await super()._invoke_method(method, args, kwargs)
 
   async def _handle_get_bulk_port(
       self, request_bytes: bytes, context: Any
@@ -639,6 +713,7 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     if not _GRPC_AVAILABLE or _grpc_lib is None or _grpc_aio_lib is None:
       raise RuntimeError("grpc is not installed or available.")
 
+    self._stopped = False
     # pylint: disable=protected-access
     self._server = _grpc_aio_lib.server(
         options=network._grpc_options(self._max_message_bytes)
@@ -718,9 +793,14 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
         loop.run_until_complete(self._server.wait_for_termination())
         loop.run_until_complete(asyncio.sleep(0.1))
     finally:
+      self._stopped = True
       if self._bulk_server is not None:
         self._bulk_server.stop()
         self._bulk_server = None
+      if self._sync_exec_pool is not None:
+        pool = self._sync_exec_pool
+        self._sync_exec_pool = None
+        pool.shutdown(wait=True, cancel_futures=True)
       self._serve_loop = None
       asyncio.set_event_loop(None)
       loop.close()
@@ -728,10 +808,15 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
   async def stop_serving(self, grace: float = 0.5) -> None:
     if self._server:
       await self._server.stop(grace)
+    self._stopped = True
     if self._bulk_server is not None:
       bulk_srv = self._bulk_server
       self._bulk_server = None
       await asyncio.get_running_loop().run_in_executor(None, bulk_srv.stop)
+    if self._sync_exec_pool is not None:
+      pool = self._sync_exec_pool
+      self._sync_exec_pool = None
+      await asyncio.to_thread(pool.shutdown, wait=True, cancel_futures=True)
 
 
 class ActorHandle(abc.ABC):

@@ -16,6 +16,7 @@
 
 import asyncio
 import contextlib
+import contextvars
 import socket
 import struct
 import threading
@@ -3630,6 +3631,267 @@ class RemoteExecutionTest(parameterized.TestCase):
     finally:
       network_lib.set_bulk_lz4_enabled(prev_lz4)
       bulk_server.stop()
+
+  def test_offload_to_thread_rejects_coroutine_function(self):
+    with self.assertRaisesRegex(
+        TypeError, "offload_to_thread only applies to synchronous methods"
+    ):
+
+      @remote_lib.offload_to_thread
+      async def _bad_async() -> None:
+        pass
+
+      del _bad_async
+
+  def test_grpc_offload_to_thread_is_opt_in_and_preserves_heartbeat_and_loop_affinity(
+      self,
+  ):
+    entered_compile = threading.Event()
+    release_compile = threading.Event()
+    compile_threads: list[threading.Thread] = []
+    heartbeat_threads: list[threading.Thread] = []
+    loop_threads: list[threading.Thread] = []
+
+    class _MixedWorker:
+
+      def __init__(self):
+        self._pause_event: Optional[asyncio.Event] = None
+
+      @remote_lib.offload_to_thread
+      def blocking_compile(self, tag: str) -> str:
+        compile_threads.append(threading.current_thread())
+        entered_compile.set()
+        if not release_compile.wait(timeout=10.0):
+          raise TimeoutError("release_compile timed out")
+        return f"compiled:{tag}"
+
+      def heartbeat(self) -> str:
+        heartbeat_threads.append(threading.current_thread())
+        return "alive"
+
+      def pause_on_loop(self) -> bool:
+        _ = asyncio.get_running_loop()
+        if self._pause_event is None:
+          self._pause_event = asyncio.Event()
+        self._pause_event.set()
+        return self._pause_event.is_set()
+
+      async def async_ping(self) -> str:
+        loop_threads.append(threading.current_thread())
+        await asyncio.sleep(0)
+        return "pong"
+
+    async def _run():
+      async with running_grpc_server(_MixedWorker()) as (_, handle):
+        compile_task = asyncio.create_task(
+            handle.asubmit("blocking_compile", "step1")
+        )
+        await asyncio.to_thread(entered_compile.wait, 10.0)
+        self.assertTrue(entered_compile.is_set())
+        # While @offload_to_thread blocking_compile is parked on the worker
+        # thread, unmarked sync heartbeat, unmarked loop-affine sync methods,
+        # and async coroutines must all complete promptly on the server loop.
+        hb = await asyncio.wait_for(handle.asubmit("heartbeat"), timeout=2.0)
+        self.assertEqual(hb, "alive")
+        paused = await asyncio.wait_for(
+            handle.asubmit("pause_on_loop"), timeout=2.0
+        )
+        self.assertTrue(paused)
+        pong = await asyncio.wait_for(handle.asubmit("async_ping"), timeout=2.0)
+        self.assertEqual(pong, "pong")
+        self.assertFalse(compile_task.done())
+        release_compile.set()
+        self.assertEqual(await compile_task, "compiled:step1")
+
+    asyncio.run(_run())
+    self.assertLen(compile_threads, 1)
+    self.assertLen(heartbeat_threads, 1)
+    self.assertLen(loop_threads, 1)
+    self.assertIsNot(compile_threads[0], loop_threads[0])
+    self.assertIs(heartbeat_threads[0], loop_threads[0])
+
+  def test_grpc_concurrent_offloaded_sync_methods_serialize_and_copy_contextvars(
+      self,
+  ):
+    guard = threading.Lock()
+    active = 0
+    max_active = 0
+    trace_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+        "trace_var", default="unset"
+    )
+    observed_ctx: list[str] = []
+
+    class _SerialWorker:
+
+      @remote_lib.offload_to_thread
+      def sync_work(self, idx: int) -> int:
+        nonlocal active, max_active
+        observed_ctx.append(trace_var.get())
+        with guard:
+          active += 1
+          max_active = max(max_active, active)
+        time.sleep(0.02)
+        with guard:
+          active -= 1
+        return idx * 10
+
+    async def _run():
+      worker = _SerialWorker()
+      async with running_grpc_server(worker) as (server, handle):
+        results = await asyncio.gather(
+            *[handle.asubmit("sync_work", i) for i in range(4)]
+        )
+        self.assertEqual(results, [0, 10, 20, 30])
+
+        observed_ctx.clear()
+        token = trace_var.set("req-ctx-42")
+        try:
+          resp = await server.execute_request(
+              remote_lib.ExecutionRequest(
+                  request_id="ctx_check", method_name="sync_work", args=(5,)
+              )
+          )
+        finally:
+          trace_var.reset(token)
+        self.assertEqual(resp.unwrap(), 50)
+        self.assertEqual(observed_ctx, ["req-ctx-42"])
+
+    asyncio.run(_run())
+    self.assertEqual(max_active, 1)
+
+  def test_sync_method_returning_awaitable_is_awaited_on_inprocess_and_grpc(
+      self,
+  ):
+    class _AwaitableReturningWorker:
+
+      def inline_coro_factory(self, x: int):
+        async def _compute():
+          await asyncio.sleep(0)
+          return x + 1
+
+        return _compute()
+
+      @remote_lib.offload_to_thread
+      def offloaded_coro_factory(self, x: int):
+        async def _compute():
+          await asyncio.sleep(0)
+          return x + 10
+
+        return _compute()
+
+    async def _run():
+      worker = _AwaitableReturningWorker()
+      inproc_handle = create_in_process_handle(worker)
+      self.assertEqual(
+          await inproc_handle.asubmit("inline_coro_factory", 5), 6
+      )
+      self.assertEqual(
+          await inproc_handle.asubmit("offloaded_coro_factory", 5), 15
+      )
+      async with running_grpc_server(worker) as (_, grpc_handle):
+        self.assertEqual(
+            await grpc_handle.asubmit("inline_coro_factory", 7), 8
+        )
+        self.assertEqual(
+            await grpc_handle.asubmit("offloaded_coro_factory", 7), 17
+        )
+
+    asyncio.run(_run())
+
+  def test_grpc_offloaded_exception_and_stop_serving_drains_inflight(self):
+    entered_step = threading.Event()
+    release_step = threading.Event()
+    finished_step = threading.Event()
+    queued_ran = threading.Event()
+
+    class _DrainingWorker:
+
+      @remote_lib.offload_to_thread
+      def explode(self) -> None:
+        raise ValueError("sync pool boom")
+
+      @remote_lib.offload_to_thread
+      def slow_step(self, tag: str) -> str:
+        if tag == "inflight":
+          entered_step.set()
+          if not release_step.wait(timeout=10.0):
+            raise TimeoutError("release_step timed out")
+          finished_step.set()
+          return "done:inflight"
+        queued_ran.set()
+        return f"done:{tag}"
+
+    async def _run():
+      port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(_DrainingWorker())
+      await server.start_serving_async(port=port)
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{port}"
+      )
+      try:
+        resp = await server.execute_request(
+            remote_lib.ExecutionRequest(
+                request_id="req_sync_err", method_name="explode"
+            )
+        )
+        self.assertEqual(resp.request_id, "req_sync_err")
+        self.assertEqual(resp.error_type, "ValueError")
+        self.assertEqual(resp.error_message, "sync pool boom")
+        self.assertIn("explode", resp.traceback or "")
+
+        with self.assertRaisesRegex(RuntimeError, "sync pool boom"):
+          await handle.asubmit("explode")
+
+        inflight_task = asyncio.create_task(
+            server.execute_request(
+                remote_lib.ExecutionRequest(
+                    request_id="req_inflight",
+                    method_name="slow_step",
+                    args=("inflight",),
+                )
+            )
+        )
+        await asyncio.to_thread(entered_step.wait, 10.0)
+        self.assertTrue(entered_step.is_set())
+        queued_task = asyncio.create_task(
+            server.execute_request(
+                remote_lib.ExecutionRequest(
+                    request_id="req_queued",
+                    method_name="slow_step",
+                    args=("queued",),
+                )
+            )
+        )
+        await asyncio.sleep(0.02)
+
+        stop_task = asyncio.create_task(server.stop_serving(grace=0.01))
+        await asyncio.sleep(0.05)
+        # stop_serving() must wait for the in-flight offloaded call to drain.
+        self.assertFalse(stop_task.done())
+        release_step.set()
+        await asyncio.wait_for(stop_task, timeout=5.0)
+        self.assertTrue(finished_step.is_set())
+        self.assertFalse(queued_ran.is_set())
+        self.assertEqual((await inflight_task).unwrap(), "done:inflight")
+        with self.assertRaises(asyncio.CancelledError):
+          await queued_task
+
+        # Post-shutdown offloaded requests fail cleanly without creating a new
+        # executor pool.
+        late_resp = await server.execute_request(
+            remote_lib.ExecutionRequest(
+                request_id="req_after_stop",
+                method_name="slow_step",
+                args=("late",),
+            )
+        )
+        self.assertEqual(late_resp.error_type, "RuntimeError")
+        self.assertIn("stopped", late_resp.error_message or "")
+      finally:
+        await handle.close()
+        await server.stop_serving()
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

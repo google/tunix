@@ -1210,34 +1210,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if dummy_data is None:
       return
 
-    def _resolve_dummy_routed_experts(data: Any) -> Any:
-      if not isinstance(data, datatypes.RLTrainerPayload):
-        return data
-      if data.routed_experts is None:
-        return data
-      routed_experts = np.asarray(data.routed_experts)
-      if routed_experts.size != 0:
-        return data
-      assert hasattr(self.model, "config")
-      cfg = self.model.config
-      batch_size, seq_len = routed_experts.shape[:2]
-      expanded = np.zeros(
-          (batch_size, seq_len, cfg.num_layers, cfg.num_experts_per_tok),
-          dtype=routed_experts.dtype,
-      )
-      metadata = dict(data.metadata)
-      if "routed_experts_encode_fn" in metadata:
-        encode_fn = metadata.pop("routed_experts_encode_fn")
-        expanded = encode_fn(expanded, num_experts=cfg.num_experts)
-      return dataclasses.replace(
-          data, routed_experts=expanded, metadata=metadata
-      )
-
     self._ensure_persistent_grad_accumulator()
     fwd_bwd_step, update_step, eval_step = (
         self.jit_fwd_bwd_update_and_eval_step()
     )
-    inputs = self._prepare_payload(_resolve_dummy_routed_experts(dummy_data))
+    inputs = self._prepare_payload(
+        abstract_trainer.resolve_dummy_routed_experts(self, dummy_data)
+    )
     # maybe_cache_and_partial wraps nnx.cached_partial(jitted, ...) in
     # functools.partial so the jitted fn stays reachable via .func;
     # .func.__wrapped__ is the nnx.jit whose cache serves the real steps.

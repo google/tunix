@@ -20,6 +20,8 @@ per-token log-prob scorer run through AbstractTrainer.fwd_only.
 """
 
 import dataclasses
+import functools
+import threading
 from typing import Any
 
 from absl.testing import absltest
@@ -201,6 +203,187 @@ class TrainerWorkerTest(absltest.TestCase):
     self.assertTrue(resp.metadata["compiled"])
     self.assertEqual(self.worker.state, datatypes.WorkerState.READY)
     self.assertEqual(self.fake_trainer.compile_calls, [dummy])
+
+  def test_compile_resolves_dummy_routed_experts_for_maxtext_engine(self):
+    encode_fn = functools.partial(
+        trainer_worker.packing.encode_routed_experts,
+        mode="auto",
+        batched=True,
+    )
+
+    class _MaxTextCfg:
+      num_decoder_layers = 40
+      num_experts_per_tok = 8
+      num_experts = 256
+
+    class _BaseModel:
+      config = _MaxTextCfg()
+
+    class _AdapterModel:
+      # Mirrors `maxtext.utils.model_creation_utils.from_pretrained(...,
+      # wrap_with_tunix_adapter=True)`, which explicitly sets `model.config =
+      # None` on `TunixMaxTextAdapter`.
+      config = None
+      base = _BaseModel()
+
+    # 1. Public `trainer.model.base.config` (TunixMaxTextAdapter) with real
+    # `packing.encode_routed_experts` -> 5D uint10 `(2, 8, 40, 2, 5)`.
+    self.fake_trainer.model = _AdapterModel()
+    dummy = datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((2, 4), dtype=np.int32),
+        prompt_mask=np.ones((2, 4), dtype=np.int32),
+        completion_ids=np.zeros((2, 4), dtype=np.int32),
+        completion_mask=np.ones((2, 4), dtype=np.int32),
+        advantages=np.zeros((2, 8), dtype=np.float32),
+        routed_experts=np.zeros((2, 8, 0, 0), dtype=np.int16),
+        metadata={"routed_experts_encode_fn": encode_fn, "tag": "moe"},
+    )
+    resp = self.worker.compile(dummy)
+    self.assertTrue(resp.metadata["compiled"])
+    self.assertLen(self.fake_trainer.compile_calls, 1)
+    compiled_payload = self.fake_trainer.compile_calls[0]
+    self.assertEqual(compiled_payload.routed_experts.shape, (2, 8, 40, 2, 5))
+    self.assertEqual(compiled_payload.routed_experts.dtype, np.uint8)
+    self.assertEqual(compiled_payload.metadata, {"tag": "moe"})
+
+    # 2. No `routed_experts_encode_fn` -> raw `(2, 8, 40, 8)` int16 with
+    # metadata preserved unchanged.
+    self.fake_trainer.compile_calls.clear()
+    raw_dummy = dataclasses.replace(dummy, metadata={"keep": 1})
+    self.worker.compile(raw_dummy)
+    raw_compiled = self.fake_trainer.compile_calls[0]
+    self.assertEqual(raw_compiled.routed_experts.shape, (2, 8, 40, 8))
+    self.assertEqual(raw_compiled.routed_experts.dtype, np.int16)
+    self.assertEqual(raw_compiled.metadata, {"keep": 1})
+
+    # 3. Native `trainer.model.config.num_layers` path (`num_experts <= 255`)
+    # -> 4D uint8 `(2, 8, 12, 4)`.
+    class _NativeCfg:
+      num_layers = 12
+      num_experts_per_tok = 4
+      num_experts = 64
+
+    class _NativeModel:
+      config = _NativeCfg()
+
+    self.fake_trainer.model = _NativeModel()
+    self.fake_trainer.compile_calls.clear()
+    self.worker.compile(dummy)
+    native_compiled = self.fake_trainer.compile_calls[0]
+    self.assertEqual(native_compiled.routed_experts.shape, (2, 8, 12, 4))
+    self.assertEqual(native_compiled.routed_experts.dtype, np.uint8)
+    self.assertEqual(native_compiled.metadata, {"tag": "moe"})
+
+    # 4. Non-empty `routed_experts` is forwarded untouched.
+    self.fake_trainer.compile_calls.clear()
+    non_empty = dataclasses.replace(
+        dummy,
+        routed_experts=np.ones((2, 8, 12, 4), dtype=np.int16),
+        metadata={"keep": 2},
+    )
+    self.worker.compile(non_empty)
+    passthrough = self.fake_trainer.compile_calls[0]
+    self.assertIs(passthrough, non_empty)
+    self.assertIs(
+        abstract_trainer.resolve_dummy_routed_experts(
+            self.fake_trainer, compiled_payload
+        ),
+        compiled_payload,
+    )
+
+    # 5. Malformed rank < 2 zero-sized placeholder fails loud.
+    malformed = dataclasses.replace(
+        dummy, routed_experts=np.zeros((0,), dtype=np.int16)
+    )
+    with self.assertRaisesRegex(ValueError, "rank >= 2"):
+      abstract_trainer.resolve_dummy_routed_experts(
+          self.fake_trainer, malformed
+      )
+
+    # 6. Model without any non-None config fails loud with a clear ValueError.
+    class _ConfiglessModel:
+      config = None
+
+    self.fake_trainer.model = _ConfiglessModel()
+    with self.assertRaisesRegex(ValueError, "non-None"):
+      abstract_trainer.resolve_dummy_routed_experts(self.fake_trainer, dummy)
+
+  def test_offload_markers_and_stop_serializes_with_inflight_step(self):
+    attr = "_tunix_offload_to_thread"
+    for offloaded_name in (
+        "initialize",
+        "compile",
+        "start",
+        "stop",
+        "with_loss_fn",
+        "with_gen_model_input_fn",
+        "set_target_state",
+        "fwd_bwd",
+        "update",
+        "eval_step",
+        "run_eval",
+        "per_token_logps",
+        "save_checkpoint",
+        "restore_checkpoint",
+        "prepare_weight_sync",
+        "release_weight_sync",
+        "get_metrics",
+    ):
+      self.assertTrue(
+          getattr(getattr(self.worker, offloaded_name), attr, False),
+          msg=f"{offloaded_name} should opt in to worker-thread offloading",
+      )
+    for inline_name in ("heartbeat", "info"):
+      self.assertFalse(
+          getattr(getattr(self.worker, inline_name), attr, False),
+          msg=f"{inline_name} must remain inline on the event loop",
+      )
+
+    entered_step = threading.Event()
+    release_step = threading.Event()
+    close_called = threading.Event()
+
+    def _blocking_fwd_bwd(payload, **kwargs):
+      del payload, kwargs
+      entered_step.set()
+      if not release_step.wait(timeout=10.0):
+        raise TimeoutError("release_step timed out")
+
+    def _recording_close():
+      close_called.set()
+
+    self.fake_trainer.fwd_bwd = _blocking_fwd_bwd
+    self.fake_trainer.close = _recording_close
+    req = datatypes.TrainRequest(
+        request_id="req-lock",
+        payload=datatypes.RLTrainerPayload(
+            prompt_ids=np.array([[1]], dtype=np.int32),
+            prompt_mask=np.ones((1, 1), dtype=np.float32),
+            completion_ids=np.array([[2]], dtype=np.int32),
+            completion_mask=np.array([[1]], dtype=np.float32),
+            advantages=np.array([1.0], dtype=np.float32),
+        ),
+    )
+    step_thread = threading.Thread(
+        target=lambda: self.worker.fwd_bwd(request=req)
+    )
+    stop_thread = threading.Thread(target=self.worker.stop)
+    step_thread.start()
+    self.assertTrue(entered_step.wait(timeout=5.0))
+    # heartbeat() and info() must remain non-blocking while _trainer_lock is
+    # held by an in-flight fwd_bwd step.
+    self.assertEqual(self.worker.heartbeat().state, datatypes.WorkerState.READY)
+    self.assertEqual(self.worker.info().worker_id, "trainer_0")
+
+    stop_thread.start()
+    self.assertFalse(close_called.wait(timeout=0.05))
+    release_step.set()
+    step_thread.join(timeout=5.0)
+    stop_thread.join(timeout=5.0)
+    self.assertFalse(step_thread.is_alive())
+    self.assertFalse(stop_thread.is_alive())
+    self.assertTrue(close_called.is_set())
+    self.assertEqual(self.worker.state, datatypes.WorkerState.STOPPED)
 
   def test_with_loss_fn_chunked_grpo_loss_matches_unchunked(self):
     batch, prompt_len, completion_len = 2, 3, 4

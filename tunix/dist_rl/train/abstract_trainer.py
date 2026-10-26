@@ -18,10 +18,22 @@ Defines the pure ML algorithmic core of a trainer.
 """
 
 import abc
-from typing import Any, Callable
+import dataclasses
+from typing import Any, Callable, Protocol, TypeVar, cast
 
+import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.metrics import metrics
+
+_PayloadT = TypeVar("_PayloadT")
+
+
+class _TrainerWithModel(Protocol):
+  """Structural protocol for trainer engines exposing a `.model` attribute."""
+
+  @property
+  def model(self) -> Any:
+    ...
 
 
 class AbstractTrainer(abc.ABC):
@@ -29,6 +41,8 @@ class AbstractTrainer(abc.ABC):
 
   Step-level only: no training loops, no I/O policy, no orchestration.
   """
+
+  model: Any
 
   @abc.abstractmethod
   def __init__(self, config: Any):
@@ -230,3 +244,74 @@ class AbstractTrainer(abc.ABC):
   def close(self) -> None:
     """Releases resources held by the trainer. Default: no-op."""
     pass
+
+
+def resolve_dummy_routed_experts(
+    trainer: AbstractTrainer | _TrainerWithModel,
+    data: _PayloadT,
+) -> _PayloadT:
+  """Expands `(B, S, 0, 0)` precompile `routed_experts` placeholders.
+
+  During pre-rollout trainer compilation, `batch_assembly` builds a dummy
+  `RLTrainerPayload` with a zero-sized `(B, S, 0, 0)` `routed_experts`
+  placeholder and attaches `routed_experts_encode_fn` in `payload.metadata`.
+  Expanding and encoding the placeholder against the trainer model's MoE
+  dimensions (`num_layers` or MaxText's `num_decoder_layers`,
+  `num_experts_per_tok`, and `num_experts`) ensures all trainer backends
+  (`PeftTrainer` and `MaxTextTrainingEngine`) precompile with the exact
+  encoded `routed_experts` shape and dtype.
+
+  This function is idempotent: once expanded (`routed_experts.size != 0`),
+  subsequent calls return `data` unchanged.
+
+  Args:
+    trainer: Initialized trainer or training engine exposing `.model.config` (or
+      `.model.base.config` for `TunixMaxTextAdapter`-wrapped MaxText models).
+    data: Optional dummy payload passed to `compile()`.
+
+  Returns:
+    `data` with any zero-sized `routed_experts` placeholder expanded (and
+    encoded via `metadata.pop("routed_experts_encode_fn")` if present).
+  """
+  if not isinstance(data, datatypes.RLTrainerPayload):
+    return data
+  if data.routed_experts is None:
+    return data
+  routed_experts = np.asarray(data.routed_experts)
+  if routed_experts.size != 0:
+    return data
+  if routed_experts.ndim < 2:
+    raise ValueError(
+        "Expected dummy routed_experts placeholder with rank >= 2, got shape"
+        f" {routed_experts.shape}."
+    )
+  model = getattr(trainer, "model", None)
+  # `maxtext.utils.model_creation_utils.from_pretrained(...,
+  # wrap_with_tunix_adapter=True)` sets `adapter.config = None`, so treat a
+  # `None` `.config` as absent and fall back to `.base.config` (or `_config`).
+  cfg = (
+      getattr(model, "config", None)
+      or getattr(getattr(model, "base", None), "config", None)
+      or getattr(trainer, "_config", None)
+  )
+  if cfg is None:
+    raise ValueError(
+        "Cannot resolve dummy routed_experts: trainer model does not expose a"
+        " non-None `.config` or `.base.config`."
+    )
+  num_layers = getattr(cfg, "num_layers", None)
+  if num_layers is None:
+    num_layers = cfg.num_decoder_layers
+  batch_size, seq_len = routed_experts.shape[:2]
+  expanded = np.zeros(
+      (batch_size, seq_len, num_layers, cfg.num_experts_per_tok),
+      dtype=routed_experts.dtype,
+  )
+  metadata = dict(data.metadata)
+  if "routed_experts_encode_fn" in metadata:
+    encode_fn = metadata.pop("routed_experts_encode_fn")
+    expanded = encode_fn(expanded, num_experts=cfg.num_experts)
+  return cast(
+      _PayloadT,
+      dataclasses.replace(data, routed_experts=expanded, metadata=metadata),
+  )
