@@ -93,7 +93,9 @@ jobs:
       - name: Run model tests
         run: |
           python -m pytest tests/models/ -v --tb=short \
-            --ignore=tests/models/naming_test.py
+            --ignore=tests/models/naming_test.py \
+            --ignore=tests/models/paged_attention_test.py
+          python -m pytest tests/models/paged_attention_test.py -v --tb=short
 
       - name: Compile gRPC Protobuf definitions
         run: |
