@@ -35,6 +35,7 @@ from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import scheduler as scheduler_lib
 from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.generate import utils
+from tunix.models import paged_attention
 
 
 _FINISH_REASONS: dict[request_lib.RequestStatus, request_lib.FinishReason] = {
@@ -474,7 +475,7 @@ class LLMEngine:
       self,
       scheduled: tuple[request_lib.RequestState, ...],
       distribution: tuple[int, int, int],
-  ) -> tuple[jax.Array, model_runner_lib.RPAMetadata]:
+  ) -> tuple[jax.Array, paged_attention.PagedAttnMetadata]:
     """Packs the scheduled requests into the model runner's inputs.
 
     Every row buffer spans `max_num_seqs` rows and every page table
@@ -527,14 +528,13 @@ class LLMEngine:
     tokens = np.zeros((num_tokens,), dtype=np.int32)
     tokens[: len(batch_tokens)] = batch_tokens
 
-    metadata = model_runner_lib.RPAMetadata(
+    metadata = paged_attention.PagedAttnMetadata(
         page_indices={
             cache_name: table for cache_name, table in page_indices.items()
         },
         kv_lens=kv_lens,
         query_lens=query_lens,
         distribution=np.asarray(distribution, dtype=np.int32),
-        chunk_prefill_size=self._scheduler.chunked_prefill_length,
     )
     device_tokens = jax.device_put(tokens, self._replicated_sharding)
     return device_tokens, metadata

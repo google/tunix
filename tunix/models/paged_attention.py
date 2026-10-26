@@ -31,7 +31,9 @@ from typing import Any
 
 from flax import struct
 import jax
+from jax.experimental.shard_map import shard_map
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec as P
 import numpy as np
 
 
@@ -56,16 +58,30 @@ class PagedAttnMetadata:
   distribution: jax.Array | np.ndarray
 
 
+def _shardable_tp_axis(
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
+    tp_axis: str | None,
+    *dim_sizes: int,
+) -> str | None:
+  """Returns `tp_axis` if every `dim_size` is divisible by its mesh size."""
+  if tp_axis is None or tp_axis not in mesh.shape:
+    return None
+  tp_size = mesh.shape[tp_axis]
+  if any(d % tp_size != 0 for d in dim_sizes):
+    return None
+  return tp_axis
+
+
 def paged_attention(
     queries: jax.Array,
     keys: jax.Array,
     values: jax.Array,
     kv_cache: jax.Array,
-    kv_lens: jax.Array,
-    page_indices: jax.Array,
-    cu_q_lens: jax.Array,
-    distribution: jax.Array,
+    metadata: PagedAttnMetadata,
     *,
+    cache_name: str,
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
+    tp_axis: str | None = None,
     decode_only: bool = False,
     max_q_len: int | None = None,
     backend: str | None = None,
@@ -80,7 +96,128 @@ def paged_attention(
     k_scale: float | None = None,
     v_scale: float | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-  """Paged attention; returns `(output, kv_cache)`.
+  """Paged attention over one named cache; returns `(output, kv_cache)`.
+
+  Args:
+    queries: `[max_num_tokens, num_q_heads, head_dim]`.
+    keys: `[max_num_tokens, num_kv_heads, head_dim]`.
+    values: `[max_num_tokens, num_kv_heads, head_dim]`.
+    kv_cache: the 5D cache described in the module docstring.
+    metadata: the batch's ragged layout and page tables.
+    cache_name: the key of `kv_cache` in `metadata.page_indices`.
+    mesh: the mesh to run the kernel over.
+    tp_axis: the mesh axis KV heads are sharded across. Everything else is
+      replicated, including the cache pages across data parallelism.
+    decode_only: static promise of one query token per sequence. On GPU it
+      enables vLLM's split-KV decode launch.
+    max_q_len: static per-sequence query bound for the JAX path; tokens past it
+      are dropped. Defaults to `max_num_tokens`.
+    backend: `"tpu"`, `"gpu"`, or anything else for the JAX path. Defaults to
+      `jax.default_backend()`.
+    use_causal_mask: whether to apply causal masking.
+    update_kv_cache: whether to write `keys`/`values` into the cache. Shared-KV
+      layers pass False: their lender already wrote this step's K/V, and the
+      kernel reads it from the cache.
+    sm_scale: softmax scale.
+    sliding_window: a query at position `p` sees keys in `(p - window, p]`.
+    soft_cap: optional tanh logit soft-cap.
+    out_dtype: defaults to the query dtype.
+    mask_value: masked logit value. Ignored on GPU, which uses -inf.
+    q_scale: query dequantization scale. Not supported on GPU.
+    k_scale: key dequantization scale. Not supported on GPU.
+    v_scale: value dequantization scale. Not supported on GPU.
+  """
+  def _call_paged_attention(
+      q, k, v, cache, kv_lens, page_indices, query_lens, distribution
+  ):
+    cu_q_lens = jnp.pad(jnp.cumsum(query_lens, dtype=jnp.int32), (1, 0))
+    return _paged_attention(
+        q, k, v, cache, kv_lens, page_indices, cu_q_lens, distribution,
+        decode_only=decode_only,
+        max_q_len=max_q_len,
+        backend=backend,
+        use_causal_mask=use_causal_mask,
+        update_kv_cache=update_kv_cache,
+        sm_scale=sm_scale,
+        sliding_window=sliding_window,
+        soft_cap=soft_cap,
+        out_dtype=out_dtype,
+        mask_value=mask_value,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
+    )
+
+  # Q heads may be sharded independently of KV heads only for MQA (one KV
+  # head); otherwise Q must follow KV to preserve GQA head grouping.
+  kv_tp_axis = _shardable_tp_axis(
+      mesh, tp_axis, queries.shape[1], keys.shape[1], kv_cache.shape[2]
+  )
+  q_tp_axis = (
+      _shardable_tp_axis(mesh, tp_axis, queries.shape[1])
+      if keys.shape[1] == 1
+      else kv_tp_axis
+  )
+  q_spec = P(None, q_tp_axis, None)
+  kv_spec = P(None, kv_tp_axis, None)
+  cache_spec = P(None, None, kv_tp_axis, None, None)
+  return shard_map(
+      _call_paged_attention,
+      mesh=mesh,
+      in_specs=(
+          q_spec,  # queries
+          kv_spec,  # keys
+          kv_spec,  # values
+          cache_spec,  # kv_cache
+          P(),  # kv_lens
+          P(),  # page_indices
+          P(),  # query_lens
+          P(),  # distribution
+      ),
+      out_specs=(q_spec, cache_spec),
+      check_rep=False,
+  )(
+      queries,
+      keys,
+      values,
+      kv_cache,
+      jnp.asarray(metadata.kv_lens, dtype=jnp.int32),
+      jnp.asarray(metadata.page_indices[cache_name], dtype=jnp.int32).reshape(
+          -1
+      ),
+      jnp.asarray(metadata.query_lens, dtype=jnp.int32),
+      jnp.asarray(metadata.distribution, dtype=jnp.int32),
+  )
+
+
+# TODO(yatlas): Inline `_paged_attention` into `paged_attention`'s
+# `shard_map` body; it has no other callers, so the separate signature and
+# docstring are duplicated boilerplate.
+def _paged_attention(
+    queries: jax.Array,
+    keys: jax.Array,
+    values: jax.Array,
+    kv_cache: jax.Array,
+    kv_lens: jax.Array,
+    page_indices: jax.Array,
+    cu_q_lens: jax.Array,
+    distribution: jax.Array,
+    *,
+    decode_only: bool,
+    max_q_len: int | None,
+    backend: str | None,
+    use_causal_mask: bool,
+    update_kv_cache: bool,
+    sm_scale: float,
+    sliding_window: int | None,
+    soft_cap: float | None,
+    out_dtype: Any,
+    mask_value: float | None,
+    q_scale: float | None,
+    k_scale: float | None,
+    v_scale: float | None,
+) -> tuple[jax.Array, jax.Array]:
+  """Dispatches paged attention to the backend's kernel.
 
   Args:
     queries: `[max_num_tokens, num_q_heads, head_dim]`.

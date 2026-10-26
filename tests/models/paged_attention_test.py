@@ -22,6 +22,10 @@ import numpy as np
 
 from tunix.models import paged_attention
 
+jax.config.update("jax_num_cpu_devices", 4)
+
+_CACHE = "cache"
+
 
 def _inputs(q_lens, kv_lens=None, *, num_q_heads=8, num_kv_heads=4,
             head_dim=128, page_size=16, pages_per_seq=8, packing=2,
@@ -44,12 +48,17 @@ def _inputs(q_lens, kv_lens=None, *, num_q_heads=8, num_kv_heads=4,
       values=rand(max_num_tokens, num_kv_heads, head_dim),
       kv_cache=rand(pages, page_size, 2 * num_kv_heads // packing, packing,
                     head_dim),
-      kv_lens=jnp.asarray(kv_lens, jnp.int32),
-      page_indices=jnp.asarray(table.reshape(-1)),
-      cu_q_lens=jnp.asarray(np.concatenate([[0], np.cumsum(q_lens)]),
-                            jnp.int32),
-      distribution=jnp.asarray([0, 0, active], jnp.int32),
+      metadata=paged_attention.PagedAttnMetadata(
+          page_indices={_CACHE: jnp.asarray(table)},
+          kv_lens=jnp.asarray(kv_lens, jnp.int32),
+          query_lens=jnp.asarray(q_lens, jnp.int32),
+          distribution=jnp.asarray([0, 0, active], jnp.int32),
+      ),
   )
+
+
+def _one_device_mesh(backend=None):
+  return jax.sharding.Mesh(np.array(jax.devices(backend)[:1]), ("tp",))
 
 
 class PagedAttentionGpuTest(parameterized.TestCase):
@@ -60,9 +69,11 @@ class PagedAttentionGpuTest(parameterized.TestCase):
       self.skipTest("needs a GPU")
 
   def _check(self, inputs, **kwargs):
+    mesh = _one_device_mesh("gpu")
     run = lambda backend: jax.jit(
         lambda x: paged_attention.paged_attention(
-            **x, backend=backend, **kwargs))(inputs)
+            **x, cache_name=_CACHE, mesh=mesh, backend=backend, **kwargs))(
+                inputs)
     gpu_out, gpu_cache = run("gpu")
     ref_out, ref_cache = run("cpu")  # Pure-JAX path, still on the GPU.
     np.testing.assert_array_equal(np.asarray(gpu_cache), np.asarray(ref_cache))
@@ -95,9 +106,11 @@ class PagedAttentionGpuTest(parameterized.TestCase):
     inputs = _inputs([4, 2], [40, 33], page_size=16, pages_per_seq=4)
     # Evict the first page of each sequence (positions 0..15 are outside
     # window=8) by setting its page-table entry to -1.
-    table = np.asarray(inputs["page_indices"]).reshape(2, 4).copy()
+    table = np.asarray(inputs["metadata"].page_indices[_CACHE]).copy()
     table[:, 0] = -1
-    inputs["page_indices"] = jnp.asarray(table.reshape(-1))
+    inputs["metadata"] = inputs["metadata"].replace(
+        page_indices={_CACHE: jnp.asarray(table)}
+    )
     self._check(inputs, sliding_window=8)
 
   def test_softcap_and_scale(self):
@@ -130,32 +143,42 @@ class PagedAttentionGpuTest(parameterized.TestCase):
     q_lens = [1] * 8 if decode_only else [64, 64]
     inputs = _inputs(q_lens, [128] * len(q_lens), num_q_heads=8,
                      num_kv_heads=2, head_dim=head_dim, pages_per_seq=16)
+    mesh = _one_device_mesh("gpu")
     jax.jit(
         lambda x: paged_attention.paged_attention(
-            **x, backend="gpu", decode_only=decode_only,
-            sliding_window=sliding_window, update_kv_cache=update_kv_cache)
+            **x, cache_name=_CACHE, mesh=mesh, backend="gpu",
+            decode_only=decode_only, sliding_window=sliding_window,
+            update_kv_cache=update_kv_cache)
     ).lower(inputs).compile()
 
 
 class PagedAttentionJaxTest(parameterized.TestCase):
 
   def test_negative_page_indices_clamp_to_page_zero(self):
+    mesh = _one_device_mesh()
     inputs = _inputs([4, 2], [40, 33], page_size=16, pages_per_seq=4)
     # Poison the last physical page with NaNs so that an unclamped -1 index
     # (which wraps to the last page in JAX gather) would produce NaNs via
     # `0.0 * NaN` in the attention value weighted sum.
     inputs["kv_cache"] = inputs["kv_cache"].at[-1].set(jnp.nan)
     ref_out, _ = paged_attention.paged_attention(
-        **inputs, backend="cpu", sliding_window=8
+        **inputs, cache_name=_CACHE, mesh=mesh, backend="cpu", sliding_window=8
     )
 
-    table = np.asarray(inputs["page_indices"]).reshape(2, 4).copy()
+    table = np.asarray(inputs["metadata"].page_indices[_CACHE]).copy()
     table[:, 0] = -1
     evicted_inputs = dict(
-        inputs, page_indices=jnp.asarray(table.reshape(-1))
+        inputs,
+        metadata=inputs["metadata"].replace(
+            page_indices={_CACHE: jnp.asarray(table)}
+        ),
     )
     out, _ = paged_attention.paged_attention(
-        **evicted_inputs, backend="cpu", sliding_window=8
+        **evicted_inputs,
+        cache_name=_CACHE,
+        mesh=mesh,
+        backend="cpu",
+        sliding_window=8,
     )
 
     self.assertFalse(bool(jnp.any(jnp.isnan(out))))
@@ -164,6 +187,63 @@ class PagedAttentionJaxTest(parameterized.TestCase):
         np.asarray(ref_out, np.float32),
         rtol=1e-5,
         atol=1e-5,
+    )
+
+  @parameterized.parameters(
+      # Full TP sharding across Q, KV, and KV cache.
+      (8, 4, 2, 4),
+      # MQA with packing=1 on tp=2: kv_cache.shape[2] == 2 divides tp, but
+      # num_kv_heads == 1 does not, so KV and cache must both stay replicated.
+      (4, 1, 1, 2),
+      # GQA with 1 < num_kv_heads < tp: KV is replicated, so Q must also stay
+      # unsharded to preserve GQA head grouping.
+      (8, 2, 1, 4),
+  )
+  def test_mesh_sharding_matches_unsharded(
+      self, num_q_heads, num_kv_heads, packing, tp_size
+  ):
+    cpu_devices = jax.devices("cpu")[:tp_size]
+    self.assertLen(cpu_devices, tp_size)
+    inputs = jax.device_put(
+        _inputs(
+            [5, 7],
+            [12, 15],
+            num_q_heads=num_q_heads,
+            num_kv_heads=num_kv_heads,
+            packing=packing,
+            head_dim=32,
+            dtype=jnp.float32,
+        ),
+        cpu_devices[0],
+    )
+    ref_mesh = jax.sharding.Mesh(np.array(cpu_devices[:1]), ("tp",))
+    ref_out, ref_cache = paged_attention.paged_attention(
+        **inputs, cache_name=_CACHE, mesh=ref_mesh, backend="cpu"
+    )
+
+    mesh = jax.sharding.Mesh(np.array(cpu_devices), ("tp",))
+    sharded_inputs = jax.device_put(
+        inputs,
+        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()),
+    )
+    sharded_out, sharded_cache = paged_attention.paged_attention(
+        **sharded_inputs,
+        cache_name=_CACHE,
+        mesh=mesh,
+        tp_axis="tp",
+        backend="cpu",
+    )
+
+    np.testing.assert_allclose(sharded_out, ref_out, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(sharded_cache, ref_cache, rtol=1e-5, atol=1e-5)
+    self.assertIsNone(paged_attention._shardable_tp_axis(mesh, None, 4))
+    self.assertIsNone(paged_attention._shardable_tp_axis(mesh, "missing", 4))
+    fake_two_way_mesh = jax.sharding.AbstractMesh((2,), ("tp",))
+    self.assertEqual(
+        paged_attention._shardable_tp_axis(fake_two_way_mesh, "tp", 4, 2), "tp"
+    )
+    self.assertIsNone(
+        paged_attention._shardable_tp_axis(fake_two_way_mesh, "tp", 1, 2)
     )
 
 
