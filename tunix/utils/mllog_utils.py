@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import threading
 import time
 from typing import Any, Callable, Iterable, Mapping, Optional
 import jax
@@ -46,6 +47,13 @@ _last_block_time_ms: Optional[int] = None
 # Last checkpoint recorded via append_checkpoint_manifest (see finish_training).
 _last_checkpoint_step: int = 0
 _last_checkpoint_time_ms: Optional[int] = None
+# MLPerf: init time beyond this limit counts toward time-to-train, so
+# init_stop/run_start are emitted by a timer if train_start is not reached.
+MAX_INIT_TIME_S = 30 * 60
+_run_start_lock = threading.Lock()
+_run_started: bool = False
+_init_start_time_ms: Optional[int] = None
+_init_timer: Optional[threading.Timer] = None
 
 
 def _reset_block_state() -> None:
@@ -300,13 +308,59 @@ def _log_end(key: str, metadata: Optional[dict[str, Any]] = None):
     mllogger.end(key=key, metadata=metadata or {})
 
 
+def _cancel_init_timer() -> None:
+  global _init_timer
+  if _init_timer is not None:
+    _init_timer.cancel()
+    _init_timer = None
+
+
+def _start_run_once(time_ms: Optional[int] = None, reason: str = "") -> None:
+  """Emits init_stop + run_start exactly once, from train_start or the timer."""
+  global _run_started
+  with _run_start_lock:
+    if _run_started:
+      return
+    _run_started = True
+    init_stop(time_ms=time_ms)
+    run_start(time_ms=time_ms)
+    _flush_to_gcs_if_needed()
+  logging.info("MLPerf init_stop/run_start emitted (%s).", reason)
+
+
+def _on_init_timeout(max_init_time_s: float) -> None:
+  # Stamp at exactly init_start + limit so timer jitter is not scored.
+  time_ms = (
+      _init_start_time_ms + int(max_init_time_s * 1000)
+      if _init_start_time_ms is not None
+      else None
+  )
+  _start_run_once(
+      time_ms=time_ms, reason=f"init exceeded {max_init_time_s:.0f}s"
+  )
+
+
 def init_start(
     args: Any = None,
     metric_logger_dir: Optional[str] = None,
     seed: Optional[int] = None,
     filename: Optional[str] = None,
+    max_init_time_s: Optional[float] = MAX_INIT_TIME_S,
 ):
-  """Logs CACHE_CLEAR and marks the beginning of the initialization phase."""
+  """Logs CACHE_CLEAR and marks the beginning of the initialization phase.
+
+  Also arms a timer that ends initialization (init_stop + run_start) after
+  max_init_time_s if train_start has not been reached by then, as MLPerf
+  counts init time beyond that limit toward time-to-train.
+
+  Args:
+    args: Optional namespace providing metric_logger_dir and seed.
+    metric_logger_dir: Directory or GCS URI for the mllog file.
+    seed: Seed used in the mllog file name.
+    filename: Explicit mllog file name.
+    max_init_time_s: Init time limit in seconds; None or 0 disables the timer.
+  """
+  global _run_started, _init_start_time_ms, _init_timer
   if _is_master_process() and mllogger is not None:
     _reset_block_state()
     if args is not None:
@@ -324,21 +378,32 @@ def init_start(
     cache_clear_key = getattr(constants, "CACHE_CLEAR", "cache_clear")
     init_start_key = getattr(constants, "INIT_START", "init_start")
     mllogger.event(key=cache_clear_key, value=True)
-    mllogger.start(key=init_start_key)
+    _init_start_time_ms = int(time.time() * 1000)
+    mllogger.start(key=init_start_key, time_ms=_init_start_time_ms)
+    _cancel_init_timer()
+    _run_started = False
+    if max_init_time_s:
+      _init_timer = threading.Timer(
+          max_init_time_s, _on_init_timeout, args=(max_init_time_s,)
+      )
+      _init_timer.daemon = True
+      _init_timer.start()
 
 
-def init_stop():
+def init_stop(time_ms: Optional[int] = None):
   """Marks the end of the initialization phase."""
   if _is_master_process() and mllogger is not None:
     init_stop_key = getattr(constants, "INIT_STOP", "init_stop")
-    mllogger.end(key=init_stop_key)
+    extra_kwargs = {} if time_ms is None else {"time_ms": int(time_ms)}
+    mllogger.end(key=init_stop_key, **extra_kwargs)
 
 
-def run_start():
+def run_start(time_ms: Optional[int] = None):
   """Marks the start of the training run."""
   if _is_master_process() and mllogger is not None:
     run_start_key = getattr(constants, "RUN_START", "run_start")
-    mllogger.start(key=run_start_key)
+    extra_kwargs = {} if time_ms is None else {"time_ms": int(time_ms)}
+    mllogger.start(key=run_start_key, **extra_kwargs)
 
 
 def block_start(args=None, step: int = 0, samples_count: Optional[int] = None):
@@ -369,9 +434,12 @@ def block_start(args=None, step: int = 0, samples_count: Optional[int] = None):
 
 
 def train_start(args=None, step: int = 0, samples_count: Optional[int] = None):
-  """Marks initialization end, run start, and the first training block start."""
-  init_stop()
-  run_start()
+  """Marks initialization end, run start, and the first training block start.
+
+  init_stop/run_start are skipped if the init timer already emitted them.
+  """
+  _cancel_init_timer()
+  _start_run_once(reason="train_start")
   block_start(args=args, step=step, samples_count=samples_count)
   _flush_to_gcs_if_needed()
 
@@ -455,6 +523,8 @@ def finish_training(
     completed_steps: Optimizer steps completed according to the trainer.
     last_step_time_ms: Timestamp (ms) of the last weight update, if known.
   """
+  # Don't let the init timer emit run_start while the process is exiting.
+  _cancel_init_timer()
   if not _block_open:
     return
   # A checkpoint is saved before weight sync, so it can be one step ahead of
