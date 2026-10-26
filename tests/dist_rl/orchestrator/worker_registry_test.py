@@ -84,7 +84,7 @@ class WorkerRegistryTest(absltest.TestCase):
     remote_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
     registry.register_handle("t0", ["trainer"], remote_handle)
     registry.unregister("t0")
-    remote_handle.close.assert_awaited_once()
+    remote_handle.sync_close.assert_called_once()
     self.assertNotIn("t0", registry)
     self.assertEmpty(registry.handles("trainer"))
     self.assertNotIn("trainer", registry.roles())
@@ -267,10 +267,68 @@ class WorkerRegistryTest(absltest.TestCase):
 
     registry.close()
 
-    h0.close.assert_awaited_once()
-    h1.close.assert_awaited_once()
+    h0.sync_close.assert_called_once()
+    h1.sync_close.assert_called_once()
     self.assertEmpty(registry)
     self.assertEmpty(registry.roles())
+
+  def test_unregister_handle_removes_matching_worker_and_closes_handle(self):
+    registry = worker_registry.WorkerRegistry()
+    h0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    registry.register_handle("w0", [datatypes.Role.ROLLOUT], h0)
+
+    self.assertEqual(registry.unregister_handle(h0), "w0")
+    self.assertNotIn("w0", registry)
+    h0.sync_close.assert_called_once()
+
+    # Unregistering an unknown or already removed handle is a safe no-op.
+    self.assertIsNone(registry.unregister_handle(h0))
+    self.assertIsNone(registry.unregister_handle(h1))
+    h1.sync_close.assert_not_called()
+
+  def test_register_override_closes_displaced_handle(self):
+    registry = worker_registry.WorkerRegistry()
+    h0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    registry.register_handle("w0", [datatypes.Role.ROLLOUT], h0)
+    registry.register_handle("w0", [datatypes.Role.ROLLOUT], h1, override=True)
+
+    h0.sync_close.assert_called_once()
+    h1.sync_close.assert_not_called()
+    self.assertIs(registry.handle("w0"), h1)
+
+  def test_evicted_worker_id_cannot_reregister_without_override(self):
+    registry = worker_registry.WorkerRegistry()
+    h0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    registry.register_handle("w0", [datatypes.Role.ROLLOUT], h0)
+    self.assertEqual(registry.unregister_handle(h0), "w0")
+
+    # A restarted process re-registering under the evicted id is rejected so
+    # it never receives tasks without bring-up and weight sync.
+    restarted = mock.MagicMock(spec=remote_execution.ActorHandle)
+    with self.assertRaisesRegex(ValueError, "was evicted after a fault"):
+      registry.register_handle("w0", [datatypes.Role.ROLLOUT], restarted)
+    self.assertNotIn("w0", registry)
+    self.assertEmpty(registry.handles(datatypes.Role.ROLLOUT))
+
+    # An explicit override still re-admits the worker and clears the tombstone.
+    registry.register_handle(
+        "w0", [datatypes.Role.ROLLOUT], restarted, override=True
+    )
+    self.assertEqual(registry.handles(datatypes.Role.ROLLOUT), [restarted])
+    registry.unregister("w0")
+    registry.register_handle("w0", [datatypes.Role.ROLLOUT], h0)
+    self.assertEqual(registry.handles(datatypes.Role.ROLLOUT), [h0])
+
+  def test_explicit_unregister_allows_reregistration(self):
+    registry = worker_registry.WorkerRegistry()
+    h0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    registry.register_handle("w0", [datatypes.Role.ROLLOUT], h0)
+    registry.unregister("w0")
+    h1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    registry.register_handle("w0", [datatypes.Role.ROLLOUT], h1)
+    self.assertEqual(registry.handles(datatypes.Role.ROLLOUT), [h1])
 
 
 if __name__ == "__main__":

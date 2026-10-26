@@ -80,12 +80,44 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       self,
       registry: worker_registry.WorkerRegistry,
       weight_sync_coordinator: Any = None,
+      *,
+      fault_tolerance_config: datatypes.FaultToleranceConfig | None = None,
   ):
     self._registry = registry
-    self._rollout_session = task_session.TaskSession(self._rollout_handles)
+    ft_cfg = fault_tolerance_config or datatypes.FaultToleranceConfig()
+    self._fault_tolerance_config = ft_cfg
+    self._rollout_session = task_session.TaskSession(
+        self._rollout_handles,
+        poll_retry_budget_s=ft_cfg.effective_poll_retry_budget_s,
+        fault_tolerance_config=task_session.TaskSessionFaultToleranceConfig(
+            max_task_retries=ft_cfg.effective_max_task_retries,
+            on_worker_unreachable=(
+                self._on_worker_unreachable if ft_cfg.enabled else None
+            ),
+        ),
+    )
     self._policy_version = 0
     self._weight_sync_coordinator = weight_sync_coordinator
     self._restored_checkpoint_metadata: dict[str, Any] | None = None
+
+  def _on_worker_unreachable(
+      self,
+      handle: remote_execution.ActorHandle,
+      exc: Exception,
+  ) -> None:
+    """Evicts an unreachable worker handle from the control-plane registry."""
+    # TODO(b/577214994): Track and log worker failure counts (total failure
+    # events and distinct failed workers), report the percentage of failed
+    # workers to the user, and add `terminate_on_worker_failure_percent` to
+    # fail the job when the failed worker ratio reaches the configured
+    # threshold.
+    worker_id = self._registry.unregister_handle(handle)
+    if worker_id is not None:
+      logging.warning(
+          "Evicted unreachable worker %r from WorkerRegistry: %s",
+          worker_id,
+          exc,
+      )
 
   def _rollout_handles(self) -> list[remote_execution.ActorHandle]:
     return self._registry.handles(datatypes.Role.ROLLOUT)
@@ -329,9 +361,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
   ) -> list[datatypes.TrajectoryItem]:
     """Concurrently long-polls completed rollout responses across all workers."""
-    if not self._rollout_handles():
-      return []
-
     completed: list[datatypes.TrajectoryItem] = []
     for res, exc in await self._rollout_session.poll_completed(
         timeout_s=timeout_s

@@ -898,6 +898,36 @@ class ActorHandle(abc.ABC):
     """Releases any underlying transport resources held by this handle."""
     pass
 
+  def sync_close(self) -> None:
+    """Releases transport resources from either sync or running-loop context.
+
+    Without a running event loop, `close()` runs to completion and its errors
+    propagate. Inside a running loop, `close()` is scheduled as a best-effort
+    background task: this method returns before it finishes, and failures are
+    logged at WARNING instead of raised.
+    """
+    coro = self.close()
+    try:
+      loop = asyncio.get_running_loop()
+    except RuntimeError:
+      asyncio.run(coro)
+    else:
+      task = loop.create_task(coro)
+      _BACKGROUND_CLOSE_TASKS.add(task)
+      task.add_done_callback(_on_background_close_done)
+
+
+_BACKGROUND_CLOSE_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _on_background_close_done(task: asyncio.Task[Any]) -> None:
+  """Removes a finished background close task and logs any exception."""
+  _BACKGROUND_CLOSE_TASKS.discard(task)
+  if not task.cancelled():
+    exc = task.exception()
+    if exc is not None:
+      logging.warning("Background ActorHandle.sync_close() failed: %r", exc)
+
 
 class RemoteActorHandle(ActorHandle):
   """ActorHandle targeting a remote network worker address over gRPC/Stubby."""

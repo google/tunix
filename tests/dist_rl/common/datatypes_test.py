@@ -14,6 +14,7 @@
 
 """Serialization-discipline tests for the common wire DTOs."""
 
+import dataclasses
 import time
 
 from absl.testing import absltest
@@ -167,8 +168,6 @@ class WireSerializationTest(absltest.TestCase):
           logps=np.array([0.5]),
       )
 
-
-
   def test_trajectory_item_to_and_from_dict(self):
     traj = {
         "reward": 2.5,
@@ -232,7 +231,6 @@ class WireSerializationTest(absltest.TestCase):
     item = datatypes.TrajectoryItem(prompt_id="42", group_index=2, traj={})
     self.assertEqual(item.traj_id, "traj_42_g2")
 
-
   def test_trajectory_item_fields(self):
     item = datatypes.TrajectoryItem(prompt_id="prompt_88", group_index=4, traj={})
     self.assertEqual(item.prompt_id, "prompt_88")
@@ -241,6 +239,39 @@ class WireSerializationTest(absltest.TestCase):
     item_default = datatypes.TrajectoryItem(prompt_id="prompt_99", traj={})
     self.assertEqual(item_default.prompt_id, "prompt_99")
     self.assertEqual(item_default.group_index, 0)
+
+  def test_fault_tolerance_config_defaults_and_disabled_override(self):
+    cfg = datatypes.FaultToleranceConfig()
+    self.assertFalse(cfg.enabled)
+    self.assertEqual(cfg.max_task_retries, 1)
+    self.assertIsNone(cfg.poll_retry_budget_s)
+    self.assertEqual(cfg.effective_max_task_retries, 0)
+    self.assertEqual(cfg.effective_poll_retry_budget_s, 300.0)
+
+    enabled_cfg = datatypes.FaultToleranceConfig(enabled=True)
+    self.assertTrue(enabled_cfg.enabled)
+    self.assertEqual(enabled_cfg.effective_max_task_retries, 1)
+    self.assertEqual(enabled_cfg.effective_poll_retry_budget_s, 60.0)
+
+    re_enabled = dataclasses.replace(cfg, enabled=True)
+    self.assertEqual(re_enabled.effective_max_task_retries, 1)
+    self.assertEqual(re_enabled.effective_poll_retry_budget_s, 60.0)
+
+    disabled_cfg = datatypes.FaultToleranceConfig(
+        enabled=False, max_task_retries=5, poll_retry_budget_s=15.0
+    )
+    self.assertFalse(disabled_cfg.enabled)
+    self.assertEqual(disabled_cfg.effective_max_task_retries, 0)
+    self.assertEqual(disabled_cfg.effective_poll_retry_budget_s, 15.0)
+
+    zero_budget_cfg = datatypes.FaultToleranceConfig(poll_retry_budget_s=0.0)
+    self.assertEqual(zero_budget_cfg.effective_poll_retry_budget_s, 0.0)
+
+    with self.assertRaisesRegex(ValueError, "max_task_retries must be >= 0"):
+      datatypes.FaultToleranceConfig(max_task_retries=-1)
+
+    with self.assertRaisesRegex(ValueError, "poll_retry_budget_s must be >= 0"):
+      datatypes.FaultToleranceConfig(poll_retry_budget_s=-5.0)
 
 
 class RLTrainerPayloadTest(absltest.TestCase):

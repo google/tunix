@@ -3893,6 +3893,42 @@ class RemoteExecutionTest(parameterized.TestCase):
 
     asyncio.run(_run())
 
+  def test_actor_handle_sync_close_in_sync_and_running_loop_contexts(self):
+    handle_sync = remote_lib.InProcessActorHandle(
+        remote_lib.InProcessRemoteExecutionServer(object())
+    )
+    handle_sync.close = mock.AsyncMock()
+    handle_sync.sync_close()
+    handle_sync.close.assert_awaited_once()
+
+    async def _run():
+      handle_async = remote_lib.InProcessActorHandle(
+          remote_lib.InProcessRemoteExecutionServer(object())
+      )
+      handle_async.close = mock.AsyncMock()
+      handle_async.sync_close()
+      self.assertLen(remote_lib._BACKGROUND_CLOSE_TASKS, 1)
+      await asyncio.gather(
+          *list(remote_lib._BACKGROUND_CLOSE_TASKS), return_exceptions=True
+      )
+      await asyncio.sleep(0)
+      handle_async.close.assert_awaited_once()
+      self.assertEmpty(remote_lib._BACKGROUND_CLOSE_TASKS)
+
+      handle_err = remote_lib.InProcessActorHandle(
+          remote_lib.InProcessRemoteExecutionServer(object())
+      )
+      handle_err.close = mock.AsyncMock(side_effect=RuntimeError("close boom"))
+      handle_err.sync_close()
+      await asyncio.gather(
+          *list(remote_lib._BACKGROUND_CLOSE_TASKS), return_exceptions=True
+      )
+      await asyncio.sleep(0)
+      handle_err.close.assert_awaited_once()
+      self.assertEmpty(remote_lib._BACKGROUND_CLOSE_TASKS)
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

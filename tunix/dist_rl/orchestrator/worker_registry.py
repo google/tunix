@@ -21,7 +21,6 @@ role, so a fused worker (e.g. one serving both "trainer" and "inference") joins
 every matching role query. Role membership is snapshotted at registration time.
 """
 
-import asyncio
 import collections
 from collections.abc import Mapping, Sequence
 import pickle
@@ -43,20 +42,37 @@ class WorkerRegistry:
     self._handles: dict[str, remote_execution.ActorHandle] = {}
     self._infos: dict[str, datatypes.WorkerInfo] = {}
     self._role_to_ids: dict[str, set[str]] = collections.defaultdict(set)
+    # Worker ids evicted after a data-plane fault (`unregister_handle`).
+    # TODO(b/577214994): Replace with staged rejoin (initialize -> compile ->
+    # weight sync -> ACTIVE) once dynamic rollout worker rejoin lands; until
+    # then a restarted worker must not become routable without bring-up and
+    # a committed weight sync.
+    self._evicted_ids: set[str] = set()
 
   def _insert_locked(
       self,
       info: datatypes.WorkerInfo,
       handle: remote_execution.ActorHandle,
       override: bool,
-  ) -> None:
+  ) -> remote_execution.ActorHandle | None:
     worker_id = info.worker_id
     if worker_id in self._handles and not override:
       raise ValueError(f"duplicate worker_id: {worker_id!r}")
+    if worker_id in self._evicted_ids and not override:
+      raise ValueError(
+          f"worker_id {worker_id!r} was evicted after a fault and cannot"
+          " re-register: dynamic rollout worker rejoin (initialize, compile,"
+          " and weight sync before receiving tasks) is not supported yet."
+      )
     if not info.roles:
       raise ValueError(f"worker {worker_id!r} declares no roles")
+    self._evicted_ids.discard(worker_id)
 
+    displaced_handle: remote_execution.ActorHandle | None = None
     if worker_id in self._infos:
+      old_handle = self._handles.get(worker_id)
+      if old_handle is not None and old_handle is not handle:
+        displaced_handle = old_handle
       old_info = self._infos[worker_id]
       for role in old_info.roles:
         if role in self._role_to_ids:
@@ -69,6 +85,7 @@ class WorkerRegistry:
     for role in info.roles:
       self._role_to_ids[role].add(worker_id)
     self._condition.notify_all()
+    return displaced_handle
 
   def register(
       self, worker: abstract_worker.Worker, override: bool = False
@@ -92,7 +109,9 @@ class WorkerRegistry:
         remote_execution.InProcessRemoteExecutionServer(worker)
     )
     with self._condition:
-      self._insert_locked(info, handle, override=override)
+      displaced_handle = self._insert_locked(info, handle, override=override)
+    if displaced_handle is not None:
+      displaced_handle.sync_close()
     return info
 
   def register_handle(
@@ -119,7 +138,9 @@ class WorkerRegistry:
         resources={"remote": True, **dict(resources or {})},
     )
     with self._condition:
-      self._insert_locked(info, handle, override=override)
+      displaced_handle = self._insert_locked(info, handle, override=override)
+    if displaced_handle is not None:
+      displaced_handle.sync_close()
     logging.info(
         "Registered remote worker %r with roles %s.",
         worker_id,
@@ -214,19 +235,50 @@ class WorkerRegistry:
           _counts(),
       )
 
+  def _pop_worker_locked(self, worker_id: str) -> remote_execution.ActorHandle:
+    info = self._infos.pop(worker_id)
+    handle = self._handles.pop(worker_id)
+    for role in info.roles:
+      members = self._role_to_ids.get(role)
+      if members is not None:
+        members.discard(worker_id)
+        if not members:
+          del self._role_to_ids[role]
+    self._condition.notify_all()
+    return handle
+
   def unregister(self, worker_id: str) -> None:
     """Removes a worker from the registry and closes its ActorHandle outside the lock."""
     with self._condition:
-      info = self._infos.pop(worker_id)
-      handle = self._handles.pop(worker_id)
-      for role in info.roles:
-        members = self._role_to_ids.get(role)
-        if members is not None:
-          members.discard(worker_id)
-          if not members:
-            del self._role_to_ids[role]
-      self._condition.notify_all()
-    asyncio.run(handle.close())
+      handle = self._pop_worker_locked(worker_id)
+    handle.sync_close()
+
+  def unregister_handle(
+      self, handle: remote_execution.ActorHandle
+  ) -> str | None:
+    """Evicts the worker owning `handle` (if still registered) and closes it.
+
+    The evicted `worker_id` is remembered: a later registration under the same
+    id (for example, a restarted process re-registering through discovery) is
+    rejected unless `override=True`, so the restarted worker never receives
+    tasks without bring-up and weight sync.
+
+    Args:
+      handle: The `ActorHandle` of the worker to evict.
+
+    Returns:
+      The evicted `worker_id`, or None if `handle` is not registered.
+    """
+    with self._condition:
+      worker_id = next(
+          (wid for wid, h in self._handles.items() if h is handle), None
+      )
+      if worker_id is None:
+        return None
+      self._pop_worker_locked(worker_id)
+      self._evicted_ids.add(worker_id)
+    handle.sync_close()
+    return worker_id
 
   def close(self) -> None:
     """Closes all registered ActorHandles outside the lock and clears registry state."""
@@ -235,12 +287,13 @@ class WorkerRegistry:
       self._handles.clear()
       self._infos.clear()
       self._role_to_ids.clear()
+      self._evicted_ids.clear()
       self._condition.notify_all()
 
     errors: list[BaseException] = []
     for handle in handles:
       try:
-        asyncio.run(handle.close())
+        handle.sync_close()
       except Exception as exc:  # pylint: disable=broad-exception-caught
         errors.append(exc)
     if errors:

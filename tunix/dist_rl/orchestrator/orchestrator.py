@@ -46,6 +46,7 @@ class ClusterOrchestrator:
       weight_sync_mode: str | None = None,
       trajectory_store_config: Mapping[str, Any] | None = None,
       weight_sync_timeouts: weight_sync_coordinator.PhaseTimeouts | None = None,
+      fault_tolerance_config: datatypes.FaultToleranceConfig | None = None,
   ):
     """Initializes ClusterOrchestrator.
 
@@ -62,6 +63,8 @@ class ClusterOrchestrator:
         visible to this process's reads once read/write wiring is connected.
       weight_sync_timeouts: Per-phase deadlines forwarded to
         `WeightSyncCoordinator`, or None to use `PhaseTimeouts()` defaults.
+      fault_tolerance_config: Fault-tolerance configuration forwarded to
+        `DistributedRLEngine`, or None to use `FaultToleranceConfig()` defaults.
     """
     self.config = config
     self.registry = (
@@ -75,6 +78,7 @@ class ClusterOrchestrator:
     mode = getattr(weight_sync_mode, "value", weight_sync_mode)
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
     self._weight_sync_timeouts = weight_sync_timeouts
+    self._fault_tolerance_config = fault_tolerance_config
     # The sole construction site for this process's Trajectory Store: one
     # ClusterOrchestrator exists per orchestrator process, so building it
     # here — once, in __init__ — is the whole guard. Its lifetime is meant
@@ -196,6 +200,7 @@ class ClusterOrchestrator:
     return distributed_rl_engine.DistributedRLEngine(
         registry=self.registry,
         weight_sync_coordinator=coordinator,
+        fault_tolerance_config=self._fault_tolerance_config,
     )
 
   def run(

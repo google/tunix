@@ -207,6 +207,81 @@ class WorkerInfo:
   resources: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
+# Default poll retry budgets used when `poll_retry_budget_s` is None.
+# `_FT_OFF_DEFAULT_POLL_RETRY_BUDGET_S` must stay in sync with
+# `task_session.DEFAULT_POLL_RETRY_BUDGET_S` (verified by
+# `distributed_rl_engine_test`).
+_FT_OFF_DEFAULT_POLL_RETRY_BUDGET_S = 300.0
+_FT_ON_DEFAULT_POLL_RETRY_BUDGET_S = 60.0
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class FaultToleranceConfig:
+  """Configuration for worker fault tolerance.
+
+  TODO(b/577214994): Decouple task retry budget from worker eviction budget
+  (a failed `dispatch_task` should only mark a worker suspect until its poll
+  loop confirms the failure), extend with circuit-breaking knobs, and then flip
+  `enabled` to default to `True`.
+
+  Attributes:
+    enabled: Whether worker fault tolerance (automatic eviction and task retry)
+      is enabled. Defaults to `False`: in v1 a single transport failure evicts a
+      worker, and an evicted worker whose process is still alive never
+      re-registers (rollout workers register with discovery only once at
+      startup), so a transient fault on a healthy worker permanently shrinks the
+      rollout pool. Until dynamic worker rejoin lands, an evicted worker's id is
+      also rejected if it tries to re-register
+      (`WorkerRegistry.unregister_handle`), so a restarted worker never receives
+      tasks without bring-up and weight sync. When `False`, fault tolerance is
+      disabled and `effective_max_task_retries` is `0`.
+    max_task_retries: Maximum number of times an in-flight task is re-dispatched
+      onto surviving workers after a worker failure when `enabled=True`. Because
+      each send-path or poll-path transport failure evicts the failing worker in
+      v1, `max_task_retries` also bounds the number of workers a single request
+      can evict; defaults to `1`.
+    poll_retry_budget_s: Optional override for the maximum wall-clock duration
+      in seconds to retry transient poll errors on a rollout worker before
+      failing its in-flight tasks (`0.0` fails immediately on the first
+      transient poll error). When `None` (default),
+      `effective_poll_retry_budget_s` resolves to `60.0` when `enabled=True`
+      (gRPC keepalive ~30s plus margin) and `300.0` when `enabled=False`
+      (matching `TaskSession`'s default budget).
+  """
+
+  # TODO(b/577214994): Change `enabled` default to `True` once dispatch failure
+  # is decoupled from worker eviction.
+  enabled: bool = False
+  max_task_retries: int = 1
+  poll_retry_budget_s: float | None = None
+
+  def __post_init__(self) -> None:
+    if self.max_task_retries < 0:
+      raise ValueError(
+          f"max_task_retries must be >= 0, got {self.max_task_retries}"
+      )
+    if self.poll_retry_budget_s is not None and self.poll_retry_budget_s < 0.0:
+      raise ValueError(
+          f"poll_retry_budget_s must be >= 0, got {self.poll_retry_budget_s}"
+      )
+
+  @property
+  def effective_max_task_retries(self) -> int:
+    """Returns the active task retry budget (`0` when `enabled=False`)."""
+    return self.max_task_retries if self.enabled else 0
+
+  @property
+  def effective_poll_retry_budget_s(self) -> float:
+    """Returns the resolved poll retry budget in seconds."""
+    if self.poll_retry_budget_s is not None:
+      return self.poll_retry_budget_s
+    return (
+        _FT_ON_DEFAULT_POLL_RETRY_BUDGET_S
+        if self.enabled
+        else _FT_OFF_DEFAULT_POLL_RETRY_BUDGET_S
+    )
+
+
 ##### Rollout DTOs #####
 
 

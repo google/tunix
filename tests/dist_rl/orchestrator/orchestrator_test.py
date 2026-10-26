@@ -154,8 +154,8 @@ class ClusterOrchestratorTest(absltest.TestCase):
     self.mock_monitor.close.assert_called_once()
     mock_rollout.submit.assert_any_call("stop")
     mock_actor.submit.assert_any_call("stop")
-    mock_rollout.close.assert_awaited_once()
-    mock_actor.close.assert_awaited_once()
+    mock_rollout.sync_close.assert_called_once()
+    mock_actor.sync_close.assert_called_once()
 
   def test_create_engine_wraps_local_workers_as_in_process_handles(self):
     class LocalWorker(abstract_worker.Worker):
@@ -193,6 +193,20 @@ class ClusterOrchestratorTest(absltest.TestCase):
     self.assertIsInstance(
         engine._rollout_handles()[0], remote_execution.InProcessActorHandle
     )
+
+  def test_create_engine_forwards_fault_tolerance_config(self):
+    registry = worker_registry.WorkerRegistry()
+    ft_config = datatypes.FaultToleranceConfig(
+        enabled=True, max_task_retries=2, poll_retry_budget_s=45.0
+    )
+    orch = orchestrator.ClusterOrchestrator(
+        registry=registry,
+        fault_tolerance_config=ft_config,
+    )
+    engine = orch._create_engine()
+    self.assertEqual(engine._fault_tolerance_config, ft_config)
+    self.assertEqual(engine._rollout_session._max_task_retries, 2)
+    self.assertEqual(engine._rollout_session._poll_retry_budget_s, 45.0)
 
   def test_run_with_bring_up(self):
     mock_program = mock.MagicMock(spec=rl_program.RLProgram)

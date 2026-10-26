@@ -142,6 +142,7 @@ def _make_engine(
     trainer_workers=None,
     inference_workers=None,
     weight_sync_coordinator=None,
+    fault_tolerance_config: datatypes.FaultToleranceConfig | None = None,
 ) -> distributed_rl_engine.DistributedRLEngine:
   registry = worker_registry.WorkerRegistry()
   for idx, handle in enumerate(rollout_workers):
@@ -155,6 +156,7 @@ def _make_engine(
   return distributed_rl_engine.DistributedRLEngine(
       registry=registry,
       weight_sync_coordinator=weight_sync_coordinator,
+      fault_tolerance_config=fault_tolerance_config,
   )
 
 
@@ -2025,6 +2027,248 @@ class DistributedRLEngineTest(absltest.TestCase):
           RuntimeError, "Rollout worker process crashed with OOM"
       ):
         await self.engine.poll_rollouts(timeout_s=1.0)
+
+    asyncio.run(_run())
+
+  def test_poll_rollouts_evicts_failed_worker_from_registry_and_retries_on_survivor(
+      self,
+  ):
+    async def _run():
+      engine = _make_engine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+          fault_tolerance_config=datatypes.FaultToleranceConfig(enabled=True),
+      )
+
+      async def _crashing_poll(timeout_s=50.0):
+        del timeout_s
+        await asyncio.sleep(0.005)
+        raise RuntimeError("rollout-0 crashed mid-poll")
+
+      resp = datatypes.RolloutResponse(
+          request_id="req_prompt_1_g0_v0",
+          status="COMPLETED",
+          payload=datatypes.TrajectoryItem(
+              prompt_id="prompt_1",
+              group_index=0,
+              traj={
+                  "trajectory_reward": 1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
+      )
+      self.mock_rollout_1.poll_responses.side_effect = _crashing_poll
+      self.mock_rollout_2.poll_responses.return_value = [resp]
+
+      # "prompt_1" routes initially to mock_rollout_1; when mock_rollout_1's
+      # poll_responses raises RuntimeError, TaskSession evicts mock_rollout_1
+      # from WorkerRegistry and retries the request on mock_rollout_2.
+      await engine.dispatch_rollouts(
+          [{"prompt": "p1", "prompt_id": "prompt_1"}],
+          num_generations=1,
+          policy_version=0,
+      )
+      results = await engine.poll_rollouts(timeout_s=1.0)
+      await asyncio.sleep(0)
+
+      self.assertLen(results, 1)
+      self.assertEqual(results[0].prompt_id, "prompt_1")
+      self.assertEqual(
+          engine._registry.handles(datatypes.Role.ROLLOUT),
+          [self.mock_rollout_2],
+      )
+      self.assertNotIn("rollout-0", engine._registry)
+      self.mock_rollout_1.sync_close.assert_called_once()
+      self.assertEqual(self.mock_rollout_1.generate.call_count, 1)
+      self.assertEqual(self.mock_rollout_2.generate.call_count, 1)
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_poll_rollouts_transient_poll_budget_exhaustion_evicts_and_retries(
+      self,
+  ):
+    async def _run():
+      # A deleted pod surfaces as gRPC UNAVAILABLE, which `poll_responses`
+      # maps to `TransientTransportError`: eviction only happens once the
+      # engine-configured `poll_retry_budget_s` is exhausted.
+      engine = _make_engine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+          fault_tolerance_config=datatypes.FaultToleranceConfig(
+              enabled=True, poll_retry_budget_s=0.05
+          ),
+      )
+      self.assertEqual(engine._rollout_session._poll_retry_budget_s, 0.05)
+
+      async def _unavailable_poll(timeout_s=50.0):
+        del timeout_s
+        await asyncio.sleep(0.005)
+        raise remote_execution.TransientTransportError(
+            "UNAVAILABLE: rollout-0 pod deleted"
+        )
+
+      resp = datatypes.RolloutResponse(
+          request_id="req_prompt_1_g0_v0",
+          status="COMPLETED",
+          payload=datatypes.TrajectoryItem(
+              prompt_id="prompt_1",
+              group_index=0,
+              traj={
+                  "trajectory_reward": 1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
+      )
+      self.mock_rollout_1.poll_responses.side_effect = _unavailable_poll
+      self.mock_rollout_2.poll_responses.return_value = [resp]
+
+      await engine.dispatch_rollouts(
+          [{"prompt": "p1", "prompt_id": "prompt_1"}],
+          num_generations=1,
+          policy_version=0,
+      )
+      results = await engine.poll_rollouts(timeout_s=2.0)
+      await asyncio.sleep(0)
+
+      self.assertLen(results, 1)
+      self.assertEqual(results[0].prompt_id, "prompt_1")
+      self.assertEqual(
+          engine._registry.handles(datatypes.Role.ROLLOUT),
+          [self.mock_rollout_2],
+      )
+      self.assertNotIn("rollout-0", engine._registry)
+      self.mock_rollout_1.sync_close.assert_called_once()
+      self.assertEqual(self.mock_rollout_2.generate.call_count, 1)
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollouts_evicts_failed_worker_and_retries_on_survivor(
+      self,
+  ):
+    async def _run():
+      engine = _make_engine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+          fault_tolerance_config=datatypes.FaultToleranceConfig(enabled=True),
+      )
+      self.mock_rollout_1.generate.side_effect = ConnectionError(
+          "rollout-0 connection refused on dispatch"
+      )
+      resp1 = datatypes.RolloutResponse(
+          request_id="req_prompt_1_g0_v0",
+          status="COMPLETED",
+          payload=datatypes.TrajectoryItem(
+              prompt_id="prompt_1",
+              group_index=0,
+              traj={
+                  "trajectory_reward": 1.0,
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              },
+          ),
+      )
+      self.mock_rollout_2.poll_responses.return_value = [resp1]
+
+      req_ids = await engine.dispatch_rollouts(
+          [{"prompt": "p1", "prompt_id": "prompt_1"}],
+          num_generations=1,
+          policy_version=0,
+      )
+      await asyncio.sleep(0)
+
+      self.assertEqual(req_ids, ["req_prompt_1_g0_v0"])
+      self.assertEqual(
+          engine._registry.handles(datatypes.Role.ROLLOUT),
+          [self.mock_rollout_2],
+      )
+      self.assertNotIn("rollout-0", engine._registry)
+      self.mock_rollout_1.sync_close.assert_called_once()
+      self.assertEqual(self.mock_rollout_1.generate.call_count, 1)
+      self.assertEqual(self.mock_rollout_2.generate.call_count, 1)
+
+      results = await engine.poll_rollouts(timeout_s=0.5)
+      self.assertLen(results, 1)
+      self.assertEqual(results[0].prompt_id, "prompt_1")
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_fault_tolerance_session_wiring_defaults_and_enabled(self):
+    async def _run():
+      self.assertEqual(
+          datatypes._FT_OFF_DEFAULT_POLL_RETRY_BUDGET_S,
+          distributed_rl_engine.task_session.DEFAULT_POLL_RETRY_BUDGET_S,
+      )
+      default_engine = _make_engine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+      )
+      self.assertEqual(
+          default_engine._rollout_session._poll_retry_budget_s, 300.0
+      )
+      self.assertEqual(default_engine._rollout_session._max_task_retries, 0)
+      self.assertIsNone(default_engine._rollout_session._on_worker_unreachable)
+      await default_engine.close()
+
+      disabled_custom_budget_engine = _make_engine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+          fault_tolerance_config=datatypes.FaultToleranceConfig(
+              enabled=False, poll_retry_budget_s=15.0
+          ),
+      )
+      self.assertEqual(
+          disabled_custom_budget_engine._rollout_session._poll_retry_budget_s,
+          15.0,
+      )
+      self.assertEqual(
+          disabled_custom_budget_engine._rollout_session._max_task_retries, 0
+      )
+      self.assertIsNone(
+          disabled_custom_budget_engine._rollout_session._on_worker_unreachable
+      )
+      await disabled_custom_budget_engine.close()
+
+      enabled_engine = _make_engine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+          fault_tolerance_config=datatypes.FaultToleranceConfig(enabled=True),
+      )
+      self.assertEqual(
+          enabled_engine._rollout_session._poll_retry_budget_s, 60.0
+      )
+      self.assertEqual(enabled_engine._rollout_session._max_task_retries, 1)
+      self.assertEqual(
+          enabled_engine._rollout_session._on_worker_unreachable,
+          enabled_engine._on_worker_unreachable,
+      )
+      await enabled_engine.close()
+
+    asyncio.run(_run())
+
+  def test_fault_tolerance_disabled_does_not_evict_or_retry(self):
+    async def _run():
+      engine = _make_engine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+          fault_tolerance_config=datatypes.FaultToleranceConfig(
+              enabled=False, max_task_retries=3
+          ),
+      )
+      self.mock_rollout_1.generate.side_effect = ConnectionError(
+          "rollout-0 connection refused on dispatch"
+      )
+
+      with self.assertRaisesRegex(
+          ConnectionError, "rollout-0 connection refused on dispatch"
+      ):
+        await engine.dispatch_rollouts(
+            [{"prompt": "p1", "prompt_id": "prompt_1"}],
+            num_generations=1,
+            policy_version=0,
+        )
+
+      # With enabled=False, rollout-0 is not evicted and mock_rollout_2 is not
+      # retried.
+      self.assertIn("rollout-0", engine._registry)
+      self.mock_rollout_1.sync_close.assert_not_called()
+      self.assertEqual(self.mock_rollout_1.generate.call_count, 1)
+      self.assertEqual(self.mock_rollout_2.generate.call_count, 0)
+      await engine.close()
 
     asyncio.run(_run())
 
