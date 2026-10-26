@@ -1,0 +1,100 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: TPU CI Queue & Runtime Monitor
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      window_hours:
+        description: 'Observation window in hours'
+        required: false
+        default: '24'
+      dry_run_alerts:
+        description: 'Skip creating/updating GitHub alert issues (true/false)'
+        required: false
+        default: 'false'
+  pull_request:
+    paths:
+      - '.github/workflows/tpu-ci-utilization.yml'
+      - 'scripts/tpu_ci_monitor.py'
+      - 'scripts/tpu_ci_alert.py'
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+concurrency:
+  group: tpu-ci-utilization-monitor-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  monitor-tpu-queues:
+    name: Analyze TPU Queue Timings & SLA
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Run TPU CI queue & runtime monitor
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          WINDOW_HOURS: ${{ inputs.window_hours || '24' }}
+        run: |
+          python3 scripts/tpu_ci_monitor.py \
+            --repo "${REPO}" \
+            --window-hours "${WINDOW_HOURS}" \
+            --markdown-output "tpu_ci_report.md" \
+            --json-output "tpu_ci_alert.json"
+          cat tpu_ci_report.md >> "${GITHUB_STEP_SUMMARY}"
+          python3 scripts/tpu_ci_alert.py --help > /dev/null
+
+      - name: Upload 35-day telemetry snapshot
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tpu-ci-telemetry
+          path: |
+            tpu_ci_report.md
+            tpu_ci_alert.json
+          retention-days: 35
+          if-no-files-found: ignore
+
+      - name: Synchronize P1 GitHub Alert Issue
+        if: ${{ always() && github.event_name != 'pull_request' && inputs.dry_run_alerts != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MONITOR_OUTCOME: ${{ job.status }}
+        run: |
+          python3 scripts/tpu_ci_alert.py \
+            --repo "${REPO}" \
+            --run-id "${RUN_ID}" \
+            --run-url "${RUN_URL}" \
+            --monitor-outcome "${MONITOR_OUTCOME}" \
+            --alert-json "tpu_ci_alert.json"
