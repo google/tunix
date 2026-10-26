@@ -27,7 +27,24 @@ from absl import logging
 import jax
 import jaxtyping
 from flax import nnx
-from tunix.rl import utils
+
+
+def _get_pytree_mesh_info(tree: jaxtyping.PyTree) -> jax.sharding.Mesh | None:
+  """Returns the mesh info for the pytree."""
+  mesh_info = set()
+
+  def _collect(leaf: jaxtyping.PyTree):
+    if isinstance(leaf, jax.Array) and getattr(leaf, 'sharding', None):
+      if isinstance(leaf.sharding, jax.sharding.NamedSharding):
+        mesh_info.add(leaf.sharding.mesh)
+    return leaf
+
+  jax.tree_util.tree_map(_collect, tree)
+  if len(mesh_info) > 1:
+    raise ValueError(
+        f'All leaves of the pytree must have the same mesh. Found: {mesh_info}'
+    )
+  return mesh_info.pop() if mesh_info else None
 
 # TODO(tsbao): move this to util
 def callback_on_ready(
@@ -263,7 +280,7 @@ def reshard_pytree(
 
 def reshard_model_to_mesh(model: nnx.Module, mesh: jax.sharding.Mesh):
   """Reshard the lora model if the mesh is specified and the lora model mesh is not the same as the input mesh."""
-  model_mesh = utils.get_pytree_mesh_info(nnx.state(model))
+  model_mesh = _get_pytree_mesh_info(nnx.state(model))
   if mesh is not None and model_mesh != mesh:
     with mesh:
       graph_def, state = nnx.split(model)
