@@ -25,6 +25,15 @@ dataclass = dataclasses.dataclass
 abstractmethod = abc.abstractmethod
 ABC = abc.ABC
 
+# Roles whose content may legitimately contain tool-call contract delimiters
+# (`<|tool_call>`, `<tool_call|>`). In multi-turn RL rollouts, previous
+# `assistant` turns contain the model's prior tool calls; stripping
+# `<|tool_call>` out of `assistant` history corrupts multi-turn context and
+# causes the model to omit `<|tool_call>` on subsequent turns via in-context
+# imitation. Turn/role injection tokens (`<|turn>`, `<turn|>`, `<|think|>`)
+# remain strictly sanitized for all roles.
+_AUTHORED_ROLES = frozenset({"system", "developer", "tool", "assistant"})
+
 
 @dataclass
 class TokenConfig:
@@ -56,21 +65,26 @@ class BaseChatTemplateParser(ABC):
     self.generation_prompt = self._init_generation_prompt()
     # message_separator is a per-turn formatting hint (e.g. "\n"), not a
     # control token; including it would strip every newline from message
-    # content. Similarly, tool_start_token and tool_end_token (e.g.
-    # "\n<tool_call>\n" and "\n</tool_call>") legitimately appear inside
-    # tool-use system prompts and assistant tool-call turns.
+    # content.
     self._tokens_to_sanitize = {
         v
         for k, v in dataclasses.asdict(self.tokens).items()
-        if k
-        not in (
-            "message_separator",
-            "tool_start_token",
-            "tool_end_token",
-        )
-        and isinstance(v, str)
-        and v
+        if k != "message_separator" and isinstance(v, str) and v
     }
+    # Delimiters that form the tool-call contract. These are exempted from
+    # sanitization for `_AUTHORED_ROLES` so instructions, tool feedback, and
+    # assistant history can show the policy the exact syntax it must produce.
+    self._contract_tokens = {
+        t
+        for t in (self.tokens.tool_start_token, self.tokens.tool_end_token)
+        if t
+    }
+
+  def _get_tokens_to_sanitize(self, role: str) -> set[str]:
+    """Returns the control tokens to sanitize for the given message role."""
+    if role in _AUTHORED_ROLES:
+      return self._tokens_to_sanitize - self._contract_tokens
+    return self._tokens_to_sanitize
 
   @abstractmethod
   def _init_tokens(self) -> TokenConfig:
@@ -123,14 +137,16 @@ class BaseChatTemplateParser(ABC):
   def _parse_message(self, message: Dict[str, str]) -> str:
     """Parse a single message based on its role."""
     role = message["role"]
+    tokens_to_sanitize = self._get_tokens_to_sanitize(role)
     content = token_sanitization.sanitize_control_tokens(
         message["content"],
-        extra_tokens=self._tokens_to_sanitize,
-        include_default=not self._tokens_to_sanitize,
+        extra_tokens=tokens_to_sanitize,
+        include_default=not tokens_to_sanitize,
     )
 
     parser_map = {
         "system": self._parse_system,
+        "developer": self._parse_system,
         "user": self._parse_user,
         "assistant": self._parse_assistant,
         "tool": self._parse_tool,
@@ -329,10 +345,11 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
     group = message.get("tool_group")
     if message["role"] != "tool" or not group:
       return super()._parse_message(message)
+    tokens_to_sanitize = self._get_tokens_to_sanitize(message["role"])
     content = token_sanitization.sanitize_control_tokens(
         message["content"],
-        extra_tokens=self._tokens_to_sanitize,
-        include_default=not self._tokens_to_sanitize,
+        extra_tokens=tokens_to_sanitize,
+        include_default=not tokens_to_sanitize,
     )
     block = (
         self.tokens.tool_response_start_token
@@ -442,13 +459,14 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
       enable_thinking: bool = True,
   ):
     super().__init__(tokenizer, enable_thinking=enable_thinking)
-    # Also sanitize the base <turn|> token (without trailing newline) to guard
-    # against model-generated control tokens trailing in message contents.
-    self._tokens_to_sanitize.add("<turn|>")
+    # Also sanitize standalone turn/think control tokens (even without trailing
+    # newlines or combined prefixes) to prevent role/turn injection across all
+    # roles.
+    self._tokens_to_sanitize.update(("<|turn>", "<turn|>", "<|think|>"))
 
   def _init_tokens(self) -> TokenConfig:
     return TokenConfig(
-        bos_token="<bos>",
+        bos_token="",
         eot_token="<turn|>\n",
         system_token=self._get_system_token(),
         user_token="<|turn>user\n",
@@ -483,13 +501,6 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
         prefix += "<|turn>system\n<|think|><turn|>\n"
     return prefix
 
-  def _parse_tool(self, content: str) -> str:
-    return (
-        self.tokens.tool_response_start_token
-        + content
-        + self.tokens.tool_response_end_token
-    )
-
   def _parse_system(self, content: str) -> str:
     return self.tokens.system_token + content.strip() + self.tokens.eot_token
 
@@ -502,13 +513,13 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
     # Historical thinking tokens are typically stripped per official Gemma 4
     # guidelines to match inference-time prompt formatting.
     cleaned_content = content.strip()
-    prefix = (
-        "<|turn>model\n"
-        if self.enable_thinking
-        else self.tokens.assistant_token
-    )
-    if cleaned_content.endswith("<turn|>"):
-      return prefix + cleaned_content + "\n"
+    if (
+        self.enable_thinking
+        and "<channel|>" in cleaned_content
+        and not cleaned_content.startswith("<|channel>thought")
+    ):
+      cleaned_content = f"<|channel>thought\n{cleaned_content}"
+    prefix = self.tokens.assistant_token
     return prefix + cleaned_content + self.tokens.eot_token
 
   def update_assistant_end_tokens(
@@ -516,7 +527,7 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
       tokens: np.ndarray,
   ) -> Tuple[np.ndarray, int]:
     """Ensures the assistant response ends with the correct tokens."""
-    # We append "\n" when pasing assistant message above so here we need to match the tokens with newline,
+    # We append "\n" when parsing assistant message above so here we need to match the tokens with newline,
     # otherwise there will be logprobs mismatch between rollout and trainer.
     tokens = np.concatenate(
         [tokens, np.array(self.newline_tokens, dtype=np.int32)], axis=0
