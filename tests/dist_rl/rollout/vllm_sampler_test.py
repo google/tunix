@@ -550,6 +550,63 @@ class VllmSamplerTest(absltest.TestCase):
     vllm_params = sampler._build_vllm_params(req, {})
     self.assertEqual(getattr(vllm_params, "cache_salt", None), "policy_v4")
 
+  def test_sample_forwards_cache_salt_for_string_and_token_prompts(self):
+    captured_prompts = []
+
+    async def mock_generate_stream(prompt, sampling_params, request_id):
+      del sampling_params, request_id
+      captured_prompts.append(prompt)
+      yield SimpleNamespace(
+          outputs=[
+              SimpleNamespace(
+                  text="ok",
+                  token_ids=[1],
+                  finish_reason="stop",
+                  logprobs=None,
+              )
+          ]
+      )
+
+    self.mock_engine.generate.side_effect = mock_generate_stream
+    reqs = [
+        base_sampler_lib.SamplingRequest(
+            request_id="turn0_str",
+            prompt="Turn 0 prompt string",
+            sampling_params=base_sampler_lib.SamplingParams(
+                max_tokens=16,
+                cache_salt="policy_v0",
+            ),
+        ),
+        base_sampler_lib.SamplingRequest(
+            request_id="turn1_tokens",
+            prompt=np.array([10, 20, 30], dtype=np.int32),
+            sampling_params=base_sampler_lib.SamplingParams(
+                max_tokens=16,
+                cache_salt="policy_v0",
+            ),
+        ),
+        base_sampler_lib.SamplingRequest(
+            request_id="unsalted_str",
+            prompt="Unsalted string prompt",
+            sampling_params=base_sampler_lib.SamplingParams(max_tokens=16),
+        ),
+        base_sampler_lib.SamplingRequest(
+            request_id="unsalted_tokens",
+            prompt=np.array([40, 50], dtype=np.int32),
+            sampling_params=base_sampler_lib.SamplingParams(max_tokens=16),
+        ),
+    ]
+    asyncio.run(self.sampler.sample(reqs))
+    self.assertEqual(
+        captured_prompts,
+        [
+            {"prompt": "Turn 0 prompt string", "cache_salt": "policy_v0"},
+            {"prompt_token_ids": [10, 20, 30], "cache_salt": "policy_v0"},
+            "Unsalted string prompt",
+            {"prompt_token_ids": [40, 50]},
+        ],
+    )
+
   def test_build_vllm_params_forwards_routed_experts_prompt_start(self):
     sampler = vllm_sampler.VllmSampler(engine_args=self.engine_args)
     req_params = SimpleNamespace(

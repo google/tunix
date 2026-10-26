@@ -42,6 +42,7 @@ from tunix.generate import utils as generate_utils
 if TYPE_CHECKING:
   from vllm.engine.arg_utils import AsyncEngineArgs
   from vllm.engine.async_llm_engine import AsyncLLMEngine
+  from vllm.inputs import TextPrompt, TokensPrompt
   from vllm.sampling_params import SamplingParams as VllmSamplingParams
 
 os.environ["VLLM_USE_V1"] = "0"
@@ -631,19 +632,34 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       vllm_params = self._build_vllm_params(req, kwargs)
       req_id = _get_val(req, "request_id") or f"req_{time.time_ns()}_{idx}"
       prompt_val = _get_val(req, "prompt")
+      param_cache_salt = getattr(vllm_params, "cache_salt", None)
+      engine_prompt: TextPrompt | TokensPrompt | str
+      expected_prompt_ids: list[int] | None
       if generate_utils.is_token_id_sequence(prompt_val):
-        expected_prompt_ids = (
-            np.asarray(prompt_val, dtype=np.int32).reshape(-1).tolist()
-        )
-        engine_prompt: Any = {"prompt_token_ids": expected_prompt_ids}
-        param_cache_salt = getattr(vllm_params, "cache_salt", None)
+        token_ids: list[int] = [
+            int(x)
+            for x in np.asarray(prompt_val, dtype=np.int32).reshape(-1).tolist()
+        ]
+        expected_prompt_ids = token_ids
         if param_cache_salt is not None:
-          engine_prompt["cache_salt"] = param_cache_salt
+          engine_prompt = {
+              "prompt_token_ids": token_ids,
+              "cache_salt": str(param_cache_salt),
+          }
+        else:
+          engine_prompt = {"prompt_token_ids": token_ids}
       else:
         expected_prompt_ids = None
-        engine_prompt = (
+        prompt_str = (
             prompt_val if isinstance(prompt_val, str) else str(prompt_val)
         )
+        if param_cache_salt is not None:
+          engine_prompt = {
+              "prompt": prompt_str,
+              "cache_salt": str(param_cache_salt),
+          }
+        else:
+          engine_prompt = prompt_str
 
       task_gen = self._engine.generate(
           engine_prompt, vllm_params, request_id=req_id

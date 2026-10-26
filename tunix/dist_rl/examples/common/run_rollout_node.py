@@ -59,6 +59,125 @@ CHAT_PARSERS = {
 DEFAULT_REGISTRY_MODULE = "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
 DEFAULT_ENV_NAME = "gsm8kenv"
 DEFAULT_AGENT_NAME = "gsm8kagent"
+_DEFAULT_INPROCESS_VLLM_HBM_UTILIZATION = 0.5
+
+# Keep in sync with every `AsyncEngineArgs` key set by CLI flags or rollout
+# invariants in `_create_vllm_sampler` (`hbm_utilization` is an alias guard for
+# `gpu_memory_utilization`).
+_FORBIDDEN_VLLM_CONFIG_JSON_KEYS = frozenset({
+    "model",
+    "tokenizer",
+    "tensor_parallel_size",
+    "data_parallel_size",
+    "max_model_len",
+    "max_num_seqs",
+    "max_num_batched_tokens",
+    "async_scheduling",
+    "enable_prefix_caching",
+    "gpu_memory_utilization",
+    "hbm_utilization",
+    "enable_return_routed_experts",
+    "hf_overrides",
+    "dtype",
+    "enable_lora",
+    "max_lora_rank",
+    "max_loras",
+    "max_logprobs",
+    "logprobs_mode",
+    "trust_remote_code",
+})
+
+# Keep in sync with CLI-flag-owned keys and rollout invariants in
+# `maxtext_utils.build_vllm_maxtext_additional_config`.
+_FORBIDDEN_MAXTEXT_CONFIG_JSON_KEYS = frozenset({
+    "model_name",
+    "model_call_mode",
+    "scan_layers",
+    "attention",
+    "prefuse_moe_weights",
+    "return_routed_experts",
+    "float32_gate_logits",
+    "float32_logits",
+})
+
+
+def _parse_vllm_config_json(
+    raw_json: str, *, has_maxtext_model: bool = True
+) -> dict[str, Any]:
+  """Parses and validates `--vllm_config_json` for `AsyncEngineArgs`.
+
+  Args:
+    raw_json: Raw JSON string passed to `--vllm_config_json`.
+    has_maxtext_model: Whether `--maxtext_model_name` is set for this run.
+
+  Returns:
+    A shallow copy of the validated top-level override dictionary (empty when
+    `raw_json` is blank).
+
+  Raises:
+    ValueError: If `raw_json` is invalid JSON, does not decode to a dict, sets
+      `maxtext_config` without `--maxtext_model_name`, or contains keys owned by
+      dedicated CLI flags or rollout contracts.
+  """
+  if not raw_json.strip():
+    return {}
+  try:
+    parsed = json.loads(raw_json)
+  except json.JSONDecodeError as exc:
+    raise ValueError(
+        "--vllm_config_json must be a valid JSON object."
+    ) from exc
+  if not isinstance(parsed, dict):
+    raise ValueError("--vllm_config_json must decode to a JSON object.")
+  forbidden = sorted(set(parsed) & _FORBIDDEN_VLLM_CONFIG_JSON_KEYS)
+  if forbidden:
+    raise ValueError(
+        "--vllm_config_json contains keys managed by dedicated CLI flags or"
+        f" rollout contracts: {forbidden}"
+    )
+  if "additional_config" in parsed:
+    additional = parsed["additional_config"]
+    if not isinstance(additional, dict):
+      raise ValueError(
+          "--vllm_config_json['additional_config'] must be a JSON object."
+      )
+    if "maxtext_config" in additional:
+      maxtext_cfg = additional["maxtext_config"]
+      if not isinstance(maxtext_cfg, dict):
+        raise ValueError(
+            "--vllm_config_json['additional_config']['maxtext_config'] must be"
+            " a JSON object."
+        )
+      if not has_maxtext_model:
+        raise ValueError(
+            "--vllm_config_json['additional_config']['maxtext_config'] requires"
+            " --maxtext_model_name to be set."
+        )
+      forbidden_mt = sorted(
+          set(maxtext_cfg) & _FORBIDDEN_MAXTEXT_CONFIG_JSON_KEYS
+      )
+      if forbidden_mt:
+        raise ValueError(
+            "--vllm_config_json['additional_config']['maxtext_config']"
+            " contains keys managed by dedicated CLI flags or rollout"
+            f" contracts: {forbidden_mt}"
+        )
+  return dict(parsed)
+
+
+def _merge_vllm_config_overrides(
+    engine_kwargs: dict[str, Any], overrides: dict[str, Any]
+) -> None:
+  """Merges validated `--vllm_config_json` overrides into `engine_kwargs`."""
+  overrides = dict(overrides)
+  json_add = dict(overrides.pop("additional_config", None) or {})
+  json_mt = json_add.pop("maxtext_config", None)
+  add = {**engine_kwargs.get("additional_config", {}), **json_add}
+  if json_mt is not None:
+    add["maxtext_config"] = {**add.get("maxtext_config", {}), **json_mt}
+  if add:
+    engine_kwargs["additional_config"] = add
+  engine_kwargs.update(overrides)
 
 
 def _import_vllm_sampler():
@@ -405,7 +524,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " active multi-turn episodes."
       ),
   )
-  parser.add_argument("--vllm_hbm_utilization", type=float, default=0.5)
+  parser.add_argument(
+      "--vllm_hbm_utilization",
+      type=float,
+      default=None,
+      help=(
+          "Fraction of HBM reserved for vLLM KV cache. When omitted,"
+          " --sampler=vllm defers to vLLM's native default, while"
+          " --sampler=inprocess_vllm defaults to 0.5."
+      ),
+  )
   parser.add_argument(
       "--vllm_init_with_random_weights",
       action=argparse.BooleanOptionalAction,
@@ -425,6 +553,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--vllm_max_num_batched_tokens", type=int, default=None)
   parser.add_argument("--vllm_max_model_len", type=int, default=None)
   parser.add_argument("--vllm_dtype", type=str, default="bfloat16")
+  parser.add_argument(
+      "--vllm_config_json",
+      type=str,
+      default=None,
+      help=(
+          "JSON object of additional AsyncEngineArgs kwargs (--sampler=vllm"
+          " only) for knobs without a dedicated CLI flag."
+      ),
+  )
   parser.add_argument(
       "--tensor_parallel_size",
       type=int,
@@ -461,6 +598,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Root directory for the file-backed TrajectoryStore.",
   )
   args = parser.parse_args(argv)
+  if args.vllm_config_json is not None:
+    if args.sampler != "vllm":
+      parser.error("--vllm_config_json is only supported when --sampler=vllm")
+    if not args.vllm_config_json.strip():
+      args.vllm_config_json = None
+    else:
+      try:
+        _parse_vllm_config_json(
+            args.vllm_config_json,
+            has_maxtext_model=bool(args.maxtext_model_name),
+        )
+      except ValueError as exc:
+        parser.error(str(exc))
   if args.return_routed_experts and args.sampler == "vanilla":
     parser.error(
         "--return_routed_experts needs a vLLM sampler; the vanilla sampler"
@@ -797,7 +947,11 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       return_logprobs=True,
       return_routed_experts=args.return_routed_experts,
       init_with_random_weights=args.vllm_init_with_random_weights,
-      hbm_utilization=args.vllm_hbm_utilization,
+      hbm_utilization=(
+          args.vllm_hbm_utilization
+          if args.vllm_hbm_utilization is not None
+          else _DEFAULT_INPROCESS_VLLM_HBM_UTILIZATION
+      ),
       lora_config=lora_config,
       mapping_config=mapping_config,
       additional_config=maxtext_additional_config,
@@ -867,7 +1021,7 @@ def _create_vllm_sampler(args, tokenizer):
   enable_prefix_caching = bool(
       args.enable_prefix_caching or partial_rollout
   )
-  engine_kwargs = dict(
+  engine_kwargs: dict[str, Any] = dict(
       model=vllm_model,
       tokenizer=args.tokenizer_path or vllm_model,
       tensor_parallel_size=tp_size,
@@ -886,6 +1040,8 @@ def _create_vllm_sampler(args, tokenizer):
   hf_overrides = _vllm_hf_overrides(args)
   if hf_overrides:
     engine_kwargs["hf_overrides"] = hf_overrides
+  if args.vllm_hbm_utilization is not None:
+    engine_kwargs["gpu_memory_utilization"] = args.vllm_hbm_utilization
   if args.vllm_max_num_seqs is not None:
     engine_kwargs["max_num_seqs"] = args.vllm_max_num_seqs
   if args.vllm_max_num_batched_tokens is not None:
@@ -908,6 +1064,14 @@ def _create_vllm_sampler(args, tokenizer):
             float32_gate_logits=args.maxtext_float32_gate_logits,
             float32_logits=args.maxtext_float32_logits,
         )
+    )
+  if args.vllm_config_json is not None:
+    _merge_vllm_config_overrides(
+        engine_kwargs,
+        _parse_vllm_config_json(
+            args.vllm_config_json,
+            has_maxtext_model=bool(args.maxtext_model_name),
+        ),
     )
   engine_args = AsyncEngineArgs(**engine_kwargs)  # type: ignore[arg-type]
   config = rollout_worker.RolloutConfig(
