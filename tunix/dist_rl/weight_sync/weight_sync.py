@@ -360,9 +360,11 @@ class WeightSyncSource(Protocol):
   Metadata is the return value of the per-round prepare call rather than a
   separately polled property. The same objects are registered and carried in
   the round's request, so a handler always sees the identity and placement
-  information for exactly the version that was prepared. A JAX/Raiden source
-  commonly rebinds new arrays and D2Hs here; a file handler may instead write
-  a checkpoint and return metadata naming that prepared artifact.
+  information for exactly the version that was prepared. Because the default
+  Raiden handler transfers with `skip_d2h=True`, a Raiden source must stage
+  host bytes (D2H) before `prepare_weight_sync` returns; a file handler may
+  instead write a checkpoint and return metadata naming that prepared
+  artifact.
   """
 
   async def prepare_weight_sync(

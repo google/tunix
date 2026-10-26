@@ -83,6 +83,9 @@ def make_host_staged_transfer_options(
 ) -> RaidenTransferOptions:
   """Transfer options for host-staged (CPU) weight sources.
 
+  The source has already staged logical bytes into host memory during
+  `prepare_weight_sync` (`d2h`), so `skip_d2h=True` prevents the transfer
+  phase from running a second device-to-host copy on temporary XLA buffers.
   The controller derives skip_tiling from slice geometry when none is
   given, marking aligned tensors as pre-tiled — but a host-staged source
   can only stage logical bytes, so the derived plan installs permuted
@@ -101,6 +104,7 @@ def make_host_staged_transfer_options(
   return RaidenTransferOptions(
       parallelism=parallelism,
       group_size=group_size,
+      skip_d2h=True,
       skip_tiling={i: False for i in range(max_layers)},
   )
 

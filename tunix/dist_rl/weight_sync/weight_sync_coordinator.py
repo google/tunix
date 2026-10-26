@@ -137,6 +137,9 @@ from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.worker import remote_execution
 
+_SOURCE_RELEASE_MAX_ATTEMPTS = 3
+_SOURCE_RELEASE_RETRY_BACKOFF_S = 0.05
+
 
 class NullHandler(weight_sync.WeightSyncHandler):
   """Runs every phase without moving bytes."""
@@ -1380,19 +1383,47 @@ class WeightSyncCoordinator:
     finally:
       if release_source:
         release_request = prepared_request or request
+
+        async def _release_one_source(wid: str, handle: Any) -> None:
+          for attempt in range(1, _SOURCE_RELEASE_MAX_ATTEMPTS + 1):
+            try:
+              await asyncio.wait_for(
+                  handle.asubmit("release_weight_sync", release_request),
+                  self._timeouts.release,
+              )
+              break
+            except (asyncio.CancelledError, TimeoutError):
+              # Do not retry timeouts: an unanswered release RPC may still be
+              # queued or executing on the source worker (and a late duplicate
+              # could overlap the next round's prepare), and retrying timeouts
+              # would multiply worst-case `finally:` latency by
+              # `_SOURCE_RELEASE_MAX_ATTEMPTS`.
+              raise
+            except Exception as e:  # pylint: disable=broad-except
+              if attempt == _SOURCE_RELEASE_MAX_ATTEMPTS:
+                raise
+              logging.warning(
+                  "source %s failed to release round %d staging (attempt"
+                  " %d/%d), retrying: %r",
+                  wid,
+                  round_index,
+                  attempt,
+                  _SOURCE_RELEASE_MAX_ATTEMPTS,
+                  e,
+              )
+              await asyncio.sleep(_SOURCE_RELEASE_RETRY_BACKOFF_S)
+
         # Shielded AND awaited to completion on cancellation. The shield
         # alone only stops the cancel from killing the release; the awaiting
         # coroutine still leaves immediately, so the release would run on
         # behind a round the caller already considers over -- overlapping the
         # next round's prepare, or a close() that frees what it is reading.
+        # Because `TimeoutError` is not retried, worst-case wait here is
+        # typically bounded to one `timeouts.release` deadline (or up to
+        # `_SOURCE_RELEASE_MAX_ATTEMPTS * timeouts.release` plus backoff if
+        # every attempt fails late with a non-timeout transport error).
         release_gather = asyncio.gather(
-            *[
-                asyncio.wait_for(
-                    handle.asubmit("release_weight_sync", release_request),
-                    self._timeouts.release,
-                )
-                for _, handle in sources
-            ],
+            *[_release_one_source(wid, handle) for wid, handle in sources],
             return_exceptions=True,
         )
         try:

@@ -190,6 +190,7 @@ class NeutralContractTest(absltest.TestCase):
     self.assertFalse(hasattr(weight_sync, "RaidenHandler"))
     self.assertFalse(hasattr(weight_sync, "RaidenTransferOptions"))
     self.assertFalse(hasattr(weight_sync, "raiden_controller"))
+    self.assertFalse(hasattr(weight_sync, "create_weight_synchronizer"))
 
 
 class MockVllmSampler(base_sampler.BaseSampler):

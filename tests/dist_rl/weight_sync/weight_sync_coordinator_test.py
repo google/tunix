@@ -92,6 +92,7 @@ class FakeSource:
     self.port = 20000
     self.prepare_calls = 0
     self.release_calls = 0
+    self.release_failures_remaining = 0
 
   def info(self) -> datatypes.WorkerInfo:
     return self._info
@@ -126,6 +127,11 @@ class FakeSource:
   async def release_weight_sync(self, sync_request: Any = None, **kwargs):
     del sync_request, kwargs
     self._log.append(f"{self._info.worker_id}:release-start")
+    if self.release_failures_remaining > 0:
+      self.release_failures_remaining -= 1
+      raise ConnectionResetError(
+          f"{self._info.worker_id}: transient release failure"
+      )
     if self.release_gate is not None:
       self.release_entered.set()
       await self.release_gate.wait()
@@ -549,6 +555,48 @@ class SuccessPathTest(CoordinatorTestBase):
     self.sync()
 
     self.assertEqual(self.sources[0].release_calls, 1)
+
+  def test_source_release_retries_on_transient_failure(self):
+    dest = FakeDestination("sampler", [])
+    self.make(dest)
+    self.sources[0].release_failures_remaining = 2
+
+    self.sync()
+
+    self.assertEqual(self.sources[0].release_calls, 1)
+    self.assertEqual(self.log.count("trainer:release-start"), 3)
+
+  def test_source_release_caps_retries_and_still_commits(self):
+    dest = FakeDestination("sampler", [])
+    self.make(dest)
+    self.sources[0].release_failures_remaining = 5
+
+    result = self.sync()
+
+    self.assertTrue(result.success)
+    self.assertEqual(self.sources[0].release_calls, 0)
+    self.assertEqual(self.log.count("trainer:release-start"), 3)
+
+  def test_source_release_does_not_retry_timeout(self):
+    dest = FakeDestination("sampler", [])
+    self.make(
+        dest,
+        timeouts=dataclasses.replace(FAST_TIMEOUTS, release=0.05),
+    )
+
+    async def _run():
+      self.sources[0].release_gate = asyncio.Event()
+      self.sources[0].release_entered = asyncio.Event()
+      try:
+        return await self.coordinator.sync(policy_version=1)
+      finally:
+        self.sources[0].release_gate.set()
+
+    result = asyncio.run(_run())
+
+    self.assertTrue(result.success)
+    self.assertEqual(self.sources[0].release_calls, 0)
+    self.assertEqual(self.log.count("trainer:release-start"), 1)
 
   def test_fresh_req_id_and_uuid_even_for_the_same_policy_version(self):
     dest = FakeDestination("sampler", [])
