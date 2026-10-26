@@ -54,12 +54,20 @@ TConfig = TypeVar("TConfig", bound=algo_config_lib.AlgorithmConfig)
 class RLLearner(abc.ABC, Generic[TConfig]):
   """Base class that should be extended by specific RL algorithms."""
 
+  def _uses_reward_model(self) -> bool:
+    """Returns True if this learner scores completions via a reward model."""
+    return (
+        self.algo_config.algo_variant == "ppo"
+        and "reward" in self.rl_engine.inference_worker._models
+        and self.rl_engine.inference_worker._models["reward"] is not None
+    )
+
   @compat.alias_init_param("rl_cluster", "rl_engine")
   def __init__(
       self,
       rl_engine: rl_engine_lib.RLEngine,
       algo_config: TConfig,
-      reward_fns: RewardFn | List[RewardFn],
+      reward_fns: RewardFn | Sequence[RewardFn] | None,
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
   ):
@@ -69,10 +77,13 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       rl_engine: RL engine containing actor, reference and reward models.
       algo_config: An instance of `AlgorithmConfig` containing all
         training-specific configuration options.
-      reward_fns: A single callable or a list of callables that compute a scalar
-        reward for given prompts and completions. Each function should accept
-        `prompts`, `completions` and optional keyword arguments, and return a
-        list of float rewards.
+      reward_fns: A single callable or a sequence of callables that compute a
+        scalar reward for given prompts and completions. Each function should
+        accept `prompts`, `completions` and optional keyword arguments, and
+        return a list of float rewards. Pass `None` when rewards are supplied
+        externally (e.g. `agentic-sequence-level` trajectory rewards) or when
+        the learner scores completions with a reward model on `rl_engine`
+        instead (e.g. `PPOLearner`).
       metric_fns: A sequence of callables that compute metrics for the
         completions. Each callable should accept `prompts`, `completions`,
         `rewards`, `advantages` and optional keyword arguments, and return a
@@ -85,13 +96,15 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     self.rl_engine = rl_engine
     self.algo_config = algo_config
 
-    reward_manager_fn = function_registry.get_reward_manager(
-        algo_config.reward_manager
-    )
-    self.reward_manager = reward_manager_fn(
-        reward_fns=reward_fns,
-        algo_config=algo_config,
-    )
+    self.reward_manager: reward_manager.AbstractRewardManager | None = None
+    if not (reward_fns is None and self._uses_reward_model()):
+      reward_manager_fn = function_registry.get_reward_manager(
+          algo_config.reward_manager
+      )
+      self.reward_manager = reward_manager_fn(
+          reward_fns=reward_fns,
+          algo_config=algo_config,
+      )
 
     self.metric_fns = metric_fns or []
     self.rl_engine.actor_trainer.is_managed_externally = True
@@ -210,10 +223,17 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       provided reward functions.
 
     Raises:
-        RuntimeError: If 'r' reward is None, indicating a failure to obtain the
+      ValueError: If `self.reward_manager` is None or if `kwargs` already
+        contains `mode` as a key.
+      RuntimeError: If 'r' reward is None, indicating a failure to obtain the
         result, or if the length of 'r' reward does not match the length of
         'prompts'.
     """
+    if self.reward_manager is None:
+      raise ValueError(
+          "reward_manager is not initialized because this learner uses a"
+          " reward model instead of reward_fns."
+      )
     if "mode" in kwargs:
       raise ValueError(f"kwargs already contains mode as a key: {kwargs}")
     kwargs["mode"] = str(mode)

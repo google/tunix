@@ -170,6 +170,79 @@ class RLLearnerTest(parameterized.TestCase):
 
     mock_engine.close.assert_called_once()
 
+  @parameterized.parameters(([],), (None,))
+  def test_empty_or_none_reward_fns_fails_fast_for_sequence_level(
+      self, empty_fns
+  ):
+    config = rl_engine_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        eval_every_n_steps=1,
+        max_steps=1,
+    )
+    mock_engine = mock.MagicMock()
+    mock_engine.actor_trainer.model = DummyModel()
+    mock_engine.rollout.model.return_value = DummyModel()
+    mock_engine.cluster_config.training_config = config
+
+    with self.assertRaisesRegex(ValueError, 'reward_fns cannot be empty'):
+      DummyLearner(
+          rl_engine=mock_engine,
+          algo_config=DummyConfig(),
+          reward_fns=empty_fns,
+      )
+
+  def test_agentic_sequence_level_with_reward_fns_none_builds_manager(self):
+    config = rl_engine_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        eval_every_n_steps=1,
+        max_steps=1,
+    )
+    mock_engine = mock.MagicMock()
+    mock_engine.actor_trainer.model = DummyModel()
+    mock_engine.rollout.model.return_value = DummyModel()
+    mock_engine.cluster_config.training_config = config
+
+    learner = DummyLearner(
+        rl_engine=mock_engine,
+        algo_config=DummyConfig(reward_manager='agentic-sequence-level'),
+        reward_fns=None,
+    )
+    self.assertIsNotNone(learner.reward_manager)
+    rewards = learner._compute_rewards(
+        prompts=['p'],
+        completions=['c'],
+        mode=rl_engine_lib.Mode.TRAIN,
+        trajectory_rewards=[3.5],
+    )
+    self.assertEqual(list(rewards), [3.5])
+
+  def test_use_reward_model_skips_reward_manager_and_fails_on_compute(self):
+    config = rl_engine_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        eval_every_n_steps=1,
+        max_steps=1,
+    )
+    mock_engine = mock.MagicMock()
+    mock_engine.actor_trainer.model = DummyModel()
+    mock_engine.rollout.model.return_value = DummyModel()
+    mock_engine.cluster_config.training_config = config
+    mock_engine.inference_worker._models = {'reward': DummyModel()}
+
+    learner = DummyLearner(
+        rl_engine=mock_engine,
+        algo_config=DummyConfig(algo_variant='ppo'),
+        reward_fns=None,
+    )
+    self.assertIsNone(learner.reward_manager)
+    with self.assertRaisesRegex(
+        ValueError, 'reward_manager is not initialized'
+    ):
+      learner._compute_rewards(
+          prompts=['p'],
+          completions=['c'],
+          mode=rl_engine_lib.Mode.TRAIN,
+      )
+
 
 if __name__ == '__main__':
   absltest.main()
