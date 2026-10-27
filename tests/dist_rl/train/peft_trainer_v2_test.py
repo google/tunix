@@ -762,6 +762,42 @@ class PeftTrainerTest(parameterized.TestCase):
         force=True,
     )
 
+  @mock.patch.object(checkpoint_manager, 'CheckpointManager')
+  def test_save_checkpoint_explicit_step_overrides_metadata_step(
+      self, mock_checkpoint_manager_init
+  ):
+    mock_cm = mock.MagicMock()
+    mock_checkpoint_manager_init.return_value = mock_cm
+    mock_cm.maybe_restore.return_value = (0, {})
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=1000,
+        checkpoint_root_directory='/tmp/checkpoint',
+        checkpointing_options=ocp.CheckpointManagerOptions(),
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    custom_metadata = {'step': 25, 'policy_version': 3}
+    trainer.save_checkpoint(metadata=custom_metadata, step=30)
+
+    mock_cm.save.assert_called_once_with(
+        30,
+        trainer.model,
+        trainer.optimizer,
+        save_only_lora_params=False,
+        force=False,
+        custom_metadata=custom_metadata,
+    )
+
+  def test_save_checkpoint_rejects_undeclared_options(self):
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=1000)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    with self.assertRaises(TypeError):
+      trainer.save_checkpoint(  # pylint: disable=unexpected-keyword-arg
+          metadata={'step': 1}, checkpoint_directory='/somewhere/else'
+      )
+
   def _external_resume_trainer(
       self, root, *, implicit_resume, gradient_accumulation_steps=None
   ):

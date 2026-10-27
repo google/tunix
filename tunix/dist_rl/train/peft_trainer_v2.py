@@ -1345,7 +1345,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if metadata is None:
       metadata = self.custom_checkpoint_metadata()
     if step is None:
-      if isinstance(metadata, (dict, Mapping)):
+      if isinstance(metadata, Mapping):
         step = metadata.get("step")
       elif hasattr(metadata, "step"):
         step = getattr(metadata, "step")
@@ -1364,7 +1364,14 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   @override
   def restore_checkpoint(self, step: int | None = None) -> Any:
-    """Restores model, optimizer and step count from a checkpoint."""
+    """Restores model, optimizer and step count from a checkpoint.
+
+    Args:
+      step: Checkpoint step to restore. If None, restores the latest one.
+
+    Returns:
+      The restored custom metadata, with `step` set to the restored step.
+    """
     self._train_steps, self._restored_custom_metadata = (
         self.checkpoint_manager.maybe_restore(
             self.model,

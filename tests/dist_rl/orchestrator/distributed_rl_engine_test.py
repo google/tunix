@@ -451,6 +451,17 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_train_step_rejects_undeclared_options(self):
+    async def _run():
+      mock_payload = mock.MagicMock(spec=datatypes.RLTrainerPayload)
+      with self.assertRaises(TypeError):
+        await self.engine.train_step(  # pylint: disable=unexpected-keyword-arg
+            mock_payload, skip_jit=True
+        )
+      self.mock_actor.fwd_bwd.assert_not_called()
+
+    asyncio.run(_run())
+
   def test_save_checkpoint_propagates_step_kwarg_without_metadata(self):
     async def _run():
       self.mock_actor.save_checkpoint.return_value = datatypes.Response(

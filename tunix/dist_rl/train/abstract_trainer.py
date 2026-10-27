@@ -178,7 +178,7 @@ class AbstractTrainer(abc.ABC):
   @abc.abstractmethod
   def save_checkpoint(
       self,
-      metadata: Any,
+      metadata: Any = None,
       *,
       step: int | None = None,
       force: bool = False,
@@ -187,7 +187,7 @@ class AbstractTrainer(abc.ABC):
 
     Checkpoint cadence/policy is the caller's responsibility.
     Args:
-      metadata: The metadata pytree to save alongside the checkpoint.
+      metadata: The metadata pytree to save alongside the checkpoint, if any.
       step: The step to save under. If None, implementations use
         `metadata["step"]` when present, else their current train step.
       force: Save even if the checkpoint manager's save policy (e.g. a save

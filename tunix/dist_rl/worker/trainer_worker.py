@@ -437,7 +437,7 @@ class TrainerWorker(abstract_worker.Worker):
   @_offload_to_thread
   def save_checkpoint(
       self,
-      metadata: Any,
+      metadata: Any = None,
       *,
       step: int | None = None,
       force: bool = False,
