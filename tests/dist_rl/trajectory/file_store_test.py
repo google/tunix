@@ -112,6 +112,36 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     metas = self.file_s.get_trajectories_metadata()
     self.assertEqual(metas, [trajectory_testing.METADATA_1])
 
+  def test_get_trajectories_metadata_lists_in_sorted_order(self) -> None:
+    """Verifies trajectories are listed in deterministic natural sorted ID order."""
+    meta_10 = trajectory_testing.METADATA_1.model_copy(
+        update={"trajectory_id": "traj_10_g0"}
+    )
+    meta_2 = trajectory_testing.METADATA_1.model_copy(
+        update={"trajectory_id": "traj_2_g0"}
+    )
+    meta_1 = trajectory_testing.METADATA_1.model_copy(
+        update={"trajectory_id": "traj_1_g0"}
+    )
+    self.file_s.update_metadata(meta_10)
+    self.file_s.update_metadata(meta_1)
+    self.file_s.update_metadata(meta_2)
+    self.file_s.flush()
+
+    metas = self.file_s.get_trajectories_metadata()
+    self.assertEqual(
+        [m.trajectory_id for m in metas],
+        ["traj_1_g0", "traj_2_g0", "traj_10_g0"],
+    )
+
+  def test_natural_sort_key(self) -> None:
+    """Verifies natural sort key handles non-zero-padded numeric components."""
+    unsorted = ["traj_10_g0", "traj_2_g0", "traj_1_g0", "traj_100_g0"]
+    self.assertEqual(
+        sorted(unsorted, key=file_store._natural_sort_key),
+        ["traj_1_g0", "traj_2_g0", "traj_10_g0", "traj_100_g0"],
+    )
+
   def test_skips_files_matching_trajectory_dir_prefix(self) -> None:
     """Verifies files matching the trajectory directory prefix are skipped during metadata listing."""
     self.file_s.add_step(

@@ -69,6 +69,10 @@ class ParseArgsTest(absltest.TestCase):
     config = _parse_cmd("summary")
     self.assertIsInstance(config.cmd, summary.SummaryCommand)
 
+  def test_subcommand_summary_with_limit(self) -> None:
+    config = _parse_cmd("summary --limit 5")
+    self.assertEqual(config.cmd, summary.SummaryCommand(limit=5))
+
   def test_subcommand_show_with_its_own_flags(self) -> None:
     config = _parse_cmd("show --trajectory_id t1 --max_chars 0")
     self.assertEqual(

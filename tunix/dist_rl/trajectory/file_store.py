@@ -68,6 +68,11 @@ def _validate_trajectory_id(trajectory_id: str | None) -> str:
   return trajectory_id
 
 
+def _natural_sort_key(s: str) -> list[int | str]:
+  """Splits text into alternating string and integer tokens for natural order."""
+  return [int(p) if p.isdigit() else p for p in re.split(r"(\d+)", s)]
+
+
 def _dump_json(model: pydantic.BaseModel) -> str:
   """Serializes a Pydantic model to compact JSON excluding None values.
 
@@ -546,13 +551,19 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         stay alive until the returned iterator is exhausted.
 
     Returns:
-      An iterator over the trajectory IDs, in the order that
-      `root_dir.iterdir()` lists them.
+      An iterator over the trajectory IDs, sorted naturally by trajectory ID.
     """
+    matched_entries = sorted(
+        (
+            (match.group("trajectory_id"), entry)
+            for entry in self.root_dir.iterdir()
+            if (match := _TRAJECTORY_DIR_REGEX.match(entry.name))
+        ),
+        key=lambda pair: _natural_sort_key(pair[0]),
+    )
     candidates = [
-        (match.group("trajectory_id"), executor.submit(entry.is_dir))
-        for entry in self.root_dir.iterdir()
-        if (match := _TRAJECTORY_DIR_REGEX.match(entry.name))
+        (trajectory_id, executor.submit(entry.is_dir))
+        for trajectory_id, entry in matched_entries
     ]
     return (
         trajectory_id
