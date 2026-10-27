@@ -230,11 +230,8 @@ class FaultToleranceConfig:
       worker, and an evicted worker whose process is still alive never
       re-registers (rollout workers register with discovery only once at
       startup), so a transient fault on a healthy worker permanently shrinks the
-      rollout pool. Until dynamic worker rejoin lands, an evicted worker's id is
-      also rejected if it tries to re-register
-      (`WorkerRegistry.unregister_handle`), so a restarted worker never receives
-      tasks without bring-up and weight sync. When `False`, fault tolerance is
-      disabled and `effective_max_task_retries` is `0`.
+      rollout pool. When `False`, fault tolerance is disabled and
+      `effective_max_task_retries` is `0`.
     max_task_retries: Maximum number of times an in-flight task is re-dispatched
       onto surviving workers after a worker failure when `enabled=True`. Because
       each send-path or poll-path transport failure evicts the failing worker in
@@ -247,6 +244,11 @@ class FaultToleranceConfig:
       `effective_poll_retry_budget_s` resolves to `60.0` when `enabled=True`
       (gRPC keepalive ~30s plus margin) and `300.0` when `enabled=False`
       (matching `TaskSession`'s default budget).
+    max_weight_sync_retries: Maximum number of times a failed weight sync round
+      is re-run; defaults to `1`. Applies regardless of `enabled`: failed
+      destinations are evicted before the re-run, but when `enabled=False` only
+      unpromoted `PENDING_WEIGHT_SYNC` destinations are evicted and any `ACTIVE`
+      destination failure still fails the round.
   """
 
   # TODO(b/577214994): Change `enabled` default to `True` once dispatch failure
@@ -254,6 +256,7 @@ class FaultToleranceConfig:
   enabled: bool = False
   max_task_retries: int = 1
   poll_retry_budget_s: float | None = None
+  max_weight_sync_retries: int = 1
 
   def __post_init__(self) -> None:
     if self.max_task_retries < 0:
@@ -263,6 +266,11 @@ class FaultToleranceConfig:
     if self.poll_retry_budget_s is not None and self.poll_retry_budget_s < 0.0:
       raise ValueError(
           f"poll_retry_budget_s must be >= 0, got {self.poll_retry_budget_s}"
+      )
+    if self.max_weight_sync_retries < 0:
+      raise ValueError(
+          "max_weight_sync_retries must be >= 0, got"
+          f" {self.max_weight_sync_retries}"
       )
 
   @property

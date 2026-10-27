@@ -35,12 +35,19 @@ from tunix.dist_rl.common import logging_utils
 from tunix.dist_rl.metrics import metrics as exp_metrics
 from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
+from tunix.dist_rl.orchestrator import fault_tolerance_manager as fault_tolerance_manager_lib
 from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import task_session
 
 _summarize_list = logging_utils.summarize_list
+
+# Weight sync pushes to serving workers and to late joiners awaiting first sync.
+_WEIGHT_SYNC_DESTINATION_STATUSES = (
+    worker_registry.AdmissionStatus.ACTIVE,
+    worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+)
 
 
 def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
@@ -81,43 +88,34 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       registry: worker_registry.WorkerRegistry,
       weight_sync_coordinator: Any = None,
       *,
-      fault_tolerance_config: datatypes.FaultToleranceConfig | None = None,
+      fault_tolerance_manager: (
+          fault_tolerance_manager_lib.FaultToleranceManager | None
+      ) = None,
   ):
     self._registry = registry
-    ft_cfg = fault_tolerance_config or datatypes.FaultToleranceConfig()
-    self._fault_tolerance_config = ft_cfg
+    self._fault_tolerance_manager = (
+        fault_tolerance_manager
+        or fault_tolerance_manager_lib.FaultToleranceManager(registry)
+    )
     self._rollout_session = task_session.TaskSession(
         self._rollout_handles,
-        poll_retry_budget_s=ft_cfg.effective_poll_retry_budget_s,
-        fault_tolerance_config=task_session.TaskSessionFaultToleranceConfig(
-            max_task_retries=ft_cfg.effective_max_task_retries,
-            on_worker_unreachable=(
-                self._on_worker_unreachable if ft_cfg.enabled else None
-            ),
+        poll_retry_budget_s=(
+            self._fault_tolerance_manager.config.effective_poll_retry_budget_s
+        ),
+        fault_tolerance_config=(
+            self._fault_tolerance_manager.task_session_fault_tolerance_config()
         ),
     )
     self._policy_version = 0
     self._weight_sync_coordinator = weight_sync_coordinator
-    self._restored_checkpoint_metadata: dict[str, Any] | None = None
-
-  def _on_worker_unreachable(
-      self,
-      handle: remote_execution.ActorHandle,
-      exc: Exception,
-  ) -> None:
-    """Evicts an unreachable worker handle from the control-plane registry."""
-    # TODO(b/577214994): Track and log worker failure counts (total failure
-    # events and distinct failed workers), report the percentage of failed
-    # workers to the user, and add `terminate_on_worker_failure_percent` to
-    # fail the job when the failed worker ratio reaches the configured
-    # threshold.
-    worker_id = self._registry.unregister_handle(handle)
-    if worker_id is not None:
-      logging.warning(
-          "Evicted unreachable worker %r from WorkerRegistry: %s",
-          worker_id,
-          exc,
+    if self._weight_sync_coordinator is not None:
+      recovery = self._fault_tolerance_manager.weight_sync_recovery()
+      self._weight_sync_coordinator.configure_fault_tolerance(
+          max_retries=recovery.max_retries,
+          on_worker_unreachable=recovery.on_worker_unreachable,
+          evictable_statuses=recovery.evictable_statuses,
       )
+    self._restored_checkpoint_metadata: dict[str, Any] | None = None
 
   def _rollout_handles(self) -> list[remote_execution.ActorHandle]:
     return self._registry.handles(datatypes.Role.ROLLOUT)
@@ -720,8 +718,23 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         next_policy_version,
     )
     result = await self._weight_sync_coordinator.sync(
-        policy_version=next_policy_version
+        policy_version=next_policy_version,
+        destination_statuses=_WEIGHT_SYNC_DESTINATION_STATUSES,
     )
+    for r in result.workers:
+      if r.phase != "committed":
+        continue
+      if self._registry.set_status(
+          r.worker_id,
+          worker_registry.AdmissionStatus.ACTIVE,
+          expected_handle=r.handle,
+          expected_status=worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+      ):
+        logging.info(
+            "Promoted synced rollout worker %r to %s.",
+            r.worker_id,
+            worker_registry.AdmissionStatus.ACTIVE.value,
+        )
     self._policy_version = result.policy_version
     logging.info(
         "Weight synchronization complete (policy_version=%d).",

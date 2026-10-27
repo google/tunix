@@ -220,6 +220,16 @@ def _grpc_channel_options(
   ]
 
 
+def _grpc_server_options(
+    max_message_bytes: int = _MAX_MESSAGE_BYTES,
+) -> List[Tuple[str, int]]:
+  """Server options disabling SO_REUSEPORT so duplicate port binds fail fast."""
+  return [
+      *_grpc_options(max_message_bytes),
+      ("grpc.so_reuseport", 0),
+  ]
+
+
 def _validate_stream_config(
     stream_chunk_bytes: int, max_message_bytes: int
 ) -> None:
