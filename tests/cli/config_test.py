@@ -226,6 +226,19 @@ class ConfigTest(parameterized.TestCase):
       hp = self.initialize_config(overrides)
       hp.create_optimizer("optimizer_config")
 
+  def test_create_optimizer_rejects_unknown_schedule_type(self):
+    with self.assertRaisesRegex(
+        AttributeError, "'not_a_schedule' is not a valid function"
+    ):
+      config.create_optimizer(
+          {
+              "opt_type": "adamw",
+              "learning_rate": 1e-5,
+              "schedule_type": "not_a_schedule",
+          },
+          "test_config_path",
+      )
+
   def test_create_optimizer_prefers_schedule_over_scalar_learning_rate(self):
     """A configured schedule wins over a scalar `learning_rate` in the block."""
     hp = self.initialize_config([
