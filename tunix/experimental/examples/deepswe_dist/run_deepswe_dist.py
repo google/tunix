@@ -463,6 +463,7 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       seq_logprob_error_threshold=args.seq_logprob_error_threshold,
       routed_experts_encode_mode=args.routed_experts_encode_mode,
       routed_experts_num_experts=args.routed_experts_num_experts,
+      reward_mode="env",
   )
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,

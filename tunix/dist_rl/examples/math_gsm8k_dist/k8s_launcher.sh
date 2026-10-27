@@ -247,6 +247,7 @@ start_orchestrator() {
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --flush_metrics_every_n_steps=${FLUSH_METRICS_EVERY_N_STEPS} \
         --max_staleness=${MAX_STALENESS} \
+        --reward_mode=${REWARD_MODE} \
         --trajectory_group_order=${TRAJECTORY_GROUP_ORDER} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         --trainer_precompile=${TRAINER_PRECOMPILE} \

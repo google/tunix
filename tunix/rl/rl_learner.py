@@ -37,7 +37,6 @@ from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
 from tunix.utils import compat
 
-
 ABC = abc.ABC
 abstractmethod = abc.abstractmethod
 
@@ -81,9 +80,9 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         scalar reward for given prompts and completions. Each function should
         accept `prompts`, `completions` and optional keyword arguments, and
         return a list of float rewards. Pass `None` when rewards are supplied
-        externally (e.g. `agentic-sequence-level` trajectory rewards) or when
-        the learner scores completions with a reward model on `rl_engine`
-        instead (e.g. `PPOLearner`).
+        externally (e.g. `reward_mode='env'` trajectory rewards) or when the
+        learner scores completions with a reward model on `rl_engine` instead
+        (e.g. `PPOLearner`).
       metric_fns: A sequence of callables that compute metrics for the
         completions. Each callable should accept `prompts`, `completions`,
         `rewards`, `advantages` and optional keyword arguments, and return a
@@ -99,7 +98,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     self.reward_manager: reward_manager.AbstractRewardManager | None = None
     if not (reward_fns is None and self._uses_reward_model()):
       reward_manager_fn = function_registry.get_reward_manager(
-          algo_config.reward_manager
+          algo_config.reward_mode
       )
       self.reward_manager = reward_manager_fn(
           reward_fns=reward_fns,

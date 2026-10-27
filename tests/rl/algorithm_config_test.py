@@ -17,6 +17,7 @@ from absl.testing import parameterized
 from tunix.rl import algorithm_config
 from tunix.rl import function_registry
 
+
 class AlgorithmConfigTest(parameterized.TestCase):
 
   def test_defaults_are_valid(self):
@@ -26,6 +27,7 @@ class AlgorithmConfigTest(parameterized.TestCase):
       self.assertEqual(config.algo_variant, "grpo")
       self.assertEqual(config.advantage_estimator, "grpo")
       self.assertEqual(config.policy_loss_fn, "grpo")
+      self.assertEqual(config.reward_mode, "reward_fn")
     except ValueError as e:
       self.fail(f"Default AlgorithmConfig values raised ValueError: {e}")
 
@@ -98,6 +100,40 @@ class AlgorithmConfigTest(parameterized.TestCase):
         "policy_loss_fn must be one of .* Received: .*",
     ):
       algorithm_config.AlgorithmConfig(policy_loss_fn=value)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="reward_fn", value="reward_fn"),
+      dict(testcase_name="env", value="env"),
+  )
+  def test_valid_reward_mode(self, value: str):
+    config = algorithm_config.AlgorithmConfig(reward_mode=value)
+    self.assertEqual(config.reward_mode, value)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="unknown", value="invalid_mode"),
+      # Legacy keys removed when `reward_manager` was renamed to `reward_mode`.
+      dict(testcase_name="legacy_sequence_level", value="sequence-level"),
+      dict(
+          testcase_name="legacy_agentic_sequence_level",
+          value="agentic-sequence-level",
+      ),
+  )
+  def test_invalid_reward_mode(self, value: str):
+    with self.assertRaisesRegex(
+        ValueError,
+        f"reward_mode must be one of .* Received: {value!r}",
+    ):
+      algorithm_config.AlgorithmConfig(reward_mode=value)
+
+  def test_reward_mode_accepts_custom_registered_manager(self):
+    """Verifies `reward_mode` falls back to `function_registry` lookups."""
+    function_registry.register_reward_manager("chicken_reward_custom_789")(
+        lambda *args, **kwargs: None
+    )
+    config = algorithm_config.AlgorithmConfig(
+        reward_mode="chicken_reward_custom_789"
+    )
+    self.assertEqual(config.reward_mode, "chicken_reward_custom_789")
 
   def test_kw_only_enforcement(self):
     """Ensures that positional arguments are not allowed."""

@@ -57,7 +57,7 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
   advantage_estimator: str = "grpo"
   policy_loss_fn: str = "grpo"
   loss_agg_mode: str = "token-mean"
-  reward_manager: str = "sequence-level"
+  reward_mode: str = "reward_fn"
   num_generations: int = 2
   num_iterations: int = 1
   beta: float = 0.0  # No KL term.

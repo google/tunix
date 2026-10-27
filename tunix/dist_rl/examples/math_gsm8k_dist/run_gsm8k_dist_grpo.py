@@ -171,11 +171,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument(
       "--reward_mode",
-      choices=("env", "exact"),
+      choices=("env", "reward_fn"),
       default="env",
       help=(
-          "env uses rollout environment rewards; exact recomputes the same "
-          "GSM8K reward in the orchestrator from returned trajectory text."
+          "Reward mode. 'env' uses rollout environment trajectory rewards; "
+          "'reward_fn' evaluates orchestrator reward_fns."
       ),
   )
   parser.add_argument(
@@ -311,11 +311,13 @@ def _trajectory_store_config(
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
+  """Builds the GRPO algorithm adapter from CLI arguments."""
   algo_config = algorithm_config.GRPOConfig(
       num_generations=args.num_generations,
       epsilon=args.epsilon,
       beta=args.beta,
       use_rollout_logps=args.use_rollout_logps,
+      reward_mode=args.reward_mode,
   )
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,
@@ -495,7 +497,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
   reward_fns = (
       [gsm8k.make_gsm8k_reward_fn(debug=args.debug)]
-      if args.reward_mode == "exact"
+      if args.reward_mode == "reward_fn"
       else []
   )
   generation_args = datatypes.GenerationArgs(

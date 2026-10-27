@@ -33,7 +33,6 @@ from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import rl_learner
 from tunix.utils import compat
 
-
 TrainingInputT = rl_learner.TrainingInputT
 RewardFn = rl_learner.RewardFn
 MetricFn = rl_learner.MetricFn
@@ -54,7 +53,7 @@ class PPOConfig(algo_config_lib.AlgorithmConfig):
     algo_variant: The algorithm variant to use. Default: `ppo`.
     advantage_estimator: The advantage estimator to use. Default: `gae`.
     policy_loss_fn: The policy loss function to use. Default: `ppo`.
-    reward_manager: The reward manager to use. Default: `sequence-level`.
+    reward_mode: The reward computation mode to use. Default: `reward_fn`.
     num_iterations: The number of optimization epochs per batch of rollouts.
       This corresponds to the number of times the policy updates its weights for
       a given batch of rollouts.
@@ -83,7 +82,7 @@ class PPOConfig(algo_config_lib.AlgorithmConfig):
   advantage_estimator: str = "gae"
   policy_loss_fn: str = "ppo"
   value_loss_fn: str = "ppo"
-  reward_manager: str = "sequence-level"
+  reward_mode: str = "reward_fn"
   num_iterations: int = 1
 
   # PPO loss and advantage computation configs.

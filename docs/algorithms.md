@@ -77,7 +77,7 @@ class MyNewAlgoConfig(AlgorithmConfig):
     # 2. Components (References strings in FunctionRegistry)
     advantage_estimator: str = "gae"
     policy_loss_fn: str = "my_custom_loss"
-    reward_manager: str = "sequence-level"
+    reward_mode: str = "reward_fn"
 
     # 3. Custom Hyperparameters
     my_hyperparam: float = 0.5

@@ -72,8 +72,11 @@ class TrainExample(common.TrainExample):
 class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   """Base configuration for Agentic RL algorithms.
 
-  Parameters:
+  Attributes:
     system_prompt: System prompt for the agent.
+    reward_mode: The reward computation mode. Defaults to `"env"`, which uses
+      environment `trajectory_rewards` (`AgenticSequenceRewardManager`) and
+      sums `reward_fns` on top when `reward_fns` are provided.
     max_response_length: Maximum number of tokens for each episode.
     max_concurrency: Maximum number of concurrent requests to the rollout
       engines.
@@ -87,7 +90,7 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   system_prompt: str = ""
   # TODO(tsbao): we need to update the scripts that uses max_tokens_to_generate
   # once this new agentic_rl_learner is used.
-  reward_manager: str = "agentic-sequence-level"
+  reward_mode: str = "env"
   max_response_length: int = 1024
   max_concurrency: int = 32
   off_policy_steps: int = 0
@@ -170,7 +173,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     )
     self._validate_rollout_config()
     reward_manager_fn = function_registry.get_reward_manager(
-        algo_config.reward_manager
+        algo_config.reward_mode
     )
     self.reward_manager = reward_manager_fn(
         reward_fns=reward_fns,

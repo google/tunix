@@ -69,7 +69,7 @@ nan_reward.__name__ = "nan_reward"
 class TestAlgoConfig(algo_config_lib.AlgorithmConfig):
   """Test Algorithm Config."""
 
-  reward_manager: str = "sequence-level"
+  reward_mode: str = "reward_fn"
   custom_param: float = 2.0
 
 
@@ -312,7 +312,7 @@ class AgenticSequenceRewardManagerTest(parameterized.TestCase):
     self.assertIn("trajectory_rewards/mean", log_metrics)
     self.assertNotIn("rewards/sum", log_metrics)
 
-  def test_empty_list_reward_fns(self):
+  def test_empty_list_reward_fns_env_mode(self):
     manager = reward_manager.AgenticSequenceRewardManager(
         reward_fns=[],
         algo_config=self.test_algo_config,

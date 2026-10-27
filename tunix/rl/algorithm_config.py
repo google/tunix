@@ -27,12 +27,17 @@ class AlgorithmConfig:
     algo_variant: The core algorithm variant to use.
     advantage_estimator: The advantage estimator to use.
     policy_loss_fn: The policy loss function to use.
+    reward_mode: The reward computation mode. `"reward_fn"` evaluates
+      `reward_fns` (`SequenceRewardManager`). `"env"` uses environment
+      `trajectory_rewards`, and also sums `reward_fns` on top when `reward_fns`
+      are provided (`AgenticSequenceRewardManager`). Custom managers registered
+      via `function_registry.register_reward_manager` are also accepted.
   """
 
   algo_variant: str = "grpo"
   advantage_estimator: str = "grpo"
   policy_loss_fn: str = "grpo"
-  reward_manager: str = "sequence-level"
+  reward_mode: str = "reward_fn"
   # Optional symmetric clamp applied to per-token KL inside
   # `common.compute_kl_divergence`. `None` (default) disables the clamp and
   # preserves prior behavior bit-for-bit. Set to a positive float (e.g.
@@ -100,6 +105,7 @@ class AlgorithmConfig:
     ]
     valid_advantage_estimators = ["grpo", "gae", "drgrpo", "rloo", "grpo-loo"]
     valid_policy_loss_fns = ["grpo", "ppo"]
+    valid_reward_modes = ["reward_fn", "env"]
     if self.algo_variant not in valid_algo_variants:
       raise ValueError(
           f"algo_variant must be one of {valid_algo_variants}. "
@@ -122,6 +128,14 @@ class AlgorithmConfig:
       raise ValueError(
           f"policy_loss_fn must be one of {valid_policy_loss_fns} or registered"
           f" in function_registry. Received: {self.policy_loss_fn}"
+      )
+    if (
+        self.reward_mode not in valid_reward_modes
+        and self.reward_mode not in function_registry.list_reward_managers()
+    ):
+      raise ValueError(
+          f"reward_mode must be one of {valid_reward_modes} or registered"
+          f" in function_registry. Received: {self.reward_mode!r}"
       )
     if self.reward_num_workers < -1:
       raise ValueError(
@@ -184,9 +198,7 @@ class AlgorithmConfig:
       )
     if lo is not None and hi is not None:
       if lo < 0.0:
-        raise ValueError(
-            f"sampler_rs_min must be >= 0.0. Received: {lo}"
-        )
+        raise ValueError(f"sampler_rs_min must be >= 0.0. Received: {lo}")
       if lo > hi:
         raise ValueError(
             "sampler_rs_min must not exceed sampler_rs_max. Received:"
@@ -218,7 +230,8 @@ class GRPOConfig(AlgorithmConfig):
       include `token-mean`, `sequence-mean-token-mean`,
       `sequence-mean-token-scale`, `seq-mean-token-sum`, and
       `sequence-mean-token-sum-norm`. Default: `sequence-mean-token-mean`.
-    reward_manager: The reward manager to use. Default: `sequence-level`.
+    reward_mode: The reward computation mode to use (`reward_fn` or `env`).
+      Default: `reward_fn`.
     loss_algo: use GRPO or GSPO for loss computation. GRPO loss is per-batch
       normalized instead of per-response normalized as mentioned in the paper.
       For GSPO, we use gspo-token loss which is more flexible.
@@ -272,7 +285,7 @@ class GRPOConfig(AlgorithmConfig):
   advantage_estimator: str = "grpo"
   policy_loss_fn: str = "grpo"
   loss_agg_mode: str = "sequence-mean-token-mean"
-  reward_manager: str = "sequence-level"
+  reward_mode: str = "reward_fn"
   loss_algo: str = "grpo"
   num_generations: int = 2
   num_iterations: int = 1

@@ -127,9 +127,9 @@ class AbstractRewardManager(abc.ABC):
     """Releases any resources held by the reward manager."""
 
 
-@function_registry.register_reward_manager("sequence-level")
+@function_registry.register_reward_manager("reward_fn")
 class SequenceRewardManager(AbstractRewardManager):
-  """Reward manager for sequence-level rewards only."""
+  """Reward manager for sequence-level reward functions (`reward_mode='reward_fn'`)."""
 
   _require_reward_fns: ClassVar[bool] = True
 
@@ -143,10 +143,10 @@ class SequenceRewardManager(AbstractRewardManager):
     super().__init__(reward_fns, algo_config)
     if self._require_reward_fns and not self.reward_fns:
       raise ValueError(
-          "reward_fns cannot be empty for SequenceRewardManager"
-          " ('sequence-level'). Provide at least one reward function, or set"
-          " algo_config.reward_manager='agentic-sequence-level' to use"
-          " environment trajectory rewards."
+          f"reward_fns cannot be empty for {type(self).__name__}."
+          " Provide at least one reward function, or set"
+          " algo_config.reward_mode='env' to use environment trajectory"
+          " rewards."
       )
     self._pool = None
     # Reward fns that must be evaluated in the parent process, learned at
@@ -401,17 +401,13 @@ class SequenceRewardManager(AbstractRewardManager):
     return metrics_to_log
 
 
-@function_registry.register_reward_manager("agentic-sequence-level")
+@function_registry.register_reward_manager("env")
 class AgenticSequenceRewardManager(SequenceRewardManager):
-  """Reward manager for agentic settings.
+  """Reward manager for agentic environment trajectories (`reward_mode='env'`).
 
-  Supports two reward sources:
-  - Pluggable reward_fns evaluated post-rollout (e.g. deepscaler).
-  - Trajectory rewards from the environment, passed via `trajectory_rewards`
-    kwarg (e.g. deepswe).
-
-  reward_fns is optional. When not provided, only trajectory_rewards are used
-  and the fn computation step is skipped entirely.
+  Starts from `trajectory_rewards` produced by the rollout environment and, when
+  `reward_fns` are provided, evaluates and sums them on top of
+  `trajectory_rewards`.
   """
 
   _require_reward_fns: ClassVar[bool] = False

@@ -191,7 +191,7 @@ class RLLearnerTest(parameterized.TestCase):
           reward_fns=empty_fns,
       )
 
-  def test_agentic_sequence_level_with_reward_fns_none_builds_manager(self):
+  def test_env_reward_mode_with_reward_fns_none_builds_manager(self):
     config = rl_engine_lib.RLTrainingConfig(
         actor_optimizer=optax.sgd(1e-3),
         eval_every_n_steps=1,
@@ -204,7 +204,7 @@ class RLLearnerTest(parameterized.TestCase):
 
     learner = DummyLearner(
         rl_engine=mock_engine,
-        algo_config=DummyConfig(reward_manager='agentic-sequence-level'),
+        algo_config=DummyConfig(reward_mode='env'),
         reward_fns=None,
     )
     self.assertIsNotNone(learner.reward_manager)
