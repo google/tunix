@@ -393,9 +393,9 @@ class FakeClusterHarness:
 
     if reward_fns is None:
       reward_fns = [
-          lambda unused_completion, metadata: (
-              1.0 if metadata["group_index"] % 2 == 0 else -1.0
-          )
+          lambda prompts, completions, group_index, **kwargs: [
+              1.0 if g % 2 == 0 else -1.0 for g in group_index
+          ]
       ]
 
     dataset = (

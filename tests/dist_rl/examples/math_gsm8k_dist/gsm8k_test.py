@@ -17,8 +17,8 @@ from unittest import mock
 from absl.testing import absltest
 import numpy as np
 import tensorflow_datasets as tfds
-from tunix.dist_rl.examples.math_gsm8k_dist import gsm8k
 from tunix.dist_rl.common import registry
+from tunix.dist_rl.examples.math_gsm8k_dist import gsm8k
 
 
 class _FakeMapDataSource:
@@ -199,50 +199,23 @@ class GSM8KTest(absltest.TestCase):
   def test_make_gsm8k_reward_fn(self):
     reward_fn = gsm8k.make_gsm8k_reward_fn(debug=True)
 
-    # 1. Format correct and answer correct -> reward 1.0
-    self.assertEqual(
-        reward_fn(
-            "<reasoning>Reasoning step.</reasoning><answer>\\boxed{42}</answer>",
-            {"gold_answer": "42", "prompt_id": "p1"},
-        ),
-        1.0,
-    )
-
-    # 2. Format correct, wrong answer -> reward 0.1
-    self.assertEqual(
-        reward_fn(
-            "<reasoning>Reasoning step.</reasoning><answer>\\boxed{100}</answer>",
-            {"gold_answer": "42", "prompt_id": "p2"},
-        ),
-        0.1,
-    )
-
-    # 3. Format incorrect, right answer -> reward 0.5
-    self.assertEqual(
-        reward_fn(
+    rewards = reward_fn(
+        prompts=["q1", "q2", "q3", "q4"],
+        completions=[
+            (
+                "<reasoning>Reasoning"
+                " step.</reasoning><answer>\\boxed{42}</answer>"
+            ),
+            (
+                "<reasoning>Reasoning"
+                " step.</reasoning><answer>\\boxed{100}</answer>"
+            ),
             "The answer is \\boxed{42}",
-            {"gold_answer": "42", "prompt_id": "p3"},
-        ),
-        0.5,
-    )
-
-    # 4. Format incorrect, wrong answer -> reward 0.0
-    self.assertEqual(
-        reward_fn(
             "No answer here",
-            {"gold_answer": "42", "prompt_id": "p4"},
-        ),
-        0.0,
+        ],
+        answer=["42", "42", "42", "42"],
     )
-
-    # 5. Uses 'answer' key in metadata fallback
-    self.assertEqual(
-        reward_fn(
-            "<reasoning>Reasoning.</reasoning><answer>\\boxed{15}</answer>",
-            {"answer": "15"},
-        ),
-        1.0,
-    )
+    self.assertEqual(rewards, [1.0, 0.1, 0.5, 0.0])
 
   def test_launchers_default_chat_parser_to_raw(self):
     base_dir = pathlib.Path(gsm8k.__file__).parent

@@ -19,7 +19,7 @@ These types provide standardized containers for actions, interaction steps,
 and complete episode trajectories.
 """
 
-from collections.abc import Hashable
+from collections.abc import Hashable, Mapping, Sequence
 import dataclasses
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional
@@ -389,4 +389,43 @@ def assistant_text(conversation_text: Any) -> str:
       str(message.get("content", ""))
       for message in conversation_text
       if isinstance(message, dict) and message.get("role") == "assistant"
+  )
+
+
+def prompt_text(
+    conversation_text: Sequence[Mapping[str, str]],
+) -> str:
+  """Extracts the initial user prompt text from a Token-mode conversation.
+
+  `TrajectoryCollectEngine` emits `conversation_text` in "Token" mode as the
+  agent's full message list (`[{"role": ..., "content": ...}, ...]`), where the
+  first `"user"` turn carries the initial prompt observation.
+
+  Args:
+    conversation_text: A list of OpenAI-format chat message mappings.
+
+  Returns:
+    The string content of the first `"user"` message.
+
+  Raises:
+    TypeError: If `conversation_text` is not a list or the user message content
+      is not a string.
+    ValueError: If `conversation_text` contains no `"user"` message.
+  """
+  if not isinstance(conversation_text, list):
+    raise TypeError(
+        "Expected conversation_text to be a list of chat messages, got"
+        f" {type(conversation_text).__name__}."
+    )
+  for message in conversation_text:
+    if message["role"] == "user":
+      content = message["content"]
+      if not isinstance(content, str):
+        raise TypeError(
+            "Expected user message content to be a str, got"
+            f" {type(content).__name__}."
+        )
+      return content
+  raise ValueError(
+      "Expected conversation_text to contain at least one 'user' message."
   )

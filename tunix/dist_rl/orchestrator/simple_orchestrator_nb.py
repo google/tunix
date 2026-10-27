@@ -118,7 +118,13 @@ class SimulatedTrainerWorker(abstract_worker.Worker):
   def stop(self) -> datatypes.Response:
     return datatypes.Response()
 
-  def fwd_bwd(self, batch: Any, accumulate_gradients: bool = False, apply_optimizer: bool = True, skip_jit: bool = False) -> dict[str, float]:
+  def fwd_bwd(
+      self,
+      batch: Any,
+      accumulate_gradients: bool = False,
+      apply_optimizer: bool = True,
+      skip_jit: bool = False,
+  ) -> dict[str, float]:
     del batch, accumulate_gradients, apply_optimizer, skip_jit
     logging.info("[%s] Executing gradient update (fwd_bwd)", self.worker_id)
     return {"loss": 0.25, "grad_norm": 1.2}
@@ -170,7 +176,7 @@ def main():
   program = rl_program.StandardRLProgram(
       algo=algo,
       dataset=train_dataset,
-      reward_fns=[lambda x: 1.0],
+      reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
       assembler=assembler,
       generation_args=datatypes.GenerationArgs(temperature=1.0),
       max_steps=2,

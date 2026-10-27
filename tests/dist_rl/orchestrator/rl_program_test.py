@@ -149,6 +149,10 @@ def _create_rollout_response(
       traj={
           "trajectory_reward": reward,
           "status": datatypes.TrajectoryStatus.SUCCEEDED,
+          "conversation_text": [
+              {"role": "user", "content": "question"},
+              {"role": "assistant", "content": "answer"},
+          ],
       },
       prompt_tokens=np.array([1, 2], dtype=np.int32),
       completion_tokens=np.array([3, 4], dtype=np.int32),
@@ -241,9 +245,7 @@ def _make_engine(
 ) -> distributed_rl_engine.DistributedRLEngine:
   registry = worker_registry.WorkerRegistry()
   for idx, handle in enumerate(rollout_workers):
-    registry.register_handle(
-        f"rollout-{idx}", [datatypes.Role.ROLLOUT], handle
-    )
+    registry.register_handle(f"rollout-{idx}", [datatypes.Role.ROLLOUT], handle)
   for role, handle in (trainer_workers or {}).items():
     registry.register_handle(f"trainer-{role}", [role], handle)
   for role, handle in (inference_workers or {}).items():
@@ -288,8 +290,7 @@ class RLProgramTest(absltest.TestCase):
     self.mock_algo.max_response_length = 1024
     self.mock_algo.requires_reference_kl = False
     self.mock_algo.has_critic = False
-    self.mock_algo.algo_config = types.SimpleNamespace(
-        temperature=None,
+    self.mock_algo.algo_config = algorithm_config.GRPOConfig(
         use_rollout_logps=True,
     )
 
@@ -332,7 +333,11 @@ class RLProgramTest(absltest.TestCase):
         dataset=dataset,
         max_steps=max_steps,
         algo=self.mock_algo,
-        reward_fns=reward_fns if reward_fns is not None else [lambda *_: 1.0],
+        reward_fns=(
+            reward_fns
+            if reward_fns is not None
+            else [lambda prompts, completions, **_: [1.0] * len(prompts)]
+        ),
         assembler=assembler if assembler is not None else self.assembler,
         **kwargs,
     )
@@ -375,7 +380,7 @@ class RLProgramTest(absltest.TestCase):
     program = rl_program.StandardRLProgram(
         dataset=["prompt_1"],
         algo=self.mock_algo,
-        reward_fns=[lambda *_: 1.0],
+        reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
         assembler=self.assembler,
     )
     self.assertEqual(program.step, 0)
@@ -390,7 +395,7 @@ class RLProgramTest(absltest.TestCase):
     program = rl_program.StandardRLProgram(
         dataset=["prompt_1"],
         algo=self.mock_algo,
-        reward_fns=[lambda *_: 1.0],
+        reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
     )
     self.assertIsInstance(
         program.assembler, batch_assembly.SequencePackedBatchAssembler
@@ -400,6 +405,7 @@ class RLProgramTest(absltest.TestCase):
   def test_program_inherits_num_generations_and_mini_batch_size_from_algo(self):
     self.mock_algo.num_generations = 5
     self.mock_algo.mini_batch_size = 3
+    self.mock_algo.algo_config.reward_mode = "env"
     program = rl_program.StandardRLProgram(
         dataset=["prompt_1"],
         algo=self.mock_algo,
@@ -424,9 +430,9 @@ class RLProgramTest(absltest.TestCase):
       )
 
   def test_program_use_rollout_logps_matching(self):
-    self.mock_algo.algo_config = types.SimpleNamespace(
-        temperature=None,
+    self.mock_algo.algo_config = algorithm_config.GRPOConfig(
         use_rollout_logps=True,
+        reward_mode="env",
     )
     program = rl_program.StandardRLProgram(
         dataset=["prompt_1"],
@@ -442,9 +448,9 @@ class RLProgramTest(absltest.TestCase):
   def test_program_use_rollout_logps_missing_in_generation_args_inherits_from_algo(
       self,
   ):
-    self.mock_algo.algo_config = types.SimpleNamespace(
-        temperature=None,
+    self.mock_algo.algo_config = algorithm_config.GRPOConfig(
         use_rollout_logps=True,
+        reward_mode="env",
     )
     program = rl_program.StandardRLProgram(
         dataset=["prompt_1"],
@@ -930,7 +936,7 @@ class RLProgramTest(absltest.TestCase):
       program = rl_program.StandardRLProgram(
           dataset=["prompt_0", "prompt_1"],
           algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=self.assembler,
           max_staleness=0,
       )
@@ -997,7 +1003,7 @@ class RLProgramTest(absltest.TestCase):
         max_steps=1,
         batch_size=2,
         algo=self.mock_algo,
-        reward_fns=[lambda *_: 1.0],
+        reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
         assembler=batch_assembly.PaddedBatchAssembler(
             batch_size=1,
             max_prompt_length=4,
@@ -1044,7 +1050,7 @@ class RLProgramTest(absltest.TestCase):
       program = rl_program.StandardRLProgram(
           dataset=[f"prompt_{i}" for i in range(8)],
           algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=self.assembler,
           batch_size=2,
           max_staleness=1,
@@ -1131,7 +1137,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=TwoMicrobatchAssembler(),
           sync_weights=False,
       )
@@ -1228,7 +1234,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=LazyPipelinedAssembler(),
           sync_weights=False,
       )
@@ -1369,7 +1375,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=TwoGroupPipelinedAssembler(),
           sync_weights=False,
       )
@@ -1491,7 +1497,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=FailingSecondMicrobatchAssembler(),
           sync_weights=False,
       )
@@ -1549,7 +1555,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=padded_assembler,
           sync_weights=False,
       )
@@ -1624,7 +1630,7 @@ class RLProgramTest(absltest.TestCase):
           max_steps=1,
           algo=self.mock_algo,
           batch_size=4,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=assembler,
           sync_weights=True,
       )
@@ -1706,7 +1712,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=padded_assembler,
           sync_weights=False,
       )
@@ -1774,7 +1780,7 @@ class RLProgramTest(absltest.TestCase):
           max_steps=1,
           algo=self.mock_algo,
           batch_size=4,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=padded_assembler,
           sync_weights=False,
       )
@@ -1878,7 +1884,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=packed_assembler,
           sync_weights=False,
       )
@@ -1946,7 +1952,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=packed_assembler,
           sync_weights=False,
       )
@@ -2016,7 +2022,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=packed_assembler,
           sync_weights=False,
       )
@@ -2093,7 +2099,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=packed_assembler,
           sync_weights=False,
       )
@@ -2192,7 +2198,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=TwoMicrobatchAssembler(),
           sync_weights=False,
       )
@@ -2251,7 +2257,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=padded_assembler,
           sync_weights=False,
       )
@@ -2311,6 +2317,7 @@ class RLProgramTest(absltest.TestCase):
         raise RuntimeError("Rollout worker cluster down!")
 
     async def _run():
+      self.mock_algo.algo_config.reward_mode = "env"
       prog = FailingProgram(
           dataset=["prompt"],
           algo=self.mock_algo,
@@ -2325,7 +2332,8 @@ class RLProgramTest(absltest.TestCase):
   def test_run_synchronous_entry_point(self):
     _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
     program = self._create_program(
-        reward_fns=[lambda *_: 2.0], dataset=["sync_prompt"]
+        reward_fns=[lambda prompts, completions, **_: [2.0] * len(prompts)],
+        dataset=["sync_prompt"],
     )
 
     program.run(self.mock_engine)
@@ -2349,6 +2357,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_missing_dataset_raises_value_error(self):
     async def _run():
+      self.mock_algo.algo_config.reward_mode = "env"
       program = rl_program.StandardRLProgram(
           algo=self.mock_algo,
           assembler=self.assembler,
@@ -2431,13 +2440,19 @@ class RLProgramTest(absltest.TestCase):
       observed_in_reward = []
 
       def tracking_reward_fn(
-          unused_completion: str, metadata: dict[str, Any]
-      ) -> float:
-        observed_in_reward.append({
-            "prompt_id": metadata["prompt_id"],
-            "group_index": metadata["group_index"],
-        })
-        return 1.0
+          prompts: Sequence[str],
+          completions: Sequence[str],
+          prompt_id: Sequence[str],
+          group_index: Sequence[int],
+          **kwargs: Any,
+      ) -> list[float]:
+        del prompts, completions, kwargs
+        for pid, gidx in zip(prompt_id, group_index):
+          observed_in_reward.append({
+              "prompt_id": pid,
+              "group_index": gidx,
+          })
+        return [1.0] * len(prompt_id)
 
       # 3. Track items passed to algo.create_trainer_payloads
       passed_to_algo = []
@@ -2666,6 +2681,7 @@ class RLProgramTest(absltest.TestCase):
           beta=0.04,
           kl_loss_mode="low_var_kl",
           use_rollout_logps=False,
+          reward_mode="env",
       )
       algo = algorithm_adapter.GRPOAdapter(
           algo_config=algo_config,
@@ -2701,6 +2717,10 @@ class RLProgramTest(absltest.TestCase):
                   "prompt_tokens": np.array([3, 4], dtype=np.int32),
                   "conversation_tokens": np.array([5, 6, 7], dtype=np.int32),
                   "conversation_masks": np.ones(3, dtype=np.float32),
+                  "conversation_text": [
+                      {"role": "user", "content": "question"},
+                      {"role": "assistant", "content": "answer"},
+                  ],
               },
               prompt_tokens=np.array([3, 4], dtype=np.int32),
               completion_tokens=np.array([5, 6, 7], dtype=np.int32),
@@ -2717,6 +2737,10 @@ class RLProgramTest(absltest.TestCase):
                   "prompt_tokens": np.array([3, 4], dtype=np.int32),
                   "conversation_tokens": np.array([8, 9, 10], dtype=np.int32),
                   "conversation_masks": np.ones(3, dtype=np.float32),
+                  "conversation_text": [
+                      {"role": "user", "content": "question"},
+                      {"role": "assistant", "content": "answer"},
+                  ],
               },
               prompt_tokens=np.array([3, 4], dtype=np.int32),
               completion_tokens=np.array([8, 9, 10], dtype=np.int32),
@@ -2873,7 +2897,8 @@ class RLProgramTest(absltest.TestCase):
     async def _run():
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
 
-      def failing_reward_fn(*_):
+      def failing_reward_fn(prompts, completions, **_):
+        del prompts, completions
         raise ValueError("Reward model computation failed")
 
       program = self._create_program(reward_fns=[failing_reward_fn])
@@ -2881,6 +2906,87 @@ class RLProgramTest(absltest.TestCase):
       with self.assertRaises(ValueError) as cm:
         await program.run_async(self.mock_engine)
       self.assertIn("Reward model computation failed", str(cm.exception))
+
+    asyncio.run(_run())
+
+  def test_reward_manager_routing_modes(self):
+    async def _run_critique_and_get_rewards(
+        program: rl_program.StandardRLProgram,
+    ) -> list[float]:
+      program.engine = self.mock_engine
+      for idx, r in enumerate([1.5, 2.5]):
+        await program.raw_q.put(
+            distributed_rl_engine._response_to_trajectory_item(
+                _create_rollout_response(
+                    f"req_{idx}", "prompt_0", group_index=idx, reward=r
+                )
+            )
+        )
+      await program.raw_q.close()
+      await program.critique_stage()
+      scored_group = await program.scored_q.get()
+      self.assertIsNotNone(scored_group)
+      assert scored_group is not None
+      return [item.traj["trajectory_reward"] for item in scored_group.items]
+
+    async def _run():
+      # 1. env mode: algo_config.reward_mode="env" with no
+      # reward_fns -> AgenticSequenceRewardManager uses trajectory_reward only.
+      self.mock_algo.algo_config.reward_mode = "env"
+      prog_env = rl_program.StandardRLProgram(
+          dataset=["prompt_0"],
+          algo=self.mock_algo,
+          reward_fns=None,
+          assembler=self.assembler,
+      )
+      np.testing.assert_allclose(
+          await _run_critique_and_get_rewards(prog_env),
+          np.array([1.5, 2.5]),
+      )
+      prog_env.close()
+
+      # 2. reward_fn mode: reward_fns with default
+      # algo_config.reward_mode="reward_fn" -> SequenceRewardManager
+      # uses reward_fns only and ignores trajectory_reward.
+      self.mock_algo.algo_config.reward_mode = "reward_fn"
+      prog_fn = rl_program.StandardRLProgram(
+          dataset=["prompt_0"],
+          algo=self.mock_algo,
+          reward_fns=[lambda prompts, completions, **_: [10.0, 20.0]],
+          assembler=self.assembler,
+      )
+      np.testing.assert_allclose(
+          await _run_critique_and_get_rewards(prog_fn),
+          np.array([10.0, 20.0]),
+      )
+      prog_fn.close()
+
+      # 3. env + reward_fns: reward_fns with
+      # algo_config.reward_mode="env" ->
+      # AgenticSequenceRewardManager sums trajectory_reward + reward_fns.
+      self.mock_algo.algo_config.reward_mode = "env"
+      prog_both = rl_program.StandardRLProgram(
+          dataset=["prompt_0"],
+          algo=self.mock_algo,
+          reward_fns=[lambda prompts, completions, **_: [10.0, 20.0]],
+          assembler=self.assembler,
+      )
+      np.testing.assert_allclose(
+          await _run_critique_and_get_rewards(prog_both),
+          np.array([11.5, 22.5]),
+      )
+      prog_both.close()
+
+      # 4. Negative control: algo_config.reward_mode="reward_fn" without
+      # reward_fns raises ValueError instead of silently falling back.
+      self.mock_algo.algo_config.reward_mode = "reward_fn"
+      with self.assertRaisesRegex(ValueError, "reward_fns cannot be empty"):
+        rl_program.StandardRLProgram(
+            dataset=["prompt_0"],
+            algo=self.mock_algo,
+            reward_fns=None,
+            assembler=self.assembler,
+        )
 
     asyncio.run(_run())
 
@@ -2939,6 +3045,7 @@ class RLProgramTest(absltest.TestCase):
           trainer_workers={datatypes.Role.ACTOR: trainer_worker},
       )
 
+      self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(
           dataset=["prompt_data_0"], reward_fns=[], sync_weights=False
       )
@@ -2950,18 +3057,14 @@ class RLProgramTest(absltest.TestCase):
 
       # 1. Actor Trainer Metrics (retrieved from TrainerWorker.get_metrics)
       self.assertTrue(logger.metric_exists("actor", "loss", "train"))
-      self.assertAlmostEqual(
-          logger.get_metric("actor", "loss", "train"), 0.5
-      )
+      self.assertAlmostEqual(logger.get_metric("actor", "loss", "train"), 0.5)
       self.assertTrue(logger.metric_exists("actor", "perplexity", "train"))
       self.assertAlmostEqual(
           logger.get_metric("actor", "perplexity", "train"),
           float(np.exp(0.5)),
           places=5,
       )
-      self.assertTrue(
-          logger.metric_exists("actor", "learning_rate", "train")
-      )
+      self.assertTrue(logger.metric_exists("actor", "learning_rate", "train"))
       self.assertAlmostEqual(
           logger.get_metric("actor", "learning_rate", "train"), 1e-4
       )
@@ -2974,9 +3077,7 @@ class RLProgramTest(absltest.TestCase):
 
       # 2. Reward Metrics
       self.assertTrue(logger.metric_exists("rewards", "mean", "train"))
-      self.assertAlmostEqual(
-          logger.get_metric("rewards", "mean", "train"), 2.5
-      )
+      self.assertAlmostEqual(logger.get_metric("rewards", "mean", "train"), 2.5)
       self.assertTrue(logger.metric_exists("rewards", "std", "train"))
       self.assertAlmostEqual(logger.get_metric("rewards", "std", "train"), 0.0)
       self.assertTrue(logger.metric_exists("rewards", "min", "train"))
@@ -2993,21 +3094,15 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(
           logger.get_metric("rewards", "advantage/mean", "train"), 1.0
       )
-      self.assertTrue(
-          logger.metric_exists("rewards", "advantage/max", "train")
-      )
+      self.assertTrue(logger.metric_exists("rewards", "advantage/max", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rewards", "advantage/max", "train"), 1.0
       )
-      self.assertTrue(
-          logger.metric_exists("rewards", "advantage/min", "train")
-      )
+      self.assertTrue(logger.metric_exists("rewards", "advantage/min", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rewards", "advantage/min", "train"), 1.0
       )
-      self.assertTrue(
-          logger.metric_exists("rewards", "advantage/std", "train")
-      )
+      self.assertTrue(logger.metric_exists("rewards", "advantage/std", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rewards", "advantage/std", "train"), 0.0
       )
@@ -3061,9 +3156,7 @@ class RLProgramTest(absltest.TestCase):
           logger.get_metric("rollout", "total_tokens_mean", "train"), 4.0
       )
 
-      self.assertTrue(
-          logger.metric_exists("rollout", "success_rate", "train")
-      )
+      self.assertTrue(logger.metric_exists("rollout", "success_rate", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rollout", "success_rate", "train"), 1.0
       )
@@ -3073,15 +3166,11 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(
           logger.get_metric("rollout", "staleness_mean", "train"), 0.0
       )
-      self.assertTrue(
-          logger.metric_exists("rollout", "staleness_max", "train")
-      )
+      self.assertTrue(logger.metric_exists("rollout", "staleness_max", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rollout", "staleness_max", "train"), 0.0
       )
-      self.assertTrue(
-          logger.metric_exists("rollout", "staleness_min", "train")
-      )
+      self.assertTrue(logger.metric_exists("rollout", "staleness_min", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rollout", "staleness_min", "train"), 0.0
       )
@@ -3089,9 +3178,7 @@ class RLProgramTest(absltest.TestCase):
 
       # 4. Perf & Orchestrator Metrics
       self.mock_engine.sync_weights.assert_not_called()
-      self.assertTrue(
-          logger.metric_exists("perf", "global_step_time", "train")
-      )
+      self.assertTrue(logger.metric_exists("perf", "global_step_time", "train"))
       self.assertTrue(
           logger.metric_exists("orchestrator", "policy_version", "train")
       )
@@ -3156,6 +3243,7 @@ class RLProgramTest(absltest.TestCase):
           payload_1,
       ]
 
+      self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(
           dataset=["prompt_0"], reward_fns=[], sync_weights=False
       )
@@ -3169,21 +3257,15 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(
           logger.get_metric("rewards", "advantage/mean", "train"), 0.5
       )
-      self.assertTrue(
-          logger.metric_exists("rewards", "advantage/max", "train")
-      )
+      self.assertTrue(logger.metric_exists("rewards", "advantage/max", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rewards", "advantage/max", "train"), 1.5
       )
-      self.assertTrue(
-          logger.metric_exists("rewards", "advantage/min", "train")
-      )
+      self.assertTrue(logger.metric_exists("rewards", "advantage/min", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rewards", "advantage/min", "train"), -0.5
       )
-      self.assertTrue(
-          logger.metric_exists("rewards", "advantage/std", "train")
-      )
+      self.assertTrue(logger.metric_exists("rewards", "advantage/std", "train"))
       self.assertAlmostEqual(
           logger.get_metric("rewards", "advantage/std", "train"), 1.0
       )
@@ -3252,6 +3334,7 @@ class RLProgramTest(absltest.TestCase):
       }
       self.mock_engine.get_metrics.return_value = {"loss": 0.2}
 
+      self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(
           dataset=["prompt_0"],
           reward_fns=[],
@@ -3267,9 +3350,7 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(
           logger.get_metric("actor_mesh/rewards", "mean", "eval"), 3.0
       )
-      self.assertTrue(
-          logger.metric_exists("actor_mesh/actor", "loss", "eval")
-      )
+      self.assertTrue(logger.metric_exists("actor_mesh/actor", "loss", "eval"))
       self.assertAlmostEqual(
           logger.get_metric("actor_mesh/actor", "loss", "eval"), 0.2
       )
@@ -3332,6 +3413,7 @@ class RLProgramTest(absltest.TestCase):
           ],
           [],
       )
+      self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(
           dataset=["prompt_0"], reward_fns=[], max_staleness=2
       )
@@ -3377,7 +3459,13 @@ class RLProgramTest(absltest.TestCase):
           start_step=0,
           prompt_tokens=None,
           completion_tokens=None,
-          traj={"trajectory_reward": 1.0},
+          traj={
+              "trajectory_reward": 1.0,
+              "conversation_text": [
+                  {"role": "user", "content": "question"},
+                  {"role": "assistant", "content": "answer"},
+              ],
+          },
       )
       traj_item_1 = datatypes.TrajectoryItem(
           group_index=1,
@@ -3385,7 +3473,13 @@ class RLProgramTest(absltest.TestCase):
           start_step=0,
           prompt_tokens=None,
           completion_tokens=None,
-          traj={"trajectory_reward": 1.0},
+          traj={
+              "trajectory_reward": 1.0,
+              "conversation_text": [
+                  {"role": "user", "content": "question"},
+                  {"role": "assistant", "content": "answer"},
+              ],
+          },
       )
       self.mock_algo.create_trainer_payloads.return_value = [
           payload_0,
@@ -3393,6 +3487,7 @@ class RLProgramTest(absltest.TestCase):
       ]
 
       _set_mock_poll_batches(self.mock_engine, [traj_item_0, traj_item_1], [])
+      self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(dataset=["prompt_0"], reward_fns=[])
 
       await program.run_async(self.mock_engine)
@@ -3436,7 +3531,13 @@ class RLProgramTest(absltest.TestCase):
           start_step=0,
           prompt_tokens=None,
           completion_tokens=None,
-          traj={"trajectory_reward": 1.0},
+          traj={
+              "trajectory_reward": 1.0,
+              "conversation_text": [
+                  {"role": "user", "content": "question"},
+                  {"role": "assistant", "content": "answer"},
+              ],
+          },
       )
       traj_item_1 = datatypes.TrajectoryItem(
           group_index=1,
@@ -3444,7 +3545,13 @@ class RLProgramTest(absltest.TestCase):
           start_step=0,
           prompt_tokens=None,
           completion_tokens=None,
-          traj={"trajectory_reward": 1.0},
+          traj={
+              "trajectory_reward": 1.0,
+              "conversation_text": [
+                  {"role": "user", "content": "question"},
+                  {"role": "assistant", "content": "answer"},
+              ],
+          },
       )
       self.mock_algo.create_trainer_payloads.return_value = [
           payload_0,
@@ -3452,6 +3559,7 @@ class RLProgramTest(absltest.TestCase):
       ]
 
       _set_mock_poll_batches(self.mock_engine, [traj_item_0, traj_item_1], [])
+      self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(dataset=["prompt_0"], reward_fns=[])
 
       await program.run_async(self.mock_engine)
@@ -3478,7 +3586,14 @@ class RLProgramTest(absltest.TestCase):
           start_step=0,
           prompt_tokens=np.array([1, 2], dtype=np.int32),
           completion_tokens=np.array([3, 4], dtype=np.int32),
-          traj={"trajectory_reward": 1.0, "status": None},
+          traj={
+              "trajectory_reward": 1.0,
+              "status": None,
+              "conversation_text": [
+                  {"role": "user", "content": "question"},
+                  {"role": "assistant", "content": "answer"},
+              ],
+          },
       )
       traj_item_1 = datatypes.TrajectoryItem(
           group_index=1,
@@ -3486,17 +3601,23 @@ class RLProgramTest(absltest.TestCase):
           start_step=0,
           prompt_tokens=np.array([1, 2], dtype=np.int32),
           completion_tokens=np.array([3, 4], dtype=np.int32),
-          traj={"trajectory_reward": 1.0, "status": None},
+          traj={
+              "trajectory_reward": 1.0,
+              "status": None,
+              "conversation_text": [
+                  {"role": "user", "content": "question"},
+                  {"role": "assistant", "content": "answer"},
+              ],
+          },
       )
       _set_mock_poll_batches(self.mock_engine, [traj_item_0, traj_item_1], [])
+      self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(dataset=["prompt_0"], reward_fns=[])
 
       await program.run_async(self.mock_engine)
 
       logger = program.metrics_logger
-      self.assertFalse(
-          logger.metric_exists("rollout", "success_rate", "train")
-      )
+      self.assertFalse(logger.metric_exists("rollout", "success_rate", "train"))
 
     asyncio.run(_run())
 
@@ -3510,14 +3631,13 @@ class RLProgramTest(absltest.TestCase):
           "scalar_metrics": {"loss": 0.35, "learning_rate": 5e-5},
           "weighted_metrics": {"kl": 0.01},
       }
+      self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(dataset=["prompt_0"], reward_fns=[])
 
       await program.run_async(self.mock_engine)
 
       logger = program.metrics_logger
-      self.assertAlmostEqual(
-          logger.get_metric("actor", "loss", "train"), 0.35
-      )
+      self.assertAlmostEqual(logger.get_metric("actor", "loss", "train"), 0.35)
       self.assertAlmostEqual(
           logger.get_metric("actor", "learning_rate", "train"), 5e-5
       )
@@ -3574,6 +3694,7 @@ class RLProgramTest(absltest.TestCase):
           for group_index, num_turns in enumerate([2, 4])
       ]
       _set_mock_poll_batches(self.mock_engine, traj_items, [])
+      self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(dataset=["prompt_0"], reward_fns=[])
 
       await program.run_async(self.mock_engine)
@@ -3612,6 +3733,7 @@ class RLProgramTest(absltest.TestCase):
       )
       self.mock_engine.sync_weights = mock.AsyncMock(side_effect=_sync_weights)
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
+      self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(dataset=["prompt_0"], reward_fns=[])
 
       await program.run_async(self.mock_engine)
@@ -3685,7 +3807,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=TwoMicrobatchAssembler(),
           sync_weights=False,
       )
@@ -3823,6 +3945,7 @@ class RLProgramTest(absltest.TestCase):
           )
       ]
       _set_mock_poll_batches(self.mock_engine, traj_items, [])
+      self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(dataset=["prompt_0"], reward_fns=[])
 
       with self.assertLogs(level="INFO") as logs:
@@ -3924,6 +4047,7 @@ class RLProgramTest(absltest.TestCase):
 
       self.mock_engine.train_step.side_effect = _mock_train_step
       self.mock_engine.get_metrics.side_effect = _mock_get_metrics
+      self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(
           dataset=["p0"] * 20,
           reward_fns=[],
@@ -3976,6 +4100,7 @@ class RLProgramTest(absltest.TestCase):
             scalar_metrics={"loss": 0.42, "learning_rate": 1e-4},
         )
 
+        self.mock_algo.algo_config.reward_mode = "env"
         program = self._create_program(
             dataset=["p0"],
             reward_fns=[],
@@ -4208,9 +4333,11 @@ class RLProgramTest(absltest.TestCase):
     mock_algo.max_packed_len = 16
     mock_algo.max_response_length = 1024
     mock_algo.requires_reference_kl = False
-    mock_algo.algo_config = mock.MagicMock(
-        temperature=0.8, use_rollout_logps=False
+    mock_algo.algo_config = algorithm_config.GRPOConfig(
+        use_rollout_logps=False,
+        reward_mode="env",
     )
+    mock_algo.algo_config.temperature = 0.8
 
     gen_args = datatypes.GenerationArgs(temperature=0.8)
     with self.assertRaisesRegex(
@@ -4233,8 +4360,9 @@ class RLProgramTest(absltest.TestCase):
     mock_algo.max_packed_len = 16
     mock_algo.max_response_length = 1024
     mock_algo.requires_reference_kl = False
-    mock_algo.algo_config = mock.MagicMock(
-        temperature=None, use_rollout_logps=False
+    mock_algo.algo_config = algorithm_config.GRPOConfig(
+        use_rollout_logps=False,
+        reward_mode="env",
     )
 
     program = rl_program.StandardRLProgram(
@@ -4254,8 +4382,9 @@ class RLProgramTest(absltest.TestCase):
     mock_algo.max_packed_len = 16
     mock_algo.max_response_length = 1024
     mock_algo.requires_reference_kl = False
-    mock_algo.algo_config = mock.MagicMock(
-        temperature=None, use_rollout_logps=False
+    mock_algo.algo_config = algorithm_config.GRPOConfig(
+        use_rollout_logps=False,
+        reward_mode="env",
     )
 
     gen_args = datatypes.GenerationArgs(temperature=0.8)
@@ -4373,7 +4502,7 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
-        reward_fns=[lambda *_: 1.0],
+        reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
         assembler=None,
         batch_config=batch_assembly.BatchConfig(
             max_seq_token_per_tpu=1024,
@@ -4394,7 +4523,7 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
-        reward_fns=[lambda *_: 1.0],
+        reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
         assembler=None,
         batch_config=batch_assembly.BatchConfig(
             max_prompt_length=128,
@@ -4412,7 +4541,7 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
-        reward_fns=[lambda *_: 1.0],
+        reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
         assembler=None,
         batch_config=batch_assembly.BatchConfig(
             max_prompt_length=128,
@@ -4429,7 +4558,7 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
-        reward_fns=[lambda *_: 1.0],
+        reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
     )
     self.assertEqual(program.max_response_length, 768)
     self.assertEqual(program.batch_config.max_response_length, 768)
@@ -4439,7 +4568,7 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
-        reward_fns=[lambda *_: 1.0],
+        reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
         assembler=None,
     )
     self.assertIsInstance(
@@ -4922,7 +5051,10 @@ class RLProgramTest(absltest.TestCase):
                 else datatypes.TrajectoryStatus.SUCCEEDED
             ),
             "trajectory_reward": 0.0,
-            "conversation_text": [{"role": "assistant", "content": "answer"}],
+            "conversation_text": [
+                {"role": "user", "content": "question"},
+                {"role": "assistant", "content": "answer"},
+            ],
             "conversation_masks": (
                 np.zeros(2, dtype=np.float32)
                 if masked
@@ -4936,10 +5068,10 @@ class RLProgramTest(absltest.TestCase):
     async def _run():
       scored_group_indices = []
 
-      def reward_fn(completion, metadata):
-        del completion
-        scored_group_indices.append(metadata["group_index"])
-        return 1.0
+      def reward_fn(prompts, completions, group_index, **_):
+        del prompts, completions
+        scored_group_indices.extend(group_index)
+        return [1.0] * len(group_index)
 
       program = self._create_program(reward_fns=[reward_fn])
       program.engine = self.mock_engine
@@ -4962,7 +5094,10 @@ class RLProgramTest(absltest.TestCase):
 
   def test_critique_stage_skips_reward_fns_for_failed_items(self):
     async def _run():
-      reward_fn = mock.MagicMock(return_value=1.0)
+      reward_fn = mock.MagicMock(
+          __name__="reward_fn",
+          side_effect=lambda prompts, completions, **_: [1.0] * len(prompts),
+      )
       program = self._create_program(reward_fns=[reward_fn])
       program.engine = self.mock_engine
       await program.raw_q.put(self._scoring_item(0))
@@ -4982,6 +5117,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_critique_stage_adds_no_steps_to_token_mode_trajectories(self):
     async def _run():
+      self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(reward_fns=[])
       program.engine = self.mock_engine
       await program.raw_q.put(self._scoring_item(0))
@@ -5005,6 +5141,7 @@ class RLProgramTest(absltest.TestCase):
       self,
   ):
     async def _run():
+      self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(reward_fns=[])
       program.engine = self.mock_engine
       valid_item = datatypes.TrajectoryItem(
@@ -5014,6 +5151,10 @@ class RLProgramTest(absltest.TestCase):
               "status": datatypes.TrajectoryStatus.SUCCEEDED,
               "trajectory_reward": 2.5,
               "conversation_masks": np.ones(2, dtype=np.float32),
+              "conversation_text": [
+                  {"role": "user", "content": "question"},
+                  {"role": "assistant", "content": "answer"},
+              ],
           },
       )
       # Invalid item missing 'trajectory_reward' (or traj=None) should not raise
@@ -5044,14 +5185,19 @@ class RLProgramTest(absltest.TestCase):
       self,
   ):
     async def _run():
-      reward_fn = mock.MagicMock(return_value=0.75)
+      reward_fn = mock.MagicMock(
+          __name__="reward_fn",
+          side_effect=lambda prompts, completions, **_: [0.75] * len(prompts),
+      )
       program = self._create_program(reward_fns=[reward_fn])
       program.engine = self.mock_engine
       unmasked_max_steps_item = datatypes.TrajectoryItem(
           prompt_id="p0",
           group_index=0,
           traj={
+              "trajectory_reward": 0.0,
               "conversation_text": [
+                  {"role": "user", "content": "question"},
                   {"role": "assistant", "content": "answer"},
               ],
               "status": datatypes.TrajectoryStatus.MAX_STEPS_REACHED,
@@ -5065,7 +5211,9 @@ class RLProgramTest(absltest.TestCase):
           prompt_id="p0",
           group_index=1,
           traj={
+              "trajectory_reward": 0.0,
               "conversation_text": [
+                  {"role": "user", "content": "question"},
                   {"role": "assistant", "content": "answer"},
               ],
               "status": datatypes.TrajectoryStatus.TIMEOUT,
@@ -5257,7 +5405,9 @@ class RLProgramTest(absltest.TestCase):
           zero_payload,
           zero_payload,
       ]
-      program = self._create_program(reward_fns=[lambda c, m: 1.0])
+      program = self._create_program(
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)]
+      )
       program.engine = self.mock_engine
       await program.raw_q.put(self._scoring_item(0))
       await program.raw_q.put(self._scoring_item(1, masked=True))
@@ -5289,9 +5439,7 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(
           logger.get_metric("rollout", "invalid_trajectory_frac", "train"), 0.5
       )
-      self.assertAlmostEqual(
-          logger.get_metric("rewards", "mean", "train"), 1.0
-      )
+      self.assertAlmostEqual(logger.get_metric("rewards", "mean", "train"), 1.0)
       program.close()
 
     asyncio.run(_run())
@@ -5303,6 +5451,7 @@ class RLProgramTest(absltest.TestCase):
       self.mock_algo.create_trainer_payloads.return_value = [
           self.mock_algo.create_trainer_payloads.return_value[0]
       ]
+      self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(reward_fns=[])
       program.engine = self.mock_engine
       await program.raw_q.put(self._scoring_item(0))
@@ -5325,6 +5474,7 @@ class RLProgramTest(absltest.TestCase):
       self,
   ):
     async def _run():
+      self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(reward_fns=[])
       program.engine = self.mock_engine
       program.raw_q = rl_program.TrajectoryQueueManager.create(
@@ -5348,6 +5498,7 @@ class RLProgramTest(absltest.TestCase):
     asyncio.run(_run())
 
   def test_trajectory_logger_initialization(self):
+    self.mock_algo.algo_config.reward_mode = "env"
     with mock.patch(
         "tunix.utils.trajectory_logger.AsyncTrajectoryLogger"
     ) as mock_logger_cls:
@@ -5386,6 +5537,7 @@ class RLProgramTest(absltest.TestCase):
       self.assertIsNone(program3.trajectory_logger)
 
   def test_log_consumed_trajectories(self):
+    self.mock_algo.algo_config.reward_mode = "env"
     program = rl_program.StandardRLProgram(
         dataset=["prompt_0"],
         max_steps=1,
@@ -5450,6 +5602,7 @@ class RLProgramTest(absltest.TestCase):
     mock_traj_logger.stop.assert_called_once()
 
   def test_log_consumed_trajectories_reward_distinction(self):
+    self.mock_algo.algo_config.reward_mode = "env"
     program = rl_program.StandardRLProgram(
         dataset=["prompt_0"],
         max_steps=1,
@@ -5496,6 +5649,7 @@ class RLProgramTest(absltest.TestCase):
     program.close()
 
   def test_log_consumed_trajectories_multi_turn_includes_env_messages(self):
+    self.mock_algo.algo_config.reward_mode = "env"
     program = rl_program.StandardRLProgram(
         dataset=["prompt_0"],
         max_steps=1,
@@ -5534,50 +5688,196 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(row["completion"], expected_completion)
     program.close()
 
-  def test_invoke_reward_fn_passes_concatenated_assistant_text_and_metadata(
+  def test_critique_stage_passes_concatenated_assistant_text_and_metadata(
       self,
   ):
-    item = datatypes.TrajectoryItem(
-        prompt_id="p_math",
-        group_index=3,
-        traj={
-            "conversation_text": [
-                {"role": "system", "content": "you are a math tutor"},
-                {
-                    "role": "user",
-                    "content": (
-                        "Put your reasoning inside"
-                        " <reasoning>...</reasoning> tags and your answer"
-                        " inside <answer>\\boxed{}</answer> tags."
-                    ),
-                },
-                {
-                    "role": "assistant",
-                    "content": "<reasoning>2+2=4.</reasoning>",
-                },
-                {"role": "user", "content": "continue"},
-                {"role": "assistant", "content": "<answer>\\boxed{4}</answer>"},
-            ]
-        },
-        metadata={"gold_answer": "4", "prompt_id": "p_math", "group_index": 3},
-    )
-    captured = {}
+    async def _run():
+      expected_prompt = (
+          "Put your reasoning inside <reasoning>...</reasoning> tags and your"
+          " answer inside <answer>\\boxed{}</answer> tags."
+      )
+      items = [
+          datatypes.TrajectoryItem(
+              prompt_id="p_math",
+              group_index=0,
+              traj={
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                  "trajectory_reward": 0.0,
+                  "conversation_masks": np.ones(2, dtype=np.float32),
+                  "conversation_text": [
+                      {"role": "system", "content": "you are a math tutor"},
+                      {
+                          "role": "user",
+                          "content": expected_prompt,
+                      },
+                      {
+                          "role": "assistant",
+                          "content": "<reasoning>2+2=4.</reasoning>",
+                      },
+                      {"role": "user", "content": "continue"},
+                      {
+                          "role": "assistant",
+                          "content": "<answer>\\boxed{4}</answer>",
+                      },
+                  ],
+              },
+              metadata={
+                  "gold_answer": "4",
+                  "num_generations": 999,
+                  "routed_experts": "ignored",
+                  "env_config": {"id": 1},
+                  "lineage": "ignored",
+                  "trajectory_rewards": [999.0],
+                  "only_on_first": "dropped",
+              },
+          ),
+          datatypes.TrajectoryItem(
+              prompt_id="p_math",
+              group_index=1,
+              traj={
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                  "trajectory_reward": 0.0,
+                  "conversation_masks": np.ones(2, dtype=np.float32),
+                  "conversation_text": [
+                      {
+                          "role": "user",
+                          "content": expected_prompt,
+                      },
+                      {
+                          "role": "assistant",
+                          "content": "<answer>\\boxed{5}</answer>",
+                      },
+                  ],
+              },
+              metadata={
+                  "gold_answer": "4",
+                  "num_generations": 999,
+                  "routed_experts": "ignored",
+                  "env_config": {"id": 1},
+                  "lineage": "ignored",
+                  "trajectory_rewards": [999.0],
+              },
+          ),
+      ]
+      captured = {}
 
-    def reward_fn(completion: str, metadata: dict[str, Any]) -> float:
-      captured["completion"] = completion
-      captured["metadata"] = dict(metadata)
-      return 1.0
+      def reward_fn(
+          prompts: Sequence[str],
+          completions: Sequence[str],
+          gold_answer: Sequence[str],
+          num_generations: int,
+          **kwargs: Any,
+      ) -> list[float]:
+        captured["prompts"] = list(prompts)
+        captured["completions"] = list(completions)
+        captured["gold_answer"] = list(gold_answer)
+        captured["num_generations"] = num_generations
+        captured["extra_kwargs"] = dict(kwargs)
+        return [1.0, 0.0]
 
-    score = rl_program._invoke_reward_fn(reward_fn, item)
-    self.assertEqual(score, 1.0)
-    self.assertEqual(
-        captured["completion"],
-        "<reasoning>2+2=4.</reasoning><answer>\\boxed{4}</answer>",
-    )
-    self.assertEqual(
-        captured["metadata"],
-        {"gold_answer": "4", "prompt_id": "p_math", "group_index": 3},
-    )
+      self.mock_algo.algo_config.num_generations = 2
+      program = self._create_program(reward_fns=[reward_fn])
+      program.engine = self.mock_engine
+      for item in items:
+        await program.raw_q.put(item)
+      await program.raw_q.close()
+      await program.critique_stage()
+
+      scored_group = await program.scored_q.get()
+      self.assertIsNotNone(scored_group)
+      assert scored_group is not None
+      self.assertEqual(
+          [it.traj["trajectory_reward"] for it in scored_group.items],
+          [1.0, 0.0],
+      )
+      self.assertEqual(captured["prompts"], [expected_prompt, expected_prompt])
+      self.assertEqual(
+          captured["completions"],
+          [
+              "<reasoning>2+2=4.</reasoning><answer>\\boxed{4}</answer>",
+              "<answer>\\boxed{5}</answer>",
+          ],
+      )
+      self.assertEqual(captured["gold_answer"], ["4", "4"])
+      # num_generations comes from algo_config (2), not item.metadata (999).
+      self.assertEqual(captured["num_generations"], 2)
+      # trajectory_rewards comes from item.traj (0.0), not
+      # item.metadata (999.0).
+      self.assertEqual(
+          captured["extra_kwargs"]["trajectory_rewards"], [0.0, 0.0]
+      )
+      for excluded_key in (
+          "prompts",
+          "completions",
+          "routed_experts",
+          "num_generations",
+          "env_config",
+          "lineage",
+      ):
+        self.assertNotIn(excluded_key, captured["extra_kwargs"])
+      self.assertNotIn("only_on_first", captured["extra_kwargs"])
+      program.close()
+
+      # A reward_fn that declares only (prompts, completions) without **kwargs
+      # succeeds cleanly, while a trajectory without a "user" role turn fails
+      # loudly in datatypes.prompt_text.
+      def prompts_completions_only_fn(
+          prompts: Sequence[str],
+          completions: Sequence[str],
+      ) -> list[float]:
+        self.assertEqual(list(prompts), [expected_prompt, expected_prompt])
+        return [float(len(c)) for c in completions]
+
+      prog_simple = self._create_program(
+          reward_fns=[prompts_completions_only_fn]
+      )
+      prog_simple.engine = self.mock_engine
+      for item in items:
+        await prog_simple.raw_q.put(item)
+      await prog_simple.raw_q.close()
+      await prog_simple.critique_stage()
+      scored_simple = await prog_simple.scored_q.get()
+      assert scored_simple is not None
+      self.assertEqual(
+          [it.traj["trajectory_reward"] for it in scored_simple.items],
+          [
+              float(
+                  len(
+                      "<reasoning>2+2=4.</reasoning><answer>\\boxed{4}</answer>"
+                  )
+              ),
+              float(len("<answer>\\boxed{5}</answer>")),
+          ],
+      )
+      prog_simple.close()
+
+      no_user_items = [
+          datatypes.TrajectoryItem(
+              prompt_id="p_env",
+              group_index=idx,
+              traj={
+                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                  "trajectory_reward": 0.0,
+                  "conversation_masks": np.ones(2, dtype=np.float32),
+                  "conversation_text": [
+                      {"role": "assistant", "content": "act" * (idx + 1)},
+                  ],
+              },
+              metadata={"extra_col": "unused"},
+          )
+          for idx in range(2)
+      ]
+      prog_no_user = self._create_program(
+          reward_fns=[prompts_completions_only_fn]
+      )
+      with self.assertRaisesRegex(
+          ValueError,
+          "Expected conversation_text to contain at least one 'user' message",
+      ):
+        prog_no_user._score_group(no_user_items)
+      prog_no_user.close()
+
+    asyncio.run(_run())
 
   def test_staleness_filtered_groups_release_dispatch_capacity_and_avoid_deadlock(
       self,
@@ -5588,6 +5888,7 @@ class RLProgramTest(absltest.TestCase):
       # When prompts 0 and 1 return stale trajectories (policy_version=0 while
       # program.policy_version=5), raw_q filters both groups out and releases
       # their 2 tokens so prompt_2 can be dispatched to complete step 0.
+      self.mock_algo.algo_config.reward_mode = "env"
       program = rl_program.StandardRLProgram(
           algo=self.mock_algo,
           dataset=["prompt_0", "prompt_1", "prompt_2"],
@@ -5800,15 +6101,14 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
     algo.max_packed_len = 16
     algo.max_response_length = 1024
     algo.requires_reference_kl = False
-    algo.algo_config = types.SimpleNamespace(
-        temperature=None,
+    algo.algo_config = algorithm_config.GRPOConfig(
         use_rollout_logps=True,
     )
     program = rl_program.StandardRLProgram(
         dataset=["prompt_0"],
         max_steps=1,
         algo=algo,
-        reward_fns=[lambda *_: 1.0],
+        reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
     )
     program.metrics_logger = mock.MagicMock()
     program._collect_and_log_step_metrics(
@@ -5859,15 +6159,14 @@ class EfficiencyMetricsLoggingTest(absltest.TestCase):
     algo.max_packed_len = 16
     algo.max_response_length = 1024
     algo.requires_reference_kl = False
-    algo.algo_config = types.SimpleNamespace(
-        temperature=None,
+    algo.algo_config = algorithm_config.GRPOConfig(
         use_rollout_logps=True,
     )
     program = rl_program.StandardRLProgram(
         dataset=["prompt_0"],
         max_steps=1,
         algo=algo,
-        reward_fns=[lambda *_: 1.0],
+        reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
     )
     program.metrics_logger = mock.MagicMock()
     program._collect_and_log_step_metrics(
@@ -5927,8 +6226,7 @@ class StandardRLProgramTrajectoryStoreTest(absltest.TestCase):
     self.mock_algo.mini_batch_size = 1
     self.mock_algo.max_packed_len = 16
     self.mock_algo.max_response_length = 1024
-    self.mock_algo.algo_config = types.SimpleNamespace(
-        temperature=None,
+    self.mock_algo.algo_config = algorithm_config.GRPOConfig(
         use_rollout_logps=True,
     )
     self.assembler = batch_assembly.SequencePackedBatchAssembler(
@@ -5942,7 +6240,7 @@ class StandardRLProgramTrajectoryStoreTest(absltest.TestCase):
     return rl_program.StandardRLProgram(
         dataset=["prompt_0"],
         algo=self.mock_algo,
-        reward_fns=[lambda *_: 1.0],
+        reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
         assembler=self.assembler,
         **kwargs,
     )
@@ -5984,8 +6282,7 @@ class StandardRLProgramAsyncDatasetTest(absltest.TestCase):
     self.mock_algo.requires_reference_kl = False
     self.mock_algo.has_critic = False
     self.mock_algo.use_rollout_logps = True
-    self.mock_algo.algo_config = types.SimpleNamespace(
-        temperature=None,
+    self.mock_algo.algo_config = algorithm_config.GRPOConfig(
         use_rollout_logps=True,
     )
 
@@ -6006,7 +6303,7 @@ class StandardRLProgramAsyncDatasetTest(absltest.TestCase):
           max_steps=2,
           batch_size=2,
           algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
       )
       mock_engine = mock.MagicMock(
           spec=distributed_rl_engine.DistributedRLEngine
@@ -6047,8 +6344,8 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
       mock_algo.max_packed_len = 8
       mock_algo.max_response_length = 8
       mock_algo.requires_reference_kl = False
-      mock_algo.algo_config = mock.MagicMock(
-          temperature=None, use_rollout_logps=False
+      mock_algo.algo_config = algorithm_config.GRPOConfig(
+          use_rollout_logps=False
       )
 
       routed = np.full((4, 2, 2), 3, dtype=np.int16)
@@ -6075,7 +6372,7 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=mock_algo,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=assembler,
           sync_weights=True,
       )
@@ -6120,7 +6417,14 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
           prompt_id="p0",
           group_index=0,
           start_step=0,
-          traj={"routed_experts": routed},
+          traj={
+              "trajectory_reward": 1.0,
+              "routed_experts": routed,
+              "conversation_text": [
+                  {"role": "user", "content": "q0"},
+                  {"role": "assistant", "content": "answer"},
+              ],
+          },
           prompt_tokens=np.array([10, 11], dtype=np.int32),
           completion_tokens=np.array([20, 21], dtype=np.int32),
           action_mask=np.array([1, 1], dtype=np.int32),
@@ -6188,11 +6492,11 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     self.mock_algo.max_response_length = 16
     self.mock_algo.requires_reference_kl = False
     self.mock_algo.has_critic = False
-    self.mock_algo.algo_config = mock.MagicMock(
-        temperature=None,
+    self.mock_algo.algo_config = algorithm_config.GRPOConfig(
         use_rollout_logps=False,
         sampler_is=None,
         sampler_is_threshold=2.0,
+        reward_mode="env",
     )
     self.mock_engine = mock.AsyncMock(
         spec=rl_program.rl_engine_interface.AbstractRLEngine
@@ -6368,10 +6672,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
           ),
           mini_batch_size=2,
       )
-      dataset = [
-          {"prompt": f"p{i}", "prompt_id": f"p{i}"}
-          for i in range(6)
-      ]
+      dataset = [{"prompt": f"p{i}", "prompt_id": f"p{i}"} for i in range(6)]
       program = rl_program.StandardRLProgram(
           algo=grpo_algo,
           dataset=dataset,
@@ -6379,7 +6680,9 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
           max_steps=3,
           max_staleness=1,
           reward_fns=[
-              lambda completion, _: 2.0 if completion.endswith("_1") else 1.0
+              lambda prompts, completions, **_: [
+                  2.0 if c.endswith("_1") else 1.0 for c in completions
+              ]
           ],
           group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_ARRIVAL,
       )
@@ -6410,12 +6713,16 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
                 prompt_tokens=np.array([1, 2], dtype=np.int32),
                 completion_tokens=np.array([3, 4], dtype=np.int32),
                 action_mask=np.array([1, 1], dtype=np.int32),
-                completion_text=f"{pid}_{g}",
                 traj={
                     "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                    "trajectory_reward": 0.0,
                     "prompt_tokens": [1, 2],
                     "conversation_tokens": [3, 4],
                     "conversation_masks": [1, 1],
+                    "conversation_text": [
+                        {"role": "user", "content": pid},
+                        {"role": "assistant", "content": f"{pid}_{g}"},
+                    ],
                 },
                 metadata=meta,
             )
@@ -6476,9 +6783,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
 
       program.scored_q.commit = _spy_commit
 
-      await asyncio.wait_for(
-          program.run_async(self.mock_engine), timeout=5.0
-      )
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=5.0)
 
       # Batch 0 (p0, p1) and Batch 1 (p2, p3) were dispatched under v=0;
       # Batch 2 (p4, p5) was blocked by DispatchWindow(max_staleness=1) until
@@ -6616,6 +6921,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
         if pid in ("prompt_0", "prompt_1", "prompt_3"):
           await run1_poll_queue.put(batch)
         else:
+
           async def _delayed(b):
             await asyncio.sleep(10.0)
             await run1_poll_queue.put(b)
@@ -6641,7 +6947,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
           algo=self.mock_algo,
           batch_size=2,
           max_staleness=2,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=batch_assembly.PaddedBatchAssembler(
               batch_size=4,
               max_prompt_length=4,
@@ -6710,9 +7016,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
           await run2_poll_queue.put(b)
 
         run2_bg_tasks.append(
-            asyncio.create_task(
-                _delayed_put(batch, delays_run2.get(pid, 0.01))
-            )
+            asyncio.create_task(_delayed_put(batch, delays_run2.get(pid, 0.01)))
         )
         return [f"req_{pid}_{g}" for g in range(4)]
 
@@ -6734,7 +7038,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
           algo=self.mock_algo,
           batch_size=2,
           max_staleness=2,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=batch_assembly.PaddedBatchAssembler(
               batch_size=4,
               max_prompt_length=4,
@@ -6757,17 +7061,13 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
 
       program2.scored_q.commit = _spy_commit2
 
-      await asyncio.wait_for(
-          program2.run_async(self.mock_engine), timeout=5.0
-      )
+      await asyncio.wait_for(program2.run_async(self.mock_engine), timeout=5.0)
       program2.close()
       for t in run2_bg_tasks:
         t.cancel()
 
       self.assertEqual(program2.step, 2)
-      self.assertEqual(
-          run2_dispatched, ["prompt_2", "prompt_4", "prompt_5"]
-      )
+      self.assertEqual(run2_dispatched, ["prompt_2", "prompt_4", "prompt_5"])
       self.assertEqual(run2_consumed, ["prompt_4", "prompt_2"])
       self.assertLen(run2_ckpts, 1)
       self.assertEqual(
@@ -6842,7 +7142,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
           algo=self.mock_algo,
           batch_size=2,
           max_staleness=1,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=batch_assembly.PaddedBatchAssembler(
               batch_size=4,
               max_prompt_length=4,
@@ -6894,7 +7194,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
           algo=self.mock_algo,
           batch_size=1,
           max_staleness=1,
-          reward_fns=[lambda *_: 1.0],
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=batch_assembly.PaddedBatchAssembler(
               batch_size=1,
               max_prompt_length=4,
@@ -6970,6 +7270,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
           (rl_program.GroupOrder.TRAJECTORY_COMPLETION, ["p2", "p0"]),
           (rl_program.GroupOrder.PROMPT_ARRIVAL, ["p0", "p1"]),
       ):
+        self.mock_algo.algo_config.reward_mode = "env"
         program = rl_program.StandardRLProgram(
             algo=self.mock_algo,
             dataset=["p0", "p1", "p2"],
@@ -6984,7 +7285,13 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
               prompt_id=pid,
               group_index=g_idx,
               start_step=0,
-              traj=_scored_traj(reward),
+              traj={
+                  **_scored_traj(reward),
+                  "conversation_text": [
+                      {"role": "user", "content": pid},
+                      {"role": "assistant", "content": "answer"},
+                  ],
+              },
               metadata={"batch_idx": batch_idx},
           )
 
