@@ -627,20 +627,24 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
   def test_snapshot_on_enqueue_isolates_step_mutation(self) -> None:
     """Verifies step mutation after enqueue does not alter saved file."""
+    file_s_copy = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir, run_id="copy_run", copy_step=True
+    )
+    self.addCleanup(file_s_copy.close)
     step = trajectory_lib.Step(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="Initial message",
         extra={"notes": "initial note"},
     )
-    self.file_s.add_step(step, trajectory_testing.METADATA_1)
+    file_s_copy.add_step(step, trajectory_testing.METADATA_1)
     # Mutate the caller's step object after enqueue.
     step_extra = step.extra
     self.assertIsNotNone(step_extra)
     step_extra["notes"] = "MUTATED_AFTER_ENQUEUE"
-    self.file_s.flush()
+    file_s_copy.flush()
 
-    step_path = self.file_s.get_step_path(
+    step_path = file_s_copy.get_step_path(
         trajectory_testing.TRAJECTORY_ID_1, step_id=1
     )
     saved_step = trajectory_lib.Step.model_validate_json(step_path.read_text())
@@ -1273,6 +1277,55 @@ class FileTrajectoryStoreConfigTest(
 
     with self.assertRaisesRegex(ValueError, "run_id"):
       file_s.to_config()
+
+  def test_copy_step_default_and_configured(self) -> None:
+    default_store = file_store.FileTrajectoryStore(
+        root_dir=self.create_tempdir().full_path,
+        run_id="run_default",
+    )
+    self.addCleanup(default_store.close)
+    self.assertFalse(default_store.copy_step)
+    self.assertNotIn("copy_step", default_store.to_config())
+
+    copy_store = file_store.FileTrajectoryStore(
+        root_dir=self.create_tempdir().full_path,
+        run_id="run_copy",
+        copy_step=True,
+    )
+    self.addCleanup(copy_store.close)
+    self.assertTrue(copy_store.copy_step)
+    self.assertTrue(copy_store.to_config().get("copy_step"))
+
+    rebuilt = self._build_store(copy_store.to_config())
+    self.assertTrue(rebuilt.copy_step)
+
+  def test_add_step_zero_copy_handover_by_default(self) -> None:
+    default_store = file_store.FileTrajectoryStore(
+        root_dir=self.create_tempdir().full_path,
+        run_id="run_zero_copy",
+    )
+    self.addCleanup(default_store.close)
+
+    enqueued_tasks = []
+    original_enqueue = default_store._writer._enqueue
+
+    def intercept_enqueue(task):
+      enqueued_tasks.append(task)
+      original_enqueue(task)
+
+    with mock.patch.object(
+        default_store._writer, "_enqueue", side_effect=intercept_enqueue
+    ):
+      step = trajectory_testing.STEP_1_1.model_copy(deep=True)
+      meta = trajectory_testing.METADATA_1.model_copy(deep=True)
+      default_store.add_step(step, meta)
+
+    self.assertLen(enqueued_tasks, 1)
+    task = enqueued_tasks[0]
+    # Zero-copy step handover preserves the identical object reference.
+    self.assertIs(task.step, step)
+    # Metadata is defensively copied so turn mutations do not leak.
+    self.assertIsNot(task.metadata, meta)
 
 
 if __name__ == "__main__":
