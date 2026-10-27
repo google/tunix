@@ -198,7 +198,7 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def restore_checkpoint(self, step: int | None = None) -> Any:
+  def restore_checkpoint(self, *, step: int | None = None) -> Any:
     """Restore state from checkpoint and return the metadata pytree.
 
     The metadata is the same as what is used on save_checkpoint.
@@ -225,7 +225,7 @@ class AbstractTrainer(abc.ABC):
     pass
 
   @abc.abstractmethod
-  def prepare_weight_sync(self, sync_request: Any = None) -> Any:
+  def prepare_weight_sync(self, *, sync_request: Any = None) -> Any:
     """Stages weights for transfer and returns coordinates/metadata for Rollouts to pull.
 
     For a Raiden based implementation, trigger the d2h weight transfer here.
@@ -239,7 +239,7 @@ class AbstractTrainer(abc.ABC):
         f"{type(self).__name__} does not implement prepare_weight_sync."
     )
 
-  def release_weight_sync(self, sync_request: Any = None) -> Any:
+  def release_weight_sync(self, *, sync_request: Any = None) -> Any:
     """Ends the staging hold taken by `prepare_weight_sync`.
 
     Called once the round's transfer is complete. Default implementation is a

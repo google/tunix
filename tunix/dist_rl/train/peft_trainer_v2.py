@@ -1320,7 +1320,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   @override
   def save_checkpoint(
       self,
-      metadata: Any = None,
+      metadata: Mapping[str, Any] | None = None,
       *,
       step: int | None = None,
       force: bool = False,
@@ -1345,12 +1345,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if metadata is None:
       metadata = self.custom_checkpoint_metadata()
     if step is None:
-      if isinstance(metadata, Mapping):
-        step = metadata.get("step")
-      elif hasattr(metadata, "step"):
-        step = getattr(metadata, "step")
-    if step is None:
-      step = self._train_steps
+      step = metadata.get("step", self._train_steps)
     if save_only_lora_params is None:
       save_only_lora_params = self._lora_enabled
     self.checkpoint_manager.save(
@@ -1363,7 +1358,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     )
 
   @override
-  def restore_checkpoint(self, step: int | None = None) -> Any:
+  def restore_checkpoint(self, *, step: int | None = None) -> Any:
     """Restores model, optimizer and step count from a checkpoint.
 
     Args:
@@ -1391,7 +1386,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return metadata
 
   @override
-  def prepare_weight_sync(self, sync_request: Any = None) -> Any:
+  def prepare_weight_sync(self, *, sync_request: Any = None) -> Any:
     """Stages this round's weights on the raiden transport, returns metadata."""
     del sync_request
     worker = self._weight_sync_worker
@@ -1451,7 +1446,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return [worker.work_unit_metadata()]
 
   @override
-  def release_weight_sync(self, sync_request: Any = None) -> Any:
+  def release_weight_sync(self, *, sync_request: Any = None) -> Any:
     """Ends this round's staging hold."""
     del sync_request
     worker = self._weight_sync_worker

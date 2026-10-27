@@ -477,6 +477,8 @@ class TrainerWorker(abstract_worker.Worker):
   @_offload_to_thread
   def release_weight_sync(self, sync_request: Any = None) -> Any:
     """Releases this round's staging and restores READY."""
+    # Not `_ensure_ready()`: `prepare_weight_sync` left the state at SYNCING,
+    # and `_ensure_ready()` raises unless the state is READY.
     result = (
         self._trainer.release_weight_sync(sync_request=sync_request)
         if self._trainer is not None

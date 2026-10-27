@@ -27,7 +27,7 @@ class _FakeTrainer:
   def __init__(self):
     self.calls = []
 
-  def prepare_weight_sync(self, sync_request=None):
+  def prepare_weight_sync(self, *, sync_request=None):
     del sync_request
     self.calls.append("prepare")
     return [{"unit": "trainer0"}]
@@ -38,14 +38,14 @@ class _FakeTrainer:
 
 class _ReleasingTrainer(_FakeTrainer):
 
-  def release_weight_sync(self, sync_request=None):
+  def release_weight_sync(self, *, sync_request=None):
     self.calls.append("release")
     self.release_request = sync_request
     return "released"
 
 class _FailingTrainer(_FakeTrainer):
 
-  def prepare_weight_sync(self, sync_request=None):
+  def prepare_weight_sync(self, *, sync_request=None):
     raise RuntimeError("boom")
 
 

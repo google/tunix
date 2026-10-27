@@ -78,13 +78,13 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
   def save_checkpoint(self, metadata=None, *, step=None, force=False):
     pass
 
-  def restore_checkpoint(self, step=None):
+  def restore_checkpoint(self, *, step=None):
     return {}
 
   def get_metrics(self):
     return {"loss": 0.25}
 
-  def prepare_weight_sync(self, sync_request=None):
+  def prepare_weight_sync(self, *, sync_request=None):
     pass
 
   def set_target_state(self, target_state: Any) -> None:

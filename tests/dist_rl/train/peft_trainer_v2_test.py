@@ -795,7 +795,8 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
     with self.assertRaises(TypeError):
       trainer.save_checkpoint(  # pylint: disable=unexpected-keyword-arg
-          metadata={'step': 1}, checkpoint_directory='/somewhere/else'
+          metadata={'step': 1},
+          checkpoint_directory='/somewhere/else',  # pyrefly: ignore[unexpected-keyword]
       )
 
   def _external_resume_trainer(
@@ -924,7 +925,9 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
     with self.assertRaises(TypeError):
       trainer.restore_checkpoint(  # pylint: disable=unexpected-keyword-arg
-          checkpoint_directory='/somewhere/else'
+          checkpoint_directory=(  # pyrefly: ignore[unexpected-keyword]
+              '/somewhere/else'
+          )
       )
 
   def test_restore_checkpoint_without_configured_directory_is_a_noop(self):
