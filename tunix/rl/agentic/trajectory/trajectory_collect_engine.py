@@ -280,8 +280,20 @@ class TrajectoryCollectEngine:
           dtype=np.int16,
       )
 
-  def _sync_trajectory_metadata(self, *, include_timings: bool = True) -> None:
-    """Syncs metadata status and agent trajectory timing/reward in place."""
+  def _sync_trajectory_metadata(
+      self,
+      *,
+      include_timings: bool = True,
+      include_final_metrics: bool = False,
+  ) -> None:
+    """Syncs metadata status and agent trajectory timing/reward in place.
+
+    Args:
+      include_timings: Whether to sync `env_time` and `reward_time`.
+      include_final_metrics: Whether to compute and set the ATIF
+        `final_metrics` rollup. Only enabled at episode end so per-step syncs
+        keep metadata unchanged and do not trigger metadata rewrites.
+    """
     if self.trajectory_store is None or self.metadata is None:
       return
     try:
@@ -292,6 +304,11 @@ class TrajectoryCollectEngine:
           gamma=self.gamma,
           env_time=self.env_time if include_timings else None,
           reward_time=self.reward_time if include_timings else None,
+          final_metrics=(
+              converter_lib.compute_final_metrics(self.agent.trajectory)
+              if include_final_metrics
+              else None
+          ),
       )
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(
@@ -305,7 +322,7 @@ class TrajectoryCollectEngine:
     if self.trajectory_store is None or self.metadata is None:
       return
     try:
-      self._sync_trajectory_metadata()
+      self._sync_trajectory_metadata(include_final_metrics=True)
       self.trajectory_store.update_metadata(self.metadata)
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(

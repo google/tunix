@@ -1702,6 +1702,136 @@ class UpdateTrajectoryMetadataTest(parameterized.TestCase):
     converter.update_trajectory_metadata(metadata=meta, policy_version=1)
     self.assertTrue(meta.masked_out)
 
+  def test_update_trajectory_metadata_sets_final_metrics(self):
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="traj_final_metrics",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+    )
+    self.assertIsNone(meta.final_metrics)
+    final_metrics = trajectory_lib.FinalMetrics(
+        total_prompt_tokens=7,
+        total_completion_tokens=11,
+        total_steps=2,
+    )
+
+    converter.update_trajectory_metadata(
+        metadata=meta, final_metrics=final_metrics
+    )
+    self.assertEqual(meta.final_metrics, final_metrics)
+
+    # Later syncs without final_metrics leave the recorded rollup in place.
+    converter.update_trajectory_metadata(metadata=meta, policy_version=1)
+    self.assertEqual(meta.final_metrics, final_metrics)
+
+
+class ComputeFinalMetricsTest(parameterized.TestCase):
+
+  def test_compute_final_metrics_none_trajectory(self):
+    self.assertIsNone(converter.compute_final_metrics(None))
+
+  def test_compute_final_metrics_sums_tokens_and_counts_turns(self):
+    traj = agent_types.Trajectory(
+        steps=[
+            agent_types.Step(assistant_tokens=np.array([1, 2, 3])),
+            agent_types.Step(assistant_tokens=[4, 5]),
+        ],
+        prompt_tokens=[101, 102, 103, 104],
+    )
+
+    final_metrics = converter.compute_final_metrics(traj)
+
+    self.assertEqual(
+        final_metrics,
+        trajectory_lib.FinalMetrics(
+            total_prompt_tokens=4,
+            total_completion_tokens=5,
+            total_steps=2,
+        ),
+    )
+
+  def test_compute_final_metrics_prefers_unpadded_prompt_length(self):
+    # Exact token continuity mode stores a left-padded prompt with its length.
+    traj = agent_types.Trajectory(
+        steps=[agent_types.Step(assistant_tokens=[7])],
+        prompt_tokens=[0, 0, 0, 101, 102],
+        prompt_length=2,
+    )
+
+    final_metrics = converter.compute_final_metrics(traj)
+
+    self.assertIsNotNone(final_metrics)
+    self.assertEqual(final_metrics.total_prompt_tokens, 2)
+
+  def test_compute_final_metrics_skips_turns_without_tokens(self):
+    traj = agent_types.Trajectory(
+        steps=[
+            agent_types.Step(assistant_tokens=None),
+            agent_types.Step(assistant_tokens=[1, 2]),
+        ],
+    )
+
+    final_metrics = converter.compute_final_metrics(traj)
+
+    self.assertEqual(
+        final_metrics,
+        trajectory_lib.FinalMetrics(
+            total_prompt_tokens=None,
+            total_completion_tokens=2,
+            total_steps=2,
+        ),
+    )
+
+  def test_compute_final_metrics_no_tokens_reported(self):
+    traj = agent_types.Trajectory(
+        steps=[agent_types.Step(), agent_types.Step()],
+    )
+
+    final_metrics = converter.compute_final_metrics(traj)
+
+    self.assertEqual(
+        final_metrics,
+        trajectory_lib.FinalMetrics(
+            total_prompt_tokens=None,
+            total_completion_tokens=None,
+            total_steps=2,
+        ),
+    )
+
+  def test_compute_final_metrics_empty_trajectory(self):
+    final_metrics = converter.compute_final_metrics(agent_types.Trajectory())
+
+    self.assertEqual(
+        final_metrics,
+        trajectory_lib.FinalMetrics(total_steps=0),
+    )
+
+  def test_final_metrics_round_trips_through_atif_metadata(self):
+    traj = agent_types.Trajectory(
+        steps=[
+            agent_types.Step(assistant_tokens=[1, 2, 3]),
+            agent_types.Step(assistant_tokens=[4, 5]),
+        ],
+        prompt_tokens=[101, 102],
+    )
+    meta = converter.create_trajectory_metadata(traj_id="traj_round_trip")
+    converter.update_trajectory_metadata(
+        metadata=meta, final_metrics=converter.compute_final_metrics(traj)
+    )
+
+    atif_json = meta.to_atif_metadata().model_dump_json(exclude_none=True)
+    restored = trajectory_lib.TunixTrajectoryMetadata.from_atif_metadata(
+        trajectory_lib.TrajectoryMetadata.model_validate_json(atif_json)
+    )
+
+    self.assertEqual(
+        restored.final_metrics,
+        trajectory_lib.FinalMetrics(
+            total_prompt_tokens=2,
+            total_completion_tokens=5,
+            total_steps=2,
+        ),
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -1822,6 +1822,15 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertEqual(metas[0].target_policy_versions, [42])
     self.assertLen(metas[0].env_time['step_latency'], 2)
     self.assertIn('reward_latency', metas[0].reward_time)
+    # final_metrics is populated once at episode end (not during add_step).
+    final_metrics = metas[0].final_metrics
+    self.assertIsNotNone(final_metrics)
+    self.assertEqual(final_metrics.total_prompt_tokens, 1)
+    self.assertEqual(
+        final_metrics.total_completion_tokens,
+        sum(len(step.assistant_tokens) for step in traj.steps),
+    )
+    self.assertEqual(final_metrics.total_steps, 2)
     self.assertEqual([step.reward for step in traj.steps], [1.0, 2.5])
     self.assertEqual(
         [step.reward for step in rehydrated_traj.steps],
