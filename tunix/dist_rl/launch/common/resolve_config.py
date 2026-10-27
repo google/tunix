@@ -17,10 +17,8 @@
 Provides:
 1. `DistHyperParameters` / `initialize(argv)`: Validated configuration loaded
    from `base_dist_config.yaml`, task/recipe override files, and
-   `section.key=value` overrides. Lightweight (no training imports); the node
-   and orchestrator mains use `dist_pipeline.DistPipeline`, which adds the
-   `tunix.cli` pipeline builders. Both load with `DIST_INIT_KWARGS` and then
-   call `finalize_dist_config` (derived defaults + dist checks).
+   `section.key=value` overrides. Used directly by the bash launchers, worker
+   nodes, and orchestrator (lightweight; no training imports).
 2. `render_bash_exports(hp)`: Emits shell environment variables for `local.sh`
    and `k8s.sh` (ports, TPU chip IDs, K8s JobSet parameters, and artifact/model
    paths).
@@ -64,9 +62,8 @@ DIST_INIT_KWARGS: Final[DistInitKwargs] = {
 def finalize_dist_config(hp: cli_config.HyperParameters) -> None:
   """Applies the distributed RL derived defaults, then validates invariants.
 
-  Called at the end of `DistHyperParameters.__init__` and
-  `dist_pipeline.DistPipeline.__init__`, after `HyperParameters.__init__` with
-  `DIST_INIT_KWARGS`.
+  Called at the end of `DistHyperParameters.__init__`, after
+  `HyperParameters.__init__` with `DIST_INIT_KWARGS`.
 
   Args:
     hp: Loaded configuration; updated in place.
@@ -76,11 +73,7 @@ def finalize_dist_config(hp: cli_config.HyperParameters) -> None:
 
 
 class DistHyperParameters(cli_config.HyperParameters):
-  """`tunix.cli.config.HyperParameters` extended for distributed RL.
-
-  Lightweight (no training imports) for `render_bash_exports`; the node and
-  orchestrator mains use `dist_pipeline.DistPipeline` instead.
-  """
+  """`tunix.cli.config.HyperParameters` extended for distributed RL."""
 
   def __init__(self, argv: Sequence[str]) -> None:
     super().__init__(argv, **DIST_INIT_KWARGS)
@@ -117,9 +110,7 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
   cluster["artifact_root"] = str(artifact_root)
 
   if not cluster["run_id"]:
-    ts = datetime.datetime.now(datetime.timezone.utc).strftime(
-        "%Y%m%d_%H%M%S"
-    )
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
     cluster["run_id"] = f"run_{ts}_{os.getpid()}"
 
   for role_key in (
@@ -212,7 +203,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
       if micro_batch % actor_axes["fsdp"] != 0:
         raise ValueError(
             f"rl_training_config.train_micro_batch_size ({micro_batch}) must"
-            f" be divisible by actor_model_config.mesh fsdp"
+            " be divisible by actor_model_config.mesh fsdp"
             f" ({actor_axes['fsdp']}) when model_source='maxtext'."
         )
 
@@ -315,9 +306,7 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       if isinstance(hp.config["kubernetes_config"], Mapping)
       else {}
   )
-  trainer_backend = (
-      "maxtext" if actor["model_source"] == "maxtext" else "tunix"
-  )
+  trainer_backend = "maxtext" if actor["model_source"] == "maxtext" else "tunix"
 
   exports: dict[str, object] = {
       "CLUSTER_TARGET": cluster["target"],
