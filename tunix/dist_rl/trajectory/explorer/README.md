@@ -19,7 +19,10 @@
 4. **Decoupled Diagnostics Library (`diagnostics/`)**
   Statistics live in `diagnostics/stats.py` (`:diagnostics`), which has no CLI dependencies: `TrajectoryStats.from_trajectory()` summarizes one trajectory and `RunStats.from_trajectories()` aggregates a run into a `pandas.DataFrame` (`RunStats.df`, columns per `COLUMN_DTYPES`) whose columns are reduced into run totals. Unreported quantities are `None` (nulls in the DataFrame), never `0`. This holds for each token count on its own, so a trajectory that reports only completion tokens renders as `N completion`. Both classes offer `to_json_dict()` for the `--json` contract. Subcommands render these objects rather than computing their own figures, so notebooks and evaluation scripts can import the same numbers.
 
-5. **Exit Codes**
+5. **Generic Statistics, Namespaced Tunix Extension (`diagnostics/tunix_stats.py`)**
+  A statistic belongs in `TrajectoryStats` only if it can be computed from base ATIF `Trajectory` and `Step` fields. Figures that only the Tunix schema reports (status, reward) live in `tunix_stats.TunixStats` (`:tunix_diagnostics`), which `TrajectoryStats` carries in a single optional `tunix` field, set only for `TunixTrajectory` instances. The field is flattened into `tunix_*` columns of `RunStats.df` and serialized as a `tunix` object (or `null`) in `to_json_dict()`, so a generic run shows all-null `tunix_*` columns and the generic code never learns Tunix field names. Run-level Tunix aggregates (status counts, mean reward) are `RunStats.tunix`, a `TunixRunStats` over the rollouts that report them, serialized as the `tunix` object of the run. `tunix_stats` is also the one place that reads the rollout engine's status vocabulary (`agent_types.TrajectoryStatus`).
+
+6. **Exit Codes**
    `0` on success, `1` when the requested data does not exist (e.g. `show` on an unknown trajectory ID), and `2` for a bad flag or flag combination. Errors go to `stderr`, never into the `--json` payload.
 
 ---

@@ -96,15 +96,16 @@ def _render_header(
     trajectory_stats: stats.TrajectoryStats,
 ) -> str:
   """Renders the trajectory's identity and headline figures."""
+  # Status and reward are Tunix figures; other schemas show `-`.
+  tunix = trajectory_stats.tunix
+  status = tunix.status if tunix is not None else None
+  reward = tunix.total_reward if tunix is not None else None
   lines = [
       f"Trajectory {trajectory.trajectory_id}",
       f"Session: {formatting.format_optional(trajectory.session_id)}",
       f"Agent: {trajectory.agent.name} {trajectory.agent.version}",
-      f"Status: {formatting.format_status(trajectory_stats.status)}",
-      (
-          "Reward:"
-          f" {formatting.format_optional(trajectory_stats.total_reward, '.3g')}"
-      ),
+      f"Status: {formatting.format_status(status)}",
+      f"Reward: {formatting.format_optional(reward, '.3g')}",
       f"Steps: {trajectory_stats.steps}",
       f"Tokens: {formatting.format_optional(trajectory_stats.tokens)}",
   ]

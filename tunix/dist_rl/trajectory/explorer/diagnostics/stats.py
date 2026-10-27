@@ -15,10 +15,15 @@
 """Derived statistics over ATIF trajectories.
 
 `TrajectoryStats.from_trajectory` summarizes a single trajectory (steps, tokens,
-tool calls, status, reward); `RunStats.from_trajectories` aggregates a
-collection of them (a "run") into a per-trajectory `pandas.DataFrame`. A
-quantity a trajectory does not report (status, reward, each token count) is
-`None` rather than 0 (a null in the DataFrame). See `TokenCounts`.
+tool calls); `RunStats.from_trajectories` aggregates a collection of them (a
+"run") into a per-trajectory `pandas.DataFrame`. A quantity a trajectory does
+not report (each token count) is `None` rather than 0 (a null in the
+DataFrame). See `TokenCounts`.
+
+Every statistic here is computed from base ATIF fields. Figures that only the
+Tunix schema reports (status, reward) live in `tunix_stats` and reach the
+generic classes through one slot each: `TrajectoryStats.tunix` (None for any
+other schema) and `RunStats.tunix`.
 """
 
 from __future__ import annotations
@@ -26,16 +31,14 @@ from __future__ import annotations
 import collections
 from collections.abc import Iterable, Mapping, Sequence
 import dataclasses
-import math
 import types
-from typing import NamedTuple, Protocol, TypedDict, runtime_checkable
+from typing import NamedTuple, TypedDict
 
 import pandas as pd
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
-from tunix.rl.agentic.agents import agent_types
+from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_stats
 
 _Trajectory = trajectory_lib.Trajectory[trajectory_lib.StepT]
-TrajectoryStatus = agent_types.TrajectoryStatus
 
 
 class StepCountsJson(TypedDict):
@@ -65,11 +68,10 @@ class TrajectoryStatsJson(TypedDict):
   """JSON form of `TrajectoryStats`."""
 
   trajectory_id: str | None
-  status: str | None
-  total_reward: float | None
   steps: StepCountsJson
   tokens: TokenCountsJson | None
   tool_call_names: list[str]
+  tunix: tunix_stats.TunixStatsJson | None
 
 
 class RunStatsJson(TypedDict):
@@ -79,19 +81,8 @@ class RunStatsJson(TypedDict):
   steps: StepCountsJson
   tokens: TokenCountsJson | None
   num_with_tokens: int
-  status_counts: dict[str, int]
-  num_with_status: int
-  mean_reward: float | None
-  num_with_reward: int
   tool_counts: dict[str, int]
-
-
-@runtime_checkable
-class _ReportsOutcome(Protocol):
-  """A trajectory whose schema declares a status and a total reward."""
-
-  status: str | TrajectoryStatus | None
-  total_reward: float | None
+  tunix: tunix_stats.TunixRunStatsJson
 
 
 class StepCounts(NamedTuple):
@@ -278,27 +269,21 @@ class TrajectoryStats:
   Only the root trajectory is summarized; embedded `subagent_trajectories` are
   not traversed (call `from_trajectory` on each subagent for its figures).
 
-  `status` and `total_reward` are read from trajectories whose schema declares
-  them and are None for trajectories whose schema does not (values packed in
-  `extra` are not read).
-
   Attributes:
     trajectory_id: The trajectory's ID, or None if unset.
-    status: Run status, or None if unreported.
-    total_reward: Overall score of the trajectory (its episode return in RL), or
-      None if unreported or non-finite (NaN, inf).
     steps: Step counts split by source.
     tokens: Token counts, or None if the trajectory reports none.
     tool_call_names: Function name of every tool call, in invocation order, with
       repeats kept.
+    tunix: Figures only a Tunix RL rollout reports, or None for any other
+      schema.
   """
 
   trajectory_id: str | None
-  status: TrajectoryStatus | None
-  total_reward: float | None
   steps: StepCounts
   tokens: TokenCounts | None
   tool_call_names: tuple[str, ...]
+  tunix: tunix_stats.TunixStats | None
 
   @classmethod
   def from_trajectory(cls, trajectory: _Trajectory) -> TrajectoryStats:
@@ -308,49 +293,33 @@ class TrajectoryStats:
       trajectory: The trajectory to summarize.
 
     Raises:
-      ValueError: If the trajectory states a status string that is not a
+      ValueError: If a Tunix rollout states a status that is not a
         `TrajectoryStatus` name.
     """
-    status: TrajectoryStatus | None = None
-    total_reward: float | None = None
-
-    if isinstance(trajectory, _ReportsOutcome):
-      raw_status = trajectory.status
-      if isinstance(raw_status, str):
-        try:
-          status = TrajectoryStatus[raw_status.upper()]
-        except KeyError:
-          raise ValueError(
-              f"Unrecognized trajectory status {raw_status!r} expected one of"
-              f" {[s.name for s in TrajectoryStatus]}."
-          ) from None
-      else:
-        status = raw_status
-      total_reward = trajectory.total_reward
-    if total_reward is not None and not math.isfinite(total_reward):
-      total_reward = None
     tool_call_names = []
     for step in trajectory.steps:
       for call in step.tool_calls or ():
         tool_call_names.append(call.function_name)
     return cls(
         trajectory_id=trajectory.trajectory_id,
-        status=status,
-        total_reward=total_reward,
         steps=StepCounts.from_steps(trajectory.steps),
         tokens=TokenCounts.from_trajectory(trajectory),
         tool_call_names=tuple(tool_call_names),
+        tunix=(
+            tunix_stats.TunixStats.from_trajectory(trajectory)
+            if isinstance(trajectory, trajectory_lib.TunixTrajectory)
+            else None
+        ),
     )
 
   def to_json_dict(self) -> TrajectoryStatsJson:
     """Returns the stats as a plain JSON-serializable dict."""
     return TrajectoryStatsJson(
         trajectory_id=self.trajectory_id,
-        status=self.status.name if self.status else None,
-        total_reward=self.total_reward,
         steps=self.steps.to_json_dict(),
         tokens=self.tokens.to_json_dict() if self.tokens is not None else None,
         tool_call_names=list(self.tool_call_names),
+        tunix=self.tunix.to_json_dict() if self.tunix is not None else None,
     )
 
   def to_row(self) -> dict[str, str | float | int | None]:
@@ -358,15 +327,15 @@ class TrajectoryStats:
 
     Unreported quantities are None, which become nulls in the DataFrame. The
     per-call `tool_call_names` sequence is reduced to `num_tool_calls`; the
-    run keeps the per-tool tally in `RunStats.tool_counts`.
+    run keeps the per-tool tally in `RunStats.tool_counts`. The Tunix figures
+    are the `tunix_*` cells (see `tunix_stats.to_row`).
     """
     return {
         "trajectory_id": self.trajectory_id,
-        "status": self.status.name if self.status else None,
-        "total_reward": self.total_reward,
         **_prefixed("steps", self.steps, StepCounts._fields),
         **_prefixed("tokens", self.tokens, TokenCounts._fields),
         "num_tool_calls": len(self.tool_call_names),
+        **tunix_stats.to_row(self.tunix),
     }
 
 
@@ -382,13 +351,15 @@ def _prefixed(
 
 COLUMN_DTYPES: Mapping[str, str] = types.MappingProxyType({
     "trajectory_id": "string",
-    "status": "string",
-    "total_reward": "float64",
     **{f"steps_{field}": "int64" for field in StepCounts._fields},
     # Capitalized "Int64" is pandas' nullable integer dtype: each token count
     # may be unreported.
     **{f"tokens_{field}": "Int64" for field in TokenCounts._fields},
     "num_tool_calls": "int64",
+    **{
+        tunix_stats.column(field): dtype
+        for field, dtype in tunix_stats.FIELD_DTYPES.items()
+    },
 })
 
 
@@ -460,45 +431,22 @@ class RunStats:
     )
 
   @property
-  def status_counts(self) -> Mapping[TrajectoryStatus, int]:
-    """Returns a read-only mapping from status to its number of trajectories.
+  def tunix(self) -> tunix_stats.TunixRunStats:
+    """Returns the Tunix figures of `df` aggregated over the run.
 
-    Trajectories that report no status are not counted.
+    Each aggregate covers the rollouts that report its figure, so a run without
+    Tunix rollouts has empty counts and no means.
     """
-    counts = self.df["status"].value_counts(sort=False)
-    return types.MappingProxyType(
-        {TrajectoryStatus[name]: int(count) for name, count in counts.items()}
-    )
-
-  @property
-  def num_with_status(self) -> int:
-    """Returns the number of trajectories that report a status."""
-    return int(self.df["status"].notna().sum())
-
-  @property
-  def num_with_reward(self) -> int:
-    """Returns the number of trajectories that report a reward."""
-    return int(self.df["total_reward"].notna().sum())
-
-  @property
-  def mean_reward(self) -> float | None:
-    """Returns the mean `total_reward`, or None if no trajectory reports one."""
-    if self.num_with_reward == 0:
-      return None
-    return float(self.df["total_reward"].mean())
+    return tunix_stats.TunixRunStats(df=self.df)
 
   def to_json_dict(self) -> RunStatsJson:
     """Returns the totals as a plain JSON-serializable dict."""
-    status_counts = collections.Counter(self.status_counts).most_common()
     tool_counts = collections.Counter(self.tool_counts).most_common()
     return RunStatsJson(
         num_trajectories=self.num_trajectories,
         steps=self.steps.to_json_dict(),
         tokens=self.tokens.to_json_dict() if self.tokens is not None else None,
         num_with_tokens=self.num_with_tokens,
-        status_counts={status.name: count for status, count in status_counts},
-        num_with_status=self.num_with_status,
-        mean_reward=self.mean_reward,
-        num_with_reward=self.num_with_reward,
         tool_counts=dict(tool_counts),
+        tunix=self.tunix.to_json_dict(),
     )

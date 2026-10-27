@@ -21,6 +21,7 @@ from absl.testing import parameterized
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
 from tunix.dist_rl.trajectory.explorer.diagnostics import stats as stats_lib
+from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_stats
 
 _AGENT = trajectory_lib.Agent(name="a", version="1.0")
 
@@ -265,68 +266,31 @@ class ToolCallsTest(absltest.TestCase):
     self.assertEqual(names, ("b", "a", "b"))
 
 
-class OutcomeTest(parameterized.TestCase):
-  """Tests for `status` and `total_reward`, which are not base ATIF fields."""
+class TunixSlotTest(absltest.TestCase):
+  """Tests for the `tunix` slot; `tunix_stats_test` covers the figures."""
 
-  @parameterized.named_parameters(
-      ("status_name", "SUCCEEDED"),
-      ("status_name_in_lower_case", "succeeded"),
-  )
-  def test_schemas_that_declare_the_fields_report_them(
-      self, status: str
-  ) -> None:
-    trajectory = _tunix_trajectory(total_reward=0.5, status=status)
+  def test_tunix_rollouts_fill_the_slot(self) -> None:
+    trajectory = _tunix_trajectory(total_reward=0.5, status="SUCCEEDED")
 
     stats = stats_lib.TrajectoryStats.from_trajectory(trajectory)
 
-    self.assertEqual(stats.status, stats_lib.TrajectoryStatus.SUCCEEDED)
-    self.assertEqual(stats.total_reward, 0.5)
+    self.assertIsNotNone(stats.tunix)
+    self.assertEqual(stats.tunix.status, tunix_stats.TrajectoryStatus.SUCCEEDED)
+    self.assertEqual(stats.tunix.total_reward, 0.5)
 
-  def test_a_status_stated_as_an_enum_member_is_reported(self) -> None:
-    # A schema may hold the `TrajectoryStatus` member itself rather than its
-    # name; `model_construct` skips validation so the enum is kept as-is.
-    trajectory = trajectory_lib.TunixTrajectory.model_construct(
-        trajectory_id="traj_test",
-        agent=_AGENT,
-        steps=[],
-        status=stats_lib.TrajectoryStatus.TIMEOUT,
-    )
-
-    stats = stats_lib.TrajectoryStats.from_trajectory(trajectory)
-
-    self.assertEqual(stats.status, stats_lib.TrajectoryStatus.TIMEOUT)
-    self.assertEqual(stats.to_row()["status"], "TIMEOUT")
-
-  def test_schemas_that_do_not_declare_the_fields_report_neither(self) -> None:
+  def test_other_schemas_leave_the_slot_empty(self) -> None:
+    # Values packed in `extra` are not read either.
     trajectory = _trajectory(extra={"status": "SUCCEEDED", "reward": 1.0})
 
     stats = stats_lib.TrajectoryStats.from_trajectory(trajectory)
 
-    self.assertIsNone(stats.status)
-    self.assertIsNone(stats.total_reward)
-
-  def test_an_unstated_status_is_unreported(self) -> None:
-    stats = stats_lib.TrajectoryStats.from_trajectory(_tunix_trajectory())
-
-    self.assertIsNone(stats.status)
+    self.assertIsNone(stats.tunix)
 
   def test_an_unrecognized_status_is_rejected(self) -> None:
     trajectory = _tunix_trajectory(status="COMPLETED")
 
     with self.assertRaisesRegex(ValueError, "Unrecognized trajectory status"):
       stats_lib.TrajectoryStats.from_trajectory(trajectory)
-
-  @parameterized.named_parameters(
-      ("nan", float("nan")),
-      ("inf", float("inf")),
-      ("negative_inf", float("-inf")),
-  )
-  def test_a_non_finite_total_reward_is_unreported(self, value: float) -> None:
-    trajectory = _tunix_trajectory(total_reward=value)
-
-    self.assertIsNone(
-        stats_lib.TrajectoryStats.from_trajectory(trajectory).total_reward
-    )
 
 
 class RunStatsTest(parameterized.TestCase):
@@ -380,20 +344,29 @@ class RunStatsTest(parameterized.TestCase):
     # Reported quantities land in the right typed column.
     reported = run.df.loc[run.df.trajectory_id == "traj_1"]
     self.assertEqual(reported.squeeze(axis=0).to_dict(), row)
-    self.assertEqual(reported["status"].item(), "SUCCEEDED")
-    self.assertEqual(reported["total_reward"].item(), 0.5)
     self.assertEqual(reported["tokens_prompt"].item(), 5)
     self.assertEqual(reported["tokens_completion"].item(), 2)
     self.assertEqual(reported["num_tool_calls"].item(), 2)
+    self.assertEqual(reported["tunix_status"].item(), "SUCCEEDED")
+    self.assertEqual(reported["tunix_total_reward"].item(), 0.5)
 
     # Unreported quantities are nulls, not zeros; counts are always reported.
     unreported = run.df.loc[run.df.trajectory_id == "traj_2"]
-    self.assertTrue(unreported["status"].isna().all())
-    self.assertTrue(unreported["total_reward"].isna().all())
     self.assertTrue(unreported["tokens_prompt"].isna().all())
     self.assertTrue(unreported["tokens_completion"].isna().all())
     self.assertTrue(unreported["tokens_cached"].isna().all())
     self.assertEqual(unreported["num_tool_calls"].item(), 0)
+    self.assertTrue(unreported["tunix_status"].isna().all())
+    self.assertTrue(unreported["tunix_total_reward"].isna().all())
+
+  def test_non_tunix_trajectories_have_null_tunix_columns(self) -> None:
+    run = stats_lib.RunStats.from_trajectories(
+        [_trajectory([_step(1, trajectory_lib.Source.AGENT)])]
+    )
+
+    tunix_columns = [c for c in run.df.columns if c.startswith("tunix_")]
+    self.assertLen(tunix_columns, len(tunix_stats.FIELD_DTYPES))
+    self.assertTrue(run.df[tunix_columns].isna().all(axis=None))
 
   def test_empty_run_keeps_the_column_schema(self) -> None:
     run = stats_lib.RunStats.from_trajectories([])
@@ -438,17 +411,6 @@ class RunStatsTest(parameterized.TestCase):
     )
     self.assertEqual(run.num_with_tokens, 3)
 
-  def test_mean_reward_averages_only_reporting_trajectories(self) -> None:
-    run = stats_lib.RunStats.from_trajectories([
-        _tunix_trajectory(total_reward=1.0),
-        _tunix_trajectory(total_reward=0.0),
-        _tunix_trajectory(),
-    ])
-
-    self.assertEqual(run.df["total_reward"].dropna().tolist(), [1.0, 0.0])
-    self.assertEqual(run.mean_reward, 0.5)
-    self.assertEqual(run.num_with_reward, 2)
-
   @parameterized.named_parameters(
       ("empty_run", 0),
       ("trajectories_reporting_nothing", 2),
@@ -464,44 +426,7 @@ class RunStatsTest(parameterized.TestCase):
     self.assertEqual(run.steps.total, 0)
     self.assertIsNone(run.tokens)
     self.assertEqual(run.num_with_tokens, 0)
-    self.assertIsNone(run.mean_reward)
-    self.assertEqual(run.num_with_reward, 0)
-    self.assertEmpty(run.status_counts)
-    self.assertEqual(run.num_with_status, 0)
     self.assertEmpty(run.tool_counts)
-
-  def test_status_counts_tally_only_reporting_trajectories(self) -> None:
-    # "SUCCEEDED" and "succeeded" must merge into a single bucket: the
-    # per-trajectory `.upper()` normalisation is what makes the run-level
-    # tally correct.
-    run = stats_lib.RunStats.from_trajectories([
-        _tunix_trajectory(status="TIMEOUT"),
-        _tunix_trajectory(status="SUCCEEDED"),
-        _tunix_trajectory(),
-        _tunix_trajectory(status="succeeded"),
-    ])
-
-    self.assertEqual(
-        run.status_counts,
-        {
-            stats_lib.TrajectoryStatus.SUCCEEDED: 2,
-            stats_lib.TrajectoryStatus.TIMEOUT: 1,
-        },
-    )
-    self.assertEqual(
-        list(run.status_counts),
-        [
-            stats_lib.TrajectoryStatus.TIMEOUT,
-            stats_lib.TrajectoryStatus.SUCCEEDED,
-        ],
-    )
-    self.assertEqual(run.num_with_status, 3)
-    self.assertEqual(
-        run.to_json_dict()["status_counts"], {"SUCCEEDED": 2, "TIMEOUT": 1}
-    )
-    self.assertEqual(
-        list(run.to_json_dict()["status_counts"]), ["SUCCEEDED", "TIMEOUT"]
-    )
 
   def test_tool_counts_are_summed_across_the_run(self) -> None:
     def with_tools(*names: str) -> trajectory_lib.Trajectory:
@@ -561,11 +486,13 @@ class RunStatsTest(parameterized.TestCase):
                 "total": 7,
             },
             "num_with_tokens": 1,
-            "status_counts": {"SUCCEEDED": 1},
-            "num_with_status": 1,
-            "mean_reward": 1.0,
-            "num_with_reward": 1,
             "tool_counts": {},
+            "tunix": {
+                "status_counts": {"SUCCEEDED": 1},
+                "num_with_status": 1,
+                "mean_reward": 1.0,
+                "num_with_reward": 1,
+            },
         },
     )
 
@@ -583,8 +510,6 @@ class JsonDictTest(absltest.TestCase):
         payload,
         {
             "trajectory_id": None,
-            "status": None,
-            "total_reward": None,
             "steps": {
                 "total": 0,
                 "agent": 0,
@@ -594,6 +519,10 @@ class JsonDictTest(absltest.TestCase):
             },
             "tokens": None,
             "tool_call_names": [],
+            "tunix": {
+                "status": None,
+                "total_reward": None,
+            },
         },
     )
     # A rollout reports only completion tokens; the other counts stay null.
@@ -604,6 +533,13 @@ class JsonDictTest(absltest.TestCase):
         rollout_payload["tokens"],
         {"prompt": None, "completion": 8, "cached": None, "total": None},
     )
+
+  def test_non_tunix_trajectory_serializes_null_tunix_block(self) -> None:
+    payload = stats_lib.TrajectoryStats.from_trajectory(
+        _trajectory()
+    ).to_json_dict()
+
+    self.assertIsNone(payload["tunix"])
 
   def test_stats_serialize_every_reported_quantity(self) -> None:
     trajectory = _tunix_trajectory(
@@ -639,8 +575,6 @@ class JsonDictTest(absltest.TestCase):
         payload,
         {
             "trajectory_id": "traj_test",
-            "status": "SUCCEEDED",
-            "total_reward": 0.85,
             "steps": {
                 "total": 2,
                 "agent": 1,
@@ -655,6 +589,10 @@ class JsonDictTest(absltest.TestCase):
                 "total": 610,
             },
             "tool_call_names": ["find_files"],
+            "tunix": {
+                "status": "SUCCEEDED",
+                "total_reward": 0.85,
+            },
         },
     )
 

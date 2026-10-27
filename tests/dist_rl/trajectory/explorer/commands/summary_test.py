@@ -120,10 +120,10 @@ class SummaryTest(absltest.TestCase):
     self.assertEqual(data["run"]["steps"]["total"], 4)
     self.assertEqual(data["run"]["tokens"]["total"], 150)
     self.assertEqual(data["run"]["num_with_tokens"], 1)
-    self.assertEqual(data["run"]["status_counts"], {})
     self.assertEqual(data["run"]["tool_counts"], {"search": 1})
+    self.assertEqual(data["run"]["tunix"]["status_counts"], {})
     # One flat record per trajectory, the columns of `RunStats.df`, with
-    # unreported quantities as null.
+    # unreported quantities as null (Tunix figures included).
     self.assertEqual(
         [t["trajectory_id"] for t in data["trajectories"]],
         [
@@ -135,8 +135,6 @@ class SummaryTest(absltest.TestCase):
         data["trajectories"][0],
         {
             "trajectory_id": _NO_OUTCOME_TRAJECTORY_1.trajectory_id,
-            "status": None,
-            "total_reward": None,
             "steps_agent": 1,
             "steps_user": 0,
             "steps_system": 0,
@@ -145,6 +143,8 @@ class SummaryTest(absltest.TestCase):
             "tokens_completion": None,
             "tokens_cached": None,
             "num_tool_calls": 0,
+            "tunix_status": None,
+            "tunix_total_reward": None,
         },
     )
     self.assertEqual(data["trajectories"][1]["tokens_prompt"], 100)
@@ -157,16 +157,17 @@ class SummaryTest(absltest.TestCase):
     self.assertEqual(exit_code, 0)
     data = json.loads(out)
     self.assertEqual(
-        data["run"]["status_counts"], {_SUCCEEDED_TRAJECTORY.status: 1}
+        data["run"]["tunix"]["status_counts"],
+        {_SUCCEEDED_TRAJECTORY.status: 1},
     )
     self.assertEqual(
-        data["run"]["mean_reward"], _SUCCEEDED_TRAJECTORY.total_reward
+        data["run"]["tunix"]["mean_reward"], _SUCCEEDED_TRAJECTORY.total_reward
     )
     self.assertEqual(
-        data["trajectories"][0]["status"], _SUCCEEDED_TRAJECTORY.status
+        data["trajectories"][0]["tunix_status"], _SUCCEEDED_TRAJECTORY.status
     )
     self.assertEqual(
-        data["trajectories"][0]["total_reward"],
+        data["trajectories"][0]["tunix_total_reward"],
         _SUCCEEDED_TRAJECTORY.total_reward,
     )
 
@@ -183,8 +184,8 @@ class SummaryTest(absltest.TestCase):
     )
     self.assertEqual(exit_code, 0)
     data = json.loads(out)
-    self.assertEqual(data["trajectories"][0]["total_reward"], 1 / 3)
-    self.assertEqual(data["run"]["mean_reward"], 1 / 3)
+    self.assertEqual(data["trajectories"][0]["tunix_total_reward"], 1 / 3)
+    self.assertEqual(data["run"]["tunix"]["mean_reward"], 1 / 3)
 
 
 if __name__ == "__main__":
