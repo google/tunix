@@ -23,6 +23,7 @@ import dataclasses
 import functools
 import threading
 from typing import Any
+from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
@@ -60,30 +61,30 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
   def with_gen_model_input_fn(self, gen_model_input_fn):
     self.gen_model_input_fn = gen_model_input_fn
 
-  def fwd_bwd(self, payload, **kwargs):
-    self.fwd_bwd_calls.append((payload, kwargs))
+  def fwd_bwd(self, payload):
+    self.fwd_bwd_calls.append(payload)
 
-  def update(self, **kwargs):
+  def update(self):
     self.step_count += 1
     return self.step_count
 
-  def eval_step(self, payload, **kwargs):
-    self.eval_step_calls.append((payload, kwargs))
+  def eval_step(self, payload):
+    self.eval_step_calls.append(payload)
 
   def fwd_only(self, fn, *args, **kwargs):
     self.fwd_only_calls.append((args, kwargs))
     return fn(self.model, *args, **kwargs)
 
-  def save_checkpoint(self, metadata, **kwargs):
+  def save_checkpoint(self, metadata=None, *, step=None, force=False):
     pass
 
-  def restore_checkpoint(self, **kwargs):
+  def restore_checkpoint(self, *, step=None):
     return {}
 
   def get_metrics(self):
     return {"loss": 0.25}
 
-  def prepare_weight_sync(self, **kwargs):
+  def prepare_weight_sync(self, *, sync_request=None):
     pass
 
   def set_target_state(self, target_state: Any) -> None:
@@ -343,8 +344,8 @@ class TrainerWorkerTest(absltest.TestCase):
     release_step = threading.Event()
     close_called = threading.Event()
 
-    def _blocking_fwd_bwd(payload, **kwargs):
-      del payload, kwargs
+    def _blocking_fwd_bwd(payload):
+      del payload
       entered_step.set()
       if not release_step.wait(timeout=10.0):
         raise TimeoutError("release_step timed out")
@@ -446,7 +447,7 @@ class TrainerWorkerTest(absltest.TestCase):
     self.assertEqual(resp.metadata["policy_version"], 3)
     self.assertTrue(resp.metadata["queued"])
     self.assertLen(self.fake_trainer.fwd_bwd_calls, 1)
-    self.assertIs(self.fake_trainer.fwd_bwd_calls[0][0], payload)
+    self.assertIs(self.fake_trainer.fwd_bwd_calls[0], payload)
 
   def test_eval_step_with_train_request(self):
     payload = datatypes.RLTrainerPayload(
@@ -469,7 +470,7 @@ class TrainerWorkerTest(absltest.TestCase):
     self.assertEqual(resp.metadata["eval_split"], "val")
     self.assertTrue(resp.metadata["evaluated"])
     self.assertLen(self.fake_trainer.eval_step_calls, 1)
-    self.assertIs(self.fake_trainer.eval_step_calls[0][0], payload)
+    self.assertIs(self.fake_trainer.eval_step_calls[0], payload)
 
   def test_update_returns_step_count(self):
     step = self.worker.update()
@@ -483,10 +484,22 @@ class TrainerWorkerTest(absltest.TestCase):
     self.assertTrue(resp.metadata["target_state_configured"])
     self.assertEqual(self.fake_trainer.target_state, target_state)
 
-  def test_set_target_state_raises_when_trainer_unsupported(self):
-    self.fake_trainer.set_target_state = None
-    with self.assertRaises(AttributeError):
-      self.worker.set_target_state(target_state={"params": 1})
+  def test_save_checkpoint_metadata_is_optional(self):
+    with mock.patch.object(
+        self.fake_trainer, "save_checkpoint", autospec=True
+    ) as save:
+      self.worker.save_checkpoint(step=42, force=True)
+    save.assert_called_once_with(None, step=42, force=True)
+
+  def test_set_target_state_falls_back_to_abstract_default(self):
+    with mock.patch.object(
+        FakeTrainer,
+        "set_target_state",
+        abstract_trainer.AbstractTrainer.set_target_state,
+    ):
+      resp = self.worker.set_target_state(target_state={"params": 1})
+    self.assertTrue(resp.metadata["target_state_configured"])
+    self.assertIsNone(self.fake_trainer.target_state)
 
   def _expected_logps(self, request, chunk_size=0):
     graphdef, state = nnx.split(self.fake_trainer.model)

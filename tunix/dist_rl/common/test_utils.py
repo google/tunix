@@ -381,38 +381,40 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     del gen_model_input_fn
     return self
 
-  def fwd_bwd(self, payload: datatypes.TrainerPayload, **kwargs: Any) -> None:
-    del payload, kwargs
+  def fwd_bwd(self, payload: datatypes.TrainerPayload) -> None:
+    del payload
 
-  def update(self, **kwargs: Any) -> int:
-    del kwargs
+  def update(self) -> int:
     self.step_count += 1
     self.policy_version += 1
     return self.step_count
 
-  def eval_step(self, payload: datatypes.TrainerPayload, **kwargs: Any) -> None:
-    del payload, kwargs
+  def eval_step(self, payload: datatypes.TrainerPayload) -> None:
+    del payload
 
   def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     return fn(None, *args, **kwargs)
 
-  def save_checkpoint(self, metadata: Any, **kwargs: Any) -> None:
-    del metadata, kwargs
+  def save_checkpoint(
+      self,
+      metadata: Any = None,
+      *,
+      step: int | None = None,
+      force: bool = False,
+  ) -> None:
+    del metadata, step, force
 
-  def restore_checkpoint(
-      self, step: int | None = None, **kwargs: Any
-  ) -> dict[str, Any]:
-    del step, kwargs
+  def restore_checkpoint(self, *, step: int | None = None) -> dict[str, Any]:
+    del step
     return {}
 
   # Return type kept as `Any` for Pyrefly override compatibility with
-  # `AbstractTrainer.get_metrics() -> metrics.MetricsBuffer` and
-  # `AbstractTrainer.prepare_weight_sync() -> None`.
+  # `AbstractTrainer.get_metrics() -> metrics.MetricsBuffer`.
   def get_metrics(self) -> Any:
     return {"loss": 0.25}
 
-  def prepare_weight_sync(self, **kwargs: Any) -> Any:
-    del kwargs
+  def prepare_weight_sync(self, *, sync_request: Any = None) -> Any:
+    del sync_request
     self.prepare_calls += 1
     return [
         weight_sync.WorkUnitMetadata(
@@ -430,10 +432,10 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
 
   def release_weight_sync(
       self,
+      *,
       sync_request: datatypes.WeightSyncRequest | None = None,
-      **kwargs: Any,
   ) -> None:
-    del sync_request, kwargs
+    del sync_request
     self.release_calls += 1
 
   def close(self) -> None:

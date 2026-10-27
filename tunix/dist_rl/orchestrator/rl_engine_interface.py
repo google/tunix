@@ -122,8 +122,6 @@ class AbstractRLEngine(Protocol):
       role: datatypes.Role = datatypes.Role.ACTOR,
       accumulate_gradients: bool = False,
       apply_optimizer: bool = True,
-      skip_jit: bool = False,
-      **kwargs: Any,
   ) -> Any:
     """Executes forward/backward gradient update on trainer workers."""
     ...
@@ -178,7 +176,9 @@ class AbstractRLEngine(Protocol):
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
       metadata: Any = None,
-      **kwargs: Any,
+      *,
+      step: int | None = None,
+      force: bool = False,
   ) -> Any:
     """Requests the trainer worker for `role` to save a checkpoint."""
     ...

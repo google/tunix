@@ -270,27 +270,16 @@ class TrainerWorker(abstract_worker.Worker):
   @_offload_to_thread
   def set_target_state(self, target_state: Any) -> datatypes.Response:
     """Stores rollout target_state so trainer-side weight sync can convert."""
-    trainer = self._ensure_ready()
-    setter = getattr(trainer, "set_target_state", None)
-    if not callable(setter):
-      raise AttributeError(
-          f"{type(trainer).__name__} does not support set_target_state"
-      )
-    setter(target_state)
+    self._ensure_ready().set_target_state(target_state)
     return self._response(target_state_configured=True)
 
   @_offload_to_thread
-  def fwd_bwd(
-      self,
-      request: datatypes.TrainRequest,
-      **kwargs: Any,
-  ) -> datatypes.Response:
+  def fwd_bwd(self, request: datatypes.TrainRequest) -> datatypes.Response:
     """Executes one forward/backward pass."""
     trainer = self._ensure_ready()
     req_metadata = dict(request.metadata) if request.metadata else {}
-    kwargs.pop("skip_jit", None)
     try:
-      trainer.fwd_bwd(request.payload, **kwargs)
+      trainer.fwd_bwd(request.payload)
       self._last_error = None
       resp = self._response(queued=True, **req_metadata)
       resp.request_id = request.request_id
@@ -301,11 +290,11 @@ class TrainerWorker(abstract_worker.Worker):
       raise
 
   @_offload_to_thread
-  def update(self, **kwargs) -> int:
+  def update(self) -> int:
     """Applies the accumulated (mean) gradients as one optimizer update."""
     trainer = self._ensure_ready()
     try:
-      train_step = trainer.update(**kwargs)
+      train_step = trainer.update()
       self._last_error = None
       return train_step
     except Exception as exc:
@@ -314,16 +303,12 @@ class TrainerWorker(abstract_worker.Worker):
       raise
 
   @_offload_to_thread
-  def eval_step(
-      self,
-      request: datatypes.TrainRequest,
-      **kwargs: Any,
-  ) -> datatypes.Response:
+  def eval_step(self, request: datatypes.TrainRequest) -> datatypes.Response:
     """Executes one evaluation step on the given payload."""
     trainer = self._ensure_ready()
     req_metadata = dict(request.metadata) if request.metadata else {}
     try:
-      trainer.eval_step(request.payload, **kwargs)
+      trainer.eval_step(request.payload)
       self._last_error = None
       resp = self._response(evaluated=True, **req_metadata)
       resp.request_id = request.request_id
@@ -334,7 +319,7 @@ class TrainerWorker(abstract_worker.Worker):
       raise
 
   @_offload_to_thread
-  def run_eval(self, eval_ds: Any, **kwargs) -> datatypes.Response:
+  def run_eval(self, eval_ds: Any) -> datatypes.Response:
     """Runs an explicit evaluation phase over eval micro-batches."""
     trainer = self._ensure_ready()
     if eval_ds is None:
@@ -342,7 +327,7 @@ class TrainerWorker(abstract_worker.Worker):
     try:
       run_eval = getattr(trainer, "run_eval", None)
       if callable(run_eval):
-        run_eval(eval_ds, **kwargs)
+        run_eval(eval_ds)
         self._last_error = None
         return self._response(evaluated=True)
 
@@ -355,7 +340,7 @@ class TrainerWorker(abstract_worker.Worker):
       eval_batches = 0
       with context:
         for payload in eval_ds:
-          trainer.eval_step(payload, **kwargs)
+          trainer.eval_step(payload)
           eval_batches += 1
       self._last_error = None
       return self._response(evaluated=True, eval_batches=eval_batches)
@@ -450,11 +435,17 @@ class TrainerWorker(abstract_worker.Worker):
       raise
 
   @_offload_to_thread
-  def save_checkpoint(self, metadata: Any, **kwargs) -> datatypes.Response:
+  def save_checkpoint(
+      self,
+      metadata: Any = None,
+      *,
+      step: int | None = None,
+      force: bool = False,
+  ) -> datatypes.Response:
     """Force the trainer to serialize its state (model + optimizer)."""
     trainer = self._ensure_ready()
     try:
-      trainer.save_checkpoint(metadata, **kwargs)
+      trainer.save_checkpoint(metadata, step=step, force=force)
       self._last_error = None
       return self._response(checkpoint_saved=True)
     except Exception as exc:
@@ -463,19 +454,17 @@ class TrainerWorker(abstract_worker.Worker):
       raise
 
   @_offload_to_thread
-  def restore_checkpoint(self, **kwargs) -> Any:
-    """Restore state from latest checkpoint and return the metadata pytree."""
-    return self._ensure_ready().restore_checkpoint(**kwargs)
+  def restore_checkpoint(self, step: int | None = None) -> Any:
+    """Restore state from a checkpoint and return the metadata pytree."""
+    return self._ensure_ready().restore_checkpoint(step=step)
 
   @_offload_to_thread
-  def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  def prepare_weight_sync(self, sync_request: Any = None) -> Any:
     """Stages weights for transfer and returns their metadata."""
     trainer = self._ensure_ready()
     self.state = WorkerState.SYNCING
     try:
-      if sync_request is not None:
-        kwargs["sync_request"] = sync_request
-      metadata = trainer.prepare_weight_sync(**kwargs)
+      metadata = trainer.prepare_weight_sync(sync_request=sync_request)
       self._last_error = None
       if metadata is not None:
         return metadata
@@ -486,10 +475,15 @@ class TrainerWorker(abstract_worker.Worker):
       raise
 
   @_offload_to_thread
-  def release_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  def release_weight_sync(self, sync_request: Any = None) -> Any:
     """Releases this round's staging and restores READY."""
-    release = getattr(self._trainer, "release_weight_sync", None)
-    result = release(sync_request=sync_request, **kwargs) if release else None
+    # Not `_ensure_ready()`: `prepare_weight_sync` left the state at SYNCING,
+    # and `_ensure_ready()` raises unless the state is READY.
+    result = (
+        self._trainer.release_weight_sync(sync_request=sync_request)
+        if self._trainer is not None
+        else None
+    )
     if self.state == WorkerState.SYNCING:
       self.state = WorkerState.READY
     return result
