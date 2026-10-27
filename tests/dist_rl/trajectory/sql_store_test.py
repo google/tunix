@@ -1152,6 +1152,59 @@ class SqlTrajectoryStoreConfigTest(store_testing.TrajectoryStoreConfigTestCase):
         [trajectory_testing.METADATA_1.trajectory_id],
     )
 
+  def test_copy_step_default_and_configured(self) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "store.db")
+    db_url = f"sqlite:///{db_path}"
+
+    default_store = sql_store.SqlTrajectoryStore(
+        run_id="run_default",
+        db_url=db_url,
+    )
+    self.addCleanup(default_store.close)
+    self.assertFalse(default_store.copy_step)
+    self.assertNotIn("copy_step", default_store.to_config())
+
+    copy_store = sql_store.SqlTrajectoryStore(
+        run_id="run_copy",
+        db_url=db_url,
+        copy_step=True,
+    )
+    self.addCleanup(copy_store.close)
+    self.assertTrue(copy_store.copy_step)
+    self.assertTrue(copy_store.to_config().get("copy_step"))
+
+    rebuilt = self._build_store(copy_store.to_config())
+    self.assertTrue(rebuilt.copy_step)
+
+  def test_add_step_zero_copy_handover_by_default(self) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "store.db")
+    default_store = sql_store.SqlTrajectoryStore(
+        run_id="run_zero_copy",
+        db_url=f"sqlite:///{db_path}",
+    )
+    self.addCleanup(default_store.close)
+
+    enqueued_tasks = []
+    original_enqueue = default_store._writer._enqueue
+
+    def intercept_enqueue(task):
+      enqueued_tasks.append(task)
+      original_enqueue(task)
+
+    with mock.patch.object(
+        default_store._writer, "_enqueue", side_effect=intercept_enqueue
+    ):
+      step = trajectory_testing.STEP_1_1.model_copy(deep=True)
+      meta = trajectory_testing.METADATA_1.model_copy(deep=True)
+      default_store.add_step(step, meta)
+
+    self.assertLen(enqueued_tasks, 1)
+    task = enqueued_tasks[0]
+    # Zero-copy step handover preserves the identical object reference.
+    self.assertIs(task.step, step)
+    # Metadata is defensively copied so turn mutations do not leak.
+    self.assertIsNot(task.metadata, meta)
+
 
 if __name__ == "__main__":
   absltest.main()

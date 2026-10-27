@@ -151,9 +151,9 @@ def _resolve_target_path(task: _FileWriteTask) -> epath.Path:
 class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
   """Asynchronously writes trajectory metadata and step files to disk."""
 
-  def __init__(self):
+  def __init__(self, copy_step: bool = False):
     """Initializes _AsyncFileWriter without starting the background worker."""
-    super().__init__()
+    super().__init__(copy_step=copy_step)
     # In-memory cache mapping trajectory_id to the hash of its last written
     # metadata JSON. Used by the worker thread to skip redundant metadata.json
     # disk writes across steps.
@@ -173,17 +173,10 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
     waiting for any disk I/O. The worker thread is lazily spawned on the first
     invocation if not already running.
 
-    `metadata` and `step` are deep copied by `WriteTask`, so what lands
-    on disk is exactly what the caller passed in. Serialization happens on the
-    worker thread, possibly long after this call returns, and callers routinely
-    keep mutating the objects they hand over (a rollout worker appending tokens
-    to the step it just logged, or flipping trajectory status from RUNNING to
-    COMPLETED). Without the copy, those later mutations would leak into the
-    already enqueued write, producing files that never matched any state the
-    trajectory actually had. The copy makes the caller-side cost proportional
-    to the payload size rather than O(1), which is a deliberate trade for
-    correctness; the expensive part, serialization and I/O, remains off the
-    caller thread.
+    `metadata` is always deep copied by `WriteTask` so status/reward mutations
+    across turns do not leak. `step` is handed over with zero copy by default to
+    eliminate synchronous GIL contention on rollout workers. When `copy_step`
+    is True, `step` is deep copied defensively.
 
     Args:
       traj_dir: Directory path for the trajectory.
@@ -199,6 +192,7 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
         meta_path=meta_path,
         metadata=metadata,
         step=step,
+        copy_step=self._copy_step,
     )
     self._enqueue(task)
 
@@ -290,6 +284,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       self,
       root_dir: epath.PathLike,
       run_id: str | None = None,
+      copy_step: bool = False,
   ) -> None:
     """Initializes FileTrajectoryStore.
 
@@ -300,6 +295,9 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         scoped under root_dir / run_id. This ID MUST stay the same when
         recovering from failures or process restarts as long as the same RL
         process is being continued.
+      copy_step: If True, deep copies step objects before writing. Defaults to
+        False (zero-copy step handover) to avoid synchronous GIL contention on
+        rollout workers.
 
     Raises:
       ValueError: If root_dir is empty, or run_id is given but cannot be used as
@@ -320,7 +318,8 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       )
     self._raw_root_dir = epath.Path(root_dir)
     self._run_id = run_id
-    self._writer = _AsyncFileWriter()
+    self._copy_step = copy_step
+    self._writer = _AsyncFileWriter(copy_step=copy_step)
 
   @classmethod
   def _from_config(
@@ -357,6 +356,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     return cls(
         root_dir=config["root_dir"],
         run_id=config["run_id"],
+        copy_step=bool(config.get("copy_step", False)),
     )
 
   def to_config(self) -> dict[str, Any]:
@@ -370,11 +370,19 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
           "FileTrajectoryStore without a run_id cannot export a valid"
           " distributed config."
       )
-    return {
+    config: dict[str, Any] = {
         "backend": self.BACKEND,
         "root_dir": str(self._raw_root_dir),
         "run_id": self._run_id,
     }
+    if self._copy_step:
+      config["copy_step"] = True
+    return config
+
+  @property
+  def copy_step(self) -> bool:
+    """Returns True if step objects are deep copied before writing."""
+    return self._copy_step
 
   @functools.cached_property
   def root_dir(self) -> epath.Path:

@@ -106,6 +106,7 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       self,
       engine: sa.Engine,
       max_cached_trajectories: int = _MAX_CACHED_TRAJECTORIES,
+      copy_step: bool = False,
   ):
     """Initializes _AsyncSqlWriter without starting the background worker.
 
@@ -114,12 +115,14 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       max_cached_trajectories: Maximum number of trajectory metadata entries
         retained per run in the in-memory LRU cache to skip redundant trajectory
         upserts. Set to 0 to disable client-side trajectory metadata caching.
+      copy_step: If True, deep copies step objects before enqueuing. Defaults to
+        False (zero-copy step handover) to avoid synchronous GIL contention.
 
     Raises:
       ValueError: If the engine uses an unsupported database dialect, or if
         max_cached_trajectories is negative.
     """
-    super().__init__()
+    super().__init__(copy_step=copy_step)
     if max_cached_trajectories < 0:
       raise ValueError("max_cached_trajectories must be non-negative.")
     # Synchronous SQLAlchemy engine providing database connectivity and dialect.
@@ -175,7 +178,12 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       raise ValueError("Step must have a non-empty step_id.")
 
     self._enqueue(
-        async_writer.WriteTask(run_id=run_id, metadata=metadata, step=step)
+        async_writer.WriteTask(
+            run_id=run_id,
+            metadata=metadata,
+            step=step,
+            copy_step=self._copy_step,
+        )
     )
 
   def _cache_committed_state(
@@ -432,6 +440,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       run_id: str,
       db_url: str,
       auto_init: bool = True,
+      copy_step: bool = False,
   ) -> None:
     """Initializes SqlTrajectoryStore.
 
@@ -445,6 +454,9 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
         omit the password; libpq then reads `PGPASSWORD` or `~/.pgpass`.
       auto_init: If True, automatically creates database tables and indexes on
         startup via `_initialize_schema`.
+      copy_step: If True, deep copies step objects before enqueuing to database.
+        Defaults to False (zero-copy step handover) to avoid synchronous GIL
+        contention on rollout workers.
 
     Raises:
       ValueError: If `run_id` or `db_url` is empty, None, or whitespace, or if
@@ -458,12 +470,13 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
 
     self._db_url = db_url
     self._run_id = run_id.strip()
+    self._copy_step = copy_step
     self._engine_handle = db_engine.acquire_engine(
         db_engine.EngineConfig(url=db_url)
     )
     self._engine = self._engine_handle.engine
     try:
-      self._writer = _AsyncSqlWriter(engine=self._engine)
+      self._writer = _AsyncSqlWriter(engine=self._engine, copy_step=copy_step)
     except Exception:
       self._engine_handle.release()
       raise
@@ -495,6 +508,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     return cls(
         run_id=config.get("run_id", ""),
         db_url=config.get("db_url", ""),
+        copy_step=bool(config.get("copy_step", False)),
     )
 
   def to_config(self) -> dict[str, Any]:
@@ -504,11 +518,19 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     including any password it embeds. Do not log it; log
     `to_redacted_config()` instead.
     """
-    return {
+    config: dict[str, Any] = {
         "backend": self.BACKEND,
         "db_url": self._db_url,
         "run_id": self._run_id,
     }
+    if self._copy_step:
+      config["copy_step"] = True
+    return config
+
+  @property
+  def copy_step(self) -> bool:
+    """Returns True if step objects are deep copied before writing."""
+    return self._copy_step
 
   def to_redacted_config(self) -> dict[str, Any]:
     """Returns `to_config()` with any password in "db_url" masked."""
@@ -679,9 +701,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       )
       with self._engine.connect() as conn:
         metadata_rows = conn.execute(statement)
-        return [
-            self._load_metadata(row) for row in metadata_rows.scalars()
-        ]
+        return [self._load_metadata(row) for row in metadata_rows.scalars()]
 
     # Query only the requested trajectory IDs when a sequence is provided.
     if not trajectory_ids:

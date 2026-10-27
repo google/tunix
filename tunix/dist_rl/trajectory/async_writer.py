@@ -35,19 +35,22 @@ class WriteTask:
 
   Encapsulates all necessary data transferred across the thread boundary from
   the frontend calling thread (e.g. rollout worker) to the background worker
-  thread. `metadata` and `step` are private deep copies owned by the task.
+  thread. `metadata` is always deep copied so caller turn mutations cannot leak
+  in. `step` is transferred with zero-copy ownership by default, but can be
+  deep copied when `copy_step` is True.
   """
 
   metadata: trajectory_lib.TrajectoryMetadata
   step: trajectory_lib.Step | None = None
   run_id: str | None = None
+  copy_step: bool = False
 
   def __post_init__(self) -> None:
-    """Deep copies the payload so later caller mutations cannot leak in."""
+    """Deep copies metadata and optionally step so mutations cannot leak."""
     object.__setattr__(
         self, "metadata", trajectory_lib.deep_copy(self.metadata)
     )
-    if self.step is not None:
+    if self.step is not None and self.copy_step:
       object.__setattr__(self, "step", trajectory_lib.deep_copy(self.step))
 
   def to_atif(self) -> None:
@@ -155,6 +158,7 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
       self,
       thread_name: str | None = None,
       max_queue_size: int = DEFAULT_MAX_QUEUE_SIZE,
+      copy_step: bool = False,
   ):
     """Initializes AsyncWriter without starting the background worker.
 
@@ -164,6 +168,9 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
       max_queue_size: Maximum number of pending tasks buffered in the queue
         before dropping incoming writes. Defaults to `DEFAULT_MAX_QUEUE_SIZE`
         (10,000).
+      copy_step: If True, deep copies step objects before enqueuing to prevent
+        caller mutations from leaking. Defaults to False (zero-copy step
+        handover) to avoid synchronous GIL contention on rollout workers.
 
     Raises:
       ValueError: If `max_queue_size` is not positive.
@@ -174,6 +181,7 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
       )
     self._thread_name = thread_name or f"{type(self).__name__}Worker"
     self._max_queue_size = max_queue_size
+    self._copy_step = copy_step
     self._step_queue_limit = max(
         1, int(max_queue_size * _STEP_QUEUE_CAPACITY_RATIO)
     )
@@ -205,6 +213,11 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
   def step_queue_limit(self) -> int:
     """Returns the queue limit above which step tasks are dropped."""
     return self._step_queue_limit
+
+  @property
+  def copy_step(self) -> bool:
+    """Returns True if step objects are deep copied on enqueue."""
+    return self._copy_step
 
   @property
   def is_closed(self) -> bool:
