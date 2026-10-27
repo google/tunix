@@ -247,10 +247,10 @@ PAIRED_ATIF_TRAJECTORY: Final[trajectory_lib.Trajectory] = to_atif_trajectory(
     PAIRED_TUNIX_TRAJECTORY
 )
 
-# A Tunix rollout with the token fields that the trajectory collector records:
-# step 0 carries the prompt token IDs, each agent step's metrics report only
-# completion tokens (no prompt tokens), and the terminal environment step
-# records no tokens.
+# A Tunix rollout as the trajectory collector records it when the inference
+# backend does not report prompt lengths: step 0 carries the prompt token IDs,
+# each agent step's metrics report only completion tokens (no prompt tokens),
+# and the terminal environment step records no tokens.
 TUNIX_ROLLOUT_TRAJECTORY: Final[trajectory_lib.TunixTrajectory] = (
     trajectory_lib.TunixTrajectory(
         trajectory_id="t_rollout",
