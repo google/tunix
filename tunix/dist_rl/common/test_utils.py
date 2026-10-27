@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Mock Environment, Sampler, and Agent implementations for testing."""
+"""Test-only mock and fake implementations for Tunix distributed RL."""
 
 import asyncio
 import dataclasses
@@ -25,7 +25,9 @@ from tunix.common import configs
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import registry
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
+from tunix.dist_rl.train import abstract_trainer
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
+from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import task_session
 from tunix.rl.agentic.agents import agent_types
@@ -155,9 +157,15 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
     self.default_delay = default_delay
     self.migration_history: List[Dict[str, Any]] = []
     self._turn_counters: Dict[str, int] = {}
-    self.current_policy_version = 0
+    self.current_policy_version: int = 0
+    self.staging_policy_version: int | None = None
+    self.fail_request_ids: set[str] = set()
     self.tokenizer = MockTokenizer()
     self.chat_parser = MockChatParser()
+
+  @property
+  def policy_version(self) -> int:
+    return self.current_policy_version
 
   def initialize(self) -> None:
     pass
@@ -185,20 +193,46 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
   def get_target_state(self) -> Any:
     return None
 
-  async def get_weight_sync_metadata(self, **kwargs) -> Any:
+  async def get_weight_sync_metadata(
+      self, **kwargs
+  ) -> list[weight_sync.WorkUnitMetadata]:
     del kwargs
-    return []
+    return [
+        weight_sync.WorkUnitMetadata(
+            unit=weight_sync.WorkUnitId(
+                job_name=self.server_id, job_replica_id="0"
+            ),
+            shards=("127.0.0.1:20001",),
+            control_plane_rpc_address="127.0.0.1:20501",
+            global_shape=(4,),
+            mesh_shape=(1,),
+            layout=(0,),
+            item_size=4,
+        )
+    ]
 
   async def bind_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     del sync_request, kwargs
     return None
 
-  async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
-    del sync_request, kwargs
+  async def post_weight_sync(
+      self,
+      sync_request: (
+          datatypes.WeightSyncRequest | datatypes.WeightSyncMetadata | None
+      ) = None,
+      **kwargs,
+  ) -> Any:
+    del kwargs
+    if self.staging_policy_version is not None:
+      self.current_policy_version = self.staging_policy_version
+      self.staging_policy_version = None
+    elif isinstance(sync_request, datatypes.WeightSyncRequest):
+      self.current_policy_version = int(sync_request.policy_version)
     return True
 
   async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     del sync_request, kwargs
+    self.staging_policy_version = None
     return True
 
   async def get_transfer_status(self, req_id: str | Any, **kwargs) -> str | Any:
@@ -222,7 +256,8 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
     if sampling_requests is None:
       raise ValueError("sampling_requests cannot be None.")
     delay = kwargs.get("delay_seconds", self.default_delay)
-    await asyncio.sleep(delay)
+    if delay > 0:
+      await asyncio.sleep(delay)
 
     is_sequence = isinstance(sampling_requests, (list, tuple))
     requests = list(sampling_requests) if is_sequence else [sampling_requests]
@@ -233,6 +268,10 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
       req_id_str = "default"
       if hasattr(req, "request_id") and req.request_id:
         req_id_str = str(req.request_id)
+      if request_kwargs.get("raise_in_sample"):
+        raise RuntimeError(str(request_kwargs.get("raise_in_sample")))
+      if req_id_str in self.fail_request_ids:
+        raise RuntimeError(f"Simulated failure for request_id={req_id_str}")
       prompt = getattr(req, "prompt", req)
       turn = self._turn_counters.get(req_id_str, 0)
       self._turn_counters[req_id_str] = turn + 1
@@ -274,14 +313,131 @@ class MockBaseSamplerImpl(base_sampler_lib.Sampler):
     })
     return True
 
-  async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  async def pre_weight_sync(
+      self,
+      sync_request: (
+          datatypes.WeightSyncRequest | datatypes.WeightSyncMetadata | None
+      ) = None,
+      **kwargs,
+  ) -> Any:
+    self.staging_policy_version = None
+    if isinstance(sync_request, datatypes.WeightSyncRequest):
+      return int(sync_request.policy_version)
     metadata = kwargs.pop("metadata", sync_request)
-    return getattr(metadata, "new_policy_version", None)
+    if isinstance(metadata, datatypes.WeightSyncMetadata):
+      return metadata.new_policy_version
+    return None
 
-  async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  async def weight_sync(
+      self,
+      sync_request: (
+          datatypes.WeightSyncRequest | datatypes.WeightSyncMetadata | None
+      ) = None,
+      **kwargs,
+  ) -> Any:
+    if isinstance(sync_request, datatypes.WeightSyncRequest):
+      self.staging_policy_version = int(sync_request.policy_version)
+      return self.staging_policy_version
     metadata = kwargs.pop("metadata", sync_request)
-    self.current_policy_version = metadata.new_policy_version
+    if isinstance(metadata, datatypes.WeightSyncMetadata):
+      self.current_policy_version = metadata.new_policy_version
     return self.current_policy_version
+
+
+class FakeTrainer(abstract_trainer.AbstractTrainer):
+  """Pure CPU / zero XLA model compilation implementation of AbstractTrainer."""
+
+  def __init__(
+      self,
+      config: Any = None,
+      *,
+      trainer_id: str = "trainer_0",
+      policy_version: int = 0,
+      step_count: int = 0,
+      compile_error: Exception | None = None,
+  ) -> None:
+    self.config = config
+    self.trainer_id = trainer_id
+    self.policy_version = policy_version
+    self.step_count = step_count
+    self.compile_error = compile_error
+    self.prepare_calls: int = 0
+    self.release_calls: int = 0
+
+  def compile(self, dummy_data: datatypes.TrainerPayload | None = None) -> None:
+    del dummy_data
+    if self.compile_error is not None:
+      raise self.compile_error
+
+  def with_loss_fn(
+      self, loss_fn: Callable[..., Any], has_aux: bool = False
+  ) -> "FakeTrainer":
+    del loss_fn, has_aux
+    return self
+
+  def with_gen_model_input_fn(
+      self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
+  ) -> "FakeTrainer":
+    del gen_model_input_fn
+    return self
+
+  def fwd_bwd(self, payload: datatypes.TrainerPayload, **kwargs: Any) -> None:
+    del payload, kwargs
+
+  def update(self, **kwargs: Any) -> int:
+    del kwargs
+    self.step_count += 1
+    self.policy_version += 1
+    return self.step_count
+
+  def eval_step(self, payload: datatypes.TrainerPayload, **kwargs: Any) -> None:
+    del payload, kwargs
+
+  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    return fn(None, *args, **kwargs)
+
+  def save_checkpoint(self, metadata: Any, **kwargs: Any) -> None:
+    del metadata, kwargs
+
+  def restore_checkpoint(
+      self, step: int | None = None, **kwargs: Any
+  ) -> dict[str, Any]:
+    del step, kwargs
+    return {}
+
+  # Return type kept as `Any` for Pyrefly override compatibility with
+  # `AbstractTrainer.get_metrics() -> metrics.MetricsBuffer` and
+  # `AbstractTrainer.prepare_weight_sync() -> None`.
+  def get_metrics(self) -> Any:
+    return {"loss": 0.25}
+
+  def prepare_weight_sync(self, **kwargs: Any) -> Any:
+    del kwargs
+    self.prepare_calls += 1
+    return [
+        weight_sync.WorkUnitMetadata(
+            unit=weight_sync.WorkUnitId(
+                job_name=self.trainer_id, job_replica_id="0"
+            ),
+            shards=("127.0.0.1:20000",),
+            control_plane_rpc_address="127.0.0.1:20500",
+            global_shape=(4,),
+            mesh_shape=(1,),
+            layout=(0,),
+            item_size=4,
+        )
+    ]
+
+  def release_weight_sync(
+      self,
+      sync_request: datatypes.WeightSyncRequest | None = None,
+      **kwargs: Any,
+  ) -> None:
+    del sync_request, kwargs
+    self.release_calls += 1
+
+  def close(self) -> None:
+    pass
 
 
 class MockAgent(base_agent.ConversationAgentBase):

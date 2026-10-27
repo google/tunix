@@ -31,6 +31,7 @@ from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.orchestrator import startup_validation
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.trajectory import store as trajectory_store_lib
+from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
 
 
@@ -47,6 +48,7 @@ class ClusterOrchestrator:
       trajectory_store_config: Mapping[str, Any] | None = None,
       weight_sync_timeouts: weight_sync_coordinator.PhaseTimeouts | None = None,
       fault_tolerance_config: datatypes.FaultToleranceConfig | None = None,
+      weight_sync_handler: weight_sync.WeightSyncHandler | None = None,
   ):
     """Initializes ClusterOrchestrator.
 
@@ -65,6 +67,7 @@ class ClusterOrchestrator:
         `WeightSyncCoordinator`, or None to use `PhaseTimeouts()` defaults.
       fault_tolerance_config: Fault-tolerance configuration forwarded to
         `DistributedRLEngine`, or None to use `FaultToleranceConfig()` defaults.
+      weight_sync_handler: Optional explicit WeightSyncHandler instance for DI.
     """
     self.config = config
     self.registry = (
@@ -79,6 +82,7 @@ class ClusterOrchestrator:
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
     self._weight_sync_timeouts = weight_sync_timeouts
     self._fault_tolerance_config = fault_tolerance_config
+    self._weight_sync_handler = weight_sync_handler
     # The sole construction site for this process's Trajectory Store: one
     # ClusterOrchestrator exists per orchestrator process, so building it
     # here — once, in __init__ — is the whole guard. Its lifetime is meant
@@ -100,6 +104,11 @@ class ClusterOrchestrator:
           "[trajectory-store] orchestrator built %s",
           self.trajectory_store.to_redacted_config(),
       )
+
+  @property
+  def health_monitor(self) -> health_monitor.HealthMonitor:
+    """Convenience alias for self.monitor."""
+    return self.monitor
 
   def __enter__(self) -> "ClusterOrchestrator":
     """Interactive context manager bring-up."""
@@ -139,7 +148,10 @@ class ClusterOrchestrator:
 
   def _verify_rollout_weight_sync_timeouts(self) -> None:
     """Verifies that Coordinator `PhaseTimeouts.pre` covers each rollout worker's soft drain window."""
-    if self._weight_sync_mode in (None, "none"):
+    if self._weight_sync_handler is None and self._weight_sync_mode in (
+        None,
+        "none",
+    ):
       return
     timeouts_cfg = (
         self._weight_sync_timeouts or weight_sync_coordinator.PhaseTimeouts()
@@ -186,9 +198,16 @@ class ClusterOrchestrator:
   def _create_engine(self) -> distributed_rl_engine.DistributedRLEngine:
     """Constructs a DistributedRLEngine from the registered role groups."""
     coordinator = None
-    if self._weight_sync_mode not in (None, "none"):
-      handler = weight_sync_coordinator.create_default_handler(
-          mode=self._weight_sync_mode
+    if self._weight_sync_handler is not None or self._weight_sync_mode not in (
+        None,
+        "none",
+    ):
+      handler = (
+          self._weight_sync_handler
+          if self._weight_sync_handler is not None
+          else weight_sync_coordinator.create_default_handler(
+              mode=self._weight_sync_mode
+          )
       )
       coordinator = weight_sync_coordinator.WeightSyncCoordinator(
           registry=self.registry,
