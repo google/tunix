@@ -235,6 +235,20 @@ class WorkerRegistry:
           _counts(),
       )
 
+  def update_resources(
+      self,
+      worker_id: str,
+      resources: Mapping[str, Any],
+      *,
+      expected_handle: remote_execution.ActorHandle,
+  ) -> bool:
+    """Updates `info.resources` for `worker_id` under the registry lock if `expected_handle` matches."""
+    with self._lock:
+      if self._handles.get(worker_id) is not expected_handle:
+        return False
+      self._infos[worker_id].resources.update(resources)
+      return True
+
   def _pop_worker_locked(self, worker_id: str) -> remote_execution.ActorHandle:
     info = self._infos.pop(worker_id)
     handle = self._handles.pop(worker_id)
@@ -327,6 +341,18 @@ class WorkerRegistry:
       else:
         ids = sorted(self._role_to_ids.get(role, set()))
       return [self._infos[i] for i in ids]
+
+  def targets(
+      self, role: datatypes.Role | str | None = None
+  ) -> list[tuple[datatypes.WorkerInfo, remote_execution.ActorHandle]]:
+    """Returns `(WorkerInfo, ActorHandle)` pairs sorted by worker_id."""
+    with self._lock:
+      ids = (
+          sorted(self._infos)
+          if role is None
+          else sorted(self._role_to_ids.get(role, set()))
+      )
+      return [(self._infos[i], self._handles[i]) for i in ids]
 
   def roles(self) -> set[str]:
     with self._lock:

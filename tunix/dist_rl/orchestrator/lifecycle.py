@@ -21,11 +21,20 @@ Shutdown is best-effort: every worker gets a `stop()` even if an earlier one
 raised, and the collected failures are reported together.
 """
 
+from collections.abc import Callable, Sequence
 import concurrent.futures
 import logging
 from typing import Any
 
+from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import worker_registry
+from tunix.dist_rl.worker import remote_execution
+
+_INIT_METADATA_KEYS = (
+    "trajectory_store_config",
+    "drain_timeout_s",
+    "partial_rollout",
+)
 
 
 class LifecycleError(RuntimeError):
@@ -42,32 +51,50 @@ class LifecycleDriver:
   """Drives a WorkerRegistry through the worker lifecycle phases."""
 
   def __init__(
-      self, registry: worker_registry.WorkerRegistry, max_workers: int = 32
+      self,
+      registry: worker_registry.WorkerRegistry,
+      max_workers: int = 32,
+      verify_fn: Callable[[Sequence[datatypes.WorkerInfo]], None] | None = None,
   ):
     self._registry = registry
     self._max_workers = max_workers
+    self._verify_fn = verify_fn
 
-  def bring_up(self, dummy_data: Any) -> None:
-    """Runs initialize -> compile -> start across all workers, phase by phase.
+  def bring_up(
+      self,
+      dummy_data: Any = None,
+  ) -> None:
+    """Runs initialize -> verify -> compile -> start across workers, phase by phase.
 
-    Each phase runs across all workers before the next phase begins. If any
-    worker raises an exception during a phase, the exception is re-raised after
-    all workers have attempted the phase, preventing subsequent phases from
-    running.
+    Each phase runs across all target workers before the next phase begins. If
+    any worker raises an exception during a phase, the exception is re-raised
+    after all workers have attempted the phase, preventing subsequent phases
+    from running.
+
     Args:
       dummy_data: Dummy data each worker uses to synthesize warmup dummies.
-    """
-    worker_ids = self._registry.worker_ids()
 
-    def _init_worker(wid: str) -> None:
-      resp = self._registry.handle(wid).submit("initialize")
-      for key in (
-          "trajectory_store_config",
-          "drain_timeout_s",
-          "partial_rollout",
+    Raises:
+      RuntimeError: If a target worker was unregistered or re-registered with a
+        different handle during bring-up.
+    """
+    resolved_targets = self._registry.targets()
+
+    def _init_worker(
+        target: tuple[datatypes.WorkerInfo, remote_execution.ActorHandle],
+    ) -> None:
+      info, handle = target
+      resp = handle.submit("initialize")
+      metadata = {
+          k: resp.metadata[k] for k in _INIT_METADATA_KEYS if k in resp.metadata
+      }
+      if not self._registry.update_resources(
+          info.worker_id, metadata, expected_handle=handle
       ):
-        if key in resp.metadata:
-          self._registry.info(wid).resources[key] = resp.metadata[key]
+        raise RuntimeError(
+            f"worker {info.worker_id!r} was unregistered or re-registered"
+            " with a different handle during bring-up"
+        )
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=self._max_workers
@@ -75,19 +102,19 @@ class LifecycleDriver:
       # TODO(noghabi): Refactor to allow successful workers to proceed to
       # compile/start and potentially retry failed ones, rather than fail-fast
       # on the first error.
-      list(pool.map(_init_worker, worker_ids))
+      list(pool.map(_init_worker, resolved_targets))
+      if self._verify_fn is not None:
+        self._verify_fn([info for info, _ in resolved_targets])
       list(
           pool.map(
-              lambda wid: self._registry.handle(wid).submit(
-                  "compile", dummy_data
-              ),
-              worker_ids,
+              lambda target: target[1].submit("compile", dummy_data),
+              resolved_targets,
           )
       )
       list(
           pool.map(
-              lambda wid: self._registry.handle(wid).submit("start"),
-              worker_ids,
+              lambda target: target[1].submit("start"),
+              resolved_targets,
           )
       )
 

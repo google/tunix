@@ -377,6 +377,9 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
         "Rollout worker 'rollout-0' trajectory_store_config .* does not match",
     ):
       orch.bring_up_workers()
+    self.assertEqual(
+        mock_rollout.submit.call_args_list, [mock.call("initialize")]
+    )
     orch.shutdown()
 
   def test_bring_up_workers_raises_when_rollout_enables_store_but_orchestrator_disables(
@@ -408,6 +411,9 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
         "Rollout worker 'rollout-0' trajectory_store_config .* does not match",
     ):
       orch.bring_up_workers()
+    self.assertEqual(
+        mock_rollout.submit.call_args_list, [mock.call("initialize")]
+    )
     orch.shutdown()
 
   def test_bring_up_workers_raises_when_pre_timeout_shorter_than_drain(self):
@@ -437,6 +443,9 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
         " 2100.0s, but orchestrator weight_sync_timeouts.pre is 900.0s",
     ):
       orch_mismatch.bring_up_workers()
+    self.assertEqual(
+        mock_rollout.submit.call_args_list, [mock.call("initialize")]
+    )
     orch_mismatch.shutdown()
 
   def test_bring_up_workers_accepts_aligned_weight_sync_timeouts(self):
@@ -512,12 +521,65 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     )
     with self.assertRaises(ValueError) as ctx:
       orch.bring_up_workers()
+    self.assertEqual(
+        mock_rollout.submit.call_args_list, [mock.call("initialize")]
+    )
     self.assertIn(
         "Rollout worker 'rollout-incomplete' is missing required resource key",
         str(ctx.exception),
     )
     self.assertIn("secret_key", str(ctx.exception))
     self.assertNotIn("secret_password", str(ctx.exception))
+    orch.shutdown()
+
+  def test_bring_up_workers_filters_non_rollout_workers_in_verify(self):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    cfg = {
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "shared_run",
+    }
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        monitor=mock.MagicMock(),
+        weight_sync_mode="fallback",
+        trajectory_store_config=cfg,
+    )
+    mock_trainer = mock.MagicMock(spec=remote_execution.ActorHandle)
+    # Trainer returns empty metadata (no trajectory_store_config or
+    # drain_timeout_s), which must be ignored by rollout verification.
+    mock_trainer.submit.return_value = datatypes.Response()
+    mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout.submit.side_effect = [
+        datatypes.Response(
+            metadata={
+                "trajectory_store_config": cfg,
+                "drain_timeout_s": 120.0,
+                "partial_rollout": False,
+            }
+        ),
+        datatypes.Response(),
+        datatypes.Response(),
+        datatypes.Response(),
+    ]
+    orch.registry.register_handle(
+        "actor-0", [datatypes.Role.ACTOR], mock_trainer
+    )
+    orch.registry.register_handle(
+        "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout
+    )
+
+    orch.bring_up_workers(dummy_data="dummy")
+    mock_trainer.submit.assert_has_calls([
+        mock.call("initialize"),
+        mock.call("compile", "dummy"),
+        mock.call("start"),
+    ])
+    mock_rollout.submit.assert_has_calls([
+        mock.call("initialize"),
+        mock.call("compile", "dummy"),
+        mock.call("start"),
+    ])
     orch.shutdown()
 
   def test_bring_up_workers_skips_timeout_check_when_weight_sync_mode_none(

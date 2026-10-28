@@ -18,8 +18,9 @@ Supervises WorkerRegistry, LifecycleDriver, HealthMonitor, and StartupValidator.
 Provides supervised RL program execution (`run`).
 """
 
+from collections.abc import Mapping, Sequence
 import contextlib
-from typing import Any, Mapping
+from typing import Any
 
 from absl import logging
 from tunix.dist_rl.common import datatypes
@@ -74,7 +75,8 @@ class ClusterOrchestrator:
         registry if registry is not None else worker_registry.WorkerRegistry()
     )
     self.lifecycle_driver = lifecycle_driver or lifecycle.LifecycleDriver(
-        self.registry
+        self.registry,
+        verify_fn=self._verify_rollout_workers,
     )
     self.monitor = monitor or health_monitor.HealthMonitor(self.registry)
     self.engine: distributed_rl_engine.DistributedRLEngine | None = None
@@ -125,19 +127,29 @@ class ClusterOrchestrator:
         len(self.registry),
     )
     self.lifecycle_driver.bring_up(dummy_data)
-    self._verify_rollout_trajectory_store_configs()
-    self._verify_rollout_weight_sync_timeouts()
     self.engine = self._create_engine()
     logging.info("All workers brought up successfully.")
 
-  def _verify_rollout_trajectory_store_configs(self) -> None:
-    """Verifies that all registered rollout workers match the orchestrator's TrajectoryStore config."""
+  def _verify_rollout_workers(
+      self, infos: Sequence[datatypes.WorkerInfo]
+  ) -> None:
+    """Verifies rollout workers' trajectory store and weight sync timeout configs."""
+    rollout_infos = [
+        info for info in infos if datatypes.Role.ROLLOUT.value in info.roles
+    ]
+    self._verify_rollout_trajectory_store_configs(rollout_infos)
+    self._verify_rollout_weight_sync_timeouts(rollout_infos)
+
+  def _verify_rollout_trajectory_store_configs(
+      self, infos: Sequence[datatypes.WorkerInfo]
+  ) -> None:
+    """Verifies that rollout workers match the orchestrator's TrajectoryStore config."""
     expected_config = (
         self.trajectory_store.to_config()
         if self.trajectory_store is not None
         else None
     )
-    for info in self.registry.infos(datatypes.Role.ROLLOUT):
+    for info in infos:
       worker_config = info.resources.get("trajectory_store_config")
       if worker_config != expected_config:
         raise ValueError(
@@ -146,7 +158,9 @@ class ClusterOrchestrator:
             f"trajectory_store_config {expected_config!r}."
         )
 
-  def _verify_rollout_weight_sync_timeouts(self) -> None:
+  def _verify_rollout_weight_sync_timeouts(
+      self, infos: Sequence[datatypes.WorkerInfo]
+  ) -> None:
     """Verifies that Coordinator `PhaseTimeouts.pre` covers each rollout worker's soft drain window."""
     if self._weight_sync_handler is None and self._weight_sync_mode in (
         None,
@@ -156,7 +170,7 @@ class ClusterOrchestrator:
     timeouts_cfg = (
         self._weight_sync_timeouts or weight_sync_coordinator.PhaseTimeouts()
     )
-    for info in self.registry.infos(datatypes.Role.ROLLOUT):
+    for info in infos:
       for key in ("partial_rollout", "drain_timeout_s"):
         if key not in info.resources:
           raise ValueError(

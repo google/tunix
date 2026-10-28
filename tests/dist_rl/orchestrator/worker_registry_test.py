@@ -298,6 +298,43 @@ class WorkerRegistryTest(absltest.TestCase):
     h1.sync_close.assert_not_called()
     self.assertIs(registry.handle("w0"), h1)
 
+  def test_update_resources_and_expected_handle_guard(self):
+    registry = worker_registry.WorkerRegistry()
+    h0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    info = registry.register_handle("w0", [datatypes.Role.ROLLOUT], h0)
+    self.assertEqual(registry.targets(), [(info, h0)])
+    self.assertEqual(registry.targets(datatypes.Role.ROLLOUT), [(info, h0)])
+    self.assertEmpty(registry.targets(datatypes.Role.ACTOR))
+
+    self.assertTrue(
+        registry.update_resources(
+            "w0", {"drain_timeout_s": 300.0}, expected_handle=h0
+        )
+    )
+    self.assertEqual(registry.info("w0").resources["drain_timeout_s"], 300.0)
+
+    self.assertFalse(
+        registry.update_resources(
+            "w0", {"drain_timeout_s": 600.0}, expected_handle=h1
+        )
+    )
+    self.assertEqual(registry.info("w0").resources["drain_timeout_s"], 300.0)
+    self.assertFalse(
+        registry.update_resources(
+            "missing", {"drain_timeout_s": 100.0}, expected_handle=h0
+        )
+    )
+
+    # Guarded update_resources after worker is unregistered returns False
+    # without raising.
+    registry.unregister("w0")
+    self.assertFalse(
+        registry.update_resources(
+            "w0", {"drain_timeout_s": 900.0}, expected_handle=h0
+        )
+    )
+
   def test_evicted_worker_id_cannot_reregister_without_override(self):
     registry = worker_registry.WorkerRegistry()
     h0 = mock.MagicMock(spec=remote_execution.ActorHandle)
