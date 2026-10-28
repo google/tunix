@@ -58,6 +58,13 @@ TrajectoryQueueManager = trajectory_queue_manager.TrajectoryQueueManager
 FifoGroupQueue = trajectory_queue_manager.FifoGroupQueue
 BatchOrderedGroupQueue = trajectory_queue_manager.BatchOrderedGroupQueue
 
+# Reward manager `log_metrics` entries: metric name -> (value, aggregation
+# function), where each value is a per-call scalar or per-trajectory array.
+RewardLogMetricAggFn = Callable[[np.ndarray], float | np.number]
+RewardLogMetrics = Mapping[
+    str, tuple[np.ndarray | float | np.number, RewardLogMetricAggFn]
+]
+
 
 def _next_microbatch(
     batch_iter: Iterator[batch_assembly.AssembledBatch],
@@ -245,11 +252,14 @@ class ScoredGroup:
       `routed_experts` stripped (`len == G`).
     rewards: Scalar rewards computed by `critique_stage` (`len == G`), also
       stamped into each `item.traj["trajectory_reward"]` for downstream logging.
+    reward_log_metrics: Per-group reward manager log metrics (`name -> (values,
+      agg_fn)`) to be aggregated across the step in `train_stage`.
   """
 
   payloads: tuple[datatypes.RLTrainerPayload, ...]
   items: tuple[datatypes.TrajectoryItem, ...]
   rewards: tuple[float, ...]
+  reward_log_metrics: RewardLogMetrics = dataclasses.field(default_factory=dict)
 
   def __post_init__(self) -> None:
     if not (len(self.payloads) == len(self.items) == len(self.rewards)):
@@ -680,7 +690,7 @@ class StandardRLProgram(RLProgram):
   def _score_group(
       self,
       group: Sequence[datatypes.TrajectoryItem],
-  ) -> list[float]:
+  ) -> tuple[list[float], RewardLogMetrics]:
     """Scores a trajectory group via `self.reward_manager`.
 
     Skips reward evaluation or extraction for failed, timed-out, or masked-out
@@ -692,13 +702,16 @@ class StandardRLProgram(RLProgram):
     Forwards prompt text (`datatypes.prompt_text(conversation_text)`), assistant
     completions (`datatypes.assistant_text(conversation_text)`), environment
     `trajectory_rewards`, and the non-plumbing `metadata` fields shared by all
-    valid items to `self.reward_manager`.
+    valid items to `self.reward_manager`. Also returns the reward manager's
+    `log_metrics` entries that carry an aggregation function, which
+    `_collect_and_log_step_metrics` reduces once per training step.
 
     Args:
       group: Sequence of `TrajectoryItem`s in the group.
 
     Returns:
-      Rewards aligned with `group` (`0.0` for invalid items).
+      A `(rewards, log_metrics)` tuple aligned with `group` (`0.0` for invalid
+      items).
 
     Raises:
       KeyError: If any valid item's `traj` is missing `"conversation_text"` or
@@ -709,7 +722,7 @@ class StandardRLProgram(RLProgram):
     """
     valid_items = [item for item in group if item.is_valid]
     if not valid_items:
-      return [0.0] * len(group)
+      return [0.0] * len(group), {}
     prompts = [
         datatypes.prompt_text(item.traj["conversation_text"])
         for item in valid_items
@@ -735,10 +748,16 @@ class StandardRLProgram(RLProgram):
         mode=str(self.mode),
         **reward_kwargs,
     )
+    log_metrics: RewardLogMetrics = {
+        name: (value, agg_fn)
+        for name, (value, agg_fn) in rewards_info["log_metrics"].items()
+        if agg_fn is not None
+    }
     valid_rewards = iter(rewards_info["rewards"])
-    return [
+    rewards = [
         float(next(valid_rewards)) if item.is_valid else 0.0 for item in group
     ]
+    return rewards, log_metrics
 
   async def critique_stage(self) -> None:
     """Stage 2: Scores rewards, PRMs, and reference KL logprobs."""
@@ -758,7 +777,9 @@ class StandardRLProgram(RLProgram):
               f" num_generations={self.num_generations}."
           )
 
-        rewards = await asyncio.to_thread(self._score_group, group)
+        rewards, group_reward_log_metrics = await asyncio.to_thread(
+            self._score_group, group
+        )
 
         raw_payloads = self.algo.create_trainer_payloads(group, rewards=rewards)
         if len(raw_payloads) != len(group):
@@ -842,8 +863,10 @@ class StandardRLProgram(RLProgram):
             payloads=tuple(group_payloads),
             items=tuple(group_items),
             rewards=tuple(rewards),
+            reward_log_metrics=group_reward_log_metrics,
         )
         del group_payloads, group_items, trainer_payloads
+        del group_reward_log_metrics
         await self.scored_q.put(scored_group)
         del scored_group
         if group:
@@ -911,6 +934,7 @@ class StandardRLProgram(RLProgram):
       sampler_agreement: dict[str, tuple[Any, list[Any]]] | None = None,
       filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]] = (),
       step_times: step_telemetry.StepTimes | None = None,
+      reward_log_metrics: Sequence[RewardLogMetrics] = (),
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
 
@@ -1046,16 +1070,34 @@ class StandardRLProgram(RLProgram):
     reward_min = float(np.min(rewards_to_log)) if rewards_to_log else 0.0
     reward_max = float(np.max(rewards_to_log)) if rewards_to_log else 0.0
     reward_sum = float(np.sum(rewards_to_log)) if rewards_to_log else 0.0
+    # Reduce each reward manager metric over all of the step's groups with its
+    # own aggregation function, the same way `MetricsBuffer` reduces per-call
+    # values in the RL learners: per-group scalars such as
+    # `trajectory_rewards/mean` are reduced across groups, and per-trajectory
+    # arrays such as `rewards/<reward_fn>` across all trajectories.
+    reward_metrics_accum: dict[
+        str, tuple[RewardLogMetricAggFn, list[np.ndarray]]
+    ] = {}
+    for group_reward_metrics in reward_log_metrics:
+      for name, (value, agg_fn) in group_reward_metrics.items():
+        if name not in reward_metrics_accum:
+          reward_metrics_accum[name] = (agg_fn, [])
+        reward_metrics_accum[name][1].append(np.atleast_1d(value))
+    step_reward_metrics: dict[str, float] = {
+        name: float(agg_fn(np.concatenate(values)))
+        for name, (agg_fn, values) in reward_metrics_accum.items()
+        if values
+    }
     if rewards_to_log:
-      reward_stats = {
-          "mean": reward_mean,
-          "std": reward_std,
-          "min": reward_min,
-          "max": reward_max,
-          "sum": reward_sum,
-      }
-      for tag, val in reward_stats.items():
-        self._log_metric(f"rewards/{tag}", val, log_step)
+      step_reward_metrics.update({
+          "rewards/mean": reward_mean,
+          "rewards/std": reward_std,
+          "rewards/min": reward_min,
+          "rewards/max": reward_max,
+          "rewards/sum": reward_sum,
+      })
+    for name, val in step_reward_metrics.items():
+      self._log_metric(name, val, log_step)
 
     # --- Advantage Metrics ---
     advantage_mean = float(np.mean(step_advantages)) if step_advantages else 0.0
@@ -1390,6 +1432,7 @@ class StandardRLProgram(RLProgram):
         consumed_policy_version = self.policy_version
 
         uncommitted_groups: list[list[datatypes.TrajectoryItem]] = []
+        step_reward_log_metrics: list[RewardLogMetrics] = []
         step_result = None
         trainer_metrics = None
         step_sampler_agreement: dict[str, tuple[Any, list[Any]]] = {}
@@ -1445,6 +1488,8 @@ class StandardRLProgram(RLProgram):
 
             groups_consumed += 1
             group_items = list(scored_group.items)
+            if scored_group.reward_log_metrics:
+              step_reward_log_metrics.append(scored_group.reward_log_metrics)
             payloads: list[datatypes.RLTrainerPayload] = []
             for item, payload, reward_val in zip(
                 scored_group.items,
@@ -1643,6 +1688,7 @@ class StandardRLProgram(RLProgram):
             sampler_agreement=step_sampler_agreement,
             filtered_groups=filtered_groups,
             step_times=step_times,
+            reward_log_metrics=step_reward_log_metrics,
         )
         del filtered_groups
         self._log_consumed_trajectories(

@@ -2990,6 +2990,200 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_reward_manager_multi_fn_both_mode_and_masked_first_item_metrics(
+      self,
+  ):
+    def fn_a(prompts, completions, **_):
+      del completions
+      return [10.0 * (i + 1) for i in range(len(prompts))]
+
+    def fn_b(prompts, completions, **_):
+      del completions
+      return [1.0 * (i + 1) for i in range(len(prompts))]
+
+    async def _run():
+      # 1 & 2 & 3. Multiple reward_fns in "both" mode across a 2-group step:
+      # Group 0 has env rewards [1.0, 2.0] + fn_a [10.0, 20.0] + fn_b [1.0, 2.0]
+      # -> combined rewards [12.0, 24.0].
+      # Group 1 has env rewards [3.0, 4.0] + fn_a [10.0, 20.0] + fn_b [1.0, 2.0]
+      # -> combined rewards [14.0, 26.0].
+      self.mock_algo.algo_config.reward_mode = "env"
+      prog = self._create_program(
+          dataset=["prompt_0", "prompt_1"],
+          batch_size=2,
+          reward_fns=[fn_a, fn_b],
+      )
+      prog.engine = self.mock_engine
+      for idx, r in enumerate([1.0, 2.0]):
+        await prog.raw_q.put(
+            distributed_rl_engine._response_to_trajectory_item(
+                _create_rollout_response(
+                    f"req_g0_{idx}", "prompt_0", group_index=idx, reward=r
+                )
+            )
+        )
+      for idx, r in enumerate([3.0, 4.0]):
+        await prog.raw_q.put(
+            distributed_rl_engine._response_to_trajectory_item(
+                _create_rollout_response(
+                    f"req_g1_{idx}", "prompt_1", group_index=idx, reward=r
+                )
+            )
+        )
+      await prog.raw_q.close()
+      await prog.critique_stage()
+
+      g0 = await prog.scored_q.get()
+      g1 = await prog.scored_q.get()
+      assert g0 is not None and g1 is not None
+      all_items = list(g0.items) + list(g1.items)
+      step_rewards = [item.traj["trajectory_reward"] for item in all_items]
+      np.testing.assert_allclose(step_rewards, [12.0, 24.0, 14.0, 26.0])
+
+      prog._collect_and_log_step_metrics(
+          all_step_items=all_items,
+          step_rewards=step_rewards,
+          step_advantages=[0.0, 0.0, 0.0, 0.0],
+          generation_metrics={},
+          step_result={"loss": 0.1},
+          trainer_metrics=None,
+          num_rollouts=4,
+          num_microbatches=2,
+          padding_stats=[],
+          packing_time_sec=0.0,
+          step_time_sec=0.1,
+          consumed_policy_version=0,
+          log_step=0,
+          sampler_agreement={},
+          filtered_groups=[],
+          step_times=None,
+          reward_log_metrics=[
+              g0.reward_log_metrics,
+              g1.reward_log_metrics,
+          ],
+      )
+      logger = prog.metrics_logger
+      self.assertAlmostEqual(
+          logger.get_metric("rewards", "mean", "train"), 19.0
+      )
+      self.assertAlmostEqual(logger.get_metric("rewards", "min", "train"), 12.0)
+      self.assertAlmostEqual(logger.get_metric("rewards", "max", "train"), 26.0)
+      self.assertAlmostEqual(logger.get_metric("rewards", "sum", "train"), 76.0)
+      self.assertAlmostEqual(
+          logger.get_metric("rewards", "std", "train"),
+          float(np.std([12.0, 24.0, 14.0, 26.0])),
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("rewards", "fn_a", "train"), 15.0
+      )
+      self.assertAlmostEqual(logger.get_metric("rewards", "fn_b", "train"), 1.5)
+      self.assertAlmostEqual(
+          logger.get_metric("trajectory_rewards", "mean", "train"), 2.5
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("trajectory_rewards", "min", "train"), 1.0
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("trajectory_rewards", "max", "train"), 4.0
+      )
+      # Per-group sums (3.0 and 7.0) are averaged across groups, as in the RL
+      # learners.
+      self.assertAlmostEqual(
+          logger.get_metric("trajectory_rewards", "sum", "train"), 5.0
+      )
+      prog.close()
+
+      # 4. Two groups with unequal valid counts (Group 0 has 1 invalid + 1 valid
+      # item with trajectory_reward=1.0; Group 1 has 2 valid items with
+      # trajectory_rewards=[3.0, 5.0]): invalid items are not scored, and the
+      # per-group trajectory_rewards metrics are reduced across groups like the
+      # RL learners' `MetricsBuffer` does, so mean = (1.0 + 4.0) / 2 = 2.5 and
+      # sum = (1.0 + 8.0) / 2 = 4.5.
+      self.mock_algo.algo_config.reward_mode = "env"
+      prog_unequal = self._create_program(
+          dataset=["prompt_0", "prompt_1"],
+          batch_size=2,
+          reward_fns=[lambda prompts, completions, **_: [5.0] * len(prompts)],
+      )
+      prog_unequal.engine = self.mock_engine
+      invalid_first = datatypes.TrajectoryItem(
+          prompt_id="prompt_0",
+          group_index=0,
+          is_valid=False,
+          traj={
+              "status": datatypes.TrajectoryStatus.FAILED,
+              "conversation_masks": np.zeros(2, dtype=np.float32),
+          },
+      )
+      valid_second = distributed_rl_engine._response_to_trajectory_item(
+          _create_rollout_response(
+              "req_g0_1", "prompt_0", group_index=1, reward=1.0
+          )
+      )
+      await prog_unequal.raw_q.put(invalid_first)
+      await prog_unequal.raw_q.put(valid_second)
+      for idx, r in enumerate([3.0, 5.0]):
+        await prog_unequal.raw_q.put(
+            distributed_rl_engine._response_to_trajectory_item(
+                _create_rollout_response(
+                    f"req_g1_{idx}", "prompt_1", group_index=idx, reward=r
+                )
+            )
+        )
+      await prog_unequal.raw_q.close()
+      await prog_unequal.critique_stage()
+
+      ug0 = await prog_unequal.scored_q.get()
+      ug1 = await prog_unequal.scored_q.get()
+      assert ug0 is not None and ug1 is not None
+      self.assertTrue(ug0.reward_log_metrics)
+      self.assertTrue(ug1.reward_log_metrics)
+      unequal_items = list(ug0.items) + list(ug1.items)
+      unequal_rewards = list(ug0.rewards) + list(ug1.rewards)
+      np.testing.assert_allclose(unequal_rewards, [0.0, 6.0, 8.0, 10.0])
+
+      prog_unequal._collect_and_log_step_metrics(
+          all_step_items=unequal_items,
+          step_rewards=unequal_rewards,
+          step_advantages=[0.0, 0.0, 0.0, 0.0],
+          generation_metrics={},
+          step_result={"loss": 0.1},
+          trainer_metrics=None,
+          num_rollouts=4,
+          num_microbatches=2,
+          padding_stats=[],
+          packing_time_sec=0.0,
+          step_time_sec=0.1,
+          consumed_policy_version=0,
+          log_step=0,
+          sampler_agreement={},
+          filtered_groups=[],
+          step_times=None,
+          reward_log_metrics=[
+              ug0.reward_log_metrics,
+              ug1.reward_log_metrics,
+          ],
+      )
+      unequal_logger = prog_unequal.metrics_logger
+      self.assertAlmostEqual(
+          unequal_logger.get_metric("rewards", "mean", "train"), 8.0
+      )
+      self.assertAlmostEqual(
+          unequal_logger.get_metric("trajectory_rewards", "mean", "train"), 2.5
+      )
+      self.assertAlmostEqual(
+          unequal_logger.get_metric("trajectory_rewards", "min", "train"), 1.0
+      )
+      self.assertAlmostEqual(
+          unequal_logger.get_metric("trajectory_rewards", "max", "train"), 5.0
+      )
+      self.assertAlmostEqual(
+          unequal_logger.get_metric("trajectory_rewards", "sum", "train"), 4.5
+      )
+      prog_unequal.close()
+
+    asyncio.run(_run())
+
   def test_run_async_cancels_background_stages_on_external_cancellation(self):
     async def _run():
       _set_mock_poll_batches(self.mock_engine)  # Yields empty and sleeps
@@ -3086,6 +3280,30 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(logger.get_metric("rewards", "max", "train"), 2.5)
       self.assertTrue(logger.metric_exists("rewards", "sum", "train"))
       self.assertAlmostEqual(logger.get_metric("rewards", "sum", "train"), 5.0)
+      self.assertTrue(
+          logger.metric_exists("trajectory_rewards", "mean", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("trajectory_rewards", "mean", "train"), 2.5
+      )
+      self.assertTrue(
+          logger.metric_exists("trajectory_rewards", "min", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("trajectory_rewards", "min", "train"), 2.5
+      )
+      self.assertTrue(
+          logger.metric_exists("trajectory_rewards", "max", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("trajectory_rewards", "max", "train"), 2.5
+      )
+      self.assertTrue(
+          logger.metric_exists("trajectory_rewards", "sum", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("trajectory_rewards", "sum", "train"), 5.0
+      )
 
       # Advantage Metrics
       self.assertTrue(
@@ -3349,6 +3567,13 @@ class RLProgramTest(absltest.TestCase):
       )
       self.assertAlmostEqual(
           logger.get_metric("actor_mesh/rewards", "mean", "eval"), 3.0
+      )
+      self.assertTrue(
+          logger.metric_exists("actor_mesh/trajectory_rewards", "mean", "eval")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("actor_mesh/trajectory_rewards", "mean", "eval"),
+          3.0,
       )
       self.assertTrue(logger.metric_exists("actor_mesh/actor", "loss", "eval"))
       self.assertAlmostEqual(
@@ -4123,6 +4348,7 @@ class RLProgramTest(absltest.TestCase):
         self.assertIn("actor/train/loss", logged_keys)
         self.assertIn("actor/train/learning_rate", logged_keys)
         self.assertIn("rewards/train/mean", logged_keys)
+        self.assertIn("trajectory_rewards/train/mean", logged_keys)
         self.assertIn("rewards/train/advantage/abs_mean", logged_keys)
         self.assertIn("rewards/train/advantage/nonzero_frac", logged_keys)
         self.assertIn("rollout/train/prompts/mean_length", logged_keys)
