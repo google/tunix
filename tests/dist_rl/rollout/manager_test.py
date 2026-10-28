@@ -22,7 +22,6 @@ from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import registry
 from tunix.dist_rl.rollout import manager as manager_lib
 from tunix.dist_rl.rollout import sampler as sampler_lib
-from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.worker import rollout_worker
 
 
@@ -456,64 +455,6 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
             "group_index": 3,
             "policy_version": 5,
         },
-    )
-
-
-class WeightSyncModeTest(absltest.TestCase):
-
-  def test_config_vanilla_without_sampler_raises(self):
-    config = rollout_worker.RolloutConfig(
-        sampler_type="vanilla",
-        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
-    )
-    with self.assertRaises(ValueError):
-      manager_lib.RolloutManager(
-          config=config, tokenizer="mock", chat_parser="mock"
-      )
-
-  @mock.patch(
-      "tunix.dist_rl.rollout.inprocess_vllm_sampler._get_vllm_sampler_cls"
-  )
-  def test_config_weight_sync_mode_inprocess_vllm_fallback(
-      self, mock_get_vllm
-  ):
-    mock_lib = mock.MagicMock()
-    mock_lib.VllmSampler.return_value = mock.MagicMock()
-    mock_get_vllm.return_value = mock_lib
-    config = rollout_worker.RolloutConfig(
-        sampler_type="inprocess_vllm",
-        weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
-    )
-    manager = manager_lib.RolloutManager(
-        config=config, tokenizer="mock", chat_parser="mock"
-    )
-    self.assertFalse(manager.sampler.enable_raiden)
-    self.assertIsNone(manager.sampler.raiden_sync_delegate)
-
-  @mock.patch(
-      "tunix.dist_rl.weight_sync.raiden_weight_sync_delegate.RaidenWeightSyncDelegate"
-  )
-  @mock.patch(
-      "tunix.dist_rl.rollout.inprocess_vllm_sampler._get_vllm_sampler_cls"
-  )
-  def test_config_weight_sync_mode_inprocess_vllm_raiden(
-      self, mock_get_vllm, mock_delegate_cls
-  ):
-    mock_lib = mock.MagicMock()
-    mock_lib.VllmSampler.return_value = mock.MagicMock()
-    mock_get_vllm.return_value = mock_lib
-    config = rollout_worker.RolloutConfig(
-        sampler_type="inprocess_vllm",
-        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
-    )
-    manager = manager_lib.RolloutManager(
-        config=config, tokenizer="mock", chat_parser="mock"
-    )
-    self.assertTrue(getattr(manager.sampler, "enable_raiden", False))
-    delegate = getattr(manager.sampler, "raiden_sync_delegate", None)
-    self.assertIsNotNone(delegate)
-    mock_delegate_cls.assert_called_once_with(
-        server_id="inprocess_vllm_sampler"
     )
 
 

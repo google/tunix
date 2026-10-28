@@ -25,7 +25,6 @@ from tunix.dist_rl.rollout import collector as collector_lib
 from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.dist_rl.trajectory import base_store as store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
-from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.worker import traffic_controller as traffic_controller_lib
 from tunix.rl.rollout import base_rollout
 
@@ -58,7 +57,7 @@ class RolloutManager:
 
     Args:
       config: RolloutConfig configuration options.
-      sampler: Optional pre-constructed Sampler instance.
+      sampler: Pre-constructed Sampler instance.
       env_pool: Environment pool for rollout execution.
       agent_factory: Factory callable producing agent instances.
       max_concurrency: Maximum number of concurrent episodes.
@@ -92,65 +91,8 @@ class RolloutManager:
         config.routed_experts_num_experts if config is not None else None
     )
     self._policy_version: int = 0
-    # TODO(tunix-dev): Require all callers to pass a non-None, pre-constructed
-    # sampler with RaidenWeightSyncDelegate already applied, and remove this
-    # lazy sampler construction fallback from RolloutManager.
     if sampler is None:
-      sampler_type = getattr(config, "sampler_type", "vanilla")
-      weight_sync_mode = getattr(
-          config, "weight_sync_mode", weight_sync.DEFAULT_WEIGHT_SYNC_MODE
-      )
-
-      if sampler_type == "vllm":
-        from tunix.dist_rl.rollout import vllm_sampler  # pylint: disable=g-import-not-at-top
-
-        sampler_kwargs: dict[str, Any] = {
-            "server_id": "vllm_sampler",
-            "model_name": getattr(config, "rollout_vllm_model_version", ""),
-            "config": self.config,
-            "weight_sync_mode": weight_sync_mode,
-        }
-        if self._partial_rollout:
-          sampler_kwargs["partial_rollout"] = True
-        sampler = vllm_sampler.VllmSampler(**sampler_kwargs)
-      elif "inprocess_vllm" in sampler_type:
-        from tunix.dist_rl.rollout import inprocess_vllm_sampler  # pylint: disable=g-import-not-at-top
-
-        raiden_delegate = None
-        if weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN:
-          from tunix.dist_rl.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
-
-          delegate_kwargs: dict[str, Any] = {
-              "server_id": "inprocess_vllm_sampler"
-          }
-          if self._partial_rollout:
-            delegate_kwargs["partial_rollout"] = True
-          raiden_delegate = (
-              raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
-                  **delegate_kwargs
-              )
-          )
-
-        sampler_kwargs = {
-            "server_id": "inprocess_vllm_sampler",
-            "tokenizer": tokenizer,
-            "config": config,
-            "raiden_sync_delegate": raiden_delegate,
-            "weight_sync_mode": weight_sync_mode,
-            "max_concurrency": max_concurrency,
-        }
-        if self._partial_rollout:
-          sampler_kwargs["partial_rollout"] = True
-        sampler = inprocess_vllm_sampler.InprocessVllmSampler(**sampler_kwargs)
-      elif "vanilla" in sampler_type:
-        raise ValueError(
-            "VanillaSampler requires an explicit pre-constructed sampler"
-            " instance with an initialized transformer model."
-        )
-      else:
-        raise ValueError(f"Unknown sampler_type: {sampler_type}")
-      sampler.initialize()
-
+      raise ValueError("RolloutManager requires a non-None sampler instance.")
     if not isinstance(sampler, sampler_lib.Sampler):
       raise TypeError(
           f"Expected object implementing Sampler Protocol, got {type(sampler)}"
