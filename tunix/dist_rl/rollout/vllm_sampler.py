@@ -100,9 +100,8 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
   """Rollout sampler backed by vLLM's asynchronous engine (`AsyncLLMEngine`).
 
   Use this sampler to keep the engine in its own process, or with a trainer
-  that emits weights in the rollout model's layout, such as MaxText. This
-  sampler also backs the OpenAI-compatible server in `serve_vllm_sampler.py`.
-  Prefer `InprocessVllmSampler` for RL training with the Tunix trainer.
+  that emits weights in the rollout model's layout, such as MaxText. Prefer
+  `InprocessVllmSampler` for RL training with the Tunix trainer.
 
   Raiden is the only way to update this sampler's weights. There is no
   `update_params` fallback, and `get_target_state()` returns None, so the
