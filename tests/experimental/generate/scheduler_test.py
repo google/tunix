@@ -14,6 +14,9 @@
 
 """Tests for continuous batching scheduler."""
 
+import dataclasses
+from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax.numpy as jnp
@@ -97,6 +100,37 @@ def _admit(
   assert kv_mgr.allocate_slots(req, num_new_tokens=len(req.token_ids))
   req.status = request_lib.RequestStatus.RUNNING
   sched._running_requests.append(req)
+
+
+def _advance_in_flight(
+    sched: scheduler.Scheduler,
+    scheduled: tuple[request_lib.RequestState, ...],
+) -> None:
+  """Simulates the engine dispatching `scheduled` to the model runner."""
+  for req in scheduled:
+    if req.is_chunked_prefill:
+      req.num_computed_tokens += sched.chunked_prefill_length
+      req.num_in_flight_tokens = 0
+    else:
+      # Assume that all speculatively scheduled tokens were generated.
+      req.num_in_flight_tokens = sched._config.num_scheduler_steps
+      req.num_computed_tokens = (
+          len(req.token_ids) + req.num_in_flight_tokens - 1
+      )
+
+
+def _complete_in_flight(
+    req: request_lib.RequestState,
+    token: int | None = None,
+) -> None:
+  """Simulates the engine completing an in-flight step for `req`."""
+  if req.num_stale_output_tokens > 0:
+    # Sampled before `req` was preempted: only the stale count drains.
+    req.num_stale_output_tokens = 0
+  else:
+    req.num_in_flight_tokens = 0
+  if token is not None and not req.is_done:
+    req.token_ids.append(token)
 
 
 class SchedulerConfigTest(parameterized.TestCase):
@@ -200,6 +234,28 @@ class PreemptionTest(parameterized.TestCase):
   def test_preempt_all_on_empty_scheduler_is_a_noop(self):
     self.sched.preempt_all()
     self.assertEqual(self.sched.num_active_requests, 0)
+
+  def test_preempt_marks_in_flight_tokens_stale(self):
+    req = _create_request(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
+    _admit(self.sched, self.kv_mgr, req)
+    req.num_in_flight_tokens = 2
+
+    self.sched._preempt()
+
+    # The in-flight step's tokens still arrive; the request waits for them.
+    self.assertEqual(req.num_stale_output_tokens, 2)
+    self.assertEqual(req.num_in_flight_tokens, 0)
+
+  def test_preempt_all_discards_in_flight_tokens(self):
+    req = _create_request(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
+    _admit(self.sched, self.kv_mgr, req)
+    req.num_in_flight_tokens = 2
+
+    self.sched.preempt_all()
+
+    # Its caller drops the in-flight step, so nothing is left to wait for.
+    self.assertEqual(req.num_stale_output_tokens, 0)
+    self.assertEqual(req.num_in_flight_tokens, 0)
 
   def test_preempt_all_requeues_every_running_request_in_arrival_order(self):
     reqs = [
@@ -601,6 +657,246 @@ class ScheduleStepTest(parameterized.TestCase):
     self.sched.abort_request(req)
 
     self.assertEqual(req.status, request_lib.RequestStatus.FINISHED_EOS)
+
+
+class ColocatedSchedulingTest(parameterized.TestCase):
+  """Tests scheduling the next step while the current step is in flight."""
+
+  def setUp(self):
+    super().setUp()
+    self.kv_mgr = _create_kv_cache_manager(page_size=4, num_device_pages=20)
+    self.config = scheduler.SchedulerConfig(
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+        max_chunked_prefill_length=16,
+        num_scheduler_steps=1,
+    )
+    self.sched = scheduler.Scheduler(
+        config=self.config,
+        kv_cache_manager=self.kv_mgr,
+    )
+
+  def test_advance_in_flight_schedules_decode_for_next_step(self):
+    req = _create_request(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
+    scheduled1, dist1 = self.sched.schedule_step([req])
+    self.assertEqual(dist1, (0, 0, 1))
+
+    _advance_in_flight(self.sched, scheduled1)
+    scheduled2, dist2 = self.sched.schedule_step([])
+    self.assertEqual(scheduled2, (req,))
+    self.assertEqual(dist2, (1, 1, 1))
+    self.assertTrue(req.is_decode)
+    self.assertFalse(req.is_chunked_prefill)
+    self.assertEqual(req.num_computed_tokens, 4)
+
+    _complete_in_flight(req, 101)
+    self.assertEqual(req.token_ids, [10, 20, 30, 40, 101])
+    self.assertEqual(req.num_computed_tokens, 4)
+
+  def test_advance_in_flight_continues_chunked_prefill(self):
+    sched = scheduler.Scheduler(
+        config=dataclasses.replace(self.config, max_num_batched_tokens=16),
+        kv_cache_manager=self.kv_mgr,
+    )
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(24)))
+    scheduled1, dist1 = sched.schedule_step([req])
+    self.assertEqual(dist1, (0, 1, 1))
+
+    # While chunk 1 (16 tokens) is in flight, chunk 2 (the remaining 8 tokens)
+    # is scheduled as a full prefill.
+    _advance_in_flight(sched, scheduled1)
+    scheduled2, dist2 = sched.schedule_step([])
+    self.assertEqual(scheduled2, (req,))
+    self.assertEqual(dist2, (0, 0, 1))
+    self.assertFalse(req.is_chunked_prefill)
+    self.assertFalse(req.is_decode)
+    self.assertEqual(req.num_computed_tokens, 16)
+
+    _complete_in_flight(req)
+    self.assertEqual(req.num_computed_tokens, 16)
+    self.assertLen(req.token_ids, 24)
+
+  def test_drop_completed_releases_finished_requests(self):
+    r1 = _create_request(req_id="r1", prompt_token_ids=[10, 20])
+    r2 = _create_request(req_id="r2", prompt_token_ids=[30, 40])
+    scheduled1, _ = self.sched.schedule_step([r1, r2])
+    _advance_in_flight(self.sched, scheduled1)
+
+    # r1 finishes in step 1.
+    _complete_in_flight(r1, 999)
+    r1.status = request_lib.RequestStatus.FINISHED_EOS
+
+    self.sched.drop_completed()
+    self.assertEqual(list(self.sched._running_requests), [r2])
+    self.assertEqual(self.kv_mgr.get_page_idxs(r1), {"cache_0": ()})
+
+  def test_request_with_final_tokens_in_flight_is_skipped(self):
+    small_kv_mgr = _create_kv_cache_manager(page_size=4, num_device_pages=3)
+    sched = scheduler.Scheduler(
+        config=self.config, kv_cache_manager=small_kv_mgr
+    )
+    r1 = _create_request(
+        req_id="r1", prompt_token_ids=[1, 2, 3, 4], max_tokens=1
+    )
+    r2 = _create_request(
+        req_id="r2", prompt_token_ids=[5, 6, 7, 8], max_tokens=2
+    )
+    scheduled1, _ = sched.schedule_step([r1, r2])
+    _advance_in_flight(sched, scheduled1)
+
+    # r1's only token is in flight, so it finishes once step 1 returns. It is
+    # skipped rather than given the last free page, which r2 needs to decode.
+    scheduled2, dist2 = sched.schedule_step([])
+    self.assertEqual(scheduled2, (r2,))
+    self.assertEqual(dist2, (1, 1, 1))
+    self.assertLen(small_kv_mgr.get_page_idxs(r1)["cache_0"], 1)
+    self.assertLen(small_kv_mgr.get_page_idxs(r2)["cache_0"], 2)
+    self.assertEqual(list(sched._running_requests), [r1, r2])
+
+  def test_preemption_while_in_flight_keeps_sampled_token_and_resumes(self):
+    tiny_kv_mgr = _create_kv_cache_manager(page_size=4, num_device_pages=2)
+    sched = scheduler.Scheduler(config=self.config, kv_cache_manager=tiny_kv_mgr)
+    r1 = _create_request(
+        req_id="r1", prompt_token_ids=[1, 2, 3, 4], max_tokens=2
+    )
+    r2 = _create_request(
+        req_id="r2", prompt_token_ids=[5, 6, 7, 8], max_tokens=2
+    )
+
+    scheduled1, _ = sched.schedule_step([r1, r2])
+    _advance_in_flight(sched, scheduled1)
+    # Step 2 needs a second page for r1, which preempts r2 while step 1 is still
+    # in flight.
+    scheduled2, _ = sched.schedule_step([])
+    self.assertEqual(scheduled2, (r1,))
+    self.assertEqual(r2.status, request_lib.RequestStatus.PENDING)
+
+    # Step 1 finishes: r2 still receives the token it sampled in step 1, while
+    # staying pending with 0 computed KV tokens.
+    _complete_in_flight(r1, 101)
+    _complete_in_flight(r2, 201)
+    self.assertEqual(r2.token_ids, [5, 6, 7, 8, 201])
+    self.assertEqual(r2.num_computed_tokens, 0)
+
+    # Step 2 finishes r1, freeing the cache so r2 can re-prefill [5, 6, 7, 8, 201].
+    _advance_in_flight(sched, scheduled2)
+    sched.schedule_step([])
+    _complete_in_flight(r1, 102)
+    r1.status = request_lib.RequestStatus.FINISHED_LENGTH
+    sched.drop_completed()
+
+    scheduled3, dist3 = sched.schedule_step([])
+    self.assertEqual(scheduled3, (r2,))
+    self.assertEqual(dist3, (0, 0, 1))
+    self.assertFalse(r2.is_decode)
+    self.assertFalse(r2.is_chunked_prefill)
+
+  def test_preempted_request_is_skipped_while_its_step_is_in_flight(
+      self,
+  ):
+    r1 = _create_request(req_id="r1", prompt_token_ids=[1, 2, 3, 4])
+    r2 = _create_request(req_id="r2", prompt_token_ids=[5, 6, 7, 8])
+    r3 = _create_request(req_id="r3", prompt_token_ids=[9, 10, 11, 12])
+    scheduled1, _ = self.sched.schedule_step([r1, r2])
+    _advance_in_flight(self.sched, scheduled1)
+
+    # r1's next allocation fails once, so it preempts r2 while step 1 is in
+    # flight. There is room for r2 again right after, in the same pass.
+    allocate_slots = self.kv_mgr.allocate_slots
+    failed = []
+
+    def fail_r1_once(req, **kwargs):
+      if req is r1 and not failed:
+        failed.append(True)
+        return False
+      return allocate_slots(req, **kwargs)
+
+    with mock.patch.object(self.kv_mgr, "allocate_slots", fail_r1_once):
+      scheduled2, dist2 = self.sched.schedule_step([r3])
+
+    # Prefilling r2 now would sample the position step 1 is about to fill, so
+    # r2 sits out step 2. It keeps its place ahead of r3, which arrived later.
+    self.assertEqual(scheduled2, (r1, r3))
+    self.assertEqual(dist2, (1, 1, 2))
+    self.assertEqual(list(self.sched._running_requests), [r1, r2, r3])
+    self.assertEmpty(self.sched._pending_requests)
+    self.assertEqual(r2.num_stale_output_tokens, 1)
+    self.assertEqual(self.kv_mgr.get_page_idxs(r2), {"cache_0": ()})
+
+    # Once step 1's output arrives, r2 re-prefills, still ahead of r3.
+    _complete_in_flight(r1, 101)
+    _complete_in_flight(r2, 201)
+    _advance_in_flight(self.sched, scheduled2)
+    scheduled3, dist3 = self.sched.schedule_step([])
+    self.assertEqual(scheduled3, (r1, r3, r2))
+    self.assertEqual(dist3, (2, 2, 3))
+    self.assertEqual(list(self.sched._running_requests), [r1, r2, r3])
+
+  def test_preempted_request_with_stale_output_runs_chunked_prefill(self):
+    sched = scheduler.Scheduler(
+        config=dataclasses.replace(self.config, max_num_batched_tokens=16),
+        kv_cache_manager=self.kv_mgr,
+    )
+    req = _create_request(req_id="r1", prompt_token_ids=list(range(24)))
+    # As if `req` was preempted while sampling a token in flight.
+    req.num_stale_output_tokens = 1
+
+    # Its first chunk only reads existing tokens, so it does not wait.
+    scheduled, dist = sched.schedule_step([req])
+    self.assertEqual(scheduled, (req,))
+    self.assertEqual(dist, (0, 1, 1))
+    self.assertTrue(req.is_chunked_prefill)
+
+    # The rest would be a full prefill, which samples, so it is skipped.
+    _advance_in_flight(sched, scheduled)
+    scheduled, dist = sched.schedule_step([])
+    self.assertEqual(scheduled, ())
+    self.assertEqual(dist, (0, 0, 0))
+    self.assertEqual(list(sched._running_requests), [req])
+
+    _complete_in_flight(req, 999)
+    scheduled, dist = sched.schedule_step([])
+    self.assertEqual(scheduled, (req,))
+    self.assertEqual(dist, (0, 0, 1))
+
+  def test_skipped_requests_do_not_count_toward_max_num_seqs(self):
+    sched = scheduler.Scheduler(
+        config=dataclasses.replace(self.config, max_num_seqs=2),
+        kv_cache_manager=self.kv_mgr,
+    )
+    r1 = _create_request(req_id="r1", prompt_token_ids=[1, 2, 3, 4])
+    r2 = _create_request(req_id="r2", prompt_token_ids=[5, 6, 7, 8])
+    r3 = _create_request(req_id="r3", prompt_token_ids=[9, 10, 11, 12])
+    scheduled1, _ = sched.schedule_step([r1, r2])
+    _advance_in_flight(sched, scheduled1)
+
+    # r1's next allocation fails once, so it preempts r2, which is then
+    # skipped while step 1 is in flight.
+    allocate_slots = self.kv_mgr.allocate_slots
+    failed = []
+
+    def fail_r1_once(req, **kwargs):
+      if req is r1 and not failed:
+        failed.append(True)
+        return False
+      return allocate_slots(req, **kwargs)
+
+    with mock.patch.object(self.kv_mgr, "allocate_slots", fail_r1_once):
+      scheduled2, dist2 = sched.schedule_step([r3])
+
+    # The skipped r2 takes no batch row, so r3 still fills the second one.
+    self.assertEqual(scheduled2, (r1, r3))
+    self.assertEqual(dist2, (1, 1, 2))
+    self.assertEqual(list(sched._running_requests), [r1, r2, r3])
+
+  def test_preempt_keeps_stale_output_of_skipped_request(self):
+    req = _create_request(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
+    self.sched._running_requests.append(req)
+    req.num_stale_output_tokens = 1
+
+    self.sched._preempt()
+
+    self.assertEqual(req.num_stale_output_tokens, 1)
 
 
 if __name__ == "__main__":

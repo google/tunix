@@ -117,6 +117,11 @@ class RequestState:
     self.num_computed_tokens = 0
     # Number of tokens being sampled by an in-flight model runner step.
     self.num_in_flight_tokens = 0
+    # Number of tokens an in-flight step was sampling when the request was
+    # preempted. They are still appended once that step's output arrives, but
+    # until then the request must not sample: it would sample the same
+    # positions a second time.
+    self.num_stale_output_tokens = 0
     # Whether the request is scheduled as a decode step.
     self.is_decode = False
     # Whether the request is scheduled as a chunked prefill step.

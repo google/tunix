@@ -27,6 +27,29 @@ from tunix.experimental.generate import request as request_lib
 _PrefixMatch = Sequence[Sequence[kv_cache_manager_lib.Page | None]]
 
 
+def _has_final_tokens_in_flight(req: request_lib.RequestState) -> bool:
+  """Whether every token `req` may still generate is being sampled in flight."""
+  return (
+      req.num_total_tokens - req.prompt_length
+      >= req.sampling_params.max_tokens
+  )
+
+
+def _is_skipped(req: request_lib.RequestState) -> bool:
+  """Whether the admitted `req` keeps its place but sits out the next step.
+
+  It sits out while its final tokens are in flight, or while it waits for the
+  stale output of a step it was preempted from, unless it runs a chunked
+  prefill, which only reads tokens that already exist.
+
+  Args:
+    req: A request admitted to the running queue this step.
+  """
+  return _has_final_tokens_in_flight(req) or (
+      req.num_stale_output_tokens > 0 and not req.is_chunked_prefill
+  )
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class SchedulerConfig:
   """Configuration for the scheduler."""
@@ -79,7 +102,6 @@ class Scheduler:
     self._pending_requests: collections.deque[request_lib.RequestState] = (
         collections.deque()
     )
-    self._token_budget: int = 0
 
     self._kv_cache_manager = kv_cache_manager
 
@@ -124,12 +146,13 @@ class Scheduler:
 
     self._schedule_requests()
 
-    decodes = [r for r in self._running_requests if r.is_decode]
-    chunked = [r for r in self._running_requests if r.is_chunked_prefill]
+    # Skipped requests hold their place in the running queue, but sit out
+    # this step.
+    runnable = [r for r in self._running_requests if not _is_skipped(r)]
+    decodes = [r for r in runnable if r.is_decode]
+    chunked = [r for r in runnable if r.is_chunked_prefill]
     prefills = [
-        r
-        for r in self._running_requests
-        if not r.is_decode and not r.is_chunked_prefill
+        r for r in runnable if not r.is_decode and not r.is_chunked_prefill
     ]
 
     i = len(decodes)
@@ -138,6 +161,11 @@ class Scheduler:
 
     # The RPA kernel expects [decodes, chunked, prefills] ordering.
     return tuple(decodes + chunked + prefills), (i, j, k)
+
+  def drop_completed(self) -> None:
+    """Drops finished or aborted requests from the queues."""
+    self._running_requests = self._drop_done(self._running_requests)
+    self._pending_requests = self._drop_done(self._pending_requests)
 
   def abort_request(self, req: request_lib.RequestState) -> None:
     """Aborts `req`. Has no effect if `req` is already done."""
@@ -162,25 +190,28 @@ class Scheduler:
     new_running_requests = []
     self._token_budget = self._config.max_num_batched_tokens
 
-    n_admitted_requests = 0
+    n_visited = 0
+    # Skipped requests take no batch row, so only runnable requests count
+    # toward `max_num_seqs`.
+    n_runnable = 0
     while (
-        n_admitted_requests < len(requests)
-        and len(new_running_requests) < self._config.max_num_seqs
+        n_visited < len(requests) and n_runnable < self._config.max_num_seqs
     ):
-      req = requests[n_admitted_requests]
-
-      scheduled = self._try_schedule_request(req, n_admitted_requests)
+      req = requests[n_visited]
+      scheduled = self._try_schedule_request(req, len(new_running_requests))
       if not scheduled:
         break
 
-      n_admitted_requests += 1
+      n_visited += 1
       new_running_requests.append(req)
+      if not _is_skipped(req):
+        n_runnable += 1
 
-    while len(self._running_requests) > n_admitted_requests:
+    while len(self._running_requests) > len(new_running_requests):
       self._preempt()
 
     self._running_requests = collections.deque(new_running_requests)
-    self._pending_requests = collections.deque(requests[n_admitted_requests:])
+    self._pending_requests = collections.deque(requests[n_visited:])
 
   def _try_schedule_request(
       self,
@@ -188,10 +219,26 @@ class Scheduler:
       n_admitted_requests: int,
   ) -> bool:
     """Tries to schedule `req` for the next step."""
+    if _has_final_tokens_in_flight(req):
+      # Every token `req` may still generate is already being sampled in
+      # flight, so it finishes once that output arrives. Keep its pages, but
+      # skip it rather than allocate slots for tokens it will never generate.
+      self._skip(req)
+      return True
+
     n_tokens_hit, computed_pages = self._get_prefix_hit(req)
     is_decode, is_chunked_prefill, n_tokens_to_schedule, n_to_allocate = (
         self._get_n_tokens_to_schedule(req, n_tokens_hit)
     )
+
+    if req.num_stale_output_tokens > 0 and not is_chunked_prefill:
+      # A decode or full prefill would sample the positions that the in-flight
+      # output is about to fill, e.g. for a request preempted earlier in this
+      # same pass. Keep its place in the queue so later requests cannot jump
+      # ahead of it, but skip it until that output arrives. A chunked prefill
+      # only reads tokens that already exist, so it can run.
+      self._skip(req)
+      return True
 
     if n_tokens_to_schedule > self._token_budget:
       return False
@@ -221,6 +268,11 @@ class Scheduler:
     req.status = request_lib.RequestStatus.RUNNING
     req.num_computed_tokens += n_tokens_hit
     return True
+
+  def _skip(self, req: request_lib.RequestState) -> None:
+    """Keeps `req`'s place in the running queue, but leaves it out of the step."""
+    req.is_decode = False
+    req.is_chunked_prefill = False
 
   def _get_prefix_hit(
       self, req: request_lib.RequestState
@@ -278,6 +330,8 @@ class Scheduler:
       self._preempt()
     for req in self._pending_requests:
       req.num_in_flight_tokens = 0
+      # The caller discards the in-flight step, so its output never arrives.
+      req.num_stale_output_tokens = 0
 
   def _preempt(self) -> None:
     """Moves the most recently admitted request to the front of pending."""
@@ -285,6 +339,9 @@ class Scheduler:
     self._kv_cache_manager.release_request(req)
 
     req.num_computed_tokens = 0
+    # Tokens an in-flight step is sampling are still appended when it
+    # returns, so the request waits for them before it samples again.
+    req.num_stale_output_tokens += req.num_in_flight_tokens
     req.num_in_flight_tokens = 0
     req.is_decode = False
     req.is_chunked_prefill = False

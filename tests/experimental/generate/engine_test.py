@@ -323,6 +323,51 @@ class StepTest(parameterized.TestCase):
     )
     self.assertEqual(output.finish_reason, 'stop')
 
+  def test_eos_in_a_batch_keeps_the_other_request_decoding(self):
+    # Request 'a' samples the EOS token as its second token while request 'b'
+    # keeps decoding. The step launched while 'a''s EOS was in flight still
+    # holds 'b', which moves from row 1 to row 0 once 'a' is dropped.
+    prompt_a = [1, 2, 3]
+    prompt_b = [4, 5]
+    eos = reference_generate(prompt_a)[1]
+    eos_token_ids = frozenset({eos})
+    expected_a = reference_generate(prompt_a, eos_token_ids=eos_token_ids)
+    expected_b = reference_generate(prompt_b, eos_token_ids=eos_token_ids)
+    self.assertLen(expected_a, 2)
+    self.assertNotIn(eos, expected_b)
+    engine = testing_utils.make_engine(eos_token_ids=eos_token_ids)
+    engine.add_request(testing_utils.make_request('a', prompt_a))
+    engine.add_request(testing_utils.make_request('b', prompt_b))
+
+    outputs = drive(engine)
+
+    self.assertEqual(outputs['a'].token_ids.tolist(), expected_a)
+    self.assertEqual(outputs['a'].finish_reason, 'stop')
+    self.assertEqual(outputs['b'].token_ids.tolist(), expected_b)
+    self.assertEqual(outputs['b'].finish_reason, 'length')
+
+  def test_stale_output_finishing_a_readmitted_request_keeps_its_kv_count(
+      self,
+  ):
+    engine = testing_utils.make_engine(eos_token_ids=frozenset({7}))
+    req = request_lib.RequestState(
+        req_id='0',
+        prompt_token_ids=list(range(1, 25)),
+        sampling_params=testing_utils.make_request('0', [1]).sampling_params,
+    )
+    # `req` was preempted while sampling a token, then re-admitted to run its
+    # first chunk before that token arrived.
+    req.num_stale_output_tokens = 1
+    req.status = request_lib.RequestStatus.RUNNING
+    req.num_computed_tokens = 16
+
+    engine._update_req_from_output(req, np.array([7]))  # pylint: disable=protected-access
+
+    self.assertEqual(req.status, request_lib.RequestStatus.FINISHED_EOS)
+    # Only the re-run chunk is in the KV cache, not the whole sequence.
+    self.assertEqual(req.num_computed_tokens, 16)
+    self.assertEqual(req.num_stale_output_tokens, 0)
+
   def test_chunked_prefill(self):
     engine = testing_utils.make_engine(
         max_num_batched_tokens=8, chunked_prefill_length=4
@@ -398,6 +443,36 @@ class StepTest(parameterized.TestCase):
     preempt_spy.assert_called()
     self.assertEqual(generated, [reference_generate(p) for p in prompts])
 
+  def test_preempted_while_in_flight_processes_generated_token(self):
+    # Two pages hold both 4-token prompts in step 1. When step 2 is scheduled
+    # while step 1 is still in flight, request '0' needs a second page for its
+    # second token and preempts request '1'. Request '1' must still process its
+    # generated token from step 1, which finishes it.
+    engine = testing_utils.make_engine(
+        max_model_len=6, max_device_size_gib=2 * testing_utils.GIB_PER_PAGE
+    )
+    preempt_spy = mock.patch.object(
+        engine._scheduler,  # pylint: disable=protected-access
+        '_preempt',
+        wraps=engine._scheduler._preempt,  # pylint: disable=protected-access
+    ).start()
+    p0 = [1, 2, 3, 4]
+    p1 = [5, 6, 7, 8]
+    engine.add_request(testing_utils.make_request('0', p0, max_tokens=2))
+    engine.add_request(testing_utils.make_request('1', p1, max_tokens=1))
+
+    outputs = drive(engine)
+
+    preempt_spy.assert_called_once()
+    self.assertEqual(set(outputs.keys()), {'0', '1'})
+    self.assertEqual(
+        outputs['0'].token_ids.tolist(), reference_generate(p0, max_tokens=2)
+    )
+    self.assertEqual(
+        outputs['1'].token_ids.tolist(), reference_generate(p1, max_tokens=1)
+    )
+    self.assertFalse(engine.has_unfinished_requests())
+
   def test_prefix_cache_hit_skips_the_cached_tokens(self):
     engine = testing_utils.make_engine()
     prompt = list(range(1, 10))
@@ -435,16 +510,67 @@ class StepTest(parameterized.TestCase):
     engine.add_request(
         testing_utils.make_request('first', [1, 2, 3], max_tokens=4)
     )
-    engine.step()  # Full prefill.
-    engine.step()  # Pure decode.
+    # Full prefill, then a pure decode launched while the prefill runs.
+    engine.step()
+    engine.step()  # Another pure decode.
     engine.add_request(
         testing_utils.make_request('second', [1, 2, 3, 4, 5], max_tokens=2)
     )
     drive(engine)  # Mixed decode + chunked prefill, 1-token tail, pure decode.
 
     decode_only = [c.kwargs['metadata'].decode_only for c in spy.call_args_list]
-    self.assertEqual(decode_only, [False, True, False, True, True])
+    self.assertEqual(decode_only, [False, True, True, False, True, True])
     self.assertTrue(all(isinstance(flag, bool) for flag in decode_only))
+
+  def test_schedules_next_step_while_model_forward_is_in_flight(self):
+    engine = testing_utils.make_engine()
+    events: list[str] = []
+
+    orig_execute = engine._model_runner.execute_step  # pylint: disable=protected-access
+    orig_schedule = engine._scheduler.schedule_step  # pylint: disable=protected-access
+    orig_update = engine._update_from_output  # pylint: disable=protected-access
+
+    def record_execute(*args, **kwargs):
+      events.append('execute')
+      return orig_execute(*args, **kwargs)
+
+    def record_schedule(*args, **kwargs):
+      events.append('schedule')
+      return orig_schedule(*args, **kwargs)
+
+    def record_update(*args, **kwargs):
+      events.append('update')
+      return orig_update(*args, **kwargs)
+
+    mock.patch.object(
+        engine._model_runner, 'execute_step', side_effect=record_execute  # pylint: disable=protected-access
+    ).start()
+    mock.patch.object(
+        engine._scheduler, 'schedule_step', side_effect=record_schedule  # pylint: disable=protected-access
+    ).start()
+    mock.patch.object(
+        engine, '_update_from_output', side_effect=record_update
+    ).start()
+
+    engine.add_request(testing_utils.make_request('0', [1, 2], max_tokens=2))
+    engine.step()
+    engine.step()
+
+    # Step 1 schedules and launches the initial batch, then schedules and
+    # launches Step 2 while Step 1 is in flight, before updating from Step 1's
+    # output. Step 2 finishes the already-launched second batch.
+    self.assertEqual(
+        events,
+        [
+            'schedule',
+            'execute',
+            'schedule',
+            'execute',
+            'update',
+            'schedule',
+            'update',
+        ],
+    )
 
   def test_returns_logits_and_logprobs(self):
     engine = testing_utils.make_engine(return_logits=True, return_logprobs=True)
