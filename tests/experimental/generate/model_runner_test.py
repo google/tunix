@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from unittest import mock
 
 from absl.testing import absltest
@@ -19,11 +20,13 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.dist_rl.rollout import sampler as sampler_lib
+from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.models import paged_attention
 from tunix.rl import reshard
 from tunix.tests import test_common as tc
+
+os.environ.setdefault('XLA_FLAGS', '--xla_force_host_platform_device_count=2')
 
 
 def _logits(row: list[float], num_rows: int = 1) -> jnp.ndarray:
@@ -413,12 +416,94 @@ class ModelRunnerTest(absltest.TestCase):
       )
 
   def test_update_params_replaces_the_weights(self):
+    def reverse_dicts(x):
+      if isinstance(x, dict):
+        return {k: reverse_dicts(v) for k, v in reversed(list(x.items()))}
+      if isinstance(x, list):
+        return [reverse_dicts(v) for v in x]
+      return x
+
     runner = _runner(_transformer(seed=0))
-    new_state = nnx.state(_transformer(seed=1), nnx.Param)
+    original_var_ids = [id(v) for v in runner._flattened_transformer_state]
+    state1 = nnx.state(_transformer(seed=1), nnx.Param)
+    state2 = nnx.state(_transformer(seed=2), nnx.Param)
 
-    runner.update_params(new_state)
+    for weights, expected in (
+        (state1, state1),
+        (reverse_dicts(nnx.to_pure_dict(state2)), state2),
+    ):
+      with mock.patch.object(nnx, 'merge', wraps=nnx.merge) as mock_merge:
+        runner.update_params(weights)
+      mock_merge.assert_not_called()
+      self.assertEqual(
+          [id(v) for v in runner._flattened_transformer_state], original_var_ids
+      )
+      self._assert_trees_equal(runner.transformer_state, expected)
+      self._assert_trees_equal(nnx.state(runner.transformer), expected)
 
-    self._assert_trees_equal(runner.transformer_state, new_state)
+  def test_update_params_validates_shape_and_sharding_atomically(self):
+    ns, pspec = jax.sharding.NamedSharding, jax.sharding.PartitionSpec
+    devices = np.asarray(jax.devices()[:2]).reshape(2, 1)
+    mesh, other_mesh = (
+        jax.sharding.Mesh(devices, ('x', 'y')),
+        jax.sharding.Mesh(devices, ('y', 'x')),
+    )
+    replicated, row_sharded = ns(mesh, pspec()), ns(mesh, pspec('x', None))
+
+    transformer = _transformer(seed=0, num_layers=1)
+    init_state = jax.device_put(nnx.state(transformer), replicated)
+    init_state['lm_head']['kernel'].set_raw_value(
+        jax.device_put(
+            init_state['lm_head']['kernel'].get_raw_value(), row_sharded
+        )
+    )
+    nnx.update(transformer, init_state)
+    runner = _runner(transformer)
+    original_var_ids = [id(v) for v in runner._flattened_transformer_state]
+
+    def make_weights(seed, head_spec=pspec('x', None)):
+      w = jax.device_put(
+          nnx.to_pure_dict(
+              nnx.state(_transformer(seed=seed, num_layers=1), nnx.Param)
+          ),
+          replicated,
+      )
+      w['lm_head']['kernel'] = jax.device_put(
+          w['lm_head']['kernel'], ns(mesh, head_spec)
+      )
+      return w
+
+    valid = make_weights(seed=1, head_spec=pspec(('x', 'y'), None))
+    with mock.patch.object(nnx, 'merge', wraps=nnx.merge) as mock_merge:
+      runner.update_params(valid)
+    mock_merge.assert_not_called()
+    self._assert_trees_equal(nnx.to_pure_dict(runner.transformer_state), valid)
+
+    base = make_weights(seed=2)
+    emb, head = base['emb']['embedding'], base['lm_head']['kernel']
+    for k1, k2, bad_leaf in (
+        ('lm_head', 'kernel', jnp.ones((1, 1), dtype=jnp.float32)),
+        ('emb', 'embedding', jax.device_put(emb, row_sharded)),
+        ('lm_head', 'kernel', jax.device_put(head, ns(mesh, pspec(None, 'x')))),
+        (
+            'lm_head',
+            'kernel',
+            jax.device_put(head, ns(other_mesh, pspec('x', None))),
+        ),
+    ):
+      bad = {**base, k1: {**base[k1], k2: bad_leaf}}
+      with mock.patch.object(nnx, 'merge', wraps=nnx.merge) as mock_merge:
+        with self.assertRaisesRegex(
+            ValueError, 'same shape, dtype and sharding'
+        ):
+          runner.update_params(bad)
+      mock_merge.assert_not_called()
+      self.assertEqual(
+          [id(v) for v in runner._flattened_transformer_state], original_var_ids
+      )
+      self._assert_trees_equal(
+          nnx.to_pure_dict(runner.transformer_state), valid
+      )
 
   def test_update_params_keeps_the_weights_it_is_not_given(self):
     runner = _runner(_transformer(seed=0))
@@ -601,6 +686,15 @@ class ExecuteStepTest(absltest.TestCase):
     self.assertEqual(logits.shape, (3, 1, _VOCAB_SIZE))
     # The prefill's logits come from its last token, 9.
     self.assertEqual(int(np.argmax(logits[1, 0])), 10)
+
+  def test_update_params_takes_effect_on_subsequent_steps(self):
+    runner = _runner(_NextTokenTransformer(), return_logits=True)
+    _, before, _, _ = self._execute(runner)
+
+    runner.update_params({'scale': jnp.array(-1.0)})
+    _, after, _, _ = self._execute(runner)
+
+    np.testing.assert_allclose(after, -before)
 
   def test_returns_logprobs_per_row(self):
     runner = _runner(_NextTokenTransformer(), return_logprobs=True)

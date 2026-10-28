@@ -232,6 +232,36 @@ def _stack_steps(
   )
   return out.at[:, 0].set(first_step)
 
+
+def _is_variable(x: object) -> bool:
+  return isinstance(x, nnx.Variable)
+
+
+def _raw_state_mapping(tree: jaxtyping.PyTree) -> jaxtyping.PyTree:
+  return tree.raw_mapping if isinstance(tree, statelib.State) else tree
+
+
+def _equivalent_sharding(x: jax.Array, y: jax.Array) -> bool:
+  """Returns whether `x` and `y` have equivalent shardings modulo memory kind."""
+  xs, ys = x.sharding, y.sharding
+  if xs == ys:
+    return True
+  if isinstance(xs, jax.sharding.SingleDeviceSharding) and isinstance(
+      ys, jax.sharding.SingleDeviceSharding
+  ):
+    return xs.device_set == ys.device_set
+  if not (
+      isinstance(xs, jax.sharding.NamedSharding)
+      and isinstance(ys, jax.sharding.NamedSharding)
+      and xs.mesh == ys.mesh
+      and x.ndim == y.ndim
+  ):
+    return False
+  if xs.memory_kind != ys.memory_kind:
+    ys = ys.update(memory_kind=xs.memory_kind)
+  return xs.is_equivalent_to(ys, x.ndim)
+
+
 class ModelRunner:
   """Runs the transformer forward pass and samples tokens."""
 
@@ -250,9 +280,12 @@ class ModelRunner:
         transformer
     )
     self._transformer_state: statelib.State = nnx.variables(transformer)
-    self._flattened_transformer_state: list[nnx.Variable] = jax.tree.leaves(
-        self._transformer_state,
-        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    self._flattened_transformer_state: list[nnx.Variable]
+    self._transformer_state_treedef: jax.tree_util.PyTreeDef
+    self._flattened_transformer_state, self._transformer_state_treedef = (
+        jax.tree.flatten(
+            _raw_state_mapping(self._transformer_state), is_leaf=_is_variable
+        )
     )
 
     self._config = config
@@ -295,7 +328,7 @@ class ModelRunner:
       jax.tree_util.tree_map(
           lambda x: param_types.add(type(x)),
           tree,
-          is_leaf=lambda x: isinstance(x, nnx.Variable),
+          is_leaf=_is_variable,
       )
       return param_types
 
@@ -310,34 +343,10 @@ class ModelRunner:
         )
 
       def check_shape_dtype_sharding(x, y):
-
-        def equivalent_sharding(x, y):
-          # Lift the condition on memory_kind due to offloading.
-          # Besides it seems jax.jit might change some shardings of the params
-          # to equivalent representation so here we check if the specs are
-          # equivalent instead of checking the identity.
-          if isinstance(
-              x.sharding, jax.sharding.SingleDeviceSharding
-          ) and isinstance(y.sharding, jax.sharding.SingleDeviceSharding):
-            return x.sharding.device_set == y.sharding.device_set
-          if not (
-              isinstance(x.sharding, jax.sharding.NamedSharding)
-              and isinstance(y.sharding, jax.sharding.NamedSharding)
-          ):
-            return False
-          if x.sharding.mesh != y.sharding.mesh:
-            return False
-          mesh = x.sharding.mesh
-          diff_spec = list(set(x.sharding.spec) - set(y.sharding.spec))
-          for spec in diff_spec:
-            if spec and mesh.shape[spec] != 1:
-              return False
-          return True
-
         return (
             jnp.shape(x) == jnp.shape(y)
             and x.dtype == y.dtype
-            and equivalent_sharding(x, y)
+            and _equivalent_sharding(x, y)
         )
 
       if not all(
@@ -372,9 +381,10 @@ class ModelRunner:
       )
       self._transformer_state = statelib.merge_state(base_state, state)
 
-    self._flattened_transformer_state = jax.tree.leaves(
-        self._transformer_state,
-        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    self._flattened_transformer_state, self._transformer_state_treedef = (
+        jax.tree.flatten(
+            _raw_state_mapping(self._transformer_state), is_leaf=_is_variable
+        )
     )
 
   def update_params(
@@ -383,6 +393,10 @@ class ModelRunner:
       filter_types: tuple[Any, ...] | None = None,
   ) -> None:
     """Updates model parameters in the sampler."""
+    if filter_types is None and self._try_update_params_in_place(
+        updated_weights
+    ):
+      return
     if filter_types is not None:
       dst_params = nnx.state(self.transformer, filter_types)
       dst_leaves = jax.tree.leaves(dst_params)
@@ -423,6 +437,45 @@ class ModelRunner:
     ):
       return self.transformer.config.dtype
     return self._flattened_transformer_state[0].dtype
+
+  def _try_update_params_in_place(
+      self, updated_weights: jaxtyping.PyTree
+  ) -> bool:
+    """Updates `self._flattened_transformer_state` in place when layouts match."""
+    new_leaves, new_treedef = jax.tree.flatten(
+        _raw_state_mapping(updated_weights), is_leaf=_is_variable
+    )
+    if new_treedef != self._transformer_state_treedef:
+      return False
+    new_arrays: list[jax.Array] = []
+    bad_shape_or_sharding = False
+    for var, leaf in zip(self._flattened_transformer_state, new_leaves):
+      if not isinstance(var, nnx.Param) or var.ref:
+        return False
+      if isinstance(leaf, nnx.Variable):
+        if leaf.ref:
+          return False
+        leaf = leaf.get_raw_value()
+      old_arr = var.get_raw_value()
+      if (
+          not isinstance(old_arr, jax.Array)
+          or not isinstance(leaf, jax.Array)
+          or old_arr.dtype != leaf.dtype
+      ):
+        return False
+      if not bad_shape_or_sharding and (
+          old_arr.shape != leaf.shape or not _equivalent_sharding(old_arr, leaf)
+      ):
+        bad_shape_or_sharding = True
+      new_arrays.append(leaf)
+    if bad_shape_or_sharding:
+      raise ValueError(
+          'New state must have the same shape, dtype and sharding as the old'
+          f' state. {self._transformer_state} vs {updated_weights}'
+      )
+    for var, new_arr in zip(self._flattened_transformer_state, new_arrays):
+      var.set_raw_value(new_arr)
+    return True
 
   def _get_token_positions(
       self,
