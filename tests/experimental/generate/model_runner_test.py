@@ -120,6 +120,17 @@ class SamplingMetadataTest(absltest.TestCase):
     # An unset `top_k` inherits the engine's lack of a limit.
     np.testing.assert_array_equal(metadata.top_k, [100, -1])
 
+  def test_unconstrained_requires_no_top_k_or_top_p_truncation(self):
+    greedy = _params(temperature=0.0, top_k=1, top_p=0.5)
+    for metadata, expected in (
+        (_metadata(_params(), greedy, num_rows=4, max_top_k=-1), True),
+        (_metadata(_params(), max_top_k=0), True),
+        (_metadata(_params(), max_top_k=8), False),
+        (_metadata(_params(), _params(top_k=2), max_top_k=-1), False),
+        (_metadata(_params(), _params(top_p=0.9), max_top_k=-1), False),
+    ):
+      self.assertIs(metadata.unconstrained, expected)
+
 
 class SampleTest(absltest.TestCase):
 
@@ -281,6 +292,99 @@ class SampleTest(absltest.TestCase):
     )
 
     self.assertIsNone(logp)
+
+  def test_unconstrained_skips_top_k_and_handles_all_neg_inf(self):
+    metadata = _metadata(_params(temperature=0.0), _params(), max_top_k=-1)
+    for vocab_size in (16, 4096):
+      logits = jnp.full((2, vocab_size), -jnp.inf, dtype=jnp.bfloat16)
+      with mock.patch.object(jax.lax, 'top_k') as mock_top_k:
+        tokens, logp = model_runner_lib.sample(
+            logits, jax.random.PRNGKey(0), metadata, max_top_k=-1
+        )
+        mock_top_k.assert_not_called()
+      self.assertEqual(tokens.dtype, jnp.int32)
+      np.testing.assert_array_equal(tokens, [0, 0])
+      self.assertIsNone(logp)
+      _, neg_inf_logp = self._sample(logits, metadata, max_top_k=-1)
+      assert neg_inf_logp is not None
+      self.assertTrue(bool(jnp.all(jnp.isnan(neg_inf_logp))))
+
+  def test_unconstrained_greedy_ties_extreme_temps_and_logprobs(self):
+    for vocab_size, mask_start, mask_stop, ties, solo in (
+        (16, 4, 8, [2, 3, 12], 13),
+        (4096, 512, 768, [300, 310, 3000], 3500),
+    ):
+      base = jax.random.normal(
+          jax.random.PRNGKey(1), (6, vocab_size), dtype=jnp.bfloat16
+      )
+      logits = (
+          base.at[:, mask_start:mask_stop]
+          .set(-jnp.inf)
+          .at[0, jnp.array(ties)]
+          .set(jnp.bfloat16(12.0))
+          .at[2, :]
+          .set(-jnp.inf)
+          .at[
+              jnp.array([2, 3, 3, 5]), jnp.array([solo, ties[0], solo, ties[2]])
+          ]
+          .set(jnp.array([-100.0, 8.0, 12.0, 11.0], dtype=jnp.bfloat16))
+      )
+      metadata = _metadata(
+          *(_params(temperature=t) for t in (0.0, 0.7, 1e-40, 2e-38, 1e38)),
+          num_rows=6,
+          max_top_k=-1,
+      )
+      tokens, logp = self._sample(logits, metadata, max_top_k=-1, seed=2)
+      self.assertEqual(tokens.dtype, jnp.int32)
+      np.testing.assert_array_equal(
+          np.asarray(tokens)[[0, 2, 3, 5]], [ties[0], solo, solo, ties[2]]
+      )
+      self.assertTrue(
+          bool(jnp.all((tokens < mask_start) | (tokens >= mask_stop)))
+      )
+      f32 = logits.astype(jnp.float32)
+      normal_logp = jax.nn.log_softmax(
+          f32 / jnp.array([1.0, 0.7, 1.0, 1.0, 1.0, 1.0])[:, None], axis=-1
+      )[jnp.arange(6), tokens]
+      expected = np.array([
+          float(normal_logp[0]),
+          float(normal_logp[1]),
+          0.0,
+          0.0,
+          -np.log(vocab_size - (mask_stop - mask_start)),
+          float(normal_logp[5]),
+      ])
+      np.testing.assert_allclose(logp, expected, rtol=1e-5, atol=1e-6)
+
+  def test_hierarchical_unconstrained_matches_softmax_frequencies(self):
+    row_logits = (
+        jnp.full((4096,), -6.0, dtype=jnp.bfloat16)
+        .at[512:768]
+        .set(-jnp.inf)
+        .at[jnp.array([13, 300, 1025, 2500, 4095])]
+        .set(jnp.array([1.5, 0.75, 0.25, -0.25, 1.0], dtype=jnp.bfloat16))
+    )
+    num_rows, temperature = 16384, 0.8
+    metadata = model_runner_lib.SamplingMetadata(
+        temperature=jnp.full((num_rows,), temperature, dtype=jnp.float32),
+        top_p=jnp.ones((num_rows,), dtype=jnp.float32),
+        top_k=jnp.full((num_rows,), -1, dtype=jnp.int32),
+        unconstrained=True,
+    )
+    jit_sample = jax.jit(
+        model_runner_lib.sample,
+        static_argnames=['max_top_k', 'return_logprobs'],
+    )
+    tokens, _ = jit_sample(
+        jnp.broadcast_to(row_logits, (num_rows, 4096)),
+        jax.random.PRNGKey(0),
+        metadata,
+        max_top_k=-1,
+    )
+    counts = np.bincount(np.asarray(tokens), minlength=4096)
+    expected = jax.nn.softmax(row_logits.astype(jnp.float32) / temperature)
+    np.testing.assert_array_equal(counts[512:768], 0)
+    np.testing.assert_allclose(counts / num_rows, expected, atol=1.5e-2)
 
 
 class ModelRunnerTest(absltest.TestCase):
@@ -815,6 +919,30 @@ class MultiStepExecuteTest(absltest.TestCase):
     self.assertEqual(decode_sampling_metadata.temperature.dtype, jnp.float32)
     self.assertEqual(decode_sampling_metadata.top_p.dtype, jnp.float32)
     self.assertEqual(decode_sampling_metadata.top_k.dtype, jnp.int32)
+
+  def test_decode_loop_preserves_unconstrained(self):
+    runner = _runner(
+        _NextTokenTransformer(), max_top_k=-1, num_scheduler_steps=2
+    )
+    mock_step = mock.Mock(wraps=_fake_step_fn)
+    runner._model_step_fn = mock_step
+    runner._compiled_model_step_fn = mock_step
+    for sampling_params, expected in (
+        ((_params(temperature=0.5), _params(), _params(temperature=0.0)), True),
+        ((_params(temperature=0.5, top_p=0.8), _params(), _params()), False),
+    ):
+      mock_step.reset_mock()
+      with jax.disable_jit():
+        runner.execute_step(
+            cache=_positions_cache(8),
+            tokens=self.tokens,
+            metadata=self.metadata,
+            sampling_params=sampling_params,
+        )
+      self.assertEqual(
+          [c.args[4].unconstrained for c in mock_step.call_args_list],
+          [expected, expected],
+      )
 
   def test_stops_when_every_row_drops_out(self):
     # A batch of nothing but chunked prefills has no row left to decode, so

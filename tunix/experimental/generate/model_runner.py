@@ -65,6 +65,12 @@ class ModelRunnerConfig:
       )
 
 
+_HIERARCHICAL_BLOCK_SIZE = 256
+_HIERARCHICAL_MIN_VOCAB_SIZE = 4096
+_MIN_SAFE_TEMP = float(np.finfo(np.float32).tiny)
+_MAX_SAFE_TEMP = 1.0 / _MIN_SAFE_TEMP
+
+
 @struct.dataclass
 class SamplingMetadata:
   """The sampling settings of each request in a batch.
@@ -80,6 +86,9 @@ class SamplingMetadata:
   top_p: jax.Array | np.ndarray        # `[num_rows]` float32, in (0, 1].
   # Samples only from the `top_k` most likely tokens. <= 0 means no limit.
   top_k: jax.Array | np.ndarray        # `[num_rows]` int32, in [1, max_top_k].
+  # Whether every request samples from the full vocabulary without `top_k` or
+  # `top_p` truncation.
+  unconstrained: bool = struct.field(pytree_node=False, default=False)
 
   # TODO(yatlas): Remove sampling_params. It is being deprecated.
   @classmethod
@@ -108,6 +117,7 @@ class SamplingMetadata:
     temperature = np.zeros((num_rows,), dtype=np.float32)
     top_p = np.ones((num_rows,), dtype=np.float32)
     top_k = np.ones((num_rows,), dtype=np.int32)
+    unconstrained = bool(max_top_k <= 0)
     for row, params in enumerate(sampling_params):
       if (
           max_top_k > 0
@@ -122,8 +132,67 @@ class SamplingMetadata:
       # No `top_p` keeps every token.
       top_p[row] = 1.0 if params.top_p is None else params.top_p
       top_k[row] = max_top_k if params.top_k is None else params.top_k
+      if temperature[row] > 0.0 and (top_k[row] > 0 or top_p[row] < 1.0):
+        unconstrained = False
 
-    return cls(temperature=temperature, top_p=top_p, top_k=top_k)
+    return cls(
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        unconstrained=unconstrained,
+    )
+
+
+def _finite_or_zero(x: jax.Array) -> jax.Array:
+  return jnp.where(jnp.isfinite(x), x, 0.0)
+
+
+def _sample_hierarchical_256(
+    logits: jax.Array,
+    key: jax.Array,
+    is_greedy: jax.Array,
+    inv_temp: jax.Array,
+    *,
+    return_logprobs: bool = False,
+) -> tuple[jax.Array, jax.Array | None]:
+  """Samples tokens in two 256-wide stages without full-vocab fp32 buffers."""
+  logits_3d = logits.reshape(logits.shape[0], -1, _HIERARCHICAL_BLOCK_SIZE)
+  block_max = jnp.max(logits_3d, axis=-1)
+  bmax_f32 = block_max.astype(jnp.float32)
+  shifted = (
+      logits_3d.astype(jnp.float32) - _finite_or_zero(bmax_f32)[:, :, None]
+  ) * inv_temp[:, None, None]
+  safe_rmax = _finite_or_zero(jnp.max(bmax_f32, axis=-1))
+  block_lse = (bmax_f32 - safe_rmax[:, None]) * inv_temp[:, None] + jnp.log(
+      jnp.sum(jnp.exp(shifted), axis=-1)
+  )
+
+  k_block, k_within = jax.random.split(key)
+  block_idx = jnp.where(
+      is_greedy,
+      jnp.argmax(block_max, axis=-1),
+      jax.random.categorical(k_block, block_lse, axis=-1),
+  )
+  chosen_raw = jnp.take_along_axis(logits_3d, block_idx[:, None, None], axis=1)[
+      :, 0, :
+  ]
+  chosen_scaled = (
+      chosen_raw.astype(jnp.float32) - safe_rmax[:, None]
+  ) * inv_temp[:, None]
+  within_idx = jnp.where(
+      is_greedy,
+      jnp.argmax(chosen_raw, axis=-1),
+      jax.random.categorical(k_within, chosen_scaled, axis=-1),
+  )
+  next_tokens = (block_idx * _HIERARCHICAL_BLOCK_SIZE + within_idx).astype(
+      jnp.int32
+  )
+  if not return_logprobs:
+    return next_tokens, None
+  chosen_logit = jnp.take_along_axis(
+      chosen_scaled, within_idx[:, None], axis=-1
+  )[:, 0]
+  return next_tokens, chosen_logit - jax.nn.logsumexp(block_lse, axis=-1)
 
 
 def sample(
@@ -157,11 +226,34 @@ def sample(
   # For most current use cases of Tunix, k does not vary across rows. If this
   # changes, this function should be updated to sample individually per row so
   # that performance is not dependent on max_top_k.
-
-  is_greedy = metadata.temperature <= 0.0
-  temperature = jnp.where(is_greedy, 1.0, metadata.temperature)
-
+  temp = jnp.asarray(metadata.temperature, dtype=jnp.float32)
+  is_greedy = temp <= 0.0
+  temperature = jnp.where(
+      is_greedy, 1.0, jnp.clip(temp, _MIN_SAFE_TEMP, _MAX_SAFE_TEMP)
+  )
   vocab_size = logits.shape[-1]
+  if metadata.unconstrained and max_top_k <= 0:
+    inv_temp = 1.0 / temperature
+    if (
+        vocab_size >= _HIERARCHICAL_MIN_VOCAB_SIZE
+        and vocab_size % _HIERARCHICAL_BLOCK_SIZE == 0
+    ):
+      return _sample_hierarchical_256(
+          logits, key, is_greedy, inv_temp, return_logprobs=return_logprobs
+      )
+    logits_f32 = logits.astype(jnp.float32)
+    rmax = _finite_or_zero(jnp.max(logits_f32, axis=-1, keepdims=True))
+    scaled = (logits_f32 - rmax) * inv_temp[:, None]
+    next_tokens = jnp.where(
+        is_greedy,
+        jnp.argmax(logits, axis=-1),
+        jax.random.categorical(key, scaled, axis=-1),
+    ).astype(jnp.int32)
+    if not return_logprobs:
+      return next_tokens, None
+    chosen = jnp.take_along_axis(scaled, next_tokens[:, None], axis=-1)[:, 0]
+    return next_tokens, chosen - jax.nn.logsumexp(scaled, axis=-1)
+
   k = vocab_size if max_top_k <= 0 else min(max_top_k, vocab_size)
 
   candidate_logits, candidate_tokens = jax.lax.top_k(logits, k)
@@ -596,6 +688,7 @@ class ModelRunner:
         temperature=compact(sampling_metadata.temperature, jnp.float32(0.0)),
         top_p=compact(sampling_metadata.top_p, jnp.float32(1.0)),
         top_k=compact(sampling_metadata.top_k, jnp.int32(1)),
+        unconstrained=sampling_metadata.unconstrained,
     )
 
     # Each surviving sequence feeds the token it just sampled back in, packed
