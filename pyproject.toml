@@ -146,3 +146,11 @@ known_third_party = ["tunix"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 addopts = ["--import-mode=importlib"]
+
+[tool.cl_complexity_gate]
+# 3D CL Understandability & Complexity Gate weights and hard/target thresholds:
+# - Dim 1 (Scope): prod_loc (250/400), prod_files (5/8)
+# - Dim 2 (Local Control Flow): cognitive (12/15), cyclomatic (10/15), nesting (3/4)
+# - Dim 3 (Structural Layering): call_depth (2/3), trivial_helpers (1/3), pass_through (0.15/0.25), closures (2/4)
+weights = { prod_loc = 0.15, cognitive_excess = 2.0, call_depth_excess = 15.0, trivial_helper = 10.0, pass_through_func = 10.0, nested_closure = 5.0, shallow_class = 10.0 }
+thresholds = { max_prod_loc_warn = 250, max_prod_loc_fail = 400, max_prod_files_warn = 5, max_prod_files_fail = 8, max_cognitive_warn = 12, max_cognitive_fail = 15, max_cyclomatic_warn = 10, max_cyclomatic_fail = 15, max_nesting_warn = 3, max_nesting_fail = 4, max_call_depth_warn = 2, max_call_depth_fail = 3, max_trivial_helpers_warn = 1, max_trivial_helpers_fail = 3, max_pass_through_ratio_warn = 0.15, max_pass_through_ratio_fail = 0.25, max_nested_closures_warn = 2, max_nested_closures_fail = 4, trivial_helper_max_stmts = 5, trivial_helper_max_cognitive = 2 }

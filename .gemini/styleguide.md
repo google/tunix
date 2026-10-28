@@ -105,3 +105,28 @@ If the formatting is off, please instruct the user to run the linter/formatter. 
   / specific exception immediately.
 * **Use specific exceptions:** Avoid catching or raising overly broad
   exceptions like bare `Exception` to swallow errors.
+
+### 3D CL Complexity & Anti-Layering Gate
+
+* **Enforce the 3D Complexity Budget (`[tool.cl_complexity_gate]`):** Every PR
+  must pass `python3 scripts/check_cl_complexity.py --strict`:
+  * **Dim 1 (Scope):** `prod_loc_added <= 400` (target `<= 250`),
+    `prod_files_changed <= 8` (target `<= 5`).
+  * **Dim 2 (Local Control Flow):** Per-function `cognitive <= 15` (target
+    `<= 12`), `cyclomatic <= 15` (target `<= 10`), `max_nesting <= 4` (target
+    `<= 3`).
+  * **Dim 3 (Structural Layering & No `lambda`/`partial` Evasion):** Intra-file
+    `max_call_depth_hops <= 3` (target `<= 2`),
+    `trivial_single_call_helpers < 3` (target `0`), `pass_through_ratio <= 25%`,
+    `nested_closures <= 4`. `lambda` and `functools.partial` aliases count the
+    same as `def` functions. Flag any refactoring that lowers local Cognitive
+    Complexity by shattering cohesive logic into shallow single-caller
+    `_helper` chains or `lambda`/`partial` shims.
+* **Implementation Priority Over Test Coupling:** Never compromise production
+  code quality with pass-through wrappers, `functools.partial` aliases, or
+  `lambda` shims just to keep existing clear-box test mocks on private
+  `_helper` symbols unchanged; update the tests to assert on public contracts
+  and boundaries instead.
+* **Escape Hatch (`SKIP_CL_COMPLEXITY=<reason>`):** Maintainers can bypass the
+  3D Complexity Gate for mechanical migrations or false positives by adding
+  `SKIP_CL_COMPLEXITY=<reason>` to the PR/CL description.

@@ -51,3 +51,13 @@ repos:
       name: isort
       types: [python]
       exclude: ^tests/
+
+  - repo: local
+    hooks:
+      - id: cl-complexity-gate
+        name: Tunix 3D CL Complexity Gate
+        entry: python3 scripts/check_cl_complexity.py
+        language: system
+        types: [python]
+        verbose: true
+        pass_filenames: false
