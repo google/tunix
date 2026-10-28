@@ -42,6 +42,7 @@ _FINISH_REASONS: dict[request_lib.RequestStatus, request_lib.FinishReason] = {
     request_lib.RequestStatus.FINISHED_EOS: 'stop',
     request_lib.RequestStatus.FINISHED_LENGTH: 'length',
 }
+_DECODE_ROW_BUCKETS = (128, 256, 512)
 
 
 def _instantiate_components(
@@ -155,7 +156,7 @@ class LLMEngine:
     )
     self._scheduler_config = self._scheduler._config  # pylint: disable=protected-access
     self._model_runner_config = model_runner_config
-    self._eos_token_ids = eos_token_ids
+    self._eos_token_array = np.array(sorted(eos_token_ids), dtype=np.int32)
     self._replicated_sharding = jax.sharding.NamedSharding(
         model_runner_config.mesh, jax.sharding.PartitionSpec()
     )
@@ -362,7 +363,7 @@ class LLMEngine:
         (generated_tokens, logits, logprobs)
     )
 
-    # The runner pads its outputs to `max_num_seqs` rows. Drop the
+    # The runner pads its outputs to the batch's row capacity. Drop the
     # padding.
     n = len(scheduled)
     finished = self._update_from_output(
@@ -387,65 +388,53 @@ class LLMEngine:
   ) -> list[request_lib.RequestState]:
     """Updates request state based on a sampler output."""
     i, j, k = distribution
-    completed_reqs = []
+    if i == 0 and j == k:
+      return []
+
+    n_rows, num_steps = generated_tokens.shape
+    if num_steps > 0 and self._eos_token_array.size > 0:
+      eos_mask = np.isin(generated_tokens, self._eos_token_array)
+      has_eos: list[bool] = eos_mask.any(axis=1).tolist()
+      first_eos: list[int] = eos_mask.argmax(axis=1).tolist()
+    else:
+      has_eos = [False] * n_rows
+      first_eos = [0] * n_rows
+
+    tokens_list: list[list[int]] = generated_tokens.tolist()
+    logprobs_list: list[list[float]] | None = (
+        logprobs.tolist() if logprobs is not None else None
+    )
+
+    completed_reqs: list[request_lib.RequestState] = []
     for row in itertools.chain(range(i), range(j, k)):
       req = scheduled[row]
+      req.num_in_flight_tokens = 0
       if req.is_done:
-        req.num_in_flight_tokens = 0
         continue
 
-      self._update_req_from_output(
-          req,
-          generated_tokens[row],
-          logits[row] if logits is not None else None,
-          logprobs[row] if logprobs is not None else None,
+      remaining = req.sampling_params.max_tokens - (
+          len(req.token_ids) - req.prompt_length
       )
+      if has_eos[row] and first_eos[row] + 1 <= remaining:
+        num_added = first_eos[row] + 1
+        req.status = request_lib.RequestStatus.FINISHED_EOS
+      elif num_steps >= remaining:
+        num_added = remaining
+        req.status = request_lib.RequestStatus.FINISHED_LENGTH
+      else:
+        num_added = num_steps
+
+      if num_added > 0:
+        req.token_ids.extend(tokens_list[row][:num_added])
+        if logprobs_list is not None:
+          req.logprobs.extend(logprobs_list[row][:num_added])
+        if logits is not None:
+          req.logits.extend(logits[row, :num_added])
 
       if req.is_done:
         completed_reqs.append(req)
 
     return completed_reqs
-
-  def _update_req_from_output(
-      self,
-      req: request_lib.RequestState,
-      generated_tokens: np.ndarray,
-      logits: np.ndarray | None = None,
-      logprobs: np.ndarray | None = None,
-  ) -> None:
-    """Updates request state based on a sampler output."""
-    req.num_in_flight_tokens = 0
-    if req.is_done:
-      return
-
-    # Gather the new tokens generated for this request. The model runner
-    # does not check for EOS and may produce garbage tokens.
-    new_tokens = []
-    for new_token in generated_tokens:
-      token_id = int(new_token)
-      new_tokens.append(token_id)
-      if token_id in self._eos_token_ids:
-        req.status = request_lib.RequestStatus.FINISHED_EOS
-        break
-
-    # Truncate the new tokens if the request has reached its max length.
-    n_generated = (
-        len(req.token_ids) + len(new_tokens) - req.prompt_length
-    )
-    n_overflow = n_generated - req.sampling_params.max_tokens
-    if n_overflow > 0:
-      new_tokens = new_tokens[:-n_overflow]
-      req.status = request_lib.RequestStatus.FINISHED_LENGTH
-    elif n_overflow == 0 and not req.is_done:
-      req.status = request_lib.RequestStatus.FINISHED_LENGTH
-
-    # Add the new tokens to the request.
-    num_added = len(new_tokens)
-    req.token_ids.extend(new_tokens)
-    if logprobs is not None:
-      req.logprobs.extend(logprobs[:num_added])
-    if logits is not None:
-      req.logits.extend(logits[:num_added])
 
   def _make_output(
       self, req: request_lib.RequestState
@@ -478,8 +467,9 @@ class LLMEngine:
   ) -> tuple[jax.Array, paged_attention.PagedAttnMetadata]:
     """Packs the scheduled requests into the model runner's inputs.
 
-    Every row buffer spans `max_num_seqs` rows and every page table
-    `max_pages_per_seq` pages, so their shapes never change.
+    Row buffers span `max_num_seqs` rows by default (or a smaller bucket on
+    pure-decode steps when `adaptive_decode_bucketing` is enabled), and every
+    page table spans `max_pages_per_seq` pages.
 
     Args:
       scheduled: The scheduled requests, ordered as decodes, chunked prefills
@@ -490,15 +480,19 @@ class LLMEngine:
       A tuple of (the packed tokens each row runs this step, the ragged
       execution metadata).
     """
-    num_rows = self._scheduler_config.max_num_seqs
+    cfg = self._scheduler_config
+    is_pure_decode = distribution[0] == distribution[2]
+    num_rows = cfg.max_num_seqs
+    if is_pure_decode and cfg.adaptive_decode_bucketing:
+      num_rows = next(
+          (b for b in _DECODE_ROW_BUCKETS if len(scheduled) <= b < num_rows),
+          num_rows,
+      )
     query_lens = np.zeros((num_rows,), dtype=np.int32)
     kv_lens = np.zeros((num_rows,), dtype=np.int32)
-    page_indices = {
-        cache_name: np.full(
-            (num_rows, self._max_pages_per_seq), -1, dtype=np.int32
-        )
-        for cache_name in self._kv_cache_manager.cache_names
-    }
+    page_indices = self._kv_cache_manager.build_page_tables(
+        scheduled, num_rows, self._max_pages_per_seq
+    )
 
     batch_tokens: list[int] = []
     for row, req in enumerate(scheduled):
@@ -510,21 +504,24 @@ class LLMEngine:
         req.num_in_flight_tokens = 0
       else:
         end = len(req.token_ids)
-        req.num_in_flight_tokens = self._scheduler_config.num_scheduler_steps
+        req.num_in_flight_tokens = cfg.num_scheduler_steps
         req.num_computed_tokens = end + req.num_in_flight_tokens - 1
 
       batch_tokens.extend(req.token_ids[start:end])
       query_lens[row] = end - start
       kv_lens[row] = end
-      for cache_name, idxs in self._kv_cache_manager.get_page_idxs(req).items():
-        page_indices[cache_name][row, : len(idxs)] = idxs
 
-    # Pad the tokens to a power of 2 to limit jax recompilation in the model
-    # runner.
-    num_tokens = min(
-        _next_power_of_2(len(batch_tokens)),
-        self._scheduler_config.max_num_batched_tokens,
-    )
+    # Bucket the token length to limit JAX recompilation in the model runner.
+    if cfg.two_shape_token_bucketing:
+      num_tokens = (
+          min(num_rows, cfg.max_num_batched_tokens)
+          if is_pure_decode
+          else cfg.max_num_batched_tokens
+      )
+    else:
+      num_tokens = min(
+          _next_power_of_2(len(batch_tokens)), cfg.max_num_batched_tokens
+      )
     tokens = np.zeros((num_tokens,), dtype=np.int32)
     tokens[: len(batch_tokens)] = batch_tokens
 

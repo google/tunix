@@ -23,10 +23,11 @@ Per-Step Lifecycle:
        out-of-window pages.
     2. Allocation (`get_computed_pages`, `allocate_slots`): Match cached
        prefixes for new requests and reserve pages for incoming tokens.
-    3. Hardware Execution (`get_page_idxs`, `get_physical_pages`): Retrieve page
-       mappings for kernel dispatch.
+    3. Hardware Execution (`get_page_idxs`, `build_page_tables`,
+       `get_physical_pages`): Retrieve page mappings for kernel dispatch.
 
-Use `release_request` upon completion, or `reset_kv_caches` to invalidate all state.
+Use `release_request` upon completion, or `reset_kv_caches` to invalidate all
+state.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ import math
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import single_type_kv_cache_manager
 import tunix.experimental.generate.tiered_page_pool as page_pool_lib
@@ -385,6 +387,31 @@ class KVCacheManager:
       for cache in manager.cache_names:
         page_idxs[cache] = group_page_idxs
     return page_idxs
+
+  def build_page_tables(
+      self,
+      requests: Sequence[request_lib.RequestState],
+      num_rows: int,
+      max_pages_per_seq: int,
+  ) -> dict[str, np.ndarray]:
+    """Builds read-only `(num_rows, max_pages_per_seq)` page tables per group."""
+    if len(requests) > num_rows:
+      raise ValueError(f"Got {len(requests)} requests for {num_rows} rows.")
+    page_tables: dict[str, np.ndarray] = {}
+    for manager in self._kv_cache_group_managers:
+      table = np.full((num_rows, max_pages_per_seq), -1, dtype=np.int32)
+      for row, req in enumerate(requests):
+        if idxs := manager.get_page_idxs(req.request_id):
+          if len(idxs) > max_pages_per_seq:
+            raise ValueError(
+                f"Request {req.request_id} has {len(idxs)} pages, over "
+                f"max_pages_per_seq={max_pages_per_seq}."
+            )
+          table[row, : len(idxs)] = idxs
+      table.setflags(write=False)
+      for cache in manager.cache_names:
+        page_tables[cache] = table
+    return page_tables
 
   def get_physical_pages(self) -> dict[str, jax.Array]:
     """Returns a mapping of cache name to physical device pages."""

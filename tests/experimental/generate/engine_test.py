@@ -323,6 +323,137 @@ class StepTest(parameterized.TestCase):
     )
     self.assertEqual(output.finish_reason, 'stop')
 
+  @parameterized.named_parameters(
+      ('eos_before_max_tokens_multistep', 4, 4, 3, 'stop'),
+      ('eos_on_max_tokens_single_step', 1, 3, 3, 'stop'),
+      ('eos_on_max_tokens_multistep', 4, 3, 3, 'stop'),
+      ('eos_past_max_tokens_multistep', 4, 2, 2, 'length'),
+  )
+  def test_eos_vs_max_tokens_truncation_and_finish_reason(
+      self, num_steps, max_tokens, expected_len, expected_reason
+  ):
+    prompt = [1, 2, 3]
+    unbounded = reference_generate(prompt, max_tokens=4)
+    engine = testing_utils.make_engine(
+        num_scheduler_steps=num_steps,
+        return_logprobs=True,
+        return_logits=True,
+        eos_token_ids=frozenset({unbounded[2]}),
+    )
+    engine.add_request(
+        testing_utils.make_request(
+            '0',
+            prompt,
+            max_tokens=max_tokens,
+            return_logprobs=True,
+            return_logits=True,
+        )
+    )
+    output = drive(engine)['0']
+
+    self.assertEqual(output.token_ids.tolist(), unbounded[:expected_len])
+    self.assertEqual(output.finish_reason, expected_reason)
+    assert output.logprobs is not None and output.logits is not None
+    self.assertLen(output.logprobs, expected_len)
+    np.testing.assert_array_equal(
+        np.argmax(output.logits, axis=-1), output.token_ids
+    )
+
+  def test_stops_at_first_of_multiple_eos_token_ids(self):
+    unbounded_a = reference_generate([1, 2, 3], max_tokens=4)
+    unbounded_b = reference_generate([1, 4], max_tokens=4)
+    engine = testing_utils.make_engine(
+        num_scheduler_steps=4,
+        eos_token_ids=frozenset(
+            {unbounded_a[1], unbounded_a[2], unbounded_b[2]}
+        ),
+    )
+    engine.add_request(testing_utils.make_request('a', [1, 2, 3], max_tokens=4))
+    engine.add_request(testing_utils.make_request('b', [1, 4], max_tokens=4))
+
+    finished = drive(engine)
+    self.assertEqual(finished['a'].token_ids.tolist(), unbounded_a[:2])
+    self.assertEqual(finished['a'].finish_reason, 'stop')
+    self.assertEqual(finished['b'].token_ids.tolist(), unbounded_b[:3])
+    self.assertEqual(finished['b'].finish_reason, 'stop')
+
+  def test_adaptive_decode_bucketing_buckets_pure_decode_rows(self):
+    engine = testing_utils.make_engine(
+        max_num_seqs=384,
+        max_num_batched_tokens=1024,
+        max_device_size_gib=1024 * testing_utils.GIB_PER_PAGE,
+        adaptive_decode_bucketing=True,
+    )
+    spy = spy_on_execute_step(engine)
+    prompt = [1, 2]
+    # 257 initial requests drain across active counts 257 -> 256 -> 129 -> 128.
+    max_tokens_by_req = [2] + [3] * 127 + [4] + [5] * 127 + [6]
+    for i, max_tokens in enumerate(max_tokens_by_req):
+      engine.add_request(
+          testing_utils.make_request(f'r{i}', prompt, max_tokens=max_tokens)
+      )
+    finished = {}
+    for _ in range(5):
+      finished.update({o.request_id: o for o in engine.step()})
+    engine.add_request(
+        testing_utils.make_request('mixed', [3, 4], max_tokens=1)
+    )
+    finished.update(drive(engine))
+    metas = [c.kwargs['metadata'] for c in spy.call_args_list]
+    self.assertEqual(
+        [m.query_lens.shape[0] for m in metas], [384, 384, 256, 256, 128, 384]
+    )
+    self.assertEqual(
+        [m.page_indices['layer_0'].shape[0] for m in metas],
+        [384, 384, 256, 256, 128, 384],
+    )
+    for i, max_tokens in enumerate(max_tokens_by_req):
+      self.assertEqual(
+          finished[f'r{i}'].token_ids.tolist(),
+          reference_generate(prompt, max_tokens),
+      )
+    self.assertEqual(
+        finished['mixed'].token_ids.tolist(), reference_generate([3, 4], 1)
+    )
+
+  @parameterized.named_parameters(
+      ('fixed_decode_rows', 384, 512, False, 384, 384),
+      ('adaptive_decode_rows', 384, 512, True, 128, 128),
+      ('max_num_seqs_under_smallest_bucket', 64, 512, True, 64, 64),
+      ('token_budget_caps_decode_tokens', 64, 32, True, 64, 32),
+  )
+  def test_two_shape_token_bucketing(
+      self,
+      max_num_seqs,
+      max_batched_tokens,
+      adaptive_decode_bucketing,
+      expected_decode_rows,
+      expected_decode_tokens,
+  ):
+    engine = testing_utils.make_engine(
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_batched_tokens,
+        max_device_size_gib=128 * testing_utils.GIB_PER_PAGE,
+        adaptive_decode_bucketing=adaptive_decode_bucketing,
+        two_shape_token_bucketing=True,
+    )
+    spy = spy_on_execute_step(engine)
+    self.assertEqual(
+        self._run(engine, [[1, 2, 3]], max_tokens=2),
+        [reference_generate([1, 2, 3], max_tokens=2)],
+    )
+    shapes = [
+        (c.kwargs['tokens'].shape[0], c.kwargs['metadata'].query_lens.shape[0])
+        for c in spy.call_args_list
+    ]
+    self.assertEqual(
+        shapes,
+        [
+            (max_batched_tokens, max_num_seqs),
+            (expected_decode_tokens, expected_decode_rows),
+        ],
+    )
+
   def test_chunked_prefill(self):
     engine = testing_utils.make_engine(
         max_num_batched_tokens=8, chunked_prefill_length=4

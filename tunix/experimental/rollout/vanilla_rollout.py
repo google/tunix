@@ -185,6 +185,12 @@ def _build_engine(
           max_num_seqs=rollout_config.rollout_vanilla_v2_max_num_seqs,
           max_chunked_prefill_length=rollout_config.rollout_vanilla_v2_chunked_prefill_length,
           num_scheduler_steps=rollout_config.rollout_vanilla_v2_num_scheduler_steps,
+          adaptive_decode_bucketing=(
+              rollout_config.rollout_vanilla_v2_adaptive_decode_bucketing
+          ),
+          two_shape_token_bucketing=(
+              rollout_config.rollout_vanilla_v2_two_shape_token_bucketing
+          ),
       ),
       model_runner_config=model_runner_lib.ModelRunnerConfig(
           max_top_k=rollout_config.top_k or -1,

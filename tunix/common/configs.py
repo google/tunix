@@ -186,6 +186,12 @@ class RolloutConfig:
   # The number of model forward passes per engine step.
   rollout_vanilla_v2_num_scheduler_steps: int = 1
 
+  # Whether pure-decode batches shrink row capacity to 128/256/512 buckets.
+  rollout_vanilla_v2_adaptive_decode_bucketing: bool = False
+
+  # Whether token capacity uses two shapes (pure decode vs. max batched tokens).
+  rollout_vanilla_v2_two_shape_token_bucketing: bool = False
+
   # vLLM specific rollout configs.
 
   # Whether to run rollout in vLLM server mode or batch inference mode.
