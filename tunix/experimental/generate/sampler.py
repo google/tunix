@@ -15,7 +15,8 @@
 """Sampler backed by the continuous batching engine."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+import contextlib
 import itertools
 import threading
 from typing import Any
@@ -99,6 +100,19 @@ class Sampler(base_sampler.BaseSampler):
         else []
     )
     return self._tokenizer.dedup_bos_ids(bos_tok + input_ids)
+
+  @contextlib.contextmanager
+  def pause(self) -> Iterator[None]:
+    """Pauses engine stepping between steps (non-reentrant).
+
+    Concurrent server-mode callers may still enqueue requests; the thread
+    holding `pause()` must not call `generate`/`__call__`, `update_params`,
+    `reinitialize_cache`, or `stop` inside the block.
+    """
+    with (
+        self._driver.pause() if self._driver is not None else self._engine_lock
+    ):
+      yield
 
   def stop(self) -> None:
     """Stops the engine loop."""

@@ -164,6 +164,11 @@ class RolloutConfig:
   # Allocated HBM fraction for the rollout engine, in (0, 1].
   rollout_vanilla_v2_hbm_utilization: float = 0.2
 
+  # Optional explicit per-device KV cache budget in GiB. When set (must be a
+  # finite float > 0), overrides `rollout_vanilla_v2_hbm_utilization` while
+  # still verifying each local device has enough free HBM.
+  rollout_vanilla_v2_kv_cache_size_gib: float | None = None
+
   # The maximum number of GiB of KV cache to allocate on the host.
   rollout_vanilla_v2_host_size_gib: float = 0.0
 
@@ -338,6 +343,14 @@ class RolloutConfig:
     datatypes.validate_routed_experts_encode_config(
         self.routed_experts_encode_mode, self.routed_experts_num_experts
     )
+    if self.rollout_vanilla_v2_kv_cache_size_gib is not None and (
+        isinstance(self.rollout_vanilla_v2_kv_cache_size_gib, bool)
+        or not 0.0 < self.rollout_vanilla_v2_kv_cache_size_gib < math.inf
+    ):
+      raise ValueError(
+          "rollout_vanilla_v2_kv_cache_size_gib must be a finite positive"
+          f" float, got {self.rollout_vanilla_v2_kv_cache_size_gib}."
+      )
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
