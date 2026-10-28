@@ -541,6 +541,12 @@ class RLEngine:
     self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
         nnx.state(self.actor_trainer.model), "pinned_host"
     )
+    restored = self.actor_trainer.checkpoint_manager.latest_step() is not None
+    if restored and not rl_utils.is_sharing_weights(
+        self.actor_trainer.model, self.rollout.model()
+    ):
+      # The rollout was built from the actor's weights before the restore.
+      self.sync_weights(increment_global_steps=False)
 
   def _propagate_backbone_sharing_map(self):
     """Propagates backbone sharing map."""
@@ -1302,8 +1308,12 @@ class RLEngine:
         )
       return actor_per_token_logps
 
-  def sync_weights(self):
-    """Syncs the weights of between the sampler model and trainer model."""
+  def sync_weights(self, *, increment_global_steps: bool = True):
+    """Syncs the weights of between the sampler model and trainer model.
+
+    Args:
+      increment_global_steps: Whether this sync ends a global step.
+    """
     if jax.devices() and jax.default_backend() not in ["tpu", "gpu"]:
       cm = contextlib.ExitStack()
       cm.enter_context(jax.transfer_guard_device_to_host("disallow_explicit"))
@@ -1325,8 +1335,10 @@ class RLEngine:
           nnx.state(self.actor_trainer.model), "pinned_host"
       )
 
-    # sync weights marks the end of a full batch, so increment the global steps.
-    self.global_steps += 1
+    if increment_global_steps:
+      # sync weights marks the end of a full batch, so increment the global
+      # steps.
+      self.global_steps += 1
 
   def get_values(
       self,
