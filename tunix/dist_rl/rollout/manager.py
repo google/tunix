@@ -16,6 +16,7 @@
 
 import asyncio
 from collections.abc import Mapping
+import functools
 import logging
 import time
 import types
@@ -35,6 +36,18 @@ TrajectoryOrError = Union[
     datatypes.TrajectoryItem,
     trajectory_lib.TrajectoryError,
 ]
+
+
+def validate_session_attempt(session_attempt: int) -> None:
+  """Validates that `session_attempt` is a 1-based `int` (excluding `bool`)."""
+  if (
+      isinstance(session_attempt, bool)
+      or not isinstance(session_attempt, int)
+      or session_attempt < 1
+  ):
+    raise ValueError(
+        f"session_attempt must be an int >= 1, got {session_attempt!r}."
+    )
 
 
 class RolloutManager:
@@ -138,6 +151,39 @@ class RolloutManager:
       self._traffic_inst = traffic_controller_lib.TrafficController()
     return self._traffic_inst
 
+  def _evict_if_current(
+      self, traj_id: str, collector: collector_lib.TrajectoryCollectorEngine
+  ) -> None:
+    """Removes active tracking entries for `traj_id` if owned by `collector`."""
+    if self._active_collectors.get(traj_id) is collector:
+      self._active_collectors.pop(traj_id, None)
+      self._active_tasks.pop(traj_id, None)
+
+  async def _cancel_attempt(
+      self,
+      traj_id: str,
+      collector: collector_lib.TrajectoryCollectorEngine,
+      task: asyncio.Task[Any],
+  ) -> None:
+    """Cancels `collector` and `task`, awaits task drain, and closes unclaimed env."""
+    collector.cancel()
+    if not task.done():
+      if task.cancelling() == 0:
+        task.cancel()
+      try:
+        await asyncio.shield(task)
+      except asyncio.CancelledError:
+        pass
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.debug(
+            "Ignoring post-cancel episode exception for %s.",
+            traj_id,
+            exc_info=True,
+        )
+    if task.done():
+      self._evict_if_current(traj_id, collector)
+    await collector.close_unclaimed_env()
+
   async def _generate_one(
       self,
       request: datatypes.RolloutRequest,
@@ -159,83 +205,105 @@ class RolloutManager:
       effective_version = sampler_version
     if effective_version > int(request.target_policy_version or 0):
       request.target_policy_version = effective_version
-    loop = asyncio.get_running_loop()
-    future: asyncio.Future[TrajectoryOrError] = loop.create_future()
-
-    def _resolve(result: TrajectoryOrError) -> None:
-      if on_complete:
-        on_complete(result)
-      if not future.done():
-        future.set_result(result)
 
     traj_id = request.traj_id
-
     env_config = dict(self.env_config)
     env_config.update(request.metadata.get("env_config", {}))
     env_config.setdefault("group_index", request.group_index)
     env_config.setdefault("policy_version", request.target_policy_version)
     env_client = self.env_factory(**env_config)
+    try:
+      agent = self.agent_factory(
+          **request.metadata.get("agent_config", self.agent_config)
+      )
+      collector_kwargs: dict[str, Any] = {
+          "routed_experts_encode_mode": self._routed_experts_encode_mode,
+          "routed_experts_num_experts": self._routed_experts_num_experts,
+      }
+      if self.trajectory_store is not None:
+        collector_kwargs["trajectory_store"] = self.trajectory_store
+      if self._store_routed_experts:
+        collector_kwargs["store_routed_experts"] = True
+      collector = collector_lib.TrajectoryCollectorEngine(
+          traj_id=traj_id,
+          request=request,
+          sampler=self.sampler,
+          env_client=env_client,
+          agent=agent,
+          tokenizer=self.tokenizer,
+          chat_parser=self.chat_parser,
+          eos_ids=self.eos_ids,
+          partial_rollout=self._partial_rollout,
+          policy_version_fn=lambda: self._policy_version,
+          **collector_kwargs,
+      )
+    except BaseException:
+      await collector_lib.shield_env_close(
+          collector_lib.close_env_client(env_client)
+      )
+      raise
 
-    agent = self.agent_factory(
-        **request.metadata.get("agent_config", self.agent_config)
-    )
-
-    collector_kwargs: dict[str, Any] = {
-        "routed_experts_encode_mode": self._routed_experts_encode_mode,
-        "routed_experts_num_experts": self._routed_experts_num_experts,
-    }
-    if self.trajectory_store is not None:
-      collector_kwargs["trajectory_store"] = self.trajectory_store
-    if self._store_routed_experts:
-      collector_kwargs["store_routed_experts"] = True
-    collector = collector_lib.TrajectoryCollectorEngine(
-        traj_id=traj_id,
-        request=request,
-        sampler=self.sampler,
-        env_client=env_client,
-        agent=agent,
-        tokenizer=self.tokenizer,
-        chat_parser=self.chat_parser,
-        eos_ids=self.eos_ids,
-        partial_rollout=self._partial_rollout,
-        policy_version_fn=lambda: self._policy_version,
-        **collector_kwargs,
-    )
-
+    cleanup_cb = functools.partial(self._evict_if_current, traj_id, collector)
     self._active_collectors[traj_id] = collector
     task = asyncio.create_task(
-        self._run_and_enqueue(collector, request, _resolve)
-    )
-    task.add_done_callback(
-        lambda t: future.cancel()
-        if t.cancelled() and not future.done()
-        else None
+        self._run_and_enqueue(collector, request, on_complete, cleanup_cb)
     )
     self._active_tasks[traj_id] = task
     self._traffic.track(task)
 
-    return await future
+    # Shield `task` so outer `Task.cancel()` enters `except CancelledError:`
+    # immediately and `_cancel_attempt` detaches `trajectory_store` before
+    # `task.cancel()` unwinds `TrajectoryCollectEngine.collect()`'s `finally:`.
+    try:
+      return await asyncio.shield(task)
+    except asyncio.CancelledError:
+      await self._cancel_attempt(traj_id, collector, task)
+      raise
 
   async def generate(
       self,
       requests: datatypes.RolloutRequest | Sequence[datatypes.RolloutRequest],
       on_complete: Optional[Callable[[TrajectoryOrError], None]] = None,
+      *,
+      session_attempt: int = 1,
   ) -> TrajectoryOrError | Sequence[TrajectoryOrError]:
-    """Dispatches 1 or N requests concurrently to the internal Collector Engine pool."""
+    """Dispatches 1 or N requests concurrently to the internal Collector Engine pool.
+
+    Args:
+      requests: Single `RolloutRequest` or sequence of requests to execute.
+      on_complete: Optional per-item callback invoked as each request finishes.
+      session_attempt: 1-based rollout attempt counter injected by `TaskSession`
+        (unchanged on same-worker transient retries and incremented by +1 per
+        cross-worker failover), validated at entry.
+
+    Returns:
+      A single `TrajectoryOrError` or sequence of results matching `requests`.
+    """
+    # TODO(b/552529132): Thread `session_attempt` into trajectory store writes
+    # once store-side attempt fencing lands.
+    validate_session_attempt(session_attempt)
     if isinstance(requests, datatypes.RolloutRequest):
       return await self._generate_one(requests, on_complete=on_complete)
     tasks = [
         asyncio.create_task(self._generate_one(req, on_complete=on_complete))
         for req in requests
     ]
-    return await asyncio.gather(*tasks)
+    try:
+      return await asyncio.gather(*tasks)
+    except BaseException:
+      for t in tasks:
+        if not t.done() and t.cancelling() == 0:
+          t.cancel()
+      await asyncio.gather(*tasks, return_exceptions=True)
+      raise
 
   async def _run_and_enqueue(
       self,
       collector: collector_lib.TrajectoryCollectorEngine,
       request: datatypes.RolloutRequest,
-      resolve_cb: Callable[[TrajectoryOrError], None],
-  ) -> None:
+      resolve_cb: Optional[Callable[[TrajectoryOrError], None]],
+      cleanup_cb: Callable[[], None],
+  ) -> TrajectoryOrError:
     """Runs episode loop, removes active tracking, and resolves callbacks/streams."""
     run_start = time.perf_counter()
     try:
@@ -258,10 +326,17 @@ class RolloutManager:
           metadata=error_metadata,
       )
     finally:
-      self._active_collectors.pop(collector.traj_id, None)
-      self._active_tasks.pop(collector.traj_id, None)
+      cleanup_cb()
+      await collector.close_unclaimed_env()
 
-    resolve_cb(trajectory)
+    current_task = asyncio.current_task()
+    if collector.is_cancelled or (
+        current_task is not None and current_task.cancelling() > 0
+    ):
+      raise asyncio.CancelledError()
+    if resolve_cb is not None:
+      resolve_cb(trajectory)
+    return trajectory
 
   async def migrate_straggler(
       self,
@@ -298,7 +373,8 @@ class RolloutManager:
     for collector in self._active_collectors.values():
       collector.cancel()
     for task in self._active_tasks.values():
-      task.cancel()
+      if not task.done() and task.cancelling() == 0:
+        task.cancel()
 
   async def pre_weight_sync(
       self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs

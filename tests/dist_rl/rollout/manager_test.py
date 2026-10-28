@@ -14,6 +14,7 @@
 
 import asyncio
 import types
+from typing import Any
 import unittest
 from unittest import mock
 
@@ -138,6 +139,13 @@ class _NoopCollector:
     )
     self.traj_id = traj_id
     self.env = env_client
+    self.is_cancelled = False
+
+  def cancel(self):
+    self.is_cancelled = True
+
+  async def close_unclaimed_env(self) -> None:
+    return None
 
   async def run_episode(self):
     return datatypes.TrajectoryItem(
@@ -406,6 +414,8 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
       collector = collector_cls.return_value
       collector.traj_id = request.traj_id
       collector.env = None
+      collector.is_cancelled = False
+      collector.close_unclaimed_env = mock.AsyncMock()
       collector.run_episode = mock.AsyncMock(return_value="trajectory")
 
       result = await manager._generate_one(request)
@@ -441,6 +451,8 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
       collector = collector_cls.return_value
       collector.traj_id = request.traj_id
       collector.env = None
+      collector.is_cancelled = False
+      collector.close_unclaimed_env = mock.AsyncMock()
       collector.run_episode = mock.AsyncMock(return_value="trajectory")
 
       result = await manager._generate_one(request)
@@ -469,6 +481,8 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
       collector = collector_cls.return_value
       collector.traj_id = request.traj_id
       collector.env = None
+      collector.is_cancelled = False
+      collector.close_unclaimed_env = mock.AsyncMock()
       collector.run_episode = mock.AsyncMock(return_value="trajectory")
 
       await manager._generate_one(request)
@@ -494,6 +508,8 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
       collector = collector_cls.return_value
       collector.traj_id = request.traj_id
       collector.env = None
+      collector.is_cancelled = False
+      collector.close_unclaimed_env = mock.AsyncMock()
       collector.run_episode = mock.AsyncMock(return_value="trajectory")
 
       await manager._generate_one(request)
@@ -527,6 +543,8 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
       collector = collector_cls.return_value
       collector.traj_id = request.traj_id
       collector.env = None
+      collector.is_cancelled = False
+      collector.close_unclaimed_env = mock.AsyncMock()
       collector.run_episode = mock.AsyncMock(
           side_effect=RuntimeError("sandbox crashed")
       )
@@ -1162,6 +1180,290 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
             agent_factory=test_utils.MockAgent,
             drain_timeout_s=invalid,
         )
+
+
+class RolloutManagerAttemptAndLifecycleTest(
+    unittest.IsolatedAsyncioTestCase, absltest.TestCase
+):
+
+  async def test_session_attempt_validation_including_empty_batch(self):
+    manager = manager_lib.RolloutManager(
+        sampler=_PauseTrackingSampler(),
+        tokenizer="mock",
+        chat_parser="mock",
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+    )
+    for bad_val in (0, -3, True, False, 1.5, "1"):
+      with self.assertRaisesRegex(ValueError, "session_attempt"):
+        await manager.generate([], session_attempt=bad_val)  # pyrefly: ignore[bad-argument-type]
+
+  async def test_caller_cancellation_cancels_batch_siblings_and_closes_envs(
+      self,
+  ):
+    closed_envs: list[Any] = []
+
+    class _CloseTrackingEnv(_CaptureEnv):
+
+      def close(self) -> None:
+        closed_envs.append(self)
+
+    manager = manager_lib.RolloutManager(
+        sampler=_PauseTrackingSampler(),
+        env_factory=_CloseTrackingEnv,
+        agent_factory=test_utils.MockAgent,
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+
+    entered_ids: list[str] = []
+    both_entered = asyncio.Event()
+    created_collectors: list[Any] = []
+    completed_items: list[Any] = []
+
+    class _HangingCollector(_NoopCollector):
+
+      def __init__(self, traj_id, request, *args, **kwargs):
+        super().__init__(traj_id, request, *args, **kwargs)
+        self._closed = False
+        created_collectors.append(self)
+
+      async def close_unclaimed_env(self) -> None:
+        if not self._closed:
+          self._closed = True
+          await manager_lib.collector_lib.close_env_client(self.env)
+
+      async def run_episode(self):
+        entered_ids.append(self.traj_id)
+        if len(entered_ids) >= 2:
+          both_entered.set()
+        await asyncio.Future()
+
+    req_a = datatypes.RolloutRequest(
+        request_id="req_a",
+        prompt="a",
+        prompt_id="pa",
+        group_index=0,
+    )
+    req_b = datatypes.RolloutRequest(
+        request_id="req_b",
+        prompt="b",
+        prompt_id="pb",
+        group_index=0,
+    )
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _HangingCollector,
+    ):
+      # 1. Cancelling the episode task before its first step (`cancel_all()`
+      # racing a newly admitted `generate`) never enters `run_episode()`, closes
+      # the unclaimed environment once via `_cancel_attempt`, and clears
+      # manager tracking.
+      pre_step_task = asyncio.create_task(manager.generate(req_a))
+      await asyncio.sleep(0)
+      manager.cancel_all()
+      pre_step_task.cancel()
+      with self.assertRaises(asyncio.CancelledError):
+        await pre_step_task
+      self.assertEqual(entered_ids, [])
+      self.assertLen(closed_envs, 1)
+      self.assertEqual(manager._active_collectors, {})
+      self.assertEqual(manager._active_tasks, {})
+
+      # 2. Cancelling a batched `generate([req_a, req_b])` mid-episode cancels
+      # all sibling tasks, closes both unclaimed envs, and emits no completions.
+      closed_envs.clear()
+      created_collectors.clear()
+      entered_ids.clear()
+      batch_task = asyncio.create_task(
+          manager.generate([req_a, req_b], on_complete=completed_items.append)
+      )
+      await asyncio.wait_for(both_entered.wait(), timeout=2.0)
+      batch_task.cancel()
+      with self.assertRaises(asyncio.CancelledError):
+        await batch_task
+
+    self.assertLen(created_collectors, 2)
+    self.assertTrue(all(c.is_cancelled for c in created_collectors))
+    self.assertLen(closed_envs, 2)
+    self.assertEqual(completed_items, [])
+    self.assertEqual(manager._active_collectors, {})
+    self.assertEqual(manager._active_tasks, {})
+
+  async def test_batched_sibling_failure_cancels_and_drains_running_sibling(
+      self,
+  ):
+    closed_envs: list[Any] = []
+    req_a_entered = asyncio.Event()
+    created_collectors: list[Any] = []
+    completed_items: list[Any] = []
+
+    class _SiblingEnv(_CaptureEnv):
+
+      def close(self) -> None:
+        closed_envs.append(self)
+
+    def _selective_agent_factory(**kwargs):
+      if kwargs.get("fail"):
+        raise RuntimeError("sibling agent init boom")
+      return test_utils.MockAgent()
+
+    class _HangingCollector(_NoopCollector):
+
+      def __init__(self, traj_id, request, *args, **kwargs):
+        super().__init__(traj_id, request, *args, **kwargs)
+        self._closed = False
+        created_collectors.append(self)
+
+      async def close_unclaimed_env(self) -> None:
+        if not self._closed:
+          self._closed = True
+          await manager_lib.collector_lib.close_env_client(self.env)
+
+      async def run_episode(self):
+        req_a_entered.set()
+        await asyncio.Future()
+
+    manager = manager_lib.RolloutManager(
+        sampler=_PauseTrackingSampler(),
+        env_factory=_SiblingEnv,
+        agent_factory=_selective_agent_factory,
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    req_a = datatypes.RolloutRequest(
+        request_id="req_sibling_a",
+        prompt="a",
+        prompt_id="pa",
+        group_index=0,
+    )
+    req_b = datatypes.RolloutRequest(
+        request_id="req_sibling_b",
+        prompt="b",
+        prompt_id="pb",
+        group_index=0,
+        metadata={"agent_config": {"fail": True}},
+    )
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _HangingCollector,
+    ):
+      with self.assertRaisesRegex(RuntimeError, "sibling agent init boom"):
+        await asyncio.wait_for(
+            manager.generate(
+                [req_a, req_b], on_complete=completed_items.append
+            ),
+            timeout=2.0,
+        )
+
+    self.assertTrue(req_a_entered.is_set())
+    self.assertLen(created_collectors, 1)
+    self.assertTrue(created_collectors[0].is_cancelled)
+    self.assertLen(closed_envs, 2)
+    self.assertEqual(completed_items, [])
+    self.assertEqual(manager._active_collectors, {})
+    self.assertEqual(manager._active_tasks, {})
+
+  async def test_evict_if_current_preserves_newer_collector_for_same_traj_id(
+      self,
+  ):
+    manager = manager_lib.RolloutManager(
+        sampler=_PauseTrackingSampler(),
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    req = datatypes.RolloutRequest(
+        request_id="traj_reuse", prompt="p", prompt_id="p0", group_index=0
+    )
+    old_collector = _NoopCollector(
+        req.traj_id, req, manager.sampler, _CaptureEnv(), None, "m", "m"
+    )
+    new_collector = _NoopCollector(
+        req.traj_id, req, manager.sampler, _CaptureEnv(), None, "m", "m"
+    )
+    new_task = asyncio.create_task(asyncio.sleep(0))
+    await new_task
+
+    manager._active_collectors[req.traj_id] = new_collector  # pyrefly: ignore[bad-assignment]
+    manager._active_tasks[req.traj_id] = new_task
+
+    # Stale cleanup callback from `old_collector` must not evict
+    # `new_collector`.
+    manager._evict_if_current(req.traj_id, old_collector)  # pyrefly: ignore[bad-argument-type]
+    self.assertIs(manager._active_collectors[req.traj_id], new_collector)
+    self.assertIs(manager._active_tasks[req.traj_id], new_task)
+
+    manager._evict_if_current(req.traj_id, new_collector)  # pyrefly: ignore[bad-argument-type]
+    self.assertEqual(manager._active_collectors, {})
+    self.assertEqual(manager._active_tasks, {})
+
+  async def test_agent_factory_failure_closes_created_env_client(self):
+    closed_envs: list[Any] = []
+
+    class _CloseTrackingEnv(_CaptureEnv):
+
+      def close(self) -> None:
+        closed_envs.append(self)
+
+    def _failing_agent(**kwargs):
+      del kwargs
+      raise RuntimeError("agent construction failed")
+
+    manager = manager_lib.RolloutManager(
+        sampler=_PauseTrackingSampler(),
+        env_factory=_CloseTrackingEnv,
+        agent_factory=_failing_agent,
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    req = datatypes.RolloutRequest(
+        request_id="req_fail_init", prompt="p", prompt_id="p0", group_index=0
+    )
+    with self.assertRaisesRegex(RuntimeError, "agent construction failed"):
+      await manager.generate(req)
+    self.assertLen(closed_envs, 1)
+    self.assertEqual(manager._active_collectors, {})
+    self.assertEqual(manager._active_tasks, {})
+
+  async def test_same_traj_id_reused_across_epochs_with_session_attempt_one(
+      self,
+  ):
+    manager = manager_lib.RolloutManager(
+        sampler=_PauseTrackingSampler(),
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    req_epoch1 = datatypes.RolloutRequest(
+        request_id="traj_p0_g0",
+        prompt="solve",
+        prompt_id="p0",
+        group_index=0,
+    )
+    req_epoch2 = datatypes.RolloutRequest(
+        request_id="traj_p0_g0",
+        prompt="solve",
+        prompt_id="p0",
+        group_index=0,
+    )
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _NoopCollector,
+    ):
+      out1 = await manager.generate(req_epoch1, session_attempt=1)
+      out2 = await manager.generate(req_epoch2, session_attempt=1)
+    self.assertIsInstance(out1, datatypes.TrajectoryItem)
+    self.assertIsInstance(out2, datatypes.TrajectoryItem)
+    self.assertEqual(manager._active_collectors, {})
+    self.assertEqual(manager._active_tasks, {})
 
 
 if __name__ == "__main__":

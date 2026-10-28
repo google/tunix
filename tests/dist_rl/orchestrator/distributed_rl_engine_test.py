@@ -2264,6 +2264,12 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertNotIn("rollout-0", engine._registry)
       self.mock_rollout_1.sync_close.assert_called_once()
       self.assertEqual(self.mock_rollout_2.generate.call_count, 1)
+      self.assertEqual(
+          self.mock_rollout_1.generate.call_args.kwargs["session_attempt"], 1
+      )
+      self.assertEqual(
+          self.mock_rollout_2.generate.call_args.kwargs["session_attempt"], 2
+      )
       await engine.close()
 
     asyncio.run(_run())
@@ -2305,6 +2311,12 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.mock_rollout_1.sync_close.assert_called_once()
       self.assertEqual(self.mock_rollout_1.generate.call_count, 1)
       self.assertEqual(self.mock_rollout_2.generate.call_count, 1)
+      self.assertEqual(
+          self.mock_rollout_1.generate.call_args.kwargs["session_attempt"], 1
+      )
+      self.assertEqual(
+          self.mock_rollout_2.generate.call_args.kwargs["session_attempt"], 2
+      )
 
       results = await self.engine.poll_rollouts(timeout_s=0.5)
       self.assertLen(results, 1)
@@ -2343,6 +2355,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertEqual(engine._rollout_session._poll_retry_budget_s, 300.0)
       self.assertEqual(engine._rollout_session._max_task_retries, 0)
       self.assertIsNone(engine._rollout_session._on_worker_unreachable)
+      self.assertTrue(engine._rollout_session._pass_session_attempt)
       await engine.close()
 
       self.assertEqual(
@@ -2921,7 +2934,8 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       w1_q: asyncio.Queue[remote_execution.ExecutionResponse] = asyncio.Queue()
 
-      async def _w1_generate(*, requests):
+      async def _w1_generate(*, requests, session_attempt: int = 1):
+        del session_attempt
         req = requests[0]
         w1_q.put_nowait(
             remote_execution.ExecutionResponse(
@@ -3390,7 +3404,9 @@ class DistributedRLEngineTest(absltest.TestCase):
             handle: MockActorHandle,
             q: asyncio.Queue[remote_execution.ExecutionResponse],
         ) -> None:
-          async def _generate(*, requests):
+
+          async def _generate(*, requests, session_attempt: int = 1):
+            del session_attempt
             req = requests[0]
             q.put_nowait(
                 remote_execution.ExecutionResponse(

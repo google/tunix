@@ -16,7 +16,7 @@
 
 import asyncio
 import time
-from typing import Any, Callable, Collection, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Collection, Coroutine, List, Mapping, Optional, Sequence, TypeVar
 from absl import logging
 import numpy as np
 from tunix.dist_rl.common import datatypes
@@ -25,6 +25,7 @@ from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.dist_rl.trajectory import base_store as store
 from tunix.dist_rl.trajectory import converter as converter_lib
 from tunix.rl.agentic.agents import agent_types
+from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.trajectory import trajectory_collect_engine as rl_collect_engine
 from tunix.rl.rollout import base_rollout
 
@@ -76,6 +77,44 @@ def response_budget_facts(
   return min(raw_length, max_response_length), clipped
 
 
+_T = TypeVar("_T")
+_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _pin_task(coro: Coroutine[Any, Any, _T]) -> asyncio.Task[_T]:
+  """Creates an asyncio Task pinned in `_BACKGROUND_TASKS` until completion."""
+  task = asyncio.create_task(coro)
+  _BACKGROUND_TASKS.add(task)
+  task.add_done_callback(_BACKGROUND_TASKS.discard)
+  return task
+
+
+async def shield_env_close(coro: Coroutine[Any, Any, None]) -> None:
+  """Runs `coro` to completion even if the awaiting task is cancelled."""
+  await asyncio.shield(_pin_task(coro))
+
+
+# Matches `TrajectoryCollectEngine._close`'s 150.0 s close timeout.
+_ENV_CLOSE_TIMEOUT_S: float = 150.0
+
+
+async def close_env_client(
+    env_client: base_environment.BaseEnv,
+    timeout_s: float = _ENV_CLOSE_TIMEOUT_S,
+) -> None:
+  """Closes `env_client` off the event loop within `timeout_s` seconds."""
+  try:
+    await asyncio.wait_for(
+        asyncio.to_thread(env_client.close), timeout=timeout_s
+    )
+  except Exception:  # pylint: disable=broad-exception-caught
+    logging.warning(
+        "Failed to close unclaimed rollout environment %r.",
+        env_client,
+        exc_info=True,
+    )
+
+
 class TrajectoryCollectorEngine:
   """Wrapper around TrajectoryCollectEngine providing lifecycle controls and Trajectory conversion."""
 
@@ -115,6 +154,8 @@ class TrajectoryCollectorEngine:
     self.request = request
     self.sampler = sampler
     self.env = env_client
+    self._env_owned_by_inner: bool = False
+    self._env_close_task: asyncio.Task[None] | None = None
     self.agent = agent
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
@@ -174,8 +215,51 @@ class TrajectoryCollectorEngine:
             exc_info=True,
         )
 
+  async def close_unclaimed_env(self) -> None:
+    """Closes `self.env` at most once if `TrajectoryCollectEngine` never claimed it."""
+    if self._env_owned_by_inner:
+      return
+    if self._env_close_task is None:
+      self._env_close_task = _pin_task(close_env_client(self.env))
+    await asyncio.shield(self._env_close_task)
+
+  async def _run_shielded_collection(
+      self, inner_engine: rl_collect_engine.TrajectoryCollectEngine
+  ) -> dict[str, Any]:
+    """Runs `inner_engine.collect` while shielding store teardown on cancel."""
+    self._inner_engine = inner_engine
+    self._env_owned_by_inner = True
+    collect_task = _pin_task(inner_engine.collect(mode="Token"))
+    # Only entered when an external caller cancels `run_episode()` directly
+    # (e.g., batched sibling failure in `RolloutManager.generate` or caller
+    # timeout); normal episodes finish `asyncio.shield` with zero extra work.
+    # Shielding lets `self.cancel()` detach `trajectory_store` BEFORE
+    # `collect_task` unwinds `_record_env_step` and `record_metadata()`,
+    # whereas awaiting `inner_engine.collect()` directly would inject
+    # `CancelledError` inside `collect()` first and clobber shared store state.
+    try:
+      return await asyncio.shield(collect_task)
+    except asyncio.CancelledError:
+      self.cancel()
+      if not collect_task.done() and collect_task.cancelling() == 0:
+        collect_task.cancel()
+      try:
+        await asyncio.shield(collect_task)
+      except asyncio.CancelledError:
+        pass
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.debug(
+            "Ignoring post-cancel collection exception for %s.",
+            self.traj_id,
+            exc_info=True,
+        )
+      raise
+
   async def run_episode(self) -> agent_types.TrajectoryItem:
     """Executes multi-turn agentic rollout episode and returns TrajectoryItem."""
+    if self.is_cancelled:
+      await self.close_unclaimed_env()
+      raise asyncio.CancelledError("Rollout episode was cancelled.")
     self._episode_cache_salt = None
     sampler_time_s = 0.0
 
@@ -188,6 +272,8 @@ class TrajectoryCollectorEngine:
       del env
       nonlocal sampler_time_s
       await self._unpaused.wait()
+      if self.is_cancelled:
+        raise asyncio.CancelledError("Rollout episode was cancelled.")
       generation_kwargs = dict(self.request.generation_kwargs)
       # NB: extra kwargs can be passed in from trajectory_collect_engine.
       generation_kwargs.update(kwargs)
@@ -293,6 +379,7 @@ class TrajectoryCollectorEngine:
       )
 
     if not self.agent or not self.env:
+      await self.close_unclaimed_env()
       raise RuntimeError(
           "RolloutCollector requires valid registered agent and env instances"
           " to run an episode."
@@ -313,8 +400,7 @@ class TrajectoryCollectorEngine:
         routed_experts_encode_mode=self.routed_experts_encode_mode,
         routed_experts_num_experts=self.routed_experts_num_experts,
     )
-    self._inner_engine = inner_engine
-    rl_traj = await inner_engine.collect(mode="Token")
+    rl_traj = await self._run_shielded_collection(inner_engine)
     self.is_done = True
     return self._convert_to_trajectory(rl_traj, sampler_time_s=sampler_time_s)
 
@@ -460,15 +546,25 @@ class TrajectoryCollectorEngine:
     self._unpaused.set()
 
   def cancel(self) -> None:
-    """Marks the episode as cancelled and persists CANCELLED metadata to the store."""
+    """Marks the episode as cancelled, wakes paused turns, and detaches the store."""
     if self.is_done:
       return
     self.is_cancelled = True
     self.is_done = True
+    self.is_paused = False
+    self._unpaused.set()
     if self.agent is not None:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.CANCELLED
+    # Unconditionally detach `trajectory_store` instead of writing `CANCELLED`
+    # metadata: during cross-worker failover or late worker `stop()`, a
+    # surviving worker may have already persisted `SUCCEEDED` for this `traj_id`
+    # in the shared store, and `stop()` closes the store immediately before
+    # cancelled episode tasks unwind on the event loop. Without a surviving
+    # retry, stored metadata retains its last persisted status (typically
+    # `RUNNING` written at episode start) until store fencing and startup
+    # recovery land, so readers must not treat stored `RUNNING` alone as proof
+    # that an episode is still live.
     if self._inner_engine is not None:
-      self._inner_engine.record_metadata()
       self._inner_engine.trajectory_store = None
     self.trajectory_store = None
 
