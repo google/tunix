@@ -39,6 +39,11 @@ class SchedulerConfig:
   max_chunked_prefill_length: int
   # The number of model forward passes to execute per engine step.
   num_scheduler_steps: int = 1
+  # Whether pure-decode batches shrink row capacity to 128/256/512 buckets.
+  adaptive_decode_bucketing: bool = False
+  # Whether token capacity uses two shapes (`num_rows` on pure decode,
+  # `max_num_batched_tokens` otherwise) instead of powers of two.
+  two_shape_token_bucketing: bool = False
 
   def __post_init__(self):
     if self.max_chunked_prefill_length <= 0:

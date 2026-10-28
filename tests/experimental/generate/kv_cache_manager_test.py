@@ -1055,6 +1055,51 @@ class InspectionTest(parameterized.TestCase):
         },
     )
 
+  def test_build_page_tables_shares_readonly_group_arrays_and_pads(self):
+    mgr, full, local = _create_two_group_manager(page_size=4, window_size=8)
+    req1 = _create_request(req_id="r1", prompt_token_ids=list(range(12)))
+    _allocate_pages(mgr, req1, num_pages=3)
+    mgr.sync_request_state(req1)
+    req2 = _create_request(req_id="r2", prompt_token_ids=list(range(4)))
+    mgr.allocate_slots(req2, num_new_tokens=4)
+
+    tables = mgr.build_page_tables(
+        [req1, req2], num_rows=4, max_pages_per_seq=5
+    )
+
+    self.assertIs(tables["cache_0"], tables["cache_1"])
+    self.assertIs(tables["cache_2"], tables["cache_3"])
+    self.assertIsNot(tables["cache_0"], tables["cache_2"])
+    self.assertFalse(tables["cache_0"].flags.writeable)
+    self.assertFalse(tables["cache_2"].flags.writeable)
+    for cache_name, group_mgr in (("cache_0", full), ("cache_2", local)):
+      expected = np.full((4, 5), -1, dtype=np.int32)
+      expected[0, :3] = group_mgr.get_page_idxs("r1")
+      expected[1, :1] = group_mgr.get_page_idxs("r2")
+      self.assertEqual(tables[cache_name].dtype, np.int32)
+      np.testing.assert_array_equal(tables[cache_name], expected)
+    self.assertEqual(tables["cache_2"][0, 0], -1)
+
+  @parameterized.named_parameters(
+      ("too_many_requests", 2, 1, 4, r"Got 2 requests for 1 rows"),
+      ("zero_page_capacity", 1, 2, 0, r"over max_pages_per_seq=0"),
+      ("too_many_pages", 1, 2, 1, r"over max_pages_per_seq=1"),
+  )
+  def test_build_page_tables_invalid_capacity_raises(
+      self, num_reqs, num_rows, max_pages_per_seq, error_regex
+  ):
+    mgr = _create_manager(page_size=4)
+    reqs = [
+        _create_request(req_id=f"r{i}", prompt_token_ids=list(range(8)))
+        for i in range(num_reqs)
+    ]
+    for req in reqs:
+      mgr.allocate_slots(req, num_new_tokens=8)
+    with self.assertRaisesRegex(ValueError, error_regex):
+      mgr.build_page_tables(
+          reqs, num_rows=num_rows, max_pages_per_seq=max_pages_per_seq
+      )
+
   def test_get_physical_pages(self):
     mgr, _, _ = _create_two_group_manager()
     phys = mgr.get_physical_pages()

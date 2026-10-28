@@ -280,6 +280,17 @@ class VanillaRolloutTest(parameterized.TestCase):
     group_mgr = rollout._sampler._engine._kv_cache_manager._kv_cache_group_managers[0]
     self.assertEqual(group_mgr._page_manager.num_free_host_pages, 16)
 
+  @parameterized.product(adaptive=(False, True), two_shape=(False, True))
+  def test_wires_bucketing_flags_to_scheduler_config(self, adaptive, two_shape):
+    rollout = self.make_rollout(
+        False,
+        rollout_vanilla_v2_adaptive_decode_bucketing=adaptive,
+        rollout_vanilla_v2_two_shape_token_bucketing=two_shape,
+    )
+    sched_cfg = rollout._sampler._engine._scheduler_config
+    self.assertEqual(sched_cfg.adaptive_decode_bucketing, adaptive)
+    self.assertEqual(sched_cfg.two_shape_token_bucketing, two_shape)
+
   def test_seed_seeds_the_engine(self):
     rollout = self.make_rollout(False, seed=7)
 

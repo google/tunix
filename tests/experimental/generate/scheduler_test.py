@@ -112,6 +112,15 @@ class SchedulerConfigTest(parameterized.TestCase):
     self.assertEqual(config.max_num_seqs, 8)
     self.assertEqual(config.max_chunked_prefill_length, 16)
     self.assertEqual(config.num_scheduler_steps, 1)
+    self.assertFalse(config.adaptive_decode_bucketing)
+    self.assertFalse(config.two_shape_token_bucketing)
+
+  def test_bucketing_flags_can_be_enabled(self):
+    config = _create_scheduler_config(
+        adaptive_decode_bucketing=True, two_shape_token_bucketing=True
+    )
+    self.assertTrue(config.adaptive_decode_bucketing)
+    self.assertTrue(config.two_shape_token_bucketing)
 
   @parameterized.parameters(0, -2)
   def test_non_positive_max_chunked_prefill_length_raises(self, length):

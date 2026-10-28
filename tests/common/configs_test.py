@@ -159,6 +159,17 @@ class ConfigsTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "timeout_secs must be > 0"):
       configs.RLProfileConfig(timeout_secs=float("nan"))
 
+  def test_rollout_config_vanilla_v2_bucketing_flags(self):
+    cfg = configs.RolloutConfig()
+    self.assertFalse(cfg.rollout_vanilla_v2_adaptive_decode_bucketing)
+    self.assertFalse(cfg.rollout_vanilla_v2_two_shape_token_bucketing)
+    cfg = configs.RolloutConfig(
+        rollout_vanilla_v2_adaptive_decode_bucketing=True,
+        rollout_vanilla_v2_two_shape_token_bucketing=True,
+    )
+    self.assertTrue(cfg.rollout_vanilla_v2_adaptive_decode_bucketing)
+    self.assertTrue(cfg.rollout_vanilla_v2_two_shape_token_bucketing)
+
 
 if __name__ == "__main__":
   absltest.main()
