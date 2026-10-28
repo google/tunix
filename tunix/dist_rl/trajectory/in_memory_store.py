@@ -43,6 +43,9 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
     self._steps_by_trajectory_id: dict[str, list[trajectory_lib.Step]] = (
         collections.defaultdict(list)
     )
+    self._metrics_by_trajectory_id: dict[
+        str, trajectory_lib.TrajectoryMetrics
+    ] = {}
 
   @classmethod
   def _from_config(
@@ -112,6 +115,34 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
       result.append(meta.create_trajectory(steps=steps))
     return result
 
+  def get_trajectories_metrics(
+      self, trajectory_ids: list[str] | None = None
+  ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
+    """Retrieves trajectory metrics for the requested or all trajectories.
+
+    Args:
+      trajectory_ids: Optional list of unique trajectory identifiers. If
+        specified, only metrics for these IDs is returned. If None, metrics for
+        all trajectories with recorded metrics is returned.
+
+    Returns:
+      A mapping from trajectory_id to TrajectoryMetrics.
+
+    Raises:
+      store.TrajectoryMetricsNotFoundError: If any requested trajectory ID does
+        not exist in the store.
+    """
+    if trajectory_ids is None:
+      trajectory_ids = list(self._metrics_by_trajectory_id.keys())
+    result: dict[str, trajectory_lib.TrajectoryMetrics] = {}
+    for traj_id in trajectory_ids:
+      if traj_id not in self._metrics_by_trajectory_id:
+        raise store.TrajectoryMetricsNotFoundError(traj_id)
+      result[traj_id] = trajectory_lib.deep_copy(
+          self._metrics_by_trajectory_id[traj_id]
+      )
+    return result
+
   def add_step(
       self,
       step: trajectory_lib.Step,
@@ -166,6 +197,47 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
     self._metadata_by_trajectory_id[traj_id] = trajectory_lib.deep_copy(
         metadata
     )
+
+  def update_metrics(
+      self,
+      trajectory_id: str,
+      metrics: trajectory_lib.TrajectoryMetrics,
+  ) -> None:
+    """Updates (or creates) trajectory metrics for a trajectory.
+
+    The metrics object is deep copied, so later mutations of the caller's
+    object do not retroactively change what this store reports.
+
+    Args:
+      trajectory_id: Unique identifier of the trajectory.
+      metrics: TrajectoryMetrics containing trajectory-level metrics.
+
+    Raises:
+      TypeError: If metrics is not a TrajectoryMetrics instance.
+      ValueError: If trajectory_id is empty or whitespace.
+    """
+    if not isinstance(metrics, trajectory_lib.TrajectoryMetrics):
+      raise TypeError(
+          f"Expected TrajectoryMetrics instance, got {type(metrics).__name__}."
+      )
+    if not trajectory_id or not trajectory_id.strip():
+      raise ValueError("trajectory_id must be non-empty.")
+
+    copied = trajectory_lib.deep_copy(metrics)
+    if trajectory_id in self._metrics_by_trajectory_id:
+      existing = self._metrics_by_trajectory_id[trajectory_id]
+      if existing.extra is None and copied.extra is None:
+        merged_extra = None
+      else:
+        merged_extra = {
+            **(existing.extra or {}),
+            **(copied.extra or {}),
+        }
+      self._metrics_by_trajectory_id[trajectory_id] = existing.model_copy(
+          update={"extra": merged_extra}
+      )
+    else:
+      self._metrics_by_trajectory_id[trajectory_id] = copied
 
   def flush(self) -> None:
     """Flushes any pending or asynchronous writes to persistent storage."""

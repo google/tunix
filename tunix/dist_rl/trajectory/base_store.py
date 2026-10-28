@@ -117,7 +117,6 @@ class TrajectoryReader(Protocol[MetadataT]):
     """
     ...
 
-
 @runtime_checkable
 class TrajectoryWriter(Protocol[MetadataT]):
   """Structural protocol defining write Trajectory Store operations."""
@@ -180,7 +179,6 @@ class TrajectoryWriter(Protocol[MetadataT]):
       metrics: TrajectoryMetrics containing the metrics data to record.
     """
     ...
-
   def flush(self) -> None:
     """Flushes any pending or asynchronous writes to persistent storage.
 
@@ -363,6 +361,42 @@ class TrajectoryStore(
       )
     return resolved_cls.from_atif_metadata(atif_metadata)
 
+  def update_metrics(
+      self,
+      trajectory_id: str,
+      metrics: trajectory_lib.TrajectoryMetrics,
+  ) -> None:
+    """Updates (or creates) trajectory-level metrics.
+
+    Args:
+      trajectory_id: Unique identifier of the trajectory.
+      metrics: TrajectoryMetrics containing trajectory-level metrics.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement update_metrics."
+    )
+
+  def get_trajectories_metrics(
+      self, trajectory_ids: list[str] | None = None
+  ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
+    """Retrieves metrics for trajectories in the run.
+
+    Args:
+      trajectory_ids: Optional list of unique trajectory identifiers. If
+        specified, only metrics for these IDs is returned. If None, metrics for
+        all trajectories with recorded metrics is returned.
+
+    Returns:
+      A mapping from trajectory_id to TrajectoryMetrics.
+
+    Raises:
+      TrajectoryMetricsNotFoundError: If any requested trajectory ID does not
+        exist.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement get_trajectories_metrics."
+    )
+
   @classmethod
   @abc.abstractmethod
   def _from_config(
@@ -397,24 +431,6 @@ class TrajectoryStore(
       accepted by `from_config`.
     """
     return self.to_config()
-
-  def get_trajectories_metrics(
-      self, trajectory_ids: list[str] | None = None
-  ) -> dict[str, trajectory_lib.TrajectoryMetrics]:
-    """Retrieves metrics for trajectories in the run."""
-    raise NotImplementedError(
-        f"{type(self).__name__} does not implement get_trajectories_metrics."
-    )
-
-  def update_metrics(
-      self,
-      trajectory_id: str,
-      metrics: trajectory_lib.TrajectoryMetrics,
-  ) -> None:
-    """Updates (or creates) trajectory metrics."""
-    raise NotImplementedError(
-        f"{type(self).__name__} does not implement update_metrics."
-    )
 
   @classmethod
   def from_config(cls, config: Mapping[str, Any] | None) -> Self | None:
