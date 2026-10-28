@@ -21,7 +21,6 @@ multi-pair trajectory collection.
 """
 
 import asyncio
-import copy
 import inspect
 import json
 import time
@@ -43,6 +42,25 @@ from tunix.rl.rollout import base_rollout
 
 BaseTaskEnv = base_environment.BaseTaskEnv
 ConversationAgentBase = base_agent.ConversationAgentBase
+
+
+def _concat_or_none(arrays: List[np.ndarray]) -> Optional[np.ndarray]:
+  """Returns arrays[0] by reference for 1 array, concatenates >1, or None."""
+  if not arrays:
+    return None
+  if len(arrays) == 1:
+    return arrays[0]
+  return np.concatenate(arrays, axis=0)
+
+
+def _concat_or_empty(
+    arrays: List[np.ndarray], *, dtype: Any
+) -> np.ndarray:
+  """Returns arrays[0] by reference for 1 array, or concatenates along axis 0."""
+  concatenated = _concat_or_none(arrays)
+  if concatenated is None:
+    return np.array([], dtype=dtype)
+  return concatenated
 
 
 class TrajectoryCollectEngine:
@@ -585,15 +603,11 @@ class TrajectoryCollectEngine:
           for step_logprobs in logprobs
           if len(step_logprobs) > 0
       ]
-      conversation_masks = (
-          np.concatenate(conversation_masks, axis=0)
-          if conversation_masks
-          else np.array([], dtype=np.int32)
+      conversation_masks = _concat_or_empty(
+          conversation_masks, dtype=np.int32
       )
-      conversation_tokens = (
-          np.concatenate(conversation_tokens, axis=0)
-          if conversation_tokens
-          else np.array([], dtype=np.int32)
+      conversation_tokens = _concat_or_empty(
+          conversation_tokens, dtype=np.int32
       )
       final_masks = (
           np.zeros_like(conversation_masks)
@@ -613,11 +627,9 @@ class TrajectoryCollectEngine:
         sample_shape = (
             sample_arr.shape[1:] if sample_arr is not None else (0, 0)
         )
-        conv_routed = (
-            np.concatenate(routed_experts, axis=0)
-            if routed_experts
-            else np.zeros((0,) + sample_shape, dtype=np.int16)
-        )
+        conv_routed = _concat_or_none(routed_experts)
+        if conv_routed is None:
+          conv_routed = np.zeros((0,) + sample_shape, dtype=np.int16)
         prompt_len = (
             (self.agent.trajectory.prompt_length or 0)
             if self.exact_token_continuity
@@ -656,9 +668,7 @@ class TrajectoryCollectEngine:
           "trajectory_reward": self.agent.trajectory.reward,
           "env_time": self.env_time,
           "reward_time": self.reward_time,
-          "old_logprobs": (
-              np.concatenate(logprobs, axis=0) if logprobs else None
-          ),
+          "old_logprobs": _concat_or_none(logprobs),
           "routed_experts": final_routed_experts,
           "policy_version": self.env.task.get("policy_version"),
           "original_input": self.agent.trajectory.task,
@@ -800,7 +810,9 @@ class TrajectoryCollectEngine:
       )
       self.agent.trajectory.prompt_tokens = prompt_tokens
     if self.exact_token_continuity:
-      self._exact_chat_history = copy.deepcopy(self.agent.chat_completions)
+      self._exact_chat_history = [
+          dict(msg) for msg in self.agent.chat_completions
+      ]
 
   def _record_exact_turn(
       self, cur_step: agent_types.Step, *, terminal: bool
@@ -817,7 +829,10 @@ class TrajectoryCollectEngine:
       raise ValueError("agent rewrote previously recorded chat history")
     if terminal:
       cur_step.done = True
-    self._exact_chat_history = copy.deepcopy(messages)
+    start = len(previous) if previous is not None else 0
+    if self._exact_chat_history is None:
+      self._exact_chat_history = []
+    self._exact_chat_history.extend(dict(msg) for msg in messages[start:])
 
   @property
   def _debug_prefix(self) -> str:
