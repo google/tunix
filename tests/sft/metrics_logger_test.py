@@ -302,9 +302,7 @@ class OpenTelemetryDoubleWriteTest(absltest.TestCase):
         "tunix.training.mode": "train",
         "tunix.metrics.prefix": "actor",
     }
-    self.assertEqual(
-        points["tunix.training.loss"], [(0.5, expected_attributes)]
-    )
+    self.assertEqual(points["tunix.actor.loss"], [(0.5, expected_attributes)])
     self.assertEqual(points["tunix.training.step"], [(7, expected_attributes)])
     # Local history is unchanged.
     self.assertAlmostEqual(logger.get_metric("actor", "loss", "train"), 0.5)
@@ -314,14 +312,24 @@ class OpenTelemetryDoubleWriteTest(absltest.TestCase):
     logger.log("actor", "rewards/score mean", 1.5, "train", 1)
 
     points = _gauge_points(self.reader.get_metrics_data())
-    self.assertIn("tunix.rewards.score.mean", points)
+    self.assertIn("tunix.actor.rewards.score.mean", points)
+
+  def test_unprefixed_known_metric_keeps_curated_instrument(self):
+    logger = self._make_logger()
+    logger.log("", "loss", 0.5, "train", 1)
+
+    points = _gauge_points(self.reader.get_metrics_data())
+    self.assertEqual(
+        points["tunix.training.loss"],
+        [(0.5, {"tunix.training.mode": "train"})],
+    )
 
   def test_non_scalar_values_stay_in_history_only(self):
     logger = self._make_logger()
     logger.log("actor", "loss", np.array([0.5, 0.6]), "train", 1)
 
     points = _gauge_points(self.reader.get_metrics_data())
-    self.assertNotIn("tunix.training.loss", points)
+    self.assertNotIn("tunix.actor.loss", points)
     self.assertLen(logger.get_metric_history("actor", "loss", "train"), 1)
 
   def test_repeated_step_emits_step_gauge_once(self):
@@ -354,7 +362,7 @@ class OpenTelemetryDoubleWriteTest(absltest.TestCase):
     logger_after_close = self._make_logger()
     logger_after_close.log("actor", "loss", 0.25, "train", 2)
     points = _gauge_points(self.reader.get_metrics_data())
-    self.assertIn(0.25, [value for value, _ in points["tunix.training.loss"]])
+    self.assertIn(0.25, [value for value, _ in points["tunix.actor.loss"]])
 
 
 if __name__ == "__main__":

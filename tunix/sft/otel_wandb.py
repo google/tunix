@@ -100,7 +100,7 @@ class WandbMetricsExporter(otel_export.MetricExporter):
 
   Chart keys mirror the legacy Metrax backend layout,
   ``{prefix}/{mode}/{instrument name}`` (for example
-  ``actor/train/tunix.training.loss``), so double-written runs are easy to
+  ``actor/train/tunix.actor.loss``), so double-written runs are easy to
   compare side by side. The ``tunix.training.step`` gauge provides the W&B
   step for the other measurements in its group.
   """
