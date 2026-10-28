@@ -48,7 +48,7 @@ class ShowTest(absltest.TestCase):
     )
 
   def test_unknown_trajectory_exits_1_with_message_on_stderr(self) -> None:
-    cmd = show.ShowCommand(trajectory_id="nope")
+    cmd = show.ShowCommand(trajectory_id=["nope"])
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr):
       exit_code, out = testing.execute_command(cmd, self.mem_store)
@@ -57,7 +57,9 @@ class ShowTest(absltest.TestCase):
     self.assertIn("trajectory not found: nope", stderr.getvalue())
 
   def test_header_and_steps(self) -> None:
-    cmd = show.ShowCommand(trajectory_id=_trajectory_id(_NO_OUTCOME_TRAJECTORY))
+    cmd = show.ShowCommand(
+        trajectory_id=[_trajectory_id(_NO_OUTCOME_TRAJECTORY)]
+    )
     exit_code, out = testing.execute_command(cmd, self.mem_store)
     self.assertEqual(exit_code, 0)
     expected = textwrap.dedent("""\
@@ -88,7 +90,7 @@ class ShowTest(absltest.TestCase):
 
   def test_tool_calls_observations_and_tokens(self) -> None:
     cmd = show.ShowCommand(
-        trajectory_id=_trajectory_id(_TOOL_CALLING_TRAJECTORY)
+        trajectory_id=[_trajectory_id(_TOOL_CALLING_TRAJECTORY)]
     )
     exit_code, out = testing.execute_command(cmd, self.mem_store)
     self.assertEqual(exit_code, 0)
@@ -103,7 +105,7 @@ class ShowTest(absltest.TestCase):
     # A rollout reports only completion tokens, so no prompt count is shown.
     rollout_store = testing.create_store(trajectories=[_ROLLOUT_TRAJECTORY])
     rollout_cmd = show.ShowCommand(
-        trajectory_id=_trajectory_id(_ROLLOUT_TRAJECTORY)
+        trajectory_id=[_trajectory_id(_ROLLOUT_TRAJECTORY)]
     )
     _, rollout_out = testing.execute_command(rollout_cmd, rollout_store)
     self.assertIn("Tokens: 8 completion", rollout_out)
@@ -127,7 +129,7 @@ class ShowTest(absltest.TestCase):
         update={"steps": [step]}
     )
     mem_store = testing.create_store(trajectories=[trajectory])
-    cmd = show.ShowCommand(trajectory_id=_trajectory_id(trajectory))
+    cmd = show.ShowCommand(trajectory_id=[_trajectory_id(trajectory)])
     exit_code, out = testing.execute_command(cmd, mem_store)
     self.assertEqual(exit_code, 0)
     self.assertIn(
@@ -168,7 +170,7 @@ class ShowTest(absltest.TestCase):
         update={"steps": [step]}
     )
     mem_store = testing.create_store(trajectories=[trajectory])
-    cmd = show.ShowCommand(trajectory_id=_trajectory_id(trajectory))
+    cmd = show.ShowCommand(trajectory_id=[_trajectory_id(trajectory)])
     exit_code, out = testing.execute_command(cmd, mem_store)
     self.assertEqual(exit_code, 0)
     expected_lines = textwrap.dedent("""\
@@ -203,7 +205,7 @@ class ShowTest(absltest.TestCase):
         update={"steps": [step]}
     )
     mem_store = testing.create_store(trajectories=[trajectory])
-    cmd = show.ShowCommand(trajectory_id=_trajectory_id(trajectory))
+    cmd = show.ShowCommand(trajectory_id=[_trajectory_id(trajectory)])
     exit_code, out = testing.execute_command(cmd, mem_store)
     self.assertEqual(exit_code, 0)
     self.assertIn("subagent (external): gs://bucket/sub.json", out)
@@ -211,7 +213,9 @@ class ShowTest(absltest.TestCase):
 
   def test_status_and_reward_from_tunix_schema(self) -> None:
     mem_store = testing.create_store(trajectories=[_SUCCEEDED_TRAJECTORY])
-    cmd = show.ShowCommand(trajectory_id=_trajectory_id(_SUCCEEDED_TRAJECTORY))
+    cmd = show.ShowCommand(
+        trajectory_id=[_trajectory_id(_SUCCEEDED_TRAJECTORY)]
+    )
     exit_code, out = testing.execute_command(cmd, mem_store)
     self.assertEqual(exit_code, 0)
     self.assertRegex(out, rf"Status: \S*{_SUCCEEDED_TRAJECTORY.status}")
@@ -222,7 +226,7 @@ class ShowTest(absltest.TestCase):
         update={"status": "not_a_status"}
     )
     mem_store = testing.create_store(trajectories=[trajectory])
-    cmd = show.ShowCommand(trajectory_id=_trajectory_id(trajectory))
+    cmd = show.ShowCommand(trajectory_id=[_trajectory_id(trajectory)])
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr):
       exit_code, out = testing.execute_command(cmd, mem_store)
@@ -237,7 +241,7 @@ class ShowTest(absltest.TestCase):
 
   def test_max_chars_truncates_content(self) -> None:
     cmd = show.ShowCommand(
-        trajectory_id=_trajectory_id(_NO_OUTCOME_TRAJECTORY), max_chars=8
+        trajectory_id=[_trajectory_id(_NO_OUTCOME_TRAJECTORY)], max_chars=8
     )
     _, out = testing.execute_command(cmd, self.mem_store)
     self.assertIn(
@@ -246,7 +250,7 @@ class ShowTest(absltest.TestCase):
 
   def test_json_output(self) -> None:
     cmd = show.ShowCommand(
-        trajectory_id=_trajectory_id(_TOOL_CALLING_TRAJECTORY)
+        trajectory_id=[_trajectory_id(_TOOL_CALLING_TRAJECTORY)]
     )
     exit_code, out = testing.execute_command(
         cmd, self.mem_store, output_json=True
@@ -262,6 +266,125 @@ class ShowTest(absltest.TestCase):
     )
     self.assertEqual(data["stats"]["tool_call_names"], ["search"])
     self.assertEqual(data["stats"]["tokens"]["total"], 150)
+
+  def test_multiple_trajectories_human_output_separated_by_delimiter(
+      self,
+  ) -> None:
+    cmd = show.ShowCommand(
+        trajectory_id=[
+            _trajectory_id(_NO_OUTCOME_TRAJECTORY),
+            _trajectory_id(_TOOL_CALLING_TRAJECTORY),
+        ]
+    )
+    exit_code, out = testing.execute_command(cmd, self.mem_store)
+    self.assertEqual(exit_code, 0)
+    _, out_1 = testing.execute_command(
+        show.ShowCommand(
+            trajectory_id=[_trajectory_id(_NO_OUTCOME_TRAJECTORY)]
+        ),
+        self.mem_store,
+    )
+    _, out_2 = testing.execute_command(
+        show.ShowCommand(
+            trajectory_id=[_trajectory_id(_TOOL_CALLING_TRAJECTORY)]
+        ),
+        self.mem_store,
+    )
+    self.assertMultiLineEqual(out, f"{out_1}\n{'=' * 80}\n\n{out_2}")
+
+  def test_multiple_trajectories_json_output_emits_list(self) -> None:
+    cmd = show.ShowCommand(
+        trajectory_id=[
+            _trajectory_id(_NO_OUTCOME_TRAJECTORY),
+            _trajectory_id(_TOOL_CALLING_TRAJECTORY),
+        ]
+    )
+    exit_code, out = testing.execute_command(
+        cmd, self.mem_store, output_json=True
+    )
+    self.assertEqual(exit_code, 0)
+    data = json.loads(out)
+    self.assertIsInstance(data, list)
+    self.assertLen(data, 2)
+    self.assertEqual(
+        data[0]["trajectory"]["trajectory_id"],
+        _NO_OUTCOME_TRAJECTORY.trajectory_id,
+    )
+    self.assertEqual(
+        data[1]["trajectory"]["trajectory_id"],
+        _TOOL_CALLING_TRAJECTORY.trajectory_id,
+    )
+
+  def test_comma_separated_trajectory_ids_normalized_and_executed(self) -> None:
+    id_1 = _trajectory_id(_NO_OUTCOME_TRAJECTORY)
+    id_2 = _trajectory_id(_TOOL_CALLING_TRAJECTORY)
+    cmd = show.ShowCommand(trajectory_id=[f"{id_1},{id_2}"])
+    self.assertEqual(cmd.trajectory_id, [id_1, id_2])
+    exit_code, out = testing.execute_command(
+        cmd, self.mem_store, output_json=True
+    )
+    self.assertEqual(exit_code, 0)
+    data = json.loads(out)
+    self.assertLen(data, 2)
+    self.assertEqual(data[0]["trajectory"]["trajectory_id"], id_1)
+    self.assertEqual(data[1]["trajectory"]["trajectory_id"], id_2)
+
+  def test_multiple_trajectories_missing_id_fails_batch_with_nothing_printed(
+      self,
+  ) -> None:
+    cmd = show.ShowCommand(
+        trajectory_id=[
+            _trajectory_id(_NO_OUTCOME_TRAJECTORY),
+            "missing_traj",
+        ]
+    )
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+      exit_code, out = testing.execute_command(cmd, self.mem_store)
+    self.assertEqual(exit_code, 1)
+    self.assertEmpty(out)
+    self.assertIn("trajectory not found: missing_traj", stderr.getvalue())
+
+  def test_multiple_trajectories_invalid_status_fails_batch_with_nothing_printed(
+      self,
+  ) -> None:
+    bad_trajectory = _SUCCEEDED_TRAJECTORY.model_copy(
+        update={"trajectory_id": "traj_bad", "status": "not_a_status"}
+    )
+    mem_store = testing.create_store(
+        trajectories=[_SUCCEEDED_TRAJECTORY, bad_trajectory]
+    )
+    cmd = show.ShowCommand(
+        trajectory_id=[
+            _trajectory_id(_SUCCEEDED_TRAJECTORY),
+            _trajectory_id(bad_trajectory),
+        ]
+    )
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+      exit_code, out = testing.execute_command(cmd, mem_store)
+    self.assertEqual(exit_code, 1)
+    self.assertEmpty(out)
+    self.assertIn(
+        f"error: trajectory {bad_trajectory.trajectory_id}: Unrecognized"
+        " trajectory status 'not_a_status'",
+        stderr.getvalue(),
+    )
+
+  def test_empty_trajectory_id_list_exits_2(self) -> None:
+    for raw_ids in ([], ["", ","]):
+      with self.subTest(raw_ids=raw_ids):
+        cmd = show.ShowCommand(trajectory_id=raw_ids)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+          exit_code, out = testing.execute_command(cmd, self.mem_store)
+        self.assertEqual(exit_code, 2)
+        self.assertEmpty(out)
+        self.assertIn(
+            "trajectory-explore: error: --trajectory_id requires at least"
+            " one ID",
+            stderr.getvalue(),
+        )
 
 
 class TruncateToLineTest(absltest.TestCase):

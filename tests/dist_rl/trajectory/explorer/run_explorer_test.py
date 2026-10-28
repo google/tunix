@@ -76,13 +76,37 @@ class ParseArgsTest(absltest.TestCase):
   def test_subcommand_show_with_its_own_flags(self) -> None:
     config = _parse_cmd("show --trajectory_id t1 --max_chars 0")
     self.assertEqual(
-        config.cmd, show.ShowCommand(trajectory_id="t1", max_chars=0)
+        config.cmd, show.ShowCommand(trajectory_id=["t1"], max_chars=0)
     )
+
+  def test_subcommand_show_with_multiple_trajectory_ids(self) -> None:
+    config = _parse_cmd("show --trajectory_id t1 t2 t3")
+    self.assertEqual(
+        config.cmd, show.ShowCommand(trajectory_id=["t1", "t2", "t3"])
+    )
+
+  def test_subcommand_show_with_comma_separated_trajectory_ids(self) -> None:
+    for raw_cmd in (
+        "show --trajectory_id t1,t2,t3",
+        "show --trajectory_id=t1,t2,t3",
+        "show --trajectory_id t1, t2, t3",
+    ):
+      with self.subTest(raw_cmd=raw_cmd):
+        config = _parse_cmd(raw_cmd)
+        self.assertEqual(
+            config.cmd, show.ShowCommand(trajectory_id=["t1", "t2", "t3"])
+        )
 
   def test_subcommand_show_requires_a_trajectory_id(self) -> None:
     with self.assertRaises(SystemExit) as cm:
       with contextlib.redirect_stderr(io.StringIO()):
         _parse_cmd("show")
+    self.assertEqual(cm.exception.code, 2)
+
+  def test_subcommand_show_rejects_empty_trajectory_id_flag(self) -> None:
+    with self.assertRaises(SystemExit) as cm:
+      with contextlib.redirect_stderr(io.StringIO()):
+        _parse_cmd("show --trajectory_id")
     self.assertEqual(cm.exception.code, 2)
 
   def test_global_flags_compose_with_a_subcommand(self) -> None:

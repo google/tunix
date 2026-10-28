@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shows the steps of a single trajectory."""
+"""Shows the steps of one or more trajectories."""
 
 import dataclasses
 import json
 import sys
-from typing import Any
 
 import simple_parsing
 from tunix.dist_rl.trajectory import store
@@ -26,13 +25,19 @@ from tunix.dist_rl.trajectory.explorer.commands import base
 from tunix.dist_rl.trajectory.explorer.commands import formatting
 from tunix.dist_rl.trajectory.explorer.diagnostics import stats
 
+_TRAJECTORY_DELIMITER = f"\n\n{'=' * 80}\n\n"
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class ShowCommand(base.BaseCommand):
-  """Prints a trajectory's header, each of its steps, and its tool sequence."""
+  """Prints each trajectory's header, steps, and tool sequence."""
 
-  trajectory_id: str = simple_parsing.field(
-      help="ID of the trajectory to show."
+  trajectory_id: list[str] = simple_parsing.field(
+      nargs="+",
+      help=(
+          "ID(s) of the trajectory or trajectories to show (space- or"
+          " comma-separated)."
+      ),
   )
   max_chars: int = simple_parsing.field(
       default=200,
@@ -42,57 +47,93 @@ class ShowCommand(base.BaseCommand):
       ),
   )
 
+  def __post_init__(self) -> None:
+    object.__setattr__(
+        self,
+        "trajectory_id",
+        [part for raw in self.trajectory_id for part in raw.split(",") if part],
+    )
+
   def execute(
       self, reader: store.TrajectoryReader, output_json: bool = False
   ) -> int:
-    """Shows the trajectory `trajectory_id`.
+    """Shows the trajectories in `trajectory_id`.
 
     Args:
       reader: The trajectory store reader backend.
       output_json: Whether to format output as machine-readable JSON.
 
     Returns:
-      Process exit code: 0 on success, 1 if the trajectory does not exist or
-      states a status that is not a `TrajectoryStatus` name.
+      Process exit code: 0 on success, 1 if any trajectory does not exist or
+      states a status that is not a `TrajectoryStatus` name, and 2 if
+      `trajectory_id` is empty.
     """
+    if not self.trajectory_id:
+      print(
+          "trajectory-explore: error: --trajectory_id requires at least one ID",
+          file=sys.stderr,
+      )
+      return 2
     try:
-      [trajectory] = reader.get_trajectories([self.trajectory_id])
-    except store.TrajectoryNotFoundError:
+      trajectories = reader.get_trajectories(self.trajectory_id)
+    except store.TrajectoryNotFoundError as error:
       print(
           "trajectory-explore: error: trajectory not found:"
-          f" {self.trajectory_id}",
+          f" {error.trajectory_id}",
           file=sys.stderr,
       )
       return 1
-    try:
-      trajectory_stats = stats.TrajectoryStats.from_trajectory(trajectory)
-    except ValueError as error:
-      print(
-          f"trajectory-explore: error: trajectory {self.trajectory_id}:"
-          f" {error}",
-          file=sys.stderr,
-      )
-      return 1
+    entries = []
+    for trajectory in trajectories:
+      try:
+        entries.append(
+            (trajectory, stats.TrajectoryStats.from_trajectory(trajectory))
+        )
+      except ValueError as error:
+        print(
+            f"trajectory-explore: error: trajectory {trajectory.trajectory_id}:"
+            f" {error}",
+            file=sys.stderr,
+        )
+        return 1
     if output_json:
-      print(
-          json.dumps({
+      payloads = [
+          {
               "trajectory": trajectory.to_json_dict(),
               "stats": trajectory_stats.to_json_dict(),
-          })
-      )
+          }
+          for trajectory, trajectory_stats in entries
+      ]
+      print(json.dumps(payloads[0] if len(payloads) == 1 else payloads))
       return 0
-    print(_render_header(trajectory, trajectory_stats))
-    for step in trajectory.steps:
-      print()
-      print(_render_step(step, self.max_chars))
-    if trajectory_stats.tool_call_names:
-      print()
-      print("Tool sequence: " + " -> ".join(trajectory_stats.tool_call_names))
+    print(
+        _TRAJECTORY_DELIMITER.join(
+            _render_trajectory(trajectory, trajectory_stats, self.max_chars)
+            for trajectory, trajectory_stats in entries
+        )
+    )
     return 0
 
 
+def _render_trajectory(
+    trajectory: trajectory_lib.Trajectory[trajectory_lib.Step],
+    trajectory_stats: stats.TrajectoryStats,
+    max_chars: int,
+) -> str:
+  """Renders a single trajectory's header, steps, and tool sequence."""
+  blocks = [
+      _render_header(trajectory, trajectory_stats),
+      *(_render_step(step, max_chars) for step in trajectory.steps),
+  ]
+  if trajectory_stats.tool_call_names:
+    blocks.append(
+        "Tool sequence: " + " -> ".join(trajectory_stats.tool_call_names)
+    )
+  return "\n\n".join(blocks)
+
+
 def _render_header(
-    trajectory: trajectory_lib.Trajectory[Any],
+    trajectory: trajectory_lib.Trajectory[trajectory_lib.Step],
     trajectory_stats: stats.TrajectoryStats,
 ) -> str:
   """Renders the trajectory's identity and headline figures."""
