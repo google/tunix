@@ -672,6 +672,7 @@ class ModelRunner:
         distribution=jnp.full_like(
             distribution, num_surviving, dtype=jnp.int32
         ),
+        decode_only=True,
     )
 
     # Each surviving request's sampling settings move along with its row. The
@@ -813,7 +814,7 @@ class ModelRunner:
               self._flattened_transformer_state,
               cache,
               next_tokens,
-              device_metadata,
+              dataclasses.replace(device_metadata, decode_only=True),
               sampling_metadata,
               self._rng,
               num_steps=num_decode_steps,

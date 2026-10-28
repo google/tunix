@@ -429,6 +429,23 @@ class StepTest(parameterized.TestCase):
         finished['second'].token_ids.tolist(), reference_generate([4, 5])
     )
 
+  def test_pure_decode_steps_mark_metadata_decode_only(self):
+    engine = testing_utils.make_engine(chunked_prefill_length=4)
+    spy = spy_on_execute_step(engine)
+    engine.add_request(
+        testing_utils.make_request('first', [1, 2, 3], max_tokens=4)
+    )
+    engine.step()  # Full prefill.
+    engine.step()  # Pure decode.
+    engine.add_request(
+        testing_utils.make_request('second', [1, 2, 3, 4, 5], max_tokens=2)
+    )
+    drive(engine)  # Mixed decode + chunked prefill, 1-token tail, pure decode.
+
+    decode_only = [c.kwargs['metadata'].decode_only for c in spy.call_args_list]
+    self.assertEqual(decode_only, [False, True, False, True, True])
+    self.assertTrue(all(isinstance(flag, bool) for flag in decode_only))
+
   def test_returns_logits_and_logprobs(self):
     engine = testing_utils.make_engine(return_logits=True, return_logprobs=True)
     engine.add_request(

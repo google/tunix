@@ -535,6 +535,9 @@ class LLMEngine:
         kv_lens=kv_lens,
         query_lens=query_lens,
         distribution=np.asarray(distribution, dtype=np.int32),
+        decode_only=bool(
+            distribution[0] == distribution[2] and distribution[2] > 0
+        ),
     )
     device_tokens = jax.device_put(tokens, self._replicated_sharding)
     return device_tokens, metadata

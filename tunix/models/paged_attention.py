@@ -56,6 +56,8 @@ class PagedAttnMetadata:
   # are rows `[0, i)`, the chunked prefills `[i, j)` and the full prefills
   # `[j, k)`.
   distribution: jax.Array | np.ndarray
+  # Static promise of at most one query token per active sequence.
+  decode_only: bool = struct.field(pytree_node=False, default=False)
 
 
 def _shardable_tp_axis(
@@ -108,8 +110,8 @@ def paged_attention(
     mesh: the mesh to run the kernel over.
     tp_axis: the mesh axis KV heads are sharded across. Everything else is
       replicated, including the cache pages across data parallelism.
-    decode_only: static promise of one query token per sequence. On GPU it
-      enables vLLM's split-KV decode launch.
+    decode_only: static promise of one query token per sequence. Combined with
+      `metadata.decode_only`; on GPU it enables vLLM's split-KV decode launch.
     max_q_len: static per-sequence query bound for the JAX path; tokens past it
       are dropped. Defaults to `max_num_tokens`.
     backend: `"tpu"`, `"gpu"`, or anything else for the JAX path. Defaults to
@@ -127,6 +129,8 @@ def paged_attention(
     k_scale: key dequantization scale. Not supported on GPU.
     v_scale: value dequantization scale. Not supported on GPU.
   """
+  decode_only = bool(decode_only or metadata.decode_only)
+
   def _call_paged_attention(
       q, k, v, cache, kv_lens, page_indices, query_lens, distribution
   ):

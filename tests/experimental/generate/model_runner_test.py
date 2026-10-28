@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 from unittest import mock
 
 from absl.testing import absltest
@@ -19,8 +20,8 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.dist_rl.rollout import sampler as sampler_lib
+from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.models import paged_attention
 from tunix.rl import reshard
 from tunix.tests import test_common as tc
@@ -826,9 +827,24 @@ class MultiStepExecuteTest(absltest.TestCase):
 
   def test_surviving_rows_keep_decoding(self):
     runner = _runner(_NextTokenTransformer(), num_scheduler_steps=3)
+    decode_loop_traces = mock.Mock(wraps=runner._decode_loop_fn)
+    runner._compiled_decode_loop_fn = jax.jit(
+        decode_loop_traces,
+        donate_argnames=['cache'],
+        static_argnames=['num_steps'],
+    )
 
     tokens, _, _, cache = self._execute(runner)
+    runner.execute_step(
+        cache=_positions_cache(8),
+        tokens=self.tokens,
+        metadata=dataclasses.replace(self.metadata, decode_only=True),
+        sampling_params=self.greedy,
+    )
 
+    # `_compiled_decode_loop_fn` compiles once across mixed and decode_only
+    # steps.
+    decode_loop_traces.assert_called_once()
     np.testing.assert_array_equal(tokens[0], [5, 6, 7])
     np.testing.assert_array_equal(tokens[2], [10, 11, 12])
     # The last step decoded the two survivors at the ends of their sequences.
@@ -870,10 +886,12 @@ class MultiStepExecuteTest(absltest.TestCase):
     # The scheduled batch runs as-is.
     np.testing.assert_array_equal(step_metadata[0].query_lens, [1, 4, 3, 0])
     np.testing.assert_array_equal(step_metadata[0].distribution, [1, 2, 3])
+    self.assertIs(step_metadata[0].decode_only, False)
     # The chunked prefill drops out and the rest decode one token per step.
     for metadata in step_metadata[1:]:
       np.testing.assert_array_equal(metadata.query_lens, [1, 1, 0, 0])
       np.testing.assert_array_equal(metadata.distribution, [2, 2, 2])
+      self.assertIs(metadata.decode_only, True)
       self.assertEqual(metadata.query_lens.dtype, jnp.int32)
       self.assertEqual(metadata.kv_lens.dtype, jnp.int32)
       self.assertEqual(metadata.distribution.dtype, jnp.int32)

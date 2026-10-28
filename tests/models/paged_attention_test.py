@@ -14,12 +14,13 @@
 
 """Checks the GPU (vLLM Triton) path against the pure-JAX path."""
 
+from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from tunix.models import paged_attention
 
 jax.config.update("jax_num_cpu_devices", 4)
@@ -245,6 +246,47 @@ class PagedAttentionJaxTest(parameterized.TestCase):
     self.assertIsNone(
         paged_attention._shardable_tp_axis(fake_two_way_mesh, "tp", 1, 2)
     )
+
+  def test_metadata_decode_only_is_static_and_forwarded_to_gpu(self):
+    inputs = _inputs([1, 1], [12, 15], head_dim=32, dtype=jnp.float32)
+    self.assertIs(inputs["metadata"].decode_only, False)
+    decode_metadata = jax.device_put(
+        inputs["metadata"].replace(decode_only=True), jax.devices("cpu")[0]
+    )
+    self.assertIs(decode_metadata.decode_only, True)
+
+    mesh = _one_device_mesh("cpu")
+    with mock.patch(
+        "tunix.models.paged_attention_vllm_gpu", create=True
+    ) as mock_gpu:
+      mock_gpu.paged_attention.side_effect = (
+          lambda q, k, v, cache, *args, **kwargs: (q, cache)
+      )
+      run = jax.jit(
+          lambda x: paged_attention.paged_attention(
+              **x, cache_name=_CACHE, mesh=mesh, backend="gpu"
+          )
+      )
+      run(inputs)
+      self.assertIs(
+          mock_gpu.paged_attention.call_args.kwargs["decode_only"], False
+      )
+
+      run(dict(inputs, metadata=decode_metadata))
+      self.assertIs(
+          mock_gpu.paged_attention.call_args.kwargs["decode_only"], True
+      )
+
+      paged_attention.paged_attention(
+          **inputs,
+          cache_name=_CACHE,
+          mesh=mesh,
+          backend="gpu",
+          decode_only=True,
+      )
+      self.assertIs(
+          mock_gpu.paged_attention.call_args.kwargs["decode_only"], True
+      )
 
 
 if __name__ == "__main__":
