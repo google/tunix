@@ -14,11 +14,14 @@
 
 """Algorithm core implementations for RL and Agentic RL learners."""
 
+import copy
 import functools
+from typing import Any, Callable
 from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.rl import algorithm_config
 from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.sft import utils as sft_utils
@@ -427,12 +430,8 @@ def grpo_loss_fn(
   beta = algo_config.beta
   epsilon = algo_config.epsilon
   loss_algo = algo_config.loss_algo
-  epsilon_high = (
-      algo_config.epsilon_high
-      if hasattr(algo_config, "epsilon_high")
-      else epsilon
-  )
-  epsilon_c = getattr(algo_config, "epsilon_c", None)
+  epsilon_high = algo_config.epsilon_high
+  epsilon_c = algo_config.epsilon_c
   loss_aggregation_mode = algo_config.loss_agg_mode
 
   completion_ids, completion_mask = (
@@ -992,3 +991,86 @@ def compute_drgrpo_advantages(
       0.0,
   )
   return jnp.asarray(advantages.reshape(np.shape(rewards)), dtype=jnp.float32)
+
+
+# ==============================================================================
+# Trainer Model Input Builders
+# ==============================================================================
+
+
+def _algo_model_input(
+    batch: Any,
+    algo_config: algorithm_config.AlgorithmConfig,
+    pad_id: int,
+    eos_id: int,
+) -> dict[str, Any]:
+  return {
+      "train_example": batch,
+      "algo_config": algo_config,
+      "pad_id": pad_id,
+      "eos_id": eos_id,
+  }
+
+
+def _critic_model_input(
+    batch: Any,
+    *,
+    clip_range_value: float | None,
+    pad_id: int,
+    eos_id: int,
+) -> dict[str, Any]:
+  return {
+      "train_example": batch,
+      "clip_range_value": clip_range_value,
+      "pad_id": pad_id,
+      "eos_id": eos_id,
+  }
+
+
+def build_gen_model_input_fn(
+    algo_config: algorithm_config.AlgorithmConfig,
+    *,
+    pad_id: int,
+    eos_id: int,
+    temperature: float | None = None,
+) -> Callable[[Any], dict[str, Any]]:
+  """Returns a closure mapping a batch (`TrainExample`) to policy loss function kwargs."""
+  effective_temp = (
+      temperature if temperature is not None else algo_config.temperature
+  )
+  if effective_temp is None:
+    raise ValueError(
+        "Trainer temperature is unset on algo_config. Pass temperature"
+        " explicitly or configure temperature via generation_args on"
+        " StandardRLProgram (which propagates it to algo_config.temperature)"
+        " before building the trainer model input fn."
+    )
+  if algo_config.temperature != effective_temp:
+    algo_config = copy.copy(algo_config)
+    algo_config.temperature = float(effective_temp)
+  return functools.partial(
+      _algo_model_input,
+      algo_config=algo_config,
+      pad_id=pad_id,
+      eos_id=eos_id,
+  )
+
+
+def build_critic_model_input_fn(
+    algo_config: algorithm_config.AlgorithmConfig,
+    *,
+    pad_id: int,
+    eos_id: int,
+) -> Callable[[Any], dict[str, Any]]:
+  """Returns a closure mapping a batch (`TrainExample`) to value loss function kwargs."""
+  if not isinstance(algo_config, algorithm_config.PPOConfig):
+    raise ValueError(
+        "build_critic_model_input_fn requires a PPOConfig (with"
+        f" clip_range_value), got {type(algo_config).__name__}."
+    )
+  return functools.partial(
+      _critic_model_input,
+      clip_range_value=algo_config.clip_range_value,
+      pad_id=pad_id,
+      eos_id=eos_id,
+  )

@@ -33,12 +33,14 @@ from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
 from tunix.dist_rl.common import logging_utils
 from tunix.dist_rl.metrics import metrics as exp_metrics
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import task_session
+from tunix.rl import algo_core
+from tunix.rl import algorithm_config
+from tunix.rl import function_registry
 
 _summarize_list = logging_utils.summarize_list
 
@@ -553,7 +555,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
       *,
-      algo: algorithm_adapter.AlgorithmAdapter,
+      algo_config: algorithm_config.AlgorithmConfig,
       assembler: batch_assembly.BatchAssembler[Any],
       **kwargs: Any,
   ) -> None:
@@ -566,7 +568,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
     Args:
       role: Target worker role to configure (defaults to `Role.ACTOR`).
-      algo: Algorithm adapter providing the loss and model-input functions.
+      algo_config: Algorithm configuration used to resolve the loss and
+        model-input functions.
       assembler: Batch assembler used to build the dummy microbatch for
         ahead-of-time compilation.
       **kwargs: Role-specific configuration options (for trainer roles:
@@ -575,9 +578,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         overrides).
     """
     role_name = role.value if isinstance(role, datatypes.Role) else str(role)
-    if algo is None:
+    if algo_config is None:
       raise ValueError(
-          f"algo is required to configure worker for role {role_name}"
+          f"algo_config is required to configure worker for role {role_name}"
       )
     if assembler is None:
       raise ValueError(
@@ -592,42 +595,65 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             "Auto-configuring trainer loss and model input fn on %s worker...",
             role_name,
         )
-        pad_id = getattr(assembler, "pad_id", kwargs.get("pad_id", 0))
-        eos_id = getattr(assembler, "eos_id", kwargs.get("eos_id", pad_id))
+        pad_id = getattr(assembler, "pad_id", None)
+        if pad_id is None:
+          pad_id = kwargs.get("pad_id", 0)
+        eos_id = getattr(assembler, "eos_id", None)
+        if eos_id is None:
+          eos_id = kwargs.get("eos_id", pad_id)
         can_fuse_agreement_in_loss = bool(
             kwargs.get("can_fuse_agreement_in_loss", True)
         )
         precompile = bool(kwargs.get("precompile", True))
         return_routed_experts = bool(kwargs.get("return_routed_experts", False))
-        gen_fn = algo.build_gen_model_input_fn(
-            pad_id=pad_id,
-            eos_id=eos_id,
-        )
-        use_rollout_logps = algo.algo_config.use_rollout_logps
+        if role == datatypes.Role.CRITIC:
+          if not isinstance(algo_config, algorithm_config.PPOConfig):
+            raise ValueError(
+                "Configuring a CRITIC trainer worker requires a PPOConfig"
+                f" (with value_loss_fn), got {type(algo_config).__name__}."
+            )
+          loss_fn = function_registry.get_value_loss_fn(
+              algo_config.value_loss_fn
+          )
+          gen_fn = algo_core.build_critic_model_input_fn(
+              algo_config,
+              pad_id=pad_id,
+              eos_id=eos_id,
+          )
+        else:
+          loss_fn = function_registry.get_policy_loss_fn(
+              algo_config.policy_loss_fn
+          )
+          gen_fn = algo_core.build_gen_model_input_fn(
+              algo_config,
+              pad_id=pad_id,
+              eos_id=eos_id,
+          )
+        use_rollout_logps = algo_config.use_rollout_logps
         sampler_agreement_applied = (
             use_rollout_logps and not can_fuse_agreement_in_loss
         )
         with_sampler_is_weights = sampler_agreement_applied and (
-            algo.algo_config.sampler_is is not None
-            or algo.algo_config.sampler_rs is not None
+            algo_config.sampler_is is not None
+            or algo_config.sampler_rs is not None
         )
 
         def _configure():
           assert worker is not None
           # Both setters clear the trainer's JIT cache, so the ahead-of-time
           # compile must run strictly after them.
-          worker.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
+          worker.submit("with_loss_fn", loss_fn, has_aux=True)
           worker.submit("with_gen_model_input_fn", gen_fn)
           if not precompile:
             return
           routed_experts_encode_mode = (
-              algo.algo_config.routed_experts_encode_mode
+              algo_config.routed_experts_encode_mode
               if return_routed_experts
               else "auto"
           )
           dummy_payload = assembler.build_dummy_payload(
               with_old_per_token_logps=use_rollout_logps,
-              with_ref_per_token_logps=algo.requires_reference_kl,
+              with_ref_per_token_logps=algo_config.requires_reference_kl,
               with_sampler_is_weights=with_sampler_is_weights,
               sampler_agreement_applied=sampler_agreement_applied,
               with_routed_experts=return_routed_experts,

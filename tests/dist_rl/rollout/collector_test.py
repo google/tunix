@@ -25,7 +25,6 @@ import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import test_utils as mocks
 from tunix.dist_rl.common import timeouts
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.rollout import collector
 from tunix.dist_rl.rollout import sampler as sampler_lib
@@ -1597,14 +1596,14 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
               items[-1].routed_experts.shape, expected_unbatched_shape
           )
 
-        adapter = algorithm_adapter.GRPOAdapter(
-            algo_config=algorithm_config.GRPOConfig(
-                num_generations=2,
-                routed_experts_encode_mode="auto",
-                routed_experts_num_experts=num_experts,
-            )
+        algo_cfg = algorithm_config.GRPOConfig(
+            num_generations=2,
+            routed_experts_encode_mode="auto",
+            routed_experts_num_experts=num_experts,
         )
-        payloads = adapter.create_trainer_payloads(items, rewards=[0.0, 1.0])
+        payloads = batch_assembly.create_trainer_payloads(
+            items, rewards=[0.0, 1.0], algo_config=algo_cfg
+        )
         self.assertTrue(
             np.shares_memory(
                 payloads[0].routed_experts, items[0].routed_experts

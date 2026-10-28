@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 from typing import Iterable, List, Sequence
 
 import flax
@@ -45,73 +44,7 @@ class TrainExample(common.TrainExample):
   old_values: jax.Array | None = None
 
 
-@dataclasses.dataclass(slots=True, kw_only=True)
-class PPOConfig(algo_config_lib.AlgorithmConfig):
-  """Configuration for PPO learner.
-
-  Attributes:
-    algo_variant: The algorithm variant to use. Default: `ppo`.
-    advantage_estimator: The advantage estimator to use. Default: `gae`.
-    policy_loss_fn: The policy loss function to use. Default: `ppo`.
-    reward_mode: The reward computation mode to use. Default: `reward_fn`.
-    num_iterations: The number of optimization epochs per batch of rollouts.
-      This corresponds to the number of times the policy updates its weights for
-      a given batch of rollouts.
-    mini_batch_size: The batch size on which the actual model updates happen.
-      The rollout phase (`generate_and_compute_advantages`) happen on a larger
-      batch, which is then split into "mini-batches".
-    gamma: The discount factor for future rewards in GAE.
-    gae_lambda: The lambda parameter for Generalized Advantage Estimation (GAE).
-    beta: The coefficient for the KL divergence penalty.
-    epsilon: Epsilon value for clipping the ratio for the policy objective.
-    epsilon_low: Lower bound for clipping the ratio for the policy objective.
-      Set to `epsilon` if not provided.
-    epsilon_high: Upper bound for clipping the ratio for the policy objective.
-      Set to `epsilon` if not provided.
-    epsilon_c: Lower bound for clipping for dual-clip PPO. If not provided, we
-      don't do dual-clip PPO.
-      Reference: https://arxiv.org/abs/1912.09729.
-    entropy_coef: Entropy coefficient for the policy loss. Set to `None` or
-      `0.0` to disable entropy regularization.
-    clip_range_value: The range for clipping the value function loss.
-    kl_method: The method for computing KL divergence. Must be one of
-      `["low_var_kl", "kl", "mse_kl"]`.
-  """
-
-  algo_variant: str = "ppo"
-  advantage_estimator: str = "gae"
-  policy_loss_fn: str = "ppo"
-  value_loss_fn: str = "ppo"
-  reward_mode: str = "reward_fn"
-  num_iterations: int = 1
-
-  # PPO loss and advantage computation configs.
-  gamma: float = 1.0
-  gae_lambda: float = 0.95
-  beta: float = 0.04
-  epsilon: float = 0.2
-  epsilon_low: float | None = None
-  epsilon_high: float | None = None
-  epsilon_c: float | None = None
-  entropy_coef: float | None = None
-  clip_range_value: float = 0.2
-  kl_method: str = "low_var_kl"
-
-  def __post_init__(self):
-    self.epsilon_low = self.epsilon_low if self.epsilon_low else self.epsilon
-    self.epsilon_high = self.epsilon_high if self.epsilon_high else self.epsilon
-    self.epsilon = self.epsilon
-
-    if self.epsilon_c is not None and self.epsilon_c <= 1.0:
-      raise ValueError(
-          f"`epsilon_c` must be greater than 1. Received: {self.epsilon_c}."
-      )
-
-    if self.kl_method not in ["kl", "mse_kl", "low_var_kl"]:
-      raise ValueError(
-          f"Invalid KL method: {self.kl_method}. Must be one of"
-          " ['low_var_kl', 'kl', 'mse_kl']."
-      )
+PPOConfig = algo_config_lib.PPOConfig
 
 
 class PPOLearner(rl_learner.RLLearner[PPOConfig]):

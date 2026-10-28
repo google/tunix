@@ -25,7 +25,7 @@ potentially move to a common library.
 """
 
 import collections
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 import dataclasses
 import functools
 from typing import Any, Generic, NamedTuple, Protocol, TypeVar
@@ -33,6 +33,10 @@ from absl import logging
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
+from tunix.generate import utils as generate_utils
+from tunix.rl import algo_core
+from tunix.rl import algorithm_config
+from tunix.rl import function_registry
 from tunix.rl import packing
 from tunix.rl import utils as rl_utils
 
@@ -207,6 +211,10 @@ class BatchConfig:
 
   Attributes:
     pad_id: Token ID used for padding prompts and completions.
+    eos_id: End-of-sequence token ID forwarded to trainer model input
+      generation. When None, callers may fall back to their default EOS ID.
+    mini_batch_size: Number of prompt groups per optimizer step.
+    train_micro_batch_size: Number of sequences per trainer forward pass.
     max_prompt_length: Maximum prompt length for padding or budget validation.
     max_response_length: Maximum response length for padding or budget
       validation.
@@ -227,6 +235,9 @@ class BatchConfig:
   """
 
   pad_id: int = 0
+  eos_id: int | None = None
+  mini_batch_size: int = 4
+  train_micro_batch_size: int = 1
   max_prompt_length: int | None = None
   max_response_length: int | None = None
   max_seq_token_per_tpu: int | None = None
@@ -557,9 +568,9 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
 
   routed = None
   if item.routed_experts is not None:
-    # The adapter aligns routing to the `[prompt | completion]` sequence
-    # (see `algorithm_adapter._routed_experts_for`); `PackItem` re-validates
-    # the `(p + c - 1 or p + c, num_layers, top_k)` shape.
+    # `_routed_experts_for` aligns routing to the `[prompt | completion]`
+    # sequence; `PackItem` re-validates the `(p + c - 1 or p + c, num_layers,
+    # top_k)` shape.
     raw_routed = np.asarray(item.routed_experts)
     if raw_routed.dtype == np.uint8 and (
         raw_routed.ndim == 3
@@ -653,6 +664,7 @@ class SequencePackedBatchAssembler:
       mini_batch_size: int,
       max_packed_len: int = 8192,
       pad_id: int = 0,
+      eos_id: int | None = None,
       max_segments_per_packed_row: int | None = None,
       segment_alignment_boundary: int = (
           packing.DEFAULT_SEGMENT_ALIGNMENT_BOUNDARY
@@ -667,13 +679,14 @@ class SequencePackedBatchAssembler:
       mini_batch_size: Number of prompt groups per model update.
       max_packed_len: Maximum packed sequence length per row.
       pad_id: Token ID used for padding.
+      eos_id: Optional end-of-sequence token ID.
       max_segments_per_packed_row: Upper bound on the number of real segments
         that may be packed into a single row.
       segment_alignment_boundary: Enforces that every packed sequence starts at
         an index that is a multiple of this value, padding any gaps. By default
         (1), sequences are packed tightly back-to-back. Use larger values to
-        align with chunk boundaries for models with chunked processing (e.g.,
-        64 for Qwen3.5 GatedDeltaNet).
+        align with chunk boundaries for models with chunked processing (e.g., 64
+        for Qwen3.5 GatedDeltaNet).
       start_batch_index: Initial microbatch index offset for tracking IDs.
     """
     if batch_size <= 0:
@@ -702,6 +715,7 @@ class SequencePackedBatchAssembler:
     self.batch_size = batch_size
     self.max_packed_len = max_packed_len
     self.pad_id = pad_id
+    self.eos_id = eos_id
     self.num_generations = num_generations
     self.mini_batch_size = mini_batch_size
     self.max_segments_per_packed_row = max_segments_per_packed_row
@@ -997,6 +1011,7 @@ class PaddedBatchAssembler:
       pad_id: int,
       num_generations: int,
       mini_batch_size: int,
+      eos_id: int | None = None,
       start_batch_index: int = 0,
   ):
     """Initializes PaddedBatchAssembler.
@@ -1009,6 +1024,7 @@ class PaddedBatchAssembler:
       pad_id: Token ID used for padding prompts and completions.
       num_generations: Number of rollout generations per prompt group (G).
       mini_batch_size: Number of prompt groups per optimizer update.
+      eos_id: Optional end-of-sequence token ID.
       start_batch_index: Initial microbatch index offset for tracking IDs.
     """
     if batch_size <= 0:
@@ -1031,6 +1047,7 @@ class PaddedBatchAssembler:
     self.max_prompt_length = max_prompt_length
     self.max_response_length = max_response_length
     self.pad_id = pad_id
+    self.eos_id = eos_id
     self.num_generations = num_generations
     self.mini_batch_size = mini_batch_size
     self._batch_counter = start_batch_index
@@ -1494,11 +1511,193 @@ class PaddedBatchAssembler:
     return payload, padding_stats
 
 
+def _extract_tokens_and_masks(
+    item: datatypes.TrajectoryItem,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+  """Extracts prompt_tokens, conversation_tokens, and conversation_masks from TrajectoryItem."""
+  p_arr = np.asarray(item.traj["prompt_tokens"], dtype=np.int32).reshape(-1)
+  prompt_len = item.traj.get("prompt_length")
+  if prompt_len is not None:
+    p_arr = generate_utils.unpad_prompt(p_arr, int(prompt_len))
+  return (
+      p_arr,
+      np.asarray(item.traj["conversation_tokens"], dtype=np.int32).reshape(-1),
+      np.asarray(item.traj["conversation_masks"], dtype=np.float32).reshape(-1),
+  )
+
+
+def _routed_experts_for(
+    item: datatypes.TrajectoryItem,
+    seq_len: int,
+    *,
+    encode_mode: packing.RoutedExpertsEncodeMode | None = None,
+    num_experts: int | None = None,
+) -> np.ndarray | None:
+  """Aligns a rollout's captured routing to the payload's token sequence.
+
+  Args:
+    item: Trajectory item, whose `routed_experts` (if any) is `[captured_len,
+      num_layers, top_k]` (`int16` or `+1`-shifted `uint8`) or `[captured_len,
+      num_layers, top_k // 4, 5]` (`+1`-shifted `uint10`).
+    seq_len: Length of the prompt+completion sequence in the payload.
+    encode_mode: Optional compact encoding mode (`"auto"`, `"uint8"`,
+      `"uint10"`, or `"int16"`). When None, preserves the input's existing
+      compact `uint8`/`uint10` representation or coerces raw integer arrays to
+      `int16`.
+    num_experts: Optional total number of experts for `encode_mode="auto"`.
+
+  Returns:
+    `[seq_len - 1 or seq_len, num_layers, top_k]` (or 4D `uint10`) prefix view,
+    or None when nothing was captured. Downstream assemblers (`pack_chunk` and
+    `_routed_experts_aligned`) pre-fill their destination buffers with
+    `UNSET_ROUTED_EXPERT` so an unrouted final token (`seq_len - 1`) falls back
+    to the trainer's own gate without allocating a padded copy here.
+  """
+  routed = getattr(item, "routed_experts", None)
+  if routed is None and isinstance(item.traj, dict):
+    routed = item.traj.get("routed_experts")
+  if routed is None:
+    routed = item.metadata.get("routed_experts")
+  if routed is None:
+    return None
+  raw = np.asarray(routed)
+  try:
+    enc = packing.routed_experts_encoding(raw, batched=False)
+  except ValueError as exc:
+    raise ValueError(
+        "routed_experts must be [length, num_layers, top_k]; got shape"
+        f" {raw.shape}"
+    ) from exc
+  routed_arr = (
+      raw if enc in ("uint8", "uint10") else np.asarray(raw, dtype=np.int16)
+  )
+  min_len = max(seq_len - 1, 0)
+  if routed_arr.shape[0] < min_len:
+    raise ValueError(
+        f"routed_experts length must be >= {min_len} (seq_len - 1 for"
+        f" seq_len={seq_len}); got shape {routed_arr.shape}"
+    )
+  sliced = routed_arr[:seq_len]
+  if encode_mode is not None:
+    return packing.encode_routed_experts(
+        sliced, mode=encode_mode, num_experts=num_experts, batched=False
+    )
+  return sliced
+
+
+def _extract_old_logps(
+    item: datatypes.TrajectoryItem, completion_len: int
+) -> np.ndarray | None:
+  """Extracts old_per_token_logps from TrajectoryItem."""
+  old_lp = item.traj.get("old_logprobs")
+  if old_lp is None:
+    return None
+  old_lp = np.asarray(old_lp, dtype=np.float32).reshape(-1)
+  if len(old_lp) != completion_len:
+    raise ValueError(
+        f"old_logprobs length {len(old_lp)} does not match completion length"
+        f" {completion_len}"
+    )
+  return old_lp
+
+
+def create_trainer_payloads(
+    group: Sequence[datatypes.TrajectoryItem],
+    rewards: Sequence[float] | np.ndarray,
+    *,
+    algo_config: algorithm_config.AlgorithmConfig,
+    ref_logps: Any | None = None,
+    values: Any | None = None,
+    old_logps: Any | None = None,
+) -> list[datatypes.RLTrainerPayload]:
+  """Packages group trajectories, advantages, and masks into unbatched RLTrainerPayloads."""
+  if algo_config is None:
+    raise ValueError("algo_config is required for create_trainer_payloads.")
+
+  use_rollout_logps = algo_config.use_rollout_logps
+  encode_mode = algo_config.routed_experts_encode_mode
+  num_experts = algo_config.routed_experts_num_experts
+  r = np.asarray(rewards, dtype=np.float32).reshape(-1)
+  valid_mask = np.array([item.is_valid for item in group], dtype=bool)
+
+  if algo_config.advantage_estimator == "gae":
+    val_arr = (
+        np.zeros_like(r)
+        if values is None
+        else np.asarray(values, dtype=np.float32).reshape(-1)
+    )
+    advs = np.where(valid_mask, r - val_arr, 0.0)
+    val_targets: np.ndarray | None = r
+  else:
+    if int(np.sum(valid_mask)) < algo_core.MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE:
+      valid_mask[:] = False
+    advantage_estimator = function_registry.get_advantage_estimator(
+        algo_config.advantage_estimator
+    )
+    advs = np.asarray(
+        advantage_estimator(
+            r,
+            num_generations=algo_config.num_generations,
+            valid_mask=valid_mask,
+        ),
+        dtype=np.float32,
+    ).reshape(-1)
+    val_targets = None
+
+  payloads = []
+  for i, item in enumerate(group):
+    p_arr, c_arr, act_arr = _extract_tokens_and_masks(item)
+    if not valid_mask[i]:
+      # While collector-filtered rollouts (`overlong_filter=True`) already
+      # arrive with zeroed `conversation_masks`, a degenerate group (`< 2`
+      # valid peers) also clears `valid_mask` for its lone healthy survivor.
+      # Zeroing `act_arr` here keeps the static `[G]` batch dimension for
+      # `BatchAssembler` while preventing that survivor's tokens from
+      # inflating the `token-mean` loss denominator or contributing KL loss.
+      act_arr = np.zeros_like(act_arr)
+
+    adv_val = float(advs[i]) if i < len(advs) and valid_mask[i] else 0.0
+    ref_lp = (
+        ref_logps[i] if ref_logps is not None and i < len(ref_logps) else None
+    )
+    seq_len = len(p_arr) + len(c_arr)
+    seq_adv = np.full(len(c_arr), adv_val, dtype=np.float32)
+    old_lp = (
+        old_logps[i] if old_logps is not None and i < len(old_logps) else None
+    )
+    if old_lp is None and use_rollout_logps:
+      old_lp = _extract_old_logps(item, len(c_arr))
+    returns_arr = None
+    if val_targets is not None:
+      vt_val = float(val_targets[i]) if i < len(val_targets) else 0.0
+      returns_arr = np.full(len(c_arr), vt_val, dtype=np.float32)
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=p_arr,
+        prompt_mask=np.ones(len(p_arr), dtype=np.float32),
+        completion_ids=c_arr,
+        completion_mask=act_arr,
+        advantages=seq_adv,
+        old_per_token_logps=(
+            np.asarray(old_lp, dtype=np.float32) if old_lp is not None else None
+        ),
+        ref_per_token_logps=(
+            np.asarray(ref_lp, dtype=np.float32) if ref_lp is not None else None
+        ),
+        returns=returns_arr,
+        routed_experts=_routed_experts_for(
+            item,
+            seq_len,
+            encode_mode=encode_mode,
+            num_experts=num_experts,
+        ),
+    )
+    payloads.append(payload)
+  return payloads
+
+
 def create_batch_assembler(
     *,
     num_generations: int,
-    mini_batch_size: int,
-    train_micro_batch_size: int,
     batch_config: BatchConfig,
 ) -> BatchAssembler:
   """Builds the batch assembler based on sequence packing or padding parameters.
@@ -1506,7 +1705,7 @@ def create_batch_assembler(
   If `batch_config.max_seq_token_per_tpu` is provided, a
   `SequencePackedBatchAssembler` is used. The packing `batch_size` (pack_size)
   is set to `batch_config.num_data_shards` (or defaults to
-  `train_micro_batch_size` with a warning if not set).
+  `batch_config.train_micro_batch_size` with a warning if not set).
   The packing budget is validated against `batch_config.max_prompt_length` and
   `max_response_length`.
 
@@ -1518,14 +1717,15 @@ def create_batch_assembler(
 
   Args:
     num_generations: Number of rollout generations per prompt group (G).
-    mini_batch_size: Number of prompt groups per model update.
-    train_micro_batch_size: Micro-batch size for training.
-    batch_config: BatchConfig containing packing, padding, and data shard
-      settings.
+    batch_config: BatchConfig containing packing, padding, batching, and data
+      shard settings.
 
   Returns:
     A BatchAssembler instance.
   """
+  mini_batch_size = batch_config.mini_batch_size
+  train_micro_batch_size = batch_config.train_micro_batch_size
+
   if batch_config.max_seq_token_per_tpu is not None:
     if batch_config.num_data_shards is None:
       logging.warning(
@@ -1562,6 +1762,7 @@ def create_batch_assembler(
         mini_batch_size=mini_batch_size,
         max_packed_len=batch_config.max_seq_token_per_tpu,
         pad_id=batch_config.pad_id,
+        eos_id=batch_config.eos_id,
         max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
         segment_alignment_boundary=batch_config.segment_alignment_boundary,
     )
@@ -1577,6 +1778,7 @@ def create_batch_assembler(
         max_prompt_length=batch_config.max_prompt_length,
         max_response_length=batch_config.max_response_length,
         pad_id=batch_config.pad_id,
+        eos_id=batch_config.eos_id,
         num_generations=num_generations,
         mini_batch_size=mini_batch_size,
     )
@@ -1586,6 +1788,7 @@ def create_batch_assembler(
       num_generations=num_generations,
       mini_batch_size=mini_batch_size,
       pad_id=batch_config.pad_id,
+      eos_id=batch_config.eos_id,
       max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
       segment_alignment_boundary=batch_config.segment_alignment_boundary,
   )

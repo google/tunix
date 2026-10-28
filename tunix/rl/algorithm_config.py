@@ -38,6 +38,11 @@ class AlgorithmConfig:
   advantage_estimator: str = "grpo"
   policy_loss_fn: str = "grpo"
   reward_mode: str = "reward_fn"
+  num_generations: int = 1
+  num_iterations: int = 1
+  beta: float = 0.0
+  force_compute_kl: bool = False
+  epsilon_c: float | None = None
   # Optional symmetric clamp applied to per-token KL inside
   # `common.compute_kl_divergence`. `None` (default) disables the clamp and
   # preserves prior behavior bit-for-bit. Set to a positive float (e.g.
@@ -137,6 +142,10 @@ class AlgorithmConfig:
           f"reward_mode must be one of {valid_reward_modes} or registered"
           f" in function_registry. Received: {self.reward_mode!r}"
       )
+    if self.num_generations <= 0:
+      raise ValueError(
+          f"num_generations must be positive. Received: {self.num_generations}"
+      )
     if self.reward_num_workers < -1:
       raise ValueError(
           "reward_num_workers must be >= 0, or -1 for one worker per CPU."
@@ -155,6 +164,11 @@ class AlgorithmConfig:
 
     # Automatically prints configuration upon initialization.
     self.print_config()
+
+  @property
+  def requires_reference_kl(self) -> bool:
+    """Whether reference-model KL log-probabilities must be computed."""
+    return self.beta != 0.0 or self.force_compute_kl
 
   def _validate_sampler_is_and_rs_options(self):
     """Checks sampler-vs-trainer error masking, IS, and RS options.
@@ -299,16 +313,97 @@ class GRPOConfig(AlgorithmConfig):
     if self.epsilon_high is None:
       self.epsilon_high = self.epsilon
 
-    super().__post_init__()
-
     if self.num_generations <= 1:
       raise ValueError(
           "num_generations must be greater than 1. Received: "
           f"{self.num_generations}"
       )
 
+    super().__post_init__()
+
     if self.loss_algo not in ["grpo", "gspo-token"]:
       raise ValueError(
           "loss_algo should be either grpo or gspo-token. Received: "
           f"{self.loss_algo}"
       )
+
+
+@dataclasses.dataclass(kw_only=True)
+class PPOConfig(AlgorithmConfig):
+  """Configuration for PPO algorithms.
+
+  Attributes:
+    algo_variant: The algorithm variant to use. Default: `ppo`.
+    advantage_estimator: The advantage estimator to use. Default: `gae`.
+    policy_loss_fn: The policy loss function to use. Default: `ppo`.
+    value_loss_fn: The value loss function to use. Default: `ppo`.
+    reward_mode: The reward computation mode to use. Default: `reward_fn`.
+    num_iterations: The number of optimization epochs per batch of rollouts.
+      This corresponds to the number of times the policy updates its weights for
+      a given batch of rollouts.
+    gamma: The discount factor for future rewards in GAE.
+    gae_lambda: The lambda parameter for Generalized Advantage Estimation (GAE).
+    beta: The coefficient for the KL divergence penalty.
+    epsilon: Epsilon value for clipping the ratio for the policy objective.
+    epsilon_low: Lower bound for clipping the ratio for the policy objective.
+      Set to `epsilon` if not provided.
+    epsilon_high: Upper bound for clipping the ratio for the policy objective.
+      Set to `epsilon` if not provided.
+    epsilon_c: Lower bound for clipping for dual-clip PPO. If not provided, we
+      don't do dual-clip PPO. Reference: https://arxiv.org/abs/1912.09729.
+    entropy_coef: Entropy coefficient for the policy loss. Set to `None` or
+      `0.0` to disable entropy regularization.
+    clip_range_value: The range for clipping the value function loss.
+    kl_method: The method for computing KL divergence. Must be one of
+      `["low_var_kl", "kl", "mse_kl"]`.
+  """
+
+  algo_variant: str = "ppo"
+  advantage_estimator: str = "gae"
+  policy_loss_fn: str = "ppo"
+  value_loss_fn: str = "ppo"
+  reward_mode: str = "reward_fn"
+  num_iterations: int = 1
+
+  # PPO loss and advantage computation configs.
+  gamma: float = 1.0
+  gae_lambda: float = 0.95
+  beta: float = 0.04
+  epsilon: float = 0.2
+  epsilon_low: float | None = None
+  epsilon_high: float | None = None
+  epsilon_c: float | None = None
+  entropy_coef: float | None = None
+  clip_range_value: float = 0.2
+  kl_method: str = "low_var_kl"
+
+  def __post_init__(self):
+    self.epsilon_low = (
+        self.epsilon_low if self.epsilon_low is not None else self.epsilon
+    )
+    self.epsilon_high = (
+        self.epsilon_high if self.epsilon_high is not None else self.epsilon
+    )
+
+    if self.epsilon_c is not None and self.epsilon_c <= 1.0:
+      raise ValueError(
+          f"`epsilon_c` must be greater than 1. Received: {self.epsilon_c}."
+      )
+
+    if self.kl_method not in ["kl", "mse_kl", "low_var_kl"]:
+      raise ValueError(
+          f"Invalid KL method: {self.kl_method}. Must be one of"
+          " ['low_var_kl', 'kl', 'mse_kl']."
+      )
+
+    valid_value_loss_fns = ["ppo"]
+    if (
+        self.value_loss_fn not in valid_value_loss_fns
+        and self.value_loss_fn not in function_registry.list_value_loss_fns()
+    ):
+      raise ValueError(
+          f"value_loss_fn must be one of {valid_value_loss_fns} or registered"
+          f" in function_registry. Received: {self.value_loss_fn}"
+      )
+
+    super().__post_init__()

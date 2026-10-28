@@ -24,7 +24,6 @@ from typing import Any
 
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import test_utils
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import orchestrator
 from tunix.dist_rl.orchestrator import rl_program
@@ -361,11 +360,10 @@ class FakeClusterHarness:
     algo_cfg = algorithm_config.GRPOConfig(
         num_generations=num_generations, epsilon=0.2, beta=0.0
     )
-    algo = algorithm_adapter.GRPOAdapter(
-        algo_config=algo_cfg,
+    batch_cfg = batch_assembly.BatchConfig(
         mini_batch_size=mini_batch_size,
         train_micro_batch_size=1,
-        max_packed_len=64,
+        max_seq_token_per_tpu=64,
         max_response_length=32,
     )
     effective_batch_size = (
@@ -409,11 +407,12 @@ class FakeClusterHarness:
         else datatypes.GenerationArgs(temperature=1.0)
     )
     return rl_program.StandardRLProgram(
-        algo=algo,
+        algo_config=algo_cfg,
         dataset=dataset,
         max_steps=max_steps,
         reward_fns=reward_fns,
         assembler=assembler,
+        batch_config=batch_cfg,
         generation_args=gen_args,
         max_staleness=max_staleness,
         sync_weights=sync_weights,

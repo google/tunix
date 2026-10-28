@@ -25,6 +25,9 @@ import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
 from tunix.dist_rl.orchestrator import batch_assembly
+from tunix.rl import algo_core
+from tunix.rl import algorithm_config
+from tunix.rl import function_registry
 from tunix.rl import packing
 
 
@@ -1143,7 +1146,7 @@ def _make_payload(
     completion_mask=None,
     metadata=None,
 ):
-  """Builds an unbatched payload shaped like `AlgorithmAdapter` output."""
+  """Builds an unbatched payload shaped like `create_trainer_payloads` output."""
   prompt = np.arange(1, prompt_len + 1, dtype=np.int32)
   completion = np.arange(101, 101 + completion_len, dtype=np.int32)
   total_seq_len = prompt_len + completion_len
@@ -2463,9 +2466,9 @@ class CreateBatchAssemblerTest(absltest.TestCase):
   def test_create_sequence_packed_assembler_with_num_data_shards(self):
     assembler = batch_assembly.create_batch_assembler(
         num_generations=2,
-        mini_batch_size=2,
-        train_micro_batch_size=1,
         batch_config=batch_assembly.BatchConfig(
+            mini_batch_size=2,
+            train_micro_batch_size=1,
             pad_id=42,
             max_prompt_length=256,
             max_response_length=256,
@@ -2487,9 +2490,9 @@ class CreateBatchAssemblerTest(absltest.TestCase):
   def test_create_sequence_packed_assembler_defaults_pack_size(self):
     assembler = batch_assembly.create_batch_assembler(
         num_generations=4,
-        mini_batch_size=2,
-        train_micro_batch_size=3,
         batch_config=batch_assembly.BatchConfig(
+            mini_batch_size=2,
+            train_micro_batch_size=3,
             max_seq_token_per_tpu=512,
         ),
     )
@@ -2503,9 +2506,9 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     with self.assertRaises(ValueError):
       batch_assembly.create_batch_assembler(
           num_generations=2,
-          mini_batch_size=2,
-          train_micro_batch_size=1,
           batch_config=batch_assembly.BatchConfig(
+              mini_batch_size=2,
+              train_micro_batch_size=1,
               max_prompt_length=512,
               max_response_length=512,
               max_seq_token_per_tpu=256,  # 256 < 512 + 512
@@ -2515,9 +2518,9 @@ class CreateBatchAssemblerTest(absltest.TestCase):
   def test_create_padded_batch_assembler(self):
     assembler = batch_assembly.create_batch_assembler(
         num_generations=2,
-        mini_batch_size=2,
-        train_micro_batch_size=4,
         batch_config=batch_assembly.BatchConfig(
+            mini_batch_size=2,
+            train_micro_batch_size=4,
             max_prompt_length=128,
             max_response_length=256,
             pad_id=7,
@@ -2532,9 +2535,9 @@ class CreateBatchAssemblerTest(absltest.TestCase):
   def test_create_padded_batch_assembler_with_config_response_length(self):
     assembler = batch_assembly.create_batch_assembler(
         num_generations=2,
-        mini_batch_size=2,
-        train_micro_batch_size=4,
         batch_config=batch_assembly.BatchConfig(
+            mini_batch_size=2,
+            train_micro_batch_size=4,
             max_prompt_length=128,
             max_response_length=512,
             pad_id=7,
@@ -2548,9 +2551,9 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     with self.assertRaises(ValueError):
       batch_assembly.create_batch_assembler(
           num_generations=2,
-          mini_batch_size=2,
-          train_micro_batch_size=1,
           batch_config=batch_assembly.BatchConfig(
+              mini_batch_size=2,
+              train_micro_batch_size=1,
               max_prompt_length=512,
               max_response_length=512,
               max_seq_token_per_tpu=256,  # 256 < 512 + 512
@@ -2560,9 +2563,10 @@ class CreateBatchAssemblerTest(absltest.TestCase):
   def test_create_default_batch_assembler(self):
     assembler = batch_assembly.create_batch_assembler(
         num_generations=2,
-        mini_batch_size=1,
-        train_micro_batch_size=2,
-        batch_config=batch_assembly.BatchConfig(),
+        batch_config=batch_assembly.BatchConfig(
+            mini_batch_size=1,
+            train_micro_batch_size=2,
+        ),
     )
     self.assertIsInstance(
         assembler, batch_assembly.SequencePackedBatchAssembler
@@ -2575,9 +2579,9 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     for max_seq_token_per_tpu in (1024, None):
       assembler = batch_assembly.create_batch_assembler(
           num_generations=2,
-          mini_batch_size=1,
-          train_micro_batch_size=2,
           batch_config=batch_assembly.BatchConfig(
+              mini_batch_size=1,
+              train_micro_batch_size=2,
               max_seq_token_per_tpu=max_seq_token_per_tpu,
               segment_alignment_boundary=64,
           ),
@@ -3411,13 +3415,13 @@ class BuildDummyPayloadTest(parameterized.TestCase):
   def test_padded_with_routed_experts_builds_placeholder(self):
     assembler = batch_assembly.create_batch_assembler(
         batch_config=batch_assembly.BatchConfig(
+            mini_batch_size=1,
+            train_micro_batch_size=3,
             pad_id=7,
             max_prompt_length=8,
             max_response_length=6,
         ),
-        train_micro_batch_size=3,
         num_generations=3,
-        mini_batch_size=1,
     )
     dummy = assembler.build_dummy_payload(
         with_old_per_token_logps=True,
@@ -3432,14 +3436,14 @@ class BuildDummyPayloadTest(parameterized.TestCase):
   def test_packed_with_routed_experts_builds_placeholder(self):
     assembler = batch_assembly.create_batch_assembler(
         batch_config=batch_assembly.BatchConfig(
+            mini_batch_size=1,
+            train_micro_batch_size=2,
             pad_id=7,
             max_seq_token_per_tpu=16,
             max_segments_per_packed_row=3,
             segment_alignment_boundary=4,
         ),
-        train_micro_batch_size=2,
         num_generations=4,
-        mini_batch_size=1,
     )
     dummy = assembler.build_dummy_payload(
         with_old_per_token_logps=True,
@@ -3603,6 +3607,676 @@ class BuildDummyPayloadTest(parameterized.TestCase):
     batches = list(asm.feed([_make_payload(2, 2)]))
     self.assertLen(batches, 1)
     self.assertEqual(asm._batch_counter, 6)
+
+
+class CreateTrainerPayloadsTest(absltest.TestCase):
+  """Tests for create_trainer_payloads and TrajectoryItem extraction helpers."""
+
+  def test_grpo_create_trainer_payloads(self):
+    cfg = algorithm_config.GRPOConfig(num_generations=2)
+    item1 = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+        },
+    )
+    item2 = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+        },
+    )
+
+    payloads = batch_assembly.create_trainer_payloads(
+        [item1, item2], rewards=[1.0, 2.0], algo_config=cfg
+    )
+    self.assertLen(payloads, 2)
+    self.assertIsInstance(payloads[0], datatypes.RLTrainerPayload)
+    np.testing.assert_array_equal(payloads[0].prompt_ids, [1, 2])
+    np.testing.assert_array_equal(payloads[0].prompt_mask, [1.0, 1.0])
+    np.testing.assert_array_equal(payloads[0].completion_ids, [3, 4])
+    np.testing.assert_array_equal(payloads[0].completion_mask, [1.0, 1.0])
+    self.assertLen(payloads[0].advantages, 2)
+    self.assertLess(payloads[0].advantages[0], 0.0)
+
+    np.testing.assert_array_equal(payloads[1].prompt_ids, [1, 2])
+    np.testing.assert_array_equal(payloads[1].prompt_mask, [1.0, 1.0])
+    np.testing.assert_array_equal(payloads[1].completion_ids, [5, 6])
+    np.testing.assert_array_equal(payloads[1].completion_mask, [1.0, 1.0])
+    self.assertLen(payloads[1].advantages, 2)
+    self.assertGreater(payloads[1].advantages[0], 0.0)
+
+  def test_grpo_create_trainer_payloads_with_rollout_logprobs(self):
+    cfg = algorithm_config.GRPOConfig(num_generations=2)
+    item1 = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+            "old_logprobs": np.array([-0.5, -0.2], dtype=np.float32),
+        },
+    )
+    item2 = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+            "old_logprobs": None,
+        },
+    )
+
+    payloads = batch_assembly.create_trainer_payloads(
+        [item1, item2], rewards=[1.0, 2.0], algo_config=cfg
+    )
+    self.assertLen(payloads, 2)
+    np.testing.assert_allclose(
+        payloads[0].old_per_token_logps,
+        np.array([-0.5, -0.2], dtype=np.float32),
+    )
+    self.assertIsNone(payloads[1].old_per_token_logps)
+
+  def test_grpo_create_trainer_payloads_with_disabled_rollout_logps(self):
+    cfg = algorithm_config.GRPOConfig(
+        num_generations=2, use_rollout_logps=False
+    )
+    item1 = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+            "old_logprobs": np.array([-0.5, -0.2], dtype=np.float32),
+        },
+    )
+    item2 = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+            "old_logprobs": np.array([-0.1, -0.4], dtype=np.float32),
+        },
+    )
+    payloads = batch_assembly.create_trainer_payloads(
+        [item1, item2], rewards=[1.0, 2.0], algo_config=cfg
+    )
+    self.assertLen(payloads, 2)
+    self.assertIsNone(payloads[0].old_per_token_logps)
+    self.assertIsNone(payloads[1].old_per_token_logps)
+
+  def test_grpo_create_trainer_payloads_with_mismatched_logps_length(self):
+    cfg = algorithm_config.GRPOConfig(num_generations=2)
+    item1 = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+            "old_logprobs": np.array([-0.5, -0.2, -0.1], dtype=np.float32),
+        },
+    )
+    item2 = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+            "old_logprobs": np.array([-0.3, -0.4], dtype=np.float32),
+        },
+    )
+    with self.assertRaises(ValueError):
+      batch_assembly.create_trainer_payloads(
+          [item1, item2], rewards=[1.0, 2.0], algo_config=cfg
+      )
+
+  def test_ppo_advantages_and_trainer_payloads(self):
+    cfg = algorithm_config.PPOConfig(gamma=0.99, gae_lambda=0.95)
+    item = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([10], dtype=np.int32),
+            "conversation_tokens": np.array([20], dtype=np.int32),
+            "conversation_masks": np.array([1.0], dtype=np.float32),
+        },
+    )
+
+    payloads = batch_assembly.create_trainer_payloads(
+        [item], rewards=[2.0], algo_config=cfg, values=[1.0]
+    )
+    self.assertLen(payloads, 1)
+    np.testing.assert_array_equal(payloads[0].prompt_ids, [10])
+    np.testing.assert_array_equal(payloads[0].prompt_mask, [1.0])
+    np.testing.assert_array_equal(payloads[0].completion_ids, [20])
+    np.testing.assert_array_equal(payloads[0].completion_mask, [1.0])
+    self.assertLen(payloads[0].advantages, 1)
+    self.assertLen(payloads[0].returns, 1)
+    self.assertAlmostEqual(payloads[0].advantages[0], 1.0)
+    self.assertAlmostEqual(payloads[0].returns[0], 2.0)
+
+  def test_create_trainer_payloads_requires_algo_config(self):
+    with self.assertRaisesRegex(ValueError, "algo_config is required"):
+      batch_assembly.create_trainer_payloads(
+          [], rewards=[], algo_config=None  # pyrefly: ignore[bad-argument-type]
+      )
+
+  def test_create_trainer_payloads_custom_registered_advantage_estimator(self):
+    @function_registry.register_advantage_estimator("test_custom_irt")
+    def _custom_adv(rewards, num_generations, valid_mask=None):
+      self.assertEqual(num_generations, 2)
+      np.testing.assert_allclose(rewards, [1.0, 2.0])
+      np.testing.assert_array_equal(valid_mask, [True, True])
+      return np.array([42.0, -42.0], dtype=np.float32)
+
+    cfg = algorithm_config.GRPOConfig(
+        num_generations=2,
+        advantage_estimator="test_custom_irt",
+    )
+    items = [
+        datatypes.TrajectoryItem(
+            group_index=i,
+            prompt_id="g1",
+            traj={
+                "prompt_tokens": np.array([1, 2], dtype=np.int32),
+                "conversation_tokens": np.array([3, 4], dtype=np.int32),
+                "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
+            },
+        )
+        for i in range(2)
+    ]
+
+    payloads = batch_assembly.create_trainer_payloads(
+        items,
+        rewards=[1.0, 2.0],
+        algo_config=cfg,
+    )
+    np.testing.assert_allclose(payloads[0].advantages, [42.0, 42.0])
+    np.testing.assert_allclose(payloads[1].advantages, [-42.0, -42.0])
+
+  def test_ppo_masks_invalid_trajectory_and_attaches_routed_experts(self):
+    cfg = algorithm_config.PPOConfig(num_generations=2)
+    routed = np.array([[[0, 1]], [[2, 3]], [[4, 5]]], dtype=np.int32)
+    valid_item = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        traj={
+            "status": datatypes.TrajectoryStatus.SUCCEEDED,
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
+            "routed_experts": routed,
+        },
+    )
+    invalid_item = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        traj={
+            "status": datatypes.TrajectoryStatus.FAILED,
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
+        },
+    )
+    payloads = batch_assembly.create_trainer_payloads(
+        [valid_item, invalid_item],
+        rewards=[3.0, 5.0],
+        algo_config=cfg,
+        values=[1.0, 1.0],
+    )
+    np.testing.assert_allclose(payloads[0].advantages, [2.0, 2.0])
+    np.testing.assert_allclose(payloads[0].returns, [3.0, 3.0])
+    self.assertIsNotNone(payloads[0].routed_experts)
+    np.testing.assert_array_equal(payloads[1].completion_mask, [0.0, 0.0])
+    np.testing.assert_array_equal(payloads[1].advantages, [0.0, 0.0])
+
+  def test_extract_tokens_and_masks_with_failed_item(self):
+    failed_item = datatypes.TrajectoryItem(
+        prompt_id="g1",
+        group_index=0,
+        traj={
+            "prompt_tokens": np.zeros(0, dtype=np.int32),
+            "conversation_tokens": np.zeros(0, dtype=np.int32),
+            "conversation_masks": np.zeros(0, dtype=np.float32),
+            "status": datatypes.TrajectoryStatus.FAILED.name,
+            "trajectory_reward": 0.0,
+        },
+    )
+
+    p_arr, c_arr, act_arr = batch_assembly._extract_tokens_and_masks(
+        failed_item
+    )
+
+    self.assertEmpty(p_arr)
+    self.assertEmpty(c_arr)
+    self.assertEmpty(act_arr)
+
+  def test_grpo_with_ref_logps(self):
+    cfg = algorithm_config.GRPOConfig(num_generations=2)
+    item1 = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+        },
+    )
+    item2 = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+        },
+    )
+    ref_logps = [
+        np.array([-0.1, -0.2], dtype=np.float32),
+        np.array([-0.3, -0.4], dtype=np.float32),
+    ]
+    payloads = batch_assembly.create_trainer_payloads(
+        [item1, item2],
+        rewards=[1.0, 2.0],
+        algo_config=cfg,
+        ref_logps=ref_logps,
+    )
+    np.testing.assert_allclose(payloads[0].ref_per_token_logps, [-0.1, -0.2])
+    np.testing.assert_allclose(payloads[1].ref_per_token_logps, [-0.3, -0.4])
+
+  def test_ppo_with_ref_and_old_logps(self):
+    cfg = algorithm_config.PPOConfig(num_generations=1)
+    item = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([10], dtype=np.int32),
+            "conversation_tokens": np.array([20], dtype=np.int32),
+            "conversation_masks": np.array([0.0], dtype=np.float32),
+        },
+    )
+    payloads = batch_assembly.create_trainer_payloads(
+        [item],
+        rewards=[2.0],
+        algo_config=cfg,
+        values=[1.0],
+        ref_logps=[np.array([-0.5], dtype=np.float32)],
+        old_logps=[np.array([-0.6], dtype=np.float32)],
+    )
+    np.testing.assert_array_equal(payloads[0].prompt_ids, [10])
+    np.testing.assert_array_equal(payloads[0].prompt_mask, [1.0])
+    np.testing.assert_array_equal(payloads[0].completion_ids, [20])
+    np.testing.assert_array_equal(payloads[0].completion_mask, [0.0])
+    np.testing.assert_allclose(payloads[0].ref_per_token_logps, [-0.5])
+    np.testing.assert_allclose(payloads[0].old_per_token_logps, [-0.6])
+
+  def test_empty_tokens_handling(self):
+    for cfg in [
+        algorithm_config.GRPOConfig(num_generations=2),
+        algorithm_config.PPOConfig(num_generations=1),
+    ]:
+      g = cfg.num_generations
+      rewards = [float(i + 1) for i in range(g)]
+
+      items = [
+          datatypes.TrajectoryItem(
+              group_index=0,
+              prompt_id="g1",
+              start_step=0,
+              traj={
+                  "prompt_tokens": np.zeros(0, dtype=np.int32),
+                  "conversation_tokens": np.zeros(0, dtype=np.int32),
+                  "conversation_masks": np.zeros(0, dtype=np.float32),
+              },
+          )
+          for _ in range(g)
+      ]
+      payloads = batch_assembly.create_trainer_payloads(
+          items, rewards=rewards, algo_config=cfg
+      )
+      self.assertLen(payloads, g)
+      for payload in payloads:
+        self.assertEqual(payload.prompt_ids.shape, (0,))
+        self.assertEqual(payload.completion_ids.shape, (0,))
+        self.assertEqual(payload.prompt_mask.shape, (0,))
+        self.assertEqual(payload.completion_mask.shape, (0,))
+        self.assertEqual(payload.advantages.shape, (0,))
+        if cfg.advantage_estimator == "gae":
+          self.assertEqual(payload.returns.shape, (0,))
+
+
+class RoutedExpertsForItemTest(absltest.TestCase):
+  """`_routed_experts_for` returns a prefix view capped at `seq_len`."""
+
+  def _align(self, routed, seq_len=8):
+    item = datatypes.TrajectoryItem(routed_experts=routed, traj={})
+    return batch_assembly._routed_experts_for(item, seq_len)  # pylint: disable=protected-access
+
+  def test_returns_none_without_capture(self):
+    self.assertIsNone(self._align(None))
+
+  def test_prefix_capture_missing_final_token_returns_zero_copy_view(self):
+    src = _routing(7, 3).astype(np.int16)
+    out = self._align(src, seq_len=8)
+    self.assertEqual(out.dtype, np.int16)
+    self.assertEqual(out.shape, (7, _ROUTING_LAYERS, _ROUTING_TOP_K))
+    np.testing.assert_array_equal(out, 3)
+    self.assertTrue(np.shares_memory(out, src))
+
+  def test_rejects_capture_shorter_than_seq_len_minus_one(self):
+    with self.assertRaisesRegex(
+        ValueError, "routed_experts length must be >= 7"
+    ):
+      self._align(_routing(5, 3), seq_len=8)
+
+  def test_overlong_capture_truncates_to_seq_len_as_zero_copy_view(self):
+    src = _routing(10, 4).astype(np.int16)
+    out = self._align(src, seq_len=8)
+    self.assertEqual(out.dtype, np.int16)
+    self.assertEqual(out.shape, (8, _ROUTING_LAYERS, _ROUTING_TOP_K))
+    np.testing.assert_array_equal(out, 4)
+    self.assertTrue(np.shares_memory(out, src))
+
+  def test_wrong_rank_is_rejected(self):
+    with self.assertRaisesRegex(ValueError, "length, num_layers, top_k"):
+      self._align(np.zeros((8, _ROUTING_TOP_K), dtype=np.int32))
+
+  def test_create_trainer_payloads_unpads_prompt_tokens_using_prompt_length(
+      self,
+  ):
+    cfg = algorithm_config.GRPOConfig(num_generations=2)
+    item1 = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([0, 0, 0, 10, 20], dtype=np.int32),
+            "prompt_length": 3,
+            "conversation_tokens": np.array([30, 40], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+        },
+    )
+    item2 = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([0, 0, 0, 10, 20], dtype=np.int32),
+            "prompt_length": 3,
+            "conversation_tokens": np.array([50, 60], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+        },
+    )
+    payloads = batch_assembly.create_trainer_payloads(
+        [item1, item2], rewards=[1.0, 2.0], algo_config=cfg
+    )
+    np.testing.assert_array_equal(payloads[0].prompt_ids, [0, 10, 20])
+    np.testing.assert_array_equal(payloads[0].prompt_mask, [1.0, 1.0, 1.0])
+    np.testing.assert_array_equal(payloads[1].prompt_ids, [0, 10, 20])
+
+
+class ExcludeMaskedFromAdvantageTest(absltest.TestCase):
+  """Masked / unhealthy rollouts must not shape the group baseline."""
+
+  def _item(self, group_index, *, masked=False, failed=False):
+    if failed:
+      return datatypes.TrajectoryItem(
+          prompt_id="g1",
+          group_index=group_index,
+          traj={
+              "status": datatypes.TrajectoryStatus.FAILED,
+              "trajectory_reward": 0.0,
+              "prompt_tokens": np.array([], dtype=np.int32),
+              "conversation_tokens": np.array([], dtype=np.int32),
+              "conversation_masks": np.array([], dtype=np.float32),
+          },
+      )
+    return datatypes.TrajectoryItem(
+        prompt_id="g1",
+        group_index=group_index,
+        start_step=0,
+        traj={
+            "status": datatypes.TrajectoryStatus.SUCCEEDED,
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": (
+                np.zeros(2, dtype=np.float32)
+                if masked
+                else np.ones(2, dtype=np.float32)
+            ),
+        },
+    )
+
+  def _cfg(self):
+    return algorithm_config.GRPOConfig(num_generations=4)
+
+  def test_masked_item_is_excluded_and_zeroed(self):
+    group = [self._item(i) for i in range(3)] + [self._item(3, masked=True)]
+    payloads = batch_assembly.create_trainer_payloads(
+        group, rewards=[1.0, 2.0, 3.0, 0.0], algo_config=self._cfg()
+    )
+
+    np.testing.assert_allclose(
+        [float(p.advantages[0]) for p in payloads],
+        [-1.0, 0.0, 1.0, 0.0],
+        rtol=1e-4,
+        atol=1e-4,
+    )
+    np.testing.assert_array_equal(payloads[3].completion_mask, [0.0, 0.0])
+    np.testing.assert_array_equal(payloads[3].advantages, [0.0, 0.0])
+    self.assertLen(payloads[3].completion_ids, 2)
+    np.testing.assert_array_equal(payloads[0].completion_mask, [1.0, 1.0])
+
+  def test_unmasked_overlong_item_is_included_when_overlong_filter_false(self):
+    overlong_item = datatypes.TrajectoryItem(
+        prompt_id="p0",
+        group_index=3,
+        traj={
+            "status": datatypes.TrajectoryStatus.MAX_STEPS_REACHED,
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.ones(2, dtype=np.float32),
+        },
+    )
+    group = [self._item(i) for i in range(3)] + [overlong_item]
+    rewards = [1.0, 2.0, 3.0, 0.0]
+
+    payloads = batch_assembly.create_trainer_payloads(
+        group, rewards=rewards, algo_config=self._cfg()
+    )
+
+    np.testing.assert_allclose(
+        [float(p.advantages[0]) for p in payloads],
+        algo_core.compute_advantages(
+            np.array(rewards, dtype=np.float32), num_generations=4
+        ),
+        rtol=1e-5,
+    )
+    np.testing.assert_array_equal(payloads[3].completion_mask, [1.0, 1.0])
+
+  def test_failed_item_is_excluded_without_raising(self):
+    group = [self._item(i) for i in range(3)] + [self._item(3, failed=True)]
+    payloads = batch_assembly.create_trainer_payloads(
+        group, rewards=[1.0, 2.0, 3.0, 0.0], algo_config=self._cfg()
+    )
+
+    np.testing.assert_allclose(
+        [
+            float(np.mean(p.advantages)) if p.advantages.size else 0.0
+            for p in payloads
+        ],
+        [-1.0, 0.0, 1.0, 0.0],
+        rtol=1e-4,
+        atol=1e-4,
+    )
+    self.assertEmpty(payloads[3].completion_ids)
+    self.assertEmpty(payloads[3].advantages)
+
+  def test_degenerate_group_zeroes_every_member(self):
+    group = [self._item(0)] + [self._item(i, masked=True) for i in range(1, 4)]
+    payloads = batch_assembly.create_trainer_payloads(
+        group, rewards=[5.0, 0.0, 0.0, 0.0], algo_config=self._cfg()
+    )
+
+    for i, payload in enumerate(payloads):
+      with self.subTest(group_index=i):
+        np.testing.assert_array_equal(payload.completion_mask, [0.0, 0.0])
+        np.testing.assert_array_equal(payload.advantages, [0.0, 0.0])
+
+  def test_all_valid_group_matches_legacy(self):
+    group = [self._item(i) for i in range(4)]
+    rewards = [1.0, 2.0, 3.0, 4.0]
+    payloads = batch_assembly.create_trainer_payloads(
+        group, rewards=rewards, algo_config=self._cfg()
+    )
+
+    np.testing.assert_allclose(
+        [float(p.advantages[0]) for p in payloads],
+        algo_core.compute_advantages(
+            np.array(rewards, dtype=np.float32), num_generations=4
+        ),
+        rtol=1e-5,
+    )
+
+  def test_extract_routed_experts_encodes_compact_uint8_and_uint10(self):
+    cfg = algorithm_config.GRPOConfig(num_generations=2)
+    routed_u8 = np.array(
+        [[[0, 1, 2, 3]], [[4, 5, 6, 7]], [[8, 9, 10, 11]]], dtype=np.int32
+    )
+    routed_u10 = np.array(
+        [[[0, 300, 511, 1022]], [[4, 5, 6, 7]], [[8, 9, 10, 11]]],
+        dtype=np.int32,
+    )
+    item1 = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
+            "routed_experts": routed_u8,
+        },
+    )
+    item2 = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
+            "routed_experts": routed_u10,
+        },
+    )
+    payloads = batch_assembly.create_trainer_payloads(
+        [item1, item2], rewards=[1.0, 2.0], algo_config=cfg
+    )
+    self.assertEqual(payloads[0].routed_experts.dtype, np.uint8)
+    self.assertEqual(payloads[0].routed_experts.shape, (3, 1, 4))
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(
+            payloads[0].routed_experts, batched=False
+        ),
+        routed_u8.astype(np.int16),
+    )
+    self.assertEqual(payloads[1].routed_experts.dtype, np.uint8)
+    self.assertEqual(payloads[1].routed_experts.shape, (3, 1, 1, 5))
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(
+            payloads[1].routed_experts, batched=False
+        ),
+        routed_u10.astype(np.int16),
+    )
+
+
+class IsValidTrajectoryTest(absltest.TestCase):
+  """Tests for datatypes.is_valid_trajectory and TrajectoryItem.is_valid."""
+
+  def _item(
+      self,
+      *,
+      status=datatypes.TrajectoryStatus.SUCCEEDED,
+      reward=1.0,
+      tokens=(3, 4),
+      masks=(1.0, 1.0),
+  ):
+    return datatypes.TrajectoryItem(
+        prompt_id="p0",
+        group_index=0,
+        traj={
+            "status": status,
+            "trajectory_reward": reward,
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array(tokens, dtype=np.int32),
+            "conversation_masks": np.array(masks, dtype=np.float32),
+        },
+    )
+
+  def test_valid_succeeded_and_max_steps_items(self):
+    self.assertTrue(self._item().is_valid)
+    self.assertTrue(
+        self._item(status=datatypes.TrajectoryStatus.MAX_STEPS_REACHED).is_valid
+    )
+
+  def test_rejects_failed_and_timeout_status(self):
+    for bad_status in (
+        datatypes.TrajectoryStatus.FAILED,
+        datatypes.TrajectoryStatus.TIMEOUT,
+        datatypes.TrajectoryStatus.ENV_TIMEOUT,
+        datatypes.TrajectoryStatus.CANCELLED,
+        "FAILED",
+        "TIMEOUT",
+        "ENV_TIMEOUT",
+        "CANCELLED",
+    ):
+      with self.subTest(status=bad_status):
+        self.assertFalse(self._item(status=bad_status).is_valid)
+
+  def test_rejects_empty_completion_or_all_zero_mask(self):
+    self.assertFalse(self._item(tokens=(), masks=()).is_valid)
+    self.assertFalse(self._item(tokens=(3, 4), masks=(0.0, 0.0)).is_valid)
+
+  def test_rejects_missing_traj_dict(self):
+    item = datatypes.TrajectoryItem(prompt_id="p0", group_index=0, traj=None)
+    self.assertFalse(item.is_valid)
+
+  def test_missing_status_defaults_to_valid_when_tokens_and_mask_present(self):
+    item = datatypes.TrajectoryItem(
+        prompt_id="p0",
+        group_index=0,
+        traj={
+            "prompt_tokens": np.array([1], dtype=np.int32),
+            "conversation_tokens": np.array([2], dtype=np.int32),
+            "conversation_masks": np.array([1.0], dtype=np.float32),
+        },
+    )
+    self.assertTrue(item.is_valid)
 
 
 if __name__ == "__main__":
