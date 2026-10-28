@@ -120,6 +120,43 @@ class SamplingMetadataTest(absltest.TestCase):
     # An unset `top_k` inherits the engine's lack of a limit.
     np.testing.assert_array_equal(metadata.top_k, [100, -1])
 
+  def test_uniform_sampling_key(self):
+    key_fn = model_runner_lib._uniform_sampling_key
+    self.assertEqual(key_fn((), 4, 8), (4, 0, 0.0, 1.0, None, 8))
+    key = key_fn(
+        (
+            sampler_lib.SamplingParams(
+                max_tokens=4, temperature=0.5, top_p=0.9, top_k=4
+            ),
+            sampler_lib.SamplingParams(
+                max_tokens=16, temperature=0.5, top_p=0.9, top_k=4
+            ),
+        ),
+        num_rows=4,
+        max_top_k=8,
+    )
+    self.assertEqual(key, (4, 2, 0.5, 0.9, 4, 8))
+    self.assertIsNone(
+        key_fn((_params(temperature=0.0), _params(temperature=0.7)), 4, 8)
+    )
+    for bad in (_params(temperature=float('nan')), _params(top_p=float('nan'))):
+      self.assertIsNone(key_fn((bad, bad), 4, 8))
+
+  def test_uniform_and_empty_batches_pack_and_pad_rows(self):
+    empty = _metadata(num_rows=2)
+    np.testing.assert_allclose(empty.temperature, [0.0, 0.0])
+    np.testing.assert_allclose(empty.top_p, [1.0, 1.0])
+    np.testing.assert_array_equal(empty.top_k, [1, 1])
+
+    uniform = _metadata(
+        _params(temperature=0.6, top_p=0.85, top_k=3),
+        _params(temperature=0.6, top_p=0.85, top_k=3),
+        num_rows=4,
+    )
+    np.testing.assert_allclose(uniform.temperature, [0.6, 0.6, 0.0, 0.0])
+    np.testing.assert_allclose(uniform.top_p, [0.85, 0.85, 1.0, 1.0])
+    np.testing.assert_array_equal(uniform.top_k, [3, 3, 1, 1])
+
 
 class SampleTest(absltest.TestCase):
 
@@ -640,6 +677,87 @@ class ExecuteStepTest(absltest.TestCase):
     self.assertEqual(logits.shape, (3, 1, _VOCAB_SIZE))
     self.assertEqual(logp.shape, (3, 1))
 
+  def test_caches_uniform_sampling_metadata_and_evicts_lru(self):
+    runner = _runner(_NextTokenTransformer())
+    orig_from_params = model_runner_lib.SamplingMetadata.from_sampling_params
+    with (
+        mock.patch.object(
+            model_runner_lib, '_SAMPLING_METADATA_CACHE_CAPACITY', 2
+        ),
+        mock.patch.object(
+            model_runner_lib.SamplingMetadata,
+            'from_sampling_params',
+            wraps=orig_from_params,
+        ) as mock_from_params,
+        mock.patch.object(
+            runner, '_to_device', wraps=runner._to_device
+        ) as mock_to_device,
+    ):
+      first, _, _, _ = self._execute(runner)
+      second, _, _, _ = self._execute(runner)
+      runner.execute_step(
+          cache=_positions_cache(4),
+          tokens=self.tokens,
+          metadata=_rpa_metadata(
+              kv_lens=[6, 0, 0], query_lens=[1, 0, 0], distribution=[1, 1, 1]
+          ),
+          sampling_params=self.greedy[:1],
+      )
+      np.testing.assert_array_equal(
+          runner._sampling_metadata_cache[(3, 1, 0.0, None, None, 8)].top_k,
+          [8, 1, 1],
+      )
+      np.testing.assert_array_equal(
+          runner._sampling_metadata_cache[(3, 2, 0.0, None, None, 8)].top_k,
+          [8, 8, 1],
+      )
+      # Refresh the 2-row greedy entry so the 1-row entry is evicted next.
+      self._execute(runner)
+      self._execute(runner, (_params(temperature=0.5),) * 2)
+
+    self.assertEqual(mock_from_params.call_count, 3)
+    self.assertIsInstance(mock_to_device.call_args_list[0].args[0], tuple)
+    self.assertIs(mock_to_device.call_args_list[1].args[0], self.metadata)
+    np.testing.assert_array_equal(first[:2], [[5], [10]])
+    np.testing.assert_array_equal(second[:2], [[5], [10]])
+    self.assertEqual(
+        set(runner._sampling_metadata_cache),
+        {(3, 2, 0.0, None, None, 8), (3, 2, 0.5, None, None, 8)},
+    )
+
+  def test_heterogeneous_or_nan_sampling_params_bypass_cache(self):
+    runner = _runner(_NextTokenTransformer())
+    heterogeneous = (_params(temperature=0.0), _params(temperature=0.8))
+    nan_uniform = (_params(temperature=float('nan')),) * 2
+    orig_from_params = model_runner_lib.SamplingMetadata.from_sampling_params
+    with mock.patch.object(
+        model_runner_lib.SamplingMetadata,
+        'from_sampling_params',
+        wraps=orig_from_params,
+    ) as mock_from_params:
+      self._execute(runner, heterogeneous)
+      self._execute(runner, heterogeneous)
+      self._execute(runner, nan_uniform)
+
+    self.assertEqual(mock_from_params.call_count, 3)
+    self.assertEmpty(runner._sampling_metadata_cache)
+
+  def test_fuses_step_output_stacking_into_one_call(self):
+    runner = _runner(
+        _NextTokenTransformer(),
+        num_scheduler_steps=2,
+        return_logits=True,
+        return_logprobs=True,
+    )
+    with mock.patch.object(
+        model_runner_lib,
+        '_stack_all_steps',
+        wraps=model_runner_lib._stack_all_steps,
+    ) as mock_stack_all:
+      self._execute(runner)
+
+    mock_stack_all.assert_called_once()
+
   def test_sampling_params_must_match_the_scheduled_requests(self):
     runner = _runner(_NextTokenTransformer())
 
@@ -834,6 +952,41 @@ class MultiStepExecuteTest(absltest.TestCase):
     runner._compiled_decode_loop_fn.assert_not_called()
     self.assertEqual(tokens.shape, (3, 4))
     np.testing.assert_array_equal(tokens[:, 1:], 0)
+
+
+class StackAllStepsTest(absltest.TestCase):
+
+  def test_stacks_and_pads_step_outputs(self):
+    tok = jnp.array([10, 20], dtype=jnp.int32)
+    logits = jnp.arange(8, dtype=jnp.float32).reshape(2, 4)
+    logp = jnp.array([-1.0, -2.0], dtype=jnp.float32)
+
+    s_tok, s_logits, s_logp = model_runner_lib._stack_all_steps(
+        tok, None, None, None, None, None, num_steps=1
+    )
+    np.testing.assert_array_equal(s_tok, [[10], [20]])
+    self.assertIsNone(s_logits)
+    self.assertIsNone(s_logp)
+
+    dec_tok = jnp.array([[11, 21], [12, 22]], dtype=jnp.int32)
+    dec_logits = jnp.arange(100, 116, dtype=jnp.float32).reshape(2, 2, 4)
+    dec_logp = jnp.array([[-1.1, -2.1], [-1.2, -2.2]], dtype=jnp.float32)
+    m_tok, m_logits, m_logp = model_runner_lib._stack_all_steps(
+        tok, dec_tok, logits, dec_logits, logp, dec_logp, num_steps=3
+    )
+    np.testing.assert_array_equal(m_tok, [[10, 11, 12], [20, 21, 22]])
+    np.testing.assert_allclose(m_logits[:, 0], logits)
+    np.testing.assert_allclose(m_logits[:, 1:], jnp.swapaxes(dec_logits, 0, 1))
+    np.testing.assert_allclose(m_logp, [[-1.0, -1.1, -1.2], [-2.0, -2.1, -2.2]])
+
+    p_tok, p_logits, p_logp = model_runner_lib._stack_all_steps(
+        tok, None, logits, None, logp, None, num_steps=3
+    )
+    np.testing.assert_array_equal(p_tok, [[10, 0, 0], [20, 0, 0]])
+    np.testing.assert_allclose(p_logits[:, 0], logits)
+    np.testing.assert_allclose(p_logits[:, 1:], 0.0)
+    np.testing.assert_allclose(p_logp, [[-1.0, 0.0, 0.0], [-2.0, 0.0, 0.0]])
+
 
 if __name__ == '__main__':
   absltest.main()

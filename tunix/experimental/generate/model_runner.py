@@ -21,6 +21,7 @@ sampling on device.
 from collections.abc import Sequence
 import dataclasses
 import functools
+import math
 import operator
 from typing import Any, TypeVar
 
@@ -65,6 +66,33 @@ class ModelRunnerConfig:
       )
 
 
+_SAMPLING_METADATA_CACHE_CAPACITY = 32
+_SamplingKey = tuple[int, int, float, float | None, int | None, int]
+
+
+def _uniform_sampling_key(
+    sampling_params: Sequence[sampler_lib.SamplingParams],
+    num_rows: int,
+    max_top_k: int,
+) -> _SamplingKey | None:
+  """Returns a cache key when all scheduled requests share sampling settings."""
+  n_sched = len(sampling_params)
+  if n_sched > num_rows:
+    return None
+  if n_sched == 0:
+    return (num_rows, 0, 0.0, 1.0, None, max_top_k)
+  p0 = sampling_params[0]
+  temperature, top_p, top_k = p0.temperature, p0.top_p, p0.top_k
+  if math.isnan(temperature) or (top_p is not None and math.isnan(top_p)):
+    return None
+  for p in sampling_params:
+    if p is not p0 and (
+        p.temperature != temperature or p.top_p != top_p or p.top_k != top_k
+    ):
+      return None
+  return (num_rows, n_sched, temperature, top_p, top_k, max_top_k)
+
+
 @struct.dataclass
 class SamplingMetadata:
   """The sampling settings of each request in a batch.
@@ -100,15 +128,15 @@ class SamplingMetadata:
     Returns:
       The metadata, padded out to `num_rows` rows.
     """
-    if len(sampling_params) > num_rows:
-      raise ValueError(
-          f'Got {len(sampling_params)} sampling params for {num_rows} rows.'
-      )
+    n_sched = len(sampling_params)
+    if n_sched > num_rows:
+      raise ValueError(f'Got {n_sched} sampling params for {num_rows} rows.')
 
     temperature = np.zeros((num_rows,), dtype=np.float32)
     top_p = np.ones((num_rows,), dtype=np.float32)
     top_k = np.ones((num_rows,), dtype=np.int32)
-    for row, params in enumerate(sampling_params):
+
+    def unpack(params: sampler_lib.SamplingParams) -> tuple[float, float, int]:
       if (
           max_top_k > 0
           and params.top_k is not None
@@ -117,11 +145,22 @@ class SamplingMetadata:
         raise ValueError(
             f'top_k={params.top_k} exceeds the engine max_top_k={max_top_k}.'
         )
-      temperature[row] = params.temperature
-
       # No `top_p` keeps every token.
-      top_p[row] = 1.0 if params.top_p is None else params.top_p
-      top_k[row] = max_top_k if params.top_k is None else params.top_k
+      return (
+          params.temperature,
+          1.0 if params.top_p is None else params.top_p,
+          max_top_k if params.top_k is None else params.top_k,
+      )
+
+    if n_sched and (
+        _uniform_sampling_key(sampling_params, num_rows, max_top_k) is not None
+    ):
+      temperature[:n_sched], top_p[:n_sched], top_k[:n_sched] = unpack(
+          sampling_params[0]
+      )
+    else:
+      for row, params in enumerate(sampling_params):
+        temperature[row], top_p[row], top_k[row] = unpack(params)
 
     return cls(temperature=temperature, top_p=top_p, top_k=top_k)
 
@@ -204,33 +243,36 @@ _PyTree = TypeVar('_PyTree')
 
 
 @functools.partial(jax.jit, static_argnames=['num_steps'])
-def _stack_steps(
-    first_step: jax.Array,
-    decode_steps: jax.Array | None,
+def _stack_all_steps(
+    next_tokens: jax.Array,
+    decode_tokens: jax.Array | None,
+    logits: jax.Array | None,
+    decode_logits: jax.Array | None,
+    logp: jax.Array | None,
+    decode_logp: jax.Array | None,
     num_steps: int,
-) -> jax.Array:
-  """Packs per-step outputs into a `[num_rows, num_steps, ...]` device array.
+) -> tuple[jax.Array, jax.Array | None, jax.Array | None]:
+  """Packs per-step outputs into `[num_rows, num_steps, ...]` device arrays."""
 
-  Args:
-    first_step: The `[num_rows, ...]` output of the scheduled batch's step.
-    decode_steps: The `[num_scheduler_steps - 1, num_rows, ...]` output of the
-      decode loop, or None when the loop did not run.
-    num_steps: The step capacity to pad out to.
-
-  Returns:
-    The outputs indexed by `[row, step, ...]`.
-  """
-  if decode_steps is not None:
-    return jnp.concatenate(
-        [first_step[:, None], jnp.swapaxes(decode_steps, 0, 1)], axis=1
+  def stack(first_step: jax.Array, decode_steps: jax.Array | None) -> jax.Array:
+    if decode_steps is not None:
+      return jnp.concatenate(
+          [first_step[:, None], jnp.swapaxes(decode_steps, 0, 1)], axis=1
+      )
+    if num_steps == 1:
+      return first_step[:, None]
+    out = jnp.zeros(
+        (first_step.shape[0], num_steps, *first_step.shape[1:]),
+        dtype=first_step.dtype,
     )
-  if num_steps == 1:
-    return first_step[:, None]
-  out = jnp.zeros(
-      (first_step.shape[0], num_steps, *first_step.shape[1:]),
-      dtype=first_step.dtype,
+    return out.at[:, 0].set(first_step)
+
+  return (
+      stack(next_tokens, decode_tokens),
+      stack(logits, decode_logits) if logits is not None else None,
+      stack(logp, decode_logp) if logp is not None else None,
   )
-  return out.at[:, 0].set(first_step)
+
 
 class ModelRunner:
   """Runs the transformer forward pass and samples tokens."""
@@ -257,6 +299,7 @@ class ModelRunner:
 
     self._config = config
     self._rng = self._to_device(jax.random.PRNGKey(config.seed))
+    self._sampling_metadata_cache: dict[_SamplingKey, SamplingMetadata] = {}
 
     self._compiled_model_step_fn = jax.jit(
         self._model_step_fn,
@@ -684,12 +727,27 @@ class ModelRunner:
           ' scheduled requests.'
       )
 
-    device_metadata, sampling_metadata = self._to_device((
-        metadata,
-        SamplingMetadata.from_sampling_params(
-            sampling_params, num_rows, self._config.max_top_k
-        ),
-    ))
+    key = _uniform_sampling_key(sampling_params, num_rows, config.max_top_k)
+    if key is not None and key in self._sampling_metadata_cache:
+      device_metadata = self._to_device(metadata)
+      sampling_metadata = self._sampling_metadata_cache.pop(key)
+      self._sampling_metadata_cache[key] = sampling_metadata
+    else:
+      host_sampling_metadata = SamplingMetadata.from_sampling_params(
+          sampling_params, num_rows, config.max_top_k
+      )
+      device_metadata, sampling_metadata = self._to_device(
+          (metadata, host_sampling_metadata)
+      )
+      if key is not None:
+        if (
+            len(self._sampling_metadata_cache)
+            >= _SAMPLING_METADATA_CACHE_CAPACITY
+        ):
+          del self._sampling_metadata_cache[
+              next(iter(self._sampling_metadata_cache))
+          ]
+        self._sampling_metadata_cache[key] = sampling_metadata
 
     next_tokens, logits, logp, cache, self._rng = self._compiled_model_step_fn(
         self._flattened_transformer_state,
@@ -727,13 +785,13 @@ class ModelRunner:
           )
       )
 
-    out_tokens = _stack_steps(next_tokens, decode_tokens, num_steps)
-    out_logits = (
-        _stack_steps(logits, decode_logits, num_steps)
-        if logits is not None
-        else None
-    )
-    out_logp = (
-        _stack_steps(logp, decode_logp, num_steps) if logp is not None else None
+    out_tokens, out_logits, out_logp = _stack_all_steps(
+        next_tokens,
+        decode_tokens,
+        logits,
+        decode_logits,
+        logp,
+        decode_logp,
+        num_steps=num_steps,
     )
     return out_tokens, out_logits, out_logp, cache
