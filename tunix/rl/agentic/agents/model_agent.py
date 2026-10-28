@@ -14,8 +14,6 @@
 
 """Agent implementation for single-turn interactions."""
 
-import copy
-
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 
@@ -38,7 +36,7 @@ class ModelAgent(base_agent.ConversationAgentBase):
     # 2. Record the Step (observation uses the cache from the last env
     # feedback).
     step = agent_types.Step(
-        chat_completions=copy.deepcopy(self.chat_completions),
+        chat_completions=list(self.chat_completions),
         action=agent_types.Action(action=response),
         model_response=response,
     )

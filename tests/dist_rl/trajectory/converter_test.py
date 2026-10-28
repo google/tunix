@@ -74,6 +74,45 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
     )
     self.assertStepEqual(agent_step, expected_step)
 
+  def test_create_agent_step_uses_readonly_ndarray_views(self) -> None:
+    assistant_tokens = np.array([101, 102], dtype=np.int32)
+    assistant_masks = np.array([1, 1], dtype=np.int32)
+    logprobs = np.array([-0.1, -0.2], dtype=np.float32)
+    prefill_routed_experts = np.arange(8, dtype=np.int16).reshape(2, 2, 2)
+    rl_step = agent_types.Step(
+        model_response="resp",
+        assistant_tokens=assistant_tokens,
+        assistant_masks=assistant_masks,
+        logprobs=logprobs,
+    )
+
+    agent_step = converter.create_agent_step(
+        rl_step,
+        tunix_step_id=0,
+        prefill_routed_experts=prefill_routed_experts,
+        prefill_start=0,
+        prefill_num_context=1,
+    )
+    self.assertIsNotNone(agent_step)
+
+    for src_arr, step_arr in (
+        (assistant_tokens, agent_step.assistant_tokens),
+        (assistant_masks, agent_step.assistant_masks),
+        (logprobs, agent_step.logprobs),
+        (prefill_routed_experts, agent_step.prefill_routed_experts),
+    ):
+      self.assertTrue(src_arr.flags.writeable)
+      self.assertFalse(step_arr.flags.writeable)
+      self.assertTrue(np.shares_memory(src_arr, step_arr))
+
+    copied_step = trajectory_lib.deep_copy(agent_step)
+    self.assertIs(copied_step.assistant_tokens, agent_step.assistant_tokens)
+    self.assertIs(copied_step.assistant_masks, agent_step.assistant_masks)
+    self.assertIs(copied_step.logprobs, agent_step.logprobs)
+    self.assertIs(
+        copied_step.prefill_routed_experts, agent_step.prefill_routed_experts
+    )
+
   def test_create_agent_step_step_id_mapping(self):
     mock_agent_step = agent_types.Step(model_response="resp")
     agent_step = converter.create_agent_step(mock_agent_step, tunix_step_id=2)
@@ -493,6 +532,32 @@ class CreateEnvStepTest(trajectory_testing.TrajectoryTestCase):
         extra={"env_meta": "test_env"},
     )
     self.assertStepEqual(env_step, expected_step)
+
+  def test_create_env_step_uses_readonly_views_and_copies_info(self) -> None:
+    env_tokens = np.array([201, 202], dtype=np.int32)
+    env_masks = np.array([0, 0], dtype=np.int32)
+    info = {"env_meta": "test_env"}
+    rl_step = agent_types.Step(
+        observation="obs",
+        env_tokens=env_tokens,
+        env_masks=env_masks,
+        info=info,
+    )
+
+    env_step = converter.create_env_step(rl_step, tunix_step_id=0)
+    self.assertIsNotNone(env_step)
+    self.assertTrue(env_tokens.flags.writeable)
+    self.assertFalse(env_step.env_tokens.flags.writeable)
+    self.assertFalse(env_step.env_masks.flags.writeable)
+    self.assertTrue(np.shares_memory(env_tokens, env_step.env_tokens))
+    self.assertTrue(np.shares_memory(env_masks, env_step.env_masks))
+    self.assertIsNot(env_step.extra, info)
+    info["mutated"] = True
+    self.assertNotIn("mutated", env_step.extra)
+
+    copied_step = trajectory_lib.deep_copy(env_step)
+    self.assertIs(copied_step.env_tokens, env_step.env_tokens)
+    self.assertIs(copied_step.env_masks, env_step.env_masks)
 
   def test_create_env_step_step_id_mapping(self):
     mock_env_step = agent_types.Step(observation="obs")

@@ -22,6 +22,20 @@ from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.rl.agentic.agents import agent_types
 
 
+def _is_plain_array(values: Any) -> TypeGuard[np.ndarray]:
+  """Returns whether `values` is an array of the exact type `np.ndarray`."""
+  return type(values) is np.ndarray  # pylint: disable=unidiomatic-typecheck
+
+
+def _readonly_view(values: np.ndarray | None) -> np.ndarray | None:
+  """Returns a read-only zero-copy view when `values` is a plain `np.ndarray`."""
+  if _is_plain_array(values):
+    view = values.view()
+    view.setflags(write=False)
+    return view
+  return values
+
+
 def _is_plain_1d_array(values: Any) -> TypeGuard[np.ndarray]:
   """Returns whether `values` is a 1-D array of the exact type `np.ndarray`.
 
@@ -224,11 +238,11 @@ def create_agent_step(
       reasoning_content=(step.thought if step.thought is not None else None),
       tool_calls=action_converter.extract_tool_calls(step.action),
       metrics=_extract_metrics(step.assistant_tokens, step.logprobs),
-      assistant_tokens=step.assistant_tokens,
-      assistant_masks=step.assistant_masks,
-      logprobs=step.logprobs,
+      assistant_tokens=_readonly_view(step.assistant_tokens),
+      assistant_masks=_readonly_view(step.assistant_masks),
+      logprobs=_readonly_view(step.logprobs),
       policy_version=effective_policy_version,
-      prefill_routed_experts=prefill_routed_experts,
+      prefill_routed_experts=_readonly_view(prefill_routed_experts),
       prefill_start=prefill_start,
       prefill_num_context=prefill_num_context,
       extra=extra or None,
@@ -265,9 +279,9 @@ def create_env_step(
       observation=_extract_observation(step.observation),
       reward=step.reward,
       done=step.done,
-      env_tokens=step.env_tokens,
-      env_masks=step.env_masks,
-      extra=step.info or None,
+      env_tokens=_readonly_view(step.env_tokens),
+      env_masks=_readonly_view(step.env_masks),
+      extra=dict(step.info) if step.info else None,
   )
 
 
