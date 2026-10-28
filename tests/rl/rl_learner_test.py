@@ -5,10 +5,12 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
+import numpy as np
 import optax
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import rl_learner
+from tunix.rl.queue import data_queue as queue_lib
 
 
 class DummyModel(nnx.Module):
@@ -169,6 +171,103 @@ class RLLearnerTest(parameterized.TestCase):
         learner.train(train_ds)
 
     mock_engine.close.assert_called_once()
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='one_iteration',
+          num_iterations=1,
+          steps_per_mini_batch=1,
+          restored_iter_steps=2,
+          expected=['C'],
+      ),
+      dict(
+          testcase_name='two_iterations',
+          num_iterations=2,
+          steps_per_mini_batch=1,
+          restored_iter_steps=2,
+          expected=['B', 'B'],
+      ),
+      dict(
+          testcase_name='two_iterations_two_micro_batches',
+          num_iterations=2,
+          steps_per_mini_batch=2,
+          restored_iter_steps=4,
+          expected=['C', 'D', 'C', 'D'],
+      ),
+      dict(
+          testcase_name='between_iterations_replays_mini_batch',
+          num_iterations=2,
+          steps_per_mini_batch=1,
+          restored_iter_steps=1,
+          expected=['A', 'A'],
+      ),
+      dict(
+          testcase_name='mid_mini_batch_replays_mini_batch',
+          num_iterations=2,
+          steps_per_mini_batch=2,
+          restored_iter_steps=2,
+          expected=['A', 'B', 'A', 'B'],
+      ),
+      # Packed iter_steps don't track input micro-batches; train_steps does.
+      dict(
+          testcase_name='packing',
+          num_iterations=2,
+          steps_per_mini_batch=1,
+          restored_iter_steps=7,
+          restored_train_steps=2,
+          packing_enabled=True,
+          expected=['B', 'B'],
+      ),
+  )
+  def test_resume_fast_forwards_consumed_micro_batches(
+      self,
+      num_iterations,
+      steps_per_mini_batch,
+      restored_iter_steps,
+      expected,
+      restored_train_steps=0,
+      packing_enabled=False,
+  ):
+    class Learner(DummyLearner):
+
+      def _generate_and_compute_advantage(self, training_input, mode):
+        return training_input
+
+      def _num_iterations(self):
+        return num_iterations
+
+    mock_engine = mock.MagicMock()
+    mock_engine.cluster_config.training_config.max_seq_token_per_tpu = None
+    mock_engine.actor_trainer.model = None
+    mock_engine.actor_trainer.iter_steps = restored_iter_steps
+    mock_engine.actor_trainer.train_steps = restored_train_steps
+    learner = Learner(
+        rl_engine=mock_engine,
+        algo_config=DummyConfig(),
+        reward_fns=lambda prompts, completions, **kwargs: [1.0] * len(prompts),
+    )
+    learner._packing_enabled = packing_enabled
+    iterator = iter([{'prompts': np.array([x])} for x in 'ABCDEFGH'])
+
+    def prepare():
+      data_queue = queue_lib.SimpleDataQueue(maxsize=0)
+      learner._prepare_data(
+          iterator,
+          proceed_num_steps=steps_per_mini_batch,
+          sample_repeat=1,
+          batch_repeat=num_iterations,
+          service_target_batch_size=1,
+          data_queue=data_queue,
+      )
+      return [str(x[0]['prompts'][0]) for x in iter(data_queue.get, None)]
+
+    self.assertEqual(prepare(), expected)
+    self.assertEqual(
+        learner._iter_steps, restored_iter_steps + steps_per_mini_batch
+    )
+    # The fast-forward only happens once.
+    next_expected = [chr(ord(x) + steps_per_mini_batch) for x in expected]
+    self.assertEqual(prepare(), next_expected)
 
   @parameterized.parameters(([],), (None,))
   def test_empty_or_none_reward_fns_fails_fast_for_sequence_level(
