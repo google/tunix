@@ -19,6 +19,8 @@ Selected with `rollout_engine='vanilla_v2'`, it is the successor to
 """
 
 from collections import defaultdict
+import contextlib
+import math
 from typing import Any
 
 from flax import nnx
@@ -78,30 +80,43 @@ def _live_arrays_hbm_usage_bytes(devices: list[Any]) -> dict[Any, int]:
 def _resolve_max_device_size_gib(
     hbm_utilization: float,
     mesh: jax.sharding.Mesh,
+    kv_cache_size_gib: float | None = None,
 ) -> float:
   """Computes available per-device KV cache GiB from an HBM utilization cap.
 
   Matches vLLM's `determine_available_memory`: budgets `int(bytes_limit *
   hbm_utilization)` total HBM per device and subtracts `bytes_in_use` (e.g.
   already-allocated model weights), returning the minimum across local devices
-  in GiB. Falls back to `jax.live_arrays()` + `device_kind` HBM limits when
-  running under Pathways (where IFRT proxy devices do not implement
-  `memory_stats()`).
+  in GiB. When `kv_cache_size_gib` is set, overrides `hbm_utilization` after
+  verifying each local device has at least `kv_cache_size_gib` free HBM. Falls
+  back to `jax.live_arrays()` + `device_kind` HBM limits when running under
+  Pathways (where IFRT proxy devices do not implement `memory_stats()`).
 
   Args:
     hbm_utilization: Fraction of total device HBM (`bytes_limit`) to budget, in
-      `(0, 1]`.
+      `(0, 1]`. Ignored when `kv_cache_size_gib` is set.
     mesh: The JAX mesh whose local devices are queried.
+    kv_cache_size_gib: Optional explicit per-device KV cache budget in GiB.
 
   Returns:
-    The minimum available GiB per device across queried devices.
+    The minimum available GiB per device across queried devices (or
+    `kv_cache_size_gib` when explicitly set).
 
   Raises:
-    ValueError: If `hbm_utilization` is out of `(0, 1]`, no local devices are
-      available, `memory_stats()` does not report `bytes_limit` /
-      `bytes_in_use`, or `bytes_in_use` already exceeds the utilization cap.
+    ValueError: If `kv_cache_size_gib` or `hbm_utilization` is invalid, no local
+      devices are available, `memory_stats()` does not report `bytes_limit` /
+      `bytes_in_use`, or free/capped device HBM is insufficient.
   """
-  if not 0.0 < hbm_utilization <= 1.0:
+  if kv_cache_size_gib is not None:
+    if (
+        isinstance(kv_cache_size_gib, bool)
+        or not 0.0 < kv_cache_size_gib < math.inf
+    ):
+      raise ValueError(
+          'rollout_vanilla_v2_kv_cache_size_gib must be a finite positive'
+          f' float, got {kv_cache_size_gib}.'
+      )
+  elif not 0.0 < hbm_utilization <= 1.0:
     raise ValueError(
         'rollout_vanilla_v2_hbm_utilization must be in (0, 1], got'
         f' {hbm_utilization}.'
@@ -126,6 +141,16 @@ def _resolve_max_device_size_gib(
       }
     limit = int(stats['bytes_limit'])
     used = int(stats['bytes_in_use'])
+    if kv_cache_size_gib is not None:
+      free_gib = (limit - used) / _GIB
+      if free_gib < kv_cache_size_gib:
+        raise ValueError(
+            f'Insufficient free HBM on device {device} for'
+            f' rollout_vanilla_v2_kv_cache_size_gib={kv_cache_size_gib}:'
+            f' free HBM ({free_gib:.4f} GiB, bytes_in_use={used},'
+            f' bytes_limit={limit}) < {kv_cache_size_gib} GiB.'
+        )
+      continue
     limit_cap = int(limit * hbm_utilization)
     avail = limit_cap - used
     if avail <= 0:
@@ -137,6 +162,8 @@ def _resolve_max_device_size_gib(
       )
     available_per_device.append(avail)
 
+  if kv_cache_size_gib is not None:
+    return float(kv_cache_size_gib)
   return min(available_per_device) / _GIB
 
 
@@ -157,11 +184,13 @@ def _build_engine(
     max_model_len: The maximum number of tokens a sequence may hold.
 
   Raises:
-    ValueError: If `rollout_config.rollout_vanilla_v2_hbm_utilization` is
-      invalid or device HBM is insufficient.
+    ValueError: If `rollout_config` KV-cache HBM settings are invalid or device
+      HBM is insufficient.
   """
   max_device_size_gib = _resolve_max_device_size_gib(
-      rollout_config.rollout_vanilla_v2_hbm_utilization, mesh
+      rollout_config.rollout_vanilla_v2_hbm_utilization,
+      mesh,
+      kv_cache_size_gib=rollout_config.rollout_vanilla_v2_kv_cache_size_gib,
   )
   eos_token_ids: set[int] = set()
   if tokenizer.eos_id() is not None:
@@ -304,6 +333,10 @@ class VanillaRollout(base_rollout.BaseRollout):
   def reinitialize_cache(self) -> None:
     """Discards cached KV after the shared model weights change in place."""
     self._sampler.reinitialize_cache()
+
+  def pause(self) -> contextlib.AbstractContextManager[None]:
+    """Pauses rollout engine stepping between steps (non-reentrant)."""
+    return self._sampler.pause()
 
   def pad_id(self) -> int:
     return self._tokenizer.pad_id()

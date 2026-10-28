@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from concurrent import futures
+import time
 from unittest import mock
 
 from absl.testing import absltest
@@ -259,8 +261,16 @@ class VanillaRolloutTest(parameterized.TestCase):
       size_gib = vanilla_rollout._resolve_max_device_size_gib(
           0.5, testing_utils.mesh()
       )
+      explicit_gib = vanilla_rollout._resolve_max_device_size_gib(
+          0.5, testing_utils.mesh(), kv_cache_size_gib=24.0
+      )
+      with self.assertRaisesRegex(ValueError, 'Insufficient free HBM'):
+        vanilla_rollout._resolve_max_device_size_gib(
+            0.5, testing_utils.mesh(), kv_cache_size_gib=29.0
+        )
     # 0.5 * 32 GiB - 4 GiB (deduplicated across shards sharing buf_id) = 12 GiB.
     self.assertEqual(size_gib, 12.0)
+    self.assertEqual(explicit_gib, 24.0)
 
   @parameterized.parameters(False, True)
   def test_combines_tokenizer_eos_and_configured_eos_tokens(self, server_mode):
@@ -330,6 +340,61 @@ class VanillaRolloutTest(parameterized.TestCase):
       ]
 
     self.assertEqual(sample(), sample())
+
+  def test_kv_cache_size_gib_overrides_hbm_utilization(self):
+    self._local_devices_mock.return_value = [
+        _FakeDevice({
+            'bytes_limit': 200 * testing_utils.BYTES_PER_PAGE,
+            'bytes_in_use': used * testing_utils.BYTES_PER_PAGE,
+        })
+        for used in (20, 110)
+    ]
+    rollout = self.make_rollout(
+        False,
+        rollout_vanilla_v2_hbm_utilization=0.1,
+        rollout_vanilla_v2_kv_cache_size_gib=64 * testing_utils.GIB_PER_PAGE,
+    )
+    self.assertEqual(
+        rollout._sampler._engine._kv_cache_manager.num_device_pages, 64  # pylint: disable=protected-access
+    )
+    output = rollout.generate(['1 2 3'], _rollout_config())
+    self.assertEqual(output.tokens[0].tolist(), _expected_tokens([1, 2, 3]))
+
+  @parameterized.parameters(0.0, -1.0, float('nan'), float('inf'), True)
+  def test_invalid_kv_cache_size_gib_raises(self, kv_cache_size_gib):
+    with self.assertRaisesRegex(
+        ValueError, 'rollout_vanilla_v2_kv_cache_size_gib'
+    ):
+      vanilla_rollout._resolve_max_device_size_gib(
+          0.5, testing_utils.mesh(), kv_cache_size_gib=kv_cache_size_gib
+      )
+
+  def test_kv_cache_size_gib_exceeding_free_hbm_raises(self):
+    self._local_devices_mock.return_value = [
+        _FakeDevice({'bytes_limit': 200, 'bytes_in_use': 20}),
+        _FakeDevice({'bytes_limit': 200, 'bytes_in_use': 150}),
+    ]
+    with self.assertRaisesRegex(
+        ValueError,
+        'Insufficient free HBM.*rollout_vanilla_v2_kv_cache_size_gib',
+    ):
+      vanilla_rollout._resolve_max_device_size_gib(
+          0.5, testing_utils.mesh(), kv_cache_size_gib=64 / (1 << 30)
+      )
+
+  def test_pause_holds_generation_until_context_exits(self):
+    rollout = self.make_rollout(True)
+    engine = rollout._sampler._engine  # pylint: disable=protected-access
+    step_spy = self.enterContext(
+        mock.patch.object(engine, 'step', wraps=engine.step)
+    )
+    with futures.ThreadPoolExecutor(max_workers=1) as pool:
+      with rollout.pause():
+        gen_future = pool.submit(rollout.generate, ['1 2 3'], _rollout_config())
+        time.sleep(0.03)
+        self.assertEqual(step_spy.call_count, 0)
+      output = gen_future.result(timeout=60.0)
+    self.assertEqual(output.tokens[0].tolist(), _expected_tokens([1, 2, 3]))
 
 
 if __name__ == '__main__':

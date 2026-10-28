@@ -14,6 +14,7 @@
 
 import threading
 import time
+from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
@@ -203,6 +204,80 @@ class VanillaInProcessDriverTest(absltest.TestCase):
       bad.result(timeout=_TIMEOUT_S)
     with self.assertRaisesRegex(ValueError, 'empty'):
       other.result(timeout=_TIMEOUT_S)
+
+  def test_pause_holds_steps_without_blocking_submissions(self):
+    driver = self.make_driver()
+    driver.start()
+    step_spy = self.enterContext(
+        mock.patch.object(driver.engine, 'step', wraps=driver.engine.step)
+    )
+    req_a = testing_utils.make_request('a', [1, 2, 3])
+    req_b = testing_utils.make_request('b', [4, 5])
+
+    with self.assertRaisesRegex(RuntimeError, 'boom'):
+      with driver.pause():
+        raise RuntimeError('boom')
+
+    with driver.pause():
+      future_a = driver.submit_request(req_a)
+      (future_b,) = driver.submit_requests([req_b])
+      time.sleep(0.03)
+      self.assertEqual(step_spy.call_count, 0)
+      self.assertFalse(future_a.done() or future_b.done())
+
+    expected = run_on_engine(req_a, req_b)
+    self.assert_output_equal(future_a.result(timeout=_TIMEOUT_S), expected['a'])
+    self.assert_output_equal(future_b.result(timeout=_TIMEOUT_S), expected['b'])
+
+    with driver.pause():
+      driver.submit_request(testing_utils.make_request('c', [6]))
+      time.sleep(0.02)
+      stop_thread = threading.Thread(target=driver.stop)
+      stop_thread.start()
+      self.addCleanup(stop_thread.join, timeout=_TIMEOUT_S)
+      steps_before_stop = step_spy.call_count
+    stop_thread.join(timeout=_TIMEOUT_S)
+    self.assertEqual(step_spy.call_count, steps_before_stop)
+
+  def test_pause_waits_for_in_flight_step(self):
+    driver = self.make_driver()
+    real_step = driver.engine.step
+    in_step, finish_step = threading.Event(), threading.Event()
+    paused, unpause = threading.Event(), threading.Event()
+
+    def gated_step():
+      if not in_step.is_set():
+        in_step.set()
+        self.assertTrue(finish_step.wait(timeout=_TIMEOUT_S))
+      return real_step()
+
+    step_spy = self.enterContext(
+        mock.patch.object(driver.engine, 'step', side_effect=gated_step)
+    )
+    driver.start()
+    req = testing_utils.make_request('0', [1, 2, 3], max_tokens=3)
+    future = driver.submit_request(req)
+    self.assertTrue(in_step.wait(timeout=_TIMEOUT_S))
+
+    def hold_pause():
+      with driver.pause():
+        paused.set()
+        unpause.wait(timeout=_TIMEOUT_S)
+
+    pause_thread = threading.Thread(target=hold_pause)
+    pause_thread.start()
+    self.addCleanup(pause_thread.join, timeout=_TIMEOUT_S)
+
+    self.assertFalse(paused.wait(timeout=0.02))
+    finish_step.set()
+    self.assertTrue(paused.wait(timeout=_TIMEOUT_S))
+    time.sleep(0.03)
+    self.assertEqual(step_spy.call_count, 1)
+
+    unpause.set()
+    self.assert_output_equal(
+        future.result(timeout=_TIMEOUT_S), run_on_engine(req)['0']
+    )
 
 
 class SubmissionBatchingTest(absltest.TestCase):

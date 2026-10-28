@@ -14,6 +14,7 @@
 
 import asyncio
 from concurrent import futures
+import time
 from unittest import mock
 
 from absl.testing import absltest
@@ -376,6 +377,26 @@ class _SamplerTests(absltest.TestCase):
     self.assertEqual(
         single.token_ids.tolist(),
         run_on_engine([1, 2], max_tokens=2).token_ids.tolist(),
+    )
+
+  def test_pause_holds_generation_until_context_exits(self):
+    sampler = self.make_sampler()
+    step_spy = self.enterContext(
+        mock.patch.object(
+            sampler._engine, 'step', wraps=sampler._engine.step  # pylint: disable=protected-access
+        )
+    )
+    with futures.ThreadPoolExecutor(max_workers=1) as pool:
+      with sampler.pause():
+        gen_future = pool.submit(sampler, '1 2 3', max_generation_steps=4)
+        time.sleep(0.03)
+        self.assertEqual(step_spy.call_count, 0)
+        self.assertFalse(gen_future.done())
+      output = gen_future.result(timeout=60.0)
+
+    self.assertEqual(
+        output.tokens[0].tolist(),
+        run_on_engine('1 2 3', max_tokens=4).token_ids.tolist(),
     )
 
 

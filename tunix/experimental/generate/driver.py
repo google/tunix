@@ -19,8 +19,9 @@ requests and get a future back, while a background thread owns the engine and
 runs its continuous batching loop until each request finishes.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from concurrent import futures
+import contextlib
 import threading
 import time
 from typing import Any
@@ -275,6 +276,19 @@ class VanillaInProcessDriver:
     with self._engine_lock:
       self._engine.reset_kv_caches()
 
+  @contextlib.contextmanager
+  def pause(self) -> Iterator[None]:
+    """Pauses engine stepping between steps (non-reentrant).
+
+    Waits for any in-flight `engine.step()` to finish, then holds `_engine_lock`
+    across the `with` block. `submit_request(s)` only takes `_queue_lock` and
+    does not block; callers must not invoke `pause`, `update_params`,
+    `reset_kv_caches`, `stop`, or `shutdown` on the same thread inside the
+    block.
+    """
+    with self._engine_lock:
+      yield
+
   def stop(self) -> None:
     """Stops the loop thread, leaving pending futures untouched."""
     self._stop_event.set()
@@ -332,6 +346,8 @@ class VanillaInProcessDriver:
     """Blocks until there is something to do, or the driver is stopping."""
     while not self._stop_event.is_set():
       with self._engine_lock, self._queue_lock:
+        if self._stop_event.is_set():
+          return False
         if self._has_work_locked():
           return True
         self._work_event.clear()

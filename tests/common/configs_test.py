@@ -159,6 +159,18 @@ class ConfigsTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "timeout_secs must be > 0"):
       configs.RLProfileConfig(timeout_secs=float("nan"))
 
+  def test_rollout_config_kv_cache_size_gib_validation(self):
+    self.assertIsNone(
+        configs.RolloutConfig().rollout_vanilla_v2_kv_cache_size_gib
+    )
+    cfg = configs.RolloutConfig(rollout_vanilla_v2_kv_cache_size_gib=4.5)
+    self.assertEqual(cfg.rollout_vanilla_v2_kv_cache_size_gib, 4.5)
+    for bad in (0.0, -1.0, float("nan"), float("inf"), float("-inf"), True):
+      with self.assertRaisesRegex(
+          ValueError, "rollout_vanilla_v2_kv_cache_size_gib"
+      ):
+        configs.RolloutConfig(rollout_vanilla_v2_kv_cache_size_gib=bad)
+
 
 if __name__ == "__main__":
   absltest.main()
