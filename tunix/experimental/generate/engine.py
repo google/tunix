@@ -33,7 +33,6 @@ from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import scheduler as scheduler_lib
-from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.generate import utils
 from tunix.models import paged_attention
 
@@ -280,7 +279,7 @@ class LLMEngine:
     self._queued_requests.append(req)
 
   def _check_sampling_params(
-      self, request_id: str, params: sampler_lib.SamplingParams
+      self, request_id: str, params: request_lib.SamplingParams
   ) -> None:
     """Raises a ValueError if the engine cannot sample with `params`."""
     if params.max_tokens < 1:

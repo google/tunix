@@ -24,7 +24,6 @@ import jax.numpy as jnp
 from tunix.experimental.generate import kv_cache_manager
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import scheduler
-from tunix.dist_rl.rollout import sampler as sampler_lib
 
 
 def _create_cache_config(
@@ -86,7 +85,7 @@ def _create_request(
   return request_lib.RequestState(
       req_id=req_id,
       prompt_token_ids=prompt_token_ids,
-      sampling_params=sampler_lib.SamplingParams(max_tokens=max_tokens),
+      sampling_params=request_lib.SamplingParams(max_tokens=max_tokens),
   )
 
 

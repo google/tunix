@@ -185,7 +185,7 @@ class Sampler(base_sampler.BaseSampler):
           ' non-empty.'
       )
 
-    sampling_params = sampler_lib.SamplingParams(
+    sampling_params = request_lib.SamplingParams(
         max_tokens=max_generation_steps,
         temperature=temperature,
         top_p=top_p,

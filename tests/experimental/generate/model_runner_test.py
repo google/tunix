@@ -20,8 +20,8 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.experimental.generate import model_runner as model_runner_lib
+from tunix.experimental.generate import request as request_lib
 from tunix.models import paged_attention
 from tunix.rl import reshard
 from tunix.tests import test_common as tc
@@ -53,12 +53,12 @@ def _runner(
   )
 
 
-def _params(**kwargs) -> sampler_lib.SamplingParams:
-  return sampler_lib.SamplingParams(max_tokens=8, **kwargs)
+def _params(**kwargs) -> request_lib.SamplingParams:
+  return request_lib.SamplingParams(max_tokens=8, **kwargs)
 
 
 def _metadata(
-    *params: sampler_lib.SamplingParams,
+    *params: request_lib.SamplingParams,
     num_rows: int | None = None,
     max_top_k: int = 8,
 ) -> model_runner_lib.SamplingMetadata:

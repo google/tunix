@@ -33,7 +33,7 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
-from tunix.dist_rl.rollout import sampler as sampler_lib
+from tunix.experimental.generate import request as request_lib
 from tunix.models import paged_attention
 from tunix.rl import reshard
 from tunix.rl import utils as rl_utils
@@ -94,7 +94,7 @@ class SamplingMetadata:
   @classmethod
   def from_sampling_params(
       cls,
-      sampling_params: Sequence[sampler_lib.SamplingParams],
+      sampling_params: Sequence[request_lib.SamplingParams],
       num_rows: int,
       max_top_k: int,
   ) -> 'SamplingMetadata':
@@ -742,7 +742,7 @@ class ModelRunner:
       cache: Cache,
       tokens: jax.Array,
       metadata: paged_attention.PagedAttnMetadata,
-      sampling_params: Sequence[sampler_lib.SamplingParams],
+      sampling_params: Sequence[request_lib.SamplingParams],
   ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache]:
     """Runs model forward passes on a batch of requests, and samples tokens.
 

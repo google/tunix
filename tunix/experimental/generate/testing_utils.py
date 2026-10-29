@@ -26,7 +26,6 @@ from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import scheduler as scheduler_lib
-from tunix.dist_rl.rollout import sampler as sampler_lib
 
 VOCAB_SIZE = 32
 PAGE_SIZE = 4
@@ -202,5 +201,5 @@ def make_request(
   return request_lib.EngineRequest(
       request_id=request_id,
       prompt_token_ids=list(prompt),
-      sampling_params=sampler_lib.SamplingParams(**sampling_kwargs),
+      sampling_params=request_lib.SamplingParams(**sampling_kwargs),
   )
