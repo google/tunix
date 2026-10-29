@@ -1059,6 +1059,23 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self._sync_rpc: Optional[Any] = None
     self._sync_get_bulk_port_rpc: Optional[Any] = None
     self._sync_lock = threading.Lock()
+    # Terminal: once closed, a handle never opens a new channel. A caller that
+    # still holds the handle (e.g. a weight sync round that started before the
+    # worker was evicted) gets an error instead of leaking a fresh channel.
+    self._closed = False
+
+  def _raise_if_closed(self) -> None:
+    if self._closed:
+      raise RuntimeError(
+          f"GrpcRemoteActorHandle to {self._host_port} is closed."
+      )
+
+  def sync_close(self) -> None:
+    # Terminal immediately: inside a running loop the base class only schedules
+    # `close()`, and the handle must not open channels before that task runs.
+    with self._sync_lock:
+      self._closed = True
+    super().sync_close()
 
   def _make_rpc(self, channel: Any) -> Any:
     return channel.stream_stream(
@@ -1361,6 +1378,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
   async def _ensure_async_channel(self) -> Any:
     """Ensures the async gRPC channel and stubs are bound to the active loop."""
     assert _grpc_aio_lib is not None
+    self._raise_if_closed()
     current_loop = _running_loop()
     if (
         self._channel is None
@@ -1448,6 +1466,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
   def _ensure_sync_loop(self) -> Any:
     """Lazily starts (once) the background loop used by blocking submit()."""
     with self._sync_lock:
+      self._raise_if_closed()
       if self._sync_loop is None:
         self._sync_loop = asyncio.new_event_loop()
         self._sync_thread = threading.Thread(
@@ -1465,6 +1484,8 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       kwargs: Dict[str, Any],
   ) -> Any:
     assert _grpc_aio_lib is not None
+    # Runs on the sync loop, serialized with `close()`'s channel teardown there.
+    self._raise_if_closed()
     if self._sync_rpc is None:
       self._sync_channel = _grpc_aio_lib.insecure_channel(
           self._host_port,
@@ -1557,6 +1578,8 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       raise
 
   async def close(self) -> None:
+    with self._sync_lock:
+      self._closed = True
     loop = _running_loop()
     if loop is not None:
       active_task = self._get_active_resolve_task(loop)

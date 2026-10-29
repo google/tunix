@@ -745,6 +745,44 @@ class RemoteExecutionTest(parameterized.TestCase):
       finally:
         asyncio.run(handle.close())  # tears down the persistent submit loop
 
+  def test_grpc_handle_does_not_reopen_channels_after_close(self):
+    handle = remote_lib.GrpcRemoteActorHandle(
+        target_address=f"grpc://localhost:{portpicker.pick_unused_port()}"
+    )
+
+    async def _run():
+      await handle.close()
+      # A holder of an evicted handle must not resurrect a channel.
+      with self.assertRaisesRegex(RuntimeError, "is closed"):
+        await handle.asubmit("get_weight_sync_status")
+      with self.assertRaisesRegex(RuntimeError, "is closed"):
+        await handle.poll_responses(timeout_s=0.1)
+      self.assertIsNone(handle._channel)
+      await handle.close()  # Idempotent.
+
+    asyncio.run(_run())
+    with self.assertRaisesRegex(RuntimeError, "is closed"):
+      handle.submit("heartbeat")
+    self.assertIsNone(handle._sync_loop)
+
+  def test_grpc_handle_sync_close_in_running_loop_is_terminal_at_once(self):
+    handle = remote_lib.GrpcRemoteActorHandle(
+        target_address=f"grpc://localhost:{portpicker.pick_unused_port()}"
+    )
+
+    async def _run():
+      # Production evictions call `sync_close()` from the event loop, which
+      # only schedules `close()`; the handle must refuse RPCs before it runs.
+      handle.sync_close()
+      with self.assertRaisesRegex(RuntimeError, "is closed"):
+        await handle.asubmit("get_weight_sync_status")
+      self.assertIsNone(handle._channel)
+      await asyncio.gather(
+          *list(remote_lib._BACKGROUND_CLOSE_TASKS), return_exceptions=True
+      )
+
+    asyncio.run(_run())
+
   def test_grpc_options_tolerate_client_keepalive_pings(self):
     options = dict(network_lib._grpc_options())
     self.assertEqual(options["grpc.keepalive_time_ms"], 60000)
