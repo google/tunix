@@ -216,6 +216,7 @@ class CacheConfigTest(parameterized.TestCase):
     self.assertEqual(cfg.dp_axis, "dp")
     self.assertEqual(cfg.tp_axis, "tp")
     self.assertEqual(cfg.dp_size, 2)
+    self.assertEqual(cfg.tp_size, 2)
 
   def test_dp_size_is_one_without_dp_axis(self):
     cfg = kv_cache_manager.CacheConfig(
@@ -225,6 +226,7 @@ class CacheConfigTest(parameterized.TestCase):
         mesh=_create_mesh(),
     )
     self.assertEqual(cfg.dp_size, 1)
+    self.assertEqual(cfg.tp_size, 2)
 
   def test_sharding_axes_without_mesh_raises(self):
     with self.assertRaisesRegex(ValueError, r"mesh is required"):
@@ -316,6 +318,35 @@ class CacheSizingTest(parameterized.TestCase):
         cfg, num_kv_heads=8, head_dim=64
     )
     self.assertEqual(element_shape, (8, 2, 64))
+
+  def test_derive_kv_geometry_pads_kv_heads_to_tp_size(self):
+    cfg = kv_cache_manager.CacheConfig(
+        max_device_size_gib=1.0,
+        dtype=jnp.bfloat16,
+        page_size=16,
+        dp_axis="dp",
+        tp_axis="tp",
+        mesh=_create_mesh(),
+    )
+    element_shape = kv_cache_manager._derive_kv_geometry(
+        cfg, num_kv_heads=1, head_dim=64
+    )
+    self.assertEqual(element_shape, (2, 2, 64))
+
+  def test_derive_kv_geometry_invalid_tp_divisibility_raises(self):
+    cfg = kv_cache_manager.CacheConfig(
+        max_device_size_gib=1.0,
+        dtype=jnp.bfloat16,
+        page_size=16,
+        tp_axis="tp",
+        mesh=jax.sharding.Mesh(np.array(jax.devices()[:4]), ("tp",)),
+    )
+    with self.assertRaisesRegex(ValueError, r"tp_size \(4\) must be divisible"):
+      kv_cache_manager._derive_kv_geometry(cfg, num_kv_heads=3, head_dim=64)
+    with self.assertRaisesRegex(
+        ValueError, r"num_kv_heads \(6\) must be divisible"
+    ):
+      kv_cache_manager._derive_kv_geometry(cfg, num_kv_heads=6, head_dim=64)
 
   @parameterized.named_parameters(
       dict(testcase_name="dp_and_tp", dp_axis="dp", tp_axis="tp"),
@@ -569,6 +600,37 @@ class KVCacheManagerInitTest(parameterized.TestCase):
             mesh, jax.sharding.PartitionSpec("dp", None, "tp", None, None)
         ),
     )
+
+  def test_init_sharding_pads_mixed_kv_heads_to_tp_size(self):
+    mesh = _create_mesh()
+    cfg = kv_cache_manager.CacheConfig(
+        max_device_size_gib=1e-3,
+        page_size=4,
+        dtype=jnp.bfloat16,
+        dp_axis="dp",
+        tp_axis="tp",
+        mesh=mesh,
+    )
+    mgr = kv_cache_manager.KVCacheManager(
+        config=cfg,
+        cache_geometries={
+            "local": kv_cache_manager.CacheGeometry(
+                num_kv_heads=2, head_dim=8, window_size=8
+            ),
+            "global": kv_cache_manager.CacheGeometry(
+                num_kv_heads=1, head_dim=16
+            ),
+        },
+    )
+
+    pages = mgr.get_physical_pages()
+    expected_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("dp", None, "tp", None, None)
+    )
+    self.assertEqual(pages["local"].sharding, expected_sharding)
+    self.assertEqual(pages["global"].sharding, expected_sharding)
+    self.assertEqual(pages["local"].shape[2:], (2, 2, 8))
+    self.assertEqual(pages["global"].shape[2:], (2, 2, 16))
 
   def test_init_insufficient_device_bytes_raises(self):
     cfg = kv_cache_manager.CacheConfig(
