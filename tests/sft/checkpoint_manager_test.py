@@ -606,6 +606,23 @@ class CheckpointManagerTest(parameterized.TestCase):
     cp_manager._checkpointer.wait()
     self.assertEqual(cp_manager.latest_step(), 1)
 
+  def test_wait_for_pending_saves(self):
+    cp_manager = checkpoint_manager.CheckpointManager(
+        f'{self.temp_path}/{self.id()}'
+    )
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    self.assertTrue(cp_manager.save(1, model))
+    # `latest_step` already reports a save in flight, so check the wait itself.
+    checkpointer = cp_manager._checkpointer
+    assert checkpointer is not None
+    with mock.patch.object(
+        checkpointer, 'wait', wraps=checkpointer.wait
+    ) as wait:
+      cp_manager.wait()
+    wait.assert_called_once()
+    # Without a directory there is nothing to wait for.
+    checkpoint_manager.CheckpointManager(root_directory=None).wait()
+
   def test_context_timeout_secs(self):
     options = checkpoint_options.TunixCheckpointingOptions(
         async_options=checkpoint_manager.ocp.options.AsyncOptions(
