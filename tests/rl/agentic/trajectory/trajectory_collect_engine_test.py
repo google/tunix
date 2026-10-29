@@ -2497,6 +2497,16 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
     self.assertEqual(result['routed_experts'].shape, (14, 2, 2))
     np.testing.assert_array_equal(result['routed_experts'][:3], init_routed[:3])
 
+  def test_single_turn_token_mode_forwards_step_arrays_by_reference(self):
+    agent, env = self._frozenlake()
+    env.max_steps = 1
+    engine, _, _ = self._collector(agent, env)
+    result = asyncio.run(engine.collect(mode='Token'))
+    step0 = agent.trajectory.steps[0]
+    self.assertIs(result['conversation_tokens'], step0.assistant_tokens)
+    self.assertIs(result['conversation_masks'], step0.assistant_masks)
+    self.assertIs(result['old_logprobs'], step0.logprobs)
+
 
 if __name__ == '__main__':
   absltest.main()

@@ -296,6 +296,13 @@ class GemmaChatTemplateParserTest(absltest.TestCase):
     self.assertEqual(
         processed[0]['content'], 'System prompt.\nUser prompt.'
     )
+    self.assertEqual(
+        messages,
+        [
+            {'role': 'system', 'content': 'System prompt.'},
+            {'role': 'user', 'content': 'User prompt.'},
+        ],
+    )
 
   def test_preprocess_with_system_only(self):
     messages = [{'role': 'system', 'content': 'System prompt.'}]
