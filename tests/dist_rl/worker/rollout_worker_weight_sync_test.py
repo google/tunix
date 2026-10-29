@@ -26,9 +26,10 @@ WorkerState = datatypes.WorkerState
 
 class _FakeManager:
 
-  def __init__(self):
+  def __init__(self, sync_result=1):
     self.calls = []
     self.admission_open = True
+    self.sync_result = sync_result
 
   async def pre_weight_sync(self, sync_request=None, **kwargs):
     del sync_request, kwargs
@@ -38,7 +39,7 @@ class _FakeManager:
   async def weight_sync(self, sync_request=None, **kwargs):
     del sync_request, kwargs
     self.calls.append("sync")
-    return 1
+    return self.sync_result
 
   async def post_weight_sync(self, sync_request=None, **kwargs):
     del sync_request, kwargs
@@ -156,6 +157,21 @@ class WeightSyncPhasesTest(unittest.IsolatedAsyncioTestCase):
     await worker.abort_weight_sync(_sync_req("r1", 1))
     self.assertTrue(worker.manager.admission_open)
     self.assertEqual(worker.state, WorkerState.READY)
+
+  async def test_weight_sync_updates_policy_version_from_request_or_metadata(
+      self,
+  ):
+    worker = self._worker()
+    worker.manager.sync_result = None
+
+    await worker.weight_sync(datatypes.WeightSyncRequest(policy_version=4))
+    self.assertEqual(worker._policy_version, 4)
+
+    await worker.weight_sync(datatypes.WeightSyncMetadata(new_policy_version=7))
+    self.assertEqual(worker._policy_version, 7)
+
+    await worker.weight_sync()
+    self.assertEqual(worker._policy_version, 8)
 
 
 if __name__ == "__main__":

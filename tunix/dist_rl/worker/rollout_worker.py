@@ -86,6 +86,10 @@ TrajectoryOrError = Union[
 
 WorkerState = datatypes.WorkerState
 
+WeightSyncRequestOrMetadata = (
+    sampler_lib.WeightSyncRequest | datatypes.WeightSyncMetadata | None
+)
+
 
 class RolloutWorker(abstract_worker.Worker):
   """Worker wrapper for rollout collection.
@@ -493,7 +497,11 @@ class RolloutWorker(abstract_worker.Worker):
     self._jax_cache_syncer.sync_after_first_completed(resp.status)
     return resp
 
-  async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  async def pre_weight_sync(
+      self,
+      sync_request: WeightSyncRequestOrMetadata = None,
+      **kwargs,
+  ) -> Any:
     """Quiesces the worker; it stays SYNCING until post or abort."""
     self._ensure_initialized()
     self.state = WorkerState.SYNCING
@@ -504,7 +512,11 @@ class RolloutWorker(abstract_worker.Worker):
     self._record_round(sync_request, "prepared")
     return result
 
-  async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  async def weight_sync(
+      self,
+      sync_request: WeightSyncRequestOrMetadata = None,
+      **kwargs,
+  ) -> Any:
     """Materializes the received weights; the worker stays SYNCING."""
     self._ensure_initialized()
     self.state = WorkerState.SYNCING
@@ -515,16 +527,21 @@ class RolloutWorker(abstract_worker.Worker):
     self._otel.record_weight_sync_phase("h2d", t0)
     if isinstance(result, int) and not isinstance(result, bool):
       self._policy_version = result
+    elif isinstance(request, sampler_lib.WeightSyncRequest):
+      self._policy_version = request.policy_version
+    elif isinstance(request, datatypes.WeightSyncMetadata):
+      self._policy_version = request.new_policy_version
     else:
-      version = getattr(request, "policy_version", None)
-      if isinstance(version, int) and not isinstance(version, bool):
-        self._policy_version = version
-      else:
-        self._policy_version += 1
+      self._policy_version += 1
+
     self._record_round(request, "h2d_done")
     return result
 
-  async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  async def post_weight_sync(
+      self,
+      sync_request: WeightSyncRequestOrMetadata = None,
+      **kwargs,
+  ) -> Any:
     """Publishes the new weights and resumes serving."""
     t0 = otel_metrics.perf_counter_s()
     result = await self.manager.post_weight_sync(sync_request, **kwargs)
@@ -584,7 +601,11 @@ class RolloutWorker(abstract_worker.Worker):
     self._ensure_initialized()
     return await self.manager.get_weight_sync_metadata(**kwargs)
 
-  async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+  async def abort_weight_sync(
+      self,
+      sync_request: WeightSyncRequestOrMetadata = None,
+      **kwargs,
+  ) -> Any:
     """Discards the round and resumes serving the previous weights."""
     res = await self.manager.abort_weight_sync(sync_request, **kwargs)
     self.state = WorkerState.READY
@@ -608,8 +629,16 @@ class RolloutWorker(abstract_worker.Worker):
         return dict(report, policy_version=self._policy_version)
     return dict(self._sync_round, policy_version=self._policy_version)
 
-  def _record_round(self, sync_request: Any, phase: str) -> None:
-    extra = getattr(sync_request, "extra_config", None) or {}
+  def _record_round(
+      self,
+      sync_request: WeightSyncRequestOrMetadata,
+      phase: str,
+  ) -> None:
+    extra = (
+        sync_request.extra_config
+        if isinstance(sync_request, sampler_lib.WeightSyncRequest)
+        else None
+    ) or {}
     req_id = extra.get("req_id")
     key = (req_id, extra.get("uuid", 0)) if req_id is not None else None
     current = (self._sync_round["req_id"], self._sync_round["uuid"])

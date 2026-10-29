@@ -1147,7 +1147,7 @@ class VanillaSamplerTest(parameterized.TestCase):
     self.assertTrue(asyncio.run(self.vanilla_sampler.pre_weight_sync()))
     new_state = self.vanilla_sampler.transformer_state
     req = base_sampler_lib.WeightSyncRequest(weights=new_state)
-    self.assertTrue(
+    self.assertIsNone(
         asyncio.run(self.vanilla_sampler.weight_sync(sync_request=req))
     )
     self.assertTrue(asyncio.run(self.vanilla_sampler.post_weight_sync()))

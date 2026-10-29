@@ -331,25 +331,9 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     self._is_running = False
     logger.info("VllmSampler stopped.")
 
-  def _check_partial_rollout_kwarg(self, kwargs: Mapping[str, Any]) -> None:
-    """Rejects a per-call `partial_rollout` kwarg that disagrees with config."""
-    # TODO(yatlas): Stop passing `partial_rollout` from
-    # `RolloutManager.pre_weight_sync` and remove `**kwargs` on `pause` /
-    # `pre_weight_sync`.
-    partial_rollout = kwargs.get("partial_rollout")
-    if (
-        partial_rollout is not None
-        and bool(partial_rollout) != self.config.partial_rollout
-    ):
-      raise ValueError(
-          f"VllmSampler [{self.server_id}] received"
-          f" partial_rollout={partial_rollout!r}, which disagrees with"
-          f" config.partial_rollout={self.config.partial_rollout}."
-      )
-
   async def pause(self, **kwargs: Any) -> None:
     """Pauses request intake and drains or freezes active batch iterations during weight updates."""
-    self._check_partial_rollout_kwarg(kwargs)
+    del kwargs
     if self._is_paused:
       return
     self._is_paused = True
@@ -900,7 +884,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     per-step latency overhead of deallocating (`delete_kv_cache`) and
     reallocating (`reinitialize_kv_cache`) the HBM KV buffer pool.
     """
-    self._check_partial_rollout_kwarg(kwargs)
+    del kwargs
     if not self.enable_raiden:
       return True
     async with self._sync_lock:
@@ -940,7 +924,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       self,
       sync_request: base_sampler_lib.WeightSyncRequest | None = None,
       **kwargs: Any,
-  ) -> Any:
+  ) -> None:
     """Phase 2: Flushes/awaits H2D transfers across TPU workers and refreshes state_leaves."""
     del kwargs
     if not self.enable_raiden:
@@ -953,7 +937,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       )
     async with self._sync_lock:
       if not self._tracker.admit(sync_request, "h2d_done"):
-        return True
+        return None
 
       logger.info("Executing weight_sync barrier on Raiden synchronizers...")
       checksums = await self.raiden_h2d(
@@ -969,7 +953,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       await self.refresh_model_state_leaves()
 
       self._tracker.complete(sync_request, "h2d_done")
-      return True
+      return None
 
   async def post_weight_sync(
       self,

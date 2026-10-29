@@ -310,7 +310,7 @@ class VllmSamplerTest(absltest.TestCase):
     )
 
     res_sync = asyncio.run(self.sampler.weight_sync(sync_req))
-    self.assertTrue(res_sync)
+    self.assertIsNone(res_sync)
     self.mock_engine.collective_rpc.assert_any_call(
         "raiden_h2d", args=(), kwargs={"uuid": 1}
     )
@@ -614,11 +614,6 @@ class VllmSamplerTest(absltest.TestCase):
     asyncio.run(sampler.post_weight_sync(req))
     self.mock_engine.reset_prefix_cache.assert_not_awaited()
     self.mock_engine.resume_generation.assert_awaited_once()
-
-    with self.assertRaisesRegex(ValueError, "disagrees with"):
-      asyncio.run(sampler.pause(partial_rollout=False))
-    with self.assertRaisesRegex(ValueError, "disagrees with"):
-      asyncio.run(sampler.pre_weight_sync(req, partial_rollout=False))
 
   def test_build_vllm_params_forwards_cache_salt(self):
     sampler = vllm_sampler.VllmSampler(

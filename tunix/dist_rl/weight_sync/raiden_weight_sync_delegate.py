@@ -133,23 +133,6 @@ def canonicalize_variable_names(entry: Mapping[str, Any]) -> Mapping[str, Any]:
   return out
 
 
-def _free_kv_cache_during_weight_sync(sampler: Any) -> bool:
-  """Whether `sampler` wants its KV cache freed around the weight sync.
-
-  Mirrors `VllmConfig.free_kv_cache_during_weight_sync`; samplers without
-  that setting keep the historical free/re-allocate behaviour.
-  """
-  config = getattr(sampler, "config", None)
-  return bool(getattr(config, "free_kv_cache_during_weight_sync", True))
-
-
-def _partial_rollout_enabled(sampler: Any, default: bool = False) -> bool:
-  """Whether `sampler` has partial-rollout (in-flight weight updates) enabled."""
-  config = getattr(sampler, "config", None)
-  flag = getattr(config, "partial_rollout", False)
-  return bool(default or (isinstance(flag, bool) and flag))
-
-
 class RaidenWeightSyncDelegate:
   """Manages weight synchronization over Raiden for rollout samplers.
 
@@ -165,16 +148,14 @@ class RaidenWeightSyncDelegate:
 
   def __init__(
       self,
-      *args,
+      *,
       worker_index: int = 0,
       server_id: str = "rollout",
-      partial_rollout: bool = False,
-      **kwargs,
   ):
-    del args, kwargs
     # TODO(tunix-dev): add a lock when enabling multiple samplers in one worker.
+    # The bound sampler's `config` (a `RolloutConfig`) is the source of truth
+    # for `partial_rollout` and `rollout_vllm_free_kv_cache_during_weight_sync`.
     self._sampler = None
-    self.partial_rollout: bool = bool(partial_rollout)
 
     self._synchronizers: List[Any] = [
         raiden_synchronizer.RaidenSynchronizer(
@@ -222,10 +203,7 @@ class RaidenWeightSyncDelegate:
 
   async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Pre-sync phase hook executed before weight transfer begins."""
-    use_partial = _partial_rollout_enabled(
-        self._sampler,
-        default=bool(kwargs.get("partial_rollout", self.partial_rollout)),
-    )
+    del kwargs
     if self._has_round(sync_request):
       if not self._tracker.admit(sync_request, "prepared"):
         return True
@@ -234,9 +212,10 @@ class RaidenWeightSyncDelegate:
     if self._sampler is None:
       raise RuntimeError("Sampler is not available for weight sync")
 
-    if use_partial:
+    config = self._sampler.config
+    if config.partial_rollout:
       pass
-    elif _free_kv_cache_during_weight_sync(self._sampler):
+    elif config.rollout_vllm_free_kv_cache_during_weight_sync:
       self._sampler.delete_cache()
     else:
       # The KV pool stays allocated; only its stale prefix entries go.
@@ -272,10 +251,7 @@ class RaidenWeightSyncDelegate:
 
   async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Post-sync phase hook executed after weight installation completes."""
-    use_partial = _partial_rollout_enabled(
-        self._sampler,
-        default=bool(kwargs.get("partial_rollout", self.partial_rollout)),
-    )
+    del kwargs
     if self._has_round(sync_request):
       if not self._tracker.admit(sync_request, "committed"):
         return True
@@ -287,9 +263,10 @@ class RaidenWeightSyncDelegate:
     if self._sampler is None:
       raise RuntimeError("Sampler is not available for weight sync")
 
+    config = self._sampler.config
     if (
-        _free_kv_cache_during_weight_sync(self._sampler)
-        and not use_partial
+        config.rollout_vllm_free_kv_cache_during_weight_sync
+        and not config.partial_rollout
     ):
       self._sampler.reinitialize_cache()
     else:
