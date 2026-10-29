@@ -782,7 +782,18 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     loss = loss_output.primary_loss.compute()
     np.testing.assert_allclose(loss, expected_loss, rtol=1e-6, atol=1e-6)
 
-  def test_process_results_extracts_assistant_text(self):
+  @parameterized.named_parameters(
+      dict(testcase_name="single_turn", turns=[], expected=["msg 0", "msg 1"]),
+      dict(
+          testcase_name="multi_turn",
+          turns=[
+              {"role": "assistant", "content": "call "},
+              {"role": "user", "content": "tool output"},
+          ],
+          expected=["call msg 0", "call msg 1"],
+      ),
+  )
+  def test_process_results_extracts_assistant_text(self, turns, expected):
     class MockTraj:
 
       def __init__(self, index):
@@ -790,6 +801,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "conversation_text": [
                 {"role": "system", "content": "system prompt"},
                 {"role": "user", "content": "user query"},
+                *turns,
                 {"role": "assistant", "content": f"msg {index}"},
             ],
             "conversation_tokens": np.array([1, 2, 3]),
@@ -870,7 +882,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       ):
         learner._process_results(trajectories)
 
-    self.assertEqual(extracted_completions, ["msg 0", "msg 1"])
+    self.assertEqual(extracted_completions, expected)
 
   def test_compute_packed_logps_uses_the_packed_buffer(self):
     """Deferred logps must be recomputed against the packed representation."""

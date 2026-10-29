@@ -46,6 +46,7 @@ from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import agentic_rl_learner
 from tunix.rl.agentic import utils as agentic_utils
+from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
@@ -494,17 +495,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     for item in trajectories:
       trajectories_to_log.append(item.traj)
-      conversation = item.traj.get("conversation_text") or []
-      assistant_text = next(
-          (
-              message["content"]
-              for message in conversation
-              if message["role"] == "assistant"
-          ),
-          "",
+      # Every assistant turn, so multi-turn episodes are scored in full.
+      completion_texts.append(
+          agent_types.assistant_text(item.traj.get("conversation_text") or [])
       )
-
-      completion_texts.append(assistant_text)
       prompt_tokens_list.append(np.asarray(item.traj.get("prompt_tokens")))
       prompt_lengths_list.append(item.traj.get("prompt_length"))
       completion_tokens_list.append(
