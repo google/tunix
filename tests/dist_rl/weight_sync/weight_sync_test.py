@@ -334,6 +334,7 @@ def _rollout_process_fn(
     mock_vllm_sampler = MockVllmSampler(model_config, rngs=nnx.Rngs(1))
     adapter = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_sampler_coord_0",
+        tokenizer=test_common.MockVocab(),
         config=adapter_config,
         raiden_sync_delegate=delegate,
     )
@@ -765,6 +766,7 @@ class WeightSyncE2ETest(absltest.TestCase):
     )
     adapter = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_sampler_fallback_0",
+        tokenizer=test_common.MockVocab(),
         config=adapter_config,
     )
     adapter.vllm_sampler = self.mock_vllm_sampler

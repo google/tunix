@@ -175,7 +175,9 @@ class SamplerToPayloadTest(absltest.TestCase):
         routed_experts=[_routing(PROMPT_LEN + GEN_LEN, fill)],
     )
 
-    adapter = inprocess_vllm_sampler.InprocessVllmSampler(server_id="rollout")
+    adapter = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="rollout", tokenizer=_StubTokenizer()
+    )
     adapter.vllm_sampler = stub
     request = base_sampler_lib.SamplingRequest(
         request_id="req-0",
@@ -245,7 +247,9 @@ class SamplerToPayloadTest(absltest.TestCase):
         ),
     ]
 
-    adapter = inprocess_vllm_sampler.InprocessVllmSampler(server_id="rollout")
+    adapter = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="rollout", tokenizer=_StubTokenizer()
+    )
     adapter.vllm_sampler = stub
 
     req0 = base_sampler_lib.SamplingRequest(
@@ -337,7 +341,9 @@ class SamplerToPayloadTest(absltest.TestCase):
         routed_experts=[routing_a, routing_b],
     )
 
-    adapter = inprocess_vllm_sampler.InprocessVllmSampler(server_id="rollout")
+    adapter = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="rollout", tokenizer=_StubTokenizer()
+    )
     adapter.vllm_sampler = stub
 
     req_a = base_sampler_lib.SamplingRequest(
@@ -456,7 +462,9 @@ class SamplerToPayloadTest(absltest.TestCase):
           tokenizer=_StubTokenizer(), config=config
       )
 
-    adapter = inprocess_vllm_sampler.InprocessVllmSampler(server_id="rollout")
+    adapter = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="rollout", tokenizer=_StubTokenizer()
+    )
     adapter.vllm_sampler = sampler
 
     mock_agent = mock.MagicMock()

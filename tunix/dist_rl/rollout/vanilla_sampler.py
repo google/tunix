@@ -34,6 +34,7 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+import transformers
 from tunix.common import configs
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.dist_rl.rollout.raiden_weight_sync_mixin import (
@@ -47,6 +48,8 @@ from tunix.processors import audio_processor
 from tunix.processors import image_processor
 from tunix.rl import reshard
 from tunix.rl import utils as rl_utils
+
+import sentencepiece as spm
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
@@ -214,7 +217,9 @@ class VanillaSampler(
       server_id: str,
       config: configs.RolloutConfig,
       transformer: nnx.Module,
-      tokenizer: Any,
+      tokenizer: (
+          transformers.PreTrainedTokenizerBase | spm.SentencePieceProcessor
+      ),
       image_processor: image_processor.ImageProcessor | None = None,
       raiden_sync_delegate: Any = None,
   ):
@@ -224,7 +229,7 @@ class VanillaSampler(
       server_id: Unique identifier for this sampler server slice.
       config: Rollout configuration for this worker.
       transformer: an instance of the transformer.
-      tokenizer: a tokenizer for the given model.
+      tokenizer: HuggingFace or SentencePiece tokenizer for the given model.
       image_processor: The image processor.
       raiden_sync_delegate: Optional Raiden weight sync delegate.
     """
@@ -235,9 +240,7 @@ class VanillaSampler(
       )
     self.server_id = server_id
     self.config: configs.RolloutConfig = config
-    self.tokenizer = tokenizer
-    if not isinstance(tokenizer, tok_adapter.TokenizerAdapter):
-      self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
+    self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.image_processor = image_processor
     self.cache_size: int = self.config.kv_cache_size
     self.raiden_sync_delegate = raiden_sync_delegate

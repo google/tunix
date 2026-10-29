@@ -71,6 +71,7 @@ class AbstractWorkerTest(parameterized.TestCase):
           ),
           kwargs=dict(
               worker_id="w2",
+              config=rollout_worker.RolloutConfig(),
               sampler=mocks.MockBaseSamplerImpl(sampler_name="mock_sampler"),
               tokenizer=mocks.MockTokenizer(),
               chat_parser=mocks.MockChatParser(),

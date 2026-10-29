@@ -92,13 +92,13 @@ class RolloutWorker(abstract_worker.Worker):
   def __init__(
       self,
       worker_id: str,
+      sampler: sampler_lib.Sampler,
+      tokenizer: Any,
+      chat_parser: Any,
       config: Optional[RolloutConfig] = None,
-      sampler: Optional[sampler_lib.Sampler] = None,
       env_pool: Any = None,
       agent_factory: Optional[Callable[[], Any]] = None,
       max_concurrency: int = 64,
-      tokenizer: Any = None,
-      chat_parser: Any = None,
       jax_cache_config: Optional[gcs_cache.JaxCacheConfig] = None,
   ):
     super().__init__()
@@ -111,11 +111,6 @@ class RolloutWorker(abstract_worker.Worker):
     self._jax_cache_syncer = gcs_cache.JaxCacheSyncer(
         worker_id, jax_cache_config
     )
-    if tokenizer is None or chat_parser is None:
-      raise ValueError(
-          "RolloutWorker requires valid tokenizer and chat_parser arguments"
-          " (none can be None)."
-      )
     # Built at most once per process: this __init__ runs exactly once per
     # RolloutWorker instance, so there is no separate guard against
     # constructing the store twice. See store.TrajectoryStore.from_config.

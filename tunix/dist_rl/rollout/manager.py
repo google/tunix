@@ -43,13 +43,13 @@ class RolloutManager:
 
   def __init__(
       self,
+      sampler: sampler_lib.Sampler,
+      tokenizer: Any,
+      chat_parser: Any,
       config: Optional[base_rollout.RolloutConfig] = None,
-      sampler: Optional[sampler_lib.Sampler] = None,
       env_pool: Any = None,
       agent_factory: Optional[Callable[[], Any]] = None,
       max_concurrency: int = 64,
-      tokenizer: Any = None,
-      chat_parser: Any = None,
       drain_timeout_s: float = timeouts_lib.DEFAULT_DRAIN_TIMEOUT_S,
       trajectory_store: Optional[store.TrajectoryWriter] = None,
   ):
@@ -91,12 +91,6 @@ class RolloutManager:
         config.routed_experts_num_experts if config is not None else None
     )
     self._policy_version: int = 0
-    if sampler is None:
-      raise ValueError("RolloutManager requires a non-None sampler instance.")
-    if not isinstance(sampler, sampler_lib.Sampler):
-      raise TypeError(
-          f"Expected object implementing Sampler Protocol, got {type(sampler)}"
-      )
     self.sampler = sampler
     self.env_pool = env_pool
     self.agent_factory = agent_factory
@@ -104,11 +98,6 @@ class RolloutManager:
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
     self.trajectory_store = trajectory_store
-    if self.tokenizer is None or self.chat_parser is None:
-      raise ValueError(
-          "RolloutManager requires valid tokenizer and chat_parser arguments"
-          " (none can be None)."
-      )
     # `RolloutConfig.eos_tokens` is the stop set the sampler runs with, and it
     # overrides the tokenizer's own EOS. Collectors need it to tell a rollout
     # that stopped on its own from one that exhausted its budget.

@@ -61,9 +61,17 @@ class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
     await manager.get_weight_sync_metadata(timeout_s=5)
     self.assertEqual(sampler.calls, [{"timeout_s": 5}])
 
-  async def test_default_vanilla_sampler_without_instance_raises(self):
-    with self.assertRaises(ValueError):
-      manager_lib.RolloutManager(tokenizer="mock", chat_parser="mock")
+  async def test_missing_sampler_raises(self):
+    with self.assertRaises(TypeError):
+      manager_lib.RolloutManager(  # pyrefly: ignore[missing-argument]
+          tokenizer="mock", chat_parser="mock"
+      )
+
+  async def test_missing_tokenizer_raises(self):
+    with self.assertRaises(TypeError):
+      manager_lib.RolloutManager(  # pyrefly: ignore[missing-argument]
+          sampler=_FakeSampler([]), chat_parser="mock"
+      )
 
 
 class _FakeSyncSampler(_FakeSampler):

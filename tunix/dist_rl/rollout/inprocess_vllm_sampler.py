@@ -22,6 +22,7 @@ from typing import Any
 
 from absl import logging
 import numpy as np
+import transformers
 from tunix.common import configs
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.dist_rl.rollout.raiden_weight_sync_mixin import (
@@ -60,7 +61,7 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
   def __init__(
       self,
       server_id: str,
-      tokenizer: Any = None,
+      tokenizer: transformers.PreTrainedTokenizerBase,
       config: Any = None,
       model_name: str = "",
       raiden_sync_delegate: Any = None,
@@ -70,14 +71,7 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
       **kwargs,
   ):
     self.server_id = server_id
-    if tokenizer is not None and not isinstance(
-        tokenizer, tok_adapter.TokenizerAdapter
-    ):
-      try:
-        tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
-      except ValueError:
-        pass
-    self.tokenizer: Any = tokenizer
+    self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     # Only a config the caller passed (or the `VllmConfig` that `initialize()`
     # builds from `model_name`) starts the engine. The `RolloutConfig` default
     # below only supplies settings, so a sampler built without a config stays
@@ -141,24 +135,7 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
 
   def initialize(self) -> None:
     """Initializes vLLM sampler if needed."""
-    if self.tokenizer is None and self.model_name:
-      from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
-      from tunix.generate import vllm_sampler as tunix_vllm_sampler  # pylint: disable=g-import-not-at-top
-
-      self.tokenizer = tok_adapter.TokenizerAdapter(
-          AutoTokenizer.from_pretrained(self.model_name)
-      )
-      self.config = tunix_vllm_sampler.VllmConfig(
-          server_mode=True,
-          engine_kwargs={"model": self.model_name},
-      )
-      self._config_given = True
-
-    if (
-        self.vllm_sampler is None
-        and self.tokenizer is not None
-        and self._config_given
-    ):
+    if self.vllm_sampler is None and self._config_given:
       # `sample()` dispatches concurrent requests across `self._executor` worker
       # threads. Force `server_mode=True` so `VllmSampler` uses
       # `VLLMInProcessDriver` (where a single background engine thread drains a
@@ -184,7 +161,7 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
       return np.asarray(prompt, dtype=np.int32).reshape(-1)
     return generate_utils.unpad_prompt_tokens(
         fallback_padded_tokens,
-        pad_id=self.tokenizer.pad_id() if self.tokenizer is not None else None,
+        pad_id=self.tokenizer.pad_id(),
         prompt_length=prompt_length,
     )
 

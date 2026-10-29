@@ -81,6 +81,13 @@ class InprocessVllmSamplerTest(absltest.TestCase):
   def test_implements_sampler_protocol(self):
     self.assertIsInstance(self.sampler, base_sampler_lib.Sampler)
 
+  def test_missing_tokenizer_raises(self):
+    with self.assertRaises(TypeError):
+      inprocess_vllm_sampler.InprocessVllmSampler(  # pyrefly: ignore[missing-argument]
+          server_id="vllm_slice_01",
+          config=self.mock_config,
+      )
+
   def test_explicit_weight_sync_mode_overrides_config(self):
     fallback_config = mock.MagicMock()
     fallback_config.weight_sync_mode = weight_sync.WeightSyncMode.FALLBACK
@@ -116,7 +123,9 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     self.assertFalse(sampler.raiden_sync_delegate.is_bounded())
 
   def test_weight_sync_mode_defaults_to_fallback_without_config(self):
-    sampler = inprocess_vllm_sampler.InprocessVllmSampler(server_id="no_cfg")
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="no_cfg", tokenizer=self.mock_tokenizer
+    )
     self.assertEqual(
         sampler.weight_sync_mode, weight_sync.DEFAULT_WEIGHT_SYNC_MODE
     )
@@ -125,7 +134,9 @@ class InprocessVllmSamplerTest(absltest.TestCase):
 
   def test_engine_config_without_weight_sync_mode_defaults_to_fallback(self):
     sampler = inprocess_vllm_sampler.InprocessVllmSampler(
-        server_id="engine_cfg", config=_EngineOnlyConfig()
+        server_id="engine_cfg",
+        tokenizer=self.mock_tokenizer,
+        config=_EngineOnlyConfig(),
     )
     self.assertEqual(
         sampler.weight_sync_mode, weight_sync.DEFAULT_WEIGHT_SYNC_MODE
@@ -136,6 +147,7 @@ class InprocessVllmSamplerTest(absltest.TestCase):
   def test_weight_sync_mode_read_from_rollout_config(self):
     sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="rollout_cfg",
+        tokenizer=self.mock_tokenizer,
         config=configs.RolloutConfig(weight_sync_mode="none"),
     )
     self.assertEqual(sampler.weight_sync_mode, weight_sync.WeightSyncMode.NONE)
@@ -340,7 +352,9 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     self.assertIsInstance(load_info, base_sampler_lib.LoadInfo)
 
   def test_uninitialized_sampler_raises(self):
-    uninit = inprocess_vllm_sampler.InprocessVllmSampler(server_id="empty")
+    uninit = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="empty", tokenizer=self.mock_tokenizer
+    )
     with self.assertRaises(RuntimeError):
       asyncio.run(
           uninit.sample(base_sampler_lib.SamplingRequest(prompt="test"))
@@ -395,7 +409,9 @@ class RoutedExpertsTest(absltest.TestCase):
         routed_experts=routed_experts,
     )
     inner_sampler.config = mock.Mock(return_routed_experts=engine_captures)
-    sampler = inprocess_vllm_sampler.InprocessVllmSampler(server_id="rollout")
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="rollout", tokenizer=mock.MagicMock()
+    )
     sampler.vllm_sampler = inner_sampler
     return sampler
 
@@ -492,7 +508,7 @@ class RoutedExpertsTest(absltest.TestCase):
 
     sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_concurrent_slice",
-        tokenizer=None,
+        tokenizer=mock.MagicMock(),
         config=None,
         max_concurrency=num_concurrent,
     )
@@ -621,6 +637,7 @@ class RoutedExpertsTest(absltest.TestCase):
     inner_sampler = mock.MagicMock()
     sampler = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="rollout",
+        tokenizer=mock.MagicMock(),
         raiden_sync_delegate=mock_delegate,
         weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
         partial_rollout=True,

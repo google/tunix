@@ -69,6 +69,14 @@ class VanillaSamplerTest(parameterized.TestCase):
     )
     self.vanilla_sampler.initialize()
 
+  def test_missing_tokenizer_raises(self):
+    with self.assertRaises(TypeError):
+      vanilla_sampler.VanillaSampler(  # pyrefly: ignore[missing-argument]
+          server_id='tpu_slice_01',
+          transformer=self.transformer,
+          config=self.config,
+      )
+
   def _make_sampler(
       self,
       transformer=None,

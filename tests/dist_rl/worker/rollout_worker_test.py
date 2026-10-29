@@ -51,6 +51,14 @@ class RolloutWorkerTest(absltest.TestCase):
         chat_parser=self.chat_parser,
     )
 
+  def test_missing_tokenizer_raises(self):
+    with self.assertRaises(TypeError):
+      rollout_worker.RolloutWorker(  # pyrefly: ignore[missing-argument]
+          worker_id="rollout_worker_42",
+          sampler=self.sampler,
+          chat_parser=self.chat_parser,
+      )
+
   def test_generate_appends_lineage_telemetry_event(self):
     async def _run():
       ctx = lineage.LineageContext(
