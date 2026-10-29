@@ -558,6 +558,28 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(copied_ids_by_pair, {(1, 2): [3], (4, 5): [6]})
     self.assertIsNot(copied_ids_by_pair[(1, 2)], ids_by_pair[(1, 2)])
 
+  def test_deep_copy_reuses_readonly_ndarray_by_reference(self) -> None:
+    """Verifies read-only non-object arrays are reused without buffer copy."""
+    readonly_tokens = np.array([10, 20, 30], dtype=np.int32)
+    readonly_tokens.setflags(write=False)
+    readonly_object_arr = np.empty(1, dtype=object)
+    readonly_object_arr[0] = [1, 2]
+    readonly_object_arr.setflags(write=False)
+
+    step = trajectory.TunixAgentStep(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        assistant_tokens=readonly_tokens,
+        extra={"obj_arr": readonly_object_arr},
+    )
+
+    copied = trajectory.deep_copy(step)
+
+    self.assertIs(copied.assistant_tokens, readonly_tokens)
+    self.assertIsNot(copied.extra["obj_arr"][0], readonly_object_arr[0])
+    self.assertEqual(copied.extra["obj_arr"][0], [1, 2])
+
 
 class _ModuleAutoPairMetadata(trajectory.TrajectoryMetadata):
   EXTENSIONS_KEY = "_test_autopair_extensions"

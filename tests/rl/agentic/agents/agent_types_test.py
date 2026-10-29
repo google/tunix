@@ -19,6 +19,8 @@ from absl.testing import absltest
 import cloudpickle
 import numpy as np
 from tunix.rl.agentic.agents import agent_types
+from tunix.rl.agentic.agents import model_agent
+from tunix.rl.agentic.agents import tool_agent
 
 
 class TrajectoryItemTest(absltest.TestCase):
@@ -244,6 +246,41 @@ class TrajectoryTest(absltest.TestCase):
 
     traj.masked_out = True
     self.assertTrue(traj.to_dict()["masked_out"])
+
+
+class AgentChatCompletionsShallowSnapshotTest(absltest.TestCase):
+
+  def test_model_agent_shares_message_dicts_across_turns(self):
+    agent = model_agent.ModelAgent(system_prompt="sys")
+    agent.update_from_env(observation="q1", reward=0.0, done=False, info={})
+    agent.update_from_model("a1")
+    agent.update_from_env(observation="q2", reward=0.0, done=False, info={})
+    agent.update_from_model("a2")
+
+    step0, step1 = agent.trajectory.steps
+    self.assertLen(step0.chat_completions, 3)
+    self.assertLen(step1.chat_completions, 5)
+    self.assertIsNot(step0.chat_completions, agent.chat_completions)
+    self.assertIsNot(step1.chat_completions, agent.chat_completions)
+    for i in range(3):
+      self.assertIs(step0.chat_completions[i], step1.chat_completions[i])
+      self.assertIs(step0.chat_completions[i], agent.chat_completions[i])
+
+  def test_tool_agent_shares_message_dicts_across_turns(self):
+    agent = tool_agent.ToolAgent(system_prompt="sys")
+    agent.update_from_env(observation="q1", reward=0.0, done=False, info={})
+    agent.update_from_model("a1")
+    agent.update_from_env(observation="q2", reward=0.0, done=False, info={})
+    agent.update_from_model("a2")
+
+    step0, step1 = agent.trajectory.steps
+    self.assertLen(step0.chat_completions, 3)
+    self.assertLen(step1.chat_completions, 5)
+    self.assertIsNot(step0.chat_completions, agent.chat_completions)
+    self.assertIsNot(step1.chat_completions, agent.chat_completions)
+    for i in range(3):
+      self.assertIs(step0.chat_completions[i], step1.chat_completions[i])
+      self.assertIs(step0.chat_completions[i], agent.chat_completions[i])
 
 
 if __name__ == "__main__":

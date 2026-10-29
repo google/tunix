@@ -85,13 +85,14 @@ def _deep_copy_into_memo(value: Any, memo: dict[int, Any]) -> Any:
   `copy.deepcopy` makes a Python call per element of a list or dict, which
   dominates the cost of copying long token ID and logprob lists and nested
   JSON-like dicts such as tool definitions. This function copies exact `list`s
-  and `dict`s itself: it reuses elements of `_JSON_SCALAR_TYPES`, which are
-  immutable, without a call, and copies a list holding only such elements with
-  one C-level `list.copy()`. Like `copy.deepcopy`, it records each copy in
-  `memo` before copying the values nested in it, so shared and cyclic
-  references are copied once. Any other value goes to `copy.deepcopy` with the
-  same `memo`. For a pydantic model, it copies `__dict__` this way and then
-  calls the model's `__deepcopy__`, which finds that copy in `memo`.
+  and `dict`s itself: it reuses elements of `_JSON_SCALAR_TYPES` and read-only
+  non-object `np.ndarray`s, which are immutable, without a call, and copies a
+  list holding only `_JSON_SCALAR_TYPES` elements with one C-level
+  `list.copy()`. Like `copy.deepcopy`, it records each copy in `memo` before
+  copying the values nested in it, so shared and cyclic references are copied
+  once. Any other value goes to `copy.deepcopy` with the same `memo`. For a
+  pydantic model, it copies `__dict__` this way and then calls the model's
+  `__deepcopy__`, which finds that copy in `memo`.
 
   Args:
     value: The value to copy.
@@ -103,6 +104,12 @@ def _deep_copy_into_memo(value: Any, memo: dict[int, Any]) -> Any:
   """
   value_type = type(value)
   if value_type in _JSON_SCALAR_TYPES:
+    return value
+  if (
+      value_type is np.ndarray
+      and not value.flags.writeable
+      and value.dtype.kind != "O"
+  ):
     return value
   memoized_copy = memo.get(id(value), _MISSING)
   if memoized_copy is not _MISSING:
@@ -403,22 +410,26 @@ def _validate_int_3d_array(
           f"Expected a 3D array for Int3DArray, got shape {arr.shape}."
       )
     if arr.size == 0:
-      return np.zeros(arr.shape, dtype=np.int16)
-    if not np.issubdtype(arr.dtype, np.integer) or np.issubdtype(
-        arr.dtype, np.bool_
-    ):
-      raise ValueError(
-          f"Expected an integer array for Int3DArray, got dtype {arr.dtype}."
-      )
-    if arr.dtype != np.int16:
-      info = np.iinfo(np.int16)
-      min_val, max_val = int(arr.min()), int(arr.max())
-      if min_val < info.min or max_val > info.max:
+      result = np.zeros(arr.shape, dtype=np.int16)
+    else:
+      if not np.issubdtype(arr.dtype, np.integer) or np.issubdtype(
+          arr.dtype, np.bool_
+      ):
         raise ValueError(
-            f"Int3DArray values [{min_val}, {max_val}] exceed int16 range"
-            f" [{info.min}, {info.max}]."
+            f"Expected an integer array for Int3DArray, got dtype {arr.dtype}."
         )
-    return np.ascontiguousarray(arr, dtype=np.int16)
+      if arr.dtype != np.int16:
+        info = np.iinfo(np.int16)
+        min_val, max_val = int(arr.min()), int(arr.max())
+        if min_val < info.min or max_val > info.max:
+          raise ValueError(
+              f"Int3DArray values [{min_val}, {max_val}] exceed int16 range"
+              f" [{info.min}, {info.max}]."
+          )
+      result = np.ascontiguousarray(arr, dtype=np.int16)
+    if isinstance(value, np.ndarray) and not value.flags.writeable:
+      result.setflags(write=False)
+    return result
   raise ValueError(f"Unsupported type for Int3DArray: {type(value).__name__}.")
 
 

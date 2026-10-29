@@ -14,7 +14,6 @@
 
 """Agent implementation that supports tool usage."""
 
-import copy
 import json
 from typing import Any, Dict
 import uuid
@@ -151,7 +150,7 @@ class ToolAgent(base_agent.ConversationAgentBase):
 
     # Record complete step with conversation context and parsed action.
     step = agent_types.Step(
-        chat_completions=copy.deepcopy(self._messages),
+        chat_completions=list(self._messages),
         action=agent_types.Action(action=tool_calls_dict),
         model_response=response,
     )

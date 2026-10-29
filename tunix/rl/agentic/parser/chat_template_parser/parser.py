@@ -401,9 +401,14 @@ class GemmaChatTemplateParser(BaseChatTemplateParser):
     if processed_messages and processed_messages[0]["role"] == "system":
       system_message = processed_messages.pop(0)
       if processed_messages and processed_messages[0]["role"] == "user":
-        processed_messages[0]["content"] = (
-            system_message["content"] + "\n" + processed_messages[0]["content"]
-        )
+        processed_messages[0] = {
+            **processed_messages[0],
+            "content": (
+                system_message["content"]
+                + "\n"
+                + processed_messages[0]["content"]
+            ),
+        }
       else:
         processed_messages.insert(
             0, {"role": "user", "content": system_message["content"]}
