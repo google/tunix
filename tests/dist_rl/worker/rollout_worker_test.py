@@ -18,6 +18,7 @@ import asyncio
 import collections
 import tempfile
 import threading
+import types
 from unittest import mock
 
 from absl.testing import absltest
@@ -25,6 +26,7 @@ from etils import epath
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
+from tunix.dist_rl.common import registry
 from tunix.dist_rl.common import test_utils as mocks
 from tunix.dist_rl.trajectory import file_store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
@@ -41,12 +43,11 @@ class RolloutWorkerTest(absltest.TestCase):
     self.sampler = mocks.MockBaseSamplerImpl(
         sampler_name="test_sampler", default_delay=0.0
     )
-    self.env_pool = mocks.MockEnvironmentPool(pool_size=5, default_delay=0.0)
     self.worker = rollout_worker.RolloutWorker(
         worker_id="rollout_worker_42",
         sampler=self.sampler,
-        env_pool=self.env_pool,
-        agent_factory=mocks.MockAgent,
+        env_name="mock_env",
+        agent_name="mock_agent",
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
     )
@@ -56,6 +57,8 @@ class RolloutWorkerTest(absltest.TestCase):
       rollout_worker.RolloutWorker(  # pyrefly: ignore[missing-argument]
           worker_id="rollout_worker_42",
           sampler=self.sampler,
+          env_name="mock_env",
+          agent_name="mock_agent",
           chat_parser=self.chat_parser,
       )
 
@@ -249,6 +252,8 @@ class RolloutWorkerTest(absltest.TestCase):
     worker = rollout_worker.RolloutWorker(
         worker_id="rollout_async",
         sampler=async_sampler,
+        env_name="mock_env",
+        agent_name="mock_agent",
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
     )
@@ -282,6 +287,8 @@ class RolloutWorkerTest(absltest.TestCase):
     worker = rollout_worker.RolloutWorker(
         worker_id="rollout_pending_sync",
         sampler=self.sampler,
+        env_name="mock_env",
+        agent_name="mock_agent",
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
     )
@@ -292,6 +299,8 @@ class RolloutWorkerTest(absltest.TestCase):
     worker2 = rollout_worker.RolloutWorker(
         worker_id="rollout_pending_meta",
         sampler=self.sampler,
+        env_name="mock_env",
+        agent_name="mock_agent",
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
     )
@@ -310,6 +319,8 @@ def _worker(config=None):
       worker_id="w0",
       config=config,
       sampler=mocks.MockBaseSamplerImpl(sampler_name="mock_sampler"),
+      env_name="mock_env",
+      agent_name="mock_agent",
       tokenizer="mock",
       chat_parser="mock",
   )
@@ -459,6 +470,81 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
           ValueError, "drain_timeout_s must be a positive finite number"
       ):
         rollout_worker.RolloutConfig(drain_timeout_s=invalid)
+
+  def test_resolves_registered_env_and_agent_with_configs(self):
+    class _FakeEnv(mocks.MockEnvironment):
+
+      def __init__(self, **kwargs):
+        super().__init__()
+        self.kwargs = kwargs
+
+    class _FakeAgent(mocks.MockAgent):
+
+      def __init__(self, **kwargs):
+        super().__init__()
+        self.kwargs = kwargs
+
+    env_cfg = {"backend": "k8s"}
+    agent_cfg = {"scaffold": "r2egym", "source": "worker"}
+    with (
+        mock.patch.object(
+            registry.ENV_REGISTRY, "get", return_value=_FakeEnv
+        ) as mock_env_get,
+        mock.patch.object(
+            registry.AGENT_REGISTRY, "get", return_value=_FakeAgent
+        ) as mock_agent_get,
+    ):
+      worker = rollout_worker.RolloutWorker(
+          worker_id="rollout_worker_reg",
+          config=rollout_worker.RolloutConfig(),
+          sampler=mocks.MockBaseSamplerImpl(
+              sampler_name="test_sampler", default_delay=0.0
+          ),
+          tokenizer=mocks.MockTokenizer(),
+          chat_parser=mocks.MockChatParser(),
+          env_name="test_env",
+          agent_name="test_agent",
+          env_config=env_cfg,
+          agent_config=agent_cfg,
+      )
+
+    mock_env_get.assert_called_once_with("test_env")
+    mock_agent_get.assert_called_once_with("test_agent")
+    self.assertIs(worker.manager.env_factory, _FakeEnv)
+    self.assertIs(worker.manager.agent_factory, _FakeAgent)
+    self.assertIsInstance(worker.manager.env_config, types.MappingProxyType)
+    self.assertIsInstance(worker.manager.agent_config, types.MappingProxyType)
+    env_cfg["backend"] = "mutated"
+    agent_cfg["source"] = "mutated"
+    self.assertEqual(worker.manager.env_config, {"backend": "k8s"})
+    self.assertEqual(
+        worker.manager.agent_config,
+        {"scaffold": "r2egym", "source": "worker"},
+    )
+
+  def test_unregistered_env_or_agent_raises_key_error(self):
+    with self.assertRaises(KeyError):
+      rollout_worker.RolloutWorker(
+          worker_id="rollout_worker_bad_env",
+          sampler=mocks.MockBaseSamplerImpl(
+              sampler_name="test_sampler", default_delay=0.0
+          ),
+          tokenizer=mocks.MockTokenizer(),
+          chat_parser=mocks.MockChatParser(),
+          env_name="unregistered_env_xyz",
+          agent_name="mock_agent",
+      )
+    with self.assertRaises(KeyError):
+      rollout_worker.RolloutWorker(
+          worker_id="rollout_worker_bad_agent",
+          sampler=mocks.MockBaseSamplerImpl(
+              sampler_name="test_sampler", default_delay=0.0
+          ),
+          tokenizer=mocks.MockTokenizer(),
+          chat_parser=mocks.MockChatParser(),
+          env_name="mock_env",
+          agent_name="unregistered_agent_xyz",
+      )
 
 
 if __name__ == "__main__":

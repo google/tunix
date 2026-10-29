@@ -23,7 +23,6 @@ from typing import Sequence
 from transformers import AutoTokenizer  # pylint: disable=g-importing-member
 from tunix.dist_rl.common import test_utils as mocks
 from tunix.dist_rl.distributed.runtime.context import ProcessContext  # pylint: disable=g-importing-member
-from tunix.dist_rl.common import registry
 from tunix.dist_rl.rollout import inprocess_vllm_sampler as inprocess_sampler_lib
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import rollout_worker
@@ -76,10 +75,8 @@ def main(argv: Sequence[str], context: ProcessContext | None) -> None:
   worker_service = rollout_worker.RolloutWorker(
       worker_id=args.worker_id,
       sampler=sampler_server,
-      env_pool=mocks.MockEnvironmentPool(
-          pool_size=1, env_factory=registry.ENV_REGISTRY.get("mock_env")
-      ),
-      agent_factory=registry.AGENT_REGISTRY.get("mock_agent"),
+      env_name="mock_env",
+      agent_name="mock_agent",
       tokenizer=tokenizer,
       chat_parser=mocks.MockChatParser(),
   )

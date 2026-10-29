@@ -15,17 +15,20 @@
 """Rollout Manager concurrency controller and Raiden KV migration orchestrator."""
 
 import asyncio
+from collections.abc import Mapping
 import logging
 import time
+import types
 from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Union
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import timeouts as timeouts_lib
-from tunix.dist_rl.common import registry
 from tunix.dist_rl.rollout import collector as collector_lib
 from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.dist_rl.trajectory import base_store as store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.worker import traffic_controller as traffic_controller_lib
+from tunix.rl.agentic.agents import base_agent
+from tunix.rl.agentic.environments import base_environment
 from tunix.rl.rollout import base_rollout
 
 TrajectoryOrError = Union[
@@ -46,9 +49,11 @@ class RolloutManager:
       sampler: sampler_lib.Sampler,
       tokenizer: Any,
       chat_parser: Any,
+      env_factory: Callable[..., base_environment.BaseTaskEnv],
+      agent_factory: Callable[..., base_agent.ConversationAgentBase],
+      env_config: Mapping[str, Any] = types.MappingProxyType({}),
+      agent_config: Mapping[str, Any] = types.MappingProxyType({}),
       config: Optional[base_rollout.RolloutConfig] = None,
-      env_pool: Any = None,
-      agent_factory: Optional[Callable[[], Any]] = None,
       max_concurrency: int = 64,
       drain_timeout_s: float = timeouts_lib.DEFAULT_DRAIN_TIMEOUT_S,
       trajectory_store: Optional[store.TrajectoryWriter] = None,
@@ -56,13 +61,17 @@ class RolloutManager:
     """Initializes the RolloutManager.
 
     Args:
-      config: RolloutConfig configuration options.
       sampler: Pre-constructed Sampler instance.
-      env_pool: Environment pool for rollout execution.
-      agent_factory: Factory callable producing agent instances.
-      max_concurrency: Maximum number of concurrent episodes.
       tokenizer: Tokenizer for prompt/response encoding.
       chat_parser: Chat parser for conversation templating.
+      env_factory: Factory callable producing environment instances.
+      agent_factory: Factory callable producing agent instances.
+      env_config: Default environment constructor kwargs. A request's
+        `metadata["env_config"]` entries are shallow-merged on top of these.
+      agent_config: Default agent constructor kwargs. A request's
+        `metadata["agent_config"]` replaces these entirely when present.
+      config: RolloutConfig configuration options.
+      max_concurrency: Maximum number of concurrent episodes.
       drain_timeout_s: Soft drain window (seconds) in `pre_weight_sync` when
         `partial_rollout` is False. Waits up to `drain_timeout_s` for in-flight
         trajectories to finish naturally before `pause_all()` pauses remaining
@@ -92,8 +101,14 @@ class RolloutManager:
     )
     self._policy_version: int = 0
     self.sampler = sampler
-    self.env_pool = env_pool
+    self.env_factory = env_factory
     self.agent_factory = agent_factory
+    self.env_config: Mapping[str, Any] = types.MappingProxyType(
+        dict(env_config)
+    )
+    self.agent_config: Mapping[str, Any] = types.MappingProxyType(
+        dict(agent_config)
+    )
     self.max_concurrency = max_concurrency
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
@@ -156,33 +171,15 @@ class RolloutManager:
 
     traj_id = request.traj_id
 
-    env_name = getattr(self.config, "env_name", "")
-    if env_name and registry.ENV_REGISTRY.contains(env_name):
-      env_cls = registry.ENV_REGISTRY.get(env_name)
-      request_metadata = dict(request.metadata or {})
-      env_config = dict(getattr(self.config, "env_config", {}))
-      if isinstance(request_metadata.get("env_config"), dict):
-        env_config.update(request_metadata["env_config"])
-      env_config.setdefault("group_index", request.group_index)
-      env_config.setdefault("policy_version", request.target_policy_version)
+    env_config = dict(self.env_config)
+    env_config.update(request.metadata.get("env_config", {}))
+    env_config.setdefault("group_index", request.group_index)
+    env_config.setdefault("policy_version", request.target_policy_version)
+    env_client = self.env_factory(**env_config)
 
-      env_client = env_cls(**env_config)
-    elif self.env_pool and hasattr(self.env_pool, "acquire_env"):
-      env_client = self.env_pool.acquire_env(request.metadata.get("env_config"))
-    else:
-      env_client = None
-
-    agent_name = getattr(self.config, "agent_name", "")
-    if agent_name and registry.AGENT_REGISTRY.contains(agent_name):
-      agent_cls = registry.AGENT_REGISTRY.get(agent_name)
-      agent_config = request.metadata.get(
-          "agent_config", getattr(self.config, "agent_config", {})
-      )
-      agent = agent_cls(**agent_config)
-    elif self.agent_factory and callable(self.agent_factory):
-      agent = self.agent_factory()
-    else:
-      agent = None
+    agent = self.agent_factory(
+        **request.metadata.get("agent_config", self.agent_config)
+    )
 
     collector_kwargs: dict[str, Any] = {
         "routed_experts_encode_mode": self._routed_experts_encode_mode,
@@ -263,12 +260,6 @@ class RolloutManager:
     finally:
       self._active_collectors.pop(collector.traj_id, None)
       self._active_tasks.pop(collector.traj_id, None)
-      if (
-          self.env_pool
-          and hasattr(self.env_pool, "release_env")
-          and collector.env is not None
-      ):
-        self.env_pool.release_env(collector.env)
 
     await self._completed_queue.put(trajectory)
     resolve_cb(trajectory)

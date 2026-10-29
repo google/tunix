@@ -38,10 +38,19 @@ from tunix.rl.agentic.environments import base_environment
 class MockEnvironment(base_environment.BaseTaskEnv):
   """Mock Environment simulating Kubernetes pod interactions with latency."""
 
-  def __init__(self, env_id: str = "mock_env_01", delay_seconds: float = 0.05):
+  def __init__(
+      self,
+      env_id: str = "mock_env_01",
+      delay_seconds: float = 0.05,
+      max_steps: int | None = None,
+      **kwargs: Any,
+  ):
+    del kwargs
     super().__init__()
     self.env_id = env_id
     self.delay_seconds = delay_seconds
+    if max_steps is not None:
+      self.max_steps = max_steps
     self.step_count = 0
 
   def reset(
@@ -76,40 +85,6 @@ class MockEnvironment(base_environment.BaseTaskEnv):
 
 
 registry.ENV_REGISTRY.register("mock_env")(MockEnvironment)
-
-
-class MockEnvironmentPool:
-  """A mock environment pool for rollout collection."""
-
-  def __init__(
-      self,
-      pool_size: int = 10,
-      default_delay: float = 0.05,
-      env_factory: Any = None,
-  ) -> None:
-    self.pool_size = pool_size
-    self.default_delay = default_delay
-    env_cls = env_factory or registry.ENV_REGISTRY.get("mock_env")
-    self._envs = [env_cls(f"env_{i}", default_delay) for i in range(pool_size)]
-
-  def acquire_env(
-      self, config: Optional[Dict[str, Any]] = None
-  ) -> MockEnvironment:
-    """Acquires a mock environment instance from the pool."""
-    delay = (
-        config.get("delay_seconds", self.default_delay)
-        if config
-        else self.default_delay
-    )
-    if self._envs:
-      env = self._envs.pop()
-      env.delay_seconds = delay
-      return env
-    return MockEnvironment("env_dynamic", delay)
-
-  def release_env(self, env: MockEnvironment) -> None:
-    """Releases a mock environment instance back into the pool."""
-    self._envs.append(env)
 
 
 class MockTokenizer:
@@ -445,7 +420,8 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
 class MockAgent(base_agent.ConversationAgentBase):
   """Mock Agent tracking turn history and memory from environment observations."""
 
-  def __init__(self, system_prompt: str = "Mock Agent"):
+  def __init__(self, system_prompt: str = "Mock Agent", **kwargs: Any):
+    del kwargs
     super().__init__(system_prompt=system_prompt)
     self.history: List[Tuple[Any, float]] = []
 

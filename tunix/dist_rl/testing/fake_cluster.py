@@ -222,12 +222,11 @@ class FakeClusterHarness:
         sampler_name=wid, default_delay=0.0, server_id=wid
     )
     self.samplers[wid] = sampler
-    env_pool = test_utils.MockEnvironmentPool(pool_size=32, default_delay=0.0)
     worker = rollout_worker_lib.RolloutWorker(
         worker_id=wid,
         sampler=sampler,
-        env_pool=env_pool,
-        agent_factory=test_utils.MockAgent,
+        env_name="mock_env",
+        agent_name="mock_agent",
         tokenizer=test_utils.MockTokenizer(),
         chat_parser=test_utils.MockChatParser(),
         config=rollout_worker_lib.RolloutConfig(

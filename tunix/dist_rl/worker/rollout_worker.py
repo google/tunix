@@ -16,12 +16,14 @@
 
 import dataclasses
 import threading
+import types
 from typing import Any, AsyncIterator, Callable, List, Mapping, Optional, Sequence, Union
 
 from absl import logging
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import gcs_cache
+from tunix.dist_rl.common import registry
 from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.rollout import manager as manager_lib
 from tunix.dist_rl.rollout import sampler as sampler_lib
@@ -34,17 +36,13 @@ from tunix.rl.rollout import base_rollout
 
 @dataclasses.dataclass
 class RolloutConfig(base_rollout.RolloutConfig):
-  """Rollout configuration extending base RolloutConfig with sampler choice and registry options.
+  """Rollout configuration extending base RolloutConfig with sampler and worker options.
 
   Attributes:
     sampler_type: Type of sampler adapter to construct ("vanilla",
       "inprocess_vllm", "vllm").
     weight_sync_mode: Mode of weight synchronization ("none", "fallback",
       "raiden").
-    env_name: Registered name of environment class in ENV_REGISTRY.
-    agent_name: Registered name of agent class in AGENT_REGISTRY.
-    env_config: Configuration dictionary passed to environment constructor.
-    agent_config: Configuration dictionary passed to agent constructor.
     trajectory_store_config: Trajectory Store configuration for this worker
       process, or None to run without a store. See
       `store.TrajectoryStore.from_config`. The worker builds the store from this
@@ -60,10 +58,6 @@ class RolloutConfig(base_rollout.RolloutConfig):
 
   sampler_type: str = "vanilla"
   weight_sync_mode: weight_sync.WeightSyncMode = weight_sync.WeightSyncMode.NONE
-  env_name: str = ""
-  agent_name: str = ""
-  env_config: dict[str, Any] = dataclasses.field(default_factory=dict)
-  agent_config: dict[str, Any] = dataclasses.field(default_factory=dict)
   trajectory_store_config: Mapping[str, Any] | None = None
   partial_rollout: bool = False
   drain_timeout_s: float = timeouts.DEFAULT_DRAIN_TIMEOUT_S
@@ -95,12 +89,31 @@ class RolloutWorker(abstract_worker.Worker):
       sampler: sampler_lib.Sampler,
       tokenizer: Any,
       chat_parser: Any,
+      env_name: str,
+      agent_name: str,
       config: Optional[RolloutConfig] = None,
-      env_pool: Any = None,
-      agent_factory: Optional[Callable[[], Any]] = None,
+      env_config: Mapping[str, Any] = types.MappingProxyType({}),
+      agent_config: Mapping[str, Any] = types.MappingProxyType({}),
       max_concurrency: int = 64,
       jax_cache_config: Optional[gcs_cache.JaxCacheConfig] = None,
   ):
+    """Initializes the RolloutWorker.
+
+    Args:
+      worker_id: Unique identifier for this worker process.
+      sampler: Pre-constructed Sampler instance.
+      tokenizer: Tokenizer for prompt/response encoding.
+      chat_parser: Chat parser for conversation templating.
+      env_name: Name of the registered environment in `ENV_REGISTRY`.
+      agent_name: Name of the registered agent in `AGENT_REGISTRY`.
+      config: Optional RolloutConfig configuration options.
+      env_config: Default environment constructor kwargs. A request's
+        `metadata["env_config"]` entries are shallow-merged on top of these.
+      agent_config: Default agent constructor kwargs. A request's
+        `metadata["agent_config"]` replaces these entirely when present.
+      max_concurrency: Maximum number of concurrent episodes.
+      jax_cache_config: Optional JAX compilation cache configuration.
+    """
     super().__init__()
     self.worker_id = worker_id
     self.config = config
@@ -111,6 +124,8 @@ class RolloutWorker(abstract_worker.Worker):
     self._jax_cache_syncer = gcs_cache.JaxCacheSyncer(
         worker_id, jax_cache_config
     )
+    env_factory = registry.ENV_REGISTRY.get(env_name)
+    agent_factory = registry.AGENT_REGISTRY.get(agent_name)
     # Built at most once per process: this __init__ runs exactly once per
     # RolloutWorker instance, so there is no separate guard against
     # constructing the store twice. See store.TrajectoryStore.from_config.
@@ -136,8 +151,10 @@ class RolloutWorker(abstract_worker.Worker):
     self.manager = manager_lib.RolloutManager(
         config=config,
         sampler=sampler,
-        env_pool=env_pool,
+        env_factory=env_factory,
         agent_factory=agent_factory,
+        env_config=env_config,
+        agent_config=agent_config,
         max_concurrency=max_concurrency,
         tokenizer=tokenizer,
         chat_parser=chat_parser,

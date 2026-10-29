@@ -448,10 +448,11 @@ async def run_worker(args: argparse.Namespace):
       worker_id="deepswe-eval",
       config=rollout_worker.RolloutConfig(
           sampler_type="inprocess_vllm", weight_sync_mode="none",
-          env_name=env_name, agent_name=deepswe.DEEPSWE_AGENT_NAME,
           eos_tokens=eos,
       ),
       sampler=sampler,
+      env_name=env_name,
+      agent_name=deepswe.DEEPSWE_AGENT_NAME,
       tokenizer=tokenizer_adapter.TokenizerAdapter(tokenizer),
       chat_parser=parser.QwenChatTemplateParser(
           tokenizer, enable_thinking=not args.disable_thinking

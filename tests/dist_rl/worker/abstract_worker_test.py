@@ -73,6 +73,8 @@ class AbstractWorkerTest(parameterized.TestCase):
               worker_id="w2",
               config=rollout_worker.RolloutConfig(),
               sampler=mocks.MockBaseSamplerImpl(sampler_name="mock_sampler"),
+              env_name="mock_env",
+              agent_name="mock_agent",
               tokenizer=mocks.MockTokenizer(),
               chat_parser=mocks.MockChatParser(),
           ),
