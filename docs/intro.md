@@ -1,3 +1,4 @@
+
 <!-- DO NOT REMOVE! Placeholder for TOC. -->
 
 # Tunix: A Lightweight LLM Post-Training Library
@@ -75,6 +76,10 @@ See [Design Overview](design.md) for more details on the architecture.
     -   Seamless multi-host distributed training with Pathways which can scale
         up to thousands of devices
     -   [Checkpointing and Fault Tolerance](reliability.md)
+-   **Observability & Diagnostics**:
+    -   [RL Monitoring and Profiling with Google Cloud ML Diagnostics](https://github.com/google/tunix/blob/main/docs/ml_diagnostics.md)
+        for scalar metrics tracking and per-role (`actor` / `rollout`) XProf
+        profiling
 
 ## Getting Started
 

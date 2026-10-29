@@ -82,6 +82,10 @@ tuning workflows on top of the XLA and JAX infrastructure. See [Design Overview]
     -   Seamless multi-host distributed training with Pathways which can scale
         up to thousands of devices
     -   [Checkpointing and Fault Tolerance](https://tunix.readthedocs.io/en/latest/reliability.html)
+-   **Observability & Diagnostics**:
+    -   [RL Monitoring and Profiling with Google Cloud ML Diagnostics](https://github.com/google/tunix/blob/main/docs/ml_diagnostics.md)
+        for scalar metrics tracking and per-role (`actor` / `rollout`) XProf
+        profiling
 
 ## Getting Started
 
