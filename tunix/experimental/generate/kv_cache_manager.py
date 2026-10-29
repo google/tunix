@@ -106,6 +106,13 @@ class CacheConfig:
       return 1
     return self.mesh.shape[self.dp_axis]
 
+  @property
+  def tp_size(self) -> int:
+    """The tensor parallel size, i.e. the size of `tp_axis`."""
+    if not self.tp_axis or self.mesh is None:
+      return 1
+    return self.mesh.shape[self.tp_axis]
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class CacheGeometry:
@@ -135,11 +142,25 @@ def _derive_kv_geometry(
     head_dim: int,
 ) -> tuple[int, int, int]:
   """Derives the shape of a KV cache element."""
-  kv_packing = utils.get_dtype_packing(config.dtype)
-  if (2 * num_kv_heads) % kv_packing != 0:
+  tp_size = config.tp_size
+  if num_kv_heads < tp_size:
+    if tp_size % num_kv_heads != 0:
+      raise ValueError(
+          f"tp_size ({tp_size}) must be divisible by "
+          f"num_kv_heads ({num_kv_heads})."
+      )
+    num_kv_heads = tp_size
+  elif num_kv_heads % tp_size != 0:
     raise ValueError(
-        f"2 * num_kv_heads ({2 * num_kv_heads}) must be divisible by "
-        f"kv_packing ({kv_packing})."
+        f"num_kv_heads ({num_kv_heads}) must be divisible by "
+        f"tp_size ({tp_size})."
+    )
+
+  kv_packing = utils.get_dtype_packing(config.dtype)
+  if (2 * (num_kv_heads // tp_size)) % kv_packing != 0:
+    raise ValueError(
+        f"2 * (num_kv_heads // tp_size) ({2 * (num_kv_heads // tp_size)}) must "
+        f"be divisible by kv_packing ({kv_packing})."
     )
 
   packed_kv_dim = (2 * num_kv_heads) // kv_packing

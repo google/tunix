@@ -60,20 +60,6 @@ class PagedAttnMetadata:
   decode_only: bool = struct.field(pytree_node=False, default=False)
 
 
-def _shardable_tp_axis(
-    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
-    tp_axis: str | None,
-    *dim_sizes: int,
-) -> str | None:
-  """Returns `tp_axis` if every `dim_size` is divisible by its mesh size."""
-  if tp_axis is None or tp_axis not in mesh.shape:
-    return None
-  tp_size = mesh.shape[tp_axis]
-  if any(d % tp_size != 0 for d in dim_sizes):
-    return None
-  return tp_axis
-
-
 def paged_attention(
     queries: jax.Array,
     keys: jax.Array,
@@ -152,33 +138,35 @@ def paged_attention(
         v_scale=v_scale,
     )
 
-  # Q heads may be sharded independently of KV heads only for MQA (one KV
-  # head); otherwise Q must follow KV to preserve GQA head grouping.
-  kv_tp_axis = _shardable_tp_axis(
-      mesh, tp_axis, queries.shape[1], keys.shape[1], kv_cache.shape[2]
-  )
-  q_tp_axis = (
-      _shardable_tp_axis(mesh, tp_axis, queries.shape[1])
-      if keys.shape[1] == 1
-      else kv_tp_axis
-  )
-  q_spec = P(None, q_tp_axis, None)
-  kv_spec = P(None, kv_tp_axis, None)
-  cache_spec = P(None, None, kv_tp_axis, None, None)
+  tp_spec = tp_axis if tp_axis in mesh.shape else None
+  if tp_spec is not None:
+    tp_size = mesh.shape[tp_spec]
+    if keys.shape[1] < tp_size:
+      if tp_size % keys.shape[1] != 0:
+        raise ValueError(
+            f'tp_size ({tp_size}) must be divisible by '
+            f'num_kv_heads ({keys.shape[1]}).'
+        )
+      reps = tp_size // keys.shape[1]
+      keys = jnp.repeat(keys, reps, axis=1)
+      values = jnp.repeat(values, reps, axis=1)
+
+  qkv_spec = P(None, tp_spec, None)
+  cache_spec = P(None, None, tp_spec, None, None)
   return shard_map(
       _call_paged_attention,
       mesh=mesh,
       in_specs=(
-          q_spec,  # queries
-          kv_spec,  # keys
-          kv_spec,  # values
+          qkv_spec,  # queries
+          qkv_spec,  # keys
+          qkv_spec,  # values
           cache_spec,  # kv_cache
           P(),  # kv_lens
           P(),  # page_indices
           P(),  # query_lens
           P(),  # distribution
       ),
-      out_specs=(q_spec, cache_spec),
+      out_specs=(qkv_spec, cache_spec),
       check_rep=False,
   )(
       queries,
