@@ -1251,6 +1251,28 @@ class TrajectoryError:
 
 TUNIX_EXTENSIONS_KEY: Final[str] = "_tunix_extensions"
 
+# Key in `extra[TUNIX_EXTENSIONS_KEY]` listing `TunixAgentStep` array fields that
+# were omitted from the packed extensions because they duplicate `Step.metrics`.
+# `TunixAgentStep.from_atif_step` restores the listed fields from `metrics`.
+_RESTORED_FROM_METRICS_KEY: Final[str] = "_restored_from_metrics"
+
+# `TunixAgentStep` array fields and the `Metrics` fields that may duplicate them.
+_AGENT_STEP_METRICS_DUPLICATES: Final[tuple[tuple[str, str], ...]] = (
+    ("assistant_tokens", "completion_token_ids"),
+    ("logprobs", "logprobs"),
+)
+
+
+def _arrays_equal(lhs: Any, rhs: Any) -> bool:
+  """Returns whether two 1-D numeric sequences have identical values."""
+  lhs_arr = np.asarray(lhs)
+  rhs_arr = np.asarray(rhs)
+  if lhs_arr.shape != rhs_arr.shape:
+    return False
+  if lhs_arr.dtype.kind == "f" or rhs_arr.dtype.kind == "f":
+    return bool(np.array_equal(lhs_arr, rhs_arr, equal_nan=True))
+  return bool(np.array_equal(lhs_arr, rhs_arr))
+
 
 class TunixAgentStep(Step):
   """A single turn/interaction agent step with Tunix RL extensions."""
@@ -1344,16 +1366,92 @@ class TunixAgentStep(Step):
         )
     return self
 
+  def _fields_duplicated_in_metrics(self) -> list[str]:
+    """Returns array fields whose values are identical to a `metrics` field."""
+    if self.metrics is None:
+      return []
+    duplicated = []
+    for step_field, metrics_field in _AGENT_STEP_METRICS_DUPLICATES:
+      step_value = getattr(self, step_field)
+      metrics_value = getattr(self.metrics, metrics_field)
+      if (
+          step_value is not None
+          and metrics_value is not None
+          and _arrays_equal(step_value, metrics_value)
+      ):
+        duplicated.append(step_field)
+    return duplicated
+
   def to_atif_step(self, step_id_offset: int = 1) -> Step:
-    """Converts this 0-indexed Tunix step to a 1-indexed base ATIF Step."""
-    return super().to_atif_step(step_id_offset=step_id_offset)
+    """Converts this 0-indexed Tunix step to a 1-indexed base ATIF Step.
+
+    `assistant_tokens` and `logprobs` are omitted from the packed extensions
+    when they are identical to `metrics.completion_token_ids` and
+    `metrics.logprobs`, so each array is serialized once; `from_atif_step`
+    restores them from `metrics`. This step is never mutated.
+
+    Args:
+      step_id_offset: Offset added to `step_id` for the ATIF step.
+
+    Returns:
+      The base ATIF Step.
+    """
+    duplicated = self._fields_duplicated_in_metrics()
+    if not duplicated:
+      return super().to_atif_step(step_id_offset=step_id_offset)
+
+    stripped = self.model_copy(update=dict.fromkeys(duplicated))
+    atif_step = super(TunixAgentStep, stripped).to_atif_step(
+        step_id_offset=step_id_offset
+    )
+    extra = dict(atif_step.extra or {})
+    extensions = dict(extra.get(TUNIX_EXTENSIONS_KEY) or {})
+    for field in duplicated:
+      extensions.pop(field, None)
+    extensions[_RESTORED_FROM_METRICS_KEY] = duplicated
+    extra[TUNIX_EXTENSIONS_KEY] = extensions
+    return atif_step.model_copy(update={"extra": extra})
 
   @classmethod
   def from_atif_step(
       cls, step: Step, step_id_offset: int = 1
   ) -> TunixAgentStep:
-    """Rehydrates a 1-indexed ATIF Step into a 0-indexed TunixAgentStep."""
-    return _unpack_step_from_atif(step, cls, step_id_offset=step_id_offset)
+    """Rehydrates a 1-indexed ATIF Step into a 0-indexed TunixAgentStep.
+
+    Restores `assistant_tokens` and `logprobs` from `metrics` when
+    `to_atif_step` omitted them as duplicates.
+
+    Args:
+      step: The base ATIF Step to rehydrate.
+      step_id_offset: Offset subtracted from `step_id`.
+
+    Returns:
+      The rehydrated TunixAgentStep.
+    """
+    tunix_step = _unpack_step_from_atif(step, cls, step_id_offset=step_id_offset)
+    extra = tunix_step.extra
+    extensions = (extra or {}).get(TUNIX_EXTENSIONS_KEY)
+    if (
+        not isinstance(extensions, dict)
+        or _RESTORED_FROM_METRICS_KEY not in extensions
+    ):
+      return tunix_step
+
+    extensions = dict(extensions)
+    restored_fields = set(extensions.pop(_RESTORED_FROM_METRICS_KEY) or ())
+    extra = dict(extra or {})
+    if extensions:
+      extra[TUNIX_EXTENSIONS_KEY] = extensions
+    else:
+      extra.pop(TUNIX_EXTENSIONS_KEY, None)
+
+    update: dict[str, Any] = {"extra": extra or None}
+    if tunix_step.metrics is not None:
+      for step_field, metrics_field in _AGENT_STEP_METRICS_DUPLICATES:
+        metrics_value = getattr(tunix_step.metrics, metrics_field)
+        if step_field in restored_fields and metrics_value is not None:
+          update[step_field] = list(metrics_value)
+    return tunix_step.model_copy(update=update)
 
 
 class TunixEnvStep(Step):
