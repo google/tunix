@@ -398,6 +398,59 @@ class CommonTest(parameterized.TestCase):
               rtol=1e-5,
           )
 
+  def test_make_completion_mask_from_lengths(self):
+    completion_mask = common.make_completion_mask_from_lengths([4, 3, 2, 1], 4)
+    expected_value = np.array([
+        [1, 1, 1, 1],
+        [1, 1, 1, 0],
+        [1, 1, 0, 0],
+        [1, 0, 0, 0],
+    ])
+    np.testing.assert_allclose(completion_mask, expected_value)
+
+  def test_make_completion_mask_from_lengths_keeps_eos_when_pad_is_eos(self):
+    # A tokenizer without a pad token makes `pad_id` fall back to the EOS id
+    # (`TokenizerAdapter.pad_id`), and the rollout keeps the stop token in the
+    # ids it returns. An `ids != pad_id` mask therefore drops the generated
+    # EOS; the lengths the rollout reports still cover it.
+    eos_tok = pad_tok = 7
+    rollout_tokens = [
+        [1, 2, eos_tok],
+        [1, 2, 3, 4],  # hit the length cap, no EOS
+    ]
+    padded_completion_ids = np.array(
+        [t + [pad_tok] * (4 - len(t)) for t in rollout_tokens], dtype=np.int32
+    )
+
+    completion_mask = common.make_completion_mask_from_lengths(
+        [len(t) for t in rollout_tokens], 4
+    )
+    expected_value = np.array([
+        [1, 1, 1, 0],
+        [1, 1, 1, 1],
+    ])
+    np.testing.assert_allclose(completion_mask, expected_value)
+
+    # The id comparison the learners used to do zeroes the EOS at index 2.
+    np.testing.assert_allclose(
+        np.not_equal(padded_completion_ids, pad_tok),
+        np.array([[1, 1, 0, 0], [1, 1, 1, 1]]),
+    )
+
+  def test_make_completion_mask_from_lengths_clips_overlong_lengths(self):
+    completion_mask = common.make_completion_mask_from_lengths([5, 0], 3)
+    expected_value = np.array([
+        [1, 1, 1],
+        [0, 0, 0],
+    ])
+    np.testing.assert_allclose(completion_mask, expected_value)
+
+  def test_make_completion_mask_from_lengths_rejects_bad_args(self):
+    with self.assertRaisesRegex(ValueError, "must be 1-D"):
+      common.make_completion_mask_from_lengths([[1, 2], [3, 4]], 4)
+    with self.assertRaisesRegex(ValueError, "must be non-negative"):
+      common.make_completion_mask_from_lengths([1, 2], -1)
+
   def test_np_make_completion_mask(self):
     completion_ids = np.array(
         [

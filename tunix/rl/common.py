@@ -1395,6 +1395,50 @@ def compute_score(
   return per_token_scores
 
 
+def make_completion_mask_from_lengths(
+    completion_lengths: Sequence[int] | np.ndarray,
+    completion_width: int,
+) -> np.ndarray:
+  """Builds a completion mask from the rollout's unpadded completion lengths.
+
+  Deriving the mask from token ids with ``ids != pad_id`` cannot tell a
+  generated EOS token from the right padding whenever the two share an id.
+  ``TokenizerAdapter.pad_id`` falls back to the EOS id for tokenizers that
+  ship without a pad token (e.g. Llama 3), and the rollout deliberately keeps
+  the stop token in the ids it returns, so under those tokenizers the real EOS
+  is masked out of the loss and out of the token denominator. Lengths are
+  exact and do not depend on the pad and EOS ids being distinct, nor on which
+  of a model's declared stop ids the rollout actually halted on.
+
+  Args:
+    completion_lengths: Unpadded completion length per row, as reported by the
+      rollout. Lengths over `completion_width` are clipped, matching
+      `pad_to_length`, which leaves an over-long completion untruncated.
+    completion_width: Padded completion width, i.e.
+      `max_tokens_to_generate`.
+
+  Returns:
+    `[B, completion_width]` int32 mask, 1 on generated tokens, 0 on padding.
+
+  Raises:
+    ValueError: If `completion_lengths` is not one-dimensional, or
+      `completion_width` is negative.
+  """
+  lengths = np.asarray(completion_lengths, dtype=np.int32)
+  if lengths.ndim != 1:
+    raise ValueError(
+        "completion_lengths must be 1-D, one length per row; got shape"
+        f" {lengths.shape}."
+    )
+  if completion_width < 0:
+    raise ValueError(
+        f"completion_width must be non-negative; got {completion_width}."
+    )
+  lengths = np.clip(lengths, 0, completion_width)
+  positions = np.arange(completion_width, dtype=np.int32)
+  return (positions[None, :] < lengths[:, None]).astype(np.int32)
+
+
 def np_make_completion_mask(
     completion_ids: np.ndarray, eos_tok: int = 0
 ) -> np.ndarray:

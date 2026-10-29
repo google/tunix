@@ -201,20 +201,26 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         )
         for completion_ids in rollout_output.tokens
     ])
+    completion_lengths = [len(t) for t in rollout_output.tokens]
     prompt_ids = jnp.array(rollout_output.left_padded_prompt_tokens)
     # Router replay: lay the rollout's routing out over the same
     # `[prompt | completion]` padding the token ids just got, so a replayed
     # expert stays attached to the token it was captured for.
     routed_experts = common.align_routed_experts(
         rollout_output.routed_experts,
-        completion_lengths=[len(t) for t in rollout_output.tokens],
+        completion_lengths=completion_lengths,
         prompt_width=prompt_ids.shape[-1],
         completion_width=rollout_config.max_tokens_to_generate,
     )
 
     # Assemble masks
     prompt_mask = prompt_ids != pad_value
-    completion_mask = np.not_equal(padded_completion_ids, pad_value)
+    # Mask from the rollout's lengths, not `ids != pad_value`: the two differ
+    # when `pad_id == eos_id`, where the id comparison also masks out the
+    # generated EOS token.
+    completion_mask = common.make_completion_mask_from_lengths(
+        completion_lengths, rollout_config.max_tokens_to_generate
+    )
 
     # Convert completion_ids and completion_mask to jax arrays
     jax_completion_ids = jnp.array(padded_completion_ids)
