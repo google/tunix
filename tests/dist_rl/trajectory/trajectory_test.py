@@ -2889,6 +2889,106 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
       step_cls.from_atif_step(atif_step)
 
 
+class AgentStepMetricsDeduplicationTest(trajectory_testing.TrajectoryTestCase):
+  """Covers omitting `TunixAgentStep` arrays that duplicate `Step.metrics`."""
+
+  def _make_step(self, **metrics_overrides: Any) -> trajectory.TunixAgentStep:
+    metrics_kwargs = dict(
+        completion_tokens=3,
+        completion_token_ids=[7, 8, 9],
+        logprobs=[-0.5, -0.25, -0.125],
+    )
+    metrics_kwargs.update(metrics_overrides)
+    return trajectory.TunixAgentStep(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="hi",
+        metrics=trajectory.Metrics(**metrics_kwargs),
+        assistant_tokens=np.array([7, 8, 9]),
+        assistant_masks=np.array([1, 1, 1]),
+        logprobs=np.array([-0.5, -0.25, -0.125], dtype=np.float32),
+        extra={"user_key": "val"},
+    )
+
+  def _extensions(self, atif_step: trajectory.Step) -> dict[str, Any]:
+    assert atif_step.extra is not None
+    return atif_step.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+
+  def test_to_atif_step_omits_arrays_duplicated_in_metrics(self):
+    atif_step = self._make_step().to_atif_step()
+
+    extensions = self._extensions(atif_step)
+    self.assertNotIn("assistant_tokens", extensions)
+    self.assertNotIn("logprobs", extensions)
+    self.assertEqual(
+        extensions["_restored_from_metrics"], ["assistant_tokens", "logprobs"]
+    )
+    # Arrays without a metrics counterpart are still packed.
+    self.assertEqual(extensions["assistant_masks"], [1, 1, 1])
+    # The canonical copies remain on the ATIF-standard `metrics` field.
+    self.assertEqual(atif_step.metrics.completion_token_ids, [7, 8, 9])
+    self.assertEqual(atif_step.metrics.logprobs, [-0.5, -0.25, -0.125])
+
+  def test_round_trip_through_json_is_lossless(self):
+    tunix_step = self._make_step()
+
+    atif_json = tunix_step.to_atif_step().model_dump_json(exclude_none=True)
+    rehydrated_step = trajectory.TunixAgentStep.from_atif_step(
+        trajectory.Step.model_validate_json(atif_json)
+    )
+
+    self.assertStepEqual(rehydrated_step, tunix_step)
+    self.assertEqual(rehydrated_step.extra, {"user_key": "val"})
+    np.testing.assert_array_equal(rehydrated_step.assistant_tokens, [7, 8, 9])
+    np.testing.assert_array_equal(
+        rehydrated_step.logprobs, [-0.5, -0.25, -0.125]
+    )
+
+  def test_to_atif_step_keeps_arrays_that_differ_from_metrics(self):
+    tunix_step = self._make_step(logprobs=[-1.0, -1.0, -1.0])
+
+    atif_step = tunix_step.to_atif_step()
+
+    extensions = self._extensions(atif_step)
+    self.assertNotIn("assistant_tokens", extensions)
+    self.assertEqual(extensions["logprobs"], [-0.5, -0.25, -0.125])
+    self.assertEqual(extensions["_restored_from_metrics"], ["assistant_tokens"])
+    self.assertStepEqual(
+        trajectory.TunixAgentStep.from_atif_step(atif_step), tunix_step
+    )
+
+  def test_to_atif_step_without_metrics_packs_all_arrays(self):
+    tunix_step = self._make_step().model_copy(update={"metrics": None})
+
+    extensions = self._extensions(tunix_step.to_atif_step())
+
+    self.assertEqual(extensions["assistant_tokens"], [7, 8, 9])
+    self.assertEqual(extensions["logprobs"], [-0.5, -0.25, -0.125])
+    self.assertNotIn("_restored_from_metrics", extensions)
+
+  def test_to_atif_step_does_not_mutate_source_step(self):
+    tunix_step = self._make_step()
+
+    tunix_step.to_atif_step()
+
+    np.testing.assert_array_equal(tunix_step.assistant_tokens, [7, 8, 9])
+    np.testing.assert_array_equal(
+        tunix_step.logprobs, [-0.5, -0.25, -0.125]
+    )
+    self.assertEqual(tunix_step.extra, {"user_key": "val"})
+
+  def test_from_atif_step_on_legacy_duplicated_payload_is_unchanged(self):
+    # Steps persisted before deduplication carry both copies and no marker.
+    tunix_step = self._make_step()
+    legacy_atif_step = trajectory.Step.to_atif_step(tunix_step, step_id_offset=1)
+    self.assertIn("assistant_tokens", self._extensions(legacy_atif_step))
+
+    rehydrated_step = trajectory.TunixAgentStep.from_atif_step(legacy_atif_step)
+
+    self.assertStepEqual(rehydrated_step, tunix_step)
+    self.assertEqual(rehydrated_step.extra, {"user_key": "val"})
+
+
 class Int3DArraySerializationTest(parameterized.TestCase):
   """Tests compact base64 binary serialization and validation for Int3DArray."""
 
