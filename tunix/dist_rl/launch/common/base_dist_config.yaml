@@ -185,6 +185,24 @@ vllm_config:
   data_parallel_size: null
   tensor_parallel_size: null
   dtype: "bfloat16"
+  # Distributed rollout settings, validated by `DistHyperParameters` and read
+  # by the rollout node and the orchestrator.
+  # Capture the MoE experts each token was routed to, so the trainer can replay
+  # them (needs a vLLM `rollout_engine`, not "vanilla").
+  return_routed_experts: false
+  # Compact encoding for captured routed experts, one of
+  # `tunix.common.datatypes.ROUTED_EXPERTS_ENCODE_MODES`.
+  routed_experts_encode_mode: "auto"
+  # Experts per MoE layer (E), a positive int or null; captured ids >= E are
+  # rejected. With `routed_experts_encode_mode: "auto"`, the tier comes from E
+  # instead of the ids seen.
+  routed_experts_num_experts: null
+  # Detokenize vLLM outputs so `SamplingResponse.text` is populated (vLLM
+  # engines only). Agentic recipes that parse the action from the completion
+  # text need this.
+  detokenize: false
+  # Free-form vLLM engine arguments (`VLLM_ADDITIONAL_CONFIG_JSON`). The typed
+  # keys above are rejected here.
   kwargs: {}
 
 offload_to_cpu: false

@@ -218,6 +218,54 @@ weight_sync_config:
     with self.assertRaisesRegex(ValueError, "warmup_ratio must be in"):
       warmup_steps(f"{opt_key}.decay_steps=10", f"{opt_key}.warmup_ratio=1.5")
 
+  def test_typed_vllm_rollout_settings(self):
+    vllm = resolve_config.initialize([]).config["vllm_config"]
+    self.assertFalse(vllm["return_routed_experts"])
+    self.assertEqual(vllm["routed_experts_encode_mode"], "auto")
+    self.assertIsNone(vllm["routed_experts_num_experts"])
+    self.assertFalse(vllm["detokenize"])
+    self.assertEqual(vllm["kwargs"], {})
+
+    vllm = resolve_config.initialize([
+        "vllm_config.return_routed_experts=true",
+        "vllm_config.routed_experts_encode_mode=uint10",
+        "vllm_config.routed_experts_num_experts=256",
+        "vllm_config.detokenize=true",
+    ]).config["vllm_config"]
+    self.assertIs(vllm["return_routed_experts"], True)
+    self.assertEqual(vllm["routed_experts_encode_mode"], "uint10")
+    self.assertEqual(vllm["routed_experts_num_experts"], 256)
+    self.assertIs(vllm["detokenize"], True)
+    # The typed settings stay out of the free-form vLLM engine arguments.
+    self.assertEqual(vllm["kwargs"], {})
+
+  def test_invalid_vllm_rollout_settings_fail_loud(self):
+    with self.assertRaisesRegex(ValueError, "routed_experts_encode_mode"):
+      resolve_config.initialize(["vllm_config.routed_experts_encode_mode=int8"])
+    with self.assertRaisesRegex(ValueError, "routed_experts_num_experts"):
+      resolve_config.initialize(["vllm_config.routed_experts_num_experts=0"])
+    with self.assertRaisesRegex(ValueError, "needs a vLLM rollout_engine"):
+      resolve_config.initialize([
+          "rollout_engine=vanilla",
+          "vllm_config.return_routed_experts=true",
+      ])
+    with self.assertRaisesRegex(TypeError, "vllm_config.detokenize"):
+      resolve_config.initialize(["vllm_config.detokenize=yes_please"])
+
+  def test_typed_vllm_keys_rejected_in_free_form_kwargs(self):
+    with self.assertRaisesRegex(
+        ValueError, r"\['detokenize', 'return_routed_experts'\].*typed keys"
+    ):
+      resolve_config.initialize([
+          "vllm_config.kwargs.return_routed_experts=true",
+          "vllm_config.kwargs.detokenize=true",
+      ])
+    # Other free-form engine arguments are still accepted.
+    vllm = resolve_config.initialize(
+        ["vllm_config.kwargs.attention=flash"]
+    ).config["vllm_config"]
+    self.assertEqual(vllm["kwargs"], {"attention": "flash"})
+
   def test_render_bash_exports_evaluates_in_bash(self):
     hp = resolve_config.initialize([
         "model_config.model_name=Qwen3-0.6B",

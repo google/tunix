@@ -38,6 +38,7 @@ import sys
 from typing import Any, Final, TypedDict
 
 from tunix.cli import config as cli_config
+from tunix.common import datatypes as common_datatypes
 
 LAUNCH_DIR = pathlib.Path(__file__).parent
 REPO_ROOT = LAUNCH_DIR.parents[3]
@@ -207,12 +208,14 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
             f" ({actor_axes['fsdp']}) when model_source='maxtext'."
         )
 
-  vllm_tp = hp.config_mapping("vllm_config")["tensor_parallel_size"]
+  vllm = hp.config_mapping("vllm_config")
+  vllm_tp = vllm["tensor_parallel_size"]
   if vllm_tp is not None and int(vllm_tp) != rollout_axes["tp"]:
     raise ValueError(
         f"vllm_config.tensor_parallel_size ({vllm_tp}) must match"
         f" rollout_model_config.mesh tp ({rollout_axes['tp']})."
     )
+  _validate_typed_vllm_settings(hp)
 
   for role_key in (
       "actor_model_config",
@@ -258,6 +261,38 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
           f" ({trajectories}) must be divisible by"
           f" rl_training_config.train_micro_batch_size ({micro_batch})."
       )
+
+
+# Rollout settings promoted from the free-form `vllm_config.kwargs` to typed
+# `vllm_config` keys.
+_TYPED_VLLM_KEYS = (
+    "return_routed_experts",
+    "routed_experts_encode_mode",
+    "routed_experts_num_experts",
+    "detokenize",
+)
+
+
+def _validate_typed_vllm_settings(hp: cli_config.HyperParameters) -> None:
+  """Validates the typed `vllm_config` rollout settings."""
+  vllm = hp.config_mapping("vllm_config")
+  promoted = sorted(set(_TYPED_VLLM_KEYS) & set(vllm["kwargs"]))
+  if promoted:
+    raise ValueError(
+        f"vllm_config.kwargs sets {promoted}, which are typed keys now; set"
+        f" vllm_config.<key> instead (e.g. vllm_config.{promoted[0]})."
+    )
+  for key in ("return_routed_experts", "detokenize"):
+    if not isinstance(vllm[key], bool):
+      raise TypeError(f"vllm_config.{key} must be a bool, got {vllm[key]!r}.")
+  common_datatypes.validate_routed_experts_encode_config(
+      vllm["routed_experts_encode_mode"], vllm["routed_experts_num_experts"]
+  )
+  if vllm["return_routed_experts"] and hp.config["rollout_engine"] == "vanilla":
+    raise ValueError(
+        "vllm_config.return_routed_experts needs a vLLM rollout_engine; the"
+        " vanilla sampler does not capture routed experts."
+    )
 
 
 _MODEL_DTYPES = ("bfloat16", "float32")
