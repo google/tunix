@@ -62,7 +62,7 @@ _BACKEND_COMPILE_EVENT = "/jax/core/compile/backend_compile_duration"
 # Names of the jitted trainer step bodies as they appear in compile events;
 # `traced_*` are the wrappers installed by `_build_trainer` below.
 _STEP_EXECUTABLES = ("traced_fwd_bwd", "traced_update", "_eval_step")
-_MAXTEXT_STEP_EXECUTABLES = ("fwd_bwd", "fwd_bwd_accum", "update", "kernel")
+_MAXTEXT_STEP_EXECUTABLES = ("fwd_bwd", "accumulate", "update", "kernel")
 
 
 def _rollouts(
@@ -295,19 +295,25 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
         wrap_with_tunix_adapter=True,
         tokenizer_pad_id=0,
     )
-    trace_counts = {"fwd_bwd": 0, "update": 0}
+    trace_counts = {"fwd_bwd": 0, "accumulate": 0, "update": 0}
     orig_fwd_bwd = engine._fwd_bwd_kernel
+    orig_accumulate = engine._accumulate_kernel
     orig_update = engine._update_kernel
 
     def traced_fwd_bwd(*args, **kwargs):
       trace_counts["fwd_bwd"] += 1
       return orig_fwd_bwd(*args, **kwargs)
 
+    def traced_accumulate(*args, **kwargs):
+      trace_counts["accumulate"] += 1
+      return orig_accumulate(*args, **kwargs)
+
     def traced_update(*args, **kwargs):
       trace_counts["update"] += 1
       return orig_update(*args, **kwargs)
 
     engine._fwd_bwd_kernel = traced_fwd_bwd
+    engine._accumulate_kernel = traced_accumulate
     engine._update_kernel = traced_update
     return engine, trace_counts
 
@@ -507,9 +513,9 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
         can_fuse_agreement_in_loss=can_fuse_agreement_in_loss,
     )
 
-    # `compile_kernels` lowers both `fwd_bwd` and `fwd_bwd_accum` (2 traces of
-    # `_fwd_bwd_kernel`) and `update` (1 trace of `_update_kernel`).
-    self.assertEqual(trace_counts, {"fwd_bwd": 2, "update": 1})
+    # `compile` lowers `fwd_bwd`, `accumulate`, and `update` (1 trace each of
+    # `_fwd_bwd_kernel`, `_accumulate_kernel`, and `_update_kernel`).
+    self.assertEqual(trace_counts, {"fwd_bwd": 1, "accumulate": 1, "update": 1})
     compiled_at_configure = self._compiled_step_executables(
         _MAXTEXT_STEP_EXECUTABLES
     )
