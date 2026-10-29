@@ -37,6 +37,7 @@ if REPO_ROOT not in sys.path:
 # pylint: disable=g-import-not-at-top
 from tunix.common import configs as common_configs
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.distributed.runtime import context as runtime_context
 from tunix.dist_rl.examples.frozenlake_dist import frozenlake
@@ -374,6 +375,13 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       format="%(asctime)s - [FrozenLakeOrchestrator] %(message)s",
       force=True,
   )
+  otel_enabled = otel_setup.setup_metrics(
+      default_service_name="tunix-orchestrator",
+      resource_attributes={
+          "tunix.role": "orchestrator",
+          "tunix.run_id": args.run_id,
+      },
+  )
   logging.info(
       "Starting distributed FrozenLake: model=%s full_batch=%d "
       "mini_batch=%d generations=%d steps=%d turns=%d weight_sync=%s",
@@ -445,6 +453,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       project_name=args.wandb_project,
       run_name=args.wandb_run_name,
       flush_every_n_steps=args.flush_every_n_steps,
+      enable_opentelemetry=otel_enabled,
       backend_kwargs={"wandb": {"config": vars(args)}},
   )
   program = rl_program.StandardRLProgram(
