@@ -47,6 +47,7 @@ if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
 
 from tunix.dist_rl.common import datatypes  # pylint: disable=g-import-not-at-top
+from tunix.dist_rl.common import otel_setup  # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.distributed.runtime import context as runtime_context  # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.examples.math_gsm8k_dist import gsm8k  # pylint: disable=g-import-not-at-top
 from tunix.dist_rl.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
@@ -409,6 +410,14 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
 
+  otel_enabled = otel_setup.setup_metrics(
+      default_service_name="tunix-orchestrator",
+      resource_attributes={
+          "tunix.role": "orchestrator",
+          "tunix.run_id": args.run_id,
+      },
+  )
+
   logging.info("=== Starting Distributed GSM8K GRPO Orchestrator ===")
   logging.info(
       "Configuration: model_id=%s, batch_size=%d (prompt groups), "
@@ -488,6 +497,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       project_name=args.wandb_project,
       run_name=args.wandb_run_name,
       flush_every_n_steps=args.flush_metrics_every_n_steps,
+      enable_opentelemetry=otel_enabled,
       backend_kwargs={
           "wandb": {
               "config": vars(args),

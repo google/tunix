@@ -35,6 +35,7 @@ from orbax import checkpoint as ocp
 from tunix.cli import config as cli_config
 from tunix.cli.utils import model as model_utils
 from tunix.common import configs as common_configs
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.worker import remote_execution
@@ -545,6 +546,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " MaxText's training engine profiler ignores this for now."
       ),
   )
+  parser.add_argument(
+      "--run_id",
+      type=str,
+      default=os.getenv("RUN_ID", ""),
+      help="Run identifier shared between orchestrator and trainer workers.",
+  )
   return parser.parse_args(argv)
 
 
@@ -943,6 +950,15 @@ def main(argv: list[str], context: Any = None) -> None:
   )
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
+
+  otel_setup.setup_metrics(
+      default_service_name="tunix-trainer",
+      resource_attributes={
+          "tunix.worker_id": args.worker_id,
+          "tunix.role": "trainer",
+          "tunix.run_id": args.run_id,
+      },
+  )
 
   if context:
     context.jax.initialize()

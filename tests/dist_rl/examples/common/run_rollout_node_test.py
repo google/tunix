@@ -24,6 +24,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from tunix.dist_rl.common import gcs_cache
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.examples.common import run_rollout_node
 from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import vllm_sampler
@@ -262,6 +263,7 @@ class RunRolloutNodeTest(absltest.TestCase):
 
     with (
         mock.patch.object(run_rollout_node.importlib, "import_module"),
+        mock.patch.object(otel_setup, "setup_metrics") as mock_otel_setup,
         mock.patch.object(
             gcs_cache,
             "restore_jax_cache",
@@ -271,8 +273,23 @@ class RunRolloutNodeTest(absltest.TestCase):
         ) as mock_restore,
     ):
       with self.assertRaisesRegex(RuntimeError, "stop at jax init"):
-        run_rollout_node.main(["--sampler=vanilla"], context=context)
+        run_rollout_node.main(
+            [
+                "--sampler=vanilla",
+                "--worker_id=rollout-7",
+                "--run_id=run_123",
+            ],
+            context=context,
+        )
 
+    mock_otel_setup.assert_called_once_with(
+        default_service_name="tunix-rollout",
+        resource_attributes={
+            "tunix.worker_id": "rollout-7",
+            "tunix.role": "rollout",
+            "tunix.run_id": "run_123",
+        },
+    )
     mock_restore.assert_called_once()
     self.assertEqual(mock_restore.call_args.kwargs["params"].sampler, "vanilla")
     self.assertEqual(events, ["restore:vanilla", "jax_init"])

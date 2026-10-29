@@ -1,0 +1,134 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Standalone OpenTelemetry Collector Deployment and Service for dist_rl on GKE.
+#
+# Deploys a dedicated OTLP gRPC endpoint (http://${JOBSET_NAME}:${USER_CONTAINER_PORT},
+# e.g. http://${USER}-otel:4317) decoupled from the orchestrator, trainer, and
+# rollout worker lifecycles so any recipe can export metrics independently.
+# Intentionally omits hostNetwork, exclusive-topology, and CPU machine
+# nodeSelector so the collector co-exists with the orchestrator on single-CPU-node
+# clusters.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${JOBSET_NAME}-config
+  namespace: ${NAMESPACE}
+data:
+  otel-collector.yaml: |
+    extensions:
+      file_storage:
+        directory: /tmp/otelcol-storage
+        create_directory: true
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:${USER_CONTAINER_PORT}
+    processors:
+      batch:
+        timeout: 5s
+    exporters:
+      debug:
+        verbosity: basic
+      googlecloud:
+        sending_queue:
+          enabled: true
+          storage: file_storage
+    service:
+      extensions: [file_storage]
+      pipelines:
+        metrics:
+          receivers: [otlp]
+          processors: [batch]
+          # Default to [debug] so the collector starts on any cluster without
+          # requiring Cloud Monitoring IAM credentials; add googlecloud when
+          # Workload Identity is configured.
+          exporters: [debug]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${JOBSET_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${JOBSET_NAME}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${JOBSET_NAME}
+  template:
+    metadata:
+      labels:
+        app: ${JOBSET_NAME}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      tolerations:
+      - key: "cloud.google.com/gke-nodepool"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: otel-collector
+        image: otel/opentelemetry-collector-contrib:0.114.0@sha256:37fa87091cfaaec7234a27e4e395a40c31c2bfaea97a349a4afef6d9e9681197
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          capabilities:
+            drop:
+            - ALL
+        args:
+        - --config=/etc/otelcol-contrib/otel-collector.yaml
+        ports:
+        - containerPort: ${USER_CONTAINER_PORT}
+          name: grpc
+          protocol: TCP
+        volumeMounts:
+        - name: otel-collector-config
+          mountPath: /etc/otelcol-contrib
+          readOnly: true
+        - name: otel-collector-storage
+          mountPath: /tmp/otelcol-storage
+      volumes:
+      - name: otel-collector-config
+        configMap:
+          name: ${JOBSET_NAME}-config
+      - name: otel-collector-storage
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${JOBSET_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${JOBSET_NAME}
+spec:
+  type: ClusterIP
+  selector:
+    app: ${JOBSET_NAME}
+  ports:
+  - name: grpc
+    port: ${USER_CONTAINER_PORT}
+    targetPort: ${USER_CONTAINER_PORT}
+    protocol: TCP

@@ -95,6 +95,8 @@ WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 LOG_DIR=${LOG_DIR:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-}
 MODEL_DTYPE=${MODEL_DTYPE:-float32}
 MODEL_LOAD_DTYPE=${MODEL_LOAD_DTYPE:-float32}
 RUN_ID=${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_$$}
@@ -262,6 +264,7 @@ echo "Starting distributed FrozenLake with ${MODEL_ID}: full batch ${BATCH_SIZE}
     --checkpoint_save_interval_steps="$CHECKPOINT_SAVE_INTERVAL_STEPS"
     --checkpoint_max_to_keep="$CHECKPOINT_MAX_TO_KEEP"
     --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
+    --run_id="$RUN_ID"
   )
   if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" && "$MAX_SEQ_TOKEN_PER_TPU" != "0" ]]; then
     cmd+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
@@ -280,6 +283,8 @@ echo "Starting distributed FrozenLake with ${MODEL_ID}: full batch ${BATCH_SIZE}
   export TPU_HOST_BOUNDS
   export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   export PYTHONUNBUFFERED=1
+  export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT"
+  export OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-tunix-trainer}"
   exec "${cmd[@]}" > "$TRAINER_LOG" 2>&1
 ) &
 TRAINER_PID=$!
@@ -335,6 +340,8 @@ TRAINER_PID=$!
   export TPU_HOST_BOUNDS
   export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   export PYTHONUNBUFFERED=1
+  export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT"
+  export OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-tunix-rollout}"
   exec "${cmd[@]}" > "$ROLLOUT_LOG" 2>&1
 ) &
 ROLLOUT_PID=$!
@@ -400,6 +407,8 @@ is_true "$DEBUG" && cmd+=(--debug)
 export JAX_PLATFORMS=cpu
 export PYTHONUNBUFFERED=1
 export WANDB_PROJECT WANDB_RUN_NAME WANDB_API_KEY
+export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT"
+export OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-tunix-orchestrator}"
 "${cmd[@]}" > "$ORCHESTRATOR_LOG" 2>&1
 
 echo "Distributed FrozenLake finished. Logs: ${TRAINER_LOG}, ${ROLLOUT_LOG}, ${ORCHESTRATOR_LOG}"
