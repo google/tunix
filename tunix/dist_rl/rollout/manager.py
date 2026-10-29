@@ -233,16 +233,6 @@ class RolloutManager:
     agent = self.agent_factory(
         **request.metadata.get("agent_config", self.agent_config)
     )
-    collector_kwargs: dict[str, Any] = {
-        "routed_experts_encode_mode": self.config.routed_experts_encode_mode,
-        "routed_experts_num_experts": self.config.routed_experts_num_experts,
-    }
-    if request.stage_routed_experts:
-      collector_kwargs["max_prompt_length"] = self.config.max_prompt_length
-    if self.trajectory_store is not None:
-      collector_kwargs["trajectory_store"] = self.trajectory_store
-    if self.config.store_routed_experts:
-      collector_kwargs["store_routed_experts"] = True
     return collector_lib.TrajectoryCollectorEngine(
         traj_id=traj_id,
         request=request,
@@ -251,13 +241,12 @@ class RolloutManager:
         agent=agent,
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
-        # `RolloutConfig.eos_tokens` is the stop set the sampler runs with, and
-        # it overrides the tokenizer's own EOS. Collectors need it to tell a
-        # rollout that stopped on its own from one that exhausted its budget.
-        eos_ids=self.config.eos_tokens,
-        partial_rollout=self.config.partial_rollout,
+        config=self.config,
         policy_version_fn=lambda: self._policy_version,
-        **collector_kwargs,
+        trajectory_store=self.trajectory_store,
+        max_prompt_length=(
+            self.config.max_prompt_length if request.stage_routed_experts else None
+        ),
     )
 
   async def _generate_one(

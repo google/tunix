@@ -88,7 +88,6 @@ class RolloutWorkerTest(absltest.TestCase):
           prompt="What is 2+2?",
           prompt_id="prompt_1",
           group_index=0,
-          generation_kwargs={"max_generation_steps": 64},
           metadata={"lineage": ctx},
       )
 
@@ -141,7 +140,6 @@ class RolloutWorkerTest(absltest.TestCase):
               prompt=f"Prompt {idx}",
               prompt_id=f"prompt_batch_{idx}",
               group_index=idx,
-              generation_kwargs={"max_generation_steps": 64},
               metadata={"lineage": batch_ctxs[idx]},
           )
           for idx in range(2)
@@ -276,7 +274,6 @@ class RolloutWorkerTest(absltest.TestCase):
           prompt="What is 2+2?",
           prompt_id="prompt_1",
           group_index=0,
-          generation_kwargs={"max_generation_steps": 64},
       )
       responses = await self.worker.generate(collections.deque([req]))
       self.assertIsInstance(responses, list)
@@ -947,7 +944,6 @@ class RolloutWorkerOTelMetricsTest(absltest.TestCase):
         prompt="What is 2+2?",
         prompt_id="prompt_gen_1",
         group_index=0,
-        generation_kwargs={"max_generation_steps": 64},
     )
     resp = asyncio.run(
         self.worker.generate(req, on_complete=callback_responses.append)
@@ -1113,10 +1109,10 @@ class RolloutWorkerOTelMetricsTest(absltest.TestCase):
 
     class _BlockingSampler(mocks.MockBaseSamplerImpl):
 
-      async def sample(self, req, **kwargs):
+      async def sample(self, req):
         enter_sample.set()
         await release_sample.wait()
-        return await super().sample(req, **kwargs)
+        return await super().sample(req)
 
     worker_1 = rollout_worker.RolloutWorker(
         config=rollout_worker.RolloutConfig(),
@@ -1165,7 +1161,6 @@ class RolloutWorkerOTelMetricsTest(absltest.TestCase):
                   prompt="What is 2+2?",
                   prompt_id="p_inflight",
                   group_index=0,
-                  generation_kwargs={"max_generation_steps": 16},
               )
           )
       )
@@ -1290,8 +1285,10 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
         sampler_name="moe_sampler",
         default_delay=decode_sleep_s,
         response_tokens_per_turn=response_tokens_per_turn,
+        min_turns=0,
         routed_experts_shape_spec=(num_layers, top_k),
         num_experts=384,
+        config=cfg,
     )
     return rollout_worker.RolloutWorker(
         worker_id="rollout-moe-0",
@@ -1327,10 +1324,6 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
                 prompt_id="p_inline",
                 max_turns=1,
                 max_response_length=16,
-                generation_kwargs={
-                    "return_routed_experts": True,
-                    "force_finish": True,
-                },
                 metadata={"env_config": {"env_id": "e", "max_steps": 1}},
             )
         )
@@ -1350,10 +1343,6 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
                 max_turns=1,
                 max_response_length=16,
                 stage_routed_experts=True,
-                generation_kwargs={
-                    "return_routed_experts": True,
-                    "force_finish": True,
-                },
                 metadata={"env_config": {"env_id": "e", "max_steps": 1}},
             )
         )
@@ -1389,10 +1378,6 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
               max_turns=1,
               max_response_length=16,
               stage_routed_experts=True,
-              generation_kwargs={
-                  "return_routed_experts": True,
-                  "force_finish": True,
-              },
               metadata={"env_config": {"env_id": "e", "max_steps": 1}},
           )
       )
@@ -1422,10 +1407,6 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
               max_turns=1,
               max_response_length=16,
               stage_routed_experts=True,
-              generation_kwargs={
-                  "return_routed_experts": True,
-                  "force_finish": True,
-              },
               metadata={"env_config": {"env_id": "e", "max_steps": 1}},
           )
       )
@@ -1437,10 +1418,6 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
                   max_turns=1,
                   max_response_length=16,
                   stage_routed_experts=True,
-                  generation_kwargs={
-                      "return_routed_experts": True,
-                      "force_finish": True,
-                  },
                   metadata={"env_config": {"env_id": "e", "max_steps": 1}},
               )
           )
@@ -1485,10 +1462,6 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
                 max_turns=1,
                 max_response_length=1024,
                 stage_routed_experts=True,
-                generation_kwargs={
-                    "return_routed_experts": True,
-                    "force_finish": True,
-                },
                 metadata={"env_config": {"env_id": "e", "max_steps": 1}},
             ),
         )
@@ -1527,10 +1500,6 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
               max_turns=1,
               max_response_length=16,
               stage_routed_experts=True,
-              generation_kwargs={
-                  "return_routed_experts": True,
-                  "force_finish": True,
-              },
               metadata={"env_config": {"env_id": "e", "max_steps": 1}},
           )
       )
@@ -1550,10 +1519,6 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
                   max_turns=1,
                   max_response_length=16,
                   stage_routed_experts=True,
-                  generation_kwargs={
-                      "return_routed_experts": True,
-                      "force_finish": True,
-                  },
                   metadata={"env_config": {"env_id": "e", "max_steps": 1}},
               )
           )
@@ -1575,10 +1540,6 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
               max_turns=1,
               max_response_length=16,
               stage_routed_experts=True,
-              generation_kwargs={
-                  "return_routed_experts": True,
-                  "force_finish": True,
-              },
               metadata={"env_config": {"env_id": "e", "max_steps": 1}},
           )
       )
@@ -1609,6 +1570,8 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
             sampler_name="moe_auto",
             routed_experts_shape_spec=(4, 8),
             response_tokens_per_turn=4,
+            min_turns=0,
+            config=cfg,
         ),
         env_name="mock_env",
         agent_name="mock_agent",
@@ -1626,10 +1589,6 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
                 prompt_id="p_auto_inline",
                 max_turns=1,
                 max_response_length=8,
-                generation_kwargs={
-                    "return_routed_experts": True,
-                    "force_finish": True,
-                },
                 metadata={"env_config": {"env_id": "e", "max_steps": 1}},
             )
         )
@@ -1650,10 +1609,6 @@ class RolloutWorkerStagingRpcTest(absltest.TestCase):
                   max_turns=1,
                   max_response_length=8,
                   stage_routed_experts=True,
-                  generation_kwargs={
-                      "return_routed_experts": True,
-                      "force_finish": True,
-                  },
                   metadata={"env_config": {"env_id": "e", "max_steps": 1}},
               )
           )

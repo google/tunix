@@ -383,6 +383,7 @@ class RolloutConfig:
       raise ValueError(f"top_p must be in (0, 1], got {self.top_p!r}.")
     if self.top_k is not None and self.top_k < -1:
       raise ValueError(f"top_k must be >= -1, got {self.top_k!r}.")
+    _is_positive_integer(self.max_tokens_to_generate, "max_tokens_to_generate")
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)

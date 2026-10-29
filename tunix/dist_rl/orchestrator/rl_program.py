@@ -399,7 +399,7 @@ class StandardRLProgram(RLProgram):
   3. Critique stage: Scores rewards, PRMs, and reference KL logprobs.
   4. Train stage: Streaming gradient accumulation over microbatches.
 
-  When `generation_args.return_routed_experts=True`:
+  When `rollout_returns_routed_experts=True`:
   - `use_routed_experts_relay=None` (default): enables Orchestrator Relay
     automatically when the wire encoding is statically resolvable
     (`algo_config.routed_experts_encode_mode != "auto"` or positive
@@ -425,6 +425,8 @@ class StandardRLProgram(RLProgram):
   def __init__(
       self,
       algo_config: algorithm_config.AlgorithmConfig,
+      rollout_temperature: float,
+      rollout_returns_routed_experts: bool,
       dataset: Iterable[Any] | None = None,
       max_steps: int | None = None,
       reward_fns: (
@@ -434,7 +436,6 @@ class StandardRLProgram(RLProgram):
       ) = None,
       assembler: batch_assembly.BatchAssembler | None = None,
       batch_config: batch_assembly.BatchConfig | None = None,
-      generation_args: datatypes.GenerationArgs | None = None,
       batch_size: int | None = None,
       max_staleness: int = 0,
       max_version_span: int | None = None,
@@ -470,27 +471,26 @@ class StandardRLProgram(RLProgram):
         if self.batch_config.eos_id is not None
         else self.pad_id
     )
-    self.generation_args = generation_args or datatypes.GenerationArgs()
+    # The trainer divides logits by it and the reference scorer rejects 0.
+    if not rollout_temperature > 0:
+      raise ValueError(
+          f"rollout_temperature must be positive, got {rollout_temperature!r}."
+      )
+    self._rollout_temperature = rollout_temperature
+    self._rollout_returns_routed_experts = rollout_returns_routed_experts
 
     # `algo_config` has a 1:1 relationship with a single `StandardRLProgram`
     # instance and is not shared across multiple programs, so we propagate
-    # `generation_args.temperature` into `algo_config.temperature` in place.
+    # `rollout_temperature` into `algo_config.temperature` in place.
     if self.algo_config.temperature is not None:
       raise ValueError(
-          "Do not set temperature on AlgorithmConfig; configure it via"
-          " generation_args on StandardRLProgram."
+          "Do not set temperature on AlgorithmConfig; pass it to"
+          " StandardRLProgram."
       )
-    gen_temp = self.generation_args.temperature
-    if gen_temp is not None:
-      self.algo_config.temperature = gen_temp
-
-    self.generation_args = dataclasses.replace(
-        self.generation_args,
-        return_logprobs=self.algo_config.use_rollout_logps,
-    )
+    self.algo_config.temperature = rollout_temperature
     self._relay: relay_coordinator.RelayCoordinator | None = None
     if (
-        self.generation_args.return_routed_experts
+        rollout_returns_routed_experts
         and use_routed_experts_relay is not False
     ):
       try:
@@ -827,8 +827,6 @@ class StandardRLProgram(RLProgram):
             "num_generations": self.num_generations,
             "policy_version": self.policy_version,
         }
-        if self.generation_args is not None:
-          dispatch_kwargs["generation_args"] = self.generation_args
         if self._relay is not None:
           dispatch_kwargs["stage_routed_experts"] = True
           dispatch_kwargs["max_response_length"] = self.max_response_length
@@ -1460,11 +1458,10 @@ class StandardRLProgram(RLProgram):
       IS/RS weights and trainer logps when configured.
     """
     assert self.engine is not None
-    gen_temp = self.generation_args.temperature
     logps_req = datatypes.LogprobsRequest(
         prompt_tokens=batch.prompt_ids,
         completion_tokens=batch.completion_ids,
-        temperature=gen_temp if gen_temp is not None else 1.0,
+        temperature=self._rollout_temperature,
         model_role="actor",
         pad_id=self.pad_id,
         eos_id=self.eos_id,
@@ -1737,12 +1734,11 @@ class StandardRLProgram(RLProgram):
                   f"{type(batch).__name__}."
               )
             reference_start = time.monotonic()
-            gen_temp = self.generation_args.temperature
             ref_req = datatypes.LogprobsRequest(
                 request_id="reference_logps",
                 prompt_tokens=batch.prompt_ids,
                 completion_tokens=batch.completion_ids,
-                temperature=gen_temp if gen_temp is not None else 1.0,
+                temperature=self._rollout_temperature,
                 model_role="reference",
                 segment_ids=batch.segment_ids,
                 segment_positions=batch.segment_positions,
@@ -2047,9 +2043,7 @@ class StandardRLProgram(RLProgram):
           eos_id=self.eos_id,
           can_fuse_agreement_in_loss=self.can_fuse_agreement_in_loss,
           precompile=self.precompile_trainer,
-          return_routed_experts=bool(
-              self.generation_args.return_routed_experts
-          ),
+          return_routed_experts=self._rollout_returns_routed_experts,
       )
 
       if self.sync_weights:

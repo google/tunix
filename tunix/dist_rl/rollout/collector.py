@@ -16,11 +16,10 @@
 
 import asyncio
 import time
-from typing import Any, Callable, Collection, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Collection, List, Mapping, Optional, Sequence, cast
 from absl import logging
 import numpy as np
 from tunix.dist_rl.common import datatypes
-from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.dist_rl.trajectory import base_store as store
 from tunix.dist_rl.trajectory import converter as converter_lib
@@ -36,17 +35,6 @@ def _build_prompt(chat_parser: Any, chat_completions: Any) -> Any:
         chat_completions, add_generation_prompt=True, is_first_msg=True
     )
   return chat_completions
-
-
-def _validate_max_prompt_length(value: int | None) -> int | None:
-  """Validates optional positive `max_prompt_length` bound."""
-  if value is None:
-    return None
-  if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-    raise ValueError(
-        f"max_prompt_length must be a positive int or None, got {value!r}."
-    )
-  return value
 
 
 def response_budget_facts(
@@ -99,13 +87,9 @@ class TrajectoryCollectorEngine:
       agent: Any,
       tokenizer: Any,
       chat_parser: Any,
-      eos_ids: Collection[int] | None = None,
-      partial_rollout: bool = False,
+      config: base_rollout.RolloutConfig,
       policy_version_fn: Callable[[], int] | None = None,
       trajectory_store: Optional[store.TrajectoryWriter] = None,
-      store_routed_experts: bool = False,
-      routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = "auto",
-      routed_experts_num_experts: int | None = None,
       max_prompt_length: int | None = None,
   ):
     if (
@@ -119,10 +103,6 @@ class TrajectoryCollectorEngine:
           "TrajectoryCollectorEngine requires valid sampler, env_client, agent,"
           " tokenizer, and chat_parser arguments (none can be None)."
       )
-    datatypes.validate_routed_experts_encode_config(
-        routed_experts_encode_mode,
-        routed_experts_num_experts,
-    )
     self.traj_id = traj_id
     self.request = request
     self.sampler = sampler
@@ -131,18 +111,11 @@ class TrajectoryCollectorEngine:
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
     self.trajectory_store = trajectory_store
-    self.store_routed_experts: bool = bool(store_routed_experts)
-    self.routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = (
-        routed_experts_encode_mode
-    )
-    self.routed_experts_num_experts: int | None = routed_experts_num_experts
-    self.max_prompt_length: int | None = _validate_max_prompt_length(
-        max_prompt_length
-    )
+    self.config: base_rollout.RolloutConfig = config
+    self.max_prompt_length: int | None = max_prompt_length
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
-    self.partial_rollout: bool = bool(partial_rollout)
     self._policy_version_fn: Callable[[], int] | None = policy_version_fn
     self._unpaused = asyncio.Event()
     self._unpaused.set()
@@ -155,23 +128,12 @@ class TrajectoryCollectorEngine:
     # whether a rollout ended on its own. Defined at the recipe level via
     # `RolloutConfig.eos_tokens` (e.g. `<|im_end|>` for Qwen chat models) rather
     # than forced from the base tokenizer.
-    self.eos_ids = frozenset(int(token_id) for token_id in eos_ids or ())
-    metadata = request.metadata or {}
-    timeout = metadata.get("episode_timeout")
-    self.episode_timeout = float(
-        timeout if timeout is not None else timeouts.DEFAULT_EPISODE_TIMEOUT_S
+    self.eos_ids = frozenset(
+        int(token_id) for token_id in config.eos_tokens or ()
     )
-    if self.episode_timeout <= 0:
-      raise ValueError("episode_timeout must be positive.")
-    overlong_filter = metadata.get("overlong_filter")
-    if overlong_filter is None:
-      self.overlong_filter = False
-    elif isinstance(overlong_filter, bool):
-      self.overlong_filter = overlong_filter
-    else:
-      raise TypeError(
-          "overlong_filter must be a boolean, got"
-          f" {type(overlong_filter).__name__}: {overlong_filter!r}."
+    if max_prompt_length is not None and max_prompt_length <= 0:
+      raise ValueError(
+          f"max_prompt_length must be positive, got {max_prompt_length!r}."
       )
     self.metadata = None
     if self.trajectory_store is not None:
@@ -181,6 +143,12 @@ class TrajectoryCollectorEngine:
             self.request,
             self.agent,
             target_policy_versions=[self.request.target_policy_version],
+            hyperparams={
+                "temperature": config.temperature,
+                "top_p": config.top_p,
+                "top_k": config.top_k,
+                "max_tokens_to_generate": config.max_tokens_to_generate,
+            },
         )
       except Exception:  # pylint: disable=broad-exception-caught
         logging.warning(
@@ -199,42 +167,19 @@ class TrajectoryCollectorEngine:
     # TrajectoryCollectEngine on the asyncio event loop without blocking
     # threads.
     async def model_call(
-        chat_completions, env=None, max_generation_steps=None, **kwargs
-    ):
+        chat_completions: list[dict[str, Any]] | None,
+        env: Any = None,
+        max_generation_steps: int | None = None,
+        prompt_token_ids: Sequence[int] | np.ndarray | None = None,
+        routed_experts_prompt_start: int = 0,
+    ) -> base_rollout.RolloutOutput:
       del env
       nonlocal sampler_time_s, is_first_model_call
       is_turn0, is_first_model_call = is_first_model_call, False
       await self._unpaused.wait()
-      generation_kwargs = dict(self.request.generation_kwargs)
-      # NB: extra kwargs can be passed in from trajectory_collect_engine.
-      generation_kwargs.update(kwargs)
-      prompt_token_ids = generation_kwargs.pop("prompt_token_ids", None)
-      request_max_generation_steps = generation_kwargs.pop(
-          "max_generation_steps", None
-      )
-      req_max_tokens = (
-          request_max_generation_steps
-          if request_max_generation_steps is not None
-          else generation_kwargs.get("max_tokens")
-      )
-
-      if max_generation_steps is not None and req_max_tokens is not None:
-        effective_max_tokens = min(max_generation_steps, req_max_tokens)
-      elif max_generation_steps is not None:
-        effective_max_tokens = max_generation_steps
-      elif req_max_tokens is not None:
-        effective_max_tokens = req_max_tokens
-      else:
-        raise ValueError(
-            "TrajectoryCollectorEngine requires"
-            " request.max_response_length, request.generation_kwargs"
-            " ('max_generation_steps' or 'max_tokens'), or the model_call"
-            " callback to specify max_generation_steps."
-        )
-
-      generation_kwargs["max_tokens"] = effective_max_tokens
-
-      seed = generation_kwargs.get("seed", None)
+      max_tokens = self.config.max_tokens_to_generate
+      if max_generation_steps is not None:
+        max_tokens = min(max_tokens, max_generation_steps)
 
       req_policy_version = int(self.request.target_policy_version or 0)
       turn_policy_version = (
@@ -245,28 +190,12 @@ class TrajectoryCollectorEngine:
       if self._inner_engine is not None:
         self._inner_engine.policy_version = turn_policy_version
 
-      cache_salt = generation_kwargs.pop("cache_salt", None)
-      if self.partial_rollout:
+      cache_salt = None
+      if self.config.partial_rollout:
         if self._episode_cache_salt is None:
           self._episode_cache_salt = f"policy_v{turn_policy_version}"
-        if cache_salt is None:
-          cache_salt = self._episode_cache_salt
+        cache_salt = self._episode_cache_salt
 
-      sampling_params = sampler_lib.SamplingParams(
-          max_tokens=effective_max_tokens,
-          temperature=generation_kwargs.get("temperature", 0.0),
-          top_p=generation_kwargs.get("top_p", None),
-          top_k=generation_kwargs.get("top_k", None),
-          seed=seed,
-          return_logprobs=generation_kwargs.get("return_logprobs", False),
-          return_routed_experts=generation_kwargs.get(
-              "return_routed_experts", False
-          ),
-          routed_experts_prompt_start=generation_kwargs.get(
-              "routed_experts_prompt_start", 0
-          ),
-          cache_salt=cache_salt,
-      )
       prompt_payload = (
           np.asarray(prompt_token_ids, dtype=np.int32)
           if prompt_token_ids is not None
@@ -275,25 +204,25 @@ class TrajectoryCollectorEngine:
       sampling_req = sampler_lib.SamplingRequest(
           request_id=self.traj_id,
           prompt=prompt_payload,
-          max_tokens=sampling_params.max_tokens,
-          cache_salt=sampling_params.cache_salt,
-          routed_experts_prompt_start=sampling_params.routed_experts_prompt_start,
-          sampling_params=sampling_params,
+          max_tokens=max_tokens,
+          cache_salt=cache_salt,
+          routed_experts_prompt_start=routed_experts_prompt_start,
       )
       sample_start = time.perf_counter()
       try:
-        res = await self.sampler.sample(sampling_req, **generation_kwargs)
+        res = cast(
+            sampler_lib.SamplingResponse,
+            await self.sampler.sample(sampling_req),
+        )
       finally:
         sampler_time_s += time.perf_counter() - sample_start
-      text = res if isinstance(res, str) else getattr(res, "text", str(res))
-      tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
-      logprobs = getattr(res, "logprobs", None)
-      routed_experts = getattr(res, "routed_experts", None)
-      raw_prompt_tokens = getattr(res, "prompt_token_ids", None)
-      prompt_tokens = np.asarray(
-          raw_prompt_tokens if raw_prompt_tokens is not None else [],
-          dtype=np.int32,
-      ).reshape(-1)
+      text = res.text
+      tokens = res.token_ids
+      logprobs = res.logprobs
+      routed_experts = res.routed_experts
+      prompt_tokens = np.asarray(res.prompt_token_ids, dtype=np.int32).reshape(
+          -1
+      )
       prompt_len = int(prompt_tokens.size)
       if (
           self.max_prompt_length is not None
@@ -316,7 +245,7 @@ class TrajectoryCollectorEngine:
           left_padded_prompt_tokens=prompt_tokens,
           prompt_lengths=np.asarray([prompt_len], dtype=np.int32),
           logprobs=[logprobs] if logprobs is not None else None,
-          routed_experts=[routed_experts]
+          routed_experts=[np.asarray(routed_experts)]
           if routed_experts is not None
           else None,
       )
@@ -333,14 +262,14 @@ class TrajectoryCollectorEngine:
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
         max_response_length=self.max_response_length,
-        timeout=self.episode_timeout,
-        overlong_filter=self.overlong_filter,
+        timeout=self.config.episode_timeout,
+        overlong_filter=self.config.overlong_filter,
         policy_version=self.request.target_policy_version,
         trajectory_store=self.trajectory_store,
         metadata=self.metadata,
-        store_routed_experts=self.store_routed_experts,
-        routed_experts_encode_mode=self.routed_experts_encode_mode,
-        routed_experts_num_experts=self.routed_experts_num_experts,
+        store_routed_experts=self.config.store_routed_experts,
+        routed_experts_encode_mode=self.config.routed_experts_encode_mode,
+        routed_experts_num_experts=self.config.routed_experts_num_experts,
     )
     self._inner_engine = inner_engine
     rl_traj = await inner_engine.collect(mode="Token")
@@ -442,6 +371,10 @@ class TrajectoryCollectorEngine:
       )
     if sampler_time_s is not None:
       rl_traj["sampler_time_s"] = sampler_time_s
+    # Without sampler logprobs the inner engine fills in zeros; drop them so
+    # the trainer uses its own logprobs instead.
+    if not self.config.return_logprobs:
+      rl_traj["old_logprobs"] = None
 
     # Metadata carries only request-scoped context. Everything about the
     # episode itself stays on `traj`, which is the single source of truth and

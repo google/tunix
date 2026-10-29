@@ -126,11 +126,10 @@ class _NoopCollector:
       agent,
       tokenizer,
       chat_parser,
-      eos_ids=None,
-      partial_rollout=False,
+      config=None,
       policy_version_fn=None,
-      routed_experts_encode_mode="auto",
-      routed_experts_num_experts=None,
+      trajectory_store=None,
+      max_prompt_length=None,
   ):
     del (
         request,
@@ -138,11 +137,10 @@ class _NoopCollector:
         agent,
         tokenizer,
         chat_parser,
-        eos_ids,
-        partial_rollout,
+        config,
         policy_version_fn,
-        routed_experts_encode_mode,
-        routed_experts_num_experts,
+        trajectory_store,
+        max_prompt_length,
     )
     self.traj_id = traj_id
     self.env = env_client
@@ -489,7 +487,7 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
       await manager._generate_one(request)
 
     self.assertEqual(
-        collector_cls.call_args.kwargs["eos_ids"], [151643, 151645]
+        collector_cls.call_args.kwargs["config"].eos_tokens, [151643, 151645]
     )
 
   async def test_unset_eos_tokens_leave_the_collector_on_its_default(self):
@@ -515,7 +513,7 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
 
       await manager._generate_one(request)
 
-    self.assertIsNone(collector_cls.call_args.kwargs["eos_ids"])
+    self.assertIsNone(collector_cls.call_args.kwargs["config"].eos_tokens)
 
   async def test_generate_stamps_request_metadata_on_trajectory_error(self):
     manager = manager_lib.RolloutManager(
@@ -917,7 +915,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
       turn_versions_seen.append(v)
       if len(turn_versions_seen) == 2:
         turn2_called_sampler.set()
-      return "ans"
+      return sampler_lib.SamplingResponse(request_id="req", text="ans")
 
     sampler.sample = _sample_fn
 
@@ -971,7 +969,6 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
           prompt_id="p_case4",
           group_index=0,
           max_response_length=32,
-          generation_kwargs={"max_generation_steps": 32},
       )
       gen_task = asyncio.create_task(manager.generate(req))
       await asyncio.wait_for(in_env_step.wait(), timeout=2.0)
@@ -1153,8 +1150,10 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
           datatypes.RolloutRequest(prompt="p", prompt_id="p0", group_index=0)
       )
 
-    self.assertEqual(captured_kwargs["routed_experts_encode_mode"], "uint10")
-    self.assertEqual(captured_kwargs["routed_experts_num_experts"], 384)
+    self.assertEqual(
+        captured_kwargs["config"].routed_experts_encode_mode, "uint10"
+    )
+    self.assertEqual(captured_kwargs["config"].routed_experts_num_experts, 384)
 
   async def test_drain_timeout_default_and_validation(self):
     manager = manager_lib.RolloutManager(
@@ -1205,8 +1204,10 @@ class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
     active_sampler = sampler or test_utils.MockBaseSamplerImpl(
         default_delay=0.0,
         response_tokens_per_turn=8,
+        min_turns=0,
         routed_experts_shape_spec=(2, 4),
         num_experts=384,
+        config=cfg,
     )
     mgr = manager_lib.RolloutManager(
         config=cfg,
@@ -1240,10 +1241,10 @@ class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
 
     class _BlockingSampler(test_utils.MockBaseSamplerImpl):
 
-      async def sample(self, sampling_requests, **kwargs):
+      async def sample(self, sampling_requests):
         entered.set()
         await unblock.wait()
-        return await super().sample(sampling_requests, **kwargs)
+        return await super().sample(sampling_requests)
 
     mgr, buf = self._make_staged_manager(
         sampler=_BlockingSampler(
@@ -1256,7 +1257,6 @@ class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
         max_turns=1,
         max_response_length=16,
         stage_routed_experts=True,
-        generation_kwargs={"return_routed_experts": True, "force_finish": True},
     )
 
     # 1. Cancel mid-sampling after `sample()` has started.
@@ -1413,7 +1413,18 @@ class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
   async def test_stage_routed_experts_without_routed_output_returns_tombstone(
       self,
   ):
-    mgr, buf = self._make_staged_manager(max_bytes=2048, max_prompt_length=128)
+    # The sampler's own config does not ask for routed experts.
+    mgr, buf = self._make_staged_manager(
+        max_bytes=2048,
+        max_prompt_length=128,
+        sampler=test_utils.MockBaseSamplerImpl(
+            default_delay=0.0,
+            response_tokens_per_turn=8,
+            min_turns=0,
+            routed_experts_shape_spec=(2, 4),
+            num_experts=384,
+        ),
+    )
     res = await mgr.generate(
         datatypes.RolloutRequest(
             prompt="p",
@@ -1421,10 +1432,6 @@ class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
             max_turns=1,
             max_response_length=16,
             stage_routed_experts=True,
-            generation_kwargs={
-                "return_routed_experts": False,
-                "force_finish": True,
-            },
         )
     )
     self.assertIsInstance(res, trajectory_lib.TrajectoryError)
@@ -1440,10 +1447,10 @@ class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
     gate = asyncio.Event()
     orig_sample = mgr.sampler.sample
 
-    async def _gated_sample(req, **kwargs):
-      if getattr(req, "request_id", None) == "traj_dup_g0":
+    async def _gated_sample(req):
+      if req.request_id == "traj_dup_g0":
         await gate.wait()
-      return await orig_sample(req, **kwargs)
+      return await orig_sample(req)
 
     mgr.sampler.sample = _gated_sample
 
@@ -1455,10 +1462,6 @@ class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
         max_turns=1,
         max_response_length=16,
         stage_routed_experts=True,
-        generation_kwargs={
-            "return_routed_experts": True,
-            "force_finish": True,
-        },
     )
     t1 = asyncio.create_task(mgr.generate(req_dup))
     t2 = asyncio.create_task(mgr.generate(req_dup))
@@ -1480,10 +1483,6 @@ class StagingReservationManagerTest(unittest.IsolatedAsyncioTestCase):
         max_turns=1,
         max_response_length=16,
         stage_routed_experts=True,
-        generation_kwargs={
-            "return_routed_experts": True,
-            "force_finish": True,
-        },
     )
     req_bad = datatypes.RolloutRequest(
         prompt="p",

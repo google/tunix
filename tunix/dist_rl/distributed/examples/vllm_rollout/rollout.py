@@ -110,7 +110,6 @@ def main(argv: Sequence[str], context: ProcessContext | None) -> None:
               "service_type": "rollout",
               "service_port": args.service_port,
               "worker_id": args.worker_id,
-              "model_name": args.model_name,
           })
       )
 

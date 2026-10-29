@@ -162,6 +162,8 @@ def build_mock_rollout_worker(
       return_logprobs=True,
       eos_tokens=_resolve_eos_token_ids(rollout_cfg["eos_tokens"], tokenizer),
       partial_rollout=bool(ws_cfg["in_flight_weight_updates"]),
+      episode_timeout=episode_timeout_s,
+      overlong_filter=bool(grpo_cfg["overlong_filter"]),
       drain_timeout_s=timeouts.drain_timeout_for(episode_timeout_s),
       trajectory_store_config=node_utils.trajectory_store_config(hp),
       return_routed_experts=bool(vllm_cfg["return_routed_experts"]),

@@ -54,11 +54,6 @@ class EvalDeepSWETest(unittest.TestCase):
     self.assertEqual(request["prompt"], "Fix the test")
     self.assertEqual(request["max_turns"], 30)
     self.assertEqual(request["max_response_length"], 32512)
-    self.assertEqual(request["generation_kwargs"], {
-        "max_generation_steps": 8192,
-        "temperature": 0.0,
-        "return_logprobs": False,
-    })
     self.assertTrue(request["metadata"]["record_episode_summary"])
     self.assertEqual(request["metadata"]["env_config"]["entry"], entry)
 
