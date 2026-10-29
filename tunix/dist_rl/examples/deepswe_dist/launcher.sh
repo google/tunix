@@ -87,6 +87,8 @@ WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 LOG_DIR=${LOG_DIR:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-}
 RUN_ID=${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_$$}
 TRAJECTORY_STORE_ENABLED=${TRAJECTORY_STORE_ENABLED:-false}
 TRAJECTORY_STORE_BACKEND=${TRAJECTORY_STORE_BACKEND:-file}
@@ -274,6 +276,7 @@ echo "Launching trainer node..."
     --checkpoint_save_interval_steps="$CHECKPOINT_SAVE_INTERVAL_STEPS"
     --checkpoint_max_to_keep="$CHECKPOINT_MAX_TO_KEEP"
     --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
+    --run_id="$RUN_ID"
   )
   if [[ -n "$OPT_CHAIN_TYPE" ]]; then
     TRAINER_CMD+=(
@@ -294,6 +297,8 @@ echo "Launching trainer node..."
   export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
   export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   export PYTHONUNBUFFERED=1
+  export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT"
+  export OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-tunix-trainer}"
   print_command "Trainer command" "${TRAINER_CMD[@]}"
   exec "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1
 ) &
@@ -352,6 +357,8 @@ echo "Launching DeepSWE rollout node..."
     fi
   fi
   export PYTHONUNBUFFERED=1
+  export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT"
+  export OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-tunix-rollout}"
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
   exec "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1
 ) &
@@ -437,6 +444,8 @@ echo "Launching CPU orchestrator..."
   export WANDB_PROJECT="$WANDB_PROJECT"
   export WANDB_RUN_NAME="$WANDB_RUN_NAME"
   export WANDB_API_KEY="$WANDB_API_KEY"
+  export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT"
+  export OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-tunix-orchestrator}"
   print_command "Orchestrator command" "${ORCHESTRATOR_CMD[@]}"
   "${ORCHESTRATOR_CMD[@]}" > "$ORCHESTRATOR_LOG" 2>&1
 )

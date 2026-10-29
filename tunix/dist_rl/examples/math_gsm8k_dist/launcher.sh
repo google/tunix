@@ -80,6 +80,10 @@ WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+# OpenTelemetry metrics export (opt-in): set to a collector endpoint such as
+# http://localhost:4317 to enable; unset keeps the default backends only.
+OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-}
 RUN_ID=${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_$$}
 TRAJECTORY_STORE_ENABLED=${TRAJECTORY_STORE_ENABLED:-false}
 TRAJECTORY_STORE_BACKEND=${TRAJECTORY_STORE_BACKEND:-file}
@@ -541,6 +545,7 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --checkpoint_save_interval_steps="$CHECKPOINT_SAVE_INTERVAL_STEPS"
     --checkpoint_max_to_keep="$CHECKPOINT_MAX_TO_KEEP"
     --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
+    --run_id="$RUN_ID"
   )
   if [[ -n "$OPT_CHAIN_TYPE" ]]; then
     TRAINER_CMD+=(
@@ -596,6 +601,8 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   fi
   export VERIFY_WEIGHTS=${VERIFY_WEIGHTS}
+  export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT"
+  export OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-tunix-trainer}"
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
   print_command "Trainer command" "${TRAINER_CMD[@]}"
@@ -655,6 +662,8 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
   export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
   export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   export VERIFY_WEIGHTS=${VERIFY_WEIGHTS}
+  export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT"
+  export OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-tunix-rollout}"
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
@@ -872,6 +881,8 @@ echo "Launching CPU orchestrator..."
   export WANDB_PROJECT="$WANDB_PROJECT"
   export WANDB_RUN_NAME="$WANDB_RUN_NAME"
   export WANDB_API_KEY="$WANDB_API_KEY"
+  export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT"
+  export OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-tunix-orchestrator}"
   env | egrep 'JAX|TPU'
   print_command "Orchestrator command" "${ORCHESTRATOR_CMD[@]}"
   "${ORCHESTRATOR_CMD[@]}" > "$ORCHESTRATOR_LOG" 2>&1

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Available options: 'start', 'stop', 'orchestrator', 'trainer', 'rollout'.
+# Available options: 'start', 'stop', 'orchestrator', 'trainer', 'rollout', 'otel'.
 COMMAND=""
 TUNIX_IMAGE=${TUNIX_IMAGE:-}
 
@@ -113,6 +113,13 @@ export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
 export LOG_DIR=${LOG_DIR:-}
 export TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+# OpenTelemetry metrics export (opt-in): a collector reachable from each pod.
+# Note: jobset.cpu.yaml (orchestrator) and jobset.pathways.yaml (trainer) set
+# hostNetwork: true, whereas leaderworkerset.mcjax.ray.yaml (default rollout)
+# uses isolated pod networking; on GKE, prefer a K8s Service DNS endpoint
+# (e.g. http://otel-collector:4317) or host IP over http://localhost:4317.
+export OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+export OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-}
 export RUN_ID=${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_$$}
 export TRAJECTORY_STORE_ENABLED=${TRAJECTORY_STORE_ENABLED:-false}
 export TRAJECTORY_STORE_BACKEND=${TRAJECTORY_STORE_BACKEND:-file}
@@ -130,6 +137,9 @@ export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-1}
 
 export TRAINER_ID=$USER-train
 export TRAINER_PORT=20002
+
+export OTEL_ID=${OTEL_ID:-$USER-otel}
+export OTEL_PORT=${OTEL_PORT:-4317}
 
 export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
 export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
@@ -197,6 +207,27 @@ apply_manifest() {
   fi
 }
 
+stop_otel() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "kubectl delete deployment,service,configmap -l app=${OTEL_ID} -n ${K8S_NAMESPACE}"
+  else
+    kubectl delete deployment "${OTEL_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
+    kubectl delete service "${OTEL_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
+    kubectl delete configmap "${OTEL_ID}-config" -n "${K8S_NAMESPACE}" --ignore-not-found
+  fi
+}
+
+start_otel() {
+  "$PYTHON" "$YAML_GEN" \
+    "$YAML_DIR/jobset.otel.yaml" \
+    --jobset_name="${OTEL_ID}" \
+    --namespace="${K8S_NAMESPACE}" \
+    ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+    --cpu_machine=${CPU_MACHINE} \
+    --worker_container_port="${OTEL_PORT}" \
+    | apply_manifest
+}
+
 stop_orchestrator() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
@@ -229,6 +260,8 @@ start_orchestrator() {
       ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
+      ${OTEL_EXPORTER_OTLP_ENDPOINT:+OTEL_EXPORTER_OTLP_ENDPOINT=\"${OTEL_EXPORTER_OTLP_ENDPOINT}\"} \
+      OTEL_SERVICE_NAME=\"${OTEL_SERVICE_NAME:-tunix-orchestrator}\" \
       python -m tunix.dist_rl.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
@@ -355,7 +388,7 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${CKPT_D2H_CONCURRENT_GB:+ CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.dist_rl.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} ${OTEL_EXPORTER_OTLP_ENDPOINT:+OTEL_EXPORTER_OTLP_ENDPOINT=\"${OTEL_EXPORTER_OTLP_ENDPOINT}\" }OTEL_SERVICE_NAME=\"${OTEL_SERVICE_NAME:-tunix-trainer}\" VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${CKPT_D2H_CONCURRENT_GB:+ CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.dist_rl.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.dist_rl.examples.common.run_trainer_node.main \
@@ -392,6 +425,7 @@ start_trainer() {
         --checkpoint_save_interval_steps=${CHECKPOINT_SAVE_INTERVAL_STEPS} \
         --checkpoint_max_to_keep=${CHECKPOINT_MAX_TO_KEEP} \
         --checkpoint_root_directory=${CHECKPOINT_ROOT_DIRECTORY} \
+        --run_id=\"${RUN_ID}\" \
         ${extra_flags} \
         ${debug_flag} \
         ${profiler_flags} \
@@ -501,7 +535,7 @@ start_rollout_instance() {
     --ray_head_pre_init_command="${ray_head_pre_init_cmd}" \
     --ray_worker_pre_init_command="${ray_worker_pre_init_cmd}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1}${jax_cache_env} python -m tunix.dist_rl.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} ${OTEL_EXPORTER_OTLP_ENDPOINT:+OTEL_EXPORTER_OTLP_ENDPOINT=\"${OTEL_EXPORTER_OTLP_ENDPOINT}\" }OTEL_SERVICE_NAME=\"${OTEL_SERVICE_NAME:-tunix-rollout}\" SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1}${jax_cache_env} python -m tunix.dist_rl.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.dist_rl.examples.common.run_rollout_node.main \
@@ -549,7 +583,7 @@ start_rollout() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    start|stop|orchestrator|trainer|rollout)
+    start|stop|orchestrator|trainer|rollout|otel)
       COMMAND="$1"
       shift
       ;;
@@ -606,9 +640,9 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      echo "Usage: $0 [start|stop|orchestrator|trainer|rollout] [options]"
+      echo "Usage: $0 [start|stop|orchestrator|trainer|rollout|otel] [options]"
       echo "Options:"
-      echo "  --command <cmd>          Command to run (start, stop, orchestrator, trainer, rollout)"
+      echo "  --command <cmd>          Command to run (start, stop, orchestrator, trainer, rollout, otel)"
       echo "  --namespace <ns>         Kubernetes namespace (default: default)"
       echo "  --queue <name>           Kueue local queue name (optional)"
       echo "  --image <image>          Container image to use"
@@ -652,7 +686,9 @@ elif [[ "$COMMAND" == "trainer" ]]; then
   stop_trainer; start_trainer
 elif [[ "$COMMAND" == "rollout" ]]; then
   stop_rollout; start_rollout
+elif [[ "$COMMAND" == "otel" ]]; then
+  stop_otel; start_otel
 else
-  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout'."
+  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout', 'otel'."
   exit 1
 fi
