@@ -725,6 +725,7 @@ class PrewarmDatasetIterator:
       unwarm_on_exhaustion: bool = False,
       scaffold: str = "r2egym",
       image_rewrite: Callable[[str], str] | None = None,
+      wait_initial: bool = False,
   ):
     del lookahead_steps
     self.scaffold = scaffold
@@ -737,6 +738,7 @@ class PrewarmDatasetIterator:
     self.max_warmpool_replicas = max_warmpool_replicas
     self.max_staleness = max(0, max_staleness)
     self.unwarm_on_exhaustion = unwarm_on_exhaustion
+    self.wait_initial = wait_initial
     self.image_rewrite = get_image_rewrite_fn(
         image_rewrite or _GLOBAL_IMAGE_REWRITE_FN
     )
@@ -772,7 +774,7 @@ class PrewarmDatasetIterator:
       logging.info(
           "[PrewarmDatasetIterator] Priming initial sandboxes on K8s..."
       )
-      self._interact_fleet(wait=False)
+      self._interact_fleet(wait=self.wait_initial)
 
   def _extract_item_image_counts(self, item: object) -> dict[str, int]:
     """Extracts a dict mapping docker_image -> count for a dataset item."""
