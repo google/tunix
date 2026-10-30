@@ -35,6 +35,7 @@ from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
 from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
+from tunix.utils import math_utils
 from tunix.utils import maxtext_utils
 
 # Import Raiden before any other libraries to ensure correct JAX compilation.
@@ -85,6 +86,7 @@ _FORBIDDEN_VLLM_CONFIG_JSON_KEYS = frozenset({
     "max_logprobs",
     "logprobs_mode",
     "trust_remote_code",
+    "seed",
 })
 
 # Keep in sync with CLI-flag-owned keys and rollout invariants in
@@ -597,6 +599,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default="",
       help="Root directory for the file-backed TrajectoryStore.",
   )
+  parser.add_argument(
+      "--seed",
+      type=int,
+      default=None,
+      help=(
+          "Base random seed for the rollout sampler engine; offset by the"
+          " numeric replica suffix of --worker_id modulo 2**32."
+      ),
+  )
   args = parser.parse_args(argv)
   if args.vllm_config_json is not None:
     if args.sampler != "vllm":
@@ -882,6 +893,9 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       "max_logprobs": 1,
       "logprobs_mode": "processed_logprobs",
   }
+  replica_seed = math_utils.replica_seed(args)
+  if replica_seed is not None:
+    engine_kwargs["seed"] = replica_seed
   hf_overrides = _vllm_hf_overrides(args)
   if hf_overrides:
     engine_kwargs["hf_overrides"] = hf_overrides
@@ -1040,6 +1054,9 @@ def _create_vllm_sampler(args, tokenizer):
       max_logprobs=1,
       logprobs_mode="processed_logprobs",
   )
+  replica_seed = math_utils.replica_seed(args)
+  if replica_seed is not None:
+    engine_kwargs["seed"] = replica_seed
   hf_overrides = _vllm_hf_overrides(args)
   if hf_overrides:
     engine_kwargs["hf_overrides"] = hf_overrides

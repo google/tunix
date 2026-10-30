@@ -51,6 +51,14 @@ def parse_args(argv=None):
   p.add_argument(
       "--role", choices=("controller", "worker"), default="controller"
   )
+  p.add_argument(
+      "--worker_id",
+      default="deepswe-eval",
+      help=(
+          "Worker identifier; numeric replica suffix offsets the vLLM engine"
+          " seed modulo 2**32."
+      ),
+  )
   p.add_argument("--worker_addresses", nargs="+", default=["localhost:20001"])
   p.add_argument("--port", type=int, default=20001)
   p.add_argument("--model_id", default=MODEL_ID)
@@ -125,7 +133,10 @@ def parse_args(argv=None):
       "--seed",
       type=int,
       default=42,
-      help="Engine RNG seed; concurrent request ordering can affect samples.",
+      help=(
+          "Base engine RNG seed; offset by the numeric replica suffix of"
+          " --worker_id modulo 2**32."
+      ),
   )
   p.add_argument("--enable_thinking", type=boolean, default=False)
   p.add_argument("--enable_prefix_caching", type=boolean, default=False)

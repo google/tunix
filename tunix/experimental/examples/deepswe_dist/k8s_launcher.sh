@@ -992,6 +992,7 @@ start_eval() {
         ${ROLLOUT_EXTRA_ENV:-} \
         SKIP_JAX_PRECOMPILE=1 python3 -u ${eval_cmd} \
           ${role_arg} \
+          --worker_id=${replica_id} \
           --worker_addresses ${worker_addrs} \
           --port=${eval_port} \
           --model_id=${MODEL_ID} \
