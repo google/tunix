@@ -1039,6 +1039,29 @@ class PeftTrainerTest(parameterized.TestCase):
     for eval_call in training_hooks.on_eval_step_end.call_args_list:
       np.testing.assert_allclose(eval_call.args[1], expected, rtol=1e-6)
 
+  def test_eval_hook_receives_mean_loss_for_scalar_loss(self):
+    def loss_fn(model, x, y):
+      return jnp.mean((model(x) - y) ** 2)
+
+    model = nnx.Linear(2, 1, rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(
+        model,
+        optax.sgd(0.0),
+        peft_trainer.TrainingConfig(eval_every_n_steps=1, max_steps=1),
+    ).with_loss_fn(loss_fn)
+    training_hooks = mock.create_autospec(hooks.TrainingHooks)
+    trainer.with_training_hooks(training_hooks)
+    batches = [
+        {'x': jnp.full((2, 2), float(i + 1)), 'y': jnp.zeros((2, 1))}
+        for i in range(3)
+    ]
+
+    trainer.train(batches, batches)
+
+    eval_loss = trainer.metrics_logger.get_metric('', 'loss', 'eval')
+    call = training_hooks.on_eval_step_end.call_args_list[-1]
+    np.testing.assert_allclose(call.args[1], eval_loss, rtol=1e-6)
+
   def test_stream_train_step_returns_raw_weighted_metric_aux(self):
     # Since _compute_legacy_aux was dropped, the (stream) _train_step returns
     # the raw aux with WeightedMetric preserved, so the metric ops can reduce
