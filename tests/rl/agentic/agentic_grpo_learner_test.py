@@ -1747,6 +1747,90 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
+          testcase_name="runtime_error",
+          error=RuntimeError("train step failed"),
+          expected=RuntimeError,
+      ),
+      dict(
+          testcase_name="keyboard_interrupt",
+          error=KeyboardInterrupt(),
+          expected=KeyboardInterrupt,
+      ),
+  )
+  def test_training_error_stops_producer(self, error, expected):
+    vocab = test_common.MockVocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    ref_model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            max_steps=4,
+            eval_every_n_steps=10,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=32,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
+            kv_cache_size=256,
+        ),
+    )
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=model,
+        reference=ref_model,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+    )
+    learner = agentic_grpo_learner.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=reward_fn_1,
+        algo_config=agentic_grpo_learner.GRPOConfig(max_response_length=10),
+        chat_parser=MockChatParser(),
+    )
+    train_ds = _dummy_dataset(MySource(data=["1", "2", "3", "4"]))
+    put_prompts_to_queue = learner._put_prompts_to_queue
+
+    def _put_prompts_and_unblock_on_teardown(prompt_queue, batch):
+      # If the producer is left blocked in `prompt_queue.get()`, unblock it at
+      # teardown so that a failing test can still exit.
+      self.addCleanup(prompt_queue.put, None)
+      put_prompts_to_queue(prompt_queue, batch)
+
+    with (
+        mock.patch.object(
+            rl_engine, "generate", side_effect=self._mock_generate
+        ),
+        mock.patch.object(rl_engine.actor_trainer, "train", side_effect=error),
+        mock.patch.object(
+            learner,
+            "_put_prompts_to_queue",
+            side_effect=_put_prompts_and_unblock_on_teardown,
+        ),
+    ):
+      with self.assertRaises(expected):
+        learner.train(train_ds)
+
+    # Interpreter exit joins all executor threads; that must not block.
+    asyncio.run_coroutine_threadsafe(
+        learner.loop.shutdown_default_executor(), learner.loop
+    ).result(timeout=30)
+
+  @parameterized.named_parameters(
+      dict(
           testcase_name="single_reward_fn",
           reward_fns=reward_fn_1,
           loss_algo="grpo",
