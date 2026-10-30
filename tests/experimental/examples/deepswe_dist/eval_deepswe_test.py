@@ -83,9 +83,22 @@ class EvalTest(unittest.TestCase):
 
   def test_in_memory_scanned_checkpoint_conversion(self):
     a = self.args(
-        "--scan_layers", "true", "--mesh_tp", "4", "--mesh_expert", "16"
+        "--scan_layers",
+        "true",
+        "--mesh_fsdp",
+        "2",
+        "--mesh_dp",
+        "2",
+        "--mesh_tp",
+        "4",
+        "--mesh_expert",
+        "16",
     )
     self.assertTrue(a.scan_layers)
+    self.assertEqual(a.mesh_fsdp, 2)
+    self.assertEqual(a.mesh_dp, 2)
+    self.assertEqual(eval_lib.model_profile(a)["mesh_fsdp"], 2)
+    self.assertEqual(eval_lib.model_profile(a)["mesh_dp"], 2)
     self.assertEqual(a.mesh_expert, 16)
     self.assertEqual(eval_lib.model_profile(a)["mesh_expert"], 16)
     self.assertTrue(eval_lib.model_profile(a)["scan_layers"])
