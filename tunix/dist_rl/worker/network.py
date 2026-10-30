@@ -45,8 +45,8 @@ import threading
 import time
 from typing import (
     Any,
+    AsyncGenerator,
     AsyncIterable,
-    AsyncIterator,
     Callable,
     Deque,
     Dict,
@@ -318,9 +318,13 @@ def _prepare_serialized_chunk_specs(
   if chunk_size <= 0:
     raise ValueError(f"chunk_size must be positive, got {chunk_size}.")
   raw_buffers: List[pickle.PickleBuffer] = []
-  header_bytes = cloudpickle.dumps(
-      obj, protocol=5, buffer_callback=raw_buffers.append
-  )
+  try:
+    header_bytes = cloudpickle.dumps(
+        obj, protocol=5, buffer_callback=raw_buffers.append
+    )
+  except Exception:
+    _release_views_and_buffers([], raw_buffers)
+    raise
   views: List[memoryview] = [memoryview(header_bytes)]  # pylint: disable=g-bare-generic
   try:
     for pb in raw_buffers:
@@ -409,7 +413,7 @@ async def _iter_async_from_chunk_specs(
     spec_iter: Iterator[_ChunkSpec],
     *,
     offload: bool = True,
-) -> AsyncIterator[bytes]:
+) -> AsyncGenerator[bytes, None]:
   """Streams materialized `bytes` chunks with multi-thread GIL-free prefetching."""
   pending_futs: Deque[
       Tuple[
@@ -2132,7 +2136,7 @@ async def _stream_bulk_pull_chunks(
     views: List[memoryview],  # pylint: disable=g-bare-generic
     raw_buffers: List[pickle.PickleBuffer],
     bulk_server: _BulkTransferServer,
-) -> AsyncIterator[bytes]:
+) -> AsyncGenerator[bytes, None]:
   """Streams a bulk manifest over gRPC while serving buffers via `_OP_PULL`."""
   tid: Optional[bytes] = None
   comp_views: Dict[int, Tuple[np.ndarray, memoryview]] = {}  # pylint: disable=g-bare-generic
@@ -2184,7 +2188,7 @@ async def _stream_bulk_push_chunks(
     *,
     push_tracker: Optional[_BulkPushTracker] = None,
     seen_bulk_targets: Optional[Set[Tuple[str, int]]] = None,
-) -> AsyncIterator[bytes]:
+) -> AsyncGenerator[bytes, None]:
   """Pushes buffers via `_OP_PUSH` sockets and yields a lightweight manifest."""
   raw_futs: List[concurrent.futures.Future[None]] = []
   push_futs: List[asyncio.Future[None]] = []

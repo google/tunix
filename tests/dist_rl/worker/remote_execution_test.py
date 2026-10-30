@@ -414,8 +414,9 @@ class RemoteExecutionTest(parameterized.TestCase):
       self.assertTrue(task_id.startswith("task_"))
 
       # Poll response queue asynchronously
-      resp = await handle.poll_responses(timeout_s=1.0)
-      self.assertIsNotNone(resp)
+      resps = await handle.poll_responses(timeout_s=1.0)
+      self.assertLen(resps, 1)
+      resp = resps[0]
       self.assertEqual(resp.request_id, task_id)
       self.assertEqual(
           resp.unwrap(),
@@ -435,8 +436,9 @@ class RemoteExecutionTest(parameterized.TestCase):
       )
       self.assertEqual(req_id, custom_id)
 
-      resp = await handle.poll_responses(timeout_s=1.0)
-      self.assertIsNotNone(resp)
+      resps = await handle.poll_responses(timeout_s=1.0)
+      self.assertLen(resps, 1)
+      resp = resps[0]
       self.assertEqual(resp.request_id, custom_id)
       self.assertEqual(
           resp.unwrap(),
@@ -457,8 +459,9 @@ class RemoteExecutionTest(parameterized.TestCase):
         self.assertTrue(task_id.startswith("task_"))
 
         # Long-poll response queue over gRPC
-        resp = await handle.poll_responses(timeout_s=2.0)
-        self.assertIsNotNone(resp)
+        resps = await handle.poll_responses(timeout_s=2.0)
+        self.assertLen(resps, 1)
+        resp = resps[0]
         self.assertEqual(resp.request_id, task_id)
         self.assertEqual(
             resp.unwrap(),
@@ -480,8 +483,9 @@ class RemoteExecutionTest(parameterized.TestCase):
         )
         self.assertEqual(req_id, custom_id)
 
-        resp = await handle.poll_responses(timeout_s=2.0)
-        self.assertIsNotNone(resp)
+        resps = await handle.poll_responses(timeout_s=2.0)
+        self.assertLen(resps, 1)
+        resp = resps[0]
         self.assertEqual(resp.request_id, custom_id)
         self.assertEqual(
             resp.unwrap(),
@@ -504,8 +508,9 @@ class RemoteExecutionTest(parameterized.TestCase):
       )
       self.assertEqual(rpc_req_id, "rpc_req_55")
 
-      resp = await handle.poll_responses(timeout_s=1.0)
-      self.assertIsNotNone(resp)
+      resps = await handle.poll_responses(timeout_s=1.0)
+      self.assertLen(resps, 1)
+      resp = resps[0]
       self.assertEqual(resp.request_id, "rpc_req_55")
       self.assertEqual(
           resp.unwrap(), "Processed my_data with domain_id=domain_req_99"
@@ -514,21 +519,21 @@ class RemoteExecutionTest(parameterized.TestCase):
     asyncio.run(_run())
 
   def test_polling_timeout_returns_none(self):
-    """Verifies poll_responses(timeout_s=0.0) and 0.01 return None when queue is empty."""
+    """Verifies poll_responses(timeout_s=0.0) and 0.01 return [] when queue is empty."""
 
     async def _run():
       engine = StubWorkerEngine("slow_worker", latency=2.0)
       # Test in-process handle (QueueEmpty via get_nowait)
       handle_inproc = create_in_process_handle(engine)
       await handle_inproc.dispatch_task(None, "compute_trajectory", "p1")
-      self.assertIsNone(await handle_inproc.poll_responses(timeout_s=0.0))
-      self.assertIsNone(await handle_inproc.poll_responses(timeout_s=0.01))
+      self.assertEqual(await handle_inproc.poll_responses(timeout_s=0.0), [])
+      self.assertEqual(await handle_inproc.poll_responses(timeout_s=0.01), [])
 
       # Test over real gRPC TCP channels
       async with running_grpc_server(engine) as (_, handle_grpc):
         await handle_grpc.dispatch_task(None, "compute_trajectory", "p2")
-        self.assertIsNone(await handle_grpc.poll_responses(timeout_s=0.0))
-        self.assertIsNone(await handle_grpc.poll_responses(timeout_s=0.01))
+        self.assertEqual(await handle_grpc.poll_responses(timeout_s=0.0), [])
+        self.assertEqual(await handle_grpc.poll_responses(timeout_s=0.01), [])
 
     asyncio.run(_run())
 
@@ -692,13 +697,51 @@ class RemoteExecutionTest(parameterized.TestCase):
       )
       await server.dispatch_task(request)
 
-      resp = await remote_lib.ExecutionResponse.deserialize_async_chunks(
+      resps = await remote_lib.ExecutionResponse.deserialize_batch_async_chunks(
           server._handle_poll_responses(b"", context=None)
       )
-      self.assertIsNotNone(resp)
+      self.assertLen(resps, 1)
+      resp = resps[0]
       self.assertEqual(resp.error_type, "ExecutionResponseSerializationError")
       self.assertIsNotNone(resp.error_message)
       self.assertEqual(resp.request_id, "req_err_7")
+
+    asyncio.run(_run())
+
+  def test_handle_poll_responses_batch_isolates_unserializable_item(self):
+    class _MixedWorker:
+
+      def run_item(self, idx: int):
+        if idx == 1:
+          return threading.Lock()
+        return {"idx": idx, "arr": np.arange(16, dtype=np.int32)}
+
+    async def _run():
+      server = remote_lib.GrpcRemoteExecutionServer(_MixedWorker())
+      q = server._get_response_queue()
+      for idx in (0, 1, 2):
+        resp = await server.execute_request(
+            remote_lib.ExecutionRequest(
+                request_id=f"req_{idx}", method_name="run_item", args=(idx,)
+            )
+        )
+        await q.put(resp)
+
+      resps = await remote_lib.ExecutionResponse.deserialize_batch_async_chunks(
+          server._handle_poll_responses(b"", context=None)
+      )
+      self.assertLen(resps, 3)
+      self.assertEqual(resps[0].request_id, "req_0")
+      self.assertEqual(resps[0].unwrap()["idx"], 0)
+      np.testing.assert_array_equal(
+          resps[0].unwrap()["arr"], np.arange(16, dtype=np.int32)
+      )
+      self.assertEqual(resps[1].request_id, "req_1")
+      self.assertEqual(
+          resps[1].error_type, "ExecutionResponseSerializationError"
+      )
+      self.assertEqual(resps[2].request_id, "req_2")
+      self.assertEqual(resps[2].unwrap()["idx"], 2)
 
     asyncio.run(_run())
 
@@ -841,7 +884,7 @@ class RemoteExecutionTest(parameterized.TestCase):
             mock.patch.object(live_handle, "_poll_rpc", return_value=fake_call),
             mock.patch.object(
                 remote_lib.ExecutionResponse,
-                "deserialize_async_chunks",
+                "deserialize_batch_async_chunks",
                 side_effect=network_lib._BulkTransportError("bulk pull reset"),
             ),
         ):
@@ -985,9 +1028,9 @@ class RemoteExecutionTest(parameterized.TestCase):
         ack_id = await handle.dispatch_task("req_stream_1", "echo_batch", batch)
         self.assertEqual(ack_id, "req_stream_1")
         polled = await handle.poll_responses(timeout_s=5.0)
-        self.assertIsNotNone(polled)
-        self.assertEqual(polled.request_id, "req_stream_1")
-        polled_out = polled.unwrap()
+        self.assertLen(polled, 1)
+        self.assertEqual(polled[0].request_id, "req_stream_1")
+        polled_out = polled[0].unwrap()
         np.testing.assert_array_equal(
             polled_out["completion_ids"], batch["completion_ids"] + 1
         )
@@ -1095,12 +1138,100 @@ class RemoteExecutionTest(parameterized.TestCase):
       await stream.aclose()
 
       # Subsequent poll must still receive the re-queued response
-      recovered = await remote_lib.ExecutionResponse.deserialize_async_chunks(
-          server._handle_poll_responses(b"", context=None)
+      recovered_batch = (
+          await remote_lib.ExecutionResponse.deserialize_batch_async_chunks(
+              server._handle_poll_responses(b"", context=None)
+          )
       )
-      self.assertIsNotNone(recovered)
+      self.assertLen(recovered_batch, 1)
+      recovered = recovered_batch[0]
       self.assertEqual(recovered.request_id, "req_requeue_1")
       self.assertIn("prompt_requeue", recovered.unwrap())
+
+    asyncio.run(_run())
+
+  def test_interrupted_poll_responses_requeues_batch_at_head_before_newer_items(
+      self,
+  ):
+    async def _run():
+      engine = StubWorkerEngine("requeue_head_worker", latency=0.001)
+      server = remote_lib.GrpcRemoteExecutionServer(
+          engine,
+          stream_chunk_bytes=16,
+      )
+      q = server._get_response_queue()
+      for i in range(3):
+        await q.put(
+            remote_lib.ExecutionResponse(
+                request_id=f"req_{i}", result=f"payload_{i}" * 16
+            )
+        )
+
+      stream = server._handle_poll_responses(b"", context=None)
+      first_chunk = await stream.__anext__()
+      self.assertNotEmpty(first_chunk)
+      # While the stream for [req_0, req_1, req_2] is in flight, a newer item
+      # req_3 finishes and enters the server queue.
+      await q.put(
+          remote_lib.ExecutionResponse(
+              request_id="req_3", result="payload_3" * 16
+          )
+      )
+      await stream.aclose()
+
+      # Cancelled batch [req_0, req_1, req_2] must be restored at the head of
+      # the queue ahead of req_3.
+      recovered_batch = (
+          await remote_lib.ExecutionResponse.deserialize_batch_async_chunks(
+              server._handle_poll_responses(b"", context=None)
+          )
+      )
+      self.assertEqual(
+          [r.request_id for r in recovered_batch],
+          ["req_0", "req_1", "req_2", "req_3"],
+      )
+
+    asyncio.run(_run())
+
+  def test_poll_responses_drains_ready_batch_and_respects_size_and_byte_caps(
+      self,
+  ):
+    async def _run():
+      engine = StubWorkerEngine("batch_poll_worker", latency=0.001)
+      server = remote_lib.GrpcRemoteExecutionServer(engine)
+      q = server._get_response_queue()
+      # 1. Test max_batch_size cap preserves FIFO order.
+      for i in range(5):
+        await q.put(
+            remote_lib.ExecutionResponse(
+                request_id=f"req_sz_{i}", result=np.ones(64, dtype=np.int32)
+            )
+        )
+      batch_1 = await server.poll_responses(timeout_s=0.1, max_batch_size=3)
+      self.assertEqual(
+          [r.request_id for r in batch_1], ["req_sz_0", "req_sz_1", "req_sz_2"]
+      )
+      batch_2 = await server.poll_responses(timeout_s=0.1, max_batch_size=3)
+      self.assertEqual(
+          [r.request_id for r in batch_2], ["req_sz_3", "req_sz_4"]
+      )
+
+      # 2. Test max_batch_bytes cap stops before popping an item that would
+      # exceed the byte budget, and allows an oversized first item through.
+      for i in range(3):
+        await q.put(
+            remote_lib.ExecutionResponse(
+                request_id=f"req_bytes_{i}",
+                result={"nested": (0, np.zeros(1024, dtype=np.uint8))},
+            )
+        )
+      # Each item is ~1280 bytes; a budget of 2600 bytes fits 2 items.
+      b1 = await server.poll_responses(timeout_s=0.1, max_batch_bytes=2600)
+      self.assertEqual(
+          [r.request_id for r in b1], ["req_bytes_0", "req_bytes_1"]
+      )
+      b2 = await server.poll_responses(timeout_s=0.1, max_batch_bytes=512)
+      self.assertEqual([r.request_id for r in b2], ["req_bytes_2"])
 
     asyncio.run(_run())
 
@@ -1608,8 +1739,8 @@ class RemoteExecutionTest(parameterized.TestCase):
           )
           self.assertEqual(ack, "req_recovered_dt")
           polled = await handle.poll_responses(timeout_s=5.0)
-          self.assertIsNotNone(polled)
-          np.testing.assert_array_equal(polled.unwrap()["tensor"], arr + 9)
+          self.assertLen(polled, 1)
+          np.testing.assert_array_equal(polled[0].unwrap()["tensor"], arr + 9)
           self.assertEqual(handle._bulk_port, server._bulk_server.port)
         finally:
           await handle.close()
@@ -1891,8 +2022,8 @@ class RemoteExecutionTest(parameterized.TestCase):
             ack = await handle.dispatch_task("req_nl_1", "echo", payload)
             self.assertEqual(ack, "req_nl_1")
             polled = await handle.poll_responses(timeout_s=5.0)
-            self.assertIsNotNone(polled)
-            np.testing.assert_array_equal(polled.unwrap()["tensor"], arr)
+            self.assertLen(polled, 1)
+            np.testing.assert_array_equal(polled[0].unwrap()["tensor"], arr)
 
           asyncio.run(_run_async())
       finally:
@@ -2159,9 +2290,9 @@ class RemoteExecutionTest(parameterized.TestCase):
         np.testing.assert_array_equal(
             out_submit["big"], np.full(256 * 1024, 41, dtype=np.int32)
         )
-        self.assertIsNotNone(out_poll)
+        self.assertLen(out_poll, 1)
         np.testing.assert_array_equal(
-            out_poll.unwrap()["big"], np.full(256 * 1024, 42, dtype=np.int32)
+            out_poll[0].unwrap()["big"], np.full(256 * 1024, 42, dtype=np.int32)
         )
         # Stale probe generation must not have written back _bulk_port.
         self.assertIsNone(handle._bulk_port)
@@ -2302,8 +2433,8 @@ class RemoteExecutionTest(parameterized.TestCase):
               "req_off_1", "echo", {"tensor": arr + 2}
           )
           polled = await hdl_client_off.poll_responses(timeout_s=5.0)
-          self.assertIsNotNone(polled)
-          np.testing.assert_array_equal(polled.unwrap()["tensor"], arr + 2)
+          self.assertLen(polled, 1)
+          np.testing.assert_array_equal(polled[0].unwrap()["tensor"], arr + 2)
 
         asyncio.run(_client_off_async())
         self.assertIsNone(hdl_client_off._bulk_port)
@@ -2334,8 +2465,8 @@ class RemoteExecutionTest(parameterized.TestCase):
             "req_srv_off", "echo", {"tensor": arr + 4}
         )
         polled = await hdl_client_on.poll_responses(timeout_s=5.0)
-        self.assertIsNotNone(polled)
-        np.testing.assert_array_equal(polled.unwrap()["tensor"], arr + 4)
+        self.assertLen(polled, 1)
+        np.testing.assert_array_equal(polled[0].unwrap()["tensor"], arr + 4)
         self.assertEqual(hdl_client_on._bulk_port, 0)
         self.assertEmpty(hdl_client_on._seen_bulk_targets)
       finally:
@@ -3412,8 +3543,8 @@ class RemoteExecutionTest(parameterized.TestCase):
             )
             self.assertEqual(ack, "req_dual_explicit")
             polled = await handle_explicit.poll_responses(timeout_s=5.0)
-            self.assertIsNotNone(polled)
-            np.testing.assert_array_equal(polled.unwrap()["tensor"], arr + 5)
+            self.assertLen(polled, 1)
+            np.testing.assert_array_equal(polled[0].unwrap()["tensor"], arr + 5)
             self.assertEqual(
                 handle_explicit._active_bulk_hosts, ("127.0.0.3", "127.0.0.2")
             )

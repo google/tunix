@@ -501,26 +501,32 @@ class TaskSession:
           break
         backoff_s: Optional[float] = None
         try:
-          response = await actor.poll_responses(timeout_s=LONG_POLL_TIMEOUT_S)
+          responses = await actor.poll_responses(timeout_s=LONG_POLL_TIMEOUT_S)
           outage_start = None
           retry_attempts = 0
-          if isinstance(response, ExecutionResponse):
-            if (
-                not response.request_id
-                or response.request_id not in dispatched_map
-            ):
-              raise RuntimeError(
-                  "Received ExecutionResponse with unknown or missing"
-                  f" request_id={response.request_id!r}; in-flight"
-                  f" request_ids={sorted(dispatched_map)!r}."
-              )
-            dispatched_map.pop(response.request_id)
-            self._in_flight = max(0, self._in_flight - 1)
-            try:
-              res = response.unwrap()
-              self._response_queue.put_nowait((res, None))
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-              self._response_queue.put_nowait((None, exc))
+          if responses:
+            seen_request_ids: set[str] = set()
+            for response in responses:
+              if (
+                  not response.request_id
+                  or response.request_id not in dispatched_map
+                  or response.request_id in seen_request_ids
+              ):
+                raise RuntimeError(
+                    "Received ExecutionResponse with unknown, missing, or"
+                    f" duplicate request_id={response.request_id!r}; in-flight"
+                    f" request_ids={sorted(dispatched_map)!r}."
+                )
+              seen_request_ids.add(response.request_id)
+            for response in responses:
+              assert response.request_id is not None
+              dispatched_map.pop(response.request_id)
+              self._in_flight -= 1
+              try:
+                res = response.unwrap()
+                self._response_queue.put_nowait((res, None))
+              except Exception as exc:  # pylint: disable=broad-exception-caught
+                self._response_queue.put_nowait((None, exc))
             self._notify_if_zero_flight()
         except asyncio.CancelledError as exc:
           if self._closed or not dispatched_map:
