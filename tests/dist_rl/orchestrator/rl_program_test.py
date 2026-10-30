@@ -1307,7 +1307,12 @@ class RLProgramTest(absltest.TestCase):
       self.assertLen(pack_threads, 2)
       for tid in pack_threads:
         self.assertNotEqual(tid, main_tid)
-      # Strict 1-deep bound: at most 1 train_step in flight at any time.
+      # Bounded in-flight depth (<= _MAX_INFLIGHT_TRAIN_STEPS); in this test
+      # mb_0's wake-up on mb1_ref_scored is scheduled before mb_1's task starts,
+      # so mb_0 completes before mb_1 enters _fake_train_step.
+      self.assertLessEqual(
+          max_in_flight_train_steps, rl_program._MAX_INFLIGHT_TRAIN_STEPS
+      )
       self.assertEqual(max_in_flight_train_steps, 1)
       # Verify mb1 packing (on worker thread) and reference scoring overlapped
       # with mb0 train_step (on event loop).
@@ -1537,6 +1542,312 @@ class RLProgramTest(absltest.TestCase):
       with self.assertRaisesRegex(RuntimeError, "packing failed on mb_1"):
         await program.train_stage()
       self.assertTrue(mb0_cancelled)
+
+    asyncio.run(_run())
+
+  def test_train_stage_double_buffers_microbatch_dispatch_up_to_depth_2(self):
+    events: list[str] = []
+    in_flight_train_steps = 0
+    max_in_flight_train_steps = 0
+    mb1_started = asyncio.Event()
+
+    class FourMicrobatchAssembler:
+      num_generations: int = 2
+      mini_batch_size: int = 1
+      groups_per_assembly_batch: int = 1
+
+      @property
+      def assembly_batch_size(self) -> int:
+        return self.groups_per_assembly_batch * self.num_generations
+
+      def feed(self, items):
+        del items
+        for mb_idx in range(4):
+          events.append(f"pack_mb_{mb_idx}")
+          yield batch_assembly.AssembledBatch(
+              payload=f"mb_{mb_idx}",
+              is_final_batch=(mb_idx == 3),
+              padding_stats=_padding_stats(),
+          )
+
+      def flush(self):
+        return iter(())
+
+      def reset(self):
+        pass
+
+    async def _run():
+      nonlocal in_flight_train_steps, max_in_flight_train_steps
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=FourMicrobatchAssembler(),
+          sync_weights=False,
+      )
+
+      async def _fake_train_step(batch, *, apply_optimizer=True, **_):
+        nonlocal in_flight_train_steps, max_in_flight_train_steps
+        mb_idx = int(batch.split("_")[1])
+        in_flight_train_steps += 1
+        max_in_flight_train_steps = max(
+            max_in_flight_train_steps, in_flight_train_steps
+        )
+        events.append(f"train_mb_{mb_idx}_start")
+        try:
+          if mb_idx == 0:
+            self.assertFalse(apply_optimizer)
+            # mb_0 stays in-flight until mb_1 has already been dispatched!
+            await asyncio.wait_for(mb1_started.wait(), timeout=2.0)
+            await asyncio.sleep(0.01)
+          elif mb_idx == 1:
+            self.assertFalse(apply_optimizer)
+            mb1_started.set()
+            await asyncio.sleep(0.02)
+          elif mb_idx == 2:
+            self.assertFalse(apply_optimizer)
+            await asyncio.sleep(0.01)
+          else:
+            self.assertTrue(apply_optimizer)
+            await asyncio.sleep(0.01)
+            return {"updated": True, "train_step": 1}
+          return None
+        finally:
+          events.append(f"train_mb_{mb_idx}_end")
+          in_flight_train_steps -= 1
+
+      self.mock_engine.train_step = mock.AsyncMock(side_effect=_fake_train_step)
+      program.engine = self.mock_engine
+
+      items = tuple(
+          datatypes.TrajectoryItem(
+              group_index=group_index,
+              prompt_id="prompt_0",
+              start_step=0,
+              traj=_scored_traj(),
+          )
+          for group_index in range(2)
+      )
+      await program.scored_q.put(
+          rl_program.ScoredGroup(
+              payloads=tuple(
+                  self.mock_algo.create_trainer_payloads.return_value[:2]
+              ),
+              items=items,
+              rewards=(1.0, 1.0),
+          )
+      )
+
+      await program.train_stage()
+
+      # Double-buffered bound: mb_1 starts while mb_0 is in-flight, and depth
+      # never exceeds _MAX_INFLIGHT_TRAIN_STEPS == 2.
+      self.assertEqual(max_in_flight_train_steps, 2)
+      self.assertLess(
+          events.index("train_mb_1_start"),
+          events.index("train_mb_0_end"),
+      )
+      self.assertLess(
+          events.index("train_mb_0_end"),
+          events.index("train_mb_2_start"),
+      )
+      self.assertEqual(
+          [events.index(f"train_mb_{i}_start") for i in range(4)],
+          sorted(events.index(f"train_mb_{i}_start") for i in range(4)),
+      )
+
+    asyncio.run(_run())
+
+  def test_train_stage_cancels_all_queued_pending_trains_on_exception(self):
+    mb0_started = threading.Event()
+    mb1_started = threading.Event()
+    cancelled_mbs: list[str] = []
+
+    class FailingThirdMicrobatchAssembler:
+      num_generations: int = 2
+      mini_batch_size: int = 1
+      groups_per_assembly_batch: int = 1
+
+      @property
+      def assembly_batch_size(self) -> int:
+        return self.groups_per_assembly_batch * self.num_generations
+
+      def feed(self, items):
+        del items
+        yield batch_assembly.AssembledBatch(
+            payload="mb_0",
+            is_final_batch=False,
+            padding_stats=_padding_stats(),
+        )
+        if not mb0_started.wait(timeout=2.0):
+          raise TimeoutError("mb0 train_step did not start in time")
+        yield batch_assembly.AssembledBatch(
+            payload="mb_1",
+            is_final_batch=False,
+            padding_stats=_padding_stats(),
+        )
+        if not mb1_started.wait(timeout=2.0):
+          raise TimeoutError("mb1 train_step did not start in time")
+        raise RuntimeError("packing failed on mb_2")
+
+      def flush(self):
+        return iter(())
+
+      def reset(self):
+        pass
+
+    async def _run():
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=FailingThirdMicrobatchAssembler(),
+          sync_weights=False,
+      )
+
+      async def _slow_train_step(batch, *, apply_optimizer=True, **_):
+        del apply_optimizer
+        try:
+          if batch == "mb_0":
+            mb0_started.set()
+          elif batch == "mb_1":
+            mb1_started.set()
+          await asyncio.sleep(10.0)
+        except asyncio.CancelledError:
+          cancelled_mbs.append(batch)
+          raise
+
+      self.mock_engine.train_step = mock.AsyncMock(side_effect=_slow_train_step)
+      program.engine = self.mock_engine
+
+      items = tuple(
+          datatypes.TrajectoryItem(
+              group_index=group_index,
+              prompt_id="prompt_0",
+              start_step=0,
+              traj=_scored_traj(),
+          )
+          for group_index in range(2)
+      )
+      await program.scored_q.put(
+          rl_program.ScoredGroup(
+              payloads=tuple(
+                  self.mock_algo.create_trainer_payloads.return_value[:2]
+              ),
+              items=items,
+              rewards=(1.0, 1.0),
+          )
+      )
+
+      with self.assertRaisesRegex(RuntimeError, "packing failed on mb_2"):
+        await program.train_stage()
+      self.assertEqual(cancelled_mbs, ["mb_0", "mb_1"])
+
+    asyncio.run(_run())
+
+  def test_train_stage_policy_training_time_measures_non_overlapping_union(
+      self,
+  ):
+    mb1_started = asyncio.Event()
+
+    class TwoOverlappingMicrobatchAssembler:
+      num_generations: int = 2
+      mini_batch_size: int = 1
+      groups_per_assembly_batch: int = 1
+
+      @property
+      def assembly_batch_size(self) -> int:
+        return self.groups_per_assembly_batch * self.num_generations
+
+      def feed(self, items):
+        del items
+        yield batch_assembly.AssembledBatch(
+            payload="mb_0",
+            is_final_batch=False,
+            padding_stats=_padding_stats(),
+        )
+        yield batch_assembly.AssembledBatch(
+            payload="mb_1",
+            is_final_batch=True,
+            padding_stats=_padding_stats(),
+        )
+
+      def flush(self):
+        return iter(())
+
+      def reset(self):
+        pass
+
+    async def _run():
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=TwoOverlappingMicrobatchAssembler(),
+          sync_weights=False,
+      )
+
+      clock = [100.0]
+
+      def _fake_monotonic() -> float:
+        return clock[0]
+
+      async def _overlapping_train_step(batch, *, apply_optimizer=True, **_):
+        del apply_optimizer
+        if batch == "mb_0":
+          # mb_0 starts at t=100.00s, overlaps with mb_1 starting at t=100.02s,
+          # and finishes at t=100.08s (duration 0.08s).
+          await asyncio.wait_for(mb1_started.wait(), timeout=2.0)
+          clock[0] = 100.08
+          return None
+        # mb_1 starts at t=100.02s while mb_0 is in flight, and finishes at
+        # t=100.12s (duration 0.10s; union of [100.00, 100.08] and
+        # [100.02, 100.12] is 0.12s, strictly less than 0.08 + 0.10 = 0.18s).
+        clock[0] = 100.02
+        mb1_started.set()
+        await asyncio.sleep(0)
+        clock[0] = 100.12
+        return {"updated": True}
+
+      self.mock_engine.train_step = mock.AsyncMock(
+          side_effect=_overlapping_train_step
+      )
+      program.engine = self.mock_engine
+
+      items = tuple(
+          datatypes.TrajectoryItem(
+              group_index=group_index,
+              prompt_id="prompt_0",
+              start_step=0,
+              traj=_scored_traj(),
+          )
+          for group_index in range(2)
+      )
+      await program.scored_q.put(
+          rl_program.ScoredGroup(
+              payloads=tuple(
+                  self.mock_algo.create_trainer_payloads.return_value[:2]
+              ),
+              items=items,
+              rewards=(1.0, 1.0),
+          )
+      )
+      await program.scored_q.close()
+
+      with mock.patch.object(
+          rl_program.time, "monotonic", side_effect=_fake_monotonic
+      ):
+        await program.train_stage()
+
+      # Both mb_0 (0.08 s) and mb_1 (0.10 s) run concurrently; the union of
+      # [100.00, 100.08] and [100.02, 100.12] is 0.12 s (< 0.18 s sum).
+      policy_time = program.metrics_logger.get_metric(
+          "perf", "policy_training_time", "train"
+      )
+      self.assertAlmostEqual(policy_time, 0.12, places=6)
 
     asyncio.run(_run())
 

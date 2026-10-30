@@ -722,7 +722,8 @@ def _maxtext_adamw_options(
   if args.optimizer_opt_type.lower() != "adamw":
     raise ValueError(
         f"--optimizer_opt_type={args.optimizer_opt_type} is not supported by"
-        " the maxtext backend, which maps only adamw." + hint
+        " the maxtext backend, which maps only adamw."
+        + hint
     )
   chain = args.optimizer_opt_chain_type
   if not chain:
@@ -741,7 +742,8 @@ def _maxtext_adamw_options(
   else:
     raise ValueError(
         f"--optimizer_opt_chain_type={chain} is not supported by the maxtext"
-        " backend, which maps only clip_by_global_norm." + hint
+        " backend, which maps only clip_by_global_norm."
+        + hint
     )
   return maxtext_utils.AdamWOptions(
       b1=args.optimizer_b1,
@@ -985,9 +987,9 @@ def main(argv: list[str], context: Any = None) -> None:
         })
     )
     logging.info("Trainer worker is registered.")
-    # Shut down gracefully on SIGTERM/SIGINT so that TrainerWorker.stop() ->
-    # PeftTrainerV2.close() runs and blocks until every in-flight async ops is
-    # finished.
+    # Shut down gracefully on SIGTERM/SIGINT so that RPC intake and in-flight
+    # off-loop sync methods drain before TrainerWorker.stop() ->
+    # PeftTrainerV2.close() runs.
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -1003,11 +1005,15 @@ def main(argv: list[str], context: Any = None) -> None:
     finally:
       logging.info("Draining trainer worker...")
       try:
-        worker_service.stop()
-        logging.info("Trainer worker drained.")
-      except Exception:
-        logging.exception("Failed to drain trainer worker cleanly.")
-      await server.stop_serving()
+        await server.stop_serving()
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.exception("Failed to stop trainer gRPC server cleanly.")
+      finally:
+        try:
+          worker_service.stop()
+          logging.info("Trainer worker drained.")
+        except Exception:  # pylint: disable=broad-exception-caught
+          logging.exception("Failed to drain trainer worker cleanly.")
 
   asyncio.run(grpc_server_main())
 

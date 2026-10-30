@@ -65,6 +65,14 @@ RewardLogMetrics = Mapping[
     str, tuple[np.ndarray | float | np.number, RewardLogMetricAggFn]
 ]
 
+# Maximum number of microbatch `train_step` tasks allowed in flight concurrently
+# in `StandardRLProgram.train_stage`. Depth 2 double-buffers microbatch dispatch
+# so the next microbatch's serialization, network transfer, and server-side
+# unpickling overlap with the active microbatch's Trainer execution while
+# bounding Orchestrator and Trainer host memory to at most 2 in-flight
+# microbatches.
+_MAX_INFLIGHT_TRAIN_STEPS = 2
+
 
 def _next_microbatch(
     batch_iter: Iterator[batch_assembly.AssembledBatch],
@@ -1392,12 +1400,21 @@ class StandardRLProgram(RLProgram):
 
   async def _timed_train_step(
       self, batch: datatypes.RLTrainerPayload, *, apply_optimizer: bool
-  ) -> tuple[Any, float]:
-    """Runs one microbatch's `train_step`; returns its result and seconds.
+  ) -> tuple[Any, float, float]:
+    """Runs one microbatch's `train_step`; returns (result, start, end).
 
-    Intermediate microbatches (`apply_optimizer=False`) intentionally return
-    once `fwd_bwd` is dispatched so the next microbatch's RPC, host-to-device
-    input sharding, and XLA launch stay pipelined with TPU execution.
+    Intermediate `train_step` calls (`apply_optimizer=False`) return once
+    `fwd_bwd` is dispatched on the Trainer, and up to
+    `_MAX_INFLIGHT_TRAIN_STEPS` microbatches may be in flight concurrently so
+    the next microbatch's RPC serialization, network transfer, and worker
+    deserialization overlap with the current microbatch's Trainer execution.
+
+    Args:
+      batch: Microbatch payload for the trainer worker.
+      apply_optimizer: Whether to apply the accumulated gradients on this step.
+
+    Returns:
+      A `(result, start_time, end_time)` tuple.
     """
     assert self.engine is not None
     start = time.monotonic()
@@ -1407,28 +1424,39 @@ class StandardRLProgram(RLProgram):
         accumulate_gradients=True,
         apply_optimizer=apply_optimizer,
     )
-    return result, time.monotonic() - start
+    return result, start, time.monotonic()
 
   async def train_stage(self) -> None:
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
     assert self.engine is not None
 
-    pending_train: asyncio.Task[tuple[Any, float]] | None = None
+    pending_trains: collections.deque[
+        asyncio.Task[tuple[Any, float, float]]
+    ] = collections.deque()
     step_result: Any = None
     step_times = step_telemetry.StepTimes()
+    last_train_end_mono = 0.0
 
-    async def _await_pending_train() -> None:
-      nonlocal pending_train, step_result
-      task, pending_train = pending_train, None
-      if task is not None:
-        step_result, train_sec = await task
-        step_times.policy_training_time += train_sec
+    async def _await_oldest_train() -> None:
+      nonlocal step_result, last_train_end_mono
+      if not pending_trains:
+        return
+      task = pending_trains.popleft()
+      step_result, start_mono, end_mono = await task
+      effective_start = max(start_mono, last_train_end_mono)
+      step_times.policy_training_time += max(0.0, end_mono - effective_start)
+      last_train_end_mono = max(last_train_end_mono, end_mono)
+
+    async def _drain_pending_trains() -> None:
+      while pending_trains:
+        await _await_oldest_train()
 
     try:
       while self.max_steps is None or self._step < self.max_steps:
         current_step = self._step
         step_start_time = time.monotonic()
         step_times = step_telemetry.StepTimes()
+        last_train_end_mono = 0.0
         consumed_policy_version = self.policy_version
 
         uncommitted_groups: list[list[datatypes.TrajectoryItem]] = []
@@ -1561,7 +1589,7 @@ class StandardRLProgram(RLProgram):
                 and algo_config.use_rollout_logps
                 and not self.can_fuse_agreement_in_loss
             ):
-              await _await_pending_train()
+              await _drain_pending_trains()
               agreement_start = time.monotonic()
               batch = await self._apply_sampler_trainer_agreement(
                   batch, step_sampler_agreement
@@ -1581,13 +1609,21 @@ class StandardRLProgram(RLProgram):
                 mb.padding_stats.row_imbalance,
             )
             is_final_batch = mb.is_final_batch
-            await _await_pending_train()
-            pending_train = asyncio.create_task(
-                self._timed_train_step(batch, apply_optimizer=is_final_batch)
+            while pending_trains and (
+                pending_trains[0].done()
+                or len(pending_trains) >= _MAX_INFLIGHT_TRAIN_STEPS
+            ):
+              await _await_oldest_train()
+            pending_trains.append(
+                asyncio.create_task(
+                    self._timed_train_step(
+                        batch, apply_optimizer=is_final_batch
+                    )
+                )
             )
             del batch, mb
             if is_final_batch:
-              await _await_pending_train()
+              await _drain_pending_trains()
               metrics_start = time.monotonic()
               trainer_metrics = await self.engine.get_metrics(
                   role=datatypes.Role.ACTOR
@@ -1617,7 +1653,7 @@ class StandardRLProgram(RLProgram):
               await _maybe_save_checkpoint()
             break
 
-        await _await_pending_train()
+        await _drain_pending_trains()
 
         if not all_step_items:
           logging.info(
@@ -1731,10 +1767,12 @@ class StandardRLProgram(RLProgram):
         # left to set the event.
         self.dispatch_window.release()
     finally:
-      if pending_train is not None:
-        pending_train.cancel()
+      for task in pending_trains:
+        task.cancel()
+      while pending_trains:
+        task = pending_trains.popleft()
         with contextlib.suppress(asyncio.CancelledError, Exception):
-          await _await_pending_train()
+          await task
 
   async def run_async(
       self,

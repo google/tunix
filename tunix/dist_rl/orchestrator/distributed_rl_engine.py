@@ -21,6 +21,7 @@ AbstractRLEngine.
 """
 
 import asyncio
+import collections
 from collections.abc import Mapping, Sequence
 import concurrent.futures
 import inspect
@@ -99,6 +100,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._policy_version = 0
     self._weight_sync_coordinator = weight_sync_coordinator
     self._restored_checkpoint_metadata: dict[str, Any] | None = None
+    self._inflight_fwd_bwd: dict[
+        datatypes.Role | str, set[asyncio.Future[None]]
+    ] = collections.defaultdict(set)
 
   def _on_worker_unreachable(
       self,
@@ -507,11 +511,42 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         payload=payload,
         metadata=metadata,
     )
-    fwd_bwd_result = await self._invoke_worker(
-        worker, "fwd_bwd", request=request
+    inflight_set = self._inflight_fwd_bwd[role]
+    prior_fwd_bwd = tuple(inflight_set) if apply_optimizer else ()
+    fwd_bwd_done: asyncio.Future[None] = (
+        asyncio.get_running_loop().create_future()
     )
+    inflight_set.add(fwd_bwd_done)
+    try:
+      fwd_bwd_result = await self._invoke_worker(
+          worker, "fwd_bwd", request=request
+      )
+    except BaseException as exc:
+      if not fwd_bwd_done.done():
+        prior_exc = (
+            RuntimeError(
+                "Prior in-flight fwd_bwd was cancelled before optimizer update."
+            )
+            if isinstance(exc, asyncio.CancelledError)
+            else exc
+        )
+        fwd_bwd_done.set_exception(prior_exc)
+        fwd_bwd_done.exception()
+      if apply_optimizer:
+        inflight_set.discard(fwd_bwd_done)
+        inflight_set.difference_update(prior_fwd_bwd)
+      raise
+    else:
+      if not fwd_bwd_done.done():
+        fwd_bwd_done.set_result(None)
+      inflight_set.discard(fwd_bwd_done)
     if not apply_optimizer:
       return fwd_bwd_result
+    try:
+      for prior in prior_fwd_bwd:
+        await asyncio.shield(prior)
+    finally:
+      inflight_set.difference_update(prior_fwd_bwd)
     train_step = await self._invoke_worker(worker, "update")
     return {
         "fwd_bwd": fwd_bwd_result,
@@ -765,6 +800,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     See `rl_engine_interface.AbstractRLEngine.resume_from_checkpoint`.
     """
     self._restored_checkpoint_metadata = None
+    self._inflight_fwd_bwd[role].clear()
     metadata = await self._restore_checkpoint(role=role)
     if not isinstance(metadata, Mapping):
       if metadata is not None:
@@ -841,4 +877,5 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
   async def close(self) -> None:
     """Closes the rollout execution session and cancels any pending polling tasks."""
+    self._inflight_fwd_bwd.clear()
     await self._rollout_session.close()

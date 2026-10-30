@@ -55,14 +55,15 @@ class StepTimes:
 
   Attributes:
     exposed_generation_time: Waiting for scored rollout groups.
-    policy_training_time: Microbatch `train_step` calls plus `get_metrics`.
+    policy_training_time: Union of (possibly overlapping) microbatch
+      `train_step` intervals, each instant counted once, plus `get_metrics`.
     reference_logps_time: Reference-model logprob passes for the KL penalty.
     sampler_agreement_time: `StandardRLProgram`'s standalone sampler-agreement
       pass, which computes trainer logprobs to compare with the sampler's.
     checkpoint_time: The `save_checkpoint` call. With async checkpointing that
-      is only its blocking part (waiting out a previous save, copying the
-      state off device); the write itself runs in the background, uncounted.
-      About 0 on steps the save policy skips.
+      is only its blocking part (waiting out a previous save, copying the state
+      off device); the write itself runs in the background, uncounted. About 0
+      on steps the save policy skips.
     weight_sync_time: Syncing the new policy to the rollout workers.
   """
 
@@ -82,10 +83,10 @@ class RolloutWindow:
     dispatch_time_s: Unix time of the rollout's `engine.dispatch` event.
     finish_time_s: Unix time of its last `worker.rollout` event.
     worker_id: The rollout worker that handed the trajectory back.
-    execution_time_s: Worker-side episode execution duration in seconds, or
-      None when not stamped.
-    batch_idx: Prompt cohort index from `engine.dispatch` or item metadata,
-      or None when untagged.
+    execution_time_s: Worker-side episode execution duration in seconds, or None
+      when not stamped.
+    batch_idx: Prompt cohort index from `engine.dispatch` or item metadata, or
+      None when untagged.
   """
 
   dispatch_time_s: float
@@ -200,8 +201,8 @@ class RolloutFacts:
     window: Dispatch and finish times from lineage, or None without them.
     env_time_s: Total environment interaction wall time (`reset` + `step` +
       `close`) in seconds, or None without `env_time`.
-    reward_time_s: Final reward evaluation wall time in seconds, or None
-      without `reward_time`.
+    reward_time_s: Final reward evaluation wall time in seconds, or None without
+      `reward_time`.
   """
 
   traj_id: str
@@ -372,9 +373,7 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
         if window.execution_time_s is not None
     ]
     if exec_durations:
-      exec_p50, exec_p90, exec_p99 = np.percentile(
-          exec_durations, [50, 90, 99]
-      )
+      exec_p50, exec_p90, exec_p99 = np.percentile(exec_durations, [50, 90, 99])
       metrics["rollout/execution_sec/p50"] = float(exec_p50)
       metrics["rollout/execution_sec/p90"] = float(exec_p90)
       metrics["rollout/execution_sec/p99"] = float(exec_p99)

@@ -66,14 +66,16 @@ class AbstractRLEngine(Protocol):
          (provided as an attribute `p.prompt_id` or dict key `p["prompt_id"]`).
          The engine does not synthesize fallback IDs; missing IDs raise a
          `ValueError` immediately.
-      2. The engine expands each prompt into `num_generations` independent rollout
-         requests with deterministic IDs `req_{prompt_id}_g{g_idx}_v{version}`
-         and sets `group_index = g_idx` (0..G-1).
+      2. The engine expands each prompt into `num_generations` independent
+         rollout requests with deterministic IDs
+         `req_{prompt_id}_g{g_idx}_v{version}` and sets `group_index = g_idx`
+         (0..G-1).
 
     Args:
       prompts: Sequence of prompt items (dicts, objects, or RolloutRequests).
         Every prompt item MUST provide a unique `prompt_id`.
-      num_generations: Number of rollout trajectories to generate per prompt (G).
+      num_generations: Number of rollout trajectories to generate per prompt
+        (G).
       policy_version: Active policy version for generation.
       generation_args: Optional generation parameters (temperature, max steps).
       route_metadata: Optional routing metadata merged into each request's
@@ -116,6 +118,10 @@ class AbstractRLEngine(Protocol):
     """Computes per-token log probabilities for a padded batch/request."""
     ...
 
+  # TODO(tunix-dev): Fuse `apply_optimizer=True` into a single atomic
+  # Trainer RPC and attach `(step_id, mb_index, num_microbatches)` accounting on
+  # TrainerWorker so lost/retried microbatches across reconnects are detected
+  # end-to-end.
   async def train_step(
       self,
       payload: datatypes.RLTrainerPayload,
@@ -123,7 +129,25 @@ class AbstractRLEngine(Protocol):
       accumulate_gradients: bool = False,
       apply_optimizer: bool = True,
   ) -> Any:
-    """Executes forward/backward gradient update on trainer workers."""
+    """Executes forward/backward gradient update on trainer workers.
+
+    Ordering Contract:
+      When multiple `train_step` coroutines are started concurrently for the
+      same `role` (e.g. double-buffered microbatch pipelining in `train_stage`),
+      implementations MUST ensure that when `apply_optimizer=True`, all prior
+      in-flight `fwd_bwd` calls for `role` have completed before `update` is
+      invoked, and callers MUST drain in-flight `train_step` calls at every
+      `apply_optimizer=True` boundary before starting subsequent microbatches.
+
+    Args:
+      payload: Microbatch payload for the trainer worker.
+      role: Target worker role to execute the training step on.
+      accumulate_gradients: Whether to accumulate gradients across microbatches.
+      apply_optimizer: Whether to apply the optimizer update after `fwd_bwd`.
+
+    Returns:
+      Engine-specific training step result or metrics.
+    """
     ...
 
   # TODO: b/552087289 - Generalize get_metrics to support querying metrics

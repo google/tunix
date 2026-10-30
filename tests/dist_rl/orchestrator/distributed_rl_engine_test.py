@@ -2285,6 +2285,238 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_train_step_overlaps_final_fwd_bwd_and_gates_update_on_prior_fwd_bwd(
+      self,
+  ):
+    """Verifies final MB overlaps fwd_bwd with prior MB and awaits prior before update."""
+    events: list[str] = []
+    mb0_fwd_bwd_entered = asyncio.Event()
+    mb1_fwd_bwd_finished = asyncio.Event()
+    release_mb0_fwd_bwd = asyncio.Event()
+
+    async def _fwd_bwd(request: datatypes.TrainRequest):
+      mb_idx = request.metadata["mb_idx"]
+      events.append(f"fwd_bwd_start_{mb_idx}")
+      if mb_idx == 0:
+        mb0_fwd_bwd_entered.set()
+        await asyncio.wait_for(release_mb0_fwd_bwd.wait(), timeout=5.0)
+      events.append(f"fwd_bwd_end_{mb_idx}")
+      if mb_idx == 1:
+        mb1_fwd_bwd_finished.set()
+      return {"mb_idx": mb_idx}
+
+    async def _update():
+      events.append("update")
+      return 1
+
+    self.mock_actor.fwd_bwd.side_effect = _fwd_bwd
+    self.mock_actor.update.side_effect = _update
+
+    async def _run():
+      p0 = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros((1, 2), dtype=np.int32),
+          prompt_mask=np.ones((1, 2), dtype=np.float32),
+          completion_ids=np.zeros((1, 2), dtype=np.int32),
+          completion_mask=np.ones((1, 2), dtype=np.float32),
+          advantages=np.ones((1, 2), dtype=np.float32),
+          metadata={"mb_idx": 0},
+      )
+      p1 = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros((1, 2), dtype=np.int32),
+          prompt_mask=np.ones((1, 2), dtype=np.float32),
+          completion_ids=np.zeros((1, 2), dtype=np.int32),
+          completion_mask=np.ones((1, 2), dtype=np.float32),
+          advantages=np.ones((1, 2), dtype=np.float32),
+          metadata={"mb_idx": 1},
+      )
+      t0 = asyncio.create_task(
+          self.engine.train_step(
+              p0,
+              role=datatypes.Role.ACTOR,
+              accumulate_gradients=True,
+              apply_optimizer=False,
+          )
+      )
+      await asyncio.wait_for(mb0_fwd_bwd_entered.wait(), timeout=5.0)
+      t1 = asyncio.create_task(
+          self.engine.train_step(
+              p1,
+              role=datatypes.Role.ACTOR,
+              accumulate_gradients=True,
+              apply_optimizer=True,
+          )
+      )
+      # mb_1's fwd_bwd runs and finishes while mb_0's fwd_bwd is still running.
+      await asyncio.wait_for(mb1_fwd_bwd_finished.wait(), timeout=5.0)
+      await asyncio.sleep(0.01)
+      # update must NOT be called while mb_0's fwd_bwd is still in flight!
+      self.mock_actor.update.assert_not_called()
+
+      release_mb0_fwd_bwd.set()
+      res0, res1 = await asyncio.gather(t0, t1)
+      self.assertEqual(res0, {"mb_idx": 0})
+      self.assertEqual(
+          res1,
+          {
+              "fwd_bwd": {"mb_idx": 1},
+              "updated": True,
+              "train_step": 1,
+              "accumulated": True,
+          },
+      )
+      self.assertEmpty(self.engine._inflight_fwd_bwd[datatypes.Role.ACTOR])
+
+    asyncio.run(_run())
+    self.assertEqual(
+        events,
+        [
+            "fwd_bwd_start_0",
+            "fwd_bwd_start_1",
+            "fwd_bwd_end_1",
+            "fwd_bwd_end_0",
+            "update",
+        ],
+    )
+
+  def test_train_step_skips_update_when_prior_inflight_fwd_bwd_fails(self):
+    """Verifies failing prior fwd_bwd aborts final train_step before update."""
+    mb0_entered = asyncio.Event()
+    mb1_finished = asyncio.Event()
+
+    async def _fwd_bwd(request: datatypes.TrainRequest):
+      mb_idx = request.metadata["mb_idx"]
+      if mb_idx == 0:
+        mb0_entered.set()
+        await asyncio.wait_for(mb1_finished.wait(), timeout=5.0)
+        raise RuntimeError("corrupted bulk stripe on mb_0")
+      loop = asyncio.get_running_loop()
+      loop.call_soon(mb1_finished.set)
+      return {"mb_idx": mb_idx}
+
+    self.mock_actor.fwd_bwd.side_effect = _fwd_bwd
+
+    async def _run():
+      p0 = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros((1, 2), dtype=np.int32),
+          prompt_mask=np.ones((1, 2), dtype=np.float32),
+          completion_ids=np.zeros((1, 2), dtype=np.int32),
+          completion_mask=np.ones((1, 2), dtype=np.float32),
+          advantages=np.ones((1, 2), dtype=np.float32),
+          metadata={"mb_idx": 0},
+      )
+      p1 = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros((1, 2), dtype=np.int32),
+          prompt_mask=np.ones((1, 2), dtype=np.float32),
+          completion_ids=np.zeros((1, 2), dtype=np.int32),
+          completion_mask=np.ones((1, 2), dtype=np.float32),
+          advantages=np.ones((1, 2), dtype=np.float32),
+          metadata={"mb_idx": 1},
+      )
+      t0 = asyncio.create_task(
+          self.engine.train_step(
+              p0,
+              role=datatypes.Role.ACTOR,
+              accumulate_gradients=True,
+              apply_optimizer=False,
+          )
+      )
+      await asyncio.wait_for(mb0_entered.wait(), timeout=5.0)
+      t1 = asyncio.create_task(
+          self.engine.train_step(
+              p1,
+              role=datatypes.Role.ACTOR,
+              accumulate_gradients=True,
+              apply_optimizer=True,
+          )
+      )
+      with self.assertRaisesRegex(
+          RuntimeError, "corrupted bulk stripe on mb_0"
+      ):
+        await t0
+      with self.assertRaisesRegex(
+          RuntimeError, "corrupted bulk stripe on mb_0"
+      ):
+        await t1
+      self.mock_actor.update.assert_not_called()
+      self.assertEmpty(self.engine._inflight_fwd_bwd[datatypes.Role.ACTOR])
+
+    asyncio.run(_run())
+
+  def test_train_step_skips_update_when_prior_fails_early_or_cancels(self):
+    """Verifies early failure or cancellation of prior fwd_bwd blocks update."""
+    mb0_entered = asyncio.Event()
+
+    async def _fwd_bwd(request: datatypes.TrainRequest):
+      mb_idx = request.metadata["mb_idx"]
+      if mb_idx == 0:
+        raise RuntimeError("early mb_0 failure")
+      if mb_idx == 2:
+        mb0_entered.set()
+        await asyncio.sleep(10.0)
+      return {"mb_idx": mb_idx}
+
+    self.mock_actor.fwd_bwd.side_effect = _fwd_bwd
+
+    async def _run():
+      def _payload(idx: int) -> datatypes.RLTrainerPayload:
+        return datatypes.RLTrainerPayload(
+            prompt_ids=np.zeros((1, 2), dtype=np.int32),
+            prompt_mask=np.ones((1, 2), dtype=np.float32),
+            completion_ids=np.zeros((1, 2), dtype=np.int32),
+            completion_mask=np.ones((1, 2), dtype=np.float32),
+            advantages=np.ones((1, 2), dtype=np.float32),
+            metadata={"mb_idx": idx},
+        )
+
+      # Case 1: t0 fails completely BEFORE t1 (apply_optimizer=True) starts.
+      with self.assertRaisesRegex(RuntimeError, "early mb_0 failure"):
+        await self.engine.train_step(
+            _payload(0),
+            role=datatypes.Role.ACTOR,
+            accumulate_gradients=True,
+            apply_optimizer=False,
+        )
+      with self.assertRaisesRegex(RuntimeError, "early mb_0 failure"):
+        await self.engine.train_step(
+            _payload(1),
+            role=datatypes.Role.ACTOR,
+            accumulate_gradients=True,
+            apply_optimizer=True,
+        )
+      self.mock_actor.update.assert_not_called()
+      self.assertEmpty(self.engine._inflight_fwd_bwd[datatypes.Role.ACTOR])
+
+      # Case 2: prior fwd_bwd is cancelled while final train_step is in flight;
+      # final train_step raises RuntimeError (not raw CancelledError).
+      t_cancel = asyncio.create_task(
+          self.engine.train_step(
+              _payload(2),
+              role=datatypes.Role.ACTOR,
+              accumulate_gradients=True,
+              apply_optimizer=False,
+          )
+      )
+      await asyncio.wait_for(mb0_entered.wait(), timeout=5.0)
+      t_final = asyncio.create_task(
+          self.engine.train_step(
+              _payload(3),
+              role=datatypes.Role.ACTOR,
+              accumulate_gradients=True,
+              apply_optimizer=True,
+          )
+      )
+      t_cancel.cancel()
+      with self.assertRaises(asyncio.CancelledError):
+        await t_cancel
+      with self.assertRaisesRegex(
+          RuntimeError, "Prior in-flight fwd_bwd was cancelled"
+      ):
+        await t_final
+      self.mock_actor.update.assert_not_called()
+      self.assertEmpty(self.engine._inflight_fwd_bwd[datatypes.Role.ACTOR])
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -647,9 +647,7 @@ class RemoteExecutionTest(parameterized.TestCase):
 
     server = remote_lib.InProcessRemoteExecutionServer(ThrowingWorker())
     resp4 = server.execute_sync_request(
-        remote_lib.ExecutionRequest(
-            request_id="req_err_5", method_name="fail"
-        )
+        remote_lib.ExecutionRequest(request_id="req_err_5", method_name="fail")
     )
     self.assertEqual(resp4.error_type, "ValueError")
     self.assertEqual(resp4.error_message, "Intentional failure")
@@ -929,9 +927,7 @@ class RemoteExecutionTest(parameterized.TestCase):
         restored_payload["strided_logps"], strided_view
     )
     np.testing.assert_array_equal(restored_payload["advantages"], advantages)
-    self.assertEqual(
-        restored_payload["metadata"], {"step": 7, "packed": True}
-    )
+    self.assertEqual(restored_payload["metadata"], {"step": 7, "packed": True})
     # Reconstructed arrays backed by released bytearrays must be writable.
     restored_payload["completion_ids"][0, 0] = 999
     self.assertEqual(restored_payload["completion_ids"][0, 0], 999)
@@ -986,9 +982,7 @@ class RemoteExecutionTest(parameterized.TestCase):
         )
 
         # 2. Verify client-streaming dispatch + server-streaming poll
-        ack_id = await handle.dispatch_task(
-            "req_stream_1", "echo_batch", batch
-        )
+        ack_id = await handle.dispatch_task("req_stream_1", "echo_batch", batch)
         self.assertEqual(ack_id, "req_stream_1")
         polled = await handle.poll_responses(timeout_s=5.0)
         self.assertIsNotNone(polled)
@@ -1573,6 +1567,7 @@ class RemoteExecutionTest(parameterized.TestCase):
     aux_bulk_server = network_lib._BulkTransferServer()
     aux_port = aux_bulk_server.start()
     try:
+
       async def _run():
         engine = StubWorkerEngine("worker_port_mismatch")
         port = portpicker.pick_unused_port()
@@ -2648,6 +2643,7 @@ class RemoteExecutionTest(parameterized.TestCase):
     bulk_server = network_lib._BulkTransferServer()
     port = bulk_server.start()
     try:
+
       async def _run():
         loop = asyncio.get_running_loop()
 
@@ -2866,6 +2862,7 @@ class RemoteExecutionTest(parameterized.TestCase):
     accept_thread.start()
 
     try:
+
       async def _run():
         # 1. Cancel _OP_PULL blocked on recv_into; use a real threading.Event
         # set in the finally block of _pull_stripe_sync (V6) to synchronize on
@@ -3151,9 +3148,7 @@ class RemoteExecutionTest(parameterized.TestCase):
     # A1 regression test: non-host[:port] gRPC target schemes (e.g. dns:/// or
     # unix:) are rejected with a clear message when enable_bulk_transport=True,
     # and accepted when enable_bulk_transport=False.
-    with self.assertRaisesRegex(
-        ValueError, "pass enable_bulk_transport=False"
-    ):
+    with self.assertRaisesRegex(ValueError, "pass enable_bulk_transport=False"):
       remote_lib.GrpcRemoteActorHandle(
           "grpc://dns:///worker.ns.svc:50051", enable_bulk_transport=True
       )
@@ -3707,17 +3702,16 @@ class RemoteExecutionTest(parameterized.TestCase):
         heartbeat_threads.append(threading.current_thread())
         return "alive"
 
-      def pause_on_loop(self) -> bool:
-        _ = asyncio.get_running_loop()
-        if self._pause_event is None:
-          self._pause_event = asyncio.Event()
-        self._pause_event.set()
+      def pause(self) -> bool:
+        loop_threads.append(threading.current_thread())
+        asyncio.get_running_loop()
+        self._pause_event = asyncio.Event()
         return self._pause_event.is_set()
 
-      async def async_ping(self) -> str:
-        loop_threads.append(threading.current_thread())
-        await asyncio.sleep(0)
-        return "pong"
+      def resume(self) -> bool:
+        assert self._pause_event is not None
+        self._pause_event.set()
+        return self._pause_event.is_set()
 
     async def _run():
       async with running_grpc_server(_MixedWorker()) as (_, handle):
@@ -3726,17 +3720,17 @@ class RemoteExecutionTest(parameterized.TestCase):
         )
         await asyncio.to_thread(entered_compile.wait, 10.0)
         self.assertTrue(entered_compile.is_set())
-        # While @offload_to_thread blocking_compile is parked on the worker
-        # thread, unmarked sync heartbeat, unmarked loop-affine sync methods,
-        # and async coroutines must all complete promptly on the server loop.
+        # While blocking_compile is parked on the worker thread, undecorated
+        # heartbeat() and loop-affined pause()/resume() must still complete
+        # promptly on the gRPC server event loop thread.
         hb = await asyncio.wait_for(handle.asubmit("heartbeat"), timeout=2.0)
         self.assertEqual(hb, "alive")
-        paused = await asyncio.wait_for(
-            handle.asubmit("pause_on_loop"), timeout=2.0
+        self.assertFalse(
+            await asyncio.wait_for(handle.asubmit("pause"), timeout=2.0)
         )
-        self.assertTrue(paused)
-        pong = await asyncio.wait_for(handle.asubmit("async_ping"), timeout=2.0)
-        self.assertEqual(pong, "pong")
+        self.assertTrue(
+            await asyncio.wait_for(handle.asubmit("resume"), timeout=2.0)
+        )
         self.assertFalse(compile_task.done())
         release_compile.set()
         self.assertEqual(await compile_task, "compiled:step1")
@@ -3745,7 +3739,7 @@ class RemoteExecutionTest(parameterized.TestCase):
     self.assertLen(compile_threads, 1)
     self.assertLen(heartbeat_threads, 1)
     self.assertLen(loop_threads, 1)
-    self.assertIsNot(compile_threads[0], loop_threads[0])
+    self.assertIsNot(compile_threads[0], heartbeat_threads[0])
     self.assertIs(heartbeat_threads[0], loop_threads[0])
 
   def test_grpc_concurrent_offloaded_sync_methods_serialize_and_copy_contextvars(
@@ -3820,16 +3814,12 @@ class RemoteExecutionTest(parameterized.TestCase):
     async def _run():
       worker = _AwaitableReturningWorker()
       inproc_handle = create_in_process_handle(worker)
-      self.assertEqual(
-          await inproc_handle.asubmit("inline_coro_factory", 5), 6
-      )
+      self.assertEqual(await inproc_handle.asubmit("inline_coro_factory", 5), 6)
       self.assertEqual(
           await inproc_handle.asubmit("offloaded_coro_factory", 5), 15
       )
       async with running_grpc_server(worker) as (_, grpc_handle):
-        self.assertEqual(
-            await grpc_handle.asubmit("inline_coro_factory", 7), 8
-        )
+        self.assertEqual(await grpc_handle.asubmit("inline_coro_factory", 7), 8)
         self.assertEqual(
             await grpc_handle.asubmit("offloaded_coro_factory", 7), 17
         )
@@ -3966,6 +3956,262 @@ class RemoteExecutionTest(parameterized.TestCase):
       self.assertEmpty(remote_lib._BACKGROUND_CLOSE_TASKS)
 
     asyncio.run(_run())
+
+  def test_grpc_default_runs_sync_off_loop_and_inprocess_runs_on_loop(self):
+    """Verifies gRPC runs @offload_to_thread sync methods off loop, InProcess inline."""
+    loop_threads: list[int] = []
+    sync_threads: list[int] = []
+    call_order: list[int] = []
+
+    class _SyncAndAsyncWorker:
+
+      async def get_loop_tid(self) -> int:
+        tid = threading.get_ident()
+        loop_threads.append(tid)
+        return tid
+
+      @remote_lib.offload_to_thread
+      def sync_op(self, x: int, payload: np.ndarray) -> int:
+        del payload
+        sync_threads.append(threading.get_ident())
+        call_order.append(x)
+        return x + 1
+
+    async def _run():
+      worker = _SyncAndAsyncWorker()
+      # 1. InProcessRemoteExecutionServer runs sync methods inline on loop.
+      inproc_server = remote_lib.InProcessRemoteExecutionServer(worker)
+      self.assertFalse(inproc_server._RUN_SYNC_METHODS_OFF_LOOP)
+      inproc_handle = remote_lib.InProcessActorHandle(inproc_server)
+      inproc_loop_tid = await inproc_handle.asubmit("get_loop_tid")
+      inproc_res = await inproc_handle.asubmit(
+          "sync_op", 9, np.ones((4,), dtype=np.int32)
+      )
+      self.assertEqual(inproc_res, 10)
+      self.assertEqual(sync_threads, [inproc_loop_tid])
+      self.assertIsNone(inproc_server._sync_executor)
+
+      # 2. GrpcRemoteExecutionServer runs sync methods off-loop by default.
+      sync_threads.clear()
+      call_order.clear()
+      port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(worker)
+      self.assertTrue(server._RUN_SYNC_METHODS_OFF_LOOP)
+      await server.start_serving_async(port)
+      handle = remote_lib.GrpcRemoteActorHandle(f"localhost:{port}")
+      try:
+        loop_tid = await handle.asubmit("get_loop_tid")
+        arr_0 = np.ones((1024,), dtype=np.int32)
+        arr_1 = np.ones((1024,), dtype=np.int32)
+        t0 = asyncio.create_task(handle.asubmit("sync_op", 0, arr_0))
+        t1 = asyncio.create_task(handle.asubmit("sync_op", 1, arr_1))
+        res0, res1 = await asyncio.gather(t0, t1)
+        self.assertEqual((res0, res1), (1, 2))
+        self.assertLen(sync_threads, 2)
+        self.assertLen(set(sync_threads), 1)
+        self.assertNotEqual(sync_threads[0], loop_tid)
+        self.assertCountEqual(call_order, [0, 1])
+        self.assertIsNotNone(server._sync_executor)
+      finally:
+        await handle.close()
+        await server.stop_serving(grace=0.0)
+
+    asyncio.run(_run())
+
+  def test_grpc_sync_worker_overlaps_network_transfer_and_deserialization(self):
+    """Verifies off-loop Trainer sync execution overlaps network and serde."""
+    events: list[str] = []
+    compute_threads: list[int] = []
+    mb0_compute_entered = threading.Event()
+    mb2_deserialized_on_server = threading.Event()
+
+    class _SyncTrainerStub:
+
+      @remote_lib.offload_to_thread
+      def fwd_bwd(self, mb_idx: int, payload: np.ndarray) -> dict[str, int]:
+        compute_threads.append(threading.get_ident())
+        events.append(f"compute_start_{mb_idx}")
+        if mb_idx == 0:
+          mb0_compute_entered.set()
+          # Wait until mb_2 has been transferred AND deserialized on the server
+          # while mb_0 is blocked inside synchronous fwd_bwd!
+          if not mb2_deserialized_on_server.wait(timeout=5.0):
+            raise TimeoutError(
+                "mb_2 was not deserialized on server while mb_0 was in fwd_bwd"
+            )
+        events.append(f"compute_end_{mb_idx}")
+        return {"mb_idx": mb_idx, "nbytes": int(payload.nbytes)}
+
+    orig_deserialize = remote_lib.ExecutionRequest.deserialize_async_chunks
+
+    async def _tracked_deserialize(chunks, **kwargs):
+      req = await orig_deserialize(chunks, **kwargs)
+      if req.method_name == "fwd_bwd":
+        mb_idx = int(req.args[0])
+        events.append(f"unpickled_{mb_idx}")
+        if mb_idx == 2:
+          mb2_deserialized_on_server.set()
+      return req
+
+    async def _run():
+      worker = _SyncTrainerStub()
+      port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(worker)
+      await server.start_serving_async(port)
+      handle = remote_lib.GrpcRemoteActorHandle(f"localhost:{port}")
+      try:
+        arr_0 = np.ones((512 * 1024,), dtype=np.int32)
+        arr_1 = np.ones((1024,), dtype=np.int32)
+        arr_2 = np.ones((1024,), dtype=np.int32)
+        with mock.patch.object(
+            remote_lib.ExecutionRequest,
+            "deserialize_async_chunks",
+            side_effect=_tracked_deserialize,
+        ):
+          t0 = asyncio.create_task(handle.asubmit("fwd_bwd", 0, arr_0))
+          await asyncio.to_thread(mb0_compute_entered.wait, 5.0)
+          t1 = asyncio.create_task(handle.asubmit("fwd_bwd", 1, arr_1))
+          t2 = asyncio.create_task(handle.asubmit("fwd_bwd", 2, arr_2))
+          res0, res1, res2 = await asyncio.gather(t0, t1, t2)
+        self.assertEqual(res0, {"mb_idx": 0, "nbytes": arr_0.nbytes})
+        self.assertEqual(res1, {"mb_idx": 1, "nbytes": arr_1.nbytes})
+        self.assertEqual(res2, {"mb_idx": 2, "nbytes": arr_2.nbytes})
+      finally:
+        await handle.close()
+        await server.stop_serving(grace=0.0)
+
+    asyncio.run(_run())
+    # All 3 synchronous calls ran on the same dedicated compute thread.
+    self.assertLen(compute_threads, 3)
+    self.assertLen(set(compute_threads), 1)
+    # mb_2 finished unpickling on the server BEFORE mb_0 finished compute.
+    self.assertLess(events.index("unpickled_2"), events.index("compute_end_0"))
+
+  def test_grpc_handle_send_lock_is_isolated_per_event_loop(self):
+    """Verifies submit() on background loop does not reset main _send_lock."""
+    stream_events: list[str] = []
+    first_stream_in_progress = asyncio.Event()
+    allow_first_stream_finish = asyncio.Event()
+
+    class _EchoWorker:
+
+      def heartbeat(self) -> str:
+        return "ok"
+
+      def send_mb(self, idx: int) -> int:
+        return idx
+
+    async def _run():
+      worker = _EchoWorker()
+      port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(worker)
+      await server.start_serving_async(port)
+      handle = remote_lib.GrpcRemoteActorHandle(f"localhost:{port}")
+      orig_prepare = handle._prepare_request_chunks
+
+      async def _instrumented_prepare(request, get_bulk_port_rpc, **kwargs):
+        bulk_port, raw_chunks = await orig_prepare(
+            request, get_bulk_port_rpc, **kwargs
+        )
+        if request.method_name != "send_mb":
+          return bulk_port, raw_chunks
+        mb_idx = int(request.args[0])
+
+        async def _tracked_chunks():
+          stream_events.append(f"stream_start_{mb_idx}")
+          if mb_idx == 0:
+            first_stream_in_progress.set()
+            await asyncio.wait_for(
+                allow_first_stream_finish.wait(), timeout=5.0
+            )
+          async for chunk in raw_chunks:
+            yield chunk
+          stream_events.append(f"stream_end_{mb_idx}")
+
+        return bulk_port, _tracked_chunks()
+
+      try:
+        with mock.patch.object(
+            handle, "_prepare_request_chunks", side_effect=_instrumented_prepare
+        ):
+          t0 = asyncio.create_task(handle.asubmit("send_mb", 0))
+          await asyncio.wait_for(first_stream_in_progress.wait(), timeout=5.0)
+          # Run a blocking submit("heartbeat") on another thread while t0 holds
+          # the main event loop's send_lock.
+          hb = await asyncio.to_thread(handle.submit, "heartbeat")
+          self.assertEqual(hb, "ok")
+          # Start t1 on the main event loop: it must wait for t0's stream to
+          # finish rather than acquiring a swapped-out lock!
+          t1 = asyncio.create_task(handle.asubmit("send_mb", 1))
+          await asyncio.sleep(0.02)
+          self.assertEqual(stream_events, ["stream_start_0"])
+          allow_first_stream_finish.set()
+          res0, res1 = await asyncio.gather(t0, t1)
+          self.assertEqual((res0, res1), (0, 1))
+      finally:
+        await handle.close()
+        await server.stop_serving(grace=0.0)
+
+    asyncio.run(_run())
+    self.assertEqual(
+        stream_events,
+        [
+            "stream_start_0",
+            "stream_end_0",
+            "stream_start_1",
+            "stream_end_1",
+        ],
+    )
+
+  def test_stop_serving_drains_active_and_cancels_queued_sync_executor_work(
+      self,
+  ):
+    """Verifies stop_serving awaits active sync call and cancels queued ones."""
+    call_events: list[str] = []
+    first_entered = threading.Event()
+    allow_first_exit = threading.Event()
+
+    class _SlowSyncWorker:
+
+      @remote_lib.offload_to_thread
+      def work(self, label: str) -> str:
+        call_events.append(f"start_{label}")
+        if label == "first":
+          first_entered.set()
+          allow_first_exit.wait(timeout=5.0)
+        call_events.append(f"end_{label}")
+        return label
+
+    async def _run():
+      worker = _SlowSyncWorker()
+      port = portpicker.pick_unused_port()
+      server = remote_lib.GrpcRemoteExecutionServer(worker)
+      await server.start_serving_async(port)
+      t_first = asyncio.create_task(
+          server.execute_request(
+              remote_lib.ExecutionRequest(method_name="work", args=("first",))
+          )
+      )
+      await asyncio.to_thread(first_entered.wait, 5.0)
+      t_second = asyncio.create_task(
+          server.execute_request(
+              remote_lib.ExecutionRequest(method_name="work", args=("second",))
+          )
+      )
+      await asyncio.sleep(0.01)
+
+      stop_task = asyncio.create_task(server.stop_serving(grace=0.0))
+      await asyncio.sleep(0.02)
+      # stop_serving must still be waiting because "first" has not exited yet.
+      self.assertFalse(stop_task.done())
+      allow_first_exit.set()
+      await stop_task
+      await asyncio.gather(t_first, t_second, return_exceptions=True)
+
+    asyncio.run(_run())
+    # "first" finished cleanly before stop_serving returned; "second" was
+    # cancelled in the queue and never started.
+    self.assertEqual(call_events, ["start_first", "end_first"])
 
 
 if __name__ == "__main__":
