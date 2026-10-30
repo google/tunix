@@ -140,40 +140,32 @@ class InferenceWorkerTest(absltest.TestCase):
 
   def test_per_token_logps_uses_padded_batch_without_repadding(self):
     core = _StubCore()
-    batch = datatypes.RLTrainerPayload(
-        prompt_ids=np.array([[0, 0, 5, 6], [0, 7, 8, 9]], dtype=np.int32),
-        prompt_mask=np.array([[0, 0, 1, 1], [0, 1, 1, 1]], dtype=np.float32),
-        completion_ids=np.array([[10, 11, 0], [12, 0, 0]], dtype=np.int32),
-        completion_mask=np.array([[1, 1, 0], [1, 0, 0]], dtype=np.float32),
-        advantages=np.ones((2, 3), dtype=np.float32),
-        ref_per_token_logps=None,
-        old_per_token_logps=None,
+    req = datatypes.LogprobsRequest(
+        prompt_tokens=np.array([[0, 0, 5, 6], [0, 7, 8, 9]], dtype=np.int32),
+        completion_tokens=np.array([[10, 11, 0], [12, 0, 0]], dtype=np.int32),
+        temperature=2.0,
     )
 
-    result = _worker(core).per_token_logps(batch, temperature=2.0)
+    result = _worker(core).per_token_logps(req)
 
-    np.testing.assert_array_equal(core.last_prompt_tokens, batch.prompt_ids)
+    np.testing.assert_array_equal(core.last_prompt_tokens, req.prompt_tokens)
     np.testing.assert_array_equal(
-        core.last_completion_tokens, batch.completion_ids
+        core.last_completion_tokens, req.completion_tokens
     )
     np.testing.assert_allclose(
-        result, batch.completion_ids.astype(np.float32) * 2.0
+        result, req.completion_tokens.astype(np.float32) * 2.0
     )
     self.assertIsNone(core.last_segment_ids)
     self.assertIsNone(core.last_segment_positions)
 
   def test_per_token_logps_forwards_sequence_packing_segment_metadata(self):
     core = _StubCore()
-    batch = datatypes.RLTrainerPayload(
-        prompt_ids=np.zeros((2, 0), dtype=np.int32),
-        prompt_mask=np.zeros((2, 0), dtype=np.float32),
-        completion_ids=np.array(
+    req = datatypes.LogprobsRequest(
+        prompt_tokens=np.zeros((2, 0), dtype=np.int32),
+        completion_tokens=np.array(
             [[3, 4, 5, 6, 7, 8], [9, 10, 11, 0, 0, 0]], dtype=np.int32
         ),
-        completion_mask=np.array(
-            [[0, 1, 1, 0, 1, 1], [0, 1, 1, 0, 0, 0]], dtype=np.float32
-        ),
-        advantages=np.ones((2, 6), dtype=np.float32),
+        temperature=1.5,
         segment_ids=np.array(
             [[1, 1, 1, 2, 2, 2], [1, 1, 1, 0, 0, 0]], dtype=np.int32
         ),
@@ -182,19 +174,19 @@ class InferenceWorkerTest(absltest.TestCase):
         ),
     )
 
-    result = _worker(core).per_token_logps(batch, temperature=1.5)
+    result = _worker(core).per_token_logps(req)
 
     self.assertEqual(core.last_prompt_tokens.shape, (2, 0))
     np.testing.assert_array_equal(
-        core.last_completion_tokens, batch.completion_ids
+        core.last_completion_tokens, req.completion_tokens
     )
-    np.testing.assert_array_equal(core.last_segment_ids, batch.segment_ids)
+    np.testing.assert_array_equal(core.last_segment_ids, req.segment_ids)
     np.testing.assert_array_equal(
-        core.last_segment_positions, batch.segment_positions
+        core.last_segment_positions, req.segment_positions
     )
     expected = (
-        batch.completion_ids.astype(np.float32) * 1.5
-        + batch.segment_positions.astype(np.float32) * 0.1
+        req.completion_tokens.astype(np.float32) * 1.5
+        + req.segment_positions.astype(np.float32) * 0.1
     )
     np.testing.assert_allclose(result, expected)
 
@@ -399,17 +391,15 @@ class InferenceWorkerTest(absltest.TestCase):
 
     blocking_worker = _worker(_BlockingCore())
     blocking_worker.initialize()
-    batch = datatypes.RLTrainerPayload(
-        prompt_ids=np.array([[1, 2]], dtype=np.int32),
-        prompt_mask=np.ones((1, 2), dtype=np.float32),
-        completion_ids=np.array([[3, 4]], dtype=np.int32),
-        completion_mask=np.ones((1, 2), dtype=np.float32),
-        advantages=np.ones((1, 2), dtype=np.float32),
+    req = datatypes.LogprobsRequest(
+        prompt_tokens=np.array([[1, 2]], dtype=np.int32),
+        completion_tokens=np.array([[3, 4]], dtype=np.int32),
+        temperature=1.0,
     )
 
     def _run_logps():
       try:
-        logps_results.append(blocking_worker.per_token_logps(batch))
+        logps_results.append(blocking_worker.per_token_logps(req))
       except BaseException as exc:  # pylint: disable=broad-exception-caught
         logps_errors.append(exc)
 
@@ -434,7 +424,7 @@ class InferenceWorkerTest(absltest.TestCase):
     t_stop.join(timeout=5.0)
     self.assertEmpty(logps_errors)
     self.assertLen(logps_results, 1)
-    np.testing.assert_allclose(logps_results[0], batch.completion_ids)
+    np.testing.assert_allclose(logps_results[0], req.completion_tokens)
     self.assertTrue(stop_finished.is_set())
     self.assertEqual(blocking_worker.heartbeat().state, WorkerState.STOPPED)
 

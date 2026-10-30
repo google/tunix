@@ -1535,11 +1535,21 @@ class StandardRLProgram(RLProgram):
                   f"{type(batch).__name__}."
               )
             reference_start = time.monotonic()
+            gen_temp = self.generation_args.temperature
+            ref_req = datatypes.LogprobsRequest(
+                request_id="reference_logps",
+                prompt_tokens=batch.prompt_ids,
+                completion_tokens=batch.completion_ids,
+                temperature=gen_temp if gen_temp is not None else 1.0,
+                model_role="reference",
+                segment_ids=batch.segment_ids,
+                segment_positions=batch.segment_positions,
+            )
             ref_logps = await self.engine.per_token_logps(
                 datatypes.Role.REFERENCE,
-                items=batch,
-                temperature=self.generation_args.temperature,
+                items=ref_req,
             )
+            del ref_req
             step_times.reference_logps_time += (
                 time.monotonic() - reference_start
             )

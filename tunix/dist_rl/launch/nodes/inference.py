@@ -61,7 +61,6 @@ def main(
   process_context.jax.initialize()
 
   ref = hp.config_mapping(_REFERENCE_KEY)
-  rollout = hp.config_mapping("rollout_config")
   worker_id = node_utils.worker_id(hp, "inference", LOCAL_WORKER_ID)
   port = node_utils.service_port(hp, "inference")
 
@@ -99,9 +98,6 @@ def main(
               "compute_logps_micro_batch_size"
           ]
       ),
-      max_prompt_length=int(rollout["max_prompt_length"]),
-      max_response_length=int(rollout["total_generation_steps"]),
-      temperature=float(rollout["temperature"]),
       execution_context=mesh,
   )
 

@@ -173,9 +173,6 @@ def main(argv: list[str], context: Any = None) -> None:
       pad_id=pad_id,
       eos_id=eos_id,
       chunk_size=args.compute_logps_micro_batch_size,
-      max_prompt_length=args.max_prompt_length,
-      max_response_length=args.max_response_length,
-      temperature=args.temperature,
       execution_context=mesh,
   )
 

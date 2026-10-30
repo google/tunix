@@ -1241,7 +1241,7 @@ class RLProgramTest(absltest.TestCase):
 
       async def _fake_per_token_logps(role, items, **kwargs):
         del role, kwargs
-        mb_id = int(items.prompt_ids[0, 0])
+        mb_id = int(items.prompt_tokens[0, 0])
         if mb_id == 2:
           # mb0 train_step must already be in flight when mb1 is packed &
           # ref-scored!
@@ -1410,7 +1410,7 @@ class RLProgramTest(absltest.TestCase):
 
       async def _fake_per_token_logps(role, items, **kwargs):
         del role, kwargs
-        mb_id = int(items.prompt_ids[0, 0])
+        mb_id = int(items.prompt_tokens[0, 0])
         if mb_id == 0:
           events.append("ref_mb0_start")
           ref_mb0_started.set()
@@ -3151,6 +3151,7 @@ class RLProgramTest(absltest.TestCase):
           advantages=np.ones((1, 2), dtype=np.float32),
           ref_per_token_logps=None,
           old_per_token_logps=None,
+          routed_experts=np.ones((1, 4, 2, 2), dtype=np.int16),
       )
       self.assembler.feed = mock.MagicMock(
           side_effect=lambda _: iter([
@@ -3171,9 +3172,20 @@ class RLProgramTest(absltest.TestCase):
 
       await program.run_async(self.mock_engine)
 
-      self.mock_engine.per_token_logps.assert_called_once_with(
-          datatypes.Role.REFERENCE, items=mock_payload, temperature=None
+      self.mock_engine.per_token_logps.assert_called_once()
+      call = self.mock_engine.per_token_logps.call_args
+      self.assertEqual(call.args, (datatypes.Role.REFERENCE,))
+      self.assertEqual(set(call.kwargs), {"items"})
+      sent_req = call.kwargs["items"]
+      self.assertIsInstance(sent_req, datatypes.LogprobsRequest)
+      self.assertEqual(sent_req.temperature, 1.0)
+      np.testing.assert_array_equal(
+          sent_req.prompt_tokens, mock_payload.prompt_ids
       )
+      np.testing.assert_array_equal(
+          sent_req.completion_tokens, mock_payload.completion_ids
+      )
+      self.assertIsNone(sent_req.routed_experts)
       self.assertEqual(program.step, 1)
 
     asyncio.run(_run())
@@ -3212,8 +3224,18 @@ class RLProgramTest(absltest.TestCase):
 
       await program.run_async(self.mock_engine)
 
-      self.mock_engine.per_token_logps.assert_called_once_with(
-          datatypes.Role.REFERENCE, items=mock_payload, temperature=0.6
+      self.mock_engine.per_token_logps.assert_called_once()
+      call = self.mock_engine.per_token_logps.call_args
+      self.assertEqual(call.args, (datatypes.Role.REFERENCE,))
+      self.assertEqual(set(call.kwargs), {"items"})
+      sent_req = call.kwargs["items"]
+      self.assertIsInstance(sent_req, datatypes.LogprobsRequest)
+      self.assertEqual(sent_req.temperature, 0.6)
+      np.testing.assert_array_equal(
+          sent_req.prompt_tokens, mock_payload.prompt_ids
+      )
+      np.testing.assert_array_equal(
+          sent_req.completion_tokens, mock_payload.completion_ids
       )
       self.assertEqual(program.step, 1)
 
@@ -3235,9 +3257,6 @@ class RLProgramTest(absltest.TestCase):
         worker_id="ref_0",
         pad_id=0,
         eos_id=2,
-        max_prompt_length=4,
-        max_response_length=4,
-        temperature=1.0,
     )
     ref_worker.initialize()
     ref_worker.start()
@@ -3258,9 +3277,9 @@ class RLProgramTest(absltest.TestCase):
         max_response_length=4,
     )
 
-    async def _score_ref(role, items, temperature=None):
+    async def _score_ref(role, items):
       self.assertEqual(role, datatypes.Role.REFERENCE)
-      return ref_worker.per_token_logps(items, temperature=temperature)
+      return ref_worker.per_token_logps(items)
 
     trained_batches: list[datatypes.RLTrainerPayload] = []
 
@@ -3340,11 +3359,15 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(kl_matched, 0.0, places=5)
       self.assertAlmostEqual(kl_loss_matched, 0.0, places=5)
 
-      # Pre-fix regression check: omitting temperature on Role.REFERENCE falls
-      # back to ref_worker._temperature (1.0), producing a spurious positive KL
-      # even when actor and reference weights are identical.
+      # Pre-fix regression check: scoring Role.REFERENCE with temperature=1.0
+      # instead of generation_args.temperature (0.7) produces a spurious
+      # positive KL even when actor and reference weights are identical.
       unmatched_ref_logps = ref_worker.per_token_logps(
-          trained_batches[0], temperature=None
+          datatypes.LogprobsRequest(
+              prompt_tokens=trained_batches[0].prompt_ids,
+              completion_tokens=trained_batches[0].completion_ids,
+              temperature=1.0,
+          )
       )
       unmatched_batch = batch_assembly.with_ref_per_token_logps(
           trained_batches[0], unmatched_ref_logps

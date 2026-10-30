@@ -83,9 +83,6 @@ class InferenceMainTest(absltest.TestCase):
             "reference_model_config.dtype=bfloat16",
             "reference_model_config.load_dtype=float32",
             "rl_training_config.compute_logps_micro_batch_size=4",
-            "rollout_config.max_prompt_length=256",
-            "rollout_config.total_generation_steps=128",
-            "rollout_config.temperature=0.7",
             "cluster_config.ports.inference=20052",
         ],
         context=self.mock_context,
@@ -108,9 +105,6 @@ class InferenceMainTest(absltest.TestCase):
         pad_id=2,
         eos_id=9,
         chunk_size=4,
-        max_prompt_length=256,
-        max_response_length=128,
-        temperature=0.7,
         execution_context=self.mock_mesh,
     )
     self.mock_serve_worker.assert_awaited_once_with(
