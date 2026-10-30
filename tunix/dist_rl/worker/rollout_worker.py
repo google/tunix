@@ -17,7 +17,7 @@
 import dataclasses
 import threading
 import types
-from typing import Any, AsyncIterator, Callable, List, Mapping, Optional, Sequence, Union
+from typing import Any, Callable, List, Mapping, Optional, Sequence, Union
 
 from absl import logging
 import numpy as np
@@ -289,7 +289,6 @@ class RolloutWorker(abstract_worker.Worker):
         state=self.state,
         policy_version=self._policy_version,
         inflight=len(self.manager._active_tasks),  # pylint: disable=protected-access
-        queue_depth=self.manager._completed_queue.qsize(),  # pylint: disable=protected-access
     )
 
   def get_target_state(self) -> Any:
@@ -395,22 +394,6 @@ class RolloutWorker(abstract_worker.Worker):
     resp = self._to_rollout_response(res)
     self._jax_cache_syncer.sync_after_first_completed(resp.status)
     return resp
-
-  async def pop_next_completed(self) -> datatypes.RolloutResponse | Any:
-    """Pull-based stream: yields whichever trajectory finishes first out-of-order."""
-    res = await self.manager.pop_next_completed()
-    resp = self._to_rollout_response(res)
-    self._jax_cache_syncer.sync_after_first_completed(resp.status)
-    return resp
-
-  async def as_completed_stream(
-      self,
-  ) -> AsyncIterator[datatypes.RolloutResponse | Any]:
-    """Async stream yielding completed trajectories or errors strictly out-of-order."""
-    async for res in self.manager.as_completed_stream():
-      resp = self._to_rollout_response(res)
-      self._jax_cache_syncer.sync_after_first_completed(resp.status)
-      yield resp
 
   async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Quiesces the worker; it stays SYNCING until post or abort."""

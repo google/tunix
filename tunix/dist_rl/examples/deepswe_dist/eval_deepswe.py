@@ -436,8 +436,6 @@ async def run_worker(args: argparse.Namespace):
 
     async def evaluate(self, fields):
       response = await self.generate(datatypes.RolloutRequest(**fields))
-      # generate also publishes a copy for streaming RL consumers.
-      await self.pop_next_completed()
       return compact_result(response)
 
     def shutdown(self):

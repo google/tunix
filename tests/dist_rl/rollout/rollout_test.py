@@ -134,19 +134,20 @@ class RolloutWorkerTest(parameterized.TestCase):
           generation_kwargs={"delay_seconds": 0.05, "max_generation_steps": 64},
       )
 
-      _ = asyncio.create_task(
-          self.actor_handle.asubmit("generate", [req_a, req_b, req_c])
-      )
-
       completed_order: List[str] = []
-      stream = self.service.as_completed_stream()
-      for _ in range(3):
-        traj = await stream.__anext__()
-        completed_order.append(traj.request_id)
+      responses = await self.service.generate(
+          [req_a, req_b, req_c],
+          on_complete=lambda traj: completed_order.append(traj.request_id),
+      )
 
       self.assertEqual(
           completed_order, ["traj_fast_B_g0", "traj_med_C_g0", "traj_slow_A_g0"]
       )
+      self.assertEqual(
+          [r.request_id for r in responses],
+          ["traj_slow_A_g0", "traj_fast_B_g0", "traj_med_C_g0"],
+      )
+      self.assertEqual(self.service.heartbeat().queue_depth, 0)
 
     asyncio.run(_run_test())
 

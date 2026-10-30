@@ -19,7 +19,7 @@ from collections.abc import Mapping
 import logging
 import time
 import types
-from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Union
+from typing import Any, Callable, Dict, Optional, Sequence, Union
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import timeouts as timeouts_lib
 from tunix.dist_rl.rollout import collector as collector_lib
@@ -122,7 +122,6 @@ class RolloutManager:
         str, collector_lib.TrajectoryCollectorEngine
     ] = {}
     self._active_tasks: Dict[str, asyncio.Task[Any]] = {}
-    self._completed_queue: asyncio.Queue[TrajectoryOrError] = asyncio.Queue()
     self._traffic_inst = None
 
   @property
@@ -261,21 +260,7 @@ class RolloutManager:
       self._active_collectors.pop(collector.traj_id, None)
       self._active_tasks.pop(collector.traj_id, None)
 
-    await self._completed_queue.put(trajectory)
     resolve_cb(trajectory)
-
-  async def pop_next_completed(self) -> TrajectoryOrError:
-    """Pull-based stream: yields whichever trajectory finishes first out-of-order."""
-    return await self._completed_queue.get()
-
-  async def as_completed_stream(
-      self,
-  ) -> AsyncIterator[TrajectoryOrError]:
-    """Async generator yielding completed trajectories strictly out-of-order."""
-    # TODO(lancewang): Add termination condition to prevent hangs when stream
-    # is exhausted.
-    while True:
-      yield await self.pop_next_completed()
 
   async def migrate_straggler(
       self,
