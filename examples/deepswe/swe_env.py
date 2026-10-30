@@ -24,10 +24,12 @@ from typing import Any, Optional, cast
 
 import numpy as np
 try:
+  from examples.deepswe import harbor_utils
   from examples.deepswe import openhands_utils
   from examples.deepswe import sandbox_utils
   from examples.deepswe import template as template_mod
 except ImportError:
+  from examples.deepswe import harbor_utils  # pytype: disable=import-error
   from examples.deepswe import openhands_utils  # pytype: disable=import-error
   from examples.deepswe import sandbox_utils  # pytype: disable=import-error
   from examples.deepswe import template as template_mod  # pytype: disable=import-error
@@ -130,6 +132,10 @@ class SWEEnv(BaseTaskEnv):
         fleet: Optional SandboxFleet instance to use.
     """
     self.entry = _unpack_entry(entry)
+    if isinstance(self.entry, dict) and harbor_utils.is_harbor_entry(
+        self.entry
+    ):
+      self.entry = harbor_utils.ensure_harbor_entry(self.entry)
     self.step_timeout = step_timeout
     self.reward_timeout = reward_timeout
     self.total_steps = 0
@@ -220,7 +226,10 @@ class SWEEnv(BaseTaskEnv):
         ws_kwargs["router_url"] = os.getenv("ROUTER_URL")
       if os.getenv("ROUTER_AUTH_TOKEN"):
         ws_kwargs["router_auth_token"] = os.getenv("ROUTER_AUTH_TOKEN")
-      ws_kwargs["working_dir"] = os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
+      ws_kwargs["working_dir"] = str(
+          self.entry.get("workdir")
+          or os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
+      )
       self.workspace = make_handle_workspace(self.handle, **ws_kwargs)
     is_openhands = self.scaffold in template_mod.OPENHANDS_SCAFFOLDS
     cmd_files = None
@@ -261,12 +270,21 @@ class SWEEnv(BaseTaskEnv):
         self.handle.target_container = sandbox_utils.RUNTIME_CONTAINER_NAME
         self.handle._target_container = sandbox_utils.RUNTIME_CONTAINER_NAME
         self.handle._defer_setup_env = False
+    if self.env is not None:
+      self.env._tunix_entry = self.entry
+      self.env._tunix_reward_timeout = float(self.reward_timeout)
     if is_openhands:
       sandbox_utils.set_runtime_container(
           self.env, sandbox_utils.EVAL_CONTAINER_NAME
       )
+      if harbor_utils.is_harbor_entry(self.entry):
+        harbor_utils.strip_harbor_verifier_paths(self.workspace, self.entry)
       openhands_utils.setup_openhands_workspace(self.workspace, self.entry)
+      if harbor_utils.is_harbor_entry(self.entry):
+        harbor_utils.configure_harbor_workspace_cwd(self.workspace, self.entry)
     elif self.env is not None:
+      if harbor_utils.is_harbor_entry(self.entry):
+        harbor_utils.strip_harbor_verifier_paths(self.env, self.entry)
       openhands_utils.hide_r2e_tests_for_rollout(self.env, self.entry)
 
     if self.env is not None and hasattr(self.env, "compute_reward"):
@@ -278,8 +296,20 @@ class SWEEnv(BaseTaskEnv):
           sandbox_utils.set_runtime_container(
               self.env, sandbox_utils.RUNTIME_CONTAINER_NAME
           )
+        if harbor_utils.is_in_place_harbor_entry(self.entry):
+          try:
+            return harbor_utils.run_harbor_verifier_in_target(
+                rollout_target,
+                self.entry,
+                timeout=float(self.reward_timeout),
+            )
+          finally:
+            openhands_utils.cleanup_rollout_container_processes(rollout_target)
         base_commit = openhands_utils.resolve_base_commit(self.entry)
-        workspace_path = os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
+        workspace_path = str(
+            self.entry.get("workdir")
+            or os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
+        )
         patch = openhands_utils.extract_agent_patch(
             rollout_target,
             base_commit=base_commit,
@@ -287,6 +317,13 @@ class SWEEnv(BaseTaskEnv):
             timeout=float(self.reward_timeout),
         )
         openhands_utils.cleanup_rollout_container_processes(rollout_target)
+        if harbor_utils.is_harbor_entry(self.entry):
+          return harbor_utils.evaluate_harbor_patch_in_fresh_container(
+              self.env,
+              patch,
+              self.entry,
+              reward_timeout=float(self.reward_timeout),
+          )
         return openhands_utils.evaluate_patch_in_fresh_container(
             self.env,
             patch,
@@ -318,6 +355,15 @@ class SWEEnv(BaseTaskEnv):
       self.env.add_commands(R2EGYM_COMMAND_FILES)
     elif self.scaffold == "sweagent":
       self.env.add_commands(SWEAGENT_COMMAND_FILES)
+    if harbor_utils.is_harbor_entry(self.entry):
+      harbor_utils.strip_harbor_verifier_paths(self.env, self.entry)
+      self.env.compute_reward = (
+          lambda *_a, **_kw: harbor_utils.run_harbor_verifier_in_target(
+              self.env,
+              self.entry,
+              timeout=float(self.reward_timeout),
+          )
+      )
 
   def _initial_observation(self) -> Any:
     if not self.env and not self.workspace:
@@ -331,7 +377,7 @@ class SWEEnv(BaseTaskEnv):
     self.final_reward_fn = self.env.compute_reward  # pytype: disable=attribute-error
     self.total_steps = 0
 
-    if self.workspace is not None:
+    if self.workspace is not None or harbor_utils.is_harbor_entry(self.entry):
       return str(
           self.entry.get("problem_statement")
           or self.entry.get("instruction")
@@ -349,7 +395,12 @@ class SWEEnv(BaseTaskEnv):
         info["base_commit"] = base_commit
       if self.entry.get("repo_language"):
         info["repo_language"] = str(self.entry["repo_language"])
-      info["workspace_path"] = os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
+      info["workspace_path"] = str(
+          self.entry.get("workdir")
+          or os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
+      )
+      if harbor_utils.is_in_place_harbor_entry(self.entry):
+        info["is_terminal_task"] = True
     return obs, info
 
   def _step_openhands_calls(self, calls: list[Any]) -> EnvStepResult:

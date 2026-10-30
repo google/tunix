@@ -310,6 +310,14 @@ def maxtext_config(a):
     cfg["float32_gate_logits"] = boolean(os.environ["FLOAT32_GATE_LOGITS"])
   if os.environ.get("FLOAT32_LOGITS"):
     cfg["float32_logits"] = boolean(os.environ["FLOAT32_LOGITS"])
+  raw_add_cfg = os.environ.get("VLLM_ADDITIONAL_CONFIG", "").strip()
+  if raw_add_cfg:
+    try:
+      extra_mt_cfg = json.loads(raw_add_cfg).get("maxtext_config")
+      if isinstance(extra_mt_cfg, dict) and "fp8_moe" in extra_mt_cfg:
+        cfg["rollout_fp8_moe"] = bool(extra_mt_cfg["fp8_moe"])
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
   return cfg
 
 
@@ -360,7 +368,7 @@ def request_fields(a, entry, index, attempt):
   }
 
 
-def summarize(rows, instance_ids, attempts):
+def summarize(rows, instance_ids, attempts, entry_by_iid=None):
   """Conservative metrics: failed/missing attempts stay in the denominator."""
   grouped = {key: [] for key in instance_ids}
   seen = set()
@@ -372,18 +380,94 @@ def summarize(rows, instance_ids, attempts):
     grouped[key[0]].append(row)
   total = len(instance_ids) * attempts
   solved = sum(row["resolved"] for row in rows)
+  per_instance_resolved_counts = {
+      iid: int(sum(bool(row["resolved"]) for row in grouped[iid]))
+      for iid in instance_ids
+  }
+  per_instance_completed_counts = {
+      iid: len(grouped[iid]) for iid in instance_ids
+  }
+  completed_instance_ids = [
+      iid for iid in instance_ids if len(grouped[iid]) == attempts
+  ]
+  touched_instance_ids = [
+      iid for iid in instance_ids if len(grouped[iid]) > 0
+  ]
+  resolved_instance_ids = [
+      iid for iid in instance_ids if per_instance_resolved_counts[iid] > 0
+  ]
+  unresolved_instance_ids = [
+      iid for iid in instance_ids if per_instance_resolved_counts[iid] == 0
+  ]
+  resolved_instances = len(resolved_instance_ids)
+  unresolved_instances = len(unresolved_instance_ids)
+  instance_pass_rate = (
+      resolved_instances / len(instance_ids) if instance_ids else 0.0
+  )
   pass_at_k = {}
+  completed_pass_at_k = {}
   ks = {1, attempts}
   if attempts >= 4:
     ks.add(4)
   for k in sorted(ks):
     values = []
-    for group in grouped.values():
+    comp_values = []
+    for iid, group in grouped.items():
       c = sum(row["resolved"] for row in group)
-      values.append(1 - math.comb(attempts - c, k) / math.comb(attempts, k))
+      val = 1 - math.comb(attempts - c, k) / math.comb(attempts, k)
+      values.append(val)
+      if len(group) == attempts:
+        comp_values.append(val)
     pass_at_k[str(k)] = sum(values) / len(values)
+    completed_pass_at_k[str(k)] = (
+        sum(comp_values) / len(comp_values) if comp_values else 0.0
+    )
+  per_difficulty = {}
+  if entry_by_iid:
+    by_lvl = collections.defaultdict(list)
+    for iid in instance_ids:
+      ent = entry_by_iid.get(iid) or {}
+      lvl = ent.get("difficulty_level") or ent.get("difficulty") or "unknown"
+      by_lvl[lvl].append(iid)
+    for lvl, lvl_iids in sorted(by_lvl.items()):
+      lvl_rows = [r for iid in lvl_iids for r in grouped[iid]]
+      lvl_comp_iids = [iid for iid in lvl_iids if len(grouped[iid]) == attempts]
+      lvl_res_iids = [iid for iid in lvl_iids if per_instance_resolved_counts[iid] > 0]
+      lvl_solved = sum(bool(r["resolved"]) for r in lvl_rows)
+      per_difficulty[lvl] = {
+          "total_instances": len(lvl_iids),
+          "completed_instances": len(lvl_comp_iids),
+          "touched_instances": sum(1 for iid in lvl_iids if grouped[iid]),
+          "resolved_instances": len(lvl_res_iids),
+          "completed_attempts": len(lvl_rows),
+          "resolved_attempts": int(lvl_solved),
+          "pass_at_1_so_far": (
+              lvl_solved / len(lvl_rows) if lvl_rows else 0.0
+          ),
+          "instance_pass_rate_on_completed": (
+              sum(1 for iid in lvl_comp_iids if per_instance_resolved_counts[iid] > 0)
+              / len(lvl_comp_iids)
+              if lvl_comp_iids
+              else 0.0
+          ),
+      }
   return {
       "instances": len(instance_ids),
+      "completed_instances": len(completed_instance_ids),
+      "touched_instances": len(touched_instance_ids),
+      "resolved_instances": resolved_instances,
+      "unresolved_instances": unresolved_instances,
+      "instance_pass_rate": instance_pass_rate,
+      "completed_instance_pass_rate": (
+          sum(1 for iid in completed_instance_ids if per_instance_resolved_counts[iid] > 0)
+          / len(completed_instance_ids)
+          if completed_instance_ids
+          else 0.0
+      ),
+      "resolved_instance_ids": resolved_instance_ids,
+      "unresolved_instance_ids": unresolved_instance_ids,
+      "per_instance_resolved_counts": per_instance_resolved_counts,
+      "per_instance_completed_counts": per_instance_completed_counts,
       "attempts_per_instance": attempts,
       "expected_attempts": total,
       "completed_attempts": len(rows),
@@ -391,7 +475,12 @@ def summarize(rows, instance_ids, attempts):
       "error_attempts": sum(bool(row.get("error")) for row in rows),
       "resolved_attempts": solved,
       "avg_at_k": solved / total,
+      "avg_at_k_completed_attempts": (
+          solved / len(rows) if rows else 0.0
+      ),
       "pass_at_k": pass_at_k,
+      "completed_instances_pass_at_k": completed_pass_at_k,
+      "per_difficulty_summary": per_difficulty,
       "mean_reward": sum(row["reward"] for row in rows) / total,
       "status_counts": dict(collections.Counter(row["status"] for row in rows)),
       "complete": len(rows) == total,
@@ -411,12 +500,34 @@ def compact_result(response):
     reward = float(traj["trajectory_reward"])
     if not math.isfinite(reward):
       raise ValueError("Non-finite trajectory reward")
+    model_time = traj.get("model_time") if isinstance(traj.get("model_time"), dict) else {}
+    reward_time = traj.get("reward_time") if isinstance(traj.get("reward_time"), dict) else {}
+    env_time = traj.get("env_time") if isinstance(traj.get("env_time"), dict) else {}
+    step_lats = model_time.get("step_latency")
+    steps = len(step_lats) if isinstance(step_lats, (list, tuple)) else None
     result = {
         "reward": reward,
         "resolved": reward > 0,
         "status": str(traj.get("status", "UNKNOWN")),
         "error": None,
     }
+    if steps is not None:
+      result["steps"] = int(steps)
+    if "total_latency" in model_time:
+      result["model_time_s"] = round(float(model_time["total_latency"]), 3)
+    if "total_completion_tokens" in model_time:
+      result["completion_tokens"] = int(model_time["total_completion_tokens"])
+    if "reward_latency" in reward_time:
+      result["reward_time_s"] = round(float(reward_time["reward_latency"]), 3)
+    if env_time:
+      result["env_time_s"] = round(
+          float(env_time.get("reset_latency", 0.0))
+          + float(env_time.get("total_step_latency", 0.0))
+          + float(env_time.get("close_latency", 0.0)),
+          3,
+      )
+    if "total_time" in traj and traj["total_time"] is not None:
+      result["total_time_s"] = round(float(traj["total_time"]), 3)
   # Worker-reported metadata (success and error); evaluate_worker falls back to
   # the requested agent_name if the worker did not report one.
   if response.metadata.get("agent_name"):
@@ -466,6 +577,11 @@ async def evaluate_worker(handle, jobs, limit, timeout, write_record):
       requested_agent = fields["metadata"].get("agent_name")
       if requested_agent and not row.get("agent_name"):
         row["agent_name"] = requested_agent
+      entry_obj = fields["metadata"].get("env_config", {}).get("entry") or {}
+      if entry_obj.get("difficulty_level") and not row.get("difficulty_level"):
+        row["difficulty_level"] = str(entry_obj["difficulty_level"])
+      if entry_obj.get("repo") and not row.get("repo"):
+        row["repo"] = str(entry_obj["repo"])
       row.update(
           instance_id=fields["metadata"]["instance_id"],
           attempt=fields["group_index"],
@@ -501,6 +617,11 @@ async def evaluate_worker(handle, jobs, limit, timeout, write_record):
           "request_id": req_id,
           "wall_seconds": now - start,
       }
+      entry_obj = fields["metadata"].get("env_config", {}).get("entry") or {}
+      if entry_obj.get("difficulty_level"):
+        row["difficulty_level"] = str(entry_obj["difficulty_level"])
+      if entry_obj.get("repo"):
+        row["repo"] = str(entry_obj["repo"])
       requested_agent = fields["metadata"].get("agent_name")
       if requested_agent:
         row["agent_name"] = requested_agent
@@ -512,23 +633,112 @@ async def evaluate_worker(handle, jobs, limit, timeout, write_record):
 class ResultWriter:
   """Each attempt is durably written separately, including on GCS."""
 
-  def __init__(self, output):
+  def __init__(self, output, mirror_output=None):
     import fsspec  # pylint: disable=import-outside-toplevel
 
     self.fs, self.root = fsspec.core.url_to_fs(output)
     self.fs.makedirs(self.root, exist_ok=True)
+    self.mirror_fs = None
+    self.mirror_root = None
+    if mirror_output and mirror_output.rstrip("/") != output.rstrip("/"):
+      try:
+        self.mirror_fs, self.mirror_root = fsspec.core.url_to_fs(mirror_output)
+        self.mirror_fs.makedirs(self.mirror_root, exist_ok=True)
+      except Exception as exc:  # pylint: disable=broad-exception-caught
+        logging.warning("Could not initialize mirror output %s: %s", mirror_output, exc)
+        self.mirror_fs = None
+        self.mirror_root = None
 
   def write(self, name, value):
     path = self.root + "/" + name
     self.fs.makedirs(path.rsplit("/", 1)[0], exist_ok=True)
     with self.fs.open(path, "w") as stream:
       json.dump(value, stream, ensure_ascii=False, allow_nan=False)
+    if self.mirror_fs is not None and self.mirror_root is not None:
+      try:
+        mpath = self.mirror_root + "/" + name
+        self.mirror_fs.makedirs(mpath.rsplit("/", 1)[0], exist_ok=True)
+        with self.mirror_fs.open(mpath, "w") as stream:
+          json.dump(value, stream, ensure_ascii=False, allow_nan=False)
+      except Exception as exc:  # pylint: disable=broad-exception-caught
+        logging.warning("Mirror write failed for %s: %s", name, exc)
+
+  def write_text(self, name, text):
+    path = self.root + "/" + name
+    self.fs.makedirs(path.rsplit("/", 1)[0], exist_ok=True)
+    with self.fs.open(path, "w") as stream:
+      stream.write(text)
+    if self.mirror_fs is not None and self.mirror_root is not None:
+      try:
+        mpath = self.mirror_root + "/" + name
+        self.mirror_fs.makedirs(mpath.rsplit("/", 1)[0], exist_ok=True)
+        with self.mirror_fs.open(mpath, "w") as stream:
+          stream.write(text)
+      except Exception as exc:  # pylint: disable=broad-exception-caught
+        logging.warning("Mirror write_text failed for %s: %s", name, exc)
 
   def record(self, row):
     self.write("attempts/" + row["request_id"] + ".json", row)
 
+  def load_existing_attempts(self):
+    rows = []
+    try:
+      files = sorted(self.fs.glob(self.root + "/attempts/*.json"))
+      for p in files:
+        try:
+          with self.fs.open(p, "r") as f:
+            rows.append(json.load(f))
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+          logging.warning("Could not read existing attempt %s: %s", p, exc)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      logging.warning("Could not glob existing attempts in %s: %s", self.root, exc)
+    return rows
+
+
+def build_per_task_jsonl(rows, entries, attempts):
+  grouped = collections.defaultdict(list)
+  for r in rows:
+    grouped[r["instance_id"]].append(r)
+  lines = []
+  for idx, entry in enumerate(entries):
+    iid = str(entry["instance_id"])
+    atts = sorted(grouped.get(iid, []), key=lambda x: x.get("attempt", 0))
+    if not atts:
+      continue
+    meta = entry.get("meta") or {}
+    if isinstance(meta, str):
+      try:
+        meta = json.loads(meta)
+      except Exception:  # pylint: disable=broad-exception-caught
+        meta = {}
+    resolved_cnt = sum(1 for a in atts if a.get("resolved"))
+    steps_list = [a["steps"] for a in atts if isinstance(a.get("steps"), int)]
+    rec = {
+        "task_index": idx,
+        "instance_id": iid,
+        "repo": entry.get("repo"),
+        "difficulty_level": entry.get("difficulty_level"),
+        "num_modified_files": meta.get("num_modified_files"),
+        "num_modified_lines": meta.get("num_modified_lines"),
+        "expected_attempts": attempts,
+        "completed_attempts": len(atts),
+        "complete": len(atts) == attempts,
+        "resolved_count": resolved_cnt,
+        "pass_at_1_so_far": round(resolved_cnt / len(atts), 4),
+        "resolved_any": 1 if resolved_cnt > 0 else 0,
+        "avg_steps": (
+            round(sum(steps_list) / len(steps_list), 1) if steps_list else None
+        ),
+        "status_counts": dict(
+            collections.Counter(a.get("status", "UNKNOWN") for a in atts)
+        ),
+    }
+    lines.append(json.dumps(rec, ensure_ascii=False))
+  return "\n".join(lines) + ("\n" if lines else "")
+
 
 def load_entries(a):
+  from examples.deepswe import harbor_utils
   from tunix.experimental.examples.deepswe_dist import deepswe
 
   if a.tasks_limit and not a.dataset_path:
@@ -542,6 +752,13 @@ def load_entries(a):
         deepswe._jsonify_lists(dict(entry))
         for entry in dataset.take(a.tasks_limit)
     ]
+  elif a.dataset_path and harbor_utils.is_jsonl_or_harbor_path(
+      a.dataset_path
+  ):
+    entries = harbor_utils.load_dataset_records(
+        a.dataset_path,
+        max_rows=a.tasks_limit if a.tasks_limit > 0 else None,
+    )
   else:
     dataset = deepswe.load_deepswe_dataset(
         dataset_name=a.dataset_name,
@@ -552,7 +769,13 @@ def load_entries(a):
     count = min(a.tasks_limit, len(dataset)) if a.tasks_limit else len(dataset)
     entries = [dict(dataset[i]) for i in range(count)]
   ids = []
-  for entry in entries:
+  normalized_entries = []
+  for raw_entry in entries:
+    entry = (
+        harbor_utils.ensure_harbor_entry(raw_entry)
+        if harbor_utils.is_harbor_entry(raw_entry)
+        else raw_entry
+    )
     # R2E-Gym releases identify tasks by their versioned Docker image;
     # SWE-Bench releases provide instance_id directly.
     if not entry.get("instance_id"):
@@ -565,11 +788,12 @@ def load_entries(a):
           "Each eval row needs instance_id, problem_statement and docker_image"
       )
     ids.append(str(entry["instance_id"]))
+    normalized_entries.append(entry)
   if not ids or len(set(ids)) != len(ids):
     raise ValueError(
         "Evaluation split must be nonempty with unique instance_id values"
     )
-  return entries
+  return normalized_entries
 
 
 def setup_rcp_logging(a):
@@ -600,27 +824,57 @@ async def run_controller(a):
   setup_rcp_logging(a)
 
   entries = load_entries(a)
-  run_id = (
+  instance_ids = [str(e["instance_id"]) for e in entries]
+  entry_by_iid = {str(e["instance_id"]): e for e in entries}
+  run_id = os.environ.get("EVAL_RUN_ID", "").strip() or (
       datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
       + "-"
       + uuid.uuid4().hex[:8]
   )
   output = a.output_dir.rstrip("/") + "/" + run_id
-  writer = ResultWriter(output)
+  mirror_base = os.environ.get("EVAL_MIRROR_OUTPUT_DIR", "").strip()
+  mirror_output = (
+      mirror_base.rstrip("/") + "/" + run_id if mirror_base else None
+  )
+  writer = ResultWriter(output, mirror_output=mirror_output)
+  existing_rows = (
+      writer.load_existing_attempts()
+      if os.environ.get("EVAL_RUN_ID", "").strip()
+      else []
+  )
+  seen_keys = set()
+  all_rows = []
+  for r in existing_rows:
+    k = (r.get("instance_id"), r.get("attempt"))
+    if (
+        k not in seen_keys
+        and k[0] in entry_by_iid
+        and isinstance(k[1], int)
+        and 0 <= k[1] < a.num_rollouts_per_instance
+    ):
+      seen_keys.add(k)
+      all_rows.append(r)
+  if all_rows:
+    logging.info(
+        "Resuming evaluation run %s with %d existing completed attempts.",
+        run_id,
+        len(all_rows),
+    )
   writer.write(
       "config.json",
       {
           **vars(a),
           "run_id": run_id,
+          "mirror_output": mirror_output,
           "dataset_sha256": (
               hashlib.sha256(
                   json.dumps(entries, sort_keys=True).encode()
               ).hexdigest()
           ),
-          "instance_ids": [str(e["instance_id"]) for e in entries],
+          "instance_ids": instance_ids,
       },
   )
-  logging.info("Evaluation output: %s", output)
+  logging.info("Evaluation output: %s (mirror: %s)", output, mirror_output)
   handles = [
       remote_execution.ActorHandle.from_address(
           address if address.startswith("grpc://") else "grpc://" + address,
@@ -628,41 +882,76 @@ async def run_controller(a):
       )
       for address in a.worker_addresses
   ]
-  all_rows = []
   tasks = []
   failure = None
   fleet = None
   entry_stream = entries
   t_eval_start = None
   eval_start_time_ms = None
+  last_checkpoint_time = [time.monotonic()]
+
+  def flush_checkpoint():
+    try:
+      partial_summary = summarize(
+          all_rows,
+          instance_ids,
+          a.num_rollouts_per_instance,
+          entry_by_iid=entry_by_iid,
+      )
+      writer.write("summary.json", partial_summary)
+      writer.write_text(
+          "per_task_results.jsonl",
+          build_per_task_jsonl(all_rows, entries, a.num_rollouts_per_instance),
+      )
+      last_checkpoint_time[0] = time.monotonic()
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      logging.warning("Incremental checkpoint write failed: %s", exc)
 
   def record(row):
     writer.record(row)
     all_rows.append(row)
+    now_t = time.monotonic()
+    if len(all_rows) % 16 == 0 or (now_t - last_checkpoint_time[0]) >= 30.0:
+      flush_checkpoint()
 
   try:
 
-    async def ready(handle):
-      deadline = time.monotonic() + a.startup_timeout
+    async def ready(handle, timeout_s=None, stop_event=None):
+      deadline = (
+          time.monotonic() + timeout_s if timeout_s is not None else None
+      )
       while True:
+        if stop_event is not None and stop_event.is_set():
+          return False
         try:
           profile = await handle.asubmit("evaluation_info")
           break
         except Exception:
-          if time.monotonic() >= deadline:
+          if deadline is not None and time.monotonic() >= deadline:
             raise TimeoutError("Rollout worker did not become ready")
           await asyncio.sleep(5)
       if profile != model_profile(a):
         raise ValueError(f"Worker/controller model settings differ: {profile}")
+      return True
 
-    await asyncio.gather(*(ready(h) for h in handles))
+    await ready(handles[0], timeout_s=a.startup_timeout)
     t_eval_start = time.monotonic()
     eval_start_time_ms = time.time_ns() // 1_000_000
-    if a.use_agent_sandbox:
+    indexed_entries = [
+        (idx, entry)
+        for idx, entry in enumerate(entries)
+        if any(
+            (str(entry["instance_id"]), att) not in seen_keys
+            for att in range(a.num_rollouts_per_instance)
+        )
+    ]
+    active_entries = [entry for _, entry in indexed_entries]
+    orig_idx_by_iid = {str(entry["instance_id"]): idx for idx, entry in indexed_entries}
+    if a.use_agent_sandbox and active_entries:
       from examples.deepswe import sandbox_utils  # pylint: disable=import-outside-toplevel
 
       fleet = sandbox_utils.init_global_fleet(
-          tasks=entries,
+          tasks=active_entries,
           max_concurrency=a.max_concurrent,
           num_generations=a.num_rollouts_per_instance,
           batch_size=a.batch_size,
@@ -670,7 +959,7 @@ async def run_controller(a):
           scaffold=a.scaffold,
       )
       entry_stream = sandbox_utils.PrewarmDatasetIterator(
-          entries,
+          active_entries,
           fleet=fleet,
           num_generations=a.num_rollouts_per_instance,
           batch_size=a.batch_size,
@@ -679,11 +968,22 @@ async def run_controller(a):
           scaffold=a.scaffold,
           wait_initial=True,
       )
-    jobs = iter(
-        request_fields(a, entry, index, attempt)
-        for index, entry in enumerate(entry_stream)
+    else:
+      entry_stream = active_entries
+    raw_jobs = (
+        request_fields(a, entry, orig_idx_by_iid[str(entry["instance_id"])], attempt)
+        for entry in entry_stream
         for attempt in range(a.num_rollouts_per_instance)
+        if (str(entry["instance_id"]), attempt) not in seen_keys
     )
+    jobs_done = asyncio.Event()
+
+    def _iter_jobs_with_done_signal():
+      for item in raw_jobs:
+        yield item
+      jobs_done.set()
+
+    jobs = _iter_jobs_with_done_signal()
     effective_concurrency = a.max_concurrent
     if a.use_agent_sandbox:
       effective_concurrency = max(
@@ -691,14 +991,27 @@ async def run_controller(a):
           min(a.max_concurrent, a.batch_size * a.num_rollouts_per_instance),
       )
     deadline = a.timeout + a.reward_timeout + 600
+
+    async def _run_worker_slot(index, handle, limit):
+      if index > 0:
+        became_ready = await ready(
+            handle, timeout_s=None, stop_event=jobs_done
+        )
+        if not became_ready:
+          return []
+        logging.info(
+            "Rollout worker slot %d (%s) became ready and joined evaluation.",
+            index,
+            a.worker_addresses[index],
+        )
+      return await evaluate_worker(handle, jobs, limit, deadline, record)
+
     for index, handle in enumerate(handles):
       limit = effective_concurrency // len(handles) + (
           index < effective_concurrency % len(handles)
       )
       tasks.append(
-          asyncio.create_task(
-              evaluate_worker(handle, jobs, limit, deadline, record)
-          )
+          asyncio.create_task(_run_worker_slot(index, handle, limit))
       )
     await asyncio.gather(*tasks)
   except BaseException as exc:
@@ -719,8 +1032,9 @@ async def run_controller(a):
     )
     summary = summarize(
         all_rows,
-        [str(e["instance_id"]) for e in entries],
+        instance_ids,
         a.num_rollouts_per_instance,
+        entry_by_iid=entry_by_iid,
     )
     summary["fatal_error"] = failure
     expected_attempts = int(summary["expected_attempts"])
@@ -764,6 +1078,10 @@ async def run_controller(a):
     summary["samples_count"] = int(a.samples_count)
     try:
       writer.write("summary.json", summary)
+      writer.write_text(
+          "per_task_results.jsonl",
+          build_per_task_jsonl(all_rows, entries, a.num_rollouts_per_instance),
+      )
     finally:
       await asyncio.gather(
           *(

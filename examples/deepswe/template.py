@@ -1122,13 +1122,39 @@ Phase 7. VERIFICATION: Test your implementation thoroughly.
 Be thorough in your exploration, testing, and reasoning. It's fine if your thinking process is lengthy - quality and completeness are more important than brevity."""
 
 
+OPENHANDS_TERMINAL_USER_PROMPT = """<uploaded_files>
+{workspace_path}
+</uploaded_files>
+
+You are operating in a Linux terminal environment with working directory `{workspace_path}`. Complete the following task:
+
+<task_description>
+{problem_statement}
+</task_description>
+
+Important guidelines:
+1. Carefully inspect the initial state of `{workspace_path}` and any files or directories mentioned in `<task_description>`.
+2. Follow every path, filename, format, permission, and content requirement in `<task_description>` literally.
+3. Do NOT leave temporary test scripts, extra backup files, or unrequested artifacts in `{workspace_path}` or target directories, as the automated verifier strictly checks the final filesystem state.
+4. Before calling the `finish` tool, verify that all required files, permissions, logs, and outputs exactly match `<task_description>`."""
+
+
 def format_openhands_user_prompt(
     problem_statement: str,
     workspace_path: str = "/testbed",
     repo_language: str = "python",
     base_commit: str = "",
+    is_terminal_task: bool = False,
 ) -> str:
-  """Renders the OpenHands swe_default.j2 user prompt."""
+  """Renders the OpenHands user prompt (SWE-bench or terminal task)."""
+  if is_terminal_task or repo_language.strip().lower() in (
+      "bash",
+      "shell",
+      "terminal",
+  ):
+    return OPENHANDS_TERMINAL_USER_PROMPT.replace(
+        "{workspace_path}", str(workspace_path or "/home/user")
+    ).replace("{problem_statement}", str(problem_statement))
   prompt = OPENHANDS_USER_PROMPT
   if workspace_path != "/testbed":
     prompt = prompt.replace(
@@ -1188,7 +1214,9 @@ DEFAULT_OPENHANDS_KEEPALIVE_CMD = [
     "sh",
     "-c",
     (
-        "chmod +x /oh/openhands-agent-server 2>/dev/null || true; if [ -d"
+        "chmod +x /oh/openhands-agent-server 2>/dev/null || true; if [ ! -e"
+        ' /testbed ] && [ -d "$(pwd)/.git" ] && [ "$(pwd)" != "/" ]; then ln -s'
+        ' "$(pwd)" /testbed 2>/dev/null || true; fi; if [ -d'
         ' /testbed/.venv/bin ]; then export PATH="/testbed/.venv/bin:${PATH}";'
         " fi; ([ -d /testbed ] && [ ! -e /workspace ] && ln -s /testbed"
         " /workspace 2>/dev/null || true); ([ -d /workspace ] && [ ! -e"

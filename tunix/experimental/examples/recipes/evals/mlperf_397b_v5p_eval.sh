@@ -23,6 +23,7 @@ export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE}}"
 export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
 export PREEMPTIBLE="${PREEMPTIBLE:-false}"
 export BUCKET="${BUCKET:-gs://atwigg-trellis-europe-west4-dev}"
+export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://sanbao-europe/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
 
 # v5p Rollout Topology (16 chips = 16 devices = 4 hosts per replica, DP=1, EP=16, TP=1)
 export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpuv5p:2x2x4}"
@@ -40,17 +41,19 @@ export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-16}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-$(( 16 * ROLLOUT_REPLICAS ))}"
 export SANDBOX_NODE_SELECTOR_KEY="${SANDBOX_NODE_SELECTOR_KEY:-cloud.google.com/gke-nodepool}"
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-cpu-pool}"
-export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
+export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX-europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 
 # Preserve v5p/caller settings that mlperf_397b_256_v7x.sh sets for v7x
 _v5p_no_launch="${MLPERF_NO_LAUNCH:-0}"
 _v5p_tpu_reservation="${TPU_RESERVATION-}"
 _v5p_use_dynamic_slicing="${USE_DYNAMIC_SLICING:-false}"
+_v5p_sandbox_tolerations="${SANDBOX_TOLERATIONS-}"
 
 MLPERF_NO_LAUNCH=1 source "${SCRIPT_DIR}/mlperf_397b_v7x_eval.sh"
 
 export MLPERF_NO_LAUNCH="${_v5p_no_launch}"
 export TPU_RESERVATION="${_v5p_tpu_reservation}"
 export USE_DYNAMIC_SLICING="${_v5p_use_dynamic_slicing}"
+export SANDBOX_TOLERATIONS="${_v5p_sandbox_tolerations}"
 
 source "${SCRIPT_DIR}/../mlperf_base.sh" "${1:-eval}" "${@:2}"

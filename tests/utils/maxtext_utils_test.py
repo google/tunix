@@ -1191,6 +1191,130 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertFalse(prefused_wi_deleted_during_exec)
     self.assertTrue(prefused_wi.deleted)
 
+  def test_load_and_convert_scanned_checkpoint_equivalent_sharding_preserves_aliased_buffer(
+      self,
+  ):
+    class FakeSharding:
+
+      def __init__(self, name, equivalent=True):
+        self.name = name
+        self.equivalent = equivalent
+
+      def __eq__(self, other):
+        return isinstance(other, FakeSharding) and self.name == other.name
+
+      def is_equivalent_to(self, other, ndim):
+        del other, ndim
+        return self.equivalent
+
+    class FakeBuffer:
+
+      def __init__(self):
+        self.deleted = False
+
+    class FakeArray:
+
+      def __init__(self, shape, sharding, buf=None):
+        self.shape = shape
+        self.ndim = len(shape)
+        self.dtype = "float32"
+        self.sharding = sharding
+        self._buf = buf or FakeBuffer()
+
+      def is_deleted(self):
+        return self._buf.deleted
+
+      def delete(self):
+        self._buf.deleted = True
+
+    src_sharding = FakeSharding("scanned_mesh_replicated", equivalent=True)
+    tgt_sharding = FakeSharding("vllm_mesh_replicated", equivalent=True)
+    out_arr = FakeArray((64,), src_sharding)
+    tgt_arr = FakeArray((64,), tgt_sharding)
+
+    def fake_device_put(arr, sharding):
+      # Simulate JAX device_put zero-copy aliasing when shardings are equivalent
+      return FakeArray(arr.shape, sharding, buf=arr._buf)
+
+    orig_converter = mock.MagicMock()
+    orig_converter._build_plan = mock.MagicMock()
+    orig_converter._execute_group = lambda group, src_flat, tgt_flat: [
+        (("layers_0", "attention", "A_log"), out_arr)
+    ]
+
+    converted_holder = {}
+
+    def fake_convert(scanned_state, target_state=None):
+      del scanned_state, target_state
+      tgt_flat = {("layers_0", "attention", "A_log"): tgt_arr}
+      group = mock.MagicMock(
+          op="slice",
+          source_keys=[("layers", "layer_0", "attention", "A_log")],
+      )
+      outs = orig_converter._execute_group(group, {}, tgt_flat)
+      converted_holder["out"] = outs[0][1]
+      return {"model": {"layers_0": {"attention": {"A_log": outs[0][1]}}}}
+
+    orig_converter.convert = fake_convert
+    converter_cls = mock.Mock(return_value=orig_converter)
+
+    scanned_cfg = mock.sentinel.scanned_cfg
+    pyconfig_mod = mock.MagicMock(initialize=mock.Mock(return_value=scanned_cfg))
+    model_creation_mod = mock.MagicMock(
+        from_pretrained=mock.Mock(
+            return_value=(mock.sentinel.model, mock.sentinel.mesh)
+        )
+    )
+    nnx_mod = mock.MagicMock(
+        Param=mock.sentinel.Param,
+        state=mock.Mock(return_value=mock.sentinel.scanned_state),
+    )
+    jax_mod = mock.MagicMock(
+        Array=FakeArray,
+        devices=mock.Mock(return_value=["d0"]),
+        device_put=mock.Mock(side_effect=fake_device_put),
+        clear_caches=mock.Mock(),
+        block_until_ready=mock.Mock(),
+        tree_util=None,
+    )
+    mock_sampler = mock.MagicMock()
+    mock_sampler.vllm_sampler.transformer_state = {
+        "layers_0": {"attention": {"A_log": tgt_arr}}
+    }
+    mock_sampler.vllm_sampler.update_params.side_effect = (
+        lambda state: mock_sampler.vllm_sampler.transformer_state.update(state)
+    )
+
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "flax": mock.MagicMock(nnx=nnx_mod),
+            "flax.nnx": nnx_mod,
+            "jax": jax_mod,
+            "maxtext.common.common_types": mock.MagicMock(
+                MODEL_MODE_AUTOREGRESSIVE="autoregressive"
+            ),
+            "maxtext.configs": mock.MagicMock(pyconfig=pyconfig_mod),
+            "maxtext.integration.vllm.weight_converter": mock.MagicMock(
+                MaxTextToMaxTextConverter=converter_cls
+            ),
+            "maxtext.utils": mock.MagicMock(
+                model_creation_utils=model_creation_mod
+            ),
+            "maxtext.utils.globals": mock.MagicMock(
+                MAXTEXT_CONFIGS_DIR="/maxtext/configs"
+            ),
+        },
+    ):
+      maxtext_utils.load_and_convert_scanned_checkpoint(
+          path="/ckpt/0/items",
+          sampler=mock_sampler,
+          mesh_tp=1,
+      )
+
+    self.assertFalse(converted_holder["out"].is_deleted())
+    self.assertEqual(converted_holder["out"].sharding, tgt_sharding)
+
   def test_pathways_ocdbt_selection(self):
     """CKPT_USE_OCDBT only enables OCDBT under colocated_python; persistence always forces it off."""
     ckpt_opts = mock.MagicMock(save_interval_steps=1, max_to_keep=2)

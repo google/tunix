@@ -1057,10 +1057,44 @@ def _iter_leaves(tree, jax_mod):
     yield tree
 
 
-def _delete_pytree_buffers(tree, jax_mod, keep_tree=None):
+def _shardings_are_equivalent(s1, s2, ndim: int | None = None) -> bool:
+  if s1 == s2:
+    return True
+  if ndim is not None:
+    is_eq = getattr(s1, "is_equivalent_to", None)
+    if callable(is_eq):
+      try:
+        return bool(is_eq(s2, ndim))
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+  return False
+
+
+def _delete_pytree_buffers(tree, jax_mod, keep_tree=None, only_param=False):
   array_cls = getattr(jax_mod, "Array", ())
   if not isinstance(array_cls, type):
     return
+  flat_state = getattr(tree, "flat_state", None)
+  if only_param and callable(flat_state):
+    try:
+      from flax import nnx  # pylint: disable=import-outside-toplevel
+
+      param_cls = getattr(nnx, "Param", None)
+    except Exception:  # pylint: disable=broad-exception-caught
+      param_cls = None
+    if param_cls is not None:
+      for _, var in flat_state():
+        if not isinstance(var, param_cls):
+          continue
+        val = getattr(var, "value", var)
+        if isinstance(val, array_cls) and not getattr(
+            val, "is_deleted", lambda: False
+        )():
+          try:
+            val.delete()
+          except Exception:  # pylint: disable=broad-exception-caught
+            pass
+      return
   keep_ids = set()
   if keep_tree is not None:
     for leaf in _iter_leaves(keep_tree, jax_mod):
@@ -1117,7 +1151,7 @@ def load_and_convert_scanned_checkpoint(
     vllm_sampler.delete_cache()
     reinit_needed = True
   _delete_pytree_buffers(
-      getattr(vllm_sampler, "transformer_state", None), jax
+      getattr(vllm_sampler, "transformer_state", None), jax, only_param=True
   )
   try:
     if base_config_path is None:
@@ -1148,6 +1182,10 @@ def load_and_convert_scanned_checkpoint(
         prefuse_moe_weights=True,
         target_dtype=None,
     )
+    if getattr(scanned_cfg, "rollout_fp8_moe", False) and hasattr(
+        converter, "fp8_moe"
+    ):
+      converter.fp8_moe = True
     orig_exec_group = getattr(converter, "_execute_group", None)
     prefused_moe_sources = {}
     orig_build_plan = getattr(converter, "_build_plan", None)
@@ -1190,11 +1228,12 @@ def load_and_convert_scanned_checkpoint(
         out_arrays = [out for _, out in outs]
         if hasattr(jax, "block_until_ready"):
           jax.block_until_ready(out_arrays)
-        _delete_pytree_buffers(
-            [prefused_wi] + [src_flat.get(k) for k in group.source_keys],
-            jax,
-            keep_tree=out_arrays,
-        )
+        if getattr(group, "op", None) not in ("direct", "identity"):
+          _delete_pytree_buffers(
+              [prefused_wi] + [src_flat.get(k) for k in group.source_keys],
+              jax,
+              keep_tree=out_arrays,
+          )
         aligned_outs = []
         for tgt_key, out in outs:
           tgt_sharding = getattr(tgt_flat.get(tgt_key), "sharding", None)
@@ -1205,10 +1244,14 @@ def load_and_convert_scanned_checkpoint(
               and out_sharding != tgt_sharding
               and hasattr(jax, "device_put")
           ):
+            equiv_sharding = _shardings_are_equivalent(
+                out_sharding, tgt_sharding, getattr(out, "ndim", None)
+            )
             resharded_out = jax.device_put(out, tgt_sharding)
             if hasattr(jax, "block_until_ready"):
               jax.block_until_ready(resharded_out)
-            _delete_pytree_buffers(out, jax, keep_tree=resharded_out)
+            if not equiv_sharding:
+              _delete_pytree_buffers(out, jax, keep_tree=resharded_out)
             out = resharded_out
           aligned_outs.append((tgt_key, out))
         return aligned_outs
@@ -1219,7 +1262,6 @@ def load_and_convert_scanned_checkpoint(
         scanned_state,
         target_state=vllm_sampler.transformer_state,
     )
-    _delete_pytree_buffers(scanned_state, jax, keep_tree=converted_state)
     del scanned_state
     gc.collect()
 
@@ -1251,12 +1293,17 @@ def load_and_convert_scanned_checkpoint(
 
         def _put_or_keep(x, dst):
           sharding = getattr(dst, "sharding", dst)
-          if sharding is None or getattr(x, "sharding", None) == sharding:
+          x_sharding = getattr(x, "sharding", None)
+          if sharding is None or x_sharding == sharding:
             return x
+          equiv_sharding = _shardings_are_equivalent(
+              x_sharding, sharding, getattr(x, "ndim", None)
+          )
           out = jax.device_put(x, sharding)
           if hasattr(jax, "block_until_ready"):
             jax.block_until_ready(out)
-          _delete_pytree_buffers(x, jax, keep_tree=out)
+          if not equiv_sharding:
+            _delete_pytree_buffers(x, jax, keep_tree=out)
           return out
 
         return jax.tree_util.tree_map(_put_or_keep, source, target)
@@ -1269,11 +1316,6 @@ def load_and_convert_scanned_checkpoint(
         reshard_mod.reshard_pytree = orig_reshard_pytree
       if sampler_cfg is not None and orig_free_kv is not None:
         sampler_cfg.free_kv_cache_during_weight_sync = orig_free_kv
-    _delete_pytree_buffers(
-        converted_state,
-        jax,
-        keep_tree=getattr(vllm_sampler, "transformer_state", None),
-    )
     del converted_state
     gc.collect()
     jax.clear_caches()
@@ -1282,4 +1324,20 @@ def load_and_convert_scanned_checkpoint(
   finally:
     if reinit_needed and hasattr(vllm_sampler, "reinitialize_cache"):
       vllm_sampler.reinitialize_cache()
+  array_cls = getattr(jax, "Array", ())
+  if isinstance(array_cls, type):
+    deleted_leaves = [
+        (i, getattr(l, "shape", None), getattr(l, "dtype", None))
+        for i, l in enumerate(
+            _iter_leaves(getattr(vllm_sampler, "transformer_state", None), jax)
+        )
+        if isinstance(getattr(l, "value", l), array_cls)
+        and getattr(getattr(l, "value", l), "is_deleted", lambda: False)()
+        is True
+    ]
+    if deleted_leaves:
+      raise RuntimeError(
+          f"Found {len(deleted_leaves)} deleted leaf array(s) in"
+          f" transformer_state after conversion: {deleted_leaves[:10]}"
+      )
   logging.info("Completed in-memory scanned-to-unscanned weight conversion.")

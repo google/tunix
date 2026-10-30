@@ -466,7 +466,7 @@ export TUNIX_DEBUG_INFERENCE_LOGS="${TUNIX_DEBUG_INFERENCE_LOGS:-true}"
 export DATASET_PATH="${DATASET_PATH:-gs://mlperf_dataset/benchmark-r2e-gym-easy}"
 export SHUFFLE="${SHUFFLE:-false}"
 export USE_AGENT_SANDBOX=1
-export SCAFFOLD="openhands"
+export SCAFFOLD="${SCAFFOLD:-openhands}"
 # The reference OpenHands runs every tool call of a model turn, in order, each
 # counting as one of MAX_TURNS; tunix runs only the first unless this is true
 # (training_rules.adoc R:685 "behaviorally equivalent" parser).
@@ -488,7 +488,7 @@ export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
 export STEP_TIMEOUT_SECS="${STEP_TIMEOUT_SECS:-60}"
 export REWARD_TIMEOUT_SECS="${REWARD_TIMEOUT_SECS:-60}"
 export FLUSH_EVERY_N_STEPS=1
-export MAX_TURNS=30
+export MAX_TURNS="${MAX_TURNS:-30}"
 export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-8192}"
 export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-57344}"
 

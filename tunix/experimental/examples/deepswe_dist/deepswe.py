@@ -78,9 +78,32 @@ def load_deepswe_dataset(
     cache_dir: str | None = None,
     shuffle: bool = True,
     seed: int = 42,
+    max_rows: int | None = None,
 ) -> Any:
-  """Loads the R2E-Gym dataset used by the DeepSWE recipe."""
+  """Loads the R2E-Gym, SWE-rebench-v2, or Harbor dataset used by DeepSWE."""
   if dataset_path:
+    from examples.deepswe import harbor_utils  # pylint: disable=g-import-not-at-top
+
+    if harbor_utils.is_jsonl_or_harbor_path(dataset_path):
+      logging.info(
+          "Loading Harbor/JSONL dataset from %s (max_rows=%s, shuffle=%s)",
+          dataset_path,
+          max_rows,
+          shuffle,
+      )
+      records = harbor_utils.load_dataset_records(
+          dataset_path,
+          max_rows=None if shuffle else max_rows,
+      )
+      if shuffle:
+        import random  # pylint: disable=g-import-not-at-top
+
+        rng = random.Random(seed)
+        rng.shuffle(records)
+        if max_rows is not None and max_rows > 0:
+          records = records[:max_rows]
+      return records
+
     from datasets import DatasetDict  # pylint: disable=g-import-not-at-top
     from datasets import load_from_disk  # pylint: disable=g-import-not-at-top
 
@@ -114,7 +137,12 @@ def _entry_at(dataset: Any, index: int) -> dict[str, Any]:
   entry = dataset[index]
   if not isinstance(entry, dict):
     raise TypeError(f"DeepSWE dataset item must be a dict, got {type(entry)}")
-  return _jsonify_lists(dict(entry))
+  from examples.deepswe import harbor_utils  # pylint: disable=g-import-not-at-top
+
+  normalized = _jsonify_lists(dict(entry))
+  if harbor_utils.is_harbor_entry(normalized):
+    normalized = harbor_utils.ensure_harbor_entry(normalized)
+  return normalized
 
 
 def _problem_statement(entry: dict[str, Any]) -> str:

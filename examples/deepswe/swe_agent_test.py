@@ -1887,9 +1887,148 @@ class SweAgentTest(absltest.TestCase):
       self.assertIn("kill -TERM", cleanup_cmd)
       mock_runtime.setup_env.assert_called_once()
 
+  def test_endless_terminals_harbor_task_and_in_place_eval(self):
+    from examples.deepswe import harbor_utils  # pylint: disable=g-import-not-at-top
+    import tempfile  # pylint: disable=g-import-not-at-top
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      task_dir = os.path.join(tmpdir, "task_000000_0033979a")
+      os.makedirs(os.path.join(task_dir, "tests"), exist_ok=True)
+      os.makedirs(os.path.join(task_dir, "environment"), exist_ok=True)
+      os.makedirs(os.path.join(task_dir, "solution"), exist_ok=True)
+
+      with open(os.path.join(task_dir, "task.toml"), "w", encoding="utf-8") as f:
+        f.write(
+            '[metadata]\ndifficulty = "easy"\ntags = ["terminal-bench", "echos"]\n'
+            "[verifier]\ntimeout_sec = 900.0\n"
+            "[agent]\ntimeout_sec = 900.0\n"
+        )
+      with open(
+          os.path.join(task_dir, "instruction.md"), "w", encoding="utf-8"
+      ) as f:
+        f.write("Create /home/user/hello.txt with 'hello world\\n'.")
+      with open(
+          os.path.join(task_dir, "environment", "Dockerfile"),
+          "w",
+          encoding="utf-8",
+      ) as f:
+        f.write("FROM ubuntu:22.04\nWORKDIR /home/user\n")
+      with open(
+          os.path.join(task_dir, "tests", "test.sh"), "w", encoding="utf-8"
+      ) as f:
+        f.write("uvx --with pytest==8.4.1 pytest /tests/test_final_state.py\n")
+      with open(
+          os.path.join(task_dir, "tests", "test_final_state.py"),
+          "w",
+          encoding="utf-8",
+      ) as f:
+        f.write(
+            "def test_hello_exists():\n"
+            "    assert True\n"
+        )
+
+      entry = harbor_utils.load_harbor_task_dir(task_dir)
+      self.assertEqual(entry["instance_id"], "task_000000_0033979a")
+      self.assertEqual(
+          entry["docker_image"],
+          "hamishivi/swerl-endless-terminals:task_000000_0033979a",
+      )
+      self.assertEqual(entry["source_dataset"], "endless_terminals")
+      self.assertTrue(entry["eval_in_place"])
+      self.assertEqual(entry["workdir"], "/home/user")
+      self.assertTrue(harbor_utils.is_in_place_harbor_entry(entry))
+      test_sh = harbor_utils.get_tests_files(entry)["test.sh"].decode("utf-8")
+      self.assertIn("score_tests:", test_sh)
+      self.assertIn("python3 -m pytest", test_sh)
+
+      # Verify CodeActAgent formats terminal prompt cleanly without git/base_commit
+      agent = swe_agent.CodeActAgent()
+      agent.update_from_env(
+          observation=entry["problem_statement"],
+          reward=0.0,
+          done=False,
+          info={
+              "workspace_path": entry["workdir"],
+              "is_terminal_task": True,
+          },
+      )
+      user_msg = agent.chat_completions[1]["content"]
+      self.assertIn("<uploaded_files>\n/home/user\n</uploaded_files>", user_msg)
+      self.assertIn("working directory `/home/user`", user_msg)
+      self.assertNotIn("base commit", user_msg)
+
+      # Verify SWEEnv reset + in-place reward runs Harbor verifier on self.workspace
+      mock_asrl = mock.MagicMock()
+      mock_r2egym_adapter = mock.MagicMock()
+      mock_oh_adapter = mock.MagicMock()
+      mock_fleet = mock.MagicMock()
+      mock_fleet.acquire.return_value = mock.MagicMock()
+      mock_repo_env = mock.MagicMock()
+      mock_repo_env.compute_reward = mock.MagicMock(return_value=0.0)
+      mock_r2egym_adapter.make_fleet_repo_env.return_value = mock_repo_env
+
+      mock_ws = mock.MagicMock()
+      mock_ws.execute_command.side_effect = [
+          # 1. strip_harbor_verifier_paths
+          mock.MagicMock(exit_code=0, stdout="", stderr=""),
+          # 2. setup_openhands_workspace
+          mock.MagicMock(exit_code=0, stdout="", stderr=""),
+          # 3. configure_harbor_workspace_cwd
+          mock.MagicMock(exit_code=0, stdout="", stderr=""),
+          # 4. run_harbor_verifier_in_target: unpack tests tar
+          mock.MagicMock(exit_code=0, stdout="", stderr=""),
+          # 5. run_harbor_verifier_in_target: run test.sh
+          mock.MagicMock(
+              exit_code=0,
+              stdout=(
+                  "===test_final_state.py::test_hello_exists PASSED\n"
+                  "score_tests: reward=1.0 fail_to_pass=1/1"
+                  " pass_to_pass_failed=0 exit=0\n"
+              ),
+              stderr="",
+          ),
+          # 6. run_harbor_verifier_in_target: cat reward.txt
+          mock.MagicMock(exit_code=0, stdout="1.0\n", stderr=""),
+          # 7. cleanup_rollout_container_processes
+          mock.MagicMock(exit_code=0, stdout="", stderr=""),
+      ]
+      mock_oh_adapter.make_handle_workspace.return_value = mock_ws
+
+      with mock.patch.dict(
+          "sys.modules",
+          {
+              "agent_sandbox_rl": mock_asrl,
+              "agent_sandbox_rl.adapters": mock.MagicMock(),
+              "agent_sandbox_rl.adapters.r2egym": mock_r2egym_adapter,
+              "agent_sandbox_rl.adapters.openhands": mock_oh_adapter,
+          },
+      ):
+        env = swe_env.SWEEnv(
+            entry=entry,
+            scaffold="openhands",
+            use_agent_sandbox=True,
+            fleet=mock_fleet,
+        )
+        obs, info = env.reset()
+        self.assertEqual(obs, entry["problem_statement"])
+        self.assertEqual(info.get("workspace_path"), "/home/user")
+        self.assertTrue(info.get("is_terminal_task"))
+        cwd_cmd = mock_ws.execute_command.call_args_list[2][0][0]
+        self.assertIn("/var/tmp/.oh_cwd", cwd_cmd)
+        self.assertIn("/home/user", cwd_cmd)
+
+        reward = env.final_reward_fn()
+        self.assertEqual(reward, 1.0)
+        self.assertEqual(mock_ws.execute_command.call_count, 7)
+        verifier_cmd = mock_ws.execute_command.call_args_list[4][0][0]
+        self.assertIn("HARBOR_TESTBED=/home/user", verifier_cmd)
+        cleanup_cmd = mock_ws.execute_command.call_args_list[6][0][0]
+        self.assertIn("kill -TERM", cleanup_cmd)
+
 
 if __name__ == "__main__":
   absltest.main()
+
 
 
 

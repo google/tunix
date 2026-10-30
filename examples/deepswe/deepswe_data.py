@@ -19,11 +19,16 @@ The module-level ``batch_fn`` is picked up automatically by
 AgenticGrpoPipeline as the custom_batch_fn for post_init_dataset.
 """
 
+from __future__ import annotations
+
 import json
 import os
+from typing import TYPE_CHECKING
 
-import grain
 import numpy as np
+
+if TYPE_CHECKING:
+  import grain
 
 
 def create_dataset(
@@ -48,6 +53,7 @@ def create_dataset(
     list fields JSON-serialised to strings.
   """
   from datasets import load_dataset  # pylint: disable=g-import-not-at-top
+  import grain  # pylint: disable=g-import-not-at-top
 
   if cache_dir is None:
     cache_dir = os.path.join(os.getcwd(), "dataset_cache")

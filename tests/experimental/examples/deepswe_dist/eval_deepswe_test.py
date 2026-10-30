@@ -314,6 +314,12 @@ class EvalTest(unittest.TestCase):
     self.assertEqual(summary["expected_attempts"], 8)
     self.assertEqual(summary["missing_attempts"], 5)
     self.assertEqual(summary["error_attempts"], 1)
+    self.assertEqual(summary["resolved_instances"], 1)
+    self.assertEqual(summary["unresolved_instances"], 1)
+    self.assertEqual(summary["instance_pass_rate"], 0.5)
+    self.assertEqual(summary["resolved_instance_ids"], ["a"])
+    self.assertEqual(summary["unresolved_instance_ids"], ["b"])
+    self.assertEqual(summary["per_instance_resolved_counts"], {"a": 1, "b": 0})
     self.assertEqual(summary["avg_at_k"], 1 / 8)
     self.assertEqual(summary["pass_at_k"], {"1": 1 / 8, "4": 1 / 2})
     self.assertFalse(summary["complete"])
@@ -413,6 +419,117 @@ class EvalTest(unittest.TestCase):
     self.assertEqual(error_row["agent_name"], "codeact_agent")
     error_response.metadata = {}
     self.assertNotIn("agent_name", eval_lib.compact_result(error_response))
+
+  def test_swe_rebench_v2_jsonl_loading_and_harbor_verifier_e2e(self):
+    import subprocess  # pylint: disable=g-import-not-at-top
+    from examples.deepswe import harbor_utils  # pylint: disable=g-import-not-at-top
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      tmp_path = Path(tmpdir)
+      jsonl_path = tmp_path / "swe_rebench_v2_python_codeA.jsonl"
+      rows = [
+          {
+              "instance_id": "aaugustin__websockets-981",
+              "repo": "aaugustin/websockets",
+              "base_commit": "0123456789abcdef0123456789abcdef01234567",
+              "problem_statement": "Fix area calculation for tall widgets.",
+              "patch": "diff --git a/pkg/core.py b/pkg/core.py\n",
+              "test_patch": (
+                  "diff --git a/tests/test_core.py b/tests/test_core.py\n"
+                  "--- a/tests/test_core.py\n"
+                  "+++ b/tests/test_core.py\n"
+                  "@@ -1,3 +1,6 @@\n"
+                  " from pkg import core\n"
+                  " def test_square():\n"
+                  "   assert core.area(2, 2) == 4\n"
+                  "+def test_tall():\n"
+                  "+  assert core.area(2, 3) == 6\n"
+              ),
+              "FAIL_TO_PASS": ["tests/test_core.py::test_tall"],
+              "PASS_TO_PASS": ["tests/test_core.py::test_square"],
+              "install_config": {
+                  "test_cmd": f"{sys.executable} -m unittest",
+                  "eval_commands": ["export TEST_FLAG=1"],
+              },
+              "image_name": "docker.io/swerebenchv2/sweb.eval.x86_64.aaugustin_1776_websockets-981:latest",
+          },
+          {
+              "instance_id": "other__repo-2",
+              "repo": "other/repo",
+              "base_commit": "fedcba9876543210fedcba9876543210fedcba98",
+              "problem_statement": "Second problem",
+              "FAIL_TO_PASS": ["tests/test_b.py::test_ok"],
+              "PASS_TO_PASS": [],
+              "docker_image": "docker.io/swerebenchv2/sweb.eval.x86_64.other_1776_repo-2:latest",
+          },
+      ]
+      jsonl_path.write_text(
+          "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
+      )
+
+      a = self.args(
+          "--dataset_path",
+          str(jsonl_path),
+          "--tasks_limit",
+          "1",
+      )
+      entries = eval_lib.load_entries(a)
+      self.assertEqual(len(entries), 1)
+      entry = entries[0]
+      self.assertEqual(entry["instance_id"], "aaugustin__websockets-981")
+      self.assertEqual(
+          entry["docker_image"],
+          "docker.io/swerebenchv2/sweb.eval.x86_64.aaugustin_1776_websockets-981:latest",
+      )
+      self.assertEqual(entry["task_format"], "harbor")
+      self.assertIn("tests_files", entry)
+      unpacked = harbor_utils.unpack_tests_files(entry["tests_files"])
+      self.assertEqual(
+          sorted(unpacked.keys()),
+          ["config.json", "score_tests.py", "test.sh", "test_patch.diff"],
+      )
+      test_sh_path = tmp_path / "check_test.sh"
+      test_sh_path.write_bytes(unpacked["test.sh"])
+      subprocess.run(["bash", "-n", str(test_sh_path)], check=True)
+
+      # Verify evaluate_harbor_patch_in_fresh_container runs Harbor verifier
+      # without calling R2E-Gym setup_env.
+      commands_ran = []
+
+      class FakeRuntime:
+
+        def __init__(self):
+          self.repo_path = "/testbed"
+          self.setup_env_called = False
+
+        def setup_env(self):
+          self.setup_env_called = True
+
+        def run(self, cmd, timeout=60):
+          commands_ran.append((cmd, timeout))
+          if "reward.txt" in cmd and "cat " in cmd:
+            return "1.0\n", 0
+          if "test.sh" in cmd and "bash " in cmd:
+            return "score_tests: reward=1.0 fail_to_pass=1/1 pass_to_pass_failed=0\n", 0
+          return "", 0
+
+      fake_runtime = FakeRuntime()
+      fake_eval_env = types.SimpleNamespace(
+          runtime=fake_runtime,
+          _tunix_entry=entry,
+          _tunix_reward_timeout=300.0,
+      )
+      reward = harbor_utils.evaluate_harbor_patch_in_fresh_container(
+          fake_eval_env,
+          "diff --git a/pkg/core.py b/pkg/core.py\n--- a/pkg/core.py\n+++ b/pkg/core.py\n@@ -1 +1 @@\n-old\n+new\n",
+          entry,
+          reward_timeout=300.0,
+      )
+      self.assertEqual(reward, 1.0)
+      self.assertFalse(fake_runtime.setup_env_called)
+      self.assertTrue(
+          any("test.sh" in cmd and "bash " in cmd for cmd, _ in commands_ran)
+      )
 
 
 class RpcTest(unittest.IsolatedAsyncioTestCase):

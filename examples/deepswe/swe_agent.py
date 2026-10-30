@@ -571,6 +571,7 @@ class CodeActAgent(SWEAgent):
             workspace_path=str(info.get("workspace_path") or "/testbed"),
             repo_language=str(info.get("repo_language") or "python"),
             base_commit=str(info.get("base_commit") or ""),
+            is_terminal_task=bool(info.get("is_terminal_task")),
         )
       else:
         observation = self.user_prompt_template.format(

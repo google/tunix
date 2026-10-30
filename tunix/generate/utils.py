@@ -1511,6 +1511,8 @@ def _collect_src_buffer_ids(
   ids: set[int] = set()
   for v in src_flat.values():
     arr = v.value if hasattr(v, 'value') else v
+    if getattr(arr, 'is_deleted', lambda: False)():
+      continue
     if not hasattr(arr, 'addressable_shards'):
       continue
     for shard in arr.addressable_shards:
