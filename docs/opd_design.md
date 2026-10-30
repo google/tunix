@@ -41,7 +41,7 @@ The existing text RL pipeline provides trajectory collection, within-group rewar
 | Group semantics | At least two valid responses per prompt; existing GRPO validity rules remain in effect |
 | Policy freshness | `max_staleness=0`, with no in-flight weight updates during sampling |
 | Batching | Teacher scoring before batch assembly; training through the existing padded and packed data paths |
-| Initial execution recipe | Qwen3-0.6B, GSM8K, padded batches, the native trainer, in-process vLLM, and Raiden |
+| Execution recipes | Qwen3-0.6B smoke and a pinned Qwen3-8B student from Qwen3-32B teacher profile; GSM8K, padded batches, the native trainer, in-process vLLM, and Raiden |
 
 ### 2.3 Non-Goals
 
@@ -375,6 +375,8 @@ The current scorer has no dedicated authentication configuration or remote check
 
 The combined CPU regression run on October 29, 2026 passed 775 tests and 286 subtests, with 6 tests skipped. For the nonuniform distributions, the maximum absolute gradient difference between the actual loss and the independent dense objective was approximately `3e-8`.
 
+After adding the complete pinned recipe and its evaluation/recovery lifecycle, the extended CPU run passed 944 tests and 394 subtests, with 6 skipped. An additional 20 existing checkpoint/restore tests passed separately. These extend the local correctness evidence without establishing accelerator memory fit, throughput, or model-quality results.
+
 In a local two-update small-model run, mean dense reverse-KL decreased from `0.149617002` to `0.147754008`. Each parameter update matched the independent NumPy oracle. The fixed fixture covered sampled EOS, a tool token with ID 0, variable response lengths, and padding. The negative control with shifted scores produced a detectable maximum parameter-update error of approximately `0.059`.
 
 This loop used a local NumPy teacher HTTP service, a controlled sampler, and NNX state copying in place of distributed transfer. Real services, accelerators, resume from disk, and pretrained-model quality remain separate acceptance requirements in the table above.
@@ -422,3 +424,7 @@ G=1, candidate-distribution distillation, multiple teachers, nonzero lag, and mu
 | Training loop and negative controls | [opd_training_test.py](../tests/dist_rl/distillation/opd_training_test.py) |
 | Checkpoint integration validation | [opd_checkpoint_identity_test.py](../tests/dist_rl/orchestrator/opd_checkpoint_identity_test.py) |
 | Initial execution recipe | [run_gsm8k_opd_qwen3_0p6b.sh](../tunix/dist_rl/examples/recipes/run_gsm8k_opd_qwen3_0p6b.sh) |
+| Complete pinned training and evaluation recipe | [QWEN3_8B_OPD.md](../tunix/dist_rl/examples/on_policy_distillation/QWEN3_8B_OPD.md) |
+| Fixed training and held-out evaluation configuration | [qwen3_8b_from_qwen3_32b.json](../tunix/dist_rl/examples/on_policy_distillation/configs/qwen3_8b_from_qwen3_32b.json) |
+| Immutable model preparation and teacher supervision | [models.py](../tunix/dist_rl/examples/on_policy_distillation/models.py), [serve_teacher.py](../tunix/dist_rl/examples/on_policy_distillation/serve_teacher.py) |
+| Synchronized policy generation evaluation | [evaluation.py](../tunix/dist_rl/examples/on_policy_distillation/evaluation.py) |

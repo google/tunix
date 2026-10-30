@@ -68,6 +68,7 @@ def load_gsm8k_dataset(
     data_dir: str = "/tmp/gsm8k_data",
     shuffle: bool = True,
     seed: int = 42,
+    dataset_name: str = "gsm8k",
 ) -> grain.MapDataset:
   """Loads the GSM8K split and maps examples to prompt/question/answer records."""
   logging.info(
@@ -78,7 +79,7 @@ def load_gsm8k_dataset(
       seed,
   )
   data = tfds.data_source(
-      "gsm8k",
+      dataset_name,
       split=split,
       data_dir=data_dir,
       builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},

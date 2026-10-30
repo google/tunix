@@ -4,7 +4,7 @@ Date: October 29, 2026. Branch: `haoyu-next`. This record documents validation o
 
 Validation currently covers mathematical gradients, the HTTP scoring protocol, batch assembly, and two rounds of actual parameter updates on a local CPU. The real SGLang inference engine, the vLLM/Raiden/TPU combination, and learning quality on pretrained models require separate acceptance tests.
 
-The final combined CPU regression run completed with **775 passed, 286 subtests passed, and 6 skipped**, with process exit code 0. Its scope includes the core checks below and existing regressions for the program, algorithm adapters, assemblers, workers, collector, native sampler, sampling utilities, and CLI/launcher.
+The initial implementation regression completed with **775 passed, 286 subtests passed, and 6 skipped**, with process exit code 0. The extended regression including the complete pinned recipe passed **944 tests and 394 subtests, with 6 skipped**; another **20 existing checkpoint/restore tests** passed separately. The combined coverage includes the core checks below and existing regressions for the program, algorithm adapters, assemblers, workers, collector, native sampler, sampling utilities, and CLI/launcher.
 
 ## 1. Objective Under Test
 
@@ -89,9 +89,19 @@ The HTTP tests require permission to bind ephemeral localhost ports. The validat
 
 The real vanilla CPU decoder was also exercised. Effective-parameter checks in the async vLLM adapter were tested through its production adapter code with lightweight engine/parameter test doubles; they do not exercise the installed vLLM library. New regressions in `tests/generate/vllm_sampler_test.py` use real vLLM `SamplingParams` to check model defaults and configuration overrides, but that file was not run because vLLM is not installed in this environment. The actual vLLM library path remains subject to runtime acceptance testing.
 
-## 6. Remaining Acceptance Tests with Real Models
+## 6. Complete Pinned Recipe Validation
+
+The [full Qwen3-8B from Qwen3-32B recipe](../tunix/dist_rl/examples/on_policy_distillation/QWEN3_8B_OPD.md) adds immutable model preparation, a supervised teacher service, a separate full-test evaluation configuration, fresh/resume/checkpoint-only control flow, and experiment records. It uses the existing trainer and live synchronized rollout workers for baseline/final evaluation rather than assuming Orbax checkpoints can be served as HF models.
+
+The extended combined CPU regression passed **944 tests and 394 subtests, with 6 skipped**. Another **20 existing checkpoint/restore tests** passed in a separate process. The new real-CPU Orbax cases verify model, optimizer, OPD identity, and cursor restoration across interval-skipped saves and safe shutdown. A trainer that advances beyond its last committed program boundary cannot publish an unlabelled newer checkpoint at shutdown.
+
+CPU tests cover the complete configuration-to-launcher contract, actual engine request construction, label isolation, numeric answer grading, failure/staleness handling, model artifacts and service metadata, and distinct deterministic seeds for sibling responses. The fixed real Qwen3-8B and Qwen3-32B tokenizer/configuration files were also downloaded without weights and passed the production semantic-compatibility check. Their fingerprint is `6b06d0afe078c85bc53ce525ebc9cee9ae68e8ef8c4022bc8e04364c4aaaf051`.
+
+No actual 8B/32B weights were loaded in this CPU validation. Accelerator memory fit, throughput, checkpoint recovery on the target runtime, and held-out quality remain unmeasured until the full recipe is executed.
+
+## 7. Remaining Acceptance Tests with Real Models
 
 1. Start a real SGLang teacher at a fixed revision with a tokenizer compatible with the student. Check a set of saved trajectories covering the first response token, EOS, and long contexts.
 2. Run the [two-round Qwen3 OPD recipe](../tunix/dist_rl/examples/recipes/run_gsm8k_opd_qwen3_0p6b.sh). Verify actual weight updates and second-round sampling on vLLM/Raiden/TPU, and measure sampler/trainer score differences at identical weights.
 3. Interrupt and restore an actual on-disk checkpoint while keeping the teacher identity, tokenizer, and objective configuration unchanged.
-4. Compare the initial student, pure OPD, GRPO, and GRPO+OPD on fixed train/evaluation splits. Report quality, response length, valid tokens, teacher latency, and training cost. Neither a two-round smoke test nor decreasing toy-model KL establishes capability transfer to a pretrained model.
+4. Execute the [full pinned recipe](../tunix/dist_rl/examples/on_policy_distillation/QWEN3_8B_OPD.md), compare its actual baseline/final reports, and then add GRPO or mixed-objective ablations as separate runs. Report quality, response length, valid tokens, teacher latency, and training cost. Neither a two-round smoke test nor decreasing toy-model KL establishes capability transfer to a pretrained model.

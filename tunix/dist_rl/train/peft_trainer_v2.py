@@ -16,6 +16,7 @@
 
 from collections.abc import Iterable, Mapping
 import contextlib
+import copy
 import dataclasses
 import functools
 import os
@@ -333,10 +334,12 @@ class GradientAccumulator(nnx.Module):
     gradients.
     """
     if self.persistent:
+
       def _zero_in_place(v):
         # `x * 0` rather than `jnp.zeros_like(x)`, to preserve the buffer's
         # sharding.
         v.set_value(v[...] * 0)
+
       jax.tree_util.tree_map(
           _zero_in_place,
           self.grads,
@@ -485,6 +488,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
     self._train_steps = 0  # represent # of times model has been updated
     self._iter_steps = 0  # represent # of times trainer has looped
+    # External programs commit their cursor and identity at complete batch
+    # boundaries. A later optimizer update must not reuse that metadata.
+    self._last_safe_checkpoint: tuple[int, dict[str, Any], bool] | None = None
     self._throttler = inflight_throttler.InflightThrottler(
         max_inflight=training_config.max_inflight_computations
     )
@@ -603,7 +609,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       PeftTrainer.
     """
     self.clear_jit_cache()
-    self.gen_model_input_fn = gen_model_input_fn  # pyrefly: ignore[bad-assignment]
+    self.gen_model_input_fn = (
+        gen_model_input_fn  # pyrefly: ignore[bad-assignment]
+    )
     return self
 
   def _is_single_microstep(self) -> bool:
@@ -768,7 +776,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         return x
       if p is None:
         p = shd.PartitionSpec()
-      sharding = sharding_utils.get_sharding(x, mesh, p)  # pyrefly: ignore[bad-argument-type]
+      sharding = sharding_utils.get_sharding(
+          x, mesh, p
+      )  # pyrefly: ignore[bad-argument-type]
       if hasattr(x, "sharding") and x.sharding == sharding:
         return x
       if getattr(x, "is_fully_addressable", True):
@@ -943,7 +953,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   ):
     """Logs the metrics to the metrics logger and console."""
     perplexity = np.exp(jax.device_get(loss))
-    self.metrics_logger.log(self.metrics_prefix, "loss", loss, self._mode, step)  # pyrefly: ignore[missing-attribute]
+    self.metrics_logger.log(
+        self.metrics_prefix, "loss", loss, self._mode, step
+    )  # pyrefly: ignore[missing-attribute]
     self.metrics_logger.log(  # pyrefly: ignore[missing-attribute]
         self.metrics_prefix, "perplexity", perplexity, self._mode, step
     )
@@ -967,9 +979,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     for k, v in (additional_metrics or {}).items():
       if k.startswith(("sampler_trainer/", "sampler_is/", "sampler_rs/")):
         prefix, metric_name = k.split("/", maxsplit=1)
-        self.metrics_logger.log(prefix, metric_name, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
+        self.metrics_logger.log(
+            prefix, metric_name, v, self._mode, step
+        )  # pyrefly: ignore[missing-attribute]
       else:
-        self.metrics_logger.log(self.metrics_prefix, k, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
+        self.metrics_logger.log(
+            self.metrics_prefix, k, v, self._mode, step
+        )  # pyrefly: ignore[missing-attribute]
 
   def _buffer_metrics(
       self,
@@ -1209,9 +1225,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return self._record_update(grad_norm)
 
   @override
-  def compile(
-      self, dummy_data: datatypes.TrainerPayload | None = None
-  ) -> None:
+  def compile(self, dummy_data: datatypes.TrainerPayload | None = None) -> None:
     """Pre-compiles jitted trainer step executables ahead of time."""
     if dummy_data is None:
       return
@@ -1257,7 +1271,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     mode is set to EVAL and buffered metrics are written on exit.
     """
     _, _, eval_step_fn = self.jit_fwd_bwd_update_and_eval_step(
-        skip_jit=skip_jit, cache_nnx_graph=cache_nnx_graph,
+        skip_jit=skip_jit,
+        cache_nnx_graph=cache_nnx_graph,
     )
     loss, aux = eval_step_fn(self._prepare_payload(payload))
     loss = jax.lax.stop_gradient(loss)
@@ -1332,6 +1347,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     checkpointing will be added later once it is supported in the checkpoint
     manager.
 
+    For externally managed trainers, this call commits a program boundary even
+    when the save interval skips persistence. Finalization can force-save this
+    boundary only while the current train step still matches its metadata.
+
     Args:
       metadata: Metadata to save alongside the checkpoint. Defaults to
         `custom_checkpoint_metadata()`.
@@ -1344,6 +1363,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     """
     if metadata is None:
       metadata = self.custom_checkpoint_metadata()
+    metadata = copy.deepcopy(dict(metadata))
     if step is None:
       step = metadata.get("step", self._train_steps)
     if save_only_lora_params is None:
@@ -1356,6 +1376,16 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         force=force,
         custom_metadata=metadata,
     )
+    # A skipped interval save still identifies a committed program boundary;
+    # close() can force-save those same weights with their complete metadata.
+    if step == self._train_steps and metadata.get("step", step) == step:
+      self._last_safe_checkpoint = (
+          step,
+          metadata,
+          save_only_lora_params,
+      )
+    else:
+      self._last_safe_checkpoint = None
 
   @override
   def restore_checkpoint(self, *, step: int | None = None) -> Any:
@@ -1367,6 +1397,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     Returns:
       The restored custom metadata, with `step` set to the restored step.
     """
+    self._last_safe_checkpoint = None
     self._train_steps, self._restored_custom_metadata = (
         self.checkpoint_manager.maybe_restore(
             self.model,
@@ -1632,7 +1663,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           span.device_end([computation_to_track])
           span_v2.async_end([computation_to_track])
 
-        self._throttler.add_computation(computation_to_track)  # pyrefly: ignore[bad-argument-type]
+        self._throttler.add_computation(
+            computation_to_track
+        )  # pyrefly: ignore[bad-argument-type]
         if is_update_step_val:
           self.save_checkpoint()
           if (
@@ -1657,6 +1690,26 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def _save_last_checkpoint(self):
     last_saved_step = self.checkpoint_manager.latest_step()
     if last_saved_step is None or last_saved_step < self._train_steps:
+      if self.is_managed_externally:
+        safe_checkpoint = self._last_safe_checkpoint
+        if safe_checkpoint is None or safe_checkpoint[0] != self._train_steps:
+          logging.info(
+              "Skipping final checkpoint at optimizer step %d: no matching "
+              "committed external-program metadata. Last saved step: %s.",
+              self._train_steps,
+              last_saved_step,
+          )
+          return
+        _, metadata, save_only_lora_params = safe_checkpoint
+        self.checkpoint_manager.save(
+            self._train_steps,
+            self.model,
+            self.optimizer,
+            save_only_lora_params=save_only_lora_params,
+            force=True,
+            custom_metadata=copy.deepcopy(metadata),
+        )
+        return
       self.checkpoint_manager.save(
           self._train_steps,
           self.model,
@@ -1684,6 +1737,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
     This includes writing any buffered metrics, saving the last checkpoint,
     and closing the checkpoint manager and metrics logger.
+
+    An externally managed trainer saves only when its current optimizer step
+    matches the most recent explicit checkpoint boundary. Otherwise, it keeps
+    the last persisted checkpoint rather than saving uncommitted progress.
     """
     self._write_train_metrics()
     self._save_last_checkpoint()

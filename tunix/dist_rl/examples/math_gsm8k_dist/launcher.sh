@@ -29,6 +29,8 @@ RUN_INFERENCE_NODE=${RUN_INFERENCE_NODE:-0}
 INFERENCE_ADDR=${INFERENCE_ADDR:-}
 MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
+MODEL_REVISION=${MODEL_REVISION:-}
+ALLOW_MODEL_DOWNLOAD=${ALLOW_MODEL_DOWNLOAD:-true}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-"${REPO_ROOT}/artifacts/qwen3_dist_gsm8k"}
 MODEL_DIR=${MODEL_DIR:-${MODEL_DOWNLOAD_DIR:-"${ARTIFACT_ROOT}/models"}}
 TOKENIZER_PATH=${TOKENIZER_PATH:-$MODEL_DIR}
@@ -62,6 +64,7 @@ LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
 MODEL_DTYPE=${MODEL_DTYPE:-float32}
 MODEL_LOAD_DTYPE=${MODEL_LOAD_DTYPE:-float32}
+REMAT_CONFIG=${REMAT_CONFIG:-none}
 USE_LORA=${USE_LORA:-0}
 CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
 CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
@@ -69,7 +72,9 @@ CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${REPO_ROOT}/checkpoints
 REWARD_MODE=${REWARD_MODE:-env}
 TFDS_DATA_DIR=${TFDS_DATA_DIR:-"${ARTIFACT_ROOT}/data"}
 TFDS_SPLIT=${TFDS_SPLIT:-train}
+TFDS_DATASET=${TFDS_DATASET:-gsm8k}
 SEED=${SEED:-42}
+GENERATION_SEED=${GENERATION_SEED:-}
 SHUFFLE=${SHUFFLE:-true}
 BETA=${BETA:-0.04}
 EPSILON=${EPSILON:-0.2}
@@ -83,6 +88,11 @@ OPD_COEFFICIENT=${OPD_COEFFICIENT:-1.0}
 OPD_TASK_REWARD_COEFFICIENT=${OPD_TASK_REWARD_COEFFICIENT:-0.0}
 OPD_TEACHER_TIMEOUT_SECONDS=${OPD_TEACHER_TIMEOUT_SECONDS:-60.0}
 OPD_MAX_CONCURRENCY=${OPD_MAX_CONCURRENCY:-8}
+OPD_MODELS_MANIFEST=${OPD_MODELS_MANIFEST:-}
+OPD_EVAL_CONFIG=${OPD_EVAL_CONFIG:-}
+OPD_EVAL_OUTPUT_DIR=${OPD_EVAL_OUTPUT_DIR:-}
+OPD_EVAL_ONLY=${OPD_EVAL_ONLY:-false}
+OPD_REQUIRE_RESUME=${OPD_REQUIRE_RESUME:-false}
 FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
 MAX_STALENESS=${MAX_STALENESS:-0}
 TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-trajectory_completion}
@@ -287,21 +297,25 @@ print_safetensors_candidates() {
 
 has_direct_safetensors() {
   [[ -d "$MODEL_DIR" ]] && [[ -n "$(
-    find "$MODEL_DIR" -maxdepth 1 -type f -name '*.safetensors' -print -quit 2>/dev/null || true
+    find -L "$MODEL_DIR" -maxdepth 1 -type f -name '*.safetensors' -print -quit 2>/dev/null || true
   )" ]]
 }
 
 download_model_dir() {
   echo "Downloading $MODEL_ID to MODEL_DIR: $MODEL_DIR"
-  PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "$PYTHON_BIN" - "$MODEL_ID" "$MODEL_DIR" <<'PY'
+  PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "$PYTHON_BIN" - "$MODEL_ID" "$MODEL_DIR" "$MODEL_REVISION" <<'PY'
 import os
 import sys
 
 from tunix.oss import utils as oss_utils
 
-model_id, model_dir = sys.argv[1], sys.argv[2]
+model_id, model_dir, revision = sys.argv[1], sys.argv[2], sys.argv[3]
 os.makedirs(model_dir, exist_ok=True)
-oss_utils.hf_pipeline(model_id, model_dir)
+if revision:
+  from huggingface_hub import snapshot_download
+  snapshot_download(repo_id=model_id, revision=revision, local_dir=model_dir)
+else:
+  oss_utils.hf_pipeline(model_id, model_dir)
 PY
 }
 
@@ -318,6 +332,10 @@ ensure_model_dir() {
   echo "No '*.safetensors' files found directly in MODEL_DIR: $MODEL_DIR"
   echo "The JAX trainer loader uses a non-recursive '*.safetensors' lookup."
   print_safetensors_candidates "$MODEL_DIR"
+  if [[ "$ALLOW_MODEL_DOWNLOAD" != "1" && "$ALLOW_MODEL_DOWNLOAD" != "true" && "$ALLOW_MODEL_DOWNLOAD" != "True" ]]; then
+    echo "Error: ALLOW_MODEL_DOWNLOAD=false; prepare the pinned local snapshot before launch." >&2
+    exit 1
+  fi
   download_model_dir
 
   if ! has_direct_safetensors; then
@@ -537,6 +555,7 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --model_dtype="$MODEL_DTYPE"
     --model_load_dtype="$MODEL_LOAD_DTYPE"
+    --remat_config="$REMAT_CONFIG"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
     --optimizer_b1="$ADAM_B1"
     --optimizer_b2="$ADAM_B2"
@@ -630,6 +649,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --model_id="$MODEL_ID"
     --model_dir="$MODEL_DIR"
     --model_name="$MODEL_NAME"
+    --model_dtype="$MODEL_DTYPE"
     --sampler="$SAMPLER"
     --mesh_fsdp="$ROLLOUT_FSDP"
     --mesh_tp="$ROLLOUT_TP"
@@ -826,6 +846,7 @@ echo "Launching CPU orchestrator..."
     --process_main=tunix.dist_rl.examples.math_gsm8k_dist.run_gsm8k_dist_grpo.main
 
     --model_id="$MODEL_ID"
+    --model_dir="$MODEL_DIR"
     --tokenizer_path="$TOKENIZER_PATH"
     --batch_size="$BATCH_SIZE"
     --mini_batch_size="$MINI_BATCH_SIZE"
@@ -846,10 +867,29 @@ echo "Launching CPU orchestrator..."
     --flush_metrics_every_n_steps="$FLUSH_METRICS_EVERY_N_STEPS"
     --tfds_data_dir="$TFDS_DATA_DIR"
     --tfds_split="$TFDS_SPLIT"
+    --tfds_dataset="$TFDS_DATASET"
     --seed="$SEED"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --stop_workers_on_exit
   )
+  if [[ -n "$GENERATION_SEED" ]]; then
+    ORCHESTRATOR_CMD+=(--generation_seed="$GENERATION_SEED")
+  fi
+  if [[ -n "$OPD_MODELS_MANIFEST" ]]; then
+    ORCHESTRATOR_CMD+=(--opd_models_manifest="$OPD_MODELS_MANIFEST")
+  fi
+  if [[ -n "$OPD_EVAL_CONFIG" ]]; then
+    ORCHESTRATOR_CMD+=(--opd_eval_config="$OPD_EVAL_CONFIG")
+  fi
+  if [[ -n "$OPD_EVAL_OUTPUT_DIR" ]]; then
+    ORCHESTRATOR_CMD+=(--opd_eval_output_dir="$OPD_EVAL_OUTPUT_DIR")
+  fi
+  if [[ "$OPD_REQUIRE_RESUME" == "1" || "$OPD_REQUIRE_RESUME" == "true" || "$OPD_REQUIRE_RESUME" == "True" ]]; then
+    ORCHESTRATOR_CMD+=(--opd_require_resume)
+  fi
+  if [[ "$OPD_EVAL_ONLY" == "1" || "$OPD_EVAL_ONLY" == "true" || "$OPD_EVAL_ONLY" == "True" ]]; then
+    ORCHESTRATOR_CMD+=(--opd_eval_only)
+  fi
   if [[ -n "$OPD_TEACHER_URL" ]]; then
     ORCHESTRATOR_CMD+=(
       --opd_teacher_url="$OPD_TEACHER_URL"

@@ -853,7 +853,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       if top_p is not None:
         sampling_params.top_p = top_p
       if top_k is not None:
-        sampling_params.top_k = top_k
+        # vLLM versions that predate the 0-disabled convention require -1.
+        sampling_params.top_k = -1 if top_k == 0 else top_k
       if seed is not None:
         sampling_params.seed = seed
 
@@ -887,6 +888,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
               1,
           )
           for key, value in sampling_kwargs.items():
+            if key == "top_k" and value == 0:
+              value = -1
             logging.log_first_n(
                 logging.DEBUG,
                 f"Sampler kwargs setting key {key} with value {value}.",

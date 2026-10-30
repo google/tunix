@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "name": "qwen3_8b_from_qwen3_32b_gsm8k",
+  "student": {
+    "repo_id": "Qwen/Qwen3-8B",
+    "revision": "b968826d9c46dd6066d109eabc6255188de91218"
+  },
+  "teacher": {
+    "repo_id": "Qwen/Qwen3-32B",
+    "revision": "9216db5781bf21249d130ec9da846c4624c16137"
+  },
+  "training": {
+    "tfds_dataset": "gsm8k:1.0.0",
+    "tfds_split": "train",
+    "seed": 42,
+    "shuffle": true,
+    "max_steps": 300,
+    "batch_size": 16,
+    "mini_batch_size": 16,
+    "num_generations": 4,
+    "train_micro_batch_size": 1,
+    "max_prompt_length": 1024,
+    "max_response_length": 4096,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": -1,
+    "opd_coefficient": 1.0,
+    "opd_task_reward_coefficient": 0.0,
+    "opd_teacher_timeout_seconds": 120.0,
+    "opd_max_concurrency": 8,
+    "beta": 0.0,
+    "epsilon": 0.2,
+    "learning_rate": 0.000001,
+    "weight_decay": 0.1,
+    "adam_b1": 0.9,
+    "adam_b2": 0.98,
+    "adam_eps": 0.00000001,
+    "max_grad_norm": 1.0,
+    "checkpoint_save_interval_steps": 25,
+    "checkpoint_max_to_keep": 3
+  },
+  "evaluation": {
+    "dataset_name": "gsm8k:1.0.0",
+    "split": "test",
+    "batch_size": 8,
+    "max_response_length": 4096,
+    "seed": 42,
+    "timeout_seconds": 600.0,
+    "max_examples": 0
+  },
+  "hardware": {
+    "trainer_tpu_chips": "0,1,2,3",
+    "rollout_tpu_chips": "4,5,6,7",
+    "trainer_fsdp": 1,
+    "trainer_tp": 4,
+    "rollout_fsdp": 1,
+    "rollout_tp": 4,
+    "tpu_chips_per_host_bounds": "2,2,1",
+    "tpu_host_bounds": "1,1,1",
+    "model_dtype": "bfloat16",
+    "model_load_dtype": "bfloat16",
+    "remat_config": "DECODER"
+  },
+  "teacher_service": {
+    "host": "0.0.0.0",
+    "port": 30001,
+    "tensor_parallel_size": 2,
+    "mem_fraction_static": 0.8,
+    "context_length": 8192
+  }
+}

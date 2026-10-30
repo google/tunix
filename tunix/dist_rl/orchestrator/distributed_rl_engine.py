@@ -23,7 +23,10 @@ AbstractRLEngine.
 import asyncio
 from collections.abc import Mapping, Sequence
 import concurrent.futures
+import hashlib
 import inspect
+import json
+import numbers
 from typing import Any
 import uuid
 
@@ -39,6 +42,22 @@ from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import task_session
+
+
+def _rollout_seed(
+    base_seed: int | None, prompt_id: str, group_index: int
+) -> int | None:
+  """Derives stable request seeds while keeping sibling generations distinct."""
+  if base_seed is None:
+    return None
+  if isinstance(base_seed, bool) or not isinstance(base_seed, numbers.Integral):
+    raise ValueError("Rollout seed must be an integer or None.")
+  material = json.dumps([int(base_seed), prompt_id], separators=(",", ":"))
+  prompt_seed = int.from_bytes(
+      hashlib.sha256(material.encode("utf-8")).digest()[:4], "big"
+  )
+  return (prompt_seed + group_index) % (2**32)
+
 
 _summarize_list = logging_utils.summarize_list
 
@@ -184,17 +203,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           getattr(req, "group_index", 0),
           req.request_id,
       )
-    await asyncio.gather(
-        *(
-            self._rollout_session.submit(
-                req.request_id,
-                "generate",
-                requests=[req],
-                route_key=req.traj_id,
-            )
-            for req in requests
+    await asyncio.gather(*(
+        self._rollout_session.submit(
+            req.request_id,
+            "generate",
+            requests=[req],
+            route_key=req.traj_id,
         )
-    )
+        for req in requests
+    ))
 
     return [r.request_id for r in requests]
 
@@ -226,6 +243,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
               f"RolloutRequest at index {idx} (id='{p.request_id}') lacks"
               " 'prompt_id'. Every request must provide a non-empty"
               " 'prompt_id'."
+          )
+        if (
+            "seed" not in p.generation_kwargs
+            and "seed" in base_generation_kwargs
+        ):
+          p.generation_kwargs["seed"] = _rollout_seed(
+              base_generation_kwargs["seed"], str(p.prompt_id), p.group_index
           )
         for k, v in base_generation_kwargs.items():
           p.generation_kwargs.setdefault(k, v)
@@ -280,6 +304,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
         generation_kwargs = dict(base_generation_kwargs)
         generation_kwargs.update(item_generation_kwargs)
+        if generation_kwargs.get("seed") is not None:
+          generation_kwargs["seed"] = _rollout_seed(
+              generation_kwargs["seed"], prompt_id, group_index
+          )
 
         rollout_reqs.append(
             datatypes.RolloutRequest(
@@ -416,15 +444,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     if not requests:
       return []
 
-    results = await asyncio.gather(
-        *(
-            self._rollout_session.route(req.traj_id).asubmit(
-                "generate",
-                requests=[req],
-            )
-            for req in requests
+    results = await asyncio.gather(*(
+        self._rollout_session.route(req.traj_id).asubmit(
+            "generate",
+            requests=[req],
         )
-    )
+        for req in requests
+    ))
     raw_items = [
         item
         for sublist in results

@@ -17,7 +17,7 @@
 import contextlib
 import functools
 import threading
-from typing import Any, Callable, ContextManager, TypeVar, cast
+from typing import Any, Callable, cast, ContextManager, TypeVar
 
 from flax import nnx
 import jax
@@ -146,6 +146,8 @@ class TrainerWorker(abstract_worker.Worker):
       if self._trainer is None:
         with self.execution_context():
           trainer = self._trainer_factory()
+          if hasattr(trainer, "is_managed_externally"):
+            trainer.is_managed_externally = True
           if self._pending_loss_fn is not None:
             trainer.with_loss_fn(*self._pending_loss_fn)
             self._pending_loss_fn = None

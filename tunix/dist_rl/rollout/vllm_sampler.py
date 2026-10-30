@@ -440,6 +440,10 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
         )
         else None,
     )
+    # Public Tunix configuration accepts 0 and -1 for disabled top-k. Older
+    # vLLM releases reject 0, while -1 is accepted across both conventions.
+    if vllm_kwargs["top_k"] == 0:
+      vllm_kwargs["top_k"] = -1
     struct_fields = getattr(vllm_sampling_params_cls, "__struct_fields__", ())
     if cache_salt is not None and "cache_salt" in struct_fields:
       vllm_kwargs["cache_salt"] = str(cache_salt)

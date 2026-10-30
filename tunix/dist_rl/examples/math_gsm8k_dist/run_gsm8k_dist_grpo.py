@@ -28,8 +28,10 @@ and executes StandardRLProgram through ClusterOrchestrator.run().
 from __future__ import annotations
 
 import argparse
+import copy
 from collections.abc import Iterator
 import functools
+import json
 import logging
 import os
 import sys
@@ -122,6 +124,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
+  parser.add_argument(
+      "--model_dir", type=str, default=os.getenv("MODEL_DIR", "")
+  )
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--temperature", type=float, default=1.0)
   parser.add_argument("--top_p", type=float, default=1.0)
@@ -160,6 +165,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--opd_teacher_timeout_seconds", type=float, default=60.0)
   parser.add_argument("--opd_max_concurrency", type=int, default=8)
+  parser.add_argument("--opd_models_manifest", default="")
+  parser.add_argument("--opd_eval_output_dir", default="")
+  parser.add_argument("--opd_require_resume", action="store_true")
+  parser.add_argument(
+      "--opd_eval_config",
+      default="",
+      help="JSON configuration for baseline/final or checkpoint evaluation.",
+  )
+  parser.add_argument(
+      "--opd_eval_only",
+      action="store_true",
+      help="Restore and evaluate an existing OPD checkpoint without training.",
+  )
   parser.add_argument(
       "--in_flight_weight_updates",
       type=_str2bool,
@@ -227,7 +245,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=os.getenv("TFDS_DATA_DIR", "/tmp/gsm8k_data"),
   )
   parser.add_argument("--tfds_split", type=str, default="train")
+  parser.add_argument("--tfds_dataset", type=str, default="gsm8k")
   parser.add_argument("--seed", type=int, default=42)
+  parser.add_argument(
+      "--generation_seed",
+      type=int,
+      default=None,
+      help=(
+          "Optional base rollout seed; request seeds also depend on prompt and"
+          " group index."
+      ),
+  )
   parser.add_argument(
       "--shuffle", action=argparse.BooleanOptionalAction, default=True
   )
@@ -409,6 +437,139 @@ def _opd_program_kwargs(
   }
 
 
+def _load_opd_models_manifest(
+    args: argparse.Namespace,
+) -> dict[str, Any] | None:
+  """Checks the control-plane settings against prepared immutable snapshots."""
+  if not args.opd_models_manifest:
+    if args.opd_eval_config or args.opd_eval_only or args.opd_require_resume:
+      raise ValueError("OPD evaluation requires --opd_models_manifest.")
+    return None
+  if not args.opd_teacher_url:
+    raise ValueError("--opd_models_manifest requires OPD to be enabled.")
+  from tunix.dist_rl.examples.on_policy_distillation import models  # pylint: disable=g-import-not-at-top
+
+  manifest = models.load_manifest(args.opd_models_manifest)
+  student, teacher_record = manifest["student"], manifest["teacher"]
+  if args.model_id != student["repo_id"]:
+    raise ValueError("model_id differs from the prepared student manifest.")
+  tokenizer_path = args.tokenizer_path or args.model_dir or args.model_id
+  for actual, expected, name in (
+      (args.model_dir, student["snapshot_path"], "student weights"),
+      (tokenizer_path, student["tokenizer_path"], "student tokenizer"),
+      (
+          args.opd_teacher_tokenizer_path,
+          teacher_record["tokenizer_path"],
+          "teacher tokenizer",
+      ),
+  ):
+    if os.path.realpath(actual) != os.path.realpath(expected):
+      raise ValueError(f"{name} differs from the prepared model manifest.")
+  if args.opd_teacher_revision != teacher_record["declared_revision"]:
+    raise ValueError(
+        "Teacher revision differs from the prepared model manifest."
+    )
+  return manifest
+
+
+def _load_opd_evaluation(args: argparse.Namespace):
+  """Loads a separate generation-evaluation config before any worker request."""
+  if not args.opd_eval_config:
+    if args.opd_eval_only:
+      raise ValueError("--opd_eval_only requires --opd_eval_config.")
+    return None
+  if (
+      not args.opd_teacher_url
+      or args.weight_sync_mode != weight_sync.WeightSyncMode.RAIDEN
+  ):
+    raise ValueError(
+        "OPD evaluation requires OPD and actual Raiden synchronization."
+    )
+  from tunix.dist_rl.examples.on_policy_distillation import evaluation  # pylint: disable=g-import-not-at-top
+
+  with open(args.opd_eval_config, encoding="utf-8") as config_file:
+    return evaluation.EvaluationConfig.from_dict(json.load(config_file))
+
+
+class _EvaluatedOPDProgram(rl_program.StandardRLProgram):
+  """Adds generation evaluation without replacing training or restore logic."""
+
+  def __init__(
+      self,
+      *,
+      evaluation_config,
+      evaluation_examples,
+      evaluation_output_dir,
+      model_identity,
+      eval_only=False,
+      require_resume=False,
+      **kwargs,
+  ):
+    super().__init__(**kwargs)
+    self._evaluation_config = evaluation_config
+    self._evaluation_examples = evaluation_examples
+    self._evaluation_output_dir = evaluation_output_dir
+    self._evaluation_model_identity = model_identity
+    self._eval_only = eval_only
+    self._require_resume = require_resume
+
+  async def _evaluate(self, label: str):
+    from tunix.dist_rl.examples.on_policy_distillation import evaluation  # pylint: disable=g-import-not-at-top
+
+    assert self.engine is not None
+    model_identity = {
+        **self._evaluation_model_identity,
+        "evaluation_source": "live_synced_rollout",
+        "program_step": self.step,
+        "checkpoint_root_directory": os.getenv("CHECKPOINT_ROOT_DIRECTORY", ""),
+        "opd_manifest": copy.deepcopy(self._opd_manifest),
+        "restored_checkpoint_metadata": copy.deepcopy(
+            self.engine.restored_checkpoint_metadata
+        ),
+    }
+    return await evaluation.evaluate_engine(
+        self.engine,
+        self._evaluation_examples,
+        config=self._evaluation_config,
+        output_path=os.path.join(self._evaluation_output_dir, f"{label}.json"),
+        label=label,
+        model_identity=model_identity,
+        policy_version=self.policy_version,
+    )
+
+  async def _resume_from_checkpoint(self) -> None:
+    # This validates the saved OPD objective after the real engine restore and
+    # resync, before any generation for evaluation or training.
+    await super()._resume_from_checkpoint()
+    if self._eval_only:
+      if self.step <= 0:
+        raise ValueError(
+            "OPD evaluation-only requires an existing nonzero checkpoint."
+        )
+      return
+    if self._require_resume and self.step <= 0:
+      raise ValueError("OPD resume requires an existing nonzero checkpoint.")
+    if self._evaluation_config is None:
+      return
+    if self.step == 0:
+      await self.engine.prepare_rollout_policy(
+          role=datatypes.Role.ACTOR,
+          sync_weights=True,
+          policy_version=self.policy_version,
+      )
+      await self._evaluate("baseline")
+
+  async def run_async(self, engine, **kwargs) -> None:
+    if self._eval_only:
+      self.engine = engine
+      await self._resume_from_checkpoint()
+      await self._evaluate("checkpoint")
+      return
+    await super().run_async(engine, **kwargs)
+    if self._evaluation_config is not None:
+      await self._evaluate("final")
+
+
 def _trajectory_store_config(
     args: argparse.Namespace,
 ) -> dict[str, Any] | None:
@@ -486,6 +647,7 @@ def _iter_prompt_items(
       data_dir=args.tfds_data_dir,
       shuffle=args.shuffle,
       seed=args.seed,
+      dataset_name=args.tfds_dataset,
   )
   dataset_size = len(dataset)
   if dataset_size == 0:
@@ -526,6 +688,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
   _validate_opd_args(args)
+  models_manifest = _load_opd_models_manifest(args)
+  eval_config = _load_opd_evaluation(args)
 
   logging.info("=== Starting Distributed GSM8K GRPO Orchestrator ===")
   logging.info(
@@ -554,9 +718,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       args.reward_mode,
   )
 
-  tokenizer_path = (
-      args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
-  )
+  tokenizer_path = args.tokenizer_path or args.model_dir or args.model_id
   tokenizer = AutoTokenizer.from_pretrained(
       tokenizer_path, trust_remote_code=True
   )
@@ -574,6 +736,14 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       eos_id,
   )
   opd_kwargs = _opd_program_kwargs(args, tokenizer)
+  if models_manifest is not None:
+    if (
+        opd_kwargs["opd_teacher_identity"].tokenizer_fingerprint
+        != models_manifest["tokenizer_fingerprint"]
+    ):
+      raise ValueError(
+          "Tokenizer fingerprint differs from the prepared model manifest."
+      )
 
   trajectory_store_config = _trajectory_store_config(args)
   cluster = orchestrator.ClusterOrchestrator(
@@ -624,8 +794,29 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       top_p=args.top_p,
       top_k=0 if args.top_k < 0 else args.top_k,
       return_logprobs=True,
+      seed=args.generation_seed,
   )
-  program = rl_program.StandardRLProgram(
+  program_class = rl_program.StandardRLProgram
+  evaluation_kwargs = {}
+  if eval_config is not None or args.opd_require_resume:
+    from tunix.dist_rl.examples.on_policy_distillation import evaluation  # pylint: disable=g-import-not-at-top
+
+    program_class = _EvaluatedOPDProgram
+    evaluation_kwargs = {
+        "evaluation_config": eval_config,
+        "evaluation_examples": (
+            evaluation.load_examples(args.tfds_data_dir, eval_config)
+            if eval_config
+            else []
+        ),
+        "evaluation_output_dir": (
+            args.opd_eval_output_dir or os.path.join(args.log_dir, "evaluation")
+        ),
+        "model_identity": models_manifest["student"],
+        "eval_only": args.opd_eval_only,
+        "require_resume": args.opd_require_resume,
+    }
+  program = program_class(
       algo=algo,
       dataset=_iter_prompt_items(args),
       max_steps=args.max_steps,
@@ -659,6 +850,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           step + 1,
       ),
       **opd_kwargs,
+      **evaluation_kwargs,
   )
 
   try:

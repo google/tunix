@@ -1,5 +1,11 @@
 # On-policy distillation on GSM8K
 
+For the complete pinned **Qwen3-8B student from Qwen3-32B teacher** workflow,
+including model preparation, teacher startup, training, held-out baseline/final
+evaluation and checkpoint-only evaluation, see the
+[full recipe](QWEN3_8B_OPD.md). Its [JSON profile](configs/qwen3_8b_from_qwen3_32b.json)
+is separate from the two-update 0.6B smoke recipe described below.
+
 This example adds a fixed SGLang teacher to the existing distributed GSM8K
 training loop. The student generates a response, the teacher scores those exact
 token IDs, and the orchestrator adds a detached token-level distillation signal
