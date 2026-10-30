@@ -213,6 +213,14 @@ depends on the execution environment.
     *   `log_dir`: Directory where event files are written.
     *   `flush_every_n_steps`: Frequency of flushing logs to disk (default: 100).
 
+#### Google Cloud ML Diagnostics
+
+[Google Cloud ML Diagnostics](https://github.com/AI-Hypercomputer/google-cloud-mldiagnostics)
+(`tunix.rl.metrics.mldiag_backend.MLDiagScalarBackend`) streams RL training and
+evaluation scalars to Google Cloud Logging alongside TensorBoard. See
+[RL Monitoring and Profiling with Google Cloud ML Diagnostics](https://github.com/google/tunix/blob/main/docs/ml_diagnostics.md)
+for setup and per-role profiling instructions.
+
 ### Experimental: OpenTelemetry double-write
 
 Tunix is evaluating [OpenTelemetry](https://opentelemetry.io/) as a

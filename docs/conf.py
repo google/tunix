@@ -34,6 +34,7 @@ exclude_patterns = [
     "_build",
     "Thumbs.db",
     ".DS_Store",
+    "ml_diagnostics.md",
     (
         "_collections/examples/model_load/from_safetensor_load/*"
         "_collections/examples/rl/README.md"
