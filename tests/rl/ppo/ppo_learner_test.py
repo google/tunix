@@ -447,6 +447,63 @@ class PPOLearnerTest(parameterized.TestCase):
           / cluster_config.training_config.eval_every_n_steps,
       )
 
+  def test_fractional_rewards_are_not_truncated(self):
+    scores = [0.75, -1.5]
+
+    def fractional_reward(prompts, **kargs):  # pylint: disable=unused-argument
+      return scores
+
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.CRITIC: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            critic_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=1,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+        ),
+    )
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=model,
+        critic=utils.create_critic_model(model),
+        reference=tc.ToyTransformer(
+            config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+            rngs=nnx.Rngs(0),
+        ),
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+    ppo_learner = ppo_lib.PPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=fractional_reward,
+        algo_config=ppo_lib.PPOConfig(beta=0.0, gamma=1.0, gae_lambda=1.0),
+    )
+
+    example = ppo_learner._generate_and_compute_advantage(
+        {'prompts': _DUMMY_DATA[:2], 'answer': _DUMMY_DATA[:2]}
+    )
+
+    # With gamma = gae_lambda = 1, the return at the first completion token is
+    # the sum of that row's rewards, which is just its score.
+    self.assertTrue(jnp.all(example.completion_mask[:, 0]))
+    chex.assert_trees_all_close(example.returns[:, 0], jnp.array(scores))
+
   @parameterized.named_parameters(
       dict(
           testcase_name='multi_iter_without_gradient_accumulation',
