@@ -18,9 +18,9 @@ import os
 import pathlib
 import re
 import subprocess
-import sys
 
 from absl.testing import absltest
+from tunix.dist_rl.launch.common import launcher_testing
 from tunix.dist_rl.launch.common import resolve_config
 import yaml
 
@@ -28,10 +28,6 @@ import yaml
 # (not this test file), since the OSS export moves tests under `tests/`.
 LAUNCH_DIR = pathlib.Path(resolve_config.__file__).parent
 LAUNCH_SH = LAUNCH_DIR / "launch.sh"
-RESOLVE_CONFIG_BIN = LAUNCH_DIR / "resolve_config"
-YAML_GEN_BIN = (
-    LAUNCH_DIR.parents[1] / "distributed" / "deployment" / "yaml_generator"
-)
 
 
 # Variables the drivers read from the caller's environment (not from
@@ -82,13 +78,7 @@ class LaunchScriptsTest(absltest.TestCase):
       args: list[str],
       extra_env: dict[str, str] | None = None,
   ) -> subprocess.CompletedProcess[str]:
-    env = dict(os.environ)
-    env["PYTHON_BIN"] = sys.executable or "python3"
-    if RESOLVE_CONFIG_BIN.is_file():
-      env["RESOLVE_CONFIG_BIN"] = str(RESOLVE_CONFIG_BIN)
-    if YAML_GEN_BIN.is_file():
-      env["YAML_GEN_BIN"] = str(YAML_GEN_BIN)
-    env["USER"] = "testuser"
+    env = launcher_testing.launcher_env()
     if extra_env:
       env.update(extra_env)
     return subprocess.run(
