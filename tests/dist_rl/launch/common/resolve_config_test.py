@@ -186,6 +186,56 @@ weight_sync_config:
           ["model_config.model_source=maxtext", "model_config.model_path="]
       )
 
+    # GRPO needs at least two generations per prompt.
+    with self.assertRaisesRegex(ValueError, "num_generations must be > 1"):
+      resolve_config.initialize(["agentic_grpo_config.num_generations=1"])
+
+  def test_orchestrator_choices_fail_loud(self):
+    hp = resolve_config.initialize([
+        "agentic_grpo_config.trajectory_group_order=prompt_arrival",
+        "weight_sync_config.mode=fallback",
+    ])
+    self.assertEqual(
+        hp.config["agentic_grpo_config"]["trajectory_group_order"],
+        "prompt_arrival",
+    )
+    self.assertEqual(hp.config["weight_sync_config"]["mode"], "fallback")
+    with self.assertRaisesRegex(
+        ValueError, "agentic_grpo_config.trajectory_group_order must be one of"
+    ):
+      resolve_config.initialize(
+          ["agentic_grpo_config.trajectory_group_order=random"]
+      )
+    with self.assertRaisesRegex(
+        ValueError, "weight_sync_config.mode must be one of"
+    ):
+      resolve_config.initialize(["weight_sync_config.mode=nccl"])
+
+  def test_null_sampler_is_resolves_to_none(self):
+    grpo = resolve_config.initialize([]).config["agentic_grpo_config"]
+    self.assertEqual(grpo["sampler_is"], "token")
+    # YAML null on a string key resolves to "" in `tunix.cli.config`.
+    grpo = resolve_config.initialize(
+        ["agentic_grpo_config.sampler_is=null"]
+    ).config["agentic_grpo_config"]
+    self.assertIsNone(grpo["sampler_is"])
+
+  def test_reward_fn_mode_requires_reward_functions(self):
+    # The base config scores with the environment rewards and sets no reward
+    # functions.
+    hp = resolve_config.initialize([])
+    self.assertEqual(hp.config["agentic_grpo_config"]["reward_mode"], "env")
+    self.assertEqual(hp.config["reward_functions"], [])
+    with self.assertRaisesRegex(ValueError, "needs at least one entry"):
+      resolve_config.initialize(["agentic_grpo_config.reward_mode=reward_fn"])
+    hp = resolve_config.initialize([
+        "agentic_grpo_config.reward_mode=reward_fn",
+        "reward_functions=['tunix/cli/reward_fn/gsm8k.py']",
+    ])
+    self.assertEqual(
+        hp.config["reward_functions"], ["tunix/cli/reward_fn/gsm8k.py"]
+    )
+
   def test_warmup_steps_derived_from_warmup_ratio(self):
     opt_key = "rl_training_config.actor_optimizer_config"
 

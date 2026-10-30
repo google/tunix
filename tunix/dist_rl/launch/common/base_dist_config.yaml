@@ -249,8 +249,10 @@ agentic_grpo_config:
 
 ############################# Reward Fns #############################
 verl_compatible: false
-reward_functions:
-  - tunix/cli/reward_fn/gsm8k.py
+# Orchestrator-side reward functions (`HyperParameters.obtain_reward_fn`).
+# `agentic_grpo_config.reward_mode: "reward_fn"` needs at least one; with
+# `"env"` they are added to the environment rewards.
+reward_functions: []
 
 ######################## Distributed RL Extensions ########################
 # Trainer/orchestrator knobs that are not part of the `tunix.cli` training
@@ -279,15 +281,15 @@ trajectory_store_config:
 
 cluster_config:
   target: "local"
-  # Shared orchestrator for every task; task-specific hooks come from
-  # `registry_module`.
-  orchestrator_main: "tunix.dist_rl.launch.common.orchestrator.main"
+  # Shared orchestrator for every task; the task comes from `data_module`,
+  # `reward_functions` and the rollout `env_class_path`/`agent_class_path`.
+  orchestrator_main: "tunix.dist_rl.launch.nodes.orchestrator.main"
   trainer_main: "tunix.dist_rl.launch.nodes.trainer.main"
   rollout_main: "tunix.dist_rl.launch.nodes.rollout.main"
   inference_main: "tunix.dist_rl.launch.nodes.inference.main"
-  # Example module (e.g. `examples/math_gsm8k_dist/gsm8k.py`): registers the
-  # example's environments and agents and implements the orchestrator's
-  # `TaskModule` hooks. Each example YAML sets its own value.
+  # Example module (e.g. `examples/math_gsm8k_dist/gsm8k.py`) that the rollout
+  # node imports to register the example's environments and agents. Each
+  # example YAML sets its own value.
   registry_module: "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
   # Relative paths are resolved against the repo root on `target: local` and
   # against the container working directory (repo root) on `target: k8s`.

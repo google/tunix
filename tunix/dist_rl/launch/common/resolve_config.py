@@ -39,6 +39,8 @@ from typing import Any, Final, TypedDict
 
 from tunix.cli import config as cli_config
 from tunix.common import datatypes as common_datatypes
+from tunix.dist_rl.queue_manager import trajectory_queue_manager
+from tunix.dist_rl.weight_sync import weight_sync
 
 LAUNCH_DIR = pathlib.Path(__file__).parent
 REPO_ROOT = LAUNCH_DIR.parents[3]
@@ -150,11 +152,15 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
           round(int(opt["decay_steps"]) * warmup_ratio, 9)
       )
 
-  grpo = hp.config_mapping("agentic_grpo_config")
+  grpo = _mutable_section(hp, "agentic_grpo_config")
   if cluster["run_inference_node"] is None:
     cluster["run_inference_node"] = (
         float(grpo["beta"]) > 0.0 and not cluster["inference_addr"]
     )
+  # String keys resolve YAML null to "" (`tunix.cli.config`), while
+  # `GRPOConfig` spells "no sampler importance correction" as None.
+  if grpo["sampler_is"] == "":
+    grpo["sampler_is"] = None
 
   k8s = cluster["k8s"]
   if isinstance(k8s, MutableMapping):
@@ -239,21 +245,46 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
       _CHAT_PARSER_TYPES,
   )
   grpo = hp.config_mapping("agentic_grpo_config")
-  for key, value in (
-      ("agentic_grpo_config.num_generations", grpo["num_generations"]),
-      (
-          "rl_training_config.train_micro_batch_size",
-          rl_train["train_micro_batch_size"],
-      ),
-  ):
-    if int(value) <= 0:
-      raise ValueError(f"{key} must be > 0, got {value}.")
+  # TODO(noghabi): Move `GroupOrder` into a dependency-free module (e.g. under
+  # `dist_rl/common/`) so the resolver doesn't depend on `queue_manager`, and
+  # through it on flax and the agentic types. (`weight_sync.py` has no deps.)
+  _check_choice(
+      "agentic_grpo_config.trajectory_group_order",
+      grpo["trajectory_group_order"],
+      tuple(order.value for order in trajectory_queue_manager.GroupOrder),
+  )
+  _check_choice(
+      "weight_sync_config.mode",
+      hp.config_mapping("weight_sync_config")["mode"],
+      tuple(mode.value for mode in weight_sync.WeightSyncMode),
+  )
+  if grpo["reward_mode"] == "reward_fn" and not hp.config["reward_functions"]:
+    raise ValueError(
+        "agentic_grpo_config.reward_mode='reward_fn' needs at least one entry"
+        " in reward_functions; use reward_mode='env' to score with the"
+        " environment rewards."
+    )
+  # TODO(noghabi): Check `cluster_config.rpc_timeout_s` against the weight-sync
+  # phase timeouts here (now done by the orchestrator at startup) once
+  # `PhaseTimeouts` moves out of `weight_sync_coordinator`, which imports gRPC
+  # and Raiden, into `dist_rl/common/timeouts.py`.
+  num_generations = int(grpo["num_generations"])
+  if num_generations <= 1:
+    raise ValueError(
+        "agentic_grpo_config.num_generations must be > 1 for GRPO, got"
+        f" {num_generations}."
+    )
+  micro_batch = int(rl_train["train_micro_batch_size"])
+  if micro_batch <= 0:
+    raise ValueError(
+        "rl_training_config.train_micro_batch_size must be > 0, got"
+        f" {micro_batch}."
+    )
   # `train_micro_batch_size` counts trajectories in the distributed trainer:
   # gradient accumulation = mini_batch_size * num_generations /
   # train_micro_batch_size (not applicable with sequence packing).
   if not rl_train["max_seq_token_per_tpu"]:
-    trajectories = mini_batch_size * int(grpo["num_generations"])
-    micro_batch = int(rl_train["train_micro_batch_size"])
+    trajectories = mini_batch_size * num_generations
     if trajectories % micro_batch != 0:
       raise ValueError(
           "rl_training_config.mini_batch_size *"
