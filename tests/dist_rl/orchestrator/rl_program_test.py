@@ -35,6 +35,7 @@ from tunix.dist_rl.orchestrator import distributed_rl_engine
 from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.orchestrator import step_telemetry
 from tunix.dist_rl.orchestrator import worker_registry
+from tunix.dist_rl.testing import worker_registry_testing
 from tunix.dist_rl.trajectory import in_memory_store
 from tunix.dist_rl.worker import inference_worker as exp_inference_worker
 from tunix.dist_rl.worker import remote_execution
@@ -250,6 +251,10 @@ def _make_engine(
     registry.register_handle(f"trainer-{role}", [role], handle)
   for role, handle in (inference_workers or {}).items():
     registry.register_handle(f"inference-{role}", [role], handle)
+  for wid in registry.worker_ids():
+    worker_registry_testing.set_status(
+        registry, wid, worker_registry.AdmissionStatus.ACTIVE
+    )
   return distributed_rl_engine.DistributedRLEngine(
       registry=registry,
       weight_sync_coordinator=weight_sync_coordinator,

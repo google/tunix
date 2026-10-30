@@ -122,20 +122,25 @@ weight sync begins once workers are up and serving.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 import dataclasses
 import enum
 import functools
 import os
 import threading
 import time
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, TYPE_CHECKING
 
 from absl import logging
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import timeouts as timeouts_lib
-from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.worker import remote_execution
+
+if TYPE_CHECKING:
+  # Type-only: rollout workers import this module and must not import the
+  # orchestrator at runtime (packaged `tunix.dist_rl.worker` would cycle).
+  from tunix.dist_rl.orchestrator import worker_registry  # pylint: disable=g-bad-import-order,g-import-not-at-top
 
 _SOURCE_RELEASE_MAX_ATTEMPTS = 3
 _SOURCE_RELEASE_RETRY_BACKOFF_S = 0.05
@@ -520,10 +525,14 @@ class WorkerRoundReport:
   `phase` is the worker's last known self-reported phase ("unknown" when the
   worker could not be reached at all). Version consistency and health are
   separate axes: a worker can hold the old weights and still be down.
+  `handle` records the exact `ActorHandle` that participated in this round so
+  callers promoting `PENDING_WEIGHT_SYNC` workers can guard against ABA handle
+  re-registration.
   """
 
   worker_id: str
   phase: str
+  handle: remote_execution.ActorHandle
   error: str = ""
   needs_restart: bool = False
 
@@ -642,20 +651,26 @@ class WeightSyncCoordinator:
 
   # ---------------------------------------------------------------- lookup
 
-  def _members(self, role: str) -> list[_Participant]:
-    infos = self._registry.infos(role)
-    if not infos:
+  def _members(
+      self,
+      role: str,
+      *,
+      statuses: Collection[datatypes.AdmissionStatus] = (
+          datatypes.AdmissionStatus.ACTIVE,
+      ),
+  ) -> list[_Participant]:
+    targets = self._registry.targets(role, statuses=statuses)
+    if not targets:
       raise ValueError(f"no workers registered for role {role!r}")
-    return [
-        (info.worker_id, self._registry.handle(info.worker_id))
-        for info in infos
-    ]
+    return [(info.worker_id, handle) for info, handle in targets]
 
   def _sources(self) -> list[_Participant]:
     return self._members(self._source_role)
 
-  def _destinations(self) -> list[_Participant]:
-    return self._members(self._destination_role)
+  def _destinations(
+      self, statuses: Collection[datatypes.AdmissionStatus]
+  ) -> list[_Participant]:
+    return self._members(self._destination_role, statuses=statuses)
 
   # ---------------------------------------------------------------- request
 
@@ -789,6 +804,10 @@ class WeightSyncCoordinator:
   async def sync(
       self,
       policy_version: int = 0,
+      *,
+      destination_statuses: Collection[datatypes.AdmissionStatus] = (
+          datatypes.AdmissionStatus.ACTIVE,
+      ),
       **extra_config,
   ) -> WeightSyncResult:
     """Runs one full round; returns only if it committed.
@@ -801,6 +820,8 @@ class WeightSyncCoordinator:
       policy_version: Version of the weights being pushed. Must not regress
         below the last committed version; pushing the same version again is
         allowed (it is how a failed round is retried).
+      destination_statuses: `AdmissionStatus` values of the destination workers
+        to include. Defaults to `(ACTIVE,)`.
       **extra_config: Carried to the workers in the request.
     """
     if self._poisoned:
@@ -824,7 +845,11 @@ class WeightSyncCoordinator:
     self._in_flight = True
     start_time = time.monotonic()
     try:
-      return await self._run_round(policy_version, extra_config)
+      return await self._run_round(
+          policy_version,
+          extra_config,
+          destination_statuses=destination_statuses,
+      )
     finally:
       elapsed_time = time.monotonic() - start_time
       logging.info("Weight sync finished in %.2f seconds.", elapsed_time)
@@ -834,6 +859,8 @@ class WeightSyncCoordinator:
       self,
       policy_version: int,
       extra_config: dict[str, Any],
+      *,
+      destination_statuses: Collection[datatypes.AdmissionStatus],
   ) -> WeightSyncResult:
     round_index = self._round_index
     self._round_index += 1
@@ -842,7 +869,7 @@ class WeightSyncCoordinator:
     req_id = f"{self._req_id_prefix}-v{policy_version}-r{round_index}"
 
     sources = self._sources()
-    destinations = self._destinations()
+    destinations = self._destinations(destination_statuses)
 
     state = RoundState.PREPARING
     transfer: Optional[weight_sync.TransferResult] = None
@@ -886,7 +913,7 @@ class WeightSyncCoordinator:
 
     async def record_workers(final_error: str = "") -> None:
       for destination in destinations:
-        wid = destination[0]
+        wid, handle = destination
         if wid in worker_reports:
           continue
         phase = await self._worker_phase(
@@ -897,6 +924,7 @@ class WeightSyncCoordinator:
             phase=phase or "unknown",
             error=final_error if phase is None else "",
             needs_restart=phase is None and quiesce_attempted,
+            handle=handle,
         )
 
     request = self.build_request(
@@ -1216,9 +1244,10 @@ class WeightSyncCoordinator:
 
       state = RoundState.COMMITTED
       self._last_committed_version = policy_version
-      for wid, _ in destinations:
+      for wid, handle in destinations:
         worker_reports.setdefault(
-            wid, WorkerRoundReport(worker_id=wid, phase="committed")
+            wid,
+            WorkerRoundReport(worker_id=wid, phase="committed", handle=handle),
         )
       return result()
 
@@ -1490,7 +1519,7 @@ class WeightSyncCoordinator:
     unknown: list[_Participant] = []
     for destination, error in failed_posts:
       phase = await self._worker_phase(destination, request)
-      wid = destination[0]
+      wid, handle = destination
       if phase == "committed":
         # The RPC failed but the worker finished publishing between
         # _call_phase's reconciliation poll and this one -- a timed-out post
@@ -1511,7 +1540,7 @@ class WeightSyncCoordinator:
             f"{wid}: post_weight_sync: {error!r} (worker aborted the round)"
         )
         worker_reports[wid] = WorkerRoundReport(
-            worker_id=wid, phase="aborted", error=repr(error)
+            worker_id=wid, phase="aborted", error=repr(error), handle=handle
         )
       else:
         unknown.append(destination)
@@ -1521,6 +1550,7 @@ class WeightSyncCoordinator:
             phase=phase or "unknown",
             error=repr(error),
             needs_restart=True,
+            handle=handle,
         )
 
     still_failed: list[_Participant] = []
@@ -1539,7 +1569,7 @@ class WeightSyncCoordinator:
       )
       for destination, error in retry_results:
         if error is not None:
-          wid = destination[0]
+          wid, handle = destination
           # Classify by the worker's CURRENT report, not the pre-retry one:
           # the same late-completion and out-of-band-abort races apply here,
           # and so does the unknown rule -- a worker that was h2d_done before
@@ -1555,7 +1585,7 @@ class WeightSyncCoordinator:
                 f"{wid}: post_weight_sync retry: {error!r} (worker aborted)"
             )
             worker_reports[wid] = WorkerRoundReport(
-                worker_id=wid, phase="aborted", error=repr(error)
+                worker_id=wid, phase="aborted", error=repr(error), handle=handle
             )
             continue
           if phase == "h2d_done":
@@ -1566,6 +1596,7 @@ class WeightSyncCoordinator:
                 phase="h2d_done",
                 error=repr(error),
                 needs_restart=True,
+                handle=handle,
             )
             continue
           unknown.append(destination)
@@ -1578,6 +1609,7 @@ class WeightSyncCoordinator:
               phase=phase or "unknown",
               error=repr(error),
               needs_restart=True,
+              handle=handle,
           )
 
     if not unknown and not still_failed and not rolled_back:
@@ -1604,13 +1636,14 @@ class WeightSyncCoordinator:
         phase_name = (
             "aborted" if rollback_state is RoundState.ABORTED else "committed"
         )
-        for wid, _ in to_abort:
+        for wid, handle in to_abort:
           previous = worker_reports.get(wid)
           worker_reports[wid] = WorkerRoundReport(
               worker_id=wid,
               phase=phase_name,
               error=previous.error if previous else "",
               needs_restart=False,
+              handle=handle,
           )
       return rollback_state
     return RoundState.PARTIALLY_COMMITTED

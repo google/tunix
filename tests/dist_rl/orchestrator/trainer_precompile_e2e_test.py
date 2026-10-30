@@ -41,6 +41,7 @@ from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import distributed_rl_engine
 from tunix.dist_rl.orchestrator import worker_registry
+from tunix.dist_rl.testing import worker_registry_testing
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import trainer_worker
@@ -327,6 +328,9 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
     )
     registry = worker_registry.WorkerRegistry()
     registry.register_handle("trainer-0", [datatypes.Role.ACTOR], handle)
+    worker_registry_testing.set_status(
+        registry, "trainer-0", worker_registry.AdmissionStatus.ACTIVE
+    )
     engine = distributed_rl_engine.DistributedRLEngine(registry=registry)
     handle.submit("initialize")
     handle.submit("compile", None)
