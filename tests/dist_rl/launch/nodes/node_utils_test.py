@@ -130,6 +130,18 @@ class WorkerIdAndPortTest(absltest.TestCase):
     self.assertEqual(node_utils.service_port(hp, "inference"), 20002)
 
 
+class OptionalBoolTest(absltest.TestCase):
+
+  def test_absent_or_null_key_is_none(self):
+    self.assertIsNone(node_utils.optional_bool({}, "flag"))
+    self.assertIsNone(node_utils.optional_bool({"flag": None}, "flag"))
+
+  def test_set_key_is_bool(self):
+    self.assertIs(node_utils.optional_bool({"flag": True}, "flag"), True)
+    self.assertIs(node_utils.optional_bool({"flag": False}, "flag"), False)
+    self.assertIs(node_utils.optional_bool({"flag": 1}, "flag"), True)
+
+
 class ServeWorkerTest(absltest.TestCase):
 
   def setUp(self):

@@ -173,7 +173,9 @@ rollout_engine: "inprocess_vllm"
 sglang_jax_config: {}
 vllm_config:
   model_version: ""
-  hbm_utilization: 0.5
+  # null: `rollout_engine: vllm` defers to vLLM's native default
+  # (`gpu_memory_utilization` is not set); `inprocess_vllm` uses 0.5.
+  hbm_utilization: null
   tpu_backend_type: "jax"
   init_with_random_weights: true
   enable_prefix_caching: false
@@ -204,6 +206,10 @@ vllm_config:
   # Free-form vLLM engine arguments (`VLLM_ADDITIONAL_CONFIG_JSON`). The typed
   # keys above are rejected here.
   kwargs: {}
+  # Extra `vllm.AsyncEngineArgs` kwargs, for `rollout_engine: vllm` only. Keys
+  # owned by other config fields are rejected; `additional_config` (and its
+  # `maxtext_config`) is deep-merged onto what the rollout node builds.
+  engine_kwargs: {}
 
 offload_to_cpu: false
 

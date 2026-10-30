@@ -28,7 +28,7 @@ import pathlib
 import pickle
 import signal
 import sys
-from typing import Literal, Protocol, cast
+from typing import Literal, TypeAlias, cast
 
 import jax
 from jax.experimental import mesh_utils
@@ -45,16 +45,9 @@ NodeRole = Literal["trainer", "rollout", "inference"]
 MESH_AXIS_NAMES = ("fsdp", "tp")
 
 
-class HfTokenizer(Protocol):
-  """The Hugging Face tokenizer surface the rollout/inference nodes use."""
-
-  pad_token_id: int | None
-  eos_token_id: int | None
-  pad_token: str | None
-  eos_token: str | None
-
-  def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
-    ...
+# The Hugging Face tokenizer the nodes load: the type the rollout samplers
+# (`VanillaSampler`, `InprocessVllmSampler`) take.
+HfTokenizer: TypeAlias = transformers.PreTrainedTokenizerBase
 
 
 def ensure_repo_root_on_path() -> None:
@@ -172,6 +165,22 @@ def worker_id(
 def service_port(hp: resolve_config.DistHyperParameters, role: NodeRole) -> int:
   """Returns `cluster_config.ports.<role>`, the node's gRPC port."""
   return int(hp.config_mapping("cluster_config")["ports"][role])
+
+
+def optional_bool(mapping: Mapping[str, object], key: str) -> bool | None:
+  """Returns `mapping[key]` as bool, or None when the key is absent or null.
+
+  For optional keys of open-ended config sections (e.g.
+  `rollout_model_config.kwargs`), where an unset key keeps the consumer's own
+  default.
+
+  Args:
+    mapping: Open-ended config section.
+    key: Optional key to read.
+  """
+  if key in mapping and mapping[key] is not None:
+    return bool(mapping[key])
+  return None
 
 
 async def serve_worker(
