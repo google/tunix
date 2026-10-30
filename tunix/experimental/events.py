@@ -606,7 +606,10 @@ def _parallel(fn: Callable[[Any], Any], items: list[Any], timeout: float | None,
 
   Daemon threads rather than concurrent.futures: the orchestrator builds its
   manifest from atexit, after concurrent.futures refuses new work, and a read
-  that hangs must not hold the interpreter's exit.
+  that hangs must not hold the interpreter's exit. Python 3.12 also refuses
+  new threads once the interpreter is shutting down; then the reads run in the
+  calling thread (the writer thread, itself bounded by the exit join) and stop
+  taking new items at the deadline.
   """
   results: list[Any] = [None] * len(items)
   nxt = [0]
@@ -614,8 +617,12 @@ def _parallel(fn: Callable[[Any], Any], items: list[Any], timeout: float | None,
   done = threading.Event()
   left = [len(items)]
 
+  deadline = None if timeout is None else time.monotonic() + timeout
+
   def work():
     while True:
+      if deadline is not None and time.monotonic() >= deadline:
+        return
       with lock:
         i = nxt[0]
         nxt[0] += 1
@@ -632,9 +639,18 @@ def _parallel(fn: Callable[[Any], Any], items: list[Any], timeout: float | None,
           done.set()
   if not items:
     return results
+  started = 0
   for _ in range(min(workers, len(items))):
-    threading.Thread(target=work, name="tunix-events-read", daemon=True).start()
-  done.wait(timeout)
+    try:
+      threading.Thread(target=work, name="tunix-events-read",
+                       daemon=True).start()
+      started += 1
+    except RuntimeError:  # can't create new thread at interpreter shutdown
+      break
+  if started == 0:
+    work()
+  else:
+    done.wait(timeout)
   with lock:
     return list(results)
 
