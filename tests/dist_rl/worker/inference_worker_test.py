@@ -33,15 +33,48 @@ class _StubCore:
     self.calls = 0
     self.last_prompt_tokens = None
     self.last_completion_tokens = None
+    self.last_segment_ids = None
+    self.last_segment_positions = None
+    self.chunk_shapes = []
 
   def get_ref_per_token_logps(
-      self, prompt_tokens, completion_tokens, pad_id, eos_id, temperature=1.0
+      self,
+      prompt_tokens,
+      completion_tokens,
+      pad_id,
+      eos_id,
+      temperature=1.0,
+      segment_ids=None,
+      segment_positions=None,
   ):
     del pad_id, eos_id
     self.calls += 1
     self.last_prompt_tokens = np.asarray(prompt_tokens, dtype=np.int32)
     self.last_completion_tokens = np.asarray(completion_tokens, dtype=np.int32)
-    return jnp.asarray(completion_tokens, dtype=jnp.float32) * temperature
+    self.last_segment_ids = (
+        None if segment_ids is None else np.asarray(segment_ids, dtype=np.int32)
+    )
+    self.last_segment_positions = (
+        None
+        if segment_positions is None
+        else np.asarray(segment_positions, dtype=np.int32)
+    )
+    self.chunk_shapes.append((
+        self.last_prompt_tokens.shape,
+        self.last_completion_tokens.shape,
+        None if self.last_segment_ids is None else self.last_segment_ids.shape,
+        None
+        if self.last_segment_positions is None
+        else self.last_segment_positions.shape,
+    ))
+    offset = (
+        0.0
+        if segment_positions is None
+        else jnp.asarray(segment_positions, dtype=jnp.float32) * 0.1
+    )
+    return (
+        jnp.asarray(completion_tokens, dtype=jnp.float32) * temperature + offset
+    )
 
   def get_rewards(self, prompt_tokens, completion_tokens, pad_id, eos_id):
     del prompt_tokens, pad_id, eos_id
@@ -126,6 +159,79 @@ class InferenceWorkerTest(absltest.TestCase):
     np.testing.assert_allclose(
         result, batch.completion_ids.astype(np.float32) * 2.0
     )
+    self.assertIsNone(core.last_segment_ids)
+    self.assertIsNone(core.last_segment_positions)
+
+  def test_per_token_logps_forwards_sequence_packing_segment_metadata(self):
+    core = _StubCore()
+    batch = datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((2, 0), dtype=np.int32),
+        prompt_mask=np.zeros((2, 0), dtype=np.float32),
+        completion_ids=np.array(
+            [[3, 4, 5, 6, 7, 8], [9, 10, 11, 0, 0, 0]], dtype=np.int32
+        ),
+        completion_mask=np.array(
+            [[0, 1, 1, 0, 1, 1], [0, 1, 1, 0, 0, 0]], dtype=np.float32
+        ),
+        advantages=np.ones((2, 6), dtype=np.float32),
+        segment_ids=np.array(
+            [[1, 1, 1, 2, 2, 2], [1, 1, 1, 0, 0, 0]], dtype=np.int32
+        ),
+        segment_positions=np.array(
+            [[0, 1, 2, 0, 1, 2], [0, 1, 2, 0, 0, 0]], dtype=np.int32
+        ),
+    )
+
+    result = _worker(core).per_token_logps(batch, temperature=1.5)
+
+    self.assertEqual(core.last_prompt_tokens.shape, (2, 0))
+    np.testing.assert_array_equal(
+        core.last_completion_tokens, batch.completion_ids
+    )
+    np.testing.assert_array_equal(core.last_segment_ids, batch.segment_ids)
+    np.testing.assert_array_equal(
+        core.last_segment_positions, batch.segment_positions
+    )
+    expected = (
+        batch.completion_ids.astype(np.float32) * 1.5
+        + batch.segment_positions.astype(np.float32) * 0.1
+    )
+    np.testing.assert_allclose(result, expected)
+
+  def test_compute_logps_chunks_segment_metadata_along_batch_axis(self):
+    segment_ids = np.tile(np.array([[1, 1, 2]], dtype=np.int32), (6, 1))
+    segment_positions = np.tile(np.array([[0, 1, 0]], dtype=np.int32), (6, 1))
+    req = _logprobs_request(
+        batch=6,
+        prompt_tokens=np.zeros((6, 0), dtype=np.int32),
+        segment_ids=segment_ids,
+        segment_positions=segment_positions,
+    )
+
+    core_single = _StubCore()
+    single = _worker(core_single).compute_logps(req)
+
+    core_chunked = _StubCore()
+    chunked = _worker(core_chunked, chunk_size=2).compute_logps(req)
+
+    np.testing.assert_allclose(single.per_token_logps, chunked.per_token_logps)
+    self.assertEqual(core_single.calls, 1)
+    self.assertEqual(core_chunked.calls, 3)
+    self.assertEqual(
+        core_chunked.chunk_shapes,
+        [((2, 0), (2, 3), (2, 3), (2, 3))] * 3,
+    )
+
+  def test_compute_logps_rejects_half_specified_segment_metadata(self):
+    req = _logprobs_request(
+        batch=2,
+        segment_ids=np.ones((2, 3), dtype=np.int32),
+        segment_positions=None,
+    )
+    result = _worker().compute_logps(req)
+    self.assertIsNotNone(result.error)
+    self.assertEqual(result.error.error_type, "ValueError")
+    self.assertIn("segment_ids and segment_positions", result.error.message)
 
   def test_per_token_logps_rejects_unpadded_trajectory_items(self):
     item = datatypes.TrajectoryItem(

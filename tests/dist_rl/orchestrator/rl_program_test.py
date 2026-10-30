@@ -3219,115 +3219,113 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  async def _run_toy_reference_kl_program(
+      self,
+      *,
+      train_micro_batch_size: int,
+      max_packed_len: int,
+      batch_config: batch_assembly.BatchConfig,
+  ):
+    config = test_common.ModelConfig(vocab_size=32, num_layers=2)
+    actor_model = test_common.ToyTransformer(config=config, rngs=nnx.Rngs(42))
+    ref_model = test_common.ToyTransformer(config=config, rngs=nnx.Rngs(42))
+
+    ref_worker = exp_inference_worker.InferenceWorker(
+        rl_inference_worker.InferenceWorker({"reference": ref_model}),
+        worker_id="ref_0",
+        pad_id=0,
+        eos_id=2,
+        max_prompt_length=4,
+        max_response_length=4,
+        temperature=1.0,
+    )
+    ref_worker.initialize()
+    ref_worker.start()
+
+    algo_config = algorithm_config.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        beta=0.04,
+        kl_loss_mode="low_var_kl",
+        use_rollout_logps=False,
+        reward_mode="env",
+    )
+    algo = algorithm_adapter.GRPOAdapter(
+        algo_config=algo_config,
+        mini_batch_size=1,
+        train_micro_batch_size=train_micro_batch_size,
+        max_packed_len=max_packed_len,
+        max_response_length=4,
+    )
+
+    async def _score_ref(role, items, temperature=None):
+      self.assertEqual(role, datatypes.Role.REFERENCE)
+      return ref_worker.per_token_logps(items, temperature=temperature)
+
+    trained_batches: list[datatypes.RLTrainerPayload] = []
+
+    async def _capture_train_step(batch, **kwargs):
+      del kwargs
+      trained_batches.append(batch)
+      return "step_done"
+
+    self.mock_engine.per_token_logps = mock.AsyncMock(side_effect=_score_ref)
+    self.mock_engine.train_step = mock.AsyncMock(
+        side_effect=_capture_train_step
+    )
+    group = [
+        datatypes.TrajectoryItem(
+            prompt_id="prompt_0",
+            group_index=idx,
+            start_step=0,
+            traj={
+                "trajectory_reward": reward,
+                "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                "prompt_tokens": np.array([3, 4], dtype=np.int32),
+                "conversation_tokens": np.array(comp_tokens, dtype=np.int32),
+                "conversation_masks": np.ones(3, dtype=np.float32),
+                "conversation_text": [
+                    {"role": "user", "content": "question"},
+                    {"role": "assistant", "content": "answer"},
+                ],
+            },
+            prompt_tokens=np.array([3, 4], dtype=np.int32),
+            completion_tokens=np.array(comp_tokens, dtype=np.int32),
+            action_mask=np.ones(3, dtype=np.float32),
+            policy_version=0,
+        )
+        for idx, (reward, comp_tokens) in enumerate(
+            [(1.0, [5, 6, 7]), (0.0, [8, 9, 10])]
+        )
+    ]
+    _set_mock_poll_batches(self.mock_engine, group)
+
+    program = rl_program.StandardRLProgram(
+        algo=algo,
+        dataset=["prompt_0"],
+        max_steps=1,
+        generation_args=datatypes.GenerationArgs(temperature=0.7),
+        batch_size=1,
+        batch_config=batch_config,
+        sync_weights=False,
+    )
+    await program.run_async(self.mock_engine)
+    program.close()
+    return trained_batches, algo, actor_model, ref_worker
+
   def test_reference_kl_logprobs_temperature_matches_actor_kl_term(self):
     async def _run():
-      config = test_common.ModelConfig(vocab_size=32, num_layers=2)
-      actor_model = test_common.ToyTransformer(config=config, rngs=nnx.Rngs(42))
-      ref_model = test_common.ToyTransformer(config=config, rngs=nnx.Rngs(42))
-
-      ref_worker = exp_inference_worker.InferenceWorker(
-          rl_inference_worker.InferenceWorker({"reference": ref_model}),
-          worker_id="ref_0",
-          pad_id=0,
-          eos_id=2,
-          max_prompt_length=4,
-          max_response_length=4,
-          temperature=1.0,
+      trained_batches, algo, actor_model, ref_worker = (
+          await self._run_toy_reference_kl_program(
+              train_micro_batch_size=2,
+              max_packed_len=8,
+              batch_config=batch_assembly.BatchConfig(
+                  pad_id=0,
+                  max_prompt_length=4,
+                  max_response_length=4,
+              ),
+          )
       )
-      ref_worker.initialize()
-      ref_worker.start()
-
-      algo_config = algorithm_config.GRPOConfig(
-          num_generations=2,
-          num_iterations=1,
-          beta=0.04,
-          kl_loss_mode="low_var_kl",
-          use_rollout_logps=False,
-          reward_mode="env",
-      )
-      algo = algorithm_adapter.GRPOAdapter(
-          algo_config=algo_config,
-          mini_batch_size=1,
-          train_micro_batch_size=2,
-          max_packed_len=8,
-          max_response_length=4,
-      )
-
-      async def _score_ref(role, items, temperature=None):
-        self.assertEqual(role, datatypes.Role.REFERENCE)
-        return ref_worker.per_token_logps(items, temperature=temperature)
-
-      trained_batches: list[datatypes.RLTrainerPayload] = []
-
-      async def _capture_train_step(batch, **kwargs):
-        del kwargs
-        trained_batches.append(batch)
-        return "step_done"
-
-      self.mock_engine.per_token_logps = mock.AsyncMock(side_effect=_score_ref)
-      self.mock_engine.train_step = mock.AsyncMock(
-          side_effect=_capture_train_step
-      )
-      group = [
-          datatypes.TrajectoryItem(
-              prompt_id="prompt_0",
-              group_index=0,
-              start_step=0,
-              traj={
-                  "trajectory_reward": 1.0,
-                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
-                  "prompt_tokens": np.array([3, 4], dtype=np.int32),
-                  "conversation_tokens": np.array([5, 6, 7], dtype=np.int32),
-                  "conversation_masks": np.ones(3, dtype=np.float32),
-                  "conversation_text": [
-                      {"role": "user", "content": "question"},
-                      {"role": "assistant", "content": "answer"},
-                  ],
-              },
-              prompt_tokens=np.array([3, 4], dtype=np.int32),
-              completion_tokens=np.array([5, 6, 7], dtype=np.int32),
-              action_mask=np.ones(3, dtype=np.float32),
-              policy_version=0,
-          ),
-          datatypes.TrajectoryItem(
-              prompt_id="prompt_0",
-              group_index=1,
-              start_step=0,
-              traj={
-                  "trajectory_reward": 0.0,
-                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
-                  "prompt_tokens": np.array([3, 4], dtype=np.int32),
-                  "conversation_tokens": np.array([8, 9, 10], dtype=np.int32),
-                  "conversation_masks": np.ones(3, dtype=np.float32),
-                  "conversation_text": [
-                      {"role": "user", "content": "question"},
-                      {"role": "assistant", "content": "answer"},
-                  ],
-              },
-              prompt_tokens=np.array([3, 4], dtype=np.int32),
-              completion_tokens=np.array([8, 9, 10], dtype=np.int32),
-              action_mask=np.ones(3, dtype=np.float32),
-              policy_version=0,
-          ),
-      ]
-      _set_mock_poll_batches(self.mock_engine, group)
-
-      program = rl_program.StandardRLProgram(
-          algo=algo,
-          dataset=["prompt_0"],
-          max_steps=1,
-          generation_args=datatypes.GenerationArgs(temperature=0.7),
-          batch_size=1,
-          batch_config=batch_assembly.BatchConfig(
-              pad_id=0,
-              max_prompt_length=4,
-              max_response_length=4,
-          ),
-          sync_weights=False,
-      )
-      await program.run_async(self.mock_engine)
-      program.close()
-
       self.assertLen(trained_batches, 1)
       loss_fn = algo.loss_fn()
       gen_input_fn = algo.build_gen_model_input_fn(pad_id=0, eos_id=2)
@@ -3354,6 +3352,77 @@ class RLProgramTest(absltest.TestCase):
       loss_out_unmatched = loss_fn(actor_model, **gen_input_fn(unmatched_batch))
       kl_unmatched = float(loss_out_unmatched.aux_metrics["kl"].compute())
       self.assertGreater(kl_unmatched, 1e-2)
+
+    asyncio.run(_run())
+
+  def test_reference_kl_logprobs_sequence_packed_matches_actor_kl_term(self):
+    async def _run():
+      trained_batches, algo, actor_model, _ = (
+          await self._run_toy_reference_kl_program(
+              train_micro_batch_size=1,
+              max_packed_len=12,
+              batch_config=batch_assembly.BatchConfig(
+                  pad_id=0,
+                  max_seq_token_per_tpu=12,
+                  max_prompt_length=4,
+                  max_response_length=4,
+              ),
+          )
+      )
+      self.assertLen(trained_batches, 1)
+      packed_batch = trained_batches[0]
+      self.assertEqual(packed_batch.prompt_ids.shape, (1, 0))
+      self.assertEqual(packed_batch.completion_ids.shape, (1, 12))
+      self.assertIsNotNone(packed_batch.segment_ids)
+      self.assertIsNotNone(packed_batch.segment_positions)
+      # Both trajectories (5 tokens each) pack into row 0 as segments 1 and 2.
+      self.assertIn(1, packed_batch.segment_ids[0])
+      self.assertIn(2, packed_batch.segment_ids[0])
+
+      loss_fn = algo.loss_fn()
+      gen_input_fn = algo.build_gen_model_input_fn(pad_id=0, eos_id=2)
+      loss_out_matched = loss_fn(actor_model, **gen_input_fn(packed_batch))
+      kl_matched = float(loss_out_matched.aux_metrics["kl"].compute())
+      kl_loss_matched = float(loss_out_matched.aux_metrics["kl_loss"].compute())
+      self.assertAlmostEqual(kl_matched, 0.0, places=5)
+      self.assertAlmostEqual(kl_loss_matched, 0.0, places=5)
+
+    asyncio.run(_run())
+
+  def test_critique_stage_offloads_create_trainer_payloads_to_worker_thread(
+      self,
+  ):
+    async def _run():
+      loop_thread_id = threading.get_ident()
+      payload_thread_ids: list[int] = []
+      orig_create = self.mock_algo.create_trainer_payloads.side_effect
+
+      def _recording_create_payloads(group, rewards=None, **kwargs):
+        del rewards, kwargs
+        payload_thread_ids.append(threading.get_ident())
+        return [
+            datatypes.RLTrainerPayload(
+                prompt_ids=np.array([1, 2], dtype=np.int32),
+                prompt_mask=np.ones(2, dtype=np.float32),
+                completion_ids=np.array([3, 4], dtype=np.int32),
+                completion_mask=np.ones(2, dtype=np.float32),
+                advantages=np.ones(2, dtype=np.float32),
+            )
+            for _ in group
+        ]
+
+      self.mock_algo.create_trainer_payloads = mock.MagicMock(
+          side_effect=_recording_create_payloads
+      )
+      try:
+        _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+        program = self._create_program(dataset=["prompt_0"])
+        await program.run_async(self.mock_engine)
+      finally:
+        self.mock_algo.create_trainer_payloads.side_effect = orig_create
+
+      self.assertLen(payload_thread_ids, 1)
+      self.assertNotEqual(payload_thread_ids[0], loop_thread_id)
 
     asyncio.run(_run())
 

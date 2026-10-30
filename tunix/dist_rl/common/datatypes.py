@@ -618,10 +618,9 @@ class LogprobsRequest(Request):
     pad_id: Pad token id. Used by the trainer/actor scoring path; the reference
       path leaves it unset and relies on the worker's own id.
     eos_id: End-of-sequence token id, used by the trainer/actor scoring path.
-    segment_ids: Optional packing segment ids (sequence packing); trainer path
-      only.
+    segment_ids: Optional packing segment ids (sequence packing).
     segment_positions: Optional packing local position indices (sequence
-      packing); trainer path only.
+      packing).
     routed_experts: Optional MoE expert ids captured during rollout, laid out
       like `RLTrainerPayload.routed_experts` (`4D` `int16` `[B, P + C,
       num_layers, top_k]` with `-1` unset, `4D` `+1`-shifted `uint8` `[B, P + C,

@@ -299,10 +299,13 @@ class GRPOAdapter(AlgorithmAdapter):
     ):
       valid_mask[:] = False
 
-    advs = self.compute_advantages(
-        rewards,
-        num_generations=self.num_generations,
-        valid_mask=valid_mask,
+    advs = np.asarray(
+        self.compute_advantages(
+            rewards,
+            num_generations=self.num_generations,
+            valid_mask=valid_mask,
+        ),
+        dtype=np.float32,
     )
     payloads = []
 
@@ -447,7 +450,9 @@ class PPOAdapter(AlgorithmAdapter):
   ) -> list[datatypes.RLTrainerPayload]:
     """Builds unbatched RLTrainerPayloads with GAE advantages, value targets, and old_logprobs."""
     del kwargs
-    advs, val_targets = self.compute_advantages(rewards, values=values)
+    advs_jax, val_targets_jax = self.compute_advantages(rewards, values=values)
+    advs = np.asarray(advs_jax, dtype=np.float32)
+    val_targets = np.asarray(val_targets_jax, dtype=np.float32)
     payloads = []
     trajectories = getattr(group, "trajectories", None) or (
         group if isinstance(group, (list, tuple)) else [group]

@@ -768,6 +768,91 @@ class StandardRLProgram(RLProgram):
     ]
     return rewards, log_metrics
 
+  def _build_scored_item(
+      self,
+      src_item: datatypes.TrajectoryItem,
+      payload: datatypes.RLTrainerPayload,
+      reward_val: float,
+  ) -> datatypes.TrajectoryItem:
+    """Builds a scored TrajectoryItem for telemetry and trajectory logging."""
+    src_traj = src_item.traj
+    if isinstance(src_traj, dict):
+      raw_status = src_traj.get("status") or getattr(src_item, "status", None)
+      traj_dict = dict(src_traj)
+      src_traj.pop("routed_experts", None)
+    elif src_traj is not None:
+      raw_status = getattr(src_traj, "status", None) or getattr(
+          src_item, "status", None
+      )
+      traj_dict = src_traj.to_dict() if hasattr(src_traj, "to_dict") else {}
+    else:
+      raw_status = getattr(src_item, "status", None)
+      traj_dict = {}
+    if isinstance(raw_status, datatypes.TrajectoryStatus):
+      status = raw_status
+    elif isinstance(raw_status, str):
+      status = getattr(
+          datatypes.TrajectoryStatus,
+          raw_status.upper(),
+          datatypes.TrajectoryStatus.SUCCEEDED
+          if raw_status.upper() in ("COMPLETED", "SUCCESS")
+          else datatypes.TrajectoryStatus.RUNNING,
+      )
+    else:
+      status = datatypes.TrajectoryStatus.RUNNING
+    metadata = dict(src_item.metadata) if src_item.metadata else {}
+    if isinstance(src_item.metadata, dict):
+      src_item.metadata.pop("routed_experts", None)
+    metadata.pop("routed_experts", None)
+    traj_dict.pop("routed_experts", None)
+    src_policy_version = getattr(src_item, "policy_version", None)
+    if src_policy_version is None:
+      src_policy_version = metadata.get("policy_version", 0)
+    policy_version = int(src_policy_version or 0)
+    traj_dict["trajectory_reward"] = reward_val
+    traj_dict["status"] = status
+    traj_dict["conversation_masks"] = payload.completion_mask
+    traj_dict["policy_version"] = policy_version
+    return datatypes.TrajectoryItem(
+        prompt_id=src_item.prompt_id,
+        group_index=src_item.group_index,
+        start_step=0,
+        traj=traj_dict,
+        is_valid=src_item.is_valid,
+        prompt_tokens=getattr(src_item, "prompt_tokens", None),
+        completion_tokens=getattr(src_item, "completion_tokens", None),
+        action_mask=getattr(src_item, "action_mask", None),
+        routed_experts=None,
+        policy_version=policy_version,
+        metadata=metadata,
+        # TODO: b/552087289 - Replace TrajectoryItem with a compact typed
+        # telemetry record (identity + reward + generation facts +
+        # RolloutFacts).
+    )
+
+  def _critique_group(
+      self,
+      group: Sequence[datatypes.TrajectoryItem],
+  ) -> ScoredGroup:
+    """Scores a trajectory group and builds its RLTrainerPayloads and ScoredGroup off-loop."""
+    rewards, group_reward_log_metrics = self._score_group(group)
+    payloads = self.algo.create_trainer_payloads(group, rewards=rewards)
+    if len(payloads) != len(group):
+      raise ValueError(
+          f"create_trainer_payloads returned {len(payloads)} payloads"
+          f" for a group of {len(group)} items."
+      )
+    items = [
+        self._build_scored_item(src_item, payload, reward_val)
+        for src_item, payload, reward_val in zip(group, payloads, rewards)
+    ]
+    return ScoredGroup(
+        payloads=tuple(payloads),
+        items=tuple(items),
+        rewards=tuple(rewards),
+        reward_log_metrics=group_reward_log_metrics,
+    )
+
   async def critique_stage(self) -> None:
     """Stage 2: Scores rewards, PRMs, and reference KL logprobs."""
     assert self.engine is not None
@@ -786,96 +871,7 @@ class StandardRLProgram(RLProgram):
               f" num_generations={self.num_generations}."
           )
 
-        rewards, group_reward_log_metrics = await asyncio.to_thread(
-            self._score_group, group
-        )
-
-        raw_payloads = self.algo.create_trainer_payloads(group, rewards=rewards)
-        if len(raw_payloads) != len(group):
-          raise ValueError(
-              f"create_trainer_payloads returned {len(raw_payloads)} payloads"
-              f" for a group of {len(group)} items."
-          )
-        trainer_payloads = collections.deque(raw_payloads)
-        del raw_payloads
-        group_payloads: list[datatypes.RLTrainerPayload] = []
-        group_items: list[datatypes.TrajectoryItem] = []
-        for idx in range(len(trainer_payloads)):
-          payload = trainer_payloads.popleft()
-          reward_val = rewards[idx]
-          src_item = group[idx]
-          src_traj = getattr(src_item, "traj", None)
-          if isinstance(src_traj, dict):
-            raw_status = src_traj.get("status") or getattr(
-                src_item, "status", None
-            )
-            traj_dict = dict(src_traj)
-          elif src_traj is not None:
-            raw_status = getattr(src_traj, "status", None) or getattr(
-                src_item, "status", None
-            )
-            traj_dict = (
-                src_traj.to_dict() if hasattr(src_traj, "to_dict") else {}
-            )
-          else:
-            raw_status = getattr(src_item, "status", None)
-            traj_dict = {}
-          if isinstance(raw_status, datatypes.TrajectoryStatus):
-            status = raw_status
-          elif isinstance(raw_status, str):
-            status = getattr(
-                datatypes.TrajectoryStatus,
-                raw_status.upper(),
-                datatypes.TrajectoryStatus.SUCCEEDED
-                if raw_status.upper() in ("COMPLETED", "SUCCESS")
-                else datatypes.TrajectoryStatus.RUNNING,
-            )
-          else:
-            status = datatypes.TrajectoryStatus.RUNNING
-          src_metadata = getattr(src_item, "metadata", None)
-          metadata = dict(src_metadata) if src_metadata else {}
-          metadata.pop("routed_experts", None)
-          traj_dict.pop("routed_experts", None)
-          if isinstance(src_traj, dict):
-            src_traj.pop("routed_experts", None)
-          if isinstance(src_metadata, dict):
-            src_metadata.pop("routed_experts", None)
-          src_policy_version = getattr(src_item, "policy_version", None)
-          if src_policy_version is None:
-            src_policy_version = metadata.get("policy_version", 0)
-          src_policy_version = int(src_policy_version or 0)
-          traj_dict["trajectory_reward"] = reward_val
-          traj_dict["status"] = status
-          traj_dict["conversation_masks"] = payload.completion_mask
-          traj_dict["policy_version"] = src_policy_version
-          item = datatypes.TrajectoryItem(
-              prompt_id=getattr(src_item, "prompt_id", ""),
-              group_index=getattr(src_item, "group_index", 0),
-              start_step=0,
-              traj=traj_dict,
-              is_valid=getattr(src_item, "is_valid", True),
-              prompt_tokens=getattr(src_item, "prompt_tokens", None),
-              completion_tokens=getattr(src_item, "completion_tokens", None),
-              action_mask=getattr(src_item, "action_mask", None),
-              routed_experts=None,
-              policy_version=src_policy_version,
-              metadata=metadata,
-              # TODO: b/552087289 - Replace TrajectoryItem with a compact typed
-              # telemetry record (identity + reward + generation facts +
-              # RolloutFacts).
-          )
-          group_payloads.append(payload)
-          group_items.append(item)
-          del payload, src_item, src_traj, src_metadata
-          del traj_dict, metadata, item
-        scored_group = ScoredGroup(
-            payloads=tuple(group_payloads),
-            items=tuple(group_items),
-            rewards=tuple(rewards),
-            reward_log_metrics=group_reward_log_metrics,
-        )
-        del group_payloads, group_items, trainer_payloads
-        del group_reward_log_metrics
+        scored_group = await asyncio.to_thread(self._critique_group, group)
         await self.scored_q.put(scored_group)
         del scored_group
         if group:
@@ -892,7 +888,7 @@ class StandardRLProgram(RLProgram):
               first_meta.get("intra_batch_idx"),
               int(first_policy_version or 0),
           )
-        del group, rewards
+        del group
     finally:
       await self.scored_q.close()
 

@@ -44,6 +44,8 @@ class ReferenceScoringCore(Protocol):
       pad_id: int,
       eos_id: int,
       temperature: float = 1.0,
+      segment_ids: jax.Array | None = None,
+      segment_positions: jax.Array | None = None,
   ) -> jax.Array:
     ...
 
@@ -161,22 +163,54 @@ class InferenceWorker(abstract_worker.Worker):
       if req.temperature <= 1e-5:
         raise ValueError("Temperature must be strictly positive.")
 
+      prompt_tokens = np.asarray(req.prompt_tokens, dtype=np.int32)
+      completion_tokens = np.asarray(req.completion_tokens, dtype=np.int32)
+      segment_ids = (
+          None
+          if req.segment_ids is None
+          else np.asarray(req.segment_ids, dtype=np.int32)
+      )
+      segment_positions = (
+          None
+          if req.segment_positions is None
+          else np.asarray(req.segment_positions, dtype=np.int32)
+      )
+      if (segment_ids is None) != (segment_positions is None):
+        raise ValueError(
+            "LogprobsRequest must specify both segment_ids and"
+            " segment_positions or neither."
+        )
+
       def _score(
-          prompt_chunk: np.ndarray, completion_chunk: np.ndarray
+          prompt_chunk: np.ndarray,
+          completion_chunk: np.ndarray,
+          segment_ids_chunk: np.ndarray | None = None,
+          segment_positions_chunk: np.ndarray | None = None,
       ) -> jax.Array:
+        segment_kwargs: dict[str, jax.Array] = {}
+        if (
+            segment_ids_chunk is not None
+            and segment_positions_chunk is not None
+        ):
+          segment_kwargs = {
+              "segment_ids": jnp.asarray(segment_ids_chunk, dtype=jnp.int32),
+              "segment_positions": jnp.asarray(
+                  segment_positions_chunk, dtype=jnp.int32
+              ),
+          }
         return self._core.get_ref_per_token_logps(
             prompt_tokens=jnp.asarray(prompt_chunk, dtype=jnp.int32),
             completion_tokens=jnp.asarray(completion_chunk, dtype=jnp.int32),
             pad_id=self._pad_id,
             eos_id=self._eos_id,
             temperature=req.temperature,
+            **segment_kwargs,
         )
 
-      prompt_tokens = np.asarray(req.prompt_tokens)
-      completion_tokens = np.asarray(req.completion_tokens)
-      logps = batch_utils.apply_chunked(
-          _score, self._chunk_size, prompt_tokens, completion_tokens
-      )
+      chunk_inputs = [prompt_tokens, completion_tokens]
+      if segment_ids is not None and segment_positions is not None:
+        chunk_inputs.extend([segment_ids, segment_positions])
+      logps = batch_utils.apply_chunked(_score, self._chunk_size, *chunk_inputs)
       return datatypes.LogprobsResponse(
           request_id=req.request_id,
           per_token_logps=np.asarray(logps, dtype=np.float32),
@@ -215,6 +249,16 @@ class InferenceWorker(abstract_worker.Worker):
             self._temperature if temperature is None else float(temperature)
         ),
         model_role=model_role,
+        segment_ids=(
+            None
+            if items.segment_ids is None
+            else np.asarray(items.segment_ids, dtype=np.int32)
+        ),
+        segment_positions=(
+            None
+            if items.segment_positions is None
+            else np.asarray(items.segment_positions, dtype=np.int32)
+        ),
     )
     resp = self.compute_logps(req)
     if resp.error is not None:
