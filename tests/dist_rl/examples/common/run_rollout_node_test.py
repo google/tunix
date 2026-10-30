@@ -554,6 +554,7 @@ class RunRolloutNodeTest(absltest.TestCase):
         "--use_lora",
         "--lora_rank=8",
         "--mesh_fsdp=1",
+        "--seed=42",
     ])
     self.assertLessEqual(
         set(maximal_kwargs) - {"additional_config"},
@@ -572,6 +573,58 @@ class RunRolloutNodeTest(absltest.TestCase):
         },
         run_rollout_node._FORBIDDEN_MAXTEXT_CONFIG_JSON_KEYS,
     )
+
+  def test_replica_seed_derives_distinct_32bit_seed_from_worker_id(self):
+    self.assertIsNone(
+        run_rollout_node.math_utils.replica_seed(
+            run_rollout_node._parse_args(["--worker_id", "roll-0"])
+        )
+    )
+    self.assertEqual(
+        run_rollout_node.math_utils.replica_seed(
+            run_rollout_node._parse_args(
+                ["--worker_id", "job-roll-0", "--seed", "42"]
+            )
+        ),
+        42,
+    )
+    self.assertEqual(
+        run_rollout_node.math_utils.replica_seed(
+            run_rollout_node._parse_args(
+                ["--worker_id", "job-roll-127", "--seed", "42"]
+            )
+        ),
+        169,
+    )
+    # Single-replica worker_id with no numeric suffix uses replica_idx=0.
+    self.assertEqual(
+        run_rollout_node.math_utils.replica_seed(
+            run_rollout_node._parse_args(
+                ["--worker_id", "job-roll", "--seed", "42"]
+            )
+        ),
+        42,
+    )
+    # Modulo 2**32 keeps the seed within numpy's valid 32-bit range.
+    self.assertEqual(
+        run_rollout_node.math_utils.replica_seed(
+            run_rollout_node._parse_args(
+                ["--worker_id", "job-roll-5", "--seed", str(2**32 - 2)]
+            )
+        ),
+        3,
+    )
+
+  def test_vllm_sampler_sets_per_replica_seed(self):
+    kwargs = _vllm_engine_kwargs(
+        ["--sampler=vllm", "--worker_id=job-roll-7", "--seed=42"]
+    )
+    self.assertEqual(kwargs["seed"], 49)
+
+    kwargs_no_seed = _vllm_engine_kwargs(
+        ["--sampler=vllm", "--worker_id=job-roll-7"]
+    )
+    self.assertNotIn("seed", kwargs_no_seed)
 
 
 if __name__ == "__main__":
