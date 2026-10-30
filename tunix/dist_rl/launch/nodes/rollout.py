@@ -557,7 +557,6 @@ def _rollout_config(
   max_prompt_length = int(rollout["max_prompt_length"])
   max_tokens_to_generate = int(rollout["total_generation_steps"])
   return rollout_worker.RolloutConfig(
-      sampler_type=sampler_type,
       rollout_vllm_model_version=(
           "" if sampler_type == "vanilla" else _vllm_model(hp)
       ),

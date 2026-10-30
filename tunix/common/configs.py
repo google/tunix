@@ -61,7 +61,7 @@ def _check_divisibility(small_size, big_size, small_size_name, big_size_name):
 CacheConfig = datatypes.CacheConfig
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(kw_only=True)
 class RolloutConfig:
   """Configuration for the rollout worker.
 
@@ -69,8 +69,12 @@ class RolloutConfig:
   https://docs.vllm.ai/en/v0.6.4/dev/sampling_params.html
   """
 
-  # Maximum number of tokens to generate per output sequence
+  # Maximum number of tokens to generate per single-turn output sequence.
   max_tokens_to_generate: int = 64
+
+  # Optional cumulative response token budget across all turns of a rollout
+  # trajectory.
+  max_response_length: int | None = None
 
   # Float that controls the randomness of the sampling.
   # Lower values make the model more deterministic, while higher values make the
@@ -86,14 +90,25 @@ class RolloutConfig:
   top_k: int | None = None
 
   # Random seed to use for the generation.
-  seed: jax.Array | None = None
+  seed: int | jax.Array | None = None
+
+  # TODO(yatlas): Beam_size is currently only wired into the Vanilla Sampler.
+  # It should be wired into the vLLM sampler as well.
+  # Beam width for beam search decoding.
+  beam_size: int | None = None
 
   # Maximum length of the prompt. The prompt will be padded/truncated to this
   # length.
   max_prompt_length: int = 64
 
-  # Only used for vanilla rollout engine.
-  kv_cache_size: int = 1024  # Only used for vanilla rollout engine.
+  # TODO(yatlas): Deprecate this field. Switch to
+  # rollout_vanilla_kv_cache_size, and require
+  # rollout_vllm_kwargs['max_model_len'] in the vLLM sampler.
+
+  # KV cache size of the vanilla rollout engine. `VllmRollout` and
+  # `InprocessVllmSampler` use it as vLLM's `max_model_len` unless
+  # `rollout_vllm_kwargs` sets one.
+  kv_cache_size: int = 1024
 
   # data type of the rollout model.
   data_type: jnp.dtype | None = None
@@ -102,7 +117,8 @@ class RolloutConfig:
   # will be used.
   eos_tokens: list[int] | None = None
 
-  # Weights mapping config for the rollout model.
+  # Weights mapping config for the rollout model. If None, derived from the
+  # rollout model when supported.
   rollout_mapping_config: mappings.MappingConfig | None = None
 
   # Parallelism configs.
@@ -115,13 +131,6 @@ class RolloutConfig:
 
   # Whether to return output logits from the sampler.
   return_logits: bool = False
-
-  # Beam width for beam search decoding.
-  beam_size: int | None = None
-
-  # TODO(yatlas): Throw an error if this flag is set in the non-agentic path.
-  # Mode of weight synchronization ("none", "fallback", "raiden").
-  weight_sync_mode: str = "none"
 
   # Whether to capture the MoE experts each token was routed through, so the
   # trainer can replay them instead of re-running its own router. MoE models on
@@ -186,6 +195,11 @@ class RolloutConfig:
   # The number of model forward passes per engine step.
   rollout_vanilla_v2_num_scheduler_steps: int = 1
 
+  # Trajectory execution configs.
+  exact_token_continuity: bool = True
+  episode_timeout: float = 600.0
+  overlong_filter: bool = False
+
   # vLLM specific rollout configs.
 
   # Whether to run rollout in vLLM server mode or batch inference mode.
@@ -214,7 +228,7 @@ class RolloutConfig:
   rollout_vllm_init_with_random_weights: bool = True
 
   # TPU backend type for vLLM rollout engine, "jax" or "torchax", default to "jax".
-  rollout_vllm_tpu_backend_type: str | None = None
+  rollout_vllm_tpu_backend_type: str = "jax"
 
   # Whether to enable asynchronous scheduling for vLLM rollout engine.
   rollout_vllm_async_scheduling: bool = False
@@ -334,10 +348,30 @@ class RolloutConfig:
       default_factory=dict
   )
 
+  # Distributed rollout worker & sampler orchestration configs.
+  weight_sync_mode: str = "none"
+
   def __post_init__(self):
+    _is_positive_integer(self.max_response_length, "max_response_length")
     datatypes.validate_routed_experts_encode_config(
         self.routed_experts_encode_mode, self.routed_experts_num_experts
     )
+    if (
+        isinstance(self.episode_timeout, bool)
+        or not isinstance(self.episode_timeout, (int, float))
+        or not math.isfinite(self.episode_timeout)
+        or self.episode_timeout <= 0
+    ):
+      raise ValueError(
+          "episode_timeout must be a positive finite number, got"
+          f" {self.episode_timeout!r}."
+      )
+    self.episode_timeout = float(self.episode_timeout)
+    if self.weight_sync_mode not in ("none", "fallback", "raiden"):
+      raise ValueError(
+          "weight_sync_mode must be one of ('none', 'fallback', 'raiden'),"
+          f" got {self.weight_sync_mode!r}."
+      )
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)

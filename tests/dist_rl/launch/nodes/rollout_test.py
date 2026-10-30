@@ -207,7 +207,6 @@ class RolloutConfigTest(absltest.TestCase):
         mock.Mock(),
         sampler_type="vllm",
     )
-    self.assertEqual(config.sampler_type, "vllm")
     # No local weights in `model_download_path`, so vLLM serves `model_id`.
     self.assertEqual(config.rollout_vllm_model_version, "Qwen/Qwen3-1.7B")
     self.assertEqual(
@@ -407,7 +406,6 @@ class CreateRolloutWorkerTest(absltest.TestCase):
     worker_kwargs = self._worker_kwargs()
     self.assertIs(worker_kwargs["config"], sampler_config)
     self.assertIs(worker_kwargs["sampler"], sampler_cls.return_value)
-    self.assertEqual(worker_kwargs["config"].sampler_type, "vanilla")
     # The base config's `chat_parser_config.type` is "raw".
     self.assertIsInstance(worker_kwargs["chat_parser"], parser.RawTextParser)
 
@@ -426,7 +424,6 @@ class CreateRolloutWorkerTest(absltest.TestCase):
     self.assertIs(
         worker_kwargs["config"], sampler_cls.call_args.kwargs["config"]
     )
-    self.assertEqual(worker_kwargs["config"].sampler_type, "vllm")
     self.assertEqual(
         worker_kwargs["config"].rollout_vllm_model_version, "Qwen/Qwen3-1.7B"
     )
@@ -477,7 +474,6 @@ class CreateRolloutWorkerTest(absltest.TestCase):
       )
     worker_kwargs = self._worker_kwargs()
     self.assertIs(worker_kwargs["sampler"], sampler_cls.return_value)
-    self.assertEqual(worker_kwargs["config"].sampler_type, "inprocess_vllm")
 
 
 class SamplerTest(absltest.TestCase):

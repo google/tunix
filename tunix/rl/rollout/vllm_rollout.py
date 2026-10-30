@@ -55,7 +55,7 @@ class VllmRollout(base_rollout.BaseRollout):
             return_routed_experts=rollout_config.return_routed_experts,
             eos_tokens=rollout_config.eos_tokens,
             init_with_random_weights=rollout_config.rollout_vllm_init_with_random_weights,
-            tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,  # pyrefly: ignore[bad-argument-type]
+            tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,
             additional_config=rollout_config.rollout_vllm_additional_config,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
             hbm_utilization=rollout_config.rollout_vllm_hbm_utilization,

@@ -30,20 +30,15 @@ from tunix.dist_rl.rollout import manager as manager_lib
 from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.dist_rl.trajectory import store as trajectory_store_lib
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
-from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.worker import abstract_worker
 from tunix.rl.rollout import base_rollout
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(kw_only=True)
 class RolloutConfig(base_rollout.RolloutConfig):
-  """Rollout configuration extending base RolloutConfig with sampler and worker options.
+  """Rollout configuration extending base RolloutConfig with worker options.
 
   Attributes:
-    sampler_type: Type of sampler adapter to construct ("vanilla",
-      "inprocess_vllm", "vllm").
-    weight_sync_mode: Mode of weight synchronization ("none", "fallback",
-      "raiden").
     trajectory_store_config: Trajectory Store configuration for this worker
       process, or None to run without a store. See
       `store.TrajectoryStore.from_config`. The worker builds the store from this
@@ -51,16 +46,11 @@ class RolloutConfig(base_rollout.RolloutConfig):
       by this process. Must match what the orchestrator was given: for the file
       backend it is the shared root_dir and run_id that make these writes
       visible to the orchestrator's reads.
-    partial_rollout: Whether to freeze in-flight trajectories in-place during
-      weight synchronization instead of draining them to completion first.
     drain_timeout_s: Soft drain window (seconds) in `pre_weight_sync` when
       `partial_rollout` is False before remaining stragglers are paused.
   """
 
-  sampler_type: str = "vanilla"
-  weight_sync_mode: weight_sync.WeightSyncMode = weight_sync.WeightSyncMode.NONE
   trajectory_store_config: Mapping[str, Any] | None = None
-  partial_rollout: bool = False
   drain_timeout_s: float = timeouts.DEFAULT_DRAIN_TIMEOUT_S
 
   def __post_init__(self) -> None:

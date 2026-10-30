@@ -159,6 +159,47 @@ class ConfigsTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "timeout_secs must be > 0"):
       configs.RLProfileConfig(timeout_secs=float("nan"))
 
+  def test_rollout_config_validation(self):
+    cfg = configs.RolloutConfig(
+        max_response_length=256,
+        episode_timeout=120,
+        weight_sync_mode="raiden",
+    )
+    self.assertEqual(cfg.max_response_length, 256)
+    self.assertEqual(cfg.episode_timeout, 120.0)
+    self.assertIsInstance(cfg.episode_timeout, float)
+    self.assertEqual(cfg.weight_sync_mode, "raiden")
+
+    # Positional arguments should be rejected (kw_only=True).
+    with self.assertRaises(TypeError):
+      configs.RolloutConfig(64)  # pytype: disable=wrong-arg-count
+
+    for bad_max_resp in (0, -1, True, 1.5):
+      with self.assertRaisesRegex(
+          ValueError, "max_response_length must be a positive integer"
+      ):
+        configs.RolloutConfig(max_response_length=bad_max_resp)  # pytype: disable=wrong-arg-types
+
+    for bad_timeout in (
+        0,
+        -1.0,
+        True,
+        False,
+        float("nan"),
+        float("inf"),
+        "60",
+    ):
+      with self.assertRaisesRegex(
+          ValueError, "episode_timeout must be a positive finite number"
+      ):
+        configs.RolloutConfig(episode_timeout=bad_timeout)  # pytype: disable=wrong-arg-types
+
+    for bad_mode in ("raden", "RAIDEN", "invalid", ""):
+      with self.assertRaisesRegex(
+          ValueError, "weight_sync_mode must be one of"
+      ):
+        configs.RolloutConfig(weight_sync_mode=bad_mode)
+
 
 if __name__ == "__main__":
   absltest.main()

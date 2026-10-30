@@ -445,7 +445,7 @@ async def run_worker(args: argparse.Namespace):
   worker = EvaluationWorker(
       worker_id="deepswe-eval",
       config=rollout_worker.RolloutConfig(
-          sampler_type="inprocess_vllm", weight_sync_mode="none",
+          weight_sync_mode="none",
           eos_tokens=eos,
       ),
       sampler=sampler,

@@ -311,10 +311,10 @@ def _trainer_process_fn(
 def _rollout_process_fn(
     conn,
     model_config_kwargs: dict[str, Any],
+    sampler_type: str,
     adapter_config_kwargs: dict[str, Any],
 ):
   model_config = test_common.ModelConfig(**model_config_kwargs)
-  sampler_type = adapter_config_kwargs.get("sampler_type", "inprocess_vllm")
   delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
   adapter_config = RolloutConfig(**adapter_config_kwargs)
 
@@ -715,7 +715,6 @@ class WeightSyncE2ETest(absltest.TestCase):
   def test_fallback_mode_weight_sync_with_vanilla_adapter(self):
     """Verifies Fallback mode weight transfer from PeftTrainer to VanillaSampler."""
     adapter_config = RolloutConfig(
-        sampler_type="vanilla",
         kv_cache_size=64,
         weight_sync_mode=WeightSyncMode.FALLBACK,
     )
@@ -737,7 +736,7 @@ class WeightSyncE2ETest(absltest.TestCase):
         model=self.toy_trainer_model,
         optimizer=optax.sgd(1e-3),
         training_config=trainer_config,
-        sampler_type=adapter_config.sampler_type,
+        sampler_type="vanilla",
     )
 
     # Mutate trainer model weights
@@ -761,7 +760,6 @@ class WeightSyncE2ETest(absltest.TestCase):
   def test_fallback_mode_weight_sync_with_vllm_adapter(self):
     """Verifies Fallback mode weight transfer from PeftTrainer to InprocessVllmSampler."""
     adapter_config = RolloutConfig(
-        sampler_type="inprocess_vllm",
         weight_sync_mode=WeightSyncMode.FALLBACK,
     )
     adapter = inprocess_vllm_sampler.InprocessVllmSampler(
@@ -779,7 +777,7 @@ class WeightSyncE2ETest(absltest.TestCase):
         model=self.toy_trainer_model,
         optimizer=optax.sgd(1e-3),
         training_config=trainer_config,
-        sampler_type=adapter_config.sampler_type,
+        sampler_type="inprocess_vllm",
     )
 
     # Mutate trainer model weights
@@ -807,8 +805,8 @@ class WeightSyncE2ETest(absltest.TestCase):
   def test_raiden_mode_multiprocess_weight_sync_with_vanilla_sampler(self):
     """Verifies end-to-end Raiden weight sync with VanillaSampler across separate processes."""
     model_config_dict = dataclasses.asdict(self.model_config)
+    sampler_type = "vanilla"
     adapter_config = RolloutConfig(
-        sampler_type="vanilla",
         kv_cache_size=64,
         weight_sync_mode=WeightSyncMode.RAIDEN,
     )
@@ -819,6 +817,7 @@ class WeightSyncE2ETest(absltest.TestCase):
         "rollout_proc_0",
         _rollout_process_fn,
         model_config_dict,
+        sampler_type,
         adapter_config_dict,
     )
     self.addCleanup(rollout_proc.shutdown)
@@ -831,7 +830,7 @@ class WeightSyncE2ETest(absltest.TestCase):
         "trainer_proc_0",
         _trainer_process_fn,
         model_config_dict,
-        adapter_config.sampler_type,
+        sampler_type,
         target_state,
     )
     self.addCleanup(trainer_proc.shutdown)
@@ -866,8 +865,8 @@ class WeightSyncE2ETest(absltest.TestCase):
   def test_raiden_mode_multiprocess_weight_sync_with_vllm_sampler(self):
     """Verifies end-to-end Raiden weight sync with vLLM Sampler across separate processes."""
     model_config_dict = dataclasses.asdict(self.model_config)
+    sampler_type = "inprocess_vllm"
     adapter_config = RolloutConfig(
-        sampler_type="inprocess_vllm",
         kv_cache_size=64,
         weight_sync_mode=WeightSyncMode.RAIDEN,
     )
@@ -878,6 +877,7 @@ class WeightSyncE2ETest(absltest.TestCase):
         "rollout_proc_0",
         _rollout_process_fn,
         model_config_dict,
+        sampler_type,
         adapter_config_dict,
     )
     self.addCleanup(rollout_proc.shutdown)
@@ -890,7 +890,7 @@ class WeightSyncE2ETest(absltest.TestCase):
         "trainer_proc_0",
         _trainer_process_fn,
         model_config_dict,
-        adapter_config.sampler_type,
+        sampler_type,
         target_state,
     )
     self.addCleanup(trainer_proc.shutdown)

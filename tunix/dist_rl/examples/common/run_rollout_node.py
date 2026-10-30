@@ -766,7 +766,6 @@ def _create_vanilla_worker(args, tokenizer):
         load_dtype=args.model_dtype,
     )
   config = rollout_worker.RolloutConfig(
-      sampler_type="vanilla",
       kv_cache_size=args.max_prompt_length + args.max_response_length,
       **_rollout_config_kwargs(args, tokenizer),
   )
@@ -972,7 +971,6 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       partial_rollout=partial_rollout,
   )
   config = rollout_worker.RolloutConfig(
-      sampler_type="inprocess_vllm",
       rollout_vllm_model_version=vllm_model,
       **_rollout_config_kwargs(args, tokenizer),
   )
@@ -1078,7 +1076,6 @@ def _create_vllm_sampler(args, tokenizer):
     )
   engine_args = AsyncEngineArgs(**engine_kwargs)  # type: ignore[arg-type]
   config = rollout_worker.RolloutConfig(
-      sampler_type="vllm",
       rollout_vllm_model_version=vllm_model,
       **_rollout_config_kwargs(args, tokenizer),
   )
