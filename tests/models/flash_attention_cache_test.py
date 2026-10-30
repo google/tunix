@@ -29,6 +29,7 @@ from tunix.models.gemma4 import attention as gemma4_attention
 from tunix.models.gemma4 import model as gemma4_model
 from tunix.models.qwen2 import model as qwen2_model
 from tunix.models.qwen3 import model as qwen3_model
+from tunix.models.qwen3p5 import model as qwen3p5_model
 
 
 pytestmark = pytest.mark.cpu_only
@@ -139,6 +140,21 @@ def _tiny_qwen3_model():
   return model, config, qwen3_model
 
 
+def _tiny_qwen3p5_model():
+  config = qwen3p5_model.ModelConfig.qwen3p5_0p8b()
+  config.num_layers = 1
+  config.layer_types = (qwen3p5_model.LayerType.FULL_ATTENTION,)
+  config.vocab_size = 64
+  config.embed_dim = 64
+  config.hidden_dim = 128
+  config.num_heads = 4
+  config.head_dim = 16
+  config.num_kv_heads = 2
+  config.use_flash_attention = True
+  model = qwen3p5_model.Qwen3p5(config, rngs=nnx.Rngs(0))
+  return model, config, qwen3p5_model
+
+
 def _tiny_gemma4_model():
   config = gemma4_model.ModelConfig.gemma4_e2b()
   config.num_layers = 1
@@ -175,6 +191,7 @@ class FlashAttentionCacheTest(parameterized.TestCase):
   @parameterized.named_parameters(
       dict(testcase_name='qwen2', model_builder=_tiny_qwen2_model),
       dict(testcase_name='qwen3', model_builder=_tiny_qwen3_model),
+      dict(testcase_name='qwen3p5', model_builder=_tiny_qwen3p5_model),
       dict(testcase_name='gemma4', model_builder=_tiny_gemma4_model),
   )
   def test_prefill_cache_layout_survives_decode(self, model_builder):

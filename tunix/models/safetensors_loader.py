@@ -80,7 +80,7 @@ def load_safetensors_with_offsets(filepath):
     A tuple containing:
       - contiguous_array: A numpy array containing the concatenated tensor data.
       - tensor_metadata: A list of dictionaries, each containing metadata
-        (name, offset_elements, size_elements, shape, dtype) for a tensor.
+        (name, start_byte, end_byte, shape, dtype) for a tensor.
       - mm: The mmap object used to read the file.
       - f: The file handle.
   """
@@ -94,44 +94,32 @@ def load_safetensors_with_offsets(filepath):
 
   tensor_metadata = []
 
-  itemsize = 2  # Default to bfloat16
-  common_dtype = None
   for tensor_name, metadata in header.items():
     if tensor_name == '__metadata__':
       continue
 
     dtype = metadata['dtype']
-    if common_dtype is None:
-      common_dtype = dtype
-      np_type = to_np_dtype(dtype)
-      itemsize = np.dtype(np_type).itemsize
-
     start_byte, end_byte = metadata['data_offsets']
     shape = tuple(metadata['shape'])
 
-    size_bytes = end_byte - start_byte
-    size_elements = size_bytes // itemsize
-    offset_elements = start_byte // itemsize
-
     tensor_metadata.append({
         'name': tensor_name,
-        'offset_elements': offset_elements,
-        'size_elements': size_elements,
+        'start_byte': start_byte,
+        'end_byte': end_byte,
         'shape': shape,
         'dtype': dtype,
     })
 
   file_size = os.path.getsize(filepath)
   data_size_bytes = file_size - data_block_start_offset_bytes
-  total_elements = data_size_bytes // itemsize
 
   f = open(filepath, 'rb')
 
   mm = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
   contiguous_array = np.frombuffer(
       mm,
-      dtype=to_np_dtype(common_dtype),
-      count=total_elements,
+      dtype=np.uint8,
+      count=data_size_bytes,
       offset=data_block_start_offset_bytes,
   )
 
@@ -411,10 +399,10 @@ def load_and_create_model_opt(
       except ValueError:
         skipped_keys.append(metadata['name'])
         continue
-      parameter = array[
-          metadata['offset_elements'] : metadata['offset_elements']
-          + metadata['size_elements']
-      ].reshape(metadata['shape'])
+      raw_bytes = array[metadata['start_byte'] : metadata['end_byte']]
+      parameter = raw_bytes.view(to_np_dtype(metadata['dtype'])).reshape(
+          metadata['shape']
+      )
       if transform is not None:
         permute, reshape = transform
         if permute:

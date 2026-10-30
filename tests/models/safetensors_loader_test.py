@@ -253,6 +253,42 @@ class SafetensorsLoaderTest(parameterized.TestCase):
         bf16_data
     )
 
+  def test_load_mixed_dtype_safetensors_offsets(self):
+    f32_data = np.ones((16,), dtype=np.float32) * 1.5
+    bf16_data = np.full((256, 16), 2.0, dtype=ml_dtypes.bfloat16)
+    # 'a_log' sorts before 'emb.embedding', testing mixed F32 + BF16 offsets
+    tensors = {
+        'a_log': f32_data,
+        'emb.embedding': bf16_data,
+    }
+    filename = os.path.join(self.st_dir, 'model.safetensors')
+    stnp.save_file(tensors, filename)
+
+    contig, metadata, mm, fh = safetensors_loader.load_safetensors_with_offsets(
+        filename
+    )
+    try:
+      by_name = {m['name']: m for m in metadata}
+      a_slice = contig[
+          by_name['a_log']['start_byte'] : by_name['a_log']['end_byte']
+      ]
+      a_loaded = a_slice.view(np.float32).reshape(by_name['a_log']['shape'])
+      np.testing.assert_allclose(a_loaded, f32_data)
+
+      emb_slice = contig[
+          by_name['emb.embedding']['start_byte'] : by_name['emb.embedding'][
+              'end_byte'
+          ]
+      ]
+      emb_loaded = emb_slice.view(ml_dtypes.bfloat16).reshape(
+          by_name['emb.embedding']['shape']
+      )
+      np.testing.assert_allclose(emb_loaded, bf16_data)
+    finally:
+      del contig, a_slice, a_loaded, emb_slice, emb_loaded
+      mm.close()
+      fh.close()
+
   def test_normalize_torch_bfloat16_safetensors(self):
     mock_tensor = MockTorchTensor(dtype_str='torch.bfloat16')
     result = safetensors_loader._normalize_tensor(mock_tensor)
