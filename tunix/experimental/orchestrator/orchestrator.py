@@ -40,6 +40,7 @@ from tunix.experimental.trajectory import store as trajectory_store_lib
 from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
+from tunix.experimental import events
 
 
 _STOP_TIMEOUT_S = 60.0  # Timeout for stopping remote workers. 60 should not be touched for any healthy stop.
@@ -341,12 +342,18 @@ class ClusterOrchestrator:
           sorted(role_names),
       )
       if datatypes.Role.ROLLOUT.value in role_names:
-        logging.info(
+        events.log_and_emit(
+            logging,
+            logging.INFO,
             "[rollout-ft] action=%s worker_id=%s incarnation=%d state=%s",
-            "rejoin" if incarnation > 1 else "join",
-            worker_id,
-            incarnation,
-            initial_state.value,
+            "worker_ft",
+            text_args=(
+                "rejoin" if incarnation > 1 else "join",
+                worker_id,
+                incarnation,
+                initial_state.value,
+            ),
+            names=("action", "worker", "incarnation", "state"),
         )
 
       if self._brought_up:
@@ -423,12 +430,18 @@ class ClusterOrchestrator:
           require_sync = coordinator is not None
           if require_sync:
             target_state = worker_registry.MembershipState.PENDING_WEIGHT_SYNC
-          logging.info(
+          events.log_and_emit(
+              logging,
+              logging.INFO,
               "[rollout-ft] action=%s worker_id=%s incarnation=%s state=%s",
-              "rejoin" if (incarnation or 0) > 1 else "join",
-              worker_id,
-              incarnation,
-              target_state.value,
+              "worker_ft",
+              text_args=(
+                  "rejoin" if (incarnation or 0) > 1 else "join",
+                  worker_id,
+                  incarnation,
+                  target_state.value,
+              ),
+              names=("action", "worker", "incarnation", "state"),
           )
       try:
         self.registry.set_state(
@@ -468,10 +481,17 @@ class ClusterOrchestrator:
             isinstance(member, weight_sync_coordinator.RemoteWorkerShim)
             and datatypes.Role.ROLLOUT.value in member.info().roles
         ):
-          logging.info(
+          events.log_and_emit(
+              logging,
+              logging.INFO,
               "[rollout-ft] action=leave worker_id=%s incarnation=%d",
-              worker_id,
-              incarnation,
+              "worker_ft",
+              text_args=(
+                  worker_id,
+                  incarnation,
+              ),
+              names=("worker", "incarnation"),
+              action="leave",
           )
           if self.engine is not None:
             self.engine.remove_rollout_worker(member.handle)
@@ -742,12 +762,19 @@ class ClusterOrchestrator:
                   datatypes.Role.ROLLOUT.value in shims[wid].info().roles
               )
               if self._fault_tolerance_config.enabled and is_rollout:
-                logging.error(
+                events.log_and_emit(
+                    logging,
+                    logging.ERROR,
                     "[rollout-ft] action=evict worker_id=%s stage=%s"
                     " reason=bring_up_failed err=%r",
-                    wid,
-                    stage_name,
-                    err,
+                    "worker_ft",
+                    text_args=(
+                        wid,
+                        stage_name,
+                        err,
+                    ),
+                    names=("worker", "stage", "error"),
+                    action="evict",
                 )
                 evicted_rollout_ids.add(wid)
                 last_rollout_err = err
@@ -834,20 +861,34 @@ class ClusterOrchestrator:
       if datatypes.Role.ROLLOUT.value not in info.roles:
         return
       if state == worker_registry.MembershipState.ACTIVE:
-        logging.info(
+        events.log_and_emit(
+            logging,
+            logging.INFO,
             "[rollout-ft] action=promote worker_id=%s incarnation=%s",
-            worker_id,
-            self.registry.incarnation(worker_id),
+            "worker_ft",
+            text_args=(
+                worker_id,
+                self.registry.incarnation(worker_id),
+            ),
+            names=("worker", "incarnation"),
+            action="promote",
         )
         self.engine.add_rollout_worker(
             member.handle,
             max_in_flight=self._effective_worker_capacity(info),
         )
       elif state == worker_registry.MembershipState.EVICTED:
-        logging.info(
+        events.log_and_emit(
+            logging,
+            logging.INFO,
             "[rollout-ft] action=evict worker_id=%s incarnation=%s",
-            worker_id,
-            self.registry.incarnation(worker_id),
+            "worker_ft",
+            text_args=(
+                worker_id,
+                self.registry.incarnation(worker_id),
+            ),
+            names=("worker", "incarnation"),
+            action="evict",
         )
         self.engine.remove_rollout_worker(member.handle)
 

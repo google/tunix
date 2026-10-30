@@ -125,6 +125,7 @@ import asyncio
 import dataclasses
 import enum
 import functools
+import hashlib
 import math
 import os
 import threading
@@ -136,6 +137,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.rollout import collector as collector_lib
 from tunix.experimental.weight_sync import weight_sync
+from tunix.experimental import events
 
 
 class NullHandler(weight_sync.WeightSyncHandler):
@@ -1152,14 +1154,21 @@ class WeightSyncCoordinator:
     finally:
       elapsed_abort_s = time.monotonic() - t_abort_start
       self._current_round_abort_s += elapsed_abort_s
-      logging.info(
+      events.log_and_emit(
+          logging,
+          logging.INFO,
           "WEIGHT_SYNC_PHASE round=%s req_id=%s phase=abort"
           " elapsed_s=%.3f timeout=%s workers=%d",
-          request.extra_config.get("round_index", -1),
-          request.extra_config.get("req_id", ""),
-          elapsed_abort_s,
-          _format_timeout(self._timeouts.abort),
-          len(destinations),
+          "wsync_phase",
+          text_args=(
+              request.extra_config.get("round_index", -1),
+              request.extra_config.get("req_id", ""),
+              elapsed_abort_s,
+              _format_timeout(self._timeouts.abort),
+              len(destinations),
+          ),
+          names=("round", "req_id", "elapsed_s", "timeout", "workers"),
+          phase="abort",
       )
 
   # ---------------------------------------------------------------- the round
@@ -1343,11 +1352,18 @@ class WeightSyncCoordinator:
           # failure is contained to pending worker(s), so release source
           # staging / clear the poison and keep the coordinator usable for the
           # next regular round instead of reporting the fleet as unhealthy.
-          logging.warning(
+          events.log_and_emit(
+              logging,
+              logging.WARNING,
               "[rollout-ft] action=pending_sync_abandoned policy_version=%d"
               " evicted=%s; ACTIVE rollout workers keep serving.",
-              policy_version,
-              failed_worker_ids,
+              "worker_ft",
+              text_args=(
+                  policy_version,
+                  failed_worker_ids,
+              ),
+              names=("policy_version", "evicted"),
+              action="pending_sync_abandoned",
           )
           if (
               res is not None
@@ -1505,14 +1521,21 @@ class WeightSyncCoordinator:
         finally:
           t_bind_s = time.monotonic() - t_phase
           t_prepare_s = t_bind_s
-          logging.info(
+          events.log_and_emit(
+              logging,
+              logging.INFO,
               "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=bind"
               " elapsed_s=%.3f timeout=%s workers=%d",
-              round_index,
-              req_id,
-              t_bind_s,
-              _format_timeout(self._timeouts.bind),
-              len(destinations),
+              "wsync_phase",
+              text_args=(
+                  round_index,
+                  req_id,
+                  t_bind_s,
+                  _format_timeout(self._timeouts.bind),
+                  len(destinations),
+              ),
+              names=("round", "req_id", "elapsed_s", "timeout", "workers"),
+              phase="bind",
           )
         first_bind_err: Optional[BaseException] = None
         for d, res in zip(destinations, bind_results):
@@ -1546,14 +1569,21 @@ class WeightSyncCoordinator:
         finally:
           t_metadata_s = time.monotonic() - t_phase
           t_prepare_s = t_bind_s + t_metadata_s
-          logging.info(
+          events.log_and_emit(
+              logging,
+              logging.INFO,
               "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=metadata"
               " elapsed_s=%.3f timeout=%s workers=%d",
-              round_index,
-              req_id,
-              t_metadata_s,
-              _format_timeout(self._timeouts.metadata),
-              len(destinations),
+              "wsync_phase",
+              text_args=(
+                  round_index,
+                  req_id,
+                  t_metadata_s,
+                  _format_timeout(self._timeouts.metadata),
+                  len(destinations),
+              ),
+              names=("round", "req_id", "elapsed_s", "timeout", "workers"),
+              phase="metadata",
           )
         first_meta_err: Optional[BaseException] = None
         for d, res in zip(destinations, dst_meta_results):
@@ -1592,14 +1622,21 @@ class WeightSyncCoordinator:
         finally:
           t_source_prepare_s = time.monotonic() - t_phase
           t_prepare_s = t_bind_s + t_metadata_s + t_source_prepare_s
-          logging.info(
+          events.log_and_emit(
+              logging,
+              logging.INFO,
               "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=source_prepare"
               " elapsed_s=%.3f timeout=%s workers=%d",
-              round_index,
-              req_id,
-              t_source_prepare_s,
-              _format_timeout(self._timeouts.source_prepare),
-              len(sources),
+              "wsync_phase",
+              text_args=(
+                  round_index,
+                  req_id,
+                  t_source_prepare_s,
+                  _format_timeout(self._timeouts.source_prepare),
+                  len(sources),
+              ),
+              names=("round", "req_id", "elapsed_s", "timeout", "workers"),
+              phase="source_prepare",
           )
         if source_staged is not None:
           source_staged.set()
@@ -1727,13 +1764,20 @@ class WeightSyncCoordinator:
         raise
       finally:
         t_register_s = time.monotonic() - t_phase
-        logging.info(
+        events.log_and_emit(
+            logging,
+            logging.INFO,
             "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=register"
             " elapsed_s=%.3f units=%d",
-            round_index,
-            req_id,
-            t_register_s,
-            len(registration_metadata),
+            "wsync_phase",
+            text_args=(
+                round_index,
+                req_id,
+                t_register_s,
+                len(registration_metadata),
+            ),
+            names=("round", "req_id", "elapsed_s", "units"),
+            phase="register",
         )
       registration_errors: list[BaseException] = []
       for metadata, result_or_error in zip(
@@ -1802,27 +1846,42 @@ class WeightSyncCoordinator:
           )
           transfer_in_flight = False
           t_transfer_s = time.monotonic() - t_phase
-          logging.info(
+          events.log_and_emit(
+              logging,
+              logging.INFO,
               "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=transfer"
               " elapsed_s=%.3f timeout=%s success=%s",
-              round_index,
-              req_id,
-              t_transfer_s,
-              _format_timeout(self._timeouts.transfer),
-              transfer.success if transfer is not None else False,
+              "wsync_phase",
+              text_args=(
+                  round_index,
+                  req_id,
+                  t_transfer_s,
+                  _format_timeout(self._timeouts.transfer),
+                  transfer.success if transfer is not None else False,
+              ),
+              names=("round", "req_id", "elapsed_s", "timeout", "success"),
+              phase="transfer",
           )
         except (
             asyncio.TimeoutError,
             weight_sync.TransferOutcomeUnknownError,
         ) as e:
           t_transfer_s = time.monotonic() - t_phase
-          logging.info(
+          events.log_and_emit(
+              logging,
+              logging.INFO,
               "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=transfer"
               " elapsed_s=%.3f timeout=%s outcome=timeout_or_unknown",
-              round_index,
-              req_id,
-              t_transfer_s,
-              _format_timeout(self._timeouts.transfer),
+              "wsync_phase",
+              text_args=(
+                  round_index,
+                  req_id,
+                  t_transfer_s,
+                  _format_timeout(self._timeouts.transfer),
+              ),
+              names=("round", "req_id", "elapsed_s", "timeout"),
+              phase="transfer",
+              outcome="timeout_or_unknown",
           )
           # Two triggers, one meaning: the coordinator's own deadline elapsed
           # (the executor thread is still running), or the transport reported
@@ -1895,15 +1954,25 @@ class WeightSyncCoordinator:
             self._timeouts.pre,
         )
         t_pre_s = time.monotonic() - t_phase
-        logging.info(
+        events.log_and_emit(
+            logging,
+            logging.INFO,
             "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=pre"
             " elapsed_s=%.3f timeout=%s workers=%d failures=%d",
-            round_index,
-            req_id,
-            t_pre_s,
-            _format_timeout(self._timeouts.pre),
-            len(destinations),
-            len(pre_failures),
+            "wsync_phase",
+            text_args=(
+                round_index,
+                req_id,
+                t_pre_s,
+                _format_timeout(self._timeouts.pre),
+                len(destinations),
+                len(pre_failures),
+            ),
+            names=(
+                "round", "req_id", "elapsed_s", "timeout", "workers",
+                "failures",
+            ),
+            phase="pre",
         )
         if pre_failures:
           failures.extend(pre_failures)
@@ -1916,13 +1985,21 @@ class WeightSyncCoordinator:
       run_parallel_h2h = self._parallel_h2h
       if run_parallel_h2h:
         if uuid <= 0:
-          logging.warning(
+          events.log_and_emit(
+              logging,
+              logging.WARNING,
               "WEIGHT_SYNC_PHASE round=%d req_id=%s parallel_h2h=True"
               " requested, but uuid=%d is not positive; falling back to"
               " sequential quiesce-before-transfer order.",
-              round_index,
-              req_id,
-              uuid,
+              "wsync_phase",
+              text_args=(
+                  round_index,
+                  req_id,
+                  uuid,
+              ),
+              names=("round", "req_id", "uuid"),
+              phase="parallel_h2h_fallback",
+              note="uuid_not_positive",
           )
           run_parallel_h2h = False
         unsafe_units = [
@@ -1931,15 +2008,23 @@ class WeightSyncCoordinator:
             if m.auto_h2d is not False
         ]
         if unsafe_units:
-          logging.warning(
+          events.log_and_emit(
+              logging,
+              logging.WARNING,
               "WEIGHT_SYNC_PHASE round=%d req_id=%s parallel_h2h=True"
               " requested, but destination unit(s) did not confirm"
               " auto_h2d=False (%s); falling back to sequential"
               " quiesce-before-transfer order to avoid writing into live HBM"
               " during serving.",
-              round_index,
-              req_id,
-              ", ".join(unsafe_units),
+              "wsync_phase",
+              text_args=(
+                  round_index,
+                  req_id,
+                  ", ".join(unsafe_units),
+              ),
+              names=("round", "req_id", "unsafe_units"),
+              phase="parallel_h2h_fallback",
+              note="auto_h2d_unconfirmed",
           )
           run_parallel_h2h = False
 
@@ -1960,15 +2045,24 @@ class WeightSyncCoordinator:
           destinations, "weight_sync", prepared_request, self._timeouts.h2d
       )
       t_h2d_s = time.monotonic() - t_phase
-      logging.info(
+      events.log_and_emit(
+          logging,
+          logging.INFO,
           "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=h2d"
           " elapsed_s=%.3f timeout=%s workers=%d failures=%d",
-          round_index,
-          req_id,
-          t_h2d_s,
-          _format_timeout(self._timeouts.h2d),
-          len(destinations),
-          len(h2d_failures),
+          "wsync_phase",
+          text_args=(
+              round_index,
+              req_id,
+              t_h2d_s,
+              _format_timeout(self._timeouts.h2d),
+              len(destinations),
+              len(h2d_failures),
+          ),
+          names=(
+              "round", "req_id", "elapsed_s", "timeout", "workers", "failures",
+          ),
+          phase="h2d",
       )
       if h2d_failures:
         # Staging-only H2D means the serving copy is untouched everywhere,
@@ -1989,15 +2083,24 @@ class WeightSyncCoordinator:
       )
       t_post_s = time.monotonic() - t_phase
       failed_posts = [(d, e) for d, e in post_results if e is not None]
-      logging.info(
+      events.log_and_emit(
+          logging,
+          logging.INFO,
           "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=post"
           " elapsed_s=%.3f timeout=%s workers=%d failures=%d",
-          round_index,
-          req_id,
-          t_post_s,
-          _format_timeout(self._timeouts.post),
-          len(destinations),
-          len(failed_posts),
+          "wsync_phase",
+          text_args=(
+              round_index,
+              req_id,
+              t_post_s,
+              _format_timeout(self._timeouts.post),
+              len(destinations),
+              len(failed_posts),
+          ),
+          names=(
+              "round", "req_id", "elapsed_s", "timeout", "workers", "failures",
+          ),
+          phase="post",
       )
       if failed_posts:
         state = await self._resolve_post_failures(
@@ -2232,14 +2335,21 @@ class WeightSyncCoordinator:
                 error,
             )
         t_release_s = time.monotonic() - t_rel_start
-        logging.info(
+        events.log_and_emit(
+            logging,
+            logging.INFO,
             "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=release"
             " elapsed_s=%.3f timeout=%s workers=%d",
-            round_index,
-            req_id,
-            t_release_s,
-            _format_timeout(self._timeouts.release),
-            len(sources),
+            "wsync_phase",
+            text_args=(
+                round_index,
+                req_id,
+                t_release_s,
+                _format_timeout(self._timeouts.release),
+                len(sources),
+            ),
+            names=("round", "req_id", "elapsed_s", "timeout", "workers"),
+            phase="release",
         )
       else:
         logging.error(
@@ -2248,33 +2358,47 @@ class WeightSyncCoordinator:
             round_index,
         )
       t_e2e_s = time.monotonic() - t_round_start
-      logging.info(
+      events.log_and_emit(
+          logging,
+          logging.INFO,
           "WEIGHT_SYNC_PROFILE round=%d req_id=%s policy_version=%d"
           " state=%s bind_s=%.3f metadata_s=%.3f source_prepare_s=%.3f"
           " register_s=%.3f pre_s=%.3f transfer_s=%.3f h2d_s=%.3f"
           " post_s=%.3f abort_s=%.3f release_s=%.3f"
           " prepare_write_s=%.3f h2d_read_s=%.3f post_verify_s=%.3f"
           " e2e_s=%.3f",
-          round_index,
-          req_id,
-          policy_version,
-          state.value,
-          t_bind_s,
-          t_metadata_s,
-          t_source_prepare_s,
-          t_register_s,
-          t_pre_s,
-          t_transfer_s,
-          t_h2d_s,
-          t_post_s,
-          self._current_round_abort_s,
-          t_release_s,
-          t_prepare_s,
-          t_h2d_s,
-          t_post_s,
-          t_e2e_s,
+          "wsync_round",
+          text_args=(
+              round_index,
+              req_id,
+              policy_version,
+              state.value,
+              t_bind_s,
+              t_metadata_s,
+              t_source_prepare_s,
+              t_register_s,
+              t_pre_s,
+              t_transfer_s,
+              t_h2d_s,
+              t_post_s,
+              self._current_round_abort_s,
+              t_release_s,
+              t_prepare_s,
+              t_h2d_s,
+              t_post_s,
+              t_e2e_s,
+          ),
+          names=(
+              "round", "req_id", "policy_version", "state", "bind_s",
+              "metadata_s", "source_prepare_s", "register_s", "pre_s",
+              "transfer_s", "h2d_s", "post_s", "abort_s", "release_s",
+              "prepare_write_s", "h2d_read_s", "post_verify_s", "e2e_s",
+          ),
+          **(self._events_dest_fields(destination_units) if events.ON else {}),
       )
-      logging.info(
+      events.log_and_emit(
+          logging,
+          logging.INFO,
           "WEIGHT_SYNC_PHASE_TIMINGS round=%d req_id=%s"
           " policy_version=%d state=%s"
           " bind=%.3fs(timeout=%s,WEIGHT_SYNC_BIND_TIMEOUT_S)"
@@ -2288,31 +2412,56 @@ class WeightSyncCoordinator:
           " abort=%.3fs(timeout=%s,WEIGHT_SYNC_ABORT_TIMEOUT_S)"
           " release=%.3fs(timeout=%s,WEIGHT_SYNC_RELEASE_TIMEOUT_S)"
           " e2e=%.3fs",
-          round_index,
-          req_id,
-          policy_version,
-          state.value,
-          t_bind_s,
-          _format_timeout(self._timeouts.bind),
-          t_metadata_s,
-          _format_timeout(self._timeouts.metadata),
-          t_source_prepare_s,
-          _format_timeout(self._timeouts.source_prepare),
-          t_register_s,
-          t_pre_s,
-          _format_timeout(self._timeouts.pre),
-          t_transfer_s,
-          _format_timeout(self._timeouts.transfer),
-          t_h2d_s,
-          _format_timeout(self._timeouts.h2d),
-          t_post_s,
-          _format_timeout(self._timeouts.post),
-          self._current_round_abort_s,
-          _format_timeout(self._timeouts.abort),
-          t_release_s,
-          _format_timeout(self._timeouts.release),
-          t_e2e_s,
+          "wsync_timings",
+          text_args=(
+              round_index,
+              req_id,
+              policy_version,
+              state.value,
+              t_bind_s,
+              _format_timeout(self._timeouts.bind),
+              t_metadata_s,
+              _format_timeout(self._timeouts.metadata),
+              t_source_prepare_s,
+              _format_timeout(self._timeouts.source_prepare),
+              t_register_s,
+              t_pre_s,
+              _format_timeout(self._timeouts.pre),
+              t_transfer_s,
+              _format_timeout(self._timeouts.transfer),
+              t_h2d_s,
+              _format_timeout(self._timeouts.h2d),
+              t_post_s,
+              _format_timeout(self._timeouts.post),
+              self._current_round_abort_s,
+              _format_timeout(self._timeouts.abort),
+              t_release_s,
+              _format_timeout(self._timeouts.release),
+              t_e2e_s,
+          ),
+          names=(
+              "round", "req_id", "policy_version", "state", "bind_s",
+              "bind_timeout", "metadata_s", "metadata_timeout",
+              "source_prepare_s", "source_prepare_timeout", "register_s",
+              "pre_s", "pre_timeout", "transfer_s", "transfer_timeout", "h2d_s",
+              "h2d_timeout", "post_s", "post_timeout", "abort_s",
+              "abort_timeout", "release_s", "release_timeout", "e2e_s",
+          ),
       )
+
+  def _events_dest_fields(
+      self, destination_units: Sequence[weight_sync.WorkUnitId]
+  ) -> dict[str, Any]:
+    """`wsync_round` fields on the destination set (called only when events are on).
+
+    `dest_set_hash` hashes the sorted units; `dest_changed` compares it with
+    the previous round's (False on the first round this process logs).
+    """
+    key = "\n".join(sorted(str(u) for u in destination_units))
+    h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+    prev = getattr(self, "_events_prev_dest_hash", None)
+    self._events_prev_dest_hash = h
+    return {"dest_set_hash": h, "dest_changed": prev is not None and prev != h}
 
   async def _resolve_post_failures(
       self,
