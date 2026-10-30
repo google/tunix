@@ -167,7 +167,11 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         ]
     )
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
+    # Trainer counters restored from a checkpoint, used to fast-forward the
+    # input iterator once on the first training `_prepare_data` call.
     self._last_iter_step = self.rl_engine.actor_trainer.iter_steps
+    self._restored_train_steps = self.rl_engine.actor_trainer.train_steps
+    self._fast_forward_pending = True
 
     self._rollout_micro_batch_size = (
         self._training_config.rollout_micro_batch_size
@@ -294,6 +298,40 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
     return produced
 
+  def _num_micro_batches_to_skip(
+      self, steps_per_mini_batch: int, num_iterations: int
+  ) -> int:
+    """Returns the number of input micro-batches consumed before the checkpoint.
+
+    The trainer counters do not count input micro-batches: each mini-batch is
+    trained on `num_iterations` times, so the counters advance `num_iterations`
+    times faster than the input iterator. The result is rounded down to a
+    mini-batch boundary since rollouts are not checkpointed; a checkpoint saved
+    between the `num_iterations` passes over a mini-batch replays it.
+
+    Args:
+      steps_per_mini_batch: Input micro-batches per mini-batch.
+      num_iterations: Passes over each mini-batch (`batch_repeat`).
+
+    Raises:
+      ValueError: If `steps_per_mini_batch` or `num_iterations` is not positive.
+    """
+    if steps_per_mini_batch <= 0 or num_iterations <= 0:
+      raise ValueError(
+          "Expected positive steps_per_mini_batch and num_iterations, got"
+          f" {steps_per_mini_batch=} and {num_iterations=}. Check that"
+          " mini_batch_size >= train_micro_batch_size and num_iterations >= 1."
+      )
+    if self._packing_enabled:
+      # Packed row counts vary, but each pass over a mini-batch is exactly one
+      # optimizer update.
+      completed = self._restored_train_steps
+      per_mini_batch = num_iterations
+    else:
+      completed = self._last_iter_step
+      per_mini_batch = steps_per_mini_batch * num_iterations
+    return (completed // per_mini_batch) * steps_per_mini_batch
+
   def _prepare_data(
       self,
       iterator: Iterator[TrainingInputT],
@@ -419,16 +457,20 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         pending_examples.clear()
 
     try:
-      while True:
-        while (
-            mode == rl_engine_lib.Mode.TRAIN
-            and self._iter_steps < self._last_iter_step
-        ):  # fast forward the iterator if loading from a previous checkpoint.
+      if mode == rl_engine_lib.Mode.TRAIN and self._fast_forward_pending:
+        # Fast forward the iterator if loading from a previous checkpoint.
+        self._fast_forward_pending = False
+        num_to_skip = self._num_micro_batches_to_skip(
+            proceed_num_steps, batch_repeat
+        )
+        for _ in range(num_to_skip):
           next(iterator)
-          self._iter_steps += 1
-          if self._iter_steps == self._last_iter_step:
-            logging.info("Fast forwarded %d micro-batches.", self._iter_steps)
+        if num_to_skip:
+          logging.info("Fast forwarded %d micro-batches.", num_to_skip)
+        # Match the value `_run_global_step` syncs from the trainer.
+        self._iter_steps = max(self._iter_steps, self._last_iter_step)
 
+      while True:
         with self.rl_engine.perf.span(
             "data_loading"
         ), self.rl_engine.perf_v2.span(
