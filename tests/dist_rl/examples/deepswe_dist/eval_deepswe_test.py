@@ -140,13 +140,19 @@ class EvalDeepSWETest(unittest.TestCase):
         del timeout_s
         request_id = responses.pop(0)
         self.pending.remove(request_id)
-        return SimpleNamespace(
-            request_id=request_id,
-            unwrap=lambda: {
-                "reward": 0.0, "num_steps": 1, "status": "SUCCEEDED",
-                "guard_blocked_steps": 0, "guard_reasons": [], "error": None,
-            },
-        )
+        return [
+            SimpleNamespace(
+                request_id=request_id,
+                unwrap=lambda: {
+                    "reward": 0.0,
+                    "num_steps": 1,
+                    "status": "SUCCEEDED",
+                    "guard_blocked_steps": 0,
+                    "guard_reasons": [],
+                    "error": None,
+                },
+            )
+        ]
 
     handle = FakeHandle()
     handle.assert_fields = []
@@ -178,13 +184,19 @@ class EvalDeepSWETest(unittest.TestCase):
 
       async def poll_responses(self, timeout_s):
         del timeout_s
-        return SimpleNamespace(
-            request_id="eval_0",
-            unwrap=lambda: {
-                "reward": 1.0, "num_steps": 2, "status": "SUCCEEDED",
-                "guard_blocked_steps": 0, "guard_reasons": [], "error": None,
-            },
-        )
+        return [
+            SimpleNamespace(
+                request_id="eval_0",
+                unwrap=lambda: {
+                    "reward": 1.0,
+                    "num_steps": 2,
+                    "status": "SUCCEEDED",
+                    "guard_blocked_steps": 0,
+                    "guard_reasons": [],
+                    "error": None,
+                },
+            )
+        ]
 
       async def close(self):
         pass

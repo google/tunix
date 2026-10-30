@@ -447,8 +447,9 @@ class TaskSessionTest(parameterized.TestCase):
         await self.poll_event.wait()
         self.poll_event.clear()
         if self.responses:
-          return self.responses.pop(0)
+          return [self.responses.pop(0)]
         await asyncio.sleep(100)
+        return []
 
     async def _run():
       handle = OutOfOrderHandle()
@@ -498,7 +499,7 @@ class TaskSessionTest(parameterized.TestCase):
 
       async def poll_responses(self, timeout_s=50.0):
         await asyncio.sleep(timeout_s)
-        return None
+        return []
 
     async def _run():
       h1, h2 = CaptureHandle(), CaptureHandle()
@@ -532,9 +533,11 @@ class TaskSessionTest(parameterized.TestCase):
       async def poll_responses(self, timeout_s=50.0):
         self.poll_calls += 1
         if self._items:
-          return self._items.pop(0)
+          batch = list(self._items)
+          self._items.clear()
+          return batch
         await asyncio.sleep(timeout_s)
-        return None
+        return []
 
     async def _run():
       busy_handle = FastBatchHandle([
@@ -614,7 +617,7 @@ class TaskSessionTest(parameterized.TestCase):
 
       async def poll_responses(self, timeout_s=50.0):
         await asyncio.sleep(timeout_s)
-        return None
+        return []
 
     async def _run():
       handle = CrashingHandle()
@@ -673,8 +676,8 @@ class TaskSessionTest(parameterized.TestCase):
   def test_task_session_rejects_unknown_or_missing_request_id(self):
     class CorruptedIdHandle(remote_lib.ActorHandle):
 
-      def __init__(self, response_id: str):
-        self._response_id = response_id
+      def __init__(self, responses):
+        self._responses = list(responses)
         self._returned = False
 
       def submit(self, method_name=None, *args, **kwargs):
@@ -692,15 +695,17 @@ class TaskSessionTest(parameterized.TestCase):
       async def poll_responses(self, timeout_s=50.0):
         if not self._returned:
           self._returned = True
-          return remote_lib.ExecutionResponse(
-              request_id=self._response_id, result="stale_or_corrupted"
-          )
+          return list(self._responses)
         await asyncio.sleep(timeout_s)
-        return None
+        return []
 
     async def _run():
       for bad_id in ("unknown_req_id", ""):
-        handle = CorruptedIdHandle(bad_id)
+        handle = CorruptedIdHandle([
+            remote_lib.ExecutionResponse(
+                request_id=bad_id, result="stale_or_corrupted"
+            )
+        ])
         async with task_session.TaskSession([handle]) as session:
           await session.submit("req_1", "generate")
           batch = await session.poll_completed(timeout_s=1.0)
@@ -708,7 +713,22 @@ class TaskSessionTest(parameterized.TestCase):
           res, exc = batch[0]
           self.assertIsNone(res)
           self.assertIsInstance(exc, RuntimeError)
-          self.assertIn("unknown or missing request_id", str(exc))
+          self.assertIn("unknown, missing, or duplicate request_id", str(exc))
+
+      # Duplicate request_id within the same batch must also be rejected before
+      # mutating dispatched_map.
+      dup_handle = CorruptedIdHandle([
+          remote_lib.ExecutionResponse(request_id="req_1", result="ok_1"),
+          remote_lib.ExecutionResponse(request_id="req_1", result="dup_1"),
+      ])
+      async with task_session.TaskSession([dup_handle]) as session:
+        await session.submit("req_1", "generate")
+        batch = await session.poll_completed(timeout_s=1.0)
+        self.assertLen(batch, 1)
+        res, exc = batch[0]
+        self.assertIsNone(res)
+        self.assertIsInstance(exc, RuntimeError)
+        self.assertIn("unknown, missing, or duplicate request_id", str(exc))
 
     asyncio.run(_run())
 
@@ -749,9 +769,11 @@ class TaskSessionTest(parameterized.TestCase):
         if self.failures_remaining > 0:
           self.failures_remaining -= 1
           raise remote_lib.TransientTransportError("transient UNAVAILABLE")
-        return remote_lib.ExecutionResponse(
-            request_id="req_1", result="recovered_ok"
-        )
+        return [
+            remote_lib.ExecutionResponse(
+                request_id="req_1", result="recovered_ok"
+            )
+        ]
 
     async def _run():
       handle = FlakyPollHandle(failures_before_success=3)
@@ -817,9 +839,11 @@ class TaskSessionTest(parameterized.TestCase):
         async def poll_responses(self, timeout_s=50.0):
           del timeout_s
           await release_healthy.wait()
-          return remote_lib.ExecutionResponse(
-              request_id="req_healthy", result="healthy_ok"
-          )
+          return [
+              remote_lib.ExecutionResponse(
+                  request_id="req_healthy", result="healthy_ok"
+              )
+          ]
 
       healthy = HealthyParkedHandle()
       async with task_session.TaskSession(
@@ -952,19 +976,23 @@ class TaskSessionTest(parameterized.TestCase):
 
       def __init__(self):
         # Burst 1: err1 at t=100.0, err2 at t=102.0 (elapsed=2.0s < 3.0s budget)
-        # -> empty poll (None) at t=103.0 resets outage_start.
+        # -> empty poll ([]) at t=103.0 resets outage_start.
         # Burst 2: err1 at t=104.0, err2 at t=106.0 (elapsed=2.0s < 3.0s budget;
-        # would be 6.0s >= 3.0s budget if None had not reset outage_start!)
+        # would be 6.0s >= 3.0s budget if [] had not reset outage_start!)
         # -> real response succeeds.
         self._script = [
             (0.0, remote_lib.TransientTransportError("burst1_err1")),
             (2.0, remote_lib.TransientTransportError("burst1_err2")),
-            (1.0, None),
+            (1.0, []),
             (1.0, remote_lib.TransientTransportError("burst2_err1")),
             (2.0, remote_lib.TransientTransportError("burst2_err2")),
             (
                 1.0,
-                remote_lib.ExecutionResponse(request_id="req_1", result="done"),
+                [
+                    remote_lib.ExecutionResponse(
+                        request_id="req_1", result="done"
+                    )
+                ],
             ),
         ]
 
@@ -1067,7 +1095,7 @@ class TaskSessionTest(parameterized.TestCase):
         self.calls += 1
         if self.calls <= 1030:
           raise remote_lib.TransientTransportError(f"err_{self.calls}")
-        return remote_lib.ExecutionResponse(request_id="req_1", result="ok")
+        return [remote_lib.ExecutionResponse(request_id="req_1", result="ok")]
 
     # 2. Verify that if session._closed becomes True while poll_responses is
     # raising TransientTransportError, _poll_worker_loop breaks cleanly without
@@ -1253,7 +1281,7 @@ class TaskSessionTest(parameterized.TestCase):
 
       async def poll_responses(self, timeout_s=50.0):
         await asyncio.sleep(timeout_s)
-        return None
+        return []
 
     async def _run():
       bad_handle = DeadOnDispatchHandle()
@@ -1325,7 +1353,7 @@ class TaskSessionTest(parameterized.TestCase):
         return request_id or ""
 
       async def poll_responses(self, timeout_s=50.0):
-        return await asyncio.wait_for(self._queue.get(), timeout=timeout_s)
+        return [await asyncio.wait_for(self._queue.get(), timeout=timeout_s)]
 
     async def _run():
       handle = ConditionalDispatchHandle()
@@ -1383,7 +1411,7 @@ class TaskSessionTest(parameterized.TestCase):
         return request_id or ""
 
       async def poll_responses(self, timeout_s=50.0):
-        return await asyncio.wait_for(self._queue.get(), timeout=timeout_s)
+        return [await asyncio.wait_for(self._queue.get(), timeout=timeout_s)]
 
     async def _run():
       handle = RetryableErrorHandle()
@@ -1498,7 +1526,7 @@ class TaskSessionTest(parameterized.TestCase):
 
       async def poll_responses(self, timeout_s=50.0):
         await asyncio.sleep(timeout_s)
-        return None
+        return []
 
     async def _run():
       dead_handle = SimultaneousFailOnDispatchHandle()
@@ -1640,7 +1668,7 @@ class TaskSessionTest(parameterized.TestCase):
         if self.evicted:
           self.polls_after_eviction += 1
         await asyncio.sleep(timeout_s)
-        return None
+        return []
 
     async def _run():
       dead_handle = DeadWorkerHandle()
@@ -1712,7 +1740,7 @@ class TaskSessionTest(parameterized.TestCase):
 
       async def poll_responses(self, timeout_s=50.0):
         await asyncio.sleep(timeout_s)
-        return None
+        return []
 
       async def close(self) -> None:
         for pending in self._pending:

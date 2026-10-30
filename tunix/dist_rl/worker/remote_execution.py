@@ -46,6 +46,7 @@ import time
 import traceback as traceback_lib
 from typing import (
     Any,
+    AsyncGenerator,
     AsyncIterable,
     AsyncIterator,
     Callable,
@@ -65,6 +66,7 @@ import weakref
 
 from absl import logging
 import cloudpickle
+import numpy as np
 from tunix.dist_rl.worker import network
 
 try:
@@ -84,6 +86,10 @@ is_bulk_lz4_enabled = network.is_bulk_lz4_enabled
 set_bulk_lz4_enabled = network.set_bulk_lz4_enabled
 
 _BULK_CAPABILITY_METADATA = (("x-tunix-bulk", "1"),)
+_POLL_MAX_BATCH_SIZE: int = 16
+_POLL_MAX_BATCH_BYTES: int = 64 * 1024 * 1024
+_ESTIMATE_MAX_DEPTH: int = 8
+_ESTIMATE_MAX_CONTAINERS: int = 256
 OFFLOAD_TO_THREAD_ATTR = "_tunix_offload_to_thread"
 _F = TypeVar("_F", bound=Callable[..., Any])
 
@@ -250,6 +256,17 @@ class ExecutionResponse:
     self.traceback = traceback_lib.format_exc()
     self.retryable = False
 
+  def _ensure_serializable(self) -> None:
+    """Validates picklability and records a structured error if unserializable."""
+    try:
+      cloudpickle.dumps(
+          self._as_tuple(),
+          protocol=5,
+          buffer_callback=lambda pb: pb.release(),
+      )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      self._record_serialization_error(e)
+
   def _prepare_chunk_specs(
       self,
       chunk_size: int = network._STREAM_CHUNK_BYTES,  # pylint: disable=protected-access
@@ -270,6 +287,32 @@ class ExecutionResponse:
       self._record_serialization_error(e)
       return network._prepare_serialized_chunk_specs(
           self._as_tuple(), chunk_size=chunk_size
+      )
+    # pylint: enable=protected-access
+
+  @classmethod
+  def _prepare_batch_chunk_specs(
+      cls,
+      responses: Sequence["ExecutionResponse"],
+      chunk_size: int = network._STREAM_CHUNK_BYTES,  # pylint: disable=protected-access
+  ) -> Tuple[
+      int,
+      bytes,
+      List[memoryview],  # pylint: disable=g-bare-generic
+      List[pickle.PickleBuffer],
+      Iterator[network._ChunkSpec],  # pylint: disable=protected-access
+  ]:
+    """Prepares serialized views and chunk specs for a response batch."""
+    # pylint: disable=protected-access
+    try:
+      return network._prepare_serialized_chunk_specs(
+          tuple(r._as_tuple() for r in responses), chunk_size=chunk_size
+      )
+    except Exception:  # pylint: disable=broad-exception-caught
+      for r in responses:
+        r._ensure_serializable()
+      return network._prepare_serialized_chunk_specs(
+          tuple(r._as_tuple() for r in responses), chunk_size=chunk_size
       )
     # pylint: enable=protected-access
 
@@ -319,6 +362,40 @@ class ExecutionResponse:
     # pylint: enable=protected-access
 
   @classmethod
+  async def serialize_batch_async_chunks(
+      cls,
+      responses: Sequence["ExecutionResponse"],
+      chunk_size: int = network._STREAM_CHUNK_BYTES,  # pylint: disable=protected-access
+      *,
+      bulk_server: Optional[network._BulkTransferServer] = None,  # pylint: disable=protected-access
+  ) -> AsyncGenerator[bytes, None]:
+    """Serializes a batch of responses into an async stream of Pickle Protocol 5 chunks."""
+    # pylint: disable=protected-access
+    total_bytes, manifest, views, raw_buffers, spec_iter = (
+        cls._prepare_batch_chunk_specs(responses, chunk_size=chunk_size)
+    )
+    if (
+        bulk_server is not None
+        and bulk_server.port > 0
+        and network._can_use_bulk_transfer(total_bytes, views)
+    ):
+      inner_stream = network._stream_bulk_pull_chunks(
+          views, raw_buffers, bulk_server
+      )
+    else:
+      inner_stream = network._iter_async_from_chunk_specs(
+          manifest,
+          views,
+          raw_buffers,
+          spec_iter,
+          offload=total_bytes >= network._ASYNC_OFFLOAD_THRESHOLD_BYTES,
+      )
+    async with contextlib.aclosing(inner_stream) as stream:
+      async for chunk in stream:
+        yield chunk
+    # pylint: enable=protected-access
+
+  @classmethod
   def deserialize_chunks(cls, chunks: Iterable[bytes]) -> "ExecutionResponse":
     """Deserializes an ExecutionResponse from a synchronous stream of chunks."""
     # SECURITY WARNING: cloudpickle.loads executes arbitrary code during
@@ -352,6 +429,31 @@ class ExecutionResponse:
     )
     return None if unpacked is None else cls(*unpacked)
 
+  @classmethod
+  async def deserialize_batch_async_chunks(
+      cls,
+      chunks: AsyncIterable[bytes],
+      *,
+      allow_empty: bool = False,
+      bulk_hosts: Sequence[str] = ("localhost",),
+      seen_bulk_targets: Optional[Set[Tuple[str, int]]] = None,
+  ) -> List["ExecutionResponse"]:
+    """Deserializes a batch of ExecutionResponses from an async stream of chunks."""
+    unpacked = await network._deserialize_from_async_chunks(  # pylint: disable=protected-access
+        chunks,
+        allow_empty=allow_empty,
+        bulk_hosts=bulk_hosts,
+        seen_bulk_targets=seen_bulk_targets,
+    )
+    if unpacked is None:
+      return []
+    if not isinstance(unpacked, (tuple, list)):
+      raise ValueError(
+          "Expected unpacked response batch to be a tuple or list, got"
+          f" {type(unpacked).__name__}."
+      )
+    return [cls(*item) for item in unpacked]
+
   def unwrap(self) -> Any:
     """Returns the result, or raises RuntimeError if the remote call failed."""
     if self.error_message is not None:
@@ -362,6 +464,50 @@ class ExecutionResponse:
         message = f"{message}\nRemote traceback:\n{self.traceback}"
       raise RuntimeError(message)
     return self.result
+
+
+def _estimate_response_bytes(
+    resp: ExecutionResponse,
+    *,
+    max_depth: int = _ESTIMATE_MAX_DEPTH,
+    max_containers: int = _ESTIMATE_MAX_CONTAINERS,
+) -> int:
+  """Fast bounded byte-size estimate of an ExecutionResponse payload."""
+  total = 256
+  if resp.error_message:
+    total += len(resp.error_message)
+  if resp.traceback:
+    total += len(resp.traceback)
+  stack: List[Tuple[Any, int]] = [(resp.result, 0)]
+  containers_seen = 0
+  while stack and containers_seen < max_containers:
+    obj, depth = stack.pop()
+    if obj is None or isinstance(obj, (int, float, bool)):
+      continue
+    if isinstance(obj, np.ndarray):
+      total += int(obj.nbytes)
+    elif isinstance(obj, (bytes, bytearray, memoryview, str)):
+      total += len(obj)
+    elif depth < max_depth:
+      containers_seen += 1
+      if isinstance(obj, dict):
+        for k, v in obj.items():
+          if isinstance(k, (str, bytes)):
+            total += len(k)
+          stack.append((v, depth + 1))
+      elif isinstance(obj, (list, tuple)):
+        if (
+            len(obj) > 32
+            and isinstance(obj[0], (int, float, bool))
+            and isinstance(obj[-1], (int, float, bool))
+        ):
+          total += len(obj) * 8
+        else:
+          for item in obj:
+            stack.append((item, depth + 1))
+      elif hasattr(obj, "__dict__"):
+        stack.append((vars(obj), depth + 1))
+  return total
 
 
 class RemoteExecutionServer(abc.ABC):
@@ -452,7 +598,7 @@ class RemoteExecutionServer(abc.ABC):
   async def poll_response(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
   ) -> Optional[ExecutionResponse]:
-    """Long-polls server-side response queue for completed task results."""
+    """Long-polls server-side response queue for a single completed task result."""
     try:
       if timeout_s == 0.0:
         return self._get_response_queue().get_nowait()
@@ -461,6 +607,49 @@ class RemoteExecutionServer(abc.ABC):
       )
     except (asyncio.TimeoutError, asyncio.QueueEmpty):
       return None
+
+  def _requeue_at_head(self, items: Sequence[ExecutionResponse]) -> None:
+    """Re-enqueues `items` at the head of `_response_queue` in FIFO order."""
+    if not items:
+      return
+    q = self._get_response_queue()
+    existing_qsize = q.qsize()
+    for item in items:
+      q.put_nowait(item)
+    for _ in range(existing_qsize):
+      q.put_nowait(q.get_nowait())
+
+  async def poll_responses(
+      self,
+      timeout_s: float = LONG_POLL_TIMEOUT_S,
+      *,
+      max_batch_size: int = _POLL_MAX_BATCH_SIZE,
+      max_batch_bytes: int = _POLL_MAX_BATCH_BYTES,
+  ) -> List[ExecutionResponse]:
+    """Long-polls for the first completed response, then drains ready responses up to bounds."""
+    if max_batch_size <= 0:
+      raise ValueError(
+          f"max_batch_size must be positive, got {max_batch_size}."
+      )
+    if max_batch_bytes <= 0:
+      raise ValueError(
+          f"max_batch_bytes must be positive, got {max_batch_bytes}."
+      )
+    first = await self.poll_response(timeout_s=timeout_s)
+    if first is None:
+      return []
+    batch: List[ExecutionResponse] = [first]
+    batch_bytes = _estimate_response_bytes(first)
+    q = self._get_response_queue()
+    while len(batch) < max_batch_size and not q.empty():
+      next_resp = q.get_nowait()
+      next_bytes = _estimate_response_bytes(next_resp)
+      if batch_bytes + next_bytes > max_batch_bytes:
+        self._requeue_at_head((next_resp,))
+        break
+      batch.append(next_resp)
+      batch_bytes += next_bytes
+    return batch
 
   def register_instance(self, instance: Any) -> None:
     """Binds a local Python object (e.g., RolloutWorkerService, TrainerWorker) to the server."""
@@ -704,8 +893,8 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
         if request_bytes
         else LONG_POLL_TIMEOUT_S
     )
-    response = await self.poll_response(timeout_s=timeout_s)
-    if response is None:
+    responses = await self.poll_responses(timeout_s=timeout_s)
+    if not responses:
       return
     completed = False
     # pylint: disable=protected-access
@@ -715,16 +904,20 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     use_bulk = self._enable_bulk_transport and _client_supports_bulk(context)
     network._inc_active_poll_rpcs()
     try:
-      async for chunk in response.serialize_async_chunks(
-          chunk_size=poll_chunk_bytes,
-          bulk_server=self._bulk_server if use_bulk else None,
-      ):
-        yield chunk
+      async with contextlib.aclosing(
+          ExecutionResponse.serialize_batch_async_chunks(
+              responses,
+              chunk_size=poll_chunk_bytes,
+              bulk_server=self._bulk_server if use_bulk else None,
+          )
+      ) as chunk_stream:
+        async for chunk in chunk_stream:
+          yield chunk
       completed = True
     finally:
       network._dec_active_poll_rpcs()
       if not completed:
-        self._get_response_queue().put_nowait(response)
+        self._requeue_at_head(responses)
     # pylint: enable=protected-access
 
   async def start_serving_async(self, port: int = 50051) -> Any:
@@ -911,8 +1104,8 @@ class ActorHandle(abc.ABC):
   @abc.abstractmethod
   async def poll_responses(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
-  ) -> Optional[ExecutionResponse]:
-    """Long-polls remote server response queue for completed result."""
+  ) -> List[ExecutionResponse]:
+    """Long-polls remote server response queue for completed results."""
     pass
 
   async def close(self) -> None:
@@ -984,7 +1177,7 @@ class RemoteActorHandle(ActorHandle):
 
   async def poll_responses(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
-  ) -> Optional[ExecutionResponse]:
+  ) -> List[ExecutionResponse]:
     del timeout_s
     raise NotImplementedError(
         f"Remote execution over {self.target_address} not initialized."
@@ -1603,7 +1796,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
 
   async def poll_responses(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
-  ) -> Optional[ExecutionResponse]:
+  ) -> List[ExecutionResponse]:
     """Long-polls remote server response queue for completed task results."""
     await self._ensure_async_channel()
     assert self._poll_rpc is not None
@@ -1613,7 +1806,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       call_kwargs["metadata"] = _BULK_CAPABILITY_METADATA
     call = self._poll_rpc(timeout_s, **call_kwargs)
     try:
-      return await ExecutionResponse.deserialize_async_chunks(
+      return await ExecutionResponse.deserialize_batch_async_chunks(
           call,
           allow_empty=True,
           bulk_hosts=self._active_bulk_hosts,
@@ -1757,9 +1950,9 @@ class InProcessActorHandle(ActorHandle):
 
   async def poll_responses(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
-  ) -> Optional[ExecutionResponse]:
+  ) -> List[ExecutionResponse]:
     """Long-polls bound server's response queue for completed results."""
-    return await self.server.poll_response(timeout_s=timeout_s)
+    return await self.server.poll_responses(timeout_s=timeout_s)
 
   async def _run_async(self, request: ExecutionRequest) -> Any:
     response = await self.server.execute_request(request)

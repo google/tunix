@@ -49,7 +49,7 @@ class MockActorHandle(mock.MagicMock):
       val = self.poll_responses.return_value
       if val is None or val == [] or isinstance(val, mock.MagicMock):
         await asyncio.sleep(min(timeout_s, 0.05))
-        return None
+        return []
       self.poll_responses.return_value = None
       req_id = (
           self._dispatched_request_ids.popleft()
@@ -59,8 +59,8 @@ class MockActorHandle(mock.MagicMock):
       if isinstance(val, remote_execution.ExecutionResponse):
         if not val.request_id and req_id:
           val.request_id = req_id
-        return val
-      return remote_execution.ExecutionResponse(request_id=req_id, result=val)
+        return [val]
+      return [remote_execution.ExecutionResponse(request_id=req_id, result=val)]
 
     self.generate = mock.AsyncMock()
     self.poll_responses = mock.AsyncMock(
@@ -1938,13 +1938,13 @@ class DistributedRLEngineTest(absltest.TestCase):
           resp1.request_id = (
               self.mock_rollout_1._dispatched_request_ids.popleft()
           )
-          return resp1
+          return [resp1]
         await asyncio.sleep(timeout_s)
-        return None
+        return []
 
       async def _slow_poll(timeout_s=50.0):
         await asyncio.sleep(timeout_s)
-        return None
+        return []
 
       self.mock_rollout_1.poll_responses.side_effect = _fast_poll
       self.mock_rollout_2.poll_responses.side_effect = _slow_poll

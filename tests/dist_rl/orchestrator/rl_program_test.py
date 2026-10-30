@@ -108,15 +108,17 @@ class _MockWorkerHandle(mock.MagicMock):
 
   async def poll_responses(
       self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
-  ) -> Any:
-    """Pops queued rollout responses, or returns None if no responses are ready."""
+  ) -> list[remote_execution.ExecutionResponse]:
+    """Pops queued rollout responses, or returns [] if no responses are ready."""
     del timeout_s
     if self.responses and self._pending_request_ids:
       items = self.responses.pop(0)
       req_id = self._pending_request_ids.pop(0)
-      return remote_execution.ExecutionResponse(request_id=req_id, result=items)
+      return [
+          remote_execution.ExecutionResponse(request_id=req_id, result=items)
+      ]
     await asyncio.sleep(0.01)
-    return None
+    return []
 
   async def asubmit(
       self, method_name: str | None = None, *args: Any, **kwargs: Any

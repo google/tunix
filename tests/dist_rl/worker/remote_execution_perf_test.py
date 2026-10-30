@@ -754,9 +754,9 @@ class RemoteExecutionPerfTest(absltest.TestCase):
         ) -> dict[str, Any]:
           req_id = await hdl.dispatch_task(f"req_{idx}", "generate_large", idx)
           self.assertEqual(req_id, f"req_{idx}")
-          resp = await hdl.poll_responses(timeout_s=300.0)
-          assert resp is not None
-          return resp.unwrap()
+          resps = await hdl.poll_responses(timeout_s=300.0)
+          self.assertLen(resps, 1)
+          return resps[0].unwrap()
 
         await asyncio.gather(
             *[_dispatch_and_poll(i, h) for i, h in enumerate(handles)]
@@ -1080,9 +1080,9 @@ class RemoteExecutionPerfTest(absltest.TestCase):
                 f"req_{idx}", "generate_large", idx
             )
             self.assertEqual(req_id, f"req_{idx}")
-            resp = await hdl.poll_responses(timeout_s=300.0)
-            assert resp is not None
-            return resp.unwrap()
+            resps = await hdl.poll_responses(timeout_s=300.0)
+            self.assertLen(resps, 1)
+            return resps[0].unwrap()
 
           def _start_control_pinger() -> (
               tuple[list[float], Callable[[], None], asyncio.Task[None]]
