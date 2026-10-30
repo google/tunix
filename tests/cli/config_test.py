@@ -895,53 +895,10 @@ class ConfigTest(parameterized.TestCase):
   ) -> config.HyperParameters:
     """Initializes from the default base YAML with the opt-in flags."""
     return config.initialize(
-        ["resolve_config", *overrides],
-        default_base_config=_BASE_YAML,
+        ["prog", str(_BASE_YAML), *overrides],
         merge_replace_keys=merge_replace_keys,
         validate_nested=validate_nested,
     )
-
-  def test_default_base_config_and_normalize_argv(self):
-    hp = config.initialize(
-        [
-            "resolve_config",
-            "model_config.model_name=qwen2.5-0.5b",
-            "model_config.model_source=maxtext",
-        ],
-        default_base_config=_BASE_YAML,
-    )
-    self.assertEqual(
-        hp.config_mapping("model_config")["model_name"], "qwen2.5-0.5b"
-    )
-    self.assertEqual(
-        hp.config_mapping("actor_model_config")["model_name"], "qwen2.5-0.5b"
-    )
-
-  @parameterized.named_parameters(
-      dict(testcase_name="flags_off", flags_on=False),
-      dict(testcase_name="flags_on", flags_on=True),
-  )
-  def test_default_base_config_matches_explicit_base(self, flags_on: bool):
-    ov = self.create_tempdir().create_file(
-        "ov.yaml", content="rollout_config:\n  temperature: 0.5\n"
-    )
-    overrides = [
-        f"override_config_file={ov.full_path}",
-        "model_config.model_name=qwen2.5-0.5b",
-        "model_config.model_source=maxtext",
-    ]
-    explicit = config.initialize(
-        ["resolve_config", str(_BASE_YAML), *overrides],
-        merge_replace_keys=flags_on,
-        validate_nested=flags_on,
-    )
-    default = config.initialize(
-        ["resolve_config", *overrides],
-        default_base_config=_BASE_YAML,
-        merge_replace_keys=flags_on,
-        validate_nested=flags_on,
-    )
-    self.assertEqual(explicit.config, default.config)
 
   def test_merge_replace_keys_and_multiple_override_files(self):
     tmp_dir = self.create_tempdir()
