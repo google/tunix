@@ -44,6 +44,9 @@ class ReferenceScoringCore(Protocol):
       pad_id: int,
       eos_id: int,
       temperature: float = 1.0,
+      segment_ids: jax.Array | None = None,
+      segment_positions: jax.Array | None = None,
+      token_mask: jax.Array | None = None,
   ) -> jax.Array:
     ...
 
@@ -156,8 +159,46 @@ class InferenceWorker(abstract_worker.Worker):
       if req.temperature <= 1e-5:
         raise ValueError("Temperature must be strictly positive.")
 
+      prompt_tokens = np.asarray(req.prompt_tokens)
+      completion_tokens = np.asarray(req.completion_tokens)
+      side_channels = {}
+      for name, dtype in (
+          ("token_mask", np.bool_),
+          ("segment_ids", np.int32),
+          ("segment_positions", np.int32),
+      ):
+        value = getattr(req, name)
+        if value is None:
+          continue
+        value = np.asarray(value, dtype=dtype)
+        if (
+            prompt_tokens.ndim != 2
+            or completion_tokens.ndim != 2
+            or completion_tokens.shape[0] != prompt_tokens.shape[0]
+            or value.shape
+            != (
+                prompt_tokens.shape[0],
+                prompt_tokens.shape[1] + completion_tokens.shape[1],
+            )
+        ):
+          raise ValueError(
+              f"{name} must match the full [B, prompt_len + completion_len]"
+              " token shape."
+          )
+        side_channels[name] = value
+      if ("segment_ids" in side_channels) != (
+          "segment_positions" in side_channels
+      ):
+        raise ValueError(
+            "segment_ids and segment_positions must be provided together."
+        )
+      if "token_mask" in side_channels and "segment_ids" in side_channels:
+        raise ValueError("Use packed segment metadata or token_mask, not both.")
+
       def _score(
-          prompt_chunk: np.ndarray, completion_chunk: np.ndarray
+          prompt_chunk: np.ndarray,
+          completion_chunk: np.ndarray,
+          *side_chunks: np.ndarray,
       ) -> jax.Array:
         return self._core.get_ref_per_token_logps(
             prompt_tokens=jnp.asarray(prompt_chunk, dtype=jnp.int32),
@@ -165,12 +206,18 @@ class InferenceWorker(abstract_worker.Worker):
             pad_id=self._pad_id,
             eos_id=self._eos_id,
             temperature=req.temperature,
+            **{
+                name: jnp.asarray(value)
+                for name, value in zip(side_channels, side_chunks, strict=True)
+            },
         )
 
-      prompt_tokens = np.asarray(req.prompt_tokens)
-      completion_tokens = np.asarray(req.completion_tokens)
       logps = batch_utils.apply_chunked(
-          _score, self._chunk_size, prompt_tokens, completion_tokens
+          _score,
+          self._chunk_size,
+          prompt_tokens,
+          completion_tokens,
+          *side_channels.values(),
       )
       return datatypes.LogprobsResponse(
           request_id=req.request_id,
@@ -194,12 +241,32 @@ class InferenceWorker(abstract_worker.Worker):
       temperature: float | None = None,
       model_role: str = "reference",
   ) -> np.ndarray:
-    """Scores reference log-probs for an already padded batch."""
+    """Scores reference log-probs for an assembled padded or packed batch."""
     if not isinstance(items, datatypes.RLTrainerPayload):
       raise TypeError(
-          "InferenceWorker.per_token_logps expects a padded RLTrainerPayload. "
-          "Pad trajectory items in BatchAssembler before scoring."
+          "InferenceWorker.per_token_logps expects an assembled"
+          " RLTrainerPayload. Assemble trajectory items in BatchAssembler"
+          " before scoring."
       )
+
+    token_mask = None
+    if items.completion_attention_mask is not None:
+      prompt_mask = np.asarray(items.prompt_mask, dtype=np.bool_)
+      completion_mask = np.asarray(
+          items.completion_attention_mask, dtype=np.bool_
+      )
+      if (
+          prompt_mask.shape != np.shape(items.prompt_ids)
+          or completion_mask.shape != np.shape(items.completion_ids)
+          or prompt_mask.ndim != 2
+          or completion_mask.ndim != 2
+          or prompt_mask.shape[0] != completion_mask.shape[0]
+      ):
+        raise ValueError(
+            "prompt_mask and completion_attention_mask must match their padded"
+            " token shapes."
+        )
+      token_mask = np.concatenate([prompt_mask, completion_mask], axis=1)
 
     req = datatypes.LogprobsRequest(
         request_id=request_id,
@@ -209,6 +276,9 @@ class InferenceWorker(abstract_worker.Worker):
             self._temperature if temperature is None else float(temperature)
         ),
         model_role=model_role,
+        segment_ids=items.segment_ids,
+        segment_positions=items.segment_positions,
+        token_mask=token_mask,
     )
     resp = self.compute_logps(req)
     if resp.error is not None:

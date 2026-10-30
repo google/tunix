@@ -150,9 +150,7 @@ class TrainerWorker(abstract_worker.Worker):
             trainer.with_loss_fn(*self._pending_loss_fn)
             self._pending_loss_fn = None
           if self._pending_gen_model_input_fn is not None:
-            trainer.with_gen_model_input_fn(
-                self._pending_gen_model_input_fn
-            )
+            trainer.with_gen_model_input_fn(self._pending_gen_model_input_fn)
             self._pending_gen_model_input_fn = None
           self._trainer = trainer
       self._last_error = None
@@ -381,6 +379,20 @@ class TrainerWorker(abstract_worker.Worker):
       batch_size = prompt.shape[0]
       if batch_size == 0:
         raise ValueError("per_token_logps requires a non-empty batch.")
+      token_mask = None
+      if items.token_mask is not None:
+        token_mask = np.asarray(items.token_mask, dtype=np.bool_)
+        if (
+            prompt.ndim != 2
+            or completion.ndim != 2
+            or completion.shape[0] != batch_size
+            or token_mask.shape
+            != (batch_size, prompt.shape[1] + completion.shape[1])
+        ):
+          raise ValueError(
+              "token_mask must match the full [B, prompt_len + completion_len]"
+              " token shape."
+          )
       temperature = (
           1.0 if items.temperature is None else float(items.temperature)
       )
@@ -420,6 +432,11 @@ class TrainerWorker(abstract_worker.Worker):
                 segment_ids=None if seg_ids is None else seg_ids[sl],
                 segment_positions=None if seg_pos is None else seg_pos[sl],
                 routed_experts=None if routed is None else routed[sl],
+                **(
+                    {"token_mask": token_mask[sl]}
+                    if token_mask is not None
+                    else {}
+                ),
             )
         )
       result = np.asarray(jnp.concatenate(outs, axis=0), dtype=np.float32)

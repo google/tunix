@@ -73,6 +73,16 @@ SEED=${SEED:-42}
 SHUFFLE=${SHUFFLE:-true}
 BETA=${BETA:-0.04}
 EPSILON=${EPSILON:-0.2}
+TEMPERATURE=${TEMPERATURE:-1.0}
+TOP_P=${TOP_P:-1.0}
+TOP_K=${TOP_K:--1}
+OPD_TEACHER_URL=${OPD_TEACHER_URL:-}
+OPD_TEACHER_TOKENIZER_PATH=${OPD_TEACHER_TOKENIZER_PATH:-}
+OPD_TEACHER_REVISION=${OPD_TEACHER_REVISION:-}
+OPD_COEFFICIENT=${OPD_COEFFICIENT:-1.0}
+OPD_TASK_REWARD_COEFFICIENT=${OPD_TASK_REWARD_COEFFICIENT:-0.0}
+OPD_TEACHER_TIMEOUT_SECONDS=${OPD_TEACHER_TIMEOUT_SECONDS:-60.0}
+OPD_MAX_CONCURRENCY=${OPD_MAX_CONCURRENCY:-8}
 FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
 MAX_STALENESS=${MAX_STALENESS:-0}
 TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-trajectory_completion}
@@ -88,6 +98,10 @@ SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
+if [[ -n "$OPD_TEACHER_URL" && -z "$OPD_TEACHER_TOKENIZER_PATH" ]]; then
+  echo "Error: OPD_TEACHER_TOKENIZER_PATH is required with OPD_TEACHER_URL." >&2
+  exit 1
+fi
 CHAT_PARSER=${CHAT_PARSER:-raw}
 # Model-specific EOS token IDs (comma-separated), fetched from HuggingFace
 # `generation_config.json`. Empty string falls back to the tokenizer's default EOS token.
@@ -822,6 +836,10 @@ echo "Launching CPU orchestrator..."
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --beta="$BETA"
     --epsilon="$EPSILON"
+    --temperature="$TEMPERATURE"
+    --top_p="$TOP_P"
+    --top_k="$TOP_K"
+    --in_flight_weight_updates="$IN_FLIGHT_WEIGHT_UPDATES"
     --reward_mode="$REWARD_MODE"
     --max_staleness="$MAX_STALENESS"
     --trajectory_group_order="$TRAJECTORY_GROUP_ORDER"
@@ -832,6 +850,17 @@ echo "Launching CPU orchestrator..."
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --stop_workers_on_exit
   )
+  if [[ -n "$OPD_TEACHER_URL" ]]; then
+    ORCHESTRATOR_CMD+=(
+      --opd_teacher_url="$OPD_TEACHER_URL"
+      --opd_teacher_tokenizer_path="$OPD_TEACHER_TOKENIZER_PATH"
+      --opd_teacher_revision="$OPD_TEACHER_REVISION"
+      --opd_coefficient="$OPD_COEFFICIENT"
+      --opd_task_reward_coefficient="$OPD_TASK_REWARD_COEFFICIENT"
+      --opd_teacher_timeout_seconds="$OPD_TEACHER_TIMEOUT_SECONDS"
+      --opd_max_concurrency="$OPD_MAX_CONCURRENCY"
+    )
+  fi
   if [[ "$SHUFFLE" == "0" || "$SHUFFLE" == "false" || "$SHUFFLE" == "False" ]]; then
     ORCHESTRATOR_CMD+=(--no-shuffle)
   else

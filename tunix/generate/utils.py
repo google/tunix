@@ -32,6 +32,61 @@ import jax.numpy as jnp
 import numpy as np
 
 
+def validate_unfiltered_sampling(params: Mapping[str, Any] | Any) -> None:
+  """Checks the effective sampler distribution required by sampled-token OPD.
+
+  Call after backend defaults and user overrides have been resolved. Checking
+  only request fields misses model generation-config defaults such as min-p
+  or repetition penalties. Stopping criteria may remain, but no token may be
+  suppressed, reweighted, forced, or selected by best-of/beam search.
+  """
+
+  def get(name: str, default: Any = None) -> Any:
+    if isinstance(params, Mapping):
+      return params.get(name, default)
+    return getattr(params, name, default)
+
+  for name, expected in (
+      ('temperature', 1.0),
+      ('top_p', 1.0),
+      ('min_p', 0.0),
+      ('presence_penalty', 0.0),
+      ('frequency_penalty', 0.0),
+      ('repetition_penalty', 1.0),
+      ('min_tokens', 0),
+      ('n', 1),
+      ('multi_sampling', 1),
+  ):
+    default = None if name in ('temperature', 'top_p') else expected
+    if get(name, default) != expected:
+      raise ValueError(f'Unfiltered OPD sampling requires {name}={expected}.')
+  if get('top_k', -1) not in (0, -1):
+    raise ValueError(
+        'Unfiltered OPD sampling requires disabled top_k (0 or -1).'
+    )
+  if get('best_of') not in (None, 1):
+    raise ValueError('Unfiltered OPD sampling does not support best_of.')
+  if get('beam_size') is not None or get('use_beam_search', False):
+    raise ValueError('Unfiltered OPD sampling does not support beam search.')
+  for name in (
+      'bad_words',
+      'bad_words_token_ids',
+      '_bad_words_token_ids',
+      'logit_bias',
+      'allowed_token_ids',
+      'logits_processors',
+      'forbidden_tokens',
+      'structured_outputs',
+      'guided_decoding',
+      'extra_args',
+      'trace_decode_token_ids',
+  ):
+    if get(name):
+      raise ValueError(f'Unfiltered OPD sampling does not support {name}.')
+  if get('thinking_token_budget') is not None:
+    raise ValueError('Unfiltered OPD sampling cannot force a thinking budget.')
+
+
 def compute_attention_masks(
     time_step: int, seq_len: int, input_mask: jax.Array
 ) -> jax.Array:
@@ -339,27 +394,48 @@ def check_sampling_mode_conflict(
 
 def get_logprobs_from_vllm_output(
     token_ids: List[int],
-    logprobs: List[Optional[Dict[int, Any]]],
+    logprobs: List[Optional[Dict[int, Any]]] | None,
+    *,
+    required: bool = False,
 ) -> List[float]:
-  """Extracts the log probs from the vLLM output."""
-  if not logprobs or logprobs[0] is None:
+  """Extracts scores for sampled IDs, independently of candidate dict order.
+
+  Required scores must cover every sampled token and be finite in fp32. The
+  optional mode retains the empty result used when scores were not requested.
+  """
+  if logprobs is None:
+    if required:
+      raise ValueError('vLLM omitted requested sampled-token logprobs.')
     logging.debug('Logprobs are missing')
     return []
-
-  assert len(logprobs) == len(token_ids), (
-      f'log probs has {len(logprobs)} number of items !='
-      f' {len(token_ids)} token ids'
-  )
+  if not required and (not logprobs or logprobs[0] is None):
+    logging.debug('Logprobs are missing')
+    return []
+  if len(logprobs) != len(token_ids):
+    raise ValueError(
+        f'vLLM logprobs shape ({len(logprobs)},) does not match sampled'
+        f' token IDs shape ({len(token_ids)},).'
+    )
 
   extracted = []
   for tok_id, tok_logprobs in zip(token_ids, logprobs):
-    if tok_id in tok_logprobs:  # pyrefly: ignore[not-iterable]
-      extracted.append(tok_logprobs[tok_id].logprob)  # pyrefly: ignore[unsupported-operation]
-    else:
+    if not isinstance(tok_logprobs, abc.Mapping) or tok_id not in tok_logprobs:
       raise ValueError(
           f'The selected token id {tok_id} not in the return log probs list'
           f' {tok_logprobs}'
       )
+    value = getattr(tok_logprobs[tok_id], 'logprob', None)
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value, numbers.Real
+    ):
+      raise ValueError(f'Invalid logprob for selected token id {tok_id}.')
+    with np.errstate(over='ignore', invalid='ignore'):
+      finite_fp32 = np.isfinite(np.float32(value))
+    if not finite_fp32:
+      raise ValueError(
+          f'Logprob for selected token id {tok_id} must be finite in float32.'
+      )
+    extracted.append(float(value))
   return extracted
 
 
@@ -974,7 +1050,9 @@ def transfer_state_with_mappings(
       )
     else:
       if kwargs.get('delete_dst_buffers', False):
-        _delete_target_buffers(sharding_dict, tgt_flat_dict)  # pyrefly: ignore[bad-argument-type]
+        _delete_target_buffers(
+            sharding_dict, tgt_flat_dict
+        )  # pyrefly: ignore[bad-argument-type]
       resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
 
     for idx, (tgt_key, tgt_param) in enumerate(tgt_flat_list):
@@ -1085,7 +1163,9 @@ def _unstack_scanned_param(
           return jnp.unstack(src_val)
         else:
           # Fallback for older JAX versions
-          return [src_val[i] for i in range(src_val.shape[0])]  # pyrefly: ignore[bad-return]
+          return [
+              src_val[i] for i in range(src_val.shape[0])
+          ]  # pyrefly: ignore[bad-return]
       except Exception as e:
         logging.debug(
             "Failed to unstack parameter '%s'. Error: %s. Using original.",
@@ -1137,7 +1217,9 @@ def _get_n_shards(arr: jax.Array | np.ndarray, axis: int) -> int:
   """Returns the number of shards for a given axis of an array."""
   sharding = getattr(arr, 'sharding', None)
   if isinstance(sharding, jax.sharding.NamedSharding):
-    return _partition_size(_spec_at_axis(sharding, axis), sharding.mesh)  # pyrefly: ignore[bad-argument-type]
+    return _partition_size(
+        _spec_at_axis(sharding, axis), sharding.mesh
+    )  # pyrefly: ignore[bad-argument-type]
   return 1
 
 
@@ -1229,7 +1311,9 @@ def _align_per_axis(
       mesh = tgt_sharding.mesh
       pad_specs = []
       for axis, s, t in mismatches:
-        n_shards = _partition_size(_spec_at_axis(tgt_sharding, axis), mesh)  # pyrefly: ignore[bad-argument-type]
+        n_shards = _partition_size(
+            _spec_at_axis(tgt_sharding, axis), mesh
+        )  # pyrefly: ignore[bad-argument-type]
         if t % n_shards != 0:
           raise ValueError(
               f'Target dimension {t} on axis {axis} for {key_path} is not '
@@ -2199,7 +2283,9 @@ def resolve_prompt_tokens(
     input_strings = [input_strings]
   if len(input_strings) == 0:
     raise ValueError('input_strings must not be empty')
-  return [np.asarray(tokenize_fn(str(x)), dtype=np.int32) for x in input_strings]
+  return [
+      np.asarray(tokenize_fn(str(x)), dtype=np.int32) for x in input_strings
+  ]
 
 
 def left_pad_prompt_tokens(

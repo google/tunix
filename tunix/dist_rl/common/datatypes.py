@@ -301,6 +301,9 @@ class GenerationArgs:
     top_k: Top-k sampling cutoff.
     seed: Random seed for reproducible generation.
     return_logprobs: Whether to return token log probabilities.
+    require_unfiltered: Require unfiltered temperature-one random sampling,
+      overriding model generation defaults. Used by OPD; None preserves the
+      sampler's normal configuration behavior.
   """
 
   max_generation_steps: int | None = None
@@ -310,6 +313,7 @@ class GenerationArgs:
   seed: int | None = None
   return_logprobs: bool | None = None
   return_routed_experts: bool | None = None
+  require_unfiltered: bool | None = None
 
   def as_kwargs(self) -> dict[str, Any]:
     return {
@@ -542,6 +546,9 @@ class RLTrainerPayload(TrainerPayload):
     completion_ids: Optional completion token ids. Unbatched payloads may carry
       1D unpadded rows; batch assembly pads them to [B, C].
     completion_mask: Optional [B, C] completion/action mask.
+    completion_attention_mask: Optional [B, C] valid completion positions for
+      padded scoring. Unlike completion_mask, includes tool observations and
+      real tokens equal to pad_id/eos_id. None preserves ID-derived validity.
     segment_ids: Optional [B, T] or [B, C] packing segment ids.
     segment_positions: Optional [B, T] or [B, C] position indices within each
       segment.
@@ -573,6 +580,7 @@ class RLTrainerPayload(TrainerPayload):
   completion_ids: ArrayLike
   completion_mask: ArrayLike
   advantages: ArrayLike
+  completion_attention_mask: ArrayLike | None = None
   segment_ids: ArrayLike | None = None
   segment_positions: ArrayLike | None = None
   ref_per_token_logps: ArrayLike | None = None
@@ -631,6 +639,9 @@ class LogprobsRequest(Request):
       `common.decode_routed_experts_jax`). When set, the scorer replays this
       routing so its log-probs match the training forward pass; trainer path
       only.
+    token_mask: Optional [B, P + C] valid attention positions for padded
+      scoring, independent of the action/loss mask and token-ID values. Use
+      packed segment metadata instead for packed sequences.
   """
 
   prompt_tokens: ArrayLike
@@ -642,6 +653,7 @@ class LogprobsRequest(Request):
   segment_ids: ArrayLike | None = None
   segment_positions: ArrayLike | None = None
   routed_experts: ArrayLike | None = None
+  token_mask: ArrayLike | None = None
 
 
 ##### Inference DTOs #####

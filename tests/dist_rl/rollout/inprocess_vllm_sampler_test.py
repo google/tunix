@@ -207,6 +207,68 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     np.testing.assert_array_equal(responses[0].prompt_token_ids, [1, 2])
     np.testing.assert_array_equal(responses[1].prompt_token_ids, [3, 4])
 
+  def test_opd_unfiltered_contract_is_forwarded_to_effective_sampler(self):
+    req = base_sampler_lib.SamplingRequest(
+        prompt="prompt",
+        sampling_params=base_sampler_lib.SamplingParams(
+            temperature=1.0, top_p=1.0, top_k=-1
+        ),
+    )
+    asyncio.run(self.sampler.sample(req, require_unfiltered=True))
+    self.assertIs(
+        self.mock_vllm_sampler.call_args.kwargs["require_unfiltered"], True
+    )
+    self.mock_vllm_sampler.reset_mock()
+    asyncio.run(self.sampler.sample(req))
+    self.assertNotIn(
+        "require_unfiltered", self.mock_vllm_sampler.call_args.kwargs
+    )
+
+  def test_requested_scores_reject_missing_misaligned_and_nonfinite_output(
+      self,
+  ):
+    request = base_sampler_lib.SamplingRequest(
+        request_id="scores",
+        prompt="prompt",
+        sampling_params=base_sampler_lib.SamplingParams(return_logprobs=True),
+    )
+    for scores in (
+        None,
+        [None],
+        [[]],
+        [[-0.1]],
+        [[-0.1, np.nan, -0.3]],
+        [[-0.1, np.inf, -0.3]],
+        [[-0.1, 1e300, -0.3]],
+    ):
+      with self.subTest(scores=scores):
+        self.mock_vllm_sampler.return_value = base_sampler.SamplerOutput(
+            text=["answer"],
+            logits=None,
+            tokens=[np.array([10, 20, 30], dtype=np.int32)],
+            padded_prompt_tokens=np.array([[1, 2]], dtype=np.int32),
+            logprobs=scores,
+        )
+        with self.assertRaisesRegex(ValueError, "logprobs"):
+          asyncio.run(self.sampler.sample(request))
+
+  def test_requested_scores_preserve_finite_zero_for_sampled_pad_or_eos(self):
+    self.mock_vllm_sampler.return_value = base_sampler.SamplerOutput(
+        text=["answer"],
+        logits=None,
+        tokens=[np.array([10, 0], dtype=np.int32)],
+        padded_prompt_tokens=np.array([[1, 2]], dtype=np.int32),
+        logprobs=[[-0.5, 0.0]],
+    )
+    request = base_sampler_lib.SamplingRequest(
+        request_id="scores",
+        prompt="prompt",
+        sampling_params=base_sampler_lib.SamplingParams(return_logprobs=True),
+    )
+    response = asyncio.run(self.sampler.sample(request))
+    np.testing.assert_array_equal(response.token_ids, [10, 0])
+    np.testing.assert_array_equal(response.logprobs, [-0.5, 0.0])
+
   def test_weight_sync_without_raiden_delegate(self):
     mock_weights = {"layer1": "weights"}
     req = base_sampler_lib.WeightSyncRequest(weights=mock_weights)

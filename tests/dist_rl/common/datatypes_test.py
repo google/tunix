@@ -119,9 +119,7 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(
         restored.payload.policy_version, original.payload.policy_version
     )
-    self.assertEqual(
-        restored.payload.traj.reward, original.payload.traj.reward
-    )
+    self.assertEqual(restored.payload.traj.reward, original.payload.traj.reward)
     np.testing.assert_array_equal(
         restored.payload.prompt_tokens, original.payload.prompt_tokens
     )
@@ -232,7 +230,9 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(item.traj_id, "traj_42_g2")
 
   def test_trajectory_item_fields(self):
-    item = datatypes.TrajectoryItem(prompt_id="prompt_88", group_index=4, traj={})
+    item = datatypes.TrajectoryItem(
+        prompt_id="prompt_88", group_index=4, traj={}
+    )
     self.assertEqual(item.prompt_id, "prompt_88")
     self.assertEqual(item.group_index, 4)
 
@@ -333,6 +333,22 @@ class RLTrainerPayloadTest(absltest.TestCase):
     np.testing.assert_array_equal(restored.prompt_ids, payload.prompt_ids)
     np.testing.assert_allclose(restored.advantages, payload.advantages)
 
+  def test_completion_attention_mask_is_a_dynamic_wire_safe_leaf(self):
+    valid = np.array([[1, 1, 0]], dtype=np.bool_)
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[0, 2]], dtype=np.int32),
+        prompt_mask=np.array([[0, 1]], dtype=np.bool_),
+        completion_ids=np.array([[0, 3, 0]], dtype=np.int32),
+        completion_mask=np.array([[0, 1, 0]], dtype=np.float32),
+        completion_attention_mask=valid,
+        advantages=np.ones((1, 3), dtype=np.float32),
+    )
+
+    leaves = jax.tree_util.tree_leaves(payload)
+    self.assertTrue(any(leaf is valid for leaf in leaves))
+    restored = cloudpickle.loads(cloudpickle.dumps(payload))
+    np.testing.assert_array_equal(restored.completion_attention_mask, valid)
+
 
 class TokenSegmentRoutingTest(absltest.TestCase):
   """`routed_experts` must line up with the tokens it describes."""
@@ -350,6 +366,13 @@ class TokenSegmentRoutingTest(absltest.TestCase):
 
 
 class GenerationArgsTest(absltest.TestCase):
+
+  def test_require_unfiltered_is_opt_in(self):
+    self.assertEqual(datatypes.GenerationArgs().as_kwargs(), {})
+    self.assertEqual(
+        datatypes.GenerationArgs(require_unfiltered=True).as_kwargs(),
+        {"require_unfiltered": True},
+    )
 
   def test_generation_args_as_kwargs(self):
     args = datatypes.GenerationArgs(

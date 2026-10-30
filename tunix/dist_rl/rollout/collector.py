@@ -284,6 +284,29 @@ class TrajectoryCollectorEngine:
       text = res if isinstance(res, str) else getattr(res, "text", str(res))
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
       logprobs = getattr(res, "logprobs", None)
+      if sampling_params.return_logprobs:
+        # Missing assistant scores must not reach Token-mode collection, which
+        # fills absent scores with zeros for callers that did not request them.
+        # Validate the returned stream; token values cannot identify padding
+        # because a real sampled token (including EOS) may equal the pad id.
+        token_ids = np.asarray(tokens)
+        if token_ids.ndim != 1 or token_ids.dtype.kind not in "iu":
+          raise ValueError(
+              "Requested logprobs require one-dimensional sampled token IDs."
+          )
+        if logprobs is None:
+          raise ValueError(
+              "Sampler omitted logprobs although return_logprobs=True."
+          )
+        scores = np.asarray(logprobs)
+        if scores.shape != token_ids.shape or scores.dtype.kind not in "fiu":
+          raise ValueError(
+              "Sampler logprobs must be numeric and match sampled token IDs."
+          )
+        with np.errstate(over="ignore", invalid="ignore"):
+          logprobs = scores.astype(np.float32)
+        if not np.all(np.isfinite(logprobs)):
+          raise ValueError("Sampler logprobs must be finite in float32.")
       routed_experts = getattr(res, "routed_experts", None)
       raw_prompt_tokens = getattr(res, "prompt_token_ids", None)
       prompt_tokens = np.asarray(

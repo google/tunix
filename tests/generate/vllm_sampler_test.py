@@ -192,7 +192,9 @@ class VllmSamplerTest(absltest.TestCase):
       lora_config = {
           "rank": 64,
           "alpha": 64.0,
-          "module_path": ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj",
+          "module_path": (
+              ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj"
+          ),
           # "dropout": 0.0,
           # "bias": "none",
       }
@@ -796,7 +798,11 @@ class VllmSamplerConfigTest(absltest.TestCase):
     # engine_kwargs should raise a ValueError at config construction time
     # before any vLLM engine args are assembled.
     mesh = self._make_mock_mesh(8)
-    for key in ("expert_parallel_size", "tensor_parallel_size", "data_parallel_size"):
+    for key in (
+        "expert_parallel_size",
+        "tensor_parallel_size",
+        "data_parallel_size",
+    ):
       with self.subTest(key=key):
         with self.assertRaisesRegex(ValueError, key):
           vllm_sampler.VllmConfig(
@@ -960,6 +966,102 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
         out.padded_prompt_tokens, [[0, 0, 0, 0, 3], [0, 0, 4, 0, 5]]
     )
     np.testing.assert_array_equal(out.logprobs, [[-0.25, -0.75]] * 2)
+
+  def test_opd_ignores_model_generation_config_in_offline_mode(self):
+    from vllm.sampling_params import SamplingParams  # pylint: disable=g-import-not-at-top
+
+    for require_unfiltered in (False, True):
+      with self.subTest(require_unfiltered=require_unfiltered):
+        obj = self._sampler()
+        obj.llm.get_default_sampling_params = mock.Mock(
+            return_value=SamplingParams(
+                min_p=0.25, repetition_penalty=1.1, presence_penalty=0.3
+            )
+        )
+        obj(
+            None,
+            4,
+            temperature=1.0,
+            top_p=1.0,
+            top_k=-1,
+            prompt_token_ids=[[1, 2]],
+            require_unfiltered=require_unfiltered,
+        )
+        params = obj.llm.generate.call_args.kwargs["sampling_params"]
+        self.assertEqual(params.min_p, 0.0 if require_unfiltered else 0.25)
+        self.assertEqual(
+            params.repetition_penalty, 1.0 if require_unfiltered else 1.1
+        )
+        self.assertEqual(
+            params.presence_penalty, 0.0 if require_unfiltered else 0.3
+        )
+        if require_unfiltered:
+          obj.llm.get_default_sampling_params.assert_not_called()
+
+  def test_opd_ignores_model_generation_config_in_server_mode(self):
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+
+    obj = self._sampler()
+    get_defaults = mock.Mock(return_value={"min_p": 0.25})
+    obj._driver = SimpleNamespace(
+        llm_engine=SimpleNamespace(
+            model_config=SimpleNamespace(get_diff_sampling_param=get_defaults)
+        )
+    )
+    obj._generate_server_mode = mock.Mock(
+        return_value=[self._result("0", [1, 2])]
+    )
+    obj(
+        None,
+        4,
+        temperature=1.0,
+        top_p=1.0,
+        top_k=-1,
+        prompt_token_ids=[[1, 2]],
+        require_unfiltered=True,
+    )
+    get_defaults.assert_not_called()
+    params = obj._generate_server_mode.call_args.args[1]
+    self.assertEqual(params.min_p, 0.0)
+
+  def test_opd_rejects_effective_config_overrides_before_engine_submission(
+      self,
+  ):
+    for overrides in (
+        {"min_p": 0.25},
+        {"repetition_penalty": 1.1},
+        {"min_tokens": 1},
+        {"logit_bias": {1: 2.0}},
+    ):
+      with self.subTest(overrides=overrides):
+        obj = self._sampler()
+        obj.config.sampling_kwargs = overrides
+        with self.assertRaises(ValueError):
+          obj(
+              None,
+              4,
+              temperature=1.0,
+              top_p=1.0,
+              top_k=-1,
+              prompt_token_ids=[[1, 2]],
+              require_unfiltered=True,
+          )
+        obj.llm.generate.assert_not_called()
+
+  def test_opd_rejects_engine_level_logits_processors(self):
+    obj = self._sampler()
+    obj.args["logits_processors"] = [object()]
+    with self.assertRaisesRegex(ValueError, "engine logits_processors"):
+      obj(
+          None,
+          4,
+          temperature=1.0,
+          top_p=1.0,
+          top_k=-1,
+          prompt_token_ids=[[1, 2]],
+          require_unfiltered=True,
+      )
+    obj.llm.generate.assert_not_called()
 
   def test_invalid_token_inputs_fail_before_submission(self):
     for kwargs in (

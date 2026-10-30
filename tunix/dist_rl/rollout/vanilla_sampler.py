@@ -854,6 +854,7 @@ class VanillaSampler(
       ) = None,
       max_audio_length: int | None = None,
       max_audio_clips: int | None = None,
+      require_unfiltered: bool = False,
       **kwargs,
   ) -> (
       base_sampler_lib.SamplingResponse
@@ -887,11 +888,34 @@ class VanillaSampler(
       max_audio_clips: Maximum number of audio clips in a sample. If specified,
         audio input to the model will be padded upto this count. Specify to
         avoid recompilation on different number of clips across calls.
+      require_unfiltered: Require actual temperature-one full-distribution
+        sampling and token logprobs for OPD. Checks the worker's static decode
+        configuration, which owns sampling on this backend.
       **kwargs: Additional unused keyword arguments.
 
     Returns:
       A single SamplingResponse or a list of SamplingResponse objects.
     """
+    if require_unfiltered:
+      # Native decoding reads the static worker config, rather than per-turn
+      # SamplingParams. A correct request alone cannot establish correctness.
+      forbidden_tokens = (
+          tuple(forbidden_tokens) if forbidden_tokens is not None else None
+      )
+      utils.validate_unfiltered_sampling({
+          **kwargs,
+          'temperature': self.config.temperature,
+          'top_p': self.config.top_p,
+          'top_k': 0 if self.config.top_k is None else self.config.top_k,
+          'beam_size': self.config.beam_size,
+          'forbidden_tokens': forbidden_tokens,
+      })
+      if not self.config.return_logprobs:
+        raise ValueError('Unfiltered OPD sampling requires token logprobs.')
+      if echo or pad_output:
+        raise ValueError('OPD requires unpadded completion-only output.')
+      if images is not None or audios is not None:
+        raise ValueError('OPD currently supports text-only sampling.')
     del kwargs
     is_sequence = not isinstance(
         sampling_requests, base_sampler_lib.SamplingRequest

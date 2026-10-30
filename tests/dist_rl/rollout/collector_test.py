@@ -1698,5 +1698,92 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
     np.testing.assert_array_equal(mixed_batch.routed_experts[0, 5:9], raw_g1)
 
 
+class RequestedLogprobsTest(absltest.TestCase):
+  """Requested assistant scores cannot become fabricated Token-mode zeros."""
+
+  def _engine(self, scores, *, requested=True, max_steps=1):
+    class _TwoTurnEnv(base_environment.BaseTaskEnv):
+
+      def _initial_observation(self):
+        return "start"
+
+      def _step_impl(self, action):
+        del action
+        return base_environment.EnvStepResult(
+            observation="tool observation", reward=1.0, done=False, info={}
+        )
+
+    class _SuffixParser(_RecordingParser):
+
+      def update_assistant_end_tokens(self, tokens):
+        return np.concatenate([tokens, np.array([99], np.int32)]), 1
+
+    class _ScoreSampler(sampler_lib.Sampler):
+
+      async def sample(self, req, **kwargs):
+        del kwargs
+        prompt = req.prompt if isinstance(req.prompt, np.ndarray) else [1, 2]
+        response = sampler_lib.SamplingResponse(
+            request_id=req.request_id,
+            text="answer",
+            prompt_token_ids=np.asarray(prompt, dtype=np.int32),
+            token_ids=np.array([0, 11], dtype=np.int32),
+        )
+        # Assign after construction to also exercise corrupt/duck-typed backend
+        # responses that have bypassed SamplingResponse's shape validation.
+        response.logprobs = scores
+        return response
+
+    return collector.TrajectoryCollectorEngine(
+        traj_id="scores",
+        request=datatypes.RolloutRequest(
+            prompt_id="scores",
+            max_response_length=128,
+            generation_kwargs={"return_logprobs": requested},
+        ),
+        sampler=_ScoreSampler(),
+        env_client=_TwoTurnEnv(task={"question": "q"}, max_steps=max_steps),
+        agent=model_agent.ModelAgent("system"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_SuffixParser(),
+    )
+
+  def test_requested_scores_reject_missing_misaligned_or_nonfinite(self):
+    for scores in (
+        None,
+        np.array([-0.25], dtype=np.float32),
+        np.array([[-0.25, -0.75]], dtype=np.float32),
+        np.array([np.nan, -0.75], dtype=np.float32),
+        np.array([-np.inf, -0.75], dtype=np.float32),
+        np.array([np.inf, -0.75], dtype=np.float32),
+        np.array([1e300, -0.75], dtype=np.float64),
+        np.array(["missing", "score"]),
+    ):
+      with self.subTest(scores=scores):
+        engine = self._engine(scores)
+        with self.assertRaisesRegex(ValueError, "logprobs"):
+          asyncio.run(engine.run_episode())
+        self.assertFalse(engine.is_done)
+
+  def test_requested_scores_keep_real_pad_id_and_mask_environment_tokens(self):
+    engine = self._engine(np.array([0.0, -0.75], dtype=np.float32), max_steps=2)
+    item = asyncio.run(engine.run_episode())
+    mask = np.asarray(item.traj["conversation_masks"], dtype=bool)
+    logprobs = np.asarray(item.traj["old_logprobs"])
+    tokens = np.asarray(item.traj["conversation_tokens"])
+    self.assertEqual(int(mask.sum()), 4)
+    self.assertGreater(int((~mask).sum()), 2)
+    np.testing.assert_array_equal(tokens[mask], [0, 11, 0, 11])
+    np.testing.assert_allclose(logprobs[mask], [0.0, -0.75, 0.0, -0.75])
+    np.testing.assert_array_equal(logprobs[~mask], 0.0)
+
+  def test_unrequested_missing_scores_keep_legacy_zero_fill(self):
+    engine = self._engine(None, requested=False)
+    item = asyncio.run(engine.run_episode())
+    self.assertTrue(engine.is_done)
+    self.assertTrue(np.any(item.traj["conversation_masks"]))
+    np.testing.assert_array_equal(item.traj["old_logprobs"], 0.0)
+
+
 if __name__ == "__main__":
   absltest.main()

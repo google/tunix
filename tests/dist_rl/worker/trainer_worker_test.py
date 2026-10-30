@@ -94,6 +94,20 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     pass
 
 
+class _AttentionContextModel(nnx.Module):
+  """Makes each token's scores depend on all valid context, including ID 0."""
+
+  def __call__(
+      self, tokens, positions, cache=None, attention_mask=None, segment_ids=None
+  ):
+    del positions, segment_ids
+    context = jnp.einsum(
+        "bqk,bk->bq", attention_mask.astype(jnp.float32), tokens + 1.0
+    )
+    logits = context[..., None] * jnp.arange(16, dtype=jnp.float32) / 32.0
+    return logits, cache
+
+
 class TrainerWorkerTest(absltest.TestCase):
 
   def setUp(self):
@@ -524,6 +538,11 @@ class TrainerWorkerTest(absltest.TestCase):
                 if request.segment_positions is None
                 else jnp.asarray(request.segment_positions)
             ),
+            token_mask=(
+                None
+                if request.token_mask is None
+                else jnp.asarray(request.token_mask)
+            ),
         )
     )
 
@@ -659,6 +678,51 @@ class TrainerWorkerTest(absltest.TestCase):
     self.worker.per_token_logps(items=self._unpacked_request())
     _, kwargs = self.fake_trainer.fwd_only_calls[0]
     self.assertIsNone(kwargs["routed_experts"])
+    self.assertNotIn("token_mask", kwargs)
+
+  def test_per_token_logps_preserves_real_pad_eos_context_per_micro_batch(self):
+    self.fake_trainer.model = _AttentionContextModel()
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer,
+        logps_micro_batch_size=1,
+    )
+    worker.initialize()
+    request = datatypes.LogprobsRequest(
+        prompt_tokens=np.array([[0, 2], [0, 3]], dtype=np.int32),
+        completion_tokens=np.array(
+            [[1, 0, 4, 0], [5, 0, 6, 0]], dtype=np.int32
+        ),
+        token_mask=np.array(
+            [[0, 1, 1, 1, 1, 0], [1, 1, 1, 1, 1, 0]], dtype=np.bool_
+        ),
+        temperature=1.0,
+        pad_id=0,
+        eos_id=0,
+    )
+
+    result = worker.per_token_logps(items=request)
+
+    self.assertLen(self.fake_trainer.fwd_only_calls, 2)
+    for row, (_, kwargs) in enumerate(self.fake_trainer.fwd_only_calls):
+      np.testing.assert_array_equal(
+          kwargs["token_mask"], request.token_mask[row : row + 1]
+      )
+    np.testing.assert_allclose(
+        result.per_token_logps, self._expected_logps(request)
+    )
+    legacy = self._expected_logps(dataclasses.replace(request, token_mask=None))
+    # A real internal EOS (ID 0) must still condition the token after it.
+    self.assertTrue(
+        np.all(np.abs(result.per_token_logps[:, 2] - legacy[:, 2]) > 1e-4)
+    )
+
+  def test_per_token_logps_rejects_misaligned_attention_mask(self):
+    request = dataclasses.replace(
+        self._unpacked_request(), token_mask=np.ones((3, 6), dtype=np.bool_)
+    )
+    with self.assertRaisesRegex(ValueError, "token_mask.*full"):
+      self.worker.per_token_logps(items=request)
+    self.assertEmpty(self.fake_trainer.fwd_only_calls)
 
   def test_per_token_logps_forwards_routed_experts_per_micro_batch(self):
     worker = trainer_worker.TrainerWorker(

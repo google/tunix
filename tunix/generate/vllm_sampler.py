@@ -594,7 +594,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     """Text and per-token logprobs of one sampled completion."""
     text = self.tokenizer.decode(single_output.token_ids)
     logprobs = utils.get_logprobs_from_vllm_output(
-        list(single_output.token_ids), single_output.logprobs
+        list(single_output.token_ids),
+        single_output.logprobs,
+        required=self.config.return_logprobs,
     )
     return text, logprobs
 
@@ -746,6 +748,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if self.tokenizer is not None and self.tokenizer.eos_id() is not None:
       eos_ids.add(self.tokenizer.eos_id())
     return list(eos_ids)
+
   def __call__(
       self,
       input_strings: str | List[str] | None = None,
@@ -764,9 +767,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       pad_output: bool = False,
       *,
       prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None = None,
+      require_unfiltered: bool = False,
       **kwargs,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
+    if require_unfiltered and self.args.get("logits_processors"):
+      raise ValueError(
+          "Unfiltered OPD sampling does not support engine logits_processors."
+      )
     exact_input = prompt_token_ids is not None
     prompt_ids = utils.resolve_prompt_tokens(
         input_strings,
@@ -794,6 +802,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       )
     raw_prompt_start = None
     raw_cache_salt = None
+    if require_unfiltered and beam_size is not None:
+      raise ValueError("Unfiltered OPD sampling does not support beam search.")
     if beam_size is not None:
       sampling_params = BeamSearchParams(
           beam_width=beam_size,
@@ -802,7 +812,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           temperature=temperature,
       )
     else:
-      if self._driver is not None:
+      if require_unfiltered:
+        # Model generation_config may contain min-p, penalties, bad words, or
+        # forced-token constraints absent from the request. OPD uses the raw
+        # temperature-one policy, so start from neutral backend defaults.
+        sampling_params = SamplingParams()
+      elif self._driver is not None:
         diff_params = (
             self._driver.llm_engine.model_config.get_diff_sampling_param()
         )
@@ -811,7 +826,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         else:
           sampling_params = SamplingParams()
       else:
-        sampling_params = self.llm.get_default_sampling_params()  # pyrefly: ignore[missing-attribute]
+        sampling_params = (
+            self.llm.get_default_sampling_params()
+        )  # pyrefly: ignore[missing-attribute]
       sampling_params.detokenize = False
       sampling_params.max_tokens = max_generation_steps
       sampling_params.n = multi_sampling
@@ -886,6 +903,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       # DeepSWE's </function>); token-only decoding cannot enforce them.
       if sampling_params.stop:
         sampling_params.detokenize = True
+      if require_unfiltered:
+        # Config sampling_kwargs and call overrides were applied above. Fail
+        # closed if either changed the promised distribution.
+        utils.validate_unfiltered_sampling(sampling_params)
 
     if exact_input and (
         isinstance(sampling_params, BeamSearchParams)
@@ -915,9 +936,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         else None
     )
     per_prompt_salts = (
-        raw_cache_salt
-        if isinstance(raw_cache_salt, (list, tuple))
-        else None
+        raw_cache_salt if isinstance(raw_cache_salt, (list, tuple)) else None
     )
     if per_prompt_starts is not None or per_prompt_salts is not None:
       if per_prompt_starts is not None:
@@ -978,7 +997,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         logits=None,
         tokens=out_tokens[0],
         padded_prompt_tokens=all_input_ids,
-        logprobs=out_logprobs[0] if self.config.return_logprobs else None,  # pyrefly: ignore[bad-argument-type]
+        logprobs=out_logprobs[0]
+        if self.config.return_logprobs
+        else None,  # pyrefly: ignore[bad-argument-type]
         routed_experts=(
             out_routed_experts[0] if self.config.return_routed_experts else None
         ),

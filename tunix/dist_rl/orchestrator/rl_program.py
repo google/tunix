@@ -35,6 +35,9 @@ from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import dispatch_window
 from tunix.dist_rl.common import logging_utils
 from tunix.dist_rl.common import tagging
+from tunix.dist_rl.distillation import identity
+from tunix.dist_rl.distillation import on_policy
+from tunix.dist_rl.distillation import teacher
 from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import dataset_utils
@@ -64,6 +67,12 @@ RewardLogMetricAggFn = Callable[[np.ndarray], float | np.number]
 RewardLogMetrics = Mapping[
     str, tuple[np.ndarray | float | np.number, RewardLogMetricAggFn]
 ]
+
+
+def _opd_token_mean(values: np.ndarray) -> float:
+  """Reduces group-level (sum, count) pairs without bias toward short groups."""
+  totals = np.sum(values, axis=0)
+  return float(totals[0] / max(totals[1], 1.0))
 
 
 def _next_microbatch(
@@ -361,6 +370,9 @@ class StandardRLProgram(RLProgram):
       group_order: GroupOrder | str = GroupOrder.TRAJECTORY_COMPLETION,
       on_step_begin: Callable[[int], None] | None = None,
       on_step_end: Callable[[int, Any], None] | None = None,
+      opd_config: on_policy.OnPolicyDistillationConfig | None = None,
+      teacher_scorer: teacher.TeacherScorer | None = None,
+      opd_teacher_identity: identity.TeacherIdentity | None = None,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -377,6 +389,31 @@ class StandardRLProgram(RLProgram):
       )
     self.max_response_length = algo_max_response_length
     self.generation_args = generation_args or datatypes.GenerationArgs()
+    self.opd_config = opd_config
+    self.teacher_scorer = teacher_scorer
+    if opd_config is None and teacher_scorer is not None:
+      raise ValueError("teacher_scorer requires an OPD configuration.")
+    if opd_config is not None:
+      if not isinstance(algo, algorithm_adapter.GRPOAdapter):
+        raise ValueError("OPD currently supports GRPOAdapter only.")
+      if algo.num_generations < 2:
+        raise ValueError(
+            "OPD currently requires at least two generations per prompt."
+        )
+      if opd_config.coefficient > 0 and teacher_scorer is None:
+        raise ValueError(
+            "OPD requires a teacher_scorer when coefficient is positive."
+        )
+      if opd_config.coefficient > 0 and not sync_weights:
+        raise ValueError(
+            "OPD requires sync_weights=True for fresh student rollouts."
+        )
+      if not self.algo.algo_config.use_rollout_logps:
+        raise ValueError("OPD requires use_rollout_logps=True.")
+      if not self.algo.algo_config.exact_token_continuity:
+        raise ValueError("OPD requires exact_token_continuity=True.")
+      if max_staleness != 0:
+        raise ValueError("OPD currently requires max_staleness=0.")
 
     if self.algo.algo_config.temperature is not None:
       raise ValueError(
@@ -391,6 +428,24 @@ class StandardRLProgram(RLProgram):
         self.generation_args,
         return_logprobs=self.algo.algo_config.use_rollout_logps,
     )
+    if opd_config is not None:
+      self.generation_args = dataclasses.replace(
+          self.generation_args, require_unfiltered=True
+      )
+      self._validate_opd_sampling(self.generation_args.as_kwargs())
+    self._opd_manifest = identity.build_manifest(
+        opd_config,
+        sampling_contract=self.generation_args.as_kwargs(),
+        teacher_identity=opd_teacher_identity,
+    )
+    if not identity.has_resumable_identity(self._opd_manifest):
+      logging.warning(
+          "OPD teacher identity is incomplete: this fresh run is allowed, but"
+          " its checkpoints cannot be resumed. Declare a frozen teacher"
+          " revision and tokenizer fingerprint before the first run. These"
+          " declarations do not verify the weights actually served by a remote"
+          " endpoint."
+      )
     self.sampler_is = getattr(self.algo.algo_config, "sampler_is", None)
     self.sampler_is_threshold = getattr(
         self.algo.algo_config, "sampler_is_threshold", 2.0
@@ -566,13 +621,16 @@ class StandardRLProgram(RLProgram):
         resync_rollout_weights=self.sync_weights,
     )
     restored_step = restored[0] if isinstance(restored, tuple) else restored
+    ckpt_meta = getattr(self.engine, "restored_checkpoint_metadata", None)
     if restored_step <= 0:
+      if isinstance(ckpt_meta, Mapping) and identity.METADATA_KEY in ckpt_meta:
+        identity.validate_resume_manifest(self._opd_manifest, ckpt_meta)
       return
+    identity.validate_resume_manifest(self._opd_manifest, ckpt_meta)
     self._step = restored_step
     self.policy_version = restored_step
     if isinstance(self.scored_q, BatchOrderedGroupQueue):
       self.scored_q.skip(0, restored_step)
-    ckpt_meta = self.engine.restored_checkpoint_metadata
     if (
         isinstance(ckpt_meta, Mapping)
         and ckpt_meta.get("policy_version") is not None
@@ -641,6 +699,15 @@ class StandardRLProgram(RLProgram):
             prompt_item["max_response_length"] = self.max_response_length
 
         prompt_item = tagging.tag_prompt(prompt_item, coordinates)
+        if self.opd_config is not None:
+          sampling = self.generation_args.as_kwargs()
+          overrides = (
+              prompt_item.get("generation_kwargs", {})
+              if isinstance(prompt_item, Mapping)
+              else getattr(prompt_item, "generation_kwargs", {})
+          )
+          sampling.update(overrides or {})
+          self._validate_opd_sampling(sampling)
         prompt_id = (
             prompt_item["prompt_id"]
             if isinstance(prompt_item, dict)
@@ -759,6 +826,138 @@ class StandardRLProgram(RLProgram):
     ]
     return rewards, log_metrics
 
+  @staticmethod
+  def _validate_opd_sampling(sampling: Mapping[str, Any]) -> None:
+    """Requires the same unfiltered probability space for behavior and teacher."""
+    if sampling.get("require_unfiltered") is not True:
+      raise ValueError("OPD requires require_unfiltered=True on every request.")
+    if sampling.get("temperature") != 1.0:
+      raise ValueError("OPD currently requires temperature=1.0.")
+    if sampling.get("top_p") != 1.0 or sampling.get("top_k") not in (0, -1):
+      raise ValueError("OPD requires top_p=1.0 and disabled top_k (0 or -1).")
+    if (
+        "return_logprobs" in sampling
+        and sampling["return_logprobs"] is not True
+    ):
+      raise ValueError("OPD requires sampled logprobs on every request.")
+    for name, default in (
+        ("min_p", 0.0),
+        ("frequency_penalty", 0.0),
+        ("presence_penalty", 0.0),
+        ("repetition_penalty", 1.0),
+    ):
+      if sampling.get(name, default) != default:
+        raise ValueError(f"OPD does not support non-default {name}.")
+    for name in (
+        "logit_bias",
+        "allowed_token_ids",
+        "logits_processors",
+        "forbidden_tokens",
+        "bad_words",
+    ):
+      if sampling.get(name):
+        raise ValueError(f"OPD does not support {name}.")
+    if sampling.get("pad_output") or sampling.get("echo"):
+      raise ValueError("OPD requires unpadded completion-only sampler output.")
+    if sampling.get("beam_size") is not None:
+      raise ValueError("OPD does not support beam search.")
+    if sampling.get("min_tokens") not in (None, 0):
+      raise ValueError("OPD does not support min_tokens filtering.")
+    for name in ("structured_outputs", "guided_decoding"):
+      if sampling.get(name) is not None:
+        raise ValueError(f"OPD does not support {name}.")
+    for name in ("best_of", "n", "multi_sampling"):
+      if sampling.get(name) not in (None, 1):
+        raise ValueError(f"OPD requires {name}=1.")
+    if sampling.get("images") is not None or sampling.get("audios") is not None:
+      raise ValueError("OPD currently supports text-only teacher scoring.")
+
+  async def _apply_opd(
+      self, payloads: Sequence[datatypes.RLTrainerPayload]
+  ) -> tuple[list[datatypes.RLTrainerPayload], RewardLogMetrics]:
+    """Scores unassembled trajectories and fixes their token advantages once."""
+    assert self.opd_config is not None
+    start = time.monotonic()
+    teacher_log_probs = None
+    if self.opd_config.coefficient > 0 and any(
+        np.any(np.asarray(payload.completion_mask) > 0) for payload in payloads
+    ):
+      self._validate_opd_context(payloads)
+      assert self.teacher_scorer is not None
+      teacher_log_probs = await self.teacher_scorer.score(payloads)
+    updated, stats = on_policy.apply_opd_to_payloads(
+        payloads, teacher_log_probs, self.opd_config
+    )
+    metrics: dict[str, tuple[np.ndarray | float, RewardLogMetricAggFn]] = {
+        "opd/token_count": (stats.token_count, np.sum),
+        "opd/scoring_time_seconds": (time.monotonic() - start, np.sum),
+    }
+    for name, total in (
+        ("reverse_kl", stats.reverse_kl_sum),
+        ("teacher_logprob", stats.teacher_logprob_sum),
+        ("student_logprob", stats.student_logprob_sum),
+    ):
+      metrics[f"opd/{name}"] = (
+          np.array([[total, stats.token_count]], dtype=np.float64),
+          _opd_token_mean,
+      )
+    return updated, metrics
+
+  def _validate_opd_context(
+      self, payloads: Sequence[datatypes.RLTrainerPayload]
+  ) -> None:
+    """Rejects post-rollout truncation that changes a scored trajectory."""
+    for payload in payloads:
+      if not np.any(np.asarray(payload.completion_mask) > 0):
+        continue
+      prompt = np.asarray(payload.prompt_ids)
+      completion = np.asarray(payload.completion_ids)
+      if prompt.ndim != 1 or completion.ndim != 1:
+        raise ValueError("OPD requires unbatched prompt and completion tokens.")
+      if isinstance(self.assembler, batch_assembly.PaddedBatchAssembler):
+        if prompt.size > self.assembler.max_prompt_length:
+          raise ValueError(
+              "OPD prompt would be truncated after teacher scoring. Increase"
+              " max_prompt_length or truncate before rollout."
+          )
+        if completion.size > self.assembler.max_response_length:
+          raise ValueError(
+              "OPD completion would be truncated after teacher scoring. Align"
+              " the rollout response budget and assembler max_response_length."
+          )
+      elif isinstance(
+          self.assembler, batch_assembly.SequencePackedBatchAssembler
+      ):
+        if prompt.size + completion.size > self.assembler.max_packed_len:
+          raise ValueError(
+              "OPD trajectory exceeds the sequence packing budget."
+          )
+
+  def _with_opd_attention_mask(
+      self,
+      batch: datatypes.RLTrainerPayload,
+      stats: batch_assembly.PaddingStats,
+  ) -> datatypes.RLTrainerPayload:
+    """Keeps real EOS/pad-valued tokens and tool observations in the context."""
+    if self.opd_config is None or batch.segment_ids is not None:
+      return batch
+    # Padded rows contain one trajectory. Validity comes from actual lengths,
+    # not token value or assistant loss weights: EOS may equal the padding ID,
+    # and tool observations are context despite having zero policy-loss mask.
+    prompt_lengths = np.sum(np.asarray(batch.prompt_mask), axis=-1)
+    completion_lengths = np.asarray(stats.row_valid_tokens) - prompt_lengths
+    width = np.asarray(batch.completion_ids).shape[1]
+    if np.any(completion_lengths < 0) or np.any(completion_lengths > width):
+      raise ValueError(
+          "OPD padded token lengths disagree with batch dimensions."
+      )
+    return dataclasses.replace(
+        batch,
+        completion_attention_mask=(
+            np.arange(width)[None, :] < completion_lengths[:, None]
+        ),
+    )
+
   async def critique_stage(self) -> None:
     """Stage 2: Scores rewards, PRMs, and reference KL logprobs."""
     assert self.engine is not None
@@ -781,12 +980,28 @@ class StandardRLProgram(RLProgram):
             self._score_group, group
         )
 
-        raw_payloads = self.algo.create_trainer_payloads(group, rewards=rewards)
+        # Pure OPD retains task scores for evaluation/telemetry but does not
+        # pass them to the group-relative task advantage estimator.
+        training_rewards = (
+            [0.0] * len(rewards)
+            if self.opd_config is not None
+            and self.opd_config.task_reward_coefficient == 0
+            else rewards
+        )
+        raw_payloads = self.algo.create_trainer_payloads(
+            group, rewards=training_rewards
+        )
         if len(raw_payloads) != len(group):
           raise ValueError(
               f"create_trainer_payloads returned {len(raw_payloads)} payloads"
               f" for a group of {len(group)} items."
           )
+        if self.opd_config is not None:
+          raw_payloads, opd_metrics = await self._apply_opd(raw_payloads)
+          group_reward_log_metrics = {
+              **group_reward_log_metrics,
+              **opd_metrics,
+          }
         trainer_payloads = collections.deque(raw_payloads)
         del raw_payloads
         group_payloads: list[datatypes.RLTrainerPayload] = []
@@ -1306,6 +1521,13 @@ class StandardRLProgram(RLProgram):
         # agreement / TIS check compares the sampler against the trainer's
         # actual training forward rather than a freshly re-gated one.
         routed_experts=batch.routed_experts,
+        token_mask=(
+            None
+            if batch.completion_attention_mask is None
+            else np.concatenate(
+                [batch.prompt_mask, batch.completion_attention_mask], axis=1
+            )
+        ),
     )
     trainer_logps = await self.engine.per_token_logps(
         datatypes.Role.ACTOR, items=logps_req
@@ -1470,6 +1692,7 @@ class StandardRLProgram(RLProgram):
                   **self.dispatch_window.checkpoint_metadata(
                       uncommitted_groups
                   ),
+                  **identity.checkpoint_metadata(self._opd_manifest),
               },
           )
           step_times.checkpoint_time += time.monotonic() - checkpoint_start
@@ -1535,7 +1758,7 @@ class StandardRLProgram(RLProgram):
             step_packing_time_sec += time.perf_counter() - packing_start_time
             if mb is None:
               break
-            batch = mb.payload
+            batch = self._with_opd_attention_mask(mb.payload, mb.padding_stats)
             if getattr(self.algo, "requires_reference_kl", False):
               if not isinstance(batch, datatypes.RLTrainerPayload):
                 raise TypeError(

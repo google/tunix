@@ -338,6 +338,8 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
         return_logprobs=return_logprobs,
         routed_experts_prompt_start=routed_experts_prompt_start,
     )
+    if kwargs.get("require_unfiltered", False):
+      sampler_call_kwargs["require_unfiltered"] = True
     if any(s is not None for s in cache_salt_list):
       sampler_call_kwargs["cache_salt"] = (
           cache_salt_list[0] if len(cache_salt_list) == 1 else cache_salt_list
@@ -390,7 +392,17 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
       prompt_token_ids = self._prompt_tokens_from_request(
           req, sampler_output.padded_prompt_tokens[i], prompt_length=prompt_len
       )
-      log_ps = np.array(lps, dtype=np.float32) if lps is not None else None
+      with np.errstate(over="ignore", invalid="ignore"):
+        log_ps = np.array(lps, dtype=np.float32) if lps is not None else None
+      if return_logprobs and (
+          log_ps is None
+          or log_ps.shape != tok_ids.shape
+          or not np.all(np.isfinite(log_ps))
+      ):
+        raise ValueError(
+            "Requested vLLM logprobs must be finite and match sampled token"
+            " IDs."
+        )
 
       responses.append(
           base_sampler_lib.SamplingResponse(

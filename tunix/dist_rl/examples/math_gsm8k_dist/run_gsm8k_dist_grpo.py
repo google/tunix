@@ -127,6 +127,49 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--top_p", type=float, default=1.0)
   parser.add_argument("--top_k", type=int, default=-1)
   parser.add_argument(
+      "--opd_teacher_url",
+      default="",
+      help="Enable on-policy distillation with this SGLang teacher URL.",
+  )
+  parser.add_argument(
+      "--opd_teacher_tokenizer_path",
+      default="",
+      help=(
+          "Explicit teacher tokenizer directory or HF ID, required with OPD."
+          " Must match the tokenizer served at opd_teacher_url."
+      ),
+  )
+  parser.add_argument("--opd_coefficient", type=float, default=1.0)
+  parser.add_argument(
+      "--opd_teacher_revision",
+      default="",
+      help=(
+          "Caller-declared immutable teacher snapshot/revision, required to"
+          " resume positive-coefficient OPD checkpoints. This does not verify"
+          " which weights the remote server actually serves."
+      ),
+  )
+  parser.add_argument(
+      "--opd_task_reward_coefficient",
+      type=float,
+      default=0.0,
+      help=(
+          "Scale the normalized task advantage before adding OPD; 0 selects"
+          " pure distillation, 1 combines the original task advantage."
+      ),
+  )
+  parser.add_argument("--opd_teacher_timeout_seconds", type=float, default=60.0)
+  parser.add_argument("--opd_max_concurrency", type=int, default=8)
+  parser.add_argument(
+      "--in_flight_weight_updates",
+      type=_str2bool,
+      default=_str2bool(os.getenv("IN_FLIGHT_WEIGHT_UPDATES", "false")),
+      help=(
+          "Describe the rollout worker setting for OPD validation; the worker"
+          " config controls execution. OPD requires false."
+      ),
+  )
+  parser.add_argument(
       "--beta",
       type=float,
       default=0.0,
@@ -292,6 +335,80 @@ def _str2bool(v: str | bool) -> bool:
   raise argparse.ArgumentTypeError(f"Boolean value expected, got {v}")
 
 
+def _validate_opd_args(args: argparse.Namespace) -> None:
+  """Rejects unsupported OPD sampling and worker schedules before setup."""
+  if not args.opd_teacher_url:
+    return
+  if not args.opd_teacher_tokenizer_path:
+    raise ValueError(
+        "--opd_teacher_tokenizer_path is required with --opd_teacher_url."
+    )
+  if args.temperature != 1.0 or args.top_p != 1.0 or args.top_k not in (-1, 0):
+    raise ValueError(
+        "OPD requires temperature=1, top_p=1 and top_k=-1 or 0 (disabled)."
+    )
+  if not args.use_rollout_logps:
+    raise ValueError("OPD requires --use_rollout_logps.")
+  if args.max_staleness != 0 or args.in_flight_weight_updates:
+    raise ValueError(
+        "OPD requires max_staleness=0 and in_flight_weight_updates=false."
+    )
+  if (
+      args.opd_coefficient > 0
+      and args.weight_sync_mode != weight_sync.WeightSyncMode.RAIDEN
+  ):
+    raise ValueError(
+        "OPD requires --weight_sync_mode=raiden; none/fallback do not update"
+        " rollout weights."
+    )
+
+
+def _opd_program_kwargs(
+    args: argparse.Namespace, student_tokenizer: Any
+) -> dict[str, Any]:
+  """Creates teacher resources only when OPD was explicitly enabled."""
+  if not args.opd_teacher_url:
+    return {}
+  from tunix.dist_rl.distillation import identity  # pylint: disable=g-import-not-at-top
+  from tunix.dist_rl.distillation import on_policy  # pylint: disable=g-import-not-at-top
+  from tunix.dist_rl.distillation import teacher  # pylint: disable=g-import-not-at-top
+
+  config = on_policy.OnPolicyDistillationConfig(
+      coefficient=args.opd_coefficient,
+      task_reward_coefficient=args.opd_task_reward_coefficient,
+  )
+  teacher_tokenizer = AutoTokenizer.from_pretrained(
+      args.opd_teacher_tokenizer_path, trust_remote_code=True
+  )
+  if (
+      teacher_tokenizer.pad_token_id is None
+      and teacher_tokenizer.eos_token is not None
+  ):
+    teacher_tokenizer.pad_token = teacher_tokenizer.eos_token
+  scorer = teacher.SGLangTeacherScorer(
+      args.opd_teacher_url,
+      student_tokenizer=student_tokenizer,
+      teacher_tokenizer=teacher_tokenizer,
+      timeout_seconds=args.opd_teacher_timeout_seconds,
+      max_concurrency=args.opd_max_concurrency,
+  )
+  logging.info(
+      "OPD teacher=%s tokenizer=%s coefficient=%s task_advantage_scale=%s.",
+      args.opd_teacher_url,
+      args.opd_teacher_tokenizer_path,
+      config.coefficient,
+      config.task_reward_coefficient,
+  )
+  return {
+      "opd_config": config,
+      "teacher_scorer": scorer,
+      "opd_teacher_identity": identity.TeacherIdentity(
+          declared_revision=args.opd_teacher_revision or None,
+          tokenizer_fingerprint=scorer.tokenizer_fingerprint,
+      ),
+  }
+
+
 def _trajectory_store_config(
     args: argparse.Namespace,
 ) -> dict[str, Any] | None:
@@ -408,6 +525,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     raise ValueError("batch_size must be positive.")
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
+  _validate_opd_args(args)
 
   logging.info("=== Starting Distributed GSM8K GRPO Orchestrator ===")
   logging.info(
@@ -455,6 +573,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       pad_id,
       eos_id,
   )
+  opd_kwargs = _opd_program_kwargs(args, tokenizer)
 
   trajectory_store_config = _trajectory_store_config(args)
   cluster = orchestrator.ClusterOrchestrator(
@@ -539,6 +658,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           step,
           step + 1,
       ),
+      **opd_kwargs,
   )
 
   try:

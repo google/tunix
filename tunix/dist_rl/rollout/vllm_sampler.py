@@ -360,6 +360,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
   ) -> VllmSamplingParams:
     """Builds a vLLM SamplingParams object from a SamplingRequest or duck-typed request."""
     from vllm.sampling_params import SamplingParams as vllm_sampling_params_cls  # pylint: disable=g-import-not-at-top
+
     sparams = _get_val(req, "sampling_params")
     stop_token_ids = _get_val(
         sparams,
@@ -465,6 +466,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       req_id: str,
       task: Any,
       expected_prompt_token_ids: list[int] | None = None,
+      require_logprobs: bool = False,
   ) -> base_sampler_lib.SamplingResponse:
     """Consumes an AsyncLLMEngine output stream and formats a SamplingResponse."""
     try:
@@ -511,13 +513,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
             raw_prompt_token_ids or [], dtype=np.int32
         )
 
-      logprobs_arr = None
-      if getattr(output_choice, "logprobs", None):
-        logprob_vals = [
-            lp_dict[next(iter(lp_dict.keys()))].logprob if lp_dict else 0.0
-            for lp_dict in output_choice.logprobs
-        ]
-        logprobs_arr = np.array(logprob_vals, dtype=np.float32)
+      raw_logprobs = getattr(output_choice, "logprobs", None)
 
       routed_experts = getattr(output_choice, "routed_experts", None)
       if routed_experts is not None and not isinstance(
@@ -544,10 +540,18 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
           error=err_obj,
       )
 
-    # Built outside the `try` so that a malformed response (for example a
-    # logprobs/token_ids shape mismatch rejected by
-    # `SamplingResponse.__post_init__`) raises instead of being converted into
-    # a silent empty completion.
+    # Validate outside the transport-error handler: missing or corrupt scores
+    # must raise, rather than becoming an empty completion with fabricated
+    # zero supervision. Candidate dictionaries need not list the sampled ID
+    # first (they may include a higher-probability unsampled token).
+    logprobs_arr = None
+    if require_logprobs or raw_logprobs:
+      logprobs_arr = np.asarray(
+          generate_utils.get_logprobs_from_vllm_output(
+              token_ids_arr.tolist(), raw_logprobs, required=require_logprobs
+          ),
+          dtype=np.float32,
+      )
     return base_sampler_lib.SamplingResponse(
         request_id=req_id,
         text=text,
@@ -629,6 +633,16 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     pending_tasks = []
     for idx, req in enumerate(req_list):
       vllm_params = self._build_vllm_params(req, kwargs)
+      if kwargs.get("require_unfiltered", False):
+        # Check the actual engine parameters, not only the orchestrator's
+        # request: backend/model defaults must not change the OPD distribution.
+        if _get_val(self.engine_args, "logits_processors"):
+          raise ValueError(
+              "Unfiltered OPD cannot use engine logits processors."
+          )
+        generate_utils.validate_unfiltered_sampling(vllm_params)
+        if vllm_params.logprobs is None:
+          raise ValueError("Unfiltered OPD sampling requires token logprobs.")
       req_id = _get_val(req, "request_id") or f"req_{time.time_ns()}_{idx}"
       prompt_val = _get_val(req, "prompt")
       param_cache_salt = getattr(vllm_params, "cache_salt", None)
@@ -663,14 +677,24 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       task_gen = self._engine.generate(
           engine_prompt, vllm_params, request_id=req_id
       )
-      pending_tasks.append((req_id, task_gen, expected_prompt_ids))
+      pending_tasks.append((
+          req_id,
+          task_gen,
+          expected_prompt_ids,
+          vllm_params.logprobs is not None,
+      ))
 
     results = list(
         await asyncio.gather(*[
             self._process_request_output(
-                req_id, task_gen, expected_prompt_token_ids=expected_ids
+                req_id,
+                task_gen,
+                expected_prompt_token_ids=expected_ids,
+                require_logprobs=require_logprobs,
             )
-            for req_id, task_gen, expected_ids in pending_tasks
+            for req_id, task_gen, expected_ids, require_logprobs in (
+                pending_tasks
+            )
         ])
     )
 

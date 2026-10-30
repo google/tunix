@@ -20,10 +20,10 @@ import jax
 from jax import sharding
 import jax.numpy as jnp
 import numpy as np
+from types import SimpleNamespace
 from unittest import mock
 from tunix.generate import utils
 from tunix.rl import reshard
-
 
 PartitionSpec = sharding.PartitionSpec
 NamedSharding = sharding.NamedSharding
@@ -196,7 +196,9 @@ class UtilsTest(parameterized.TestCase):
     ]
     expected = [-1.71, -0.37, 0.0]
     self.assertEqual(
-        utils.get_logprobs_from_vllm_output(token_ids, logprobs),  # pyrefly: ignore[bad-argument-type]
+        utils.get_logprobs_from_vllm_output(
+            token_ids, logprobs
+        ),  # pyrefly: ignore[bad-argument-type]
         expected,
     )
 
@@ -204,7 +206,9 @@ class UtilsTest(parameterized.TestCase):
     token_ids = [100, 200]
     logprobs = [{101: Logprob(-0.5)}, {200: Logprob(-1.2)}]
     with self.assertRaises(ValueError):
-      utils.get_logprobs_from_vllm_output(token_ids, logprobs)  # pyrefly: ignore[bad-argument-type]
+      utils.get_logprobs_from_vllm_output(
+          token_ids, logprobs
+      )  # pyrefly: ignore[bad-argument-type]
 
   @parameterized.named_parameters(
       ("none_logprobs", [], None),
@@ -216,6 +220,36 @@ class UtilsTest(parameterized.TestCase):
         utils.get_logprobs_from_vllm_output(token_ids, logprobs),
         [],
     )
+
+  def test_required_logprobs_select_actual_token_not_first_candidate(self):
+    self.assertEqual(
+        utils.get_logprobs_from_vllm_output(
+            [7, 0],
+            [
+                {99: Logprob(float("nan")), 7: Logprob(-3.0)},
+                {42: Logprob(-0.1), 0: Logprob(0.0)},
+            ],
+            required=True,
+        ),
+        [-3.0, 0.0],
+    )
+
+  def test_required_logprobs_reject_missing_or_corrupt_selected_scores(self):
+    for logprobs in (
+        None,
+        [],
+        [None],
+        [{}],
+        [{99: Logprob(-0.1)}],
+        [{7: Logprob(float("nan"))}],
+        [{7: Logprob(float("inf"))}],
+        [{7: Logprob(float("-inf"))}],
+        [{7: Logprob(1e300)}],
+        [{7: object()}],
+    ):
+      with self.subTest(logprobs=logprobs):
+        with self.assertRaises(ValueError):
+          utils.get_logprobs_from_vllm_output([7], logprobs, required=True)
 
   def test_transfer_state_with_mappings_tranpose_and_sharding_device(self):
     device_count = len(jax.devices())
@@ -2552,6 +2586,67 @@ class ResolveParallelismSizesTest(parameterized.TestCase):
     utils.detach_incompatible_vllm_cleanup_finalizer(None)
 
 
+class UnfilteredSamplingTest(parameterized.TestCase):
+
+  @parameterized.parameters(0, -1)
+  def test_neutral_effective_mapping_and_attribute_params(self, top_k):
+    params = dict(temperature=1.0, top_p=1.0, top_k=top_k)
+    utils.validate_unfiltered_sampling(params)
+    utils.validate_unfiltered_sampling(SimpleNamespace(**params))
+
+  @parameterized.parameters(
+      ("temperature", 0.9),
+      ("temperature", None),
+      ("top_p", 0.9),
+      ("top_k", 20),
+      ("top_k", None),
+      ("min_p", 0.1),
+      ("frequency_penalty", 0.2),
+      ("presence_penalty", 0.2),
+      ("repetition_penalty", 1.1),
+      ("min_tokens", 1),
+      ("n", 2),
+      ("multi_sampling", 2),
+      ("best_of", 2),
+      ("beam_size", 1),
+      ("use_beam_search", True),
+      ("bad_words", ["blocked"]),
+      ("bad_words_token_ids", [[1]]),
+      ("_bad_words_token_ids", [[1]]),
+      ("logit_bias", {1: 2.0}),
+      ("allowed_token_ids", [1]),
+      ("logits_processors", [object()]),
+      ("forbidden_tokens", [1]),
+      ("structured_outputs", object()),
+      ("guided_decoding", object()),
+      ("extra_args", {"custom_logits": True}),
+      ("trace_decode_token_ids", [1]),
+      ("thinking_token_budget", 1),
+  )
+  def test_effective_filters_and_selection_are_rejected(self, name, value):
+    params = dict(temperature=1.0, top_p=1.0, top_k=-1)
+    params[name] = value
+    for effective in (params, SimpleNamespace(**params)):
+      with self.subTest(effective_type=type(effective)):
+        with self.assertRaises(ValueError):
+          utils.validate_unfiltered_sampling(effective)
+
+  def test_stopping_and_decoding_options_do_not_change_probabilities(self):
+    utils.validate_unfiltered_sampling(
+        dict(
+            temperature=1.0,
+            top_p=1.0,
+            top_k=-1,
+            stop=["stop"],
+            stop_token_ids=[0],
+            skip_special_tokens=False,
+            ignore_eos=True,
+            max_tokens=8,
+            seed=123,
+        )
+    )
+
+
 class TokenIdsTest(parameterized.TestCase):
 
   @parameterized.parameters(
@@ -2592,9 +2687,7 @@ class TokenIdsTest(parameterized.TestCase):
 
   def test_resolve_prompt_tokens_rejects_empty_numpy_arrays(self):
     with self.assertRaisesRegex(ValueError, "input_strings must not be empty"):
-      utils.resolve_prompt_tokens(
-          np.array([], dtype=str), None, lambda s: [1]
-      )
+      utils.resolve_prompt_tokens(np.array([], dtype=str), None, lambda s: [1])
     with self.assertRaisesRegex(
         ValueError, "prompt_token_ids must not be empty"
     ):
