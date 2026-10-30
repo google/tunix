@@ -16,8 +16,7 @@
 
 import contextlib
 import functools
-import threading
-from typing import Any, Callable, ContextManager, TypeVar, cast
+from typing import Any, Callable, ContextManager, cast
 
 from flax import nnx
 import jax
@@ -30,22 +29,6 @@ from tunix.rl import common as rl_common
 from tunix.rl import packing
 
 WorkerState = datatypes.WorkerState
-# Matches `remote_execution.OFFLOAD_TO_THREAD_ATTR` without adding a `grpc`
-# dependency to `:trainer_worker`.
-_OFFLOAD_TO_THREAD_ATTR = "_tunix_offload_to_thread"
-_F = TypeVar("_F", bound=Callable[..., Any])
-
-
-def _offload_to_thread(fn: _F) -> _F:
-  """Offloads a `TrainerWorker` method to the RPC thread and holds `_trainer_lock`."""
-
-  @functools.wraps(fn)
-  def _wrapped(self: "TrainerWorker", *args: Any, **kwargs: Any) -> Any:
-    with self._trainer_lock:  # pylint: disable=protected-access
-      return fn(self, *args, **kwargs)
-
-  setattr(_wrapped, _OFFLOAD_TO_THREAD_ATTR, True)
-  return cast(_F, _wrapped)
 
 
 def _compute_per_token_logps(
@@ -111,7 +94,6 @@ class TrainerWorker(abstract_worker.Worker):
     self._worker_id = worker_id
     self._state = WorkerState.PENDING
     self._last_error: str | None = None
-    self._trainer_lock = threading.RLock()
 
   def _policy_version(self) -> int:
     trainer = self._trainer
@@ -136,7 +118,7 @@ class TrainerWorker(abstract_worker.Worker):
       raise RuntimeError(f"TrainerWorker is not ready: {self.state.value}.")
     return self._trainer
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def initialize(self) -> datatypes.Response:
     """Initializes the worker and the underlying trainer."""
     if self.state == WorkerState.READY:
@@ -165,7 +147,7 @@ class TrainerWorker(abstract_worker.Worker):
       if self.state == WorkerState.INITIALIZING:
         self.state = WorkerState.READY
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def compile(self, dummy_data: Any = None) -> datatypes.Response:
     """Triggers JIT compilation using the provided dummy_data."""
     trainer = self._ensure_ready()
@@ -184,14 +166,14 @@ class TrainerWorker(abstract_worker.Worker):
       if self.state == WorkerState.COMPILING:
         self.state = WorkerState.READY
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def start(self) -> datatypes.Response:
     """Starts the worker's main loop."""
     self._ensure_ready()
     self._is_running = True
     return self._response(started=True)
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def stop(self) -> datatypes.Response:
     """Gracefully stops the worker."""
     if self.state == WorkerState.STOPPED:
@@ -226,7 +208,7 @@ class TrainerWorker(abstract_worker.Worker):
         last_error=self._last_error,
     )
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def with_loss_fn(
       self, loss_fn: Callable[..., Any], has_aux: bool = False
   ) -> datatypes.Response:
@@ -256,7 +238,7 @@ class TrainerWorker(abstract_worker.Worker):
       self._trainer.with_loss_fn(loss_fn, has_aux)
     return self._response(loss_fn_configured=True)
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def with_gen_model_input_fn(
       self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
   ) -> datatypes.Response:
@@ -267,13 +249,13 @@ class TrainerWorker(abstract_worker.Worker):
       self._trainer.with_gen_model_input_fn(gen_model_input_fn)
     return self._response(gen_model_input_fn_configured=True)
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def set_target_state(self, target_state: Any) -> datatypes.Response:
     """Stores rollout target_state so trainer-side weight sync can convert."""
     self._ensure_ready().set_target_state(target_state)
     return self._response(target_state_configured=True)
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def fwd_bwd(self, request: datatypes.TrainRequest) -> datatypes.Response:
     """Executes one forward/backward pass."""
     trainer = self._ensure_ready()
@@ -289,7 +271,7 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def update(self) -> int:
     """Applies the accumulated (mean) gradients as one optimizer update."""
     trainer = self._ensure_ready()
@@ -302,7 +284,7 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def eval_step(self, request: datatypes.TrainRequest) -> datatypes.Response:
     """Executes one evaluation step on the given payload."""
     trainer = self._ensure_ready()
@@ -318,7 +300,7 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def run_eval(self, eval_ds: Any) -> datatypes.Response:
     """Runs an explicit evaluation phase over eval micro-batches."""
     trainer = self._ensure_ready()
@@ -349,7 +331,7 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def per_token_logps(
       self, items: datatypes.LogprobsRequest, **kwargs: Any
   ) -> datatypes.LogprobsResponse:
@@ -434,7 +416,7 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def save_checkpoint(
       self,
       metadata: Any = None,
@@ -453,12 +435,12 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def restore_checkpoint(self, step: int | None = None) -> Any:
     """Restore state from a checkpoint and return the metadata pytree."""
     return self._ensure_ready().restore_checkpoint(step=step)
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def prepare_weight_sync(self, sync_request: Any = None) -> Any:
     """Stages weights for transfer and returns their metadata."""
     trainer = self._ensure_ready()
@@ -474,7 +456,7 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def release_weight_sync(self, sync_request: Any = None) -> Any:
     """Releases this round's staging and restores READY."""
     # Not `_ensure_ready()`: `prepare_weight_sync` left the state at SYNCING,
@@ -488,7 +470,7 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.READY
     return result
 
-  @_offload_to_thread
+  @abstract_worker.offload_to_thread
   def get_metrics(self) -> Any:
     """Returns and clears the recently collected step metric records."""
     return self._ensure_ready().get_metrics()

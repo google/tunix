@@ -69,8 +69,9 @@ RewardLogMetrics = Mapping[
 # in `StandardRLProgram.train_stage`. Depth 2 double-buffers microbatch dispatch
 # so the next microbatch's serialization, network transfer, and server-side
 # unpickling overlap with the active microbatch's Trainer execution while
-# bounding Orchestrator and Trainer host memory to at most 2 in-flight
-# microbatches.
+# bounding Trainer host memory to at most 2 in-flight microbatches (and
+# Orchestrator host memory to at most 4 microbatches across packing,
+# `pending_prep`, and `pending_trains`).
 _MAX_INFLIGHT_TRAIN_STEPS = 2
 
 
@@ -1430,12 +1431,34 @@ class StandardRLProgram(RLProgram):
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
     assert self.engine is not None
 
+    pending_prep: asyncio.Task[None] | None = None
     pending_trains: collections.deque[
         asyncio.Task[tuple[Any, float, float]]
     ] = collections.deque()
     step_result: Any = None
     step_times = step_telemetry.StepTimes()
     last_train_end_mono = 0.0
+
+    async def _drain_pending_prep() -> None:
+      nonlocal pending_prep
+      task, pending_prep = pending_prep, None
+      if task is not None:
+        await task
+
+    async def _next_scored_group() -> ScoredGroup | None:
+      # Surface a failed in-flight `pending_prep` while waiting for the next
+      # group instead of stalling until that group arrives from `scored_q`.
+      get_task = asyncio.ensure_future(self.scored_q.get())
+      try:
+        while (prep := pending_prep) is not None and not get_task.done():
+          await asyncio.wait(
+              (get_task, prep), return_when=asyncio.FIRST_COMPLETED
+          )
+          if prep.done():
+            await _drain_pending_prep()
+        return await get_task
+      finally:
+        get_task.cancel()
 
     async def _await_oldest_train() -> None:
       nonlocal step_result, last_train_end_mono
@@ -1503,9 +1526,70 @@ class StandardRLProgram(RLProgram):
           step_times.checkpoint_time += time.monotonic() - checkpoint_start
           checkpoint_saved = True
 
+        async def _prepare_and_enqueue_train(
+            mb: batch_assembly.AssembledBatch,
+        ) -> None:
+          nonlocal num_microbatches
+          batch = mb.payload
+          if getattr(self.algo, "requires_reference_kl", False):
+            if not isinstance(batch, datatypes.RLTrainerPayload):
+              raise TypeError(
+                  "Reference KL requires an assembler that returns "
+                  "datatypes.RLTrainerPayload microbatches; got "
+                  f"{type(batch).__name__}."
+              )
+            reference_start = time.monotonic()
+            ref_logps = await self.engine.per_token_logps(
+                datatypes.Role.REFERENCE,
+                items=batch,
+                temperature=self.generation_args.temperature,
+            )
+            step_times.reference_logps_time += (
+                time.monotonic() - reference_start
+            )
+            batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
+          algo_config = getattr(self.algo, "algo_config", None)
+          if (
+              isinstance(batch, datatypes.RLTrainerPayload)
+              and batch.old_per_token_logps is not None
+              and algo_config is not None
+              and algo_config.use_rollout_logps
+              and not self.can_fuse_agreement_in_loss
+          ):
+            await _drain_pending_trains()
+            agreement_start = time.monotonic()
+            batch = await self._apply_sampler_trainer_agreement(
+                batch, step_sampler_agreement
+            )
+            step_times.sampler_agreement_time += (
+                time.monotonic() - agreement_start
+            )
+
+          num_microbatches += 1
+          step_padding_stats.append(mb.padding_stats)
+          logging.info(
+              "Packed %d trajectories into microbatch: %s"
+              " (padding_ratio=%.3f, row_imbalance=%.3f)",
+              len(mb.trajectory_ids),
+              logging_utils.summarize_list(list(mb.trajectory_ids)),
+              mb.padding_stats.padding_ratio,
+              mb.padding_stats.row_imbalance,
+          )
+          is_final_batch = mb.is_final_batch
+          while pending_trains and (
+              pending_trains[0].done()
+              or len(pending_trains) >= _MAX_INFLIGHT_TRAIN_STEPS
+          ):
+            await _await_oldest_train()
+          pending_trains.append(
+              asyncio.create_task(
+                  self._timed_train_step(batch, apply_optimizer=is_final_batch)
+              )
+          )
+
         while groups_consumed < self.full_batch_size:
           wait_start = time.monotonic()
-          scored_group = await self.scored_q.get()
+          scored_group = await _next_scored_group()
           step_times.exposed_generation_time += time.monotonic() - wait_start
           had_scored_items = scored_group is not None
           if scored_group is None:
@@ -1563,66 +1647,11 @@ class StandardRLProgram(RLProgram):
             step_packing_time_sec += time.perf_counter() - packing_start_time
             if mb is None:
               break
-            batch = mb.payload
-            if getattr(self.algo, "requires_reference_kl", False):
-              if not isinstance(batch, datatypes.RLTrainerPayload):
-                raise TypeError(
-                    "Reference KL requires an assembler that returns "
-                    "datatypes.RLTrainerPayload microbatches; got "
-                    f"{type(batch).__name__}."
-                )
-              reference_start = time.monotonic()
-              ref_logps = await self.engine.per_token_logps(
-                  datatypes.Role.REFERENCE,
-                  items=batch,
-                  temperature=self.generation_args.temperature,
-              )
-              step_times.reference_logps_time += (
-                  time.monotonic() - reference_start
-              )
-              batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
-            algo_config = getattr(self.algo, "algo_config", None)
-            if (
-                isinstance(batch, datatypes.RLTrainerPayload)
-                and batch.old_per_token_logps is not None
-                and algo_config is not None
-                and algo_config.use_rollout_logps
-                and not self.can_fuse_agreement_in_loss
-            ):
-              await _drain_pending_trains()
-              agreement_start = time.monotonic()
-              batch = await self._apply_sampler_trainer_agreement(
-                  batch, step_sampler_agreement
-              )
-              step_times.sampler_agreement_time += (
-                  time.monotonic() - agreement_start
-              )
-
-            num_microbatches += 1
-            step_padding_stats.append(mb.padding_stats)
-            logging.info(
-                "Packed %d trajectories into microbatch: %s"
-                " (padding_ratio=%.3f, row_imbalance=%.3f)",
-                len(mb.trajectory_ids),
-                logging_utils.summarize_list(list(mb.trajectory_ids)),
-                mb.padding_stats.padding_ratio,
-                mb.padding_stats.row_imbalance,
-            )
+            await _drain_pending_prep()
             is_final_batch = mb.is_final_batch
-            while pending_trains and (
-                pending_trains[0].done()
-                or len(pending_trains) >= _MAX_INFLIGHT_TRAIN_STEPS
-            ):
-              await _await_oldest_train()
-            pending_trains.append(
-                asyncio.create_task(
-                    self._timed_train_step(
-                        batch, apply_optimizer=is_final_batch
-                    )
-                )
-            )
-            del batch, mb
             if is_final_batch:
+              await _prepare_and_enqueue_train(mb)
+              del mb
               await _drain_pending_trains()
               metrics_start = time.monotonic()
               trainer_metrics = await self.engine.get_metrics(
@@ -1646,14 +1675,21 @@ class StandardRLProgram(RLProgram):
               )
               if full_batch_complete:
                 await _maybe_save_checkpoint()
+            else:
+              pending_prep = asyncio.create_task(_prepare_and_enqueue_train(mb))
+              del mb
+              await asyncio.sleep(0)
+              if pending_prep.done():
+                await _drain_pending_prep()
           del batch_iter
 
           if not had_scored_items or groups_consumed >= self.full_batch_size:
-            if not checkpoint_saved and final_minibatch_completed:
-              await _maybe_save_checkpoint()
             break
 
+        await _drain_pending_prep()
         await _drain_pending_trains()
+        if not checkpoint_saved and final_minibatch_completed:
+          await _maybe_save_checkpoint()
 
         if not all_step_items:
           logging.info(
@@ -1767,6 +1803,11 @@ class StandardRLProgram(RLProgram):
         # left to set the event.
         self.dispatch_window.release()
     finally:
+      if pending_prep is not None:
+        pending_prep.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+          await pending_prep
+        pending_prep = None
       for task in pending_trains:
         task.cancel()
       while pending_trains:

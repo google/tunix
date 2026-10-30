@@ -14,6 +14,7 @@
 
 """Tests for the frozen-model InferenceWorker wrapper."""
 
+import threading
 from absl.testing import absltest
 import cloudpickle
 import jax.numpy as jnp
@@ -244,6 +245,129 @@ class InferenceWorkerTest(absltest.TestCase):
     )
     worker.score(req)
     self.assertEqual(events, ["enter_ctx", "exit_ctx"])
+
+  def test_offload_markers_and_lock_serialization(self):
+    worker = _worker()
+    attr = inference_lib.abstract_worker.OFFLOAD_TO_THREAD_ATTR
+    for offloaded_name in (
+        "initialize",
+        "compile",
+        "start",
+        "stop",
+        "compute_logps",
+        "per_token_logps",
+        "score",
+    ):
+      self.assertTrue(
+          getattr(getattr(worker, offloaded_name), attr, False),
+          msg=f"{offloaded_name} should opt in to worker-thread offloading",
+      )
+    for inline_name in ("heartbeat", "info"):
+      self.assertFalse(
+          getattr(getattr(worker, inline_name), attr, False),
+          msg=f"{inline_name} must remain inline on the event loop",
+      )
+
+    entered_logps = threading.Event()
+    release_logps = threading.Event()
+    stop_finished = threading.Event()
+    logps_results: list[np.ndarray] = []
+    logps_errors: list[BaseException] = []
+
+    class _BlockingCore(_StubCore):
+
+      def get_ref_per_token_logps(
+          self,
+          prompt_tokens,
+          completion_tokens,
+          pad_id,
+          eos_id,
+          temperature=1.0,
+      ):
+        entered_logps.set()
+        if not release_logps.wait(timeout=5.0):
+          raise TimeoutError("release_logps timed out")
+        return super().get_ref_per_token_logps(
+            prompt_tokens, completion_tokens, pad_id, eos_id, temperature
+        )
+
+    blocking_worker = _worker(_BlockingCore())
+    blocking_worker.initialize()
+    batch = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1, 2]], dtype=np.int32),
+        prompt_mask=np.ones((1, 2), dtype=np.float32),
+        completion_ids=np.array([[3, 4]], dtype=np.int32),
+        completion_mask=np.ones((1, 2), dtype=np.float32),
+        advantages=np.ones((1, 2), dtype=np.float32),
+    )
+
+    def _run_logps():
+      try:
+        logps_results.append(blocking_worker.per_token_logps(batch))
+      except BaseException as exc:  # pylint: disable=broad-exception-caught
+        logps_errors.append(exc)
+
+    t_logps = threading.Thread(target=_run_logps)
+    t_logps.start()
+    self.assertTrue(entered_logps.wait(timeout=5.0))
+
+    # Inline probes do not acquire `_worker_lock` and respond immediately.
+    self.assertEqual(blocking_worker.heartbeat().state, WorkerState.READY)
+    self.assertEqual(blocking_worker.info().worker_id, "test_worker_1")
+
+    def _run_stop():
+      blocking_worker.stop()
+      stop_finished.set()
+
+    t_stop = threading.Thread(target=_run_stop)
+    t_stop.start()
+    self.assertFalse(stop_finished.wait(timeout=0.05))
+
+    release_logps.set()
+    t_logps.join(timeout=5.0)
+    t_stop.join(timeout=5.0)
+    self.assertEmpty(logps_errors)
+    self.assertLen(logps_results, 1)
+    np.testing.assert_allclose(logps_results[0], batch.completion_ids)
+    self.assertTrue(stop_finished.is_set())
+    self.assertEqual(blocking_worker.heartbeat().state, WorkerState.STOPPED)
+
+  def test_offload_to_thread_rejects_async_and_supports_reentrant_lock(self):
+    aw = inference_lib.abstract_worker
+
+    async def _async_fn(self):
+      return self
+
+    with self.assertRaisesRegex(TypeError, "synchronous methods"):
+      aw.offload_to_thread(_async_fn)
+
+    class _MinimalWorker(aw.Worker):
+
+      @aw.offload_to_thread
+      def initialize(self):
+        return datatypes.Response()
+
+      @aw.offload_to_thread
+      def compile(self, dummy_data=None):
+        del dummy_data
+        return self.initialize()
+
+      def start(self):
+        return datatypes.Response()
+
+      def stop(self):
+        return datatypes.Response()
+
+      def info(self):
+        return datatypes.WorkerInfo(worker_id="m", roles=frozenset())
+
+      def heartbeat(self):
+        return datatypes.HealthReport(state=self.state)
+
+    w = _MinimalWorker()
+    self.assertTrue(getattr(w.compile, aw.OFFLOAD_TO_THREAD_ATTR, False))
+    self.assertFalse(getattr(w.heartbeat, aw.OFFLOAD_TO_THREAD_ATTR, False))
+    self.assertIsInstance(w.compile(), datatypes.Response)
 
 
 if __name__ == "__main__":

@@ -1329,6 +1329,257 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_train_stage_three_way_overlap_pack_reference_and_train(self):
+    events: list[str] = []
+    ref_mb0_started = threading.Event()
+    mb1_packed = asyncio.Event()
+    train_mb0_started = threading.Event()
+    ref_mb1_started = threading.Event()
+    mb2_packed = asyncio.Event()
+
+    def _make_mb_payload(val: int) -> datatypes.RLTrainerPayload:
+      return datatypes.RLTrainerPayload(
+          prompt_ids=np.array([[val, val]], dtype=np.int32),
+          prompt_mask=np.ones((1, 2), dtype=np.float32),
+          completion_ids=np.array([[val + 10, val + 20]], dtype=np.int32),
+          completion_mask=np.ones((1, 2), dtype=np.float32),
+          advantages=np.ones((1, 2), dtype=np.float32),
+      )
+
+    class ThreeStageOverlapAssembler:
+      num_generations: int = 2
+      mini_batch_size: int = 1
+      groups_per_assembly_batch: int = 1
+
+      @property
+      def assembly_batch_size(self) -> int:
+        return self.groups_per_assembly_batch * self.num_generations
+
+      def feed(self, items):
+        del items
+        events.append("pack_mb0")
+        yield batch_assembly.AssembledBatch(
+            payload=_make_mb_payload(0),
+            is_final_batch=False,
+            padding_stats=_padding_stats(),
+        )
+        # Pack(mb_1) runs while Reference(mb_0) is already in flight.
+        if not ref_mb0_started.wait(timeout=2.0):
+          raise TimeoutError("Reference(mb_0) did not start before Pack(mb_1)")
+        events.append("pack_mb1_during_ref_mb0")
+        loop.call_soon_threadsafe(mb1_packed.set)
+        yield batch_assembly.AssembledBatch(
+            payload=_make_mb_payload(1),
+            is_final_batch=False,
+            padding_stats=_padding_stats(),
+        )
+        # Pack(mb_2) runs while BOTH Trainer(mb_0) and Reference(mb_1) are in
+        # flight concurrently.
+        if not train_mb0_started.wait(timeout=2.0):
+          raise TimeoutError("Trainer(mb_0) did not start before Pack(mb_2)")
+        if not ref_mb1_started.wait(timeout=2.0):
+          raise TimeoutError("Reference(mb_1) did not start before Pack(mb_2)")
+        events.append("pack_mb2_during_ref_mb1_and_train_mb0")
+        loop.call_soon_threadsafe(mb2_packed.set)
+        yield batch_assembly.AssembledBatch(
+            payload=_make_mb_payload(2),
+            is_final_batch=True,
+            padding_stats=_padding_stats(),
+        )
+
+      def flush(self):
+        return iter(())
+
+      def reset(self):
+        pass
+
+    loop: asyncio.AbstractEventLoop
+
+    async def _run():
+      nonlocal loop
+      loop = asyncio.get_running_loop()
+      self.mock_algo.requires_reference_kl = True
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+          assembler=ThreeStageOverlapAssembler(),
+          sync_weights=False,
+      )
+
+      async def _fake_per_token_logps(role, items, **kwargs):
+        del role, kwargs
+        mb_id = int(items.prompt_ids[0, 0])
+        if mb_id == 0:
+          events.append("ref_mb0_start")
+          ref_mb0_started.set()
+          await asyncio.wait_for(mb1_packed.wait(), timeout=2.0)
+          events.append("ref_mb0_end")
+        elif mb_id == 1:
+          events.append("ref_mb1_start")
+          ref_mb1_started.set()
+          await asyncio.wait_for(mb2_packed.wait(), timeout=2.0)
+          events.append("ref_mb1_end")
+        else:
+          events.append("ref_mb2")
+        return np.array([[-0.1, -0.2]], dtype=np.float32)
+
+      async def _fake_train_step(batch, *, apply_optimizer=True, **_):
+        mb_id = int(batch.prompt_ids[0, 0])
+        if mb_id == 0:
+          self.assertFalse(apply_optimizer)
+          events.append("train_mb0_start")
+          train_mb0_started.set()
+          await asyncio.wait_for(mb2_packed.wait(), timeout=2.0)
+          events.append("train_mb0_end")
+          return None
+        if mb_id == 1:
+          self.assertFalse(apply_optimizer)
+          events.append("train_mb1")
+          return None
+        self.assertTrue(apply_optimizer)
+        events.append("train_mb2")
+        return {"updated": True}
+
+      self.mock_engine.per_token_logps = mock.AsyncMock(
+          side_effect=_fake_per_token_logps
+      )
+      self.mock_engine.train_step = mock.AsyncMock(side_effect=_fake_train_step)
+      program.engine = self.mock_engine
+
+      items = tuple(
+          datatypes.TrajectoryItem(
+              group_index=group_index,
+              prompt_id="prompt_0",
+              start_step=0,
+              traj=_scored_traj(),
+          )
+          for group_index in range(2)
+      )
+      await program.scored_q.put(
+          rl_program.ScoredGroup(
+              payloads=tuple(
+                  self.mock_algo.create_trainer_payloads.return_value[:2]
+              ),
+              items=items,
+              rewards=(1.0, 1.0),
+          )
+      )
+
+      await program.train_stage()
+
+      self.assertIn("pack_mb1_during_ref_mb0", events)
+      self.assertIn("pack_mb2_during_ref_mb1_and_train_mb0", events)
+      self.assertLess(
+          events.index("ref_mb0_start"),
+          events.index("pack_mb1_during_ref_mb0"),
+      )
+      self.assertLess(
+          events.index("pack_mb1_during_ref_mb0"),
+          events.index("ref_mb0_end"),
+      )
+      self.assertLess(
+          events.index("train_mb0_start"),
+          events.index("pack_mb2_during_ref_mb1_and_train_mb0"),
+      )
+      self.assertLess(
+          events.index("ref_mb1_start"),
+          events.index("pack_mb2_during_ref_mb1_and_train_mb0"),
+      )
+      self.assertLess(
+          events.index("pack_mb2_during_ref_mb1_and_train_mb0"),
+          events.index("ref_mb1_end"),
+      )
+      self.assertLess(
+          events.index("pack_mb2_during_ref_mb1_and_train_mb0"),
+          events.index("train_mb0_end"),
+      )
+
+    asyncio.run(_run())
+
+  def test_train_stage_surfaces_pending_prep_error_while_waiting_for_next_group(
+      self,
+  ):
+    class SingleMicrobatchPerGroupAssembler:
+      num_generations: int = 2
+      mini_batch_size: int = 2
+      groups_per_assembly_batch: int = 1
+      _calls: int = 0
+
+      @property
+      def assembly_batch_size(self) -> int:
+        return self.groups_per_assembly_batch * self.num_generations
+
+      def feed(self, items):
+        del items
+        self._calls += 1
+        yield batch_assembly.AssembledBatch(
+            payload=datatypes.RLTrainerPayload(
+                prompt_ids=np.array([[1, 2]], dtype=np.int32),
+                prompt_mask=np.ones((1, 2), dtype=np.float32),
+                completion_ids=np.array([[3, 4]], dtype=np.int32),
+                completion_mask=np.ones((1, 2), dtype=np.float32),
+                advantages=np.ones((1, 2), dtype=np.float32),
+            ),
+            is_final_batch=(self._calls == 2),
+            padding_stats=_padding_stats(),
+        )
+
+      def flush(self):
+        return iter(())
+
+      def reset(self):
+        pass
+
+    async def _run():
+      self.mock_algo.mini_batch_size = 2
+      self.mock_algo.requires_reference_kl = True
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+          assembler=SingleMicrobatchPerGroupAssembler(),
+          sync_weights=False,
+      )
+
+      async def _failing_ref_logps(role, items, **kwargs):
+        del role, items, kwargs
+        await asyncio.sleep(0.01)
+        raise RuntimeError("reference RPC failed on mb_0")
+
+      self.mock_engine.per_token_logps = mock.AsyncMock(
+          side_effect=_failing_ref_logps
+      )
+      program.engine = self.mock_engine
+
+      items = tuple(
+          datatypes.TrajectoryItem(
+              group_index=group_index,
+              prompt_id="prompt_0",
+              start_step=0,
+              traj=_scored_traj(),
+          )
+          for group_index in range(2)
+      )
+      # Only enqueue group 0 (not closing scored_q and never enqueueing group 1)
+      # so `train_stage` blocks waiting for group 1 on `scored_q.get()`.
+      await program.scored_q.put(
+          rl_program.ScoredGroup(
+              payloads=tuple(
+                  self.mock_algo.create_trainer_payloads.return_value[:2]
+              ),
+              items=items,
+              rewards=(1.0, 1.0),
+          )
+      )
+
+      with self.assertRaisesRegex(RuntimeError, "reference RPC failed on mb_0"):
+        await asyncio.wait_for(program.train_stage(), timeout=2.0)
+
+    asyncio.run(_run())
+
   def test_train_stage_awaits_pending_train_before_sampler_trainer_agreement(
       self,
   ):

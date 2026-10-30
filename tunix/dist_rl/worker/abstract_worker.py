@@ -25,13 +25,33 @@ import contextlib
 import contextvars
 import functools
 import inspect
-from typing import Any, Callable
+import threading
+from typing import Any, Callable, TypeVar, cast
 
 from tunix.dist_rl.common import datatypes
 
+OFFLOAD_TO_THREAD_ATTR = "_tunix_offload_to_thread"
+_F = TypeVar("_F", bound=Callable[..., Any])
 _ACTIVE_WORKERS: contextvars.ContextVar[frozenset[int]] = (
     contextvars.ContextVar("active_workers", default=frozenset())
 )
+
+
+def offload_to_thread(fn: _F) -> _F:
+  """Marks a sync `Worker` method for RPC thread offload and serializes via `_worker_lock`."""
+  if inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn):
+    raise TypeError("offload_to_thread only applies to synchronous methods.")
+
+  @functools.wraps(fn)
+  def _wrapped(self: "Worker", *args: Any, **kwargs: Any) -> Any:
+    lock = self.__dict__.get("_worker_lock")
+    if lock is None:
+      lock = self.__dict__.setdefault("_worker_lock", threading.RLock())
+    with lock:
+      return fn(self, *args, **kwargs)
+
+  setattr(_wrapped, OFFLOAD_TO_THREAD_ATTR, True)
+  return cast(_F, _wrapped)
 
 
 def _wrap_with_execution_context(fn: Callable[..., Any]) -> Callable[..., Any]:

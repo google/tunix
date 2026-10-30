@@ -116,6 +116,7 @@ class InferenceWorker(abstract_worker.Worker):
         worker_id=self._worker_id, roles=frozenset({"inference"})
     )
 
+  @abstract_worker.offload_to_thread
   def initialize(self) -> datatypes.Response:
     self.state = WorkerState.INITIALIZING
     try:
@@ -123,6 +124,7 @@ class InferenceWorker(abstract_worker.Worker):
     finally:
       self.state = WorkerState.READY
 
+  @abstract_worker.offload_to_thread
   def compile(self, dummy_data: Any) -> datatypes.Response:
     del dummy_data
     self.state = WorkerState.COMPILING
@@ -131,9 +133,11 @@ class InferenceWorker(abstract_worker.Worker):
     finally:
       self.state = WorkerState.READY
 
+  @abstract_worker.offload_to_thread
   def start(self) -> datatypes.Response:
     return datatypes.Response()
 
+  @abstract_worker.offload_to_thread
   def stop(self) -> datatypes.Response:
     self.state = WorkerState.STOPPED
     return datatypes.Response()
@@ -141,6 +145,7 @@ class InferenceWorker(abstract_worker.Worker):
   def heartbeat(self) -> datatypes.HealthReport:
     return datatypes.HealthReport(state=self.state)
 
+  @abstract_worker.offload_to_thread
   def compute_logps(
       self, req: datatypes.LogprobsRequest
   ) -> datatypes.LogprobsResponse:
@@ -187,6 +192,7 @@ class InferenceWorker(abstract_worker.Worker):
           ),
       )
 
+  @abstract_worker.offload_to_thread
   def per_token_logps(
       self,
       items: datatypes.RLTrainerPayload,
@@ -215,6 +221,7 @@ class InferenceWorker(abstract_worker.Worker):
       raise RuntimeError(resp.error.message)
     return np.asarray(resp.per_token_logps, dtype=np.float32)
 
+  @abstract_worker.offload_to_thread
   def score(self, req: datatypes.ScoreRequest) -> datatypes.ScoreResponse:
     """Scores one scalar per row under a hosted (frozen) reward model."""
     try:
