@@ -16,6 +16,7 @@
 
 import asyncio
 import collections
+import dataclasses
 import tempfile
 import threading
 import types
@@ -312,6 +313,75 @@ class RolloutWorkerTest(absltest.TestCase):
     ):
       asyncio.run(worker2.get_weight_sync_metadata())
     self.assertEqual(worker2.state, datatypes.WorkerState.READY)
+
+  def test_abort_after_commit_still_reports_committed(self):
+    request = datatypes.WeightSyncRequest(
+        controller_id="c",
+        policy_version=1,
+        extra_config={"req_id": "wsync-v1-r0", "uuid": 1},
+    )
+
+    async def _run():
+      await self.worker.bind_weight_sync()
+      await self.worker.pre_weight_sync(request)
+      await self.worker.weight_sync(request)
+      await self.worker.post_weight_sync(request)
+      # A rollback abort racing a late commit must not hide the commit, nor may
+      # an abort for an older round or one without a round key.
+      await self.worker.abort_weight_sync(request)
+      await self.worker.abort_weight_sync(
+          dataclasses.replace(
+              request, extra_config={"req_id": "wsync-v0-r0", "uuid": 0}
+          )
+      )
+      await self.worker.abort_weight_sync(None)
+      return await self.worker.get_weight_sync_status()
+
+    status = asyncio.run(_run())
+    self.assertEqual(status["phase"], "committed")
+    self.assertEqual(status["req_id"], "wsync-v1-r0")
+    self.assertEqual(status["uuid"], 1)
+
+  def test_weight_sync_status_prefers_sampler_round_tracker(self):
+    tracker_report = {"req_id": "wsync-v2-r1", "uuid": 2, "phase": "committed"}
+    with mock.patch.object(
+        self.sampler,
+        "get_weight_sync_status",
+        new=mock.AsyncMock(return_value=tracker_report),
+        create=True,
+    ):
+      status = asyncio.run(self.worker.get_weight_sync_status())
+    self.assertEqual(status, dict(tracker_report, policy_version=0))
+
+  def test_weight_sync_status_falls_back_when_tracker_never_opened_round(self):
+    unopened_report = {
+        "req_id": None,
+        "uuid": -1,
+        "phase": "idle",
+        "policy_version": -1,
+    }
+    request = datatypes.WeightSyncRequest(
+        controller_id="c",
+        policy_version=1,
+        extra_config={"req_id": "wsync-v1-r0", "uuid": 1},
+    )
+    asyncio.run(self.worker.pre_weight_sync(request))
+    with mock.patch.object(
+        self.sampler,
+        "get_weight_sync_status",
+        new=mock.AsyncMock(return_value=unopened_report),
+        create=True,
+    ):
+      status = asyncio.run(self.worker.get_weight_sync_status())
+    self.assertEqual(
+        status,
+        {
+            "req_id": "wsync-v1-r0",
+            "uuid": 1,
+            "phase": "prepared",
+            "policy_version": 0,
+        },
+    )
 
 
 def _worker(config=None):

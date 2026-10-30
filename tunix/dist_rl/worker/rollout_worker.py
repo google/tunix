@@ -15,6 +15,7 @@
 """Top-level RolloutWorker abstractions (Service vs Client Driver)."""
 
 import dataclasses
+import inspect
 import threading
 import types
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Union
@@ -120,6 +121,8 @@ class RolloutWorker(abstract_worker.Worker):
     self._policy_version = 0
     self._state = datatypes.WorkerState.PENDING
     self._init_lock = threading.Lock()
+    # TODO(linchai): make the sampler the single owner of weight-sync round
+    # state, then drop `_sync_round` and `_record_round`.
     self._sync_round = {"req_id": None, "uuid": 0, "phase": "idle"}
     self._jax_cache_syncer = gcs_cache.JaxCacheSyncer(
         worker_id, jax_cache_config
@@ -448,11 +451,31 @@ class RolloutWorker(abstract_worker.Worker):
 
   async def get_weight_sync_status(self, **kwargs) -> Any:
     """Returns this worker's view of the current weight sync round."""
+    del kwargs
+    # A sampler with an opened WorkerRoundTracker round is authoritative: it
+    # knows when an abort was refused because the round had already committed.
+    sampler = getattr(self.manager, "sampler", None)
+    get_status = getattr(sampler, "get_weight_sync_status", None)
+    if get_status is not None:
+      report = get_status()
+      if inspect.isawaitable(report):
+        report = await report
+      if report and report.get("req_id") is not None:
+        return dict(report, policy_version=self._policy_version)
     return dict(self._sync_round, policy_version=self._policy_version)
 
   def _record_round(self, sync_request: Any, phase: str) -> None:
     extra = getattr(sync_request, "extra_config", None) or {}
-    if extra.get("req_id") is not None:
-      self._sync_round["req_id"] = extra.get("req_id")
-      self._sync_round["uuid"] = extra.get("uuid", 0)
+    req_id = extra.get("req_id")
+    key = (req_id, extra.get("uuid", 0)) if req_id is not None else None
+    current = (self._sync_round["req_id"], self._sync_round["uuid"])
+    if (
+        phase == "aborted"
+        and self._sync_round["phase"] == "committed"
+        and (key is None or key == current or key[1] < current[1])
+    ):
+      # An abort for this or an older round does not roll back a commit.
+      return
+    if key is not None:
+      self._sync_round["req_id"], self._sync_round["uuid"] = key
     self._sync_round["phase"] = phase
