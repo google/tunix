@@ -312,7 +312,16 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     Args:
       steps_per_mini_batch: Input micro-batches per mini-batch.
       num_iterations: Passes over each mini-batch (`batch_repeat`).
+
+    Raises:
+      ValueError: If `steps_per_mini_batch` or `num_iterations` is not positive.
     """
+    if steps_per_mini_batch <= 0 or num_iterations <= 0:
+      raise ValueError(
+          "Expected positive steps_per_mini_batch and num_iterations, got"
+          f" {steps_per_mini_batch=} and {num_iterations=}. Check that"
+          " mini_batch_size >= train_micro_batch_size and num_iterations >= 1."
+      )
     if self._packing_enabled:
       # Packed row counts vary, but each pass over a mini-batch is exactly one
       # optimizer update.

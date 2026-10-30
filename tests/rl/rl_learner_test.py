@@ -269,6 +269,34 @@ class RLLearnerTest(parameterized.TestCase):
     next_expected = [chr(ord(x) + steps_per_mini_batch) for x in expected]
     self.assertEqual(prepare(), next_expected)
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='zero_steps_per_mini_batch',
+          steps_per_mini_batch=0,
+          num_iterations=1,
+      ),
+      dict(
+          testcase_name='zero_num_iterations',
+          steps_per_mini_batch=1,
+          num_iterations=0,
+      ),
+  )
+  def test_num_micro_batches_to_skip_rejects_non_positive(
+      self, steps_per_mini_batch, num_iterations
+  ):
+    mock_engine = mock.MagicMock()
+    mock_engine.cluster_config.training_config.max_seq_token_per_tpu = None
+    mock_engine.actor_trainer.model = None
+    mock_engine.actor_trainer.iter_steps = 0
+    mock_engine.actor_trainer.train_steps = 0
+    learner = DummyLearner(
+        rl_engine=mock_engine,
+        algo_config=DummyConfig(),
+        reward_fns=lambda prompts, completions, **kwargs: [1.0] * len(prompts),
+    )
+    with self.assertRaisesRegex(ValueError, 'Expected positive'):
+      learner._num_micro_batches_to_skip(steps_per_mini_batch, num_iterations)
+
   @parameterized.parameters(([],), (None,))
   def test_empty_or_none_reward_fns_fails_fast_for_sequence_level(
       self, empty_fns
