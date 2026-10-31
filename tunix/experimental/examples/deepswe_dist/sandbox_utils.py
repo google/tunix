@@ -385,36 +385,65 @@ def _coerce_str(val: object) -> str:
   return str(val)
 
 
+def _has_image_value(val: object) -> bool:
+  if val is None:
+    return False
+  if isinstance(val, str):
+    return bool(val.strip())
+  if isinstance(val, (list, tuple, np.ndarray)):
+    return np.asarray(val).size > 0
+  return True
+
+
+def _normalize_extracted_img(img: object) -> object:
+  if isinstance(img, str):
+    s = img.strip()
+    if "swesmith" in s.lower():
+      if "/" not in s:
+        short_img = s.split(":")[0].replace("__", "_1776_")
+        return f"jyangballin/{short_img}:latest"
+      if ":" not in s:
+        return f"{s}:latest"
+  return img
+
+
+def _extract_dict_image(d: dict[str, object]) -> object | None:
+  for key in ("docker_image", "image", "image_name"):
+    if key in d and _has_image_value(d[key]):
+      return _normalize_extracted_img(d[key])
+  from tunix.experimental.examples.deepswe_dist import swegym_utils  # pylint: disable=g-import-not-at-top
+
+  if swegym_utils.is_swegym_entry(d):
+    instance_id = str(d.get("instance_id") or "").strip()
+    if instance_id:
+      return swegym_utils.source_image_for_instance(instance_id)
+  return None
+
+
 def extract_task_image(item: dict[str, object]) -> object | None:
-  """Extract `docker_image` or `image` from a dataset item dictionary."""
-  if "docker_image" in item and item["docker_image"] is not None:
-    return item["docker_image"]
-  if "image" in item and item["image"] is not None:
-    return item["image"]
+  """Extract `docker_image`, `image`, or `image_name` from a dataset item dictionary."""
+  direct = _extract_dict_image(item)
+  if direct is not None:
+    return direct
 
   if "metadata" in item and isinstance(item["metadata"], dict):
     meta = item["metadata"]
-    if "docker_image" in meta and meta["docker_image"] is not None:
-      return meta["docker_image"]
-    if "image" in meta and meta["image"] is not None:
-      return meta["image"]
+    meta_img = _extract_dict_image(meta)
+    if meta_img is not None:
+      return meta_img
     if "env_config" in meta and isinstance(meta["env_config"], dict):
       env_cfg = meta["env_config"]
       if "entry" in env_cfg and isinstance(env_cfg["entry"], dict):
-        entry = env_cfg["entry"]
-        if "docker_image" in entry and entry["docker_image"] is not None:
-          return entry["docker_image"]
-        if "image" in entry and entry["image"] is not None:
-          return entry["image"]
+        entry_img = _extract_dict_image(env_cfg["entry"])
+        if entry_img is not None:
+          return entry_img
 
   if "env_config" in item and isinstance(item["env_config"], dict):
     env_cfg = item["env_config"]
     if "entry" in env_cfg and isinstance(env_cfg["entry"], dict):
-      entry = env_cfg["entry"]
-      if "docker_image" in entry and entry["docker_image"] is not None:
-        return entry["docker_image"]
-      if "image" in entry and entry["image"] is not None:
-        return entry["image"]
+      entry_img = _extract_dict_image(env_cfg["entry"])
+      if entry_img is not None:
+        return entry_img
 
   return None
 
