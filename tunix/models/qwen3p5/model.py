@@ -109,6 +109,7 @@ class ShardingConfig:
   linear_conv_k1d: Tuple[str | None, ...]
   linear_head_h: Tuple[str | None, ...]
   linear_out_fd: Tuple[str | None, ...]
+  head_norm_weight: Tuple[str | None, ...] = (None,)
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False) -> 'ShardingConfig':
@@ -122,18 +123,19 @@ class ShardingConfig:
         o_weight_nhd=('tp', None, fsdp),
         ffw_weight_df=(fsdp, 'tp'),
         ffw_weight_fd=('tp', fsdp),
-        rms_norm_weight=('tp',),
-        act_btd=('fsdp', None, None if is_sampling else 'tp'),
+        rms_norm_weight=(None,),
+        act_btd=('fsdp', None, None),
         act_btf=('fsdp', None, 'tp'),
         act_btnh=('fsdp', None, 'tp', None),
         exp_weight_edf=(None, fsdp, 'tp'),
         exp_weight_efd=(None, 'tp', fsdp),
         linear_qkv_df=(fsdp, None),
         linear_z_df=(fsdp, 'tp'),
-        linear_ba_dh=(fsdp, None),
+        linear_ba_dh=(fsdp, 'tp'),
         linear_conv_k1d=(None, None, None),
-        linear_head_h=(None,),
+        linear_head_h=('tp',),
         linear_out_fd=('tp', fsdp),
+        head_norm_weight=(None,),
     )
 
 
@@ -141,11 +143,11 @@ class ShardingConfig:
 class ModelConfig:
   """Configuration for Qwen3.5 hybrid models.
 
-  Note: `GatedDeltaNet` uses a token-level `jax.lax.scan` that retains per-token
-  float32 recurrent states `(B, H, D_k, D_v)` for backpropagation when
-  `remat_config=RematConfig.NONE`. For training long sequences, prefer
-  `RematConfig.BLOCK` or `RematConfig.DECODER` to recompute scan intermediates
-  during the backward pass.
+  Note: `GatedDeltaNet` uses a chunkwise parallel WY recurrence
+  (`_chunk_gated_delta_rule`) with `@jax.checkpoint` per chunk when
+  `seq_len > 1`. For training very long sequences under tight HBM budgets,
+  `RematConfig.BLOCK` or `RematConfig.DECODER` can additionally recompute block
+  or decoder activations during the backward pass.
   """
 
   num_layers: int
@@ -401,6 +403,7 @@ class RMSNorm(nnx.Module):
       use_norm_offset: bool = True,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      weight_sharding: Tuple[str | None, ...] | None = None,
       param_dtype: jax.typing.DTypeLike = jnp.bfloat16,
       dtype: jax.typing.DTypeLike = jnp.bfloat16,
   ):
@@ -409,9 +412,14 @@ class RMSNorm(nnx.Module):
         if use_norm_offset
         else nnx.initializers.ones_init()
     )
+    resolved_sharding = (
+        shd_config.rms_norm_weight
+        if weight_sharding is None
+        else weight_sharding
+    )
     self.w = nnx.Param(
         init_fn(rngs.params(), (dim,), param_dtype),
-        sharding=shd_config.rms_norm_weight,
+        sharding=resolved_sharding,
     )
     self.norm_eps = norm_eps
     self.use_norm_offset = use_norm_offset
@@ -444,7 +452,7 @@ class RMSNormGated(nnx.Module):
   ):
     self.w = nnx.Param(
         nnx.initializers.ones_init()(rngs.params(), (dim,), param_dtype),
-        sharding=shd_config.linear_head_h,
+        sharding=shd_config.head_norm_weight,
     )
     self.norm_eps = norm_eps
     self.dtype = dtype
@@ -541,6 +549,257 @@ def _align_kv_heads_for_splash(
     value_proj = jnp.repeat(value_proj, repeat_factor, axis=1)
     num_kv_heads = num_q_heads
   return key_proj, value_proj, num_kv_heads
+
+
+def _invert_unit_lower_triangular(s_mat: jaxtyping.Array) -> jaxtyping.Array:
+  """Inverts unit lower-triangular `(I + s_mat)` via 2x2 block recursion on MXU.
+
+  For strictly lower-triangular `s_mat` of power-of-two size `C`, recursively
+  inverts diagonal blocks of size `b = 1, 2, 4, ..., C // 2` using
+  `[[A00, 0], [S10, A11]]^{-1} = [[A00^{-1}, 0], [-A11^{-1} S10 A00^{-1},
+  A11^{-1}]]`. This avoids XLA's `TriangularSolve` unrolled sequential column
+  loop for `C < 128`.
+
+  Args:
+    s_mat: Strictly lower-triangular float32 tensor of shape
+      `(*batch_dims, C, C)` where `C` is a power of two.
+
+  Returns:
+    Unit lower-triangular inverse `(I + s_mat)^{-1}` of shape
+    `(*batch_dims, C, C)`.
+  """
+  batch_dims = s_mat.shape[:-2]
+  c_size = s_mat.shape[-1]
+  if c_size == 1:
+    return jnp.ones_like(s_mat)
+
+  inv_blocks = jnp.ones((*batch_dims, c_size, 1, 1), dtype=s_mat.dtype)
+  b = 1
+  while b < c_size:
+    num_pairs = c_size // (2 * b)
+    inv_pairs = inv_blocks.reshape(*batch_dims, num_pairs, 2, b, b)
+    inv_00 = inv_pairs[..., 0, :, :]
+    inv_11 = inv_pairs[..., 1, :, :]
+
+    s_pairs = s_mat.reshape(*batch_dims, num_pairs, 2, b, num_pairs, 2, b)
+    s_sub = s_pairs[..., 1, :, :, 0, :]
+    s_10 = jnp.moveaxis(
+        jnp.diagonal(s_sub, axis1=-4, axis2=-2), -1, -3
+    )
+
+    if b == 1:
+      inv_10 = -s_10
+    else:
+      inv_10 = -jnp.matmul(
+          inv_11,
+          jnp.matmul(s_10, inv_00, precision=jax.lax.Precision.HIGHEST),
+          precision=jax.lax.Precision.HIGHEST,
+      )
+
+    zeros_01 = jnp.zeros_like(inv_00)
+    top = jnp.concatenate([inv_00, zeros_01], axis=-1)
+    bot = jnp.concatenate([inv_10, inv_11], axis=-1)
+    inv_blocks = jnp.concatenate([top, bot], axis=-2)
+    b *= 2
+
+  return jnp.squeeze(inv_blocks, axis=-3)
+
+
+def _chunk_gated_delta_rule(
+    q: jaxtyping.Array,
+    k: jaxtyping.Array,
+    v: jaxtyping.Array,
+    g: jaxtyping.Array,
+    beta: jaxtyping.Array,
+    initial_state: jaxtyping.Array,
+    valid_seg: jaxtyping.Array | None = None,
+    chunk_size: int = 64,
+) -> tuple[jaxtyping.Array, jaxtyping.Array]:
+  """Chunkwise parallel Gated DeltaNet recurrence using the WY representation.
+
+  Reformulates the token-by-token delta rule recurrence over chunks of size `C`
+  so intra-chunk transitions are evaluated via matrix-matrix multiplications on
+  the TPU MXU and `(I + L)^{-1}` triangular solves, while inter-chunk state
+  propagation scans over `ceil(T / C)` chunks.
+
+  Args:
+    q: L2-normalized and scaled query tensor of shape `(B, T, H, D_k)` in
+      float32.
+    k: L2-normalized key tensor of shape `(B, T, H, D_k)` in float32 (zeroed on
+      masked tokens).
+    v: Value tensor of shape `(B, T, H, D_v)` in float32 (zeroed on masked
+      tokens).
+    g: Log-decay tensor of shape `(B, T, H)` in float32 (`<= 0`, zeroed on
+      masked tokens).
+    beta: Writing gate tensor of shape `(B, T, H)` in float32 (zeroed on masked
+      tokens).
+    initial_state: Initial recurrent state of shape `(B, H, D_k, D_v)` in
+      float32.
+    valid_seg: Optional integer segment IDs of shape `(B, T)` (`0` on padding).
+      When provided, recurrent state is reset to `0` at segment boundaries and
+      on padding tokens (`valid_seg == 0`).
+    chunk_size: Chunk length `C` (power of two) for intra-chunk
+      parallelization.
+
+  Returns:
+    Tuple of `(final_state, core_out)` where `final_state` has shape
+    `(B, H, D_k, D_v)` and `core_out` has shape `(B, T, H, D_v)` in float32.
+  """
+  batch_size, seq_len, num_heads, head_k_dim = q.shape
+  head_v_dim = v.shape[-1]
+  target_c = min(chunk_size, seq_len)
+  c_size = 1 << (target_c - 1).bit_length()
+  pad_len = (c_size - (seq_len % c_size)) % c_size
+  if pad_len > 0:
+    q = jnp.pad(q, ((0, 0), (0, pad_len), (0, 0), (0, 0)))
+    k = jnp.pad(k, ((0, 0), (0, pad_len), (0, 0), (0, 0)))
+    v = jnp.pad(v, ((0, 0), (0, pad_len), (0, 0), (0, 0)))
+    g = jnp.pad(g, ((0, 0), (0, pad_len), (0, 0)))
+    beta = jnp.pad(beta, ((0, 0), (0, pad_len), (0, 0)))
+
+  padded_len = seq_len + pad_len
+  num_chunks = padded_len // c_size
+
+  q_c = q.reshape(
+      batch_size, num_chunks, c_size, num_heads, head_k_dim
+  ).transpose(0, 1, 3, 2, 4)
+  k_c = k.reshape(
+      batch_size, num_chunks, c_size, num_heads, head_k_dim
+  ).transpose(0, 1, 3, 2, 4)
+  v_c = v.reshape(
+      batch_size, num_chunks, c_size, num_heads, head_v_dim
+  ).transpose(0, 1, 3, 2, 4)
+  g_c = g.reshape(batch_size, num_chunks, c_size, num_heads).transpose(
+      0, 1, 3, 2
+  )
+  beta_c = beta.reshape(batch_size, num_chunks, c_size, num_heads).transpose(
+      0, 1, 3, 2
+  )
+
+  g_cumsum = jnp.cumsum(g_c, axis=-1)  # (B, NC, H, C)
+  g_diff = jnp.tril(g_cumsum[..., :, None] - g_cumsum[..., None, :])
+  decay_matrix = jnp.exp(g_diff)  # (B, NC, H, C, C)
+
+  mask_strict = jnp.tril(jnp.ones((c_size, c_size), dtype=jnp.bool_), k=-1)
+  mask_causal = jnp.tril(jnp.ones((c_size, c_size), dtype=jnp.bool_), k=0)
+
+  if valid_seg is not None:
+    prev_seg = jnp.pad(valid_seg[:, :-1], ((0, 0), (1, 0)), constant_values=0)
+    reset = (valid_seg != prev_seg) | (valid_seg == 0)  # (B, T)
+    if pad_len > 0:
+      reset = jnp.pad(reset, ((0, 0), (0, pad_len)), constant_values=False)
+    run_id = jnp.cumsum(reset.astype(jnp.int32), axis=-1)
+    run_id_c = run_id.reshape(batch_size, num_chunks, c_size)
+    prev_chunk_run_id = jnp.concatenate(
+        [jnp.zeros((batch_size, 1), dtype=jnp.int32), run_id_c[:, :-1, -1]],
+        axis=1,
+    )
+    same_run = (
+        run_id_c[:, :, None, :, None] == run_id_c[:, :, None, None, :]
+    )  # (B, NC, 1, C, C)
+    carry_in_mask = (
+        run_id_c == prev_chunk_run_id[:, :, None]
+    )[:, :, None, :, None]  # (B, NC, 1, C, 1)
+    mask_strict_full = mask_strict & same_run
+  else:
+    run_id_c = None
+    prev_chunk_run_id = None
+    carry_in_mask = None
+    mask_strict_full = mask_strict
+
+  k_beta = k_c * beta_c[..., None]  # (B, NC, H, C, D_k)
+  s_mat = jnp.matmul(
+      k_beta, k_c.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST
+  )
+  s_mat = jnp.where(mask_strict_full, s_mat * decay_matrix, 0.0)
+
+  a_mat = _invert_unit_lower_triangular(s_mat)
+
+  v_beta = v_c * beta_c[..., None]
+  u_chunks = jnp.matmul(a_mat, v_beta, precision=jax.lax.Precision.HIGHEST)
+
+  g_exp = jnp.exp(g_cumsum)[..., None]  # (B, NC, H, C, 1)
+  if carry_in_mask is not None:
+    g_exp = jnp.where(carry_in_mask, g_exp, 0.0)
+  k_beta_g = k_beta * g_exp
+  w_chunks = jnp.matmul(a_mat, k_beta_g, precision=jax.lax.Precision.HIGHEST)
+
+  def _chunk_step_impl(h, scan_inputs):
+    u_i, w_i, q_i, k_i, g_cs_i, run_id_i, prev_run_i = scan_inputs
+    v_new = u_i - jnp.matmul(w_i, h, precision=jax.lax.Precision.HIGHEST)
+
+    g_exp_i = jnp.exp(g_cs_i)[..., None]  # (B, H, C, 1)
+    g_diff_i = jnp.tril(g_cs_i[..., :, None] - g_cs_i[..., None, :])
+    decay_i = jnp.exp(g_diff_i)  # (B, H, C, C)
+    g_last_exp_i = jnp.exp(g_cs_i[..., -1:])[..., None]  # (B, H, 1, 1)
+    g_diff_last_i = jnp.exp(g_cs_i[..., -1:] - g_cs_i)[
+        ..., None
+    ]  # (B, H, C, 1)
+
+    if run_id_i is not None and prev_run_i is not None:
+      same_run_i = run_id_i[:, None, :, None] == run_id_i[:, None, None, :]
+      carry_in_i = (run_id_i == prev_run_i[:, None])[:, None, :, None]
+      carry_out_i = (run_id_i[:, -1:] == prev_run_i[:, None])[:, None, :, None]
+      last_run_i = (run_id_i == run_id_i[:, -1:])[:, None, :, None]
+      g_exp_i = jnp.where(carry_in_i, g_exp_i, 0.0)
+      g_last_exp_i = jnp.where(carry_out_i, g_last_exp_i, 0.0)
+      g_diff_last_i = jnp.where(last_run_i, g_diff_last_i, 0.0)
+      causal_mask_i = mask_causal & same_run_i
+    else:
+      causal_mask_i = mask_causal
+
+    q_g_i = q_i * g_exp_i
+    o_inter = jnp.matmul(q_g_i, h, precision=jax.lax.Precision.HIGHEST)
+
+    qk_i = jnp.matmul(
+        q_i, k_i.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST
+    )
+    attn_i = jnp.where(causal_mask_i, qk_i * decay_i, 0.0)
+    o_intra = jnp.matmul(attn_i, v_new, precision=jax.lax.Precision.HIGHEST)
+    o_i = o_inter + o_intra
+
+    k_last_i = k_i * g_diff_last_i
+    h_new = h * g_last_exp_i + jnp.matmul(
+        k_last_i.swapaxes(-1, -2), v_new, precision=jax.lax.Precision.HIGHEST
+    )
+    return h_new, o_i
+
+  if num_chunks == 1:
+    final_state, o_single = _chunk_step_impl(
+        initial_state,
+        (
+            u_chunks[:, 0],
+            w_chunks[:, 0],
+            q_c[:, 0],
+            k_c[:, 0],
+            g_cumsum[:, 0],
+            run_id_c[:, 0] if run_id_c is not None else None,
+            prev_chunk_run_id[:, 0] if prev_chunk_run_id is not None else None,
+        ),
+    )
+    core_out = o_single.transpose(0, 2, 1, 3)
+  else:
+    scan_xs = (
+        jnp.swapaxes(u_chunks, 0, 1),
+        jnp.swapaxes(w_chunks, 0, 1),
+        jnp.swapaxes(q_c, 0, 1),
+        jnp.swapaxes(k_c, 0, 1),
+        jnp.swapaxes(g_cumsum, 0, 1),
+        jnp.swapaxes(run_id_c, 0, 1) if run_id_c is not None else None,
+        jnp.swapaxes(prev_chunk_run_id, 0, 1)
+        if prev_chunk_run_id is not None
+        else None,
+    )
+    final_state, core_out_scan = jax.lax.scan(
+        jax.checkpoint(_chunk_step_impl), initial_state, scan_xs
+    )
+    core_out = core_out_scan.transpose(1, 0, 3, 2, 4).reshape(
+        batch_size, padded_len, num_heads, head_v_dim
+    )
+
+  if pad_len > 0:
+    core_out = core_out[:, :seq_len, :, :]
+  return final_state, core_out
 
 
 class GatedDeltaNet(nnx.Module):
@@ -719,8 +978,9 @@ class GatedDeltaNet(nnx.Module):
           valid_seg, ((0, 0), (state_len, 0)), constant_values=0
       )
     conv_out = jnp.zeros(mixed_qkv.shape, dtype=jnp.float32)
+    conv_input_f32 = conv_input.astype(jnp.float32)
     for k_idx in range(self.conv_kernel_size):
-      step_input = conv_input[:, k_idx : k_idx + seq_len, :].astype(jnp.float32)
+      step_input = conv_input_f32[:, k_idx : k_idx + seq_len, :]
       if padded_seg is not None and valid_seg is not None:
         same_seg = (padded_seg[:, k_idx : k_idx + seq_len] == valid_seg) & (
             valid_seg != 0
@@ -738,6 +998,10 @@ class GatedDeltaNet(nnx.Module):
       repeat_ratio = self.num_v_heads // self.num_k_heads
       q = jnp.repeat(q, repeat_ratio, axis=2)
       k = jnp.repeat(k, repeat_ratio, axis=2)
+
+    q = shard(q, self.shd_config.act_btnh)
+    k = shard(k, self.shd_config.act_btnh)
+    v = shard(v, self.shd_config.act_btnh)
 
     beta = jax.nn.sigmoid(b.astype(jnp.float32))
     g = -jnp.exp(self.A_log.value.astype(jnp.float32)) * jax.nn.softplus(
@@ -770,37 +1034,15 @@ class GatedDeltaNet(nnx.Module):
           :, None, :, :
       ]  # (B, 1, H, D_v)
     else:
-      q_t = jnp.transpose(q_f32, (1, 0, 2, 3))  # (T, B, H, D_k)
-      k_t = jnp.transpose(k_f32, (1, 0, 2, 3))  # (T, B, H, D_k)
-      v_t = jnp.transpose(v_f32, (1, 0, 2, 3))  # (T, B, H, D_v)
-      g_t = jnp.transpose(g, (1, 0, 2))  # (T, B, H)
-      beta_t = jnp.transpose(beta, (1, 0, 2))  # (T, B, H)
-      if valid_seg is not None:
-        prev_seg = jnp.pad(
-            valid_seg[:, :-1], ((0, 0), (1, 0)), constant_values=0
-        )
-        keep_state_t = jnp.transpose(
-            (valid_seg == prev_seg) & (valid_seg != 0), (1, 0)
-        )
-      else:
-        keep_state_t = jnp.ones((seq_len, batch_size), dtype=jnp.bool_)
-
-      def _scan_step(state, inputs):
-        q_i, k_i, v_i, g_i, beta_i, keep_i = inputs
-        state = jnp.where(keep_i[:, None, None, None], state, 0.0)
-        state = state * jnp.exp(g_i)[..., None, None]
-        kv_mem = jnp.sum(state * k_i[..., None], axis=-2)
-        delta = (v_i - kv_mem) * beta_i[..., None]
-        state = state + k_i[..., :, None] * delta[..., None, :]
-        out_i = jnp.sum(state * q_i[..., None], axis=-2)
-        return state, out_i
-
-      new_recurrent_state, core_out_t = jax.lax.scan(
-          _scan_step,
+      new_recurrent_state, core_out = _chunk_gated_delta_rule(
+          q_f32,
+          k_f32,
+          v_f32,
+          g,
+          beta,
           recurrent_state,
-          (q_t, k_t, v_t, g_t, beta_t, keep_state_t),
+          valid_seg=valid_seg,
       )
-      core_out = jnp.transpose(core_out_t, (1, 0, 2, 3))  # (B, T, H, D_v)
 
     core_out = self.norm(core_out.astype(self.config.dtype), z)
     core_out = core_out.reshape(batch_size, seq_len, self.value_dim)
@@ -904,6 +1146,7 @@ class Attention(nnx.Module):
         use_norm_offset=config.use_norm_offset,
         rngs=rngs,
         shd_config=self.shd_config,
+        weight_sharding=self.shd_config.head_norm_weight,
         param_dtype=config.param_dtype,
         dtype=config.dtype,
     )
@@ -913,6 +1156,7 @@ class Attention(nnx.Module):
         use_norm_offset=config.use_norm_offset,
         rngs=rngs,
         shd_config=self.shd_config,
+        weight_sharding=self.shd_config.head_norm_weight,
         param_dtype=config.param_dtype,
         dtype=config.dtype,
     )

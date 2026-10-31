@@ -875,6 +875,209 @@ class Qwen3p5ModelTest(parameterized.TestCase):
         atol=1e-5,
     )
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='chunk2_t7_unpacked',
+          chunk_size=2,
+          seq_len=7,
+          packed=False,
+      ),
+      dict(
+          testcase_name='chunk4_t11_unpacked',
+          chunk_size=4,
+          seq_len=11,
+          packed=False,
+      ),
+      dict(
+          testcase_name='chunk64_t7_unpacked',
+          chunk_size=64,
+          seq_len=7,
+          packed=False,
+      ),
+      dict(
+          testcase_name='chunk2_t7_packed',
+          chunk_size=2,
+          seq_len=7,
+          packed=True,
+      ),
+      dict(
+          testcase_name='chunk4_t11_packed',
+          chunk_size=4,
+          seq_len=11,
+          packed=True,
+      ),
+  )
+  def test_chunk_gated_delta_rule_matches_token_scan_forward_and_backward(
+      self, chunk_size: int, seq_len: int, packed: bool
+  ):
+    batch_size, num_heads, head_k_dim, head_v_dim = 2, 4, 8, 8
+    q = qwen3p5_model._l2norm(
+        jax.random.normal(
+            jax.random.key(1), (batch_size, seq_len, num_heads, head_k_dim)
+        )
+    ) * (head_k_dim**-0.5)
+    k = qwen3p5_model._l2norm(
+        jax.random.normal(
+            jax.random.key(2), (batch_size, seq_len, num_heads, head_k_dim)
+        )
+    )
+    v = jax.random.normal(
+        jax.random.key(3), (batch_size, seq_len, num_heads, head_v_dim)
+    )
+    g = -jax.nn.softplus(
+        jax.random.normal(jax.random.key(4), (batch_size, seq_len, num_heads))
+    )
+    beta = jax.nn.sigmoid(
+        jax.random.normal(jax.random.key(5), (batch_size, seq_len, num_heads))
+    )
+    init_state = jax.random.normal(
+        jax.random.key(6), (batch_size, num_heads, head_k_dim, head_v_dim)
+    )
+
+    if packed:
+      if seq_len == 7:
+        valid_seg = jnp.array(
+            [[1, 1, 1, 2, 2, 0, 0], [0, 1, 1, 2, 3, 3, 3]], dtype=jnp.int32
+        )
+      else:
+        valid_seg = jnp.array(
+            [
+                [1, 1, 2, 2, 2, 3, 3, 0, 4, 4, 0],
+                [1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3],
+            ],
+            dtype=jnp.int32,
+        )
+      token_mask = valid_seg != 0
+      k = jnp.where(token_mask[:, :, None, None], k, 0.0)
+      v = jnp.where(token_mask[:, :, None, None], v, 0.0)
+      g = jnp.where(token_mask[:, :, None], g, 0.0)
+      beta = jnp.where(token_mask[:, :, None], beta, 0.0)
+    else:
+      valid_seg = None
+
+    def _ref_scan(q_in, k_in, v_in, g_in, beta_in, state_in):
+      q_t = jnp.transpose(q_in, (1, 0, 2, 3))
+      k_t = jnp.transpose(k_in, (1, 0, 2, 3))
+      v_t = jnp.transpose(v_in, (1, 0, 2, 3))
+      g_t = jnp.transpose(g_in, (1, 0, 2))
+      beta_t = jnp.transpose(beta_in, (1, 0, 2))
+      if valid_seg is not None:
+        prev_seg = jnp.pad(
+            valid_seg[:, :-1], ((0, 0), (1, 0)), constant_values=0
+        )
+        keep_t = jnp.transpose(
+            (valid_seg == prev_seg) & (valid_seg != 0), (1, 0)
+        )
+      else:
+        keep_t = jnp.ones((seq_len, batch_size), dtype=jnp.bool_)
+
+      def _step(state, xs):
+        q_i, k_i, v_i, g_i, beta_i, keep_i = xs
+        state = jnp.where(keep_i[:, None, None, None], state, 0.0)
+        state = state * jnp.exp(g_i)[..., None, None]
+        kv_mem = jnp.sum(state * k_i[..., None], axis=-2)
+        delta = (v_i - kv_mem) * beta_i[..., None]
+        state = state + k_i[..., :, None] * delta[..., None, :]
+        out_i = jnp.sum(state * q_i[..., None], axis=-2)
+        return state, out_i
+
+      final_s, out_t = jax.lax.scan(
+          _step, state_in, (q_t, k_t, v_t, g_t, beta_t, keep_t)
+      )
+      return final_s, jnp.transpose(out_t, (1, 0, 2, 3))
+
+    ref_state, ref_out = _ref_scan(q, k, v, g, beta, init_state)
+    chunk_state, chunk_out = qwen3p5_model._chunk_gated_delta_rule(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        init_state,
+        valid_seg=valid_seg,
+        chunk_size=chunk_size,
+    )
+    if packed and valid_seg is not None:
+      ref_out = jnp.where((valid_seg != 0)[:, :, None, None], ref_out, 0.0)
+      chunk_out = jnp.where((valid_seg != 0)[:, :, None, None], chunk_out, 0.0)
+
+    np.testing.assert_allclose(
+        np.asarray(chunk_out), np.asarray(ref_out), rtol=1e-5, atol=1e-5
+    )
+    np.testing.assert_allclose(
+        np.asarray(chunk_state), np.asarray(ref_state), rtol=1e-5, atol=1e-5
+    )
+
+    cotangent_out = jax.random.normal(jax.random.key(7), ref_out.shape)
+    cotangent_state = jax.random.normal(jax.random.key(8), ref_state.shape)
+    if packed and valid_seg is not None:
+      cotangent_out = jnp.where(
+          (valid_seg != 0)[:, :, None, None], cotangent_out, 0.0
+      )
+
+    def _loss_ref(q_in, k_in, v_in, g_in, beta_in, state_in):
+      s_out, o_out = _ref_scan(q_in, k_in, v_in, g_in, beta_in, state_in)
+      return jnp.sum(o_out * cotangent_out) + jnp.sum(s_out * cotangent_state)
+
+    def _loss_chunk(q_in, k_in, v_in, g_in, beta_in, state_in):
+      s_out, o_out = qwen3p5_model._chunk_gated_delta_rule(
+          q_in,
+          k_in,
+          v_in,
+          g_in,
+          beta_in,
+          state_in,
+          valid_seg=valid_seg,
+          chunk_size=chunk_size,
+      )
+      return jnp.sum(o_out * cotangent_out) + jnp.sum(s_out * cotangent_state)
+
+    grads_ref = jax.grad(_loss_ref, argnums=(0, 1, 2, 3, 4, 5))(
+        q, k, v, g, beta, init_state
+    )
+    grads_chunk = jax.grad(_loss_chunk, argnums=(0, 1, 2, 3, 4, 5))(
+        q, k, v, g, beta, init_state
+    )
+    for g_r, g_c in zip(grads_ref, grads_chunk):
+      np.testing.assert_allclose(
+          np.asarray(g_c), np.asarray(g_r), rtol=1e-4, atol=1e-4
+      )
+
+  def test_sharding_config_alignment(self):
+    shd_train = qwen3p5_model.ShardingConfig.get_default_sharding(
+        is_sampling=False
+    )
+    self.assertEqual(shd_train.act_btd, ('fsdp', None, None))
+    self.assertEqual(shd_train.rms_norm_weight, (None,))
+    self.assertEqual(shd_train.head_norm_weight, (None,))
+    self.assertEqual(shd_train.linear_ba_dh, ('fsdp', 'tp'))
+    self.assertEqual(shd_train.linear_head_h, ('tp',))
+
+    cfg = _make_tiny_qwen3p5_config()
+    model = qwen3p5_model.Qwen3p5(cfg, rngs=nnx.Rngs(0))
+    pspecs = nnx.get_partition_spec(nnx.state(model))
+    part_spec = jax.sharding.PartitionSpec
+    self.assertEqual(
+        pspecs.layers[0].linear_attn.norm.w.value,
+        part_spec(*shd_train.head_norm_weight),
+    )
+    self.assertEqual(
+        pspecs.layers[0].linear_attn.dt_bias.value,
+        part_spec(*shd_train.linear_head_h),
+    )
+    self.assertEqual(
+        pspecs.layers[0].linear_attn.A_log.value,
+        part_spec(*shd_train.linear_head_h),
+    )
+    self.assertEqual(
+        pspecs.layers[3].attn.q_norm.w.value,
+        part_spec(*shd_train.head_norm_weight),
+    )
+    self.assertEqual(
+        pspecs.layers[3].attn.k_norm.w.value,
+        part_spec(*shd_train.head_norm_weight),
+    )
+
 
 if __name__ == '__main__':
   absltest.main()
