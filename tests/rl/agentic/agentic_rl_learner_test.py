@@ -293,6 +293,7 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
       setattr(config, option, value)
       engine = types.SimpleNamespace(
           rollout=types.SimpleNamespace(),
+          get_rollout_config=lambda **_: config,
           tokenizer=object(),
           cluster_config=types.SimpleNamespace(
               rollout_config=config,
