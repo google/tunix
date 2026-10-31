@@ -26,10 +26,12 @@ import numpy as np
 try:
   from examples.deepswe import openhands_utils
   from examples.deepswe import sandbox_utils
+  from examples.deepswe import swegym_utils
   from examples.deepswe import template as template_mod
 except ImportError:
   from examples.deepswe import openhands_utils  # pytype: disable=import-error
   from examples.deepswe import sandbox_utils  # pytype: disable=import-error
+  from examples.deepswe import swegym_utils  # pytype: disable=import-error
   from examples.deepswe import template as template_mod  # pytype: disable=import-error
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv
 from tunix.rl.agentic.environments.base_environment import EnvStepResult
@@ -81,17 +83,75 @@ def _unpack_entry(entry: dict) -> dict:
   """Utility to clean up and unpack the dataset entry."""
   unpacked_entry = {}
   for k, v in entry.items():
-    if isinstance(v, np.ndarray):
-      unpacked_entry[k] = v.item()
+    if k in ("FAIL_TO_PASS", "PASS_TO_PASS"):
+      if isinstance(v, np.ndarray):
+        v = v.tolist()
+      elif isinstance(v, str) and v.strip().startswith("["):
+        try:
+          v = json.loads(v)
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+      unpacked_entry[k] = v
+    elif isinstance(v, np.ndarray):
+      unpacked_entry[k] = v.item() if v.size == 1 else v.tolist()
     elif isinstance(v, list):
-      if len(v) != 1:
-        raise ValueError(
-            f"Can only convert a list of size 1; got size {len(v)}"
-        )
-      unpacked_entry[k] = v[0]
+      if len(v) == 1:
+        unpacked_entry[k] = v[0]
+      else:
+        unpacked_entry[k] = v
     else:
       unpacked_entry[k] = v
+  raw_img_name = str(
+      unpacked_entry.get("image_name")
+      or unpacked_entry.get("docker_image")
+      or ""
+  ).strip()
+  if not unpacked_entry.get("docker_image") and raw_img_name:
+    if "swesmith" in raw_img_name.lower() and "/" not in raw_img_name:
+      short_img = raw_img_name.split(":")[0].replace("__", "_1776_")
+      unpacked_entry["docker_image"] = f"jyangballin/{short_img}:latest"
+    else:
+      unpacked_entry["docker_image"] = (
+          raw_img_name if ":" in raw_img_name else f"{raw_img_name}:latest"
+      )
+  if raw_img_name and "swesmith" in raw_img_name.lower():
+    unpacked_entry["image_name"] = (
+        raw_img_name.split("/")[-1].split(":")[0].replace("_1776_", "__")
+    )
+  if swegym_utils.is_swegym_entry(unpacked_entry):
+    _normalize_swegym_entry(unpacked_entry)
   return unpacked_entry
+
+
+def _normalize_swegym_entry(entry: dict) -> None:
+  """Fills fields R2E-Gym's DockerRuntime needs for SWE-Gym rows (in place).
+
+  SWE-Gym images run R2E-Gym's runtime in its default (R2E) mode, which parses
+  `parsed_commit_content` at construction; grading itself is done by
+  `swegym_utils.evaluate_swegym_in_fresh_container`.
+  """
+  instance_id = str(entry.get("instance_id") or "").strip()
+  if not entry.get("docker_image") and instance_id:
+    entry["docker_image"] = swegym_utils.source_image_for_instance(instance_id)
+  if not entry.get("repo_name") and entry.get("repo"):
+    entry["repo_name"] = entry["repo"]
+  pcc = entry.get("parsed_commit_content")
+  valid = False
+  if isinstance(pcc, str) and pcc.strip():
+    try:
+      valid = isinstance(json.loads(pcc), dict)
+    except ValueError:
+      valid = False
+  elif isinstance(pcc, dict):
+    valid = True
+  if not valid:
+    entry["parsed_commit_content"] = json.dumps({
+        "file_diffs": [],
+        "old_commit_hash": str(entry.get("base_commit") or ""),
+        "new_commit_hash": "",
+        "commit_message": "",
+        "commit_date": "1970-01-01T00:00:00",
+    })
 
 
 class SWEEnv(BaseTaskEnv):

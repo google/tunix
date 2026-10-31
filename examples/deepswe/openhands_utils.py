@@ -27,6 +27,7 @@ import time
 import uuid
 from typing import Any, Optional
 
+from examples.deepswe import swegym_utils
 from examples.deepswe.opencode_fuzzy import fuzzy_find_match
 from tunix.rl.agentic.environments.base_environment import EnvStepResult
 
@@ -758,14 +759,23 @@ def hide_r2e_tests_for_rollout(
 ) -> None:
   """Removes /r2e_tests and /run_tests.sh from the rollout container."""
   try:
+    swegym_mode = swegym_utils.is_swegym_entry(entry)
+    squash_cmds = (
+        swegym_utils.build_rollout_setup_cmds("/testbed") if swegym_mode else []
+    )
     cmd = (
         f"{_HIDE_R2E_TESTS_CMD} && "
         "(git -C /testbed reset --hard 2>/dev/null || true) && "
-        f"{_GIT_EXCLUDE_R2E_AND_OH_CMD} && "
+        + "".join(f"{c} && " for c in squash_cmds)
+        + f"{_GIT_EXCLUDE_R2E_AND_OH_CMD} && "
         "(git -C /testbed rev-parse HEAD 2>/dev/null || true)"
     )
-    res = _exec_in_sandbox(target, cmd, timeout=60.0)
-    if entry is not None and ("base_commit" not in entry or not entry["base_commit"]):
+    res = _exec_in_sandbox(
+        target, cmd, timeout=300.0 if swegym_mode else 60.0
+    )
+    if entry is not None and (
+        swegym_mode or "base_commit" not in entry or not entry["base_commit"]
+    ):
       stdout, exit_code = _unpack_exec_output(res)
       if exit_code == 0 and stdout:
         lines = [ln.strip() for ln in stdout.strip().splitlines() if ln.strip()]
@@ -773,6 +783,69 @@ def hide_r2e_tests_for_rollout(
           entry["base_commit"] = lines[-1]
   except Exception as e:
     logging.warning("[SWEEnv] Failed to hide R2E tests for rollout: %s", e)
+
+
+def is_swesmith_entry(entry: Optional[dict[str, Any]]) -> bool:
+  """Returns True if the dataset entry comes from SWE-smith.
+
+  An explicit `task_source` ("r2egym"/"swesmith"/"swegym") or `is_swesmith`
+  flag wins; the image-name / key heuristics only apply to legacy rows that
+  carry neither (mixed datasets give every row the SWE-smith keys).
+  """
+  if not isinstance(entry, dict):
+    return False
+  source = str(entry.get("task_source") or "").strip().lower()
+  if source:
+    return source == "swesmith"
+  if entry.get("is_swesmith") is not None:
+    flag = entry.get("is_swesmith")
+    if isinstance(flag, str):
+      return flag.strip().lower() in ("1", "true", "yes")
+    return bool(flag)
+  if swegym_utils.is_swegym_entry(entry):
+    return False
+  img = str(entry.get("image_name", "") or entry.get("docker_image", "")).lower()
+  if "swesmith" in img:
+    return True
+  return "FAIL_TO_PASS" in entry and "patch" in entry and "image_name" in entry
+
+
+def _parse_test_list(val: Any) -> list[str]:
+  """Normalizes FAIL_TO_PASS / PASS_TO_PASS into a list of test node IDs."""
+  if val is None:
+    return []
+  if isinstance(val, (list, tuple)):
+    return [str(x).strip() for x in val if str(x).strip()]
+  if isinstance(val, str):
+    s = val.strip()
+    if not s:
+      return []
+    if s.startswith("["):
+      try:
+        parsed = json.loads(s)
+        if isinstance(parsed, list):
+          return [str(x).strip() for x in parsed if str(x).strip()]
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+    return [s]
+  return []
+
+
+def _get_swesmith_test_files(
+    entry: dict[str, Any], include_p2p: bool = False
+) -> list[str]:
+  """Extracts unique test file paths from FAIL_TO_PASS (and optionally PASS_TO_PASS)."""
+  tests = list(_parse_test_list(entry.get("FAIL_TO_PASS")))
+  if include_p2p:
+    tests.extend(_parse_test_list(entry.get("PASS_TO_PASS")))
+  seen: set[str] = set()
+  files: list[str] = []
+  for t in tests:
+    path = t.split("::", 1)[0].strip()
+    if path and path not in seen:
+      seen.add(path)
+      files.append(path)
+  return files
 
 
 def setup_openhands_workspace(
@@ -804,6 +877,51 @@ def setup_openhands_workspace(
     if workspace is None:
       return
 
+  swesmith_mode = is_swesmith_entry(entry)
+  swesmith_setup_cmds: list[str] = []
+  if swesmith_mode and isinstance(entry, dict):
+    instance_id = str(entry.get("instance_id", "")).strip()
+    bug_patch = str(entry.get("patch", "") or "")
+    f2p_files = _get_swesmith_test_files(entry, include_p2p=False)
+    quoted_f2p = " ".join(shlex.quote(f) for f in f2p_files)
+    b64_bug_patch = base64.b64encode(bug_patch.encode("utf-8")).decode("ascii")
+    checkout_part = "false"
+    if instance_id:
+      q_branch = shlex.quote(f"remotes/origin/{instance_id}")
+      q_id = shlex.quote(instance_id)
+      checkout_part = (
+          f"git -C /testbed checkout -f {q_branch} 2>/dev/null || "
+          f"git -C /testbed checkout -f {q_id} 2>/dev/null"
+      )
+    fallback_part = "true"
+    if b64_bug_patch:
+      rm_f2p = f"rm -f -- {quoted_f2p}" if quoted_f2p else "true"
+      fallback_part = (
+          f"(printf '%s' {shlex.quote(b64_bug_patch)} | base64 -d"
+          " > /tmp/.swesmith_bug.patch && git -C /testbed apply"
+          " --whitespace=fix /tmp/.swesmith_bug.patch && rm -f"
+          f" /tmp/.swesmith_bug.patch && (cd /testbed && {rm_f2p}))"
+      )
+    swesmith_setup_cmds.append(f"({checkout_part} || {fallback_part})")
+    # Squash git history into a single orphan commit so the rollout agent
+    # cannot inspect `git log -p` or `git show HEAD~1` to see the bug patch.
+    swesmith_setup_cmds.append(
+        "(cd /testbed && git checkout --orphan _oh_base >/dev/null 2>&1 && "
+        "git add -A >/dev/null 2>&1 && "
+        "git commit -q -m 'Initial commit' --no-verify >/dev/null 2>&1 && "
+        "git branch -M _oh_base main >/dev/null 2>&1 && "
+        "for _ref in $(git for-each-ref --format='%(refname)' refs/heads/"
+        " refs/remotes/ refs/tags/ 2>/dev/null); do "
+        '[ "$_ref" = "refs/heads/main" ] || git update-ref -d "$_ref"'
+        " 2>/dev/null || true; done)"
+    )
+
+  # SWE-Gym images are full clones reset to base_commit: squash history so
+  # the upstream fix is not reachable via reflog / ORIG_HEAD / tags.
+  swegym_mode = (not swesmith_mode) and swegym_utils.is_swegym_entry(entry)
+  if swegym_mode:
+    swesmith_setup_cmds.extend(swegym_utils.build_rollout_setup_cmds("/testbed"))
+
   setup_cmds = [
       "rm -f /var/tmp/.oh_cwd /var/tmp/.oh_editor_history.json 2>/dev/null || true",
       "git config --global user.email 'openhands@agent.sandbox'",
@@ -821,6 +939,7 @@ def setup_openhands_workspace(
           " 2>/dev/null || true)"
       ),
       "git -C /testbed reset --hard 2>/dev/null || true",
+      *swesmith_setup_cmds,
       (
           "(for r in $(git -C /testbed remote 2>/dev/null); do"
           ' git -C /testbed remote remove "$r" 2>/dev/null || true; done)'
@@ -842,7 +961,12 @@ def setup_openhands_workspace(
       )
     else:
       logging.info("[SWEEnv] Successfully configured OpenHands workspace")
-      if entry is not None and ("base_commit" not in entry or not entry["base_commit"]):
+      if entry is not None and (
+          swesmith_mode
+          or swegym_mode
+          or "base_commit" not in entry
+          or not entry["base_commit"]
+      ):
         stdout = getattr(res, "stdout", None)
         if isinstance(stdout, str):
           lines = [ln.strip() for ln in stdout.strip().splitlines() if ln.strip()]
@@ -927,6 +1051,221 @@ def cleanup_rollout_container_processes(
     logging.debug("[SWEEnv] Rollout container process cleanup note: %s", e)
 
 
+def _parse_swesmith_pytest_output(
+    log: Optional[str],
+) -> tuple[dict[str, str], dict[str, str]]:
+  """Parses pytest -rA short test summary info into (full_nodeid_map, short_name_map)."""
+  if not log:
+    return {}, {}
+  cleaned = re.sub(r"\x1b\[[0-9;]*m|\r", "", log)
+  if "short test summary info" not in cleaned:
+    return {}, {}
+  summary = cleaned.split("short test summary info")[-1].strip()
+  full_map: dict[str, str] = {}
+  short_map: dict[str, str] = {}
+  for line in summary.splitlines():
+    line_s = line.strip()
+    status = None
+    if line_s.startswith("PASSED "):
+      status = "PASSED"
+      rest = line_s[len("PASSED ") :].strip()
+    elif line_s.startswith("FAILED "):
+      status = "FAILED"
+      rest = line_s[len("FAILED ") :].strip()
+    elif line_s.startswith("ERROR "):
+      status = "ERROR"
+      rest = line_s[len("ERROR ") :].strip()
+    else:
+      continue
+    nodeid = rest.split(" - ", 1)[0].strip()
+    if not nodeid:
+      continue
+    full_map[nodeid] = status
+    short_name = ".".join(nodeid.split("::")[1:]) if "::" in nodeid else nodeid
+    if short_name:
+      # Never overwrite a non-PASSED status on a colliding short name
+      if short_map.get(short_name) not in ("FAILED", "ERROR"):
+        short_map[short_name] = status
+  return full_map, short_map
+
+
+def _write_patch_to_eval_container(
+    runtime: Any, patch: str, patch_path: str = "/tmp/model.patch"
+) -> bool:
+  """Writes `patch` into `patch_path` inside the active eval container."""
+  b64_patch = base64.b64encode(patch.encode("utf-8")).decode("ascii")
+  if len(b64_patch) <= 65536:
+    cmd = f"printf '%s' {shlex.quote(b64_patch)} | base64 -d > {shlex.quote(patch_path)}"
+    res = runtime.run(f"/bin/sh -c {shlex.quote(cmd)}", timeout=30)
+    _, rc = _unpack_exec_output(res)
+    return rc == 0
+  b64_tmp_path = f"{patch_path}.b64"
+  chunk_size = 49152
+  for idx in range(0, len(b64_patch), chunk_size):
+    chunk = b64_patch[idx : idx + chunk_size]
+    redir = ">" if idx == 0 else ">>"
+    inner_chunk = f"printf '%s' {shlex.quote(chunk)} {redir} {shlex.quote(b64_tmp_path)}"
+    res = runtime.run(f"/bin/sh -c {shlex.quote(inner_chunk)}", timeout=30)
+    _, rc = _unpack_exec_output(res)
+    if rc != 0:
+      runtime.run(f"rm -f {shlex.quote(b64_tmp_path)}", timeout=15)
+      return False
+  decode_cmd = (
+      f"base64 -d {shlex.quote(b64_tmp_path)} > {shlex.quote(patch_path)} && "
+      f"rm -f {shlex.quote(b64_tmp_path)}"
+  )
+  res = runtime.run(f"/bin/sh -c {shlex.quote(decode_cmd)}", timeout=30)
+  _, rc = _unpack_exec_output(res)
+  return rc == 0
+
+
+def evaluate_swesmith_in_fresh_container(
+    runtime: Any,
+    entry: dict[str, Any],
+    patch: str,
+    timeout: int = 300,
+) -> float:
+  """Applies `patch` in the fresh SWE-smith `eval` container and grades F2P/P2P."""
+  f2p = _parse_test_list(entry.get("FAIL_TO_PASS"))
+  p2p = _parse_test_list(entry.get("PASS_TO_PASS"))
+  if not f2p:
+    logging.warning("[SWEEnv] SWE-smith entry has empty FAIL_TO_PASS; reward=0.0")
+    return 0.0
+
+  repo_path = getattr(runtime, "repo_path", "/testbed") or "/testbed"
+  test_files = _get_swesmith_test_files(entry, include_p2p=True)
+  quoted_test_files = " ".join(shlex.quote(f) for f in test_files)
+
+  img_name = str(
+      entry.get("image_name", "") or entry.get("docker_image", "")
+  ).split("/")[-1]
+  if ":" in img_name:
+    img_name = img_name.split(":", 1)[0]
+  img_name = img_name.replace("_1776_", "__")
+
+  norm_entry = dict(entry)
+  norm_entry["image_name"] = img_name
+  norm_entry["FAIL_TO_PASS"] = f2p
+  norm_entry["PASS_TO_PASS"] = p2p
+
+  try:
+    from r2egym.swesmith.utils import get_test_command  # pylint: disable=g-import-not-at-top
+
+    test_cmd, _ = get_test_command(norm_entry)
+  except Exception:  # pylint: disable=broad-exception-caught
+    test_cmd = (
+        "pytest --disable-warnings --color=no --tb=no --verbose -rA "
+        + quoted_test_files
+    )
+
+  instance_id = str(entry.get("instance_id", "")).strip()
+  bug_patch = str(entry.get("patch", "") or "")
+  b64_bug_patch = base64.b64encode(bug_patch.encode("utf-8")).decode("ascii")
+
+  checkout_buggy = "false"
+  if instance_id:
+    q_bug_commit = shlex.quote(f"remotes/origin/{instance_id}~1")
+    q_id_bug_commit = shlex.quote(f"{instance_id}~1")
+    checkout_buggy = (
+        f"git checkout -f {q_bug_commit} 2>/dev/null || "
+        f"git checkout -f {q_id_bug_commit} 2>/dev/null"
+    )
+  fallback_buggy = "false"
+  if b64_bug_patch:
+    fallback_buggy = (
+        '(git checkout -f "$_clean_head" 2>/dev/null && '
+        f"printf '%s' {shlex.quote(b64_bug_patch)} | base64 -d"
+        " > /tmp/.swesmith_eval_bug.patch && "
+        "git apply --whitespace=fix /tmp/.swesmith_eval_bug.patch && "
+        "rm -f /tmp/.swesmith_eval_bug.patch)"
+    )
+
+  prep_cmd = (
+      f"cd {shlex.quote(repo_path)} && "
+      "git reset --hard >/dev/null 2>&1 && "
+      "git clean -fd >/dev/null 2>&1 && "
+      "_clean_head=$(git rev-parse refs/heads/main 2>/dev/null || git rev-parse HEAD) && "
+      'printf "%s" "$_clean_head" > /tmp/.swesmith_clean_head && '
+      f"({checkout_buggy} || {fallback_buggy})"
+  )
+  prep_res = runtime.run(f"/bin/sh -c {shlex.quote(prep_cmd)}", timeout=60)
+  prep_out, prep_rc = _unpack_exec_output(prep_res)
+  if prep_rc != 0:
+    logging.warning(
+        "[SWEEnv] Failed to prepare SWE-smith buggy state in eval container: %s",
+        prep_out,
+    )
+    return 0.0
+
+  git_ls_res = runtime.run("git ls-files --others --exclude-standard", timeout=30)
+  git_ls_output, _ = _unpack_exec_output(git_ls_res)
+  untracked_files = [
+      f.strip() for f in git_ls_output.splitlines() if f.strip()
+  ]
+  exclude_files = list(dict.fromkeys(untracked_files + test_files))
+  exclude_str = " ".join(shlex.quote(f"--exclude={f}") for f in exclude_files)
+
+  patch_path = "/tmp/model.patch"
+  if not _write_patch_to_eval_container(runtime, patch, patch_path):
+    logging.warning("[SWEEnv] Failed to write SWE-smith model patch to eval container")
+    return 0.0
+
+  restore_tests_cmd = (
+      f'git checkout -f "$(cat /tmp/.swesmith_clean_head)" -- {quoted_test_files}'
+      " 2>/dev/null || true"
+      if quoted_test_files
+      else "true"
+  )
+  apply_inner = (
+      f"cd {shlex.quote(repo_path)} && "
+      f"(git apply --whitespace=fix {exclude_str} {patch_path} || "
+      f"git apply --whitespace=fix --reject {exclude_str} {patch_path} || "
+      f"patch --batch --fuzz=5 -p1 -i {patch_path}); "
+      f"_rc=$?; rm -f {patch_path}; "
+      f"{restore_tests_cmd}; "
+      "exit $_rc"
+  )
+  apply_res = runtime.run(f"/bin/sh -c {shlex.quote(apply_inner)}", timeout=60)
+  apply_out, apply_rc = _unpack_exec_output(apply_res)
+  if apply_rc != 0:
+    logging.warning(
+        "[SWEEnv] Failed to apply SWE-smith patch in eval container: %s",
+        apply_out,
+    )
+    return 0.0
+
+  run_inner = (
+      "export PATH=\"/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:/root/.local/bin:${PATH}\"; "
+      f"cd {shlex.quote(repo_path)} && "
+      f"{test_cmd}"
+  )
+  test_res = runtime.run(
+      f"/bin/sh -c {shlex.quote(run_inner)}", timeout=int(timeout)
+  )
+  test_output, _ = _unpack_exec_output(test_res)
+  full_map, short_map = _parse_swesmith_pytest_output(test_output)
+  if not full_map and not short_map:
+    return 0.0
+
+  for test_id in f2p + p2p:
+    if test_id in full_map:
+      if full_map[test_id] != "PASSED":
+        return 0.0
+      continue
+    short_name = (
+        ".".join(test_id.split("::")[1:]) if "::" in test_id else test_id
+    )
+    if short_name in short_map:
+      if short_map[short_name] != "PASSED":
+        return 0.0
+      continue
+    matching_key = next((k for k in short_map if short_name in k), None)
+    if matching_key is None or short_map[matching_key] != "PASSED":
+      return 0.0
+
+  return 1.0
+
+
 def evaluate_patch_in_fresh_container(
     eval_env: Any,
     patch: str,
@@ -970,6 +1309,32 @@ def evaluate_patch_in_fresh_container(
       if orig_compute_reward is not None:
         return float(orig_compute_reward(*args, **kwargs))
       return 0.0
+
+    entry = getattr(eval_env, "entry", None) or getattr(runtime, "ds", None)
+    if swegym_utils.is_swegym_entry(entry):
+      try:
+        swegym_timeout = int(os.getenv("SWEGYM_TEST_TIMEOUT", "1200"))
+      except ValueError:
+        swegym_timeout = 1200
+      reward = swegym_utils.evaluate_swegym_in_fresh_container(
+          runtime, entry, patch, timeout=swegym_timeout
+      )
+      logging.info(
+          "[SWEEnv] Evaluated SWE-Gym patch in fresh eval container:"
+          " reward=%.1f (patch_bytes=%d)",
+          reward,
+          len(patch),
+      )
+      return reward
+    if is_swesmith_entry(entry):
+      reward = evaluate_swesmith_in_fresh_container(runtime, entry, patch)
+      logging.info(
+          "[SWEEnv] Evaluated SWE-smith patch in fresh eval container:"
+          " reward=%.1f (patch_bytes=%d)",
+          reward,
+          len(patch),
+      )
+      return reward
 
     repo_path = getattr(runtime, "repo_path", "/testbed") or "/testbed"
     git_ls_res = runtime.run(
@@ -1503,11 +1868,16 @@ def step_openhands(
     wrapped_cmd = (
         _STRIP_PYINSTALLER_LD_PATH
         + "if [ -d /testbed/.venv/bin ]; then export"
-        ' PATH="/testbed/.venv/bin:${PATH}"; fi; '
+        ' PATH="/testbed/.venv/bin:${PATH}";'
+        " elif [ -d /opt/miniconda3/envs/testbed/bin ]; then export"
+        ' PATH="/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:${PATH}";'
+        " fi; "
         + "if [ -d /testbed ]; then cd /testbed; elif [ -d /workspace ]; then"
         " cd /workspace; fi; "
         + "if [ -x /testbed/.venv/bin/python ]; then"
         f' /testbed/.venv/bin/python -c "{py_cmd}";'
+        " elif [ -x /opt/miniconda3/envs/testbed/bin/python ]; then"
+        f' /opt/miniconda3/envs/testbed/bin/python -c "{py_cmd}";'
         f' else python3 -c "{py_cmd}"; fi'
     )
 
@@ -1597,7 +1967,10 @@ def step_openhands(
         "("
         + _STRIP_PYINSTALLER_LD_PATH
         + "if [ -d /testbed/.venv/bin ]; then export"
-        ' PATH="/testbed/.venv/bin:${PATH}"; fi; '
+        ' PATH="/testbed/.venv/bin:${PATH}";'
+        " elif [ -d /opt/miniconda3/envs/testbed/bin ]; then export"
+        ' PATH="/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:${PATH}";'
+        " fi; "
         + '__oh_cwd_file="${__OH_CWD_FILE:-/var/tmp/.oh_cwd}"; '
         + '__oh_cwd=$(cat "$__oh_cwd_file" 2>/dev/null); '
         'if [ -n "$__oh_cwd" ] && [ -d "$__oh_cwd" ]; then cd "$__oh_cwd"; '
