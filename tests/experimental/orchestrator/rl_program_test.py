@@ -3788,6 +3788,10 @@ class RLProgramTest(absltest.TestCase):
       # 2. Reward Metrics
       self.assertTrue(logger.metric_exists("rewards", "mean", "train"))
       self.assertAlmostEqual(logger.get_metric("rewards", "mean", "train"), 2.5)
+      self.assertTrue(logger.metric_exists("rewards", "kept_mean", "train"))
+      self.assertAlmostEqual(
+          logger.get_metric("rewards", "kept_mean", "train"), 2.5
+      )
       self.assertTrue(logger.metric_exists("rewards", "std", "train"))
       self.assertAlmostEqual(logger.get_metric("rewards", "std", "train"), 0.0)
       self.assertTrue(logger.metric_exists("rewards", "min", "train"))
