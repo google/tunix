@@ -3925,6 +3925,10 @@ class RLProgramTest(absltest.TestCase):
       # 2. Reward Metrics
       self.assertTrue(logger.metric_exists("rewards", "mean", "train"))
       self.assertAlmostEqual(logger.get_metric("rewards", "mean", "train"), 2.5)
+      self.assertTrue(logger.metric_exists("rewards", "kept_mean", "train"))
+      self.assertAlmostEqual(
+          logger.get_metric("rewards", "kept_mean", "train"), 2.5
+      )
       self.assertTrue(logger.metric_exists("rewards", "std", "train"))
       self.assertAlmostEqual(logger.get_metric("rewards", "std", "train"), 0.0)
       self.assertTrue(logger.metric_exists("rewards", "min", "train"))
@@ -8225,6 +8229,118 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
           self.assertEqual(g3.items[0].prompt_id, "p2")
           self.assertEqual(g3.rewards, (3.0, 4.0))
         program.close()
+
+    asyncio.run(_run())
+
+  def test_filter_zero_variance_drops_constant_groups_and_logs_unfiltered_mean(
+      self,
+  ):
+    """Tests DAPO zero-variance filtering, unfiltered rewards/mean vs kept_mean, and pass-rate logging."""
+
+    async def _run():
+      self.mock_algo.num_generations = 2
+      self.mock_algo.mini_batch_size = 1
+      self.mock_algo.algo_config.reward_mode = "env"
+
+      def _create_payloads(group, rewards=None):
+        del rewards
+        return [
+            datatypes.RLTrainerPayload(
+                prompt_ids=np.array([it.group_index], dtype=np.int32),
+                prompt_mask=np.array([1], dtype=np.int32),
+                completion_ids=np.array([10], dtype=np.int32),
+                completion_mask=np.array([1], dtype=np.int32),
+                advantages=np.array([0.5], dtype=np.float32),
+            )
+            for it in group
+        ]
+
+      self.mock_algo.create_trainer_payloads.side_effect = _create_payloads
+      pass_rate_dir = self.create_tempdir().full_path
+
+      program = rl_program.StandardRLProgram(
+          algo=self.mock_algo,
+          dataset=["p_all_wrong", "p_all_correct", "p_mixed"],
+          batch_size=1,
+          max_staleness=2,
+          filter_zero_variance=True,
+          pass_rate_log_path=pass_rate_dir,
+          reward_fns=[],
+          group_order=rl_program.GroupOrder.TRAJECTORY_COMPLETION,
+      )
+      self.assertEqual(program.max_dispatch_ahead_batches, 1)
+      program.engine = self.mock_engine
+
+      def _raw_item(pid, g_idx, reward):
+        return datatypes.TrajectoryItem(
+            prompt_id=pid,
+            group_index=g_idx,
+            start_step=0,
+            routed_experts=np.ones((2, 4), dtype=np.int32),
+            traj={
+                **_scored_traj(reward),
+                "conversation_text": [
+                    {"role": "user", "content": pid},
+                    {"role": "assistant", "content": "ans"},
+                ],
+            },
+            metadata={"batch_idx": 0},
+        )
+
+      # Group 1: 0/2 (zero variance -> filtered all wrong)
+      await program.raw_q.put(_raw_item("p_all_wrong", 0, 0.0))
+      await program.raw_q.put(_raw_item("p_all_wrong", 1, 0.0))
+      # Group 2: 2/2 (zero variance -> filtered all correct)
+      await program.raw_q.put(_raw_item("p_all_correct", 0, 1.0))
+      await program.raw_q.put(_raw_item("p_all_correct", 1, 1.0))
+      # Group 3: 1/2 (non-zero variance -> kept)
+      await program.raw_q.put(_raw_item("p_mixed", 0, 0.0))
+      await program.raw_q.put(_raw_item("p_mixed", 1, 1.0))
+      await program.raw_q.close()
+
+      await program.critique_stage()
+
+      kept = await asyncio.wait_for(program.scored_q.get(), timeout=1.0)
+      assert kept is not None
+      self.assertEqual(kept.items[0].prompt_id, "p_mixed")
+      self.assertIsNone(await program.scored_q.get())
+      self.assertEqual(
+          program.dispatch_window.skipped_prompt_ids,
+          {"p_all_wrong", "p_all_correct"},
+      )
+
+      filtered_groups = await program._drain_filtered_groups()
+      self.assertLen(filtered_groups, 2)
+      summary = program._collect_and_log_step_metrics(
+          all_step_items=list(kept.items),
+          step_rewards=[0.0, 1.0],
+          step_advantages=[-0.5, 0.5],
+          num_rollouts=2,
+          num_microbatches=1,
+          padding_stats=[],
+          packing_time_sec=0.0,
+          step_time_sec=1.0,
+          consumed_policy_version=0,
+          log_step=0,
+          filtered_groups=filtered_groups,
+      )
+      # Kept mean = (0 + 1)/2 = 0.5; unfiltered mean = (0+0 + 1+1 + 0+1)/6 = 0.5
+      self.assertAlmostEqual(summary["reward_mean"], 0.5)
+      self.assertAlmostEqual(summary["reward_mean_all"], 0.5)
+      logger = program.metrics_logger
+      self.assertAlmostEqual(
+          logger.get_metric("rollout", "filtered_all_wrong_groups", "train"),
+          1.0,
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("rollout", "filtered_all_correct_groups", "train"),
+          1.0,
+      )
+      import pathlib  # pylint: disable=g-import-not-at-top
+
+      part_files = list(pathlib.Path(pass_rate_dir).glob("*.jsonl"))
+      self.assertLen(part_files, 1)
+      program.close()
 
     asyncio.run(_run())
 
