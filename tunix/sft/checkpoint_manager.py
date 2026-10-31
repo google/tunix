@@ -217,6 +217,11 @@ class CheckpointManager:
       return None
     return self._checkpointer.latest.step
 
+  def wait(self) -> None:
+    """Blocks until pending saves are durable."""
+    if self._checkpointer is not None:
+      self._checkpointer.wait()
+
   def save(
       self,
       step: int,

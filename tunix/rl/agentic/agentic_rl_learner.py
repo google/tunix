@@ -23,6 +23,7 @@ import contextlib
 import copy
 import dataclasses
 import itertools
+import os
 import queue
 import threading
 from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar, Optional, Set
@@ -33,6 +34,7 @@ import jax
 from jax import typing
 import jax.numpy as jnp
 import numpy as np
+from orbax.checkpoint import v1 as ocp
 from tunix.generate import utils as generate_utils
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
@@ -40,9 +42,11 @@ from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import function_registry
 from tunix.rl import reward_manager  # pylint: disable=unused-import
 from tunix.rl import rl_cluster as rl_engine_lib
+from tunix.rl import sub_batch_checkpoint
 from tunix.rl.rollout import base_rollout
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import utils as agentic_utils
+from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
@@ -52,6 +56,7 @@ from tunix.rl.agentic.pipeline import rollout_orchestrator
 from tunix.rl.agentic.rewards import reward  # pylint: disable=unused-import
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.queue import data_queue as queue_lib
+from tunix.sft import checkpoint_options
 from tunix.sft import utils as sft_utils
 
 ArrayLike = typing.ArrayLike
@@ -85,6 +90,14 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
     num_generations: Number of samples per prompt.
     num_iterations: Number of iterations per batch.
     episode_timeout: Timeout for each episode in seconds.
+    sub_batch_checkpointing: Whether to persist each global step's generated
+      rollouts so that a restart resumes the step instead of regenerating them.
+      Requires `training_config.checkpoint_root_directory` and a trainer
+      checkpoint at every global-step boundary and none inside a step. A
+      restart retrains the step from its start, scoring the restored rollouts
+      again, and must keep the dataset and its order, the batch sizes,
+      `gradient_accumulation_steps`, `num_generations` and `num_iterations`;
+      other settings may change.
   """
 
   system_prompt: str = ""
@@ -100,6 +113,7 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   filter_statuses: Optional[Set] = None
   overlong_filter: bool = False
   use_rollout_logps: bool = True
+  sub_batch_checkpointing: bool = False
 
 
 TConfig = TypeVar("TConfig", bound=AgenticRLConfig)
@@ -211,6 +225,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             self.rl_engine.rollout.model(),
         )
     )
+    self._sub_batch: sub_batch_checkpoint.SubBatchCheckpointManager | None = (
+        None
+    )
+    # The global step restored at train start; its groups train first.
+    self._sub_batch_resume: sub_batch_checkpoint.SubBatchState | None = None
+    if self.algo_config.sub_batch_checkpointing:
+      self._check_sub_batch_config()
 
     # Enable async rollout if trainer and rollout are not on the same mesh.
     # If they do, then doesn't make sense for the interleave because they will
@@ -262,6 +283,91 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self._train_rewards_window: List[float] = []
     self._eval_rewards_window: List[float] = []
     self._rewards_window_lock = threading.Lock()
+
+  def _init_sub_batch_checkpointing(
+      self, geometry: sub_batch_checkpoint.BatchGeometry
+  ) -> None:
+    """Restores the in-progress global step, or saves a fresh run's weights.
+
+    The trainer's save cadence is checked first, so that snapshots are only
+    restored, and later steps' deleted, at a restored global-step boundary.
+
+    Args:
+      geometry: The batch geometry this run trains with.
+    """
+    trainer = self.rl_engine.actor_trainer
+    options = checkpoint_options.resolve_checkpointing_defaults(
+        self._training_config.checkpointing_options
+    )
+    policy = options.save_decision_policy
+    updates_per_step = geometry.updates_per_step
+    fixed_interval = ocp.training.save_decision_policies.FixedIntervalPolicy
+    if not (
+        isinstance(policy, fixed_interval)
+        and policy.interval == updates_per_step
+        and trainer.train_steps
+        == self.rl_engine.global_steps * updates_per_step
+    ):
+      raise ValueError(
+          "sub_batch_checkpointing needs a trainer checkpoint at every"
+          " global-step boundary and none inside a step:"
+          f" FixedIntervalPolicy({updates_per_step}), the optimizer updates"
+          " per global step, and a trainer step at the start of the global"
+          f" step. Got {policy!r} at trainer step {trainer.train_steps} and"
+          f" global step {self.rl_engine.global_steps}."
+      )
+    root = self._training_config.checkpoint_root_directory
+    assert root is not None
+    self._sub_batch = sub_batch_checkpoint.SubBatchCheckpointManager(
+        os.path.join(root, "sub_batch"),
+        enable_async=bool(options.enable_async_checkpointing),
+    )
+    if trainer.checkpoint_manager.latest_step() is not None:
+      # The trainer restarts at the start of a global step; restore the
+      # rollouts that step already generated.
+      self._sub_batch_resume = self._sub_batch.restore(
+          self.rl_engine.global_steps
+      )
+    elif self._sub_batch.has_snapshots():
+      raise ValueError(
+          f"Found sub-batch snapshots but no trainer checkpoint under {root}."
+          " Use a new checkpoint root or delete the sub_batch directory."
+      )
+    else:
+      # Snapshots of the first step need its weights to resume from. The
+      # optimizer is not saved: a relaunch rebuilds its initial state.
+      saved = trainer.checkpoint_manager.save(
+          0,
+          trainer.model,
+          save_only_lora_params=sft_utils.is_lora_enabled(trainer.model),
+          force=True,
+          custom_metadata={
+              "global_step": 0,
+              "role": rl_engine_lib.Role.ACTOR.value,
+          },
+      )
+      if not saved:
+        raise RuntimeError(
+            "sub_batch_checkpointing could not save the initial weights."
+        )
+      trainer.checkpoint_manager.wait()
+    self._sub_batch.set_geometry(geometry)
+
+  def _check_sub_batch_config(self) -> None:
+    """Rejects configurations that sub-batch checkpointing cannot resume."""
+    if not self._training_config.checkpoint_root_directory:
+      raise ValueError(
+          "sub_batch_checkpointing requires"
+          " training_config.checkpoint_root_directory."
+      )
+    if hasattr(self.rl_engine, "critic_trainer"):
+      raise ValueError("sub_batch_checkpointing does not support a critic.")
+    if self.algo_config.off_policy_steps:
+      raise ValueError("sub_batch_checkpointing requires off_policy_steps=0.")
+    if jax.process_count() > 1:
+      raise ValueError(
+          "sub_batch_checkpointing supports single-process runs only."
+      )
 
   def _validate_rollout_config(self):
     """Validates that the rollout config is properly aligned with the algo config."""
@@ -528,6 +634,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       prompt_iterator: Iterable[TrainingInputT] | AsyncIterator[TrainingInputT],
       num_generations: int = 1,
       collect_mode: str = "Token",
+      skip_group: Callable[[int], bool] | None = None,
+      first_group_id: int | None = None,
   ):
     """Generates trajectory groups using the orchestrator pattern.
 
@@ -536,6 +644,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       prompt_iterator: An iterable yielding single `TrainingInputT` examples.
       num_generations: The number of episodes to run per agent-environment pair.
       collect_mode: The mode for trajectory collection (e.g., "Token").
+      skip_group: Returns True for group ids that must not be generated.
+      first_group_id: The first prompt's group id. Defaults to the current
+        global step's first.
 
     Yields:
       A list of trajectories for a group.
@@ -544,11 +655,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     async def pairs_stream_generator():
       """Yield (agent, env) pairs with unique group_id per original prompt."""
-      # TODO (tsbao): fix the group id when we can resume from mid global step
-      # with mini-batch.
-      group_id = self.rl_engine.global_steps * self._full_batch_size
+      group_id = (
+          self.rl_engine.global_steps * self._full_batch_size
+          if first_group_id is None
+          else first_group_id
+      )
       if is_async_iterator:
         async for single_example in prompt_iterator:  # pyrefly: ignore[not-iterable]
+          if skip_group is not None and skip_group(group_id):
+            group_id += 1
+            continue
           # Create agent-env pairs in parallel for a group to handle potential
           # cold start latency on env creation.
           agent_env_pairs = await asyncio.gather(*[
@@ -566,6 +682,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           group_id += 1
       else:
         for single_example in prompt_iterator:  # pyrefly: ignore[not-iterable]
+          if skip_group is not None and skip_group(group_id):
+            group_id += 1
+            continue
           agent_env_pairs = await asyncio.gather(*[
               self.loop.run_in_executor(
                   None,
@@ -695,25 +814,34 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           yield prompt
 
     prompt_iterator = _iterate_micro_batches()
+    sub_batch = self._sub_batch
+    # Read before restored groups let training advance `global_steps`.
+    first_group_id = (
+        None
+        if sub_batch is None
+        else self.rl_engine.global_steps * self._full_batch_size
+    )
     try:
+      if self._sub_batch_resume is not None:
+        # Restored groups train first, in their original order.
+        for group in self._sub_batch_resume.active_groups:
+          self._queue_train_group(group, train_data_queue)
+        # The queue holds them now.
+        self._sub_batch_resume = None
       async for batch in self._orchestrator_producer(
           orchestrator=orchestrator,
           prompt_iterator=prompt_iterator,
           num_generations=self.algo_config.num_generations,
           collect_mode="Token",
+          skip_group=None if sub_batch is None else sub_batch.should_skip_group,
+          first_group_id=first_group_id,
       ):
         try:
-          if self._process_in_consumer:
-            # Put raw batch (list of trajectories) into queue.
-            # We put it once, and consumer will handle iterations.
-            train_data_queue.put(batch)
-          else:
-            train_examples = self._batch_to_train_example(
-                batch_results=batch,
-                mode=rl_engine_lib.Mode.TRAIN,
+          if sub_batch is not None:
+            sub_batch.record_rollout_group(
+                batch[0].prompt_id // self._full_batch_size, batch
             )
-            for train_example in train_examples:
-              train_data_queue.put(train_example)
+          self._queue_train_group(batch, train_data_queue)
         except Exception as e:
           if not isinstance(e, RuntimeError):
             logging.exception(
@@ -726,6 +854,24 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # Ensure that any background threads waiting on the prompt queue are
       # unblocked.
       prompt_queue.put(None)
+
+  def _queue_train_group(
+      self,
+      group: list[agent_types.TrajectoryItem],
+      train_data_queue: queue_lib.AbstractDataQueue,
+  ) -> None:
+    """Queues one generated group for training."""
+    if self._process_in_consumer:
+      # Put raw batch (list of trajectories) into queue.
+      # We put it once, and consumer will handle iterations.
+      train_data_queue.put(group)
+    else:
+      train_examples = self._batch_to_train_example(
+          batch_results=group,
+          mode=rl_engine_lib.Mode.TRAIN,
+      )
+      for train_example in train_examples:
+        train_data_queue.put(train_example)
 
   def _data_consumer_batch_generator(
       self, queue: queue_lib.AbstractDataQueue, batch_size: int
@@ -745,6 +891,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       skip_jit: bool = False,
   ) -> None:
     """Main training loop for the AgenticRLLearner."""
+    try:
+      self._train_impl(train_dataset, eval_dataset, skip_jit)
+    finally:
+      sub_batch, self._sub_batch = self._sub_batch, None
+      if sub_batch is not None:
+        sub_batch.close()
+
+  def _train_impl(
+      self,
+      train_dataset: Iterable[TrainingInputT],
+      eval_dataset: Iterable[TrainingInputT] | None,
+      skip_jit: bool,
+  ) -> None:
+    """The body of `train`, which closes the sub-batch manager after it."""
     full_batch_iterator = iter(train_dataset)
 
     if self.rl_engine.global_steps > 0:
@@ -813,6 +973,18 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         (mini_batch_size, f"{mini_batch_size=}"),
     ]:
       rl_utils.check_divisibility(v, full_batch_size, n, f"{full_batch_size=}")
+
+    if self.algo_config.sub_batch_checkpointing:
+      self._init_sub_batch_checkpointing(
+          sub_batch_checkpoint.BatchGeometry(
+              full_batch_size=full_batch_size,
+              mini_batch_size=mini_batch_size,
+              train_micro_batch_size=train_micro_batch_size,
+              gradient_accumulation_steps=grad_acc_steps,
+              num_generations=self._num_generations(),
+              num_iterations=self._num_iterations(),
+          )
+      )
 
     logging.info(  # pylint: disable=logging-fstring-interpolation
         f"Training with {full_batch_size=}, {mini_batch_size=},"
