@@ -225,6 +225,43 @@ class DispatchWindowTest(absltest.TestCase):
     self.assertFalse(window.uses_prompt_id_resume)
     self.assertEqual(window.dataset_skip_count, 2)
 
+  def test_max_dispatch_ahead_batches_and_group_level_replenishment(self):
+    async def _run():
+      step = 0
+      window = dispatch_window.DispatchWindow(
+          max_staleness=4,
+          next_batch_fn=lambda: step,
+          full_batch_size=3,
+          out_of_order_resume=True,
+          max_dispatch_ahead_batches=1,
+      )
+      self.assertEqual(window.max_dispatch_ahead_batches, 1)
+      admitted: list[int] = []
+
+      async def _dispatch():
+        for idx in range(9):
+          if await window.admit(idx, {"prompt_id": f"p_{idx}"}):
+            admitted.append(idx)
+
+      task = asyncio.create_task(_dispatch())
+      await asyncio.sleep(0.01)
+      # step=0, max_dispatch_ahead_batches=1, full_batch_size=3 -> batches 0 & 1
+      # (prompts 0..5) admitted; prompt 6 parked despite max_staleness=4.
+      self.assertEqual(admitted, [0, 1, 2, 3, 4, 5])
+
+      # Filtering 1 group admits exactly 1 replacement prompt (prompt 6), not
+      # the entire next batch.
+      window.on_group_filtered([_FakeItem("p_0")])
+      await asyncio.sleep(0.01)
+      self.assertEqual(admitted, [0, 1, 2, 3, 4, 5, 6])
+
+      step = 1
+      window.release()
+      await asyncio.wait_for(task, timeout=1.0)
+      self.assertEqual(admitted, [0, 1, 2, 3, 4, 5, 6, 7, 8])
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

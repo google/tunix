@@ -120,7 +120,20 @@ class TrajectoryQueueManager(
   ) -> "TrajectoryQueueManager":
     """Creates a grouped trajectory queue with optional policy staleness filtering."""
     assert max_staleness >= 0, "max_staleness must be non-negative."
-    combined_filter: FilterFn[TrajectoryItem] | None = filter_fn
+    def _strip_filtered_items(items: Sequence[TrajectoryItem]) -> None:
+      for item in items:
+        item.routed_experts = None
+        item.prompt_tokens = None
+        item.completion_tokens = None
+        item.action_mask = None
+        if isinstance(item.metadata, dict):
+          item.metadata.pop("routed_experts", None)
+        if isinstance(item.traj, dict):
+          item.traj.pop("routed_experts", None)
+        if hasattr(item, "payload"):
+          item.payload = None
+
+    combined_filter: FilterFn[TrajectoryItem] | None = None
     if max_staleness > 0 and current_policy_version is not None:
 
       def _item_policy_version(item: TrajectoryItem) -> int:
@@ -134,16 +147,38 @@ class TrajectoryQueueManager(
       ) -> tuple[list[TrajectoryItem], list[TrajectoryItem]]:
         min_allowed = current_policy_version() - max_staleness
         if any(_item_policy_version(item) < min_allowed for item in group):
-          return [], list(group)
+          filtered = list(group)
+          _strip_filtered_items(filtered)
+          return [], filtered
         if filter_fn is not None:
           res = filter_fn(group)
           if isinstance(res, tuple):
-            return res[0], list(res[1])
-          valid_ids = {id(x) for x in res}
-          return res, [x for x in group if id(x) not in valid_ids]
+            valid, filtered = res[0], list(res[1])
+          else:
+            valid = res
+            valid_ids = {id(x) for x in valid}
+            filtered = [x for x in group if id(x) not in valid_ids]
+          _strip_filtered_items(filtered)
+          return valid, filtered
         return list(group), []
 
       combined_filter = _staleness_filter
+    elif filter_fn is not None:
+
+      def _wrapped_filter(
+          group: list[TrajectoryItem],
+      ) -> tuple[list[TrajectoryItem], list[TrajectoryItem]]:
+        res = filter_fn(group)
+        if isinstance(res, tuple):
+          valid, filtered = res[0], list(res[1])
+        else:
+          valid = res
+          valid_ids = {id(x) for x in valid}
+          filtered = [x for x in group if id(x) not in valid_ids]
+        _strip_filtered_items(filtered)
+        return valid, filtered
+
+      combined_filter = _wrapped_filter
 
     return cls(
         num_generations=num_generations,

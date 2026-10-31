@@ -215,6 +215,7 @@ def iter_prompt_items(
     env_verbose: bool,
     overlong_filter: bool = False,
     max_staleness: int = 0,
+    dynamic_sampling: bool = False,
     episode_timeout_secs: int | None = None,
     return_routed_experts: bool = False,
 ) -> Iterator[dict[str, Any]]:
@@ -223,8 +224,11 @@ def iter_prompt_items(
   if dataset_size <= 0:
     raise ValueError("DeepSWE dataset is empty.")
 
+  # When dynamic_sampling (zero-variance filtering) is enabled, allocate 4x
+  # prompt capacity so filtered groups never exhaust the prompt stream early.
+  step_multiplier = 4 if dynamic_sampling else 1
   total_prompts = dataset_utils.total_prompt_groups(
-      max_steps, batch_size, max_staleness
+      max_steps * step_multiplier, batch_size, max_staleness
   )
   for prompt_idx in range(total_prompts):
     yield build_prompt_item(

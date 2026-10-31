@@ -33,9 +33,9 @@ class DispatchWindow:
   """Bounds how many prompt batches ahead of `next_batch` the dispatcher may run.
 
   The dispatcher may emit prompts for `batch_idx` while
-  `batch_idx <= next_batch + max_staleness`. When `batch_idx` exceeds that
-  bound, `wait_for(batch_idx)` parks until `release()` signals that
-  `next_batch` has advanced.
+  `batch_idx <= next_batch + max_dispatch_ahead_batches`. When `batch_idx`
+  exceeds that bound, `wait_for(batch_idx)` parks until `release()` signals
+  that `next_batch` has advanced.
 
   Also tracks filtered-group replenishment and off-policy `prompt_id`
   checkpoint/resume state (`committed_prompt_ids` and `skipped_prompt_ids`).
@@ -48,6 +48,7 @@ class DispatchWindow:
       *,
       full_batch_size: int = 1,
       out_of_order_resume: bool = False,
+      max_dispatch_ahead_batches: int | None = None,
   ):
     if max_staleness < 0:
       raise ValueError(
@@ -57,7 +58,20 @@ class DispatchWindow:
       raise ValueError(
           f"full_batch_size must be positive, got {full_batch_size}."
       )
+    if (
+        max_dispatch_ahead_batches is not None
+        and max_dispatch_ahead_batches < 0
+    ):
+      raise ValueError(
+          "max_dispatch_ahead_batches must be non-negative, got"
+          f" {max_dispatch_ahead_batches}."
+      )
     self.max_staleness = max_staleness
+    self.max_dispatch_ahead_batches = (
+        max_staleness
+        if max_dispatch_ahead_batches is None
+        else min(max_staleness, int(max_dispatch_ahead_batches))
+    )
     self.full_batch_size = full_batch_size
     self.out_of_order_resume = out_of_order_resume
     self._next_batch_fn = next_batch_fn
@@ -67,6 +81,7 @@ class DispatchWindow:
     self._skipped_prompt_ids: set[str] = set()
     self._has_resume_state = False
     self._resume_base_prompts: int | None = None
+    self._resume_filtered_base = 0
     self._dispatched_since_resume = 0
 
   @property
@@ -173,9 +188,28 @@ class DispatchWindow:
         self._skipped_prompt_ids = {str(pid) for pid in raw_skipped}
     return True
 
-  async def wait_for(self, batch_idx: int) -> None:
-    """Blocks until `batch_idx` is inside the policy-staleness window."""
-    while batch_idx > self.next_batch + self.max_staleness:
+  async def wait_for(
+      self,
+      batch_idx: int,
+      *,
+      prompt_idx: int | None = None,
+      filtered_base: int = 0,
+  ) -> None:
+    """Blocks until `batch_idx` (or `prompt_idx` when given) fits in the window."""
+    if prompt_idx is not None:
+      while True:
+        replenished = max(0, self._filtered_groups - filtered_base)
+        effective_batch_idx = (
+            max(0, prompt_idx - replenished) // self.full_batch_size
+        )
+        if (
+            effective_batch_idx
+            <= self._next_batch_fn() + self.max_dispatch_ahead_batches
+        ):
+          return
+        await self._release.wait()
+        self._release.clear()
+    while batch_idx > self.next_batch + self.max_dispatch_ahead_batches:
       # Wait first, clear second. The reverse loses a release that lands
       # between the test above and the clear, and nothing would set it again.
       await self._release.wait()
@@ -204,11 +238,18 @@ class DispatchWindow:
         return False
       if self._resume_base_prompts is None:
         self._resume_base_prompts = self.next_batch * self.full_batch_size
-      dispatch_batch_idx = (
-          self._resume_base_prompts + self._dispatched_since_resume
-      ) // self.full_batch_size
+        self._resume_filtered_base = self._filtered_groups
+      base_prompt_idx = self._resume_base_prompts + self._dispatched_since_resume
       self._dispatched_since_resume += 1
-    else:
-      dispatch_batch_idx = prompt_idx // self.full_batch_size
+      await self.wait_for(
+          base_prompt_idx // self.full_batch_size,
+          prompt_idx=base_prompt_idx,
+          filtered_base=self._resume_filtered_base,
+      )
+      return True
+    dispatch_batch_idx = prompt_idx // self.full_batch_size
+    if self.out_of_order_resume:
+      await self.wait_for(dispatch_batch_idx, prompt_idx=prompt_idx)
+      return True
     await self.wait_for(dispatch_batch_idx)
     return True

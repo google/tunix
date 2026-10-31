@@ -225,7 +225,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument(
       "--trajectory_group_order",
-      choices=("trajectory_completion", "prompt_arrival", "prompt_batch"),
+      choices=(
+          "trajectory_completion",
+          "arrival",
+          "prompt_arrival",
+          "prompt_batch",
+      ),
       default=os.getenv("TRAJECTORY_GROUP_ORDER", "trajectory_completion"),
       help="Trajectory group order.",
   )
@@ -350,6 +355,52 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           "Zero out the policy loss mask, final reward, and advantage inclusion"
           " of overlong (max-steps or max-context-limit) trajectories, rather"
           " than training on them."
+      ),
+  )
+  parser.add_argument(
+      "--dynamic_sampling",
+      action=argparse.BooleanOptionalAction,
+      default=_str2bool(os.getenv("DYNAMIC_SAMPLING", "false")),
+      help=(
+          "DAPO-style dynamic sampling: filter out zero-variance prompt groups"
+          " (where all valid rollouts have identical reward, e.g. 0/G or G/G)"
+          " and replenish from the prompt stream."
+      ),
+  )
+  parser.add_argument(
+      "--max_dispatch_ahead_batches",
+      type=int,
+      default=(
+          int(os.environ["MAX_DISPATCH_AHEAD_BATCHES"])
+          if os.getenv("MAX_DISPATCH_AHEAD_BATCHES")
+          else None
+      ),
+      help=(
+          "Maximum number of prompt batches beyond the currently training"
+          " batch that may be dispatched concurrently (capped at"
+          " max_staleness)."
+      ),
+  )
+  parser.add_argument(
+      "--min_rollout_replicas",
+      type=int,
+      default=(
+          int(os.environ["MIN_ROLLOUT_REPLICAS"])
+          if os.getenv("MIN_ROLLOUT_REPLICAS")
+          else None
+      ),
+      help=(
+          "Minimum number of rollout replicas required to register before"
+          " starting training. Defaults to rollout_replicas."
+      ),
+  )
+  parser.add_argument(
+      "--pass_rate_log_path",
+      type=str,
+      default=os.getenv("PASS_RATE_LOG_PATH", ""),
+      help=(
+          "Optional local or gs:// directory where per-group pass-rate JSONL"
+          " part files are written."
       ),
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=None)
@@ -506,6 +557,13 @@ def _validate_args(
   """Validates DeepSWE arguments and derives aligned `PhaseTimeouts`."""
   if args.trajectory_group_order == "prompt_batch":
     args.trajectory_group_order = "prompt_arrival"
+  elif args.trajectory_group_order == "arrival":
+    args.trajectory_group_order = "trajectory_completion"
+  if args.dynamic_sampling and args.trajectory_group_order == "prompt_arrival":
+    raise ValueError(
+        "dynamic_sampling requires trajectory_group_order='trajectory_completion'"
+        " (or 'arrival')."
+    )
   if args.mini_batch_size is None:
     args.mini_batch_size = args.batch_size
   if args.num_generations <= 1:
@@ -514,11 +572,6 @@ def _validate_args(
     raise ValueError("batch_size must be positive.")
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
-  if args.use_agent_sandbox and args.max_staleness > 1:
-    raise ValueError(
-        "use_agent_sandbox only supports max_staleness <= 1, got"
-        f" {args.max_staleness}."
-    )
   if args.step_timeout_secs <= 0:
     raise ValueError("step_timeout_secs must be positive.")
   if args.reward_timeout_secs <= 0:
@@ -630,10 +683,15 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
   )
 
+  min_rollout_replicas = (
+      args.min_rollout_replicas
+      if args.min_rollout_replicas is not None
+      else args.rollout_replicas
+  )
   cluster.registry.wait_for_workers(
       min_workers={
           datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: max(1, args.rollout_replicas),
+          datatypes.Role.ROLLOUT: max(1, min_rollout_replicas),
           datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
       },
       timeout=args.init_timeout_s,
@@ -675,6 +733,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       env_verbose=args.env_verbose,
       overlong_filter=args.overlong_filter,
       max_staleness=args.max_staleness,
+      dynamic_sampling=args.dynamic_sampling,
       return_routed_experts=args.return_routed_experts,
   )
   orchestrator_fleet = None
@@ -752,6 +811,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       ),
       trajectory_store=cluster.trajectory_store,
       max_staleness=args.max_staleness,
+      filter_zero_variance=args.dynamic_sampling,
+      max_dispatch_ahead_batches=args.max_dispatch_ahead_batches,
+      pass_rate_log_path=args.pass_rate_log_path,
       group_order=args.trajectory_group_order,
       sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
       precompile_trainer=args.trainer_precompile,
