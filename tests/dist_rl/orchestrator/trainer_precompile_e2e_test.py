@@ -392,7 +392,7 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
     )
     self.compiled_fns.clear()
     worker.fwd_bwd(datatypes.TrainRequest(payload=real_payload))
-    step = worker.update()
+    step, _ = worker.update()
     params_after = nnx.state(trainer.model, nnx.Param)
     self.assertTrue(
         any(

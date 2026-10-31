@@ -68,7 +68,7 @@ class MockActorHandle(mock.MagicMock):
     )
     self.weight_sync = mock.AsyncMock()
     self.fwd_bwd = mock.AsyncMock()
-    self.update = mock.AsyncMock()
+    self.update = mock.AsyncMock(return_value=(1, {}))
     self.prepare_weight_sync = mock.AsyncMock()
     self.release_weight_sync = mock.AsyncMock()
     self.pre_weight_sync = mock.AsyncMock()
@@ -374,7 +374,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.mock_actor.fwd_bwd.return_value = datatypes.Response(
           metadata={"queued": True}
       )
-      self.mock_actor.update.return_value = 3
+      self.mock_actor.update.return_value = (3, {"loss": 0.25})
       mock_payload = mock.MagicMock(spec=datatypes.RLTrainerPayload)
       mock_payload.metadata = {}
 
@@ -391,6 +391,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               "updated": True,
               "train_step": 3,
               "accumulated": True,
+              "metrics": {"loss": 0.25},
           },
       )
 
@@ -2307,7 +2308,7 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     async def _update():
       events.append("update")
-      return 1
+      return 1, {"loss": 0.1}
 
     self.mock_actor.fwd_bwd.side_effect = _fwd_bwd
     self.mock_actor.update.side_effect = _update
@@ -2362,6 +2363,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               "updated": True,
               "train_step": 1,
               "accumulated": True,
+              "metrics": {"loss": 0.1},
           },
       )
       self.assertEmpty(self.engine._inflight_fwd_bwd[datatypes.Role.ACTOR])

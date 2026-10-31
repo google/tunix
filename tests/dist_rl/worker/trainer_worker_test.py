@@ -473,8 +473,9 @@ class TrainerWorkerTest(absltest.TestCase):
     self.assertIs(self.fake_trainer.eval_step_calls[0], payload)
 
   def test_update_returns_step_count(self):
-    step = self.worker.update()
+    step, metrics = self.worker.update()
     self.assertEqual(step, 11)
+    self.assertEqual(metrics, {"loss": 0.25})
 
   def test_set_target_state_configures_trainer(self):
     target_state = {"params": np.zeros((4, 4))}

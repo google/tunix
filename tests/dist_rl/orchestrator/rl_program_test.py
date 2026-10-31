@@ -125,7 +125,7 @@ class _MockWorkerHandle(mock.MagicMock):
       return datatypes.Response(request_id="step", metadata={"loss": 0.5})
     elif method_name == "update":
       self.train_step_count += 1
-      return self.train_step_count
+      return self.train_step_count, self.metrics_buffer
     elif method_name == "get_metrics":
       return self.metrics_buffer
     elif method_name == "generate":
@@ -2313,10 +2313,9 @@ class RLProgramTest(absltest.TestCase):
               "apply_optimizer"
           ]
       )
-      # Checkpoint and metrics are executed on the flushed batch
-      self.mock_engine.get_metrics.assert_called_once_with(
-          role=datatypes.Role.ACTOR
-      )
+      # Checkpoint is executed on the flushed batch; metrics come from
+      # train_step.
+      self.mock_engine.get_metrics.assert_not_called()
       self.mock_engine.save_checkpoint.assert_called_once()
       self.assertEqual(program.last_step_result.num_microbatches, 1)
       self.assertEqual(program.last_step_result.num_rollouts, 3)
@@ -4203,8 +4202,8 @@ class RLProgramTest(absltest.TestCase):
       )
       self.mock_engine.train_step.return_value = {
           "updated": True,
+          "metrics": {"loss": 0.2},
       }
-      self.mock_engine.get_metrics.return_value = {"loss": 0.2}
 
       self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(
@@ -4245,13 +4244,14 @@ class RLProgramTest(absltest.TestCase):
 
   def test_distributed_engine_train_step_and_get_metrics(self):
     async def _run():
+      metrics_buf = exp_metrics.MetricsBuffer(
+          id=1, scalar_metrics={"loss": 0.1}
+      )
       mock_worker = mock.MagicMock(spec=remote_execution.ActorHandle)
       mock_worker.asubmit.side_effect = lambda method, *args, **kwargs: {
           "fwd_bwd": "fwd_bwd_done",
-          "update": 1,
-          "get_metrics": exp_metrics.MetricsBuffer(
-              id=1, scalar_metrics={"loss": 0.1}
-          ),
+          "update": (1, metrics_buf),
+          "get_metrics": metrics_buf,
       }[method]
 
       engine = _make_engine(
@@ -4269,7 +4269,7 @@ class RLProgramTest(absltest.TestCase):
           payload, role=datatypes.Role.ACTOR, apply_optimizer=True
       )
       self.assertTrue(res["updated"])
-      self.assertNotIn("metrics", res)
+      self.assertIs(res["metrics"], metrics_buf)
 
       metrics = await engine.get_metrics(role=datatypes.Role.ACTOR)
       self.assertEqual(metrics.scalar_metrics["loss"], 0.1)
@@ -4505,10 +4505,10 @@ class RLProgramTest(absltest.TestCase):
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
       self.mock_engine.train_step.return_value = {
           "updated": True,
-      }
-      self.mock_engine.get_metrics.return_value = {
-          "scalar_metrics": {"loss": 0.35, "learning_rate": 5e-5},
-          "weighted_metrics": {"kl": 0.01},
+          "metrics": {
+              "scalar_metrics": {"loss": 0.35, "learning_rate": 5e-5},
+              "weighted_metrics": {"kl": 0.01},
+          },
       }
       self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(dataset=["prompt_0"], reward_fns=[])
@@ -4904,28 +4904,27 @@ class RLProgramTest(absltest.TestCase):
 
       def _mock_train_step(payload, role=None, apply_optimizer=True, **kwargs):
         del payload, role, kwargs
-        return {
-            "updated": apply_optimizer,
-        }
-
-      def _mock_get_metrics(role=datatypes.Role.ACTOR, **kwargs):
-        del role, kwargs
         step_num = self.mock_engine.train_step.call_count
         loss = float(0.3 + 1.8 * np.exp(-step_num / 5.0))
         lr = float(1e-4 * max(0.1, 1.0 - (step_num / 20.0)))
         grad_norm = float(0.2 + 0.8 * np.exp(-step_num / 8.0))
-        return exp_metrics.MetricsBuffer(
-            id=step_num,
-            scalar_metrics={
-                "loss": loss,
-                "learning_rate": lr,
-                "grad_norm": grad_norm,
-            },
-            weighted_metrics={"kl": float(0.01 + 0.02 * (step_num / 20.0))},
-        )
+        metrics = None
+        if apply_optimizer:
+          metrics = exp_metrics.MetricsBuffer(
+              id=step_num,
+              scalar_metrics={
+                  "loss": loss,
+                  "learning_rate": lr,
+                  "grad_norm": grad_norm,
+              },
+              weighted_metrics={"kl": float(0.01 + 0.02 * (step_num / 20.0))},
+          )
+        return {
+            "updated": apply_optimizer,
+            "metrics": metrics,
+        }
 
       self.mock_engine.train_step.side_effect = _mock_train_step
-      self.mock_engine.get_metrics.side_effect = _mock_get_metrics
       self.mock_algo.algo_config.reward_mode = "env"
       program = self._create_program(
           dataset=["p0"] * 20,
@@ -4973,11 +4972,11 @@ class RLProgramTest(absltest.TestCase):
 
         self.mock_engine.train_step.return_value = {
             "updated": True,
+            "metrics": exp_metrics.MetricsBuffer(
+                id=1,
+                scalar_metrics={"loss": 0.42, "learning_rate": 1e-4},
+            ),
         }
-        self.mock_engine.get_metrics.return_value = exp_metrics.MetricsBuffer(
-            id=1,
-            scalar_metrics={"loss": 0.42, "learning_rate": 1e-4},
-        )
 
         self.mock_algo.algo_config.reward_mode = "env"
         program = self._create_program(
@@ -5500,15 +5499,16 @@ class RLProgramTest(absltest.TestCase):
           payload_with_old_logps,
       ]
       self.mock_engine.per_token_logps = mock.AsyncMock()
-      self.mock_engine.get_metrics = mock.AsyncMock(
-          return_value=exp_metrics.MetricsBuffer(
+      self.mock_engine.train_step.return_value = {
+          "updated": True,
+          "metrics": exp_metrics.MetricsBuffer(
               id=1,
               scalar_metrics={
                   "loss": 0.5,
                   "sampler_trainer/logp_diff_mean": 0.15,
               },
-          )
-      )
+          ),
+      }
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
       program = self._create_program(dataset=["prompt_data_0"])
       await program.run_async(self.mock_engine)
@@ -7381,7 +7381,10 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     self.mock_engine = mock.AsyncMock(
         spec=rl_program.rl_engine_interface.AbstractRLEngine
     )
-    self.mock_engine.train_step.return_value = {"loss": 0.1}
+    self.mock_engine.train_step.return_value = {
+        "updated": True,
+        "metrics": {"loss": 0.1},
+    }
     self.mock_engine.get_metrics.return_value = {"loss": 0.1}
     self.mock_engine.sync_weights.return_value = None
     self.mock_engine.resume_from_checkpoint.return_value = 0

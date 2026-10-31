@@ -272,13 +272,14 @@ class TrainerWorker(abstract_worker.Worker):
       raise
 
   @abstract_worker.offload_to_thread
-  def update(self) -> int:
-    """Applies the accumulated (mean) gradients as one optimizer update."""
+  def update(self) -> tuple[int, Any]:
+    """Applies the accumulated (mean) gradients and returns `(train_step, metrics)`."""
     trainer = self._ensure_ready()
     try:
       train_step = trainer.update()
+      metrics = trainer.get_metrics()
       self._last_error = None
-      return train_step
+      return train_step, metrics
     except Exception as exc:
       self._last_error = str(exc)
       self.state = WorkerState.ERROR

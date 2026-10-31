@@ -39,9 +39,10 @@ class StepTimes:
   long the orchestrator awaited that phase, not how long its work ran. The
   trainer answers `train_step` once its programs are dispatched (JAX runs them
   asynchronously), so device time lands in whichever later call first blocks
-  on the trainer's results: with `PeftTrainerV2`, the `get_metrics` after each
-  optimizer update (it reads the step's losses and gradient norm), counted in
-  `policy_training_time`, or the actor logprob pass of a standalone sampler
+  on the trainer's results: with `PeftTrainerV2`, `TrainerWorker.update` at the
+  end of `train_step(..., apply_optimizer=True)` (it flushes and reads the
+  step's losses and gradient norm), counted in `policy_training_time`, or the
+  actor logprob pass of a standalone sampler
   agreement check. Training that runs while the stage waits for scored groups
   or packs is hidden behind that waiting and packing, and `save_checkpoint`
   and `sync_weights` absorb training only when nothing before them blocked.
@@ -56,7 +57,8 @@ class StepTimes:
   Attributes:
     exposed_generation_time: Waiting for scored rollout groups.
     policy_training_time: Union of (possibly overlapping) microbatch
-      `train_step` intervals, each instant counted once, plus `get_metrics`.
+      `train_step` intervals, each instant counted once (including `update` and
+      metric flush on the final microbatch).
     reference_logps_time: Reference-model logprob passes for the KL penalty.
     sampler_agreement_time: `StandardRLProgram`'s standalone sampler-agreement
       pass, which computes trainer logprobs to compare with the sampler's.

@@ -547,12 +547,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         await asyncio.shield(prior)
     finally:
       inflight_set.difference_update(prior_fwd_bwd)
-    train_step = await self._invoke_worker(worker, "update")
+    train_step, metrics = await self._invoke_worker(worker, "update")
     return {
         "fwd_bwd": fwd_bwd_result,
         "updated": True,
         "train_step": train_step,
         "accumulated": accumulate_gradients,
+        "metrics": metrics,
     }
 
   async def get_metrics(

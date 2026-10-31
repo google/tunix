@@ -119,10 +119,12 @@ class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
 
   def test_update_runs_within_mesh(self):
     self.mock_trainer.update.return_value = 5
+    self.mock_trainer.get_metrics.return_value = {"loss": 0.1}
     result = self.worker.update()
-    self.assertEqual(result, 5)
+    self.assertEqual(result, (5, {"loss": 0.1}))
     self.mock_mesh.__enter__.assert_called_once()
     self.mock_trainer.update.assert_called_once_with()
+    self.mock_trainer.get_metrics.assert_called_once_with()
     self.mock_mesh.__exit__.assert_called_once()
 
   def test_eval_step_runs_within_mesh(self):

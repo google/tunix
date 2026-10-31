@@ -1659,13 +1659,8 @@ class StandardRLProgram(RLProgram):
               await _prepare_and_enqueue_train(mb)
               del mb
               await _drain_pending_trains()
-              metrics_start = time.monotonic()
-              trainer_metrics = await self.engine.get_metrics(
-                  role=datatypes.Role.ACTOR
-              )
-              step_times.policy_training_time += (
-                  time.monotonic() - metrics_start
-              )
+              if isinstance(step_result, dict):
+                trainer_metrics = step_result.get("metrics")
               final_minibatch_completed = True
               # TODO(tunix-dev): Configurable checkpointing frequency. Today we
               # checkpoint at the same frequency as the weight update.
