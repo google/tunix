@@ -50,6 +50,29 @@ concurrency:
 permissions:
   contents: read
 jobs:
+  cl_complexity_gate:
+    name: 3D CL Complexity Gate
+    if: ${{ github.event_name == 'pull_request' && (github.event.action != 'labeled' || github.event.label.name == 'ready-to-submit') }}
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+      - name: Run 3D CL Complexity Gate (Warning Only)
+        if: ${{ !contains(github.event.pull_request.body, 'SKIP_CL_COMPLEXITY=') }}
+        run: |
+          if ! out=$(python3 scripts/check_cl_complexity.py --strict --rev origin/${{ github.base_ref || 'main' }}); then
+            echo "$out"
+            echo "::warning title=3D CL Complexity Gate::${out//$'\n'/%0A}"
+          else
+            echo "$out"
+          fi
+
   build_tunix_package:
     name: Build tunix package
     if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready-to-submit' }}
