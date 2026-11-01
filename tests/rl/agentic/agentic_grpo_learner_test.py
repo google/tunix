@@ -265,6 +265,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         self.rl_engine = mock.Mock()
         self.metric_fns = []
         self._process_in_consumer = False
+        self._sub_batch = None
+        self._sub_batch_resume = None
 
       def _create_micro_batch_iterator(self, iterator, batch_size):
         # The dataset batch size is 2, and we want to test micro-batching
@@ -294,6 +296,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           ),
           num_generations: int = 1,
           collect_mode: str = "Token",
+          skip_group=None,
+          first_group_id=None,
       ):
         i = 0
         if hasattr(prompt_iterator, "__aiter__"):
