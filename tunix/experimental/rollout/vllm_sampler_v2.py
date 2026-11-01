@@ -35,6 +35,7 @@ import numpy as np
 from vllm import envs
 from tunix.generate import utils as generate_utils
 from tunix.utils import env_utils
+from tunix.experimental import events
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams as VllmSamplingParams
@@ -170,9 +171,16 @@ class RLVllmSampler:
         existing.append("WEIGHT_SYNC_PARALLEL_H2H")
         os.environ["VLLM_RAY_EXTRA_ENV_VARS_TO_COPY"] = ",".join(existing)
 
+    engine_kwargs: dict[str, Any] = {}
+    if events.ON:
+      from tunix.experimental.rollout import events_stat_logger  # pylint: disable=g-import-not-at-top
+
+      engine_kwargs["stat_loggers"] = [events_stat_logger.EventsStatLogger]
     for attempt in range(1, self._START_MAX_ATTEMPTS + 1):
       try:
-        self._engine = AsyncLLMEngine.from_engine_args(self.engine_args)
+        self._engine = AsyncLLMEngine.from_engine_args(
+            self.engine_args, **engine_kwargs
+        )
         break
       except RuntimeError as e:
         if (
@@ -245,6 +253,10 @@ class RLVllmSampler:
     if self._is_paused:
       return
     self._is_paused = True
+    if events.ON:
+      events.emit(
+          "engine_pause", policy_version=self._policy_version, mode=mode
+      )
     if mode is not None or self._partial_rollout:
       self._unpaused_event.clear()
       if self._engine:
@@ -275,6 +287,8 @@ class RLVllmSampler:
   async def resume(self, **kwargs: Any) -> None:
     """Resumes inference processing after weight sync completion."""
     del kwargs
+    if events.ON and self._is_paused:
+      events.emit("engine_unpause", policy_version=self._policy_version)
     if self._paused_with_generation or self._partial_rollout:
       if not self._is_paused:
         self._unpaused_event.set()
@@ -643,17 +657,26 @@ class RLVllmSampler:
           if tot_comp_toks > 0
           else 0.0
       )
-      logger.info(
+      events.log_and_emit(
+          logger,
+          logging.INFO,
           '[DEBUG_INFERENCE][Sampler] requests=%d, duration=%.3fs, '
           'prompt_tokens=%d, completion_tokens=%d, preemptions=%d, '
           'tps=%.2f, tpot=%.2fms',
-          len(results),
-          sample_duration,
-          tot_prompt_toks,
-          tot_comp_toks,
-          tot_preempts,
-          s_tps,
-          s_tpot_ms,
+          "sampler_call",
+          text_args=(
+              len(results),
+              sample_duration,
+              tot_prompt_toks,
+              tot_comp_toks,
+              tot_preempts,
+              s_tps,
+              s_tpot_ms,
+          ),
+          names=(
+              "requests", "dur_s", "prompt_tokens", "completion_tokens",
+              "preemptions", "tps", "tpot_ms",
+          ),
       )
 
     if raw_input_mode:

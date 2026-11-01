@@ -41,6 +41,7 @@ from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.rollout import base_rollout
 from tunix.utils import env_utils
+from tunix.experimental import events
 
 BaseTaskEnv = base_environment.BaseTaskEnv
 
@@ -471,26 +472,36 @@ class TrajectoryCollectEngine:
           if hasattr(self.agent.trajectory.status, 'name')
           else str(self.agent.trajectory.status)
       )
-      logging.info(
+      events.log_and_emit(
+          logging,
+          logging.INFO,
           '[DEBUG_INFERENCE][Trajectory] traj_id=%s, global_step=%s, '
           'status=%s, reward=%s, steps=%d, total_time=%.3fs, '
           'model_time=%.3fs, env_time=%.3fs, reward_time=%.3fs, '
           'mean_step_latency=%.3fs, '
           'completion_tokens=%d, preemptions=%d, tps=%.2f, tpot=%.2fms',
-          traj_id,
-          self.policy_version,
-          status_str,
-          self.agent.trajectory.reward,
-          num_steps,
-          total_time,
-          m_lat,
-          total_env_time,
-          total_reward_time,
-          mean_step_lat,
-          comp_toks,
-          p_cnt,
-          tps,
-          tpot_ms,
+          "trajectory",
+          text_args=(
+              traj_id,
+              self.policy_version,
+              status_str,
+              self.agent.trajectory.reward,
+              num_steps,
+              total_time,
+              m_lat,
+              total_env_time,
+              total_reward_time,
+              mean_step_lat,
+              comp_toks,
+              p_cnt,
+              tps,
+              tpot_ms,
+          ),
+          names=(
+              "traj", "policy_version", "status", "reward", "turns", "wall_s",
+              "model_s", "env_s", "reward_s", "mean_step_s",
+              "completion_tokens", "preemptions", "tps", "tpot_ms",
+          ),
       )
 
     if mode not in ["Trajectory", "Steps", "Token", "Conversation"]:
@@ -1360,20 +1371,29 @@ class TrajectoryCollectEngine:
       traj_id = self._debug_traj_id
       env_lat = wall_time if env_step_executed else 0.0
       turn_total = step_latency + env_lat
-      logging.info(
+      events.log_and_emit(
+          logging,
+          logging.INFO,
           '[DEBUG_INFERENCE][Turn] traj_id=%s, turn=%d, model_time=%.3fs, '
           'env_time=%.3fs, total_time=%.3fs, prompt_tokens=%d, '
           'completion_tokens=%d, preemptions=%d, tps=%.2f, tpot=%.2fms',
-          traj_id,
-          turn_idx,
-          step_latency,
-          env_lat,
-          turn_total,
-          prompt_len,
-          comp_len,
-          preempt,
-          turn_tps,
-          turn_tpot_ms,
+          "turn",
+          text_args=(
+              traj_id,
+              turn_idx,
+              step_latency,
+              env_lat,
+              turn_total,
+              prompt_len,
+              comp_len,
+              preempt,
+              turn_tps,
+              turn_tpot_ms,
+          ),
+          names=(
+              "traj", "turn", "model_s", "env_s", "total_s", "prompt_tokens",
+              "completion_tokens", "preemptions", "tps", "tpot_ms",
+          ),
       )
 
     if step_timed_out:

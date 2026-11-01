@@ -853,6 +853,26 @@ def _create_trainer_factory(args) -> tuple[Any, Mesh]:
   return _create_tunix_trainer_factory(args)
 
 
+async def _events_node_stopping() -> None:
+  from tunix.experimental import events  # pylint: disable=g-import-not-at-top
+
+  if events.ON:
+    try:
+      await asyncio.to_thread(events.node_stopping)
+    except Exception:  # pylint: disable=broad-except
+      events.node_stopping()  # bounded by its own timeout
+
+
+async def _events_node_stopped() -> None:
+  from tunix.experimental import events  # pylint: disable=g-import-not-at-top
+
+  if events.ON:
+    try:
+      await asyncio.to_thread(events.node_stopped)
+    except Exception:  # pylint: disable=broad-except
+      events.node_stopped()  # bounded by its own timeout
+
+
 def main(argv: list[str], context: Any = None) -> None:
   if context and context.ipc and context.ipc.discovery:
     pass
@@ -927,12 +947,17 @@ def main(argv: list[str], context: Any = None) -> None:
       pass
     finally:
       logging.info("Draining trainer worker...")
+      # This loop's handler replaced the events SIGTERM handler: write and
+      # upload the queued events before the drain (bounded, never raises).
+      await _events_node_stopping()
       try:
         worker_service.stop()
         logging.info("Trainer worker drained.")
       except Exception:
         logging.exception("Failed to drain trainer worker cleanly.")
       await server.stop_serving()
+      # Final health line, write and upload (bounded, never raises).
+      await _events_node_stopped()
 
   asyncio.run(grpc_server_main())
 

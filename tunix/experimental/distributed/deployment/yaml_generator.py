@@ -320,6 +320,14 @@ def main() -> None:
       help="Kubernetes nodepool for Pathways head pod (e.g. cpu-np).",
   )
   parser.add_argument(
+      "--rollout_termination_grace_seconds",
+      default=int(os.environ.get("ROLLOUT_TERMINATION_GRACE_SECONDS") or 30),
+      type=int,
+      help="Termination grace period in seconds for the rollout (vLLM) pods of"
+      " jobset.tpu.yaml (default: 30; covers the ~5 s vLLM drain plus the final"
+      " events upload).",
+  )
+  parser.add_argument(
       "--termination_grace_seconds",
       default=int(os.environ.get("TERMINATION_GRACE_SECONDS") or 360),
       type=int,
@@ -845,6 +853,7 @@ def main() -> None:
         COLOCATED_PYTHON_WORKER_ARGS=colocated_python_worker_args,
         COLOCATED_PYTHON_PROXY_ARGS=colocated_python_proxy_args,
         TERMINATION_GRACE_SECONDS=args.termination_grace_seconds,
+        ROLLOUT_TERMINATION_GRACE_SECONDS=args.rollout_termination_grace_seconds,
         PW_INSTANCE_TYPE=pw_instance_type,
         REPLICAS=1,
         COMPLETIONS=num_chips // 4 if num_chips else None,
