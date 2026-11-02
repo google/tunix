@@ -307,6 +307,8 @@ class RlEngineTest(parameterized.TestCase):
       self,
       rollout_engine: str,
       rollout_config: base_rollout.RolloutConfig,
+      colocated: bool = False,
+      checkpoint_root_directory: str | None = None,
   ) -> rl_engine_lib.RLEngine:
     split_index = self.device_count // 2
     actor_mesh = Mesh(
@@ -317,6 +319,8 @@ class RlEngineTest(parameterized.TestCase):
         np.array(jax.devices()[split_index:]).reshape(1, split_index),
         ('fsdp', 'tp'),
     )
+    if colocated:
+      rollout_mesh = actor_mesh
     cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
             rl_engine_lib.Role.ACTOR: actor_mesh,
@@ -330,6 +334,7 @@ class RlEngineTest(parameterized.TestCase):
             eval_every_n_steps=1,
             max_steps=10,
             gradient_accumulation_steps=None,
+            checkpoint_root_directory=checkpoint_root_directory,
         ),
         rollout_config=rollout_config,
     )
@@ -383,6 +388,72 @@ class RlEngineTest(parameterized.TestCase):
     with mock.patch.object(rl_engine_lib.gc, 'collect') as mock_collect:
       rl_engine.sync_weights()
     self.assertEqual(mock_collect.called, gc_collect_after_weight_sync)
+
+  def test_sync_weights_can_leave_the_global_step(self):
+    rl_engine = self._create_test_rl_engine(
+        'vanilla',
+        base_rollout.RolloutConfig(
+            max_tokens_to_generate=10, max_prompt_length=256, kv_cache_size=1024
+        ),
+        colocated=True,
+    )
+    rl_engine.sync_weights(increment_global_steps=False)
+    self.assertEqual(rl_engine.global_steps, 0)
+    rl_engine.sync_weights()
+    self.assertEqual(rl_engine.global_steps, 1)
+
+  def test_init_syncs_restored_actor_weights_to_a_rollout_copy(self):
+    # One mesh: on CPU, sync_weights' transfer guard rejects cross-mesh copies.
+    # The rollout then shares the actor's weights, so pretend it holds a copy,
+    # like vLLM or a vanilla rollout on another mesh.
+    self.enter_context(
+        mock.patch.object(
+            rl_engine_lib.rl_utils, 'is_sharing_weights', return_value=False
+        )
+    )
+    sync = self.enter_context(
+        mock.patch.object(
+            rl_engine_lib.RLEngine,
+            'sync_weights',
+            autospec=True,
+            side_effect=rl_engine_lib.RLEngine.sync_weights,
+        )
+    )
+    rollout_config = base_rollout.RolloutConfig(
+        max_tokens_to_generate=10, max_prompt_length=256, kv_cache_size=1024
+    )
+    root = self.create_tempdir().full_path
+    rl_engine = self._create_test_rl_engine(
+        'vanilla',
+        rollout_config,
+        colocated=True,
+        checkpoint_root_directory=root,
+    )
+    # Nothing was restored, so the rollout already has the actor's weights.
+    sync.assert_not_called()
+    trainer = rl_engine.actor_trainer
+    trained = jax.tree.map(
+        lambda x: x + 1.0, nnx.state(trainer.model, nnx.Param)
+    )
+    nnx.update(trainer.model, trained)
+    trainer.checkpoint_manager.save(1, trainer.model, force=True)
+    # Closing waits for the save.
+    trainer.checkpoint_manager.close()
+
+    # The rollout is built from the actor before the trainer restores it.
+    rl_engine = self._create_test_rl_engine(
+        'vanilla',
+        rollout_config,
+        colocated=True,
+        checkpoint_root_directory=root,
+    )
+
+    sync.assert_called_once_with(rl_engine, increment_global_steps=False)
+    jax.tree.map_with_path(
+        tc.assert_close,
+        trained,
+        nnx.state(rl_engine.rollout.model(), nnx.Param),
+    )
 
   def test_init_engine_invalid_engine_string(self):
     with self.assertRaisesRegex(
