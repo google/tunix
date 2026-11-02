@@ -130,6 +130,12 @@ export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
 export LOG_DIR=${LOG_DIR:-}
 export TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+# OpenTelemetry metrics export (opt-in): deploy the in-cluster collector via
+# `./k8s_launcher.sh --command otel`, then set
+# OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_ID}:${OTEL_PORT} (default
+# http://${USER}-otel:4317).
+export OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+export OTEL_METRIC_EXPORT_INTERVAL=${OTEL_METRIC_EXPORT_INTERVAL:-}
 export RUN_ID=${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_$$}
 export TRAJECTORY_STORE_ENABLED=${TRAJECTORY_STORE_ENABLED:-false}
 export TRAJECTORY_STORE_BACKEND=${TRAJECTORY_STORE_BACKEND:-file}
@@ -143,6 +149,9 @@ export ROLLOUT_PORT=20001
 
 export TRAINER_ID=$USER-train
 export TRAINER_PORT=20002
+
+export OTEL_ID=${OTEL_ID:-$USER-otel}
+export OTEL_PORT=${OTEL_PORT:-4317}
 
 export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
 export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
@@ -203,6 +212,34 @@ case "${RETURN_ROUTED_EXPERTS}" in
     ;;
 esac
 
+stop_otel() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "kubectl delete deployment ${OTEL_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete service ${OTEL_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete configmap ${OTEL_ID}-config -n ${K8S_NAMESPACE}"
+  else
+    kubectl delete deployment "${OTEL_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
+    kubectl delete service "${OTEL_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
+    kubectl delete configmap "${OTEL_ID}-config" -n "${K8S_NAMESPACE}" --ignore-not-found
+  fi
+}
+
+start_otel() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "kubectl create configmap ${OTEL_ID}-config -n ${K8S_NAMESPACE} --from-file=otel-collector.yaml=tunix/dist_rl/distributed/deployment/yamls/otel-collector.yaml"
+  else
+    kubectl create configmap "${OTEL_ID}-config" -n "${K8S_NAMESPACE}" \
+      --from-file=otel-collector.yaml=tunix/dist_rl/distributed/deployment/yamls/otel-collector.yaml \
+      --dry-run=client -o yaml | apply_manifest
+  fi
+  "$PYTHON" tunix/dist_rl/distributed/deployment/yaml_generator.py \
+    tunix/dist_rl/distributed/deployment/yamls/jobset.otel.yaml \
+    --jobset_name="${OTEL_ID}" \
+    --namespace="${K8S_NAMESPACE}" \
+    --worker_container_port="${OTEL_PORT}" \
+    | apply_manifest
+}
+
 stop_orchestrator() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
@@ -238,6 +275,8 @@ start_orchestrator() {
       ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
+      ${OTEL_EXPORTER_OTLP_ENDPOINT:+OTEL_EXPORTER_OTLP_ENDPOINT=\"${OTEL_EXPORTER_OTLP_ENDPOINT}\"} \
+      ${OTEL_METRIC_EXPORT_INTERVAL:+OTEL_METRIC_EXPORT_INTERVAL=\"${OTEL_METRIC_EXPORT_INTERVAL}\"} \
       python -m tunix.dist_rl.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
@@ -373,7 +412,7 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${CKPT_D2H_CONCURRENT_GB:+ CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}}${MAXTEXT_EXTRA_FLAGS:+ MAXTEXT_EXTRA_FLAGS=\"${MAXTEXT_EXTRA_FLAGS}\"}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.dist_rl.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} ${OTEL_EXPORTER_OTLP_ENDPOINT:+OTEL_EXPORTER_OTLP_ENDPOINT=\"${OTEL_EXPORTER_OTLP_ENDPOINT}\" }${OTEL_METRIC_EXPORT_INTERVAL:+OTEL_METRIC_EXPORT_INTERVAL=\"${OTEL_METRIC_EXPORT_INTERVAL}\" }VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${CKPT_D2H_CONCURRENT_GB:+ CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}}${MAXTEXT_EXTRA_FLAGS:+ MAXTEXT_EXTRA_FLAGS=\"${MAXTEXT_EXTRA_FLAGS}\"}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.dist_rl.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.dist_rl.examples.common.run_trainer_node.main \
@@ -398,6 +437,7 @@ start_trainer() {
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
         --sampler=${SAMPLER} \
+        --run_id=\"${RUN_ID}\" \
         ${lora_args} \
         ${maxtext_args} \
         ${profiler_flags} \
@@ -480,7 +520,7 @@ start_rollout() {
     --ray_head_pre_init_command="${ray_head_pre_init_cmd}" \
     --ray_worker_pre_init_command="${ray_worker_pre_init_cmd}" \
     --worker_startup_command=" \
-      SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${sandbox_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1}${jax_cache_env} python -m tunix.dist_rl.distributed.runtime.main \
+      ${OTEL_EXPORTER_OTLP_ENDPOINT:+OTEL_EXPORTER_OTLP_ENDPOINT=\"${OTEL_EXPORTER_OTLP_ENDPOINT}\" }${OTEL_METRIC_EXPORT_INTERVAL:+OTEL_METRIC_EXPORT_INTERVAL=\"${OTEL_METRIC_EXPORT_INTERVAL}\" }SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${sandbox_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1}${jax_cache_env} python -m tunix.dist_rl.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.dist_rl.examples.common.run_rollout_node.main \
@@ -521,6 +561,10 @@ start_rollout() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    start|stop|orchestrator|trainer|rollout|otel|stop-otel)
+      COMMAND="$1"
+      shift
+      ;;
     --command)
       COMMAND="$2"
       shift 2
@@ -555,7 +599,7 @@ if [[ "$DRY_RUN" != "true" ]]; then
   fi
 fi
 
-if [[ -z "$TUNIX_IMAGE" ]]; then
+if [[ "$COMMAND" != "stop" && "$COMMAND" != "otel" && "$COMMAND" != "stop-otel" && -z "$TUNIX_IMAGE" ]]; then
   echo "Error: no image set. Build one with tunix, maxtext, and" \
        "tpu-inference installed, then pass it via TUNIX_IMAGE=... or" \
        "--image=..."
@@ -579,7 +623,11 @@ elif [[ "$COMMAND" == "trainer" ]]; then
   stop_trainer; start_trainer
 elif [[ "$COMMAND" == "rollout" ]]; then
   stop_rollout; start_rollout
+elif [[ "$COMMAND" == "otel" ]]; then
+  stop_otel; start_otel
+elif [[ "$COMMAND" == "stop-otel" ]]; then
+  stop_otel
 else
-  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout'."
+  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout', 'otel', 'stop-otel'."
   exit 1
 fi

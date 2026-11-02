@@ -30,6 +30,7 @@ from typing import Any
 
 from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.common import gcs_cache
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
@@ -1136,6 +1137,15 @@ def main(argv: list[str], context: Any = None) -> None:
     logging.getLogger().setLevel(logging.DEBUG)
     os.environ["TUNIX_LOG_ROLLOUT_TEXT"] = "1"
   logging.info("Parsed args: %s", args)
+
+  otel_setup.setup_metrics(
+      default_service_name="tunix-rollout",
+      resource_attributes={
+          "tunix.worker_id": args.worker_id,
+          "tunix.role": "rollout",
+          "tunix.run_id": args.run_id,
+      },
+  )
 
   if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)

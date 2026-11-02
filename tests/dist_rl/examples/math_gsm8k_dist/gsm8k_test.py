@@ -237,6 +237,64 @@ class GSM8KTest(absltest.TestCase):
       self.assertIn("--trajectory_store_dir=", content)
       self.assertIn("--run_id=", content)
 
+  def test_launchers_export_otel_across_all_roles(self):
+    base_dir = pathlib.Path(gsm8k.__file__).parent
+    for script_name in ("launcher.sh", "k8s_launcher.sh"):
+      content = (base_dir / script_name).read_text(encoding="utf-8")
+      self.assertIn(
+          "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}",
+          content,
+      )
+      self.assertIn(
+          "OTEL_METRIC_EXPORT_INTERVAL=${OTEL_METRIC_EXPORT_INTERVAL:-}",
+          content,
+      )
+      self.assertNotIn("OTEL_SERVICE_NAME", content)
+
+    local_content = (base_dir / "launcher.sh").read_text(encoding="utf-8")
+    self.assertEqual(
+        local_content.count(
+            'export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT"'
+        ),
+        4,
+    )
+    self.assertEqual(
+        local_content.count(
+            'export OTEL_METRIC_EXPORT_INTERVAL="$OTEL_METRIC_EXPORT_INTERVAL"'
+        ),
+        4,
+    )
+
+    k8s_content = (base_dir / "k8s_launcher.sh").read_text(encoding="utf-8")
+    self.assertIn("export OTEL_ID=${OTEL_ID:-$USER-otel}", k8s_content)
+    self.assertIn("export OTEL_PORT=${OTEL_PORT:-4317}", k8s_content)
+    self.assertIn("jobset.otel.yaml", k8s_content)
+    self.assertIn("otel-collector.yaml", k8s_content)
+    self.assertIn("start_otel()", k8s_content)
+    self.assertIn("stop_otel()", k8s_content)
+    self.assertEqual(
+        k8s_content.count(
+            "${OTEL_EXPORTER_OTLP_ENDPOINT:+"
+            'OTEL_EXPORTER_OTLP_ENDPOINT=\\"${OTEL_EXPORTER_OTLP_ENDPOINT}\\"}'
+        )
+        + k8s_content.count(
+            "${OTEL_EXPORTER_OTLP_ENDPOINT:+"
+            'OTEL_EXPORTER_OTLP_ENDPOINT=\\"${OTEL_EXPORTER_OTLP_ENDPOINT}\\" }'
+        ),
+        3,
+    )
+    self.assertEqual(
+        k8s_content.count(
+            "${OTEL_METRIC_EXPORT_INTERVAL:+"
+            'OTEL_METRIC_EXPORT_INTERVAL=\\"${OTEL_METRIC_EXPORT_INTERVAL}\\"}'
+        )
+        + k8s_content.count(
+            "${OTEL_METRIC_EXPORT_INTERVAL:+"
+            'OTEL_METRIC_EXPORT_INTERVAL=\\"${OTEL_METRIC_EXPORT_INTERVAL}\\" }'
+        ),
+        3,
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

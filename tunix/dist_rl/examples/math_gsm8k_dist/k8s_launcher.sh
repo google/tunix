@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Available options: 'start', 'stop', 'orchestrator', 'trainer', 'rollout'.
+# Available options: 'start', 'stop', 'orchestrator', 'trainer', 'rollout', 'otel', 'stop-otel'.
 COMMAND=""
 TUNIX_IMAGE=${TUNIX_IMAGE:-}
 
@@ -113,6 +113,13 @@ export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
 export LOG_DIR=${LOG_DIR:-}
 export TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+# OpenTelemetry metrics export (opt-in): deploy the in-cluster collector via
+# `./k8s_launcher.sh otel`, then set
+# OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_ID}:${OTEL_PORT} (default
+# http://${USER}-otel:4317). Note: rollout pods use isolated pod networking,
+# so prefer the K8s Service DNS or host IP over http://localhost:4317.
+export OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+export OTEL_METRIC_EXPORT_INTERVAL=${OTEL_METRIC_EXPORT_INTERVAL:-}
 export RUN_ID=${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_$$}
 export TRAJECTORY_STORE_ENABLED=${TRAJECTORY_STORE_ENABLED:-false}
 export TRAJECTORY_STORE_BACKEND=${TRAJECTORY_STORE_BACKEND:-file}
@@ -130,6 +137,9 @@ export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-1}
 
 export TRAINER_ID=$USER-train
 export TRAINER_PORT=20002
+
+export OTEL_ID=${OTEL_ID:-$USER-otel}
+export OTEL_PORT=${OTEL_PORT:-4317}
 
 export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
 export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
@@ -197,6 +207,34 @@ apply_manifest() {
   fi
 }
 
+stop_otel() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "kubectl delete deployment ${OTEL_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete service ${OTEL_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete configmap ${OTEL_ID}-config -n ${K8S_NAMESPACE}"
+  else
+    kubectl delete deployment "${OTEL_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
+    kubectl delete service "${OTEL_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
+    kubectl delete configmap "${OTEL_ID}-config" -n "${K8S_NAMESPACE}" --ignore-not-found
+  fi
+}
+
+start_otel() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "kubectl create configmap ${OTEL_ID}-config -n ${K8S_NAMESPACE} --from-file=otel-collector.yaml=${YAML_DIR}/otel-collector.yaml"
+  else
+    kubectl create configmap "${OTEL_ID}-config" -n "${K8S_NAMESPACE}" \
+      --from-file=otel-collector.yaml="$YAML_DIR/otel-collector.yaml" \
+      --dry-run=client -o yaml | apply_manifest
+  fi
+  "$PYTHON" "$YAML_GEN" \
+    "$YAML_DIR/jobset.otel.yaml" \
+    --jobset_name="${OTEL_ID}" \
+    --namespace="${K8S_NAMESPACE}" \
+    --worker_container_port="${OTEL_PORT}" \
+    | apply_manifest
+}
+
 stop_orchestrator() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
@@ -229,6 +267,8 @@ start_orchestrator() {
       ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
+      ${OTEL_EXPORTER_OTLP_ENDPOINT:+OTEL_EXPORTER_OTLP_ENDPOINT=\"${OTEL_EXPORTER_OTLP_ENDPOINT}\"} \
+      ${OTEL_METRIC_EXPORT_INTERVAL:+OTEL_METRIC_EXPORT_INTERVAL=\"${OTEL_METRIC_EXPORT_INTERVAL}\"} \
       python -m tunix.dist_rl.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
@@ -355,7 +395,7 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${CKPT_D2H_CONCURRENT_GB:+ CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.dist_rl.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} ${OTEL_EXPORTER_OTLP_ENDPOINT:+OTEL_EXPORTER_OTLP_ENDPOINT=\"${OTEL_EXPORTER_OTLP_ENDPOINT}\" }${OTEL_METRIC_EXPORT_INTERVAL:+OTEL_METRIC_EXPORT_INTERVAL=\"${OTEL_METRIC_EXPORT_INTERVAL}\" }VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${CKPT_D2H_CONCURRENT_GB:+ CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.dist_rl.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.dist_rl.examples.common.run_trainer_node.main \
@@ -392,6 +432,7 @@ start_trainer() {
         --checkpoint_save_interval_steps=${CHECKPOINT_SAVE_INTERVAL_STEPS} \
         --checkpoint_max_to_keep=${CHECKPOINT_MAX_TO_KEEP} \
         --checkpoint_root_directory=${CHECKPOINT_ROOT_DIRECTORY} \
+        --run_id=\"${RUN_ID}\" \
         ${extra_flags} \
         ${debug_flag} \
         ${profiler_flags} \
@@ -501,7 +542,7 @@ start_rollout_instance() {
     --ray_head_pre_init_command="${ray_head_pre_init_cmd}" \
     --ray_worker_pre_init_command="${ray_worker_pre_init_cmd}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1}${jax_cache_env} python -m tunix.dist_rl.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} ${OTEL_EXPORTER_OTLP_ENDPOINT:+OTEL_EXPORTER_OTLP_ENDPOINT=\"${OTEL_EXPORTER_OTLP_ENDPOINT}\" }${OTEL_METRIC_EXPORT_INTERVAL:+OTEL_METRIC_EXPORT_INTERVAL=\"${OTEL_METRIC_EXPORT_INTERVAL}\" }SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1}${jax_cache_env} python -m tunix.dist_rl.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.dist_rl.examples.common.run_rollout_node.main \
@@ -549,7 +590,7 @@ start_rollout() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    start|stop|orchestrator|trainer|rollout)
+    start|stop|orchestrator|trainer|rollout|otel|stop-otel)
       COMMAND="$1"
       shift
       ;;
@@ -606,9 +647,9 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      echo "Usage: $0 [start|stop|orchestrator|trainer|rollout] [options]"
+      echo "Usage: $0 [start|stop|orchestrator|trainer|rollout|otel|stop-otel] [options]"
       echo "Options:"
-      echo "  --command <cmd>          Command to run (start, stop, orchestrator, trainer, rollout)"
+      echo "  --command <cmd>          Command to run (start, stop, orchestrator, trainer, rollout, otel, stop-otel)"
       echo "  --namespace <ns>         Kubernetes namespace (default: default)"
       echo "  --queue <name>           Kueue local queue name (optional)"
       echo "  --image <image>          Container image to use"
@@ -628,7 +669,7 @@ if [[ "$DRY_RUN" != "true" ]]; then
   source "${ENTER_KUBE_CONTEXT}"
 fi
 
-if [[ -z "$TUNIX_IMAGE" ]]; then
+if [[ "$COMMAND" != "stop" && "$COMMAND" != "otel" && "$COMMAND" != "stop-otel" && -z "$TUNIX_IMAGE" ]]; then
   echo "Error: no image set. Build one with tunix, maxtext, and" \
        "tpu-inference installed, then pass it via TUNIX_IMAGE=... or" \
        "--image=..."
@@ -652,7 +693,11 @@ elif [[ "$COMMAND" == "trainer" ]]; then
   stop_trainer; start_trainer
 elif [[ "$COMMAND" == "rollout" ]]; then
   stop_rollout; start_rollout
+elif [[ "$COMMAND" == "otel" ]]; then
+  stop_otel; start_otel
+elif [[ "$COMMAND" == "stop-otel" ]]; then
+  stop_otel
 else
-  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout'."
+  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout', 'otel', 'stop-otel'."
   exit 1
 fi

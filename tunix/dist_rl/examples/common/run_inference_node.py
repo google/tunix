@@ -29,6 +29,7 @@ import jax
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from transformers import AutoTokenizer
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.worker import inference_worker as exp_inference_worker
 from tunix.dist_rl.worker import remote_execution
 from tunix.models import automodel
@@ -72,6 +73,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--max_prompt_length", type=int, default=1024)
   parser.add_argument("--max_response_length", type=int, default=1024)
   parser.add_argument("--temperature", type=float, default=1.0)
+  parser.add_argument(
+      "--run_id",
+      type=str,
+      default=os.getenv("RUN_ID", ""),
+      help="Run identifier shared between orchestrator and inference workers.",
+  )
   return parser.parse_args(argv)
 
 
@@ -132,6 +139,15 @@ def main(argv: list[str], context: Any = None) -> None:
 
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
+
+  otel_setup.setup_metrics(
+      default_service_name="tunix-inference",
+      resource_attributes={
+          "tunix.worker_id": args.worker_id,
+          "tunix.role": "inference",
+          "tunix.run_id": args.run_id,
+      },
+  )
 
   if context:
     context.jax.initialize()
