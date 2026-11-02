@@ -86,7 +86,7 @@ def create_worker(a):
     except Exception as exc:  # pylint: disable=broad-exception-caught
       logging.warning("Could not read Orbax _METADATA from %s: %s", path, exc)
   is_ocdbt = bool(
-      getattr(a, "checkpoint_storage_use_ocdbt", False)
+      a.checkpoint_storage_use_ocdbt
       or (path / "manifest.ocdbt").exists()
   )
   if a.use_ocdbt_with_pathways and is_ocdbt:
