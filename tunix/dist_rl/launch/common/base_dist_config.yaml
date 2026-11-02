@@ -240,6 +240,7 @@ agentic_grpo_config:
   sampler_is_threshold: 2.0
   max_concurrency: 256
   off_policy_steps: 0
+  max_version_span: null
   trajectory_group_order: "trajectory_completion"
   reward_mode: "env"
   episode_timeout: 600

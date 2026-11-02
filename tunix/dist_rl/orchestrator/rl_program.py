@@ -25,6 +25,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 import contextlib
 import dataclasses
 import os
+import sys
 import threading
 import time
 from typing import Any
@@ -292,6 +293,36 @@ def _scored_group_batch_idx(group: ScoredGroup) -> int:
   return trajectory_queue_manager.default_batch_idx_fn(group.items[0])
 
 
+def _scored_group_policy_version(group: ScoredGroup) -> int:
+  """Returns the oldest valid item policy version in `group` for EDF ordering."""
+  valid_items = [item for item in group.items if item.is_valid]
+  if valid_items:
+    return min(
+        trajectory_queue_manager.item_policy_version(item)
+        for item in valid_items
+    )
+  return sys.maxsize
+
+
+def _group_latest_policy_version(
+    group: Sequence[datatypes.TrajectoryItem],
+) -> int:
+  """Returns the latest policy version across valid items in `group`."""
+  valid_versions = [
+      trajectory_queue_manager.item_policy_version(it)
+      for it in group
+      if it.is_valid and trajectory_queue_manager.has_policy_version(it)
+  ]
+  if valid_versions:
+    return max(valid_versions)
+  any_versions = [
+      trajectory_queue_manager.item_policy_version(it)
+      for it in group
+      if trajectory_queue_manager.has_policy_version(it)
+  ]
+  return max(any_versions) if any_versions else -1
+
+
 @dataclasses.dataclass(kw_only=True)
 class RLStepResult:
   """Summary of a completed RL training step."""
@@ -360,6 +391,7 @@ class StandardRLProgram(RLProgram):
       generation_args: datatypes.GenerationArgs | None = None,
       batch_size: int | None = None,
       max_staleness: int = 0,
+      max_version_span: int | None = None,
       sync_weights: bool = True,
       precompile_trainer: bool = True,
       metrics_logging_options: MetricsLoggerOptions | None = None,
@@ -375,6 +407,8 @@ class StandardRLProgram(RLProgram):
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
     if max_staleness < 0:
       raise ValueError("max_staleness must be non-negative.")
+    if max_version_span is not None and max_version_span < 0:
+      raise ValueError("max_version_span must be non-negative.")
     self.dataset = dataset
     self.max_steps = max_steps
     self.algo = algo
@@ -466,6 +500,7 @@ class StandardRLProgram(RLProgram):
           batch_config=self.batch_config,
       )
     self.max_staleness = max_staleness
+    self.max_version_span = max_version_span
     self.sync_weights = sync_weights
     self.precompile_trainer = precompile_trainer
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
@@ -510,6 +545,11 @@ class StandardRLProgram(RLProgram):
     )
     self.raw_q: TrajectoryQueueManager
     if self.group_order == GroupOrder.PROMPT_ARRIVAL:
+      if max_version_span is not None:
+        raise ValueError(
+            "max_version_span is only supported with"
+            " GroupOrder.TRAJECTORY_COMPLETION."
+        )
       ordered_q: BatchOrderedGroupQueue[ScoredGroup] = (
           BatchOrderedGroupQueue.create(
               full_batch_size=self.full_batch_size,
@@ -526,7 +566,11 @@ class StandardRLProgram(RLProgram):
           full_batch_size=self.full_batch_size,
       )
     else:
-      self.scored_q = FifoGroupQueue.create()
+      self.scored_q = FifoGroupQueue.create(
+          priority_fn=(
+              _scored_group_policy_version if max_staleness > 0 else None
+          ),
+      )
       self.dispatch_window = dispatch_window.DispatchWindow(
           max_staleness=max_staleness,
           next_batch_fn=lambda: self._step,
@@ -536,6 +580,7 @@ class StandardRLProgram(RLProgram):
       self.raw_q = TrajectoryQueueManager.create(
           num_generations=self.num_generations,
           max_staleness=max_staleness,
+          max_version_span=max_version_span,
           current_policy_version=lambda: self.policy_version,
           on_group_filtered=self.dispatch_window.on_group_filtered,
       )
@@ -805,14 +850,16 @@ class StandardRLProgram(RLProgram):
       src_item.metadata.pop("routed_experts", None)
     metadata.pop("routed_experts", None)
     traj_dict.pop("routed_experts", None)
-    src_policy_version = getattr(src_item, "policy_version", None)
-    if src_policy_version is None:
-      src_policy_version = metadata.get("policy_version", 0)
-    policy_version = int(src_policy_version or 0)
+    policy_version = (
+        trajectory_queue_manager.item_policy_version(src_item)
+        if trajectory_queue_manager.has_policy_version(src_item)
+        else None
+    )
     traj_dict["trajectory_reward"] = reward_val
     traj_dict["status"] = status
     traj_dict["conversation_masks"] = payload.completion_mask
-    traj_dict["policy_version"] = policy_version
+    if policy_version is not None:
+      traj_dict["policy_version"] = policy_version
     return datatypes.TrajectoryItem(
         prompt_id=src_item.prompt_id,
         group_index=src_item.group_index,
@@ -875,18 +922,15 @@ class StandardRLProgram(RLProgram):
         await self.scored_q.put(scored_group)
         del scored_group
         if group:
-          first_meta = getattr(group[0], "metadata", None) or {}
-          first_policy_version = getattr(group[0], "policy_version", None)
-          if first_policy_version is None:
-            first_policy_version = first_meta.get("policy_version", 0)
+          first_meta = group[0].metadata
           logging.info(
               "[pipeline] ARRIVED prompt_id=%s prompt_idx=%s batch_idx=%s"
               " intra_batch_idx=%s policy_version=%d",
-              getattr(group[0], "prompt_id", ""),
+              group[0].prompt_id,
               first_meta.get("prompt_idx"),
               first_meta.get("batch_idx"),
               first_meta.get("intra_batch_idx"),
-              int(first_policy_version or 0),
+              _group_latest_policy_version(group),
           )
         del group
     finally:
@@ -963,18 +1007,17 @@ class StandardRLProgram(RLProgram):
         p_len + c_len
         for p_len, c_len in zip(prompt_lengths, completion_lengths, strict=True)
     ]
-    staleness_list = []
+    staleness_list: list[float] = []
+    version_span_list: list[float] = []
     for item in all_step_items:
-      # Batch ingestion staleness: consumed_policy_version - item.policy_version
-      pol_ver = getattr(item, "policy_version", None)
-      if (
-          pol_ver is None
-          and hasattr(item, "metadata")
-          and isinstance(item.metadata, dict)
-      ):
-        pol_ver = item.metadata.get("policy_version")
-      if pol_ver is not None:
+      if not item.is_valid:
+        continue
+      if trajectory_queue_manager.has_policy_version(item):
+        pol_ver = trajectory_queue_manager.item_policy_version(item)
         staleness_list.append(float(max(0, consumed_policy_version - pol_ver)))
+        version_span_list.append(
+            float(trajectory_queue_manager.item_version_span(item))
+        )
 
     if prompt_lengths:
       self._log_metric(
@@ -1022,6 +1065,17 @@ class StandardRLProgram(RLProgram):
       }
       for tag, val in staleness_stats.items():
         self._log_metric(f"rollout/{tag}", val, log_step)
+    if version_span_list:
+      self._log_metric(
+          "rollout/version_span_mean",
+          float(np.mean(version_span_list)),
+          log_step,
+      )
+      self._log_metric(
+          "rollout/version_span_max",
+          float(np.max(version_span_list)),
+          log_step,
+      )
 
     rollout_facts = [
         step_telemetry.RolloutFacts.of(item) for item in all_step_items
@@ -1376,7 +1430,11 @@ class StandardRLProgram(RLProgram):
           "consumed_policy_version": consumed_policy_version,
           "prompt_id": getattr(item, "prompt_id", ""),
           "group_index": getattr(item, "group_index", 0),
-          "rollout_policy_version": getattr(item, "policy_version", 0),
+          "rollout_policy_version": (
+              trajectory_queue_manager.item_policy_version(item)
+              if trajectory_queue_manager.has_policy_version(item)
+              else 0
+          ),
           "status": status or "UNKNOWN",
           "reward": float(reward) if reward is not None else None,
           "question": metadata.get("question", env_config.get("question", "")),
@@ -1721,16 +1779,9 @@ class StandardRLProgram(RLProgram):
             current_step,
             self.dispatch_window.next_batch,
             consumed_policy_version,
+            [_group_latest_policy_version(g) for g in uncommitted_groups if g],
             [
-                getattr(g[0], "policy_version", 0)
-                for g in uncommitted_groups
-                if g
-            ],
-            [
-                (
-                    getattr(g[0], "prompt_id", ""),
-                    (getattr(g[0], "metadata", None) or {}).get("batch_idx"),
-                )
+                (g[0].prompt_id, g[0].metadata.get("batch_idx"))
                 for g in uncommitted_groups
                 if g
             ],

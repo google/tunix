@@ -496,6 +496,8 @@ def build_program(
     The RL program.
   """
   grpo = hp.config_mapping("agentic_grpo_config")
+  raw_max_span = grpo["max_version_span"]
+  max_version_span = int(raw_max_span) if raw_max_span is not None else None
   return rl_program.StandardRLProgram(
       algo=algo,
       dataset=prompt_items,
@@ -508,6 +510,7 @@ def build_program(
       trajectory_log_dir=_trajectory_log_dir(hp),
       trajectory_store=trajectory_store,
       max_staleness=int(grpo["off_policy_steps"]),
+      max_version_span=max_version_span,
       group_order=rl_program.GroupOrder(str(grpo["trajectory_group_order"])),
       sync_weights=_weight_sync_mode(hp) != weight_sync.WeightSyncMode.NONE,
       precompile_trainer=bool(

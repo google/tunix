@@ -277,6 +277,21 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
       grpo["trajectory_group_order"],
       tuple(order.value for order in trajectory_queue_manager.GroupOrder),
   )
+  max_version_span = grpo["max_version_span"]
+  if max_version_span is not None:
+    if int(max_version_span) < 0:
+      raise ValueError(
+          "agentic_grpo_config.max_version_span must be non-negative, got"
+          f" {max_version_span}."
+      )
+    if (
+        grpo["trajectory_group_order"]
+        == trajectory_queue_manager.GroupOrder.PROMPT_ARRIVAL.value
+    ):
+      raise ValueError(
+          "agentic_grpo_config.max_version_span is only supported with"
+          " trajectory_group_order='trajectory_completion'."
+      )
   _check_choice(
       "weight_sync_config.mode",
       hp.config_mapping("weight_sync_config")["mode"],

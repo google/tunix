@@ -666,10 +666,23 @@ class ProgramTest(absltest.TestCase):
     self.assertEqual(program.num_generations, 4)
     self.assertEqual(program.max_steps, 3)
     self.assertEqual(program.max_staleness, 1)
+    self.assertIsNone(program.max_version_span)
     self.assertEqual(program.group_order, rl_program.GroupOrder.PROMPT_ARRIVAL)
     self.assertTrue(program.sync_weights)
     self.assertFalse(program.precompile_trainer)
     self.assertTrue(program.generation_args.return_routed_experts)
+
+    hp_span = self._program_config(
+        "agentic_grpo_config.off_policy_steps=1",
+        "agentic_grpo_config.max_version_span=2",
+        "agentic_grpo_config.trajectory_group_order=trajectory_completion",
+    )
+    program_span = self._build_program(hp_span, reward_fns=[])
+    self.addCleanup(program_span.close)
+    self.assertEqual(program_span.max_version_span, 2)
+    self.assertEqual(
+        program_span.group_order, rl_program.GroupOrder.TRAJECTORY_COMPLETION
+    )
 
   def test_env_reward_mode_runs_without_reward_functions(self):
     hp = self._program_config()

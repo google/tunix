@@ -235,6 +235,17 @@ weight_sync_config:
         ValueError, "weight_sync_config.mode must be one of"
     ):
       resolve_config.initialize(["weight_sync_config.mode=nccl"])
+    with self.assertRaisesRegex(
+        ValueError, "agentic_grpo_config.max_version_span must be non-negative"
+    ):
+      resolve_config.initialize(["agentic_grpo_config.max_version_span=-1"])
+    with self.assertRaisesRegex(
+        ValueError, "agentic_grpo_config.max_version_span is only supported"
+    ):
+      resolve_config.initialize([
+          "agentic_grpo_config.max_version_span=2",
+          "agentic_grpo_config.trajectory_group_order=prompt_arrival",
+      ])
 
   def test_null_sampler_is_resolves_to_none(self):
     grpo = resolve_config.initialize([]).config["agentic_grpo_config"]

@@ -6483,6 +6483,27 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(row["metadata"], item.metadata)
     self.assertEqual(row["trajectory"], traj)
 
+    multi_turn_item = datatypes.TrajectoryItem(
+        traj_id="traj_multi",
+        prompt_id="prompt_multi",
+        group_index=1,
+        prompt_tokens=[1, 2],
+        completion_tokens=[3, 4],
+        metadata={
+            "policy_version": 1,
+            "policy_versions": [1, 4],
+            "question": "What is 2+2?",
+        },
+        traj={**traj, "policy_version": 1},
+    )
+    program._log_consumed_trajectories(
+        [multi_turn_item],
+        log_step=4,
+        consumed_policy_version=5,
+    )
+    multi_row = mock_traj_logger.log_item_async.call_args[0][0]
+    self.assertEqual(multi_row["rollout_policy_version"], 4)
+
     program.close()
     mock_traj_logger.stop.assert_called_once()
 
@@ -8229,6 +8250,190 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
           assert g3 is not None
           self.assertEqual(g3.items[0].prompt_id, "p2")
           self.assertEqual(g3.rewards, (3.0, 4.0))
+        program.close()
+
+    asyncio.run(_run())
+
+  def test_max_version_span_validation_and_edf_priority_ordering(self):
+    """Verifies max_version_span validation, raw_q span filtering, and scored_q EDF priority ordering."""
+    with self.assertRaisesRegex(ValueError, "max_version_span"):
+      rl_program.StandardRLProgram(
+          algo=self.mock_algo,
+          dataset=["p0"],
+          reward_fns=[],
+          max_version_span=-1,
+      )
+    with self.assertRaisesRegex(
+        ValueError, "max_version_span is only supported"
+    ):
+      rl_program.StandardRLProgram(
+          algo=self.mock_algo,
+          dataset=["p0"],
+          reward_fns=[],
+          max_version_span=2,
+          group_order=rl_program.GroupOrder.PROMPT_ARRIVAL,
+      )
+
+    async def _run():
+      self.mock_algo.num_generations = 2
+      self.mock_algo.algo_config.reward_mode = "env"
+      dummy_payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.array([1, 1], dtype=np.int32),
+          completion_ids=np.array([3, 4], dtype=np.int32),
+          completion_mask=np.array([1, 1], dtype=np.int32),
+          advantages=np.array([1.0, 1.0], dtype=np.float32),
+      )
+      self.mock_algo.create_trainer_payloads.return_value = [
+          dummy_payload,
+          dummy_payload,
+      ]
+      program = rl_program.StandardRLProgram(
+          algo=self.mock_algo,
+          dataset=["p0", "p1", "p2"],
+          reward_fns=[],
+          max_staleness=2,
+          max_version_span=1,
+          group_order=rl_program.GroupOrder.TRAJECTORY_COMPLETION,
+      )
+      program.policy_version = 3
+      try:
+        # 1. raw_q rejects group spanning versions [1, 2, 3] (span 2 > 1).
+        for g_idx in range(2):
+          await program.raw_q.put(
+              datatypes.TrajectoryItem(
+                  prompt_id="p_wide_span",
+                  group_index=g_idx,
+                  start_step=0,
+                  traj=_scored_traj(1.0),
+                  metadata={"policy_version": 1, "policy_versions": [1, 2, 3]},
+              )
+          )
+        self.assertEqual(program.raw_q.ready_groups_count, 0)
+        self.assertEqual(program.raw_q.filtered_groups_count, 1)
+
+        # 2. Build multi-version ScoredGroups via `_critique_group` (exercising
+        # `_build_scored_item` -> `_scored_group_policy_version` -> metrics).
+        def _multi_version_raw_item(
+            prompt_id: str, group_index: int, versions: list[int]
+        ) -> datatypes.TrajectoryItem:
+          return datatypes.TrajectoryItem(
+              prompt_id=prompt_id,
+              group_index=group_index,
+              start_step=0,
+              traj={
+                  **_scored_traj(1.0),
+                  "policy_version": versions[0],
+                  "policy_versions": list(versions),
+                  "conversation_text": [
+                      {"role": "user", "content": prompt_id},
+                      {"role": "assistant", "content": "answer"},
+                  ],
+              },
+              metadata={
+                  "policy_version": versions[0],
+                  "policy_versions": list(versions),
+              },
+          )
+
+        # Both items finished at v=3 (despite starting at v=1 and v=2) -> EDF=3.
+        newer_group = program._critique_group([
+            _multi_version_raw_item("p_newer", 0, [1, 3]),
+            _multi_version_raw_item("p_newer", 1, [2, 3]),
+        ])
+        self.assertEqual(
+            [it.policy_version for it in newer_group.items], [3, 3]
+        )
+
+        # Item 0 finished at v=3 ([1, 3]), Item 1 finished at v=2 ([1, 2])
+        # -> EDF priority key is min(3, 2) = 2 < 3.
+        older_mixed_group = program._critique_group([
+            _multi_version_raw_item("p_older", 0, [1, 3]),
+            _multi_version_raw_item("p_older", 1, [1, 2]),
+        ])
+        self.assertEqual(
+            [it.policy_version for it in older_mixed_group.items], [3, 2]
+        )
+
+        # All-invalid tombstone groups sort behind valid aging groups, and
+        # unversioned tombstones preserve `has_policy_version(...) == False`.
+        def _tombstone_raw(pid: str, g: int) -> datatypes.TrajectoryItem:
+          return datatypes.TrajectoryItem(
+              prompt_id=pid,
+              group_index=g,
+              start_step=0,
+              traj={
+                  **_scored_traj(0.0),
+                  "status": datatypes.TrajectoryStatus.FAILED,
+              },
+              metadata={},
+              is_valid=False,
+          )
+
+        all_tombstone_group = program._critique_group([
+            _tombstone_raw("p_all_failed", 0),
+            _tombstone_raw("p_all_failed", 1),
+        ])
+        self.assertFalse(
+            rl_program.trajectory_queue_manager.has_policy_version(
+                all_tombstone_group.items[0]
+            )
+        )
+        mixed_tombstone_group = program._critique_group([
+            _multi_version_raw_item("p_mixed_tombstone", 0, [1, 2]),
+            _tombstone_raw("p_mixed_tombstone", 1),
+        ])
+        self.assertFalse(
+            rl_program.trajectory_queue_manager.has_policy_version(
+                mixed_tombstone_group.items[1]
+            )
+        )
+        self.assertEqual(
+            rl_program._scored_group_policy_version(mixed_tombstone_group), 2
+        )
+
+        await program.scored_q.put(all_tombstone_group)
+        await program.scored_q.put(newer_group)
+        await program.scored_q.put(older_mixed_group)
+
+        first = await program.scored_q.get()
+        second = await program.scored_q.get()
+        third = await program.scored_q.get()
+        assert first is not None and second is not None and third is not None
+        self.assertEqual(first.items[0].prompt_id, "p_older")
+        self.assertEqual(second.items[0].prompt_id, "p_newer")
+        self.assertEqual(third.items[0].prompt_id, "p_all_failed")
+
+        # 3. Staleness metrics reflect latest sampled version (3->0, 2->1)
+        # rather than initial turn version v_0=1, and log version_span_*.
+        program._collect_and_log_step_metrics(
+            all_step_items=first.items,
+            step_rewards=first.rewards,
+            num_rollouts=2,
+            num_microbatches=1,
+            padding_stats=[],
+            packing_time_sec=0.0,
+            step_time_sec=1.0,
+            consumed_policy_version=3,
+            log_step=0,
+        )
+        logger = program.metrics_logger
+        self.assertAlmostEqual(
+            logger.get_metric("rollout", "staleness_max", "train"), 1.0
+        )
+        self.assertAlmostEqual(
+            logger.get_metric("rollout", "staleness_min", "train"), 0.0
+        )
+        self.assertAlmostEqual(
+            logger.get_metric("rollout", "staleness_mean", "train"), 0.5
+        )
+        self.assertAlmostEqual(
+            logger.get_metric("rollout", "version_span_max", "train"), 2.0
+        )
+        self.assertAlmostEqual(
+            logger.get_metric("rollout", "version_span_mean", "train"), 1.5
+        )
+      finally:
         program.close()
 
     asyncio.run(_run())
