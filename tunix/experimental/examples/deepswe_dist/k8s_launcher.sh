@@ -236,6 +236,7 @@ role = sys.argv[1]
 docs = list(yaml.safe_load_all(sys.stdin.read()))
 sa = os.getenv("SERVICE_ACCOUNT", "").strip()
 prio = os.getenv("PRIORITY_CLASS", "").strip()
+kueue_prio = os.getenv("KUEUE_PRIORITY_CLASS", "").strip()
 cpu_np = os.getenv("CPU_NODEPOOL", "").strip()
 cpu_mem = os.getenv("CPU_MEMORY", "").strip()
 pw_proxy_args = os.getenv("PATHWAYS_PROXY_EXTRA_ARGS", "").split()
@@ -264,6 +265,12 @@ def upsert_env(env_list, name, value):
 for doc in docs:
   if not isinstance(doc, dict):
     continue
+  if kueue_prio:
+    doc_meta = doc.get("metadata") or {}
+    doc["metadata"] = doc_meta
+    doc_labels = doc_meta.get("labels") or {}
+    doc_meta["labels"] = doc_labels
+    doc_labels.setdefault("kueue.x-k8s.io/priority-class", kueue_prio)
   for rjob in doc.get("spec", {}).get("replicatedJobs", []):
     pod_tmpl = rjob.get("template", {}).get("spec", {}).get("template") or {}
     pod_meta = pod_tmpl.get("metadata") or {}
@@ -301,16 +308,32 @@ for doc in docs:
           for k, v in extra_pw_env.items():
             upsert_env(c_env, k, v)
     elif role == "rollout":
-      vols = pod_spec.setdefault("volumes", [])
-      if not any(v.get("name") == "dshm" for v in vols):
-        vols.append({"name": "dshm", "emptyDir": {"medium": "Memory"}})
+      has_user_ctr = any(
+          c.get("name") not in ("pathways-rm", "pathways-proxy", "pathways-worker")
+          for c in pod_spec.get("containers", [])
+      )
+      if has_user_ctr:
+        vols = pod_spec.setdefault("volumes", [])
+        if not any(v.get("name") == "dshm" for v in vols):
+          vols.append({"name": "dshm", "emptyDir": {"medium": "Memory"}})
       for c in pod_spec.get("containers", []):
+        cname = c.get("name", "")
         c_env = c.setdefault("env", [])
         upsert_env(c_env, "ENABLE_MULTI_NUMA", enable_multi_numa)
         upsert_env(c_env, "TPU_RAIDEN_DATA_NICS", raiden_nics)
-        vmounts = c.setdefault("volumeMounts", [])
-        if not any(m.get("name") == "dshm" for m in vmounts):
-          vmounts.append({"name": "dshm", "mountPath": "/dev/shm"})
+        if cname == "pathways-proxy":
+          if pw_proxy_args:
+            c_args = c.setdefault("args", [])
+            for flag in pw_proxy_args:
+              if flag not in c_args:
+                c_args.append(flag)
+        elif cname == "pathways-worker":
+          for k, v in extra_pw_env.items():
+            upsert_env(c_env, k, v)
+        elif cname != "pathways-rm":
+          vmounts = c.setdefault("volumeMounts", [])
+          if not any(m.get("name") == "dshm" for m in vmounts):
+            vmounts.append({"name": "dshm", "mountPath": "/dev/shm"})
 
 print(yaml.safe_dump_all(docs, sort_keys=False))
 ' "$role"
@@ -872,11 +895,396 @@ while [[ $# -gt 0 ]]; do
       ROLLOUT_COUNT="${1#*=}"
       shift
       ;;
+    start|stop|orchestrator|trainer|rollout|eval|stop_eval)
+      COMMAND="$1"
+      shift
+      ;;
     *)
       shift
       ;;
   esac
 done
+
+start_eval() {
+  if [[ -z "${MAXTEXT_CKPT:-}" ]]; then
+    local eval_yaml
+    eval_yaml="$(dirname "${BASH_SOURCE[0]}")/eval_qwen35_gke.yaml"
+    if [[ "$DRY_RUN" == "true" ]]; then
+      cat "$eval_yaml"
+    else
+      kubectl apply -f "$eval_yaml"
+    fi
+    return
+  fi
+
+  local eval_name="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
+  local eval_port="${ROLLOUT_PORT:-20001}"
+  local max_model_len="${VLLM_MAX_MODEL_LEN:-65536}"
+  local max_context_limit="${MAX_CONTEXT_LIMIT:-$((max_model_len - ${MAX_PROMPT_LENGTH:-4096}))}"
+  local output_dir="${EVAL_OUTPUT_DIR:-${TRAJECTORY_LOG_DIR:-eval_results}}"
+  local sandbox_env=""
+  if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
+    local eval_job_prefix="${eval_name}"
+    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+      eval_job_prefix="${eval_name}-0"
+    fi
+    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS=\"${SANDBOX_TOLERATIONS}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ORCHESTRATOR_ID=\"${eval_job_prefix}\" JOB_PREFIX=\"${eval_job_prefix}\" ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"}"
+  elif [[ -n "${IMAGE_REWRITE_PREFIX}" ]]; then
+    sandbox_env="IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\""
+  fi
+
+  local worker_addrs="localhost:${eval_port}"
+  if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+    for ((j=1; j<ROLLOUT_REPLICAS; j++)); do
+      worker_addrs="${worker_addrs} ${eval_name}-${j}-proc-0-0.${eval_name}-${j}:${eval_port}"
+    done
+  fi
+
+  for i in $(seq ${ROLLOUT_START_INDEX:-0} $((ROLLOUT_REPLICAS - 1))); do
+    local replica_id="${eval_name}"
+    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+      replica_id="${eval_name}-${i}"
+    fi
+    local eval_cmd="tunix/experimental/examples/deepswe_dist/eval_launcher.py"
+    local role_arg=""
+    if [[ ${i} -gt 0 ]]; then
+      eval_cmd="tunix/experimental/examples/deepswe_dist/eval_deepswe.py"
+      role_arg="--role=worker"
+    fi
+
+    "${PYTHON_BIN:-$PYTHON}" "$YAML_GENERATOR" \
+      "${YAML_DIR}/${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}" \
+      --jobset_name="${replica_id}" \
+      --namespace="${K8S_NAMESPACE}" \
+      ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+      --tpu_slice="${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}" \
+      --cpu_machine="${CPU_MACHINE}" \
+      ${PATHWAYS_SERVER_IMAGE:+--pathways_server_image="${PATHWAYS_SERVER_IMAGE}"} \
+      ${PATHWAYS_PROXY_IMAGE:+--pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}"} \
+      ${PATHWAYS_PROXY_MEMORY_LIMIT:+--pathways_proxy_memory_limit="${PATHWAYS_PROXY_MEMORY_LIMIT}"} \
+      ${PATHWAYS_PROXY_MEMORY:+--pathways_proxy_memory="${PATHWAYS_PROXY_MEMORY}"} \
+      ${PATHWAYS_RM_MEMORY:+--pathways_rm_memory="${PATHWAYS_RM_MEMORY}"} \
+      ${USER_CONTAINER_MEMORY:+--user_container_memory="${USER_CONTAINER_MEMORY}"} \
+      ${USER_CONTAINER_MEMORY_LIMIT:+--user_container_memory_limit="${USER_CONTAINER_MEMORY_LIMIT}"} \
+      ${PATHWAYS_WORKER_MEMORY:+--pathways_worker_memory="${PATHWAYS_WORKER_MEMORY}"} \
+      --pathways_gcs_scratch_location="${GCS_SCRATCH_LOCATION}" \
+      --worker_container_image="${TUNIX_IMAGE}" \
+      --worker_container_port="${eval_port}" \
+      --worker_startup_command=" \
+        PYTHONUNBUFFERED=1 \
+        TUNIX_IS_INTERNAL_ENV=false \
+        VLLM_TPU_USING_PATHWAYS=1 \
+        ${sandbox_env} \
+        ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
+        ${BOOTSTRAP_CMD:-} \
+        ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
+        ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
+        ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE} \
+        PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS:-${PREFUSE_MOE_WEIGHTS}} \
+        ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS:-${PREFUSE_MOE_WEIGHTS}} \
+        FLOAT32_GATE_LOGITS=${FLOAT32_GATE_LOGITS:-true} \
+        FLOAT32_LOGITS=${FLOAT32_LOGITS:-true} \
+        ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING} \
+        ROLLOUT_FREE_KV_CACHE=${ROLLOUT_FREE_KV_CACHE:-} \
+        VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-16} \
+        VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION:-0.9} \
+        ${VLLM_ASYNC_SCHEDULING:+VLLM_ASYNC_SCHEDULING=${VLLM_ASYNC_SCHEDULING}} \
+        ${VLLM_ENABLE_EXPERT_PARALLEL:+VLLM_ENABLE_EXPERT_PARALLEL=${VLLM_ENABLE_EXPERT_PARALLEL}} \
+        ${VLLM_LANGUAGE_MODEL_ONLY:+VLLM_LANGUAGE_MODEL_ONLY=${VLLM_LANGUAGE_MODEL_ONLY}} \
+        ${VLLM_ENABLE_CHUNKED_PREFILL:+VLLM_ENABLE_CHUNKED_PREFILL=${VLLM_ENABLE_CHUNKED_PREFILL}} \
+        ${VLLM_KV_CACHE_DTYPE:+VLLM_KV_CACHE_DTYPE=${VLLM_KV_CACHE_DTYPE}} \
+        ${VLLM_BLOCK_SIZE:+VLLM_BLOCK_SIZE=${VLLM_BLOCK_SIZE}} \
+        ${VLLM_MAMBA_CACHE_MODE:+VLLM_MAMBA_CACHE_MODE=${VLLM_MAMBA_CACHE_MODE}} \
+        ${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:+VLLM_PREFIX_CACHE_RETENTION_INTERVAL=${VLLM_PREFIX_CACHE_RETENTION_INTERVAL}} \
+        ${VLLM_REASONING_PARSER:+VLLM_REASONING_PARSER=${VLLM_REASONING_PARSER}} \
+        ${VLLM_ADDITIONAL_CONFIG:+VLLM_ADDITIONAL_CONFIG='${VLLM_ADDITIONAL_CONFIG}'} \
+        ${VLLM_LIMIT_MM_PER_PROMPT:+VLLM_LIMIT_MM_PER_PROMPT='${VLLM_LIMIT_MM_PER_PROMPT}'} \
+        ${NUM_PRECOMPILE_WORKERS:+NUM_PRECOMPILE_WORKERS=${NUM_PRECOMPILE_WORKERS}} \
+        ${NEW_MODEL_DESIGN:+NEW_MODEL_DESIGN=${NEW_MODEL_DESIGN}} \
+        ${ATTN_BUCKETIZED_NUM_REQS:+ATTN_BUCKETIZED_NUM_REQS=${ATTN_BUCKETIZED_NUM_REQS}} \
+        ${ATTN_CUSTOM_NUM_REQS_BUCKETS:+ATTN_CUSTOM_NUM_REQS_BUCKETS=${ATTN_CUSTOM_NUM_REQS_BUCKETS}} \
+        ${ONEHOT_MOE_PERMUTE_THRESHOLD:+ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD}} \
+        ${VLLM_MOE_CHUNK_SIZE:+VLLM_MOE_CHUNK_SIZE=${VLLM_MOE_CHUNK_SIZE}} \
+        ${SLICE_ROPE_CACHE:+SLICE_ROPE_CACHE=${SLICE_ROPE_CACHE}} \
+        ${DP_SCHED_BATCH_PREFILL:+DP_SCHED_BATCH_PREFILL=${DP_SCHED_BATCH_PREFILL}} \
+        ${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:+VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS}} \
+        ${LIBTPU_INIT_ARGS:+LIBTPU_INIT_ARGS=\"${LIBTPU_INIT_ARGS}\"} \
+        ${VLLM_ENABLE_V1_MULTIPROCESSING:+VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}} \
+        ${VLLM_LOGGING_LEVEL:+VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL}} \
+        ${VLLM_DATA_PARALLEL_SIZE:+VLLM_DATA_PARALLEL_SIZE=${VLLM_DATA_PARALLEL_SIZE}} \
+        ${ROLLOUT_ENV_FLAGS:-} \
+        ${ROLLOUT_EXTRA_ENV:-} \
+        SKIP_JAX_PRECOMPILE=1 python3 -u ${eval_cmd} \
+          ${role_arg} \
+          --worker_id=${replica_id} \
+          --worker_addresses ${worker_addrs} \
+          --port=${eval_port} \
+          --model_id=${MODEL_ID} \
+          --tokenizer_path=${TOKENIZER_PATH} \
+          --model_absolute_path=${MAXTEXT_CKPT} \
+          --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
+          ${SCAN_LAYERS:+--scan_layers=${SCAN_LAYERS}} \
+          --mesh_fsdp=${ROLLOUT_MESH_FSDP:-1} \
+          --mesh_dp=${VLLM_DATA_PARALLEL_SIZE:-1} \
+          --mesh_tp=${ROLLOUT_MESH_TP:-1} \
+          --mesh_expert=${ROLLOUT_MESH_EXPERT:-1} \
+          --vllm_utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.9} \
+          --max_model_len=${max_model_len} \
+          --max_context_limit=${max_context_limit} \
+          --max_response_length=${MAX_RESPONSE_LENGTH} \
+          --max_steps=${MAX_TURNS} \
+          --max_concurrent=${MAX_CONCURRENCY} \
+          --batch_size=${BATCH_SIZE:-16} \
+          --vllm_max_num_seqs=${VLLM_MAX_NUM_SEQS:-16} \
+          --vllm_max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS:-2048} \
+          --timeout=${EPISODE_TIMEOUT_SECS:-1800} \
+          --reward_timeout=${REWARD_TIMEOUT_SECS} \
+          --step_timeout=${STEP_TIMEOUT_SECS} \
+          --temperature=${TEMPERATURE} \
+          --top_p=${TOP_P} \
+          --top_k=${TOP_K} \
+          --seed=${SEED} \
+          --enable_thinking=${ENABLE_THINKING:-false} \
+          --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
+          --checkpoint_storage_use_ocdbt=${CHECKPOINT_STORAGE_USE_OCDBT:-true} \
+          --checkpoint_storage_use_zarr3=${CHECKPOINT_STORAGE_USE_ZARR3:-false} \
+          --dataset_name=${DATASET_NAME} \
+          --dataset_split=${DATASET_SPLIT} \
+          ${DATASET_PATH:+--dataset_path=${DATASET_PATH}} \
+          ${TASKS_LIMIT:+--tasks_limit=${TASKS_LIMIT}} \
+          --num_rollouts_per_instance=${NUM_GENERATIONS} \
+          --scaffold=${SCAFFOLD} \
+          --use_agent_sandbox=${USE_AGENT_SANDBOX} \
+          --max_warmpool_size=${MAX_WARMPOOL_REPLICAS} \
+          --output_dir=${output_dir} \
+      " \
+      | enrich_manifest rollout | apply_manifest
+  done
+}
+
+stop_eval() {
+  local eval_name="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
+  local eval_ns="${EVAL_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
+  local eval_job_prefix="${eval_name}"
+  if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+    eval_job_prefix="${eval_name}-0"
+  fi
+  local sandbox_run_id
+  sandbox_run_id=$("${PYTHON_BIN:-$PYTHON}" -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].strip().encode("utf-8")).hexdigest()[:8])' "${eval_job_prefix}")
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "[DRY RUN] Would delete jobset ${eval_name} in namespace ${eval_ns}"
+    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+      echo "kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((ROLLOUT_REPLICAS - 1))) -n ${eval_ns}"
+      for ((i=0; i<ROLLOUT_REPLICAS; i++)); do
+        echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${eval_name}-${i} -n ${eval_ns}"
+      done
+    fi
+    if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
+      for _sel in "agent-sandbox-rl-run=${sandbox_run_id}" "app.kubernetes.io/created-by=${eval_job_prefix}"; do
+        echo "kubectl delete sandboxclaims -n ${SANDBOX_NAMESPACE} -l ${_sel} --ignore-not-found=true"
+        echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l ${_sel} --ignore-not-found=true"
+        echo "kubectl delete sandboxes -n ${SANDBOX_NAMESPACE} -l ${_sel} --ignore-not-found=true"
+        echo "kubectl delete sandboxtemplates -n ${SANDBOX_NAMESPACE} -l ${_sel} --ignore-not-found=true"
+        echo "kubectl delete pods -n ${SANDBOX_NAMESPACE} -l ${_sel} --force --grace-period=0 --ignore-not-found=true"
+      done
+    fi
+  else
+    kubectl delete jobset "${eval_name}" -n "${eval_ns}" --ignore-not-found=true || true
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${eval_name}" -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
+    local _wait_js_sel="jobset.sigs.k8s.io/jobset-name=${eval_name}"
+    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+      kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((ROLLOUT_REPLICAS - 1))) -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
+      for ((i=0; i<ROLLOUT_REPLICAS; i++)); do
+        kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${eval_name}-${i}" -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
+      done
+      _wait_js_sel="jobset.sigs.k8s.io/jobset-name in (${eval_name},$(seq -s ',' -f "${eval_name}-%g" 0 $((ROLLOUT_REPLICAS - 1))))"
+    fi
+    # Wait for JobSet pods to finish terminating first so dying workers cannot create late SandboxClaims.
+    for ((_w=0; _w<90; _w++)); do
+      local _rem_pods
+      _rem_pods=$(kubectl get pods -n "${eval_ns}" -l "${_wait_js_sel}" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+      if [[ "${_rem_pods:-0}" == "0" ]]; then
+        break
+      fi
+      if (( _w % 5 == 0 )); then
+        echo "Waiting for ${_rem_pods} ${eval_name} pod(s) to terminate in ${eval_ns}..."
+      fi
+      sleep 2
+    done
+    if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
+      echo "Cleaning up sandboxes and warmpools for ${eval_job_prefix} (run_id=${sandbox_run_id}) in ${SANDBOX_NAMESPACE}..."
+      "${PYTHON_BIN:-$PYTHON}" - \
+        "${SANDBOX_NAMESPACE}" \
+        "${sandbox_run_id}" \
+        "${eval_job_prefix}" \
+        "${SERVICE_ACCOUNT:-xpk-sa}" \
+        "${PRIORITY_CLASS:-medium}" \
+        "${SANDBOX_NODE_SELECTOR_KEY:-cloud.google.com/gke-nodepool}" \
+        "${SANDBOX_NODE_SELECTOR_VAL:-sandbox-cpu-pool}" \
+        "${SANDBOX_REAPER_IMAGE:-${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/sanbao/trellis:latest}}" \
+        <<'PYEOF' || true
+import json, subprocess, sys, time
+
+ns, run_id, job_prefix, sa_name, prio_class, ns_key, ns_val, reaper_img = sys.argv[1:9]
+selectors = [f"agent-sandbox-rl-run={run_id}", f"app.kubernetes.io/created-by={job_prefix}"]
+
+def count_remaining():
+  counts = {}
+  for kind in ("sandboxclaims", "sandboxwarmpools", "sandboxes", "sandboxtemplates", "pods"):
+    seen = set()
+    for sel in selectors:
+      q_sel = f"{sel},app!=agent-sandbox-rl-reaper" if kind == "pods" else sel
+      res = subprocess.run(
+          ["kubectl", "get", kind, "-n", ns, "-l", q_sel, "-o", "jsonpath={.items[*].metadata.name}"],
+          capture_output=True, text=True, check=False,
+      )
+      if res.returncode == 0 and res.stdout.strip():
+        seen.update(res.stdout.split())
+    counts[kind] = len(seen)
+  return counts
+
+initial = count_remaining()
+if sum(initial.values()) == 0:
+  print(f"No leftover sandbox resources found for run_id={run_id} (job_prefix={job_prefix}).")
+  sys.exit(0)
+
+print(f"Found sandbox resources for run_id={run_id}: {initial}; launching in-cluster reaper pod as {sa_name}...")
+reaper_pod = f"reaper-{run_id}-{int(time.time())}"
+inner_script = r"""
+import json, subprocess, sys
+
+ns, run_id, job_prefix = sys.argv[1], sys.argv[2], sys.argv[3]
+selectors = [f"agent-sandbox-rl-run={run_id}", f"app.kubernetes.io/created-by={job_prefix}"]
+pool_selectors = set()
+claim_sandboxes = set()
+
+def kget(kind, sel):
+  res = subprocess.run(
+      ["kubectl", "get", kind, "-n", ns, "-l", sel, "-o", "json"],
+      capture_output=True, text=True, check=False,
+  )
+  if res.returncode != 0 or not res.stdout.strip():
+    return []
+  try:
+    return json.loads(res.stdout).get("items", [])
+  except Exception:
+    return []
+
+for sel in selectors:
+  for wp in kget("sandboxwarmpools", sel):
+    s = (wp.get("status") or {}).get("selector")
+    if isinstance(s, str) and s.strip():
+      pool_selectors.add(s.strip())
+  for cl in kget("sandboxclaims", sel):
+    sb_name = ((cl.get("status") or {}).get("sandbox") or {}).get("name")
+    if isinstance(sb_name, str) and sb_name.strip():
+      claim_sandboxes.add(sb_name.strip())
+
+sb_pod_selectors = set(pool_selectors)
+for sb_name in sorted(claim_sandboxes):
+  res = subprocess.run(
+      ["kubectl", "get", "sandbox", sb_name, "-n", ns, "-o", "json"],
+      capture_output=True, text=True, check=False,
+  )
+  if res.returncode == 0 and res.stdout.strip():
+    try:
+      ls = (json.loads(res.stdout).get("status") or {}).get("labelSelector")
+      if isinstance(ls, str) and ls.strip():
+        sb_pod_selectors.add(ls.strip())
+    except Exception:
+      pass
+
+subprocess.run(
+    [sys.executable, "-m", "agent_sandbox_rl.reaper", "--run-id", run_id, "--namespace", ns],
+    check=False,
+)
+
+def kdel(args):
+  r = subprocess.run(["kubectl", "delete", *args], capture_output=True, text=True, check=False)
+  if r.returncode != 0 and r.stderr.strip():
+    print(f"kubectl delete {' '.join(args)} stderr: {r.stderr.strip()}", file=sys.stderr)
+
+for kind in ("sandboxclaims", "sandboxwarmpools"):
+  for sel in selectors:
+    kdel([kind, "-n", ns, "-l", sel, "--ignore-not-found=true"])
+if claim_sandboxes:
+  kdel(["sandbox", *sorted(claim_sandboxes), "-n", ns, "--ignore-not-found=true"])
+for p_sel in sorted(pool_selectors):
+  kdel(["sandboxes", "-n", ns, "-l", p_sel, "--ignore-not-found=true"])
+for sel in selectors:
+  for kind in ("sandboxes", "sandboxtemplates"):
+    kdel([kind, "-n", ns, "-l", sel, "--ignore-not-found=true"])
+for pod_sel in sorted(sb_pod_selectors | set(selectors)):
+  kdel(["pods", "-n", ns, "-l", f"{pod_sel},app!=agent-sandbox-rl-reaper", "--force", "--grace-period=0", "--ignore-not-found=true"])
+print(f"In-cluster reaper finished for run_id={run_id}.")
+"""
+
+pod_manifest = {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": {
+        "name": reaper_pod,
+        "namespace": ns,
+        "labels": {
+            "app": "agent-sandbox-rl-reaper",
+            "reaper-target-run": run_id,
+        },
+    },
+    "spec": {
+        "serviceAccountName": sa_name,
+        "priorityClassName": prio_class,
+        "restartPolicy": "Never",
+        "containers": [{
+            "name": "reaper",
+            "image": reaper_img,
+            "imagePullPolicy": "IfNotPresent",
+            "command": ["/opt/venv/bin/python3", "-c", inner_script, ns, run_id, job_prefix],
+            "resources": {
+                "requests": {"cpu": "1", "memory": "2Gi"},
+                "limits": {"cpu": "2", "memory": "4Gi"},
+            },
+        }],
+    },
+}
+if ns_key and ns_val:
+  pod_manifest["spec"]["nodeSelector"] = {ns_key: ns_val}
+
+try:
+  apply_res = subprocess.run(
+      ["kubectl", "apply", "-f", "-"],
+      input=json.dumps(pod_manifest),
+      capture_output=True, text=True, check=False,
+  )
+  if apply_res.returncode != 0:
+    print(f"Warning: failed to create in-cluster reaper pod ({apply_res.stderr.strip()}); attempting host cleanup.", file=sys.stderr)
+    subprocess.run([sys.executable, "-c", inner_script, ns, run_id, job_prefix], check=False)
+  else:
+    for _ in range(150):
+      st = subprocess.run(
+          ["kubectl", "get", "pod", reaper_pod, "-n", ns, "-o", "jsonpath={.status.phase}"],
+          capture_output=True, text=True, check=False,
+      )
+      phase = st.stdout.strip()
+      if phase in ("Succeeded", "Failed"):
+        break
+      time.sleep(2)
+    logs = subprocess.run(["kubectl", "logs", reaper_pod, "-n", ns], capture_output=True, text=True, check=False)
+    if logs.stdout.strip():
+      print(logs.stdout.strip())
+    if logs.stderr.strip():
+      print(logs.stderr.strip(), file=sys.stderr)
+finally:
+  subprocess.run(
+      ["kubectl", "delete", "pod", reaper_pod, "-n", ns, "--force", "--grace-period=0", "--ignore-not-found=true"],
+      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+  )
+
+final_counts = count_remaining()
+print(f"Post-reap sandbox resource counts for run_id={run_id}: {final_counts}")
+PYEOF
+    fi
+  fi
+}
 
 if [[ "$DRY_RUN" != "true" ]]; then
   if [[ -z "${KUBECONFIG:-}" && -f "$HOME/.kube/config" ]]; then
@@ -892,7 +1300,7 @@ if [[ "$DRY_RUN" != "true" ]]; then
   kubectl config set-context --current --namespace="${K8S_NAMESPACE}" >/dev/null 2>&1 || true
 fi
 
-if [[ -z "$TUNIX_IMAGE" ]]; then
+if [[ "$COMMAND" != "eval" && "$COMMAND" != "stop_eval" && -z "$TUNIX_IMAGE" ]]; then
   echo "Error: no image set. Build one with tunix, maxtext, and" \
        "tpu-inference installed, then pass it via TUNIX_IMAGE=... or" \
        "--image=..."
@@ -920,7 +1328,12 @@ elif [[ "$COMMAND" == "trainer" ]]; then
   stop_trainer; start_trainer
 elif [[ "$COMMAND" == "rollout" ]]; then
   stop_rollout; start_rollout
+elif [[ "$COMMAND" == "eval" ]]; then
+  stop_eval
+  start_eval
+elif [[ "$COMMAND" == "stop_eval" ]]; then
+  stop_eval
 else
-  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout'."
+  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout', 'eval', 'stop_eval'."
   exit 1
 fi
