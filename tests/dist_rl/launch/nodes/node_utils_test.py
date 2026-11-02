@@ -113,6 +113,7 @@ class WorkerIdAndPortTest(absltest.TestCase):
   def test_k8s_target_uses_role_id(self):
     hp = resolve_config.initialize([
         "cluster_config.target=k8s",
+        "agentic_grpo_config.beta=0.0",
         "cluster_config.k8s.trainer_id=trainer-1",
         "cluster_config.k8s.rollout_id=roll-1",
         "cluster_config.k8s.inference_id=inf-1",

@@ -180,6 +180,7 @@ weight_sync_config:
     k8s = resolve_config.initialize([
         "cluster_config.target=k8s",
         "cluster_config.artifact_root=artifacts/my_task",
+        "agentic_grpo_config.beta=0.0",
     ])
     self.assertEqual(
         k8s.config["cluster_config"]["artifact_root"], "artifacts/my_task"
@@ -214,6 +215,30 @@ weight_sync_config:
     # GRPO needs at least two generations per prompt.
     with self.assertRaisesRegex(ValueError, "num_generations must be > 1"):
       resolve_config.initialize(["agentic_grpo_config.num_generations=1"])
+
+  def test_k8s_target_rejects_reference_worker(self):
+    # The default beta (0.04) enables the reference worker, which k8s.sh does
+    # not deploy.
+    with self.assertRaisesRegex(
+        ValueError, "does not deploy a reference inference worker"
+    ):
+      resolve_config.initialize(["cluster_config.target=k8s"])
+    with self.assertRaisesRegex(ValueError, "run_inference_node is true"):
+      resolve_config.initialize([
+          "cluster_config.target=k8s",
+          "agentic_grpo_config.beta=0.0",
+          "cluster_config.run_inference_node=true",
+      ])
+    hp = resolve_config.initialize(
+        ["cluster_config.target=k8s", "agentic_grpo_config.beta=0.0"]
+    )
+    self.assertFalse(hp.config["cluster_config"]["run_inference_node"])
+    # A reference worker started separately joins through discovery.
+    hp = resolve_config.initialize([
+        "cluster_config.target=k8s",
+        "cluster_config.run_inference_node=false",
+    ])
+    self.assertEqual(hp.config["agentic_grpo_config"]["beta"], 0.04)
 
   def test_orchestrator_choices_fail_loud(self):
     hp = resolve_config.initialize([

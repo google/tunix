@@ -189,6 +189,7 @@ class LaunchScriptsTest(absltest.TestCase):
         "cluster_config.run_id=run_k8s_test",
         "weight_sync_config.mode=raiden",
         "cluster_config.k8s.rollout.replicas=2",
+        "agentic_grpo_config.beta=0.0",
     ])
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertIn("kubectl delete jobset testuser-orch -n default", res.stdout)
@@ -218,9 +219,24 @@ class LaunchScriptsTest(absltest.TestCase):
       self.assertNotEmpty(docs)
 
   def test_k8s_requires_tunix_image(self):
-    res = self._run_launch(["--dry-run", "cluster_config.target=k8s"])
+    res = self._run_launch([
+        "--dry-run",
+        "cluster_config.target=k8s",
+        "agentic_grpo_config.beta=0.0",
+    ])
     self.assertNotEqual(res.returncode, 0)
     self.assertIn("cluster_config.k8s.tunix_image is empty", res.stderr)
+
+  def test_k8s_rejects_reference_worker(self):
+    res = self._run_launch([
+        "--dry-run",
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=test-image",
+        "agentic_grpo_config.beta=0.04",
+    ])
+    self.assertNotEqual(res.returncode, 0)
+    self.assertIn("does not deploy a reference inference worker", res.stderr)
+    self.assertNotIn("apiVersion:", res.stdout)
 
   def test_k8s_stop_command_only_deletes_resources(self):
     res = self._run_launch([
@@ -228,6 +244,7 @@ class LaunchScriptsTest(absltest.TestCase):
         "--dry-run",
         "cluster_config.target=k8s",
         "cluster_config.k8s.tunix_image=test-image",
+        "agentic_grpo_config.beta=0.0",
     ])
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertIn("kubectl delete jobset testuser-orch -n default", res.stdout)

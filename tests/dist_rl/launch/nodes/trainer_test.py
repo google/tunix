@@ -94,6 +94,7 @@ class TrainerMainTest(absltest.TestCase):
     trainer.main(
         [
             "cluster_config.target=k8s",
+            "agentic_grpo_config.beta=0.0",
             "cluster_config.k8s.trainer_id=trainer-1",
         ],
         context=self.mock_context,
