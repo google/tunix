@@ -31,8 +31,8 @@ class LineageEvent:
 
   Attributes:
     component: System component that generated the event (e.g.,
-      "engine.dispatch", "worker.rollout", "orchestrator.assembler",
-      "worker.trainer").
+      "engine.dispatch", "worker.received", "worker.rollout",
+      "orchestrator.assembler", "worker.trainer").
     operation: Operation name (e.g., "rollout", "generate", "pack",
       "fwd_bwd", "train_step").
     timestamp_s: Unix timestamp in seconds when the event was recorded.

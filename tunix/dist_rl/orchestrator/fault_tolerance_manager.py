@@ -14,8 +14,12 @@
 
 """Control-plane fault-tolerance policy for distributed RL workers."""
 
+import collections
+import threading
+
 from absl import logging
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.orchestrator import lifecycle
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import task_session
@@ -24,8 +28,9 @@ from tunix.dist_rl.worker import task_session
 class FaultToleranceManager:
   """Applies `FaultToleranceConfig` to worker eviction and task retries.
 
-  Derives the `TaskSession` fault-tolerance config and evicts unreachable worker
-  handles from `WorkerRegistry`. Holds no task ledger; worker bring-up,
+  Derives the `TaskSession` fault-tolerance config, evicts unreachable worker
+  handles from `WorkerRegistry`, and aggregates `ft/*` fleet gauges and
+  cumulative fault-tolerance counters. Holds no task ledger; worker bring-up,
   admission, and shutdown belong to `LifecycleDriver`.
   """
 
@@ -33,22 +38,90 @@ class FaultToleranceManager:
       self,
       registry: worker_registry.WorkerRegistry,
       config: datatypes.FaultToleranceConfig | None = None,
+      *,
+      lifecycle_driver: lifecycle.LifecycleDriver | None = None,
   ):
     """Initializes the manager.
 
     Args:
       registry: Registry that unreachable worker handles are evicted from.
       config: Fault-tolerance config; `None` uses the defaults (disabled).
+      lifecycle_driver: Optional lifecycle driver exposing late rollout worker
+        bring-up failure counters.
     """
     self._registry = registry
     self._config = (
         config if config is not None else datatypes.FaultToleranceConfig()
     )
+    self._lifecycle_driver = lifecycle_driver
+    self._lock = threading.Lock()
+    self._task_session_evictions_total = 0
+    self._promoted_total = 0
 
   @property
   def config(self) -> datatypes.FaultToleranceConfig:
     """Returns the active `FaultToleranceConfig`."""
     return self._config
+
+  def record_rejoin_promoted(self) -> None:
+    """Counts a worker promoted from PENDING_WEIGHT_SYNC to ACTIVE."""
+    with self._lock:
+      self._promoted_total += 1
+
+  def metrics(
+      self,
+      *,
+      rollout_session: task_session.TaskSession | None = None,
+  ) -> dict[str, float]:
+    """Returns rollout fleet gauges and cumulative fault-tolerance counters.
+
+    `ft/fleet/*` counts the rollout workers in each `AdmissionStatus` now. Every
+    other metric is a running total since the manager was created; take the
+    per-step difference to see what happened during one step.
+
+    `ft/rollout/task_unrecovered_total` counts tasks lost to worker/transport
+    faults (retries exhausted, or no surviving worker), not application errors
+    returned by a worker (covered by `rollout/status/*_frac` or run abort). A
+    non-zero value means the run is aborting because `poll_rollouts()` re-raises
+    the terminal error, so in live per-step W&B logs it normally reads 0 and
+    serves mainly as a post-mortem / log signal.
+
+    Args:
+      rollout_session: Optional rollout `TaskSession` supplying cumulative task
+        retry and unrecovered task counters.
+    """
+    statuses = collections.Counter(
+        status
+        for _, _, status in self._registry.targets_with_status(
+            datatypes.Role.ROLLOUT, statuses=None
+        )
+    )
+    with self._lock:
+      task_session_evictions = self._task_session_evictions_total
+      promoted = self._promoted_total
+    return {
+        **{
+            f"ft/fleet/rollout_{status.value}": float(statuses[status])
+            for status in worker_registry.AdmissionStatus
+        },
+        "ft/evictions_total/task_session": float(task_session_evictions),
+        "ft/rollout/task_retries_total": (
+            float(rollout_session.task_retries_total)
+            if rollout_session is not None
+            else 0.0
+        ),
+        "ft/rollout/task_unrecovered_total": (
+            float(rollout_session.task_unrecovered_total)
+            if rollout_session is not None
+            else 0.0
+        ),
+        "ft/rejoin/promoted_total": float(promoted),
+        "ft/rejoin/bring_up_failures_total": (
+            float(self._lifecycle_driver.bring_up_failures_total)
+            if self._lifecycle_driver is not None
+            else 0.0
+        ),
+    }
 
   def task_session_fault_tolerance_config(
       self,
@@ -80,11 +153,14 @@ class FaultToleranceManager:
       handle: remote_execution.ActorHandle,
       exc: Exception,
   ) -> None:
-    """Evicts an unreachable worker handle from the control-plane registry."""
+    """Evicts a worker handle that `TaskSession` found unreachable."""
     worker_id = self._registry.unregister_handle(handle)
-    if worker_id is not None:
-      logging.warning(
-          "Evicted unreachable worker %r from WorkerRegistry: %s",
-          worker_id,
-          exc,
-      )
+    if worker_id is None:
+      return
+    with self._lock:
+      self._task_session_evictions_total += 1
+    logging.warning(
+        "Evicted failed worker %r from WorkerRegistry (task_session): %s",
+        worker_id,
+        exc,
+    )

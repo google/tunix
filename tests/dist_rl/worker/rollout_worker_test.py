@@ -89,21 +89,63 @@ class RolloutWorkerTest(absltest.TestCase):
       self.assertIn("lineage", resp.metadata)
       resp_ctx = resp.metadata["lineage"]
       self.assertIs(resp_ctx, ctx)
-      self.assertLen(resp_ctx.events, 2)
+      self.assertLen(resp_ctx.events, 3)
 
       dispatch_event = resp_ctx.events[0]
       self.assertEqual(dispatch_event.component, "engine.dispatch")
       self.assertEqual(dispatch_event.operation, "rollout")
 
-      worker_event = resp_ctx.events[1]
+      received_event = resp_ctx.events[1]
+      self.assertEqual(received_event.component, "worker.received")
+      self.assertEqual(received_event.operation, "generate")
+      self.assertEqual(
+          received_event.attributes.get("worker_id"), "rollout_worker_42"
+      )
+      self.assertNotIn("execution_time_s", received_event.attributes)
+      self.assertGreaterEqual(
+          received_event.timestamp_s, dispatch_event.timestamp_s
+      )
+
+      worker_event = resp_ctx.events[2]
       self.assertEqual(worker_event.component, "worker.rollout")
       self.assertEqual(worker_event.operation, "generate")
       self.assertEqual(
           worker_event.attributes.get("worker_id"), "rollout_worker_42"
       )
       self.assertGreaterEqual(
+          worker_event.timestamp_s, received_event.timestamp_s
+      )
+      self.assertGreaterEqual(
           worker_event.attributes.get("execution_time_s", -1.0), 0.0
       )
+
+      # Batched `generate([req_1, req_2])` also stamps `worker.received` and
+      # `worker.rollout` on each request's lineage context.
+      batch_ctxs = [
+          lineage.LineageContext(tracking_id=f"traj_batch_{idx}")
+          for idx in range(2)
+      ]
+      for b_ctx in batch_ctxs:
+        b_ctx.add_event(component="engine.dispatch", operation="rollout")
+      batch_reqs = [
+          datatypes.RolloutRequest(
+              request_id=f"req_batch_{idx}",
+              prompt=f"Prompt {idx}",
+              prompt_id=f"prompt_batch_{idx}",
+              group_index=idx,
+              generation_kwargs={"max_generation_steps": 64},
+              metadata={"lineage": batch_ctxs[idx]},
+          )
+          for idx in range(2)
+      ]
+      batch_resps = await self.worker.generate(requests=batch_reqs)
+      self.assertLen(batch_resps, 2)
+      for idx, b_resp in enumerate(batch_resps):
+        self.assertEqual(
+            [e.component for e in batch_ctxs[idx].events],
+            ["engine.dispatch", "worker.received", "worker.rollout"],
+        )
+        self.assertIs(b_resp.metadata["lineage"], batch_ctxs[idx])
 
     asyncio.run(_run())
 

@@ -4795,6 +4795,37 @@ class RLProgramTest(absltest.TestCase):
       )
     program.close()
 
+  def test_collect_and_log_step_metrics_logs_fault_tolerance_metrics(self):
+    program = self._create_program()
+    self.addCleanup(program.close)
+    program.engine = mock.MagicMock(
+        spec=distributed_rl_engine.DistributedRLEngine
+    )
+    program.engine.fault_tolerance_metrics.return_value = {
+        "ft/fleet/rollout_active": 3.0,
+        "ft/evictions_total/task_session": 1.0,
+    }
+
+    program._collect_and_log_step_metrics(
+        all_step_items=[],
+        step_rewards=[],
+        num_rollouts=0,
+        num_microbatches=0,
+        padding_stats=[],
+        packing_time_sec=0.0,
+        step_time_sec=1.0,
+        consumed_policy_version=0,
+        log_step=0,
+    )
+
+    logger = program.metrics_logger
+    self.assertEqual(
+        logger.get_metric("ft", "fleet/rollout_active", "train"), 3.0
+    )
+    self.assertEqual(
+        logger.get_metric("ft", "evictions_total/task_session", "train"), 1.0
+    )
+
   def test_run_logs_rollout_health_and_slowest_rollouts(self):
     async def _run():
       conversation = [

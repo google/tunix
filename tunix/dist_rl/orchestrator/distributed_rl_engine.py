@@ -757,6 +757,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           expected_handle=r.handle,
           expected_status=worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
       ):
+        self._fault_tolerance_manager.record_rejoin_promoted()
         logging.info(
             "Promoted synced rollout worker %r to %s.",
             r.worker_id,
@@ -768,6 +769,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         self._policy_version,
     )
     return result.policy_version
+
+  def fault_tolerance_metrics(self) -> dict[str, float]:
+    """Returns rollout fleet gauges and cumulative fault-tolerance counters."""
+    return self._fault_tolerance_manager.metrics(
+        rollout_session=self._rollout_session
+    )
 
   async def save_checkpoint(
       self,

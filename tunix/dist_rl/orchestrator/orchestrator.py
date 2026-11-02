@@ -84,6 +84,7 @@ class ClusterOrchestrator:
         fault_tolerance_manager_lib.FaultToleranceManager(
             self.registry,
             config=fault_tolerance_config,
+            lifecycle_driver=self.lifecycle_driver,
         )
     )
     self.monitor = monitor or health_monitor.HealthMonitor(self.registry)

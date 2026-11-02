@@ -545,6 +545,29 @@ class WorkerRegistry:
         for entry in self._matching_entries(role, statuses)
     ]
 
+  def targets_with_status(
+      self,
+      role: datatypes.Role | str | None = None,
+      *,
+      statuses: Collection[AdmissionStatus] | None,
+  ) -> list[
+      tuple[datatypes.WorkerInfo, remote_execution.ActorHandle, AdmissionStatus]
+  ]:
+    """Returns `(info, handle, status)` triples sorted by worker_id.
+
+    Args:
+      role: Role to filter by, or None for all roles.
+      statuses: Statuses to include, or None for every registered worker.
+
+    Returns:
+      List of `(WorkerInfo, ActorHandle, AdmissionStatus)` triples ordered by
+      `worker_id`.
+    """
+    return [
+        (entry.info, entry.handle, entry.status)
+        for entry in self._matching_entries(role, statuses)
+    ]
+
   def roles(self) -> set[str]:
     with self._lock:
       return set().union(*(e.info.roles for e in self._entries.values()))

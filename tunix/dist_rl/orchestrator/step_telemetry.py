@@ -79,12 +79,14 @@ class StepTimes:
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class RolloutWindow:
-  """When a rollout was dispatched and finished, and which worker ran it.
+  """Dispatch, receive, and finish times of a rollout, and its worker.
 
   Attributes:
     dispatch_time_s: Unix time of the rollout's `engine.dispatch` event.
     finish_time_s: Unix time of its last `worker.rollout` event.
     worker_id: The rollout worker that handed the trajectory back.
+    received_time_s: Unix time of its last `worker.received` event from
+      `worker_id`, or None when not stamped.
     execution_time_s: Worker-side episode execution duration in seconds, or None
       when not stamped.
     batch_idx: Prompt cohort index from `engine.dispatch` or item metadata, or
@@ -94,6 +96,7 @@ class RolloutWindow:
   dispatch_time_s: float
   finish_time_s: float
   worker_id: str
+  received_time_s: float | None = None
   execution_time_s: float | None = None
   batch_idx: int | None = None
 
@@ -104,20 +107,23 @@ class RolloutWindow:
 
 
 def _rollout_window(item: datatypes.TrajectoryItem) -> RolloutWindow | None:
-  """Reads a rollout's dispatch and finish times from its lineage.
+  """Reads a rollout's dispatch, received, and finish times from its lineage.
 
   `DistributedRLEngine` records `engine.dispatch` when it builds the request,
-  and the rollout worker records `worker.rollout` when it hands the finished
-  trajectory back. The two timestamps come from different hosts' clocks, so a
-  duration includes their skew; `execution_time_s` (when stamped by the worker)
-  measures episode execution on the worker's own monotonic clock.
+  the rollout worker records `worker.received` when `generate()` receives the
+  request, and records `worker.rollout` when it hands the finished trajectory
+  back. `dispatch_time_s` and `received_time_s` / `finish_time_s` come from
+  different hosts' clocks, so `duration_s` and dispatch delay include their
+  skew; `received_time_s` and `finish_time_s` share the winning worker's clock,
+  and `execution_time_s` (when stamped by the worker) measures episode execution
+  on the worker's own monotonic clock.
 
   Args:
     item: A scored rollout.
 
   Returns:
-    The rollout's window, or None when it carries no lineage or either event
-    is missing.
+    The rollout's window, or None when it carries no lineage or either
+    `engine.dispatch` or `worker.rollout` is missing.
   """
   lineage_ctx: lineage.LineageContext | None = item.metadata.get("lineage")
   if lineage_ctx is None:
@@ -136,6 +142,14 @@ def _rollout_window(item: datatypes.TrajectoryItem) -> RolloutWindow | None:
     return None
   dispatch_attrs = dispatched[0].attributes
   finish_attrs = finished[-1].attributes
+  worker_id = str(finish_attrs["worker_id"])
+  received = [
+      event
+      for event in lineage_ctx.events
+      if event.component == "worker.received"
+      and event.attributes.get("worker_id") is not None
+      and str(event.attributes["worker_id"]) == worker_id
+  ]
   raw_exec = finish_attrs.get("execution_time_s")
   raw_batch_idx = dispatch_attrs.get("batch_idx")
   if raw_batch_idx is None:
@@ -143,7 +157,8 @@ def _rollout_window(item: datatypes.TrajectoryItem) -> RolloutWindow | None:
   return RolloutWindow(
       dispatch_time_s=dispatched[0].timestamp_s,
       finish_time_s=finished[-1].timestamp_s,
-      worker_id=str(finish_attrs["worker_id"]),
+      worker_id=worker_id,
+      received_time_s=received[-1].timestamp_s if received else None,
       execution_time_s=float(raw_exec) if raw_exec is not None else None,
       batch_idx=int(raw_batch_idx) if raw_batch_idx is not None else None,
   )
@@ -259,6 +274,24 @@ class RolloutHealth:
   status_counts: dict[str, int]
 
 
+def _add_percentiles(
+    metrics: dict[str, float],
+    prefix: str,
+    values: Sequence[float | int] | np.ndarray,
+    percentiles: Sequence[int] = (50, 90, 99),
+    *,
+    include_mean: bool = False,
+) -> None:
+  """Records `prefix/{mean,pXX,...,max}` summary statistics into `metrics`."""
+  if include_mean:
+    metrics[f"{prefix}/mean"] = float(np.mean(values))
+  for p, val in zip(
+      percentiles, np.percentile(values, percentiles), strict=True
+  ):
+    metrics[f"{prefix}/p{p}"] = float(val)
+  metrics[f"{prefix}/max"] = float(np.max(values))
+
+
 def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
   """Computes the step's rollout status, turn and latency metrics.
 
@@ -285,9 +318,16 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
       for weight sync and clock skew between hosts are all included.
       `rollout/execution_sec/{p50,p90,p99,max}` is the worker-side episode
       execution duration, and `rollout/queue_wait_sec/{p50,p90,p99,max}` is
-      `max(0, duration_sec - execution_sec)`. `rollout/tail_sec` is max - p50,
-      and `rollout/batch_wall_sec` is the maximum cohort span from first
-      dispatch to last finish within each `batch_idx` cohort.
+      `max(0, duration_sec - execution_sec)`.
+      `rollout/dispatch_delay_sec/{p50,p90,p99,max}` is `max(0, received_time_s
+      - dispatch_time_s)`, capturing transport transit and any pre-reroute wait
+      time on failed attempts before the winning worker received the request,
+      and `rollout/worker_queue_wait_sec/{p50,p90,p99,max}` is
+      `max(0, (finish_time_s - received_time_s) - execution_sec)` measured on
+      the winning worker's clock (`duration ≈ dispatch_delay +
+      worker_queue_wait + execution`). `rollout/tail_sec` is max - p50, and
+      `rollout/batch_wall_sec` is the maximum cohort span from first dispatch
+      to last finish within each `batch_idx` cohort.
 
   The turn and duration families skip rollouts that lack their inputs and are
   omitted when no rollout has them.
@@ -332,31 +372,32 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
     metrics["rollout/num_turns_mean"] = float(np.mean(turns))
     metrics["rollout/num_turns_max"] = float(np.max(turns))
   if turn_lengths:
-    p50, p99 = np.percentile(turn_lengths, [50, 99])
-    metrics["rollout/turn_length/mean"] = float(np.mean(turn_lengths))
-    metrics["rollout/turn_length/p50"] = float(p50)
-    metrics["rollout/turn_length/p99"] = float(p99)
-    metrics["rollout/turn_length/max"] = float(np.max(turn_lengths))
+    _add_percentiles(
+        metrics,
+        "rollout/turn_length",
+        turn_lengths,
+        (50, 99),
+        include_mean=True,
+    )
   if env_times:
-    p50, p99 = np.percentile(env_times, [50, 99])
-    metrics["rollout/env_time_sec/mean"] = float(np.mean(env_times))
-    metrics["rollout/env_time_sec/p50"] = float(p50)
-    metrics["rollout/env_time_sec/p99"] = float(p99)
-    metrics["rollout/env_time_sec/max"] = float(np.max(env_times))
+    _add_percentiles(
+        metrics, "rollout/env_time_sec", env_times, (50, 99), include_mean=True
+    )
   if reward_times:
-    p50, p99 = np.percentile(reward_times, [50, 99])
-    metrics["rollout/reward_time_sec/mean"] = float(np.mean(reward_times))
-    metrics["rollout/reward_time_sec/p50"] = float(p50)
-    metrics["rollout/reward_time_sec/p99"] = float(p99)
-    metrics["rollout/reward_time_sec/max"] = float(np.max(reward_times))
+    _add_percentiles(
+        metrics,
+        "rollout/reward_time_sec",
+        reward_times,
+        (50, 99),
+        include_mean=True,
+    )
   if windows:
     durations = np.array([window.duration_s for window in windows])
-    p50, p90, p99 = np.percentile(durations, [50, 90, 99])
-    metrics["rollout/duration_sec/p50"] = float(p50)
-    metrics["rollout/duration_sec/p90"] = float(p90)
-    metrics["rollout/duration_sec/p99"] = float(p99)
-    metrics["rollout/duration_sec/max"] = float(np.max(durations))
-    metrics["rollout/tail_sec"] = float(np.max(durations) - p50)
+    _add_percentiles(metrics, "rollout/duration_sec", durations)
+    metrics["rollout/tail_sec"] = (
+        metrics["rollout/duration_sec/max"]
+        - metrics["rollout/duration_sec/p50"]
+    )
     cohorts: collections.defaultdict[int | None, list[RolloutWindow]] = (
         collections.defaultdict(list)
     )
@@ -369,27 +410,40 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
             for cohort in cohorts.values()
         )
     )
+    dispatch_delays = [
+        max(0.0, window.received_time_s - window.dispatch_time_s)
+        for window in windows
+        if window.received_time_s is not None
+    ]
+    if dispatch_delays:
+      _add_percentiles(metrics, "rollout/dispatch_delay_sec", dispatch_delays)
     exec_durations = [
         window.execution_time_s
         for window in windows
         if window.execution_time_s is not None
     ]
     if exec_durations:
-      exec_p50, exec_p90, exec_p99 = np.percentile(exec_durations, [50, 90, 99])
-      metrics["rollout/execution_sec/p50"] = float(exec_p50)
-      metrics["rollout/execution_sec/p90"] = float(exec_p90)
-      metrics["rollout/execution_sec/p99"] = float(exec_p99)
-      metrics["rollout/execution_sec/max"] = float(np.max(exec_durations))
+      _add_percentiles(metrics, "rollout/execution_sec", exec_durations)
       queue_waits = [
           max(0.0, window.duration_s - window.execution_time_s)
           for window in windows
           if window.execution_time_s is not None
       ]
-      wait_p50, wait_p90, wait_p99 = np.percentile(queue_waits, [50, 90, 99])
-      metrics["rollout/queue_wait_sec/p50"] = float(wait_p50)
-      metrics["rollout/queue_wait_sec/p90"] = float(wait_p90)
-      metrics["rollout/queue_wait_sec/p99"] = float(wait_p99)
-      metrics["rollout/queue_wait_sec/max"] = float(np.max(queue_waits))
+      _add_percentiles(metrics, "rollout/queue_wait_sec", queue_waits)
+    worker_queue_waits = [
+        max(
+            0.0,
+            (window.finish_time_s - window.received_time_s)
+            - window.execution_time_s,
+        )
+        for window in windows
+        if window.received_time_s is not None
+        and window.execution_time_s is not None
+    ]
+    if worker_queue_waits:
+      _add_percentiles(
+          metrics, "rollout/worker_queue_wait_sec", worker_queue_waits
+      )
   return RolloutHealth(metrics=metrics, status_counts=status_counts)
 
 

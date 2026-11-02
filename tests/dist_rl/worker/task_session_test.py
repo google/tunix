@@ -1470,6 +1470,8 @@ class TaskSessionTest(parameterized.TestCase):
         self.assertEqual(h3.dispatched_count, 0)
         self.assertEqual(evicted, [h1, h2])
         self.assertEqual(session._in_flight, 0)
+        self.assertEqual(session.task_retries_total, 1)
+        self.assertEqual(session.task_unrecovered_total, 1)
 
     asyncio.run(_run())
 
@@ -1825,6 +1827,91 @@ class TaskSessionTest(parameterized.TestCase):
         self.assertIn("no route for retried task", str(exc))
         self.assertIsInstance(exc.__cause__, ConnectionError)
         self.assertEqual(session._in_flight, 0)
+        # `route()` raised before any surviving worker was selected for
+        # re-dispatch, so no retry was actually re-dispatched.
+        self.assertEqual(session.task_retries_total, 0)
+        self.assertEqual(session.task_unrecovered_total, 1)
+
+    asyncio.run(_run())
+
+  def test_unrecovered_total_counts_empty_pool(self):
+    class DeadOnPollHandle(remote_lib.ActorHandle):
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        await asyncio.sleep(0.01)
+        raise ConnectionError("w1 crashed mid-generation")
+
+    async def _run():
+      w1 = DeadOnPollHandle()
+      w2 = create_in_process_handle(StubWorkerEngine("w2"))
+      live_actors: list[remote_lib.ActorHandle] = [w1, w2]
+
+      def _on_unreachable(actor, exc):
+        del exc
+        if actor in live_actors:
+          live_actors.remove(actor)
+        # Evict w2 on the next event-loop turn: `_can_retry` still sees `[w2]`
+        # and schedules `_retry_or_fail_task`, then `live_actors` becomes empty
+        # right before `_retry_or_fail_task` calls `DefaultRouter`.
+        asyncio.get_running_loop().call_soon(live_actors.clear)
+
+      async with task_session.TaskSession(
+          lambda: list(live_actors),
+          fault_tolerance_config=task_session.TaskSessionFaultToleranceConfig(
+              max_task_retries=1,
+              on_worker_unreachable=_on_unreachable,
+          ),
+      ) as session:
+        # Caller argument error on a non-empty pool is not a worker failure.
+        with self.assertRaises(ValueError):
+          await session.submit("bad_key", "compute_trajectory", route_key=-1)
+        self.assertEqual(session.task_unrecovered_total, 0)
+
+        # Route req_1 deterministically to w1 (`route_key=0`).
+        await session.submit("req_1", "compute_trajectory", "p1", route_key=0)
+        batch = await session.poll_completed(timeout_s=1.0)
+        self.assertLen(batch, 1)
+        res, exc = batch[0]
+        self.assertIsNone(res)
+        self.assertIsInstance(exc, RuntimeError)
+        self.assertIn("no registered ActorHandles", str(exc))
+        self.assertIsInstance(exc.__cause__, ConnectionError)
+        # `live_actors` emptied before `route()` ran on the retry, so zero
+        # workers received a re-dispatch.
+        self.assertEqual(session.task_retries_total, 0)
+        self.assertEqual(session.task_unrecovered_total, 1)
+
+        # Foreground submit onto the now-empty pool also counts as a task
+        # failure without a retry.
+        with self.assertRaisesRegex(RuntimeError, "no registered ActorHandles"):
+          await session.submit("req_2", "compute_trajectory", "p2", route_key=0)
+        self.assertEqual(session.task_retries_total, 0)
+        self.assertEqual(session.task_unrecovered_total, 2)
+        self.assertEqual(session._in_flight, 0)
+
+      # Custom `route_fn` that would otherwise raise `ValueError` on an empty
+      # sequence (`min([])`) also gets the empty-pool `RuntimeError` contract.
+      async with task_session.TaskSession(
+          lambda: [],
+          route_fn=lambda actors, key: min(actors, key=id),
+      ) as custom_empty_session:
+        with self.assertRaisesRegex(RuntimeError, "no registered ActorHandles"):
+          await custom_empty_session.submit("req_empty", "compute_trajectory")
+        self.assertEqual(custom_empty_session.task_unrecovered_total, 1)
+        self.assertEqual(custom_empty_session._in_flight, 0)
 
     asyncio.run(_run())
 

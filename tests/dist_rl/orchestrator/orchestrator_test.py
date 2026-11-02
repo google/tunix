@@ -15,11 +15,14 @@
 """Unit tests for ClusterOrchestrator."""
 
 import tempfile
+import threading
+import time
 from unittest import mock
 
 from absl.testing import absltest
 from etils import epath
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.orchestrator import health_monitor
 from tunix.dist_rl.orchestrator import orchestrator
 from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.orchestrator import worker_registry
@@ -231,6 +234,9 @@ class ClusterOrchestratorTest(absltest.TestCase):
     )
     engine = orch._create_engine()
     self.assertIs(engine._fault_tolerance_manager, orch.fault_tolerance_manager)
+    self.assertIs(
+        orch.fault_tolerance_manager._lifecycle_driver, orch.lifecycle_driver
+    )
     self.assertEqual(engine._fault_tolerance_manager.config, ft_config)
     self.assertEqual(engine._rollout_session._max_task_retries, 2)
     self.assertEqual(engine._rollout_session._poll_retry_budget_s, 45.0)
@@ -699,6 +705,56 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
         worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
     )
     orch.shutdown()
+
+  def test_late_rollout_bring_up_failure_surfaces_in_fault_tolerance_metrics(
+      self,
+  ):
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        monitor=mock.create_autospec(
+            health_monitor.HealthMonitor, instance=True
+        ),
+    )
+    self.addCleanup(orch.shutdown)
+    h_ok = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_ok.submit.return_value = datatypes.Response()
+    orch.registry.register_handle("rollout-0", [datatypes.Role.ROLLOUT], h_ok)
+    orch.bring_up_workers()
+    self.assertIsNotNone(orch.engine)
+    self.assertEqual(
+        orch.engine.fault_tolerance_metrics()[
+            "ft/rejoin/bring_up_failures_total"
+        ],
+        0.0,
+    )
+
+    h_bad = mock.MagicMock(spec=remote_execution.ActorHandle)
+    closed = threading.Event()
+    h_bad.sync_close.side_effect = closed.set
+    h_bad.submit.side_effect = [
+        datatypes.Response(),
+        RuntimeError("compile exploded"),
+    ]
+    orch.registry.register_handle(
+        "rollout-bad", [datatypes.Role.ROLLOUT], h_bad
+    )
+    self.assertTrue(closed.wait(timeout=5.0))
+    deadline = time.monotonic() + 5.0
+    while (
+        orch.engine.fault_tolerance_metrics()[
+            "ft/rejoin/bring_up_failures_total"
+        ]
+        < 1.0
+        and time.monotonic() < deadline
+    ):
+      time.sleep(0.005)
+    self.assertNotIn("rollout-bad", orch.registry)
+    self.assertEqual(
+        orch.engine.fault_tolerance_metrics()[
+            "ft/rejoin/bring_up_failures_total"
+        ],
+        1.0,
+    )
 
 
 if __name__ == "__main__":

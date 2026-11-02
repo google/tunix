@@ -586,6 +586,20 @@ class WorkerRegistryTest(absltest.TestCase):
         registry.targets(statuses=(worker_registry.AdmissionStatus.ACTIVE,)),
         [(r0_info, h0)],
     )
+    self.assertEqual(
+        registry.targets_with_status(datatypes.Role.ROLLOUT, statuses=None),
+        [
+            (r0_info, h0, worker_registry.AdmissionStatus.ACTIVE),
+            (r1_info, h1, worker_registry.AdmissionStatus.REGISTERED),
+        ],
+    )
+    self.assertEqual(
+        registry.targets_with_status(
+            datatypes.Role.ROLLOUT,
+            statuses=(worker_registry.AdmissionStatus.ACTIVE,),
+        ),
+        [(r0_info, h0, worker_registry.AdmissionStatus.ACTIVE)],
+    )
 
     # Default handles() only returns ACTIVE workers; infos() and worker_ids()
     # return all registered workers.

@@ -293,6 +293,7 @@ class RolloutWorker(abstract_worker.Worker):
       self,
       metadata: dict[str, Any] | None,
       *,
+      component: str = "worker.rollout",
       execution_time_s: float | None = None,
   ) -> None:
     """Appends worker generation telemetry to the lineage context if present."""
@@ -304,7 +305,7 @@ class RolloutWorker(abstract_worker.Worker):
       if execution_time_s is not None:
         attributes["execution_time_s"] = float(execution_time_s)
       lineage_ctx.add_event(
-          component="worker.rollout",
+          component=component,
           operation="generate",
           attributes=attributes,
       )
@@ -360,7 +361,7 @@ class RolloutWorker(abstract_worker.Worker):
     """Coroutine method for single or batched generate requests."""
     self._ensure_initialized()
     if isinstance(requests, datatypes.RolloutRequest):
-      pass
+      self._stamp_worker_lineage(requests.metadata, component="worker.received")
     elif isinstance(requests, Sequence) and not isinstance(
         requests, (str, bytes)
     ):
@@ -369,6 +370,8 @@ class RolloutWorker(abstract_worker.Worker):
             "generate requires `requests` to be a RolloutRequest or"
             " Sequence[RolloutRequest]."
         )
+      for req in requests:
+        self._stamp_worker_lineage(req.metadata, component="worker.received")
     else:
       raise TypeError(
           "generate requires `requests` to be a RolloutRequest or"

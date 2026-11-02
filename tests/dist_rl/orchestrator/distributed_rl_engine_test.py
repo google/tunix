@@ -26,6 +26,7 @@ from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import distributed_rl_engine
 from tunix.dist_rl.orchestrator import fault_tolerance_manager as fault_tolerance_manager_lib
+from tunix.dist_rl.orchestrator import lifecycle
 from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.testing import worker_registry_testing
@@ -2708,6 +2709,124 @@ class DistributedRLEngineTest(absltest.TestCase):
         await t_final
       self.mock_actor.update.assert_not_called()
       self.assertEmpty(self.engine._inflight_fwd_bwd[datatypes.Role.ACTOR])
+
+    asyncio.run(_run())
+
+  def test_fault_tolerance_metrics_reports_fleet_gauges_and_counters(self):
+    async def _run():
+      registry = worker_registry.WorkerRegistry()
+      for idx in range(3):
+        bad_handle = MockActorHandle()
+        bad_handle.generate.side_effect = ConnectionError("dispatch failed")
+        registry.register_handle(
+            f"bad-{idx}", [datatypes.Role.ROLLOUT], bad_handle
+        )
+        worker_registry_testing.set_status(
+            registry, f"bad-{idx}", worker_registry.AdmissionStatus.ACTIVE
+        )
+
+      registry.register_handle(
+          "rollout-0", [datatypes.Role.ROLLOUT], self.mock_rollout_1
+      )
+      worker_registry_testing.set_status(
+          registry, "rollout-0", worker_registry.AdmissionStatus.ACTIVE
+      )
+
+      promoted_reports = []
+      for idx in range(4):
+        h_promote = MockActorHandle()
+        wid = f"rollout-promote-{idx}"
+        registry.register_handle(wid, [datatypes.Role.ROLLOUT], h_promote)
+        worker_registry_testing.set_status(
+            registry, wid, worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+        )
+        promoted_reports.append(
+            weight_sync_coordinator_lib.WorkerRoundReport(
+                worker_id=wid, phase="committed", handle=h_promote
+            )
+        )
+
+      coordinator = _FakeWeightSyncCoordinator(workers=promoted_reports)
+      mock_lifecycle = mock.MagicMock(
+          spec=lifecycle.LifecycleDriver,
+          bring_up_failures_total=6,
+      )
+      ftm = fault_tolerance_manager_lib.FaultToleranceManager(
+          registry,
+          config=datatypes.FaultToleranceConfig(
+              enabled=True, max_task_retries=1
+          ),
+          lifecycle_driver=mock_lifecycle,
+      )
+      engine = distributed_rl_engine.DistributedRLEngine(
+          registry=registry,
+          weight_sync_coordinator=coordinator,
+          fault_tolerance_manager=ftm,
+      )
+
+      # Drive TaskSession counters with `route_key=0` (selects lexicographically
+      # first ACTIVE worker):
+      # 1) `req_fail`: `bad-0` fails (eviction #1) -> retries on `bad-1`
+      #    (retry #1), which also fails (eviction #2) -> terminal failure #1.
+      with self.assertRaises(ConnectionError):
+        await engine._rollout_session.submit(
+            "req_fail", "generate", requests=[], route_key=0
+        )
+      # 2) `req_ok`: `bad-2` fails (eviction #3) -> retries on `rollout-0`
+      #    (retry #2), which accepts dispatch.
+      await engine._rollout_session.submit(
+          "req_ok", "generate", requests=[], route_key=0
+      )
+
+      await engine.sync_weights(policy_version=1)
+
+      for idx in range(7):
+        wid = f"rollout-pending-{idx}"
+        registry.register_handle(
+            wid, [datatypes.Role.ROLLOUT], MockActorHandle()
+        )
+        worker_registry_testing.set_status(
+            registry, wid, worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+        )
+      for idx in range(8):
+        registry.register_handle(
+            f"rollout-registered-{idx}",
+            [datatypes.Role.ROLLOUT],
+            MockActorHandle(),
+        )
+
+      self.assertEqual(
+          engine.fault_tolerance_metrics(),
+          {
+              "ft/rollout/task_unrecovered_total": 1.0,
+              "ft/rollout/task_retries_total": 2.0,
+              "ft/evictions_total/task_session": 3.0,
+              "ft/rejoin/promoted_total": 4.0,
+              "ft/fleet/rollout_active": 5.0,
+              "ft/rejoin/bring_up_failures_total": 6.0,
+              "ft/fleet/rollout_pending_weight_sync": 7.0,
+              "ft/fleet/rollout_registered": 8.0,
+          },
+      )
+      await engine.close()
+
+      minimal_engine = distributed_rl_engine.DistributedRLEngine(
+          registry=worker_registry.WorkerRegistry()
+      )
+      self.assertEqual(
+          minimal_engine.fault_tolerance_metrics(),
+          {
+              "ft/fleet/rollout_registered": 0.0,
+              "ft/fleet/rollout_pending_weight_sync": 0.0,
+              "ft/fleet/rollout_active": 0.0,
+              "ft/evictions_total/task_session": 0.0,
+              "ft/rollout/task_retries_total": 0.0,
+              "ft/rollout/task_unrecovered_total": 0.0,
+              "ft/rejoin/promoted_total": 0.0,
+              "ft/rejoin/bring_up_failures_total": 0.0,
+          },
+      )
+      await minimal_engine.close()
 
     asyncio.run(_run())
 

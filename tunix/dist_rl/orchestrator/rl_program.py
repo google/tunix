@@ -1196,6 +1196,9 @@ class StandardRLProgram(RLProgram):
     if step_times is not None:
       for tag, val in dataclasses.asdict(step_times).items():
         self._log_metric(f"perf/{tag}", val, log_step)
+    if self.engine is not None:
+      for tag, val in self.engine.fault_tolerance_metrics().items():
+        self._log_metric(tag, val, log_step)
     if padding_stats:
       for tag, val in batch_assembly.summarize_padding_stats(
           padding_stats

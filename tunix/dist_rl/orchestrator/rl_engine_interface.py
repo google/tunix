@@ -196,6 +196,10 @@ class AbstractRLEngine(Protocol):
     """Coordinates decentralized peer-to-peer weight sync across worker roles."""
     ...
 
+  def fault_tolerance_metrics(self) -> Mapping[str, float]:
+    """Returns fault-tolerance metrics (`ft/*`) to log with each train step."""
+    ...
+
   async def save_checkpoint(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,

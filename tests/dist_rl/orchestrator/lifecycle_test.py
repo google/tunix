@@ -429,13 +429,15 @@ class LifecycleDriverTest(absltest.TestCase):
         [c.args for c in new_handle.submit.call_args_list],
         [("initialize",), ("compile", None), ("start",)],
     )
+    self.assertEqual(driver.bring_up_failures_total, 0)
     driver.shutdown()
 
   def test_late_rollout_worker_bring_up_failure_unregisters_worker(self):
     registry = worker_registry.WorkerRegistry()
-    driver = lifecycle.LifecycleDriver(registry)
-    driver.enable_late_registration()
     self.addCleanup(registry.close)
+    driver = lifecycle.LifecycleDriver(registry)
+    self.addCleanup(driver.shutdown)
+    driver.enable_late_registration()
 
     h_bad = mock.MagicMock(spec=remote_execution.ActorHandle)
     h_bad.submit.side_effect = [
@@ -443,10 +445,16 @@ class LifecycleDriverTest(absltest.TestCase):
         RuntimeError("compile exploded"),
     ]
     registry.register_handle("rollout-bad", [datatypes.Role.ROLLOUT], h_bad)
-    self.assertTrue(_wait_until(lambda: "rollout-bad" not in registry))
+    self.assertTrue(
+        _wait_until(
+            lambda: driver.bring_up_failures_total == 1
+            and "rollout-bad" not in registry
+        )
+    )
 
     self.assertNotIn("rollout-bad", registry)
     h_bad.sync_close.assert_called_once()
+    self.assertEqual(driver.bring_up_failures_total, 1)
     driver.shutdown()
 
   def test_shutdown_unregisters_registered_workers_and_is_idempotent(self):
@@ -486,6 +494,7 @@ class LifecycleDriverTest(absltest.TestCase):
     h_init.sync_close.assert_called_once()
     self.assertIn("r-active", registry)
     h_active.submit.assert_called_once_with("stop")
+    self.assertEqual(driver.bring_up_failures_total, 0)
 
     # Repeated shutdown is safe.
     driver.shutdown()
@@ -626,6 +635,7 @@ class LifecycleDriverTest(absltest.TestCase):
     h_queued_2.submit.assert_not_called()
     self.assertIn("r-active", registry)
     h_active.submit.assert_called_once_with("stop")
+    self.assertEqual(driver.bring_up_failures_total, 0)
 
   def test_bring_up_raises_when_worker_is_displaced_during_compile(self):
     registry = worker_registry.WorkerRegistry()

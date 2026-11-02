@@ -49,6 +49,8 @@ _monotonic: Callable[[], float] = time.monotonic
 RouteFn = Callable[[Sequence[ActorHandle], Optional[Any]], ActorHandle]
 OnWorkerUnreachableFn = Callable[[ActorHandle, Exception], None]
 
+_CALLER_ERRORS = (TypeError, ValueError, pickle.PickleError)
+
 
 @dataclasses.dataclass(frozen=True)
 class TaskSessionFaultToleranceConfig:
@@ -259,6 +261,8 @@ class TaskSession:
     self._in_flight = 0
     self._closed = False
     self._sentinel = object()
+    self._task_retries_total = 0
+    self._task_unrecovered_total = 0
 
   async def __aenter__(self) -> "TaskSession":
     return self
@@ -266,6 +270,16 @@ class TaskSession:
   async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
     del exc_type, exc_val, exc_tb
     await self.close()
+
+  @property
+  def task_retries_total(self) -> int:
+    """Number of times a task was re-dispatched after a worker failure."""
+    return self._task_retries_total
+
+  @property
+  def task_unrecovered_total(self) -> int:
+    """Tasks lost to a worker/transport fault or empty pool, not retried."""
+    return self._task_unrecovered_total
 
   def _notify_if_zero_flight(self) -> None:
     if self._in_flight == 0:
@@ -276,7 +290,10 @@ class TaskSession:
     # TODO(tunix-dev): Incorporate per-worker in-flight load
     # (`len(self._dispatched_tasks.get(actor, ()))`) into routing so retried
     # and newly submitted tasks avoid queueing behind heavily loaded workers.
-    return self._route_fn(self._actors_fn(), route_key)
+    actors = self._actors_fn()
+    if not actors:
+      raise RuntimeError("TaskSession has no registered ActorHandles.")
+    return self._route_fn(actors, route_key)
 
   async def submit(
       self,
@@ -317,10 +334,16 @@ class TaskSession:
     self._in_flight += 1
     try:
       await self._dispatch_with_retries(task)
-    except BaseException:
+    except BaseException as exc:
       # `task.dispatching` stays True only if another path (the poller or
       # `close()`) already accounted for this task's `_in_flight` slot.
       if not task.dispatching:
+        if (
+            not self._closed
+            and isinstance(exc, Exception)
+            and (task.retries > 0 or not isinstance(exc, _CALLER_ERRORS))
+        ):
+          self._task_unrecovered_total += 1
         self._in_flight = max(0, self._in_flight - 1)
         self._notify_if_zero_flight()
       raise
@@ -328,6 +351,8 @@ class TaskSession:
 
   def _fail_task_to_queue(self, exc: Exception) -> None:
     """Delivers a terminal `(None, exc)` outcome and releases its slot."""
+    if not self._closed:
+      self._task_unrecovered_total += 1
     self._response_queue.put_nowait((None, exc))
     self._in_flight = max(0, self._in_flight - 1)
     self._notify_if_zero_flight()
@@ -351,6 +376,8 @@ class TaskSession:
     """
     while True:
       actor = self.route(task.route_key)
+      if task.retries > 0:
+        self._task_retries_total += 1
       dispatched_map = self._dispatched_tasks.setdefault(actor, {})
       task.dispatching = True
       dispatched_map[task.request_id] = task
@@ -406,7 +433,7 @@ class TaskSession:
         task.dispatching = False
         if (
             isinstance(exc, Exception)
-            and not isinstance(exc, (TypeError, ValueError, pickle.PickleError))
+            and not isinstance(exc, _CALLER_ERRORS)
             and not self._closed
             and self._fault_tolerance_enabled
         ):

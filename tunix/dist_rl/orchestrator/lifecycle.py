@@ -73,6 +73,13 @@ class LifecycleDriver:
     self._late_lock = threading.Lock()
     self._late_executor: concurrent.futures.ThreadPoolExecutor | None = None
     self._reconciler_thread: threading.Thread | None = None
+    self._bring_up_failures_total = 0
+
+  @property
+  def bring_up_failures_total(self) -> int:
+    """Number of late rollout workers unregistered after a failed bring-up."""
+    with self._late_lock:
+      return self._bring_up_failures_total
 
   def _run_bring_up_phases(
       self,
@@ -260,13 +267,15 @@ class LifecycleDriver:
             target_status.value,
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
-      logging.warning(
-          "Late rollout worker %r failed background bring-up; unregistering:"
-          " %s",
-          worker_id,
-          exc,
-      )
-      self._registry.unregister_handle(handle)
+      if self._registry.unregister_handle(handle) is not None:
+        with self._late_lock:
+          self._bring_up_failures_total += 1
+        logging.warning(
+            "Late rollout worker %r failed background bring-up; unregistering:"
+            " %s",
+            worker_id,
+            exc,
+        )
 
   # TODO(b/577214994): Add `stop_workers: bool = True` (also on
   # `ClusterOrchestrator.shutdown()`) so `stop_workers_on_exit=False` callers
