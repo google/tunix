@@ -574,7 +574,7 @@ class ClusterTest(absltest.TestCase):
         [info.worker_id for info in cluster.registry.infos()],
         ["rollout-1", "trainer-0"],
     )
-    (handle,) = cluster.registry.handles(datatypes.Role.ACTOR)
+    (handle,) = cluster.registry.handles(datatypes.Role.ACTOR, statuses=None)
     assert isinstance(handle, remote_execution.GrpcRemoteActorHandle)
     self.assertEqual(handle._rpc_timeout_s, 42.0)  # pylint: disable=protected-access
 
@@ -596,13 +596,17 @@ class ClusterTest(absltest.TestCase):
 
     # `target: local` launches a single rollout node.
     local = wait(_config(*overrides), ["trainer", "rollout"])
-    self.assertLen(local.registry.handles(datatypes.Role.ROLLOUT), 1)
+    self.assertLen(
+        local.registry.handles(datatypes.Role.ROLLOUT, statuses=None), 1
+    )
 
     k8s_hp = _config(*overrides, "cluster_config.target=k8s")
     with self.assertRaises(TimeoutError):
       wait(k8s_hp, ["trainer", "rollout"])
     k8s = wait(k8s_hp, ["trainer", "rollout", "rollout"])
-    self.assertLen(k8s.registry.handles(datatypes.Role.ROLLOUT), 2)
+    self.assertLen(
+        k8s.registry.handles(datatypes.Role.ROLLOUT, statuses=None), 2
+    )
 
   def test_close_cluster_stops_workers_on_exit(self):
     cluster = _FakeCluster()

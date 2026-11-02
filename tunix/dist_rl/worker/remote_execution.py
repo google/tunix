@@ -735,7 +735,7 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     self._stopped = False
     # pylint: disable=protected-access
     self._server = _grpc_aio_lib.server(
-        options=network._grpc_options(self._max_message_bytes)
+        options=network._grpc_server_options(self._max_message_bytes)
     )
     # pylint: enable=protected-access
     handler = _grpc_lib.method_handlers_generic_handler(
@@ -1074,7 +1074,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     # calls reuse one channel. gRPC aio channels are bound to the loop that
     # created them, so they cannot be shared with the caller's async loop nor
     # survive a per-call asyncio.run() loop.
-    self._sync_loop: Optional[Any] = None
+    self._sync_loop: Optional[asyncio.AbstractEventLoop] = None
     self._sync_thread: Optional[threading.Thread] = None
     self._sync_channel: Optional[Any] = None
     self._sync_rpc: Optional[Any] = None
@@ -1523,25 +1523,28 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
           "GrpcRemoteActorHandle.submit() is blocking and cannot be called from"
           " a running event loop; use asubmit() instead."
       )
-    loop = self._ensure_sync_loop()
-    future = asyncio.run_coroutine_threadsafe(
-        self._invoke_on_sync_loop(method_name, args, kwargs), loop
-    )
-    return future.result()
-
-  def _ensure_sync_loop(self) -> Any:
-    """Lazily starts (once) the background loop used by blocking submit()."""
     with self._sync_lock:
       self._raise_if_closed()
-      if self._sync_loop is None:
-        self._sync_loop = asyncio.new_event_loop()
-        self._sync_thread = threading.Thread(
-            target=self._sync_loop.run_forever,
-            name=f"grpc-submit-{self._host_port}",
-            daemon=True,
-        )
-        self._sync_thread.start()
-      return self._sync_loop
+      loop = self._ensure_sync_loop_locked()
+      coro = self._invoke_on_sync_loop(method_name, args, kwargs)
+      try:
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+      except BaseException:
+        coro.close()
+        raise
+    return future.result()
+
+  def _ensure_sync_loop_locked(self) -> asyncio.AbstractEventLoop:
+    """Lazily starts (once) the background loop used by blocking submit()."""
+    if self._sync_loop is None:
+      self._sync_loop = asyncio.new_event_loop()
+      self._sync_thread = threading.Thread(
+          target=self._sync_loop.run_forever,
+          name=f"grpc-submit-{self._host_port}",
+          daemon=True,
+      )
+      self._sync_thread.start()
+    return self._sync_loop
 
   async def _invoke_on_sync_loop(
       self,
@@ -1550,19 +1553,21 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       kwargs: Dict[str, Any],
   ) -> Any:
     assert _grpc_aio_lib is not None
-    # Runs on the sync loop, serialized with `close()`'s channel teardown there.
-    self._raise_if_closed()
-    if self._sync_rpc is None:
-      self._sync_channel = _grpc_aio_lib.insecure_channel(
-          self._host_port,
-          options=network._grpc_channel_options(self._max_message_bytes),  # pylint: disable=protected-access
-      )
-      self._sync_rpc = self._make_rpc(self._sync_channel)
-      self._sync_get_bulk_port_rpc = self._make_get_bulk_port_rpc(
-          self._sync_channel
-      )
+    with self._sync_lock:
+      self._raise_if_closed()
+      if self._sync_rpc is None:
+        self._sync_channel = _grpc_aio_lib.insecure_channel(
+            self._host_port,
+            options=network._grpc_channel_options(self._max_message_bytes),  # pylint: disable=protected-access
+        )
+        self._sync_rpc = self._make_rpc(self._sync_channel)
+        self._sync_get_bulk_port_rpc = self._make_get_bulk_port_rpc(
+            self._sync_channel
+        )
+      rpc = self._sync_rpc
+      get_bulk_port_rpc = self._sync_get_bulk_port_rpc
     return await self._execute_rpc(
-        self._sync_rpc, self._sync_get_bulk_port_rpc, method_name, args, kwargs
+        rpc, get_bulk_port_rpc, method_name, args, kwargs
     )
 
   async def asubmit(
@@ -1583,19 +1588,24 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
   ) -> str:
     """Asynchronously dispatches task request on remote server, returning task ACK ID."""
     await self._ensure_async_channel()
-    assert self._dispatch_rpc is not None
+    # Bind the stubs before the next `await`: a concurrent `close()` (e.g. a
+    # mid-run eviction) resets them to `None`, and calling `None` would raise a
+    # `TypeError` that `TaskSession` treats as a non-retryable caller error.
+    dispatch_rpc = self._dispatch_rpc
+    get_bulk_port_rpc = self._get_bulk_port_rpc
+    assert dispatch_rpc is not None
     request = ExecutionRequest(
         request_id=request_id, method_name=method_name, args=args, kwargs=kwargs
     )
     push_tracker = network._BulkPushTracker()  # pylint: disable=protected-access
     _, chunks = await self._prepare_request_chunks(
         request,
-        self._get_bulk_port_rpc,
+        get_bulk_port_rpc,
         push_tracker=push_tracker,
         need_port_for_response=False,
     )
     try:
-      result = await self._dispatch_rpc(chunks, timeout=self._rpc_timeout_s)
+      result = await dispatch_rpc(chunks, timeout=self._rpc_timeout_s)
     except BaseException as exc:  # pylint: disable=broad-exception-caught
       self._handle_rpc_exception(exc, push_tracker)
     self._check_post_rpc_push_tracker(push_tracker)
@@ -1606,12 +1616,14 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
   ) -> Optional[ExecutionResponse]:
     """Long-polls remote server response queue for completed task results."""
     await self._ensure_async_channel()
-    assert self._poll_rpc is not None
+    # Bind the stub before the next `await`; see `dispatch_task`.
+    poll_rpc = self._poll_rpc
+    assert poll_rpc is not None
     bulk_port = await self._ensure_bulk_port(self._get_bulk_port_rpc)
     call_kwargs: Dict[str, Any] = {"timeout": self._rpc_timeout_s}
     if bulk_port > 0:
       call_kwargs["metadata"] = _BULK_CAPABILITY_METADATA
-    call = self._poll_rpc(timeout_s, **call_kwargs)
+    call = poll_rpc(timeout_s, **call_kwargs)
     try:
       return await ExecutionResponse.deserialize_async_chunks(
           call,
@@ -1646,6 +1658,14 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
   async def close(self) -> None:
     with self._sync_lock:
       self._closed = True
+      sync_loop = self._sync_loop
+      sync_thread = self._sync_thread
+      sync_channel = self._sync_channel
+      self._sync_loop = None
+      self._sync_thread = None
+      self._sync_channel = None
+      self._sync_rpc = None
+      self._sync_get_bulk_port_rpc = None
     loop = _running_loop()
     if loop is not None:
       active_task = self._get_active_resolve_task(loop)
@@ -1654,6 +1674,11 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self._invalidate_bulk_port()
     self._seen_bulk_targets.clear()
     if self._channel is not None:
+      # TODO(b/577214994): When `close()` runs on another thread (e.g. a
+      # displaced handle closed from the discovery server thread) while
+      # `self._channel_loop` is still running, schedule the `_resolve_task`
+      # cancellation and `channel.close()` onto `self._channel_loop` via
+      # `asyncio.run_coroutine_threadsafe` instead of the current loop.
       # `self._channel` is lazily created on the caller's event loop (e.g.
       # `RLProgram.run()`), which is typically already closed by the time
       # `WorkerRegistry.close()` runs on a fresh shutdown loop. Calling
@@ -1670,35 +1695,54 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       self._get_bulk_port_rpc = None
       self._dispatch_rpc = None
       self._poll_rpc = None
-    sync_loop = self._sync_loop
     if sync_loop is not None:
 
       async def _close_sync_channel() -> None:
-        if self._sync_channel is not None:
-          await self._sync_channel.close()
+        current = asyncio.current_task()
+        pending = [
+            task
+            for task in asyncio.all_tasks(sync_loop)
+            if task is not current and not task.done()
+        ]
+        for task in pending:
+          task.cancel()
+        if sync_channel is not None:
+          # Still drain the cancelled tasks below if closing the channel fails.
+          with contextlib.suppress(Exception):
+            await sync_channel.close()
+        if pending:
+          await asyncio.gather(*pending, return_exceptions=True)
+          # Let `_chain_future` done-callbacks scheduled via `call_soon` settle
+          # each caller's `concurrent.futures.Future` before the loop stops.
+          await asyncio.sleep(0)
 
       try:
-        await asyncio.wrap_future(
-            asyncio.run_coroutine_threadsafe(_close_sync_channel(), sync_loop)
+        # `shield` keeps a cancelled `close()` (e.g. a background `sync_close()`
+        # task whose loop is exiting) from cancelling the teardown itself.
+        await asyncio.shield(
+            asyncio.wrap_future(
+                asyncio.run_coroutine_threadsafe(
+                    _close_sync_channel(), sync_loop
+                )
+            )
         )
       except Exception:  # pylint: disable=broad-exception-caught
         pass
-      sync_loop.call_soon_threadsafe(sync_loop.stop)
-      if self._sync_thread is not None:
+      finally:
+        # Runs even if `close()` is cancelled, so the loop and thread exit.
+        sync_loop.call_soon_threadsafe(sync_loop.stop)
+      if sync_thread is not None:
         await asyncio.get_running_loop().run_in_executor(
-            None, self._sync_thread.join, 5
+            None, sync_thread.join, 5
         )
-        if self._sync_thread.is_alive():
+        if sync_thread.is_alive():
           logging.warning(
               "Background sync thread '%s' failed to join within 5 seconds. "
               "This may lead to leaked thread resources.",
-              self._sync_thread.name,
+              sync_thread.name,
           )
-      self._sync_loop = None
-      self._sync_thread = None
-      self._sync_channel = None
-      self._sync_rpc = None
-      self._sync_get_bulk_port_rpc = None
+        else:
+          sync_loop.close()
     with self._send_locks_guard:
       self._send_locks.clear()
 

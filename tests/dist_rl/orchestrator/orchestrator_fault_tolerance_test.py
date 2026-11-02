@@ -23,18 +23,33 @@ Also pins 3 known production edge-case defects via @unittest.expectedFailure.
 """
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable
+import time
 from typing import Any
 import unittest
 
 from absl.testing import absltest
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import rl_program
+from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.testing import fake_cluster
 from tunix.dist_rl.testing import fault_injection
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import task_session
+
+
+def _wait_until(
+    predicate: Callable[[], bool],
+    *,
+    timeout_s: float = 10.0,
+    desc: str = "condition",
+) -> None:
+  deadline = time.monotonic() + timeout_s
+  while not predicate():
+    if time.monotonic() >= deadline:
+      raise AssertionError(f"Timed out after {timeout_s}s waiting for {desc}.")
+    time.sleep(0.02)
 
 
 def _first_rollout_request(
@@ -84,17 +99,282 @@ class OrchestratorFaultToleranceTest(absltest.TestCase):
       for sampler in harness.samplers.values():
         self.assertEqual(sampler.policy_version, 1)
 
+  def test_same_port_rollout_rejoin_isolates_subchannel_and_recovers(
+      self,
+  ) -> None:
+    with fake_cluster.FakeClusterHarness(
+        num_rollout_workers=2,
+        weight_sync_mode="none",
+    ) as harness:
+      harness.orchestrator.bring_up_workers()
+      old_handle = harness.orchestrator.registry.handle("rollout_1")
+      old_port = harness.servers["rollout_1"].bound_port
+
+      # Force an RPC failure on old_handle against the stopped port so its gRPC
+      # subchannel enters TRANSIENT_FAILURE reconnect backoff before rejoin.
+      harness.stop_worker_server("rollout_1", grace=0.0)
+      with self.assertRaises(Exception):
+        old_handle.submit("heartbeat")
+
+      restarted_port = harness.restart_worker(
+          "rollout_1", same_port=True, override=False, re_register=True
+      )
+      self.assertEqual(restarted_port, old_port)
+
+      deadline = time.monotonic() + 10.0
+      while (
+          harness.orchestrator.registry.status("rollout_1")
+          != worker_registry.AdmissionStatus.ACTIVE
+      ):
+        if time.monotonic() >= deadline:
+          self.fail("Timed out waiting for rejoined rollout_1 to become ACTIVE")
+        time.sleep(0.02)
+
+      self.assertIsNot(
+          harness.orchestrator.registry.handle("rollout_1"), old_handle
+      )
+      self.assertEqual(
+          harness.rollout_workers["rollout_1"].state,
+          datatypes.WorkerState.READY,
+      )
+
+      program = harness.build_program(
+          num_prompts=2,
+          max_steps=1,
+          num_generations=2,
+          mini_batch_size=2,
+          sync_weights=False,
+      )
+      future = harness.start_program(program, bring_up=False)
+      future.result(timeout=60.0)
+      self.assertEqual(harness.fake_trainer.step_count, 1)
+
+  def test_rollout_rejoin_failure_mid_bring_up_unregisters_and_recovers_on_retry(
+      self,
+  ) -> None:
+    with fake_cluster.FakeClusterHarness(num_rollout_workers=2) as harness:
+      harness.orchestrator.bring_up_workers()
+      registry = harness.orchestrator.registry
+
+      # 1. Crash mid-rejoin during `compile`: worker stays isolated in
+      #    REGISTERED while bringing up and is cleanly unregistered on failure.
+      compile_gate = fault_injection.FaultGate()
+      harness.injector.on(
+          "rollout_1",
+          "compile",
+          fault_injection.Block(compile_gate),
+          times=1,
+      )
+      harness.restart_worker(
+          "rollout_1", same_port=False, override=False, re_register=True
+      )
+      self.assertTrue(compile_gate.entered.wait(timeout=10.0))
+      self.assertEqual(
+          registry.status("rollout_1"),
+          worker_registry.AdmissionStatus.REGISTERED,
+      )
+      self.assertEqual(
+          [
+              info.worker_id
+              for info, _ in registry.targets(
+                  datatypes.Role.ROLLOUT,
+                  statuses=(worker_registry.AdmissionStatus.ACTIVE,),
+              )
+          ],
+          ["rollout_0"],
+      )
+
+      harness.stop_worker_server("rollout_1", grace=0.0)
+      compile_gate.release()
+      _wait_until(
+          lambda: "rollout_1" not in registry,
+          desc="crashed mid-compile rejoin to unregister",
+      )
+      self.assertEqual(
+          [info.worker_id for info in registry.infos(datatypes.Role.ROLLOUT)],
+          ["rollout_0"],
+      )
+
+      # 2. Verification rejection mid-rejoin (`_verify_rollout_workers`):
+      #    mismatched drain_timeout_s aborts bring-up before compile/start and
+      #    unregisters the worker without leaking into PENDING_WEIGHT_SYNC.
+      bad_init_rule = harness.injector.on(
+          "rollout_1",
+          "initialize",
+          fault_injection.Return(
+              {"partial_rollout": False, "drain_timeout_s": 99999.0}
+          ),
+          times=1,
+      )
+      harness.restart_worker(
+          "rollout_1", same_port=False, override=False, re_register=True
+      )
+      _wait_until(
+          lambda: bad_init_rule.fired_count == 1
+          and "rollout_1" not in registry,
+          desc="rejected mid-verification rejoin to unregister",
+      )
+      self.assertNotEqual(
+          harness.rollout_workers["rollout_1"].state,
+          datatypes.WorkerState.READY,
+      )
+      harness.stop_worker_server("rollout_1", grace=0.0)
+
+      # 3. Step 0 runs and syncs weights cleanly on surviving rollout_0 alone;
+      #    then a clean retry rejoin stages in PENDING_WEIGHT_SYNC before step 1
+      #    and promotes to ACTIVE on step 1's weight sync.
+      def _on_step_end(step: int, unused_res: Any) -> None:
+        if step == 0:
+          self.assertEqual(harness.samplers["rollout_0"].policy_version, 1)
+          harness.restart_worker(
+              "rollout_1", same_port=False, override=False, re_register=True
+          )
+          _wait_until(
+              lambda: (
+                  registry.status("rollout_1")
+                  == worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+              ),
+              desc="retried rollout_1 rejoin to enter PENDING_WEIGHT_SYNC",
+          )
+          self.assertEqual(
+              [
+                  info.worker_id
+                  for info, _ in registry.targets(
+                      datatypes.Role.ROLLOUT,
+                      statuses=(worker_registry.AdmissionStatus.ACTIVE,),
+                  )
+              ],
+              ["rollout_0"],
+          )
+          self.assertEqual(harness.samplers["rollout_1"].policy_version, 0)
+
+      program = harness.build_program(
+          num_prompts=4,
+          max_steps=2,
+          num_generations=2,
+          mini_batch_size=2,
+          batch_size=2,
+          sync_weights=True,
+          on_step_end=_on_step_end,
+      )
+      future = harness.start_program(program, bring_up=False)
+      future.result(timeout=60.0)
+
+      self.assertEqual(harness.fake_trainer.step_count, 2)
+      self.assertEqual(
+          registry.status("rollout_1"),
+          worker_registry.AdmissionStatus.ACTIVE,
+      )
+      self.assertEqual(
+          [
+              info.worker_id
+              for info, _ in registry.targets(
+                  datatypes.Role.ROLLOUT,
+                  statuses=(worker_registry.AdmissionStatus.ACTIVE,),
+              )
+          ],
+          ["rollout_0", "rollout_1"],
+      )
+      self.assertEqual(harness.samplers["rollout_0"].policy_version, 2)
+      self.assertEqual(harness.samplers["rollout_1"].policy_version, 2)
+
+  def test_overlapping_rollout_rejoin_displaces_stuck_bring_up_without_evicting_replacement(
+      self,
+  ) -> None:
+    with fake_cluster.FakeClusterHarness(num_rollout_workers=2) as harness:
+      harness.orchestrator.bring_up_workers()
+      registry = harness.orchestrator.registry
+
+      compile_gate = fault_injection.FaultGate()
+      harness.injector.on(
+          "rollout_1",
+          "compile",
+          fault_injection.Block(compile_gate),
+          times=1,
+      )
+      wedged_heartbeat = harness.injector.on(
+          "rollout_1",
+          "heartbeat",
+          fault_injection.Raise(RuntimeError("wedged mid-compile")),
+          times=1,
+      )
+      harness.restart_worker(
+          "rollout_1", same_port=False, override=False, re_register=True
+      )
+      self.assertTrue(compile_gate.entered.wait(timeout=10.0))
+      stuck_handle = registry.handle("rollout_1")
+      wedged_server = harness.servers["rollout_1"]
+      self.assertEqual(
+          registry.status("rollout_1"),
+          worker_registry.AdmissionStatus.REGISTERED,
+      )
+
+      try:
+        # While the first bring-up thread is still wedged in `compile`, a fresh
+        # replacement instance registers under the same worker_id. The liveness
+        # probe against the wedged instance fails, displacing and closing
+        # `stuck_handle` without letting the first thread's `unregister_handle`
+        # evict the replacement.
+        harness._create_and_register_rollout_worker(  # pylint: disable=protected-access
+            "rollout_1", port=0, override=False, re_register=True
+        )
+        self.assertEqual(wedged_heartbeat.fired_count, 1)
+        replacement_handle = registry.handle("rollout_1")
+        self.assertIsNot(replacement_handle, stuck_handle)
+
+        _wait_until(
+            lambda: (
+                registry.status("rollout_1")
+                == worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+            ),
+            desc="replacement rollout_1 to reach PENDING_WEIGHT_SYNC",
+        )
+      finally:
+        compile_gate.release()
+        wedged_server.stop(grace=0.0)
+
+      program = harness.build_program(
+          num_prompts=2,
+          max_steps=1,
+          num_generations=2,
+          mini_batch_size=2,
+          sync_weights=True,
+      )
+      future = harness.start_program(program, bring_up=False)
+      future.result(timeout=60.0)
+
+      self.assertEqual(harness.fake_trainer.step_count, 1)
+      self.assertIs(registry.handle("rollout_1"), replacement_handle)
+      self.assertEqual(
+          registry.status("rollout_1"),
+          worker_registry.AdmissionStatus.ACTIVE,
+      )
+      self.assertEqual(harness.samplers["rollout_0"].policy_version, 1)
+      self.assertEqual(harness.samplers["rollout_1"].policy_version, 1)
+
   def test_duplicate_worker_registration_without_override_rejected_fail_fast(
       self,
   ) -> None:
     with fake_cluster.FakeClusterHarness(num_rollout_workers=2) as harness:
+      rollout_0_port = harness.servers["rollout_0"].bound_port
       with self.assertRaisesRegex(ValueError, "duplicate worker_id"):
         harness.register_worker_from_discovery(
             "rollout_0",
             "rollout",
-            port=harness.servers["rollout_0"].bound_port,
+            port=harness.servers["rollout_1"].bound_port,
             override=False,
         )
+      with self.assertRaisesRegex(ValueError, "duplicate worker_id"):
+        harness.register_worker_from_discovery(
+            "trainer_0",
+            "trainer",
+            port=harness.servers["trainer_0"].bound_port,
+            override=False,
+        )
+      self.assertEqual(
+          harness.orchestrator.registry.handle("rollout_0").target_address,
+          f"grpc://localhost:{rollout_0_port}",
+      )
       hb = harness.orchestrator.registry.handle("rollout_0").submit("heartbeat")
       self.assertEqual(hb.state, datatypes.WorkerState.PENDING)
 

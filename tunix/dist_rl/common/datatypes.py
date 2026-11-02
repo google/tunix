@@ -170,6 +170,26 @@ _ALLOWED_TRANSITIONS: dict[WorkerState, set[WorkerState]] = {
 }
 
 
+class AdmissionStatus(enum.Enum):
+  """Control-plane admission status of a registered worker.
+
+  Tracked by the orchestrator to decide which workers may receive data-plane
+  traffic. Distinct from `WorkerState`, the lifecycle state a worker
+  self-reports via `heartbeat()`: a worker can report `READY` while still
+  `PENDING_WEIGHT_SYNC` here.
+
+  Attributes:
+    REGISTERED: Registered but not yet brought up by `LifecycleDriver`.
+    PENDING_WEIGHT_SYNC: Brought up and awaiting its first committed weight
+      sync; a weight sync destination but not routable.
+    ACTIVE: Routable by the data plane.
+  """
+
+  REGISTERED = "registered"
+  PENDING_WEIGHT_SYNC = "pending_weight_sync"
+  ACTIVE = "active"
+
+
 @dataclasses.dataclass(kw_only=True)
 class HealthReport:
   """A snapshot of a worker's health and readiness state.
@@ -231,11 +251,8 @@ class FaultToleranceConfig:
       worker, and an evicted worker whose process is still alive never
       re-registers (rollout workers register with discovery only once at
       startup), so a transient fault on a healthy worker permanently shrinks the
-      rollout pool. Until dynamic worker rejoin lands, an evicted worker's id is
-      also rejected if it tries to re-register
-      (`WorkerRegistry.unregister_handle`), so a restarted worker never receives
-      tasks without bring-up and weight sync. When `False`, fault tolerance is
-      disabled and `effective_max_task_retries` is `0`.
+      rollout pool. When `False`, fault tolerance is disabled and
+      `effective_max_task_retries` is `0`.
     max_task_retries: Maximum number of times an in-flight task is re-dispatched
       onto surviving workers after a worker failure when `enabled=True`. Because
       each send-path or poll-path transport failure evicts the failing worker in
