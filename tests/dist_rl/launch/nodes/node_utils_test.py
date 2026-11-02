@@ -165,6 +165,7 @@ class ServeWorkerTest(absltest.TestCase):
       self,
       *,
       drain_fn: Callable[[], Awaitable[None] | None] | None = None,
+      close_fn: Callable[[], None] | None = None,
       signal_to_send: signal.Signals | None = signal.SIGTERM,
   ) -> None:
     """Runs `serve_worker`, firing `signal_to_send`'s handler once attached.
@@ -175,6 +176,7 @@ class ServeWorkerTest(absltest.TestCase):
 
     Args:
       drain_fn: Passed through to `serve_worker`.
+      close_fn: Passed through to `serve_worker`.
       signal_to_send: Signal whose registered handler is invoked, or None.
     """
 
@@ -201,6 +203,7 @@ class ServeWorkerTest(absltest.TestCase):
                 port=20001,
                 extra_metadata={"trajectory_store_config": {"backend": "file"}},
                 drain_fn=drain_fn,
+                close_fn=close_fn,
             )
         )
         if signal_to_send is None:
@@ -256,10 +259,42 @@ class ServeWorkerTest(absltest.TestCase):
         "discovery down"
     )
     drain = mock.Mock(return_value=None)
+    close = mock.Mock(return_value=None)
     with self.assertRaisesRegex(RuntimeError, "discovery down"):
-      self._serve(drain_fn=drain)
+      self._serve(drain_fn=drain, close_fn=close)
     drain.assert_called_once_with()
     self.server.stop_serving.assert_called_once()
+    close.assert_called_once_with()
+
+  def test_drains_then_stops_serving_then_closes(self):
+    calls: list[str] = []
+
+    def _drain() -> None:
+      calls.append("drain")
+
+    def _stop_serving() -> None:
+      calls.append("stop_serving")
+
+    def _close() -> None:
+      calls.append("close")
+
+    self.server.stop_serving.side_effect = _stop_serving
+    self._serve(drain_fn=_drain, close_fn=_close)
+    self.assertEqual(calls, ["drain", "stop_serving", "close"])
+
+  def test_closes_and_raises_when_stop_serving_fails(self):
+    self.server.stop_serving.side_effect = RuntimeError("stop failed")
+    close = mock.Mock(return_value=None)
+    with self.assertRaisesRegex(RuntimeError, "stop failed"):
+      self._serve(close_fn=close)
+    close.assert_called_once_with()
+
+  def test_close_failure_raises_after_stop_serving(self):
+    close = mock.Mock(side_effect=RuntimeError("close failed"))
+    with self.assertRaisesRegex(RuntimeError, "close failed"):
+      self._serve(close_fn=close, signal_to_send=signal.SIGINT)
+    self.server.stop_serving.assert_called_once()
+    close.assert_called_once_with()
 
 
 class LoadHfTokenizerTest(absltest.TestCase):

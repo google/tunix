@@ -192,8 +192,12 @@ async def serve_worker(
     port: int,
     extra_metadata: Mapping[str, object] | None = None,
     drain_fn: Callable[[], Awaitable[None] | None] | None = None,
+    close_fn: Callable[[], None] | None = None,
 ) -> None:
   """Starts the gRPC server, registers with discovery, and drains on signal.
+
+  On SIGINT/SIGTERM (or cancellation) the worker shuts down in this order:
+  `drain_fn`, `server.stop_serving()`, then `close_fn`.
 
   Args:
     worker_service: Worker RPC service exposed by `GrpcRemoteExecutionServer`.
@@ -202,13 +206,18 @@ async def serve_worker(
     worker_id_str: Registered worker id.
     port: gRPC port to listen on.
     extra_metadata: Optional extra fields merged into the discovery metadata.
-    drain_fn: Optional sync or async drain callback run before `stop_serving`.
+    drain_fn: Optional sync or async callback run before `stop_serving`, e.g. to
+      cancel long-running work so in-flight RPCs return.
+    close_fn: Optional sync callback run after `stop_serving` has cancelled the
+      queued RPCs and waited for the running one, e.g. to release resources
+      those RPCs use. Runs even if `stop_serving` fails; its own failure
+      propagates.
   """
   server = remote_execution.GrpcRemoteExecutionServer(worker_service)
   await server.start_serving_async(port)
   logging.info("Serving %s worker on port %d.", role, port)
   # Everything after `start_serving_async` is inside the `try`, so the server is
-  # always drained and stopped, even if discovery registration fails.
+  # always drained, stopped, and closed, even if discovery registration fails.
   try:
     metadata: dict[str, object] = {
         "service_type": role,
@@ -234,6 +243,8 @@ async def serve_worker(
   except asyncio.CancelledError:
     pass
   finally:
+    # TODO(noghabi): Let `drain_fn` failures propagate too, once `stop_serving`
+    # and `close_fn` have run (check the rollout's drain first).
     if drain_fn is not None:
       logging.info("Draining %s worker...", role)
       try:
@@ -243,7 +254,13 @@ async def serve_worker(
         logging.info("%s worker drained.", role.capitalize())
       except Exception:  # pylint: disable=broad-exception-caught
         logging.exception("Failed to drain %s worker cleanly.", role)
-    await server.stop_serving()
+    try:
+      await server.stop_serving()
+    finally:
+      if close_fn is not None:
+        logging.info("Closing %s worker...", role)
+        close_fn()
+        logging.info("%s worker closed.", role.capitalize())
 
 
 # TODO(noghabi): Delegate to `tunix.utils.mesh.create_mesh` with

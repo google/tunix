@@ -66,7 +66,7 @@ class TrainerMainTest(absltest.TestCase):
         )
     )
 
-  def test_main_builds_worker_and_serves_with_drain(self):
+  def test_main_builds_worker_and_serves_with_close(self):
     trainer.main(
         ["cluster_config.ports.trainer=20050"], context=self.mock_context
     )
@@ -86,8 +86,9 @@ class TrainerMainTest(absltest.TestCase):
     self.assertEqual(serve_kwargs["role"], "trainer")
     self.assertEqual(serve_kwargs["worker_id_str"], trainer.LOCAL_WORKER_ID)
     self.assertEqual(serve_kwargs["port"], 20050)
-    # The drain callback stops the worker and discards its `Response`.
-    self.assertIsNone(serve_kwargs["drain_fn"]())
+    # The worker is stopped after the gRPC server, not drained before it.
+    self.assertNotIn("drain_fn", serve_kwargs)
+    self.assertIsNone(serve_kwargs["close_fn"]())
     self.mock_worker_service.stop.assert_called_once_with()
 
   def test_k8s_target_registers_with_k8s_trainer_id(self):

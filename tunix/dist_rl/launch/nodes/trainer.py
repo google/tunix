@@ -635,9 +635,12 @@ def main(
       execution_context=mesh,
   )
 
-  # Drain on SIGTERM/SIGINT so that TrainerWorker.stop() -> PeftTrainerV2.close()
-  # runs and blocks until every in-flight async op is finished.
-  def _drain() -> None:
+  # On SIGTERM/SIGINT, stop the gRPC server first: `stop_serving` cancels the
+  # queued RPCs and waits for the one running on the worker thread (e.g.
+  # `fwd_bwd`, `update`, or `save_checkpoint`). Only then close the worker
+  # (`TrainerWorker.stop()` -> `PeftTrainerV2.close()`), which blocks until the
+  # async checkpoint saves are finished.
+  def _close() -> None:
     worker_service.stop()
 
   asyncio.run(
@@ -647,7 +650,7 @@ def main(
           role="trainer",
           worker_id_str=worker_id,
           port=port,
-          drain_fn=_drain,
+          close_fn=_close,
       )
   )
 
