@@ -272,6 +272,39 @@ weight_sync_config:
           "agentic_grpo_config.trajectory_group_order=prompt_arrival",
       ])
 
+  def test_weight_sync_requires_matching_maxtext_sources(self):
+    maxtext_actor = [
+        "actor_model_config.model_source=maxtext",
+        "actor_model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+    ]
+    with self.assertRaisesRegex(
+        ValueError,
+        "must both be 'maxtext' or both not; got 'maxtext' and 'huggingface'",
+    ):
+      resolve_config.initialize(
+          ["weight_sync_config.mode=raiden", *maxtext_actor]
+      )
+    with self.assertRaisesRegex(ValueError, "got 'huggingface' and 'maxtext'"):
+      resolve_config.initialize([
+          "weight_sync_config.mode=fallback",
+          "rollout_model_config.model_source=maxtext",
+      ])
+    # Without weight sync the two sources are independent.
+    hp = resolve_config.initialize(maxtext_actor)
+    self.assertEqual(
+        hp.config["rollout_model_config"]["model_source"], "huggingface"
+    )
+    # `model_config.model_source` sets both roles.
+    hp = resolve_config.initialize([
+        "weight_sync_config.mode=raiden",
+        "model_config.model_source=maxtext",
+        "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+    ])
+    self.assertEqual(hp.config["actor_model_config"]["model_source"], "maxtext")
+    self.assertEqual(
+        hp.config["rollout_model_config"]["model_source"], "maxtext"
+    )
+
   def test_null_sampler_is_resolves_to_none(self):
     grpo = resolve_config.initialize([]).config["agentic_grpo_config"]
     self.assertEqual(grpo["sampler_is"], "token")

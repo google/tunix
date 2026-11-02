@@ -329,6 +329,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
       hp.config_mapping("weight_sync_config")["mode"],
       tuple(mode.value for mode in weight_sync.WeightSyncMode),
   )
+  _validate_maxtext_pairing(hp)
   if grpo["reward_mode"] == "reward_fn" and not hp.config["reward_functions"]:
     raise ValueError(
         "agentic_grpo_config.reward_mode='reward_fn' needs at least one entry"
@@ -363,6 +364,40 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
           f" ({trajectories}) must be divisible by"
           f" rl_training_config.train_micro_batch_size ({micro_batch})."
       )
+
+
+def _validate_maxtext_pairing(hp: cli_config.HyperParameters) -> None:
+  """Requires a MaxText trainer and a MaxText rollout, or neither.
+
+  `model_source: maxtext` selects MaxText's model implementation, and with it
+  MaxText's parameter names; other sources load the same checkpoint into Tunix
+  or vLLM implementations, whose names differ. Weight sync pairs trainer and
+  rollout parameters by name, so both mixes pair nothing: a MaxText trainer
+  with a non-MaxText rollout (e.g. only `actor_model_config.model_source` set),
+  and a Tunix trainer with vLLM's `MaxTextForCausalLM`. Set
+  `model_config.model_source` to set both roles.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    ValueError: If weight sync is on and exactly one of
+      `actor_model_config.model_source` and `rollout_model_config.model_source`
+      is "maxtext".
+  """
+  mode = hp.config_mapping("weight_sync_config")["mode"]
+  if mode == weight_sync.WeightSyncMode.NONE.value:
+    return
+  actor_source = hp.config_mapping("actor_model_config")["model_source"]
+  rollout_source = hp.config_mapping("rollout_model_config")["model_source"]
+  if (actor_source == "maxtext") != (rollout_source == "maxtext"):
+    raise ValueError(
+        f"weight_sync_config.mode={mode!r} pairs trainer and rollout tensors by"
+        " name, so actor_model_config.model_source and"
+        " rollout_model_config.model_source must both be 'maxtext' or both"
+        f" not; got {actor_source!r} and {rollout_source!r}. Set"
+        " model_config.model_source to set both."
+    )
 
 
 # Rollout settings promoted from the free-form `vllm_config.kwargs` to typed
