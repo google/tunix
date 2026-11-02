@@ -1091,16 +1091,66 @@ stop_eval() {
   else
     kubectl delete jobset "${eval_name}" -n "${eval_ns}" --ignore-not-found=true || true
     kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${eval_name}" -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
+    local _wait_js_sel="jobset.sigs.k8s.io/jobset-name=${eval_name}"
     if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
       kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((ROLLOUT_REPLICAS - 1))) -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
       for ((i=0; i<ROLLOUT_REPLICAS; i++)); do
         kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${eval_name}-${i}" -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
       done
+      _wait_js_sel="jobset.sigs.k8s.io/jobset-name in (${eval_name},$(seq -s ',' -f "${eval_name}-%g" 0 $((ROLLOUT_REPLICAS - 1))))"
     fi
+    # Wait for JobSet pods to finish terminating first so dying workers cannot create late SandboxClaims.
+    for ((_w=0; _w<90; _w++)); do
+      local _rem_pods
+      _rem_pods=$(kubectl get pods -n "${eval_ns}" -l "${_wait_js_sel}" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+      if [[ "${_rem_pods:-0}" == "0" ]]; then
+        break
+      fi
+      if (( _w % 5 == 0 )); then
+        echo "Waiting for ${_rem_pods} ${eval_name} pod(s) to terminate in ${eval_ns}..."
+      fi
+      sleep 2
+    done
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
       echo "Cleaning up sandboxes and warmpools for ${eval_job_prefix} (run_id=${sandbox_run_id}) in ${SANDBOX_NAMESPACE}..."
-      "${PYTHON_BIN:-$PYTHON}" -m agent_sandbox_rl.reaper --run-id "${sandbox_run_id}" --namespace "${SANDBOX_NAMESPACE}" 2>/dev/null || true
-      "${PYTHON_BIN:-$PYTHON}" - "${SANDBOX_NAMESPACE}" "${sandbox_run_id}" "${eval_job_prefix}" <<'PYEOF' || true
+      "${PYTHON_BIN:-$PYTHON}" - \
+        "${SANDBOX_NAMESPACE}" \
+        "${sandbox_run_id}" \
+        "${eval_job_prefix}" \
+        "${SERVICE_ACCOUNT:-xpk-sa}" \
+        "${PRIORITY_CLASS:-medium}" \
+        "${SANDBOX_NODE_SELECTOR_KEY:-cloud.google.com/gke-nodepool}" \
+        "${SANDBOX_NODE_SELECTOR_VAL:-sandbox-cpu-pool}" \
+        "${SANDBOX_REAPER_IMAGE:-${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/sanbao/trellis:latest}}" \
+        <<'PYEOF' || true
+import json, subprocess, sys, time
+
+ns, run_id, job_prefix, sa_name, prio_class, ns_key, ns_val, reaper_img = sys.argv[1:9]
+selectors = [f"agent-sandbox-rl-run={run_id}", f"app.kubernetes.io/created-by={job_prefix}"]
+
+def count_remaining():
+  counts = {}
+  for kind in ("sandboxclaims", "sandboxwarmpools", "sandboxes", "sandboxtemplates", "pods"):
+    seen = set()
+    for sel in selectors:
+      q_sel = f"{sel},app!=agent-sandbox-rl-reaper" if kind == "pods" else sel
+      res = subprocess.run(
+          ["kubectl", "get", kind, "-n", ns, "-l", q_sel, "-o", "jsonpath={.items[*].metadata.name}"],
+          capture_output=True, text=True, check=False,
+      )
+      if res.returncode == 0 and res.stdout.strip():
+        seen.update(res.stdout.split())
+    counts[kind] = len(seen)
+  return counts
+
+initial = count_remaining()
+if sum(initial.values()) == 0:
+  print(f"No leftover sandbox resources found for run_id={run_id} (job_prefix={job_prefix}).")
+  sys.exit(0)
+
+print(f"Found sandbox resources for run_id={run_id}: {initial}; launching in-cluster reaper pod as {sa_name}...")
+reaper_pod = f"reaper-{run_id}-{int(time.time())}"
+inner_script = r"""
 import json, subprocess, sys
 
 ns, run_id, job_prefix = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -1144,33 +1194,93 @@ for sb_name in sorted(claim_sandboxes):
     except Exception:
       pass
 
+subprocess.run(
+    [sys.executable, "-m", "agent_sandbox_rl.reaper", "--run-id", run_id, "--namespace", ns],
+    check=False,
+)
+
+def kdel(args):
+  r = subprocess.run(["kubectl", "delete", *args], capture_output=True, text=True, check=False)
+  if r.returncode != 0 and r.stderr.strip():
+    print(f"kubectl delete {' '.join(args)} stderr: {r.stderr.strip()}", file=sys.stderr)
+
 for kind in ("sandboxclaims", "sandboxwarmpools"):
   for sel in selectors:
-    subprocess.run(
-        ["kubectl", "delete", kind, "-n", ns, "-l", sel, "--ignore-not-found=true"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-    )
+    kdel([kind, "-n", ns, "-l", sel, "--ignore-not-found=true"])
 if claim_sandboxes:
-  subprocess.run(
-      ["kubectl", "delete", "sandbox", *sorted(claim_sandboxes), "-n", ns, "--ignore-not-found=true"],
-      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-  )
+  kdel(["sandbox", *sorted(claim_sandboxes), "-n", ns, "--ignore-not-found=true"])
 for p_sel in sorted(pool_selectors):
-  subprocess.run(
-      ["kubectl", "delete", "sandboxes", "-n", ns, "-l", p_sel, "--ignore-not-found=true"],
-      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-  )
+  kdel(["sandboxes", "-n", ns, "-l", p_sel, "--ignore-not-found=true"])
 for sel in selectors:
   for kind in ("sandboxes", "sandboxtemplates"):
-    subprocess.run(
-        ["kubectl", "delete", kind, "-n", ns, "-l", sel, "--ignore-not-found=true"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-    )
+    kdel([kind, "-n", ns, "-l", sel, "--ignore-not-found=true"])
 for pod_sel in sorted(sb_pod_selectors | set(selectors)):
+  kdel(["pods", "-n", ns, "-l", f"{pod_sel},app!=agent-sandbox-rl-reaper", "--force", "--grace-period=0", "--ignore-not-found=true"])
+print(f"In-cluster reaper finished for run_id={run_id}.")
+"""
+
+pod_manifest = {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": {
+        "name": reaper_pod,
+        "namespace": ns,
+        "labels": {
+            "app": "agent-sandbox-rl-reaper",
+            "reaper-target-run": run_id,
+        },
+    },
+    "spec": {
+        "serviceAccountName": sa_name,
+        "priorityClassName": prio_class,
+        "restartPolicy": "Never",
+        "containers": [{
+            "name": "reaper",
+            "image": reaper_img,
+            "imagePullPolicy": "IfNotPresent",
+            "command": ["/opt/venv/bin/python3", "-c", inner_script, ns, run_id, job_prefix],
+            "resources": {
+                "requests": {"cpu": "1", "memory": "2Gi"},
+                "limits": {"cpu": "2", "memory": "4Gi"},
+            },
+        }],
+    },
+}
+if ns_key and ns_val:
+  pod_manifest["spec"]["nodeSelector"] = {ns_key: ns_val}
+
+try:
+  apply_res = subprocess.run(
+      ["kubectl", "apply", "-f", "-"],
+      input=json.dumps(pod_manifest),
+      capture_output=True, text=True, check=False,
+  )
+  if apply_res.returncode != 0:
+    print(f"Warning: failed to create in-cluster reaper pod ({apply_res.stderr.strip()}); attempting host cleanup.", file=sys.stderr)
+    subprocess.run([sys.executable, "-c", inner_script, ns, run_id, job_prefix], check=False)
+  else:
+    for _ in range(150):
+      st = subprocess.run(
+          ["kubectl", "get", "pod", reaper_pod, "-n", ns, "-o", "jsonpath={.status.phase}"],
+          capture_output=True, text=True, check=False,
+      )
+      phase = st.stdout.strip()
+      if phase in ("Succeeded", "Failed"):
+        break
+      time.sleep(2)
+    logs = subprocess.run(["kubectl", "logs", reaper_pod, "-n", ns], capture_output=True, text=True, check=False)
+    if logs.stdout.strip():
+      print(logs.stdout.strip())
+    if logs.stderr.strip():
+      print(logs.stderr.strip(), file=sys.stderr)
+finally:
   subprocess.run(
-      ["kubectl", "delete", "pods", "-n", ns, "-l", pod_sel, "--force", "--grace-period=0", "--ignore-not-found=true"],
+      ["kubectl", "delete", "pod", reaper_pod, "-n", ns, "--force", "--grace-period=0", "--ignore-not-found=true"],
       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
   )
+
+final_counts = count_remaining()
+print(f"Post-reap sandbox resource counts for run_id={run_id}: {final_counts}")
 PYEOF
     fi
   fi

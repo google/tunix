@@ -378,11 +378,23 @@ class EvalTest(unittest.TestCase):
     self.assertIn('JOB_PREFIX=\\"${eval_job_prefix}\\"', start_body)
     self.assertIn("agent-sandbox-rl-run=${sandbox_run_id}", stop_body)
     self.assertIn("app.kubernetes.io/created-by=${eval_job_prefix}", stop_body)
+    self.assertIn("Waiting for ${_rem_pods} ${eval_name} pod(s) to terminate", stop_body)
+    self.assertIn('"serviceAccountName": sa_name', stop_body)
+    self.assertIn("agent_sandbox_rl.reaper", stop_body)
 
     worker_text = (RECIPE / "eval_worker.py").read_text()
     self.assertIn("if a.scaffold not in openhands_template.OPENHANDS_SCAFFOLDS:", worker_text)
     self.assertIn("warm_on_init=False", worker_text)
     self.assertIn("teardown_on_exit=False", worker_text)
+
+  def test_openhands_adapter_and_sdk_imports_available(self):
+    from agent_sandbox_rl.adapters import openhands as oh_adapter
+    from openhands.sdk.workspace import RemoteWorkspace
+    from openhands_k8s_agent_sandbox import AgentSandboxWorkspace
+
+    self.assertTrue(issubclass(AgentSandboxWorkspace, RemoteWorkspace))
+    self.assertTrue(callable(oh_adapter.make_fleet_workspace))
+    self.assertTrue(callable(oh_adapter.make_handle_workspace))
 
 
 class RpcTest(unittest.IsolatedAsyncioTestCase):
