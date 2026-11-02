@@ -265,7 +265,7 @@ def request_fields(a, entry, index, attempt):
 
   instance_id = str(entry["instance_id"])
   prompt_id = f"eval_{index}"
-  max_context_limit = getattr(a, "max_context_limit", 0)
+  max_context_limit = a.max_context_limit
   return {
       "request_id": f"{prompt_id}_{attempt}",
       "prompt_id": prompt_id,
