@@ -699,10 +699,10 @@ def extract_answer(passage: str):
 
 def replica_seed(args: argparse.Namespace) -> int | None:
   """Derives the per-replica 32-bit vLLM engine seed from --seed and --worker_id."""
-  seed = getattr(args, "seed", None)
+  seed = args.seed
   if seed is None:
     return None
-  worker_id = str(getattr(args, "worker_id", "") or "")
+  worker_id = str(args.worker_id or "")
   suffix = worker_id.rsplit("-", 1)[-1]
   replica_idx = int(suffix) if (suffix.isascii() and suffix.isdigit()) else 0
   return (int(seed) + replica_idx) % (2**32)
