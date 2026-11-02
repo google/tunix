@@ -27,6 +27,7 @@
 set -Eeuo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/legacy_env.sh"
 
 usage() {
   echo "Usage: $0 [start|stop|orchestrator|trainer|rollout] [--dry-run]" \
@@ -65,6 +66,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+fail_on_legacy_launcher_env
 resolve_config_or_die "${CONFIG_ARGS[@]}"
 
 case "${CLUSTER_TARGET}" in

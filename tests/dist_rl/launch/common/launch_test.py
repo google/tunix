@@ -162,6 +162,35 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertNotIn("unbound variable", res.stderr)
     self.assertNotIn("Trainer command:", res.stdout)
 
+  def test_legacy_launcher_env_vars_fail_fast(self):
+    args = [
+        "--dry-run",
+        "cluster_config.target=local",
+        "agentic_grpo_config.beta=0.0",
+    ]
+    res = self._run_launch(
+        args, extra_env={"MODEL_NAME": "Qwen3-8B", "MAX_STEPS": "2"}
+    )
+    self.assertNotEqual(res.returncode, 0)
+    self.assertIn(
+        "old example launchers are set: MAX_STEPS MODEL_NAME", res.stderr
+    )
+    self.assertIn("rl_training_config.max_steps=2", res.stderr)
+    self.assertNotIn("Trainer command:", res.stdout)
+    # An empty variable is not a setting.
+    res = self._run_launch(args, extra_env={"MODEL_NAME": ""})
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    self.assertIn("Trainer command:", res.stdout)
+
+  def test_legacy_launcher_env_vars_exclude_driver_inputs(self):
+    text = (LAUNCH_DIR / "legacy_env.sh").read_text()
+    body = text.split("LEGACY_LAUNCHER_ENV_VARS=(", 1)[1].split(")", 1)[0]
+    legacy = re.findall(r"^\s*([A-Z][A-Z0-9_]*)\s*$", body, re.MULTILINE)
+    self.assertNotEmpty(legacy)
+    self.assertEqual(legacy, sorted(set(legacy)))
+    # Variables the drivers read from the caller's environment stay usable.
+    self.assertEmpty(set(legacy) & _ENV_PASSTHROUGH)
+
   def test_drivers_refuse_direct_invocation(self):
     for script in ("local.sh", "k8s.sh"):
       with self.subTest(script=script):
