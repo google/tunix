@@ -195,37 +195,6 @@ def _inherits(
   return key in base and role[key] == base[key]
 
 
-def normalize_argv(
-    argv: Sequence[str],
-    default_base_config: str | pathlib.Path,
-) -> list[str]:
-  """Normalizes `argv` into `[entry_point, base_yaml_path, *overrides]`.
-
-  Args:
-    argv: Command-line arguments. The first element is treated as the entry
-      point when it neither ends in `.yaml`/`.yml` nor contains `=`; otherwise
-      `"resolve_config"` is used. The next element is the base YAML when it does
-      not contain `=`.
-    default_base_config: Base YAML used when `argv` does not name one, or names
-      a file with the same basename.
-
-  Returns:
-    The normalized argument list.
-  """
-  args = list(argv)
-  entry_point = "resolve_config"
-  if args and not args[0].endswith((".yaml", ".yml")) and "=" not in args[0]:
-    entry_point = args[0] or "resolve_config"
-    args = args[1:]
-
-  default_path = pathlib.Path(default_base_config)
-  if not args or "=" in args[0]:
-    return [entry_point, str(default_path)] + args
-  if args[0] == default_path.name:
-    return [entry_point, str(default_path)] + args[1:]
-  return [entry_point, args[0]] + args[1:]
-
-
 def yaml_key_to_env_key(s: str) -> str:
   return _TUNIX_PREFIX + s.upper()
 
@@ -576,7 +545,6 @@ class HyperParameters:
 
   Optional keyword-only flags (all off by default; existing CLI behavior is
   unchanged when they are off):
-  * `default_base_config`: Base YAML used when `argv` does not name one.
   * `merge_replace_keys`: Deep-merge instead of replace. Allows multiple
     `override_config_file=` arguments, disables `replace_keys`, and merges
     `model_config` into role configs per nested sub-key while preserving
@@ -610,7 +578,6 @@ class HyperParameters:
       self,
       argv: Sequence[str],
       *,
-      default_base_config: str | pathlib.Path | None = None,
       merge_replace_keys: bool = False,
       validate_nested: bool = False,
       **kwargs: object,
@@ -620,9 +587,7 @@ class HyperParameters:
     dotenv.load_dotenv()
     raw_keys = collections.OrderedDict()
 
-    if default_base_config is not None:
-      argv = normalize_argv(argv, default_base_config)
-    elif len(argv) < 2 or "=" in argv[1]:
+    if len(argv) < 2 or "=" in argv[1]:
       raise ValueError(
           "The first argument must be a path to a base config file."
       )
@@ -1632,14 +1597,12 @@ class HyperParameters:
 def initialize(
     argv: Sequence[str],
     *,
-    default_base_config: str | pathlib.Path | None = None,
     merge_replace_keys: bool = False,
     validate_nested: bool = False,
     **kwargs: object,
 ) -> HyperParameters:
   return HyperParameters(
       argv,
-      default_base_config=default_base_config,
       merge_replace_keys=merge_replace_keys,
       validate_nested=validate_nested,
       **kwargs,

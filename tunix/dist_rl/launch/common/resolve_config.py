@@ -15,10 +15,11 @@
 """Distributed RL configuration resolver built on `tunix.cli.config.HyperParameters`.
 
 Provides:
-1. `DistHyperParameters` / `initialize(argv)`: Validated configuration loaded
-   from `base_dist_config.yaml`, task/recipe override files, and
-   `section.key=value` overrides. Used directly by the bash launchers, worker
-   nodes, and orchestrator (lightweight; no training imports).
+1. `DistHyperParameters` / `initialize(overrides)`: Validated configuration
+   loaded from `base_dist_config.yaml`, task/recipe override files, and
+   `section.key=value` overrides (no program name; see `_dist_argv`). Used
+   directly by the bash launchers, worker nodes, and orchestrator
+   (lightweight; no training imports).
 2. `render_bash_exports(hp)`: Emits shell environment variables for `local.sh`
    and `k8s.sh` (ports, TPU chip IDs, K8s JobSet parameters, and artifact/model
    paths).
@@ -35,7 +36,7 @@ import os
 import pathlib
 import shlex
 import sys
-from typing import Any, Final, TypedDict
+from typing import Any, Final
 
 from tunix.cli import config as cli_config
 from tunix.common import datatypes as common_datatypes
@@ -47,26 +48,42 @@ REPO_ROOT = LAUNCH_DIR.parents[3]
 DEFAULT_BASE_CONFIG_PATH = LAUNCH_DIR / "base_dist_config.yaml"
 
 
-class DistInitKwargs(TypedDict):
-  """`HyperParameters.__init__` options shared by the dist config classes."""
-
-  default_base_config: pathlib.Path
-  merge_replace_keys: bool
-  validate_nested: bool
+# Program name (`argv[0]`) that `DistHyperParameters` passes to
+# `HyperParameters`; dist callers pass overrides only.
+_DIST_PROG: Final[str] = "dist_rl"
 
 
-DIST_INIT_KWARGS: Final[DistInitKwargs] = {
-    "default_base_config": DEFAULT_BASE_CONFIG_PATH,
-    "merge_replace_keys": True,
-    "validate_nested": True,
-}
+def _dist_argv(overrides: Sequence[str]) -> list[str]:
+  """Returns the `HyperParameters` argv for the dist `overrides`.
+
+  The agentic CLI passes `[prog, base_yaml, *overrides]` from its command line.
+  Dist callers pass overrides only, so the program name (`_DIST_PROG`) and the
+  base YAML (`DEFAULT_BASE_CONFIG_PATH`) are prepended here.
+
+  Args:
+    overrides: `section.key=value` and `override_config_file=path` arguments,
+      without a program name or base YAML.
+
+  Returns:
+    `[_DIST_PROG, DEFAULT_BASE_CONFIG_PATH, *overrides]`.
+
+  Raises:
+    ValueError: If an argument has no `=` (a program name or base YAML).
+  """
+  bare = [arg for arg in overrides if "=" not in arg]
+  if bare:
+    raise ValueError(
+        "Expected only 'section.key=value' or 'override_config_file=path'"
+        f" arguments (no program name or base YAML), got {bare}."
+    )
+  return [_DIST_PROG, str(DEFAULT_BASE_CONFIG_PATH), *overrides]
 
 
 def finalize_dist_config(hp: cli_config.HyperParameters) -> None:
   """Applies the distributed RL derived defaults, then validates invariants.
 
   Called at the end of `DistHyperParameters.__init__`, after
-  `HyperParameters.__init__` with `DIST_INIT_KWARGS`.
+  `HyperParameters.__init__`.
 
   Args:
     hp: Loaded configuration; updated in place.
@@ -76,10 +93,17 @@ def finalize_dist_config(hp: cli_config.HyperParameters) -> None:
 
 
 class DistHyperParameters(cli_config.HyperParameters):
-  """`tunix.cli.config.HyperParameters` extended for distributed RL."""
+  """`tunix.cli.config.HyperParameters` extended for distributed RL.
 
-  def __init__(self, argv: Sequence[str]) -> None:
-    super().__init__(argv, **DIST_INIT_KWARGS)
+  Takes overrides only (see `_dist_argv`). Override files and `key=value`
+  arguments deep-merge (`merge_replace_keys`), and every override key must be
+  in the base schema (`validate_nested`).
+  """
+
+  def __init__(self, overrides: Sequence[str]) -> None:
+    super().__init__(
+        _dist_argv(overrides), merge_replace_keys=True, validate_nested=True
+    )
     finalize_dist_config(self)
 
 
@@ -337,9 +361,9 @@ def _check_choice(key: str, value: object, choices: Sequence[str]) -> None:
     raise ValueError(f"{key} must be one of {choices}, got {value!r}.")
 
 
-def initialize(argv: Sequence[str]) -> DistHyperParameters:
-  """Initializes `DistHyperParameters` from `argv` (mirrors `config.initialize`)."""
-  return DistHyperParameters(argv)
+def initialize(overrides: Sequence[str]) -> DistHyperParameters:
+  """Initializes `DistHyperParameters` from overrides only (no program name)."""
+  return DistHyperParameters(overrides)
 
 
 def _bash_quote(val: object) -> str:
@@ -473,7 +497,25 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-  hp = initialize(sys.argv if argv is None else argv)
+  """Prints the bash exports for the config given on the command line.
+
+  Args:
+    argv: Full command line (`sys.argv` when None): the program name, then the
+      overrides.
+
+  Returns:
+    The process exit status.
+
+  Raises:
+    ValueError: If `argv` is empty or starts with an override instead of the
+      program name.
+  """
+  args = sys.argv if argv is None else argv
+  if not args or "=" in args[0]:
+    raise ValueError(
+        f"argv must start with the program name, got {list(args)!r}."
+    )
+  hp = initialize(args[1:])
   sys.stdout.write(render_bash_exports(hp))
   return 0
 

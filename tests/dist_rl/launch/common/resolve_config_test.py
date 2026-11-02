@@ -27,6 +27,31 @@ from tunix.dist_rl.launch.common import resolve_config
 
 class ResolveConfigTest(absltest.TestCase):
 
+  def test_rejects_program_name_or_base_yaml(self):
+    for argv in (
+        ["resolve_config", "batch_size=8"],
+        [str(resolve_config.DEFAULT_BASE_CONFIG_PATH), "batch_size=8"],
+        ["batch_size=8", "bare_token"],
+    ):
+      with self.subTest(argv=argv):
+        with self.assertRaisesRegex(ValueError, "no program name"):
+          resolve_config.initialize(argv)
+
+  def test_main_drops_program_name(self):
+    with mock.patch("sys.stdout") as stdout:
+      self.assertEqual(
+          resolve_config.main(["any_prog", "cluster_config.run_id=main_run"]),
+          0,
+      )
+    rendered = "".join(c.args[0] for c in stdout.write.call_args_list)
+    self.assertIn("export RUN_ID=main_run\n", rendered)
+
+  def test_main_requires_program_name(self):
+    for argv in ([], ["cluster_config.run_id=main_run"]):
+      with self.subTest(argv=argv):
+        with self.assertRaisesRegex(ValueError, "must start with the program"):
+          resolve_config.main(argv)
+
   def test_subclasses_hyperparameters_and_matches_launcher_defaults(self):
     hp = resolve_config.initialize([])
     self.assertIsInstance(hp, cli_config.HyperParameters)
