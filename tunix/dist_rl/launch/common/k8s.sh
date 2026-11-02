@@ -99,6 +99,10 @@ stop_orchestrator() {
   fi
 }
 
+# TODO(noghabi): Pass HF_TOKEN and WANDB_API_KEY to the pods through a
+# Kubernetes Secret. `start_orchestrator`, `start_trainer`, and
+# `start_rollout_instance` write them into the container commands, so they
+# show up in the JobSet / LeaderWorkerSet specs and in `--dry-run` output.
 start_orchestrator() {
   local env_prefix=""
   if [[ -n "${HF_TOKEN:-}" ]]; then
