@@ -236,6 +236,7 @@ role = sys.argv[1]
 docs = list(yaml.safe_load_all(sys.stdin.read()))
 sa = os.getenv("SERVICE_ACCOUNT", "").strip()
 prio = os.getenv("PRIORITY_CLASS", "").strip()
+kueue_prio = os.getenv("KUEUE_PRIORITY_CLASS", "").strip()
 cpu_np = os.getenv("CPU_NODEPOOL", "").strip()
 cpu_mem = os.getenv("CPU_MEMORY", "").strip()
 pw_proxy_args = os.getenv("PATHWAYS_PROXY_EXTRA_ARGS", "").split()
@@ -264,6 +265,12 @@ def upsert_env(env_list, name, value):
 for doc in docs:
   if not isinstance(doc, dict):
     continue
+  if kueue_prio:
+    doc_meta = doc.get("metadata") or {}
+    doc["metadata"] = doc_meta
+    doc_labels = doc_meta.get("labels") or {}
+    doc_meta["labels"] = doc_labels
+    doc_labels.setdefault("kueue.x-k8s.io/priority-class", kueue_prio)
   for rjob in doc.get("spec", {}).get("replicatedJobs", []):
     pod_tmpl = rjob.get("template", {}).get("spec", {}).get("template") or {}
     pod_meta = pod_tmpl.get("metadata") or {}
@@ -301,16 +308,32 @@ for doc in docs:
           for k, v in extra_pw_env.items():
             upsert_env(c_env, k, v)
     elif role == "rollout":
-      vols = pod_spec.setdefault("volumes", [])
-      if not any(v.get("name") == "dshm" for v in vols):
-        vols.append({"name": "dshm", "emptyDir": {"medium": "Memory"}})
+      has_user_ctr = any(
+          c.get("name") not in ("pathways-rm", "pathways-proxy", "pathways-worker")
+          for c in pod_spec.get("containers", [])
+      )
+      if has_user_ctr:
+        vols = pod_spec.setdefault("volumes", [])
+        if not any(v.get("name") == "dshm" for v in vols):
+          vols.append({"name": "dshm", "emptyDir": {"medium": "Memory"}})
       for c in pod_spec.get("containers", []):
+        cname = c.get("name", "")
         c_env = c.setdefault("env", [])
         upsert_env(c_env, "ENABLE_MULTI_NUMA", enable_multi_numa)
         upsert_env(c_env, "TPU_RAIDEN_DATA_NICS", raiden_nics)
-        vmounts = c.setdefault("volumeMounts", [])
-        if not any(m.get("name") == "dshm" for m in vmounts):
-          vmounts.append({"name": "dshm", "mountPath": "/dev/shm"})
+        if cname == "pathways-proxy":
+          if pw_proxy_args:
+            c_args = c.setdefault("args", [])
+            for flag in pw_proxy_args:
+              if flag not in c_args:
+                c_args.append(flag)
+        elif cname == "pathways-worker":
+          for k, v in extra_pw_env.items():
+            upsert_env(c_env, k, v)
+        elif cname != "pathways-rm":
+          vmounts = c.setdefault("volumeMounts", [])
+          if not any(m.get("name") == "dshm" for m in vmounts):
+            vmounts.append({"name": "dshm", "mountPath": "/dev/shm"})
 
 print(yaml.safe_dump_all(docs, sort_keys=False))
 ' "$role"
@@ -905,7 +928,7 @@ start_eval() {
     if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
       eval_job_prefix="${eval_name}-0"
     fi
-    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS=\"${SANDBOX_TOLERATIONS}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ORCHESTRATOR_ID=\"${JOB_PREFIX}\" JOB_PREFIX=\"${eval_job_prefix}\" ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"}"
+    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS=\"${SANDBOX_TOLERATIONS}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ORCHESTRATOR_ID=\"${eval_job_prefix}\" JOB_PREFIX=\"${eval_job_prefix}\" ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"}"
   elif [[ -n "${IMAGE_REWRITE_PREFIX}" ]]; then
     sandbox_env="IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\""
   fi
@@ -955,6 +978,7 @@ start_eval() {
         ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
         ${BOOTSTRAP_CMD:-} \
         ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
+        ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
         ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE} \
         PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS:-${PREFUSE_MOE_WEIGHTS}} \
         ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS:-${PREFUSE_MOE_WEIGHTS}} \
@@ -1034,13 +1058,19 @@ start_eval() {
           --max_warmpool_size=${MAX_WARMPOOL_REPLICAS} \
           --output_dir=${output_dir} \
       " \
-      | apply_manifest
+      | enrich_manifest rollout | apply_manifest
   done
 }
 
 stop_eval() {
   local eval_name="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
   local eval_ns="${EVAL_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
+  local eval_job_prefix="${eval_name}"
+  if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+    eval_job_prefix="${eval_name}-0"
+  fi
+  local sandbox_run_id
+  sandbox_run_id=$("${PYTHON_BIN:-$PYTHON}" -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].strip().encode("utf-8")).hexdigest()[:8])' "${eval_job_prefix}")
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "[DRY RUN] Would delete jobset ${eval_name} in namespace ${eval_ns}"
     if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
@@ -1050,10 +1080,13 @@ stop_eval() {
       done
     fi
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-      echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --ignore-not-found=true"
-      echo "kubectl delete sandboxtemplates -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --ignore-not-found=true"
-      echo "kubectl delete sandboxclaims -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --ignore-not-found=true"
-      echo "kubectl delete pods -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --force --grace-period=0 --ignore-not-found=true"
+      for _sel in "agent-sandbox-rl-run=${sandbox_run_id}" "app.kubernetes.io/created-by=${eval_job_prefix}"; do
+        echo "kubectl delete sandboxclaims -n ${SANDBOX_NAMESPACE} -l ${_sel} --ignore-not-found=true"
+        echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l ${_sel} --ignore-not-found=true"
+        echo "kubectl delete sandboxes -n ${SANDBOX_NAMESPACE} -l ${_sel} --ignore-not-found=true"
+        echo "kubectl delete sandboxtemplates -n ${SANDBOX_NAMESPACE} -l ${_sel} --ignore-not-found=true"
+        echo "kubectl delete pods -n ${SANDBOX_NAMESPACE} -l ${_sel} --force --grace-period=0 --ignore-not-found=true"
+      done
     fi
   else
     kubectl delete jobset "${eval_name}" -n "${eval_ns}" --ignore-not-found=true || true
@@ -1065,11 +1098,80 @@ stop_eval() {
       done
     fi
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-      echo "Cleaning up sandboxes and warmpools for ${JOB_PREFIX} in ${SANDBOX_NAMESPACE}..."
-      kubectl delete sandboxwarmpools -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${JOB_PREFIX}" --ignore-not-found=true 2>/dev/null || true
-      kubectl delete sandboxtemplates -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${JOB_PREFIX}" --ignore-not-found=true 2>/dev/null || true
-      kubectl delete sandboxclaims -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${JOB_PREFIX}" --ignore-not-found=true 2>/dev/null || true
-      kubectl delete pods -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${JOB_PREFIX}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
+      echo "Cleaning up sandboxes and warmpools for ${eval_job_prefix} (run_id=${sandbox_run_id}) in ${SANDBOX_NAMESPACE}..."
+      "${PYTHON_BIN:-$PYTHON}" -m agent_sandbox_rl.reaper --run-id "${sandbox_run_id}" --namespace "${SANDBOX_NAMESPACE}" 2>/dev/null || true
+      "${PYTHON_BIN:-$PYTHON}" - "${SANDBOX_NAMESPACE}" "${sandbox_run_id}" "${eval_job_prefix}" <<'PYEOF' || true
+import json, subprocess, sys
+
+ns, run_id, job_prefix = sys.argv[1], sys.argv[2], sys.argv[3]
+selectors = [f"agent-sandbox-rl-run={run_id}", f"app.kubernetes.io/created-by={job_prefix}"]
+pool_selectors = set()
+claim_sandboxes = set()
+
+def kget(kind, sel):
+  res = subprocess.run(
+      ["kubectl", "get", kind, "-n", ns, "-l", sel, "-o", "json"],
+      capture_output=True, text=True, check=False,
+  )
+  if res.returncode != 0 or not res.stdout.strip():
+    return []
+  try:
+    return json.loads(res.stdout).get("items", [])
+  except Exception:
+    return []
+
+for sel in selectors:
+  for wp in kget("sandboxwarmpools", sel):
+    s = (wp.get("status") or {}).get("selector")
+    if isinstance(s, str) and s.strip():
+      pool_selectors.add(s.strip())
+  for cl in kget("sandboxclaims", sel):
+    sb_name = ((cl.get("status") or {}).get("sandbox") or {}).get("name")
+    if isinstance(sb_name, str) and sb_name.strip():
+      claim_sandboxes.add(sb_name.strip())
+
+sb_pod_selectors = set(pool_selectors)
+for sb_name in sorted(claim_sandboxes):
+  res = subprocess.run(
+      ["kubectl", "get", "sandbox", sb_name, "-n", ns, "-o", "json"],
+      capture_output=True, text=True, check=False,
+  )
+  if res.returncode == 0 and res.stdout.strip():
+    try:
+      ls = (json.loads(res.stdout).get("status") or {}).get("labelSelector")
+      if isinstance(ls, str) and ls.strip():
+        sb_pod_selectors.add(ls.strip())
+    except Exception:
+      pass
+
+for kind in ("sandboxclaims", "sandboxwarmpools"):
+  for sel in selectors:
+    subprocess.run(
+        ["kubectl", "delete", kind, "-n", ns, "-l", sel, "--ignore-not-found=true"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+    )
+if claim_sandboxes:
+  subprocess.run(
+      ["kubectl", "delete", "sandbox", *sorted(claim_sandboxes), "-n", ns, "--ignore-not-found=true"],
+      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+  )
+for p_sel in sorted(pool_selectors):
+  subprocess.run(
+      ["kubectl", "delete", "sandboxes", "-n", ns, "-l", p_sel, "--ignore-not-found=true"],
+      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+  )
+for sel in selectors:
+  for kind in ("sandboxes", "sandboxtemplates"):
+    subprocess.run(
+        ["kubectl", "delete", kind, "-n", ns, "-l", sel, "--ignore-not-found=true"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+    )
+for pod_sel in sorted(sb_pod_selectors | set(selectors)):
+  subprocess.run(
+      ["kubectl", "delete", "pods", "-n", ns, "-l", pod_sel, "--force", "--grace-period=0", "--ignore-not-found=true"],
+      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+  )
+PYEOF
     fi
   fi
 }

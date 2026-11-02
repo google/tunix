@@ -244,6 +244,10 @@ def create_worker(a):
     except Exception:
       pass
 
+  sampling_kwargs = {"skip_special_tokens": False}
+  if a.scaffold not in openhands_template.OPENHANDS_SCAFFOLDS:
+    sampling_kwargs["stop"] = ["</function>"]
+    sampling_kwargs["include_stop_str_in_output"] = True
   config = vllm_sampler.VllmConfig(
       server_mode=True,
       mesh=mesh,
@@ -256,11 +260,7 @@ def create_worker(a):
       additional_config=additional_config,
       engine_kwargs=engine_kwargs,
       eos_tokens=eos_ids,
-      sampling_kwargs={
-          "stop": ["</function>"],
-          "include_stop_str_in_output": True,
-          "skip_special_tokens": False,
-      },
+      sampling_kwargs=sampling_kwargs,
   )
   sampler = inprocess_vllm_sampler.InprocessVllmSampler(
       server_id="deepswe-eval",
@@ -299,6 +299,11 @@ def create_worker(a):
 
   if a.use_agent_sandbox:
     entries = eval_deepswe.load_entries(a)
+    job_id = (
+        os.environ.get("JOB_PREFIX")
+        or os.environ.get("ORCHESTRATOR_ID")
+        or a.worker_id
+    )
     # Populate the fleet plan with all dataset tasks so fleet.acquire claims
     # from the planned warmpools created by the controller's PrewarmDatasetIterator.
     sandbox_utils.init_global_fleet(
@@ -308,6 +313,9 @@ def create_worker(a):
         batch_size=a.batch_size,
         max_warmpool_replicas=a.max_warmpool_size,
         scaffold=a.scaffold,
+        job_id=job_id,
+        warm_on_init=False,
+        teardown_on_exit=False,
     )
   worker = EvaluationWorker(
       worker_id="deepswe-eval",
@@ -358,4 +366,6 @@ async def serve(a):
     try:
       await worker.sampler.stop()
     finally:
-      await asyncio.to_thread(sandbox_utils.teardown_global_fleet)
+      fleet = getattr(sandbox_utils, "_GLOBAL_FLEET", None)
+      if fleet is not None and hasattr(fleet, "release_all"):
+        await asyncio.to_thread(fleet.release_all)

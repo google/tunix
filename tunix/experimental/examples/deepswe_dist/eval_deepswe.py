@@ -22,6 +22,7 @@ the process that needs them.
 import argparse
 import asyncio
 import collections
+import concurrent.futures
 import datetime
 import hashlib
 import json
@@ -30,6 +31,7 @@ import math
 import os
 from pathlib import Path
 import sys
+import threading
 import time
 import uuid
 
@@ -413,11 +415,17 @@ class ResultWriter:
     import fsspec  # pylint: disable=import-outside-toplevel
 
     self.fs, self.root = fsspec.core.url_to_fs(output)
-    self.fs.makedirs(self.root, exist_ok=True)
+    protos = self.fs.protocol
+    if not isinstance(protos, (tuple, list, set)):
+      protos = (protos,)
+    self._is_local_fs = "file" in protos
+    if self._is_local_fs:
+      self.fs.makedirs(self.root, exist_ok=True)
 
   def write(self, name, value):
     path = self.root + "/" + name
-    self.fs.makedirs(path.rsplit("/", 1)[0], exist_ok=True)
+    if self._is_local_fs:
+      self.fs.makedirs(path.rsplit("/", 1)[0], exist_ok=True)
     with self.fs.open(path, "w") as stream:
       json.dump(value, stream, ensure_ascii=False, allow_nan=False)
 
@@ -505,11 +513,34 @@ async def run_controller(a):
   tasks = []
   failure = None
   fleet = None
+  fleet_run_id = None
   entry_stream = entries
+  image_by_instance = {}
+  remaining_by_image = {}
+  record_lock = threading.Lock()
 
   def record(row):
     writer.record(row)
-    all_rows.append(row)
+    completed_img = None
+    with record_lock:
+      all_rows.append(row)
+      img = image_by_instance.get(str(row.get("instance_id", "")))
+      if img and img in remaining_by_image:
+        remaining_by_image[img] -= 1
+        if remaining_by_image[img] <= 0:
+          del remaining_by_image[img]
+          completed_img = img
+    if completed_img:
+      try:
+        if hasattr(entry_stream, "mark_image_completed"):
+          entry_stream.mark_image_completed(completed_img)
+        elif fleet is not None:
+          fleet.unwarm_image(completed_img)
+        logging.info("Unwarmed completed task pool: %s", completed_img)
+      except Exception as exc:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "Failed to unwarm completed pool %s: %s", completed_img, exc
+        )
 
   try:
 
@@ -530,6 +561,11 @@ async def run_controller(a):
     if a.use_agent_sandbox:
       from tunix.experimental.examples.deepswe_dist import sandbox_utils  # pylint: disable=import-outside-toplevel
 
+      job_id = (
+          os.environ.get("JOB_PREFIX")
+          or os.environ.get("ORCHESTRATOR_ID")
+          or a.worker_id
+      )
       fleet = sandbox_utils.init_global_fleet(
           tasks=entries,
           max_concurrency=a.max_concurrent,
@@ -537,17 +573,57 @@ async def run_controller(a):
           batch_size=a.batch_size,
           max_warmpool_replicas=a.max_warmpool_size,
           scaffold=a.scaffold,
+          job_id=job_id,
+          warm_on_init=False,
+          teardown_on_exit=True,
       )
+      fleet_run_id = getattr(fleet, "run_id", None)
+      rewrite_fn = sandbox_utils.get_image_rewrite_fn(
+          getattr(fleet, "_image_rewrite_fn", None)
+      )
+      for entry in entries:
+        raw_img = sandbox_utils.extract_task_image(entry)
+        if raw_img is not None:
+          img_str = sandbox_utils._coerce_str(raw_img)  # pylint: disable=protected-access
+          if rewrite_fn is not None:
+            img_str = rewrite_fn(img_str)
+          inst_id = str(entry["instance_id"])
+          image_by_instance[inst_id] = img_str
+          remaining_by_image[img_str] = (
+              remaining_by_image.get(img_str, 0) + a.num_rollouts_per_instance
+          )
       entry_stream = sandbox_utils.PrewarmDatasetIterator(
           entries,
           fleet=fleet,
           num_generations=a.num_rollouts_per_instance,
           batch_size=a.batch_size,
           max_warmpool_replicas=a.max_warmpool_size,
-          unwarm_on_exhaustion=True,
+          unwarm_on_exhaustion=False,
           scaffold=a.scaffold,
-          wait_initial=True,
+          wait_initial=False,
+          max_staleness=max(1, len(entries)),
       )
+      active_initial = dict(entry_stream._active_replicas)  # pylint: disable=protected-access
+      if active_initial:
+
+        def _warm_initial_parallel():
+          with concurrent.futures.ThreadPoolExecutor(
+              max_workers=min(32, len(active_initial))
+          ) as pool:
+            futs = {
+                pool.submit(
+                    fleet.warm_image, img, replicas_override=reps, wait=True
+                ): img
+                for img, reps in active_initial.items()
+            }
+            for fut in concurrent.futures.as_completed(futs):
+              fut.result()
+
+        logging.info(
+            "Waiting in parallel for %d initial sandbox warmpool(s)...",
+            len(active_initial),
+        )
+        await asyncio.to_thread(_warm_initial_parallel)
     jobs = iter(
         request_fields(a, entry, index, attempt)
         for index, entry in enumerate(entry_stream)
@@ -577,12 +653,6 @@ async def run_controller(a):
     for task in tasks:
       task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
-    if hasattr(entry_stream, "close"):
-      entry_stream.close()
-    if fleet is not None:
-      from tunix.experimental.examples.deepswe_dist import sandbox_utils  # pylint: disable=import-outside-toplevel
-
-      await asyncio.to_thread(sandbox_utils.teardown_global_fleet)
     summary = summarize(
         all_rows,
         [str(e["instance_id"]) for e in entries],
@@ -608,6 +678,25 @@ async def run_controller(a):
       await asyncio.gather(
           *(h.close() for h in handles), return_exceptions=True
       )
+      if hasattr(entry_stream, "close"):
+        await asyncio.to_thread(entry_stream.close)
+      if fleet is not None:
+        from tunix.experimental.examples.deepswe_dist import sandbox_utils  # pylint: disable=import-outside-toplevel
+
+        await asyncio.to_thread(sandbox_utils.teardown_global_fleet)
+      if fleet_run_id:
+        try:
+          from agent_sandbox_rl import reaper as asrl_reaper  # pylint: disable=import-outside-toplevel
+
+          reap_stats = await asyncio.to_thread(
+              asrl_reaper.reap,
+              run_id=fleet_run_id,
+              namespace=os.getenv("NAMESPACE", "trellis"),
+              in_cluster=os.getenv("KUBERNETES_SERVICE_HOST") is not None,
+          )
+          logging.info("Sandbox reaper cleanup stats: %s", reap_stats)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+          logging.warning("Sandbox reaper cleanup note: %s", exc)
     logging.info("Evaluation summary: %s", json.dumps(summary))
   if summary["error_attempts"] or not summary["complete"]:
     raise RuntimeError(

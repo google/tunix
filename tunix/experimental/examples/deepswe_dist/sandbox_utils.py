@@ -42,6 +42,7 @@ def set_runtime_container(target: Any, container_name: str) -> None:
     return
   runtime = getattr(target, "runtime", None) or target
   try:
+    runtime._container = container_name
     runtime._target_container = container_name
     client = getattr(runtime, "client", None)
     if client is not None:
@@ -757,6 +758,8 @@ class PrewarmDatasetIterator:
     self._previous_batch_counts: dict[str, int] = {}
     self._image_counts: dict[str, int] = {}
     self._active_replicas: dict[str, int] = {}
+    self._completed_images: set[str] = set()
+    self._lock = threading.RLock()
     self.unwarm_calls: list[str] = []
     self._exhausted = False
 
@@ -864,46 +867,57 @@ class PrewarmDatasetIterator:
 
   def _interact_fleet(self, wait: bool = False) -> None:
     """Interacts with the fleet to reconcile warm pools with self._image_counts."""
-    desired: dict[str, int] = {}
-    for img, count in self._image_counts.items():
-      if count > 0:
-        reps = count * self.num_generations
-        if self.max_warmpool_replicas is not None:
-          reps = min(reps, self.max_warmpool_replicas)
-        desired[img] = reps
+    with self._lock:
+      desired: dict[str, int] = {}
+      for img, count in self._image_counts.items():
+        if count > 0 and img not in self._completed_images:
+          reps = count * self.num_generations
+          if self.max_warmpool_replicas is not None:
+            reps = min(reps, self.max_warmpool_replicas)
+          desired[img] = reps
 
-    # 1. Warm new keys or scale existing keys (fail loud on errors).
-    for img, target_reps in desired.items():
-      if img not in self._active_replicas:
-        self.fleet.warm_image(img, replicas_override=target_reps, wait=wait)
-        self._active_replicas[img] = target_reps
-        logging.info(
-            "[PrewarmDatasetIterator] Warmed new pool on K8s: %s"
-            " (replicas=%d, wait=%s)",
-            img,
-            target_reps,
-            wait,
-        )
-      elif self._active_replicas[img] != target_reps:
-        self.fleet.set_pool_replicas(img, target_reps)
-        logging.info(
-            "[PrewarmDatasetIterator] Scaled pool on K8s: %s (replicas %d ->"
-            " %d)",
-            img,
-            self._active_replicas[img],
-            target_reps,
-        )
-        self._active_replicas[img] = target_reps
+      # 1. Warm new keys or scale existing keys (fail loud on errors).
+      for img, target_reps in desired.items():
+        if img not in self._active_replicas:
+          self.fleet.warm_image(img, replicas_override=target_reps, wait=wait)
+          self._active_replicas[img] = target_reps
+          logging.info(
+              "[PrewarmDatasetIterator] Warmed new pool on K8s: %s"
+              " (replicas=%d, wait=%s)",
+              img,
+              target_reps,
+              wait,
+          )
+        elif self._active_replicas[img] != target_reps:
+          self.fleet.set_pool_replicas(img, target_reps)
+          logging.info(
+              "[PrewarmDatasetIterator] Scaled pool on K8s: %s (replicas %d ->"
+              " %d)",
+              img,
+              self._active_replicas[img],
+              target_reps,
+          )
+          self._active_replicas[img] = target_reps
 
-    # 2. Delete / unwarm keys no longer in desired (fail loud on errors).
-    to_delete = [img for img in self._active_replicas if img not in desired]
-    for img in to_delete:
-      self.fleet.unwarm_image(img)
-      self.unwarm_calls.append(img)
-      logging.info(
-          "[PrewarmDatasetIterator] Unwarmed retired pool on K8s: %s", img
-      )
-      del self._active_replicas[img]
+      # 2. Delete / unwarm keys no longer in desired (fail loud on errors).
+      to_delete = [img for img in self._active_replicas if img not in desired]
+      for img in to_delete:
+        self.fleet.unwarm_image(img)
+        self.unwarm_calls.append(img)
+        logging.info(
+            "[PrewarmDatasetIterator] Unwarmed retired pool on K8s: %s", img
+        )
+        del self._active_replicas[img]
+
+  def mark_image_completed(self, image: str) -> None:
+    """Marks `image` completed and immediately unwarms its K8s pool."""
+    with self._lock:
+      self._completed_images.add(image)
+      was_active = image in self._active_replicas
+      self._active_replicas.pop(image, None)
+      if was_active or image not in self.unwarm_calls:
+        self.fleet.unwarm_image(image)
+        self.unwarm_calls.append(image)
 
   def __iter__(self) -> PrewarmDatasetIterator:
     return self
@@ -947,17 +961,18 @@ class PrewarmDatasetIterator:
 
   def close(self) -> None:
     """Explicitly tears down active warm pools managed by this iterator."""
-    for img in list(self._active_replicas):
-      self.fleet.unwarm_image(img)
-      self.unwarm_calls.append(img)
-      logging.info(
-          "[PrewarmDatasetIterator] Cleaned up warm pool on K8s: %s", img
-      )
-    self._active_replicas.clear()
-    self._image_counts.clear()
-    self._previous_batches.clear()
-    self._previous_batch_counts.clear()
-    self._current_batch_counts.clear()
-    self._next_batch_counts.clear()
-    self.current_batch.clear()
-    self.next_batch.clear()
+    with self._lock:
+      for img in list(self._active_replicas):
+        self.fleet.unwarm_image(img)
+        self.unwarm_calls.append(img)
+        logging.info(
+            "[PrewarmDatasetIterator] Cleaned up warm pool on K8s: %s", img
+        )
+      self._active_replicas.clear()
+      self._image_counts.clear()
+      self._previous_batches.clear()
+      self._previous_batch_counts.clear()
+      self._current_batch_counts.clear()
+      self._next_batch_counts.clear()
+      self.current_batch.clear()
+      self.next_batch.clear()

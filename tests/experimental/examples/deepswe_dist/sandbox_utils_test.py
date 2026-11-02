@@ -346,6 +346,45 @@ class SandboxUtilsTest(absltest.TestCase):
     self.assertEqual(fleet.active_pools.get("nested_img_B"), 3)
     iterator.close()
 
+  def test_set_runtime_container_and_mark_image_completed(self):
+    client = mock.Mock()
+    runtime = mock.Mock(client=client)
+    env = mock.Mock(runtime=runtime)
+    sandbox_utils.set_runtime_container(env, sandbox_utils.EVAL_CONTAINER_NAME)
+    self.assertEqual(runtime._container, sandbox_utils.EVAL_CONTAINER_NAME)
+    self.assertEqual(
+        runtime._target_container, sandbox_utils.EVAL_CONTAINER_NAME
+    )
+    self.assertEqual(
+        client._default_container, sandbox_utils.EVAL_CONTAINER_NAME
+    )
+
+    fleet = FakeSandboxFleet(FakeFleetConfig(max_warmpool_size=4))
+    dataset = [
+        {"prompt": "p0", "docker_image": "img_A"},
+        {"prompt": "p1", "docker_image": "img_B"},
+        {"prompt": "p2", "docker_image": "img_C"},
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=4,
+        batch_size=1,
+        max_staleness=10,
+    )
+    self.assertEqual(next(iterator)["prompt"], "p0")
+    iterator.mark_image_completed("img_A")
+    self.assertNotIn("img_A", fleet.active_pools)
+    self.assertIn("img_A", fleet.unwarm_calls)
+    # Advancing to subsequent batches must NOT re-warm completed img_A even with high max_staleness.
+    self.assertEqual(next(iterator)["prompt"], "p1")
+    self.assertEqual(next(iterator)["prompt"], "p2")
+    self.assertNotIn("img_A", fleet.active_pools)
+    self.assertEqual(
+        [c[0] for c in fleet.warm_calls].count("img_A"), 1
+    )
+    iterator.close()
+
 
 if __name__ == "__main__":
   absltest.main()

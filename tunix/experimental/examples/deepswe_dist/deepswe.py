@@ -539,18 +539,28 @@ class DeepSWEEnv(swe_env.SWEEnv):
       except Exception:  # pylint: disable=broad-exception-caught
         cmd_files = None
     if is_openhands and self.handle is not None:
+      self.handle.target_container = sandbox_utils.EVAL_CONTAINER_NAME
       self.handle._target_container = sandbox_utils.EVAL_CONTAINER_NAME  # pylint: disable=protected-access
       self.handle._defer_setup_env = True  # pylint: disable=protected-access
     try:
-      self.env = make_fleet_repo_env(
-          self.handle,
-          command_files=cmd_files,
-          step_timeout=self.step_timeout,
-          reward_timeout=self.reward_timeout,
-          verbose=self.verbose,
-      )
+      import inspect  # pylint: disable=g-import-not-at-top
+
+      repo_env_kwargs: dict[str, Any] = {
+          "command_files": cmd_files,
+          "step_timeout": self.step_timeout,
+          "reward_timeout": self.reward_timeout,
+          "verbose": self.verbose,
+      }
+      if is_openhands:
+        try:
+          if "container" in inspect.signature(make_fleet_repo_env).parameters:
+            repo_env_kwargs["container"] = sandbox_utils.EVAL_CONTAINER_NAME
+        except (TypeError, ValueError):
+          pass
+      self.env = make_fleet_repo_env(self.handle, **repo_env_kwargs)
     finally:
       if is_openhands and self.handle is not None:
+        self.handle.target_container = sandbox_utils.RUNTIME_CONTAINER_NAME
         self.handle._target_container = sandbox_utils.RUNTIME_CONTAINER_NAME  # pylint: disable=protected-access
         self.handle._defer_setup_env = False  # pylint: disable=protected-access
     if is_openhands:

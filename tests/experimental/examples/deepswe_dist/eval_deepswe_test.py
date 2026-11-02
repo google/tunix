@@ -344,6 +344,46 @@ class EvalTest(unittest.TestCase):
           row,
       )
 
+  def test_gcs_result_writer_skips_bucket_makedirs(self):
+    fake_fs = mock.MagicMock()
+    fake_fs.protocol = ("gcs", "gs")
+    written = {}
+
+    class _Buf:
+      def __enter__(self):
+        return self
+
+      def __exit__(self, *exc):
+        return False
+
+      def write(self, s):
+        written["payload"] = written.get("payload", "") + s
+
+    fake_fs.open.return_value = _Buf()
+    with mock.patch("fsspec.core.url_to_fs", return_value=(fake_fs, "my-bkt/p")):
+      writer = eval_lib.ResultWriter("gs://my-bkt/p")
+      writer.record(dict(request_id="eval_0_0", instance_id="inst", reward=1))
+    fake_fs.makedirs.assert_not_called()
+    fake_fs.open.assert_called_once_with("my-bkt/p/attempts/eval_0_0.json", "w")
+    self.assertEqual(json.loads(written["payload"])["reward"], 1)
+
+  def test_launcher_and_worker_sandbox_contracts(self):
+    launcher_text = (RECIPE / "k8s_launcher.sh").read_text()
+    start_idx = launcher_text.index("start_eval() {")
+    stop_idx = launcher_text.index("stop_eval() {", start_idx)
+    start_body = launcher_text[start_idx:stop_idx]
+    stop_body = launcher_text[stop_idx:]
+    self.assertIn("| enrich_manifest rollout | apply_manifest", start_body)
+    self.assertIn('ORCHESTRATOR_ID=\\"${eval_job_prefix}\\"', start_body)
+    self.assertIn('JOB_PREFIX=\\"${eval_job_prefix}\\"', start_body)
+    self.assertIn("agent-sandbox-rl-run=${sandbox_run_id}", stop_body)
+    self.assertIn("app.kubernetes.io/created-by=${eval_job_prefix}", stop_body)
+
+    worker_text = (RECIPE / "eval_worker.py").read_text()
+    self.assertIn("if a.scaffold not in openhands_template.OPENHANDS_SCAFFOLDS:", worker_text)
+    self.assertIn("warm_on_init=False", worker_text)
+    self.assertIn("teardown_on_exit=False", worker_text)
+
 
 class RpcTest(unittest.IsolatedAsyncioTestCase):
 
