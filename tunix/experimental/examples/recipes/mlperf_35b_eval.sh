@@ -30,8 +30,8 @@ export SERVICE_ACCOUNT="xpk-sa"
 export CPU_MACHINE="n2d-standard-64"
 
 # Pathways Images and settings (proc + pw-node co-locate on ct5p-hightpu-4t ~425 GiB allocatable)
-export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260920_v2}"
-export PATHWAYS_PROXY_IMAGE="${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260920_v2}"
+export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/sanitized_server:raiden_20261013212200}"
+export PATHWAYS_PROXY_IMAGE="${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/sanitized_proxy_server:raiden_20261013212200}"
 export PATHWAYS_RM_MEMORY="${PATHWAYS_RM_MEMORY:-4G}"
 export PATHWAYS_PROXY_MEMORY="${PATHWAYS_PROXY_MEMORY:-16G}"
 export PATHWAYS_PROXY_MEMORY_LIMIT="${PATHWAYS_PROXY_MEMORY_LIMIT:-140G}"

@@ -489,6 +489,32 @@ class RpcTest(unittest.IsolatedAsyncioTestCase):
             handle, iter([fields]), 1, 10, lambda r: None
         )
 
+  def test_patch_pathways_libtpu_version_check(self):
+    import os
+    from tunix.experimental.examples.deepswe_dist import eval_worker
+    from jax._src import cloud_tpu_init
+    from jax._src.pallas.mosaic import lowering as mosaic_lowering
+
+    fake_orig = lambda v: cloud_tpu_init._parse_version("0.0.44") >= (
+        cloud_tpu_init._parse_version(v)
+    )
+    with (
+        mock.patch.dict(
+            os.environ,
+            {"VLLM_TPU_USING_PATHWAYS": "1", "JAX_PLATFORMS": "proxy,cpu"},
+            clear=False,
+        ),
+        mock.patch.object(cloud_tpu_init, "is_libtpu_at_least", fake_orig),
+        mock.patch.object(mosaic_lowering, "is_libtpu_at_least", fake_orig),
+    ):
+      self.assertFalse(mosaic_lowering.is_libtpu_at_least("0.0.46"))
+      self.assertTrue(eval_worker._patch_pathways_libtpu_version_check())
+      self.assertTrue(eval_worker._patch_pathways_libtpu_version_check())
+      self.assertTrue(cloud_tpu_init.is_libtpu_at_least("0.0.46"))
+      self.assertTrue(mosaic_lowering.is_libtpu_at_least("0.0.46"))
+      self.assertFalse(cloud_tpu_init.is_libtpu_at_least("0.0.50"))
+      self.assertFalse(mosaic_lowering.is_libtpu_at_least("0.1.0"))
+
 
 if __name__ == "__main__":
   unittest.main()

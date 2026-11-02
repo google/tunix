@@ -24,6 +24,58 @@ from tunix.utils import math_utils
 from tunix.utils import maxtext_utils
 
 
+def _patch_pathways_libtpu_version_check():
+  """Allow Pallas Mosaic lowering under Pathways proxy when host libtpu < 0.0.46."""
+  use_pathways = (
+      "proxy" in os.environ.get("JAX_PLATFORMS", "").split(",")
+      or os.environ.get("VLLM_TPU_USING_PATHWAYS", "").lower() in ("1", "true")
+  )
+  if not use_pathways:
+    try:
+      from jax._src import xla_bridge  # pylint: disable=import-outside-toplevel
+
+      backend = xla_bridge.get_backend()
+      use_pathways = "Pathways" in str(getattr(backend, "platform_version", ""))
+    except Exception:  # pylint: disable=broad-exception-caught
+      use_pathways = False
+  if not use_pathways:
+    return False
+
+  try:
+    from jax._src import cloud_tpu_init  # pylint: disable=import-outside-toplevel
+  except ImportError:
+    return False
+
+  orig_fn = getattr(cloud_tpu_init, "is_libtpu_at_least", None)
+  parse_version = getattr(cloud_tpu_init, "_parse_version", None)
+  if orig_fn is None or parse_version is None:
+    return False
+  if getattr(orig_fn, "_tunix_pathways_patched", False):
+    return True
+
+  # Under Pathways proxy, host `libtpu` (e.g. 0.0.44) is not the execution
+  # runtime; treat the effective floor as 0.0.49 so Pallas Mosaic lowering
+  # (`>= 0.0.46`) succeeds while `tpu_custom_call` keeps the compatible
+  # pre-0.0.50 wire format (`ir_version=17`, `megachip_parallelism_config`,
+  # inline debug locations).
+  min_pathways_version = (0, 0, 49)
+
+  def _pathways_is_libtpu_at_least(version_str: str) -> bool:
+    if orig_fn(version_str):
+      return True
+    return min_pathways_version >= parse_version(version_str)
+
+  _pathways_is_libtpu_at_least._tunix_pathways_patched = True  # pylint: disable=protected-access
+  cloud_tpu_init.is_libtpu_at_least = _pathways_is_libtpu_at_least
+  try:
+    from jax._src.pallas.mosaic import lowering as mosaic_lowering  # pylint: disable=import-outside-toplevel
+
+    mosaic_lowering.is_libtpu_at_least = _pathways_is_libtpu_at_least
+  except ImportError:
+    pass
+  return True
+
+
 def create_worker(a):
   """Load real inference weights once, then expose the standard RolloutWorker."""
   os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -33,6 +85,8 @@ def create_worker(a):
   # Preserve the vLLM-before-rollout-adapters import order used by rollout nodes.
   from tunix.generate import vllm_sampler
   import jax
+
+  _patch_pathways_libtpu_version_check()
   from jax.experimental import mesh_utils
   from jax.sharding import Mesh
   from transformers import AutoTokenizer
