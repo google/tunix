@@ -68,6 +68,7 @@ def _rollout_lineage(
 def _health_item(
     group_index=0,
     *,
+    prompt_id="p0",
     status=datatypes.TrajectoryStatus.SUCCEEDED,
     num_turns=None,
     turn_lengths=None,
@@ -104,7 +105,7 @@ def _health_item(
         batch_idx=batch_idx,
     )
   return datatypes.TrajectoryItem(
-      prompt_id="p0", group_index=group_index, traj=traj, metadata=metadata
+      prompt_id=prompt_id, group_index=group_index, traj=traj, metadata=metadata
   )
 
 
@@ -406,6 +407,29 @@ class RolloutHealthTest(absltest.TestCase):
     )
 
     self.assertEqual(health.metrics["rollout/batch_wall_sec"], 40.0)
+
+  def test_computes_group_straggler_sec_from_first_to_last_finish_per_prompt(
+      self,
+  ):
+    # Prompt p0 finishes at 110s and 130s (group lag = 20s).
+    # Prompt p1 finishes at 105s and 145s (group lag = 40s).
+    # Prompt p2 has only 1 sample (skipped for intra-group lag).
+    health = step_telemetry.rollout_health(
+        _facts(
+            _health_item(0, prompt_id="p0", window=(100.0, 110.0)),
+            _health_item(1, prompt_id="p0", window=(100.0, 130.0)),
+            _health_item(0, prompt_id="p1", window=(100.0, 105.0)),
+            _health_item(1, prompt_id="p1", window=(100.0, 145.0)),
+            _health_item(0, prompt_id="p2", window=(100.0, 200.0)),
+        )
+    )
+
+    self.assertEqual(health.metrics["rollout/group_straggler_sec/mean"], 30.0)
+    self.assertEqual(health.metrics["rollout/group_straggler_sec/p50"], 30.0)
+    self.assertAlmostEqual(
+        health.metrics["rollout/group_straggler_sec/p90"], 38.0
+    )
+    self.assertEqual(health.metrics["rollout/group_straggler_sec/max"], 40.0)
 
   def test_omits_families_without_inputs(self):
     health = step_telemetry.rollout_health(_facts(_health_item(0)))

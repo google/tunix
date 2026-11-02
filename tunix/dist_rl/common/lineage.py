@@ -16,7 +16,8 @@
 
 Defines:
 - LineageEvent: Individual telemetry event for a component/operation.
-- LineageContext: Provenance tree node carrying tracking IDs and DAG causal edges.
+- LineageContext: Provenance tree node carrying tracking IDs and DAG causal
+edges.
 """
 
 from collections.abc import Sequence
@@ -33,8 +34,8 @@ class LineageEvent:
     component: System component that generated the event (e.g.,
       "engine.dispatch", "worker.received", "worker.rollout",
       "orchestrator.assembler", "worker.trainer").
-    operation: Operation name (e.g., "rollout", "generate", "pack",
-      "fwd_bwd", "train_step").
+    operation: Operation name (e.g., "rollout", "generate", "pack", "fwd_bwd",
+      "train_step").
     timestamp_s: Unix timestamp in seconds when the event was recorded.
     attributes: Arbitrary key-value metadata associated with the event (e.g.,
       worker_id, latency_ms, loss, metrics).
@@ -53,12 +54,14 @@ class LineageContext:
   Attributes:
     tracking_id: Unique semantic tracking identifier for this entity (e.g.,
       "traj_prompt_1_0", "batch_0", "policy_v2").
+    task_name: Optional semantic task or dataset name for this entity.
     parent_tracking_ids: List of upstream tracking IDs that contributed to this
       entity (directed causal edges in DAG).
     events: Chronological sequence of lifecycle events for this entity.
   """
 
   tracking_id: str
+  task_name: str = ""
   parent_tracking_ids: list[str] = dataclasses.field(default_factory=list)
   events: list[LineageEvent] = dataclasses.field(default_factory=list)
 
@@ -119,6 +122,17 @@ class LineageContext:
             if ctx is not None and ctx.tracking_id
         )
     )
-    new_ctx = cls(tracking_id=batch_id, parent_tracking_ids=parent_ids)
+    task_names = list(
+        dict.fromkeys(
+            ctx.task_name
+            for ctx in contexts
+            if ctx is not None and ctx.task_name
+        )
+    )
+    new_ctx = cls(
+        tracking_id=batch_id,
+        task_name=task_names[0] if len(task_names) == 1 else "",
+        parent_tracking_ids=parent_ids,
+    )
     new_ctx.add_event(component, operation, attributes)
     return new_ctx

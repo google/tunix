@@ -25,6 +25,8 @@ from unittest import mock
 from absl.testing import absltest
 from etils import epath
 import numpy as np
+from opentelemetry.sdk import metrics as sdk_metrics
+from opentelemetry.sdk.metrics import export as sdk_metrics_export
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
 from tunix.dist_rl.common import registry
@@ -483,9 +485,7 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     worker_b = _worker(
         config=rollout_worker.RolloutConfig(trajectory_store_config=config)
     )
-    self.assertIsNot(
-        worker_a.trajectory_store, worker_b.trajectory_store
-    )
+    self.assertIsNot(worker_a.trajectory_store, worker_b.trajectory_store)
     worker_a.stop()
     worker_b.stop()
 
@@ -539,9 +539,7 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
         "run_id": "handshake_run",
     }
     worker_enabled = _worker(
-        config=rollout_worker.RolloutConfig(
-            trajectory_store_config=input_cfg
-        )
+        config=rollout_worker.RolloutConfig(trajectory_store_config=input_cfg)
     )
     self.assertEqual(
         worker_enabled.info().resources["trajectory_store_config"],
@@ -657,6 +655,301 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
           env_name="mock_env",
           agent_name="unregistered_agent_xyz",
       )
+
+
+def _collect_otel_metrics(reader: sdk_metrics_export.InMemoryMetricReader):
+  """Extracts {metric_name: [(value_or_sum, count_or_none, dict(attributes)), ...]}."""
+  data = reader.get_metrics_data()
+  collected = collections.defaultdict(list)
+  for resource_metric in data.resource_metrics:
+    for scope_metric in resource_metric.scope_metrics:
+      for metric in scope_metric.metrics:
+        for dp in metric.data.data_points:
+          val = dp.sum if hasattr(dp, "sum") else dp.value
+          cnt = dp.count if hasattr(dp, "count") else None
+          collected[metric.name].append((val, cnt, dict(dp.attributes)))
+  return collected
+
+
+class RolloutWorkerOTelMetricsTest(absltest.TestCase):
+  """Verifies direct OpenTelemetry SDK instruments emitted by RolloutWorker."""
+
+  def setUp(self):
+    super().setUp()
+    self.reader = sdk_metrics_export.InMemoryMetricReader()
+    self.meter_provider = sdk_metrics.MeterProvider(
+        metric_readers=[self.reader]
+    )
+    self.sampler = mocks.MockBaseSamplerImpl(
+        sampler_name="test_sampler", default_delay=0.0
+    )
+    self.worker = rollout_worker.RolloutWorker(
+        worker_id="rollout_otel_0",
+        sampler=self.sampler,
+        env_name="mock_env",
+        agent_name="mock_agent",
+        tokenizer=mocks.MockTokenizer(),
+        chat_parser=mocks.MockChatParser(),
+        otel_meter_provider=self.meter_provider,
+    )
+
+  def test_emits_all_rollout_worker_otel_instruments_from_trajectory_item(self):
+    ctx = lineage.LineageContext(
+        tracking_id="traj_p1_0",
+        task_name="swe_bench",
+        parent_tracking_ids=["p1"],
+    )
+    item = datatypes.TrajectoryItem(
+        prompt_id="p1",
+        group_index=0,
+        traj={
+            "status": "SUCCEEDED",
+            "prompt_tokens": np.array([1, 2, 3, 4], dtype=np.int32),
+            "conversation_tokens": np.array(
+                [10, 11, 12, 13, 14, 15], dtype=np.int32
+            ),
+            "assistant_turn_lengths": [4, 2],
+            "execution_time_s": 1.25,
+            "sampler_time_s": 0.75,
+            "env_time": {
+                "reset_latency": 0.10,
+                "step_latency": [0.20, 0.30],
+                "close_latency": 0.05,
+            },
+            "reward_time": {
+                "reward_latency": 0.15,
+            },
+        },
+        metadata={
+            "clipped": False,
+            "lineage": ctx,
+        },
+    )
+
+    resp = self.worker._to_rollout_response(item)
+    self.assertEqual(resp.status, "COMPLETED")
+    metrics = _collect_otel_metrics(self.reader)
+
+    self.assertEqual(
+        metrics["tunix.worker.trajectories.completed"],
+        [(
+            1,
+            None,
+            {
+                "worker_id": "rollout_otel_0",
+                "task_name": "swe_bench",
+                "status": "SUCCEEDED",
+                "clipped": "false",
+                "has_error": "false",
+            },
+        )],
+    )
+    self.assertEqual(
+        metrics["tunix.worker.turns.total"],
+        [(
+            2,
+            None,
+            {
+                "worker_id": "rollout_otel_0",
+                "task_name": "swe_bench",
+            },
+        )],
+    )
+    self.assertEqual(
+        metrics["tunix.worker.prompt_tokens"],
+        [(
+            4,
+            1,
+            {
+                "worker_id": "rollout_otel_0",
+                "task_name": "swe_bench",
+                "status": "SUCCEEDED",
+            },
+        )],
+    )
+    self.assertEqual(
+        metrics["tunix.worker.completion_tokens"],
+        [(
+            6,
+            1,
+            {
+                "worker_id": "rollout_otel_0",
+                "task_name": "swe_bench",
+                "status": "SUCCEEDED",
+                "clipped": "false",
+            },
+        )],
+    )
+    exec_pts = metrics["tunix.worker.execution_sec"]
+    self.assertLen(exec_pts, 1)
+    self.assertAlmostEqual(exec_pts[0][0], 1.25)
+    self.assertEqual(exec_pts[0][1], 1)
+    self.assertEqual(
+        exec_pts[0][2],
+        {
+            "worker_id": "rollout_otel_0",
+            "task_name": "swe_bench",
+            "status": "SUCCEEDED",
+        },
+    )
+
+    sampler_pts = metrics["tunix.worker.sampler_time_s"]
+    self.assertLen(sampler_pts, 1)
+    self.assertAlmostEqual(sampler_pts[0][0], 0.75)
+    self.assertEqual(sampler_pts[0][1], 1)
+    self.assertEqual(
+        sampler_pts[0][2],
+        {
+            "worker_id": "rollout_otel_0",
+            "task_name": "swe_bench",
+        },
+    )
+
+    env_by_op = {
+        attrs["op"]: (val, cnt, attrs)
+        for val, cnt, attrs in metrics["tunix.worker.env_time_sec"]
+    }
+    self.assertCountEqual(env_by_op.keys(), ["reset", "step", "close", "total"])
+    self.assertAlmostEqual(env_by_op["reset"][0], 0.10)
+    self.assertEqual(env_by_op["reset"][1], 1)
+    self.assertAlmostEqual(env_by_op["step"][0], 0.50)
+    self.assertEqual(env_by_op["step"][1], 2)
+    self.assertAlmostEqual(env_by_op["close"][0], 0.05)
+    self.assertEqual(env_by_op["close"][1], 1)
+    self.assertAlmostEqual(env_by_op["total"][0], 0.65)
+    self.assertEqual(env_by_op["total"][1], 1)
+
+    reward_pts = metrics["tunix.worker.reward_time_sec"]
+    self.assertLen(reward_pts, 1)
+    self.assertAlmostEqual(reward_pts[0][0], 0.15)
+    self.assertEqual(reward_pts[0][1], 1)
+    self.assertEqual(
+        reward_pts[0][2],
+        {
+            "worker_id": "rollout_otel_0",
+            "task_name": "swe_bench",
+        },
+    )
+
+  def test_emits_clipped_error_and_single_count_with_on_complete(self):
+    # 1. TrajectoryError uses fallback task_name="mock_env" and status="ERROR".
+    err = trajectory_lib.TrajectoryError(
+        trajectory_id="err_1",
+        prompt_id="p_err",
+        error_message="boom",
+        error_type="RuntimeError",
+    )
+    self.worker._to_rollout_response(err)
+
+    # 2. Clipped TrajectoryItem with TIMEOUT status and prompt_length override.
+    clipped_item = datatypes.TrajectoryItem(
+        prompt_id="p_clip",
+        group_index=1,
+        traj={
+            "status": datatypes.TrajectoryStatus.TIMEOUT,
+            "prompt_tokens": np.array([0, 0, 1, 2, 3], dtype=np.int32),
+            "prompt_length": 3,
+            "conversation_tokens": np.array([10, 11, 12, 13], dtype=np.int32),
+            "conversation_text": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a1"},
+            ],
+        },
+        metadata={"clipped": True},
+    )
+    self.worker._to_rollout_response(clipped_item)
+
+    # 3. End-to-end generate() with on_complete callback must record once.
+    callback_responses = []
+    req = datatypes.RolloutRequest(
+        request_id="req_gen_1",
+        prompt="What is 2+2?",
+        prompt_id="prompt_gen_1",
+        group_index=0,
+        generation_kwargs={"max_generation_steps": 64},
+    )
+    resp = asyncio.run(
+        self.worker.generate(req, on_complete=callback_responses.append)
+    )
+    self.assertLen(callback_responses, 1)
+    self.assertIs(callback_responses[0], resp)
+
+    metrics = _collect_otel_metrics(self.reader)
+    completed_by_status = {
+        attrs["status"]: (val, attrs)
+        for val, _, attrs in metrics["tunix.worker.trajectories.completed"]
+    }
+    self.assertEqual(
+        completed_by_status["ERROR"],
+        (
+            1,
+            {
+                "worker_id": "rollout_otel_0",
+                "task_name": "mock_env",
+                "status": "ERROR",
+                "clipped": "false",
+                "has_error": "true",
+            },
+        ),
+    )
+    self.assertEqual(
+        completed_by_status["TIMEOUT"],
+        (
+            1,
+            {
+                "worker_id": "rollout_otel_0",
+                "task_name": "mock_env",
+                "status": "TIMEOUT",
+                "clipped": "true",
+                "has_error": "true",
+            },
+        ),
+    )
+    gen_status = str(resp.payload.traj["status"])
+    self.assertEqual(completed_by_status[gen_status][0], 1)
+
+    prompt_by_status = {
+        attrs["status"]: val
+        for val, _, attrs in metrics["tunix.worker.prompt_tokens"]
+    }
+    # Uses unpadded prompt_length=3 rather than len(prompt_tokens)=5.
+    self.assertEqual(prompt_by_status["TIMEOUT"], 3)
+
+  def test_emits_weight_sync_durations_and_requests_inflight_gauge(self):
+    async def _run_sync_rounds():
+      await self.worker.pre_weight_sync()
+      await self.worker.weight_sync(policy_version=2)
+      await self.worker.post_weight_sync()
+      # Also test an aborted weight-sync round to verify `aborted_paused`.
+      await self.worker.pre_weight_sync()
+      await self.worker.abort_weight_sync()
+
+    asyncio.run(_run_sync_rounds())
+
+    metrics = _collect_otel_metrics(self.reader)
+    ws_by_phase = {
+        attrs["phase"]: (val, cnt, attrs)
+        for val, cnt, attrs in metrics["tunix.worker.weight_sync.duration"]
+    }
+    self.assertCountEqual(
+        ws_by_phase.keys(),
+        ["pre", "h2d", "post", "total_paused", "aborted_paused"],
+    )
+    self.assertEqual(ws_by_phase["pre"][1], 2)
+    self.assertEqual(ws_by_phase["h2d"][1], 1)
+    self.assertEqual(ws_by_phase["post"][1], 1)
+    self.assertEqual(ws_by_phase["total_paused"][1], 1)
+    self.assertEqual(ws_by_phase["aborted_paused"][1], 1)
+    for val, _, attrs in ws_by_phase.values():
+      self.assertGreaterEqual(val, 0.0)
+      self.assertEqual(attrs["worker_id"], "rollout_otel_0")
+
+    inflight_pts = metrics["tunix.worker.requests_inflight"]
+    self.assertLen(inflight_pts, 1)
+    self.assertEqual(
+        inflight_pts[0],
+        (0, None, {"worker_id": "rollout_otel_0"}),
+    )
 
 
 if __name__ == "__main__":

@@ -396,6 +396,8 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
     self.assertEqual(item.traj["status"], "MAX_CONTEXT_LIMIT_REACHED")
     self.assertFalse(np.any(item.traj["conversation_masks"]))
     self.assertEqual(item.traj["assistant_turn_lengths"], [30, 20])
+    self.assertIn("sampler_time_s", item.traj)
+    self.assertGreaterEqual(item.traj["sampler_time_s"], 0.0)
 
   def test_model_call_preserves_explicit_seed_in_generation_kwargs(self):
     async def _run():
@@ -660,10 +662,12 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
     )
     agent = mocks.MockAgent()
     agent.trajectory.steps = [
-        types.SimpleNamespace(info={"guard_blocked": True,
-                                    "guard_reason": "invalid_action"}),
-        types.SimpleNamespace(info={"guard_blocked": True,
-                                    "guard_reason": "invalid_action"}),
+        types.SimpleNamespace(
+            info={"guard_blocked": True, "guard_reason": "invalid_action"}
+        ),
+        types.SimpleNamespace(
+            info={"guard_blocked": True, "guard_reason": "invalid_action"}
+        ),
         types.SimpleNamespace(info={"guard_blocked": False}),
     ]
     engine = collector.TrajectoryCollectorEngine(
