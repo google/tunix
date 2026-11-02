@@ -10,7 +10,7 @@ export EVAL_JOBSET_NAME="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
 export BUCKET="${BUCKET:-gs://atwigg-trellis-europe-west4-dev}"
 export EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${BUCKET}/eval_results/${JOB_PREFIX}}"
 export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${BUCKET}/trajectories/${JOB_PREFIX}}"
-export GCS_SCRATCH_LOCATION="${GCS_SCRATCH_LOCATION:-${BUCKET}/pathways-staging/${EVAL_JOBSET_NAME}}"
+export GCS_SCRATCH_LOCATION="${GCS_SCRATCH_LOCATION:-gs://atwigg-trellis-europe-west4-dev/pathways-staging/${EVAL_JOBSET_NAME}}"
 export ROLLOUT_PORT="${ROLLOUT_PORT:-20001}"
 export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/sanbao/tunix_stack:eval}"
 
