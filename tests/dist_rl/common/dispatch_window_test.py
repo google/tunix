@@ -225,6 +225,45 @@ class DispatchWindowTest(absltest.TestCase):
     self.assertFalse(window.uses_prompt_id_resume)
     self.assertEqual(window.dataset_skip_count, 2)
 
+  def test_admit_replenishes_one_prompt_per_filtered_group(self):
+    async def _run():
+      step = 0
+      window = dispatch_window.DispatchWindow(
+          max_staleness=1,
+          next_batch_fn=lambda: step,
+          full_batch_size=4,
+          out_of_order_resume=True,
+      )
+      admitted: list[int] = []
+
+      async def _dispatch():
+        for idx in range(12):
+          if await window.admit(idx, {"prompt_id": f"prompt_{idx}"}):
+            admitted.append(idx)
+
+      task = asyncio.create_task(_dispatch())
+      await asyncio.sleep(0.01)
+      # Step 0 with max_staleness=1 and full_batch_size=4 admits 8 prompts
+      # (0..7).
+      self.assertEqual(admitted, list(range(8)))
+
+      # Filtering 1 group must replenish exactly 1 prompt (idx=8), NOT an entire
+      # batch of 4 prompts (8..11).
+      window.on_group_filtered([_FakeItem("prompt_0")])
+      await asyncio.sleep(0.01)
+      self.assertEqual(admitted, list(range(9)))
+
+      window.on_group_filtered([_FakeItem("prompt_1")])
+      await asyncio.sleep(0.01)
+      self.assertEqual(admitted, list(range(10)))
+
+      step = 1
+      window.release()
+      await asyncio.wait_for(task, timeout=1.0)
+      self.assertEqual(admitted, list(range(12)))
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

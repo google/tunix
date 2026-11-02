@@ -30,12 +30,13 @@ class HasPromptId(Protocol):
 
 
 class DispatchWindow:
-  """Bounds how many prompt batches ahead of `next_batch` the dispatcher may run.
+  """Bounds how many prompts ahead of the active training step the dispatcher may run.
 
-  The dispatcher may emit prompts for `batch_idx` while
-  `batch_idx <= next_batch + max_staleness`. When `batch_idx` exceeds that
-  bound, `wait_for(batch_idx)` parks until `release()` signals that
-  `next_batch` has advanced.
+  The dispatcher may emit prompts while
+  `prompt_idx < (next_batch_fn() + max_staleness + 1) * full_batch_size +
+  filtered_groups`. When `prompt_idx` reaches that bound,
+  `wait_for(prompt_idx)` parks until `release()` signals that the step cursor
+  has advanced or a filtered group has replenished capacity by 1 prompt.
 
   Also tracks filtered-group replenishment and off-policy `prompt_id`
   checkpoint/resume state (`committed_prompt_ids` and `skipped_prompt_ids`).
@@ -173,9 +174,13 @@ class DispatchWindow:
         self._skipped_prompt_ids = {str(pid) for pid in raw_skipped}
     return True
 
-  async def wait_for(self, batch_idx: int) -> None:
-    """Blocks until `batch_idx` is inside the policy-staleness window."""
-    while batch_idx > self.next_batch + self.max_staleness:
+  async def wait_for(self, prompt_idx: int) -> None:
+    """Blocks until `prompt_idx` is inside the policy-staleness window."""
+    while (
+        prompt_idx >= (
+            self._next_batch_fn() + self.max_staleness + 1
+        ) * self.full_batch_size + self._filtered_groups
+    ):
       # Wait first, clear second. The reverse loses a release that lands
       # between the test above and the clear, and nothing would set it again.
       await self._release.wait()
@@ -186,7 +191,7 @@ class DispatchWindow:
       prompt_idx: int,
       prompt_item: Mapping[str, object] | HasPromptId | object = None,
   ) -> bool:
-    """Waits until the prompt's batch is within the window, or returns False if already handled on resume."""
+    """Waits until the prompt is within the window, or returns False if already handled on resume."""
     if self.uses_prompt_id_resume:
       if isinstance(prompt_item, Mapping):
         raw_pid = (
@@ -203,12 +208,12 @@ class DispatchWindow:
       ):
         return False
       if self._resume_base_prompts is None:
-        self._resume_base_prompts = self.next_batch * self.full_batch_size
-      dispatch_batch_idx = (
+        self._resume_base_prompts = self._next_batch_fn() * self.full_batch_size
+      effective_prompt_idx = (
           self._resume_base_prompts + self._dispatched_since_resume
-      ) // self.full_batch_size
+      )
       self._dispatched_since_resume += 1
     else:
-      dispatch_batch_idx = prompt_idx // self.full_batch_size
-    await self.wait_for(dispatch_batch_idx)
+      effective_prompt_idx = prompt_idx
+    await self.wait_for(effective_prompt_idx)
     return True
