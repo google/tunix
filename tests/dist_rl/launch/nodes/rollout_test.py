@@ -38,6 +38,7 @@ from tunix.utils import maxtext_utils
 _MAXTEXT_ROLLOUT_ARGV = (
     "rollout_model_config.model_source=maxtext",
     "rollout_model_config.model_name=qwen3-30b-a3b",
+    "rollout_model_config.kwargs.maxtext_model_name=qwen3-30b-a3b",
 )
 _ROUTED_EXPERTS_ARGV = (
     *_MAXTEXT_ROLLOUT_ARGV,
@@ -165,12 +166,13 @@ class ModelFamilyTest(absltest.TestCase):
             "rollout_model_config.model_id=google/gemma-4-E2B-it",
             "rollout_model_config.model_source=maxtext",
             "rollout_model_config.model_name=gemma3-4b",
+            "rollout_model_config.kwargs.maxtext_model_name=gemma3-4b",
         )
     )
 
     self.assertEqual(overrides, dict(maxtext_utils.VLLM_MAXTEXT_HF_OVERRIDES))
 
-  def test_maxtext_model_name_prefers_kwargs_over_model_name(self):
+  def test_maxtext_model_name_reads_kwargs(self):
     self.assertEqual(rollout._maxtext_model_name(_hp()), "")
     self.assertEqual(
         rollout._maxtext_model_name(_hp(*_MAXTEXT_ROLLOUT_ARGV)),

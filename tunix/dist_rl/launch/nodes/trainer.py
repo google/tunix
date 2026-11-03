@@ -504,21 +504,12 @@ def _create_maxtext_trainer_factory(
 
   Returns:
     The trainer factory and the MaxText device mesh.
-
-  Raises:
-    ValueError: If `actor_model_config.kwargs.maxtext_model_name` is unset,
-      null, or empty.
   """
   logging.info("Trainer backend: MaxText's MaxTextTrainingEngine.")
   actor = hp.config_mapping(_ACTOR_KEY)
   kwargs = actor["kwargs"]
-  maxtext_model_name = _kwarg(kwargs, "maxtext_model_name", "")
-  if not maxtext_model_name:
-    raise ValueError(
-        "actor_model_config.model_source='maxtext' requires"
-        " actor_model_config.kwargs.maxtext_model_name (or"
-        " model_config.kwargs.maxtext_model_name)."
-    )
+  # `DistHyperParameters` requires it (non-empty) for a MaxText actor.
+  maxtext_model_name = str(kwargs["maxtext_model_name"])
   rl_train = hp.config_mapping(_RL_TRAINING_KEY)
   rollout = hp.config_mapping("rollout_config")
   opt = rl_train[_ACTOR_OPTIMIZER_KEY]

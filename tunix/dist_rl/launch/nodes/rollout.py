@@ -163,16 +163,13 @@ def _maxtext_model_name(hp: resolve_config.DistHyperParameters) -> str:
     hp: Validated distributed RL configuration.
 
   Returns:
-    `rollout_model_config.kwargs.maxtext_model_name`, falling back to
-    `rollout_model_config.model_name`, when `model_source == "maxtext"`.
+    `rollout_model_config.kwargs.maxtext_model_name` when `model_source` is
+    "maxtext" (`DistHyperParameters` requires it there), else "".
   """
   rollout_model = hp.config_mapping(_ROLLOUT_KEY)
   if rollout_model["model_source"] != "maxtext":
     return ""
-  kwargs = rollout_model["kwargs"]
-  if "maxtext_model_name" in kwargs:
-    return str(kwargs["maxtext_model_name"])
-  return str(rollout_model["model_name"])
+  return str(rollout_model["kwargs"]["maxtext_model_name"])
 
 
 def _episode_timeout_secs(hp: resolve_config.DistHyperParameters) -> float:

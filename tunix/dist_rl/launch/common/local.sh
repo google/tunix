@@ -237,15 +237,13 @@ convert_maxtext_ckpt() {
     echo "Found existing local MAXTEXT_CKPT: ${ACTOR_MAXTEXT_CKPT_PATH}"
     return
   fi
-  local maxtext_model_name
-  maxtext_model_name="${MAXTEXT_MODEL_NAME:-$(printf '%s' "${ACTOR_MODEL_NAME}" | tr '[:upper:]' '[:lower:]')}"
   local ckpt_base
   ckpt_base="$(dirname "$(dirname "${ACTOR_MAXTEXT_CKPT_PATH}")")"
   echo "Converting HF checkpoint ${ACTOR_MODEL_DIR} to MaxText Orbax checkpoint at ${ckpt_base}..."
   mkdir -p "$ckpt_base"
   JAX_PLATFORMS=cpu "$PYTHON_BIN" \
     -m maxtext.checkpoint_conversion.to_maxtext \
-    model_name="${maxtext_model_name}" \
+    model_name="${ACTOR_MAXTEXT_MODEL_NAME}" \
     --hf_model_path="${ACTOR_MODEL_DIR}" \
     base_output_directory="${ckpt_base}" \
     scan_layers=True \

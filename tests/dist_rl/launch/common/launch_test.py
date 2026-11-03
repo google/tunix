@@ -37,7 +37,6 @@ _ENV_PASSTHROUGH = frozenset({
     "ENTER_KUBE_CONTEXT",
     "HF_TOKEN",
     "LOG_ROOT",
-    "MAXTEXT_MODEL_NAME",
     "ORCHESTRATOR_ID",
     "PYTHON",
     "PYTHONPATH",
@@ -190,6 +189,9 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertEqual(legacy, sorted(set(legacy)))
     # Variables the drivers read from the caller's environment stay usable.
     self.assertEmpty(set(legacy) & _ENV_PASSTHROUGH)
+    # `local.sh` takes the MaxText model name from the config now
+    # (`ACTOR_MAXTEXT_MODEL_NAME`), so the old variable is rejected.
+    self.assertIn("MAXTEXT_MODEL_NAME", legacy)
 
   def test_drivers_refuse_direct_invocation(self):
     for script in ("local.sh", "k8s.sh"):

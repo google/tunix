@@ -330,6 +330,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
       tuple(mode.value for mode in weight_sync.WeightSyncMode),
   )
   _validate_maxtext_pairing(hp)
+  _validate_maxtext_model_names(hp)
   if grpo["reward_mode"] == "reward_fn" and not hp.config["reward_functions"]:
     raise ValueError(
         "agentic_grpo_config.reward_mode='reward_fn' needs at least one entry"
@@ -432,6 +433,62 @@ def _validate_typed_vllm_settings(hp: cli_config.HyperParameters) -> None:
     )
 
 
+def _validate_maxtext_model_names(hp: cli_config.HyperParameters) -> None:
+  """Requires one `kwargs.maxtext_model_name` for the MaxText trainer and rollout.
+
+  The trainer, the rollout (vLLM's `MaxTextForCausalLM`), and the Hugging Face
+  to Orbax conversion in `local.sh` all take the MaxText model name from
+  `kwargs.maxtext_model_name`; nothing falls back to `model_name`.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    TypeError: If a MaxText role's `kwargs` is not a mapping.
+    ValueError: If the actor or rollout has `model_source: maxtext` but its
+      `kwargs.maxtext_model_name` is missing, not a string, empty, or has
+      surrounding spaces, or if weight sync is on and the two name different
+      MaxText models.
+  """
+  names: dict[str, str] = {}
+  for role_key in ("actor_model_config", "rollout_model_config"):
+    role_cfg = hp.config_mapping(role_key)
+    if role_cfg["model_source"] != "maxtext":
+      continue
+    kwargs = role_cfg["kwargs"]
+    if not isinstance(kwargs, Mapping):
+      raise TypeError(
+          f"{role_key}.kwargs must be a mapping when {role_key}.model_source"
+          f" is 'maxtext' (it holds maxtext_model_name), got {kwargs!r}."
+      )
+    if "maxtext_model_name" not in kwargs:
+      raise ValueError(
+          f"{role_key}.model_source='maxtext' requires"
+          f" {role_key}.kwargs.maxtext_model_name (or"
+          " model_config.kwargs.maxtext_model_name), e.g. 'qwen3-0.6b'."
+      )
+    name = kwargs["maxtext_model_name"]
+    if not isinstance(name, str) or not name or name != name.strip():
+      raise ValueError(
+          f"{role_key}.kwargs.maxtext_model_name must be a non-empty string"
+          f" without surrounding spaces, e.g. 'qwen3-0.6b'; got {name!r}."
+      )
+    names[role_key] = name
+  mode = hp.config_mapping("weight_sync_config")["mode"]
+  if (
+      mode != weight_sync.WeightSyncMode.NONE.value
+      and len(names) == 2
+      and names["actor_model_config"] != names["rollout_model_config"]
+  ):
+    raise ValueError(
+        f"weight_sync_config.mode={mode!r} syncs the trainer's weights into the"
+        " rollout, so actor_model_config.kwargs.maxtext_model_name"
+        f" ({names['actor_model_config']!r}) and"
+        " rollout_model_config.kwargs.maxtext_model_name"
+        f" ({names['rollout_model_config']!r}) must match."
+    )
+
+
 _MODEL_DTYPES = ("bfloat16", "float32")
 _REMAT_CONFIGS = ("none", "block", "decoder")
 _ROLLOUT_ENGINES = ("inprocess_vllm", "vllm", "vanilla")
@@ -499,7 +556,11 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "TRAINER_PORT": ports["trainer"],
       "ROLLOUT_PORT": ports["rollout"],
       "INFERENCE_PORT": ports["inference"],
-      "ACTOR_MODEL_NAME": actor["model_name"],
+      "ACTOR_MAXTEXT_MODEL_NAME": (
+          actor["kwargs"]["maxtext_model_name"]
+          if actor["model_source"] == "maxtext"
+          else ""
+      ),
       "ACTOR_MODEL_ID": actor["model_id"],
       "ACTOR_MODEL_DIR": actor["model_download_path"],
       "ACTOR_TRAINER_BACKEND": trainer_backend,

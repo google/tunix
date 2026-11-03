@@ -31,7 +31,11 @@ from tunix.sft import checkpoint_options
 from tunix.utils import maxtext_utils
 
 _OPT = "rl_training_config.actor_optimizer_config"
-_MAXTEXT_ARGV = ("actor_model_config.kwargs.maxtext_model_name=qwen3-0.6b",)
+_MAXTEXT_ARGV = (
+    "actor_model_config.model_source=maxtext",
+    "actor_model_config.model_path=/ckpt/qwen3-0.6b/0/items",
+    "actor_model_config.kwargs.maxtext_model_name=qwen3-0.6b",
+)
 
 
 def _hp(*argv: str) -> resolve_config.DistHyperParameters:
@@ -241,10 +245,7 @@ class TrainerFactoryTest(absltest.TestCase):
     mock_create_maxtext.assert_not_called()
 
     mock_create_tunix.reset_mock()
-    hp_maxtext = _hp(
-        "actor_model_config.model_source=maxtext",
-        "actor_model_config.model_path=/ckpt/items",
-    )
+    hp_maxtext = _hp(*_MAXTEXT_ARGV)
     trainer._create_trainer_factory(hp_maxtext, "trainer-0")
     mock_create_maxtext.assert_called_once_with(hp_maxtext, "trainer-0")
     mock_create_tunix.assert_not_called()
@@ -491,17 +492,6 @@ class MaxTextTrainerFactoryTest(absltest.TestCase):
     )
     mock_build_cfg.assert_called_once()
     return mock_build_cfg.call_args.kwargs
-
-  def test_requires_maxtext_model_name(self, mock_build_cfg, *_):
-    for argv in (
-        (),
-        ("actor_model_config.kwargs.maxtext_model_name=null",),
-        ("actor_model_config.kwargs.maxtext_model_name=",),
-    ):
-      with self.subTest(argv=argv):
-        with self.assertRaisesRegex(ValueError, "kwargs.maxtext_model_name"):
-          trainer._create_maxtext_trainer_factory(_hp(*argv), "trainer-0")
-    mock_build_cfg.assert_not_called()
 
   def test_plumbs_core_config(self, mock_build_cfg, *_):
     kwargs = self._build_kwargs(

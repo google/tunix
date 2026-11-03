@@ -276,6 +276,7 @@ weight_sync_config:
     maxtext_actor = [
         "actor_model_config.model_source=maxtext",
         "actor_model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+        "actor_model_config.kwargs.maxtext_model_name=qwen3-1.7b",
     ]
     with self.assertRaisesRegex(
         ValueError,
@@ -288,6 +289,7 @@ weight_sync_config:
       resolve_config.initialize([
           "weight_sync_config.mode=fallback",
           "rollout_model_config.model_source=maxtext",
+          "rollout_model_config.kwargs.maxtext_model_name=qwen3-1.7b",
       ])
     # Without weight sync the two sources are independent.
     hp = resolve_config.initialize(maxtext_actor)
@@ -299,6 +301,7 @@ weight_sync_config:
         "weight_sync_config.mode=raiden",
         "model_config.model_source=maxtext",
         "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+        "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
     ])
     self.assertEqual(hp.config["actor_model_config"]["model_source"], "maxtext")
     self.assertEqual(
@@ -410,9 +413,77 @@ weight_sync_config:
     ).config["vllm_config"]
     self.assertEqual(vllm["kwargs"], {"attention": "flash"})
 
+  def test_maxtext_roles_require_one_maxtext_model_name(self):
+    maxtext = [
+        "model_config.model_source=maxtext",
+        "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+    ]
+    for argv in (
+        (),
+        ("model_config.kwargs.maxtext_model_name=null",),
+        ("model_config.kwargs.maxtext_model_name=",),
+    ):
+      with self.subTest(argv=argv):
+        with self.assertRaisesRegex(
+            ValueError, "actor_model_config.kwargs.maxtext_model_name"
+        ):
+          resolve_config.initialize([*maxtext, *argv])
+    # The rollout needs it too: there is no fallback to `model_name`.
+    with self.assertRaisesRegex(
+        ValueError, "rollout_model_config.kwargs.maxtext_model_name"
+    ):
+      resolve_config.initialize(["rollout_model_config.model_source=maxtext"])
+    with self.assertRaisesRegex(ValueError, "must match"):
+      resolve_config.initialize([
+          *maxtext,
+          "weight_sync_config.mode=raiden",
+          "actor_model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+          "rollout_model_config.kwargs.maxtext_model_name=qwen3-0.6b",
+      ])
+    # Without weight sync, the two roles may name different models.
+    hp = resolve_config.initialize([
+        *maxtext,
+        "weight_sync_config.mode=none",
+        "actor_model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+        "rollout_model_config.kwargs.maxtext_model_name=qwen3-0.6b",
+    ])
+    self.assertEqual(
+        hp.config_mapping("rollout_model_config")["kwargs"][
+            "maxtext_model_name"
+        ],
+        "qwen3-0.6b",
+    )
+    # A null kwargs (how merge mode clears a mapping) fails with context.
+    with self.assertRaisesRegex(
+        TypeError, "actor_model_config.kwargs must be a mapping"
+    ):
+      resolve_config.initialize([*maxtext, "model_config.kwargs=null"])
+    # Non-string and untrimmed names fail here, not later in MaxText.
+    for name in ("true", "' qwen3-0.6b '"):
+      with self.subTest(name=name):
+        with self.assertRaisesRegex(ValueError, "non-empty string"):
+          resolve_config.initialize(
+              [*maxtext, f"model_config.kwargs.maxtext_model_name={name}"]
+          )
+    # `local.sh` converts the checkpoint with the exported name.
+    hp = resolve_config.initialize(
+        [*maxtext, "model_config.kwargs.maxtext_model_name=qwen3-1.7b"]
+    )
+    self.assertIn(
+        "export ACTOR_MAXTEXT_MODEL_NAME=qwen3-1.7b\n",
+        resolve_config.render_bash_exports(hp),
+    )
+    self.assertIn(
+        "export ACTOR_MAXTEXT_MODEL_NAME=''\n",
+        resolve_config.render_bash_exports(resolve_config.initialize([])),
+    )
+
   def test_render_bash_exports_evaluates_in_bash(self):
     hp = resolve_config.initialize([
         "model_config.model_name=Qwen3-0.6B",
+        "model_config.model_source=maxtext",
+        "model_config.model_path=/ckpt/qwen3-0.6b/0/items",
+        "model_config.kwargs.maxtext_model_name=qwen3-0.6b",
         "weight_sync_config.mode=raiden",
         "kubernetes_config.namespace=swe-ns",
     ])
@@ -424,8 +495,8 @@ weight_sync_config:
             "pipefail",
             "-c",
             exports_str
-            + '\necho "$CLUSTER_TARGET|$ACTOR_MODEL_NAME|$WEIGHT_SYNC_MODE|'
-            '$SANDBOX_NAMESPACE|$TRAINER_MAIN|$DRY_RUN"',
+            + '\necho "$CLUSTER_TARGET|$ACTOR_MAXTEXT_MODEL_NAME|'
+            '$WEIGHT_SYNC_MODE|$SANDBOX_NAMESPACE|$TRAINER_MAIN|$DRY_RUN"',
         ],
         check=True,
         capture_output=True,
@@ -433,7 +504,7 @@ weight_sync_config:
     )
     self.assertEqual(
         proc.stdout.strip(),
-        "local|Qwen3-0.6B|raiden|swe-ns|"
+        "local|qwen3-0.6b|raiden|swe-ns|"
         "tunix.dist_rl.launch.nodes.trainer.main|false",
     )
 
