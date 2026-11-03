@@ -35,9 +35,7 @@ class LineageTest(absltest.TestCase):
     self.assertEqual(event.operation, "rollout")
     self.assertGreaterEqual(event.timestamp_s, before)
     self.assertLessEqual(event.timestamp_s, after)
-    self.assertEqual(
-        event.attributes, {"policy_version": 1, "group_index": 0}
-    )
+    self.assertEqual(event.attributes, {"policy_version": 1, "group_index": 0})
 
   def test_lineage_context_add_event(self):
     ctx = lineage.LineageContext(
@@ -119,6 +117,7 @@ class LineageTest(absltest.TestCase):
   def test_lineage_context_cloudpickle_round_trip(self):
     ctx = lineage.LineageContext(
         tracking_id="batch_42",
+        task_name="gsm8k",
         parent_tracking_ids=["t1", "t2", "t3"],
     )
     ctx.add_event("worker.trainer", "fwd_bwd", {"loss": 0.35})
@@ -126,6 +125,7 @@ class LineageTest(absltest.TestCase):
     restored = cloudpickle.loads(cloudpickle.dumps(ctx))
 
     self.assertEqual(restored.tracking_id, "batch_42")
+    self.assertEqual(restored.task_name, "gsm8k")
     self.assertEqual(restored.parent_tracking_ids, ["t1", "t2", "t3"])
     self.assertLen(restored.events, 1)
     self.assertEqual(restored.events[0].component, "worker.trainer")

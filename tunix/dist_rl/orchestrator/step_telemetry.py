@@ -21,7 +21,7 @@ running program.
 """
 
 import collections
-from collections.abc import Mapping, Sequence
+from collections.abc import Hashable, Mapping, Sequence
 import dataclasses
 from typing import Any
 
@@ -209,6 +209,7 @@ class RolloutFacts:
 
   Attributes:
     traj_id: The rollout's trajectory id.
+    prompt_id: The prompt identifier grouping rollouts in a GRPO cohort.
     status: Name of the `TrajectoryStatus` the rollout ended in.
     num_turns: Assistant turns in `conversation_text`, or None without one.
     turn_lengths: Tokens sampled per assistant turn, from the
@@ -227,6 +228,7 @@ class RolloutFacts:
   num_turns: int | None
   turn_lengths: Sequence[int] | None
   window: RolloutWindow | None
+  prompt_id: Hashable | None = None
   env_time_s: float | None = None
   reward_time_s: float | None = None
 
@@ -251,6 +253,7 @@ class RolloutFacts:
     traj = item.traj
     return cls(
         traj_id=item.traj_id,
+        prompt_id=item.prompt_id,
         status=traj["status"].name,
         num_turns=_num_turns(traj),
         turn_lengths=traj.get("assistant_turn_lengths"),
@@ -410,6 +413,29 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
             for cohort in cohorts.values()
         )
     )
+    by_prompt: collections.defaultdict[Hashable, list[RolloutWindow]] = (
+        collections.defaultdict(list)
+    )
+    for fact in facts:
+      if (
+          fact.window is not None
+          and fact.prompt_id is not None
+          and fact.prompt_id != ""
+      ):
+        by_prompt[fact.prompt_id].append(fact.window)
+    group_lags = [
+        max(w.finish_time_s for w in grp) - min(w.finish_time_s for w in grp)
+        for grp in by_prompt.values()
+        if len(grp) > 1
+    ]
+    if group_lags:
+      _add_percentiles(
+          metrics,
+          "rollout/group_straggler_sec",
+          group_lags,
+          (50, 90, 99),
+          include_mean=True,
+      )
     dispatch_delays = [
         max(0.0, window.received_time_s - window.dispatch_time_s)
         for window in windows

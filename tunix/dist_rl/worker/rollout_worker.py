@@ -17,13 +17,15 @@
 import dataclasses
 import inspect
 import threading
+import time
 import types
-from typing import Any, Callable, List, Mapping, Optional, Sequence, Union
+from typing import Any, Callable, Iterable, List, Mapping, Optional, Sequence, Union
 
 from absl import logging
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import gcs_cache
+from tunix.dist_rl.common import lineage
 from tunix.dist_rl.common import registry
 from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.rollout import manager as manager_lib
@@ -32,6 +34,11 @@ from tunix.dist_rl.trajectory import store as trajectory_store_lib
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.worker import abstract_worker
 from tunix.rl.rollout import base_rollout
+
+try:
+  from opentelemetry import metrics as otel_metrics  # pylint: disable=g-import-not-at-top
+except ImportError:
+  otel_metrics = None
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -87,6 +94,7 @@ class RolloutWorker(abstract_worker.Worker):
       agent_config: Mapping[str, Any] = types.MappingProxyType({}),
       max_concurrency: int = 64,
       jax_cache_config: Optional[gcs_cache.JaxCacheConfig] = None,
+      otel_meter_provider: Any = None,
   ):
     """Initializes the RolloutWorker.
 
@@ -104,13 +112,82 @@ class RolloutWorker(abstract_worker.Worker):
         `metadata["agent_config"]` replaces these entirely when present.
       max_concurrency: Maximum number of concurrent episodes.
       jax_cache_config: Optional JAX compilation cache configuration.
+      otel_meter_provider: Optional OpenTelemetry MeterProvider override for
+        testing; defaults to the global MeterProvider when None.
     """
     super().__init__()
     self.worker_id = worker_id
+    self._env_name = env_name
     self.config = config
     self._policy_version = 0
     self._state = datatypes.WorkerState.PENDING
     self._init_lock = threading.Lock()
+    self._sync_pause_start_s: float | None = None
+    meter: Any = None
+    if otel_metrics is not None:
+      provider = otel_meter_provider or otel_metrics.get_meter_provider()
+      meter = provider.get_meter("tunix.worker")
+      self._otel_traj_completed = meter.create_counter(
+          "tunix.worker.trajectories.completed",
+          unit="{trajectory}",
+          description="Count of completed rollout trajectories.",
+      )
+      self._otel_turns_total = meter.create_counter(
+          "tunix.worker.turns.total",
+          unit="{turn}",
+          description="Total assistant turns generated across trajectories.",
+      )
+      self._otel_prompt_tokens = meter.create_histogram(
+          "tunix.worker.prompt_tokens",
+          unit="{token}",
+          description="Prompt token count per rollout trajectory.",
+      )
+      self._otel_completion_tokens = meter.create_histogram(
+          "tunix.worker.completion_tokens",
+          unit="{token}",
+          description="Completion token count per rollout trajectory.",
+      )
+      self._otel_execution_sec = meter.create_histogram(
+          "tunix.worker.execution_sec",
+          unit="s",
+          description=(
+              "End-to-end episode execution time on the rollout worker."
+          ),
+      )
+      self._otel_sampler_time_s = meter.create_histogram(
+          "tunix.worker.sampler_time_s",
+          unit="s",
+          description=(
+              "Cumulative model sampler inference latency per trajectory."
+          ),
+      )
+      self._otel_env_time_sec = meter.create_histogram(
+          "tunix.worker.env_time_sec",
+          unit="s",
+          description="Environment interaction latency by operation.",
+      )
+      self._otel_reward_time_sec = meter.create_histogram(
+          "tunix.worker.reward_time_sec",
+          unit="s",
+          description="Final reward computation latency per trajectory.",
+      )
+      self._otel_weight_sync_duration = meter.create_histogram(
+          "tunix.worker.weight_sync.duration",
+          unit="s",
+          description=(
+              "Rollout worker weight sync phase and total paused duration."
+          ),
+      )
+    else:
+      self._otel_traj_completed = None
+      self._otel_turns_total = None
+      self._otel_prompt_tokens = None
+      self._otel_completion_tokens = None
+      self._otel_execution_sec = None
+      self._otel_sampler_time_s = None
+      self._otel_env_time_sec = None
+      self._otel_reward_time_sec = None
+      self._otel_weight_sync_duration = None
     # TODO(linchai): make the sampler the single owner of weight-sync round
     # state, then drop `_sync_round` and `_record_round`.
     self._sync_round = {"req_id": None, "uuid": 0, "phase": "idle"}
@@ -154,6 +231,24 @@ class RolloutWorker(abstract_worker.Worker):
         drain_timeout_s=drain_timeout_s,
         trajectory_store=self._trajectory_store,
     )
+    if otel_metrics is not None and meter is not None:
+      def _observe_inflight(options: Any) -> Iterable[Any]:
+        del options
+        yield otel_metrics.Observation(
+            len(self.manager._active_tasks),  # pylint: disable=protected-access
+            attributes={"worker_id": self.worker_id},
+        )
+
+      self._otel_requests_inflight = meter.create_observable_gauge(
+          "tunix.worker.requests_inflight",
+          callbacks=[_observe_inflight],
+          unit="{request}",
+          description=(
+              "Number of active rollout episodes in flight on this worker."
+          ),
+      )
+    else:
+      self._otel_requests_inflight = None
 
   @property
   def trajectory_store(
@@ -289,6 +384,17 @@ class RolloutWorker(abstract_worker.Worker):
     self._ensure_initialized()
     return self.manager.get_target_state()
 
+  def _resolve_task_name(self, metadata: Mapping[str, Any] | None) -> str:
+    """Resolves semantic task_name from LineageContext or falls back to env_name."""
+    if metadata is not None and "lineage" in metadata:
+      lineage_ctx = metadata["lineage"]
+      if (
+          isinstance(lineage_ctx, lineage.LineageContext)
+          and lineage_ctx.task_name
+      ):
+        return lineage_ctx.task_name
+    return self._env_name
+
   def _stamp_worker_lineage(
       self,
       metadata: dict[str, Any] | None,
@@ -297,10 +403,10 @@ class RolloutWorker(abstract_worker.Worker):
       execution_time_s: float | None = None,
   ) -> None:
     """Appends worker generation telemetry to the lineage context if present."""
-    if metadata is None:
+    if metadata is None or "lineage" not in metadata:
       return
-    lineage_ctx = metadata.get("lineage")
-    if lineage_ctx is not None and hasattr(lineage_ctx, "add_event"):
+    lineage_ctx = metadata["lineage"]
+    if isinstance(lineage_ctx, lineage.LineageContext):
       attributes: dict[str, Any] = {"worker_id": self.worker_id}
       if execution_time_s is not None:
         attributes["execution_time_s"] = float(execution_time_s)
@@ -308,6 +414,227 @@ class RolloutWorker(abstract_worker.Worker):
           component=component,
           operation="generate",
           attributes=attributes,
+      )
+
+  def _record_trajectory_error_otel(
+      self, metadata: Mapping[str, Any] | None
+  ) -> None:
+    """Records OpenTelemetry trajectory completion counter for a failed episode."""
+    if self._otel_traj_completed is None:
+      return
+    task_name = self._resolve_task_name(metadata)
+    self._otel_traj_completed.add(
+        1,
+        attributes={
+            "worker_id": self.worker_id,
+            "task_name": task_name,
+            "status": "ERROR",
+            "clipped": "false",
+            "has_error": "true",
+        },
+    )
+
+  def _record_trajectory_item_otel(
+      self, item: datatypes.TrajectoryItem
+  ) -> None:
+    """Records direct OpenTelemetry instruments from a completed TrajectoryItem."""
+    if self._otel_traj_completed is None:
+      return
+    traj = item.traj if isinstance(item.traj, Mapping) else {}
+    metadata = item.metadata
+    task_name = self._resolve_task_name(metadata)
+
+    if "status" in traj and traj["status"]:
+      raw_status = traj["status"]
+    elif "status" in metadata and metadata["status"]:
+      raw_status = metadata["status"]
+    else:
+      raw_status = "COMPLETED"
+    status = (
+        raw_status.name
+        if isinstance(raw_status, datatypes.TrajectoryStatus)
+        else str(raw_status)
+    )
+    clipped_bool = bool(metadata["clipped"]) if "clipped" in metadata else False
+    clipped_str = "true" if clipped_bool else "false"
+    has_error_str = "false" if status in ("SUCCEEDED", "COMPLETED") else "true"
+
+    self._otel_traj_completed.add(
+        1,
+        attributes={
+            "worker_id": self.worker_id,
+            "task_name": task_name,
+            "status": status,
+            "clipped": clipped_str,
+            "has_error": has_error_str,
+        },
+    )
+
+    num_turns: int | None = None
+    if (
+        "assistant_turn_lengths" in traj
+        and traj["assistant_turn_lengths"] is not None
+    ):
+      num_turns = len(traj["assistant_turn_lengths"])
+    elif "conversation_text" in traj and isinstance(
+        traj["conversation_text"], list
+    ):
+      num_turns = sum(
+          1
+          for msg in traj["conversation_text"]
+          if isinstance(msg, Mapping)
+          and "role" in msg
+          and msg["role"] == "assistant"
+      )
+    if (
+        num_turns is not None
+        and num_turns > 0
+        and self._otel_turns_total is not None
+    ):
+      self._otel_turns_total.add(
+          num_turns,
+          attributes={"worker_id": self.worker_id, "task_name": task_name},
+      )
+
+    prompt_len: int | None = None
+    if "prompt_length" in traj and traj["prompt_length"] is not None:
+      prompt_len = int(traj["prompt_length"])
+    elif "prompt_tokens" in traj and traj["prompt_tokens"] is not None:
+      prompt_len = len(traj["prompt_tokens"])
+    elif "prompt_tokens" in metadata and metadata["prompt_tokens"] is not None:
+      prompt_len = len(metadata["prompt_tokens"])
+    if prompt_len is not None and self._otel_prompt_tokens is not None:
+      self._otel_prompt_tokens.record(
+          prompt_len,
+          attributes={
+              "worker_id": self.worker_id,
+              "task_name": task_name,
+              "status": status,
+          },
+      )
+
+    completion_len: int | None = None
+    if (
+        "conversation_tokens" in traj
+        and traj["conversation_tokens"] is not None
+    ):
+      completion_len = len(traj["conversation_tokens"])
+    elif (
+        "assistant_turn_lengths" in traj
+        and traj["assistant_turn_lengths"] is not None
+    ):
+      completion_len = int(sum(traj["assistant_turn_lengths"]))
+    elif (
+        "completion_tokens" in metadata
+        and metadata["completion_tokens"] is not None
+    ):
+      completion_len = len(metadata["completion_tokens"])
+    if completion_len is not None and self._otel_completion_tokens is not None:
+      self._otel_completion_tokens.record(
+          completion_len,
+          attributes={
+              "worker_id": self.worker_id,
+              "task_name": task_name,
+              "status": status,
+              "clipped": clipped_str,
+          },
+      )
+
+    if (
+        "execution_time_s" in traj
+        and traj["execution_time_s"] is not None
+        and self._otel_execution_sec is not None
+    ):
+      self._otel_execution_sec.record(
+          float(traj["execution_time_s"]),
+          attributes={
+              "worker_id": self.worker_id,
+              "task_name": task_name,
+              "status": status,
+          },
+      )
+
+    if (
+        "sampler_time_s" in traj
+        and traj["sampler_time_s"] is not None
+        and self._otel_sampler_time_s is not None
+    ):
+      self._otel_sampler_time_s.record(
+          float(traj["sampler_time_s"]),
+          attributes={
+              "worker_id": self.worker_id,
+              "task_name": task_name,
+          },
+      )
+
+    if (
+        "env_time" in traj
+        and isinstance(traj["env_time"], Mapping)
+        and self._otel_env_time_sec is not None
+    ):
+      env_time = traj["env_time"]
+      total_env_s = 0.0
+      has_env_op = False
+      if "reset_latency" in env_time and env_time["reset_latency"] is not None:
+        reset_s = float(env_time["reset_latency"])
+        self._otel_env_time_sec.record(
+            reset_s,
+            attributes={
+                "worker_id": self.worker_id,
+                "task_name": task_name,
+                "op": "reset",
+            },
+        )
+        total_env_s += reset_s
+        has_env_op = True
+      if "step_latency" in env_time and env_time["step_latency"] is not None:
+        for step_val in env_time["step_latency"]:
+          step_s = float(step_val)
+          self._otel_env_time_sec.record(
+              step_s,
+              attributes={
+                  "worker_id": self.worker_id,
+                  "task_name": task_name,
+                  "op": "step",
+              },
+          )
+          total_env_s += step_s
+          has_env_op = True
+      if "close_latency" in env_time and env_time["close_latency"] is not None:
+        close_s = float(env_time["close_latency"])
+        self._otel_env_time_sec.record(
+            close_s,
+            attributes={
+                "worker_id": self.worker_id,
+                "task_name": task_name,
+                "op": "close",
+            },
+        )
+        total_env_s += close_s
+        has_env_op = True
+      if has_env_op:
+        self._otel_env_time_sec.record(
+            total_env_s,
+            attributes={
+                "worker_id": self.worker_id,
+                "task_name": task_name,
+                "op": "total",
+            },
+        )
+
+    if (
+        "reward_time" in traj
+        and isinstance(traj["reward_time"], Mapping)
+        and "reward_latency" in traj["reward_time"]
+        and traj["reward_time"]["reward_latency"] is not None
+        and self._otel_reward_time_sec is not None
+    ):
+      self._otel_reward_time_sec.record(
+          float(traj["reward_time"]["reward_latency"]),
+          attributes={
+              "worker_id": self.worker_id,
+              "task_name": task_name,
+          },
       )
 
   def _to_rollout_response(
@@ -321,6 +648,7 @@ class RolloutWorker(abstract_worker.Worker):
       metadata = dict(item.metadata or {})
       metadata["prompt_id"] = item.prompt_id
       self._stamp_worker_lineage(metadata)
+      self._record_trajectory_error_otel(metadata)
       return datatypes.RolloutResponse(
           request_id=request_id or item.trajectory_id or item.prompt_id,
           status="ERROR",
@@ -334,15 +662,27 @@ class RolloutWorker(abstract_worker.Worker):
     if isinstance(item, datatypes.RolloutResponse):
       return item
     if isinstance(item, datatypes.TrajectoryItem):
-      req_id = request_id or getattr(item, "traj_id", "")
-      if prompt_tokens is not None and getattr(item, "prompt_tokens", None) is None:
+      req_id = request_id or item.traj_id
+      if (
+          prompt_tokens is not None
+          and (
+              not isinstance(item.traj, Mapping)
+              or "prompt_tokens" not in item.traj
+              or item.traj["prompt_tokens"] is None
+          )
+          and (
+              "prompt_tokens" not in item.metadata
+              or item.metadata["prompt_tokens"] is None
+          )
+      ):
         item.metadata["prompt_tokens"] = prompt_tokens
       exec_time_s = (
-          item.traj.get("execution_time_s")
-          if isinstance(item.traj, dict)
+          item.traj["execution_time_s"]
+          if isinstance(item.traj, Mapping) and "execution_time_s" in item.traj
           else None
       )
       self._stamp_worker_lineage(item.metadata, execution_time_s=exec_time_s)
+      self._record_trajectory_item_otel(item)
       return datatypes.RolloutResponse(
           request_id=req_id,
           status="COMPLETED",
@@ -378,16 +718,24 @@ class RolloutWorker(abstract_worker.Worker):
           " Sequence[RolloutRequest]."
       )
 
+    converted: dict[int, datatypes.RolloutResponse] = {}
+
+    def _convert_once(item: Any) -> datatypes.RolloutResponse:
+      item_key = id(item)
+      if item_key not in converted:
+        converted[item_key] = self._to_rollout_response(item)
+      return converted[item_key]
+
     cb = None
     if on_complete is not None:
-      cb = lambda item: on_complete(self._to_rollout_response(item))
+      cb = lambda item: on_complete(_convert_once(item))
     res = await self.manager.generate(requests, on_complete=cb)
     if isinstance(res, (list, tuple)):
-      responses = [self._to_rollout_response(r) for r in res]
+      responses = [_convert_once(r) for r in res]
       for resp in responses:
         self._jax_cache_syncer.sync_after_first_completed(resp.status)
       return responses
-    resp = self._to_rollout_response(res)
+    resp = _convert_once(res)
     self._jax_cache_syncer.sync_after_first_completed(resp.status)
     return resp
 
@@ -395,8 +743,15 @@ class RolloutWorker(abstract_worker.Worker):
     """Quiesces the worker; it stays SYNCING until post or abort."""
     self._ensure_initialized()
     self.state = WorkerState.SYNCING
+    t0 = time.perf_counter()
+    self._sync_pause_start_s = t0
     self._record_round(sync_request, "idle")
     result = await self.manager.pre_weight_sync(sync_request, **kwargs)
+    if self._otel_weight_sync_duration is not None:
+      self._otel_weight_sync_duration.record(
+          float(time.perf_counter() - t0),
+          attributes={"worker_id": self.worker_id, "phase": "pre"},
+      )
     self._record_round(sync_request, "prepared")
     return result
 
@@ -406,7 +761,13 @@ class RolloutWorker(abstract_worker.Worker):
     self.state = WorkerState.SYNCING
     metadata = kwargs.pop("metadata", None)
     request = sync_request if sync_request is not None else metadata
+    t0 = time.perf_counter()
     result = await self.manager.weight_sync(request, **kwargs)
+    if self._otel_weight_sync_duration is not None:
+      self._otel_weight_sync_duration.record(
+          float(time.perf_counter() - t0),
+          attributes={"worker_id": self.worker_id, "phase": "h2d"},
+      )
     if isinstance(result, int):
       self._policy_version = result
     else:
@@ -420,8 +781,21 @@ class RolloutWorker(abstract_worker.Worker):
 
   async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Publishes the new weights and resumes serving."""
+    t0 = time.perf_counter()
     result = await self.manager.post_weight_sync(sync_request, **kwargs)
+    end_s = time.perf_counter()
     self.state = WorkerState.READY
+    if self._otel_weight_sync_duration is not None:
+      self._otel_weight_sync_duration.record(
+          float(end_s - t0),
+          attributes={"worker_id": self.worker_id, "phase": "post"},
+      )
+      if self._sync_pause_start_s is not None:
+        self._otel_weight_sync_duration.record(
+            float(end_s - self._sync_pause_start_s),
+            attributes={"worker_id": self.worker_id, "phase": "total_paused"},
+        )
+    self._sync_pause_start_s = None
     self._record_round(sync_request, "committed")
     return result
 
@@ -438,7 +812,17 @@ class RolloutWorker(abstract_worker.Worker):
   async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Discards the round and resumes serving the previous weights."""
     res = await self.manager.abort_weight_sync(sync_request, **kwargs)
+    end_s = time.perf_counter()
     self.state = WorkerState.READY
+    if (
+        self._otel_weight_sync_duration is not None
+        and self._sync_pause_start_s is not None
+    ):
+      self._otel_weight_sync_duration.record(
+          float(end_s - self._sync_pause_start_s),
+          attributes={"worker_id": self.worker_id, "phase": "aborted_paused"},
+      )
+    self._sync_pause_start_s = None
     self._record_round(sync_request, "aborted")
     return res
 

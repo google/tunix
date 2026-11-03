@@ -15,6 +15,7 @@
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
 import asyncio
+import time
 from typing import Any, Callable, Collection, List, Mapping, Optional, Sequence
 from absl import logging
 import numpy as np
@@ -195,6 +196,7 @@ class TrajectoryCollectorEngine:
     """Executes multi-turn agentic rollout episode and returns TrajectoryItem."""
     self._episode_cache_salt = None
     self._turn_policy_versions = []
+    sampler_time_s = 0.0
 
     # Note: model_call is an async coroutine callback invoked directly by
     # TrajectoryCollectEngine on the asyncio event loop without blocking
@@ -203,6 +205,7 @@ class TrajectoryCollectorEngine:
         chat_completions, env=None, max_generation_steps=None, **kwargs
     ):
       del env
+      nonlocal sampler_time_s
       await self._unpaused.wait()
       generation_kwargs = dict(self.request.generation_kwargs)
       # NB: extra kwargs can be passed in from trajectory_collect_engine.
@@ -280,7 +283,9 @@ class TrajectoryCollectorEngine:
           prompt=prompt_payload,
           sampling_params=sampling_params,
       )
+      sample_start = time.perf_counter()
       res = await self.sampler.sample(sampling_req, **generation_kwargs)
+      sampler_time_s += time.perf_counter() - sample_start
       text = res if isinstance(res, str) else getattr(res, "text", str(res))
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
       logprobs = getattr(res, "logprobs", None)
@@ -331,6 +336,7 @@ class TrajectoryCollectorEngine:
     self._inner_engine = inner_engine
     rl_traj = await inner_engine.collect(mode="Token")
     if isinstance(rl_traj, dict):
+      rl_traj["sampler_time_s"] = sampler_time_s
       if self._turn_policy_versions:
         rl_traj["policy_version"] = int(self._turn_policy_versions[0])
         rl_traj["policy_versions"] = list(self._turn_policy_versions)
