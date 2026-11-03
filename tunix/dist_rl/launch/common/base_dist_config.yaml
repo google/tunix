@@ -302,14 +302,25 @@ cluster_config:
   dry_run: false
   debug: false
   rpc_timeout_s: 1800.0
+  # Seconds the orchestrator waits for every worker to register; null waits
+  # forever (the previous example orchestrators did the same).
+  # TODO(noghabi): Default to a finite timeout, so a worker that never
+  # registers (e.g. a reference worker started separately) fails the run
+  # instead of hanging it. Choose the value per cluster target from measured
+  # worker startup times: one fixed value would also fail healthy k8s runs
+  # whose TPU JobSets Kueue is still queueing, or whose workers are still
+  # loading their model. On local, `local.sh` already fails a worker whose
+  # port never opens (`cluster_config.wait_timeout_secs`).
   init_timeout_s: null
   wait_timeout_secs: 1800
   wait_poll_secs: 5
   wait_debug_every_polls: 6
   wait_log_tail_lines: 40
   stop_workers_on_exit: true
+  # Start a reference inference worker (for the KL penalty). Null means
+  # `agentic_grpo_config.beta > 0`. Set false to use a reference worker started
+  # separately; it registers with the orchestrator through discovery.
   run_inference_node: null
-  inference_addr: ""
   ports:
     orchestrator: 30000
     trainer: 20000

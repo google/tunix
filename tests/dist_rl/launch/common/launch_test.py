@@ -128,7 +128,9 @@ class LaunchScriptsTest(absltest.TestCase):
     )
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertIn("Inference command:", res.stdout)
-    self.assertIn("cluster_config.inference_addr=localhost:20002", res.stdout)
+    # The reference worker registers through discovery; every node, including
+    # the orchestrator, gets the same config arguments.
+    self.assertNotIn("inference_addr", res.stdout)
 
   def test_local_dry_run_flag_does_not_launch(self):
     res = self._run_launch([

@@ -165,6 +165,22 @@ weight_sync_config:
     ):
       resolve_config.initialize(["rl_training_config.nonexistent_flag=123"])
 
+  def test_run_inference_node_defaults_to_kl_penalty(self):
+    cluster = resolve_config.initialize([]).config["cluster_config"]
+    self.assertTrue(cluster["run_inference_node"])
+    cluster = resolve_config.initialize(
+        ["agentic_grpo_config.beta=0.0"]
+    ).config["cluster_config"]
+    self.assertFalse(cluster["run_inference_node"])
+    # A reference worker started separately registers through discovery; there
+    # is no address to configure.
+    cluster = resolve_config.initialize(
+        ["cluster_config.run_inference_node=false"]
+    ).config["cluster_config"]
+    self.assertFalse(cluster["run_inference_node"])
+    with self.assertRaisesRegex(ValueError, "cluster_config.inference_addr"):
+      resolve_config.initialize(["cluster_config.inference_addr=host:20002"])
+
   def test_artifact_root_and_model_download_path_defaults(self):
     local = resolve_config.initialize([
         "cluster_config.artifact_root=artifacts/my_task",

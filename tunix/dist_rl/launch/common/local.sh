@@ -83,11 +83,6 @@ INFERENCE_CMD=(
   "${NODE_CONFIG_ARGS[@]}"
 )
 
-EFFECTIVE_INFERENCE_ADDR="${INFERENCE_ADDR}"
-if is_true "${RUN_INFERENCE_NODE}" && [[ -z "${EFFECTIVE_INFERENCE_ADDR}" ]]; then
-  EFFECTIVE_INFERENCE_ADDR="localhost:${INFERENCE_PORT}"
-fi
-
 ORCHESTRATOR_CMD=(
   "$PYTHON_BIN" -m tunix.dist_rl.distributed.runtime.main
   --discovery_id="${ORCHESTRATOR_ID}"
@@ -95,9 +90,6 @@ ORCHESTRATOR_CMD=(
   --process_main="${ORCHESTRATOR_MAIN}"
   "${NODE_CONFIG_ARGS[@]}"
 )
-if [[ -n "${EFFECTIVE_INFERENCE_ADDR}" ]]; then
-  ORCHESTRATOR_CMD+=("cluster_config.inference_addr=${EFFECTIVE_INFERENCE_ADDR}")
-fi
 
 print_command() {
   local label="$1"

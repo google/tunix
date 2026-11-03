@@ -178,9 +178,7 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
 
   grpo = _mutable_section(hp, "agentic_grpo_config")
   if cluster["run_inference_node"] is None:
-    cluster["run_inference_node"] = (
-        float(grpo["beta"]) > 0.0 and not cluster["inference_addr"]
-    )
+    cluster["run_inference_node"] = float(grpo["beta"]) > 0.0
   # String keys resolve YAML null to "" (`tunix.cli.config`), while
   # `GRPOConfig` spells "no sampler importance correction" as None.
   if grpo["sampler_is"] == "":
@@ -551,7 +549,6 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "WAIT_DEBUG_EVERY_POLLS": cluster["wait_debug_every_polls"],
       "WAIT_LOG_TAIL_LINES": cluster["wait_log_tail_lines"],
       "RUN_INFERENCE_NODE": cluster["run_inference_node"],
-      "INFERENCE_ADDR": cluster["inference_addr"],
       "ORCHESTRATOR_PORT": ports["orchestrator"],
       "TRAINER_PORT": ports["trainer"],
       "ROLLOUT_PORT": ports["rollout"],
