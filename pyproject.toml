@@ -18,7 +18,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-  "datasets",
+  "datasets>=4.0.0",  # Avoid pip backtracking to legacy datasets/pyarrow sdist on Python 3.12+
   "flax>=0.12.5",
   "fsspec",  # notebook dependency
   "google-metrax>=0.2.3",
