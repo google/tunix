@@ -316,7 +316,6 @@ TRAINER_PID=$!
     --vllm_max_num_batched_tokens="$VLLM_MAX_NUM_BATCHED_TOKENS"
     --vllm_max_model_len="$VLLM_MAX_MODEL_LEN"
     --vllm_dtype=bfloat16
-    --vllm_server_mode
     --no-vllm_async_scheduling
     --no-enable_thinking
   )

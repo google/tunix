@@ -542,11 +542,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=True,
   )
   parser.add_argument(
-      "--vllm_server_mode",
-      action=argparse.BooleanOptionalAction,
-      default=None,
-  )
-  parser.add_argument(
       "--vllm_async_scheduling",
       action=argparse.BooleanOptionalAction,
       default=False,
@@ -918,13 +913,6 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
 
   if multihost_backend:
     engine_kwargs["distributed_executor_backend"] = multihost_backend
-  # Enable VLLMInProcessDriver (`server_mode=True`) on both single-host and
-  # multi-host TPUs so concurrent `InprocessVllmSampler.sample()` worker
-  # threads submit into a single engine loop for continuous batching without
-  # racing on donated JAX KV-cache buffers. `--no-vllm_server_mode` opts out.
-  server_mode = (
-      args.vllm_server_mode if args.vllm_server_mode is not None else True
-  )
   rollout_mesh = None if multihost_backend else _create_rollout_mesh(args)
 
   tp_size = _get_tensor_parallel_size(args)
@@ -944,7 +932,11 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
         "max_loras": 1,
     }
   vllm_config = vllm_sampler.VllmConfig(
-      server_mode=server_mode,
+      # Enable VLLMInProcessDriver on both single-host and multi-host TPUs so
+      # concurrent `InprocessVllmSampler.sample()` worker threads submit into a
+      # single engine loop for continuous batching without racing on donated
+      # JAX KV-cache buffers. `InprocessVllmSampler` requires it.
+      server_mode=True,
       mesh=rollout_mesh,
       tensor_parallel_size=tp_size,
       data_parallel_size=args.mesh_fsdp,
@@ -1079,6 +1071,8 @@ def _create_vllm_sampler(args, tokenizer):
   engine_args = AsyncEngineArgs(**engine_kwargs)  # type: ignore[arg-type]
   config = rollout_worker.RolloutConfig(
       rollout_vllm_model_version=vllm_model,
+      # `VllmSampler` always runs in server mode.
+      rollout_vllm_server_mode=True,
       **_rollout_config_kwargs(args, tokenizer),
   )
   sampler = vllm_sampler.VllmSampler(
@@ -1110,11 +1104,6 @@ def _build_rollout_cache_params(
       use_lora=bool(args.use_lora),
       lora_rank=args.lora_rank,
       enable_prefix_caching=bool(args.enable_prefix_caching),
-      vllm_server_mode=(
-          args.vllm_server_mode
-          if args.vllm_server_mode is not None
-          else env_params.vllm_server_mode
-      ),
       vllm_async_scheduling=bool(args.vllm_async_scheduling),
   )
 

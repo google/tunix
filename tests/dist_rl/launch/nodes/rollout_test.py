@@ -345,15 +345,18 @@ class ValidateRolloutConfigTest(absltest.TestCase):
           )
       )
 
-  def test_rejects_server_mode_false_with_inprocess_vllm(self):
-    with self.assertRaisesRegex(ValueError, "server_mode: false"):
-      rollout._validate_rollout_config(
-          _hp("rollout_engine=inprocess_vllm", "vllm_config.server_mode=false")
-      )
-
-  def test_server_mode_false_allowed_with_vllm_engine(self):
+  def test_rejects_server_mode_false(self):
+    for rollout_engine in ("inprocess_vllm", "vllm", "vanilla"):
+      with self.subTest(rollout_engine=rollout_engine):
+        with self.assertRaisesRegex(ValueError, "server_mode: false"):
+          rollout._validate_rollout_config(
+              _hp(
+                  f"rollout_engine={rollout_engine}",
+                  "vllm_config.server_mode=false",
+              )
+          )
     rollout._validate_rollout_config(
-        _hp("rollout_engine=vllm", "vllm_config.server_mode=false")
+        _hp("rollout_engine=vllm", "vllm_config.server_mode=true")
     )
 
 
@@ -502,6 +505,12 @@ class SamplerTest(absltest.TestCase):
     self.assertIs(default["detokenize"], True)
     _, disabled = _create_vllm_sampler_kwargs("vllm_config.detokenize=false")
     self.assertIs(disabled["detokenize"], False)
+
+  def test_vllm_sampler_always_runs_in_server_mode(self):
+    _, default = _create_vllm_sampler_kwargs()
+    self.assertTrue(default["config"].rollout_vllm_server_mode)
+    _, explicit = _create_vllm_sampler_kwargs("vllm_config.server_mode=true")
+    self.assertTrue(explicit["config"].rollout_vllm_server_mode)
 
   def test_vllm_sampler_rejects_lora_with_data_parallelism(self):
     with self.assertRaisesRegex(ValueError, "LoRA is not supported"):
@@ -809,6 +818,8 @@ class RolloutMainTest(absltest.TestCase):
     self.assertEqual(params.max_prompt_length, 256)
     self.assertEqual(params.max_response_length, 128)
     self.assertFalse(params.use_lora)
+    # Rollout always runs vLLM in server mode, so the key doesn't vary with it.
+    self.assertTrue(params.vllm_server_mode)
 
   def test_main_restores_jax_cache_before_jax_init(self):
     events: list[str] = []

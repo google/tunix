@@ -348,15 +348,10 @@ def _validate_rollout_config(hp: resolve_config.DistHyperParameters) -> None:
         " rollout_engine: vanilla (the vanilla sampler loads the base model"
         " only); use a vLLM rollout_engine or drop lora_config."
     )
-  if (
-      rollout_engine == "inprocess_vllm"
-      and hp.config_mapping("vllm_config")["server_mode"] is False
-  ):
+  if hp.config_mapping("vllm_config")["server_mode"] is False:
     raise ValueError(
-        "vllm_config.server_mode: false is not supported with rollout_engine:"
-        " inprocess_vllm, which always runs the in-process engine driver"
-        " (concurrent sample() calls need it); remove it or use"
-        " rollout_engine: vllm."
+        "vllm_config.server_mode: false is not supported: both vLLM rollout"
+        " samplers always run in server mode. Remove it."
     )
 
 
@@ -557,6 +552,9 @@ def _rollout_config(
       rollout_vllm_model_version=(
           "" if sampler_type == "vanilla" else _vllm_model(hp)
       ),
+      # Both vLLM samplers always run in server mode;
+      # `_validate_rollout_config` rejects `vllm_config.server_mode: false`.
+      rollout_vllm_server_mode=True,
       weight_sync_mode=weight_sync_lib.WeightSyncMode(str(ws["mode"])),
       max_prompt_length=max_prompt_length,
       max_tokens_to_generate=max_tokens_to_generate,
@@ -925,11 +923,6 @@ def _build_rollout_cache_params(
       # RolloutCacheKeyParams' own "no LoRA" rank.
       lora_rank=lora_rank if lora_rank is not None else env_params.lora_rank,
       enable_prefix_caching=bool(vllm["enable_prefix_caching"]),
-      vllm_server_mode=(
-          bool(vllm["server_mode"])
-          if vllm["server_mode"] is not None
-          else env_params.vllm_server_mode
-      ),
       vllm_async_scheduling=bool(vllm["async_scheduling"]),
   )
 

@@ -32,12 +32,14 @@ from tunix.generate import base_sampler
 class _EngineOnlyConfig:
   """A config without a `weight_sync_mode` field, like `VllmConfig`.
 
-  `partial_rollout` is the only field `InprocessVllmSampler.__init__` reads.
-  The real `VllmConfig` can't be imported here: its module imports vLLM, which
-  needs Transformers v5, and this target links v4.
+  `InprocessVllmSampler.__init__` reads only `partial_rollout`, and
+  `initialize()` reads `server_mode`. The real `VllmConfig` can't be imported
+  here: its module imports vLLM, which needs Transformers v5, and this target
+  links v4.
   """
 
   partial_rollout: bool = False
+  server_mode: bool = True
 
 
 class InprocessVllmSamplerTest(absltest.TestCase):
@@ -390,6 +392,16 @@ class InprocessVllmSamplerTest(absltest.TestCase):
     sampler.initialize()
     self.assertIsNotNone(sampler.vllm_sampler)
     self.mock_vllm_lib.VllmSampler.assert_called_once()
+
+  def test_initialize_warns_when_server_mode_is_false(self):
+    config = _EngineOnlyConfig(server_mode=False)
+    sampler = inprocess_vllm_sampler.InprocessVllmSampler(
+        server_id="warn_slice", tokenizer=self.mock_tokenizer, config=config
+    )
+    with self.assertLogs(level="WARNING") as cm:
+      sampler.initialize()
+    self.assertTrue(any("server_mode=False" in msg for msg in cm.output))
+    self.assertTrue(config.server_mode)
 
 
 class RoutedExpertsTest(absltest.TestCase):

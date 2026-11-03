@@ -64,7 +64,9 @@ def main(argv: Sequence[str], context: ProcessContext | None) -> None:
   tokenizer = AutoTokenizer.from_pretrained(args.model_name)
   if tokenizer is None:
     raise ValueError(f"No tokenizer found for {args.model_name!r}.")
-  config = vllm_sampler.VllmConfig(engine_kwargs={"model": args.model_name})
+  config = vllm_sampler.VllmConfig(
+      server_mode=True, engine_kwargs={"model": args.model_name}
+  )
   sampler_server = inprocess_sampler_lib.InprocessVllmSampler(
       server_id="vllm-0",
       tokenizer=tokenizer,

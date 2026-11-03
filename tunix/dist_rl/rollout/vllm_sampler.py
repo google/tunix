@@ -128,10 +128,17 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     del kwargs
     if config is None:
       config = configs.RolloutConfig(
-          weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN
+          weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
+          rollout_vllm_server_mode=True,
       )
     self.config: configs.RolloutConfig = config
     self.server_id = server_id
+    if not self.config.rollout_vllm_server_mode:
+      logger.warning(
+          "VllmSampler [%s] always runs in server mode; ignoring"
+          " config.rollout_vllm_server_mode=False.",
+          self.server_id,
+      )
     self.engine_args = engine_args
     self.model_name = (
         model_name

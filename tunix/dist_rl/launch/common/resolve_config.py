@@ -423,6 +423,13 @@ def _validate_typed_vllm_settings(hp: cli_config.HyperParameters) -> None:
   for key in ("return_routed_experts", "detokenize"):
     if not isinstance(vllm[key], bool):
       raise TypeError(f"vllm_config.{key} must be a bool, got {vllm[key]!r}.")
+  if vllm["server_mode"] is not None and not isinstance(
+      vllm["server_mode"], bool
+  ):
+    raise TypeError(
+        "vllm_config.server_mode must be a bool or null, got"
+        f" {vllm['server_mode']!r}."
+    )
   common_datatypes.validate_routed_experts_encode_config(
       vllm["routed_experts_encode_mode"], vllm["routed_experts_num_experts"]
   )

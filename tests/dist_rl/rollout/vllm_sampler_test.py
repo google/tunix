@@ -17,6 +17,7 @@
 """Tests for VllmSampler."""
 
 import asyncio
+import dataclasses
 import importlib
 import importlib.metadata
 import sys
@@ -473,6 +474,26 @@ class VllmSamplerTest(absltest.TestCase):
         engine_args=self.engine_args,
     )
     self.assertEqual(sampler.raiden_job_name, "replica_worker-42")
+
+  def test_init_does_not_warn_by_default(self):
+    with self.assertNoLogs(vllm_sampler.logger, level="WARNING"):
+      sampler = vllm_sampler.VllmSampler(
+          server_id="worker-default", engine_args=self.engine_args
+      )
+    self.assertTrue(sampler.config.rollout_vllm_server_mode)
+
+  def test_init_warns_when_server_mode_is_false(self):
+    with self.assertLogs(level="WARNING") as cm:
+      vllm_sampler.VllmSampler(
+          server_id="worker-warn",
+          engine_args=self.engine_args,
+          config=dataclasses.replace(
+              self.sampler.config, rollout_vllm_server_mode=False
+          ),
+      )
+    self.assertTrue(
+        any("rollout_vllm_server_mode=False" in msg for msg in cm.output)
+    )
 
   def test_canonicalize_variable_names_bracketed_to_dotted(self):
     entry = {

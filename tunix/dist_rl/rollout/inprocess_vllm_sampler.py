@@ -143,6 +143,12 @@ class InprocessVllmSampler(RaidenDestinationWeightSyncMixin, Sampler):
       # `_generate_offline()`, which calls `engine.step()` directly from caller
       # threads and races on donated JAX KV-cache buffers (`Array has been
       # deleted`).
+      if not self.config.server_mode:
+        logging.warning(
+            "InprocessVllmSampler [%s] requires server_mode=True; ignoring"
+            " server_mode=False.",
+            self.server_id,
+        )
       self.config.server_mode = True
       vllm_lib = _get_vllm_sampler_cls()
       self.vllm_sampler = vllm_lib.VllmSampler(

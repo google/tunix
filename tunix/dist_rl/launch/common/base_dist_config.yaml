@@ -180,6 +180,9 @@ vllm_config:
   tpu_backend_type: "jax"
   init_with_random_weights: true
   enable_prefix_caching: false
+  # Both vLLM rollout engines always run in server mode, so `false` is
+  # rejected.
+  # TODO(yatlas): Remove this option.
   server_mode: null
   async_scheduling: false
   max_num_seqs: null
