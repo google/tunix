@@ -30,7 +30,6 @@ from tunix.dist_rl.orchestrator import fault_tolerance_manager as fault_toleranc
 from tunix.dist_rl.orchestrator import health_monitor
 from tunix.dist_rl.orchestrator import lifecycle
 from tunix.dist_rl.orchestrator import rl_program
-from tunix.dist_rl.orchestrator import startup_validation
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.trajectory import store as trajectory_store_lib
 from tunix.dist_rl.weight_sync import weight_sync
@@ -221,12 +220,6 @@ class ClusterOrchestrator:
       stack.callback(self.lifecycle_driver.shutdown)
       stack.callback(self.monitor.close)
     logging.info("Shutdown complete.")
-
-  def validate_startup(self, alg_config: Any, training_config: Any) -> None:
-    """Validates cluster geometry against configurations."""
-    startup_validation.validate_startup(
-        self.registry, alg_config, training_config
-    )
 
   def _create_engine(self) -> distributed_rl_engine.DistributedRLEngine:
     """Constructs a DistributedRLEngine from the registered role groups."""
