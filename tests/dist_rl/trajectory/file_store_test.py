@@ -387,24 +387,25 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     )
     second_missing_checked = threading.Event()
     path_cls = type(self.tmp_dir)
-    orig_exists = path_cls.exists
+    orig_read_text = path_cls.read_text
 
-    def exists_checking_first_missing_last(
+    def read_text_checking_first_missing_last(
         path_self: epath.Path, *args: Any, **kwargs: Any
-    ) -> bool:
+    ) -> str:
       # Reporting whichever ID is found missing first would report missing_2.
       if path_self == first_missing_meta_path:
         second_missing_checked.wait(timeout=_CONCURRENT_READ_TIMEOUT_SECONDS)
-      exists = orig_exists(path_self, *args, **kwargs)
-      if path_self == second_missing_meta_path:
-        second_missing_checked.set()
-      return exists
+      try:
+        return orig_read_text(path_self, *args, **kwargs)
+      finally:
+        if path_self == second_missing_meta_path:
+          second_missing_checked.set()
 
     with mock.patch.object(
         path_cls,
-        "exists",
+        "read_text",
         autospec=True,
-        side_effect=exists_checking_first_missing_last,
+        side_effect=read_text_checking_first_missing_last,
     ):
       with self.assertRaisesRegex(expected_error, "'missing_1'"):
         read_method(
@@ -544,34 +545,21 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     missing_meta_path = self.file_s.get_trajectory_metadata_path("missing")
     metadata_read_started = threading.Event()
     path_cls = type(self.tmp_dir)
-    orig_exists = path_cls.exists
     orig_read_text = path_cls.read_text
-
-    def exists_once_metadata_read_started(
-        path_self: epath.Path, *args: Any, **kwargs: Any
-    ) -> bool:
-      # Reports the missing ID while the other metadata file is being read.
-      if path_self == missing_meta_path:
-        metadata_read_started.wait(timeout=_CONCURRENT_READ_TIMEOUT_SECONDS)
-      return orig_exists(path_self, *args, **kwargs)
 
     def read_text_slowly(
         path_self: epath.Path, *args: Any, **kwargs: Any
     ) -> str:
+      # Reports the missing ID while the other metadata file is being read.
+      if path_self == missing_meta_path:
+        metadata_read_started.wait(timeout=_CONCURRENT_READ_TIMEOUT_SECONDS)
+        return orig_read_text(path_self, *args, **kwargs)
       metadata_read_started.set()
       time.sleep(0.1)
       return orig_read_text(path_self, *args, **kwargs)
 
-    with (
-        mock.patch.object(
-            path_cls,
-            "exists",
-            autospec=True,
-            side_effect=exists_once_metadata_read_started,
-        ),
-        mock.patch.object(
-            path_cls, "read_text", autospec=True, side_effect=read_text_slowly
-        ),
+    with mock.patch.object(
+        path_cls, "read_text", autospec=True, side_effect=read_text_slowly
     ):
       with self.assertRaises(store.TrajectoryMetadataNotFoundError):
         self.file_s.get_trajectories_metadata(
@@ -1247,6 +1235,139 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
         root_dir=nonexistent_root,
     )
     self.assertEmpty(store_instance.get_trajectories_metadata())
+
+  def _write_metrics(
+      self,
+      traj_id: str,
+      extra: dict[str, Any] | None,
+      target: file_store.FileTrajectoryStore[Any] | None = None,
+  ) -> None:
+    writer = target or self.file_s
+    writer.update_metrics(
+        traj_id, trajectory_lib.TrajectoryMetrics(extra=extra)
+    )
+    writer.flush()
+
+  def test_update_metrics_creates_file_and_deduplicates_writes(self) -> None:
+    traj_dir = self.file_s.get_trajectory_dir("t1")
+    metrics_path = self.file_s.get_trajectory_metrics_path("t1")
+    path_cls = type(self.tmp_dir)
+    with (
+        mock.patch.object(path_cls, "read_text", side_effect=FileNotFoundError),
+        mock.patch.object(path_cls, "exists") as mock_exists,
+    ):
+      self.assertIsNone(file_store._read_text_or_none(metrics_path))
+    mock_exists.assert_not_called()
+
+    write_fn = path_cls.write_text
+    with (
+        mock.patch.object(
+            path_cls, "mkdir", autospec=True, side_effect=path_cls.mkdir
+        ) as mock_mkdir,
+        mock.patch.object(
+            path_cls, "write_text", autospec=True, side_effect=write_fn
+        ) as mock_write,
+    ):
+      for extra in (None, {}, {}, {"s": 1.0}, {"s": 1.0}, None, {"s": 2.0}):
+        self._write_metrics("t1", extra)
+
+    expected = trajectory_lib.TrajectoryMetrics(extra={"s": 2.0})
+    self.assertEqual(metrics_path.read_text(), expected.model_dump_json())
+    mock_mkdir.assert_called_once_with(traj_dir, parents=True, exist_ok=True)
+    self.assertEqual(mock_write.call_count, 4)
+
+  def test_update_metrics_cold_start_and_lru_eviction(self) -> None:
+    self._write_metrics("t1", {"a": 1, "b": 2, "n": None})
+    self._write_metrics("t2", {"x": 10})
+    self.file_s.close()
+
+    reopened = file_store.FileTrajectoryStore(root_dir=self.tmp_dir)
+    self.addCleanup(reopened.close)
+    path_cls = type(self.tmp_dir)
+    with (
+        mock.patch.object(file_store, "_MAX_CACHED_METRICS", 2),
+        mock.patch.object(
+            path_cls, "read_text", autospec=True, side_effect=path_cls.read_text
+        ) as mock_read,
+        mock.patch.object(
+            path_cls,
+            "write_text",
+            autospec=True,
+            side_effect=path_cls.write_text,
+        ) as mock_write,
+    ):
+      for tid, extra in (
+          ("t2", {"x": 10}),
+          ("t1", {"b": 2}),
+          ("t2", {"x": 10}),
+          ("t3", {"z": 1}),
+          ("t2", {"x": 10}),
+          ("t1", {"b": 3, "c": 4}),
+      ):
+        self._write_metrics(tid, extra, reopened)
+
+    self.assertEqual(
+        [c.args[0] for c in mock_read.call_args_list],
+        [
+            reopened.get_trajectory_metrics_path(tid)
+            for tid in ("t2", "t1", "t3", "t1")
+        ],
+    )
+    self.assertEqual(mock_write.call_count, 2)
+    self.assertEqual(
+        reopened.get_trajectories_metrics(["t1"])["t1"].extra,
+        {"a": 1, "b": 3, "n": None, "c": 4},
+    )
+
+  @parameterized.named_parameters(
+      ("disk_oserror", True, {"k2": 2}),
+      ("unserializable_extra", False, {"bad": object()}),
+  )
+  def test_update_metrics_recovers_after_task_failure(
+      self, fail_write: bool, failing_extra: dict[str, Any]
+  ) -> None:
+    self._write_metrics("t1", {"k1": 1})
+    path_cls = type(self.tmp_dir)
+    write_fx = OSError("disk full") if fail_write else path_cls.write_text
+    with (
+        mock.patch.object(
+            path_cls, "write_text", autospec=True, side_effect=write_fx
+        ),
+        mock.patch.object(logging, "exception", autospec=True) as mock_log,
+    ):
+      self._write_metrics("t1", failing_extra)
+
+    mock_log.assert_called_once_with(
+        "%s failed to write trajectory %s (trajectory_id=%s) to %s.",
+        "_AsyncFileWriterWorker",
+        "metrics",
+        "t1",
+        self.file_s.get_trajectory_metrics_path("t1"),
+    )
+    self._write_metrics("t1", {"k2": 2})
+    self.assertEqual(
+        self.file_s.get_trajectories_metrics(["t1"])["t1"].extra,
+        {"k1": 1, "k2": 2},
+    )
+
+  def test_metadata_discovery_skips_non_step_dirs(self) -> None:
+    traj_id = trajectory_testing.TRAJECTORY_ID_1
+    self.file_s.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    self._write_metrics("metrics_only", {"v": 1})
+    self._write_metrics(traj_id, {"v": 1})
+    self.file_s.get_trajectory_dir("empty_dir").mkdir(parents=True)
+    self.assertEqual(
+        self.file_s.get_trajectories_metadata(), [trajectory_testing.METADATA_1]
+    )
+    self.assertEqual(
+        set(self.file_s.get_trajectories_metrics()), {traj_id, "metrics_only"}
+    )
+
+    self.file_s.get_trajectory_metadata_path(traj_id).unlink()
+    with self.assertRaises(store.TrajectoryMetadataNotFoundError):
+      self.file_s.get_trajectories_metadata()
 
 
 class FileTrajectoryStoreMetadataClsTest(
