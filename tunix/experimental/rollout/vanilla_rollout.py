@@ -24,11 +24,9 @@ from typing import Any
 from flax import nnx
 import jax
 import jaxtyping
+from tunix.experimental.generate import configs
 from tunix.experimental.generate import engine as engine_lib
-from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
-from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.experimental.generate import sampler as sampler_lib
-from tunix.experimental.generate import scheduler as scheduler_lib
 from tunix.generate import tokenizer_adapter
 from tunix.rl import common
 from tunix.rl.rollout import base_rollout
@@ -171,7 +169,7 @@ def _build_engine(
   tp_axis = 'tp' if 'tp' in mesh.axis_names else None
   return engine_lib.LLMEngine(
       model,
-      cache_config=kv_cache_manager_lib.CacheConfig(
+      cache_config=configs.CacheConfig(
           max_device_size_gib=max_device_size_gib,
           max_host_size_gib=rollout_config.rollout_vanilla_v2_host_size_gib,
           page_size=rollout_config.rollout_vanilla_v2_kv_cache_page_size,
@@ -180,13 +178,13 @@ def _build_engine(
           tp_axis=tp_axis,
           mesh=mesh if tp_axis is not None else None,
       ),
-      scheduler_config=scheduler_lib.SchedulerConfig(
+      scheduler_config=configs.SchedulerConfig(
           max_num_batched_tokens=rollout_config.rollout_vanilla_v2_max_num_batched_tokens,
           max_num_seqs=rollout_config.rollout_vanilla_v2_max_num_seqs,
           max_chunked_prefill_length=rollout_config.rollout_vanilla_v2_chunked_prefill_length,
           num_scheduler_steps=rollout_config.rollout_vanilla_v2_num_scheduler_steps,
       ),
-      model_runner_config=model_runner_lib.ModelRunnerConfig(
+      model_runner_config=configs.ModelRunnerConfig(
           max_top_k=rollout_config.top_k or -1,
           mesh=mesh,
           return_logprobs=rollout_config.return_logprobs,

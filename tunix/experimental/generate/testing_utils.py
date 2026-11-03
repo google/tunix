@@ -21,16 +21,15 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.experimental.generate import configs
 from tunix.experimental.generate import engine as engine_lib
 from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
-from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.experimental.generate import request as request_lib
-from tunix.experimental.generate import scheduler as scheduler_lib
 
 VOCAB_SIZE = 32
 PAGE_SIZE = 4
 GEOMETRIES = {
-    'layer_0': kv_cache_manager_lib.CacheGeometry(num_kv_heads=1, head_dim=1)
+    'layer_0': configs.CacheGeometry(num_kv_heads=1, head_dim=1)
 }
 # One page of one cache: `page_size` slots of a packed K and V float32 value.
 BYTES_PER_PAGE = PAGE_SIZE * 2 * 4
@@ -60,14 +59,14 @@ class PagedSumTransformer(nnx.Module):
       self,
       offset: jax.typing.ArrayLike = 0.0,
       dtype: jax.typing.DTypeLike = jnp.float32,
-      geometries: Mapping[str, kv_cache_manager_lib.CacheGeometry] = GEOMETRIES,
+      geometries: Mapping[str, configs.CacheGeometry] = GEOMETRIES,
   ):
     self.config = PagedSumConfig(dtype=dtype)
     self.offset = nnx.Param(jnp.asarray(offset, dtype=dtype))
     self.geometries = dict(geometries)
 
   def init_kv_cache(
-      self, cache_config: kv_cache_manager_lib.CacheConfig
+      self, cache_config: configs.CacheConfig
   ) -> kv_cache_manager_lib.KVCacheManager:
     """Builds one cache per entry of `geometries`."""
     return kv_cache_manager_lib.KVCacheManager(cache_config, self.geometries)
@@ -169,18 +168,18 @@ def make_engine(
   """Returns an engine running `transformer`, a `PagedSumTransformer` if None."""
   return engine_lib.LLMEngine(
       transformer if transformer is not None else PagedSumTransformer(),
-      cache_config=kv_cache_manager_lib.CacheConfig(
+      cache_config=configs.CacheConfig(
           max_device_size_gib=max_device_size_gib,
           page_size=PAGE_SIZE,
           dtype=jnp.float32,
       ),
-      scheduler_config=scheduler_lib.SchedulerConfig(
+      scheduler_config=configs.SchedulerConfig(
           max_num_batched_tokens=max_num_batched_tokens,
           max_num_seqs=4,
           max_chunked_prefill_length=chunked_prefill_length,
           num_scheduler_steps=num_scheduler_steps,
       ),
-      model_runner_config=model_runner_lib.ModelRunnerConfig(
+      model_runner_config=configs.ModelRunnerConfig(
           max_top_k=max_top_k,
           mesh=mesh(),
           return_logprobs=return_logprobs,

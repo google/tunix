@@ -20,6 +20,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.experimental.generate import configs
 from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.experimental.generate import request as request_lib
 from tunix.models import paged_attention
@@ -49,7 +50,7 @@ def _runner(
   config_kwargs.setdefault('mesh', _mesh())
   return model_runner_lib.ModelRunner(
       transformer,
-      model_runner_lib.ModelRunnerConfig(**config_kwargs),
+      configs.ModelRunnerConfig(**config_kwargs),
   )
 
 
@@ -65,22 +66,6 @@ def _metadata(
   return model_runner_lib.SamplingMetadata.from_sampling_params(
       params, num_rows or len(params), max_top_k
   )
-
-
-class ModelRunnerConfigTest(absltest.TestCase):
-
-  def test_non_positive_max_top_k_sets_no_limit(self):
-    for max_top_k in (0, -1):
-      config = model_runner_lib.ModelRunnerConfig(
-          max_top_k=max_top_k, mesh=_mesh()
-      )
-      self.assertEqual(config.max_top_k, max_top_k)
-
-  def test_non_positive_num_scheduler_steps_raises(self):
-    with self.assertRaisesRegex(ValueError, 'num_scheduler_steps'):
-      model_runner_lib.ModelRunnerConfig(
-          max_top_k=1, mesh=_mesh(), num_scheduler_steps=0
-      )
 
 
 class SamplingMetadataTest(absltest.TestCase):

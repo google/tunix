@@ -29,6 +29,7 @@ from flax.nnx import statelib
 import jax
 import jaxtyping
 import numpy as np
+from tunix.experimental.generate import configs
 from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.experimental.generate import request as request_lib
@@ -68,9 +69,9 @@ def _write_decode_tokens(
 
 def _instantiate_components(
     transformer: nnx.Module,
-    cache_config: kv_cache_manager_lib.CacheConfig,
-    scheduler_config: scheduler_lib.SchedulerConfig,
-    model_runner_config: model_runner_lib.ModelRunnerConfig,
+    cache_config: configs.CacheConfig,
+    scheduler_config: configs.SchedulerConfig,
+    model_runner_config: configs.ModelRunnerConfig,
 ) -> tuple[
     model_runner_lib.ModelRunner,
     kv_cache_manager_lib.KVCacheManager,
@@ -142,9 +143,9 @@ class LLMEngine:
   def __init__(
       self,
       transformer: nnx.Module,
-      cache_config: kv_cache_manager_lib.CacheConfig,
-      scheduler_config: scheduler_lib.SchedulerConfig,
-      model_runner_config: model_runner_lib.ModelRunnerConfig,
+      cache_config: configs.CacheConfig,
+      scheduler_config: configs.SchedulerConfig,
+      model_runner_config: configs.ModelRunnerConfig,
       max_model_len: int,
       eos_token_ids: frozenset[int] = frozenset(),
   ):

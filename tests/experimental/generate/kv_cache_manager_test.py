@@ -24,6 +24,7 @@ from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.experimental.generate import configs
 from tunix.experimental.generate import kv_cache_manager
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import single_type_kv_cache_manager
@@ -51,12 +52,12 @@ def _create_cache_config(
     head_dim: int = 16,
     mesh: jax.sharding.Mesh | None = None,
     enable_prefix_caching: bool = True,
-) -> kv_cache_manager.CacheConfig:
+) -> configs.CacheConfig:
   bytes_per_cache_page = page_size * (2 * num_kv_heads) * head_dim * 4
   total_bytes_per_page = bytes_per_cache_page * num_caches
   if mesh is None and (dp_axis or tp_axis):
     mesh = _create_mesh()
-  return kv_cache_manager.CacheConfig(
+  return configs.CacheConfig(
       max_device_size_gib=(total_bytes_per_page * num_device_pages) / _GIB,
       max_host_size_gib=(total_bytes_per_page * num_host_pages) / _GIB,
       page_size=page_size,
@@ -73,12 +74,12 @@ def _create_cache_geometries(
     num_kv_heads: int = 2,
     head_dim: int = 16,
     cache_to_window_size: dict[str, int | None] | None = None,
-) -> dict[str, kv_cache_manager.CacheGeometry]:
+) -> dict[str, configs.CacheGeometry]:
   if cache_to_window_size is None:
     cache_to_window_size = {f"cache_{i}": None for i in range(num_caches)}
 
   return {
-      cache_name: kv_cache_manager.CacheGeometry(
+      cache_name: configs.CacheGeometry(
           num_kv_heads=num_kv_heads,
           head_dim=head_dim,
           window_size=window_size,
@@ -199,117 +200,10 @@ def _cache_pages(
     manager.release_request(req.request_id)
 
 
-class CacheConfigTest(parameterized.TestCase):
-
-  def test_valid_config(self):
-    cfg = kv_cache_manager.CacheConfig(
-        max_device_size_gib=1.0,
-        max_host_size_gib=0.5,
-        page_size=16,
-        dtype=jnp.float32,
-        dp_axis="dp",
-        tp_axis="tp",
-        mesh=_create_mesh(),
-    )
-    self.assertEqual(cfg.page_size, 16)
-    self.assertEqual(cfg.dtype, jnp.float32)
-    self.assertEqual(cfg.dp_axis, "dp")
-    self.assertEqual(cfg.tp_axis, "tp")
-    self.assertEqual(cfg.dp_size, 2)
-    self.assertEqual(cfg.tp_size, 2)
-
-  def test_dp_size_is_one_without_dp_axis(self):
-    cfg = kv_cache_manager.CacheConfig(
-        max_device_size_gib=1.0,
-        dtype=jnp.float32,
-        tp_axis="tp",
-        mesh=_create_mesh(),
-    )
-    self.assertEqual(cfg.dp_size, 1)
-    self.assertEqual(cfg.tp_size, 2)
-
-  def test_sharding_axes_without_mesh_raises(self):
-    with self.assertRaisesRegex(ValueError, r"mesh is required"):
-      kv_cache_manager.CacheConfig(
-          max_device_size_gib=1.0,
-          page_size=16,
-          dtype=jnp.float32,
-          dp_axis="dp",
-      )
-
-  @parameterized.named_parameters(
-      dict(testcase_name="dp_axis", dp_axis="data", tp_axis="tp"),
-      dict(testcase_name="tp_axis", dp_axis="dp", tp_axis="model"),
-  )
-  def test_axis_not_in_mesh_raises(self, dp_axis, tp_axis):
-    with self.assertRaisesRegex(ValueError, r"is not in the mesh axes"):
-      kv_cache_manager.CacheConfig(
-          max_device_size_gib=1.0,
-          dtype=jnp.float32,
-          dp_axis=dp_axis,
-          tp_axis=tp_axis,
-          mesh=_create_mesh(),
-      )
-
-  def test_invalid_page_size_raises(self):
-    with self.assertRaisesRegex(ValueError, r"page_size must be positive"):
-      kv_cache_manager.CacheConfig(
-          page_size=0,
-          max_device_size_gib=1.0,
-          dtype=jnp.float32,
-      )
-
-  def test_invalid_negative_size_raises(self):
-    with self.assertRaisesRegex(
-        ValueError, r"max_device_size_gib must be positive"
-    ):
-      kv_cache_manager.CacheConfig(
-          page_size=16,
-          max_device_size_gib=-1.0,
-          dtype=jnp.float32,
-      )
-    with self.assertRaisesRegex(
-        ValueError, r"max_host_size_gib cannot be negative"
-    ):
-      kv_cache_manager.CacheConfig(
-          page_size=16,
-          max_device_size_gib=1.0,
-          max_host_size_gib=-1.0,
-          dtype=jnp.float32,
-      )
-
-  def test_zero_device_size_raises(self):
-    with self.assertRaisesRegex(
-        ValueError, r"max_device_size_gib must be positive"
-    ):
-      kv_cache_manager.CacheConfig(
-          page_size=16,
-          max_device_size_gib=0.0,
-          dtype=jnp.float32,
-      )
-
-
-class CacheGeometryTest(parameterized.TestCase):
-
-  @parameterized.named_parameters(
-      dict(testcase_name="zero_num_kv_heads", field="num_kv_heads", value=0),
-      dict(testcase_name="zero_head_dim", field="head_dim", value=0),
-      dict(testcase_name="zero_window_size", field="window_size", value=0),
-      dict(
-          testcase_name="negative_window_size", field="window_size", value=-8
-      ),
-  )
-  def test_non_positive_field_raises(self, field, value):
-    kwargs = dict(num_kv_heads=2, head_dim=16, window_size=8)
-    kwargs[field] = value
-    with self.assertRaisesRegex(ValueError, rf"{field} must be positive"):
-      kv_cache_manager.CacheGeometry(**kwargs)
-
-
 class CacheSizingTest(parameterized.TestCase):
 
   def test_derive_kv_geometry(self):
-    cfg = kv_cache_manager.CacheConfig(
+    cfg = configs.CacheConfig(
         max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
@@ -320,7 +214,7 @@ class CacheSizingTest(parameterized.TestCase):
     self.assertEqual(element_shape, (8, 2, 64))
 
   def test_derive_kv_geometry_pads_kv_heads_to_tp_size(self):
-    cfg = kv_cache_manager.CacheConfig(
+    cfg = configs.CacheConfig(
         max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
@@ -334,7 +228,7 @@ class CacheSizingTest(parameterized.TestCase):
     self.assertEqual(element_shape, (2, 2, 64))
 
   def test_derive_kv_geometry_invalid_tp_divisibility_raises(self):
-    cfg = kv_cache_manager.CacheConfig(
+    cfg = configs.CacheConfig(
         max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
@@ -355,7 +249,7 @@ class CacheSizingTest(parameterized.TestCase):
   )
   def test_derive_cache_sharding(self, dp_axis, tp_axis):
     mesh = _create_mesh()
-    cfg = kv_cache_manager.CacheConfig(
+    cfg = configs.CacheConfig(
         max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
@@ -372,7 +266,7 @@ class CacheSizingTest(parameterized.TestCase):
     )
 
   def test_derive_cache_sharding_no_sharding(self):
-    cfg = kv_cache_manager.CacheConfig(
+    cfg = configs.CacheConfig(
         max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
@@ -380,7 +274,7 @@ class CacheSizingTest(parameterized.TestCase):
     self.assertIsNone(kv_cache_manager._derive_cache_sharding(cfg))
 
   def test_compute_page_limits(self):
-    cfg = kv_cache_manager.CacheConfig(
+    cfg = configs.CacheConfig(
         max_device_size_gib=(1024 * 1024) / _GIB,
         max_host_size_gib=(512 * 1024) / _GIB,
         dtype=jnp.bfloat16,
@@ -444,7 +338,7 @@ class CacheSizingTest(parameterized.TestCase):
         (-0.2, expected_device_pages_one_byte_short, 2),
     ):
       with self.subTest(budget_offset=budget_offset):
-        cfg = kv_cache_manager.CacheConfig(
+        cfg = configs.CacheConfig(
             max_device_size_gib=(8 * page_bytes + budget_offset) / _GIB,
             max_host_size_gib=(3 * page_bytes + budget_offset) / _GIB,
             dtype=jnp.bfloat16,
@@ -469,18 +363,18 @@ class CacheSizingTest(parameterized.TestCase):
   def test_compute_page_limits_heterogeneous_geometry(self):
     # Weighting each group's byte budget by its own per-page cost makes the
     # weight cancel, so both groups end up with the same page count.
-    cfg = kv_cache_manager.CacheConfig(
+    cfg = configs.CacheConfig(
         max_device_size_gib=(3 * (65536 + 16384)) / _GIB,
         dtype=jnp.bfloat16,
         page_size=16,
     )
     geometries = (
-        kv_cache_manager.CacheGeometry(num_kv_heads=8, head_dim=64),
-        kv_cache_manager.CacheGeometry(num_kv_heads=8, head_dim=64),
-        kv_cache_manager.CacheGeometry(
+        configs.CacheGeometry(num_kv_heads=8, head_dim=64),
+        configs.CacheGeometry(num_kv_heads=8, head_dim=64),
+        configs.CacheGeometry(
             num_kv_heads=4, head_dim=32, window_size=128
         ),
-        kv_cache_manager.CacheGeometry(
+        configs.CacheGeometry(
             num_kv_heads=4, head_dim=32, window_size=128
         ),
     )
@@ -502,7 +396,7 @@ class CacheSizingTest(parameterized.TestCase):
   def test_compute_page_limits_is_multiple_of_dp_size(self):
     # Axis 0 of the pool is partitioned over dp, so a count that isn't a
     # multiple of dp_size would fail allocation with IndivisibleError.
-    cfg = kv_cache_manager.CacheConfig(
+    cfg = configs.CacheConfig(
         max_device_size_gib=(37 * 1024) / _GIB,
         dtype=jnp.bfloat16,
         page_size=16,
@@ -554,7 +448,7 @@ class KVCacheManagerInitTest(parameterized.TestCase):
   def test_init_per_group_element_shape(self):
     # Gemma 4's global layers project fewer, wider KV heads than its local
     # ones, so each group's pool must carry its own element shape.
-    cfg = kv_cache_manager.CacheConfig(
+    cfg = configs.CacheConfig(
         max_device_size_gib=(4 * (4 * 4 * 8 * 4 + 4 * 1 * 16 * 4)) / _GIB,
         page_size=4,
         dtype=jnp.float32,
@@ -562,10 +456,10 @@ class KVCacheManagerInitTest(parameterized.TestCase):
     mgr = kv_cache_manager.KVCacheManager(
         config=cfg,
         cache_geometries={
-            "cache_0": kv_cache_manager.CacheGeometry(
+            "cache_0": configs.CacheGeometry(
                 num_kv_heads=2, head_dim=8, window_size=8
             ),
-            "cache_1": kv_cache_manager.CacheGeometry(
+            "cache_1": configs.CacheGeometry(
                 num_kv_heads=1, head_dim=16
             ),
         },
@@ -603,7 +497,7 @@ class KVCacheManagerInitTest(parameterized.TestCase):
 
   def test_init_sharding_pads_mixed_kv_heads_to_tp_size(self):
     mesh = _create_mesh()
-    cfg = kv_cache_manager.CacheConfig(
+    cfg = configs.CacheConfig(
         max_device_size_gib=1e-3,
         page_size=4,
         dtype=jnp.bfloat16,
@@ -614,10 +508,10 @@ class KVCacheManagerInitTest(parameterized.TestCase):
     mgr = kv_cache_manager.KVCacheManager(
         config=cfg,
         cache_geometries={
-            "local": kv_cache_manager.CacheGeometry(
+            "local": configs.CacheGeometry(
                 num_kv_heads=2, head_dim=8, window_size=8
             ),
-            "global": kv_cache_manager.CacheGeometry(
+            "global": configs.CacheGeometry(
                 num_kv_heads=1, head_dim=16
             ),
         },
@@ -633,7 +527,7 @@ class KVCacheManagerInitTest(parameterized.TestCase):
     self.assertEqual(pages["global"].shape[2:], (2, 2, 16))
 
   def test_init_insufficient_device_bytes_raises(self):
-    cfg = kv_cache_manager.CacheConfig(
+    cfg = configs.CacheConfig(
         page_size=4,
         dtype=jnp.float32,
         max_device_size_gib=10 / _GIB,

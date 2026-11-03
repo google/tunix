@@ -33,36 +33,11 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+from tunix.experimental.generate import configs
 from tunix.experimental.generate import request as request_lib
 from tunix.models import paged_attention
 from tunix.rl import reshard
 from tunix.rl import utils as rl_utils
-
-
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class ModelRunnerConfig:
-  """Configuration for the model runner."""
-
-  # The maximum `top_k` value allowed in `SamplingParams`.
-  # <= 0 to set no limit.
-  max_top_k: int
-  # The device mesh the transformer runs on.
-  mesh: jax.sharding.Mesh
-  # Whether or not return logprobs.
-  return_logprobs: bool = False
-  # Whether or not to return logits.
-  return_logits: bool = False
-  # The number of model forward passes to execute per engine step.
-  num_scheduler_steps: int = 1
-  # The engine's single sampling seed. Each step's key is derived from it, and
-  # every row samples independently under that key.
-  seed: int = 0
-
-  def __post_init__(self):
-    if self.num_scheduler_steps < 1:
-      raise ValueError(
-          f'num_scheduler_steps must be positive, got {self.num_scheduler_steps}.'
-      )
 
 
 _HIERARCHICAL_BLOCK_SIZE = 256
@@ -330,7 +305,7 @@ class ModelRunner:
   def __init__(
       self,
       transformer: nnx.Module,
-      config: ModelRunnerConfig,
+      config: configs.ModelRunnerConfig,
   ):
     """Initializes the runner.
 
@@ -361,7 +336,7 @@ class ModelRunner:
     )
 
   @property
-  def config(self) -> ModelRunnerConfig:
+  def config(self) -> configs.ModelRunnerConfig:
     return self._config
 
   def model_def_and_state(

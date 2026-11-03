@@ -24,6 +24,7 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 import jaxtyping
+from tunix.experimental.generate import configs as generate_configs
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.models import paged_attention
 from tunix.utils import compat
@@ -744,7 +745,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
     return logits[0], cache
 
   def init_kv_cache(
-      self, cache_config: kv_cache_manager.CacheConfig
+      self, cache_config: generate_configs.CacheConfig
   ) -> kv_cache_manager.KVCacheManager:
     """Builds the paged KV caches `_paged_call` reads.
 
@@ -766,7 +767,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         continue
       # `attn.num_kv_heads` / `attn.head_dim` are already resolved per
       # attention type; the raw config values are the local-layer ones.
-      cache_geometries[f'layer_{i}'] = kv_cache_manager.CacheGeometry(
+      cache_geometries[f'layer_{i}'] = generate_configs.CacheGeometry(
           num_kv_heads=layer.attn.num_kv_heads,
           head_dim=layer.attn.head_dim,
           window_size=(

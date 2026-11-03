@@ -21,11 +21,9 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.experimental.generate import configs
 from tunix.experimental.generate import engine as engine_lib
-from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
-from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.experimental.generate import request as request_lib
-from tunix.experimental.generate import scheduler as scheduler_lib
 from tunix.experimental.generate import testing_utils
 
 
@@ -46,18 +44,18 @@ class LLMEngineTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, 'num_scheduler_steps'):
       engine_lib.LLMEngine(
           testing_utils.PagedSumTransformer(),
-          cache_config=kv_cache_manager_lib.CacheConfig(
+          cache_config=configs.CacheConfig(
               max_device_size_gib=64 * testing_utils.GIB_PER_PAGE,
               page_size=testing_utils.PAGE_SIZE,
               dtype=jnp.float32,
           ),
-          scheduler_config=scheduler_lib.SchedulerConfig(
+          scheduler_config=configs.SchedulerConfig(
               max_num_batched_tokens=32,
               max_num_seqs=4,
               max_chunked_prefill_length=32,
               num_scheduler_steps=2,
           ),
-          model_runner_config=model_runner_lib.ModelRunnerConfig(
+          model_runner_config=configs.ModelRunnerConfig(
               max_top_k=4, mesh=testing_utils.mesh(), num_scheduler_steps=1
           ),
           max_model_len=24,
@@ -77,7 +75,7 @@ class LLMEngineTest(absltest.TestCase):
   def test_truncates_chunked_prefill_length_to_sliding_window(self):
     transformer = testing_utils.PagedSumTransformer(
         geometries={
-            'layer_0': kv_cache_manager_lib.CacheGeometry(
+            'layer_0': configs.CacheGeometry(
                 num_kv_heads=1, head_dim=1, window_size=12
             )
         }
@@ -398,8 +396,8 @@ class StepTest(parameterized.TestCase):
   )
   def test_chunk_fits_in_the_smallest_window(self, window_size, expected):
     geometries = {
-        'full': kv_cache_manager_lib.CacheGeometry(num_kv_heads=1, head_dim=1),
-        'sliding': kv_cache_manager_lib.CacheGeometry(
+        'full': configs.CacheGeometry(num_kv_heads=1, head_dim=1),
+        'sliding': configs.CacheGeometry(
             num_kv_heads=1, head_dim=1, window_size=window_size
         ),
     }

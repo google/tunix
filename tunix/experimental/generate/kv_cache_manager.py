@@ -33,11 +33,11 @@ from __future__ import annotations
 
 import collections
 from collections.abc import Mapping, Sequence
-import dataclasses
 import math
 
 import jax
 import jax.numpy as jnp
+from tunix.experimental.generate import configs
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import single_type_kv_cache_manager
 import tunix.experimental.generate.tiered_page_pool as page_pool_lib
@@ -49,95 +49,8 @@ Page = single_type_kv_cache_manager.Page
 _GIB = 1 << 30
 
 
-@dataclasses.dataclass(kw_only=True)
-class CacheConfig:
-  """Raw configuration parameters for KV Cache allocation and sharding."""
-
-  # The maximum number of GiB to allocate on each device.
-  max_device_size_gib: float
-  # The maximum number of GiB to allocate on the host.
-  max_host_size_gib: float = 0.0
-  # The number of tokens per page.
-  page_size: int = 16
-  # Whether pages may be shared between requests with a common prefix.
-  enable_prefix_caching: bool = True
-  # The data type of KV cache entries.
-  dtype: jax.typing.DTypeLike
-  # The mesh axis to shard pages across.
-  dp_axis: str | None = None
-  # The mesh axis to shard KV heads across.
-  tp_axis: str | None = None
-  # The mesh to shard the KV caches over. Required if `dp_axis` or `tp_axis`
-  # is set.
-  mesh: jax.sharding.Mesh | None = None
-
-  def __post_init__(self):
-    positive_checks = {
-        "page_size": self.page_size,
-        "max_device_size_gib": self.max_device_size_gib,
-    }
-    for field_name, value in positive_checks.items():
-      if value <= 0:
-        raise ValueError(f"{field_name} must be positive, got {value}.")
-
-    if self.max_host_size_gib < 0:
-      raise ValueError(
-          f"max_host_size_gib cannot be negative, got {self.max_host_size_gib}."
-      )
-
-    if not (self.dp_axis or self.tp_axis):
-      return
-    if self.mesh is None:
-      raise ValueError(
-          "mesh is required when dp_axis or tp_axis is set, got "
-          f"dp_axis={self.dp_axis!r}, tp_axis={self.tp_axis!r}. Pages are "
-          "allocated outside any mesh context, so the mesh cannot be inferred."
-      )
-    for axis in (self.dp_axis, self.tp_axis):
-      if axis and axis not in self.mesh.shape:
-        raise ValueError(
-            f"Axis {axis!r} is not in the mesh axes {tuple(self.mesh.shape)}."
-        )
-
-  @property
-  def dp_size(self) -> int:
-    """The number of data parallel replicas, i.e. the size of `dp_axis`."""
-    if not self.dp_axis or self.mesh is None:
-      return 1
-    return self.mesh.shape[self.dp_axis]
-
-  @property
-  def tp_size(self) -> int:
-    """The tensor parallel size, i.e. the size of `tp_axis`."""
-    if not self.tp_axis or self.mesh is None:
-      return 1
-    return self.mesh.shape[self.tp_axis]
-
-
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class CacheGeometry:
-  """The shape and reach of one KV cache."""
-
-  num_kv_heads: int
-  head_dim: int
-  # None means the layers reading this cache attend globally.
-  window_size: int | None = None
-
-  def __post_init__(self):
-    positive_checks = {
-        "num_kv_heads": self.num_kv_heads,
-        "head_dim": self.head_dim,
-    }
-    if self.window_size is not None:
-      positive_checks["window_size"] = self.window_size
-
-    for field_name, value in positive_checks.items():
-      if value <= 0:
-        raise ValueError(f"{field_name} must be positive, got {value}.")
-
-
 def _derive_kv_geometry(
-    config: CacheConfig,
+    config: configs.CacheConfig,
     num_kv_heads: int,
     head_dim: int,
 ) -> tuple[int, int, int]:
@@ -168,7 +81,7 @@ def _derive_kv_geometry(
 
 
 def _derive_cache_sharding(
-    config: CacheConfig,
+    config: configs.CacheConfig,
 ) -> jax.sharding.Sharding | None:
   """Derives the cache sharding."""
   if not (config.dp_axis or config.tp_axis):
@@ -187,7 +100,7 @@ def _derive_cache_sharding(
 
 
 def _compute_page_limits(
-    config: CacheConfig,
+    config: configs.CacheConfig,
     element_shapes: Sequence[tuple[int, int, int]],
     sharding: jax.sharding.Sharding | None,
 ) -> tuple[int, int]:
@@ -239,20 +152,20 @@ def _compute_page_limits(
 
 
 def _create_kv_cache_group_managers(
-    config: CacheConfig,
-    cache_geometries: Mapping[str, CacheGeometry],
+    config: configs.CacheConfig,
+    cache_geometries: Mapping[str, configs.CacheGeometry],
 ) -> tuple[list[single_type_kv_cache_manager.SingleTypeKVCacheManager], int]:
   """Creates one `SingleTypeKVCacheManager` per unique cache geometry."""
   if not cache_geometries:
     raise ValueError("At least one cache must be configured.")
 
-  caches_by_geometry: dict[CacheGeometry, list[str]] = (
+  caches_by_geometry: dict[configs.CacheGeometry, list[str]] = (
       collections.defaultdict(list)
   )
   for cache, geometry in cache_geometries.items():
     caches_by_geometry[geometry].append(cache)
 
-  kv_shapes: dict[CacheGeometry, tuple[int, int, int]] = {
+  kv_shapes: dict[configs.CacheGeometry, tuple[int, int, int]] = {
       geometry: _derive_kv_geometry(
           config, geometry.num_kv_heads, geometry.head_dim
       )
@@ -290,8 +203,8 @@ class KVCacheManager:
 
   def __init__(
       self,
-      config: CacheConfig,
-      cache_geometries: Mapping[str, CacheGeometry],
+      config: configs.CacheConfig,
+      cache_geometries: Mapping[str, configs.CacheGeometry],
   ):
     """Initializes the cache.
 
@@ -324,7 +237,7 @@ class KVCacheManager:
     return self._cache_names
 
   @property
-  def cache_geometries(self) -> Mapping[str, CacheGeometry]:
+  def cache_geometries(self) -> Mapping[str, configs.CacheGeometry]:
     """Returns the geometry of each named cache."""
     return self._cache_geometries
 

@@ -25,7 +25,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import qwix
-from tunix.experimental.generate import kv_cache_manager
+from tunix.experimental.generate import configs as generate_configs
 from tunix.models import cache_utils
 from tunix.models import paged_attention
 from tunix.models.gemma4 import attention as attention_lib
@@ -240,7 +240,7 @@ class ModelTest(parameterized.TestCase):
       dense_decode_logits.append(logits[0, -1:])
 
     manager = model.init_kv_cache(
-        kv_cache_manager.CacheConfig(
+        generate_configs.CacheConfig(
             max_device_size_gib=(1 << 20) / (1 << 30),
             page_size=4,
             dtype=jnp.float32,
@@ -250,10 +250,10 @@ class ModelTest(parameterized.TestCase):
     self.assertEqual(
         geometries,
         {
-            'layer_0': kv_cache_manager.CacheGeometry(
+            'layer_0': generate_configs.CacheGeometry(
                 num_kv_heads=4, head_dim=32, window_size=4
             ),
-            'layer_1': kv_cache_manager.CacheGeometry(
+            'layer_1': generate_configs.CacheGeometry(
                 num_kv_heads=2, head_dim=64, window_size=None
             ),
         },

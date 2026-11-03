@@ -16,10 +16,10 @@
 
 import collections
 from collections.abc import Sequence
-import dataclasses
 import functools
 import itertools
 
+from tunix.experimental.generate import configs
 from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import request as request_lib
 
@@ -50,34 +50,6 @@ def _is_skipped(req: request_lib.RequestState) -> bool:
   )
 
 
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class SchedulerConfig:
-  """Configuration for the scheduler."""
-
-  # The maximum number of tokens that can be scheduled in a single batch.
-  max_num_batched_tokens: int
-  # The maximum number of sequences that can be scheduled in a single batch.
-  max_num_seqs: int
-  # The maximum size of a chunked prefill request in tokens.
-  max_chunked_prefill_length: int
-  # The number of model forward passes to execute per engine step.
-  num_scheduler_steps: int = 1
-
-  def __post_init__(self):
-    if self.max_chunked_prefill_length <= 0:
-      raise ValueError(
-          "max_chunked_prefill_length must be positive. Got"
-          f" {self.max_chunked_prefill_length}."
-      )
-
-    if self.max_chunked_prefill_length > self.max_num_batched_tokens:
-      raise ValueError(
-          "max_chunked_prefill_length must be less than or equal to "
-          f"max_num_batched_tokens. Got {self.max_chunked_prefill_length} "
-          f"and {self.max_num_batched_tokens}."
-      )
-
-
 class Scheduler:
   """Continuous batching scheduler.
 
@@ -88,7 +60,7 @@ class Scheduler:
 
   def __init__(
       self,
-      config: SchedulerConfig,
+      config: configs.SchedulerConfig,
       kv_cache_manager: kv_cache_manager_lib.KVCacheManager,
   ):
     self._config = config
