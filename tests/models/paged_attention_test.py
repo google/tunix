@@ -193,16 +193,27 @@ class PagedAttentionJaxTest(parameterized.TestCase):
   @parameterized.parameters(
       # Full TP sharding across Q, KV, and KV cache.
       (8, 4, 2, 4),
-      # MQA with packing=1 on tp=2: kv_cache.shape[2] == 2 divides tp, but
-      # num_kv_heads == 1 does not, so KV and cache must both stay replicated.
+      # MQA on tp=2: KV head is padded to tp_size=2 and sharded across TP.
       (4, 1, 1, 2),
-      # GQA with 1 < num_kv_heads < tp: KV is replicated, so Q must also stay
-      # unsharded to preserve GQA head grouping.
+      (4, 1, 2, 2),
+      # GQA with 1 < num_kv_heads < tp: KV heads are padded to tp_size=4.
       (8, 2, 1, 4),
+      (8, 2, 2, 4),
   )
   def test_mesh_sharding_matches_unsharded(
       self, num_q_heads, num_kv_heads, packing, tp_size
   ):
+    def _pad_cache_for_tp(cache):
+      if num_kv_heads >= tp_size:
+        return cache
+      pages, page_size, _, pack, head_dim = cache.shape
+      reps = tp_size // num_kv_heads
+      unpacked = cache.reshape(pages, page_size, num_kv_heads, 2, head_dim)
+      padded = jnp.repeat(unpacked, reps, axis=2)
+      return padded.reshape(
+          pages, page_size, 2 * tp_size // pack, pack, head_dim
+      )
+
     cpu_devices = jax.devices("cpu")[:tp_size]
     self.assertLen(cpu_devices, tp_size)
     inputs = jax.device_put(
@@ -223,8 +234,11 @@ class PagedAttentionJaxTest(parameterized.TestCase):
     )
 
     mesh = jax.sharding.Mesh(np.array(cpu_devices), ("tp",))
+    sharded_inputs = dict(
+        inputs, kv_cache=_pad_cache_for_tp(inputs["kv_cache"])
+    )
     sharded_inputs = jax.device_put(
-        inputs,
+        sharded_inputs,
         jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()),
     )
     sharded_out, sharded_cache = paged_attention.paged_attention(
@@ -236,16 +250,26 @@ class PagedAttentionJaxTest(parameterized.TestCase):
     )
 
     np.testing.assert_allclose(sharded_out, ref_out, rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(sharded_cache, ref_cache, rtol=1e-5, atol=1e-5)
-    self.assertIsNone(paged_attention._shardable_tp_axis(mesh, None, 4))
-    self.assertIsNone(paged_attention._shardable_tp_axis(mesh, "missing", 4))
-    fake_two_way_mesh = jax.sharding.AbstractMesh((2,), ("tp",))
-    self.assertEqual(
-        paged_attention._shardable_tp_axis(fake_two_way_mesh, "tp", 4, 2), "tp"
+    np.testing.assert_allclose(
+        sharded_cache, _pad_cache_for_tp(ref_cache), rtol=1e-5, atol=1e-5
     )
-    self.assertIsNone(
-        paged_attention._shardable_tp_axis(fake_two_way_mesh, "tp", 1, 2)
+
+  def test_indivisible_kv_heads_for_tp_raises(self):
+    cpu_devices = jax.devices("cpu")[:4]
+    mesh = jax.sharding.Mesh(np.array(cpu_devices), ("tp",))
+    inputs = _inputs(
+        [5, 7],
+        [12, 15],
+        num_q_heads=12,
+        num_kv_heads=3,
+        packing=1,
+        head_dim=32,
+        dtype=jnp.float32,
     )
+    with self.assertRaisesRegex(ValueError, r"tp_size \(4\) must be divisible"):
+      paged_attention.paged_attention(
+          **inputs, cache_name=_CACHE, mesh=mesh, tp_axis="tp", backend="cpu"
+      )
 
   def test_metadata_decode_only_is_static_and_forwarded_to_gpu(self):
     inputs = _inputs([1, 1], [12, 15], head_dim=32, dtype=jnp.float32)
