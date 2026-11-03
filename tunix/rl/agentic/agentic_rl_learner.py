@@ -437,6 +437,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         single_example,
         **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},  # pyrefly: ignore[bad-argument-type]
     )
+    if hasattr(env, "prewarm") and callable(env.prewarm):
+      env.prewarm()
 
     return agent, env
 
@@ -500,11 +502,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         perf_v2=self.rl_engine.perf_v2,
         exact_token_continuity=self.algo_config.exact_token_continuity,
     )
+    prefetch_size = getattr(self.algo_config, "prefetch_size", None)
     return rollout_orchestrator.RolloutOrchestrator(
         engine_cls=trajectory_collect_engine.TrajectoryCollectEngine,
         engine_kwargs=engine_kwargs,
         max_concurrency=self.algo_config.max_concurrency,
         rollout_sync_lock=self._rollout_sync_lock,
+        prefetch_size=prefetch_size,
     )
 
   async def _orchestrator_producer(
