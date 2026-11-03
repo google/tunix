@@ -900,8 +900,10 @@ def transfer_state_with_mappings(
       else list(dst_state.items())
   )
 
-  # Build sharding dictionary if resharding is needed
+  # Build sharding dictionary and snapshot target buffers if resharding is
+  # needed.
   sharding_dict = None
+  orig_tgt_buffers = None
 
   if reshard_fn:
     sharding_dict = {
@@ -909,6 +911,14 @@ def transfer_state_with_mappings(
             tgt_params.value.sharding
             if hasattr(tgt_params, 'value')
             else tgt_params.sharding
+        )
+        for key, tgt_params in tgt_flat_list
+    }
+    orig_tgt_buffers = {
+        key: (
+            tgt_params.value
+            if hasattr(tgt_params, 'value')
+            else tgt_params
         )
         for key, tgt_params in tgt_flat_list
     }
@@ -965,16 +975,20 @@ def transfer_state_with_mappings(
         for key, tgt_params in tgt_flat_list
     }
     if kwargs.get('reshard_chunk_size', None) is not None:
+      assert orig_tgt_buffers is not None
       resharded_values_flat_dict = _reshard_in_chunks(
           src_flat=tgt_flat_dict,
-          spec_flat=sharding_dict,  # pyrefly: ignore[bad-argument-type]
+          spec_flat=orig_tgt_buffers,
           reshard_fn=reshard_fn,
           chunk_size=kwargs['reshard_chunk_size'],
           delete_spec_buffers=kwargs.get('delete_dst_buffers', False),
       )
     else:
-      if kwargs.get('delete_dst_buffers', False):
-        _delete_target_buffers(sharding_dict, tgt_flat_dict)  # pyrefly: ignore[bad-argument-type]
+      if (
+          kwargs.get('delete_dst_buffers', False)
+          and orig_tgt_buffers is not None
+      ):
+        _delete_target_buffers(orig_tgt_buffers, tgt_flat_dict)
       resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
 
     for idx, (tgt_key, tgt_param) in enumerate(tgt_flat_list):
@@ -1551,14 +1565,31 @@ def _delete_target_buffers(
   """Deletes target arrays in spec_flat that don't alias any source shard."""
   # This will be a set() of IDs, or None if we are on Pathways
   src_buffer_ids = _collect_src_buffer_ids(src_flat)
+  src_obj_ids = {
+      id(v.value if hasattr(v, 'value') else v) for v in src_flat.values()
+  }
+
   for tgt_val in spec_flat.values():
     tgt_arr = tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
+
+    # Skip if the target array is the same object as a source array.
+    if id(tgt_arr) in src_obj_ids:
+      continue
+
     # Skip if the array cannot be deleted or is already deleted
     if (
         not hasattr(tgt_arr, 'delete')
         or getattr(tgt_arr, 'is_deleted', lambda: False)()
     ):
       continue
+
+    # Never delete CPU-offloaded buffers on pinned_host
+    if (
+        isinstance(tgt_arr, jax.Array)
+        and tgt_arr.sharding.memory_kind == 'pinned_host'
+    ):
+      continue
+
     # Check for aliasing only if the backend supports buffer pointer tracking
     if src_buffer_ids is not None and hasattr(tgt_arr, 'addressable_shards'):
       aliases_source = any(
@@ -1568,6 +1599,59 @@ def _delete_target_buffers(
       if aliases_source:
         continue
     tgt_arr.delete()
+
+
+def _flatten_state(
+    state: Any,
+) -> Dict[Tuple[str, ...], jax.Array | np.ndarray | nnx.Variable]:
+  """Flattens a state container into a dict keyed by string path tuples."""
+  if state is None:
+    return {}
+  items = (
+      state.flat_state()
+      if hasattr(state, 'flat_state')
+      else traverse_util.flatten_dict(state).items()
+  )
+  return {
+      (
+          tuple(str(p) for p in k)
+          if isinstance(k, tuple)
+          else tuple(str(k).split('.'))
+      ): v
+      for k, v in items
+  }
+
+
+def delete_state_buffers(
+    dst_state: Any,
+    src_state: Any = None,
+    key_mappings: Optional[Mapping[str, Any]] = None,
+) -> None:
+  """Deletes device weight buffers in `dst_state` that will be overwritten on sync."""
+  tgt_flat = _flatten_state(dst_state)
+  if not tgt_flat:
+    return
+  if key_mappings and src_state is not None:
+    src_to_tgt_map = build_flat_dict(
+        list(tgt_flat.items()), dict(key_mappings)  # pyrefly: ignore[bad-argument-type]
+    )
+    unscanned = _unroll_scanned_layers(src_state, src_to_tgt_map)
+    spec_flat = {
+        tuple(tgt_key.split('.')): tgt_param
+        for (_, tgt_key), (_, tgt_param) in unscanned.items()
+    }
+    src_flat = {
+        tuple(tgt_key.split('.')): val
+        for (_, tgt_key), (val, _) in unscanned.items()
+    }
+  else:
+    src_flat = _flatten_state(src_state)
+    spec_flat = {
+        k: v
+        for k, v in tgt_flat.items()
+        if 'rng' not in k and (not src_flat or k in src_flat)
+    }
+  _delete_target_buffers(spec_flat, src_flat)
 
 
 def _snapshot_dst_sharding(

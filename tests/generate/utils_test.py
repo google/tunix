@@ -2609,6 +2609,67 @@ class TokenIdsTest(parameterized.TestCase):
     np.testing.assert_array_equal(tokens[0], [1, 2, 3])
     np.testing.assert_array_equal(tokens[1], [4, 5, 6])
 
+  @parameterized.parameters((None,), (1,))
+  def test_transfer_state_with_mappings_deletes_old_target_buffers_and_preserves_rng(
+      self, chunk_size
+  ):
+    src_w = jnp.ones((2, 2), dtype=jnp.float32) * 3.0
+    dst_w = jnp.zeros((2, 2), dtype=jnp.float32)
+    dst_rng = jnp.array([7, 8], dtype=jnp.uint32)
+    src = MockState({"layer.0.weight": MockParam(src_w)})
+    dst = MockState({
+        "layer.0.weight": MockParam(dst_w),
+        "rng": MockParam(dst_rng),
+    })
+    mappings = {"layer.0.weight": ("layer.0.weight", None)}
+
+    def fake_reshard(source, target):
+      del target
+      return source
+
+    result = utils.transfer_state_with_mappings(
+        src,
+        dst,
+        mappings,
+        reshard_fn=fake_reshard,
+        delete_dst_buffers=True,
+        reshard_chunk_size=chunk_size,
+    )
+    self.assertTrue(dst_w.is_deleted())
+    self.assertFalse(dst_rng.is_deleted())
+    self.assertFalse(result.params["layer.0.weight"].value.is_deleted())
+    np.testing.assert_allclose(result.params["layer.0.weight"].value, 3.0)
+
+  def test_delete_state_buffers_respects_rng_aliasing_and_lora_filtering(self):
+    shared_w = jnp.ones((2, 2), dtype=jnp.float32)
+    base_w = jnp.ones((2, 2), dtype=jnp.float32) * 2.0
+    lora_w = jnp.ones((2, 1), dtype=jnp.float32) * 4.0
+    rng_arr = jnp.array([1, 2], dtype=jnp.uint32)
+
+    dst = MockState({
+        "model.layers.0.base_w": MockParam(base_w),
+        "model.layers.0.shared_w": MockParam(shared_w),
+        "model.layers.0.lora_a": MockParam(lora_w),
+        "model.rng": MockParam(rng_arr),
+    })
+    # Source state only contains LoRA weight and the aliased shared weight.
+    src = MockState({
+        "layers.0.shared_w": MockParam(shared_w),
+        "layers.0.lora_a": MockParam(jnp.zeros((2, 1), dtype=jnp.float32)),
+    })
+    mappings = {
+        "layers.0.base_w": ("model.layers.0.base_w", None),
+        "layers.0.shared_w": ("model.layers.0.shared_w", None),
+        "layers.0.lora_a": ("model.layers.0.lora_a", None),
+    }
+
+    utils.delete_state_buffers(dst, src_state=src, key_mappings=mappings)
+
+    self.assertTrue(lora_w.is_deleted())
+    self.assertFalse(base_w.is_deleted())
+    self.assertFalse(shared_w.is_deleted())
+    self.assertFalse(rng_arr.is_deleted())
+
 
 if __name__ == "__main__":
   absltest.main()
