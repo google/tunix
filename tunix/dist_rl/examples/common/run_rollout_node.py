@@ -468,14 +468,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--detokenize",
       type=_str2bool,
-      default=False,
+      default=True,
       nargs="?",
       const=True,
       help=(
           "Detokenize vLLM outputs so `SamplingResponse.text` is populated"
           " (--sampler=vllm only). Agentic recipes that parse the action from"
-          " the completion text need this; token-only workflows can leave it"
-          " off."
+          " the completion text need this. Token-only workflows can pass"
+          " --detokenize=false, but vLLM then rejects stop strings, so stop"
+          " on --eos_tokens ids instead."
       ),
   )
   parser.add_argument(

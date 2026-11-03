@@ -388,19 +388,19 @@ weight_sync_config:
     self.assertFalse(vllm["return_routed_experts"])
     self.assertEqual(vllm["routed_experts_encode_mode"], "auto")
     self.assertIsNone(vllm["routed_experts_num_experts"])
-    self.assertFalse(vllm["detokenize"])
+    self.assertTrue(vllm["detokenize"])
     self.assertEqual(vllm["kwargs"], {})
 
     vllm = resolve_config.initialize([
         "vllm_config.return_routed_experts=true",
         "vllm_config.routed_experts_encode_mode=uint10",
         "vllm_config.routed_experts_num_experts=256",
-        "vllm_config.detokenize=true",
+        "vllm_config.detokenize=false",
     ]).config["vllm_config"]
     self.assertIs(vllm["return_routed_experts"], True)
     self.assertEqual(vllm["routed_experts_encode_mode"], "uint10")
     self.assertEqual(vllm["routed_experts_num_experts"], 256)
-    self.assertIs(vllm["detokenize"], True)
+    self.assertIs(vllm["detokenize"], False)
     # The typed settings stay out of the free-form vLLM engine arguments.
     self.assertEqual(vllm["kwargs"], {})
 

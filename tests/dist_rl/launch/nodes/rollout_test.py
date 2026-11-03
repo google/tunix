@@ -499,9 +499,9 @@ class SamplerTest(absltest.TestCase):
 
   def test_vllm_sampler_detokenize_follows_config(self):
     _, default = _create_vllm_sampler_kwargs()
-    self.assertIs(default["detokenize"], False)
-    _, enabled = _create_vllm_sampler_kwargs("vllm_config.detokenize=true")
-    self.assertIs(enabled["detokenize"], True)
+    self.assertIs(default["detokenize"], True)
+    _, disabled = _create_vllm_sampler_kwargs("vllm_config.detokenize=false")
+    self.assertIs(disabled["detokenize"], False)
 
   def test_vllm_sampler_rejects_lora_with_data_parallelism(self):
     with self.assertRaisesRegex(ValueError, "LoRA is not supported"):

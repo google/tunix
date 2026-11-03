@@ -122,7 +122,7 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
       weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
       free_kv_cache: bool = False,
       partial_rollout: bool = False,
-      detokenize: bool = False,
+      detokenize: bool = True,
       **kwargs: Any,
   ):
     del kwargs
@@ -154,9 +154,11 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     self.partial_rollout: bool = bool(
         partial_rollout or self.config.partial_rollout
     )
-    # When set (run_rollout_node's `--detokenize`), every request is
-    # detokenized unless it explicitly opts out. Agentic rollouts read the
-    # action from `SamplingResponse.text`.
+    # Default `detokenize` for requests that don't set it themselves. Agentic
+    # rollouts read the action from `SamplingResponse.text`; token-only
+    # workflows can pass False to skip detokenization.
+    # TODO(yatlas): Always detokenize; remove this flag and per-request
+    # `detokenize` overrides.
     self.detokenize: bool = bool(detokenize)
 
     # TODO(tunix-dev): Share this weight-sync-mode resolution with
@@ -424,11 +426,12 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
         # Detokenize by default so callers that read `SamplingResponse.text`
         # (e.g. agentic rollouts) receive populated text, matching vLLM's
         # default. Token-only callers can opt out by passing `detokenize=False`.
+        # TODO(yatlas): Drop per-request `detokenize` overrides.
         detokenize=bool(
             _get_val(
                 sparams,
                 "detokenize",
-                _get_val(kwargs, "detokenize", True),
+                _get_val(kwargs, "detokenize", self.detokenize),
             )
         ),
         logprobs=1
@@ -584,8 +587,6 @@ class VllmSampler(Sampler, weight_sync.WeightSyncDestination):
     if sampling_requests is None:
       raise ValueError("sampling_requests cannot be None.")
     self._require_initialized()
-    if self.detokenize:
-      kwargs.setdefault("detokenize", True)
 
     while self._is_paused:
       await asyncio.sleep(0.05)

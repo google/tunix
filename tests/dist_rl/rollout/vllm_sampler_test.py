@@ -660,9 +660,13 @@ class VllmSamplerTest(absltest.TestCase):
     vllm_params = sampler._build_vllm_params(req, {"detokenize": True})
     self.assertFalse(vllm_params.detokenize)
 
-  def _kwargs_passed_to_build_vllm_params(self, sampler, **sample_kwargs):
+  def _detokenize_sent_to_engine(self, sampler, **sample_kwargs):
+    """Returns the `detokenize` of the `SamplingParams` sent to the engine."""
+    sent = []
+
     async def mock_generate_stream(prompt, sampling_params, request_id):
-      del prompt, sampling_params, request_id
+      del prompt, request_id
+      sent.append(sampling_params.detokenize)
       yield SimpleNamespace(
           outputs=[
               SimpleNamespace(
@@ -674,35 +678,36 @@ class VllmSamplerTest(absltest.TestCase):
     sampler._engine = self.mock_engine
     sampler._is_running = True
     self.mock_engine.generate.side_effect = mock_generate_stream
-    with mock.patch.object(
-        sampler, "_build_vllm_params", wraps=sampler._build_vllm_params
-    ) as build:
-      asyncio.run(
-          sampler.sample(
-              base_sampler_lib.SamplingRequest(prompt="hi"), **sample_kwargs
-          )
-      )
-    return build.call_args.args[1]
+    asyncio.run(
+        sampler.sample(
+            base_sampler_lib.SamplingRequest(prompt="hi"), **sample_kwargs
+        )
+    )
+    self.assertLen(sent, 1)
+    return sent[0]
 
-  def test_detokenize_flag_off_by_default(self):
-    self.assertFalse(self.sampler.detokenize)
-    self.assertEqual(self._kwargs_passed_to_build_vllm_params(self.sampler), {})
+  def test_detokenize_flag_on_by_default(self):
+    self.assertTrue(self.sampler.detokenize)
+    self.assertIs(self._detokenize_sent_to_engine(self.sampler), True)
 
-  def test_detokenize_flag_enabled_is_forwarded(self):
+  def test_detokenize_flag_disabled_is_forwarded(self):
     sampler = vllm_sampler.VllmSampler(
-        engine_args=self.engine_args, detokenize=True
+        engine_args=self.engine_args, detokenize=False
     )
-    self.assertEqual(
-        self._kwargs_passed_to_build_vllm_params(sampler), {"detokenize": True}
+    self.assertIs(self._detokenize_sent_to_engine(sampler), False)
+    # Callers pass unset fields as `None`; the sampler flag still applies.
+    self.assertIs(
+        self._detokenize_sent_to_engine(sampler, detokenize=None), False
     )
+    req = SimpleNamespace(sampling_params=SimpleNamespace(max_tokens=32))
+    self.assertFalse(sampler._build_vllm_params(req, {}).detokenize)
 
   def test_explicit_detokenize_kwarg_wins_over_sampler_flag(self):
     sampler = vllm_sampler.VllmSampler(
-        engine_args=self.engine_args, detokenize=True
+        engine_args=self.engine_args, detokenize=False
     )
-    self.assertEqual(
-        self._kwargs_passed_to_build_vllm_params(sampler, detokenize=False),
-        {"detokenize": False},
+    self.assertIs(
+        self._detokenize_sent_to_engine(sampler, detokenize=True), True
     )
 
   def test_duck_typed_request_processing(self):
