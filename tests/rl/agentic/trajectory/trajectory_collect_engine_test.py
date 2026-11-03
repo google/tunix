@@ -2187,7 +2187,7 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
           else '```Right```'
       )
       if poison == 'history' and index == 1:
-        agent.chat_completions[0]['content'] += ' edited'
+        agent.chat_completions[-1]['content'] += ' edited'
       return base_rollout.RolloutOutput(
           text=[text],
           logits=None,

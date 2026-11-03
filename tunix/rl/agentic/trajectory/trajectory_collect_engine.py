@@ -143,7 +143,7 @@ class TrajectoryCollectEngine:
     if exact_token_continuity and (tokenizer is None or chat_parser is None):
       raise ValueError("exact_token_continuity requires a tokenizer and parser")
     self.exact_token_continuity = exact_token_continuity
-    self._exact_chat_history = None
+    self._exact_chat_history: List[Dict[str, Any]] = []
     self.perf_v2 = (
         perf_v2 if perf_v2 is not None else perf_tracer_v2.NoopTracer()
     )
@@ -613,11 +613,6 @@ class TrajectoryCollectEngine:
         sample_shape = (
             sample_arr.shape[1:] if sample_arr is not None else (0, 0)
         )
-        conv_routed = (
-            np.concatenate(routed_experts, axis=0)
-            if routed_experts
-            else np.zeros((0,) + sample_shape, dtype=np.int16)
-        )
         prompt_len = (
             (self.agent.trajectory.prompt_length or 0)
             if self.exact_token_continuity
@@ -640,7 +635,7 @@ class TrajectoryCollectEngine:
           prompt_routed_arr = np.zeros((0,) + sample_shape, dtype=np.int16)
 
         final_routed_experts = np.concatenate(
-            [prompt_routed_arr, conv_routed], axis=0
+            [prompt_routed_arr, *routed_experts], axis=0
         )
 
       result = {
@@ -800,7 +795,9 @@ class TrajectoryCollectEngine:
       )
       self.agent.trajectory.prompt_tokens = prompt_tokens
     if self.exact_token_continuity:
-      self._exact_chat_history = copy.deepcopy(self.agent.chat_completions)
+      self._exact_chat_history = [
+          copy.deepcopy(msg) for msg in self.agent.chat_completions
+      ]
 
   def _record_exact_turn(
       self, cur_step: agent_types.Step, *, terminal: bool
@@ -813,11 +810,11 @@ class TrajectoryCollectEngine:
     """
     messages = self.agent.chat_completions
     previous = self._exact_chat_history
-    if previous is not None and messages[: len(previous)] != previous:
+    if messages[: len(previous)] != previous:
       raise ValueError("agent rewrote previously recorded chat history")
     if terminal:
       cur_step.done = True
-    self._exact_chat_history = copy.deepcopy(messages)
+    previous.extend(copy.deepcopy(msg) for msg in messages[len(previous) :])
 
   @property
   def _debug_prefix(self) -> str:

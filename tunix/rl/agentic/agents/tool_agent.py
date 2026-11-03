@@ -150,8 +150,16 @@ class ToolAgent(base_agent.ConversationAgentBase):
     self._messages.append({"role": "assistant", "content": response})
 
     # Record complete step with conversation context and parsed action.
+    prev = (
+        self._trajectory.steps[-1].chat_completions
+        if self._trajectory.steps
+        else []
+    )
     step = agent_types.Step(
-        chat_completions=copy.deepcopy(self._messages),
+        chat_completions=[
+            *prev,
+            *(copy.deepcopy(msg) for msg in self._messages[len(prev) :]),
+        ],
         action=agent_types.Action(action=tool_calls_dict),
         model_response=response,
     )
