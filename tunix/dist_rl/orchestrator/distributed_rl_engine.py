@@ -43,8 +43,8 @@ from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import task_session
 
 _summarize_list = logging_utils.summarize_list
-# Default maximum number of contiguous trajectories per prompt stripe.
-DEFAULT_ROLLOUT_PROMPT_STRIPE_SIZE: int = 4
+# Maximum number of contiguous trajectories per prompt stripe.
+_ROLLOUT_PROMPT_STRIPE_SIZE: int = 4
 # Lower-bound target on stripes per prompt when capping stripe size for fanout.
 _TARGET_STRIPES_PER_PROMPT: int = 4
 
@@ -53,31 +53,6 @@ _WEIGHT_SYNC_DESTINATION_STATUSES = (
     worker_registry.AdmissionStatus.ACTIVE,
     worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
 )
-
-
-def validate_rollout_prompt_stripe_size(stripe_size: int) -> int:
-  """Validates that `stripe_size` is a positive integer (excluding `bool`).
-
-  Args:
-    stripe_size: Candidate maximum trajectory stripe size per prompt.
-
-  Returns:
-    The validated `stripe_size`.
-
-  Raises:
-    TypeError: If `stripe_size` is not an `int` (or is a `bool`).
-    ValueError: If `stripe_size <= 0`.
-  """
-  if isinstance(stripe_size, bool) or not isinstance(stripe_size, int):
-    raise TypeError(
-        "rollout_prompt_stripe_size must be an int, got"
-        f" {type(stripe_size).__name__}"
-    )
-  if stripe_size <= 0:
-    raise ValueError(
-        f"rollout_prompt_stripe_size must be positive, got {stripe_size}"
-    )
-  return stripe_size
 
 
 def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
@@ -121,27 +96,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       fault_tolerance_manager: (
           fault_tolerance_manager_lib.FaultToleranceManager | None
       ) = None,
-      rollout_prompt_stripe_size: int = DEFAULT_ROLLOUT_PROMPT_STRIPE_SIZE,
   ):
-    """Initializes DistributedRLEngine.
-
-    Args:
-      registry: Worker registry tracking active role handles.
-      weight_sync_coordinator: Optional coordinator executing weight sync
-        rounds.
-      fault_tolerance_manager: Optional manager supplying task retry and
-        eviction hooks; one is created from `registry` if omitted.
-      rollout_prompt_stripe_size: Maximum contiguous trajectory stripe size per
-        prompt when load-balancing `dispatch_rollout_requests`. Must be a
-        positive integer.
-
-    Raises:
-      TypeError: If `rollout_prompt_stripe_size` is not an `int` (or is `bool`).
-      ValueError: If `rollout_prompt_stripe_size <= 0`.
-    """
-    self._rollout_prompt_stripe_size = validate_rollout_prompt_stripe_size(
-        rollout_prompt_stripe_size
-    )
+    """Initializes DistributedRLEngine."""
     self._registry = registry
     self._fault_tolerance_manager = (
         fault_tolerance_manager
@@ -223,8 +179,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     When multiple rollout workers are active, groups requests by `prompt_id`
     (colocating duplicate `traj_id` entries submitted within the same call, not
     across separate calls), slices each prompt's trajectories into contiguous
-    stripes of size `min(stripe_size, max(1, num_trajs // min(num_workers,
-    _TARGET_STRIPES_PER_PROMPT)))`, and assigns each stripe via
+    stripes of size `min(_ROLLOUT_PROMPT_STRIPE_SIZE, max(1, num_trajs //
+    min(num_workers, _TARGET_STRIPES_PER_PROMPT)))`, and assigns each stripe via
     `preferred_actor` to the worker with the lowest in-flight load (breaking
     ties via an actor-identity round-robin cursor). Every submission retains
     `route_key=req.traj_id` so stale-handle fallbacks and fault-tolerant retries
@@ -269,7 +225,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           traj_buckets[req.traj_id] = []
         traj_buckets[req.traj_id].append(idx)
 
-      stripe_size = self._rollout_prompt_stripe_size
       min_stripes = min(num_workers, _TARGET_STRIPES_PER_PROMPT)
       rr_cursor = 0
       if self._last_routed_actor is not None:
@@ -281,7 +236,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       for traj_buckets in prompt_traj_buckets.values():
         traj_units = list(traj_buckets.values())
         eff_stripe = min(
-            stripe_size,
+            _ROLLOUT_PROMPT_STRIPE_SIZE,
             max(1, len(traj_units) // min_stripes),
         )
         for i in range(0, len(traj_units), eff_stripe):

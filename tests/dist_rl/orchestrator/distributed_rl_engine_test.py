@@ -16,7 +16,6 @@
 
 import asyncio
 import collections
-from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
@@ -152,9 +151,6 @@ def _make_engine(
     inference_workers=None,
     weight_sync_coordinator=None,
     fault_tolerance_config: datatypes.FaultToleranceConfig | None = None,
-    rollout_prompt_stripe_size: int = (
-        distributed_rl_engine.DEFAULT_ROLLOUT_PROMPT_STRIPE_SIZE
-    ),
 ) -> distributed_rl_engine.DistributedRLEngine:
   registry = (
       registry if registry is not None else worker_registry.WorkerRegistry()
@@ -178,7 +174,6 @@ def _make_engine(
       registry=registry,
       weight_sync_coordinator=weight_sync_coordinator,
       fault_tolerance_manager=ftm,
-      rollout_prompt_stripe_size=rollout_prompt_stripe_size,
   )
 
 
@@ -2875,38 +2870,6 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     return _enqueue_completions
 
-  def test_init_rejects_non_positive_rollout_prompt_stripe_size(self):
-    registry = worker_registry.WorkerRegistry()
-    with self.assertRaisesRegex(
-        ValueError, "rollout_prompt_stripe_size must be positive"
-    ):
-      distributed_rl_engine.DistributedRLEngine(
-          registry=registry, rollout_prompt_stripe_size=0
-      )
-    with self.assertRaisesRegex(
-        ValueError, "rollout_prompt_stripe_size must be positive"
-    ):
-      distributed_rl_engine.DistributedRLEngine(
-          registry=registry, rollout_prompt_stripe_size=-1
-      )
-
-  def test_init_rejects_non_int_rollout_prompt_stripe_size(self):
-    registry = worker_registry.WorkerRegistry()
-    bad_bool: Any = False
-    bad_float: Any = 2.5
-    with self.assertRaisesRegex(
-        TypeError, "rollout_prompt_stripe_size must be an int"
-    ):
-      distributed_rl_engine.DistributedRLEngine(
-          registry=registry, rollout_prompt_stripe_size=bad_bool
-      )
-    with self.assertRaisesRegex(
-        TypeError, "rollout_prompt_stripe_size must be an int"
-    ):
-      distributed_rl_engine.DistributedRLEngine(
-          registry=registry, rollout_prompt_stripe_size=bad_float
-      )
-
   def test_dispatch_rollout_requests_stripes_onto_least_loaded_workers(self):
     async def _run():
       workers = [MockActorHandle() for _ in range(4)]
@@ -2988,17 +2951,13 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_dispatch_rollout_requests_handles_remainder_and_custom_stripe_size(
-      self,
-  ):
+  def test_dispatch_rollout_requests_handles_remainder_stripe(self):
     async def _run():
       w0, w1 = MockActorHandle(), MockActorHandle()
-      engine = _make_engine(
-          rollout_workers=[w0, w1], rollout_prompt_stripe_size=3
-      )
-      # G=10 on 2 workers with stripe_size=3 -> eff_stripe = min(3, 10 // 2)=3:
-      # stripes [0, 1, 2] -> w0 (load 3), [3, 4, 5] -> w1 (load 3),
-      # [6, 7, 8] -> w0 (load 6), and remainder [9] -> w1 (load 4).
+      engine = _make_engine(rollout_workers=[w0, w1])
+      # G=10 on 2 workers -> eff_stripe = min(4, 10 // 2) = 4:
+      # stripes [0, 1, 2, 3] -> w0 (load 4), [4, 5, 6, 7] -> w1 (load 4),
+      # and remainder [8, 9] -> w0 (load 6).
       await engine.dispatch_rollout_requests([
           datatypes.RolloutRequest(
               prompt="p_rem",
@@ -3015,8 +2974,8 @@ class DistributedRLEngineTest(absltest.TestCase):
           call.kwargs["requests"][0].group_index
           for call in w1.generate.call_args_list
       ]
-      self.assertEqual(w0_groups, [0, 1, 2, 6, 7, 8])
-      self.assertEqual(w1_groups, [3, 4, 5, 9])
+      self.assertEqual(w0_groups, [0, 1, 2, 3, 8, 9])
+      self.assertEqual(w1_groups, [4, 5, 6, 7])
 
       # A follow-up G=2 prompt (eff_stripe=1) sends both requests to w1 (load
       # 4 -> 5 -> 6) to balance w0's load of 6.
@@ -3037,7 +2996,7 @@ class DistributedRLEngineTest(absltest.TestCase):
   def test_dispatch_rollout_requests_load_balances_small_groups(self):
     async def _run():
       pool4 = [MockActorHandle() for _ in range(4)]
-      engine = _make_engine(rollout_workers=pool4, rollout_prompt_stripe_size=4)
+      engine = _make_engine(rollout_workers=pool4)
       for p_idx in range(2):
         await engine.dispatch_rollout_requests([
             datatypes.RolloutRequest(
@@ -3175,13 +3134,11 @@ class DistributedRLEngineTest(absltest.TestCase):
 
   def test_dispatch_rollout_requests_never_straddles_prompt_boundaries(self):
     async def _run():
-      # 3 prompts with G=6 on 2 workers (stripe_size=4) must compute
-      # eff_stripe = min(4, 6 // 2) = 3 per prompt so stripes never straddle
-      # distinct prompt_ids.
+      # 3 prompts with G=6 on 2 workers (_ROLLOUT_PROMPT_STRIPE_SIZE=4) must
+      # compute eff_stripe = min(4, 6 // 2) = 3 per prompt so stripes never
+      # straddle distinct prompt_ids.
       w0, w1 = MockActorHandle(), MockActorHandle()
-      engine = _make_engine(
-          rollout_workers=[w0, w1], rollout_prompt_stripe_size=4
-      )
+      engine = _make_engine(rollout_workers=[w0, w1])
       multi_reqs: list[datatypes.RolloutRequest] = []
       for pid in ("alpha", "beta", "gamma"):
         for g in range(6):

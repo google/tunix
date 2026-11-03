@@ -51,9 +51,6 @@ class ClusterOrchestrator:
       weight_sync_timeouts: weight_sync_coordinator.PhaseTimeouts | None = None,
       fault_tolerance_config: datatypes.FaultToleranceConfig | None = None,
       weight_sync_handler: weight_sync.WeightSyncHandler | None = None,
-      rollout_prompt_stripe_size: int = (
-          distributed_rl_engine.DEFAULT_ROLLOUT_PROMPT_STRIPE_SIZE
-      ),
   ):
     """Initializes ClusterOrchestrator.
 
@@ -74,18 +71,7 @@ class ClusterOrchestrator:
         `FaultToleranceManager`, or None to use `FaultToleranceConfig()`
         defaults.
       weight_sync_handler: Optional explicit WeightSyncHandler instance for DI.
-      rollout_prompt_stripe_size: Maximum contiguous trajectory stripe size per
-        prompt forwarded to `DistributedRLEngine`. Must be a positive integer.
-
-    Raises:
-      TypeError: If `rollout_prompt_stripe_size` is not an `int` (or is `bool`).
-      ValueError: If `rollout_prompt_stripe_size <= 0`.
     """
-    self._rollout_prompt_stripe_size = (
-        distributed_rl_engine.validate_rollout_prompt_stripe_size(
-            rollout_prompt_stripe_size
-        )
-    )
     self.config = config
     self.registry = (
         registry if registry is not None else worker_registry.WorkerRegistry()
@@ -264,7 +250,6 @@ class ClusterOrchestrator:
         registry=self.registry,
         weight_sync_coordinator=coordinator,
         fault_tolerance_manager=self.fault_tolerance_manager,
-        rollout_prompt_stripe_size=self._rollout_prompt_stripe_size,
     )
 
   def run(

@@ -17,7 +17,6 @@
 import tempfile
 import threading
 import time
-from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
@@ -257,53 +256,6 @@ class ClusterOrchestratorTest(absltest.TestCase):
     self.assertEqual(engine._rollout_session._max_task_retries, 0)
     self.assertIsNone(engine._rollout_session._on_worker_unreachable)
     self.assertEqual(engine._rollout_session._poll_retry_budget_s, 45.0)
-
-  def test_create_engine_forwards_default_rollout_prompt_stripe_size(self):
-    orch = orchestrator.ClusterOrchestrator(
-        registry=worker_registry.WorkerRegistry()
-    )
-    engine = orch._create_engine()
-    self.assertEqual(engine._rollout_prompt_stripe_size, 4)
-
-  def test_create_engine_forwards_custom_rollout_prompt_stripe_size(self):
-    orch = orchestrator.ClusterOrchestrator(
-        registry=worker_registry.WorkerRegistry(),
-        rollout_prompt_stripe_size=2,
-    )
-    engine = orch._create_engine()
-    self.assertEqual(engine._rollout_prompt_stripe_size, 2)
-
-  def test_init_rejects_non_positive_rollout_prompt_stripe_size(self):
-    registry = worker_registry.WorkerRegistry()
-    with self.assertRaisesRegex(
-        ValueError, "rollout_prompt_stripe_size must be positive"
-    ):
-      orchestrator.ClusterOrchestrator(
-          registry=registry, rollout_prompt_stripe_size=0
-      )
-    with self.assertRaisesRegex(
-        ValueError, "rollout_prompt_stripe_size must be positive"
-    ):
-      orchestrator.ClusterOrchestrator(
-          registry=registry, rollout_prompt_stripe_size=-1
-      )
-
-  def test_init_rejects_non_int_rollout_prompt_stripe_size(self):
-    registry = worker_registry.WorkerRegistry()
-    bad_bool: Any = False
-    bad_float: Any = 2.5
-    with self.assertRaisesRegex(
-        TypeError, "rollout_prompt_stripe_size must be an int"
-    ):
-      orchestrator.ClusterOrchestrator(
-          registry=registry, rollout_prompt_stripe_size=bad_bool
-      )
-    with self.assertRaisesRegex(
-        TypeError, "rollout_prompt_stripe_size must be an int"
-    ):
-      orchestrator.ClusterOrchestrator(
-          registry=registry, rollout_prompt_stripe_size=bad_float
-      )
 
   def test_run_with_bring_up(self):
     mock_program = mock.MagicMock(spec=rl_program.RLProgram)
