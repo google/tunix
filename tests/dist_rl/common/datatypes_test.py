@@ -369,5 +369,69 @@ class GenerationArgsTest(absltest.TestCase):
     self.assertEqual(args.as_kwargs(), expected)
 
 
+class IsValidTrajectoryTest(absltest.TestCase):
+  """Tests for datatypes.is_valid_trajectory and TrajectoryItem.is_valid."""
+
+  def _item(
+      self,
+      *,
+      status=datatypes.TrajectoryStatus.SUCCEEDED,
+      reward=1.0,
+      tokens=(3, 4),
+      masks=(1.0, 1.0),
+  ):
+    return datatypes.TrajectoryItem(
+        prompt_id="p0",
+        group_index=0,
+        traj={
+            "status": status,
+            "trajectory_reward": reward,
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array(tokens, dtype=np.int32),
+            "conversation_masks": np.array(masks, dtype=np.float32),
+        },
+    )
+
+  def test_valid_succeeded_and_max_steps_items(self):
+    self.assertTrue(self._item().is_valid)
+    self.assertTrue(
+        self._item(status=datatypes.TrajectoryStatus.MAX_STEPS_REACHED).is_valid
+    )
+
+  def test_rejects_failed_and_timeout_status(self):
+    for bad_status in (
+        datatypes.TrajectoryStatus.FAILED,
+        datatypes.TrajectoryStatus.TIMEOUT,
+        datatypes.TrajectoryStatus.ENV_TIMEOUT,
+        datatypes.TrajectoryStatus.CANCELLED,
+        "FAILED",
+        "TIMEOUT",
+        "ENV_TIMEOUT",
+        "CANCELLED",
+    ):
+      with self.subTest(status=bad_status):
+        self.assertFalse(self._item(status=bad_status).is_valid)
+
+  def test_rejects_empty_completion_or_all_zero_mask(self):
+    self.assertFalse(self._item(tokens=(), masks=()).is_valid)
+    self.assertFalse(self._item(tokens=(3, 4), masks=(0.0, 0.0)).is_valid)
+
+  def test_rejects_missing_traj_dict(self):
+    item = datatypes.TrajectoryItem(prompt_id="p0", group_index=0, traj=None)
+    self.assertFalse(item.is_valid)
+
+  def test_missing_status_defaults_to_valid_when_tokens_and_mask_present(self):
+    item = datatypes.TrajectoryItem(
+        prompt_id="p0",
+        group_index=0,
+        traj={
+            "prompt_tokens": np.array([1], dtype=np.int32),
+            "conversation_tokens": np.array([2], dtype=np.int32),
+            "conversation_masks": np.array([1.0], dtype=np.float32),
+        },
+    )
+    self.assertTrue(item.is_valid)
+
+
 if __name__ == "__main__":
   absltest.main()

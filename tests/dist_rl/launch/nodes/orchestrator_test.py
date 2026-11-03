@@ -244,30 +244,11 @@ class BuildersTest(absltest.TestCase):
     self.assertEqual(config.routed_experts_encode_mode, "uint10")
     self.assertEqual(config.routed_experts_num_experts, 256)
 
-  def test_algo_uses_mini_batch_and_length_budgets(self):
-    algo = orchestrator.build_algo(
-        _config(
-            "batch_size=8",
-            "rl_training_config.mini_batch_size=4",
-            "rl_training_config.train_micro_batch_size=2",
-            "rollout_config.max_prompt_length=100",
-            "rollout_config.total_generation_steps=28",
-            "agentic_grpo_config.max_turns=3",
-        )
-    )
-    self.assertEqual(algo.mini_batch_size, 4)
-    self.assertEqual(algo.train_micro_batch_size, 2)
-    self.assertEqual(algo.max_turns, 3)
-    self.assertEqual(algo.max_packed_len, 128)
-    self.assertEqual(algo.max_response_length, 28)
-
-  def test_algo_packed_len_follows_sequence_packing_budget(self):
-    hp = _config("rl_training_config.max_seq_token_per_tpu=4096")
-    self.assertEqual(orchestrator.build_algo(hp).max_packed_len, 4096)
-
   def test_batch_config(self):
     config = orchestrator.build_batch_config(
         _config(
+            "rl_training_config.mini_batch_size=4",
+            "rl_training_config.train_micro_batch_size=2",
             "rollout_config.max_prompt_length=64",
             "rollout_config.total_generation_steps=32",
             "rl_training_config.max_segments_per_packed_row=3",
@@ -285,7 +266,16 @@ class BuildersTest(absltest.TestCase):
             max_segments_per_packed_row=3,
             segment_alignment_boundary=64,
             num_data_shards=None,
+            mini_batch_size=4,
+            train_micro_batch_size=2,
         ),
+    )
+
+  def test_batch_config_packed_len_follows_sequence_packing_budget(self):
+    hp = _config("rl_training_config.max_seq_token_per_tpu=4096")
+    self.assertEqual(
+        orchestrator.build_batch_config(hp, pad_id=0).max_seq_token_per_tpu,
+        4096,
     )
 
   def test_batch_config_shards_over_trainer_data_parallel_axes(self):
@@ -640,7 +630,7 @@ class ProgramTest(absltest.TestCase):
   ) -> rl_program.StandardRLProgram:
     return orchestrator.build_program(
         hp,
-        algo=orchestrator.build_algo(hp),
+        algo_config=orchestrator.build_grpo_config(hp),
         reward_fns=reward_fns,
         pad_id=0,
         prompt_items=grain.MapDataset.source([]),
@@ -844,7 +834,7 @@ rl_training_config:
     (program,) = cluster.programs
     assert isinstance(program, rl_program.StandardRLProgram)
     self.assertEqual(program.batch_config.pad_id, 3)
-    self.assertEqual(program.algo.algo_config.reward_mode, "reward_fn")
+    self.assertEqual(program.algo_config.reward_mode, "reward_fn")
     # Scores with the `reward_functions` module.
     rewards = program.reward_manager(prompts=["p"], completions=["abcd"])[
         "rewards"

@@ -55,7 +55,6 @@ from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.distributed.runtime import context as runtime_context
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import orchestrator as cluster_orchestrator
 from tunix.dist_rl.orchestrator import rl_program
@@ -108,30 +107,6 @@ def build_grpo_config(
   )
 
 
-def build_algo(
-    hp: resolve_config.DistHyperParameters,
-) -> algorithm_adapter.GRPOAdapter:
-  """Builds the GRPO algorithm adapter."""
-  rl_train = hp.config_mapping("rl_training_config")
-  # `create_rollout_config()` needs worker meshes for `rollout_engine=vllm`; the
-  # CPU orchestrator only needs the length budgets.
-  rollout = hp.config_mapping("rollout_config")
-  max_response_length = int(rollout["total_generation_steps"])
-  max_seq_token_per_tpu = rl_train["max_seq_token_per_tpu"]
-  return algorithm_adapter.GRPOAdapter(
-      algo_config=build_grpo_config(hp),
-      mini_batch_size=int(rl_train["mini_batch_size"]),
-      train_micro_batch_size=int(rl_train["train_micro_batch_size"]),
-      max_turns=int(hp.config_mapping("agentic_grpo_config")["max_turns"]),
-      max_packed_len=(
-          int(max_seq_token_per_tpu)
-          if max_seq_token_per_tpu is not None
-          else int(rollout["max_prompt_length"]) + max_response_length
-      ),
-      max_response_length=max_response_length,
-  )
-
-
 def _num_data_shards(hp: resolve_config.DistHyperParameters) -> int | None:
   """Returns the trainer data-parallel shard count, or None when unsharded."""
   axes = hp.mesh_axes("actor_model_config")
@@ -144,7 +119,8 @@ def build_batch_config(
 ) -> batch_assembly.BatchConfig:
   """Builds the batch-assembly config (padding and sequence packing)."""
   rl_train = hp.config_mapping("rl_training_config")
-  # See `build_algo` for why the rollout section is read directly.
+  # `create_rollout_config()` needs worker meshes for `rollout_engine=vllm`; the
+  # CPU orchestrator only needs the length budgets.
   rollout = hp.config_mapping("rollout_config")
   max_seq_token_per_tpu = rl_train["max_seq_token_per_tpu"]
   max_segments_per_packed_row = rl_train["max_segments_per_packed_row"]
@@ -166,6 +142,8 @@ def build_batch_config(
           ]
       ),
       num_data_shards=_num_data_shards(hp),
+      mini_batch_size=int(rl_train["mini_batch_size"]),
+      train_micro_batch_size=int(rl_train["train_micro_batch_size"]),
   )
 
 
@@ -183,7 +161,7 @@ def build_generation_args(
   Returns:
     The generation arguments.
   """
-  # See `build_algo` for why the rollout section is read directly.
+  # See `build_batch_config` for why the rollout section is read directly.
   # TODO(noghabi): Share the sampling settings (temperature, top_p, top_k) with
   # the rollout node's `RolloutConfig` through one `node_utils` helper, so both
   # nodes use the same disabled-`top_k` convention.
@@ -344,9 +322,9 @@ def load_prompt_items(
   # learner's (`AgenticRLLearner`: `env_class(single_example, **env_kwargs)`) so
   # `tunix.cli` data modules work unchanged, and drop `prompt` from records if
   # `RolloutRequest.prompt` stays unused. Also have `StandardRLProgram` stamp
-  # `max_turns` (from `GRPOAdapter.max_turns`) and the rollout worker take
-  # `episode_timeout` / `overlong_filter` from its config, so prompt items carry
-  # only task data.
+  # `max_turns` (from `agentic_grpo_config.max_turns`) and the rollout worker
+  # take `episode_timeout` / `overlong_filter` from its config, so prompt items
+  # carry only task data.
   def to_prompt_item(record: object) -> dict[str, object]:
     if not isinstance(record, Mapping):
       raise TypeError(
@@ -469,7 +447,7 @@ def wait_for_workers(
 def build_program(
     hp: resolve_config.DistHyperParameters,
     *,
-    algo: algorithm_adapter.GRPOAdapter,
+    algo_config: algorithm_config.AlgorithmConfig,
     reward_fns: Sequence[reward_manager.RewardFn],
     pad_id: int,
     prompt_items: grain.MapDataset[dict[str, object]],
@@ -479,7 +457,7 @@ def build_program(
 
   Args:
     hp: Resolved distributed RL configuration.
-    algo: GRPO algorithm adapter (see `build_algo`).
+    algo_config: Algorithm configuration (see `build_grpo_config`).
     reward_fns: Orchestrator-side reward functions (`reward_functions`).
     pad_id: Tokenizer padding id for batch assembly.
     prompt_items: Prompt items to dispatch (see `load_prompt_items`).
@@ -492,7 +470,7 @@ def build_program(
   raw_max_span = grpo["max_version_span"]
   max_version_span = int(raw_max_span) if raw_max_span is not None else None
   return rl_program.StandardRLProgram(
-      algo=algo,
+      algo_config=algo_config,
       dataset=prompt_items,
       max_steps=int(hp.config_mapping("rl_training_config")["max_steps"]),
       reward_fns=reward_fns,
@@ -619,7 +597,7 @@ def main(
   # workers: the checks that need no download first, then the dataset and the
   # tokenizer, then the program itself.
   weight_sync_timeouts, rpc_timeout_s = resolve_weight_sync_timeouts(hp)
-  algo = build_algo(hp)
+  algo_config = build_grpo_config(hp)
   reward_fns = hp.obtain_reward_fn()
   prompt_items = load_prompt_items(hp)
   pad_id, _ = node_utils.pad_and_eos_ids(node_utils.load_hf_tokenizer(hp))
@@ -628,7 +606,7 @@ def main(
   try:
     program = build_program(
         hp,
-        algo=algo,
+        algo_config=algo_config,
         reward_fns=reward_fns,
         pad_id=pad_id,
         prompt_items=prompt_items,

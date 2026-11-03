@@ -18,7 +18,6 @@ from typing import Any
 from absl import logging
 import numpy as np
 from tunix.dist_rl.common import datatypes
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import orchestrator
 from tunix.dist_rl.orchestrator import rl_program
@@ -158,11 +157,6 @@ def main():
   algo_config = algorithm_config.GRPOConfig(
       num_generations=2,
   )
-  algo = algorithm_adapter.GRPOAdapter(
-      algo_config=algo_config,
-      mini_batch_size=1,
-      max_packed_len=32,
-  )
   assembler = batch_assembly.SequencePackedBatchAssembler(
       batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=32
   )
@@ -174,10 +168,11 @@ def main():
 
   print("Executing Run via ClusterOrchestrator...")
   program = rl_program.StandardRLProgram(
-      algo=algo,
+      algo_config=algo_config,
       dataset=train_dataset,
       reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
       assembler=assembler,
+      batch_config=batch_assembly.BatchConfig(mini_batch_size=1),
       generation_args=datatypes.GenerationArgs(temperature=1.0),
       max_steps=2,
   )

@@ -41,13 +41,11 @@ from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.distributed.runtime import context as runtime_context
 from tunix.dist_rl.examples.frozenlake_dist import frozenlake
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import orchestrator
 from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
-from tunix.dist_rl.worker import remote_execution
 from tunix.rl import algorithm_config
 from tunix.sft import metrics_logger as metrics_logger_lib
 
@@ -318,8 +316,8 @@ def _validate_args(
   return weight_sync_timeouts
 
 
-def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
-  algo_config = algorithm_config.GRPOConfig(
+def _build_algo(args: argparse.Namespace) -> algorithm_config.GRPOConfig:
+  return algorithm_config.GRPOConfig(
       num_generations=args.num_generations,
       num_iterations=args.num_iterations,
       epsilon=args.epsilon,
@@ -334,32 +332,6 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       sampler_is=None if args.sampler_is == "none" else args.sampler_is,
       sampler_is_threshold=args.sampler_is_threshold,
       reward_mode="env",
-  )
-  return algorithm_adapter.GRPOAdapter(
-      algo_config=algo_config,
-      mini_batch_size=args.mini_batch_size,
-      train_micro_batch_size=args.train_micro_batch_size,
-      max_turns=args.max_turns,
-      max_packed_len=(
-          args.max_seq_token_per_tpu
-          if args.max_seq_token_per_tpu is not None
-          else args.max_prompt_length + args.max_response_length
-      ),
-      max_response_length=args.max_response_length,
-  )
-
-
-def _configure_trainer_loss(
-    trainer_handle: remote_execution.ActorHandle,
-    *,
-    algo: algorithm_adapter.GRPOAdapter,
-    pad_id: int,
-    eos_id: int,
-) -> None:
-  trainer_handle.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
-  trainer_handle.submit(
-      "with_gen_model_input_fn",
-      algo.build_gen_model_input_fn(pad_id=pad_id, eos_id=eos_id),
   )
 
 
@@ -443,12 +415,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       timeout=args.init_timeout_s,
   )
 
-  algo = _build_algo(args)
-  trainer_handles = cluster.registry.handles(
-      datatypes.Role.ACTOR, statuses=None
-  )
-  if len(trainer_handles) != 1:
-    raise ValueError(f"Expected 1 trainer worker, got {len(trainer_handles)}.")
+  algo_config = _build_algo(args)
 
   metrics_options = metrics_logger_lib.MetricsLoggerOptions(
       log_dir=args.log_dir,
@@ -459,7 +426,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       backend_kwargs={"wandb": {"config": vars(args)}},
   )
   program = rl_program.StandardRLProgram(
-      algo=algo,
+      algo_config=algo_config,
       dataset=frozenlake.iter_prompt_items(
           dataset=dataset,
           max_steps=args.max_steps,
@@ -484,7 +451,10 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       ),
       batch_size=args.batch_size,
       batch_config=batch_assembly.BatchConfig(
+          mini_batch_size=args.mini_batch_size,
+          train_micro_batch_size=args.train_micro_batch_size,
           pad_id=pad_id,
+          eos_id=eos_id,
           max_prompt_length=args.max_prompt_length,
           max_response_length=args.max_response_length,
           max_seq_token_per_tpu=args.max_seq_token_per_tpu,
@@ -504,9 +474,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       on_step_end=lambda step, result: logging.info(
           "<<< FrozenLake step %d finished | %s", step, result
       ),
-  )
-  _configure_trainer_loss(
-      trainer_handles[0], algo=algo, pad_id=pad_id, eos_id=eos_id
   )
 
   try:

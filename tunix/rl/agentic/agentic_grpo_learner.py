@@ -79,6 +79,8 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
       when it would normally be skipped (e.g., when beta is 0.0).
     epsilon: PPO-style clipping epsilon.
     epsilon_high: PPO-style clipping epsilon upper bound.
+    epsilon_c: Dual-clip lower bound applied when advantages are negative.
+      `None` (default) disables dual clipping.
     loss_algo: "grpo" or "gspo-token".
     system_prompt: System prompt for the agent.
     max_concurrency: Maximum number of concurrent rollout engines.
@@ -110,6 +112,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   system_prompt: str = ""
   max_concurrency: int = 16
   epsilon_high: float | None = None  # 0.28 from DAPO.
+  epsilon_c: float | None = None
   off_policy_steps: int = 0
   # Deprecated. Will remove in the next release.
   degenerate_group_masking: bool = (
