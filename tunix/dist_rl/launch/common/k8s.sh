@@ -46,7 +46,19 @@ run_yaml_gen() {
 # repo-relative paths (`tunix/...`) so container startup commands resolve them
 # inside the GKE image. `cluster_config.dry_run` only affects this launcher and
 # is not forwarded to the containers.
-CONTAINER_CONFIG_ARGS=("cluster_config.run_id=${RUN_ID}")
+#
+# Every pod gets these same arguments, so every pod resolves the same config
+# (and logs the same `config_sha256`): the run id and the resource ids are
+# pinned to the launcher's values, where each pod would otherwise derive the ids
+# from the container's `$USER`. A rollout replica gets its index from the
+# environment instead (`start_rollout_instance`).
+CONTAINER_CONFIG_ARGS=(
+  "cluster_config.run_id=${RUN_ID}"
+  "cluster_config.k8s.orchestrator_id=${K8S_ORCHESTRATOR_ID}"
+  "cluster_config.k8s.trainer_id=${K8S_TRAINER_ID}"
+  "cluster_config.k8s.rollout_id=${K8S_ROLLOUT_ID}"
+  "cluster_config.k8s.inference_id=${K8S_INFERENCE_ID}"
+)
 for arg in "${CONFIG_ARGS[@]}"; do
   case "$arg" in
     override_config_file="${REPO_ROOT}/"*)
@@ -218,11 +230,17 @@ stop_rollout() {
 
 start_rollout_instance() {
   local target_id="$1"
+  local replica="$2"
   if [[ "${K8S_ROLLOUT_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
     echo "Rollout Pathways images: server=${K8S_PATHWAYS_SERVER_IMAGE} proxy=${K8S_PATHWAYS_PROXY_IMAGE}" >&2
   fi
 
   local env_prefix="SKIP_JAX_PRECOMPILE=${K8S_ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${WEIGHT_SYNC_VERIFY_WEIGHTS} ROLLOUT_TPU_SLICE=$(printf '%q' "${K8S_ROLLOUT_TPU_SLICE}")"
+  if (( K8S_ROLLOUT_REPLICAS > 1 )); then
+    # The node appends the index to `cluster_config.k8s.rollout_id`
+    # (`node_utils.worker_id`), so it registers as `target_id`.
+    env_prefix+=" DIST_RL_ROLLOUT_REPLICA=${replica}"
+  fi
   if [[ -n "${HF_TOKEN:-}" ]]; then
     env_prefix="HF_TOKEN=$(printf '%q' "${HF_TOKEN}") ${env_prefix}"
   fi
@@ -262,7 +280,7 @@ start_rollout_instance() {
     ray_worker_pre_init_cmd+=" && (python3 -m tunix.dist_rl.common.gcs_cache download \"${K8S_JAX_CACHE_LOCAL_DIR}\" \"${K8S_JAX_CACHE_ROLLOUT_GCS_DIR}\" || true)"
   fi
 
-  local startup_cmd="${env_prefix} python -m tunix.dist_rl.distributed.runtime.main --discovery_addrs=${K8S_ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor --process_main=${ROLLOUT_MAIN} ${CONTAINER_ARGS_STR} cluster_config.k8s.rollout_id=$(printf '%q' "${target_id}")"
+  local startup_cmd="${env_prefix} python -m tunix.dist_rl.distributed.runtime.main --discovery_addrs=${K8S_ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor --process_main=${ROLLOUT_MAIN} ${CONTAINER_ARGS_STR}"
 
   run_yaml_gen \
     "${YAML_DIR}/${K8S_ROLLOUT_JOBSET_YAML}" \
@@ -291,7 +309,7 @@ start_rollout() {
     if (( K8S_ROLLOUT_REPLICAS > 1 )); then
       target_id="${K8S_ROLLOUT_ID}-${i}"
     fi
-    start_rollout_instance "${target_id}"
+    start_rollout_instance "${target_id}" "${i}"
   done
 }
 

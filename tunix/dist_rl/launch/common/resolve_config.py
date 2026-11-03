@@ -642,6 +642,7 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "K8S_ORCHESTRATOR_ID": k8s["orchestrator_id"],
       "K8S_TRAINER_ID": k8s["trainer_id"],
       "K8S_ROLLOUT_ID": k8s["rollout_id"],
+      "K8S_INFERENCE_ID": k8s["inference_id"],
       "K8S_CPU_MACHINE": k8s["cpu_machine"],
       "K8S_GCS_SCRATCH_LOCATION": k8s["gcs_scratch_location"],
       "K8S_ENABLE_PATHWAYS_PERSISTENCE": k8s["enable_pathways_persistence"],

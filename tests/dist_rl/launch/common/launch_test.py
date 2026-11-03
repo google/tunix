@@ -240,8 +240,15 @@ class LaunchScriptsTest(absltest.TestCase):
         "tunix/dist_rl/launch/common/base_dist_config.yaml",
         res.stdout,
     )
-    self.assertIn("cluster_config.k8s.rollout_id=testuser-roll-0", res.stdout)
-    self.assertIn("cluster_config.k8s.rollout_id=testuser-roll-1", res.stdout)
+    # Every pod gets the same config arguments, with the launcher's resource
+    # ids; a rollout replica gets its index from the environment instead.
+    self.assertIn("cluster_config.k8s.trainer_id=testuser-train", res.stdout)
+    self.assertRegex(
+        res.stdout, r"cluster_config\.k8s\.rollout_id=testuser-roll(?![\w-])"
+    )
+    self.assertNotIn("cluster_config.k8s.rollout_id=testuser-roll-", res.stdout)
+    self.assertIn("DIST_RL_ROLLOUT_REPLICA=0", res.stdout)
+    self.assertIn("DIST_RL_ROLLOUT_REPLICA=1", res.stdout)
 
     # Verify that the rendered YAML documents after the kubectl delete lines
     # parse as valid Kubernetes YAML manifests.

@@ -70,6 +70,7 @@ class LogResolvedConfigTest(absltest.TestCase):
         "VLLM_TPU_RPA_VERSION": "2",
         "DISABLE_MOSAIC_ATTN": "1",
         "TUNIX_BULK_TCP_LZ4": "0",
+        node_utils.ROLLOUT_REPLICA_ENV: "1",
         "HF_TOKEN": "secret",
         "VLLM_API_KEY": "secret",
         "VLLM_api_key": "secret",
@@ -94,6 +95,7 @@ class LogResolvedConfigTest(absltest.TestCase):
     self.assertEqual(record["env"]["VLLM_TPU_RPA_VERSION"], "2")
     self.assertEqual(record["env"]["DISABLE_MOSAIC_ATTN"], "1")
     self.assertEqual(record["env"]["TUNIX_BULK_TCP_LZ4"], "0")
+    self.assertEqual(record["env"][node_utils.ROLLOUT_REPLICA_ENV], "1")
     # Credentials are never recorded, even under a logged prefix and in
     # mixed case.
     self.assertNotIn("HF_TOKEN", record["env"])
@@ -167,6 +169,30 @@ class WorkerIdAndPortTest(absltest.TestCase):
     )
     self.assertEqual(node_utils.worker_id(hp, "rollout", "r-0"), "roll-1")
     self.assertEqual(node_utils.worker_id(hp, "inference", "i-0"), "inf-1")
+
+  def test_k8s_rollout_replica_appends_index_from_env(self):
+    hp = resolve_config.initialize([
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.trainer_id=trainer-1",
+        "cluster_config.k8s.rollout_id=roll-1",
+        "cluster_config.k8s.rollout.replicas=2",
+        # `k8s.sh` deploys no reference worker.
+        "agentic_grpo_config.beta=0.0",
+    ])
+    replica_env = node_utils.ROLLOUT_REPLICA_ENV
+    with mock.patch.dict(os.environ, {replica_env: "1"}):
+      self.assertEqual(node_utils.worker_id(hp, "rollout", "r-0"), "roll-1-1")
+      # Only rollout replicas carry an index.
+      self.assertEqual(
+          node_utils.worker_id(hp, "trainer", "trainer-0"), "trainer-1"
+      )
+    with mock.patch.dict(os.environ, {replica_env: "2"}):
+      with self.assertRaisesRegex(ValueError, "out of range"):
+        node_utils.worker_id(hp, "rollout", "r-0")
+    env = {k: v for k, v in os.environ.items() if k != replica_env}
+    with mock.patch.dict(os.environ, env, clear=True):
+      with self.assertRaisesRegex(ValueError, "must be set"):
+        node_utils.worker_id(hp, "rollout", "r-0")
 
   def test_service_port_reads_role_port(self):
     hp = resolve_config.initialize(["cluster_config.ports.rollout=20051"])
