@@ -1915,6 +1915,227 @@ class TaskSessionTest(parameterized.TestCase):
 
     asyncio.run(_run())
 
+  def test_worker_inflight_loads_tracks_active_and_dynamic_actors(self):
+    async def _run():
+      release = asyncio.Event()
+
+      class _GatedWorker:
+
+        async def compute_trajectory(
+            self, prompt_id: str, turns: int = 1
+        ) -> str:
+          await release.wait()
+          return f"{prompt_id}:{turns}"
+
+      handle_0 = create_in_process_handle(_GatedWorker())
+      handle_1 = create_in_process_handle(_GatedWorker())
+      handle_late = create_in_process_handle(_GatedWorker())
+      live_handles = [handle_0, handle_1]
+
+      async with task_session.TaskSession(
+          lambda: list(live_handles)
+      ) as session:
+        self.assertEqual(
+            session.worker_inflight_loads(),
+            [(handle_0, 0), (handle_1, 0)],
+        )
+        await session.submit(
+            "req_0_a",
+            "compute_trajectory",
+            "p0",
+            turns=1,
+            preferred_actor=handle_0,
+        )
+        await session.submit(
+            "req_0_b",
+            "compute_trajectory",
+            "p1",
+            turns=1,
+            preferred_actor=handle_0,
+        )
+        await session.submit(
+            "req_1_a",
+            "compute_trajectory",
+            "p2",
+            turns=1,
+            preferred_actor=handle_1,
+        )
+        live_handles.append(handle_late)
+        loads_with_late = session.worker_inflight_loads()
+        # Evict handle_late (0 tasks) and handle_1 (1 active task still in
+        # _dispatched_tasks) and verify both are omitted from live loads.
+        live_handles.remove(handle_late)
+        live_handles.remove(handle_1)
+        loads_after_eviction = session.worker_inflight_loads()
+        release.set()
+
+        outcomes = []
+        async for res, exc in session.as_completed():
+          self.assertIsNone(exc)
+          outcomes.append(res)
+        loads_after_drain = session.worker_inflight_loads()
+
+      self.assertEqual(
+          loads_with_late,
+          [(handle_0, 2), (handle_1, 1), (handle_late, 0)],
+      )
+      self.assertEqual(loads_after_eviction, [(handle_0, 2)])
+      self.assertLen(outcomes, 3)
+      self.assertEqual(loads_after_drain, [(handle_0, 0)])
+
+    asyncio.run(_run())
+
+  def test_submit_rejects_non_actor_handle_preferred_actor(self):
+    async def _run():
+      handle_0 = create_in_process_handle(
+          StubWorkerEngine("worker_0", latency=0.0)
+      )
+      async with task_session.TaskSession([handle_0]) as session:
+        bad_actor: Any = "not_a_handle"
+        with self.assertRaisesRegex(
+            TypeError, "Expected ActorHandle for preferred_actor"
+        ):
+          await session.submit(
+              "req_bad",
+              "compute_trajectory",
+              "p_bad",
+              preferred_actor=bad_actor,
+          )
+
+    asyncio.run(_run())
+
+  def test_submit_dispatches_to_live_preferred_actor(self):
+    async def _run():
+      engine_0 = StubWorkerEngine("worker_0", latency=0.0)
+      engine_1 = StubWorkerEngine("worker_1", latency=0.0)
+      handle_0 = create_in_process_handle(engine_0)
+      handle_1 = create_in_process_handle(engine_1)
+
+      async with task_session.TaskSession([handle_0, handle_1]) as session:
+        # route_key=0 alone would route to handle_0; preferred_actor=handle_1
+        # overrides initial placement while handle_1 is live.
+        await session.submit(
+            "req_pref",
+            "compute_trajectory",
+            "p_pref",
+            turns=1,
+            route_key=0,
+            preferred_actor=handle_1,
+        )
+        outcomes = []
+        async for res, exc in session.as_completed():
+          self.assertIsNone(exc)
+          outcomes.append(res)
+
+      self.assertEqual(
+          outcomes, ["[worker_1] Trajectory for prompt p_pref (1 turns)"]
+      )
+      self.assertEqual(engine_0.call_count, 0)
+
+    asyncio.run(_run())
+
+  def test_submit_falls_back_to_route_key_for_stale_preferred_actor(self):
+    async def _run():
+      engine_0 = StubWorkerEngine("worker_0", latency=0.0)
+      engine_1 = StubWorkerEngine("worker_1", latency=0.0)
+      engine_stale = StubWorkerEngine("worker_stale", latency=0.0)
+      handle_0 = create_in_process_handle(engine_0)
+      handle_1 = create_in_process_handle(engine_1)
+      handle_stale = create_in_process_handle(engine_stale)
+
+      async with task_session.TaskSession([handle_0, handle_1]) as session:
+        # handle_stale is absent from live actors, so submit falls back to
+        # route_key=0 -> handle_0 without touching handle_stale.
+        await session.submit(
+            "req_stale",
+            "compute_trajectory",
+            "p_stale",
+            turns=1,
+            route_key=0,
+            preferred_actor=handle_stale,
+        )
+        outcomes = []
+        async for res, exc in session.as_completed():
+          self.assertIsNone(exc)
+          outcomes.append(res)
+
+      self.assertEqual(
+          outcomes, ["[worker_0] Trajectory for prompt p_stale (1 turns)"]
+      )
+      self.assertEqual(engine_1.call_count, 0)
+      self.assertEqual(engine_stale.call_count, 0)
+
+    asyncio.run(_run())
+
+  def test_submit_preferred_actor_retries_via_route_key_on_worker_failure(self):
+    async def _run():
+      trigger_crash = asyncio.Event()
+
+      class _CrashingPollHandle(remote_lib.ActorHandle):
+
+        def submit(self, method_name=None, *args, **kwargs):
+          raise NotImplementedError()
+
+        async def asubmit(self, method_name=None, *args, **kwargs):
+          raise NotImplementedError()
+
+        async def dispatch_task(
+            self, request_id=None, method_name=None, *args, **kwargs
+        ) -> str:
+          del method_name, args, kwargs
+          return request_id or ""
+
+        async def poll_responses(self, timeout_s=50.0):
+          del timeout_s
+          await trigger_crash.wait()
+          raise ConnectionError("preferred worker crashed mid-poll")
+
+      bad_handle = _CrashingPollHandle()
+      engine_a = StubWorkerEngine("survivor_a", latency=0.0)
+      engine_b = StubWorkerEngine("survivor_b", latency=0.0)
+      survivor_a = create_in_process_handle(engine_a)
+      survivor_b = create_in_process_handle(engine_b)
+      live_actors: list[remote_lib.ActorHandle] = [
+          bad_handle,
+          survivor_a,
+          survivor_b,
+      ]
+
+      def _evict(actor, exc):
+        del exc
+        if actor in live_actors:
+          live_actors.remove(actor)
+
+      async with task_session.TaskSession(
+          lambda: list(live_actors),
+          fault_tolerance_config=task_session.TaskSessionFaultToleranceConfig(
+              max_task_retries=1,
+              on_worker_unreachable=_evict,
+          ),
+      ) as session:
+        for g in range(8):
+          await session.submit(
+              f"req_g{g}",
+              "compute_trajectory",
+              f"p_g{g}",
+              turns=1,
+              route_key=f"traj_p0_g{g}",
+              preferred_actor=bad_handle,
+          )
+        trigger_crash.set()
+
+        outcomes = []
+        async for res, exc in session.as_completed():
+          self.assertIsNone(exc)
+          outcomes.append(res)
+
+      self.assertLen(outcomes, 8)
+      self.assertGreater(engine_a.call_count, 0)
+      self.assertGreater(engine_b.call_count, 0)
+      self.assertEqual(engine_a.call_count + engine_b.call_count, 8)
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

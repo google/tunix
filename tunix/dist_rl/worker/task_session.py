@@ -96,6 +96,7 @@ class _InFlightTask:
   args: Tuple[Any, ...]
   kwargs: Dict[str, Any]
   route_key: Optional[Any] = None
+  preferred_actor: Optional[ActorHandle] = None
   retries: int = 0
   dispatching: bool = False
 
@@ -295,12 +296,25 @@ class TaskSession:
       raise RuntimeError("TaskSession has no registered ActorHandles.")
     return self._route_fn(actors, route_key)
 
+  def worker_inflight_loads(self) -> list[tuple[ActorHandle, int]]:
+    """Returns `(actor, in_flight_count)` pairs for each current live actor."""
+    return [
+        (
+            actor,
+            len(self._dispatched_tasks[actor])
+            if actor in self._dispatched_tasks
+            else 0,
+        )
+        for actor in self._actors_fn()
+    ]
+
   async def submit(
       self,
       request_id: str,
       method_name: Optional[str] = None,
       *args: Any,
       route_key: Optional[Any] = None,
+      preferred_actor: Optional[ActorHandle] = None,
       **kwargs: Any,
   ) -> str:
     """Dispatches a task to a routed worker and tracks its completion.
@@ -309,24 +323,37 @@ class TaskSession:
       request_id: Unique identifier for the in-flight request.
       method_name: Remote method name to invoke on the selected worker.
       *args: Positional arguments forwarded to `dispatch_task`.
-      route_key: Optional sticky routing key consumed by `route_fn`.
+      route_key: Optional sticky routing key consumed by `route_fn` when
+        `preferred_actor` is omitted, no longer live, or retried after failure.
+      preferred_actor: Optional initial target `ActorHandle`. Used on the first
+        dispatch attempt if still present in live `actors`; stale handles and
+        fault-tolerant retries fall back to `route_fn(..., route_key)`.
       **kwargs: Keyword arguments forwarded to `dispatch_task`.
 
     Returns:
       The submitted `request_id`.
 
     Raises:
+      TypeError: If `preferred_actor` is neither `None` nor an `ActorHandle`.
       RuntimeError: If the session is closed or no `ActorHandle`s are
         available.
     """
     if self._closed:
       raise RuntimeError("TaskSession is closed.")
+    if preferred_actor is not None and not isinstance(
+        preferred_actor, ActorHandle
+    ):
+      raise TypeError(
+          "Expected ActorHandle for preferred_actor, got"
+          f" {type(preferred_actor)}"
+      )
     task = _InFlightTask(
         request_id=request_id,
         method_name=method_name,
         args=args,
         kwargs=dict(kwargs) if self._max_task_retries > 0 else kwargs,
         route_key=route_key,
+        preferred_actor=preferred_actor,
     )
     # Increment in_flight BEFORE awaiting dispatch_task so a fast worker
     # completing before dispatch_task's coroutine resumes always finds
@@ -373,9 +400,23 @@ class TaskSession:
 
     Args:
       task: The in-flight task to route and dispatch.
+
+    Raises:
+      RuntimeError: If no `ActorHandle`s are registered in the session.
+      WorkerUnreachableError: If the target worker fails while dispatching with
+        fault tolerance enabled and no retry succeeds.
     """
     while True:
-      actor = self.route(task.route_key)
+      live_actors = self._actors_fn()
+      if not live_actors:
+        raise RuntimeError("TaskSession has no registered ActorHandles.")
+      preferred = task.preferred_actor
+      task.preferred_actor = None
+      actor = (
+          preferred
+          if preferred is not None and preferred in live_actors
+          else self._route_fn(live_actors, task.route_key)
+      )
       if task.retries > 0:
         self._task_retries_total += 1
       dispatched_map = self._dispatched_tasks.setdefault(actor, {})

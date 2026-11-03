@@ -16,6 +16,7 @@
 
 import asyncio
 import collections
+from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
@@ -145,13 +146,19 @@ class _FakeWeightSyncCoordinator:
 
 def _make_engine(
     *,
+    registry: worker_registry.WorkerRegistry | None = None,
     rollout_workers=(),
     trainer_workers=None,
     inference_workers=None,
     weight_sync_coordinator=None,
     fault_tolerance_config: datatypes.FaultToleranceConfig | None = None,
+    rollout_prompt_stripe_size: int = (
+        distributed_rl_engine.DEFAULT_ROLLOUT_PROMPT_STRIPE_SIZE
+    ),
 ) -> distributed_rl_engine.DistributedRLEngine:
-  registry = worker_registry.WorkerRegistry()
+  registry = (
+      registry if registry is not None else worker_registry.WorkerRegistry()
+  )
   for idx, handle in enumerate(rollout_workers):
     registry.register_handle(
         f"rollout-{idx}", [datatypes.Role.ROLLOUT], handle
@@ -171,6 +178,7 @@ def _make_engine(
       registry=registry,
       weight_sync_coordinator=weight_sync_coordinator,
       fault_tolerance_manager=ftm,
+      rollout_prompt_stripe_size=rollout_prompt_stripe_size,
   )
 
 
@@ -921,11 +929,10 @@ class DistributedRLEngineTest(absltest.TestCase):
           for req in call.kwargs["requests"]
       ]
 
-      # Routing on the per-trajectory key must not send the whole group to one
-      # worker. The split is hash-determined, so assert both workers are used
-      # rather than an exact ratio.
-      self.assertNotEmpty(dispatched_1)
-      self.assertNotEmpty(dispatched_2)
+      # Per-prompt least-loaded striping spreads the 4 trajectories across both
+      # active workers.
+      self.assertLen(dispatched_1, 2)
+      self.assertLen(dispatched_2, 2)
 
       # No trajectory is dropped or duplicated.
       self.assertEqual(
@@ -939,8 +946,9 @@ class DistributedRLEngineTest(absltest.TestCase):
 
   def test_dispatch_routes_same_trajectory_to_same_worker(self):
     async def _run():
-      # Same (prompt_id, group_index) => same traj_id => same worker, so a
-      # redispatch lands where the trajectory's KV cache may still live.
+      # Within a single dispatch_rollout_requests call, duplicate traj_id
+      # entries bucket into the same trajectory unit and land on the same
+      # worker.
       def _req(request_id: str) -> datatypes.RolloutRequest:
         return datatypes.RolloutRequest(
             request_id=request_id,
@@ -965,11 +973,12 @@ class DistributedRLEngineTest(absltest.TestCase):
           for req in call.kwargs["requests"]
       ]
 
-      # Both dispatches resolve to the same worker; which one is hash-defined.
+      # Both requests in the batch resolve to the same least-loaded worker.
       landed = dispatched_1 or dispatched_2
       self.assertEqual(
           [r.request_id for r in landed], ["first", "retry"]
       )
+      self.assertEmpty(dispatched_2 if dispatched_1 else dispatched_1)
 
     asyncio.run(_run())
 
@@ -989,9 +998,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       req_ids = await self.engine.dispatch_rollouts([req1, req2])
       self.assertEqual(req_ids, ["1", "2"])
 
-      # Delegation, not placement: both requests must reach a worker. Which
-      # worker is hash-defined, and two trajectories may legitimately collide
-      # onto the same one.
+      # Delegation check: both requests must reach active rollout workers.
       dispatched = [
           req
           for mock in (self.mock_rollout_1, self.mock_rollout_2)
@@ -2827,6 +2834,515 @@ class DistributedRLEngineTest(absltest.TestCase):
           },
       )
       await minimal_engine.close()
+
+    asyncio.run(_run())
+
+  def _bind_completion_queues(self, workers: list[MockActorHandle]):
+    queues = [
+        asyncio.Queue[remote_execution.ExecutionResponse]() for _ in workers
+    ]
+    for handle, response_q in zip(workers, queues, strict=True):
+
+      async def _poll(timeout_s=50.0, q=response_q):
+        del timeout_s
+        return await q.get()
+
+      handle.poll_responses.side_effect = _poll
+
+    def _enqueue_completions(worker_idx: int, count: int) -> None:
+      handle = workers[worker_idx]
+      for _ in range(count):
+        req_id = handle._dispatched_request_ids.popleft()
+        queues[worker_idx].put_nowait(
+            remote_execution.ExecutionResponse(
+                request_id=req_id,
+                result=[
+                    datatypes.RolloutResponse(
+                        request_id=req_id,
+                        status="COMPLETED",
+                        payload=datatypes.TrajectoryItem(
+                            prompt_id="done",
+                            group_index=0,
+                            traj={
+                                "trajectory_reward": 1.0,
+                                "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                            },
+                        ),
+                    )
+                ],
+            )
+        )
+
+    return _enqueue_completions
+
+  def test_init_rejects_non_positive_rollout_prompt_stripe_size(self):
+    registry = worker_registry.WorkerRegistry()
+    with self.assertRaisesRegex(
+        ValueError, "rollout_prompt_stripe_size must be positive"
+    ):
+      distributed_rl_engine.DistributedRLEngine(
+          registry=registry, rollout_prompt_stripe_size=0
+      )
+    with self.assertRaisesRegex(
+        ValueError, "rollout_prompt_stripe_size must be positive"
+    ):
+      distributed_rl_engine.DistributedRLEngine(
+          registry=registry, rollout_prompt_stripe_size=-1
+      )
+
+  def test_init_rejects_non_int_rollout_prompt_stripe_size(self):
+    registry = worker_registry.WorkerRegistry()
+    bad_bool: Any = False
+    bad_float: Any = 2.5
+    with self.assertRaisesRegex(
+        TypeError, "rollout_prompt_stripe_size must be an int"
+    ):
+      distributed_rl_engine.DistributedRLEngine(
+          registry=registry, rollout_prompt_stripe_size=bad_bool
+      )
+    with self.assertRaisesRegex(
+        TypeError, "rollout_prompt_stripe_size must be an int"
+    ):
+      distributed_rl_engine.DistributedRLEngine(
+          registry=registry, rollout_prompt_stripe_size=bad_float
+      )
+
+  def test_dispatch_rollout_requests_stripes_onto_least_loaded_workers(self):
+    async def _run():
+      workers = [MockActorHandle() for _ in range(4)]
+      enqueue_completions = self._bind_completion_queues(workers)
+      w0, w1, w2, w3 = workers
+      engine = _make_engine(rollout_workers=workers)
+
+      # Dispatch two 16-request groups so loads start at [8, 8, 8, 8], then
+      # complete 0 on w0, 8 on w1, 4 on w2, and 8 on w3 via poll_rollouts() to
+      # establish skewed active loads [8, 0, 4, 0] through public APIs.
+      for seed_idx in range(2):
+        await engine.dispatch_rollout_requests([
+            datatypes.RolloutRequest(
+                prompt=f"seed_{seed_idx}",
+                prompt_id=f"seed_prompt_{seed_idx}",
+                group_index=g,
+            )
+            for g in range(16)
+        ])
+      enqueue_completions(1, 8)
+      enqueue_completions(2, 4)
+      enqueue_completions(3, 8)
+      drained = 0
+      while drained < 20:
+        batch = await engine.poll_rollouts(timeout_s=1.0)
+        drained += len(batch)
+      self.assertEqual(drained, 20)
+      for handle in workers:
+        handle.generate.reset_mock()
+
+      reqs_p0 = [
+          datatypes.RolloutRequest(
+              prompt="p0",
+              prompt_id="deepswe_0",
+              group_index=g,
+          )
+          for g in range(16)
+      ]
+      await engine.dispatch_rollout_requests(reqs_p0)
+      # Active loads started at [8, 0, 4, 0]:
+      # - Stripe 0 (g=0..3) -> w1 (load 0 -> 4, rr_cursor=2)
+      # - Stripe 1 (g=4..7) -> w3 (load 0 -> 4, rr_cursor=0)
+      # - Stripe 2 (g=8..11) -> w1 (load 4 -> 8, tied [8,4,4,4], rr_cursor=0)
+      # - Stripe 3 (g=12..15) -> w2 (load 4 -> 8, tied [8,8,4,4], rr_cursor=2)
+      self.assertEqual(w0.generate.call_count, 0)
+      self.assertEqual(w1.generate.call_count, 8)
+      self.assertEqual(w2.generate.call_count, 4)
+      self.assertEqual(w3.generate.call_count, 4)
+
+      w1_group_indices = [
+          call.kwargs["requests"][0].group_index
+          for call in w1.generate.call_args_list
+      ]
+      w2_group_indices = [
+          call.kwargs["requests"][0].group_index
+          for call in w2.generate.call_args_list
+      ]
+      w3_group_indices = [
+          call.kwargs["requests"][0].group_index
+          for call in w3.generate.call_args_list
+      ]
+      self.assertEqual(w1_group_indices, [0, 1, 2, 3, 8, 9, 10, 11])
+      self.assertEqual(w3_group_indices, [4, 5, 6, 7])
+      self.assertEqual(w2_group_indices, [12, 13, 14, 15])
+
+      # Active loads are now [8, 8, 8, 4]; with G=4 on 4 workers, eff_stripe=1,
+      # so all 4 trajectories route to w3 (4 -> 5 -> 6 -> 7 -> 8).
+      reqs_p1 = [
+          datatypes.RolloutRequest(
+              prompt="p1",
+              prompt_id="deepswe_1",
+              group_index=g,
+          )
+          for g in range(4)
+      ]
+      await engine.dispatch_rollout_requests(reqs_p1)
+      self.assertEqual(w3.generate.call_count, 8)
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_handles_remainder_and_custom_stripe_size(
+      self,
+  ):
+    async def _run():
+      w0, w1 = MockActorHandle(), MockActorHandle()
+      engine = _make_engine(
+          rollout_workers=[w0, w1], rollout_prompt_stripe_size=3
+      )
+      # G=10 on 2 workers with stripe_size=3 -> eff_stripe = min(3, 10 // 2)=3:
+      # stripes [0, 1, 2] -> w0 (load 3), [3, 4, 5] -> w1 (load 3),
+      # [6, 7, 8] -> w0 (load 6), and remainder [9] -> w1 (load 4).
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              prompt="p_rem",
+              prompt_id="prompt_rem",
+              group_index=g,
+          )
+          for g in range(10)
+      ])
+      w0_groups = [
+          call.kwargs["requests"][0].group_index
+          for call in w0.generate.call_args_list
+      ]
+      w1_groups = [
+          call.kwargs["requests"][0].group_index
+          for call in w1.generate.call_args_list
+      ]
+      self.assertEqual(w0_groups, [0, 1, 2, 6, 7, 8])
+      self.assertEqual(w1_groups, [3, 4, 5, 9])
+
+      # A follow-up G=2 prompt (eff_stripe=1) sends both requests to w1 (load
+      # 4 -> 5 -> 6) to balance w0's load of 6.
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              prompt="p_next",
+              prompt_id="prompt_next",
+              group_index=g,
+          )
+          for g in range(2)
+      ])
+      self.assertEqual(w0.generate.call_count, 6)
+      self.assertEqual(w1.generate.call_count, 6)
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_load_balances_small_groups(self):
+    async def _run():
+      pool4 = [MockActorHandle() for _ in range(4)]
+      engine = _make_engine(rollout_workers=pool4, rollout_prompt_stripe_size=4)
+      for p_idx in range(2):
+        await engine.dispatch_rollout_requests([
+            datatypes.RolloutRequest(
+                prompt=f"small_{p_idx}",
+                prompt_id=f"small_prompt_{p_idx}",
+                group_index=g,
+            )
+            for g in range(2)
+        ])
+      self.assertEqual([w.generate.call_count for w in pool4], [1, 1, 1, 1])
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_persists_tie_break_cursor_across_completions(
+      self,
+  ):
+    async def _run():
+      workers = [MockActorHandle() for _ in range(4)]
+      enqueue_completions = self._bind_completion_queues(workers)
+      engine = _make_engine(rollout_workers=workers)
+
+      # Step 1: G=2 on 4 idle workers (eff_stripe=1) routes to w0 and w1,
+      # leaving _last_routed_actor=w1 (next cursor index=2 -> w2).
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              prompt="p_a",
+              prompt_id="prompt_a",
+              group_index=g,
+          )
+          for g in range(2)
+      ])
+      self.assertEqual([w.generate.call_count for w in workers], [1, 1, 0, 0])
+
+      # Complete both tasks so active loads return to a 4-way tie [0, 0, 0, 0].
+      enqueue_completions(0, 1)
+      enqueue_completions(1, 1)
+      drained = 0
+      while drained < 2:
+        drained += len(await engine.poll_rollouts(timeout_s=1.0))
+      self.assertEqual(drained, 2)
+
+      # Step 2: G=1 with tied loads [0, 0, 0, 0] must resume at w2 (not reset
+      # to w0).
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              prompt="p_b",
+              prompt_id="prompt_b",
+              group_index=0,
+          )
+      ])
+      self.assertEqual([w.generate.call_count for w in workers], [1, 1, 1, 0])
+
+      # Complete w2's task (loads [0, 0, 0, 0]) and verify a G=2 prompt wraps
+      # around onto w3 (g=0) and w0 (g=1).
+      enqueue_completions(2, 1)
+      self.assertLen(await engine.poll_rollouts(timeout_s=1.0), 1)
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              prompt="p_c",
+              prompt_id="prompt_c",
+              group_index=g,
+          )
+          for g in range(2)
+      ])
+      self.assertEqual([w.generate.call_count for w in workers], [2, 1, 1, 1])
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_tie_break_cursor_tracks_actor_identity_across_eviction(
+      self,
+  ):
+    async def _run():
+      registry = worker_registry.WorkerRegistry()
+      workers = [MockActorHandle() for _ in range(4)]
+      enqueue_completions = self._bind_completion_queues(workers)
+      w0, w1, w2, w3 = workers
+      engine = _make_engine(registry=registry, rollout_workers=workers)
+
+      # Route G=2 onto w0 and w1 (_last_routed_actor=w1), drain both tasks, and
+      # evict rollout-0 so live actors shift to [w1, w2, w3] at loads [0, 0, 0].
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              prompt="p_init",
+              prompt_id="prompt_init",
+              group_index=g,
+          )
+          for g in range(2)
+      ])
+      enqueue_completions(0, 1)
+      enqueue_completions(1, 1)
+      drained = 0
+      while drained < 2:
+        drained += len(await engine.poll_rollouts(timeout_s=1.0))
+      self.assertEqual(drained, 2)
+      registry.unregister("rollout-0")
+
+      # Identity-based cursor resumes immediately after w1 onto w2 (rather than
+      # skipping w2 via a stale positional index=2 -> w3).
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              prompt="p_after_evict",
+              prompt_id="prompt_after_evict",
+              group_index=0,
+          )
+      ])
+      self.assertEqual(
+          [w.generate.call_count for w in (w0, w1, w2, w3)], [1, 1, 1, 0]
+      )
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_spreads_single_trajectory_prompts_evenly(
+      self,
+  ):
+    async def _run():
+      # 16 distinct G=1 prompts in one batch on 8 idle workers must spread
+      # evenly ([2] * 8) rather than packing 4 unrelated prompts onto 0..3.
+      pool8 = [MockActorHandle() for _ in range(8)]
+      engine = _make_engine(rollout_workers=pool8)
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              prompt=f"p_{idx}",
+              prompt_id=f"prompt_{idx}",
+              group_index=0,
+          )
+          for idx in range(16)
+      ])
+      self.assertEqual([w.generate.call_count for w in pool8], [2] * 8)
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_never_straddles_prompt_boundaries(self):
+    async def _run():
+      # 3 prompts with G=6 on 2 workers (stripe_size=4) must compute
+      # eff_stripe = min(4, 6 // 2) = 3 per prompt so stripes never straddle
+      # distinct prompt_ids.
+      w0, w1 = MockActorHandle(), MockActorHandle()
+      engine = _make_engine(
+          rollout_workers=[w0, w1], rollout_prompt_stripe_size=4
+      )
+      multi_reqs: list[datatypes.RolloutRequest] = []
+      for pid in ("alpha", "beta", "gamma"):
+        for g in range(6):
+          multi_reqs.append(
+              datatypes.RolloutRequest(
+                  prompt=f"text_{pid}",
+                  prompt_id=pid,
+                  group_index=g,
+              )
+          )
+      await engine.dispatch_rollout_requests(multi_reqs)
+      w0_pairs = [
+          (
+              call.kwargs["requests"][0].prompt_id,
+              call.kwargs["requests"][0].group_index,
+          )
+          for call in w0.generate.call_args_list
+      ]
+      w1_pairs = [
+          (
+              call.kwargs["requests"][0].prompt_id,
+              call.kwargs["requests"][0].group_index,
+          )
+          for call in w1.generate.call_args_list
+      ]
+      self.assertEqual(
+          w0_pairs,
+          [
+              ("alpha", 0),
+              ("alpha", 1),
+              ("alpha", 2),
+              ("beta", 0),
+              ("beta", 1),
+              ("beta", 2),
+              ("gamma", 0),
+              ("gamma", 1),
+              ("gamma", 2),
+          ],
+      )
+      self.assertEqual(
+          w1_pairs,
+          [
+              ("alpha", 3),
+              ("alpha", 4),
+              ("alpha", 5),
+              ("beta", 3),
+              ("beta", 4),
+              ("beta", 5),
+              ("gamma", 3),
+              ("gamma", 4),
+              ("gamma", 5),
+          ],
+      )
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollout_requests_eviction_spreads_retries_across_survivors(
+      self,
+  ):
+    async def _run():
+      trigger_crash = asyncio.Event()
+      registry = worker_registry.WorkerRegistry()
+      workers = [MockActorHandle() for _ in range(4)]
+      w0, w1, w2, w3 = workers
+      survivor_queues: dict[
+          MockActorHandle, asyncio.Queue[remote_execution.ExecutionResponse]
+      ] = {
+          w1: asyncio.Queue(),
+          w2: asyncio.Queue(),
+          w3: asyncio.Queue(),
+      }
+
+      for survivor, response_q in survivor_queues.items():
+
+        def _bind_survivor(
+            handle: MockActorHandle,
+            q: asyncio.Queue[remote_execution.ExecutionResponse],
+        ) -> None:
+          async def _generate(*, requests):
+            req = requests[0]
+            q.put_nowait(
+                remote_execution.ExecutionResponse(
+                    request_id=req.request_id,
+                    result=[
+                        datatypes.RolloutResponse(
+                            request_id=req.request_id,
+                            status="COMPLETED",
+                            payload=datatypes.TrajectoryItem(
+                                prompt_id=str(req.prompt_id),
+                                group_index=req.group_index,
+                                traj={
+                                    "trajectory_reward": 1.0,
+                                    "status": (
+                                        datatypes.TrajectoryStatus.SUCCEEDED
+                                    ),
+                                },
+                            ),
+                        )
+                    ],
+                )
+            )
+
+          async def _poll(timeout_s=50.0):
+            del timeout_s
+            return await q.get()
+
+          handle.generate.side_effect = _generate
+          handle.poll_responses.side_effect = _poll
+
+        _bind_survivor(survivor, response_q)
+
+      async def _crashing_poll(timeout_s=50.0):
+        del timeout_s
+        await trigger_crash.wait()
+        raise ConnectionError("rollout-0 crashed with active striped tasks")
+
+      w0.poll_responses.side_effect = _crashing_poll
+
+      engine = _make_engine(
+          registry=registry,
+          rollout_workers=workers,
+          fault_tolerance_config=datatypes.FaultToleranceConfig(
+              enabled=True, max_task_retries=1
+          ),
+      )
+
+      # G=32 on 4 workers places 8 trajectories on each worker (w0 receives
+      # g=0..3 and g=16..19 via preferred_actor=w0 while keeping
+      # route_key=req.traj_id).
+      await engine.dispatch_rollout_requests([
+          datatypes.RolloutRequest(
+              request_id=f"req_evict_g{g}",
+              prompt="p_evict",
+              prompt_id="prompt_evict",
+              group_index=g,
+          )
+          for g in range(32)
+      ])
+      self.assertEqual(w0.generate.call_count, 8)
+      before_eviction_counts = [w.generate.call_count for w in (w1, w2, w3)]
+      self.assertEqual(before_eviction_counts, [8, 8, 8])
+
+      trigger_crash.set()
+      completed: list[datatypes.TrajectoryItem] = []
+      while len(completed) < 32:
+        completed.extend(await engine.poll_rollouts(timeout_s=1.0))
+
+      self.assertLen(completed, 32)
+      self.assertEqual(
+          sorted(item.group_index for item in completed), list(range(32))
+      )
+      self.assertNotIn("rollout-0", registry)
+      retried_per_survivor = [
+          w.generate.call_count - 8 for w in (w1, w2, w3)
+      ]
+      self.assertEqual(sum(retried_per_survivor), 8)
+      # Retries hash distinct traj_id strings across all 3 survivors instead of
+      # collapsing all 8 orphaned tasks onto a single k % (N - 1) survivor.
+      self.assertTrue(all(count > 0 for count in retried_per_survivor))
+      await engine.close()
 
     asyncio.run(_run())
 

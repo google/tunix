@@ -465,11 +465,15 @@ class OrchestratorFaultToleranceTest(absltest.TestCase):
           fault_injection.Block(gate),
           times=1,
       )
+      # Dispatch a single prompt (G=2 across 2 workers -> 1 stripe on rollout_0
+      # and 1 stripe on rollout_1) so no second prompt races a fresh
+      # dispatch_task RPC against stop_worker_server("rollout_1") before the
+      # active poller exhausts poll_retry_budget_s.
       program = harness.build_program(
-          num_prompts=4,
+          num_prompts=1,
           max_steps=1,
           num_generations=2,
-          mini_batch_size=2,
+          mini_batch_size=1,
           sync_weights=False,
       )
       future = harness.start_program(program)

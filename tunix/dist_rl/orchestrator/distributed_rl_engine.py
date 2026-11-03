@@ -43,12 +43,41 @@ from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import task_session
 
 _summarize_list = logging_utils.summarize_list
+# Default maximum number of contiguous trajectories per prompt stripe.
+DEFAULT_ROLLOUT_PROMPT_STRIPE_SIZE: int = 4
+# Lower-bound target on stripes per prompt when capping stripe size for fanout.
+_TARGET_STRIPES_PER_PROMPT: int = 4
 
 # Weight sync pushes to serving workers and to late joiners awaiting first sync.
 _WEIGHT_SYNC_DESTINATION_STATUSES = (
     worker_registry.AdmissionStatus.ACTIVE,
     worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
 )
+
+
+def validate_rollout_prompt_stripe_size(stripe_size: int) -> int:
+  """Validates that `stripe_size` is a positive integer (excluding `bool`).
+
+  Args:
+    stripe_size: Candidate maximum trajectory stripe size per prompt.
+
+  Returns:
+    The validated `stripe_size`.
+
+  Raises:
+    TypeError: If `stripe_size` is not an `int` (or is a `bool`).
+    ValueError: If `stripe_size <= 0`.
+  """
+  if isinstance(stripe_size, bool) or not isinstance(stripe_size, int):
+    raise TypeError(
+        "rollout_prompt_stripe_size must be an int, got"
+        f" {type(stripe_size).__name__}"
+    )
+  if stripe_size <= 0:
+    raise ValueError(
+        f"rollout_prompt_stripe_size must be positive, got {stripe_size}"
+    )
+  return stripe_size
 
 
 def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
@@ -92,7 +121,27 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       fault_tolerance_manager: (
           fault_tolerance_manager_lib.FaultToleranceManager | None
       ) = None,
+      rollout_prompt_stripe_size: int = DEFAULT_ROLLOUT_PROMPT_STRIPE_SIZE,
   ):
+    """Initializes DistributedRLEngine.
+
+    Args:
+      registry: Worker registry tracking active role handles.
+      weight_sync_coordinator: Optional coordinator executing weight sync
+        rounds.
+      fault_tolerance_manager: Optional manager supplying task retry and
+        eviction hooks; one is created from `registry` if omitted.
+      rollout_prompt_stripe_size: Maximum contiguous trajectory stripe size per
+        prompt when load-balancing `dispatch_rollout_requests`. Must be a
+        positive integer.
+
+    Raises:
+      TypeError: If `rollout_prompt_stripe_size` is not an `int` (or is `bool`).
+      ValueError: If `rollout_prompt_stripe_size <= 0`.
+    """
+    self._rollout_prompt_stripe_size = validate_rollout_prompt_stripe_size(
+        rollout_prompt_stripe_size
+    )
     self._registry = registry
     self._fault_tolerance_manager = (
         fault_tolerance_manager
@@ -108,6 +157,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         ),
     )
     self._policy_version = 0
+    self._last_routed_actor: remote_execution.ActorHandle | None = None
     self._weight_sync_coordinator = weight_sync_coordinator
     self._restored_checkpoint_metadata: dict[str, Any] | None = None
     self._inflight_fwd_bwd: dict[
@@ -168,32 +218,96 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       self,
       requests: Sequence[datatypes.RolloutRequest],
   ) -> list[str]:
-    """Dispatches pre-formed RolloutRequests across rollout workers."""
+    """Dispatches pre-formed RolloutRequests across rollout workers.
+
+    When multiple rollout workers are active, groups requests by `prompt_id`
+    (colocating duplicate `traj_id` entries submitted within the same call, not
+    across separate calls), slices each prompt's trajectories into contiguous
+    stripes of size `min(stripe_size, max(1, num_trajs // min(num_workers,
+    _TARGET_STRIPES_PER_PROMPT)))`, and assigns each stripe via
+    `preferred_actor` to the worker with the lowest in-flight load (breaking
+    ties via an actor-identity round-robin cursor). Every submission retains
+    `route_key=req.traj_id` so stale-handle fallbacks and fault-tolerant retries
+    spread across surviving workers.
+
+    Args:
+      requests: Rollout requests to dispatch.
+
+    Returns:
+      The list of dispatched `request_id` strings.
+    """
     requests = self._build_rollout_requests(requests)
+    actors_and_loads = self._rollout_session.worker_inflight_loads()
+    actors = [actor for actor, _ in actors_and_loads]
+    worker_loads = [load for _, load in actors_and_loads]
+    num_workers = len(actors)
     logging.info(
         "Dispatching %d rollout request(s) across %d worker(s).",
         len(requests),
-        len(self._rollout_handles()),
+        num_workers,
     )
     for req in requests:
       logging.debug(
           "Dispatched rollout request (prompt_id=%s, group_index=%d,"
           " request_id=%s).",
-          getattr(req, "prompt_id", ""),
-          getattr(req, "group_index", 0),
+          req.prompt_id,
+          req.group_index,
           req.request_id,
       )
-    await asyncio.gather(
-        *(
-            self._rollout_session.submit(
-                req.request_id,
-                "generate",
-                requests=[req],
-                route_key=req.traj_id,
-            )
-            for req in requests
-        )
+
+    target_actors: list[remote_execution.ActorHandle | None] = [None] * len(
+        requests
     )
+    if num_workers > 1 and requests:
+      prompt_traj_buckets: dict[str, dict[str, list[int]]] = {}
+      for idx, req in enumerate(requests):
+        pid = str(req.prompt_id)
+        if pid not in prompt_traj_buckets:
+          prompt_traj_buckets[pid] = {}
+        traj_buckets = prompt_traj_buckets[pid]
+        if req.traj_id not in traj_buckets:
+          traj_buckets[req.traj_id] = []
+        traj_buckets[req.traj_id].append(idx)
+
+      stripe_size = self._rollout_prompt_stripe_size
+      min_stripes = min(num_workers, _TARGET_STRIPES_PER_PROMPT)
+      rr_cursor = 0
+      if self._last_routed_actor is not None:
+        for w_idx, actor in enumerate(actors):
+          if actor == self._last_routed_actor:
+            rr_cursor = (w_idx + 1) % num_workers
+            break
+      best_w = 0
+      for traj_buckets in prompt_traj_buckets.values():
+        traj_units = list(traj_buckets.values())
+        eff_stripe = min(
+            stripe_size,
+            max(1, len(traj_units) // min_stripes),
+        )
+        for i in range(0, len(traj_units), eff_stripe):
+          stripe_req_indices: list[int] = []
+          for unit in traj_units[i : i + eff_stripe]:
+            stripe_req_indices.extend(unit)
+          _, _, best_w = min(
+              (worker_loads[w], (w - rr_cursor) % num_workers, w)
+              for w in range(num_workers)
+          )
+          worker_loads[best_w] += len(stripe_req_indices)
+          rr_cursor = (best_w + 1) % num_workers
+          for req_idx in stripe_req_indices:
+            target_actors[req_idx] = actors[best_w]
+      self._last_routed_actor = actors[best_w]
+
+    await asyncio.gather(*(
+        self._rollout_session.submit(
+            req.request_id,
+            "generate",
+            requests=[req],
+            route_key=req.traj_id,
+            preferred_actor=actor,
+        )
+        for req, actor in zip(requests, target_actors, strict=True)
+    ))
 
     return [r.request_id for r in requests]
 
