@@ -608,7 +608,7 @@ def main(
       force=True,
   )
   hp = resolve_config.initialize(argv)
-  logging.info("Resolved config: %s", hp.config)
+  node_utils.log_resolved_config(hp, "trainer")
 
   process_context.jax.initialize()
 

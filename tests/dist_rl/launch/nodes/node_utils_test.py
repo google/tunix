@@ -16,6 +16,8 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import json
+import os
 import pathlib
 import pickle
 import signal
@@ -57,6 +59,48 @@ class EnsureRepoRootOnPathTest(absltest.TestCase):
       self.assertEqual(sys.path.count(repo_root), 1)
     finally:
       sys.path[:] = saved_path
+
+
+class LogResolvedConfigTest(absltest.TestCase):
+
+  def test_logs_one_json_record_and_returns_fingerprint(self):
+    hp = resolve_config.initialize(["cluster_config.run_id=run_1"])
+    env = {
+        "TPU_VISIBLE_CHIPS": "0,1",
+        "VLLM_TPU_RPA_VERSION": "2",
+        "DISABLE_MOSAIC_ATTN": "1",
+        "TUNIX_BULK_TCP_LZ4": "0",
+        "HF_TOKEN": "secret",
+        "VLLM_API_KEY": "secret",
+        "VLLM_api_key": "secret",
+        "VERIFY_WEIGHTS_EXTRA": "1",
+    }
+    with mock.patch.dict(os.environ, env):
+      with self.assertLogs(level="INFO") as logs:
+        fingerprint = node_utils.log_resolved_config(hp, "trainer")
+
+    self.assertEqual(fingerprint, resolve_config.config_fingerprint(hp))
+    marker = node_utils.RESOLVED_CONFIG_LOG_MARKER + " "
+    (line,) = [m for m in logs.output if marker in m]
+    record = json.loads(line.split(marker, 1)[1])
+    self.assertEqual(record["role"], "trainer")
+    self.assertEqual(record["config_sha256"], fingerprint)
+    self.assertEqual(
+        record["config"],
+        json.loads(json.dumps(resolve_config.plain_config(hp))),
+    )
+    # Variables under a logged prefix, and the exact toggles, are recorded.
+    self.assertEqual(record["env"]["TPU_VISIBLE_CHIPS"], "0,1")
+    self.assertEqual(record["env"]["VLLM_TPU_RPA_VERSION"], "2")
+    self.assertEqual(record["env"]["DISABLE_MOSAIC_ATTN"], "1")
+    self.assertEqual(record["env"]["TUNIX_BULK_TCP_LZ4"], "0")
+    # Credentials are never recorded, even under a logged prefix and in
+    # mixed case.
+    self.assertNotIn("HF_TOKEN", record["env"])
+    self.assertNotIn("VLLM_API_KEY", record["env"])
+    self.assertNotIn("VLLM_api_key", record["env"])
+    # Exact toggle names are not prefixes.
+    self.assertNotIn("VERIFY_WEIGHTS_EXTRA", record["env"])
 
 
 class PadAndEosIdsTest(absltest.TestCase):

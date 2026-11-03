@@ -30,6 +30,7 @@ from __future__ import annotations
 from collections.abc import Mapping, MutableMapping, Sequence
 import datetime
 import getpass
+import hashlib
 import json
 import math
 import os
@@ -38,6 +39,7 @@ import shlex
 import sys
 from typing import Any, Final
 
+import omegaconf
 from tunix.cli import config as cli_config
 from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.queue_manager import trajectory_queue_manager
@@ -501,6 +503,56 @@ def _check_choice(key: str, value: object, choices: Sequence[str]) -> None:
 def initialize(overrides: Sequence[str]) -> DistHyperParameters:
   """Initializes `DistHyperParameters` from overrides only (no program name)."""
   return DistHyperParameters(overrides)
+
+
+def plain_config(hp: cli_config.HyperParameters) -> dict[str, object]:
+  """Returns the resolved config as plain, JSON-serializable containers.
+
+  Args:
+    hp: Resolved configuration.
+
+  Returns:
+    A deep copy of `hp.config` in which OmegaConf containers (e.g. the
+    top-level `reward_functions` list), at any depth, are plain dicts and
+    lists, and every mapping key is a string.
+
+  Raises:
+    omegaconf.errors.MissingMandatoryValue: If a value is still OmegaConf's
+      mandatory `???`.
+  """
+  return {str(key): _plain(value) for key, value in hp.config.items()}
+
+
+def _plain(value: object) -> object:
+  """Returns a deep copy of `value` with OmegaConf containers made plain."""
+  if isinstance(value, (omegaconf.DictConfig, omegaconf.ListConfig)):
+    value = omegaconf.OmegaConf.to_container(
+        value, resolve=True, throw_on_missing=True
+    )
+  if isinstance(value, Mapping):
+    return {str(key): _plain(item) for key, item in value.items()}
+  if isinstance(value, (list, tuple)):
+    return [_plain(item) for item in value]
+  return value
+
+
+def config_fingerprint(hp: cli_config.HyperParameters) -> str:
+  """Returns the sha256 hex digest of the resolved config's canonical JSON.
+
+  Two processes have the same fingerprint exactly when they resolved the same
+  config, so comparing the nodes' fingerprints shows whether they got the same
+  overrides.
+
+  Args:
+    hp: Resolved configuration.
+
+  Raises:
+    TypeError: If the config holds a value that is not JSON-serializable.
+  """
+  canonical = json.dumps(
+      plain_config(hp), sort_keys=True, separators=(",", ":")
+  )
+  return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _bash_quote(val: object) -> str:

@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+import json
 import logging
+import os
 import pathlib
 import pickle
 import signal
 import sys
-from typing import Literal, TypeAlias, cast
+from typing import Literal, TypeAlias, TypedDict, cast
 
 import jax
 from jax.experimental import mesh_utils
@@ -39,6 +41,50 @@ from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.worker import remote_execution
 
 NodeRole = Literal["trainer", "rollout", "inference"]
+# Every process of a run: the orchestrator and the worker nodes.
+ProcessRole = Literal["orchestrator", "trainer", "rollout", "inference"]
+
+# Marker that starts the resolved-config log line, so the record can be found in
+# mixed logs (e.g. `sed -n 's/.*DIST_RL_RESOLVED_CONFIG //p' trainer.log | jq`).
+RESOLVED_CONFIG_LOG_MARKER = "DIST_RL_RESOLVED_CONFIG"
+# Environment variables recorded with the resolved config: runtime settings
+# only, never credentials. The exact names are the toggles the launchers and
+# nodes set; the prefixes are whole namespaces.
+_LOGGED_ENV_VARS = frozenset({
+    "ALLOW_MULTIPLE_LIBTPU_LOAD",
+    "CKPT_D2H_CONCURRENT_GB",
+    "DISABLE_JAX_CACHE",
+    "DISABLE_MOSAIC_ATTN",
+    "ENABLE_PATHWAYS_PERSISTENCE",
+    "NEW_MODEL_DESIGN",
+    "ROLLOUT_JAX_CACHE_GCS_DIR",
+    "ROLLOUT_TPU_SLICE",
+    "SAVE_JAX_CACHE",
+    "SKIP_JAX_PRECOMPILE",
+    "TFDS_DATA_DIR",
+    "TRAINER_PATHWAYS_LOCAL_INIT",
+    "USE_RAIDEN",
+    "VERIFY_WEIGHTS",
+})
+_LOGGED_ENV_PREFIXES = (
+    "JAX_",
+    "LIBTPU_",
+    "RAIDEN_",
+    "TPU_",
+    "TUNIX_",
+    "VLLM_",
+    "XLA_",
+)
+# Credentials can live under those prefixes (e.g. vLLM's `VLLM_API_KEY`); the
+# suffixes are matched in any case.
+_CREDENTIAL_ENV_SUFFIXES = (
+    "_CREDENTIAL",
+    "_CREDENTIALS",
+    "_KEY",
+    "_PASSWORD",
+    "_SECRET",
+    "_TOKEN",
+)
 
 # Axis names of the 2D device mesh the tunix trainer, the vanilla/in-process
 # vLLM rollout and the reference inference node build from `mesh_axes`.
@@ -56,6 +102,62 @@ def ensure_repo_root_on_path() -> None:
   if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
   logging.info("Repo root inserted into sys.path: %s", repo_root)
+
+
+class ResolvedConfigRecord(TypedDict):
+  """The JSON record `log_resolved_config` logs after the marker.
+
+  Attributes:
+    role: Process that resolved the config.
+    config_sha256: `resolve_config.config_fingerprint` of the config.
+    env: The runtime environment variables `_logged_env` selects.
+    config: `resolve_config.plain_config` of the config.
+  """
+
+  role: ProcessRole
+  config_sha256: str
+  env: dict[str, str]
+  config: dict[str, object]
+
+
+def _logged_env() -> dict[str, str]:
+  """Returns the runtime environment variables to record, without credentials."""
+  return {
+      name: value
+      for name, value in sorted(os.environ.items())
+      if (name in _LOGGED_ENV_VARS or name.startswith(_LOGGED_ENV_PREFIXES))
+      and not name.upper().endswith(_CREDENTIAL_ENV_SUFFIXES)
+  }
+
+
+def log_resolved_config(
+    hp: resolve_config.DistHyperParameters, role: ProcessRole
+) -> str:
+  """Logs the resolved config as one JSON record and returns its fingerprint.
+
+  The record is a single line, `RESOLVED_CONFIG_LOG_MARKER {json}`, holding a
+  `ResolvedConfigRecord`: the process `role`, the `config_sha256` fingerprint
+  (compare it across the processes of a run), the runtime environment
+  variables, and the full resolved `config`.
+
+  Args:
+    hp: Validated distributed RL configuration.
+    role: Process that resolved `hp`.
+
+  Returns:
+    `resolve_config.config_fingerprint(hp)`.
+  """
+  fingerprint = resolve_config.config_fingerprint(hp)
+  record: ResolvedConfigRecord = {
+      "role": role,
+      "config_sha256": fingerprint,
+      "env": _logged_env(),
+      "config": resolve_config.plain_config(hp),
+  }
+  logging.info(
+      "%s %s", RESOLVED_CONFIG_LOG_MARKER, json.dumps(record, sort_keys=True)
+  )
+  return fingerprint
 
 
 # TODO(noghabi): Reuse the agentic tokenizer loading

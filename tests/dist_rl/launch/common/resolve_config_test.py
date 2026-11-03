@@ -16,11 +16,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from unittest import mock
 
 from absl.testing import absltest
+import omegaconf
 from tunix.cli import config as cli_config
 from tunix.dist_rl.launch.common import resolve_config
 
@@ -493,6 +495,57 @@ weight_sync_config:
         "export ACTOR_MAXTEXT_MODEL_NAME=''\n",
         resolve_config.render_bash_exports(resolve_config.initialize([])),
     )
+
+  def test_plain_config_and_fingerprint(self):
+    overrides = ["cluster_config.run_id=run_1", "batch_size=8"]
+    hp = resolve_config.initialize(overrides)
+    plain = resolve_config.plain_config(hp)
+    self.assertEqual(plain["batch_size"], 8)
+    # Top-level lists are OmegaConf `ListConfig`s in `hp.config`.
+    self.assertIs(type(plain["reward_functions"]), list)
+    cluster = plain["cluster_config"]
+    assert isinstance(cluster, dict)  # Narrows the type for pytype.
+    self.assertEqual(cluster["run_id"], "run_1")
+    # A detached copy that serializes to JSON.
+    cluster["run_id"] = "changed"
+    self.assertEqual(hp.config_mapping("cluster_config")["run_id"], "run_1")
+    json.dumps(plain)
+
+    fingerprint = resolve_config.config_fingerprint(hp)
+    self.assertRegex(fingerprint, r"^[0-9a-f]{64}$")
+    # The same config resolved again (e.g. by another node) matches, ...
+    self.assertEqual(
+        resolve_config.config_fingerprint(
+            resolve_config.initialize(list(reversed(overrides)))
+        ),
+        fingerprint,
+    )
+    # ... and any difference changes it, including the run id.
+    for changed in (
+        ["cluster_config.run_id=run_1", "batch_size=4"],
+        ["cluster_config.run_id=run_2", "batch_size=8"],
+    ):
+      with self.subTest(changed=changed):
+        self.assertNotEqual(
+            resolve_config.config_fingerprint(
+                resolve_config.initialize(changed)
+            ),
+            fingerprint,
+        )
+
+  def test_plain_config_normalizes_omegaconf_containers(self):
+    hp = resolve_config.initialize(["cluster_config.run_id=run_1"])
+    # An open section can hold an OmegaConf container with non-string keys.
+    hp.config["env_kwargs"] = omegaconf.OmegaConf.create({1: "a", "b": [2]})
+    self.assertEqual(
+        resolve_config.plain_config(hp)["env_kwargs"], {"1": "a", "b": [2]}
+    )
+    # Mixed key types would otherwise break the sorted canonical JSON.
+    resolve_config.config_fingerprint(hp)
+    # A mandatory value that was never set fails instead of logging "???".
+    hp.config["env_kwargs"] = omegaconf.OmegaConf.create({"m": "???"})
+    with self.assertRaises(omegaconf.MissingMandatoryValue):
+      resolve_config.plain_config(hp)
 
   def test_render_bash_exports_evaluates_in_bash(self):
     hp = resolve_config.initialize([

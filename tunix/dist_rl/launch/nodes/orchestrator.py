@@ -202,14 +202,6 @@ def build_generation_args(
   )
 
 
-def _logged_config(hp: resolve_config.DistHyperParameters) -> dict[str, object]:
-  """Returns the resolved configuration as plain containers for W&B."""
-  return {
-      key: hp.config_mapping(key) if isinstance(value, Mapping) else value
-      for key, value in hp.config.items()
-  }
-
-
 def build_metrics_logging_options(
     hp: resolve_config.DistHyperParameters,
 ) -> metrics_logger_lib.MetricsLoggerOptions:
@@ -234,7 +226,8 @@ def build_metrics_logging_options(
         f" {options!r}."
     )
   return dataclasses.replace(
-      options, backend_kwargs={"wandb": {"config": _logged_config(hp)}}
+      options,
+      backend_kwargs={"wandb": {"config": resolve_config.plain_config(hp)}},
   )
 
 
@@ -619,7 +612,7 @@ def main(
   if hp.config_mapping("cluster_config")["debug"]:
     # Enables debug logging, including full sampler responses.
     logging.getLogger().setLevel(logging.DEBUG)
-  logging.info("Resolved config: %s", hp.config)
+  node_utils.log_resolved_config(hp, "orchestrator")
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
 
   # Everything that can fail on the config runs before waiting for the

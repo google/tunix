@@ -956,7 +956,6 @@ def main(
   if cluster["debug"]:
     logging.getLogger().setLevel(logging.DEBUG)
     os.environ["TUNIX_LOG_ROLLOUT_TEXT"] = "1"
-  logging.info("Resolved config: %s", hp.config)
 
   node_utils.ensure_repo_root_on_path()
 
@@ -966,15 +965,19 @@ def main(
 
   gcs_cache.restore_jax_cache(params=_build_rollout_cache_params(hp))
 
-  sampler_type = str(hp.config["rollout_engine"])
-  if sampler_type == "vanilla":
-    process_context.jax.initialize()
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
   os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
   os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
   os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
   if _maxtext_model_name(hp):
     os.environ.setdefault("NEW_MODEL_DESIGN", "1")
+  # Logged after the defaults above, so the record holds the effective env, and
+  # before the JAX initialization, which can block on the other processes.
+  node_utils.log_resolved_config(hp, "rollout")
+
+  sampler_type = str(hp.config["rollout_engine"])
+  if sampler_type == "vanilla":
+    process_context.jax.initialize()
 
   tokenizer = node_utils.load_hf_tokenizer(hp)
   worker_id = node_utils.worker_id(hp, "rollout", LOCAL_WORKER_ID)
