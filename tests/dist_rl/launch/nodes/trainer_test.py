@@ -694,10 +694,13 @@ class MaxTextOptionsTest(absltest.TestCase):
 
   def test_adamw_options_reject_unmapped_settings(self):
     for argv, error in (
-        ([f"{_OPT}.opt_type=sgd"], "maps only adamw.*MAXTEXT_EXTRA_FLAGS"),
+        (
+            [f"{_OPT}.opt_type=sgd"],
+            "maps only adamw.*maxtext_extra_flags",
+        ),
         (
             [f"{_OPT}.opt_chain_type=clip"],
-            "maps only clip_by_global_norm.*MAXTEXT_EXTRA_FLAGS",
+            "maps only clip_by_global_norm.*maxtext_extra_flags",
         ),
         ([f"{_OPT}.chain_kwargs.max_norm=null"], "needs a max_norm"),
         ([f"{_OPT}.chain_kwargs.max_norm=0"], "must be positive"),

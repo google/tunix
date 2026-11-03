@@ -331,6 +331,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   )
   _validate_maxtext_pairing(hp)
   _validate_maxtext_model_names(hp)
+  _validate_maxtext_extra_flags(hp)
   if grpo["reward_mode"] == "reward_fn" and not hp.config["reward_functions"]:
     raise ValueError(
         "agentic_grpo_config.reward_mode='reward_fn' needs at least one entry"
@@ -496,6 +497,46 @@ def _validate_maxtext_model_names(hp: cli_config.HyperParameters) -> None:
     )
 
 
+def _validate_maxtext_extra_flags(hp: cli_config.HyperParameters) -> None:
+  """Checks `dist_training_config.maxtext_extra_flags` before any job starts.
+
+  The flags are extra MaxText config arguments, which only a MaxText trainer
+  reads (`maxtext_utils.build_maxtext_config`); a Tunix trainer would silently
+  ignore them. A malformed entry would otherwise fail only inside the trainer,
+  after the launcher has submitted the jobs.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    TypeError: If the flags are not a string.
+    ValueError: If the flags are set and `actor_model_config.model_source` is
+      not "maxtext", or an entry is not a `key=value` pair.
+  """
+  flags = hp.config_mapping("dist_training_config")["maxtext_extra_flags"]
+  if not isinstance(flags, str):
+    raise TypeError(
+        "dist_training_config.maxtext_extra_flags must be a string of"
+        f" space-separated key=value pairs, got {flags!r}."
+    )
+  entries = flags.split()
+  if not entries:
+    return
+  actor_source = hp.config_mapping("actor_model_config")["model_source"]
+  if actor_source != "maxtext":
+    raise ValueError(
+        "dist_training_config.maxtext_extra_flags configures a MaxText trainer,"
+        f" but actor_model_config.model_source is {actor_source!r}. Set"
+        " model_config.model_source=maxtext or drop the flags."
+    )
+  malformed = [e for e in entries if "=" not in e or e.startswith("=")]
+  if malformed:
+    raise ValueError(
+        "dist_training_config.maxtext_extra_flags entries must be key=value"
+        f" pairs, got {malformed!r}."
+    )
+
+
 _MODEL_DTYPES = ("bfloat16", "float32")
 _REMAT_CONFIGS = ("none", "block", "decoder")
 _ROLLOUT_ENGINES = ("inprocess_vllm", "vllm", "vanilla")
@@ -629,6 +670,7 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
           "" if ws["raiden_use_ffi"] is None else ws["raiden_use_ffi"]
       ),
       "CKPT_D2H_CONCURRENT_GB": dist_training["ckpt_d2h_concurrent_gb"],
+      "MAXTEXT_EXTRA_FLAGS": dist_training["maxtext_extra_flags"],
       "VLLM_ADDITIONAL_CONFIG_JSON": (
           json.dumps(vllm["kwargs"], sort_keys=True) if vllm["kwargs"] else ""
       ),

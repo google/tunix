@@ -161,6 +161,9 @@ start_trainer() {
   if [[ -n "${CKPT_D2H_CONCURRENT_GB}" ]]; then
     env_prefix+=" CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}"
   fi
+  if [[ -n "${MAXTEXT_EXTRA_FLAGS}" ]]; then
+    env_prefix+=" MAXTEXT_EXTRA_FLAGS=$(printf '%q' "${MAXTEXT_EXTRA_FLAGS}")"
+  fi
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
     if [[ -n "${WEIGHT_SYNC_RAIDEN_USE_FFI}" ]]; then
       if is_true "${WEIGHT_SYNC_RAIDEN_USE_FFI}"; then

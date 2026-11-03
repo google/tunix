@@ -404,7 +404,8 @@ def _maxtext_adamw_options(
   prefix = f"{_RL_TRAINING_KEY}.{_ACTOR_OPTIMIZER_KEY}"
   hint = (
       " For other MaxText optimizer settings, drop this setting and set them in"
-      ' MAXTEXT_EXTRA_FLAGS instead (e.g. MAXTEXT_EXTRA_FLAGS="opt_type=sgd").'
+      " dist_training_config.maxtext_extra_flags instead (e.g."
+      ' dist_training_config.maxtext_extra_flags="opt_type=sgd").'
   )
   opt_type = str(opt["opt_type"])
   if opt_type.lower() != "adamw":

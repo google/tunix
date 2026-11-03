@@ -267,6 +267,13 @@ reward_functions: []
 # `BasePipeline.create_rl_training_config()` builder accepts it unchanged.
 dist_training_config:
   ckpt_d2h_concurrent_gb: 8
+  # Extra MaxText config arguments for a MaxText trainer
+  # (`actor_model_config.model_source: maxtext`), as space-separated
+  # `key=value` pairs, e.g. "remat_policy=custom opt_type=sgd". The trainer
+  # appends them to the MaxText config it builds. Set them here, not in the
+  # `MAXTEXT_EXTRA_FLAGS` or `M_<KEY>` environment variables, which `launch.sh`
+  # rejects.
+  maxtext_extra_flags: ""
   profiler_period: -1
   segment_alignment_boundary: 1
   # Precompile the trainer step before the first rollout batch arrives.

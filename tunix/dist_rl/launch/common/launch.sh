@@ -67,6 +67,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 fail_on_legacy_launcher_env
+fail_on_maxtext_env_overrides
 resolve_config_or_die "${CONFIG_ARGS[@]}"
 
 case "${CLUSTER_TARGET}" in

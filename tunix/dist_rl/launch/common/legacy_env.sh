@@ -27,6 +27,8 @@
 # environment (`_ENV_PASSTHROUGH` in `launch_test.py`) and the ones read by the
 # runtime itself: JAX, libtpu, TFDS, W&B, Python, `enter_kube_context.sh`, and
 # the Tunix libraries (e.g. `VERIFY_WEIGHTS`, `CKPT_D2H_CONCURRENT_GB`).
+# `MAXTEXT_EXTRA_FLAGS` is listed although `maxtext_utils` reads it: the
+# resolver exports it from `dist_training_config.maxtext_extra_flags`.
 
 LEGACY_LAUNCHER_ENV_VARS=(
   ADAM_B1
@@ -84,6 +86,7 @@ LEGACY_LAUNCHER_ENV_VARS=(
   LR_PEAK_VALUE
   MAXTEXT_ATTENTION
   MAXTEXT_CKPT
+  MAXTEXT_EXTRA_FLAGS
   MAXTEXT_MODEL_NAME
   MAXTEXT_OUTPUT_DIR
   MAX_GRAD_NORM
@@ -223,6 +226,29 @@ fail_on_legacy_launcher_env() {
       "section.key=value arguments instead (e.g. MAX_STEPS=2 becomes" \
       "rl_training_config.max_steps=2); see base_dist_config.yaml and the" \
       "example YAML for the keys." >&2
+    exit 1
+  fi
+}
+
+# Exits with status 1, naming every exported `M_<KEY>` variable. MaxText reads
+# each one as a config override (`maxtext/configs/pyconfig.py`), even an empty
+# one, so a local trainer would inherit them from the caller unseen by the
+# resolved config.
+fail_on_maxtext_env_overrides() {
+  local name
+  local -a found=()
+  while IFS= read -r name; do
+    if [[ "${name}" == M_* ]]; then
+      found+=("${name}")
+    fi
+  done < <(compgen -e)
+  if (( ${#found[@]} > 0 )); then
+    echo "Error: MaxText config overrides are set in the environment:" \
+      "${found[*]}." >&2
+    echo "Unset them and pass them as" \
+      "dist_training_config.maxtext_extra_flags=\"key=value ...\" instead" \
+      "(e.g. M_REMAT_POLICY=full becomes" \
+      "dist_training_config.maxtext_extra_flags=remat_policy=full)." >&2
     exit 1
   fi
 }

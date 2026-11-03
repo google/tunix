@@ -498,6 +498,46 @@ weight_sync_config:
         resolve_config.render_bash_exports(resolve_config.initialize([])),
     )
 
+  def test_maxtext_extra_flags_need_a_maxtext_trainer_and_are_exported(self):
+    maxtext = [
+        "model_config.model_source=maxtext",
+        "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+        "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+    ]
+    flags = (
+        "dist_training_config.maxtext_extra_flags="
+        "remat_policy=custom opt_type=sgd"
+    )
+    # A Tunix trainer would silently ignore them.
+    with self.assertRaisesRegex(
+        ValueError, "maxtext_extra_flags configures a MaxText trainer"
+    ):
+      resolve_config.initialize([flags])
+    with self.assertRaisesRegex(TypeError, "must be a string"):
+      resolve_config.initialize(
+          [*maxtext, "dist_training_config.maxtext_extra_flags=3"]
+      )
+    # A malformed entry fails here, before any job is submitted.
+    for malformed in ("remat_policy custom", "=custom"):
+      with self.subTest(malformed=malformed):
+        with self.assertRaisesRegex(ValueError, "must be key=value pairs"):
+          resolve_config.initialize([
+              *maxtext,
+              f"dist_training_config.maxtext_extra_flags={malformed}",
+          ])
+    # The drivers hand them to the trainer as `MAXTEXT_EXTRA_FLAGS`, which
+    # `maxtext_utils.build_maxtext_config` reads.
+    self.assertIn(
+        "export MAXTEXT_EXTRA_FLAGS='remat_policy=custom opt_type=sgd'\n",
+        resolve_config.render_bash_exports(
+            resolve_config.initialize([*maxtext, flags])
+        ),
+    )
+    self.assertIn(
+        "export MAXTEXT_EXTRA_FLAGS=''\n",
+        resolve_config.render_bash_exports(resolve_config.initialize([])),
+    )
+
   def test_plain_config_and_fingerprint(self):
     overrides = ["cluster_config.run_id=run_1", "batch_size=8"]
     hp = resolve_config.initialize(overrides)

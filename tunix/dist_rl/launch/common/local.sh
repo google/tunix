@@ -427,6 +427,7 @@ echo "Launching trainer node on TPU chips ${LOCAL_TRAINER_TPU_CHIPS}..."
   fi
   export VERIFY_WEIGHTS="${WEIGHT_SYNC_VERIFY_WEIGHTS}"
   export CKPT_D2H_CONCURRENT_GB="${CKPT_D2H_CONCURRENT_GB}"
+  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS}"
   export PYTHONUNBUFFERED=1
   print_command "Trainer command" "${TRAINER_CMD[@]}"
   exec "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1

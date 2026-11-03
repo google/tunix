@@ -194,6 +194,60 @@ class LaunchScriptsTest(absltest.TestCase):
     # `local.sh` takes the MaxText model name from the config now
     # (`ACTOR_MAXTEXT_MODEL_NAME`), so the old variable is rejected.
     self.assertIn("MAXTEXT_MODEL_NAME", legacy)
+    # Extra MaxText flags come from `dist_training_config.maxtext_extra_flags`.
+    self.assertIn("MAXTEXT_EXTRA_FLAGS", legacy)
+
+  def test_maxtext_env_overrides_fail_fast(self):
+    args = [
+        "--dry-run",
+        "cluster_config.target=local",
+        "agentic_grpo_config.beta=0.0",
+    ]
+    res = self._run_launch(
+        args, extra_env={"MAXTEXT_EXTRA_FLAGS": "remat_policy=full"}
+    )
+    self.assertNotEqual(res.returncode, 0)
+    self.assertIn(
+        "old example launchers are set: MAXTEXT_EXTRA_FLAGS", res.stderr
+    )
+    res = self._run_launch(args, extra_env={"M_REMAT_POLICY": "full"})
+    self.assertNotEqual(res.returncode, 0)
+    self.assertIn(
+        "MaxText config overrides are set in the environment: M_REMAT_POLICY",
+        res.stderr,
+    )
+    self.assertIn("dist_training_config.maxtext_extra_flags", res.stderr)
+    self.assertNotIn("Trainer command:", res.stdout)
+    # MaxText reads an empty variable too: it would set `remat_policy` to "".
+    res = self._run_launch(args, extra_env={"M_REMAT_POLICY": ""})
+    self.assertNotEqual(res.returncode, 0)
+    self.assertIn(
+        "MaxText config overrides are set in the environment: M_REMAT_POLICY",
+        res.stderr,
+    )
+
+  def test_k8s_trainer_gets_maxtext_extra_flags_from_the_config(self):
+    args = [
+        "--dry-run",
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=test-image",
+        "agentic_grpo_config.beta=0.0",
+        "model_config.model_source=maxtext",
+        "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+        "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+    ]
+    flags = (
+        "dist_training_config.maxtext_extra_flags="
+        "remat_policy=custom opt_type=sgd"
+    )
+    res = self._run_launch([*args, flags])
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    self.assertRegex(
+        res.stdout, r"MAXTEXT_EXTRA_FLAGS=remat_policy=custom\\+ opt_type=sgd"
+    )
+    res = self._run_launch(args)
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    self.assertNotIn("MAXTEXT_EXTRA_FLAGS", res.stdout)
 
   def test_drivers_refuse_direct_invocation(self):
     for script in ("local.sh", "k8s.sh"):
