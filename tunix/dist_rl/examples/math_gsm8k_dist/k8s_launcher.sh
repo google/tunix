@@ -150,8 +150,8 @@ export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-16}
 export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
 
-export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest}
-export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest}
+export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest}
+export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server:latest}
 # Memory *requests* are the scheduling floor and must sum to less than the
 # node's allocatable RAM (~208G on v5e, ~256G on v5p), because podAffinity
 # co-locates the head pod (rm + proxy + user) with the pw-node pod (worker).
