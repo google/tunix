@@ -30,6 +30,7 @@ import numpy as np
 from tunix.models.qwen3 import model as qwen3_stock
 from tunix.zero_tim_kernel import canonical_logsoftmax
 from tunix.zero_tim_kernel import fixed_order_reduce
+from tunix.zero_tim_kernel import padded_matmul
 from tunix.zero_tim_kernel import test_utils
 from tunix.zero_tim_kernel.bench.qwen3 import qwen3_canon_benchmark
 from tunix.zero_tim_kernel.bench.qwen3 import qwen3_model_canon as qwen3_canon
@@ -796,7 +797,10 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
     then score every shard's rows locally, 256 at a time
     (`_map_row_shard_chunks`): the values stay bitwise the library's and the
     logits gradients (token log-probs with an f32 and a bf16 residual, full
-    log-softmax) bitwise the replicated program's. The legacy loop over the
+    log-softmax) match the replicated program's (bitwise on CPU and for token
+    log-probs on TPU; within 1-2 f32 ULPs for full log-softmax on TPU where
+    XLA:TPU fuses `cotangent - prob * sum` across `P('fsdp', 'tp')` slices).
+    The legacy loop over the
     flat `[chunks, 256, V/TP]` view slices the `fsdp`-sharded chunk dimension,
     so SPMD all-gathers that whole operand in every `lax.map` iteration (57 ms
     each at the learner's `M=32768`, `V=151936` on v6e); for shard-aligned
@@ -897,7 +901,15 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
     test_utils.assert_bitwise_equal(ls, ref_ls)
     for name in losses:
       with self.subTest(grad=name):
-        test_utils.assert_bitwise_equal(grads[name], grads_ref[name])
+        if _interpret() or name != 'log_softmax':
+          test_utils.assert_bitwise_equal(grads[name], grads_ref[name])
+        else:
+          np.testing.assert_allclose(
+              np.asarray(grads[name]),
+              np.asarray(grads_ref[name]),
+              rtol=1e-5,
+              atol=1e-5,
+          )
     if m % (256 * fsdp) == 0:
       # Shard-aligned rows (the learner's case) keep the legacy loop's
       # operand sharded, so it re-gathers it; padded rows are resharded first.
@@ -1453,7 +1465,9 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
     if jax.default_backend() != 'tpu' or len(jax.devices()) < 4:
       self.skipTest('TPU-only timing A/B; the bitwise check runs on CPU.')
     if not os.environ.get('ZERO_TIM_TPU_BENCH'):
-      self.skipTest('Set ZERO_TIM_TPU_BENCH=1 to run full-scale TPU benchmarks.')
+      self.skipTest(
+          'Set ZERO_TIM_TPU_BENCH=1 to run full-scale TPU benchmarks.'
+      )
     self.assertEqual(qwen3_canon.FORWARD_TP_SUM_SCATTER_MIN_M, 4096)
     workload = _perf_workload('L=8, B=32, T=256 (224+32)')
     zero_tim = 'canon_all_enabled (Zero-TIM)'
@@ -1573,7 +1587,9 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
     if jax.default_backend() != 'tpu' or len(jax.devices()) < 4:
       self.skipTest('TPU-only timing attribution.')
     if not os.environ.get('ZERO_TIM_TPU_BENCH'):
-      self.skipTest('Set ZERO_TIM_TPU_BENCH=1 to run full-scale TPU benchmarks.')
+      self.skipTest(
+          'Set ZERO_TIM_TPU_BENCH=1 to run full-scale TPU benchmarks.'
+      )
     workload = _perf_workload('L=8, B=32, T=256 (224+32)')
     zero_tim = 'canon_all_enabled (Zero-TIM)'
     loo_configs = tuple(
@@ -1642,7 +1658,9 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
     if jax.default_backend() != 'tpu' or len(jax.devices()) < 4:
       self.skipTest('Requires 4 TPU devices; the mini suite covers CPU.')
     if not os.environ.get('ZERO_TIM_TPU_BENCH'):
-      self.skipTest('Set ZERO_TIM_TPU_BENCH=1 to run full-scale TPU benchmarks.')
+      self.skipTest(
+          'Set ZERO_TIM_TPU_BENCH=1 to run full-scale TPU benchmarks.'
+      )
     rows = qwen3_canon_benchmark.run_benchmark_suite(
         preset='qwen3_0p6b_2l',
         batch_size=4,
@@ -2758,10 +2776,20 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
     self.assertEqual(contract.block_n, 256)
     if aligned:
       self.assertEqual(local_vocab, 38 * 1024)
-      self.assertNotIn(local_vocab, contract.matmul_n_padding)
+      self.assertEqual(
+          padded_matmul.padded_matmul_extents(
+              1024, local_vocab, contract=contract
+          ),
+          (1024, 38 * 1024),
+      )
     else:
       self.assertEqual(local_vocab, 37984)
-      self.assertEqual(contract.matmul_n_padding[local_vocab], 38144)
+      self.assertEqual(
+          padded_matmul.padded_matmul_extents(
+              1024, local_vocab, contract=contract
+          ),
+          (1024, 38144),
+      )
 
   def test_extract_memory_profile_fields(self):
     """`_extract_memory_profile` populates every `MemoryProfile` field."""
@@ -2880,6 +2908,57 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
         f'[grad-check {self._testMethodName}] {len(ref)} leaves, worst'
         f' |ratio-1| = {worst_ratio_dev:.2e}, min cosine = {min_cosine:.6f}',
         flush=True,
+    )
+
+  def test_zz_embedder_encode_replicates_hidden_and_pins_f32_rounding(self):
+    """`CanonEmbedder.encode` keeps `D` unsharded over TP and hard-rounds f32."""
+    learner_shd = qwen3_stock.ShardingConfig.get_default_sharding(
+        is_sampling=False
+    )
+    self.assertEqual(tuple(learner_shd.act_btd), ('fsdp', None, 'tp'))
+    emb_f32 = qwen3_canon.CanonEmbedder(
+        vocab_size=64,
+        embed_dim=128,
+        rngs=nnx.Rngs(params=0),
+        shd_config=learner_shd,
+        dtype=jnp.dtype(jnp.bfloat16),
+        param_dtype=jnp.dtype(jnp.float32),
+    )
+    tokens = jnp.asarray([[1, 2, 3], [4, 5, 6]], dtype=jnp.int32)
+    seen_specs = []
+
+    def spy_shard(arr, spec):
+      seen_specs.append(tuple(spec))
+      return arr
+
+    with mock.patch.object(qwen3_canon, 'shard', side_effect=spy_shard):
+      out_canon = emb_f32.encode(tokens, use_canon=True)
+      out_stock = emb_f32.encode(tokens, use_canon=False)
+
+    self.assertEqual(seen_specs[0], ('fsdp', None, None))
+    self.assertEqual(seen_specs[1], ('fsdp', None, 'tp'))
+    self.assertEqual(out_canon.dtype, jnp.bfloat16)
+    test_utils.assert_bitwise_equal(out_canon, out_stock)
+
+    jaxpr_f32 = jax.make_jaxpr(lambda t: emb_f32.encode(t, use_canon=True))(
+        tokens
+    )
+    self.assertTrue(
+        any(eqn.primitive.name == 'reduce_precision' for eqn in jaxpr_f32.eqns)
+    )
+    emb_bf16 = qwen3_canon.CanonEmbedder(
+        vocab_size=64,
+        embed_dim=128,
+        rngs=nnx.Rngs(params=0),
+        shd_config=learner_shd,
+        dtype=jnp.dtype(jnp.bfloat16),
+        param_dtype=jnp.dtype(jnp.bfloat16),
+    )
+    jaxpr_bf16 = jax.make_jaxpr(lambda t: emb_bf16.encode(t, use_canon=True))(
+        tokens
+    )
+    self.assertFalse(
+        any(eqn.primitive.name == 'reduce_precision' for eqn in jaxpr_bf16.eqns)
     )
 
 

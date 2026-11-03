@@ -20,7 +20,6 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec as P
 import numpy as np
 from tunix.zero_tim_kernel import rpa_canonical
 from tunix.zero_tim_kernel import rpa_diff
@@ -28,12 +27,10 @@ from tunix.zero_tim_kernel import rpa_diff_chunked
 from tunix.zero_tim_kernel import test_utils
 
 _CANONICAL = (128, 512, 128, 512)
-_RANK_PARALLEL_ENV = "CANON_RANK_PARALLEL_BACKWARD"
 _ENVS = (
     rpa_canonical.FORCE_MIXED_ENV,
     rpa_canonical.RPA_VJP2_ENV,
     rpa_canonical.RPA_VJP_ENV,
-    _RANK_PARALLEL_ENV,
 ) + tuple(name for _, name in rpa_canonical.BLOCK_SIZE_ENVS)
 
 
@@ -184,81 +181,7 @@ class DifferentiableRpaTest(_CleanEnvTestCase):
       )
 
 
-class RankParallelLocalAttentionTest(_CleanEnvTestCase):
-
-  def setUp(self):
-    super().setUp()
-    self.mesh = test_utils.cpu_mesh((2, 2), ("data", "model"))
-
-  def _in_manual_map(self, engine_mesh, axis_names=None):
-    observed = []
-
-    def body(x):
-      observed.append(
-          rpa_canonical.rank_parallel_local_attention_context(engine_mesh)
-      )
-      return x
-
-    kwargs = {} if axis_names is None else {"axis_names": axis_names}
-    jax.jit(
-        jax.shard_map(
-            body,
-            mesh=self.mesh,
-            in_specs=P(),
-            out_specs=P(),
-            check_vma=False,
-            **kwargs,
-        )
-    )(jnp.zeros((4,), jnp.float32))
-    return observed[0]
-
-  def test_context(self):
-    self.assertFalse(self._in_manual_map(self.mesh))
-    os.environ[_RANK_PARALLEL_ENV] = "1"
-    self.assertFalse(
-        rpa_canonical.rank_parallel_local_attention_context(self.mesh)
-    )
-    self.assertTrue(self._in_manual_map(self.mesh))
-    self.assertFalse(self._in_manual_map(self.mesh, axis_names={"model"}))
-
-  @parameterized.named_parameters(
-      ("topology_differs", (1, 4), ("data", "model")),
-      ("engine_lacks_data_axis", (4,), ("model",)),
-  )
-  def test_rejects_inconsistent_engine(self, shape, axis_names):
-    os.environ[_RANK_PARALLEL_ENV] = "1"
-    with self.assertRaises(RuntimeError):
-      self._in_manual_map(test_utils.cpu_mesh(shape, axis_names))
-
-  def _operands(
-      self,
-      *,
-      q=(16, 4, 128),
-      k=(16, 2, 128),
-      v=None,
-      cache=(8, 16, 2, 2, 128),
-  ):
-    return tuple(
-        jax.ShapeDtypeStruct(shape, jnp.bfloat16)
-        for shape in (q, k, k if v is None else v, cache)
-    )
-
-  def test_validate_accepts_tp_local_operands(self):
-    # bf16 packs two values per 32-bit word: K and V interleave into
-    # ceil(2 * kv_heads / packing) cache heads.
-    rpa_canonical.validate_rank_parallel_local_attention(
-        *self._operands(), tp_size=4
-    )
-    rpa_canonical.validate_rank_parallel_local_attention(
-        *self._operands(
-            q=(16, 8, 128), k=(16, 1, 128), cache=(8, 16, 1, 2, 128)
-        ),
-        tp_size=8,
-    )
-    q, k, v, _ = self._operands()
-    rpa_canonical.validate_rank_parallel_local_attention(
-        q, k, v, None, tp_size=4
-    )
+class ScratchKvCacheTest(_CleanEnvTestCase):
 
   def test_bind_scratch_kv_cache_helper(self):
     q = jnp.ones((32, 4, 128), dtype=jnp.bfloat16)
@@ -292,24 +215,6 @@ class RankParallelLocalAttentionTest(_CleanEnvTestCase):
     )
     out = bound(q, k, v, kv_lens, cu_q_lens, dist)
     np.testing.assert_array_equal(np.asarray(out), np.asarray(q * 2))
-
-  @parameterized.named_parameters(
-      ("q_rank", dict(q=(16, 512))),
-      ("cache_rank", dict(cache=(8, 16, 2, 256))),
-      ("k_v_differ", dict(v=(16, 1, 128))),
-      ("tokens_differ", dict(k=(8, 2, 128))),
-      ("head_dim_differs", dict(k=(16, 2, 64))),
-      ("gqa_ratio", dict(q=(16, 3, 128))),
-      ("no_kv_heads", dict(k=(16, 0, 128))),
-      ("zero_packing", dict(cache=(8, 16, 2, 0, 128))),
-      ("cache_heads", dict(cache=(8, 16, 4, 2, 128))),
-      ("cache_head_dim", dict(cache=(8, 16, 2, 2, 64))),
-  )
-  def test_validate_rejects(self, overrides):
-    with self.assertRaises(ValueError):
-      rpa_canonical.validate_rank_parallel_local_attention(
-          *self._operands(**overrides), tp_size=4
-      )
 
 
 def _fixed_qk_scores(

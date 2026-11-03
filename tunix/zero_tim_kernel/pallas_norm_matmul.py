@@ -13,16 +13,11 @@
 # limitations under the License.
 """Fused `pallas_rmsnorm` prologue + `pallas_matmul` in one custom call.
 
-Why: the decode layer computes rmsnorm(x) only to feed the very next
-projection matmul, paying a [M, F] bf16 round-trip through HBM plus one
-extra kernel launch per site.  This kernel normalizes the row block once
-into VMEM scratch with the verbatim pallas_rmsnorm arithmetic (f32 promotion,
-BF-blocked left-to-right sumsq, rsqrt(mean + eps), f32 scale by gamma,
-bf16 cast) and then runs the verbatim pallas_matmul tile loop (bf16 tiles, f32
-accumulator, same BK order) against that scratch.  Every per-element
-chain is the one the two-kernel chain executes, so outputs are bitwise
-equal; only the intermediate's residency changes (VMEM scratch instead
-of an HBM tensor).
+Normalizes each `block_m` row block once into VMEM scratch via
+`pallas_rmsnorm.canonical_rmsnorm` (Single Source of Truth) and then runs the
+verbatim `pallas_matmul` tile loop (`bf16` tiles, `f32` accumulator, same
+`block_k` order) against that scratch. Every per-element chain matches the
+two-kernel chain bit for bit while keeping the normalized rows in VMEM.
 """
 
 from __future__ import annotations
@@ -49,7 +44,7 @@ def norm_matmul(
     block_n: int = pallas_matmul.BN,
     block_k: int = pallas_matmul.BK,
 ):
-  """Compute pallas_matmul.matmul(pallas_rmsnorm.rmsnorm(x, gamma), y) as one custom call."""
+  """Computes `pallas_matmul.matmul(pallas_rmsnorm.rmsnorm(x, gamma), y)` as one custom call."""
   if x.ndim != 2 or y.ndim != 2 or gamma.ndim != 1:
     raise ValueError(
         "pallas_norm_matmul expects x[M,K] gamma[K] y[K,N], got "
@@ -81,42 +76,23 @@ def norm_matmul(
         "pallas_norm_matmul shape must divide BM/BN/BK/BF="
         f"{block_m}/{block_n}/{block_k}/{BF}, got {(m, k, n)}"
     )
-  x, gamma, y = pallas_matmul.check_vma_align_operands(x, gamma, y)
 
   def _kernel(x_ref, gamma_ref, y_ref, out_ref, acc_ref, normed_ref):
-    # Design note: the n dimension lives INSIDE the kernel as a static tile
-    # loop, so the row block and its normalized scratch stream from
-    # HBM once per (i, q) instead of once per (i, j, q).  Each
-    # n-tile's dot keeps the exact (block_m, block_k) x (block_k,
-    # block_n) shape and the same sequential q order, so every
-    # output element's accumulation chain is unchanged.
     q = pl.program_id(1)
 
     @pl.when(q == 0)
     def _norm():
-      # Verbatim pallas_rmsnorm: f32 promote, BF-blocked left-to-right sumsq
-      # (python-static expansion), rsqrt(mean + eps), f32 gamma
-      # scale, bf16 cast.  Row-independent, so the 128-row batch
-      # changes nothing per row.
-      xf = x_ref[...].astype(jnp.float32).reshape(block_m, k // BF, BF)
-      sumsq = jnp.zeros((block_m,), dtype=jnp.float32)
-      for b in range(k // BF):
-        block = xf[:, b, :]
-        sumsq = sumsq + jnp.sum(block * block, axis=-1, dtype=jnp.float32)
-      inv = jax.lax.rsqrt(sumsq / jnp.float32(k) + jnp.float32(epsilon))
-      normed_ref[...] = (
-          x_ref[...].astype(jnp.float32)
-          * inv[:, None]
-          * gamma_ref[...].astype(jnp.float32)[None, :]
-      ).astype(jnp.bfloat16)
+      normed_ref[...] = pallas_rmsnorm.canonical_rmsnorm(
+          x_ref[...],
+          gamma_ref[...],
+          epsilon=epsilon,
+          out_dtype=jnp.bfloat16,
+      )
 
     @pl.when(q == 0)
     def _init():
       acc_ref[...] = jnp.zeros_like(acc_ref)
 
-    # Verbatim pallas_matmul tile step on the scratch rows: bf16 tiles, f32
-    # accumulator, the same sequential BK order; n tiles unrolled
-    # statically with the identical per-tile dot shape.
     xk = normed_ref[:, pl.ds(q * block_k, block_k)]
     for j in range(n // block_n):
       lo = j * block_n
@@ -127,24 +103,13 @@ def norm_matmul(
           preferred_element_type=jnp.float32,
       )
 
-    # The output block is resident across the q loop (its block index does
-    # not depend on q); the single store of the final accumulator is the
-    # same value the branch's per-step store left behind, minus the
-    # k/block_k - 1 redundant f32 -> bf16 casts (deviation from the branch:
-    # store placement only, no numerics).
     @pl.when(q == pl.num_programs(1) - 1)
     def _store():
       out_ref[...] = acc_ref[...].astype(out_ref.dtype)
 
   return pl.pallas_call(
       _kernel,
-      out_shape=pallas_matmul.make_out_shape(
-          (m, n),
-          jnp.bfloat16,
-          manual_axis_type=pallas_matmul.check_vma_output_manual_axis_type(
-              x, gamma, y
-          ),
-      ),
+      out_shape=jax.ShapeDtypeStruct((m, n), jnp.bfloat16),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=0,
           in_specs=[
@@ -160,8 +125,8 @@ def norm_matmul(
           ],
       ),
       compiler_params=pltpu.CompilerParams(
-          # q must run in grid order: the row block's normalize happens
-          # at its first visit and later steps read the scratch.
+          # `q` (`k // block_k`) must be `"arbitrary"` (sequential): `q == 0`
+          # populates `normed_ref` and zeros `acc_ref` read by all `q > 0`.
           dimension_semantics=("parallel", "arbitrary"),
           allow_input_fusion=(False, False, False),
           shape_invariant_numerics=shape_invariant_numerics,

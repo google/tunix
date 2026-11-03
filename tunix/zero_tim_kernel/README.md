@@ -32,10 +32,10 @@ that exact forward primal.
 *   **`R1` — Tensor-Parallel (TP) reduction order (`fixed_order_reduce`)**:
     `bfloat16` addition is non-associative. Stock XLA ring `all-reduce` (`psum`)
     sums TP partials in a rank- and row-position-dependent order across
-    contract-parallel projections (`o_proj`, `down_proj`) and vocab-sharded
-    embedding lookups (`embedder.encode`). Fix: enforce a single canonical
-    association order `((p0 + p1) + p2) + p3` on every rank, for every row, in
-    every program (`RING`, `GATHER`, and `SCATTER` modes are bitwise identical).
+    contract-parallel projections (`o_proj`, `down_proj`). Fix: enforce a single
+    canonical association order `((p0 + p1) + p2) + p3` on every rank, for every
+    row, in every program (`RING`, `GATHER`, and `SCATTER` modes are bitwise
+    identical).
 *   **`R2` — Attention block sizes and batch distribution (`rpa_canonical`, `canon_attention`)**:
     Stock Ragged Paged Attention (RPA v3) selects tuned block sizes by shape and
     clamps them by decode concurrency, while stock model code switches between
@@ -78,7 +78,7 @@ implementation and unit tests.
 
 | Stage | Op ID | Operation | Drift Source in Stock Stack | `tunix/zero_tim_kernel` Implementation | Unit Test Coverage | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Stem** | **Op H1** | `embedder.encode` (Vocab-Parallel Lookup) | GSPMD `psum` order & `act_btd` TP sharding mismatch (`R1`, `R3`) | `fixed_order_reduce.py` (`fixed_order_embed_*`), `CanonEmbedder.encode` | `fixed_order_reduce_test.py`, `qwen3_model_canon_test.py` | Complete |
+| **Stem** | **Op H1** | `embedder.encode` (Vocab-Parallel Lookup) | `act_btd` TP sharding mismatch (`R3`) | `CanonEmbedder.encode` (`input_embedding[(x_ids,)]` + replicated `act_btd`) | `qwen3_model_canon_test.py` | Complete |
 | **Layer** | **Op 0** | Remat / Checkpoint Boundaries (`NONE`/`BLOCK`/`DECODER`) | XLA excess-precision `f32 -> bf16` elision across checkpoint boundaries (`R3`) | `fixed_order_reduce.py` (`hard_round`, `hard_upcast`), `CanonDecoderLayer` | `fixed_order_reduce_test.py`, `qwen3_model_canon_test.py` | Complete |
 | **Layer** | **Op 1** | `input_layernorm` (Pre-Attention RMSNorm) | Feature-axis `mean(x^2)` tree order & `div`/`rsqrt` fusion vary with `M` | `pallas_rmsnorm.py`, `pallas_norm_matmul.py`, `canonical_vjp.py` | `pallas_rmsnorm_test.py`, `pallas_norm_matmul_test.py`, `canonical_vjp_test.py` | Complete |
 | **Layer** | **Op 2** | `q_proj`, `k_proj`, `v_proj` (Column-Parallel Matmul) | MXU tiling, K-split, and operand order vary with `M = B * T` | `pallas_matmul.py`, `padded_matmul.py`, `model_contracts.py`, `canonical_vjp.py` | `pallas_matmul_test.py`, `padded_matmul_test.py`, `model_contracts_test.py` | Complete (TP) |
@@ -89,7 +89,7 @@ implementation and unit tests.
 | **Layer** | **Op 7** | `o_proj` (Row-Parallel Matmul + TP All-Reduce) | Local contraction varies with `M`; ring `all-reduce` is non-associative (`R1`) | `padded_matmul.py` + `fixed_order_reduce.py` (`RING` / `GATHER` / `SCATTER`) | `fixed_order_reduce_test.py`, `padded_matmul_test.py`, `qwen3_model_canon_test.py` | Complete |
 | **Layer** | **Op 8** | Pre-MLP Residual Add (`x + attn_out`) | Upstream `f32` accumulator fused into residual add in `Fwd` vs `Fwd+Bwd` (`R3`) | `fixed_order_reduce.py` (`hard_upcast`, `hard_round`), `_residual_add` | `fixed_order_reduce_test.py`, `qwen3_model_canon_test.py` | Complete |
 | **Layer** | **Op 9** | `post_attention_layernorm` (Post-Attention RMSNorm) | Same as **Op 1** (feature-axis reduction & fusion drift) | `pallas_rmsnorm.py`, `pallas_norm_matmul.py`, `canonical_vjp.py` | `pallas_rmsnorm_test.py`, `pallas_norm_matmul_test.py`, `canonical_vjp_test.py` | Complete |
-| **Layer** | **Op 10A** | Dense `MLP`: `gate_proj`/`up_proj` $\to$ `SwiGLU` $\to$ `down_proj` | Matmul `M`-dependent tiling, `silu(gate) * up` epilogue/prologue fusion, TP sum (`R1`) | `padded_matmul.py`, `pallas_swiglu.py`, `padded_swiglu.py`, `fixed_order_reduce.py` | `pallas_swiglu_test.py`, `padded_swiglu_test.py`, `padded_matmul_test.py`, `fixed_order_reduce_test.py` | Complete (TP) |
+| **Layer** | **Op 10A** | Dense `MLP`: `gate_proj`/`up_proj` $\to$ `SwiGLU` $\to$ `down_proj` | Matmul `M`-dependent tiling, `silu(gate) * up` epilogue/prologue fusion, TP sum (`R1`) | `padded_matmul.py`, `pallas_swiglu.py`, `fixed_order_reduce.py` | `pallas_swiglu_test.py`, `padded_matmul_test.py`, `fixed_order_reduce_test.py` | Complete (TP) |
 | **Layer** | **Op 10B** | `MoELayer` (Router `top_k` + `megablox.gmm`) | Discrete router `top_k` flips & batch-dependent `gmm` group tiling | Falls back to stock `MoELayer` （dense layers only) | N/A | Follow-up |
 | **Layer** | **Op 11** | Post-MLP Residual Add (`residual + mlp_out`) | Same as **Op 8** (`f32` fusion across layer boundary, `R3`) | `fixed_order_reduce.py` (`hard_upcast`, `hard_round`), `_residual_add` | `fixed_order_reduce_test.py`, `qwen3_model_canon_test.py` | Complete |
 | **Tail** | **Op T1** | `final_norm` (Final Layer RMSNorm) | Fusion drift between final residual add (**Op 11**) and LM head (**Op T2**) | `pallas_rmsnorm.py`, `CanonRMSNorm` | `pallas_rmsnorm_test.py`, `qwen3_model_canon_test.py` | Complete |
@@ -104,22 +104,18 @@ implementation and unit tests.
 ### 1. Model Stem
 
 #### Op H1 — Vocab-Parallel Embedding Lookup (`embedder.encode`)
-*   **Why Stock Drifts**: When the embedding table `emb_vd` is sharded along the
-    vocabulary axis across TP ranks (`P('tp', fsdp)`), GSPMD lowers
-    `input_embedding[(x,)]` to a local lookup with out-of-range tokens masked to
-    zero followed by a cross-TP `all-reduce` (`psum`) or `reduce-scatter`. Under
-    mixed precision (`param_dtype=float32`) or varying `act_btd` sharding specs
-    (`None if is_sampling else 'tp'`), XLA reorders the `f32 -> bf16` cast and
-    the cross-TP reduction between sampler and learner.
-*   **Implementation (`fixed_order_reduce.py`, `CanonEmbedder.encode`)**:
-    *   `fixed_order_reduce.fixed_order_embed_1d` and `fixed_order_embed_2d`
-        cast local shard weights to `bf16` prior to lookup, mask out-of-range
-        token IDs to exact `+0.0`, and reduce across TP in ascending rank order
-        `((p0 + p1) + p2) + p3` with `hard_bf16_add`.
+
+*   **Why Stock Drifts**: Under mixed precision (`param_dtype=float32`) or
+    varying `act_btd` sharding specs (`None if is_sampling else 'tp'`), XLA
+    reorders the `f32 -> bf16` cast and splits the residual stream across TP.
+*   **Implementation (`CanonEmbedder.encode`)**:
+    *   Because each token ID belongs to at most one TP vocabulary shard (other
+        shards contribute exact `+0.0`, and `+0.0 + x == x` in IEEE-754), native
+        GSPMD `input_embedding[(x_ids,)]` is already reduction-order invariant.
     *   The residual stream `act_btd` is kept replicated along the hidden
         dimension `D` (`P(None, None, None)`) in both sampling and training so
         downstream layer norms never split their feature reduction across TP.
-*   **Tests**: `fixed_order_reduce_test.py`, `qwen3_model_canon_test.py`.
+*   **Tests**: `qwen3_model_canon_test.py`.
 
 ---
 
@@ -172,9 +168,9 @@ implementation and unit tests.
         accumulated left to right in `f32` with a single `bf16` store at the
         final `K` step (`BM = 128, BN = 128` are bitwise neutral).
     *   `model_contracts.py` & `padded_matmul.matmul`: enforces per-model,
-        per-TP tile and zero-padding contracts (failing closed on unadmitted
-        widths) and zero-pads `M` to multiples of 128 so `T=1` decode and `T=L`
-        prefill run the exact same MXU instruction stream.
+        per-TP tile contracts (`round_up(K, block_k)` and
+        `round_up(N, block_n)`) and zero-pads `M` to multiples of 128 so `T=1`
+        decode and `T=L` prefill run the exact same MXU instruction stream.
     *   `canonical_vjp.matmul`: binds the Pallas forward kernel as the primal
         with either a single-dot or `K`-blocked custom VJP backward pass.
 *   **Tests**: `pallas_matmul_test.py`, `padded_matmul_test.py`,
@@ -291,18 +287,18 @@ implementation and unit tests.
     *   **Why Stock Drifts**: XLA fuses `silu(gate) * up` into either the
         `gate`/`up` matmul epilogue or the `down_proj` prologue differently
         between `Fwd` and `Fwd+Bwd`.
-    *   **Implementation (`pallas_swiglu.py`, `padded_swiglu.py`, `canonical_vjp.py`)**:
+    *   **Implementation (`pallas_swiglu.py`, `canonical_vjp.py`)**:
         Standalone Pallas kernel with `allow_input_fusion=(False, False)` and
-        fixed `(BM = 8, BN = 128)` tiles that computes
+        fixed `(BM = 128, BF = 256)` tiles (auto-padding unaligned `(M, F)` to
+        tile multiples) that computes
         `(gate_f32 * jax.nn.sigmoid(gate_f32)) * up_f32` in `f32` and stores
-        `bf16` once, wrapped with contract padding (`padded_swiglu.swiglu`) and
-        a custom VJP (`canonical_vjp.swiglu`).
+        `bf16` once, wrapped with a custom VJP (`canonical_vjp.swiglu`).
 *   **Op 10A.3 (`down_proj`)**:
     *   Uses `padded_matmul.matmul` (zero-padding the contracted `F / TP` axis
         to a multiple of `BK = 256` when needed) followed by
         `fixed_order_reduce` (`RING` / `GATHER` / `SCATTER`) across TP.
-*   **Tests**: `pallas_swiglu_test.py`, `padded_swiglu_test.py`,
-    `padded_matmul_test.py`, `fixed_order_reduce_test.py`.
+*   **Tests**: `pallas_swiglu_test.py`, `padded_matmul_test.py`,
+    `fixed_order_reduce_test.py`.
 
 #### Op 10B — Mixture-of-Experts (`MoELayer`)
 *   **Scope**: This package targets dense Transformer layers; when
@@ -403,27 +399,27 @@ implementation and unit tests.
     sum-of-squares Pallas RMSNorm and its bit-exact pure-JAX counterpart
     `canonical_rmsnorm`.
 *   `pallas_swiglu.py`: Single-kernel Pallas `silu(gate) * up` with input fusion
-    disabled and a single `bf16` output store.
+    disabled, auto-padding of unaligned `(M, F)` to `(BM = 128, BF = 256)`, and
+    a single `bf16` output store.
 *   `pallas_norm_matmul.py`: Fused `pallas_rmsnorm` VMEM prologue +
     `pallas_matmul` in one custom call, bitwise equal to the two-kernel chain.
-*   `model_contracts.py`: Per-model and per-TP tile and zero-padding contracts
-    (`qwen0p6b`, `qwen1p7b`, `qwen4b`, `qwen8b`, `qwen32b`; `TP = 4` and
-    `TP = 8`). Fails closed on unadmitted widths.
-*   `padded_matmul.py`: Row zero-padding (`M` to 128) and contract-governed `K`/`N`
+*   `model_contracts.py`: Per-model and per-TP tile contracts (`qwen1p7b`,
+    `qwen4b`, `qwen8b`, `qwen32b` across `TP = 1, 2, 4, 8`).
+*   `padded_matmul.py`: Row zero-padding (`M` to `block_m`) and `K`/`N`
     zero-padding wrapper around `pallas_matmul`.
-*   `padded_swiglu.py`: Contract-governed padding wrapper around `pallas_swiglu`.
 *   `canonical_vjp.py`: `jax.custom_vjp` wrappers binding `pallas_matmul`,
-    `pallas_rmsnorm`, and `pallas_swiglu` as forward primals with selectable
-    `plain` or `K`-blocked backward passes.
-*   `fixed_order_reduce.py`: Fixed rank-order (`((p0 + p1) + p2) + p3`) TP
-    collectives (`RING`, `GATHER`, `SCATTER`), explicit `bf16` rounding helpers
-    (`hard_bf16_add`, `hard_round`, `hard_upcast`, `plain_add`), fixed-order
-    vocab-sharded embedding lookups (`fixed_order_embed_1d`,
-    `fixed_order_embed_2d`), and rank-parallel backward helpers.
+    `pallas_rmsnorm`, `pallas_swiglu`, and `pallas_norm_matmul` as forward
+    primals with selectable `plain` or `K`-blocked backward passes, plus
+    copy-free residual fused projection coats (`fused_matmul`,
+    `fused_norm_matmul`).
+*   `fixed_order_reduce.py`: Axis-agnostic fixed rank-order
+    (`((p0 + p1) + p2) + p3`) TP collectives (`RING`, `GATHER`, `SCATTER`) and
+    explicit `bf16` rounding helpers (`hard_bf16_add`, `hard_round`,
+    `hard_upcast`, `plain_add`).
 *   `fixed_lm_head.py`: Fixed `[FIXED_M = 256, K] @ [K, round_up(V/TP, 256)]`
-    LM-head Pallas program with request zero-padding (`M <= 256`), learner
-    chunk mapping (`M > 256`), and ordered `lax.scan` weight-gradient
-    accumulation.
+    local LM-head Pallas program (`fixed_m_lm_head_local`) with request
+    zero-padding (`M <= 256`), learner chunk mapping (`M > 256`), and ordered
+    `lax.scan` weight-gradient accumulation.
 *   `canonical_logsoftmax.py`: Fixed three-stage Pallas `log_softmax` and
     `token_logprobs` / `gathered_logprobs` (`VOCAB_TILE = 1024`) with 8-aligned
     row buckets up to `PRODUCTION_M = 256`.
@@ -452,27 +448,22 @@ implementation and unit tests.
 
 ## Canonical Environment Switches
 
-*   **`R1` (TP reduction & embedding)**: `CANON_FIXED_AR=1`,
-    `CANON_FIXED_AR_EMBED=1`, optional `CANON_FIXED_AR_GATHER=1` or
-    `CANON_FIXED_AR_SCATTER=1`.
-*   **`R2` (RPA block sizes & bucket)**: `CANON_RPA_D=128,512,128,512`,
-    `CANON_RPA_P=128,512,128,512`, `CANON_RPA_M=128,512,128,512`,
-    `MIN_TOKEN_BUCKET=256`.
+*   **`R1` (TP reduction mode)**: `CANON_FIXED_AR_GATHER=1` (and optionally
+    `CANON_FIXED_AR_SCATTER=1` alongside `CANON_FIXED_AR_GATHER=1`; defaults to
+    `RING` in `fixed_order_reduce`; `Qwen3Canon` selects `GATHER` for
+    `M < 4096` and `SCATTER` for `M >= 4096`).
+*   **`R2` (RPA block sizes & forced mixed distribution)**:
+    `CANON_RPA_D=128,512,128,512`, `CANON_RPA_P=128,512,128,512`,
+    `CANON_RPA_M=128,512,128,512`, `CANON_FORCE_MIXED=1`.
 *   **`R3` (Rounding boundaries)**: Pinned in code by default (`hard_bf16_add`
-    in `fixed_order_reduce` and `HARD_ROUNDING=ALL` in `Qwen3Canon`);
+    in `fixed_order_reduce` and `ZERO_TIM_HARD_ROUNDING` in `Qwen3Canon`);
     `XLA_FLAGS=--xla_allow_excess_precision=false` is optional defense in depth.
-*   **`R4` (Differentiable RPA)**: `CANON_RPA_VJP2=1`, `CANON_VJP2_MAX_SEQS=1`
-    (or batch size `B` when unrolling multi-sequence ragged training batches).
-*   **`R5` (Log-softmax)**: `CANON_LOGPROB_M=256`, `CANON_LOGPROB_M_BUCKET=1`,
-    `CANON_PROMPT_PROCESSED_LOGPROBS=1`, `CANON_PALLAS_LOGSOFTMAX=1`.
-*   **Projections, Norms & LM Head**: `CANON_PALLAS_ALL_PROJ=1`,
-    `CANON_PALLAS_ALL_RMSNORM=1`, `CANON_PALLAS_SWIGLU=1`,
-    `CANON_PALLAS_MPAD=1`, `CANON_PALLAS_SWIGLU_MPAD=1`,
-    `CANON_PALLAS_CANONICAL_VJP=1`, `CANON_MATMUL_VJP_PLAIN=1`,
-    `CANON_FIXED_LM_HEAD=1`.
-*   **Rank-Parallel Backward & Device Order**: `CANON_RANK_PARALLEL_BACKWARD=1`,
-    `CANON_RANK_PARALLEL_BACKWARD_CHECK_VMA=1`,
-    `CANON_CHECK_VMA_RANK_PARALLEL_ONLY=1`, `CANON_EXPECT_MODEL_MESH_IDS`.
+*   **`R4` (Differentiable RPA)**: `CANON_RPA_VJP2=1`, `CANON_RPA_VJP=1`,
+    `CANON_VJP2_MAX_SEQS=1` (or batch size `B` when unrolling multi-sequence
+    ragged training batches).
+*   **Projections & VJPs**: `CANON_PALLAS_INPUT_FUSION=1`,
+    `CANON_MATMUL_VJP_PLAIN=1` (default on; `0` selects the `K`-blocked replica
+    pullback).
 
 ---
 
@@ -492,16 +483,14 @@ contract = model_contracts.get_contract("qwen8b")  # Qwen3-8B at TP=4.
 forward = lambda a, b: padded_matmul.matmul(a, b, contract=contract)
 y = canonical_vjp.matmul(x, w, forward=forward, contract=contract)
 
-# Contract-parallel projection (Op 7 o_proj / Op 10A.3 down_proj) completed in a fixed order.
-out = fixed_order_reduce.contract_parallel_projection(
-    h, w_down, equation="mn,np->mp", mesh=mesh, tp_axis="model",
-    local_matmul=forward)
+# Contract-parallel TP sum (Op 7 o_proj / Op 10A.3 down_proj) inside shard_map.
+out_local = fixed_order_reduce.fixed_order_tp_sum(
+    forward(h_local, w_down_local), axis_name="tp", count=tp_size)
 
 # LM head (Op T2) and gathered token log-probs (Op T3) through one fixed program.
-logits = fixed_lm_head.fixed_lm_head(
-    hidden, lm_head, mesh=mesh, tp_axis="model",
-    local_matmul=fixed_lm_head.canonical_local_matmul(contract),
-    endpoint="untied_lm_head")
+logits_local = fixed_lm_head.fixed_m_lm_head_local(
+    hidden, lm_head_local,
+    local_matmul=fixed_lm_head.canonical_local_matmul(contract))
 logprobs = canonical_logsoftmax.gathered_logprobs(logits, token_ids)
 ```
 

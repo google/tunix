@@ -11,12 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for pallas_swiglu (CPU, Pallas interpret mode)."""
+"""Tests for `pallas_swiglu` (CPU, Pallas interpret mode)."""
+
+import os
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax.numpy as jnp
 import numpy as np
+from tunix.zero_tim_kernel import pallas_matmul
 from tunix.zero_tim_kernel import pallas_swiglu
 from tunix.zero_tim_kernel import test_utils
 
@@ -50,11 +54,32 @@ class SwigluTest(parameterized.TestCase):
       )
       test_utils.assert_bitwise_equal(full[start : start + 128], part)
 
+  @parameterized.parameters(1, 8, 64, 127)
+  def test_decode_rows_equal_the_128_row_program(self, m):
+    rng = np.random.default_rng(m)
+    gate = test_utils.random_bf16(rng, (128, 512), scale=3.0)
+    up = test_utils.random_bf16(rng, (128, 512))
+    full = pallas_swiglu.swiglu(gate, up, interpret=True)
+    part = pallas_swiglu.swiglu(gate[:m], up[:m], interpret=True)
+    test_utils.assert_bitwise_equal(part, full[:m])
+
+  def test_feature_padding_is_sliced_off(self):
+    rng = np.random.default_rng(1)
+    gate = test_utils.random_bf16(rng, (16, 1216), scale=3.0)
+    up = test_utils.random_bf16(rng, (16, 1216))
+    out = pallas_swiglu.swiglu(gate, up, interpret=True)
+    self.assertEqual(out.shape, (16, 1216))
+    expected = pallas_swiglu.canonical_swiglu(gate, up)
+    test_utils.assert_bitwise_equal(out, expected)
+    with mock.patch.dict(os.environ, {pallas_matmul.INPUT_FUSION_ENV: "1"}):
+      fused = pallas_swiglu.swiglu(gate, up, interpret=True)
+    test_utils.assert_bitwise_equal(fused, out)
+
   @parameterized.named_parameters(
       ("shape_mismatch", (128, 256), (128, 512)),
       ("rank", (128, 256, 1), (128, 256, 1)),
-      ("m_not_tiled", (64, 256), (64, 256)),
-      ("f_not_tiled", (128, 128), (128, 128)),
+      ("empty_m", (0, 256), (0, 256)),
+      ("empty_f", (128, 0), (128, 0)),
   )
   def test_rejects(self, gate_shape, up_shape):
     with self.assertRaises(ValueError):

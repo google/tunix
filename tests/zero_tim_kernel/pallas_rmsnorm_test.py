@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for pallas_rmsnorm (CPU, Pallas interpret mode)."""
+"""Tests for `pallas_rmsnorm` (CPU, Pallas interpret mode)."""
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -49,7 +49,7 @@ class RowTileTest(parameterized.TestCase):
       ("x_rank", (8, 128, 1), (128,)),
       ("weight_rank", (8, 128), (1, 128)),
       ("feature_mismatch", (8, 128), (256,)),
-      ("m_not_tiled", (12, 128), (128,)),
+      ("m_empty", (0, 128), (128,)),
       ("f_not_tiled", (8, 200), (200,)),
   )
   def test_validate_shape_rejects(self, x_shape, weight_shape):
@@ -59,10 +59,16 @@ class RowTileTest(parameterized.TestCase):
 
 class RmsnormTest(parameterized.TestCase):
 
-  @parameterized.parameters((8, 128), (16, 384), (256, 256), (512, 1024))
+  @parameterized.parameters(
+      (1, 128),
+      (7, 256),
+      (8, 128),
+      (12, 256),
+      (16, 384),
+      (256, 256),
+      (512, 1024),
+  )
   def test_kernel_matches_declared_semantic_on_exact_rows(self, m, f):
-    # Exact rows make the sum of squares order-free, so the Pallas program
-    # and the declared canonical semantic must agree bit for bit on CPU.
     rng = np.random.default_rng(m * f)
     x = test_utils.exact_bf16(rng, (m, f))
     weight = test_utils.random_bf16(rng, (f,))
@@ -83,18 +89,13 @@ class RmsnormTest(parameterized.TestCase):
         atol=1e-2,
     )
 
-  @parameterized.parameters((256, 512), (8, 16))
+  @parameterized.parameters((256, 512), (8, 16), (3, 19))
   def test_rows_do_not_depend_on_batch_size(self, small, large):
-    # Both batch sizes use the same row tile, so each row is bitwise equal.
     rng = np.random.default_rng(2)
     x = test_utils.random_bf16(rng, (large, 1024), scale=2.0)
     weight = test_utils.random_bf16(rng, (1024,))
-    self.assertEqual(
-        pallas_rmsnorm.row_tile(small, 1024),
-        pallas_rmsnorm.row_tile(large, 1024),
-    )
     full = pallas_rmsnorm.rmsnorm(x, weight, epsilon=_EPS, interpret=True)
-    for start in range(0, large, small):
+    for start in range(0, large - small + 1, max(small, pallas_rmsnorm.BM)):
       part = pallas_rmsnorm.rmsnorm(
           x[start : start + small], weight, epsilon=_EPS, interpret=True
       )

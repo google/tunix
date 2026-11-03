@@ -11,53 +11,42 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Model-pinned shape padding around the unchanged fixed-tile matmul.
+"""Automatic zero-padding wrapper around fixed-tile `pallas_matmul.matmul`.
 
-Padding is what makes the kernel usable for every M: M is zero-padded up to a
-multiple of 128 (decode M=1..8 runs the same 128-row program as a 128-row
-prefill slice, and a padded row can never change a real row because rows are
-independent), and K/N are zero-padded only to the widths the model contract
-admits.  Zero K-padding adds exact ``+0.0`` terms at the end of the f32
-accumulation and N-padding adds columns that are sliced off, so every real
-output element keeps its contraction order bit for bit.
+Zero-pads `M` to a multiple of `BM = 128`, `K` to a multiple of `block_k`, and
+`N` to a multiple of `block_n` (or to a 256-aligned wide-`N` tile when within
+10% padding overhead), runs `pallas_matmul.matmul`, and slices `[:M, :N]`.
+
+Why zero-padding preserves Zero-TIM bitwise invariance:
+- `M` rows are independent; decode (`M=1..8`) runs the exact same 128-row
+  program as a 128-row prefill slice.
+- Zero `K`-padding appends exact `+0.0` blocks at the end of the `f32`
+  contraction loop (`acc + 0.0 == acc` under IEEE-754 RNE).
+- Zero `N`-padding appends output columns that are sliced off.
 """
 
 from __future__ import annotations
 
-from absl import logging
 import jax.numpy as jnp
 from tunix.zero_tim_kernel import model_contracts
 from tunix.zero_tim_kernel import pallas_matmul
 
 BM = pallas_matmul.BM
-
-# A TP-local width that no policy candidate
-# divides (Qwen3-4B MLP: 2432 at TP4, 1216 at TP8) used to run at the
-# contract's 128-wide output tile.  When the model contract already admits a
-# zero-padded width for it, that padded width can carry a wide tile: padding
-# columns are sliced off and every real column's contraction order is
-# unchanged, so the result is bitwise identical (gate/up
-# 98.1 -> 37.7 us at TP4, 57.1 -> 28.2 us at TP8, M=256).  Only contract
-# tiles trigger this; explicit tiles are honored as written.
-# TODO(tunix-dev): Make wide-N candidate tiles and max padding ratio
-# configurable via ModelContract rather than hardcoding Qwen3-4B widths.
 WIDE_N_CANDIDATES = (1280, 640, 512)
 WIDE_N_MAX_PADDING_NUM, WIDE_N_MAX_PADDING_DEN = 11, 10  # np <= 1.1 * n
-_WIDE_N_RECEIPTS: set[tuple[int, int, int]] = set()
 
 
-def wide_n_tiles(m: int, k: int, n: int, tiles, mapping):
-  """Return (np, block_n) when a contract-padded width admits a wide tile, else None."""
-  del m, k  # Only the output width decides; kept for signature parity.
-  block_m, block_n, block_k = tiles
-  if (block_m, block_n, block_k) not in pallas_matmul.CONTRACT_TILES:
+def wide_n_tiles(
+    m: int, k: int, n: int, tiles: tuple[int, int, int]
+) -> tuple[int, int] | None:
+  """Returns `(np, block_n)` when 256-aligning `n` admits a wide output tile."""
+  del m, k
+  if tiles not in pallas_matmul.CONTRACT_TILES:
     return None
   if any(n % candidate == 0 for candidate in pallas_matmul.BLOCK_N_CANDIDATES):
     return None
-  if not isinstance(mapping, dict):
-    return None
-  padded = mapping.get(int(n))
-  if not isinstance(padded, int) or isinstance(padded, bool) or padded <= n:
+  padded = model_contracts.round_up(int(n), model_contracts.SWIGLU_FEATURE_TILE)
+  if padded <= n:
     return None
   if padded * WIDE_N_MAX_PADDING_DEN > n * WIDE_N_MAX_PADDING_NUM:
     return None
@@ -67,55 +56,25 @@ def wide_n_tiles(m: int, k: int, n: int, tiles, mapping):
   return None
 
 
-def _padded_extent(width: int, tile: int, mapping, *, axis: str) -> int:
-  """Returns `width` or its contract-admitted zero-padded multiple of `tile`."""
-  width = int(width)
-  tile = int(tile)
-  if width <= 0 or tile <= 0:
-    raise ValueError(
-        f"padded_matmul requires positive {axis}/tile, got {width}/{tile}"
-    )
-  if width % tile == 0:
-    return width
-  if not isinstance(mapping, dict):
-    raise ValueError(
-        f"padded_matmul model {axis} padding contract must be a dict "
-    )
-  padded = mapping.get(width)
-  if (
-      not isinstance(padded, int)
-      or isinstance(padded, bool)
-      or padded <= width
-      or padded % tile
-  ):
-    raise ValueError(
-        f"padded_matmul {axis}={width} is not admitted by the model-pinned "
-        f"tile={tile} padding contract: {mapping!r}"
-    )
-  return padded
-
-
 def padded_matmul_extents(
     k: int,
     n: int,
     *,
-    contract: model_contracts.ModelContract,
+    contract: model_contracts.ModelContract | None = None,
     block_k: int | None = None,
     block_n: int | None = None,
 ) -> tuple[int, int]:
-  """Returns admitted TP-local K/N extents for the given model contract."""
-  kp = _padded_extent(
-      k,
-      contract.block_k if block_k is None else block_k,
-      contract.matmul_k_padding,
-      axis="K",
-  )
-  np = _padded_extent(
-      n,
-      contract.block_n if block_n is None else block_n,
-      contract.matmul_n_padding,
-      axis="N",
-  )
+  """Returns zero-padded `(kp, np)` extents executed by `padded_matmul.matmul`."""
+  default_bm = BM if contract is None else contract.block_m
+  default_bk = pallas_matmul.BK if contract is None else contract.block_k
+  default_bn = pallas_matmul.BN if contract is None else contract.block_n
+  bk = int(default_bk if block_k is None else block_k)
+  bn = int(default_bn if block_n is None else block_n)
+  kp = model_contracts.round_up(int(k), bk)
+  np = model_contracts.round_up(int(n), bn)
+  wide = wide_n_tiles(default_bm, kp, int(n), (default_bm, bn, bk))
+  if wide is not None:
+    np, _ = wide
   return kp, np
 
 
@@ -123,14 +82,14 @@ def matmul(
     x,
     y,
     *,
-    contract: model_contracts.ModelContract,
+    contract: model_contracts.ModelContract | None = None,
     interpret: bool = False,
     shape_invariant_numerics: bool = True,
     block_m: int = BM,
     block_n: int | None = None,
     block_k: int | None = None,
 ):
-  """Fixed-tile matmul of arbitrary M with contract-admitted K/N padding."""
+  """Fixed-tile matmul of arbitrary positive `(M, K) @ (K, N)` with zero-padding."""
   if x.ndim != 2 or y.ndim != 2:
     raise ValueError(
         f"padded_matmul expects rank-2 inputs, got {x.shape}, {y.shape} "
@@ -141,46 +100,21 @@ def matmul(
     raise ValueError(f"padded_matmul contracted dimensions differ: {k} vs {ky}")
   if m <= 0:
     raise ValueError(f"padded_matmul requires positive M, got {m}")
+  default_bk = pallas_matmul.BK if contract is None else contract.block_k
+  default_bn = pallas_matmul.BN if contract is None else contract.block_n
   block_m = int(block_m)
-  block_k = int(contract.block_k if block_k is None else block_k)
-  block_n = int(contract.block_n if block_n is None else block_n)
+  block_k = int(default_bk if block_k is None else block_k)
+  block_n = int(default_bn if block_n is None else block_n)
   kp, np = padded_matmul_extents(
       k, n, contract=contract, block_k=block_k, block_n=block_n
   )
   mp = model_contracts.round_up(m, BM)
 
-  wide = wide_n_tiles(
-      mp, kp, n, (block_m, block_n, block_k), contract.matmul_n_padding
-  )
+  wide = wide_n_tiles(mp, kp, n, (block_m, block_n, block_k))
   if wide is not None:
-    np, wide_bn = wide
-    wide_bm = 256 if mp % 256 == 0 else block_m
-    key = (m, k, n)
-    if key not in _WIDE_N_RECEIPTS:
-      _WIDE_N_RECEIPTS.add(key)
-      logging.info(
-          "[PATHTRACE] matmul_wide_n_padding=v2 M=%d K=%d N=%d->%d bm=%d "
-          "bn=%d bk=%d",
-          m,
-          k,
-          n,
-          np,
-          wide_bm,
-          wide_bn,
-          block_k,
-      )
-    x_padded = jnp.pad(x, ((0, mp - m), (0, kp - k)), constant_values=0)
-    y_padded = jnp.pad(y, ((0, kp - k), (0, np - n)), constant_values=0)
-    out = pallas_matmul.matmul(
-        x_padded,
-        y_padded,
-        interpret=interpret,
-        shape_invariant_numerics=shape_invariant_numerics,
-        block_m=wide_bm,
-        block_n=wide_bn,
-        block_k=block_k,
-    )
-    return out[:m, :n]
+    np, block_n = wide
+    block_m = 256 if mp % 256 == 0 else block_m
+
   if mp == m and kp == k and np == n:
     return pallas_matmul.matmul(
         x,

@@ -11,9 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for padded_matmul (CPU, Pallas interpret mode)."""
-
-import dataclasses
+"""Tests for `padded_matmul` (CPU, Pallas interpret mode)."""
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -42,6 +40,7 @@ class ExtentsTest(parameterized.TestCase):
       ("qwen4b_tp4", 2432, 2560, (2432, 2560)),
       ("qwen4b_tp4", 2432, 2560, (2560, 2560), 256),
       ("qwen8b_tp8", 4096, 18992, (4096, 19200)),
+      ("qwen8b", 1000, 1000, (1024, 1024)),
   )
   def test_padded_extents(self, name, k, n, expected, block_k=None):
     self.assertEqual(
@@ -51,58 +50,36 @@ class ExtentsTest(parameterized.TestCase):
         expected,
     )
 
-  @parameterized.parameters(
-      ("qwen8b", 4096, 1000),  # N not admitted.
-      ("qwen8b", 1000, 4096),  # K not admitted.
-      ("qwen4b", 0, 128),  # Non-positive width.
-  )
-  def test_rejects_unadmitted_widths(self, name, k, n):
+  def test_rejects_non_positive_widths(self):
     with self.assertRaises(ValueError):
-      padded_matmul.padded_matmul_extents(k, n, contract=_contract(name))
+      padded_matmul.padded_matmul_extents(0, 128, contract=_contract("qwen4b"))
+    with self.assertRaises(ValueError):
+      padded_matmul.padded_matmul_extents(128, 0, contract=_contract("qwen4b"))
 
   def test_wide_n_tiles(self):
-    qwen4b = _contract("qwen4b")
-    qwen4b_tp4 = _contract("qwen4b_tp4")
-    tiles = qwen4b.tiles
-    # 4B MLP widths get a wide tile on their contract-padded width.
+    tiles = _contract("qwen4b").tiles
+    # 4B MLP widths get a wide tile on their 256-aligned padded width.
     self.assertEqual(
-        padded_matmul.wide_n_tiles(
-            128, 2560, 1216, tiles, qwen4b.matmul_n_padding
-        ),
+        padded_matmul.wide_n_tiles(128, 2560, 1216, tiles),
         (1280, 1280),
     )
     self.assertEqual(
-        padded_matmul.wide_n_tiles(
-            128, 2560, 2432, tiles, qwen4b_tp4.matmul_n_padding
-        ),
+        padded_matmul.wide_n_tiles(128, 2560, 2432, tiles),
         (2560, 1280),
     )
     # A padded lm_head width no wide candidate divides keeps the contract.
+    self.assertIsNone(padded_matmul.wide_n_tiles(128, 2560, 37984, tiles))
+    # Widths the policy already tiles or explicit non-contract tiles.
+    self.assertIsNone(padded_matmul.wide_n_tiles(128, 2560, 2560, tiles))
     self.assertIsNone(
-        padded_matmul.wide_n_tiles(
-            128, 2560, 37984, tiles, qwen4b_tp4.matmul_n_padding
-        )
+        padded_matmul.wide_n_tiles(128, 2560, 1216, (128, 128, 256))
     )
-    # Widths the policy already tiles, explicit tiles, and unmapped widths.
-    self.assertIsNone(
-        padded_matmul.wide_n_tiles(
-            128, 2560, 2560, tiles, qwen4b.matmul_n_padding
-        )
-    )
-    self.assertIsNone(
-        padded_matmul.wide_n_tiles(
-            128, 2560, 1216, (128, 128, 256), qwen4b.matmul_n_padding
-        )
-    )
-    self.assertIsNone(padded_matmul.wide_n_tiles(128, 2560, 1216, tiles, {}))
 
 
 class PaddedMatmulTest(parameterized.TestCase):
 
   @parameterized.parameters(1, 7, 8, 100, 127)
   def test_decode_rows_equal_the_128_row_program(self, m):
-    # Every M <= 128 runs the identical 128-row program, so a decode row is
-    # bitwise the same row inside a 128-row prefill/scoring batch.
     contract = _contract("qwen8b")
     rng = np.random.default_rng(m)
     x = test_utils.random_bf16(rng, (128, 512))
@@ -122,12 +99,8 @@ class PaddedMatmulTest(parameterized.TestCase):
         out, test_utils.exact_matmul_reference(x, y)
     )
 
-  def test_contract_k_and_n_padding(self):
-    contract = dataclasses.replace(
-        _contract("qwen4b"),
-        matmul_k_padding={200: 256},
-        matmul_n_padding={200: 256},
-    )
+  def test_arbitrary_k_and_n_padding(self):
+    contract = _contract("qwen4b")
     rng = np.random.default_rng(2)
     x = test_utils.exact_bf16(rng, (16, 200))
     y = test_utils.exact_bf16(rng, (200, 200))
@@ -138,7 +111,6 @@ class PaddedMatmulTest(parameterized.TestCase):
     )
 
   def test_wide_padded_width_is_bitwise_neutral(self):
-    # qwen4b gate/up: N=1216 -> 1280 with a 1280-wide tile.
     contract = _contract("qwen4b")
     rng = np.random.default_rng(3)
     x = test_utils.exact_bf16(rng, (8, 256))
@@ -151,13 +123,6 @@ class PaddedMatmulTest(parameterized.TestCase):
 
   def test_rejects(self):
     contract = _contract("qwen8b")
-    with self.assertRaises(ValueError):
-      padded_matmul.matmul(
-          jnp.zeros((8, 1000), jnp.bfloat16),
-          jnp.zeros((1000, 256), jnp.bfloat16),
-          contract=contract,
-          interpret=True,
-      )
     with self.assertRaises(ValueError):
       padded_matmul.matmul(
           jnp.zeros((8, 256), jnp.bfloat16),

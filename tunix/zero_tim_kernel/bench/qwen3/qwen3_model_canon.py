@@ -43,7 +43,7 @@ mismatch (TIM):
 5. `use_canon_o_proj`: Fixed-tile padded matmul + canonical VJP for `o_proj`.
 6. `use_canon_mlp_proj`: Fixed-tile padded matmul + canonical VJP for
    `gate_proj`, `up_proj`, and `down_proj`.
-7. `use_canon_swiglu`: Padded Pallas SwiGLU (`padded_swiglu` +
+7. `use_canon_swiglu`: Padded Pallas SwiGLU (`pallas_swiglu` +
    `canonical_vjp.swiglu`).
 8. `use_fixed_lm_head`: the `FIXED_M=256` padded/chunked output head with
    ascending-chunk `lax.scan` VJP (`fixed_lm_head`).
@@ -144,9 +144,8 @@ from tunix.zero_tim_kernel import fixed_lm_head
 from tunix.zero_tim_kernel import fixed_order_reduce
 from tunix.zero_tim_kernel import model_contracts
 from tunix.zero_tim_kernel import padded_matmul
-from tunix.zero_tim_kernel import padded_swiglu
-from tunix.zero_tim_kernel import pallas_norm_matmul
 from tunix.zero_tim_kernel import pallas_rmsnorm
+from tunix.zero_tim_kernel import pallas_swiglu
 from tunix.zero_tim_kernel.bench.qwen3 import canon_attention
 from tunix.zero_tim_kernel.bench.qwen3 import rpa_backend
 
@@ -373,21 +372,10 @@ def _upcast(x: jax.Array, hard: bool) -> jax.Array:
 
 
 def _hard_add(a: jax.Array, b: jax.Array) -> jax.Array:
-  """`a + b` (in the promoted dtype) with operands and sum hard-rounded.
-
-  The result dtype follows `jnp.result_type(a, b)` exactly like the `a + b`
-  this replaces, so the switch cannot change a program's dtypes: at every site
-  today both operands are `config.dtype` (bf16); an f32 operand would keep the
-  sum in f32 (`hard_round` of an f32 to f32 is the identity).
-
-  Args:
-    a: Left operand (the running accumulator in the TP-sum chain).
-    b: Right operand.
-
-  Returns:
-    The hard-rounded sum.
-  """
+  """`a + b` (in the promoted dtype) with the bf16 sum hard-rounded."""
   out_dtype = jnp.result_type(a, b)
+  if out_dtype == jnp.bfloat16:
+    return fixed_order_reduce.hard_bf16_add(a, b)
   total = fixed_order_reduce.hard_upcast(a) + fixed_order_reduce.hard_upcast(b)
   return fixed_order_reduce.hard_round(total, out_dtype)
 
@@ -555,7 +543,6 @@ def resolve_or_build_contract(
       tp_size=tp_size,
       tiles=tiles,
       vocab_size=config.vocab_size,
-      pad_mlp_to_swiglu_tile=True,
   )
 
 
@@ -712,17 +699,14 @@ def _column_parallel_local(local, *args):
   enclosing shard_map with `P(None, ...)`. Their TP-sharded consumer yields one
   partial cotangent per rank, and JAX's transpose of a `check_vma=False`
   shard_map `psum`s the cotangent of every input whose spec leaves the TP axis
-  unmentioned -- exactly the column-parallel `dx` all-reduce.
-  `fixed_order_reduce.rank_parallel_column_parallel` additionally completes
-  those cotangents with a fixed-order f32 TP sum *inside* the body; that is
-  correct when the gradient is taken inside the rank-parallel backward's manual
-  map (no outer transpose), but stacked on top of the transpose `psum` it
-  multiplied `dx` / `dgamma` by TP (measured `4.0x` on every RMSNorm gamma in
-  `canon_all_enabled` and up to `11x` on the embedding in single-switch
-  ablations at TP=4). Not attaching it also removes one f32 `[TP, M, D]`
-  `all_gather` plus its barriered sum per site from the backward (`-4.TP.M.D`
-  bytes transient HBM, `(TP-1).M.D.4` fewer ICI bytes); the remaining `psum`
-  moves `~2(TP-1)/TP.M.D.2` bytes.
+  unmentioned -- exactly the column-parallel `dx` all-reduce. Completing those
+  cotangents with an explicit f32 TP sum *inside* the body would stack on top of
+  the transpose `psum` and multiply `dx` / `dgamma` by TP (measured `4.0x` on
+  every RMSNorm gamma in `canon_all_enabled` and up to `11x` on the embedding in
+  single-switch ablations at TP=4). Letting the transpose `psum` handle it also
+  avoids an f32 `[TP, M, D]` `all_gather` plus its barriered sum per site in the
+  backward (`-4.TP.M.D` bytes transient HBM, `(TP-1).M.D.4` fewer ICI bytes);
+  the `psum` moves `~2(TP-1)/TP.M.D.2` bytes.
 
   Args:
     local: The TP-local body.
@@ -901,279 +885,6 @@ def _canon_matmul_2d(
   return out_bf16.astype(out_dtype)
 
 
-def _canon_fused_matmul_2d(
-    x_2d: jax.Array,
-    w_parts: Tuple[jax.Array, ...],
-    *,
-    contract: model_contracts.ModelContract,
-    interpret: bool,
-    out_dtype: jaxtyping.DTypeLike,
-) -> jax.Array:
-  """Horizontally fused `x @ concat(w_parts, axis=1)` with a copy-free residual.
-
-  Forward is the exact same program as
-  `_canon_matmul_2d(x, jnp.concatenate(w_parts, axis=1))`: one fixed-tile
-  `padded_matmul` over the concatenated output columns. Output column tiles
-  are independent, so every element keeps the accumulation chain of the
-  un-fused per-projection kernel (bitwise identical, `0.000e+00`).
-
-  HBM Optimization (fused-weight residual):
-    `canonical_vjp.matmul` stores its `(a, b)` operands as the `custom_vjp`
-    residual. With `b = concat([W_q, W_k, W_v])` (or `[W_gate, W_up]`) that
-    residual is a *fresh* array - a second copy of ~2/3 of the layer's
-    projection weights that stays live from the forward until the backward
-    (`+5 MB/layer` on Qwen3-0.6B@TP4, `~63 MB/layer` on Qwen3-8B@TP4; measured
-    `+38 MB` Fwd+Bwd Temp HBM at `L=8, Remat=NONE`). This coat keeps the
-    original parameter views `w_parts` as the residual (no extra memory: they
-    alias the `nnx.Param`s) and re-materialises the concatenation only as a
-    short-lived transient inside the backward, right before the same
-    `plain_matmul_pullback` / K-block replica pullback that
-    `canonical_vjp.matmul` would run on the fused weight.
-
-    Measured on 4x TPU v5p (TP=4, B=4, `Remat=NONE`): Fwd+Bwd Temp HBM
-    `L=8, T=256`: 364.61 -> 306.92 MB (-58 MB); `L=8, T=64`: 177.09 -> 115.30
-    MB (-62 MB); latency and all Zero-TIM drift checks unchanged
-    (`0.000e+00`). The gain only materialised once the backward concatenation
-    was made non-CSE-able (see the `optimization_barrier` note in `op_bwd`);
-    `Remat=BLOCK` is unaffected because the forward is recomputed anyway.
-
-  Args:
-    x_2d: `[M, K]` input rows.
-    w_parts: Weights `[K, N_i]` sharing the contracting dim, concatenated along
-      the output axis.
-    contract: Model contract (tile policy) of the Pallas matmul.
-    interpret: Pallas interpret mode.
-    out_dtype: Output dtype.
-
-  Returns:
-    `[M, sum(N_i)]` matmul output.
-  """
-  x_bf16 = x_2d.astype(jnp.bfloat16)
-  parts = tuple(w.astype(jnp.bfloat16) for w in w_parts)
-  split_points = []
-  offset = 0
-  for w in parts[:-1]:
-    offset += int(w.shape[1])
-    split_points.append(offset)
-
-  def forward(a: jax.Array, b: jax.Array) -> jax.Array:
-    return padded_matmul.matmul(
-        a,
-        b,
-        contract=contract,
-        interpret=interpret,
-        shape_invariant_numerics=True,
-        block_m=contract.block_m,
-        block_n=contract.block_n,
-        block_k=contract.block_k,
-    )
-
-  @jax.custom_vjp
-  def op(a: jax.Array, ws: Tuple[jax.Array, ...]) -> jax.Array:
-    return forward(a, jnp.concatenate(ws, axis=1))
-
-  def op_fwd(a: jax.Array, ws: Tuple[jax.Array, ...]):
-    # Residual = original (un-concatenated) weight views, never the fused copy.
-    return forward(a, jnp.concatenate(ws, axis=1)), (a, ws)
-
-  def op_bwd(residual, cotangent):
-    a, ws = residual
-    # Re-materialise the fused weight as a *backward-local* transient. Routing
-    # the weight views through an `optimization_barrier` tied to `cotangent`
-    # (a) gives this concatenation operands distinct from the forward's, so
-    # XLA CSE cannot merge the two `concatenate` ops and thereby keep the
-    # forward's fused copy alive across the whole forward -> backward span
-    # (measured: without the barrier Fwd+Bwd Temp HBM did not drop at all),
-    # and (b) prevents the scheduler from hoisting it ahead of the backward.
-    ws_late, cotangent = lax.optimization_barrier((ws, cotangent))
-    w_fused = jnp.concatenate(ws_late, axis=1)
-    if canonical_vjp.plain_matmul_vjp_enabled():
-      da, dw = canonical_vjp.plain_matmul_pullback(a, w_fused, cotangent)
-    else:
-      _, pullback = jax.vjp(
-          lambda a_, b_: canonical_vjp.canonical_matmul(
-              a_, b_, contract=contract
-          ),
-          a,
-          w_fused,
-      )
-      da, dw = pullback(cotangent)
-    dws = tuple(jnp.split(dw, split_points, axis=1))
-    return da, dws
-
-  op.defvjp(op_fwd, op_bwd)
-  return op(x_bf16, parts).astype(out_dtype)
-
-
-def _norm_matmul_admits(
-    d_in: int, contract: model_contracts.ModelContract
-) -> bool:
-  """Whether `pallas_norm_matmul` can take `[*, d_in]` rows unpadded.
-
-  The fused kernel normalizes over the full contracting width `K` inside the
-  kernel (`sumsq / K`), so unlike `padded_matmul` it can never zero-pad `K`:
-  that would change the RMS mean. It also needs `K` to divide the matmul
-  `block_k` and the RMSNorm `BF` block. Sites that do not qualify keep the
-  un-fused two-kernel chain (a static-shape decision).
-
-  Args:
-    d_in: Contracting width `K` of the site.
-    contract: Model contract (tile policy) of the Pallas kernels.
-
-  Returns:
-    Whether the fused norm+matmul kernel admits this site.
-  """
-  return d_in % contract.block_k == 0 and d_in % pallas_rmsnorm.BF == 0
-
-
-def _canon_fused_norm_matmul_2d(
-    x_2d: jax.Array,
-    gamma: jax.Array,
-    w_parts: Tuple[jax.Array, ...],
-    *,
-    norm_eps: float,
-    contract: model_contracts.ModelContract,
-    interpret: bool,
-    out_dtype: jaxtyping.DTypeLike,
-) -> jax.Array:
-  """Bench coat of `pallas_norm_matmul`: `rmsnorm(x, gamma) @ concat(w_parts)`.
-
-  Forward: ONE `pallas_norm_matmul.norm_matmul` call. Its prologue normalizes
-  each 128-row block with the verbatim arithmetic of `pallas_rmsnorm`
-  (f32 promote, BF=128-blocked left-to-right sum of squares,
-  `rsqrt(sumsq / K + eps)`, `x * inv * gamma`, one bf16 cast) into VMEM
-  scratch and then runs the verbatim tile loop of `pallas_matmul`
-  (bf16 tiles, f32 accumulator, the same sequential `block_k` order) on that
-  scratch. `block_k` is the only tile that enters an element's contraction
-  order and is taken from the model contract exactly as `_canon_matmul_2d`
-  does; `block_m` / `block_n` only choose which output tile a program writes.
-  Every per-element chain is therefore the one the two-kernel chain
-  `_canon_rmsnorm_nd -> _canon_fused_matmul_2d` executes, so the output is
-  bitwise identical (`without_use_canon_norm_matmul` must report
-  `|LP - Canon| = 0.000e+00` on TPU) and remains batch-invariant (rows are
-  independent; `M` is zero-padded to the fixed 128-row block, padded rows
-  normalize to exactly `0 * rsqrt(eps) * gamma = 0` and are sliced off).
-
-  Latency: one kernel launch instead of two per site and no `[M, D]` bf16
-  round-trip of the normalized rows through HBM (`-2.M.D` bytes of forward
-  transient per site).
-
-  HBM Optimization (Fwd+Bwd residual): the un-fused chain stores TWO `[M, D]`
-  bf16 residuals per site -- `x` for the RMSNorm VJP and `rmsnorm(x)` for the
-  matmul VJP. This coat stores only `(x, gamma, w_parts)` (parameter views, no
-  copy) and re-derives `h = canonical_rmsnorm(x, gamma)` -- the declared
-  bit-exact semantic of the Pallas norm, i.e. the identical bits the un-fused
-  matmul VJP would have read back -- as a backward-local transient, exactly as
-  `canonical_vjp.norm_matmul` does. Net `-2.M.D` bytes per site per layer
-  (`-4 MB` per site at `M=1024, D=1024`, two sites per layer) in `Remat=NONE`.
-  The fused weight is re-materialised behind an `optimization_barrier` tied to
-  the cotangent for the same anti-CSE reason documented in
-  `_canon_fused_matmul_2d`.
-
-  Args:
-    x_2d: `[M, K]` un-normalized rows (residual stream).
-    gamma: `[K]` RMSNorm weight.
-    w_parts: Weights `[K, N_i]` concatenated along the output axis.
-    norm_eps: RMSNorm epsilon.
-    contract: Model contract (tile policy) of the Pallas matmul.
-    interpret: Pallas interpret mode.
-    out_dtype: Output dtype.
-
-  Returns:
-    `[M, sum(N_i)]` projection of the normalized rows.
-  """
-  x_bf16 = x_2d.astype(jnp.bfloat16)
-  gamma_bf16 = gamma.astype(jnp.bfloat16)
-  parts = tuple(w.astype(jnp.bfloat16) for w in w_parts)
-  m, k = map(int, x_bf16.shape)
-  if not _norm_matmul_admits(k, contract):
-    raise ValueError(
-        f'fused norm_matmul needs K={k} to divide block_k={contract.block_k}'
-        f' and BF={pallas_rmsnorm.BF}'
-    )
-  split_points = []
-  offset = 0
-  for w in parts[:-1]:
-    offset += int(w.shape[1])
-    split_points.append(offset)
-  n_total = offset + int(parts[-1].shape[1])
-
-  # Row block of the fused kernel; the per-element contraction chain only
-  # depends on `block_k` (see the docstring), so this choice is numerically
-  # neutral and fixed at 128 for every M (padded rows are sliced off).
-  block_m = 128
-  block_n = contract.block_n
-  block_k = contract.block_k
-  _, n_padded = padded_matmul.padded_matmul_extents(
-      k, n_total, contract=contract, block_k=block_k, block_n=block_n
-  )
-  m_padded = model_contracts.round_up(m, block_m)
-
-  def forward(a: jax.Array, g: jax.Array, b: jax.Array) -> jax.Array:
-    if m_padded != m:
-      a = jnp.pad(a, ((0, m_padded - m), (0, 0)), constant_values=0)
-    if n_padded != n_total:
-      b = jnp.pad(b, ((0, 0), (0, n_padded - n_total)), constant_values=0)
-    out = pallas_norm_matmul.norm_matmul(
-        a,
-        g,
-        b,
-        epsilon=norm_eps,
-        interpret=interpret,
-        shape_invariant_numerics=True,
-        block_m=block_m,
-        block_n=block_n,
-        block_k=block_k,
-    )
-    return out[:m, :n_total]
-
-  @jax.custom_vjp
-  def op(a: jax.Array, g: jax.Array, ws: Tuple[jax.Array, ...]) -> jax.Array:
-    return forward(a, g, jnp.concatenate(ws, axis=1))
-
-  def op_fwd(a: jax.Array, g: jax.Array, ws: Tuple[jax.Array, ...]):
-    # Residual = raw rows + gamma + un-concatenated weight views; neither the
-    # normalized rows nor the fused weight copy is kept alive.
-    return forward(a, g, jnp.concatenate(ws, axis=1)), (a, g, ws)
-
-  def op_bwd(residual, cotangent):
-    a, g, ws = residual
-    ws_late, cotangent = lax.optimization_barrier((ws, cotangent))
-    w_fused = jnp.concatenate(ws_late, axis=1)
-    # `canonical_rmsnorm` is the bit-exact JAX statement of the Pallas norm
-    # (rows must divide its BM=8 row block; padded rows are sliced off again).
-    m8 = model_contracts.round_up(m, pallas_rmsnorm.BM)
-    a8 = jnp.pad(a, ((0, m8 - m), (0, 0)), constant_values=0) if m8 != m else a
-    h8, norm_pullback = jax.vjp(
-        lambda a_, g_: pallas_rmsnorm.canonical_rmsnorm(
-            a_, g_, epsilon=norm_eps
-        ),
-        a8,
-        g,
-    )
-    h = h8[:m]
-    if canonical_vjp.plain_matmul_vjp_enabled():
-      dh, dw = canonical_vjp.plain_matmul_pullback(h, w_fused, cotangent)
-    else:
-      _, pullback = jax.vjp(
-          lambda h_, b_: canonical_vjp.canonical_matmul(
-              h_, b_, contract=contract
-          ),
-          h,
-          w_fused,
-      )
-      dh, dw = pullback(cotangent)
-    if m8 != m:
-      dh = jnp.pad(dh, ((0, m8 - m), (0, 0)), constant_values=0)
-    da8, dg = norm_pullback(dh)
-    da = da8[:m] if m8 != m else da8
-    dws = tuple(jnp.split(dw, split_points, axis=1))
-    return da, dg, dws
-
-  op.defvjp(op_fwd, op_bwd)
-  return op(x_bf16, gamma_bf16, parts).astype(out_dtype)
-
-
 def _canon_rmsnorm_nd_local(
     x: jax.Array,
     w: jax.Array,
@@ -1189,22 +900,13 @@ def _canon_rmsnorm_nd_local(
   x_2d = x.reshape(m, f).astype(jnp.bfloat16)
   w_1d = w.reshape(f).astype(jnp.bfloat16)
 
-  bm = pallas_rmsnorm.BM
-  bf = pallas_rmsnorm.BF
-  mp = model_contracts.round_up(m, bm)
-
-  if f % bf != 0:
+  if f % pallas_rmsnorm.BF != 0:
     xf = x_2d.astype(jnp.float32)
     wf = w_1d.astype(jnp.float32)
     rms = lax.rsqrt(
         jnp.mean(xf * xf, axis=-1, keepdims=True) + jnp.float32(norm_eps)
     )
     return (xf * rms * wf[None, :]).astype(out_dtype).reshape(orig_shape)
-
-  if mp != m:
-    x_padded = jnp.pad(x_2d, ((0, mp - m), (0, 0)), constant_values=0)
-  else:
-    x_padded = x_2d
 
   def forward(a: jax.Array, weight: jax.Array) -> jax.Array:
     return pallas_rmsnorm.rmsnorm(
@@ -1215,10 +917,7 @@ def _canon_rmsnorm_nd_local(
         shape_invariant_numerics=True,
     )
 
-  out_padded = canonical_vjp.rmsnorm(
-      x_padded, w_1d, epsilon=norm_eps, forward=forward
-  )
-  out_2d = out_padded[:m, :]
+  out_2d = canonical_vjp.rmsnorm(x_2d, w_1d, epsilon=norm_eps, forward=forward)
   return out_2d.astype(out_dtype).reshape(orig_shape)
 
 
@@ -1299,8 +998,8 @@ def _apply_rope_canonical_local(
   # `HARD_ROUNDING_ROPE`: the sin / cos round trip through `inputs.dtype`, the
   # input upcast and the output casts become flag-proof rounding points.
   hard = _hard(HARD_ROUNDING_ROPE)
-  sin = _upcast(_cast(jnp.sin(sinusoid_inp), inputs.dtype, hard), hard)
-  cos = _upcast(_cast(jnp.cos(sinusoid_inp), inputs.dtype, hard), hard)
+  sin = _upcast(jnp.sin(sinusoid_inp).astype(inputs.dtype), hard)
+  cos = _upcast(jnp.cos(sinusoid_inp).astype(inputs.dtype), hard)
 
   inp_f32 = _upcast(inp_pad, hard)
   first_half, second_half = jnp.split(inp_f32, 2, axis=-1)
@@ -1910,47 +1609,20 @@ class CanonEmbedder(nnx.Module):
       self,
       x: jaxtyping.ArrayLike,
       *,
-      use_fixed_order_reduce: bool = False,
+      use_canon: bool = True,
   ) -> jaxtyping.Array:
+    if not use_canon:
+      out = self.input_embedding[(x,)]
+      out = jnp.astype(out, self.dtype)
+      return shard(out, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     x_ids = jnp.asarray(x, dtype=jnp.int32)
-    tp_size, mesh = _active_tp_size_and_mesh('tp')
-    if (
-        use_fixed_order_reduce
-        and mesh is not None
-        and tp_size > 1
-        and int(self.input_embedding.value.shape[0]) % tp_size == 0
-    ):
-      orig_shape = x_ids.shape
-      flat_ids = x_ids.reshape(-1)
-      table = jnp.astype(self.input_embedding.value, self.dtype)
-
-      def local_embed(
-          ids_local: jax.Array, table_local: jax.Array
-      ) -> jax.Array:
-        part = fixed_order_reduce.vocab_parallel_local_rows(
-            ids_local, table_local, axis_name='tp'
-        )
-        # Vocab-parallel gather: exactly one rank holds each id, the others
-        # contribute zeros, so the rank-ordered sum is the row itself (bitwise)
-        # and the VJP must hand the full cotangent to the owning rank.
-        return _fixed_order_tp_sum_with_vjp(
-            part, 'tp', tp_size, mode=fixed_order_reduce.RING
-        )
-
-      out_2d = jax.shard_map(
-          local_embed,
-          mesh=mesh,
-          in_specs=(P(None), P('tp', None)),
-          out_specs=P(None, None),
-          check_vma=False,
-      )(flat_ids, table)
-      return out_2d.astype(self.dtype).reshape(
-          *orig_shape, self.input_embedding.value.shape[1]
-      )
     out = self.input_embedding[(x_ids,)]
-    out = jnp.astype(out, self.dtype)
-    out = shard(out, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
-    return out
+    if jnp.dtype(out.dtype) != jnp.dtype(self.dtype):
+      out = _cast(out, self.dtype, _hard(HARD_ROUNDING_RESIDUAL))
+    axes = tuple(self.shd_config.act_btd)
+    axes = axes + (None,) * max(0, out.ndim - len(axes))
+    act_spec = (*axes[: out.ndim - 1], None)
+    return shard(out, act_spec)  # pyrefly: ignore[bad-argument-type]
 
   @jax.named_scope('embedder_decode')
   def decode(
@@ -2109,7 +1781,7 @@ class CanonAttention(nnx.Module):
         and Prefill pass, while keeping output tiles 100% bitwise identical.
       - HBM Residuals: the fused coat saves the input activation `x_2d` only
         ONCE per layer instead of 3 times (-66% QKV activation memory), and
-        `_canon_fused_matmul_2d` keeps the un-fused `W_q/W_k/W_v` parameter
+        `canonical_vjp.fused_matmul` keeps the un-fused `W_q/W_k/W_v` parameter
         views (not the concatenated copy) as its backward residual, so the
         fusion adds no persistent weight memory in `Remat=NONE` training.
       - Backward: `dx` is one fused Pallas matmul (`dy_qkv @ W_qkv.T`) whose
@@ -2120,19 +1792,20 @@ class CanonAttention(nnx.Module):
     `use_canon_norm_matmul`):
       With `norm_weight` (the `input_layernorm` gamma) given, `x` is the
       UN-normalized residual stream and the norm is applied inside the
-      projection kernel by `_canon_fused_norm_matmul_2d` (pallas_norm_matmul):
+      projection kernel by `canonical_vjp.fused_norm_matmul`
+      (pallas_norm_matmul):
       the normalized rows never leave VMEM, saving one kernel launch and one
       `[M, D]` bf16 HBM round trip per layer in the forward, and the matmul's
       `[M, D]` normalized-row residual in `Remat=NONE` training (the norm is
       re-derived bit-exactly in the backward). Bitwise identical to the un-fused
-      `input_layernorm -> _qkv_proj` chain (see the helper).
+      `input_layernorm -> _qkv_proj` chain.
 
     Args:
       x: `[B, T, D]` hidden states (un-normalized iff `norm_weight` is given).
       use_canon: Use the fixed-tile Pallas matmul.
       interpret: Pallas interpret mode.
       norm_weight: Optional `[D]` RMSNorm gamma to fuse as a prologue (requires
-        `use_canon`; the caller checks `_norm_matmul_admits`).
+        `use_canon`; the caller checks `canonical_vjp.norm_matmul_admits`).
 
     Returns:
       `(q, k, v)` as `[B, T, N_q, H]`, `[B, T, N_kv, H]`, `[B, T, N_kv, H]`.
@@ -2170,7 +1843,7 @@ class CanonAttention(nnx.Module):
         a_2d: jax.Array, g: jax.Array | None, ws: Tuple[jax.Array, ...]
     ) -> jax.Array:
       if g is None:
-        return _canon_fused_matmul_2d(
+        return canonical_vjp.fused_matmul(
             a_2d,
             ws,
             contract=self.contract,
@@ -2179,7 +1852,7 @@ class CanonAttention(nnx.Module):
         )
       # `norm_eps` is a static Python float shared by every norm of the model
       # (never a traced operand, so the fusion is safe under `jax.checkpoint`).
-      return _canon_fused_norm_matmul_2d(
+      return canonical_vjp.fused_norm_matmul(
           a_2d,
           g,
           ws,
@@ -2604,7 +2277,7 @@ class CanonAttention(nnx.Module):
 
 
 class CanonMLP(nnx.Module):
-  """MLP module with Zero-TIM `padded_matmul` and `padded_swiglu` switches."""
+  """MLP module with Zero-TIM `padded_matmul` and `pallas_swiglu` switches."""
 
   def __init__(
       self,
@@ -2779,7 +2452,7 @@ class CanonMLP(nnx.Module):
         100% bitwise identical.
       - HBM Residuals: the fused coat saves the input activation `x_2d` only
         ONCE per layer instead of twice (-50% MLP input residual memory), and
-        `_canon_fused_matmul_2d` keeps the un-fused `W_gate/W_up` parameter
+        `canonical_vjp.fused_matmul` keeps the un-fused `W_gate/W_up` parameter
         views (not the concatenated copy) as its backward residual.
       - Backward: `dx` is one fused Pallas matmul (`dy_gu @ W_gu.T`) whose TP
         partials JAX reduces with the single column-parallel `psum` of the
@@ -2789,7 +2462,8 @@ class CanonMLP(nnx.Module):
     `use_canon_norm_matmul`):
       With `norm_weight` (the `post_attention_layernorm` gamma) given, `x` is
       the UN-normalized residual stream and the norm runs inside the
-      projection kernel (`_canon_fused_norm_matmul_2d`, pallas_norm_matmul); see
+      projection kernel (`canonical_vjp.fused_norm_matmul`,
+      pallas_norm_matmul); see
       `CanonAttention._qkv_proj` for the launch / HBM accounting. Bitwise
       identical to the un-fused `post_attention_layernorm -> _gate_up_proj`
       chain.
@@ -2799,7 +2473,7 @@ class CanonMLP(nnx.Module):
       use_canon: Use the fixed-tile Pallas matmul.
       interpret: Pallas interpret mode.
       norm_weight: Optional `[D]` RMSNorm gamma to fuse as a prologue (requires
-        `use_canon`; the caller checks `_norm_matmul_admits`).
+        `use_canon`; the caller checks `canonical_vjp.norm_matmul_admits`).
 
     Returns:
       `(gate, up)`, each `[B, T, F]`.
@@ -2826,14 +2500,14 @@ class CanonMLP(nnx.Module):
         a_2d: jax.Array, g: jax.Array | None, ws: Tuple[jax.Array, ...]
     ) -> jax.Array:
       if g is None:
-        return _canon_fused_matmul_2d(
+        return canonical_vjp.fused_matmul(
             a_2d,
             ws,
             contract=self.contract,
             interpret=interpret,
             out_dtype=self.config.dtype,
         )
-      return _canon_fused_norm_matmul_2d(
+      return canonical_vjp.fused_norm_matmul(
           a_2d,
           g,
           ws,
@@ -2906,10 +2580,9 @@ class CanonMLP(nnx.Module):
       tp_size, mesh = _active_tp_size_and_mesh('tp')
 
       def swiglu_fwd(g: jax.Array, u: jax.Array) -> jax.Array:
-        return padded_swiglu.swiglu(
+        return pallas_swiglu.swiglu(
             g,
             u,
-            contract=self.contract,
             interpret=interpret,
             shape_invariant_numerics=True,
         )
@@ -3033,14 +2706,14 @@ class CanonDecoderLayer(nnx.Module):
     # static, per-site decision. It only replaces a chain that is *already*
     # canonical at both ends (Pallas norm -> fixed-tile projection) and whose
     # contracting width the fused kernel admits unpadded
-    # (`_norm_matmul_admits`); every other combination keeps the two-kernel
-    # chain, so flipping this switch alone never changes which arithmetic runs
-    # -- only where the normalized rows live (VMEM scratch vs an HBM tensor +
-    # residual).
+    # (`canonical_vjp.norm_matmul_admits`); every other combination keeps the
+    # two-kernel chain, so flipping this switch alone never changes which
+    # arithmetic runs -- only where the normalized rows live (VMEM scratch vs
+    # an HBM tensor + residual).
     fuse_norm = (
         cc.use_canon_norm_matmul
         and cc.use_canon_rmsnorm
-        and _norm_matmul_admits(int(x.shape[-1]), self.contract)
+        and canonical_vjp.norm_matmul_admits(int(x.shape[-1]), self.contract)
     )
     fuse_attn_norm = fuse_norm and cc.use_canon_qkv_proj
     mlp = self.mlp
@@ -3192,9 +2865,7 @@ class Qwen3Canon(BackendMappingMixin, nnx.Module):
   ) -> tuple[jaxtyping.Array, Cache | None]:
     new_cache: Cache | None = None if cache is None else {}
     cc = self.canon_config
-    x = self.embedder.encode(
-        input_tokens, use_fixed_order_reduce=cc.use_fixed_order_reduce
-    )
+    x = self.embedder.encode(input_tokens, use_canon=cc.any_enabled())
 
     for i, layer in enumerate(self.layers):
       layer_name = f'layer_{i}'

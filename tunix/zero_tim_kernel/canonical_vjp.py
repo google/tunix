@@ -15,27 +15,37 @@
 
 Pallas TPU kernels have no JVP rule, and the training forward (C) must be the
 very same program as the engine's scoring forward (B) for their log-probs to
-be bitwise equal.  Every coat below therefore uses the Pallas kernel verbatim
+be bitwise equal. Every coat below therefore uses the Pallas kernel verbatim
 as the primal and differentiates a pure-JAX replica in the backward:
 
-* ``canonical_matmul``: a 16-K-block (contract BK) replica of the forward's
+* `canonical_matmul`: a fixed-K-block (contract BK) replica of the forward's
   accumulation order; optionally replaced by one plain dot's transpose
-  (``CANON_MATMUL_VJP_PLAIN``, default on) because the backward only has to be
+  (`CANON_MATMUL_VJP_PLAIN`, default on) because the backward only has to be
   a correct gradient, not a bitwise one;
-* ``canonical_rmsnorm``: the declared bit-exact semantic of the Pallas norm;
-* ``canonical_swiglu``: ``silu(gate) * up`` in bf16.
+* `canonical_rmsnorm`: the declared bit-exact semantic of the Pallas norm;
+* `canonical_swiglu`: `silu(gate) * up` in bf16;
+* `fused_matmul` / `fused_norm_matmul`: horizontally fused projection coats
+  that keep the un-concatenated parameter views `(w_parts)` as the VJP residual
+  and re-materialize the concatenation inside the backward behind an
+  `optimization_barrier` to avoid keeping a duplicate copy of the layer weights
+  live across the forward-to-backward span.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import os
 
 from absl import logging
 import jax
+from jax import lax
 import jax.numpy as jnp
 from tunix.zero_tim_kernel import model_contracts
 from tunix.zero_tim_kernel import padded_matmul
+from tunix.zero_tim_kernel import pallas_matmul
+from tunix.zero_tim_kernel import pallas_norm_matmul
 from tunix.zero_tim_kernel import pallas_rmsnorm
+from tunix.zero_tim_kernel import pallas_swiglu
 
 
 def canonical_matmul(x, y, *, contract: model_contracts.ModelContract):
@@ -65,30 +75,9 @@ def canonical_matmul(x, y, *, contract: model_contracts.ModelContract):
   return acc.astype(jnp.bfloat16)
 
 
-def canonical_swiglu(gate, up):
-  if (
-      gate.shape != up.shape
-      or gate.dtype != jnp.bfloat16
-      or up.dtype != jnp.bfloat16
-  ):
-    raise ValueError(
-        f"canonical_vjp SwiGLU contract failed: {gate.shape}/{up.shape} "
-        f"{gate.dtype}/{up.dtype}"
-    )
-  return (jax.nn.silu(gate) * up).astype(jnp.bfloat16)
+canonical_swiglu = pallas_swiglu.canonical_swiglu
 
 
-# The coats below differentiate canonical_matmul, the 16-K-block replica of
-# the forward's accumulation order, so every projection's backward is 16
-# sliced dots whose weight cotangents are padded back into full-size buffers
-# and summed: in the 8B update window that structure was the
-# add_bitcast_fusion bf16[1,4096,6144]/[1,6144,4096] family (21.5% of the
-# backward chunk) plus the fusion bf16[256,256] sea (4032 per launch, 5%).
-# The backward does not need the forward's K-blocking: dX = cot . W^T and
-# dW = X^T . cot as two plain f32-accumulating dots give the same gradient up
-# to summation order.  The plain dots are the code default;
-# CANON_MATMUL_VJP_PLAIN=0 keeps the K-block replica pullback as the explicit
-# A/B path.
 PLAIN_VJP_ENV = "CANON_MATMUL_VJP_PLAIN"
 _PLAIN_RECEIPT = set()
 
@@ -96,11 +85,11 @@ _PLAIN_RECEIPT = set()
 def plain_matmul_vjp_enabled():
   """Whether projection pullbacks are the transposes of one plain bf16 dot.
 
-  Default on.  ``CANON_MATMUL_VJP_PLAIN=0``
-  keeps the K-block replica pullback as an explicit A/B path.
+  Default on. `CANON_MATMUL_VJP_PLAIN=0` keeps the K-block replica pullback as
+  an explicit A/B path.
 
   Returns:
-    True unless ``CANON_MATMUL_VJP_PLAIN=0`` is set.
+    True unless `CANON_MATMUL_VJP_PLAIN=0` is set.
   """
   value = os.environ.get(PLAIN_VJP_ENV, "1")
   if value not in ("0", "1"):
@@ -121,8 +110,8 @@ def plain_matmul_vjp_enabled():
 def plain_matmul(x, y):
   """One plain bf16 dot (f32 MXU accumulation, rounded once to bf16).
 
-  Only its transpose is ever executed: the E2d pullback is JAX's own
-  transpose of this dot, two plain bf16 dots.
+  Only its transpose is ever executed: the pullback is JAX's own transpose of
+  this dot, two plain bf16 dots.
 
   Args:
     x: Left operand `[M, K]` (bf16).
@@ -137,15 +126,11 @@ def plain_matmul(x, y):
 def plain_matmul_pullback(a, b, cotangent):
   """dX, dW of X @ W through JAX's transpose of one plain dot.
 
-  Going through jax.vjp instead of writing the two dots by hand keeps the
-  manual-axis typing of the canonical path: under check_vma=True the
+  Going through `jax.vjp` instead of writing the two dots by hand keeps the
+  manual-axis typing of the canonical path: under `check_vma=True` the
   replicated projection input is implicitly cast to varying over TP inside
-  the dot, and JAX transposes that cast into the TP psum, so dX comes back
-  invariant over model like the primal input.  A hand-written dot(cot, W^T)
-  is typed varying over model and carries only this rank's partial sum
-  (observed as "Custom VJP bwd rule must produce an output with the same type
-  as the args tuple ... bfloat16[256,4096]{V:(data,model)} corresponding to an
-  input of type bfloat16[256,4096]{V:data}").
+  the dot, and JAX transposes that cast into the TP `psum`, so `dX` comes back
+  invariant over model like the primal input.
 
   Args:
     a: The primal left operand.
@@ -153,7 +138,7 @@ def plain_matmul_pullback(a, b, cotangent):
     cotangent: The output cotangent.
 
   Returns:
-    The (da, db) cotangents.
+    The `(da, db)` cotangents.
   """
   _, pullback = jax.vjp(plain_matmul, a, b)
   return pullback(cotangent)
@@ -175,7 +160,7 @@ def matmul(
     forward,
     contract: model_contracts.ModelContract | None = None,
 ):
-  """Use ``forward`` verbatim for primal and canonical_matmul only for VJP."""
+  """Use `forward` verbatim for primal and `canonical_matmul` only for VJP."""
 
   @jax.custom_vjp
   def op(a, b):
@@ -200,8 +185,15 @@ def matmul(
   return op(x, y)
 
 
-def swiglu(gate, up, *, forward):
-  """Use promoted padded SwiGLU for primal and canonical_swiglu for VJP."""
+def swiglu(
+    gate,
+    up,
+    *,
+    forward: Callable[[jax.Array, jax.Array], jax.Array] | None = None,
+):
+  """Use Pallas SwiGLU for primal and `canonical_swiglu` for VJP."""
+  if forward is None:
+    forward = pallas_swiglu.swiglu
 
   @jax.custom_vjp
   def op(g, u):
@@ -228,26 +220,7 @@ def norm_matmul(
     forward,
     contract: model_contracts.ModelContract | None = None,
 ):
-  """`pallas_norm_matmul` coat: fused Pallas primal, composed replica VJP.
-
-  The backward differentiates canonical_matmul(canonical_rmsnorm(.)) --
-  the same two replicas the separate XK coats differentiate, composed
-  by the chain rule in the same order the un-fused path applies them.
-  canonical_rmsnorm is the declared bit-exact semantic of the Pallas
-  norm, so the recomputed intermediate matches the stored one.
-
-  Args:
-    x: [M, K] bf16 input rows.
-    gamma: [K] bf16 RMSNorm weight.
-    y: [K, N] bf16 projection weight.
-    epsilon: RMSNorm epsilon.
-    forward: The fused primal ``forward(x, gamma, y)``.
-    contract: Model contract for the K-block replica pullback (only used when
-      ``CANON_MATMUL_VJP_PLAIN=0``).
-
-  Returns:
-    ``forward(x, gamma, y)`` with the canonical VJP attached.
-  """
+  """`pallas_norm_matmul` coat: fused Pallas primal, composed replica VJP."""
 
   def oracle(a, g, b):
     return canonical_matmul(
@@ -303,3 +276,225 @@ def rmsnorm(x, weight, *, epsilon: float, forward):
 
   op.defvjp(fwd, bwd)
   return op(x, weight)
+
+
+def _validate_fused_operands(
+    x_2d: jax.Array,
+    w_parts: tuple[jax.Array, ...],
+    *,
+    what: str,
+) -> tuple[int, int, list[int], int]:
+  """Validates `x_2d` `[M, K]` and `w_parts` `([K, N_i], ...)` up front."""
+  if x_2d.ndim != 2:
+    raise ValueError(f"{what} expects rank-2 input x_2d, got {x_2d.shape}")
+  if not w_parts:
+    raise ValueError(f"{what} requires at least one weight part in w_parts")
+  m, k = map(int, x_2d.shape)
+  if m <= 0 or k <= 0:
+    raise ValueError(f"{what} requires positive (M, K), got {(m, k)}")
+  split_points: list[int] = []
+  offset = 0
+  for idx, w in enumerate(w_parts):
+    if w.ndim != 2 or int(w.shape[0]) != k or int(w.shape[1]) <= 0:
+      raise ValueError(
+          f"{what} w_parts[{idx}] must have shape [K={k}, N_i>0], got {w.shape}"
+      )
+    offset += int(w.shape[1])
+    if idx < len(w_parts) - 1:
+      split_points.append(offset)
+  return m, k, split_points, offset
+
+
+def fused_matmul(
+    x_2d: jax.Array,
+    w_parts: tuple[jax.Array, ...],
+    *,
+    contract: model_contracts.ModelContract,
+    interpret: bool = False,
+    out_dtype: jax.typing.DTypeLike = jnp.bfloat16,
+) -> jax.Array:
+  """Horizontally fused `x @ concat(w_parts, axis=1)` with a copy-free residual.
+
+  Keeps the original parameter views `w_parts` as the `custom_vjp` residual and
+  re-materializes the concatenation only inside the backward behind an
+  `optimization_barrier` tied to the cotangent so XLA CSE cannot keep the
+  concatenated weight buffer live across the forward-to-backward span.
+
+  Args:
+    x_2d: `[M, K]` input rows.
+    w_parts: Weights `[K, N_i]` sharing the contracting dim, concatenated along
+      the output axis.
+    contract: Model contract (tile policy) of the Pallas matmul.
+    interpret: Pallas interpret mode.
+    out_dtype: Output dtype.
+
+  Returns:
+    `[M, sum(N_i)]` matmul output.
+  """
+  _, _, split_points, _ = _validate_fused_operands(
+      x_2d, w_parts, what="fused_matmul"
+  )
+  x_bf16 = x_2d.astype(jnp.bfloat16)
+  parts = tuple(w.astype(jnp.bfloat16) for w in w_parts)
+
+  def forward(a: jax.Array, b: jax.Array) -> jax.Array:
+    return padded_matmul.matmul(
+        a,
+        b,
+        contract=contract,
+        interpret=interpret,
+        shape_invariant_numerics=True,
+        block_m=contract.block_m,
+        block_n=contract.block_n,
+        block_k=contract.block_k,
+    )
+
+  @jax.custom_vjp
+  def op(a: jax.Array, ws: tuple[jax.Array, ...]) -> jax.Array:
+    return forward(a, jnp.concatenate(ws, axis=1))
+
+  def op_fwd(a: jax.Array, ws: tuple[jax.Array, ...]):
+    return forward(a, jnp.concatenate(ws, axis=1)), (a, ws)
+
+  def op_bwd(residual, cotangent):
+    a, ws = residual
+    ws_late, cotangent = lax.optimization_barrier((ws, cotangent))
+    w_fused = jnp.concatenate(ws_late, axis=1)
+    if plain_matmul_vjp_enabled():
+      da, dw = plain_matmul_pullback(a, w_fused, cotangent)
+    else:
+      _, pullback = jax.vjp(
+          lambda a_, b_: canonical_matmul(a_, b_, contract=contract),
+          a,
+          w_fused,
+      )
+      da, dw = pullback(cotangent)
+    dws = tuple(jnp.split(dw, split_points, axis=1))
+    return da, dws
+
+  op.defvjp(op_fwd, op_bwd)
+  return op(x_bf16, parts).astype(out_dtype)
+
+
+def norm_matmul_admits(
+    d_in: int, contract: model_contracts.ModelContract
+) -> bool:
+  """Whether `pallas_norm_matmul` can take `[*, d_in]` rows unpadded."""
+  return d_in % contract.block_k == 0 and d_in % pallas_rmsnorm.BF == 0
+
+
+def fused_norm_matmul(
+    x_2d: jax.Array,
+    gamma: jax.Array,
+    w_parts: tuple[jax.Array, ...],
+    *,
+    norm_eps: float,
+    contract: model_contracts.ModelContract,
+    interpret: bool = False,
+    out_dtype: jax.typing.DTypeLike = jnp.bfloat16,
+) -> jax.Array:
+  """Fused `rmsnorm(x, gamma) @ concat(w_parts)` with a copy-free residual.
+
+  Stores only `(x, gamma, w_parts)` as the `custom_vjp` residual (neither the
+  normalized activations nor the concatenated weight copy is kept alive across
+  the forward-to-backward span) and re-derives `h = canonical_rmsnorm(x, gamma)`
+  and `w_fused` (behind an `optimization_barrier`) inside the backward.
+
+  Args:
+    x_2d: `[M, K]` un-normalized rows (residual stream).
+    gamma: `[K]` RMSNorm weight.
+    w_parts: Weights `[K, N_i]` concatenated along the output axis.
+    norm_eps: RMSNorm epsilon.
+    contract: Model contract (tile policy) of the Pallas matmul.
+    interpret: Pallas interpret mode.
+    out_dtype: Output dtype.
+
+  Returns:
+    `[M, sum(N_i)]` projection of the normalized rows.
+  """
+  m, k, split_points, n_total = _validate_fused_operands(
+      x_2d, w_parts, what="fused_norm_matmul"
+  )
+  if gamma.ndim != 1 or int(gamma.shape[0]) != k:
+    raise ValueError(
+        f"fused_norm_matmul expects gamma of shape [{k}], got {gamma.shape}"
+    )
+  if not norm_matmul_admits(k, contract):
+    raise ValueError(
+        f"fused norm_matmul needs K={k} to divide block_k={contract.block_k}"
+        f" and BF={pallas_rmsnorm.BF}"
+    )
+  x_bf16 = x_2d.astype(jnp.bfloat16)
+  gamma_bf16 = gamma.astype(jnp.bfloat16)
+  parts = tuple(w.astype(jnp.bfloat16) for w in w_parts)
+
+  # Keep `block_m = contract.block_m` (128) so `pallas_norm_matmul`'s full-width
+  # VMEM scratch `[block_m, n_padded]` stays within TPU VMEM, while promoting
+  # `(n_padded, block_n)` via `wide_n_tiles` / `tile_policy` so the inner MXU
+  # column loop uses wide `block_n` tiles (matching `padded_matmul.matmul`).
+  block_m = contract.block_m
+  block_n = contract.block_n
+  block_k = contract.block_k
+  m_padded = model_contracts.round_up(m, block_m)
+  n_padded = model_contracts.round_up(n_total, block_n)
+  wide = padded_matmul.wide_n_tiles(
+      m_padded, k, n_total, (block_m, block_n, block_k)
+  )
+  if wide is not None:
+    n_padded, block_n = wide
+  elif (block_m, block_n, block_k) in pallas_matmul.CONTRACT_TILES:
+    _, block_n, _ = pallas_matmul.tile_policy(
+        m_padded, k, n_padded, (block_m, block_n, block_k)
+    )
+
+  def forward(a: jax.Array, g: jax.Array, b: jax.Array) -> jax.Array:
+    if m_padded != m:
+      a = jnp.pad(a, ((0, m_padded - m), (0, 0)), constant_values=0)
+    if n_padded != n_total:
+      b = jnp.pad(b, ((0, 0), (0, n_padded - n_total)), constant_values=0)
+    out = pallas_norm_matmul.norm_matmul(
+        a,
+        g,
+        b,
+        epsilon=norm_eps,
+        interpret=interpret,
+        shape_invariant_numerics=True,
+        block_m=block_m,
+        block_n=block_n,
+        block_k=block_k,
+    )
+    return out[:m, :n_total]
+
+  @jax.custom_vjp
+  def op(a: jax.Array, g: jax.Array, ws: tuple[jax.Array, ...]) -> jax.Array:
+    return forward(a, g, jnp.concatenate(ws, axis=1))
+
+  def op_fwd(a: jax.Array, g: jax.Array, ws: tuple[jax.Array, ...]):
+    return forward(a, g, jnp.concatenate(ws, axis=1)), (a, g, ws)
+
+  def op_bwd(residual, cotangent):
+    a, g, ws = residual
+    ws_late, cotangent = lax.optimization_barrier((ws, cotangent))
+    w_fused = jnp.concatenate(ws_late, axis=1)
+    h, norm_pullback = jax.vjp(
+        lambda a_, g_: pallas_rmsnorm.canonical_rmsnorm(
+            a_, g_, epsilon=norm_eps
+        ),
+        a,
+        g,
+    )
+    if plain_matmul_vjp_enabled():
+      dh, dw = plain_matmul_pullback(h, w_fused, cotangent)
+    else:
+      _, pullback = jax.vjp(
+          lambda h_, b_: canonical_matmul(h_, b_, contract=contract),
+          h,
+          w_fused,
+      )
+      dh, dw = pullback(cotangent)
+    da, dg = norm_pullback(dh)
+    dws = tuple(jnp.split(dw, split_points, axis=1))
+    return da, dg, dws
+
+  op.defvjp(op_fwd, op_bwd)
+  return op(x_bf16, gamma_bf16, parts).astype(out_dtype)
