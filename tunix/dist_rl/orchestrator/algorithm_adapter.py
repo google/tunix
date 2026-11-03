@@ -25,7 +25,6 @@ import functools
 import types
 from typing import Any
 
-import jax.numpy as jnp
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.generate import utils as generate_utils
@@ -173,7 +172,7 @@ class AlgorithmAdapter(abc.ABC):
 
   @abc.abstractmethod
   def compute_advantages(
-      self, rewards: np.ndarray | jnp.ndarray | Sequence[float], **kwargs: Any
+      self, rewards: np.ndarray | Sequence[float], **kwargs: Any
   ) -> Any:
     """Computes returns and advantages from rewards."""
     ...
@@ -248,11 +247,11 @@ class GRPOAdapter(AlgorithmAdapter):
 
   def compute_advantages(
       self,
-      rewards: np.ndarray | jnp.ndarray | Sequence[float],
+      rewards: np.ndarray | Sequence[float],
       num_generations: int | None = None,
-      valid_mask: np.ndarray | jnp.ndarray | None = None,
+      valid_mask: np.ndarray | None = None,
       **kwargs: Any,
-  ) -> jnp.ndarray:
+  ) -> np.ndarray:
     """Computes returns and advantages using the registered advantage estimator.
 
     Args:
@@ -264,7 +263,7 @@ class GRPOAdapter(AlgorithmAdapter):
       **kwargs: Unused.
 
     Returns:
-      Per-trajectory advantages.
+      Per-trajectory advantages as a float32 numpy array.
     """
     del kwargs
     g = num_generations or self.num_generations
@@ -272,12 +271,13 @@ class GRPOAdapter(AlgorithmAdapter):
         self.algo_config.advantage_estimator
     )
     r = np.asarray(rewards, dtype=np.float32).reshape(-1)
-    return jnp.asarray(
+    return np.asarray(
         estimator(
             rewards=r,
             num_generations=g,
             valid_mask=valid_mask,
-        )
+        ),
+        dtype=np.float32,
     )
 
   def create_trainer_payloads(
@@ -299,13 +299,10 @@ class GRPOAdapter(AlgorithmAdapter):
     ):
       valid_mask[:] = False
 
-    advs = np.asarray(
-        self.compute_advantages(
-            rewards,
-            num_generations=self.num_generations,
-            valid_mask=valid_mask,
-        ),
-        dtype=np.float32,
+    advs = self.compute_advantages(
+        rewards,
+        num_generations=self.num_generations,
+        valid_mask=valid_mask,
     )
     payloads = []
 
@@ -421,17 +418,17 @@ class PPOAdapter(AlgorithmAdapter):
 
   def compute_advantages(
       self,
-      rewards: np.ndarray | jnp.ndarray | Sequence[float],
-      values: np.ndarray | jnp.ndarray | None = None,
+      rewards: np.ndarray | Sequence[float],
+      values: np.ndarray | None = None,
       **kwargs: Any,
-  ) -> tuple[jnp.ndarray, jnp.ndarray]:
+  ) -> tuple[np.ndarray, np.ndarray]:
     """Computes GAE advantages and value function regression targets."""
     del kwargs
-    r = jnp.asarray(rewards, dtype=jnp.float32)
+    r = np.asarray(rewards, dtype=np.float32)
     if values is None:
-      values = jnp.zeros_like(r)
+      values = np.zeros_like(r)
     else:
-      values = jnp.asarray(values, dtype=jnp.float32)
+      values = np.asarray(values, dtype=np.float32)
 
     # 1-step / scalar GAE fallback for sequence-level rewards
     deltas = r - values
@@ -450,9 +447,7 @@ class PPOAdapter(AlgorithmAdapter):
   ) -> list[datatypes.RLTrainerPayload]:
     """Builds unbatched RLTrainerPayloads with GAE advantages, value targets, and old_logprobs."""
     del kwargs
-    advs_jax, val_targets_jax = self.compute_advantages(rewards, values=values)
-    advs = np.asarray(advs_jax, dtype=np.float32)
-    val_targets = np.asarray(val_targets_jax, dtype=np.float32)
+    advs, val_targets = self.compute_advantages(rewards, values=values)
     payloads = []
     trajectories = getattr(group, "trajectories", None) or (
         group if isinstance(group, (list, tuple)) else [group]

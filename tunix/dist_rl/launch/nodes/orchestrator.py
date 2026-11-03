@@ -578,10 +578,10 @@ def close_cluster(
 def _pin_control_plane_to_cpu() -> None:
   """Defaults the control-plane JAX platform to CPU.
 
-  The orchestrator runs small JAX computations (`GRPOAdapter.compute_advantages`
-  returns `jax.numpy` arrays), and its imports load JAX anyway. On
-  `cluster_config.target: local` it shares the host with the trainer and rollout
-  nodes, so an unpinned JAX would claim the TPUs those nodes own.
+  The orchestrator's imports still load JAX transitively (e.g. through
+  `tunix.rl.algo_core`). On `cluster_config.target: local` it shares the host
+  with the trainer and rollout nodes, so an unpinned JAX would claim the TPUs
+  those nodes own.
 
   JAX reads `JAX_PLATFORMS` when it is imported, so an explicitly set value is
   already in `jax.config` and is kept. Must run before any JAX backend use.
