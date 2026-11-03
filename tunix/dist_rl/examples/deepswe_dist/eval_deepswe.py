@@ -226,8 +226,7 @@ async def collect_worker(handle, jobs, limit, args, on_result):
       pending[request_id] = (index, entry, time.monotonic())
     if not pending:
       break
-    reply = await handle.poll_responses(timeout_s=5)
-    if reply is not None:
+    for reply in await handle.poll_responses(timeout_s=5):
       if reply.request_id not in pending:
         raise RuntimeError(f"Unexpected evaluation result: {reply.request_id}")
       index, entry, started = pending.pop(reply.request_id)
