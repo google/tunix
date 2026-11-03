@@ -16,7 +16,8 @@ import enum
 import functools
 import math
 import sys
-from typing import Annotated, Any, ClassVar, Final, Generic, Literal, Self, TypeVar, TypedDict, cast, get_args
+import types
+from typing import Annotated, Any, ClassVar, Final, Generic, Literal, Self, TypeVar, TypedDict, Union, cast, get_args, get_origin
 import weakref
 
 import numpy as np
@@ -53,15 +54,59 @@ _JSON_SCALAR_TYPES: Final[frozenset[type[object]]] = frozenset(
 )
 
 
+class _JsonCompatibleDict(dict[str, Any]):
+  """A dict whose values `_pack_subclass_values_into_extra` already converted.
+
+  Projecting a subclass model to base ATIF stores its serialized extension
+  fields under `extra[EXTENSIONS_KEY]` in this type when every value is
+  JSON-compatible and every `list` stored directly in it is a flat list of JSON
+  scalars (token IDs, masks, logprobs, policy versions). `_to_json_compatible`
+  and `_deep_copy_into_memo` therefore copy those lists with one C-level
+  `list.copy()` instead of scanning every element again on each `model_dump()`
+  or `deep_copy()`.
+
+  Only `_pack_subclass_values_into_extra` creates instances; if any packed list
+  holds nested containers, it stores a plain `dict` instead. A plain `dict` with
+  the same keys that a caller builds by hand also takes the regular conversion
+  path, so unconverted arrays or tuples in it are still serialized correctly.
+  """
+
+  __slots__ = ()
+
+
 def _to_json_compatible(value: Any) -> Any:
-  """Recursively converts NumPy arrays and tuples nested in `value` to lists."""
+  """Recursively converts NumPy arrays and tuples nested in `value` to lists.
+
+  Every `list` and `dict` in the result is a new object, so the output of
+  `model_dump()` never shares a container with the model's `extra`.
+
+  Args:
+    value: The value to convert.
+
+  Returns:
+    The JSON-compatible equivalent of `value`.
+  """
+  value_type = type(value)
   if isinstance(value, np.ndarray):
     return value.tolist()
+  if value_type is _JsonCompatibleDict:
+    # Already converted when packed; copy flat scalar lists in one C call.
+    out: dict[str, Any] = {}
+    for key, element in value.items():
+      element_type = type(element)
+      if element_type is list:
+        out[key] = element.copy()
+      elif element_type in _JSON_SCALAR_TYPES:
+        out[key] = element
+      else:
+        out[key] = _to_json_compatible(element)
+    return out
   if isinstance(value, dict):
     return {k: _to_json_compatible(v) for k, v in value.items()}
   if isinstance(value, (list, tuple)):
-    # `to_atif_step()` packs long token, mask, and logprob lists into `extra`;
-    # copy scalar-only sequences without a Python call per element.
+    # Caller-supplied token or ID lists in `extra` are common; vet scalar-only
+    # sequences with one C-level scan and copy them without a Python call per
+    # element.
     if _JSON_SCALAR_TYPES.issuperset(map(type, value)):
       return list(value)
     return [_to_json_compatible(v) for v in value]
@@ -79,19 +124,131 @@ def _serialize_dict(value: dict[str, Any] | None) -> dict[str, Any] | None:
 _MISSING: Final[object] = object()
 
 
+def _copy_scalar_list(value: list[Any], memo: dict[int, Any]) -> list[Any]:
+  """Copies a list known to hold only JSON scalars, recording it in `memo`."""
+  memoized_copy = memo.get(id(value), _MISSING)
+  if memoized_copy is not _MISSING:
+    return memoized_copy
+  list_copy = value.copy()
+  memo[id(value)] = list_copy
+  return list_copy
+
+
+def _is_json_scalar_annotation(annotation: Any) -> bool:
+  """Returns whether `annotation` only admits `_JSON_SCALAR_TYPES` values."""
+  if get_origin(annotation) is Annotated:
+    annotation = get_args(annotation)[0]
+  if annotation in _JSON_SCALAR_TYPES:
+    return True
+  if get_origin(annotation) in (types.UnionType, Union):
+    return all(
+        _is_json_scalar_annotation(member) for member in get_args(annotation)
+    )
+  return False
+
+
+def _is_scalar_list_annotation(annotation: Any) -> bool:
+  """Returns whether `annotation` only admits `list` values of JSON scalars.
+
+  Matches `list[T]` (and unions of `list[T]` with non-list types such as `None`
+  or `np.ndarray`, like `IntArray` and `FloatArray`) where `T` only admits
+  `_JSON_SCALAR_TYPES` elements. Nested lists such as `Int3DArray`
+  (`list[list[list[int]]]`) and model or dict lists return `False`.
+
+  Args:
+    annotation: A resolved field annotation from `model_fields`.
+
+  Returns:
+    `True` if any `list` value validated by the field is a flat list of JSON
+    scalars.
+  """
+  if get_origin(annotation) is Annotated:
+    annotation = get_args(annotation)[0]
+  origin = get_origin(annotation)
+  members = (
+      get_args(annotation)
+      if origin in (types.UnionType, Union)
+      else (annotation,)
+  )
+  has_scalar_list = False
+  for member in members:
+    if get_origin(member) is Annotated:
+      member = get_args(member)[0]
+    if get_origin(member) is list:
+      args = get_args(member)
+      if len(args) != 1 or not _is_json_scalar_annotation(args[0]):
+        return False
+      has_scalar_list = True
+    elif member is not np.ndarray and not _is_json_scalar_annotation(member):
+      return False
+  return has_scalar_list
+
+
+def _scalar_list_fields(
+    model_cls: type[pydantic.BaseModel],
+) -> frozenset[str]:
+  """Returns the names of fields on `model_cls` annotated as flat scalar lists."""
+  return frozenset(
+      name
+      for name, field in model_cls.model_fields.items()
+      if _is_scalar_list_annotation(field.annotation)
+  )
+
+
+def _deep_copy_model_dict(
+    model: pydantic.BaseModel, memo: dict[int, Any]
+) -> dict[str, Any]:
+  """Deep-copies `model.__dict__` into `memo`.
+
+  Fields that the model class lists in `SCALAR_LIST_FIELDS` hold flat lists of
+  JSON scalars once validated (token IDs, masks, logprobs, policy versions), so
+  a `list` in such a field is copied with one C-level `list.copy()` instead of
+  a per-element type scan. Every other value takes `_deep_copy_into_memo`.
+
+  Args:
+    model: The model whose `__dict__` to copy.
+    memo: The `copy.deepcopy` memo, mapping the `id()` of each copied original
+      to its copy.
+
+  Returns:
+    A deep copy of `model.__dict__`.
+  """
+  model_dict = model.__dict__
+  memoized_copy = memo.get(id(model_dict), _MISSING)
+  if memoized_copy is not _MISSING:
+    return memoized_copy
+  scalar_list_fields = (
+      type(model).SCALAR_LIST_FIELDS
+      if isinstance(model, (Metrics, Step, TrajectoryMetadata))
+      else frozenset()
+  )
+  dict_copy: dict[str, Any] = {}
+  memo[id(model_dict)] = dict_copy
+  for key, element in model_dict.items():
+    element_type = type(element)
+    if element_type is list and key in scalar_list_fields:
+      element = _copy_scalar_list(element, memo)
+    elif element_type not in _JSON_SCALAR_TYPES:
+      element = _deep_copy_into_memo(element, memo)
+    dict_copy[key] = element
+  return dict_copy
+
+
 def _deep_copy_into_memo(value: Any, memo: dict[int, Any]) -> Any:
   """Returns a deep copy of `value`, sharing `memo` with `copy.deepcopy`.
 
   `copy.deepcopy` makes a Python call per element of a list or dict, which
   dominates the cost of copying long token ID and logprob lists and nested
-  JSON-like dicts such as tool definitions. This function copies exact `list`s
-  and `dict`s itself: it reuses elements of `_JSON_SCALAR_TYPES`, which are
-  immutable, without a call, and copies a list holding only such elements with
-  one C-level `list.copy()`. Like `copy.deepcopy`, it records each copy in
-  `memo` before copying the values nested in it, so shared and cyclic
-  references are copied once. Any other value goes to `copy.deepcopy` with the
-  same `memo`. For a pydantic model, it copies `__dict__` this way and then
-  calls the model's `__deepcopy__`, which finds that copy in `memo`.
+  JSON-like dicts such as tool definitions. This function copies exact `list`s,
+  `dict`s, `_JsonCompatibleDict`s, and NumPy arrays without object elements
+  itself: it reuses elements of `_JSON_SCALAR_TYPES`, which are immutable,
+  without a call, copies a list holding only such elements with one C-level
+  `list.copy()`, and copies an array with one `ndarray.copy()`. Like
+  `copy.deepcopy`, it records each copy in `memo` before copying the values
+  nested in it, so shared and cyclic references are copied once. Any other
+  value goes to `copy.deepcopy` with the same `memo`. For a pydantic model, it
+  copies `__dict__` via `_deep_copy_model_dict` and then calls the model's
+  `__deepcopy__`, which finds that copy in `memo`.
 
   Args:
     value: The value to copy.
@@ -107,6 +264,25 @@ def _deep_copy_into_memo(value: Any, memo: dict[int, Any]) -> Any:
   memoized_copy = memo.get(id(value), _MISSING)
   if memoized_copy is not _MISSING:
     return memoized_copy
+  if value_type is np.ndarray and not value.dtype.hasobject:
+    # Same buffer copy `ndarray.__deepcopy__` makes for these dtypes, without
+    # the `copy.deepcopy` dispatch. Arrays holding Python objects, including
+    # structured dtypes with an object field, must deep-copy their elements.
+    array_copy = value.copy()
+    memo[id(value)] = array_copy
+    return array_copy
+  if value_type is _JsonCompatibleDict:
+    packed_copy = _JsonCompatibleDict()
+    memo[id(value)] = packed_copy
+    for key, element in value.items():
+      element_type = type(element)
+      if element_type is list:
+        # Flat scalar lists by construction; see `_JsonCompatibleDict`.
+        element = _copy_scalar_list(element, memo)
+      elif element_type not in _JSON_SCALAR_TYPES:
+        element = _deep_copy_into_memo(element, memo)
+      packed_copy[key] = element
+    return packed_copy
   # Subclasses of `list` and `dict` are left to `copy.deepcopy`, which
   # preserves their type.
   if value_type is list:
@@ -134,7 +310,7 @@ def _deep_copy_into_memo(value: Any, memo: dict[int, Any]) -> Any:
     return dict_copy
   if isinstance(value, pydantic.BaseModel):
     # Copied here first, so that `__deepcopy__` finds this copy in `memo`.
-    _deep_copy_into_memo(value.__dict__, memo)
+    _deep_copy_model_dict(value, memo)
     # Calls `__deepcopy__` itself, as `copy.deepcopy(value, memo)` does on a
     # memo miss. If a field refers back to `value`, copying `__dict__` has
     # already put an inner copy of `value` in `memo`, which `copy.deepcopy`
@@ -200,6 +376,15 @@ def _get_non_none_fields(
   return values_by_field
 
 
+def _is_flat_scalar_source(
+    raw: Any, field: str, scalar_list_fields: frozenset[str]
+) -> bool:
+  """Returns whether packing `raw` yields a flat list of JSON scalars."""
+  if isinstance(raw, np.ndarray):
+    return raw.ndim == 1 and raw.dtype.kind in "biuf"
+  return isinstance(raw, list) and field in scalar_list_fields
+
+
 def _pack_subclass_values_into_extra(
     subclass_model: Step | TrajectoryMetadata,
     base_atif_cls: type[pydantic.BaseModel],
@@ -250,8 +435,21 @@ def _pack_subclass_values_into_extra(
   extra = dict(subclass_model.extra or {})
   if subclass_values_by_field:
     extensions_key = subclass_model.EXTENSIONS_KEY
-    existing_extensions = extra.get(extensions_key) or {}
-    extra[extensions_key] = existing_extensions | subclass_values_by_field
+    # Caller-supplied extensions are converted here so that everything stored
+    # in the packed dict is JSON-compatible; `_JsonCompatibleDict` is used only
+    # when every top-level list is a flat list of JSON scalars.
+    existing_extensions = _to_json_compatible(extra.get(extensions_key) or {})
+    packed = existing_extensions | subclass_values_by_field
+    scalar_list_fields = type(subclass_model).SCALAR_LIST_FIELDS
+    is_flat = all(
+        not isinstance(value, list)
+        or _is_flat_scalar_source(
+            subclass_fields.get(key), key, scalar_list_fields
+        )
+        or _JSON_SCALAR_TYPES.issuperset(map(type, value))
+        for key, value in packed.items()
+    )
+    extra[extensions_key] = _JsonCompatibleDict(packed) if is_flat else packed
   if extra:
     base_values_by_field[_EXTRA_FIELD] = extra
   return base_values_by_field
@@ -541,6 +739,16 @@ class Observation(pydantic.BaseModel):
 class Metrics(pydantic.BaseModel):
   """LLM operational and confidence data for a step."""
 
+  # Fields whose `list` values hold only JSON scalars once validated, so
+  # `deep_copy` copies them with one `list.copy()` instead of a per-element
+  # scan. Populated from `model_fields` for `Metrics` and its subclasses.
+  SCALAR_LIST_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
+  @classmethod
+  def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+    super().__pydantic_init_subclass__(**kwargs)
+    cls.SCALAR_LIST_FIELDS = _scalar_list_fields(cls)
+
   prompt_tokens: int | None = pydantic.Field(
       default=None,
       description="Total input tokens, including cached and non-cached.",
@@ -573,6 +781,9 @@ class Metrics(pydantic.BaseModel):
       default=None,
       description="Other operational metrics.",
   )
+
+
+Metrics.SCALAR_LIST_FIELDS = _scalar_list_fields(Metrics)
 
 
 class FinalMetrics(pydantic.BaseModel):
@@ -678,11 +889,17 @@ class Step(pydantic.BaseModel):
   # projecting to base ATIF. Subclasses must define this ClassVar.
   EXTENSIONS_KEY: ClassVar[str]
 
+  # Fields whose `list` values hold only JSON scalars once validated, so
+  # `deep_copy` copies them with one `list.copy()` instead of a per-element
+  # scan. Populated in `__pydantic_init_subclass__` from `model_fields`.
+  SCALAR_LIST_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
   @classmethod
   def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
-    """Validates that Step subclasses define a non-empty EXTENSIONS_KEY."""
+    """Validates `EXTENSIONS_KEY` and records scalar-list fields."""
     super().__pydantic_init_subclass__(**kwargs)
     _validate_subclass_extensions_key(cls)
+    cls.SCALAR_LIST_FIELDS = _scalar_list_fields(cls)
 
   step_id: int = pydantic.Field(
       description="Ordinal index of the turn (starting from 1).",
@@ -805,6 +1022,11 @@ class TrajectoryMetadata(pydantic.BaseModel):
   # projecting to base ATIF. Subclasses must define this ClassVar.
   EXTENSIONS_KEY: ClassVar[str]
 
+  # Fields whose `list` values hold only JSON scalars once validated, so
+  # `deep_copy` copies them with one `list.copy()` instead of a per-element
+  # scan. Populated in `__pydantic_init_subclass__` from `model_fields`.
+  SCALAR_LIST_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
   # Maps each registered TrajectoryMetadata subclass to the set of extension
   # field names it defines beyond the base ATIF TrajectoryMetadata schema.
   # WeakKeyDictionary avoids keeping dynamically defined/test classes alive.
@@ -848,6 +1070,7 @@ class TrajectoryMetadata(pydantic.BaseModel):
           TrajectoryMetadata._PAIRED_TRAJECTORY_CLASSES[base] = cls
       return
     _validate_subclass_extensions_key(cls)
+    cls.SCALAR_LIST_FIELDS = _scalar_list_fields(cls)
     extension_fields = frozenset(
         cls.model_fields.keys() - TrajectoryMetadata.model_fields.keys()
     )

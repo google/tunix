@@ -186,6 +186,150 @@ class MetadataDictSerializationTest(parameterized.TestCase):
     # One call for the `extra` dict and one for the list, none per element.
     self.assertEqual(mock_to_json_compatible.call_count, 2)
 
+  def test_model_dump_copies_primitive_lists(self):
+    tokens = [1, 2, 3]
+    step = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        extra={"tokens": tokens},
+    )
+
+    dumped_tokens = step.model_dump()["extra"]["tokens"]
+
+    self.assertEqual(dumped_tokens, tokens)
+    self.assertIsNot(dumped_tokens, tokens)
+
+  def test_model_dump_copies_packed_scalar_lists_without_rescanning(self):
+    agent_step = trajectory_testing.TUNIX_AGENT_STEP_1.to_atif_step()
+    packed = agent_step.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    self.assertIs(type(packed), trajectory._JsonCompatibleDict)
+    packed_lists = [
+        value for value in packed.values() if isinstance(value, list)
+    ]
+    self.assertNotEmpty(packed_lists)
+    packed_scalars = [
+        value
+        for value in packed.values()
+        if type(value) in trajectory._JSON_SCALAR_TYPES
+    ]
+    self.assertNotEmpty(packed_scalars)
+
+    with mock.patch.object(
+        trajectory,
+        "_to_json_compatible",
+        wraps=trajectory._to_json_compatible,
+    ) as mock_to_json_compatible:
+      dumped_extra = agent_step.model_dump()["extra"]
+
+    self.assertEqual(dumped_extra, agent_step.extra)
+    dumped_packed = dumped_extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    self.assertIs(type(dumped_packed), dict)
+    # Packed token, mask, and logprob lists are copied in one C call, and
+    # scalar extensions skip recursive dispatch altogether.
+    called_values = [
+        call.args[0] for call in mock_to_json_compatible.call_args_list
+    ]
+    for packed_list in packed_lists:
+      self.assertTrue(all(v is not packed_list for v in called_values))
+    for packed_scalar in packed_scalars:
+      self.assertTrue(all(v is not packed_scalar for v in called_values))
+    self.assertEqual(dumped_packed["assistant_tokens"], [10, 20])
+    self.assertIsNot(
+        dumped_packed["assistant_tokens"], packed["assistant_tokens"]
+    )
+
+  def test_model_dump_converts_caller_built_extensions_dict(self):
+    # A dict a caller builds by hand under the Tunix extensions key is not a
+    # packed dict, so arrays and tuples inside it are still converted.
+    step = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        extra={
+            trajectory.TUNIX_EXTENSIONS_KEY: {
+                "assistant_tokens": [np.array([1, 2])],
+                "prefill_routed_experts": {"shape": (1, 1, 2)},
+            }
+        },
+    )
+
+    dumped = step.model_dump()["extra"][trajectory.TUNIX_EXTENSIONS_KEY]
+
+    expected = {
+        "assistant_tokens": [[1, 2]],
+        "prefill_routed_experts": {"shape": [1, 1, 2]},
+    }
+    self.assertEqual(dumped, expected)
+    self.assertEqual(
+        json.loads(step.model_dump_json())["extra"][
+            trajectory.TUNIX_EXTENSIONS_KEY
+        ],
+        expected,
+    )
+
+
+class PackedExtensionsTest(parameterized.TestCase):
+  """Tests the contract of extensions packed into `extra` on projection."""
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="agent_step",
+          model=trajectory_testing.TUNIX_AGENT_STEP_1,
+      ),
+      dict(testcase_name="env_step", model=trajectory_testing.TUNIX_ENV_STEP_0),
+      dict(testcase_name="metadata", model=trajectory_testing.TUNIX_METADATA_1),
+      dict(
+          testcase_name="trajectory",
+          model=trajectory_testing.TUNIX_TRAJECTORY_1,
+      ),
+  )
+  def test_packed_lists_are_flat_scalar_lists(
+      self, model: trajectory.Step | trajectory.TrajectoryMetadata
+  ) -> None:
+    """Verifies the invariant `_JsonCompatibleDict` fast paths rely on."""
+    if isinstance(model, trajectory.Step):
+      projected = model.to_atif_step()
+    else:
+      projected = model.to_atif_metadata()
+
+    packed = projected.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+
+    self.assertIs(type(packed), trajectory._JsonCompatibleDict)
+    for key, value in packed.items():
+      if isinstance(value, list):
+        self.assertTrue(
+            trajectory._JSON_SCALAR_TYPES.issuperset(map(type, value)),
+            msg=f"{key} holds non-scalar elements: {value!r}",
+        )
+
+  def test_to_atif_metadata_does_not_alias_target_policy_versions(
+      self,
+  ) -> None:
+    metadata = trajectory_testing.TUNIX_METADATA_1.model_copy(deep=True)
+
+    atif_metadata = metadata.to_atif_metadata()
+    metadata.target_policy_versions.append(4)
+
+    self.assertEqual(
+        atif_metadata.extra[trajectory.TUNIX_EXTENSIONS_KEY][
+            "target_policy_versions"
+        ],
+        [2, 3],
+    )
+
+  def test_to_atif_step_converts_existing_extensions(self) -> None:
+    custom_extensions = {"custom": np.array([7])}
+    step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(
+        update={"extra": {trajectory.TUNIX_EXTENSIONS_KEY: custom_extensions}}
+    )
+
+    packed = step.to_atif_step().extra[trajectory.TUNIX_EXTENSIONS_KEY]
+
+    self.assertIs(type(packed), trajectory._JsonCompatibleDict)
+    self.assertEqual(packed["custom"], [7])
+    self.assertEqual(packed["assistant_tokens"], [10, 20])
+
 
 class _IterationCountingArray(np.ndarray):
   """A NumPy array that counts the calls to its `__iter__`."""
@@ -557,6 +701,181 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
     copied_ids_by_pair = copied.extra["ids_by_pair"]
     self.assertEqual(copied_ids_by_pair, {(1, 2): [3], (4, 5): [6]})
     self.assertIsNot(copied_ids_by_pair[(1, 2)], ids_by_pair[(1, 2)])
+
+  def test_deep_copy_copies_ndarrays_and_scalar_list_fields_directly(
+      self,
+  ) -> None:
+    """Verifies arrays and scalar-list fields skip the per-element paths."""
+    arr = np.array([1, 2, 3], dtype=np.int32)
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        assistant_tokens=[10, 20, 30],
+        assistant_masks=arr,
+        metrics=trajectory.Metrics(completion_token_ids=[10, 20, 30]),
+    )
+    shared_tokens = step.assistant_tokens
+    step.metrics.completion_token_ids = shared_tokens
+
+    with (
+        mock.patch.object(
+            copy, "deepcopy", wraps=copy.deepcopy
+        ) as mock_deepcopy,
+        mock.patch.object(
+            trajectory,
+            "_deep_copy_into_memo",
+            wraps=trajectory._deep_copy_into_memo,
+        ) as mock_deep_copy_into_memo,
+    ):
+      copied = trajectory.deep_copy(step)
+
+    self.assertIsNot(copied.assistant_tokens, shared_tokens)
+    self.assertEqual(copied.assistant_tokens, [10, 20, 30])
+    # A list shared by two scalar-list fields is copied once.
+    self.assertIs(copied.metrics.completion_token_ids, copied.assistant_tokens)
+    self.assertIsNot(copied.assistant_masks, arr)
+    np.testing.assert_array_equal(copied.assistant_masks, arr)
+    for call in mock_deepcopy.call_args_list:
+      self.assertNotIsInstance(call.args[0], np.ndarray)
+    for call in mock_deep_copy_into_memo.call_args_list:
+      self.assertIsNot(call.args[0], shared_tokens)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="object_dtype",
+          array=np.array([{"k": 1}], dtype=object),
+          element_of=lambda array: array[0],
+      ),
+      dict(
+          testcase_name="structured_dtype_with_object_field",
+          array=np.array(
+              [(1, {"k": 1})], dtype=[("id", np.int32), ("obj", object)]
+          ),
+          element_of=lambda array: array["obj"][0],
+      ),
+  )
+  def test_deep_copy_deep_copies_arrays_holding_objects(
+      self, array: np.ndarray, element_of: Any
+  ) -> None:
+    """Verifies arrays with Python object elements copy those elements."""
+    step = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        extra={"array": array},
+    )
+
+    copied = trajectory.deep_copy(step)
+
+    copied_array = copied.extra["array"]
+    self.assertIsNot(copied_array, array)
+    self.assertEqual(element_of(copied_array), {"k": 1})
+    self.assertIsNot(element_of(copied_array), element_of(array))
+
+  def test_deep_copy_preserves_packed_extensions(self) -> None:
+    """Verifies packed extensions keep their type and copy lists directly."""
+    atif_step = trajectory_testing.TUNIX_AGENT_STEP_1.to_atif_step()
+    packed = atif_step.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    packed_lists = [
+        value for value in packed.values() if isinstance(value, list)
+    ]
+    self.assertNotEmpty(packed_lists)
+
+    with mock.patch.object(
+        trajectory,
+        "_deep_copy_into_memo",
+        wraps=trajectory._deep_copy_into_memo,
+    ) as mock_deep_copy_into_memo:
+      copied = trajectory.deep_copy(atif_step)
+
+    copied_packed = copied.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    self.assertIs(type(copied_packed), trajectory._JsonCompatibleDict)
+    self.assertEqual(copied_packed, packed)
+    self.assertIsNot(
+        copied_packed["assistant_tokens"], packed["assistant_tokens"]
+    )
+    for call in mock_deep_copy_into_memo.call_args_list:
+      for packed_list in packed_lists:
+        self.assertIsNot(call.args[0], packed_list)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="caller_supplied_nested_list",
+          step_kwargs={
+              "extra": {
+                  trajectory.TUNIX_EXTENSIONS_KEY: {"tags": [{"k": "v"}]}
+              }
+          },
+          packed_key="tags",
+      ),
+      dict(
+          testcase_name="two_dimensional_array",
+          step_kwargs={"logprobs": np.zeros((2, 3), dtype=np.float32)},
+          packed_key="logprobs",
+      ),
+  )
+  def test_deep_copy_of_projected_step_shares_no_nested_containers(
+      self, step_kwargs: dict[str, Any], packed_key: str
+  ) -> None:
+    """Verifies packed extensions holding nested containers are deep-copied."""
+    atif_step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        **step_kwargs,
+    ).to_atif_step()
+    packed = atif_step.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+
+    copied = trajectory.deep_copy(atif_step)
+
+    copied_packed = copied.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    self.assertEqual(copied_packed[packed_key], packed[packed_key])
+    self.assertIsNot(copied_packed[packed_key][0], packed[packed_key][0])
+
+  def test_scalar_list_fields_populated_from_annotations(self) -> None:
+    """Verifies `SCALAR_LIST_FIELDS` is derived from `model_fields` at import/init."""
+    self.assertEqual(
+        trajectory.Metrics.SCALAR_LIST_FIELDS,
+        frozenset({"prompt_token_ids", "completion_token_ids", "logprobs"}),
+    )
+    self.assertEqual(trajectory.Step.SCALAR_LIST_FIELDS, frozenset())
+    self.assertEqual(
+        trajectory.TunixAgentStep.SCALAR_LIST_FIELDS,
+        frozenset({"assistant_tokens", "assistant_masks", "logprobs"}),
+    )
+    self.assertEqual(
+        trajectory.TunixEnvStep.SCALAR_LIST_FIELDS,
+        frozenset({"env_tokens", "env_masks"}),
+    )
+    self.assertEqual(
+        trajectory.TrajectoryMetadata.SCALAR_LIST_FIELDS, frozenset()
+    )
+    self.assertEqual(
+        trajectory.TunixTrajectoryMetadata.SCALAR_LIST_FIELDS,
+        frozenset({"target_policy_versions"}),
+    )
+    self.assertEqual(
+        trajectory.TunixTrajectory.SCALAR_LIST_FIELDS,
+        frozenset({"target_policy_versions"}),
+    )
+
+    class _CustomStep(trajectory.Step):
+      model_config = pydantic.ConfigDict(
+          arbitrary_types_allowed=True, extra="forbid"
+      )
+      EXTENSIONS_KEY = "_custom_step_ext"
+      token_ids: trajectory.IntArray = None
+      scores: trajectory.FloatArray = None
+      labels: list[str | None] | None = None
+      routed_experts: trajectory.Int3DArray = None
+      nested_lists: list[list[int]] | None = None
+      records: list[dict[str, Any]] | None = None
+
+    self.assertEqual(
+        _CustomStep.SCALAR_LIST_FIELDS,
+        frozenset({"token_ids", "scores", "labels"}),
+    )
 
 
 class _ModuleAutoPairMetadata(trajectory.TrajectoryMetadata):
