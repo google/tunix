@@ -3426,5 +3426,157 @@ class TrajectoryMetricsTest(parameterized.TestCase):
       trajectory.TrajectoryMetrics.model_validate({"unknown_metric": 1})
 
 
+class TolerantCreateTrajectoryTest(absltest.TestCase):
+  """Unit tests for tolerant trajectory construction (strict=False)."""
+
+  def test_create_trajectory_strict_false_clips_gap_on_base_metadata(
+      self,
+  ) -> None:
+    meta = trajectory.TrajectoryMetadata(
+        trajectory_id="base_gap",
+        agent=trajectory.Agent(name="test", version="1.0"),
+    )
+    step1 = trajectory_testing.make_step(step_id=1, message="step 1")
+    step2 = trajectory_testing.make_step(step_id=2, message="step 2")
+    step4 = trajectory_testing.make_step(step_id=4, message="step 4")
+
+    traj = meta.create_trajectory(steps=[step1, step2, step4], strict=False)
+
+    self.assertEqual(trajectory.Trajectory.STEP_ID_START, 1)
+    self.assertEqual([s.step_id for s in traj.steps], [1, 2])
+
+  def test_create_trajectory_strict_false_clips_gap_and_resets_completion(
+      self,
+  ) -> None:
+    meta = trajectory.TunixTrajectoryMetadata(
+        trajectory_id="tunix_gap",
+        agent=trajectory.Agent(name="test", version="1.0"),
+        status="COMPLETED",
+        total_reward=10.0,
+        final_metrics=trajectory.FinalMetrics(total_steps=3),
+    )
+    step1 = trajectory_testing.make_step(step_id=1, message="step 1")
+    step2 = trajectory_testing.make_step(step_id=2, message="step 2")
+    step4 = trajectory_testing.make_step(step_id=4, message="step 4")
+
+    traj = meta.create_trajectory(steps=[step1, step2, step4], strict=False)
+
+    self.assertEqual(trajectory.TunixTrajectory.STEP_ID_START, 0)
+    self.assertEqual([s.step_id for s in traj.steps], [0, 1])
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+
+  def test_create_trajectory_strict_false_head_truncated_tunix_steps_returns_empty(
+      self,
+  ) -> None:
+    meta = trajectory.TunixTrajectoryMetadata(
+        trajectory_id="head_truncated",
+        agent=trajectory.Agent(name="test", version="1.0"),
+        status="COMPLETED",
+        total_reward=10.0,
+        final_metrics=trajectory.FinalMetrics(total_steps=2),
+    )
+    step1 = trajectory.TunixAgentStep(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="step 1",
+    )
+    step2 = trajectory.TunixAgentStep(
+        step_id=2,
+        source=trajectory.Source.AGENT,
+        message="step 2",
+    )
+
+    traj = meta.create_trajectory(steps=[step1, step2], strict=False)
+
+    self.assertEmpty(traj.steps)
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+
+  def test_create_trajectory_strict_false_resets_completion_on_tail_mismatch(
+      self,
+  ) -> None:
+    meta = trajectory.TunixTrajectoryMetadata(
+        trajectory_id="tail_mismatch",
+        agent=trajectory.Agent(name="test", version="1.0"),
+        status="SUCCEEDED",
+        total_reward=10.0,
+        final_metrics=trajectory.FinalMetrics(total_steps=3),
+    )
+    step1 = trajectory_testing.make_step(step_id=1, message="step 1")
+    step2 = trajectory_testing.make_step(step_id=2, message="step 2")
+
+    traj = meta.create_trajectory(steps=[step1, step2], strict=False)
+
+    self.assertEqual([s.step_id for s in traj.steps], [0, 1])
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+
+  def test_create_trajectory_strict_false_resets_completion_when_was_clipped_true(
+      self,
+  ) -> None:
+    meta = trajectory.TunixTrajectoryMetadata(
+        trajectory_id="was_clipped_flag",
+        agent=trajectory.Agent(name="test", version="1.0"),
+        status="SUCCEEDED",
+        total_reward=10.0,
+    )
+    step1 = trajectory_testing.make_step(step_id=1, message="step 1")
+    step2 = trajectory_testing.make_step(step_id=2, message="step 2")
+
+    traj = meta.create_trajectory(
+        steps=[step1, step2],
+        strict=False,
+        was_clipped=True,
+    )
+
+    self.assertEqual([s.step_id for s in traj.steps], [0, 1])
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+
+  def test_create_trajectory_strict_false_skips_corrupt_subclass_step(
+      self,
+  ) -> None:
+    meta = trajectory.TunixTrajectoryMetadata(
+        trajectory_id="corrupt_ext",
+        agent=trajectory.Agent(name="test", version="1.0"),
+        status="SUCCEEDED",
+        total_reward=10.0,
+    )
+    step1 = trajectory_testing.make_step(step_id=1, message="step 1")
+    step2_corrupt = trajectory.Step(
+        step_id=2,
+        source=trajectory.Source.AGENT,
+        message="step 2",
+        extra={
+            "_tunix_extensions": {
+                "prefill_start": -5,
+                "prefill_num_context": 0,
+                "prefill_routed_experts": {
+                    "shape": [1, 1, 1],
+                    "dtype": "int16",
+                    "data": "AAAA",
+                },
+            }
+        },
+    )
+    step3 = trajectory_testing.make_step(step_id=3, message="step 3")
+
+    with self.assertRaisesRegex(ValueError, "Decoded Int3DArray byte length"):
+      meta.create_trajectory(
+          steps=[step1, step2_corrupt, step3],
+          strict=True,
+      )
+
+    traj = meta.create_trajectory(
+        steps=[step1, step2_corrupt, step3],
+        strict=False,
+    )
+
+    self.assertEqual([s.step_id for s in traj.steps], [0])
+    self.assertIsNone(traj.status)
+    self.assertIsNone(traj.total_reward)
+
+
 if __name__ == "__main__":
   absltest.main()

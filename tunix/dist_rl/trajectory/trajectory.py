@@ -14,6 +14,7 @@ import dataclasses
 import datetime
 import enum
 import functools
+import logging
 import math
 import sys
 import types
@@ -1222,11 +1223,32 @@ class TrajectoryMetadata(pydantic.BaseModel):
     target_values_by_field = _unpack_subclass_values_from_extra(metadata, cls)
     return cls.model_validate(target_values_by_field)
 
+  def prepare_metadata_for_tolerant_trajectory(
+      self,
+      num_valid_steps: int,
+      *,
+      was_clipped: bool,
+  ) -> Self:
+    """Returns metadata adjusted for a tolerantly reconstructed trajectory.
+
+    Args:
+      num_valid_steps: Number of valid contiguous steps retained.
+      was_clipped: Whether any steps were dropped due to gaps or corruption.
+
+    Returns:
+      The adjusted metadata instance.
+    """
+    del num_valid_steps, was_clipped
+    return self
+
   def _create_paired_trajectory(
       self,
       trajectory_cls: type[TrajectoryT],
       steps: Sequence[Any] | None,
       subagent_trajectories: Sequence[Any] | None,
+      *,
+      strict: bool = True,
+      was_clipped: bool = False,
   ) -> TrajectoryT:
     """Constructs `trajectory_cls` from this metadata, steps, and subagents.
 
@@ -1238,6 +1260,12 @@ class TrajectoryMetadata(pydantic.BaseModel):
       trajectory_cls: Concrete Trajectory class to build.
       steps: Sequence of step instances, or None.
       subagent_trajectories: Sequence of subagent trajectory instances, or None.
+      strict: Whether to enforce sequential step IDs. When False, clips `steps`
+        to the longest contiguous prefix starting at
+        `trajectory_cls.STEP_ID_START` and adjusts metadata via
+        `prepare_metadata_for_tolerant_trajectory`.
+      was_clipped: Whether any step was already skipped as corrupted before
+        calling this method.
 
     Returns:
       The constructed paired trajectory instance.
@@ -1253,11 +1281,28 @@ class TrajectoryMetadata(pydantic.BaseModel):
       raise TypeError(
           f"Expected trajectory_cls to be a subclass of {type(self).__name__}"
       )
-    metadata_fields = _get_field_names(type(self)) - {
+    meta = self
+    if not strict:
+      sorted_steps = sorted(steps, key=lambda s: s.step_id) if steps else []
+      valid_steps: list[Any] = []
+      expected_id = trajectory_cls.STEP_ID_START
+      for step in sorted_steps:
+        if step.step_id == expected_id:
+          valid_steps.append(step)
+          expected_id += 1
+        else:
+          break
+      was_clipped = was_clipped or (len(valid_steps) < len(sorted_steps))
+      meta = self.prepare_metadata_for_tolerant_trajectory(
+          len(valid_steps),
+          was_clipped=was_clipped,
+      )
+      steps = valid_steps
+    metadata_fields = _get_field_names(type(meta)) - {
         "steps",
         "subagent_trajectories",
     }
-    data = {field: getattr(self, field) for field in metadata_fields}
+    data = {field: getattr(meta, field) for field in metadata_fields}
     if steps is not None:
       data["steps"] = list(steps)
     if subagent_trajectories is not None:
@@ -1305,6 +1350,9 @@ class TrajectoryMetadata(pydantic.BaseModel):
       self,
       steps: Sequence[Any] | None = None,
       subagent_trajectories: Sequence[Any] | None = None,
+      *,
+      strict: bool = True,
+      was_clipped: bool = False,
   ) -> Trajectory[Any]:
     """Creates a full Trajectory from this metadata, steps, and subagents.
 
@@ -1316,13 +1364,21 @@ class TrajectoryMetadata(pydantic.BaseModel):
     Args:
       steps: Sequence of step instances, or None.
       subagent_trajectories: Sequence of subagent trajectory instances, or None.
+      strict: Whether to enforce strict sequential step IDs. When False, clips
+        `steps` to the longest contiguous prefix starting from `STEP_ID_START`.
+      was_clipped: Whether any step was already skipped as corrupted before
+        calling this method.
 
     Returns:
       The constructed trajectory instance.
     """
     trajectory_cls = self._get_or_create_paired_trajectory_cls()
     return self._create_paired_trajectory(
-        trajectory_cls, steps, subagent_trajectories
+        trajectory_cls,
+        steps,
+        subagent_trajectories,
+        strict=strict,
+        was_clipped=was_clipped,
     )
 
 
@@ -1334,7 +1390,7 @@ class Trajectory(TrajectoryMetadata, Generic[StepT]):
 
   # First step_id in a well-formed trajectory; step_ids must be sequential
   # from here.
-  _STEP_ID_START: ClassVar[int] = 1
+  STEP_ID_START: ClassVar[int] = 1
 
   steps: list[StepT] = pydantic.Field(
       default_factory=list,
@@ -1348,13 +1404,13 @@ class Trajectory(TrajectoryMetadata, Generic[StepT]):
   @pydantic.field_validator("steps")
   @classmethod
   def validate_step_ids(cls, steps: list[StepT]) -> list[StepT]:
-    """Validate that step_ids are sequential from `_STEP_ID_START`."""
+    """Validate that step_ids are sequential from `STEP_ID_START`."""
     steps.sort(key=lambda step: step.step_id)
-    for expected_step_id, step in enumerate(steps, start=cls._STEP_ID_START):
+    for expected_step_id, step in enumerate(steps, start=cls.STEP_ID_START):
       if step.step_id != expected_step_id:
         raise ValueError(
             f"Expected step_id {expected_step_id} (sequential from"
-            f" {cls._STEP_ID_START}), got {step.step_id}"
+            f" {cls.STEP_ID_START}), got {step.step_id}"
         )
     return steps
 
@@ -1420,7 +1476,7 @@ class Trajectory(TrajectoryMetadata, Generic[StepT]):
     Returns:
       The newly created and appended step.
     """
-    step_id = len(self.steps) + self._STEP_ID_START
+    step_id = len(self.steps) + self.STEP_ID_START
     new_step = Step(
         step_id=step_id,
         timestamp=timestamp or datetime.datetime.now(datetime.timezone.utc),
@@ -1701,10 +1757,42 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
       description="Timing information for reward operations.",
   )
 
+  def prepare_metadata_for_tolerant_trajectory(
+      self,
+      num_valid_steps: int,
+      *,
+      was_clipped: bool,
+  ) -> Self:
+    """Resets completion fields when steps were clipped or truncated at tail.
+
+    Args:
+      num_valid_steps: Number of valid contiguous steps retained.
+      was_clipped: Whether any steps were dropped due to gaps or corruption.
+
+    Returns:
+      A copy of this metadata with `status` and `total_reward` reset to None if
+      clipped or incomplete, or `self` if complete.
+    """
+    expected_total = (
+        self.final_metrics.total_steps
+        if self.final_metrics is not None
+        else None
+    )
+    tail_mismatch = self.status in ("COMPLETED", "SUCCEEDED") and (
+        (expected_total is not None and num_valid_steps < expected_total)
+        or (expected_total is None and num_valid_steps == 0)
+    )
+    if was_clipped or tail_mismatch:
+      return self.model_copy(update={"status": None, "total_reward": None})
+    return self
+
   def create_trajectory(
       self,
       steps: Sequence[Step] | None = None,
       subagent_trajectories: Sequence[Trajectory] | None = None,
+      *,
+      strict: bool = True,
+      was_clipped: bool = False,
   ) -> TunixTrajectory:
     """Creates a TunixTrajectory, rehydrating 1-indexed ATIF inputs.
 
@@ -1713,19 +1801,44 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
         the Tunix subclass for their source), or None.
       subagent_trajectories: Embedded Tunix subagent trajectories (kept as-is)
         or 1-indexed ATIF trajectories (rehydrated recursively), or None.
+      strict: Whether to enforce sequential step IDs and raise on step
+        validation errors. When False, skips corrupted steps, clips to the
+        longest contiguous prefix from step 0, and resets completion fields
+        (`status`, `total_reward`) if steps were clipped or missing.
+      was_clipped: Whether any step was already skipped as corrupted before
+        calling this method.
 
     Returns:
       The constructed TunixTrajectory.
     """
     if steps is not None:
-      steps = [_upcast_atif_step(step) for step in steps]
+      if strict:
+        steps = [_upcast_atif_step(step) for step in steps]
+      else:
+        upcast_steps: list[TunixAgentStep | TunixEnvStep] = []
+        for step in steps:
+          try:
+            upcast_steps.append(_upcast_atif_step(step))
+          except Exception:  # pylint: disable=broad-exception-caught
+            logging.warning(
+                "Skipping corrupted step %d in trajectory %r.",
+                step.step_id,
+                self.trajectory_id,
+                exc_info=True,
+            )
+            was_clipped = True
+        steps = upcast_steps
     if subagent_trajectories is not None:
       subagent_trajectories = [
           TunixTrajectory.from_atif_trajectory(subagent_trajectory)
           for subagent_trajectory in subagent_trajectories
       ]
     return self._create_paired_trajectory(
-        TunixTrajectory, steps, subagent_trajectories
+        TunixTrajectory,
+        steps,
+        subagent_trajectories,
+        strict=strict,
+        was_clipped=was_clipped,
     )
 
 
@@ -1735,7 +1848,7 @@ class TunixTrajectory(
 ):
   """Tunix-specific trajectory object containing the interaction history."""
 
-  _STEP_ID_START: ClassVar[int] = 0
+  STEP_ID_START: ClassVar[int] = 0
 
   subagent_trajectories: list[TunixTrajectory] | None = pydantic.Field(
       default=None,
@@ -1770,7 +1883,7 @@ class TunixTrajectory(
       extra: dict[str, Any] | None = None,
   ) -> TunixAgentStep | TunixEnvStep:
     """Helper to create and append a step, automatically assigning step_id."""
-    step_id = len(self.steps) + self._STEP_ID_START
+    step_id = len(self.steps) + self.STEP_ID_START
     ts = timestamp or datetime.datetime.now(datetime.timezone.utc)
     if source == Source.AGENT:
       new_step = TunixAgentStep(
