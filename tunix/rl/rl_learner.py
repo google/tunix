@@ -30,6 +30,7 @@ from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import function_registry
+from tunix.rl import packing
 from tunix.rl import reward_manager
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils as rl_utils
@@ -135,7 +136,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       else:
         r_config = rollout_config
 
-      rl_utils.validate_packing_budget(
+      packing.validate_packing_budget(
           self._training_config.max_seq_token_per_tpu,
           getattr(r_config, "max_prompt_length", 1000000),
           getattr(algo_config, "max_response_length", None)

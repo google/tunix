@@ -888,6 +888,37 @@ def validate_items(items: Iterable[PackItem], budget: int) -> None:
       )
 
 
+def validate_packing_budget(
+    max_token_budget: int,
+    max_prompt_length: int,
+    max_response_length: int,
+) -> None:
+  """Fails at learner init if a maximal sequence cannot fit one packed row.
+
+  Sequences are truncated to `max_prompt_length + max_response_length`, so that
+  sum is the longest row `pack_sequences` can ever be handed. A smaller budget
+  is not a degraded mode -- it raises mid-run the first time a maximal sequence
+  shows up, which can be hours in. Check it up front instead.
+
+  Args:
+    max_token_budget: The configured `max_seq_token_per_tpu`.
+    max_prompt_length: Rollout's prompt cap.
+    max_response_length: Rollout's generation cap.
+
+  Raises:
+    ValueError: if the budget cannot hold one maximal sequence.
+  """
+  longest = max_prompt_length + max_response_length
+  if max_token_budget < longest:
+    raise ValueError(
+        f"max_seq_token_per_tpu={max_token_budget} is smaller than the longest"
+        f" possible sequence (max_prompt_length {max_prompt_length} +"
+        f" max_response_length {max_response_length} = {longest}); packing"
+        " would fail once a maximal sequence appears. Set"
+        f" max_seq_token_per_tpu >= {longest}."
+    )
+
+
 def pack_chunks_with_bins_fast(
     items: Sequence[PackItem],
     *,

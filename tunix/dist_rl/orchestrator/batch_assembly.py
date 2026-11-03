@@ -34,7 +34,6 @@ import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
 from tunix.rl import packing
-from tunix.rl import utils as rl_utils
 
 T = TypeVar("T")
 
@@ -1541,7 +1540,7 @@ def create_batch_assembler(
         batch_config.max_prompt_length is not None
         and batch_config.max_response_length is not None
     ):
-      rl_utils.validate_packing_budget(
+      packing.validate_packing_budget(
           batch_config.max_seq_token_per_tpu,
           batch_config.max_prompt_length,
           batch_config.max_response_length,
