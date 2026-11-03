@@ -224,6 +224,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=int(os.getenv("MAX_STALENESS", "0")),
   )
   parser.add_argument(
+      "--max_version_span",
+      type=_optional_int,
+      default=_optional_int(os.getenv("MAX_VERSION_SPAN")),
+      help=(
+          "Maximum policy version span (max - min) a single trajectory may"
+          " straddle across in-flight weight updates, or None."
+      ),
+  )
+  parser.add_argument(
       "--trajectory_group_order",
       choices=("trajectory_completion", "prompt_arrival", "prompt_batch"),
       default=os.getenv("TRAJECTORY_GROUP_ORDER", "trajectory_completion"),
@@ -409,6 +418,18 @@ def _optional_float(v: str | float | None) -> float | None:
   return float(s)
 
 
+def _optional_int(v: str | int | None) -> int | None:
+  """Parses an optional int CLI argument where 'none'/'null'/'' maps to None."""
+  if v is None:
+    return None
+  if isinstance(v, int) and not isinstance(v, bool):
+    return v
+  s = str(v).strip()
+  if not s or s.lower() in ("none", "null"):
+    return None
+  return int(s)
+
+
 def _str2bool(v: str | bool) -> bool:
   """Converts string representations of booleans to bool."""
   if isinstance(v, bool):
@@ -514,6 +535,14 @@ def _validate_args(
     raise ValueError("batch_size must be positive.")
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
+  if args.max_version_span is not None:
+    if args.max_version_span < 0:
+      raise ValueError("max_version_span must be non-negative.")
+    if args.trajectory_group_order == "prompt_arrival":
+      raise ValueError(
+          "max_version_span is only supported with"
+          " trajectory_group_order='trajectory_completion'."
+      )
   if args.use_agent_sandbox and args.max_staleness > 1:
     raise ValueError(
         "use_agent_sandbox only supports max_staleness <= 1, got"
@@ -754,6 +783,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       ),
       trajectory_store=cluster.trajectory_store,
       max_staleness=args.max_staleness,
+      max_version_span=args.max_version_span,
       group_order=args.trajectory_group_order,
       sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
       precompile_trainer=args.trainer_precompile,

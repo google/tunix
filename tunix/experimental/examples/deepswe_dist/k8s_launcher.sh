@@ -60,6 +60,7 @@ export WARMUP_STEPS_FRACTION=${WARMUP_STEPS_FRACTION:-0.0}
 export BETA=${BETA:-0.0}
 export EPSILON=${EPSILON:-0.2}
 export MAX_STALENESS=${MAX_STALENESS:-0}
+export MAX_VERSION_SPAN=${MAX_VERSION_SPAN:-}
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-trajectory_completion}
 export TEMPERATURE=${TEMPERATURE:-1.0}
 export TOP_P=${TOP_P:-1.0}
@@ -445,6 +446,7 @@ start_orchestrator() {
         ${SAMPLER_RS_MAX:+--sampler_rs_max=${SAMPLER_RS_MAX}} \
         ${SEQ_LOGPROB_ERROR_THRESHOLD:+--seq_logprob_error_threshold=${SEQ_LOGPROB_ERROR_THRESHOLD}} \
         --max_staleness=${MAX_STALENESS} \
+        ${MAX_VERSION_SPAN:+--max_version_span=${MAX_VERSION_SPAN}} \
         --trajectory_group_order=${TRAJECTORY_GROUP_ORDER} \
         --dataset_name=${DATASET_NAME} \
         --dataset_split=${DATASET_SPLIT} \
