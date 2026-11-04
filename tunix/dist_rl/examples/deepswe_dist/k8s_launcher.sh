@@ -258,8 +258,10 @@ start_orchestrator() {
     shuffle_arg="--no-shuffle"
   fi
   local sandbox_arg=""
+  local sandbox_env=""
   if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
     sandbox_arg="--use_agent_sandbox"
+    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"}"
   fi
   "$PYTHON" tunix/dist_rl/distributed/deployment/yaml_generator.py \
     tunix/dist_rl/distributed/deployment/yamls/jobset.cpu.yaml \
@@ -277,6 +279,7 @@ start_orchestrator() {
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
       ${OTEL_EXPORTER_OTLP_ENDPOINT:+OTEL_EXPORTER_OTLP_ENDPOINT=\"${OTEL_EXPORTER_OTLP_ENDPOINT}\"} \
       ${OTEL_METRIC_EXPORT_INTERVAL:+OTEL_METRIC_EXPORT_INTERVAL=\"${OTEL_METRIC_EXPORT_INTERVAL}\"} \
+      ${sandbox_env} \
       python -m tunix.dist_rl.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
