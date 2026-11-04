@@ -33,8 +33,10 @@ class DispatchWindow:
   """Bounds how many prompts ahead of the active training step the dispatcher may run.
 
   The dispatcher may emit prompts while
-  `prompt_idx < (next_batch_fn() + max_staleness + 1) * full_batch_size +
-  filtered_groups`. When `prompt_idx` reaches that bound,
+  `prompt_idx < next_batch_fn() * full_batch_size + window_capacity +
+  filtered_groups`, where `window_capacity` is `max_in_flight_groups` when set
+  and `(max_staleness + 1) * full_batch_size` otherwise. When `prompt_idx`
+  reaches that bound,
   `wait_for(prompt_idx)` parks until `release()` signals that the step cursor
   has advanced or a filtered group has replenished capacity by 1 prompt.
 
@@ -48,8 +50,25 @@ class DispatchWindow:
       next_batch_fn: Callable[[], int],
       *,
       full_batch_size: int = 1,
+      max_in_flight_groups: int | None = None,
       out_of_order_resume: bool = False,
   ):
+    """Initializes the dispatch window.
+
+    Args:
+      max_staleness: Maximum weight syncs a dispatched prompt may lag behind the
+        trainer.
+      next_batch_fn: Returns the trainer's current consumed-batch index.
+      full_batch_size: Prompt groups per global training step.
+      max_in_flight_groups: Optional cap on in-flight prompt groups; None allows
+        `(max_staleness + 1) * full_batch_size`.
+      out_of_order_resume: Whether checkpoint resume tracks individual
+        `prompt_id`s instead of prefix-skipping whole batches.
+
+    Raises:
+      ValueError: If `max_staleness` is negative, or `full_batch_size` or
+        `max_in_flight_groups` is not positive.
+    """
     if max_staleness < 0:
       raise ValueError(
           f"max_staleness must be non-negative, got {max_staleness}."
@@ -58,8 +77,13 @@ class DispatchWindow:
       raise ValueError(
           f"full_batch_size must be positive, got {full_batch_size}."
       )
+    if max_in_flight_groups is not None and max_in_flight_groups <= 0:
+      raise ValueError(
+          f"max_in_flight_groups must be positive, got {max_in_flight_groups}."
+      )
     self.max_staleness = max_staleness
     self.full_batch_size = full_batch_size
+    self.max_in_flight_groups = max_in_flight_groups
     self.out_of_order_resume = out_of_order_resume
     self._next_batch_fn = next_batch_fn
     self._release = asyncio.Event()
@@ -69,6 +93,13 @@ class DispatchWindow:
     self._has_resume_state = False
     self._resume_base_prompts: int | None = None
     self._dispatched_since_resume = 0
+
+  @property
+  def window_capacity(self) -> int:
+    """Prompts that may be admitted ahead of the trainer's consumed prompts."""
+    if self.max_in_flight_groups is not None:
+      return self.max_in_flight_groups
+    return (self.max_staleness + 1) * self.full_batch_size
 
   @property
   def next_batch(self) -> int:
@@ -177,9 +208,10 @@ class DispatchWindow:
   async def wait_for(self, prompt_idx: int) -> None:
     """Blocks until `prompt_idx` is inside the policy-staleness window."""
     while (
-        prompt_idx >= (
-            self._next_batch_fn() + self.max_staleness + 1
-        ) * self.full_batch_size + self._filtered_groups
+        prompt_idx
+        >= self._next_batch_fn() * self.full_batch_size
+        + self.window_capacity
+        + self._filtered_groups
     ):
       # Wait first, clear second. The reverse loses a release that lands
       # between the test above and the clear, and nothing would set it again.

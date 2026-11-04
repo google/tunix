@@ -22,6 +22,7 @@ import queue
 import random
 import shutil
 import tempfile
+import threading
 import types
 from typing import Any, AsyncIterable, Iterable
 from unittest import mock
@@ -45,6 +46,8 @@ from tunix.rl import common as rl_common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.agentic import agentic_grpo_learner
+from tunix.rl.agentic import dynamic_sampling
+from tunix.rl.agentic import prompt_feed
 from tunix.rl.agentic.agents.agent_types import Action, Step
 from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
@@ -265,6 +268,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         self.rl_engine = mock.Mock()
         self.metric_fns = []
         self._process_in_consumer = False
+        self._dynamic_sampler = None
 
       def _create_micro_batch_iterator(self, iterator, batch_size):
         # The dataset batch size is 2, and we want to test micro-batching
@@ -325,12 +329,18 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
     dataset = _dummy_dataset(MySource(data=[i for i in range(2)]), batch_size=2)
-    prompt_queue = queue.Queue()
-    for item in iter(dataset):
-      prompt_queue.put(item)
-    prompt_queue.put(None)
+    feed = prompt_feed.QueuePromptFeed(
+        iter(dataset),
+        put_batch=lambda q, batch: q.put(batch),
+        split=lambda batch: trainer._create_micro_batch_iterator(  # pylint: disable=protected-access
+            iter([batch]), 1
+        ),
+        prefill_batches=2,
+    )
 
-    asyncio.run(trainer._producer(mock.Mock(), prompt_queue, train_data_queue))
+    asyncio.run(
+        trainer._producer(mock.Mock(), feed, train_data_queue)  # pylint: disable=protected-access
+    )
 
     results = []
     while True:
@@ -2236,6 +2246,409 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         test_common.assert_equal, original_base_params, base_params
     )
 
+  def _dynamic_sampling_learner(
+      self,
+      reward_fn,
+      *,
+      off_policy_steps,
+      max_steps,
+      mini_batch_size=None,
+      **algo_kwargs,
+  ):
+    """Returns an RLEngine and a GRPOLearner with dynamic-sampling options."""
+    vocab = _mock_vocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=100,
+            max_steps=max_steps,
+            mini_batch_size=mini_batch_size,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=256,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
+            kv_cache_size=1024,
+        ),
+    )
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=model,
+        reference=model,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+    )
+    learner = agentic_grpo_learner.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=reward_fn,
+        algo_config=agentic_grpo_learner.GRPOConfig(
+            num_generations=2,
+            num_iterations=1,
+            max_response_length=10,
+            off_policy_steps=off_policy_steps,
+            **algo_kwargs,
+        ),
+        chat_parser=MockChatParser(),
+    )
+    return rl_engine, learner
+
+  @parameterized.named_parameters(
+      dict(testcase_name="on_policy", off_policy_steps=0),
+      dict(testcase_name="off_policy", off_policy_steps=1),
+  )
+  def test_dynamic_sampling_drops_and_refills_zero_variance_groups(
+      self, off_policy_steps
+  ):
+    tied = {"hello world", "hello there"}  # Half of MySource's prompts.
+    scored, kept = [], []
+
+    def reward_fn(prompts, completions, **kwargs):
+      del kwargs
+      scored.append(prompts[0])
+      if prompts[0] in tied:
+        return [1.0] * len(completions)
+      kept.append(prompts[0])
+      return [float(i) for i in range(len(completions))]
+
+    max_steps, batch_size = 3, 2
+    rl_engine, learner = self._dynamic_sampling_learner(
+        reward_fn,
+        off_policy_steps=off_policy_steps,
+        max_steps=max_steps,
+        group_filters=("zero_variance",),
+    )
+    train_ds = _dummy_dataset(MySource(repeat=10), batch_size=batch_size)
+    with (
+        mock.patch.object(
+            rl_engine, "generate", side_effect=self._mock_generate
+        ),
+        mock.patch.object(
+            rl_engine,
+            "buffer_metrics_async",
+            wraps=rl_engine.buffer_metrics_async,
+        ) as spy_metrics,
+    ):
+      learner.train(train_ds, None)
+
+    self.assertEqual(rl_engine.global_steps, max_steps)
+    # Every trained group came from an untied prompt, and the tied ones were
+    # replaced rather than shrinking the batches.
+    self.assertGreaterEqual(len(kept), max_steps * batch_size)
+    dropped = len(scored) - len(kept)
+    self.assertGreater(dropped, 0)
+    self.assertTrue(all(p in tied for p in scored if p not in kept))
+    dropped_metrics = [
+        c
+        for c in spy_metrics.call_args_list
+        if "dynamic_sampling/dropped_groups/zero_variance" in c.args[0]
+    ]
+    self.assertLen(dropped_metrics, dropped)
+    # The staleness window bounds how far dispatch runs ahead of training:
+    # batches up to max_steps + off_policy_steps (the window opens one more
+    # batch at the final step) plus exactly one refill per dropped group.
+    self.assertLessEqual(
+        len(scored),
+        (max_steps + off_policy_steps + 1) * batch_size + dropped,
+    )
+
+  def test_dynamic_sampling_raises_when_every_group_ties(self):
+    def reward_fn(prompts, completions, **kwargs):
+      del prompts, kwargs
+      return [0.0] * len(completions)
+
+    rl_engine, learner = self._dynamic_sampling_learner(
+        reward_fn,
+        off_policy_steps=0,
+        max_steps=2,
+        group_filters=("zero_variance",),
+        max_consecutive_filtered_groups=3,
+    )
+    train_ds = _dummy_dataset(MySource(repeat=10), batch_size=2)
+    with mock.patch.object(
+        rl_engine, "generate", side_effect=self._mock_generate
+    ):
+      with self.assertRaises(dynamic_sampling.DynamicSamplingStalledError):
+        learner.train(train_ds, None)
+
+  def test_dynamic_sampling_minus_one_disables_stall_guard(self):
+    calls = 0
+
+    def reward_fn(prompts, completions, **kwargs):
+      nonlocal calls
+      del prompts, kwargs
+      calls += 1
+      # First 4 groups tie, then untied groups appear.
+      if calls <= 4:
+        return [0.0] * len(completions)
+      return [float(i) for i in range(len(completions))]
+
+    rl_engine, learner = self._dynamic_sampling_learner(
+        reward_fn,
+        off_policy_steps=0,
+        max_steps=1,
+        group_filters=("zero_variance",),
+        max_consecutive_filtered_groups=-1,
+    )
+    train_ds = _dummy_dataset(MySource(repeat=10), batch_size=2)
+    with mock.patch.object(
+        rl_engine, "generate", side_effect=self._mock_generate
+    ):
+      learner.train(train_ds, None)
+    self.assertEqual(rl_engine.global_steps, 1)
+
+  @parameterized.parameters(0, -2)
+  def test_invalid_max_consecutive_filtered_groups_raises(self, bad_value):
+    with self.assertRaisesRegex(ValueError, "max_consecutive_filtered_groups"):
+      self._dynamic_sampling_learner(
+          reward_fn_1,
+          off_policy_steps=0,
+          max_steps=1,
+          max_consecutive_filtered_groups=bad_value,
+      )
+
+  @parameterized.parameters(0, -1)
+  def test_invalid_max_in_flight_groups_raises(self, bad_value):
+    with self.assertRaisesRegex(ValueError, "max_in_flight_groups"):
+      self._dynamic_sampling_learner(
+          reward_fn_1,
+          off_policy_steps=0,
+          max_steps=1,
+          max_in_flight_groups=bad_value,
+      )
+
+  def test_max_in_flight_groups_caps_admitted_prompts(self):
+    scored = []
+
+    def reward_fn(prompts, completions, **kwargs):
+      del kwargs
+      scored.append(prompts[0])
+      return [float(i) for i in range(len(completions))]
+
+    # batch_size=2, max_steps=2, off_policy_steps=1, max_in_flight_groups=3
+    # (1.5 batches instead of 2 batches = 4 groups).
+    rl_engine, learner = self._dynamic_sampling_learner(
+        reward_fn,
+        off_policy_steps=1,
+        max_steps=2,
+        max_in_flight_groups=3,
+    )
+    train_ds = _dummy_dataset(MySource(repeat=10), batch_size=2)
+    with mock.patch.object(
+        rl_engine, "generate", side_effect=self._mock_generate
+    ):
+      learner.train(train_ds, None)
+    self.assertEqual(rl_engine.global_steps, 2)
+    # At step 0 at most 3 prompts admitted; after step 0 completes (step=1), at
+    # most 1*2 + 3 = 5; after step 1 completes (step=2, release before break),
+    # at most 2*2 + 3 = 7.
+    self.assertGreaterEqual(len(scored), 4)
+    self.assertLessEqual(len(scored), 7)
+
+  def test_unknown_group_filter_raises(self):
+    with self.assertRaisesRegex(ValueError, "Unknown group_filters"):
+      self._dynamic_sampling_learner(
+          reward_fn_1,
+          off_policy_steps=0,
+          max_steps=1,
+          group_filters=("top_k",),
+      )
+
+  def test_dynamic_sampling_stops_when_the_dataset_runs_out(self):
+    tied = {"hello world", "hello there"}
+
+    def reward_fn(prompts, completions, **kwargs):
+      del kwargs
+      if prompts[0] in tied:
+        return [1.0] * len(completions)
+      return [float(i) for i in range(len(completions))]
+
+    # 4 prompts, 2 of them tied: one global step, then the dataset is empty.
+    rl_engine, learner = self._dynamic_sampling_learner(
+        reward_fn,
+        off_policy_steps=0,
+        max_steps=5,
+        group_filters=("zero_variance",),
+    )
+    train_ds = _dummy_dataset(MySource(), batch_size=2)
+    with mock.patch.object(
+        rl_engine, "generate", side_effect=self._mock_generate
+    ):
+      learner.train(train_ds, None)
+    self.assertEqual(rl_engine.global_steps, 1)
+
+  def test_dynamic_sampling_without_any_kept_group_and_no_guard(self):
+    def reward_fn(prompts, completions, **kwargs):
+      del prompts, kwargs
+      return [0.0] * len(completions)
+
+    rl_engine, learner = self._dynamic_sampling_learner(
+        reward_fn,
+        off_policy_steps=0,
+        max_steps=2,
+        group_filters=("zero_variance",),
+    )
+    train_ds = _dummy_dataset(MySource(repeat=2), batch_size=2)
+    with mock.patch.object(
+        rl_engine, "generate", side_effect=self._mock_generate
+    ):
+      learner.train(train_ds, None)
+    self.assertEqual(rl_engine.global_steps, 0)
+
+  def test_dynamic_sampling_resumes_at_the_restored_step(self):
+    rl_engine, learner = self._dynamic_sampling_learner(
+        reward_fn_1,
+        off_policy_steps=0,
+        max_steps=2,
+        max_in_flight_groups=2,
+    )
+    rl_engine.global_steps = 1
+    learner.policy_version = 1
+    train_ds = _dummy_dataset(MySource(repeat=4), batch_size=2)
+    process_results = learner._process_results  # pylint: disable=protected-access
+    with (
+        mock.patch.object(
+            rl_engine, "generate", side_effect=self._mock_generate
+        ),
+        mock.patch.object(
+            learner, "_process_results", wraps=process_results
+        ) as spy,
+    ):
+      learner.train(train_ds, None)
+    self.assertEqual(rl_engine.global_steps, 2)
+    steps = {c.kwargs["expected_step"] for c in spy.call_args_list}
+    self.assertEqual(steps, {1})
+
+  def test_dynamic_sampling_streams_mini_batches_and_warns_on_incomplete_step(
+      self,
+  ):
+    # Mini-batch 0 streams to update_actor before group 1 of step 0 finishes;
+    # the 3rd prompt runs 1 of 2 updates of step 1 and logs a warning at exit.
+    first_minibatch_trained = threading.Event()
+    rl_engine, learner = self._dynamic_sampling_learner(
+        reward_fn_1,
+        off_policy_steps=0,
+        max_steps=5,
+        mini_batch_size=1,
+        group_filters=("zero_variance",),
+    )
+    orig_update_actor = rl_engine.update_actor
+
+    def _update_actor(*args, **kwargs):
+      orig_update_actor(*args, **kwargs)
+      first_minibatch_trained.set()
+
+    def _generate(prompts=None, **kwargs):
+      if prompts and "c d" in str(prompts[0]):
+        self.assertTrue(first_minibatch_trained.wait(timeout=5.0))
+      return self._mock_generate(prompts=prompts, **kwargs)
+
+    train_ds = _dummy_dataset(
+        MySource(data=["a b", "c d", "e f"]), batch_size=2
+    )
+    with (
+        mock.patch.object(rl_engine, "generate", side_effect=_generate),
+        mock.patch.object(rl_engine, "update_actor", side_effect=_update_actor),
+        self.assertLogs(level="WARNING") as logs,
+    ):
+      learner.train(train_ds, None)
+    self.assertEqual(rl_engine.global_steps, 1)
+    self.assertEqual(rl_engine.actor_trainer.train_steps, 3)
+    self.assertTrue(
+        any("Dataset ended mid-step after 1/2" in m for m in logs.output)
+    )
+
+  def test_dynamic_sampling_drops_trailing_partial_micro_batch_and_warns(self):
+    # Five prompts with batch_size=4, mini_batch_size=2: 1 global step (2
+    # updates), 1 trailing group (< mini_batch_size) dropped, warning on exit.
+    rl_engine, learner = self._dynamic_sampling_learner(
+        reward_fn_1,
+        off_policy_steps=0,
+        max_steps=5,
+        mini_batch_size=2,
+        group_filters=("zero_variance",),
+    )
+    train_ds = _dummy_dataset(
+        MySource(data=["a b", "c d", "e f", "g h", "i j"]), batch_size=4
+    )
+    with (
+        mock.patch.object(
+            rl_engine, "generate", side_effect=self._mock_generate
+        ),
+        self.assertLogs(level="WARNING") as logs,
+    ):
+      learner.train(train_ds, None)
+    self.assertEqual(rl_engine.global_steps, 1)
+    self.assertEqual(rl_engine.actor_trainer.train_steps, 2)
+    self.assertTrue(
+        any("before reaching max_steps=5" in m for m in logs.output)
+    )
+
+  @parameterized.named_parameters(
+      dict(testcase_name="while_step_trains", unblock_after="step_scored"),
+      dict(testcase_name="after_step_completes", unblock_after="step_trained"),
+  )
+  def test_dynamic_sampling_skips_post_max_steps_lookahead_drops(
+      self, unblock_after
+  ):
+    ready = threading.Event()
+    scored = []
+
+    def reward_fn(prompts, completions, **kwargs):
+      del kwargs
+      scored.append(prompts[0])
+      if len(scored) == 2 and unblock_after == "step_scored":
+        ready.set()
+      if prompts[0].startswith("drop"):
+        return [0.0] * len(completions)
+      return [float(i) for i in range(len(completions))]
+
+    rl_engine, learner = self._dynamic_sampling_learner(
+        reward_fn,
+        off_policy_steps=1,
+        max_steps=1,
+        group_filters=("zero_variance",),
+        max_consecutive_filtered_groups=2,
+    )
+    orig_buffer_metrics = rl_engine.buffer_metrics
+
+    def _buffer_metrics(*args, **kwargs):
+      orig_buffer_metrics(*args, **kwargs)
+      if unblock_after == "step_trained" and rl_engine.global_steps >= 1:
+        ready.set()
+
+    def _generate(prompts=None, **kwargs):
+      if prompts and "drop " in str(prompts[0]):
+        self.assertTrue(ready.wait(timeout=5.0))
+      return self._mock_generate(prompts=prompts, **kwargs)
+
+    train_ds = _dummy_dataset(
+        MySource(
+            data=["keep 0", "keep 1", "drop 2", "drop 3", "drop 4", "drop 5"]
+        ),
+        batch_size=2,
+    )
+    with (
+        mock.patch.object(rl_engine, "generate", side_effect=_generate),
+        mock.patch.object(
+            rl_engine, "buffer_metrics", side_effect=_buffer_metrics
+        ),
+    ):
+      learner.train(train_ds, None)
+    self.assertEqual(rl_engine.global_steps, 1)
+    self.assertCountEqual(scored, ["keep 0", "keep 1"])
+
   def test_customized_agent_env(self):
     class MockEnv(BaseTaskEnv):
 
@@ -2535,6 +2948,8 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
     )
     obj._trajectory_logger = None
     obj._full_batch_size = 0
+    obj._dynamic_sampler = None  # pylint: disable=protected-access
+    obj.policy_version = 7
     obj.metric_fns = []
     obj._compute_rewards = lambda **kw: jnp.array([0.0, 1.0])
     obj.rl_engine = types.SimpleNamespace(
