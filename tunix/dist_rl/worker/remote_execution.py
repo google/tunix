@@ -1373,6 +1373,27 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     )
     # pylint: enable=protected-access
 
+  @staticmethod
+  async def _cancel_and_close_request_stream(
+      call: Any,
+      chunks: Optional[AsyncIterator[bytes]],
+  ) -> None:
+    """Cancels gRPC's request poller task before closing the chunk generator."""
+    if call is not None:
+      if hasattr(call, "cancel"):
+        with contextlib.suppress(Exception):
+          call.cancel()
+      poller = getattr(call, "_async_request_poller", None)
+      if isinstance(poller, asyncio.Task) and not poller.done():
+        poller.cancel()
+        with contextlib.suppress(BaseException):
+          await poller
+    if chunks is not None:
+      aclose = getattr(chunks, "aclose", None)
+      if aclose is not None:
+        with contextlib.suppress(Exception):
+          await aclose()
+
   def _check_post_rpc_push_tracker(
       self, push_tracker: network._BulkPushTracker  # pylint: disable=protected-access
   ) -> None:
@@ -1407,6 +1428,78 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     if isinstance(exc, network._BulkTransportError):  # pylint: disable=protected-access
       self._invalidate_bulk_port()
     raise exc
+
+  @staticmethod
+  def _is_retryable_transport_error(
+      exc: BaseException,
+      push_tracker: Optional[network._BulkPushTracker],  # pylint: disable=protected-access
+  ) -> bool:
+    """Returns whether a failed session RPC may succeed if simply retried."""
+    # When the bulk-push request iterator raises, `grpc.aio` cancels the
+    # `StreamUnaryCall` (`exc` is `CancelledError` with `push_tracker.error`
+    # set); real caller cancellation is already re-raised as `CancelledError`
+    # by `_handle_rpc_exception` before this check runs.
+    if push_tracker is not None and push_tracker.error is not None:
+      return True
+    if isinstance(exc, network._BulkTransportError):  # pylint: disable=protected-access
+      return True
+    return (
+        _grpc_lib is not None
+        and _grpc_aio_lib is not None
+        and isinstance(exc, _grpc_aio_lib.AioRpcError)
+        and exc.code()
+        in (
+            _grpc_lib.StatusCode.UNAVAILABLE,
+            _grpc_lib.StatusCode.DEADLINE_EXCEEDED,
+            # Stale cached bulk port; retried after invalidation.
+            _grpc_lib.StatusCode.FAILED_PRECONDITION,
+        )
+    )
+
+  def _raise_session_rpc_error(
+      self,
+      exc: BaseException,
+      operation: str,
+      push_tracker: Optional[network._BulkPushTracker] = None,  # pylint: disable=protected-access
+  ) -> NoReturn:
+    """Raises the error for a failed `dispatch_task` / `poll_responses` RPC.
+
+    Retryable transport faults (bulk transfer failures, a stale bulk port, and
+    gRPC `UNAVAILABLE` / `DEADLINE_EXCEEDED`) are raised as
+    `TransientTransportError` so `TaskSession` retries them; caller
+    cancellation and all other errors propagate unchanged.
+
+    Args:
+      exc: The exception raised by the RPC.
+      operation: Description of the RPC for error messages, e.g. "polling".
+      push_tracker: Bulk push tracker of a dispatch RPC, if any.
+
+    Raises:
+      TransientTransportError: If the failure is retryable.
+    """
+    try:
+      self._handle_rpc_exception(
+          exc,
+          push_tracker
+          if push_tracker is not None
+          else network._BulkPushTracker(),  # pylint: disable=protected-access
+      )
+    except BaseException as raised:
+      if isinstance(
+          raised, asyncio.CancelledError
+      ) or not self._is_retryable_transport_error(exc, push_tracker):
+        raise
+      if (
+          _grpc_aio_lib is not None
+          and isinstance(exc, _grpc_aio_lib.AioRpcError)
+          and raised is exc
+      ):
+        detail = f"{exc.code().name} ({exc.details()})"
+      else:
+        detail = str(raised)
+      raise TransientTransportError(
+          f"Transient transport error {operation} {self._host_port}: {detail}"
+      ) from raised
 
   async def _ensure_async_channel(self) -> Any:
     """Ensures the async gRPC channel and stubs are bound to the active loop."""
@@ -1498,7 +1591,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
             seen_bulk_targets=self._seen_bulk_targets,
         )
       except BaseException as exc:  # pylint: disable=broad-exception-caught
-        call.cancel()
+        await self._cancel_and_close_request_stream(call, raw_chunks)
         self._handle_rpc_exception(exc, push_tracker)
       self._check_post_rpc_push_tracker(push_tracker)
       assert response is not None
@@ -1604,10 +1697,18 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         push_tracker=push_tracker,
         need_port_for_response=False,
     )
+    call: Any = None
     try:
-      result = await dispatch_rpc(chunks, timeout=self._rpc_timeout_s)
+      call = dispatch_rpc(chunks, timeout=self._rpc_timeout_s)
+      result = await call
     except BaseException as exc:  # pylint: disable=broad-exception-caught
-      self._handle_rpc_exception(exc, push_tracker)
+      await self._cancel_and_close_request_stream(call, chunks)
+      self._raise_session_rpc_error(exc, "dispatching to", push_tracker)
+    finally:
+      aclose = getattr(chunks, "aclose", None)
+      if aclose is not None:
+        with contextlib.suppress(Exception):
+          await aclose()
     self._check_post_rpc_push_tracker(push_tracker)
     return result
 
@@ -1631,29 +1732,12 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
           bulk_hosts=self._active_bulk_hosts,
           seen_bulk_targets=self._seen_bulk_targets,
       )
-    except network._BulkTransportError as exc:  # pylint: disable=protected-access
-      self._invalidate_bulk_port()
-      if hasattr(call, "cancel"):
-        call.cancel()
-      raise TransientTransportError(
-          f"Transient bulk transport error polling {self._host_port}: {exc}"
-      ) from exc
     except BaseException as exc:  # pylint: disable=broad-exception-caught
-      if (
-          _grpc_lib is not None
-          and _grpc_aio_lib is not None
-          and isinstance(exc, _grpc_aio_lib.AioRpcError)
-          and exc.code()
-          in (
-              _grpc_lib.StatusCode.UNAVAILABLE,
-              _grpc_lib.StatusCode.DEADLINE_EXCEEDED,
-          )
+      if isinstance(exc, network._BulkTransportError) and hasattr(  # pylint: disable=protected-access
+          call, "cancel"
       ):
-        raise TransientTransportError(
-            f"Transient gRPC error polling {self._host_port}:"
-            f" {exc.code().name} ({exc.details()})"
-        ) from exc
-      raise
+        call.cancel()
+      self._raise_session_rpc_error(exc, "polling")
 
   async def close(self) -> None:
     with self._sync_lock:

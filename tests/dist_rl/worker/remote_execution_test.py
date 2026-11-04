@@ -1662,7 +1662,8 @@ class RemoteExecutionTest(parameterized.TestCase):
           handle._bulk_port = aux_port
           handle._seen_bulk_targets.add(("127.0.0.2", aux_port))
           with self.assertRaisesRegex(
-              ConnectionError, "Bulk push manifest port mismatch"
+              remote_lib.TransientTransportError,
+              "Bulk push manifest port mismatch",
           ):
             await handle.dispatch_task(
                 "req_mismatch_dt", "echo", {"tensor": arr}
@@ -3116,9 +3117,12 @@ class RemoteExecutionTest(parameterized.TestCase):
 
       asyncio.run(_run())
     finally:
-      stall_listener.close()
+      network_lib._shutdown_and_close_socket(stall_listener)
+      for c in list(accepted_conns):
+        network_lib._shutdown_and_close_socket(c)
+      accept_thread.join(timeout=2.0)
       for c in accepted_conns:
-        c.close()
+        network_lib._shutdown_and_close_socket(c)
 
   def test_bulk_socket_pool_evicts_expired_idle_sockets_and_handles_fork(self):
     bulk_server = network_lib._BulkTransferServer()
@@ -4278,6 +4282,185 @@ class RemoteExecutionTest(parameterized.TestCase):
     # "first" finished cleanly before stop_serving returned; "second" was
     # cancelled in the queue and never started.
     self.assertEqual(call_events, ["start_first", "end_first"])
+
+  def test_grpc_dispatch_task_maps_transient_errors_and_preserves_fatal_errors(
+      self,
+  ):
+    """Verifies dispatch_task maps transient RPC/bulk faults to TransientTransportError."""
+    import grpc  # pylint: disable=g-import-not-at-top
+
+    async def _run():
+      # 1. Closed/unreachable port -> UNAVAILABLE -> TransientTransportError.
+      closed_port = portpicker.pick_unused_port()
+      dead_handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{closed_port}",
+          rpc_timeout_s=1.0,
+      )
+      try:
+        with self.assertRaises(remote_lib.TransientTransportError) as cm:
+          await dead_handle.dispatch_task("req_unavail", "echo", "x")
+        self.assertIn("UNAVAILABLE", str(cm.exception))
+      finally:
+        await dead_handle.close()
+
+      # 2. Slow server dispatch -> DEADLINE_EXCEEDED -> TransientTransportError,
+      # and non-transient gRPC status (INTERNAL) -> AioRpcError (not transient).
+      engine = StubWorkerEngine("dispatch_err_worker")
+      async with running_grpc_server(engine, rpc_timeout_s=0.1) as (
+          _,
+          handle,
+      ):
+        hold_gate = asyncio.Event()
+        await handle._ensure_async_channel()
+
+        class _FakeAioRpcError(grpc.aio.AioRpcError):
+
+          def __init__(self, code, details):
+            super().__init__(
+                code,
+                initial_metadata=grpc.aio.Metadata(),
+                trailing_metadata=grpc.aio.Metadata(),
+                details=details,
+            )
+
+        async def _deadline_rpc(chunks, timeout=None):
+          del chunks, timeout
+          raise _FakeAioRpcError(
+              grpc.StatusCode.DEADLINE_EXCEEDED, "dispatch deadline exceeded"
+          )
+
+        async def _internal_rpc(chunks, timeout=None):
+          del chunks, timeout
+          raise _FakeAioRpcError(grpc.StatusCode.INTERNAL, "server bug")
+
+        async def _bulk_err_rpc(chunks, timeout=None):
+          del chunks, timeout
+          raise network_lib._BulkTransportError("bulk socket reset")
+
+        async def _blocking_rpc(chunks, timeout=None):
+          del chunks, timeout
+          await hold_gate.wait()
+          return "ack"
+
+        with mock.patch.object(
+            handle, "_dispatch_rpc", side_effect=_deadline_rpc
+        ):
+          with self.assertRaisesRegex(
+              remote_lib.TransientTransportError, "DEADLINE_EXCEEDED"
+          ):
+            await handle.dispatch_task("req_dl", "echo", "x")
+
+        with mock.patch.object(
+            handle, "_dispatch_rpc", side_effect=_internal_rpc
+        ):
+          with self.assertRaises(grpc.aio.AioRpcError) as internal_cm:
+            await handle.dispatch_task("req_int", "echo", "x")
+          self.assertNotIsInstance(
+              internal_cm.exception, remote_lib.TransientTransportError
+          )
+
+        handle._bulk_port = 12345
+        with mock.patch.object(
+            handle, "_dispatch_rpc", side_effect=_bulk_err_rpc
+        ):
+          with self.assertRaisesRegex(
+              remote_lib.TransientTransportError, "bulk socket reset"
+          ):
+            await handle.dispatch_task("req_bulk", "echo", "x")
+        self.assertIsNone(handle._bulk_port)
+
+        # When `_stream_bulk_push_chunks` catches a bulk TCP error, it sets
+        # `push_tracker.error` and re-raises into `grpc.aio`'s request-iterator
+        # consumer, which cancels the `StreamUnaryCall` (`_dispatch_rpc` raises
+        # `asyncio.CancelledError()` with `curr_task.cancelling() == 0`). That
+        # must still map to `TransientTransportError`.
+        dead_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        dead_sock.bind(("127.0.0.1", 0))
+        dead_bulk_port = int(dead_sock.getsockname()[1])
+        dead_sock.close()
+
+        async def _grpc_aio_iter_cancelled_rpc(chunks, timeout=None):
+          del timeout
+          try:
+            async for _ in chunks:
+              pass
+          except OSError as e:
+            raise asyncio.CancelledError() from e
+          return "ack"
+
+        handle._bulk_port = dead_bulk_port
+        with mock.patch.object(
+            handle, "_dispatch_rpc", side_effect=_grpc_aio_iter_cancelled_rpc
+        ):
+          with self.assertRaises(remote_lib.TransientTransportError):
+            await handle.dispatch_task(
+                "req_bulk_iter_err",
+                "echo",
+                {"tensor": np.ones(256 * 1024, dtype=np.int32)},
+            )
+        self.assertIsNone(handle._bulk_port)
+
+        # Caller task cancellation must re-raise CancelledError directly, even
+        # when cancelling an active bulk transfer aborts sockets and populates
+        # `push_tracker.error`.
+        with mock.patch.object(
+            handle, "_dispatch_rpc", side_effect=_blocking_rpc
+        ):
+          t = asyncio.create_task(
+              handle.dispatch_task("req_cancel", "echo", "x")
+          )
+          await asyncio.sleep(0.01)
+          t.cancel()
+          with self.assertRaises(asyncio.CancelledError):
+            await t
+
+        stall_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        stall_listener.bind(("127.0.0.1", 0))
+        stall_listener.listen(8)
+        stall_port = int(stall_listener.getsockname()[1])
+        accepted_conns: list[socket.socket] = []
+        push_accepted = threading.Event()
+
+        def _accept_loop() -> None:
+          while True:
+            try:
+              conn, _ = stall_listener.accept()
+              accepted_conns.append(conn)
+              push_accepted.set()
+            except OSError:
+              break
+
+        accept_thread = threading.Thread(target=_accept_loop, daemon=True)
+        accept_thread.start()
+        try:
+          handle._bulk_port = stall_port
+
+          async def _blocking_bulk_rpc(chunks, timeout=None):
+            del timeout
+            await anext(chunks)
+            await hold_gate.wait()
+            return "ack"
+
+          with mock.patch.object(
+              handle, "_dispatch_rpc", side_effect=_blocking_bulk_rpc
+          ):
+            bulk_payload = np.ones(256 * 1024, dtype=np.int32)
+            t_bulk = asyncio.create_task(
+                handle.dispatch_task(
+                    "req_cancel_bulk", "echo", {"tensor": bulk_payload}
+                )
+            )
+            self.assertTrue(await asyncio.to_thread(push_accepted.wait, 5.0))
+            t_bulk.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+              await t_bulk
+        finally:
+          stall_listener.close()
+          for conn in accepted_conns:
+            conn.close()
+          accept_thread.join(timeout=2.0)
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":
