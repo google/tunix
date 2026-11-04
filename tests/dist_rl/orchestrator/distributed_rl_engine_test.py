@@ -1252,6 +1252,65 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_dispatch_rollouts_stamps_task_name_from_prompt(self):
+    async def _run():
+      req_ids = await self.engine.dispatch_rollouts(
+          [
+              {
+                  "prompt": "Solve 2+2",
+                  "prompt_id": "p_gsm",
+                  "task_name": "gsm8k",
+              },
+              {
+                  "prompt": "Fix repo",
+                  "prompt_id": "p_swe",
+                  "task_name": "deepswe",
+              },
+              {"prompt": "No task", "prompt_id": "p_unset"},
+          ],
+          num_generations=2,
+          policy_version=2,
+      )
+      self.assertLen(req_ids, 6)
+
+      requests = []
+      for call in self.mock_rollout_1.generate.call_args_list:
+        requests.extend(call.kwargs.get("requests", []))
+      for call in self.mock_rollout_2.generate.call_args_list:
+        requests.extend(call.kwargs.get("requests", []))
+      by_prompt: dict[str, list[datatypes.RolloutRequest]] = {}
+      for req in requests:
+        by_prompt.setdefault(str(req.prompt_id), []).append(req)
+
+      self.assertLen(by_prompt["p_gsm"], 2)
+      for req in by_prompt["p_gsm"]:
+        gsm_ctx = req.metadata["lineage"]
+        self.assertEqual(gsm_ctx.task_name, "gsm8k")
+        self.assertNotIn("task_name", gsm_ctx.events[0].attributes)
+
+      self.assertLen(by_prompt["p_swe"], 2)
+      for req in by_prompt["p_swe"]:
+        swe_ctx = req.metadata["lineage"]
+        self.assertEqual(swe_ctx.task_name, "deepswe")
+        self.assertNotIn("task_name", swe_ctx.events[0].attributes)
+
+      self.assertLen(by_prompt["p_unset"], 2)
+      for req in by_prompt["p_unset"]:
+        unset_ctx = req.metadata["lineage"]
+        self.assertEqual(unset_ctx.task_name, "")
+        self.assertNotIn("task_name", unset_ctx.events[0].attributes)
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollouts_rejects_non_string_task_name(self):
+    async def _run():
+      with self.assertRaisesRegex(TypeError, "non-string 'task_name'"):
+        await self.engine.dispatch_rollouts(
+            [{"prompt": "p", "prompt_id": "p1", "task_name": 123}]
+        )
+
+    asyncio.run(_run())
+
   def test_poll_rollouts_forwards_lineage_to_trajectory_item(self):
     async def _run():
       ctx = lineage.LineageContext(

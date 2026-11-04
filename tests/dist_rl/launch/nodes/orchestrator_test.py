@@ -431,6 +431,7 @@ class LoadPromptItemsTest(absltest.TestCase):
   def test_maps_records_and_repeats(self):
     hp = _config(
         f"data_module={self._data_module()}",
+        "task_name=gsm8k",
         "data_config.num_records=3",
         "agentic_grpo_config.max_turns=3",
         "agentic_grpo_config.episode_timeout=60",
@@ -448,6 +449,7 @@ class LoadPromptItemsTest(absltest.TestCase):
         items[3],
         {
             "prompt": "train-0",
+            "task_name": "gsm8k",
             "max_turns": 3,
             "metadata": {
                 "env_config": {"seed": 42},
@@ -466,7 +468,7 @@ class LoadPromptItemsTest(absltest.TestCase):
         "  return grain.MapDataset.source(records).shuffle(seed=seed)\n"
     )
     items = orchestrator.load_prompt_items(
-        _config(f"data_module={data_module}")
+        _config(f"data_module={data_module}", "task_name=gsm8k")
     )
     first_epoch = [_prompt(items, i) for i in range(8)]
     second_epoch = [_prompt(items, i) for i in range(8, 16)]
@@ -530,24 +532,82 @@ class LoadPromptItemsTest(absltest.TestCase):
             ValueError,
             r"\['episode_timeout'\]",
         ),
+        (
+            "[{'prompt': 'q', 'task_name': 123}]",
+            TypeError,
+            "'task_name' must be a str",
+        ),
+        (
+            "[{'prompt': 'q', 'task_name': ''}]",
+            ValueError,
+            "'task_name' must be non-empty",
+        ),
+        (
+            "[{'prompt': 'q', 'task_name': '   '}]",
+            ValueError,
+            "'task_name' must be non-empty",
+        ),
     )):
       with self.subTest(records=records):
         data_module = self._data_module(
             _records_module(records), name=f"data_{i}"
         )
         with self.assertRaisesRegex(error, regex):
-          orchestrator.load_prompt_items(_config(f"data_module={data_module}"))
+          orchestrator.load_prompt_items(
+              _config(f"data_module={data_module}", "task_name=gsm8k")
+          )
 
   def test_checks_later_records_as_they_are_read(self):
     data_module = self._data_module(
         _records_module("[{'prompt': 'q0'}, {'prompts': 'q1'}]")
     )
     items = orchestrator.load_prompt_items(
-        _config(f"data_module={data_module}")
+        _config(f"data_module={data_module}", "task_name=gsm8k")
     )
     self.assertEqual(_prompt(items, 0), "q0")
     with self.assertRaisesRegex(ValueError, "unexpected keys"):
       _ = items[1]
+
+  def test_forwards_record_task_name_and_falls_back_to_config_task_name(self):
+    data_module = self._data_module(
+        _records_module(
+            "[{'prompt': 'q0', 'task_name': 'deepswe'}, {'prompt': 'q1'}]"
+        ),
+        name="multi_task_data",
+    )
+    items = orchestrator.load_prompt_items(
+        _config(f"data_module={data_module}", "task_name=gsm8k")
+    )
+    first_item = items[0]
+    second_item = items[1]
+    assert first_item is not None
+    assert second_item is not None
+    self.assertEqual(first_item["task_name"], "deepswe")
+    self.assertEqual(second_item["task_name"], "gsm8k")
+
+    # When every record provides `task_name`, config `task_name` can stay unset.
+    labeled_module = self._data_module(
+        _records_module("[{'prompt': 'q0', 'task_name': 'deepswe'}]"),
+        name="labeled_data",
+    )
+    labeled_items = orchestrator.load_prompt_items(
+        _config(f"data_module={labeled_module}")
+    )
+    labeled_first = labeled_items[0]
+    assert labeled_first is not None
+    self.assertEqual(labeled_first["task_name"], "deepswe")
+
+  def test_requires_task_name_when_record_omits_task_name(self):
+    data_module = self._data_module(
+        _records_module("[{'prompt': 'q0'}]"),
+        name="unlabeled_data",
+    )
+    for task_override in ("task_name=", "task_name='   '"):
+      with self.subTest(task_override=task_override):
+        with self.assertRaisesRegex(ValueError, "task_name must be non-empty"):
+          orchestrator.load_prompt_items(
+              _config(f"data_module={data_module}", task_override)
+          )
 
 
 class ClusterTest(absltest.TestCase):
@@ -938,6 +998,7 @@ class MainTest(absltest.TestCase):
         "recipe.yaml",
         content=f"""\
 data_module: "{data_module.full_path}"
+task_name: "gsm8k"
 data_config:
   num_records: 3
 reward_functions:

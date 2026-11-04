@@ -53,12 +53,17 @@ class LineageContext:
   Attributes:
     tracking_id: Unique semantic tracking identifier for this entity (e.g.,
       "traj_prompt_1_0", "batch_0", "policy_v2").
+    task_name: Optional semantic task or dataset name for this entity. An empty
+      string (`""`) indicates that the task is unset/unknown or that upstream
+      contexts from multiple tasks (or a mix of labeled and unlabeled contexts)
+      were merged.
     parent_tracking_ids: List of upstream tracking IDs that contributed to this
       entity (directed causal edges in DAG).
     events: Chronological sequence of lifecycle events for this entity.
   """
 
   tracking_id: str
+  task_name: str = ""
   parent_tracking_ids: list[str] = dataclasses.field(default_factory=list)
   events: list[LineageEvent] = dataclasses.field(default_factory=list)
 
@@ -109,8 +114,9 @@ class LineageContext:
       attributes: Optional metadata attributes for the merge event.
 
     Returns:
-      A new LineageContext with parent_tracking_ids set to the upstream IDs
-      and an initial merge event recorded.
+      A new LineageContext with parent_tracking_ids set to the upstream IDs,
+      task_name preserved when all non-None upstream contexts share the same
+      task_name (or "" otherwise), and an initial merge event recorded.
     """
     parent_ids = list(
         dict.fromkeys(
@@ -119,6 +125,11 @@ class LineageContext:
             if ctx is not None and ctx.tracking_id
         )
     )
-    new_ctx = cls(tracking_id=batch_id, parent_tracking_ids=parent_ids)
+    task_names = {ctx.task_name for ctx in contexts if ctx is not None}
+    new_ctx = cls(
+        tracking_id=batch_id,
+        task_name=next(iter(task_names)) if len(task_names) == 1 else "",
+        parent_tracking_ids=parent_ids,
+    )
     new_ctx.add_event(component, operation, attributes)
     return new_ctx

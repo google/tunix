@@ -169,6 +169,7 @@ def build_prompt_item(
   return {
       "prompt": problem,
       "prompt_id": prompt_id,
+      "task_name": "deepswe",
       "max_turns": max_turns,
       "max_response_length": max_response_length,
       "generation_kwargs": {

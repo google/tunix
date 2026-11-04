@@ -391,13 +391,17 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
 
   def test_feed_merges_lineage_contexts(self):
     ctx1 = lineage.LineageContext(
-        tracking_id="traj_p1_g0", parent_tracking_ids=["p1"]
+        tracking_id="traj_p1_g0",
+        task_name="gsm8k",
+        parent_tracking_ids=["p1"],
     )
     ctx1.add_event("engine.dispatch", "rollout", {"group_index": 0})
     ctx1.add_event("worker.rollout", "generate", {"worker_id": "w0"})
 
     ctx2 = lineage.LineageContext(
-        tracking_id="traj_p1_g1", parent_tracking_ids=["p1"]
+        tracking_id="traj_p1_g1",
+        task_name="gsm8k",
+        parent_tracking_ids=["p1"],
     )
     ctx2.add_event("engine.dispatch", "rollout", {"group_index": 1})
     ctx2.add_event("worker.rollout", "generate", {"worker_id": "w1"})
@@ -415,6 +419,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     self.assertIn("lineage", batch_payload.metadata)
     batch_ctx = batch_payload.metadata["lineage"]
     self.assertEqual(batch_ctx.tracking_id, "batch_0")
+    self.assertEqual(batch_ctx.task_name, "gsm8k")
     self.assertEqual(
         sorted(batch_ctx.parent_tracking_ids), ["traj_p1_g0", "traj_p1_g1"]
     )

@@ -116,9 +116,64 @@ class LineageTest(absltest.TestCase):
     self.assertEqual(merged.parent_tracking_ids, ["traj_p1_0", "traj_p2_0"])
     self.assertLen(merged.events, 1)
 
+  def test_lineage_context_merge_preserves_homogeneous_task_name(self):
+    ctx_gsm_1 = lineage.LineageContext(
+        tracking_id="traj_p1_0",
+        task_name="gsm8k",
+        parent_tracking_ids=["p1"],
+    )
+    ctx_gsm_2 = lineage.LineageContext(
+        tracking_id="traj_p2_0",
+        task_name="gsm8k",
+        parent_tracking_ids=["p2"],
+    )
+
+    homogeneous = lineage.LineageContext.merge(
+        batch_id="batch_homogeneous",
+        contexts=[ctx_gsm_1, ctx_gsm_2, None],
+        component="orchestrator.assembler",
+        operation="pack",
+    )
+    self.assertEqual(homogeneous.task_name, "gsm8k")
+
+  def test_lineage_context_merge_clears_heterogeneous_or_partially_unset_task_name(
+      self,
+  ):
+    ctx_gsm = lineage.LineageContext(
+        tracking_id="traj_p1_0",
+        task_name="gsm8k",
+        parent_tracking_ids=["p1"],
+    )
+    ctx_unset = lineage.LineageContext(
+        tracking_id="traj_p2_0",
+        parent_tracking_ids=["p2"],
+    )
+    ctx_swe = lineage.LineageContext(
+        tracking_id="traj_p3_0",
+        task_name="deepswe",
+        parent_tracking_ids=["p3"],
+    )
+
+    mixed = lineage.LineageContext.merge(
+        batch_id="batch_mixed",
+        contexts=[ctx_gsm, ctx_swe],
+        component="orchestrator.assembler",
+        operation="pack",
+    )
+    self.assertEqual(mixed.task_name, "")
+
+    partially_unset = lineage.LineageContext.merge(
+        batch_id="batch_partially_unset",
+        contexts=[ctx_gsm, ctx_unset],
+        component="orchestrator.assembler",
+        operation="pack",
+    )
+    self.assertEqual(partially_unset.task_name, "")
+
   def test_lineage_context_cloudpickle_round_trip(self):
     ctx = lineage.LineageContext(
         tracking_id="batch_42",
+        task_name="gsm8k",
         parent_tracking_ids=["t1", "t2", "t3"],
     )
     ctx.add_event("worker.trainer", "fwd_bwd", {"loss": 0.35})
@@ -126,6 +181,7 @@ class LineageTest(absltest.TestCase):
     restored = cloudpickle.loads(cloudpickle.dumps(ctx))
 
     self.assertEqual(restored.tracking_id, "batch_42")
+    self.assertEqual(restored.task_name, "gsm8k")
     self.assertEqual(restored.parent_tracking_ids, ["t1", "t2", "t3"])
     self.assertLen(restored.events, 1)
     self.assertEqual(restored.events[0].component, "worker.trainer")

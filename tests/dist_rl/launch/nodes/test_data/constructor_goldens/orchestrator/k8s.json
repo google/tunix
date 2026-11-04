@@ -147,7 +147,8 @@
                 "episode_timeout": 600.0,
                 "overlong_filter": false
               },
-              "prompt": "golden prompt"
+              "prompt": "golden prompt",
+              "task_name": "gsm8k"
             },
             "__type__": "grain.MapDataset"
           },

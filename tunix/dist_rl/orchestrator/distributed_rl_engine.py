@@ -288,6 +288,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     version = kwargs.get("policy_version", policy_version)
 
     rollout_reqs: list[datatypes.RolloutRequest] = []
+    req_task_names: list[str] = []
     for idx, p in enumerate(prompts):
       if isinstance(p, datatypes.RolloutRequest):
         if p.prompt_id is None or p.prompt_id == "":
@@ -299,6 +300,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         for k, v in base_generation_kwargs.items():
           p.generation_kwargs.setdefault(k, v)
         rollout_reqs.append(p)
+        req_task_names.append("")
         continue
 
       item_metadata = dict(getattr(p, "metadata", {}) or {})
@@ -322,6 +324,14 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         )
 
       prompt_id = str(prompt_id)
+      item_task_name = (
+          p["task_name"] if isinstance(p, Mapping) and "task_name" in p else ""
+      )
+      if not isinstance(item_task_name, str):
+        raise TypeError(
+            f"Prompt at index {idx} has non-string 'task_name' of type"
+            f" {type(item_task_name).__name__}."
+        )
       raw_prompt = (
           p.get("prompt", p)
           if isinstance(p, Mapping)
@@ -366,6 +376,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
                 metadata=request_metadata,
             )
         )
+        req_task_names.append(item_task_name)
 
     prompt_ids = list(dict.fromkeys(req.prompt_id for req in rollout_reqs))
     logging.info(
@@ -377,12 +388,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         version,
         _summarize_list(prompt_ids),
     )
-    for req in rollout_reqs:
+    for req, req_task_name in zip(rollout_reqs, req_task_names, strict=True):
       if req.metadata is None:
         req.metadata = {}  # pyrefly: ignore[bad-assignment]
       if req.metadata.get("lineage") is None:
         lineage_ctx = lineage.LineageContext(
             tracking_id=req.traj_id,
+            task_name=req_task_name,
             parent_tracking_ids=[str(req.prompt_id)],
         )
         dispatch_attrs: dict[str, Any] = {
@@ -413,8 +425,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     """Dispatches rollout requests across workers, constructing RolloutRequests internally.
 
     Every prompt item in `prompts` MUST have a unique, collision-free
-    `prompt_id`
-    attribute or dict key. Missing prompt IDs raise a ValueError.
+    `prompt_id` attribute or dict key (missing prompt IDs raise a `ValueError`),
+    and may optionally provide a string `task_name` dict key to stamp onto its
+    `LineageContext` (non-string `task_name` values raise a `TypeError`).
     """
     rollout_reqs = self._build_rollout_requests(
         prompts,

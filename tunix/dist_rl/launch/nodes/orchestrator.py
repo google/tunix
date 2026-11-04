@@ -24,8 +24,9 @@ the agentic `tunix.cli` path:
 
 * `data_module` / `data_config`: the task records, from
   `create_dataset(**data_config) -> grain.MapDataset` as in `tunix.cli`. The
-  record format is specific to this path (`{"prompt", "metadata"}`, not
-  `tunix.cli`'s flat columns); see `load_prompt_items`.
+  record format is specific to this path (`{"prompt", "metadata", "task_name"}`
+  with optional `metadata` and `task_name`, not `tunix.cli`'s flat columns);
+  see `load_prompt_items`.
 * `reward_functions` and `agentic_grpo_config.reward_mode`: `reward_fn` scores
   completions with `reward_functions`; `env` uses the environment rewards, plus
   any `reward_functions`.
@@ -72,7 +73,7 @@ from tunix.sft import metrics_logger as metrics_logger_lib
 MIN_DERIVED_RPC_TIMEOUT_S = 1800.0
 
 # Keys a `data_module` record may hold (see `load_prompt_items`).
-_RECORD_KEYS = frozenset({"prompt", "metadata"})
+_RECORD_KEYS = frozenset({"prompt", "metadata", "task_name"})
 # Prompt-item metadata stamped from the run configuration; records must not set
 # it.
 _RUN_WIDE_METADATA_KEYS = frozenset({"episode_timeout", "overlong_filter"})
@@ -270,13 +271,13 @@ def load_prompt_items(
   """Loads the task records from `data_module` as endless rollout prompt items.
 
   `data_module` provides `create_dataset(**data_config) -> grain.MapDataset`, as
-  in the agentic `tunix.cli` path. Each record is a mapping with a `prompt` and
-  an optional `metadata`; other keys are rejected instead of being dropped by
-  `DistributedRLEngine`. Reward functions get their inputs from `metadata`, the
-  environment its settings from `metadata.env_config`, and the agent from
-  `metadata.agent_config`. Environments build the model's first turn from
-  `metadata.env_config`, so `prompt` only fills `RolloutRequest.prompt` (`""`
-  is fine).
+  in the agentic `tunix.cli` path. Each record is a mapping with a `prompt`, an
+  optional `metadata`, and an optional `task_name`; other keys are rejected
+  instead of being dropped by `DistributedRLEngine`. Reward functions get their
+  inputs from `metadata`, the environment its settings from
+  `metadata.env_config`, and the agent from `metadata.agent_config`.
+  Environments build the model's first turn from `metadata.env_config`, so
+  `prompt` only fills `RolloutRequest.prompt` (`""` is fine).
 
   The dataset repeats indefinitely, and an upstream `shuffle` reshuffles each
   epoch. `StandardRLProgram` stops dispatching after `max_steps` and stamps each
@@ -292,9 +293,11 @@ def load_prompt_items(
 
   Raises:
     ValueError: If `data_module` is empty, `apply_chat_template_to_dataset` is
-      set, the dataset is empty, or its first record is malformed.
+      set, `task_name` is whitespace-only or empty when records omit
+      `task_name`, the dataset is empty, or its first record is malformed
+      (including an empty or whitespace-only `task_name`).
     TypeError: If `create_dataset` does not return a `grain.MapDataset`, or the
-      first record or its `metadata` is not a mapping.
+      first record, its `metadata`, or its `task_name` has an invalid type.
   """
   data_module = str(hp.config["data_module"])
   if not data_module:
@@ -307,6 +310,9 @@ def load_prompt_items(
         "apply_chat_template_to_dataset must be false: the rollout workers"
         " apply the chat template (chat_parser_config)."
     )
+  default_task_name = str(hp.config["task_name"])
+  if default_task_name and not default_task_name.strip():
+    raise ValueError("task_name must be non-empty.")
   dataset = data_lib.get_dataset_from_module(
       data_module, **hp.config_mapping("data_config")
   )
@@ -340,8 +346,9 @@ def load_prompt_items(
     if unexpected:
       raise ValueError(
           f"Dataset record has unexpected keys {unexpected}; a record holds"
-          " only 'prompt' and 'metadata'. Put reward function inputs in"
-          " 'metadata' and environment settings in 'metadata.env_config'."
+          " only 'prompt', 'metadata', and optional 'task_name'. Put reward"
+          " function inputs in 'metadata' and environment settings in"
+          " 'metadata.env_config'."
       )
     if "prompt" not in record:
       raise ValueError("Dataset record has no 'prompt'.")
@@ -357,8 +364,25 @@ def load_prompt_items(
           f"Dataset record metadata sets {run_wide}, which come from the run"
           " configuration."
       )
+    if "task_name" in record:
+      task_name = record["task_name"]
+      if not isinstance(task_name, str):
+        raise TypeError(
+            "Dataset record 'task_name' must be a str, got"
+            f" {type(task_name).__name__}."
+        )
+      if not task_name.strip():
+        raise ValueError("Dataset record 'task_name' must be non-empty.")
+    elif default_task_name:
+      task_name = default_task_name
+    else:
+      raise ValueError(
+          "task_name must be non-empty when dataset records do not set"
+          " 'task_name'."
+      )
     return {
         "prompt": record["prompt"],
+        "task_name": task_name,
         "max_turns": max_turns,
         "metadata": {
             **metadata,

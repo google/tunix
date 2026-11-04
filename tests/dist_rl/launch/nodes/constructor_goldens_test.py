@@ -145,6 +145,7 @@ FIXED_OVERRIDES = (
     "cluster_config.k8s.inference_id=golden-inference",
     "tokenizer_config.tokenizer_path=/models/tokenizer",
     "data_module=golden_data_module",
+    "task_name=gsm8k",
 )
 
 

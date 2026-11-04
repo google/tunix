@@ -167,6 +167,7 @@ class FrozenLakeDistTest(absltest.TestCase):
     )
 
     self.assertEqual(item["prompt_id"], "frozenlake_2")
+    self.assertEqual(item["task_name"], "frozenlake")
     self.assertEqual(item["max_turns"], 8)
     self.assertEqual(item["max_response_length"], 2048)
     self.assertEqual(item["generation_kwargs"]["temperature"], 0.7)

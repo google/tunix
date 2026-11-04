@@ -216,6 +216,7 @@ class RolloutFacts:
       them. They do not depend on the training mask, so rollouts that were
       masked out still have them.
     window: Dispatch and finish times from lineage, or None without them.
+    task_name: Semantic task name from lineage, or `""` when unset.
     env_time_s: Total environment interaction wall time (`reset` + `step` +
       `close`) in seconds, or None without `env_time`.
     reward_time_s: Final reward evaluation wall time in seconds, or None without
@@ -227,6 +228,7 @@ class RolloutFacts:
   num_turns: int | None
   turn_lengths: Sequence[int] | None
   window: RolloutWindow | None
+  task_name: str = ""
   env_time_s: float | None = None
   reward_time_s: float | None = None
 
@@ -249,12 +251,19 @@ class RolloutFacts:
         sets.
     """
     traj = item.traj
+    lineage_ctx = item.metadata.get("lineage")
+    task_name = (
+        lineage_ctx.task_name
+        if isinstance(lineage_ctx, lineage.LineageContext)
+        else ""
+    )
     return cls(
         traj_id=item.traj_id,
         status=traj["status"].name,
         num_turns=_num_turns(traj),
         turn_lengths=traj.get("assistant_turn_lengths"),
         window=_rollout_window(item),
+        task_name=task_name,
         env_time_s=_env_time_s(traj),
         reward_time_s=_reward_time_s(traj),
     )

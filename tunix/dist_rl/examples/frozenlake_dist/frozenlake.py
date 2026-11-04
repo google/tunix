@@ -109,6 +109,7 @@ def build_prompt_item(
       # The registered environment supplies the first user observation.
       "prompt": "",
       "prompt_id": prompt_id,
+      "task_name": "frozenlake",
       "max_turns": max_turns,
       "max_response_length": max_response_length,
       "generation_kwargs": {

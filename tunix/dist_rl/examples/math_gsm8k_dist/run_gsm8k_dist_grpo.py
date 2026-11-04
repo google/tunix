@@ -333,6 +333,7 @@ def _build_prompt_item(
   return {
       "prompt": prompt,
       "prompt_id": prompt_id,
+      "task_name": "gsm8k",
       "metadata": {
           "answer": answer,
           "gold_answer": answer,

@@ -68,6 +68,9 @@ tokenizer_config:
 data_source: "tfds"
 data_directory: ""
 data_module: ""
+# Default semantic task_name for data_module records without one; required
+# unless every record sets task_name.
+task_name: ""
 apply_chat_template_to_dataset: false
 data_config:
   split: "train"

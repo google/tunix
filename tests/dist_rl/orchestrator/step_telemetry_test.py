@@ -26,6 +26,7 @@ def _rollout_lineage(
     received_s: float | None = None,
     execution_time_s: float | None = None,
     batch_idx: int | None = None,
+    task_name: str = "",
 ) -> lineage.LineageContext:
   """Lineage a rollout carries back: dispatched, received, then finished."""
   dispatch_attrs = {}
@@ -61,6 +62,7 @@ def _rollout_lineage(
   )
   return lineage.LineageContext(
       tracking_id="traj",
+      task_name=task_name,
       events=events,
   )
 
@@ -76,6 +78,7 @@ def _health_item(
     worker_id="rollout-0",
     execution_time_s=None,
     batch_idx=None,
+    task_name="",
     env_time=None,
     reward_time=None,
 ):
@@ -102,6 +105,7 @@ def _health_item(
         received_s=received_time_s,
         execution_time_s=execution_time_s,
         batch_idx=batch_idx,
+        task_name=task_name,
     )
   return datatypes.TrajectoryItem(
       prompt_id="p0", group_index=group_index, traj=traj, metadata=metadata
@@ -124,6 +128,7 @@ class RolloutFactsTest(absltest.TestCase):
             turn_lengths=[5, 57344],
             window=(100.0, 130.0),
             worker_id="w1",
+            task_name="gsm8k",
         )
     )
 
@@ -131,6 +136,7 @@ class RolloutFactsTest(absltest.TestCase):
     self.assertEqual(facts.status, "MAX_CONTEXT_LIMIT_REACHED")
     self.assertEqual(facts.num_turns, 2)
     self.assertEqual(facts.turn_lengths, [5, 57344])
+    self.assertEqual(facts.task_name, "gsm8k")
     self.assertEqual(
         facts.window,
         step_telemetry.RolloutWindow(
@@ -147,6 +153,7 @@ class RolloutFactsTest(absltest.TestCase):
     self.assertIsNone(facts.num_turns)
     self.assertIsNone(facts.turn_lengths)
     self.assertIsNone(facts.window)
+    self.assertEqual(facts.task_name, "")
 
   def test_rollout_without_status_raises(self):
     # `critique_stage` stamps every scored rollout's status, so a missing one
