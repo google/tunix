@@ -67,11 +67,11 @@ class TilePolicyTest(parameterized.TestCase):
     rng = np.random.default_rng(0)
     x = test_utils.exact_bf16(rng, (256, 512))
     y = test_utils.exact_bf16(rng, (512, 1024))
-    _, launches = _launches(lambda: pallas_matmul.matmul(x, y, interpret=True))
+    _, launches = _launches(lambda: pallas_matmul.matmul(x, y, interpret=pltpu.InterpretParams()))
     self.assertEqual(launches, [("canon_matmul_bm256_bn1024_bk256", (1, 1, 2))])
     _, launches = _launches(
         lambda: pallas_matmul.matmul(
-            x, y, interpret=True, block_m=128, block_n=128, block_k=256
+            x, y, interpret=pltpu.InterpretParams(), block_m=128, block_n=128, block_k=256
         )
     )
     self.assertEqual(launches, [("canon_matmul_bm128_bn128_bk256", (2, 8, 2))])
@@ -90,7 +90,7 @@ class MatmulNumericsTest(parameterized.TestCase):
     rng = np.random.default_rng(m + k + n)
     x = test_utils.exact_bf16(rng, (m, k))
     y = test_utils.exact_bf16(rng, (k, n))
-    out = pallas_matmul.matmul(x, y, interpret=True)
+    out = pallas_matmul.matmul(x, y, interpret=pltpu.InterpretParams())
     self.assertEqual(out.dtype, jnp.bfloat16)
     test_utils.assert_bitwise_equal(
         out, test_utils.exact_matmul_reference(x, y)
@@ -100,7 +100,7 @@ class MatmulNumericsTest(parameterized.TestCase):
     rng = np.random.default_rng(1)
     x = test_utils.random_bf16(rng, (256, 768))
     y = test_utils.random_bf16(rng, (768, 512), scale=0.05)
-    out = pallas_matmul.matmul(x, y, interpret=True)
+    out = pallas_matmul.matmul(x, y, interpret=pltpu.InterpretParams())
     reference = np.asarray(x, np.float64) @ np.asarray(y, np.float64)
     np.testing.assert_allclose(
         test_utils.as_f32(out), reference, rtol=1e-2, atol=1e-2
@@ -112,7 +112,7 @@ class MatmulNumericsTest(parameterized.TestCase):
     rng = np.random.default_rng(2)
     x = test_utils.random_bf16(rng, (256, 512))
     y = test_utils.random_bf16(rng, (512, 1024), scale=0.05)
-    alone = pallas_matmul.matmul(x, y, interpret=True)
+    alone = pallas_matmul.matmul(x, y, interpret=pltpu.InterpretParams())
     for filler in (
         jnp.zeros_like(x),
         jnp.full_like(x, 1e4),
@@ -120,10 +120,10 @@ class MatmulNumericsTest(parameterized.TestCase):
         -x,
     ):
       below = pallas_matmul.matmul(
-          jnp.concatenate([x, filler]), y, interpret=True
+          jnp.concatenate([x, filler]), y, interpret=pltpu.InterpretParams()
       )
       above = pallas_matmul.matmul(
-          jnp.concatenate([filler, x]), y, interpret=True
+          jnp.concatenate([filler, x]), y, interpret=pltpu.InterpretParams()
       )
       test_utils.assert_bitwise_equal(below[:256], alone)
       test_utils.assert_bitwise_equal(above[256:], alone)
@@ -133,9 +133,9 @@ class MatmulNumericsTest(parameterized.TestCase):
     rng = np.random.default_rng(3)
     x = test_utils.random_bf16(rng, (384, 256))
     y = test_utils.random_bf16(rng, (256, 512), scale=0.05)
-    full = pallas_matmul.matmul(x, y, interpret=True)
+    full = pallas_matmul.matmul(x, y, interpret=pltpu.InterpretParams())
     for start in (0, 128, 256):
-      part = pallas_matmul.matmul(x[start : start + 128], y, interpret=True)
+      part = pallas_matmul.matmul(x[start : start + 128], y, interpret=pltpu.InterpretParams())
       test_utils.assert_bitwise_equal(full[start : start + 128], part)
 
   @parameterized.parameters(
@@ -145,9 +145,9 @@ class MatmulNumericsTest(parameterized.TestCase):
     rng = np.random.default_rng(4)
     x = test_utils.exact_bf16(rng, (512, 512))
     y = test_utils.exact_bf16(rng, (512, 1024))
-    default = pallas_matmul.matmul(x, y, interpret=True)
+    default = pallas_matmul.matmul(x, y, interpret=pltpu.InterpretParams())
     tiled = pallas_matmul.matmul(
-        x, y, interpret=True, block_m=bm, block_n=bn, block_k=bk
+        x, y, interpret=pltpu.InterpretParams(), block_m=bm, block_n=bn, block_k=bk
     )
     test_utils.assert_bitwise_equal(tiled, default)
 
@@ -155,8 +155,8 @@ class MatmulNumericsTest(parameterized.TestCase):
     rng = np.random.default_rng(5)
     x = test_utils.random_bf16(rng, (256, 256))
     y = test_utils.random_bf16(rng, (256, 256))
-    eager = pallas_matmul.matmul(x, y, interpret=True)
-    jitted = jax.jit(lambda a, b: pallas_matmul.matmul(a, b, interpret=True))(
+    eager = pallas_matmul.matmul(x, y, interpret=pltpu.InterpretParams())
+    jitted = jax.jit(lambda a, b: pallas_matmul.matmul(a, b, interpret=pltpu.InterpretParams()))(
         x, y
     )
     test_utils.assert_bitwise_equal(jitted, eager)
@@ -174,13 +174,13 @@ class MatmulNumericsTest(parameterized.TestCase):
     y = y.at[0, :].set(jnp.bfloat16(16.0)).at[128, :].set(jnp.bfloat16(-16.0))
 
     ref_bm128_bn256_bk256 = pallas_matmul.matmul(
-        x, y, interpret=True, block_m=128, block_n=256, block_k=256
+        x, y, interpret=pltpu.InterpretParams(), block_m=128, block_n=256, block_k=256
     )
     bm256_bn128_bk256 = pallas_matmul.matmul(
-        x, y, interpret=True, block_m=256, block_n=128, block_k=256
+        x, y, interpret=pltpu.InterpretParams(), block_m=256, block_n=128, block_k=256
     )
     bk128 = pallas_matmul.matmul(
-        x, y, interpret=True, block_m=128, block_n=256, block_k=128
+        x, y, interpret=pltpu.InterpretParams(), block_m=128, block_n=256, block_k=128
     )
 
     # Output tiles (BM, BN) only partition which tile writes which output
@@ -209,14 +209,14 @@ class MatmulValidationTest(parameterized.TestCase):
     x = jnp.zeros(x_shape, jnp.bfloat16)
     y = jnp.zeros(y_shape, jnp.bfloat16)
     with self.assertRaises(ValueError):
-      pallas_matmul.matmul(x, y, interpret=True, **kwargs)
+      pallas_matmul.matmul(x, y, interpret=pltpu.InterpretParams(), **kwargs)
 
   def test_rejects_non_bf16(self):
     with self.assertRaisesRegex(ValueError, "bf16"):
       pallas_matmul.matmul(
           jnp.zeros((128, 256), jnp.float32),
           jnp.zeros((256, 256), jnp.float32),
-          interpret=True,
+          interpret=pltpu.InterpretParams(),
       )
 
 

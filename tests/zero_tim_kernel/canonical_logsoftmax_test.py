@@ -104,11 +104,11 @@ class RowBucketTest(_EnvTestCase):
         tokens, ((0, canonical_logsoftmax.PRODUCTION_M - 8),)
     )
     padded_full = canonical_logsoftmax.gathered_logprobs(
-        padded_logits, padded_tokens, interpret=True
+        padded_logits, padded_tokens, interpret=pltpu.InterpretParams()
     )
     padded = tuple(item[:8] for item in padded_full)
     bucket = canonical_logsoftmax.gathered_logprobs(
-        logits, tokens, interpret=True
+        logits, tokens, interpret=pltpu.InterpretParams()
     )
     self.assertLen(bucket, len(padded))
     for got, want in zip(bucket, padded):
@@ -122,7 +122,7 @@ class LogSoftmaxTest(_EnvTestCase):
     # 1000 and 9000 exercise the finfo.min padding of a partial vocabulary
     # group; 9000 also the left-to-right combine of two groups.
     logits = _logits(vocab, 8, vocab)
-    out = canonical_logsoftmax.log_softmax(logits, interpret=True)
+    out = canonical_logsoftmax.log_softmax(logits, interpret=pltpu.InterpretParams())
     self.assertEqual(out.shape, (8, vocab))
     self.assertEqual(out.dtype, jnp.float32)
     np.testing.assert_allclose(
@@ -131,11 +131,11 @@ class LogSoftmaxTest(_EnvTestCase):
 
   def test_rows_are_independent_of_the_batch(self):
     logits = _logits(1, 16, 1000)
-    full = canonical_logsoftmax.log_softmax(logits, interpret=True)
-    head = canonical_logsoftmax.log_softmax(logits[:8], interpret=True)
+    full = canonical_logsoftmax.log_softmax(logits, interpret=pltpu.InterpretParams())
+    head = canonical_logsoftmax.log_softmax(logits[:8], interpret=pltpu.InterpretParams())
     test_utils.assert_bitwise_equal(head, full[:8])
     perm = np.random.default_rng(2).permutation(16)
-    permuted = canonical_logsoftmax.log_softmax(logits[perm], interpret=True)
+    permuted = canonical_logsoftmax.log_softmax(logits[perm], interpret=pltpu.InterpretParams())
     test_utils.assert_bitwise_equal(permuted, np.asarray(full)[perm])
 
   def test_vjp_is_the_analytic_log_softmax_vjp(self):
@@ -144,7 +144,7 @@ class LogSoftmaxTest(_EnvTestCase):
 
     def loss(x):
       return jnp.sum(
-          weights * canonical_logsoftmax.log_softmax(x, interpret=True)
+          weights * canonical_logsoftmax.log_softmax(x, interpret=pltpu.InterpretParams())
       )
 
     grad = jax.grad(loss)(logits)
@@ -160,19 +160,19 @@ class LogSoftmaxTest(_EnvTestCase):
         jnp.zeros((2, 4, 512), jnp.float32),
     ):
       with self.assertRaises(canonical_logsoftmax.CanonicalLogSoftmaxError):
-        canonical_logsoftmax.log_softmax(bad, interpret=True)
+        canonical_logsoftmax.log_softmax(bad, interpret=pltpu.InterpretParams())
     os.environ.pop(canonical_logsoftmax.ENV)
     with self.assertRaisesRegex(
         canonical_logsoftmax.CanonicalLogSoftmaxError, "is required"
     ):
-      canonical_logsoftmax.log_softmax(good, interpret=True)
+      canonical_logsoftmax.log_softmax(good, interpret=pltpu.InterpretParams())
     with self.assertRaises(canonical_logsoftmax.CanonicalLogSoftmaxError):
       canonical_logsoftmax.gathered_logprobs(
-          good, jnp.zeros((8,), jnp.int32), interpret=True
+          good, jnp.zeros((8,), jnp.int32), interpret=pltpu.InterpretParams()
       )
     with self.assertRaises(canonical_logsoftmax.CanonicalLogSoftmaxError):
       canonical_logsoftmax.token_logprobs(
-          good, jnp.zeros((8,), jnp.int32), interpret=True
+          good, jnp.zeros((8,), jnp.int32), interpret=pltpu.InterpretParams()
       )
 
   @parameterized.parameters(512, 1000, 9000)
@@ -184,11 +184,11 @@ class LogSoftmaxTest(_EnvTestCase):
     cotangent = _logits(vocab + 11, 8, 1, scale=1.0)[:, 0]
 
     def ref_fn(x):
-      full = canonical_logsoftmax.log_softmax(x, interpret=True)
+      full = canonical_logsoftmax.log_softmax(x, interpret=pltpu.InterpretParams())
       return jnp.take_along_axis(full, tokens[:, None], axis=-1)[:, 0]
 
     def opt_fn(x):
-      return canonical_logsoftmax.token_logprobs(x, tokens, interpret=True)
+      return canonical_logsoftmax.token_logprobs(x, tokens, interpret=pltpu.InterpretParams())
 
     ref_out, ref_vjp = jax.vjp(ref_fn, logits)
     opt_out, opt_vjp = jax.vjp(opt_fn, logits)
@@ -201,7 +201,7 @@ class LogSoftmaxTest(_EnvTestCase):
 class GatheredLogprobsTest(_EnvTestCase):
 
   def _materialize_then_gather(self, logits, tokens):
-    full = np.asarray(canonical_logsoftmax.log_softmax(logits, interpret=True))
+    full = np.asarray(canonical_logsoftmax.log_softmax(logits, interpret=pltpu.InterpretParams()))
     rows = np.arange(full.shape[0])
     token_logprob = full[rows, np.asarray(tokens)]
     return (
@@ -216,7 +216,7 @@ class GatheredLogprobsTest(_EnvTestCase):
   def test_matches_materialize_then_gather_bitwise(self, vocab):
     logits = _logits(vocab + 1, 8, vocab)
     tokens = _tokens(vocab + 1, 8, vocab)
-    got = canonical_logsoftmax.gathered_logprobs(logits, tokens, interpret=True)
+    got = canonical_logsoftmax.gathered_logprobs(logits, tokens, interpret=pltpu.InterpretParams())
     want = self._materialize_then_gather(logits, tokens)
     self.assertLen(got, 4)
     for value, expected in zip(got, want):
@@ -232,7 +232,7 @@ class GatheredLogprobsTest(_EnvTestCase):
     logits = jnp.asarray(logits)
     tokens = jnp.asarray([700, 8500, 0, 1, 2, 3, 4, 5], jnp.int32)
     token_logprob, top_value, top_index, rank = (
-        canonical_logsoftmax.gathered_logprobs(logits, tokens, interpret=True)
+        canonical_logsoftmax.gathered_logprobs(logits, tokens, interpret=pltpu.InterpretParams())
     )
     self.assertEqual(int(top_index[0]), 5)
     self.assertEqual(int(top_index[1]), 100)
@@ -250,10 +250,10 @@ class GatheredLogprobsTest(_EnvTestCase):
     logits = _logits(6, 16, 1000)
     tokens = _tokens(6, 16, 1000)
     full = canonical_logsoftmax.gathered_logprobs(
-        logits, tokens, interpret=True
+        logits, tokens, interpret=pltpu.InterpretParams()
     )
     head = canonical_logsoftmax.gathered_logprobs(
-        logits[:8], tokens[:8], interpret=True
+        logits[:8], tokens[:8], interpret=pltpu.InterpretParams()
     )
     for got, want in zip(head, full):
       test_utils.assert_bitwise_equal(got, np.asarray(want)[:8])

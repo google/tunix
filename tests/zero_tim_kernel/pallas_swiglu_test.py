@@ -35,7 +35,7 @@ class SwigluTest(parameterized.TestCase):
     rng = np.random.default_rng(0)
     gate = test_utils.random_bf16(rng, (256, 512), scale=3.0)
     up = test_utils.random_bf16(rng, (256, 512))
-    out = pallas_swiglu.swiglu(gate, up, interpret=True)
+    out = pallas_swiglu.swiglu(gate, up, interpret=pltpu.InterpretParams())
     g = np.asarray(gate, np.float64)
     expected = g / (1.0 + np.exp(-g)) * np.asarray(up, np.float64)
     self.assertEqual(out.dtype, jnp.bfloat16)
@@ -47,10 +47,10 @@ class SwigluTest(parameterized.TestCase):
     rng = np.random.default_rng(1)
     gate = test_utils.random_bf16(rng, (384, 768), scale=3.0)
     up = test_utils.random_bf16(rng, (384, 768))
-    full = pallas_swiglu.swiglu(gate, up, interpret=True)
+    full = pallas_swiglu.swiglu(gate, up, interpret=pltpu.InterpretParams())
     for start in (0, 128, 256):
       part = pallas_swiglu.swiglu(
-          gate[start : start + 128], up[start : start + 128], interpret=True
+          gate[start : start + 128], up[start : start + 128], interpret=pltpu.InterpretParams()
       )
       test_utils.assert_bitwise_equal(full[start : start + 128], part)
 
@@ -59,20 +59,20 @@ class SwigluTest(parameterized.TestCase):
     rng = np.random.default_rng(m)
     gate = test_utils.random_bf16(rng, (128, 512), scale=3.0)
     up = test_utils.random_bf16(rng, (128, 512))
-    full = pallas_swiglu.swiglu(gate, up, interpret=True)
-    part = pallas_swiglu.swiglu(gate[:m], up[:m], interpret=True)
+    full = pallas_swiglu.swiglu(gate, up, interpret=pltpu.InterpretParams())
+    part = pallas_swiglu.swiglu(gate[:m], up[:m], interpret=pltpu.InterpretParams())
     test_utils.assert_bitwise_equal(part, full[:m])
 
   def test_feature_padding_is_sliced_off(self):
     rng = np.random.default_rng(1)
     gate = test_utils.random_bf16(rng, (16, 1216), scale=3.0)
     up = test_utils.random_bf16(rng, (16, 1216))
-    out = pallas_swiglu.swiglu(gate, up, interpret=True)
+    out = pallas_swiglu.swiglu(gate, up, interpret=pltpu.InterpretParams())
     self.assertEqual(out.shape, (16, 1216))
     expected = pallas_swiglu.canonical_swiglu(gate, up)
     test_utils.assert_bitwise_equal(out, expected)
     with mock.patch.dict(os.environ, {pallas_matmul.INPUT_FUSION_ENV: "1"}):
-      fused = pallas_swiglu.swiglu(gate, up, interpret=True)
+      fused = pallas_swiglu.swiglu(gate, up, interpret=pltpu.InterpretParams())
     test_utils.assert_bitwise_equal(fused, out)
 
   @parameterized.named_parameters(
@@ -86,7 +86,7 @@ class SwigluTest(parameterized.TestCase):
       pallas_swiglu.swiglu(
           jnp.zeros(gate_shape, jnp.bfloat16),
           jnp.zeros(up_shape, jnp.bfloat16),
-          interpret=True,
+          interpret=pltpu.InterpretParams(),
       )
 
   def test_rejects_non_bf16(self):
@@ -94,7 +94,7 @@ class SwigluTest(parameterized.TestCase):
       pallas_swiglu.swiglu(
           jnp.zeros((128, 256), jnp.float32),
           jnp.zeros((128, 256), jnp.float32),
-          interpret=True,
+          interpret=pltpu.InterpretParams(),
       )
 
 

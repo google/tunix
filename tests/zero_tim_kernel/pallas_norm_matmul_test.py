@@ -30,8 +30,8 @@ def setUpModule():
 
 
 def _two_kernel_chain(x, gamma, y, **tiles):
-  normed = pallas_rmsnorm.rmsnorm(x, gamma, epsilon=_EPS, interpret=True)
-  return pallas_matmul.matmul(normed, y, interpret=True, **tiles)
+  normed = pallas_rmsnorm.rmsnorm(x, gamma, epsilon=_EPS, interpret=pltpu.InterpretParams())
+  return pallas_matmul.matmul(normed, y, interpret=pltpu.InterpretParams(), **tiles)
 
 
 class NormMatmulTest(parameterized.TestCase):
@@ -46,7 +46,7 @@ class NormMatmulTest(parameterized.TestCase):
     gamma = test_utils.random_bf16(rng, (512,))
     y = test_utils.random_bf16(rng, (512, 256), scale=0.05)
     fused = pallas_norm_matmul.norm_matmul(
-        x, gamma, y, epsilon=_EPS, interpret=True
+        x, gamma, y, epsilon=_EPS, interpret=pltpu.InterpretParams()
     )
     test_utils.assert_bitwise_equal(fused, _two_kernel_chain(x, gamma, y))
 
@@ -60,7 +60,7 @@ class NormMatmulTest(parameterized.TestCase):
     gamma = jnp.ones((k,), jnp.bfloat16)
     y = test_utils.exact_bf16(rng, (k, n))
     fused = pallas_norm_matmul.norm_matmul(
-        x, gamma, y, epsilon=_EPS, interpret=True
+        x, gamma, y, epsilon=_EPS, interpret=pltpu.InterpretParams()
     )
     test_utils.assert_bitwise_equal(fused, _two_kernel_chain(x, gamma, y))
 
@@ -77,7 +77,7 @@ class NormMatmulTest(parameterized.TestCase):
           jnp.ones(gamma_shape, jnp.bfloat16),
           jnp.zeros(y_shape, jnp.bfloat16),
           epsilon=_EPS,
-          interpret=True,
+          interpret=pltpu.InterpretParams(),
           **kwargs,
       )
 
@@ -87,10 +87,10 @@ class NormMatmulTest(parameterized.TestCase):
     y = jnp.zeros((256, 256), jnp.bfloat16)
     with self.assertRaisesRegex(ValueError, "bf16"):
       pallas_norm_matmul.norm_matmul(
-          x, gamma.astype(jnp.float32), y, epsilon=_EPS, interpret=True
+          x, gamma.astype(jnp.float32), y, epsilon=_EPS, interpret=pltpu.InterpretParams()
       )
     with self.assertRaisesRegex(ValueError, "epsilon"):
-      pallas_norm_matmul.norm_matmul(x, gamma, y, epsilon=0.0, interpret=True)
+      pallas_norm_matmul.norm_matmul(x, gamma, y, epsilon=0.0, interpret=pltpu.InterpretParams())
 
 
 if __name__ == "__main__":

@@ -64,7 +64,7 @@ class CanonicalReplicaTest(absltest.TestCase):
     y = test_utils.exact_bf16(rng, (512, 512))
     test_utils.assert_bitwise_equal(
         canonical_vjp.canonical_matmul(x, y, contract=contract),
-        padded_matmul.matmul(x, y, contract=contract, interpret=True),
+        padded_matmul.matmul(x, y, contract=contract, interpret=pltpu.InterpretParams()),
     )
 
   def test_replicas_reject_bad_operands(self):
@@ -97,7 +97,7 @@ class CoatTest(parameterized.TestCase):
     self.cotangent = jnp.asarray(rng.standard_normal((16, 256)), jnp.float32)
 
   def _pallas_forward(self, a, b):
-    return padded_matmul.matmul(a, b, contract=self.contract, interpret=True)
+    return padded_matmul.matmul(a, b, contract=self.contract, interpret=pltpu.InterpretParams())
 
   def test_plain_env_parsing(self):
     self.assertTrue(canonical_vjp.plain_matmul_vjp_enabled())
@@ -179,7 +179,7 @@ class CoatTest(parameterized.TestCase):
     cotangent = jnp.asarray(rng.standard_normal((16, 512)), jnp.float32)
 
     def forward(g, u):
-      return pallas_swiglu.swiglu(g, u, interpret=True)
+      return pallas_swiglu.swiglu(g, u, interpret=pltpu.InterpretParams())
 
     coat = canonical_vjp.swiglu(gate, up, forward=forward)
     test_utils.assert_bitwise_equal(coat, forward(gate, up))
@@ -199,7 +199,7 @@ class CoatTest(parameterized.TestCase):
     )
 
     def forward(a, w):
-      return pallas_rmsnorm.rmsnorm(a, w, epsilon=_EPS, interpret=True)
+      return pallas_rmsnorm.rmsnorm(a, w, epsilon=_EPS, interpret=pltpu.InterpretParams())
 
     def replica(a, w):
       return pallas_rmsnorm.canonical_rmsnorm(a, w, epsilon=_EPS)
@@ -223,7 +223,7 @@ class CoatTest(parameterized.TestCase):
 
     def forward(a, g, b):
       return pallas_norm_matmul.norm_matmul(
-          a, g, b, epsilon=_EPS, interpret=True
+          a, g, b, epsilon=_EPS, interpret=pltpu.InterpretParams()
       )
 
     def coat(a, g, b):
@@ -261,13 +261,13 @@ class CoatTest(parameterized.TestCase):
     cot = jnp.asarray(rng.standard_normal((12, 384)), jnp.float32)
 
     out_fused = canonical_vjp.fused_matmul(
-        x, (w1, w2), contract=self.contract, interpret=True
+        x, (w1, w2), contract=self.contract, interpret=pltpu.InterpretParams()
     )
     out_concat = padded_matmul.matmul(
         x,
         jnp.concatenate((w1, w2), axis=1),
         contract=self.contract,
-        interpret=True,
+        interpret=pltpu.InterpretParams(),
     )
     test_utils.assert_bitwise_equal(out_fused, out_concat)
 
@@ -279,7 +279,7 @@ class CoatTest(parameterized.TestCase):
 
     dx_mm, dw1_mm, dw2_mm = _grads(
         lambda a, b1, b2: canonical_vjp.fused_matmul(
-            a, (b1, b2), contract=self.contract, interpret=True
+            a, (b1, b2), contract=self.contract, interpret=pltpu.InterpretParams()
         ),
         cot,
         x,
@@ -297,11 +297,11 @@ class CoatTest(parameterized.TestCase):
         (w1, w2),
         norm_eps=_EPS,
         contract=self.contract,
-        interpret=True,
+        interpret=pltpu.InterpretParams(),
     )
-    normed = pallas_rmsnorm.rmsnorm(x, self.gamma, epsilon=_EPS, interpret=True)
+    normed = pallas_rmsnorm.rmsnorm(x, self.gamma, epsilon=_EPS, interpret=pltpu.InterpretParams())
     out_two_step = canonical_vjp.fused_matmul(
-        normed, (w1, w2), contract=self.contract, interpret=True
+        normed, (w1, w2), contract=self.contract, interpret=pltpu.InterpretParams()
     )
     test_utils.assert_bitwise_equal(out_norm_fused, out_two_step)
 
@@ -316,7 +316,7 @@ class CoatTest(parameterized.TestCase):
             (b1, b2),
             norm_eps=_EPS,
             contract=self.contract,
-            interpret=True,
+            interpret=pltpu.InterpretParams(),
         ),
         cot,
         x,
@@ -346,26 +346,26 @@ class CoatTest(parameterized.TestCase):
         (w_gate, w_up),
         norm_eps=_EPS,
         contract=qwen4b,
-        interpret=True,
+        interpret=pltpu.InterpretParams(),
     )
-    normed = pallas_rmsnorm.rmsnorm(x, gamma, epsilon=_EPS, interpret=True)
+    normed = pallas_rmsnorm.rmsnorm(x, gamma, epsilon=_EPS, interpret=pltpu.InterpretParams())
     out_two_step = canonical_vjp.fused_matmul(
-        normed, (w_gate, w_up), contract=qwen4b, interpret=True
+        normed, (w_gate, w_up), contract=qwen4b, interpret=pltpu.InterpretParams()
     )
     test_utils.assert_bitwise_equal(out_fused, out_two_step)
 
     with self.assertRaisesRegex(ValueError, "w_parts"):
-      canonical_vjp.fused_matmul(x, (), contract=qwen4b, interpret=True)
+      canonical_vjp.fused_matmul(x, (), contract=qwen4b, interpret=pltpu.InterpretParams())
     with self.assertRaisesRegex(ValueError, "w_parts"):
       canonical_vjp.fused_norm_matmul(
-          x, gamma, (), norm_eps=_EPS, contract=qwen4b, interpret=True
+          x, gamma, (), norm_eps=_EPS, contract=qwen4b, interpret=pltpu.InterpretParams()
       )
     with self.assertRaisesRegex(ValueError, "w_parts"):
       canonical_vjp.fused_matmul(
           x,
           (jnp.zeros((128, 128), jnp.bfloat16),),
           contract=qwen4b,
-          interpret=True,
+          interpret=pltpu.InterpretParams(),
       )
 
 
