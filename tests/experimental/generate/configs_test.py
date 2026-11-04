@@ -79,15 +79,6 @@ class CacheConfigTest(parameterized.TestCase):
     self.assertEqual(cfg.dp_size, 1)
     self.assertEqual(cfg.tp_size, 2)
 
-  def test_sharding_axes_without_mesh_raises(self):
-    with self.assertRaisesRegex(ValueError, r"mesh is required"):
-      configs.CacheConfig(
-          max_device_size_gib=1.0,
-          page_size=16,
-          dtype=jnp.float32,
-          dp_axis="dp",
-      )
-
   def test_duplicate_dp_and_tp_axis_raises(self):
     with self.assertRaisesRegex(
         ValueError, r"dp_axis and tp_axis must be different"
@@ -120,6 +111,7 @@ class CacheConfigTest(parameterized.TestCase):
           page_size=0,
           max_device_size_gib=1.0,
           dtype=jnp.float32,
+          mesh=_create_mesh(),
       )
 
   def test_invalid_negative_size_raises(self):
@@ -130,6 +122,7 @@ class CacheConfigTest(parameterized.TestCase):
           page_size=16,
           max_device_size_gib=-1.0,
           dtype=jnp.float32,
+          mesh=_create_mesh(),
       )
     with self.assertRaisesRegex(
         ValueError, r"max_host_size_gib cannot be negative"
@@ -139,6 +132,7 @@ class CacheConfigTest(parameterized.TestCase):
           max_device_size_gib=1.0,
           max_host_size_gib=-1.0,
           dtype=jnp.float32,
+          mesh=_create_mesh(),
       )
 
   def test_zero_device_size_raises(self):
@@ -149,6 +143,7 @@ class CacheConfigTest(parameterized.TestCase):
           page_size=16,
           max_device_size_gib=0.0,
           dtype=jnp.float32,
+          mesh=_create_mesh(),
       )
 
 

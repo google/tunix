@@ -55,8 +55,6 @@ def _create_cache_config(
 ) -> configs.CacheConfig:
   bytes_per_cache_page = page_size * (2 * num_kv_heads) * head_dim * 4
   total_bytes_per_page = bytes_per_cache_page * num_caches
-  if mesh is None and (dp_axis or tp_axis):
-    mesh = _create_mesh()
   return configs.CacheConfig(
       max_device_size_gib=(total_bytes_per_page * num_device_pages) / _GIB,
       max_host_size_gib=(total_bytes_per_page * num_host_pages) / _GIB,
@@ -65,7 +63,7 @@ def _create_cache_config(
       dtype=jnp.float32,
       dp_axis=dp_axis,
       tp_axis=tp_axis,
-      mesh=mesh,
+      mesh=mesh if mesh is not None else _create_mesh(),
   )
 
 
@@ -237,6 +235,7 @@ class KVCacheManagerInitTest(parameterized.TestCase):
         max_device_size_gib=(4 * (4 * 4 * 8 * 4 + 4 * 1 * 16 * 4)) / _GIB,
         page_size=4,
         dtype=jnp.float32,
+        mesh=_create_mesh(),
     )
     mgr = kv_cache_manager.KVCacheManager(
         config=cfg,
@@ -316,6 +315,7 @@ class KVCacheManagerInitTest(parameterized.TestCase):
         page_size=4,
         dtype=jnp.float32,
         max_device_size_gib=10 / _GIB,
+        mesh=_create_mesh(),
     )
     with self.assertRaisesRegex(ValueError, r"Cannot allocate 0 device pages"):
       kv_cache_manager.KVCacheManager(

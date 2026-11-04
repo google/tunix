@@ -59,8 +59,8 @@ class CacheConfig:
     dtype: The data type of KV cache entries.
     dp_axis: The mesh axis to shard pages across.
     tp_axis: The mesh axis to shard KV heads across.
-    mesh: The mesh to shard the KV caches over. Required if `dp_axis` or
-      `tp_axis` is set.
+    mesh: The mesh to shard the KV caches over. Pages are allocated outside any
+      mesh context, so the mesh cannot be inferred.
   """
 
   max_device_size_gib: float
@@ -70,7 +70,7 @@ class CacheConfig:
   dtype: jax.typing.DTypeLike
   dp_axis: str | None = None
   tp_axis: str | None = None
-  mesh: jax.sharding.Mesh | None = None
+  mesh: jax.sharding.Mesh
 
   def __post_init__(self):
     positive_checks = {
@@ -88,12 +88,6 @@ class CacheConfig:
 
     if not (self.dp_axis or self.tp_axis):
       return
-    if self.mesh is None:
-      raise ValueError(
-          "mesh is required when dp_axis or tp_axis is set, got "
-          f"dp_axis={self.dp_axis!r}, tp_axis={self.tp_axis!r}. Pages are "
-          "allocated outside any mesh context, so the mesh cannot be inferred."
-      )
     if self.dp_axis == self.tp_axis:
       raise ValueError(
           "dp_axis and tp_axis must be different, got"
@@ -108,14 +102,14 @@ class CacheConfig:
   @property
   def dp_size(self) -> int:
     """The number of data parallel replicas, i.e. the size of `dp_axis`."""
-    if not self.dp_axis or self.mesh is None:
+    if not self.dp_axis:
       return 1
     return self.mesh.shape[self.dp_axis]
 
   @property
   def tp_size(self) -> int:
     """The tensor parallel size, i.e. the size of `tp_axis`."""
-    if not self.tp_axis or self.mesh is None:
+    if not self.tp_axis:
       return 1
     return self.mesh.shape[self.tp_axis]
 

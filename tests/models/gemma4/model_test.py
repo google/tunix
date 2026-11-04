@@ -239,11 +239,13 @@ class ModelTest(parameterized.TestCase):
       dense_prefill_logits.append(logits[0, :-1])
       dense_decode_logits.append(logits[0, -1:])
 
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ('tp',))
     manager = model.init_kv_cache(
         generate_configs.CacheConfig(
             max_device_size_gib=(1 << 20) / (1 << 30),
             page_size=4,
             dtype=jnp.float32,
+            mesh=mesh,
         )
     )
     geometries = manager.cache_geometries
@@ -259,7 +261,6 @@ class ModelTest(parameterized.TestCase):
         },
     )
     cache = manager.get_physical_pages()
-    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ('tp',))
     # Distinct page tables per cache verify `cache_name` routing; -1 marks
     # unallocated page slots. The last row and trailing tokens are padding.
     pages_0 = np.array([[0, 1], [2, -1], [-1, -1]], dtype=np.int32)

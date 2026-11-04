@@ -84,6 +84,7 @@ class CacheSizingTest(parameterized.TestCase):
         max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
+        mesh=_create_mesh(),
     )
     element_shape = utils.derive_kv_geometry(cfg, num_kv_heads=8, head_dim=64)
     self.assertEqual(element_shape, (8, 2, 64))
@@ -135,6 +136,7 @@ class CacheSizingTest(parameterized.TestCase):
       dict(testcase_name="dp_and_tp", dp_axis="dp", tp_axis="tp"),
       dict(testcase_name="dp_only", dp_axis="dp", tp_axis=None),
       dict(testcase_name="tp_only", dp_axis=None, tp_axis="tp"),
+      dict(testcase_name="no_sharding", dp_axis=None, tp_axis=None),
   )
   def test_derive_cache_sharding(self, dp_axis, tp_axis):
     mesh = _create_mesh()
@@ -154,26 +156,19 @@ class CacheSizingTest(parameterized.TestCase):
         ),
     )
 
-  def test_derive_cache_sharding_no_sharding(self):
-    cfg = configs.CacheConfig(
-        max_device_size_gib=1.0,
-        dtype=jnp.bfloat16,
-        page_size=16,
-    )
-    self.assertIsNone(utils.derive_cache_sharding(cfg))
-
   def test_compute_page_limits(self):
     cfg = configs.CacheConfig(
         max_device_size_gib=(1024 * 1024) / _GIB,
         max_host_size_gib=(512 * 1024) / _GIB,
         dtype=jnp.bfloat16,
         page_size=16,
+        mesh=_create_mesh(),
     )
     element_shape = utils.derive_kv_geometry(cfg, num_kv_heads=8, head_dim=64)
     num_device_pages, num_host_pages = utils.compute_page_limits(
         config=cfg,
         element_shapes=(element_shape,) * 4,
-        sharding=None,
+        sharding=utils.derive_cache_sharding(cfg),
     )
     self.assertEqual(num_device_pages, 8)
     self.assertEqual(num_host_pages, 4)
@@ -183,11 +178,16 @@ class CacheSizingTest(parameterized.TestCase):
         max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
+        mesh=_create_mesh(),
     )
     with self.assertRaisesRegex(
         ValueError, r"element_shapes must not be empty\."
     ):
-      utils.compute_page_limits(config=cfg, element_shapes=(), sharding=None)
+      utils.compute_page_limits(
+          config=cfg,
+          element_shapes=(),
+          sharding=utils.derive_cache_sharding(cfg),
+      )
 
   # One page is 16 tokens * (16 KV heads * 64 head dim) * 2 bytes = 32 KiB.
   # The budget fits 8 unsharded pages on a device, and 16 pages sharded over
@@ -263,6 +263,7 @@ class CacheSizingTest(parameterized.TestCase):
         max_device_size_gib=(3 * (65536 + 16384)) / _GIB,
         dtype=jnp.bfloat16,
         page_size=16,
+        mesh=_create_mesh(),
     )
     geometries = (
         configs.CacheGeometry(num_kv_heads=8, head_dim=64),
@@ -281,7 +282,7 @@ class CacheSizingTest(parameterized.TestCase):
     num_device_pages, _ = utils.compute_page_limits(
         config=cfg,
         element_shapes=element_shapes,
-        sharding=None,
+        sharding=utils.derive_cache_sharding(cfg),
     )
     self.assertEqual(num_device_pages, 3)
 

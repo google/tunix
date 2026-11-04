@@ -115,7 +115,7 @@ def derive_kv_geometry(
 
 def derive_cache_sharding(
     config: configs.CacheConfig,
-) -> jax.sharding.Sharding | None:
+) -> jax.sharding.NamedSharding:
   """Derives the device sharding for a KV cache page pool.
 
   Args:
@@ -123,14 +123,8 @@ def derive_cache_sharding(
 
   Returns:
     A `NamedSharding` partitioning pages (`axis=0`) across `config.dp_axis` and
-    packed KV heads (`axis=2`) across `config.tp_axis`, or `None` if neither
-    axis is set.
+    packed KV heads (`axis=2`) across `config.tp_axis`.
   """
-  if not (config.dp_axis or config.tp_axis):
-    return None
-  # `CacheConfig` requires a mesh whenever an axis is set.
-  assert config.mesh is not None
-
   # The cache has shape:
   #   (num_pages, page_size, packed_kv_dim, kv_packing, head_dim)
   #   i.e. (num_pages, num_elements_per_page, *element_shape)
@@ -144,7 +138,7 @@ def derive_cache_sharding(
 def compute_page_limits(
     config: configs.CacheConfig,
     element_shapes: Sequence[tuple[int, int, int]],
-    sharding: jax.sharding.Sharding | None,
+    sharding: jax.sharding.Sharding,
 ) -> tuple[int, int]:
   """Calculates the per-cache device and host page capacities.
 
@@ -172,10 +166,9 @@ def compute_page_limits(
   # `dp_size`, one page per replica. Each device only stores its shard of a
   # group.
   group_shapes = [
-      (config.dp_size, config.page_size, *shape) for shape in element_shapes
+      sharding.shard_shape((config.dp_size, config.page_size, *shape))
+      for shape in element_shapes
   ]
-  if sharding is not None:
-    group_shapes = [sharding.shard_shape(shape) for shape in group_shapes]
   bytes_per_device_per_group = dtype_bytes * sum(
       math.prod(shape) for shape in group_shapes
   )
