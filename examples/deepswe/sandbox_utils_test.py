@@ -279,7 +279,7 @@ class SandboxUtilsTest(absltest.TestCase):
         rewrite("my-image:latest"), "gcr.io/rewritten/my-image:latest"
     )
 
-  def test_init_global_fleet_starts_initial_warmpools(self):
+  def test_init_global_fleet_plans_without_warming_or_preflight(self):
     mock_fleet = mock.MagicMock()
     mock_entry = mock.MagicMock()
     mock_entry.image = "test-image:v1"
@@ -294,10 +294,29 @@ class SandboxUtilsTest(absltest.TestCase):
             num_generations=4,
         )
         self.assertEqual(fleet, mock_fleet)
+        mock_fleet.plan.assert_called_once()
+        mock_fleet.preflight.assert_not_called()
+        mock_fleet.warm_images.assert_not_called()
+
+  def test_warm_global_fleet_warms_planned_images_and_waits(self):
+    mock_fleet = mock.MagicMock()
+    mock_entry = mock.MagicMock()
+    mock_entry.image = "test-image:v1"
+    mock_fleet.plan_.entries = [mock_entry]
+    mock_fleet.config.max_warmpool_size = 4
+
+    with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", mock_fleet):
+      with mock.patch.object(
+          sandbox_utils.atexit, "register"
+      ) as mock_register:
+        sandbox_utils.warm_global_fleet()
         mock_fleet.warm_images.assert_called_once_with(
             ["test-image:v1"],
             replicas_override=4,
-            wait=False,
+            wait=True,
+        )
+        mock_register.assert_called_once_with(
+            sandbox_utils.teardown_global_fleet
         )
 
 
