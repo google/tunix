@@ -1,0 +1,173 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Agentic FrozenLake GRPO on Qwen3.5-0.8B with a vLLM rollout, sized for a
+# single 8-chip TPU host (e.g. v5e-8 / v6e-8).
+#
+# Layout: actor, reference and rollout are co-located on all 8 chips. The
+# actor trains on an 8-way FSDP mesh, and vLLM runs data_parallel_size=8 x
+# tensor_parallel_size=1 (one replica per chip), which is what the Qwen3.5
+# vLLM weight mapping (tunix/models/qwen3p5/mapping_vllm_jax.py) supports.
+# vllm_config.hbm_utilization caps the per-chip HBM vLLM takes for weights +
+# KV cache; the rest is left to the trainer.
+#
+# tpu-inference has no JAX-native Qwen3.5, so vLLM runs its PyTorch model via
+# torchax. `hf_overrides.architectures` selects the text-only
+# `Qwen3_5ForCausalLM` (the default multimodal wrapper would compile the vision
+# tower), and the rollout starts from dummy weights that are synced from the
+# actor before the first rollout.
+
+model_config:
+  model_name: "qwen3.5-0.8b"
+  model_id: "Qwen/Qwen3.5-0.8B"
+  model_source: "huggingface"
+  model_path: ""
+  mesh:
+    shape: "(8,1)"
+    axis_names: "('fsdp','tp')"
+  remat_config: "DECODER"
+  use_flash_attention: False
+  dtype: "bfloat16"
+  rng_seed: 42
+actor_model_config:
+  # fp32 master weights: at LR=1e-6 bf16 storage would round most Adam
+  # updates away.
+  load_dtype: "float32"
+  mesh:
+    shape: "(8,1)"
+    axis_names: "('fsdp','tp')"
+reference_model_config:
+  mesh: null
+  same_mesh_as: "actor"
+rollout_model_config:
+  mesh: null
+  same_mesh_as: "actor"
+tokenizer_config:
+  tokenizer_type: "huggingface"
+  tokenizer_path: "Qwen/Qwen3.5-0.8B"
+  add_bos: False
+  # Qwen3.5's eos token is <|im_end|>; appending it to every prompt would close
+  # the assistant turn right after the generation prompt.
+  add_eos: False
+
+# Agentic GRPO configuration
+training_mode: "agentic_grpo"
+agent_class_path: "examples.frozenlake.agent.FrozenLakeAgent"
+agent_kwargs:
+  use_multistep_prompt: True
+env_class_path: "examples.frozenlake.env.FrozenLakeEnv"
+env_kwargs:
+  max_steps: 8
+
+data_module: "examples.frozenlake.data"
+data_config:
+  split: "train"
+  shuffle: True
+  seed: 42
+  data_dir: "/tmp/data/frozenlake"
+
+chat_parser_config:
+  type: "qwen"
+  # The agent prompt already asks for step-by-step reasoning; Qwen3.5 thinking
+  # mode would spend most of the response budget inside <think>.
+  enable_thinking: False
+
+batch_size: 64
+num_batches: 5
+num_test_batches: 2
+num_train_epochs: 1
+
+rl_training_config:
+  mini_batch_size: 64
+  # 2 prompts x 8 generations = 16 rows per micro-batch, i.e. 2 rows per chip
+  # on the 8-way FSDP mesh. With 1 row per chip the Qwen3.5 backward pass
+  # blows up (grad norm ~1e17, then NaN) although the forward is correct.
+  train_micro_batch_size: 2
+  actor_optimizer_config:
+    opt_type: "adamw"
+    peak_value: 1e-6
+    schedule_type: "warmup_cosine_decay_schedule"
+    init_value: 0.0
+    end_value: 0.0
+    warmup_ratio: 0.1
+    # 0 = derived by the CLI: warmup = 10% of max_steps, decay over max_steps.
+    warmup_steps: 0
+    decay_steps: 0
+    b1: 0.9
+    b2: 0.95
+    weight_decay: 0.0
+    max_grad_norm: 100.0
+  eval_every_n_steps: 10
+  max_steps: 5
+  metrics_logging_options:
+    log_dir: "/tmp/logging"
+    flush_every_n_steps: 1
+  checkpointing_options:
+    save_interval_steps: 50
+    max_to_keep: 4
+  profiler_options: {}
+  compute_logps_chunk_size: 1024
+
+rollout_config:
+  total_generation_steps: 2048
+  max_prompt_length: 2048
+  temperature: 0.7
+  top_p: 1.0
+  top_k: 0
+  return_logprobs: True
+  rollout_vllm_init_with_random_weights: True
+  rollout_vllm_sampling_kwargs:
+    skip_special_tokens: False
+
+rollout_engine: "vllm"
+
+vllm_config:
+  model_version: "Qwen/Qwen3.5-0.8B"
+  # Per-chip HBM share for vLLM (weights + KV cache), co-located with the
+  # trainer. 0.35 left the trainer too little room while an async checkpoint
+  # save was in flight (OOM loading train_step at the step-50 save).
+  hbm_utilization: 0.3
+  tpu_backend_type: "jax"
+  server_mode: True
+  async_scheduling: False
+  # Per replica: 8 x 64 = 512 sequences in flight, one full step's batch.
+  max_num_seqs: 64
+  max_num_batched_tokens: 8192
+  data_parallel_size: 8
+  tensor_parallel_size: 1
+  kwargs:
+    kv_cache_metrics: True
+    disable_log_stats: False
+    enable_prefix_caching: False
+    dtype: "bfloat16"
+    hf_overrides:
+      architectures: ["Qwen3_5ForCausalLM"]
+
+offload_to_cpu: False
+
+reward_functions: []
+
+agentic_grpo_config:
+  num_generations: 8
+  num_iterations: 1
+  beta: 0.0
+  epsilon: 0.003
+  epsilon_high: 0.005
+  loss_algo: "gspo-token"
+  loss_agg_mode: "sequence-mean-token-mean"
+  kl_loss_mode: "low_var_kl"
+  advantage_estimator: "rloo"
+  sampler_is: "token"
+  sampler_is_threshold: 2.0
+  max_concurrency: 512
