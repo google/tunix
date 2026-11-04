@@ -362,9 +362,11 @@ class RLProgramTest(absltest.TestCase):
     # Hold the dispatch window open. Most tests run `rollout_dispatch_stage`
     # with no trainer to advance `_next_batch`, so the real gate would park the
     # dispatcher `max_staleness` batches in and never let it reach the end of
-    # the dataset. The window itself is covered by the tests named for it,
-    # which build their programs directly.
-    program.dispatch_window.wait_for = mock.AsyncMock()
+    # the dataset. Mocking `admit` also bypasses resume `prompt_id` filtering;
+    # the window and resume tests build `StandardRLProgram` directly.
+    program.dispatch_window.admit = mock.create_autospec(
+        program.dispatch_window.admit, return_value=True
+    )
     return program
 
   def test_dataset_exhausted_before_max_steps(self):
@@ -1017,6 +1019,38 @@ class RLProgramTest(absltest.TestCase):
               (expected_p1, 1),
           ],
       )
+
+    asyncio.run(_run())
+
+  def test_rollout_dispatch_stage_preserves_integer_zero_prompt_id(self):
+    async def _run():
+      dispatched = []
+
+      async def mock_dispatch(prompts, **kwargs):
+        del kwargs
+        dispatched.append(prompts[0]["prompt_id"])
+        return ["rollout"]
+
+      self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+      dataset = [
+          types.MappingProxyType({"prompt": "p0", "prompt_id": 0}),
+          {"prompt": "p1", "prompt_id": 1},
+      ]
+      program = self._window_program()
+      program.dataset = dataset
+      await program.rollout_dispatch_stage()
+      self.assertEqual(dispatched, [0, 1])
+      program.close()
+
+      dispatched.clear()
+      resumed = self._window_program()
+      resumed.dataset = dataset
+      resumed.dispatch_window.restore_checkpoint_metadata(
+          {"committed_prompt_ids": ["0"], "skipped_prompt_ids": []}
+      )
+      await resumed.rollout_dispatch_stage()
+      self.assertEqual(dispatched, [1])
+      resumed.close()
 
     asyncio.run(_run())
 

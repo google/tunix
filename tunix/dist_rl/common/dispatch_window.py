@@ -16,11 +16,9 @@
 
 import asyncio
 from collections.abc import Callable, Hashable, Mapping, Sequence
-import typing
 from typing import Protocol
 
 
-@typing.runtime_checkable
 class HasPromptId(Protocol):
   """Protocol for trajectory or prompt objects carrying a `prompt_id`."""
 
@@ -30,16 +28,25 @@ class HasPromptId(Protocol):
 
 
 class DispatchWindow:
-  """Bounds how many prompts ahead of the active training step the dispatcher may run.
+  """Bounds how many prompts ahead of training the dispatcher may run.
 
-  The dispatcher may emit prompts while
-  `prompt_idx < (next_batch_fn() + max_staleness + 1) * full_batch_size +
-  filtered_groups`. When `prompt_idx` reaches that bound,
-  `wait_for(prompt_idx)` parks until `release()` signals that the step cursor
-  has advanced or a filtered group has replenished capacity by 1 prompt.
-
-  Also tracks filtered-group replenishment and off-policy `prompt_id`
-  checkpoint/resume state (`committed_prompt_ids` and `skipped_prompt_ids`).
+  - **Capacity bound**: `admit()` allows up to `(max_staleness + 1) *
+    full_batch_size` prompts in flight at once, parking when full until
+    `release()` wakes it.
+  - **In-flight accounting**:
+    `in_flight_prompts = admitted_prompts - (next_batch - start_step) *
+    full_batch_size - filtered_groups`, where `start_step` is anchored to
+    `next_batch` on the first admitted prompt:
+    - Each completed training step advances `next_batch` by 1, freeing
+      `full_batch_size` slots.
+    - Each dropped trajectory group (`on_group_filtered`) increments
+      `filtered_groups` by 1, replenishing 1 slot immediately.
+  - **Checkpoint resume**:
+    - In-order (`out_of_order_resume=False`): skips the first `next_batch *
+      full_batch_size` dataset items via `dataset_skip_count`.
+    - Out-of-order (`out_of_order_resume=True`): records `committed_prompt_ids`
+      and `skipped_prompt_ids` so `admit()` can skip already-handled prompts
+      on resume.
   """
 
   def __init__(
@@ -67,16 +74,13 @@ class DispatchWindow:
     self._committed_prompt_ids: set[str] = set()
     self._skipped_prompt_ids: set[str] = set()
     self._has_resume_state = False
-    self._resume_base_prompts: int | None = None
-    self._dispatched_since_resume = 0
+    self._start_step: int | None = None
+    self._admitted_prompts = 0
 
   @property
   def next_batch(self) -> int:
     """Index of the next prompt batch the trainer will consume."""
-    filtered_batch_offset = (
-        self._filtered_groups + self.full_batch_size - 1
-    ) // self.full_batch_size
-    return self._next_batch_fn() + filtered_batch_offset
+    return self._next_batch_fn()
 
   @property
   def committed_prompt_ids(self) -> set[str]:
@@ -90,15 +94,25 @@ class DispatchWindow:
 
   @property
   def uses_prompt_id_resume(self) -> bool:
-    """Whether dataset iteration filters by prompt_id instead of prefix-skipping."""
+    """Whether dataset iteration filters by prompt_id vs. prefix-skipping."""
     return self.out_of_order_resume and self._has_resume_state
 
   @property
   def dataset_skip_count(self) -> int:
-    """Number of leading dataset items `iter_dataset_async` can skip directly."""
+    """Number of leading dataset items `iter_dataset_async` can skip."""
     if self.uses_prompt_id_resume:
       return 0
     return self.next_batch * self.full_batch_size
+
+  @property
+  def in_flight_prompts(self) -> int:
+    """Net admitted prompts relative to steps advanced and groups filtered."""
+    if self._start_step is None:
+      return 0
+    trained_since_start = (
+        self.next_batch - self._start_step
+    ) * self.full_batch_size
+    return self._admitted_prompts - trained_since_start - self._filtered_groups
 
   @property
   def is_released(self) -> bool:
@@ -110,8 +124,8 @@ class DispatchWindow:
     self._release.set()
 
   def on_group_filtered(self, filtered_group: Sequence[HasPromptId]) -> None:
-    """Replenishes dispatch capacity and records skipped prompt_id when a group is dropped."""
-    if filtered_group and filtered_group[0].prompt_id:
+    """Replenishes capacity and records skipped prompt_id on group drop."""
+    if filtered_group and filtered_group[0].prompt_id not in (None, ""):
       self._skipped_prompt_ids.add(str(filtered_group[0].prompt_id))
     self._filtered_groups += 1
     self.release()
@@ -123,7 +137,7 @@ class DispatchWindow:
     if not self.out_of_order_resume:
       return
     for g in groups:
-      if g and g[0].prompt_id:
+      if g and g[0].prompt_id not in (None, ""):
         self._committed_prompt_ids.add(str(g[0].prompt_id))
 
   def checkpoint_metadata(
@@ -137,7 +151,9 @@ class DispatchWindow:
     ):
       return {}
     step_pids = {
-        str(g[0].prompt_id) for g in pending_groups if g and g[0].prompt_id
+        str(g[0].prompt_id)
+        for g in pending_groups
+        if g and g[0].prompt_id not in (None, "")
     }
     return {
         "committed_prompt_ids": sorted(self._committed_prompt_ids | step_pids),
@@ -158,62 +174,40 @@ class DispatchWindow:
     ):
       return False
     self._has_resume_state = True
-    self._committed_prompt_ids = set()
-    if "committed_prompt_ids" in ckpt_meta:
-      raw_committed = ckpt_meta["committed_prompt_ids"]
-      if isinstance(raw_committed, Sequence) and not isinstance(
-          raw_committed, (str, bytes)
-      ):
-        self._committed_prompt_ids = {str(pid) for pid in raw_committed}
-    self._skipped_prompt_ids = set()
-    if "skipped_prompt_ids" in ckpt_meta:
-      raw_skipped = ckpt_meta["skipped_prompt_ids"]
-      if isinstance(raw_skipped, Sequence) and not isinstance(
-          raw_skipped, (str, bytes)
-      ):
-        self._skipped_prompt_ids = {str(pid) for pid in raw_skipped}
+
+    def _extract_ids(key: str) -> set[str]:
+      raw = ckpt_meta[key] if key in ckpt_meta else ()
+      if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        return {str(pid) for pid in raw}
+      return set()
+
+    self._committed_prompt_ids = _extract_ids("committed_prompt_ids")
+    self._skipped_prompt_ids = _extract_ids("skipped_prompt_ids")
     return True
 
-  async def wait_for(self, prompt_idx: int) -> None:
-    """Blocks until `prompt_idx` is inside the policy-staleness window."""
-    while (
-        prompt_idx >= (
-            self._next_batch_fn() + self.max_staleness + 1
-        ) * self.full_batch_size + self._filtered_groups
-    ):
+  async def admit(self, prompt_id: Hashable) -> bool:
+    """Waits for a free in-flight slot and claims it for `prompt_id`.
+
+    Args:
+      prompt_id: Identifier of the candidate prompt.
+
+    Returns:
+      True once an in-flight slot is claimed for `prompt_id`, or False if
+      `prompt_id` was already committed or skipped before checkpoint resume.
+    """
+    if prompt_id in (None, ""):
+      raise ValueError("prompt_id must be non-empty.")
+    if self.uses_prompt_id_resume:
+      pid = str(prompt_id)
+      if pid in self._committed_prompt_ids or pid in self._skipped_prompt_ids:
+        return False
+    if self._start_step is None:
+      self._start_step = self.next_batch
+    window_capacity = (self.max_staleness + 1) * self.full_batch_size
+    while self.in_flight_prompts >= window_capacity:
       # Wait first, clear second. The reverse loses a release that lands
       # between the test above and the clear, and nothing would set it again.
       await self._release.wait()
       self._release.clear()
-
-  async def admit(
-      self,
-      prompt_idx: int,
-      prompt_item: Mapping[str, object] | HasPromptId | object = None,
-  ) -> bool:
-    """Waits until the prompt is within the window, or returns False if already handled on resume."""
-    if self.uses_prompt_id_resume:
-      if isinstance(prompt_item, Mapping):
-        raw_pid = (
-            prompt_item["prompt_id"] if "prompt_id" in prompt_item else None
-        )
-        candidate_pid = str(raw_pid) if raw_pid else f"prompt_{prompt_idx}"
-      elif isinstance(prompt_item, HasPromptId) and prompt_item.prompt_id:
-        candidate_pid = str(prompt_item.prompt_id)
-      else:
-        candidate_pid = f"prompt_{prompt_idx}"
-      if (
-          candidate_pid in self._committed_prompt_ids
-          or candidate_pid in self._skipped_prompt_ids
-      ):
-        return False
-      if self._resume_base_prompts is None:
-        self._resume_base_prompts = self._next_batch_fn() * self.full_batch_size
-      effective_prompt_idx = (
-          self._resume_base_prompts + self._dispatched_since_resume
-      )
-      self._dispatched_since_resume += 1
-    else:
-      effective_prompt_idx = prompt_idx
-    await self.wait_for(effective_prompt_idx)
+    self._admitted_prompts += 1
     return True

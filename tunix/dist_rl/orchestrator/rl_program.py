@@ -659,7 +659,7 @@ class StandardRLProgram(RLProgram):
         " already-trained dataset items).",
         restored_step,
         self.policy_version,
-        self.dispatch_window.next_batch * self.full_batch_size,
+        self.dispatch_window.dataset_skip_count,
     )
 
   async def rollout_dispatch_stage(self) -> None:
@@ -686,32 +686,33 @@ class StandardRLProgram(RLProgram):
           skip_count=self.dispatch_window.dataset_skip_count,
           prefetch_size=max(1, self.full_batch_size),
       ):
-        if not await self.dispatch_window.admit(prompt_idx, prompt_item):
-          continue
-        coordinates = tagging.prompt_coordinates(
-            prompt_idx, self.full_batch_size
-        )
-        if isinstance(prompt_item, dict):
+        if isinstance(prompt_item, Mapping):
           prompt_item = dict(prompt_item)
-          prompt_item.setdefault("prompt_id", f"prompt_{prompt_idx}")
-          if self.max_response_length is not None:
-            prompt_item.setdefault(
-                "max_response_length", self.max_response_length
-            )
-        elif not hasattr(prompt_item, "prompt_id"):
+          if "prompt_id" not in prompt_item:
+            prompt_item["prompt_id"] = f"prompt_{prompt_idx}"
+          if (
+              self.max_response_length is not None
+              and "max_response_length" not in prompt_item
+          ):
+            prompt_item["max_response_length"] = self.max_response_length
+          prompt_id = prompt_item["prompt_id"]
+        elif hasattr(prompt_item, "prompt_id"):
+          prompt_id = prompt_item.prompt_id
+        else:
+          prompt_id = f"prompt_{prompt_idx}"
           prompt_item = {
               "prompt": prompt_item,
-              "prompt_id": f"prompt_{prompt_idx}",
+              "prompt_id": prompt_id,
           }
           if self.max_response_length is not None:
             prompt_item["max_response_length"] = self.max_response_length
 
-        prompt_item = tagging.tag_prompt(prompt_item, coordinates)
-        prompt_id = (
-            prompt_item["prompt_id"]
-            if isinstance(prompt_item, dict)
-            else prompt_item.prompt_id
+        if not await self.dispatch_window.admit(prompt_id):
+          continue
+        coordinates = tagging.prompt_coordinates(
+            prompt_idx, self.full_batch_size
         )
+        prompt_item = tagging.tag_prompt(prompt_item, coordinates)
         logging.info(
             "[pipeline] DISPATCH prompt_id=%s prompt_idx=%d batch_idx=%d"
             " intra_batch_idx=%d policy_version=%d next_batch=%d",
@@ -1865,9 +1866,9 @@ class StandardRLProgram(RLProgram):
         if self.on_step_end:
           self.on_step_end(current_step, step_result)
         self._step += 1
-        # Strictly after the increment: the dispatcher re-reads `next_batch` on
-        # waking, and waking it on the old value would park it again with no one
-        # left to set the event.
+        # Strictly after the increment: the dispatcher re-reads
+        # `in_flight_prompts` on waking, and waking it on the old step would
+        # park it again with no one left to set the event.
         self.dispatch_window.release()
     finally:
       if pending_prep is not None:
