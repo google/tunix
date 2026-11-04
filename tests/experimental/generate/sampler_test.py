@@ -14,6 +14,7 @@
 
 import asyncio
 from concurrent import futures
+import threading
 from unittest import mock
 
 from absl.testing import absltest
@@ -436,6 +437,50 @@ class ServerModeSamplerTest(_SamplerTests):
       asyncio.run(
           sampler.sample(testing_utils.make_request('after_stop', [1, 2]))
       )
+
+  def test_delete_cache_delivers_in_flight_finished_request_to_sampler(self):
+    sampler = self.make_sampler()
+    assert sampler._driver is not None
+    driver = sampler._driver
+
+    first_step_done = threading.Event()
+    resume_loop = threading.Event()
+    real_step_engine = driver._step_engine  # pylint: disable=protected-access
+    step_count = 0
+
+    def gated_step_engine():
+      nonlocal step_count
+      result = real_step_engine()
+      step_count += 1
+      if step_count == 1:
+        first_step_done.set()
+        resume_loop.wait(timeout=5.0)
+      return result
+
+    self.enterContext(
+        mock.patch.object(driver, '_step_engine', side_effect=gated_step_engine)
+    )
+
+    req_short = testing_utils.make_request('short', [1, 2, 3], max_tokens=2)
+    req_long = testing_utils.make_request('long', [4, 5, 6], max_tokens=4)
+
+    with futures.ThreadPoolExecutor(max_workers=1) as pool:
+      gen_future = pool.submit(sampler.generate, [req_short, req_long])
+      self.assertTrue(first_step_done.wait(timeout=5.0))
+      sampler.delete_cache()
+      sampler.reinitialize_cache()
+      resume_loop.set()
+      responses = gen_future.result(timeout=5.0)
+
+    self.assertEqual([r.request_id for r in responses], ['short', 'long'])
+    self.assertEqual(
+        responses[0].token_ids.tolist(),
+        run_on_engine([1, 2, 3], max_tokens=2).token_ids.tolist(),
+    )
+    self.assertEqual(
+        responses[1].token_ids.tolist(),
+        run_on_engine([4, 5, 6], max_tokens=4).token_ids.tolist(),
+    )
 
 
 # Only its subclasses run.

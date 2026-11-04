@@ -360,3 +360,14 @@ class KVCacheManager:
     for manager in self._kv_cache_group_managers:
       manager.reset_kv_caches()
     self._request_to_prefix_hashes.clear()
+
+  def delete_device_pool(self) -> None:
+    """Releases all requests and deletes physical device page buffers."""
+    self.reset_kv_caches()
+    for manager in self._kv_cache_group_managers:
+      manager.delete_device_pool()
+
+  def reallocate_device_pool(self) -> None:
+    """Reallocates physical device page buffers if they were deleted."""
+    for manager in self._kv_cache_group_managers:
+      manager.reallocate_device_pool()

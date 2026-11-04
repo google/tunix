@@ -161,6 +161,15 @@ class SingleTypeKVCacheManager:
     self._free_pages(list(self._unreferenced_device_pages.keys()))
     self._free_pages(list(self._unreferenced_host_pages.keys()))
 
+  def delete_device_pool(self) -> None:
+    """Releases all cached pages and deletes physical device page buffers."""
+    self.reset_kv_caches()
+    self._page_manager.delete_device_pool()
+
+  def reallocate_device_pool(self) -> None:
+    """Reallocates physical device page buffers if they were deleted."""
+    self._page_manager.reallocate_device_pool()
+
   def _touch_page(self, page: Page | None) -> None:
     """Increments a page's reference count."""
     if page is None:

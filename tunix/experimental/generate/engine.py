@@ -228,11 +228,24 @@ class LLMEngine:
     """Discards all KV, for after the weights change in place.
 
     Every in-flight request is preempted, and re-prefills its prompt and the
-    tokens sampled so far. The prefix cache is cleared.
+    tokens sampled so far. The prefix cache is cleared. If the device KV page
+    pools were deleted, they are reallocated.
     """
     self._in_flight_step = None
     self._scheduler.preempt_all()
     self._kv_cache_manager.reset_kv_caches()
+    self._kv_cache_manager.reallocate_device_pool()
+
+  def delete_kv_caches(self) -> list[request_lib.EngineResponse]:
+    """Drains any in-flight step, preempts requests, and deletes device KV buffers."""
+    outputs: list[request_lib.EngineResponse] = []
+    if self._in_flight_step is not None:
+      in_flight = self._in_flight_step
+      self._in_flight_step = None
+      outputs = self._consume_in_flight_step(in_flight)
+    self._scheduler.preempt_all()
+    self._kv_cache_manager.delete_device_pool()
+    return outputs
 
   def add_request(self, request: request_lib.EngineRequest) -> None:
     """Submits a request, to be scheduled from the next step on."""
@@ -384,6 +397,12 @@ class LLMEngine:
           prev_generated_tokens=in_flight.generated_tokens,
       )
 
+    return self._consume_in_flight_step(in_flight)
+
+  def _consume_in_flight_step(
+      self, in_flight: _InFlightStep
+  ) -> list[request_lib.EngineResponse]:
+    """Blocks on `in_flight`, updates request states, and returns finished outputs."""
     generated_tokens, logits, logprobs = jax.device_get(
         (in_flight.generated_tokens, in_flight.logits, in_flight.logprobs)
     )

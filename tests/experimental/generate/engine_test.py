@@ -749,6 +749,43 @@ class ResetKVCachesTest(absltest.TestCase):
         finished['0'].token_ids.tolist(), before_reset + after_reset
     )
 
+  def test_delete_kv_caches_and_reallocate_on_reset(self):
+    engine = testing_utils.make_engine()
+    prompt = [1, 2, 3, 4, 5]
+    engine.add_request(testing_utils.make_request('0', list(prompt)))
+    engine.step()
+
+    outputs = engine.delete_kv_caches()
+    self.assertEmpty(outputs)
+    self.assertIsNone(engine._in_flight_step)  # pylint: disable=protected-access
+    for arr in engine._kv_cache_manager.get_physical_pages().values():  # pylint: disable=protected-access
+      self.assertTrue(arr.is_deleted())
+
+    engine.reset_kv_caches()
+    for arr in engine._kv_cache_manager.get_physical_pages().values():  # pylint: disable=protected-access
+      self.assertFalse(arr.is_deleted())
+
+    finished = drive(engine)
+    self.assertEqual(
+        finished['0'].token_ids.tolist(), reference_generate(prompt)
+    )
+
+  def test_delete_kv_caches_returns_requests_finished_in_flight(self):
+    engine = testing_utils.make_engine()
+    prompt = [1, 2, 3]
+    engine.add_request(
+        testing_utils.make_request('0', list(prompt), max_tokens=2)
+    )
+    self.assertEmpty(engine.step())
+
+    outputs = engine.delete_kv_caches()
+    self.assertLen(outputs, 1)
+    self.assertEqual(outputs[0].request_id, '0')
+    self.assertEqual(
+        outputs[0].token_ids.tolist(), reference_generate(prompt, 2)
+    )
+    self.assertFalse(engine.has_unfinished_requests())
+
 
 if __name__ == '__main__':
   absltest.main()

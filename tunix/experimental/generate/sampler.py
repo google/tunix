@@ -435,3 +435,11 @@ class Sampler(base_sampler.BaseSampler):
     else:
       with self._engine_lock:
         self._engine.reset_kv_caches()
+
+  def delete_cache(self) -> None:
+    """Deletes the engine's physical device KV page buffers to free HBM."""
+    if self._driver is not None:
+      self._driver.delete_kv_caches()
+    else:
+      with self._engine_lock:
+        self._engine.delete_kv_caches()
