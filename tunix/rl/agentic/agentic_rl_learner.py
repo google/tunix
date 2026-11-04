@@ -211,6 +211,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             self.rl_engine.rollout.model(),
         )
     )
+    self._partial_rollout_sync = self._uses_partial_rollout_sync()
 
     # Enable async rollout if trainer and rollout are not on the same mesh.
     # If they do, then doesn't make sense for the interleave because they will
@@ -262,6 +263,35 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self._train_rewards_window: List[float] = []
     self._eval_rewards_window: List[float] = []
     self._rewards_window_lock = threading.Lock()
+
+  def _uses_partial_rollout_sync(self) -> bool:
+    """Whether weight syncs freeze in-flight rollouts instead of draining them.
+
+    Returns:
+      True if `RolloutConfig.partial_rollout` is set and weights are synced.
+
+    Raises:
+      ValueError: If `partial_rollout` is set but the rollout engine cannot
+        pause in-flight requests.
+    """
+    rollout_config = self.rl_engine.cluster_config.rollout_config
+    if isinstance(rollout_config, dict):
+      rollout_config = rollout_config[rl_engine_lib.Mode.TRAIN]
+    if not rollout_config.partial_rollout:
+      return False
+    if not self.should_sync_weights:
+      logging.info(
+          "partial_rollout ignored: actor and rollout share weights, so there"
+          " is no weight sync to overlap."
+      )
+      return False
+    if not self.rl_engine.rollout.supports_partial_rollout_sync():
+      raise ValueError(
+          "partial_rollout is set but the rollout engine"
+          f" {type(self.rl_engine.rollout).__name__} cannot pause in-flight"
+          " requests; use the vLLM rollout engine in server mode."
+      )
+    return True
 
   def _validate_rollout_config(self):
     """Validates that the rollout config is properly aligned with the algo config."""
@@ -450,8 +480,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       prompt_token_ids: np.ndarray | None = None,
   ) -> base_rollout.RolloutOutput:
     """Calls model generation from chat messages or from recorded token ids."""
+    policy_version = self.policy_version
     if env:
-      env.task["policy_version"] = self.policy_version
+      # First turn wins: an episode is labeled with the oldest policy any of
+      # its tokens came from (with partial-rollout sync, later turns may run
+      # after a sync).
+      policy_version = env.task.setdefault("policy_version", policy_version)
+    # A partial-rollout sync keeps the vLLM prefix cache, so salt requests with
+    # the episode's policy version, as the dist_rl collector does: blocks
+    # computed under other weights are not reused by other episodes.
+    sampling_kwargs = (
+        {"cache_salt": f"policy_v{policy_version}"}
+        if self._partial_rollout_sync
+        else None
+    )
 
     tags = {}
     if env and hasattr(env, "extra_kwargs"):
@@ -491,6 +533,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           mode=rl_engine_lib.Mode.TRAIN,
           trace_tags=tags,
           max_generation_steps=max_generation_steps,
+          sampling_kwargs=sampling_kwargs,
       )
 
     return self.rl_engine.generate(
@@ -500,6 +543,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         trace_tags=tags,
         max_generation_steps=max_generation_steps,
         prompt_token_ids=[packing.as_token_ids(prompt_token_ids)],
+        sampling_kwargs=sampling_kwargs,
     )
 
   def _build_orchestrator(self) -> rollout_orchestrator.RolloutOrchestrator:
@@ -1181,37 +1225,18 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             step=self.rl_engine.global_steps,
         )
         if self.should_sync_weights:
-          logging.info("Requesting sync lock to sync weights...")
-          self._rollout_sync_lock.acquire_weight_sync()
+          self._sync_weights()
           try:
-            logging.info("Sync lock acquired. Syncing weights.")
             with self.rl_engine.perf_v2.span(
-                perf_constants.WEIGHT_SYNC,
-                self.rl_engine.perf_v2.all_devices,
+                perf_constants.DATA_LOADING,
                 tags={
                     perf_constants.STEP: self.rl_engine.global_steps,
                 },
             ):
-              self.rl_engine.sync_weights()
-            self.policy_version += 1
-            logging.info(
-                "Weights synced. Policy version incremented to %d.",
-                self.policy_version,
-            )
-            try:
-              with self.rl_engine.perf_v2.span(
-                  perf_constants.DATA_LOADING,
-                  tags={
-                      perf_constants.STEP: self.rl_engine.global_steps,
-                  },
-              ):
-                batch = next(full_dataset_iterator)
-              self._put_prompts_to_queue(prompt_queue, batch)
-            except StopIteration:
-              prompt_queue.put(None)
-          finally:
-            self._rollout_sync_lock.release_weight_sync()
-            logging.info("Sync lock released.")
+              batch = next(full_dataset_iterator)
+            self._put_prompts_to_queue(prompt_queue, batch)
+          except StopIteration:
+            prompt_queue.put(None)
         else:
           self.rl_engine.global_steps += 1
           try:
@@ -1236,6 +1261,77 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     _ = producer_future.result()
     self.rl_engine.close()
+
+  def _sync_weights(self) -> None:
+    """Syncs the rollout weights and increments `policy_version`."""
+    hold_rollouts = (
+        self._rollouts_paused_for_sync
+        if self._partial_rollout_sync
+        else self._rollouts_drained_for_sync
+    )
+    with hold_rollouts():
+      with self.rl_engine.perf_v2.span(
+          perf_constants.WEIGHT_SYNC,
+          self.rl_engine.perf_v2.all_devices,
+          tags={perf_constants.STEP: self.rl_engine.global_steps},
+      ):
+        self.rl_engine.sync_weights()
+    logging.info(
+        "Weights synced. Policy version incremented to %d.",
+        self.policy_version,
+    )
+
+  @contextlib.contextmanager
+  def _rollouts_drained_for_sync(self) -> Iterator[None]:
+    """Waits for in-flight episodes and blocks new ones during a sync.
+
+    The trainer idles until the slowest in-flight episode finishes.
+    `policy_version` is incremented once the sync succeeds.
+
+    Yields:
+      Nothing; the weights are synced inside the context.
+    """
+    logging.info("Requesting sync lock to sync weights...")
+    self._rollout_sync_lock.acquire_weight_sync()
+    try:
+      logging.info("Sync lock acquired. Syncing weights.")
+      yield
+      self.policy_version += 1
+    finally:
+      self._rollout_sync_lock.release_weight_sync()
+      logging.info("Sync lock released.")
+
+  @contextlib.contextmanager
+  def _rollouts_paused_for_sync(self) -> Iterator[None]:
+    """Freezes in-flight requests during a sync instead of draining them.
+
+    The rollout engine freezes its requests at a token boundary, the weights
+    are synced, and the frozen requests continue on the new weights (see
+    `RolloutConfig.partial_rollout_kv_policy`). The engine is resumed even if
+    pausing or syncing fails, so that rollouts never hang on a paused engine.
+
+    Yields:
+      Nothing; the weights are synced inside the context.
+    """
+    rollout = self.rl_engine.rollout
+    step = self.rl_engine.global_steps
+    pause_start = time.perf_counter()
+    try:
+      rollout.pause_for_weight_sync()
+      # Increment before syncing: requests submitted from here on queue in the
+      # paused engine and only ever run on the new weights, so they must carry
+      # the new version (and prefix-cache salt).
+      self.policy_version += 1
+      yield
+    finally:
+      rollout.resume_after_weight_sync()
+    paused_s = time.perf_counter() - pause_start
+    logging.info("Rollouts paused %.2fs for the weight sync.", paused_s)
+    self.rl_engine.buffer_metrics_async(
+        {"perf/partial_rollout_pause_s": (paused_s, np.mean)},
+        mode=rl_engine_lib.Mode.TRAIN,
+        step=step,
+    )
 
   def _put_prompts_to_queue(
       self,

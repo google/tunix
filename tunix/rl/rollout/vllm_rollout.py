@@ -14,8 +14,10 @@
 
 """vLLM rollout worker with Tunix sampler."""
 
-from typing import Any, Dict, Optional, Tuple
+from collections.abc import Sequence
+from typing import Any, Optional, Tuple
 
+from absl import logging
 from flax import nnx
 import jax
 import jaxtyping
@@ -35,6 +37,15 @@ class VllmRollout(base_rollout.BaseRollout):
       mesh: jax.sharding.Mesh,
       rollout_config: base_rollout.RolloutConfig,
   ):
+    self._partial_rollout = rollout_config.partial_rollout
+    if self._partial_rollout:
+      _check_partial_rollout_config(rollout_config)
+    # Only the "keep" policy leaves the KV blocks of frozen requests resident
+    # across a weight sync.
+    self._keep_kv_across_sync = (
+        self._partial_rollout
+        and rollout_config.partial_rollout_kv_policy == "keep"
+    )
     mapping_config = mappings.MappingConfig.build(
         mapping_obj=rollout_config.rollout_mapping_config,
         model=model,
@@ -104,10 +115,23 @@ class VllmRollout(base_rollout.BaseRollout):
       prompts: list[str] | None,
       rollout_config: base_rollout.RolloutConfig,
       *,
-      prompt_token_ids=None,
-      **kwargs,
+      prompt_token_ids: Sequence[Sequence[int]] | None = None,
+      **kwargs: Any,
   ) -> base_rollout.RolloutOutput:
-    """Generates samples from the model."""
+    """Generates samples from the model.
+
+    Args:
+      prompts: Text prompts to sample from, or `None` when `prompt_token_ids` is
+        provided.
+      rollout_config: Sampling and generation limits for the rollout call.
+      prompt_token_ids: Optional explicit unpadded token rows passed directly to
+        the vLLM sampler instead of tokenizing `prompts`.
+      **kwargs: Extra per-call keyword arguments forwarded to `VllmSampler`
+        (such as `cache_salt`).
+
+    Returns:
+      A `RolloutOutput` containing generated text, tokens, and logprobs.
+    """
     if prompt_token_ids is not None:
       kwargs["prompt_token_ids"] = prompt_token_ids
     output = self._sampler(
@@ -150,7 +174,35 @@ class VllmRollout(base_rollout.BaseRollout):
       params: jaxtyping.PyTree,
       filter_types: Optional[Tuple[Any, ...]] = None,
   ) -> None:
-    self._sampler.update_params(params, filter_types)
+    self._sampler.update_params(
+        params,
+        filter_types,
+        preserve_active_kv_cache=self._keep_kv_across_sync,
+    )
+
+  def supports_partial_rollout_sync(self) -> bool:
+    """Whether `RolloutConfig.partial_rollout` is set."""
+    return self._partial_rollout
+
+  def pause_for_weight_sync(self) -> None:
+    """Freezes in-flight requests at a token boundary for a weight sync.
+
+    Requests submitted while paused queue in the driver. With the "recompute"
+    policy the frozen requests are preempted, so they re-prefill on the new
+    weights after `resume_after_weight_sync`; "keep" leaves their KV resident.
+
+    Raises:
+      RuntimeError: If `partial_rollout` is not set, if the async batch queue
+        fails to drain, or if the "recompute" policy cannot clear caches.
+      TimeoutError: If pausing the sampler times out.
+    """
+    if not self._partial_rollout:
+      raise RuntimeError("pause_for_weight_sync requires partial_rollout.")
+    self._sampler.pause("keep", clear_cache=not self._keep_kv_across_sync)
+
+  def resume_after_weight_sync(self) -> None:
+    """Resumes the requests frozen by `pause_for_weight_sync`."""
+    self._sampler.resume()
 
   def pad_id(self) -> int:
     return self._sampler.tokenizer.pad_id()
@@ -160,3 +212,39 @@ class VllmRollout(base_rollout.BaseRollout):
 
   def model(self) -> nnx.Module:
     return self._sampler.transformer
+
+
+def _check_partial_rollout_config(
+    rollout_config: base_rollout.RolloutConfig,
+) -> None:
+  """Rejects partial-rollout settings that the vLLM engine cannot run.
+
+  Args:
+    rollout_config: The rollout config, with `partial_rollout` set.
+
+  Raises:
+    ValueError: If the combination is unsupported.
+  """
+  if not rollout_config.rollout_vllm_server_mode:
+    raise ValueError(
+        "partial_rollout needs rollout_vllm_server_mode=True: only the"
+        " in-process driver can freeze in-flight requests."
+    )
+  if rollout_config.partial_rollout_kv_policy == "keep":
+    logging.warning(
+        "partial_rollout_kv_policy='keep': the KV cache stays allocated"
+        " during weight sync, so the sync's second copy of the weights must"
+        " fit next to it (rollout_vllm_free_kv_cache_during_weight_sync is"
+        " bypassed). Lower rollout_vllm_hbm_utilization if the sync OOMs."
+    )
+  elif rollout_config.rollout_vllm_async_scheduling:
+    # tpu-inference's async-scheduling token substitution assumes that a
+    # request of the previous step is a 1-token decode; a request preempted
+    # by the pause and re-prefilled in chunks violates that.
+    raise ValueError(
+        "partial_rollout_kv_policy='recompute' is not supported together"
+        " with vLLM async scheduling: the re-prefill of preempted requests"
+        " trips its async token substitution. Use"
+        " partial_rollout_kv_policy='keep', or set"
+        " rollout_vllm_async_scheduling=False."
+    )

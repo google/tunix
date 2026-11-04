@@ -126,3 +126,36 @@ is essential for algorithms like GRPO which require multiple trajectory samples
 for each prompt, and improves efficiency by yielding full groups of trajectories
 in batches. The `max_open_buckets` parameter can be used to limit memory usage
 by controlling the number of groups that can be populated simultaneously.
+
+### Partial-Rollout Weight Sync
+
+By default a weight sync drains the rollout engine: it waits for every
+in-flight episode to finish and blocks new ones meanwhile, so the trainer idles
+on the slowest rollout. With partial rollout, the vLLM engine (server mode)
+instead freezes its in-flight requests at a token boundary, the weights are
+synced, and the same requests continue on the new weights:
+
+```yaml
+rollout_config:
+  partial_rollout: true
+  partial_rollout_kv_policy: keep  # or recompute
+vllm_config:
+  server_mode: true
+```
+
+*   `partial_rollout_kv_policy: keep` (default) continues decoding from the
+    existing KV cache on the new weights (PipelineRL-style). The KV pool stays
+    allocated during the sync, so the sync's second copy of the weights must
+    fit next to it.
+*   `partial_rollout_kv_policy: recompute` lets vLLM preempt the requests and
+    re-prefill their prefix on the new weights (AReaL-style). It is not
+    supported together with vLLM async scheduling, so it needs
+    `vllm_config.async_scheduling: false`.
+
+Tokens of one request may then come from two policies, so keep
+`agentic_grpo_config.use_rollout_logps: true` (the default): the recorded
+rollout log-probabilities are the true sampling distribution. An episode keeps
+the policy version of its first turn, and its requests are salted with that
+version (vLLM `cache_salt`) so that the prefix cache never serves blocks
+computed under other weights to other episodes. `perf/partial_rollout_pause_s`
+reports how long each sync paused the rollout engine.

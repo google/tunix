@@ -110,3 +110,32 @@ class BaseRollout(ABC):
   @abstractmethod
   def model(self) -> Any:
     """Returns the rollout model."""
+
+  def supports_partial_rollout_sync(self) -> bool:
+    """Returns whether this rollout pauses in-flight requests on weight sync.
+
+    Whether this rollout instance is configured to pause in-flight requests
+    during weight sync instead of draining them. Instances that return True
+    implement `pause_for_weight_sync` and `resume_after_weight_sync`.
+    """
+    return False
+
+  def pause_for_weight_sync(self) -> None:
+    """Freezes in-flight requests at a token boundary for a weight sync.
+
+    Raises:
+      NotImplementedError: If partial-rollout weight sync is unsupported.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not support partial-rollout weight sync."
+    )
+
+  def resume_after_weight_sync(self) -> None:
+    """Resumes the requests frozen by `pause_for_weight_sync`.
+
+    Raises:
+      NotImplementedError: If partial-rollout weight sync is unsupported.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not support partial-rollout weight sync."
+    )

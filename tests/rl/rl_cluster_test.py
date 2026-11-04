@@ -303,6 +303,17 @@ class RlEngineTest(parameterized.TestCase):
     rl_engine.rollout.generate.assert_called_once()
     called_prompts = rl_engine.rollout.generate.call_args[0][0]
     self.assertEqual(called_prompts, ['formatted prompt'])
+    self.assertNotIn('cache_salt', rl_engine.rollout.generate.call_args[1])
+
+    rl_engine.generate(
+        prompts=messages,
+        apply_chat_template=True,
+        mode=rl_engine_lib.Mode.EVAL,
+        sampling_kwargs={'cache_salt': 'policy_v3'},
+    )
+    self.assertEqual(
+        rl_engine.rollout.generate.call_args[1]['cache_salt'], 'policy_v3'
+    )
 
   def _metrics_only_engine(self):
     """Returns an RLEngine with only its metric buffers set up."""

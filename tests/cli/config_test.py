@@ -1021,6 +1021,23 @@ class ConfigTest(parameterized.TestCase):
     )
     self.assertEqual(hp.config_mapping("vllm_config"), {"some_key": 1})
 
+  def test_validate_nested_accepts_partial_rollout_keys(self):
+    for yaml_name in ("base_config.yaml", "base_agentic_config.yaml"):
+      yaml_path = pathlib.Path(config.__file__).parent / yaml_name
+      hp = config.initialize(
+          [
+              "prog",
+              str(yaml_path),
+              "rollout_config.partial_rollout=true",
+              "rollout_config.partial_rollout_kv_policy=recompute",
+          ],
+          merge_replace_keys=True,
+          validate_nested=True,
+      )
+      rollout_cfg = hp.config_mapping("rollout_config")
+      self.assertTrue(rollout_cfg["partial_rollout"])
+      self.assertEqual(rollout_cfg["partial_rollout_kv_policy"], "recompute")
+
   def test_validate_nested_accepts_mapping_under_null_entry(self):
     hp = self._initialize_with_flags(
         ["critic_model_config.model_name=qwen2.5-0.5b"]

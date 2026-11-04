@@ -885,6 +885,7 @@ class RLEngine:
       max_generation_steps: int | None = None,
       *,
       prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None = None,
+      sampling_kwargs: Mapping[str, Any] | None = None,
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
@@ -900,10 +901,14 @@ class RLEngine:
       trace_tags: Optional tags to add to the performance tracer.
       prompt_token_ids: Explicit unpadded token rows. Mutually exclusive with
         text prompts and chat templating; requires backend token-input support.
+      sampling_kwargs: Extra scalar per-call sampler kwargs (such as vLLM
+        `cache_salt`), forwarded unchanged to `rollout.generate` on every
+        micro-batch chunk.
 
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
     """
+    sampling_kwargs = sampling_kwargs or {}
     exact_input = prompt_token_ids is not None
     if exact_input:
       if prompts is not None:
@@ -972,10 +977,13 @@ class RLEngine:
                   cast(Any, None),
                   rollout_config,
                   prompt_token_ids=prompt_rows[s],
+                  **sampling_kwargs,
               )
               if exact_input
               else self.rollout.generate(
-                  cast(list[str], prompt_rows[s]), rollout_config
+                  cast(list[str], prompt_rows[s]),
+                  rollout_config,
+                  **sampling_kwargs,
               )
               for s in rl_utils.chunk_slices_by_size(
                   stop=len(prompt_rows), step=micro_batch_size

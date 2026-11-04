@@ -2236,6 +2236,107 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         test_common.assert_equal, original_base_params, base_params
     )
 
+  @parameterized.named_parameters(
+      dict(testcase_name="on_policy", off_policy_steps=0),
+      dict(testcase_name="off_policy", off_policy_steps=1),
+  )
+  def test_partial_rollout_sync_pauses_instead_of_draining(
+      self, off_policy_steps
+  ):
+    split_index = self.device_count // 2
+    devices = sorted(jax.devices(), key=lambda d: d.id)
+    mesh1 = Mesh(
+        np.array(devices[:split_index]).reshape(split_index, 1),
+        ("fsdp", "tp"),
+    )
+    mesh2 = Mesh(
+        np.array(devices[split_index:]).reshape(1, split_index),
+        ("fsdp", "tp"),
+    )
+    vocab = _mock_vocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    ref_model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    actor_model = test_common.get_lora_model(ref_model, mesh=mesh1)
+    max_steps = 3
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: mesh1,
+            rl_engine_lib.Role.REFERENCE: mesh1,
+            rl_engine_lib.Role.ROLLOUT: mesh2,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=10,
+            max_steps=max_steps,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=256,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
+            kv_cache_size=1024,
+            partial_rollout=True,
+        ),
+    )
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=actor_model,
+        reference=ref_model,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+    )
+    events = []
+    rollout = rl_engine.rollout
+    # The vanilla engine cannot pause; stand in for one that can.
+    rollout.supports_partial_rollout_sync = lambda: True
+    rollout.pause_for_weight_sync = lambda: events.append("pause")
+    rollout.resume_after_weight_sync = lambda: events.append("resume")
+    real_sync = rl_engine.sync_weights
+
+    def _recording_sync():
+      events.append("sync")
+      real_sync()
+
+    grpo_learner = agentic_grpo_learner.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=reward_fn_1,
+        algo_config=agentic_grpo_learner.GRPOConfig(
+            num_generations=2,
+            num_iterations=1,
+            max_response_length=10,
+            off_policy_steps=off_policy_steps,
+        ),
+        chat_parser=MockChatParser(),
+    )
+    self.assertTrue(grpo_learner._partial_rollout_sync)  # pylint: disable=protected-access
+    train_ds = _dummy_dataset(MySource(repeat=10), batch_size=2)
+    with (
+        mock.patch.object(
+            rl_engine, "generate", side_effect=self._mock_generate
+        ),
+        mock.patch.object(
+            rl_engine, "sync_weights", side_effect=_recording_sync
+        ),
+        mock.patch.object(
+            grpo_learner._rollout_sync_lock,  # pylint: disable=protected-access
+            "acquire_weight_sync",
+            side_effect=AssertionError("partial rollout must not drain"),
+        ),
+    ):
+      grpo_learner.train(train_ds, None)
+
+    self.assertEqual(events, ["pause", "sync", "resume"] * max_steps)
+    self.assertEqual(grpo_learner.policy_version, max_steps)
+    self.assertEqual(rl_engine.global_steps, max_steps)
+    jax.tree.map_with_path(
+        test_common.assert_close,
+        nnx.state(grpo_learner.rl_engine.rollout.model(), nnx.LoRAParam),
+        nnx.state(rl_engine.actor_trainer.model, nnx.LoRAParam),
+    )
+
   def test_customized_agent_env(self):
     class MockEnv(BaseTaskEnv):
 

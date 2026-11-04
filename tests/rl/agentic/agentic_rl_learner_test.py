@@ -320,6 +320,7 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
         ),
         rl_engine=types.SimpleNamespace(generate=mock.Mock()),
         policy_version=7,
+        _partial_rollout_sync=False,
     )
     agentic_rl_learner.AgenticRLLearner._model_call(
         obj, None, prompt_token_ids=np.array([0, 3])
@@ -357,6 +358,7 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
         chat_parser=qwen_parser,
         rl_engine=types.SimpleNamespace(generate=mock.Mock()),
         policy_version=7,
+        _partial_rollout_sync=False,
     )
     agentic_rl_learner.AgenticRLLearner._model_call(obj, raw_messages)
     self.assertEqual(
@@ -373,6 +375,7 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
         chat_parser=types.SimpleNamespace(parse=mock.Mock()),
         rl_engine=types.SimpleNamespace(generate=mock.Mock()),
         policy_version=7,
+        _partial_rollout_sync=False,
     )
     with self.assertRaisesRegex(ValueError, "chat_lists is required"):
       agentic_rl_learner.AgenticRLLearner._model_call(obj, None)
@@ -389,6 +392,7 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
             chat_parser=types.SimpleNamespace(parse=mock.Mock()),
             rl_engine=types.SimpleNamespace(generate=mock.Mock()),
             policy_version=7,
+            _partial_rollout_sync=False,
         )
         with self.assertRaisesRegex(ValueError, error):
           agentic_rl_learner.AgenticRLLearner._model_call(
@@ -402,6 +406,7 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
         chat_parser=None,
         rl_engine=types.SimpleNamespace(generate=mock.Mock()),
         policy_version=7,
+        _partial_rollout_sync=False,
     )
     agentic_rl_learner.AgenticRLLearner._model_call(
         obj, [{"role": "user", "content": np.array(["q"])}]

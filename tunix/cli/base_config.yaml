@@ -265,6 +265,10 @@ rollout_config:
 
   top_k: 50
 
+  partial_rollout: false
+
+  partial_rollout_kv_policy: "keep"
+
 
 ############################### Other RL  Config ###############################
 

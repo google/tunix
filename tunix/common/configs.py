@@ -16,7 +16,7 @@
 
 import dataclasses
 import math
-from typing import Any, List, Optional, TYPE_CHECKING, Tuple
+from typing import Any, get_args, List, Literal, Optional, Tuple, TYPE_CHECKING
 
 import flax
 import jax
@@ -40,6 +40,10 @@ if TYPE_CHECKING:
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
 Mode = datatypes.Mode
 Role = datatypes.Role
+
+# What a partial-rollout weight sync does with the KV cache of the in-flight
+# requests it freezes; see `RolloutConfig.partial_rollout_kv_policy`.
+PartialRolloutKvPolicy = Literal["keep", "recompute"]
 
 
 def _is_positive_integer(value: int | None, name: str):
@@ -275,6 +279,22 @@ class RolloutConfig:
   # synchronization instead of draining them to completion first.
   partial_rollout: bool = False
 
+  # What happens to the KV cache of the in-flight requests frozen by a
+  # partial-rollout weight sync. Only read when `partial_rollout` is True.
+  #   "keep" (default): their KV blocks stay resident and decoding continues
+  #     on the new weights over the old-policy KV (PipelineRL-style), without
+  #     re-prefill. The KV pool stays allocated through the sync
+  #     (rollout_vllm_free_kv_cache_during_weight_sync is bypassed), and
+  #     tokens after the sync come from a mixed policy: the recorded rollout
+  #     logprobs are the true sampling distribution, so keep
+  #     `use_rollout_logps=True`.
+  #   "recompute": vLLM preempts them (their KV blocks are freed) and, on
+  #     resume, re-prefills prompt + tokens generated so far with the new
+  #     weights (AReaL-style). The KV is exact at the cost of one prefill per
+  #     in-flight request per sync. Not supported together with vLLM async
+  #     scheduling (rollout_vllm_async_scheduling).
+  partial_rollout_kv_policy: PartialRolloutKvPolicy = "keep"
+
   # Decode text / extract logprobs of each finished request in a thread pool
   # while vLLM keeps decoding the rest of the batch (offline and server mode).
   # Outputs are identical; False post-processes after generation as before.
@@ -371,6 +391,12 @@ class RolloutConfig:
       raise ValueError(
           "weight_sync_mode must be one of ('none', 'fallback', 'raiden'),"
           f" got {self.weight_sync_mode!r}."
+      )
+    if self.partial_rollout_kv_policy not in get_args(PartialRolloutKvPolicy):
+      raise ValueError(
+          "partial_rollout_kv_policy must be one of"
+          f" {get_args(PartialRolloutKvPolicy)}, got"
+          f" {self.partial_rollout_kv_policy!r}."
       )
 
 
