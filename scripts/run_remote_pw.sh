@@ -51,8 +51,8 @@ GITHUB_PATH=${GITHUB_PATH:-/github} # Specify your repos are in github folder
 TEMP_BUCKET=${TEMP_BUCKET:-lancewang-dev-supercomputer-testing/tunix/pw}
 
 JAX_TPU_IMAGE=${JAX_TPU_IMAGE:-gcr.io/cloud-tpu-multipod-dev/lance_deepswe:latest}
-PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest}
-PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest}
+PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest}
+PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server:latest}
 PROXY_CPU_LIMIT=${PROXY_CPU_LIMIT:-50}
 PROXY_MEMORY_LIMIT=${PROXY_MEMORY_LIMIT:-320G}
 JAX_CPU_LIMIT=${JAX_CPU_LIMIT:-50}

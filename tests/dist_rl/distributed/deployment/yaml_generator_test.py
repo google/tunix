@@ -260,6 +260,16 @@ class YamlGeneratorTest(parameterized.TestCase):
         self.assertIn("memory: 16G", rendered)
         self.assertIn("memory: 48G", rendered)
         self.assertIn("memory: 100G", rendered)
+        self.assertIn(
+            "image:"
+            " us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest",
+            rendered,
+        )
+        self.assertIn(
+            "image:"
+            " us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server:latest",
+            rendered,
+        )
 
   def test_generate_pathways_yaml_custom_memory_limits_and_requests(self):
     template_file = _get_template_path("jobset.pathways.yaml")
