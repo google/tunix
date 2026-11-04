@@ -24,8 +24,6 @@ import enum
 import time
 from typing import Any, Dict
 import uuid
-import flax
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 from tunix.common import datatypes as common_datatypes
 from tunix.rl.agentic.agents import agent_types
@@ -518,14 +516,29 @@ class WeightSyncMetadata:
 
 
 ##### Training DTOs #####
+#
+# Trainer payloads are plain frozen dataclasses so this module stays free of
+# any ML framework: the orchestrator builds them from numpy arrays (the wire
+# contract, see `rpc_utils.validate_wire_safe`) and ships them unchanged.
+# Framework-specific container behaviour is registered next to the trainer
+# that needs it; for JAX, importing `tunix.dist_rl.train.jax_pytrees`
+# registers them as pytrees, after which a trainer may hold device arrays in
+# the same fields. Use `dataclasses.replace` to derive modified copies.
+
+# Marks a payload field as static configuration rather than array data. Array
+# fields are the per-batch tensors a trainer traces / shards / moves between
+# devices; static fields describe the batch (e.g. a packing bound) and must
+# stay Python values. `jax.tree_util.register_dataclass` reads this exact
+# metadata key to pick `meta_fields`, so JAX needs no separate field list.
+STATIC_FIELD_METADATA = {"static": True}
 
 
-@flax.struct.dataclass(frozen=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class TrainerPayload:
   """Base abstract class for generic trainer payloads."""
 
 
-@flax.struct.dataclass(frozen=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class SFTTrainerPayload(TrainerPayload):
   """Supervised Fine-Tuning (SFT) trainer payload.
 
@@ -539,15 +552,15 @@ class SFTTrainerPayload(TrainerPayload):
     segment_positions: Optional [B, T] position indices within each segment.
   """
 
-  token_ids: ArrayLike
-  token_mask: ArrayLike
-  segment_ids: ArrayLike | None = None
-  segment_positions: ArrayLike | None = None
+  token_ids: np.ndarray
+  token_mask: np.ndarray
+  segment_ids: np.ndarray | None = None
+  segment_positions: np.ndarray | None = None
 
 
 # TODO(tunix-dev): Introduce PPOTrainerPayload to replace generic
 # RLTrainerPayload when PPO specific fields are needed.
-@flax.struct.dataclass(frozen=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class RLTrainerPayload(TrainerPayload):
   """RL training payload.
 
@@ -581,29 +594,33 @@ class RLTrainerPayload(TrainerPayload):
     returns: Optional [B, C] value baseline returns (for PPO / Critic).
     old_values: Optional [B, C] critic value estimates (for PPO / Critic).
     num_segments: Optional static upper bound on number of segments in packed
-      rows.
-    metadata: Extra payload metadata dictionary.
+      rows (static field, see `STATIC_FIELD_METADATA`).
+    sampler_agreement_applied: Whether the orchestrator already scored the
+      batch against the trainer (static field).
+    metadata: Extra payload metadata dictionary (static field).
   """
 
-  prompt_ids: ArrayLike
-  prompt_mask: ArrayLike
-  completion_ids: ArrayLike
-  completion_mask: ArrayLike
-  advantages: ArrayLike
-  segment_ids: ArrayLike | None = None
-  segment_positions: ArrayLike | None = None
-  ref_per_token_logps: ArrayLike | None = None
-  old_per_token_logps: ArrayLike | None = None
-  sampler_is_weights: ArrayLike | None = None
-  routed_experts: ArrayLike | None = None
-  returns: ArrayLike | None = None
-  old_values: ArrayLike | None = None
-  num_segments: int | None = flax.struct.field(default=None, pytree_node=False)
-  sampler_agreement_applied: bool = flax.struct.field(
-      default=False, pytree_node=False
+  prompt_ids: np.ndarray
+  prompt_mask: np.ndarray
+  completion_ids: np.ndarray
+  completion_mask: np.ndarray
+  advantages: np.ndarray
+  segment_ids: np.ndarray | None = None
+  segment_positions: np.ndarray | None = None
+  ref_per_token_logps: np.ndarray | None = None
+  old_per_token_logps: np.ndarray | None = None
+  sampler_is_weights: np.ndarray | None = None
+  routed_experts: np.ndarray | None = None
+  returns: np.ndarray | None = None
+  old_values: np.ndarray | None = None
+  num_segments: int | None = dataclasses.field(
+      default=None, metadata=STATIC_FIELD_METADATA
   )
-  metadata: dict[str, Any] = flax.struct.field(
-      default_factory=dict, pytree_node=False
+  sampler_agreement_applied: bool = dataclasses.field(
+      default=False, metadata=STATIC_FIELD_METADATA
+  )
+  metadata: dict[str, Any] = dataclasses.field(
+      default_factory=dict, metadata=STATIC_FIELD_METADATA
   )
   # TODO(tunix-dev): add ppo specific fields in PPORLTrainerPayload.
 
@@ -649,15 +666,15 @@ class LogprobsRequest(Request):
       only.
   """
 
-  prompt_tokens: ArrayLike
-  completion_tokens: ArrayLike
+  prompt_tokens: np.ndarray
+  completion_tokens: np.ndarray
   temperature: float
   model_role: str = "reference"
   pad_id: int | None = None
   eos_id: int | None = None
-  segment_ids: ArrayLike | None = None
-  segment_positions: ArrayLike | None = None
-  routed_experts: ArrayLike | None = None
+  segment_ids: np.ndarray | None = None
+  segment_positions: np.ndarray | None = None
+  routed_experts: np.ndarray | None = None
 
 
 ##### Inference DTOs #####

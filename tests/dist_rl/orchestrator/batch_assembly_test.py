@@ -25,6 +25,7 @@ import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
 from tunix.dist_rl.orchestrator import batch_assembly
+from tunix.dist_rl.train import jax_pytrees  # pylint: disable=unused-import
 from tunix.rl import algo_core
 from tunix.rl import algorithm_config
 from tunix.rl import function_registry
@@ -1439,8 +1440,9 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
     np.testing.assert_allclose(payload.advantages[0], [2.5, 2.5, 2.5, 0, 0])
 
   def test_sequence_aligned_advantage_is_sliced_to_completion(self):
-    item = _make_payload(2, 3).replace(
-        advantages=np.array([0, 0, 2, 2, 2], dtype=np.float32)
+    item = dataclasses.replace(
+        _make_payload(2, 3),
+        advantages=np.array([0, 0, 2, 2, 2], dtype=np.float32),
     )
     payload = self._assembler().pack([item])[0]
 

@@ -29,6 +29,15 @@ import humanize
 import jax
 import jax.numpy as jnp
 import numpy as np
+# Registers the dist_rl trainer payloads as JAX pytrees. This module is the one
+# Tunix module every JAX training engine imports (Tunix's own trainers and
+# MaxText's `training_engine`, which takes `LossOutput` / `WeightedMetric` from
+# here), so importing the registration from it guarantees payloads are pytrees
+# in any JAX trainer process without each engine importing it explicitly.
+# TODO(tsbao): Once MaxText can depend on a Tunix release that ships
+# `tunix.dist_rl.train.jax_pytrees`, have the engines import it directly and
+# drop this hook (`sft` should not depend on `dist_rl`).
+from tunix.dist_rl.train import jax_pytrees  # pylint: disable=unused-import
 from tunix.oss import utils as google_utils
 
 

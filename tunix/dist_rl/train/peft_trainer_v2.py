@@ -37,6 +37,7 @@ from tunix.common import configs
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.metrics import metrics as exp_metrics
 from tunix.dist_rl.train import abstract_trainer
+from tunix.dist_rl.train import jax_pytrees  # pylint: disable=unused-import
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants

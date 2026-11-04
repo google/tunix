@@ -19,7 +19,6 @@ import time
 
 from absl.testing import absltest
 import cloudpickle
-import jax
 import numpy as np
 from tunix.dist_rl.common import datatypes
 
@@ -289,31 +288,24 @@ class RLTrainerPayloadTest(absltest.TestCase):
     self.assertEqual(payload.num_segments, 3)
     self.assertEqual(payload.metadata, {"step": 1})
 
-    replaced = payload.replace(num_segments=4)
+    replaced = dataclasses.replace(payload, num_segments=4)
     self.assertEqual(replaced.num_segments, 4)
     np.testing.assert_array_equal(replaced.prompt_ids, payload.prompt_ids)
 
-  def test_rl_trainer_payload_pytree_structure(self):
-    payload = datatypes.RLTrainerPayload(
-        prompt_ids=np.array([1, 2], dtype=np.int32),
-        prompt_mask=np.ones(2, dtype=np.float32),
-        completion_ids=np.array([3, 4], dtype=np.int32),
-        completion_mask=np.ones(2, dtype=np.float32),
-        advantages=np.array([1.0, 2.0], dtype=np.float32),
-        num_segments=5,
-        metadata={"key": "value"},
+  def test_rl_trainer_payload_static_field_metadata(self):
+    static = {
+        f.name
+        for f in dataclasses.fields(datatypes.RLTrainerPayload)
+        if f.metadata == datatypes.STATIC_FIELD_METADATA
+    }
+    self.assertEqual(
+        static, {"num_segments", "sampler_agreement_applied", "metadata"}
     )
-    leaves, treedef = jax.tree_util.tree_flatten(payload)
-    # num_segments and metadata are pytree_node=False, so they are not in leaves
-    for leaf in leaves:
-      if leaf is not None:
-        self.assertIsInstance(leaf, np.ndarray)
-
-    # Tree unflatten restores full object
-    restored = jax.tree_util.tree_unflatten(treedef, leaves)
-    self.assertEqual(restored.num_segments, 5)
-    self.assertEqual(restored.metadata, {"key": "value"})
-    np.testing.assert_allclose(restored.advantages, [1.0, 2.0])
+    self.assertEmpty([
+        f.name
+        for f in dataclasses.fields(datatypes.SFTTrainerPayload)
+        if f.metadata
+    ])
 
   def test_rl_trainer_payload_cloudpickle_roundtrip(self):
     payload = datatypes.RLTrainerPayload(
