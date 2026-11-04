@@ -105,3 +105,44 @@ If the formatting is off, please instruct the user to run the linter/formatter. 
   / specific exception immediately.
 * **Use specific exceptions:** Avoid catching or raising overly broad
   exceptions like bare `Exception` to swallow errors.
+
+### CL Complexity Gate
+
+* **Enforce the Complexity Budget (`[tool.cl_complexity_gate]`):** Every PR
+  is checked by `python3 scripts/check_cl_complexity.py --strict` across
+  orthogonal dimensions:
+  * **Dim 1 (Soft AST-Statement Scope Budget):** Tracks formatting-invariant net
+    executable AST statements (`net_stmts`, excluding tests, comments, and
+    docstrings) as a continuous soft budget inside `Score <= 100` with no
+    standalone line-count hard cliff—modular CLs with clean Dim 2/3/4 structure
+    are never blocked by line or file count.
+  * **Dim 2 (Local Control Flow & Legacy Ratchet):** Per-function
+    `cognitive <= 15` (target `<= 12`), `cyclomatic <= 15` (target `<= 10`),
+    `max_nesting <= 4` (target `<= 3`), flat `+1` early-exit guard relief,
+    bounded legacy delta (`+5` Cog / `+5` Cyc) on existing high-complexity
+    functions, and 1-to-1 cross-file move matching.
+  * **Dim 3 (Structural Layering & Anti-Sprawl):** Per-file single-caller
+    chain depth `max_call_depth_hops <= 2` (target `<= 2`), newly added
+    `trivial_single_call_helpers < 3` (target `0`: `stmts <= 4` and
+    `cognitive <= 1`; exempting pure cohesive leaf helpers and semantic runtime
+    decorators), `pass_through_ratio <= 0.25` (target `<= 0.15`),
+    `nested_closures <= 4` (target `<= 2`), and anti-sprawl budget (`>= 5` new
+    private helpers with `file_cog_delta > +40`). When collapsing a 1-to-1
+    single-caller chain `outer -> inner`, preserve the outer domain function
+    name and inline the inner callee upward; follow the Closure Elimination
+    Hierarchy (`Stdlib/Builtin > Inline > Hoist Last`); and enforce the
+    Verb–Execution Semantics Contract (lazy `yield` generators use
+    `_iter_*`/`_stream_*`/`_generate_*`, never eager
+    `_drain_*`/`_flush_*`/`_collect_*`/`_materialize_*`/`_gather_*`/`_load_all_*`).
+  * **Dim 4 (Duplicate Logic & Intentional Forks):** AST statement 2-gram
+    multiset Jaccard clone detection (`>= 0.60` for `stmts >= 7`,
+    `cognitive >= 4`) catching intra-file and cross-file copy-pasted logic
+    while honoring configured `intentional_forks`.
+* **Implementation Priority Over Test Coupling:** Never compromise production
+  code quality with pass-through wrappers, `functools.partial` aliases, or
+  `lambda` shims just to keep existing clear-box test mocks on private
+  `_helper` symbols unchanged; update the tests to assert on public contracts
+  and boundaries instead.
+* **Escape Hatch (`SKIP_CL_COMPLEXITY=<reason>`):** Maintainers can bypass the
+  Complexity Gate for mechanical migrations or false positives by adding
+  `SKIP_CL_COMPLEXITY=<reason>` to the PR/CL description.
