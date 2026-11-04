@@ -14,6 +14,7 @@
 
 """Unit tests for utils."""
 
+import math
 import os
 
 from absl.testing import absltest
@@ -30,10 +31,12 @@ os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 _GIB = 1 << 30
 
 
-def _create_mesh() -> jax.sharding.Mesh:
-  return jax.sharding.Mesh(
-      np.array(jax.devices()[:4]).reshape((2, 2)), ("dp", "tp")
-  )
+def _create_mesh(
+    shape: tuple[int, ...] = (2, 2),
+    axis_names: tuple[str, ...] = ("dp", "tp"),
+) -> jax.sharding.Mesh:
+  devices = jax.devices()[: math.prod(shape)]
+  return jax.sharding.Mesh(np.array(devices).reshape(shape), axis_names)
 
 
 class UtilsTest(parameterized.TestCase):
@@ -94,8 +97,6 @@ class CacheSizingTest(parameterized.TestCase):
         max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
-        dp_axis="dp",
-        tp_axis="tp",
         mesh=_create_mesh(),
     )
     element_shape = utils.derive_kv_geometry(cfg, num_kv_heads=1, head_dim=64)
@@ -106,8 +107,7 @@ class CacheSizingTest(parameterized.TestCase):
         max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
-        tp_axis="tp",
-        mesh=jax.sharding.Mesh(np.array(jax.devices()[:4]), ("tp",)),
+        mesh=_create_mesh((4,), ("tp",)),
     )
     with self.assertRaisesRegex(ValueError, r"tp_size \(4\) must be divisible"):
       utils.derive_kv_geometry(cfg, num_kv_heads=3, head_dim=64)
@@ -121,8 +121,6 @@ class CacheSizingTest(parameterized.TestCase):
         max_device_size_gib=1.0,
         dtype=jnp.int8,
         page_size=16,
-        dp_axis="dp",
-        tp_axis="tp",
         mesh=_create_mesh(),
     )
     with self.assertRaisesRegex(
@@ -133,19 +131,48 @@ class CacheSizingTest(parameterized.TestCase):
       utils.derive_kv_geometry(cfg, num_kv_heads=2, head_dim=64)
 
   @parameterized.named_parameters(
-      dict(testcase_name="dp_and_tp", dp_axis="dp", tp_axis="tp"),
-      dict(testcase_name="dp_only", dp_axis="dp", tp_axis=None),
-      dict(testcase_name="tp_only", dp_axis=None, tp_axis="tp"),
-      dict(testcase_name="no_sharding", dp_axis=None, tp_axis=None),
+      dict(
+          testcase_name="dp_and_tp",
+          shape=(2, 2),
+          axis_names=("dp", "tp"),
+          dp_axis=("dp",),
+          tp_axis="tp",
+      ),
+      dict(
+          testcase_name="dp_only",
+          shape=(2,),
+          axis_names=("dp",),
+          dp_axis=("dp",),
+          tp_axis=None,
+      ),
+      dict(
+          testcase_name="fsdp_and_dp",
+          shape=(2, 2),
+          axis_names=("fsdp", "dp"),
+          dp_axis=("fsdp", "dp"),
+          tp_axis=None,
+      ),
+      dict(
+          testcase_name="tp_only",
+          shape=(2,),
+          axis_names=("tp",),
+          dp_axis=None,
+          tp_axis="tp",
+      ),
+      dict(
+          testcase_name="single_dp_replica",
+          shape=(1,),
+          axis_names=("dp",),
+          dp_axis=None,
+          tp_axis=None,
+      ),
   )
-  def test_derive_cache_sharding(self, dp_axis, tp_axis):
-    mesh = _create_mesh()
+  def test_derive_cache_sharding(self, shape, axis_names, dp_axis, tp_axis):
+    mesh = _create_mesh(shape, axis_names)
     cfg = configs.CacheConfig(
         max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
-        dp_axis=dp_axis,
-        tp_axis=tp_axis,
         mesh=mesh,
     )
     self.assertEqual(
@@ -162,7 +189,7 @@ class CacheSizingTest(parameterized.TestCase):
         max_host_size_gib=(512 * 1024) / _GIB,
         dtype=jnp.bfloat16,
         page_size=16,
-        mesh=_create_mesh(),
+        mesh=_create_mesh((1,), ("tp",)),
     )
     element_shape = utils.derive_kv_geometry(cfg, num_kv_heads=8, head_dim=64)
     num_device_pages, num_host_pages = utils.compute_page_limits(
@@ -194,42 +221,43 @@ class CacheSizingTest(parameterized.TestCase):
   # TP. DP places one page of each group of dp_size on every device.
   @parameterized.named_parameters(
       dict(
-          testcase_name="no_sharding",
-          dp_axis=None,
-          tp_axis=None,
+          testcase_name="single_device",
+          shape=(1,),
+          axis_names=("tp",),
           expected_device_pages=8,
           expected_device_pages_one_byte_short=7,
       ),
       dict(
           testcase_name="dp_only",
-          dp_axis="dp",
-          tp_axis=None,
+          shape=(2,),
+          axis_names=("dp",),
           expected_device_pages=16,
           expected_device_pages_one_byte_short=14,
       ),
       dict(
           testcase_name="tp_only",
-          dp_axis=None,
-          tp_axis="tp",
+          shape=(2,),
+          axis_names=("tp",),
           expected_device_pages=16,
           expected_device_pages_one_byte_short=15,
       ),
       dict(
           testcase_name="dp_and_tp",
-          dp_axis="dp",
-          tp_axis="tp",
+          shape=(2, 2),
+          axis_names=("dp", "tp"),
           expected_device_pages=32,
           expected_device_pages_one_byte_short=30,
       ),
   )
   def test_compute_page_limits_budget_boundary(
       self,
-      dp_axis,
-      tp_axis,
+      shape,
+      axis_names,
       expected_device_pages,
       expected_device_pages_one_byte_short,
   ):
     page_bytes = 32 * 1024
+    mesh = _create_mesh(shape, axis_names)
     for budget_offset, expected_device, expected_host in (
         (0, expected_device_pages, 3),
         (-1, expected_device_pages_one_byte_short, 2),
@@ -241,9 +269,7 @@ class CacheSizingTest(parameterized.TestCase):
             max_host_size_gib=(3 * page_bytes + budget_offset) / _GIB,
             dtype=jnp.bfloat16,
             page_size=16,
-            dp_axis=dp_axis,
-            tp_axis=tp_axis,
-            mesh=_create_mesh(),
+            mesh=mesh,
         )
         element_shape = utils.derive_kv_geometry(
             cfg, num_kv_heads=8, head_dim=64
@@ -263,7 +289,7 @@ class CacheSizingTest(parameterized.TestCase):
         max_device_size_gib=(3 * (65536 + 16384)) / _GIB,
         dtype=jnp.bfloat16,
         page_size=16,
-        mesh=_create_mesh(),
+        mesh=_create_mesh((1,), ("tp",)),
     )
     geometries = (
         configs.CacheGeometry(num_kv_heads=8, head_dim=64),
@@ -293,8 +319,7 @@ class CacheSizingTest(parameterized.TestCase):
         max_device_size_gib=(37 * 1024) / _GIB,
         dtype=jnp.bfloat16,
         page_size=16,
-        dp_axis="dp",
-        mesh=jax.sharding.Mesh(np.array(jax.devices()[:4]), ("dp",)),
+        mesh=_create_mesh((4,), ("dp",)),
     )
     element_shape = utils.derive_kv_geometry(cfg, num_kv_heads=2, head_dim=8)
     num_device_pages, _ = utils.compute_page_limits(

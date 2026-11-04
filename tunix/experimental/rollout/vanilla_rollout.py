@@ -166,7 +166,6 @@ def _build_engine(
     eos_token_ids.add(tokenizer.eos_id())
   if rollout_config.eos_tokens:
     eos_token_ids.update(rollout_config.eos_tokens)
-  tp_axis = 'tp' if 'tp' in mesh.axis_names else None
   return engine_lib.LLMEngine(
       model,
       cache_config=configs.CacheConfig(
@@ -175,7 +174,6 @@ def _build_engine(
           page_size=rollout_config.rollout_vanilla_v2_kv_cache_page_size,
           enable_prefix_caching=rollout_config.rollout_vanilla_v2_enable_prefix_caching,
           dtype=model.config.dtype,  # pyrefly: ignore[missing-attribute]
-          tp_axis=tp_axis,
           mesh=mesh,
       ),
       scheduler_config=configs.SchedulerConfig(

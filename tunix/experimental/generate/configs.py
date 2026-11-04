@@ -15,6 +15,7 @@
 """Configuration dataclasses for the v2 continuous batching generation engine."""
 
 import dataclasses
+import math
 
 import jax
 
@@ -57,10 +58,10 @@ class CacheConfig:
     enable_prefix_caching: Whether pages may be shared between requests with a
       common prefix.
     dtype: The data type of KV cache entries.
-    dp_axis: The mesh axis to shard pages across.
-    tp_axis: The mesh axis to shard KV heads across.
-    mesh: The mesh to shard the KV caches over. Pages are allocated outside any
-      mesh context, so the mesh cannot be inferred.
+    mesh: The mesh to shard the KV caches over. Pages are sharded across the
+      data parallel axes (`"dp"` and `"fsdp"`), and KV heads are sharded
+      across `"tp"`. Pages are allocated outside any mesh context, so the mesh
+      cannot be inferred.
   """
 
   max_device_size_gib: float
@@ -68,8 +69,6 @@ class CacheConfig:
   page_size: int = 16
   enable_prefix_caching: bool = True
   dtype: jax.typing.DTypeLike
-  dp_axis: str | None = None
-  tp_axis: str | None = None
   mesh: jax.sharding.Mesh
 
   def __post_init__(self):
@@ -86,32 +85,21 @@ class CacheConfig:
           f"max_host_size_gib cannot be negative, got {self.max_host_size_gib}."
       )
 
-    if not (self.dp_axis or self.tp_axis):
-      return
-    if self.dp_axis == self.tp_axis:
-      raise ValueError(
-          "dp_axis and tp_axis must be different, got"
-          f" {self.dp_axis!r} for both."
-      )
-    for axis in (self.dp_axis, self.tp_axis):
-      if axis and axis not in self.mesh.shape:
-        raise ValueError(
-            f"Axis {axis!r} is not in the mesh axes {tuple(self.mesh.shape)}."
-        )
-
   @property
   def dp_size(self) -> int:
-    """The number of data parallel replicas, i.e. the size of `dp_axis`."""
-    if not self.dp_axis:
-      return 1
-    return self.mesh.shape[self.dp_axis]
+    """The number of data parallel replicas in `mesh`."""
+    return math.prod(
+        size
+        for axis, size in self.mesh.shape.items()
+        if axis in ("dp", "fsdp")
+    )
 
   @property
   def tp_size(self) -> int:
-    """The tensor parallel size, i.e. the size of `tp_axis`."""
-    if not self.tp_axis:
+    """The tensor parallel size in `mesh`."""
+    if "tp" not in self.mesh.shape:
       return 1
-    return self.mesh.shape[self.tp_axis]
+    return self.mesh.shape["tp"]
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

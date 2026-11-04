@@ -69,7 +69,6 @@ def paged_attention(
     *,
     cache_name: str,
     mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
-    tp_axis: str | None = None,
     decode_only: bool = False,
     max_q_len: int | None = None,
     backend: str | None = None,
@@ -93,9 +92,9 @@ def paged_attention(
     kv_cache: the 5D cache described in the module docstring.
     metadata: the batch's ragged layout and page tables.
     cache_name: the key of `kv_cache` in `metadata.page_indices`.
-    mesh: the mesh to run the kernel over.
-    tp_axis: the mesh axis KV heads are sharded across. Everything else is
-      replicated, including the cache pages across data parallelism.
+    mesh: the mesh to run the kernel over. KV heads are sharded across `'tp'`;
+      everything else is replicated, including the cache pages across data
+      parallelism.
     decode_only: static promise of one query token per sequence. Combined with
       `metadata.decode_only`; on GPU it enables vLLM's split-KV decode launch.
     max_q_len: static per-sequence query bound for the JAX path; tokens past it
@@ -138,7 +137,7 @@ def paged_attention(
         v_scale=v_scale,
     )
 
-  tp_spec = tp_axis if tp_axis in mesh.shape else None
+  tp_spec = 'tp' if 'tp' in mesh.shape else None
   if tp_spec is not None:
     tp_size = mesh.shape[tp_spec]
     if keys.shape[1] < tp_size:

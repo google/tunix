@@ -882,7 +882,6 @@ class Attention(nnx.Module):
         metadata,
         cache_name=cache_name,
         mesh=mesh,
-        tp_axis=tuple(self.config.shd_config.act_btnh)[2],
         sliding_window=(
             self.config.sliding_window_size
             if self.attn_type == AttentionType.LOCAL_SLIDING

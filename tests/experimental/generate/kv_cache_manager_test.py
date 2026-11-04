@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import math
 import os
 
 from absl.testing import absltest
@@ -35,18 +36,18 @@ os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 _GIB = 1 << 30
 
 
-def _create_mesh() -> jax.sharding.Mesh:
-  return jax.sharding.Mesh(
-      np.array(jax.devices()[:4]).reshape((2, 2)), ("dp", "tp")
-  )
+def _create_mesh(
+    shape: tuple[int, ...] = (2, 2),
+    axis_names: tuple[str, ...] = ("dp", "tp"),
+) -> jax.sharding.Mesh:
+  devices = jax.devices()[: math.prod(shape)]
+  return jax.sharding.Mesh(np.array(devices).reshape(shape), axis_names)
 
 
 def _create_cache_config(
     page_size: int = 4,
     num_device_pages: int = 10,
     num_host_pages: int = 10,
-    dp_axis: str | None = None,
-    tp_axis: str | None = None,
     num_caches: int = 1,
     num_kv_heads: int = 2,
     head_dim: int = 16,
@@ -61,9 +62,7 @@ def _create_cache_config(
       page_size=page_size,
       enable_prefix_caching=enable_prefix_caching,
       dtype=jnp.float32,
-      dp_axis=dp_axis,
-      tp_axis=tp_axis,
-      mesh=mesh if mesh is not None else _create_mesh(),
+      mesh=mesh if mesh is not None else _create_mesh((1,), ("tp",)),
   )
 
 
@@ -235,7 +234,7 @@ class KVCacheManagerInitTest(parameterized.TestCase):
         max_device_size_gib=(4 * (4 * 4 * 8 * 4 + 4 * 1 * 16 * 4)) / _GIB,
         page_size=4,
         dtype=jnp.float32,
-        mesh=_create_mesh(),
+        mesh=_create_mesh((1,), ("tp",)),
     )
     mgr = kv_cache_manager.KVCacheManager(
         config=cfg,
@@ -266,9 +265,7 @@ class KVCacheManagerInitTest(parameterized.TestCase):
     # Pages are allocated outside any mesh context, so the mesh travels on the
     # config rather than through `jax.set_mesh`.
     mesh = _create_mesh()
-    mgr = _create_manager(
-        num_caches=1, dp_axis="dp", tp_axis="tp", mesh=mesh
-    )
+    mgr = _create_manager(num_caches=1, mesh=mesh)
 
     arr = mgr.get_physical_pages()["cache_0"]
     assert isinstance(arr, jax.Array)
@@ -285,8 +282,6 @@ class KVCacheManagerInitTest(parameterized.TestCase):
         max_device_size_gib=1e-3,
         page_size=4,
         dtype=jnp.bfloat16,
-        dp_axis="dp",
-        tp_axis="tp",
         mesh=mesh,
     )
     mgr = kv_cache_manager.KVCacheManager(

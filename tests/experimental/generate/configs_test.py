@@ -14,6 +14,7 @@
 
 """Unit tests for v2 generation engine configuration dataclasses."""
 
+import math
 import os
 
 from absl.testing import absltest
@@ -27,10 +28,12 @@ from tunix.experimental.generate import configs
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 
 
-def _create_mesh() -> jax.sharding.Mesh:
-  return jax.sharding.Mesh(
-      np.array(jax.devices()[:4]).reshape((2, 2)), ("dp", "tp")
-  )
+def _create_mesh(
+    shape: tuple[int, ...] = (2, 2),
+    axis_names: tuple[str, ...] = ("dp", "tp"),
+) -> jax.sharding.Mesh:
+  devices = jax.devices()[: math.prod(shape)]
+  return jax.sharding.Mesh(np.array(devices).reshape(shape), axis_names)
 
 
 class CacheGeometryTest(parameterized.TestCase):
@@ -53,57 +56,60 @@ class CacheGeometryTest(parameterized.TestCase):
 class CacheConfigTest(parameterized.TestCase):
 
   def test_valid_config(self):
+    mesh = _create_mesh()
     cfg = configs.CacheConfig(
         max_device_size_gib=1.0,
         max_host_size_gib=0.5,
         page_size=16,
         dtype=jnp.float32,
-        dp_axis="dp",
-        tp_axis="tp",
-        mesh=_create_mesh(),
+        mesh=mesh,
     )
     self.assertEqual(cfg.page_size, 16)
     self.assertEqual(cfg.dtype, jnp.float32)
-    self.assertEqual(cfg.dp_axis, "dp")
-    self.assertEqual(cfg.tp_axis, "tp")
+    self.assertIs(cfg.mesh, mesh)
     self.assertEqual(cfg.dp_size, 2)
     self.assertEqual(cfg.tp_size, 2)
 
-  def test_dp_size_is_one_without_dp_axis(self):
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="single_device",
+          shape=(1,),
+          axis_names=("tp",),
+          expected_dp_size=1,
+          expected_tp_size=1,
+      ),
+      dict(
+          testcase_name="tp_only",
+          shape=(2,),
+          axis_names=("tp",),
+          expected_dp_size=1,
+          expected_tp_size=2,
+      ),
+      dict(
+          testcase_name="dp_only",
+          shape=(2,),
+          axis_names=("dp",),
+          expected_dp_size=2,
+          expected_tp_size=1,
+      ),
+      dict(
+          testcase_name="multiple_dp_axes_and_tp",
+          shape=(2, 2, 1),
+          axis_names=("fsdp", "dp", "tp"),
+          expected_dp_size=4,
+          expected_tp_size=1,
+      ),
+  )
+  def test_infers_dp_and_tp_size_from_mesh(
+      self, shape, axis_names, expected_dp_size, expected_tp_size
+  ):
     cfg = configs.CacheConfig(
         max_device_size_gib=1.0,
         dtype=jnp.float32,
-        tp_axis="tp",
-        mesh=_create_mesh(),
+        mesh=_create_mesh(shape, axis_names),
     )
-    self.assertEqual(cfg.dp_size, 1)
-    self.assertEqual(cfg.tp_size, 2)
-
-  def test_duplicate_dp_and_tp_axis_raises(self):
-    with self.assertRaisesRegex(
-        ValueError, r"dp_axis and tp_axis must be different"
-    ):
-      configs.CacheConfig(
-          max_device_size_gib=1.0,
-          dtype=jnp.float32,
-          dp_axis="tp",
-          tp_axis="tp",
-          mesh=_create_mesh(),
-      )
-
-  @parameterized.named_parameters(
-      dict(testcase_name="dp_axis", dp_axis="data", tp_axis="tp"),
-      dict(testcase_name="tp_axis", dp_axis="dp", tp_axis="model"),
-  )
-  def test_axis_not_in_mesh_raises(self, dp_axis, tp_axis):
-    with self.assertRaisesRegex(ValueError, r"is not in the mesh axes"):
-      configs.CacheConfig(
-          max_device_size_gib=1.0,
-          dtype=jnp.float32,
-          dp_axis=dp_axis,
-          tp_axis=tp_axis,
-          mesh=_create_mesh(),
-      )
+    self.assertEqual(cfg.dp_size, expected_dp_size)
+    self.assertEqual(cfg.tp_size, expected_tp_size)
 
   def test_invalid_page_size_raises(self):
     with self.assertRaisesRegex(ValueError, r"page_size must be positive"):

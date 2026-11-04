@@ -113,24 +113,33 @@ def derive_kv_geometry(
   return (packed_kv_dim, kv_packing, head_dim)
 
 
+def kv_cache_dp_axes(
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
+) -> tuple[str, ...]:
+  """Returns the mesh axes that index the DP groups (`'dp'` and `'fsdp'`)."""
+  return tuple(axis for axis in mesh.axis_names if axis in ("dp", "fsdp"))
+
+
 def derive_cache_sharding(
     config: configs.CacheConfig,
 ) -> jax.sharding.NamedSharding:
   """Derives the device sharding for a KV cache page pool.
 
   Args:
-    config: Cache configuration specifying the mesh, `dp_axis`, and `tp_axis`.
+    config: Cache configuration specifying the mesh.
 
   Returns:
-    A `NamedSharding` partitioning pages (`axis=0`) across `config.dp_axis` and
-    packed KV heads (`axis=2`) across `config.tp_axis`.
+    A `NamedSharding` partitioning pages (`axis=0`) across data-parallel mesh
+    axes and packed KV heads (`axis=2`) across `"tp"`.
   """
   # The cache has shape:
   #   (num_pages, page_size, packed_kv_dim, kv_packing, head_dim)
   #   i.e. (num_pages, num_elements_per_page, *element_shape)
   # Pages are sharded across DP and KV elements are sharded across TP.
+  dp_axes = kv_cache_dp_axes(config.mesh) if config.dp_size > 1 else ()
+  tp_axis = "tp" if "tp" in config.mesh.shape else None
   sharding_spec = jax.sharding.PartitionSpec(
-      config.dp_axis, None, config.tp_axis, None, None
+      dp_axes or None, None, tp_axis, None, None
   )
   return jax.sharding.NamedSharding(config.mesh, sharding_spec)
 

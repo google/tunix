@@ -245,7 +245,6 @@ class PagedAttentionJaxTest(parameterized.TestCase):
         **sharded_inputs,
         cache_name=_CACHE,
         mesh=mesh,
-        tp_axis="tp",
         backend="cpu",
     )
 
@@ -268,7 +267,7 @@ class PagedAttentionJaxTest(parameterized.TestCase):
     )
     with self.assertRaisesRegex(ValueError, r"tp_size \(4\) must be divisible"):
       paged_attention.paged_attention(
-          **inputs, cache_name=_CACHE, mesh=mesh, tp_axis="tp", backend="cpu"
+          **inputs, cache_name=_CACHE, mesh=mesh, backend="cpu"
       )
 
   def test_metadata_decode_only_is_static_and_forwarded_to_gpu(self):
