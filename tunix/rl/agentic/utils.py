@@ -258,6 +258,31 @@ class RolloutSyncLock:
         self._can_rollout.wait()
       self._rollouts += 1
 
+  def try_acquire_rollout(self) -> bool:
+    """Acquires a rollout lock unless a weight sync holds or awaits the lock.
+
+    Returns:
+      Whether the rollout lock was acquired.
+    """
+    with self._mutex:
+      if self._weight_syncs > 0 or self._weight_syncs_waiting > 0:
+        return False
+      self._rollouts += 1
+      return True
+
+  async def acquire_rollout_async(self, poll_interval_s: float = 0.05) -> None:
+    """Acquires a rollout lock from a coroutine without blocking the loop.
+
+    Blocking in `acquire_rollout` on the event loop thread deadlocks once a
+    weight sync is waiting: the sync waits for the in-flight episodes, and
+    those episodes need the loop to finish.
+
+    Args:
+      poll_interval_s: Seconds between attempts while a weight sync is pending.
+    """
+    while not self.try_acquire_rollout():
+      await asyncio.sleep(poll_interval_s)
+
   def release_rollout(self):
     """Release a rollout lock."""
     with self._mutex:

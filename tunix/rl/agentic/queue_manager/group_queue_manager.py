@@ -210,12 +210,13 @@ class GroupQueueManager(Generic[_T]):
     while True:
       if self._exc:
         raise self._exc
-      if self._clearing:
-        return []
       async with self._lock:
+        # Hand out groups that are already complete before honoring
+        # `_clearing`: the producer flags it as soon as the prompt stream ends,
+        # while a slower consumer may still have ready groups queued here.
         if self._ready_groups:
           return self._ready_groups.popleft()
-        if self._closed:
+        if self._clearing or self._closed:
           return []
       await self._have_ready.wait()
       self._have_ready.clear()

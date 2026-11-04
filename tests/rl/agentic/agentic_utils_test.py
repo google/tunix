@@ -14,6 +14,8 @@
 
 """Tests for agentic utility functions."""
 
+import asyncio
+import threading
 import unittest
 from unittest import mock
 
@@ -444,6 +446,51 @@ class TokenContinuityTest(absltest.TestCase):
     )
     self.assertEqual(tokens, [2, 10, 11, 20, 21])
     self.assertEqual(masks, [0, 0, 0, 1, 1])
+
+
+class RolloutSyncLockAsyncTest(absltest.TestCase):
+
+  def test_try_acquire_rollout_fails_while_a_sync_holds_or_awaits(self):
+    sync_lock = utils.RolloutSyncLock()
+    self.assertTrue(sync_lock.try_acquire_rollout())
+    sync_lock.release_rollout()
+    sync_lock.acquire_weight_sync()
+    self.assertFalse(sync_lock.try_acquire_rollout())
+    sync_lock.release_weight_sync()
+    self.assertTrue(sync_lock.try_acquire_rollout())
+    sync_lock.release_rollout()
+
+  def test_waiting_sync_does_not_deadlock_loop_thread_runners(self):
+    """A runner that starts while a sync waits must not block the loop."""
+    sync_lock = utils.RolloutSyncLock()
+    sync_lock.acquire_rollout()  # One episode in flight.
+    synced = threading.Event()
+
+    def _sync():
+      sync_lock.acquire_weight_sync()
+      synced.set()
+      sync_lock.release_weight_sync()
+
+    async def _run():
+      threading.Thread(target=_sync, daemon=True).start()
+      # Wait until the sync is queued behind the in-flight episode.
+      while not sync_lock._weight_syncs_waiting:  # pylint: disable=protected-access
+        await asyncio.sleep(0.001)
+
+      async def late_runner():
+        await sync_lock.acquire_rollout_async(poll_interval_s=0.001)
+        sync_lock.release_rollout()
+        return 'ran'
+
+      task = asyncio.create_task(late_runner())
+      for _ in range(20):
+        await asyncio.sleep(0)
+      self.assertFalse(task.done())  # Parked without blocking the loop.
+      sync_lock.release_rollout()  # The in-flight episode finishes.
+      self.assertEqual(await asyncio.wait_for(task, 5), 'ran')
+      self.assertTrue(synced.is_set())
+
+    asyncio.run(_run())
 
 
 if __name__ == '__main__':
