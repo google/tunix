@@ -21,6 +21,7 @@ import os
 import tempfile
 import threading
 import time
+import types
 from unittest import mock
 from absl.testing import absltest
 from flax import nnx
@@ -1068,6 +1069,53 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
 
     obj.resume()
     obj._driver.resume.assert_called_once()
+
+  def test_release_for_training_and_idempotent_delete_cache(self):
+    obj = self._sampler()
+    obj.config.free_kv_cache_during_weight_sync = True
+    obj.config.delete_dst_buffers = True
+    obj.config.partial_rollout = False
+    obj.config.reshard_chunk_size = None
+    obj.config.mapping_config = types.SimpleNamespace(preprocess_src_state=None)
+    obj.to_hf_key_mappings = {"w": ("w", None)}
+    obj.to_hf_transpose_keys = None
+    obj.to_hf_hook_fns = None
+    obj.llm.reset_prefix_cache = mock.Mock()
+    obj.llm.collective_rpc = mock.Mock()
+
+    dst_arr = jax.numpy.ones((2, 2), dtype=jax.numpy.float32)
+    runner = types.SimpleNamespace(
+        state={"w": dst_arr},
+        state_leaves=(dst_arr,),
+        model_config=types.SimpleNamespace(
+            get_total_num_kv_heads=lambda: 1,
+            get_head_size=lambda: 2,
+        ),
+    )
+    obj.llm.llm_engine = types.SimpleNamespace(
+        model_executor=types.SimpleNamespace(
+            driver_worker=types.SimpleNamespace(model_runner=runner)
+        )
+    )
+
+    obj.release_for_training(free_weights=True)
+    self.assertTrue(obj._kv_cache_deleted)
+    self.assertEqual(obj.llm.reset_prefix_cache.call_count, 1)
+    obj.llm.collective_rpc.assert_called_once_with("delete_kv_cache")
+    self.assertTrue(dst_arr.is_deleted())
+    self.assertEqual(obj._model_runner.state_leaves, ())
+
+    # Second delete_cache call is a no-op while _kv_cache_deleted is True.
+    obj.delete_cache()
+    self.assertEqual(obj.llm.collective_rpc.call_count, 1)
+
+    # Restore reallocates KV cache and resets _kv_cache_deleted.
+    new_arr = jax.numpy.ones((2, 2), dtype=jax.numpy.float32) * 2.0
+    obj._model_runner.state = {"w": new_arr}
+    obj.restore_after_training()
+    self.assertFalse(obj._kv_cache_deleted)
+    obj.llm.collective_rpc.assert_called_with("reinitialize_kv_cache")
+    self.assertEqual(obj._model_runner.state_leaves, (new_arr,))
 
 
 if __name__ == "__main__":

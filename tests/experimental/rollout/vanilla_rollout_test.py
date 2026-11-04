@@ -331,6 +331,24 @@ class VanillaRolloutTest(parameterized.TestCase):
 
     self.assertEqual(sample(), sample())
 
+  def test_release_and_restore_for_training(self):
+    rollout = self.make_rollout(False)
+    kv_mgr = rollout._sampler._engine._kv_cache_manager  # pylint: disable=protected-access
+
+    rollout.release_for_training(free_weights=False)
+    for arr in kv_mgr.get_physical_pages().values():
+      self.assertTrue(arr.is_deleted())
+    self.assertFalse(
+        rollout._sampler.transformer_state['offset'].value.is_deleted()  # pylint: disable=protected-access
+    )
+
+    rollout.restore_after_training()
+    for arr in kv_mgr.get_physical_pages().values():
+      self.assertFalse(arr.is_deleted())
+
+    output = rollout.generate(['1 2 3'], _rollout_config())
+    self.assertEqual(output.tokens[0].tolist(), _expected_tokens([1, 2, 3]))
+
 
 if __name__ == '__main__':
   absltest.main()

@@ -28,6 +28,7 @@ from tunix.experimental.generate import configs
 from tunix.experimental.generate import engine as engine_lib
 from tunix.experimental.generate import sampler as sampler_lib
 from tunix.generate import tokenizer_adapter
+from tunix.generate import utils
 from tunix.rl import common
 from tunix.rl.rollout import base_rollout
 
@@ -299,6 +300,23 @@ class VanillaRollout(base_rollout.BaseRollout):
 
   def reinitialize_cache(self) -> None:
     """Discards cached KV after the shared model weights change in place."""
+    self._sampler.reinitialize_cache()
+
+  def release_for_training(
+      self,
+      free_weights: bool = True,
+      src_state: jaxtyping.PyTree | None = None,
+  ) -> None:
+    """Releases the KV cache and optionally model weights before training."""
+    self._sampler.delete_cache()
+    if free_weights:
+      jax.effects_barrier()
+      utils.delete_state_buffers(
+          self._sampler.transformer_state, src_state=src_state
+      )
+
+  def restore_after_training(self) -> None:
+    """Reallocates the KV cache if it was deleted before training."""
     self._sampler.reinitialize_cache()
 
   def pad_id(self) -> int:

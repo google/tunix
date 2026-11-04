@@ -18,7 +18,6 @@ import atexit
 import concurrent.futures
 import copy
 import dataclasses
-import gc
 from itertools import count
 import os
 import threading
@@ -151,6 +150,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       base_sampler.BaseSampler
   """
 
+  _kv_cache_deleted: bool = False
+
   def __init__(
       self,
       tokenizer: Any,
@@ -188,6 +189,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     self._thread_local = threading.local()
     self._driver: VLLMInProcessDriver | None = None
     self.llm: LLM | None = None
+    self._kv_cache_deleted = False
     self._request_counter = count()
 
     if config.server_mode:
@@ -250,12 +252,15 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     return bool(self._driver is not None and self._driver.is_paused)
 
   def delete_cache(self) -> None:
+    if self._kv_cache_deleted:
+      return
     if self.llm is not None:
       self.llm.reset_prefix_cache()
       self.llm.collective_rpc("delete_kv_cache")  # will free hbm
     elif self._driver is not None:
       self._driver.llm_engine.reset_prefix_cache()
       self._driver.llm_engine.collective_rpc("delete_kv_cache")
+    self._kv_cache_deleted = True
 
   def reset_prefix_cache(self) -> None:
     if self.llm is not None:
@@ -276,6 +281,37 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self.llm.collective_rpc("reinitialize_kv_cache")
     elif self._driver is not None:
       self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+    self._kv_cache_deleted = False
+
+  def release_for_training(
+      self,
+      free_weights: bool = True,
+      src_state: jaxtyping.PyTree | None = None,
+  ) -> None:
+    """Releases rollout HBM (KV cache and optionally model weights) before training."""
+    if self.config.partial_rollout:
+      return
+    if self.config.free_kv_cache_during_weight_sync:
+      self.delete_cache()
+    if (
+        free_weights
+        and self.config.delete_dst_buffers
+        and not self._is_torchax_backend()
+    ):
+      jax.effects_barrier()
+      utils.delete_state_buffers(
+          self.transformer_state,
+          src_state=src_state,
+          key_mappings=self.to_hf_key_mappings or None,
+      )
+      self._model_runner.state_leaves = ()
+
+  def restore_after_training(self) -> None:
+    """Reallocates the KV cache if it was deleted before training."""
+    if self._kv_cache_deleted:
+      self.reinitialize_cache()
+    else:
+      self.refresh_state_leaves()
 
   # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
   def update_params(
@@ -348,7 +384,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           reshard_chunk_size=self.config.reshard_chunk_size,
       )
 
-    if self.config.free_kv_cache_during_weight_sync and not keep_active_kv:
+    if (
+        self.config.free_kv_cache_during_weight_sync or self._kv_cache_deleted
+    ) and not keep_active_kv:
       self.reinitialize_cache()
     else:
       self.refresh_state_leaves()

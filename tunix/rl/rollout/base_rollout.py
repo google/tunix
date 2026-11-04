@@ -110,3 +110,14 @@ class BaseRollout(ABC):
   @abstractmethod
   def model(self) -> Any:
     """Returns the rollout model."""
+
+  def release_for_training(
+      self,
+      free_weights: bool = True,
+      src_state: jaxtyping.PyTree | None = None,
+  ) -> None:
+    """Releases rollout HBM resources before training when colocated."""
+    del free_weights, src_state
+
+  def restore_after_training(self) -> None:
+    """Restores rollout HBM resources after training when colocated."""

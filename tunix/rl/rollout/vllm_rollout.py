@@ -152,6 +152,18 @@ class VllmRollout(base_rollout.BaseRollout):
   ) -> None:
     self._sampler.update_params(params, filter_types)
 
+  def release_for_training(
+      self,
+      free_weights: bool = True,
+      src_state: jaxtyping.PyTree | None = None,
+  ) -> None:
+    self._sampler.release_for_training(
+        free_weights=free_weights, src_state=src_state
+    )
+
+  def restore_after_training(self) -> None:
+    self._sampler.restore_after_training()
+
   def pad_id(self) -> int:
     return self._sampler.tokenizer.pad_id()
 
