@@ -1,5 +1,20 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Tests for the ATIF trajectory models and their extension hooks."""
+
 import collections
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 import copy
 import json
 import os
@@ -12,14 +27,27 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
 import pydantic
-from tunix.dist_rl.trajectory import converter
 from tunix.dist_rl.trajectory import trajectory
 from tunix.dist_rl.trajectory import trajectory_testing
-from tunix.rl.agentic.agents import agent_types
 
 _SAMPLE_ATIF_PATH = os.path.join(
-    os.path.dirname(trajectory.__file__), "testdata", "sample_atif_v1_7.json"
+    os.path.dirname(__file__), "test_data", "sample_atif_v1_7.json"
 )
+
+
+def _extra_of(
+    model: trajectory.Step | trajectory.TrajectoryMetadata,
+) -> dict[str, Any]:
+  """Returns `model.extra`, which the calling test expects to be set."""
+  assert model.extra is not None
+  return model.extra
+
+
+def _packed_extensions(
+    model: trajectory.Step | trajectory.TrajectoryMetadata,
+) -> dict[str, Any]:
+  """Returns the Example extensions packed into `model.extra`."""
+  return _extra_of(model)[trajectory_testing.EXAMPLE_EXTENSIONS_KEY]
 
 
 class SubagentTrajectoryRefTest(parameterized.TestCase):
@@ -55,7 +83,7 @@ class StepTest(trajectory_testing.TrajectoryTestCase):
   )
   def test_validate_agent_only_fields(self, field_name, value):
     # Invalid: non-agent step containing agent-only field
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "step_id": 1,
         "source": trajectory.Source.USER,
         "message": "Hello",
@@ -74,7 +102,7 @@ class StepTest(trajectory_testing.TrajectoryTestCase):
       self, field_name, value
   ):
     # Invalid: agent step with llm_call_count=0 containing LLM fields
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "step_id": 1,
         "source": trajectory.Source.AGENT,
         "message": "Deterministic action",
@@ -95,7 +123,7 @@ class StepTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(step.llm_call_count, 0)
 
   def test_step_policy_version_agent_step_success(self):
-    step = trajectory.TunixAgentStep(
+    step = trajectory_testing.ExampleAgentStep(
         step_id=1,
         source=trajectory.Source.AGENT,
         message="Agent turn",
@@ -104,7 +132,7 @@ class StepTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(step.policy_version, 42)
     step_dict = step.model_dump()
     self.assertEqual(step_dict["policy_version"], 42)
-    restored_step = trajectory.TunixAgentStep(**step_dict)
+    restored_step = trajectory_testing.ExampleAgentStep(**step_dict)
     self.assertEqual(restored_step, step)
 
 
@@ -201,8 +229,8 @@ class MetadataDictSerializationTest(parameterized.TestCase):
     self.assertIsNot(dumped_tokens, tokens)
 
   def test_model_dump_copies_packed_scalar_lists_without_rescanning(self):
-    agent_step = trajectory_testing.TUNIX_AGENT_STEP_1.to_atif_step()
-    packed = agent_step.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    agent_step = trajectory_testing.EXAMPLE_AGENT_STEP_1.to_atif_step()
+    packed = _packed_extensions(agent_step)
     self.assertIs(type(packed), trajectory._JsonCompatibleDict)
     packed_lists = [
         value for value in packed.values() if isinstance(value, list)
@@ -223,7 +251,7 @@ class MetadataDictSerializationTest(parameterized.TestCase):
       dumped_extra = agent_step.model_dump()["extra"]
 
     self.assertEqual(dumped_extra, agent_step.extra)
-    dumped_packed = dumped_extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    dumped_packed = dumped_extra[trajectory_testing.EXAMPLE_EXTENSIONS_KEY]
     self.assertIs(type(dumped_packed), dict)
     # Packed token, mask, and logprob lists are copied in one C call, and
     # scalar extensions skip recursive dispatch altogether.
@@ -240,30 +268,32 @@ class MetadataDictSerializationTest(parameterized.TestCase):
     )
 
   def test_model_dump_converts_caller_built_extensions_dict(self):
-    # A dict a caller builds by hand under the Tunix extensions key is not a
+    # A dict a caller builds by hand under the Example extensions key is not a
     # packed dict, so arrays and tuples inside it are still converted.
     step = trajectory.Step(
         step_id=1,
         source=trajectory.Source.AGENT,
         message="msg",
         extra={
-            trajectory.TUNIX_EXTENSIONS_KEY: {
+            trajectory_testing.EXAMPLE_EXTENSIONS_KEY: {
                 "assistant_tokens": [np.array([1, 2])],
-                "prefill_routed_experts": {"shape": (1, 1, 2)},
+                "routed_experts": {"shape": (1, 1, 2)},
             }
         },
     )
 
-    dumped = step.model_dump()["extra"][trajectory.TUNIX_EXTENSIONS_KEY]
+    dumped = step.model_dump()["extra"][
+        trajectory_testing.EXAMPLE_EXTENSIONS_KEY
+    ]
 
     expected = {
         "assistant_tokens": [[1, 2]],
-        "prefill_routed_experts": {"shape": [1, 1, 2]},
+        "routed_experts": {"shape": [1, 1, 2]},
     }
     self.assertEqual(dumped, expected)
     self.assertEqual(
         json.loads(step.model_dump_json())["extra"][
-            trajectory.TUNIX_EXTENSIONS_KEY
+            trajectory_testing.EXAMPLE_EXTENSIONS_KEY
         ],
         expected,
     )
@@ -275,13 +305,17 @@ class PackedExtensionsTest(parameterized.TestCase):
   @parameterized.named_parameters(
       dict(
           testcase_name="agent_step",
-          model=trajectory_testing.TUNIX_AGENT_STEP_1,
+          model=trajectory_testing.EXAMPLE_AGENT_STEP_1,
       ),
-      dict(testcase_name="env_step", model=trajectory_testing.TUNIX_ENV_STEP_0),
-      dict(testcase_name="metadata", model=trajectory_testing.TUNIX_METADATA_1),
+      dict(
+          testcase_name="env_step", model=trajectory_testing.EXAMPLE_ENV_STEP_0
+      ),
+      dict(
+          testcase_name="metadata", model=trajectory_testing.EXAMPLE_METADATA_1
+      ),
       dict(
           testcase_name="trajectory",
-          model=trajectory_testing.TUNIX_TRAJECTORY_1,
+          model=trajectory_testing.EXAMPLE_TRAJECTORY_1,
       ),
   )
   def test_packed_lists_are_flat_scalar_lists(
@@ -293,7 +327,7 @@ class PackedExtensionsTest(parameterized.TestCase):
     else:
       projected = model.to_atif_metadata()
 
-    packed = projected.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    packed = _packed_extensions(projected)
 
     self.assertIs(type(packed), trajectory._JsonCompatibleDict)
     for key, value in packed.items():
@@ -306,25 +340,27 @@ class PackedExtensionsTest(parameterized.TestCase):
   def test_to_atif_metadata_does_not_alias_target_policy_versions(
       self,
   ) -> None:
-    metadata = trajectory_testing.TUNIX_METADATA_1.model_copy(deep=True)
+    metadata = trajectory_testing.EXAMPLE_METADATA_1.model_copy(deep=True)
 
     atif_metadata = metadata.to_atif_metadata()
+    assert metadata.target_policy_versions is not None
     metadata.target_policy_versions.append(4)
 
     self.assertEqual(
-        atif_metadata.extra[trajectory.TUNIX_EXTENSIONS_KEY][
-            "target_policy_versions"
-        ],
-        [2, 3],
+        _packed_extensions(atif_metadata)["target_policy_versions"], [2, 3]
     )
 
   def test_to_atif_step_converts_existing_extensions(self) -> None:
     custom_extensions = {"custom": np.array([7])}
-    step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(
-        update={"extra": {trajectory.TUNIX_EXTENSIONS_KEY: custom_extensions}}
+    step = trajectory_testing.EXAMPLE_AGENT_STEP_1.model_copy(
+        update={
+            "extra": {
+                trajectory_testing.EXAMPLE_EXTENSIONS_KEY: custom_extensions
+            }
+        }
     )
 
-    packed = step.to_atif_step().extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    packed = _packed_extensions(step.to_atif_step())
 
     self.assertIs(type(packed), trajectory._JsonCompatibleDict)
     self.assertEqual(packed["custom"], [7])
@@ -348,40 +384,40 @@ class _IterationCountingArray(np.ndarray):
 
 
 class ArrayFieldValidationTest(parameterized.TestCase):
-  """Tests validation of the NumPy array fields of Tunix steps."""
+  """Tests validation of the NumPy array fields of the Example steps."""
 
   @parameterized.named_parameters(
       dict(
           testcase_name="assistant_tokens",
-          step_cls=trajectory.TunixAgentStep,
+          step_cls=trajectory_testing.ExampleAgentStep,
           source=trajectory.Source.AGENT,
           field_name="assistant_tokens",
           dtype=np.int32,
       ),
       dict(
           testcase_name="assistant_masks",
-          step_cls=trajectory.TunixAgentStep,
+          step_cls=trajectory_testing.ExampleAgentStep,
           source=trajectory.Source.AGENT,
           field_name="assistant_masks",
           dtype=np.int32,
       ),
       dict(
           testcase_name="logprobs",
-          step_cls=trajectory.TunixAgentStep,
+          step_cls=trajectory_testing.ExampleAgentStep,
           source=trajectory.Source.AGENT,
           field_name="logprobs",
           dtype=np.float32,
       ),
       dict(
           testcase_name="env_tokens",
-          step_cls=trajectory.TunixEnvStep,
+          step_cls=trajectory_testing.ExampleEnvStep,
           source=trajectory.Source.USER,
           field_name="env_tokens",
           dtype=np.int32,
       ),
       dict(
           testcase_name="env_masks",
-          step_cls=trajectory.TunixEnvStep,
+          step_cls=trajectory_testing.ExampleEnvStep,
           source=trajectory.Source.USER,
           field_name="env_masks",
           dtype=np.int32,
@@ -389,17 +425,19 @@ class ArrayFieldValidationTest(parameterized.TestCase):
   )
   def test_array_is_stored_without_iterating_its_elements(
       self,
-      step_cls: type[trajectory.TunixAgentStep | trajectory.TunixEnvStep],
+      step_cls: type[
+          trajectory_testing.ExampleAgentStep
+          | trajectory_testing.ExampleEnvStep
+      ],
       source: trajectory.Source,
       field_name: str,
       dtype: type[np.generic],
   ) -> None:
     """Verifies arrays are kept as they are, without iterating over them."""
     array = np.arange(1000, dtype=dtype).view(_IterationCountingArray)
+    array_field: dict[str, Any] = {field_name: array}
 
-    step = step_cls(
-        step_id=0, source=source, message="msg", **{field_name: array}
-    )
+    step = step_cls(step_id=0, source=source, message="msg", **array_field)
 
     self.assertIs(getattr(step, field_name), array)
     # Guards the speed of validating arrays, which relies on `np.ndarray`
@@ -414,7 +452,7 @@ class ArrayFieldValidationTest(parameterized.TestCase):
       self, tokens: list[int] | tuple[int, ...]
   ) -> None:
     """Verifies lists and tuples of ints are validated into lists of ints."""
-    step = trajectory.TunixAgentStep(
+    step = trajectory_testing.ExampleAgentStep(
         step_id=0,
         source=trajectory.Source.AGENT,
         message="msg",
@@ -432,7 +470,7 @@ class ArrayFieldValidationTest(parameterized.TestCase):
   def test_invalid_tokens_raise_validation_error(self, tokens: Any) -> None:
     """Verifies tokens other than arrays and sequences of ints are rejected."""
     with self.assertRaises(pydantic.ValidationError):
-      trajectory.TunixAgentStep(
+      trajectory_testing.ExampleAgentStep(
           step_id=0,
           source=trajectory.Source.AGENT,
           message="msg",
@@ -480,20 +518,20 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
   @parameterized.named_parameters(
       dict(testcase_name="step", model=trajectory_testing.STEP_1_1),
       dict(
-          testcase_name="tunix_env_step",
-          model=trajectory_testing.TUNIX_ENV_STEP_0,
+          testcase_name="example_env_step",
+          model=trajectory_testing.EXAMPLE_ENV_STEP_0,
       ),
       dict(
-          testcase_name="tunix_agent_step",
-          model=trajectory_testing.TUNIX_AGENT_STEP_1,
+          testcase_name="example_agent_step",
+          model=trajectory_testing.EXAMPLE_AGENT_STEP_1,
       ),
       dict(
-          testcase_name="tunix_metadata",
-          model=trajectory_testing.TUNIX_METADATA_1,
+          testcase_name="example_metadata",
+          model=trajectory_testing.EXAMPLE_METADATA_1,
       ),
       dict(
-          testcase_name="tunix_trajectory",
-          model=trajectory_testing.TUNIX_TRAJECTORY_1,
+          testcase_name="example_trajectory",
+          model=trajectory_testing.EXAMPLE_TRAJECTORY_1,
       ),
       dict(
           testcase_name="atif_trajectory",
@@ -511,7 +549,7 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
       ),
       dict(
           testcase_name="mixed_extra",
-          model=trajectory.TunixAgentStep(
+          model=trajectory_testing.ExampleAgentStep(
               step_id=0,
               source=trajectory.Source.AGENT,
               message="msg",
@@ -538,7 +576,7 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
 
   def test_deep_copy_shares_no_mutable_state(self) -> None:
     """Verifies changes to the copy leave the original unchanged."""
-    step = trajectory.TunixAgentStep(
+    step = trajectory_testing.ExampleAgentStep(
         step_id=0,
         source=trajectory.Source.AGENT,
         message="msg",
@@ -550,13 +588,18 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
     )
 
     copied = trajectory.deep_copy(step)
+    assert copied.assistant_tokens is not None
+    assert copied.metrics is not None
+    assert copied.metrics.prompt_token_ids is not None
+    assert copied.metrics.logprobs is not None
     copied.assistant_tokens[0] = 0
     copied.metrics.prompt_token_ids.append(3)
     copied.metrics.logprobs[0] = 0.0
-    copied.extra["ids"].append(5)
-    copied.extra["rows"][0].append(7)
-    copied.extra["rows"][1]["ids"].append(8)
+    _extra_of(copied)["ids"].append(5)
+    _extra_of(copied)["rows"][0].append(7)
+    _extra_of(copied)["rows"][1]["ids"].append(8)
 
+    assert step.metrics is not None
     np.testing.assert_array_equal(step.assistant_tokens, [10, 20])
     self.assertEqual(step.metrics.prompt_token_ids, [1, 2])
     self.assertEqual(step.metrics.logprobs, [-0.1, -0.2])
@@ -572,11 +615,11 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
         extra={"a": shared_ids, "b": shared_ids, "rows": [shared_ids]},
     )
 
-    copied = trajectory.deep_copy(step)
+    copied_extra = _extra_of(trajectory.deep_copy(step))
 
-    self.assertIsNot(copied.extra["a"], shared_ids)
-    self.assertIs(copied.extra["b"], copied.extra["a"])
-    self.assertIs(copied.extra["rows"][0], copied.extra["a"])
+    self.assertIsNot(copied_extra["a"], shared_ids)
+    self.assertIs(copied_extra["b"], copied_extra["a"])
+    self.assertIs(copied_extra["rows"][0], copied_extra["a"])
 
   @parameterized.named_parameters(
       dict(testcase_name="tuple_first", keys=("pair", "ids")),
@@ -595,16 +638,16 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
         extra={key: values[key] for key in keys},
     )
 
-    copied = trajectory.deep_copy(step)
+    copied_extra = _extra_of(trajectory.deep_copy(step))
 
-    self.assertIsNot(copied.extra["ids"], shared_ids)
-    self.assertEqual(copied.extra["ids"], [1, 2, 3])
-    self.assertIs(copied.extra["pair"][0], copied.extra["ids"])
-    self.assertEqual(copied.extra["pair"][1], "x")
+    self.assertIsNot(copied_extra["ids"], shared_ids)
+    self.assertEqual(copied_extra["ids"], [1, 2, 3])
+    self.assertIs(copied_extra["pair"][0], copied_extra["ids"])
+    self.assertEqual(copied_extra["pair"][1], "x")
 
   def test_deep_copy_copies_cyclic_list(self) -> None:
     """Verifies a list that contains itself is copied with the cycle kept."""
-    cyclic = [1]
+    cyclic: list[Any] = [1]
     cyclic.append(cyclic)
     step = trajectory.Step(
         step_id=1,
@@ -615,7 +658,7 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
 
     copied = trajectory.deep_copy(step)
 
-    copied_cyclic = copied.extra["cyclic"]
+    copied_cyclic = _extra_of(copied)["cyclic"]
     self.assertIsNot(copied_cyclic, cyclic)
     self.assertEqual(copied_cyclic[0], 1)
     self.assertIs(copied_cyclic[1], copied_cyclic)
@@ -634,7 +677,7 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
     copied = trajectory.deep_copy(step)
 
     self.assertIsNot(copied.metrics, shared_metrics)
-    self.assertIs(copied.extra["metrics"], copied.metrics)
+    self.assertIs(_extra_of(copied)["metrics"], copied.metrics)
 
   def test_deep_copy_copies_model_its_fields_refer_back_to_like_model_copy(
       self,
@@ -643,15 +686,15 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
     step = trajectory.Step(
         step_id=1, source=trajectory.Source.AGENT, message="msg", extra={}
     )
-    step.extra["step"] = step
+    _extra_of(step)["step"] = step
 
     copied = trajectory.deep_copy(step)
 
     # Matches `model_copy(deep=True)`: the back reference becomes a second
     # model object that shares the outer copy's `__dict__`.
     self.assertIsNot(copied, step)
-    self.assertIsNot(copied.extra["step"], copied)
-    self.assertIs(copied.extra["step"].__dict__, copied.__dict__)
+    self.assertIsNot(_extra_of(copied)["step"], copied)
+    self.assertIs(_extra_of(copied)["step"].__dict__, copied.__dict__)
 
   def test_deep_copy_preserves_list_subclass(self) -> None:
     """Verifies a list subclass keeps its type in the copy."""
@@ -662,11 +705,11 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
         extra={"ids": _TokenList([1, 2])},
     )
 
-    copied = trajectory.deep_copy(step)
+    copied_extra = _extra_of(trajectory.deep_copy(step))
 
-    self.assertIs(type(copied.extra["ids"]), _TokenList)
-    self.assertEqual(copied.extra["ids"], [1, 2])
-    self.assertIsNot(copied.extra["ids"], step.extra["ids"])
+    self.assertIs(type(copied_extra["ids"]), _TokenList)
+    self.assertEqual(copied_extra["ids"], [1, 2])
+    self.assertIsNot(copied_extra["ids"], _extra_of(step)["ids"])
 
   def test_deep_copy_preserves_nested_dict_subclass(self) -> None:
     """Verifies a nested `defaultdict` keeps its type and default factory."""
@@ -680,7 +723,7 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
 
     copied = trajectory.deep_copy(step)
 
-    copied_ids_by_name = copied.extra["ids_by_name"]
+    copied_ids_by_name = _extra_of(copied)["ids_by_name"]
     self.assertIs(type(copied_ids_by_name), collections.defaultdict)
     self.assertIs(copied_ids_by_name.default_factory, list)
     self.assertEqual(copied_ids_by_name, {"a": [1, 2]})
@@ -698,7 +741,7 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
 
     copied = trajectory.deep_copy(step)
 
-    copied_ids_by_pair = copied.extra["ids_by_pair"]
+    copied_ids_by_pair = _extra_of(copied)["ids_by_pair"]
     self.assertEqual(copied_ids_by_pair, {(1, 2): [3], (4, 5): [6]})
     self.assertIsNot(copied_ids_by_pair[(1, 2)], ids_by_pair[(1, 2)])
 
@@ -707,7 +750,7 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
   ) -> None:
     """Verifies arrays and scalar-list fields skip the per-element paths."""
     arr = np.array([1, 2, 3], dtype=np.int32)
-    step = trajectory.TunixAgentStep(
+    step = trajectory_testing.ExampleAgentStep(
         step_id=0,
         source=trajectory.Source.AGENT,
         message="msg",
@@ -716,6 +759,8 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
         metrics=trajectory.Metrics(completion_token_ids=[10, 20, 30]),
     )
     shared_tokens = step.assistant_tokens
+    assert isinstance(shared_tokens, list)
+    assert step.metrics is not None
     step.metrics.completion_token_ids = shared_tokens
 
     with (
@@ -730,6 +775,7 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
     ):
       copied = trajectory.deep_copy(step)
 
+    assert copied.metrics is not None
     self.assertIsNot(copied.assistant_tokens, shared_tokens)
     self.assertEqual(copied.assistant_tokens, [10, 20, 30])
     # A list shared by two scalar-list fields is copied once.
@@ -768,15 +814,15 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
 
     copied = trajectory.deep_copy(step)
 
-    copied_array = copied.extra["array"]
+    copied_array = _extra_of(copied)["array"]
     self.assertIsNot(copied_array, array)
     self.assertEqual(element_of(copied_array), {"k": 1})
     self.assertIsNot(element_of(copied_array), element_of(array))
 
   def test_deep_copy_preserves_packed_extensions(self) -> None:
     """Verifies packed extensions keep their type and copy lists directly."""
-    atif_step = trajectory_testing.TUNIX_AGENT_STEP_1.to_atif_step()
-    packed = atif_step.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    atif_step = trajectory_testing.EXAMPLE_AGENT_STEP_1.to_atif_step()
+    packed = _packed_extensions(atif_step)
     packed_lists = [
         value for value in packed.values() if isinstance(value, list)
     ]
@@ -789,7 +835,7 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
     ) as mock_deep_copy_into_memo:
       copied = trajectory.deep_copy(atif_step)
 
-    copied_packed = copied.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    copied_packed = _packed_extensions(copied)
     self.assertIs(type(copied_packed), trajectory._JsonCompatibleDict)
     self.assertEqual(copied_packed, packed)
     self.assertIsNot(
@@ -804,7 +850,9 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
           testcase_name="caller_supplied_nested_list",
           step_kwargs={
               "extra": {
-                  trajectory.TUNIX_EXTENSIONS_KEY: {"tags": [{"k": "v"}]}
+                  trajectory_testing.EXAMPLE_EXTENSIONS_KEY: {
+                      "tags": [{"k": "v"}]
+                  }
               }
           },
           packed_key="tags",
@@ -819,17 +867,17 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
       self, step_kwargs: dict[str, Any], packed_key: str
   ) -> None:
     """Verifies packed extensions holding nested containers are deep-copied."""
-    atif_step = trajectory.TunixAgentStep(
+    atif_step = trajectory_testing.ExampleAgentStep(
         step_id=0,
         source=trajectory.Source.AGENT,
         message="msg",
         **step_kwargs,
     ).to_atif_step()
-    packed = atif_step.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    packed = _packed_extensions(atif_step)
 
     copied = trajectory.deep_copy(atif_step)
 
-    copied_packed = copied.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    copied_packed = _packed_extensions(copied)
     self.assertEqual(copied_packed[packed_key], packed[packed_key])
     self.assertIsNot(copied_packed[packed_key][0], packed[packed_key][0])
 
@@ -841,22 +889,22 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
     )
     self.assertEqual(trajectory.Step.SCALAR_LIST_FIELDS, frozenset())
     self.assertEqual(
-        trajectory.TunixAgentStep.SCALAR_LIST_FIELDS,
+        trajectory_testing.ExampleAgentStep.SCALAR_LIST_FIELDS,
         frozenset({"assistant_tokens", "assistant_masks", "logprobs"}),
     )
     self.assertEqual(
-        trajectory.TunixEnvStep.SCALAR_LIST_FIELDS,
+        trajectory_testing.ExampleEnvStep.SCALAR_LIST_FIELDS,
         frozenset({"env_tokens", "env_masks"}),
     )
     self.assertEqual(
         trajectory.TrajectoryMetadata.SCALAR_LIST_FIELDS, frozenset()
     )
     self.assertEqual(
-        trajectory.TunixTrajectoryMetadata.SCALAR_LIST_FIELDS,
+        trajectory_testing.ExampleTrajectoryMetadata.SCALAR_LIST_FIELDS,
         frozenset({"target_policy_versions"}),
     )
     self.assertEqual(
-        trajectory.TunixTrajectory.SCALAR_LIST_FIELDS,
+        trajectory_testing.ExampleTrajectory.SCALAR_LIST_FIELDS,
         frozenset({"target_policy_versions"}),
     )
 
@@ -907,30 +955,8 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     reloaded = trajectory.Trajectory.from_json_dict(serialized)
     self.assertTrajectoryEqual(reloaded, traj)
 
-  def test_dynamic_step_logging(self):
-    traj = trajectory.TunixTrajectory(
-        agent=trajectory.Agent(name="test-agent", version="1.0")
-    )
-    self.assertEmpty(traj.steps)
-
-    step1 = traj.add_step(source=trajectory.Source.USER, message="Start task")
-    self.assertEqual(step1.step_id, 0)
-    self.assertLen(traj.steps, 1)
-    self.assertEqual(traj.steps[0].message, "Start task")
-
-    step2 = traj.add_step(
-        source=trajectory.Source.AGENT,
-        message="Working",
-        reasoning_content="Logic here",
-        policy_version=5,
-    )
-    self.assertEqual(step2.step_id, 1)
-    self.assertLen(traj.steps, 2)
-    self.assertEqual(traj.steps[1].reasoning_content, "Logic here")
-    self.assertEqual(traj.steps[1].policy_version, 5)
-
   def test_trajectory_metadata_target_policy_versions(self):
-    meta = trajectory.TunixTrajectoryMetadata(
+    meta = trajectory_testing.ExampleTrajectoryMetadata(
         trajectory_id="traj_pv_test",
         agent=trajectory.Agent(name="test_agent", version="1.0"),
         target_policy_versions=[1, 2, 3],
@@ -938,7 +964,9 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(meta.target_policy_versions, [1, 2, 3])
     dumped = meta.model_dump()
     self.assertEqual(dumped["target_policy_versions"], [1, 2, 3])
-    restored = trajectory.TunixTrajectoryMetadata.model_validate(dumped)
+    restored = trajectory_testing.ExampleTrajectoryMetadata.model_validate(
+        dumped
+    )
     self.assertEqual(restored.target_policy_versions, [1, 2, 3])
 
   def test_observation_and_metrics_serialization(self):
@@ -985,6 +1013,11 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     traj = trajectory.Trajectory.from_json_dict(data)
     self.assertLen(traj.steps, 1)
     step = traj.steps[0]
+    assert step.tool_calls is not None
+    assert step.observation is not None
+    assert step.metrics is not None
+    assert step.metrics.extra is not None
+    assert traj.final_metrics is not None
     self.assertEqual(step.message, "Call tool")
     self.assertEqual(step.tool_calls[0].tool_call_id, "call-1")
     self.assertEqual(step.observation.results[0].content, "4")
@@ -1013,12 +1046,14 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     metrics = trajectory.Metrics(prompt_tokens=20, completion_tokens=10)
 
     step = traj.add_step(
-        source="agent",
+        source=trajectory.Source.AGENT,
         message="Running...",
         observation=obs,
         metrics=metrics,
     )
 
+    assert step.observation is not None
+    assert step.metrics is not None
     self.assertEqual(step.step_id, 1)
     self.assertEqual(step.observation.results[0].content, "result")
     self.assertEqual(step.metrics.prompt_tokens, 20)
@@ -1187,6 +1222,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(traj.notes, "parent notes")
     self.assertEqual(traj.extra, {"custom": "field"})
     self.assertLen(traj.steps, 2)
+    assert traj.subagent_trajectories is not None
     self.assertLen(traj.subagent_trajectories, 1)
     self.assertEqual(traj.subagent_trajectories[0].trajectory_id, "sub_1")
     self.assertTrajectoryEqual(traj.subagent_trajectories[0], subagents[0])
@@ -1207,9 +1243,9 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertEmpty(traj.steps)
     self.assertIsNone(traj.subagent_trajectories)
 
-  def test_tunix_create_trajectory_with_subagent_trajectories(self):
-    meta = trajectory.TunixTrajectoryMetadata(
-        trajectory_id="tunix_parent",
+  def test_example_create_trajectory_with_subagent_trajectories(self):
+    meta = trajectory_testing.ExampleTrajectoryMetadata(
+        trajectory_id="example_parent",
         agent=trajectory.Agent(name="agent_test", version="1.0"),
         prompt_id="prompt_abc",
         group_index=3,
@@ -1218,34 +1254,39 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
         hyperparams={"temperature": 0.7},
     )
     steps = [
-        trajectory.TunixAgentStep(
+        trajectory_testing.ExampleAgentStep(
             step_id=0, source=trajectory.Source.AGENT, message="Act"
         )
     ]
     subagents = [
-        trajectory.TunixTrajectory(
-            trajectory_id="tunix_sub_1",
+        trajectory_testing.ExampleTrajectory(
+            trajectory_id="example_sub_1",
             agent=trajectory.Agent(name="sub_agent", version="1.0"),
         )
     ]
 
     traj = meta.create_trajectory(steps=steps, subagent_trajectories=subagents)
 
-    self.assertIsInstance(traj, trajectory.TunixTrajectory)
-    self.assertEqual(traj.trajectory_id, "tunix_parent")
+    self.assertIsInstance(traj, trajectory_testing.ExampleTrajectory)
+    self.assertEqual(traj.trajectory_id, "example_parent")
     self.assertEqual(traj.prompt_id, "prompt_abc")
     self.assertEqual(traj.group_index, 3)
     self.assertEqual(traj.status, "COMPLETED")
     self.assertEqual(traj.total_reward, 1.5)
     self.assertEqual(traj.hyperparams, {"temperature": 0.7})
     self.assertLen(traj.steps, 1)
+    assert traj.subagent_trajectories is not None
     self.assertLen(traj.subagent_trajectories, 1)
-    self.assertEqual(traj.subagent_trajectories[0].trajectory_id, "tunix_sub_1")
+    self.assertEqual(
+        traj.subagent_trajectories[0].trajectory_id, "example_sub_1"
+    )
     self.assertIsNot(traj.subagent_trajectories, subagents)
 
-  def test_tunix_create_trajectory_rehydrates_atif_subagent_trajectories(self):
-    meta = trajectory.TunixTrajectoryMetadata(
-        trajectory_id="tunix_parent",
+  def test_example_create_trajectory_rehydrates_atif_subagent_trajectories(
+      self,
+  ):
+    meta = trajectory_testing.ExampleTrajectoryMetadata(
+        trajectory_id="example_parent",
         agent=trajectory.Agent(name="agent_test", version="1.0"),
     )
     atif_subagent = trajectory.Trajectory(
@@ -1263,33 +1304,36 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
 
     traj = meta.create_trajectory(subagent_trajectories=[atif_subagent])
 
+    assert traj.subagent_trajectories is not None
     self.assertLen(traj.subagent_trajectories, 1)
     subagent = traj.subagent_trajectories[0]
-    self.assertIsInstance(subagent, trajectory.TunixTrajectory)
+    self.assertIsInstance(subagent, trajectory_testing.ExampleTrajectory)
     self.assertEqual(subagent.trajectory_id, "atif_sub")
     self.assertLen(subagent.steps, 2)
-    self.assertIsInstance(subagent.steps[0], trajectory.TunixEnvStep)
+    self.assertIsInstance(subagent.steps[0], trajectory_testing.ExampleEnvStep)
     self.assertEqual(subagent.steps[0].step_id, 0)
     self.assertEqual(subagent.steps[0].message, "Sub prompt")
-    self.assertIsInstance(subagent.steps[1], trajectory.TunixAgentStep)
+    self.assertIsInstance(
+        subagent.steps[1], trajectory_testing.ExampleAgentStep
+    )
     self.assertEqual(subagent.steps[1].step_id, 1)
     self.assertEqual(subagent.steps[1].message, "Sub reply")
 
-  def test_tunix_create_trajectory_without_subagent_trajectories(self):
-    meta = trajectory.TunixTrajectoryMetadata(
-        trajectory_id="tunix_empty",
+  def test_example_create_trajectory_without_subagent_trajectories(self):
+    meta = trajectory_testing.ExampleTrajectoryMetadata(
+        trajectory_id="example_empty",
         agent=trajectory.Agent(name="agent_test", version="1.0"),
     )
 
     traj = meta.create_trajectory()
 
-    self.assertIsInstance(traj, trajectory.TunixTrajectory)
+    self.assertIsInstance(traj, trajectory_testing.ExampleTrajectory)
     self.assertEmpty(traj.steps)
     self.assertIsNone(traj.subagent_trajectories)
 
-  def test_tunix_create_trajectory_promotes_plain_atif_steps(self):
-    meta = trajectory.TunixTrajectoryMetadata(
-        trajectory_id="tunix_promote",
+  def test_example_create_trajectory_promotes_plain_atif_steps(self):
+    meta = trajectory_testing.ExampleTrajectoryMetadata(
+        trajectory_id="example_promote",
         agent=trajectory.Agent(name="agent_test", version="1.0"),
     )
     plain_steps = [
@@ -1309,59 +1353,66 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
 
     traj = meta.create_trajectory(steps=plain_steps)
 
-    self.assertIsInstance(traj, trajectory.TunixTrajectory)
+    self.assertIsInstance(traj, trajectory_testing.ExampleTrajectory)
     self.assertLen(traj.steps, 4)
-    self.assertIsInstance(traj.steps[0], trajectory.TunixEnvStep)
+    self.assertIsInstance(traj.steps[0], trajectory_testing.ExampleEnvStep)
     self.assertEqual(traj.steps[0].step_id, 0)
     self.assertEqual(traj.steps[0].message, "User prompt")
-    self.assertIsInstance(traj.steps[1], trajectory.TunixAgentStep)
+    self.assertIsInstance(traj.steps[1], trajectory_testing.ExampleAgentStep)
     self.assertEqual(traj.steps[1].step_id, 1)
     self.assertEqual(traj.steps[1].message, "Agent response")
-    self.assertIsInstance(traj.steps[2], trajectory.TunixAgentStep)
+    self.assertIsInstance(traj.steps[2], trajectory_testing.ExampleAgentStep)
     self.assertEqual(traj.steps[2].step_id, 2)
     self.assertEqual(traj.steps[2].message, "Dict agent step")
-    self.assertIsInstance(traj.steps[3], trajectory.TunixEnvStep)
+    self.assertIsInstance(traj.steps[3], trajectory_testing.ExampleEnvStep)
     self.assertEqual(traj.steps[3].step_id, 3)
     self.assertEqual(traj.steps[3].message, "Dict user step")
 
-  def test_tunix_create_trajectory_rejects_non_step_inputs(self):
+  def test_example_create_trajectory_rejects_non_step_inputs(self):
     # Only typed `Step` instances are accepted; raw dicts are not silently
-    # reinterpreted as either ATIF or Tunix steps.
-    meta = trajectory.TunixTrajectoryMetadata(
-        trajectory_id="tunix_promote_err",
+    # reinterpreted as either ATIF or Example steps.
+    meta = trajectory_testing.ExampleTrajectoryMetadata(
+        trajectory_id="example_promote_err",
         agent=trajectory.Agent(name="agent_test", version="1.0"),
     )
-    tunix_shaped_dict = {
+    example_shaped_dict = {
         "step_id": 1,
         "source": "user",
         "message": "m",
         "reward": 1.0,
     }
-    for non_step in ({"invalid": "data"}, tunix_shaped_dict, "not_a_step"):
+    non_steps: list[Any] = [
+        {"invalid": "data"},
+        example_shaped_dict,
+        "not_a_step",
+    ]
+    for non_step in non_steps:
       with self.subTest(non_step=non_step):
         with self.assertRaises(AttributeError):
-          meta.create_trajectory(steps=[non_step])  # pytype: disable=wrong-arg-types
+          meta.create_trajectory(steps=[non_step])
 
-  def test_tunix_create_trajectory_propagates_step_rehydration_errors(self):
+  def test_example_create_trajectory_propagates_step_rehydration_errors(self):
     # Rehydration failures surface as-is instead of falling back to treating
-    # the input as an already-Tunix step.
-    meta = trajectory.TunixTrajectoryMetadata(
-        trajectory_id="tunix_promote_err",
+    # the input as an already-Example step.
+    meta = trajectory_testing.ExampleTrajectoryMetadata(
+        trajectory_id="example_promote_err",
         agent=trajectory.Agent(name="agent_test", version="1.0"),
     )
     bad_ext_step = trajectory.Step(
         step_id=1,
         source=trajectory.Source.USER,
         message="m",
-        extra={trajectory.TUNIX_EXTENSIONS_KEY: {"reward": "not_a_float"}},
+        extra={
+            trajectory_testing.EXAMPLE_EXTENSIONS_KEY: {"reward": "not_a_float"}
+        },
     )
 
     with self.assertRaisesRegex(pydantic.ValidationError, "reward"):
       meta.create_trajectory(steps=[bad_ext_step])
 
-  def test_tunix_create_trajectory_rejects_unknown_source(self):
-    meta = trajectory.TunixTrajectoryMetadata(
-        trajectory_id="tunix_unknown_source",
+  def test_example_create_trajectory_rejects_unknown_source(self):
+    meta = trajectory_testing.ExampleTrajectoryMetadata(
+        trajectory_id="example_unknown_source",
         agent=trajectory.Agent(name="agent_test", version="1.0"),
     )
     unknown_source_step = trajectory.Step.model_construct(
@@ -1395,10 +1446,10 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
         TypeError,
         "Expected trajectory_cls to be a subclass of _NoNewFields",
     ):
-      meta._create_paired_trajectory(trajectory.Trajectory, None, None)
+      meta.create_paired_trajectory(trajectory.Trajectory, None, None)
 
   def test_create_paired_trajectory_rejects_incompatible_trajectory_cls(self):
-    """_create_paired_trajectory enforces that trajectory_cls subclasses type(self)."""
+    """create_paired_trajectory enforces that trajectory_cls subclasses type(self)."""
 
     class _NewField(trajectory.TrajectoryMetadata):
       EXTENSIONS_KEY = "_test_extensions"
@@ -1413,7 +1464,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
       with self.assertRaisesRegex(
           TypeError, "Expected trajectory_cls to be a subclass of _NewField"
       ):
-        meta._create_paired_trajectory(trajectory.Trajectory, None, None)
+        meta.create_paired_trajectory(trajectory.Trajectory, None, None)
 
       traj = meta.create_trajectory()
       self.assertIsInstance(traj, _NewField)
@@ -1423,7 +1474,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
       trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(_NewField, None)
 
   def test_step_initialization_with_rl_fields(self):
-    step = trajectory.TunixAgentStep(
+    step = trajectory_testing.ExampleAgentStep(
         step_id=1,
         source=trajectory.Source.AGENT,
         message="Running bash command",
@@ -1443,7 +1494,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(step.extra, {"custom_key": "custom_val"})
 
   def test_step_env_fields(self):
-    step = trajectory.TunixEnvStep(
+    step = trajectory_testing.ExampleEnvStep(
         step_id=2,
         source=trajectory.Source.SYSTEM,
         message="Observation result",
@@ -1458,7 +1509,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     np.testing.assert_array_equal(step.env_masks, np.array([1]))
 
   def test_step_json_serialization_and_deserialization(self):
-    step = trajectory.TunixAgentStep(
+    step = trajectory_testing.ExampleAgentStep(
         step_id=1,
         source=trajectory.Source.AGENT,
         message="Thinking",
@@ -1470,24 +1521,26 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(loaded_dict["assistant_tokens"], [10, 20])
     self.assertEqual(loaded_dict["logprobs"], [-0.5, -0.3])
 
-    reloaded_step = trajectory.TunixAgentStep.model_validate_json(json_str)
+    reloaded_step = trajectory_testing.ExampleAgentStep.model_validate_json(
+        json_str
+    )
     self.assertEqual(reloaded_step.assistant_tokens, [10, 20])
     self.assertEqual(reloaded_step.logprobs, [-0.5, -0.3])
 
   def test_step_equality(self):
-    step1 = trajectory.TunixAgentStep(
+    step1 = trajectory_testing.ExampleAgentStep(
         step_id=1,
         source=trajectory.Source.AGENT,
         message="msg",
         assistant_tokens=np.array([1, 2]),
     )
-    step2 = trajectory.TunixAgentStep(
+    step2 = trajectory_testing.ExampleAgentStep(
         step_id=1,
         source=trajectory.Source.AGENT,
         message="msg",
         assistant_tokens=np.array([1, 2]),
     )
-    step3 = trajectory.TunixAgentStep(
+    step3 = trajectory_testing.ExampleAgentStep(
         step_id=1,
         source=trajectory.Source.AGENT,
         message="msg",
@@ -1609,7 +1662,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertNotEqual(step1.model_dump(), step3.model_dump())
 
   def test_trajectory_metadata_first_class_fields(self):
-    meta = trajectory.TunixTrajectoryMetadata(
+    meta = trajectory_testing.ExampleTrajectoryMetadata(
         trajectory_id="traj_1",
         agent=trajectory.Agent(name="agent_test", version="1.0"),
         prompt_id="prompt_abc",
@@ -1621,7 +1674,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
         reward_time={"eval": 0.2},
         extra={"unstructured_key": "val"},
     )
-    self.assertIsInstance(meta, trajectory.TunixTrajectoryMetadata)
+    self.assertIsInstance(meta, trajectory_testing.ExampleTrajectoryMetadata)
     self.assertIsInstance(meta, trajectory.TrajectoryMetadata)
     self.assertEqual(meta.trajectory_id, "traj_1")
     self.assertEqual(meta.prompt_id, "prompt_abc")
@@ -1634,7 +1687,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(meta.extra, {"unstructured_key": "val"})
 
   def test_trajectory_get_metadata_preserves_first_class_fields(self):
-    traj = trajectory.TunixTrajectory(
+    traj = trajectory_testing.ExampleTrajectory(
         trajectory_id="traj_1",
         agent=trajectory.Agent(name="agent_test", version="1.0"),
         prompt_id="prompt_abc",
@@ -1646,7 +1699,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
         reward_time={"eval": 0.2},
         extra={"custom": "field"},
         steps=[
-            trajectory.TunixAgentStep(
+            trajectory_testing.ExampleAgentStep(
                 step_id=0,
                 source=trajectory.Source.AGENT,
                 message="hello",
@@ -1654,7 +1707,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
         ],
     )
     meta = traj.get_metadata()
-    self.assertIsInstance(meta, trajectory.TunixTrajectoryMetadata)
+    self.assertIsInstance(meta, trajectory_testing.ExampleTrajectoryMetadata)
     self.assertIsInstance(meta, trajectory.TrajectoryMetadata)
     self.assertEqual(meta.trajectory_id, "traj_1")
     self.assertEqual(meta.prompt_id, "prompt_abc")
@@ -1669,7 +1722,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
   def test_trajectory_serialization_deserialization_with_first_class_metadata(
       self,
   ):
-    traj = trajectory.TunixTrajectory(
+    traj = trajectory_testing.ExampleTrajectory(
         trajectory_id="traj_roundtrip",
         agent=trajectory.Agent(name="agent_test", version="1.0"),
         prompt_id="p1",
@@ -1681,7 +1734,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
         reward_time={"reward": 0.01},
         extra={"meta": "data"},
         steps=[
-            trajectory.TunixAgentStep(
+            trajectory_testing.ExampleAgentStep(
                 step_id=0,
                 source=trajectory.Source.AGENT,
                 message="action message",
@@ -1689,7 +1742,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
         ],
     )
     data = traj.to_json_dict()
-    restored = trajectory.TunixTrajectory.from_json_dict(data)
+    restored = trajectory_testing.ExampleTrajectory.from_json_dict(data)
     self.assertEqual(restored.trajectory_id, traj.trajectory_id)
     self.assertEqual(restored.prompt_id, "p1")
     self.assertEqual(restored.group_index, 1)
@@ -1701,225 +1754,14 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(restored.extra, {"meta": "data"})
     self.assertLen(restored.steps, 1)
 
-  def test_to_tunix_trajectory_multi_turn_conversion(self):
-    # 1. Create a mock trajectory metadata via create_trajectory_metadata()
-    class MockRolloutRequest:
-      prompt_id = "prompt_123"
-      group_index = 0
-      generation_kwargs = {"temperature": 0.7, "top_p": 0.9}
-      metadata = {"req_key": "req_val"}
-
-    class MockAgent:
-      name = "multi_turn_agent"
-      version = "2.0"
-      trajectory = agent_types.Trajectory(
-          reward=4.5,
-          env_time={"init": 0.1, "step": 0.6},
-          reward_time={"eval": 0.25},
-      )
-
-    meta = converter.create_trajectory_metadata(
-        traj_id="traj_multi_turn_test",
-        request=MockRolloutRequest(),
-        agent=MockAgent(),
-        target_policy_versions=[1, 2, 3],
-        status="SUCCEEDED",
-        extra={"custom_extra": "custom_val"},
-    )
-
-    # 2. Add the first step to it via calling create_task_step (step_id = 0)
-    step_0 = converter.create_task_step("Solve task step by step")
-    self.assertIsNotNone(step_0)
-    self.assertEqual(step_0.step_id, 0)
-    self.assertEqual(step_0.source, trajectory.Source.USER)
-
-    # 3. Add Tunix turn 0 (tunix_step_id=0) agent step -> converted step_id = 1
-    mock_agent_step_1 = agent_types.Step(
-        model_response="Action 1 response",
-        thought="Thought 1",
-        action=agent_types.Action(
-            action={
-                "id": "call_1",
-                "name": "tool_1",
-                "arguments": {"arg1": "val1"},
-            }
-        ),
-        assistant_tokens=np.array([101, 102]),
-        assistant_masks=np.array([1, 1]),
-        logprobs=np.array([-0.1, -0.2]),
-        mc_return=1.0,
-        info={"trace_1": "abc"},
-    )
-    step_1 = converter.create_agent_step(mock_agent_step_1, tunix_step_id=0)
-    self.assertIsNotNone(step_1)
-    self.assertEqual(step_1.step_id, 1)
-
-    # 4. Add Tunix turn 0 (tunix_step_id=0) env step -> converted step_id = 2
-    mock_env_step_1 = agent_types.Step(
-        observation="Observation 1 result",
-        reward=0.5,
-        done=False,
-        env_tokens=np.array([201]),
-        env_masks=np.array([1]),
-        info={"env_meta_1": "val1"},
-    )
-    step_2 = converter.create_env_step(mock_env_step_1, tunix_step_id=0)
-    self.assertIsNotNone(step_2)
-    self.assertEqual(step_2.step_id, 2)
-
-    # 5. Add Tunix turn 1 (tunix_step_id=1) agent step -> converted step_id = 3
-    mock_agent_step_2 = agent_types.Step(
-        model_response="Action 2 response",
-        thought="Thought 2",
-        action=agent_types.Action(
-            action={
-                "id": "call_2",
-                "name": "tool_2",
-                "arguments": {"arg2": "val2"},
-            }
-        ),
-        assistant_tokens=np.array([103, 104]),
-        assistant_masks=np.array([1, 1]),
-        logprobs=np.array([-0.3, -0.4]),
-        mc_return=2.0,
-        info={"trace_2": "def"},
-    )
-    step_3 = converter.create_agent_step(mock_agent_step_2, tunix_step_id=1)
-    self.assertIsNotNone(step_3)
-    self.assertEqual(step_3.step_id, 3)
-
-    # 6. Add Tunix turn 1 (tunix_step_id=1) env step -> converted step_id = 4
-    mock_env_step_2 = agent_types.Step(
-        observation="Observation 2 result",
-        reward=1.0,
-        done=False,
-        env_tokens=np.array([202]),
-        env_masks=np.array([1]),
-        info={"env_meta_2": "val2"},
-    )
-    step_4 = converter.create_env_step(mock_env_step_2, tunix_step_id=1)
-    self.assertIsNotNone(step_4)
-    self.assertEqual(step_4.step_id, 4)
-
-    # 7. Add Tunix turn 2 (tunix_step_id=2) agent step -> converted step_id = 5
-    mock_agent_step_3 = agent_types.Step(
-        model_response="Action 3 response",
-        thought="Thought 3",
-        action=None,
-        assistant_tokens=np.array([105, 106]),
-        assistant_masks=np.array([1, 1]),
-        logprobs=np.array([-0.5, -0.6]),
-        mc_return=3.0,
-        info={"trace_3": "ghi"},
-    )
-    step_5 = converter.create_agent_step(mock_agent_step_3, tunix_step_id=2)
-    self.assertIsNotNone(step_5)
-    self.assertEqual(step_5.step_id, 5)
-
-    # 8. Add Tunix turn 2 (tunix_step_id=2) env step -> converted step_id = 6
-    mock_env_step_3 = agent_types.Step(
-        observation="Observation 3 result",
-        reward=3.0,
-        done=True,
-        env_tokens=np.array([203]),
-        env_masks=np.array([1]),
-        info={"env_meta_3": "val3"},
-    )
-    step_6 = converter.create_env_step(mock_env_step_3, tunix_step_id=2)
-    self.assertIsNotNone(step_6)
-    self.assertEqual(step_6.step_id, 6)
-
-    traj = trajectory.TunixTrajectory(
-        **meta.model_dump(),
-        steps=[step_0, step_1, step_2, step_3, step_4, step_5, step_6],
-    )
-
-    # 9. Call to_tunix_trajectory to convert the trajectory
-    converted_traj = converter.to_tunix_trajectory(traj)
-
-    # 10. Verify received trajectory
-    # a) Trajectory task should have the same prompt as Step #0
-    self.assertEqual(
-        converted_traj.task, {"prompts": ["Solve task step by step"]}
-    )
-    self.assertEqual(converted_traj.task["prompts"][0], traj.steps[0].message)
-
-    # b) Step #0 contains (3) and (4)
-    self.assertLen(converted_traj.steps, 3)
-    expected_step_0 = converter.to_tunix_step(
-        agent_step=step_1, env_step=step_2
-    )
-    expected_step_0.mc_return = 4.5
-    self.assertStepEqual(converted_traj.steps[0], expected_step_0)
-    self.assertEqual(
-        converted_traj.steps[0].model_response, "Action 1 response"
-    )
-    self.assertEqual(converted_traj.steps[0].thought, "Thought 1")
-    self.assertEqual(
-        converted_traj.steps[0].action,
-        agent_types.Action(
-            action={
-                "id": "call_1",
-                "name": "tool_1",
-                "arguments": {"arg1": "val1"},
-            }
-        ),
-    )
-    self.assertEqual(
-        converted_traj.steps[0].observation, "Observation 1 result"
-    )
-    self.assertEqual(converted_traj.steps[0].reward, 0.5)
-    self.assertFalse(converted_traj.steps[0].done)
-    self.assertEqual(converted_traj.steps[0].mc_return, 4.5)
-    np.testing.assert_array_equal(
-        converted_traj.steps[0].assistant_tokens, np.array([101, 102])
-    )
-    np.testing.assert_array_equal(
-        converted_traj.steps[0].assistant_masks, np.array([1, 1])
-    )
-    np.testing.assert_array_equal(
-        converted_traj.steps[0].logprobs, np.array([-0.1, -0.2])
-    )
-    np.testing.assert_array_equal(
-        converted_traj.steps[0].env_tokens, np.array([201])
-    )
-    np.testing.assert_array_equal(
-        converted_traj.steps[0].env_masks, np.array([1])
-    )
-    self.assertEqual(
-        converted_traj.steps[0].info,
-        {"trace_1": "abc", "env_meta_1": "val1"},
-    )
-
-    # c) Step #1 contains (5) and (6)
-    expected_step_1 = converter.to_tunix_step(
-        agent_step=step_3, env_step=step_4
-    )
-    expected_step_1.mc_return = 4.0
-    self.assertStepEqual(converted_traj.steps[1], expected_step_1)
-    self.assertEqual(
-        converted_traj.steps[1].model_response, "Action 2 response"
-    )
-    self.assertEqual(converted_traj.steps[1].thought, "Thought 2")
-    self.assertEqual(
-        converted_traj.steps[1].action,
-        agent_types.Action(
-            action={
-                "id": "call_2",
-                "name": "tool_2",
-                "arguments": {"arg2": "val2"},
-            }
-        ),
-    )
-
 
 class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
-  """Covers the `to_atif_*()` projection of Tunix models into base ATIF."""
+  """Covers the `to_atif_*()` projection of Example models into base ATIF."""
 
-  def test_to_atif_step_on_tunix_agent_step_packs_subclass_fields_into_extra(
+  def test_to_atif_step_on_example_agent_step_packs_subclass_fields_into_extra(
       self,
   ):
-    agent_step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(
+    agent_step = trajectory_testing.EXAMPLE_AGENT_STEP_1.model_copy(
         update={
             "extra": {
                 "user_key": "val",
@@ -1935,24 +1777,22 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
         atif_agent_step.extra,
         {
             "user_key": "val",
-            trajectory.TUNIX_EXTENSIONS_KEY: {
+            trajectory_testing.EXAMPLE_EXTENSIONS_KEY: {
                 "assistant_tokens": [10, 20],
                 "assistant_masks": [1, 1],
                 "logprobs": [-0.5, -0.2],
                 "policy_version": 3,
-                "prefill_routed_experts": trajectory._serialize_int_3d_array(
+                "routed_experts": trajectory._serialize_int_3d_array(
                     [[[1, 2]], [[3, 4]], [[5, 6]]]
                 ),
-                "prefill_start": 0,
-                "prefill_num_context": 1,
             },
         },
     )
 
-  def test_to_atif_step_on_tunix_env_step_packs_subclass_fields_into_extra(
+  def test_to_atif_step_on_example_env_step_packs_subclass_fields_into_extra(
       self,
   ):
-    env_step = trajectory_testing.TUNIX_ENV_STEP_0
+    env_step = trajectory_testing.EXAMPLE_ENV_STEP_0
 
     atif_env_step = env_step.to_atif_step()
 
@@ -1962,7 +1802,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
         atif_env_step.extra,
         {
             "env_extra_key": "env_extra_val",
-            trajectory.TUNIX_EXTENSIONS_KEY: {
+            trajectory_testing.EXAMPLE_EXTENSIONS_KEY: {
                 "reward": 1.0,
                 "done": False,
                 "env_tokens": [1, 2],
@@ -1974,44 +1814,44 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
   @parameterized.named_parameters(
       dict(
           testcase_name="agent_step",
-          step_cls=trajectory.TunixAgentStep,
-          tunix_step=trajectory_testing.TUNIX_AGENT_STEP_1,
+          step_cls=trajectory_testing.ExampleAgentStep,
+          example_step=trajectory_testing.EXAMPLE_AGENT_STEP_1,
       ),
       dict(
           testcase_name="env_step",
-          step_cls=trajectory.TunixEnvStep,
-          tunix_step=trajectory_testing.TUNIX_ENV_STEP_0,
+          step_cls=trajectory_testing.ExampleEnvStep,
+          example_step=trajectory_testing.EXAMPLE_ENV_STEP_0,
       ),
   )
-  def test_to_atif_step_packs_every_tunix_only_field_into_extra(
-      self, step_cls, tunix_step
+  def test_to_atif_step_packs_every_example_only_field_into_extra(
+      self, step_cls, example_step
   ):
-    tunix_only_field_names = set(step_cls.model_fields) - set(
+    example_only_field_names = set(step_cls.model_fields) - set(
         trajectory.Step.model_fields
     )
 
-    atif_step = tunix_step.to_atif_step()
+    atif_step = example_step.to_atif_step()
 
     self.assertContainsSubset(
-        tunix_only_field_names, atif_step.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+        example_only_field_names,
+        atif_step.extra[trajectory_testing.EXAMPLE_EXTENSIONS_KEY],
     )
 
-  def test_to_atif_metadata_packs_every_tunix_only_field_into_extra(self):
-    tunix_only_field_names = set(
-        trajectory.TunixTrajectoryMetadata.model_fields
+  def test_to_atif_metadata_packs_every_example_only_field_into_extra(self):
+    example_only_field_names = set(
+        trajectory_testing.ExampleTrajectoryMetadata.model_fields
     ) - set(trajectory.TrajectoryMetadata.model_fields)
 
-    atif_metadata = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
+    atif_metadata = trajectory_testing.EXAMPLE_METADATA_1.to_atif_metadata()
 
     self.assertContainsSubset(
-        tunix_only_field_names,
-        atif_metadata.extra[trajectory.TUNIX_EXTENSIONS_KEY],
+        example_only_field_names, _packed_extensions(atif_metadata)
     )
 
-  def test_to_atif_metadata_on_tunix_metadata_packs_subclass_fields_into_extra(
+  def test_to_atif_metadata_on_example_metadata_packs_subclass_fields_into_extra(
       self,
   ):
-    atif_metadata = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
+    atif_metadata = trajectory_testing.EXAMPLE_METADATA_1.to_atif_metadata()
 
     self.assertIs(type(atif_metadata), trajectory.TrajectoryMetadata)
     self.assertEqual(atif_metadata.trajectory_id, "t_atif")
@@ -2021,14 +1861,12 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
         atif_metadata.extra,
         {
             "user_meta": "val",
-            trajectory.TUNIX_EXTENSIONS_KEY: {
+            trajectory_testing.EXAMPLE_EXTENSIONS_KEY: {
                 "prompt_id": "p_1",
                 "group_index": 2,
                 "target_policy_versions": [2, 3],
                 "status": "SUCCEEDED",
                 "total_reward": 3.5,
-                "gamma": 0.9,
-                "masked_out": False,
                 "hyperparams": {"temperature": 0.7},
                 "env_time": {"step_0": 0.05},
                 "reward_time": {"step_1": 0.02},
@@ -2037,14 +1875,12 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
     )
 
   def test_to_atif_step_retains_none_valued_subclass_fields_in_extra(self):
-    sparse_agent_step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(
+    sparse_agent_step = trajectory_testing.EXAMPLE_AGENT_STEP_1.model_copy(
         update={
             "assistant_tokens": None,
             "assistant_masks": None,
             "logprobs": None,
-            "prefill_routed_experts": None,
-            "prefill_start": None,
-            "prefill_num_context": None,
+            "routed_experts": None,
             "extra": None,
         }
     )
@@ -2054,38 +1890,36 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(
         atif_step.extra,
         {
-            trajectory.TUNIX_EXTENSIONS_KEY: {
+            trajectory_testing.EXAMPLE_EXTENSIONS_KEY: {
                 "assistant_tokens": None,
                 "assistant_masks": None,
                 "logprobs": None,
                 "policy_version": 3,
-                "prefill_routed_experts": None,
-                "prefill_start": None,
-                "prefill_num_context": None,
+                "routed_experts": None,
             }
         },
     )
 
   def test_to_atif_metadata_retains_none_valued_subclass_fields_in_extra(self):
-    sparse_tunix_meta = trajectory.TunixTrajectoryMetadata(
+    sparse_example_meta = trajectory_testing.ExampleTrajectoryMetadata(
         trajectory_id="t_sparse",
         agent=trajectory.Agent(name="agent", version="1.0"),
     )
 
-    atif_metadata = sparse_tunix_meta.to_atif_metadata()
+    atif_metadata = sparse_example_meta.to_atif_metadata()
     reloaded = trajectory.TrajectoryMetadata.model_validate_json(
         atif_metadata.model_dump_json(exclude_none=True)
     )
 
-    expected_keys = set(trajectory.TunixTrajectoryMetadata.model_fields) - set(
-        trajectory.TrajectoryMetadata.model_fields
-    )
+    expected_keys = set(
+        trajectory_testing.ExampleTrajectoryMetadata.model_fields
+    ) - set(trajectory.TrajectoryMetadata.model_fields)
     self.assertEqual(set(atif_metadata.get_extensions().keys()), expected_keys)
     self.assertEqual(set(reloaded.get_extensions().keys()), expected_keys)
     self.assertIsNone(reloaded.get_extensions()["prompt_id"])
     self.assertIs(
         trajectory.TrajectoryMetadata.resolve_subclass(reloaded),
-        trajectory.TunixTrajectoryMetadata,
+        trajectory_testing.ExampleTrajectoryMetadata,
     )
 
   @parameterized.named_parameters(
@@ -2107,10 +1941,10 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
 
     self.assertIs(projected_model, atif_model)
 
-  def test_to_atif_metadata_on_tunix_trajectory_strips_steps_and_packs_extra(
+  def test_to_atif_metadata_on_example_trajectory_strips_steps_and_packs_extra(
       self,
   ):
-    atif_metadata = trajectory_testing.TUNIX_TRAJECTORY_1.to_atif_metadata()
+    atif_metadata = trajectory_testing.EXAMPLE_TRAJECTORY_1.to_atif_metadata()
 
     self.assertIs(type(atif_metadata), trajectory.TrajectoryMetadata)
     self.assertEqual(atif_metadata.trajectory_id, "t_atif")
@@ -2118,14 +1952,12 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
         atif_metadata.extra,
         {
             "user_meta": "val",
-            trajectory.TUNIX_EXTENSIONS_KEY: {
+            trajectory_testing.EXAMPLE_EXTENSIONS_KEY: {
                 "prompt_id": "p_1",
                 "group_index": 2,
                 "target_policy_versions": [2, 3],
                 "status": "SUCCEEDED",
                 "total_reward": 3.5,
-                "gamma": 0.9,
-                "masked_out": False,
                 "hyperparams": {"temperature": 0.7},
                 "env_time": {"step_0": 0.05},
                 "reward_time": {"step_1": 0.02},
@@ -2140,7 +1972,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(base_atif_metadata, trajectory_testing.METADATA_1)
 
   def test_get_extensions_on_projected_metadata_returns_packed_extensions(self):
-    atif_metadata = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
+    atif_metadata = trajectory_testing.EXAMPLE_METADATA_1.to_atif_metadata()
 
     self.assertEqual(
         atif_metadata.get_extensions(),
@@ -2150,8 +1982,6 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
             "target_policy_versions": [2, 3],
             "status": "SUCCEEDED",
             "total_reward": 3.5,
-            "gamma": 0.9,
-            "masked_out": False,
             "hyperparams": {"temperature": 0.7},
             "env_time": {"step_0": 0.05},
             "reward_time": {"step_1": 0.02},
@@ -2171,109 +2001,113 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
 
 
 class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
-  """Covers the `from_atif_*()` rehydration of base ATIF into Tunix models."""
+  """Covers the `from_atif_*()` rehydration of base ATIF into Example models."""
 
   @parameterized.named_parameters(
       dict(
           testcase_name="agent_step",
-          step_cls=trajectory.TunixAgentStep,
-          tunix_step=trajectory_testing.TUNIX_AGENT_STEP_1,
+          step_cls=trajectory_testing.ExampleAgentStep,
+          example_step=trajectory_testing.EXAMPLE_AGENT_STEP_1,
           expected_extra={"user_key": "val"},
       ),
       dict(
           testcase_name="env_step",
-          step_cls=trajectory.TunixEnvStep,
-          tunix_step=trajectory_testing.TUNIX_ENV_STEP_0,
+          step_cls=trajectory_testing.ExampleEnvStep,
+          example_step=trajectory_testing.EXAMPLE_ENV_STEP_0,
           expected_extra={"env_extra_key": "env_extra_val"},
       ),
   )
-  def test_from_atif_step_round_trip_restores_tunix_step(
-      self, step_cls, tunix_step, expected_extra
+  def test_from_atif_step_round_trip_restores_example_step(
+      self, step_cls, example_step, expected_extra
   ):
-    atif_step = tunix_step.to_atif_step()
+    atif_step = example_step.to_atif_step()
 
     rehydrated_step = step_cls.from_atif_step(atif_step)
 
-    self.assertStepEqual(rehydrated_step, tunix_step)
+    self.assertStepEqual(rehydrated_step, example_step)
     self.assertEqual(rehydrated_step.extra, expected_extra)
 
   @parameterized.named_parameters(
       dict(
           testcase_name="agent_step",
-          step_cls=trajectory.TunixAgentStep,
-          tunix_step=trajectory_testing.TUNIX_AGENT_STEP_1,
+          step_cls=trajectory_testing.ExampleAgentStep,
+          example_step=trajectory_testing.EXAMPLE_AGENT_STEP_1,
           array_field_names=(
               "assistant_tokens",
               "assistant_masks",
               "logprobs",
-              "prefill_routed_experts",
+              "routed_experts",
           ),
       ),
       dict(
           testcase_name="env_step",
-          step_cls=trajectory.TunixEnvStep,
-          tunix_step=trajectory_testing.TUNIX_ENV_STEP_0,
+          step_cls=trajectory_testing.ExampleEnvStep,
+          example_step=trajectory_testing.EXAMPLE_ENV_STEP_0,
           array_field_names=("env_tokens", "env_masks"),
       ),
   )
   def test_from_atif_step_round_trip_preserves_array_values(
-      self, step_cls, tunix_step, array_field_names
+      self, step_cls, example_step, array_field_names
   ):
     # `assertStepEqual` compares serialized dumps, where both ndarrays and
     # lists render as lists, so array payloads are checked element-wise here.
     # Only the values survive the round trip; the ndarray container does not.
-    rehydrated_step = step_cls.from_atif_step(tunix_step.to_atif_step())
+    rehydrated_step = step_cls.from_atif_step(example_step.to_atif_step())
 
     for field_name in array_field_names:
       np.testing.assert_array_equal(
           getattr(rehydrated_step, field_name),
-          getattr(tunix_step, field_name),
+          getattr(example_step, field_name),
           err_msg=f"Field '{field_name}' mismatch",
       )
 
-  def test_from_atif_step_round_trip_restores_unset_tunix_fields(self):
-    sparse_agent_step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(
+  def test_from_atif_step_round_trip_restores_unset_example_fields(self):
+    sparse_agent_step = trajectory_testing.EXAMPLE_AGENT_STEP_1.model_copy(
         update={
             "assistant_tokens": None,
             "assistant_masks": None,
             "logprobs": None,
-            "prefill_routed_experts": None,
-            "prefill_start": None,
-            "prefill_num_context": None,
+            "routed_experts": None,
             "extra": None,
         }
     )
 
-    rehydrated_step = trajectory.TunixAgentStep.from_atif_step(
+    rehydrated_step = trajectory_testing.ExampleAgentStep.from_atif_step(
         sparse_agent_step.to_atif_step()
     )
 
     self.assertStepEqual(rehydrated_step, sparse_agent_step)
 
-  def test_from_atif_trajectory_round_trip_restores_tunix_trajectory(self):
-    tunix_trajectory = trajectory_testing.TUNIX_TRAJECTORY_1
-    atif_trajectory = trajectory_testing.to_atif_trajectory(tunix_trajectory)
+  def test_from_atif_trajectory_round_trip_restores_example_trajectory(self):
+    example_trajectory = trajectory_testing.EXAMPLE_TRAJECTORY_1
+    atif_trajectory = trajectory_testing.to_atif_trajectory(example_trajectory)
 
-    rehydrated_trajectory = trajectory.TunixTrajectory.from_atif_trajectory(
-        atif_trajectory
+    rehydrated_trajectory = (
+        trajectory_testing.ExampleTrajectory.from_atif_trajectory(
+            atif_trajectory
+        )
     )
 
-    self.assertIs(type(rehydrated_trajectory), trajectory.TunixTrajectory)
+    self.assertIs(
+        type(rehydrated_trajectory), trajectory_testing.ExampleTrajectory
+    )
     # Stores omit subagent trajectories, so the projection carries none and
     # the round trip restores every other field.
     self.assertTrajectoryEqual(
         rehydrated_trajectory,
-        tunix_trajectory.model_copy(update={"subagent_trajectories": None}),
+        example_trajectory.model_copy(update={"subagent_trajectories": None}),
     )
 
   def test_from_atif_trajectory_renumbers_steps_to_zero_indexed(self):
     atif_trajectory = trajectory_testing.to_atif_trajectory(
-        trajectory_testing.TUNIX_TRAJECTORY_1
+        trajectory_testing.EXAMPLE_TRAJECTORY_1
     )
     self.assertEqual([step.step_id for step in atif_trajectory.steps], [1, 2])
 
-    rehydrated_trajectory = trajectory.TunixTrajectory.from_atif_trajectory(
-        atif_trajectory
+    rehydrated_trajectory = (
+        trajectory_testing.ExampleTrajectory.from_atif_trajectory(
+            atif_trajectory
+        )
     )
 
     self.assertEqual(
@@ -2282,84 +2116,103 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
 
   def test_from_atif_trajectory_upcasts_steps_by_source(self):
     atif_trajectory = trajectory_testing.to_atif_trajectory(
-        trajectory_testing.TUNIX_TRAJECTORY_1
+        trajectory_testing.EXAMPLE_TRAJECTORY_1
     )
 
-    rehydrated_trajectory = trajectory.TunixTrajectory.from_atif_trajectory(
-        atif_trajectory
+    rehydrated_trajectory = (
+        trajectory_testing.ExampleTrajectory.from_atif_trajectory(
+            atif_trajectory
+        )
     )
 
     env_step, agent_step = rehydrated_trajectory.steps
-    self.assertIs(type(env_step), trajectory.TunixEnvStep)
-    self.assertIs(type(agent_step), trajectory.TunixAgentStep)
+    self.assertIs(type(env_step), trajectory_testing.ExampleEnvStep)
+    self.assertIs(type(agent_step), trajectory_testing.ExampleAgentStep)
 
   def test_from_atif_trajectory_rehydrates_nested_subagent_trajectories(self):
     atif_subagent_trajectory = trajectory_testing.to_atif_trajectory(
-        trajectory_testing.TUNIX_SUBAGENT_TRAJECTORY_1
+        trajectory_testing.EXAMPLE_SUBAGENT_TRAJECTORY_1
     )
     atif_trajectory = trajectory_testing.to_atif_trajectory(
-        trajectory_testing.TUNIX_TRAJECTORY_1
+        trajectory_testing.EXAMPLE_TRAJECTORY_1
     ).model_copy(update={"subagent_trajectories": [atif_subagent_trajectory]})
 
-    rehydrated_trajectory = trajectory.TunixTrajectory.from_atif_trajectory(
-        atif_trajectory
+    rehydrated_trajectory = (
+        trajectory_testing.ExampleTrajectory.from_atif_trajectory(
+            atif_trajectory
+        )
     )
 
+    assert rehydrated_trajectory.subagent_trajectories is not None
     (rehydrated_subagent,) = rehydrated_trajectory.subagent_trajectories
-    self.assertIs(type(rehydrated_subagent), trajectory.TunixTrajectory)
+    self.assertIs(
+        type(rehydrated_subagent), trajectory_testing.ExampleTrajectory
+    )
     self.assertEqual(rehydrated_subagent.trajectory_id, "sub_traj_1")
     self.assertEqual(
         [step.step_id for step in rehydrated_subagent.steps], [0, 1]
     )
 
-  def test_from_atif_metadata_round_trip_restores_tunix_metadata(self):
-    tunix_metadata = trajectory_testing.TUNIX_METADATA_1
-    atif_metadata = tunix_metadata.to_atif_metadata()
+  def test_from_atif_metadata_round_trip_restores_example_metadata(self):
+    example_metadata = trajectory_testing.EXAMPLE_METADATA_1
+    atif_metadata = example_metadata.to_atif_metadata()
 
-    rehydrated_metadata = trajectory.TunixTrajectoryMetadata.from_atif_metadata(
-        atif_metadata
+    rehydrated_metadata = (
+        trajectory_testing.ExampleTrajectoryMetadata.from_atif_metadata(
+            atif_metadata
+        )
     )
 
-    self.assertIs(type(rehydrated_metadata), trajectory.TunixTrajectoryMetadata)
-    self.assertEqual(rehydrated_metadata, tunix_metadata)
+    self.assertIs(
+        type(rehydrated_metadata), trajectory_testing.ExampleTrajectoryMetadata
+    )
+    self.assertEqual(rehydrated_metadata, example_metadata)
     self.assertEqual(rehydrated_metadata.extra, {"user_meta": "val"})
 
   def test_from_atif_metadata_on_base_trajectory_strips_steps_and_rehydrates(
       self,
   ):
-    tunix_trajectory = trajectory_testing.TUNIX_TRAJECTORY_1
-    atif_trajectory = trajectory_testing.to_atif_trajectory(tunix_trajectory)
+    example_trajectory = trajectory_testing.EXAMPLE_TRAJECTORY_1
+    atif_trajectory = trajectory_testing.to_atif_trajectory(example_trajectory)
 
-    rehydrated_metadata = trajectory.TunixTrajectoryMetadata.from_atif_metadata(
-        atif_trajectory
+    rehydrated_metadata = (
+        trajectory_testing.ExampleTrajectoryMetadata.from_atif_metadata(
+            atif_trajectory
+        )
     )
 
-    self.assertIs(type(rehydrated_metadata), trajectory.TunixTrajectoryMetadata)
-    self.assertEqual(rehydrated_metadata, tunix_trajectory.get_metadata())
+    self.assertIs(
+        type(rehydrated_metadata), trajectory_testing.ExampleTrajectoryMetadata
+    )
+    self.assertEqual(rehydrated_metadata, example_trajectory.get_metadata())
 
-  def test_from_atif_step_without_tunix_extensions_rehydrates_with_defaults(
+  def test_from_atif_step_without_example_extensions_rehydrates_with_defaults(
       self,
   ):
     base_atif_step = trajectory_testing.STEP_1_1
 
-    rehydrated_step = trajectory.TunixAgentStep.from_atif_step(base_atif_step)
+    rehydrated_step = trajectory_testing.ExampleAgentStep.from_atif_step(
+        base_atif_step
+    )
 
-    self.assertIsInstance(rehydrated_step, trajectory.TunixAgentStep)
+    self.assertIsInstance(rehydrated_step, trajectory_testing.ExampleAgentStep)
     self.assertEqual(rehydrated_step.step_id, base_atif_step.step_id - 1)
     self.assertIsNone(rehydrated_step.assistant_tokens)
     self.assertIsNone(rehydrated_step.extra)
 
-  def test_from_atif_metadata_without_tunix_extensions_rehydrates_with_defaults(
+  def test_from_atif_metadata_without_example_extensions_rehydrates_with_defaults(
       self,
   ):
     base_atif_metadata = trajectory_testing.METADATA_1
 
-    rehydrated_metadata = trajectory.TunixTrajectoryMetadata.from_atif_metadata(
-        base_atif_metadata
+    rehydrated_metadata = (
+        trajectory_testing.ExampleTrajectoryMetadata.from_atif_metadata(
+            base_atif_metadata
+        )
     )
 
     self.assertIsInstance(
-        rehydrated_metadata, trajectory.TunixTrajectoryMetadata
+        rehydrated_metadata, trajectory_testing.ExampleTrajectoryMetadata
     )
     self.assertEqual(
         rehydrated_metadata.trajectory_id, base_atif_metadata.trajectory_id
@@ -2386,12 +2239,12 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
 
   def test_pydantic_init_subclass_registers_metadata_subclasses_only(self):
     self.assertIn(
-        trajectory.TunixTrajectoryMetadata,
+        trajectory_testing.ExampleTrajectoryMetadata,
         trajectory.TrajectoryMetadata._SUBCLASS_FIELDS,
     )
     self.assertEqual(
         trajectory.TrajectoryMetadata._SUBCLASS_FIELDS[
-            trajectory.TunixTrajectoryMetadata
+            trajectory_testing.ExampleTrajectoryMetadata
         ],
         frozenset({
             "prompt_id",
@@ -2399,8 +2252,6 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
             "target_policy_versions",
             "status",
             "total_reward",
-            "gamma",
-            "masked_out",
             "hyperparams",
             "env_time",
             "reward_time",
@@ -2415,7 +2266,7 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
         trajectory.TrajectoryMetadata._SUBCLASS_FIELDS,
     )
     self.assertNotIn(
-        trajectory.TunixTrajectory,
+        trajectory_testing.ExampleTrajectory,
         trajectory.TrajectoryMetadata._SUBCLASS_FIELDS,
     )
 
@@ -2440,10 +2291,10 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
         trajectory.TrajectoryMetadata.resolve_subclass(base_meta),
         trajectory.TrajectoryMetadata,
     )
-    tunix_atif_meta = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
+    example_atif_meta = trajectory_testing.EXAMPLE_METADATA_1.to_atif_metadata()
     self.assertIs(
-        trajectory.TrajectoryMetadata.resolve_subclass(tunix_atif_meta),
-        trajectory.TunixTrajectoryMetadata,
+        trajectory.TrajectoryMetadata.resolve_subclass(example_atif_meta),
+        trajectory_testing.ExampleTrajectoryMetadata,
     )
 
     class SubclassA(trajectory.TrajectoryMetadata):
@@ -2556,15 +2407,15 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
     )
     self.assertIs(
         trajectory.TrajectoryMetadata.resolve_subclass(
-            trajectory_testing.TUNIX_METADATA_1
+            trajectory_testing.EXAMPLE_METADATA_1
         ),
-        trajectory.TunixTrajectoryMetadata,
+        trajectory_testing.ExampleTrajectoryMetadata,
     )
     self.assertIs(
         trajectory.TrajectoryMetadata.resolve_subclass(
-            trajectory_testing.TUNIX_TRAJECTORY_1
+            trajectory_testing.EXAMPLE_TRAJECTORY_1
         ),
-        trajectory.TunixTrajectoryMetadata,
+        trajectory_testing.ExampleTrajectoryMetadata,
     )
     self.assertIs(
         trajectory.TrajectoryMetadata.resolve_subclass(
@@ -2575,7 +2426,7 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
     unknown_ext_meta = trajectory_testing.METADATA_1.model_copy(
         update={
             "extra": {
-                trajectory.TUNIX_EXTENSIONS_KEY: {
+                trajectory_testing.EXAMPLE_EXTENSIONS_KEY: {
                     "unregistered_ext_key": "value"
                 }
             }
@@ -2819,20 +2670,20 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
     )
     self.assertIsNone(getattr(trajectory.Trajectory, "EXTENSIONS_KEY", None))
     self.assertEqual(
-        trajectory.TunixAgentStep.EXTENSIONS_KEY,
-        trajectory.TUNIX_EXTENSIONS_KEY,
+        trajectory_testing.ExampleAgentStep.EXTENSIONS_KEY,
+        trajectory_testing.EXAMPLE_EXTENSIONS_KEY,
     )
     self.assertEqual(
-        trajectory.TunixEnvStep.EXTENSIONS_KEY,
-        trajectory.TUNIX_EXTENSIONS_KEY,
+        trajectory_testing.ExampleEnvStep.EXTENSIONS_KEY,
+        trajectory_testing.EXAMPLE_EXTENSIONS_KEY,
     )
     self.assertEqual(
-        trajectory.TunixTrajectoryMetadata.EXTENSIONS_KEY,
-        trajectory.TUNIX_EXTENSIONS_KEY,
+        trajectory_testing.ExampleTrajectoryMetadata.EXTENSIONS_KEY,
+        trajectory_testing.EXAMPLE_EXTENSIONS_KEY,
     )
     self.assertEqual(
-        trajectory.TunixTrajectory.EXTENSIONS_KEY,
-        trajectory.TUNIX_EXTENSIONS_KEY,
+        trajectory_testing.ExampleTrajectory.EXTENSIONS_KEY,
+        trajectory_testing.EXAMPLE_EXTENSIONS_KEY,
     )
 
     with self.assertRaisesRegex(
@@ -2894,10 +2745,10 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
 
       def create_trajectory(
           self,
-          steps: list[trajectory.Step] | None = None,
-          subagent_trajectories: list["DefaultedTagTrajectory"] | None = None,
+          steps: Sequence[Any] | None = None,
+          subagent_trajectories: Sequence[Any] | None = None,
       ) -> "DefaultedTagTrajectory":
-        return self._create_paired_trajectory(
+        return self.create_paired_trajectory(
             DefaultedTagTrajectory, steps, subagent_trajectories
         )
 
@@ -3024,45 +2875,45 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
 
   @parameterized.named_parameters(
       dict(
-          testcase_name="tunix_agent_step",
-          tunix_model=trajectory_testing.TUNIX_AGENT_STEP_1,
-          rehydrate=trajectory.TunixAgentStep.from_atif_step,
+          testcase_name="example_agent_step",
+          example_model=trajectory_testing.EXAMPLE_AGENT_STEP_1,
+          rehydrate=trajectory_testing.ExampleAgentStep.from_atif_step,
       ),
       dict(
-          testcase_name="tunix_env_step",
-          tunix_model=trajectory_testing.TUNIX_ENV_STEP_0,
-          rehydrate=trajectory.TunixEnvStep.from_atif_step,
+          testcase_name="example_env_step",
+          example_model=trajectory_testing.EXAMPLE_ENV_STEP_0,
+          rehydrate=trajectory_testing.ExampleEnvStep.from_atif_step,
       ),
       dict(
-          testcase_name="tunix_metadata",
-          tunix_model=trajectory_testing.TUNIX_METADATA_1,
-          rehydrate=trajectory.TunixTrajectoryMetadata.from_atif_metadata,
+          testcase_name="example_metadata",
+          example_model=trajectory_testing.EXAMPLE_METADATA_1,
+          rehydrate=trajectory_testing.ExampleTrajectoryMetadata.from_atif_metadata,
       ),
       dict(
-          testcase_name="tunix_trajectory",
-          tunix_model=trajectory_testing.TUNIX_TRAJECTORY_1,
-          rehydrate=trajectory.TunixTrajectoryMetadata.from_atif_metadata,
+          testcase_name="example_trajectory",
+          example_model=trajectory_testing.EXAMPLE_TRAJECTORY_1,
+          rehydrate=trajectory_testing.ExampleTrajectoryMetadata.from_atif_metadata,
       ),
       dict(
-          testcase_name="tunix_trajectory_from_trajectory",
-          tunix_model=trajectory_testing.TUNIX_TRAJECTORY_1,
-          rehydrate=trajectory.TunixTrajectory.from_atif_trajectory,
+          testcase_name="example_trajectory_from_trajectory",
+          example_model=trajectory_testing.EXAMPLE_TRAJECTORY_1,
+          rehydrate=trajectory_testing.ExampleTrajectory.from_atif_trajectory,
       ),
   )
-  def test_from_atif_on_already_tunix_model_is_noop(
-      self, tunix_model, rehydrate
+  def test_from_atif_on_already_example_model_is_noop(
+      self, example_model, rehydrate
   ):
-    self.assertIs(rehydrate(tunix_model), tunix_model)
+    self.assertIs(rehydrate(example_model), example_model)
 
   def test_from_atif_step_with_custom_step_id_offset(self):
-    tunix_step = trajectory_testing.TUNIX_AGENT_STEP_1
-    atif_step = tunix_step.to_atif_step(step_id_offset=0)
+    example_step = trajectory_testing.EXAMPLE_AGENT_STEP_1
+    atif_step = example_step.to_atif_step(step_id_offset=0)
 
-    rehydrated_step = trajectory.TunixAgentStep.from_atif_step(
+    rehydrated_step = trajectory_testing.ExampleAgentStep.from_atif_step(
         atif_step, step_id_offset=0
     )
 
-    self.assertEqual(rehydrated_step.step_id, tunix_step.step_id)
+    self.assertEqual(rehydrated_step.step_id, example_step.step_id)
 
   def test_from_atif_step_on_zero_indexed_step_raises_value_error(self):
     # `from_atif_step` assumes the 1-indexed ATIF numbering. An already
@@ -3074,125 +2925,143 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
     with self.assertRaisesRegex(
         ValueError, "Expected a 1-indexed ATIF step_id, got 0"
     ):
-      trajectory.TunixAgentStep.from_atif_step(zero_indexed_atif_step)
+      trajectory_testing.ExampleAgentStep.from_atif_step(zero_indexed_atif_step)
 
-  def test_from_atif_step_with_foreign_tunix_extensions_key_keeps_it_nested(
+  def test_from_atif_step_with_foreign_example_extensions_key_keeps_it_nested(
       self,
   ):
-    # `TUNIX_EXTENSIONS_KEY` is reserved by convention alone. Only fields the
-    # Tunix subclass actually declares are promoted, so a key a caller stashed
+    # `EXAMPLE_EXTENSIONS_KEY` is reserved by convention alone. Only fields the
+    # Example subclass actually declares are promoted, so a key a caller stashed
     # there stays nested instead of tripping `extra="forbid"`.
     atif_step = trajectory_testing.STEP_1_1.model_copy(
         update={
             "extra": {
                 "user_key": "user_val",
-                trajectory.TUNIX_EXTENSIONS_KEY: {"caller_key": "caller_val"},
+                trajectory_testing.EXAMPLE_EXTENSIONS_KEY: {
+                    "caller_key": "caller_val"
+                },
             }
         }
     )
 
-    rehydrated_step = trajectory.TunixAgentStep.from_atif_step(atif_step)
+    rehydrated_step = trajectory_testing.ExampleAgentStep.from_atif_step(
+        atif_step
+    )
 
     self.assertEqual(
         rehydrated_step.extra,
         {
             "user_key": "user_val",
-            trajectory.TUNIX_EXTENSIONS_KEY: {"caller_key": "caller_val"},
+            trajectory_testing.EXAMPLE_EXTENSIONS_KEY: {
+                "caller_key": "caller_val"
+            },
         },
     )
 
   def test_from_atif_step_does_not_mutate_source_step_extra(self):
     # Unpacking pops promoted fields out of the nested extension dict, so it
     # must work on a copy rather than the dict the source step holds.
-    atif_step = trajectory_testing.TUNIX_AGENT_STEP_1.to_atif_step()
+    atif_step = trajectory_testing.EXAMPLE_AGENT_STEP_1.to_atif_step()
     extra_before = copy.deepcopy(atif_step.extra)
 
-    trajectory.TunixAgentStep.from_atif_step(atif_step)
+    trajectory_testing.ExampleAgentStep.from_atif_step(atif_step)
 
     self.assertEqual(atif_step.extra, extra_before)
 
-  def test_from_atif_step_with_foreign_tunix_extensions_key_does_not_shadow_field(
+  def test_from_atif_step_with_foreign_example_extensions_key_does_not_shadow_field(
       self,
   ):
     # A foreign key naming a real field must not be promoted over the value the
     # step already carries.
     atif_step = trajectory_testing.STEP_1_1.model_copy(
         update={
-            "extra": {trajectory.TUNIX_EXTENSIONS_KEY: {"message": "spoofed"}}
+            "extra": {
+                trajectory_testing.EXAMPLE_EXTENSIONS_KEY: {
+                    "message": "spoofed"
+                }
+            }
         }
     )
 
-    rehydrated_step = trajectory.TunixAgentStep.from_atif_step(atif_step)
+    rehydrated_step = trajectory_testing.ExampleAgentStep.from_atif_step(
+        atif_step
+    )
 
     self.assertEqual(
         rehydrated_step.message, trajectory_testing.STEP_1_1.message
     )
     self.assertEqual(
         rehydrated_step.extra,
-        {trajectory.TUNIX_EXTENSIONS_KEY: {"message": "spoofed"}},
+        {trajectory_testing.EXAMPLE_EXTENSIONS_KEY: {"message": "spoofed"}},
     )
 
-  def test_atif_step_round_trip_with_foreign_tunix_extensions_key_is_lossless(
+  def test_atif_step_round_trip_with_foreign_example_extensions_key_is_lossless(
       self,
   ):
-    # Packing merges foreign keys into `TUNIX_EXTENSIONS_KEY` rather than
+    # Packing merges foreign keys into `EXAMPLE_EXTENSIONS_KEY` rather than
     # overwriting, so unpacking must leave them behind for the projection to be
     # an inverse.
-    tunix_step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(
+    example_step = trajectory_testing.EXAMPLE_AGENT_STEP_1.model_copy(
         update={
             "extra": {
                 "user_key": "user_val",
-                trajectory.TUNIX_EXTENSIONS_KEY: {"caller_key": "caller_val"},
+                trajectory_testing.EXAMPLE_EXTENSIONS_KEY: {
+                    "caller_key": "caller_val"
+                },
             }
         }
     )
 
-    round_tripped_step = trajectory.TunixAgentStep.from_atif_step(
-        tunix_step.to_atif_step()
+    round_tripped_step = trajectory_testing.ExampleAgentStep.from_atif_step(
+        example_step.to_atif_step()
     )
 
-    self.assertStepEqual(round_tripped_step, tunix_step)
+    self.assertStepEqual(round_tripped_step, example_step)
 
-  def test_atif_metadata_round_trip_with_foreign_tunix_extensions_key_is_lossless(
+  def test_atif_metadata_round_trip_with_foreign_example_extensions_key_is_lossless(
       self,
   ):
-    tunix_metadata = trajectory_testing.TUNIX_METADATA_1.model_copy(
+    example_metadata = trajectory_testing.EXAMPLE_METADATA_1.model_copy(
         update={
             "extra": {
                 "user_meta": "val",
-                trajectory.TUNIX_EXTENSIONS_KEY: {"caller_key": "caller_val"},
+                trajectory_testing.EXAMPLE_EXTENSIONS_KEY: {
+                    "caller_key": "caller_val"
+                },
             }
         }
     )
-    atif_metadata = tunix_metadata.to_atif_metadata()
+    atif_metadata = example_metadata.to_atif_metadata()
 
     self.assertIs(
         trajectory.TrajectoryMetadata.resolve_subclass(atif_metadata),
-        trajectory.TunixTrajectoryMetadata,
+        trajectory_testing.ExampleTrajectoryMetadata,
     )
     round_tripped_metadata = (
-        trajectory.TunixTrajectoryMetadata.from_atif_metadata(atif_metadata)
+        trajectory_testing.ExampleTrajectoryMetadata.from_atif_metadata(
+            atif_metadata
+        )
     )
 
     self.assertEqual(
-        round_tripped_metadata.model_dump(), tunix_metadata.model_dump()
+        round_tripped_metadata.model_dump(), example_metadata.model_dump()
     )
 
   @parameterized.named_parameters(
       dict(
           testcase_name="agent_class_rejects_user_source",
-          step_cls=trajectory.TunixAgentStep,
+          step_cls=trajectory_testing.ExampleAgentStep,
           source=trajectory.Source.USER,
           expected_error=(
-              "TunixAgentStep is only applicable when source is 'agent'"
+              "ExampleAgentStep is only applicable when source is 'agent'"
           ),
       ),
       dict(
           testcase_name="env_class_rejects_agent_source",
-          step_cls=trajectory.TunixEnvStep,
+          step_cls=trajectory_testing.ExampleEnvStep,
           source=trajectory.Source.AGENT,
           expected_error=(
-              "TunixEnvStep is only applicable when source is 'system' or"
+              "ExampleEnvStep is only applicable when source is 'system' or"
               " 'user'"
           ),
       ),
@@ -3208,109 +3077,44 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
       step_cls.from_atif_step(atif_step)
 
 
-class TunixAgentStepTokenLogprobLengthTest(parameterized.TestCase):
-  """Covers the `assistant_tokens` / `logprobs` length validator."""
-
-  def _make_step(self, **kwargs: Any) -> trajectory.TunixAgentStep:
-    return trajectory.TunixAgentStep(
-        step_id=1, source=trajectory.Source.AGENT, message="hi", **kwargs
-    )
-
-  @parameterized.named_parameters(
-      dict(
-          testcase_name="matching_arrays",
-          assistant_tokens=np.array([7, 8, 9], dtype=np.int32),
-          logprobs=np.array([-0.5, -0.25, -0.125], dtype=np.float32),
-      ),
-      dict(
-          testcase_name="matching_lists",
-          assistant_tokens=[7, 8],
-          logprobs=[-0.5, -0.25],
-      ),
-      dict(
-          testcase_name="tokens_only",
-          assistant_tokens=np.array([7, 8, 9]),
-          logprobs=None,
-      ),
-      dict(
-          testcase_name="logprobs_only",
-          assistant_tokens=None,
-          logprobs=np.array([-0.5]),
-      ),
-      dict(
-          testcase_name="neither",
-          assistant_tokens=None,
-          logprobs=None,
-      ),
-  )
-  def test_accepts_equal_lengths_or_missing_arrays(
-      self, assistant_tokens: Any, logprobs: Any
-  ):
-    step = self._make_step(assistant_tokens=assistant_tokens, logprobs=logprobs)
-
-    for actual, expected in (
-        (step.assistant_tokens, assistant_tokens),
-        (step.logprobs, logprobs),
-    ):
-      if expected is None:
-        self.assertIsNone(actual)
-      else:
-        np.testing.assert_array_equal(actual, expected)
-
-  def test_rejects_mismatched_lengths(self):
-    with self.assertRaisesRegex(
-        pydantic.ValidationError,
-        r"Length of assistant_tokens \(3\) must match length of logprobs"
-        r" \(2\)",
-    ):
-      self._make_step(
-          assistant_tokens=np.array([7, 8, 9]),
-          logprobs=np.array([-0.5, -0.25]),
-      )
-
-
 class Int3DArraySerializationTest(parameterized.TestCase):
   """Tests compact base64 binary serialization and validation for Int3DArray."""
 
   def test_int_3d_array_serializes_to_base64_blob_and_round_trips(self):
     arr = np.arange(24, dtype=np.int16).reshape(3, 4, 2)
-    step = trajectory.TunixAgentStep(
+    step = trajectory_testing.ExampleAgentStep(
         step_id=0,
         source=trajectory.Source.AGENT,
         message="routed",
-        prefill_routed_experts=arr,
-        prefill_start=0,
-        prefill_num_context=1,
+        routed_experts=arr,
     )
 
     dumped = step.model_dump(mode="json")
-    blob = dumped["prefill_routed_experts"]
+    blob = dumped["routed_experts"]
     self.assertEqual(blob["shape"], [3, 4, 2])
     self.assertEqual(blob["dtype"], "int16")
     self.assertIsInstance(blob["data"], str)
 
-    restored = trajectory.TunixAgentStep.model_validate(dumped)
-    self.assertIsInstance(restored.prefill_routed_experts, np.ndarray)
-    self.assertEqual(restored.prefill_routed_experts.dtype, np.int16)
-    np.testing.assert_array_equal(restored.prefill_routed_experts, arr)
+    restored = trajectory_testing.ExampleAgentStep.model_validate(dumped)
+    self.assertIsInstance(restored.routed_experts, np.ndarray)
+    self.assertEqual(restored.routed_experts.dtype, np.int16)
+    np.testing.assert_array_equal(restored.routed_experts, arr)
 
   def test_int_3d_array_empty_shape_round_trips(self):
     arr = np.zeros((0, 4, 2), dtype=np.int16)
-    step = trajectory.TunixAgentStep(
+    step = trajectory_testing.ExampleAgentStep(
         step_id=0,
         source=trajectory.Source.AGENT,
         message="empty_routed",
-        prefill_routed_experts=arr,
-        prefill_start=0,
-        prefill_num_context=0,
+        routed_experts=arr,
     )
     dumped = step.model_dump(mode="json")
     self.assertEqual(
-        dumped["prefill_routed_experts"],
+        dumped["routed_experts"],
         {"shape": [0, 4, 2], "dtype": "int16", "data": ""},
     )
-    restored = trajectory.TunixAgentStep.model_validate(dumped)
-    np.testing.assert_array_equal(restored.prefill_routed_experts, arr)
+    restored = trajectory_testing.ExampleAgentStep.model_validate(dumped)
+    np.testing.assert_array_equal(restored.routed_experts, arr)
 
   @parameterized.named_parameters(
       dict(
@@ -3356,72 +3160,11 @@ class Int3DArraySerializationTest(parameterized.TestCase):
   )
   def test_int_3d_array_rejects_invalid_inputs(self, bad_value, expected_error):
     with self.assertRaisesRegex(ValueError, expected_error):
-      trajectory.TunixAgentStep(
+      trajectory_testing.ExampleAgentStep(
           step_id=0,
           source=trajectory.Source.AGENT,
           message="invalid",
-          prefill_routed_experts=bad_value,
-          prefill_start=0,
-          prefill_num_context=0,
-      )
-
-  @parameterized.named_parameters(
-      dict(
-          testcase_name="missing_start_and_num_context",
-          kwargs=dict(
-              prefill_routed_experts=np.zeros((2, 2, 1), dtype=np.int16)
-          ),
-          expected_error="either all None or all set",
-      ),
-      dict(
-          testcase_name="missing_routed_experts",
-          kwargs=dict(prefill_start=0, prefill_num_context=1),
-          expected_error="either all None or all set",
-      ),
-      dict(
-          testcase_name="negative_prefill_start",
-          kwargs=dict(
-              prefill_routed_experts=np.zeros((2, 2, 1), dtype=np.int16),
-              prefill_start=-1,
-              prefill_num_context=1,
-          ),
-          expected_error="prefill_start must be >= 0",
-      ),
-      dict(
-          testcase_name="num_context_exceeds_rows",
-          kwargs=dict(
-              prefill_routed_experts=np.zeros((2, 2, 1), dtype=np.int16),
-              prefill_start=0,
-              prefill_num_context=3,
-          ),
-          expected_error="prefill_num_context must be in",
-      ),
-  )
-  def test_agent_step_rejects_invalid_prefill_metadata(
-      self, kwargs, expected_error
-  ):
-    with self.assertRaisesRegex(ValueError, expected_error):
-      trajectory.TunixAgentStep(
-          step_id=0,
-          source=trajectory.Source.AGENT,
-          message="bad_prefill",
-          **kwargs,
-      )
-
-  def test_add_step_rejects_prefill_fields_for_non_agent_source(self):
-    traj = trajectory.TunixTrajectory(
-        session_id="s1",
-        agent=trajectory.Agent(name="a", version="1"),
-    )
-    with self.assertRaisesRegex(
-        ValueError, "only valid when source is 'agent'"
-    ):
-      traj.add_step(
-          trajectory.Source.USER,
-          "env",
-          prefill_routed_experts=np.zeros((1, 2, 1), dtype=np.int16),
-          prefill_start=0,
-          prefill_num_context=0,
+          routed_experts=bad_value,
       )
 
 

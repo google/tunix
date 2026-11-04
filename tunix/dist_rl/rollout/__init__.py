@@ -24,4 +24,4 @@ from tunix.dist_rl.rollout.sampler import Sampler
 from tunix.dist_rl.rollout.vanilla_sampler import VanillaSampler
 from tunix.dist_rl.rollout.vllm_sampler import VllmSampler
 from tunix.dist_rl.trajectory.trajectory import Trajectory
-from tunix.dist_rl.trajectory.trajectory import TrajectoryError
+from tunix.dist_rl.trajectory.tunix_trajectory import TrajectoryError

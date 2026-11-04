@@ -32,6 +32,7 @@ import numpy as np
 from tunix.dist_rl.trajectory import base_store as store_lib
 from tunix.dist_rl.trajectory import converter as converter_lib
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
+from tunix.dist_rl.trajectory import tunix_trajectory
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl import packing
@@ -348,7 +349,7 @@ class TrajectoryCollectEngine:
             break
         if not user_msg and task is not None:
           user_msg = str(task)
-        task_step = trajectory_lib.TunixEnvStep(
+        task_step = tunix_trajectory.TunixEnvStep(
             step_id=0,
             source=trajectory_lib.Source.USER,
             message=user_msg,

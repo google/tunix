@@ -24,6 +24,7 @@ from tunix.dist_rl.trajectory import in_memory_store
 from tunix.dist_rl.trajectory import sql_store
 from tunix.dist_rl.trajectory import store as store_lib
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
+from tunix.dist_rl.trajectory import tunix_trajectory
 
 
 class BackendRegistrationTest(absltest.TestCase):
@@ -36,7 +37,7 @@ class BackendRegistrationTest(absltest.TestCase):
     # backend would otherwise take over "file" for the rest of the process,
     # and `from_config` would hand every caller this class instead.
     class SubclassWithoutBackend(
-        file_store.FileTrajectoryStore[trajectory_lib.TunixTrajectoryMetadata]
+        file_store.FileTrajectoryStore[tunix_trajectory.TunixTrajectoryMetadata]
     ):
       pass
 
@@ -216,7 +217,7 @@ class FromConfigTest(absltest.TestCase):
     self.assertIsInstance(store, file_store.FileTrajectoryStore)
     self.assertIs(
         store.bound_metadata_cls,
-        trajectory_lib.TunixTrajectoryMetadata,
+        tunix_trajectory.TunixTrajectoryMetadata,
     )
     with self.assertRaisesRegex(
         TypeError,
@@ -234,21 +235,21 @@ class FromConfigTest(absltest.TestCase):
   def test_bound_metadata_cls_property_reports_bound_metadata_class(self):
     file_s = store_lib.TunixTrajectoryStore.from_config(self._file_config())
     self.assertIs(
-        file_s.bound_metadata_cls, trajectory_lib.TunixTrajectoryMetadata
+        file_s.bound_metadata_cls, tunix_trajectory.TunixTrajectoryMetadata
     )
     file_s.close()
 
     mem_s = store_lib.TunixTrajectoryStore.from_config({"backend": "memory"})
     self.assertIs(
-        mem_s.bound_metadata_cls, trajectory_lib.TunixTrajectoryMetadata
+        mem_s.bound_metadata_cls, tunix_trajectory.TunixTrajectoryMetadata
     )
 
     subscripted_mem = in_memory_store.InMemoryTrajectoryStore[
-        trajectory_lib.TunixTrajectoryMetadata
+        tunix_trajectory.TunixTrajectoryMetadata
     ]()
     self.assertIs(
         subscripted_mem.bound_metadata_cls,
-        trajectory_lib.TunixTrajectoryMetadata,
+        tunix_trajectory.TunixTrajectoryMetadata,
     )
 
     unbound_mem = in_memory_store.InMemoryTrajectoryStore()
@@ -292,16 +293,16 @@ class GenericTypeParametersTest(absltest.TestCase):
   def test_classes_are_runtime_subscriptable(self) -> None:
     """Verifies that classes are subscriptable with concrete models at runtime."""
     subscripted_store = store_lib.TrajectoryStore[
-        trajectory_lib.TunixTrajectoryMetadata
+        tunix_trajectory.TunixTrajectoryMetadata
     ]
     subscripted_mem = in_memory_store.InMemoryTrajectoryStore[
-        trajectory_lib.TunixTrajectoryMetadata
+        tunix_trajectory.TunixTrajectoryMetadata
     ]
     subscripted_file = file_store.FileTrajectoryStore[
-        trajectory_lib.TunixTrajectoryMetadata
+        tunix_trajectory.TunixTrajectoryMetadata
     ]
     subscripted_sql = sql_store.SqlTrajectoryStore[
-        trajectory_lib.TunixTrajectoryMetadata
+        tunix_trajectory.TunixTrajectoryMetadata
     ]
     self.assertIsNotNone(subscripted_store)
     self.assertIsNotNone(subscripted_mem)
@@ -383,7 +384,7 @@ class GenericTypeParametersTest(absltest.TestCase):
     """Verifies that concrete subclassing binds and closes type parameters."""
 
     class ConcreteFileStore(
-        file_store.FileTrajectoryStore[trajectory_lib.TunixTrajectoryMetadata]
+        file_store.FileTrajectoryStore[tunix_trajectory.TunixTrajectoryMetadata]
     ):
       pass
 
@@ -407,7 +408,7 @@ class GenericTypeParametersTest(absltest.TestCase):
   def test_subscripted_store_binds_metadata_type_on_first_write(self) -> None:
     """Verifies that Store[MetadataT]() rejects mismatched metadata on first write."""
     mem = in_memory_store.InMemoryTrajectoryStore[
-        trajectory_lib.TunixTrajectoryMetadata
+        tunix_trajectory.TunixTrajectoryMetadata
     ]()
     with self.assertRaisesRegex(
         TypeError,
@@ -437,7 +438,7 @@ class GenericTypeParametersTest(absltest.TestCase):
     writer.close()
 
     reader = file_store.FileTrajectoryStore[
-        trajectory_lib.TunixTrajectoryMetadata
+        tunix_trajectory.TunixTrajectoryMetadata
     ](root_dir=tmp_dir)
     try:
       with self.assertRaisesRegex(
@@ -460,7 +461,7 @@ class GenericTypeParametersTest(absltest.TestCase):
 
     class BaseTunixStore(
         in_memory_store.InMemoryTrajectoryStore[
-            trajectory_lib.TunixTrajectoryMetadata
+            tunix_trajectory.TunixTrajectoryMetadata
         ]
     ):
       pass
@@ -470,7 +471,7 @@ class GenericTypeParametersTest(absltest.TestCase):
 
     derived = DerivedTunixStore()
     derived.update_metadata(
-        trajectory_lib.TunixTrajectoryMetadata(
+        tunix_trajectory.TunixTrajectoryMetadata(
             trajectory_id="t_1",
             agent=trajectory_lib.Agent(name="a", version="1.0"),
         )
@@ -497,14 +498,14 @@ class GenericTypeParametersTest(absltest.TestCase):
     class MixedStore(
         UnrelatedGenericMixin[trajectory_lib.TrajectoryMetadata],
         in_memory_store.InMemoryTrajectoryStore[
-            trajectory_lib.TunixTrajectoryMetadata
+            tunix_trajectory.TunixTrajectoryMetadata
         ],
     ):
       pass
 
     self.assertIs(
         MixedStore._metadata_cls,
-        trajectory_lib.TunixTrajectoryMetadata,
+        tunix_trajectory.TunixTrajectoryMetadata,
     )
     store = MixedStore()
     with self.assertRaisesRegex(
@@ -533,17 +534,17 @@ class GenericTypeParametersTest(absltest.TestCase):
       pass
 
     class ConcreteMultiParamStore(
-        MultiParamStore[int, trajectory_lib.TunixTrajectoryMetadata]
+        MultiParamStore[int, tunix_trajectory.TunixTrajectoryMetadata]
     ):
       pass
 
     self.assertIs(
         ConcreteMultiParamStore._metadata_cls,
-        trajectory_lib.TunixTrajectoryMetadata,
+        tunix_trajectory.TunixTrajectoryMetadata,
     )
 
     alias_instance = MultiParamStore[
-        str, trajectory_lib.TunixTrajectoryMetadata
+        str, tunix_trajectory.TunixTrajectoryMetadata
     ]()
     with self.assertRaisesRegex(
         TypeError,
@@ -568,7 +569,7 @@ class GenericTypeParametersTest(absltest.TestCase):
 
     self.assertIs(
         TunixInMemoryStore._metadata_cls,
-        trajectory_lib.TunixTrajectoryMetadata,
+        tunix_trajectory.TunixTrajectoryMetadata,
     )
 
   def test_multiple_inheritance_conflicting_metadata_types_raises(self) -> None:
@@ -595,7 +596,7 @@ class GenericTypeParametersTest(absltest.TestCase):
     store_b = in_memory_store.InMemoryTrajectoryStore()
 
     store_a.update_metadata(
-        trajectory_lib.TunixTrajectoryMetadata(
+        tunix_trajectory.TunixTrajectoryMetadata(
             trajectory_id="t_1",
             agent=trajectory_lib.Agent(name="a", version="1.0"),
         )

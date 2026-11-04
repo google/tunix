@@ -22,11 +22,12 @@ from absl.testing import parameterized
 import numpy as np
 from tunix.dist_rl.trajectory import converter
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
-from tunix.dist_rl.trajectory import trajectory_testing
+from tunix.dist_rl.trajectory import tunix_trajectory
+from tunix.dist_rl.trajectory import tunix_trajectory_testing
 from tunix.rl.agentic.agents import agent_types
 
 
-class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
+class CreateAgentStepTest(tunix_trajectory_testing.TunixTrajectoryTestCase):
 
   def test_create_agent_step_none_returns_none(self):
     step = converter.create_agent_step(None, tunix_step_id=0)
@@ -47,7 +48,7 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
 
     agent_step = converter.create_agent_step(mock_agent_step, tunix_step_id=0)
 
-    expected_step = trajectory_lib.TunixAgentStep(
+    expected_step = tunix_trajectory.TunixAgentStep(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="Calling bash tool",
@@ -299,7 +300,7 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
       *,
       turn_1_start: int = 3,
       turn_1_num_context: int = 4,
-  ) -> tuple[trajectory_lib.TunixTrajectory, np.ndarray, np.ndarray]:
+  ) -> tuple[tunix_trajectory.TunixTrajectory, np.ndarray, np.ndarray]:
     """Builds a 2-turn MoE trajectory the way the collector records it.
 
     Prompt: 2 tokens. Turn 0: 3 assistant tokens (1 routed in turn 0, a 2-token
@@ -345,7 +346,7 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
         prefill_start=turn_1_start,
         prefill_num_context=turn_1_num_context,
     )
-    traj = trajectory_lib.TunixTrajectory(
+    traj = tunix_trajectory.TunixTrajectory(
         trajectory_id="traj_moe",
         agent=trajectory_lib.Agent(name="agent", version="1.0"),
         status="SUCCEEDED",
@@ -442,7 +443,7 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
         converter.to_tunix_trajectory(traj)
 
 
-class CreateEnvStepTest(trajectory_testing.TrajectoryTestCase):
+class CreateEnvStepTest(tunix_trajectory_testing.TunixTrajectoryTestCase):
 
   def test_create_env_step_none_returns_none(self):
     step = converter.create_env_step(None, tunix_step_id=0)
@@ -460,7 +461,7 @@ class CreateEnvStepTest(trajectory_testing.TrajectoryTestCase):
 
     env_step = converter.create_env_step(mock_env_step, tunix_step_id=0)
 
-    expected_step = trajectory_lib.TunixEnvStep(
+    expected_step = tunix_trajectory.TunixEnvStep(
         step_id=2,
         source=trajectory_lib.Source.SYSTEM,
         message="file1.txt\nfile2.txt",
@@ -492,7 +493,7 @@ class CreateEnvStepTest(trajectory_testing.TrajectoryTestCase):
 
     env_step = converter.create_env_step(mock_env_step, tunix_step_id=0)
 
-    expected_step = trajectory_lib.TunixEnvStep(
+    expected_step = tunix_trajectory.TunixEnvStep(
         step_id=2,
         source=trajectory_lib.Source.SYSTEM,
         message="['file1.txt', 'file2.txt']",
@@ -516,7 +517,7 @@ class CreateEnvStepTest(trajectory_testing.TrajectoryTestCase):
 
     env_step = converter.create_env_step(mock_env_step, tunix_step_id=0)
 
-    expected_step = trajectory_lib.TunixEnvStep(
+    expected_step = tunix_trajectory.TunixEnvStep(
         step_id=2,
         source=trajectory_lib.Source.SYSTEM,
         message="",
@@ -563,14 +564,14 @@ class CreateTaskStepTest(parameterized.TestCase):
     self.assertIsNone(step)
 
 
-class ToTunixStepTest(trajectory_testing.TrajectoryTestCase):
+class ToTunixStepTest(tunix_trajectory_testing.TunixTrajectoryTestCase):
 
   def test_to_tunix_step_none_returns_empty_step(self):
     dto_step = converter.to_tunix_step(None, None)
     self.assertStepEqual(dto_step, agent_types.Step())
 
   def test_to_tunix_step_only_agent_step_passed(self):
-    agent_traj_step = trajectory_lib.TunixAgentStep(
+    agent_traj_step = tunix_trajectory.TunixAgentStep(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="Calling search",
@@ -611,7 +612,7 @@ class ToTunixStepTest(trajectory_testing.TrajectoryTestCase):
     self.assertStepEqual(dto_step, expected_step)
 
   def test_to_tunix_step_only_env_step_passed(self):
-    env_traj_step = trajectory_lib.TunixEnvStep(
+    env_traj_step = tunix_trajectory.TunixEnvStep(
         step_id=2,
         source=trajectory_lib.Source.SYSTEM,
         message="Search completed successfully",
@@ -642,7 +643,7 @@ class ToTunixStepTest(trajectory_testing.TrajectoryTestCase):
     self.assertStepEqual(dto_step, expected_step)
 
   def test_to_tunix_step_both_passed(self):
-    agent_traj_step = trajectory_lib.TunixAgentStep(
+    agent_traj_step = tunix_trajectory.TunixAgentStep(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="Calling search",
@@ -661,7 +662,7 @@ class ToTunixStepTest(trajectory_testing.TrajectoryTestCase):
         ),
         extra={"session_id": "sess_1"},
     )
-    env_traj_step = trajectory_lib.TunixEnvStep(
+    env_traj_step = tunix_trajectory.TunixEnvStep(
         step_id=2,
         source=trajectory_lib.Source.SYSTEM,
         message="search result",
@@ -753,7 +754,7 @@ class ToTunixStepTest(trajectory_testing.TrajectoryTestCase):
     self.assertStepEqual(restored_step, expected_step)
 
   def test_to_tunix_step_multiple_tool_calls(self):
-    agent_traj_step = trajectory_lib.TunixAgentStep(
+    agent_traj_step = tunix_trajectory.TunixAgentStep(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="Calling multiple tools",
@@ -944,7 +945,7 @@ class ToTunixStepTest(trajectory_testing.TrajectoryTestCase):
     self.assertIsInstance(restored_step.action.action, CustomCommand)
 
   def test_to_tunix_step_fallback_to_tool_calls_when_raw_action_absent(self):
-    agent_traj_step = trajectory_lib.TunixAgentStep(
+    agent_traj_step = tunix_trajectory.TunixAgentStep(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="Calling search",
@@ -974,7 +975,7 @@ class ToTunixStepTest(trajectory_testing.TrajectoryTestCase):
   def test_to_tunix_step_fallback_multiple_tool_calls_when_raw_action_absent(
       self,
   ):
-    agent_traj_step = trajectory_lib.TunixAgentStep(
+    agent_traj_step = tunix_trajectory.TunixAgentStep(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="Calling tools",
@@ -1004,13 +1005,13 @@ class ToTunixStepTest(trajectory_testing.TrajectoryTestCase):
     )
 
   def test_to_tunix_step_env_step_raw_action_excluded_from_info(self):
-    agent_step = trajectory_lib.TunixAgentStep(
+    agent_step = tunix_trajectory.TunixAgentStep(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="agent msg",
         extra={"raw_action": "agent_action", "other_agent_info": "ok"},
     )
-    env_step = trajectory_lib.TunixEnvStep(
+    env_step = tunix_trajectory.TunixEnvStep(
         step_id=2,
         source=trajectory_lib.Source.SYSTEM,
         message="env msg",
@@ -1038,10 +1039,10 @@ class ToTunixStepTest(trajectory_testing.TrajectoryTestCase):
       self.assertStepEqual(restored, orig_step)
 
 
-class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
+class ToTunixTrajectoryTest(tunix_trajectory_testing.TunixTrajectoryTestCase):
 
   def test_to_tunix_trajectory_empty(self):
-    traj = trajectory_lib.TunixTrajectory(
+    traj = tunix_trajectory.TunixTrajectory(
         trajectory_id="empty_t",
         agent=trajectory_lib.Agent(name="test_agent", version="1.0"),
         steps=[],
@@ -1053,24 +1054,24 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(tunix_traj.status, agent_types.TrajectoryStatus.RUNNING)
 
   def test_to_tunix_trajectory_with_task_and_paired_steps(self):
-    traj = trajectory_lib.TunixTrajectory(
+    traj = tunix_trajectory.TunixTrajectory(
         trajectory_id="t1",
         agent=trajectory_lib.Agent(name="test_agent", version="1.0"),
         total_reward=2.5,
         status="SUCCEEDED",
         steps=[
-            trajectory_lib.TunixEnvStep(
+            tunix_trajectory.TunixEnvStep(
                 step_id=0,
                 source=trajectory_lib.Source.USER,
                 message="Calculate 3+4",
             ),
-            trajectory_lib.TunixAgentStep(
+            tunix_trajectory.TunixAgentStep(
                 step_id=1,
                 source=trajectory_lib.Source.AGENT,
                 message="7",
                 reasoning_content="Simple addition",
             ),
-            trajectory_lib.TunixEnvStep(
+            tunix_trajectory.TunixEnvStep(
                 step_id=2,
                 source=trajectory_lib.Source.SYSTEM,
                 message="Correct",
@@ -1100,12 +1101,12 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertIsNone(tunix_traj.masked_out)
 
   def test_to_tunix_trajectory_rehydrates_prompt_tokens_and_masked_out(self):
-    traj = trajectory_lib.TunixTrajectory(
+    traj = tunix_trajectory.TunixTrajectory(
         trajectory_id="t_prompt_ids",
         agent=trajectory_lib.Agent(name="test_agent", version="1.0"),
         masked_out=True,
         steps=[
-            trajectory_lib.TunixEnvStep(
+            tunix_trajectory.TunixEnvStep(
                 step_id=0,
                 source=trajectory_lib.Source.USER,
                 message="Calculate 3+4",
@@ -1154,7 +1155,7 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
   def test_to_tunix_trajectory_restores_stated_status(
       self, status: agent_types.TrajectoryStatus
   ) -> None:
-    traj = trajectory_lib.TunixTrajectory(
+    traj = tunix_trajectory.TunixTrajectory(
         trajectory_id="status_t",
         agent=trajectory_lib.Agent(name="test_agent", version="1.0"),
         status=status.name,
@@ -1174,7 +1175,7 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
   def test_to_tunix_trajectory_with_unrecognized_status_raises_value_error(
       self, status: str
   ) -> None:
-    traj = trajectory_lib.TunixTrajectory(
+    traj = tunix_trajectory.TunixTrajectory(
         trajectory_id="bad_status_t",
         agent=trajectory_lib.Agent(name="test_agent", version="1.0"),
         status=status,
@@ -1203,7 +1204,7 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
     env_step = converter.create_env_step(orig_rl_step, tunix_step_id=0)
     user_step = converter.create_task_step("Find users")
 
-    traj = trajectory_lib.TunixTrajectory(
+    traj = tunix_trajectory.TunixTrajectory(
         trajectory_id="roundtrip_traj_1",
         agent=trajectory_lib.Agent(name="db_agent", version="1.0"),
         total_reward=1.0,
@@ -1401,7 +1402,7 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
       env_st = converter.create_env_step(s, tunix_step_id=idx)
       converted_steps.append(env_st)
 
-    tunix_traj_obj = trajectory_lib.TunixTrajectory(
+    tunix_traj_obj = tunix_trajectory.TunixTrajectory(
         trajectory_id="deepswe_episode_001",
         agent=trajectory_lib.Agent(name="DeepSWEAgent", version="1.0"),
         total_reward=1.0,
@@ -1447,32 +1448,32 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
       self,
   ):
     rl_trajectory = converter.to_tunix_trajectory(
-        trajectory_testing.PAIRED_ATIF_TRAJECTORY
+        tunix_trajectory_testing.PAIRED_ATIF_TRAJECTORY
     )
 
     self.assertEqual(
         rl_trajectory.reward,
-        trajectory_testing.PAIRED_TUNIX_TRAJECTORY.total_reward,
+        tunix_trajectory_testing.PAIRED_TUNIX_TRAJECTORY.total_reward,
     )
     self.assertEqual(
         rl_trajectory.status, agent_types.TrajectoryStatus.SUCCEEDED
     )
     self.assertEqual(
         rl_trajectory.env_time,
-        trajectory_testing.PAIRED_TUNIX_TRAJECTORY.env_time,
+        tunix_trajectory_testing.PAIRED_TUNIX_TRAJECTORY.env_time,
     )
     self.assertEqual(
         rl_trajectory.reward_time,
-        trajectory_testing.PAIRED_TUNIX_TRAJECTORY.reward_time,
+        tunix_trajectory_testing.PAIRED_TUNIX_TRAJECTORY.reward_time,
     )
 
   def test_to_tunix_trajectory_on_base_atif_trajectory_rehydrates_steps(self):
     prompt_step, agent_step, trailing_env_step = (
-        trajectory_testing.PAIRED_TUNIX_TRAJECTORY.steps
+        tunix_trajectory_testing.PAIRED_TUNIX_TRAJECTORY.steps
     )
 
     rl_trajectory = converter.to_tunix_trajectory(
-        trajectory_testing.PAIRED_ATIF_TRAJECTORY
+        tunix_trajectory_testing.PAIRED_ATIF_TRAJECTORY
     )
 
     self.assertEqual(rl_trajectory.task, {"prompts": [prompt_step.message]})
@@ -1488,36 +1489,36 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
     )
 
   def test_to_tunix_trajectory_computes_discounted_mc_return(self):
-    traj = trajectory_lib.TunixTrajectory(
+    traj = tunix_trajectory.TunixTrajectory(
         trajectory_id="t_discounted",
         agent=trajectory_lib.Agent(name="test_agent", version="1.0"),
         total_reward=3.5,
         gamma=0.9,
         status="SUCCEEDED",
         steps=[
-            trajectory_lib.TunixEnvStep(
+            tunix_trajectory.TunixEnvStep(
                 step_id=0,
                 source=trajectory_lib.Source.USER,
                 message="Prompt",
             ),
-            trajectory_lib.TunixAgentStep(
+            tunix_trajectory.TunixAgentStep(
                 step_id=1,
                 source=trajectory_lib.Source.AGENT,
                 message="Turn 0",
             ),
-            trajectory_lib.TunixEnvStep(
+            tunix_trajectory.TunixEnvStep(
                 step_id=2,
                 source=trajectory_lib.Source.SYSTEM,
                 message="Obs 0",
                 reward=1.0,
                 done=False,
             ),
-            trajectory_lib.TunixAgentStep(
+            tunix_trajectory.TunixAgentStep(
                 step_id=3,
                 source=trajectory_lib.Source.AGENT,
                 message="Turn 1",
             ),
-            trajectory_lib.TunixEnvStep(
+            tunix_trajectory.TunixEnvStep(
                 step_id=4,
                 source=trajectory_lib.Source.SYSTEM,
                 message="Obs 1",
@@ -1531,12 +1532,223 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertAlmostEqual(tunix_traj.steps[0].mc_return, 3.25)
     self.assertAlmostEqual(tunix_traj.steps[1].mc_return, 2.5)
 
+  def test_to_tunix_trajectory_multi_turn_conversion(self):
+    # 1. Create a mock trajectory metadata via create_trajectory_metadata()
+    class MockRolloutRequest:
+      prompt_id = "prompt_123"
+      group_index = 0
+      generation_kwargs = {"temperature": 0.7, "top_p": 0.9}
+      metadata = {"req_key": "req_val"}
+
+    class MockAgent:
+      name = "multi_turn_agent"
+      version = "2.0"
+      trajectory = agent_types.Trajectory(
+          reward=4.5,
+          env_time={"init": 0.1, "step": 0.6},
+          reward_time={"eval": 0.25},
+      )
+
+    meta = converter.create_trajectory_metadata(
+        traj_id="traj_multi_turn_test",
+        request=MockRolloutRequest(),
+        agent=MockAgent(),
+        target_policy_versions=[1, 2, 3],
+        status="SUCCEEDED",
+        extra={"custom_extra": "custom_val"},
+    )
+
+    # 2. Add the first step to it via calling create_task_step (step_id = 0)
+    step_0 = converter.create_task_step("Solve task step by step")
+    self.assertIsNotNone(step_0)
+    self.assertEqual(step_0.step_id, 0)
+    self.assertEqual(step_0.source, trajectory_lib.Source.USER)
+
+    # 3. Add Tunix turn 0 (tunix_step_id=0) agent step -> converted step_id = 1
+    mock_agent_step_1 = agent_types.Step(
+        model_response="Action 1 response",
+        thought="Thought 1",
+        action=agent_types.Action(
+            action={
+                "id": "call_1",
+                "name": "tool_1",
+                "arguments": {"arg1": "val1"},
+            }
+        ),
+        assistant_tokens=np.array([101, 102]),
+        assistant_masks=np.array([1, 1]),
+        logprobs=np.array([-0.1, -0.2]),
+        mc_return=1.0,
+        info={"trace_1": "abc"},
+    )
+    step_1 = converter.create_agent_step(mock_agent_step_1, tunix_step_id=0)
+    self.assertIsNotNone(step_1)
+    self.assertEqual(step_1.step_id, 1)
+
+    # 4. Add Tunix turn 0 (tunix_step_id=0) env step -> converted step_id = 2
+    mock_env_step_1 = agent_types.Step(
+        observation="Observation 1 result",
+        reward=0.5,
+        done=False,
+        env_tokens=np.array([201]),
+        env_masks=np.array([1]),
+        info={"env_meta_1": "val1"},
+    )
+    step_2 = converter.create_env_step(mock_env_step_1, tunix_step_id=0)
+    self.assertIsNotNone(step_2)
+    self.assertEqual(step_2.step_id, 2)
+
+    # 5. Add Tunix turn 1 (tunix_step_id=1) agent step -> converted step_id = 3
+    mock_agent_step_2 = agent_types.Step(
+        model_response="Action 2 response",
+        thought="Thought 2",
+        action=agent_types.Action(
+            action={
+                "id": "call_2",
+                "name": "tool_2",
+                "arguments": {"arg2": "val2"},
+            }
+        ),
+        assistant_tokens=np.array([103, 104]),
+        assistant_masks=np.array([1, 1]),
+        logprobs=np.array([-0.3, -0.4]),
+        mc_return=2.0,
+        info={"trace_2": "def"},
+    )
+    step_3 = converter.create_agent_step(mock_agent_step_2, tunix_step_id=1)
+    self.assertIsNotNone(step_3)
+    self.assertEqual(step_3.step_id, 3)
+
+    # 6. Add Tunix turn 1 (tunix_step_id=1) env step -> converted step_id = 4
+    mock_env_step_2 = agent_types.Step(
+        observation="Observation 2 result",
+        reward=1.0,
+        done=False,
+        env_tokens=np.array([202]),
+        env_masks=np.array([1]),
+        info={"env_meta_2": "val2"},
+    )
+    step_4 = converter.create_env_step(mock_env_step_2, tunix_step_id=1)
+    self.assertIsNotNone(step_4)
+    self.assertEqual(step_4.step_id, 4)
+
+    # 7. Add Tunix turn 2 (tunix_step_id=2) agent step -> converted step_id = 5
+    mock_agent_step_3 = agent_types.Step(
+        model_response="Action 3 response",
+        thought="Thought 3",
+        action=None,
+        assistant_tokens=np.array([105, 106]),
+        assistant_masks=np.array([1, 1]),
+        logprobs=np.array([-0.5, -0.6]),
+        mc_return=3.0,
+        info={"trace_3": "ghi"},
+    )
+    step_5 = converter.create_agent_step(mock_agent_step_3, tunix_step_id=2)
+    self.assertIsNotNone(step_5)
+    self.assertEqual(step_5.step_id, 5)
+
+    # 8. Add Tunix turn 2 (tunix_step_id=2) env step -> converted step_id = 6
+    mock_env_step_3 = agent_types.Step(
+        observation="Observation 3 result",
+        reward=3.0,
+        done=True,
+        env_tokens=np.array([203]),
+        env_masks=np.array([1]),
+        info={"env_meta_3": "val3"},
+    )
+    step_6 = converter.create_env_step(mock_env_step_3, tunix_step_id=2)
+    self.assertIsNotNone(step_6)
+    self.assertEqual(step_6.step_id, 6)
+
+    traj = tunix_trajectory.TunixTrajectory(
+        **meta.model_dump(),
+        steps=[step_0, step_1, step_2, step_3, step_4, step_5, step_6],
+    )
+
+    # 9. Call to_tunix_trajectory to convert the trajectory
+    converted_traj = converter.to_tunix_trajectory(traj)
+
+    # 10. Verify received trajectory
+    # a) Trajectory task should have the same prompt as Step #0
+    self.assertEqual(
+        converted_traj.task, {"prompts": ["Solve task step by step"]}
+    )
+    self.assertEqual(converted_traj.task["prompts"][0], traj.steps[0].message)
+
+    # b) Step #0 contains (3) and (4)
+    self.assertLen(converted_traj.steps, 3)
+    expected_step_0 = converter.to_tunix_step(
+        agent_step=step_1, env_step=step_2
+    )
+    expected_step_0.mc_return = 4.5
+    self.assertStepEqual(converted_traj.steps[0], expected_step_0)
+    self.assertEqual(
+        converted_traj.steps[0].model_response, "Action 1 response"
+    )
+    self.assertEqual(converted_traj.steps[0].thought, "Thought 1")
+    self.assertEqual(
+        converted_traj.steps[0].action,
+        agent_types.Action(
+            action={
+                "id": "call_1",
+                "name": "tool_1",
+                "arguments": {"arg1": "val1"},
+            }
+        ),
+    )
+    self.assertEqual(
+        converted_traj.steps[0].observation, "Observation 1 result"
+    )
+    self.assertEqual(converted_traj.steps[0].reward, 0.5)
+    self.assertFalse(converted_traj.steps[0].done)
+    self.assertEqual(converted_traj.steps[0].mc_return, 4.5)
+    np.testing.assert_array_equal(
+        converted_traj.steps[0].assistant_tokens, np.array([101, 102])
+    )
+    np.testing.assert_array_equal(
+        converted_traj.steps[0].assistant_masks, np.array([1, 1])
+    )
+    np.testing.assert_array_equal(
+        converted_traj.steps[0].logprobs, np.array([-0.1, -0.2])
+    )
+    np.testing.assert_array_equal(
+        converted_traj.steps[0].env_tokens, np.array([201])
+    )
+    np.testing.assert_array_equal(
+        converted_traj.steps[0].env_masks, np.array([1])
+    )
+    self.assertEqual(
+        converted_traj.steps[0].info,
+        {"trace_1": "abc", "env_meta_1": "val1"},
+    )
+
+    # c) Step #1 contains (5) and (6)
+    expected_step_1 = converter.to_tunix_step(
+        agent_step=step_3, env_step=step_4
+    )
+    expected_step_1.mc_return = 4.0
+    self.assertStepEqual(converted_traj.steps[1], expected_step_1)
+    self.assertEqual(
+        converted_traj.steps[1].model_response, "Action 2 response"
+    )
+    self.assertEqual(converted_traj.steps[1].thought, "Thought 2")
+    self.assertEqual(
+        converted_traj.steps[1].action,
+        agent_types.Action(
+            action={
+                "id": "call_2",
+                "name": "tool_2",
+                "arguments": {"arg2": "val2"},
+            }
+        ),
+    )
+
 
 class CreateTrajectoryMetadataTest(parameterized.TestCase):
 
   def test_create_trajectory_metadata_defaults(self):
     meta = converter.create_trajectory_metadata(traj_id="traj_100")
-    self.assertIsInstance(meta, trajectory_lib.TunixTrajectoryMetadata)
+    self.assertIsInstance(meta, tunix_trajectory.TunixTrajectoryMetadata)
     self.assertIsInstance(meta, trajectory_lib.TrajectoryMetadata)
     self.assertEqual(meta.trajectory_id, "traj_100")
     self.assertEqual(meta.agent.name, "agent")
@@ -1574,7 +1786,7 @@ class CreateTrajectoryMetadataTest(parameterized.TestCase):
         status="SUCCEEDED",
         extra={"custom_tag": "run_1"},
     )
-    self.assertIsInstance(meta, trajectory_lib.TunixTrajectoryMetadata)
+    self.assertIsInstance(meta, tunix_trajectory.TunixTrajectoryMetadata)
     self.assertEqual(meta.trajectory_id, "traj_200")
     self.assertEqual(meta.agent.name, "custom_agent")
     self.assertEqual(meta.agent.version, "2.1")
@@ -1604,7 +1816,7 @@ class UpdateTrajectoryMetadataTest(parameterized.TestCase):
           reward_time={"eval_latency": 0.05},
       )
 
-    meta = trajectory_lib.TunixTrajectoryMetadata(
+    meta = tunix_trajectory.TunixTrajectoryMetadata(
         trajectory_id="traj_1",
         agent=trajectory_lib.Agent(name="agent", version="1.0"),
         status="RUNNING",
@@ -1624,7 +1836,7 @@ class UpdateTrajectoryMetadataTest(parameterized.TestCase):
     self.assertEqual(updated_meta.extra, {"checkpoint": "step_100"})
 
   def test_update_trajectory_metadata_status_override(self):
-    meta = trajectory_lib.TunixTrajectoryMetadata(
+    meta = tunix_trajectory.TunixTrajectoryMetadata(
         trajectory_id="traj_2",
         agent=trajectory_lib.Agent(name="agent", version="1.0"),
         status="RUNNING",
@@ -1640,7 +1852,7 @@ class UpdateTrajectoryMetadataTest(parameterized.TestCase):
   def test_update_trajectory_metadata_policy_version_appends_and_deduplicates(
       self,
   ):
-    meta = trajectory_lib.TunixTrajectoryMetadata(
+    meta = tunix_trajectory.TunixTrajectoryMetadata(
         trajectory_id="traj_3",
         agent=trajectory_lib.Agent(name="agent", version="1.0"),
         status="RUNNING",
@@ -1660,7 +1872,7 @@ class UpdateTrajectoryMetadataTest(parameterized.TestCase):
     self.assertEqual(meta.target_policy_versions, [1, 2])
 
   def test_update_trajectory_metadata_target_policy_versions_override(self):
-    meta = trajectory_lib.TunixTrajectoryMetadata(
+    meta = tunix_trajectory.TunixTrajectoryMetadata(
         trajectory_id="traj_4",
         agent=trajectory_lib.Agent(name="agent", version="1.0"),
         target_policy_versions=[1, 2],
@@ -1674,7 +1886,7 @@ class UpdateTrajectoryMetadataTest(parameterized.TestCase):
     class MockAgent:
       trajectory = agent_types.Trajectory(masked_out=True)
 
-    meta = trajectory_lib.TunixTrajectoryMetadata(
+    meta = tunix_trajectory.TunixTrajectoryMetadata(
         trajectory_id="traj_masked",
         agent=trajectory_lib.Agent(name="agent", version="1.0"),
     )
