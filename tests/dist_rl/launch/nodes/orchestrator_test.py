@@ -21,6 +21,7 @@ import dataclasses
 import importlib
 import pickle
 import sys
+import threading
 from unittest import mock
 
 from absl.testing import absltest
@@ -88,19 +89,43 @@ def _prompt(items: grain.MapDataset[dict[str, object]], index: int) -> object:
 
 
 class _FakeDiscovery(runtime_context.DiscoveryContext):
-  """Registers the given workers as soon as the orchestrator subscribes."""
+  """Registers the given workers as soon as the orchestrator subscribes.
 
-  def __init__(self, service_types: Sequence[str] = ()) -> None:
+  Every worker sends `config_sha256` as its config fingerprint, or no
+  fingerprint when it is None.
+  """
+
+  def __init__(
+      self,
+      service_types: Sequence[str] = (),
+      config_sha256: str | None = "",
+  ) -> None:
     self._service_types = service_types
+    self._config_sha256 = config_sha256
 
   def on_register(self, callback: Callable[[str, int, bytes], None]) -> None:
     for i, service_type in enumerate(self._service_types):
-      metadata = {
+      metadata: dict[str, object] = {
           "service_type": service_type,
           "service_port": 50000 + i,
           "worker_id": f"{service_type}-{i}",
       }
+      if self._config_sha256 is not None:
+        metadata[node_utils.CONFIG_SHA256_METADATA_KEY] = self._config_sha256
       callback("localhost", 0, pickle.dumps(metadata))
+
+
+class _ThreadedDiscovery(_FakeDiscovery):
+  """Registers from another thread and drops callback errors, like gRPC."""
+
+  def on_register(self, callback: Callable[[str, int, bytes], None]) -> None:
+    def _register() -> None:
+      try:
+        _FakeDiscovery.on_register(self, callback)
+      except ValueError:
+        pass  # gRPC returns the error to the registering worker.
+
+    threading.Thread(target=_register, daemon=True).start()
 
 
 class _FakeIpc(runtime_context.IpcContext):
@@ -559,9 +584,14 @@ class ClusterTest(absltest.TestCase):
 
   def test_wait_for_workers_registers_with_rpc_timeout(self):
     hp = _config("agentic_grpo_config.beta=0.0")
+    sha = resolve_config.config_fingerprint(hp)
     cluster = self._cluster(hp)
     orchestrator.wait_for_workers(
-        hp, cluster, _FakeDiscovery(["trainer", "rollout"]), rpc_timeout_s=42.0
+        hp,
+        cluster,
+        _FakeDiscovery(["trainer", "rollout"], config_sha256=sha),
+        rpc_timeout_s=42.0,
+        config_sha256=sha,
     )
     self.assertEqual(
         [info.worker_id for info in cluster.registry.infos()],
@@ -582,8 +612,13 @@ class ClusterTest(absltest.TestCase):
         hp: resolve_config.DistHyperParameters, service_types: Sequence[str]
     ) -> cluster_orchestrator.ClusterOrchestrator:
       cluster = self._cluster(hp)
+      sha = resolve_config.config_fingerprint(hp)
       orchestrator.wait_for_workers(
-          hp, cluster, _FakeDiscovery(service_types), rpc_timeout_s=1.0
+          hp,
+          cluster,
+          _FakeDiscovery(service_types, config_sha256=sha),
+          rpc_timeout_s=1.0,
+          config_sha256=sha,
       )
       return cluster
 
@@ -594,12 +629,125 @@ class ClusterTest(absltest.TestCase):
     )
 
     k8s_hp = _config(*overrides, "cluster_config.target=k8s")
-    with self.assertRaises(TimeoutError):
+    with self.assertRaisesRegex(
+        TimeoutError,
+        r"did not register within cluster_config.init_timeout_s=0\.5s\."
+        r" Required: .*'rollout'>: 2.*, registered: .*'rollout'>: 1",
+    ):
       wait(k8s_hp, ["trainer", "rollout"])
     k8s = wait(k8s_hp, ["trainer", "rollout", "rollout"])
     self.assertLen(
         k8s.registry.handles(datatypes.Role.ROLLOUT, statuses=None), 2
     )
+
+  def test_wait_for_workers_rejects_a_worker_with_another_config(self):
+    hp = _config(
+        "agentic_grpo_config.beta=0.0", "cluster_config.init_timeout_s=30"
+    )
+    sha = resolve_config.config_fingerprint(hp)
+    other_sha = "0" * 64
+    for discovery in (
+        _FakeDiscovery(["trainer", "rollout"], config_sha256=other_sha),
+        # Registered off the waiting thread, as discovery does: the wait
+        # still raises the error, instead of timing out.
+        _ThreadedDiscovery(["trainer", "rollout"], config_sha256=other_sha),
+    ):
+      with self.subTest(type(discovery).__name__):
+        cluster = self._cluster(hp)
+        with self.assertRaisesRegex(
+            ValueError,
+            "trainer worker 'trainer-0' at localhost resolved a different"
+            f" config than the orchestrator \\(config_sha256 {other_sha} vs"
+            f" {sha}\\)",
+        ):
+          orchestrator.wait_for_workers(
+              hp, cluster, discovery, rpc_timeout_s=1.0, config_sha256=sha
+          )
+        self.assertEmpty(cluster.registry.infos())
+    # A worker that sends no fingerprint is rejected too.
+    with self.assertRaisesRegex(
+        ValueError, "registered without a config_sha256"
+    ):
+      orchestrator.wait_for_workers(
+          hp,
+          self._cluster(hp),
+          _FakeDiscovery(["trainer"], config_sha256=None),
+          rpc_timeout_s=1.0,
+          config_sha256=sha,
+      )
+
+  def test_wait_for_workers_raises_a_rejection_even_past_the_deadline(self):
+    hp = _config(
+        "agentic_grpo_config.beta=0.0", "cluster_config.init_timeout_s=0.2"
+    )
+    sha = resolve_config.config_fingerprint(hp)
+    discovery = _FakeDiscovery()
+    cluster = self._cluster(hp)
+    poll = cluster.registry.wait_for_workers
+
+    def reject_during_last_poll(
+        *, min_workers: dict[datatypes.Role | str, int], timeout: float | None
+    ) -> None:
+      # A worker with another config registers (on discovery's thread) while
+      # the only poll waits; the poll then times out at the deadline.
+      (register,) = on_register.call_args.args
+      with self.assertRaises(ValueError):
+        register(
+            "localhost",
+            0,
+            pickle.dumps({
+                "service_type": "trainer",
+                "service_port": 50000,
+                "worker_id": "trainer-0",
+                node_utils.CONFIG_SHA256_METADATA_KEY: "0" * 64,
+            }),
+        )
+      poll(min_workers=min_workers, timeout=timeout)
+
+    with (
+        mock.patch.object(
+            discovery, "on_register", wraps=discovery.on_register
+        ) as on_register,
+        mock.patch.object(
+            cluster.registry,
+            "wait_for_workers",
+            side_effect=reject_during_last_poll,
+        ),
+        self.assertRaisesRegex(ValueError, "resolved a different config"),
+    ):
+      orchestrator.wait_for_workers(
+          hp, cluster, discovery, rpc_timeout_s=1.0, config_sha256=sha
+      )
+
+  def test_wait_for_workers_rejects_a_late_worker_with_another_config(self):
+    hp = _config(
+        "agentic_grpo_config.beta=0.0", "cluster_config.init_timeout_s=30"
+    )
+    sha = resolve_config.config_fingerprint(hp)
+    discovery = _FakeDiscovery(["trainer", "rollout"], config_sha256=sha)
+    cluster = self._cluster(hp)
+    with mock.patch.object(
+        discovery, "on_register", wraps=discovery.on_register
+    ) as on_register:
+      orchestrator.wait_for_workers(
+          hp, cluster, discovery, rpc_timeout_s=1.0, config_sha256=sha
+      )
+    registered = cluster.registry.infos()
+    # Discovery keeps calling the callback for workers that join later.
+    (register,) = on_register.call_args.args
+    late_worker = pickle.dumps({
+        "service_type": "rollout",
+        "service_port": 50009,
+        "worker_id": "rollout-9",
+        node_utils.CONFIG_SHA256_METADATA_KEY: "0" * 64,
+    })
+    with self.assertLogs(level="WARNING") as logs:
+      with self.assertRaisesRegex(
+          ValueError, "rollout worker 'rollout-9' at late-host resolved"
+      ):
+        register("late-host", 0, late_worker)
+    self.assertIn("Rejected a worker registration", logs.output[0])
+    self.assertEqual(cluster.registry.infos(), registered)
 
   def test_close_cluster_stops_workers_on_exit(self):
     cluster = _FakeCluster()
@@ -716,6 +864,7 @@ class ProgramTest(absltest.TestCase):
   ) -> tuple[rl_program.StandardRLProgram, mock.MagicMock]:
     """Runs a real program on `cluster`; returns it and its `close` spy."""
     hp = self._program_config("agentic_grpo_config.beta=0.0", *overrides)
+    sha = resolve_config.config_fingerprint(hp)
     program = self._build_program(hp, reward_fns=[])
     self.addCleanup(_close_keeping_workers, cluster)
     with mock.patch.object(program, "close", wraps=program.close) as close:
@@ -725,8 +874,9 @@ class ProgramTest(absltest.TestCase):
                 hp,
                 cluster,
                 program,
-                discovery=_FakeDiscovery(service_types),
+                discovery=_FakeDiscovery(service_types, config_sha256=sha),
                 rpc_timeout_s=1.0,
+                config_sha256=sha,
             )
         )
       finally:
@@ -802,7 +952,13 @@ rl_training_config:
     ).full_path
 
   def test_runs_configured_task(self):
-    discovery = _FakeDiscovery(["trainer", "rollout"])
+    argv = [
+        f"override_config_file={self._recipe()}",
+        "cluster_config.run_id=run_1",
+    ]
+    # The workers resolved the same config as the orchestrator.
+    sha = resolve_config.config_fingerprint(resolve_config.initialize(argv))
+    discovery = _FakeDiscovery(["trainer", "rollout"], config_sha256=sha)
     cluster = _FakeCluster()
     with (
         mock.patch.object(
@@ -825,13 +981,7 @@ rl_training_config:
             orchestrator, "build_program", wraps=orchestrator.build_program
         ) as build_program,
     ):
-      orchestrator.main(
-          [
-              f"override_config_file={self._recipe()}",
-              "cluster_config.run_id=run_1",
-          ],
-          _FakeProcessContext(discovery),
-      )
+      orchestrator.main(argv, _FakeProcessContext(discovery))
 
     setup_metrics.assert_called_once_with(
         default_service_name="tunix-orchestrator",
@@ -855,7 +1005,9 @@ rl_training_config:
     (_, cluster_arg, discovery_arg), wait_kwargs = wait_for_workers.call_args
     self.assertIs(cluster_arg, cluster)
     self.assertIs(discovery_arg, discovery)
-    self.assertEqual(wait_kwargs, {"rpc_timeout_s": 1800.0})
+    self.assertEqual(
+        wait_kwargs, {"rpc_timeout_s": 1800.0, "config_sha256": sha}
+    )
     self.assertEqual(
         cluster.calls, ["bring_up_workers", "run", "shutdown", "monitor.close"]
     )

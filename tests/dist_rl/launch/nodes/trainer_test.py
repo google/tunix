@@ -75,10 +75,8 @@ class TrainerMainTest(absltest.TestCase):
     )
 
   def test_main_builds_worker_and_serves_with_close(self):
-    trainer.main(
-        ["cluster_config.ports.trainer=20050", "cluster_config.run_id=run_1"],
-        context=self.mock_context,
-    )
+    argv = ["cluster_config.ports.trainer=20050", "cluster_config.run_id=run_1"]
+    trainer.main(argv, context=self.mock_context)
 
     self.mock_setup_metrics.assert_called_once_with(
         default_service_name="tunix-trainer",
@@ -104,6 +102,11 @@ class TrainerMainTest(absltest.TestCase):
     self.assertEqual(serve_kwargs["role"], "trainer")
     self.assertEqual(serve_kwargs["worker_id_str"], trainer.LOCAL_WORKER_ID)
     self.assertEqual(serve_kwargs["port"], 20050)
+    # The worker registers with the fingerprint of the config it resolved.
+    self.assertEqual(
+        serve_kwargs["config_sha256"],
+        resolve_config.config_fingerprint(_hp(*argv)),
+    )
     # The worker is stopped after the gRPC server, not drained before it.
     self.assertNotIn("drain_fn", serve_kwargs)
     self.assertIsNone(serve_kwargs["close_fn"]())

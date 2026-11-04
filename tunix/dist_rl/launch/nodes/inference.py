@@ -56,7 +56,7 @@ def main(
   )
 
   hp = resolve_config.initialize(argv)
-  node_utils.log_resolved_config(hp, "inference")
+  config_sha256 = node_utils.log_resolved_config(hp, "inference")
   worker_id = node_utils.worker_id(hp, "inference", LOCAL_WORKER_ID)
   # Before the JAX initialization, which can block on the other processes, so
   # a malformed OpenTelemetry setting fails fast.
@@ -111,6 +111,7 @@ def main(
           role="inference",
           worker_id_str=worker_id,
           port=port,
+          config_sha256=config_sha256,
       )
   )
 

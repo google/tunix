@@ -19,6 +19,7 @@ from unittest import mock
 from absl.testing import absltest
 from jax.sharding import Mesh
 from tunix.dist_rl.common import otel_setup
+from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import inference
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.worker import inference_worker as exp_inference_worker
@@ -81,17 +82,15 @@ class InferenceMainTest(absltest.TestCase):
     )
 
   def test_main_loads_model_with_separate_load_dtype_and_serves_worker(self):
-    inference.main(
-        [
-            "reference_model_config.model_name=Qwen3-4B",
-            "reference_model_config.dtype=bfloat16",
-            "reference_model_config.load_dtype=float32",
-            "rl_training_config.compute_logps_micro_batch_size=4",
-            "cluster_config.ports.inference=20052",
-            "cluster_config.run_id=run_1",
-        ],
-        context=self.mock_context,
-    )
+    argv = [
+        "reference_model_config.model_name=Qwen3-4B",
+        "reference_model_config.dtype=bfloat16",
+        "reference_model_config.load_dtype=float32",
+        "rl_training_config.compute_logps_micro_batch_size=4",
+        "cluster_config.ports.inference=20052",
+        "cluster_config.run_id=run_1",
+    ]
+    inference.main(argv, context=self.mock_context)
 
     self.mock_setup_metrics.assert_called_once_with(
         default_service_name="tunix-inference",
@@ -127,6 +126,9 @@ class InferenceMainTest(absltest.TestCase):
         role="inference",
         worker_id_str="reference-inference-0",
         port=20052,
+        config_sha256=resolve_config.config_fingerprint(
+            resolve_config.initialize(argv)
+        ),
     )
 
   def test_main_raises_without_discovery_context(self):

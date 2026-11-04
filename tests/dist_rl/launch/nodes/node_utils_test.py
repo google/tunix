@@ -306,6 +306,7 @@ class ServeWorkerTest(absltest.TestCase):
                 role="rollout",
                 worker_id_str="rollout-0",
                 port=20001,
+                config_sha256="config-sha",
                 extra_metadata={"trajectory_store_config": {"backend": "file"}},
                 drain_fn=drain_fn,
                 close_fn=close_fn,
@@ -337,6 +338,7 @@ class ServeWorkerTest(absltest.TestCase):
             "service_type": "rollout",
             "service_port": 20001,
             "worker_id": "rollout-0",
+            node_utils.CONFIG_SHA256_METADATA_KEY: "config-sha",
             "trajectory_store_config": {"backend": "file"},
         },
     )

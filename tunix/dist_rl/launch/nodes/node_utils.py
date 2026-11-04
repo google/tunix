@@ -53,6 +53,10 @@ ROLLOUT_REPLICA_ENV = "DIST_RL_ROLLOUT_REPLICA"
 # Marker that starts the resolved-config log line, so the record can be found in
 # mixed logs (e.g. `sed -n 's/.*DIST_RL_RESOLVED_CONFIG //p' trainer.log | jq`).
 RESOLVED_CONFIG_LOG_MARKER = "DIST_RL_RESOLVED_CONFIG"
+# Discovery registration metadata key holding the worker's config
+# fingerprint; the orchestrator rejects a worker whose value differs from its
+# own.
+CONFIG_SHA256_METADATA_KEY = "config_sha256"
 # Environment variables recorded with the resolved config: runtime settings
 # only, never credentials. The exact names are the toggles the launchers and
 # nodes set; the prefixes are whole namespaces.
@@ -354,6 +358,7 @@ async def serve_worker(
     role: NodeRole,
     worker_id_str: str,
     port: int,
+    config_sha256: str,
     extra_metadata: Mapping[str, object] | None = None,
     drain_fn: Callable[[], Awaitable[None] | None] | None = None,
     close_fn: Callable[[], None] | None = None,
@@ -369,6 +374,9 @@ async def serve_worker(
     role: Node role ("trainer", "rollout", "inference").
     worker_id_str: Registered worker id.
     port: gRPC port to listen on.
+    config_sha256: This worker's config fingerprint (`log_resolved_config`
+      returns it), sent with the registration so that the orchestrator can
+      reject a worker that resolved a different config.
     extra_metadata: Optional extra fields merged into the discovery metadata.
     drain_fn: Optional sync or async callback run before `stop_serving`, e.g. to
       cancel long-running work so in-flight RPCs return.
@@ -387,6 +395,7 @@ async def serve_worker(
         "service_type": role,
         "service_port": port,
         "worker_id": worker_id_str,
+        CONFIG_SHA256_METADATA_KEY: config_sha256,
     }
     if extra_metadata:
       metadata.update(extra_metadata)

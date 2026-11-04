@@ -899,6 +899,33 @@ class RolloutMainTest(absltest.TestCase):
     )
     serve_worker.assert_awaited_once()
 
+  def test_main_serves_with_the_config_fingerprint(self):
+    argv = ["cluster_config.run_id=run_1"]
+    worker_service = mock.MagicMock(trajectory_store=None)
+    with contextlib.ExitStack() as stack:
+      # `main` sets environment defaults; restore the test's environment.
+      stack.enter_context(mock.patch.dict(os.environ))
+      stack.enter_context(mock.patch.object(rollout.importlib, "import_module"))
+      stack.enter_context(mock.patch.object(gcs_cache, "restore_jax_cache"))
+      stack.enter_context(mock.patch.object(node_utils, "load_hf_tokenizer"))
+      stack.enter_context(
+          mock.patch.object(
+              rollout, "_create_rollout_worker", return_value=worker_service
+          )
+      )
+      serve_worker = stack.enter_context(
+          mock.patch.object(
+              node_utils, "serve_worker", new_callable=mock.AsyncMock
+          )
+      )
+      rollout.main(argv, context=mock.Mock())
+
+    serve_worker.assert_awaited_once()
+    self.assertEqual(
+        serve_worker.call_args.kwargs["config_sha256"],
+        resolve_config.config_fingerprint(resolve_config.initialize(argv)),
+    )
+
   def test_main_raises_without_discovery_context(self):
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):
       rollout.main([], context=None)

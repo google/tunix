@@ -970,7 +970,7 @@ def main(
     os.environ.setdefault("NEW_MODEL_DESIGN", "1")
   # Logged after the defaults above, so the record holds the effective env, and
   # before the JAX initialization, which can block on the other processes.
-  node_utils.log_resolved_config(hp, "rollout")
+  config_sha256 = node_utils.log_resolved_config(hp, "rollout")
 
   sampler_type = str(hp.config["rollout_engine"])
   if sampler_type == "vanilla":
@@ -994,6 +994,7 @@ def main(
         role="rollout",
         worker_id_str=worker_id,
         port=port,
+        config_sha256=config_sha256,
         extra_metadata={
             "trajectory_store_config": (
                 worker_service.trajectory_store.to_config()
