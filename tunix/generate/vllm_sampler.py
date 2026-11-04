@@ -265,7 +265,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   def refresh_state_leaves(self) -> None:
     """Re-reads the runner's state leaves after its params were updated."""
-    self._model_runner.state_leaves = tuple(
+    runner = self._model_runner
+    if hasattr(runner, "refresh_state_leaves"):
+      # tpu-inference knows its dispatch view: flattened leaves for an nnx
+      # state, the dict itself for the torchax (vLLM PyTorch model) path.
+      runner.refresh_state_leaves()
+      return
+    runner.state_leaves = tuple(
         jax.tree_util.tree_leaves(self._model_runner.state)
     )
 
@@ -395,8 +401,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     runner.model.load_canonical_weights(canonical, runner.state)
 
   def _update_params_jax(self, updated_weights: jaxtyping.PyTree) -> None:
-    """Mapped weight sync into the tpu-inference flax/nnx model state."""
-    utils.transfer_state_with_mappings(
+    """Mapped weight sync into the tpu-inference model state.
+
+    For flax/nnx states the transfer assigns in place. A torchax (vLLM
+    PyTorch model) runner keeps a plain ``{name: jax.Array}`` dict, for which
+    the transfer returns a new dict that has to be written back.
+    """
+    new_state = utils.transfer_state_with_mappings(
         src_state=updated_weights,
         dst_state=self.transformer_state,
         key_mappings=self.to_hf_key_mappings,
@@ -417,6 +428,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         ),
         tp_size=self.args.get("tensor_parallel_size", 1),
     )
+    if isinstance(self._model_runner.state, dict):
+      self._model_runner.state.update(new_state)
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading

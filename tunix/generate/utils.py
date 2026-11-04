@@ -830,27 +830,33 @@ def _sync_tied_lm_head_if_needed(
   if any(key.endswith('lm_head') for key in transferred_target_keys):
     return
 
-  embed_param = None
-  lm_head_param = None
-  for flat_key, tgt_param in tgt_flat_list:
+  embed_idx = None
+  lm_head_idx = None
+  for idx, (flat_key, _) in enumerate(tgt_flat_list):
     path = (
         flat_key
         if isinstance(flat_key, str)
         else '.'.join(str(k) for k in flat_key)
     )
     if path.endswith(('embedding', 'embed_tokens.weight')):
-      embed_param = tgt_param
+      embed_idx = idx
     elif path.endswith(('lm_head', 'lm_head.weight')):
-      lm_head_param = tgt_param
+      lm_head_idx = idx
 
-  if embed_param is None or lm_head_param is None:
+  if embed_idx is None or lm_head_idx is None:
     return
-  if not hasattr(embed_param, 'value') or not hasattr(lm_head_param, 'value'):
-    return
-  if embed_param.value.shape != lm_head_param.value.shape:
+  embed_param = tgt_flat_list[embed_idx][1]
+  lm_head_key, lm_head_param = tgt_flat_list[lm_head_idx]
+  embed_val = getattr(embed_param, 'value', embed_param)
+  lm_head_val = getattr(lm_head_param, 'value', lm_head_param)
+  if embed_val.shape != lm_head_val.shape:
     return
 
-  lm_head_param.value = embed_param.value
+  if hasattr(lm_head_param, 'value'):
+    lm_head_param.value = embed_val
+  else:
+    # Plain-array destination (e.g. the dict state of a torchax vLLM model).
+    tgt_flat_list[lm_head_idx] = (lm_head_key, embed_val)
 
 
 def transfer_state_with_mappings(
