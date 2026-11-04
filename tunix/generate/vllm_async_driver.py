@@ -21,6 +21,7 @@ where multiprocessing is undesirable (e.g. JAX integration).
 
 from __future__ import annotations
 
+from collections.abc import Container
 from concurrent.futures import Future
 import os
 import threading
@@ -45,9 +46,34 @@ if os.environ.get("VLLM_ENABLE_V1_MULTIPROCESSING") != "0":
   os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 envs.VLLM_ENABLE_V1_MULTIPROCESSING = False
 
+# Steps of a paused engine allowed to empty its async-scheduling batch queue.
+_MAX_DRAIN_STEPS = 8
+
 StreamCallback = Callable[[Union[RequestOutput, PoolingRequestOutput]], None]
 RequestFuture = Future[Union[RequestOutput, PoolingRequestOutput]]
 QueuedRequest = dict[str, Any]
+
+
+def _scheduled_request_ids(
+    engine_core: Any, exclude: Container[str]
+) -> list[str]:
+  """Returns ids of requests the engine scheduler holds but `exclude` lacks.
+
+  Args:
+    engine_core: The unwrapped EngineCore.
+    exclude: Request ids already known to the caller.
+
+  Returns:
+    The ids of the scheduler's running and waiting requests not in `exclude`.
+  """
+  scheduler = getattr(engine_core, "scheduler", None)
+  ids: list[str] = []
+  for queue_name in ("running", "waiting"):
+    for request in list(getattr(scheduler, queue_name, None) or ()):
+      request_id = getattr(request, "request_id", None)
+      if request_id is not None and request_id not in exclude:
+        ids.append(request_id)
+  return list(dict.fromkeys(ids))
 
 
 class VLLMInProcessDriver:
@@ -334,23 +360,173 @@ class VLLMInProcessDriver:
     with self._engine_lock:
       return self._pause_mode
 
-  def _apply_pause_engine_effects_locked(
-      self, mode: str, clear_cache: bool
-  ) -> None:
-    """Applies scheduler pause and optional cache resets on the engine."""
+  def _engine_core(self) -> Any:
+    """Returns the in-process EngineCore, unwrapping vLLM's InprocClient.
+
+    `LLMEngine.engine_core` is an `InprocClient` that has no
+    `pause_scheduler` / `resume_scheduler` of its own; the EngineCore it wraps
+    does.
+    """
     engine_core = getattr(self._llm_engine, "engine_core", None)
-    if engine_core is not None and hasattr(engine_core, "pause_scheduler"):
-      try:
-        engine_core.pause_scheduler(mode=mode, clear_cache=clear_cache)
-      except TypeError:
-        engine_core.pause_scheduler()
-    if clear_cache:
-      if hasattr(self._llm_engine, "reset_prefix_cache"):
-        self._llm_engine.reset_prefix_cache()
-      if engine_core is not None and hasattr(
-          engine_core, "reset_encoder_cache"
-      ):
-        engine_core.reset_encoder_cache()
+    return getattr(engine_core, "engine_core", engine_core)
+
+  def _drain_async_batch_queue_locked(
+      self, engine_core: Any
+  ) -> list[Union[RequestOutput, PoolingRequestOutput]]:
+    """Completes the engine step that async scheduling still has in flight.
+
+    With `async_scheduling=True` vLLM's `step()` returns the output of step
+    t-1 while step t is still executing in `EngineCore.batch_queue`. Stepping
+    the paused scheduler until that queue is empty finishes the in-flight step
+    without scheduling a new one, so no kernel reads the weights while they
+    are updated. Request ids finished meanwhile are kept for the first real
+    step after `resume`.
+
+    Args:
+      engine_core: The unwrapped EngineCore.
+
+    Returns:
+      The outputs of the drained step(s). Callers pass them to
+      `_handle_output` after releasing `_engine_lock`.
+
+    Raises:
+      RuntimeError: If the queue does not empty within a few steps, i.e. the
+        paused engine does not complete its queued steps.
+    """
+    batch_queue = getattr(engine_core, "batch_queue", None)
+    if not batch_queue:
+      return []
+    scheduler = getattr(engine_core, "scheduler", None)
+    finished = getattr(scheduler, "finished_req_ids", None)
+    if not isinstance(finished, set):
+      finished = set()
+    stashed = set(finished)
+    finished.clear()
+    outputs = []
+    try:
+      # The queue holds at most `max_concurrent_batches` (2) steps, and each
+      # `step()` of a paused scheduler completes one of them.
+      for _ in range(_MAX_DRAIN_STEPS):
+        outputs.extend(self._llm_engine.step() or [])
+        stashed |= finished
+        finished.clear()
+        if not batch_queue:
+          return outputs
+      raise RuntimeError(
+          f"vLLM batch_queue still holds {len(batch_queue)} steps after"
+          f" {_MAX_DRAIN_STEPS} steps of a paused engine."
+      )
+    finally:
+      finished |= stashed
+
+  def _pause_scheduler_locked(
+      self, engine_core: Any, clear_cache: bool
+  ) -> None:
+    """Stops the engine scheduler from scheduling further steps.
+
+    Args:
+      engine_core: The unwrapped EngineCore.
+      clear_cache: Whether the engine also drops its caches, preempting the
+        running requests so they re-prefill on resume.
+
+    Raises:
+      RuntimeError: If `clear_cache` is set but the engine cannot clear them.
+    """
+    try:
+      # The driver implements "wait" / "abort" itself (draining or aborting
+      # the requests); the engine scheduler only has to stop scheduling.
+      engine_core.pause_scheduler(mode="keep", clear_cache=clear_cache)
+    except TypeError:
+      if clear_cache:
+        raise RuntimeError(
+            "This vLLM engine's pause_scheduler() does not accept clear_cache,"
+            " so it cannot preempt the running requests before their KV"
+            " cache is dropped."
+        ) from None
+      engine_core.pause_scheduler()
+
+  def _freeze_and_drain_locked(
+      self, engine_core: Any
+  ) -> list[Union[RequestOutput, PoolingRequestOutput]]:
+    """Freezes the engine scheduler and completes its in-flight step.
+
+    Args:
+      engine_core: The unwrapped EngineCore.
+
+    Returns:
+      The outputs of the drained step; see `_drain_async_batch_queue_locked`.
+    """
+    if not hasattr(engine_core, "pause_scheduler"):
+      return []
+    self._pause_scheduler_locked(engine_core, clear_cache=False)
+    return self._drain_async_batch_queue_locked(engine_core)
+
+  def _clear_engine_caches_locked(self, engine_core: Any) -> None:
+    """Drops the prefix / encoder caches of a frozen engine.
+
+    Running requests are preempted first (their KV blocks are freed and they
+    re-prefill on resume), so that no request decodes over a freed KV pool.
+
+    Args:
+      engine_core: The unwrapped EngineCore.
+
+    Raises:
+      RuntimeError: If requests still hold KV blocks afterwards.
+    """
+    if hasattr(engine_core, "pause_scheduler"):
+      self._pause_scheduler_locked(engine_core, clear_cache=True)
+      scheduler = getattr(engine_core, "scheduler", None)
+      holding_kv = len(getattr(scheduler, "running", None) or ())
+    else:
+      holding_kv = self._llm_engine.get_num_unfinished_requests()
+    if holding_kv:
+      raise RuntimeError(
+          f"{holding_kv} requests still hold KV blocks after a clearing"
+          " pause: this vLLM does not preempt running requests, so their KV"
+          " cache cannot be dropped."
+      )
+    if hasattr(self._llm_engine, "reset_prefix_cache"):
+      self._llm_engine.reset_prefix_cache()
+    if hasattr(engine_core, "reset_encoder_cache"):
+      engine_core.reset_encoder_cache()
+
+  def _freeze_engine(self, clear_cache: bool) -> None:
+    """Freezes the engine and resolves the requests its drained step finished.
+
+    Args:
+      clear_cache: Whether to also drop the engine caches; see
+        `_clear_engine_caches_locked`.
+
+    Raises:
+      RuntimeError: If the async batch queue fails to drain, or if
+        `clear_cache` is set and the engine cannot clear its caches.
+    """
+    outputs = []
+    try:
+      with self._engine_lock:
+        engine_core = self._engine_core()
+        outputs = self._freeze_and_drain_locked(engine_core)
+        if clear_cache:
+          self._clear_engine_caches_locked(engine_core)
+    finally:
+      for output in outputs:
+        self._handle_output(output)
+
+  def _pause_timeout(self, what: str, mode: str) -> TimeoutError:
+    """Resumes the loop after a pause that timed out and returns the error.
+
+    Args:
+      what: What the pause was waiting for.
+      mode: The pause mode.
+
+    Returns:
+      The error for the caller to raise.
+    """
+    self.resume()
+    return TimeoutError(
+        f"Timed out waiting for {what} during pause(mode={mode!r}); the"
+        " driver was resumed."
+    )
 
   def pause(
       self,
@@ -361,6 +537,10 @@ class VLLMInProcessDriver:
   ) -> None:
     """Pauses the in-process vLLM loop.
 
+    In every mode the engine scheduler is frozen too, and a step that vLLM's
+    async scheduling still has in flight is completed before this returns, so
+    that no kernel reads the weights while they are updated.
+
     Args:
       mode: Pause mode:
         - "keep": Freeze scheduling at the next step boundary while keeping
@@ -368,14 +548,20 @@ class VLLMInProcessDriver:
         - "wait": Flush staged submissions and wait for all in-flight requests
           to complete before freezing the loop.
         - "abort": Freeze the loop and abort all queued and in-flight requests.
-      clear_cache: Whether to clear the engine prefix/encoder caches once
-        paused. Defaults to False so active KV blocks remain valid in "keep"
-        mode.
+      clear_cache: Whether to also drop the engine prefix/encoder caches once
+        paused. In "keep" mode this preempts the in-flight requests: their KV
+        blocks are freed and they re-prefill when resumed. Defaults to False
+        so active KV blocks remain valid in "keep" mode.
       timeout_s: Maximum seconds to wait for in-flight step / drain completion.
 
     Raises:
       ValueError: If `mode` is not one of "keep", "wait", or "abort".
-      TimeoutError: If waiting for the active step or drain exceeds `timeout_s`.
+      TimeoutError: If waiting for the active step or drain exceeds
+        `timeout_s`. The driver is resumed before this is raised.
+      RuntimeError: If the async batch queue fails to drain, or if
+        `clear_cache` is set and the engine cannot preempt the requests that
+        hold KV blocks. In "keep" and "wait" modes the driver is resumed before
+        this is raised.
     """
     if mode not in ("keep", "wait", "abort"):
       raise ValueError(
@@ -383,21 +569,24 @@ class VLLMInProcessDriver:
           " 'abort'."
       )
 
+    if mode == "abort":
+      with self._engine_lock:
+        self._pause_mode = "abort"
+        self._unpaused_event.clear()
+        self._work_event.set()
+      if not self._step_idle_event.wait(timeout=timeout_s):
+        raise self._pause_timeout("the in-flight vLLM step", mode)
+      self._abort_all(clear_cache)
+      return
+
     if mode == "keep":
       with self._engine_lock:
         self._pause_mode = "keep"
         self._unpaused_event.clear()
         self._work_event.set()
       if not self._step_idle_event.wait(timeout=timeout_s):
-        raise TimeoutError(
-            "Timed out waiting for in-flight vLLM step to complete during"
-            " pause(mode='keep')."
-        )
-      with self._engine_lock:
-        self._apply_pause_engine_effects_locked(mode, clear_cache)
-      return
-
-    if mode == "wait":
+        raise self._pause_timeout("the in-flight vLLM step", mode)
+    else:  # mode == "wait"
       with self._engine_lock:
         self._drain_submission_queue_locked(force=True)
         self._pause_mode = "wait"
@@ -410,48 +599,59 @@ class VLLMInProcessDriver:
           self._unpaused_event.clear()
           self._work_event.set()
       if not self._drained_event.wait(timeout=timeout_s):
-        raise TimeoutError(
-            "Timed out waiting for in-flight vLLM requests to drain during"
-            " pause(mode='wait')."
-        )
+        raise self._pause_timeout("in-flight vLLM requests to drain", mode)
       if not self._step_idle_event.wait(timeout=timeout_s):
-        raise TimeoutError(
-            "Timed out waiting for vLLM loop step to become idle during"
-            " pause(mode='wait')."
-        )
-      with self._engine_lock:
-        self._apply_pause_engine_effects_locked(mode, clear_cache)
-      return
+        raise self._pause_timeout("the vLLM loop step to become idle", mode)
 
-    # mode == "abort"
-    with self._engine_lock:
-      self._pause_mode = "abort"
-      self._unpaused_event.clear()
-      self._work_event.set()
-    if not self._step_idle_event.wait(timeout=timeout_s):
-      raise TimeoutError(
-          "Timed out waiting for in-flight vLLM step to complete during"
-          " pause(mode='abort')."
-      )
-    with self._engine_lock:
-      aborted_ids = list(self._pending.keys())
-      pending_futures = list(self._pending.values())
-      self._submission_queue.clear()
-      self._submission_window_start = None
-      self._pending.clear()
-      if aborted_ids:
-        self._llm_engine.abort_request(aborted_ids)
-      self._work_event.clear()
-      self._apply_pause_engine_effects_locked(mode, clear_cache)
-    for future in pending_futures:
-      if not future.done():
-        future.cancel()
+    try:
+      self._freeze_engine(clear_cache)
+    except Exception:
+      self.resume()
+      raise
+
+  def _abort_all(self, clear_cache: bool) -> None:
+    """Aborts every queued and in-flight request of the paused loop.
+
+    The futures of the aborted requests are cancelled even if the engine
+    raises.
+
+    Args:
+      clear_cache: Whether to also drop the engine caches.
+
+    Raises:
+      RuntimeError: If the async batch queue fails to drain, or if
+        `clear_cache` is set and the engine cannot clear its caches.
+    """
+    pending_futures: list[RequestFuture] = []
+    try:
+      with self._engine_lock:
+        pending = dict(self._pending)
+        pending_futures = list(pending.values())
+        self._submission_queue.clear()
+        self._submission_window_start = None
+        self._pending.clear()
+        self._work_event.clear()
+        engine_core = self._engine_core()
+        # Complete the in-flight async step before its requests are aborted;
+        # its outputs belong to requests that are aborted below.
+        self._freeze_and_drain_locked(engine_core)
+        aborted_ids = list(pending) + _scheduled_request_ids(
+            engine_core, exclude=pending
+        )
+        if aborted_ids:
+          self._llm_engine.abort_request(aborted_ids)
+        if clear_cache:
+          self._clear_engine_caches_locked(engine_core)
+    finally:
+      for future in pending_futures:
+        if not future.done():
+          future.cancel()
 
   def resume(self) -> None:
     """Resumes the in-process vLLM loop after a pause."""
     with self._engine_lock:
-      engine_core = getattr(self._llm_engine, "engine_core", None)
-      if engine_core is not None and hasattr(engine_core, "resume_scheduler"):
+      engine_core = self._engine_core()
+      if hasattr(engine_core, "resume_scheduler"):
         engine_core.resume_scheduler()
       self._pause_mode = None
       self._drained_event.set()

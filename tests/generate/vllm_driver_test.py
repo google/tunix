@@ -12,10 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import collections
+import concurrent.futures
 import importlib.metadata
 import sys
 import threading
 import time
+import types
 from typing import Any, Iterable
 from unittest import mock
 
@@ -64,7 +67,6 @@ importlib.import_module("torch._inductor.pattern_matcher")
 
 from absl.testing import absltest  # pylint: disable=g-import-not-at-top
 from tunix.generate.vllm_async_driver import VLLMInProcessDriver  # pylint: disable=g-import-not-at-top
-
 
 # TODO(b/453660461): Add extensive concurrency tests.
 
@@ -575,6 +577,179 @@ class VllmDriverAsyncTest(absltest.TestCase):
       driver.pause(mode="invalid")
 
 
+class _InnerEngineCore:
+  """EngineCore stand-in with vLLM's async-scheduling batch queue."""
+
+  def __init__(self, batch_queue, finished_req_ids, running=()):
+    self.batch_queue = batch_queue
+    self.scheduler = types.SimpleNamespace(
+        finished_req_ids=finished_req_ids, running=list(running)
+    )
+    self.pause_calls = []
+    self.resume_calls = 0
+
+  def pause_scheduler(self, mode="keep", clear_cache=False):
+    self.pause_calls.append((mode, clear_cache, len(self.batch_queue)))
+
+  def resume_scheduler(self):
+    self.resume_calls += 1
+
+
+def _engine_with_inner_core(inner, step=None):
+  """Returns an LLMEngine stand-in whose InprocClient wraps `inner`."""
+  # vLLM's LLMEngine.engine_core is an InprocClient that wraps the EngineCore
+  # and has no pause_scheduler / resume_scheduler of its own.
+  return types.SimpleNamespace(
+      engine_core=types.SimpleNamespace(engine_core=inner),
+      step=mock.Mock(side_effect=step, return_value=[]),
+      has_unfinished_requests=mock.Mock(return_value=True),
+      get_num_unfinished_requests=mock.Mock(return_value=1),
+      reset_prefix_cache=mock.Mock(),
+      abort_request=mock.Mock(),
+  )
+
+
+class VllmDriverPauseEngineTest(absltest.TestCase):
+
+  def test_pause_drains_async_batch_queue_of_unwrapped_engine_core(self):
+    finished_req_ids = {"req_done_before_pause"}
+    inner = _InnerEngineCore(collections.deque(["step_t"]), finished_req_ids)
+    drained = _DummyRequestOutput("req_drained")
+
+    def _step():
+      # The paused scheduler finishes the in-flight step only.
+      self.assertEqual(finished_req_ids, set())
+      inner.batch_queue.pop()
+      finished_req_ids.add("req_drained")
+      return [drained]
+
+    engine = _engine_with_inner_core(inner, step=_step)
+    driver = VLLMInProcessDriver(llm_engine=engine, auto_start=False)
+    future = concurrent.futures.Future()
+    driver._pending["req_drained"] = future  # pylint: disable=protected-access
+
+    driver.pause(mode="keep", clear_cache=True, timeout_s=1.0)
+
+    engine.step.assert_called_once()
+    self.assertIs(future.result(timeout=1.0), drained)
+    # Frozen while the step is in flight; the clearing pause comes after.
+    self.assertEqual(inner.pause_calls, [("keep", False, 1), ("keep", True, 0)])
+    self.assertEqual(finished_req_ids, {"req_done_before_pause", "req_drained"})
+    engine.reset_prefix_cache.assert_called_once()
+    driver.resume()
+    self.assertEqual(inner.resume_calls, 1)
+
+  def test_pause_without_queued_step_does_not_step_the_engine(self):
+    inner = _InnerEngineCore(collections.deque(), set())
+    engine = _engine_with_inner_core(inner)
+    driver = VLLMInProcessDriver(llm_engine=engine, auto_start=False)
+
+    driver.pause(mode="keep", clear_cache=False, timeout_s=1.0)
+
+    engine.step.assert_not_called()
+    self.assertEqual(inner.pause_calls, [("keep", False, 0)])
+    engine.reset_prefix_cache.assert_not_called()
+
+  def test_clearing_pause_raises_if_requests_still_hold_kv(self):
+    for mode in ("keep", "wait"):
+      with self.subTest(mode=mode):
+        inner = _InnerEngineCore(
+            collections.deque(["step_t"]), set(), running=["req-0"]
+        )
+        drained = _DummyRequestOutput("req_drained")
+
+        def _step(queue=inner.batch_queue, output=drained):
+          queue.pop()
+          return [output]
+
+        engine = _engine_with_inner_core(inner, step=_step)
+        engine.has_unfinished_requests.return_value = False
+        driver = VLLMInProcessDriver(llm_engine=engine, auto_start=False)
+        future = concurrent.futures.Future()
+        driver._pending["req_drained"] = future  # pylint: disable=protected-access
+
+        with self.assertRaisesRegex(RuntimeError, "still hold KV blocks"):
+          driver.pause(mode=mode, clear_cache=True, timeout_s=1.0)
+
+        self.assertIs(future.result(timeout=1.0), drained)
+        self.assertFalse(driver.is_paused)
+        self.assertEqual(inner.resume_calls, 1)
+        engine.reset_prefix_cache.assert_not_called()
+
+  def test_clearing_pause_needs_clear_cache_support(self):
+    class _OldEngineCore:
+
+      def pause_scheduler(self):
+        pass
+
+    driver = VLLMInProcessDriver(
+        llm_engine=_engine_with_inner_core(_OldEngineCore()),
+        auto_start=False,
+    )
+    with self.assertRaisesRegex(RuntimeError, "does not accept clear_cache"):
+      driver.pause(mode="keep", clear_cache=True, timeout_s=1.0)
+    self.assertFalse(driver.is_paused)
+
+  def test_drain_gives_up_if_the_paused_engine_does_not_step(self):
+    inner = _InnerEngineCore(collections.deque(["stuck"]), set())
+    driver = VLLMInProcessDriver(
+        llm_engine=_engine_with_inner_core(inner), auto_start=False
+    )
+    with self.assertRaisesRegex(RuntimeError, "batch_queue still holds"):
+      driver.pause(mode="keep", timeout_s=1.0)
+    self.assertFalse(driver.is_paused)
+    self.assertEqual(inner.resume_calls, 1)
+
+  def test_pause_timeout_resumes_the_driver(self):
+    inner = _InnerEngineCore(collections.deque(), set())
+    driver = VLLMInProcessDriver(
+        llm_engine=_engine_with_inner_core(inner), auto_start=False
+    )
+    # An engine step that never becomes idle in time.
+    driver._step_idle_event = mock.Mock(  # pylint: disable=protected-access
+        wait=mock.Mock(return_value=False)
+    )
+    for mode in ("keep", "abort"):
+      with self.subTest(mode=mode):
+        with self.assertRaisesRegex(TimeoutError, "driver was resumed"):
+          driver.pause(mode=mode, timeout_s=0.01)
+        self.assertFalse(driver.is_paused)
+
+  def test_abort_cancels_futures_and_scheduled_requests_even_if_it_raises(
+      self,
+  ):
+    # A request the scheduler still runs after the abort makes the clearing
+    # pause fail; the pending future must be cancelled anyway.
+    inner = _InnerEngineCore(
+        collections.deque(),
+        set(),
+        running=[types.SimpleNamespace(request_id="x")],
+    )
+    engine = _engine_with_inner_core(inner)
+    driver = VLLMInProcessDriver(llm_engine=engine, auto_start=False)
+    future = concurrent.futures.Future()
+    driver._pending["req-0"] = future  # pylint: disable=protected-access
+
+    with self.assertRaisesRegex(RuntimeError, "still hold KV blocks"):
+      driver.pause(mode="abort", clear_cache=True, timeout_s=1.0)
+
+    self.assertTrue(future.cancelled())
+    engine.abort_request.assert_called_once_with(["req-0", "x"])
+
+  def test_abort_cancels_futures_if_drain_raises(self):
+    inner = _InnerEngineCore(collections.deque(["stuck"]), set())
+    driver = VLLMInProcessDriver(
+        llm_engine=_engine_with_inner_core(inner), auto_start=False
+    )
+    future = concurrent.futures.Future()
+    driver._pending["req-0"] = future  # pylint: disable=protected-access
+
+    with self.assertRaisesRegex(RuntimeError, "batch_queue still holds"):
+      driver.pause(mode="abort", timeout_s=1.0)
+
+    self.assertTrue(future.cancelled())
+    self.assertEmpty(driver._pending)  # pylint: disable=protected-access
+
+
 if __name__ == "__main__":
   absltest.main()
-
