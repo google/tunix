@@ -25,7 +25,7 @@ import dataclasses
 import itertools
 import queue
 import threading
-from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar, Optional, Set
+from typing import Any, AsyncIterator, Callable, Dict, Generic, get_args, Iterable, Iterator, List, Literal, Optional, Sequence, Set, Type, TypeVar
 
 from absl import logging
 import flax
@@ -45,6 +45,7 @@ from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import dynamic_sampling
 from tunix.rl.agentic import group_filters as group_filters_lib
 from tunix.rl.agentic import prompt_feed as prompt_feed_lib
+from tunix.rl.agentic import submission_order
 from tunix.rl.agentic import utils as agentic_utils
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.agents import model_agent
@@ -69,6 +70,11 @@ class TrainExample(common.TrainExample):
 
   # Includes environment/template tokens; distinct from sampled-token loss mask.
   completion_attention_mask: jax.Array | None = None
+
+
+# How kept groups fill the mini-batches of a global step; see
+# `AgenticRLConfig.minibatch_order`.
+MinibatchOrder = Literal["completion", "submission"]
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -102,6 +108,16 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
       1) * batch_size` (e.g. 24 for `batch_size=16, off_policy_steps=1`).
       Setting it, or `group_filters`, switches the prompt feed from one batch
       per global step to per-prompt admission.
+    minibatch_order: How kept groups fill the mini-batches of a global step
+      when `mini_batch_size < batch_size` (several optimizer updates per
+      step). `"completion"` (default): groups train in the order they finish,
+      which puts the longest groups in the last (most off-policy, most
+      clipped) mini-batch. `"submission"`: mini-batch `m` is the `m`-th block
+      of `mini_batch_size` kept groups in prompt (`group_id`) order, so the
+      mini-batch a group trains in depends on its dataset position, not on how
+      long it took to generate; a dropped group gives its place to the next
+      prompt, and members of the open mini-batch are released as soon as they
+      finish. Ignored with one optimizer update per global step.
   """
 
   system_prompt: str = ""
@@ -120,11 +136,25 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   group_filters: Sequence[str] = ()
   max_consecutive_filtered_groups: int = -1
   max_in_flight_groups: int | None = None
+  minibatch_order: MinibatchOrder = "completion"
 
   def __post_init__(self):
     # `slots=True` recreates the class, which breaks zero-argument super().
     super(AgenticRLConfig, self).__post_init__()  # pylint: disable=super-with-arguments
     self._validate_dynamic_sampling_options()
+    self._validate_minibatch_order()
+
+  def _validate_minibatch_order(self) -> None:
+    """Checks `minibatch_order`.
+
+    Raises:
+      ValueError: If `minibatch_order` is not a `MinibatchOrder`.
+    """
+    if self.minibatch_order not in get_args(MinibatchOrder):
+      raise ValueError(
+          f"minibatch_order must be one of {get_args(MinibatchOrder)}, got"
+          f" {self.minibatch_order!r}."
+      )
 
   def _validate_dynamic_sampling_options(self) -> None:
     """Checks `group_filters` and the dynamic-sampling limits.
@@ -271,6 +301,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self._rollout_sync_lock = agentic_utils.RolloutSyncLock()
     # Set by `train` when `group_filters` or `max_in_flight_groups` is set.
     self._dynamic_sampler: dynamic_sampling.DynamicSampler | None = None
+    # Set by `train` when mini-batches are filled in submission order.
+    self._submission_emitter: (
+        submission_order.SubmissionOrderEmitter[list[Any]] | None
+    ) = None
     self._background_tasks: Set[asyncio.Task] = set()
     self._full_batch_size = 0
     self._process_in_consumer: bool = False
@@ -676,6 +710,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       expected_step = self.rl_engine.global_steps
     elif self._dynamic_sampler is not None:
       # Dropped groups are replaced, so group ids run ahead of the trainer.
+      # Kept groups are counted in completion order, so with submission order
+      # a reordered group may be attributed to the neighboring step (metrics
+      # and perf tags only).
       expected_step = self._dynamic_sampler.expected_step
     else:
       expected_step = batch_results[0].group_id // self._full_batch_size
@@ -776,19 +813,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         if self._reached_max_steps():
           prompt_feed.close()
           break
-        if (
-            self._dynamic_sampler is not None
-            and self._training_config.max_steps
-            and self._dynamic_sampler.expected_step
-            >= self._training_config.max_steps
-        ):
+        if self._can_skip_post_max_steps_group():
           prompt_feed.close()
           continue
         try:
           if self._process_in_consumer:
-            # Put raw batch (list of trajectories) into queue.
-            # We put it once, and consumer will handle iterations.
-            train_data_queue.put(batch)
+            # Wrap `batch` (list of trajectories) in a 1-element list so
+            # `_queue_payloads` enqueues the raw trajectory group as one item
+            # for the consumer, which handles iterations.
+            self._emit_group(batch, [batch], train_data_queue)
           else:
             self._queue_train_examples(batch, train_data_queue)
         except Exception as e:
@@ -797,6 +830,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 "Exception in _producer while processing batch: %s", e
             )
           raise
+      self._release_held_groups(train_data_queue)
     finally:
       # Signal production is complete for this batch, even if errors occurred.
       train_data_queue.put(None)
@@ -827,6 +861,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           step=sampler.expected_step,
       )
       sampler.on_group_dropped(group, dropped.reason)
+      self._emit_group(group, None, train_data_queue)
       return
     if self._dynamic_sampler is not None:
       self._dynamic_sampler.on_group_kept()
@@ -836,8 +871,129 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           >= self._training_config.max_steps
       ):
         self._dynamic_sampler.close()
-    for train_example in train_examples:
-      train_data_queue.put(train_example)
+    self._emit_group(group, train_examples, train_data_queue)
+
+  def _can_skip_post_max_steps_group(self) -> bool:
+    """Whether in-flight groups may be skipped because `max_steps` are queued.
+
+    With submission-order mini-batches, kept lookahead groups wait in
+    `_submission_emitter` until earlier groups resolve, so earlier groups must
+    still be scored while any group is held.
+    """
+    return bool(
+        self._dynamic_sampler is not None
+        and (
+            self._submission_emitter is None
+            or not self._submission_emitter.held
+        )
+        and self._training_config.max_steps
+        and self._dynamic_sampler.expected_step
+        >= self._training_config.max_steps
+    )
+
+  def _emit_group(
+      self,
+      group: list[Any],
+      items: list[Any] | None,
+      train_data_queue: queue_lib.AbstractDataQueue,
+  ) -> None:
+    """Queues the items of a scored group, in submission order if configured.
+
+    Args:
+      group: The group's trajectory items.
+      items: What to queue for the group, or None if it was dropped.
+      train_data_queue: Output queue.
+    """
+    emitter = self._submission_emitter
+    if emitter is None:
+      payloads = [] if items is None else [items]
+    elif items is None:
+      payloads = emitter.drop(group[0].group_id)
+    else:
+      payloads = emitter.complete(group[0].group_id, items)
+    self._queue_payloads(payloads, train_data_queue)
+
+  def _queue_payloads(
+      self,
+      payloads: list[list[Any]],
+      train_data_queue: queue_lib.AbstractDataQueue,
+  ) -> None:
+    """Queues the items of released groups, one payload per group.
+
+    Args:
+      payloads: The items of each released group, in release order.
+      train_data_queue: Output queue.
+    """
+    for payload in payloads:
+      for item in payload:
+        train_data_queue.put(item)
+
+  def _release_held_groups(
+      self, train_data_queue: queue_lib.AbstractDataQueue
+  ) -> None:
+    """Queues the groups still held for submission order at the stream end.
+
+    Groups are only held at the end if a lower-id group never completed;
+    training on them is better than losing them.
+
+    Args:
+      train_data_queue: Output queue.
+    """
+    if (
+        self._submission_emitter is None
+        or not self._submission_emitter.held
+        or self._reached_max_steps()
+    ):
+      return
+    logging.warning(
+        "Releasing %d groups held for submission order at the end of the"
+        " prompt stream.",
+        self._submission_emitter.held,
+    )
+    self._queue_payloads(self._submission_emitter.flush(), train_data_queue)
+
+  def _start_submission_order(
+      self, full_batch_size: int, mini_batch_size: int
+  ) -> submission_order.SubmissionOrderEmitter[list[Any]] | None:
+    """Creates the submission-order emitter of a `train` call, if needed.
+
+    Args:
+      full_batch_size: Groups per global step.
+      mini_batch_size: Groups per optimizer update.
+
+    Returns:
+      The emitter, or None when groups are queued in completion order.
+    """
+    if (
+        self.algo_config.minibatch_order != "submission"
+        or mini_batch_size >= full_batch_size
+    ):
+      return None
+    logging.info(
+        "Mini-batches of %d groups are filled in submission order (%d"
+        " optimizer updates per global step of %d groups).",
+        mini_batch_size,
+        full_batch_size // mini_batch_size,
+        full_batch_size,
+    )
+    # Same numbering as `_orchestrator_producer`'s pair stream.
+    return submission_order.SubmissionOrderEmitter(
+        window_size=mini_batch_size,
+        first_group_id=self.rl_engine.global_steps * full_batch_size,
+    )
+
+  def _check_batch_sizes(
+      self, full_batch_size: int, mini_batch_size: int
+  ) -> None:
+    """Rejects algorithm options that the batch sizes cannot support.
+
+    Called by `train` before any rollout; subclasses override it.
+
+    Args:
+      full_batch_size: Groups per global step.
+      mini_batch_size: Groups per optimizer update.
+    """
+    del full_batch_size, mini_batch_size
 
   def _create_prompt_feed(
       self,
@@ -1031,6 +1187,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         f" {train_micro_batch_size=}, {self._rollout_micro_batch_size=},"
         f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=},"
         f" {iterator_batch_size=}"
+    )
+
+    self._check_batch_sizes(full_batch_size, mini_batch_size)
+    self._submission_emitter = self._start_submission_order(
+        full_batch_size, mini_batch_size
     )
 
     logging.info("Starting AgenticRLLearner training loop.")

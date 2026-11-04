@@ -162,3 +162,26 @@ Reward metrics cover every scored group, including dropped ones;
 group was when it was scored. Prompts are admitted one at a time rather than
 by batch, so kept groups stream to the trainer as each mini-batch fills and any
 trailing partial micro-batch at the end of the dataset is dropped.
+
+### Submission-Order Mini-Batches
+
+With `mini_batch_size < batch_size` a global step takes several optimizer
+updates. By default kept groups fill the mini-batches in the order they finish,
+which puts the short, fast groups in the first mini-batch and the long ones in
+the last, most off-policy one. `minibatch_order: submission` assigns groups to
+mini-batches by prompt order instead:
+
+```yaml
+rl_training_config:
+  mini_batch_size: 8  # batch_size=16: two optimizer updates per global step
+agentic_grpo_config:
+  minibatch_order: submission  # default: completion
+```
+
+Mini-batch `m` is the `m`-th block of `mini_batch_size` kept groups in
+`group_id` order; a group dropped by dynamic sampling gives its place to the
+next prompt. Within a mini-batch the order does not matter, so a member is
+handed to the trainer as soon as it finishes, but a later mini-batch waits for
+the slowest member of the current one. `sampler_is`, `sampler_rs` and
+`seq_logprob_error_threshold` need one optimizer update per global step and are
+rejected with `mini_batch_size < batch_size`.

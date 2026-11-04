@@ -269,6 +269,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         self.metric_fns = []
         self._process_in_consumer = False
         self._dynamic_sampler = None
+        self._submission_emitter = None
 
       def _create_micro_batch_iterator(self, iterator, batch_size):
         # The dataset batch size is 2, and we want to test micro-batching
@@ -2253,6 +2254,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       off_policy_steps,
       max_steps,
       mini_batch_size=None,
+      max_seq_token_per_tpu=None,
       **algo_kwargs,
   ):
     """Returns an RLEngine and a GRPOLearner with dynamic-sampling options."""
@@ -2276,6 +2278,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             eval_every_n_steps=100,
             max_steps=max_steps,
             mini_batch_size=mini_batch_size,
+            max_seq_token_per_tpu=max_seq_token_per_tpu,
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_prompt_length=256,
@@ -2649,6 +2652,122 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     self.assertEqual(rl_engine.global_steps, 1)
     self.assertCountEqual(scored, ["keep 0", "keep 1"])
 
+  @parameterized.named_parameters(
+      dict(testcase_name="no_filters", group_filters=()),
+      dict(testcase_name="zero_variance", group_filters=("zero_variance",)),
+      dict(
+          testcase_name="packed",
+          group_filters=(),
+          max_seq_token_per_tpu=512,
+      ),
+  )
+  def test_submission_order_mini_batches(
+      self, group_filters, max_seq_token_per_tpu=None
+  ):
+    rl_engine, learner = self._dynamic_sampling_learner(
+        reward_fn_1,
+        off_policy_steps=1,
+        max_steps=2,
+        mini_batch_size=1,
+        max_seq_token_per_tpu=max_seq_token_per_tpu,
+        group_filters=group_filters,
+        minibatch_order="submission",
+    )
+    train_ds = _dummy_dataset(MySource(repeat=4), batch_size=2)
+    with mock.patch.object(
+        rl_engine, "generate", side_effect=self._mock_generate
+    ):
+      learner.train(train_ds, None)
+    self.assertEqual(rl_engine.global_steps, 2)
+    self.assertEqual(rl_engine.actor_trainer.train_steps, 4)
+    self.assertFalse(
+        rl_engine.actor_trainer.metrics_logger.metric_exists(
+            "actor", "sampler_trainer/logp_diff_mean", "train"
+        )
+    )
+    self.assertFalse(
+        rl_engine._rl_metrics_logger.metric_exists(  # pylint: disable=protected-access
+            "sampler_trainer", "logp_diff_mean", "train"
+        )
+    )
+
+  @parameterized.named_parameters(
+      dict(testcase_name="unpacked", packed=False),
+      dict(testcase_name="packed", packed=True),
+  )
+  def test_multi_minibatch_marks_sampler_agreement_applied(self, packed):
+    rl_engine, learner = self._dynamic_sampling_learner(
+        reward_fn_1,
+        off_policy_steps=0,
+        max_steps=2,
+        mini_batch_size=1,
+        max_seq_token_per_tpu=512 if packed else None,
+        exact_token_continuity=True,
+    )
+    learner._full_batch_size = 2  # pylint: disable=protected-access
+
+    trajectories = [
+        types.SimpleNamespace(
+            traj={
+                "conversation_text": [
+                    {"role": "assistant", "content": f"msg {i}"}
+                ],
+                "conversation_tokens": np.array([1, 2, 3], np.int32),
+                "conversation_masks": np.array([1, 1, 1], np.int32),
+                "old_logprobs": np.full(3, -0.5, dtype=np.float32),
+                "policy_version": 0,
+                "trajectory_reward": float(i),
+                "prompt_tokens": np.array([4, 5], np.int32),
+                "prompt_length": 2,
+                "original_input": {"prompts": ["hello"]},
+                "group_id": 0,
+            }
+        )
+        for i in range(2)
+    ]
+
+    with mock.patch.object(
+        rl_engine, "get_actor_per_token_logps", autospec=True
+    ) as actor_logps:
+      example = learner._process_results(  # pylint: disable=protected-access
+          trajectories, mode=rl_engine_lib.Mode.TRAIN, expected_step=0
+      )[0]
+      if packed:
+        packed_input = agentic_grpo_learner.TrainExample(
+            prompt_ids=jnp.ones((1, 4), jnp.int32),
+            prompt_mask=jnp.ones((1, 4), jnp.int32),
+            completion_ids=jnp.ones((1, 4), jnp.int32),
+            completion_mask=jnp.ones((1, 8), jnp.int32),
+            advantages=jnp.zeros((1,)),
+            old_per_token_logps=jnp.full((1, 8), -0.5),
+            ref_per_token_logps=None,
+            segment_ids=jnp.array([[1, 1, 1, 2, 2, 0, 0, 0]]),
+            segment_positions=jnp.arange(8).reshape(1, 8),
+        )
+        example = learner._compute_packed_logps(  # pylint: disable=protected-access
+            packed_input
+        )
+      actor_logps.assert_not_called()
+    self.assertTrue(example.sampler_agreement_applied)
+
+  def test_trainer_logp_baseline_with_mini_batches_raises_before_rollout(
+      self,
+  ):
+    rl_engine, learner = self._dynamic_sampling_learner(
+        reward_fn_1,
+        off_policy_steps=0,
+        max_steps=2,
+        mini_batch_size=1,
+        sampler_is="token",
+    )
+    train_ds = _dummy_dataset(MySource(repeat=4), batch_size=2)
+    with mock.patch.object(
+        rl_engine, "generate", side_effect=self._mock_generate
+    ) as generate:
+      with self.assertRaisesRegex(ValueError, "mini_batch_size >= batch_size"):
+        learner.train(train_ds, None)
+    generate.assert_not_called()
+
   def test_customized_agent_env(self):
     class MockEnv(BaseTaskEnv):
 
@@ -2909,6 +3028,45 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       self.assertIsNotNone(train_example.old_per_token_logps)
       self.assertFalse(train_example.sampler_agreement_applied)
       self.assertIsNone(train_example.sampler_is_weights)
+
+
+class MiniBatchGuardTest(parameterized.TestCase):
+  # The guards are private hooks of the learner.
+  # pylint: disable=protected-access
+
+  def _learner(self, mini_batch_size, **algo_kwargs):
+    """Returns a GRPOLearner shell with `batch_size=8`."""
+    learner = object.__new__(agentic_grpo_learner.GRPOLearner)
+    learner.algo_config = agentic_grpo_learner.GRPOConfig(**algo_kwargs)
+    learner._full_batch_size = 8
+    learner.rl_engine = types.SimpleNamespace(
+        cluster_config=types.SimpleNamespace(
+            training_config=types.SimpleNamespace(
+                mini_batch_size=mini_batch_size
+            )
+        )
+    )
+    return learner
+
+  @parameterized.parameters(
+      dict(sampler_is="token"), dict(seq_logprob_error_threshold=2.0)
+  )
+  def test_trainer_logp_baseline_needs_one_update_per_step(self, **kwargs):
+    self._learner(8, **kwargs)._check_batch_sizes(8, 8)
+    with self.assertRaisesRegex(ValueError, "mini_batch_size >= batch_size"):
+      self._learner(4, **kwargs)._check_batch_sizes(8, 4)
+
+  def test_recomputed_old_logps_with_mini_batches_warn(self):
+    learner = self._learner(4, use_rollout_logps=False)
+    with self.assertLogs(level="WARNING") as logs:
+      learner._check_batch_sizes(8, 4)
+    self.assertIn("use_rollout_logps=False", logs.output[0])
+
+  def test_agreement_diagnostic_is_skipped_with_mini_batches(self):
+    self.assertTrue(self._learner(8)._diagnoses_agreement())
+    self.assertFalse(self._learner(4)._diagnoses_agreement())
+    self.assertTrue(self._learner(4, num_iterations=2)._diagnoses_agreement())
+    self.assertFalse(self._learner(4)._can_fuse_agreement_in_loss())
 
 
 class ExactTokenContinuityBatchTest(absltest.TestCase):
