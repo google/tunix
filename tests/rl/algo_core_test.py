@@ -1058,6 +1058,38 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
         for g in grad_leaves:
           self.assertTrue(bool(jnp.all(jnp.isfinite(g))))
 
+  def test_default_kl_penalty_gradient_depends_on_reference(self):
+    """The default KL penalty pulls the policy towards the reference model."""
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+
+    config = algorithm_config.GRPOConfig()
+    config.temperature = 1.0  # Set from the rollout config by the learner.
+
+    def kl_penalty_grad(ref_logp):
+      example = self._example(
+          ref_per_token_logps=jnp.full((2, 3), ref_logp, jnp.float32)
+      )
+
+      def kl_penalty(model):
+        out = algo_core.grpo_loss_fn(
+            model, example, config, pad_id=0, eos_id=-1
+        )
+        return config.beta * out.aux_metrics['kl_loss'].compute()
+
+      grads = nnx.grad(kl_penalty)(self.model)
+      return jnp.concatenate(
+          [jnp.ravel(g) for g in jax.tree_util.tree_leaves(grads)]
+      )
+
+    grad_at_policy = kl_penalty_grad(self.trainer_logp)
+    grad_below_policy = kl_penalty_grad(self.trainer_logp - 1.0)
+    # The penalty is minimal where the policy equals the reference.
+    np.testing.assert_allclose(grad_at_policy, 0.0, atol=1e-6)
+    # Its gradient changes with the reference model.
+    self.assertGreater(
+        float(jnp.max(jnp.abs(grad_below_policy - grad_at_policy))), 1e-3
+    )
+
   def test_grpo_loss_fn_ignores_non_finite_advantages_on_masked_rows(self):
     from flax import nnx  # pylint: disable=g-import-not-at-top
 
