@@ -74,14 +74,19 @@ def _unpack_entry(entry: dict) -> dict:
   """Utility to clean up and unpack the dataset entry."""
   unpacked_entry = {}
   for k, v in entry.items():
-    if isinstance(v, np.ndarray):
-      unpacked_entry[k] = v.item()
+    if k in ("FAIL_TO_PASS", "PASS_TO_PASS"):
+      if isinstance(v, np.ndarray):
+        v = v.tolist()
+      elif isinstance(v, str) and v.strip().startswith("["):
+        try:
+          v = json.loads(v)
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+      unpacked_entry[k] = v
+    elif isinstance(v, np.ndarray):
+      unpacked_entry[k] = v.item() if v.size == 1 else v.tolist()
     elif isinstance(v, list):
-      if len(v) != 1:
-        raise ValueError(
-            f"Can only convert a list of size 1; got size {len(v)}"
-        )
-      unpacked_entry[k] = v[0]
+      unpacked_entry[k] = v[0] if len(v) == 1 else v
     else:
       unpacked_entry[k] = v
   return unpacked_entry
