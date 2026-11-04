@@ -399,7 +399,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
 
-  otel_enabled = otel_setup.setup_metrics(
+  otel_setup.setup_metrics(
       default_service_name="tunix-orchestrator",
       resource_attributes={
           "tunix.role": "orchestrator",
@@ -486,7 +486,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       project_name=args.wandb_project,
       run_name=args.wandb_run_name,
       flush_every_n_steps=args.flush_metrics_every_n_steps,
-      enable_opentelemetry=otel_enabled,
       backend_kwargs={
           "wandb": {
               "config": vars(args),

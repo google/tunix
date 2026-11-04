@@ -65,7 +65,6 @@
               "config": "<resolve_config.plain_config(hp)>"
             }
           },
-          "enable_opentelemetry": false,
           "flush_every_n_steps": 1,
           "log_dir": "",
           "project_name": "trellis-gsm8k",

@@ -14,10 +14,8 @@
 
 """Process-level OpenTelemetry metrics setup for the dist_rl runtime.
 
-``tunix.sft.metrics_logger.MetricsLogger`` double-writes every logged scalar as
-an OpenTelemetry gauge once ``MetricsLoggerOptions.enable_opentelemetry`` is
-set, and worker processes can record native OpenTelemetry instruments directly,
-but neither owns the provider: with nothing installed the API resolves a proxy
+Worker and orchestrator processes record OpenTelemetry instruments directly,
+but do not own the provider: with nothing installed the API resolves a proxy
 provider that silently drops every measurement. Each process that wants to
 export therefore installs a global ``MeterProvider`` -- an OTLP/gRPC exporter
 behind a periodic reader, with a ``service.name`` resource and optional process
@@ -121,8 +119,7 @@ def setup_metrics(
       Empty string values are omitted.
 
   Returns:
-    True when a provider was installed and ``enable_opentelemetry`` should be
-    passed to ``MetricsLoggerOptions``; False when export is disabled (no
+    True when a provider was installed; False when export is disabled (no
     endpoint) or the SDK / exporter is not installed.
 
   Raises:

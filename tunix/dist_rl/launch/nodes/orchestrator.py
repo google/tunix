@@ -185,7 +185,7 @@ def build_generation_args(
 
 
 def build_metrics_logging_options(
-    hp: resolve_config.DistHyperParameters, *, enable_opentelemetry: bool
+    hp: resolve_config.DistHyperParameters,
 ) -> metrics_logger_lib.MetricsLoggerOptions:
   """Builds `MetricsLoggerOptions` from `rl_training_config`.
 
@@ -195,8 +195,6 @@ def build_metrics_logging_options(
 
   Args:
     hp: Resolved distributed RL configuration.
-    enable_opentelemetry: Whether `otel_setup.setup_metrics` installed an
-      OpenTelemetry exporter, so the logged metrics are exported too.
 
   Returns:
     The metrics logger options, with the resolved config logged to W&B.
@@ -212,7 +210,6 @@ def build_metrics_logging_options(
   return dataclasses.replace(
       options,
       backend_kwargs={"wandb": {"config": resolve_config.plain_config(hp)}},
-      enable_opentelemetry=enable_opentelemetry,
   )
 
 
@@ -723,12 +720,8 @@ def main(
   weight_sync_timeouts, rpc_timeout_s = resolve_weight_sync_timeouts(hp)
   algo_config = build_grpo_config(hp)
   reward_fns = hp.obtain_reward_fn()
-  otel_enabled = node_utils.setup_otel_metrics(
-      hp, "orchestrator", worker_id_str=None
-  )
-  metrics_logging_options = build_metrics_logging_options(
-      hp, enable_opentelemetry=otel_enabled
-  )
+  node_utils.setup_otel_metrics(hp, "orchestrator", worker_id_str=None)
+  metrics_logging_options = build_metrics_logging_options(hp)
   prompt_items = load_prompt_items(hp)
   pad_id, eos_id = node_utils.pad_and_eos_ids(node_utils.load_hf_tokenizer(hp))
 

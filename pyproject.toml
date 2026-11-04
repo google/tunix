@@ -75,13 +75,12 @@ test = [
   "chex",
   "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
   "opentelemetry-sdk>=1.25.0",
-  "wandb",  # Offline end-to-end test for the OpenTelemetry W&B exporter
 ]
 cli = [
   "tensorflow",
 ]
 otel = [
-  # Experimental OpenTelemetry double-write path for MetricsLogger.
+  # OpenTelemetry metrics export for dist_rl.
   "opentelemetry-api>=1.25.0",
   "opentelemetry-sdk>=1.25.0",
   # OTLP/gRPC exporter so the SDK can reach a collector.

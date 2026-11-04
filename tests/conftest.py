@@ -1,20 +1,16 @@
 """Shared test configuration.
 
-The test environment installs ``wandb`` for the OpenTelemetry W&B exporter
-end-to-end test. Installing it has a side effect on the legacy path: the
-default Metrax ``WandbBackend`` becomes constructible, registers a
-process-global ``jax.monitoring`` listener that receives JAX's own internal
-compile metrics, and shares the module-global ``wandb.run`` across logger
-instances — one logger's ``close()`` (``wandb.finish()``) then breaks any
+When ``wandb`` is installed in the test environment (for example in the Tunix
+container image), the default Metrax ``WandbBackend`` becomes constructible,
+registers a process-global ``jax.monitoring`` listener that receives JAX's own
+internal compile metrics, and shares the module-global ``wandb.run`` across
+logger instances — one logger's ``close()`` (``wandb.finish()``) then breaks any
 other still-registered backend in the process.
 
-To keep the legacy default-backend behavior identical to an environment
-without ``wandb`` (which is how CI has always run), the default
-``WandbBackend`` is replaced with a stub that raises ``ImportError``, which
-``MetricsLoggerOptions.create_backends`` already handles by skipping the
-backend. Tests that exercise wandb do so explicitly: the OpenTelemetry
-exporter tests pass an offline ``wandb.init`` run object directly and never
-touch the Metrax backend.
+To keep default-backend behavior identical to an environment without ``wandb``,
+the default ``WandbBackend`` is replaced with a stub that raises
+``ImportError``, which ``MetricsLoggerOptions.create_backends`` handles by
+skipping the backend.
 
 This module also parses absl flags so that ``absltest`` helpers work under
 bare ``pytest`` (see below).

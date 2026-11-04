@@ -340,11 +340,9 @@ class BuildersTest(absltest.TestCase):
             "rl_training_config.metrics_logging_options.log_dir=/tmp/metrics",
             "rl_training_config.metrics_logging_options.project_name=proj",
             "batch_size=8",
-        ),
-        enable_opentelemetry=True,
+        )
     )
     self.assertIsInstance(options, metrics_logger_lib.MetricsLoggerOptions)
-    self.assertTrue(options.enable_opentelemetry)
     self.assertEqual(options.log_dir, "/tmp/metrics")
     self.assertEqual(options.project_name, "proj")
     wandb_kwargs = options.backend_kwargs["wandb"]
@@ -846,9 +844,7 @@ class ProgramTest(absltest.TestCase):
         eos_id=1,
         prompt_items=grain.MapDataset.source([]),
         trajectory_store=None,
-        metrics_logging_options=orchestrator.build_metrics_logging_options(
-            hp, enable_opentelemetry=False
-        ),
+        metrics_logging_options=orchestrator.build_metrics_logging_options(hp),
     )
 
   def test_build_program(self):
@@ -1038,9 +1034,6 @@ rl_training_config:
         mock.patch.object(
             otel_setup, "setup_metrics", return_value=True
         ) as setup_metrics,
-        mock.patch.object(
-            orchestrator, "build_program", wraps=orchestrator.build_program
-        ) as build_program,
     ):
       orchestrator.main(argv, _FakeProcessContext(discovery))
 
@@ -1050,11 +1043,6 @@ rl_training_config:
             "tunix.role": "orchestrator",
             "tunix.run_id": "run_1",
         },
-    )
-    self.assertTrue(
-        build_program.call_args.kwargs[
-            "metrics_logging_options"
-        ].enable_opentelemetry
     )
 
     self.assertEqual(jax.config.jax_platforms, "cpu")
