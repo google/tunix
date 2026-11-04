@@ -42,13 +42,13 @@ from tunix.common import configs
 from tunix.common import datatypes
 from tunix.experimental.rollout import vanilla_rollout as vanilla_rollout_v2
 from tunix.generate import tokenizer_adapter
-from tunix.generate import utils as generate_utils
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl import common
+from tunix.rl import packing
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
@@ -903,7 +903,7 @@ class RLEngine:
       if prompts is not None:
         raise ValueError("Provide exactly one of prompts or prompt_token_ids.")
       prompt_rows: list[Any] = [
-          generate_utils.as_token_ids(row)
+          packing.as_token_ids(row)
           for row in prompt_token_ids
       ]
     else:

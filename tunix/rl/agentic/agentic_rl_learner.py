@@ -33,11 +33,11 @@ import jax
 from jax import typing
 import jax.numpy as jnp
 import numpy as np
-from tunix.generate import utils as generate_utils
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import function_registry
+from tunix.rl import packing
 from tunix.rl import reward_manager  # pylint: disable=unused-import
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.rollout import base_rollout
@@ -499,7 +499,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         mode=rl_engine_lib.Mode.TRAIN,
         trace_tags=tags,
         max_generation_steps=max_generation_steps,
-        prompt_token_ids=[generate_utils.as_token_ids(prompt_token_ids)],
+        prompt_token_ids=[packing.as_token_ids(prompt_token_ids)],
     )
 
   def _build_orchestrator(self) -> rollout_orchestrator.RolloutOrchestrator:

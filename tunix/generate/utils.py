@@ -30,6 +30,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
+from tunix.rl import packing
 
 
 def compute_attention_masks(
@@ -2203,26 +2204,6 @@ def is_token_id_sequence(prompt: Any) -> bool:
   )
 
 
-def as_token_ids(value) -> np.ndarray:
-  """Copies token IDs into an owned 1-D int32 array.
-
-  Raises:
-    ValueError: `value` is not one-dimensional.
-  """
-  array = np.array(value, dtype=np.int32)
-  if array.ndim != 1:
-    raise ValueError(f'token ids must be 1-D, got shape {array.shape}')
-  return array
-
-
-def unpad_prompt(padded_tokens, length: int) -> np.ndarray:
-  """Returns the last `length` tokens of a left-padded prompt row."""
-  arr = as_token_ids(padded_tokens)
-  if length <= 0:
-    return np.zeros(0, dtype=np.int32)
-  return arr[-int(length) :]
-
-
 def unpad_prompt_tokens(
     padded_tokens: Any,
     pad_id: int | None = None,
@@ -2230,7 +2211,7 @@ def unpad_prompt_tokens(
 ) -> np.ndarray:
   """Returns sampler-tokenized prompt ids without backend left padding."""
   if prompt_length is not None:
-    return unpad_prompt(padded_tokens, int(prompt_length))
+    return packing.unpad_prompt(padded_tokens, int(prompt_length))
   arr = np.asarray(padded_tokens, dtype=np.int32).reshape(-1)
   if not isinstance(pad_id, numbers.Integral):
     return arr
@@ -2258,7 +2239,7 @@ def resolve_prompt_tokens(
       raise ValueError('prompt_token_ids must not be empty')
     if not single_output_per_row:
       raise ValueError('prompt_token_ids requires exactly one output per row')
-    prompt_ids = [as_token_ids(row) for row in prompt_token_ids]
+    prompt_ids = [packing.as_token_ids(row) for row in prompt_token_ids]
     if max_total_length is not None and any(
         len(row) + max_generation_steps > max_total_length for row in prompt_ids
     ):
@@ -2350,7 +2331,7 @@ def check_prompt_echo(
     if isinstance(echoed, (int, np.integer)):
       matches = int(echoed) == len(expected)
     else:
-      matches = np.array_equal(as_token_ids(echoed), expected)
+      matches = np.array_equal(packing.as_token_ids(echoed), expected)
     if not matches:
       raise ValueError(
           f'{backend_name} prompt echo / prompt_token_ids differed from input'

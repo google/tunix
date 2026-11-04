@@ -19,6 +19,7 @@ import os
 import signal
 import time
 from absl.testing import absltest
+from absl.testing import parameterized
 import numpy as np
 from tunix.rl import packing
 from tunix.rl.agentic.agents import agent_types
@@ -1216,6 +1217,44 @@ class ValidatePackingBudgetTest(absltest.TestCase):
           max_prompt_length=1024,
           max_response_length=1024,
       )
+
+
+class TokenIdsTest(parameterized.TestCase):
+
+  @parameterized.parameters(
+      ([0, 3],),
+      ((0, np.int64(3)),),
+      (np.array([0, 3], dtype=np.uint64),),
+      (np.array([0, 3], dtype=np.int64),),
+  )
+  def test_as_token_ids_returns_owned_1d_int32_copy(self, value):
+    out = packing.as_token_ids(value)
+    self.assertEqual(out.dtype, np.int32)
+    np.testing.assert_array_equal(out, [0, 3])
+    if isinstance(value, np.ndarray):
+      value[0] = 999
+      self.assertEqual(int(out[0]), 0)
+
+  def test_as_token_ids_rejects_non_1d(self):
+    with self.assertRaisesRegex(ValueError, "token ids must be 1-D"):
+      packing.as_token_ids(np.zeros((2, 3), dtype=np.int32))
+    with self.assertRaisesRegex(ValueError, "token ids must be 1-D"):
+      packing.as_token_ids(7)
+
+  def test_unpad_prompt_slices_trailing_tokens_and_handles_non_positive_length(
+      self,
+  ):
+    source = np.array([0, 0, 4, 0, 5], dtype=np.int32)
+    unpadded = packing.unpad_prompt(source, 4)
+    self.assertEqual(unpadded.dtype, np.int32)
+    np.testing.assert_array_equal(unpadded, [0, 4, 0, 5])
+    source[:] = 888
+    np.testing.assert_array_equal(unpadded, [0, 4, 0, 5])
+
+    for zero_or_neg in (0, -2):
+      empty = packing.unpad_prompt(source, zero_or_neg)
+      self.assertEqual(empty.dtype, np.int32)
+      self.assertEqual(empty.shape, (0,))
 
 
 if __name__ == "__main__":

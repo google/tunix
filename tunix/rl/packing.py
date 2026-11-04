@@ -31,6 +31,7 @@ import dataclasses
 from typing import Iterable, Literal, Mapping, Sequence, overload
 
 import numpy as np
+from numpy import typing as npt
 from tunix.common import datatypes as common_datatypes
 from tunix.rl.agentic.agents import agent_types
 
@@ -74,6 +75,32 @@ def align_offset(offset: int, segment_alignment_boundary: int) -> int:
   """Rounds `offset` up to the next multiple of `segment_alignment_boundary`."""
   _check_segment_alignment_boundary(segment_alignment_boundary)
   return -(-offset // segment_alignment_boundary) * segment_alignment_boundary
+
+
+def as_token_ids(value: npt.ArrayLike) -> np.ndarray:
+  """Copies token IDs into an owned 1-D int32 array.
+
+  Args:
+    value: 1-D token ID sequence or array.
+
+  Returns:
+    Owned 1-D `int32` NumPy array.
+
+  Raises:
+    ValueError: `value` is not one-dimensional.
+  """
+  array = np.array(value, dtype=np.int32)
+  if array.ndim != 1:
+    raise ValueError(f"token ids must be 1-D, got shape {array.shape}")
+  return array
+
+
+def unpad_prompt(padded_tokens: npt.ArrayLike, length: int) -> np.ndarray:
+  """Returns the last `length` tokens of a left-padded prompt row."""
+  arr = as_token_ids(padded_tokens)
+  if length <= 0:
+    return np.zeros(0, dtype=np.int32)
+  return arr[-int(length) :]
 
 
 def routed_experts_encoding(

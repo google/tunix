@@ -19,8 +19,8 @@ import threading
 from typing import Any, Optional
 
 import numpy as np
-from tunix.generate import utils as generate_utils
 import tunix.generate.tokenizer_adapter as tok_adapter
+from tunix.rl import packing
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_template_parser
 
 
@@ -312,8 +312,8 @@ def assistant_with_suffix(
     ValueError: the parser changed the sampled prefix or appended a different
       number of tokens than it reported.
   """
-  sampled = generate_utils.as_token_ids(sampled_tokens)
-  assistant = generate_utils.as_token_ids(assistant_tokens)
+  sampled = packing.as_token_ids(sampled_tokens)
+  assistant = packing.as_token_ids(assistant_tokens)
   if assistant.size != sampled.size + n_append or not np.array_equal(
       assistant[: sampled.size], sampled
   ):
@@ -324,12 +324,12 @@ def assistant_with_suffix(
 def continuation_prompt_tokens(trajectory) -> np.ndarray:
   """Builds the later-turn prompt: owned first prompt + every recorded turn."""
   segments = [
-      generate_utils.unpad_prompt(
+      packing.unpad_prompt(
           trajectory.prompt_tokens, trajectory.prompt_length
       )
   ]
   for step in trajectory.steps:
-    segments.append(generate_utils.as_token_ids(step.assistant_tokens))
+    segments.append(packing.as_token_ids(step.assistant_tokens))
     if step.env_tokens is not None:
-      segments.append(generate_utils.as_token_ids(step.env_tokens))
+      segments.append(packing.as_token_ids(step.env_tokens))
   return np.concatenate(segments)

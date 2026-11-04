@@ -37,7 +37,6 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tunix.generate import utils as generate_utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algo_core  # pylint: disable=unused-import
 from tunix.rl import common

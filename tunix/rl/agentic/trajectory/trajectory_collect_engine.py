@@ -32,9 +32,9 @@ import numpy as np
 from tunix.dist_rl.trajectory import base_store as store_lib
 from tunix.dist_rl.trajectory import converter as converter_lib
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
-from tunix.generate import utils as generate_utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
+from tunix.rl import packing
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
@@ -323,7 +323,7 @@ class TrajectoryCollectEngine:
     if prompt_length is None:
       return np.asarray(prompt_tokens)
     # Exact mode stores the first-turn prompt left-padded alongside its length.
-    return generate_utils.unpad_prompt(prompt_tokens, prompt_length)
+    return packing.unpad_prompt(prompt_tokens, prompt_length)
 
   def _record_task_step(self) -> None:
     """Writes the initial task step (step 0) live to trajectory_store.
@@ -1014,7 +1014,7 @@ class TrajectoryCollectEngine:
         # Prompt ids are only known now; upsert step 0 to include them.
         self._record_task_step()
       else:
-        echoed = generate_utils.unpad_prompt(
+        echoed = packing.unpad_prompt(
             rollout_output.left_padded_prompt_tokens[0],
             rollout_output.prompt_lengths[0],
         )

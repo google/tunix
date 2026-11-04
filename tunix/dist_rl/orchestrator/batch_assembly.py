@@ -33,7 +33,6 @@ from absl import logging
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
-from tunix.generate import utils as generate_utils
 from tunix.rl import algo_core
 from tunix.rl import algorithm_config
 from tunix.rl import function_registry
@@ -1515,7 +1514,7 @@ def _extract_tokens_and_masks(
   p_arr = np.asarray(item.traj["prompt_tokens"], dtype=np.int32).ravel()
   prompt_len = item.traj.get("prompt_length")
   if prompt_len is not None:
-    p_arr = generate_utils.unpad_prompt(p_arr, int(prompt_len))
+    p_arr = packing.unpad_prompt(p_arr, int(prompt_len))
   return (
       p_arr,
       np.asarray(item.traj["conversation_tokens"], dtype=np.int32).ravel(),
