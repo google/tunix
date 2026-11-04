@@ -117,18 +117,11 @@ class RaidenHandlerTest(absltest.TestCase):
     server_patch = mock.patch.object(
         raiden_handler.raiden_controller, "RaidenControllerServer", autospec=True
     )
-    rpc_client_patch = mock.patch.object(
-        raiden_handler.raiden_controller,
-        "WeightSyncWorkerRpcClient",
-        autospec=True,
-    )
     self.controller_cls = self.enter_context(controller_patch)
     self.server_cls = self.enter_context(server_patch)
-    self.rpc_client_cls = self.enter_context(rpc_client_patch)
 
     self.server_cls.return_value.start.return_value = 15000
     self.controller = self.controller_cls.return_value
-    self.controller.worker_rpc_client = mock.MagicMock()
 
     # A fresh future per call, kept so a test can assert which way it was
     # driven. `start_transfer` returning a bare Mock would not do: the
@@ -254,24 +247,8 @@ class RaidenHandlerTest(absltest.TestCase):
     self.assertFalse(result.success)
     self.assertIn("recv timeout", result.message)
 
-  def test_resolver_reaches_the_controllers_outbound_client(self):
-    # The facade resolving names is not enough: the controller itself makes
-    # outbound calls to worker control-plane addresses through its
-    # WeightSyncWorkerRpcClient, and that client needs the resolver too.
-    resolver = object()
-    self.rpc_client_cls.reset_mock()
-    raiden_handler.RaidenHandler(port=0, name_resolver=resolver)
-
-    self.rpc_client_cls.assert_called_once_with(name_resolver=resolver)
-    self.assertIs(
-        self.controller_cls.call_args.kwargs["worker_rpc_client"],
-        self.rpc_client_cls.return_value,
-    )
-
-  def test_no_resolver_means_no_worker_rpc_client_override(self):
-    self.assertIsNone(
-        self.controller_cls.call_args.kwargs["worker_rpc_client"]
-    )
+  def test_controller_initialized_without_worker_rpc_client(self):
+    self.controller_cls.assert_called_once_with(port=0)
 
   # ---------------------------------------------------------- registration
 
