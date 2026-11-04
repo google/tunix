@@ -201,6 +201,8 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
       k8s["rollout_id"] = f"{user}-roll"
     if not k8s["inference_id"]:
       k8s["inference_id"] = f"{user}-inf"
+    if not k8s["otel_id"]:
+      k8s["otel_id"] = f"{user}-otel"
 
 
 # TODO(noghabi): Deploy a reference inference worker from `k8s.sh` (a JobSet
@@ -653,6 +655,7 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "TRAINER_PORT": ports["trainer"],
       "ROLLOUT_PORT": ports["rollout"],
       "INFERENCE_PORT": ports["inference"],
+      "OTEL_PORT": ports["otel"],
       "ACTOR_MAXTEXT_MODEL_NAME": (
           actor["kwargs"]["maxtext_model_name"]
           if actor["model_source"] == "maxtext"
@@ -692,6 +695,7 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "K8S_TRAINER_ID": k8s["trainer_id"],
       "K8S_ROLLOUT_ID": k8s["rollout_id"],
       "K8S_INFERENCE_ID": k8s["inference_id"],
+      "K8S_OTEL_ID": k8s["otel_id"],
       "K8S_CPU_MACHINE": k8s["cpu_machine"],
       "K8S_GCS_SCRATCH_LOCATION": k8s["gcs_scratch_location"],
       "K8S_ENABLE_PATHWAYS_PERSISTENCE": k8s["enable_pathways_persistence"],

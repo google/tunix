@@ -28,6 +28,7 @@ from unittest import mock
 from absl.testing import absltest
 import jax
 import transformers
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.worker import remote_execution
@@ -199,6 +200,40 @@ class WorkerIdAndPortTest(absltest.TestCase):
     self.assertEqual(node_utils.service_port(hp, "trainer"), 20000)
     self.assertEqual(node_utils.service_port(hp, "rollout"), 20051)
     self.assertEqual(node_utils.service_port(hp, "inference"), 20002)
+
+
+class SetupOtelMetricsTest(absltest.TestCase):
+
+  def test_names_the_service_and_tags_role_run_and_worker(self):
+    hp = resolve_config.initialize(["cluster_config.run_id=run_1"])
+    with mock.patch.object(
+        otel_setup, "setup_metrics", return_value=True
+    ) as setup_metrics:
+      self.assertTrue(
+          node_utils.setup_otel_metrics(hp, "rollout", "rollout-0")
+      )
+      node_utils.setup_otel_metrics(hp, "orchestrator", worker_id_str=None)
+    self.assertEqual(
+        setup_metrics.call_args_list,
+        [
+            mock.call(
+                default_service_name="tunix-rollout",
+                resource_attributes={
+                    "tunix.role": "rollout",
+                    "tunix.run_id": "run_1",
+                    "tunix.worker_id": "rollout-0",
+                },
+            ),
+            # The orchestrator registers no worker id.
+            mock.call(
+                default_service_name="tunix-orchestrator",
+                resource_attributes={
+                    "tunix.role": "orchestrator",
+                    "tunix.run_id": "run_1",
+                },
+            ),
+        ],
+    )
 
 
 class OptionalBoolTest(absltest.TestCase):

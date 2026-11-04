@@ -21,7 +21,8 @@
 # command-line arguments.
 #
 # Usage:
-#   bash launch.sh [start|stop|orchestrator|trainer|rollout] [--dry-run] \
+#   bash launch.sh [start|stop|orchestrator|trainer|rollout|otel|stop-otel] \
+#     [--dry-run] \
 #     [override_config_file=<config.yaml> ...] [section.key=value ...]
 
 set -Eeuo pipefail
@@ -30,7 +31,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/legacy_env.sh"
 
 usage() {
-  echo "Usage: $0 [start|stop|orchestrator|trainer|rollout] [--dry-run]" \
+  echo "Usage: $0 [start|stop|orchestrator|trainer|rollout|otel|stop-otel]" \
+    "[--dry-run]" \
     "[override_config_file=<config.yaml> ...] [section.key=value ...]"
 }
 
@@ -39,7 +41,7 @@ CONFIG_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    start|stop|orchestrator|trainer|rollout)
+    start|stop|orchestrator|trainer|rollout|otel|stop-otel)
       COMMAND="$1"
       shift
       ;;

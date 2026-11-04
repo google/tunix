@@ -181,7 +181,7 @@ def build_generation_args(
 
 
 def build_metrics_logging_options(
-    hp: resolve_config.DistHyperParameters,
+    hp: resolve_config.DistHyperParameters, *, enable_opentelemetry: bool
 ) -> metrics_logger_lib.MetricsLoggerOptions:
   """Builds `MetricsLoggerOptions` from `rl_training_config`.
 
@@ -191,6 +191,8 @@ def build_metrics_logging_options(
 
   Args:
     hp: Resolved distributed RL configuration.
+    enable_opentelemetry: Whether `otel_setup.setup_metrics` installed an
+      OpenTelemetry exporter, so the logged metrics are exported too.
 
   Returns:
     The metrics logger options, with the resolved config logged to W&B.
@@ -206,6 +208,7 @@ def build_metrics_logging_options(
   return dataclasses.replace(
       options,
       backend_kwargs={"wandb": {"config": resolve_config.plain_config(hp)}},
+      enable_opentelemetry=enable_opentelemetry,
   )
 
 
@@ -452,6 +455,7 @@ def build_program(
     pad_id: int,
     prompt_items: grain.MapDataset[dict[str, object]],
     trajectory_store: trajectory_store_lib.TrajectoryStore | None,
+    metrics_logging_options: metrics_logger_lib.MetricsLoggerOptions,
 ) -> rl_program.StandardRLProgram:
   """Builds the `StandardRLProgram` from the configuration.
 
@@ -462,6 +466,8 @@ def build_program(
     pad_id: Tokenizer padding id for batch assembly.
     prompt_items: Prompt items to dispatch (see `load_prompt_items`).
     trajectory_store: The cluster's trajectory store, if enabled.
+    metrics_logging_options: Metrics logging (see
+      `build_metrics_logging_options`).
 
   Returns:
     The RL program.
@@ -477,7 +483,7 @@ def build_program(
       generation_args=build_generation_args(hp),
       batch_size=int(hp.config["batch_size"]),
       batch_config=build_batch_config(hp, pad_id=pad_id),
-      metrics_logging_options=build_metrics_logging_options(hp),
+      metrics_logging_options=metrics_logging_options,
       trajectory_log_dir=_trajectory_log_dir(hp),
       trajectory_store=trajectory_store,
       max_staleness=int(grpo["off_policy_steps"]),
@@ -599,6 +605,12 @@ def main(
   weight_sync_timeouts, rpc_timeout_s = resolve_weight_sync_timeouts(hp)
   algo_config = build_grpo_config(hp)
   reward_fns = hp.obtain_reward_fn()
+  otel_enabled = node_utils.setup_otel_metrics(
+      hp, "orchestrator", worker_id_str=None
+  )
+  metrics_logging_options = build_metrics_logging_options(
+      hp, enable_opentelemetry=otel_enabled
+  )
   prompt_items = load_prompt_items(hp)
   pad_id, _ = node_utils.pad_and_eos_ids(node_utils.load_hf_tokenizer(hp))
 
@@ -611,6 +623,7 @@ def main(
         pad_id=pad_id,
         prompt_items=prompt_items,
         trajectory_store=cluster.trajectory_store,
+        metrics_logging_options=metrics_logging_options,
     )
     result = run_program(
         hp, cluster, program, discovery=discovery, rpc_timeout_s=rpc_timeout_s

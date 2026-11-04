@@ -17,6 +17,7 @@
 from collections.abc import Mapping
 import contextlib
 import json
+import os
 import sys
 import types
 from typing import Any
@@ -24,6 +25,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from tunix.dist_rl.common import gcs_cache
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.launch.nodes import rollout
@@ -863,6 +865,39 @@ class RolloutMainTest(absltest.TestCase):
     mock_restore.assert_called_once()
     self.assertEqual(mock_restore.call_args.kwargs["params"].sampler, "vanilla")
     self.assertEqual(events, ["restore:vanilla", "jax_init"])
+
+  def test_main_exports_otel_metrics_as_the_rollout(self):
+    worker_service = mock.MagicMock(trajectory_store=None)
+    with contextlib.ExitStack() as stack:
+      # `main` sets environment defaults; restore the test's environment.
+      stack.enter_context(mock.patch.dict(os.environ))
+      stack.enter_context(mock.patch.object(rollout.importlib, "import_module"))
+      stack.enter_context(mock.patch.object(gcs_cache, "restore_jax_cache"))
+      stack.enter_context(mock.patch.object(node_utils, "load_hf_tokenizer"))
+      stack.enter_context(
+          mock.patch.object(
+              rollout, "_create_rollout_worker", return_value=worker_service
+          )
+      )
+      serve_worker = stack.enter_context(
+          mock.patch.object(
+              node_utils, "serve_worker", new_callable=mock.AsyncMock
+          )
+      )
+      setup_metrics = stack.enter_context(
+          mock.patch.object(otel_setup, "setup_metrics", return_value=False)
+      )
+      rollout.main(["cluster_config.run_id=run_1"], context=mock.Mock())
+
+    setup_metrics.assert_called_once_with(
+        default_service_name="tunix-rollout",
+        resource_attributes={
+            "tunix.worker_id": rollout.LOCAL_WORKER_ID,
+            "tunix.role": "rollout",
+            "tunix.run_id": "run_1",
+        },
+    )
+    serve_worker.assert_awaited_once()
 
   def test_main_raises_without_discovery_context(self):
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):

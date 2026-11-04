@@ -27,6 +27,7 @@ from absl.testing import absltest
 import grain
 import jax
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.distributed.runtime import context as runtime_context
 from tunix.dist_rl.launch.common import resolve_config
@@ -315,9 +316,11 @@ class BuildersTest(absltest.TestCase):
             "rl_training_config.metrics_logging_options.log_dir=/tmp/metrics",
             "rl_training_config.metrics_logging_options.project_name=proj",
             "batch_size=8",
-        )
+        ),
+        enable_opentelemetry=True,
     )
     self.assertIsInstance(options, metrics_logger_lib.MetricsLoggerOptions)
+    self.assertTrue(options.enable_opentelemetry)
     self.assertEqual(options.log_dir, "/tmp/metrics")
     self.assertEqual(options.project_name, "proj")
     wandb_kwargs = options.backend_kwargs["wandb"]
@@ -635,6 +638,9 @@ class ProgramTest(absltest.TestCase):
         pad_id=0,
         prompt_items=grain.MapDataset.source([]),
         trajectory_store=None,
+        metrics_logging_options=orchestrator.build_metrics_logging_options(
+            hp, enable_opentelemetry=False
+        ),
     )
 
   def test_build_program(self):
@@ -812,11 +818,33 @@ rl_training_config:
             "wait_for_workers",
             wraps=orchestrator.wait_for_workers,
         ) as wait_for_workers,
+        mock.patch.object(
+            otel_setup, "setup_metrics", return_value=True
+        ) as setup_metrics,
+        mock.patch.object(
+            orchestrator, "build_program", wraps=orchestrator.build_program
+        ) as build_program,
     ):
       orchestrator.main(
-          [f"override_config_file={self._recipe()}"],
+          [
+              f"override_config_file={self._recipe()}",
+              "cluster_config.run_id=run_1",
+          ],
           _FakeProcessContext(discovery),
       )
+
+    setup_metrics.assert_called_once_with(
+        default_service_name="tunix-orchestrator",
+        resource_attributes={
+            "tunix.role": "orchestrator",
+            "tunix.run_id": "run_1",
+        },
+    )
+    self.assertTrue(
+        build_program.call_args.kwargs[
+            "metrics_logging_options"
+        ].enable_opentelemetry
+    )
 
     self.assertEqual(jax.config.jax_platforms, "cpu")
     _, create_kwargs = create_cluster.call_args

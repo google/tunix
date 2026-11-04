@@ -36,6 +36,7 @@ import jax
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 import transformers
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.distributed.runtime import context as context_lib
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.worker import remote_execution
@@ -296,6 +297,38 @@ def worker_id(
 def service_port(hp: resolve_config.DistHyperParameters, role: NodeRole) -> int:
   """Returns `cluster_config.ports.<role>`, the node's gRPC port."""
   return int(hp.config_mapping("cluster_config")["ports"][role])
+
+
+def setup_otel_metrics(
+    hp: resolve_config.DistHyperParameters,
+    role: ProcessRole,
+    worker_id_str: str | None,
+) -> bool:
+  """Exports this process's metrics to OpenTelemetry when it is configured.
+
+  `otel_setup.setup_metrics` installs an exporter when
+  `OTEL_EXPORTER_OTLP_ENDPOINT` is set, and fails on a malformed OpenTelemetry
+  setting. Every process names its service `tunix-<role>` and tags its metrics
+  with its role, the run id, and its worker id.
+
+  Args:
+    hp: Validated distributed RL configuration.
+    role: Process role.
+    worker_id_str: The id the worker registers with; None for the orchestrator,
+      which has none.
+
+  Returns:
+    Whether an exporter was installed.
+  """
+  attributes = {
+      "tunix.role": role,
+      "tunix.run_id": str(hp.config_mapping("cluster_config")["run_id"]),
+  }
+  if worker_id_str is not None:
+    attributes["tunix.worker_id"] = worker_id_str
+  return otel_setup.setup_metrics(
+      default_service_name=f"tunix-{role}", resource_attributes=attributes
+  )
 
 
 def optional_bool(mapping: Mapping[str, object], key: str) -> bool | None:

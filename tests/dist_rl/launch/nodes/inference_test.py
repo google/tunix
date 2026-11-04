@@ -18,6 +18,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from jax.sharding import Mesh
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.launch.nodes import inference
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.worker import inference_worker as exp_inference_worker
@@ -75,6 +76,9 @@ class InferenceMainTest(absltest.TestCase):
             node_utils, "serve_worker", new_callable=mock.AsyncMock
         )
     )
+    self.mock_setup_metrics = self.enter_context(
+        mock.patch.object(otel_setup, "setup_metrics", return_value=False)
+    )
 
   def test_main_loads_model_with_separate_load_dtype_and_serves_worker(self):
     inference.main(
@@ -84,8 +88,18 @@ class InferenceMainTest(absltest.TestCase):
             "reference_model_config.load_dtype=float32",
             "rl_training_config.compute_logps_micro_batch_size=4",
             "cluster_config.ports.inference=20052",
+            "cluster_config.run_id=run_1",
         ],
         context=self.mock_context,
+    )
+
+    self.mock_setup_metrics.assert_called_once_with(
+        default_service_name="tunix-inference",
+        resource_attributes={
+            "tunix.worker_id": "reference-inference-0",
+            "tunix.role": "inference",
+            "tunix.run_id": "run_1",
+        },
     )
 
     self.mock_context.jax.initialize.assert_called_once()

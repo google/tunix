@@ -945,6 +945,10 @@ def main(
 
   hp = resolve_config.initialize(argv)
   _validate_rollout_config(hp)
+  worker_id = node_utils.worker_id(hp, "rollout", LOCAL_WORKER_ID)
+  # Before the slow startup below (registry import, JAX cache restore, JAX
+  # initialization), so a malformed OpenTelemetry setting fails fast.
+  node_utils.setup_otel_metrics(hp, "rollout", worker_id)
   cluster = hp.config_mapping("cluster_config")
   if cluster["debug"]:
     logging.getLogger().setLevel(logging.DEBUG)
@@ -973,7 +977,6 @@ def main(
     process_context.jax.initialize()
 
   tokenizer = node_utils.load_hf_tokenizer(hp)
-  worker_id = node_utils.worker_id(hp, "rollout", LOCAL_WORKER_ID)
   port = node_utils.service_port(hp, "rollout")
 
   async def grpc_server_main() -> None:

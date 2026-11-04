@@ -22,6 +22,7 @@ from absl.testing import absltest
 from jax.sharding import Mesh
 from orbax.checkpoint import v1 as ocp_v1
 from tunix.cli import config as cli_config
+from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.launch.nodes import trainer
@@ -69,10 +70,23 @@ class TrainerMainTest(absltest.TestCase):
             node_utils, "serve_worker", new_callable=mock.AsyncMock
         )
     )
+    self.mock_setup_metrics = self.enter_context(
+        mock.patch.object(otel_setup, "setup_metrics", return_value=False)
+    )
 
   def test_main_builds_worker_and_serves_with_close(self):
     trainer.main(
-        ["cluster_config.ports.trainer=20050"], context=self.mock_context
+        ["cluster_config.ports.trainer=20050", "cluster_config.run_id=run_1"],
+        context=self.mock_context,
+    )
+
+    self.mock_setup_metrics.assert_called_once_with(
+        default_service_name="tunix-trainer",
+        resource_attributes={
+            "tunix.worker_id": trainer.LOCAL_WORKER_ID,
+            "tunix.role": "trainer",
+            "tunix.run_id": "run_1",
+        },
     )
 
     self.mock_context.jax.initialize.assert_called_once()

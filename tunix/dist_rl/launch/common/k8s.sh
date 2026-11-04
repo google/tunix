@@ -17,6 +17,8 @@
 # the distributed RL launchers.
 #
 # Invoked by `launch.sh` (never directly) as `k8s.sh <command> [config args]`.
+# `otel` / `stop-otel` deploy / delete the OpenTelemetry collector that the
+# nodes export metrics to when `OTEL_EXPORTER_OTLP_ENDPOINT` points at it.
 # Consumes the cluster/deployment environment variables exported by
 # `resolve_config.py` and forwards YAML + `key=value` arguments directly to
 # `run_trainer_node`, `run_rollout_node`, and the distributed orchestrator via
@@ -58,6 +60,7 @@ CONTAINER_CONFIG_ARGS=(
   "cluster_config.k8s.trainer_id=${K8S_TRAINER_ID}"
   "cluster_config.k8s.rollout_id=${K8S_ROLLOUT_ID}"
   "cluster_config.k8s.inference_id=${K8S_INFERENCE_ID}"
+  "cluster_config.k8s.otel_id=${K8S_OTEL_ID}"
 )
 for arg in "${CONFIG_ARGS[@]}"; do
   case "$arg" in
@@ -82,6 +85,17 @@ format_args() {
 }
 
 CONTAINER_ARGS_STR="$(format_args "${CONTAINER_CONFIG_ARGS[@]}")"
+
+# OpenTelemetry metrics export settings, read by every node
+# (`tunix/dist_rl/common/otel_setup.py`): passed to the pods when set in the
+# caller's environment, as `local.sh`'s child processes inherit them.
+OTEL_ENV_PREFIX=""
+for otel_var in OTEL_EXPORTER_OTLP_ENDPOINT OTEL_METRIC_EXPORT_INTERVAL \
+  OTEL_EXPORTER_OTLP_TIMEOUT; do
+  if [[ -n "${!otel_var:-}" ]]; then
+    OTEL_ENV_PREFIX+="${otel_var}=$(printf '%q' "${!otel_var}") "
+  fi
+done
 
 is_jax_cache_disabled() {
   is_true "${K8S_JAX_CACHE_DISABLE:-false}"
@@ -124,7 +138,7 @@ start_orchestrator() {
     env_prefix+="WANDB_API_KEY=$(printf '%q' "${WANDB_API_KEY}") "
   fi
 
-  local startup_cmd="${env_prefix}python -m tunix.dist_rl.distributed.runtime.main --discovery_id=${K8S_ORCHESTRATOR_ID} --discovery_port=${ORCHESTRATOR_PORT} --process_main=${ORCHESTRATOR_MAIN} ${CONTAINER_ARGS_STR}"
+  local startup_cmd="${env_prefix}${OTEL_ENV_PREFIX}python -m tunix.dist_rl.distributed.runtime.main --discovery_id=${K8S_ORCHESTRATOR_ID} --discovery_port=${ORCHESTRATOR_PORT} --process_main=${ORCHESTRATOR_MAIN} ${CONTAINER_ARGS_STR}"
 
   run_yaml_gen \
     "${YAML_DIR}/jobset.cpu.yaml" \
@@ -179,7 +193,7 @@ start_trainer() {
     env_prefix+=" ${K8S_TRAINER_EXTRA_ENV}"
   fi
 
-  local startup_cmd="${env_prefix} python -m tunix.dist_rl.distributed.runtime.main --discovery_addrs=${K8S_ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor --process_main=${TRAINER_MAIN} ${CONTAINER_ARGS_STR}"
+  local startup_cmd="${OTEL_ENV_PREFIX}${env_prefix} python -m tunix.dist_rl.distributed.runtime.main --discovery_addrs=${K8S_ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor --process_main=${TRAINER_MAIN} ${CONTAINER_ARGS_STR}"
 
   run_yaml_gen \
     "${YAML_DIR}/${K8S_TRAINER_JOBSET_YAML}" \
@@ -283,7 +297,7 @@ start_rollout_instance() {
     ray_worker_pre_init_cmd+=" && (python3 -m tunix.dist_rl.common.gcs_cache download \"${K8S_JAX_CACHE_LOCAL_DIR}\" \"${K8S_JAX_CACHE_ROLLOUT_GCS_DIR}\" || true)"
   fi
 
-  local startup_cmd="${env_prefix} python -m tunix.dist_rl.distributed.runtime.main --discovery_addrs=${K8S_ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor --process_main=${ROLLOUT_MAIN} ${CONTAINER_ARGS_STR}"
+  local startup_cmd="${OTEL_ENV_PREFIX}${env_prefix} python -m tunix.dist_rl.distributed.runtime.main --discovery_addrs=${K8S_ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor --process_main=${ROLLOUT_MAIN} ${CONTAINER_ARGS_STR}"
 
   run_yaml_gen \
     "${YAML_DIR}/${K8S_ROLLOUT_JOBSET_YAML}" \
@@ -316,6 +330,37 @@ start_rollout() {
   done
 }
 
+stop_otel() {
+  if is_true "${DRY_RUN}"; then
+    echo "kubectl delete deployment ${K8S_OTEL_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete service ${K8S_OTEL_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete configmap ${K8S_OTEL_ID}-config -n ${K8S_NAMESPACE}"
+  else
+    kubectl delete deployment "${K8S_OTEL_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
+    kubectl delete service "${K8S_OTEL_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found
+    kubectl delete configmap "${K8S_OTEL_ID}-config" -n "${K8S_NAMESPACE}" --ignore-not-found
+  fi
+}
+
+# Deploys the OpenTelemetry collector: the Deployment and Service in
+# `jobset.otel.yaml`, configured by `otel-collector.yaml`. The nodes export to
+# it with OTEL_EXPORTER_OTLP_ENDPOINT=http://${K8S_OTEL_ID}:${OTEL_PORT}.
+start_otel() {
+  if is_true "${DRY_RUN}"; then
+    echo "kubectl create configmap ${K8S_OTEL_ID}-config -n ${K8S_NAMESPACE} --from-file=otel-collector.yaml=${YAML_DIR}/otel-collector.yaml"
+  else
+    kubectl create configmap "${K8S_OTEL_ID}-config" -n "${K8S_NAMESPACE}" \
+      --from-file=otel-collector.yaml="${YAML_DIR}/otel-collector.yaml" \
+      --dry-run=client -o yaml | apply_manifest
+  fi
+  run_yaml_gen \
+    "${YAML_DIR}/jobset.otel.yaml" \
+    --jobset_name="${K8S_OTEL_ID}" \
+    --namespace="${K8S_NAMESPACE}" \
+    --worker_container_port="${OTEL_PORT}" \
+    | apply_manifest
+}
+
 if ! is_true "${DRY_RUN}"; then
   ENTER_KUBE_CONTEXT="${ENTER_KUBE_CONTEXT:-${LAUNCH_DIR}/enter_kube_context.sh}"
   if [[ -f "${ENTER_KUBE_CONTEXT}" ]]; then
@@ -323,7 +368,8 @@ if ! is_true "${DRY_RUN}"; then
   fi
 fi
 
-if [[ -z "${K8S_TUNIX_IMAGE}" ]]; then
+# The collector runs its own image.
+if [[ "${COMMAND}" != "otel" && "${COMMAND}" != "stop-otel" && -z "${K8S_TUNIX_IMAGE}" ]]; then
   echo "Error: cluster_config.k8s.tunix_image is empty." >&2
   exit 1
 fi
@@ -354,8 +400,15 @@ case "${COMMAND}" in
     stop_rollout
     start_rollout
     ;;
+  otel)
+    stop_otel
+    start_otel
+    ;;
+  stop-otel)
+    stop_otel
+    ;;
   *)
-    echo "Error: Invalid command '${COMMAND}'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout'." >&2
+    echo "Error: Invalid command '${COMMAND}'. Available commands: 'start', 'stop', 'orchestrator', 'trainer', 'rollout', 'otel', 'stop-otel'." >&2
     exit 1
     ;;
 esac

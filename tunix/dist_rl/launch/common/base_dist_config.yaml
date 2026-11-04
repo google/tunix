@@ -338,6 +338,9 @@ cluster_config:
     trainer: 20000
     rollout: 20001
     inference: 20002
+    # OTLP gRPC port of the OpenTelemetry collector that `launch.sh otel`
+    # deploys on k8s.
+    otel: 4317
   local:
     auto_detect_pci_tpus: false
     trainer_tpu_chips: "0,1"
@@ -358,6 +361,11 @@ cluster_config:
     trainer_id: ""
     rollout_id: ""
     inference_id: ""
+    # Name of the OpenTelemetry collector Deployment and Service that
+    # `launch.sh otel` deploys (default `<user>-otel`). To export metrics, set
+    # OTEL_EXPORTER_OTLP_ENDPOINT=http://<otel_id>:<ports.otel> when launching;
+    # every node then exports to it (`tunix/dist_rl/common/otel_setup.py`).
+    otel_id: ""
     cpu_machine: "n2-standard-64"
     gcs_scratch_location: "gs://cloud-pathways-staging/tmp"
     enable_pathways_persistence: false

@@ -38,6 +38,9 @@ _ENV_PASSTHROUGH = frozenset({
     "HF_TOKEN",
     "LOG_ROOT",
     "ORCHESTRATOR_ID",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_TIMEOUT",
+    "OTEL_METRIC_EXPORT_INTERVAL",
     "PYTHON",
     "PYTHONPATH",
     "PYTHON_BIN",
@@ -344,6 +347,99 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertIn("kubectl delete jobset testuser-orch -n default", res.stdout)
     self.assertNotIn("apiVersion:", res.stdout)
 
+  def test_k8s_passes_otel_settings_to_every_pod(self):
+    args = [
+        "start",
+        "--dry-run",
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=test-image",
+        "agentic_grpo_config.beta=0.0",
+    ]
+    res = self._run_launch(
+        args,
+        extra_env={
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://testuser-otel:4317",
+            "OTEL_METRIC_EXPORT_INTERVAL": "5000",
+            "OTEL_EXPORTER_OTLP_TIMEOUT": "10000",
+        },
+    )
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    # Each startup command is one line of its rendered manifest.
+    exporting = set(
+        re.findall(
+            r"OTEL_EXPORTER_OTLP_ENDPOINT=http://testuser-otel:4317 "
+            r"OTEL_METRIC_EXPORT_INTERVAL=5000 "
+            r"OTEL_EXPORTER_OTLP_TIMEOUT=10000 .*--process_main=(\S+)",
+            res.stdout,
+        )
+    )
+    mains = {
+        "tunix.dist_rl.launch.nodes.orchestrator.main",
+        "tunix.dist_rl.launch.nodes.trainer.main",
+        "tunix.dist_rl.launch.nodes.rollout.main",
+    }
+    self.assertEqual(exporting, mains)
+    # Every pod resolves the collector name the launcher deployed, not one
+    # from the container's `$USER`.
+    pinned = set(
+        re.findall(
+            r"--process_main=(\S+) [^\n]*"
+            r"cluster_config\.k8s\.otel_id=testuser-otel",
+            res.stdout,
+        )
+    )
+    self.assertEqual(pinned, mains)
+    # Unset in the caller's environment, the pods get neither.
+    res = self._run_launch(args)
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    self.assertNotIn("OTEL_", res.stdout)
+
+  def test_otel_commands_deploy_and_delete_the_collector(self):
+    k8s = ["cluster_config.target=k8s", "agentic_grpo_config.beta=0.0"]
+    # The collector needs no `cluster_config.k8s.tunix_image`.
+    res = self._run_launch(
+        ["otel", "--dry-run", *k8s, "cluster_config.ports.otel=4318"]
+    )
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    self.assertIn(
+        "kubectl delete deployment testuser-otel -n default", res.stdout
+    )
+    self.assertIn(
+        "kubectl create configmap testuser-otel-config -n default"
+        " --from-file=otel-collector.yaml=",
+        res.stdout,
+    )
+    manifests = {}
+    for section in res.stdout.split("\n---\n")[1:]:
+      for doc in yaml.safe_load_all(section):
+        if doc:
+          manifests[doc["kind"]] = doc
+    self.assertEqual(set(manifests), {"Deployment", "Service"})
+    service = manifests["Service"]
+    self.assertEqual(service["metadata"]["name"], "testuser-otel")
+    self.assertEqual(service["spec"]["ports"][0]["port"], 4318)
+
+    res = self._run_launch(["stop-otel", "--dry-run", *k8s])
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    self.assertIn("kubectl delete service testuser-otel -n default", res.stdout)
+    self.assertNotIn("apiVersion:", res.stdout)
+
+    # Single-host runs use a collector started separately.
+    res = self._run_launch([
+        "otel",
+        "--dry-run",
+        "cluster_config.target=local",
+        "agentic_grpo_config.beta=0.0",
+    ])
+    self.assertNotEqual(res.returncode, 0)
+    self.assertIn("command 'otel' is not supported", res.stderr)
+
+    # The previous k8s launcher's collector settings are config keys now.
+    res = self._run_launch(
+        ["otel", "--dry-run", *k8s], extra_env={"OTEL_PORT": "4318"}
+    )
+    self.assertNotEqual(res.returncode, 0)
+    self.assertIn("OTEL_PORT", res.stderr)
 
   def test_drivers_only_read_exported_or_known_variables(self):
     exported = set(
