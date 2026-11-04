@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 from tunix.dist_rl.trajectory import action_converter
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
+from tunix.dist_rl.trajectory import tunix_trajectory
 from tunix.rl.agentic.agents import agent_types
 
 
@@ -57,7 +58,7 @@ def _extract_observation(obs_val: Any) -> trajectory_lib.Observation | None:
 
 def create_task_step(
     task: Any,
-) -> trajectory_lib.TunixEnvStep | None:
+) -> tunix_trajectory.TunixEnvStep | None:
   """Creates an initial user task Step from a task prompt or object.
 
   Args:
@@ -83,7 +84,7 @@ def create_task_step(
   if not prompt_str:
     return None
 
-  return trajectory_lib.TunixEnvStep(
+  return tunix_trajectory.TunixEnvStep(
       step_id=0,
       source=trajectory_lib.Source.USER,
       message=prompt_str,
@@ -98,7 +99,7 @@ def create_agent_step(
     prefill_routed_experts: np.ndarray | None = None,
     prefill_start: int | None = None,
     prefill_num_context: int | None = None,
-) -> trajectory_lib.TunixAgentStep | None:
+) -> tunix_trajectory.TunixAgentStep | None:
   """Converts a Tunix agent_types.Step into an agent turn Step.
 
   Maps the 0-based Tunix interaction turn index (`tunix_step_id`) to the
@@ -145,7 +146,7 @@ def create_agent_step(
     effective_policy_version = extra["policy_version"]
 
   converted_step_id = 2 * tunix_step_id + 1
-  return trajectory_lib.TunixAgentStep(
+  return tunix_trajectory.TunixAgentStep(
       step_id=converted_step_id,
       source=trajectory_lib.Source.AGENT,
       message=step.model_response,
@@ -166,7 +167,7 @@ def create_agent_step(
 def create_env_step(
     step: agent_types.Step | None,
     tunix_step_id: int,
-) -> trajectory_lib.TunixEnvStep | None:
+) -> tunix_trajectory.TunixEnvStep | None:
   """Converts a Tunix agent_types.Step into an environment turn Step.
 
   Maps the 0-based Tunix interaction turn index (`tunix_step_id`) to the
@@ -186,7 +187,7 @@ def create_env_step(
 
   obs_str = str(step.observation) if step.observation is not None else ""
   converted_step_id = 2 * tunix_step_id + 2
-  return trajectory_lib.TunixEnvStep(
+  return tunix_trajectory.TunixEnvStep(
       step_id=converted_step_id,
       source=trajectory_lib.Source.SYSTEM,
       message=obs_str,
@@ -213,9 +214,9 @@ def _to_numpy_or_none(arr: Any) -> np.ndarray | None:
 
 def to_tunix_step(
     agent_step: (
-        trajectory_lib.TunixAgentStep | trajectory_lib.Step | None
+        tunix_trajectory.TunixAgentStep | trajectory_lib.Step | None
     ) = None,
-    env_step: trajectory_lib.TunixEnvStep | trajectory_lib.Step | None = None,
+    env_step: tunix_trajectory.TunixEnvStep | trajectory_lib.Step | None = None,
 ) -> agent_types.Step:
   """Converts Trajectory agent and/or env steps into a single Tunix Step.
 
@@ -230,9 +231,9 @@ def to_tunix_step(
     return agent_types.Step()
 
   if agent_step is not None:
-    agent_step = trajectory_lib.TunixAgentStep.from_atif_step(agent_step)
+    agent_step = tunix_trajectory.TunixAgentStep.from_atif_step(agent_step)
   if env_step is not None:
-    env_step = trajectory_lib.TunixEnvStep.from_atif_step(env_step)
+    env_step = tunix_trajectory.TunixEnvStep.from_atif_step(env_step)
 
   thought = ""
   model_response = ""
@@ -325,7 +326,7 @@ def to_tunix_step(
 
 def to_tunix_trajectory(
     traj: (
-        trajectory_lib.TunixTrajectory
+        tunix_trajectory.TunixTrajectory
         | trajectory_lib.Trajectory
         | dict[str, Any]
     ),
@@ -364,12 +365,12 @@ def to_tunix_trajectory(
             if isinstance(step, dict)
         )
     ):
-      traj_obj = trajectory_lib.TunixTrajectory.from_json_dict(traj)
+      traj_obj = tunix_trajectory.TunixTrajectory.from_json_dict(traj)
     else:
       traj_obj = trajectory_lib.Trajectory.from_json_dict(traj)
   else:
     traj_obj = traj
-  metadata_obj = trajectory_lib.TunixTrajectoryMetadata.from_atif_metadata(
+  metadata_obj = tunix_trajectory.TunixTrajectoryMetadata.from_atif_metadata(
       traj_obj
   )
 
@@ -386,15 +387,15 @@ def to_tunix_trajectory(
   ):
     task_val = {"prompts": [traj_obj.steps[0].message]}
     # Unpadded first-turn prompt ids, if the collector recorded them.
-    task_step = trajectory_lib.TunixEnvStep.from_atif_step(traj_obj.steps[0])
+    task_step = tunix_trajectory.TunixEnvStep.from_atif_step(traj_obj.steps[0])
     prompt_tokens = _to_numpy_or_none(task_step.env_tokens)
     converted_step_idx = 1
 
   # Iterate through steps and pair AGENT + ENV steps into Tunix turns.
   # `routed_turns` keeps each turn's source agent step for routing splits.
-  routed_turns: list[tuple[agent_types.Step, trajectory_lib.TunixAgentStep]] = (
-      []
-  )
+  routed_turns: list[
+      tuple[agent_types.Step, tunix_trajectory.TunixAgentStep]
+  ] = []
   while converted_step_idx < num_converted_steps:
     curr_step = traj_obj.steps[converted_step_idx]
     if curr_step.source == trajectory_lib.Source.AGENT:
@@ -406,7 +407,7 @@ def to_tunix_trajectory(
       ):
         next_step = traj_obj.steps[converted_step_idx + 1]
       # No-op if `curr_step` is already a TunixAgentStep.
-      agent_step = trajectory_lib.TunixAgentStep.from_atif_step(curr_step)
+      agent_step = tunix_trajectory.TunixAgentStep.from_atif_step(curr_step)
       dto_step = to_tunix_step(agent_step=agent_step, env_step=next_step)
       dto_steps.append(dto_step)
       routed_turns.append((dto_step, agent_step))
@@ -460,7 +461,9 @@ def to_tunix_trajectory(
 
 
 def _split_prefill_routed_experts(
-    routed_turns: list[tuple[agent_types.Step, trajectory_lib.TunixAgentStep]],
+    routed_turns: list[
+        tuple[agent_types.Step, tunix_trajectory.TunixAgentStep]
+    ],
 ) -> np.ndarray | None:
   """Splits each turn's raw prefill routing back into per-step routing.
 
@@ -563,7 +566,7 @@ def create_trajectory_metadata(
     ) = agent_types.TrajectoryStatus.RUNNING,
     gamma: float | None = None,
     extra: dict[str, Any] | None = None,
-) -> trajectory_lib.TunixTrajectoryMetadata:
+) -> tunix_trajectory.TunixTrajectoryMetadata:
   """Constructs TunixTrajectoryMetadata from rollout request and agent state."""
   meta_extra = dict(getattr(request, "metadata", None) or {})
   if extra:
@@ -590,7 +593,7 @@ def create_trajectory_metadata(
       else str(effective_status)
   )
 
-  return trajectory_lib.TunixTrajectoryMetadata(
+  return tunix_trajectory.TunixTrajectoryMetadata(
       trajectory_id=traj_id,
       agent=agent_obj,
       prompt_id=getattr(request, "prompt_id", None),
@@ -609,7 +612,7 @@ def create_trajectory_metadata(
 
 def update_trajectory_metadata(
     metadata: (
-        trajectory_lib.TunixTrajectoryMetadata
+        tunix_trajectory.TunixTrajectoryMetadata
         | trajectory_lib.TrajectoryMetadata
     ),
     agent: Any = None,
@@ -672,7 +675,7 @@ def update_trajectory_metadata(
         existing.append(policy_version)
 
   if (
-      isinstance(metadata, trajectory_lib.TunixTrajectoryMetadata)
+      isinstance(metadata, tunix_trajectory.TunixTrajectoryMetadata)
       and gamma is not None
   ):
     metadata.gamma = float(gamma)
@@ -681,7 +684,7 @@ def update_trajectory_metadata(
     if hasattr(metadata, "total_reward"):
       setattr(metadata, "total_reward", getattr(traj_obj, "reward", None))
     if (
-        isinstance(metadata, trajectory_lib.TunixTrajectoryMetadata)
+        isinstance(metadata, tunix_trajectory.TunixTrajectoryMetadata)
         and traj_obj.masked_out is not None
     ):
       metadata.masked_out = bool(traj_obj.masked_out)

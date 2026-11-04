@@ -18,6 +18,8 @@ from tunix.dist_rl.trajectory import store
 from tunix.dist_rl.trajectory import store_testing
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
+from tunix.dist_rl.trajectory import tunix_trajectory
+from tunix.dist_rl.trajectory import tunix_trajectory_testing
 
 _POSTGRES_URL = "postgresql+psycopg2://user@host/db"
 
@@ -113,7 +115,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
   def test_resolve_status_with_stated_status_returns_status_as_is(
       self,
   ) -> None:
-    atif_metadata = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
+    atif_metadata = tunix_trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
     self.assertEqual(
         sql_store._resolve_status(atif_metadata),
         "SUCCEEDED",
@@ -129,7 +131,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
   def test_resolve_status_strips_whitespace_and_ignores_blank_or_non_string_values(
       self, raw_status: Any, expected: str
   ) -> None:
-    metadata = trajectory_testing.TUNIX_METADATA_1.model_copy(
+    metadata = tunix_trajectory_testing.TUNIX_METADATA_1.model_copy(
         update={"status": raw_status}
     ).to_atif_metadata()
     self.assertEqual(sql_store._resolve_status(metadata), expected)
@@ -327,12 +329,12 @@ class SqlStoreWriterTest(parameterized.TestCase):
       self,
   ) -> None:
     writer = self._create_writer()
-    original = trajectory_lib.TunixTrajectoryMetadata(
+    original = tunix_trajectory.TunixTrajectoryMetadata(
         trajectory_id="traj_up",
         agent=trajectory_testing.METADATA_1.agent,
         status="RUNNING",
     )
-    updated = trajectory_lib.TunixTrajectoryMetadata(
+    updated = tunix_trajectory.TunixTrajectoryMetadata(
         trajectory_id="traj_up",
         agent=trajectory_testing.METADATA_1.agent,
         status="SUCCEEDED",
@@ -382,7 +384,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
     writer = self._create_writer()
     writer.enqueue_write(
         run_id="preserve_run",
-        metadata=trajectory_lib.TunixTrajectoryMetadata(
+        metadata=tunix_trajectory.TunixTrajectoryMetadata(
             trajectory_id="traj_preserve",
             agent=trajectory_testing.METADATA_1.agent,
             status="SUCCEEDED",
@@ -445,7 +447,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
       self,
   ) -> None:
     writer = self._create_writer()
-    running_metadata = trajectory_lib.TunixTrajectoryMetadata(
+    running_metadata = tunix_trajectory.TunixTrajectoryMetadata(
         trajectory_id=trajectory_testing.TRAJECTORY_ID_2,
         agent=trajectory_testing.METADATA_2.agent,
         status="RUNNING",
@@ -557,7 +559,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
       self,
   ) -> None:
     writer = self._create_writer(max_cached_trajectories=0)
-    metadata = trajectory_lib.TunixTrajectoryMetadata(
+    metadata = tunix_trajectory.TunixTrajectoryMetadata(
         trajectory_id="traj_sql_where",
         agent=trajectory_testing.METADATA_1.agent,
         status="RUNNING",
@@ -993,10 +995,10 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
       self,
   ) -> None:
     store_inst = self._create_store(run_id="meta_reader_run")
-    tunix_meta_2 = trajectory_testing.TUNIX_METADATA_1.model_copy(
+    tunix_meta_2 = tunix_trajectory_testing.TUNIX_METADATA_1.model_copy(
         update={"trajectory_id": "t_atif_2"}
     )
-    store_inst.update_metadata(trajectory_testing.TUNIX_METADATA_1)
+    store_inst.update_metadata(tunix_trajectory_testing.TUNIX_METADATA_1)
     store_inst.update_metadata(tunix_meta_2)
     store_inst.flush()
 
@@ -1004,7 +1006,7 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(
         metas,
         [
-            trajectory_testing.TUNIX_METADATA_1,
+            tunix_trajectory_testing.TUNIX_METADATA_1,
             tunix_meta_2,
         ],
     )
@@ -1013,16 +1015,16 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
       self,
   ) -> None:
     store_inst = self._create_store(run_id="trajs_reader_run")
-    tunix_meta = trajectory_testing.PAIRED_TUNIX_TRAJECTORY.get_metadata()
+    tunix_meta = tunix_trajectory_testing.PAIRED_TUNIX_TRAJECTORY.get_metadata()
     # Log Tunix steps out of step_id order (step 2, then step 0, then step 1).
-    store_inst.add_step(trajectory_testing.TUNIX_ENV_STEP_2, tunix_meta)
-    store_inst.add_step(trajectory_testing.TUNIX_ENV_STEP_0, tunix_meta)
-    store_inst.add_step(trajectory_testing.TUNIX_AGENT_STEP_1, tunix_meta)
+    store_inst.add_step(tunix_trajectory_testing.TUNIX_ENV_STEP_2, tunix_meta)
+    store_inst.add_step(tunix_trajectory_testing.TUNIX_ENV_STEP_0, tunix_meta)
+    store_inst.add_step(tunix_trajectory_testing.TUNIX_AGENT_STEP_1, tunix_meta)
     store_inst.flush()
 
     (trajectory,) = store_inst.get_trajectories([tunix_meta.trajectory_id])
     self.assertTrajectoryEqual(
-        trajectory, trajectory_testing.PAIRED_TUNIX_TRAJECTORY
+        trajectory, tunix_trajectory_testing.PAIRED_TUNIX_TRAJECTORY
     )
 
   def test_reader_methods_isolate_trajectories_across_runs(self) -> None:

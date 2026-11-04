@@ -25,7 +25,7 @@ from tunix.dist_rl.common import timeouts as timeouts_lib
 from tunix.dist_rl.rollout import collector as collector_lib
 from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.dist_rl.trajectory import base_store as store
-from tunix.dist_rl.trajectory import trajectory as trajectory_lib
+from tunix.dist_rl.trajectory import tunix_trajectory
 from tunix.dist_rl.worker import traffic_controller as traffic_controller_lib
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
@@ -33,7 +33,7 @@ from tunix.rl.rollout import base_rollout
 
 TrajectoryOrError = Union[
     datatypes.TrajectoryItem,
-    trajectory_lib.TrajectoryError,
+    tunix_trajectory.TrajectoryError,
 ]
 
 
@@ -249,7 +249,7 @@ class RolloutManager:
       error_metadata["prompt_id"] = request.prompt_id
       error_metadata["group_index"] = request.group_index
       error_metadata["policy_version"] = int(request.target_policy_version or 0)
-      trajectory = trajectory_lib.TrajectoryError(
+      trajectory = tunix_trajectory.TrajectoryError(
           trajectory_id=collector.traj_id,
           prompt_id=request.prompt_id,
           error_message=str(e),

@@ -23,13 +23,14 @@ from typing import Any
 from absl.testing import absltest
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
+from tunix.dist_rl.trajectory import tunix_trajectory_testing
 from tunix.dist_rl.trajectory.explorer.commands import show
 from tunix.dist_rl.trajectory.explorer.commands import testing
 
 _NO_OUTCOME_TRAJECTORY = trajectory_testing.TRAJECTORY_2
-_TOOL_CALLING_TRAJECTORY = trajectory_testing.PAIRED_ATIF_TRAJECTORY
-_SUCCEEDED_TRAJECTORY = trajectory_testing.PAIRED_TUNIX_TRAJECTORY
-_ROLLOUT_TRAJECTORY = trajectory_testing.TUNIX_ROLLOUT_TRAJECTORY
+_TOOL_CALLING_TRAJECTORY = tunix_trajectory_testing.PAIRED_ATIF_TRAJECTORY
+_SUCCEEDED_TRAJECTORY = tunix_trajectory_testing.PAIRED_TUNIX_TRAJECTORY
+_ROLLOUT_TRAJECTORY = tunix_trajectory_testing.TUNIX_ROLLOUT_TRAJECTORY
 
 
 def _trajectory_id(trajectory: trajectory_lib.Trajectory[Any]) -> str:

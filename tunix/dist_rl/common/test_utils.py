@@ -27,6 +27,7 @@ from tunix.dist_rl.common import registry
 from tunix.dist_rl.rollout import sampler as base_sampler_lib
 from tunix.dist_rl.train import abstract_trainer
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
+from tunix.dist_rl.trajectory import tunix_trajectory
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import task_session
@@ -462,7 +463,7 @@ class MockTrainer:
 
 
 TrajectoryOrError = Union[
-    trajectory_lib.Trajectory, trajectory_lib.TrajectoryError
+    trajectory_lib.Trajectory, tunix_trajectory.TrajectoryError
 ]
 
 

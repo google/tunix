@@ -14,6 +14,8 @@ import numpy as np
 from tunix.dist_rl.trajectory import async_writer
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
+from tunix.dist_rl.trajectory import tunix_trajectory
+from tunix.dist_rl.trajectory import tunix_trajectory_testing
 
 # Bounds for barriers that must never be hit on a healthy run; generous enough
 # to stay reliable on a loaded test machine.
@@ -270,8 +272,8 @@ class AsyncWriterTest(trajectory_testing.TrajectoryTestCase):
 
   def test_write_task_deep_copies_on_init_and_projects_on_worker(self) -> None:
     writer = self._create_writer()
-    meta = trajectory_testing.TUNIX_METADATA_1.model_copy(deep=True)
-    step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(deep=True)
+    meta = tunix_trajectory_testing.TUNIX_METADATA_1.model_copy(deep=True)
+    step = tunix_trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(deep=True)
     task = _TestWriteTask(metadata=meta, step=step)
 
     # Mutate base ATIF containers.
@@ -294,9 +296,9 @@ class AsyncWriterTest(trajectory_testing.TrajectoryTestCase):
     step.logprobs[0] = -9.9
 
     # Caller thread only deep-copies; Tunix subclass types remain unprojected.
-    self.assertIs(type(task.metadata), trajectory_lib.TunixTrajectoryMetadata)
-    self.assertEqual(task.metadata, trajectory_testing.TUNIX_METADATA_1)
-    self.assertStepEqual(task.step, trajectory_testing.TUNIX_AGENT_STEP_1)
+    self.assertIs(type(task.metadata), tunix_trajectory.TunixTrajectoryMetadata)
+    self.assertEqual(task.metadata, tunix_trajectory_testing.TUNIX_METADATA_1)
+    self.assertStepEqual(task.step, tunix_trajectory_testing.TUNIX_AGENT_STEP_1)
 
     # Worker thread projects to base ATIF when draining the queue.
     writer._enqueue(task)
@@ -309,12 +311,12 @@ class AsyncWriterTest(trajectory_testing.TrajectoryTestCase):
     )
     self.assertEqual(
         processed_task.metadata,
-        trajectory_testing.TUNIX_METADATA_1.to_atif_metadata(),
+        tunix_trajectory_testing.TUNIX_METADATA_1.to_atif_metadata(),
     )
     self.assertIs(type(processed_task.step), trajectory_lib.Step)
     self.assertEqual(
         processed_task.step,
-        trajectory_testing.TUNIX_AGENT_STEP_1.to_atif_step(),
+        tunix_trajectory_testing.TUNIX_AGENT_STEP_1.to_atif_step(),
     )
 
   # ============================================================================

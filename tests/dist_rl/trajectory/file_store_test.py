@@ -17,6 +17,7 @@ from tunix.dist_rl.trajectory import store
 from tunix.dist_rl.trajectory import store_testing
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
+from tunix.dist_rl.trajectory import tunix_trajectory
 
 # How long a file read in the parallel read tests waits for the reads that
 # should run at the same time as it.
@@ -667,7 +668,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
   @parameterized.named_parameters(
       (
           "agent_step",
-          trajectory_lib.TunixAgentStep(
+          tunix_trajectory.TunixAgentStep(
               step_id=0,
               source=trajectory_lib.Source.AGENT,
               message="agent turn",
@@ -676,7 +677,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
       ),
       (
           "env_step",
-          trajectory_lib.TunixEnvStep(
+          tunix_trajectory.TunixEnvStep(
               step_id=0,
               source=trajectory_lib.Source.USER,
               message="env turn",
@@ -703,13 +704,13 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
   def test_tunix_step_sequence_writes_distinct_offset_files(self) -> None:
     """Verifies a mixed Tunix step sequence maps each step_id to step_id + 1."""
     steps = [
-        trajectory_lib.TunixEnvStep(
+        tunix_trajectory.TunixEnvStep(
             step_id=0, source=trajectory_lib.Source.USER, message="prompt"
         ),
-        trajectory_lib.TunixAgentStep(
+        tunix_trajectory.TunixAgentStep(
             step_id=1, source=trajectory_lib.Source.AGENT, message="answer"
         ),
-        trajectory_lib.TunixEnvStep(
+        tunix_trajectory.TunixEnvStep(
             step_id=4, source=trajectory_lib.Source.USER, message="feedback"
         ),
     ]
@@ -732,7 +733,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
   def test_writes_compact_json_files(self) -> None:
     """Verifies metadata and step files hold compact, unindented JSON."""
-    step = trajectory_lib.TunixAgentStep(
+    step = tunix_trajectory.TunixAgentStep(
         step_id=0,
         source=trajectory_lib.Source.AGENT,
         message="agent turn",
