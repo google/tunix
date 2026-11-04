@@ -24,7 +24,7 @@ class CacheGeometryTest(parameterized.TestCase):
       datatypes.CacheGeometry(**kwargs)
 
 
-class ConfigsTest(absltest.TestCase):
+class ConfigsTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -230,6 +230,37 @@ class ConfigsTest(absltest.TestCase):
 
     with self.assertRaisesRegex(ValueError, "timeout_secs must be > 0"):
       configs.RLProfileConfig(timeout_secs=float("nan"))
+
+    self.assertFalse(cfg.enable_continuous_profiling)
+    self.assertTrue(
+        configs.RLProfileConfig(
+            enable_continuous_profiling=True
+        ).enable_continuous_profiling
+    )
+    cfg_managed = configs.RLProfileConfig(
+        managed_mldiagnostics=True,
+        enable_continuous_profiling=True,
+    )
+    self.assertTrue(cfg_managed.managed_mldiagnostics)
+    self.assertTrue(cfg_managed.enable_continuous_profiling)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="str_enable_continuous_profiling",
+          kwargs={"enable_continuous_profiling": "false"},
+          error_regex="enable_continuous_profiling must be a bool",
+      ),
+      dict(
+          testcase_name="int_enable_continuous_profiling",
+          kwargs={"enable_continuous_profiling": 1},
+          error_regex="enable_continuous_profiling must be a bool",
+      ),
+  )
+  def test_rl_profile_config_invalid_continuous_profiling(
+      self, kwargs, error_regex
+  ):
+    with self.assertRaisesRegex(ValueError, error_regex):
+      configs.RLProfileConfig(**kwargs)
 
   def test_rollout_config_validation(self):
     cfg = configs.RolloutConfig(

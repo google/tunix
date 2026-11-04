@@ -400,13 +400,23 @@ class RLProfileConfig:
       profiling for each role. Defaults to 2.
     num_invocations: The number of function calls to profile for each role once
       start_invocation is reached. Defaults to 1.
-    output_dir: Location to save raw JAX `.xplane.pb` traces.
+    output_dir: Location to save raw JAX `.xplane.pb` or `.xplane.riegeli`
+      traces.
     mldiagnostics_dir: Explicit GCS output directory for ML Diagnostics tracing.
     managed_mldiagnostics: If True, securely streams traces to the ML
       Diagnostics visual UI unified under a single MLRun, bypassing local
       output_dir dumps.
     timeout_secs: Timeout in seconds for joining background trace deactivation
       or upload threads. Defaults to 60.0.
+    enable_continuous_profiling: When True (ignored when
+      `managed_mldiagnostics=True`, which uses the ML Diagnostics profiler
+      backend), sets `enable_continuous_profiling` in
+      `jax.profiler.ProfileOptions.advanced_configuration` to stream chunked
+      `.xplane.riegeli` traces and bypass the 2 GiB protobuf limit. Requires
+      JAX >= 0.11.2. Defaults to False.
+
+  Raises:
+    ValueError: If any field has an invalid value.
   """
 
   start_invocation: int = 2
@@ -415,6 +425,7 @@ class RLProfileConfig:
   mldiagnostics_dir: str = ""
   managed_mldiagnostics: bool = False
   timeout_secs: float = 60.0
+  enable_continuous_profiling: bool = False
 
   def __post_init__(self):
     if self.start_invocation < 0:
@@ -427,6 +438,11 @@ class RLProfileConfig:
       )
     if math.isnan(self.timeout_secs) or self.timeout_secs <= 0:
       raise ValueError(f"timeout_secs must be > 0. Got: {self.timeout_secs}")
+    if not isinstance(self.enable_continuous_profiling, bool):
+      raise ValueError(
+          "enable_continuous_profiling must be a bool. Got:"
+          f" {self.enable_continuous_profiling!r}"
+      )
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
