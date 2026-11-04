@@ -290,7 +290,7 @@ class WorkerRegistryTest(absltest.TestCase):
     # 1. Existing worker at hostA:5001 is still alive -> reject hostB:6001.
     with self.assertRaisesRegex(
         ValueError,
-        "existing rollout worker at hostA:5001 is still alive when hostB:6001"
+        "existing worker at hostA:5001 is still alive when hostB:6001"
         " attempted to register",
     ):
       registry.register_from_hostname("hostB", 0, meta_b)
@@ -320,29 +320,91 @@ class WorkerRegistryTest(absltest.TestCase):
   @mock.patch.object(
       remote_execution.ActorHandle, "from_address", autospec=True
   )
-  def test_register_from_hostname_rejects_non_rollout_duplicate_and_concurrent_eviction(
+  def test_register_from_hostname_pre_and_post_bring_up_and_concurrent_eviction(
       self, mock_from_address
   ):
     registry = worker_registry.WorkerRegistry()
     trainer_h0 = mock.MagicMock(spec=remote_execution.ActorHandle)
     trainer_h1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    trainer_h2 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    trainer_probe = mock.MagicMock(spec=remote_execution.ActorHandle)
+    trainer_h3 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    trainer_h4 = mock.MagicMock(spec=remote_execution.ActorHandle)
     rollout_h = mock.MagicMock(spec=remote_execution.ActorHandle)
-    mock_from_address.side_effect = [trainer_h0, trainer_h1, rollout_h]
+    trainer_probe.submit.side_effect = ConnectionError("dead peer")
+    mock_from_address.side_effect = [
+        trainer_h0,
+        trainer_h1,
+        trainer_h2,
+        trainer_probe,
+        trainer_h3,
+        trainer_h4,
+        rollout_h,
+    ]
     trainer_meta = pickle.dumps({
         "service_type": "trainer",
         "service_port": 5000,
         "worker_id": "trainer-0",
     })
+    trainer_meta_b = pickle.dumps({
+        "service_type": "trainer",
+        "service_port": 6000,
+        "worker_id": "trainer-0",
+    })
     registry.register_from_hostname("hostA", 0, trainer_meta)
+    # Pre-bring_up (AdmissionStatus.REGISTERED): same-address re-registration
+    # is allowed for any role and replaces the prior handle.
+    registry.register_from_hostname("hostA", 0, trainer_meta)
+    trainer_h0.sync_close.assert_called_once()
+    trainer_h1.sync_close.assert_not_called()
+    self.assertIs(registry.handle("trainer-0"), trainer_h1)
+    self.assertEqual(
+        registry.status("trainer-0"),
+        worker_registry.AdmissionStatus.REGISTERED,
+    )
+
+    # Pre-bring_up (AdmissionStatus.REGISTERED): different-address
+    # re-registration replaces the existing entry if the liveness probe fails.
+    registry.register_from_hostname("hostB", 0, trainer_meta_b)
+    trainer_probe.submit.assert_called_once_with("heartbeat")
+    trainer_probe.sync_close.assert_called_once()
+    trainer_h1.sync_close.assert_called_once()
+    trainer_h2.sync_close.assert_not_called()
+    self.assertIs(registry.handle("trainer-0"), trainer_h2)
+    self.assertEqual(
+        registry.info("trainer-0").resources["address"], "hostB:6000"
+    )
+
+    # Once promoted to PENDING_WEIGHT_SYNC or ACTIVE, non-rollout
+    # re-registration is rejected.
+    worker_registry_testing.set_status(
+        registry,
+        "trainer-0",
+        worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+    )
     with self.assertRaisesRegex(
         ValueError,
         r"duplicate worker_id 'trainer-0' for role 'actor' \(existing roles"
-        r" \['actor'\]\); only rollout workers support re-registration",
+        r" \['actor'\], status 'pending_weight_sync'\); only pre-bring_up"
+        r" \(REGISTERED\) workers or rollout workers support re-registration",
     ):
-      registry.register_from_hostname("hostA", 0, trainer_meta)
-    trainer_h1.sync_close.assert_called_once()
-    trainer_h0.sync_close.assert_not_called()
-    self.assertIs(registry.handle("trainer-0"), trainer_h0)
+      registry.register_from_hostname("hostB", 0, trainer_meta_b)
+    trainer_h3.sync_close.assert_called_once()
+    trainer_h2.sync_close.assert_not_called()
+
+    worker_registry_testing.set_status(
+        registry, "trainer-0", worker_registry.AdmissionStatus.ACTIVE
+    )
+    with self.assertRaisesRegex(
+        ValueError,
+        r"duplicate worker_id 'trainer-0' for role 'actor' \(existing roles"
+        r" \['actor'\], status 'active'\); only pre-bring_up \(REGISTERED\)"
+        r" workers or rollout workers support re-registration",
+    ):
+      registry.register_from_hostname("hostB", 0, trainer_meta_b)
+    trainer_h4.sync_close.assert_called_once()
+    trainer_h2.sync_close.assert_not_called()
+    self.assertIs(registry.handle("trainer-0"), trainer_h2)
 
     # A rollout worker colliding with a non-rollout worker_id is also rejected.
     rollout_meta = pickle.dumps({
@@ -353,12 +415,12 @@ class WorkerRegistryTest(absltest.TestCase):
     with self.assertRaisesRegex(
         ValueError,
         r"duplicate worker_id 'trainer-0' for role 'rollout' \(existing roles"
-        r" \['actor'\]\)",
+        r" \['actor'\]",
     ):
       registry.register_from_hostname("hostA", 0, rollout_meta)
     rollout_h.sync_close.assert_called_once()
-    trainer_h0.sync_close.assert_not_called()
-    self.assertIs(registry.handle("trainer-0"), trainer_h0)
+    trainer_h2.sync_close.assert_not_called()
+    self.assertIs(registry.handle("trainer-0"), trainer_h2)
 
     # Concurrent eviction of old rollout handle while liveness probe is running
     # outside the lock inserts the new handle cleanly without double-closing
@@ -396,6 +458,56 @@ class WorkerRegistryTest(absltest.TestCase):
     probe_rollout.sync_close.assert_called_once()
     new_rollout.sync_close.assert_not_called()
     self.assertIs(registry.handle("rollout-race"), new_rollout)
+
+  @mock.patch.object(
+      remote_execution.ActorHandle, "from_address", autospec=True
+  )
+  def test_register_from_hostname_rejects_concurrent_promotion_to_active_during_probe(
+      self, mock_from_address
+  ):
+    registry = worker_registry.WorkerRegistry()
+    h_a = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_b = mock.MagicMock(spec=remote_execution.ActorHandle)
+    probe = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_from_address.side_effect = [h_a, h_b, probe]
+
+    def _promote_during_probe(method_name):
+      del method_name
+      # bring_up promotes trainer-0 to ACTIVE with the same handle while
+      # hostB's liveness probe is running outside the lock.
+      registry.set_status(
+          "trainer-0",
+          worker_registry.AdmissionStatus.ACTIVE,
+          expected_handle=h_a,
+          expected_status=worker_registry.AdmissionStatus.REGISTERED,
+      )
+      raise TimeoutError("probe timed out after promotion")
+
+    probe.submit.side_effect = _promote_during_probe
+    meta_a = pickle.dumps({
+        "service_type": "trainer",
+        "service_port": 5001,
+        "worker_id": "trainer-0",
+    })
+    meta_b = pickle.dumps({
+        "service_type": "trainer",
+        "service_port": 6001,
+        "worker_id": "trainer-0",
+    })
+    registry.register_from_hostname("hostA", 0, meta_a)
+    with self.assertRaisesRegex(
+        ValueError,
+        r"re-registered concurrently or promoted to 'active'",
+    ):
+      registry.register_from_hostname("hostB", 0, meta_b)
+
+    probe.sync_close.assert_called_once()
+    h_b.sync_close.assert_called_once()
+    h_a.sync_close.assert_not_called()
+    self.assertIs(registry.handle("trainer-0"), h_a)
+    self.assertEqual(
+        registry.status("trainer-0"), worker_registry.AdmissionStatus.ACTIVE
+    )
 
   def test_register_from_hostname_unknown_service_type(self):
     registry = worker_registry.WorkerRegistry()

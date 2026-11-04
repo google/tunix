@@ -357,6 +357,7 @@ class OrchestratorFaultToleranceTest(absltest.TestCase):
   ) -> None:
     with fake_cluster.FakeClusterHarness(num_rollout_workers=2) as harness:
       rollout_0_port = harness.servers["rollout_0"].bound_port
+      trainer_0_port = harness.servers["trainer_0"].bound_port
       with self.assertRaisesRegex(ValueError, "duplicate worker_id"):
         harness.register_worker_from_discovery(
             "rollout_0",
@@ -368,15 +369,34 @@ class OrchestratorFaultToleranceTest(absltest.TestCase):
         harness.register_worker_from_discovery(
             "trainer_0",
             "trainer",
-            port=harness.servers["trainer_0"].bound_port,
+            port=harness.servers["rollout_1"].bound_port,
             override=False,
         )
+      # Pre-bring_up (AdmissionStatus.REGISTERED): stopping and restarting the
+      # trainer on the same port (or a lost-reply discovery retry) replaces the
+      # prior handle cleanly and completes bring_up_workers().
+      restarted_port = harness.restart_worker(
+          "trainer_0",
+          same_port=True,
+          override=False,
+          re_register=True,
+      )
+      self.assertEqual(restarted_port, trainer_0_port)
       self.assertEqual(
           harness.orchestrator.registry.handle("rollout_0").target_address,
           f"grpc://localhost:{rollout_0_port}",
       )
       hb = harness.orchestrator.registry.handle("rollout_0").submit("heartbeat")
       self.assertEqual(hb.state, datatypes.WorkerState.PENDING)
+
+      harness.orchestrator.bring_up_workers()
+      with self.assertRaisesRegex(ValueError, "duplicate worker_id"):
+        harness.register_worker_from_discovery(
+            "trainer_0",
+            "trainer",
+            port=trainer_0_port,
+            override=False,
+        )
 
   def test_bring_up_single_worker_compile_failure_aborts_startup(self) -> None:
     with fake_cluster.FakeClusterHarness(

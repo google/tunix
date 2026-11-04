@@ -209,8 +209,9 @@ class WorkerRegistry:
   ) -> datatypes.WorkerInfo:
     """Registers a remote worker handle from a hostname and metadata.
 
-    A rollout worker re-registering under an existing `worker_id` replaces the
-    existing entry if it reuses the same address, or if the existing worker at a
+    A worker in `AdmissionStatus.REGISTERED` (before `bring_up`) or a rollout
+    worker re-registering under an existing `worker_id` replaces the existing
+    entry if it reuses the same address, or if the existing worker at a
     different address fails a `heartbeat` liveness probe.
 
     Args:
@@ -224,9 +225,9 @@ class WorkerRegistry:
 
     Raises:
       RuntimeError: If `service_type` is unknown or registration is closed.
-      ValueError: If `worker_id` collides with a non-rollout worker, a rollout
-        worker with no address, or a live rollout worker at a different
-        address.
+      ValueError: If `worker_id` collides with a worker of a different role, a
+        non-rollout worker already promoted past `REGISTERED`, a worker with no
+        address, or a live worker at a different address.
     """
     md = pickle.loads(metadata)
 
@@ -273,15 +274,20 @@ class WorkerRegistry:
               f"Worker registration is closed; cannot register {worker_id!r}."
           )
         existing = self._entries.get(worker_id)
-        # TODO(linchai): Support re-registration for non-rollout roles once
-        # trainer/reference worker fault tolerance is implemented.
+        # TODO(linchai): Support runtime re-registration for non-rollout roles
+        # once trainer/reference worker fault tolerance is implemented.
         if existing is not None and (
-            role != datatypes.Role.ROLLOUT or existing.info.roles != info.roles
+            existing.info.roles != info.roles
+            or (
+                existing.status is not AdmissionStatus.REGISTERED
+                and role != datatypes.Role.ROLLOUT
+            )
         ):
           raise ValueError(
               f"duplicate worker_id {worker_id!r} for role {role.value!r}"
-              f" (existing roles {sorted(existing.info.roles)}); only rollout"
-              " workers support re-registration"
+              f" (existing roles {sorted(existing.info.roles)}, status"
+              f" {existing.status.value!r}); only pre-bring_up (REGISTERED)"
+              " workers or rollout workers support re-registration"
           )
         # A remote worker at a different address may still be alive: probe it
         # outside the lock before replacing it.
@@ -290,7 +296,7 @@ class WorkerRegistry:
           existing_addr = existing.info.resources.get("address")
           if not existing_addr:
             raise ValueError(
-                f"duplicate worker_id {worker_id!r}: existing rollout worker"
+                f"duplicate worker_id {worker_id!r}: existing worker"
                 " has no address to probe (registered via `register()` or"
                 " `register_handle()`)"
             )
@@ -307,16 +313,24 @@ class WorkerRegistry:
         existing_handle, existing_addr = to_probe
         if self._is_remote_worker_alive(existing_addr):
           raise ValueError(
-              f"duplicate worker_id {worker_id!r}: existing rollout worker at"
+              f"duplicate worker_id {worker_id!r}: existing worker at"
               f" {existing_addr} is still alive when {service_address}"
               " attempted to register"
           )
         with self._condition:
           current = self._entries.get(worker_id)
-          if current is not None and current.handle is not existing_handle:
+          if current is not None and (
+              current.handle is not existing_handle
+              or current.info.roles != info.roles
+              or (
+                  current.status is not AdmissionStatus.REGISTERED
+                  and role != datatypes.Role.ROLLOUT
+              )
+          ):
             raise ValueError(
                 f"duplicate worker_id {worker_id!r}: re-registered"
-                f" concurrently while {service_address} was registering"
+                f" concurrently or promoted to {current.status.value!r} while"
+                f" {service_address} was registering"
             )
           displaced_handle = self._insert_locked(info, handle, override=True)
     except BaseException:
