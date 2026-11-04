@@ -120,6 +120,7 @@
     {
       "tunix.dist_rl.orchestrator.batch_assembly.BatchConfig": {
         "kwargs": {
+          "eos_id": 151645,
           "max_prompt_length": 1024,
           "max_response_length": 1024,
           "max_segments_per_packed_row": null,

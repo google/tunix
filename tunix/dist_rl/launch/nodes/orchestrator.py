@@ -117,9 +117,9 @@ def _num_data_shards(hp: resolve_config.DistHyperParameters) -> int | None:
 
 
 def build_batch_config(
-    hp: resolve_config.DistHyperParameters, *, pad_id: int
+    hp: resolve_config.DistHyperParameters, *, pad_id: int, eos_id: int
 ) -> batch_assembly.BatchConfig:
-  """Builds the batch-assembly config (padding and sequence packing)."""
+  """Builds the batch-assembly config (token ids, padding, sequence packing)."""
   rl_train = hp.config_mapping("rl_training_config")
   # `create_rollout_config()` needs worker meshes for `rollout_engine=vllm`; the
   # CPU orchestrator only needs the length budgets.
@@ -128,6 +128,7 @@ def build_batch_config(
   max_segments_per_packed_row = rl_train["max_segments_per_packed_row"]
   return batch_assembly.BatchConfig(
       pad_id=pad_id,
+      eos_id=eos_id,
       max_prompt_length=int(rollout["max_prompt_length"]),
       max_response_length=int(rollout["total_generation_steps"]),
       max_seq_token_per_tpu=(
@@ -534,6 +535,7 @@ def build_program(
     algo_config: algorithm_config.AlgorithmConfig,
     reward_fns: Sequence[reward_manager.RewardFn],
     pad_id: int,
+    eos_id: int,
     prompt_items: grain.MapDataset[dict[str, object]],
     trajectory_store: trajectory_store_lib.TrajectoryStore | None,
     metrics_logging_options: metrics_logger_lib.MetricsLoggerOptions,
@@ -545,6 +547,8 @@ def build_program(
     algo_config: Algorithm configuration (see `build_grpo_config`).
     reward_fns: Orchestrator-side reward functions (`reward_functions`).
     pad_id: Tokenizer padding id for batch assembly.
+    eos_id: Tokenizer end-of-sequence id for the trainer loss and actor
+      re-scoring.
     prompt_items: Prompt items to dispatch (see `load_prompt_items`).
     trajectory_store: The cluster's trajectory store, if enabled.
     metrics_logging_options: Metrics logging (see
@@ -563,7 +567,7 @@ def build_program(
       reward_fns=reward_fns,
       generation_args=build_generation_args(hp),
       batch_size=int(hp.config["batch_size"]),
-      batch_config=build_batch_config(hp, pad_id=pad_id),
+      batch_config=build_batch_config(hp, pad_id=pad_id, eos_id=eos_id),
       metrics_logging_options=metrics_logging_options,
       trajectory_log_dir=_trajectory_log_dir(hp),
       trajectory_store=trajectory_store,
@@ -702,7 +706,7 @@ def main(
       hp, enable_opentelemetry=otel_enabled
   )
   prompt_items = load_prompt_items(hp)
-  pad_id, _ = node_utils.pad_and_eos_ids(node_utils.load_hf_tokenizer(hp))
+  pad_id, eos_id = node_utils.pad_and_eos_ids(node_utils.load_hf_tokenizer(hp))
 
   cluster = create_cluster(hp, weight_sync_timeouts=weight_sync_timeouts)
   try:
@@ -711,6 +715,7 @@ def main(
         algo_config=algo_config,
         reward_fns=reward_fns,
         pad_id=pad_id,
+        eos_id=eos_id,
         prompt_items=prompt_items,
         trajectory_store=cluster.trajectory_store,
         metrics_logging_options=metrics_logging_options,

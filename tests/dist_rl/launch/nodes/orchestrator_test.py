@@ -281,11 +281,13 @@ class BuildersTest(absltest.TestCase):
             "dist_training_config.segment_alignment_boundary=64",
         ),
         pad_id=7,
+        eos_id=9,
     )
     self.assertEqual(
         config,
         batch_assembly.BatchConfig(
             pad_id=7,
+            eos_id=9,
             max_prompt_length=64,
             max_response_length=32,
             max_seq_token_per_tpu=None,
@@ -299,19 +301,16 @@ class BuildersTest(absltest.TestCase):
 
   def test_batch_config_packed_len_follows_sequence_packing_budget(self):
     hp = _config("rl_training_config.max_seq_token_per_tpu=4096")
-    self.assertEqual(
-        orchestrator.build_batch_config(hp, pad_id=0).max_seq_token_per_tpu,
-        4096,
-    )
+    config = orchestrator.build_batch_config(hp, pad_id=0, eos_id=1)
+    self.assertEqual(config.max_seq_token_per_tpu, 4096)
 
   def test_batch_config_shards_over_trainer_data_parallel_axes(self):
     hp = _config(
         "actor_model_config.mesh.shape=(4,2,2)",
         "actor_model_config.mesh.axis_names=('fsdp','tp','expert')",
     )
-    self.assertEqual(
-        orchestrator.build_batch_config(hp, pad_id=0).num_data_shards, 8
-    )
+    config = orchestrator.build_batch_config(hp, pad_id=0, eos_id=1)
+    self.assertEqual(config.num_data_shards, 8)
 
   def test_generation_args(self):
     args = orchestrator.build_generation_args(
@@ -784,6 +783,7 @@ class ProgramTest(absltest.TestCase):
         algo_config=orchestrator.build_grpo_config(hp),
         reward_fns=reward_fns,
         pad_id=0,
+        eos_id=1,
         prompt_items=grain.MapDataset.source([]),
         trajectory_store=None,
         metrics_logging_options=orchestrator.build_metrics_logging_options(
@@ -1014,6 +1014,7 @@ rl_training_config:
     (program,) = cluster.programs
     assert isinstance(program, rl_program.StandardRLProgram)
     self.assertEqual(program.batch_config.pad_id, 3)
+    self.assertEqual(program.batch_config.eos_id, 7)
     self.assertEqual(program.algo_config.reward_mode, "reward_fn")
     # Scores with the `reward_functions` module.
     rewards = program.reward_manager(prompts=["p"], completions=["abcd"])[
