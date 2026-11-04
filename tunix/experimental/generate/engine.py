@@ -34,7 +34,7 @@ from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import model_runner as model_runner_lib
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import scheduler as scheduler_lib
-from tunix.generate import utils
+from tunix.experimental.generate import utils
 from tunix.models import paged_attention
 
 
@@ -53,18 +53,6 @@ class _InFlightStep:
   generated_tokens: jax.Array
   logits: jax.Array | None
   logprobs: jax.Array | None
-
-
-@jax.jit
-def _write_decode_tokens(
-    tokens: jax.Array,
-    prev_generated_tokens: jax.Array,
-    target_idxs: jax.Array,
-) -> jax.Array:
-  """Writes the last token sampled by each surviving row into `tokens`."""
-  return tokens.at[target_idxs].set(
-      prev_generated_tokens[:, -1], mode='drop'
-  )
 
 
 def _instantiate_components(
@@ -127,14 +115,6 @@ def _instantiate_components(
       config=scheduler_config, kv_cache_manager=kv_cache_manager
   )
   return model_runner, kv_cache_manager, scheduler
-
-
-def _next_power_of_2(x: int) -> int:
-  """Returns the next power of 2 that is not smaller than x."""
-  x = int(x)
-  if x <= 1:
-    return 1
-  return 1 << (x - 1).bit_length()
 
 
 class LLMEngine:
@@ -439,7 +419,9 @@ class LLMEngine:
   ) -> _InFlightStep:
     """Writes any in-flight decode tokens on device and launches the runner."""
     if prev_generated_tokens is not None:
-      tokens = _write_decode_tokens(tokens, prev_generated_tokens, target_idxs)
+      tokens = utils.jit_scatter_last_column(
+          tokens, prev_generated_tokens, target_idxs
+      )
     generated_tokens, logits, logprobs, pages = (
         self._model_runner.execute_step(
             cache=self._kv_cache_manager.get_physical_pages(),
@@ -646,7 +628,7 @@ class LLMEngine:
     # Pad the tokens to a power of 2 to limit jax recompilation in the model
     # runner.
     num_tokens = min(
-        _next_power_of_2(len(batch_tokens)),
+        utils.next_power_of_2(len(batch_tokens)),
         self._scheduler_config.max_num_batched_tokens,
     )
     tokens = np.zeros((num_tokens,), dtype=np.int32)

@@ -36,8 +36,8 @@ import dataclasses
 from typing import Any
 
 import jax
+from tunix.experimental.generate import utils
 import tunix.experimental.generate.tiered_page_pool as page_pool_lib
-from tunix.generate import utils
 
 
 @dataclasses.dataclass

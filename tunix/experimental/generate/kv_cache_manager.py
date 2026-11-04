@@ -33,122 +33,16 @@ from __future__ import annotations
 
 import collections
 from collections.abc import Mapping, Sequence
-import math
 
 import jax
-import jax.numpy as jnp
 from tunix.experimental.generate import configs
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import single_type_kv_cache_manager
-import tunix.experimental.generate.tiered_page_pool as page_pool_lib
-from tunix.generate import utils
+from tunix.experimental.generate import tiered_page_pool as page_pool_lib
+from tunix.experimental.generate import utils
 
 
 Page = single_type_kv_cache_manager.Page
-
-_GIB = 1 << 30
-
-
-def _derive_kv_geometry(
-    config: configs.CacheConfig,
-    num_kv_heads: int,
-    head_dim: int,
-) -> tuple[int, int, int]:
-  """Derives the shape of a KV cache element."""
-  tp_size = config.tp_size
-  if num_kv_heads < tp_size:
-    if tp_size % num_kv_heads != 0:
-      raise ValueError(
-          f"tp_size ({tp_size}) must be divisible by "
-          f"num_kv_heads ({num_kv_heads})."
-      )
-    num_kv_heads = tp_size
-  elif num_kv_heads % tp_size != 0:
-    raise ValueError(
-        f"num_kv_heads ({num_kv_heads}) must be divisible by "
-        f"tp_size ({tp_size})."
-    )
-
-  kv_packing = utils.get_dtype_packing(config.dtype)
-  if (2 * (num_kv_heads // tp_size)) % kv_packing != 0:
-    raise ValueError(
-        f"2 * (num_kv_heads // tp_size) ({2 * (num_kv_heads // tp_size)}) must "
-        f"be divisible by kv_packing ({kv_packing})."
-    )
-
-  packed_kv_dim = (2 * num_kv_heads) // kv_packing
-  return (packed_kv_dim, kv_packing, head_dim)
-
-
-def _derive_cache_sharding(
-    config: configs.CacheConfig,
-) -> jax.sharding.Sharding | None:
-  """Derives the cache sharding."""
-  if not (config.dp_axis or config.tp_axis):
-    return None
-  # `CacheConfig` requires a mesh whenever an axis is set.
-  assert config.mesh is not None
-
-  # The cache has shape:
-  #   (num_pages, page_size, packed_kv_dim, kv_packing, head_dim)
-  #   i.e. (num_pages, num_elements_per_page, *element_shape)
-  # Pages are sharded across DP and KV elements are sharded across TP.
-  sharding_spec = jax.sharding.PartitionSpec(
-      config.dp_axis, None, config.tp_axis, None, None
-  )
-  return jax.sharding.NamedSharding(config.mesh, sharding_spec)
-
-
-def _compute_page_limits(
-    config: configs.CacheConfig,
-    element_shapes: Sequence[tuple[int, int, int]],
-    sharding: jax.sharding.Sharding | None,
-) -> tuple[int, int]:
-  """Calculates the per-cache device and host page capacities.
-
-  Each cache is assigned the same number of device and host pages.
-  Args:
-    config: Cache capacity and sharding configuration.
-    element_shapes: The packed element shape of every cache, one entry each.
-    sharding: The device sharding of every cache.
-
-  Returns:
-    A tuple of (device pages per cache, host pages per cache).
-  """
-  dtype_bytes = jnp.dtype(config.dtype).itemsize
-
-  # Pages are sharded across DP replicas, so they are allocated in groups of
-  # `dp_size`, one page per replica. Each device only stores its shard of a
-  # group.
-  group_shapes = [
-      (config.dp_size, config.page_size, *shape) for shape in element_shapes
-  ]
-  if sharding is not None:
-    group_shapes = [sharding.shard_shape(shape) for shape in group_shapes]
-  bytes_per_device_per_group = dtype_bytes * sum(
-      math.prod(shape) for shape in group_shapes
-  )
-
-  max_device_bytes = math.floor(config.max_device_size_gib * _GIB)
-  num_groups = max_device_bytes // bytes_per_device_per_group
-  if num_groups <= 0:
-    raise ValueError(
-        "Cannot allocate 0 device pages. max_device_size_gib="
-        f"{config.max_device_size_gib} ({max_device_bytes} bytes) is smaller "
-        f"than the {bytes_per_device_per_group} bytes each device needs to "
-        f"hold one page on each of {config.dp_size} DP replica(s)."
-    )
-  num_device_pages = num_groups * config.dp_size
-
-  # Host pages are not sharded, so the host stores every page whole.
-  bytes_per_page = (
-      dtype_bytes
-      * config.page_size
-      * sum(math.prod(shape) for shape in element_shapes)
-  )
-  max_host_bytes = math.floor(config.max_host_size_gib * _GIB)
-  num_host_pages = max_host_bytes // bytes_per_page
-  return num_device_pages, num_host_pages
 
 
 def _create_kv_cache_group_managers(
@@ -166,13 +60,13 @@ def _create_kv_cache_group_managers(
     caches_by_geometry[geometry].append(cache)
 
   kv_shapes: dict[configs.CacheGeometry, tuple[int, int, int]] = {
-      geometry: _derive_kv_geometry(
+      geometry: utils.derive_kv_geometry(
           config, geometry.num_kv_heads, geometry.head_dim
       )
       for geometry in caches_by_geometry
   }
-  sharding = _derive_cache_sharding(config)
-  num_device_pages, num_host_pages = _compute_page_limits(
+  sharding = utils.derive_cache_sharding(config)
+  num_device_pages, num_host_pages = utils.compute_page_limits(
       config=config,
       element_shapes=[kv_shapes[g] for g in cache_geometries.values()],
       sharding=sharding,
