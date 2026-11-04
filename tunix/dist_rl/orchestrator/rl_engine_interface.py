@@ -17,7 +17,6 @@
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 from tunix.dist_rl.common import datatypes
-from tunix.dist_rl.metrics import metrics as exp_metrics
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.worker import remote_execution
 from tunix.rl import algorithm_config
@@ -157,8 +156,8 @@ class AbstractRLEngine(Protocol):
       role: datatypes.Role = datatypes.Role.ACTOR,
       **kwargs: Any,
   ) -> (
-      exp_metrics.MetricsBuffer
-      | Sequence[exp_metrics.MetricsBuffer]
+      datatypes.MetricsBuffer
+      | Sequence[datatypes.MetricsBuffer]
       | dict[str, Any]
       | None
   ):

@@ -19,10 +19,11 @@ This module centralizes type aliases and dataclasses used for:
 2) Defining common data structures used by Orchestrator and workers.
 """
 
+from collections.abc import Callable, Mapping
 import dataclasses
 import enum
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Protocol
 import uuid
 import numpy as np
 from tunix.common import datatypes as common_datatypes
@@ -636,6 +637,68 @@ class TrainRequest(Request):
 
   payload: TrainerPayload
   target_policy_version: int = 0
+
+
+class WeightedMetricLike(Protocol):
+  """An unreduced weighted metric transported across the wire.
+
+  Trainers accumulate some metrics as a running `unreduced_sum` and a
+  `denominator` so the orchestrator can reduce them correctly across
+  micro-batches and workers. This is the structural wire contract; readers match
+  on these read-only attributes rather than a concrete class so the wire format
+  stays framework-neutral. `tunix.sft.utils.WeightedMetric` is the on-device JAX
+  counterpart whose `jax.Array` fields must be converted to host numpy/float
+  values before crossing the wire (`rpc_utils.validate_wire_safe` rejects
+  `jax.Array`).
+  """
+
+  @property
+  def unreduced_sum(self) -> np.ndarray | np.number | float:
+    ...
+
+  @property
+  def denominator(self) -> np.ndarray | np.number | float:
+    ...
+
+  @property
+  def eps(self) -> float | None:
+    ...
+
+  @property
+  def min_denom(self) -> float | None:
+    ...
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class MetricsBuffer:
+  """Step metrics returned by a trainer worker to the orchestrator.
+
+  Carries one update's metrics unreduced so the orchestrator can apply the
+  right reduction per metric; values must already be host (numpy/float) scalars
+  when the buffer crosses the wire.
+
+  Attributes:
+    id: The trainer step (or any caller-chosen identifier) the metrics belong
+      to.
+    weighted_metrics: Metrics that reduce as `unreduced_sum / denominator`.
+    scalar_metrics: Metrics that reduce with a plain aggregation function.
+    aggregation_fns: Optional per-metric host-side aggregation overrides for
+      `scalar_metrics`, keyed by metric name.
+    mode: The training mode the metrics were collected in (`"train"` /
+      `"eval"`).
+  """
+
+  id: int | str
+  weighted_metrics: Mapping[str, WeightedMetricLike] = dataclasses.field(
+      default_factory=dict
+  )
+  scalar_metrics: Mapping[str, np.ndarray | np.number | float] = (
+      dataclasses.field(default_factory=dict)
+  )
+  aggregation_fns: Mapping[
+      str, Callable[[np.ndarray | np.number | float], Any]
+  ] = dataclasses.field(default_factory=dict)
+  mode: str = "train"
 
 
 @dataclasses.dataclass(kw_only=True)

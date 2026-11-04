@@ -304,9 +304,8 @@ class MetricReducerTest(absltest.TestCase):
     self.assertIs(utils.metric_reducer(jnp.array(1.0)), np.mean)
 
   def test_identifies_a_field_compatible_metric_from_another_module(self):
-    # `tunix.dist_rl.metrics.WeightedMetric` mirrors `WeightedMetric`
-    # without inheriting from it, so the check has to be structural. Stand in
-    # for it here rather than importing `dist_rl` from an `sft` test.
+    # The weighted-metric wire contract is structural, so any object with the
+    # same fields must reduce like `WeightedMetric` regardless of its class.
     class ForeignWeightedMetric:
 
       def __init__(self):

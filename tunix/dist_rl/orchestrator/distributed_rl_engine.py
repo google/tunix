@@ -33,7 +33,6 @@ import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
 from tunix.dist_rl.common import logging_utils
-from tunix.dist_rl.metrics import metrics as exp_metrics
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import fault_tolerance_manager as fault_tolerance_manager_lib
 from tunix.dist_rl.orchestrator import rl_engine_interface
@@ -627,8 +626,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       role: datatypes.Role = datatypes.Role.ACTOR,
       **kwargs: Any,
   ) -> (
-      exp_metrics.MetricsBuffer
-      | Sequence[exp_metrics.MetricsBuffer]
+      datatypes.MetricsBuffer
+      | Sequence[datatypes.MetricsBuffer]
       | dict[str, Any]
       | None
   ):

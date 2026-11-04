@@ -21,8 +21,17 @@ from absl.testing import absltest
 import cloudpickle
 import numpy as np
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.common import rpc_utils
 
 WorkerState = datatypes.WorkerState
+
+
+@dataclasses.dataclass(frozen=True)
+class _HostWeightedMetric:
+  unreduced_sum: float
+  denominator: float
+  eps: float | None = None
+  min_denom: float | None = None
 
 
 def _rollout_response_dto() -> datatypes.RolloutResponse:
@@ -148,6 +157,50 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(restored.error.error_type, "TimeoutError")
     self.assertTrue(restored.error.retryable)
     self.assertIsNone(restored.payload)
+
+  def test_metrics_buffer_defaults_and_wire_round_trip(self):
+    empty = datatypes.MetricsBuffer(id=-1)
+    self.assertEqual(empty.id, -1)
+    self.assertEqual(empty.weighted_metrics, {})
+    self.assertEqual(empty.scalar_metrics, {})
+    self.assertEqual(empty.aggregation_fns, {})
+    self.assertEqual(empty.mode, "train")
+    rpc_utils.validate_wire_safe(empty)
+    with self.assertRaises(dataclasses.FrozenInstanceError):
+      setattr(empty, "mode", "eval")
+
+    weighted: dict[str, _HostWeightedMetric] = {
+        "kl": _HostWeightedMetric(unreduced_sum=3.0, denominator=2.0, eps=1e-8)
+    }
+    scalars: dict[str, np.ndarray | np.number | float] = {
+        "loss": np.float32(0.25),
+        "grad_norm": np.array(1.5, dtype=np.float32),
+        "lr": 1e-4,
+    }
+    original = datatypes.MetricsBuffer(
+        id=7,
+        weighted_metrics=weighted,
+        scalar_metrics=scalars,
+        aggregation_fns={"grad_norm": np.mean},
+        mode="eval",
+    )
+    rpc_utils.validate_wire_safe(original)
+
+    restored = cloudpickle.loads(  # pylint: disable=g-unsafe-pickle-load
+        cloudpickle.dumps(original)
+    )
+
+    rpc_utils.validate_wire_safe(restored)
+    self.assertEqual(restored.id, 7)
+    self.assertEqual(restored.mode, "eval")
+    self.assertEqual(restored.weighted_metrics["kl"].unreduced_sum, 3.0)
+    self.assertEqual(restored.weighted_metrics["kl"].denominator, 2.0)
+    self.assertAlmostEqual(float(restored.scalar_metrics["loss"]), 0.25)
+    np.testing.assert_allclose(restored.scalar_metrics["grad_norm"], 1.5)
+    self.assertEqual(restored.scalar_metrics["lr"], 1e-4)
+    self.assertAlmostEqual(
+        float(restored.aggregation_fns["grad_norm"](np.array([1.0, 2.0]))), 1.5
+    )
 
   def test_token_segment_enforces_shapes(self):
     with self.assertRaisesRegex(

@@ -1,5 +1,6 @@
 """RPC utilities for the Tunix Orchestrator and Workers."""
 
+from collections.abc import Mapping
 import dataclasses
 import numpy as np
 
@@ -31,12 +32,12 @@ def validate_wire_safe(obj: object) -> None:
       continue
     visited.add(val_id)
 
-    if isinstance(value, np.ndarray):
+    if isinstance(value, (np.ndarray, np.generic)):
       continue
 
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
       stack.extend(getattr(value, f.name) for f in dataclasses.fields(value))
-    elif isinstance(value, dict):
+    elif isinstance(value, Mapping):
       stack.extend(value.keys())
       stack.extend(value.values())
     elif isinstance(value, (list, tuple, set, frozenset)):

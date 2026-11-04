@@ -28,7 +28,6 @@ import metrax.logging as metrax_logging
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
-from tunix.dist_rl.metrics import metrics as exp_metrics
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import distributed_rl_engine
 from tunix.dist_rl.orchestrator import rl_program
@@ -77,7 +76,7 @@ class _MockWorkerHandle(mock.MagicMock):
     super().__init__(spec=remote_execution.ActorHandle, *args, **kwargs)
     self.role = role
     self.responses: list[list[datatypes.RolloutResponse]] = []
-    self.metrics_buffer: exp_metrics.MetricsBuffer | None = None
+    self.metrics_buffer: datatypes.MetricsBuffer | None = None
     self.train_step_count: int = 0
     self.dispatched_requests: list[Any] = []
     self._pending_request_ids: list[str] = []
@@ -3913,7 +3912,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_metrics_logging_full_pipeline(self):
     async def _run():
-      mock_buffer = exp_metrics.MetricsBuffer(
+      mock_buffer = datatypes.MetricsBuffer(
           id=0,
           scalar_metrics={
               "loss": 0.5,
@@ -4151,7 +4150,7 @@ class RLProgramTest(absltest.TestCase):
           ],
       ]
       trainer_worker = _MockWorkerHandle(role="trainer")
-      trainer_worker.metrics_buffer = exp_metrics.MetricsBuffer(
+      trainer_worker.metrics_buffer = datatypes.MetricsBuffer(
           id=1, scalar_metrics={"loss": 0.1}
       )
       engine = _make_engine(
@@ -4214,11 +4213,11 @@ class RLProgramTest(absltest.TestCase):
   def test_engine_get_metrics_across_roles(self):
     async def _run():
       actor_worker = _MockWorkerHandle(role="actor")
-      actor_worker.metrics_buffer = exp_metrics.MetricsBuffer(
+      actor_worker.metrics_buffer = datatypes.MetricsBuffer(
           id=1, scalar_metrics={"loss": 0.4}
       )
       critic_worker = _MockWorkerHandle(role="critic")
-      critic_worker.metrics_buffer = exp_metrics.MetricsBuffer(
+      critic_worker.metrics_buffer = datatypes.MetricsBuffer(
           id=1, scalar_metrics={"vf_loss": 0.15}
       )
       ref_worker = _MockWorkerHandle(role="reference")
@@ -4310,7 +4309,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_distributed_engine_train_step_and_get_metrics(self):
     async def _run():
-      metrics_buf = exp_metrics.MetricsBuffer(
+      metrics_buf = datatypes.MetricsBuffer(
           id=1, scalar_metrics={"loss": 0.1}
       )
       mock_worker = mock.MagicMock(spec=remote_execution.ActorHandle)
@@ -4593,7 +4592,7 @@ class RLProgramTest(absltest.TestCase):
   def test_engine_get_metrics_empty_workers_raises_value_error(self):
     async def _run():
       actor_worker = _MockWorkerHandle(role="actor")
-      actor_worker.metrics_buffer = exp_metrics.MetricsBuffer(
+      actor_worker.metrics_buffer = datatypes.MetricsBuffer(
           id=1, scalar_metrics={"loss": 0.25}
       )
 
@@ -5009,7 +5008,7 @@ class RLProgramTest(absltest.TestCase):
         grad_norm = float(0.2 + 0.8 * np.exp(-step_num / 8.0))
         metrics = None
         if apply_optimizer:
-          metrics = exp_metrics.MetricsBuffer(
+          metrics = datatypes.MetricsBuffer(
               id=step_num,
               scalar_metrics={
                   "loss": loss,
@@ -5071,7 +5070,7 @@ class RLProgramTest(absltest.TestCase):
 
         self.mock_engine.train_step.return_value = {
             "updated": True,
-            "metrics": exp_metrics.MetricsBuffer(
+            "metrics": datatypes.MetricsBuffer(
                 id=1,
                 scalar_metrics={"loss": 0.42, "learning_rate": 1e-4},
             ),
@@ -5634,7 +5633,7 @@ class RLProgramTest(absltest.TestCase):
       self.mock_engine.per_token_logps = mock.AsyncMock()
       self.mock_engine.train_step.return_value = {
           "updated": True,
-          "metrics": exp_metrics.MetricsBuffer(
+          "metrics": datatypes.MetricsBuffer(
               id=1,
               scalar_metrics={
                   "loss": 0.5,

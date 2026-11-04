@@ -384,7 +384,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     return {}
 
   # Return type kept as `Any` for Pyrefly override compatibility with
-  # `AbstractTrainer.get_metrics() -> metrics.MetricsBuffer`.
+  # `AbstractTrainer.get_metrics() -> datatypes.MetricsBuffer`.
   def get_metrics(self) -> Any:
     return {"loss": 0.25}
 

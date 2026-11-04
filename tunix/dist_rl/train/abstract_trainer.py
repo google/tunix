@@ -23,7 +23,6 @@ from typing import Any, Callable, Protocol, TypeVar, cast
 
 import numpy as np
 from tunix.dist_rl.common import datatypes
-from tunix.dist_rl.metrics import metrics
 
 _PayloadT = TypeVar("_PayloadT")
 
@@ -255,7 +254,7 @@ class AbstractTrainer(abc.ABC):
     return None
 
   @abc.abstractmethod
-  def get_metrics(self) -> metrics.MetricsBuffer:
+  def get_metrics(self) -> datatypes.MetricsBuffer:
     """Returns and clears the recently collected step metric records."""
     raise NotImplementedError(
         f"{type(self).__name__} does not implement get_metrics."

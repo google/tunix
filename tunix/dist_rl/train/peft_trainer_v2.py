@@ -35,7 +35,6 @@ import numpy as np
 import optax
 from tunix.common import configs
 from tunix.dist_rl.common import datatypes
-from tunix.dist_rl.metrics import metrics as exp_metrics
 from tunix.dist_rl.train import abstract_trainer
 from tunix.dist_rl.train import jax_pytrees  # pylint: disable=unused-import
 from tunix.perf import metrics as perf_metrics
@@ -519,7 +518,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # get_metrics to retrieve metrics from trainer, we need to write metrics to
     # a buffer. We should delete this once the metrics logging implementations
     # are updated according to the new design.
-    self._written_metrics: exp_metrics.MetricsBuffer | None = None
+    self._written_metrics: datatypes.MetricsBuffer | None = None
     self.training_hooks = None
     self.data_hooks = None
     self._jit_cache = set()
@@ -1055,11 +1054,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     weighted_metrics = {}
     scalar_metrics = {"loss": loss}
     for k, val in additional_metrics.items():
-      if isinstance(val, (utils.WeightedMetric, exp_metrics.WeightedMetric)):
+      if isinstance(val, utils.WeightedMetric):
         weighted_metrics[k] = val
       else:
         scalar_metrics[k] = val
-    self._written_metrics = exp_metrics.MetricsBuffer(
+    self._written_metrics = datatypes.MetricsBuffer(
         id=metrics_buffer.step,
         weighted_metrics=weighted_metrics,
         scalar_metrics=scalar_metrics,
@@ -1456,14 +1455,14 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return True
 
   @override
-  def get_metrics(self) -> exp_metrics.MetricsBuffer:
+  def get_metrics(self) -> datatypes.MetricsBuffer:
     if (
         self._written_metrics is None
         and self._prev_buffered_train_metrics is not None
     ):
       self._write_train_metrics()
     if self._written_metrics is None:
-      return exp_metrics.MetricsBuffer(id=-1)
+      return datatypes.MetricsBuffer(id=-1)
     ret = self._written_metrics
     self._written_metrics = None
     return ret
