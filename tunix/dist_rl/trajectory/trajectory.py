@@ -1,7 +1,26 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Trajectory implementation using Agent Trajectory Interchange Format (ATIF).
 
 For more details on the ATIF specification, see:
 https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md
+
+Clients extend the base ATIF models by subclassing `Step` and
+`TrajectoryMetadata` (declaring an `EXTENSIONS_KEY`) and pairing the metadata
+subclass with a `Trajectory` subclass; see `unpack_step_from_atif`,
+`TrajectoryMetadata.create_paired_trajectory`, and `Trajectory.STEP_ID_START`
+for the extension hooks.
 """
 
 from __future__ import annotations
@@ -495,22 +514,41 @@ def _unpack_subclass_values_from_extra(
   return values_by_field
 
 
-_StepT = TypeVar("_StepT", "TunixAgentStep", "TunixEnvStep")
+_StepT = TypeVar("_StepT", bound="Step")
 
 
-def _unpack_step_from_atif(
+def unpack_step_from_atif(
     step: Step,
     target_cls: type[_StepT],
     step_id_offset: int = 1,
 ) -> _StepT:
-  """Rehydrates a 1-indexed ATIF Step into a 0-indexed Tunix step subclass."""
+  """Rehydrates a base ATIF Step into the `target_cls` Step subclass.
+
+  Promotes the fields packed under `extra[target_cls.EXTENSIONS_KEY]` back to
+  first-class fields and shifts `step_id` down by `step_id_offset`, so a
+  subclass whose trajectories start at `STEP_ID_START = 0` can round-trip
+  through the 1-indexed base ATIF representation.
+
+  Args:
+    step: A `target_cls` instance (returned as-is) or a base ATIF step.
+    target_cls: The concrete `Step` subclass to rehydrate into.
+    step_id_offset: Amount subtracted from the ATIF `step_id`; the inverse of
+      the offset passed to `Step.to_atif_step`.
+
+  Returns:
+    The step as a `target_cls` instance.
+
+  Raises:
+    ValueError: If `step.step_id` is below `step_id_offset`, which means the
+      step already uses the subclass's shifted step_id convention.
+  """
   if isinstance(step, target_cls):
     return step
   if step.step_id < step_id_offset:
     raise ValueError(
         f"Expected a {step_id_offset}-indexed ATIF step_id, got"
-        f" {step.step_id}; this step may already use the 0-indexed Tunix"
-        " convention."
+        f" {step.step_id}; this step may already use the"
+        f" {target_cls.__name__} step_id convention."
     )
   target_values_by_field = _unpack_subclass_values_from_extra(step, target_cls)
   target_values_by_field["step_id"] = step.step_id - step_id_offset
@@ -978,7 +1016,7 @@ class Step(pydantic.BaseModel):
         )
     return self
 
-  # TODO(tunix-dev): Add automatic Step subclass registration and resolution
+  # TODO(tendril-dev): Add automatic Step subclass registration and resolution
   # (mirroring TrajectoryMetadata._SUBCLASS_FIELDS and resolve_subclass) so
   # persistent stores rehydrate custom Step subclasses automatically.
   def to_atif_step(self, step_id_offset: int = 0) -> Step:
@@ -1174,9 +1212,10 @@ class TrajectoryMetadata(pydantic.BaseModel):
         return metadata_cls
     else:
       # `Trajectory` subclasses multiply inherit from `Trajectory` and their
-      # paired `TrajectoryMetadata` subclass (e.g. `TunixTrajectory` inherits
-      # from `Trajectory` and `TunixTrajectoryMetadata`). Walk the Method
-      # Resolution Order (`__mro__`) to find the paired metadata subclass.
+      # paired `TrajectoryMetadata` subclass (e.g. a client's `ClientTrajectory`
+      # inherits from `Trajectory` and `ClientTrajectoryMetadata`). Walk the
+      # Method Resolution Order (`__mro__`) to find the paired metadata
+      # subclass.
       for base in metadata_cls.__mro__:
         if base in cls._SUBCLASS_FIELDS:
           return base
@@ -1222,7 +1261,7 @@ class TrajectoryMetadata(pydantic.BaseModel):
     target_values_by_field = _unpack_subclass_values_from_extra(metadata, cls)
     return cls.model_validate(target_values_by_field)
 
-  def _create_paired_trajectory(
+  def create_paired_trajectory(
       self,
       trajectory_cls: type[TrajectoryT],
       steps: Sequence[Any] | None,
@@ -1230,9 +1269,11 @@ class TrajectoryMetadata(pydantic.BaseModel):
   ) -> TrajectoryT:
     """Constructs `trajectory_cls` from this metadata, steps, and subagents.
 
-    Verifies that `trajectory_cls` is a subclass of `type(self)` before
-    instantiation so passing an incompatible trajectory class raises
-    `TypeError`.
+    Subclasses that override `create_trajectory` (for example to upcast base
+    ATIF steps into their own `Step` subclasses first) call this to build their
+    paired `Trajectory` subclass. Verifies that `trajectory_cls` is a subclass
+    of `type(self)` before instantiation so passing an incompatible trajectory
+    class raises `TypeError`.
 
     Args:
       trajectory_cls: Concrete Trajectory class to build.
@@ -1311,7 +1352,7 @@ class TrajectoryMetadata(pydantic.BaseModel):
     When called on a `TrajectoryMetadata` subclass that does not override
     this method, automatically resolves or synthesizes the paired `Trajectory`
     subclass. Subclasses with custom step upcasting should override this
-    method (see `TunixTrajectoryMetadata.create_trajectory`).
+    method and build their paired class via `create_paired_trajectory`.
 
     Args:
       steps: Sequence of step instances, or None.
@@ -1321,7 +1362,7 @@ class TrajectoryMetadata(pydantic.BaseModel):
       The constructed trajectory instance.
     """
     trajectory_cls = self._get_or_create_paired_trajectory_cls()
-    return self._create_paired_trajectory(
+    return self.create_paired_trajectory(
         trajectory_cls, steps, subagent_trajectories
     )
 
@@ -1333,8 +1374,9 @@ class Trajectory(TrajectoryMetadata, Generic[StepT]):
   """Root trajectory object containing the interaction history."""
 
   # First step_id in a well-formed trajectory; step_ids must be sequential
-  # from here.
-  _STEP_ID_START: ClassVar[int] = 1
+  # from here. Subclasses that number steps from 0 override this and project
+  # to the 1-indexed base ATIF form with `Step.to_atif_step(step_id_offset=1)`.
+  STEP_ID_START: ClassVar[int] = 1
 
   steps: list[StepT] = pydantic.Field(
       default_factory=list,
@@ -1348,13 +1390,13 @@ class Trajectory(TrajectoryMetadata, Generic[StepT]):
   @pydantic.field_validator("steps")
   @classmethod
   def validate_step_ids(cls, steps: list[StepT]) -> list[StepT]:
-    """Validate that step_ids are sequential from `_STEP_ID_START`."""
+    """Validate that step_ids are sequential from `STEP_ID_START`."""
     steps.sort(key=lambda step: step.step_id)
-    for expected_step_id, step in enumerate(steps, start=cls._STEP_ID_START):
+    for expected_step_id, step in enumerate(steps, start=cls.STEP_ID_START):
       if step.step_id != expected_step_id:
         raise ValueError(
             f"Expected step_id {expected_step_id} (sequential from"
-            f" {cls._STEP_ID_START}), got {step.step_id}"
+            f" {cls.STEP_ID_START}), got {step.step_id}"
         )
     return steps
 
@@ -1420,7 +1462,7 @@ class Trajectory(TrajectoryMetadata, Generic[StepT]):
     Returns:
       The newly created and appended step.
     """
-    step_id = len(self.steps) + self._STEP_ID_START
+    step_id = len(self.steps) + self.STEP_ID_START
     new_step = Step(
         step_id=step_id,
         timestamp=timestamp or datetime.datetime.now(datetime.timezone.utc),
@@ -1590,7 +1632,7 @@ class TunixAgentStep(Step):
       cls, step: Step, step_id_offset: int = 1
   ) -> TunixAgentStep:
     """Rehydrates a 1-indexed ATIF Step into a 0-indexed TunixAgentStep."""
-    return _unpack_step_from_atif(step, cls, step_id_offset=step_id_offset)
+    return unpack_step_from_atif(step, cls, step_id_offset=step_id_offset)
 
 
 class TunixEnvStep(Step):
@@ -1637,7 +1679,7 @@ class TunixEnvStep(Step):
   @classmethod
   def from_atif_step(cls, step: Step, step_id_offset: int = 1) -> TunixEnvStep:
     """Rehydrates a 1-indexed ATIF Step into a 0-indexed TunixEnvStep."""
-    return _unpack_step_from_atif(step, cls, step_id_offset=step_id_offset)
+    return unpack_step_from_atif(step, cls, step_id_offset=step_id_offset)
 
 
 def _upcast_atif_step(step: Step) -> TunixAgentStep | TunixEnvStep:
@@ -1738,7 +1780,7 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
           TunixTrajectory.from_atif_trajectory(subagent_trajectory)
           for subagent_trajectory in subagent_trajectories
       ]
-    return self._create_paired_trajectory(
+    return self.create_paired_trajectory(
         TunixTrajectory, steps, subagent_trajectories
     )
 
@@ -1749,7 +1791,7 @@ class TunixTrajectory(
 ):
   """Tunix-specific trajectory object containing the interaction history."""
 
-  _STEP_ID_START: ClassVar[int] = 0
+  STEP_ID_START: ClassVar[int] = 0
 
   subagent_trajectories: list[TunixTrajectory] | None = pydantic.Field(
       default=None,
@@ -1784,7 +1826,7 @@ class TunixTrajectory(
       extra: dict[str, Any] | None = None,
   ) -> TunixAgentStep | TunixEnvStep:
     """Helper to create and append a step, automatically assigning step_id."""
-    step_id = len(self.steps) + self._STEP_ID_START
+    step_id = len(self.steps) + self.STEP_ID_START
     ts = timestamp or datetime.datetime.now(datetime.timezone.utc)
     if source == Source.AGENT:
       new_step = TunixAgentStep(
