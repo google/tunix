@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Mapping, Sequence
 import pathlib
 from unittest import mock
 from absl.testing import absltest
@@ -19,18 +20,48 @@ import numpy as np
 import tensorflow_datasets as tfds
 from tunix.dist_rl.common import registry
 from tunix.dist_rl.examples.math_gsm8k_dist import gsm8k
+from tunix.dist_rl.examples.math_gsm8k_dist import gsm8k_rewards
+from tunix.dist_rl.launch.common import resolve_config
+
+_REWARDS_MODULE = "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k_rewards"
 
 
 class _FakeMapDataSource:
+  """Stands in for the source `tfds.data_source` returns."""
 
-  def __init__(self, data):
+  def __init__(self, data: Sequence[Mapping[str, object]]) -> None:
     self._data = list(data)
 
-  def __len__(self):
+  def __len__(self) -> int:
     return len(self._data)
 
-  def __getitem__(self, idx):
+  def __getitem__(self, idx: int) -> Mapping[str, object]:
     return self._data[idx]
+
+
+def _tfds_examples() -> _FakeMapDataSource:
+  """Two raw GSM8K examples, as `tfds.data_source` returns them."""
+  return _FakeMapDataSource([
+      {"question": b"Q0", "answer": b"Zero. #### 0"},
+      {"question": b"Q1", "answer": b"One. #### 1"},
+  ])
+
+
+def _expected_record(index: int) -> dict[str, object]:
+  """The task record `create_dataset` makes from `_tfds_examples()[index]`."""
+  prompt = gsm8k.build_prompt(f"Q{index}")
+  return {
+      "prompt": prompt,
+      "metadata": {
+          "answer": str(index),
+          "env_config": {
+              # The orchestrator's trajectory log reads `prompt` here.
+              "prompt": prompt,
+              "question": f"Q{index}",
+              "answer": str(index),
+          },
+      },
+  }
 
 
 class GSM8KTest(absltest.TestCase):
@@ -186,13 +217,16 @@ class GSM8KTest(absltest.TestCase):
         download=True,
     )
     self.assertLen(dataset, 2)
+    # `MapDataset.__getitem__` is typed `T | None`.
     first_item = dataset[0]
+    assert first_item is not None
     self.assertEqual(first_item["question"], "What is 10 + 5?")
     self.assertEqual(first_item["answer"], "15")
     self.assertIn("What is 10 + 5?", first_item["prompts"])
     self.assertIn("<answer>\\boxed{}</answer>", first_item["prompts"])
 
     second_item = dataset[1]
+    assert second_item is not None
     self.assertEqual(second_item["question"], "What is 3 * 7?")
     self.assertEqual(second_item["answer"], "21")
 
@@ -294,6 +328,95 @@ class GSM8KTest(absltest.TestCase):
         ),
         3,
     )
+
+
+class TaskRecordsTest(absltest.TestCase):
+  """Tests `create_dataset` records for the orchestrator and rollout worker."""
+
+  def test_create_dataset_records(self):
+    with mock.patch.object(
+        tfds, "data_source", return_value=_tfds_examples()
+    ) as data_source:
+      records = gsm8k.create_dataset(
+          split="train[:2]", data_dir="/tmp/data", shuffle=False, seed=7
+      )
+    data_source.assert_called_once_with(
+        "gsm8k",
+        split="train[:2]",
+        data_dir="/tmp/data",
+        builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
+        download=True,
+    )
+    self.assertLen(records, 2)
+    self.assertEqual(records[1], _expected_record(1))
+
+  def test_create_dataset_uses_the_tfds_default_data_dir(self):
+    with mock.patch.object(
+        tfds, "data_source", return_value=_tfds_examples()
+    ) as data_source:
+      records = gsm8k.create_dataset(split="train", shuffle=True, seed=42)
+    self.assertIsNone(data_source.call_args.kwargs["data_dir"])
+    self.assertCountEqual(
+        [records[0], records[1]], [_expected_record(0), _expected_record(1)]
+    )
+
+  def test_rollout_env_builds_from_env_config(self):
+    with mock.patch.object(tfds, "data_source", return_value=_tfds_examples()):
+      record = gsm8k.create_dataset(split="train", shuffle=False, seed=0)[0]
+    assert record is not None
+    # `Registry.get` raises `KeyError` for an unregistered name.
+    env_class = registry.ENV_REGISTRY.get(gsm8k.GSM8K_ENV_NAME)
+    # `RolloutManager` adds the group index and policy version.
+    env = env_class(
+        **record["metadata"]["env_config"], group_index=0, policy_version=0
+    )
+    observation, _ = env.reset()
+    self.assertEqual(observation, {"prompts": gsm8k.build_prompt("Q0")})
+    _, reward, done, info = env.step(
+        "<reasoning>0.</reasoning><answer>\\boxed{0}</answer>"
+    )
+    self.assertEqual(reward, 1.0)
+    self.assertTrue(done)
+    self.assertTrue(info["correct"])
+
+
+class RewardFunctionsTest(absltest.TestCase):
+  """`gsm8k_rewards`, loaded through `reward_functions`."""
+
+  def test_reward_functions_load_only_the_gsm8k_reward(self):
+    # Every public function of a `reward_functions` module is a reward, which
+    # is why the reward is not in `gsm8k.py`.
+    hp = resolve_config.initialize([
+        "agentic_grpo_config.reward_mode=reward_fn",
+        f"reward_functions=[{_REWARDS_MODULE}]",
+        "tokenizer_config.tokenizer_path=/unused/tokenizer",
+    ])
+    reward_fns = hp.obtain_reward_fn()
+    self.assertEqual(reward_fns, [gsm8k_rewards.reward_fn])
+    # The name is the per-function reward metric: `rewards/train/reward_fn`,
+    # as with the legacy launcher's reward function.
+    self.assertEqual(reward_fns[0].__name__, "reward_fn")
+
+  def test_reward_fn_matches_env_reward(self):
+    completions = [
+        "<reasoning>2+2=4.</reasoning><answer>\\boxed{4}</answer>",
+        "<reasoning>2+2=5.</reasoning><answer>\\boxed{5}</answer>",
+        "The answer is \\boxed{4}",
+        "No answer here",
+    ]
+    rewards = gsm8k_rewards.reward_fn(
+        prompts=["p"] * 4,
+        completions=completions,
+        answer=["4"] * 4,
+        # The other record metadata the orchestrator passes along.
+        episode_timeout=[600.0] * 4,
+        overlong_filter=[False] * 4,
+    )
+    self.assertEqual(rewards, [1.0, 0.1, 0.5, 0.0])
+    for completion, reward in zip(completions, rewards, strict=True):
+      env = gsm8k.GSM8KEnv(prompts="p", answer="4")
+      env.reset()
+      self.assertEqual(env.step(completion)[1], reward)
 
 
 if __name__ == "__main__":
