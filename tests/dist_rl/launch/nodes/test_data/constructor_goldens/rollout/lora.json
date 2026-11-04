@@ -1,0 +1,200 @@
+{
+  "calls": [
+    {
+      "importlib.import_module": {
+        "args": [
+          "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
+        ]
+      }
+    },
+    {
+      "tunix.dist_rl.common.gcs_cache.RolloutCacheKeyParams": {
+        "kwargs": {
+          "attn_custom_num_reqs_buckets": "",
+          "enable_prefix_caching": false,
+          "float32_logits": "",
+          "libtpu_init_args": "",
+          "lora_rank": 64,
+          "max_prompt_length": 1024,
+          "max_response_length": 1024,
+          "mesh_expert": 1,
+          "mesh_fsdp": 1,
+          "mesh_tp": 1,
+          "model_name": "model",
+          "onehot_moe_permute_threshold": "",
+          "rollout_fp8": "",
+          "rollout_quantization": "",
+          "sampler": "vllm",
+          "tpu_slice": "tpuv5e:4x4",
+          "use_batched_rpa_kernel": "",
+          "use_lora": false,
+          "vllm_async_scheduling": false,
+          "vllm_data_parallel_size": null,
+          "vllm_max_model_len": null,
+          "vllm_moe_chunk_size": "",
+          "vllm_server_mode": true
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.common.gcs_cache.RolloutCacheKeyParams": {
+        "kwargs": {
+          "attn_custom_num_reqs_buckets": "",
+          "enable_prefix_caching": false,
+          "float32_logits": "",
+          "libtpu_init_args": "",
+          "lora_rank": 16,
+          "max_prompt_length": 1024,
+          "max_response_length": 1024,
+          "mesh_expert": 1,
+          "mesh_fsdp": 1,
+          "mesh_tp": 4,
+          "model_name": "Qwen3-1.7B",
+          "onehot_moe_permute_threshold": "",
+          "rollout_fp8": "",
+          "rollout_quantization": "",
+          "sampler": "vllm",
+          "tpu_slice": "tpuv5e:4x4",
+          "use_batched_rpa_kernel": "",
+          "use_lora": true,
+          "vllm_async_scheduling": false,
+          "vllm_data_parallel_size": null,
+          "vllm_max_model_len": null,
+          "vllm_moe_chunk_size": "",
+          "vllm_server_mode": true
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.common.gcs_cache.restore_jax_cache": {
+        "kwargs": {
+          "params": "<tunix.dist_rl.common.gcs_cache.RolloutCacheKeyParams()#2>"
+        }
+      }
+    },
+    {
+      "transformers.models.auto.tokenization_auto.AutoTokenizer.from_pretrained": {
+        "args": [
+          "/models/tokenizer"
+        ],
+        "kwargs": {
+          "trust_remote_code": true
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.worker.rollout_worker.RolloutConfig": {
+        "kwargs": {
+          "drain_timeout_s": 660.0,
+          "eos_tokens": [
+            151645,
+            151643
+          ],
+          "kv_cache_size": 2048,
+          "max_prompt_length": 1024,
+          "max_tokens_to_generate": 1024,
+          "partial_rollout": false,
+          "return_logprobs": true,
+          "return_routed_experts": false,
+          "rollout_vllm_model_version": "Qwen/Qwen3-1.7B",
+          "rollout_vllm_server_mode": true,
+          "routed_experts_encode_mode": "auto",
+          "routed_experts_num_experts": null,
+          "temperature": 1.0,
+          "top_k": -1,
+          "top_p": 1.0,
+          "trajectory_store_config": null,
+          "weight_sync_mode": "WeightSyncMode.NONE"
+        }
+      }
+    },
+    {
+      "vllm.engine.arg_utils.AsyncEngineArgs": {
+        "kwargs": {
+          "async_scheduling": false,
+          "data_parallel_size": 1,
+          "dtype": "bfloat16",
+          "enable_lora": true,
+          "enable_prefix_caching": false,
+          "logprobs_mode": "processed_logprobs",
+          "max_logprobs": 1,
+          "max_lora_rank": 16,
+          "max_loras": 1,
+          "max_model_len": 2048,
+          "model": "Qwen/Qwen3-1.7B",
+          "tensor_parallel_size": 4,
+          "tokenizer": "/models/tokenizer",
+          "trust_remote_code": true
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.rollout.vllm_sampler.VllmSampler": {
+        "kwargs": {
+          "config": "<tunix.dist_rl.worker.rollout_worker.RolloutConfig()>",
+          "detokenize": true,
+          "engine_args": "<vllm.engine.arg_utils.AsyncEngineArgs()>",
+          "model_name": "Qwen/Qwen3-1.7B",
+          "partial_rollout": false,
+          "server_id": "rollout-0",
+          "weight_sync_mode": "WeightSyncMode.NONE"
+        }
+      }
+    },
+    {
+      "tunix.generate.tokenizer_adapter.TokenizerAdapter": {
+        "args": [
+          "<tokenizer>"
+        ]
+      }
+    },
+    {
+      "tunix.rl.agentic.parser.chat_template_parser.parser.RawTextParser": {
+        "args": [
+          "<tokenizer>"
+        ]
+      }
+    },
+    {
+      "tunix.dist_rl.worker.rollout_worker.RolloutWorker": {
+        "kwargs": {
+          "agent_config": {},
+          "agent_name": "gsm8kagent",
+          "chat_parser": "<tunix.rl.agentic.parser.chat_template_parser.parser.RawTextParser()>",
+          "config": "<tunix.dist_rl.worker.rollout_worker.RolloutConfig()>",
+          "env_config": {},
+          "env_name": "gsm8kenv",
+          "max_concurrency": 256,
+          "sampler": "<tunix.dist_rl.rollout.vllm_sampler.VllmSampler()>",
+          "tokenizer": "<tunix.generate.tokenizer_adapter.TokenizerAdapter()>",
+          "worker_id": "rollout-0"
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.launch.nodes.node_utils.serve_worker": {
+        "args": [
+          "<tunix.dist_rl.worker.rollout_worker.RolloutWorker()>"
+        ],
+        "kwargs": {
+          "config_sha256": "<resolve_config.config_fingerprint(hp)>",
+          "drain_fn": "<function tunix.dist_rl.launch.nodes.rollout.main.<locals>.grpc_server_main.<locals>._drain>",
+          "extra_metadata": {
+            "trajectory_store_config": null
+          },
+          "port": 20001,
+          "process_context": "<context>",
+          "role": "rollout",
+          "worker_id_str": "rollout-0"
+        }
+      }
+    }
+  ],
+  "env": {
+    "DISABLE_MOSAIC_ATTN": "1",
+    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+    "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+    "VLLM_TPU_RPA_VERSION": "2"
+  },
+  "jax_config": {}
+}

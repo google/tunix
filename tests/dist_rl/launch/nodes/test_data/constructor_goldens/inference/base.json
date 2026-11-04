@@ -1,0 +1,105 @@
+{
+  "calls": [
+    {
+      "context.jax.initialize": {}
+    },
+    {
+      "tunix.dist_rl.launch.nodes.node_utils.ensure_local_safetensors": {
+        "args": [
+          "/artifacts/models/Qwen3-1.7B",
+          "Qwen/Qwen3-1.7B"
+        ],
+        "kwargs": {
+          "model_key": "reference_model_config"
+        }
+      }
+    },
+    {
+      "transformers.models.auto.tokenization_auto.AutoTokenizer.from_pretrained": {
+        "args": [
+          "/models/tokenizer"
+        ],
+        "kwargs": {
+          "trust_remote_code": true
+        }
+      }
+    },
+    {
+      "jax.experimental.mesh_utils.create_device_mesh": {
+        "args": [
+          [
+            1,
+            2
+          ],
+          [
+            "<jax.devices()[0]>",
+            "<jax.devices()[1]>"
+          ]
+        ]
+      }
+    },
+    {
+      "tunix.dist_rl.launch.nodes.node_utils.Mesh": {
+        "args": [
+          "<jax.experimental.mesh_utils.create_device_mesh()>"
+        ],
+        "kwargs": {
+          "axis_names": [
+            "fsdp",
+            "tp"
+          ]
+        }
+      }
+    },
+    {
+      "tunix.models.automodel.AutoModel.from_pretrained": {
+        "kwargs": {
+          "dtype": "float32",
+          "load_dtype": "float32",
+          "mesh": "<tunix.dist_rl.launch.nodes.node_utils.Mesh()>",
+          "model_id": "Qwen3-1.7B",
+          "model_path": "/artifacts/models/Qwen3-1.7B"
+        }
+      }
+    },
+    {
+      "tunix.rl.inference.inference_worker.InferenceWorker": {
+        "args": [
+          {
+            "reference": "<tunix.models.automodel.AutoModel.from_pretrained()[0]>"
+          }
+        ]
+      }
+    },
+    {
+      "tunix.dist_rl.worker.inference_worker.InferenceWorker": {
+        "args": [
+          "<tunix.rl.inference.inference_worker.InferenceWorker()>"
+        ],
+        "kwargs": {
+          "chunk_size": 1,
+          "eos_id": 151645,
+          "execution_context": "<tunix.dist_rl.launch.nodes.node_utils.Mesh()>",
+          "pad_id": 151643,
+          "worker_id": "reference-inference-0"
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.launch.nodes.node_utils.serve_worker": {
+        "args": [
+          "<tunix.dist_rl.worker.inference_worker.InferenceWorker()>"
+        ],
+        "kwargs": {
+          "config_sha256": "<resolve_config.config_fingerprint(hp)>",
+          "port": 20002,
+          "process_context": "<context>",
+          "role": "inference",
+          "worker_id_str": "reference-inference-0"
+        }
+      }
+    }
+  ],
+  "env": {},
+  "jax_config": {}
+}

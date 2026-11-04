@@ -1,0 +1,161 @@
+{
+  "calls": [
+    {
+      "context.jax.initialize": {}
+    },
+    {
+      "tunix.utils.maxtext_utils.AdamWOptions": {
+        "kwargs": {
+          "b1": 0.9,
+          "b2": 0.999,
+          "eps": 1e-08,
+          "gradient_clipping_threshold": 1.0,
+          "weight_decay": 0.01
+        }
+      }
+    },
+    {
+      "transformers.models.auto.tokenization_auto.AutoTokenizer.from_pretrained": {
+        "args": [
+          "/models/tokenizer"
+        ],
+        "kwargs": {
+          "trust_remote_code": true
+        }
+      }
+    },
+    {
+      "orbax.checkpoint.checkpoint_manager.CheckpointManagerOptions": {
+        "kwargs": {
+          "max_to_keep": 10,
+          "save_interval_steps": 1
+        }
+      }
+    },
+    {
+      "tunix.sft.checkpoint_options.TunixCheckpointingOptions": {
+        "kwargs": {
+          "async_options": {
+            "__type__": "AsyncOptions"
+          },
+          "enable_async_checkpointing": true,
+          "preservation_policy": {
+            "__type__": "LatestN",
+            "n": 10
+          },
+          "save_decision_policy": {
+            "__type__": "FixedIntervalPolicy",
+            "interval": 1
+          },
+          "step_name_format": null
+        }
+      }
+    },
+    {
+      "tunix.sft.metrics_logger.MetricsLoggerOptions": {
+        "kwargs": {
+          "flush_every_n_steps": 1,
+          "log_dir": "",
+          "project_name": "trellis-gsm8k",
+          "run_name": ""
+        }
+      }
+    },
+    {
+      "tunix.utils.maxtext_utils.ProfilerOptions": {
+        "kwargs": {
+          "enable_tpu_profiling_options": true,
+          "profiler_period": 10,
+          "profiler_steps": 3,
+          "skip_first_n_steps": 5,
+          "tpu_num_chips_to_profile_per_task": 1,
+          "tpu_num_sparse_core_tiles_to_trace": 1,
+          "tpu_num_sparse_cores_to_trace": 1,
+          "upload_all_profiler_results": false
+        }
+      }
+    },
+    {
+      "tunix.utils.maxtext_utils.build_maxtext_config": {
+        "kwargs": {
+          "adamw_options": "<tunix.utils.maxtext_utils.AdamWOptions()>",
+          "attention": "flash",
+          "base_num_kv_heads": 0,
+          "base_output_directory": "/artifacts/maxtext",
+          "checkpointing_options": "<orbax.checkpoint.checkpoint_manager.CheckpointManagerOptions()>",
+          "gradient_accumulation_steps": 32,
+          "learning_rate": 2e-07,
+          "load_parameters_path": "/ckpt/qwen3-1.7b/0/items",
+          "max_prompt_length": 1024,
+          "max_response_length": 1024,
+          "max_seq_token_per_tpu": 0,
+          "mesh_context": 1,
+          "mesh_expert": 1,
+          "mesh_fsdp": 1,
+          "mesh_tp": 2,
+          "model_name": "qwen3-1.7b",
+          "num_devices": 2,
+          "padded_moe_mlp_dim": 0,
+          "prefuse_moe_weights": false,
+          "profiling_options": "<tunix.utils.maxtext_utils.ProfilerOptions()>",
+          "rollout_mesh_tp": 2,
+          "train_micro_batch_size": 1,
+          "use_weight_converter": true,
+          "warmup_steps_fraction": 0.05,
+          "weight_dtype": "float32",
+          "worker_id": "trainer-0"
+        }
+      }
+    },
+    {
+      "tunix.utils.maxtext_utils.create_maxtext_mesh": {
+        "args": [
+          "<tunix.utils.maxtext_utils.build_maxtext_config()>"
+        ]
+      }
+    },
+    {
+      "tunix.dist_rl.worker.trainer_worker.TrainerWorker": {
+        "kwargs": {
+          "execution_context": "<tunix.utils.maxtext_utils.create_maxtext_mesh()>",
+          "logps_chunk_size": 0,
+          "logps_micro_batch_size": 1,
+          "trainer_factory": "<function tunix.dist_rl.launch.nodes.trainer._create_maxtext_trainer_factory.<locals>._factory>",
+          "worker_id": "trainer-0"
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.launch.nodes.node_utils.serve_worker": {
+        "args": [
+          "<tunix.dist_rl.worker.trainer_worker.TrainerWorker()>"
+        ],
+        "kwargs": {
+          "close_fn": "<function tunix.dist_rl.launch.nodes.trainer.main.<locals>._close>",
+          "config_sha256": "<resolve_config.config_fingerprint(hp)>",
+          "port": 20000,
+          "process_context": "<context>",
+          "role": "trainer",
+          "worker_id_str": "trainer-0"
+        }
+      }
+    },
+    {
+      "trainer_factory": {}
+    },
+    {
+      "tunix.utils.maxtext_utils.create_maxtext_engine": {
+        "args": [
+          "<tunix.utils.maxtext_utils.build_maxtext_config()>"
+        ],
+        "kwargs": {
+          "mesh": "<tunix.utils.maxtext_utils.create_maxtext_mesh()>",
+          "tokenizer_pad_id": 151643,
+          "wrap_with_tunix_adapter": true
+        }
+      }
+    }
+  ],
+  "env": {},
+  "jax_config": {}
+}

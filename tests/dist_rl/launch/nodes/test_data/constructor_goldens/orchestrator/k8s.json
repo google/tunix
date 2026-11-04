@@ -1,0 +1,198 @@
+{
+  "calls": [
+    {
+      "tunix.dist_rl.weight_sync.weight_sync_coordinator.PhaseTimeouts": {
+        "kwargs": {
+          "pre": 900.0
+        }
+      }
+    },
+    {
+      "tunix.rl.algorithm_config.GRPOConfig": {
+        "kwargs": {
+          "advantage_estimator": "grpo",
+          "beta": 0.0,
+          "epsilon": 0.2,
+          "epsilon_high": 0.28,
+          "kl_loss_mode": "low_var_kl",
+          "loss_agg_mode": "sequence-mean-token-mean",
+          "loss_algo": "grpo",
+          "num_generations": 8,
+          "num_iterations": 1,
+          "reward_mode": "env",
+          "routed_experts_encode_mode": "auto",
+          "routed_experts_num_experts": null,
+          "sampler_is": "token",
+          "sampler_is_threshold": 2.0,
+          "use_rollout_logps": true
+        }
+      }
+    },
+    {
+      "tunix.sft.checkpoint_options.TunixCheckpointingOptions": {
+        "kwargs": {
+          "async_options": {
+            "__type__": "AsyncOptions"
+          },
+          "enable_async_checkpointing": true,
+          "preservation_policy": {
+            "__type__": "LatestN",
+            "n": 10
+          },
+          "save_decision_policy": {
+            "__type__": "FixedIntervalPolicy",
+            "interval": 1
+          },
+          "step_name_format": null
+        }
+      }
+    },
+    {
+      "tunix.sft.metrics_logger.MetricsLoggerOptions": {
+        "kwargs": {
+          "flush_every_n_steps": 1,
+          "log_dir": "",
+          "project_name": "trellis-gsm8k",
+          "run_name": ""
+        }
+      }
+    },
+    {
+      "tunix.sft.metrics_logger.MetricsLoggerOptions": {
+        "kwargs": {
+          "backend_kwargs": {
+            "wandb": {
+              "config": "<resolve_config.plain_config(hp)>"
+            }
+          },
+          "enable_opentelemetry": false,
+          "flush_every_n_steps": 1,
+          "log_dir": "",
+          "project_name": "trellis-gsm8k",
+          "run_name": ""
+        }
+      }
+    },
+    {
+      "tunix.cli.utils.data.get_dataset_from_module": {
+        "args": [
+          "golden_data_module"
+        ],
+        "kwargs": {
+          "seed": 42,
+          "shuffle": true,
+          "split": "train"
+        }
+      }
+    },
+    {
+      "transformers.models.auto.tokenization_auto.AutoTokenizer.from_pretrained": {
+        "args": [
+          "/models/tokenizer"
+        ],
+        "kwargs": {
+          "trust_remote_code": true
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.orchestrator.orchestrator.ClusterOrchestrator": {
+        "kwargs": {
+          "trajectory_store_config": {
+            "backend": "file",
+            "run_id": "golden"
+          },
+          "weight_sync_mode": "raiden",
+          "weight_sync_timeouts": "<tunix.dist_rl.weight_sync.weight_sync_coordinator.PhaseTimeouts()>"
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.common.datatypes.GenerationArgs": {
+        "kwargs": {
+          "return_routed_experts": false,
+          "temperature": 1.0,
+          "top_k": 0,
+          "top_p": 1.0
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.orchestrator.batch_assembly.BatchConfig": {
+        "kwargs": {
+          "max_prompt_length": 1024,
+          "max_response_length": 1024,
+          "max_segments_per_packed_row": null,
+          "max_seq_token_per_tpu": 4096,
+          "mini_batch_size": 4,
+          "num_data_shards": 2,
+          "pad_id": 151643,
+          "segment_alignment_boundary": 1,
+          "train_micro_batch_size": 1
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.orchestrator.rl_program.StandardRLProgram": {
+        "kwargs": {
+          "algo_config": "<tunix.rl.algorithm_config.GRPOConfig()>",
+          "batch_config": "<tunix.dist_rl.orchestrator.batch_assembly.BatchConfig()>",
+          "batch_size": 4,
+          "dataset": {
+            "[0]": {
+              "max_turns": 8,
+              "metadata": {
+                "answer": "42",
+                "episode_timeout": 600.0,
+                "overlong_filter": false
+              },
+              "prompt": "golden prompt"
+            },
+            "__type__": "grain.MapDataset"
+          },
+          "generation_args": "<tunix.dist_rl.common.datatypes.GenerationArgs()>",
+          "group_order": "GroupOrder.TRAJECTORY_COMPLETION",
+          "max_staleness": 1,
+          "max_steps": 1,
+          "max_version_span": 2,
+          "metrics_logging_options": "<tunix.sft.metrics_logger.MetricsLoggerOptions()#2>",
+          "precompile_trainer": true,
+          "reward_fns": [],
+          "sync_weights": true,
+          "trajectory_log_dir": null,
+          "trajectory_store": "<tunix.dist_rl.orchestrator.orchestrator.ClusterOrchestrator().trajectory_store>"
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.launch.nodes.orchestrator.run_program": {
+        "args": [
+          "<hp>",
+          "<tunix.dist_rl.orchestrator.orchestrator.ClusterOrchestrator()>",
+          "<tunix.dist_rl.orchestrator.rl_program.StandardRLProgram()>"
+        ],
+        "kwargs": {
+          "config_sha256": "<resolve_config.config_fingerprint(hp)>",
+          "discovery": "<context.ipc.discovery>",
+          "rpc_timeout_s": 3600.0
+        }
+      }
+    },
+    {
+      "tunix.dist_rl.orchestrator.orchestrator.ClusterOrchestrator().registry.wait_for_workers": {
+        "kwargs": {
+          "min_workers": {
+            "Role.ACTOR": 1,
+            "Role.REFERENCE": 0,
+            "Role.ROLLOUT": 2
+          },
+          "timeout": 1.0
+        }
+      }
+    }
+  ],
+  "env": {},
+  "jax_config": {
+    "jax_platforms": "cpu"
+  }
+}
