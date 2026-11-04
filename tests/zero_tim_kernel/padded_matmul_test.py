@@ -84,8 +84,8 @@ class PaddedMatmulTest(parameterized.TestCase):
     rng = np.random.default_rng(m)
     x = test_utils.random_bf16(rng, (128, 512))
     y = test_utils.random_bf16(rng, (512, 1024), scale=0.05)
-    full = padded_matmul.matmul(x, y, contract=contract, interpret=True)
-    part = padded_matmul.matmul(x[:m], y, contract=contract, interpret=True)
+    full = padded_matmul.matmul(x, y, contract=contract, interpret=pltpu.InterpretParams())
+    part = padded_matmul.matmul(x[:m], y, contract=contract, interpret=pltpu.InterpretParams())
     test_utils.assert_bitwise_equal(part, full[:m])
 
   def test_m_padding_to_256_rows(self):
@@ -93,7 +93,7 @@ class PaddedMatmulTest(parameterized.TestCase):
     rng = np.random.default_rng(1)
     x = test_utils.exact_bf16(rng, (200, 256))
     y = test_utils.exact_bf16(rng, (256, 512))
-    out = padded_matmul.matmul(x, y, contract=contract, interpret=True)
+    out = padded_matmul.matmul(x, y, contract=contract, interpret=pltpu.InterpretParams())
     self.assertEqual(out.shape, (200, 512))
     test_utils.assert_bitwise_equal(
         out, test_utils.exact_matmul_reference(x, y)
@@ -104,7 +104,7 @@ class PaddedMatmulTest(parameterized.TestCase):
     rng = np.random.default_rng(2)
     x = test_utils.exact_bf16(rng, (16, 200))
     y = test_utils.exact_bf16(rng, (200, 200))
-    out = padded_matmul.matmul(x, y, contract=contract, interpret=True)
+    out = padded_matmul.matmul(x, y, contract=contract, interpret=pltpu.InterpretParams())
     self.assertEqual(out.shape, (16, 200))
     test_utils.assert_bitwise_equal(
         out, test_utils.exact_matmul_reference(x, y)
@@ -115,7 +115,7 @@ class PaddedMatmulTest(parameterized.TestCase):
     rng = np.random.default_rng(3)
     x = test_utils.exact_bf16(rng, (8, 256))
     y = test_utils.exact_bf16(rng, (256, 1216))
-    out = padded_matmul.matmul(x, y, contract=contract, interpret=True)
+    out = padded_matmul.matmul(x, y, contract=contract, interpret=pltpu.InterpretParams())
     self.assertEqual(out.shape, (8, 1216))
     test_utils.assert_bitwise_equal(
         out, test_utils.exact_matmul_reference(x, y)
@@ -128,14 +128,14 @@ class PaddedMatmulTest(parameterized.TestCase):
           jnp.zeros((8, 256), jnp.bfloat16),
           jnp.zeros((512, 256), jnp.bfloat16),
           contract=contract,
-          interpret=True,
+          interpret=pltpu.InterpretParams(),
       )
     with self.assertRaises(ValueError):
       padded_matmul.matmul(
           jnp.zeros((0, 256), jnp.bfloat16),
           jnp.zeros((256, 256), jnp.bfloat16),
           contract=contract,
-          interpret=True,
+          interpret=pltpu.InterpretParams(),
       )
 
 

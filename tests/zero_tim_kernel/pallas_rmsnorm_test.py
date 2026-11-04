@@ -72,7 +72,7 @@ class RmsnormTest(parameterized.TestCase):
     rng = np.random.default_rng(m * f)
     x = test_utils.exact_bf16(rng, (m, f))
     weight = test_utils.random_bf16(rng, (f,))
-    out = pallas_rmsnorm.rmsnorm(x, weight, epsilon=_EPS, interpret=True)
+    out = pallas_rmsnorm.rmsnorm(x, weight, epsilon=_EPS, interpret=pltpu.InterpretParams())
     expected = pallas_rmsnorm.canonical_rmsnorm(x, weight, epsilon=_EPS)
     self.assertEqual(out.dtype, jnp.bfloat16)
     test_utils.assert_bitwise_equal(out, expected)
@@ -81,7 +81,7 @@ class RmsnormTest(parameterized.TestCase):
     rng = np.random.default_rng(1)
     x = test_utils.random_bf16(rng, (64, 2048), scale=3.0)
     weight = test_utils.random_bf16(rng, (2048,))
-    out = pallas_rmsnorm.rmsnorm(x, weight, epsilon=_EPS, interpret=True)
+    out = pallas_rmsnorm.rmsnorm(x, weight, epsilon=_EPS, interpret=pltpu.InterpretParams())
     np.testing.assert_allclose(
         test_utils.as_f32(out),
         _float64_rmsnorm(x, weight, _EPS),
@@ -94,10 +94,10 @@ class RmsnormTest(parameterized.TestCase):
     rng = np.random.default_rng(2)
     x = test_utils.random_bf16(rng, (large, 1024), scale=2.0)
     weight = test_utils.random_bf16(rng, (1024,))
-    full = pallas_rmsnorm.rmsnorm(x, weight, epsilon=_EPS, interpret=True)
+    full = pallas_rmsnorm.rmsnorm(x, weight, epsilon=_EPS, interpret=pltpu.InterpretParams())
     for start in range(0, large - small + 1, max(small, pallas_rmsnorm.BM)):
       part = pallas_rmsnorm.rmsnorm(
-          x[start : start + small], weight, epsilon=_EPS, interpret=True
+          x[start : start + small], weight, epsilon=_EPS, interpret=pltpu.InterpretParams()
       )
       test_utils.assert_bitwise_equal(full[start : start + small], part)
 
@@ -106,10 +106,10 @@ class RmsnormTest(parameterized.TestCase):
     weight = jnp.ones((128,), jnp.bfloat16)
     with self.assertRaisesRegex(ValueError, "bf16"):
       pallas_rmsnorm.rmsnorm(
-          x.astype(jnp.float32), weight, epsilon=_EPS, interpret=True
+          x.astype(jnp.float32), weight, epsilon=_EPS, interpret=pltpu.InterpretParams()
       )
     with self.assertRaisesRegex(ValueError, "epsilon"):
-      pallas_rmsnorm.rmsnorm(x, weight, epsilon=0.0, interpret=True)
+      pallas_rmsnorm.rmsnorm(x, weight, epsilon=0.0, interpret=pltpu.InterpretParams())
     with self.assertRaisesRegex(ValueError, "epsilon"):
       pallas_rmsnorm.canonical_rmsnorm(x, weight, epsilon=-1.0)
 

@@ -46,7 +46,7 @@ class FixedLmHeadTest(parameterized.TestCase):
     os.environ.pop(canonical_vjp.PLAIN_VJP_ENV, None)
     self.contract = model_contracts.get_contract("qwen8b")
     self.local_matmul = fixed_lm_head.canonical_local_matmul(
-        self.contract, interpret=True
+        self.contract, interpret=pltpu.InterpretParams()
     )
 
   def _head(self, x, w, *, use_fast_plain_vjp: bool = True):
@@ -125,7 +125,7 @@ class FixedLmHeadTest(parameterized.TestCase):
     mesh = test_utils.cpu_mesh((4,), ("tp",))
     contract = model_contracts.find_contract(hidden_size=4096, tp_size=4)
     local_matmul = fixed_lm_head.canonical_local_matmul(
-        contract, interpret=True
+        contract, interpret=pltpu.InterpretParams()
     )
 
     def head(x, w):
