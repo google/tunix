@@ -126,3 +126,62 @@ is essential for algorithms like GRPO which require multiple trajectory samples
 for each prompt, and improves efficiency by yielding full groups of trajectories
 in batches. The `max_open_buckets` parameter can be used to limit memory usage
 by controlling the number of groups that can be populated simultaneously.
+
+### Dynamic Sampling (DAPO)
+
+With GRPO-style advantages, a group whose `num_generations` samples all receive
+the same reward has all-zero advantages and contributes no gradient. Dynamic
+sampling drops such groups and admits a replacement prompt in their place, so
+every global step still trains on `batch_size` informative groups. It is opt-in
+on `AgenticRLConfig` (`agentic_grpo_config` in the CLI):
+
+```yaml
+agentic_grpo_config:
+  off_policy_steps: 1
+  group_filters: ["zero_variance"]
+  max_in_flight_groups: 24  # batch_size=16
+  max_consecutive_filtered_groups: 256
+```
+
+*   `group_filters`: `"zero_variance"` drops groups whose advantages are all
+    zero; `"drop_failed"` drops groups with a broken episode (`FAILED`,
+    `ENV_TIMEOUT` or `CANCELLED`). The learner checks the filters right after
+    computing advantages, before the reference and actor log-probability passes,
+    and the `DispatchWindow` admits exactly one replacement prompt per dropped
+    group within the `off_policy_steps` staleness window.
+*   `max_in_flight_groups`: optional cap on the prompt groups admitted ahead of
+    the trainer, between `batch_size` and the default `(off_policy_steps + 1) *
+    batch_size`.
+*   `max_consecutive_filtered_groups`: raises `DynamicSamplingStalledError` when
+    this many groups in a row are dropped, i.e. the data no longer yields
+    trainable groups. `-1` (default) disables the guard.
+
+Reward metrics cover every scored group, including dropped ones;
+`dynamic_sampling/dropped_groups/<filter>` counts the dropped groups and
+`policy/staleness_steps` reports how many weight syncs behind the trainer a
+group was when it was scored. Prompts are admitted one at a time rather than
+by batch, so kept groups stream to the trainer as each mini-batch fills and any
+trailing partial micro-batch at the end of the dataset is dropped.
+
+### Submission-Order Mini-Batches
+
+With `mini_batch_size < batch_size` a global step takes several optimizer
+updates. By default kept groups fill the mini-batches in the order they finish,
+which puts the short, fast groups in the first mini-batch and the long ones in
+the last, most off-policy one. `minibatch_order: submission` assigns groups to
+mini-batches by prompt order instead:
+
+```yaml
+rl_training_config:
+  mini_batch_size: 8  # batch_size=16: two optimizer updates per global step
+agentic_grpo_config:
+  minibatch_order: submission  # default: completion
+```
+
+Mini-batch `m` is the `m`-th block of `mini_batch_size` kept groups in
+`group_id` order; a group dropped by dynamic sampling gives its place to the
+next prompt. Within a mini-batch the order does not matter, so a member is
+handed to the trainer as soon as it finishes, but a later mini-batch waits for
+the slowest member of the current one. `sampler_is`, `sampler_rs` and
+`seq_logprob_error_threshold` need one optimizer update per global step and are
+rejected with `mini_batch_size < batch_size`.

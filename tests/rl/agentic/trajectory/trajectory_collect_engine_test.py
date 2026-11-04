@@ -2237,6 +2237,8 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
     )
     learner._trajectory_logger = None
     learner._full_batch_size = 0
+    learner._dynamic_sampler = None  # pylint: disable=protected-access
+    learner.policy_version = 7
     learner.metric_fns = []
     learner._compute_rewards = lambda **kw: np.array([0.0, 1.0])
     learner.rl_engine = SimpleNamespace(

@@ -664,6 +664,65 @@ vllm_config:
     self.assertEqual(p.config["agentic_dummy_config"]["system_prompt"], "")
 
 
+class OptimizerScheduleTest(absltest.TestCase):
+
+  def _scheduled_optimizer(self, cli_args, extra_yaml=""):
+    """Runs compute_params with max_steps=10 and returns the actor optimizer."""
+    p = _make_pipeline_with_cli_args(
+        extra_yaml,
+        [
+            "rl_training_config.actor_optimizer_config.learning_rate=1e-6",
+            *cli_args,
+        ],
+    )
+    with mock.patch.object(p, "_compute_max_steps", return_value=10):
+      base_rl_pipeline.BasePipeline.compute_params(p, dataset=None)
+    rl_config = p._mutable_config_mapping("rl_training_config")  # pylint: disable=protected-access
+    self.assertEqual(rl_config["max_steps"], 10)
+    return rl_config["actor_optimizer_config"]
+
+  def test_agentic_schedule_is_counted_in_optimizer_updates(self):
+    # 8 groups per global step in mini-batches of 2: 4 updates per step.
+    opt = self._scheduled_optimizer(
+        ["batch_size=8", "rl_training_config.mini_batch_size=2"],
+        extra_yaml=(
+            'training_mode: "agentic_dummy"\n'
+            "agentic_dummy_config:\n  num_iterations: 1\n"
+        ),
+    )
+    self.assertEqual(opt["decay_steps"], 40)
+    self.assertAlmostEqual(opt["warmup_steps"], 4.0)
+
+  def test_agentic_schedule_counts_every_iteration_and_clamps_minibatch(self):
+    opt = self._scheduled_optimizer(
+        ["batch_size=8", "rl_training_config.mini_batch_size=4"],
+        extra_yaml=(
+            'training_mode: "agentic_dummy"\n'
+            "agentic_dummy_config:\n  num_iterations: 3\n"
+        ),
+    )
+    self.assertEqual(opt["decay_steps"], 60)
+
+    # When mini_batch_size > batch_size, max(1, batch_size // mini_batch_size)
+    # clamps updates per iteration to 1.
+    clamped = self._scheduled_optimizer(
+        ["batch_size=4", "rl_training_config.mini_batch_size=8"],
+        extra_yaml=(
+            'training_mode: "agentic_dummy"\n'
+            "agentic_dummy_config:\n  num_iterations: 3\n"
+        ),
+    )
+    self.assertEqual(clamped["decay_steps"], 30)
+
+  def test_non_agentic_grpo_mode_keeps_max_steps_unscaled(self):
+    opt = self._scheduled_optimizer(
+        ["batch_size=8", "rl_training_config.mini_batch_size=2"],
+        extra_yaml='training_mode: "grpo"\ngrpo_config:\n  num_iterations: 3\n',
+    )
+    self.assertEqual(opt["decay_steps"], 10)
+    self.assertAlmostEqual(opt["warmup_steps"], 1.0)
+
+
 class SplitMeshConfigTest(absltest.TestCase):
 
   def test_split_mesh_uses_explicit_role_meshes(self):

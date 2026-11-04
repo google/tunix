@@ -14,7 +14,7 @@
 """Base class for RL pipelines."""
 
 import abc
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 import dataclasses
 import importlib
 import os
@@ -691,8 +691,8 @@ class BasePipeline(abc.ABC, config.HyperParameters):
 
     This method computes max_steps from the dataset length and RL training
     config, and updates the RL training config with the computed max_steps.
-    It also updates the actor and critic optimizer configs with the computed
-    max_steps.
+    It also sets the decay / warmup steps of the actor and critic optimizer
+    configs, counted in optimizer updates (see `_optimizer_updates_per_step`).
 
     Args:
       dataset: The dataset to compute max_steps from.
@@ -701,21 +701,64 @@ class BasePipeline(abc.ABC, config.HyperParameters):
     max_steps = self._compute_max_steps(dataset)
 
     rl_training_config["max_steps"] = max_steps
-    self._apply_optimizer_step_limits(
-        rl_training_config, "actor_optimizer_config", max_steps
+    optimizer_steps = max_steps * self._optimizer_updates_per_step(
+        rl_training_config
     )
     self._apply_optimizer_step_limits(
-        rl_training_config, "critic_optimizer_config", max_steps
+        rl_training_config, "actor_optimizer_config", optimizer_steps
     )
+    self._apply_optimizer_step_limits(
+        rl_training_config, "critic_optimizer_config", optimizer_steps
+    )
+
+  def _optimizer_updates_per_step(
+      self, rl_training_config: Mapping[str, Any]
+  ) -> int:
+    """Returns the optimizer updates represented by one `max_steps` unit.
+
+    Non-agentic `RLLearner` modes count `max_steps` directly in optimizer
+    updates, whereas agentic modes count `max_steps` in global steps. Each
+    agentic global step runs `num_iterations` passes over the batch with one
+    optimizer update per mini-batch, and optax schedules advance once per
+    update.
+
+    Args:
+      rl_training_config: The `rl_training_config` section.
+
+    Returns:
+      `num_iterations * max(1, batch_size // mini_batch_size)` in agentic modes,
+      or `1` in non-agentic modes.
+    """
+    mode = self._config_string("training_mode", self._default_training_mode)
+    if not self._is_agentic_mode(mode):
+      return 1
+    batch_size = int(self.config.get("batch_size") or 1)
+    mini_batch_size = int(
+        rl_training_config.get("mini_batch_size") or batch_size
+    )
+    num_iterations = int(
+        self._config_mapping(f"{mode}_config").get("num_iterations") or 1
+    )
+    return num_iterations * max(1, batch_size // mini_batch_size)
 
   def _apply_optimizer_step_limits(
       self,
       rl_training_config: MutableMapping[str, Any],
       optimizer_key: str,
-      max_steps: int,
-  ):
-    """Apply step limits to optimizer config if it exists."""
+      optimizer_steps: int,
+  ) -> None:
+    """Applies step limits (in optimizer updates) to an optimizer config.
 
+    Args:
+      rl_training_config: Mutable `rl_training_config` mapping to update.
+      optimizer_key: Key of the optimizer config entry inside
+        `rl_training_config`.
+      optimizer_steps: Total number of optimizer updates in the run.
+
+    Raises:
+      ValueError: If `rl_training_config[optimizer_key]` is set and not a
+        mapping.
+    """
     opt: MutableMapping[str, Any] | None = None
     opt_value = rl_training_config.get(optimizer_key)
 
@@ -725,10 +768,12 @@ class BasePipeline(abc.ABC, config.HyperParameters):
       raise ValueError(f"rl_training_config.{optimizer_key} must be a dict.")
 
     if opt and not opt.get("decay_steps"):
-      opt["decay_steps"] = max_steps
+      opt["decay_steps"] = optimizer_steps
     if opt and not opt.get("warmup_steps"):
       warmup_ratio = self.config.get("warmup_ratio", 0.1)
-      warmup_steps = self.config.get("warmup_steps", warmup_ratio * max_steps)
+      warmup_steps = self.config.get(
+          "warmup_steps", warmup_ratio * optimizer_steps
+      )
       opt["warmup_steps"] = warmup_steps
 
   # ------------------------------------------------------------------
