@@ -30,6 +30,7 @@ from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import lineage
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import distributed_rl_engine
+from tunix.dist_rl.orchestrator import payload_builder
 from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.orchestrator import step_telemetry
 from tunix.dist_rl.orchestrator import worker_registry
@@ -306,10 +307,10 @@ class RLProgramTest(absltest.TestCase):
         completion_mask=np.array([1, 1], dtype=np.float32),
         advantages=np.array([1.0, 1.0], dtype=np.float32),
     )
-    self._orig_create_trainer_payloads = batch_assembly.create_trainer_payloads
+    self._orig_create_trainer_payloads = payload_builder.create_trainer_payloads
     self.mock_create_trainer_payloads = self.enterContext(
         mock.patch.object(
-            batch_assembly,
+            payload_builder,
             "create_trainer_payloads",
             return_value=[mock_payload, mock_payload],
         )
@@ -3123,7 +3124,7 @@ class RLProgramTest(absltest.TestCase):
           ],
       )
 
-      # 6. Verify items passed to batch_assembly.create_trainer_payloads
+      # 6. Verify items passed to payload_builder.create_trainer_payloads
       self.assertEqual(
           passed_to_algo,
           [
@@ -7436,7 +7437,7 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
       )
       mock_create_payloads = self.enterContext(
           mock.patch.object(
-              batch_assembly,
+              payload_builder,
               "create_trainer_payloads",
           )
       )
@@ -7582,9 +7583,9 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     )
     self.mock_create_trainer_payloads = self.enterContext(
         mock.patch.object(
-            batch_assembly,
+            payload_builder,
             "create_trainer_payloads",
-            wraps=batch_assembly.create_trainer_payloads,
+            wraps=payload_builder.create_trainer_payloads,
         )
     )
     self.mock_engine = mock.AsyncMock(

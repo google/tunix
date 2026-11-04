@@ -38,6 +38,7 @@ from tunix.dist_rl.common import logging_utils
 from tunix.dist_rl.common import tagging
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import dataset_utils
+from tunix.dist_rl.orchestrator import payload_builder
 from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.dist_rl.orchestrator import step_telemetry
 from tunix.dist_rl.queue_manager import trajectory_queue_manager
@@ -256,8 +257,8 @@ class ScoredGroup:
 
   Attributes:
     payloads: Trainer tensor DTOs for the group's rollouts (`len == G`),
-      produced by `batch_assembly.create_trainer_payloads`. Single owner of each
-      rollout's `routed_experts` until packed by the batch assembler.
+      produced by `payload_builder.create_trainer_payloads`. Single owner of
+      each rollout's `routed_experts` until packed by the batch assembler.
     items: Telemetry and lineage views of the group's rollouts with
       `routed_experts` stripped (`len == G`).
     rewards: Scalar rewards computed by `critique_stage` (`len == G`), also
@@ -892,7 +893,7 @@ class StandardRLProgram(RLProgram):
   ) -> ScoredGroup:
     """Scores a trajectory group and builds its RLTrainerPayloads and ScoredGroup off-loop."""
     rewards, group_reward_log_metrics = self._score_group(group)
-    payloads = batch_assembly.create_trainer_payloads(
+    payloads = payload_builder.create_trainer_payloads(
         group,
         rewards=rewards,
         algo_config=self.algo_config,

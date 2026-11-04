@@ -19,7 +19,7 @@ Drives the exact production sequence against a real `PeftTrainer` on CPU:
 1. `LifecycleDriver.bring_up`: `initialize()`, `compile(None)`, `start()`.
 2. `DistributedRLEngine.configure_worker`: `with_loss_fn`,
    `with_gen_model_input_fn`, then `compile(assembler.build_dummy_payload())`.
-3. First real microbatch from `batch_assembly.create_trainer_payloads` + the
+3. First real microbatch from `payload_builder.create_trainer_payloads` + the
    same assembler.
 
 and asserts step 3 triggers neither a new trace nor an XLA backend compile of
@@ -40,6 +40,7 @@ import optax
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import distributed_rl_engine
+from tunix.dist_rl.orchestrator import payload_builder
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.testing import worker_registry_testing
 from tunix.dist_rl.train import peft_trainer_v2
@@ -369,7 +370,7 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
   ) -> int:
     (assembled,) = list(
         assembler.feed(
-            batch_assembly.create_trainer_payloads(
+            payload_builder.create_trainer_payloads(
                 _rollouts(routed_experts_shape, num_experts=num_experts),
                 [1.0, 0.0],
                 algo_config=algo_cfg,
