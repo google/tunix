@@ -59,11 +59,7 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
                 arguments={"command": "ls -la"},
             )
         ],
-        metrics=trajectory_lib.Metrics(
-            completion_tokens=2,
-            completion_token_ids=[101, 102],
-            logprobs=[-0.1, -0.2],
-        ),
+        metrics=trajectory_lib.Metrics(completion_tokens=2),
         assistant_tokens=mock_agent_step.assistant_tokens,
         assistant_masks=mock_agent_step.assistant_masks,
         logprobs=mock_agent_step.logprobs,
@@ -93,73 +89,63 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
       dict(
           testcase_name="int32_array",
           assistant_tokens=np.array([101, -102], dtype=np.int32),
-          expected_token_ids=[101, -102],
+          expected_count=2,
       ),
       dict(
           testcase_name="uint64_array",
           assistant_tokens=np.array([101, 2**64 - 1], dtype=np.uint64),
-          expected_token_ids=[101, 2**64 - 1],
+          expected_count=2,
       ),
       dict(
           testcase_name="int8_array",
           assistant_tokens=np.array([-128, 127], dtype=np.int8),
-          expected_token_ids=[-128, 127],
+          expected_count=2,
       ),
       dict(
           testcase_name="uint8_array",
           assistant_tokens=np.array([0, 255], dtype=np.uint8),
-          expected_token_ids=[0, 255],
+          expected_count=2,
       ),
       dict(
           testcase_name="big_endian_int32_array",
           assistant_tokens=np.array([101, -102], dtype=">i4"),
-          expected_token_ids=[101, -102],
+          expected_count=2,
       ),
       dict(
           testcase_name="strided_int32_array",
           assistant_tokens=np.arange(6, dtype=np.int32)[::2],
-          expected_token_ids=[0, 2, 4],
+          expected_count=3,
       ),
       dict(
           testcase_name="empty_int32_array",
           assistant_tokens=np.array([], dtype=np.int32),
-          expected_token_ids=[],
-      ),
-      dict(
-          testcase_name="bool_array",
-          assistant_tokens=np.array([True, False]),
-          expected_token_ids=[1, 0],
-      ),
-      dict(
-          testcase_name="float_array",
-          assistant_tokens=np.array([101.7, -102.7]),
-          expected_token_ids=[101, -102],
+          expected_count=0,
       ),
       dict(
           testcase_name="list",
           assistant_tokens=[101, 102],
-          expected_token_ids=[101, 102],
+          expected_count=2,
       ),
       dict(
           testcase_name="tuple_of_numpy_ints",
           assistant_tokens=(np.int64(101), np.int64(102)),
-          expected_token_ids=[101, 102],
+          expected_count=2,
       ),
   )
-  def test_create_agent_step_converts_token_ids_to_python_ints(
-      self, assistant_tokens: Any, expected_token_ids: list[int]
+  def test_create_agent_step_records_completion_token_count_only(
+      self, assistant_tokens: Any, expected_count: int
   ) -> None:
-    """Verifies token IDs are converted to a list of Python ints."""
+    """Verifies metrics carry only the token count, not the token arrays."""
     rl_step = agent_types.Step(
         model_response="resp", assistant_tokens=assistant_tokens
     )
 
     agent_step = converter.create_agent_step(rl_step, tunix_step_id=0)
 
-    token_ids = agent_step.metrics.completion_token_ids
-    self.assertEqual(token_ids, expected_token_ids)
-    self.assertEqual([type(t) for t in token_ids], [int] * len(token_ids))
-    self.assertEqual(agent_step.metrics.completion_tokens, len(token_ids))
+    self.assertEqual(agent_step.metrics.completion_tokens, expected_count)
+    self.assertIsNone(agent_step.metrics.completion_token_ids)
+    self.assertIsNone(agent_step.metrics.logprobs)
+    np.testing.assert_array_equal(agent_step.assistant_tokens, assistant_tokens)
 
   @parameterized.named_parameters(
       dict(
@@ -193,11 +179,6 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
           expected_logprobs=[],
       ),
       dict(
-          testcase_name="longdouble_array",
-          logprobs=np.array([-0.5, -1.5], dtype=np.longdouble),
-          expected_logprobs=[-0.5, -1.5],
-      ),
-      dict(
           testcase_name="int_array",
           logprobs=np.array([-1, 0]),
           expected_logprobs=[-1.0, 0.0],
@@ -208,20 +189,17 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
           expected_logprobs=[-0.5, -1.0],
       ),
   )
-  def test_create_agent_step_converts_logprobs_to_python_floats(
+  def test_create_agent_step_keeps_logprobs_off_metrics(
       self, logprobs: Any, expected_logprobs: list[float]
   ) -> None:
-    """Verifies logprobs are converted to a list of Python floats."""
+    """Verifies logprobs stay on TunixAgentStep and are not copied to metrics."""
     rl_step = agent_types.Step(model_response="resp", logprobs=logprobs)
 
     agent_step = converter.create_agent_step(rl_step, tunix_step_id=0)
 
-    converted_logprobs = agent_step.metrics.logprobs
-    np.testing.assert_array_equal(converted_logprobs, expected_logprobs)
-    self.assertEqual(
-        [type(lp) for lp in converted_logprobs],
-        [float] * len(converted_logprobs),
-    )
+    # Without assistant_tokens there is no completion token count to record.
+    self.assertIsNone(agent_step.metrics)
+    np.testing.assert_array_equal(agent_step.logprobs, expected_logprobs)
 
   def test_create_agent_step_metrics_match_validated_metrics(self) -> None:
     """Verifies the unvalidated Metrics equals one built with validation."""
@@ -235,20 +213,25 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
 
     validated = trajectory_lib.Metrics.model_validate(metrics.model_dump())
     self.assertEqual(metrics, validated)
-    self.assertEqual(
-        metrics.model_fields_set,
-        {"completion_tokens", "completion_token_ids", "logprobs"},
-    )
+    self.assertEqual(metrics.model_fields_set, {"completion_tokens"})
 
-  def test_create_agent_step_with_masked_token_raises_mask_error(self) -> None:
-    """Verifies token IDs in a masked array with a masked entry are rejected."""
+  def test_create_agent_step_keeps_arrays_on_tunix_agent_step(self) -> None:
+    """Verifies token and logprob arrays are stored once, on the agent step."""
+    assistant_tokens = np.array([101, 102], dtype=np.int32)
+    logprobs = np.array([-0.5, -1.5], dtype=np.float32)
     rl_step = agent_types.Step(
         model_response="resp",
-        assistant_tokens=np.ma.masked_array([101, 102], mask=[False, True]),
+        assistant_tokens=assistant_tokens,
+        logprobs=logprobs,
     )
 
-    with self.assertRaises(np.ma.MaskError):
-      converter.create_agent_step(rl_step, tunix_step_id=0)
+    agent_step = converter.create_agent_step(rl_step, tunix_step_id=0)
+
+    self.assertIs(agent_step.assistant_tokens, assistant_tokens)
+    self.assertIs(agent_step.logprobs, logprobs)
+    self.assertEqual(agent_step.metrics.completion_tokens, 2)
+    self.assertIsNone(agent_step.metrics.completion_token_ids)
+    self.assertIsNone(agent_step.metrics.logprobs)
 
   def test_create_agent_step_multiple_tool_calls(self):
     mock_agent_step = agent_types.Step(

@@ -3208,6 +3208,67 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
       step_cls.from_atif_step(atif_step)
 
 
+class TunixAgentStepTokenLogprobLengthTest(parameterized.TestCase):
+  """Covers the `assistant_tokens` / `logprobs` length validator."""
+
+  def _make_step(self, **kwargs: Any) -> trajectory.TunixAgentStep:
+    return trajectory.TunixAgentStep(
+        step_id=1, source=trajectory.Source.AGENT, message="hi", **kwargs
+    )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="matching_arrays",
+          assistant_tokens=np.array([7, 8, 9], dtype=np.int32),
+          logprobs=np.array([-0.5, -0.25, -0.125], dtype=np.float32),
+      ),
+      dict(
+          testcase_name="matching_lists",
+          assistant_tokens=[7, 8],
+          logprobs=[-0.5, -0.25],
+      ),
+      dict(
+          testcase_name="tokens_only",
+          assistant_tokens=np.array([7, 8, 9]),
+          logprobs=None,
+      ),
+      dict(
+          testcase_name="logprobs_only",
+          assistant_tokens=None,
+          logprobs=np.array([-0.5]),
+      ),
+      dict(
+          testcase_name="neither",
+          assistant_tokens=None,
+          logprobs=None,
+      ),
+  )
+  def test_accepts_equal_lengths_or_missing_arrays(
+      self, assistant_tokens: Any, logprobs: Any
+  ):
+    step = self._make_step(assistant_tokens=assistant_tokens, logprobs=logprobs)
+
+    for actual, expected in (
+        (step.assistant_tokens, assistant_tokens),
+        (step.logprobs, logprobs),
+    ):
+      if expected is None:
+        self.assertIsNone(actual)
+      else:
+        np.testing.assert_array_equal(actual, expected)
+
+  def test_rejects_mismatched_lengths(self):
+    with self.assertRaisesRegex(
+        pydantic.ValidationError,
+        r"Length of assistant_tokens \(3\) must match length of logprobs"
+        r" \(2\)",
+    ):
+      self._make_step(
+          assistant_tokens=np.array([7, 8, 9]),
+          logprobs=np.array([-0.5, -0.25]),
+      )
+
+
 class Int3DArraySerializationTest(parameterized.TestCase):
   """Tests compact base64 binary serialization and validation for Int3DArray."""
 

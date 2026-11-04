@@ -1567,6 +1567,20 @@ class TunixAgentStep(Step):
         )
     return self
 
+  @pydantic.model_validator(mode="after")
+  def validate_assistant_tokens_match_logprobs(self) -> TunixAgentStep:
+    """Validate that `assistant_tokens` and `logprobs` have equal lengths."""
+    if (
+        self.assistant_tokens is not None
+        and self.logprobs is not None
+        and len(self.assistant_tokens) != len(self.logprobs)
+    ):
+      raise ValueError(
+          f"Length of assistant_tokens ({len(self.assistant_tokens)}) must"
+          f" match length of logprobs ({len(self.logprobs)})."
+      )
+    return self
+
   def to_atif_step(self, step_id_offset: int = 1) -> Step:
     """Converts this 0-indexed Tunix step to a 1-indexed base ATIF Step."""
     return super().to_atif_step(step_id_offset=step_id_offset)
