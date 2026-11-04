@@ -1,7 +1,26 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Trajectory implementation using Agent Trajectory Interchange Format (ATIF).
 
 For more details on the ATIF specification, see:
 https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md
+
+Clients extend the base ATIF models by subclassing `Step` and
+`TrajectoryMetadata` (declaring an `EXTENSIONS_KEY`) and pairing the metadata
+subclass with a `Trajectory` subclass; see `unpack_step_from_atif`,
+`TrajectoryMetadata.create_paired_trajectory`, and `Trajectory.STEP_ID_START`
+for the extension hooks.
 """
 
 from __future__ import annotations
@@ -10,7 +29,6 @@ import base64
 import binascii
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 import copy
-import dataclasses
 import datetime
 import enum
 import functools
@@ -495,22 +513,41 @@ def _unpack_subclass_values_from_extra(
   return values_by_field
 
 
-_StepT = TypeVar("_StepT", "TunixAgentStep", "TunixEnvStep")
+_StepT = TypeVar("_StepT", bound="Step")
 
 
-def _unpack_step_from_atif(
+def unpack_step_from_atif(
     step: Step,
     target_cls: type[_StepT],
     step_id_offset: int = 1,
 ) -> _StepT:
-  """Rehydrates a 1-indexed ATIF Step into a 0-indexed Tunix step subclass."""
+  """Rehydrates a base ATIF Step into the `target_cls` Step subclass.
+
+  Promotes the fields packed under `extra[target_cls.EXTENSIONS_KEY]` back to
+  first-class fields and shifts `step_id` down by `step_id_offset`, so a
+  subclass whose trajectories start at `STEP_ID_START = 0` can round-trip
+  through the 1-indexed base ATIF representation.
+
+  Args:
+    step: A `target_cls` instance (returned as-is) or a base ATIF step.
+    target_cls: The concrete `Step` subclass to rehydrate into.
+    step_id_offset: Amount subtracted from the ATIF `step_id`; the inverse of
+      the offset passed to `Step.to_atif_step`.
+
+  Returns:
+    The step as a `target_cls` instance.
+
+  Raises:
+    ValueError: If `step.step_id` is below `step_id_offset`, which means the
+      step already uses the subclass's shifted step_id convention.
+  """
   if isinstance(step, target_cls):
     return step
   if step.step_id < step_id_offset:
     raise ValueError(
         f"Expected a {step_id_offset}-indexed ATIF step_id, got"
-        f" {step.step_id}; this step may already use the 0-indexed Tunix"
-        " convention."
+        f" {step.step_id}; this step may already use the"
+        f" {target_cls.__name__} step_id convention."
     )
   target_values_by_field = _unpack_subclass_values_from_extra(step, target_cls)
   target_values_by_field["step_id"] = step.step_id - step_id_offset
@@ -978,7 +1015,7 @@ class Step(pydantic.BaseModel):
         )
     return self
 
-  # TODO(tunix-dev): Add automatic Step subclass registration and resolution
+  # TODO(tendril-dev): Add automatic Step subclass registration and resolution
   # (mirroring TrajectoryMetadata._SUBCLASS_FIELDS and resolve_subclass) so
   # persistent stores rehydrate custom Step subclasses automatically.
   def to_atif_step(self, step_id_offset: int = 0) -> Step:
@@ -1174,9 +1211,10 @@ class TrajectoryMetadata(pydantic.BaseModel):
         return metadata_cls
     else:
       # `Trajectory` subclasses multiply inherit from `Trajectory` and their
-      # paired `TrajectoryMetadata` subclass (e.g. `TunixTrajectory` inherits
-      # from `Trajectory` and `TunixTrajectoryMetadata`). Walk the Method
-      # Resolution Order (`__mro__`) to find the paired metadata subclass.
+      # paired `TrajectoryMetadata` subclass (e.g. a client's `ClientTrajectory`
+      # inherits from `Trajectory` and `ClientTrajectoryMetadata`). Walk the
+      # Method Resolution Order (`__mro__`) to find the paired metadata
+      # subclass.
       for base in metadata_cls.__mro__:
         if base in cls._SUBCLASS_FIELDS:
           return base
@@ -1222,7 +1260,7 @@ class TrajectoryMetadata(pydantic.BaseModel):
     target_values_by_field = _unpack_subclass_values_from_extra(metadata, cls)
     return cls.model_validate(target_values_by_field)
 
-  def _create_paired_trajectory(
+  def create_paired_trajectory(
       self,
       trajectory_cls: type[TrajectoryT],
       steps: Sequence[Any] | None,
@@ -1230,9 +1268,11 @@ class TrajectoryMetadata(pydantic.BaseModel):
   ) -> TrajectoryT:
     """Constructs `trajectory_cls` from this metadata, steps, and subagents.
 
-    Verifies that `trajectory_cls` is a subclass of `type(self)` before
-    instantiation so passing an incompatible trajectory class raises
-    `TypeError`.
+    Subclasses that override `create_trajectory` (for example to upcast base
+    ATIF steps into their own `Step` subclasses first) call this to build their
+    paired `Trajectory` subclass. Verifies that `trajectory_cls` is a subclass
+    of `type(self)` before instantiation so passing an incompatible trajectory
+    class raises `TypeError`.
 
     Args:
       trajectory_cls: Concrete Trajectory class to build.
@@ -1311,7 +1351,7 @@ class TrajectoryMetadata(pydantic.BaseModel):
     When called on a `TrajectoryMetadata` subclass that does not override
     this method, automatically resolves or synthesizes the paired `Trajectory`
     subclass. Subclasses with custom step upcasting should override this
-    method (see `TunixTrajectoryMetadata.create_trajectory`).
+    method and build their paired class via `create_paired_trajectory`.
 
     Args:
       steps: Sequence of step instances, or None.
@@ -1321,7 +1361,7 @@ class TrajectoryMetadata(pydantic.BaseModel):
       The constructed trajectory instance.
     """
     trajectory_cls = self._get_or_create_paired_trajectory_cls()
-    return self._create_paired_trajectory(
+    return self.create_paired_trajectory(
         trajectory_cls, steps, subagent_trajectories
     )
 
@@ -1333,8 +1373,9 @@ class Trajectory(TrajectoryMetadata, Generic[StepT]):
   """Root trajectory object containing the interaction history."""
 
   # First step_id in a well-formed trajectory; step_ids must be sequential
-  # from here.
-  _STEP_ID_START: ClassVar[int] = 1
+  # from here. Subclasses that number steps from 0 override this and project
+  # to the 1-indexed base ATIF form with `Step.to_atif_step(step_id_offset=1)`.
+  STEP_ID_START: ClassVar[int] = 1
 
   steps: list[StepT] = pydantic.Field(
       default_factory=list,
@@ -1348,13 +1389,13 @@ class Trajectory(TrajectoryMetadata, Generic[StepT]):
   @pydantic.field_validator("steps")
   @classmethod
   def validate_step_ids(cls, steps: list[StepT]) -> list[StepT]:
-    """Validate that step_ids are sequential from `_STEP_ID_START`."""
+    """Validate that step_ids are sequential from `STEP_ID_START`."""
     steps.sort(key=lambda step: step.step_id)
-    for expected_step_id, step in enumerate(steps, start=cls._STEP_ID_START):
+    for expected_step_id, step in enumerate(steps, start=cls.STEP_ID_START):
       if step.step_id != expected_step_id:
         raise ValueError(
             f"Expected step_id {expected_step_id} (sequential from"
-            f" {cls._STEP_ID_START}), got {step.step_id}"
+            f" {cls.STEP_ID_START}), got {step.step_id}"
         )
     return steps
 
@@ -1420,7 +1461,7 @@ class Trajectory(TrajectoryMetadata, Generic[StepT]):
     Returns:
       The newly created and appended step.
     """
-    step_id = len(self.steps) + self._STEP_ID_START
+    step_id = len(self.steps) + self.STEP_ID_START
     new_step = Step(
         step_id=step_id,
         timestamp=timestamp or datetime.datetime.now(datetime.timezone.utc),
@@ -1455,399 +1496,3 @@ class Trajectory(TrajectoryMetadata, Generic[StepT]):
 
 
 TrajectoryT = TypeVar("TrajectoryT", bound=Trajectory[Any])
-
-
-@dataclasses.dataclass
-class TrajectoryError:
-  """Structured error payload returned over streams or futures when generation fails."""
-
-  trajectory_id: str
-  prompt_id: str
-  error_message: str
-  error_type: str = "RuntimeError"
-  metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
-
-
-# ==============================================================================
-# --- Tunix RL Extensions ---
-# ==============================================================================
-
-TUNIX_EXTENSIONS_KEY: Final[str] = "_tunix_extensions"
-
-
-class TunixAgentStep(Step):
-  """A single turn/interaction agent step with Tunix RL extensions."""
-
-  model_config = pydantic.ConfigDict(
-      arbitrary_types_allowed=True,
-      extra="forbid",
-  )
-
-  EXTENSIONS_KEY: ClassVar[str] = TUNIX_EXTENSIONS_KEY
-
-  assistant_tokens: IntArray = pydantic.Field(
-      default=None,
-      description="Token IDs generated by the assistant for this step.",
-  )
-  assistant_masks: IntArray = pydantic.Field(
-      default=None,
-      description="Masks for assistant tokens.",
-  )
-  logprobs: FloatArray = pydantic.Field(
-      default=None,
-      description="Log probabilities for assistant tokens.",
-  )
-  policy_version: int | None = pydantic.Field(
-      default=None,
-      description="Policy/weight version used to generate this step.",
-  )
-  prefill_routed_experts: Int3DArray = pydantic.Field(
-      default=None,
-      description=(
-          "MoE routed expert IDs returned by this step's model call, shape"
-          " (T, L, K), covering sequence positions [prefill_start,"
-          " prefill_start + T). The last sampled token of a turn (plus any"
-          " chat-parser suffix tokens appended to assistant_tokens) is only"
-          " routed by the next turn's prefill, so rows are: turn 0 = prompt +"
-          " this turn's routed assistant prefix; turn t > 0 = previous turn's"
-          " unrouted assistant tail + previous env tokens + this turn's routed"
-          " assistant prefix. Written once and never rewritten."
-      ),
-  )
-  prefill_start: int | None = pydantic.Field(
-      default=None,
-      description=(
-          "Position of the first `prefill_routed_experts` row in the unpadded"
-          " prompt + conversation token sequence."
-      ),
-  )
-  prefill_num_context: int | None = pydantic.Field(
-      default=None,
-      description=(
-          "Number of leading `prefill_routed_experts` rows that cover tokens"
-          " before this step's generation (turn 0: the prompt; turn t > 0:"
-          " the previous assistant tail + previous env tokens)."
-      ),
-  )
-
-  @pydantic.model_validator(mode="after")
-  def validate_agent_source(self) -> TunixAgentStep:
-    """Validate source and prefill routing invariants for TunixAgentStep."""
-    if self.source != Source.AGENT:
-      raise ValueError(
-          "TunixAgentStep is only applicable when source is 'agent', but source"
-          f" is '{self.source}'"
-      )
-    prefill_fields = (
-        self.prefill_routed_experts,
-        self.prefill_start,
-        self.prefill_num_context,
-    )
-    if any(x is not None for x in prefill_fields) and not all(
-        x is not None for x in prefill_fields
-    ):
-      raise ValueError(
-          "prefill_routed_experts, prefill_start, and prefill_num_context must"
-          " be either all None or all set"
-      )
-    if self.prefill_routed_experts is not None:
-      assert self.prefill_start is not None
-      assert self.prefill_num_context is not None
-      if self.prefill_start < 0:
-        raise ValueError(
-            f"prefill_start must be >= 0, got {self.prefill_start}"
-        )
-      if not (
-          0 <= self.prefill_num_context <= len(self.prefill_routed_experts)
-      ):
-        raise ValueError(
-            "prefill_num_context must be in"
-            f" [0, {len(self.prefill_routed_experts)}], got"
-            f" {self.prefill_num_context}"
-        )
-    return self
-
-  @pydantic.model_validator(mode="after")
-  def validate_assistant_tokens_match_logprobs(self) -> TunixAgentStep:
-    """Validate that `assistant_tokens` and `logprobs` have equal lengths."""
-    if (
-        self.assistant_tokens is not None
-        and self.logprobs is not None
-        and len(self.assistant_tokens) != len(self.logprobs)
-    ):
-      raise ValueError(
-          f"Length of assistant_tokens ({len(self.assistant_tokens)}) must"
-          f" match length of logprobs ({len(self.logprobs)})."
-      )
-    return self
-
-  def to_atif_step(self, step_id_offset: int = 1) -> Step:
-    """Converts this 0-indexed Tunix step to a 1-indexed base ATIF Step."""
-    return super().to_atif_step(step_id_offset=step_id_offset)
-
-  @classmethod
-  def from_atif_step(
-      cls, step: Step, step_id_offset: int = 1
-  ) -> TunixAgentStep:
-    """Rehydrates a 1-indexed ATIF Step into a 0-indexed TunixAgentStep."""
-    return _unpack_step_from_atif(step, cls, step_id_offset=step_id_offset)
-
-
-class TunixEnvStep(Step):
-  """A single turn/interaction environment step with Tunix RL extensions."""
-
-  model_config = pydantic.ConfigDict(
-      arbitrary_types_allowed=True,
-      extra="forbid",
-  )
-
-  EXTENSIONS_KEY: ClassVar[str] = TUNIX_EXTENSIONS_KEY
-
-  reward: float | None = pydantic.Field(
-      default=None,
-      description="Immediate reward signal from the environment.",
-  )
-  done: bool | None = pydantic.Field(
-      default=None,
-      description="Terminal state flag indicating if the episode ended.",
-  )
-  env_tokens: IntArray = pydantic.Field(
-      default=None,
-      description="Token IDs generated by the environment for this step.",
-  )
-  env_masks: IntArray = pydantic.Field(
-      default=None,
-      description="Masks for environment tokens.",
-  )
-
-  @pydantic.model_validator(mode="after")
-  def validate_env_source(self) -> TunixEnvStep:
-    """Validate that source is 'system' or 'user' for TunixEnvStep."""
-    if self.source not in (Source.SYSTEM, Source.USER):
-      raise ValueError(
-          "TunixEnvStep is only applicable when source is 'system' or 'user',"
-          f" but source is '{self.source}'"
-      )
-    return self
-
-  def to_atif_step(self, step_id_offset: int = 1) -> Step:
-    """Converts this 0-indexed Tunix step to a 1-indexed base ATIF Step."""
-    return super().to_atif_step(step_id_offset=step_id_offset)
-
-  @classmethod
-  def from_atif_step(cls, step: Step, step_id_offset: int = 1) -> TunixEnvStep:
-    """Rehydrates a 1-indexed ATIF Step into a 0-indexed TunixEnvStep."""
-    return _unpack_step_from_atif(step, cls, step_id_offset=step_id_offset)
-
-
-def _upcast_atif_step(step: Step) -> TunixAgentStep | TunixEnvStep:
-  """Rehydrates a 1-indexed ATIF Step into the Tunix subclass for its source.
-
-  Args:
-    step: A Tunix step (returned as-is) or a 1-indexed base ATIF step.
-
-  Returns:
-    The step as a `TunixAgentStep` or `TunixEnvStep`.
-
-  Raises:
-    ValueError: If `step.source` has no matching Tunix step subclass.
-  """
-  if isinstance(step, (TunixAgentStep, TunixEnvStep)):
-    return step
-  match step.source:
-    case Source.AGENT:
-      return TunixAgentStep.from_atif_step(step)
-    case Source.USER | Source.SYSTEM:
-      return TunixEnvStep.from_atif_step(step)
-    case _:
-      raise ValueError(f"Unsupported step source: {step.source}")
-
-
-class TunixTrajectoryMetadata(TrajectoryMetadata):
-  """Tunix-specific trajectory metadata extending base ATIF TrajectoryMetadata."""
-
-  EXTENSIONS_KEY: ClassVar[str] = TUNIX_EXTENSIONS_KEY
-
-  prompt_id: str | None = pydantic.Field(
-      default=None,
-      description="Identifier for the initial prompt/task.",
-  )
-  group_index: int = pydantic.Field(
-      default=0,
-      description="Sample index within group for rollouts.",
-  )
-  target_policy_versions: list[int] | None = pydantic.Field(
-      default=None,
-      description="List of policy versions for each step in the trajectory.",
-  )
-  status: str | None = pydantic.Field(
-      default=None,
-      description=(
-          "Trajectory status as an `agent_types.TrajectoryStatus` name (e.g."
-          ' "RUNNING", "SUCCEEDED", "FAILED"), or None if not stated.'
-      ),
-  )
-  total_reward: float | None = pydantic.Field(
-      default=None,
-      description="Total cumulative reward.",
-  )
-  gamma: float | None = pydantic.Field(
-      default=None,
-      description="Discount factor for Monte Carlo return calculation.",
-  )
-  masked_out: bool | None = pydantic.Field(
-      default=None,
-      description=(
-          "True if the overlong filter zeroed this trajectory's training"
-          " masks; None until the episode is post-processed."
-      ),
-  )
-  hyperparams: MetadataDict = pydantic.Field(
-      default=None,
-      description="Hyperparameters / generation kwargs.",
-  )
-  env_time: MetadataDict = pydantic.Field(
-      default=None,
-      description="Timing information for environment operations.",
-  )
-  reward_time: MetadataDict = pydantic.Field(
-      default=None,
-      description="Timing information for reward operations.",
-  )
-
-  def create_trajectory(
-      self,
-      steps: Sequence[Step] | None = None,
-      subagent_trajectories: Sequence[Trajectory] | None = None,
-  ) -> TunixTrajectory:
-    """Creates a TunixTrajectory, rehydrating 1-indexed ATIF inputs.
-
-    Args:
-      steps: Tunix steps (kept as-is) or 1-indexed ATIF steps (rehydrated into
-        the Tunix subclass for their source), or None.
-      subagent_trajectories: Embedded Tunix subagent trajectories (kept as-is)
-        or 1-indexed ATIF trajectories (rehydrated recursively), or None.
-
-    Returns:
-      The constructed TunixTrajectory.
-    """
-    if steps is not None:
-      steps = [_upcast_atif_step(step) for step in steps]
-    if subagent_trajectories is not None:
-      subagent_trajectories = [
-          TunixTrajectory.from_atif_trajectory(subagent_trajectory)
-          for subagent_trajectory in subagent_trajectories
-      ]
-    return self._create_paired_trajectory(
-        TunixTrajectory, steps, subagent_trajectories
-    )
-
-
-class TunixTrajectory(
-    TunixTrajectoryMetadata,
-    Trajectory[TunixAgentStep | TunixEnvStep],
-):
-  """Tunix-specific trajectory object containing the interaction history."""
-
-  _STEP_ID_START: ClassVar[int] = 0
-
-  subagent_trajectories: list[TunixTrajectory] | None = pydantic.Field(
-      default=None,
-      description="Array of embedded subagent trajectories.",
-  )
-
-  def add_step(
-      self,
-      source: Source,
-      message: str,
-      *,
-      timestamp: datetime.datetime | None = None,
-      reasoning_content: str | None = None,
-      tool_calls: list[ToolCall] | None = None,
-      observation: Observation | None = None,
-      metrics: Metrics | None = None,
-      model_name: str | None = None,
-      reasoning_effort: str | float | None = None,
-      is_copied_context: bool | None = None,
-      llm_call_count: int | None = None,
-      reward: float | None = None,
-      done: bool | None = None,
-      assistant_tokens: list[int] | np.ndarray | None = None,
-      assistant_masks: list[int] | np.ndarray | None = None,
-      env_tokens: list[int] | np.ndarray | None = None,
-      env_masks: list[int] | np.ndarray | None = None,
-      logprobs: list[float] | np.ndarray | None = None,
-      policy_version: int | None = None,
-      prefill_routed_experts: list[list[list[int]]] | np.ndarray | None = None,
-      prefill_start: int | None = None,
-      prefill_num_context: int | None = None,
-      extra: dict[str, Any] | None = None,
-  ) -> TunixAgentStep | TunixEnvStep:
-    """Helper to create and append a step, automatically assigning step_id."""
-    step_id = len(self.steps) + self._STEP_ID_START
-    ts = timestamp or datetime.datetime.now(datetime.timezone.utc)
-    if source == Source.AGENT:
-      new_step = TunixAgentStep(
-          step_id=step_id,
-          timestamp=ts,
-          source=source,
-          message=message,
-          reasoning_content=reasoning_content,
-          tool_calls=tool_calls,
-          observation=observation,
-          metrics=metrics,
-          model_name=model_name,
-          reasoning_effort=reasoning_effort,
-          is_copied_context=is_copied_context,
-          llm_call_count=llm_call_count,
-          assistant_tokens=assistant_tokens,
-          assistant_masks=assistant_masks,
-          logprobs=logprobs,
-          policy_version=policy_version,
-          prefill_routed_experts=prefill_routed_experts,
-          prefill_start=prefill_start,
-          prefill_num_context=prefill_num_context,
-          extra=extra,
-      )
-    else:
-      if (
-          prefill_routed_experts is not None
-          or prefill_start is not None
-          or prefill_num_context is not None
-      ):
-        raise ValueError(
-            "prefill_routed_experts, prefill_start, and prefill_num_context"
-            f" are only valid when source is 'agent', got '{source}'"
-        )
-      new_step = TunixEnvStep(
-          step_id=step_id,
-          timestamp=ts,
-          source=source,
-          message=message,
-          observation=observation,
-          reward=reward,
-          done=done,
-          env_tokens=env_tokens,
-          env_masks=env_masks,
-          extra=extra,
-      )
-    self.steps.append(new_step)
-    return new_step
-
-  def get_metadata(self) -> TunixTrajectoryMetadata:
-    """Returns trajectory metadata (excluding steps and sub-trajectories)."""
-    data = self.model_dump(exclude={"steps", "subagent_trajectories"})
-    return TunixTrajectoryMetadata(**data)
-
-  @classmethod
-  def from_atif_trajectory(cls, atif_trajectory: Trajectory) -> TunixTrajectory:
-    """Rehydrates a 1-indexed ATIF Trajectory to a 0-indexed TunixTrajectory."""
-    if isinstance(atif_trajectory, cls):
-      return atif_trajectory
-
-    return TunixTrajectoryMetadata.from_atif_metadata(
-        atif_trajectory
-    ).create_trajectory(
-        steps=atif_trajectory.steps,
-        subagent_trajectories=atif_trajectory.subagent_trajectories,
-    )

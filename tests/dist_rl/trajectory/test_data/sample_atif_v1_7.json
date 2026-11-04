@@ -13,7 +13,7 @@
       }
     ],
     "extra": {
-      "framework": "tunix"
+      "framework": "example"
     }
   },
   "steps": [

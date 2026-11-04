@@ -30,6 +30,7 @@ from tunix.dist_rl.rollout import manager as manager_lib
 from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.dist_rl.trajectory import store as trajectory_store_lib
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
+from tunix.dist_rl.trajectory import tunix_trajectory
 from tunix.dist_rl.worker import abstract_worker
 from tunix.rl.rollout import base_rollout
 
@@ -61,7 +62,7 @@ class RolloutConfig(base_rollout.RolloutConfig):
 
 
 TrajectoryOrError = Union[
-    trajectory_lib.Trajectory, trajectory_lib.TrajectoryError
+    trajectory_lib.Trajectory, tunix_trajectory.TrajectoryError
 ]
 
 WorkerState = datatypes.WorkerState
@@ -317,7 +318,7 @@ class RolloutWorker(abstract_worker.Worker):
       prompt_tokens: np.ndarray | None = None,
   ) -> datatypes.RolloutResponse:
     """Converts internal Trajectory or TrajectoryError to wire-safe RolloutResponse."""
-    if isinstance(item, trajectory_lib.TrajectoryError):
+    if isinstance(item, tunix_trajectory.TrajectoryError):
       metadata = dict(item.metadata or {})
       metadata["prompt_id"] = item.prompt_id
       self._stamp_worker_lineage(metadata)
