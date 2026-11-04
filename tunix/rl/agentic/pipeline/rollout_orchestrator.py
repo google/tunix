@@ -160,8 +160,10 @@ class RolloutOrchestrator:
     )
 
     try:
-      # Parallel execution for the group
-      self._rollout_sync_lock.acquire_rollout()
+      # Parallel execution for the group. Must not block the event loop: a
+      # pending weight sync waits for the in-flight episodes, which need the
+      # loop to finish.
+      await self._rollout_sync_lock.acquire_rollout_async()
       try:
         episode_count = await self._run_and_queue_one_episode(
             agent=agent,

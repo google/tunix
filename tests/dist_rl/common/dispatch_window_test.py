@@ -264,6 +264,56 @@ class DispatchWindowTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_max_in_flight_groups_caps_window_and_rejects_non_positive(self):
+    async def _run():
+      step = 0
+      # full_batch_size=16, max_in_flight_groups=24 (1.5 batches, not 2).
+      window = dispatch_window.DispatchWindow(
+          max_staleness=1,
+          next_batch_fn=lambda: step,
+          full_batch_size=16,
+          max_in_flight_groups=24,
+      )
+      self.assertEqual(window.window_capacity, 24)
+      admitted: list[int] = []
+
+      async def _dispatch():
+        for idx in range(45):
+          await window.admit(idx)
+          admitted.append(idx)
+
+      task = asyncio.create_task(_dispatch())
+      await asyncio.sleep(0.01)
+      self.assertEqual(admitted, list(range(24)))
+
+      # A filtered group replenishes exactly one prompt.
+      window.on_group_filtered([_FakeItem("p0")])
+      await asyncio.sleep(0.01)
+      self.assertEqual(admitted, list(range(25)))
+
+      # A training step consumes 16 groups and admits 16 more.
+      step = 1
+      window.release()
+      await asyncio.sleep(0.01)
+      self.assertEqual(admitted, list(range(41)))
+
+      step = 2
+      window.release()
+      await asyncio.wait_for(task, timeout=1.0)
+      self.assertEqual(admitted, list(range(45)))
+
+    asyncio.run(_run())
+    self.assertEqual(
+        dispatch_window.DispatchWindow(
+            max_staleness=1, next_batch_fn=lambda: 0, full_batch_size=16
+        ).window_capacity,
+        32,
+    )
+    with self.assertRaisesRegex(ValueError, "max_in_flight_groups"):
+      dispatch_window.DispatchWindow(
+          max_staleness=1, next_batch_fn=lambda: 0, max_in_flight_groups=0
+      )
+
 
 if __name__ == "__main__":
   absltest.main()

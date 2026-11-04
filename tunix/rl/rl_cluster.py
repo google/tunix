@@ -14,6 +14,7 @@
 
 """Client facing abstraction for interacting with RL training engine."""
 
+import bisect
 import collections
 import contextlib
 import copy
@@ -24,6 +25,7 @@ import gc
 import itertools
 import operator
 import os
+import threading
 from typing import Any, Callable, Mapping, Sequence, cast
 
 from absl import logging
@@ -184,6 +186,9 @@ class RLEngine:
     )
     self._buffered_train_metrics: list[MetricsBuffer] = []
     self._buffered_eval_metrics: list[MetricsBuffer] = []
+    self._last_logged_steps: dict[Mode, int] = {}
+    # The trainer thread and the async rollout producer both buffer metrics.
+    self._metrics_lock = threading.Lock()
     self._external_metrics_logger = None
 
     self._init_engine()
@@ -652,7 +657,11 @@ class RLEngine:
 
   def close(self):
     """Closes engine components and flushes buffered metrics and profiler traces."""
-    for m in self._buffered_train_metrics + self._buffered_eval_metrics:
+    with self._metrics_lock:
+      pending = self._buffered_train_metrics + self._buffered_eval_metrics
+      self._buffered_train_metrics.clear()
+      self._buffered_eval_metrics.clear()
+    for m in pending:
       self._log_metrics(m)
     self.actor_trainer.close()
     if getattr(self, "critic_trainer", None):
@@ -730,86 +739,83 @@ class RLEngine:
         metric value and an optional aggregation function.
       mode: The mode of the workload, either TRAIN or EVAL.
     """
-    if mode == Mode.TRAIN:
-      buffered_metrics = self._buffered_train_metrics
-    else:
-      buffered_metrics = self._buffered_eval_metrics
-
-    if not buffered_metrics:
-      buffered_metrics.append(MetricsBuffer(self.global_steps, mode=str(mode)))
-
-    # Global steps are incremented, log the previous metrics.
-    if self._buffered_train_metrics[0].global_steps != self.global_steps:
-      self._buffered_train_metrics.append(
-          MetricsBuffer(self.global_steps, mode=str(mode))
-      )
-      for m in [self._buffered_train_metrics.pop(0)] + (
-          [self._buffered_eval_metrics.pop(0)]
-          if self._buffered_eval_metrics
-          else []
-      ):
-        self._log_metrics(m)
-
-    cur_metrics = buffered_metrics[-1]
-    for metric_name, (value, op) in metrics.items():
-      if metric_name not in cur_metrics.metrics:
-        cur_metrics.metrics[metric_name] = (
-            [value],
-            op,
-        )
-      else:
-        cur_metrics.metrics[metric_name][0].append(value)
+    self.buffer_metrics_async(metrics, mode=mode, step=None)
 
   def buffer_metrics_async(
       self,
       metrics: MetricsT,
       mode: Mode = Mode.TRAIN,
-      step: int = 0,
+      step: int | None = None,
   ) -> None:
     """Buffers rl metrics to be logged for async training.
 
-    Actual logging will happen when global steps are incremented.
+    The async producer runs ahead of the trainer and interleaves metrics of
+    several global steps, so each metric goes to the buffer of its own step
+    (created on first use) instead of to a new buffer at every switch of step,
+    which would split a step and log part of it late. A step's buffer is
+    logged once the global step has moved past it. Safe to call from several
+    threads.
 
     Args:
       metrics: A dictionary mapping metric names to a tuple containing the
         metric value and an optional aggregation function.
       mode: The mode of the workload, either TRAIN or EVAL.
-      step: The step number for the metrics. Only used in TRAIN mode.
+      step: The global step the metrics belong to. Defaults to the current
+        global step.
     """
+    with self._metrics_lock:
+      cur_metrics = self._async_metrics_buffer_locked(mode, step)
+      for metric_name, (value, op) in metrics.items():
+        if metric_name not in cur_metrics.metrics:
+          cur_metrics.metrics[metric_name] = (
+              [value],
+              op,
+          )
+        else:
+          cur_metrics.metrics[metric_name][0].append(value)
+      # Global steps are incremented, log the previous metrics.
+      last_logged = vars(self).setdefault("_last_logged_steps", {})
+      finished: list[MetricsBuffer] = []
+      for buf_mode, buffered in (
+          (Mode.TRAIN, self._buffered_train_metrics),
+          (Mode.EVAL, self._buffered_eval_metrics),
+      ):
+        while buffered and buffered[0].global_steps < self.global_steps:
+          finished.append(buffered.pop(0))
+          last_logged[buf_mode] = finished[-1].global_steps
+      for m in finished:
+        self._log_metrics(m)
+
+  def _async_metrics_buffer_locked(
+      self, mode: Mode, step: int | None
+  ) -> MetricsBuffer:
+    """Returns the buffer of `step`, creating it in step order if needed.
+
+    Args:
+      mode: The mode of the workload, either TRAIN or EVAL.
+      step: The global step the metrics belong to, or `None` for the current
+        global step.
+
+    Returns:
+      The metrics buffer of the resolved step.
+    """
+    if step is None:
+      step = self.global_steps
+    last_logged = vars(self).setdefault("_last_logged_steps", {}).get(mode)
+    if last_logged is not None and step <= last_logged:
+      step = max(self.global_steps, last_logged + 1)
     if mode == Mode.TRAIN:
       buffered_metrics = self._buffered_train_metrics
     else:
       buffered_metrics = self._buffered_eval_metrics
-
-    if not buffered_metrics:
-      buffered_metrics.append(MetricsBuffer(self.global_steps, mode=str(mode)))
-    else:
-      if step != buffered_metrics[-1].global_steps:
-        buffered_metrics.append(MetricsBuffer(step, mode=str(mode)))
-
-    cur_metrics = buffered_metrics[-1]
-    for metric_name, (value, op) in metrics.items():
-      if metric_name not in cur_metrics.metrics:
-        cur_metrics.metrics[metric_name] = (
-            [value],
-            op,
-        )
-      else:
-        cur_metrics.metrics[metric_name][0].append(value)
-
-    # Global steps are incremented, log the previous metrics.
-    if (
-        self._buffered_train_metrics
-        and self._buffered_train_metrics[0].global_steps < self.global_steps
-    ):
-      for m in [self._buffered_train_metrics.pop(0)]:
-        self._log_metrics(m)
-    if (
-        self._buffered_eval_metrics
-        and self._buffered_eval_metrics[0].global_steps < self.global_steps
-    ):
-      for m in [self._buffered_eval_metrics.pop(0)]:
-        self._log_metrics(m)
+    for metrics_buffer in buffered_metrics:
+      if metrics_buffer.global_steps == step:
+        return metrics_buffer
+    metrics_buffer = MetricsBuffer(step, mode=str(mode))
+    bisect.insort(
+        buffered_metrics, metrics_buffer, key=lambda b: b.global_steps
+    )
+    return metrics_buffer
 
   def train(
       self,

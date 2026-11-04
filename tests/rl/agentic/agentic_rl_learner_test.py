@@ -240,6 +240,30 @@ class AgenticRLLearnerTest(parameterized.TestCase):
         learner.train(train_dataset)
         spy_consumer_gen.assert_called_once_with(mock.ANY, 4)
 
+  @parameterized.named_parameters(
+      dict(testcase_name="unknown_filter", group_filters=("top_k",)),
+      dict(testcase_name="zero_guard", max_consecutive_filtered_groups=0),
+      dict(testcase_name="negative_guard", max_consecutive_filtered_groups=-2),
+      dict(testcase_name="zero_in_flight", max_in_flight_groups=0),
+  )
+  def test_config_rejects_invalid_dynamic_sampling_options(self, **options):
+    with self.assertRaises(ValueError):
+      agentic_rl_learner.AgenticRLConfig(**options)
+
+  def test_learner_without_group_filter_support_rejects_group_filters(self):
+    rl_engine = mock.Mock()
+    rl_engine.cluster_config.rollout_engine = "generic"
+    rl_engine.cluster_config.rollout_config = base_rollout.RolloutConfig(
+        max_tokens_to_generate=10, return_logprobs=True
+    )
+    algo_config = agentic_rl_learner.AgenticRLConfig(
+        max_response_length=10, group_filters=("zero_variance",)
+    )
+    with self.assertRaisesRegex(ValueError, "does not support group_filters"):
+      DummyLearner(
+          rl_engine=rl_engine, reward_fns=mock.Mock(), algo_config=algo_config
+      )
+
 
 class ExactTokenContinuityConfigTest(absltest.TestCase):
 

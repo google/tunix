@@ -131,7 +131,9 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
           "loss_algo should be either grpo or gspo-token. Received: "
           f"{self.loss_algo}"
       )
+    # Bypass super().__post_init__(): AlgorithmConfig rejects "agentic_grpo".
     self._validate_sampler_is_and_rs_options()
+    self._validate_dynamic_sampling_options()
 
 
 TGrpoConfig = TypeVar("TGrpoConfig", bound=GRPOConfig)
@@ -151,6 +153,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
   References:
     - https://arxiv.org/abs/2402.03300
   """
+
+  _SUPPORTS_GROUP_FILTERS = True
 
   @compat.alias_init_param("rl_cluster", "rl_engine")
   def __init__(
@@ -664,6 +668,65 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         else len(trajectories)
     )
 
+    # Collect perf tags
+    traj = trajectories[0].traj
+    group_id = traj.get("group_id")
+    if group_id is None:
+      original_input = traj.get("original_input", {})
+      group_id = original_input.get("group_id")
+
+    perf_tags = {
+        perf_constants.STEP: expected_step,
+    }
+    if group_id is not None:
+      perf_tags[perf_constants.GROUP_ID] = group_id
+
+    # Rewards & advantages
+    # Prepare arguments for reward computation by forwarding all training inputs
+    # except for prompts, which is passed explicitly.
+    original_inputs_list = [
+        item.traj["original_input"] for item in trajectories
+    ]
+    original_inputs = rl_utils.merge_micro_batches(original_inputs_list)
+
+    prompt_token_len = len(prompt_tokens_list[0])
+    self.rl_engine.buffer_metrics_async(
+        {
+            "generation/prompts/mean_length": (prompt_token_len, np.mean),
+            "generation/prompts/max_length": (prompt_token_len, np.max),
+            "generation/prompts/min_length": (prompt_token_len, np.min),
+        },
+        mode=mode,
+        step=expected_step,
+    )
+
+    reward_kwargs = {
+        key: value for key, value in original_inputs.items() if key != "prompts"
+    }
+    reward_kwargs["trajectory_rewards"] = trajectory_rewards_list
+    with self.rl_engine.perf_v2.span(
+        perf_constants.ADVANTAGE_COMPUTATION,
+        tags=perf_tags,
+    ):
+      rewards = self._compute_rewards(
+          prompts=original_inputs["prompts"],
+          completions=completion_texts,
+          mode=mode,
+          **reward_kwargs,
+          expected_step=expected_step,
+      )
+
+      advantage_estimator = function_registry.get_advantage_estimator(
+          self.algo_config.advantage_estimator
+      )
+      advantages = advantage_estimator(
+          rewards=rewards, num_generations=self.algo_config.num_generations
+      )
+
+    # Decided before any reference / actor forward pass: a dropped group is not
+    # trained on, so those passes would be wasted.
+    self._check_group_filters(trajectories, advantages, mode)
+
     can_fuse_in_loss = self._can_fuse_agreement_in_loss()
     rollout_per_token_logps = None
     trainer_per_token_logps = None
@@ -721,19 +784,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           " `return_logprobs` in RolloutConfig."
       )
 
-    # Collect perf tags
-    traj = trajectories[0].traj
-    group_id = traj.get("group_id")
-    if group_id is None:
-      original_input = traj.get("original_input", {})
-      group_id = original_input.get("group_id")
-
-    perf_tags = {
-        perf_constants.STEP: expected_step,
-    }
-    if group_id is not None:
-      perf_tags[perf_constants.GROUP_ID] = group_id
-
     if (
         self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
     ) and not is_packed:
@@ -754,51 +804,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     else:
       ref_per_token_logps = None
 
-    # Rewards & advantages
-    # Prepare arguments for reward computation by forwarding all training inputs
-    # except for prompts, which is passed explicitly.
-    original_inputs_list = [
-        item.traj["original_input"] for item in trajectories
-    ]
-    original_inputs = rl_utils.merge_micro_batches(original_inputs_list)
-
-    prompt_token_len = len(prompt_tokens_list[0])
-    self.rl_engine.buffer_metrics_async(
-        {
-            "generation/prompts/mean_length": (prompt_token_len, np.mean),
-            "generation/prompts/max_length": (prompt_token_len, np.max),
-            "generation/prompts/min_length": (prompt_token_len, np.min),
-        },
-        mode=mode,
-        step=expected_step,  # pyrefly: ignore[bad-argument-type]
-    )
-
-    reward_kwargs = {
-        key: value for key, value in original_inputs.items() if key != "prompts"
-    }
-    reward_kwargs["trajectory_rewards"] = trajectory_rewards_list
-    with self.rl_engine.perf_v2.span(
-        perf_constants.ADVANTAGE_COMPUTATION,
-        tags=perf_tags,
-    ):
-      rewards = self._compute_rewards(
-          prompts=original_inputs["prompts"],
-          completions=completion_texts,
-          mode=mode,
-          **reward_kwargs,
-          expected_step=expected_step,
-      )
-
-      advantage_estimator = function_registry.get_advantage_estimator(
-          self.algo_config.advantage_estimator
-      )
-      advantages = advantage_estimator(
-          rewards=rewards, num_generations=self.algo_config.num_generations
-      )
-
     logging.debug("Advantages computed: %s", advantages)
 
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
+    # Weight syncs between the policy that started this group and the one the
+    # trainer holds when the group is scored (0 = on-policy).
+    staleness = float(self.policy_version - policy_versions.min())
 
     # Log completion lengths, rewards and env time.
     agg_completion_mask = completion_mask.sum(axis=-1)
@@ -806,6 +817,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         raw_completion_lengths, dtype=np.int32
     )
     metrics_to_log = {
+        "policy/staleness_steps/mean": (staleness, np.mean),
+        "policy/staleness_steps/max": (staleness, np.max),
         "generation/completions/mean_length": (
             np.mean(agg_completion_mask),
             np.mean,
