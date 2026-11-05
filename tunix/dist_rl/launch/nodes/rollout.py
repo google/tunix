@@ -749,7 +749,9 @@ def _create_inprocess_vllm_sampler(
       data_parallel_size=dp_size,
       return_logprobs=True,
       return_routed_experts=return_routed_experts,
-      init_with_random_weights=bool(vllm["init_with_random_weights"]),
+      init_with_random_weights=(
+          resolve_config.rollout_init_with_random_weights(hp)
+      ),
       hbm_utilization=(
           float(vllm["hbm_utilization"])
           if vllm["hbm_utilization"] is not None

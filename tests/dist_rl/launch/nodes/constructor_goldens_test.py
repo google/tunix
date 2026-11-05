@@ -209,11 +209,13 @@ GOLDEN_CASES: Mapping[str, GoldenCase] = {
         "rollout_engine=vllm",
         "rollout_model_config.mesh.shape=(1,4)",
     )),
-    # MaxText trainer and rollout with profiling and custom MaxText knobs.
+    # MaxText trainer and rollout with profiling and custom MaxText knobs, and
+    # Raiden weight sync (the only source of a MaxText rollout's weights).
     "maxtext": GoldenCase((
         "model_config.model_source=maxtext",
         "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
         "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+        "weight_sync_config.mode=raiden",
         "agentic_grpo_config.beta=0.0",
         "actor_model_config.kwargs.warmup_steps_fraction=0.05",
         "actor_model_config.kwargs.attention=flash",
@@ -246,13 +248,14 @@ GOLDEN_CASES: Mapping[str, GoldenCase] = {
         "vllm_config.max_num_batched_tokens=2048",
         "chat_parser_config.type=auto",
     )),
-    # MaxText `vllm` (`AsyncEngineArgs`) rollout with LoRA, routed experts,
-    # detokenize, and deep-merged `vllm_config.engine_kwargs`.
+    # MaxText `vllm` (`AsyncEngineArgs`) rollout, with Raiden weight sync, LoRA,
+    # routed experts, detokenize, and deep-merged `vllm_config.engine_kwargs`.
     "vllm_engine_kwargs": GoldenCase((
         "rollout_engine=vllm",
         "model_config.model_source=maxtext",
         "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
         "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+        "weight_sync_config.mode=raiden",
         "rollout_model_config.kwargs.attention=vllm_rpa",
         "rollout_model_config.kwargs.float32_gate_logits=true",
         "rollout_model_config.lora_config={'rank': 8, 'alpha': 16.0}",

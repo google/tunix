@@ -180,7 +180,14 @@ vllm_config:
   # (`gpu_memory_utilization` is not set); `inprocess_vllm` uses 0.5.
   hbm_utilization: null
   tpu_backend_type: "jax"
-  init_with_random_weights: true
+  # Start the rollout from random weights instead of loading the checkpoint.
+  # Null means true exactly when `weight_sync_config.mode` is "raiden", whose
+  # bootstrap sync loads the trainer's weights before step 0; otherwise a
+  # non-MaxText rollout loads the checkpoint. An explicit true requires
+  # "raiden"; only `rollout_engine: inprocess_vllm` reads it. A MaxText rollout
+  # (`rollout_model_config.model_source: maxtext`) never loads the checkpoint,
+  # so it always needs "raiden".
+  init_with_random_weights: null
   enable_prefix_caching: false
   # Both vLLM rollout engines always run in server mode, so `false` is
   # rejected.

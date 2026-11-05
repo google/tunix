@@ -232,7 +232,6 @@ class BuildersTest(absltest.TestCase):
     config = orchestrator.build_grpo_config(
         _config(
             "agentic_grpo_config.num_generations=4",
-            "agentic_grpo_config.num_iterations=2",
             "agentic_grpo_config.beta=0.0",
             "agentic_grpo_config.epsilon=0.1",
             "agentic_grpo_config.epsilon_high=0.3",
@@ -248,7 +247,6 @@ class BuildersTest(absltest.TestCase):
         )
     )
     self.assertEqual(config.num_generations, 4)
-    self.assertEqual(config.num_iterations, 2)
     self.assertEqual(config.beta, 0.0)
     self.assertEqual(config.epsilon, 0.1)
     self.assertEqual(config.epsilon_high, 0.3)

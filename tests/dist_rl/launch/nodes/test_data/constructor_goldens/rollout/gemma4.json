@@ -170,7 +170,7 @@
             151643
           ],
           "hbm_utilization": 0.75,
-          "init_with_random_weights": true,
+          "init_with_random_weights": false,
           "lora_config": {
             "max_lora_rank": 8,
             "max_loras": 1

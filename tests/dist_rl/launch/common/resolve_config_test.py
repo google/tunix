@@ -241,6 +241,93 @@ weight_sync_config:
     with self.assertRaisesRegex(ValueError, "num_generations must be > 1"):
       resolve_config.initialize(["agentic_grpo_config.num_generations=1"])
 
+    # The program runs one optimizer pass per rollout batch.
+    with self.assertRaisesRegex(
+        ValueError, "num_iterations must be 1, got 2: StandardRLProgram"
+    ):
+      resolve_config.initialize(["agentic_grpo_config.num_iterations=2"])
+
+  def test_rollout_random_init_defaults_to_raiden_weight_sync(self):
+    hp = resolve_config.initialize([])
+    self.assertIsNone(hp.config["vllm_config"]["init_with_random_weights"])
+    self.assertIs(resolve_config.rollout_init_with_random_weights(hp), False)
+    for mode, init, expected in (
+        # Null: random weights only when Raiden's bootstrap sync replaces them.
+        ("raiden", "null", True),
+        ("none", "null", False),
+        ("fallback", "null", False),
+        # Explicit values are kept; any mode may load the checkpoint.
+        ("raiden", "true", True),
+        ("raiden", "false", False),
+        ("none", "false", False),
+    ):
+      with self.subTest(mode=mode, init=init):
+        hp = resolve_config.initialize([
+            f"weight_sync_config.mode={mode}",
+            f"vllm_config.init_with_random_weights={init}",
+        ])
+        self.assertIs(
+            resolve_config.rollout_init_with_random_weights(hp), expected
+        )
+
+  def test_rollout_random_init_without_raiden_fails_loud(self):
+    for mode in ("none", "fallback"):
+      with self.subTest(mode=mode):
+        with self.assertRaisesRegex(
+            ValueError,
+            f"weight_sync_config.mode='{mode}' never loads the trainer's"
+            " weights.*sample from random weights for the whole run",
+        ):
+          resolve_config.initialize([
+              f"weight_sync_config.mode={mode}",
+              "vllm_config.init_with_random_weights=true",
+          ])
+    # Only the in-process vLLM rollout reads it.
+    for rollout_engine in ("vllm", "vanilla"):
+      with self.subTest(rollout_engine=rollout_engine):
+        resolve_config.initialize([
+            f"rollout_engine={rollout_engine}",
+            "vllm_config.init_with_random_weights=true",
+        ])
+    for init in ("1", "yes_please"):
+      with self.subTest(init=init):
+        with self.assertRaisesRegex(
+            TypeError, "init_with_random_weights must be a bool or null"
+        ):
+          resolve_config.initialize(
+              [f"vllm_config.init_with_random_weights={init}"]
+          )
+
+  def test_maxtext_vllm_rollout_requires_raiden(self):
+    maxtext = [
+        "model_config.model_source=maxtext",
+        "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+        "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+    ]
+    for rollout_engine in ("inprocess_vllm", "vllm"):
+      # vLLM's `MaxTextForCausalLM` never loads the checkpoint itself.
+      for mode in ("none", "fallback"):
+        with self.subTest(rollout_engine=rollout_engine, mode=mode):
+          with self.assertRaisesRegex(
+              ValueError,
+              f"A MaxText {rollout_engine} rollout.* needs"
+              f" weight_sync_config.mode=raiden, got '{mode}'",
+          ):
+            resolve_config.initialize([
+                *maxtext,
+                f"rollout_engine={rollout_engine}",
+                f"weight_sync_config.mode={mode}",
+            ])
+      with self.subTest(rollout_engine=rollout_engine, mode="raiden"):
+        hp = resolve_config.initialize([
+            *maxtext,
+            f"rollout_engine={rollout_engine}",
+            "weight_sync_config.mode=raiden",
+        ])
+        self.assertEqual(
+            hp.config["rollout_model_config"]["model_source"], "maxtext"
+        )
+
   def test_k8s_target_resolves_reference_worker(self):
     # `k8s.sh` rejects the reference worker only for the commands that start
     # nodes, so `stop` and `otel` resolve the default beta (0.04) on k8s too.
@@ -460,19 +547,15 @@ weight_sync_config:
           "actor_model_config.kwargs.maxtext_model_name=qwen3-1.7b",
           "rollout_model_config.kwargs.maxtext_model_name=qwen3-0.6b",
       ])
-    # Without weight sync, the two roles may name different models.
-    hp = resolve_config.initialize([
-        *maxtext,
-        "weight_sync_config.mode=none",
-        "actor_model_config.kwargs.maxtext_model_name=qwen3-1.7b",
-        "rollout_model_config.kwargs.maxtext_model_name=qwen3-0.6b",
-    ])
-    self.assertEqual(
-        hp.config_mapping("rollout_model_config")["kwargs"][
-            "maxtext_model_name"
-        ],
-        "qwen3-0.6b",
-    )
+    # Without weight sync the names may differ, but the MaxText rollout then
+    # never gets real weights.
+    with self.assertRaisesRegex(ValueError, "needs weight_sync_config.mode"):
+      resolve_config.initialize([
+          *maxtext,
+          "weight_sync_config.mode=none",
+          "actor_model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+          "rollout_model_config.kwargs.maxtext_model_name=qwen3-0.6b",
+      ])
     # A null kwargs (how merge mode clears a mapping) fails with context.
     with self.assertRaisesRegex(
         TypeError, "actor_model_config.kwargs must be a mapping"
@@ -486,9 +569,11 @@ weight_sync_config:
               [*maxtext, f"model_config.kwargs.maxtext_model_name={name}"]
           )
     # `local.sh` converts the checkpoint with the exported name.
-    hp = resolve_config.initialize(
-        [*maxtext, "model_config.kwargs.maxtext_model_name=qwen3-1.7b"]
-    )
+    hp = resolve_config.initialize([
+        *maxtext,
+        "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+        "weight_sync_config.mode=raiden",
+    ])
     self.assertIn(
         "export ACTOR_MAXTEXT_MODEL_NAME=qwen3-1.7b\n",
         resolve_config.render_bash_exports(hp),
@@ -503,6 +588,7 @@ weight_sync_config:
         "model_config.model_source=maxtext",
         "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
         "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+        "weight_sync_config.mode=raiden",
     ]
     flags = (
         "dist_training_config.maxtext_extra_flags="

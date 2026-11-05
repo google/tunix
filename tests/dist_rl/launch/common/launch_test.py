@@ -238,6 +238,7 @@ class LaunchScriptsTest(absltest.TestCase):
         "model_config.model_source=maxtext",
         "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
         "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+        "weight_sync_config.mode=raiden",
     ]
     flags = (
         "dist_training_config.maxtext_extra_flags="

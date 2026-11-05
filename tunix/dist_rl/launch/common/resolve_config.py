@@ -302,6 +302,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_maxtext_pairing(hp)
   _validate_maxtext_model_names(hp)
   _validate_maxtext_extra_flags(hp)
+  _validate_rollout_weights(hp)
   if grpo["reward_mode"] == "reward_fn" and not hp.config["reward_functions"]:
     raise ValueError(
         "agentic_grpo_config.reward_mode='reward_fn' needs at least one entry"
@@ -317,6 +318,12 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
     raise ValueError(
         "agentic_grpo_config.num_generations must be > 1 for GRPO, got"
         f" {num_generations}."
+    )
+  if grpo["num_iterations"] != 1:
+    raise ValueError(
+        "agentic_grpo_config.num_iterations must be 1, got"
+        f" {grpo['num_iterations']!r}: StandardRLProgram runs one optimizer"
+        " pass per rollout batch."
     )
   micro_batch = int(rl_train["train_micro_batch_size"])
   if micro_batch <= 0:
@@ -369,6 +376,82 @@ def _validate_maxtext_pairing(hp: cli_config.HyperParameters) -> None:
         " rollout_model_config.model_source must both be 'maxtext' or both"
         f" not; got {actor_source!r} and {rollout_source!r}. Set"
         " model_config.model_source to set both."
+    )
+
+
+def rollout_init_with_random_weights(hp: cli_config.HyperParameters) -> bool:
+  """Returns the effective `vllm_config.init_with_random_weights`.
+
+  True makes the `inprocess_vllm` rollout start from random weights (vLLM's
+  `load_format="dummy"`) instead of loading the checkpoint. Only Raiden weight
+  sync replaces them: its bootstrap sync loads the trainer's weights before
+  step 0. `fallback` moves no weights, and `none` skips the sync.
+
+  Args:
+    hp: Loaded configuration.
+
+  Returns:
+    `vllm_config.init_with_random_weights`, or, when it is null, whether
+    `weight_sync_config.mode` is "raiden".
+
+  Raises:
+    TypeError: If `vllm_config.init_with_random_weights` is not a bool or null.
+  """
+  value = hp.config_mapping("vllm_config")["init_with_random_weights"]
+  if value is None:
+    mode = hp.config_mapping("weight_sync_config")["mode"]
+    return mode == weight_sync.WeightSyncMode.RAIDEN.value
+  if not isinstance(value, bool):
+    raise TypeError(
+        "vllm_config.init_with_random_weights must be a bool or null, got"
+        f" {value!r}."
+    )
+  return value
+
+
+def _validate_rollout_weights(hp: cli_config.HyperParameters) -> None:
+  """Rejects a vLLM rollout that would never get real weights.
+
+  Without Raiden weight sync, the rollout keeps the weights it starts from for
+  the whole run. vLLM's `MaxTextForCausalLM` always starts from random weights:
+  it loads weights only from `maxtext_config.load_parameters_path`, which the
+  rollout does not set (`maxtext_utils.build_vllm_maxtext_additional_config`).
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    TypeError: If `vllm_config.init_with_random_weights` is not a bool or null.
+    ValueError: If `weight_sync_config.mode` is not "raiden" and either a vLLM
+      `rollout_engine` serves `rollout_model_config.model_source: maxtext`, or
+      `rollout_engine` is "inprocess_vllm" with
+      `vllm_config.init_with_random_weights` true.
+  """
+  random_init = rollout_init_with_random_weights(hp)
+  mode = hp.config_mapping("weight_sync_config")["mode"]
+  if mode == weight_sync.WeightSyncMode.RAIDEN.value:
+    return
+  rollout_engine = hp.config["rollout_engine"]
+  rollout_source = hp.config_mapping("rollout_model_config")["model_source"]
+  if rollout_source == "maxtext" and rollout_engine != "vanilla":
+    raise ValueError(
+        f"A MaxText {rollout_engine} rollout"
+        " (rollout_model_config.model_source='maxtext') needs"
+        f" weight_sync_config.mode=raiden, got {mode!r}. vLLM's"
+        " MaxTextForCausalLM loads weights only from"
+        " maxtext_config.load_parameters_path, which the rollout does not set,"
+        " so the rollout would sample from random weights for the whole run."
+        " Use weight_sync_config.mode=raiden with a MaxText trainer"
+        " (model_config.model_source=maxtext sets both roles)."
+    )
+  if random_init and rollout_engine == "inprocess_vllm":
+    raise ValueError(
+        "vllm_config.init_with_random_weights=true starts the inprocess_vllm"
+        f" rollout from random weights, and weight_sync_config.mode={mode!r}"
+        " never loads the trainer's weights into it, so the rollout would"
+        " sample from random weights for the whole run. Set"
+        " vllm_config.init_with_random_weights to false or null to load the"
+        " checkpoint, or use weight_sync_config.mode=raiden."
     )
 
 

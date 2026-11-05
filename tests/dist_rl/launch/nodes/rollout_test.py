@@ -37,10 +37,13 @@ from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.utils import maxtext_utils
 
+# A MaxText rollout gets real weights only from a MaxText trainer over Raiden.
 _MAXTEXT_ROLLOUT_ARGV = (
-    "rollout_model_config.model_source=maxtext",
-    "rollout_model_config.model_name=qwen3-30b-a3b",
-    "rollout_model_config.kwargs.maxtext_model_name=qwen3-30b-a3b",
+    "model_config.model_source=maxtext",
+    "model_config.model_name=qwen3-30b-a3b",
+    "model_config.model_path=/ckpt/qwen3-30b-a3b/0/items",
+    "model_config.kwargs.maxtext_model_name=qwen3-30b-a3b",
+    "weight_sync_config.mode=raiden",
 )
 _ROUTED_EXPERTS_ARGV = (
     *_MAXTEXT_ROLLOUT_ARGV,
@@ -165,10 +168,8 @@ class ModelFamilyTest(absltest.TestCase):
   def test_maxtext_overrides_take_precedence_over_gemma4(self):
     overrides = rollout._vllm_hf_overrides(
         _hp(
+            *_MAXTEXT_ROLLOUT_ARGV,
             "rollout_model_config.model_id=google/gemma-4-E2B-it",
-            "rollout_model_config.model_source=maxtext",
-            "rollout_model_config.model_name=gemma3-4b",
-            "rollout_model_config.kwargs.maxtext_model_name=gemma3-4b",
         )
     )
 
@@ -184,7 +185,7 @@ class ModelFamilyTest(absltest.TestCase):
         rollout._maxtext_model_name(
             _hp(
                 *_MAXTEXT_ROLLOUT_ARGV,
-                "rollout_model_config.kwargs.maxtext_model_name=qwen3-30b",
+                "model_config.kwargs.maxtext_model_name=qwen3-30b",
             )
         ),
         "qwen3-30b",
@@ -564,6 +565,27 @@ class SamplerTest(absltest.TestCase):
 
   def test_inprocess_vllm_server_mode_defaults_on(self):
     self.assertTrue(_inprocess_vllm_config_kwargs()["server_mode"])
+
+  def test_inprocess_vllm_random_init_follows_weight_sync_mode(self):
+    for argv, expected in (
+        # The base config (`weight_sync_config.mode: none`) loads the
+        # checkpoint.
+        ((), False),
+        # Raiden's bootstrap sync loads the trainer's weights before step 0.
+        (("weight_sync_config.mode=raiden",), True),
+        (
+            (
+                "weight_sync_config.mode=raiden",
+                "vllm_config.init_with_random_weights=false",
+            ),
+            False,
+        ),
+    ):
+      with self.subTest(argv=argv):
+        self.assertIs(
+            _inprocess_vllm_config_kwargs(*argv)["init_with_random_weights"],
+            expected,
+        )
 
   def test_vllm_samplers_plumb_float32_logit_flags_when_set(self):
     default_mt_cfg = _vllm_engine_kwargs(*_MAXTEXT_ROLLOUT_ARGV)[

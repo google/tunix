@@ -104,7 +104,7 @@
           "top_k": -1,
           "top_p": 1.0,
           "trajectory_store_config": null,
-          "weight_sync_mode": "WeightSyncMode.NONE"
+          "weight_sync_mode": "WeightSyncMode.RAIDEN"
         }
       }
     },
@@ -194,7 +194,7 @@
           "partial_rollout": false,
           "server_id": "rollout-0",
           "tokenizer": "<tokenizer>",
-          "weight_sync_mode": "WeightSyncMode.NONE"
+          "weight_sync_mode": "WeightSyncMode.RAIDEN"
         }
       }
     },

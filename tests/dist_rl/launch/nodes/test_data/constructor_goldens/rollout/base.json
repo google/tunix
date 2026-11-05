@@ -157,7 +157,7 @@
             151643
           ],
           "hbm_utilization": 0.5,
-          "init_with_random_weights": true,
+          "init_with_random_weights": false,
           "lora_config": null,
           "mapping_config": "<MappingConfig(**tunix.models.qwen3.mapping_vllm_jax.VLLM_JAX_MAPPING)>",
           "mesh": "<tunix.dist_rl.launch.nodes.node_utils.Mesh()>",
