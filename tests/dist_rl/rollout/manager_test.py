@@ -869,20 +869,28 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
 
     class _FakeInnerCollectEngine:
 
-      def __init__(self, *, model_call, **kwargs):
+      def __init__(self, *, model_call, policy_version=0, **kwargs):
         del kwargs
         self._model_call = model_call
+        self.policy_version = policy_version
+        self._policy_versions = []
 
       async def collect(self, mode="Token"):
         del mode
         # Turn 1 under v0
         await self._model_call([{"role": "user", "content": "q1"}])
+        self._policy_versions.append(self.policy_version)
         # Environment step in progress when weight sync begins
         in_env_step.set()
         await release_env_step.wait()
         # Turn 2 must block on collector._unpaused until post_weight_sync
         await self._model_call([{"role": "user", "content": "q2"}])
-        return {"conversation_tokens": [1, 2, 3, 4], "status": "DONE"}
+        self._policy_versions.append(self.policy_version)
+        return {
+            "conversation_tokens": [1, 2, 3, 4],
+            "status": "DONE",
+            "policy_versions": self._policy_versions,
+        }
 
     manager = manager_lib.RolloutManager(
         config=rollout_worker.RolloutConfig(partial_rollout=True),
@@ -932,8 +940,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
 
     self.assertTrue(turn2_called_sampler.is_set())
     self.assertEqual(turn_versions_seen, [0, 1])
-    self.assertEqual(traj.policy_version, 0)
-    self.assertEqual(traj.metadata["policy_versions"], [0, 1])
+    self.assertEqual(traj.policy_versions, [0, 1])
 
   async def test_fr1_synthetic_straggler_ab_benchmark(self):
 

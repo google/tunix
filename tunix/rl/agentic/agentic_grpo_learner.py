@@ -519,10 +519,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       old_logprobs_list.append(
           np.asarray(old_logprobs) if old_logprobs is not None else None
       )
-      policy_version = item.traj.get("policy_version")
-      if policy_version is None:
-        raise ValueError("policy_version is missing from trajectory task.")
-      policy_versions_list.append(policy_version)
+      policy_versions = item.traj.get("policy_versions")
+      if not policy_versions:
+        raise ValueError("policy_versions is missing from trajectory task.")
+      policy_versions_list.append(policy_versions[-1])
       trajectory_rewards_list.append(item.traj.get("trajectory_reward"))
 
     # Log trajectory.

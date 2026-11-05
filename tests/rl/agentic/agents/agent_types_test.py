@@ -32,7 +32,7 @@ class TrajectoryItemTest(absltest.TestCase):
         "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
         "reward": 1.5,
         "status": agent_types.TrajectoryStatus.SUCCEEDED,
-        "policy_version": 2,
+        "policy_versions": [2],
     }
     item = agent_types.TrajectoryItem(
         prompt_id="prompt_42",
@@ -50,7 +50,7 @@ class TrajectoryItemTest(absltest.TestCase):
     self.assertEqual(restored.start_step, 0)
     self.assertEqual(restored.reward, 1.5)
     self.assertEqual(restored.status, agent_types.TrajectoryStatus.SUCCEEDED)
-    self.assertEqual(restored.policy_version, 2)
+    self.assertEqual(restored.policy_versions, [2])
     self.assertEqual(restored.user_tag, "test_tag")
     self.assertEqual(restored.metadata, {"user_tag": "test_tag"})
     np.testing.assert_array_equal(restored.prompt_tokens, item.prompt_tokens)
@@ -66,7 +66,7 @@ class TrajectoryItemTest(absltest.TestCase):
     traj = {
         "prompt_tokens": np.array([10, 20], dtype=np.int32),
         "reward": 2.0,
-        "policy_version": 3,
+        "policy_versions": [1, 3],
     }
     item = agent_types.TrajectoryItem(
         prompt_id="cloud_prompt",
@@ -82,7 +82,7 @@ class TrajectoryItemTest(absltest.TestCase):
     self.assertEqual(restored.prompt_id, "cloud_prompt")
     self.assertEqual(restored.group_index, 2)
     self.assertEqual(restored.reward, 2.0)
-    self.assertEqual(restored.policy_version, 3)
+    self.assertEqual(restored.policy_versions, [1, 3])
     self.assertEqual(restored.meta_key, "meta_val")
     np.testing.assert_array_equal(restored.prompt_tokens, [10, 20])
 

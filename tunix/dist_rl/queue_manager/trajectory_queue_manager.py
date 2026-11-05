@@ -57,13 +57,14 @@ class GroupOrder(enum.Enum):
       simultaneously buffered groups are served in oldest-valid-first
       (Earliest-Deadline-First) policy-version order with FIFO tie-breaking to
       reduce the risk of older valid groups aging past `max_staleness` behind
-      newer arrivals. Stale raw groups and groups whose cross-turn/cross-item
+      newer arrivals. Raw groups whose valid items fall outside the policy
+      window `[current - max_staleness, current]` or whose cross-turn/cross-item
       version span exceeds `max_version_span` are dropped at `raw_q` via
       `TrajectoryQueueManager.create` (enforcing group-wide span `max - min <=
-      max_version_span` and group completion staleness `max >= current -
-      max_staleness` across valid items when `max_version_span` is set, or
-      per-item `item_policy_version(item) >= current - max_staleness` when
-      `max_version_span` is `None`).
+      max_version_span` and group completion window `max in [current -
+      max_staleness, current]` across valid items when `max_version_span` is
+      set, or per-item `item_policy_version(item) in [current - max_staleness,
+      current]` when `max_version_span` is `None`).
     PROMPT_ARRIVAL: Partitions scored groups by dataset prompt batch (`batch_idx
       = prompt_idx // full_batch_size`) via `BatchOrderedGroupQueue` and serves
       only groups belonging to the current batch cursor (`next_batch_idx`),
@@ -82,45 +83,66 @@ class GroupOrder(enum.Enum):
 
 
 def has_policy_version(item: TrajectoryItem) -> bool:
-  """Returns whether `item.metadata` carries an explicit policy version."""
-  if (
-      "policy_versions" in item.metadata
-      and item.metadata["policy_versions"] is not None
-  ):
-    return True
-  return (
-      "policy_version" in item.metadata
-      and item.metadata["policy_version"] is not None
+  """Returns whether `item.traj` carries a non-empty `policy_versions` list."""
+  return isinstance(item.traj, dict) and bool(item.traj.get("policy_versions"))
+
+
+def item_policy_versions(item: TrajectoryItem) -> Sequence[int]:
+  """Returns the non-empty policy version sequence from `item.traj`."""
+  versions = (
+      item.traj.get("policy_versions") if isinstance(item.traj, dict) else None
   )
-
-
-def _item_policy_versions(item: TrajectoryItem) -> Sequence[int]:
-  """Returns the non-empty policy version sequence from `item.metadata`."""
-  if (
-      "policy_versions" in item.metadata
-      and item.metadata["policy_versions"] is not None
-  ):
-    versions = item.metadata["policy_versions"]
-    if not versions:
-      raise ValueError("item.metadata['policy_versions'] must not be empty.")
-    return [int(v) for v in versions]
-  if (
-      "policy_version" in item.metadata
-      and item.metadata["policy_version"] is not None
-  ):
-    return (int(item.metadata["policy_version"]),)
-  raise ValueError("TrajectoryItem is missing 'policy_version'.")
+  if not versions:
+    raise ValueError(
+        f"Valid TrajectoryItem {item.traj_id} (prompt_id="
+        f"{item.prompt_id!r}, group_index={item.group_index}) is"
+        " missing policy_versions."
+    )
+  return [int(version) for version in versions]
 
 
 def item_policy_version(item: TrajectoryItem) -> int:
   """Returns the latest policy version that generated tokens for `item`."""
-  return max(_item_policy_versions(item))
+  return item_policy_versions(item)[-1]
 
 
 def item_version_span(item: TrajectoryItem) -> int:
   """Returns the policy version span (`max - min`) across turns for `item`."""
-  versions = _item_policy_versions(item)
+  versions = item_policy_versions(item)
   return max(versions) - min(versions)
+
+
+def _is_group_within_version_window(
+    valid_items: Sequence[TrajectoryItem],
+    *,
+    max_staleness: int,
+    policy_version_fn: Callable[[], int] | None,
+    span_limit: int | None,
+) -> bool:
+  """Returns whether `valid_items` satisfy monotonicity, span, and staleness bounds."""
+  item_versions = [item_policy_versions(item) for item in valid_items]
+  if any(
+      a > b
+      for versions in item_versions
+      for a, b in itertools.pairwise(versions)
+  ):
+    return False
+  all_versions = list(itertools.chain.from_iterable(item_versions))
+  if (
+      span_limit is not None
+      and max(all_versions) - min(all_versions) > span_limit
+  ):
+    return False
+  if policy_version_fn is None:
+    return True
+  current_version = policy_version_fn()
+  min_version = current_version - max_staleness
+  checked_versions = (
+      (max(all_versions),)
+      if span_limit is not None
+      else (versions[-1] for versions in item_versions)
+  )
+  return all(min_version <= v <= current_version for v in checked_versions)
 
 
 class TrajectoryQueueManager(
@@ -173,36 +195,54 @@ class TrajectoryQueueManager(
   ) -> "TrajectoryQueueManager":
     """Creates a grouped trajectory queue with optional staleness and span filtering.
 
-    Invalid/tombstoned items (`not item.is_valid`) are excluded from version
-    checks when at least one valid sibling exists in the group. When
+    The window is checked once, when a group completes in `put`, and only
+    against the group's valid items: invalid items (error tombstones,
+    overlong-masked rollouts) contribute no gradient, so their version does
+    not matter and is never substituted with `0`. A group with no valid item
+    has nothing to judge and passes through; it trains with zero advantage. A
+    valid item without a `policy_version` is a producer bug and makes `put`
+    raise `ValueError`.
+
+    Each valid item's per-turn version sequence must be monotonically
+    non-decreasing (`v_0 <= v_1 <= ... <= v_k`); any trajectory whose version
+    regressed across turns (e.g. after a checkpoint rollback) is dropped. When
     `max_version_span` is set (partial rollout), filtering enforces group-wide
     version span (`max(all_versions) - min(all_versions) <= max_version_span`)
-    and group completion staleness (`max(all_versions) >=
-    current_policy_version() - max_staleness`), allowing early-finishing
-    rollouts in `num_generations > 1` groups as long as the group-wide span is
-    bounded. When `max_version_span` is `None`, filtering enforces per-item
-    staleness (`item_policy_version(item) >= current_policy_version() -
-    max_staleness`) across active items.
+    and group completion window (`max(all_versions) in
+    [current_policy_version() - max_staleness, current_policy_version()]`),
+    allowing early-finishing rollouts in `num_generations > 1` groups as long
+    as the group-wide span is bounded. When `max_version_span` is `None`,
+    filtering enforces per-item two-sided window (`item_policy_version(item) in
+    [current_policy_version() - max_staleness, current_policy_version()]`)
+    across valid items.
 
     Args:
-      num_generations: Number of rollouts expected per prompt group.
-      max_staleness: Maximum allowed policy-version lag when `> 0`.
-      current_policy_version: Callable returning the latest policy version.
-      filter_fn: Optional additional group filter run after version checks.
-      on_group_filtered: Optional callback invoked when a group is dropped.
+      num_generations: Number of trajectories per ready group.
+      max_staleness: How many policy versions behind `current_policy_version()`
+        a group's rollouts may be when the group completes. `0` admits only
+        rollouts sampled from the current version.
+      current_policy_version: Returns the trainer's current policy version. When
+        given, the staleness window is enforced (including for `max_staleness ==
+        0`); when `None`, no staleness filtering happens.
+      filter_fn: Optional extra filter applied after the staleness check.
+      on_group_filtered: Called with each group the filters drop.
       max_version_span: Optional maximum allowed policy-version span (`max -
-        min`) across active items/turns in a group.
+        min`) across valid items/turns in a group.
 
     Returns:
-      Configured `TrajectoryQueueManager` instance.
+      The configured `TrajectoryQueueManager`.
+
+    Raises:
+      ValueError: If `max_staleness` or `max_version_span` is negative.
     """
-    assert max_staleness >= 0, "max_staleness must be non-negative."
+    if max_staleness < 0:
+      raise ValueError("max_staleness must be non-negative.")
     if max_version_span is not None and max_version_span < 0:
       raise ValueError(
           f"max_version_span must be non-negative, got {max_version_span}."
       )
     combined_filter: FilterFn[TrajectoryItem] | None = filter_fn
-    policy_version_fn = current_policy_version if max_staleness > 0 else None
+    policy_version_fn = current_policy_version
     span_limit = max_version_span
     if policy_version_fn is not None or span_limit is not None:
 
@@ -210,31 +250,13 @@ class TrajectoryQueueManager(
           group: list[TrajectoryItem],
       ) -> tuple[list[TrajectoryItem], list[TrajectoryItem]]:
         valid_items = [item for item in group if item.is_valid]
-        active_items = (
-            valid_items
-            if valid_items
-            else [item for item in group if has_policy_version(item)]
-        )
-        if active_items:
-          if span_limit is not None:
-            all_versions = list(
-                itertools.chain.from_iterable(
-                    _item_policy_versions(item) for item in active_items
-                )
-            )
-            if max(all_versions) - min(all_versions) > span_limit:
-              return [], list(group)
-            if policy_version_fn is not None:
-              min_allowed = policy_version_fn() - max_staleness
-              if max(all_versions) < min_allowed:
-                return [], list(group)
-          elif policy_version_fn is not None:
-            min_allowed = policy_version_fn() - max_staleness
-            if any(
-                item_policy_version(item) < min_allowed
-                for item in active_items
-            ):
-              return [], list(group)
+        if valid_items and not _is_group_within_version_window(
+            valid_items,
+            max_staleness=max_staleness,
+            policy_version_fn=policy_version_fn,
+            span_limit=span_limit,
+        ):
+          return [], list(group)
         if filter_fn is not None:
           res = filter_fn(group)
           if isinstance(res, tuple):

@@ -147,7 +147,6 @@ class TrajectoryCollectorEngine:
     self._unpaused = asyncio.Event()
     self._unpaused.set()
     self._episode_cache_salt: str | None = None
-    self._turn_policy_versions: list[int] = []
     self._inner_engine: Optional[rl_collect_engine.TrajectoryCollectEngine] = (
         None
     )
@@ -194,7 +193,6 @@ class TrajectoryCollectorEngine:
   async def run_episode(self) -> agent_types.TrajectoryItem:
     """Executes multi-turn agentic rollout episode and returns TrajectoryItem."""
     self._episode_cache_salt = None
-    self._turn_policy_versions = []
 
     # Note: model_call is an async coroutine callback invoked directly by
     # TrajectoryCollectEngine on the asyncio event loop without blocking
@@ -241,11 +239,7 @@ class TrajectoryCollectorEngine:
           if self._policy_version_fn is not None
           else req_policy_version
       )
-      self._turn_policy_versions.append(turn_policy_version)
-      if (
-          self._inner_engine is not None
-          and turn_policy_version != req_policy_version
-      ):
+      if self._inner_engine is not None:
         self._inner_engine.policy_version = turn_policy_version
 
       cache_salt = generation_kwargs.pop("cache_salt", None)
@@ -331,9 +325,6 @@ class TrajectoryCollectorEngine:
     self._inner_engine = inner_engine
     rl_traj = await inner_engine.collect(mode="Token")
     if isinstance(rl_traj, dict):
-      if self._turn_policy_versions:
-        rl_traj["policy_version"] = int(self._turn_policy_versions[0])
-        rl_traj["policy_versions"] = list(self._turn_policy_versions)
       routed_experts = rl_traj.get("routed_experts")
       if routed_experts is not None:
         if (
@@ -460,18 +451,6 @@ class TrajectoryCollectorEngine:
     metadata["prompt_id"] = self.request.prompt_id
     metadata["group_index"] = self.request.group_index
     metadata["status"] = rl_traj.get("status", "")
-    policy_version = getattr(
-        self.request,
-        "target_policy_version",
-        rl_traj.get("policy_version", 0),
-    )
-    if self._turn_policy_versions:
-      metadata["policy_version"] = int(self._turn_policy_versions[0])
-      metadata["policy_versions"] = list(self._turn_policy_versions)
-    else:
-      initial_version = int(policy_version or 0)
-      metadata["policy_version"] = initial_version
-      metadata["policy_versions"] = [initial_version]
 
     if metadata.pop("record_episode_summary", False):
       steps = self.agent.trajectory.steps

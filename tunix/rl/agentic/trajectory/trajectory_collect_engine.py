@@ -280,6 +280,28 @@ class TrajectoryCollectEngine:
           dtype=np.int16,
       )
 
+  def _resolve_policy_version(self) -> Optional[int]:
+    """Resolves policy version from `self.policy_version` or `env.task`.
+
+    Returns:
+      The resolved policy version integer, or None if neither source defines it.
+    """
+    if self.policy_version is not None:
+      return self.policy_version
+    task = getattr(self.env, "task", None)
+    if isinstance(task, dict):
+      return task.get("policy_version")
+    return None
+
+  def _collect_policy_versions(self) -> Optional[List[int]]:
+    """Returns the ordered per-turn policy versions across trajectory steps."""
+    step_versions = [
+        step.info["policy_version"]
+        for step in self.agent.trajectory.steps
+        if step.info and step.info.get("policy_version") is not None
+    ]
+    return step_versions or None
+
   def _sync_trajectory_metadata(self, *, include_timings: bool = True) -> None:
     """Syncs metadata status and agent trajectory timing/reward in place."""
     if self.trajectory_store is None or self.metadata is None:
@@ -288,7 +310,7 @@ class TrajectoryCollectEngine:
       converter_lib.update_trajectory_metadata(
           metadata=self.metadata,
           agent=self.agent,
-          policy_version=self.policy_version,
+          policy_version=self._resolve_policy_version(),
           gamma=self.gamma,
           env_time=self.env_time if include_timings else None,
           reward_time=self.reward_time if include_timings else None,
@@ -369,6 +391,9 @@ class TrajectoryCollectEngine:
       step: Optional[agent_types.Step],
   ) -> None:
     """Writes an agent turn step (2*i + 1) live to trajectory_store."""
+    policy_version = self._resolve_policy_version()
+    if step is not None and policy_version is not None:
+      step.info["policy_version"] = policy_version
     if self.trajectory_store is None or self.metadata is None or step is None:
       return
     try:
@@ -383,7 +408,7 @@ class TrajectoryCollectEngine:
       agent_step = converter_lib.create_agent_step(
           step,
           tunix_step_id=self.agent.trajectory.step_idx,
-          policy_version=self.policy_version,
+          policy_version=policy_version,
           prefill_routed_experts=prefill_rows,
           prefill_start=prefill_start,
           prefill_num_context=prefill_num_context,
@@ -655,7 +680,7 @@ class TrajectoryCollectEngine:
               np.concatenate(logprobs, axis=0) if logprobs else None
           ),
           "routed_experts": final_routed_experts,
-          "policy_version": self.env.task.get("policy_version"),
+          "policy_versions": self._collect_policy_versions(),
           "original_input": self.agent.trajectory.task,
           "group_id": self.env.extra_kwargs.get("group_id"),
       }
@@ -834,6 +859,9 @@ class TrajectoryCollectEngine:
     enriched_info = dict(info or {})
     enriched_info["max_steps"] = self.max_steps
     enriched_info["cur_tokens"] = self._response_token_count
+    policy_version = self._resolve_policy_version()
+    if policy_version is not None:
+      enriched_info["policy_version"] = policy_version
     return enriched_info
 
   def _get_perf_tags(self) -> Dict[str, Any]:
@@ -846,10 +874,9 @@ class TrajectoryCollectEngine:
       pair_index = self.env.extra_kwargs.get("pair_index")
       if pair_index is not None:
         tags[perf_constants.PAIR_INDEX] = pair_index
-    if hasattr(self.env, "task"):
-      policy_version = self.env.task.get("policy_version")
-      if policy_version is not None:
-        tags[perf_constants.STEP] = policy_version
+    policy_version = self._resolve_policy_version()
+    if policy_version is not None:
+      tags[perf_constants.STEP] = policy_version
     return tags
 
   def _assistant_suffix_len(self) -> int:

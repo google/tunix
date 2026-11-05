@@ -149,6 +149,7 @@ def _create_rollout_response(
       group_index=group_index,
       start_step=0,
       traj={
+          "policy_versions": [policy_version],
           "trajectory_reward": reward,
           "status": datatypes.TrajectoryStatus.SUCCEEDED,
           "conversation_text": [
@@ -159,7 +160,6 @@ def _create_rollout_response(
       prompt_tokens=np.array([1, 2], dtype=np.int32),
       completion_tokens=np.array([3, 4], dtype=np.int32),
       action_mask=np.array([1, 1], dtype=np.float32),
-      policy_version=policy_version,
       metadata={"prompt_id": prompt_id, "group_index": group_index},
   )
   return datatypes.RolloutResponse(
@@ -174,6 +174,7 @@ def _make_trajectory_group(
     prompt_id: str = "prompt_0",
     num_generations: int = 2,
     reward: float = 1.0,
+    policy_version: int = 0,
 ) -> list[datatypes.TrajectoryItem]:
   return [
       distributed_rl_engine._response_to_trajectory_item(
@@ -181,6 +182,7 @@ def _make_trajectory_group(
               f"req_{prompt_id}_{idx}",
               prompt_id,
               group_index=idx,
+              policy_version=policy_version,
               reward=reward,
           )
       )
@@ -235,6 +237,9 @@ def _scored_traj(reward: float = 1.0) -> dict[str, Any]:
   return {
       "trajectory_reward": reward,
       "status": datatypes.TrajectoryStatus.SUCCEEDED,
+      # `critique_stage` preserves the rollout's sampled versions on the
+      # trajectory it hands over; valid items always have `policy_versions`.
+      "policy_versions": [0],
   }
 
 
@@ -576,20 +581,41 @@ class RLProgramTest(absltest.TestCase):
   def test_policy_version_incremented_after_weight_sync(self):
     async def _run():
       self.mock_engine.sync_weights = mock.AsyncMock(return_value=None)
-      _set_mock_poll_batches(
-          self.mock_engine,
-          _make_trajectory_group("prompt_0"),
-          _make_trajectory_group("prompt_1"),
-      )
-      program = self._create_program(
+      pending_batches: list[list[datatypes.TrajectoryItem]] = []
+      dispatched_versions: list[int] = []
+
+      async def _mock_dispatch(prompts, *, policy_version: int = 0, **kwargs):
+        del kwargs
+        dispatched_versions.append(policy_version)
+        prompt_id = prompts[0]["prompt_id"]
+        pending_batches.append(
+            _make_trajectory_group(prompt_id, policy_version=policy_version)
+        )
+
+      async def _mock_poll(timeout_s=0.1):
+        del timeout_s
+        if pending_batches:
+          return pending_batches.pop(0)
+        await asyncio.sleep(0.005)
+        return []
+
+      self.mock_engine.dispatch_rollouts.side_effect = _mock_dispatch
+      self.mock_engine.poll_rollouts.side_effect = _mock_poll
+      program = rl_program.StandardRLProgram(
           dataset=["prompt_data_0", "prompt_data_1"],
           max_steps=2,
+          algo_config=self.algo_config,
+          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
+          assembler=self.assembler,
+          batch_config=self.batch_config,
           sync_weights=True,
+          max_staleness=0,
       )
 
       self.assertEqual(program.policy_version, 0)
       await program.run_async(self.mock_engine)
 
+      self.assertEqual(dispatched_versions, [0, 1])
       self.assertEqual(self.mock_engine.sync_weights.call_count, 2)
       self.assertEqual(program.policy_version, 2)
       self.assertIsNotNone(program.last_step_result)
@@ -3385,6 +3411,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=idx,
             start_step=0,
             traj={
+                "policy_versions": [0],
                 "trajectory_reward": reward,
                 "status": datatypes.TrajectoryStatus.SUCCEEDED,
                 "prompt_tokens": np.array([3, 4], dtype=np.int32),
@@ -3398,7 +3425,6 @@ class RLProgramTest(absltest.TestCase):
             prompt_tokens=np.array([3, 4], dtype=np.int32),
             completion_tokens=np.array(comp_tokens, dtype=np.int32),
             action_mask=np.ones(3, dtype=np.float32),
-            policy_version=0,
         )
         for idx, (reward, comp_tokens) in enumerate(
             [(1.0, [5, 6, 7]), (0.0, [8, 9, 10])]
@@ -4416,6 +4442,70 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_staleness_metrics_ignore_invalid_zero_turn_tombstones(self):
+    async def _run():
+      resp_v4 = _create_rollout_response(
+          "req_valid", "prompt_0", group_index=0, policy_version=4
+      )
+      valid_item = distributed_rl_engine._response_to_trajectory_item(resp_v4)
+      # The real 0-turn shape: a worker-level error response with no payload,
+      # whose metadata never recorded a sampled policy version.
+      failed_tombstone = distributed_rl_engine._response_to_trajectory_item(
+          datatypes.RolloutResponse(
+              request_id="req_failed",
+              status="ERROR",
+              error=datatypes.ErrorInfo(
+                  error_type="TrajectoryError", message="env reset failed"
+              ),
+              metadata={"prompt_id": "prompt_0", "group_index": 1},
+          )
+      )
+      self.assertFalse(failed_tombstone.is_valid)
+      self.assertFalse(
+          rl_program.trajectory_queue_manager.has_policy_version(
+              failed_tombstone
+          )
+      )
+      _set_mock_poll_batches(
+          self.mock_engine,
+          [valid_item, failed_tombstone],
+          [],
+      )
+      self.algo_config.reward_mode = "env"
+      program = self._create_program(
+          dataset=["prompt_0"], reward_fns=[], max_staleness=2
+      )
+      program.policy_version = 5
+      mock_traj_logger = mock.MagicMock()
+      program.trajectory_logger = mock_traj_logger
+
+      await program.run_async(self.mock_engine)
+
+      logger = program.metrics_logger
+      # Consumed policy_version is 5; valid sibling is v4 (staleness=1.0).
+      # 0-turn FAILED tombstone has policy_version=None and must not inject 5.
+      self.assertAlmostEqual(
+          logger.get_metric("rollout", "staleness_mean", "train"), 1.0
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("rollout", "staleness_max", "train"), 1.0
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("rollout", "staleness_min", "train"), 1.0
+      )
+      # The scored-group re-wrap must carry the version through unchanged:
+      # 4 for the valid rollout and None (not 0) for the tombstone.
+      rows = [
+          call.args[0]
+          for call in mock_traj_logger.log_item_async.call_args_list
+      ]
+      self.assertEqual(
+          {row["group_index"]: row["rollout_policy_version"] for row in rows},
+          {0: 4, 1: None},
+      )
+
+    asyncio.run(_run())
+
   def test_token_mask_and_loss_mask_fallback(self):
     async def _run():
       payload_0 = datatypes.RLTrainerPayload(
@@ -4439,6 +4529,7 @@ class RLProgramTest(absltest.TestCase):
           prompt_tokens=None,
           completion_tokens=None,
           traj={
+              "policy_versions": [0],
               "trajectory_reward": 1.0,
               "conversation_text": [
                   {"role": "user", "content": "question"},
@@ -4453,6 +4544,7 @@ class RLProgramTest(absltest.TestCase):
           prompt_tokens=None,
           completion_tokens=None,
           traj={
+              "policy_versions": [0],
               "trajectory_reward": 1.0,
               "conversation_text": [
                   {"role": "user", "content": "question"},
@@ -4511,6 +4603,7 @@ class RLProgramTest(absltest.TestCase):
           prompt_tokens=None,
           completion_tokens=None,
           traj={
+              "policy_versions": [0],
               "trajectory_reward": 1.0,
               "conversation_text": [
                   {"role": "user", "content": "question"},
@@ -4525,6 +4618,7 @@ class RLProgramTest(absltest.TestCase):
           prompt_tokens=None,
           completion_tokens=None,
           traj={
+              "policy_versions": [0],
               "trajectory_reward": 1.0,
               "conversation_text": [
                   {"role": "user", "content": "question"},
@@ -4566,6 +4660,7 @@ class RLProgramTest(absltest.TestCase):
           prompt_tokens=np.array([1, 2], dtype=np.int32),
           completion_tokens=np.array([3, 4], dtype=np.int32),
           traj={
+              "policy_versions": [0],
               "trajectory_reward": 1.0,
               "status": None,
               "conversation_text": [
@@ -4581,6 +4676,7 @@ class RLProgramTest(absltest.TestCase):
           prompt_tokens=np.array([1, 2], dtype=np.int32),
           completion_tokens=np.array([3, 4], dtype=np.int32),
           traj={
+              "policy_versions": [0],
               "trajectory_reward": 1.0,
               "status": None,
               "conversation_text": [
@@ -4666,6 +4762,7 @@ class RLProgramTest(absltest.TestCase):
               prompt_tokens=np.array([1, 2], dtype=np.int32),
               completion_tokens=np.array([3, 4], dtype=np.int32),
               traj={
+                  "policy_versions": [0],
                   "trajectory_reward": 1.0,
                   "conversation_text": _conversation(num_turns),
               },
@@ -4937,6 +5034,7 @@ class RLProgramTest(absltest.TestCase):
               prompt_id="prompt_0",
               start_step=0,
               traj={
+                  "policy_versions": [0],
                   "trajectory_reward": 1.0,
                   # The collector reports the status by name.
                   "status": status_name,
@@ -5020,14 +5118,14 @@ class RLProgramTest(absltest.TestCase):
             "p0",
             group_index=0,
             reward=float(1.5 + 2.5 * (1.0 - np.exp(-step_idx / 6.0))),
-            policy_version=max(0, step_idx - 1),
+            policy_version=0,
         )
         r2 = _create_rollout_response(
             f"req_{step_idx}_1",
             "p0",
             group_index=1,
             reward=float(1.5 + 2.5 * (1.0 - np.exp(-step_idx / 6.0))),
-            policy_version=max(0, step_idx - 1),
+            policy_version=0,
         )
         batches.append([
             distributed_rl_engine._response_to_trajectory_item(r1),
@@ -6129,6 +6227,64 @@ class RLProgramTest(absltest.TestCase):
         logger.get_metric("sampler_trainer", "logp_diff_max", "train"), 0.9
     )
 
+  def test_collect_and_log_step_metrics_rejects_valid_item_without_version(
+      self,
+  ):
+    """Valid rollout without policy_version is a producer bug, not staleness 0.
+
+    This is the only place that enforces it in PROMPT_ARRIVAL mode, whose
+    `raw_q` has no staleness filter.
+    """
+    program = self._create_program()
+    unversioned = datatypes.TrajectoryItem(
+        prompt_id="p0",
+        group_index=0,
+        traj={
+            "status": datatypes.TrajectoryStatus.SUCCEEDED,
+            "trajectory_reward": 1.0,
+        },
+    )
+    self.assertTrue(unversioned.is_valid)
+    self.assertFalse(
+        rl_program.trajectory_queue_manager.has_policy_version(unversioned)
+    )
+
+    with self.assertRaisesRegex(ValueError, "is missing policy_version"):
+      program._collect_and_log_step_metrics(
+          all_step_items=[unversioned],
+          step_rewards=[1.0],
+          num_rollouts=1,
+          num_microbatches=0,
+          padding_stats=[],
+          packing_time_sec=0.0,
+          step_time_sec=0.0,
+          consumed_policy_version=0,
+          log_step=0,
+      )
+
+    # The same item as an invalid tombstone is skipped, not rejected.
+    tombstone = datatypes.TrajectoryItem(
+        prompt_id="p0",
+        group_index=1,
+        traj={"status": datatypes.TrajectoryStatus.FAILED},
+    )
+    program._collect_and_log_step_metrics(
+        all_step_items=[tombstone],
+        step_rewards=[0.0],
+        num_rollouts=1,
+        num_microbatches=0,
+        padding_stats=[],
+        packing_time_sec=0.0,
+        step_time_sec=0.0,
+        consumed_policy_version=0,
+        log_step=0,
+    )
+    self.assertFalse(
+        program.metrics_logger.metric_exists(
+            "rollout", "staleness_mean", "train"
+        )
+    )
+
   def _scoring_item(self, group_index, *, masked=False, failed=False):
     """A Token-mode trajectory as the collector hands it to critique."""
     return datatypes.TrajectoryItem(
@@ -6136,6 +6292,7 @@ class RLProgramTest(absltest.TestCase):
         group_index=group_index,
         start_step=0,
         traj={
+            "policy_versions": [0],
             "status": (
                 datatypes.TrajectoryStatus.FAILED
                 if failed
@@ -6235,6 +6392,7 @@ class RLProgramTest(absltest.TestCase):
           prompt_id="p0",
           group_index=0,
           traj={
+              "policy_versions": [0],
               "status": datatypes.TrajectoryStatus.SUCCEEDED,
               "trajectory_reward": 2.5,
               "conversation_masks": np.ones(2, dtype=np.float32),
@@ -6280,6 +6438,7 @@ class RLProgramTest(absltest.TestCase):
           prompt_id="p0",
           group_index=0,
           traj={
+              "policy_versions": [0],
               "trajectory_reward": 0.0,
               "conversation_text": [
                   {"role": "user", "content": "question"},
@@ -6638,6 +6797,7 @@ class RLProgramTest(absltest.TestCase):
     # A MagicMock here would make the reward assertion pass for the wrong
     # reason, since float(MagicMock()) happens to return 1.0.
     traj = {
+        "policy_versions": [2],
         "status": datatypes.TrajectoryStatus.SUCCEEDED,
         "trajectory_reward": 1.0,
         "conversation_text": [
@@ -6649,7 +6809,6 @@ class RLProgramTest(absltest.TestCase):
         traj_id="traj_1",
         prompt_id="prompt_1",
         group_index=0,
-        policy_version=2,
         prompt_tokens=[1, 2],
         completion_tokens=[3, 4],
         metadata={
@@ -6692,11 +6851,9 @@ class RLProgramTest(absltest.TestCase):
         prompt_tokens=[1, 2],
         completion_tokens=[3, 4],
         metadata={
-            "policy_version": 1,
-            "policy_versions": [1, 4],
             "question": "What is 2+2?",
         },
-        traj={**traj, "policy_version": 1},
+        traj={**traj, "policy_versions": [1, 4]},
     )
     program._log_consumed_trajectories(
         [multi_turn_item],
@@ -6811,6 +6968,7 @@ class RLProgramTest(absltest.TestCase):
               prompt_id="p_math",
               group_index=0,
               traj={
+                  "policy_versions": [0],
                   "status": datatypes.TrajectoryStatus.SUCCEEDED,
                   "trajectory_reward": 0.0,
                   "conversation_masks": np.ones(2, dtype=np.float32),
@@ -6845,6 +7003,7 @@ class RLProgramTest(absltest.TestCase):
               prompt_id="p_math",
               group_index=1,
               traj={
+                  "policy_versions": [0],
                   "status": datatypes.TrajectoryStatus.SUCCEEDED,
                   "trajectory_reward": 0.0,
                   "conversation_masks": np.ones(2, dtype=np.float32),
@@ -6966,6 +7125,7 @@ class RLProgramTest(absltest.TestCase):
               prompt_id="p_env",
               group_index=idx,
               traj={
+                  "policy_versions": [0],
                   "status": datatypes.TrajectoryStatus.SUCCEEDED,
                   "trajectory_reward": 0.0,
                   "conversation_masks": np.ones(2, dtype=np.float32),
@@ -7536,6 +7696,7 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
           group_index=0,
           start_step=0,
           traj={
+              "policy_versions": [0],
               "trajectory_reward": 1.0,
               "routed_experts": routed,
               "conversation_text": [
@@ -7654,8 +7815,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
         prompt_id=prompt_id,
         group_index=group_index,
         start_step=0,
-        policy_version=policy_version,
-        traj=_scored_traj(reward),
+        traj={**_scored_traj(reward), "policy_versions": [policy_version]},
         metadata={"batch_idx": batch_idx},
     )
     return rl_program.ScoredGroup(
@@ -7840,11 +8000,11 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
                 prompt_id=pid,
                 group_index=g,
                 start_step=program.step,
-                policy_version=v,
                 prompt_tokens=np.array([1, 2], dtype=np.int32),
                 completion_tokens=np.array([3, 4], dtype=np.int32),
                 action_mask=np.array([1, 1], dtype=np.int32),
                 traj={
+                    "policy_versions": [v],
                     "status": datatypes.TrajectoryStatus.SUCCEEDED,
                     "trajectory_reward": 0.0,
                     "prompt_tokens": [1, 2],
@@ -7908,7 +8068,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
             step,
             step,
             [str(it.prompt_id) for it in items],
-            [it.policy_version for it in items],
+            [it.policy_versions[-1] for it in items],
         ))
         return orig_commit(step, groups=groups)
 
@@ -8212,89 +8372,6 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_off_policy_handles_none_traj_policy_version_with_metadata_fallback(
-      self,
-  ):
-    """Verifies off-policy runs when TrajectoryCollectEngine leaves traj['policy_version']=None."""
-
-    async def _run():
-      self.algo_config.num_generations = 4
-
-      def _create_payloads(group, rewards=None, **kwargs):
-        del rewards, kwargs
-        mock_payload = datatypes.RLTrainerPayload(
-            prompt_ids=np.array([1, 2], dtype=np.int32),
-            prompt_mask=np.array([1, 1], dtype=np.float32),
-            completion_ids=np.array([3, 4], dtype=np.int32),
-            completion_mask=np.array([1, 1], dtype=np.float32),
-            advantages=np.array([1.0, 1.0], dtype=np.float32),
-        )
-        return [mock_payload for _ in group]
-
-      self.mock_create_trainer_payloads.side_effect = _create_payloads
-      poll_queue: asyncio.Queue[list[datatypes.TrajectoryItem]] = (
-          asyncio.Queue()
-      )
-
-      async def _dispatch(prompts, **kwargs):
-        p = prompts[0]
-        pid = p["prompt_id"]
-        pv = kwargs.get("policy_version", 0)
-        batch = []
-        for g_idx in range(4):
-          resp = _create_rollout_response(
-              f"req_{pid}_{g_idx}",
-              pid,
-              group_index=g_idx,
-              policy_version=pv,
-              reward=1.0,
-          )
-          item = distributed_rl_engine._response_to_trajectory_item(resp)
-          # Simulate TrajectoryCollectEngine when env.task has no policy_version
-          # (e.g. FrozenLakeEnv) and collector sets metadata['policy_version'].
-          item.traj["policy_version"] = None
-          item.metadata["policy_version"] = pv
-          if isinstance(p, dict) and isinstance(p.get("metadata"), dict):
-            item.metadata.update(p["metadata"])
-          batch.append(item)
-        await poll_queue.put(batch)
-        return [f"req_{pid}_{g}" for g in range(4)]
-
-      async def _poll(timeout_s=0.1):
-        del timeout_s
-        try:
-          return await asyncio.wait_for(poll_queue.get(), timeout=0.02)
-        except asyncio.TimeoutError:
-          return []
-
-      self.mock_engine.dispatch_rollouts = mock.AsyncMock(side_effect=_dispatch)
-      self.mock_engine.poll_rollouts = mock.AsyncMock(side_effect=_poll)
-
-      program = rl_program.StandardRLProgram(
-          dataset=[f"q_{i}" for i in range(4)],
-          max_steps=1,
-          algo_config=self.algo_config,
-          batch_config=self.batch_config,
-          batch_size=2,
-          max_staleness=1,
-          reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
-          assembler=batch_assembly.PaddedBatchAssembler(
-              batch_size=4,
-              max_prompt_length=4,
-              max_response_length=4,
-              pad_id=0,
-              num_generations=4,
-              mini_batch_size=2,
-          ),
-          sync_weights=True,
-          group_order=rl_program.GroupOrder.TRAJECTORY_COMPLETION,
-      )
-      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=5.0)
-      program.close()
-      self.assertEqual(program.step, 1)
-
-    asyncio.run(_run())
-
   def test_polling_stage_worker_error_aborts_run_instead_of_hanging(self):
     async def _run():
       rollout_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
@@ -8538,8 +8615,10 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
                   prompt_id="p_wide_span",
                   group_index=g_idx,
                   start_step=0,
-                  traj=_scored_traj(1.0),
-                  metadata={"policy_version": 1, "policy_versions": [1, 2, 3]},
+                  traj={
+                      **_scored_traj(1.0),
+                      "policy_versions": [1, 2, 3],
+                  },
               )
           )
         self.assertEqual(program.raw_q.ready_groups_count, 0)
@@ -8556,17 +8635,13 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
               start_step=0,
               traj={
                   **_scored_traj(1.0),
-                  "policy_version": versions[0],
                   "policy_versions": list(versions),
                   "conversation_text": [
                       {"role": "user", "content": prompt_id},
                       {"role": "assistant", "content": "answer"},
                   ],
               },
-              metadata={
-                  "policy_version": versions[0],
-                  "policy_versions": list(versions),
-              },
+              metadata={},
           )
 
         # Both items finished at v=3 (despite starting at v=1 and v=2) -> EDF=3.
@@ -8575,7 +8650,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
             _multi_version_raw_item("p_newer", 1, [2, 3]),
         ])
         self.assertEqual(
-            [it.policy_version for it in newer_group.items], [3, 3]
+            [it.policy_versions for it in newer_group.items], [[1, 3], [2, 3]]
         )
 
         # Item 0 finished at v=3 ([1, 3]), Item 1 finished at v=2 ([1, 2])
@@ -8585,7 +8660,8 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
             _multi_version_raw_item("p_older", 1, [1, 2]),
         ])
         self.assertEqual(
-            [it.policy_version for it in older_mixed_group.items], [3, 2]
+            [it.policy_versions for it in older_mixed_group.items],
+            [[1, 3], [1, 2]],
         )
 
         # All-invalid tombstone groups sort behind valid aging groups, and
@@ -8596,7 +8672,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
               group_index=g,
               start_step=0,
               traj={
-                  **_scored_traj(0.0),
+                  "trajectory_reward": 0.0,
                   "status": datatypes.TrajectoryStatus.FAILED,
               },
               metadata={},

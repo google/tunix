@@ -331,7 +331,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         },
         'old_logprobs': np.array([1, 1, 0, 0, 1, 1]),
         'assistant_turn_lengths': [2, 2],
-        'policy_version': None,
+        'policy_versions': None,
         'original_input': {'some': 'task'},
         'group_id': None,
         'status': 'SUCCEEDED',
@@ -1902,6 +1902,25 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertEqual(stored_meta.status, 'FAILED')
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_collect_token_mode_uses_engine_policy_version_when_task_lacks_it(
+      self, mock_convert
+  ):
+    mock_convert.return_value = ([101], [1])
+    self.mock_env.max_steps = 1
+    self.mock_env.task = {'question': 'no_version_in_task'}
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        policy_version=7,
+    )
+    result = asyncio.run(self._run_collect(engine, mode='Token'))
+    self.assertNotIn('policy_version', result)
+    self.assertEqual(result['policy_versions'], [7])
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_trajectory_store_masked_out_skips_final_reward(self, mock_convert):
     mock_convert.return_value = ([101], [1])
     self.mock_env.max_steps = 1
@@ -2296,7 +2315,7 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
       result = asyncio.run(engine.collect(mode='Token'))
       self.assertEqual((len(calls), len(tokenizer.encoded)), (3, 2))
       self.assertEqual(
-          (result['prompt_length'], result['policy_version']), (3, 7)
+          (result['prompt_length'], result['policy_versions']), (3, [7, 7, 7])
       )
       np.testing.assert_array_equal(result['prompt_tokens'][-3:], [5, 100, 101])
       np.testing.assert_array_equal(

@@ -307,21 +307,18 @@ def _scored_group_policy_version(group: ScoredGroup) -> int:
 
 def _group_latest_policy_version(
     group: Sequence[datatypes.TrajectoryItem],
-) -> int:
-  """Returns the latest policy version across valid items in `group`."""
+) -> int | None:
+  """Returns the latest policy version across valid items in `group`.
+
+  Returns:
+    The latest policy version, or None if no valid items carry a version.
+  """
   valid_versions = [
       trajectory_queue_manager.item_policy_version(it)
       for it in group
       if it.is_valid and trajectory_queue_manager.has_policy_version(it)
   ]
-  if valid_versions:
-    return max(valid_versions)
-  any_versions = [
-      trajectory_queue_manager.item_policy_version(it)
-      for it in group
-      if trajectory_queue_manager.has_policy_version(it)
-  ]
-  return max(any_versions) if any_versions else -1
+  return max(valid_versions) if valid_versions else None
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -569,6 +566,9 @@ class StandardRLProgram(RLProgram):
           )
       )
       self.scored_q = ordered_q
+      # PROMPT_ARRIVAL cannot drop groups in `raw_q` without stalling the
+      # downstream `BatchOrderedGroupQueue` at the missing `batch_idx`;
+      # staleness is bounded upstream by `DispatchWindow` instead.
       self.raw_q = TrajectoryQueueManager.create(
           num_generations=self.num_generations,
       )
@@ -861,16 +861,9 @@ class StandardRLProgram(RLProgram):
       src_item.metadata.pop("routed_experts", None)
     metadata.pop("routed_experts", None)
     traj_dict.pop("routed_experts", None)
-    policy_version = (
-        trajectory_queue_manager.item_policy_version(src_item)
-        if trajectory_queue_manager.has_policy_version(src_item)
-        else None
-    )
     traj_dict["trajectory_reward"] = reward_val
     traj_dict["status"] = status
     traj_dict["conversation_masks"] = payload.completion_mask
-    if policy_version is not None:
-      traj_dict["policy_version"] = policy_version
     return datatypes.TrajectoryItem(
         prompt_id=src_item.prompt_id,
         group_index=src_item.group_index,
@@ -881,7 +874,6 @@ class StandardRLProgram(RLProgram):
         completion_tokens=getattr(src_item, "completion_tokens", None),
         action_mask=getattr(src_item, "action_mask", None),
         routed_experts=None,
-        policy_version=policy_version,
         metadata=metadata,
         # TODO: b/552087289 - Replace TrajectoryItem with a compact typed
         # telemetry record (identity + reward + generation facts +
@@ -940,7 +932,7 @@ class StandardRLProgram(RLProgram):
           first_meta = group[0].metadata
           logging.info(
               "[pipeline] ARRIVED prompt_id=%s prompt_idx=%s batch_idx=%s"
-              " intra_batch_idx=%s policy_version=%d",
+              " intra_batch_idx=%s policy_version=%s",
               group[0].prompt_id,
               first_meta.get("prompt_idx"),
               first_meta.get("batch_idx"),
@@ -1025,14 +1017,17 @@ class StandardRLProgram(RLProgram):
     staleness_list: list[float] = []
     version_span_list: list[float] = []
     for item in all_step_items:
+      # Invalid items contribute no gradient, so their version is not part of
+      # the consumed batch's staleness. A valid item must carry one.
       if not item.is_valid:
         continue
-      if trajectory_queue_manager.has_policy_version(item):
-        pol_ver = trajectory_queue_manager.item_policy_version(item)
-        staleness_list.append(float(max(0, consumed_policy_version - pol_ver)))
-        version_span_list.append(
-            float(trajectory_queue_manager.item_version_span(item))
-        )
+      item_version = trajectory_queue_manager.item_policy_version(item)
+      staleness_list.append(
+          float(max(0, consumed_policy_version - item_version))
+      )
+      version_span_list.append(
+          float(trajectory_queue_manager.item_version_span(item))
+      )
 
     if prompt_lengths:
       self._log_metric(
@@ -1451,7 +1446,7 @@ class StandardRLProgram(RLProgram):
           "rollout_policy_version": (
               trajectory_queue_manager.item_policy_version(item)
               if trajectory_queue_manager.has_policy_version(item)
-              else 0
+              else None
           ),
           "status": status or "UNKNOWN",
           "reward": float(reward) if reward is not None else None,

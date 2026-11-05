@@ -795,7 +795,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "conversation_tokens": np.array([1, 2, 3]),
             "conversation_masks": np.array([1, 1, 1]),
             "old_logprobs": None,
-            "policy_version": 0,
+            "policy_versions": [0],
             "trajectory_reward": 1.0,
             "prompt_tokens": np.array([4, 5]),
             "original_input": {"prompts": "hello"},
@@ -1045,7 +1045,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "conversation_tokens": np.array([1, 2, 3]),
             "conversation_masks": np.array([1, 1, 1]),
             "old_logprobs": old_logprobs,
-            "policy_version": 0,
+            "policy_versions": [0],
             "trajectory_reward": reward,
             "prompt_tokens": np.array([4, 5]),
             "original_input": {"prompts": "hello"},
@@ -1533,7 +1533,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "conversation_tokens": np.array([1, 2, 3]),
             "conversation_masks": np.array([1, 1, 1]),
             "old_logprobs": None,
-            "policy_version": 0,
+            "policy_versions": [0],
             "trajectory_reward": 1.0,
             "prompt_tokens": np.array([4, 5]),
             "original_input": {"prompts": "hello"},
@@ -1655,7 +1655,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "old_logprobs": (
                 np.full(3, 1.0, dtype=np.float32) if return_logprobs else None
             ),
-            "policy_version": 0,
+            "policy_versions": [0],
             "trajectory_reward": 1.0,
             "prompt_tokens": np.array([4, 5]),
             "original_input": {"prompts": "hello"},
@@ -2141,7 +2141,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         assistant_msgs = [m for m in conversation if m["role"] == "assistant"]
         self.assertNotEmpty(assistant_msgs)
         self.assertIn(assistant_msgs[0]["content"], _MOCK_RESPONSES)
-        self.assertEqual(traj.get("policy_version"), 0)
+        self.assertEqual(traj.get("policy_versions"), [0])
 
   def test_grpo_with_lora_model(self):
     # reshard through default device_put.
@@ -2469,7 +2469,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             "conversation_tokens": np.array([1, 2, 3]),
             "conversation_masks": np.array([1, 1, 1]),
             "old_logprobs": np.full(3, -0.5, dtype=np.float32),
-            "policy_version": 0,
+            "policy_versions": [0],
             "trajectory_reward": 1.0,
             "prompt_tokens": np.array([4, 5]),
             "original_input": {"prompts": "hello"},
@@ -2516,7 +2516,7 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
             np.array([1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0], np.float32) * -0.5
         ),
         "conversation_text": [{"role": "assistant", "content": "action"}],
-        "policy_version": 7,
+        "policy_versions": [7],
         "trajectory_reward": 1.0,
         "original_input": {"prompts": ["fixture"]},
     }

@@ -567,7 +567,7 @@ class _FakeInnerEngine:
         "old_logprobs": np.array([], dtype=np.float32),
         "trajectory_reward": 0.0,
         "status": "COMPLETED",
-        "policy_version": 0,
+        "policy_versions": [0],
     }
 
 
@@ -721,14 +721,14 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         "old_logprobs": np.array([-0.1, -0.2, -0.3], dtype=np.float32),
         "trajectory_reward": 2.5,
         "status": "COMPLETED",
-        "policy_version": 5,
+        "policy_versions": [5],
     }
 
     item = engine._convert_to_trajectory(rl_traj)
     self.assertIsInstance(item, datatypes.TrajectoryItem)
     self.assertEqual(item.prompt_id, "prompt_test")
     self.assertEqual(item.group_index, 2)
-    self.assertEqual(item.policy_version, 5)
+    self.assertEqual(item.policy_versions, [5])
     self.assertEqual(item.metadata.get("custom_key"), "custom_val")
     np.testing.assert_array_equal(item.prompt_tokens, [1, 2, 3])
     np.testing.assert_array_equal(item.conversation_tokens, [10, 11, 12])
@@ -802,7 +802,7 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         ),
         "trajectory_reward": 1.0,
         "status": "COMPLETED",
-        "policy_version": 1,
+        "policy_versions": [1],
     }
 
     item = engine._convert_to_trajectory(rl_traj)
@@ -1174,7 +1174,7 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
         "routed_experts": mock_routed,
         "trajectory_reward": 1.0,
         "status": "COMPLETED",
-        "policy_version": 1,
+        "policy_versions": [1],
     }
     item = engine._convert_to_trajectory(rl_traj)
     self.assertNotIn("routed_experts", item.metadata)
@@ -1335,13 +1335,122 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
     self.assertEqual(
         sampler.requests[1].sampling_params.cache_salt, "policy_v2"
     )
-    # Conservative oldest version is preserved in policy_version, while per-turn
-    # history is recorded in policy_versions.
-    self.assertEqual(item.policy_version, 2)
-    self.assertEqual(item.metadata["policy_version"], 2)
-    self.assertEqual(item.metadata["policy_versions"], [2, 3])
-    self.assertEqual(item.traj["policy_version"], 2)
+    # Per-turn history is recorded in policy_versions on item.traj (SSOT).
+    self.assertEqual(item.policy_versions, [2, 3])
+    self.assertNotIn("policy_version", item.traj)
     self.assertEqual(item.traj["policy_versions"], [2, 3])
+    self.assertNotIn("policy_version", item.metadata)
+    self.assertNotIn("policy_versions", item.metadata)
+
+  def test_partial_rollout_handles_arbitrary_v_first_and_advancing_versions(
+      self,
+  ):
+    class _ThreeTurnEnv(base_environment.BaseTaskEnv):
+
+      def __init__(self):
+        super().__init__(task={"question": "q0"}, max_steps=3)
+        self._step_idx = 0
+
+      def _initial_observation(self):
+        return "obs0"
+
+      def _step_impl(self, action):
+        self._step_idx += 1
+        return base_environment.EnvStepResult(
+            observation=f"obs{self._step_idx}",
+            reward=1.0,
+            done=self._step_idx >= 3,
+            info={},
+        )
+
+    # Turn 0 starts at arbitrary v_first=42, Turn 1 advances to 45, Turn 2
+    # advances to 48.
+    turn_versions = [42, 45, 48]
+    current_policy_version = [turn_versions[0]]
+
+    class _DynamicVersionSampler(sampler_lib.Sampler):
+
+      def __init__(self):
+        self.requests = []
+
+      async def sample(self, req, **kwargs):
+        del kwargs
+        self.requests.append(req)
+        turn = len(self.requests)
+        if turn < len(turn_versions):
+          current_policy_version[0] = turn_versions[turn]
+        prompt_toks = (
+            np.asarray(req.prompt, dtype=np.int32)
+            if isinstance(req.prompt, np.ndarray)
+            else np.array([10, 11], dtype=np.int32)
+        )
+        return sampler_lib.SamplingResponse(
+            request_id=req.request_id,
+            text=f"ans_{turn}",
+            token_ids=np.array([20 + turn, 21 + turn], dtype=np.int32),
+            prompt_token_ids=prompt_toks,
+            logprobs=np.array([-0.1, -0.2], dtype=np.float32),
+        )
+
+    sampler = _DynamicVersionSampler()
+    req = datatypes.RolloutRequest(
+        prompt_id="p_arbitrary_start",
+        prompt="q0",
+        target_policy_version=42,
+        max_response_length=64,
+    )
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id="traj_arbitrary_start",
+        request=req,
+        sampler=sampler,
+        env_client=_ThreeTurnEnv(),
+        agent=model_agent.ModelAgent("sys"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+        partial_rollout=True,
+        policy_version_fn=lambda: current_policy_version[0],
+    )
+    item = asyncio.run(engine.run_episode())
+    self.assertEqual(item.traj["policy_versions"], [42, 45, 48])
+    self.assertEqual(item.policy_versions, [42, 45, 48])
+    self.assertNotIn("policy_version", item.traj)
+    self.assertNotIn("policy_version", item.metadata)
+
+  def test_convert_to_trajectory_preserves_store_recovered_step_versions(self):
+    request = datatypes.RolloutRequest(
+        request_id="req_recovered",
+        prompt="hello",
+        prompt_id="prompt_recovered",
+        group_index=0,
+        target_policy_version=46,
+    )
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id=request.traj_id,
+        request=request,
+        sampler=_RecordingSampler(),
+        env_client=object(),
+        agent=mocks.MockAgent(),
+        tokenizer=mocks.MockTokenizer(),
+        chat_parser=mocks.MockChatParser(),
+    )
+    # Resumed worker invocation only observed Turn 2 live (v=46), while
+    # step-backed rl_traj["policy_versions"] carries pre-crash turns [42, 43]
+    # restored from TrajectoryStore plus live turn [46].
+    rl_traj = {
+        "conversation_text": "recovered rollout",
+        "prompt_tokens": np.array([1, 2], dtype=np.int32),
+        "conversation_tokens": np.array([10, 11], dtype=np.int32),
+        "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
+        "old_logprobs": np.array([-0.1, -0.2], dtype=np.float32),
+        "trajectory_reward": 1.0,
+        "status": "COMPLETED",
+        "policy_versions": [42, 43, 46],
+    }
+    item = engine._convert_to_trajectory(rl_traj)
+    self.assertEqual(item.traj["policy_versions"], [42, 43, 46])
+    self.assertEqual(item.policy_versions, [42, 43, 46])
+    self.assertNotIn("policy_version", item.traj)
+    self.assertNotIn("policy_version", item.metadata)
 
   def test_pause_blocks_model_call_until_resume(self):
     async def _run():
