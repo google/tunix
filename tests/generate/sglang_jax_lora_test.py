@@ -58,7 +58,7 @@ class SglangJaxLoRATest(absltest.TestCase):
         axis_types=(jax.sharding.AxisType.Auto,) * 2,
     )
 
-    model_version = "meta-llama/Llama-3.2-1B-Instruct"
+    model_version = "unsloth/Llama-3.2-1B-Instruct"
 
     # Model configuration (smaller for faster testing)
     cls.model_config = llama_lib.ModelConfig.llama3p2_1b()

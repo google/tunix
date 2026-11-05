@@ -31,6 +31,7 @@ import dotenv
 import jax
 import omegaconf
 import optax
+from tunix.models import naming
 from tunix.perf import metrics as perf_metrics
 from tunix.sft import checkpoint_options
 from tunix.sft import metrics_logger
@@ -941,8 +942,10 @@ class HyperParameters:
   def _validate_tokenizer(self):
     """Validate the tokenizer configuration.
 
-    Currently only sentencepiece and huggingface are supported. `HF_TOKEN` must
-    be set if huggingface tokenizer is used.
+    Currently only sentencepiece and huggingface are supported. Hugging Face Hub
+    tokenizers remain supported both for public repositories (without
+    `HF_TOKEN`) and for gated/private repositories (using `HF_TOKEN` from
+    `os.environ` at tokenizer download time).
     """
     tokenizer_config = self.config["tokenizer_config"]
     tokenizer_type = tokenizer_config["tokenizer_type"]
@@ -953,14 +956,8 @@ class HyperParameters:
           f"tokenizer_type {tokenizer_type} is not supported, currently only"
           f" {valid_tokenizer_type} is supported"
       )
-    if tokenizer_type == "huggingface":
-      # Only require HF_TOKEN when loading from HuggingFace Hub (not a local
-      # or CNS path).
-      is_local_path = tokenizer_path.startswith(("/", "gs://"))
-      if not is_local_path and "HF_TOKEN" not in os.environ:
-        raise ValueError("Missing `HF_TOKEN` to access hf tokenizer")
-      if not tokenizer_path:
-        raise ValueError("tokenizer_path must be specified.")
+    if tokenizer_type == "huggingface" and not tokenizer_path:
+      raise ValueError("tokenizer_path must be specified.")
 
   def clear_directory_contents(self):
     """Removes all files, directories, and links within the specified directory."""
@@ -1029,21 +1026,16 @@ class HyperParameters:
     )
     # TODO: b/467448875 - Add support for other sources, such as kaggle for other
     # models.
-    supported_sources["gemma"] = ["kaggle", "internal", "maxtext"]
-    supported_sources["gemma2"] = ["kaggle", "internal", "maxtext"]
+    supported_sources["gemma"] = ["kaggle", "gcs", "internal", "maxtext"]
+    supported_sources["gemma1p1"] = ["kaggle", "gcs", "internal", "maxtext"]
+    supported_sources["gemma2"] = ["kaggle", "gcs", "internal", "maxtext"]
     supported_sources["gemma3"] = ["gcs", "internal", "maxtext"]
     # TODO: support maxtext for gemma4.
     supported_sources["gemma4"] = ["kaggle", "huggingface", "gcs", "internal"]
 
-    if model_name.startswith(("gemma4", "gemma-4")):
-      model_family = "gemma4"
-    elif model_name.startswith(("gemma3", "gemma-3")):
-      model_family = "gemma3"
-    elif model_name.startswith(("gemma2", "gemma-2")):
-      model_family = "gemma2"
-    elif model_name.startswith("gemma"):
-      model_family = "gemma"
-    else:
+    try:
+      model_family = naming.ModelNaming(model_name=model_name).model_family
+    except ValueError:
       model_family = "other"
 
     expected_sources = supported_sources[model_family]

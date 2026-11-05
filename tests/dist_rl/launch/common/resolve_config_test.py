@@ -145,19 +145,26 @@ weight_sync_config:
     self.assertEqual(hp.config["weight_sync_config"]["mode"], "raiden")
 
   def test_tokenizer_uses_base_cli_validation(self):
-    # A Hugging Face hub id needs HF_TOKEN; a local path does not.
+    # A Hugging Face hub id or local path works without HF_TOKEN.
     env_without_token = {
         k: v for k, v in os.environ.items() if k != "HF_TOKEN"
     }
     with mock.patch.dict(os.environ, env_without_token, clear=True):
-      with self.assertRaisesRegex(ValueError, "HF_TOKEN"):
-        resolve_config.initialize([])
+      hp_hub = resolve_config.initialize([])
+      self.assertEqual(
+          hp_hub.config["tokenizer_config"]["tokenizer_path"],
+          "Qwen/Qwen3-1.7B",
+      )
       hp = resolve_config.initialize(
           ["tokenizer_config.tokenizer_path=/tmp/models/qwen"]
       )
     self.assertEqual(
         hp.config["tokenizer_config"]["tokenizer_path"], "/tmp/models/qwen"
     )
+    with self.assertRaisesRegex(
+        ValueError, "tokenizer_path must be specified"
+    ):
+      resolve_config.initialize(["tokenizer_config.tokenizer_path="])
     with self.assertRaisesRegex(ValueError, "tokenizer_type"):
       resolve_config.initialize(["tokenizer_config.tokenizer_type=bpe"])
 

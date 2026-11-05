@@ -19,13 +19,6 @@ name: TPU Tests
 
 on:
   workflow_call:
-    secrets:
-      HF_TOKEN:
-        description: 'HuggingFace token for model downloads'
-      KAGGLE_USERNAME:
-        description: 'Kaggle Username'
-      KAGGLE_KEY:
-        description: 'Kaggle API Key'
 
 concurrency:
   # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
@@ -59,7 +52,7 @@ jobs:
   # Purpose: Multi-device TPU unit tests, then SGLang-JAX integration.
   # Hardware: Live TPU v6e-8 accelerator (1 slice).
   # Image:    JAX stable stack candidate.
-  # Secrets:  HF_TOKEN, used only by the SGLang stage.
+  # Secrets:  None (uses public Hugging Face Hub checkpoints).
   # Scope:    Sharded model, generation, SFT, distillation and RL unit tests,
   #           followed by SGLang sampler, LoRA and RL cluster integration tests.
   #
@@ -73,7 +66,6 @@ jobs:
   # ---------------------------------------------------------------------------
   run_core:
     runs-on: [linux-x86-ct6e-180-8tpu]
-    environment: testing
     # Note: GitHub Actions `timeout-minutes` only counts active execution time after
     # a runner picks up the job (queue wait time is excluded). Measured execution
     # is ~14.2m, so 60m provides >4x headroom while catching hung processes.
@@ -181,14 +173,7 @@ jobs:
       # [ORDERING CONSTRAINT]: MUST stay LAST in `run_core`. It installs
       # `sglang-jax` and pins `jax[tpu]<0.11.0` and `qwix`, mutating the Python
       # environment.
-      #
-      # Gated at the step level rather than the job level so that the unit tests
-      # above still run on external fork PRs, where secrets are unavailable.
-      # This preserves the previous behaviour, where run_core had no `if:`.
       - name: Run install sglang-jax && test
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           ## because sglang-jax has codes like jax.local_devices('cpu')
           # TODO(lancewang): Re-enable this test once the bug is fixed.
@@ -218,7 +203,7 @@ jobs:
   #          distributed RL smoke test.
   # Hardware: Live TPU v6e-8 accelerator (1 slice).
   # Image:    vLLM TPU nightly.
-  # Secrets:  Requires HF_TOKEN and KAGGLE_* secrets (skipped on external fork PRs).
+  # Secrets:  None (uses public Hugging Face Hub and GCS checkpoints).
   # Scope:    End-to-end GRPO RL demo training, vLLM Sampler generation / LoRA
   #           mapping / checkpoint loading, SFT PEFT 2x2 mesh integration, then
   #           the Qwen3-0.6B GSM8K distributed RL smoke test with Raiden sync.
@@ -236,9 +221,7 @@ jobs:
   #      prevents background process or chip-lock leakage into earlier tests.
   # ---------------------------------------------------------------------------
   run_dev:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: [linux-x86-ct6e-180-8tpu]
-    environment: testing
     # Note: GitHub Actions `timeout-minutes` only counts active execution time after
     # a runner picks up the job (queue wait time is excluded). Measured execution
     # is ~20.9m, so 60m provides ~3x headroom while catching hung processes.
@@ -307,8 +290,6 @@ jobs:
           python3 -m pip install numpy==2.3.5 --force-reinstall
 
       - name: GRPO Integration Test (Llama3 / Qwen2 multi-device RL training demo)
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           # Run GRPO demo script with minimal configuration
           python3 scripts/grpo_demo_llama3_qwen2.py \
@@ -326,8 +307,6 @@ jobs:
       # tpu-inference/Numba requires. Keeping vLLM above SFT preserves the freshly
       # pinned environment it had as a standalone job.
       - name: Run vllm tests
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           unset JAX_PLATFORMS
           python3 -m pytest tests/generate/vllm_sampler_qwen_test.py -v --tb=short
@@ -340,8 +319,6 @@ jobs:
       # upgrades NumPy past ==2.3.5) and BEFORE the Distributed RL smoke stage
       # (which reuses this tensorflow install for TFDS dataset loading).
       - name: Run tunix SFT integration tests (PEFT with 2x2 mesh on TPU)
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           unset PIP_NO_CACHE_DIR
           # Update dependencies
@@ -404,8 +381,6 @@ jobs:
       # orchestrator logs (`launch/common/local.sh`) to a per-backend directory
       # that the failure step below prints.
       - name: Run GSM8K Distributed RL Smoke Test (Tunix Backend + Raiden Sync)
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           LOG_ROOT="${GITHUB_WORKSPACE}/dist_rl_logs/tunix" \
             ./tunix/dist_rl/examples/recipes/ci_smoke_gsm8k_qwen3_0p6b.sh
@@ -417,8 +392,6 @@ jobs:
           python3 -m pip install "protobuf>=7.35.1"
 
       - name: Run GSM8K Distributed RL Smoke Test (MaxText Backend + Raiden Sync)
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           LOG_ROOT="${GITHUB_WORKSPACE}/dist_rl_logs/maxtext" \
             ./tunix/dist_rl/examples/recipes/ci_smoke_gsm8k_qwen3_0p6b_maxtext.sh

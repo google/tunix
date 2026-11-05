@@ -50,7 +50,7 @@ class SglangJaxSamplerTest(absltest.TestCase):
     )
 
     cls.repo_id = (  ## use smaller models to prevent OOM in v5e
-        "meta-llama/Llama-3.2-3B-Instruct"
+        "unsloth/Llama-3.2-3B-Instruct"
     )
     temp_dir = tempfile.gettempdir()
     cls.model_path = os.path.join(temp_dir, "models", cls.repo_id)
@@ -58,6 +58,7 @@ class SglangJaxSamplerTest(absltest.TestCase):
 
   def load_llama3_model(self, model_version: str):
     model_config = {
+        "unsloth/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3p2_3b,
         "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3p2_3b,
         "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
     }

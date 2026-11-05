@@ -14,7 +14,7 @@
 
 model_config:
   model_name: "llama-3.2-1b"
-  model_id: "meta-llama/Llama-3.2-1B"
+  model_id: "unsloth/Llama-3.2-1B"
   model_source: "huggingface"
   mesh:
     shape: "(2,4)"

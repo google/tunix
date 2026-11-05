@@ -153,6 +153,38 @@ class ConfigTest(parameterized.TestCase):
           overrides=["model_name=gemma-3-1b-pt", "model_source=gcs"],
       ),
       dict(
+          testcase_name="gemma2_gcs_ckpt_source",
+          overrides=["model_name=gemma-2-2b-it", "model_source=gcs"],
+      ),
+      dict(
+          testcase_name="gemma_gcs_ckpt_source",
+          overrides=["model_name=gemma-2b", "model_source=gcs"],
+      ),
+      dict(
+          testcase_name="gemma1p1_gcs_ckpt_source",
+          overrides=["model_name=gemma-1.1-2b-it", "model_source=gcs"],
+      ),
+      dict(
+          testcase_name="gemma1p1_kaggle_with_ckpt",
+          overrides=[
+              "model_name=gemma-1.1-2b-it",
+              "model_source=kaggle",
+              "intermediate_ckpt_dir=/path/to/ckpt",
+          ],
+      ),
+      dict(
+          testcase_name="gemma4_gcs_ckpt_source",
+          overrides=["model_name=gemma-4-e2b", "model_source=gcs"],
+      ),
+      dict(
+          testcase_name="custom_hf_model_name",
+          overrides=[
+              "model_name=custom-finetune-7b",
+              "model_source=huggingface",
+              "intermediate_ckpt_dir=/path/to/ckpt",
+          ],
+      ),
+      dict(
           testcase_name="maxtext_source",
           overrides=["model_name=qwen2.5-0.5b", "model_source=maxtext"],
       ),
@@ -1292,6 +1324,52 @@ class ConfigTest(parameterized.TestCase):
           ["override_config_file=a.yaml", "override_config_file=b.yaml"]
       )
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="gemma_2b_rejects_hf",
+          model_name="gemma-2b",
+          model_source="huggingface",
+      ),
+      dict(
+          testcase_name="gemma1p1_rejects_hf",
+          model_name="gemma-1.1-2b-it",
+          model_source="huggingface",
+      ),
+      dict(
+          testcase_name="gemma2_config_id_rejects_hf",
+          model_name="gemma2_2b_it",
+          model_source="huggingface",
+      ),
+      dict(
+          testcase_name="gemma3_rejects_kaggle",
+          model_name="gemma-3-1b-it",
+          model_source="kaggle",
+      ),
+      dict(
+          testcase_name="gemma4_rejects_maxtext",
+          model_name="gemma-4-e2b",
+          model_source="maxtext",
+      ),
+      dict(
+          testcase_name="custom_model_rejects_gcs",
+          model_name="custom-finetune-7b",
+          model_source="gcs",
+      ),
+  )
+  def test_check_supported_workflow_rejects_unsupported_source(
+      self, model_name, model_source
+  ):
+    overrides = [
+        f"model_config.model_name={model_name}",
+        f"model_config.model_source={model_source}",
+        "model_config.intermediate_ckpt_dir=/tmp/ckpt",
+    ]
+    with self.assertRaisesRegex(
+        ValueError,
+        f"Model '{model_name}' must use source\\(s\\).*got '{model_source}'",
+    ):
+      self.initialize_config(overrides)
+
   def test_empty_override_config_file_path_raises(self):
     with self.assertRaisesRegex(
         ValueError, "Empty path in override_config_file"
@@ -1300,6 +1378,4 @@ class ConfigTest(parameterized.TestCase):
 
 
 if __name__ == "__main__":
-  if "HF_TOKEN" not in os.environ:
-    os.environ["HF_TOKEN"] = "TestToken"
   absltest.main()

@@ -25,14 +25,14 @@ echo "  Max Steps: $max_steps"
 python3 -m tunix.cli.peft_main \
   base_config.yaml \
   model_config.model_name="llama-3.2-3b" \
-  model_config.model_id="meta-llama/Llama-3.2-3B" \
+  model_config.model_id="unsloth/Llama-3.2-3B" \
   model_config.model_source="huggingface" \
   model_config.model_download_path="/tmp/models/llama3.2-3b" \
   model_config.rng_seed=0 \
   model_config.lora_config={} \
   model_config.mesh.shape="(2,2)" \
   model_config.mesh.axis_names="('fsdp','tp')" \
-  tokenizer_config.tokenizer_path="meta-llama/Llama-3.2-3B" \
+  tokenizer_config.tokenizer_path="unsloth/Llama-3.2-3B" \
   tokenizer_config.tokenizer_type="huggingface" \
   dataset_name="mtnt/en-fr"\
   max_target_length=512 \

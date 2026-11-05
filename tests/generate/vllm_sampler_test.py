@@ -50,7 +50,7 @@ class VllmSamplerTest(absltest.TestCase):
   @classmethod
   def setUpClass(cls) -> None:
     super().setUpClass()
-    cls.repo_id = "meta-llama/Llama-3.2-1B-Instruct"
+    cls.repo_id = "unsloth/Llama-3.2-1B-Instruct"
     temp_dir = tempfile.gettempdir()
     cls.model_path = os.path.join(temp_dir, "models", cls.repo_id)
 
@@ -115,6 +115,7 @@ class VllmSamplerTest(absltest.TestCase):
   @functools.lru_cache(maxsize=1)
   def load_llama3_model(cls, model_version: str, enable_lora: bool = False):
     model_config = {
+        "unsloth/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
         "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
         "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
     }

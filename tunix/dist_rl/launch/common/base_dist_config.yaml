@@ -57,8 +57,7 @@ rollout_model_config:
 
 ################################## Tokenizer ##################################
 tokenizer_config:
-  # A Hugging Face hub id requires `HF_TOKEN` (same check as `tunix.cli`); set a
-  # local, CNS, or GCS path to load the tokenizer without it.
+  # Accepts a Hugging Face hub id or a local, CNS, or GCS path.
   tokenizer_path: "Qwen/Qwen3-1.7B"
   tokenizer_type: "huggingface"
   add_bos: true

@@ -19,16 +19,6 @@ name: Tunix Nightly Regression
 
 on:
   workflow_call:
-    secrets:
-      HF_TOKEN:
-        required: true
-        description: 'HuggingFace token for model downloads'
-      KAGGLE_USERNAME:
-        required: true
-        description: 'Kaggle username for model downloads'
-      KAGGLE_KEY:
-        required: true
-        description: 'Kaggle API key for model downloads'
 
 concurrency:
   # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
@@ -42,7 +32,6 @@ env:
 jobs:
   run_prod:
     runs-on: [linux-x86-ct6e-180-8tpu]
-    environment: testing
     container:
       image: vllm/vllm-tpu:nightly-20260911-4b80060-51da0ca # zizmor: ignore[unpinned-images]
       options: --privileged
@@ -98,10 +87,6 @@ jobs:
     - name: Run SFT shell scripts
       id: sft_tests
       shell: bash
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
       run: |
         SCRIPT_DIR="./examples/sft/mtnt"
         MAX_STEPS=5
@@ -122,6 +107,11 @@ jobs:
         FAILED_SCRIPTS=()
         for script in "$SCRIPT_DIR"/*.sh; do
           if [ -f "$script" ]; then
+            if [[ "$script" == *"run_gemma_2b.sh"* ]]; then
+              echo "⏭️ Skipping legacy Gemma 1 Kaggle script (covered by run_gemma2_2b.sh via GCS): $script"
+              echo "| $script | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+              continue
+            fi
             echo "::group::📦 Executing: $script"
             echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
             chmod +x "$script"
@@ -157,10 +147,6 @@ jobs:
       id: rl_tests
       if: success() || failure()
       shell: bash
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
       run: |
         SCRIPT_DIRS=(
           "./examples/rl/grpo/gsm8k"
@@ -189,7 +175,7 @@ jobs:
           while IFS= read -r script; do
             if [ -f "$script" ]; then
               # TODO(b/510383570)
-              if [[ "$script" == *"run_qwen3_8b"* ]]; then
+              if [[ "$script" == *"run_qwen3_8b"* || "$script" == *"run_gemma_2b.sh"* ]]; then
                 echo "⏭️ Skipping: $script"
                 echo "| $script | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
                 continue
@@ -240,8 +226,6 @@ jobs:
     - name: Run regression scripts
       if: success() || failure()
       shell: bash
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
       id: regression_tests
       run: |
         echo "### Regression Scripts Summary" >> $GITHUB_STEP_SUMMARY
@@ -322,7 +306,6 @@ jobs:
 
   run_latest:
     runs-on: [linux-x86-ct6e-180-8tpu]
-    environment: testing
     container:
       image: vllm/vllm-tpu:nightly # zizmor: ignore[unpinned-images]
       options: --privileged
@@ -396,8 +379,6 @@ jobs:
 
     - name: Run latest tests
       shell: bash
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
         mkdir -p /tmp/grpo_test/rl/grpo/data
         FAILED=0
@@ -434,8 +415,6 @@ jobs:
     #   id: maxtext_test
     #   if: success() || failure()
     #   shell: bash
-    #   env:
-    #     HF_TOKEN: ${{ secrets.HF_TOKEN }}
     #   run: |
     #     # Install MaxText if not present
     #     python3 -c "import maxtext" 2>/dev/null || python3 -m pip install git+https://github.com/AI-Hypercomputer/maxtext.git

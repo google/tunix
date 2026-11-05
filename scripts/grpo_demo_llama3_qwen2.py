@@ -20,6 +20,8 @@ includes training, evaluation, and inference.
 Example usage:
 python3 grpo_demo_llama3_qwen2.py --root-dir=/path/to/root_dir \
 --model-version=Qwen/Qwen2.5-0.5B-Instruct
+python3 grpo_demo_llama3_qwen2.py --root-dir=/path/to/root_dir \
+--model-version=unsloth/Llama-3.2-1B-Instruct
 
 """
 
@@ -104,9 +106,12 @@ parser.add_argument(
 parser.add_argument(
     "--model-version",
     type=str,
-    default="meta-llama/Llama-3.2-1B-Instruct",
+    default="Qwen/Qwen2.5-0.5B-Instruct",
     required=False,
-    help="The model version to use.",
+    help=(
+        "Hugging Face model ID to use (e.g., Qwen/Qwen2.5-0.5B-Instruct, "
+        "unsloth/Llama-3.2-1B-Instruct, or unsloth/Llama-3.2-3B-Instruct)."
+    ),
 )
 parser.add_argument(
     "--num-generations",
@@ -683,6 +688,8 @@ test_dataset, _ = data_lib.post_init_dataset(
 MODEL_CONFIG = {
     "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
     "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3p2_3b,
+    "unsloth/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
+    "unsloth/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3p2_3b,
     "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
     "Qwen/Qwen2.5-0.5B-Instruct": qwen2_lib.ModelConfig.qwen2p5_0p5b,
     "Qwen/Qwen2.5-7B-Instruct": qwen2_lib.ModelConfig.qwen2p5_7b,
