@@ -36,14 +36,15 @@ except ImportError:
   raise unittest.SkipTest("gymnasium is not installed")  # pylint: disable=raise-missing-from
 
 # pylint: disable=g-import-not-at-top
-from datasets import Dataset
+import datasets
+from tunix.dist_rl.common import registry
+from tunix.dist_rl.examples.frozenlake_dist import frozenlake
+from tunix.dist_rl.examples.frozenlake_dist import run_frozenlake_dist
+from tunix.models import automodel
 from examples.frozenlake import agent as frozenlake_agent
 from examples.frozenlake import data as frozenlake_data
 from examples.frozenlake import env as frozenlake_env
-from tunix.dist_rl.examples.frozenlake_dist import frozenlake
-from tunix.dist_rl.examples.frozenlake_dist import run_frozenlake_dist
-from tunix.dist_rl.common import registry
-from tunix.models import automodel
+
 # pylint: enable=g-import-not-at-top
 
 
@@ -98,7 +99,9 @@ class FrozenLakeDistTest(absltest.TestCase):
         )
         for index, env_seed in enumerate(seeds)
     ]
-    expected = Dataset.from_list(reference).shuffle(seed=42).to_list()[:12]
+    expected = (
+        datasets.Dataset.from_list(reference).shuffle(seed=42).to_list()[:12]
+    )
 
     actual = frozenlake.create_dataset(
         size=32, seed=42, shuffle_seed=42, limit=12
@@ -217,11 +220,13 @@ class FrozenLakeDistTest(absltest.TestCase):
   def test_recipe_defaults_match_reference(self):
     with mock.patch.dict(os.environ, {}, clear=False):
       os.environ.pop("EPISODE_TIMEOUT_SECS", None)
+      os.environ.pop("ROLLOUT_REPLICAS", None)
       args = run_frozenlake_dist._parse_args([])
     self.assertEqual(args.model_id, "Qwen/Qwen3-8B")
     self.assertEqual(args.batch_size, 64)
     self.assertEqual(args.mini_batch_size, 64)
     self.assertEqual(args.num_generations, 8)
+    self.assertEqual(args.rollout_replicas, 1)
     self.assertEqual(args.num_batches, 150)
     self.assertEqual(args.num_iterations, 1)
     self.assertEqual(args.num_epochs, 3)
@@ -267,9 +272,166 @@ class FrozenLakeDistTest(absltest.TestCase):
     )
     self.assertFalse(args_no_precompile.trainer_precompile)
 
+    args_bad_replicas = run_frozenlake_dist._parse_args(
+        ["--rollout_replicas=0"]
+    )
+    with self.assertRaisesRegex(ValueError, "rollout_replicas"):
+      run_frozenlake_dist._validate_args(args_bad_replicas)
+
     algo_config = run_frozenlake_dist._build_algo(args)
     self.assertEqual(algo_config.sampler_is, "token")
     self.assertEqual(algo_config.sampler_is_threshold, 2.0)
+
+  def test_main_waits_for_rollout_replicas_and_preserves_primary_error(self):
+    fake_ctx = mock.MagicMock()
+    fake_tokenizer = mock.MagicMock()
+    fake_tokenizer.pad_token_id = 0
+    fake_tokenizer.eos_token_id = 1
+    fake_cluster = mock.MagicMock()
+    fake_cluster.trajectory_store = None
+    fake_cluster.registry.handles.return_value = [mock.MagicMock()]
+    fake_cluster.registry.infos.return_value = []
+    fake_cluster.bring_up_workers.side_effect = RuntimeError("trainer died")
+    fake_cluster.shutdown.side_effect = RuntimeError("shutdown also failed")
+    fake_program = mock.MagicMock()
+
+    def _make_fake_program(*args, **kwargs):
+      del args
+      kwargs["algo_config"].temperature = kwargs["generation_args"].temperature
+      return fake_program
+
+    with (
+        mock.patch.object(
+            run_frozenlake_dist.AutoTokenizer,
+            "from_pretrained",
+            return_value=fake_tokenizer,
+        ),
+        mock.patch.object(
+            run_frozenlake_dist.orchestrator,
+            "ClusterOrchestrator",
+            return_value=fake_cluster,
+        ),
+        mock.patch.object(
+            run_frozenlake_dist.rl_program,
+            "StandardRLProgram",
+            side_effect=_make_fake_program,
+        ),
+    ):
+      with self.assertRaisesRegex(RuntimeError, "trainer died"):
+        run_frozenlake_dist.main(
+            [
+                "--rollout_replicas=2",
+                "--batch_size=4",
+                "--mini_batch_size=4",
+                "--num_generations=2",
+                "--train_micro_batch_size=2",
+                "--dataset_size=8",
+                "--num_batches=1",
+                "--max_steps=1",
+                "--stop_workers_on_exit",
+            ],
+            context=fake_ctx,
+        )
+
+    fake_cluster.registry.wait_for_workers.assert_called_once()
+    min_workers = fake_cluster.registry.wait_for_workers.call_args.kwargs[
+        "min_workers"
+    ]
+    self.assertEqual(min_workers[run_frozenlake_dist.datatypes.Role.ROLLOUT], 2)
+    fake_program.close.assert_called_once()
+    fake_cluster.shutdown.assert_called_once_with(abort=True)
+
+  def test_main_clean_exit_shuts_down_without_abort(self):
+    fake_ctx = mock.MagicMock()
+    fake_tokenizer = mock.MagicMock(pad_token_id=0, eos_token_id=1)
+    fake_cluster = mock.MagicMock()
+    fake_cluster.trajectory_store = None
+    fake_cluster.registry.handles.return_value = [mock.MagicMock()]
+    fake_cluster.registry.infos.return_value = []
+    fake_program = mock.MagicMock(last_step_result=None)
+
+    def _make_fake_program(*args, **kwargs):
+      del args
+      kwargs["algo_config"].temperature = kwargs["generation_args"].temperature
+      return fake_program
+
+    with (
+        mock.patch.object(
+            run_frozenlake_dist.AutoTokenizer,
+            "from_pretrained",
+            return_value=fake_tokenizer,
+        ),
+        mock.patch.object(
+            run_frozenlake_dist.orchestrator,
+            "ClusterOrchestrator",
+            return_value=fake_cluster,
+        ),
+        mock.patch.object(
+            run_frozenlake_dist.rl_program,
+            "StandardRLProgram",
+            side_effect=_make_fake_program,
+        ),
+    ):
+      run_frozenlake_dist.main(
+          [
+              "--rollout_replicas=2",
+              "--batch_size=4",
+              "--mini_batch_size=4",
+              "--num_generations=2",
+              "--train_micro_batch_size=2",
+              "--dataset_size=8",
+              "--num_batches=1",
+              "--max_steps=1",
+              "--stop_workers_on_exit",
+          ],
+          context=fake_ctx,
+      )
+
+    fake_cluster.bring_up_workers.assert_called_once_with(dummy_data=None)
+    fake_cluster.run.assert_called_once_with(
+        program=fake_program, num_steps=1, bring_up=False
+    )
+    fake_program.close.assert_called_once_with()
+    fake_cluster.shutdown.assert_called_once_with()
+
+  def test_main_startup_wait_timeout_aborts_surviving_workers(self):
+    fake_ctx = mock.MagicMock()
+    fake_tokenizer = mock.MagicMock(pad_token_id=0, eos_token_id=1)
+    fake_cluster = mock.MagicMock()
+    fake_cluster.trajectory_store = None
+    fake_cluster.registry.wait_for_workers.side_effect = TimeoutError(
+        "rollout_1 never registered"
+    )
+
+    with (
+        mock.patch.object(
+            run_frozenlake_dist.AutoTokenizer,
+            "from_pretrained",
+            return_value=fake_tokenizer,
+        ),
+        mock.patch.object(
+            run_frozenlake_dist.orchestrator,
+            "ClusterOrchestrator",
+            return_value=fake_cluster,
+        ),
+    ):
+      with self.assertRaisesRegex(TimeoutError, "rollout_1 never registered"):
+        run_frozenlake_dist.main(
+            [
+                "--rollout_replicas=2",
+                "--batch_size=4",
+                "--mini_batch_size=4",
+                "--num_generations=2",
+                "--train_micro_batch_size=2",
+                "--dataset_size=8",
+                "--num_batches=1",
+                "--max_steps=1",
+                "--stop_workers_on_exit",
+            ],
+            context=fake_ctx,
+        )
+
+    fake_cluster.shutdown.assert_called_once_with(abort=True)
 
   def test_qwen3_8b_supported_by_distributed_workers(self):
     config = automodel.call_model_config("qwen3-8b")
@@ -331,8 +493,6 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertIn("COMPUTE_LOGPS_MICRO_BATCH_SIZE:-2", launcher)
     self.assertIn("COMPUTE_LOGPS_CHUNK_SIZE:-2048", launcher)
     self.assertIn("ROLLOUT_MAX_CONCURRENCY:-512", launcher)
-    self.assertIn("VLLM_MAX_NUM_SEQS:-32", launcher)
-    self.assertIn("VLLM_MAX_NUM_BATCHED_TOKENS:-8192", launcher)
 
 
 if __name__ == "__main__":

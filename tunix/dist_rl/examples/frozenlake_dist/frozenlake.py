@@ -19,12 +19,12 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
+import numpy as np
+from tunix.dist_rl.common import registry
+from tunix.dist_rl.orchestrator import dataset_utils
 from examples.frozenlake import agent as frozenlake_agent
 from examples.frozenlake import data as frozenlake_data
 from examples.frozenlake import env as frozenlake_env
-import numpy as np
-from tunix.dist_rl.orchestrator import dataset_utils
-from tunix.dist_rl.common import registry
 
 FROZENLAKE_ENV_NAME = "frozenlake_env"
 FROZENLAKE_AGENT_NAME = "frozenlake_agent"

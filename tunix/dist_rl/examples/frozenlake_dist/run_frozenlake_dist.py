@@ -108,6 +108,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Trajectory group order.",
   )
   parser.add_argument(
+      "--rollout_replicas",
+      type=int,
+      default=int(os.getenv("ROLLOUT_REPLICAS", "1")),
+      help="Minimum number of rollout worker replicas to wait for at startup.",
+  )
+  parser.add_argument(
       "--weight_sync_mode",
       type=weight_sync.WeightSyncMode,
       default=weight_sync.WeightSyncMode(os.getenv("WEIGHT_SYNC_MODE", "none")),
@@ -293,6 +299,8 @@ def _validate_args(
     raise ValueError("episode_timeout_secs must be positive.")
   if args.sampler_is_threshold <= 0:
     raise ValueError("sampler_is_threshold must be positive.")
+  if args.rollout_replicas <= 0:
+    raise ValueError("rollout_replicas must be positive.")
   if args.weight_sync_mode == weight_sync.WeightSyncMode.FALLBACK:
     raise ValueError(
         "weight_sync_mode=fallback does not transfer weights; use none for a "
@@ -356,11 +364,13 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
   logging.info(
       "Starting distributed FrozenLake: model=%s full_batch=%d "
-      "mini_batch=%d generations=%d steps=%d turns=%d weight_sync=%s",
+      "mini_batch=%d generations=%d rollout_replicas=%d steps=%d turns=%d "
+      "weight_sync=%s",
       args.model_id,
       args.batch_size,
       args.mini_batch_size,
       args.num_generations,
+      args.rollout_replicas,
       args.max_steps,
       args.max_turns,
       args.weight_sync_mode,
@@ -400,92 +410,106 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       trajectory_store_config=trajectory_store_config,
       weight_sync_timeouts=weight_sync_timeouts,
   )
-  context.ipc.discovery.on_register(
-      functools.partial(
-          cluster.registry.register_from_hostname,
-          rpc_timeout_s=args.rpc_timeout_s,
+  with orchestrator.managed_cluster_teardown(
+      cluster, stop_workers_on_exit=args.stop_workers_on_exit
+  ):
+    context.ipc.discovery.on_register(
+        functools.partial(
+            cluster.registry.register_from_hostname,
+            rpc_timeout_s=args.rpc_timeout_s,
+        )
+    )
+    logging.info(
+        "Waiting for workers to register (actor=1, rollout=%d,"
+        " reference=%d)...",
+        args.rollout_replicas,
+        1 if args.beta != 0.0 else 0,
+    )
+    cluster.registry.wait_for_workers(
+        min_workers={
+            datatypes.Role.ACTOR: 1,
+            datatypes.Role.ROLLOUT: args.rollout_replicas,
+            datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
+        },
+        timeout=args.init_timeout_s,
+    )
+    logging.info(
+        "Registered workers ready for bring-up: %s",
+        [w.worker_id for w in cluster.registry.infos()],
+    )
+
+    algo_config = _build_algo(args)
+
+    metrics_options = metrics_logger_lib.MetricsLoggerOptions(
+        log_dir=args.log_dir,
+        project_name=args.wandb_project,
+        run_name=args.wandb_run_name,
+        flush_every_n_steps=args.flush_every_n_steps,
+        backend_kwargs={"wandb": {"config": vars(args)}},
+    )
+    program = rl_program.StandardRLProgram(
+        algo_config=algo_config,
+        dataset=frozenlake.iter_prompt_items(
+            dataset=dataset,
+            max_steps=args.max_steps,
+            batch_size=args.batch_size,
+            max_turns=args.max_turns,
+            max_response_length=args.max_response_length,
+            episode_timeout_secs=args.episode_timeout_secs,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            is_slippery=args.is_slippery,
+            use_multistep_prompt=args.use_multistep_prompt,
+            max_staleness=args.max_staleness,
+        ),
+        max_steps=args.max_steps,
+        reward_fns=[],
+        generation_args=datatypes.GenerationArgs(
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            return_logprobs=args.use_rollout_logps,
+        ),
+        batch_size=args.batch_size,
+        batch_config=batch_assembly.BatchConfig(
+            mini_batch_size=args.mini_batch_size,
+            train_micro_batch_size=args.train_micro_batch_size,
+            pad_id=pad_id,
+            eos_id=eos_id,
+            max_prompt_length=args.max_prompt_length,
+            max_response_length=args.max_response_length,
+            max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+            max_segments_per_packed_row=args.max_segments_per_packed_row,
+            num_data_shards=args.num_data_shards,
+        ),
+        metrics_logging_options=metrics_options,
+        trajectory_log_dir=args.trajectory_log_dir,
+        trajectory_store=cluster.trajectory_store,
+        max_staleness=args.max_staleness,
+        group_order=args.trajectory_group_order,
+        sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
+        precompile_trainer=args.trainer_precompile,
+        on_step_begin=lambda step: logging.info(
+            ">>> FrozenLake step %d starting", step
+        ),
+        on_step_end=lambda step, result: logging.info(
+            "<<< FrozenLake step %d finished | %s", step, result
+        ),
+    )
+    try:
+      logging.info("Bringing up remote workers through ClusterOrchestrator...")
+      cluster.bring_up_workers(dummy_data=None)
+      logging.info(
+          "Cluster workers ready: %s. Starting StandardRLProgram execution...",
+          [w.worker_id for w in cluster.registry.infos()],
       )
-  )
-  cluster.registry.wait_for_workers(
-      min_workers={
-          datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: 1,
-          datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
-      },
-      timeout=args.init_timeout_s,
-  )
-
-  algo_config = _build_algo(args)
-
-  metrics_options = metrics_logger_lib.MetricsLoggerOptions(
-      log_dir=args.log_dir,
-      project_name=args.wandb_project,
-      run_name=args.wandb_run_name,
-      flush_every_n_steps=args.flush_every_n_steps,
-      backend_kwargs={"wandb": {"config": vars(args)}},
-  )
-  program = rl_program.StandardRLProgram(
-      algo_config=algo_config,
-      dataset=frozenlake.iter_prompt_items(
-          dataset=dataset,
-          max_steps=args.max_steps,
-          batch_size=args.batch_size,
-          max_turns=args.max_turns,
-          max_response_length=args.max_response_length,
-          episode_timeout_secs=args.episode_timeout_secs,
-          temperature=args.temperature,
-          top_p=args.top_p,
-          top_k=args.top_k,
-          is_slippery=args.is_slippery,
-          use_multistep_prompt=args.use_multistep_prompt,
-          max_staleness=args.max_staleness,
-      ),
-      max_steps=args.max_steps,
-      reward_fns=[],
-      generation_args=datatypes.GenerationArgs(
-          temperature=args.temperature,
-          top_p=args.top_p,
-          top_k=args.top_k,
-          return_logprobs=args.use_rollout_logps,
-      ),
-      batch_size=args.batch_size,
-      batch_config=batch_assembly.BatchConfig(
-          mini_batch_size=args.mini_batch_size,
-          train_micro_batch_size=args.train_micro_batch_size,
-          pad_id=pad_id,
-          eos_id=eos_id,
-          max_prompt_length=args.max_prompt_length,
-          max_response_length=args.max_response_length,
-          max_seq_token_per_tpu=args.max_seq_token_per_tpu,
-          max_segments_per_packed_row=args.max_segments_per_packed_row,
-          num_data_shards=args.num_data_shards,
-      ),
-      metrics_logging_options=metrics_options,
-      trajectory_log_dir=args.trajectory_log_dir,
-      trajectory_store=cluster.trajectory_store,
-      max_staleness=args.max_staleness,
-      group_order=args.trajectory_group_order,
-      sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
-      precompile_trainer=args.trainer_precompile,
-      on_step_begin=lambda step: logging.info(
-          ">>> FrozenLake step %d starting", step
-      ),
-      on_step_end=lambda step, result: logging.info(
-          "<<< FrozenLake step %d finished | %s", step, result
-      ),
-  )
-
-  try:
-    cluster.bring_up_workers(dummy_data=None)
-    cluster.run(program=program, num_steps=args.max_steps, bring_up=False)
-  finally:
-    program.close()
-    if args.stop_workers_on_exit:
-      cluster.shutdown()
-    else:
-      cluster.monitor.close()
-      if cluster.trajectory_store is not None:
-        cluster.trajectory_store.close()
+      cluster.run(program=program, num_steps=args.max_steps, bring_up=False)
+    except BaseException as exc:
+      logging.exception("FATAL: FrozenLake execution failed: %s", exc)
+      raise
+    finally:
+      program.close()
 
   result = program.last_step_result
   if result is not None:
