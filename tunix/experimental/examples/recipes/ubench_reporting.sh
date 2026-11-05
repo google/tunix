@@ -20,7 +20,10 @@
 # On `start`, this file writes to MAXTEXT_OUTPUT_DIR:
 #   logs/rl_topology.yaml      Trainer and rollout topologies and chip counts.
 #   workload_timestamps.yaml   Launch time. uBench ignores older pods.
-#   logs/resolved_config.yaml  uBench config for this run. Written last.
+#   logs/resolved_config.yaml  uBench config for this run.
+# Rerunning `start` with the same JOB_PREFIX overwrites these files with the
+# new launch's values, until `ubench benchmark report` has reported the run
+# (which writes metrics_run_config.yaml and seals the JOB_PREFIX).
 # Then it prints the command that reports the run after it finishes.
 # ==============================================================================
 
@@ -139,8 +142,8 @@ _ubench_main() {
     _ubench_log "gcloud CLI is not installed or not in PATH."
     return 1
   fi
-  if gcloud storage ls "${run_dir}/logs/resolved_config.yaml" > /dev/null 2>&1; then
-    _ubench_log "${run_dir} already has uBench files from an earlier run." \
+  if gcloud storage ls "${run_dir}/metrics_run_config.yaml" > /dev/null 2>&1; then
+    _ubench_log "${run_dir} has already been reported to uBench." \
       "Use a new JOB_PREFIX."
     return 1
   fi
@@ -189,8 +192,8 @@ distributed:
 EOF
 )"
   # Each file is streamed to GCS, so no temporary files are left behind if an
-  # upload fails. resolved_config.yaml goes last: the check above looks for it,
-  # so a failed upload doesn't block a retry.
+  # upload fails. Overwrites any files from an earlier unreported launch with
+  # the same JOB_PREFIX.
   if ! printf '%s\n' "${rl_topology}" |
          _ubench_upload "${run_dir}/logs/rl_topology.yaml" ||
      ! echo "job_start_time: '$(date -u +%Y-%m-%dT%H:%M:%SZ)'" |
@@ -202,7 +205,7 @@ EOF
   fi
 
   _ubench_log "After the run finishes, report it with:"
-  echo "  ubench benchmark report --run-name ${JOB_PREFIX} --gcs-root-path ${root}" >&2
+  echo "  /google/bin/releases/ubench-cli/ubench benchmark report --run-name ${JOB_PREFIX} --gcs-root-path ${root}" >&2
 }
 
 _ubench_main "$@"
