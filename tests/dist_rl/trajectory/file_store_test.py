@@ -881,13 +881,13 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
           expected=True,
       ),
   )
-  def test_requires_mkdir_identifies_local_and_object_store_paths(
+  def test_is_local_filesystem_identifies_local_and_object_store_paths(
       self,
       path: epath.Path,
       expected: bool,
   ) -> None:
-    """Verifies _requires_mkdir returns True only for local filesystem paths."""
-    self.assertEqual(file_store._requires_mkdir(path), expected)
+    """Verifies _is_local_filesystem returns True only for local POSIX paths."""
+    self.assertEqual(file_store._is_local_filesystem(path), expected)
 
   def test_add_step_on_gcs_path_skips_mkdir_and_writes_files(self) -> None:
     """Verifies add_step on a gs:// path skips mkdir and writes files."""
@@ -926,8 +926,8 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     self.assertEqual(
         mock_write.call_args_list,
         [
-            mock.call(meta_path, expected_meta_json),
             mock.call(step_path, expected_step_json),
+            mock.call(meta_path, expected_meta_json),
         ],
     )
 
@@ -942,6 +942,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     meta_path = self.file_s.get_trajectory_metadata_path(
         trajectory_testing.TRAJECTORY_ID_1
     )
+    meta_tmp_path = meta_path.parent / ".metadata.json.tmp"
     with mock.patch.object(
         path_cls, "write_text", autospec=True, side_effect=path_cls.write_text
     ) as mock_write:
@@ -949,9 +950,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
       self.file_s.add_step(step_1, trajectory_testing.METADATA_1)
       self.file_s.flush()
       meta_write_calls = [
-          c
-          for c in mock_write.call_args_list
-          if c.args and c.args[0] == meta_path
+          written_path
+          for (written_path, *_), _ in mock_write.call_args_list
+          if written_path == meta_tmp_path
       ]
       self.assertLen(meta_write_calls, 1)
 
@@ -959,9 +960,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
       self.file_s.add_step(step_2, trajectory_testing.METADATA_1)
       self.file_s.flush()
       meta_write_calls = [
-          c
-          for c in mock_write.call_args_list
-          if c.args and c.args[0] == meta_path
+          written_path
+          for (written_path, *_), _ in mock_write.call_args_list
+          if written_path == meta_tmp_path
       ]
       self.assertLen(meta_write_calls, 1)
 
@@ -985,6 +986,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     meta_path = self.file_s.get_trajectory_metadata_path(
         trajectory_testing.TRAJECTORY_ID_1
     )
+    meta_tmp_path = meta_path.parent / ".metadata.json.tmp"
     with mock.patch.object(
         path_cls, "write_text", autospec=True, side_effect=path_cls.write_text
     ) as mock_write:
@@ -992,9 +994,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
       self.file_s.add_step(trajectory_testing.STEP_2_1, meta_initial)
       self.file_s.flush()
       meta_write_calls = [
-          c
-          for c in mock_write.call_args_list
-          if c.args and c.args[0] == meta_path
+          written_path
+          for (written_path, *_), _ in mock_write.call_args_list
+          if written_path == meta_tmp_path
       ]
       self.assertLen(meta_write_calls, 1)
 
@@ -1002,9 +1004,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
       self.file_s.add_step(trajectory_testing.STEP_2_2, meta_initial)
       self.file_s.flush()
       meta_write_calls = [
-          c
-          for c in mock_write.call_args_list
-          if c.args and c.args[0] == meta_path
+          written_path
+          for (written_path, *_), _ in mock_write.call_args_list
+          if written_path == meta_tmp_path
       ]
       self.assertLen(meta_write_calls, 1)
 
@@ -1012,9 +1014,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
       self.file_s.add_step(trajectory_testing.STEP_2_3, meta_completed)
       self.file_s.flush()
       meta_write_calls = [
-          c
-          for c in mock_write.call_args_list
-          if c.args and c.args[0] == meta_path
+          written_path
+          for (written_path, *_), _ in mock_write.call_args_list
+          if written_path == meta_tmp_path
       ]
       self.assertLen(meta_write_calls, 2)
 
@@ -1022,9 +1024,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
       self.file_s.add_step(trajectory_testing.STEP_2_4, meta_completed)
       self.file_s.flush()
       meta_write_calls = [
-          c
-          for c in mock_write.call_args_list
-          if c.args and c.args[0] == meta_path
+          written_path
+          for (written_path, *_), _ in mock_write.call_args_list
+          if written_path == meta_tmp_path
       ]
       self.assertLen(meta_write_calls, 2)
 
@@ -1032,9 +1034,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
       self.file_s.add_step(trajectory_testing.STEP_2_5, meta_failed)
       self.file_s.flush()
       meta_write_calls = [
-          c
-          for c in mock_write.call_args_list
-          if c.args and c.args[0] == meta_path
+          written_path
+          for (written_path, *_), _ in mock_write.call_args_list
+          if written_path == meta_tmp_path
       ]
       self.assertLen(meta_write_calls, 3)
 
@@ -1068,11 +1070,12 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     meta = trajectory_testing.make_metadata(trajectory_id=traj_id)
     step = trajectory_testing.make_step(step_id=3)
     step_path = self.file_s.get_step_path(traj_id, 3)
+    step_tmp_path = step_path.parent / ".step_000003.json.tmp"
     path_cls = type(self.tmp_dir)
     original_write_text = path_cls.write_text
 
     def fail_only_on_step_write(path_self, *args, **kwargs):
-      if path_self == step_path:
+      if path_self == step_tmp_path:
         raise OSError("Disk full while writing step")
       return original_write_text(path_self, *args, **kwargs)
 
@@ -1125,6 +1128,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     step_1 = trajectory_testing.make_step(step_id=1)
     step_2 = trajectory_testing.make_step(step_id=2)
     meta_path = self.file_s.get_trajectory_metadata_path("traj_retry")
+    meta_tmp_path = meta_path.parent / ".metadata.json.tmp"
 
     fail_once = True
     path_cls = type(self.tmp_dir)
@@ -1132,7 +1136,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
     def write_text_with_transient_failure(path_self, *args, **kwargs):
       nonlocal fail_once
-      if path_self == meta_path and fail_once:
+      if path_self == meta_tmp_path and fail_once:
         fail_once = False
         raise IOError("Transient disk I/O error during metadata write")
       return orig_write_text(path_self, *args, **kwargs)
@@ -1157,6 +1161,99 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
         meta_path.read_text()
     )
     self.assertEqual(saved_meta, meta)
+
+  def test_add_step_stages_temp_files_and_replaces_step_before_metadata(
+      self,
+  ) -> None:
+    """Verifies local writes stage hidden .tmp files and replace step before metadata."""
+    traj_id = trajectory_testing.TRAJECTORY_ID_1
+    step = trajectory_testing.STEP_1_1
+    meta = trajectory_testing.METADATA_1
+    traj_dir = self.file_s.get_trajectory_dir(traj_id)
+    step_path = self.file_s.get_step_path(traj_id, step.step_id)
+    meta_path = self.file_s.get_trajectory_metadata_path(traj_id)
+    path_cls = type(self.tmp_dir)
+
+    with mock.patch.object(
+        path_cls, "replace", autospec=True, side_effect=path_cls.replace
+    ) as mock_replace:
+      self.file_s.add_step(step, meta)
+      self.file_s.flush()
+
+    self.assertEqual(
+        mock_replace.call_args_list,
+        [
+            mock.call(traj_dir / ".step_000001.json.tmp", step_path),
+            mock.call(traj_dir / ".metadata.json.tmp", meta_path),
+        ],
+    )
+    self.assertCountEqual(
+        [entry.name for entry in traj_dir.iterdir()],
+        ["step_000001.json", "metadata.json"],
+    )
+
+  def test_add_step_when_step_write_fails_leaves_prior_metadata_intact(
+      self,
+  ) -> None:
+    """Verifies a failed step write leaves prior metadata and steps intact."""
+    traj_id = trajectory_testing.TRAJECTORY_ID_1
+    meta_running = trajectory_testing.METADATA_1.model_copy(
+        update={"extra": {"status": "RUNNING"}}
+    )
+    meta_completed = trajectory_testing.METADATA_1.model_copy(
+        update={"extra": {"status": "COMPLETED"}}
+    )
+    self.file_s.add_step(trajectory_testing.STEP_2_1, meta_running)
+    self.file_s.flush()
+    traj_dir = self.file_s.get_trajectory_dir(traj_id)
+    step_2_path = self.file_s.get_step_path(
+        traj_id, trajectory_testing.STEP_2_2.step_id
+    )
+    # Create the staging path for step 2 as a directory so writing step 2 fails
+    # with IsADirectoryError while metadata.json remains writable.
+    (traj_dir / ".step_000002.json.tmp").mkdir()
+
+    self.file_s.add_step(trajectory_testing.STEP_2_2, meta_completed)
+    self.file_s.flush()
+
+    self.assertFalse(step_2_path.exists())
+    (recovered_traj,) = self.file_s.get_trajectories([traj_id])
+    self.assertEqual(
+        recovered_traj,
+        meta_running.create_trajectory(steps=[trajectory_testing.STEP_2_1]),
+    )
+
+  def test_local_write_when_replace_fails_cleans_up_temp_file(self) -> None:
+    """Verifies failed local atomic replacement unlinks the staged .tmp file."""
+    traj_id = trajectory_testing.TRAJECTORY_ID_1
+    meta_running = trajectory_testing.METADATA_1.model_copy(
+        update={"extra": {"status": "RUNNING"}}
+    )
+    meta_completed = trajectory_testing.METADATA_1.model_copy(
+        update={"extra": {"status": "COMPLETED"}}
+    )
+    self.file_s.update_metadata(meta_running)
+    self.file_s.flush()
+    traj_dir = self.file_s.get_trajectory_dir(traj_id)
+    step_1_path = self.file_s.get_step_path(
+        traj_id, trajectory_testing.STEP_1_1.step_id
+    )
+    # Create the destination step path as a directory so staging
+    # .step_000001.json.tmp succeeds on disk and replace() fails with
+    # IsADirectoryError.
+    step_1_path.mkdir()
+
+    self.file_s.add_step(trajectory_testing.STEP_1_1, meta_completed)
+    self.file_s.flush()
+
+    self.assertEqual(
+        self.file_s.get_trajectories_metadata([traj_id]),
+        [meta_running],
+    )
+    self.assertCountEqual(
+        [entry.name for entry in traj_dir.iterdir()],
+        ["metadata.json", "step_000001.json"],
+    )
 
   def test_store_recovery_and_persistence_across_instances(self) -> None:
     """Simulates process restart by opening existing run in new store."""

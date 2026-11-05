@@ -98,12 +98,33 @@ def _get_step_path(traj_dir: epath.Path, atif_step_id: int) -> epath.Path:
   return traj_dir / _STEP_FILENAME_TEMPLATE.format(step_id=atif_step_id)
 
 
-def _requires_mkdir(path: epath.Path) -> bool:
-  """Returns whether `path` is on a local filesystem that requires `mkdir`."""
+def _is_local_filesystem(path: epath.Path) -> bool:
+  """Returns whether `path` is on a local POSIX filesystem."""
   # Local POSIX paths are either relative or resolve to a `file://` URI, whereas
   # remote object stores (such as `gs://` or `s3://`) preserve their cloud URI
   # scheme in `as_uri()` even when `str(path)` normalizes to a mount path.
   return not path.is_absolute() or path.as_uri().startswith("file://")
+
+
+def _write_text(path: epath.Path, content: str) -> None:
+  """Writes `content` to `path`, using atomic temp-file replacement locally."""
+  if not _is_local_filesystem(path):
+    path.write_text(content)
+    return
+
+  # Stage the payload in a hidden sibling file on the same filesystem so
+  # `replace()` performs an atomic POSIX rename and concurrent readers never
+  # observe a truncated or partially written JSON file.
+  tmp_path = path.parent / f".{path.name}.tmp"
+  try:
+    tmp_path.write_text(content)
+    tmp_path.replace(path)
+  except BaseException:
+    try:
+      tmp_path.unlink(missing_ok=True)
+    except OSError:
+      pass
+    raise
 
 
 def _read_text_or_none(path: epath.Path) -> str | None:
@@ -273,22 +294,24 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
         traj_id in self._metadata_hash_by_trajectory_id
         or traj_id in self._metrics_by_trajectory_id
     )
-    if not has_dir and _requires_mkdir(task.traj_dir):
+    if not has_dir and _is_local_filesystem(task.traj_dir):
       task.traj_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write step file before metadata.json so a crash or I/O error mid-write
+    # never leaves metadata.json advertising a newer trajectory state (such as
+    # COMPLETED) while the corresponding step file is missing on disk.
+    if task.step is not None:
+      if task.step_path is None:
+        raise RuntimeError("to_atif() must run before _process_task().")
+      _write_text(task.step_path, _dump_json(task.step))
 
     # Only write metadata.json if metadata content has changed.
     if task.metadata is not None:
       meta_json = _dump_json(task.metadata)
       meta_hash = hash(meta_json)
       if self._metadata_hash_by_trajectory_id.get(traj_id) != meta_hash:
-        task.meta_path.write_text(meta_json)
+        _write_text(task.meta_path, meta_json)
         self._metadata_hash_by_trajectory_id[traj_id] = meta_hash
-
-    # Write step file if provided. `step_path` is set by `to_atif()`.
-    if task.step is not None:
-      if task.step_path is None:
-        raise RuntimeError("to_atif() must run before _process_task().")
-      task.step_path.write_text(_dump_json(task.step))
 
     if task.metrics is not None:
       existing = self._metrics_by_trajectory_id.get(traj_id)
