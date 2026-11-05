@@ -3038,7 +3038,7 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
         cluster_config=SimpleNamespace(
             rollout_config=base_rollout.RolloutConfig(max_prompt_length=5),
             training_config=SimpleNamespace(
-                max_seq_token_per_tpu=64,
+                max_seq_tokens_per_device=64,
                 compute_logps_micro_batch_size=1,
                 mini_batch_size=None,
             ),

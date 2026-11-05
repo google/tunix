@@ -19,7 +19,7 @@ from collections.abc import Mapping
 import logging
 import time
 import types
-from typing import Any, Callable, Dict, Optional, Sequence, Union
+from typing import Any, Callable, Dict, Optional, Sequence, TYPE_CHECKING, Union
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import timeouts as timeouts_lib
 from tunix.dist_rl.rollout import collector as collector_lib

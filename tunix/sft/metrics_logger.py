@@ -6,7 +6,6 @@ import enum
 from typing import Any, Callable
 
 from absl import logging
-import jax
 from metrax import logging as metrax_logging
 import numpy as np
 from tunix.utils import env_utils
@@ -52,6 +51,8 @@ class MetricsLoggerOptions:
   def create_backends(self) -> list[LoggingBackend]:
     """Factory method to create a fresh set of live backends."""
     # Only create live backends on the main process.
+    import jax  # pylint: disable=g-import-not-at-top
+
     if jax.process_index() != 0:
       return []
 
@@ -156,9 +157,12 @@ class MetricsLogger:
         if metrics_logger_options
         else []
     )
-    if metrics_logger_options and jax.process_index() == 0:
-      for backend in self._backends:
-        jax.monitoring.register_scalar_listener(backend.log_scalar)
+    if metrics_logger_options:
+      import jax  # pylint: disable=g-import-not-at-top
+
+      if jax.process_index() == 0:
+        for backend in self._backends:
+          jax.monitoring.register_scalar_listener(backend.log_scalar)
 
   def log(
       self,
@@ -174,6 +178,8 @@ class MetricsLogger:
         mode, collections.defaultdict(list)
     )
     mode_metrics[metric_name].append(scalar_value)
+
+    import jax  # pylint: disable=g-import-not-at-top
 
     jax.monitoring.record_scalar(
         f"{metrics_prefix}/{mode}/{metric_name}", scalar_value, step=step  # pyrefly: ignore[bad-argument-type]
@@ -217,7 +223,8 @@ class MetricsLogger:
     for backend in self._backends:
       backend.close()
     try:
+      import jax  # pylint: disable=g-import-not-at-top
+
       jax.monitoring.clear_event_listeners()
-    except Exception:  # pylint: disable=broad-exception-caught
-      # We didn't register the scalar listener, so this is expected.
-      pass
+    except (AttributeError, RuntimeError, ValueError) as err:
+      logging.debug("No scalar listener to clear: %s", err)

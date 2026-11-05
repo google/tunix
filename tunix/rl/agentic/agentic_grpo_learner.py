@@ -642,9 +642,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     have_actor_mesh = actor_mesh is not None and not actor_mesh.empty
     # pack-first: defer old/ref logp to the packed buffer (computed after
     # pack_sequences in the consumer). Leave the non-packed path untouched.
-    is_packed = (
-        self.rl_engine.cluster_config.training_config.max_seq_token_per_tpu
-        is not None
+    is_packed = rl_engine_lib.configs.is_sequence_packing_enabled(
+        self.rl_engine.cluster_config.training_config
     )
 
     configured_compute_logps = (

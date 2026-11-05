@@ -133,7 +133,7 @@
           "max_prompt_length": 1024,
           "max_response_length": 1024,
           "max_segments_per_packed_row": null,
-          "max_seq_token_per_tpu": 4096,
+          "max_seq_tokens_per_device": 4096,
           "mini_batch_size": 4,
           "num_data_shards": 2,
           "pad_id": 151643,

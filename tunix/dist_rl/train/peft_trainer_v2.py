@@ -444,7 +444,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   ):
     # TODO(noghabi): Implement sequence packing for SFT and remove this check.
     if (
-        training_config.max_seq_token_per_tpu is not None
+        configs.is_sequence_packing_enabled(training_config)
         and not self.supports_sequence_packing
     ):
       raise ValueError(
@@ -607,10 +607,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return self
 
   def _is_single_microstep(self) -> bool:
-    return (
-        self.config.get_with_default("gradient_accumulation_steps", 1) == 1
-        and self.config.max_seq_token_per_tpu is None
-    )
+    return self.config.get_with_default(
+        "gradient_accumulation_steps", 1
+    ) == 1 and not configs.is_sequence_packing_enabled(self.config)
 
   def _fwd_bwd_step(
       self,

@@ -21,11 +21,22 @@ from concurrent import futures
 import dataclasses
 import threading
 import time
-from typing import Any, Callable, cast
+from typing import Any, Callable, TYPE_CHECKING, cast
 
 from absl import logging
-import jax
-import jaxtyping
+
+if TYPE_CHECKING:
+  import jax
+  import jaxtyping
+
+
+def __getattr__(name: str) -> Any:
+  if name == "jax":
+    import jax as _jax  # pylint: disable=g-import-not-at-top
+
+    globals()[name] = _jax
+    return _jax
+  raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @dataclasses.dataclass

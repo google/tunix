@@ -16,17 +16,17 @@
 
 import contextlib
 import functools
-from typing import Any, Callable, ContextManager, cast
+from typing import Any, Callable, ContextManager, TYPE_CHECKING, cast
 
-from flax import nnx
-import jax
-import jax.numpy as jnp
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.train import abstract_trainer
 from tunix.dist_rl.worker import abstract_worker
-from tunix.rl import common as rl_common
 from tunix.rl import packing
+
+if TYPE_CHECKING:
+  from flax import nnx  # pylint: disable=g-import-not-at-top
+  import jax  # pylint: disable=g-import-not-at-top
 
 WorkerState = datatypes.WorkerState
 
@@ -46,7 +46,10 @@ def _compute_per_token_logps(
   Returns:
     A JAX Array containing the computed per-token log-probabilities.
   """
-  graphdef, state = nnx.split(model)
+  from flax import nnx as flax_nnx  # pylint: disable=g-import-not-at-top
+  from tunix.rl import common as rl_common  # pylint: disable=g-import-not-at-top
+
+  graphdef, state = flax_nnx.split(model)
   return rl_common.compute_per_token_logps(
       graphdef, state, *args, stop_gradient=True, **kwargs
   )
@@ -441,7 +444,7 @@ class TrainerWorker(abstract_worker.Worker):
                 routed_experts=None if routed is None else routed[sl],
             )
         )
-      result = np.asarray(jnp.concatenate(outs, axis=0), dtype=np.float32)
+      result = np.concatenate(outs, axis=0).astype(np.float32, copy=False)
       self._last_error = None
       return datatypes.LogprobsResponse(
           request_id=items.request_id,

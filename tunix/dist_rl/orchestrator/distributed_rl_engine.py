@@ -39,7 +39,6 @@ from tunix.dist_rl.orchestrator import rl_engine_interface
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import task_session
-from tunix.rl import algo_core
 from tunix.rl import algorithm_config
 from tunix.rl import function_registry
 
@@ -715,6 +714,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         )
         precompile = bool(kwargs.get("precompile", True))
         return_routed_experts = bool(kwargs.get("return_routed_experts", False))
+        from tunix.rl import algo_core  # pylint: disable=g-import-not-at-top
         if role == datatypes.Role.CRITIC:
           # TODO(sizhi): The PPO critic is not supported end to end yet:
           # `create_trainer_payloads` never fills `old_values` and

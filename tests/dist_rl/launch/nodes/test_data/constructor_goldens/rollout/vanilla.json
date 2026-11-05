@@ -96,7 +96,7 @@
       }
     },
     {
-      "tunix.dist_rl.launch.nodes.node_utils.Mesh": {
+      "jax.sharding.Mesh": {
         "args": [
           "<jax.experimental.mesh_utils.create_device_mesh()>"
         ],
@@ -113,7 +113,7 @@
         "kwargs": {
           "dtype": "bfloat16",
           "load_dtype": "float32",
-          "mesh": "<tunix.dist_rl.launch.nodes.node_utils.Mesh()>",
+          "mesh": "<jax.sharding.Mesh()>",
           "model_id": "Qwen3-1.7B",
           "model_path": "/artifacts/models/Qwen3-1.7B"
         }

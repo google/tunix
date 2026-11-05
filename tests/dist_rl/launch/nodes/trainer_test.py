@@ -23,12 +23,14 @@ from absl.testing import absltest
 from jax.sharding import Mesh
 from orbax.checkpoint import v1 as ocp_v1
 from tunix.cli import config as cli_config
+from tunix.cli.utils import model as model_utils
 from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.launch.nodes import trainer
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.worker import trainer_worker
+from tunix.models import automodel
 from tunix.sft import checkpoint_options
 from tunix.utils import maxtext_utils
 
@@ -241,7 +243,7 @@ class TrainerFactoryTest(absltest.TestCase):
         if load_dtype:
           argv.append(f"actor_model_config.load_dtype={load_dtype}")
         with mock.patch.object(
-            trainer.automodel.AutoModel,
+            automodel.AutoModel,
             "from_pretrained",
             return_value=(mock.sentinel.model, "/tmp/model"),
         ) as load:
@@ -264,12 +266,12 @@ class TrainerFactoryTest(absltest.TestCase):
     )
     with (
         mock.patch.object(
-            trainer.automodel.AutoModel,
+            automodel.AutoModel,
             "from_pretrained",
             return_value=(mock.sentinel.model, "/tmp/model"),
         ) as load,
         mock.patch.object(
-            trainer.model_utils,
+            model_utils,
             "apply_lora_to_model",
             return_value=mock.sentinel.lora_model,
         ) as apply_lora,
@@ -397,6 +399,7 @@ class TrainerFactoryTest(absltest.TestCase):
         training_config.checkpoint_root_directory, "/checkpoints/test"
     )
     self.assertFalse(training_config.resume_from_checkpoint_on_init)
+    self.assertIsNone(training_config.max_seq_tokens_per_device)
     self.assertIsNone(training_config.max_seq_token_per_tpu)
     self.assertIsNone(training_config.metrics_logging_options)
     self.assertIsNone(training_config.profiler_options)
@@ -421,11 +424,11 @@ class TrainerFactoryTest(absltest.TestCase):
       self.fail(f"Unexpected checkpointing_options {ckpt!r}.")
     self.assertIsNone(ckpt.device_host_concurrent_gb)
 
-  def test_tunix_trainer_factory_ignores_max_seq_token_per_tpu(self):
+  def test_tunix_trainer_factory_ignores_max_seq_tokens_per_device(self):
     # The field is for MaxText's max_target_length. Under the orchestrator the
     # PeftTrainer never packs -- the SequencePackedBatchAssembler does, and the
     # packing weights arrive on the payload -- so it stays off TrainingConfig.
-    hp = _hp("rl_training_config.max_seq_token_per_tpu=4096")
+    hp = _hp("rl_training_config.max_seq_tokens_per_device=4096")
     with (
         self._tunix_factory_patches(),
         mock.patch.object(
@@ -434,6 +437,9 @@ class TrainerFactoryTest(absltest.TestCase):
     ):
       trainer._create_tunix_trainer_factory(hp)
     mock_training_config.assert_called_once()
+    self.assertNotIn(
+        "max_seq_tokens_per_device", mock_training_config.call_args.kwargs
+    )
     self.assertNotIn(
         "max_seq_token_per_tpu", mock_training_config.call_args.kwargs
     )
@@ -510,7 +516,7 @@ class TrainerFactoryTest(absltest.TestCase):
         "agentic_grpo_config.num_generations=3",
         "rl_training_config.train_micro_batch_size=4",
         "actor_model_config.mesh.shape=(4,1)",
-        "rl_training_config.max_seq_token_per_tpu=4096",
+        "rl_training_config.max_seq_tokens_per_device=4096",
     )
     self.assertEqual(trainer._gradient_accumulation_steps(hp), 1)
 
@@ -620,9 +626,9 @@ class MaxTextTrainerFactoryTest(absltest.TestCase):
     self.assertEqual(kwargs["max_seq_token_per_tpu"], 0)
     self.assertIsNone(kwargs["profiling_options"])
 
-  def test_plumbs_max_seq_token_per_tpu(self, mock_build_cfg, *_):
+  def test_plumbs_max_seq_tokens_per_device(self, mock_build_cfg, *_):
     kwargs = self._build_kwargs(
-        mock_build_cfg, "rl_training_config.max_seq_token_per_tpu=4096"
+        mock_build_cfg, "rl_training_config.max_seq_tokens_per_device=4096"
     )
     self.assertEqual(kwargs["max_seq_token_per_tpu"], 4096)
     self.assertEqual(kwargs["gradient_accumulation_steps"], 1)

@@ -213,9 +213,10 @@ class BatchConfig:
     max_prompt_length: Maximum prompt length for padding or budget validation.
     max_response_length: Maximum response length for padding or budget
       validation.
-    max_seq_token_per_tpu: Maximum packed sequence tokens per TPU. When
-      configured, SequencePackedBatchAssembler is used instead of
+    max_seq_tokens_per_device: Maximum packed sequence tokens per accelerator
+      device. When configured, SequencePackedBatchAssembler is used instead of
       PaddedBatchAssembler.
+    max_seq_token_per_tpu: Deprecated alias for `max_seq_tokens_per_device`.
     max_segments_per_packed_row: Maximum segments per packed row when sequence
       packing is enabled.
     segment_alignment_boundary: Enforces that every packed sequence starts at an
@@ -235,10 +236,41 @@ class BatchConfig:
   train_micro_batch_size: int = 1
   max_prompt_length: int | None = None
   max_response_length: int | None = None
+  max_seq_tokens_per_device: int | None = None
+  # TODO(deprecate): use max_seq_tokens_per_device.
   max_seq_token_per_tpu: int | None = None
   max_segments_per_packed_row: int | None = None
   segment_alignment_boundary: int = packing.DEFAULT_SEGMENT_ALIGNMENT_BOUNDARY
   num_data_shards: int | None = None
+
+  def __post_init__(self) -> None:
+    for field_name, val in (
+        ("max_seq_tokens_per_device", self.max_seq_tokens_per_device),
+        ("max_seq_token_per_tpu", self.max_seq_token_per_tpu),
+    ):
+      if val is not None and (
+          isinstance(val, bool) or not isinstance(val, int) or val < 0
+      ):
+        raise ValueError(
+            f"{field_name} must be a non-negative integer or None, got {val!r}."
+        )
+    if (
+        self.max_seq_tokens_per_device is not None
+        and self.max_seq_token_per_tpu is not None
+        and self.max_seq_tokens_per_device != self.max_seq_token_per_tpu
+    ):
+      raise ValueError(
+          "max_seq_tokens_per_device and max_seq_token_per_tpu must match when"
+          f" both are set, got {self.max_seq_tokens_per_device} vs"
+          f" {self.max_seq_token_per_tpu}."
+      )
+    resolved = (
+        self.max_seq_tokens_per_device
+        if self.max_seq_tokens_per_device is not None
+        else self.max_seq_token_per_tpu
+    )
+    self.max_seq_tokens_per_device = resolved
+    self.max_seq_token_per_tpu = resolved
 
 
 def _extract_trajectory_id(item: Any) -> str:
@@ -1479,14 +1511,14 @@ def create_batch_assembler(
 ) -> BatchAssembler:
   """Builds the batch assembler based on sequence packing or padding parameters.
 
-  If `batch_config.max_seq_token_per_tpu` is provided, a
+  If `batch_config.max_seq_tokens_per_device` is provided, a
   `SequencePackedBatchAssembler` is used. The packing `batch_size` (pack_size)
   is set to `batch_config.num_data_shards` (or defaults to
   `batch_config.train_micro_batch_size` with a warning if not set).
   The packing budget is validated against `batch_config.max_prompt_length` and
   `max_response_length`.
 
-  If `batch_config.max_seq_token_per_tpu` is None and
+  If `batch_config.max_seq_tokens_per_device` is None and
   `batch_config.max_prompt_length` is specified, a `PaddedBatchAssembler` is
   used.
 
@@ -1503,7 +1535,7 @@ def create_batch_assembler(
   mini_batch_size = batch_config.mini_batch_size
   train_micro_batch_size = batch_config.train_micro_batch_size
 
-  if batch_config.max_seq_token_per_tpu is not None:
+  if batch_config.max_seq_tokens_per_device:
     if batch_config.num_data_shards is None:
       logging.warning(
           "num_data_shards is not set, defaulting pack_size to "
@@ -1519,16 +1551,16 @@ def create_batch_assembler(
         and batch_config.max_response_length is not None
     ):
       packing.validate_packing_budget(
-          batch_config.max_seq_token_per_tpu,
+          batch_config.max_seq_tokens_per_device,
           batch_config.max_prompt_length,
           batch_config.max_response_length,
       )
 
     logging.info(
-        "Using SequencePackedBatchAssembler with max_seq_token_per_tpu: %d, "
-        "max_segments_per_packed_row: %s, segment_alignment_boundary: %d, "
-        "pack_size: %d",
-        batch_config.max_seq_token_per_tpu,
+        "Using SequencePackedBatchAssembler with max_seq_tokens_per_device: %d,"
+        " max_segments_per_packed_row: %s, segment_alignment_boundary: %d,"
+        " pack_size: %d",
+        batch_config.max_seq_tokens_per_device,
         batch_config.max_segments_per_packed_row,
         batch_config.segment_alignment_boundary,
         pack_size,
@@ -1537,7 +1569,7 @@ def create_batch_assembler(
         batch_size=pack_size,
         num_generations=num_generations,
         mini_batch_size=mini_batch_size,
-        max_packed_len=batch_config.max_seq_token_per_tpu,
+        max_packed_len=batch_config.max_seq_tokens_per_device,
         pad_id=batch_config.pad_id,
         max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
         segment_alignment_boundary=batch_config.segment_alignment_boundary,

@@ -23,26 +23,21 @@ import logging
 import os
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from flax import nnx
-import jax
-from jax.experimental import mesh_utils
-from jax.sharding import Mesh
-from orbax import checkpoint as ocp
 from tunix.cli import config as cli_config
 from tunix.cli.utils import model as model_utils
 from tunix.common import configs as common_configs
 from tunix.dist_rl.common import otel_setup
-from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import trainer_worker
 from tunix.models import automodel
+from tunix.oss import utils as oss_utils
 from tunix.utils import maxtext_utils
 
-# Import Raiden before any other libraries to ensure correct JAX compilation.
-raiden_preload.import_raiden()
+if TYPE_CHECKING:
+  from jax.sharding import Mesh
 
 REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
@@ -434,9 +429,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
-      "--max_seq_token_per_tpu",
+      "--max_seq_tokens_per_device",
       type=int,
-      default=0,
+      default=None,
       help=(
           "Token budget per packed row, as configured on the orchestrator's"
           " SequencePackedBatchAssembler. MaxText backend only: it becomes"
@@ -445,6 +440,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " trajectory. The Tunix PeftTrainer backend ignores it -- the"
           " orchestrator owns packing there. 0 keeps max_target_length at"
           " max_prompt_length + max_response_length."
+      ),
+  )
+  # TODO(deprecate): use --max_seq_tokens_per_device.
+  parser.add_argument(
+      "--max_seq_token_per_tpu",
+      type=int,
+      default=None,
+      help=(
+          "Deprecated alias for --max_seq_tokens_per_device; kept for legacy"
+          " launcher scripts."
       ),
   )
   parser.add_argument(
@@ -550,7 +555,28 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=os.getenv("RUN_ID", ""),
       help="Run identifier shared between orchestrator and trainer workers.",
   )
-  return parser.parse_args(argv)
+  args = parser.parse_args(argv)
+  if (
+      args.max_seq_tokens_per_device is not None
+      and args.max_seq_token_per_tpu is not None
+      and args.max_seq_tokens_per_device != args.max_seq_token_per_tpu
+  ):
+    parser.error(
+        "--max_seq_tokens_per_device and --max_seq_token_per_tpu must match"
+        f" when both are set, got {args.max_seq_tokens_per_device} vs"
+        f" {args.max_seq_token_per_tpu}."
+    )
+  if args.max_seq_tokens_per_device is not None:
+    budget = args.max_seq_tokens_per_device
+  elif args.max_seq_token_per_tpu is not None:
+    budget = args.max_seq_token_per_tpu
+  else:
+    budget = 0
+  if budget < 0:
+    parser.error("--max_seq_tokens_per_device must be non-negative.")
+  args.max_seq_tokens_per_device = budget
+  args.max_seq_token_per_tpu = budget
+  return args
 
 
 def _nested_safetensors_dirs(model_dir: Path) -> list[str]:
@@ -608,8 +634,6 @@ def _ensure_model_dir_for_trainer(model_dir: str, model_id: str) -> str:
         "\n  ".join(nested_dirs),
     )
   model_path.mkdir(parents=True, exist_ok=True)
-  from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
-
   oss_utils.hf_pipeline(model_id, str(model_path))
   if _has_direct_safetensors(model_path):
     return str(model_path)
@@ -621,6 +645,11 @@ def _ensure_model_dir_for_trainer(model_dir: str, model_id: str) -> str:
 
 
 def _create_mesh(args) -> Mesh:
+  """Creates the 2D `(fsdp, tp)` JAX device mesh for the trainer."""
+  import jax  # pylint: disable=g-import-not-at-top
+  from jax.experimental import mesh_utils  # pylint: disable=g-import-not-at-top
+  from jax.sharding import Mesh  # pylint: disable=g-import-not-at-top
+
   shape = (args.mesh_fsdp, args.mesh_tp)
   if args.mesh_fsdp * args.mesh_tp != jax.device_count():
     raise ValueError(
@@ -669,6 +698,8 @@ def _checkpointing_options(args) -> Any:
   become `read_only` rather than being passed through. Restoring is a separate
   path and keeps working, which is what makes 0 usable for short smoke tests.
   """
+  from orbax import checkpoint as ocp  # pylint: disable=g-import-not-at-top
+
   if args.checkpoint_save_interval_steps < 0:
     raise ValueError(
         "checkpoint_save_interval_steps must be non-negative, got"
@@ -761,6 +792,8 @@ def _maxtext_adamw_options(
 
 def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
   """Creates the trainer factory function and mesh for MaxText's MaxTextTrainingEngine."""
+  import jax  # pylint: disable=g-import-not-at-top
+
   logging.info("Trainer backend: MaxText's MaxTextTrainingEngine.")
   adamw_options = _maxtext_adamw_options(args)
   pad_id = maxtext_utils.get_tokenizer_pad_id(
@@ -817,7 +850,7 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       rollout_mesh_tp=args.rollout_mesh_tp,
       prefuse_moe_weights=args.prefuse_moe_weights,
       use_weight_converter=args.use_weight_converter,
-      max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+      max_seq_token_per_tpu=args.max_seq_tokens_per_device,
       weight_dtype=args.model_load_dtype,
       attention=args.maxtext_attention,
       device_host_concurrent_gb=int(d2h_gb) if d2h_gb else None,
@@ -863,6 +896,8 @@ def _gradient_accumulation_steps(args: argparse.Namespace) -> int:
 
 def _create_tunix_trainer_factory(args) -> tuple[Any, Mesh]:
   """Creates the trainer factory function and mesh for Tunix's PeftTrainer."""
+  from tunix.dist_rl.train import peft_trainer_v2  # pylint: disable=g-import-not-at-top
+
   logging.info("Trainer backend: Tunix's PeftTrainer.")
   grad_accumulation_steps = _gradient_accumulation_steps(args)
   update_trajectories = args.mini_batch_size * args.num_generations
@@ -884,23 +919,23 @@ def _create_tunix_trainer_factory(args) -> tuple[Any, Mesh]:
       data_sharding_axis=("fsdp",),
       checkpointing_options=checkpointing_options,
       checkpoint_root_directory=_checkpoint_root_directory(args),
-      # No max_seq_token_per_tpu here. Under the orchestrator the trainer never
-      # packs: the SequencePackedBatchAssembler does, and the weighting that
-      # packing needs rides in on the payload (`_fwd_bwd_step` accumulates with
-      # `denom=aux.primary_loss.denominator`). The only thing the field would
-      # change on this path is `_is_single_microstep()`, and the orchestrator
-      # drives `fwd_bwd` + `update` rather than the fused step it gates.
-      # The orchestrator owns resume: it calls restore_checkpoint() explicitly.
-      # Orchestrator needs to realign its step/policy_version from the returned
-      # metadata.
+      # No max_seq_tokens_per_device here. Under the orchestrator the trainer
+      # never packs: the SequencePackedBatchAssembler does, and the weighting
+      # that packing needs rides in on the payload (`_fwd_bwd_step` accumulates
+      # with `denom=aux.primary_loss.denominator`). The only thing the field
+      # would change on this path is `_is_single_microstep()`, and the
+      # orchestrator drives `fwd_bwd` + `update` rather than the fused step it
+      # gates. The orchestrator owns resume: it calls restore_checkpoint()
+      # explicitly. Orchestrator needs to realign its step/policy_version from
+      # the returned metadata.
       resume_from_checkpoint_on_init=False,
   )
   if common_configs.is_sequence_packing_enabled(args):
     logging.info(
         "Trainer gradient accumulation is dynamic via sequence packing "
-        "(max_seq_token_per_tpu=%d, mini_batch_size=%d prompt groups, "
+        "(max_seq_tokens_per_device=%d, mini_batch_size=%d prompt groups, "
         "num_generations=%d, update_trajectories=%d).",
-        args.max_seq_token_per_tpu,
+        args.max_seq_tokens_per_device,
         args.mini_batch_size,
         args.num_generations,
         update_trajectories,
@@ -966,6 +1001,7 @@ def main(argv: list[str], context: Any = None) -> None:
       },
   )
 
+  raiden_preload.import_raiden()
   if context:
     context.jax.initialize()
   if REPO_ROOT not in sys.path:

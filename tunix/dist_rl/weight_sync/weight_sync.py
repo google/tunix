@@ -27,19 +27,12 @@ from __future__ import annotations
 
 import abc
 import dataclasses
-import enum
 from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
+from tunix.common import datatypes as common_datatypes
 
-class WeightSyncMode(str, enum.Enum):
-  """Modes for weight synchronization across workers."""
-
-  NONE = "none"
-  FALLBACK = "fallback"
-  RAIDEN = "raiden"
-
-
-DEFAULT_WEIGHT_SYNC_MODE = WeightSyncMode.FALLBACK
+WeightSyncMode = common_datatypes.WeightSyncMode
+DEFAULT_WEIGHT_SYNC_MODE = common_datatypes.DEFAULT_WEIGHT_SYNC_MODE
 
 
 @dataclasses.dataclass(frozen=True)

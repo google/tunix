@@ -32,17 +32,18 @@ import pickle
 import signal
 import sys
 import types
-from typing import Final, Literal, TypeAlias, TypedDict, cast
+from typing import Final, Literal, TYPE_CHECKING, TypeAlias, TypedDict, cast
 
-import jax
-from jax.experimental import mesh_utils
-from jax.sharding import Mesh
 import transformers
 from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.distributed.runtime import context as context_lib
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.worker import abstract_worker
 from tunix.dist_rl.worker import remote_execution
+from tunix.oss import utils as oss_utils
+
+if TYPE_CHECKING:
+  from jax.sharding import Mesh
 
 NodeRole = Literal["trainer", "rollout", "inference"]
 # Every process of a run: the orchestrator and the worker nodes.
@@ -637,6 +638,10 @@ def create_mesh(
     ValueError: If `dp` or `expert` is not 1, or if `fsdp * tp` does not equal
       the visible device count.
   """
+  import jax  # pylint: disable=g-import-not-at-top
+  from jax import sharding as jax_sharding  # pylint: disable=g-import-not-at-top
+  from jax.experimental import mesh_utils  # pylint: disable=g-import-not-at-top
+
   axes = hp.mesh_axes(model_key)
   if axes["dp"] != 1 or axes["expert"] != 1:
     raise ValueError(
@@ -650,7 +655,7 @@ def create_mesh(
         f"Got {model_key}.mesh shape={shape}, devices={jax.device_count()}."
     )
   devices = mesh_utils.create_device_mesh(shape, jax.devices())
-  return Mesh(devices, axis_names=MESH_AXIS_NAMES)
+  return jax_sharding.Mesh(devices, axis_names=MESH_AXIS_NAMES)
 
 
 # TODO(noghabi): Drop `ensure_local_safetensors` and its helpers and let
@@ -663,8 +668,6 @@ def has_direct_safetensors(model_path: pathlib.Path) -> bool:
 
 
 def _download_hf_model(model_id: str, model_dir: str) -> None:
-  from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
-
   oss_utils.hf_pipeline(model_id, model_dir)
 
 
