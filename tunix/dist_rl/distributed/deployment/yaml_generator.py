@@ -15,13 +15,130 @@
 """Generates Kubernetes deployment YAML manifests from templates."""
 
 import argparse
+from collections.abc import Sequence
 import math
 import os
+import re
 import string
+from typing import Any
+
+_K8S_LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$")
+_STANDALONE_PLACEHOLDER_RE = re.compile(
+    r"^(?P<indent>[ \t]*)\$\{(?P<key>[A-Z0-9_]+)\}[ \t]*\n",
+    re.MULTILINE,
+)
+
+_WORKER_NONZERO_EXIT_GUARD = """\
+                  if [ "$EXIT_CODE" -eq 0 ]; then
+                    echo "ERROR: Worker exited with code 0 unexpectedly; forcing exit code 1." >&2
+                    EXIT_CODE=1
+                  fi"""
 
 
-def main() -> None:
-  """Parses command-line arguments and renders a deployment YAML from a template."""
+def _substitute_template(
+    template_text: str, substitutions: dict[str, Any]
+) -> str:
+  """Substitutes template variables, aligning or dropping standalone lines."""
+
+  def _replace_standalone(match: re.Match[str]) -> str:
+    key = match.group("key")
+    if key not in substitutions:
+      return match.group(0)
+    indent = match.group("indent")
+    val = substitutions[key]
+    raw = "" if val is None else str(val).strip("\n")
+    if not raw:
+      return ""
+    lines = raw.splitlines()
+    if indent and not all(
+        not line or line.startswith(indent) for line in lines
+    ):
+      formatted = (
+          "\n".join((indent + line if line else "") for line in lines) + "\n"
+      )
+    else:
+      formatted = raw + "\n"
+    return formatted.replace("$", "$$")
+
+  expanded = _STANDALONE_PLACEHOLDER_RE.sub(_replace_standalone, template_text)
+  return string.Template(expanded).substitute(substitutions)
+
+
+def _env_bool(name: str) -> bool:
+  return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
+
+
+def validate_gang_id(gang_id: str | None) -> None:
+  """Validates gang_id against Kubernetes label value syntax rules."""
+  if not gang_id:
+    return
+  if len(gang_id) > 63 or not _K8S_LABEL_VALUE_RE.fullmatch(gang_id):
+    raise ValueError(
+        f"Invalid gang_id {gang_id!r}: must be a valid Kubernetes label value "
+        "(<=63 chars, alphanumeric start/end, [-A-Za-z0-9_.])."
+    )
+
+
+def render_gang_labels(gang_id: str | None) -> str:
+  """Renders the gang-id label line if gang_id is provided."""
+  if not gang_id:
+    return ""
+  validate_gang_id(gang_id)
+  return f'    scheduling.x-k8s.io/gang-id: "{gang_id}"\n'
+
+
+def render_teardown_on_exit(
+    teardown_gang_on_exit: bool,
+    gang_id: str | None,
+    namespace: str,
+    jobset_name: str,
+) -> str:
+  """Renders a shell block for the CPU orchestrator to delete sibling JobSets."""
+  if not teardown_gang_on_exit:
+    return ""
+  if not gang_id:
+    raise ValueError(
+        "--teardown_gang_on_exit requires --gang_id (or GANG_ID) to be set."
+    )
+  validate_gang_id(gang_id)
+  # A failed delete only warns, so the orchestrator keeps its own exit code.
+  return (
+      f'echo "Orchestrator finished (exit=${{EXIT_CODE}});'
+      f' tearing down sibling JobSets in gang {gang_id}..."\n'
+      "if ! kubectl delete jobsets.jobset.x-k8s.io"
+      f' -n "{namespace}"'
+      f' -l "scheduling.x-k8s.io/gang-id={gang_id}"'
+      f' --field-selector="metadata.name!={jobset_name}"'
+      " --ignore-not-found=true --wait=false; then\n"
+      f'  echo "WARNING: Failed to tear down sibling JobSets in gang {gang_id}'
+      ' (check kubectl and ServiceAccount RBAC)." >&2\n'
+      "fi"
+  )
+
+
+def render_fail_fast_fields(
+    fail_fast: bool, startup_retries: int
+) -> dict[str, str]:
+  """Renders JobSet/Job fail-fast and startup retry fields."""
+  if startup_retries < 0:
+    raise ValueError(f"--startup_retries must be >= 0, got {startup_retries}")
+  if not fail_fast:
+    return {
+        "STARTUP_RETRIES": str(startup_retries),
+        "BACKOFF_LIMIT": "2048000",
+        "RESTART_POLICY": "OnFailure",
+        "WORKER_NONZERO_EXIT_GUARD": "",
+    }
+  return {
+      "STARTUP_RETRIES": str(startup_retries),
+      "BACKOFF_LIMIT": "0",
+      "RESTART_POLICY": "Never",
+      "WORKER_NONZERO_EXIT_GUARD": _WORKER_NONZERO_EXIT_GUARD,
+  }
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+  """Parses command line arguments."""
   parser = argparse.ArgumentParser(
       description="Generate Kubernetes deployment YAML from template."
   )
@@ -53,6 +170,48 @@ def main() -> None:
       "--queue_name",
       default=os.environ.get("KUEUE_QUEUE_NAME", ""),
       help="Kueue local queue name for scheduling (optional).",
+  )
+  parser.add_argument(
+      "--gang_id",
+      default=os.environ.get("GANG_ID"),
+      help=(
+          "Per-run unique identifier shared across all JobSets in a single RL"
+          " run (emits scheduling.x-k8s.io/gang-id JobSet label; must be unique"
+          " per concurrent run in the namespace so teardown only deletes"
+          " sibling JobSets of the same run)."
+      ),
+  )
+  parser.add_argument(
+      "--teardown_gang_on_exit",
+      action="store_true",
+      default=None,
+      help=(
+          "When rendering jobset.cpu.yaml with --gang_id, append a kubectl"
+          " delete of sibling JobSets in the same gang after the orchestrator"
+          " exits (or set TEARDOWN_GANG_ON_EXIT=1)."
+      ),
+  )
+  parser.add_argument(
+      "--fail_fast",
+      action="store_true",
+      default=None,
+      help=(
+          "Disable in-place pod restarts (backoffLimit=0, restartPolicy=Never)"
+          " and map unexpected zero worker exits to 1 (or set FAIL_FAST=1)."
+      ),
+  )
+  parser.add_argument(
+      "--startup_retries",
+      type=int,
+      default=int(os.environ.get("STARTUP_RETRIES") or "3"),
+      help=(
+          "JobSet failurePolicy.maxRestarts (default: STARTUP_RETRIES or 3):"
+          " whole-JobSet recreations over the JobSet's lifetime, not only at"
+          " startup. Trainer/reference workers can re-register only before"
+          " bring_up; with --fail_fast, use --gang_id and"
+          " --teardown_gang_on_exit so the orchestrator's exit deletes the"
+          " sibling JobSets."
+      ),
   )
 
   parser.add_argument(
@@ -154,14 +313,20 @@ def main() -> None:
       help="Command to run on Ray worker pods before joining the Ray cluster.",
   )
 
-  args = parser.parse_args()
+  args = parser.parse_args(argv)
   if not 0 < args.ifrt_proxy_large_transfer_threshold_bytes <= 2**63 - 1:
     # The IFRT proxy client parses the value as a positive int64.
     parser.error(
         "--ifrt_proxy_large_transfer_threshold_bytes must be in [1, 2**63 - 1],"
         f" got {args.ifrt_proxy_large_transfer_threshold_bytes}"
     )
+  return args
 
+
+def build_substitutions(
+    args: argparse.Namespace, template_text: str = ""
+) -> dict[str, Any]:
+  """Computes substitution dictionary for template rendering."""
   tpu_type = None
   tpu_topology = None
   num_chips = None
@@ -208,53 +373,99 @@ def main() -> None:
       raise ValueError(f"Unsupported TPU type {tpu_type}")
 
   jobset_name = args.jobset_name
-  if args.jobset_name is None:
+  if jobset_name is None:
     jobset_name = f"{os.environ.get('USER')}-{pw_instance_type}-{num_chips}"
 
-  queue_label = (
-      f"  labels:\n    kueue.x-k8s.io/queue-name: {args.queue_name}\n"
-      if args.queue_name
-      else ""
+  labels: list[str] = []
+  if args.queue_name:
+    labels.append(f"    kueue.x-k8s.io/queue-name: {args.queue_name}\n")
+  if args.gang_id:
+    labels.append(render_gang_labels(args.gang_id))
+  queue_label = "  labels:\n" + "".join(labels) if labels else ""
+
+  supports_fail_fast = (
+      not template_text or "${WORKER_NONZERO_EXIT_GUARD}" in template_text
+  )
+  fail_fast = (
+      bool(args.fail_fast)
+      if args.fail_fast is not None
+      else (_env_bool("FAIL_FAST") and supports_fail_fast)
+  )
+  supports_teardown = (
+      not template_text or "${TEARDOWN_ON_EXIT}" in template_text
+  )
+  teardown_gang_on_exit = (
+      bool(args.teardown_gang_on_exit)
+      if args.teardown_gang_on_exit is not None
+      else (_env_bool("TEARDOWN_GANG_ON_EXIT") and supports_teardown)
   )
 
-  with open(args.template_file, "r") as f:
-    template = string.Template(f.read())
-    content = template.substitute(
-        JOBSET_NAME=jobset_name,
-        USER=os.environ.get("USER"),
-        NAMESPACE=args.namespace,
-        QUEUE_NAME=args.queue_name,
-        QUEUE_LABEL=queue_label,
-        SERVER_IMAGE=args.pathways_server_image,
-        PROXY_IMAGE=args.pathways_proxy_server_image,
-        GCS_SCRATCH_LOCATION=args.pathways_gcs_scratch_location,
-        PATHWAYS_PROXY_MEMORY_LIMIT=args.pathways_proxy_memory_limit,
-        PATHWAYS_PROXY_MEMORY=args.pathways_proxy_memory,
-        PATHWAYS_RM_MEMORY=args.pathways_rm_memory,
-        USER_CONTAINER_MEMORY=args.user_container_memory,
-        USER_CONTAINER_MEMORY_LIMIT=args.user_container_memory_limit,
-        PATHWAYS_WORKER_MEMORY=args.pathways_worker_memory,
-        IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES=(
-            args.ifrt_proxy_large_transfer_threshold_bytes
-        ),
-        CPU_MACHINE=args.cpu_machine,
-        TPU_MACHINE=tpu_machine,
-        TPU_TYPE=tpu_type,
-        TPU_TOPOLOGY=tpu_topology,
-        PW_INSTANCE_TYPE=pw_instance_type,
-        REPLICAS=1,
-        COMPLETIONS=num_chips // 4 if num_chips else None,
-        PARALLELISM=num_chips // 4 if num_chips else None,
-        PODSET_SLICE_TOPOLOGY=slice_topology,
-        PODSET_SLICE_SIZE=slice_size,
-        USER_CONTAINER=args.worker_container_name,
-        USER_CONTAINER_IMAGE=args.worker_container_image,
-        USER_CONTAINER_PORT=args.worker_container_port,
-        STARTUP_COMMAND=args.worker_startup_command,
-        RAY_HEAD_PRE_INIT_COMMAND=args.ray_head_pre_init_command,
-        RAY_WORKER_PRE_INIT_COMMAND=args.ray_worker_pre_init_command,
+  return {
+      "JOBSET_NAME": jobset_name,
+      "USER": os.environ.get("USER"),
+      "NAMESPACE": args.namespace,
+      "QUEUE_NAME": args.queue_name,
+      "QUEUE_LABEL": queue_label,
+      "TEARDOWN_ON_EXIT": render_teardown_on_exit(
+          teardown_gang_on_exit,
+          args.gang_id,
+          args.namespace,
+          jobset_name,
+      ),
+      **render_fail_fast_fields(fail_fast, args.startup_retries),
+      "SERVER_IMAGE": args.pathways_server_image,
+      "PROXY_IMAGE": args.pathways_proxy_server_image,
+      "GCS_SCRATCH_LOCATION": args.pathways_gcs_scratch_location,
+      "PATHWAYS_PROXY_MEMORY_LIMIT": args.pathways_proxy_memory_limit,
+      "PATHWAYS_PROXY_MEMORY": args.pathways_proxy_memory,
+      "PATHWAYS_RM_MEMORY": args.pathways_rm_memory,
+      "USER_CONTAINER_MEMORY": args.user_container_memory,
+      "USER_CONTAINER_MEMORY_LIMIT": args.user_container_memory_limit,
+      "PATHWAYS_WORKER_MEMORY": args.pathways_worker_memory,
+      "IFRT_PROXY_LARGE_TRANSFER_THRESHOLD_BYTES": (
+          args.ifrt_proxy_large_transfer_threshold_bytes
+      ),
+      "CPU_MACHINE": args.cpu_machine,
+      "TPU_MACHINE": tpu_machine,
+      "TPU_TYPE": tpu_type,
+      "TPU_TOPOLOGY": tpu_topology,
+      "PW_INSTANCE_TYPE": pw_instance_type,
+      "REPLICAS": 1,
+      "COMPLETIONS": num_chips // 4 if num_chips else None,
+      "PARALLELISM": num_chips // 4 if num_chips else None,
+      "PODSET_SLICE_TOPOLOGY": slice_topology,
+      "PODSET_SLICE_SIZE": slice_size,
+      "USER_CONTAINER": args.worker_container_name,
+      "USER_CONTAINER_IMAGE": args.worker_container_image,
+      "USER_CONTAINER_PORT": args.worker_container_port,
+      "STARTUP_COMMAND": args.worker_startup_command,
+      "RAY_HEAD_PRE_INIT_COMMAND": args.ray_head_pre_init_command,
+      "RAY_WORKER_PRE_INIT_COMMAND": args.ray_worker_pre_init_command,
+  }
+
+
+def render_template(template_text: str, args: argparse.Namespace) -> str:
+  """Validates template compatibility and renders substituted YAML."""
+  if args.fail_fast and "${WORKER_NONZERO_EXIT_GUARD}" not in template_text:
+    raise ValueError(
+        f"--fail_fast is not supported by template {args.template_file}"
     )
-    print(content)
+  if args.teardown_gang_on_exit and "${TEARDOWN_ON_EXIT}" not in template_text:
+    raise ValueError(
+        f"--teardown_gang_on_exit is not supported by template"
+        f" {args.template_file}"
+    )
+  substitutions = build_substitutions(args, template_text=template_text)
+  return _substitute_template(template_text, substitutions)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+  """Parses command-line arguments and renders a deployment YAML from a template."""
+  args = parse_args(argv)
+  with open(args.template_file, "r") as f:
+    template_text = f.read()
+  content = render_template(template_text, args)
+  print(content)
 
 
 if __name__ == "__main__":

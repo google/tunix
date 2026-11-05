@@ -17,9 +17,10 @@ kind: JobSet
 metadata:
   name: ${JOBSET_NAME}
   namespace: ${NAMESPACE}
-${QUEUE_LABEL}spec:
+  ${QUEUE_LABEL}
+spec:
   failurePolicy:
-    maxRestarts: 3
+    maxRestarts: ${STARTUP_RETRIES}
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true
@@ -27,16 +28,22 @@ ${QUEUE_LABEL}spec:
   replicatedJobs:
   - name: proc
     template:
+      metadata:
+        annotations:
+          cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       spec:
-        backoffLimit: 2048000
+        backoffLimit: ${BACKOFF_LIMIT}
         completionMode: Indexed
         completions: ${COMPLETIONS}
         parallelism: ${PARALLELISM}
         template:
+          metadata:
+            annotations:
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
           spec:
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
-            restartPolicy: OnFailure
+            restartPolicy: ${RESTART_POLICY}
             terminationGracePeriodSeconds: 10
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
@@ -63,21 +70,28 @@ ${QUEUE_LABEL}spec:
                 - |
                   # PID 1 wrapper: forwards SIGTERM to background child process so K8s
                   # termination grace period shuts down workload cleanly without SIGKILL.
-                  # Polling sleep loop ensures bash wakes up promptly to run trap handler.
+                  # Wait loop wakes up immediately on SIGTERM to run trap handler and wait for
+                  # the subshell's direct foreground child to drain (STARTUP_COMMAND should
+                  # launch the workload directly or via `exec`).
 
                   echo "Program Start: $$(date)"
-                  _sigterm() (kill -SIGTERM $$! 2>/dev/null)
+                  _sigterm() {
+                    pkill -SIGTERM -P "$$PID" 2>/dev/null || kill -SIGTERM $$(cat /proc/$$PID/task/$$PID/children 2>/dev/null) 2>/dev/null || true
+                    kill -SIGTERM "$$PID" 2>/dev/null || true
+                  }
                   trap _sigterm SIGTERM
 
                   (
+                    trap 'exit 143' SIGTERM
                     ${STARTUP_COMMAND}
                   ) & PID=$$!
 
                   while kill -0 $$PID 2>/dev/null; do
-                    sleep 5
+                    wait $$PID 2>/dev/null || true
                   done
                   wait $$PID
                   EXIT_CODE=$$?
+                  ${WORKER_NONZERO_EXIT_GUARD}
 
                   echo "Program End: $$(date)"
                   echo "EXIT_CODE=$$EXIT_CODE"

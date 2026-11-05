@@ -17,11 +17,12 @@ kind: JobSet
 metadata:
   name: ${JOBSET_NAME}
   namespace: ${NAMESPACE}
-${QUEUE_LABEL}spec:
+  ${QUEUE_LABEL}
+spec:
   coordinator:
     replicatedJob: proc
   failurePolicy:
-    maxRestarts: 3
+    maxRestarts: ${STARTUP_RETRIES}
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true
@@ -31,13 +32,17 @@ ${QUEUE_LABEL}spec:
     replicas: ${REPLICAS}
     template:
       metadata:
-        annotations: {}
+        annotations:
+          cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       spec:
         backoffLimit: 0
         completionMode: Indexed
         completions: 1
         parallelism: 1
         template:
+          metadata:
+            annotations:
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
           spec:
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
@@ -71,7 +76,7 @@ ${QUEUE_LABEL}spec:
               emptyDir:
                 medium: Memory
                 sizeLimit: ${USER_CONTAINER_MEMORY_LIMIT}
-            containers:
+            initContainers:
             - name: pathways-rm
               image: ${SERVER_IMAGE}
               imagePullPolicy: IfNotPresent
@@ -142,6 +147,7 @@ ${QUEUE_LABEL}spec:
               volumeMounts:
               - name: ifrt-proxy-large-transfer
                 mountPath: /ifrt_proxy_large_transfer
+            containers:
             - name: ${USER_CONTAINER}
               image: ${USER_CONTAINER_IMAGE}
               imagePullPolicy: Always
@@ -158,7 +164,9 @@ ${QUEUE_LABEL}spec:
                 - |
                   # PID 1 wrapper: forwards SIGTERM to background child process so K8s
                   # termination grace period shuts down workload cleanly without SIGKILL.
-                  # Polling sleep loop ensures bash wakes up promptly to run trap handler.
+                  # Wait loop wakes up immediately on SIGTERM to run trap handler and wait for
+                  # the subshell's direct foreground child to drain (STARTUP_COMMAND should
+                  # launch the workload directly or via `exec`).
 
                   echo "Program Start: $$(date)"
                   # pathways-proxy runs as another user (uid 99 in the Cloud
@@ -173,18 +181,23 @@ ${QUEUE_LABEL}spec:
                     echo "Cannot drop the sticky bit of /ifrt_proxy_large_transfer." >&2
                     exit 1
                   fi
-                  _sigterm() (kill -SIGTERM $$! 2>/dev/null)
+                  _sigterm() {
+                    pkill -SIGTERM -P "$$PID" 2>/dev/null || kill -SIGTERM $$(cat /proc/$$PID/task/$$PID/children 2>/dev/null) 2>/dev/null || true
+                    kill -SIGTERM "$$PID" 2>/dev/null || true
+                  }
                   trap _sigterm SIGTERM
 
                   (
+                    trap 'exit 143' SIGTERM
                     ${STARTUP_COMMAND}
                   ) & PID=$$!
 
                   while kill -0 $$PID 2>/dev/null; do
-                    sleep 5
+                    wait $$PID 2>/dev/null || true
                   done
                   wait $$PID
                   EXIT_CODE=$$?
+                  ${WORKER_NONZERO_EXIT_GUARD}
 
                   echo "Program End: $$(date)"
                   echo "EXIT_CODE=$$EXIT_CODE"
@@ -237,6 +250,7 @@ ${QUEUE_LABEL}spec:
         template:
           metadata:
             annotations:
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
               # # place on nodes in the same block
               # kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
               # # place on nodes in the same slice
