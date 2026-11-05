@@ -302,6 +302,7 @@ class TrajectoryCollectEngine:
           status=status,
           env_time=self.env_time,
           reward_time=self.reward_time,
+          gamma=self.gamma,
       )
 
   def _store_add_step(self, step: Any) -> None:
@@ -415,15 +416,6 @@ class TrajectoryCollectEngine:
           await asyncio.wait({close_task}, timeout=0.05)
         else:
           await self._close()
-        if self.trajectory_store is not None and self.metadata is not None:
-          for i, step in enumerate(self.agent.trajectory.steps):
-            agent_step = converter_lib.create_agent_step(
-                step,
-                tunix_step_id=i,
-                policy_version=self.policy_version,
-            )
-            if agent_step is not None:
-              self._store_add_step(agent_step)
     except asyncio.TimeoutError:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
       raise

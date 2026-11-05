@@ -163,9 +163,6 @@ def create_agent_step(
       assistant_masks=step.assistant_masks,
       logprobs=step.logprobs,
       policy_version=effective_policy_version,
-      mc_return=(
-          float(step.mc_return) if step.mc_return is not None else None
-      ),
       extra=extra or None,
   )
 
@@ -243,7 +240,6 @@ def to_tunix_step(
   assistant_tokens = None
   assistant_masks = None
   logprobs = None
-  mc_return = 0.0
 
   if agent_step is not None:
     thought = agent_step.reasoning_content or ""
@@ -268,9 +264,6 @@ def to_tunix_step(
     assistant_tokens = getattr(agent_step, "assistant_tokens", None)
     assistant_masks = getattr(agent_step, "assistant_masks", None)
     logprobs = getattr(agent_step, "logprobs", None)
-    mc_return_val = getattr(agent_step, "mc_return", None)
-    if mc_return_val is not None:
-      mc_return = float(mc_return_val)
 
     if agent_step.metrics is not None:
       if (
@@ -320,7 +313,6 @@ def to_tunix_step(
       observation=observation,
       reward=reward,
       done=done,
-      mc_return=mc_return,
       assistant_tokens=_to_numpy_or_none(assistant_tokens),
       assistant_masks=_to_numpy_or_none(assistant_masks),
       env_tokens=_to_numpy_or_none(env_tokens),
@@ -355,11 +347,10 @@ def to_tunix_trajectory(
         "prompt_id" in traj
         or "status" in traj
         or "total_reward" in traj
+        or "gamma" in traj
         or traj.get("schema_version", "").startswith("Tunix")
         or any(
-            step.get("step_id") == 0
-            or "mc_return" in step
-            or "reward" in step
+            step.get("step_id") == 0 or "reward" in step
             for step in traj.get("steps", [])
             if isinstance(step, dict)
         )
@@ -402,6 +393,17 @@ def to_tunix_trajectory(
       dto_steps.append(dto_step)
       converted_step_idx += 1
 
+  gamma = (
+      float(traj_obj.gamma)
+      if isinstance(traj_obj, trajectory_lib.TunixTrajectory)
+      and traj_obj.gamma is not None
+      else 1.0
+  )
+  g = 0.0
+  for dto_step in reversed(dto_steps):
+    g = dto_step.reward + gamma * g
+    dto_step.mc_return = g
+
   total_reward = getattr(traj_obj, "total_reward", None)
   reward = float(total_reward) if total_reward is not None else 0.0
 
@@ -436,6 +438,7 @@ def create_trajectory_metadata(
         str | agent_types.TrajectoryStatus | None
     ) = None,
     extra: dict[str, Any] | None = None,
+    gamma: float | None = None,
 ) -> trajectory_lib.TunixTrajectoryMetadata:
   """Constructs TunixTrajectoryMetadata from rollout request and agent state."""
   meta_extra = dict(getattr(request, "metadata", None) or {})
@@ -470,6 +473,7 @@ def create_trajectory_metadata(
       target_policy_versions=target_policy_versions,
       status=status_str,
       total_reward=getattr(traj_obj, "reward", None),
+      gamma=(float(gamma) if gamma is not None else None),
       hyperparams=getattr(request, "generation_kwargs", None),
       env_time=getattr(traj_obj, "env_time", None),
       reward_time=getattr(traj_obj, "reward_time", None),
@@ -491,6 +495,7 @@ def update_trajectory_metadata(
     reward_time: dict[str, Any] | None = None,
     model_time: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
+    gamma: float | None = None,
 ) -> trajectory_lib.TrajectoryMetadata:
   """Updates an existing TrajectoryMetadata with latest agent/trajectory state.
 
@@ -504,6 +509,7 @@ def update_trajectory_metadata(
     reward_time: Optional explicit reward timing dictionary.
     model_time: Optional explicit model timing dictionary.
     extra: Optional dictionary of extra metadata fields to merge.
+    gamma: Optional discount factor for Monte Carlo return calculation.
 
   Returns:
     The updated TrajectoryMetadata instance.
@@ -578,5 +584,11 @@ def update_trajectory_metadata(
     if metadata.extra is None:
       metadata.extra = {}
     metadata.extra.update(extra)
+
+  if (
+      isinstance(metadata, trajectory_lib.TunixTrajectoryMetadata)
+      and gamma is not None
+  ):
+    metadata.gamma = float(gamma)
 
   return metadata
