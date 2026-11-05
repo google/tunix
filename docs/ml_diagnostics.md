@@ -51,7 +51,9 @@ To enable ML Diagnostics in a training script that runs Tunix RL algorithms
     `requirements/maxtext_requirements.txt`.)*
 
 2.  **Initialize `machinelearning_run`** in your training script before creating
-    `RLCluster`.
+    `RLCluster`. Pass `rl_orchestrator="TUNIX"` (SDK `>= 1.0.9`) so the run is
+    labelled `rl_orchestrator=tunix` and can be filtered by orchestrator in the
+    ML Diagnostics UI.
 
 3.  **Pass `MLDiagScalarBackend` to `MetricsLoggerOptions`** (alongside
     `TensorboardBackend` if TensorBoard logging is also desired) and
@@ -125,6 +127,7 @@ mldiag.machinelearning_run(
     configs={"algo": "grpo", "num_generations": 2},
     gcs_path="gs://<your_gcs_bucket>/mldiagnostics",
     on_demand_xprof=False,
+    rl_orchestrator="TUNIX",  # Labels the run `rl_orchestrator=tunix`.
 )
 
 # 2. Build metrics logging and per-role profiling configs.
