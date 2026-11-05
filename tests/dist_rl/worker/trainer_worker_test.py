@@ -21,7 +21,9 @@ per-token log-prob scorer run through AbstractTrainer.fwd_only.
 
 import dataclasses
 import functools
+import importlib
 import os
+import sys
 import threading
 from typing import Any
 from unittest import mock
@@ -40,6 +42,7 @@ from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.testing import otel_testing
 from tunix.dist_rl.train import abstract_trainer
+from tunix.dist_rl.train import jax_logps
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.worker import otel_metrics
 from tunix.dist_rl.worker import trainer_worker
@@ -61,7 +64,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     self.eval_step_calls = []
     # Payloads passed to `fwd_only`.
     self.fwd_only_calls = []
-    self.fwd_only_fn = None
+    self._fwd_only_fn = None
     self.model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     self.policy_version = 3
     self.step_count = 10
@@ -89,14 +92,16 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     self.eval_step_calls.append(payload)
 
   def with_fwd_only_fn(self, fn):
-    self.fwd_only_fn = fn
+    self._fwd_only_fn = fn
     return self
 
   def fwd_only(self, payload):
-    if self.fwd_only_fn is None:
+    if self._fwd_only_fn is None:
       raise ValueError("FakeTrainer.fwd_only needs with_fwd_only_fn() first.")
     self.fwd_only_calls.append(payload)
-    return self.fwd_only_fn(self.model, payload)
+    return self._fwd_only_fn(self.model, payload)
+
+  compute_per_token_logps = jax_logps.compute_trainer_per_token_logps
 
   def save_checkpoint(self, metadata=None, *, step=None, force=False):
     pass
@@ -117,7 +122,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     pass
 
 
-class TrainerWorkerTest(absltest.TestCase):
+class TrainerWorkerTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -723,6 +728,8 @@ class TrainerWorkerTest(absltest.TestCase):
         self.fwd_only_calls.append((fn, args, kwargs))
         return fn(self.model, *args, **kwargs)
 
+      compute_per_token_logps = jax_logps.compute_trainer_per_token_logps
+
     legacy_trainer = _LegacyFakeTrainer()
     worker = trainer_worker.TrainerWorker(
         trainer_factory=lambda: legacy_trainer,
@@ -736,6 +743,53 @@ class TrainerWorkerTest(absltest.TestCase):
     result = worker.per_token_logps(items=request)
 
     self.assertLen(legacy_trainer.fwd_only_calls, 2)
+    np.testing.assert_allclose(
+        result.per_token_logps,
+        self._expected_logps(request),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+  def test_per_token_logps_dispatches_all_micro_batches_before_host_transfer(
+      self,
+  ):
+    events: list[str] = []
+
+    class _DeferredDeviceArray:
+
+      def __init__(self, arr: np.ndarray, idx: int):
+        self._arr = arr
+        self._idx = idx
+
+      def __array__(self, dtype=None):
+        events.append(f"materialize_{self._idx}")
+        return np.asarray(self._arr, dtype=dtype)
+
+    class _AsyncTrackingTrainer(FakeTrainer):
+
+      def compute_per_token_logps(self, prompt_tokens, completion_tokens, **kw):
+        idx = len(self.fwd_only_calls)
+        events.append(f"dispatch_{idx}")
+        out = super().compute_per_token_logps(
+            prompt_tokens, completion_tokens, **kw
+        )
+        return _DeferredDeviceArray(np.asarray(out), idx)
+
+    async_trainer = _AsyncTrackingTrainer()
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: async_trainer,
+        worker_id="async_trainer",
+        logps_micro_batch_size=2,
+    )
+    worker.initialize()
+    request = self._unpacked_request(temperature=0.7)
+
+    result = worker.per_token_logps(items=request)
+
+    self.assertEqual(
+        events,
+        ["dispatch_0", "dispatch_1", "materialize_0", "materialize_1"],
+    )
     np.testing.assert_allclose(
         result.per_token_logps,
         self._expected_logps(request),
@@ -1780,6 +1834,130 @@ class TrainerWorkerOTelMetricsTest(parameterized.TestCase):
       elif rpc_case == "compile":
         self.worker.compile({"dummy": 1})
     self.assertEqual(self.worker._otel.last_free_time_s, 42.0)
+
+
+class NonJaxTrainerWorkerTest(absltest.TestCase):
+
+  def test_non_jax_trainer_scores_logps_without_jax(self):
+    class PureNumpyTrainer(abstract_trainer.AbstractTrainer):
+
+      def __init__(self, config: Any = None):
+        del config
+        self.policy_version = 7
+
+      def with_loss_fn(self, loss_fn, has_aux=False):
+        del loss_fn, has_aux
+        return self
+
+      def with_gen_model_input_fn(self, gen_model_input_fn):
+        del gen_model_input_fn
+        return self
+
+      def compile(self, dummy_data=None):
+        del dummy_data
+
+      def fwd_bwd(self, payload):
+        del payload
+
+      def update(self):
+        return 1
+
+      def eval_step(self, payload):
+        del payload
+
+      def with_fwd_only_fn(self, fn):
+        del fn
+        return self
+
+      def fwd_only(self, payload):
+        raise AssertionError("TrainerWorker must not call JAX fwd_only")
+
+      def compute_per_token_logps(
+          self,
+          prompt_tokens,
+          completion_tokens,
+          *,
+          pad_id,
+          eos_id,
+          temperature=1.0,
+          chunk_size=0,
+          segment_ids=None,
+          segment_positions=None,
+          routed_experts=None,
+      ):
+        del prompt_tokens, pad_id, eos_id, chunk_size
+        del segment_ids, segment_positions, routed_experts
+        return -float(temperature) * np.ones(
+            completion_tokens.shape, dtype=np.float32
+        )
+
+      def save_checkpoint(self, metadata=None, *, step=None, force=False):
+        del metadata, step, force
+
+      def restore_checkpoint(self, *, step=None):
+        del step
+        return {}
+
+      def prepare_weight_sync(self, *, sync_request=None):
+        del sync_request
+        return None
+
+      def get_metrics(self):
+        return {}
+
+      def close(self):
+        pass
+
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=PureNumpyTrainer,
+        worker_id="torch_trainer_0",
+        logps_micro_batch_size=2,
+    )
+    worker.initialize()
+    req = datatypes.LogprobsRequest(
+        request_id="req-pure-np",
+        prompt_tokens=np.ones((3, 2), dtype=np.int32),
+        completion_tokens=np.ones((3, 4), dtype=np.int32),
+        pad_id=0,
+        eos_id=2,
+        temperature=0.5,
+    )
+    resp = worker.per_token_logps(req)
+    self.assertEqual(resp.model_version, 7)
+    self.assertIsInstance(resp.per_token_logps, np.ndarray)
+    np.testing.assert_allclose(
+        resp.per_token_logps,
+        np.full((3, 4), -0.5, dtype=np.float32),
+    )
+    worker.stop()
+
+  def test_importing_trainer_worker_keeps_ml_frameworks_unloaded(self):
+    forbidden = (
+        "jax",
+        "flax",
+        "optax",
+        "torch",
+        "tpu_raiden",
+        "tpu_sync",
+    )
+    with mock.patch.dict(sys.modules):
+      for name in list(sys.modules):
+        if (
+            name == "tunix"
+            or name.startswith("tunix.")
+            or name.endswith(".tunix")
+            or ".tunix." in name
+        ):
+          sys.modules.pop(name, None)
+        elif any(
+            name == pkg or name.startswith(f"{pkg}.") or f".{pkg}" in name
+            for pkg in forbidden
+        ):
+          sys.modules[name] = None
+      for pkg in forbidden:
+        sys.modules[pkg] = None
+      mod = importlib.import_module("tunix.dist_rl.worker.trainer_worker")
+      self.assertTrue(hasattr(mod, "TrainerWorker"))
 
 
 if __name__ == "__main__":

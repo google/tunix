@@ -614,6 +614,36 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
       raise ValueError("FakeTrainer.fwd_only needs with_fwd_only_fn() first.")
     return self._fwd_only_fn(None, payload)
 
+  def compute_per_token_logps(
+      self,
+      prompt_tokens: np.ndarray,
+      completion_tokens: np.ndarray,
+      *,
+      pad_id: int,
+      eos_id: int,
+      temperature: float = 1.0,
+      chunk_size: int = 0,
+      segment_ids: np.ndarray | None = None,
+      segment_positions: np.ndarray | None = None,
+      routed_experts: np.ndarray | None = None,
+  ) -> np.ndarray:
+    del chunk_size
+    payload = datatypes.LogprobsScoringPayload(
+        prompt_ids=prompt_tokens,
+        completion_ids=completion_tokens,
+        pad_id=int(pad_id),
+        eos_id=int(eos_id),
+        temperature=temperature,
+        segment_ids=segment_ids,
+        segment_positions=segment_positions,
+        routed_experts=routed_experts,
+    )
+    if self._fwd_only_fn is not None:
+      return np.asarray(self.fwd_only(payload), dtype=np.float32)
+    self.fwd_only_calls += 1
+    self._record_rl_routed(routed_experts)
+    return np.zeros(completion_tokens.shape, dtype=np.float32)
+
   def save_checkpoint(
       self,
       metadata: Any = None,

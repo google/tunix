@@ -36,6 +36,7 @@ import optax
 from tunix.common import configs
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.train import abstract_trainer
+from tunix.dist_rl.train import jax_logps
 from tunix.dist_rl.train import jax_pytrees  # pylint: disable=unused-import
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
@@ -1337,6 +1338,34 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       self._jitted_fwd_only_fn = jax.jit(self._fwd_only_fn)
     graphdef, state = nnx.split(self.model)
     return self._jitted_fwd_only_fn(graphdef, state, payload)
+
+  @override
+  def compute_per_token_logps(
+      self,
+      prompt_tokens: np.ndarray,
+      completion_tokens: np.ndarray,
+      *,
+      pad_id: int,
+      eos_id: int,
+      temperature: float = 1.0,
+      chunk_size: int = 0,
+      segment_ids: np.ndarray | None = None,
+      segment_positions: np.ndarray | None = None,
+      routed_experts: np.ndarray | None = None,
+  ) -> jax.Array | np.ndarray:
+    """Computes per-token log-probabilities via `fwd_only` on `self.model`."""
+    return jax_logps.compute_trainer_per_token_logps(
+        self,
+        prompt_tokens,
+        completion_tokens,
+        pad_id=pad_id,
+        eos_id=eos_id,
+        temperature=temperature,
+        chunk_size=chunk_size,
+        segment_ids=segment_ids,
+        segment_positions=segment_positions,
+        routed_experts=routed_experts,
+    )
 
   @override
   def save_checkpoint(

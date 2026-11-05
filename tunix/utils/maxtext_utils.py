@@ -23,6 +23,9 @@ import os
 import types
 from typing import Any
 
+from tunix.dist_rl.train import abstract_trainer
+from tunix.dist_rl.train import jax_logps
+
 
 @dataclasses.dataclass(frozen=True)
 class ProfilerOptions:
@@ -853,6 +856,20 @@ def create_maxtext_engine(
   # TODO(tunix-dev): [legacy-maxtext-a2cf3bc8b] Remove once legacy pinned
   # MaxText images predating `rollout_weight_dtype` are retired.
   _configure_target_free_rollout_dtypes(engine, maxtext_config)
+
+  engine_cls = maxtext_engine.MaxTextTrainingEngine
+  if isinstance(engine_cls, type):
+    # Register `MaxTextTrainingEngine` as a virtual subclass of
+    # `AbstractTrainer` and bind `compute_per_token_logps` on the class so
+    # `isinstance`/`issubclass` and method lookup agree without forcing the
+    # external MaxText library to inherit from `AbstractTrainer`.
+    if not callable(getattr(engine_cls, "compute_per_token_logps", None)):
+      setattr(
+          engine_cls,
+          "compute_per_token_logps",
+          jax_logps.compute_trainer_per_token_logps,
+      )
+    abstract_trainer.AbstractTrainer.register(engine_cls)
 
   model_type = type(engine.model).__name__
   logging.info(
