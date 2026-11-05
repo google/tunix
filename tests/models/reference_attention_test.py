@@ -136,9 +136,7 @@ class ReferenceAttentionTest(parameterized.TestCase):
         )(),
         (None, None, None, None, None, 1, 1),
     )
-    prev_mesh = jax.sharding.get_mesh()
-    try:
-      jax.sharding.set_mesh(single_mesh)
+    with jax.set_mesh(single_mesh):
       mesh_out, shd_b_set, _, shd_n_set, _, _, _, _ = (
           reference_attention_lib.resolve_splash_sharding(
               ("fsdp", None, "tp", None), batch_size=2, kv_heads=2
@@ -158,9 +156,6 @@ class ReferenceAttentionTest(parameterized.TestCase):
         return jnp.int32(h_shd)
 
       self.assertEqual(int(_check_in_jit()), 1)
-    finally:
-      if prev_mesh is not None and not prev_mesh.empty:
-        jax.sharding.set_mesh(prev_mesh)
 
   def test_prepare_attention_mask_rectangular_and_validation(self):
     # Rectangular q_len < kv_len with all-False padding row 0 gets diag guard

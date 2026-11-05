@@ -48,7 +48,9 @@ def create_dummy_model(
     Model instance with randomly initialized weights (sharded if a mesh is provided).
 
   """
-  context_manager = mesh if mesh is not None else contextlib.nullcontext()
+  context_manager = (
+      jax.set_mesh(mesh) if mesh is not None else contextlib.nullcontext()
+  )
 
   with context_manager:
     # Build abstract model to obtain param shapes without allocating full tensors.
