@@ -45,8 +45,6 @@ if TYPE_CHECKING:
   from vllm.inputs import TextPrompt, TokensPrompt
   from vllm.sampling_params import SamplingParams as VllmSamplingParams
 
-os.environ["VLLM_USE_V1"] = "0"
-
 Sampler = base_sampler_lib.Sampler
 logger = logging.getLogger(__name__)
 
