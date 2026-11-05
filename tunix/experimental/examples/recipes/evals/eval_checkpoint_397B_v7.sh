@@ -24,8 +24,8 @@ set -e
 #
 # Behavior:
 # - Scales Qwen3.5-397B-A17B rollout evaluation to 512 TPU v7x chips by default
-#   (32 replicas x 16 chips tpu7x:2x2x4, BATCH_SIZE=128, MAX_CONCURRENCY=512,
-#   MAX_WARMPOOL_REPLICAS=32).
+#   (32 replicas x 16 chips tpu7x:2x2x4, BATCH_SIZE=64, MAX_CONCURRENCY=256,
+#   MAX_WARMPOOL_REPLICAS=2).
 # - Auto-detects cluster/pod (us-east1 -> pod2, us-central1 -> pod1).
 # - Auto-discovers <run>/mllog/eval_checkpoints.jsonl when present so
 #   eval_start, eval_accuracy, eval_stop, and run_stop are appended to the
@@ -140,9 +140,14 @@ fi
 export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x4}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-32}"
 export NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
-export BATCH_SIZE="${BATCH_SIZE:-128}"
-export MAX_CONCURRENCY="${MAX_CONCURRENCY:-512}"
-export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-32}"
+export BATCH_SIZE="${BATCH_SIZE:-64}"
+export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
+export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-2}"
+
+# CPU node pool placement defaults (align head pod and orchestrator to avoid pool sprawl)
+export HEAD_NODEPOOL="${HEAD_NODEPOOL:-cpu-np}"
+export CPU_NODEPOOL="${CPU_NODEPOOL:-${HEAD_NODEPOOL}}"
+export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-c3d-np}"
 
 # ==============================================================================
 # Auto-discover Manifest Metadata (<run>/mllog/eval_checkpoints.jsonl)
