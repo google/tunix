@@ -1065,12 +1065,12 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
     config = algorithm_config.GRPOConfig()
     config.temperature = 1.0  # Set from the rollout config by the learner.
 
-    def kl_penalty_grad(ref_logp):
+    def kl_penalty_grad(ref_logp: float) -> jax.Array:
       example = self._example(
           ref_per_token_logps=jnp.full((2, 3), ref_logp, jnp.float32)
       )
 
-      def kl_penalty(model):
+      def kl_penalty(model: nnx.Module) -> jax.Array:
         out = algo_core.grpo_loss_fn(
             model, example, config, pad_id=0, eos_id=-1
         )
