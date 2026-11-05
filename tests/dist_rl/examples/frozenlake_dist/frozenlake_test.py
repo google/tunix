@@ -14,10 +14,8 @@
 
 """Tests for the self-contained distributed FrozenLake recipe."""
 
-import os
 from pathlib import Path
 import unittest
-from unittest import mock
 
 from absl.testing import absltest
 
@@ -32,7 +30,6 @@ except ImportError:
 import datasets
 from tunix.dist_rl.common import registry
 from tunix.dist_rl.examples.frozenlake_dist import frozenlake
-from tunix.dist_rl.examples.frozenlake_dist import run_frozenlake_dist
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import orchestrator
 from tunix.models import automodel
@@ -42,24 +39,14 @@ from examples.frozenlake import env as frozenlake_env
 
 # pylint: enable=g-import-not-at-top
 
-_DATA_MODULE = "tunix.dist_rl.examples.frozenlake_dist.frozenlake"
+_FROZENLAKE_YAML = Path(frozenlake.__file__).parent / "frozenlake.yaml"
 
 
-def _orchestrator_config(
-    *overrides: str,
-) -> resolve_config.DistHyperParameters:
-  """Returns a config that loads 12 of 32 generated maps from this module."""
-  return resolve_config.initialize([
-      f"data_module={_DATA_MODULE}",
-      "task_name=frozenlake",
-      "data_config.size=32",
-      "data_config.limit=12",
-      "agentic_grpo_config.beta=0.0",
-      "agentic_grpo_config.max_turns=8",
-      # A local path needs no `HF_TOKEN`; nothing loads the tokenizer here.
-      "tokenizer_config.tokenizer_path=/unused/tokenizer",
-      *overrides,
-  ])
+def _hp(*overrides: str) -> resolve_config.DistHyperParameters:
+  """Resolves `frozenlake.yaml` on top of `base_dist_config.yaml`."""
+  return resolve_config.initialize(
+      [f"override_config_file={_FROZENLAKE_YAML}", *overrides]
+  )
 
 
 class FrozenLakeDistTest(absltest.TestCase):
@@ -169,284 +156,6 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertEqual(action.action, "3")
     self.assertEqual(agent.trajectory.steps[-1].action, "3")
 
-  def test_prompt_item_carries_distributed_env_and_agent_config(self):
-    item = frozenlake.build_prompt_item(
-        entry={"seed": 1, "size": 4, "p": 0.75},
-        prompt_idx=2,
-        max_turns=8,
-        max_response_length=2048,
-        episode_timeout_secs=600,
-        temperature=0.7,
-        top_p=1.0,
-        top_k=0,
-        is_slippery=False,
-        use_multistep_prompt=True,
-    )
-
-    self.assertEqual(item["prompt_id"], "frozenlake_2")
-    self.assertEqual(item["task_name"], "frozenlake")
-    self.assertEqual(item["max_turns"], 8)
-    self.assertEqual(item["max_response_length"], 2048)
-    self.assertEqual(item["generation_kwargs"]["temperature"], 0.7)
-    self.assertEqual(item["metadata"]["env_config"]["max_steps"], 8)
-    self.assertEqual(
-        item["metadata"]["agent_config"], {"use_multistep_prompt": True}
-    )
-
-  def test_prompt_iterator_emits_one_full_batch_per_step(self):
-    items = list(
-        frozenlake.iter_prompt_items(
-            dataset=[{"seed": 1, "size": 2, "p": 0.8}],
-            max_steps=2,
-            batch_size=3,
-            max_turns=4,
-            max_response_length=64,
-            episode_timeout_secs=30,
-            temperature=0.7,
-            top_p=1.0,
-            top_k=0,
-            is_slippery=False,
-            use_multistep_prompt=True,
-        )
-    )
-    self.assertLen(items, 6)
-    self.assertLen({item["prompt_id"] for item in items}, 6)
-
-    offpolicy_items = list(
-        frozenlake.iter_prompt_items(
-            dataset=[{"seed": 1, "size": 2, "p": 0.8}],
-            max_steps=2,
-            batch_size=3,
-            max_turns=4,
-            max_response_length=64,
-            episode_timeout_secs=30,
-            temperature=0.7,
-            top_p=1.0,
-            top_k=0,
-            is_slippery=False,
-            use_multistep_prompt=True,
-            max_staleness=2,
-        )
-    )
-    # max_steps=2 + extra_steps=max(8, 6, 0)=8 => 10 * 3 = 30 prompts
-    self.assertLen(offpolicy_items, 30)
-
-  def test_recipe_defaults_match_reference(self):
-    with mock.patch.dict(os.environ, {}, clear=False):
-      os.environ.pop("EPISODE_TIMEOUT_SECS", None)
-      os.environ.pop("ROLLOUT_REPLICAS", None)
-      args = run_frozenlake_dist._parse_args([])
-    self.assertEqual(args.model_id, "Qwen/Qwen3-8B")
-    self.assertEqual(args.batch_size, 64)
-    self.assertEqual(args.mini_batch_size, 64)
-    self.assertEqual(args.num_generations, 8)
-    self.assertEqual(args.rollout_replicas, 1)
-    self.assertEqual(args.num_batches, 150)
-    self.assertEqual(args.num_iterations, 1)
-    self.assertEqual(args.num_epochs, 3)
-    self.assertEqual(args.max_steps, 450)
-    self.assertEqual(args.max_turns, 8)
-    self.assertEqual(args.epsilon, 0.003)
-    self.assertEqual(args.epsilon_high, 0.005)
-    self.assertEqual(args.loss_algo, "gspo-token")
-    self.assertEqual(args.advantage_estimator, "rloo")
-    self.assertEqual(args.sampler_is, "token")
-    self.assertEqual(args.sampler_is_threshold, 2.0)
-    self.assertEqual(args.grid_size_range, (2, 9))
-    self.assertEqual(args.wandb_project, "tunix-frozenlake")
-    self.assertTrue(args.trainer_precompile)
-    self.assertEqual(args.episode_timeout_secs, 600)
-    self.assertIsNone(args.rpc_timeout_s)
-    ws_timeouts = run_frozenlake_dist._validate_args(args)
-    self.assertEqual(args.rpc_timeout_s, 1800.0)
-    self.assertEqual(ws_timeouts.pre, 900.0)
-
-    args_long_ep = run_frozenlake_dist._parse_args(
-        ["--episode_timeout_secs=1800"]
-    )
-    ws_long = run_frozenlake_dist._validate_args(args_long_ep)
-    self.assertEqual(args_long_ep.rpc_timeout_s, 2100.0)
-    self.assertEqual(ws_long.pre, 2100.0)
-
-    args_bad_rpc = run_frozenlake_dist._parse_args(
-        ["--episode_timeout_secs=1800", "--rpc_timeout_s=1800"]
-    )
-    with self.assertRaisesRegex(ValueError, "rpc_timeout_s"):
-      run_frozenlake_dist._validate_args(args_bad_rpc)
-
-    for bad_rpc in ("0", "-1", "nan", "inf"):
-      args_invalid_rpc = run_frozenlake_dist._parse_args(
-          [f"--rpc_timeout_s={bad_rpc}"]
-      )
-      with self.assertRaisesRegex(ValueError, "rpc_timeout_s"):
-        run_frozenlake_dist._validate_args(args_invalid_rpc)
-
-    args_no_precompile = run_frozenlake_dist._parse_args(
-        ["--trainer_precompile=false"]
-    )
-    self.assertFalse(args_no_precompile.trainer_precompile)
-
-    args_bad_replicas = run_frozenlake_dist._parse_args(
-        ["--rollout_replicas=0"]
-    )
-    with self.assertRaisesRegex(ValueError, "rollout_replicas"):
-      run_frozenlake_dist._validate_args(args_bad_replicas)
-
-    algo_config = run_frozenlake_dist._build_algo(args)
-    self.assertEqual(algo_config.sampler_is, "token")
-    self.assertEqual(algo_config.sampler_is_threshold, 2.0)
-
-  def test_main_waits_for_rollout_replicas_and_preserves_primary_error(self):
-    fake_ctx = mock.MagicMock()
-    fake_tokenizer = mock.MagicMock()
-    fake_tokenizer.pad_token_id = 0
-    fake_tokenizer.eos_token_id = 1
-    fake_cluster = mock.MagicMock()
-    fake_cluster.trajectory_store = None
-    fake_cluster.registry.handles.return_value = [mock.MagicMock()]
-    fake_cluster.registry.infos.return_value = []
-    fake_cluster.bring_up_workers.side_effect = RuntimeError("trainer died")
-    fake_cluster.shutdown.side_effect = RuntimeError("shutdown also failed")
-    fake_program = mock.MagicMock()
-
-    def _make_fake_program(*args, **kwargs):
-      del args
-      kwargs["algo_config"].temperature = kwargs["generation_args"].temperature
-      return fake_program
-
-    with (
-        mock.patch.object(
-            run_frozenlake_dist.AutoTokenizer,
-            "from_pretrained",
-            return_value=fake_tokenizer,
-        ),
-        mock.patch.object(
-            run_frozenlake_dist.orchestrator,
-            "ClusterOrchestrator",
-            return_value=fake_cluster,
-        ),
-        mock.patch.object(
-            run_frozenlake_dist.rl_program,
-            "StandardRLProgram",
-            side_effect=_make_fake_program,
-        ),
-    ):
-      with self.assertRaisesRegex(RuntimeError, "trainer died"):
-        run_frozenlake_dist.main(
-            [
-                "--rollout_replicas=2",
-                "--batch_size=4",
-                "--mini_batch_size=4",
-                "--num_generations=2",
-                "--train_micro_batch_size=2",
-                "--dataset_size=8",
-                "--num_batches=1",
-                "--max_steps=1",
-                "--stop_workers_on_exit",
-            ],
-            context=fake_ctx,
-        )
-
-    fake_cluster.registry.wait_for_workers.assert_called_once()
-    min_workers = fake_cluster.registry.wait_for_workers.call_args.kwargs[
-        "min_workers"
-    ]
-    self.assertEqual(min_workers[run_frozenlake_dist.datatypes.Role.ROLLOUT], 2)
-    fake_program.close.assert_called_once()
-    fake_cluster.shutdown.assert_called_once_with(abort=True)
-
-  def test_main_clean_exit_shuts_down_without_abort(self):
-    fake_ctx = mock.MagicMock()
-    fake_tokenizer = mock.MagicMock(pad_token_id=0, eos_token_id=1)
-    fake_cluster = mock.MagicMock()
-    fake_cluster.trajectory_store = None
-    fake_cluster.registry.handles.return_value = [mock.MagicMock()]
-    fake_cluster.registry.infos.return_value = []
-    fake_program = mock.MagicMock(last_step_result=None)
-
-    def _make_fake_program(*args, **kwargs):
-      del args
-      kwargs["algo_config"].temperature = kwargs["generation_args"].temperature
-      return fake_program
-
-    with (
-        mock.patch.object(
-            run_frozenlake_dist.AutoTokenizer,
-            "from_pretrained",
-            return_value=fake_tokenizer,
-        ),
-        mock.patch.object(
-            run_frozenlake_dist.orchestrator,
-            "ClusterOrchestrator",
-            return_value=fake_cluster,
-        ),
-        mock.patch.object(
-            run_frozenlake_dist.rl_program,
-            "StandardRLProgram",
-            side_effect=_make_fake_program,
-        ),
-    ):
-      run_frozenlake_dist.main(
-          [
-              "--rollout_replicas=2",
-              "--batch_size=4",
-              "--mini_batch_size=4",
-              "--num_generations=2",
-              "--train_micro_batch_size=2",
-              "--dataset_size=8",
-              "--num_batches=1",
-              "--max_steps=1",
-              "--stop_workers_on_exit",
-          ],
-          context=fake_ctx,
-      )
-
-    fake_cluster.bring_up_workers.assert_called_once_with(dummy_data=None)
-    fake_cluster.run.assert_called_once_with(
-        program=fake_program, num_steps=1, bring_up=False
-    )
-    fake_program.close.assert_called_once_with()
-    fake_cluster.shutdown.assert_called_once_with()
-
-  def test_main_startup_wait_timeout_aborts_surviving_workers(self):
-    fake_ctx = mock.MagicMock()
-    fake_tokenizer = mock.MagicMock(pad_token_id=0, eos_token_id=1)
-    fake_cluster = mock.MagicMock()
-    fake_cluster.trajectory_store = None
-    fake_cluster.registry.wait_for_workers.side_effect = TimeoutError(
-        "rollout_1 never registered"
-    )
-
-    with (
-        mock.patch.object(
-            run_frozenlake_dist.AutoTokenizer,
-            "from_pretrained",
-            return_value=fake_tokenizer,
-        ),
-        mock.patch.object(
-            run_frozenlake_dist.orchestrator,
-            "ClusterOrchestrator",
-            return_value=fake_cluster,
-        ),
-    ):
-      with self.assertRaisesRegex(TimeoutError, "rollout_1 never registered"):
-        run_frozenlake_dist.main(
-            [
-                "--rollout_replicas=2",
-                "--batch_size=4",
-                "--mini_batch_size=4",
-                "--num_generations=2",
-                "--train_micro_batch_size=2",
-                "--dataset_size=8",
-                "--num_batches=1",
-                "--max_steps=1",
-                "--stop_workers_on_exit",
-            ],
-            context=fake_ctx,
-        )
-
-    fake_cluster.shutdown.assert_called_once_with(abort=True)
-
   def test_qwen3_8b_supported_by_distributed_workers(self):
     config = automodel.call_model_config("qwen3-8b")
     self.assertEqual(config.embed_dim, 4096)
@@ -459,57 +168,6 @@ class FrozenLakeDistTest(absltest.TestCase):
     # The distributed workers drive prefill/decode themselves, so the ring
     # buffer KV cache stays off; assert the default the nodes rely on.
     self.assertFalse(config.use_sliding_window_kv_cache)
-
-  def test_launcher_uses_frozenlake_registry(self):
-    launcher = (Path(frozenlake.__file__).parent / "launcher.sh").read_text(
-        encoding="utf-8"
-    )
-    self.assertIn(
-        "--registry_module=tunix.dist_rl.examples.frozenlake_dist.frozenlake",
-        launcher,
-    )
-    self.assertIn("--env_name=frozenlake_env", launcher)
-    self.assertIn("--agent_name=frozenlake_agent", launcher)
-    self.assertEqual(launcher.count('--mini_batch_size="$MINI_BATCH_SIZE"'), 2)
-    self.assertEqual(launcher.count('--num_generations="$NUM_GENERATIONS"'), 2)
-    self.assertEqual(
-        launcher.count('--episode_timeout_secs="$EPISODE_TIMEOUT_SECS"'), 2
-    )
-    self.assertIn("WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}", launcher)
-    self.assertIn("MODEL_DTYPE=${MODEL_DTYPE:-float32}", launcher)
-    self.assertIn('--model_dtype="$MODEL_DTYPE"', launcher)
-    self.assertIn(
-        '--compute_logps_micro_batch_size="$COMPUTE_LOGPS_MICRO_BATCH_SIZE"',
-        launcher,
-    )
-    self.assertIn('--sampler_is="$SAMPLER_IS"', launcher)
-    self.assertIn('--rollout_mesh_tp="$ROLLOUT_TP"', launcher)
-    self.assertIn("GRID_SIZE_RANGE=${GRID_SIZE_RANGE:-2 9}", launcher)
-    self.assertIn("--grid_size_range $GRID_SIZE_RANGE", launcher)
-    self.assertIn("RUN_ID=", launcher)
-    self.assertIn("--enable_trajectory_store=", launcher)
-    self.assertIn("--trajectory_store_backend=", launcher)
-    self.assertIn("--trajectory_store_dir=", launcher)
-    self.assertIn("--run_id=", launcher)
-
-  def test_gemma4_launcher_matches_reference_runtime_limits(self):
-    launcher = (
-        Path(frozenlake.__file__).parent / "run_gemma4_e2b.sh"
-    ).read_text(encoding="utf-8")
-    self.assertIn("MODEL_NAME=${MODEL_NAME:-gemma-4-e2b}", launcher)
-    self.assertIn("MODEL_ID=${MODEL_ID:-google/gemma-4-E2B-it}", launcher)
-    self.assertIn("TRAINER_TPU_CHIPS:-0,1", launcher)
-    self.assertIn("TRAINER_FSDP:-2", launcher)
-    self.assertIn("TRAINER_TP:-1", launcher)
-    self.assertIn("ROLLOUT_TPU_CHIPS:-2,3", launcher)
-    self.assertIn("ROLLOUT_TP:-2", launcher)
-    self.assertIn("TRAIN_MICRO_BATCH_SIZE:-2", launcher)
-    self.assertIn("COMPUTE_LOGPS_MICRO_BATCH_SIZE:-2", launcher)
-    self.assertIn("COMPUTE_LOGPS_CHUNK_SIZE:-2048", launcher)
-    self.assertIn("ROLLOUT_MAX_CONCURRENCY:-512", launcher)
-    # TODO(noghabi): Reconcile `VLLM_MAX_NUM_SEQS=32` and
-    # `VLLM_MAX_NUM_BATCHED_TOKENS=8192` between `run_gemma4_e2b.sh`,
-    # `README.md`, and the shared-orchestrator Gemma4 YAML config.
 
 
 class TaskRecordsTest(absltest.TestCase):
@@ -535,7 +193,7 @@ class TaskRecordsTest(absltest.TestCase):
   def test_create_dataset_rejects_invalid_arguments(self):
     with self.assertRaisesRegex(ValueError, "'train' split"):
       frozenlake.create_dataset(split="test", shuffle=True, seed=42, size=8)
-    for grid_size_range in ((2,), (2, 5, 9)):
+    for grid_size_range in ((2,), (2, 5, 9), (True, 9), (1, 9), (5, 5)):
       with self.subTest(grid_size_range=grid_size_range):
         with self.assertRaisesRegex(ValueError, "grid_size_range"):
           frozenlake.create_dataset(
@@ -546,7 +204,7 @@ class TaskRecordsTest(absltest.TestCase):
               grid_size_range=grid_size_range,
           )
 
-  def test_rollout_env_matches_the_legacy_prompt_item_env(self):
+  def test_rollout_env_matches_the_previous_launcher_env(self):
     # Each `FrozenLakeEnv` sets the recipe's global `MAX_STEPS`.
     self.addCleanup(
         setattr, frozenlake_env, "MAX_STEPS", frozenlake_env.MAX_STEPS
@@ -556,58 +214,62 @@ class TaskRecordsTest(absltest.TestCase):
     )[0]
     assert record is not None  # `MapDataset.__getitem__` is typed `T | None`.
     env_config = record["metadata"]["env_config"]
-    legacy_env_config = frozenlake.build_prompt_item(
-        entry=env_config["entry"],
-        prompt_idx=0,
-        max_turns=8,
-        max_response_length=2048,
-        episode_timeout_secs=600,
-        temperature=0.7,
-        top_p=1.0,
-        top_k=0,
-        is_slippery=False,
-        use_multistep_prompt=True,
-    )["metadata"]["env_config"]
     env_class = registry.ENV_REGISTRY.get(frozenlake.FROZENLAKE_ENV_NAME)
     # `RolloutManager` builds the env from `env_kwargs`, the record's
     # `env_config`, and the group fields `DistributedRLEngine` adds to it.
     env = env_class(**{
-        "max_steps": 8,
-        "is_slippery": False,
+        **_hp().config_mapping("env_kwargs"),
         **env_config,
         "group_index": 0,
         "num_generations": 8,
         "policy_version": 0,
     })
-    legacy_env = env_class(**legacy_env_config)
+    # The previous launcher's requests set the map, the max turns as
+    # `max_steps`, and `is_slippery`.
+    legacy_env = env_class(
+        entry=env_config["entry"], max_steps=8, is_slippery=False
+    )
     self.assertEqual(env.desc.tolist(), legacy_env.desc.tolist())
     self.assertEqual(env.max_steps, legacy_env.max_steps)
     self.assertEqual(env.env_kwargs, legacy_env.env_kwargs)
     self.assertEqual(env.reset(), legacy_env.reset())
 
   def test_orchestrator_loads_the_records_in_a_fixed_order(self):
-    items = orchestrator.load_prompt_items(_orchestrator_config())
+    items = orchestrator.load_prompt_items(
+        _hp("data_config.size=32", "data_config.limit=12")
+    )
     item = items[0]
     assert item is not None  # `MapDataset.__getitem__` is typed `T | None`.
-    self.assertEqual(item["prompt"], "")
-    self.assertEqual(item["task_name"], "frozenlake")
-    self.assertEqual(item["max_turns"], 8)
-    metadata = item["metadata"]
-    assert isinstance(metadata, dict)
-    # The base `data_config` passes `split="train"`, `shuffle=True`, `seed=42`.
+    # `frozenlake.yaml` shuffles the maps with seed 42.
     entries = frozenlake.generate_entries(32, 42, shuffle_seed=42, limit=12)
-    self.assertEqual(metadata["env_config"], {"entry": entries[0]})
+    self.assertEqual(
+        item,
+        {
+            "prompt": "",
+            "task_name": "frozenlake",
+            "max_turns": 8,
+            "metadata": {
+                "env_config": {"entry": entries[0]},
+                "episode_timeout": 600.0,
+                "overlong_filter": False,
+            },
+        },
+    )
     # Every epoch repeats the same order.
     self.assertEqual(
         [items[index] for index in range(12, 24)],
         [items[index] for index in range(12)],
     )
 
-  def test_orchestrator_rejects_non_int_grid_size_range(self):
-    # `data_config` values reach `create_dataset` untyped.
-    hp = _orchestrator_config("data_config.grid_size_range=[2.5,9]")
-    with self.assertRaisesRegex(ValueError, "grid_size_range"):
-      orchestrator.load_prompt_items(hp)
+  def test_orchestrator_rejects_bad_data_config(self):
+    for override, error, regex in (
+        # `data_config` values reach `create_dataset` untyped.
+        ("data_config.grid_size_range=[2.5,9]", ValueError, "grid_size_range"),
+        ("data_config.data_dir=/tmp/data", TypeError, "data_dir"),
+    ):
+      with self.subTest(override=override):
+        with self.assertRaisesRegex(error, regex):
+          orchestrator.load_prompt_items(_hp(override))
 
 
 if __name__ == "__main__":

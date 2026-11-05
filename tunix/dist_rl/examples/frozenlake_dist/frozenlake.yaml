@@ -1,0 +1,173 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Example defaults for the distributed FrozenLake GRPO recipe (Qwen3-8B on one
+# 8-chip TPU host).
+#
+# Layered on top of `launch/common/base_dist_config.yaml`, with the settings of
+# the previous FrozenLake launcher. `launcher.sh` adds the checkpoint
+# directory, and `run_gemma4_e2b.sh` the Gemma4 E2B model and placement. Later
+# `override_config_file=` arguments and `section.key=value` overrides win.
+
+model_config:
+  model_name: "Qwen3-8B"
+  model_source: "huggingface"
+  model_id: "Qwen/Qwen3-8B"
+  dtype: "float32"
+  load_dtype: "float32"
+  remat_config: "decoder"
+  use_flash_attention: true
+  flash_attention_block_size: 256
+  # Every role config inherits this mesh unless it sets its own: the trainer
+  # runs FSDP 1 x TP 4, and the rollout TP 4.
+  mesh:
+    shape: "(1,4)"
+    axis_names: "('fsdp','tp')"
+
+tokenizer_config:
+  # A public Hugging Face hub id needs no `HF_TOKEN` (gated repos do). On a
+  # host without hub access, set it to `model_config.model_download_path`.
+  tokenizer_path: "Qwen/Qwen3-8B"
+
+# Each model family's own chat template, without thinking (base: `raw`).
+chat_parser_config:
+  type: "auto"
+  enable_thinking: false
+
+rollout_engine: "inprocess_vllm"
+rollout_config:
+  max_prompt_length: 2048
+  total_generation_steps: 2048
+  temperature: 0.7
+  top_p: 1.0
+  # Disabled.
+  top_k: -1
+  # Stop on the tokenizer's EOS token. The base config's Qwen token ids are
+  # ordinary tokens for other models, such as Gemma4.
+  eos_tokens: ""
+  return_logprobs: true
+
+vllm_config:
+  hbm_utilization: 0.75
+  max_num_seqs: 512
+  max_num_batched_tokens: 32768
+  # max_prompt_length + total_generation_steps + 256 (base: the sum only).
+  max_model_len: 4352
+  dtype: "bfloat16"
+  async_scheduling: false
+
+weight_sync_config:
+  # The rollout starts from random weights and gets the trainer's through
+  # Raiden before the first step. With mode "none", also set
+  # `vllm_config.init_with_random_weights: false`.
+  mode: "raiden"
+  in_flight_weight_updates: false
+
+# The orchestrator loads the task records with
+# `frozenlake.create_dataset(**data_config)`.
+data_module: "tunix.dist_rl.examples.frozenlake_dist.frozenlake"
+task_name: "frozenlake"
+data_config:
+  split: "train"
+  shuffle: true
+  seed: 42
+  # Generated maps.
+  size: 10000
+  # Maps trained on, in the same order every epoch: 150 batches of 64. Nothing
+  # derives `limit` or `rl_training_config.max_steps` from `batch_size`: when
+  # overriding `batch_size`, also set `limit` to 150 x `batch_size`.
+  limit: 9600
+  grid_size_range: [2, 9]
+
+batch_size: 64
+rl_training_config:
+  mini_batch_size: 64
+  train_micro_batch_size: 4
+  compute_logps_micro_batch_size: 4
+  compute_logps_chunk_size: 0
+  # 150 batches x 1 iteration x 3 epochs (`num_batches` and `num_train_epochs`
+  # are not read).
+  max_steps: 450
+  actor_optimizer_config:
+    opt_type: "adamw"
+    learning_rate: 1.0e-6
+    # Empty: a constant learning rate.
+    schedule_type: ""
+    b1: 0.9
+    b2: 0.95
+    eps: 1.0e-8
+    weight_decay: 0.0
+    opt_chain_type: "clip_by_global_norm"
+    chain_kwargs:
+      max_norm: 100.0
+  checkpointing_options:
+    save_interval_steps: 1000000000
+    max_to_keep: 1
+  metrics_logging_options:
+    project_name: "tunix-frozenlake"
+    log_dir: "/tmp/trellis_frozenlake"
+    flush_every_n_steps: 1
+
+agentic_grpo_config:
+  num_generations: 8
+  num_iterations: 1
+  beta: 0.0
+  epsilon: 0.003
+  epsilon_high: 0.005
+  loss_algo: "gspo-token"
+  loss_agg_mode: "sequence-mean-token-mean"
+  kl_loss_mode: "low_var_kl"
+  advantage_estimator: "rloo"
+  sampler_is: "token"
+  sampler_is_threshold: 2.0
+  max_concurrency: 256
+  off_policy_steps: 0
+  trajectory_group_order: "trajectory_completion"
+  # "env": `FrozenLakeEnv` rewards each episode on the rollout worker.
+  reward_mode: "env"
+  episode_timeout: 600
+  # Keep equal to `env_kwargs.max_steps`.
+  max_turns: 8
+  overlong_filter: false
+  use_rollout_logps: true
+
+reward_functions: []
+
+env_class_path: "frozenlake_env"
+# `FrozenLakeEnv` settings for the whole run; each task record adds its map
+# (`entry`).
+env_kwargs:
+  # Keep equal to `agentic_grpo_config.max_turns`. It also bounds the path
+  # search that validates each generated map, so it changes the maps.
+  max_steps: 8
+  is_slippery: false
+
+agent_class_path: "frozenlake_agent"
+agent_kwargs:
+  use_multistep_prompt: true
+
+cluster_config:
+  # Imported by the rollout node to register `FrozenLakeEnv` /
+  # `FrozenLakeAgent`.
+  registry_module: "tunix.dist_rl.examples.frozenlake_dist.frozenlake"
+  artifact_root: "artifacts/frozenlake"
+  # Null derives the worker RPC deadline from the weight-sync phase timeouts,
+  # which scale with `agentic_grpo_config.episode_timeout` (base: 1800).
+  rpc_timeout_s: null
+  # One 8-chip host: trainer chips 0-3, rollout chips 4-7.
+  local:
+    trainer_tpu_chips: "0,1,2,3"
+    rollout_tpu_chips: "4,5,6,7"
+    tpu_chips_per_host_bounds: "1,4,1"
+    tpu_host_bounds: "1,1,1"

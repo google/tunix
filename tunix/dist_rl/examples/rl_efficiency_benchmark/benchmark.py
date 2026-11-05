@@ -55,7 +55,9 @@ def load_workload(path=WORKLOAD):
   MODULE (run as `python -m MODULE BASE_CONFIG override_config_file=FILE` for
   agentic training), DEFAULTS (integer workload flags), RESPONSE_RESERVE,
   validate(workload), dist_launch(workload, output, model_dir) and
-  agentic_config(workload, model_dir).
+  agentic_config(workload, model_dir). dist_launch returns the launch command,
+  whose `section.key=value` arguments include `model_config.dtype` and
+  `model_config.load_dtype`, and the environment variables to set for it.
 
   Args:
     path: The workload module file.
@@ -112,7 +114,12 @@ def prepare(args, workload):
   if args.mode == "dist":
     command, dist_env = workload.dist_launch(w, output, model_dir)
     env.update(dist_env)
-    dtypes = (env["MODEL_DTYPE"], env["MODEL_LOAD_DTYPE"])
+    # The dist recipe takes its configuration as `section.key=value` arguments.
+    overrides = dict(arg.split("=", 1) for arg in command if "=" in arg)
+    dtypes = (
+        overrides["model_config.dtype"],
+        overrides["model_config.load_dtype"],
+    )
   else:
     config = workload.agentic_config(w, model_dir)
     write_json(output / "agentic.json", config)

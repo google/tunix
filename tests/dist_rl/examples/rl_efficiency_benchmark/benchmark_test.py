@@ -79,12 +79,15 @@ def validate(workload):
 
 
 def dist_launch(workload, output, model_dir):
-  command = [sys.executable, "-c", CHILD, str(output / "launched.json")]
-  return command, {
-      "STEPS": str(workload["steps"]),
-      "MODEL_DTYPE": "bfloat16",
-      "MODEL_LOAD_DTYPE": "float32",
-  }
+  command = [
+      sys.executable,
+      "-c",
+      CHILD,
+      str(output / "launched.json"),
+      "model_config.dtype=bfloat16",
+      "model_config.load_dtype=float32",
+  ]
+  return command, {"STEPS": str(workload["steps"])}
 
 
 def agentic_config(workload, model_dir):

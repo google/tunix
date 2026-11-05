@@ -13,24 +13,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Distributed FrozenLake with Gemma4 E2B on a single 4-chip TPU host: the
+# trainer runs FSDP 2 on chips 0,1 and the rollout TP 2 on chips 2,3. Layered
+# on `launcher.sh` (`frozenlake.yaml`).
+#
+# Usage:
+#   bash run_gemma4_e2b.sh [--dry-run] [section.key=value ...]
+
 set -Eeuo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${DIR}/../../../.." && pwd)"
 
-export MODEL_NAME=${MODEL_NAME:-gemma-4-e2b}
-export MODEL_ID=${MODEL_ID:-google/gemma-4-E2B-it}
-export ARTIFACT_ROOT=${ARTIFACT_ROOT:-"${REPO_ROOT}/artifacts/gemma4_e2b_dist_frozenlake"}
-export TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
-export TRAINER_FSDP=${TRAINER_FSDP:-2}
-export TRAINER_TP=${TRAINER_TP:-1}
-export ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
-export ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
-export ROLLOUT_TP=${ROLLOUT_TP:-2}
-export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,2,1}
-export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-2}
-export COMPUTE_LOGPS_MICRO_BATCH_SIZE=${COMPUTE_LOGPS_MICRO_BATCH_SIZE:-2}
-export COMPUTE_LOGPS_CHUNK_SIZE=${COMPUTE_LOGPS_CHUNK_SIZE:-2048}
-export ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-512}
-
-exec "${DIR}/launcher.sh"
+exec "${DIR}/launcher.sh" \
+  model_config.model_name="gemma-4-e2b" \
+  model_config.model_id="google/gemma-4-E2B-it" \
+  tokenizer_config.tokenizer_path="google/gemma-4-E2B-it" \
+  actor_model_config.mesh.shape="(2,1)" \
+  actor_model_config.mesh.axis_names="('fsdp','tp')" \
+  rollout_model_config.mesh.shape="(1,2)" \
+  rollout_model_config.mesh.axis_names="('fsdp','tp')" \
+  rl_training_config.train_micro_batch_size=2 \
+  rl_training_config.compute_logps_micro_batch_size=2 \
+  rl_training_config.compute_logps_chunk_size=2048 \
+  agentic_grpo_config.max_concurrency=512 \
+  cluster_config.artifact_root="artifacts/gemma4_e2b_dist_frozenlake" \
+  cluster_config.local.trainer_tpu_chips="0,1" \
+  cluster_config.local.rollout_tpu_chips="2,3" \
+  cluster_config.local.tpu_chips_per_host_bounds="1,2,1" \
+  "$@"

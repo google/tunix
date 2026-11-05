@@ -14,10 +14,10 @@
 
 """FrozenLake workload for the distributed-vs-agentic RL benchmark.
 
-The distributed stack runs `run_gemma4_e2b.sh`; the agentic stack runs the
-same Gemma4 E2B recipe through `tunix.cli.grpo_main`. The harness in
-`rl_efficiency_benchmark/benchmark.py` loads this file by path, so the module
-level imports only the standard library.
+The distributed stack runs `run_gemma4_e2b.sh` with `section.key=value`
+overrides; the agentic stack runs the same Gemma4 E2B recipe through
+`tunix.cli.grpo_main`. The harness in `rl_efficiency_benchmark/benchmark.py`
+loads this file by path, so the module level imports only the standard library.
 """
 
 import functools
@@ -43,8 +43,8 @@ DEFAULTS = {
     "max_num_seqs": 32,
     "batched_tokens": 8192,
 }
-# Settings from examples/frozenlake/train_frozenlake.py that launcher.sh does
-# not default to. Both stacks use them.
+# Settings from examples/frozenlake/train_frozenlake.py that frozenlake.yaml
+# does not default to. Both stacks use them.
 _COMPUTE_DTYPE = "bfloat16"
 _LOAD_DTYPE = "float32"
 _HBM_UTILIZATION = 0.2
@@ -65,9 +65,12 @@ def validate(workload):
 
 
 def dist_launch(workload, output, model_dir):
-  """Returns the distributed recipe command and the variables it overrides.
+  """Returns the distributed recipe command and the variables it sets.
 
-  Every other setting keeps its run_gemma4_e2b.sh or launcher.sh default.
+  The command passes the benchmark settings to run_gemma4_e2b.sh as
+  `section.key=value` overrides. Every other setting keeps its
+  run_gemma4_e2b.sh, frozenlake.yaml or launch/common/base_dist_config.yaml
+  value.
 
   Args:
     workload: Workload flag values.
@@ -80,42 +83,52 @@ def dist_launch(workload, output, model_dir):
   w = workload
   # Match the agentic microbatch of micro_groups prompt groups.
   microbatch_size = w["micro_groups"] * w["generations"]
-  env = {
-      "TRAINER_PROCESS_MAIN": _RUNTIME + ".trainer_main",
-      "ROLLOUT_PROCESS_MAIN": _RUNTIME + ".rollout_main",
-      "ORCHESTRATOR_PROCESS_MAIN": MODULE + ".dist_main",
-      "MODEL_DIR": model_dir,
-      "ARTIFACT_ROOT": output / "artifacts",
-      "LOG_ROOT": output,
-      "CHECKPOINT_ROOT_DIRECTORY": output / "checkpoints",
-      "BATCH_SIZE": w["batch"],
-      "MINI_BATCH_SIZE": w["batch"],
-      "NUM_GENERATIONS": w["generations"],
-      "NUM_BATCHES": w["steps"],
-      "NUM_EPOCHS": 1,
-      "MAX_STEPS": w["steps"],
-      "DATASET_SIZE": w["dataset_size"],
-      "SEED": w["seed"],
-      "MAX_TURNS": w["turns"],
-      "MAX_PROMPT_LENGTH": w["prompt"],
-      "MAX_RESPONSE_LENGTH": w["response"],
-      "ROLLOUT_MAX_CONCURRENCY": w["concurrency"],
-      "VLLM_MAX_NUM_SEQS": w["max_num_seqs"],
-      "VLLM_MAX_NUM_BATCHED_TOKENS": w["batched_tokens"],
-      "MODEL_DTYPE": _COMPUTE_DTYPE,
-      "MODEL_LOAD_DTYPE": _LOAD_DTYPE,
-      "VLLM_HBM_UTILIZATION": _HBM_UTILIZATION,
-      # Benchmark hooks write events.jsonl; checkpoints and logging backends
-      # would add untimed I/O. run_frozenlake_dist.py logs to a default
-      # directory unless LOG_DIR is in its environment, even if empty.
-      "CHECKPOINT_SAVE_INTERVAL_STEPS": 0,
-      "LOG_DIR": "",
-      "TRAJECTORY_LOG_DIR": "",
-      "TRAIN_MICRO_BATCH_SIZE": microbatch_size,
-      "COMPUTE_LOGPS_MICRO_BATCH_SIZE": microbatch_size,
+  overrides = {
+      "cluster_config.trainer_main": _RUNTIME + ".trainer_main",
+      "cluster_config.rollout_main": _RUNTIME + ".rollout_main",
+      "cluster_config.orchestrator_main": MODULE + ".dist_main",
+      "model_config.model_download_path": model_dir,
+      "tokenizer_config.tokenizer_path": model_dir,
+      "cluster_config.artifact_root": output / "artifacts",
+      "rl_training_config.checkpoint_root_directory": output / "checkpoints",
+      "batch_size": w["batch"],
+      "rl_training_config.mini_batch_size": w["batch"],
+      "agentic_grpo_config.num_generations": w["generations"],
+      "rl_training_config.max_steps": w["steps"],
+      "data_config.size": w["dataset_size"],
+      "data_config.seed": w["seed"],
+      # One epoch.
+      "data_config.limit": w["steps"] * w["batch"],
+      "agentic_grpo_config.max_turns": w["turns"],
+      "env_kwargs.max_steps": w["turns"],
+      "rollout_config.max_prompt_length": w["prompt"],
+      "rollout_config.total_generation_steps": w["response"],
+      # The agentic kv_cache_size.
+      "vllm_config.max_model_len": w["prompt"] + w["response"] + 256,
+      "agentic_grpo_config.max_concurrency": w["concurrency"],
+      "vllm_config.max_num_seqs": w["max_num_seqs"],
+      "vllm_config.max_num_batched_tokens": w["batched_tokens"],
+      "model_config.dtype": _COMPUTE_DTYPE,
+      "model_config.load_dtype": _LOAD_DTYPE,
+      "vllm_config.hbm_utilization": _HBM_UTILIZATION,
+      # Benchmark hooks write events.jsonl; checkpoints and trajectory logs
+      # would add untimed I/O. An empty `log_dir` still creates the default
+      # metrics backends, as the previous launcher's `LOG_DIR=""` did.
+      # TODO(noghabi): Disable the metrics backends once the orchestrator
+      # accepts no `metrics_logging_options`, as `agentic_config` does.
+      "rl_training_config.checkpointing_options.save_interval_steps": 0,
+      "rl_training_config.metrics_logging_options.log_dir": '""',
+      "dist_training_config.trajectory_log_dir": '""',
+      "rl_training_config.train_micro_batch_size": microbatch_size,
+      "rl_training_config.compute_logps_micro_batch_size": microbatch_size,
   }
-  command = ["bash", str(Path(__file__).with_name("run_gemma4_e2b.sh"))]
-  return command, {key: str(value) for key, value in env.items()}
+  command = [
+      "bash",
+      str(Path(__file__).with_name("run_gemma4_e2b.sh")),
+      *(f"{key}={value}" for key, value in overrides.items()),
+  ]
+  # launch/common/local.sh writes the node logs to LOG_ROOT.
+  return command, {"LOG_ROOT": str(output)}
 
 
 def agentic_config(workload, model_dir):
@@ -274,20 +287,22 @@ def create_dataset(size, seed, limit=None, **unused_kwargs):
 def dist_main(*args, **kwargs):
   """Distributed orchestrator entry point with benchmark hooks."""
   from tunix.dist_rl.examples.frozenlake_dist import frozenlake
-  from tunix.dist_rl.examples.frozenlake_dist import run_frozenlake_dist
   from tunix.dist_rl.examples.rl_efficiency_benchmark import runtime
+  from tunix.dist_rl.launch.nodes import orchestrator  # pylint: disable=g-import-not-at-top
 
-  create = frozenlake.generate_entries
+  generate = frozenlake.generate_entries
 
-  @functools.wraps(create)
-  def recorded_dataset(*dataset_args, **dataset_kwargs):
-    rows = create(*dataset_args, **dataset_kwargs)
+  # The orchestrator's data module, `frozenlake.create_dataset`, generates the
+  # maps with `frozenlake.generate_entries`.
+  @functools.wraps(generate)
+  def recorded_entries(*entry_args, **entry_kwargs):
+    rows = generate(*entry_args, **entry_kwargs)
     runtime.record_dataset(rows)
     return rows
 
-  frozenlake.generate_entries = recorded_dataset
+  frozenlake.generate_entries = recorded_entries
   runtime.install("dist")
-  return run_frozenlake_dist.main(*args, **kwargs)
+  return orchestrator.main(*args, **kwargs)
 
 
 def agentic_main():
