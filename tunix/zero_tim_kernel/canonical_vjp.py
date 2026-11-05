@@ -428,24 +428,18 @@ def fused_norm_matmul(
   gamma_bf16 = gamma.astype(jnp.bfloat16)
   parts = tuple(w.astype(jnp.bfloat16) for w in w_parts)
 
-  # Keep `block_m = contract.block_m` (128) so `pallas_norm_matmul`'s full-width
-  # VMEM scratch `[block_m, n_padded]` stays within TPU VMEM, while promoting
-  # `(n_padded, block_n)` via `wide_n_tiles` / `tile_policy` so the inner MXU
-  # column loop uses wide `block_n` tiles (matching `padded_matmul.matmul`).
-  block_m = contract.block_m
+  # Cap `block_m` at `contract.block_m` (`128`) while using adaptive power-of-2
+  # row buckets (`{8, 16, 32, 64}`) for small decode batches (`m < 128`), and
+  # promote `(n_padded, block_n)` via `wide_n_tiles` / `pallas_norm_matmul`.
+  m_padded, block_m = pallas_matmul.adaptive_row_bucket(m, contract.block_m)
   block_n = contract.block_n
   block_k = contract.block_k
-  m_padded = model_contracts.round_up(m, block_m)
   n_padded = model_contracts.round_up(n_total, block_n)
   wide = padded_matmul.wide_n_tiles(
       m_padded, k, n_total, (block_m, block_n, block_k)
   )
   if wide is not None:
     n_padded, block_n = wide
-  elif (block_m, block_n, block_k) in pallas_matmul.CONTRACT_TILES:
-    _, block_n, _ = pallas_matmul.tile_policy(
-        m_padded, k, n_padded, (block_m, block_n, block_k)
-    )
 
   def forward(a: jax.Array, g: jax.Array, b: jax.Array) -> jax.Array:
     if m_padded != m:

@@ -47,7 +47,7 @@ mismatch (TIM):
    `canonical_vjp.swiglu`).
 8. `use_fixed_lm_head`: the `FIXED_M=256` padded/chunked output head with
    ascending-chunk `lax.scan` VJP (`fixed_lm_head`).
-9. `use_canon_logsoftmax`: Fixed 1024-tile 3-stage log-softmax / gathered
+9. `use_canon_logsoftmax`: Fixed 1024-tile 2-stage log-softmax / gathered
    logprobs (`canonical_logsoftmax`).
 10. `use_fixed_order_reduce`: Rank-0-to-(TP-1) f32 TP reduction
     (`fixed_order_reduce`) when running over a tensor-parallel mesh.
@@ -69,11 +69,10 @@ their cost can be A/B'd:
 - `CHECKPOINT_ATTN_CORE`: `jax.checkpoint` around the cacheless
   `q_norm / k_norm -> RoPE -> attention` core during `Remat=NONE` training.
 - `VOCAB_PARALLEL_LOGSOFTMAX`: canonical log-softmax / `token_logprobs` on the
-  `P(None, 'tp')`-sharded `[M, V/TP]` logits without the `[M, V]` all-gather.
-  It is only taken when every rank's `V/TP` shard is a whole 1024-column tile
-  (`vocab_parallel_logsoftmax_admitted`), which makes it bitwise the library
-  program; other shapes (Qwen3's `V=151936` at TP=2/4/8) use the gathered
-  library path.
+  `P(..., 'tp')`-sharded `[M, V/TP]` logits without the `[M, V]` all-gather.
+  Admitted whenever `V / TP >= 1024` (`vocab_parallel_logsoftmax_admitted`,
+  including Qwen3's `V = 151936` at `TP = 2 / 4 / 8` via a 1024-column neighbor
+  halo alignment); smaller per-rank slices use the gathered library path.
 - `canon_attention.ATTENTION_BWD`: the backward of `canonical_online_attention`
   (a dense flash backward or the Pallas flash backward kernel; JAX autodiff
   of the XLA scan for the `XLA_FWD` forward). The forward kernel is the same
@@ -149,8 +148,6 @@ from tunix.zero_tim_kernel import pallas_swiglu
 from tunix.zero_tim_kernel.bench.qwen3 import canon_attention
 from tunix.zero_tim_kernel.bench.qwen3 import rpa_backend
 
-pl = canonical_logsoftmax.pl
-pltpu = canonical_logsoftmax.pltpu
 K_MASK = qwen3_stock.K_MASK
 LayerCache = qwen3_stock.LayerCache
 Cache = qwen3_stock.Cache
@@ -237,11 +234,14 @@ def _forward_tp_sum_mode(rows: int) -> str:
 CHECKPOINT_ATTN_CORE = True
 
 # Candidate (5b): Vocab-parallel canonical log-softmax / `token_logprobs` on
-# `P(None, 'tp')`-sharded `[M, V/TP]` logits. Eliminates the full-vocabulary
-# `[M, V]` f32 `all_gather` in Sample, Prefill, and Fwd+Bwd, runs Stage 1 tile
-# reductions only on the local `V/TP` columns, `all_gather`s only the tiny
-# `(M, tiles_local)` f32 tile summaries before Stage 2, and keeps the backward
-# residual and `grad_logits` sharded as `[M, V/TP]`.
+# `P(data_axes, 'tp')`-sharded `[M, V/TP]` logits (admitted whenever
+# `V / TP >= 1024`, including `V = 151936` at `TP = 2 / 4 / 8`). Eliminates the
+# full-vocabulary `[M, V]` `all_gather` in Sample, Prefill, and Fwd+Bwd, runs
+# Stage 1 tile reductions on each shard's aligned 1024-column tiles (exchanging
+# at most a single 1024-column neighbor halo via `lax.ppermute` when
+# `(V / TP) % 1024 != 0`), `all_gather`s only the compact `(2, M, tiles_local)`
+# f32 tile summaries before Stage 2, and keeps the backward residual and
+# `grad_logits` sharded as `[M, V/TP]`.
 VOCAB_PARALLEL_LOGSOFTMAX = True
 
 # D1: rotate the query and the key heads in ONE canonical RoPE program
@@ -546,12 +546,20 @@ def resolve_or_build_contract(
   )
 
 
+def _active_mesh() -> jax.sharding.Mesh | None:
+  """Returns the active non-empty physical mesh, or `None`."""
+  mesh = pxla.thread_resources.env.physical_mesh
+  if mesh is not None and not mesh.empty:
+    return mesh
+  return None
+
+
 def _active_tp_size_and_mesh(
     tp_axis: str = 'tp',
 ) -> tuple[int, jax.sharding.Mesh | None]:
   """Returns `(tp_size, mesh)` if a physical mesh with `tp_axis` is active."""
-  mesh = pxla.thread_resources.env.physical_mesh
-  if mesh is not None and not mesh.empty and tp_axis in mesh.shape:
+  mesh = _active_mesh()
+  if mesh is not None and tp_axis in mesh.shape:
     return int(mesh.shape[tp_axis]), mesh
   return 1, None
 
@@ -577,52 +585,6 @@ def _data_axes(
       if name != tp_axis and int(mesh.shape[name]) > 1
   )
   return axes, math.prod(int(mesh.shape[name]) for name in axes)
-
-
-def _map_row_shard_chunks(
-    run_rows,
-    operands: Tuple[jax.Array, ...],
-    *,
-    chunk_rows: int,
-    num_shards: int,
-) -> jax.Array:
-  """`lax.map`s `run_rows` over `chunk_rows`-row chunks of every row shard.
-
-  The rows (leading dim of every operand, a multiple of `chunk_rows *
-  num_shards`) are viewed as `[num_shards, chunks, chunk_rows]`, i.e. the
-  contiguous row blocks a data-parallel sharding of the row dimension holds.
-  The loop runs over the unsharded `chunks` dimension, and each iteration hands
-  `run_rows` one chunk of every shard (`num_shards * chunk_rows` rows,
-  shard-major), so a row-sharded `run_rows` sees only its shard's rows.
-  Looping over the flat `[mp / chunk_rows, chunk_rows]` view instead slices a
-  dimension that is sharded over the data axes, and SPMD then all-gathers the
-  whole operand in every iteration.
-
-  Args:
-    run_rows: Maps operands with `num_shards * chunk_rows` rows to an output
-      with the same leading row dimension.
-    operands: Arrays sharing the leading row dimension.
-    chunk_rows: Rows per shard per iteration.
-    num_shards: Number of row shards (the product of the data axes' sizes).
-
-  Returns:
-    The per-row outputs, in the original row order.
-  """
-  rows = int(operands[0].shape[0])
-  chunks = rows // (num_shards * chunk_rows)
-
-  def to_chunks(x: jax.Array) -> jax.Array:
-    x = x.reshape((num_shards, chunks, chunk_rows) + x.shape[1:])
-    return jnp.swapaxes(x, 0, 1)
-
-  def body(xs):
-    return run_rows(
-        *(x.reshape((num_shards * chunk_rows,) + x.shape[2:]) for x in xs)
-    )
-
-  out = lax.map(body, tuple(to_chunks(x) for x in operands))
-  out = out.reshape((chunks, num_shards, chunk_rows) + out.shape[2:])
-  return jnp.swapaxes(out, 0, 1).reshape((rows,) + out.shape[3:])
 
 
 def _fixed_order_tp_sum_with_vjp(
@@ -929,8 +891,13 @@ def _canon_rmsnorm_nd(
     interpret: bool,
     out_dtype: jaxtyping.DTypeLike,
 ) -> jax.Array:
-  """Runs fixed-BF=128 Pallas RMSNorm with row padding and TP shard_map support."""
-  tp_size, mesh = _active_tp_size_and_mesh('tp')
+  """Runs fixed-BF=128 Pallas RMSNorm with batch/TP shard_map support."""
+  tp_size, _ = _active_tp_size_and_mesh('tp')
+  mesh = _active_mesh()
+  data_axes, num_shards = _data_axes(mesh)
+  batch_spec = (
+      data_axes if (data_axes and int(x.shape[0]) % num_shards == 0) else None
+  )
 
   def local_nd(x_loc: jax.Array, w_loc: jax.Array) -> jax.Array:
     return _canon_rmsnorm_nd_local(
@@ -941,30 +908,70 @@ def _canon_rmsnorm_nd(
         out_dtype=out_dtype,
     )
 
-  if mesh is not None and tp_size > 1:
+  if mesh is not None and (tp_size > 1 or batch_spec is not None):
     if x.ndim == 4:
-      # q_norm / k_norm: heads are TP-sharded, gamma is replicated. The gamma
-      # cotangent is the plain column-parallel case: JAX's transpose of the
-      # `P(None)` input `psum`s the per-rank partial `dgamma`
-      # (see `_column_parallel_local`).
+      # q_norm / k_norm: batch may be data-sharded, heads are TP-sharded, and
+      # gamma is replicated. JAX's transpose of `P(None)` `psum`s the per-shard
+      # partial `dgamma` over `(data_axes, 'tp')` (`_column_parallel_local`).
+      head_spec = 'tp' if tp_size > 1 else None
+      spec_4d = P(batch_spec, None, head_spec, None)
       return jax.shard_map(
           lambda a, g: _column_parallel_local(local_nd, a, g),
           mesh=mesh,
-          in_specs=(P(None, None, 'tp', None), P(None)),
-          out_specs=P(None, None, 'tp', None),
+          in_specs=(spec_4d, P(None)),
+          out_specs=spec_4d,
           check_vma=False,
       )(x, w)
-    if x.ndim == 3:
-      # final_norm (and the layer norms when `use_canon_norm_matmul` is off or
-      # the site does not admit the fusion): input, gamma AND output are all
-      # TP-replicated, so the collective-free VJP coat applies.
-      return _shard_map_with_local_vjp(
+    if x.ndim in (2, 3):
+      x_spec = P(batch_spec, *([None] * (x.ndim - 1)))
+      if batch_spec is None:
+        # final_norm (and layer norms when `use_canon_norm_matmul` is off):
+        # input, gamma, and output are all TP-replicated.
+        return _shard_map_with_local_vjp(
+            local_nd,
+            mesh=mesh,
+            in_specs=(x_spec, P(None)),
+            out_spec=x_spec,
+            differentiable=(True, True),
+        )(x, w)
+
+      fwd_shmap = jax.shard_map(
           local_nd,
           mesh=mesh,
-          in_specs=(P(None, None, None), P(None)),
-          out_spec=P(None, None, None),
-          differentiable=(True, True),
-      )(x, w)
+          in_specs=(x_spec, P(None)),
+          out_specs=x_spec,
+          check_vma=False,
+      )
+
+      def _bwd_local(res_loc: tuple[jax.Array, jax.Array], cot_loc: jax.Array):
+        x_loc, w_loc = res_loc
+        _, pullback = jax.vjp(local_nd, x_loc, w_loc)
+        dx_loc, dw_loc = pullback(cot_loc)
+        dw_sum = lax.psum(dw_loc.astype(jnp.float32), batch_spec).astype(
+            w_loc.dtype
+        )
+        return dx_loc, dw_sum
+
+      bwd_shmap = jax.shard_map(
+          _bwd_local,
+          mesh=mesh,
+          in_specs=((x_spec, P(None)), x_spec),
+          out_specs=(x_spec, P(None)),
+          check_vma=False,
+      )
+
+      @jax.custom_vjp
+      def op(x_in: jax.Array, w_in: jax.Array) -> jax.Array:
+        return fwd_shmap(x_in, w_in)
+
+      def _fwd(x_in: jax.Array, w_in: jax.Array):
+        return fwd_shmap(x_in, w_in), (x_in, w_in)
+
+      def _bwd(residual: tuple[jax.Array, jax.Array], cotangent: jax.Array):
+        return bwd_shmap(residual, cotangent)
+
+      op.defvjp(_fwd, _bwd)
+      return op(x, w)
   return local_nd(x, w)
 
 
@@ -3066,428 +3073,13 @@ def _logsoftmax_vjp_coat(
   )
 
 
-def vocab_parallel_logsoftmax_admitted(vocab: int, tp_size: int) -> bool:
-  """Whether `[M, V]` logits sharded `V/TP` per rank admit the vocab-parallel path.
-
-  `_vocab_parallel_normalizer` reproduces the library's tile grouping only when
-  every rank's `V/TP` columns are whole `VOCAB_TILE=1024` tiles: rank `r`'s
-  tile summaries are then exactly the library's global tiles
-  `[r * tiles_local, (r + 1) * tiles_local)` and Stage 2 combines them in the
-  library's left-to-right order. A non-aligned shard would have to pad *inside*
-  the global tile sequence, which defines a different (self-consistent, but not
-  engine-compatible) reduction, so such shapes fall back to the gathered
-  full-vocabulary library path. Qwen3's `V=151936` is not admitted at
-  TP=2/4/8 (`V/TP % 1024` = 192/96/560); the bench's `V=8192, TP=4`
-  (`v_local=2048`) and the CPU tests' `V=4096, TP=4` are.
-
-  Args:
-    vocab: Full vocabulary size `V`.
-    tp_size: Tensor-parallel degree the logits are sharded over.
-
-  Returns:
-    True when the vocab-parallel normalizer is bitwise the library normalizer.
-  """
-  return (
-      tp_size > 1
-      and vocab % tp_size == 0
-      and (vocab // tp_size) % canonical_logsoftmax.VOCAB_TILE == 0
-  )
-
-
-def _vocab_parallel_normalizer(
-    logits_local: jax.Array,
-    *,
-    tp_axis: str,
-    tp_size: int,
-    interpret: bool,
-) -> jax.Array:
-  """Stages 1+2 normalizer on TP-sharded `logits_local[m, v_local]` (any `m`).
-
-  Must be invoked inside `jax.shard_map` over `tp_axis` with
-  `v_local % VOCAB_TILE == 0` (see `vocab_parallel_logsoftmax_admitted`).
-  - Stage 1 (`partial_kernel`) runs locally on each TP rank over its `v_local`
-    slice (`tiles_local = v_local / 1024` tiles), avoiding the `[M, V]`
-    `all_gather` and cutting Stage 1 Pallas work by `tp_size`x. The grid walks
-    `(row block, tile)` over the 2-D operand directly and the operand may be
-    bf16 (upcast in-kernel, exactly as the library's `partial_kernel` does), so
-    neither an f32 copy nor a tile-splitting reshape (a relayout copy on TPU)
-    of the logits is ever materialized (A1 / A1b).
-  - Bitwise contract: a lane reduction is NOT shape-invariant under XLA (CPU
-    interpret mode reduces a `(1, 1024)` or `(1, 1, 2, 1024)` block in a
-    different order than the library's `(1, 1, 8, 1024)` block: 72% of the
-    tile sums differ by an ulp, ~5% of the normalizers). Every Stage 1 grid
-    step therefore consumes `TILES_PER_GROUP * block_rows` rows and reshapes
-    them in-kernel to the library's exact value shape
-    `[block_rows, 1, TILES_PER_GROUP, VOCAB_TILE]` -- the rows stand in for a
-    group's tiles; each `(row, tile)` reduction is over the same 1024 values
-    in the same program -- before running the library's `partial_kernel`
-    arithmetic verbatim.
-  - Only the per-tile `(local_max, local_sum)` summaries (one
-    `[2, mp, tiles_local]` f32 array, `16 KB` at `mp=1024, tiles_local=2`) are
-    all-gathered across `tp_axis`, in a single collective.
-  - Stage 2 (`combine_kernel`) combines all `tp_size * tiles_local` tile
-    summaries in exact left-to-right tile order (library `TILES_PER_GROUP`
-    padding included) on the library's in-kernel VALUE shape
-    `(block_rows, vocab_groups * TILES_PER_GROUP)`, read from the compact
-    `[mp, padded_tiles]` summaries and written as a lane-dense `[mp, 128]`
-    column (no 128-lane broadcast of the operands, no `[mp, 1, 8, 128]`
-    output), producing a `log_normalizer[m]` that is bitwise identical to the
-    library's unsharded `canonical_logsoftmax._pallas_normalizer`; pinned by
-    `qwen3_model_canon_test.test_vocab_parallel_logsoftmax_matches_library_bitwise`.
-  Every stage is row-independent, so `m` is only padded to the Stage 1 row
-  step (`64` on TPU, `8` in interpret mode) and never chunked: one program for
-  `m=1024` instead of four 256-row `lax.map` iterations, each with its own two
-  launches and two collectives.
-
-  Args:
-    logits_local: This rank's `[m, v_local]` logits shard (bf16 or f32).
-    tp_axis: Mesh axis name of the vocabulary sharding.
-    tp_size: Tensor-parallel degree.
-    interpret: Pallas interpret mode (CPU tests).
-
-  Returns:
-    The f32 `log_normalizer[m]` (`logsumexp` of each full row).
-  """
-  m, v_local = map(int, logits_local.shape)
-  block_rows = 1 if interpret else canonical_logsoftmax.ROW_BUCKET_ALIGN
-  vocab_tile = canonical_logsoftmax.VOCAB_TILE
-  tiles_per_group = canonical_logsoftmax.TILES_PER_GROUP
-  summary_align = canonical_logsoftmax.SUMMARY_ALIGN
-  if v_local % vocab_tile:
-    raise ValueError(
-        f'vocab-parallel normalizer needs v_local % {vocab_tile} == 0, got'
-        f' v_local={v_local}; gate on vocab_parallel_logsoftmax_admitted()'
-    )
-  tiles_local = v_local // vocab_tile
-  rows_per_step = tiles_per_group * block_rows
-
-  mp = model_contracts.round_up(m, rows_per_step)
-  if mp != m:
-    # Padded rows are independent of the real rows and dropped below.
-    logits_local = jnp.pad(
-        logits_local,
-        ((0, mp - m), (0, 0)),
-        constant_values=jnp.zeros((), dtype=logits_local.dtype),
-    )
-
-  def partial_kernel(x_ref, max_ref, sum_ref):
-    # `[rows_per_step, VOCAB_TILE]` -> the library's
-    # `[block_rows, 1, TILES_PER_GROUP, VOCAB_TILE]` (a vreg re-indexing on
-    # TPU: both second-minor extents are sublane multiples, the lane extent is
-    # unchanged), then the library's `partial_kernel` body verbatim.
-    x = x_ref[...].astype(jnp.float32)
-    x = x.reshape(block_rows, 1, tiles_per_group, vocab_tile)
-    tile_max = jnp.max(x, axis=-1)
-    tile_sum = jnp.sum(
-        jnp.exp(x - tile_max[..., None]), axis=-1, dtype=jnp.float32
-    )
-    max_ref[...] = jnp.broadcast_to(tile_max[..., None], max_ref.shape)
-    sum_ref[...] = jnp.broadcast_to(tile_sum[..., None], sum_ref.shape)
-
-  # Summaries keep the library's `[.., 1, TILES_PER_GROUP, SUMMARY_ALIGN]`
-  # block so the stores match too; `(mp // 8, 1, 8, T * 128)` is the row-major
-  # `[mp, T * 128]` with row `8 * i + t` at `[i, 0, t]`.
-  summary_shape = jax.ShapeDtypeStruct(
-      (mp // tiles_per_group, 1, tiles_per_group, tiles_local * summary_align),
-      jnp.float32,
-  )
-  partial_max, partial_sum = pl.pallas_call(
-      partial_kernel,
-      out_shape=(summary_shape, summary_shape),
-      grid_spec=pltpu.PrefetchScalarGridSpec(
-          num_scalar_prefetch=0,
-          in_specs=[
-              pl.BlockSpec((rows_per_step, vocab_tile), lambda i, j: (i, j)),
-          ],
-          out_specs=[
-              pl.BlockSpec(
-                  (block_rows, 1, tiles_per_group, summary_align),
-                  lambda i, j: (i, 0, 0, j),
-              ),
-              pl.BlockSpec(
-                  (block_rows, 1, tiles_per_group, summary_align),
-                  lambda i, j: (i, 0, 0, j),
-              ),
-          ],
-          grid=(mp // rows_per_step, tiles_local),
-      ),
-      compiler_params=pltpu.CompilerParams(
-          dimension_semantics=('parallel', 'parallel'),
-          allow_input_fusion=(False,),
-          shape_invariant_numerics=True,
-      ),
-      interpret=interpret,
-      name=f'canon_logsoftmax_vp_partial_m{mp}_vl{v_local}',
-  )(logits_local)
-
-  # Lane 0 of each 128-lane summary block holds the tile value; gather both
-  # summaries with one collective, rank-ordered along the tile axis.
-  local_summary = jnp.stack([
-      partial_max.reshape(mp, tiles_local, summary_align)[:, :, 0],
-      partial_sum.reshape(mp, tiles_local, summary_align)[:, :, 0],
-  ])  # [2, mp, tiles_local]
-  all_summary = lax.all_gather(local_summary, tp_axis, axis=2, tiled=True)
-  all_max = all_summary[0]  # [mp, tp_size * tiles_local]
-  all_sum = all_summary[1]
-
-  total_tiles = tp_size * tiles_local
-  vocab_groups = (total_tiles + tiles_per_group - 1) // tiles_per_group
-  padded_tiles = vocab_groups * tiles_per_group
-  if padded_tiles != total_tiles:
-    # A fully padded library tile (all `finfo.min` columns) summarizes to
-    # `(finfo.min, VOCAB_TILE)`; its Stage 2 contribution vanishes exactly.
-    all_max = jnp.pad(
-        all_max,
-        ((0, 0), (0, padded_tiles - total_tiles)),
-        constant_values=jnp.finfo(jnp.float32).min,
-    )
-    all_sum = jnp.pad(
-        all_sum,
-        ((0, 0), (0, padded_tiles - total_tiles)),
-        constant_values=jnp.float32(vocab_tile),
-    )
-
-  # Stage 2 consumes the compact `[mp, padded_tiles]` summaries directly. The
-  # library's `combine_kernel` loads lane 0 of a lane-padded
-  # `(block_rows, vocab_groups, TILES_PER_GROUP, SUMMARY_ALIGN)` block and
-  # reshapes it to `(block_rows, vocab_groups * TILES_PER_GROUP)` before its
-  # two reductions; a `(block_rows, padded_tiles)` block IS that value (same
-  # shape, same lane positions), so the reductions are the library's, while
-  # the lane-padded operands (`2 * mp * SUMMARY_ALIGN * 4` bytes, 8 MB at
-  # `mp=1024`) and the lane-padded `[mp, 1, 8, 128]` output (4 MB) are never
-  # materialized: Step 8 measured them as a `+2.7 MB` Prefill / `+9.6 MB`
-  # Fwd+Bwd peak regression once the 256-row chunking was removed (A1b).
-  padded_tiles = vocab_groups * tiles_per_group
-
-  def combine_kernel(max_ref, sum_ref, norm_ref):
-    l_max = max_ref[...].astype(jnp.float32)
-    l_sum = sum_ref[...].astype(jnp.float32)
-    global_max = jnp.max(l_max, axis=-1)
-    global_sum = jnp.sum(
-        l_sum * jnp.exp(l_max - global_max[:, None]),
-        axis=-1,
-        dtype=jnp.float32,
-    )
-    normalizer = global_max + jnp.log(global_sum)
-    norm_ref[...] = jnp.broadcast_to(normalizer[:, None], norm_ref.shape)
-
-  log_normalizer = pl.pallas_call(
-      combine_kernel,
-      out_shape=jax.ShapeDtypeStruct((mp, summary_align), jnp.float32),
-      grid_spec=pltpu.PrefetchScalarGridSpec(
-          num_scalar_prefetch=0,
-          in_specs=[
-              pl.BlockSpec((block_rows, padded_tiles), lambda row: (row, 0)),
-              pl.BlockSpec((block_rows, padded_tiles), lambda row: (row, 0)),
-          ],
-          out_specs=pl.BlockSpec(
-              (block_rows, summary_align), lambda row: (row, 0)
-          ),
-          grid=(mp // block_rows,),
-      ),
-      compiler_params=pltpu.CompilerParams(
-          dimension_semantics=('parallel',),
-          allow_input_fusion=(False, False),
-          shape_invariant_numerics=True,
-      ),
-      interpret=interpret,
-      name=f'canon_logsoftmax_vp_combine_m{mp}_t{total_tiles}',
-  )(all_max, all_sum)
-  return log_normalizer[:m, 0]
-
-
-def _vocab_parallel_log_softmax(
-    flat_logits: jax.Array,
-    *,
-    mesh: jax.sharding.Mesh,
-    tp_axis: str,
-    tp_size: int,
-    interpret: bool,
-    exact_residual_dtype: jaxtyping.DTypeLike | None,
-) -> jax.Array:
-  """Vocab-parallel `log_softmax` of the `P(None, 'tp')` `flat_logits[m, V]`.
-
-  `flat_logits` may be bf16 (the LM head's native dtype): the normalizer kernel
-  upcasts in-kernel and the output is f32, so the result is bitwise the result
-  for `flat_logits.astype(f32)` without materializing that copy. The cotangent
-  is returned in the primal dtype; it is formed in f32 and rounded once, which
-  is exactly what differentiating through an outer `astype(f32)` did before.
-
-  Args:
-    flat_logits: `[m, V]` logits, `P(None, tp_axis)` sharded.
-    mesh: The TP mesh.
-    tp_axis: Mesh axis name of the vocabulary sharding.
-    tp_size: Tensor-parallel degree.
-    interpret: Pallas interpret mode (CPU tests).
-    exact_residual_dtype: Optional storage dtype of the logits residual; `None`
-      keeps the primal dtype.
-
-  Returns:
-    The f32 `log_softmax` `[m, V]`, sharded like `flat_logits`.
-  """
-
-  def _fwd_local(logits_local: jax.Array):
-    normalizer = _vocab_parallel_normalizer(
-        logits_local,
-        tp_axis=tp_axis,
-        tp_size=tp_size,
-        interpret=interpret,
-    )
-    out_local = logits_local.astype(jnp.float32) - normalizer[:, None]
-    logits_res = (
-        logits_local.astype(exact_residual_dtype)
-        if exact_residual_dtype is not None
-        else logits_local
-    )
-    return out_local, (logits_res, normalizer)
-
-  def _bwd_local(res_local, cot_local: jax.Array):
-    logits_res, normalizer = res_local
-    logits_f32_local = logits_res.astype(jnp.float32)
-    cot_f32_local = cot_local.astype(jnp.float32)
-    prob_local = jnp.exp(logits_f32_local - normalizer[:, None])
-    cot_sum = lax.psum(jnp.sum(cot_f32_local, axis=-1, keepdims=True), tp_axis)
-    grad_f32 = cot_f32_local - prob_local * cot_sum
-    return grad_f32.astype(flat_logits.dtype)
-
-  fwd_shmap = jax.shard_map(
-      _fwd_local,
-      mesh=mesh,
-      in_specs=(P(None, tp_axis),),
-      out_specs=(P(None, tp_axis), (P(None, tp_axis), P(None))),
-      check_vma=False,
-  )
-  bwd_shmap = jax.shard_map(
-      _bwd_local,
-      mesh=mesh,
-      in_specs=((P(None, tp_axis), P(None)), P(None, tp_axis)),
-      out_specs=P(None, tp_axis),
-      check_vma=False,
-  )
-
-  @jax.custom_vjp
-  def op(logits_in: jax.Array) -> jax.Array:
-    out, _ = fwd_shmap(logits_in)
-    return out
-
-  def _fwd(logits_in: jax.Array):
-    return fwd_shmap(logits_in)
-
-  def _bwd(residual, cotangent: jax.Array):
-    return (bwd_shmap(residual, cotangent),)
-
-  op.defvjp(_fwd, _bwd)
-  return op(flat_logits)
-
-
-def _vocab_parallel_token_logprobs(
-    flat_logits: jax.Array,
-    flat_tokens: jax.Array,
-    *,
-    mesh: jax.sharding.Mesh,
-    tp_axis: str,
-    tp_size: int,
-    interpret: bool,
-    exact_residual_dtype: jaxtyping.DTypeLike | None,
-) -> jax.Array:
-  """Vocab-parallel `token_logprobs` of the `P(None, 'tp')` `flat_logits[m, V]`.
-
-  `flat_logits` may be bf16 (the LM head's native dtype, see
-  `Qwen3Canon.compute_final_logits`): the normalizer kernel upcasts in-kernel
-  and the gathered target column is upcast after the gather (both exact), so
-  the result is bitwise the result for `flat_logits.astype(f32)` while the
-  `[m, V/TP]` f32 copy, its residual and its f32 cotangent are never
-  materialized. The cotangent is formed in f32 (`-p * ct`, plus `ct` at the
-  target column) and rounded once to the primal dtype -- the rounding point an
-  outer `astype(f32)` transposed to before.
-
-  Args:
-    flat_logits: `[m, V]` logits, `P(None, tp_axis)` sharded.
-    flat_tokens: `[m]` int32 target token ids (replicated).
-    mesh: The TP mesh.
-    tp_axis: Mesh axis name of the vocabulary sharding.
-    tp_size: Tensor-parallel degree.
-    interpret: Pallas interpret mode (CPU tests).
-    exact_residual_dtype: Optional storage dtype of the logits residual; `None`
-      keeps the primal dtype.
-
-  Returns:
-    The f32 per-row target log-probabilities `[m]` (replicated).
-  """
-  m, vocab = map(int, flat_logits.shape)
-  v_local = vocab // tp_size
-
-  def _fwd_local(logits_local: jax.Array, tok_1d: jax.Array):
-    normalizer = _vocab_parallel_normalizer(
-        logits_local,
-        tp_axis=tp_axis,
-        tp_size=tp_size,
-        interpret=interpret,
-    )
-    axis_idx = lax.axis_index(tp_axis)
-    v_start = axis_idx * v_local
-    local_tok = tok_1d - v_start
-    in_shard = (local_tok >= 0) & (local_tok < v_local)
-    safe_tok = jnp.where(in_shard, local_tok, 0)
-    gathered = jnp.take_along_axis(logits_local, safe_tok[:, None], axis=-1)[
-        :, 0
-    ].astype(jnp.float32)
-    token_col = lax.psum(
-        jnp.where(in_shard, gathered, jnp.float32(0.0)), tp_axis
-    )
-    token_logprob = token_col - normalizer
-    logits_res = (
-        logits_local.astype(exact_residual_dtype)
-        if exact_residual_dtype is not None
-        else logits_local
-    )
-    return token_logprob, (logits_res, normalizer, tok_1d)
-
-  def _bwd_local(res_local, cot_1d: jax.Array):
-    logits_res, normalizer, tok_1d = res_local
-    logits_f32_local = logits_res.astype(jnp.float32)
-    cot_f32 = cot_1d.astype(jnp.float32)
-    prob_local = jnp.exp(logits_f32_local - normalizer[:, None])
-    grad_local = -prob_local * cot_f32[:, None]
-    axis_idx = lax.axis_index(tp_axis)
-    v_start = axis_idx * v_local
-    local_tok = tok_1d - v_start
-    in_shard = (local_tok >= 0) & (local_tok < v_local)
-    safe_tok = jnp.where(in_shard, local_tok, 0)
-    rows = jnp.arange(m, dtype=jnp.int32)
-    grad_local = grad_local.at[rows, safe_tok].add(
-        jnp.where(in_shard, cot_f32, jnp.float32(0.0))
-    )
-    return grad_local.astype(flat_logits.dtype)
-
-  fwd_shmap = jax.shard_map(
-      _fwd_local,
-      mesh=mesh,
-      in_specs=(P(None, tp_axis), P(None)),
-      out_specs=(P(None), (P(None, tp_axis), P(None), P(None))),
-      check_vma=False,
-  )
-  bwd_shmap = jax.shard_map(
-      _bwd_local,
-      mesh=mesh,
-      in_specs=((P(None, tp_axis), P(None), P(None)), P(None)),
-      out_specs=P(None, tp_axis),
-      check_vma=False,
-  )
-
-  @jax.custom_vjp
-  def op(logits_in: jax.Array, tok_in: jax.Array) -> jax.Array:
-    out, _ = fwd_shmap(logits_in, tok_in)
-    return out
-
-  def _fwd(logits_in: jax.Array, tok_in: jax.Array):
-    return fwd_shmap(logits_in, tok_in)
-
-  def _bwd(residual, cotangent: jax.Array):
-    return bwd_shmap(residual, cotangent), None
-
-  op.defvjp(_fwd, _bwd)
-  return op(flat_logits, flat_tokens)
+vocab_parallel_logsoftmax_admitted = (
+    canonical_logsoftmax.vocab_parallel_logsoftmax_admitted
+)
+_vocab_parallel_log_softmax = canonical_logsoftmax.vocab_parallel_log_softmax
+_vocab_parallel_token_logprobs = (
+    canonical_logsoftmax.vocab_parallel_token_logprobs
+)
 
 
 def compute_log_softmax(
@@ -3499,13 +3091,13 @@ def compute_log_softmax(
 ) -> jax.Array:
   """Computes full-vocabulary log-softmax (stock or Zero-TIM canonical).
 
-  Handles arbitrary batch/sequence dimensions by flattening to 2D `[M, V]`,
-  padding `M` to a valid `ROW_BUCKET_ALIGN=8` bucket (or chunking by
-  `PRODUCTION_M=256`), and invoking `canonical_logsoftmax.log_softmax`. Under a
-  TP mesh whose vocabulary shards are whole 1024-column tiles
-  (`vocab_parallel_logsoftmax_admitted`) the vocab-parallel program runs
-  instead; it consumes `logits` in their native dtype (the kernel upcasts) and
-  is bitwise the library program.
+  Handles arbitrary batch/sequence dimensions by flattening to 2D `[M, V]` and
+  invoking `canonical_logsoftmax.log_softmax` (or
+  `canonical_logsoftmax.vocab_parallel_log_softmax` under a TP mesh whenever
+  `vocab_parallel_logsoftmax_admitted(V, TP)` holds, including Qwen3's
+  `V = 151936` at `TP = 2 / 4 / 8`). Both paths accept `bf16` and `f32`
+  operands of any row count `M >= 1` directly and preserve data-axis row
+  sharding (`fsdp`).
 
   Args:
     logits: Float array `[..., V]`.
@@ -3525,14 +3117,18 @@ def compute_log_softmax(
   if interpret is None:
     interpret = is_interpret_default()
   vocab = int(logits.shape[-1])
-
-  os.environ.setdefault(canonical_logsoftmax.ENV, '1')
   orig_shape = logits.shape
   m = int(logits.size // vocab)
 
-  row_align = 1 if interpret else canonical_logsoftmax.ROW_BUCKET_ALIGN
-  prod_m = canonical_logsoftmax.PRODUCTION_M
-  tp_size, mesh = _active_tp_size_and_mesh('tp')
+  tp_size, _ = _active_tp_size_and_mesh('tp')
+  mesh = _active_mesh()
+  data_axes, num_shards = _data_axes(mesh)
+
+  flat_in = (
+      logits.reshape(m, vocab)
+      if logits.dtype in (jnp.bfloat16, jnp.float32)
+      else jnp.astype(logits, jnp.float32).reshape(m, vocab)
+  )
 
   if (
       VOCAB_PARALLEL_LOGSOFTMAX
@@ -3540,53 +3136,30 @@ def compute_log_softmax(
       and vocab_parallel_logsoftmax_admitted(vocab, tp_size)
   ):
     out_2d = _vocab_parallel_log_softmax(
-        logits.reshape(m, vocab),
+        flat_in,
         mesh=mesh,
         tp_axis='tp',
         tp_size=tp_size,
+        data_axes=data_axes,
+        num_shards=num_shards,
         interpret=interpret,
         exact_residual_dtype=exact_residual_dtype,
     )
     return out_2d.reshape(orig_shape)
 
-  logits_f32 = jnp.astype(logits, jnp.float32)
-  flat = logits_f32.reshape(m, vocab)
-
   def _run_2d(mat_2d: jax.Array) -> jax.Array:
-    return canonical_logsoftmax.log_softmax(
-        mat_2d, interpret=interpret, strict_vocab=False
-    )
+    return canonical_logsoftmax.log_softmax(mat_2d, interpret=interpret)
 
-  run_2d = _logsoftmax_vjp_coat(
-      _run_2d,
-      mesh=mesh if (mesh is not None and tp_size > 1) else None,
-      in_specs=(P(None, None),),
-      out_spec=P(None, None),
-      differentiable=(True,),
-      exact_residual_dtype=exact_residual_dtype,
-  )
-
-  if m <= prod_m:
-    mp = model_contracts.round_up(m, row_align)
+  if data_axes:
+    mp = model_contracts.round_up(m, num_shards)
     if mp != m:
       padded = jnp.pad(
-          flat, ((0, mp - m), (0, 0)), constant_values=jnp.float32(0.0)
+          flat_in,
+          ((0, mp - m), (0, 0)),
+          constant_values=jnp.zeros((), dtype=flat_in.dtype),
       )
     else:
-      padded = flat
-    out_2d = run_2d(padded)[:m, :]
-    return out_2d.reshape(orig_shape)
-
-  data_axes, num_shards = _data_axes(mesh)
-  mp = model_contracts.round_up(m, prod_m * num_shards)
-  if mp != m:
-    padded = jnp.pad(
-        flat, ((0, mp - m), (0, 0)), constant_values=jnp.float32(0.0)
-    )
-  else:
-    padded = flat
-  if data_axes:
-    # Rows sharded over the data axes: see `compute_token_logprobs`.
+      padded = flat_in
     run_rows = _logsoftmax_vjp_coat(
         _run_2d,
         mesh=mesh,
@@ -3595,13 +3168,25 @@ def compute_log_softmax(
         differentiable=(True,),
         exact_residual_dtype=exact_residual_dtype,
     )
-    out_2d = _map_row_shard_chunks(
-        run_rows, (padded,), chunk_rows=prod_m, num_shards=num_shards
-    )
-    return out_2d[:m, :].reshape(orig_shape)
-  chunks = padded.reshape(-1, prod_m, vocab)
-  out_chunks = lax.map(run_2d, chunks)
-  return out_chunks.reshape(mp, vocab)[:m, :].reshape(orig_shape)
+    return run_rows(padded)[:m, :].reshape(orig_shape)
+
+  coat_mesh = mesh if (mesh is not None and tp_size > 1) else None
+  same_res_dtype = (
+      exact_residual_dtype is not None
+      and jnp.dtype(exact_residual_dtype) == flat_in.dtype
+  )
+  coat_res_dtype = (
+      None if (coat_mesh is None and same_res_dtype) else exact_residual_dtype
+  )
+  run_2d = _logsoftmax_vjp_coat(
+      _run_2d,
+      mesh=coat_mesh,
+      in_specs=(P(None, None),),
+      out_spec=P(None, None),
+      differentiable=(True,),
+      exact_residual_dtype=coat_res_dtype,
+  )
+  return run_2d(flat_in).reshape(orig_shape)
 
 
 def compute_token_logprobs(
@@ -3616,33 +3201,29 @@ def compute_token_logprobs(
 
   HBM & Latency Optimization:
   When `use_canon_logsoftmax=True`, routes directly to
-  `canonical_logsoftmax.token_logprobs` (or `_vocab_parallel_token_logprobs`
-  under a TP mesh when `VOCAB_PARALLEL_LOGSOFTMAX=True` and
+  `canonical_logsoftmax.token_logprobs` (or
+  `canonical_logsoftmax.vocab_parallel_token_logprobs` under a TP mesh when
+  `VOCAB_PARALLEL_LOGSOFTMAX=True` and
   `vocab_parallel_logsoftmax_admitted(V, TP)`) instead of materializing the
   full `[M, V]` `float32` `compute_log_softmax(logits)` tensor and slicing with
   `jnp.take_along_axis`:
-  - Forward skips Stage 3 (`normalize_kernel`) and subtracts the per-row
-    Stages 1+2 `log_normalizer[M]` directly from the gathered target column
-    `logits[row, token_ids[row]]`, eliminating ~24 MB (`M=64`) to ~152 MB
-    (`M=256`) of temporary HBM in Prefill while remaining 100% bitwise
-    identical to `take_along_axis(compute_log_softmax(logits), token_ids)`.
-  - Under TP > 1 (`VOCAB_PARALLEL_LOGSOFTMAX=True`),
-    `_vocab_parallel_token_logprobs` consumes `logits` directly in its native
-    `P(None, 'tp')` vocabulary sharding `[M, V/TP]` AND in its native dtype
-    (bf16 from `compute_final_logits`; the Stage 1 kernel upcasts in-kernel)
-    without all-gathering the full `[M, V]` tensor or materializing an f32
-    copy of the shard: Stage 1 runs on `1/TP` columns per rank, only the tiny
-    `[2, M, tiles_local]` tile summaries (`16 KB` at `M=1024, tiles_local=2`)
-    are all-gathered for Stage 2, the saved backward residual is the
-    `[M, V/TP]` bf16 shard itself plus `normalizer[M]` (`4 KB`), and backward
-    computes `dL/dlogits` locally in `[M, V/TP]` without re-running Stages 1+2
-    or executing any collectives. Shards that are not whole 1024-column tiles
-    (e.g. `V=151936` at TP=2/4/8) fall back to the gathered library program,
-    which is the engine's.
+  - Forward subtracts the per-row Stages 1+2 `log_normalizer[M]` directly from
+    the gathered target column `logits[row, token_ids[row]]` while remaining
+    100% bitwise identical to `take_along_axis(compute_log_softmax(logits),
+    token_ids)`.
+  - Under TP > 1 (`VOCAB_PARALLEL_LOGSOFTMAX=True`, admitted whenever
+    `V / TP >= 1024`, including Qwen3's `V = 151936` at `TP = 2 / 4 / 8`),
+    `vocab_parallel_token_logprobs` consumes `logits` directly in its native
+    `P(data_axes, 'tp')` sharding `[M, V/TP]` AND in its native dtype (`bf16`
+    from `compute_final_logits`) without all-gathering `[M, V]`: non-aligned
+    shard boundaries exchange a single 1024-column halo via `lax.ppermute`,
+    only the compact `[2, M, tiles_local]` summaries are all-gathered across TP
+    for Stage 2, and backward computes `dL/dlogits` locally in `[M, V/TP]`
+    without re-running Stages 1+2 or executing any collectives.
 
   Args:
-    logits: Logits tensor `[..., V]` (any float dtype; bf16 is consumed without
-      an upcast copy on the vocab-parallel path).
+    logits: Logits tensor `[..., V]` (any float dtype; `bf16` and `f32` are
+      consumed directly without an upcast copy).
     token_ids: Integer token IDs `[...]`.
     use_canon_logsoftmax: Whether to use Zero-TIM `canonical_logsoftmax`.
     interpret: Optional Pallas interpret mode override.
@@ -3666,15 +3247,19 @@ def compute_token_logprobs(
   if interpret is None:
     interpret = is_interpret_default()
   vocab = int(logits.shape[-1])
-
-  os.environ.setdefault(canonical_logsoftmax.ENV, '1')
   orig_token_shape = token_ids.shape
   m = int(logits.size // vocab)
   flat_tokens = token_ids.astype(jnp.int32).reshape(m)
 
-  row_align = 1 if interpret else canonical_logsoftmax.ROW_BUCKET_ALIGN
-  prod_m = canonical_logsoftmax.PRODUCTION_M
-  tp_size, mesh = _active_tp_size_and_mesh('tp')
+  tp_size, _ = _active_tp_size_and_mesh('tp')
+  mesh = _active_mesh()
+  data_axes, num_shards = _data_axes(mesh)
+
+  flat_logits = (
+      logits.reshape(m, vocab)
+      if logits.dtype in (jnp.bfloat16, jnp.float32)
+      else jnp.astype(logits, jnp.float32).reshape(m, vocab)
+  )
 
   if (
       VOCAB_PARALLEL_LOGSOFTMAX
@@ -3682,37 +3267,30 @@ def compute_token_logprobs(
       and vocab_parallel_logsoftmax_admitted(vocab, tp_size)
   ):
     out_1d = _vocab_parallel_token_logprobs(
-        logits.reshape(m, vocab),
+        flat_logits,
         flat_tokens,
         mesh=mesh,
         tp_axis='tp',
         tp_size=tp_size,
+        data_axes=data_axes,
+        num_shards=num_shards,
         interpret=interpret,
         exact_residual_dtype=exact_residual_dtype,
     )
     return out_1d.reshape(orig_token_shape)
 
-  flat_logits = jnp.astype(logits, jnp.float32).reshape(m, vocab)
-
   def _run_2d(mat_2d: jax.Array, tok_1d: jax.Array) -> jax.Array:
     return canonical_logsoftmax.token_logprobs(
-        mat_2d, tok_1d, interpret=interpret, strict_vocab=False
+        mat_2d, tok_1d, interpret=interpret
     )
 
-  run_2d = _logsoftmax_vjp_coat(
-      _run_2d,
-      mesh=mesh if (mesh is not None and tp_size > 1) else None,
-      in_specs=(P(None, None), P(None)),
-      out_spec=P(None),
-      differentiable=(True, False),
-      exact_residual_dtype=exact_residual_dtype,
-  )
-
-  if m <= prod_m:
-    mp = model_contracts.round_up(m, row_align)
+  if data_axes:
+    mp = model_contracts.round_up(m, num_shards)
     if mp != m:
       padded_logits = jnp.pad(
-          flat_logits, ((0, mp - m), (0, 0)), constant_values=jnp.float32(0.0)
+          flat_logits,
+          ((0, mp - m), (0, 0)),
+          constant_values=jnp.zeros((), dtype=flat_logits.dtype),
       )
       padded_tokens = jnp.pad(
           flat_tokens, ((0, mp - m),), constant_values=jnp.int32(0)
@@ -3720,25 +3298,6 @@ def compute_token_logprobs(
     else:
       padded_logits = flat_logits
       padded_tokens = flat_tokens
-    out_1d = run_2d(padded_logits, padded_tokens)[:m]
-    return out_1d.reshape(orig_token_shape)
-
-  data_axes, num_shards = _data_axes(mesh)
-  mp = model_contracts.round_up(m, prod_m * num_shards)
-  if mp != m:
-    padded_logits = jnp.pad(
-        flat_logits, ((0, mp - m), (0, 0)), constant_values=jnp.float32(0.0)
-    )
-    padded_tokens = jnp.pad(
-        flat_tokens, ((0, mp - m),), constant_values=jnp.int32(0)
-    )
-  else:
-    padded_logits = flat_logits
-    padded_tokens = flat_tokens
-  if data_axes:
-    # Rows sharded over the data axes (e.g. the learner's batch over `fsdp`):
-    # every shard scores its own rows, 256 at a time. Rows are independent, so
-    # each row's value is the one the replicated program computes.
     run_rows = _logsoftmax_vjp_coat(
         _run_2d,
         mesh=mesh,
@@ -3747,19 +3306,25 @@ def compute_token_logprobs(
         differentiable=(True, False),
         exact_residual_dtype=exact_residual_dtype,
     )
-    out_1d = _map_row_shard_chunks(
-        run_rows,
-        (padded_logits, padded_tokens),
-        chunk_rows=prod_m,
-        num_shards=num_shards,
-    )
-    return out_1d[:m].reshape(orig_token_shape)
-  logit_chunks = padded_logits.reshape(-1, prod_m, vocab)
-  token_chunks = padded_tokens.reshape(-1, prod_m)
-  out_chunks = lax.map(
-      lambda xs: run_2d(xs[0], xs[1]), (logit_chunks, token_chunks)
+    return run_rows(padded_logits, padded_tokens)[:m].reshape(orig_token_shape)
+
+  coat_mesh = mesh if (mesh is not None and tp_size > 1) else None
+  same_res_dtype = (
+      exact_residual_dtype is not None
+      and jnp.dtype(exact_residual_dtype) == flat_logits.dtype
   )
-  return out_chunks.reshape(mp)[:m].reshape(orig_token_shape)
+  coat_res_dtype = (
+      None if (coat_mesh is None and same_res_dtype) else exact_residual_dtype
+  )
+  run_2d = _logsoftmax_vjp_coat(
+      _run_2d,
+      mesh=coat_mesh,
+      in_specs=(P(None, None), P(None)),
+      out_spec=P(None),
+      differentiable=(True, False),
+      exact_residual_dtype=coat_res_dtype,
+  )
+  return run_2d(flat_logits, flat_tokens).reshape(orig_token_shape)
 
 
 def get_tp_sharding_config(tp_axis: str = 'tp') -> ShardingConfig:

@@ -34,12 +34,44 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
+MIN_BLOCK_M = 8
 BM = 128
 BN = 256
 BK = 256
 CONTRACT_TILES = frozenset({(BM, BN, BK), (128, 128, 128)})
+CONTRACT_NK_TILES = frozenset({(BN, BK), (128, 128)})
 BLOCK_N_CANDIDATES = (1024, 1280, 640, 512)
 INPUT_FUSION_ENV = "CANON_PALLAS_INPUT_FUSION"
+
+
+def adaptive_row_bucket(m: int, default_bm: int = BM) -> tuple[int, int]:
+  """Returns `(m_padded, block_m)` using power-of-2 row buckets for small `m`.
+
+  For `m < default_bm`, selects the smallest power-of-2 bucket in
+  `[MIN_BLOCK_M, default_bm)` that is `>= m` (aligned to TPU VREG sublanes
+  `MIN_BLOCK_M = 8`), avoiding padding small decode batches all the way to `128`
+  or `256`. Because rows are independent in the matmul contraction, `block_m`
+  is bitwise neutral. For `m >= default_bm` (or when the next power of 2 reaches
+  `default_bm`), rounds `m` up to a multiple of `default_bm`.
+
+  Args:
+    m: Semantic row count (`> 0`).
+    default_bm: Target row block/chunk size for full batches (`> 0`).
+
+  Returns:
+    `(m_padded, block_m)`.
+  """
+  if m <= 0 or default_bm <= 0:
+    raise ValueError(
+        "adaptive_row_bucket requires positive (m, default_bm), got "
+        f"{(m, default_bm)}"
+    )
+  if default_bm >= MIN_BLOCK_M and m < default_bm:
+    bucket = max(MIN_BLOCK_M, 1 << (m - 1).bit_length())
+    if bucket < default_bm:
+      return bucket, bucket
+  mp = ((m + default_bm - 1) // default_bm) * default_bm
+  return mp, default_bm
 
 
 def tile_policy(
@@ -47,8 +79,9 @@ def tile_policy(
 ) -> tuple[int, int, int]:
   """Returns `(block_m, block_n, block_k)` for an `[m, k] @ [k, n]` bf16 matmul.
 
-  `block_m` is promoted to `256` when `m % 256 == 0`; `block_n` is promoted to
-  the first candidate in `BLOCK_N_CANDIDATES` dividing `n`; `block_k` is kept
+  `block_m` is promoted from `BM` (`128`) to `256` when `m % 256 == 0` (smaller
+  adaptive decode `block_m` values are preserved); `block_n` is promoted to the
+  first candidate in `BLOCK_N_CANDIDATES` dividing `n`; `block_k` is kept
   unchanged so the per-element accumulation order never changes.
 
   Args:
@@ -62,7 +95,7 @@ def tile_policy(
   """
   del k
   block_m, block_n, block_k = tiles
-  if m % 256 == 0:
+  if block_m == BM and m % 256 == 0:
     block_m = 256
   for candidate in BLOCK_N_CANDIDATES:
     if n % candidate == 0:
@@ -99,7 +132,13 @@ def matmul(
     raise ValueError(
         f"pallas_matmul requires bf16 inputs, got {x.dtype}, {y.dtype} "
     )
-  if (block_m, block_n, block_k) in CONTRACT_TILES:
+  is_adaptive_small_m = (
+      MIN_BLOCK_M <= block_m < BM
+      and block_m % MIN_BLOCK_M == 0
+      and block_m == m
+      and (block_n, block_k) in CONTRACT_NK_TILES
+  )
+  if (block_m, block_n, block_k) in CONTRACT_TILES or is_adaptive_small_m:
     block_m, block_n, block_k = tile_policy(
         m, k, n, (block_m, block_n, block_k)
     )

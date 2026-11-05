@@ -13,8 +13,11 @@
 # limitations under the License.
 """Tests for pallas_norm_matmul (CPU, Pallas interpret mode)."""
 
+from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
+from jax.experimental import pallas as pl
 import jax.numpy as jnp
 import numpy as np
 from tunix.zero_tim_kernel import pallas_matmul
@@ -63,6 +66,39 @@ class NormMatmulTest(parameterized.TestCase):
         x, gamma, y, epsilon=_EPS, interpret=True
     )
     test_utils.assert_bitwise_equal(fused, _two_kernel_chain(x, gamma, y))
+
+  def test_wide_block_n_promotion_and_column_grouping_are_bitwise_identical(
+      self,
+  ):
+    rng = np.random.default_rng(42)
+    x = test_utils.random_bf16(rng, (16, 512))
+    gamma = test_utils.random_bf16(rng, (512,))
+    # N = 6144 exceeds MAX_GROUP_N = 3072: block_n promotes 256 -> 1024 and
+    # group_n caps at 3072 -> 2 parallel column groups of 3072 each.
+    y = test_utils.random_bf16(rng, (512, 6144), scale=0.05)
+    with mock.patch.object(pl, "pallas_call", wraps=pl.pallas_call) as spy:
+      fused = pallas_norm_matmul.norm_matmul(
+          x, gamma, y, epsilon=_EPS, interpret=True, block_m=16
+      )
+    self.assertLen(spy.call_args_list, 1)
+    call = spy.call_args_list[0]
+    self.assertEqual(
+        call.kwargs["name"],
+        "canon_norm_matmul_bm16_bn1024_gn3072_bk256_f512",
+    )
+    self.assertEqual(tuple(call.kwargs["grid_spec"].grid), (1, 2, 2))
+    test_utils.assert_bitwise_equal(
+        fused, _two_kernel_chain(x, gamma, y, block_m=16)
+    )
+
+  def test_column_group_width(self):
+    self.assertEqual(pallas_norm_matmul.column_group_width(1536, 512), 1536)
+    self.assertEqual(pallas_norm_matmul.column_group_width(2560, 1280), 2560)
+    self.assertEqual(pallas_norm_matmul.column_group_width(6144, 1024), 3072)
+    self.assertEqual(pallas_norm_matmul.column_group_width(5120, 1024), 1024)
+    self.assertEqual(pallas_norm_matmul.column_group_width(24576, 1024), 3072)
+    with self.assertRaises(ValueError):
+      pallas_norm_matmul.column_group_width(1024, 300)
 
   @parameterized.named_parameters(
       ("rank", (128, 256, 1), (256,), (256, 256), {}),

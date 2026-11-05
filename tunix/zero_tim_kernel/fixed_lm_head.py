@@ -11,21 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Fixed-shape Pallas output head (`[FIXED_M=256, K] @ [K, V_local]`).
+"""Fixed-contraction Pallas output head (`[M, K] @ [K, V_local]`).
 
 The output head `[M, K] @ [K, V]` is evaluated at very different row counts `M`
 by decode steps (`M <= 256`), prefill/scoring (`M == 256`), and the learner
-(`M > 256`). `fixed_m_lm_head_local` routes every outer row count through one
-fixed Pallas program `[FIXED_M=256, K] @ [K, V_local]` with fixed tiles
-`BM/BN/BK = 128/256/256`:
+(`M > 256`). `fixed_m_lm_head_local` routes every outer row count through the
+same fixed-`BK = 256` Pallas contraction order:
 
-* `M < 256` is zero-padded to 256 rows (rows are independent, so padding never
-  changes a real row) and sliced back;
+* `M < 256` is zero-padded only to the smallest power-of-2 row bucket in
+  `{8, 16, 32, 64, 128, 256}` (rows are independent and `block_m` is bitwise
+  neutral, avoiding up to 32x decode MXU and HBM writeback waste) and sliced
+  back;
 * `M == 256` runs directly;
 * `M > 256` is zero-padded to a multiple of 256 rows, reshaped into `c` chunks
-  of 256 rows, and mapped with `lax.map` over the same 256-row program. Its
-  custom VJP accumulates the weight cotangent chunk by chunk with a
-  loop-carried `lax.scan` in ascending chunk order.
+  of 256 rows, and mapped with `lax.map` over the 256-row program. Its custom
+  VJP accumulates the weight cotangent chunk by chunk with a loop-carried
+  `lax.scan` in ascending chunk order.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ import jax.numpy as jnp
 from tunix.zero_tim_kernel import canonical_vjp
 from tunix.zero_tim_kernel import model_contracts
 from tunix.zero_tim_kernel import padded_matmul
+from tunix.zero_tim_kernel import pallas_matmul
 
 FIXED_M = 256
 BM = 128
@@ -90,12 +92,13 @@ def fixed_m_lm_head_local(
 ) -> jax.Array:
   """Runs the TP-local `fixed_m`-chunked or row-padded LM head.
 
-  For `m < fixed_m`, rows are zero-padded to `fixed_m` and sliced back after one
-  `local_matmul` call. For `m == fixed_m`, `local_matmul` runs directly. For
-  `m > fixed_m`, rows are padded to a multiple of `fixed_m`, mapped over
-  `fixed_m`-row chunks with `lax.map` in the forward pass, and differentiated
-  with a custom VJP that accumulates `dW` across chunks in ascending order via
-  `lax.scan`.
+  For `m < fixed_m`, rows are zero-padded to the smallest power-of-2 row bucket
+  in `{8, 16, ..., fixed_m}` and sliced back after one `local_matmul` call at
+  `block_m = min(block_m, bucket)` (preserving the exact `block_k` contraction
+  order). For `m == fixed_m`, `local_matmul` runs directly. For `m > fixed_m`,
+  rows are padded to a multiple of `fixed_m`, mapped over `fixed_m`-row chunks
+  with `lax.map` in the forward pass, and differentiated with a custom VJP that
+  accumulates `dW` across chunks in ascending order via `lax.scan`.
 
   Args:
     x_bf16: `[m, hidden]` bf16 local activations.
@@ -146,21 +149,32 @@ def fixed_m_lm_head_local(
   if local_matmul is None:
     local_matmul = canonical_local_matmul()
 
-  def run_fixed_chunk(a_chunk: jax.Array, weight: jax.Array) -> jax.Array:
+  def run_chunk(
+      a_chunk: jax.Array, weight: jax.Array, *, chunk_bm: int = block_m
+  ) -> jax.Array:
     return local_matmul(
         a_chunk,
         weight,
-        block_m=block_m,
+        block_m=chunk_bm,
         block_n=block_n,
         block_k=block_k,
         shape_invariant_numerics=True,
     )
 
   if m < fixed_m:
-    a_padded = jnp.pad(x_bf16, ((0, fixed_m - m), (0, 0)), constant_values=0)
-    return run_fixed_chunk(a_padded, w_bf16)[:m, :]
+    mp, bucket_bm = pallas_matmul.adaptive_row_bucket(m, fixed_m)
+    a_in = (
+        jnp.pad(x_bf16, ((0, mp - m), (0, 0)), constant_values=0)
+        if mp != m
+        else x_bf16
+    )
+    out = run_chunk(a_in, w_bf16, chunk_bm=min(block_m, bucket_bm))
+    return out[:m, :] if mp != m else out
   if m == fixed_m:
-    return run_fixed_chunk(x_bf16, w_bf16)
+    return run_chunk(x_bf16, w_bf16)
+
+  def run_fixed_chunk(a_chunk: jax.Array, weight: jax.Array) -> jax.Array:
+    return run_chunk(a_chunk, weight)
 
   mp = model_contracts.round_up(m, fixed_m)
   a_all = (

@@ -51,9 +51,34 @@ class TilePolicyTest(parameterized.TestCase):
       (256, 4096, 1024, (128, 128, 128), (256, 1024, 128)),
       (256, 2560, 640, (128, 256, 256), (256, 640, 256)),
       (256, 2048, 1536, (128, 256, 256), (256, 512, 256)),
+      (8, 2048, 1024, (8, 256, 256), (8, 1024, 256)),
+      (32, 2048, 1536, (32, 128, 128), (32, 512, 128)),
   )
   def test_tile_policy(self, m, k, n, tiles, expected):
     self.assertEqual(pallas_matmul.tile_policy(m, k, n, tiles), expected)
+
+  @parameterized.parameters(
+      (1, 128, (8, 8)),
+      (4, 128, (8, 8)),
+      (8, 128, (8, 8)),
+      (12, 128, (16, 16)),
+      (32, 128, (32, 32)),
+      (64, 128, (64, 64)),
+      (65, 128, (128, 128)),
+      (128, 128, (128, 128)),
+      (200, 128, (256, 128)),
+      (4, 256, (8, 8)),
+      (128, 256, (128, 128)),
+      (200, 256, (256, 256)),
+  )
+  def test_adaptive_row_bucket(self, m, default_bm, expected):
+    self.assertEqual(pallas_matmul.adaptive_row_bucket(m, default_bm), expected)
+
+  def test_adaptive_row_bucket_rejects_non_positive(self):
+    with self.assertRaises(ValueError):
+      pallas_matmul.adaptive_row_bucket(0, 128)
+    with self.assertRaises(ValueError):
+      pallas_matmul.adaptive_row_bucket(8, 0)
 
   def test_block_k_is_never_changed(self):
     for tiles in pallas_matmul.CONTRACT_TILES:
@@ -75,6 +100,12 @@ class TilePolicyTest(parameterized.TestCase):
         )
     )
     self.assertEqual(launches, [("canon_matmul_bm128_bn128_bk256", (2, 8, 2))])
+    _, launches = _launches(
+        lambda: pallas_matmul.matmul(
+            x[:8], y, interpret=True, block_m=8, block_n=256, block_k=256
+        )
+    )
+    self.assertEqual(launches, [("canon_matmul_bm8_bn1024_bk256", (1, 1, 2))])
 
 
 class MatmulNumericsTest(parameterized.TestCase):

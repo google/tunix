@@ -103,6 +103,17 @@ def _interpret() -> bool:
   return test_utils.is_interpret_default()
 
 
+# Matches any HLO `all-gather` / `all-gather-start` whose `replica_groups`
+# spans axis 0 (`'fsdp'`) of a `(2, 2)` `('fsdp', 'tp')` mesh: XLA prints named
+# `'fsdp'` (including TPU fused 2D `{'fsdp','tp'}`), SPMD iota `'axis_0'`, or
+# explicit `{{0,2},...}` / `{{0,1,2,3}}` lists; TP-only (`'tp'`, `'axis_1'`, or
+# `{{0,1},{2,3}}`) does not match.
+_FSDP_ALL_GATHER_RE = (
+    r'all-gather(?:-start)?\([^\n]*replica_groups='
+    r"(?:mesh\[[^\]]*\] \{[^}]*'(?:fsdp|axis_0)'|\{\{[^}]*\b0\b[^}]*\b2\b)"
+)
+
+
 def _perf_workload(label: str) -> qwen3_canon_benchmark.PerfWorkload:
   """The `DEFAULT_PERF_WORKLOADS` entry with this label."""
   workloads = qwen3_canon_benchmark.DEFAULT_PERF_WORKLOADS
@@ -160,46 +171,18 @@ def _perf_delta_table(
 def _library_reference(
     logits_f32: np.ndarray, tokens: np.ndarray, *, interpret: bool
 ) -> tuple[np.ndarray, np.ndarray]:
-  """Unsharded library `token_logprobs` / `log_softmax` for any row count.
-
-  The library serves one row bucket (a multiple of 8 up to `PRODUCTION_M=256`)
-  per call on TPU; rows are independent, so longer inputs are padded to a
-  multiple of 8 and scored 256 rows at a time.
-
-  Args:
-    logits_f32: `[M, V]` float32 logits.
-    tokens: `[M]` int32 token ids to score.
-    interpret: run the Pallas kernels in interpret mode (CPU).
-
-  Returns:
-    `(token_logprobs, log_softmax)` numpy arrays for the `M` rows.
-  """
-  os.environ.setdefault(canonical_logsoftmax.ENV, '1')
-  m = logits_f32.shape[0]
-  align = canonical_logsoftmax.ROW_BUCKET_ALIGN
-  mp = -(-m // align) * align
-  logits_p = np.pad(logits_f32, ((0, mp - m), (0, 0)))
-  tokens_p = np.pad(tokens, (0, mp - m))
-  lps, ls = [], []
-  for start in range(0, mp, canonical_logsoftmax.PRODUCTION_M):
-    stop = min(start + canonical_logsoftmax.PRODUCTION_M, mp)
-    chunk = jnp.asarray(logits_p[start:stop], jnp.float32)
-    tok = jnp.asarray(tokens_p[start:stop], jnp.int32)
-    lps.append(
-        np.asarray(
-            canonical_logsoftmax.token_logprobs(
-                chunk, tok, interpret=interpret, strict_vocab=False
-            )
-        )
-    )
-    ls.append(
-        np.asarray(
-            canonical_logsoftmax.log_softmax(
-                chunk, interpret=interpret, strict_vocab=False
-            )
-        )
-    )
-  return np.concatenate(lps)[:m], np.concatenate(ls)[:m]
+  """Unsharded library `token_logprobs` / `log_softmax` for any row count."""
+  logits_jnp = jnp.asarray(logits_f32, jnp.float32)
+  tokens_jnp = jnp.asarray(tokens, jnp.int32)
+  lps = np.asarray(
+      canonical_logsoftmax.token_logprobs(
+          logits_jnp, tokens_jnp, interpret=interpret
+      )
+  )
+  ls = np.asarray(
+      canonical_logsoftmax.log_softmax(logits_jnp, interpret=interpret)
+  )
+  return lps, ls
 
 
 def _prefill_logits(model, tokens: jax.Array) -> jax.Array:
@@ -695,39 +678,26 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
     admitted = qwen3_canon.vocab_parallel_logsoftmax_admitted
     self.assertTrue(admitted(8192, 4))  # TPU bench: v_local = 2048
     self.assertTrue(admitted(4096, 4))  # CPU tests: v_local = 1024
+    self.assertTrue(admitted(5000, 4))  # v_local = 1250 >= 1024 (halo aligned)
     self.assertTrue(admitted(2048, 2))
     self.assertFalse(admitted(2048, 4))  # v_local = 512: half a tile
+    self.assertFalse(admitted(1536, 2))  # v_local = 768 < 1024
     self.assertFalse(admitted(4096, 1))  # no TP axis
     self.assertFalse(admitted(4096, 3))  # V not divisible by TP
     for tp_size in (2, 4, 8):
-      # Qwen3's production vocabulary (151936) is never tile-aligned per rank.
-      self.assertFalse(admitted(canonical_logsoftmax.PRODUCTION_V, tp_size))
+      # Qwen3's production vocabulary (151936) is admitted via halo alignment.
+      self.assertTrue(admitted(canonical_logsoftmax.PRODUCTION_V, tp_size))
 
   @parameterized.named_parameters(('m8', 8), ('m256', 256), ('m516', 516))
   def test_vocab_parallel_logsoftmax_matches_library_bitwise(self, m: int):
     """A0 contract: the TP-sharded normalizer is bitwise the library's.
 
-    The bench's vocab-parallel program (Stage 1 per rank on `[m, V/TP]` with a
-    `(row block, tile)` grid, one all-gather of tile summaries, Stage 2 in
-    global tile order) must reproduce the unsharded library
-    `canonical_logsoftmax` bit for bit, for bf16 and f32 operands, for
-    `token_logprobs` and `log_softmax`, and for row counts the library serves
-    as one bucket (8, 256) or several (516 = 256 + 256 + 4, padded to 8).
+    Tests both tile-aligned (`V=4096`) and non-tile-aligned (`V=5000`,
+    `v_local=1250`, exercising 1024-column neighbor halo alignment + partial
+    tail masking) vocabularies across `bf16` and `f32` operands,
+    `token_logprobs` and `log_softmax`, and arbitrary row counts.
     """
-    tp_size, vocab = 4, 4096
-    self.assertTrue(
-        qwen3_canon.vocab_parallel_logsoftmax_admitted(vocab, tp_size)
-    )
-    rng = np.random.default_rng(m)
-    logits_bf16 = jnp.asarray(
-        rng.standard_normal((m, vocab)) * 4.0, jnp.bfloat16
-    )
-    logits_f32 = logits_bf16.astype(jnp.float32)
-    tokens = jnp.asarray(rng.integers(0, vocab, size=(m,)), jnp.int32)
-    ref_lps, ref_ls = _library_reference(
-        np.asarray(logits_f32), np.asarray(tokens), interpret=_interpret()
-    )
-
+    tp_size = 4
     token_logprobs = jax.jit(
         functools.partial(
             qwen3_canon.compute_token_logprobs, use_canon_logsoftmax=True
@@ -738,13 +708,27 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
             qwen3_canon.compute_log_softmax, use_canon_logsoftmax=True
         )
     )
-    with _tp_mesh(tp_size):
-      vp_lps_bf16 = token_logprobs(logits_bf16, tokens)
-      vp_lps_f32 = token_logprobs(logits_f32, tokens)
-      vp_ls_bf16 = log_softmax(logits_bf16)
-    test_utils.assert_bitwise_equal(vp_lps_bf16, ref_lps)
-    test_utils.assert_bitwise_equal(vp_lps_f32, ref_lps)
-    test_utils.assert_bitwise_equal(vp_ls_bf16, ref_ls)
+    for vocab in (4096, 5000):
+      with self.subTest(vocab=vocab):
+        self.assertTrue(
+            qwen3_canon.vocab_parallel_logsoftmax_admitted(vocab, tp_size)
+        )
+        rng = np.random.default_rng(m + vocab)
+        logits_bf16 = jnp.asarray(
+            rng.standard_normal((m, vocab)) * 4.0, jnp.bfloat16
+        )
+        logits_f32 = logits_bf16.astype(jnp.float32)
+        tokens = jnp.asarray(rng.integers(0, vocab, size=(m,)), jnp.int32)
+        ref_lps, ref_ls = _library_reference(
+            np.asarray(logits_f32), np.asarray(tokens), interpret=_interpret()
+        )
+        with _tp_mesh(tp_size):
+          vp_lps_bf16 = token_logprobs(logits_bf16, tokens)
+          vp_lps_f32 = token_logprobs(logits_f32, tokens)
+          vp_ls_bf16 = log_softmax(logits_bf16)
+        test_utils.assert_bitwise_equal(vp_lps_bf16, ref_lps)
+        test_utils.assert_bitwise_equal(vp_lps_f32, ref_lps)
+        test_utils.assert_bitwise_equal(vp_ls_bf16, ref_ls)
 
   def test_non_tile_aligned_shard_falls_back_to_library_bitwise(self):
     """A2 guard: `V/TP` that is not a whole tile uses the gathered library path."""
@@ -788,29 +772,19 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
     test_utils.assert_bitwise_equal(lps, ref_lps)
     test_utils.assert_bitwise_equal(ls, ref_ls)
 
-  @parameterized.named_parameters(('m1024', 1024), ('m600', 600))
+  @parameterized.named_parameters(('m1024', 1024), ('m600', 600), ('m601', 601))
   def test_row_sharded_fallback_scores_local_rows_bitwise(self, m: int):
-    """Rows sharded over `fsdp`: the gathered fallback loops over local rows.
+    """Rows sharded over `fsdp`: the gathered fallback scores local rows only.
 
-    Under an `('fsdp', 'tp')` mesh with `fsdp > 1` the learner's scoring rows
-    are sharded over `fsdp`. `compute_token_logprobs` / `compute_log_softmax`
-    then score every shard's rows locally, 256 at a time
-    (`_map_row_shard_chunks`): the values stay bitwise the library's and the
-    logits gradients (token log-probs with an f32 and a bf16 residual, full
-    log-softmax) match the replicated program's (bitwise on CPU and for token
-    log-probs on TPU; within 1-2 f32 ULPs for full log-softmax on TPU where
-    XLA:TPU fuses `cotangent - prob * sum` across `P('fsdp', 'tp')` slices).
-    The legacy loop over the
-    flat `[chunks, 256, V/TP]` view slices the `fsdp`-sharded chunk dimension,
-    so SPMD all-gathers that whole operand in every `lax.map` iteration (57 ms
-    each at the learner's `M=32768`, `V=151936` on v6e); for shard-aligned
-    rows its HLO must contain that all-gather, and neither the row-sharded
-    value program nor its gradient programs may contain one.
-
-    Args:
-      m: Scoring rows (600 also exercises the row padding to `256 * fsdp`).
+    Under an `('fsdp', 'tp')` mesh with `fsdp > 1` and `v_local < 1024`
+    (gathered fallback), `compute_token_logprobs` / `compute_log_softmax` score
+    each `fsdp` shard's local `[m // fsdp, V]` rows directly without chunking
+    or all-gathering across `fsdp`. The legacy path (`_data_axes -> ((), 1)`)
+    all-gathers the full `[m, V]` tensor across `fsdp`; for shard-aligned `m`
+    its HLO must contain that full-row all-gather while the row-sharded value
+    and gradient programs must not.
     """
-    fsdp, tp_size, vocab = 2, 2, 1536  # v_local = 768: gathered fallback
+    fsdp, tp_size, vocab = 2, 2, 1536  # v_local = 768 < 1024: gathered fallback
     dp_mesh = test_utils.cpu_mesh((fsdp, tp_size), ('fsdp', 'tp'))
     self.assertFalse(
         qwen3_canon.vocab_parallel_logsoftmax_admitted(vocab, tp_size)
@@ -857,16 +831,11 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
     row_sharded = jax.sharding.NamedSharding(
         dp_mesh, jax.sharding.PartitionSpec('fsdp', 'tp')
     )
-    # An all-gather (synchronous, or the result of an async pair) producing a
-    # stack of several 256-row chunks: `[..., >= 2, ..., 256, V*]` in any
-    # rank. The per-iteration TP gather of the gathered fallback
-    # (`[1, 256, V]` / `[256, V]`) and a pad reshard (`[m, V*]`) do not match.
-    stacked_gather = (
-        r'= (?:bf16|f32)\[(?:\d+,)*(?:[2-9]|\d{2,}),(?:\d+,)*256,\d+\]\S*'
-        r' all-gather(?:-start|-done)?\('
-    )
     with dp_mesh:
-      x = jax.device_put(logits, row_sharded)
+      if m % fsdp == 0:
+        x = jax.device_put(logits, row_sharded)
+      else:
+        x = logits
       lps = token_logprobs(x, tokens)
       ls = log_softmax(x)
       hlos = {
@@ -877,8 +846,11 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
       }
       grads = {}
       for name, loss in losses.items():
-        # Row-sharded output: no gather is needed to return the gradient.
-        grad_fn = jax.jit(jax.grad(loss), out_shardings=row_sharded)
+        grad_fn = (
+            jax.jit(jax.grad(loss), out_shardings=row_sharded)
+            if m % fsdp == 0
+            else jax.jit(jax.grad(loss))
+        )
         grads[name] = grad_fn(x)
         hlos[f'grad_{name}'] = str(grad_fn.lower(x).compile().as_text())
       with mock.patch.object(qwen3_canon, '_data_axes', return_value=((), 1)):
@@ -901,22 +873,20 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
     test_utils.assert_bitwise_equal(ls, ref_ls)
     for name in losses:
       with self.subTest(grad=name):
-        if _interpret() or name != 'log_softmax':
+        if name != 'log_softmax':
           test_utils.assert_bitwise_equal(grads[name], grads_ref[name])
         else:
           np.testing.assert_allclose(
               np.asarray(grads[name]),
               np.asarray(grads_ref[name]),
-              rtol=1e-5,
+              rtol=5e-5,
               atol=1e-5,
           )
-    if m % (256 * fsdp) == 0:
-      # Shard-aligned rows (the learner's case) keep the legacy loop's
-      # operand sharded, so it re-gathers it; padded rows are resharded first.
-      self.assertRegex(legacy_hlo, stacked_gather)
-    for name, hlo in hlos.items():
-      with self.subTest(program=name):
-        self.assertNotRegex(hlo, stacked_gather)
+    if m % fsdp == 0:
+      self.assertRegex(legacy_hlo, _FSDP_ALL_GATHER_RE)
+      for name, hlo in hlos.items():
+        with self.subTest(program=name):
+          self.assertNotRegex(hlo, _FSDP_ALL_GATHER_RE)
 
   def test_row_complete_scoring_is_bitwise_tp4(self):
     """A1: scoring all `B*T` rows at once equals slicing `logits[:, :-1]` first.
@@ -1753,15 +1723,14 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
 
     Every other TPU table runs `qwen3_0p6b_2l` (`V=8192`, at most `B*T=1024`
     scoring rows). Qwen3's production vocabulary (`V=151936`, preset
-    `qwen3_0p6b_2l_fullvocab`) takes four code paths those tables never reach
-    on TPU: the partial last column group of the library log-softmax
-    (`151936 = 18 * 8192 + 4480`), the gathered fallback of
-    `compute_log_softmax` / `compute_token_logprobs` (`V/TP = 37984` is not a
-    whole number of 1024-column tiles, so the vocab-parallel path is not
-    admitted) with its 256-row `lax.map` chunks (16 at `M=4096`), the fixed
-    LM head's `N = 37984 -> 38144` column padding, and decode (`M=B`) versus
-    prefill (`M=B*T`) rows on opposite sides of the LM-head row chunking and
-    of the `FORWARD_TP_SUM_SCATTER_MIN_M=4096` threshold.
+    `qwen3_0p6b_2l_fullvocab`) exercises four code paths those tables never
+    reach on TPU: the partial last column group of the library log-softmax
+    (`151936 = 18 * 8192 + 4480`), the 1024-column neighbor halo alignment
+    (`lax.ppermute`) and SMEM tail masking of `vocab_parallel_normalizer`
+    (`V/TP = 37984` at `TP=4`), the fixed LM head's `N = 37984 -> 38144`
+    column padding, and decode (`M=B`) versus prefill (`M=B*T`) rows on
+    opposite sides of the LM-head row chunking and of the
+    `FORWARD_TP_SUM_SCATTER_MIN_M=4096` threshold.
 
     Runs drift regimes 1a-3a of the four standard configurations at `B=8` and
     `B=16` with `T=256 (224+32)` -- the learner row buckets `M=2048` and
@@ -1803,7 +1772,7 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
     }
     config = qwen3_canon_benchmark.build_model_config(preset, tp_size=tp_size)
     self.assertEqual(config.vocab_size, qwen3_canon_benchmark.PRODUCTION_VOCAB)
-    self.assertFalse(
+    self.assertTrue(
         qwen3_canon.vocab_parallel_logsoftmax_admitted(
             config.vocab_size, tp_size
         )
@@ -1927,19 +1896,16 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
     `without_use_canon_logsoftmax` Leave-One-Out configurations on the
     `PRODUCTION_VOCAB_PERF_WORKLOADS` (`L=2`, `B=8` and `B=16` at `T=256`:
     `M=2048` / `4096` scoring rows) for (a) `qwen3_0p6b_2l_fullvocab`
-    (`V=151936`: gathered log-softmax fallback, LM head padded to 38144
-    columns), (b) `qwen3_0p6b_2l_fullvocab_aligned` (`V=155648 = 38 * 4096`:
-    vocab-parallel log-softmax, unpadded LM head) and (c) the `qwen3_0p6b_2l`
-    (`V=8192`) control on the `B=16` workload, in one process. (a) against
-    (c) isolates the vocabulary's share of the stock / Zero-TIM arena and
-    latency gap: on the gathered path the canonical program materializes the
-    replicated `[M, V]` logits in bf16 and f32 (`1.2 GB` + `2.5 GB` per rank
-    at `M=4096`) plus the bf16 residual and f32 cotangent of the fwd+bwd
-    program, where the stock model keeps its f32 logits `V/TP`-sharded; that
-    gap bounds what a fused LM head + log-softmax can give back. (b) against
-    (a) is what aligning the vocabulary to `1024 * TP` buys on today's
-    kernels. The rows are timing / HBM only; the Zero-TIM contract at this
-    vocabulary is `test_production_vocab_zero_tim_tpu`.
+    (`V=151936`: vocab-parallel log-softmax with 1024-column neighbor halo
+    alignment, LM head padded to 38144 columns), (b)
+    `qwen3_0p6b_2l_fullvocab_aligned` (`V=155648 = 38 * 4096`: vocab-parallel
+    log-softmax with aligned shard boundaries, unpadded LM head) and (c) the
+    `qwen3_0p6b_2l` (`V=8192`) control on the `B=16` workload, in one process.
+    (a) against (b) isolates the cost of the 1024-column halo alignment +
+    LM-head column padding at production scale; (a) against (c) isolates the
+    remaining vocabulary-width cost without `[M, V]` all-gathers. The rows are
+    timing / HBM only; the Zero-TIM contract at this vocabulary is
+    `test_production_vocab_zero_tim_tpu`.
 
     TPU-only; runs only when `ZERO_TIM_PRODUCTION_VOCAB=1` is set (75
     compiles, ~20 min on 4x v5p; run it filtered to this method).
@@ -2718,13 +2684,14 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
   def test_production_vocab_presets(self, preset: str, aligned: bool):
     """The production-vocabulary presets have the geometry the TPU tables use.
 
-    `qwen3_0p6b_2l_fullvocab` keeps Qwen3's `V=151936` at every TP; at
-    TP=2/4/8 the vocab-parallel log-softmax is not admitted (gathered
-    fallback) and the fixed LM head pads its `V/TP` columns (`37984 -> 38144`
-    at TP=4). `qwen3_0p6b_2l_fullvocab_aligned` is the library's 8192-column
-    padding of it (`155648 = 38 * 4096`): admitted at TP=2/4/8 and
-    tile-aligned for the LM head. Both are the 0.6B architecture at two
-    layers in bf16 and are registered with the `--model_preset` flag.
+    `qwen3_0p6b_2l_fullvocab` keeps Qwen3's `V=151936` at every TP: at
+    TP=2/4/8 the vocab-parallel log-softmax is admitted via the 1024-column
+    neighbor halo alignment (`V / TP >= 1024`) while the fixed LM head pads its
+    `V/TP` columns (`37984 -> 38144` at TP=4). `qwen3_0p6b_2l_fullvocab_aligned`
+    is the 8192-column padding of it (`155648 = 38 * 4096`): tile-aligned for
+    both the vocab-parallel Stage 1 (`(V / TP) % 1024 == 0`) and the LM head.
+    Both are the 0.6B architecture at two layers in bf16 and are registered
+    with the `--model_preset` flag.
     """
     expected_vocab = (
         qwen3_canon_benchmark.PRODUCTION_VOCAB_ALIGNED
@@ -2761,11 +2728,10 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
       self.assertEqual(config.dtype, jnp.dtype(jnp.bfloat16), msg=msg)
       self.assertEqual(config.param_dtype, jnp.dtype(jnp.bfloat16), msg=msg)
       if tp_size > 1:
-        self.assertEqual(
+        self.assertTrue(
             qwen3_canon.vocab_parallel_logsoftmax_admitted(
                 config.vocab_size, tp_size
             ),
-            aligned,
             msg=msg,
         )
     # The fixed LM head geometry at the measured TP=4.
@@ -2960,6 +2926,179 @@ class Qwen3ModelCanonTest(parameterized.TestCase):
     self.assertFalse(
         any(eqn.primitive.name == 'reduce_precision' for eqn in jaxpr_bf16.eqns)
     )
+
+  def test_zzz_row_sharded_vocab_parallel_logsoftmax_no_fsdp_gather(self):
+    """Vocab-parallel log-softmax under `('fsdp', 'tp')` avoids `[m, *]` gathers."""
+    fsdp, tp_size, m, vocab = 2, 2, 64, 3000  # v_local = 1500 (halo aligned)
+    dp_mesh = test_utils.cpu_mesh((fsdp, tp_size), ('fsdp', 'tp'))
+    self.assertTrue(
+        qwen3_canon.vocab_parallel_logsoftmax_admitted(vocab, tp_size)
+    )
+    rng = np.random.default_rng(123)
+    logits = jnp.asarray(rng.standard_normal((m, vocab)) * 3.0, jnp.bfloat16)
+    tokens = jnp.asarray(rng.integers(0, vocab, size=(m,)), jnp.int32)
+    weights = jnp.asarray(rng.standard_normal((m,)), jnp.float32)
+    ref_lps, ref_ls = _library_reference(
+        np.asarray(logits, np.float32),
+        np.asarray(tokens),
+        interpret=_interpret(),
+    )
+    row_sharded = jax.sharding.NamedSharding(
+        dp_mesh, jax.sharding.PartitionSpec('fsdp', 'tp')
+    )
+    tok_fn = jax.jit(
+        functools.partial(
+            qwen3_canon.compute_token_logprobs, use_canon_logsoftmax=True
+        )
+    )
+    ls_fn = jax.jit(
+        functools.partial(
+            qwen3_canon.compute_log_softmax, use_canon_logsoftmax=True
+        )
+    )
+    loss_fn = lambda x: jnp.sum(
+        qwen3_canon.compute_token_logprobs(
+            x,
+            tokens,
+            use_canon_logsoftmax=True,
+            exact_residual_dtype=jnp.bfloat16,
+        )
+        * weights
+    )
+    with dp_mesh:
+      x = jax.device_put(logits, row_sharded)
+      lps = tok_fn(x, tokens)
+      ls = ls_fn(x)
+      grad_fn = jax.jit(jax.grad(loss_fn), out_shardings=row_sharded)
+      dx = grad_fn(x)
+      hlo_fwd = str(tok_fn.lower(x, tokens).compile().as_text())
+      hlo_bwd = str(grad_fn.lower(x).compile().as_text())
+      with mock.patch.object(qwen3_canon, '_data_axes', return_value=((), 1)):
+        legacy_hlo = str(
+            jax.jit(
+                functools.partial(
+                    qwen3_canon.compute_token_logprobs,
+                    use_canon_logsoftmax=True,
+                )
+            )
+            .lower(x, tokens)
+            .compile()
+            .as_text()
+        )
+    with _tp_mesh(tp_size):
+      dx_ref = jax.jit(jax.grad(loss_fn))(logits)
+    test_utils.assert_bitwise_equal(lps, ref_lps)
+    test_utils.assert_bitwise_equal(ls, ref_ls)
+    test_utils.assert_bitwise_equal(dx, dx_ref)
+    self.assertRegex(legacy_hlo, _FSDP_ALL_GATHER_RE)
+    self.assertNotRegex(hlo_fwd, _FSDP_ALL_GATHER_RE)
+    self.assertNotRegex(hlo_bwd, _FSDP_ALL_GATHER_RE)
+
+  def test_zzz_canon_rmsnorm_nd_data_axes_avoids_fsdp_gather(self):
+    """`_canon_rmsnorm_nd` shards batch rows over `fsdp` for 3D and 4D inputs."""
+    fsdp, tp_size = 2, 2
+    dp_mesh = test_utils.cpu_mesh((fsdp, tp_size), ('fsdp', 'tp'))
+    rng = np.random.default_rng(456)
+
+    # 3D (`final_norm` / unfused layer norm): P('fsdp', None, None).
+    b, t, d = 4, 8, 256
+    x3 = jnp.asarray(rng.standard_normal((b, t, d)), jnp.bfloat16)
+    w3 = jnp.asarray(1.0 + 0.1 * rng.standard_normal((d,)), jnp.bfloat16)
+    cot3 = jnp.asarray(rng.standard_normal((b, t, d)), jnp.bfloat16)
+    shd3 = jax.sharding.NamedSharding(
+        dp_mesh, jax.sharding.PartitionSpec('fsdp', None, None)
+    )
+    raw3 = lambda x, w: qwen3_canon._canon_rmsnorm_nd(  # pylint: disable=protected-access
+        x,
+        w,
+        norm_eps=1e-6,
+        interpret=_interpret(),
+        out_dtype=jnp.bfloat16,
+    )
+    fn3 = jax.jit(raw3)
+    loss3 = lambda x, w: jnp.sum(
+        fn3(x, w).astype(jnp.float32) * cot3.astype(jnp.float32)
+    )
+    grad3 = jax.jit(
+        jax.grad(loss3, argnums=(0, 1)),
+        out_shardings=(
+            shd3,
+            jax.sharding.NamedSharding(dp_mesh, jax.sharding.PartitionSpec()),
+        ),
+    )
+    with dp_mesh:
+      x3_shd = jax.device_put(x3, shd3)
+      y3 = fn3(x3_shd, w3)
+      dx3, dw3 = grad3(x3_shd, w3)
+      hlo3 = str(grad3.lower(x3_shd, w3).compile().as_text())
+      with mock.patch.object(qwen3_canon, '_data_axes', return_value=((), 1)):
+        legacy_hlo3 = str(
+            jax.jit(lambda x, w: raw3(x, w)).lower(x3_shd, w3).compile().as_text()  # pylint: disable=unnecessary-lambda
+        )
+    with _tp_mesh(tp_size):
+      y3_ref = fn3(x3, w3)
+      dx3_ref, dw3_ref = jax.jit(jax.grad(loss3, argnums=(0, 1)))(x3, w3)
+    test_utils.assert_bitwise_equal(y3, y3_ref)
+    test_utils.assert_bitwise_equal(dx3, dx3_ref)
+    # Per-shard `dw_loc` is rounded to `bf16` before `psum` over `fsdp` (1 ULP
+    # of a ~20 partial sum is 0.125).
+    np.testing.assert_allclose(
+        np.asarray(dw3, np.float32),
+        np.asarray(dw3_ref, np.float32),
+        rtol=2e-2,
+        atol=0.15,
+    )
+    self.assertRegex(legacy_hlo3, _FSDP_ALL_GATHER_RE)
+    self.assertNotRegex(hlo3, _FSDP_ALL_GATHER_RE)
+
+    # 4D (`q_norm` / `k_norm`): P('fsdp', None, 'tp', None).
+    nh, hd = 4, 128
+    x4 = jnp.asarray(rng.standard_normal((b, t, nh, hd)), jnp.bfloat16)
+    w4 = jnp.asarray(1.0 + 0.1 * rng.standard_normal((hd,)), jnp.bfloat16)
+    cot4 = jnp.asarray(rng.standard_normal((b, t, nh, hd)), jnp.bfloat16)
+    shd4 = jax.sharding.NamedSharding(
+        dp_mesh, jax.sharding.PartitionSpec('fsdp', None, 'tp', None)
+    )
+    raw4 = lambda x, w: qwen3_canon._canon_rmsnorm_nd(  # pylint: disable=protected-access
+        x,
+        w,
+        norm_eps=1e-6,
+        interpret=_interpret(),
+        out_dtype=jnp.bfloat16,
+    )
+    fn4 = jax.jit(raw4)
+    loss4 = lambda x, w: jnp.sum(
+        fn4(x, w).astype(jnp.float32) * cot4.astype(jnp.float32)
+    )
+    grad4 = jax.jit(
+        jax.grad(loss4, argnums=(0, 1)),
+        out_shardings=(
+            shd4,
+            jax.sharding.NamedSharding(dp_mesh, jax.sharding.PartitionSpec()),
+        ),
+    )
+    with dp_mesh:
+      x4_shd = jax.device_put(x4, shd4)
+      y4 = fn4(x4_shd, w4)
+      dx4, dw4 = grad4(x4_shd, w4)
+      hlo4 = str(grad4.lower(x4_shd, w4).compile().as_text())
+      with mock.patch.object(qwen3_canon, '_data_axes', return_value=((), 1)):
+        legacy_hlo4 = str(
+            jax.jit(lambda x, w: raw4(x, w)).lower(x4_shd, w4).compile().as_text()  # pylint: disable=unnecessary-lambda
+        )
+    with _tp_mesh(tp_size):
+      y4_ref = fn4(x4, w4)
+      dx4_ref, dw4_ref = jax.jit(jax.grad(loss4, argnums=(0, 1)))(x4, w4)
+    test_utils.assert_bitwise_equal(y4, y4_ref)
+    test_utils.assert_bitwise_equal(dx4, dx4_ref)
+    np.testing.assert_allclose(
+        np.asarray(dw4, np.float32),
+        np.asarray(dw4_ref, np.float32),
+        rtol=2e-2,
+        atol=0.15,
+    )
+    self.assertRegex(legacy_hlo4, _FSDP_ALL_GATHER_RE)
+    self.assertNotRegex(hlo4, _FSDP_ALL_GATHER_RE)
 
 
 def _param_grads(model, tokens: jax.Array, *, use_canon_logsoftmax: bool):

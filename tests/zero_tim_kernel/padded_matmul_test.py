@@ -13,8 +13,12 @@
 # limitations under the License.
 """Tests for `padded_matmul` (CPU, Pallas interpret mode)."""
 
+from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
+import jax
+from jax.experimental import pallas as pl
 import jax.numpy as jnp
 import numpy as np
 from tunix.zero_tim_kernel import model_contracts
@@ -66,6 +70,10 @@ class ExtentsTest(parameterized.TestCase):
     self.assertEqual(
         padded_matmul.wide_n_tiles(128, 2560, 2432, tiles),
         (2560, 1280),
+    )
+    self.assertEqual(
+        padded_matmul.wide_n_tiles(8, 2560, 1216, (8, 128, 128)),
+        (1280, 1280),
     )
     # A padded lm_head width no wide candidate divides keeps the contract.
     self.assertIsNone(padded_matmul.wide_n_tiles(128, 2560, 37984, tiles))
@@ -120,6 +128,45 @@ class PaddedMatmulTest(parameterized.TestCase):
     test_utils.assert_bitwise_equal(
         out, test_utils.exact_matmul_reference(x, y)
     )
+
+  @parameterized.parameters(
+      (1, 8),
+      (4, 8),
+      (8, 8),
+      (12, 16),
+      (32, 32),
+      (64, 64),
+      (100, 128),
+  )
+  def test_decode_uses_adaptive_row_bucket_and_skips_aligned_weight_pad(
+      self, m, expected_bm
+  ):
+    contract = _contract("qwen8b")
+    rng = np.random.default_rng(100 + m)
+    x = test_utils.random_bf16(rng, (m, 512))
+    y = test_utils.random_bf16(rng, (512, 1024), scale=0.05)
+    with (
+        mock.patch.object(pl, "pallas_call", wraps=pl.pallas_call) as spy,
+        mock.patch.object(padded_matmul.jnp, "pad", wraps=jnp.pad) as pad_spy,
+    ):
+      out = padded_matmul.matmul(x, y, contract=contract, interpret=True)
+    self.assertEqual(out.shape, (m, 1024))
+    self.assertLen(spy.call_args_list, 1)
+    call = spy.call_args_list[0]
+    self.assertEqual(
+        call.kwargs["name"], f"canon_matmul_bm{expected_bm}_bn1024_bk256"
+    )
+    self.assertEqual(tuple(call.kwargs["grid_spec"].grid), (1, 1, 2))
+    self.assertEqual(pad_spy.call_count, 0 if m == expected_bm else 1)
+    if m != expected_bm:
+      self.assertIs(pad_spy.call_args_list[0].args[0], x)
+    # Aligned weight `y` must not emit a zero-width `pad` instruction in JAXPR.
+    jaxpr = jax.make_jaxpr(
+        lambda a, b: padded_matmul.matmul(
+            a, b, contract=contract, interpret=True
+        )
+    )(x, y)
+    self.assertEqual(str(jaxpr).count(" pad["), 0 if m == expected_bm else 1)
 
   def test_rejects(self):
     contract = _contract("qwen8b")

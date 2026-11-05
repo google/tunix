@@ -23,6 +23,8 @@ single source of truth and differentiated by `canonical_vjp`.
 
 from __future__ import annotations
 
+import math
+
 import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
@@ -58,10 +60,10 @@ def validate_shape(shape_x, shape_weight) -> tuple[int, int]:
 
 
 def row_tile(m: int, f: int) -> int:
-  """Returns `block_m` for an `[m, f]` RMSNorm (`256` when `m % 256 == 0` else `BM`)."""
-  if m % ROW_TILE_WIDE == 0 and f <= ROW_TILE_MAX_FEATURES:
-    return ROW_TILE_WIDE
-  return BM
+  """Returns the largest power-of-2 `block_m` in `[BM, 256]` dividing `m` (`f <= 4096`)."""
+  if m <= 0 or m % BM != 0 or f > ROW_TILE_MAX_FEATURES:
+    return BM
+  return max(BM, math.gcd(m, ROW_TILE_WIDE))
 
 
 def canonical_rmsnorm(

@@ -41,10 +41,11 @@ that exact forward primal.
     clamps them by decode concurrency, while stock model code switches between
     dense `einsum` (`seq_len == 1`) and Flash/Splash attention (`seq_len > 1`),
     changing the online-softmax rescale points. Fix: pin
-    `(bkv_p, bq_sz, bkv_compute_p, bkv_sz) = (128, 512, 128, 512)`, force the
-    mixed batch distribution `[0, 0, B]`, and pad token rows to
-    `MIN_TOKEN_BUCKET = 256` (or run the standalone fixed-tile `flash_fwd_pallas`
-    kernel with 512-key blocks and 128-key sub-blocks).
+    `(bq_sz, bkv_sz, bq_csz, bkv_csz) = (128, bkv_sz, 128, 512)` (default
+    `bkv_sz = 512`, any multiple of 512), force the mixed batch distribution
+    `[0, 0, B]` (with minimal idle `d_block_sizes = (1, 512, 1, 512)`), and pad
+    token rows to `MIN_TOKEN_BUCKET = 256` (or run the standalone fixed-tile
+    `flash_fwd_pallas` kernel with 512-key blocks and 128-key sub-blocks).
 *   **`R3` — Forward vs. Forward+Backward XLA excess precision (`fixed_order_reduce.hard_round`)**:
     Under the TPU default `--xla_allow_excess_precision=true`, XLA elides
     intermediate `f32 -> bf16` truncations differently when an activation is
@@ -62,9 +63,11 @@ that exact forward primal.
 *   **`R5` — Large-vocabulary log-softmax reduction tree (`canonical_logsoftmax`)**:
     Across large vocabularies (e.g., `V = 151,936`), XLA chooses different
     `max` and `sum(exp)` reduction trees depending on the row count `M` and TP
-    sharding. Fix: a three-stage Pallas kernel over fixed `VOCAB_TILE = 1024`
-    column tiles with strict left-to-right tile combination and 8-aligned row
-    buckets up to `PRODUCTION_M = 256`.
+    sharding. Fix: a two-stage Pallas normalizer over fixed `VOCAB_TILE = 1024`
+    column tiles with compact left-to-right tile combination, flag-proof `f32`
+    subtraction, arbitrary `M >= 1` support (`bf16` or `f32`), and TP
+    vocab-parallel Stage 1 with 1024-column neighbor halo alignment admitting
+    `V = 151,936` at `TP = 2 / 4 / 8`.
 
 ---
 
@@ -93,8 +96,8 @@ implementation and unit tests.
 | **Layer** | **Op 10B** | `MoELayer` (Router `top_k` + `megablox.gmm`) | Discrete router `top_k` flips & batch-dependent `gmm` group tiling | Falls back to stock `MoELayer` （dense layers only) | N/A | Follow-up |
 | **Layer** | **Op 11** | Post-MLP Residual Add (`residual + mlp_out`) | Same as **Op 8** (`f32` fusion across layer boundary, `R3`) | `fixed_order_reduce.py` (`hard_upcast`, `hard_round`), `_residual_add` | `fixed_order_reduce_test.py`, `qwen3_model_canon_test.py` | Complete |
 | **Tail** | **Op T1** | `final_norm` (Final Layer RMSNorm) | Fusion drift between final residual add (**Op 11**) and LM head (**Op T2**) | `pallas_rmsnorm.py`, `CanonRMSNorm` | `pallas_rmsnorm_test.py`, `qwen3_model_canon_test.py` | Complete |
-| **Tail** | **Op T2** | `compute_final_logits` (Tied `embedder.decode` / Untied `lm_head`) | `M` spans `1..256` (decode) vs `1024..4096` (trainer); non-256 `V/TP` tail | `fixed_lm_head.py` (`FIXED_M = 256` pad/chunk program, explicit `bf16` output) | `fixed_lm_head_test.py`, `qwen3_model_canon_test.py` | Complete (TP) |
-| **Tail** | **Op T3** | `log_softmax` & `token_logprobs` (`R5`) | `V = 151,936` reduction tree varies with `M` & TP sharding | `canonical_logsoftmax.py` (3-stage `VOCAB_TILE = 1024` Pallas kernel) | `canonical_logsoftmax_test.py`, `qwen3_model_canon_test.py` | Complete |
+| **Tail** | **Op T2** | `compute_final_logits` (Tied `embedder.decode` / Untied `lm_head`) | `M` spans `1..256` (decode) vs `1024..4096` (trainer); non-256 `V/TP` tail | `fixed_lm_head.py` (adaptive `BM in {8..128}` up to `FIXED_M = 256` + chunk map, `bf16` output) | `fixed_lm_head_test.py`, `qwen3_model_canon_test.py` | Complete (TP) |
+| **Tail** | **Op T3** | `log_softmax` & `token_logprobs` (`R5`) | `V = 151,936` reduction tree varies with `M` & TP sharding | `canonical_logsoftmax.py` (2-stage `VOCAB_TILE = 1024` normalizer + halo-aligned vocab-parallel TP) | `canonical_logsoftmax_test.py`, `qwen3_model_canon_test.py` | Complete |
 | **Tail** | **Op T4** | Token Sampling & Temperature Contract | Inconsistent `bf16`/`f32` cast or temperature division before `log_softmax` | `_forward_sample` & `next_token_logprobs` (`bench/qwen3/qwen3_model_canon.py`) | `qwen3_model_canon_test.py` | Complete |
 
 ---
@@ -144,15 +147,18 @@ implementation and unit tests.
     reduction order and `div` vs. `rsqrt` fusion when the flattened token row
     count `M = B * T` changes between decode (`T=1`) and prefill (`T=L`).
 *   **Implementation (`pallas_rmsnorm.py`, `pallas_norm_matmul.py`, `canonical_vjp.py`)**:
-    *   `pallas_rmsnorm.rmsnorm`: pads `M` to a multiple of `BM = 8`, accumulates
+    *   `pallas_rmsnorm.rmsnorm`: pads `M` to a multiple of `BM = 8` (selecting
+        row tiles up to `gcd(mp, 256)` for `F <= 4096`), accumulates
         sum-of-squares in `f32` over fixed `BF = 128` feature blocks strictly
         left to right (`i = 0, 1, ..., D/128 - 1`), multiplies by
         `lax.rsqrt(acc / D + eps)` and `bf16`-aligned `gamma` in `f32`, and
         stores `bf16` once.
     *   `pallas_norm_matmul.norm_matmul`: fuses the exact `pallas_rmsnorm`
-        prologue into VMEM scratch inside the downstream projection matmul,
-        eliminating one `[M, D]` HBM round-trip per norm site while remaining
-        100% bitwise identical to `pallas_rmsnorm -> pallas_matmul`.
+        prologue into VMEM scratch over a 3D `(row_tile, col_group, k_step)`
+        grid (`MAX_GROUP_N = 3072`, wide `block_n` promotion up to `1280`)
+        inside the downstream projection matmul, eliminating one `[M, D]` HBM
+        round-trip per norm site while remaining 100% bitwise identical to
+        `pallas_rmsnorm -> pallas_matmul`.
     *   `canonical_vjp.rmsnorm`: wraps the Pallas forward primal with a pure-JAX
         backward pass so `Fwd` and `Fwd+Bwd` share the exact same forward kernel.
 *   **Tests**: `pallas_rmsnorm_test.py`, `pallas_norm_matmul_test.py`,
@@ -169,8 +175,10 @@ implementation and unit tests.
         final `K` step (`BM = 128, BN = 128` are bitwise neutral).
     *   `model_contracts.py` & `padded_matmul.matmul`: enforces per-model,
         per-TP tile contracts (`round_up(K, block_k)` and
-        `round_up(N, block_n)`) and zero-pads `M` to multiples of 128 so `T=1`
-        decode and `T=L` prefill run the exact same MXU instruction stream.
+        `round_up(N, block_n)`), skips no-op weight padding when `(K, N)` are
+        already aligned, and pads small decode row counts (`M < 128`) to their
+        smallest adaptive row bucket in `{8, 16, 32, 64, 128}` (`BM` has zero
+        effect on per-row contraction bits).
     *   `canonical_vjp.matmul`: binds the Pallas forward kernel as the primal
         with either a single-dot or `K`-blocked custom VJP backward pass.
 *   **Tests**: `pallas_matmul_test.py`, `padded_matmul_test.py`,
@@ -181,7 +189,7 @@ implementation and unit tests.
     JAX fuses differently with upstream QKV projections and downstream RoPE
     between `T=1` decode and `T=L` prefill.
 *   **Implementation (`pallas_rmsnorm.py`, `_canon_rmsnorm_nd`)**:
-    *   Flattens `[B, T, N_local, H]` to `[B * T * N_local, H]` inside each TP
+    *   Flattens `[B_local, T, N_local, H]` inside each `(data_axes, 'tp')`
         shard via `jax.shard_map` and runs `pallas_rmsnorm.rmsnorm` (`BF = 128`
         covers `H = 128` in one feature block).
 *   **Tests**: `pallas_rmsnorm_test.py`, `qwen3_model_canon_test.py`.
@@ -233,9 +241,11 @@ implementation and unit tests.
         prefill (`R2`) and lacks an autodiff VJP rule (`R4`).
 *   **Implementation**:
     *   **Engine RPA v3 Path (`rpa_canonical.py`, `rpa_diff_chunked.py`, `rpa_diff.py`, `bench/qwen3/rpa_backend.py`)**:
-        *   `rpa_canonical.pinned_block_size_kwargs`: pins
-            `(bkv_p, bq_sz, bkv_compute_p, bkv_sz) = (128, 512, 128, 512)` across
-            decode, prefill, and mixed batches.
+        *   `rpa_canonical.canonical_block_size_kwargs`: pins
+            `(bq_sz, bkv_sz, bq_csz, bkv_csz) = (128, bkv_sz, 128, 512)`
+            (`bkv_sz % 512 == 0`, default `512`) on the active mixed path while
+            giving the idle decode branch minimal `(1, 512, 1, 512)` blocks and
+            omitting unused `p_block_sizes` when `force_mixed=True`.
         *   `rpa_canonical.force_mixed_distribution`: rewrites `distribution` to
             `[0, 0, total_seqs]` so 1-token decode executes the exact same mixed
             kernel path as multi-token prefill, padded to
@@ -280,17 +290,18 @@ implementation and unit tests.
 #### Op 10A — Dense MLP (`gate_proj` / `up_proj` $\to$ `SwiGLU` $\to$ `down_proj`)
 *   **Op 10A.1 (`gate_proj`, `up_proj`)**:
     *   Uses `padded_matmul.matmul` (or fused `pallas_norm_matmul.norm_matmul`
-        with **Op 9**) and `model_contracts.py` to pad `M` to 128 rows and pad
-        non-256-multiple per-rank intermediate widths `F / TP` (e.g., Qwen3-4B
-        `F = 9728` at `TP = 8` where `F / TP = 1216 -> 1280`) with zeros.
+        with **Op 9**) and `model_contracts.py` with adaptive decode row buckets
+        (`{8..128}`) and zero-padded non-256-multiple per-rank intermediate
+        widths `F / TP` (e.g., Qwen3-4B `F = 9728` at `TP = 8` where
+        `F / TP = 1216 -> 1280`).
 *   **Op 10A.2 (`SwiGLU`: `silu(gate) * up`)**:
     *   **Why Stock Drifts**: XLA fuses `silu(gate) * up` into either the
         `gate`/`up` matmul epilogue or the `down_proj` prologue differently
         between `Fwd` and `Fwd+Bwd`.
     *   **Implementation (`pallas_swiglu.py`, `canonical_vjp.py`)**:
-        Standalone Pallas kernel with `allow_input_fusion=(False, False)` and
-        fixed `(BM = 128, BF = 256)` tiles (auto-padding unaligned `(M, F)` to
-        tile multiples) that computes
+        Standalone Pallas kernel with `allow_input_fusion=(False, False)`,
+        adaptive decode row buckets `{8..128}`, and `BF = 256` column tiles
+        (auto-padding unaligned `(M, F)`) that computes
         `(gate_f32 * jax.nn.sigmoid(gate_f32)) * up_f32` in `f32` and stores
         `bf16` once, wrapped with a custom VJP (`canonical_vjp.swiglu`).
 *   **Op 10A.3 (`down_proj`)**:
@@ -333,16 +344,16 @@ implementation and unit tests.
         elide the `bf16` rounding of the matmul accumulator in one program while
         keeping it in another.
 *   **Implementation (`fixed_lm_head.py`)**:
-    *   Compiles a **single canonical Pallas program** of shape
-        `[FIXED_M = 256, K] @ [K, round_up(V / TP, 256)]` with tiles
-        `(BM = 128, BN = 256, BK = 256)`:
-        *   **Small `M <= 256` (decode / scoring buckets)**: zero-pads `M` to
-            `FIXED_M = 256`, runs the canonical kernel, and slices the first `M`
-            rows.
+    *   Runs `pallas_matmul.matmul` over `[mp, K] @ [K, round_up(V / TP, 256)]`
+        with `(BN = 256, BK = 256)` and adaptive row buckets:
+        *   **Small `M <= 256` (decode / scoring buckets)**: pads `M` to its
+            smallest adaptive row bucket in `{8, 16, 32, 64, 128}` (for
+            `M <= 128`) or `FIXED_M = 256` (for `128 < M <= 256`), runs the
+            canonical kernel, and slices the first `M` rows.
         *   **Large `M > 256` (learner batches, e.g., `1024, 2048, 4096`)**:
-            reshapes `x` into `(-1, 256, K)` and maps the exact same
-            `FIXED_M = 256` kernel over chunks via `jax.lax.map`; the custom VJP
-            accumulates `dW` across chunks in ascending order via `jax.lax.scan`.
+            reshapes `x` into `(-1, 256, K)` and maps the `FIXED_M = 256`
+            kernel over chunks via `jax.lax.map`; the custom VJP accumulates
+            `dW` across chunks in ascending order via `jax.lax.scan`.
     *   Returns explicit `bf16` logits so no `f32` logit copy is materialized in
         HBM and `bf16` rounding is never elided.
 *   **Tests**: `fixed_lm_head_test.py`, `qwen3_model_canon_test.py`.
@@ -353,27 +364,32 @@ implementation and unit tests.
     TP sharding (`R5`). Furthermore, slicing `logits[:, :-1, :]` before scoring
     produces unaligned row counts `B * (T - 1)`.
 *   **Implementation (`canonical_logsoftmax.py`)**:
-    *   **Three-stage Pallas kernel**:
+    *   **Two-stage compact Pallas normalizer + flag-proof subtraction**:
         1.  `partial_kernel`: partitions the vocabulary into fixed
-            `VOCAB_TILE = 1024` tiles (grouped by `TILES_PER_GROUP = 8`, padding
-            tail columns beyond `V` with `jnp.finfo(jnp.float32).min`) and
-            computes per-tile `(tile_max, tile_sum)` in `f32`;
-        2.  `combine_kernel`: combines all tile summaries strictly left to right
-            into each row's scalar normalizer `global_max + log(global_sum)`;
-        3.  `normalize_kernel` / `gather_kernel`: `log_softmax` writes the full
-            `[M, V]` output, whereas `token_logprobs` / `gathered_logprobs`
-            subtracts the row normalizer directly from the target token's logit
-            without materializing the `[M, V]` `f32` log-probability tensor
-            (100% bitwise equal to `log_softmax` + `take_along_axis`).
-    *   **Row-Bucket Invariance**: All three stages operate independently across
-        8-row blocks (`BM = 8`), so any 8-aligned bucket `M in {8, 16, ..., 256}`
-        produces the exact same bits as `PRODUCTION_M = 256`.
-    *   **Vocab-Parallel Admission Guard**: In `Qwen3Canon`, vocab-parallel Stage 1
-        runs locally on each TP shard only when `(V / TP) % VOCAB_TILE == 0`
-        (where shard boundaries align with 1024-column tiles, guaranteeing
-        bitwise equality with the unsharded library call); otherwise it gathers
-        the `bf16` shards before Stage 1 so the global 1024-column tile
-        boundaries never shift.
+            `VOCAB_TILE = 1024` tiles (padding tail columns beyond `V` with
+            `jnp.finfo(jnp.float32).min` in-kernel) and computes compact
+            `[mp, total_tiles]` per-tile `(tile_max, tile_sum)` summaries in
+            `f32`;
+        2.  `combine_kernel`: combines all compact tile summaries strictly left
+            to right into each row's scalar normalizer
+            `global_max + log(global_sum)`;
+        3.  `log_softmax` / `token_logprobs` / `gathered_logprobs`:
+            `log_softmax` subtracts `normalizer[:, None]` from
+            `hard_upcast(logits)`, whereas `token_logprobs` and
+            `gathered_logprobs` subtract `normalizer` directly from the gathered
+            target token logit without materializing the `[M, V]` `f32`
+            log-probability tensor.
+    *   **Arbitrary `M >= 1` & Native `bf16`/`f32`**: Accepts any positive row
+        count `M` in `bf16` or `f32` directly without environment-variable gates
+        or 256-row chunking.
+    *   **Vocab-Parallel Halo Alignment (`V = 151,936` at `TP = 2 / 4 / 8`)**:
+        `vocab_parallel_log_softmax` and `vocab_parallel_token_logprobs` run
+        Stage 1 locally on each TP shard whenever `V / TP >= 1024` (and shard
+        rows over `data_axes` when `fsdp > 1`). When `(V / TP) % 1024 != 0`, a
+        single 1024-column neighbor halo exchange (`lax.ppermute`) aligns every
+        rank onto the exact global 1024-column tiles, eliminating `[M, V]`
+        all-gathers while remaining 100% bitwise identical to the unsharded
+        normalizer.
 *   **Tests**: `canonical_logsoftmax_test.py`, `qwen3_model_canon_test.py`.
 
 #### Op T4 — Token Sampling & Temperature Contract (`_forward_sample`, `next_token_logprobs`)
@@ -399,14 +415,16 @@ implementation and unit tests.
     sum-of-squares Pallas RMSNorm and its bit-exact pure-JAX counterpart
     `canonical_rmsnorm`.
 *   `pallas_swiglu.py`: Single-kernel Pallas `silu(gate) * up` with input fusion
-    disabled, auto-padding of unaligned `(M, F)` to `(BM = 128, BF = 256)`, and
-    a single `bf16` output store.
+    disabled, adaptive decode row buckets `{8, 16, 32, 64, 128}` (`BF = 256`),
+    and a single `bf16` output store.
 *   `pallas_norm_matmul.py`: Fused `pallas_rmsnorm` VMEM prologue +
-    `pallas_matmul` in one custom call, bitwise equal to the two-kernel chain.
+    `pallas_matmul` over a 3D `(row_tile, col_group, k_step)` grid
+    (`MAX_GROUP_N = 3072`, wide `block_n` promotion), bitwise equal to the
+    two-kernel chain.
 *   `model_contracts.py`: Per-model and per-TP tile contracts (`qwen1p7b`,
     `qwen4b`, `qwen8b`, `qwen32b` across `TP = 1, 2, 4, 8`).
-*   `padded_matmul.py`: Row zero-padding (`M` to `block_m`) and `K`/`N`
-    zero-padding wrapper around `pallas_matmul`.
+*   `padded_matmul.py`: Adaptive decode row-bucket padding (`M < 128` ->
+    `{8..128}`) and `K`/`N` zero-padding wrapper around `pallas_matmul`.
 *   `canonical_vjp.py`: `jax.custom_vjp` wrappers binding `pallas_matmul`,
     `pallas_rmsnorm`, `pallas_swiglu`, and `pallas_norm_matmul` as forward
     primals with selectable `plain` or `K`-blocked backward passes, plus
@@ -416,16 +434,16 @@ implementation and unit tests.
     (`((p0 + p1) + p2) + p3`) TP collectives (`RING`, `GATHER`, `SCATTER`) and
     explicit `bf16` rounding helpers (`hard_bf16_add`, `hard_round`,
     `hard_upcast`, `plain_add`).
-*   `fixed_lm_head.py`: Fixed `[FIXED_M = 256, K] @ [K, round_up(V/TP, 256)]`
-    local LM-head Pallas program (`fixed_m_lm_head_local`) with request
-    zero-padding (`M <= 256`), learner chunk mapping (`M > 256`), and ordered
-    `lax.scan` weight-gradient accumulation.
-*   `canonical_logsoftmax.py`: Fixed three-stage Pallas `log_softmax` and
-    `token_logprobs` / `gathered_logprobs` (`VOCAB_TILE = 1024`) with 8-aligned
-    row buckets up to `PRODUCTION_M = 256`.
-*   `rpa_canonical.py`: Pinned RPA v3 block sizes `(128, 512, 128, 512)`, forced
-    mixed batch distribution, 256-row token bucket, and differentiable wrapper
-    selection.
+*   `fixed_lm_head.py`: Local LM-head Pallas program (`fixed_m_lm_head_local`)
+    with adaptive small-`M` row buckets (`{8..128, 256}`), learner chunk mapping
+    (`M > 256`), and ordered `lax.scan` weight-gradient accumulation.
+*   `canonical_logsoftmax.py`: Fixed two-stage Pallas normalizer,
+    `log_softmax`, `token_logprobs`, `gathered_logprobs`, and halo-aligned
+    TP `vocab_parallel_*` scoring (`VOCAB_TILE = 1024`) over arbitrary `M >= 1`
+    in `bf16` or `f32`.
+*   `rpa_canonical.py`: Configurable outer `bkv_sz` (`bkv_sz % 512 == 0`),
+    minimal idle decode block sizes under `force_mixed=True`, 256-row token
+    bucket, and differentiable wrapper selection.
 *   `rpa_diff_chunked.py`: Chunked-cache differentiable RPA v3 (`jax.custom_vjp`)
     and its multi-sequence ragged adapter (`make_diff_rpa_chunked_ragged`).
 *   `rpa_diff.py`: Prefill-only differentiable RPA v3 wrapper with zero KV-cache

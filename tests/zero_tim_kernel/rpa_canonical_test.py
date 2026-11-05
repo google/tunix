@@ -97,6 +97,24 @@ class BlockSizeTest(_CleanEnvTestCase):
     self.assertEqual(
         rpa_canonical.pinned_block_size_kwargs(environ=environ), canonical
     )
+    self.assertEqual(
+        rpa_canonical.canonical_block_size_kwargs(force_mixed=True),
+        {
+            "d_block_sizes": (1, 512, 1, 512),
+            "m_block_sizes": (128, 512, 128, 512),
+        },
+    )
+    self.assertEqual(
+        rpa_canonical.canonical_block_size_kwargs(
+            bkv_sz=1024, force_mixed=True
+        ),
+        {
+            "d_block_sizes": (1, 512, 1, 512),
+            "m_block_sizes": (128, 1024, 128, 512),
+        },
+    )
+    with self.assertRaisesRegex(ValueError, "multiple of 512"):
+      rpa_canonical.canonical_block_size_kwargs(bkv_sz=768)
 
 
 class ForceMixedTest(_CleanEnvTestCase):

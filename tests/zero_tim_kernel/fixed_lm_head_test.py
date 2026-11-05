@@ -19,6 +19,7 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
+from jax.experimental import pallas as pl
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 import numpy as np
@@ -68,6 +69,23 @@ class FixedLmHeadTest(parameterized.TestCase):
     full = self._head(x, w)
     self.assertEqual(full.shape, (256, _LOCAL_VOCAB))
     test_utils.assert_bitwise_equal(self._head(x[:m], w), full[:m])
+
+  @parameterized.parameters((1, 8), (4, 8), (8, 8), (32, 32), (128, 128))
+  def test_small_decode_m_uses_adaptive_row_bucket_launch(self, m, expected_bm):
+    rng = np.random.default_rng(50 + m)
+    x = test_utils.random_bf16(rng, (m, _HIDDEN))
+    w = test_utils.random_bf16(rng, (_HIDDEN, 1024), scale=0.05)
+    with mock.patch.object(pl, "pallas_call", wraps=pl.pallas_call) as spy:
+      out = fixed_lm_head.fixed_m_lm_head_local(
+          x, w, local_matmul=self.local_matmul
+      )
+    self.assertEqual(out.shape, (m, 1024))
+    self.assertLen(spy.call_args_list, 1)
+    call = spy.call_args_list[0]
+    self.assertEqual(
+        call.kwargs["name"], f"canon_matmul_bm{expected_bm}_bn1024_bk256"
+    )
+    self.assertEqual(tuple(call.kwargs["grid_spec"].grid), (1, 1, 2))
 
   @parameterized.parameters(8, 256, _LEARNER_M)
   def test_exact_operands_give_the_rounded_product(self, m):

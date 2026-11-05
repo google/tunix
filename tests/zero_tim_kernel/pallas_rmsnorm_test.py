@@ -38,6 +38,11 @@ class RowTileTest(parameterized.TestCase):
   @parameterized.parameters(
       (256, 4096, 256),
       (512, 2048, 256),
+      (384, 2048, 128),
+      (128, 2048, 128),
+      (64, 2048, 64),
+      (32, 2048, 32),
+      (16, 2048, 16),
       (256, 5120, pallas_rmsnorm.BM),
       (264, 128, pallas_rmsnorm.BM),
       (8, 2560, pallas_rmsnorm.BM),

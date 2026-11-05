@@ -20,8 +20,10 @@ kernel is a custom-call boundary with `allow_input_fusion = (False, False)`,
 giving every `(row, feature)` tile the identical `f32` `silu(gate) * up` body
 and single `bf16` store regardless of `M`.
 
-Non-multiple `(M, F)` extents are automatically zero-padded to `(BM, BF) =
-(128, 256)` multiples before the Pallas launch and sliced back to `[:M, :F]`.
+Non-multiple `(M, F)` extents are automatically zero-padded to adaptive row
+buckets (`{8, 16, 32, 64}` for `M < 128`, or multiples of `BM = 128` otherwise)
+and `BF = 256` column multiples before the Pallas launch and sliced back to
+`[:M, :F]`.
 """
 
 from __future__ import annotations
@@ -88,7 +90,7 @@ def swiglu(
         f"pallas_swiglu requires bf16 inputs, got {gate.dtype}, {up.dtype} "
     )
 
-  mp = model_contracts.round_up(m, BM)
+  mp, bm = pallas_matmul.adaptive_row_bucket(m, BM)
   fp = model_contracts.round_up(f, BF)
   if mp != m or fp != f:
     pad = ((0, mp - m), (0, fp - f))
@@ -109,11 +111,11 @@ def swiglu(
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=0,
           in_specs=[
-              pl.BlockSpec((BM, BF), lambda i, j: (i, j)),
-              pl.BlockSpec((BM, BF), lambda i, j: (i, j)),
+              pl.BlockSpec((bm, BF), lambda i, j: (i, j)),
+              pl.BlockSpec((bm, BF), lambda i, j: (i, j)),
           ],
-          out_specs=pl.BlockSpec((BM, BF), lambda i, j: (i, j)),
-          grid=(mp // BM, fp // BF),
+          out_specs=pl.BlockSpec((bm, BF), lambda i, j: (i, j)),
+          grid=(mp // bm, fp // BF),
       ),
       compiler_params=pltpu.CompilerParams(
           dimension_semantics=("parallel", "parallel"),
@@ -125,6 +127,6 @@ def swiglu(
           shape_invariant_numerics=shape_invariant_numerics,
       ),
       interpret=interpret,
-      name=f"canon_swiglu_bm{BM}_bf{BF}",
+      name=f"canon_swiglu_bm{bm}_bf{BF}",
   )(gate_in, up_in)
   return out[:m, :f] if (mp != m or fp != f) else out

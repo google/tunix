@@ -57,9 +57,27 @@ BLOCK_SIZE_ENVS = (
     ("m_block_sizes", "CANON_RPA_M"),
 )
 # Canonical block sizes and token bucket.
-# TODO(tunix-dev): Allow overriding canonical RPA block sizes, token bucket,
-# default page size, and mesh axis names via configuration.
-CANONICAL_BLOCK_SIZES = (128, 512, 128, 512)
+CANONICAL_BQ_SZ = 128
+CANONICAL_BKV_SZ = 512
+CANONICAL_BQ_CSZ = 128
+CANONICAL_BKV_CSZ = 512
+CANONICAL_BLOCK_SIZES = (
+    CANONICAL_BQ_SZ,
+    CANONICAL_BKV_SZ,
+    CANONICAL_BQ_CSZ,
+    CANONICAL_BKV_CSZ,
+)
+# Minimal valid decode block sizes when `FORCE_MIXED` routes every sequence
+# through `m_block_sizes` (`distribution = [0, 0, k]`): the idle decode
+# branch is still traced at compile time, so `bq_sz = 1` shrinks its unused
+# `bq_double_buf` / `l_scratch` / `m_scratch` / `acc_scratch` VMEM by 128x
+# while `bkv_sz = 512` stays divisible by any valid `page_size | 512`.
+CANONICAL_IDLE_DECODE_BLOCK_SIZES = (
+    1,
+    CANONICAL_BKV_CSZ,
+    1,
+    CANONICAL_BKV_CSZ,
+)
 CANONICAL_MIN_TOKEN_BUCKET = 256
 FORCE_MIXED_ENV = "CANON_FORCE_MIXED"
 RPA_VJP2_ENV = "CANON_RPA_VJP2"
@@ -105,9 +123,47 @@ def pinned_block_size_kwargs(
   return kwargs
 
 
-def canonical_block_size_kwargs() -> dict[str, tuple[int, ...]]:
-  """The canonical bundle's pinned kwargs, independent of the environment."""
-  return {key: CANONICAL_BLOCK_SIZES for key, _ in BLOCK_SIZE_ENVS}
+def canonical_block_size_kwargs(
+    *,
+    bkv_sz: int = CANONICAL_BKV_SZ,
+    force_mixed: bool = False,
+) -> dict[str, tuple[int, int, int, int]]:
+  """Returns canonical RPA v3 block-size kwargs, independent of the environment.
+
+  The inner compute tiles `(bq_csz, bkv_csz) = (128, 512)` and outer query block
+  `bq_sz = 128` govern the online-softmax reduction granularity and causal bound
+  and are locked. Any outer KV DMA block `bkv_sz` that is a positive multiple of
+  `bkv_csz = 512` (e.g. `1024` on long contexts) shares the same VMEM online
+  softmax accumulators across `512`-token inner sub-blocks and produces
+  bitwise-identical forward outputs.
+
+  When `force_mixed=True` (`distribution = [0, 0, k]`), `p_block_sizes` is
+  omitted (never consumed when `chunk_prefill_size is None`) and `d_block_sizes`
+  is set to `CANONICAL_IDLE_DECODE_BLOCK_SIZES = (1, 512, 1, 512)` to shrink
+  compile-time VMEM scratch in the idle `RpaCase.DECODE` branch by 128x.
+
+  Args:
+    bkv_sz: Outer KV DMA block size (`bkv_sz % 512 == 0`).
+    force_mixed: Whether all sequences are routed to the mixed pass.
+  """
+  bkv_sz = int(bkv_sz)
+  if bkv_sz <= 0 or bkv_sz % CANONICAL_BKV_CSZ != 0:
+    raise ValueError(
+        "canonical_block_size_kwargs requires bkv_sz to be a positive multiple "
+        f"of {CANONICAL_BKV_CSZ}, got {bkv_sz}"
+    )
+  mixed_blocks = (
+      CANONICAL_BQ_SZ,
+      bkv_sz,
+      CANONICAL_BQ_CSZ,
+      CANONICAL_BKV_CSZ,
+  )
+  if force_mixed:
+    return {
+        "d_block_sizes": CANONICAL_IDLE_DECODE_BLOCK_SIZES,
+        "m_block_sizes": mixed_blocks,
+    }
+  return {key: mixed_blocks for key, _ in BLOCK_SIZE_ENVS}
 
 
 def force_mixed_distribution(distribution):

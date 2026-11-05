@@ -18,6 +18,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
+from jax.experimental import pallas as pl
 import jax.numpy as jnp
 import numpy as np
 from tunix.zero_tim_kernel import pallas_matmul
@@ -62,6 +63,19 @@ class SwigluTest(parameterized.TestCase):
     full = pallas_swiglu.swiglu(gate, up, interpret=True)
     part = pallas_swiglu.swiglu(gate[:m], up[:m], interpret=True)
     test_utils.assert_bitwise_equal(part, full[:m])
+
+  @parameterized.parameters((1, 8), (8, 8), (32, 32), (64, 64), (100, 128))
+  def test_small_m_launches_adaptive_bm_grid(self, m, expected_bm):
+    rng = np.random.default_rng(20 + m)
+    gate = test_utils.random_bf16(rng, (m, 512), scale=3.0)
+    up = test_utils.random_bf16(rng, (m, 512))
+    with mock.patch.object(pl, "pallas_call", wraps=pl.pallas_call) as spy:
+      out = pallas_swiglu.swiglu(gate, up, interpret=True)
+    self.assertEqual(out.shape, (m, 512))
+    self.assertLen(spy.call_args_list, 1)
+    call = spy.call_args_list[0]
+    self.assertEqual(call.kwargs["name"], f"canon_swiglu_bm{expected_bm}_bf256")
+    self.assertEqual(tuple(call.kwargs["grid_spec"].grid), (1, 2))
 
   def test_feature_padding_is_sliced_off(self):
     rng = np.random.default_rng(1)
