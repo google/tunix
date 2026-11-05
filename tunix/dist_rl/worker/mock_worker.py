@@ -58,6 +58,7 @@ class MockWorker(abstract_worker.Worker):
     )
     # Tracks how many times each method was called
     self.call_counts = collections.Counter()
+    self.last_stop_abort = False
     self._log = log
     self._fail_stop = fail_stop
 
@@ -88,11 +89,17 @@ class MockWorker(abstract_worker.Worker):
       self._log.append(f"{self._info.worker_id}:start")
     return datatypes.Response()
 
-  def stop(self) -> datatypes.Response:
+  def stop(self, *, abort: bool = False) -> datatypes.Response:
     self.call_counts["stop"] += 1
+    self.last_stop_abort = bool(abort)
     self.state = WorkerState.STOPPED
     if self._log is not None:
       self._log.append(f"{self._info.worker_id}:stop")
-    if self._fail_stop:
-      raise RuntimeError(f"{self._info.worker_id} refused to stop")
-    return datatypes.Response()
+    try:
+      if self._fail_stop:
+        raise RuntimeError(f"{self._info.worker_id} refused to stop")
+      return datatypes.Response(
+          metadata={"stopped": True, "abort": bool(abort)}
+      )
+    finally:
+      self._notify_stopped(abort)

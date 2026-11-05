@@ -26,6 +26,7 @@ best-effort `stop()` across every remaining worker.
 from collections.abc import Callable, Sequence
 import concurrent.futures
 import threading
+import time
 from typing import Any
 
 from absl import logging
@@ -94,6 +95,7 @@ class LifecycleDriver:
         target: tuple[datatypes.WorkerInfo, remote_execution.ActorHandle],
     ) -> None:
       info, handle = target
+      t0 = time.monotonic()
       resp = handle.submit("initialize")
       metadata = {
           k: resp.metadata[k] for k in _INIT_METADATA_KEYS if k in resp.metadata
@@ -105,28 +107,56 @@ class LifecycleDriver:
             f"worker {info.worker_id!r} was unregistered or re-registered"
             " with a different handle during bring-up"
         )
+      logging.info(
+          "Lifecycle bring-up: worker %r finished initialize in %.2fs.",
+          info.worker_id,
+          time.monotonic() - t0,
+      )
 
+    worker_ids = [info.worker_id for info, _ in resolved_targets]
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=self._max_workers
     ) as pool:
       # TODO(noghabi): Refactor to allow successful workers to proceed to
       # compile/start and potentially retry failed ones, rather than fail-fast
       # on the first error.
+      if worker_ids:
+        logging.info(
+            "Lifecycle bring-up: starting initialize for %s.", worker_ids
+        )
       list(pool.map(_init_worker, resolved_targets))
       if self._verify_fn is not None:
         self._verify_fn([info for info, _ in resolved_targets])
+      t_compile = time.monotonic()
+      if worker_ids:
+        logging.info("Lifecycle bring-up: starting compile for %s.", worker_ids)
       list(
           pool.map(
               lambda target: target[1].submit("compile", dummy_data),
               resolved_targets,
           )
       )
+      if worker_ids:
+        logging.info(
+            "Lifecycle bring-up: finished compile for %s in %.2fs.",
+            worker_ids,
+            time.monotonic() - t_compile,
+        )
+      t_start = time.monotonic()
+      if worker_ids:
+        logging.info("Lifecycle bring-up: starting start for %s.", worker_ids)
       list(
           pool.map(
               lambda target: target[1].submit("start"),
               resolved_targets,
           )
       )
+      if worker_ids:
+        logging.info(
+            "Lifecycle bring-up: finished start for %s in %.2fs.",
+            worker_ids,
+            time.monotonic() - t_start,
+        )
 
   def bring_up(
       self,
@@ -281,8 +311,17 @@ class LifecycleDriver:
   # `ClusterOrchestrator.shutdown()`) so `stop_workers_on_exit=False` callers
   # still close registration, the late bring-up executor, and local handles
   # without sending `stop` to remote workers.
-  def shutdown(self) -> None:
-    """Closes registration, stops late bring-up tasks, and stops all workers."""
+  def shutdown(self, *, abort: bool = False) -> None:
+    """Closes registration, stops late bring-up tasks, and stops all workers.
+
+    Args:
+      abort: Whether this is an abnormal teardown (an unrecoverable error or
+        preemption). If True, passes `abort=True` to each worker's `stop` RPC;
+        see `Worker.stop`.
+
+    Raises:
+      LifecycleError: If stopping any worker fails.
+    """
     self._registry.close_registration()
     with self._late_lock:
       reconciler = self._reconciler_thread
@@ -303,6 +342,9 @@ class LifecycleDriver:
 
     failures: list[tuple[str, BaseException]] = []
     targets = self._registry.targets(statuses=None)
+    # Only pass `abort` when set, so a clean shutdown sends the same `stop` RPC
+    # as before (older workers and test doubles take no `abort` argument).
+    stop_kwargs = {"abort": True} if abort else {}
 
     def _stop_worker(
         info: datatypes.WorkerInfo, handle: remote_execution.ActorHandle
@@ -317,7 +359,7 @@ class LifecycleDriver:
             "Worker %r unregistered concurrently, nothing to stop.", wid
         )
         return
-      handle.submit("stop")
+      handle.submit("stop", **stop_kwargs)
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=self._max_workers

@@ -522,6 +522,74 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     worker = _worker()
     worker.stop()
 
+  def test_stop_is_idempotent_and_invokes_on_stop_callback(self):
+    worker = _worker()
+    mock_store = mock.MagicMock()
+    worker._trajectory_store = mock_store  # pylint: disable=protected-access
+    worker.manager.cancel_all = mock.MagicMock()
+    observed_aborts = []
+    worker.set_on_stop(observed_aborts.append)
+
+    first = worker.stop(abort=True)
+    second = worker.stop(abort=False)
+
+    self.assertEqual(worker.state, datatypes.WorkerState.STOPPED)
+    self.assertEqual(
+        first.metadata,
+        {
+            "worker_id": "w0",
+            "policy_version": 0,
+            "state": "STOPPED",
+            "stopped": True,
+            "abort": True,
+        },
+    )
+    self.assertEqual(
+        second.metadata,
+        {
+            "worker_id": "w0",
+            "policy_version": 0,
+            "state": "STOPPED",
+            "stopped": True,
+            "already_stopped": True,
+            "abort": False,
+        },
+    )
+    worker.manager.cancel_all.assert_called_once_with()
+    mock_store.close.assert_called_once_with()
+    # The callback's abort flag stays latched after a later non-abort stop.
+    self.assertEqual(observed_aborts, [True, True])
+
+  def test_stop_keeps_failure_signal_without_recleaning_if_cleanup_raises(
+      self,
+  ):
+    worker = _worker()
+    mock_store = mock.MagicMock()
+    worker._trajectory_store = mock_store  # pylint: disable=protected-access
+    worker.manager.cancel_all = mock.MagicMock(
+        side_effect=RuntimeError("cancel_all failed")
+    )
+    observed_aborts = []
+    worker.set_on_stop(observed_aborts.append)
+
+    # A clean (non-abort) stop whose cleanup fails is escalated to an abort.
+    with self.assertRaisesRegex(RuntimeError, "cancel_all failed"):
+      worker.stop()
+
+    self.assertEqual(worker.state, datatypes.WorkerState.STOPPED)
+    mock_store.close.assert_called_once_with()
+    self.assertEqual(observed_aborts, [True])
+
+    # Local teardown does not re-run cleanup, but still surfaces the earlier
+    # failure with the abort flag latched.
+    with self.assertRaisesRegex(
+        RuntimeError, "failed to stop cleanly earlier: cancel_all failed"
+    ):
+      worker.stop()
+    worker.manager.cancel_all.assert_called_once_with()
+    mock_store.close.assert_called_once_with()
+    self.assertEqual(observed_aborts, [True, True])
+
   def test_info_and_initialize_report_trajectory_store_config(self):
     worker_disabled = _worker()
     self.assertIsNone(

@@ -451,7 +451,8 @@ class InferenceWorkerTest(absltest.TestCase):
       def start(self):
         return datatypes.Response()
 
-      def stop(self):
+      def stop(self, *, abort: bool = False):
+        del abort
         return datatypes.Response()
 
       def info(self):
@@ -464,6 +465,25 @@ class InferenceWorkerTest(absltest.TestCase):
     self.assertTrue(getattr(w.compile, aw.OFFLOAD_TO_THREAD_ATTR, False))
     self.assertFalse(getattr(w.heartbeat, aw.OFFLOAD_TO_THREAD_ATTR, False))
     self.assertIsInstance(w.compile(), datatypes.Response)
+
+  def test_stop_is_idempotent_and_invokes_on_stop_callback(self):
+    worker = _worker()
+    worker.initialize()
+    observed = []
+    worker.set_on_stop(observed.append)
+
+    first = worker.stop()
+    self.assertEqual(worker.state, WorkerState.STOPPED)
+    self.assertEqual(first.metadata, {"stopped": True, "abort": False})
+    self.assertEqual(observed, [False])
+
+    second = worker.stop(abort=True)
+    self.assertEqual(worker.state, WorkerState.STOPPED)
+    self.assertEqual(
+        second.metadata,
+        {"stopped": True, "already_stopped": True, "abort": True},
+    )
+    self.assertEqual(observed, [False, True])
 
 
 if __name__ == "__main__":

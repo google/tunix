@@ -18,8 +18,11 @@ Supervises WorkerRegistry, LifecycleDriver, HealthMonitor, and StartupValidator.
 Provides supervised RL program execution (`run`).
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 import contextlib
+import signal
+import threading
+import types
 from typing import Any
 
 from absl import logging
@@ -131,7 +134,15 @@ class ClusterOrchestrator:
     return self
 
   def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-    self.shutdown()
+    if exc_type is not None:
+      try:
+        self.shutdown(abort=True)
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.exception(
+            "Best-effort shutdown(abort=True) also failed after primary error."
+        )
+    else:
+      self.shutdown()
 
   def bring_up_workers(self, dummy_data: Any = None) -> None:
     """Brings up registered workers and enables late rollout registration.
@@ -208,16 +219,25 @@ class ClusterOrchestrator:
             f" orchestrator weight_sync_timeouts.pre is {timeouts_cfg.pre}s."
         )
 
-  def shutdown(self) -> None:
-    """Shuts down all workers, closes handles, and closes health monitoring resources."""
-    logging.info("Shutting down all workers...")
+  def shutdown(self, *, abort: bool = False) -> None:
+    """Stops all workers and closes handles and health monitoring resources.
+
+    Args:
+      abort: Whether this is an abnormal teardown (an unrecoverable error or
+        preemption). If True, every worker receives `stop(abort=True)`; see
+        `Worker.stop`.
+    """
+    logging.info("Shutting down all workers (abort=%s)...", abort)
     with contextlib.ExitStack() as stack:
       # Registered in reverse order of execution (LIFO) so that every stage
       # runs even if a preceding stage raises an exception.
       if self.trajectory_store is not None:
         stack.callback(self.trajectory_store.close)
       stack.callback(self.registry.close)
-      stack.callback(self.lifecycle_driver.shutdown)
+      if abort:
+        stack.callback(self.lifecycle_driver.shutdown, abort=True)
+      else:
+        stack.callback(self.lifecycle_driver.shutdown)
       stack.callback(self.monitor.close)
     logging.info("Shutdown complete.")
 
@@ -275,3 +295,93 @@ class ClusterOrchestrator:
         **kwargs,
     )
     logging.info("Program %s finished.", type(program).__name__)
+
+
+def _raise_system_exit_on_signal(
+    signum: int, frame: types.FrameType | None
+) -> None:
+  """Signal handler that raises `SystemExit(128 + signum)`."""
+  del frame
+  raise SystemExit(128 + signum)
+
+
+@contextlib.contextmanager
+def _sigterm_raises_system_exit() -> Iterator[None]:
+  """Makes SIGTERM raise `SystemExit` within the scope on the main thread.
+
+  Elsewhere this is a no-op, since Python only lets the main thread install
+  signal handlers.
+
+  Yields:
+    None.
+  """
+  if threading.current_thread() is not threading.main_thread():
+    yield
+    return
+  prev_handler = signal.signal(signal.SIGTERM, _raise_system_exit_on_signal)
+  try:
+    yield
+  finally:
+    try:
+      # `None` means the previous handler was installed outside Python (e.g. by
+      # native code) and cannot be restored; fall back to the default.
+      signal.signal(
+          signal.SIGTERM,
+          signal.SIG_DFL if prev_handler is None else prev_handler,
+      )
+    except Exception:  # pylint: disable=broad-exception-caught
+      logging.exception("Failed to restore the previous SIGTERM handler.")
+
+
+def _teardown_cluster(
+    cluster: ClusterOrchestrator, *, stop_workers: bool, abort: bool
+) -> None:
+  """Shuts `cluster` down, or only closes its local resources."""
+  if stop_workers and abort:
+    cluster.shutdown(abort=True)
+  elif stop_workers:
+    cluster.shutdown()
+  else:
+    with contextlib.ExitStack() as stack:
+      if cluster.trajectory_store is not None:
+        stack.callback(cluster.trajectory_store.close)
+      stack.callback(cluster.monitor.close)
+
+
+@contextlib.contextmanager
+def managed_cluster_teardown(
+    cluster: ClusterOrchestrator, *, stop_workers_on_exit: bool = True
+) -> Iterator[None]:
+  """Guards cluster startup and execution, aborting workers on error or SIGTERM.
+
+  On a clean exit, calls `cluster.shutdown()`. If the body raises, including the
+  `SystemExit` raised for SIGTERM, calls `cluster.shutdown(abort=True)` on a
+  best-effort basis and re-raises the original exception.
+
+  When entered on the main thread, SIGTERM raises `SystemExit(128 + SIGTERM)`
+  for the duration of the scope. Delivery is cooperative: Python runs the
+  handler on the main thread between bytecodes, so teardown starts only once the
+  main thread's current blocking call returns (for example, after in-flight
+  bring-up RPCs finish).
+
+  Args:
+    cluster: `ClusterOrchestrator` instance managing registered workers.
+    stop_workers_on_exit: Whether to call `cluster.shutdown(...)` when exiting
+      the scope. When False, local monitor and trajectory store resources are
+      still closed.
+
+  Yields:
+    None.
+  """
+  try:
+    with _sigterm_raises_system_exit():
+      yield
+  except BaseException:
+    try:
+      _teardown_cluster(cluster, stop_workers=stop_workers_on_exit, abort=True)
+    except Exception:  # pylint: disable=broad-exception-caught
+      logging.exception(
+          "Best-effort cluster teardown also failed after the primary error."
+      )
+    raise
+  _teardown_cluster(cluster, stop_workers=stop_workers_on_exit, abort=False)

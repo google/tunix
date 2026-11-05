@@ -14,6 +14,7 @@
 
 """Top-level RolloutWorker abstractions (Service vs Client Driver)."""
 
+import contextlib
 import dataclasses
 import inspect
 import threading
@@ -110,6 +111,8 @@ class RolloutWorker(abstract_worker.Worker):
     self.config = config
     self._policy_version = 0
     self._state = datatypes.WorkerState.PENDING
+    # Set when `stop()` failed to clean up; later stops re-raise it.
+    self._stop_error: str | None = None
     self._init_lock = threading.Lock()
     # TODO(linchai): make the sampler the single owner of weight-sync round
     # state, then drop `_sync_round` and `_record_round`.
@@ -249,19 +252,52 @@ class RolloutWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  def stop(self) -> datatypes.Response:
-    self.state = WorkerState.STOPPED
+  def stop(self, *, abort: bool = False) -> datatypes.Response:
+    """Stops the worker, cleaning up its resources at most once.
+
+    If cleanup fails, the worker still ends up `STOPPED` so that teardown never
+    re-runs a partially failed cleanup. The failure is kept instead of dropped:
+    it is escalated to an abort for the `set_on_stop` callback and re-raised by
+    every later `stop()` call, so local node teardown still exits non-zero.
+
+    Args:
+      abort: Whether the stop is part of an abnormal cluster teardown; see
+        `Worker.stop`.
+
+    Returns:
+      A response with `stopped=True` and the requested `abort` flag, plus
+      `already_stopped=True` if the worker was already stopped.
+
+    Raises:
+      RuntimeError: If an earlier `stop()` failed to clean up.
+    """
     try:
-      self.manager.cancel_all()
-    finally:
+      if self.state == WorkerState.STOPPED:
+        if self._stop_error is not None:
+          raise RuntimeError(
+              f"RolloutWorker {self.worker_id!r} failed to stop cleanly"
+              f" earlier: {self._stop_error}"
+          )
+        return self._response(
+            stopped=True, already_stopped=True, abort=bool(abort)
+        )
+      self.state = WorkerState.STOPPED
       try:
-        # Runs even when cancel_all raises, so a failed stop releases the
-        # store's background writer thread instead of leaking it.
-        if self._trajectory_store is not None:
-          self._trajectory_store.close()
-      finally:
-        self._jax_cache_syncer.wait()
-    return datatypes.Response()
+        with contextlib.ExitStack() as stack:
+          # Callbacks run in reverse order once `cancel_all` returns or raises,
+          # so a failed stop still releases the store's background writer thread
+          # and waits for the cache syncer instead of leaking them.
+          stack.callback(self._jax_cache_syncer.wait)
+          if self._trajectory_store is not None:
+            stack.callback(self._trajectory_store.close)
+          self.manager.cancel_all()
+      except Exception as exc:
+        self._stop_error = str(exc)
+        abort = True
+        raise
+      return self._response(stopped=True, abort=bool(abort))
+    finally:
+      self._notify_stopped(abort)
 
   def pause(self) -> datatypes.Response:
     self.manager.pause_all()

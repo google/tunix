@@ -14,6 +14,7 @@
 
 """Unit tests for ClusterOrchestrator."""
 
+import signal
 import tempfile
 import threading
 import time
@@ -55,6 +56,12 @@ class ClusterOrchestratorTest(absltest.TestCase):
     orch = orchestrator.ClusterOrchestrator(registry=empty_registry)
     self.assertIs(orch.registry, empty_registry)
 
+  def test_context_manager_clean_exit_shuts_down_without_abort(self):
+    with self.orch:
+      pass
+
+    self.mock_lifecycle.shutdown.assert_called_once_with()
+
   def test_bring_up_and_shutdown(self):
     self.orch.bring_up_workers("dummy_warmup_data")
     self.mock_lifecycle.enable_late_registration.assert_called_once_with(
@@ -64,8 +71,22 @@ class ClusterOrchestratorTest(absltest.TestCase):
 
     self.orch.shutdown()
     self.mock_monitor.close.assert_called_once()
-    self.mock_lifecycle.shutdown.assert_called_once()
+    self.mock_lifecycle.shutdown.assert_called_once_with()
     self.mock_registry.close.assert_called_once()
+
+    self.mock_lifecycle.shutdown.reset_mock()
+    self.orch.shutdown(abort=True)
+    self.mock_lifecycle.shutdown.assert_called_once_with(abort=True)
+
+    # Context-manager failure exit forwards abort=True and preserves primary
+    # error.
+    self.mock_lifecycle.shutdown.reset_mock()
+    self.mock_lifecycle.shutdown.side_effect = RuntimeError("teardown failed")
+    with self.assertRaisesRegex(RuntimeError, "primary boom"):
+      with self.orch:
+        raise RuntimeError("primary boom")
+    self.mock_lifecycle.shutdown.assert_called_once_with(abort=True)
+    self.mock_lifecycle.shutdown.side_effect = None
 
     mock_lifecycle_ws = mock.MagicMock()
     orch_ws = orchestrator.ClusterOrchestrator(
@@ -202,7 +223,8 @@ class ClusterOrchestratorTest(absltest.TestCase):
       def start(self):
         return datatypes.Response()
 
-      def stop(self):
+      def stop(self, *, abort: bool = False):
+        del abort
         return datatypes.Response()
 
       def heartbeat(self):
@@ -755,6 +777,152 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
         ],
         1.0,
     )
+
+
+def _mock_cluster() -> mock.MagicMock:
+  """Returns a `ClusterOrchestrator` mock with local resources attached."""
+  cluster = mock.MagicMock(spec=orchestrator.ClusterOrchestrator)
+  # Instance attributes are not part of the class spec, so set them explicitly.
+  cluster.monitor = mock.MagicMock()
+  cluster.trajectory_store = mock.MagicMock()
+  return cluster
+
+
+class ManagedClusterTeardownTest(absltest.TestCase):
+
+  def test_clean_exit_shuts_down_without_abort(self):
+    cluster = _mock_cluster()
+
+    with orchestrator.managed_cluster_teardown(cluster):
+      pass
+
+    cluster.shutdown.assert_called_once_with()
+
+  def test_error_aborts_workers_and_keeps_primary_error(self):
+    cluster = _mock_cluster()
+    cluster.shutdown.side_effect = RuntimeError("dead worker stop RPC failed")
+
+    with self.assertRaisesRegex(TimeoutError, "wait_for_workers timed out"):
+      with orchestrator.managed_cluster_teardown(cluster):
+        raise TimeoutError("wait_for_workers timed out")
+
+    cluster.shutdown.assert_called_once_with(abort=True)
+
+  def test_keep_workers_clean_exit_only_closes_local_resources(self):
+    cluster = _mock_cluster()
+
+    with orchestrator.managed_cluster_teardown(
+        cluster, stop_workers_on_exit=False
+    ):
+      pass
+
+    cluster.shutdown.assert_not_called()
+    cluster.monitor.close.assert_called_once_with()
+    cluster.trajectory_store.close.assert_called_once_with()
+
+  def test_keep_workers_error_closes_local_resources_and_keeps_error(self):
+    cluster = _mock_cluster()
+    cluster.monitor.close.side_effect = RuntimeError("monitor close failed")
+
+    with self.assertRaisesRegex(ValueError, "training failed"):
+      with orchestrator.managed_cluster_teardown(
+          cluster, stop_workers_on_exit=False
+      ):
+        raise ValueError("training failed")
+
+    cluster.shutdown.assert_not_called()
+    cluster.monitor.close.assert_called_once_with()
+    cluster.trajectory_store.close.assert_called_once_with()
+
+  def test_keep_workers_without_trajectory_store_only_closes_monitor(self):
+    cluster = _mock_cluster()
+    cluster.trajectory_store = None
+
+    with orchestrator.managed_cluster_teardown(
+        cluster, stop_workers_on_exit=False
+    ):
+      pass
+
+    cluster.shutdown.assert_not_called()
+    cluster.monitor.close.assert_called_once_with()
+
+  def test_sigterm_raises_system_exit_aborts_and_restores_handler(self):
+    cluster = _mock_cluster()
+    original_handler = signal.getsignal(signal.SIGTERM)
+    self.addCleanup(
+        signal.signal,
+        signal.SIGTERM,
+        signal.SIG_DFL if original_handler is None else original_handler,
+    )
+
+    # A known previous handler, so the test proves it is restored rather than
+    # relying on whatever handler the test process started with.
+    def _sentinel_handler(signum, frame):
+      del signum, frame
+
+    signal.signal(signal.SIGTERM, _sentinel_handler)
+
+    with self.assertRaises(SystemExit) as cm:
+      with orchestrator.managed_cluster_teardown(cluster):
+        signal.raise_signal(signal.SIGTERM)
+
+    self.assertEqual(cm.exception.code, 128 + signal.SIGTERM)
+    self.assertIs(signal.getsignal(signal.SIGTERM), _sentinel_handler)
+    cluster.shutdown.assert_called_once_with(abort=True)
+
+  def test_unknown_previous_sigterm_handler_is_restored_as_default(self):
+    cluster = _mock_cluster()
+
+    # `signal.signal` returns None when the previous handler was installed
+    # outside Python, and passing None back to it raises `TypeError`.
+    with mock.patch.object(signal, "signal", return_value=None) as mock_signal:
+      with orchestrator.managed_cluster_teardown(cluster):
+        pass
+
+    self.assertEqual(
+        mock_signal.call_args_list[-1],
+        mock.call(signal.SIGTERM, signal.SIG_DFL),
+    )
+    cluster.shutdown.assert_called_once_with()
+
+  def test_sigterm_restore_failure_does_not_skip_teardown(self):
+    cluster = _mock_cluster()
+
+    with mock.patch.object(
+        signal,
+        "signal",
+        side_effect=[signal.SIG_DFL, ValueError("restore failed")],
+    ):
+      with self.assertLogs(level="ERROR") as logs:
+        with orchestrator.managed_cluster_teardown(cluster):
+          pass
+
+    cluster.shutdown.assert_called_once_with()
+    self.assertIn(
+        "Failed to restore the previous SIGTERM handler",
+        "\n".join(logs.output),
+    )
+
+  def test_non_main_thread_does_not_install_sigterm_handler(self):
+    cluster = _mock_cluster()
+    errors = []
+
+    def _run() -> None:
+      try:
+        with orchestrator.managed_cluster_teardown(cluster):
+          pass
+      except BaseException as e:  # pylint: disable=broad-exception-caught
+        errors.append(e)
+
+    with mock.patch.object(signal, "signal") as mock_signal:
+      thread = threading.Thread(target=_run)
+      thread.start()
+      thread.join(timeout=10.0)
+
+    self.assertFalse(thread.is_alive())
+    self.assertEmpty(errors)
+    mock_signal.assert_not_called()
+    cluster.shutdown.assert_called_once_with()
 
 
 if __name__ == "__main__":

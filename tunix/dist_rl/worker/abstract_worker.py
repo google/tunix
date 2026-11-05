@@ -20,14 +20,15 @@ pipeline (e.g. TrainerWorker is a wrapper around the Trainer).
 """
 
 import abc
-from collections.abc import Awaitable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 import contextlib
 import contextvars
 import functools
 import inspect
 import threading
-from typing import Any, Callable, TypeVar, cast
+from typing import Any, TypeVar, cast
 
+from absl import logging
 from tunix.dist_rl.common import datatypes
 
 OFFLOAD_TO_THREAD_ATTR = "_tunix_offload_to_thread"
@@ -123,6 +124,8 @@ class Worker(abc.ABC):
   # Default initial state for a worker
   _state: datatypes.WorkerState = datatypes.WorkerState.PENDING
   _execution_context: Any = None
+  _on_stop: Callable[[bool], None] | None = None
+  _stop_abort: bool = False
 
   def __init_subclass__(cls, **kwargs: Any) -> None:
     super().__init_subclass__(**kwargs)
@@ -131,6 +134,35 @@ class Worker(abc.ABC):
         continue
       if inspect.isfunction(attr):
         setattr(cls, name, _wrap_with_execution_context(attr))
+
+  def set_on_stop(self, callback: Callable[[bool], None] | None) -> None:
+    """Registers a callback that `stop()` invokes with the latched abort flag.
+
+    The callback fires at the end of every `stop()` call, including repeated
+    calls on an already stopped worker and calls that raise. Its argument is
+    latched: once any `stop(abort=True)` has been seen, or an implementation
+    escalated a failed stop to an abort, it is True for the rest of the worker's
+    lifetime, so a later local `stop()` cannot downgrade an abort. The callback
+    runs synchronously on the thread executing `stop()` (an RPC executor thread
+    or the event loop), possibly while worker locks are held, so it must be
+    fast, non-blocking, and thread-safe. Exceptions it raises are logged and
+    swallowed.
+
+    Args:
+      callback: Called with the latched abort flag, or None to unregister.
+    """
+    self._on_stop = callback
+
+  def _notify_stopped(self, abort: bool) -> None:
+    """Latches `abort` and invokes the registered `_on_stop` callback."""
+    self._stop_abort = self._stop_abort or bool(abort)
+    callback = self._on_stop
+    if callback is None:
+      return
+    try:
+      callback(self._stop_abort)
+    except Exception:  # pylint: disable=broad-exception-caught
+      logging.exception("Worker on_stop callback failed.")
 
   @contextlib.contextmanager
   def execution_context(self) -> Iterator[None]:
@@ -197,8 +229,18 @@ class Worker(abc.ABC):
     pass
 
   @abc.abstractmethod
-  def stop(self) -> datatypes.Response:
-    """Gracefully stops the worker."""
+  def stop(self, *, abort: bool = False) -> datatypes.Response:
+    """Gracefully stops the worker.
+
+    Implementations call `_notify_stopped(abort)` when they finish, including
+    on failure, so that the callback registered via `set_on_stop` fires.
+
+    Args:
+      abort: Whether the stop is part of an abnormal cluster teardown (an
+        unrecoverable error or preemption). It is forwarded to the `set_on_stop`
+        callback, so the hosting node runner can exit non-zero after draining
+        and let the cluster scheduler restart it.
+    """
     pass
 
   @abc.abstractmethod

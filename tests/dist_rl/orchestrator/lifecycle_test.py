@@ -14,6 +14,7 @@
 
 """Tests for the LifecycleDriver."""
 
+import asyncio
 from collections.abc import Callable
 import pickle
 import threading
@@ -21,6 +22,7 @@ import time
 from unittest import mock
 
 from absl.testing import absltest
+import portpicker
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.orchestrator import lifecycle
 from tunix.dist_rl.orchestrator import worker_registry
@@ -74,6 +76,99 @@ class LifecycleDriverTest(absltest.TestCase):
     driver.shutdown()
 
     self.assertEqual(trainer.state, WorkerState.STOPPED)
+    self.assertFalse(trainer.last_stop_abort)
+
+  def test_shutdown_abort_forwards_abort_to_workers(self):
+    registry = worker_registry.WorkerRegistry()
+    trainer = mock_worker.MockWorker(worker_id="t0", roles={"trainer"})
+    remote_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+    remote_handle.submit.return_value = datatypes.Response()
+    registry.register(trainer)
+    registry.register_handle(
+        "r-remote", [datatypes.Role.ROLLOUT], remote_handle
+    )
+    driver = lifecycle.LifecycleDriver(registry)
+    driver.bring_up(_DUMMY_DATA)
+    remote_handle.submit.reset_mock()
+
+    driver.shutdown(abort=True)
+
+    self.assertEqual(trainer.state, WorkerState.STOPPED)
+    self.assertTrue(trainer.last_stop_abort)
+    remote_handle.submit.assert_called_once_with("stop", abort=True)
+
+  def test_shutdown_over_loopback_grpc_drains_and_latches_abort_flag(self):
+    for abort_flag in (False, True):
+      with self.subTest(abort=abort_flag):
+        port = portpicker.pick_unused_port()
+        worker = mock_worker.MockWorker(worker_id="t-grpc", roles={"trainer"})
+        server_ready = threading.Event()
+        result_box: dict[str, object] = {}
+
+        def _serve_node(
+            worker: mock_worker.MockWorker,
+            port: int,
+            server_ready: threading.Event,
+            result_box: dict[str, object],
+        ) -> None:
+          async def _server_main() -> bool:
+            stop_event = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            abort_requested = False
+
+            def _request_shutdown(abort: bool = False) -> None:
+              nonlocal abort_requested
+              if abort:
+                abort_requested = True
+              stop_event.set()
+
+            def _on_worker_stop(abort: bool = False) -> None:
+              loop.call_soon_threadsafe(_request_shutdown, abort)
+
+            worker.set_on_stop(_on_worker_stop)
+            server = remote_execution.GrpcRemoteExecutionServer(worker)
+            await server.start_serving_async(port)
+            server_ready.set()
+            try:
+              await stop_event.wait()
+            finally:
+              worker.set_on_stop(None)
+              await asyncio.sleep(0)
+              await server.stop_serving(grace=5.0)
+              worker.stop()
+            return abort_requested
+
+          try:
+            result_box["abort_requested"] = asyncio.run(_server_main())
+          except BaseException as exc:  # pylint: disable=broad-exception-caught
+            result_box["error"] = exc
+
+        server_thread = threading.Thread(
+            target=_serve_node,
+            args=(worker, port, server_ready, result_box),
+            daemon=True,
+        )
+        server_thread.start()
+        self.assertTrue(server_ready.wait(timeout=10.0))
+
+        registry = worker_registry.WorkerRegistry()
+        handle = remote_execution.GrpcRemoteActorHandle(
+            target_address=f"grpc://localhost:{port}",
+            rpc_timeout_s=10.0,
+        )
+        try:
+          registry.register_handle("t-grpc", [datatypes.Role.ACTOR], handle)
+          driver = lifecycle.LifecycleDriver(registry)
+          driver.bring_up(_DUMMY_DATA)
+          driver.shutdown(abort=abort_flag)
+        finally:
+          handle.sync_close()
+
+        server_thread.join(timeout=10.0)
+        self.assertFalse(server_thread.is_alive())
+        self.assertNotIn("error", result_box)
+        self.assertEqual(result_box.get("abort_requested"), abort_flag)
+        self.assertEqual(worker.state, WorkerState.STOPPED)
 
   def test_bring_up_runs_phase_by_phase(self):
     registry = worker_registry.WorkerRegistry()

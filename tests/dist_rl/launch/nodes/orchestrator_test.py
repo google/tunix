@@ -207,7 +207,8 @@ class _FakeCluster(cluster_orchestrator.ClusterOrchestrator):
     if self._run_error is not None:
       raise self._run_error
 
-  def shutdown(self) -> None:
+  def shutdown(self, *, abort: bool = False) -> None:
+    del abort  # Unused.
     # `ClusterOrchestrator.shutdown` without the `stop` RPCs to fake workers.
     self.calls.append("shutdown")
     _close_keeping_workers(self)

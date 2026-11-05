@@ -581,7 +581,8 @@ class _RemoteWorkerProxy(abstract_worker.Worker):
         "Lifecycle methods are not used in WeightSyncE2ETest."
     )
 
-  def stop(self) -> datatypes.Response:
+  def stop(self, *, abort: bool = False) -> datatypes.Response:
+    del abort
     raise NotImplementedError(
         "Lifecycle methods are not used in WeightSyncE2ETest."
     )

@@ -94,6 +94,8 @@ class TrainerWorker(abstract_worker.Worker):
     self._worker_id = worker_id
     self._state = WorkerState.PENDING
     self._last_error: str | None = None
+    # Set when `stop()` failed to close the trainer; later stops re-raise it.
+    self._stop_error: str | None = None
 
   def _policy_version(self) -> int:
     trainer = self._trainer
@@ -174,17 +176,51 @@ class TrainerWorker(abstract_worker.Worker):
     return self._response(started=True)
 
   @abstract_worker.offload_to_thread
-  def stop(self) -> datatypes.Response:
-    """Gracefully stops the worker."""
-    if self.state == WorkerState.STOPPED:
-      return self._response(stopped=True, already_stopped=True)
-    self._is_running = False
-    if self.state == WorkerState.READY:
-      self.state = WorkerState.DRAINING
-    if self._trainer is not None:
-      self._trainer.close()
-    self.state = WorkerState.STOPPED
-    return self._response(stopped=True)
+  def stop(self, *, abort: bool = False) -> datatypes.Response:
+    """Gracefully stops the worker, closing the trainer at most once.
+
+    If closing the trainer fails, the worker still ends up `STOPPED` so that
+    teardown never re-runs a partially failed close. The failure is kept instead
+    of dropped: it is recorded as the worker's last error, escalated to an abort
+    for the `set_on_stop` callback, and re-raised by every later `stop()` call,
+    so local node teardown still exits non-zero.
+
+    Args:
+      abort: Whether the stop is part of an abnormal cluster teardown; see
+        `Worker.stop`.
+
+    Returns:
+      A response with `stopped=True` and the requested `abort` flag, plus
+      `already_stopped=True` if the worker was already stopped.
+
+    Raises:
+      RuntimeError: If an earlier `stop()` failed to close the trainer.
+    """
+    try:
+      if self.state == WorkerState.STOPPED:
+        if self._stop_error is not None:
+          raise RuntimeError(
+              f"TrainerWorker {self._worker_id!r} failed to stop cleanly"
+              f" earlier: {self._stop_error}"
+          )
+        return self._response(
+            stopped=True, already_stopped=True, abort=bool(abort)
+        )
+      self._is_running = False
+      if self.state == WorkerState.READY:
+        self.state = WorkerState.DRAINING
+      try:
+        if self._trainer is not None:
+          self._trainer.close()
+      except Exception as exc:
+        self._stop_error = self._last_error = str(exc)
+        abort = True
+        raise
+      finally:
+        self.state = WorkerState.STOPPED
+      return self._response(stopped=True, abort=bool(abort))
+    finally:
+      self._notify_stopped(abort)
 
   def info(self) -> datatypes.WorkerInfo:
     trainer = self._trainer

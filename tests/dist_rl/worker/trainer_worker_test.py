@@ -806,6 +806,51 @@ class TrainerWorkerExecutionContextTest(absltest.TestCase):
 
     self.assertEqual(self.events, ["enter_ctx", "save_failed", "exit_ctx"])
 
+  def test_repeated_stop_closes_trainer_once(self):
+    self.worker.initialize()
+    close_calls = []
+    self.fake_trainer.close = lambda: close_calls.append(1)
+
+    first = self.worker.stop()
+    second = self.worker.stop()
+
+    self.assertEqual(self.worker.state, datatypes.WorkerState.STOPPED)
+    self.assertNotIn("already_stopped", first.metadata)
+    self.assertTrue(second.metadata["already_stopped"])
+    self.assertEqual(close_calls, [1])
+
+  def test_stop_keeps_failure_signal_without_reclosing_if_close_raises(self):
+    self.worker.initialize()
+    close_calls = []
+
+    def _failing_close():
+      close_calls.append(1)
+      raise RuntimeError("checkpoint flush failed")
+
+    self.fake_trainer.close = _failing_close
+    observed_aborts = []
+    self.worker.set_on_stop(observed_aborts.append)
+
+    # A clean (non-abort) stop whose close fails is escalated to an abort.
+    with self.assertRaisesRegex(RuntimeError, "checkpoint flush failed"):
+      self.worker.stop()
+
+    self.assertEqual(self.worker.state, datatypes.WorkerState.STOPPED)
+    self.assertEqual(close_calls, [1])
+    self.assertEqual(observed_aborts, [True])
+    self.assertEqual(
+        self.worker.heartbeat().last_error, "checkpoint flush failed"
+    )
+
+    # Local teardown (`worker_service.stop()`) does not re-close the trainer,
+    # but still surfaces the earlier failure with the abort flag latched.
+    with self.assertRaisesRegex(
+        RuntimeError, "failed to stop cleanly earlier: checkpoint flush failed"
+    ):
+      self.worker.stop()
+    self.assertEqual(close_calls, [1])
+    self.assertEqual(observed_aborts, [True, True])
+
 
 if __name__ == "__main__":
   absltest.main()

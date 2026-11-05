@@ -128,9 +128,22 @@ class InferenceWorker(abstract_worker.Worker):
     return datatypes.Response()
 
   @abstract_worker.offload_to_thread
-  def stop(self) -> datatypes.Response:
-    self.state = WorkerState.STOPPED
-    return datatypes.Response()
+  def stop(self, *, abort: bool = False) -> datatypes.Response:
+    try:
+      if self.state == WorkerState.STOPPED:
+        return datatypes.Response(
+            metadata={
+                "stopped": True,
+                "already_stopped": True,
+                "abort": bool(abort),
+            }
+        )
+      self.state = WorkerState.STOPPED
+      return datatypes.Response(
+          metadata={"stopped": True, "abort": bool(abort)}
+      )
+    finally:
+      self._notify_stopped(abort)
 
   def heartbeat(self) -> datatypes.HealthReport:
     return datatypes.HealthReport(state=self.state)

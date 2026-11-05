@@ -47,7 +47,8 @@ class SimulatedRolloutWorker(abstract_worker.Worker):
   def start(self) -> datatypes.Response:
     return datatypes.Response()
 
-  def stop(self) -> datatypes.Response:
+  def stop(self, *, abort: bool = False) -> datatypes.Response:
+    del abort
     return datatypes.Response()
 
   def generate(
@@ -114,7 +115,8 @@ class SimulatedTrainerWorker(abstract_worker.Worker):
   def start(self) -> datatypes.Response:
     return datatypes.Response()
 
-  def stop(self) -> datatypes.Response:
+  def stop(self, *, abort: bool = False) -> datatypes.Response:
+    del abort
     return datatypes.Response()
 
   def fwd_bwd(
