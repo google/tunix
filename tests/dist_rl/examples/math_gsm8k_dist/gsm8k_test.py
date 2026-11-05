@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for the GSM8K example: components, `gsm8k.yaml`, and task records."""
+
 from collections.abc import Mapping, Sequence
 import pathlib
 from unittest import mock
+
 from absl.testing import absltest
 import numpy as np
 import tensorflow_datasets as tfds
@@ -22,8 +25,19 @@ from tunix.dist_rl.common import registry
 from tunix.dist_rl.examples.math_gsm8k_dist import gsm8k
 from tunix.dist_rl.examples.math_gsm8k_dist import gsm8k_rewards
 from tunix.dist_rl.launch.common import resolve_config
+from tunix.dist_rl.launch.nodes import orchestrator
+from tunix.dist_rl.weight_sync import weight_sync_coordinator
 
+_GSM8K_YAML = pathlib.Path(gsm8k.__file__).parent / "gsm8k.yaml"
+_GSM8K_MODULE = "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
 _REWARDS_MODULE = "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k_rewards"
+
+
+def _hp(*overrides: str) -> resolve_config.DistHyperParameters:
+  """Resolves `gsm8k.yaml` on top of `base_dist_config.yaml`."""
+  return resolve_config.initialize(
+      [f"override_config_file={_GSM8K_YAML}", *overrides]
+  )
 
 
 class _FakeMapDataSource:
@@ -251,83 +265,99 @@ class GSM8KTest(absltest.TestCase):
     )
     self.assertEqual(rewards, [1.0, 0.1, 0.5, 0.0])
 
-  def test_launchers_default_chat_parser_to_raw(self):
-    base_dir = pathlib.Path(gsm8k.__file__).parent
-    launcher = (base_dir / "launcher.sh").read_text(encoding="utf-8")
-    self.assertIn("CHAT_PARSER=${CHAT_PARSER:-raw}", launcher)
-    self.assertIn('--chat_parser="$CHAT_PARSER"', launcher)
 
-    k8s_launcher = (base_dir / "k8s_launcher.sh").read_text(encoding="utf-8")
-    self.assertIn("export CHAT_PARSER=${CHAT_PARSER:-raw}", k8s_launcher)
-    self.assertIn("--chat_parser=${CHAT_PARSER}", k8s_launcher)
+class ExampleConfigTest(absltest.TestCase):
+  """`gsm8k.yaml` resolved on top of `base_dist_config.yaml`."""
 
-  def test_launchers_export_trajectory_store_flags(self):
-    base_dir = pathlib.Path(gsm8k.__file__).parent
-    for script_name in ("launcher.sh", "k8s_launcher.sh"):
-      content = (base_dir / script_name).read_text(encoding="utf-8")
-      self.assertIn("RUN_ID=", content)
-      self.assertIn("--enable_trajectory_store=", content)
-      self.assertIn("--trajectory_store_backend=", content)
-      self.assertIn("--trajectory_store_dir=", content)
-      self.assertIn("--run_id=", content)
-
-  def test_launchers_export_otel_across_all_roles(self):
-    base_dir = pathlib.Path(gsm8k.__file__).parent
-    for script_name in ("launcher.sh", "k8s_launcher.sh"):
-      content = (base_dir / script_name).read_text(encoding="utf-8")
-      self.assertIn(
-          "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}",
-          content,
-      )
-      self.assertIn(
-          "OTEL_METRIC_EXPORT_INTERVAL=${OTEL_METRIC_EXPORT_INTERVAL:-}",
-          content,
-      )
-      self.assertNotIn("OTEL_SERVICE_NAME", content)
-
-    local_content = (base_dir / "launcher.sh").read_text(encoding="utf-8")
+  def test_gsm8k_yaml(self):
+    hp = _hp()
+    config = hp.config
+    self.assertEqual(config["batch_size"], 4)
+    self.assertEqual(config["rl_training_config"]["mini_batch_size"], 2)
+    self.assertEqual(config["rl_training_config"]["max_steps"], 1)
+    grpo = config["agentic_grpo_config"]
+    self.assertEqual(grpo["num_generations"], 8)
+    self.assertEqual(grpo["beta"], 0.0)
+    self.assertEqual(grpo["max_turns"], 1)
+    self.assertEqual(grpo["reward_mode"], "env")
+    self.assertTrue(grpo["use_rollout_logps"])
+    self.assertEqual(config["reward_functions"], [])
+    self.assertEqual(config["chat_parser_config"]["type"], "raw")
     self.assertEqual(
-        local_content.count(
-            'export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT"'
-        ),
-        4,
+        config["tokenizer_config"]["tokenizer_path"], "Qwen/Qwen3-1.7B"
     )
     self.assertEqual(
-        local_content.count(
-            'export OTEL_METRIC_EXPORT_INTERVAL="$OTEL_METRIC_EXPORT_INTERVAL"'
-        ),
-        4,
+        config["actor_model_config"]["model_id"], "Qwen/Qwen3-1.7B"
     )
+    self.assertEqual(config["rollout_config"]["max_prompt_length"], 1024)
+    self.assertEqual(config["rollout_config"]["total_generation_steps"], 1024)
+    self.assertEqual(config["data_module"], _GSM8K_MODULE)
+    self.assertEqual(config["task_name"], "gsm8k")
+    self.assertEqual(
+        hp.config_mapping("data_config"),
+        {"split": "train", "shuffle": True, "seed": 42},
+    )
+    self.assertEqual(config["env_class_path"], gsm8k.GSM8K_ENV_NAME)
+    self.assertEqual(config["agent_class_path"], gsm8k.GSM8K_AGENT_NAME)
+    optimizer = config["rl_training_config"]["actor_optimizer_config"]
+    self.assertEqual(optimizer["opt_chain_type"], "clip_by_global_norm")
+    self.assertEqual(optimizer["chain_kwargs"], {"max_norm": 1.0})
+    self.assertEqual(optimizer["learning_rate"], 2.0e-7)
+    self.assertEqual(hp.mesh_axes("actor_model_config")["tp"], 2)
+    self.assertEqual(hp.mesh_axes("rollout_model_config")["tp"], 2)
+    cluster = config["cluster_config"]
+    self.assertEqual(cluster["target"], "local")
+    self.assertEqual(
+        cluster["orchestrator_main"],
+        "tunix.dist_rl.launch.nodes.orchestrator.main",
+    )
+    self.assertEqual(cluster["registry_module"], _GSM8K_MODULE)
+    self.assertTrue(cluster["artifact_root"].endswith("artifacts/math_gsm8k"))
+    self.assertEqual(cluster["local"]["trainer_tpu_chips"], "0,1")
+    self.assertEqual(cluster["local"]["rollout_tpu_chips"], "2,3")
+    # `beta == 0.0` disables the reference inference worker.
+    self.assertFalse(cluster["run_inference_node"])
+    traj_store = config["trajectory_store_config"]
+    self.assertFalse(traj_store["enable"])
+    self.assertEqual(traj_store["backend"], "file")
 
-    k8s_content = (base_dir / "k8s_launcher.sh").read_text(encoding="utf-8")
-    self.assertIn("export OTEL_ID=${OTEL_ID:-$USER-otel}", k8s_content)
-    self.assertIn("export OTEL_PORT=${OTEL_PORT:-4317}", k8s_content)
-    self.assertIn("jobset.otel.yaml", k8s_content)
-    self.assertIn("otel-collector.yaml", k8s_content)
-    self.assertIn("start_otel()", k8s_content)
-    self.assertIn("stop_otel()", k8s_content)
-    self.assertEqual(
-        k8s_content.count(
-            "${OTEL_EXPORTER_OTLP_ENDPOINT:+"
-            'OTEL_EXPORTER_OTLP_ENDPOINT=\\"${OTEL_EXPORTER_OTLP_ENDPOINT}\\"}'
-        )
-        + k8s_content.count(
-            "${OTEL_EXPORTER_OTLP_ENDPOINT:+"
-            'OTEL_EXPORTER_OTLP_ENDPOINT=\\"${OTEL_EXPORTER_OTLP_ENDPOINT}\\" }'
-        ),
-        3,
+  def test_weight_sync_timeouts(self):
+    # Same values as `run_gsm8k_dist_grpo.py`: the coordinator's default
+    # `PhaseTimeouts` and `rpc_timeout_s=1800`.
+    phase_timeouts, rpc_timeout_s = orchestrator.resolve_weight_sync_timeouts(
+        _hp()
     )
-    self.assertEqual(
-        k8s_content.count(
-            "${OTEL_METRIC_EXPORT_INTERVAL:+"
-            'OTEL_METRIC_EXPORT_INTERVAL=\\"${OTEL_METRIC_EXPORT_INTERVAL}\\"}'
-        )
-        + k8s_content.count(
-            "${OTEL_METRIC_EXPORT_INTERVAL:+"
-            'OTEL_METRIC_EXPORT_INTERVAL=\\"${OTEL_METRIC_EXPORT_INTERVAL}\\" }'
-        ),
-        3,
-    )
+    self.assertEqual(phase_timeouts, weight_sync_coordinator.PhaseTimeouts())
+    self.assertEqual(rpc_timeout_s, 1800.0)
+
+  def test_grpo_config_matches_reference_grpo_defaults(self):
+    config = orchestrator.build_grpo_config(_hp())
+    self.assertEqual(config.num_generations, 8)
+    self.assertEqual(config.beta, 0.0)
+    self.assertEqual(config.epsilon, 0.2)
+    # `GRPOConfig` resolves an unset `epsilon_high` to `epsilon` (symmetric).
+    self.assertEqual(config.epsilon_high, config.epsilon)
+    self.assertEqual(config.kl_loss_mode, "kl")
+    self.assertEqual(config.loss_algo, "grpo")
+    self.assertEqual(config.advantage_estimator, "grpo")
+    self.assertIsNone(config.sampler_is)
+    self.assertTrue(config.use_rollout_logps)
+    self.assertEqual(config.reward_mode, "env")
+
+  def test_batch_config_and_generation_args(self):
+    batch_config = orchestrator.build_batch_config(_hp(), pad_id=3, eos_id=7)
+    self.assertEqual(batch_config.pad_id, 3)
+    self.assertIsNone(batch_config.num_data_shards)
+    self.assertEqual(batch_config.segment_alignment_boundary, 1)
+    generation_args = orchestrator.build_generation_args(_hp())
+    self.assertEqual(generation_args.temperature, 1.0)
+    self.assertEqual(generation_args.top_k, 0)
+
+  def test_metrics_logging_options(self):
+    options = orchestrator.build_metrics_logging_options(_hp())
+    self.assertEqual(options.log_dir, "/tmp/trellis_gsm8k")
+    self.assertEqual(options.project_name, "trellis-gsm8k")
+    self.assertEqual(options.flush_every_n_steps, 1)
 
 
 class TaskRecordsTest(absltest.TestCase):
@@ -359,6 +389,43 @@ class TaskRecordsTest(absltest.TestCase):
     self.assertCountEqual(
         [records[0], records[1]], [_expected_record(0), _expected_record(1)]
     )
+
+  def test_unknown_data_config_key_fails_loud(self):
+    hp = _hp("data_config.data_directory=/tmp/data")
+    with self.assertRaisesRegex(TypeError, "data_directory"):
+      orchestrator.load_prompt_items(hp)
+
+  def test_orchestrator_loads_gsm8k_prompt_items(self):
+    with mock.patch.object(
+        tfds, "data_source", return_value=_tfds_examples()
+    ) as data_source:
+      prompt_items = orchestrator.load_prompt_items(_hp())
+    # `gsm8k.yaml` reads the `train` split with no `data_dir`: TFDS uses its
+    # default.
+    self.assertEqual(data_source.call_args.kwargs["split"], "train")
+    self.assertIsNone(data_source.call_args.kwargs["data_dir"])
+    expected = []
+    for index in range(2):
+      prompt = gsm8k.build_prompt(f"Q{index}")
+      expected.append({
+          "prompt": prompt,
+          "task_name": "gsm8k",
+          "max_turns": 1,
+          "metadata": {
+              "answer": str(index),
+              "env_config": {
+                  "prompt": prompt,
+                  "question": f"Q{index}",
+                  "answer": str(index),
+              },
+              "episode_timeout": 600.0,
+              "overlong_filter": False,
+          },
+      })
+    # `gsm8k.yaml` shuffles, so the two records come in either order.
+    self.assertCountEqual([prompt_items[0], prompt_items[1]], expected)
+    # The records repeat (reshuffled) for as many steps as the run needs.
+    self.assertCountEqual([prompt_items[2], prompt_items[3]], expected)
 
   def test_rollout_env_builds_from_env_config(self):
     with mock.patch.object(tfds, "data_source", return_value=_tfds_examples()):
@@ -396,6 +463,20 @@ class RewardFunctionsTest(absltest.TestCase):
     # The name is the per-function reward metric: `rewards/train/reward_fn`,
     # as with the legacy launcher's reward function.
     self.assertEqual(reward_fns[0].__name__, "reward_fn")
+
+  def test_gsm8k_yaml_scores_on_the_orchestrator(self):
+    hp = _hp(
+        "agentic_grpo_config.reward_mode=reward_fn",
+        f"reward_functions=[{_REWARDS_MODULE}]",
+    )
+    self.assertEqual(hp.obtain_reward_fn(), [gsm8k_rewards.reward_fn])
+    self.assertEqual(
+        orchestrator.build_grpo_config(hp).reward_mode, "reward_fn"
+    )
+
+  def test_reward_fn_mode_needs_reward_functions(self):
+    with self.assertRaisesRegex(ValueError, "reward_functions"):
+      _hp("agentic_grpo_config.reward_mode=reward_fn")
 
   def test_reward_fn_matches_env_reward(self):
     completions = [

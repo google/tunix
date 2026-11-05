@@ -400,11 +400,15 @@ jobs:
           print("TPU runtime preflight check passed successfully.")
           PY
 
+      # `LOG_ROOT` sends each recipe's trainer / rollout / inference /
+      # orchestrator logs (`launch/common/local.sh`) to a per-backend directory
+      # that the failure step below prints.
       - name: Run GSM8K Distributed RL Smoke Test (Tunix Backend + Raiden Sync)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          ./tunix/dist_rl/examples/recipes/ci_smoke_gsm8k_qwen3_0p6b.sh
+          LOG_ROOT="${GITHUB_WORKSPACE}/dist_rl_logs/tunix" \
+            ./tunix/dist_rl/examples/recipes/ci_smoke_gsm8k_qwen3_0p6b.sh
 
       - name: Install MaxText dependencies
         run: |
@@ -416,16 +420,17 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          ./tunix/dist_rl/examples/recipes/ci_smoke_gsm8k_qwen3_0p6b_maxtext.sh
+          LOG_ROOT="${GITHUB_WORKSPACE}/dist_rl_logs/maxtext" \
+            ./tunix/dist_rl/examples/recipes/ci_smoke_gsm8k_qwen3_0p6b_maxtext.sh
 
       # Fires for any failure in this job, not just the smoke test above; the
       # `|| true` guards make that harmless when the logs do not exist.
       - name: Print logs on failure
         if: ${{ failure() }}
         run: |
-          echo "==================== TRAINER LOG ===================="
-          cat tunix/dist_rl/examples/math_gsm8k_dist/trainer.log || true
-          echo "==================== ROLLOUT LOG ===================="
-          cat tunix/dist_rl/examples/math_gsm8k_dist/rollout.log || true
-          echo "==================== ORCHESTRATOR LOG ===================="
-          cat tunix/dist_rl/examples/math_gsm8k_dist/orchestrator.log || true
+          for backend in tunix maxtext; do
+            for node in trainer rollout inference orchestrator; do
+              echo "==================== ${backend} ${node} LOG ===================="
+              cat "${GITHUB_WORKSPACE}/dist_rl_logs/${backend}/${node}.log" || true
+            done
+          done

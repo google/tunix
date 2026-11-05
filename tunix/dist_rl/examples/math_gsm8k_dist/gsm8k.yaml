@@ -1,0 +1,134 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Example defaults for the distributed GSM8K GRPO recipe (Qwen3-1.7B).
+#
+# Layered on top of `launch/common/base_dist_config.yaml`; cluster, mesh, and
+# chip placement default to `base_dist_config.yaml` (target local) unless set
+# below; `k8s_launcher.sh` adds the GKE overrides as `section.key=value`
+# arguments. Later `override_config_file=` arguments and `section.key=value`
+# overrides win.
+
+model_config:
+  model_name: "Qwen3-1.7B"
+  model_source: "huggingface"
+  model_id: "Qwen/Qwen3-1.7B"
+  dtype: "float32"
+  load_dtype: "float32"
+
+tokenizer_config:
+  # A Hugging Face hub id requires `HF_TOKEN`.
+  tokenizer_path: "Qwen/Qwen3-1.7B"
+
+chat_parser_config:
+  type: "raw"
+  enable_thinking: false
+
+rollout_engine: "inprocess_vllm"
+rollout_config:
+  max_prompt_length: 1024
+  total_generation_steps: 1024
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  eos_tokens: "151645,151643"
+  return_logprobs: true
+
+weight_sync_config:
+  mode: "none"
+  use_weight_converter: true
+  verify_weights: false
+  in_flight_weight_updates: false
+
+# The orchestrator loads the task records with
+# `gsm8k.create_dataset(**data_config)`.
+data_module: "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
+task_name: "gsm8k"
+data_config:
+  split: "train"
+  shuffle: true
+  seed: 42
+  # No `data_dir`: TFDS uses `TFDS_DATA_DIR`, or `~/tensorflow_datasets`.
+
+batch_size: 4
+rl_training_config:
+  mini_batch_size: 2
+  train_micro_batch_size: 1
+  max_steps: 1
+  eval_every_n_steps: 50
+  actor_optimizer_config:
+    opt_type: "adamw"
+    learning_rate: 2.0e-7
+    schedule_type: "warmup_cosine_decay_schedule"
+    init_value: 0.0
+    end_value: 0.0
+    decay_steps: 500
+    b1: 0.9
+    b2: 0.999
+    eps: 1.0e-8
+    weight_decay: 0.01
+    opt_chain_type: "clip_by_global_norm"
+    chain_kwargs:
+      max_norm: 1.0
+  checkpointing_options:
+    save_interval_steps: 1
+    max_to_keep: 10
+  metrics_logging_options:
+    project_name: "trellis-gsm8k"
+    log_dir: "/tmp/trellis_gsm8k"
+    flush_every_n_steps: 1
+
+agentic_grpo_config:
+  num_generations: 8
+  num_iterations: 1
+  beta: 0.0
+  epsilon: 0.2
+  # GSM8K uses the canonical `GRPOConfig` loss defaults: symmetric clipping,
+  # "kl" penalty, and no sampler importance correction.
+  epsilon_high: null
+  loss_algo: "grpo"
+  loss_agg_mode: "sequence-mean-token-mean"
+  kl_loss_mode: "kl"
+  advantage_estimator: "grpo"
+  sampler_is: null
+  sampler_is_threshold: 2.0
+  # GSM8K is single-turn.
+  max_turns: 1
+  # "env": `GSM8KEnv` scores each completion on the rollout worker. To score
+  # on the orchestrator instead, set `reward_mode: "reward_fn"` and
+  # `reward_functions: ["tunix.dist_rl.examples.math_gsm8k_dist.gsm8k_rewards"]`
+  # (same reward). Don't list that module with "env", which adds reward
+  # functions to the environment's reward.
+  reward_mode: "env"
+  off_policy_steps: 0
+  trajectory_group_order: "trajectory_completion"
+  use_rollout_logps: true
+
+env_class_path: "gsm8kenv"
+agent_class_path: "gsm8kagent"
+
+cluster_config:
+  # Imported by the rollout node to register `GSM8KEnv` / `GSM8KAgent`.
+  registry_module: "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
+  artifact_root: "artifacts/math_gsm8k"
+  # Runs on `target: local` with the default single-host placement from
+  # `base_dist_config.yaml` (trainer chips 0,1; rollout chips 2,3). Use
+  # `k8s_launcher.sh` for GKE.
+  #
+  # `agentic_grpo_config.beta: 0.0` disables the KL penalty, so no reference
+  # inference worker is started by default. When `beta > 0`, `local.sh` fails
+  # loud until one is available: set
+  # `cluster_config.local.inference_tpu_chips=<chips>` (local inference node),
+  # or set `cluster_config.run_inference_node=false` to use a reference worker
+  # started separately (it registers through discovery).
