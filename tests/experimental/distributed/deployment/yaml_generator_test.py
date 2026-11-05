@@ -838,6 +838,21 @@ class FailFastRenderTest(parameterized.TestCase):
     self.assertEqual(result.returncode, expected, result.stdout)
 
   @parameterized.named_parameters(
+      ("tpu", "jobset.tpu.yaml", "tpuv5:2x2x1"),
+      ("mcjax", "jobset.mcjax.yaml", "tpuv5p:2x2x4"),
+      ("mcjax_ray", "jobset.mcjax.ray.yaml", "tpuv5p:2x2x4"),
+      ("lws_mcjax_ray", "leaderworkerset.mcjax.ray.yaml", "tpuv5p:2x2x4"),
+      ("pathways", "jobset.pathways.yaml", "tpuv5:4x4x4"),
+      ("pathways_397b", "jobset.pathways.qwen3.5-397b.yaml", "tpuv5p:4x8x8"),
+  )
+  def test_tpu_templates_disable_and_cleanup_core_dumps(
+      self, template_name, tpu_slice
+  ):
+    rendered = _render(template_name, tpu_slice)
+    self.assertIn("ulimit -c 0", rendered)
+    self.assertIn("rm -f /tmp/core*", rendered)
+
+  @parameterized.named_parameters(
       ("deepswe_dist", "deepswe_dist", "deepswe"),
       ("math_gsm8k_dist", "math_gsm8k_dist", "math"),
   )
