@@ -205,42 +205,10 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
       k8s["otel_id"] = f"{user}-otel"
 
 
-# TODO(noghabi): Deploy a reference inference worker from `k8s.sh` (a JobSet
-# on its own TPU slice, like the trainer's) and remove this check, so k8s runs
-# can use the KL penalty. `nodes/inference.py` and
-# `cluster_config.k8s.inference_id` already support k8s.
-def _validate_k8s_reference_worker(hp: cli_config.HyperParameters) -> None:
-  """Rejects a reference inference worker on `cluster_config.target: k8s`.
-
-  `k8s.sh` does not deploy one yet (see the TODO above): it starts the
-  orchestrator, trainer, and rollout only, so the orchestrator would wait for a
-  reference worker that never registers.
-
-  Args:
-    hp: Loaded configuration, with `cluster_config.run_inference_node` resolved.
-
-  Raises:
-    ValueError: If `target` is "k8s" and `run_inference_node` is true.
-  """
-  cluster = hp.config_mapping("cluster_config")
-  if cluster["target"] == "k8s" and cluster["run_inference_node"]:
-    beta = hp.config_mapping("agentic_grpo_config")["beta"]
-    raise ValueError(
-        "cluster_config.target=k8s does not deploy a reference inference"
-        " worker yet (k8s.sh starts the orchestrator, trainer, and rollout"
-        " only), but cluster_config.run_inference_node is true"
-        f" (agentic_grpo_config.beta={beta}). Set agentic_grpo_config.beta=0.0"
-        " to train without the KL penalty, or set"
-        " cluster_config.run_inference_node=false and start a reference worker"
-        " that registers with the orchestrator through discovery."
-    )
-
-
 def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   """Validates cross-field invariants across trainer and rollout configs."""
   # TODO(noghabi): Check which of these checks can be consolidated with the
   # `tunix.cli` validations or left to the constructors that consume them.
-  _validate_k8s_reference_worker(hp)
   batch_size = int(hp.config["batch_size"])
   rl_train = hp.config_mapping("rl_training_config")
   mini_batch_size = int(rl_train["mini_batch_size"])

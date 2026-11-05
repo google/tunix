@@ -368,11 +368,29 @@ if ! is_true "${DRY_RUN}"; then
   fi
 fi
 
-# The collector runs its own image.
-if [[ "${COMMAND}" != "otel" && "${COMMAND}" != "stop-otel" && -z "${K8S_TUNIX_IMAGE}" ]]; then
-  echo "Error: cluster_config.k8s.tunix_image is empty." >&2
-  exit 1
-fi
+# Checks for the commands that start nodes: `stop` and `stop-otel` only delete
+# resources, and the collector (`otel`) runs its own image.
+#
+# TODO(noghabi): Deploy a reference inference worker from `k8s.sh` (a JobSet
+# on its own TPU slice, like the trainer's) and remove the
+# `RUN_INFERENCE_NODE` check, so k8s runs can use the KL penalty.
+# `nodes/inference.py` and `cluster_config.k8s.inference_id` already support
+# k8s.
+case "${COMMAND}" in
+  stop|otel|stop-otel)
+    ;;
+  *)
+    if [[ -z "${K8S_TUNIX_IMAGE}" ]]; then
+      echo "Error: cluster_config.k8s.tunix_image is empty." >&2
+      exit 1
+    fi
+    # The orchestrator would wait for a reference worker that never registers.
+    if is_true "${RUN_INFERENCE_NODE}"; then
+      echo "Error: cluster_config.target=k8s does not deploy a reference inference worker yet (k8s.sh starts the orchestrator, trainer, and rollout only), but cluster_config.run_inference_node is true (it defaults to agentic_grpo_config.beta > 0). Set agentic_grpo_config.beta=0.0 to train without the KL penalty, or set cluster_config.run_inference_node=false and start a reference worker that registers with the orchestrator through discovery." >&2
+      exit 1
+    fi
+    ;;
+esac
 
 case "${COMMAND}" in
   start)

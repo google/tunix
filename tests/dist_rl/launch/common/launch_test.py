@@ -325,24 +325,22 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertIn("cluster_config.k8s.tunix_image is empty", res.stderr)
 
   def test_k8s_rejects_reference_worker(self):
+    # The default beta (0.04) enables the reference worker, which k8s.sh does
+    # not deploy.
     res = self._run_launch([
+        "start",
         "--dry-run",
         "cluster_config.target=k8s",
         "cluster_config.k8s.tunix_image=test-image",
-        "agentic_grpo_config.beta=0.04",
     ])
     self.assertNotEqual(res.returncode, 0)
     self.assertIn("does not deploy a reference inference worker", res.stderr)
     self.assertNotIn("apiVersion:", res.stdout)
 
   def test_k8s_stop_command_only_deletes_resources(self):
-    res = self._run_launch([
-        "stop",
-        "--dry-run",
-        "cluster_config.target=k8s",
-        "cluster_config.k8s.tunix_image=test-image",
-        "agentic_grpo_config.beta=0.0",
-    ])
+    # Deleting the jobs needs no node image, and the default beta's reference
+    # worker (which k8s.sh does not deploy) is no reason to fail.
+    res = self._run_launch(["stop", "--dry-run", "cluster_config.target=k8s"])
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertIn("kubectl delete jobset testuser-orch -n default", res.stdout)
     self.assertNotIn("apiVersion:", res.stdout)
@@ -395,8 +393,10 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertNotIn("OTEL_", res.stdout)
 
   def test_otel_commands_deploy_and_delete_the_collector(self):
-    k8s = ["cluster_config.target=k8s", "agentic_grpo_config.beta=0.0"]
-    # The collector needs no `cluster_config.k8s.tunix_image`.
+    # The collector needs no `cluster_config.k8s.tunix_image`, and the default
+    # beta's reference worker (which k8s.sh does not deploy) is no reason to
+    # fail.
+    k8s = ["cluster_config.target=k8s"]
     res = self._run_launch(
         ["otel", "--dry-run", *k8s, "cluster_config.ports.otel=4318"]
     )
