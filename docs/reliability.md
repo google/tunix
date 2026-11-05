@@ -31,8 +31,10 @@ defined inside `checkpoint_options`:
     seconds). See Orbax v1 [`save_decision_policies.py`](https://github.com/google/orbax/blob/main/checkpoint/orbax/checkpoint/experimental/v1/_src/training/save_decision_policies.py)
     for the complete interface contracts.
 *   **Preservation Policies**: Sets specifications regarding tracking
-    checkpoints over bounded timelines (e.g., `LatestN`). The default is
-    `LatestN(n=3)` (keeps the latest 3 checkpoints). See Orbax v1
+    checkpoints over bounded timelines (e.g., `LatestN`, `EveryNSteps`). The
+    default is `LatestN(n=3)` (keeps the latest 3 checkpoints). You can use
+    `keep_every_nth_step` in parallel with `max_to_keep` to retain exact
+    performance steps indefinitely. See Orbax v1
     [`preservation_policies.py`](https://github.com/google/orbax/blob/main/checkpoint/orbax/checkpoint/experimental/v1/_src/training/preservation_policies.py)
     for the complete interface contracts.
 *   **Step Name Format**: Defines the representation of directory names for step
