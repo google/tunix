@@ -390,7 +390,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       tokenizer.eos_token_id if tokenizer.eos_token_id is not None else pad_id
   )
 
-  dataset = frozenlake.create_dataset(
+  dataset = frozenlake.generate_entries(
       size=args.dataset_size,
       seed=args.seed,
       shuffle_seed=args.seed if args.shuffle else None,

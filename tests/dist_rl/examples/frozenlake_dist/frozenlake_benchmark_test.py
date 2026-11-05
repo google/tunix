@@ -247,7 +247,7 @@ class FrozenLakeBenchmarkTest(unittest.TestCase):
         function_calls(workload.MODULE + ".agentic_main"),
     )
     self.assertLessEqual(
-        {"frozenlake.create_dataset", "runtime.record_dataset"},
+        {"frozenlake.generate_entries", "runtime.record_dataset"},
         function_calls(workload.MODULE + ".create_dataset"),
     )
 

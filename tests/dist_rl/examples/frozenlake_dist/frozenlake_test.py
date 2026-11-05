@@ -16,20 +16,13 @@
 
 import os
 from pathlib import Path
-import sys
 import unittest
 from unittest import mock
 
 from absl.testing import absltest
 
-if "pytest" in sys.modules:
-  try:
-    import pytest  # pylint: disable=g-import-not-at-top
-
-    pytest.importorskip("gymnasium")
-  except ImportError:
-    pass
-
+# `gymnasium` comes with the optional `frozenlake` extra. pytest also reports
+# this module-level `unittest.SkipTest` as a skip.
 try:
   import gymnasium  # pylint: disable=unused-import,g-import-not-at-top
 except ImportError:
@@ -40,12 +33,33 @@ import datasets
 from tunix.dist_rl.common import registry
 from tunix.dist_rl.examples.frozenlake_dist import frozenlake
 from tunix.dist_rl.examples.frozenlake_dist import run_frozenlake_dist
+from tunix.dist_rl.launch.common import resolve_config
+from tunix.dist_rl.launch.nodes import orchestrator
 from tunix.models import automodel
 from examples.frozenlake import agent as frozenlake_agent
 from examples.frozenlake import data as frozenlake_data
 from examples.frozenlake import env as frozenlake_env
 
 # pylint: enable=g-import-not-at-top
+
+_DATA_MODULE = "tunix.dist_rl.examples.frozenlake_dist.frozenlake"
+
+
+def _orchestrator_config(
+    *overrides: str,
+) -> resolve_config.DistHyperParameters:
+  """Returns a config that loads 12 of 32 generated maps from this module."""
+  return resolve_config.initialize([
+      f"data_module={_DATA_MODULE}",
+      "task_name=frozenlake",
+      "data_config.size=32",
+      "data_config.limit=12",
+      "agentic_grpo_config.beta=0.0",
+      "agentic_grpo_config.max_turns=8",
+      # A local path needs no `HF_TOKEN`; nothing loads the tokenizer here.
+      "tokenizer_config.tokenizer_path=/unused/tokenizer",
+      *overrides,
+  ])
 
 
 class FrozenLakeDistTest(absltest.TestCase):
@@ -72,8 +86,8 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertNotIn("class FrozenLakeEnv", source)
 
   def test_dataset_is_deterministic_and_uses_reference_ranges(self):
-    first = frozenlake.create_dataset(size=5, seed=123)
-    second = frozenlake.create_dataset(size=5, seed=123)
+    first = frozenlake.generate_entries(size=5, seed=123)
+    second = frozenlake.generate_entries(size=5, seed=123)
 
     self.assertEqual(first, second)
     self.assertLen(first, 5)
@@ -83,7 +97,7 @@ class FrozenLakeDistTest(absltest.TestCase):
       self.assertGreaterEqual(entry["p"], 0.6)
       self.assertLess(entry["p"], 0.85)
 
-    custom_range = frozenlake.create_dataset(
+    custom_range = frozenlake.generate_entries(
         size=10, seed=123, grid_size_range=(3, 5)
     )
     for entry in custom_range:
@@ -103,7 +117,7 @@ class FrozenLakeDistTest(absltest.TestCase):
         datasets.Dataset.from_list(reference).shuffle(seed=42).to_list()[:12]
     )
 
-    actual = frozenlake.create_dataset(
+    actual = frozenlake.generate_entries(
         size=32, seed=42, shuffle_seed=42, limit=12
     )
 
@@ -493,6 +507,107 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertIn("COMPUTE_LOGPS_MICRO_BATCH_SIZE:-2", launcher)
     self.assertIn("COMPUTE_LOGPS_CHUNK_SIZE:-2048", launcher)
     self.assertIn("ROLLOUT_MAX_CONCURRENCY:-512", launcher)
+    # TODO(noghabi): Reconcile `VLLM_MAX_NUM_SEQS=32` and
+    # `VLLM_MAX_NUM_BATCHED_TOKENS=8192` between `run_gemma4_e2b.sh`,
+    # `README.md`, and the shared-orchestrator Gemma4 YAML config.
+
+
+class TaskRecordsTest(absltest.TestCase):
+  """Tests `create_dataset` records for the orchestrator and rollout worker."""
+
+  def test_create_dataset_wraps_the_generated_entries_in_order(self):
+    for shuffle, shuffle_seed in ((True, 42), (False, None)):
+      with self.subTest(shuffle=shuffle):
+        records = frozenlake.create_dataset(
+            split="train", shuffle=shuffle, seed=42, size=32, limit=12
+        )
+        entries = frozenlake.generate_entries(
+            32, 42, shuffle_seed=shuffle_seed, limit=12
+        )
+        self.assertEqual(
+            list(records),
+            [
+                {"prompt": "", "metadata": {"env_config": {"entry": entry}}}
+                for entry in entries
+            ],
+        )
+
+  def test_create_dataset_rejects_invalid_arguments(self):
+    with self.assertRaisesRegex(ValueError, "'train' split"):
+      frozenlake.create_dataset(split="test", shuffle=True, seed=42, size=8)
+    for grid_size_range in ((2,), (2, 5, 9)):
+      with self.subTest(grid_size_range=grid_size_range):
+        with self.assertRaisesRegex(ValueError, "grid_size_range"):
+          frozenlake.create_dataset(
+              split="train",
+              shuffle=True,
+              seed=42,
+              size=8,
+              grid_size_range=grid_size_range,
+          )
+
+  def test_rollout_env_matches_the_legacy_prompt_item_env(self):
+    # Each `FrozenLakeEnv` sets the recipe's global `MAX_STEPS`.
+    self.addCleanup(
+        setattr, frozenlake_env, "MAX_STEPS", frozenlake_env.MAX_STEPS
+    )
+    record = frozenlake.create_dataset(
+        split="train", shuffle=True, seed=42, size=32, limit=12
+    )[0]
+    assert record is not None  # `MapDataset.__getitem__` is typed `T | None`.
+    env_config = record["metadata"]["env_config"]
+    legacy_env_config = frozenlake.build_prompt_item(
+        entry=env_config["entry"],
+        prompt_idx=0,
+        max_turns=8,
+        max_response_length=2048,
+        episode_timeout_secs=600,
+        temperature=0.7,
+        top_p=1.0,
+        top_k=0,
+        is_slippery=False,
+        use_multistep_prompt=True,
+    )["metadata"]["env_config"]
+    env_class = registry.ENV_REGISTRY.get(frozenlake.FROZENLAKE_ENV_NAME)
+    # `RolloutManager` builds the env from `env_kwargs`, the record's
+    # `env_config`, and the group fields `DistributedRLEngine` adds to it.
+    env = env_class(**{
+        "max_steps": 8,
+        "is_slippery": False,
+        **env_config,
+        "group_index": 0,
+        "num_generations": 8,
+        "policy_version": 0,
+    })
+    legacy_env = env_class(**legacy_env_config)
+    self.assertEqual(env.desc.tolist(), legacy_env.desc.tolist())
+    self.assertEqual(env.max_steps, legacy_env.max_steps)
+    self.assertEqual(env.env_kwargs, legacy_env.env_kwargs)
+    self.assertEqual(env.reset(), legacy_env.reset())
+
+  def test_orchestrator_loads_the_records_in_a_fixed_order(self):
+    items = orchestrator.load_prompt_items(_orchestrator_config())
+    item = items[0]
+    assert item is not None  # `MapDataset.__getitem__` is typed `T | None`.
+    self.assertEqual(item["prompt"], "")
+    self.assertEqual(item["task_name"], "frozenlake")
+    self.assertEqual(item["max_turns"], 8)
+    metadata = item["metadata"]
+    assert isinstance(metadata, dict)
+    # The base `data_config` passes `split="train"`, `shuffle=True`, `seed=42`.
+    entries = frozenlake.generate_entries(32, 42, shuffle_seed=42, limit=12)
+    self.assertEqual(metadata["env_config"], {"entry": entries[0]})
+    # Every epoch repeats the same order.
+    self.assertEqual(
+        [items[index] for index in range(12, 24)],
+        [items[index] for index in range(12)],
+    )
+
+  def test_orchestrator_rejects_non_int_grid_size_range(self):
+    # `data_config` values reach `create_dataset` untyped.
+    hp = _orchestrator_config("data_config.grid_size_range=[2.5,9]")
+    with self.assertRaisesRegex(ValueError, "grid_size_range"):
+      orchestrator.load_prompt_items(hp)
 
 
 if __name__ == "__main__":

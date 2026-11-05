@@ -264,7 +264,7 @@ def create_dataset(size, seed, limit=None, **unused_kwargs):
   from tunix.dist_rl.examples.frozenlake_dist import frozenlake
   from tunix.dist_rl.examples.rl_efficiency_benchmark import runtime
 
-  rows = frozenlake.create_dataset(
+  rows = frozenlake.generate_entries(
       size=size, seed=seed, shuffle_seed=seed, limit=limit
   )
   runtime.record_dataset(rows)
@@ -277,7 +277,7 @@ def dist_main(*args, **kwargs):
   from tunix.dist_rl.examples.frozenlake_dist import run_frozenlake_dist
   from tunix.dist_rl.examples.rl_efficiency_benchmark import runtime
 
-  create = frozenlake.create_dataset
+  create = frozenlake.generate_entries
 
   @functools.wraps(create)
   def recorded_dataset(*dataset_args, **dataset_kwargs):
@@ -285,7 +285,7 @@ def dist_main(*args, **kwargs):
     runtime.record_dataset(rows)
     return rows
 
-  frozenlake.create_dataset = recorded_dataset
+  frozenlake.generate_entries = recorded_dataset
   runtime.install("dist")
   return run_frozenlake_dist.main(*args, **kwargs)
 
