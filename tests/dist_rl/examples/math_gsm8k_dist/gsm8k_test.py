@@ -347,7 +347,7 @@ class ExampleConfigTest(absltest.TestCase):
   def test_batch_config_and_generation_args(self):
     batch_config = orchestrator.build_batch_config(_hp(), pad_id=3, eos_id=7)
     self.assertEqual(batch_config.pad_id, 3)
-    self.assertIsNone(batch_config.num_data_shards)
+    self.assertEqual(batch_config.num_data_shards, 1)
     self.assertEqual(batch_config.segment_alignment_boundary, 1)
     generation_args = orchestrator.build_generation_args(_hp())
     self.assertEqual(generation_args.temperature, 1.0)
