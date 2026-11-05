@@ -20,6 +20,8 @@ import types
 from unittest import mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
+from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -192,7 +194,7 @@ class LocalIpTest(absltest.TestCase):
     self.assertLen(made, 2)
 
 
-class RaidenSynchronizerTest(absltest.TestCase):
+class RaidenSynchronizerTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -208,6 +210,23 @@ class RaidenSynchronizerTest(absltest.TestCase):
     return {
         "w1": jnp.ones((2, 4), jnp.float32),
         "w2": jnp.arange(3, dtype=jnp.float32),
+    }
+
+  def _flat_vllm_state(self) -> dict[str, jax.Array]:
+    # Hash-table fixtures use float32 so _bindable does not mask the segment
+    # filter (real hash_indices_table buffers are int32).
+    return {
+        "vllm_model.model.embed_tokens.weight": jnp.zeros((4, 2), jnp.float32),
+        "vllm_model.lm_head.weight": jnp.zeros((4, 2), jnp.float32),
+        "vllm_model.model.layers.3.self_attn.rotary_emb.cos_sin_cache": (
+            jnp.full((8, 4), 3.0, dtype=jnp.float32)
+        ),
+        "vllm_model.model.layers.0.hash_indices_table": jnp.ones(
+            (4,), dtype=jnp.float32
+        ),
+        "vllm_model.model.layers.0.routed_experts.tpu_hash_indices_table": (
+            jnp.ones((4, 2), dtype=jnp.float32)
+        ),
     }
 
   def test_ctor_passes_safety_kwargs(self):
@@ -1217,10 +1236,15 @@ class RaidenSynchronizerTest(absltest.TestCase):
     }
     runner = _Runner(runner_state)
     sync.apply_to_runner(runner)
+    self.assertIs(runner.state, runner_state)
     self.assertIs(
         runner.state["model"]["layers"][0]["mlp"]["down_proj"]["weight"], arr1
     )
     self.assertIs(runner.state["model"]["embed_tokens"]["weight"], arr2)
+    self.assertIsInstance(runner.state_leaves, tuple)
+    self.assertLen(runner.state_leaves, 2)
+    self.assertIs(runner.state_leaves[0], arr2)
+    self.assertIs(runner.state_leaves[1], arr1)
 
   def test_apply_to_runner_shape_mismatch_raises(self):
     sync = raiden_synchronizer.RaidenSynchronizer("rollout")
@@ -1373,6 +1397,185 @@ class RaidenSynchronizerTest(absltest.TestCase):
       raiden_synchronizer._global_shard_indices(
           arr, sharding, devices=[mesh.devices.flat[0], other_dev]
       )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="maxtext_cache_segment",
+          name="['base']['decoder']['layers']['attention']['cache']['k']",
+          expected=True,
+      ),
+      dict(
+          testcase_name="maxtext_cached_prefill_key",
+          name="['layers']['cached_prefill_key']",
+          expected=True,
+      ),
+      dict(
+          testcase_name="maxtext_cached_prefill_value",
+          name="['layers']['cached_prefill_value']",
+          expected=True,
+      ),
+      dict(
+          testcase_name="vllm_cos_sin_cache",
+          name=(
+              "['vllm_model.model.layers.3.self_attn.rotary_emb.cos_sin_cache']"
+          ),
+          expected=True,
+      ),
+      dict(
+          testcase_name="vllm_hash_indices_table",
+          name="['vllm_model.model.layers.0.hash_indices_table']",
+          expected=True,
+      ),
+      dict(
+          testcase_name="vllm_tpu_hash_indices_table",
+          name=(
+              "['vllm_model.model.layers.0.routed_experts"
+              ".tpu_hash_indices_table']"
+          ),
+          expected=True,
+      ),
+      dict(
+          testcase_name="regular_embed_weight",
+          name="['vllm_model.model.embed_tokens.weight']",
+          expected=False,
+      ),
+      dict(
+          testcase_name="substring_cache_proj_weight_is_not_filtered",
+          name="['vllm_model.model.layers.0.cache_proj.weight']",
+          expected=False,
+      ),
+  )
+  def test_is_inference_only_buffer_matches_exact_segments(
+      self, name: str, expected: bool
+  ):
+    self.assertEqual(
+        raiden_synchronizer._is_inference_only_buffer(name), expected
+    )
+
+  def test_bind_flat_vllm_dict_drops_inference_only_buffers(self):
+    sync = raiden_synchronizer.RaidenSynchronizer(
+        "rollout", self._flat_vllm_state()
+    )
+    self.assertEqual(
+        sync.names,
+        [
+            "['vllm_model.lm_head.weight']",
+            "['vllm_model.model.embed_tokens.weight']",
+        ],
+    )
+
+  @parameterized.named_parameters(
+      dict(testcase_name="alias_leaves", stale_tuple_leaves=False),
+      dict(testcase_name="stale_tuple_leaves", stale_tuple_leaves=True),
+  )
+  def test_apply_to_runner_updates_flat_vllm_dict_in_place(
+      self, stale_tuple_leaves: bool
+  ):
+    runner_state = self._flat_vllm_state()
+    cos_sin_cache = runner_state[
+        "vllm_model.model.layers.3.self_attn.rotary_emb.cos_sin_cache"
+    ]
+    hash_table = runner_state["vllm_model.model.layers.0.hash_indices_table"]
+    tpu_hash_table = runner_state[
+        "vllm_model.model.layers.0.routed_experts.tpu_hash_indices_table"
+    ]
+
+    class _FlatDictRunner:
+
+      def __init__(self, state: dict[str, jax.Array]):
+        self.state = state
+        self.state_leaves: dict[str, jax.Array] | tuple[jax.Array, ...] = (
+            tuple(state.values()) if stale_tuple_leaves else state
+        )
+        self.refresh_calls = 0
+
+      def refresh_state_leaves(self) -> None:
+        self.refresh_calls += 1
+        self.state_leaves = self.state
+
+    runner = _FlatDictRunner(runner_state)
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout", runner.state)
+    new_embed = jnp.full((4, 2), 11.0, dtype=jnp.float32)
+    new_lm_head = jnp.full((4, 2), 13.0, dtype=jnp.float32)
+    sync.arrays = [new_lm_head, new_embed]
+    sync.apply_to_runner(runner)
+
+    self.assertIs(runner.state, runner_state)
+    self.assertIs(runner.state_leaves, runner_state)
+    self.assertEqual(runner.refresh_calls, 1)
+    self.assertIs(
+        runner.state["vllm_model.model.embed_tokens.weight"], new_embed
+    )
+    self.assertIs(runner.state["vllm_model.lm_head.weight"], new_lm_head)
+    self.assertIs(
+        runner.state[
+            "vllm_model.model.layers.3.self_attn.rotary_emb.cos_sin_cache"
+        ],
+        cos_sin_cache,
+    )
+    self.assertIs(
+        runner.state["vllm_model.model.layers.0.hash_indices_table"],
+        hash_table,
+    )
+    self.assertIs(
+        runner.state[
+            "vllm_model.model.layers.0.routed_experts.tpu_hash_indices_table"
+        ],
+        tpu_hash_table,
+    )
+
+  def test_apply_to_runner_updates_nnx_state_before_refresh_state_leaves(self):
+    orig_w = jnp.zeros((4, 2), dtype=jnp.float32)
+    initial_state = nnx.State({"model": {"w": nnx.Param(orig_w)}})
+
+    class _NnxRunnerWithRefresh:
+
+      def __init__(self, state: nnx.State):
+        self.state = state
+        self.state_leaves = tuple(jax.tree_util.tree_leaves(state))
+        self.refresh_calls = 0
+
+      def refresh_state_leaves(self) -> None:
+        self.refresh_calls += 1
+        self.state_leaves = tuple(jax.tree_util.tree_leaves(self.state))
+
+    runner = _NnxRunnerWithRefresh(initial_state)
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout", runner.state)
+    new_w = jnp.full((4, 2), 23.0, dtype=jnp.float32)
+    sync.arrays = [new_w]
+    sync.apply_to_runner(runner)
+
+    self.assertIsInstance(runner.state, nnx.State)
+    self.assertIsNot(runner.state, initial_state)
+    self.assertEqual(runner.refresh_calls, 1)
+    self.assertIs(runner.state["model"]["w"].get_value(), new_w)
+    self.assertLen(runner.state_leaves, 1)
+    self.assertIs(runner.state_leaves[0], new_w)
+
+  def test_flat_vllm_dict_falls_back_when_runner_lacks_refresh_state_leaves(
+      self,
+  ):
+    runner_state = {
+        "vllm_model.model.embed_tokens.weight": jnp.zeros((4, 2), jnp.float32),
+    }
+
+    class _BareFlatDictRunner:
+
+      def __init__(self, state: dict[str, jax.Array]):
+        self.state = state
+        self.state_leaves = dict(state)
+
+    runner = _BareFlatDictRunner(runner_state)
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout", runner.state)
+    new_embed = jnp.full((4, 2), 19.0, dtype=jnp.float32)
+    sync.arrays = [new_embed]
+    sync.apply_to_runner(runner)
+
+    self.assertIs(runner.state, runner_state)
+    self.assertIs(runner.state_leaves, runner.state)
+    self.assertIs(
+        runner.state["vllm_model.model.embed_tokens.weight"], new_embed
+    )
 
 
 if __name__ == "__main__":

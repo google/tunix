@@ -225,26 +225,42 @@ def _bindable(arr: Any, *, allow_proxy: bool = False) -> bool:
     return False
 
 
-_KV_CACHE_SEGMENTS = frozenset(
-    {"cache", "cached_prefill_key", "cached_prefill_value"}
-)
+_INFERENCE_ONLY_SEGMENTS = frozenset({
+    "cache",
+    "cached_prefill_key",
+    "cached_prefill_value",
+    "cos_sin_cache",
+    "hash_indices_table",
+    "tpu_hash_indices_table",
+})
 
 
-def _is_kv_cache(name: str) -> bool:
-  """True for inference KV-cache buffers, which are not weights.
+def _is_inference_only_buffer(name: str) -> bool:
+  """True for inference-only cache and lookup buffers, which are not weights.
 
-  The rollout's MaxText model carries per-layer KV cache arrays
-  (`...['attention']['cache']['cached_prefill_key']`). They are floating point
-  and rank>=1, so `_bindable` accepts them, but the trainer has no counterpart
-  and manifest preflight then rejects them as destination-only variables.
+  Matches MaxText KV-cache arrays (`...['attention']['cache'][...]`) as well as
+  `VllmModelWrapper` non-trainable lookup buffers (`cos_sin_cache`,
+  `hash_indices_table`, `tpu_hash_indices_table`). Floating-point caches like
+  `cos_sin_cache` have no trainer counterpart -- breaking manifest pairing --
+  and may carry custom TPU layouts (such as `ROPE_CACHE_ROW_MAJOR`) that Raiden
+  C++ `BindWeights` rejects, while integer routing tables would otherwise log
+  spurious unbindable-leaf warnings.
+
+  Args:
+    name: Flattened leaf key path string.
+
+  Returns:
+    True if any path segment identifies an inference-only non-weight buffer.
   """
-  return any(seg in _KV_CACHE_SEGMENTS for seg in _param_key(name).split("."))
+  return any(
+      seg in _INFERENCE_ONLY_SEGMENTS for seg in _param_key(name).split(".")
+  )
 
 
 def _filter_bindable(
     names: List[str], arrays: List[Any], *, allow_proxy: bool = False
 ) -> Tuple[List[str], List[Any]]:
-  """Drops leaves _bindable rejects, plus inference-only KV cache buffers."""
+  """Drops leaves _bindable rejects, plus inference-only non-weight buffers."""
   logging.vlog(
       1,
       "raiden bind census: %s",
@@ -255,27 +271,83 @@ def _filter_bindable(
   keep_names: List[str] = []
   keep_arrays: List[Any] = []
   dropped = []
-  cache_dropped = []
+  inference_only_dropped = []
   for name, arr in zip(names, arrays):
-    if _is_kv_cache(name):
-      cache_dropped.append(name)
+    if _is_inference_only_buffer(name):
+      inference_only_dropped.append(name)
     elif _bindable(arr, allow_proxy=allow_proxy):
       arr.block_until_ready()
       keep_names.append(name)
       keep_arrays.append(arr)
     else:
       dropped.append(name)
-  if cache_dropped:
+  if inference_only_dropped:
     logging.debug(
-        "raiden bind skipped %d KV-cache leaves: %s",
-        len(cache_dropped),
-        cache_dropped[:5],
+        "raiden bind skipped %d inference-only non-weight leaves: %s",
+        len(inference_only_dropped),
+        inference_only_dropped[:5],
     )
   if dropped:
     logging.warning(
         "raiden bind dropped %d unbindable leaves: %s", len(dropped), dropped[:5]
     )
   return keep_names, keep_arrays
+
+
+# (bound index, bound name, synced array)
+_SynchronizerEntry = tuple[int, str, Any]
+
+
+def _claim_synchronizer_entry(
+    key: str,
+    key_to_entries: dict[str, list[_SynchronizerEntry]],
+    matched_indices: set[int],
+) -> _SynchronizerEntry | None:
+  """Returns the first unapplied entry matching or suffix-matching `key`."""
+  for entry in key_to_entries.get(key, ()):
+    if entry[0] not in matched_indices:
+      return entry
+  # A runner path may carry a wrapper prefix the bound name lacks; match on
+  # a whole-segment suffix so `a.b.w` still finds `b.w`, never `ab.w`.
+  for candidate, entries in key_to_entries.items():
+    if not key.endswith("." + candidate):
+      continue
+    for entry in entries:
+      if entry[0] not in matched_indices:
+        return entry
+  return None
+
+
+def _write_runner_state(
+    runner: Any, new_state: Any, new_leaves: list[Any]
+) -> None:
+  """Updates `runner.state` and `runner.state_leaves` after weight application.
+
+  `TPUModelRunner`'s vLLM (`VllmModelWrapper`) path stores `state` as a flat
+  `dict[str, jax.Array]`, aliases `state_leaves` directly to `state` for
+  `torch.func.functional_call`, and shares that dict reference with auxiliary
+  holders (such as multimodal encoder JIT managers and vision precompile
+  closures); `dict` containers are therefore mutated in place via `update()`.
+  `runner.state` is always written before calling
+  `runner.refresh_state_leaves()` because on Flax/NNX (`nnx.State`) runners
+  `refresh_state_leaves()` re-flattens `runner.state` into a `tuple`.
+
+  Args:
+    runner: Model runner owning `state` and `state_leaves`.
+    new_state: Reconstructed state PyTree containing updated leaf arrays.
+    new_leaves: Updated flat leaf list in `runner.state` PyTree order.
+  """
+  if isinstance(runner.state, dict):
+    runner.state.update(new_state)
+  else:
+    runner.state = new_state
+
+  if callable(getattr(runner, "refresh_state_leaves", None)):
+    runner.refresh_state_leaves()
+  elif isinstance(runner.state, dict) and isinstance(runner.state_leaves, dict):
+    runner.state_leaves = runner.state
+  else:
+    runner.state_leaves = tuple(new_leaves)
 
 
 def _axis_name(axis: Any) -> str:
@@ -955,7 +1027,7 @@ class RaidenSynchronizer:
   # TODO(tunix-dev): drop this once bind() records the runner's leaf identity so
   # h2d() writes back in place, making the name matching below unnecessary.
   def apply_to_runner(self, runner: Any) -> None:
-    """Applies updated arrays after H2D to the runner's state_leaves and state."""
+    """Applies synced arrays to `runner.state` and refreshes `state_leaves`."""
     if runner is None or not self.arrays:
       return
     if not hasattr(runner, "state_leaves") or runner.state_leaves is None:
@@ -968,53 +1040,35 @@ class RaidenSynchronizer:
           f"{self.job_name}: runner does not have a valid 'state' attribute."
       )
 
-    new_leaves = list(runner.state_leaves)
     runner_leaves_with_path = list(
         jax.tree_util.tree_leaves_with_path(runner.state)
     )
-    if len(new_leaves) != len(runner_leaves_with_path):
-      raise RuntimeError(
-          f"{self.job_name}: runner.state_leaves length ({len(new_leaves)})"
-          " does not match runner.state leaves count"
-          f" ({len(runner_leaves_with_path)})."
-      )
+    new_leaves = [leaf for _, leaf in runner_leaves_with_path]
 
-    key_to_entries: dict[str, List[Any]] = collections.defaultdict(list)
+    key_to_entries: dict[str, list[_SynchronizerEntry]] = (
+        collections.defaultdict(list)
+    )
     for idx, (name, arr) in enumerate(zip(self.names, self.arrays)):
       key_to_entries[_param_key(name)].append((idx, name, arr))
 
-    matched_indices = set()
-
-    def _claim(key: str):
-      """First unapplied array whose key equals, or is a suffix of, `key`."""
-      for entry in key_to_entries.get(key, ()):
-        if entry[0] not in matched_indices:
-          return entry
-      # A runner path may carry a wrapper prefix the bound name lacks; match on
-      # a whole-segment suffix so `a.b.w` still finds `b.w`, never `ab.w`.
-      for candidate, entries in key_to_entries.items():
-        if not key.endswith("." + candidate):
-          continue
-        for entry in entries:
-          if entry[0] not in matched_indices:
-            return entry
-      return None
-
+    matched_indices: set[int] = set()
     for i, (path, leaf) in enumerate(runner_leaves_with_path):
       p_str = jax.tree_util.keystr(path)
-      entry = _claim(_param_key(p_str))
-
-      if entry is not None:
-        idx, orig_name, arr = entry
-        leaf_arr = getattr(leaf, "value", leaf)
-        if hasattr(leaf_arr, "shape") and leaf_arr.shape != arr.shape:
-          raise ValueError(
-              f"Shape mismatch for parameter '{orig_name}' (runner path"
-              f" '{p_str}'): runner shape {leaf_arr.shape} vs synchronizer"
-              f" shape {arr.shape}"
-          )
-        new_leaves[i] = arr
-        matched_indices.add(idx)
+      entry = _claim_synchronizer_entry(
+          _param_key(p_str), key_to_entries, matched_indices
+      )
+      if entry is None:
+        continue
+      idx, orig_name, arr = entry
+      leaf_arr = getattr(leaf, "value", leaf)
+      if hasattr(leaf_arr, "shape") and leaf_arr.shape != arr.shape:
+        raise ValueError(
+            f"Shape mismatch for parameter '{orig_name}' (runner path"
+            f" '{p_str}'): runner shape {leaf_arr.shape} vs synchronizer"
+            f" shape {arr.shape}"
+        )
+      new_leaves[i] = arr
+      matched_indices.add(idx)
 
     if len(matched_indices) != len(self.arrays):
       unmatched = [
@@ -1029,10 +1083,10 @@ class RaidenSynchronizer:
           f" {unmatched[:10]}"
       )
 
-    runner.state_leaves = tuple(new_leaves)
-    runner.state = jax.tree_util.tree_unflatten(
+    new_state = jax.tree_util.tree_unflatten(
         jax.tree_util.tree_structure(runner.state), new_leaves
     )
+    _write_runner_state(runner, new_state, new_leaves)
     logging.info(
         "%s apply_to_runner: successfully applied %d arrays to runner state and"
         " state_leaves (total runner leaves: %d).",
