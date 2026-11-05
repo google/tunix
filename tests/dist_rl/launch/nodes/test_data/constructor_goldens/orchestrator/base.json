@@ -122,7 +122,7 @@
           "max_segments_per_packed_row": null,
           "max_seq_token_per_tpu": null,
           "mini_batch_size": 4,
-          "num_data_shards": null,
+          "num_data_shards": 1,
           "pad_id": 151643,
           "segment_alignment_boundary": 1,
           "train_micro_batch_size": 1

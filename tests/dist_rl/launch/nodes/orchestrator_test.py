@@ -294,7 +294,7 @@ class BuildersTest(absltest.TestCase):
             max_seq_token_per_tpu=None,
             max_segments_per_packed_row=3,
             segment_alignment_boundary=64,
-            num_data_shards=None,
+            num_data_shards=1,
             mini_batch_size=4,
             train_micro_batch_size=2,
         ),
@@ -312,6 +312,25 @@ class BuildersTest(absltest.TestCase):
     )
     config = orchestrator.build_batch_config(hp, pad_id=0, eos_id=1)
     self.assertEqual(config.num_data_shards, 8)
+
+  def test_packing_on_an_unsharded_trainer_packs_one_row_per_batch(self):
+    # A TP-only trainer mesh has one data shard. Without `num_data_shards`, the
+    # assembler would pack `train_micro_batch_size` rows per batch instead.
+    config = orchestrator.build_batch_config(
+        _config(
+            "actor_model_config.mesh.shape=(1,4)",
+            "rl_training_config.train_micro_batch_size=4",
+            "rl_training_config.max_seq_token_per_tpu=4096",
+        ),
+        pad_id=0,
+        eos_id=1,
+    )
+    self.assertEqual(config.num_data_shards, 1)
+    assembler = batch_assembly.create_batch_assembler(
+        num_generations=8, batch_config=config
+    )
+    assert isinstance(assembler, batch_assembly.SequencePackedBatchAssembler)
+    self.assertEqual(assembler.batch_size, 1)
 
   def test_generation_args(self):
     args = orchestrator.build_generation_args(

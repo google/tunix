@@ -110,11 +110,18 @@ def build_grpo_config(
   )
 
 
-def _num_data_shards(hp: resolve_config.DistHyperParameters) -> int | None:
-  """Returns the trainer data-parallel shard count, or None when unsharded."""
+def _num_data_shards(hp: resolve_config.DistHyperParameters) -> int:
+  """Returns the trainer's data-parallel shard count, `fsdp * dp * expert`.
+
+  With sequence packing, the batch assembler packs this many rows per batch, so
+  an unsharded trainer (e.g. a TP-only mesh) gets one row, as the MaxText
+  trainer expects there (`maxtext_utils.build_maxtext_config`).
+
+  Args:
+    hp: Resolved distributed RL configuration.
+  """
   axes = hp.mesh_axes("actor_model_config")
-  shards = axes["fsdp"] * axes["dp"] * axes["expert"]
-  return shards if shards > 1 else None
+  return axes["fsdp"] * axes["dp"] * axes["expert"]
 
 
 def build_batch_config(
