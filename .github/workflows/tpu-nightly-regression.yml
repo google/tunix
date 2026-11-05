@@ -284,7 +284,7 @@ jobs:
         printf "jax<0.11.0\njaxlib<0.11.0\n" > /tmp/sglang_constraints.txt
         export PIP_CONSTRAINT=/tmp/sglang_constraints.txt
         cd ..
-        git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax && git checkout 1bdbc6747939c0e600622fc7f812151d76321080 && cd python && python3 -m pip install -e . && cd ../..
+        git init sglang-jax && cd sglang-jax && git fetch --depth 1 https://github.com/sgl-project/sglang-jax.git 1bdbc6747939c0e600622fc7f812151d76321080 && git checkout FETCH_HEAD && cd python && python3 -m pip install -e . && cd ../..
         python3 -m pip list | egrep 'jax|flax|libtpu'
         cd tunix
         echo "::endgroup::"
