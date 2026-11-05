@@ -1525,6 +1525,140 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     )
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_trajectory_store_persists_encoded_prefill_routed_experts(
+      self, mock_convert
+  ):
+    shape = (2, 4)
+    turn0 = np.concatenate([
+        np.full((2,) + shape, 3, dtype=np.int16),
+        np.full((1,) + shape, 5, dtype=np.int16),
+    ])
+    turn1 = np.concatenate([
+        np.full((1,) + shape, 5, dtype=np.int16),
+        np.full((3,) + shape, 6, dtype=np.int16),
+        np.full((1,) + shape, 7, dtype=np.int16),
+    ])
+    prompt = np.array([[101, 102]], dtype=np.int32)
+
+    turn1_high = turn1.copy()
+    turn1_high[-1, -1, -1] = 255
+    for (
+        num_experts,
+        turn1_arr,
+        expected_turn0_shape,
+        expected_turn1_shape,
+    ) in (
+        (255, turn1, (3, 2, 4), (5, 2, 4)),
+        (256, turn1, (3, 2, 1, 5), (5, 2, 1, 5)),
+        (None, turn1_high, (3, 2, 4), (5, 2, 1, 5)),
+    ):
+      with self.subTest(num_experts=num_experts):
+        expected_full = np.concatenate(
+            [
+                turn0,
+                turn1_arr,
+                np.full(
+                    (1, 2, 4), agent_types.UNSET_ROUTED_EXPERT, dtype=np.int16
+                ),
+            ],
+            axis=0,
+        )
+        self.setUp()
+        mock_convert.side_effect = [
+            ([101, 102], [1, 1]),
+            ([301, 302, 303], [1, 1, 1]),
+        ]
+        self.mock_model_call.side_effect = [
+            RolloutOutput(
+                text=['resp'],
+                logits=None,
+                tokens=[np.array([201, 202], dtype=np.int32)],
+                left_padded_prompt_tokens=prompt,
+                logprobs=[np.ones(2, dtype=np.float32)],
+                routed_experts=[turn0],
+            ),
+            RolloutOutput(
+                text=['resp'],
+                logits=None,
+                tokens=[np.array([203, 204], dtype=np.int32)],
+                left_padded_prompt_tokens=prompt,
+                logprobs=[np.ones(2, dtype=np.float32)],
+                routed_experts=[turn1_arr],
+            ),
+        ]
+        store = in_memory_store.InMemoryTrajectoryStore()
+        traj_id = f'traj_encoded_{num_experts}'
+        engine = trajectory_collect_engine.TrajectoryCollectEngine(
+            agent=self.mock_agent,
+            env=self.mock_env,
+            model_call=self.mock_model_call,
+            tokenizer=self.mock_tokenizer,
+            chat_parser=self.mock_chat_parser,
+            trajectory_store=store,
+            metadata=converter_lib.create_trajectory_metadata(traj_id=traj_id),
+            store_routed_experts=True,
+            routed_experts_encode_mode='auto',
+            routed_experts_num_experts=num_experts,
+        )
+        token_result = asyncio.run(self._run_collect(engine, mode='Token'))
+        self.assertEqual(token_result['routed_experts'].dtype, np.uint8)
+        np.testing.assert_array_equal(
+            trajectory_collect_engine.packing.decode_routed_experts(
+                token_result['routed_experts'], batched=False
+            ),
+            expected_full,
+        )
+
+        (stored,) = store.get_trajectories([traj_id])
+        agent_0, agent_1 = stored.steps[1], stored.steps[3]
+        self.assertEqual(agent_0.prefill_routed_experts.dtype, np.uint8)
+        self.assertEqual(
+            agent_0.prefill_routed_experts.shape, expected_turn0_shape
+        )
+        self.assertEqual(agent_1.prefill_routed_experts.dtype, np.uint8)
+        self.assertEqual(
+            agent_1.prefill_routed_experts.shape, expected_turn1_shape
+        )
+        np.testing.assert_array_equal(
+            trajectory_collect_engine.packing.decode_routed_experts(
+                agent_0.prefill_routed_experts, batched=False
+            ),
+            turn0,
+        )
+        np.testing.assert_array_equal(
+            trajectory_collect_engine.packing.decode_routed_experts(
+                agent_1.prefill_routed_experts, batched=False
+            ),
+            turn1_arr,
+        )
+
+        restored = converter_lib.to_tunix_trajectory(stored.to_json_dict())
+        np.testing.assert_array_equal(
+            trajectory_collect_engine.packing.decode_routed_experts(
+                restored.prompt_routed_experts, batched=False
+            ),
+            turn0[:2],
+        )
+        np.testing.assert_array_equal(
+            trajectory_collect_engine.packing.decode_routed_experts(
+                restored.steps[0].assistant_routed_experts, batched=False
+            ),
+            np.concatenate([turn0[2:], turn1_arr[:1]], axis=0),
+        )
+        np.testing.assert_array_equal(
+            trajectory_collect_engine.packing.decode_routed_experts(
+                restored.steps[0].env_routed_experts, batched=False
+            ),
+            turn1_arr[1:4],
+        )
+        np.testing.assert_array_equal(
+            trajectory_collect_engine.packing.decode_routed_experts(
+                restored.steps[1].assistant_routed_experts, batched=False
+            ),
+            turn1_arr[4:],
+        )
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_token_mode_max_steps_reached_pads_terminal_env_routed_experts(
       self, mock_convert
   ):

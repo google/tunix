@@ -45,6 +45,13 @@ BaseTaskEnv = base_environment.BaseTaskEnv
 ConversationAgentBase = base_agent.ConversationAgentBase
 
 
+_ROUTED_EXPERTS_TIER_ORDER: dict[str, int] = {
+    "uint8": 0,
+    "uint10": 1,
+    "int16": 2,
+}
+
+
 class TrajectoryCollectEngine:
   """Asynchronous trajectory collection engine for agent-env interactions.
 
@@ -80,6 +87,8 @@ class TrajectoryCollectEngine:
       trajectory_store: Optional[store_lib.TrajectoryWriter] = None,
       metadata: Optional[trajectory_lib.TrajectoryMetadata] = None,
       store_routed_experts: bool = False,
+      routed_experts_encode_mode: packing.RoutedExpertsEncodeMode = "int16",
+      routed_experts_num_experts: Optional[int] = None,
   ):
     """Initialize the trajectory collection engine.
 
@@ -99,8 +108,8 @@ class TrajectoryCollectEngine:
         timeout (float): Maximum episode duration in seconds before timeout
           termination. Model calls after the first turn are cut off, and no
           model call or env.step starts, once it is spent.
-        reset_timeout (Optional[float]): Deadline in seconds for `env.reset`;
-          if it passes, `collect()` raises `asyncio.TimeoutError` and closes the
+        reset_timeout (Optional[float]): Deadline in seconds for `env.reset`; if
+          it passes, `collect()` raises `asyncio.TimeoutError` and closes the
           env while `env.reset` may still run in its executor thread. Defaults
           to 3600.0; None means no deadline.
         final_reward_timeout (Optional[float]): Deadline in seconds for the
@@ -125,12 +134,23 @@ class TrajectoryCollectEngine:
         metadata: Optional TrajectoryMetadata for the current episode.
         store_routed_experts: Whether to persist captured prefill MoE
           routed_experts to `trajectory_store` on each agent step.
+        routed_experts_encode_mode: Wire encoding mode (`"auto"`, `"uint8"`,
+          `"uint10"`, or `"int16"`) applied to each turn's captured MoE
+          `routed_experts` before storing in trajectory steps and
+          `trajectory_store`.
+        routed_experts_num_experts: Optional total number of experts per MoE
+          layer used to select a deterministic compact tier when
+          `routed_experts_encode_mode == "auto"`.
     """
     if not isinstance(store_routed_experts, bool):
       raise ValueError(
           "store_routed_experts must be a bool, got"
           f" {store_routed_experts!r}"
       )
+    packing.validate_routed_experts_encode_config(
+        routed_experts_encode_mode,
+        routed_experts_num_experts,
+    )
     self.agent = agent
     self.env = env
     self.model_call = model_call
@@ -138,6 +158,10 @@ class TrajectoryCollectEngine:
     self.trajectory_store = trajectory_store
     self.metadata = metadata
     self.store_routed_experts = store_routed_experts
+    self.routed_experts_encode_mode: packing.RoutedExpertsEncodeMode = (
+        routed_experts_encode_mode
+    )
+    self.routed_experts_num_experts: Optional[int] = routed_experts_num_experts
     self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
     if exact_token_continuity and (tokenizer is None or chat_parser is None):
@@ -180,6 +204,9 @@ class TrajectoryCollectEngine:
     # This turn's raw prefill routing as (rows, prefill_start,
     # prefill_num_context), persisted as-is on the turn's agent step.
     self._current_prefill: Optional[Tuple[np.ndarray, int, int]] = None
+    self._episode_routed_experts_encoding: Optional[
+        packing.RoutedExpertsWireEncoding
+    ] = None
     self.env_time = {
         "reset_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
         "step_latency": [],  # List of per-step wall-clock times, ordered by step index
@@ -237,6 +264,65 @@ class TrajectoryCollectEngine:
     self._logged_clip_reasons.add(reason)
     logging.warning("%s trajectory clipped: %s", self._debug_prefix, reason)
 
+  def _encode_turn_routed_experts(self, routed: np.ndarray) -> np.ndarray:
+    """Encodes a single turn's routed_experts using the episode's active tier."""
+    if (
+        self.routed_experts_encode_mode == "int16"
+        and self.routed_experts_num_experts is None
+    ):
+      return np.asarray(routed, dtype=np.int16)
+    if (
+        self.routed_experts_encode_mode == "auto"
+        and self.routed_experts_num_experts is None
+    ):
+      logging.log_first_n(
+          logging.WARNING,
+          "Encoding routed_experts with routed_experts_encode_mode='auto'"
+          " and routed_experts_num_experts=None. For MoE models with >255"
+          " experts, set routed_experts_num_experts (or"
+          " routed_experts_encode_mode='uint10') to avoid per-step tier"
+          " switching between 4D uint8 and 5D uint10.",
+          1,
+      )
+    encoded = packing.encode_routed_experts(
+        routed,
+        mode=self.routed_experts_encode_mode,
+        num_experts=self.routed_experts_num_experts,
+        batched=False,
+    )
+    turn_enc = packing.routed_experts_encoding(encoded, batched=False)
+    ep_enc = self._episode_routed_experts_encoding
+    if ep_enc is None or ep_enc == turn_enc:
+      self._episode_routed_experts_encoding = turn_enc
+      return encoded
+    if (
+        _ROUTED_EXPERTS_TIER_ORDER[turn_enc]
+        < _ROUTED_EXPERTS_TIER_ORDER[ep_enc]
+    ):
+      return packing.encode_routed_experts(routed, mode=ep_enc, batched=False)
+    self._episode_routed_experts_encoding = turn_enc
+    traj = self.agent.trajectory
+    targets: list[tuple[agent_types.Trajectory | agent_types.Step, str]] = [
+        (traj, "prompt_routed_experts")
+    ]
+    for s in traj.steps:
+      targets.extend(
+          ((s, "assistant_routed_experts"), (s, "env_routed_experts"))
+      )
+    for obj, attr in targets:
+      val = getattr(obj, attr, None)
+      if val is not None:
+        setattr(
+            obj,
+            attr,
+            packing.encode_routed_experts(
+                packing.decode_routed_experts(val, batched=False),
+                mode=turn_enc,
+                batched=False,
+            ),
+        )
+    return encoded
+
   def _finalize_terminal_step_routing(self) -> None:
     """Pad the terminal step's unrouted trailing tokens with UNSET_ROUTED_EXPERT.
 
@@ -255,6 +341,8 @@ class TrajectoryCollectEngine:
     if final_step.assistant_routed_experts is None:
       return
     expert_shape = final_step.assistant_routed_experts.shape[1:]
+    pad_dtype = final_step.assistant_routed_experts.dtype
+    pad_fill = 0 if pad_dtype == np.uint8 else agent_types.UNSET_ROUTED_EXPERT
     if final_step.assistant_tokens is not None and len(
         final_step.assistant_routed_experts
     ) < len(final_step.assistant_tokens):
@@ -263,8 +351,8 @@ class TrajectoryCollectEngine:
       )
       pad = np.full(
           (missing,) + expert_shape,
-          agent_types.UNSET_ROUTED_EXPERT,
-          dtype=np.int16,
+          pad_fill,
+          dtype=pad_dtype,
       )
       final_step.assistant_routed_experts = np.concatenate(
           [final_step.assistant_routed_experts, pad], axis=0
@@ -276,8 +364,8 @@ class TrajectoryCollectEngine:
     ):
       final_step.env_routed_experts = np.full(
           (len(final_step.env_tokens),) + expert_shape,
-          agent_types.UNSET_ROUTED_EXPERT,
-          dtype=np.int16,
+          pad_fill,
+          dtype=pad_dtype,
       )
 
   def _resolve_policy_version(self) -> Optional[int]:
@@ -578,7 +666,7 @@ class TrajectoryCollectEngine:
                   f" {len(step_routed)} does not match assistant_tokens length"
                   f" {len(assistant_tokens)}."
               )
-            routed_experts.append(np.asarray(step_routed, dtype=np.int16))
+            routed_experts.append(np.asarray(step_routed))
         if env_tokens is not None:
           conversation_tokens.append(env_tokens)
           conversation_masks.append(step.env_masks)
@@ -595,7 +683,7 @@ class TrajectoryCollectEngine:
                   f" {len(step_env_routed)} does not match env_tokens length"
                   f" {len(env_tokens)}."
               )
-            routed_experts.append(np.asarray(step_env_routed, dtype=np.int16))
+            routed_experts.append(np.asarray(step_env_routed))
 
       conversation_tokens = [
           np.asarray(tokens)
@@ -635,8 +723,10 @@ class TrajectoryCollectEngine:
             iter(routed_experts),
             prompt_routed,
         )
-        sample_shape = (
-            sample_arr.shape[1:] if sample_arr is not None else (0, 0)
+        sample_shape, sample_dtype = (
+            (sample_arr.shape[1:], sample_arr.dtype)
+            if sample_arr is not None
+            else ((0, 0), np.int16)
         )
         prompt_len = (
             (self.agent.trajectory.prompt_length or 0)
@@ -655,9 +745,9 @@ class TrajectoryCollectEngine:
                 f" {getattr(prompt_routed, 'shape', None)} does not match"
                 f" prompt_tokens length {prompt_len}."
             )
-          prompt_routed_arr = np.asarray(prompt_routed, dtype=np.int16)
+          prompt_routed_arr = np.asarray(prompt_routed, dtype=sample_dtype)
         else:
-          prompt_routed_arr = np.zeros((0,) + sample_shape, dtype=np.int16)
+          prompt_routed_arr = np.zeros((0,) + sample_shape, dtype=sample_dtype)
 
         final_routed_experts = np.concatenate(
             [prompt_routed_arr, *routed_experts], axis=0
@@ -771,6 +861,7 @@ class TrajectoryCollectEngine:
     self._current_step_initial_routed_experts = None
     self._has_routed_experts = False
     self._current_prefill = None
+    self._episode_routed_experts_encoding = None
     self.env_time = {
         "reset_latency": 0.0,
         "step_latency": [],
@@ -1071,7 +1162,7 @@ class TrajectoryCollectEngine:
       )
 
     if routed is not None and not self.agent.trajectory.steps:
-      init_routed = np.asarray(routed, dtype=np.int16)
+      init_routed = self._encode_turn_routed_experts(routed)
       prompt_len = (
           (self.agent.trajectory.prompt_length or 0)
           if self.exact_token_continuity
@@ -1090,7 +1181,7 @@ class TrajectoryCollectEngine:
       self._cumulative_prompt_tokens = init_routed.shape[0]
       self._current_step_initial_routed_experts = init_routed[prompt_len:]
     elif routed is not None:
-      delta_routed = np.asarray(routed, dtype=np.int16)
+      delta_routed = self._encode_turn_routed_experts(routed)
       prev_step = self.agent.trajectory.steps[-1]
       needed_asst = 0
       if (

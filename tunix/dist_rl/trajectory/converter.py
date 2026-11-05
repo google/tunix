@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 from tunix.dist_rl.trajectory import action_converter
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
+from tunix.rl import packing
 from tunix.rl.agentic.agents import agent_types
 
 
@@ -459,6 +460,33 @@ def to_tunix_trajectory(
   )
 
 
+def _normalize_prefill_encodings(
+    prefills: list[np.ndarray | None],
+) -> list[np.ndarray | None]:
+  """Widens mixed-tier prefill arrays to the widest tier in the episode."""
+  valid = [p for p in prefills if p is not None]
+  if len(valid) <= 1 or len({(p.dtype, p.ndim) for p in valid}) == 1:
+    return prefills
+  if any(p.dtype == np.int16 for p in valid):
+    target_mode = "int16"
+  elif any(p.ndim == 4 for p in valid):
+    target_mode = "uint10"
+  else:
+    target_mode = "uint8"
+  normalized: list[np.ndarray | None] = []
+  for p in prefills:
+    if p is None:
+      normalized.append(None)
+    else:
+      decoded = packing.decode_routed_experts(p, batched=False)
+      normalized.append(
+          packing.encode_routed_experts(
+              decoded, mode=target_mode, batched=False
+          )
+      )
+  return normalized
+
+
 def _split_prefill_routed_experts(
     routed_turns: list[tuple[agent_types.Step, trajectory_lib.TunixAgentStep]],
 ) -> np.ndarray | None:
@@ -488,12 +516,16 @@ def _split_prefill_routed_experts(
   if all(src.prefill_routed_experts is None for _, src in routed_turns):
     return None
 
+  normalized_prefills = _normalize_prefill_encodings(
+      [_to_numpy_or_none(src.prefill_routed_experts) for _, src in routed_turns]
+  )
   prompt_routed_experts = None
   prev_step: agent_types.Step | None = None
   prev_own = np.zeros((0,))
   expected_start = 0
-  for turn, (step, src) in enumerate(routed_turns):
-    prefill = _to_numpy_or_none(src.prefill_routed_experts)
+  for turn, ((step, src), prefill) in enumerate(
+      zip(routed_turns, normalized_prefills)
+  ):
     num_context = src.prefill_num_context
     if prefill is None:
       raise ValueError(
