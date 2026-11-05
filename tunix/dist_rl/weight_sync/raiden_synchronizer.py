@@ -217,7 +217,7 @@ def _bindable(arr: Any, *, allow_proxy: bool = False) -> bool:
       return False
     supported_platforms = {"tpu", "cpu"}
     if allow_proxy:
-      supported_platforms.add("proxy")
+      supported_platforms.update(("proxy", "pathways"))
     return all(
         getattr(d, "platform", "?") in supported_platforms for d in devices
     )
@@ -530,7 +530,9 @@ def _global_shard_indices(
         _compute_global_shard_index(index_map[d], shape) for d in devices
     )
   shards = getattr(arr, "addressable_shards", None)
-  if shards and not any(s.device.platform == "proxy" for s in shards):
+  if shards and not any(
+      s.device.platform in ("proxy", "pathways") for s in shards
+  ):
     return tuple(_compute_global_shard_index(s.index, shape) for s in shards)
   mesh_obj = getattr(sharding, "mesh", None)
   mesh_devices = (
@@ -622,6 +624,23 @@ def _tensor_metadata(
   )
 
 
+def _use_ffi_transport() -> bool:
+  """Returns whether Raiden should use the XLA FFI (Pathways/proxy) transport."""
+  for env_key in ("RAIDEN_USE_FFI", "USE_RAIDEN_FFI"):
+    raw = os.environ.get(env_key, "").strip().lower()
+    if not raw:
+      continue
+    if raw in ("1", "true", "yes"):
+      return True
+    if raw in ("0", "false", "no"):
+      return False
+    raise ValueError(
+        f"Unsupported {env_key}={os.environ[env_key]!r}; expected"
+        " 0/1/true/false/yes/no."
+    )
+  return mesh.topology._is_pathways_backend_used()  # pylint: disable=protected-access
+
+
 class RaidenSynchronizer:
   """One host's weights on the raiden transport, plus its registration metadata.
 
@@ -641,7 +660,7 @@ class RaidenSynchronizer:
       parallelism: int = 4,
       bind_ip: Optional[str] = None,
   ):
-    is_proxy = "proxy" in os.environ.get("JAX_PLATFORMS", "")
+    is_proxy = _use_ffi_transport()
     self.job_name = job_name
     self.worker_index = worker_index
     self.names: List[str] = []

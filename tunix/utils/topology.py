@@ -39,11 +39,12 @@ Source references:
 """
 
 import ast
-import functools
 import math
 import os
 import re
 from typing import Any, Sequence
+
+import jax
 
 _MULTI_HOST_BOUNDS = (2, 2, 1)
 # Edge families expose a 2D chip torus; fish families expose a 3D torus. The two
@@ -233,14 +234,17 @@ def _shape_fits_within(
   return all(dim <= limit for dim, limit in zip(shape, available_shape))
 
 
-@functools.cache
 def _is_pathways_backend_used() -> bool:
   """Returns whether the current process is attached to a Pathways backend.
 
   Returns:
     True if a Pathways backend is used, otherwise False.
   """
-  if "proxy" in os.environ.get("JAX_PLATFORMS", ""):
+  jax_platforms_env = os.environ.get("JAX_PLATFORMS", "").lower()
+  if "proxy" in jax_platforms_env or "pathways" in jax_platforms_env:
+    return True
+  jax_platforms_cfg = (jax.config.jax_platforms or "").lower()
+  if "proxy" in jax_platforms_cfg or "pathways" in jax_platforms_cfg:
     return True
   try:
     import pathwaysutils  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
