@@ -168,7 +168,11 @@ start_trainer() {
     echo "Trainer Pathways images: server=${K8S_PATHWAYS_SERVER_IMAGE} proxy=${K8S_PATHWAYS_PROXY_IMAGE}" >&2
   fi
 
-  local env_prefix="VERIFY_WEIGHTS=${WEIGHT_SYNC_VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${K8S_ENABLE_PATHWAYS_PERSISTENCE}"
+  local enable_pathways_persistence=0
+  if is_true "${K8S_ENABLE_PATHWAYS_PERSISTENCE}"; then
+    enable_pathways_persistence=1
+  fi
+  local env_prefix="VERIFY_WEIGHTS=${WEIGHT_SYNC_VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${enable_pathways_persistence}"
   if [[ -n "${HF_TOKEN:-}" ]]; then
     env_prefix="HF_TOKEN=$(printf '%q' "${HF_TOKEN}") ${env_prefix}"
   fi

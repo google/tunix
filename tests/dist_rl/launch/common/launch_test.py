@@ -293,6 +293,8 @@ class LaunchScriptsTest(absltest.TestCase):
     )
     self.assertIn("RAIDEN_USE_FFI=1", res.stdout)
     self.assertIn("RAIDEN_USE_FFI=0", res.stdout)
+    self.assertIn("ENABLE_PATHWAYS_PERSISTENCE=0", res.stdout)
+    self.assertNotIn("ENABLE_PATHWAYS_PERSISTENCE=false", res.stdout)
     self.assertIn(
         "override_config_file="
         "tunix/dist_rl/launch/common/base_dist_config.yaml",
@@ -315,6 +317,18 @@ class LaunchScriptsTest(absltest.TestCase):
     for section in yaml_sections:
       docs = list(yaml.safe_load_all(section))
       self.assertNotEmpty(docs)
+
+    res_persistence = self._run_launch([
+        "trainer",
+        "--dry-run",
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=test-image",
+        "cluster_config.k8s.enable_pathways_persistence=true",
+        "agentic_grpo_config.beta=0.0",
+    ])
+    self.assertEqual(res_persistence.returncode, 0, msg=res_persistence.stderr)
+    self.assertIn("ENABLE_PATHWAYS_PERSISTENCE=1", res_persistence.stdout)
+    self.assertNotIn("ENABLE_PATHWAYS_PERSISTENCE=true", res_persistence.stdout)
 
   def test_k8s_requires_tunix_image(self):
     res = self._run_launch([
