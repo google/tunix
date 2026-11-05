@@ -553,6 +553,56 @@ def _split_prefill_routed_experts(
   return prompt_routed_experts
 
 
+def compute_final_metrics(
+    trajectory: agent_types.Trajectory | None,
+) -> trajectory_lib.FinalMetrics | None:
+  """Computes ATIF episode-level FinalMetrics from a Tunix trajectory.
+
+  Intended to be called once at episode end so the rollup is persisted with the
+  terminal metadata update instead of being recomputed on every read.
+
+  Args:
+    trajectory: The Tunix trajectory whose steps and prompt are summarized.
+
+  Returns:
+    A FinalMetrics with:
+      - `total_prompt_tokens`: Unpadded length of the initial prompt (the
+        `prompt_length` field when known, otherwise `len(prompt_tokens)`), or
+        None if the prompt was never tokenized.
+      - `total_completion_tokens`: Sum of `len(step.assistant_tokens)` across
+        turns that report assistant tokens, or None if no turn does.
+      - `total_steps`: Number of agent turns (`len(trajectory.steps)`).
+    Returns None if `trajectory` is None.
+  """
+  if trajectory is None:
+    return None
+
+  total_prompt_tokens = None
+  if trajectory.prompt_length is not None:
+    total_prompt_tokens = int(trajectory.prompt_length)
+  elif (
+      trajectory.prompt_tokens is not None
+      and len(trajectory.prompt_tokens) > 0
+  ):
+    total_prompt_tokens = len(trajectory.prompt_tokens)
+
+  completion_tokens = 0
+  has_completion_tokens = False
+  for step in trajectory.steps:
+    if step.assistant_tokens is not None:
+      has_completion_tokens = True
+      completion_tokens += len(step.assistant_tokens)
+  total_completion_tokens = (
+      completion_tokens if has_completion_tokens else None
+  )
+
+  return trajectory_lib.FinalMetrics(
+      total_prompt_tokens=total_prompt_tokens,
+      total_completion_tokens=total_completion_tokens,
+      total_steps=len(trajectory.steps),
+  )
+
+
 def create_trajectory_metadata(
     traj_id: str,
     request: Any = None,
@@ -620,6 +670,7 @@ def update_trajectory_metadata(
     env_time: dict[str, Any] | None = None,
     reward_time: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
+    final_metrics: trajectory_lib.FinalMetrics | None = None,
 ) -> trajectory_lib.TrajectoryMetadata:
   """Updates an existing TrajectoryMetadata with latest agent/trajectory state.
 
@@ -633,6 +684,8 @@ def update_trajectory_metadata(
     env_time: Optional explicit environment timing dictionary.
     reward_time: Optional explicit reward timing dictionary.
     extra: Optional dictionary of extra metadata fields to merge.
+    final_metrics: Optional episode-level FinalMetrics rollup to set (e.g. from
+      `compute_final_metrics` at episode end). Left unchanged when None.
 
   Returns:
     The updated TrajectoryMetadata instance.
@@ -709,5 +762,8 @@ def update_trajectory_metadata(
     if metadata.extra is None:
       metadata.extra = {}
     metadata.extra.update(extra)
+
+  if final_metrics is not None:
+    metadata.final_metrics = final_metrics
 
   return metadata
