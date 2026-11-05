@@ -42,7 +42,20 @@ class _FakeSplashKernel:
     return None
 
   def __call__(self, q, k, v, segment_ids=None):
-    del k, v, segment_ids
+    if k.shape[-2] != q.shape[-2] or v.shape[-2] != q.shape[-2]:
+      raise ValueError(
+          f'Splash KV sequence length ({k.shape[-2]}, {v.shape[-2]}) must '
+          f'match query sequence length ({q.shape[-2]}).'
+      )
+    if segment_ids is not None and (
+        segment_ids.q.shape[-1] != q.shape[-2]
+        or segment_ids.kv.shape[-1] != k.shape[-2]
+    ):
+      raise ValueError(
+          f'Splash segment_ids lengths ({segment_ids.q.shape[-1]}, '
+          f'{segment_ids.kv.shape[-1]}) must match (q={q.shape[-2]}, '
+          f'k={k.shape[-2]}).'
+      )
     return q
 
 

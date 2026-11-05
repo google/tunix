@@ -27,6 +27,8 @@ import jax.sharding as shd
 from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
+from tunix.models import gpu_kernels as kernels_lib
+from tunix.models import reference_attention as reference_attention_lib
 from tunix.utils import compat
 from tunix.utils import env_utils
 
@@ -98,6 +100,7 @@ class ModelConfig:
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   weight_tying: bool = False  # Llama3.2 features
   remat_config: RematConfig = RematConfig.NONE
+  use_flash_attention: bool = False
 
 
   @classmethod
@@ -376,24 +379,30 @@ class Attention(nnx.Module):
           cache['k'], key_proj, slice_indices
       )
 
-    b, t, qh, d = query_proj.shape
-    _, s, kh, _ = key_proj.shape
-
-    # GQA
-    query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
-    attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * self.scale
-    attn = attn.reshape((b, qh, t, s))
-
-    if attn_mask is not None:
-      attn = jnp.where((jnp.expand_dims(attn_mask, -3)), attn, K_MASK)
-
-    attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
-        key_proj.dtype
-    )
-
-    attn = attn.reshape((b, kh, qh // kh, t, s))
-    qkv = jnp.einsum('BHGTS,BSHD->BTHGD', attn, value_proj)
-    qkv = qkv.reshape((b, t, qh, d))
+    if (
+        self.config.use_flash_attention
+        and seq_len > 1
+        and cache is None
+        and jax.default_backend() == 'gpu'
+    ):
+      qkv = kernels_lib.gpu_flash_attention(
+          query_proj,
+          key_proj,
+          value_proj,
+          scale=self.scale,
+          is_causal=attn_mask is None,
+          mask=attn_mask,
+          query_sharding_spec=self.shd_config.act_btnh,
+      )
+    else:
+      qkv = reference_attention_lib.reference_attention(
+          query_proj,
+          key_proj,
+          value_proj,
+          scale=self.scale,
+          attn_mask=attn_mask,
+          mask_value=K_MASK,
+      )
 
     outputs = self.o_proj(qkv)
     outputs = shard(outputs, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]

@@ -17,6 +17,7 @@
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from tunix.models import gpu_kernels as kernels_lib
 
 
 def _renormalization_factor(router_probs: jax.Array, choices: jax.Array):
@@ -145,18 +146,21 @@ class MoERagged(nnx.Module):
         self.num_experts, self.features, 2 * self.hidden_dim
     )
 
-    gate_out = jax.lax.ragged_dot(
+    ragged_dot_fn = (
+        kernels_lib.gpu_ragged_dot
+        if jax.default_backend() == 'gpu'
+        else jax.lax.ragged_dot
+    )
+    gate_out = ragged_dot_fn(
         sorted_xs,
         w_gate.astype(self.config.dtype),
         group_sizes=xs_tokens_per_expert,
     )
-
     gate_out = gate_out.reshape(gate_out.shape[0], 2, self.hidden_dim)
     x1 = gate_out[:, 0, :]
     x2 = gate_out[:, 1, :]
     activation = nnx.gelu(x1) * x2
-
-    expert_outputs = jax.lax.ragged_dot(
+    expert_outputs = ragged_dot_fn(
         activation,
         self.linear.value.astype(self.config.dtype),
         group_sizes=xs_tokens_per_expert,

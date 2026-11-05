@@ -29,6 +29,8 @@ import jax.sharding as shd
 from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
+from tunix.models import gpu_kernels as kernels_lib
+from tunix.models import reference_attention as reference_attention_lib
 from tunix.models.qwen3 import model as _qwen3_model
 from tunix.utils import compat
 from tunix.utils import env_utils
@@ -481,33 +483,6 @@ def _l2norm(x: jaxtyping.Array, eps: float = 1e-6) -> jaxtyping.Array:
   return x_f32 * inv_norm
 
 
-def _extract_token_mask(
-    attention_mask: jaxtyping.Array | None, seq_len: int
-) -> jaxtyping.Array | None:
-  """Extracts per-token validity mask (B, T) from causal attention_mask.
-
-  For `seq_len > 1`, assumes initial prefill (`end_index == 0`) so that query
-  position `t` corresponds to key column `t` along the diagonal of
-  `attention_mask[:, :seq_len, :seq_len]`.
-
-  Args:
-    attention_mask: Boolean causal mask of shape `(B, T, S)` or `(B, 1, T, S)`.
-    seq_len: Query sequence length `T`.
-
-  Returns:
-    Boolean validity mask of shape `(B, T)`, or `None` if `attention_mask` is
-    `None`.
-  """
-  if attention_mask is None:
-    return None
-  mask = attention_mask
-  if mask.ndim == 4:
-    mask = mask[:, 0, :, :]
-  if seq_len == 1:
-    return jnp.any(mask, axis=-1)
-  return jnp.diagonal(mask[:, :seq_len, :seq_len], axis1=1, axis2=2)
-
-
 def _align_kv_heads_for_splash(
     key_proj: jaxtyping.Array,
     value_proj: jaxtyping.Array,
@@ -930,7 +905,9 @@ class GatedDeltaNet(nnx.Module):
       )
     x = jnp.asarray(x, dtype=self.config.dtype)
 
-    token_mask = _extract_token_mask(attention_mask, seq_len)
+    token_mask = reference_attention_lib.extract_token_mask(
+        attention_mask, seq_len
+    )
     if segment_ids is not None:
       seg_token_mask = segment_ids != 0
       token_mask = (
@@ -1237,7 +1214,7 @@ class Attention(nnx.Module):
       cache_value_positions = value_positions
       cache_key_positions = key_positions
 
-    b, t, qh, d = query_positions.shape
+    b, _, qh, _ = query_positions.shape
     _, _, kh, _ = key_positions.shape
     if segment_ids is not None and cache is not None and seq_len > 1:
       raise ValueError(
@@ -1247,58 +1224,52 @@ class Attention(nnx.Module):
     # NB: flash attention doesn't work for decoding step. When `cache` is
     # provided with `seq_len > 1`, flash prefill assumes initial prefill
     # (`end_index == 0`).
-    if self.config.use_flash_attention and seq_len > 1:
+    if (
+        self.config.use_flash_attention
+        and seq_len > 1
+        and cache is None
+        and jax.default_backend() == 'gpu'
+    ):
+      attn_vec = kernels_lib.gpu_flash_attention(
+          query_positions,
+          key_positions,
+          value_positions,
+          scale=self.scale,
+          is_causal=attn_mask is None,
+          mask=attn_mask,
+          segment_ids=segment_ids,
+          query_sharding_spec=self.shd_config.act_btnh,
+      )
+    elif (
+        self.config.use_flash_attention
+        and seq_len > 1
+        and cache is None
+        and jax.default_backend() != 'gpu'
+    ):
       query_proj = query_positions.transpose(0, 2, 1, 3) * self.scale
       key_proj = key_positions.transpose(0, 2, 1, 3)
       value_proj = value_positions.transpose(0, 2, 1, 3)
 
-      effective_segment_ids = segment_ids
-      if effective_segment_ids is None and attn_mask is not None:
-        token_mask = _extract_token_mask(attn_mask, seq_len)
-        if token_mask is not None:
-          effective_segment_ids = token_mask.astype(jnp.int32)
-
-      mesh = pxla.thread_resources.env.physical_mesh
-      if mesh.empty:
-        try:
-          abs_mesh = jax.sharding.get_abstract_mesh()
-          if abs_mesh is not None and not abs_mesh.empty:
-            mesh = abs_mesh
-          else:
-            ctx_mesh = jax.sharding.get_mesh()
-            if ctx_mesh is not None and not ctx_mesh.empty:
-              mesh = ctx_mesh
-        except Exception:  # pylint: disable=broad-exception-caught
-          pass
-
-      shd_b, shd_t, shd_n, shd_h = self.shd_config.act_btnh
-      if mesh is None or not mesh.shape:
-        shd_b = shd_t = shd_n = shd_h = None
-      else:
-        if shd_b is not None and (
-            shd_b not in mesh.shape or b % mesh.shape[shd_b] != 0
-        ):
-          shd_b = None
-        if shd_t is not None and shd_t not in mesh.shape:
-          shd_t = None
-        if shd_n is not None and shd_n not in mesh.shape:
-          shd_n = None
-        if shd_h is not None and shd_h not in mesh.shape:
-          shd_h = None
-
-      head_shards = (
-          mesh.shape[shd_n]
-          if mesh is not None and shd_n is not None and shd_n in mesh.shape
-          else 1
+      effective_segment_ids = reference_attention_lib.extract_token_mask(
+          attn_mask, seq_len, segment_ids=segment_ids, dtype=jnp.int32
       )
-      q_seq_shards = (
-          mesh.shape[shd_t]
-          if mesh is not None and shd_t is not None and shd_t in mesh.shape
-          else 1
+
+      (
+          mesh,
+          shd_b,
+          shd_t,
+          shd_n,
+          shd_h,
+          _,
+          head_shards,
+          q_seq_shards,
+      ) = reference_attention_lib.resolve_splash_sharding(
+          self.shd_config.act_btnh, b, kh
       )
       key_proj, value_proj, kh = _align_kv_heads_for_splash(
           key_proj, value_proj, qh, head_shards
       )
+      shd_n_kv = shd_n if shd_n is not None and kh % head_shards == 0 else None
 
       bs = self.config.flash_attention_block_size
       if self.config.splash_attention_impl == SplashAttentionImpl.TOKAMAX:
@@ -1318,12 +1289,8 @@ class Attention(nnx.Module):
             config=splash_config,
             q_seq_shards=q_seq_shards,
         )
-        kernel_spec = (
-            splash_attn_kernel.manual_sharding_spec(
-                shd.NamedSharding(mesh, P(shd_t))
-            )
-            if mesh is not None
-            else None
+        kernel_spec = splash_attn_kernel.manual_sharding_spec(
+            shd.NamedSharding(mesh, P(shd_t))
         )
         segment_ids_cls = tokamax_splash.SegmentIds
       else:
@@ -1346,24 +1313,12 @@ class Attention(nnx.Module):
             head_shards=head_shards,
             q_seq_shards=q_seq_shards,
         )
-        kernel_spec = (
-            splash_attn_kernel.manual_sharding_spec(
-                shd.NamedSharding(mesh, P(shd_n, shd_t))
-            )
-            if mesh is not None
-            else None
+        kernel_spec = splash_attn_kernel.manual_sharding_spec(
+            shd.NamedSharding(mesh, P(shd_n, shd_t))
         )
         segment_ids_cls = splash.SegmentIds
 
       shd_spec = P(shd_b, shd_n, shd_t, shd_h)
-      shd_n_kv = (
-          shd_n
-          if mesh is not None
-          and shd_n is not None
-          and shd_n in mesh.shape
-          and kh % mesh.shape[shd_n] == 0
-          else None
-      )
       unsharded_seq_kv = P(shd_b, shd_n_kv, None, shd_h)
 
       if effective_segment_ids is not None:
@@ -1422,38 +1377,16 @@ class Attention(nnx.Module):
         )
       attn_vec = attn_vec.transpose(0, 2, 1, 3)
     else:
-      s = cache_key_positions.shape[1]
-      g = qh // kh
-
-      q = query_positions.reshape((b, t, kh, g, d))
-      scores = (
-          jnp.einsum(
-              'btkgh,bskh->bkgts',
-              q.astype(jnp.float32),
-              cache_key_positions.astype(jnp.float32),
-          )
-          * self.scale
+      attn_vec = reference_attention_lib.reference_attention(
+          query_positions,
+          cache_key_positions,
+          cache_value_positions,
+          scale=self.scale,
+          attn_mask=attn_mask,
+          segment_ids=segment_ids,
+          is_causal=(attn_mask is None and cache is None),
+          mask_value=K_MASK,
       )
-      scores = scores.reshape((b, qh, t, s))
-
-      if attn_mask is not None:
-        if attn_mask.ndim == 3:
-          attn_mask = jnp.expand_dims(attn_mask, axis=1)
-        scores = jnp.where(attn_mask, scores, K_MASK)
-      elif cache is None:
-        causal_mask = jnp.tril(jnp.ones((t, s), dtype=jnp.bool_))
-        scores = jnp.where(causal_mask[None, None, :, :], scores, K_MASK)
-
-      if segment_ids is not None:
-        seg_mask = segment_ids[:, :, None] == segment_ids[:, None, :]
-        scores = jnp.where(seg_mask[:, None, :, :], scores, K_MASK)
-
-      probs = jax.nn.softmax(scores, axis=-1).astype(
-          cache_value_positions.dtype
-      )
-      probs = probs.reshape((b, kh, g, t, s))
-      attn_vec = jnp.einsum('bkgts,bskh->btkgh', probs, cache_value_positions)
-      attn_vec = attn_vec.reshape((b, t, qh, d))
 
     if gate is not None:
       attn_vec = (

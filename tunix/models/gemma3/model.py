@@ -23,10 +23,12 @@ import einops
 import flax
 from flax import nnx
 import jax
-from jax.sharding import PartitionSpec as P
 from jax import numpy as jnp
+from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
+from tunix.models import gpu_kernels as kernels_lib
+from tunix.models import reference_attention as reference_attention_lib
 from tunix.models.gemma3 import merge_embeddings as merge_embeddings_lib
 from tunix.models.gemma3 import utils
 from tunix.models.gemma3 import vision
@@ -125,6 +127,7 @@ class ModelConfig:
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
   param_dtype: jnp.dtype = jnp.bfloat16  # pyrefly: ignore[bad-assignment]
+  use_flash_attention: bool = False
 
   @classmethod
   def gemma3_270m(
@@ -515,19 +518,25 @@ class Attention(nnx.Module):
       shd_config: ShardingConfig,
       remat_config: RematConfig,
       param_dtype: jnp.dtype = jnp.bfloat16,  # pyrefly: ignore[bad-function-definition]
+      use_flash_attention: bool = False,
   ):
     if attn_type == AttentionType.LOCAL_SLIDING and sliding_window_size is None:
       raise ValueError(
           '`sliding_window_size` must be set if `attn_type` is Local Sliding.'
       )
 
-    self.sliding_window_size = sliding_window_size
+    self.sliding_window_size = (
+        sliding_window_size
+        if attn_type == AttentionType.LOCAL_SLIDING
+        else None
+    )
     self.attn_type = attn_type
     self.rope_base_frequency = rope_base_frequency
     self.rope_scale_factor = rope_scale_factor
     self.query_pre_attn_norm = query_pre_attn_norm
     self.shd_config = shd_config
     self.remat_config = remat_config
+    self.use_flash_attention = use_flash_attention
     self.attn_vec_einsum = Einsum(
         einsum_str='BTNH,NHD->BTD',
         shape=(num_heads, head_dim, features),
@@ -615,49 +624,49 @@ class Attention(nnx.Module):
           cache['k'], key_proj, slice_indices
       )
 
-    if self.use_gqa:
-      # Reshape matrices to enable einsums over groups.
-      b, t, kg, h = query_scaled.shape
-      query_scaled = query_scaled.reshape(
-          (b, t, self.num_kv_heads, int(kg / self.num_kv_heads), h)
+    if (
+        self.use_flash_attention
+        and seq_len > 1
+        and cache is None
+        and jax.default_backend() == 'gpu'
+    ):
+      encoded = kernels_lib.gpu_flash_attention(
+          query_scaled,
+          key_proj,
+          value_proj,
+          scale=1.0,
+          is_causal=attn_mask is None,
+          mask=attn_mask,
+          local_window_size=self.sliding_window_size,
+          query_sharding_spec=self.shd_config.act_btnh,
       )
-      logits = jnp.einsum('BTKGH,BSKH->BTKGS', query_scaled, key_proj)
-      b, t, k, g, s = logits.shape
-      logits = logits.reshape((b, t, k * g, s))
     else:
-      # [batch_size, seq_len, num_heads, cache_size]
-      # If cache is None, then cache_size = seq_len.
-      logits = jnp.einsum('BTNH,BSNH->BTNS', query_scaled, key_proj)
-
-    if self.attn_type == AttentionType.LOCAL_SLIDING:
-      if segment_pos.shape[1] == 1:  # for decoding
-        sliding_mask = create_sliding_window_mask(
-            attn_mask,
-            sliding_window_size=self.sliding_window_size,  # pyrefly: ignore[bad-argument-type]
-        )
-      else:  # for prefill
+      if self.attn_type == AttentionType.LOCAL_SLIDING:
         all_ones = jnp.ones_like(attn_mask)
-        sliding_mask = jnp.triu(
-            all_ones, -1 * self.sliding_window_size + 1  # pyrefly: ignore[unsupported-operation]
-        ) * jnp.tril(all_ones, self.sliding_window_size - 1)  # pyrefly: ignore[unsupported-operation]
-      attn_mask = sliding_mask * attn_mask
+        # pylint: disable=g-long-ternary
+        sliding_mask = (
+            create_sliding_window_mask(
+                attn_mask,
+                sliding_window_size=self.sliding_window_size,  # pyrefly: ignore[bad-argument-type]
+            )
+            if segment_pos.shape[1] == 1
+            else jnp.triu(
+                all_ones, -1 * self.sliding_window_size + 1  # pyrefly: ignore[unsupported-operation]
+            )
+            * jnp.tril(all_ones, self.sliding_window_size - 1)  # pyrefly: ignore[unsupported-operation]
+        )
+        # pylint: enable=g-long-ternary
+        attn_mask = sliding_mask * attn_mask
 
-    padded_logits = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
-
-    probs = jax.nn.softmax(padded_logits, axis=-1).astype(key_proj.dtype)
-
-    if self.use_gqa:
-      # Reshape matrices to enable einsums over groups.
-      b, t, kg, h = probs.shape
-      probs = probs.reshape(
-          (b, t, self.num_kv_heads, int(kg / self.num_kv_heads), h)
+      encoded = reference_attention_lib.reference_attention(
+          query_scaled,
+          key_proj,
+          value_proj,
+          scale=1.0,
+          attn_mask=attn_mask,
+          mask_value=K_MASK,
+          softmax_dtype=None,
       )
-      encoded = jnp.einsum('BTKGS,BSKH->BTKGH', probs, value_proj)
-      b, t, k, g, h = encoded.shape
-      encoded = encoded.reshape((b, t, k * g, h))
-    else:
-      # [batch_size, seq_len, num_heads, head_dim]
-      encoded = jnp.einsum('BTNS,BSNH->BTNH', probs, value_proj)
 
     attn_output = self.attn_vec_einsum(encoded)
     attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)
@@ -848,6 +857,7 @@ class DecoderLayer(nnx.Module):
         shd_config=config.shd_config,
         remat_config=config.remat_config,
         param_dtype=config.param_dtype,
+        use_flash_attention=config.use_flash_attention,
     )
     self.post_attention_norm = RMSNorm(
         config.embed_dim,

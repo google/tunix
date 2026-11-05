@@ -28,6 +28,8 @@ import jax.sharding as shd
 from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
+from tunix.models import gpu_kernels as kernels_lib
+from tunix.models import reference_attention as reference_attention_lib
 from tunix.models.gemma import params as params_lib
 from tunix.utils import compat
 from tunix.utils import env_utils
@@ -105,6 +107,7 @@ class ModelConfig:
   attention_types: Iterable[AttentionType]
   attn_logits_soft_cap: float | None = None
   sliding_window_size: int | None = None
+  use_flash_attention: bool = False
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
 
@@ -353,6 +356,7 @@ class Attention(nnx.Module):
       rngs: nnx.Rngs,
       sliding_window_size: int | None = None,
       attn_logits_soft_cap: float | None = None,
+      use_flash_attention: bool = False,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
       remat_config: RematConfig = RematConfig.BLOCK,
   ):
@@ -361,9 +365,14 @@ class Attention(nnx.Module):
           '`sliding_window_size` must be set if `attn_type` is Local Sliding.'
       )
 
-    self.sliding_window_size = sliding_window_size
+    self.sliding_window_size = (
+        sliding_window_size
+        if attn_type == AttentionType.LOCAL_SLIDING
+        else None
+    )
     self.attn_type = attn_type
     self.attn_logits_soft_cap = attn_logits_soft_cap
+    self.use_flash_attention = use_flash_attention
     self.shd_config = shd_config
     self.remat_config = remat_config
     self.attn_vec_einsum = Einsum(
@@ -439,48 +448,42 @@ class Attention(nnx.Module):
           cache['k'], key_proj, slice_indices
       )
 
-    if self.use_gqa:
-      # Reshape matrices to enable einsums over groups.
-      b, t, kg, h = query_scaled.shape
-      query_scaled = query_scaled.reshape(
-          (b, t, self.num_kv_heads, int(kg / self.num_kv_heads), h)
+    if (
+        self.use_flash_attention
+        and seq_len > 1
+        and cache is None
+        and jax.default_backend() == 'gpu'
+    ):
+      encoded = kernels_lib.gpu_flash_attention(
+          query_scaled,
+          key_proj,
+          value_proj,
+          scale=1.0,
+          is_causal=attn_mask is None,
+          mask=attn_mask,
+          local_window_size=self.sliding_window_size,
+          logits_soft_cap=self.attn_logits_soft_cap,
+          query_sharding_spec=self.shd_config.act_btnh,
       )
-      logits = jnp.einsum('BTKGH,BSKH->BTKGS', query_scaled, key_proj)
-      b, t, k, g, s = logits.shape
-      logits = logits.reshape((b, t, k * g, s))
     else:
-      # [batch_size, seq_len, num_heads, cache_size]
-      # If cache is None, then cache_size = seq_len.
-      logits = jnp.einsum('BTNH,BSNH->BTNS', query_scaled, key_proj)
+      if self.attn_type == AttentionType.LOCAL_SLIDING:
+        sliding_mask = _create_sliding_mask(
+            segment_pos,
+            cache_len=attn_mask.shape[-1],
+            sliding_window_size=self.sliding_window_size,  # pyrefly: ignore[bad-argument-type]
+        )
+        attn_mask = sliding_mask * attn_mask
 
-    if self.attn_logits_soft_cap is not None:
-      logits = jnp.tanh(logits / self.attn_logits_soft_cap)
-      logits = logits * self.attn_logits_soft_cap
-
-    if self.attn_type == AttentionType.LOCAL_SLIDING:
-      sliding_mask = _create_sliding_mask(
-          segment_pos,
-          cache_len=attn_mask.shape[-1],
-          sliding_window_size=self.sliding_window_size,  # pyrefly: ignore[bad-argument-type]
+      encoded = reference_attention_lib.reference_attention(
+          query_scaled,
+          key_proj,
+          value_proj,
+          scale=1.0,
+          attn_mask=attn_mask,
+          logits_soft_cap=self.attn_logits_soft_cap,
+          mask_value=K_MASK,
+          softmax_dtype=None,
       )
-      attn_mask = sliding_mask * attn_mask
-
-    padded_logits = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
-
-    probs = jax.nn.softmax(padded_logits, axis=-1).astype(key_proj.dtype)
-
-    if self.use_gqa:
-      # Reshape matrices to enable einsums over groups.
-      b, t, kg, h = probs.shape
-      probs = probs.reshape(
-          (b, t, self.num_kv_heads, int(kg / self.num_kv_heads), h)
-      )
-      encoded = jnp.einsum('BTKGS,BSKH->BTKGH', probs, value_proj)
-      b, t, k, g, h = encoded.shape
-      encoded = encoded.reshape((b, t, k * g, h))
-    else:
-      # [batch_size, seq_len, num_heads, head_dim]
-      encoded = jnp.einsum('BTNS,BSNH->BTNH', probs, value_proj)
 
     attn_output = self.attn_vec_einsum(encoded)
     attn_output = shard(attn_output, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
@@ -638,6 +641,7 @@ class DecoderLayer(nnx.Module):
         attn_type=attn_type,
         attn_logits_soft_cap=config.attn_logits_soft_cap,
         sliding_window_size=config.sliding_window_size,
+        use_flash_attention=config.use_flash_attention,
         rngs=rngs,
         shd_config=config.shd_config,
         remat_config=config.remat_config,
