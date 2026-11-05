@@ -38,8 +38,17 @@ env:
   JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS: "0"
 
 jobs:
-  run_core:
+  run_core_shard:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - agentic_and_utils
+          - rl
+          - models
+          - dist_rl
+          - experimental
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -48,21 +57,22 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Cache pip
+      - name: Cache uv
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
-          path: ~/.cache/pip
-          key: pip-cpu-core-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements/**/*.txt', 'requirements*.txt', 'constraints*.txt') }}
+          path: ~/.cache/uv
+          key: uv-cpu-core-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements/**/*.txt', 'requirements*.txt', 'constraints*.txt') }}
           restore-keys: |
-            pip-cpu-core-${{ runner.os }}-
+            uv-cpu-core-${{ runner.os }}-
 
       - name: Cache JAX compilation
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: /tmp/jax_compilation_cache
-          key: jax-cache-cpu-core-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements/**/*.txt', 'requirements*.txt') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: jax-cache-cpu-core-${{ matrix.shard }}-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements/**/*.txt', 'requirements*.txt') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            jax-cache-cpu-core-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements/**/*.txt', 'requirements*.txt') }}-
+            jax-cache-cpu-core-${{ matrix.shard }}-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements/**/*.txt', 'requirements*.txt') }}-
+            jax-cache-cpu-core-${{ matrix.shard }}-${{ runner.os }}-
             jax-cache-cpu-core-${{ runner.os }}-
 
       - name: Download the tunix wheel
@@ -72,8 +82,8 @@ jobs:
 
       - name: Install the tunix wheel
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install --find-links=. "google-tunix[prod,test,experimental]"
+          python -m pip install -q uv
+          uv pip install --system --find-links=. --reinstall-package google-tunix "google-tunix[prod,test,experimental]"
           python -c "import pathlib, shutil, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.so')) for ext in ('dist_rl/worker/_compression_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'; [shutil.copy2(p, pathlib.Path('tunix') / p.relative_to(root)) for paths in exts.values() for p in paths]"
 
       - name: Verify Tunix imports from installed package
@@ -92,51 +102,81 @@ jobs:
           assert tunix.__version__ != '0.0.0.dev0', 'Tunix version not set correctly'
           print('All tunix modules imported successfully and version is', tunix.__version__)
           "
-      - name: Run agentic RL tests
-        run: |
-          python -m pytest tests/rl/agentic/ -n auto --dist loadscope -v --tb=short
 
-      - name: Run RL unit tests
+      - name: Run agentic RL tests
+        if: ${{ matrix.shard == 'agentic_and_utils' }}
         run: |
-          python -m pytest tests/rl/ -n auto --dist loadscope -v --tb=short -k "not test_grpo_with_lora_model" --ignore=tests/rl/agentic --ignore=tests/rl/rl_cluster_test.py
+          python -m pytest tests/rl/agentic/ -n auto --dist load -v --tb=short
 
       - name: Run Cli utils tests
+        if: ${{ matrix.shard == 'agentic_and_utils' }}
         run: |
           python -m pytest tests/cli/utils/ -v --tb=short
 
       - name: Run shared mesh and topology tests
+        if: ${{ matrix.shard == 'agentic_and_utils' }}
         run: |
           python -m pytest tests/utils/mesh_test.py tests/utils/topology_test.py -v --tb=short
 
       - name: Run perf tests
+        if: ${{ matrix.shard == 'agentic_and_utils' }}
         run: |
           python -m pytest tests/perf/ -v --tb=short
 
+      - name: Run RL unit tests
+        if: ${{ matrix.shard == 'rl' }}
+        run: |
+          python -m pytest tests/rl/ -n auto --dist loadscope -v --tb=short -k "not test_grpo_with_lora_model" --ignore=tests/rl/agentic --ignore=tests/rl/rl_cluster_test.py
+
       - name: Run model tests
+        if: ${{ matrix.shard == 'models' }}
         run: |
           # Cap at -n 2 to stay within the 16 GB runner RAM budget (~14 GB peak RSS vs ~21.8 GB at -n 4).
           python -m pytest tests/models/ -n 2 --dist loadscope -v --tb=short \
             --ignore=tests/models/naming_test.py \
             --ignore=tests/models/paged_attention_test.py
-          python -m pytest tests/models/paged_attention_test.py -n 2 --dist loadscope -v --tb=short
+          python -m pytest tests/models/paged_attention_test.py -n 2 --dist load -v --tb=short
 
       - name: Compile gRPC Protobuf definitions
+        if: ${{ matrix.shard == 'dist_rl' || matrix.shard == 'experimental' }}
         run: |
-          python -m pip install grpcio-tools
           find tunix/dist_rl/distributed -name "*.proto" -exec \
             python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. {} +
 
-      - name: Run dist_rl and experimental tests
+      - name: Run dist_rl tests
+        if: ${{ matrix.shard == 'dist_rl' }}
         env:
           # Configs with a Hugging Face hub tokenizer require HF_TOKEN at
           # resolution time; these tests do not download anything.
           HF_TOKEN: ${{ secrets.HF_TOKEN || 'dist_rl_config_test_token' }}
         run: |
           # TODO(tunix-dev): add back raiden tests after tpu_sync lib is ready.
-          python -m pytest tests/dist_rl/ tests/experimental/ -n auto --dist loadscope -v --tb=short \
+          python -m pytest tests/dist_rl/ -n auto --dist loadscope -v --tb=short \
             --ignore-glob='*/raiden_*.py' \
             --ignore=tests/dist_rl/rollout/vllm_sampler_test.py \
             --ignore=tests/dist_rl/weight_sync/weight_sync_test.py
+
+      - name: Run experimental tests
+        if: ${{ matrix.shard == 'experimental' }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN || 'dist_rl_config_test_token' }}
+        run: |
+          python -m pytest tests/experimental/ -n auto --dist loadscope -v --tb=short \
+            --ignore-glob='*/raiden_*.py'
+
+  run_core:
+    needs: [run_core_shard]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check core test shards
+        env:
+          SHARDS_RESULT: ${{ needs.run_core_shard.result }}
+        run: |
+          if [[ "$SHARDS_RESULT" != "success" ]]; then
+            echo "Core test shards failed (result=$SHARDS_RESULT)."
+            exit 1
+          fi
 
   run_vllm:
     runs-on: ubuntu-24.04
@@ -186,13 +226,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Cache pip
+      - name: Cache uv
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
-          path: ~/.cache/pip
-          key: pip-cpu-dev-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements/**/*.txt', 'requirements*.txt', 'constraints*.txt') }}
+          path: ~/.cache/uv
+          key: uv-cpu-dev-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements/**/*.txt', 'requirements*.txt', 'constraints*.txt') }}
           restore-keys: |
-            pip-cpu-dev-${{ runner.os }}-
+            uv-cpu-dev-${{ runner.os }}-
 
       - name: Cache JAX compilation
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
@@ -219,10 +259,10 @@ jobs:
 
       - name: Install the tunix wheel and dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install --find-links=. "google-tunix[prod,test,experimental]"
+          python -m pip install -q uv
+          uv pip install --system --find-links=. --reinstall-package google-tunix "google-tunix[prod,test,experimental]"
           python -c "import pathlib, shutil, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.so')) for ext in ('dist_rl/worker/_compression_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'; [shutil.copy2(p, pathlib.Path('tunix') / p.relative_to(root)) for paths in exts.values() for p in paths]"
-          python -m pip install --upgrade kagglehub kagglesdk torch
+          uv pip install --system --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match --upgrade kagglehub kagglesdk torch
 
       - name: Run Smoke tests (model creation)
         env:
