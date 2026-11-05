@@ -953,9 +953,13 @@ def main(
     worker_service = _create_rollout_worker(hp, worker_id, tokenizer)
 
     async def _drain() -> None:
-      # Cancel in-flight trajectory collections, then shut down the engine.
-      worker_service.stop()
-      await worker_service.sampler.stop()
+      # Cancel in-flight trajectory collections, then shut down the engine. The
+      # engine is shut down even if `stop()` raises (e.g. it re-raises an
+      # earlier failed stop), so the vLLM engine and its tasks do not leak.
+      try:
+        worker_service.stop()
+      finally:
+        await worker_service.sampler.stop()
 
     await node_utils.serve_worker(
         worker_service,

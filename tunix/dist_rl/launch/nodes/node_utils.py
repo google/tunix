@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+import contextlib
 import json
 import logging
 import os
@@ -40,6 +41,7 @@ import transformers
 from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.distributed.runtime import context as context_lib
 from tunix.dist_rl.launch.common import resolve_config
+from tunix.dist_rl.worker import abstract_worker
 from tunix.dist_rl.worker import remote_execution
 
 NodeRole = Literal["trainer", "rollout", "inference"]
@@ -486,8 +488,13 @@ def optional_bool(mapping: Mapping[str, object], key: str) -> bool | None:
   return None
 
 
+# Grace period for in-flight RPCs when a worker stops serving; matches
+# `remote_execution.serve_worker`.
+_STOP_SERVING_GRACE_S: Final[float] = 5.0
+
+
 async def serve_worker(
-    worker_service: object,
+    worker_service: abstract_worker.Worker,
     *,
     process_context: context_lib.ProcessContext,
     role: NodeRole,
@@ -498,10 +505,11 @@ async def serve_worker(
     drain_fn: Callable[[], Awaitable[None] | None] | None = None,
     close_fn: Callable[[], None] | None = None,
 ) -> None:
-  """Starts the gRPC server, registers with discovery, and drains on signal.
+  """Starts the gRPC server, registers with discovery, and drains on stop.
 
-  On SIGINT/SIGTERM (or cancellation) the worker shuts down in this order:
-  `drain_fn`, `server.stop_serving()`, then `close_fn`.
+  Wakes on SIGINT/SIGTERM, cancellation, or when `worker_service` invokes its
+  `set_on_stop` callback (from an incoming `stop(abort=...)` RPC), then shuts
+  down in this order: `drain_fn`, `server.stop_serving()`, then `close_fn`.
 
   Args:
     worker_service: Worker RPC service exposed by `GrpcRemoteExecutionServer`.
@@ -517,11 +525,29 @@ async def serve_worker(
       cancel long-running work so in-flight RPCs return.
     close_fn: Optional sync callback run after `stop_serving` has cancelled the
       queued RPCs and waited for the running one, e.g. to release resources
-      those RPCs use. Runs even if `stop_serving` fails; its own failure
-      propagates.
+      those RPCs use. Runs even if `stop_serving` fails. Its own failure
+      propagates, unless the worker was stopped with an abort: it is then
+      logged and the process exits 1.
+
+  Raises:
+    SystemExit: With code 1 when stopped with abort=True (or when worker stop
+      escalates a failure to an abort).
   """
-  server = remote_execution.GrpcRemoteExecutionServer(worker_service)
-  await server.start_serving_async(port)
+  stop_event = asyncio.Event()
+  loop = asyncio.get_running_loop()
+  aborted: list[bool] = []
+
+  def _on_stop(abort: bool = False) -> None:
+    aborted.append(bool(abort))
+    loop.call_soon_threadsafe(stop_event.set)
+
+  worker_service.set_on_stop(_on_stop)
+  try:
+    server = remote_execution.GrpcRemoteExecutionServer(worker_service)
+    await server.start_serving_async(port)
+  except BaseException:
+    worker_service.set_on_stop(None)
+    raise
   logging.info("Serving %s worker on port %d.", role, port)
   # Everything after `start_serving_async` is inside the `try`, so the server is
   # always drained, stopped, and closed, even if discovery registration fails.
@@ -539,18 +565,22 @@ async def serve_worker(
     process_context.ipc.discovery.register(metadata=pickle.dumps(metadata))
     logging.info("%s worker is registered.", role.capitalize())
 
-    stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-      try:
-        loop.add_signal_handler(sig, stop_event.set)
-      except NotImplementedError:
-        pass
+    installed_signals: list[signal.Signals] = []
+    try:
+      for sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError):
+          loop.add_signal_handler(sig, stop_event.set)
+          installed_signals.append(sig)
 
-    await stop_event.wait()
-  except asyncio.CancelledError:
-    pass
+      with contextlib.suppress(asyncio.CancelledError):
+        await stop_event.wait()
+    finally:
+      # Restore the default handlers, so a second SIGINT/SIGTERM can still
+      # interrupt a teardown that hangs (e.g. a blocked `close_fn`).
+      for sig in installed_signals:
+        loop.remove_signal_handler(sig)
   finally:
+    await asyncio.sleep(0)
     # TODO(noghabi): Let `drain_fn` failures propagate too, once `stop_serving`
     # and `close_fn` have run (check the rollout's drain first).
     if drain_fn is not None:
@@ -563,12 +593,25 @@ async def serve_worker(
       except Exception:  # pylint: disable=broad-exception-caught
         logging.exception("Failed to drain %s worker cleanly.", role)
     try:
-      await server.stop_serving()
+      # The grace lets the `stop` RPC that woke this loop return its response
+      # to the orchestrator before the server goes away.
+      await server.stop_serving(grace=_STOP_SERVING_GRACE_S)
     finally:
-      if close_fn is not None:
-        logging.info("Closing %s worker...", role)
-        close_fn()
-        logging.info("%s worker closed.", role.capitalize())
+      try:
+        if close_fn is not None:
+          logging.info("Closing %s worker...", role)
+          close_fn()
+          logging.info("%s worker closed.", role.capitalize())
+      except Exception:  # pylint: disable=broad-exception-caught
+        # After an abort (e.g. the worker's own `stop()` failed and now
+        # re-raises that failure), exit 1 below rather than with this error.
+        if not any(aborted):
+          raise
+        logging.exception("Failed to close %s worker cleanly.", role)
+      finally:
+        worker_service.set_on_stop(None)
+  if any(aborted):
+    raise SystemExit(1)
 
 
 # TODO(noghabi): Delegate to `tunix.utils.mesh.create_mesh` with

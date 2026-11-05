@@ -104,6 +104,11 @@ def main(
       execution_context=mesh,
   )
 
+  # On SIGTERM/SIGINT, stop the gRPC server first so in-flight scoring RPCs
+  # finish before transitioning the worker to STOPPED.
+  def _close() -> None:
+    worker_service.stop()
+
   asyncio.run(
       node_utils.serve_worker(
           worker_service,
@@ -112,6 +117,7 @@ def main(
           worker_id_str=worker_id,
           port=port,
           config_sha256=config_sha256,
+          close_fn=_close,
       )
   )
 

@@ -65,11 +65,14 @@ class InferenceMainTest(absltest.TestCase):
             return_value=mock.sentinel.core_worker,
         )
     )
+    self.mock_worker_service = mock.MagicMock(
+        spec=exp_inference_worker.InferenceWorker
+    )
     self.mock_exp_worker_cls = self.enter_context(
         mock.patch.object(
             exp_inference_worker,
             "InferenceWorker",
-            return_value=mock.sentinel.worker_service,
+            return_value=self.mock_worker_service,
         )
     )
     self.mock_serve_worker = self.enter_context(
@@ -120,16 +123,22 @@ class InferenceMainTest(absltest.TestCase):
         chunk_size=4,
         execution_context=self.mock_mesh,
     )
-    self.mock_serve_worker.assert_awaited_once_with(
-        mock.sentinel.worker_service,
-        process_context=self.mock_context,
-        role="inference",
-        worker_id_str="reference-inference-0",
-        port=20052,
-        config_sha256=resolve_config.config_fingerprint(
-            resolve_config.initialize(argv)
-        ),
+    self.mock_serve_worker.assert_awaited_once()
+    serve_kwargs = self.mock_serve_worker.call_args.kwargs
+    self.assertIs(
+        self.mock_serve_worker.call_args.args[0], self.mock_worker_service
     )
+    self.assertIs(serve_kwargs["process_context"], self.mock_context)
+    self.assertEqual(serve_kwargs["role"], "inference")
+    self.assertEqual(serve_kwargs["worker_id_str"], "reference-inference-0")
+    self.assertEqual(serve_kwargs["port"], 20052)
+    self.assertEqual(
+        serve_kwargs["config_sha256"],
+        resolve_config.config_fingerprint(resolve_config.initialize(argv)),
+    )
+    self.assertNotIn("drain_fn", serve_kwargs)
+    self.assertIsNone(serve_kwargs["close_fn"]())
+    self.mock_worker_service.stop.assert_called_once_with()
 
   def test_main_raises_without_discovery_context(self):
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):

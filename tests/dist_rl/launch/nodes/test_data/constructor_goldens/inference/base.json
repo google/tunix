@@ -91,6 +91,7 @@
           "<tunix.dist_rl.worker.inference_worker.InferenceWorker()>"
         ],
         "kwargs": {
+          "close_fn": "<function tunix.dist_rl.launch.nodes.inference.main.<locals>._close>",
           "config_sha256": "<resolve_config.config_fingerprint(hp)>",
           "port": 20002,
           "process_context": "<context>",
