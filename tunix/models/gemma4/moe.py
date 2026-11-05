@@ -151,9 +151,8 @@ class MoERagged(nnx.Module):
         group_sizes=xs_tokens_per_expert,
     )
 
-    gate_out = gate_out.reshape(gate_out.shape[0], 2, self.hidden_dim)
-    x1 = gate_out[:, 0, :]
-    x2 = gate_out[:, 1, :]
+    x1 = gate_out[:, : self.hidden_dim]
+    x2 = gate_out[:, self.hidden_dim :]
     activation = nnx.gelu(x1) * x2
 
     expert_outputs = jax.lax.ragged_dot(
@@ -162,19 +161,13 @@ class MoERagged(nnx.Module):
         group_sizes=xs_tokens_per_expert,
     )
 
-    expert_indices = jnp.repeat(
-        jnp.arange(self.num_experts),
-        xs_tokens_per_expert,
-        total_repeat_length=expert_outputs.shape[0],
-    )
-    per_expert = self.per_expert_scale.value.astype(expert_outputs.dtype)
-    expert_outputs = expert_outputs * per_expert[expert_indices, None]
-
     out = _expert_collect(
         expert_outputs,
         xs_reverse_argsort=xs_reverse_argsort,
         xs_combine_weights=xs_combine_weights,
     )
+    per_expert = self.per_expert_scale.value.astype(out.dtype)
+    out = out * per_expert[expert_choices, None]
 
     out = jnp.einsum(
         'blkd,blk->bld',
