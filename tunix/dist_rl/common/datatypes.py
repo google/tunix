@@ -239,35 +239,36 @@ _FT_ON_DEFAULT_POLL_RETRY_BUDGET_S = 60.0
 class FaultToleranceConfig:
   """Configuration for worker fault tolerance.
 
-  TODO(b/577214994): Decouple task retry budget from worker eviction budget
-  (a failed `dispatch_task` should only mark a worker suspect until its poll
-  loop confirms the failure), extend with circuit-breaking knobs, and then flip
-  `enabled` to default to `True`.
+  TODO(b/577214994): Extend with circuit-breaking knobs and flip `enabled` to
+  default to `True` once evicted workers whose process is still alive exit or
+  rejoin the rollout pool.
 
   Attributes:
     enabled: Whether worker fault tolerance (automatic eviction and task retry)
-      is enabled. Defaults to `False`: in v1 a single transport failure evicts a
-      worker, and an evicted worker whose process is still alive never
-      re-registers (rollout workers register with discovery only once at
-      startup), so a transient fault on a healthy worker permanently shrinks the
-      rollout pool. When `False`, fault tolerance is disabled and
-      `effective_max_task_retries` is `0`.
+      is enabled. Transient transport errors are first retried in place on the
+      same worker (dispatch: up to 3 serialized attempts; poll: until
+      `effective_poll_retry_budget_s`), and the worker is evicted only when
+      those run out or on a non-transient transport error. Defaults to `False`:
+      an evicted worker whose process is still alive never re-registers (rollout
+      workers register with discovery only once at startup), so a false eviction
+      of a healthy worker permanently shrinks the rollout pool. When `False`,
+      fault tolerance is disabled and `effective_max_task_retries` is `0`.
     max_task_retries: Maximum number of times an in-flight task is re-dispatched
       onto surviving workers after a worker failure when `enabled=True`. Because
-      each send-path or poll-path transport failure evicts the failing worker in
-      v1, `max_task_retries` also bounds the number of workers a single request
-      can evict; defaults to `1`.
+      a task is re-dispatched only after its worker is evicted,
+      `max_task_retries` also bounds the number of workers a single request can
+      evict; defaults to `1`.
     poll_retry_budget_s: Optional override for the maximum wall-clock duration
-      in seconds to retry transient poll errors on a rollout worker before
-      failing its in-flight tasks (`0.0` fails immediately on the first
-      transient poll error). When `None` (default),
+      in seconds to retry transient poll (and, when `enabled=True`, dispatch)
+      errors on a rollout worker before failing its in-flight tasks (`0.0` fails
+      immediately on the first transient error). When `None` (default),
       `effective_poll_retry_budget_s` resolves to `60.0` when `enabled=True`
       (gRPC keepalive ~30s plus margin) and `300.0` when `enabled=False`
       (matching `TaskSession`'s default budget).
   """
 
-  # TODO(b/577214994): Change `enabled` default to `True` once dispatch failure
-  # is decoupled from worker eviction.
+  # TODO(b/577214994): Change `enabled` default to `True` once evicted workers
+  # whose process is still alive exit or rejoin the rollout pool.
   enabled: bool = False
   max_task_retries: int = 1
   poll_retry_budget_s: float | None = None

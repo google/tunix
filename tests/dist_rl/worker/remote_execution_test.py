@@ -4462,6 +4462,157 @@ class RemoteExecutionTest(parameterized.TestCase):
 
     asyncio.run(_run())
 
+  def test_dispatch_task_deduplicates_in_flight_request_ids(self):
+    """Duplicate dispatches execute once while in flight; none is cached."""
+    gate = asyncio.Event()
+    calls: list[str] = []
+
+    class _IdempotentWorker:
+
+      async def compute(self, label: str) -> str:
+        calls.append(label)
+        if label == "gated":
+          await gate.wait()
+        return f"done:{label}"
+
+    def _request(label: str) -> remote_lib.ExecutionRequest:
+      return remote_lib.ExecutionRequest(
+          request_id="req_dup", method_name="compute", args=(label,)
+      )
+
+    async def _run():
+      server = remote_lib.InProcessRemoteExecutionServer(_IdempotentWorker())
+
+      # 1. A retried dispatch (lost ACK) while the first is still running is
+      # acknowledged without executing again, and only one response is
+      # enqueued.
+      self.assertEqual(await server.dispatch_task(_request("gated")), "req_dup")
+      await asyncio.sleep(0.01)
+      self.assertEqual(await server.dispatch_task(_request("gated")), "req_dup")
+      self.assertEqual(calls, ["gated"])
+      gate.set()
+      resp = await server.poll_response(timeout_s=1.0)
+      assert resp is not None
+      self.assertEqual(
+          (resp.request_id, resp.unwrap()), ("req_dup", "done:gated")
+      )
+      self.assertIsNone(await server.poll_response(timeout_s=0.0))
+      self.assertEmpty(server._in_flight_requests)
+
+      # 2. Once delivered, the server keeps no per-request state: a later
+      # dispatch with the same ID executes again (the client drops the
+      # duplicate response), so reused IDs can never be black-holed.
+      self.assertEqual(await server.dispatch_task(_request("again")), "req_dup")
+      resp2 = await server.poll_response(timeout_s=1.0)
+      assert resp2 is not None
+      self.assertEqual(resp2.unwrap(), "done:again")
+      self.assertEqual(calls, ["gated", "again"])
+      self.assertEmpty(server._in_flight_requests)
+
+      # 3. On GrpcRemoteExecutionServer, `request_id` stays in
+      # `_in_flight_requests` while `_handle_poll_responses` is still streaming
+      # chunks, so an arriving retry mid-stream does not start a duplicate run.
+      grpc_server = remote_lib.GrpcRemoteExecutionServer(
+          _IdempotentWorker(), stream_chunk_bytes=16
+      )
+      self.assertEqual(
+          await grpc_server.dispatch_task(_request("streamed" * 8)), "req_dup"
+      )
+      await asyncio.sleep(0.01)
+      stream = grpc_server._handle_poll_responses(b"", context=None)
+      self.assertNotEmpty(await stream.__anext__())
+      self.assertIn("req_dup", grpc_server._in_flight_requests)
+      self.assertEqual(
+          await grpc_server.dispatch_task(_request("streamed" * 8)), "req_dup"
+      )
+      self.assertEqual(calls, ["gated", "again", "streamed" * 8])
+      await stream.aclose()
+      self.assertIn("req_dup", grpc_server._in_flight_requests)
+      delivered = await remote_lib.ExecutionResponse.deserialize_async_chunks(
+          grpc_server._handle_poll_responses(b"", context=None)
+      )
+      self.assertEqual(delivered.unwrap(), "done:" + "streamed" * 8)
+      self.assertEmpty(grpc_server._in_flight_requests)
+
+      # 4. A task that dies without enqueuing a response releases its ID, so a
+      # retry runs again instead of being acknowledged as a no-op forever.
+      with mock.patch.object(
+          server, "execute_request", side_effect=RuntimeError("boom")
+      ):
+        self.assertEqual(
+            await server.dispatch_task(_request("crash")), "req_dup"
+        )
+        await asyncio.sleep(0.01)
+      self.assertEmpty(server._in_flight_requests)
+
+    asyncio.run(_run())
+
+  def test_task_session_retries_reply_lost_grpc_dispatch_in_place(self):
+    """Real gRPC: a lost DispatchTask reply neither evicts nor re-executes."""
+    import grpc  # pylint: disable=g-import-not-at-top
+
+    class _FakeAioRpcError(grpc.aio.AioRpcError):
+
+      def __init__(self, code, details):
+        super().__init__(
+            code,
+            initial_metadata=grpc.aio.Metadata(),
+            trailing_metadata=grpc.aio.Metadata(),
+            details=details,
+        )
+
+    class _GatedEngine:
+
+      def __init__(self):
+        self.calls: list[str] = []
+        self.gate = asyncio.Event()
+
+      async def compute(self, label: str) -> str:
+        self.calls.append(label)
+        await self.gate.wait()
+        return f"done:{label}"
+
+    async def _run():
+      engine = _GatedEngine()
+      unreachable: list[remote_lib.ActorHandle] = []
+      async with running_grpc_server(engine) as (_, handle):
+        await handle._ensure_async_channel()
+        real_dispatch_rpc = handle._dispatch_rpc
+        lost_replies = 0
+
+        async def _lose_first_reply(chunks, timeout=None):
+          nonlocal lost_replies
+          ack = await real_dispatch_rpc(chunks, timeout=timeout)
+          if lost_replies == 0:
+            lost_replies += 1
+            raise _FakeAioRpcError(grpc.StatusCode.UNAVAILABLE, "reply lost")
+          return ack
+
+        with mock.patch.object(
+            handle, "_dispatch_rpc", side_effect=_lose_first_reply
+        ):
+          async with task_session.TaskSession(
+              lambda: [handle],
+              poll_retry_initial_backoff_s=0.02,
+              poll_retry_max_backoff_s=0.02,
+              fault_tolerance_config=task_session.TaskSessionFaultToleranceConfig(
+                  max_task_retries=1,
+                  on_worker_unreachable=lambda a, e: unreachable.append(a),
+              ),
+          ) as session:
+            await session.submit("r1", "compute", "x")
+            engine.gate.set()
+            batch = await session.poll_completed(timeout_s=5.0)
+            self.assertEqual(batch, [("done:x", None)])
+            self.assertEqual(session.task_retries_total, 1)
+            self.assertEqual(session.stale_responses_total, 0)
+      self.assertEqual(lost_replies, 1)
+      # The retry was deduplicated by the server: executed exactly once.
+      self.assertEqual(engine.calls, ["x"])
+      self.assertEmpty(unreachable)
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

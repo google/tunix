@@ -373,6 +373,11 @@ class RemoteExecutionServer(abc.ABC):
     self._instance: Optional[Any] = instance
     self._response_queue: Optional[asyncio.Queue[ExecutionResponse]] = None
     self._request_counter: int = 0
+    # Request IDs accepted by `dispatch_task` whose response has not yet been
+    # delivered to a poller, mapped to their execution task; a duplicate
+    # dispatch of one of these (a client retry after a lost ACK) is
+    # acknowledged without executing it again.
+    self._in_flight_requests: Dict[str, asyncio.Task[None]] = {}
     self._background_tasks: set[asyncio.Task[Any]] = set()
     self._sync_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
     self._sync_executor_lock = threading.Lock()
@@ -423,10 +428,40 @@ class RemoteExecutionServer(abc.ABC):
     if not request.request_id:
       self._request_counter += 1
       request.request_id = f"task_{self._request_counter}"
+    req_id = request.request_id
+    if req_id in self._in_flight_requests:
+      logging.debug(
+          "[RemoteExecutionServer] Deduplicating in-flight dispatch for"
+          " request_id=%s",
+          req_id,
+      )
+      return req_id
     task = asyncio.create_task(self._run_and_enqueue(request))
+    self._in_flight_requests[req_id] = task
     self._background_tasks.add(task)
     task.add_done_callback(self._background_tasks.discard)
-    return request.request_id
+    task.add_done_callback(
+        functools.partial(self._release_unanswered_request, req_id)
+    )
+    return req_id
+
+  def _release_unanswered_request(
+      self, req_id: str, task: asyncio.Task[None]
+  ) -> None:
+    """Forgets `req_id` if its task ended without enqueuing a response."""
+    if task.cancelled():
+      if self._in_flight_requests.get(req_id) is task:
+        self._in_flight_requests.pop(req_id, None)
+      return
+    exc = task.exception()
+    if exc is not None:
+      if self._in_flight_requests.get(req_id) is task:
+        self._in_flight_requests.pop(req_id, None)
+      logging.error(
+          "[RemoteExecutionServer] Task %s failed without a response: %r",
+          req_id,
+          exc,
+      )
 
   async def _run_and_enqueue(self, request: ExecutionRequest) -> None:
     logging.debug(
@@ -449,10 +484,10 @@ class RemoteExecutionServer(abc.ABC):
       )
     await self._get_response_queue().put(response)
 
-  async def poll_response(
+  async def _dequeue_response(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
   ) -> Optional[ExecutionResponse]:
-    """Long-polls server-side response queue for completed task results."""
+    """Dequeues the next completed response, or returns `None` on timeout."""
     try:
       if timeout_s == 0.0:
         return self._get_response_queue().get_nowait()
@@ -461,6 +496,15 @@ class RemoteExecutionServer(abc.ABC):
       )
     except (asyncio.TimeoutError, asyncio.QueueEmpty):
       return None
+
+  async def poll_response(
+      self, timeout_s: float = LONG_POLL_TIMEOUT_S
+  ) -> Optional[ExecutionResponse]:
+    """Long-polls server-side response queue for completed task results."""
+    response = await self._dequeue_response(timeout_s=timeout_s)
+    if response is not None and response.request_id:
+      self._in_flight_requests.pop(response.request_id, None)
+    return response
 
   def register_instance(self, instance: Any) -> None:
     """Binds a local Python object (e.g., RolloutWorkerService, TrainerWorker) to the server."""
@@ -704,7 +748,7 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
         if request_bytes
         else LONG_POLL_TIMEOUT_S
     )
-    response = await self.poll_response(timeout_s=timeout_s)
+    response = await self._dequeue_response(timeout_s=timeout_s)
     if response is None:
       return
     completed = False
@@ -721,6 +765,8 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       ):
         yield chunk
       completed = True
+      if response.request_id:
+        self._in_flight_requests.pop(response.request_id, None)
     finally:
       network._dec_active_poll_rpcs()
       if not completed:
