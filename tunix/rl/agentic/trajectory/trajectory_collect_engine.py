@@ -289,6 +289,8 @@ class TrajectoryCollectEngine:
       self,
       status: Optional[str | agent_types.TrajectoryStatus] = None,
       policy_version: Optional[int] = None,
+      *,
+      include_timings: bool = True,
   ) -> None:
     """Syncs metadata status and agent trajectory timing/reward in place."""
     if self.metadata is not None:
@@ -300,8 +302,8 @@ class TrajectoryCollectEngine:
           agent=self.agent,
           policy_version=effective_policy_version,
           status=status,
-          env_time=self.env_time,
-          reward_time=self.reward_time,
+          env_time=self.env_time if include_timings else None,
+          reward_time=self.reward_time if include_timings else None,
       )
 
   def _store_add_step(self, step: Any) -> None:
@@ -361,7 +363,9 @@ class TrajectoryCollectEngine:
         self._logged_clip_reasons.clear()
 
         if self.trajectory_store is not None and self.metadata is not None:
-          self.sync_trajectory_metadata(policy_version=self.policy_version)
+          self.sync_trajectory_metadata(
+              policy_version=self.policy_version, include_timings=False
+          )
           task = self.agent.trajectory.task or getattr(self.env, "task", None)
           task_step = converter_lib.create_task_step(task)
           if task_step is not None:
@@ -1232,7 +1236,6 @@ class TrajectoryCollectEngine:
           policy_version=self.policy_version,
       )
       if agent_step is not None:
-        self.sync_trajectory_metadata(policy_version=self.policy_version)
         self._store_add_step(agent_step)
 
     logging.debug(
@@ -1348,7 +1351,6 @@ class TrajectoryCollectEngine:
           cur_step, tunix_step_id=tunix_step_id
       )
       if env_step is not None:
-        self.sync_trajectory_metadata()
         self._store_add_step(env_step)
 
     if env_utils.is_debug_inference_logs_enabled():
@@ -1433,7 +1435,6 @@ class TrajectoryCollectEngine:
           last_step, tunix_step_id=tunix_step_id
       )
       if env_step is not None:
-        self.sync_trajectory_metadata()
         self._store_add_step(env_step)
     logging.debug(
         "%s Final reward computed: %s", self._debug_prefix, final_reward
