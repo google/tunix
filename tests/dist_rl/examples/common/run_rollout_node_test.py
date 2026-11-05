@@ -23,11 +23,14 @@ import types
 from unittest import mock
 
 from absl.testing import absltest
+import transformers
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.examples.common import run_rollout_node
 from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import vllm_sampler
+from tunix.dist_rl.worker import remote_execution
+from tunix.dist_rl.worker import rollout_worker
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.utils import maxtext_utils
 
@@ -589,6 +592,122 @@ class RunRolloutNodeTest(absltest.TestCase):
         },
         run_rollout_node._FORBIDDEN_MAXTEXT_CONFIG_JSON_KEYS,
     )
+
+  def test_main_rpc_stop_callback_drains_worker_cleanly_or_exits_nonzero_on_abort(
+      self,
+  ):
+    context = mock.MagicMock()
+    mock_tokenizer = mock.MagicMock(pad_token_id=0, eos_token="<eos>")
+    mock_worker_service = mock.MagicMock(spec=rollout_worker.RolloutWorker)
+    mock_worker_service.trajectory_store = None
+    mock_sampler = mock.MagicMock()
+    mock_sampler.stop = mock.AsyncMock()
+    mock_worker_service.sampler = mock_sampler
+    registered_callbacks = []
+    mock_worker_service.set_on_stop.side_effect = registered_callbacks.append
+
+    mock_server = mock.MagicMock(
+        spec=remote_execution.GrpcRemoteExecutionServer
+    )
+    mock_server.start_serving_async = mock.AsyncMock()
+    mock_server.stop_serving = mock.AsyncMock()
+
+    with (
+        mock.patch.object(run_rollout_node.importlib, "import_module"),
+        mock.patch.object(otel_setup, "setup_metrics"),
+        mock.patch.object(gcs_cache, "restore_jax_cache", return_value=False),
+        mock.patch.object(
+            transformers.AutoTokenizer,
+            "from_pretrained",
+            return_value=mock_tokenizer,
+        ),
+        mock.patch.object(
+            run_rollout_node,
+            "_create_vllm_worker",
+            return_value=mock_worker_service,
+        ),
+        mock.patch.object(
+            remote_execution,
+            "GrpcRemoteExecutionServer",
+            return_value=mock_server,
+        ),
+    ):
+
+      shutdown_order: list[str] = []
+
+      async def _stop_serving(grace: float = 0.5):
+        self.assertEqual(grace, 5.0)
+        shutdown_order.append("server.stop_serving")
+
+      def _stop_worker():
+        shutdown_order.append("worker_service.stop")
+
+      async def _stop_sampler():
+        shutdown_order.append("sampler.stop")
+
+      mock_server.stop_serving = mock.AsyncMock(side_effect=_stop_serving)
+      mock_worker_service.stop.side_effect = _stop_worker
+      mock_sampler.stop = mock.AsyncMock(side_effect=_stop_sampler)
+
+      def _register_and_trigger_clean_stop(*, metadata):
+        del metadata
+        self.assertTrue(callable(registered_callbacks[0]))
+        registered_callbacks[0](False)
+
+      context.ipc.discovery.register.side_effect = (
+          _register_and_trigger_clean_stop
+      )
+      run_rollout_node.main(
+          [
+              "--sampler=inprocess_vllm",
+              "--port=20001",
+              "--worker_id=rollout-0",
+          ],
+          context=context,
+      )
+      self.assertIsNone(registered_callbacks[-1])
+      self.assertEqual(
+          shutdown_order,
+          ["server.stop_serving", "worker_service.stop", "sampler.stop"],
+      )
+      mock_server.stop_serving.assert_awaited_once_with(grace=5.0)
+
+      shutdown_order.clear()
+      mock_sampler.stop.reset_mock()
+      mock_server.stop_serving = mock.AsyncMock(
+          side_effect=RuntimeError("gRPC stop_serving failed")
+      )
+
+      def _stop_worker_and_fail():
+        shutdown_order.append("worker_service.stop")
+        raise RuntimeError("worker_service.stop failed")
+
+      mock_worker_service.stop = mock.MagicMock(
+          side_effect=_stop_worker_and_fail
+      )
+      registered_callbacks.clear()
+
+      def _register_and_trigger_abort_stop(*, metadata):
+        del metadata
+        self.assertTrue(callable(registered_callbacks[0]))
+        registered_callbacks[0](True)
+
+      context.ipc.discovery.register.side_effect = (
+          _register_and_trigger_abort_stop
+      )
+      with self.assertRaises(SystemExit) as cm:
+        run_rollout_node.main(
+            [
+                "--sampler=inprocess_vllm",
+                "--port=20001",
+                "--worker_id=rollout-0",
+            ],
+            context=context,
+        )
+      self.assertEqual(cm.exception.code, 1)
+      self.assertIsNone(registered_callbacks[-1])
+      mock_server.stop_serving.assert_awaited_once_with(grace=5.0)
+      self.assertEqual(shutdown_order, ["worker_service.stop", "sampler.stop"])
 
 
 if __name__ == "__main__":

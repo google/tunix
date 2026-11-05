@@ -41,6 +41,7 @@ import contextvars
 import functools
 import inspect
 import pickle
+import signal
 import threading
 import time
 import traceback as traceback_lib
@@ -48,11 +49,13 @@ from typing import (
     Any,
     AsyncIterable,
     AsyncIterator,
+    Awaitable,
     Callable,
     Dict,
     Iterable,
     Iterator,
     List,
+    Mapping,
     NoReturn,
     Optional,
     Sequence,
@@ -884,6 +887,74 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       bulk_srv = self._bulk_server
       self._bulk_server = None
       await asyncio.get_running_loop().run_in_executor(None, bulk_srv.stop)
+
+
+async def serve_worker(
+    worker_service: Any,
+    *,
+    port: int,
+    discovery: Any,
+    metadata: Mapping[str, Any],
+    drain_fn: Optional[Callable[[], Awaitable[Any]]] = None,
+    stop_grace_s: float = 5.0,
+) -> None:
+  """Serves `worker_service` over gRPC, registers discovery, and drains on stop.
+
+  Wakes on `SIGINT`/`SIGTERM` or when `worker_service` invokes its `set_on_stop`
+  callback (from an incoming `stop(abort=...)` RPC), stops the gRPC server
+  before invoking `worker_service.stop()` and optional `drain_fn`, and raises
+  `SystemExit(1)` if an abort stop was requested.
+
+  Args:
+    worker_service: Bound worker instance exposing `set_on_stop` and `stop`.
+    port: TCP port for `GrpcRemoteExecutionServer`.
+    discovery: Discovery client exposing `register(metadata=...)`.
+    metadata: Registration metadata mapping to pickle and publish.
+    drain_fn: Optional async callback awaited after `worker_service.stop()`.
+    stop_grace_s: Grace period in seconds for `server.stop_serving`.
+
+  Raises:
+    SystemExit: With code `1` if an abort stop (`abort=True`) was requested.
+  """
+  stop_event = asyncio.Event()
+  loop = asyncio.get_running_loop()
+  aborted: List[bool] = []
+  worker_service.set_on_stop(
+      lambda abort=False: (
+          aborted.append(bool(abort)),
+          loop.call_soon_threadsafe(stop_event.set),
+      )
+  )
+
+  server = GrpcRemoteExecutionServer(worker_service)
+  await server.start_serving_async(port)
+  try:
+    discovery.register(metadata=pickle.dumps(dict(metadata)))
+    for sig in (signal.SIGINT, signal.SIGTERM):
+      with contextlib.suppress(NotImplementedError):
+        loop.add_signal_handler(sig, stop_event.set)
+    with contextlib.suppress(asyncio.CancelledError):
+      await stop_event.wait()
+  finally:
+    await asyncio.sleep(0)
+    try:
+      await server.stop_serving(grace=stop_grace_s)
+    except Exception:  # pylint: disable=broad-exception-caught
+      logging.exception("Failed to stop worker gRPC server cleanly.")
+    try:
+      worker_service.stop()
+    except Exception:  # pylint: disable=broad-exception-caught
+      logging.exception("Failed to stop worker service cleanly.")
+    finally:
+      worker_service.set_on_stop(None)
+    if drain_fn is not None:
+      try:
+        await drain_fn()
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.exception("Failed to drain worker resources cleanly.")
+
+  if any(aborted):
+    raise SystemExit(1)
 
 
 class ActorHandle(abc.ABC):

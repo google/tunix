@@ -478,7 +478,8 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     )
     shutdown_order: list[str] = []
 
-    async def _stop_serving():
+    async def _stop_serving(grace: float = 0.5):
+      self.assertEqual(grace, 5.0)
       shutdown_order.append("server.stop_serving")
 
     def _stop_worker():
@@ -538,6 +539,73 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
           context=self.mock_context,
       )
 
+    self.mock_server.stop_serving.assert_called_once()
+    self.mock_worker_service.stop.assert_called_once()
+
+  @mock.patch.object(run_trainer_node, "_ensure_model_dir_for_trainer")
+  @mock.patch.object(run_trainer_node, "_create_mesh")
+  @mock.patch.object(run_trainer_node, "_load_actor_model")
+  @mock.patch.object(run_trainer_node, "_create_trainer_factory")
+  @mock.patch.object(trainer_worker, "TrainerWorker")
+  @mock.patch.object(remote_execution, "GrpcRemoteExecutionServer")
+  def test_rpc_stop_callback_wakes_server_cleanly_or_exits_nonzero_on_abort(
+      self,
+      mock_grpc_server_cls,
+      mock_trainer_worker_cls,
+      mock_create_trainer_factory,
+      mock_load_actor_model,
+      mock_create_mesh,
+      mock_ensure_model_dir,
+  ):
+    self._setup_main_mocks(
+        mock_ensure_model_dir,
+        mock_create_mesh,
+        mock_load_actor_model,
+        mock_create_trainer_factory,
+        mock_trainer_worker_cls,
+        mock_grpc_server_cls,
+    )
+    registered_callbacks = []
+    self.mock_worker_service.set_on_stop.side_effect = (
+        registered_callbacks.append
+    )
+
+    def _register_and_trigger_clean_stop(*, metadata):
+      del metadata
+      self.assertTrue(callable(registered_callbacks[0]))
+      registered_callbacks[0](False)
+
+    self.mock_context.ipc.discovery.register.side_effect = (
+        _register_and_trigger_clean_stop
+    )
+    run_trainer_node.main(
+        ["--port", "20000", "--worker_id", "trainer-0"],
+        context=self.mock_context,
+    )
+    self.assertIsNone(registered_callbacks[-1])
+    self.mock_server.stop_serving.assert_called_once()
+    self.mock_worker_service.stop.assert_called_once()
+
+    # Abort stop (`abort=True`) must still drain cleanly and then exit(1).
+    self.mock_server.stop_serving.reset_mock()
+    self.mock_worker_service.stop.reset_mock()
+    registered_callbacks.clear()
+
+    def _register_and_trigger_abort_stop(*, metadata):
+      del metadata
+      self.assertTrue(callable(registered_callbacks[0]))
+      registered_callbacks[0](True)
+
+    self.mock_context.ipc.discovery.register.side_effect = (
+        _register_and_trigger_abort_stop
+    )
+    with self.assertRaises(SystemExit) as cm:
+      run_trainer_node.main(
+          ["--port", "20000", "--worker_id", "trainer-0"],
+          context=self.mock_context,
+      )
+    self.assertEqual(cm.exception.code, 1)
+    self.assertIsNone(registered_callbacks[-1])
     self.mock_server.stop_serving.assert_called_once()
     self.mock_worker_service.stop.assert_called_once()
 

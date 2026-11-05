@@ -22,8 +22,6 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-import pickle
-import signal
 import sys
 from typing import Any
 
@@ -990,48 +988,18 @@ def main(argv: list[str], context: Any = None) -> None:
       execution_context=mesh,
   )
 
-  async def grpc_server_main() -> None:
-    server = remote_execution.GrpcRemoteExecutionServer(worker_service)
-    await server.start_serving_async(args.port)
-    logging.info("Serving trainer worker on port %d.", args.port)
-
-    context.ipc.discovery.register(
-        metadata=pickle.dumps({
-            "service_type": "trainer",
-            "service_port": args.port,
-            "worker_id": args.worker_id,
-        })
-    )
-    logging.info("Trainer worker is registered.")
-    # Shut down gracefully on SIGTERM/SIGINT so that RPC intake and in-flight
-    # off-loop sync methods drain before TrainerWorker.stop() ->
-    # PeftTrainerV2.close() runs.
-    stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-      try:
-        loop.add_signal_handler(sig, stop_event.set)
-      except NotImplementedError:
-        pass
-
-    try:
-      await stop_event.wait()
-    except asyncio.CancelledError:
-      pass
-    finally:
-      logging.info("Draining trainer worker...")
-      try:
-        await server.stop_serving()
-      except Exception:  # pylint: disable=broad-exception-caught
-        logging.exception("Failed to stop trainer gRPC server cleanly.")
-      finally:
-        try:
-          worker_service.stop()
-          logging.info("Trainer worker drained.")
-        except Exception:  # pylint: disable=broad-exception-caught
-          logging.exception("Failed to drain trainer worker cleanly.")
-
-  asyncio.run(grpc_server_main())
+  asyncio.run(
+      remote_execution.serve_worker(
+          worker_service,
+          port=args.port,
+          discovery=context.ipc.discovery,
+          metadata={
+              "service_type": "trainer",
+              "service_port": args.port,
+              "worker_id": args.worker_id,
+          },
+      )
+  )
 
 
 if __name__ == "__main__":

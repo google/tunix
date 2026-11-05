@@ -21,7 +21,6 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-import pickle
 import sys
 from typing import Any
 
@@ -192,29 +191,18 @@ def main(argv: list[str], context: Any = None) -> None:
       execution_context=mesh,
   )
 
-  async def grpc_server_main() -> None:
-    server = remote_execution.GrpcRemoteExecutionServer(worker_service)
-    logging.info("Serving reference inference worker on port %d.", args.port)
-    await server.start_serving_async(args.port)
-
-    context.ipc.discovery.register(
-        metadata=pickle.dumps({
-            "service_type": "inference",
-            "service_port": args.port,
-            "worker_id": args.worker_id,
-        })
-    )
-    logging.info("Inference worker is registered.")
-
-    try:
-      while True:
-        await asyncio.sleep(1)
-    except asyncio.CancelledError:
-      pass
-    finally:
-      await server.stop_serving()
-
-  asyncio.run(grpc_server_main())
+  asyncio.run(
+      remote_execution.serve_worker(
+          worker_service,
+          port=args.port,
+          discovery=context.ipc.discovery,
+          metadata={
+              "service_type": "inference",
+              "service_port": args.port,
+              "worker_id": args.worker_id,
+          },
+      )
+  )
 
 
 if __name__ == "__main__":

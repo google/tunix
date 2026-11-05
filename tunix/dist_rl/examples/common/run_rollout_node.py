@@ -23,8 +23,6 @@ import importlib
 import json
 import logging
 import os
-import pickle
-import signal
 import sys
 from typing import Any
 
@@ -1176,13 +1174,11 @@ def main(argv: list[str], context: Any = None) -> None:
         remote_execution,
     )
 
-    logging.info("Creating rollout gRPC server...")
-    server = remote_execution.GrpcRemoteExecutionServer(worker_service)
-    await server.start_serving_async(args.port)
-    logging.info("Serving vLLM rollout worker on port %d.", args.port)
-
-    context.ipc.discovery.register(
-        metadata=pickle.dumps({
+    await remote_execution.serve_worker(
+        worker_service,
+        port=args.port,
+        discovery=context.ipc.discovery,
+        metadata={
             "service_type": "rollout",
             "service_port": args.port,
             "worker_id": args.worker_id,
@@ -1191,35 +1187,9 @@ def main(argv: list[str], context: Any = None) -> None:
                 if worker_service.trajectory_store is not None
                 else None
             ),
-        })
+        },
+        drain_fn=worker_service.sampler.stop,
     )
-    logging.info("Rollout worker is registered.")
-
-    # Shut down gracefully on SIGTERM/SIGINT.
-    stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-      try:
-        loop.add_signal_handler(sig, stop_event.set)
-      except NotImplementedError:
-        pass
-
-    try:
-      await stop_event.wait()
-    except asyncio.CancelledError:
-      pass
-    finally:
-      logging.info("Draining rollout worker...")
-      try:
-        # Cancel in-flight trajectory collections
-        worker_service.stop()
-        if hasattr(worker_service.sampler, "stop"):
-          # Shut down vLLM engine
-          await worker_service.sampler.stop()
-        logging.info("Rollout worker drained.")
-      except Exception:
-        logging.exception("Failed to drain rollout worker cleanly.")
-      await server.stop_serving()
 
   asyncio.run(grpc_server_main())
 
