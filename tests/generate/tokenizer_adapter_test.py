@@ -45,7 +45,7 @@ class TokenizerAdapterTest(absltest.TestCase):
     model = None  # pylint: disable=unused-variable
     #
     if model is None:
-      model = 'meta-llama/Meta-Llama-3-8B-Instruct'
+      model = 'unsloth/Llama-3.2-1B-Instruct'
     hf_tokenizer = AutoTokenizer.from_pretrained(model)
     tokenizer_adapter = adapter.TokenizerAdapter(hf_tokenizer)
     self.assertEqual(
