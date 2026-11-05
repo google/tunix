@@ -31,7 +31,8 @@ from tunix.dist_rl.common import registry
 from tunix.dist_rl.common import test_utils as mocks
 from tunix.dist_rl.trajectory import file_store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
-from tunix.dist_rl.trajectory import trajectory_testing
+from tunix.dist_rl.trajectory import tunix_trajectory
+from tunix.dist_rl.trajectory import tunix_trajectory_testing
 from tunix.dist_rl.worker import rollout_worker
 
 
@@ -186,7 +187,7 @@ class RolloutWorkerTest(absltest.TestCase):
         tracking_id="traj_p1_3",
         parent_tracking_ids=["p1"],
     )
-    err = trajectory_lib.TrajectoryError(
+    err = tunix_trajectory.TrajectoryError(
         trajectory_id="err_traj_1",
         prompt_id="p1",
         error_message="episode failed",
@@ -463,7 +464,7 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     )
     self.assertIs(
         worker.trajectory_store.bound_metadata_cls,
-        trajectory_lib.TunixTrajectoryMetadata,
+        tunix_trajectory.TunixTrajectoryMetadata,
     )
     worker.stop()
 
@@ -504,8 +505,8 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     worker.stop()
     with self.assertRaises(RuntimeError):
       store.add_step(
-          trajectory_testing.TUNIX_ENV_STEP_0,
-          trajectory_testing.TUNIX_METADATA_1,
+          tunix_trajectory_testing.TUNIX_ENV_STEP_0,
+          tunix_trajectory_testing.TUNIX_METADATA_1,
       )
 
   def test_stop_closes_the_store_even_when_cancel_all_raises(self):

@@ -9,6 +9,8 @@ from absl.testing import parameterized
 from tunix.dist_rl.trajectory import store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
+from tunix.dist_rl.trajectory import tunix_trajectory
+from tunix.dist_rl.trajectory import tunix_trajectory_testing
 
 # `trajectory.py` uses `from __future__ import annotations`, so the field
 # annotations of `Trajectory` are strings naming these symbols. Parametrizing
@@ -572,7 +574,7 @@ class TrajectoryWriterTestCase(
     """Verifies that passing a Trajectory instance as metadata raises TypeError."""
     for traj in (
         trajectory_testing.TRAJECTORY_1,
-        trajectory_testing.TUNIX_TRAJECTORY_1,
+        tunix_trajectory_testing.TUNIX_TRAJECTORY_1,
     ):
       with self.assertRaisesRegex(
           TypeError, "Expected a TrajectoryMetadata instance"
@@ -772,15 +774,15 @@ class TrajectoryStoreMetadataClsTestCase(
   def test_tunix_trajectory_with_step_zero(self) -> None:
     """Verifies storing and retrieving Tunix metadata and steps with step_id=0."""
     tunix_store = self._create_store()
-    meta = trajectory_lib.TunixTrajectoryMetadata(
+    meta = tunix_trajectory.TunixTrajectoryMetadata(
         trajectory_id="tunix_1",
         agent=trajectory_lib.Agent(name="a1", version="1.0"),
         status="RUNNING",
     )
-    step0 = trajectory_lib.TunixEnvStep(
+    step0 = tunix_trajectory.TunixEnvStep(
         step_id=0, source=trajectory_lib.Source.USER, message="prompt"
     )
-    step1 = trajectory_lib.TunixAgentStep(
+    step1 = tunix_trajectory.TunixAgentStep(
         step_id=1, source=trajectory_lib.Source.AGENT, message="response"
     )
     tunix_store.add_step(step0, meta)
@@ -789,16 +791,16 @@ class TrajectoryStoreMetadataClsTestCase(
 
     metas = tunix_store.get_trajectories_metadata(["tunix_1"])
     self.assertLen(metas, 1)
-    self.assertIsInstance(metas[0], trajectory_lib.TunixTrajectoryMetadata)
+    self.assertIsInstance(metas[0], tunix_trajectory.TunixTrajectoryMetadata)
     self.assertEqual(metas[0].status, "RUNNING")
 
     trajs = tunix_store.get_trajectories(["tunix_1"])
     self.assertLen(trajs, 1)
-    self.assertIsInstance(trajs[0], trajectory_lib.TunixTrajectory)
+    self.assertIsInstance(trajs[0], tunix_trajectory.TunixTrajectory)
     self.assertEqual(trajs[0].steps[0].step_id, 0)
     self.assertEqual(trajs[0].steps[1].step_id, 1)
-    self.assertIsInstance(trajs[0].steps[0], trajectory_lib.TunixEnvStep)
-    self.assertIsInstance(trajs[0].steps[1], trajectory_lib.TunixAgentStep)
+    self.assertIsInstance(trajs[0].steps[0], tunix_trajectory.TunixEnvStep)
+    self.assertIsInstance(trajs[0].steps[1], tunix_trajectory.TunixAgentStep)
 
   def test_custom_metadata_and_trajectory_subclass(self) -> None:
     """Verifies the store supports custom metadata and trajectory types."""
@@ -862,11 +864,11 @@ class TrajectoryStoreMetadataClsTestCase(
       (
           "base_then_tunix",
           trajectory_testing.METADATA_1,
-          trajectory_testing.TUNIX_METADATA_1,
+          tunix_trajectory_testing.TUNIX_METADATA_1,
       ),
       (
           "tunix_then_base",
-          trajectory_testing.TUNIX_METADATA_1,
+          tunix_trajectory_testing.TUNIX_METADATA_1,
           trajectory_testing.METADATA_1,
       ),
       (
@@ -876,7 +878,7 @@ class TrajectoryStoreMetadataClsTestCase(
               agent=trajectory_lib.Agent(name="a", version="1.0"),
               custom_tag="tag",
           ),
-          trajectory_testing.TUNIX_METADATA_1,
+          tunix_trajectory_testing.TUNIX_METADATA_1,
       ),
       (
           "parent_custom_then_child_custom",
@@ -939,10 +941,10 @@ class PersistentTrajectoryStoreMetadataClsTestCase(
     """Verifies persistent readers rehydrate subclasses and reject mixed runs."""
     tunix_writer = self._create_store()
     tunix_writer.add_step(
-        trajectory_lib.TunixEnvStep(
+        tunix_trajectory.TunixEnvStep(
             step_id=0, source=trajectory_lib.Source.USER, message="prompt"
         ),
-        trajectory_testing.TUNIX_METADATA_1,
+        tunix_trajectory_testing.TUNIX_METADATA_1,
     )
     tunix_writer.flush()
 
@@ -956,9 +958,9 @@ class PersistentTrajectoryStoreMetadataClsTestCase(
     reader = self._create_store()
     base_id = trajectory_testing.TRAJECTORY_ID_1
     (read_meta,) = reader.get_trajectories_metadata(["t_atif"])
-    self.assertEqual(read_meta, trajectory_testing.TUNIX_METADATA_1)
+    self.assertEqual(read_meta, tunix_trajectory_testing.TUNIX_METADATA_1)
     (read_traj,) = reader.get_trajectories(["t_atif"])
-    self.assertIsInstance(read_traj, trajectory_lib.TunixTrajectory)
+    self.assertIsInstance(read_traj, tunix_trajectory.TunixTrajectory)
 
     with self.assertRaisesRegex(TypeError, "is bound to metadata type"):
       reader.get_trajectories_metadata([base_id])
@@ -1027,7 +1029,7 @@ class TrajectoryStoreConfigTestCase(
 
   @parameterized.named_parameters(
       ("base", trajectory_lib.TrajectoryMetadata),
-      ("tunix", trajectory_lib.TunixTrajectoryMetadata),
+      ("tunix", tunix_trajectory.TunixTrajectoryMetadata),
       ("custom", CustomMetadata),
       ("extended_custom", ExtendedCustomMetadata),
       ("optional_only", OptionalOnlyMetadata),
@@ -1066,7 +1068,7 @@ class TrajectoryStoreConfigTestCase(
     self.addCleanup(built.close)
 
     self.assertIs(
-        built.bound_metadata_cls, trajectory_lib.TunixTrajectoryMetadata
+        built.bound_metadata_cls, tunix_trajectory.TunixTrajectoryMetadata
     )
     with self.assertRaisesRegex(TypeError, "is bound to metadata type"):
       built.update_metadata(cast(Any, trajectory_testing.METADATA_1))

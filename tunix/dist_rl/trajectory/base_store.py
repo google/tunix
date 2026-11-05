@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from typing import Any, ClassVar, Protocol, Self, TypeVar, cast, get_args, get_origin, runtime_checkable
 
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
+from tunix.dist_rl.trajectory import tunix_trajectory
 
 MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)
 
@@ -479,7 +480,7 @@ class TrajectoryStore(
 
 
 class TunixTrajectoryStore(
-    TrajectoryStore[trajectory_lib.TunixTrajectoryMetadata],
+    TrajectoryStore[tunix_trajectory.TunixTrajectoryMetadata],
 ):
   """TrajectoryStore bound to TunixTrajectoryMetadata.
 

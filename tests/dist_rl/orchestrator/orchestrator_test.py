@@ -29,8 +29,8 @@ from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.testing import worker_registry_testing
 from tunix.dist_rl.trajectory import file_store
-from tunix.dist_rl.trajectory import trajectory as trajectory_lib
-from tunix.dist_rl.trajectory import trajectory_testing
+from tunix.dist_rl.trajectory import tunix_trajectory
+from tunix.dist_rl.trajectory import tunix_trajectory_testing
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
 from tunix.dist_rl.worker import abstract_worker
 from tunix.dist_rl.worker import remote_execution
@@ -352,7 +352,7 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     self.assertIsInstance(orch.trajectory_store, file_store.FileTrajectoryStore)
     self.assertIs(
         orch.trajectory_store.bound_metadata_cls,
-        trajectory_lib.TunixTrajectoryMetadata,
+        tunix_trajectory.TunixTrajectoryMetadata,
     )
     orch.shutdown()
 
@@ -369,8 +369,8 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     orch.shutdown()
     with self.assertRaises(RuntimeError):
       store.add_step(
-          trajectory_testing.TUNIX_ENV_STEP_0,
-          trajectory_testing.TUNIX_METADATA_1,
+          tunix_trajectory_testing.TUNIX_ENV_STEP_0,
+          tunix_trajectory_testing.TUNIX_METADATA_1,
       )
 
   def test_shutdown_closes_the_store_even_when_a_prior_step_raises(self):

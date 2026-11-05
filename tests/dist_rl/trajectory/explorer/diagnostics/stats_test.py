@@ -19,7 +19,8 @@ from typing import Any
 from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
-from tunix.dist_rl.trajectory import trajectory_testing
+from tunix.dist_rl.trajectory import tunix_trajectory
+from tunix.dist_rl.trajectory import tunix_trajectory_testing
 from tunix.dist_rl.trajectory.explorer.diagnostics import stats as stats_lib
 
 _AGENT = trajectory_lib.Agent(name="a", version="1.0")
@@ -51,9 +52,9 @@ def _step(
 
 def _tunix_trajectory(
     trajectory_id: str = "traj_test", **kwargs: Any
-) -> trajectory_lib.TunixTrajectory:
+) -> tunix_trajectory.TunixTrajectory:
   """Builds a Tunix trajectory, which can report `status` and `total_reward`."""
-  return trajectory_lib.TunixTrajectory(
+  return tunix_trajectory.TunixTrajectory(
       trajectory_id=trajectory_id, agent=_AGENT, **kwargs
   )
 
@@ -285,7 +286,7 @@ class OutcomeTest(parameterized.TestCase):
   def test_a_status_stated_as_an_enum_member_is_reported(self) -> None:
     # A schema may hold the `TrajectoryStatus` member itself rather than its
     # name; `model_construct` skips validation so the enum is kept as-is.
-    trajectory = trajectory_lib.TunixTrajectory.model_construct(
+    trajectory = tunix_trajectory.TunixTrajectory.model_construct(
         trajectory_id="traj_test",
         agent=_AGENT,
         steps=[],
@@ -335,7 +336,7 @@ class RunStatsTest(parameterized.TestCase):
     reporting = _tunix_trajectory(
         trajectory_id="traj_1",
         steps=[
-            trajectory_lib.TunixAgentStep(
+            tunix_trajectory.TunixAgentStep(
                 step_id=0,
                 source=trajectory_lib.Source.AGENT,
                 message="m",
@@ -350,7 +351,7 @@ class RunStatsTest(parameterized.TestCase):
                     ),
                 ],
             ),
-            trajectory_lib.TunixEnvStep(
+            tunix_trajectory.TunixEnvStep(
                 step_id=1, source=trajectory_lib.Source.USER, message="m"
             ),
         ],
@@ -425,7 +426,7 @@ class RunStatsTest(parameterized.TestCase):
         _trajectory([_step(1, trajectory_lib.Source.SYSTEM)]),
         # A rollout reports only completion tokens: it adds to `completion`
         # and to `num_with_tokens`, but not to `prompt` or `cached`.
-        trajectory_testing.TUNIX_ROLLOUT_TRAJECTORY,
+        tunix_trajectory_testing.TUNIX_ROLLOUT_TRAJECTORY,
     ])
 
     self.assertEqual(run.num_trajectories, 4)
@@ -530,7 +531,7 @@ class RunStatsTest(parameterized.TestCase):
     run = stats_lib.RunStats.from_trajectories([
         _tunix_trajectory(
             steps=[
-                trajectory_lib.TunixAgentStep(
+                tunix_trajectory.TunixAgentStep(
                     step_id=0, source=trajectory_lib.Source.AGENT, message="m"
                 )
             ],
@@ -584,7 +585,7 @@ class RunStatsTest(parameterized.TestCase):
 class JsonDictTest(absltest.TestCase):
 
   def test_unreported_quantities_serialize_as_null(self) -> None:
-    trajectory = trajectory_lib.TunixTrajectory(agent=_AGENT, steps=[])
+    trajectory = tunix_trajectory.TunixTrajectory(agent=_AGENT, steps=[])
 
     payload = stats_lib.TrajectoryStats.from_trajectory(
         trajectory
@@ -609,7 +610,7 @@ class JsonDictTest(absltest.TestCase):
     )
     # A rollout reports only completion tokens; the other counts stay null.
     rollout_payload = stats_lib.TrajectoryStats.from_trajectory(
-        trajectory_testing.TUNIX_ROLLOUT_TRAJECTORY
+        tunix_trajectory_testing.TUNIX_ROLLOUT_TRAJECTORY
     ).to_json_dict()
     self.assertEqual(
         rollout_payload["tokens"],
@@ -621,7 +622,7 @@ class JsonDictTest(absltest.TestCase):
         status="SUCCEEDED",
         total_reward=0.85,
         steps=[
-            trajectory_lib.TunixAgentStep(
+            tunix_trajectory.TunixAgentStep(
                 step_id=0,
                 source=trajectory_lib.Source.AGENT,
                 message="m",
@@ -631,7 +632,7 @@ class JsonDictTest(absltest.TestCase):
                     )
                 ],
             ),
-            trajectory_lib.TunixEnvStep(
+            tunix_trajectory.TunixEnvStep(
                 step_id=1, source=trajectory_lib.Source.USER, message="m"
             ),
         ],
