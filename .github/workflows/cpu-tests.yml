@@ -151,7 +151,7 @@ jobs:
       - name: Run dist_rl tests
         if: ${{ matrix.shard == 'dist_rl' }}
         run: |
-          # TODO(tunix-dev): add back raiden tests after tpu_sync lib is ready.
+          # Raiden and weight_sync_test require the tpu_sync wheel and run in tpu-tests.yml.
           python -m pytest tests/dist_rl/ -n auto --dist loadscope -v --tb=short \
             --ignore-glob='*/raiden_*.py' \
             --ignore=tests/dist_rl/rollout/vllm_sampler_test.py \
