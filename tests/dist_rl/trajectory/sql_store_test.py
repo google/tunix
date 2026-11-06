@@ -844,6 +844,41 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(store_inst.run_id, "my_run")
     self.assertEqual(str(store_inst.engine.url), self.db_url)
 
+  def test_exclude_step_arrays_drops_arrays_from_written_steps(self) -> None:
+    store_inst = sql_store.SqlTrajectoryStore(
+        db_url=self.db_url,
+        run_id="filtered_run",
+        exclude_step_arrays=["assistant_tokens", "logprobs"],
+    )
+    self.addCleanup(store_inst.close)
+    step = trajectory_testing.TUNIX_AGENT_STEP_1
+    meta = trajectory_testing.TUNIX_METADATA_1
+
+    store_inst.add_step(trajectory_testing.TUNIX_ENV_STEP_0, meta)
+    store_inst.add_step(step, meta)
+    store_inst.flush()
+
+    (traj,) = store_inst.get_trajectories([meta.trajectory_id])
+    written_step = traj.steps[1]
+    self.assertIsNone(written_step.assistant_tokens)
+    self.assertIsNone(written_step.logprobs)
+    self.assertEqual(list(written_step.assistant_masks), [1, 1])
+    self.assertIsNotNone(step.assistant_tokens)
+
+  def test_exclude_step_arrays_round_trips_through_config(self) -> None:
+    store_inst = sql_store.SqlTrajectoryStore.from_config({
+        "backend": "sql",
+        "db_url": self.db_url,
+        "run_id": "config_run",
+        "exclude_step_arrays": ["logprobs"],
+    })
+    self.addCleanup(store_inst.close)
+
+    self.assertEqual(
+        store_inst.to_config()["exclude_step_arrays"], ["logprobs"]
+    )
+    self.assertNotIn("exclude_step_arrays", self._create_store().to_config())
+
   def test_init_with_auto_init_false_does_not_create_tables(self) -> None:
     store_inst = sql_store.SqlTrajectoryStore(
         db_url=self.db_url,

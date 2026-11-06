@@ -1,7 +1,7 @@
 """SQL-backed implementation for Trajectory Store."""
 
 import collections
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 import datetime
 import textwrap
 import threading
@@ -132,6 +132,7 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       self,
       engine: sa.Engine,
       max_cached_trajectories: int = _MAX_CACHED_TRAJECTORIES,
+      exclude_step_arrays: Collection[str] = (),
   ):
     """Initializes _AsyncSqlWriter without starting the background worker.
 
@@ -140,12 +141,16 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       max_cached_trajectories: Maximum number of trajectory metadata entries
         retained per run in the in-memory LRU cache to skip redundant trajectory
         upserts. Set to 0 to disable client-side trajectory metadata caching.
+      exclude_step_arrays: Step array fields dropped before queueing step
+        writes (see `async_writer.FILTERABLE_STEP_ARRAY_FIELDS`).
 
     Raises:
-      ValueError: If the engine uses an unsupported database dialect, or if
-        max_cached_trajectories is negative.
+      ValueError: If the engine uses an unsupported database dialect, if
+        max_cached_trajectories is negative, or if exclude_step_arrays has
+        unsupported field names.
+      TypeError: If exclude_step_arrays is a single string.
     """
-    super().__init__()
+    super().__init__(exclude_step_arrays=exclude_step_arrays)
     if max_cached_trajectories < 0:
       raise ValueError("max_cached_trajectories must be non-negative.")
     # Synchronous SQLAlchemy engine providing database connectivity and dialect.
@@ -201,7 +206,9 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       raise ValueError("Step must have a non-empty step_id.")
 
     self._enqueue(
-        async_writer.WriteTask(run_id=run_id, metadata=metadata, step=step)
+        async_writer.WriteTask(
+            run_id=run_id, metadata=metadata, step=self._filter_step(step)
+        )
     )
 
   def enqueue_metrics_write(
@@ -597,6 +604,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       run_id: str,
       db_url: str,
       auto_init: bool = True,
+      exclude_step_arrays: Collection[str] = (),
   ) -> None:
     """Initializes SqlTrajectoryStore.
 
@@ -611,10 +619,17 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
         omit the password; libpq then reads `PGPASSWORD` or `~/.pgpass`.
       auto_init: If True, automatically creates database tables and indexes on
         startup via `_initialize_schema`.
+      exclude_step_arrays: Heavy per-token step array fields to drop before
+        steps are queued and written, e.g. `("assistant_tokens", "logprobs")`
+        for observability-only runs. Must be a subset of
+        `async_writer.FILTERABLE_STEP_ARRAY_FIELDS`. Defaults to keeping all
+        arrays.
 
     Raises:
-      ValueError: If `run_id` or `db_url` is empty, None, or whitespace, or if
-        `db_url` uses an unsupported database dialect.
+      ValueError: If `run_id` or `db_url` is empty, None, or whitespace, if
+        `db_url` uses an unsupported database dialect, or if
+        `exclude_step_arrays` has unsupported field names.
+      TypeError: If `exclude_step_arrays` is a single string.
     """
     super().__init__()
     self._run_id = _validate_non_empty_str(run_id, "run_id").strip()
@@ -624,7 +639,9 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     )
     self._engine = self._engine_handle.engine
     try:
-      self._writer = _AsyncSqlWriter(engine=self._engine)
+      self._writer = _AsyncSqlWriter(
+          engine=self._engine, exclude_step_arrays=exclude_step_arrays
+      )
     except Exception:
       self._engine_handle.release()
       raise
@@ -645,7 +662,8 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     """Builds a SQL-backed store from `config`.
 
     Args:
-      config: Requires "db_url" and "run_id".
+      config: Requires "db_url" and "run_id". Accepts an optional
+        "exclude_step_arrays" list of step array fields to drop before writing.
 
     Returns:
       A new SqlTrajectoryStore.
@@ -656,6 +674,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     return cls(
         run_id=config.get("run_id", ""),
         db_url=config.get("db_url", ""),
+        exclude_step_arrays=config.get("exclude_step_arrays") or (),
     )
 
   def to_config(self) -> dict[str, Any]:
@@ -665,11 +684,14 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     including any password it embeds. Do not log it; log
     `to_redacted_config()` instead.
     """
-    return {
+    config: dict[str, Any] = {
         "backend": self.BACKEND,
         "db_url": self._db_url,
         "run_id": self._run_id,
     }
+    if self._writer.exclude_step_arrays:
+      config["exclude_step_arrays"] = sorted(self._writer.exclude_step_arrays)
+    return config
 
   def to_redacted_config(self) -> dict[str, Any]:
     """Returns `to_config()` with any password in "db_url" masked."""
