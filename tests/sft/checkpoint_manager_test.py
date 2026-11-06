@@ -634,6 +634,23 @@ class CheckpointManagerTest(parameterized.TestCase):
     )
     self.assertEqual(cp_manager._context.asynchronous.timeout_secs, 42)
 
+  def test_context_device_host_concurrent_gb(self):
+    # Unset by default: Orbax does not limit the bytes copied to host at once.
+    cp_manager = checkpoint_manager.CheckpointManager(
+        f'{self.temp_path}/{self.id()}_uncapped'
+    )
+    self.assertIsNone(cp_manager._context.memory.transfer_concurrent_bytes)
+    options = checkpoint_options.TunixCheckpointingOptions(
+        device_host_concurrent_gb=8
+    )
+    cp_manager = checkpoint_manager.CheckpointManager(
+        f'{self.temp_path}/{self.id()}_capped', options=options
+    )
+    # Decimal GB, as MaxText's `checkpoint_storage_device_host_concurrent_gb`.
+    self.assertEqual(
+        cp_manager._context.memory.transfer_concurrent_bytes, 8 * 10**9
+    )
+
   @parameterized.parameters(True, False)
   def test_checkpointing_method_selection(self, enable_async):
     cp_path = f'{self.temp_path}/{self.id()}_{enable_async}'

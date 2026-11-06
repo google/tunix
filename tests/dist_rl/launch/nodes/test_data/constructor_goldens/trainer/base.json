@@ -47,6 +47,7 @@
           "async_options": {
             "__type__": "AsyncOptions"
           },
+          "device_host_concurrent_gb": null,
           "enable_async_checkpointing": true,
           "preservation_policy": {
             "__type__": "LatestN",
@@ -71,10 +72,30 @@
       }
     },
     {
+      "tunix.sft.checkpoint_options.TunixCheckpointingOptions": {
+        "kwargs": {
+          "async_options": {
+            "__type__": "AsyncOptions"
+          },
+          "device_host_concurrent_gb": null,
+          "enable_async_checkpointing": true,
+          "preservation_policy": {
+            "__type__": "LatestN",
+            "n": 10
+          },
+          "save_decision_policy": {
+            "__type__": "FixedIntervalPolicy",
+            "interval": 1
+          },
+          "step_name_format": null
+        }
+      }
+    },
+    {
       "tunix.common.configs.TrainingConfig": {
         "kwargs": {
           "checkpoint_root_directory": "/artifacts/checkpoints",
-          "checkpointing_options": "<tunix.sft.checkpoint_options.TunixCheckpointingOptions()>",
+          "checkpointing_options": "<tunix.sft.checkpoint_options.TunixCheckpointingOptions()#2>",
           "data_sharding_axis": [
             "fsdp"
           ],
@@ -170,6 +191,9 @@
       }
     }
   ],
-  "env": {},
+  "env": {
+    "TPU_RAIDEN_DATA_NICS": "eth0",
+    "VERIFY_WEIGHTS": "false"
+  },
   "jax_config": {}
 }

@@ -225,6 +225,10 @@ vllm_config:
   # but vLLM then rejects stop strings, so stop on `eos_tokens` ids instead.
   # TODO(yatlas): Always detokenize and remove this option.
   detokenize: true
+  # Skip tpu_inference's precompilation of every input shape at engine start;
+  # each shape then compiles on first use. The rollout node sets
+  # `SKIP_JAX_PRECOMPILE` from it.
+  skip_jax_precompile: true
   # Free-form vLLM engine arguments (`VLLM_ADDITIONAL_CONFIG_JSON`). The typed
   # keys above are rejected here.
   kwargs: {}
@@ -282,7 +286,11 @@ reward_functions: []
 # config. Kept out of `rl_training_config` so the shared
 # `BasePipeline.create_rl_training_config()` builder accepts it unchanged.
 dist_training_config:
-  ckpt_d2h_concurrent_gb: 8
+  # Caps the GB a checkpoint save copies from device to host at once. null
+  # keeps the backend's default: MaxText's own cap
+  # (`checkpoint_storage_device_host_concurrent_gb`, 8 GB). Only the MaxText
+  # trainer takes a value; the Tunix trainer rejects one for now.
+  ckpt_d2h_concurrent_gb: null
   # Extra MaxText config arguments for a MaxText trainer
   # (`actor_model_config.model_source: maxtext`), as space-separated
   # `key=value` pairs, e.g. "remat_policy=custom opt_type=sgd". The trainer
@@ -301,8 +309,15 @@ weight_sync_config:
   raiden_use_ffi: null
   use_weight_converter: true
   prefuse_moe_weights: true
+  # Log weight checksums on both sides of each sync, and Raiden's transfer
+  # metrics. The trainer and rollout nodes set `VERIFY_WEIGHTS` from it.
   verify_weights: false
   in_flight_weight_updates: false
+  # Comma-separated NICs Raiden sends weights over, e.g. "eth0,eth1". "eth0"
+  # matches the earlier launchers; empty lets Raiden pick by its own heuristic.
+  # The trainer and rollout nodes set `TPU_RAIDEN_DATA_NICS` from it when it is
+  # not empty.
+  raiden_data_nics: "eth0"
 
 trajectory_store_config:
   enable: false
@@ -459,7 +474,6 @@ cluster_config:
       rollout_gcs_dir: ""
       bucket: ""
       save: true
-      rollout_skip_jax_precompile: 1
     trainer:
       jobset_yaml: "jobset.pathways.yaml"
       tpu_slice: "tpuv5e:4x4"

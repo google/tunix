@@ -425,9 +425,6 @@ echo "Launching trainer node on TPU chips ${LOCAL_TRAINER_TPU_CHIPS}..."
   if is_true "${LOCAL_ALLOW_MULTIPLE_LIBTPU_LOAD}"; then
     export ALLOW_MULTIPLE_LIBTPU_LOAD=1
   fi
-  export VERIFY_WEIGHTS="${WEIGHT_SYNC_VERIFY_WEIGHTS}"
-  export CKPT_D2H_CONCURRENT_GB="${CKPT_D2H_CONCURRENT_GB}"
-  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS}"
   export PYTHONUNBUFFERED=1
   print_command "Trainer command" "${TRAINER_CMD[@]}"
   exec "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1
@@ -438,7 +435,6 @@ echo "Trainer pid=$TRAINER_PID log=$TRAINER_LOG"
 echo "Launching rollout node on TPU chips ${LOCAL_ROLLOUT_TPU_CHIPS}..."
 (
   export JAX_PLATFORMS=tpu,cpu
-  export SKIP_JAX_PRECOMPILE=1
   export TPU_VISIBLE_DEVICES="${LOCAL_ROLLOUT_TPU_CHIPS}"
   export TPU_VISIBLE_CHIPS="${TPU_VISIBLE_DEVICES}"
   export TPU_CHIPS_PER_HOST_BOUNDS="${LOCAL_TPU_CHIPS_PER_HOST_BOUNDS}"
@@ -457,7 +453,6 @@ echo "Launching rollout node on TPU chips ${LOCAL_ROLLOUT_TPU_CHIPS}..."
       export NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL}"
     fi
   fi
-  export VERIFY_WEIGHTS="${WEIGHT_SYNC_VERIFY_WEIGHTS}"
   export PYTHONUNBUFFERED=1
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
   exec "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1

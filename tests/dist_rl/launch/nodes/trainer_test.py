@@ -38,6 +38,12 @@ _MAXTEXT_ARGV = (
     "actor_model_config.model_path=/ckpt/qwen3-0.6b/0/items",
     "actor_model_config.kwargs.maxtext_model_name=qwen3-0.6b",
 )
+# The variables `node_utils.apply_library_env` sets.
+_LIBRARY_ENV_VARS = (
+    "VERIFY_WEIGHTS",
+    "TPU_RAIDEN_DATA_NICS",
+    "SKIP_JAX_PRECOMPILE",
+)
 
 
 def _hp(*argv: str) -> resolve_config.DistHyperParameters:
@@ -49,6 +55,10 @@ class TrainerMainTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
+    # `main` sets the library variables: start without them, and restore the
+    # test's environment afterwards.
+    env = {k: v for k, v in os.environ.items() if k not in _LIBRARY_ENV_VARS}
+    self.enter_context(mock.patch.dict(os.environ, env, clear=True))
     self.mock_context = mock.MagicMock()
     self.mock_worker_service = mock.MagicMock(spec=trainer_worker.TrainerWorker)
     self.mock_mesh = mock.MagicMock(spec=Mesh)
@@ -151,6 +161,43 @@ class TrainerMainTest(absltest.TestCase):
           ValueError, "DIST_RL_WORKER_PORT must be set"
       ):
         trainer.main(argv, context=self.mock_context)
+    self.mock_context.jax.initialize.assert_not_called()
+
+  def test_main_sets_library_env_before_logging_the_resolved_config(self):
+    logged_env: dict[str, str] = {}
+
+    def _log_resolved_config(
+        hp: resolve_config.DistHyperParameters, role: str
+    ) -> str:
+      del hp, role
+      logged_env.update(
+          (name, os.environ[name])
+          for name in _LIBRARY_ENV_VARS
+          if name in os.environ
+      )
+      return "config-sha"
+
+    with mock.patch.object(
+        node_utils, "log_resolved_config", side_effect=_log_resolved_config
+    ):
+      trainer.main(
+          [
+              "weight_sync_config.verify_weights=true",
+              "weight_sync_config.raiden_data_nics=eth0,eth1",
+          ],
+          context=self.mock_context,
+      )
+    self.assertEqual(
+        logged_env,
+        {"VERIFY_WEIGHTS": "true", "TPU_RAIDEN_DATA_NICS": "eth0,eth1"},
+    )
+
+  def test_main_rejects_another_library_value_before_jax_init(self):
+    os.environ["VERIFY_WEIGHTS"] = "true"
+    with self.assertRaisesRegex(
+        ValueError, "set weight_sync_config.verify_weights instead"
+    ):
+      trainer.main([], context=self.mock_context)
     self.mock_context.jax.initialize.assert_not_called()
 
   def test_main_raises_without_discovery_context(self):
@@ -368,6 +415,11 @@ class TrainerFactoryTest(absltest.TestCase):
     ):
       self.fail(f"Unexpected preservation_policy {preservation_policy!r}.")
     self.assertEqual(preservation_policy.n, 3)
+    # No D2H cap for the Tunix trainer yet: the resolver rejects a
+    # `dist_training_config.ckpt_d2h_concurrent_gb` for it.
+    if not isinstance(ckpt, checkpoint_options.TunixCheckpointingOptions):
+      self.fail(f"Unexpected checkpointing_options {ckpt!r}.")
+    self.assertIsNone(ckpt.device_host_concurrent_gb)
 
   def test_tunix_trainer_factory_ignores_max_seq_token_per_tpu(self):
     # The field is for MaxText's max_target_length. Under the orchestrator the
@@ -696,6 +748,25 @@ class MaxTextTrainerFactoryTest(absltest.TestCase):
     )
     self.assertEqual(kwargs["checkpointing_options"].save_interval_steps, 5)
     self.assertEqual(kwargs["checkpointing_options"].max_to_keep, 3)
+
+  def test_plumbs_checkpoint_d2h_cap_and_extra_flags(self, mock_build_cfg, *_):
+    defaults = self._build_kwargs(mock_build_cfg)
+    # null keeps MaxText's own cap.
+    self.assertIsNone(defaults["device_host_concurrent_gb"])
+    self.assertEqual(defaults["extra_flags"], [])
+    mock_build_cfg.reset_mock()
+    kwargs = self._build_kwargs(
+        mock_build_cfg,
+        "dist_training_config.ckpt_d2h_concurrent_gb=16",
+        (
+            "dist_training_config.maxtext_extra_flags="
+            "remat_policy=full opt_type=sgd"
+        ),
+    )
+    self.assertEqual(kwargs["device_host_concurrent_gb"], 16)
+    self.assertEqual(
+        kwargs["extra_flags"], ["remat_policy=full", "opt_type=sgd"]
+    )
 
 
 class MaxTextOptionsTest(absltest.TestCase):

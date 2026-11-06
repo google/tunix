@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import dataclasses
 import logging
 import os
@@ -214,6 +214,19 @@ def build_vllm_maxtext_additional_config(
   return {"maxtext_config": overrides}
 
 
+def _d2h_concurrent_gb_argv(gb: int | None) -> list[str]:
+  """Formats MaxText's checkpoint D2H cap CLI argument after checking `gb`."""
+  if gb is None:
+    return []
+  if isinstance(gb, bool) or not isinstance(gb, int):
+    raise TypeError(
+        f"device_host_concurrent_gb must be an int or None, got {gb!r}."
+    )
+  if gb <= 0:
+    raise ValueError(f"device_host_concurrent_gb must be positive, got {gb}.")
+  return [f"checkpoint_storage_device_host_concurrent_gb={gb}"]
+
+
 def build_maxtext_config(
     model_name: str,
     worker_id: str = "",
@@ -244,6 +257,8 @@ def build_maxtext_config(
     adamw_options: AdamWOptions | None = None,
     weight_dtype: str = DEFAULT_TRAINER_WEIGHT_DTYPE,
     attention: str = "",
+    device_host_concurrent_gb: int | None = None,
+    extra_flags: Sequence[str] = (),
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on.
 
@@ -251,6 +266,12 @@ def build_maxtext_config(
     mesh_context: ICI context-parallelism degree; when > 1, disables
       `context_parallel_load_balance` because Tunix RL feeds batches in natural
       token order rather than MaxText's grain `DUAL_CHUNK_SWAP` order.
+    device_host_concurrent_gb: Caps the GB that checkpoint saves copy from
+      device to host at once (`checkpoint_storage_device_host_concurrent_gb`);
+      None keeps MaxText's default.
+    extra_flags: Extra MaxText config arguments, each `key=value` (a
+      ValueError otherwise), appended last so they override the ones built
+      here.
   """
   pyconfig, _, _ = maxtext_modules()
 
@@ -613,28 +634,21 @@ def build_maxtext_config(
         "checkpoint_storage_use_zarr3=false",
     ])
 
-  _d2h_gb = os.environ.get("CKPT_D2H_CONCURRENT_GB", "").strip()
-  if _d2h_gb:
-    logging.info(
-        "CKPT_D2H_CONCURRENT_GB=%s; overriding "
-        "checkpoint_storage_device_host_concurrent_gb.",
-        _d2h_gb,
-    )
-    argv.append(f"checkpoint_storage_device_host_concurrent_gb={_d2h_gb}")
+  argv.extend(_d2h_concurrent_gb_argv(device_host_concurrent_gb))
 
-  _extra = os.environ.get("MAXTEXT_EXTRA_FLAGS", "").strip()
-  if _extra:
-    _pairs = [tok for tok in _extra.split() if tok]
-    _bad = [tok for tok in _pairs if "=" not in tok]
-    if _bad:
+  if extra_flags:
+    malformed = [flag for flag in extra_flags if "=" not in flag]
+    if malformed:
       raise ValueError(
-          "MAXTEXT_EXTRA_FLAGS entries must be key=value, got: "
-          f"{' '.join(_bad)}"
+          f"extra_flags entries must be key=value, got: {' '.join(malformed)}"
       )
+    # Log tooling parses this line from the trainer logs; keep its format.
     logging.info(
-        "MAXTEXT_EXTRA_FLAGS adding %d flag(s): %s", len(_pairs), _pairs
+        "MAXTEXT_EXTRA_FLAGS adding %d flag(s): %s",
+        len(extra_flags),
+        list(extra_flags),
     )
-    argv.extend(_pairs)
+    argv.extend(extra_flags)
 
   if not supports_rollout_weight_dtype:
     logging.info(

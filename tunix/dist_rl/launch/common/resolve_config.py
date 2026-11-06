@@ -239,10 +239,9 @@ def _validate_rollout_cache_settings(hp: cli_config.HyperParameters) -> None:
     TypeError: If `cluster_config.k8s.jax_cache.disable` or `save` is not a
       bool, which `k8s.sh` and `render_bash_exports` could read differently
       (e.g. `save: null` would still save on the pods).
-    ValueError: If `cluster_config.k8s.jax_cache.rollout_skip_jax_precompile`
-      is not the int 0 or 1, if `cluster_config.k8s.jax_cache.local_dir` is
-      not a non-empty absolute path, or if `rollout_model_config.lora_config`
-      is set without `rank`.
+    ValueError: If `cluster_config.k8s.jax_cache.local_dir` is not a non-empty
+      absolute path, or if `rollout_model_config.lora_config` is set without
+      `rank`.
   """
   jax_cache = hp.config_mapping("cluster_config")["k8s"]["jax_cache"]
   for key in ("disable", "save"):
@@ -251,17 +250,6 @@ def _validate_rollout_cache_settings(hp: cli_config.HyperParameters) -> None:
           f"cluster_config.k8s.jax_cache.{key} must be a bool, got"
           f" {jax_cache[key]!r}."
       )
-  skip_precompile = jax_cache["rollout_skip_jax_precompile"]
-  # `bool` is an `int` subclass, but `k8s.sh` would pass it on as true/false.
-  if (
-      isinstance(skip_precompile, bool)
-      or not isinstance(skip_precompile, int)
-      or skip_precompile not in (0, 1)
-  ):
-    raise ValueError(
-        "cluster_config.k8s.jax_cache.rollout_skip_jax_precompile must be 0 or"
-        f" 1, got {skip_precompile!r}."
-    )
   local_dir = jax_cache["local_dir"]
   if not isinstance(local_dir, str) or not os.path.isabs(local_dir):
     raise ValueError(
@@ -550,6 +538,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_maxtext_model_names(hp)
   _validate_maxtext_extra_flags(hp)
   _validate_rollout_weights(hp)
+  _validate_library_settings(hp)
   if grpo["reward_mode"] == "reward_fn" and not hp.config["reward_functions"]:
     raise ValueError(
         "agentic_grpo_config.reward_mode='reward_fn' needs at least one entry"
@@ -841,6 +830,7 @@ def _validate_maxtext_extra_flags(hp: cli_config.HyperParameters) -> None:
 # ones (through `k8s.sh`); another launcher starts the `external` ones, e.g. a
 # job scheduler that starts each process separately.
 _CLUSTER_TARGETS = ("local", "k8s", "external")
+
 _MODEL_DTYPES = ("bfloat16", "float32")
 _REMAT_CONFIGS = ("none", "block", "decoder")
 _ROLLOUT_ENGINES = ("inprocess_vllm", "vllm", "vanilla")
@@ -850,6 +840,71 @@ _CHAT_PARSER_TYPES = ("auto", "raw")
 def _check_choice(key: str, value: object, choices: Sequence[str]) -> None:
   if value not in choices:
     raise ValueError(f"{key} must be one of {choices}, got {value!r}.")
+
+
+# Settings the worker nodes hand to the libraries as environment variables
+# (`node_utils.apply_library_env`), as (section, key).
+_LIBRARY_BOOL_SETTINGS = (
+    ("weight_sync_config", "verify_weights"),
+    ("vllm_config", "skip_jax_precompile"),
+)
+
+
+def _validate_library_settings(hp: cli_config.HyperParameters) -> None:
+  """Checks the types of the settings the nodes hand to the libraries.
+
+  The resolver checks that a key exists, not its type: a `section.key=value`
+  override takes whatever type its value parses to. Without this check a
+  malformed value would be misread or fail only inside a node, after its TPUs
+  are allocated: e.g. `weight_sync_config.verify_weights='false'` is a
+  non-empty string, so `node_utils.apply_library_env` would export
+  `VERIFY_WEIGHTS=true`, and `dist_training_config.ckpt_d2h_concurrent_gb=8.5`
+  would fail inside MaxText or Orbax on the trainer.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    TypeError: If a `_LIBRARY_BOOL_SETTINGS` value is not a bool,
+      `weight_sync_config.raiden_data_nics` is not a string, or
+      `dist_training_config.ckpt_d2h_concurrent_gb` is neither an int nor
+      null.
+    ValueError: If `dist_training_config.ckpt_d2h_concurrent_gb` is not
+      positive, or is set for the Tunix trainer.
+  """
+  for section, key in _LIBRARY_BOOL_SETTINGS:
+    value = hp.config_mapping(section)[key]
+    if not isinstance(value, bool):
+      raise TypeError(f"{section}.{key} must be a bool, got {value!r}.")
+  nics = hp.config_mapping("weight_sync_config")["raiden_data_nics"]
+  if not isinstance(nics, str):
+    raise TypeError(
+        "weight_sync_config.raiden_data_nics must be a string of"
+        f" comma-separated NIC names, or empty, got {nics!r}."
+    )
+  gb = hp.config_mapping("dist_training_config")["ckpt_d2h_concurrent_gb"]
+  if gb is None:
+    return
+  if isinstance(gb, bool) or not isinstance(gb, int):
+    raise TypeError(
+        "dist_training_config.ckpt_d2h_concurrent_gb must be an int or null,"
+        f" got {gb!r}."
+    )
+  if gb <= 0:
+    raise ValueError(
+        "dist_training_config.ckpt_d2h_concurrent_gb must be positive, got"
+        f" {gb}."
+    )
+  # TODO(noghabi): Cap the Tunix trainer's checkpoint D2H copies too
+  # (`TunixCheckpointingOptions.device_host_concurrent_gb` takes the value)
+  # once step-time data on a checkpointing step shows async saves still
+  # overlap training: Orbax may block on earlier writes past the cap.
+  if hp.config_mapping("actor_model_config")["model_source"] != "maxtext":
+    raise ValueError(
+        "dist_training_config.ckpt_d2h_concurrent_gb only applies to the"
+        " MaxText trainer (actor_model_config.model_source='maxtext'); the"
+        f" Tunix trainer has no D2H cap yet, so leave it null (got {gb})."
+    )
 
 
 def initialize(overrides: Sequence[str]) -> DistHyperParameters:
@@ -985,7 +1040,6 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
   rollout_model = hp.config_mapping("rollout_model_config")
   ws = hp.config_mapping("weight_sync_config")
   vllm = hp.config_mapping("vllm_config")
-  dist_training = hp.config_mapping("dist_training_config")
   sandbox_k8s = (
       hp.config["kubernetes_config"]
       if isinstance(hp.config["kubernetes_config"], Mapping)
@@ -1038,12 +1092,9 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "ROLLOUT_MODEL_ID": rollout_model["model_id"],
       "ROLLOUT_MODEL_DIR": rollout_model["model_download_path"],
       "WEIGHT_SYNC_MODE": ws["mode"],
-      "WEIGHT_SYNC_VERIFY_WEIGHTS": ws["verify_weights"],
       "WEIGHT_SYNC_RAIDEN_USE_FFI": (
           "" if ws["raiden_use_ffi"] is None else ws["raiden_use_ffi"]
       ),
-      "CKPT_D2H_CONCURRENT_GB": dist_training["ckpt_d2h_concurrent_gb"],
-      "MAXTEXT_EXTRA_FLAGS": dist_training["maxtext_extra_flags"],
       "VLLM_ADDITIONAL_CONFIG_JSON": (
           json.dumps(vllm["kwargs"], sort_keys=True) if vllm["kwargs"] else ""
       ),
@@ -1099,9 +1150,6 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       # Empty without a GCS cache.
       "K8S_JAX_CACHE_ROLLOUT_GCS_DIR": rollout_cache_uri or "",
       "K8S_JAX_CACHE_SAVE": jax_cache["save"],
-      "K8S_ROLLOUT_SKIP_JAX_PRECOMPILE": jax_cache[
-          "rollout_skip_jax_precompile"
-      ],
       "SANDBOX_NAMESPACE": (
           sandbox_k8s["namespace"] if "namespace" in sandbox_k8s else ""
       ),

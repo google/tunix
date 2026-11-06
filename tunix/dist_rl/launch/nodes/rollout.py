@@ -912,6 +912,7 @@ def main(
   )
 
   hp = resolve_config.initialize(argv)
+  node_utils.apply_library_env(hp, "rollout")
   _validate_rollout_config(hp)
   worker_id = node_utils.worker_id(hp, "rollout", LOCAL_WORKER_ID)
   port = node_utils.service_port(hp, "rollout")

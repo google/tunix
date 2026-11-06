@@ -34,6 +34,7 @@
           "async_options": {
             "__type__": "AsyncOptions"
           },
+          "device_host_concurrent_gb": null,
           "enable_async_checkpointing": true,
           "preservation_policy": {
             "__type__": "LatestN",

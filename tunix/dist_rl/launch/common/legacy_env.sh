@@ -29,9 +29,11 @@
 # The list leaves out the variables the drivers still read from the caller's
 # environment (`_ENV_PASSTHROUGH` in `launch_test.py`) and the ones read by the
 # runtime itself: JAX, libtpu, TFDS, W&B, Python, `enter_kube_context.sh`, and
-# the Tunix libraries (e.g. `VERIFY_WEIGHTS`, `CKPT_D2H_CONCURRENT_GB`).
-# `MAXTEXT_EXTRA_FLAGS` is listed although `maxtext_utils` reads it: the
-# resolver exports it from `dist_training_config.maxtext_extra_flags`.
+# the libraries. The worker nodes set some of the latter from the config (e.g.
+# `VERIFY_WEIGHTS`, see `node_utils.apply_library_env`) and fail on a different
+# value in the environment. `CKPT_D2H_CONCURRENT_GB` and `MAXTEXT_EXTRA_FLAGS`
+# are listed: only the old example mains read them, and the trainer node takes
+# them from `dist_training_config`.
 
 LEGACY_LAUNCHER_ENV_VARS=(
   ADAM_B1
@@ -45,6 +47,7 @@ LEGACY_LAUNCHER_ENV_VARS=(
   CHECKPOINT_MAX_TO_KEEP
   CHECKPOINT_ROOT_DIRECTORY
   CHECKPOINT_SAVE_INTERVAL_STEPS
+  CKPT_D2H_CONCURRENT_GB
   COMPUTE_LOGPS_CHUNK_SIZE
   COMPUTE_LOGPS_MICRO_BATCH_SIZE
   CPU_MACHINE
@@ -83,6 +86,7 @@ LEGACY_LAUNCHER_ENV_VARS=(
   K8S_NAMESPACE
   KL_LOSS_MODE
   KUEUE_PRIORITY_CLASS
+  KUEUE_QUEUE
   KUEUE_QUEUE_NAME
   LEARNING_RATE
   LOCAL_JAX_CACHE_DIR
@@ -186,6 +190,7 @@ LEGACY_LAUNCHER_ENV_VARS=(
   TOP_K
   TOP_P
   TRAINER_BACKEND
+  TRAINER_EXPERT
   TRAINER_EXTRA_ENV
   TRAINER_FSDP
   TRAINER_ID
@@ -227,6 +232,7 @@ LEGACY_LAUNCHER_ENV_VARS=(
   WAIT_TIMEOUT_SECS
   WARMUP_STEPS
   WEIGHT_DECAY
+  WEIGHT_SYNC_MODE
   WORKER_SHUTDOWN_GRACE_SECS
 )
 

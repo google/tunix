@@ -15,7 +15,7 @@
 """Unit tests for the helpers shared by the distributed RL node mains."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 import json
 import os
 import pathlib
@@ -23,6 +23,7 @@ import pickle
 import signal
 import sys
 import tempfile
+from typing import Literal
 from unittest import mock
 
 from absl.testing import absltest
@@ -113,6 +114,129 @@ class LogResolvedConfigTest(absltest.TestCase):
     self.assertNotIn("VLLM_api_key", record["env"])
     # Exact toggle names are not prefixes.
     self.assertNotIn("VERIFY_WEIGHTS_EXTRA", record["env"])
+
+
+# The variables `apply_library_env` sets.
+_LIBRARY_ENV_VARS = (
+    "VERIFY_WEIGHTS",
+    "TPU_RAIDEN_DATA_NICS",
+    "SKIP_JAX_PRECOMPILE",
+)
+
+
+def _apply_library_env(
+    argv: Sequence[str],
+    role: Literal["trainer", "rollout"],
+    env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+  """Runs `apply_library_env` and returns the library variables it leaves.
+
+  Args:
+    argv: Config overrides.
+    role: Node role.
+    env: Library variables already in the environment; the others are unset.
+
+  Returns:
+    The `_LIBRARY_ENV_VARS` entries present in `os.environ` after the call.
+  """
+  start = {k: v for k, v in os.environ.items() if k not in _LIBRARY_ENV_VARS}
+  start.update(env or {})
+  with mock.patch.dict(os.environ, start, clear=True):
+    node_utils.apply_library_env(resolve_config.initialize(list(argv)), role)
+    return {
+        name: os.environ[name]
+        for name in _LIBRARY_ENV_VARS
+        if name in os.environ
+    }
+
+
+class ApplyLibraryEnvTest(absltest.TestCase):
+
+  def test_defaults(self):
+    self.assertEqual(
+        _apply_library_env([], "trainer"),
+        {"VERIFY_WEIGHTS": "false", "TPU_RAIDEN_DATA_NICS": "eth0"},
+    )
+    self.assertEqual(
+        _apply_library_env([], "rollout"),
+        {
+            "VERIFY_WEIGHTS": "false",
+            "TPU_RAIDEN_DATA_NICS": "eth0",
+            "SKIP_JAX_PRECOMPILE": "1",
+        },
+    )
+    # Empty lets Raiden pick its own NICs: `TPU_RAIDEN_DATA_NICS` stays unset.
+    self.assertEqual(
+        _apply_library_env(
+            ["weight_sync_config.raiden_data_nics=''"], "trainer"
+        ),
+        {"VERIFY_WEIGHTS": "false"},
+    )
+
+  def test_sets_the_configured_values(self):
+    argv = [
+        "weight_sync_config.verify_weights=true",
+        "weight_sync_config.raiden_data_nics=eth0,eth1",
+        "vllm_config.skip_jax_precompile=false",
+    ]
+    self.assertEqual(
+        _apply_library_env(argv, "trainer"),
+        {
+            "VERIFY_WEIGHTS": "true",
+            "TPU_RAIDEN_DATA_NICS": "eth0,eth1",
+        },
+    )
+    self.assertEqual(
+        _apply_library_env(argv, "rollout"),
+        {
+            "VERIFY_WEIGHTS": "true",
+            "TPU_RAIDEN_DATA_NICS": "eth0,eth1",
+            "SKIP_JAX_PRECOMPILE": "0",
+        },
+    )
+
+  def test_accepts_the_same_value_in_the_environment(self):
+    env = {
+        "VERIFY_WEIGHTS": "false",
+        "TPU_RAIDEN_DATA_NICS": "eth0",
+        "SKIP_JAX_PRECOMPILE": "1",
+    }
+    self.assertEqual(_apply_library_env([], "rollout", env), env)
+
+  def test_rejects_another_value_in_the_environment(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        "SKIP_JAX_PRECOMPILE='true' is set in the environment, but"
+        " vllm_config.skip_jax_precompile sets it to '1'",
+    ):
+      _apply_library_env([], "rollout", {"SKIP_JAX_PRECOMPILE": "true"})
+    with self.assertRaisesRegex(
+        ValueError,
+        "VERIFY_WEIGHTS='true' .* weight_sync_config.verify_weights sets it to"
+        " 'false'.*set weight_sync_config.verify_weights instead",
+    ):
+      _apply_library_env([], "trainer", {"VERIFY_WEIGHTS": "true"})
+
+  def test_rejects_a_variable_the_config_leaves_unset(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        "weight_sync_config.raiden_data_nics leaves it unset.*set"
+        " weight_sync_config.raiden_data_nics instead",
+    ):
+      _apply_library_env(
+          ["weight_sync_config.raiden_data_nics=''"],
+          "trainer",
+          {"TPU_RAIDEN_DATA_NICS": "eth0"},
+      )
+
+  def test_sets_nothing_when_a_variable_conflicts(self):
+    env = {k: v for k, v in os.environ.items() if k not in _LIBRARY_ENV_VARS}
+    env["SKIP_JAX_PRECOMPILE"] = "0"
+    hp = resolve_config.initialize([])
+    with mock.patch.dict(os.environ, env, clear=True):
+      with self.assertRaisesRegex(ValueError, "SKIP_JAX_PRECOMPILE"):
+        node_utils.apply_library_env(hp, "rollout")
+      self.assertNotIn("VERIFY_WEIGHTS", os.environ)
 
 
 class PadAndEosIdsTest(absltest.TestCase):

@@ -789,6 +789,10 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
         upload_all_profiler_results=args.upload_all_profiler_results,
     )
 
+  # The legacy launchers set these two in the environment;
+  # `tunix.dist_rl.launch.nodes.trainer` takes them from the config instead.
+  d2h_gb = os.environ.get("CKPT_D2H_CONCURRENT_GB", "").strip()
+  extra_flags = os.environ.get("MAXTEXT_EXTRA_FLAGS", "").split()
   maxtext_config = maxtext_utils.build_maxtext_config(
       model_name=args.maxtext_model_name,
       worker_id=args.worker_id,
@@ -816,6 +820,8 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       max_seq_token_per_tpu=args.max_seq_token_per_tpu,
       weight_dtype=args.model_load_dtype,
       attention=args.maxtext_attention,
+      device_host_concurrent_gb=int(d2h_gb) if d2h_gb else None,
+      extra_flags=extra_flags,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
+import dataclasses
 import logging
 import os
 import sys
@@ -152,16 +153,34 @@ def _checkpoint_root_directory(
   return None
 
 
+def _ckpt_d2h_concurrent_gb(
+    hp: resolve_config.DistHyperParameters,
+) -> int | None:
+  """Returns `dist_training_config.ckpt_d2h_concurrent_gb`, or None if null.
+
+  The MaxText trainer caps the GB a checkpoint save copies from device to host
+  at once by it; None keeps the backend's default. The resolver only allows a
+  value for the MaxText trainer, so the Tunix trainer always gets None (no cap)
+  for now.
+
+  Args:
+    hp: Validated distributed RL configuration.
+  """
+  gb = hp.config_mapping("dist_training_config")["ckpt_d2h_concurrent_gb"]
+  return None if gb is None else int(gb)
+
+
 def _tunix_training_config(
     hp: resolve_config.DistHyperParameters, *, gradient_accumulation_steps: int
 ) -> peft_trainer_v2.TrainingConfig:
   """Builds the PeftTrainer v2 config for the orchestrator-driven trainer.
 
   The checkpointing options come from the shared
-  `obtain_training_config_dict` builder. `hp.create_rl_training_config()` is
-  not used: `RLTrainingConfig` rejects trajectory-level micro-batches (see
-  `_gradient_accumulation_steps`). Metrics logging and profiling stay with the
-  orchestrator, so they are not set here.
+  `obtain_training_config_dict` builder, with the device-to-host cap of
+  `dist_training_config.ckpt_d2h_concurrent_gb`.
+  `hp.create_rl_training_config()` is not used: `RLTrainingConfig` rejects
+  trajectory-level micro-batches (see `_gradient_accumulation_steps`). Metrics
+  logging and profiling stay with the orchestrator, so they are not set here.
 
   Args:
     hp: Validated distributed RL configuration.
@@ -179,7 +198,10 @@ def _tunix_training_config(
       pbar_description="Actor Training",
       # Matches the batch axis of `node_utils.MESH_AXIS_NAMES`.
       data_sharding_axis=("fsdp",),
-      checkpointing_options=built["checkpointing_options"],
+      checkpointing_options=dataclasses.replace(
+          built["checkpointing_options"],
+          device_host_concurrent_gb=_ckpt_d2h_concurrent_gb(hp),
+      ),
       checkpoint_root_directory=_checkpoint_root_directory(hp),
       # No max_seq_token_per_tpu here. Under the orchestrator the trainer never
       # packs: the SequencePackedBatchAssembler does, and the weighting that
@@ -568,6 +590,11 @@ def _create_maxtext_trainer_factory(
       ),
       weight_dtype=str(actor["load_dtype"]),
       attention=_kwarg(kwargs, "attention", ""),
+      device_host_concurrent_gb=_ckpt_d2h_concurrent_gb(hp),
+      # `DistHyperParameters` checked that each entry is `key=value`.
+      extra_flags=str(
+          hp.config_mapping("dist_training_config")["maxtext_extra_flags"]
+      ).split(),
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)
@@ -609,6 +636,7 @@ def main(
       force=True,
   )
   hp = resolve_config.initialize(argv)
+  node_utils.apply_library_env(hp, "trainer")
   config_sha256 = node_utils.log_resolved_config(hp, "trainer")
   worker_id = node_utils.worker_id(hp, "trainer", LOCAL_WORKER_ID)
   port = node_utils.service_port(hp, "trainer")

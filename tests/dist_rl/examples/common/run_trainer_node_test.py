@@ -751,6 +751,42 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(kwargs["base_num_kv_heads"], 8)
     self.assertEqual(kwargs["attention"], "flash")
 
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_passes_legacy_launcher_env(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    del mock_create_mesh, mock_get_pad_id  # Unused.
+    args = run_trainer_node._parse_args([])
+    # The legacy launchers set these in the environment.
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "CKPT_D2H_CONCURRENT_GB": " 8 ",
+            "MAXTEXT_EXTRA_FLAGS": "remat_policy=full  opt_type=sgd ",
+        },
+    ):
+      run_trainer_node._create_maxtext_trainer_factory(args)
+    kwargs = mock_build_cfg.call_args.kwargs
+    self.assertEqual(kwargs["device_host_concurrent_gb"], 8)
+    self.assertEqual(
+        kwargs["extra_flags"], ["remat_policy=full", "opt_type=sgd"]
+    )
+
+    mock_build_cfg.reset_mock()
+    with mock.patch.dict("os.environ", {}, clear=False):
+      run_trainer_node.os.environ.pop("CKPT_D2H_CONCURRENT_GB", None)
+      run_trainer_node.os.environ.pop("MAXTEXT_EXTRA_FLAGS", None)
+      run_trainer_node._create_maxtext_trainer_factory(args)
+    kwargs = mock_build_cfg.call_args.kwargs
+    self.assertIsNone(kwargs["device_host_concurrent_gb"])
+    self.assertEqual(kwargs["extra_flags"], [])
+
   def test_maxtext_adamw_options_follow_optimizer_flags(self):
     # Names are case-insensitive, as cli.config.create_optimizer reads them.
     args = run_trainer_node._parse_args([

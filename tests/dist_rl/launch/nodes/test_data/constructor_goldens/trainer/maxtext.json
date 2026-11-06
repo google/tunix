@@ -38,6 +38,7 @@
           "async_options": {
             "__type__": "AsyncOptions"
           },
+          "device_host_concurrent_gb": null,
           "enable_async_checkpointing": true,
           "preservation_policy": {
             "__type__": "LatestN",
@@ -83,6 +84,8 @@
           "base_num_kv_heads": 0,
           "base_output_directory": "/artifacts/maxtext",
           "checkpointing_options": "<orbax.checkpoint.checkpoint_manager.CheckpointManagerOptions()>",
+          "device_host_concurrent_gb": null,
+          "extra_flags": [],
           "gradient_accumulation_steps": 32,
           "learning_rate": 2e-07,
           "load_parameters_path": "/ckpt/qwen3-1.7b/0/items",
@@ -156,6 +159,9 @@
       }
     }
   ],
-  "env": {},
+  "env": {
+    "TPU_RAIDEN_DATA_NICS": "eth0",
+    "VERIFY_WEIGHTS": "false"
+  },
   "jax_config": {}
 }

@@ -184,15 +184,9 @@ start_trainer() {
   if is_true "${K8S_ENABLE_PATHWAYS_PERSISTENCE}"; then
     enable_pathways_persistence=1
   fi
-  local env_prefix="VERIFY_WEIGHTS=${WEIGHT_SYNC_VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${enable_pathways_persistence}"
+  local env_prefix="ENABLE_PATHWAYS_PERSISTENCE=${enable_pathways_persistence}"
   if [[ -n "${HF_TOKEN:-}" ]]; then
     env_prefix="HF_TOKEN=$(printf '%q' "${HF_TOKEN}") ${env_prefix}"
-  fi
-  if [[ -n "${CKPT_D2H_CONCURRENT_GB}" ]]; then
-    env_prefix+=" CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}"
-  fi
-  if [[ -n "${MAXTEXT_EXTRA_FLAGS}" ]]; then
-    env_prefix+=" MAXTEXT_EXTRA_FLAGS=$(printf '%q' "${MAXTEXT_EXTRA_FLAGS}")"
   fi
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
     if [[ -n "${WEIGHT_SYNC_RAIDEN_USE_FFI}" ]]; then
@@ -277,7 +271,7 @@ start_rollout_instance() {
     echo "Rollout Pathways images: server=${K8S_PATHWAYS_SERVER_IMAGE} proxy=${K8S_PATHWAYS_PROXY_IMAGE}" >&2
   fi
 
-  local env_prefix="SKIP_JAX_PRECOMPILE=$(printf '%q' "${K8S_ROLLOUT_SKIP_JAX_PRECOMPILE}") VERIFY_WEIGHTS=$(printf '%q' "${WEIGHT_SYNC_VERIFY_WEIGHTS}")"
+  local env_prefix=""
   if (( ROLLOUT_REPLICAS > 1 )); then
     # The node appends the index to `cluster_config.k8s.rollout_id`
     # (`node_utils.worker_id`), so it registers as `target_id`.
@@ -328,6 +322,7 @@ start_rollout_instance() {
     fi
   fi
 
+  env_prefix="${env_prefix# }"
   local startup_cmd="${OTEL_ENV_PREFIX}${env_prefix} python -m tunix.dist_rl.distributed.runtime.main --discovery_addrs=${K8S_ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor --process_main=${ROLLOUT_MAIN} ${CONTAINER_ARGS_STR}"
 
   run_yaml_gen \
@@ -461,6 +456,25 @@ if [[ "${COMMAND}" == "start" || "${COMMAND}" == "rollout" ]]; then
   if [[ -n "${BUCKET:-}" ]]; then
     echo "Warning: the k8s rollout pods don't read BUCKET; set" \
       "cluster_config.k8s.jax_cache.bucket for a GCS compilation cache." >&2
+  fi
+fi
+
+# The trainer and rollout nodes set these library variables from the config
+# (`node_utils.apply_library_env`). Unlike `local.sh`'s nodes, the pods don't
+# inherit the caller's environment, which would silently drop them.
+if [[ "${COMMAND}" == "start" || "${COMMAND}" == "trainer" || "${COMMAND}" == "rollout" ]]; then
+  library_env_set=()
+  for library_var in SKIP_JAX_PRECOMPILE TPU_RAIDEN_DATA_NICS VERIFY_WEIGHTS; do
+    if [[ -n "${!library_var:-}" ]]; then
+      library_env_set+=("${library_var}")
+    fi
+  done
+  if (( ${#library_env_set[@]} > 0 )); then
+    echo "Error: ${library_env_set[*]} set in the environment, but the k8s" \
+      "nodes take them from the config: vllm_config.skip_jax_precompile," \
+      "weight_sync_config.raiden_data_nics and" \
+      "weight_sync_config.verify_weights." >&2
+    exit 1
   fi
 fi
 

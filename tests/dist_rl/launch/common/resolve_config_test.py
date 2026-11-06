@@ -840,7 +840,7 @@ weight_sync_config:
         resolve_config.render_bash_exports(resolve_config.initialize([])),
     )
 
-  def test_maxtext_extra_flags_need_a_maxtext_trainer_and_are_exported(self):
+  def test_maxtext_extra_flags_need_a_maxtext_trainer(self):
     maxtext = [
         "model_config.model_source=maxtext",
         "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
@@ -868,18 +868,86 @@ weight_sync_config:
               *maxtext,
               f"dist_training_config.maxtext_extra_flags={malformed}",
           ])
-    # The drivers hand them to the trainer as `MAXTEXT_EXTRA_FLAGS`, which
-    # `maxtext_utils.build_maxtext_config` reads.
-    self.assertIn(
-        "export MAXTEXT_EXTRA_FLAGS='remat_policy=custom opt_type=sgd'\n",
-        resolve_config.render_bash_exports(
-            resolve_config.initialize([*maxtext, flags])
-        ),
+    hp = resolve_config.initialize([*maxtext, flags])
+    self.assertEqual(
+        hp.config_mapping("dist_training_config")["maxtext_extra_flags"],
+        "remat_policy=custom opt_type=sgd",
     )
-    self.assertIn(
-        "export MAXTEXT_EXTRA_FLAGS=''\n",
-        resolve_config.render_bash_exports(resolve_config.initialize([])),
+
+  def test_library_settings(self):
+    hp = resolve_config.initialize([])
+    vllm = hp.config_mapping("vllm_config")
+    self.assertIs(vllm["skip_jax_precompile"], True)
+    dist_training = hp.config_mapping("dist_training_config")
+    # null keeps the backend's own D2H cap (MaxText's 8 GB, none for Tunix).
+    self.assertIsNone(dist_training["ckpt_d2h_concurrent_gb"])
+    ws = hp.config_mapping("weight_sync_config")
+    self.assertIs(ws["verify_weights"], False)
+    # As the earlier launchers did.
+    self.assertEqual(ws["raiden_data_nics"], "eth0")
+
+    hp = resolve_config.initialize([
+        "vllm_config.skip_jax_precompile=false",
+        "actor_model_config.model_source=maxtext",
+        "actor_model_config.model_path=/ckpt",
+        "actor_model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+        "dist_training_config.ckpt_d2h_concurrent_gb=16",
+        "weight_sync_config.raiden_data_nics=eth0,eth1",
+    ])
+    vllm = hp.config_mapping("vllm_config")
+    self.assertIs(vllm["skip_jax_precompile"], False)
+    dist_training = hp.config_mapping("dist_training_config")
+    self.assertEqual(dist_training["ckpt_d2h_concurrent_gb"], 16)
+    self.assertEqual(
+        hp.config_mapping("weight_sync_config")["raiden_data_nics"],
+        "eth0,eth1",
     )
+
+  def test_invalid_library_settings_fail_loud(self):
+    # The nodes turn them into environment variables; a wrong type would be
+    # misread there, after the jobs started.
+    d2h = "dist_training_config.ckpt_d2h_concurrent_gb"
+    for override, error in (
+        ("vllm_config.skip_jax_precompile=1", "skip_jax_precompile must be a"),
+        ("weight_sync_config.verify_weights=1", "verify_weights must be a"),
+        ("weight_sync_config.raiden_data_nics=1", "must be a string"),
+        (f"{d2h}=8.5", "must be an int or null"),
+        (f"{d2h}=true", "must be an int or null"),
+    ):
+      with self.subTest(override=override):
+        with self.assertRaisesRegex(TypeError, error):
+          resolve_config.initialize([override])
+    with self.assertRaisesRegex(ValueError, "must be positive"):
+      resolve_config.initialize([f"{d2h}=0"])
+    # The Tunix trainer has no D2H cap yet.
+    with self.assertRaisesRegex(
+        ValueError, "only applies to the MaxText trainer"
+    ):
+      resolve_config.initialize([f"{d2h}=8"])
+
+  def test_moved_library_settings_fail_as_unknown_keys(self):
+    for override in (
+        "cluster_config.k8s.jax_cache.rollout_skip_jax_precompile=0",
+        "cluster_config.k8s.jax_cache.skip_jax_precompile=0",
+    ):
+      with self.subTest(override=override):
+        with self.assertRaisesRegex(
+            ValueError, f"Unknown configuration key '{override.split('=')[0]}'"
+        ):
+          resolve_config.initialize([override])
+
+  def test_library_settings_are_not_exported_to_the_drivers(self):
+    # The nodes take them from the config (`node_utils.apply_library_env`,
+    # `maxtext_utils.build_maxtext_config`); the drivers pass config only.
+    exports = resolve_config.render_bash_exports(resolve_config.initialize([]))
+    for name in (
+        "WEIGHT_SYNC_VERIFY_WEIGHTS",
+        "CKPT_D2H_CONCURRENT_GB",
+        "MAXTEXT_EXTRA_FLAGS",
+        "K8S_ROLLOUT_SKIP_JAX_PRECOMPILE",
+    ):
+      with self.subTest(name=name):
+        self.assertNotIn(f"export {name}=", exports)
 
   def test_plain_config_and_fingerprint(self):
     overrides = ["cluster_config.run_id=run_1", "batch_size=8"]
@@ -1010,15 +1078,6 @@ weight_sync_config:
               "agentic_grpo_config.beta=0.0",
               f"cluster_config.k8s.jax_cache.save={save}",
           ])
-    for skip in ("true", "null", "2", "'1'"):
-      with self.subTest(rollout_skip_jax_precompile=skip):
-        with self.assertRaisesRegex(
-            ValueError, "rollout_skip_jax_precompile must be 0 or 1"
-        ):
-          resolve_config.initialize([
-              "agentic_grpo_config.beta=0.0",
-              f"cluster_config.k8s.jax_cache.rollout_skip_jax_precompile={skip}",
-          ])
     for local_dir in ("''", "jax_cache", "null"):
       with self.subTest(local_dir=local_dir):
         with self.assertRaisesRegex(
@@ -1085,11 +1144,6 @@ weight_sync_config:
           "agentic_grpo_config.beta=0.0",
           "rollout_model_config.lora_config={'alpha': 32.0}",
       ])
-    # Both precompile settings are valid.
-    resolve_config.initialize([
-        "agentic_grpo_config.beta=0.0",
-        "cluster_config.k8s.jax_cache.rollout_skip_jax_precompile=0",
-    ])
 
   def test_k8s_rollout_cache_uri_comes_from_the_config_only(self):
     base = ["agentic_grpo_config.beta=0.0"]

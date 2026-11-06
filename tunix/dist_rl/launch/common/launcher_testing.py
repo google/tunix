@@ -80,13 +80,20 @@ _K8S_GUARDED_CACHE_ENV = frozenset({
     "VLLM_LOCAL_JAX_CACHE_DIR",
     "VLLM_SAVE_JAX_CACHE",
 })
+# Library variables that `k8s.sh` rejects in the launcher's environment (the
+# nodes set them from the config); keep in sync with its guard.
+_K8S_GUARDED_LIBRARY_ENV = frozenset({
+    "SKIP_JAX_PRECOMPILE",
+    "TPU_RAIDEN_DATA_NICS",
+    "VERIFY_WEIGHTS",
+})
 
 
 def launcher_env() -> dict[str, str]:
   """Returns the hermetic environment to run the launch scripts with in tests.
 
   Starts from `os.environ` without the `T_*` config overrides and the JAX
-  compilation cache variables `k8s.sh` guards against, and sets the current
+  compilation cache and library variables `k8s.sh` guards against, and sets the current
   interpreter, the built `resolve_config` and `yaml_generator` binaries when
   present (they are not in the OSS export), a fixed `USER` (the k8s resource
   names include it), and `FAKE_HF_TOKEN`.
@@ -99,6 +106,7 @@ def launcher_env() -> dict[str, str]:
       for key, value in os.environ.items()
       if not key.startswith(_CONFIG_OVERRIDE_ENV_PREFIX)
       and key not in _K8S_GUARDED_CACHE_ENV
+      and key not in _K8S_GUARDED_LIBRARY_ENV
   }
   env["PYTHON_BIN"] = sys.executable or "python3"
   if _RESOLVE_CONFIG_BIN.is_file():

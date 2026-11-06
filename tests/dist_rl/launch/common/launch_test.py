@@ -286,7 +286,7 @@ class LaunchScriptsTest(absltest.TestCase):
     # `local.sh` takes the MaxText model name from the config now
     # (`ACTOR_MAXTEXT_MODEL_NAME`), so the old variable is rejected.
     self.assertIn("MAXTEXT_MODEL_NAME", legacy)
-    # Extra MaxText flags come from `dist_training_config.maxtext_extra_flags`.
+    # The trainer takes these from `dist_training_config`.
     self.assertIn("MAXTEXT_EXTRA_FLAGS", legacy)
     # Environment variables read by `yaml_generator.py` that do not pass through
     # must fail fast if set in the caller's environment.
@@ -300,6 +300,15 @@ class LaunchScriptsTest(absltest.TestCase):
         {"FAIL_FAST", "GANG_ID", "STARTUP_RETRIES", "TEARDOWN_GANG_ON_EXIT"},
         legacy,
     )
+    self.assertIn("CKPT_D2H_CONCURRENT_GB", legacy)
+    # The old launchers' settings the config replaced: the resolver's own
+    # `WEIGHT_SYNC_MODE` export would overwrite a caller's value unseen.
+    self.assertContainsSubset(
+        {"KUEUE_QUEUE", "TRAINER_EXPERT", "WEIGHT_SYNC_MODE"}, legacy
+    )
+    # Libraries read it; the nodes set it from the config and reject another
+    # value in the environment (`node_utils.apply_library_env`).
+    self.assertNotIn("VERIFY_WEIGHTS", legacy)
 
   def test_maxtext_env_overrides_fail_fast(self):
     args = [
@@ -330,8 +339,8 @@ class LaunchScriptsTest(absltest.TestCase):
         res.stderr,
     )
 
-  def test_k8s_trainer_gets_maxtext_extra_flags_from_the_config(self):
-    args = [
+  def test_k8s_pods_get_library_settings_as_config_arguments_only(self):
+    res = self._run_launch([
         "--dry-run",
         "cluster_config.target=k8s",
         "cluster_config.k8s.tunix_image=test-image",
@@ -340,19 +349,49 @@ class LaunchScriptsTest(absltest.TestCase):
         "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
         "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
         "weight_sync_config.mode=raiden",
-    ]
-    flags = (
-        "dist_training_config.maxtext_extra_flags="
-        "remat_policy=custom opt_type=sgd"
-    )
-    res = self._run_launch([*args, flags])
+        (
+            "dist_training_config.maxtext_extra_flags="
+            "remat_policy=custom opt_type=sgd"
+        ),
+        "weight_sync_config.verify_weights=true",
+    ])
     self.assertEqual(res.returncode, 0, msg=res.stderr)
+    # The pods get the settings with the config arguments ...
     self.assertRegex(
-        res.stdout, r"MAXTEXT_EXTRA_FLAGS=remat_policy=custom\\+ opt_type=sgd"
+        res.stdout,
+        r"dist_training_config\.maxtext_extra_flags=remat_policy=custom\\+"
+        r" opt_type=sgd",
     )
-    res = self._run_launch(args)
-    self.assertEqual(res.returncode, 0, msg=res.stderr)
-    self.assertNotIn("MAXTEXT_EXTRA_FLAGS", res.stdout)
+    # ... and the nodes set what the libraries read from the environment
+    # (`node_utils.apply_library_env`).
+    for name in (
+        "MAXTEXT_EXTRA_FLAGS",
+        "CKPT_D2H_CONCURRENT_GB",
+        "VERIFY_WEIGHTS",
+        "SKIP_JAX_PRECOMPILE",
+    ):
+      with self.subTest(name=name):
+        self.assertNotIn(f"{name}=", res.stdout)
+
+  def test_k8s_rejects_library_env_vars_from_the_caller(self):
+    args = [
+        "start",
+        "--dry-run",
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=test-image",
+        "agentic_grpo_config.beta=0.0",
+    ]
+    # The nodes set these from the config; the pods don't inherit the
+    # launcher's environment, so the launch fails instead of dropping them.
+    res = self._run_launch(
+        args,
+        extra_env={"SKIP_JAX_PRECOMPILE": "0", "VERIFY_WEIGHTS": "true"},
+    )
+    self.assertNotEqual(res.returncode, 0)
+    self.assertIn(
+        "SKIP_JAX_PRECOMPILE VERIFY_WEIGHTS set in the environment", res.stderr
+    )
+    self.assertIn("vllm_config.skip_jax_precompile", res.stderr)
 
   def test_external_target_is_not_launched_here(self):
     # The resolver accepts the target, with an absolute artifact root.

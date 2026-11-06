@@ -49,6 +49,12 @@ _ROUTED_EXPERTS_ARGV = (
     *_MAXTEXT_ROLLOUT_ARGV,
     "vllm_config.return_routed_experts=true",
 )
+# The variables `node_utils.apply_library_env` sets.
+_LIBRARY_ENV_VARS = (
+    "VERIFY_WEIGHTS",
+    "TPU_RAIDEN_DATA_NICS",
+    "SKIP_JAX_PRECOMPILE",
+)
 
 
 def _hp(*argv: str) -> resolve_config.DistHyperParameters:
@@ -825,6 +831,13 @@ class EngineKwargsTest(absltest.TestCase):
 
 class RolloutMainTest(absltest.TestCase):
 
+  def setUp(self):
+    super().setUp()
+    # `main` sets the library variables: start without them, and restore the
+    # test's environment afterwards.
+    env = {k: v for k, v in os.environ.items() if k not in _LIBRARY_ENV_VARS}
+    self.enter_context(mock.patch.dict(os.environ, env, clear=True))
+
   def test_main_restores_jax_cache_before_jax_init(self):
     events: list[str] = []
     context = mock.Mock()
@@ -929,6 +942,56 @@ class RolloutMainTest(absltest.TestCase):
         serve_worker.call_args.kwargs["config_sha256"],
         resolve_config.config_fingerprint(resolve_config.initialize(argv)),
     )
+
+  def test_main_sets_library_env_before_logging_the_resolved_config(self):
+    logged_env: dict[str, str] = {}
+
+    def _log_resolved_config(
+        hp: resolve_config.DistHyperParameters, role: str
+    ) -> str:
+      del hp, role
+      logged_env.update(
+          (name, os.environ[name])
+          for name in _LIBRARY_ENV_VARS
+          if name in os.environ
+      )
+      raise RuntimeError("stop after logging")
+
+    with contextlib.ExitStack() as stack:
+      stack.enter_context(mock.patch.object(rollout.importlib, "import_module"))
+      stack.enter_context(mock.patch.object(gcs_cache, "restore_jax_cache"))
+      stack.enter_context(
+          mock.patch.object(
+              node_utils,
+              "log_resolved_config",
+              side_effect=_log_resolved_config,
+          )
+      )
+      with self.assertRaisesRegex(RuntimeError, "stop after logging"):
+        rollout.main(
+            [
+                "vllm_config.skip_jax_precompile=false",
+                "weight_sync_config.raiden_data_nics=eth1",
+            ],
+            context=mock.Mock(),
+        )
+    self.assertEqual(
+        logged_env,
+        {
+            "VERIFY_WEIGHTS": "false",
+            "TPU_RAIDEN_DATA_NICS": "eth1",
+            "SKIP_JAX_PRECOMPILE": "0",
+        },
+    )
+
+  def test_main_rejects_another_library_value_before_starting(self):
+    os.environ["SKIP_JAX_PRECOMPILE"] = "0"
+    with mock.patch.object(rollout.importlib, "import_module") as mock_import:
+      with self.assertRaisesRegex(
+          ValueError, "set vllm_config.skip_jax_precompile instead"
+      ):
+        rollout.main([], context=mock.Mock())
+    mock_import.assert_not_called()
 
   def test_main_raises_without_discovery_context(self):
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):

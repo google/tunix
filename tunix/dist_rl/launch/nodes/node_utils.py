@@ -30,7 +30,8 @@ import pathlib
 import pickle
 import signal
 import sys
-from typing import Literal, TypeAlias, TypedDict, cast
+import types
+from typing import Final, Literal, TypeAlias, TypedDict, cast
 
 import jax
 from jax.experimental import mesh_utils
@@ -70,7 +71,6 @@ _LOGGED_ENV_VARS = frozenset({
     ROLLOUT_REPLICA_ENV,
     WORKER_PORT_ENV,
     "ALLOW_MULTIPLE_LIBTPU_LOAD",
-    "CKPT_D2H_CONCURRENT_GB",
     "DISABLE_JAX_CACHE",
     "DISABLE_MOSAIC_ATTN",
     "ENABLE_PATHWAYS_PERSISTENCE",
@@ -120,6 +120,76 @@ def ensure_repo_root_on_path() -> None:
   if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
   logging.info("Repo root inserted into sys.path: %s", repo_root)
+
+
+# Environment variables `apply_library_env` sets from the config, and the
+# config key each comes from. Launchers reject them in user-supplied
+# environments so a value can only come from the config.
+LIBRARY_ENV_CONFIG_KEYS: Final[Mapping[str, str]] = types.MappingProxyType({
+    "SKIP_JAX_PRECOMPILE": "vllm_config.skip_jax_precompile",
+    "TPU_RAIDEN_DATA_NICS": "weight_sync_config.raiden_data_nics",
+    "VERIFY_WEIGHTS": "weight_sync_config.verify_weights",
+})
+
+
+def _library_env(
+    hp: resolve_config.DistHyperParameters, role: Literal["trainer", "rollout"]
+) -> dict[str, tuple[str | None, str]]:
+  """Returns `{variable: (value, config key)}`; a None value leaves it unset."""
+  ws = hp.config_mapping("weight_sync_config")
+  values: dict[str, str | None] = {
+      "VERIFY_WEIGHTS": "true" if ws["verify_weights"] else "false",
+      "TPU_RAIDEN_DATA_NICS": str(ws["raiden_data_nics"]) or None,
+  }
+  if role == "rollout":
+    skip = hp.config_mapping("vllm_config")["skip_jax_precompile"]
+    values["SKIP_JAX_PRECOMPILE"] = "1" if skip else "0"
+  return {
+      name: (value, LIBRARY_ENV_CONFIG_KEYS[name])
+      for name, value in values.items()
+  }
+
+
+def apply_library_env(
+    hp: resolve_config.DistHyperParameters, role: Literal["trainer", "rollout"]
+) -> None:
+  """Sets the environment variables that libraries read, from the config.
+
+  MaxText, tpu_inference and Raiden take these settings only from the
+  environment, so the node sets them itself and the launchers pass config only.
+  Call it right after resolving the config: before `log_resolved_config`, which
+  records them, and before JAX or an engine starts.
+
+  * `VERIFY_WEIGHTS` (trainer, rollout): `weight_sync_config.verify_weights`
+    as "true" or "false": whether weight syncs log checksums and Raiden
+    metrics.
+  * `TPU_RAIDEN_DATA_NICS` (trainer, rollout):
+    `weight_sync_config.raiden_data_nics`; unset when empty, so Raiden picks
+    its NICs itself.
+  * `SKIP_JAX_PRECOMPILE` (rollout): `vllm_config.skip_jax_precompile` as "1"
+    or "0".
+
+  Args:
+    hp: Validated distributed RL configuration.
+    role: Worker node role, which selects the variables.
+
+  Raises:
+    ValueError: If the environment already holds one of the variables with
+      another value than the config gives, or holds one the config leaves
+      unset.
+  """
+  env = _library_env(hp, role)
+  for name, (value, key) in env.items():
+    if name in os.environ and os.environ[name] != value:
+      wanted = "leaves it unset" if value is None else f"sets it to {value!r}"
+      raise ValueError(
+          f"{name}={os.environ[name]!r} is set in the environment, but {key}"
+          f" {wanted}: the node sets {name} from the config, so unset it and"
+          f" set {key} instead."
+      )
+  for name, (value, _) in env.items():
+    if value is not None:
+      os.environ[name] = value
 
 
 class ResolvedConfigRecord(TypedDict):

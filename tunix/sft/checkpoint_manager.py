@@ -158,6 +158,13 @@ class CheckpointManager:
         and self._options.async_options.timeout_secs is not None
     ):
       ctx.asynchronous.timeout_secs = self._options.async_options.timeout_secs
+    if self._options.device_host_concurrent_gb is not None:
+      # Decimal GB (10**9 bytes): Orbax v0's `save_device_host_concurrent_gb`,
+      # which MaxText's `checkpoint_storage_device_host_concurrent_gb` sets,
+      # counts them the same way.
+      ctx.memory.transfer_concurrent_bytes = (
+          self._options.device_host_concurrent_gb * 10**9
+      )
 
     # When using Pathways, the checkpoint manager only supports persistence
     # APIs now.
