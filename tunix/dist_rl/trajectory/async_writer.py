@@ -2,7 +2,7 @@
 
 import abc
 import atexit
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 import dataclasses
 import queue
 import threading
@@ -80,6 +80,93 @@ class BatchConfig:
 
 
 DEFAULT_BATCH_CONFIG: Final[BatchConfig] = BatchConfig()
+
+# Heavy per-token (or per-position) array fields on Tunix `Step` subclasses
+# that a writer can be configured to drop before steps are deep copied and
+# queued (e.g. for observability-only runs that do not need training arrays).
+FILTERABLE_STEP_ARRAY_FIELDS: Final[frozenset[str]] = frozenset({
+    "assistant_tokens",
+    "assistant_masks",
+    "logprobs",
+    "env_tokens",
+    "env_masks",
+    "prefill_routed_experts",
+})
+
+# `TunixAgentStep` requires `prefill_routed_experts`, `prefill_start`, and
+# `prefill_num_context` to be all set or all None, so dropping the routed
+# experts array also clears these scalar companions.
+_PREFILL_COMPANION_FIELDS: Final[tuple[str, ...]] = (
+    "prefill_start",
+    "prefill_num_context",
+)
+
+
+def validate_step_array_exclusions(fields: Collection[str]) -> frozenset[str]:
+  """Validates and normalizes a collection of step array fields to exclude.
+
+  Args:
+    fields: Names of step array fields to drop before queueing writes. Each name
+      must be in `FILTERABLE_STEP_ARRAY_FIELDS`.
+
+  Returns:
+    The validated field names as a frozenset.
+
+  Raises:
+    TypeError: If `fields` is a single string rather than a collection.
+    ValueError: If `fields` contains names outside
+      `FILTERABLE_STEP_ARRAY_FIELDS`.
+  """
+  if isinstance(fields, str):
+    raise TypeError(
+        "exclude_step_arrays must be a collection of field names, not a"
+        f" string; got {fields!r}."
+    )
+  excluded = frozenset(fields)
+  unknown = excluded - FILTERABLE_STEP_ARRAY_FIELDS
+  if unknown:
+    raise ValueError(
+        f"Unsupported exclude_step_arrays fields {sorted(unknown)}; supported"
+        f" fields are {sorted(FILTERABLE_STEP_ARRAY_FIELDS)}."
+    )
+  return excluded
+
+
+def filter_step_arrays(
+    step: trajectory_lib.Step | None,
+    exclude: frozenset[str],
+) -> trajectory_lib.Step | None:
+  """Returns `step` with the excluded array fields set to None.
+
+  Uses a shallow `model_copy`, so the caller's `step` is never mutated and the
+  excluded arrays are never deep copied. Fields that the step's class does not
+  define, or that are already None, are ignored. Dropping
+  `prefill_routed_experts` also clears `prefill_start` and
+  `prefill_num_context`.
+
+  Args:
+    step: The step to filter, or None.
+    exclude: Validated field names to drop (see
+      `validate_step_array_exclusions`).
+
+  Returns:
+    A filtered shallow copy of `step`, or `step` itself if nothing was dropped.
+  """
+  if step is None or not exclude:
+    return step
+  field_names = type(step).model_fields
+  update: dict[str, Any] = {
+      field: None
+      for field in exclude
+      if field in field_names and getattr(step, field) is not None
+  }
+  if "prefill_routed_experts" in update:
+    for field in _PREFILL_COMPANION_FIELDS:
+      if field in field_names:
+        update[field] = None
+  if not update:
+    return step
+  return step.model_copy(update=update)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -350,6 +437,7 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
       thread_name: str | None = None,
       max_queue_size: int = DEFAULT_MAX_QUEUE_SIZE,
       batching: BatchConfig | None = DEFAULT_BATCH_CONFIG,
+      exclude_step_arrays: Collection[str] = (),
   ):
     """Initializes AsyncWriter without starting the background worker.
 
@@ -361,14 +449,22 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
         (10,000).
       batching: Configuration governing batch item limits and maximum batch wait
         time. Defaults to `DEFAULT_BATCH_CONFIG`.
+      exclude_step_arrays: Step array fields (from
+        `FILTERABLE_STEP_ARRAY_FIELDS`) that subclasses drop via `_filter_step`
+        before queueing a step write. Defaults to keeping all arrays.
 
     Raises:
-      ValueError: If `max_queue_size` is not positive.
+      ValueError: If `max_queue_size` is not positive, or if
+        `exclude_step_arrays` contains unsupported field names.
+      TypeError: If `exclude_step_arrays` is a single string.
     """
     if max_queue_size <= 0:
       raise ValueError(
           f"max_queue_size must be positive, got {max_queue_size}."
       )
+    self._exclude_step_arrays: frozenset[str] = (
+        validate_step_array_exclusions(exclude_step_arrays)
+    )
     self._thread_name = thread_name or f"{type(self).__name__}Worker"
     self._max_queue_size = max_queue_size
     self._step_queue_limit = max(
@@ -423,6 +519,27 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
   def batching(self) -> BatchConfig:
     """Returns the active `BatchConfig` for this writer."""
     return self._batching
+
+  @property
+  def exclude_step_arrays(self) -> frozenset[str]:
+    """Returns the step array fields dropped before queueing step writes."""
+    return self._exclude_step_arrays
+
+  def _filter_step(
+      self, step: trajectory_lib.Step | None
+  ) -> trajectory_lib.Step | None:
+    """Drops `exclude_step_arrays` from `step` before it is deep copied.
+
+    Subclasses call this on the caller thread before constructing a `WriteTask`,
+    so excluded arrays are never deep copied, queued, or serialized.
+
+    Args:
+      step: The step to filter, or None.
+
+    Returns:
+      The filtered step (see `filter_step_arrays`).
+    """
+    return filter_step_arrays(step, self._exclude_step_arrays)
 
   @property
   def batch_wait_s(self) -> float:

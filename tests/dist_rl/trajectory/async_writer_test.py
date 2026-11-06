@@ -43,11 +43,13 @@ class _TestAsyncWriter(async_writer.AsyncWriter[_TestWriteTask]):
       batching: async_writer.BatchConfig | None = (
           async_writer.DEFAULT_BATCH_CONFIG
       ),
+      exclude_step_arrays: Sequence[str] = (),
   ):
     super().__init__(
         thread_name=thread_name,
         max_queue_size=max_queue_size,
         batching=batching,
+        exclude_step_arrays=exclude_step_arrays,
     )
     self.processed_tasks: list[_TestWriteTask] = []
     self.processed_batches: list[tuple[_TestWriteTask, ...]] = []
@@ -921,6 +923,97 @@ class AsyncWriterTest(trajectory_testing.TrajectoryTestCase):
         [t.trajectory_id for t in writer.processed_tasks],
         [trajectory_testing.TRAJECTORY_ID_1] * 3,
     )
+
+
+class StepArrayFilteringTest(trajectory_testing.TrajectoryTestCase):
+  """Tests configurable pre-queue dropping of heavy step array fields."""
+
+  def test_validate_returns_frozenset_of_supported_fields(self) -> None:
+    self.assertEqual(
+        async_writer.validate_step_array_exclusions(
+            ["assistant_tokens", "logprobs"]
+        ),
+        frozenset({"assistant_tokens", "logprobs"}),
+    )
+
+  def test_validate_rejects_unsupported_fields(self) -> None:
+    with self.assertRaisesRegex(ValueError, r"Unsupported.*'message'"):
+      async_writer.validate_step_array_exclusions(["logprobs", "message"])
+
+  def test_validate_rejects_bare_string(self) -> None:
+    with self.assertRaisesRegex(TypeError, r"not a string"):
+      async_writer.validate_step_array_exclusions("logprobs")
+
+  def test_filter_with_no_exclusions_returns_same_step(self) -> None:
+    step = trajectory_testing.TUNIX_AGENT_STEP_1
+
+    self.assertIs(async_writer.filter_step_arrays(step, frozenset()), step)
+    self.assertIsNone(
+        async_writer.filter_step_arrays(None, frozenset({"logprobs"}))
+    )
+
+  def test_filter_drops_excluded_arrays_without_mutating_source(self) -> None:
+    step = trajectory_testing.TUNIX_AGENT_STEP_1
+
+    filtered = async_writer.filter_step_arrays(
+        step, frozenset({"assistant_tokens", "logprobs"})
+    )
+
+    self.assertIsNone(filtered.assistant_tokens)
+    self.assertIsNone(filtered.logprobs)
+    # Non-excluded arrays and scalar metrics are kept.
+    np.testing.assert_array_equal(
+        filtered.assistant_masks, step.assistant_masks
+    )
+    self.assertEqual(filtered.metrics, step.metrics)
+    # The caller's step is unchanged.
+    self.assertIsNotNone(step.assistant_tokens)
+    self.assertIsNotNone(step.logprobs)
+
+  def test_filter_prefill_routed_experts_clears_companions(self) -> None:
+    step = trajectory_testing.TUNIX_AGENT_STEP_1
+    self.assertIsNotNone(step.prefill_routed_experts)
+
+    filtered = async_writer.filter_step_arrays(
+        step, frozenset({"prefill_routed_experts"})
+    )
+
+    self.assertIsNone(filtered.prefill_routed_experts)
+    self.assertIsNone(filtered.prefill_start)
+    self.assertIsNone(filtered.prefill_num_context)
+    # The filtered step still round-trips through ATIF validation.
+    rehydrated = trajectory_lib.TunixAgentStep.from_atif_step(
+        filtered.to_atif_step()
+    )
+    self.assertIsNone(rehydrated.prefill_routed_experts)
+
+  def test_filter_ignores_fields_not_defined_on_step(self) -> None:
+    env_step = trajectory_testing.TUNIX_ENV_STEP_0
+
+    self.assertIs(
+        async_writer.filter_step_arrays(
+            env_step, frozenset({"assistant_tokens"})
+        ),
+        env_step,
+    )
+    filtered = async_writer.filter_step_arrays(
+        env_step, frozenset({"env_tokens", "env_masks"})
+    )
+    self.assertIsNone(filtered.env_tokens)
+    self.assertIsNone(filtered.env_masks)
+
+  def test_writer_exposes_and_applies_exclusions(self) -> None:
+    writer = _TestAsyncWriter(exclude_step_arrays=["logprobs"])
+    self.addCleanup(writer.close)
+
+    self.assertEqual(writer.exclude_step_arrays, frozenset({"logprobs"}))
+    filtered = writer._filter_step(trajectory_testing.TUNIX_AGENT_STEP_1)
+    self.assertIsNone(filtered.logprobs)
+    self.assertIsNotNone(filtered.assistant_tokens)
+
+  def test_writer_rejects_unsupported_exclusions(self) -> None:
+    with self.assertRaises(ValueError):
+      _TestAsyncWriter(exclude_step_arrays=["not_a_field"])
 
 
 class AsyncWriterShutdownHookTest(parameterized.TestCase):

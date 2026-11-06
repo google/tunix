@@ -88,6 +88,63 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     """Verifies root_dir directly returns base directory when run_id is omitted."""
     self.assertEqual(self.file_s.root_dir, self.tmp_dir)
 
+  def test_exclude_step_arrays_drops_arrays_from_written_steps(self) -> None:
+    """Verifies excluded step arrays are not written while others are kept."""
+    filtered_s = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir,
+        run_id="filtered_run",
+        exclude_step_arrays=["assistant_tokens", "logprobs"],
+    )
+    self.addCleanup(filtered_s.close)
+    step = trajectory_testing.TUNIX_AGENT_STEP_1
+    meta = trajectory_testing.TUNIX_METADATA_1
+
+    filtered_s.add_step(trajectory_testing.TUNIX_ENV_STEP_0, meta)
+    filtered_s.add_step(step, meta)
+    filtered_s.flush()
+
+    (traj,) = filtered_s.get_trajectories([meta.trajectory_id])
+    written_step = traj.steps[1]
+    self.assertIsNone(written_step.assistant_tokens)
+    self.assertIsNone(written_step.logprobs)
+    self.assertEqual(list(written_step.assistant_masks), [1, 1])
+    # The caller's step is unchanged.
+    self.assertIsNotNone(step.assistant_tokens)
+    self.assertIsNotNone(step.logprobs)
+
+  def test_exclude_step_arrays_round_trips_through_config(self) -> None:
+    """Verifies exclude_step_arrays is restored by from_config/to_config."""
+    config = {
+        "backend": "file",
+        "root_dir": str(self.tmp_dir),
+        "run_id": "config_run",
+        "exclude_step_arrays": ["logprobs", "assistant_tokens"],
+    }
+
+    restored = file_store.FileTrajectoryStore.from_config(config)
+    self.addCleanup(restored.close)
+
+    self.assertEqual(
+        restored.to_config()["exclude_step_arrays"],
+        ["assistant_tokens", "logprobs"],
+    )
+
+  def test_to_config_omits_exclude_step_arrays_by_default(self) -> None:
+    """Verifies the default config is unchanged when no arrays are excluded."""
+    default_s = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir, run_id="default_run"
+    )
+    self.addCleanup(default_s.close)
+
+    self.assertNotIn("exclude_step_arrays", default_s.to_config())
+
+  def test_exclude_step_arrays_rejects_unsupported_fields(self) -> None:
+    """Verifies unsupported field names fail fast at construction."""
+    with self.assertRaisesRegex(ValueError, r"Unsupported"):
+      file_store.FileTrajectoryStore(
+          root_dir=self.tmp_dir, exclude_step_arrays=["message"]
+      )
+
   def test_root_dir_with_run_id(self) -> None:
     """Verifies root_dir is scoped under root_dir / run_id when run_id is provided."""
     file_s_with_run = file_store.FileTrajectoryStore(

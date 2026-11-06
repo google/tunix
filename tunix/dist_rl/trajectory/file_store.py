@@ -1,7 +1,7 @@
 """File-based implementation for Trajectory Store."""
 
 import collections
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from concurrent import futures
 import contextlib
 import dataclasses
@@ -209,9 +209,14 @@ def _merge_metrics(
 class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
   """Asynchronously writes trajectory metadata, step, and metrics files."""
 
-  def __init__(self):
-    """Initializes _AsyncFileWriter without starting the background worker."""
-    super().__init__()
+  def __init__(self, exclude_step_arrays: Collection[str] = ()):
+    """Initializes _AsyncFileWriter without starting the background worker.
+
+    Args:
+      exclude_step_arrays: Step array fields dropped before queueing step
+        writes (see `async_writer.FILTERABLE_STEP_ARRAY_FIELDS`).
+    """
+    super().__init__(exclude_step_arrays=exclude_step_arrays)
     # Worker-owned caches of persisted state used to skip redundant disk writes.
     self._metadata_hash_by_trajectory_id: dict[str, int] = {}
     self._metrics_by_trajectory_id: collections.OrderedDict[
@@ -243,6 +248,9 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
     correctness; the expensive part, serialization and I/O, remains off the
     caller thread.
 
+    Array fields in `exclude_step_arrays` are dropped from `step` (via a
+    shallow copy) before the deep copy, so they are never copied or written.
+
     Args:
       traj_dir: Directory path for the trajectory.
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
@@ -252,7 +260,9 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
       RuntimeError: If the writer has already been closed.
     """
     self._enqueue(
-        _FileWriteTask(traj_dir=traj_dir, metadata=metadata, step=step)
+        _FileWriteTask(
+            traj_dir=traj_dir, metadata=metadata, step=self._filter_step(step)
+        )
     )
 
   def enqueue_metrics_write(
@@ -387,6 +397,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       self,
       root_dir: epath.PathLike,
       run_id: str | None = None,
+      exclude_step_arrays: Collection[str] = (),
   ) -> None:
     """Initializes FileTrajectoryStore.
 
@@ -397,10 +408,16 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         scoped under root_dir / run_id. This ID MUST stay the same when
         recovering from failures or process restarts as long as the same RL
         process is being continued.
+      exclude_step_arrays: Heavy per-token step array fields to drop before
+        steps are queued and written, e.g. `("assistant_tokens", "logprobs")`
+        for observability-only runs. Must be a subset of
+        `async_writer.FILTERABLE_STEP_ARRAY_FIELDS`. Defaults to keeping all
+        arrays.
 
     Raises:
-      ValueError: If root_dir is empty, or run_id is given but cannot be used as
-        a directory name.
+      ValueError: If root_dir is empty, run_id is given but cannot be used as
+        a directory name, or exclude_step_arrays has unsupported field names.
+      TypeError: If exclude_step_arrays is a single string.
     """
     super().__init__()
     if not root_dir or not str(root_dir).strip():
@@ -417,7 +434,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       )
     self._raw_root_dir = epath.Path(root_dir)
     self._run_id = run_id
-    self._writer = _AsyncFileWriter()
+    self._writer = _AsyncFileWriter(exclude_step_arrays=exclude_step_arrays)
 
   @classmethod
   def _from_config(
@@ -426,7 +443,8 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
   ) -> "FileTrajectoryStore[MetadataT]":
     """Builds a file-backed store from `config`.
 
-    Requires "root_dir" and "run_id".
+    Requires "root_dir" and "run_id". Accepts an optional
+    "exclude_step_arrays" list of step array fields to drop before writing.
 
     Raises:
       ValueError: If "root_dir" or "run_id" is missing or empty.
@@ -454,6 +472,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     return cls(
         root_dir=config["root_dir"],
         run_id=config["run_id"],
+        exclude_step_arrays=config.get("exclude_step_arrays") or (),
     )
 
   def to_config(self) -> dict[str, Any]:
@@ -467,11 +486,14 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
           "FileTrajectoryStore without a run_id cannot export a valid"
           " distributed config."
       )
-    return {
+    config: dict[str, Any] = {
         "backend": self.BACKEND,
         "root_dir": str(self._raw_root_dir),
         "run_id": self._run_id,
     }
+    if self._writer.exclude_step_arrays:
+      config["exclude_step_arrays"] = sorted(self._writer.exclude_step_arrays)
+    return config
 
   @functools.cached_property
   def root_dir(self) -> epath.Path:
