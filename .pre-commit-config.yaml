@@ -37,7 +37,7 @@ repos:
       - id: mdformat
         args: ["--wrap", "80"]
         additional_dependencies:
-          - mdformat-gfm==0.3.5
+          - mdformat-gfm==1.0.0
           - "markdown-it-py[linkify]"
           # (optional) other plugins:
           # - mdformat-frontmatter
