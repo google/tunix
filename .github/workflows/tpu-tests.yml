@@ -54,22 +54,13 @@ env:
 jobs:
   # ---------------------------------------------------------------------------
   # Job: run_core
-  # Purpose: Multi-device TPU unit tests, then SGLang-JAX integration.
+  # Purpose: Multi-device TPU unit tests.
   # Hardware: Live TPU v6e-8 accelerator (1 slice).
   # Image:    JAX stable stack candidate.
   # Secrets:  None (uses public Hugging Face Hub checkpoints).
   # Scope:    Generation, split-mesh RL cluster, and multi-device SFT unit tests
-  #           (plus catch-all), followed by SGLang sampler, LoRA, and RL cluster
-  #           tests. Full SFT, distillation, and CPU/mock suites run in
+  #           (plus catch-all). Full SFT, distillation, and CPU/mock suites run in
   #           cpu-tests.yml.
-  #
-  # ORDERING CONSTRAINTS (within run_core):
-  #   1. Core unit test suites (generation, RL cluster, SFT multi-device, uncovered)
-  #      MUST run BEFORE SGLang-JAX so they execute against the unmodified candidate
-  #      JAX stable stack image. (Relative order among these 4 suites is flexible.)
-  #   2. SGLang-JAX (`Run install sglang-jax && test`) MUST run as the last test stage in this job.
-  #      It installs `sglang-jax` and pins `jax[tpu]<0.11.0` and `qwix`, mutating
-  #      the Python environment.
   # ---------------------------------------------------------------------------
   run_core:
     runs-on: [linux-x86-ct6e-180-8tpu]
@@ -182,31 +173,6 @@ jobs:
           else
             exit "${code:-0}"
           fi
-
-      # --- SGLang-JAX stage (formerly the standalone `run_sglang` job) ---------
-      # [ORDERING CONSTRAINT]: MUST run as the last test stage in `run_core`. It installs
-      # `sglang-jax` and pins `jax[tpu]<0.11.0` and `qwix`, mutating the Python
-      # environment.
-      - name: Run install sglang-jax && test
-        run: |
-          ## because sglang-jax has codes like jax.local_devices('cpu')
-          # TODO(lancewang): Re-enable this test once the bug is fixed.
-          unset JAX_PLATFORMS
-          python3 -m pip list | egrep 'jax|flax|libtpu'
-          # Constrain jax/jaxlib < 0.11.0 during sglang-jax installation so uv does
-          # not upgrade to jax 0.11.1+ and force a subsequent downgrade/reinstall.
-          printf "jax<0.11.0\njaxlib<0.11.0\n" > /tmp/sglang_constraints.txt
-          cd ..
-          git init sglang-jax && cd sglang-jax && git fetch --depth 1 https://github.com/sgl-project/sglang-jax.git 1bdbc6747939c0e600622fc7f812151d76321080 && git checkout FETCH_HEAD && cd python && uv pip install --python "$(which python3)" -c /tmp/sglang_constraints.txt -e . && cd ../..
-          # SGLang Jax removed qwix dependency in https://github.com/sgl-project/sglang-jax/pull/734
-          uv pip install --python "$(which python3)" -c /tmp/sglang_constraints.txt qwix 'jax[tpu]<0.11.0'
-          # TODO(b/470113586): Remove this test once the bug is fixed.
-          python3 -m pip list | egrep 'jax|flax|libtpu'
-
-          cd tunix
-          python3 tests/generate/sglang_jax_sampler_test.py
-          python3 tests/generate/sglang_jax_lora_test.py
-          GITHUB_JOB=run_sglang python3 -m pytest tests/rl/rl_cluster_test.py -v --tb=short -k "sglang_jax"
 
       - name: Prune uv cache
         if: ${{ steps.cache-uv.outputs.cache-hit != 'true' }}

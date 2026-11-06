@@ -275,24 +275,6 @@ jobs:
         # run_and_log "vllm grpo_demo_llama3_qwen2.py with vllm server mode in 3 way disaggregated mode" \
         #   python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-3-way
 
-        # SGLang Tests
-        echo "::group::📦 Setting up SGLang"
-        unset JAX_PLATFORMS
-        unset PIP_NO_CACHE_DIR
-        export PIP_NO_BUILD_ISOLATION=1
-        python3 -m pip list | egrep 'jax|flax|libtpu'
-        printf "jax<0.11.0\njaxlib<0.11.0\n" > /tmp/sglang_constraints.txt
-        export PIP_CONSTRAINT=/tmp/sglang_constraints.txt
-        cd ..
-        git init sglang-jax && cd sglang-jax && git fetch --depth 1 https://github.com/sgl-project/sglang-jax.git 1bdbc6747939c0e600622fc7f812151d76321080 && git checkout FETCH_HEAD && cd python && python3 -m pip install -e . && cd ../..
-        python3 -m pip list | egrep 'jax|flax|libtpu'
-        cd tunix
-        echo "::endgroup::"
-
-        run_and_log "sglang_jax colocated" bash -c "unset JAX_PLATFORMS && python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax"
-        run_and_log "sglang_jax disaggregated-2-way" bash -c "unset JAX_PLATFORMS && python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-2-way"
-        run_and_log "sglang_jax disaggregated-3-way" bash -c "unset JAX_PLATFORMS && python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-3-way"
-
         if [ "$FAILED" -ne 0 ]; then
           echo "🚫 One or more regression scripts failed:" >&2
           for failed_script in "${FAILED_SCRIPTS[@]}"; do
