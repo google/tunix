@@ -208,13 +208,18 @@ class ResolvedConfigRecord(TypedDict):
   config: dict[str, object]
 
 
+def is_credential_env_var(name: str) -> bool:
+  """Returns whether environment variable `name` may hold a credential."""
+  return name.upper().endswith(_CREDENTIAL_ENV_SUFFIXES)
+
+
 def _logged_env() -> dict[str, str]:
   """Returns the runtime environment variables to record, without credentials."""
   return {
       name: value
       for name, value in sorted(os.environ.items())
       if (name in _LOGGED_ENV_VARS or name.startswith(_LOGGED_ENV_PREFIXES))
-      and not name.upper().endswith(_CREDENTIAL_ENV_SUFFIXES)
+      and not is_credential_env_var(name)
   }
 
 
