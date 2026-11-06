@@ -21,7 +21,10 @@
 # `launch.sh` reads settings only from `override_config_file=` and
 # `section.key=value` arguments, so it would silently ignore these variables;
 # some (e.g. `DRY_RUN`, `RUN_ID`) are even overwritten by the resolver's
-# exports. `fail_on_legacy_launcher_env` turns a set variable into an error.
+# exports. Others (e.g. `FAIL_FAST`, `GANG_ID`) are read by `yaml_generator.py`
+# whenever `k8s.sh` leaves the matching flag unset, so they would override
+# `cluster_config.k8s` unseen. `fail_on_legacy_launcher_env` turns a set
+# variable into an error.
 #
 # The list leaves out the variables the drivers still read from the caller's
 # environment (`_ENV_PASSTHROUGH` in `launch_test.py`) and the ones read by the
@@ -45,6 +48,8 @@ LEGACY_LAUNCHER_ENV_VARS=(
   COMPUTE_LOGPS_CHUNK_SIZE
   COMPUTE_LOGPS_MICRO_BATCH_SIZE
   CPU_MACHINE
+  CPU_MEMORY
+  CPU_NODEPOOL
   DATASET_CACHE_DIR
   DATASET_NAME
   DATASET_PATH
@@ -61,18 +66,24 @@ LEGACY_LAUNCHER_ENV_VARS=(
   EPSILON_HIGH
   EVAL_EVERY_N_STEPS
   EVAL_JAX_CACHE_GCS_DIR
+  FAIL_FAST
   FLASH_ATTENTION_BLOCK_SIZE
   FLUSH_EVERY_N_STEPS
   FLUSH_METRICS_EVERY_N_STEPS
   FORCE_ARM_SECS
+  GANG_ID
   GCS_SCRATCH_LOCATION
   GRID_SIZE_RANGE
+  HEAD_NODEPOOL
   INFERENCE_ADDR
   INFERENCE_PORT
   INFERENCE_TPU_CHIPS
   IN_FLIGHT_WEIGHT_UPDATES
   IS_SLIPPERY
+  K8S_NAMESPACE
   KL_LOSS_MODE
+  KUEUE_PRIORITY_CLASS
+  KUEUE_QUEUE_NAME
   LEARNING_RATE
   LOCAL_JAX_CACHE_DIR
   LOG_DIR
@@ -120,7 +131,9 @@ LEGACY_LAUNCHER_ENV_VARS=(
   PATHWAYS_RM_MEMORY
   PATHWAYS_SERVER_IMAGE
   PATHWAYS_WORKER_MEMORY
+  PREEMPTIBLE
   PREFUSE_MOE_WEIGHTS
+  PRIORITY_CLASS
   PROFILER_PERIOD
   PROFILER_STEPS
   RETURN_ROUTED_EXPERTS
@@ -159,11 +172,15 @@ LEGACY_LAUNCHER_ENV_VARS=(
   SCHEDULE_TYPE
   SEED
   SEGMENT_ALIGNMENT_BOUNDARY
+  SERVICE_ACCOUNT
   SHUFFLE
   SHUTDOWN_GRACE_SECS
   SKIP_FIRST_N_PROFILER_STEPS
+  STARTUP_RETRIES
   STEP_TIMEOUT_SECS
+  TEARDOWN_GANG_ON_EXIT
   TEMPERATURE
+  TERMINATION_GRACE_SECONDS
   TOKENIZER_PATH
   TOP_K
   TOP_P
@@ -194,6 +211,7 @@ LEGACY_LAUNCHER_ENV_VARS=(
   USER_CONTAINER_MEMORY
   USER_CONTAINER_MEMORY_LIMIT
   USE_AGENT_SANDBOX
+  USE_DYNAMIC_SLICING
   USE_LORA
   USE_MULTISTEP_PROMPT
   USE_ROLLOUT_LOGPS

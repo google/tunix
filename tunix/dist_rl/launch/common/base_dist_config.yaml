@@ -366,6 +366,14 @@ cluster_config:
   k8s:
     namespace: "default"
     kueue_queue_name: ""
+    # Kueue / GKE scheduling for every JobSet; a `leaderworkerset.*.yaml`
+    # rollout takes none of these. Empty values keep the template defaults.
+    preemptible: false
+    priority_class: ""
+    service_account: ""
+    # Pod termination grace period for every JobSet; null keeps each template's
+    # default (300 s for the orchestrator, 10 s for the workers).
+    termination_grace_seconds: null
     orchestrator_id: ""
     trainer_id: ""
     rollout_id: ""
@@ -376,6 +384,10 @@ cluster_config:
     # every node then exports to it (`tunix/dist_rl/common/otel_setup.py`).
     otel_id: ""
     cpu_machine: "n2-standard-64"
+    # Orchestrator node pool and memory request. Empty `cpu_nodepool` selects
+    # the node by `cpu_machine`; empty `cpu_memory` requests none.
+    cpu_nodepool: ""
+    cpu_memory: ""
     gcs_scratch_location: "gs://cloud-pathways-staging/tmp"
     enable_pathways_persistence: false
     trainer_extra_env: ""
@@ -390,6 +402,26 @@ cluster_config:
     user_container_memory: "48G"
     user_container_memory_limit: "70G"
     pathways_worker_memory: "100G"
+    # Fail-fast restarts for the trainer and rollout JobSets: a failed pod fails
+    # its Job instead of restarting in place, and JobSet recreates the whole
+    # JobSet up to `startup_retries` times. Needs `jobset.*.yaml` worker
+    # templates; `leaderworkerset.*.yaml` has no fail-fast mode.
+    fail_fast: false
+    # JobSet `failurePolicy.maxRestarts` for the trainer and rollout JobSets,
+    # counted over each JobSet's lifetime. A recreated trainer can re-register
+    # only before `bring_up`, so pair `fail_fast` with `teardown_gang_on_exit`.
+    startup_retries: 3
+    # Labels every JobSet with `scheduling.x-k8s.io/gang-id: <run_id>`, and the
+    # orchestrator deletes the run's other JobSets when it exits. Its
+    # `service_account` needs RBAC to delete JobSets. Needs `jobset.*.yaml`
+    # worker templates (`leaderworkerset.*.yaml` is not deleted by gang
+    # teardown).
+    teardown_gang_on_exit: false
+    # tpu7x dynamic slicing for the trainer and rollout JobSets (needs
+    # `jobset.*.yaml` worker templates). `head_nodepool` (requires
+    # `use_dynamic_slicing`) pins the Pathways head pod to a node pool.
+    use_dynamic_slicing: false
+    head_nodepool: ""
     # Rollout JAX compilation cache. Unless `disable`, the rollout pods cache in
     # `local_dir` and use a GCS cache: `rollout_gcs_dir`, or else a directory
     # under `gcs_dir` (or `gs://<bucket>/jax_cache`) named by the rollout config

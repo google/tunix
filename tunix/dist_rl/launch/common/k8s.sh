@@ -84,6 +84,14 @@ format_args() {
   printf '%s' "${out# }"
 }
 
+# Prints generator flag `$2` when the boolean config value `$1` is true. Used
+# unquoted, so a false value adds no argument.
+bool_flag() {
+  if is_true "$1"; then
+    printf '%s\n' "$2"
+  fi
+}
+
 CONTAINER_ARGS_STR="$(format_args "${CONTAINER_CONFIG_ARGS[@]}")"
 
 # OpenTelemetry metrics export settings, read by every node
@@ -140,8 +148,16 @@ start_orchestrator() {
     "${YAML_DIR}/jobset.cpu.yaml" \
     --jobset_name="${K8S_ORCHESTRATOR_ID}" \
     --namespace="${K8S_NAMESPACE}" \
-    ${K8S_KUEUE_QUEUE_NAME:+--queue_name="${K8S_KUEUE_QUEUE_NAME}"} \
+    --queue_name="${K8S_KUEUE_QUEUE_NAME}" \
+    $(bool_flag "${K8S_PREEMPTIBLE}" --preemptible) \
+    ${K8S_PRIORITY_CLASS:+--priority_class="${K8S_PRIORITY_CLASS}"} \
+    ${K8S_SERVICE_ACCOUNT:+--service_account="${K8S_SERVICE_ACCOUNT}"} \
+    ${K8S_TERMINATION_GRACE_SECONDS:+--termination_grace_seconds="${K8S_TERMINATION_GRACE_SECONDS}"} \
+    $(bool_flag "${K8S_TEARDOWN_GANG_ON_EXIT}" "--gang_id=${RUN_ID}") \
+    $(bool_flag "${K8S_TEARDOWN_GANG_ON_EXIT}" --teardown_gang_on_exit) \
     --cpu_machine="${K8S_CPU_MACHINE}" \
+    ${K8S_CPU_NODEPOOL:+--cpu_nodepool="${K8S_CPU_NODEPOOL}"} \
+    ${K8S_CPU_MEMORY:+--cpu_memory="${K8S_CPU_MEMORY}"} \
     --worker_container_image="${K8S_TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command="${startup_cmd}" \
@@ -199,7 +215,16 @@ start_trainer() {
     "${YAML_DIR}/${K8S_TRAINER_JOBSET_YAML}" \
     --jobset_name="${K8S_TRAINER_ID}" \
     --namespace="${K8S_NAMESPACE}" \
-    ${K8S_KUEUE_QUEUE_NAME:+--queue_name="${K8S_KUEUE_QUEUE_NAME}"} \
+    --queue_name="${K8S_KUEUE_QUEUE_NAME}" \
+    $(bool_flag "${K8S_PREEMPTIBLE}" --preemptible) \
+    ${K8S_PRIORITY_CLASS:+--priority_class="${K8S_PRIORITY_CLASS}"} \
+    ${K8S_SERVICE_ACCOUNT:+--service_account="${K8S_SERVICE_ACCOUNT}"} \
+    ${K8S_TERMINATION_GRACE_SECONDS:+--termination_grace_seconds="${K8S_TERMINATION_GRACE_SECONDS}"} \
+    $(bool_flag "${K8S_TEARDOWN_GANG_ON_EXIT}" "--gang_id=${RUN_ID}") \
+    $(bool_flag "${K8S_FAIL_FAST}" --fail_fast) \
+    --startup_retries="${K8S_STARTUP_RETRIES}" \
+    $(bool_flag "${K8S_USE_DYNAMIC_SLICING}" --use_dynamic_slicing) \
+    ${K8S_HEAD_NODEPOOL:+--head_nodepool="${K8S_HEAD_NODEPOOL}"} \
     --tpu_slice="${K8S_TRAINER_TPU_SLICE}" \
     --cpu_machine="${K8S_CPU_MACHINE}" \
     --pathways_server_image="${K8S_PATHWAYS_SERVER_IMAGE}" \
@@ -309,10 +334,26 @@ start_rollout_instance() {
     "${YAML_DIR}/${K8S_ROLLOUT_JOBSET_YAML}" \
     --jobset_name="${target_id}" \
     --namespace="${K8S_NAMESPACE}" \
-    ${K8S_KUEUE_QUEUE_NAME:+--queue_name="${K8S_KUEUE_QUEUE_NAME}"} \
+    --queue_name="${K8S_KUEUE_QUEUE_NAME}" \
+    $(bool_flag "${K8S_PREEMPTIBLE}" --preemptible) \
+    ${K8S_PRIORITY_CLASS:+--priority_class="${K8S_PRIORITY_CLASS}"} \
+    ${K8S_SERVICE_ACCOUNT:+--service_account="${K8S_SERVICE_ACCOUNT}"} \
+    ${K8S_TERMINATION_GRACE_SECONDS:+--termination_grace_seconds="${K8S_TERMINATION_GRACE_SECONDS}"} \
+    $(bool_flag "${K8S_TEARDOWN_GANG_ON_EXIT}" "--gang_id=${RUN_ID}") \
+    $(bool_flag "${K8S_FAIL_FAST}" --fail_fast) \
+    --startup_retries="${K8S_STARTUP_RETRIES}" \
+    $(bool_flag "${K8S_USE_DYNAMIC_SLICING}" --use_dynamic_slicing) \
+    ${K8S_HEAD_NODEPOOL:+--head_nodepool="${K8S_HEAD_NODEPOOL}"} \
     --tpu_slice="${K8S_ROLLOUT_TPU_SLICE}" \
+    --cpu_machine="${K8S_CPU_MACHINE}" \
     --pathways_server_image="${K8S_PATHWAYS_SERVER_IMAGE}" \
     --pathways_proxy_server_image="${K8S_PATHWAYS_PROXY_IMAGE}" \
+    --pathways_proxy_memory_limit="${K8S_PATHWAYS_PROXY_MEMORY_LIMIT}" \
+    --pathways_proxy_memory="${K8S_PATHWAYS_PROXY_MEMORY}" \
+    --pathways_rm_memory="${K8S_PATHWAYS_RM_MEMORY}" \
+    --user_container_memory="${K8S_USER_CONTAINER_MEMORY}" \
+    --user_container_memory_limit="${K8S_USER_CONTAINER_MEMORY_LIMIT}" \
+    --pathways_worker_memory="${K8S_PATHWAYS_WORKER_MEMORY}" \
     --pathways_gcs_scratch_location="${K8S_GCS_SCRATCH_LOCATION}" \
     --worker_container_image="${K8S_TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \

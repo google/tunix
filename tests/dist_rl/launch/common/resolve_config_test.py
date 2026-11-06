@@ -346,6 +346,130 @@ weight_sync_config:
     self.assertEqual(hp.config["agentic_grpo_config"]["beta"], 0.04)
     self.assertFalse(hp.config["cluster_config"]["run_inference_node"])
 
+  def test_k8s_worker_jobset_settings_fail_loud_and_are_exported(self):
+    # `k8s.sh` applies the orchestrator before it renders the workers, so the
+    # resolver rejects what the YAML generator would reject for a worker.
+    k8s = ["cluster_config.target=k8s", "agentic_grpo_config.beta=0.0"]
+
+    # Scalar type and range validation.
+    with self.assertRaisesRegex(
+        TypeError, "cluster_config.k8s.fail_fast must be a bool"
+    ):
+      resolve_config.initialize([*k8s, "cluster_config.k8s.fail_fast=1"])
+    with self.assertRaisesRegex(
+        TypeError, "cluster_config.k8s.preemptible must be a bool"
+    ):
+      resolve_config.initialize([*k8s, "cluster_config.k8s.preemptible=1"])
+    for str_override in (
+        "priority_class=123",
+        "service_account=true",
+        "cpu_nodepool=123",
+        "cpu_memory=64",
+        "head_nodepool=true",
+    ):
+      key = str_override.split("=")[0]
+      with self.subTest(str_key=key):
+        with self.assertRaisesRegex(
+            TypeError, rf"cluster_config\.k8s\.{key} must be a str"
+        ):
+          resolve_config.initialize([
+              *k8s,
+              "cluster_config.k8s.rollout.jobset_yaml=jobset.pathways.yaml",
+              "cluster_config.k8s.use_dynamic_slicing=true",
+              f"cluster_config.k8s.{str_override}",
+          ])
+    with self.assertRaisesRegex(
+        ValueError, "startup_retries must be an int >= 0"
+    ):
+      resolve_config.initialize(
+          [*k8s, "cluster_config.k8s.startup_retries=true"]
+      )
+    with self.assertRaisesRegex(
+        ValueError, "termination_grace_seconds must be an int >= 0 or null"
+    ):
+      resolve_config.initialize(
+          [*k8s, "cluster_config.k8s.termination_grace_seconds=-1"]
+      )
+    with self.assertRaisesRegex(
+        ValueError, "termination_grace_seconds must be an int >= 0 or null"
+    ):
+      resolve_config.initialize(
+          [*k8s, "cluster_config.k8s.termination_grace_seconds=true"]
+      )
+
+    with self.assertRaisesRegex(
+        ValueError, "startup_retries must be an int >= 0"
+    ):
+      resolve_config.initialize([*k8s, "cluster_config.k8s.startup_retries=-1"])
+    with self.assertRaisesRegex(
+        ValueError, "head_nodepool requires .*use_dynamic_slicing=true"
+    ):
+      resolve_config.initialize([*k8s, "cluster_config.k8s.head_nodepool=np"])
+
+    # teardown_gang_on_exit requires run_id to be a valid K8s label value.
+    with self.assertRaisesRegex(
+        ValueError,
+        "cluster_config.run_id must be a valid Kubernetes label value",
+    ):
+      resolve_config.initialize([
+          *k8s,
+          "cluster_config.run_id=bad/run",
+          "cluster_config.k8s.teardown_gang_on_exit=true",
+          "cluster_config.k8s.rollout.jobset_yaml=jobset.mcjax.ray.yaml",
+      ])
+    # run_id=bad/run remains allowed when teardown_gang_on_exit=false.
+    resolve_config.initialize([
+        *k8s,
+        "cluster_config.run_id=bad/run",
+        "cluster_config.k8s.teardown_gang_on_exit=false",
+    ])
+
+    # JobSet-only settings with the default LeaderWorkerSet rollout template.
+    for jobset_key in (
+        "fail_fast=true",
+        "teardown_gang_on_exit=true",
+        "use_dynamic_slicing=true",
+    ):
+      with self.subTest(jobset_key=jobset_key):
+        with self.assertRaisesRegex(
+            ValueError,
+            rf"cluster_config\.k8s\.{jobset_key.split('=')[0]} need JobSet"
+            r" worker templates \(jobset\.\*\.yaml\), got"
+            r" cluster_config\.k8s\.rollout\.jobset_yaml="
+            r"leaderworkerset\.mcjax\.ray\.yaml",
+        ):
+          resolve_config.initialize([*k8s, f"cluster_config.k8s.{jobset_key}"])
+
+    # Shared scheduling settings succeed with the default rollout.
+    resolve_config.initialize([
+        *k8s,
+        "cluster_config.k8s.kueue_queue_name=q",
+        "cluster_config.k8s.preemptible=true",
+        "cluster_config.k8s.priority_class=p",
+        "cluster_config.k8s.service_account=sa",
+        "cluster_config.k8s.termination_grace_seconds=60",
+    ])
+
+    # `local.sh` deploys no JobSets.
+    resolve_config.initialize(["cluster_config.k8s.fail_fast=true"])
+
+    exports = resolve_config.render_bash_exports(
+        resolve_config.initialize([
+            *k8s,
+            "cluster_config.k8s.rollout.jobset_yaml=jobset.mcjax.ray.yaml",
+            "cluster_config.k8s.fail_fast=true",
+            "cluster_config.k8s.startup_retries=5",
+            "cluster_config.k8s.use_dynamic_slicing=true",
+            "cluster_config.k8s.head_nodepool=head-np",
+        ])
+    )
+    self.assertIn("export K8S_FAIL_FAST=true\n", exports)
+    self.assertIn("export K8S_STARTUP_RETRIES=5\n", exports)
+    self.assertIn("export K8S_USE_DYNAMIC_SLICING=true\n", exports)
+    self.assertIn("export K8S_HEAD_NODEPOOL=head-np\n", exports)
+    # `k8s.sh` omits the flag, so each template keeps its own default.
+    self.assertIn("export K8S_TERMINATION_GRACE_SECONDS=''\n", exports)
+
   def test_orchestrator_choices_fail_loud(self):
     hp = resolve_config.initialize([
         "agentic_grpo_config.trajectory_group_order=prompt_arrival",

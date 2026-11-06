@@ -44,6 +44,7 @@ import omegaconf
 from tunix.cli import config as cli_config
 from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.common import gcs_cache
+from tunix.dist_rl.distributed.deployment import yaml_generator
 from tunix.dist_rl.queue_manager import trajectory_queue_manager
 from tunix.dist_rl.weight_sync import weight_sync
 
@@ -291,12 +292,114 @@ def _validate_k8s_jax_cache_gcs(hp: cli_config.HyperParameters) -> None:
     )
 
 
+_K8S_BOOL_KEYS: Final[tuple[str, ...]] = (
+    "preemptible",
+    "fail_fast",
+    "teardown_gang_on_exit",
+    "use_dynamic_slicing",
+)
+_K8S_STR_KEYS: Final[tuple[str, ...]] = (
+    "priority_class",
+    "service_account",
+    "cpu_nodepool",
+    "cpu_memory",
+    "head_nodepool",
+)
+_K8S_SCALAR_TYPES: Final[tuple[tuple[str, type[bool | str]], ...]] = (
+    *((key, bool) for key in _K8S_BOOL_KEYS),
+    *((key, str) for key in _K8S_STR_KEYS),
+)
+_K8S_JOBSET_ONLY_KEYS: Final[tuple[str, ...]] = (
+    "fail_fast",
+    "teardown_gang_on_exit",
+    "use_dynamic_slicing",
+)
+
+
+def _validate_k8s_scalars(hp: cli_config.HyperParameters) -> None:
+  """Validates scalar types and ranges of `cluster_config.k8s` settings."""
+  cluster = hp.config_mapping("cluster_config")
+  if cluster["target"] != "k8s":
+    return
+  k8s = cluster["k8s"]
+  for key, expected_type in _K8S_SCALAR_TYPES:
+    if not isinstance(k8s[key], expected_type):
+      raise TypeError(
+          f"cluster_config.k8s.{key} must be a {expected_type.__name__}, got"
+          f" {k8s[key]!r}."
+      )
+  retries = k8s["startup_retries"]
+  if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+    raise ValueError(
+        "cluster_config.k8s.startup_retries must be an int >= 0, got"
+        f" {retries!r}."
+    )
+  grace = k8s["termination_grace_seconds"]
+  if grace is not None and (
+      isinstance(grace, bool) or not isinstance(grace, int) or grace < 0
+  ):
+    raise ValueError(
+        "cluster_config.k8s.termination_grace_seconds must be an int >= 0 or"
+        f" null, got {grace!r}."
+    )
+
+
+def _validate_k8s_worker_jobsets(hp: cli_config.HyperParameters) -> None:
+  """Rejects `cluster_config.k8s` settings the worker templates cannot render.
+
+  `k8s.sh` applies the orchestrator JobSet before it renders the trainer and
+  rollout ones, so a setting the YAML generator rejects or drops for a worker
+  template would leave a partial deploy.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    ValueError: If `target` is "k8s" and `run_id` is not a valid K8s label
+      value when `teardown_gang_on_exit` is enabled, `head_nodepool` is set
+      without `use_dynamic_slicing`, or a JobSet-only setting is enabled with a
+      `leaderworkerset.*.yaml` worker template.
+  """
+  cluster = hp.config_mapping("cluster_config")
+  if cluster["target"] != "k8s":
+    return
+  k8s = cluster["k8s"]
+  if k8s["teardown_gang_on_exit"]:
+    try:
+      yaml_generator.validate_gang_id(str(cluster["run_id"]))
+    except ValueError as e:
+      raise ValueError(
+          "cluster_config.run_id must be a valid Kubernetes label value when"
+          f" cluster_config.k8s.teardown_gang_on_exit=true: {e}"
+      ) from e
+  if k8s["head_nodepool"] and not k8s["use_dynamic_slicing"]:
+    raise ValueError(
+        "cluster_config.k8s.head_nodepool requires"
+        " cluster_config.k8s.use_dynamic_slicing=true."
+    )
+  enabled_jobset_keys = [
+      f"cluster_config.k8s.{k}" for k in _K8S_JOBSET_ONLY_KEYS if k8s[k]
+  ]
+  lws_templates = [
+      f"cluster_config.k8s.{role}.jobset_yaml={k8s[role]['jobset_yaml']}"
+      for role in ("trainer", "rollout")
+      if str(k8s[role]["jobset_yaml"]).startswith("leaderworkerset.")
+  ]
+  if enabled_jobset_keys and lws_templates:
+    raise ValueError(
+        f"{', '.join(enabled_jobset_keys)} need JobSet worker templates"
+        f" (jobset.*.yaml), got {', '.join(lws_templates)}."
+    )
+
+
 def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   """Validates cross-field invariants across trainer and rollout configs."""
   # TODO(noghabi): Check which of these checks can be consolidated with the
   # `tunix.cli` validations or left to the constructors that consume them.
   _validate_rollout_cache_settings(hp)
   _validate_k8s_jax_cache_gcs(hp)
+  _validate_k8s_scalars(hp)
+  _validate_k8s_worker_jobsets(hp)
   batch_size = int(hp.config["batch_size"])
   rl_train = hp.config_mapping("rl_training_config")
   mini_batch_size = int(rl_train["mini_batch_size"])
@@ -897,12 +1000,18 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "LOCAL_FORCE_ARM_SECS": local["force_arm_secs"],
       "K8S_NAMESPACE": k8s["namespace"],
       "K8S_KUEUE_QUEUE_NAME": k8s["kueue_queue_name"],
+      "K8S_PREEMPTIBLE": k8s["preemptible"],
+      "K8S_PRIORITY_CLASS": k8s["priority_class"],
+      "K8S_SERVICE_ACCOUNT": k8s["service_account"],
+      "K8S_TERMINATION_GRACE_SECONDS": k8s["termination_grace_seconds"],
       "K8S_ORCHESTRATOR_ID": k8s["orchestrator_id"],
       "K8S_TRAINER_ID": k8s["trainer_id"],
       "K8S_ROLLOUT_ID": k8s["rollout_id"],
       "K8S_INFERENCE_ID": k8s["inference_id"],
       "K8S_OTEL_ID": k8s["otel_id"],
       "K8S_CPU_MACHINE": k8s["cpu_machine"],
+      "K8S_CPU_NODEPOOL": k8s["cpu_nodepool"],
+      "K8S_CPU_MEMORY": k8s["cpu_memory"],
       "K8S_GCS_SCRATCH_LOCATION": k8s["gcs_scratch_location"],
       "K8S_ENABLE_PATHWAYS_PERSISTENCE": k8s["enable_pathways_persistence"],
       "K8S_TRAINER_EXTRA_ENV": k8s["trainer_extra_env"],
@@ -915,6 +1024,11 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "K8S_USER_CONTAINER_MEMORY": k8s["user_container_memory"],
       "K8S_USER_CONTAINER_MEMORY_LIMIT": k8s["user_container_memory_limit"],
       "K8S_PATHWAYS_WORKER_MEMORY": k8s["pathways_worker_memory"],
+      "K8S_FAIL_FAST": k8s["fail_fast"],
+      "K8S_STARTUP_RETRIES": k8s["startup_retries"],
+      "K8S_TEARDOWN_GANG_ON_EXIT": k8s["teardown_gang_on_exit"],
+      "K8S_USE_DYNAMIC_SLICING": k8s["use_dynamic_slicing"],
+      "K8S_HEAD_NODEPOOL": k8s["head_nodepool"],
       "K8S_TRAINER_JOBSET_YAML": k8s_trainer["jobset_yaml"],
       "K8S_TRAINER_TPU_SLICE": k8s_trainer["tpu_slice"],
       "K8S_ROLLOUT_JOBSET_YAML": k8s_rollout["jobset_yaml"],

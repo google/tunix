@@ -14,12 +14,16 @@
 
 from __future__ import annotations
 
+import ast
+import json
 import os
 import pathlib
 import re
 import subprocess
+from typing import Any
 
 from absl.testing import absltest
+from tunix.dist_rl.distributed.deployment import yaml_generator
 from tunix.dist_rl.launch.common import launcher_testing
 from tunix.dist_rl.launch.common import resolve_config
 import yaml
@@ -54,6 +58,20 @@ _ENV_PASSTHROUGH = frozenset({
     "YAML_GEN",
     "YAML_GEN_BIN",
 })
+# Environment variables read by `yaml_generator.py` that intentionally pass
+# through from the caller's environment (not configured via `base_dist_config`).
+_YAML_GEN_ENV_PASSTHROUGH = frozenset({
+    "COLOCATED_PYTHON_SIDECAR_IMAGE",
+    "COLOCATED_PYTHON_SIDECAR_MEMORY",
+    "COLOCATED_PYTHON_SIDECAR_SHM",
+    "ENABLE_MULTI_NUMA",
+    "PATHWAYS_PROXY_EXTRA_ARGS",
+    "PATHWAYS_WORKER_EXTRA_ENV",
+    "RAIDEN_BROADCAST_K",
+    "TPU_RAIDEN_DATA_NICS",
+    "TPU_RESERVATION",
+    "USER",
+})
 _VAR_REF = re.compile(r"\$\{?([A-Z][A-Z0-9_]*)")
 _VAR_DEF = re.compile(
     r"^\s*(?:local\s+|export\s+)?([A-Z][A-Z0-9_]*)(?:\[[^]]*\])?\+?=|"
@@ -73,6 +91,59 @@ def _script_vars(text: str) -> tuple[set[str], set[str]]:
     referenced |= set(re.findall(r"\b([A-Z][A-Z0-9_]*)\b", expr))
   defined = {a or b for a, b in _VAR_DEF.findall(code)}
   return referenced, defined
+
+
+def _yaml_generator_env_vars() -> set[str]:
+  """Extracts environment variable names read by `yaml_generator.py`."""
+  tree = ast.parse(pathlib.Path(yaml_generator.__file__).read_text())
+  env_vars = set()
+  for node in ast.walk(tree):
+    if isinstance(node, ast.Call):
+      if (
+          isinstance(node.func, ast.Attribute)
+          and isinstance(node.func.value, ast.Attribute)
+          and node.func.value.attr == "environ"
+          and node.func.attr == "get"
+          and node.args
+          and isinstance(node.args[0], ast.Constant)
+          and isinstance(node.args[0].value, str)
+      ):
+        env_vars.add(node.args[0].value)
+      elif (
+          isinstance(node.func, ast.Name)
+          and node.func.id == "_env_bool"
+          and node.args
+          and isinstance(node.args[0], ast.Constant)
+          and isinstance(node.args[0].value, str)
+      ):
+        env_vars.add(node.args[0].value)
+    elif isinstance(node, ast.Subscript):
+      if (
+          isinstance(node.value, ast.Attribute)
+          and node.value.attr == "environ"
+          and isinstance(node.slice, ast.Constant)
+          and isinstance(node.slice.value, str)
+      ):
+        env_vars.add(node.slice.value)
+  return env_vars
+
+
+def _dry_run_jobsets(stdout: str) -> dict[str, Any]:
+  """Returns the JobSet manifests of a `start --dry-run`, keyed by name."""
+  jobsets = {}
+  for section in stdout.split("\n---\n")[1:]:
+    for doc in yaml.safe_load_all(section):
+      if doc and doc["kind"] == "JobSet":
+        jobsets[doc["metadata"]["name"]] = doc
+  return jobsets
+
+
+def _pod_specs(jobset: Any) -> list[Any]:
+  """Returns the pod spec of every replicated job of a JobSet manifest."""
+  return [
+      job["template"]["spec"]["template"]["spec"]
+      for job in jobset["spec"]["replicatedJobs"]
+  ]
 
 
 class LaunchScriptsTest(absltest.TestCase):
@@ -183,6 +254,17 @@ class LaunchScriptsTest(absltest.TestCase):
     )
     self.assertIn("rl_training_config.max_steps=2", res.stderr)
     self.assertNotIn("Trainer command:", res.stdout)
+    # Rogue K8s environment variables fail fast before rendering.
+    res = self._run_launch(args, extra_env={"KUEUE_QUEUE_NAME": "rogue-q"})
+    self.assertNotEqual(res.returncode, 0)
+    self.assertIn(
+        "old example launchers are set: KUEUE_QUEUE_NAME", res.stderr
+    )
+    res = self._run_launch(args, extra_env={"K8S_NAMESPACE": "rogue-ns"})
+    self.assertNotEqual(res.returncode, 0)
+    self.assertIn(
+        "old example launchers are set: K8S_NAMESPACE", res.stderr
+    )
     # An empty variable is not a setting.
     res = self._run_launch(args, extra_env={"MODEL_NAME": ""})
     self.assertEqual(res.returncode, 0, msg=res.stderr)
@@ -201,6 +283,18 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertIn("MAXTEXT_MODEL_NAME", legacy)
     # Extra MaxText flags come from `dist_training_config.maxtext_extra_flags`.
     self.assertIn("MAXTEXT_EXTRA_FLAGS", legacy)
+    # Environment variables read by `yaml_generator.py` that do not pass through
+    # must fail fast if set in the caller's environment.
+    yaml_gen_envs = _yaml_generator_env_vars()
+    self.assertNotEmpty(yaml_gen_envs)
+    self.assertEmpty(set(legacy) & _YAML_GEN_ENV_PASSTHROUGH)
+    self.assertContainsSubset(yaml_gen_envs - _YAML_GEN_ENV_PASSTHROUGH, legacy)
+    # `yaml_generator.py` reads these when `k8s.sh` leaves the matching flag
+    # unset, so a caller's value would override `cluster_config.k8s`.
+    self.assertContainsSubset(
+        {"FAIL_FAST", "GANG_ID", "STARTUP_RETRIES", "TEARDOWN_GANG_ON_EXIT"},
+        legacy,
+    )
 
   def test_maxtext_env_overrides_fail_fast(self):
     args = [
@@ -493,6 +587,178 @@ class LaunchScriptsTest(absltest.TestCase):
     res = self._run_launch(args)
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertNotIn("OTEL_", res.stdout)
+
+  def test_k8s_passes_restart_and_scheduling_settings_to_the_jobsets(self):
+    args = [
+        "start",
+        "--dry-run",
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=test-image",
+        "cluster_config.run_id=run_k8s_gang",
+        "agentic_grpo_config.beta=0.0",
+        # The default `leaderworkerset.*.yaml` rollout has no fail-fast mode.
+        "cluster_config.k8s.rollout.jobset_yaml=jobset.mcjax.ray.yaml",
+    ]
+    res = self._run_launch([
+        *args,
+        "cluster_config.k8s.fail_fast=true",
+        "cluster_config.k8s.startup_retries=5",
+        "cluster_config.k8s.teardown_gang_on_exit=true",
+        "cluster_config.k8s.preemptible=true",
+        "cluster_config.k8s.priority_class=rl-high",
+        "cluster_config.k8s.service_account=rl-sa",
+        "cluster_config.k8s.termination_grace_seconds=120",
+        "cluster_config.k8s.kueue_queue_name=rl-queue",
+        "cluster_config.k8s.cpu_nodepool=cpu-np",
+        "cluster_config.k8s.cpu_memory=64Gi",
+    ])
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    jobsets = _dry_run_jobsets(res.stdout)
+    self.assertCountEqual(
+        jobsets, ["testuser-orch", "testuser-train", "testuser-roll"]
+    )
+    for name, jobset in jobsets.items():
+      with self.subTest(jobset=name):
+        labels = jobset["metadata"]["labels"]
+        self.assertEqual(labels["kueue.x-k8s.io/queue-name"], "rl-queue")
+        self.assertEqual(labels["scheduling.x-k8s.io/gang-id"], "run_k8s_gang")
+        self.assertEqual(labels["scheduling.x-k8s.io/preemptible"], "true")
+        for pod in _pod_specs(jobset):
+          self.assertEqual(pod["priorityClassName"], "rl-high")
+          self.assertEqual(pod["serviceAccountName"], "rl-sa")
+          self.assertEqual(pod["terminationGracePeriodSeconds"], 120)
+    # The workers fail fast: an exit-0 guard, no in-place pod restarts, and up
+    # to `startup_retries` whole-JobSet recreations.
+    for name in ("testuser-train", "testuser-roll"):
+      with self.subTest(jobset=name):
+        spec = jobsets[name]["spec"]
+        self.assertEqual(spec["failurePolicy"]["maxRestarts"], 5)
+        self.assertIn("forcing exit code 1", json.dumps(spec))
+    rollout_job = jobsets["testuser-roll"]["spec"]["replicatedJobs"][0]
+    self.assertEqual(rollout_job["template"]["spec"]["backoffLimit"], 0)
+    (rollout_pod,) = _pod_specs(jobsets["testuser-roll"])
+    self.assertEqual(rollout_pod["restartPolicy"], "Never")
+    # The orchestrator runs in the CPU node pool and, when it exits, deletes
+    # the other JobSets of its run.
+    (orch_pod,) = _pod_specs(jobsets["testuser-orch"])
+    self.assertEqual(
+        orch_pod["nodeSelector"], {"cloud.google.com/gke-nodepool": "cpu-np"}
+    )
+    orch_container = orch_pod["containers"][0]
+    self.assertEqual(
+        orch_container["resources"]["requests"]["memory"], "64Gi"
+    )
+    self.assertIn(
+        '-l "scheduling.x-k8s.io/gang-id=run_k8s_gang"'
+        ' --field-selector="metadata.name!=testuser-orch"',
+        orch_container["command"][2],
+    )
+
+    # Unset, the settings keep the template defaults.
+    res = self._run_launch(args)
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    jobsets = _dry_run_jobsets(res.stdout)
+    for name, jobset in jobsets.items():
+      with self.subTest(jobset=name):
+        self.assertNotIn("labels", jobset["metadata"])
+        self.assertNotIn("forcing exit code 1", json.dumps(jobset))
+    for name in ("testuser-train", "testuser-roll"):
+      with self.subTest(jobset=name):
+        spec = jobsets[name]["spec"]
+        self.assertEqual(spec["failurePolicy"]["maxRestarts"], 3)
+    (rollout_pod,) = _pod_specs(jobsets["testuser-roll"])
+    self.assertEqual(rollout_pod["restartPolicy"], "OnFailure")
+    (orch_pod,) = _pod_specs(jobsets["testuser-orch"])
+    self.assertNotIn("kubectl delete", orch_pod["containers"][0]["command"][2])
+
+  def test_k8s_pathways_rollout_gets_cpu_machine_and_memory_settings(self):
+    args = [
+        "start",
+        "--dry-run",
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=test-image",
+        "agentic_grpo_config.beta=0.0",
+        "cluster_config.k8s.rollout.jobset_yaml=jobset.pathways.yaml",
+        "cluster_config.k8s.rollout.tpu_slice=tpu7x:2x2x1",
+        "cluster_config.k8s.use_dynamic_slicing=true",
+        "cluster_config.k8s.cpu_machine=n2-highmem-32",
+        "cluster_config.k8s.pathways_proxy_memory_limit=190G",
+        "cluster_config.k8s.pathways_proxy_memory=24G",
+        "cluster_config.k8s.pathways_rm_memory=8G",
+        "cluster_config.k8s.user_container_memory=56G",
+        "cluster_config.k8s.user_container_memory_limit=80G",
+        "cluster_config.k8s.pathways_worker_memory=120G",
+    ]
+    res = self._run_launch(args)
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    jobsets = _dry_run_jobsets(res.stdout)
+    rollout_jobset = jobsets["testuser-roll"]
+    rjobs = {
+        rj["name"]: rj["template"]["spec"]["template"]["spec"]
+        for rj in rollout_jobset["spec"]["replicatedJobs"]
+    }
+
+    # Head pod (proc) uses node.kubernetes.io/instance-type selector.
+    proc_spec = rjobs["proc"]
+    self.assertEqual(
+        proc_spec["nodeSelector"],
+        {"node.kubernetes.io/instance-type": "n2-highmem-32"},
+    )
+
+    # Init containers (pathways-rm, pathways-proxy) and main user container.
+    init_containers = {c["name"]: c for c in proc_spec["initContainers"]}
+    self.assertEqual(
+        init_containers["pathways-rm"]["resources"]["requests"]["memory"], "8G"
+    )
+    self.assertEqual(
+        init_containers["pathways-proxy"]["resources"]["requests"]["memory"],
+        "24G",
+    )
+    self.assertEqual(
+        init_containers["pathways-proxy"]["resources"]["limits"]["memory"],
+        "190G",
+    )
+
+    containers = {c["name"]: c for c in proc_spec["containers"]}
+    self.assertEqual(
+        containers["main"]["resources"]["requests"]["memory"], "56G"
+    )
+    self.assertEqual(
+        containers["main"]["resources"]["limits"]["memory"], "80G"
+    )
+
+    # Worker pod (pw-node) container (pathways-worker).
+    pw_spec = rjobs["pw-node"]
+    pw_containers = {c["name"]: c for c in pw_spec["containers"]}
+    self.assertEqual(
+        pw_containers["pathways-worker"]["resources"]["requests"]["memory"],
+        "120G",
+    )
+
+    # With `head_nodepool` set alongside `use_dynamic_slicing=true`, both the
+    # trainer and rollout Pathways head (`proc`) pods pin to that node pool.
+    res = self._run_launch([*args, "cluster_config.k8s.head_nodepool=head-np"])
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    jobsets = _dry_run_jobsets(res.stdout)
+    for name in ("testuser-train", "testuser-roll"):
+      with self.subTest(jobset=name):
+        rjobs = {
+            rj["name"]: rj["template"]["spec"]["template"]["spec"]
+            for rj in jobsets[name]["spec"]["replicatedJobs"]
+        }
+        self.assertEqual(
+            rjobs["proc"]["nodeSelector"],
+            {"cloud.google.com/gke-nodepool": "head-np"},
+        )
+        self.assertEqual(
+            rjobs["proc"]["tolerations"],
+            [{
+                "key": "cloud.google.com/gke-nodepool",
+                "operator": "Equal",
+                "value": "head-np",
+                "effect": "NoSchedule",
+            }],
+        )
 
   def test_otel_commands_deploy_and_delete_the_collector(self):
     # The collector needs no `cluster_config.k8s.tunix_image`, and the default
