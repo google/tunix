@@ -58,7 +58,26 @@ class YamlGeneratorTest(parameterized.TestCase):
         yaml_generator.main()
         rendered = mock_stdout.getvalue()
         self.assertIn("test-cpu-job", rendered)
+        self.assertIn(
+            "node.kubernetes.io/instance-type: n2-standard-64", rendered
+        )
         self.assertIn("9999", rendered)
+        doc = yaml.safe_load(rendered)
+        self.assertEqual(doc["spec"]["failurePolicy"]["maxRestarts"], 0)
+        pod_tpl = doc["spec"]["replicatedJobs"][0]["template"]["spec"][
+            "template"
+        ]
+        self.assertEqual(
+            pod_tpl["metadata"]["annotations"][
+                "cluster-autoscaler.kubernetes.io/safe-to-evict"
+            ],
+            "false",
+        )
+        pod_spec = pod_tpl["spec"]
+        self.assertNotIn("priorityClassName", pod_spec)
+        self.assertNotIn("serviceAccountName", pod_spec)
+        self.assertEqual(pod_spec["terminationGracePeriodSeconds"], 300)
+        self.assertNotIn("resources", pod_spec["containers"][0])
 
   @parameterized.named_parameters(
       (
@@ -464,6 +483,33 @@ class YamlGeneratorTest(parameterized.TestCase):
       ("mcjax_default", "jobset.mcjax.yaml", False, 3, 3, 2048000, "OnFailure"),
       ("mcjax_fail_fast_default", "jobset.mcjax.yaml", True, 3, 3, 0, "Never"),
       ("mcjax_fail_fast_custom", "jobset.mcjax.yaml", True, 5, 5, 0, "Never"),
+      (
+          "mcjax_ray_default",
+          "jobset.mcjax.ray.yaml",
+          False,
+          3,
+          3,
+          2048000,
+          "OnFailure",
+      ),
+      (
+          "mcjax_ray_fail_fast_default",
+          "jobset.mcjax.ray.yaml",
+          True,
+          3,
+          3,
+          0,
+          "Never",
+      ),
+      (
+          "mcjax_ray_fail_fast_custom",
+          "jobset.mcjax.ray.yaml",
+          True,
+          5,
+          5,
+          0,
+          "Never",
+      ),
   )
   def test_fail_fast_modes(
       self,
@@ -652,6 +698,7 @@ class YamlGeneratorTest(parameterized.TestCase):
       "jobset.pathways.yaml",
       "jobset.tpu.yaml",
       "jobset.mcjax.yaml",
+      "jobset.mcjax.ray.yaml",
   )
   def test_generate_yaml_with_gang_id_top_level_labels(self, template_name):
     template_file = _get_template_path(template_name)
@@ -885,6 +932,588 @@ class YamlGeneratorTest(parameterized.TestCase):
         stderr = f.read()
       self.assertNotIn("trailing_step_should_not_run", stdout)
       self.assertNotIn("Worker exited with code 0 unexpectedly", stderr)
+
+  def test_preemptible_flag_and_env(self):
+    template_file = _get_template_path("jobset.tpu.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-job",
+        "--tpu_slice=tpuv5e:4x4",
+        "--preemptible",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        doc = yaml.safe_load(mock_stdout.getvalue())
+        self.assertEqual(
+            doc["metadata"]["labels"]["scheduling.x-k8s.io/preemptible"],
+            "true",
+        )
+
+    # Test via environment variable PREEMPTIBLE=true
+    with mock.patch.dict(os.environ, {"PREEMPTIBLE": "true"}):
+      argv_env = [
+          "yaml_generator.py",
+          template_file,
+          "--jobset_name=test-job-env",
+          "--tpu_slice=tpuv5e:4x4",
+      ]
+      with mock.patch.object(sys, "argv", argv_env):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+          yaml_generator.main()
+          doc = yaml.safe_load(mock_stdout.getvalue())
+          self.assertEqual(
+              doc["metadata"]["labels"]["scheduling.x-k8s.io/preemptible"],
+              "true",
+          )
+
+  def test_hardware_and_scheduling_knobs(self):
+    cpu_template = _get_template_path("jobset.cpu.yaml")
+    argv = [
+        "yaml_generator.py",
+        cpu_template,
+        "--jobset_name=test-cpu",
+        "--cpu_machine=n2-standard-64",
+        "--priority_class=high-priority",
+        "--service_account=custom-sa",
+        "--cpu_nodepool=my-cpu-pool",
+        "--cpu_memory=64Gi",
+        "--termination_grace_seconds=45",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        doc = yaml.safe_load(mock_stdout.getvalue())
+        pod_spec = doc["spec"]["replicatedJobs"][0]["template"]["spec"][
+            "template"
+        ]["spec"]
+        self.assertEqual(pod_spec["priorityClassName"], "high-priority")
+        self.assertEqual(pod_spec["serviceAccountName"], "custom-sa")
+        self.assertEqual(pod_spec["terminationGracePeriodSeconds"], 45)
+        self.assertEqual(
+            pod_spec["nodeSelector"]["cloud.google.com/gke-nodepool"],
+            "my-cpu-pool",
+        )
+        self.assertEqual(
+            pod_spec["containers"][0]["resources"]["requests"]["memory"],
+            "64Gi",
+        )
+
+    tpu_template = _get_template_path("jobset.tpu.yaml")
+    with mock.patch.dict(
+        os.environ,
+        {"KUEUE_PRIORITY_CLASS": "fallback-prio", "TPU_RESERVATION": "my-res"},
+    ):
+      argv = [
+          "yaml_generator.py",
+          tpu_template,
+          "--jobset_name=test-tpu",
+          "--tpu_slice=tpuv5e:4x4",
+          "--termination_grace_seconds=60",
+      ]
+      with mock.patch.object(sys, "argv", argv):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+          yaml_generator.main()
+          doc = yaml.safe_load(mock_stdout.getvalue())
+          pod_spec = doc["spec"]["replicatedJobs"][0]["template"]["spec"][
+              "template"
+          ]["spec"]
+          self.assertEqual(pod_spec["priorityClassName"], "fallback-prio")
+          self.assertEqual(pod_spec["terminationGracePeriodSeconds"], 60)
+          self.assertEqual(
+              pod_spec["nodeSelector"]["cloud.google.com/reservation-name"],
+              "my-res",
+          )
+          self.assertIn(
+              {"name": "dshm", "emptyDir": {"medium": "Memory"}},
+              pod_spec["volumes"],
+          )
+          self.assertIn(
+              {"name": "dshm", "mountPath": "/dev/shm"},
+              pod_spec["containers"][0]["volumeMounts"],
+          )
+          env_map = {
+              e["name"]: e["value"]
+              for e in pod_spec["containers"][0]["env"]
+              if "value" in e
+          }
+          self.assertEqual(env_map["ENABLE_MULTI_NUMA"], "0")
+          self.assertEqual(env_map["TPU_RAIDEN_DATA_NICS"], "eth0")
+
+    mcjax_template = _get_template_path("jobset.mcjax.yaml")
+    argv_mcjax = [
+        "yaml_generator.py",
+        mcjax_template,
+        "--jobset_name=test-mcjax",
+        "--tpu_slice=tpuv5e:4x4",
+    ]
+    with mock.patch.object(sys, "argv", argv_mcjax):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        doc = yaml.safe_load(mock_stdout.getvalue())
+        pod_spec = doc["spec"]["replicatedJobs"][0]["template"]["spec"][
+            "template"
+        ]["spec"]
+        self.assertIn(
+            {"name": "dshm", "emptyDir": {"medium": "Memory"}},
+            pod_spec["volumes"],
+        )
+        self.assertIn(
+            {"name": "dshm", "mountPath": "/dev/shm"},
+            pod_spec["containers"][0]["volumeMounts"],
+        )
+
+  def test_dynamic_slicing(self):
+    pw_template = _get_template_path("jobset.pathways.yaml")
+    # --head_nodepool without --use_dynamic_slicing raises ValueError
+    with mock.patch.object(
+        sys,
+        "argv",
+        [
+            "yaml_generator.py",
+            pw_template,
+            "--jobset_name=test-pw",
+            "--tpu_slice=tpu7x:4x4x8",
+            "--head_nodepool=head-pool",
+        ],
+    ):
+      with self.assertRaisesRegex(
+          ValueError, "--head_nodepool.*requires --use_dynamic_slicing"
+      ):
+        yaml_generator.main()
+
+    # With --use_dynamic_slicing and --head_nodepool
+    argv = [
+        "yaml_generator.py",
+        pw_template,
+        "--jobset_name=test-pw",
+        "--tpu_slice=tpu7x:4x4x8",
+        "--use_dynamic_slicing",
+        "--head_nodepool=head-pool",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        doc = yaml.safe_load(mock_stdout.getvalue())
+        proc_spec = doc["spec"]["replicatedJobs"][0]["template"]["spec"][
+            "template"
+        ]["spec"]
+        self.assertEqual(
+            proc_spec["nodeSelector"]["cloud.google.com/gke-nodepool"],
+            "head-pool",
+        )
+        pw_spec = doc["spec"]["replicatedJobs"][1]["template"]["spec"][
+            "template"
+        ]["spec"]
+        self.assertIn("affinity", pw_spec)
+        self.assertIn("nodeAffinity", pw_spec["affinity"])
+
+    # With --use_dynamic_slicing and --cpu_machine (without --head_nodepool)
+    argv_machine = [
+        "yaml_generator.py",
+        pw_template,
+        "--jobset_name=test-pw-machine",
+        "--tpu_slice=tpu7x:4x4x4",
+        "--use_dynamic_slicing",
+        "--cpu_machine=n2d-standard-64",
+    ]
+    with mock.patch.object(sys, "argv", argv_machine):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        doc = yaml.safe_load(mock_stdout.getvalue())
+        proc_spec = doc["spec"]["replicatedJobs"][0]["template"]["spec"][
+            "template"
+        ]["spec"]
+        self.assertEqual(
+            proc_spec["nodeSelector"]["node.kubernetes.io/instance-type"],
+            "n2d-standard-64",
+        )
+        self.assertEqual(proc_spec["tolerations"][0]["operator"], "Exists")
+
+    # With --use_dynamic_slicing and neither --head_nodepool nor --cpu_machine
+    argv_default_pool = [
+        "yaml_generator.py",
+        pw_template,
+        "--jobset_name=test-pw-default",
+        "--tpu_slice=tpu7x:4x4x4",
+        "--use_dynamic_slicing",
+    ]
+    with mock.patch.object(sys, "argv", argv_default_pool):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        doc = yaml.safe_load(mock_stdout.getvalue())
+        proc_spec = doc["spec"]["replicatedJobs"][0]["template"]["spec"][
+            "template"
+        ]["spec"]
+        self.assertEqual(
+            proc_spec["nodeSelector"]["cloud.google.com/gke-nodepool"],
+            "cpu-np",
+        )
+        self.assertEqual(proc_spec["tolerations"][0]["operator"], "Equal")
+        self.assertEqual(proc_spec["tolerations"][0]["value"], "cpu-np")
+
+  def test_colocated_python_sidecar(self):
+    pw_template = _get_template_path("jobset.pathways.yaml")
+    with mock.patch.dict(
+        os.environ,
+        {
+            "COLOCATED_PYTHON_SIDECAR_IMAGE": "test-sidecar-img:v1",
+            "COLOCATED_PYTHON_SIDECAR_SHM": "1",
+        },
+    ):
+      argv = [
+          "yaml_generator.py",
+          pw_template,
+          "--jobset_name=test-pw-sidecar",
+          "--tpu_slice=tpuv5e:4x4",
+      ]
+      with mock.patch.object(sys, "argv", argv):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+          yaml_generator.main()
+          rendered = mock_stdout.getvalue()
+          doc = yaml.safe_load(rendered)
+          pw_spec = doc["spec"]["replicatedJobs"][1]["template"]["spec"][
+              "template"
+          ]["spec"]
+          worker_container = pw_spec["containers"][0]
+          self.assertIn(
+              "--cloud_pathways_sidecar_shm_directory=/tmp/sidecar",
+              worker_container["args"],
+          )
+          # check colocated sidecar container in initContainers
+          sidecar = next(
+              c
+              for c in pw_spec["initContainers"]
+              if c["name"] == "colocated-python-sidecar"
+          )
+          self.assertEqual(sidecar["image"], "test-sidecar-img:v1")
+          # check sidecar-shared-memory in volumes
+          self.assertTrue(
+              any(
+                  v["name"] == "sidecar-shared-memory"
+                  for v in pw_spec["volumes"]
+              )
+          )
+
+  def test_pathways_extra_env_and_proxy_args(self):
+    pw_template = _get_template_path("jobset.pathways.yaml")
+    with mock.patch.dict(
+        os.environ,
+        {
+            "PATHWAYS_WORKER_EXTRA_ENV": 'MY_CUSTOM_VAR="val1"\nOTHER_VAR=2',
+            "PATHWAYS_PROXY_EXTRA_ARGS": "foo=1 bar=2",
+            "RAIDEN_BROADCAST_K": "128",
+        },
+    ):
+      argv = [
+          "yaml_generator.py",
+          pw_template,
+          "--jobset_name=test-pw-extra",
+          "--tpu_slice=tpuv5e:4x4",
+      ]
+      with mock.patch.object(sys, "argv", argv):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+          yaml_generator.main()
+          doc = yaml.safe_load(mock_stdout.getvalue())
+          proxy = doc["spec"]["replicatedJobs"][0]["template"]["spec"][
+              "template"
+          ]["spec"]["initContainers"][1]
+          self.assertIn("foo=1", proxy["args"])
+          self.assertIn("bar=2", proxy["args"])
+          worker = doc["spec"]["replicatedJobs"][1]["template"]["spec"][
+              "template"
+          ]["spec"]["containers"][0]
+          env_map = {
+              e["name"]: e.get("value") for e in worker["env"] if "value" in e
+          }
+          self.assertEqual(env_map["MY_CUSTOM_VAR"], "val1")
+          self.assertEqual(env_map["OTHER_VAR"], "2")
+          self.assertEqual(env_map["RAIDEN_BROADCAST_K"], "128")
+
+    # Conflicting or malformed PATHWAYS_WORKER_EXTRA_ENV raises ValueError
+    for bad_extra_env in (
+        "RAIDEN_BROADCAST_K=128",
+        "TPU_MIN_LOG_LEVEL=2",
+        "MALFORMED_LINE_WITHOUT_EQUALS",
+        "=empty_key",
+    ):
+      with mock.patch.dict(
+          os.environ, {"PATHWAYS_WORKER_EXTRA_ENV": bad_extra_env}
+      ):
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "yaml_generator.py",
+                pw_template,
+                "--jobset_name=test-pw-extra",
+                "--tpu_slice=tpuv5e:4x4",
+            ],
+        ):
+          with self.assertRaises(ValueError):
+            yaml_generator.main()
+
+  def test_generate_mcjax_ray_yaml(self):
+    ray_template = _get_template_path("jobset.mcjax.ray.yaml")
+    argv = [
+        "yaml_generator.py",
+        ray_template,
+        "--jobset_name=test-ray-job",
+        "--tpu_slice=tpuv5e:4x4",
+        "--ray_head_pre_init_command=echo 'head pre-init'",
+        "--ray_worker_pre_init_command=echo 'worker pre-init'",
+        "--fail_fast",
+        "--startup_retries=5",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+        self.assertIn("echo 'head pre-init'", rendered)
+        self.assertIn("echo 'worker pre-init'", rendered)
+        self.assertIn('grep -E -q "/16(\\.0)? TPU"', rendered)
+        self.assertIn(
+            "ERROR: Worker exited with code 0 unexpectedly", rendered
+        )
+        doc = yaml.safe_load(rendered)
+        self.assertEqual(doc["spec"]["failurePolicy"]["maxRestarts"], 5)
+        job_spec = doc["spec"]["replicatedJobs"][0]["template"]["spec"]
+        self.assertEqual(job_spec["backoffLimit"], 0)
+        pod_spec = job_spec["template"]["spec"]
+        self.assertEqual(pod_spec["restartPolicy"], "Never")
+        self.assertTrue(any(v["name"] == "dshm" for v in pod_spec["volumes"]))
+
+  def _render_mcjax_ray_script(
+      self,
+      *,
+      head_pre_init: str = "",
+      worker_pre_init: str = "",
+      startup_cmd: str = "sleep infinity",
+  ) -> str:
+    ray_template = _get_template_path("jobset.mcjax.ray.yaml")
+    with open(ray_template, "r") as f:
+      template_text = f.read()
+    args = yaml_generator.parse_args([
+        ray_template,
+        "--jobset_name=roll",
+        "--tpu_slice=tpuv5e:4x4",
+        "--fail_fast",
+        f"--ray_head_pre_init_command={head_pre_init}",
+        f"--ray_worker_pre_init_command={worker_pre_init}",
+        f"--worker_startup_command={startup_cmd}",
+    ])
+    rendered = yaml_generator.render_template(template_text, args)
+    doc = yaml.safe_load(rendered)
+    return doc["spec"]["replicatedJobs"][0]["template"]["spec"]["template"][
+        "spec"
+    ]["containers"][0]["command"][2]
+
+  def test_mcjax_ray_worker_pid1_script_fails_fast_on_crash(self):
+    pre_init_cmd = (
+        "STATUS_CALLS=0; "
+        "START_CALLS=0; "
+        "sleep() { :; }; "
+        "ray() { "
+        'if [ "$1" = "status" ]; then '
+        "STATUS_CALLS=$((STATUS_CALLS + 1)); "
+        '[ "$STATUS_CALLS" -ge 2 ]; return $?; '
+        'elif [ "$1" = "start" ]; then '
+        "START_CALLS=$((START_CALLS + 1)); "
+        'echo "RAY_START_CALL=$START_CALLS args=$*"; '
+        "return 1; "
+        "fi; "
+        "}"
+    )
+    script = self._render_mcjax_ray_script(worker_pre_init=pre_init_cmd)
+    env = dict(
+        os.environ,
+        JOBSET_NAME="roll",
+        REPLICATED_JOB_NAME="worker",
+        JOB_INDEX="0",
+        POD_INDEX="1",
+    )
+    res = subprocess.run(
+        ["bash", "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    self.assertEqual(res.returncode, 1)
+    self.assertIn(
+        "Ray head roll-worker-0-0.roll not ready, retrying in 5s...",
+        res.stdout,
+    )
+    self.assertIn(
+        "RAY_START_CALL=1 args=start --address=roll-worker-0-0.roll:6379"
+        " --block",
+        res.stdout,
+    )
+    self.assertNotIn("RAY_START_CALL=2", res.stdout)
+
+  def test_mcjax_ray_head_and_worker_startup_failures_and_timeouts(self):
+    # 1. Head pod fails fast when ray start --head fails
+    head_fail_script = self._render_mcjax_ray_script(
+        head_pre_init="ray() { return 1; }",
+        startup_cmd="echo WORKLOAD_RAN",
+    )
+    res_head_fail = subprocess.run(
+        ["bash", "-c", head_fail_script],
+        env=dict(
+            os.environ,
+            JOBSET_NAME="roll",
+            REPLICATED_JOB_NAME="worker",
+            JOB_INDEX="0",
+            POD_INDEX="0",
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    self.assertEqual(res_head_fail.returncode, 1)
+    self.assertNotIn("WORKLOAD_RAN", res_head_fail.stdout)
+
+    # 2. Head pod times out when ray status never reaches NUM_CHIPS
+    head_timeout_script = self._render_mcjax_ray_script(
+        head_pre_init=(
+            'ray() { if [ "$1" = "start" ]; then return 0; fi; '
+            'echo "0.0/8.0 TPU"; return 0; }'
+        ),
+        startup_cmd="echo WORKLOAD_RAN",
+    )
+    res_head_timeout = subprocess.run(
+        ["bash", "-c", head_timeout_script],
+        env=dict(
+            os.environ,
+            JOBSET_NAME="roll",
+            REPLICATED_JOB_NAME="worker",
+            JOB_INDEX="0",
+            POD_INDEX="0",
+            RAY_CLUSTER_WAIT_TIMEOUT_S="0",
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    self.assertEqual(res_head_timeout.returncode, 1)
+    self.assertIn(
+        "Timed out after 0s waiting for 16 TPUs", res_head_timeout.stderr
+    )
+    self.assertNotIn("WORKLOAD_RAN", res_head_timeout.stdout)
+
+    # 3. Worker pod times out when Ray head never becomes reachable
+    worker_timeout_script = self._render_mcjax_ray_script(
+        worker_pre_init=(
+            'ray() { if [ "$1" = "status" ]; then return 1; fi; '
+            'echo "RAY_START_RAN"; return 0; }'
+        ),
+    )
+    res_worker_timeout = subprocess.run(
+        ["bash", "-c", worker_timeout_script],
+        env=dict(
+            os.environ,
+            JOBSET_NAME="roll",
+            REPLICATED_JOB_NAME="worker",
+            JOB_INDEX="0",
+            POD_INDEX="1",
+            RAY_CLUSTER_WAIT_TIMEOUT_S="0",
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    self.assertEqual(res_worker_timeout.returncode, 1)
+    self.assertIn(
+        "Timed out after 0s waiting for Ray head", res_worker_timeout.stderr
+    )
+    self.assertNotIn("RAY_START_RAN", res_worker_timeout.stdout)
+
+  def test_mcjax_ray_sigterm_drains_child_and_exits_143(self):
+    # Redirect stdout/stderr to files and use proc.wait() (not communicate(),
+    # which blocks on pipe EOF from orphaned grandchildren) so this test fails
+    # if the subshell exits before its child finishes draining.
+    with tempfile.TemporaryDirectory() as tmpdir:
+      ready_file = os.path.join(tmpdir, "ready")
+      drain_marker = os.path.join(tmpdir, "drained")
+      stdout_path = os.path.join(tmpdir, "stdout.log")
+      stderr_path = os.path.join(tmpdir, "stderr.log")
+      child_sh = (
+          "sleep 30 >/dev/null 2>&1 & SPID=$!; "
+          "trap 'kill $SPID 2>/dev/null; sleep 0.4; "
+          f"echo drained > {shlex.quote(drain_marker)}; exit 0' SIGTERM; "
+          f"echo 1 > {shlex.quote(ready_file)}; "
+          "wait $SPID"
+      )
+      script = self._render_mcjax_ray_script(
+          worker_pre_init=(
+              'ray() { if [ "$1" = "status" ]; then return 0; fi; '
+              f"bash -c {shlex.quote(child_sh)}; "
+              "}"
+          ),
+      )
+      with (
+          open(stdout_path, "wb") as stdout_f,
+          open(stderr_path, "wb") as stderr_f,
+      ):
+        proc = subprocess.Popen(
+            ["bash", "-c", script],
+            env=dict(
+                os.environ,
+                JOBSET_NAME="roll",
+                REPLICATED_JOB_NAME="worker",
+                JOB_INDEX="0",
+                POD_INDEX="1",
+            ),
+            stdout=stdout_f,
+            stderr=stderr_f,
+        )
+        deadline = time.monotonic() + 5.0
+        while not os.path.exists(ready_file):
+          self.assertLess(time.monotonic(), deadline)
+          time.sleep(0.02)
+        proc.send_signal(signal.SIGTERM)
+        rc = proc.wait(timeout=10)
+      self.assertTrue(os.path.exists(drain_marker))
+      self.assertEqual(rc, 143)
+      with open(stderr_path, "r") as f:
+        stderr = f.read()
+      self.assertNotIn("Worker exited with code 0 unexpectedly", stderr)
+
+  def test_standalone_placeholder_formatting_and_multiline_commands(self):
+    # 1. Empty optional standalone placeholders leave no blank lines
+    cpu_template = _get_template_path("jobset.cpu.yaml")
+    with open(cpu_template, "r") as f:
+      cpu_text = f.read()
+    cpu_rendered = yaml_generator.render_template(
+        cpu_text,
+        yaml_generator.parse_args([
+            cpu_template,
+            "--jobset_name=test-cpu",
+            "--cpu_machine=n2-standard-64",
+            "--worker_startup_command=echo line1\necho line2",
+        ]),
+    )
+    self.assertIn("  namespace: default\nspec:\n", cpu_rendered)
+    self.assertIn(
+        "          spec:\n            dnsPolicy: ClusterFirstWithHostNet\n",
+        cpu_rendered,
+    )
+    self.assertIn(
+        "              securityContext:\n                privileged: true\n"
+        "              command:\n",
+        cpu_rendered,
+    )
+    self.assertIn(
+        "                    echo line1\n                    echo line2\n",
+        cpu_rendered,
+    )
+    doc = yaml.safe_load(cpu_rendered)
+    self.assertIsNotNone(doc)
 
 
 if __name__ == "__main__":

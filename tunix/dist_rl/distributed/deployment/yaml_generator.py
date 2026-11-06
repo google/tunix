@@ -16,6 +16,7 @@
 
 import argparse
 from collections.abc import Sequence
+import json
 import math
 import os
 import re
@@ -27,6 +28,22 @@ _STANDALONE_PLACEHOLDER_RE = re.compile(
     r"^(?P<indent>[ \t]*)\$\{(?P<key>[A-Z0-9_]+)\}[ \t]*\n",
     re.MULTILINE,
 )
+
+_PATHWAYS_WORKER_TEMPLATE_ENV = frozenset({
+    "RAIDEN_BROADCAST_K",
+    "ENABLE_MULTI_NUMA",
+    "TPU_RAIDEN_DATA_NICS",
+    "TPU_MIN_LOG_LEVEL",
+    "TF_CPP_MIN_LOG_LEVEL",
+    "XCLOUD_ENVIRONMENT",
+    "MEGASCALE_GRPC_ENABLE_XOR_TRACER",
+    "MEGASCALE_NUM_SLICES",
+    "JOBSET_NAME",
+    "REPLICATED_JOB_NAME",
+    "MEGASCALE_SLICE_ID",
+    "PATHWAYS_HEAD",
+    "MEGASCALE_COORDINATOR_ADDRESS",
+})
 
 _WORKER_NONZERO_EXIT_GUARD = """\
                   if [ "$EXIT_CODE" -eq 0 ]; then
@@ -47,7 +64,7 @@ def _substitute_template(
     indent = match.group("indent")
     val = substitutions[key]
     raw = "" if val is None else str(val).strip("\n")
-    if not raw:
+    if not raw.strip():
       return ""
     lines = raw.splitlines()
     if indent and not all(
@@ -162,6 +179,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
       help="CPU machine type (e.g. n2-standard-64)",
   )
   parser.add_argument(
+      "--cpu_nodepool",
+      default=os.environ.get("CPU_NODEPOOL") or None,
+      help="GKE nodepool for CPU jobs (e.g. cpu-np, cpu-highmem-np).",
+  )
+  parser.add_argument(
+      "--cpu_memory",
+      default=os.environ.get("CPU_MEMORY") or None,
+      help="Memory request for CPU jobs (e.g. 240G, 300Gi).",
+  )
+  parser.add_argument(
       "--namespace",
       default=os.environ.get("K8S_NAMESPACE", "default"),
       help="Kubernetes namespace to deploy into.",
@@ -172,6 +199,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
       help="Kueue local queue name for scheduling (optional).",
   )
   parser.add_argument(
+      "--preemptible",
+      action=argparse.BooleanOptionalAction,
+      default=None,
+      help=(
+          'Add scheduling.x-k8s.io/preemptible: "true" label to JobSet'
+          " metadata (or set PREEMPTIBLE=true)."
+      ),
+  )
+  parser.add_argument(
       "--gang_id",
       default=os.environ.get("GANG_ID"),
       help=(
@@ -179,6 +215,42 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
           " run (emits scheduling.x-k8s.io/gang-id JobSet label; must be unique"
           " per concurrent run in the namespace so teardown only deletes"
           " sibling JobSets of the same run)."
+      ),
+  )
+  parser.add_argument(
+      "--service_account",
+      default=os.environ.get("SERVICE_ACCOUNT") or None,
+      help="Kubernetes service account for pods.",
+  )
+  parser.add_argument(
+      "--priority_class",
+      default=os.environ.get("PRIORITY_CLASS")
+      or os.environ.get("KUEUE_PRIORITY_CLASS")
+      or None,
+      help="Kubernetes priority class for pods.",
+  )
+  parser.add_argument(
+      "--use_dynamic_slicing",
+      action=argparse.BooleanOptionalAction,
+      default=None,
+      help="Enable GKE dynamic slicing annotations and topology selectors.",
+  )
+  parser.add_argument(
+      "--head_nodepool",
+      default=None,
+      help="Kubernetes nodepool for Pathways head pod (e.g. cpu-np).",
+  )
+  parser.add_argument(
+      "--termination_grace_seconds",
+      default=(
+          int(os.environ["TERMINATION_GRACE_SECONDS"])
+          if os.environ.get("TERMINATION_GRACE_SECONDS")
+          else None
+      ),
+      type=int,
+      help=(
+          "Termination grace period in seconds for pods (default: 300 for CPU"
+          " orchestrator, 10 for TPU/Pathways templates)."
       ),
   )
   parser.add_argument(
@@ -376,9 +448,16 @@ def build_substitutions(
   if jobset_name is None:
     jobset_name = f"{os.environ.get('USER')}-{pw_instance_type}-{num_chips}"
 
+  if args.preemptible is not None:
+    preemptible = args.preemptible
+  else:
+    preemptible = _env_bool("PREEMPTIBLE")
+
   labels: list[str] = []
   if args.queue_name:
     labels.append(f"    kueue.x-k8s.io/queue-name: {args.queue_name}\n")
+  if preemptible:
+    labels.append('    scheduling.x-k8s.io/preemptible: "true"\n')
   if args.gang_id:
     labels.append(render_gang_labels(args.gang_id))
   queue_label = "  labels:\n" + "".join(labels) if labels else ""
@@ -400,12 +479,319 @@ def build_substitutions(
       else (_env_bool("TEARDOWN_GANG_ON_EXIT") and supports_teardown)
   )
 
+  if args.cpu_nodepool:
+    cpu_node_selector = f"cloud.google.com/gke-nodepool: {args.cpu_nodepool}"
+  else:
+    cpu_node_selector = f"node.kubernetes.io/instance-type: {args.cpu_machine}"
+
+  if args.cpu_memory:
+    cpu_resources = (
+        "resources:\n"
+        "  requests:\n"
+        '    cpu: "24"\n'
+        f"    memory: {args.cpu_memory}\n"
+        "    ephemeral-storage: 20Gi"
+    )
+  else:
+    cpu_resources = ""
+
+  priority_class_line = (
+      f"priorityClassName: {args.priority_class}" if args.priority_class else ""
+  )
+  service_account_line = (
+      f"serviceAccountName: {args.service_account}"
+      if args.service_account
+      else ""
+  )
+
+  if args.termination_grace_seconds is not None:
+    termination_grace_seconds = args.termination_grace_seconds
+  elif os.path.basename(args.template_file or "") == "jobset.cpu.yaml":
+    termination_grace_seconds = 300
+  else:
+    termination_grace_seconds = 10
+
+  reservation_name = os.environ.get("TPU_RESERVATION", "").strip()
+  reservation_selector = (
+      f"cloud.google.com/reservation-name: {reservation_name}"
+      if reservation_name
+      else ""
+  )
+
+  if args.use_dynamic_slicing is not None:
+    use_dynamic_slicing = args.use_dynamic_slicing
+  else:
+    use_dynamic_slicing = _env_bool("USE_DYNAMIC_SLICING")
+
+  explicit_head_nodepool = (
+      args.head_nodepool or os.environ.get("HEAD_NODEPOOL", "").strip()
+  )
+  if explicit_head_nodepool and not use_dynamic_slicing:
+    raise ValueError(
+        "--head_nodepool (or HEAD_NODEPOOL) requires --use_dynamic_slicing."
+    )
+
+  if use_dynamic_slicing:
+    if explicit_head_nodepool:
+      head_nodepool = explicit_head_nodepool
+      head_node_selector = f"cloud.google.com/gke-nodepool: {head_nodepool}"
+    elif args.cpu_machine:
+      head_nodepool = ""
+      head_node_selector = (
+          f"node.kubernetes.io/instance-type: {args.cpu_machine}"
+      )
+    else:
+      head_nodepool = "cpu-np"
+      head_node_selector = f"cloud.google.com/gke-nodepool: {head_nodepool}"
+    head_affinity = ""
+    toleration_op = "Equal" if head_nodepool else "Exists"
+    toleration_val = f'  value: "{head_nodepool}"\n' if head_nodepool else ""
+    head_tolerations = (
+        "tolerations:\n"
+        '- key: "cloud.google.com/gke-nodepool"\n'
+        f'  operator: "{toleration_op}"\n'
+        f"{toleration_val}"
+        '  effect: "NoSchedule"'
+    )
+    tpu_topology_selector = ""
+  else:
+    head_selector_lines = [
+        f"cloud.google.com/gke-tpu-accelerator: {tpu_type}",
+        f"cloud.google.com/gke-tpu-topology: {tpu_topology}",
+    ]
+    if reservation_selector:
+      head_selector_lines.append(reservation_selector)
+    head_node_selector = "\n".join(head_selector_lines)
+    head_affinity = (
+        "affinity:\n"
+        "  podAffinity:\n"
+        "    requiredDuringSchedulingIgnoredDuringExecution:\n"
+        "    # place on one of the pathways-worker nodes\n"
+        "    - topologyKey: kubernetes.io/hostname\n"
+        "      labelSelector:\n"
+        "        matchExpressions:\n"
+        "        - key: jobset.sigs.k8s.io/jobset-name\n"
+        "          operator: In\n"
+        "          values:\n"
+        f"          - {jobset_name}\n"
+        "        - key: jobset.sigs.k8s.io/replicatedjob-name\n"
+        "          operator: In\n"
+        "          values:\n"
+        "          - pw-node"
+    )
+    head_tolerations = ""
+    tpu_topology_selector = (
+        f"cloud.google.com/gke-tpu-topology: {tpu_topology}"
+        if tpu_topology
+        else ""
+    )
+
+  if use_dynamic_slicing and slice_topology:
+    if slice_size and slice_size > 1:
+      anno_lines = [
+          f'cloud.google.com/gke-tpu-slice-topology: "{tpu_topology}"',
+          'cloud.google.com/skip-tpu-webhook-check: "true"',
+          (
+              "kueue.x-k8s.io/podset-required-topology:"
+              " cloud.google.com/gce-topology-block"
+          ),
+          (
+              "kueue.x-k8s.io/podset-slice-required-topology:"
+              f" cloud.google.com/gke-tpu-partition-{slice_topology}-id"
+          ),
+          f'kueue.x-k8s.io/podset-slice-size: "{slice_size}"',
+      ]
+    else:
+      anno_lines = [
+          f'cloud.google.com/gke-tpu-slice-topology: "{slice_topology}"',
+          'cloud.google.com/skip-tpu-webhook-check: "true"',
+      ]
+    tpu_annotations = "\n".join(anno_lines)
+  else:
+    tpu_annotations = ""
+
+  if use_dynamic_slicing:
+    if slice_size and slice_size > 1:
+      pw_node_affinity = (
+          "affinity:\n"
+          "  nodeAffinity:\n"
+          "    requiredDuringSchedulingIgnoredDuringExecution:\n"
+          "      nodeSelectorTerms:\n"
+          "      - matchExpressions:\n"
+          "        - key:"
+          f" cloud.google.com/gke-tpu-partition-{slice_topology}-state\n"
+          "          operator: In\n"
+          '          values: ["HEALTHY", "DEGRADED"]'
+      )
+      tpu_affinity = pw_node_affinity
+    else:
+      pw_node_affinity = ""
+      tpu_affinity = ""
+  else:
+    pw_node_affinity = (
+        "affinity:\n"
+        "  # place on nodes in the same nodepool\n"
+        "  podAffinity:\n"
+        "    requiredDuringSchedulingIgnoredDuringExecution:\n"
+        "    - topologyKey: cloud.google.com/gke-nodepool\n"
+        "      labelSelector:\n"
+        "        matchExpressions:\n"
+        "        - key: jobset.sigs.k8s.io/jobset-name\n"
+        "          operator: In\n"
+        "          values:\n"
+        f"          - {jobset_name}\n"
+        "  # ensure exclusive access to the nodepool\n"
+        "  podAntiAffinity:\n"
+        "    requiredDuringSchedulingIgnoredDuringExecution:\n"
+        "    - topologyKey: cloud.google.com/gke-nodepool\n"
+        "      labelSelector:\n"
+        "        matchExpressions:\n"
+        "        - key: jobset.sigs.k8s.io/jobset-name\n"
+        "          operator: Exists\n"
+        "        - key: jobset.sigs.k8s.io/jobset-name\n"
+        "          operator: NotIn\n"
+        "          values:\n"
+        f"          - {jobset_name}"
+    )
+    tpu_affinity = ""
+
+  sidecar_image = os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip()
+  sidecar_shm = os.environ.get(
+      "COLOCATED_PYTHON_SIDECAR_SHM", "1"
+  ).strip().lower() not in ("0", "false", "no")
+  sidecar_memory = os.environ.get(
+      "COLOCATED_PYTHON_SIDECAR_MEMORY", "16Gi"
+  ).strip()
+  if sidecar_shm:
+    worker_shm_mount = (
+        "  - mountPath: /tmp/sidecar\n"
+        "    name: sidecar-shared-memory\n"
+    )
+    sidecar_shm_env = (
+        "\n  - name: CLOUD_PATHWAYS_SIDECAR_SHM_DIRECTORY\n"
+        "    value: /tmp/sidecar"
+    )
+    sidecar_volume_mount = (
+        "  - mountPath: /tmp/sidecar\n"
+        "    name: sidecar-shared-memory"
+    )
+  else:
+    worker_shm_mount = ""
+    sidecar_shm_env = ""
+    sidecar_volume_mount = (
+        "  - mountPath: /tmp\n"
+        "    name: shared-tmp"
+    )
+  if sidecar_image:
+    colocated_python_sidecar_block = (
+        f"{worker_shm_mount}"
+        "initContainers:\n"
+        "- name: colocated-python-sidecar\n"
+        f"  image: {sidecar_image}\n"
+        "  imagePullPolicy: Always\n"
+        "  env:\n"
+        "  - name: GRPC_SERVER_ADDRESS\n"
+        f'    value: "0.0.0.0:50051"{sidecar_shm_env}\n'
+        "  ports:\n"
+        "  - containerPort: 50051\n"
+        "    protocol: TCP\n"
+        "  resources:\n"
+        "    requests:\n"
+        '      cpu: "4"\n'
+        f"      memory: {sidecar_memory}\n"
+        "  restartPolicy: Always\n"
+        "  volumeMounts:\n"
+        f"{sidecar_volume_mount}"
+    )
+    colocated_python_proxy_args = "- --sidecar_name=external"
+  else:
+    colocated_python_sidecar_block = ""
+    colocated_python_proxy_args = ""
+  if sidecar_image and sidecar_shm:
+    colocated_python_worker_args = (
+        "- --cloud_pathways_sidecar_shm_directory=/tmp/sidecar"
+    )
+    colocated_python_sidecar_volume = (
+        "- name: sidecar-shared-memory\n"
+        "  emptyDir:\n"
+        "    medium: Memory"
+    )
+  else:
+    colocated_python_worker_args = ""
+    colocated_python_sidecar_volume = ""
+
+  worker_env = {}
+  for line in (
+      os.environ.get("PATHWAYS_WORKER_EXTRA_ENV", "").strip().splitlines()
+  ):
+    line = line.strip()
+    if not line:
+      continue
+    if "=" not in line:
+      raise ValueError(
+          f"Invalid PATHWAYS_WORKER_EXTRA_ENV entry {line!r}; expected"
+          " KEY=VALUE"
+      )
+    key, value = line.split("=", 1)
+    key = key.strip()
+    if not key:
+      raise ValueError(
+          f"Invalid PATHWAYS_WORKER_EXTRA_ENV entry {line!r}; empty key"
+      )
+    if key in _PATHWAYS_WORKER_TEMPLATE_ENV:
+      raise ValueError(
+          f"PATHWAYS_WORKER_EXTRA_ENV key {key!r} conflicts with a"
+          " template-defined environment variable; configure"
+          " RAIDEN_BROADCAST_K, ENABLE_MULTI_NUMA, or TPU_RAIDEN_DATA_NICS"
+          " directly via environment variables."
+      )
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+      value = value[1:-1]
+    worker_env[key] = value
+
+  pathways_worker_extra_env = "\n".join(
+      f"- name: {key}\n  value: {json.dumps(value)}"
+      for key, value in worker_env.items()
+  )
+
+  pathways_proxy_extra_args = "\n".join(
+      f"- {json.dumps(flag)}"
+      for flag in os.environ.get("PATHWAYS_PROXY_EXTRA_ARGS", "").split()
+  )
+
+  raiden_broadcast_k = os.environ.get("RAIDEN_BROADCAST_K", "64")
+  enable_multi_numa = os.environ.get("ENABLE_MULTI_NUMA", "0")
+  tpu_raiden_data_nics = os.environ.get("TPU_RAIDEN_DATA_NICS", "eth0")
+
   return {
       "JOBSET_NAME": jobset_name,
       "USER": os.environ.get("USER"),
       "NAMESPACE": args.namespace,
       "QUEUE_NAME": args.queue_name,
       "QUEUE_LABEL": queue_label,
+      "SERVICE_ACCOUNT_LINE": service_account_line,
+      "PRIORITY_CLASS_LINE": priority_class_line,
+      "CPU_NODE_SELECTOR": cpu_node_selector,
+      "CPU_RESOURCES": cpu_resources,
+      "TERMINATION_GRACE_SECONDS": termination_grace_seconds,
+      "TPU_TOPOLOGY_SELECTOR": tpu_topology_selector,
+      "TPU_ANNOTATIONS": tpu_annotations,
+      "TPU_AFFINITY": tpu_affinity,
+      "PW_NODE_AFFINITY": pw_node_affinity,
+      "HEAD_NODE_SELECTOR": head_node_selector,
+      "HEAD_AFFINITY": head_affinity,
+      "HEAD_TOLERATIONS": head_tolerations,
+      "RESERVATION_SELECTOR": reservation_selector,
+      "COLOCATED_PYTHON_SIDECAR_BLOCK": colocated_python_sidecar_block,
+      "COLOCATED_PYTHON_SIDECAR_VOLUME": colocated_python_sidecar_volume,
+      "COLOCATED_PYTHON_WORKER_ARGS": colocated_python_worker_args,
+      "COLOCATED_PYTHON_PROXY_ARGS": colocated_python_proxy_args,
+      "PATHWAYS_WORKER_EXTRA_ENV": pathways_worker_extra_env,
+      "PATHWAYS_PROXY_EXTRA_ARGS": pathways_proxy_extra_args,
+      "RAIDEN_BROADCAST_K": raiden_broadcast_k,
+      "ENABLE_MULTI_NUMA": enable_multi_numa,
+      "TPU_RAIDEN_DATA_NICS": tpu_raiden_data_nics,
       "TEARDOWN_ON_EXIT": render_teardown_on_exit(
           teardown_gang_on_exit,
           args.gang_id,
@@ -429,6 +815,7 @@ def build_substitutions(
       "TPU_MACHINE": tpu_machine,
       "TPU_TYPE": tpu_type,
       "TPU_TOPOLOGY": tpu_topology,
+      "NUM_CHIPS": num_chips,
       "PW_INSTANCE_TYPE": pw_instance_type,
       "REPLICAS": 1,
       "COMPLETIONS": num_chips // 4 if num_chips else None,
@@ -455,6 +842,24 @@ def render_template(template_text: str, args: argparse.Namespace) -> str:
         f"--teardown_gang_on_exit is not supported by template"
         f" {args.template_file}"
     )
+  is_pathways = "name: pathways-worker" in template_text
+  sidecar_image = os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip()
+  if is_pathways and sidecar_image:
+    missing_placeholders = [
+        p
+        for p in (
+            "${COLOCATED_PYTHON_SIDECAR_BLOCK}",
+            "${COLOCATED_PYTHON_WORKER_ARGS}",
+            "${COLOCATED_PYTHON_PROXY_ARGS}",
+            "${COLOCATED_PYTHON_SIDECAR_VOLUME}",
+        )
+        if p not in template_text
+    ]
+    if missing_placeholders:
+      raise ValueError(
+          f"COLOCATED_PYTHON_SIDECAR_IMAGE is set, but template "
+          f"{args.template_file} lacks {', '.join(missing_placeholders)}"
+      )
   substitutions = build_substitutions(args, template_text=template_text)
   return _substitute_template(template_text, substitutions)
 

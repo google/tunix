@@ -44,28 +44,16 @@ spec:
             annotations:
               cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
           spec:
+            ${PRIORITY_CLASS_LINE}
+            ${SERVICE_ACCOUNT_LINE}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: Never
-            terminationGracePeriodSeconds: 10
+            terminationGracePeriodSeconds: ${TERMINATION_GRACE_SECONDS}
             nodeSelector:
-              cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
-            affinity:
-              podAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                # place on one of the pathways-worker nodes
-                - topologyKey: kubernetes.io/hostname
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: In
-                      values:
-                      - ${JOBSET_NAME}
-                    - key: jobset.sigs.k8s.io/replicatedjob-name
-                      operator: In
-                      values:
-                      - pw-node
+              ${HEAD_NODE_SELECTOR}
+            ${HEAD_AFFINITY}
+            ${HEAD_TOLERATIONS}
             volumes:
             # Memory-backed directory shared by the user container (IFRT proxy
             # client) and pathways-proxy. Host buffers of at least
@@ -99,6 +87,12 @@ spec:
               - --instance_count=${REPLICAS}
               - --instance_type=${PW_INSTANCE_TYPE}:${TPU_TOPOLOGY}
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "${RAIDEN_BROADCAST_K}"
+              - name: ENABLE_MULTI_NUMA
+                value: "${ENABLE_MULTI_NUMA}"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "${TPU_RAIDEN_DATA_NICS}"
               - name: REPLICATED_JOB_NAME
                 valueFrom:
                   fieldRef:
@@ -134,7 +128,15 @@ spec:
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
               - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
               - --temporary_flags_for_debugging=temporary_flag_for_debugging_test_only_hold_death_ref=false
+              ${PATHWAYS_PROXY_EXTRA_ARGS}
+              ${COLOCATED_PYTHON_PROXY_ARGS}
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "${RAIDEN_BROADCAST_K}"
+              - name: ENABLE_MULTI_NUMA
+                value: "${ENABLE_MULTI_NUMA}"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "${TPU_RAIDEN_DATA_NICS}"
               - name: PATHWAYS_HEAD
                 valueFrom:
                   fieldRef:
@@ -203,6 +205,12 @@ spec:
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "${RAIDEN_BROADCAST_K}"
+              - name: ENABLE_MULTI_NUMA
+                value: "${ENABLE_MULTI_NUMA}"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "${TPU_RAIDEN_DATA_NICS}"
               # Injects the JobSet Name
               - name: JOBSET_NAME
                 valueFrom:
@@ -251,42 +259,19 @@ spec:
           metadata:
             annotations:
               cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
-              # # place on nodes in the same block
-              # kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
-              # # place on nodes in the same slice
-              # kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-slice-${PODSET_SLICE_TOPOLOGY}-id
-              # kueue.x-k8s.io/podset-slice-size: "${PODSET_SLICE_SIZE}"
+              ${TPU_ANNOTATIONS}
           spec:
+            ${PRIORITY_CLASS_LINE}
+            ${SERVICE_ACCOUNT_LINE}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: OnFailure
-            terminationGracePeriodSeconds: 10
+            terminationGracePeriodSeconds: ${TERMINATION_GRACE_SECONDS}
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
-            affinity:
-              # place on nodes in the same nodepool
-              podAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: In
-                      values:
-                      - ${JOBSET_NAME}
-              # ensure exclusive access to the nodepool (among all jobsets created with this yaml)
-              podAntiAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: Exists
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: NotIn
-                      values:
-                      - ${JOBSET_NAME}
+              ${TPU_TOPOLOGY_SELECTOR}
+              ${RESERVATION_SELECTOR}
+            ${PW_NODE_AFFINITY}
             # tolerations:
             # - key: "google.com/tpu"
             #   operator: "Equal"
@@ -306,7 +291,14 @@ spec:
               - --server_port=29005
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
               - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
+              ${COLOCATED_PYTHON_WORKER_ARGS}
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "${RAIDEN_BROADCAST_K}"
+              - name: ENABLE_MULTI_NUMA
+                value: "${ENABLE_MULTI_NUMA}"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "${TPU_RAIDEN_DATA_NICS}"
               - name: TPU_MIN_LOG_LEVEL
                 value: "0"
               - name: TF_CPP_MIN_LOG_LEVEL
@@ -315,6 +307,7 @@ spec:
                 value: GCP
               - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
                 value: "false"
+              ${PATHWAYS_WORKER_EXTRA_ENV}
               - name: MEGASCALE_NUM_SLICES
                 valueFrom:
                   fieldRef:
@@ -357,26 +350,13 @@ spec:
               volumeMounts:
               - mountPath: /tmp
                 name: shared-tmp
-            # initContainers:
-            # - name: colocated-python-sidecar
-            #   image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways-colocated-python/sidecar:2026_03_16-python_3.12-jax_0.9.1
-            #   imagePullPolicy: Always
-            #   env:
-            #   - name: GRPC_SERVER_ADDRESS
-            #     value: "'0.0.0.0:50051'"
-            #   ports:
-            #   - containerPort: 50051
-            #     protocol: TCP
-            #   resources: {}
-            #   restartPolicy: Always
-            #   volumeMounts:
-            #   - mountPath: /tmp
-            #     name: shared-tmp
+            ${COLOCATED_PYTHON_SIDECAR_BLOCK}
             volumes:
             - name: shared-tmp
               hostPath:
                 path: /tmp
                 type: DirectoryOrCreate
+            ${COLOCATED_PYTHON_SIDECAR_VOLUME}
   startupPolicy:
     startupPolicyOrder: AnyOrder
   successPolicy:

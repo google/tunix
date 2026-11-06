@@ -40,42 +40,24 @@ spec:
           metadata:
             annotations:
               cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+              ${TPU_ANNOTATIONS}
               # # place on nodes in the same block
               # kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
               # # place on nodes in the same slice
               # kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-slice-${PODSET_SLICE_TOPOLOGY}-id
               # kueue.x-k8s.io/podset-slice-size: "${PODSET_SLICE_SIZE}"
           spec:
+            ${PRIORITY_CLASS_LINE}
+            ${SERVICE_ACCOUNT_LINE}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: ${RESTART_POLICY}
-            terminationGracePeriodSeconds: 10
+            terminationGracePeriodSeconds: ${TERMINATION_GRACE_SECONDS}
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
-            affinity:
-              # place on nodes in the same nodepool
-              podAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: In
-                      values:
-                      - ${JOBSET_NAME}
-              # ensure exclusive access to the nodepool (among all jobsets created with this yaml)
-              podAntiAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: Exists
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: NotIn
-                      values:
-                      - ${JOBSET_NAME}
+              ${TPU_TOPOLOGY_SELECTOR}
+              ${RESERVATION_SELECTOR}
+            ${PW_NODE_AFFINITY}
             # tolerations:
             # - key: "google.com/tpu"
             #   operator: "Equal"
@@ -153,9 +135,14 @@ spec:
               - containerPort: ${USER_CONTAINER_PORT}
                 name: grpc # Naming it 'grpc' tells GKE to optimize for HTTP/2
               volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
               - mountPath: /tmp
                 name: shared-tmp
             volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
             - name: shared-tmp
               hostPath:
                 path: /tmp

@@ -44,12 +44,14 @@ spec:
               alpha.jobset.sigs.k8s.io/exclusive-topology: kubernetes.io/hostname
               cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
           spec:
+            ${PRIORITY_CLASS_LINE}
+            ${SERVICE_ACCOUNT_LINE}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: Never
-            terminationGracePeriodSeconds: 300
+            terminationGracePeriodSeconds: ${TERMINATION_GRACE_SECONDS}
             nodeSelector:
-              node.kubernetes.io/instance-type: ${CPU_MACHINE}
+              ${CPU_NODE_SELECTOR}
             tolerations:
             - key: "cloud.google.com/gke-nodepool"
               operator: "Exists"
@@ -60,10 +62,7 @@ spec:
               imagePullPolicy: Always
               securityContext:
                 privileged: true
-              # resources:
-              #   limits:
-              #     cpu: "24"
-              #     memory: 100G
+              ${CPU_RESOURCES}
               command:
                 - bash
                 - -c

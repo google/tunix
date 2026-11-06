@@ -40,14 +40,19 @@ spec:
           metadata:
             annotations:
               cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+              ${TPU_ANNOTATIONS}
           spec:
+            ${PRIORITY_CLASS_LINE}
+            ${SERVICE_ACCOUNT_LINE}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: ${RESTART_POLICY}
-            terminationGracePeriodSeconds: 10
+            terminationGracePeriodSeconds: ${TERMINATION_GRACE_SECONDS}
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
+              ${TPU_TOPOLOGY_SELECTOR}
+              ${RESERVATION_SELECTOR}
+            ${TPU_AFFINITY}
             # tolerations:
             # - key: "google.com/tpu"
             #   operator: "Equal"
@@ -97,6 +102,10 @@ spec:
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:
+              - name: ENABLE_MULTI_NUMA
+                value: "${ENABLE_MULTI_NUMA}"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "${TPU_RAIDEN_DATA_NICS}"
               # Injects the JobSet Name
               - name: JOBSET_NAME
                 valueFrom:
@@ -125,9 +134,14 @@ spec:
               - containerPort: ${USER_CONTAINER_PORT}
                 name: grpc # Naming it 'grpc' tells GKE to optimize for HTTP/2
               volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
               - mountPath: /tmp
                 name: shared-tmp
             volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
             - name: shared-tmp
               hostPath:
                 path: /tmp
