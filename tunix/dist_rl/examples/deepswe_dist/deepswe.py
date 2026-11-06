@@ -12,18 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DeepSWE components for the experimental distributed GRPO example."""
+"""DeepSWE components for the distributed GRPO example.
+
+* The rollout node imports this module (`cluster_config.registry_module`),
+  which registers `DeepSWEEnv` and `DeepSWEAgent`.
+* The orchestrator calls `create_dataset(**data_config)` (`data_module`) for
+  the task records.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 import json
 import logging
 from typing import Any
 
+import grain
 import numpy as np
-from tunix.dist_rl.orchestrator import dataset_utils
 from tunix.dist_rl.common import registry
+from tunix.dist_rl.orchestrator import dataset_utils
 from examples.deepswe import deepswe_data
 from examples.deepswe import sandbox_utils
 from examples.deepswe import swe_agent
@@ -56,9 +63,9 @@ def as_text(value: Any) -> str:
   return value if isinstance(value, str) else str(value)
 
 
-def _jsonify_lists(entry: dict[str, Any]) -> dict[str, Any]:
+def _jsonify_lists(entry: Mapping[str, object]) -> dict[str, object]:
   """Matches the legacy DeepSWE recipe's heterogeneous dataset normalization."""
-  normalized = {}
+  normalized: dict[str, object] = {}
   for key, value in entry.items():
     value = normalize_example_value(value)
     normalized[key] = json.dumps(value) if isinstance(value, list) else value
@@ -105,6 +112,143 @@ def load_deepswe_dataset(
   )
 
 
+def _validate_str(
+    value: object, name: str, *, allow_empty: bool = False
+) -> str:
+  """Validates a string option, rejecting non-str and whitespace-only values."""
+  if not isinstance(value, str):
+    raise TypeError(f"{name} must be a str, got {type(value).__name__}.")
+  if not value.strip() and (not allow_empty or value):
+    raise ValueError(f"{name} must be a non-empty string.")
+  return value
+
+
+def _validate_int(
+    value: object, name: str, *, positive: bool = False
+) -> int:
+  """Validates an integer option, rejecting booleans."""
+  if isinstance(value, bool) or not isinstance(value, int):
+    raise TypeError(f"{name} must be an int, got {type(value).__name__}.")
+  if positive and value <= 0:
+    raise ValueError(f"{name} must be positive, got {value}.")
+  return value
+
+
+def _problem_statement(entry: Mapping[str, object]) -> str:
+  for key in ("problem_statement", "prompt", "instance_id"):
+    if key in entry and entry[key] is not None:
+      return as_text(entry[key])
+  return ""
+
+
+def _to_task_record(index: int, raw_entry: object) -> dict[str, object]:
+  """Maps a DeepSWE dataset entry to an orchestrator task record."""
+  if not isinstance(raw_entry, Mapping):
+    raise TypeError(
+        "DeepSWE dataset item must be a mapping, got"
+        f" {type(raw_entry).__name__}."
+    )
+  entry = _jsonify_lists(raw_entry)
+  problem = _problem_statement(entry)
+  raw_id = entry["instance_id"] if "instance_id" in entry else None
+  instance_id = as_text(raw_id).strip() if raw_id is not None else ""
+  prompt_id = instance_id or f"deepswe_{index}"
+  return {
+      "prompt": problem,
+      "metadata": {
+          "instance_id": prompt_id,
+          "problem_statement": problem,
+          "env_config": {
+              "entry": entry,
+              "prompt_id": prompt_id,
+          },
+      },
+  }
+
+
+def create_dataset(
+    *,
+    split: str = "train",
+    shuffle: bool = True,
+    seed: int = 42,
+    dataset_name: str = DEFAULT_DATASET_NAME,
+    dataset_path: str = "",
+    cache_dir: str | None = None,
+    limit: int | None = None,
+) -> grain.MapDataset[dict[str, object]]:
+  """Returns the DeepSWE task records for the distributed orchestrator.
+
+  The orchestrator calls `create_dataset(**data_config)` (`data_module`). Each
+  record holds `prompt` (the problem statement) and `metadata` with
+  `instance_id`, `problem_statement`, and `env_config` (`entry` and `prompt_id`)
+  for `DeepSWEEnv`. Run-wide environment and agent settings come from
+  `env_kwargs` and `agent_kwargs`; records omit `agent_config`, which would
+  replace `agent_kwargs` in `RolloutManager`.
+
+  Args:
+    split: Dataset split name (for example, `"train"`).
+    shuffle: Whether to shuffle the dataset once with `seed` on load.
+    seed: Random seed for shuffling.
+    dataset_name: HuggingFace dataset identifier used when `dataset_path` is
+      empty.
+    dataset_path: Optional local HuggingFace `save_to_disk` directory path.
+    cache_dir: Optional local cache directory for HuggingFace downloads. Empty
+      string `""` is normalized to `None`.
+    limit: Optional positive cap on the number of records returned after
+      optional shuffling.
+
+  Returns:
+    A `grain.MapDataset` of `{"prompt", "metadata"}` task records.
+
+  Raises:
+    TypeError: If any argument has an invalid type (including `bool` for `seed`
+      or `limit`).
+    ValueError: If `split` is empty, both `dataset_path` and `dataset_name` are
+      empty, any string option is whitespace-only, `limit` is not positive, or
+      the loaded dataset is empty.
+  """
+  _validate_str(split, "split")
+  if not isinstance(shuffle, bool):
+    raise TypeError(f"shuffle must be a bool, got {type(shuffle).__name__}.")
+  _validate_int(seed, "seed")
+  _validate_str(dataset_name, "dataset_name", allow_empty=True)
+  _validate_str(dataset_path, "dataset_path", allow_empty=True)
+  if not dataset_path and not dataset_name:
+    raise ValueError("Either dataset_path or dataset_name must be non-empty.")
+  effective_cache_dir: str | None = None
+  if cache_dir is not None:
+    effective_cache_dir = (
+        _validate_str(cache_dir, "cache_dir", allow_empty=True) or None
+    )
+  if limit is not None:
+    _validate_int(limit, "limit", positive=True)
+
+  dataset = load_deepswe_dataset(
+      dataset_name=dataset_name,
+      dataset_split=split,
+      dataset_path=dataset_path,
+      cache_dir=effective_cache_dir,
+      shuffle=shuffle,
+      seed=seed,
+  )
+  raw: grain.MapDataset[object] = (
+      dataset
+      if isinstance(dataset, grain.MapDataset)
+      else grain.MapDataset.source(dataset)
+  )
+  if len(raw) <= 0:
+    raise ValueError("DeepSWE dataset is empty.")
+  if limit is not None:
+    raw = raw[:limit]
+  logging.info(
+      "Loaded DeepSWE dataset: source=%s split=%s size=%d.",
+      dataset_path or dataset_name,
+      split,
+      len(raw),
+  )
+  return raw.map_with_index(_to_task_record)
+
+
 def _entry_at(dataset: Any, index: int) -> dict[str, Any]:
   entry = dataset[index]
   if not isinstance(entry, dict):
@@ -112,13 +256,8 @@ def _entry_at(dataset: Any, index: int) -> dict[str, Any]:
   return _jsonify_lists(dict(entry))
 
 
-def _problem_statement(entry: dict[str, Any]) -> str:
-  for key in ("problem_statement", "prompt", "instance_id"):
-    if key in entry and entry[key] is not None:
-      return as_text(entry[key])
-  return ""
-
-
+# TODO(noghabi): Remove build_prompt_item and iter_prompt_items with
+# run_deepswe_dist.py.
 def build_prompt_item(
     *,
     entry: dict[str, Any],
