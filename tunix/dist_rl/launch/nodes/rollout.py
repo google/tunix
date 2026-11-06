@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
-import dataclasses
 import importlib
 import logging
 import os
@@ -896,39 +895,6 @@ def _create_rollout_worker(
   )
 
 
-def _build_rollout_cache_params(
-    hp: resolve_config.DistHyperParameters,
-) -> gcs_cache.RolloutCacheKeyParams:
-  """Builds `RolloutCacheKeyParams` from the config and environment."""
-  env_params = gcs_cache.RolloutCacheKeyParams.from_env()
-  rollout_model = hp.config_mapping(_ROLLOUT_KEY)
-  rollout = hp.config_mapping("rollout_config")
-  vllm = hp.config_mapping("vllm_config")
-  lora_rank = _lora_rank(hp)
-  max_model_len = vllm["max_model_len"]
-  return dataclasses.replace(
-      env_params,
-      model_name=(
-          _maxtext_model_name(hp)
-          or str(rollout_model["model_name"])
-          or str(rollout_model["model_id"])
-      ),
-      sampler=str(hp.config["rollout_engine"]),
-      max_prompt_length=int(rollout["max_prompt_length"]),
-      max_response_length=int(rollout["total_generation_steps"]),
-      vllm_max_model_len=(
-          int(max_model_len) if max_model_len is not None else None
-      ),
-      mesh_tp=_tensor_parallel_size(hp),
-      mesh_fsdp=_data_parallel_size(hp),
-      use_lora=lora_rank is not None,
-      # RolloutCacheKeyParams' own "no LoRA" rank.
-      lora_rank=lora_rank if lora_rank is not None else env_params.lora_rank,
-      enable_prefix_caching=bool(vllm["enable_prefix_caching"]),
-      vllm_async_scheduling=bool(vllm["async_scheduling"]),
-  )
-
-
 def main(
     argv: list[str], context: context_lib.ProcessContext | None = None
 ) -> None:
@@ -962,7 +928,7 @@ def main(
   logging.info("Importing rollout registry module: %s", registry_module)
   importlib.import_module(registry_module)
 
-  gcs_cache.restore_jax_cache(params=_build_rollout_cache_params(hp))
+  gcs_cache.restore_jax_cache(params=resolve_config.rollout_cache_params(hp))
 
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
   os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")

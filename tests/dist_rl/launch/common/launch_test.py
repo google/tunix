@@ -34,6 +34,8 @@ LAUNCH_SH = LAUNCH_DIR / "launch.sh"
 # `render_bash_exports`).
 _ENV_PASSTHROUGH = frozenset({
     "BASH_SOURCE",
+    # Only checked: `k8s.sh` warns that the rollout pods don't read it.
+    "BUCKET",
     "ENTER_KUBE_CONTEXT",
     "HF_TOKEN",
     "LOG_ROOT",
@@ -359,6 +361,91 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertIn("kubectl delete jobset testuser-orch -n default", res.stdout)
     self.assertNotIn("apiVersion:", res.stdout)
+
+  def test_k8s_rollout_compilation_cache_comes_from_the_config(self):
+    args = [
+        "start",
+        "--dry-run",
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.tunix_image=test-image",
+        "agentic_grpo_config.beta=0.0",
+    ]
+    # The rollout node reads these, but from the launcher's environment they
+    # would reach no pod: the launch fails instead.
+    res = self._run_launch(
+        args,
+        extra_env={
+            "JAX_CACHE_BUCKET": "stray",
+            "SAVE_JAX_CACHE": "false",
+            "VLLM_DISABLE_COMPILE_CACHE": "1",
+        },
+    )
+    self.assertNotEqual(res.returncode, 0)
+    self.assertIn(
+        "JAX_CACHE_BUCKET SAVE_JAX_CACHE VLLM_DISABLE_COMPILE_CACHE set in the"
+        " environment",
+        res.stderr,
+    )
+    self.assertIn("cluster_config.k8s.jax_cache", res.stderr)
+    self.assertNotIn("apiVersion:", res.stdout)
+    # A generic `BUCKET` only gets a warning, and reaches no pod either.
+    res = self._run_launch(args, extra_env={"BUCKET": "stray"})
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    self.assertIn("don't read BUCKET", res.stderr)
+    self.assertNotIn("stray", res.stdout)
+    self.assertNotIn("JAX_CACHE_GCS_DIR=", res.stdout)
+
+    res = self._run_launch(
+        [
+            *args,
+            "cluster_config.k8s.jax_cache.bucket=my-bucket",
+            "cluster_config.k8s.jax_cache.local_dir=/cache",
+        ],
+        extra_env={"BUCKET": "stray"},
+    )
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    self.assertNotIn("stray", res.stdout)
+    uri = (
+        r"gs://my-bucket/jax_cache/v5e/qwen3-1\.7b/"
+        r"rollout_4x4_ep1_tp2_[0-9a-f]{10}"
+    )
+    # The rollout node restores and saves the cache there, ...
+    self.assertRegex(
+        res.stdout,
+        rf"LOCAL_JAX_CACHE_DIR=/cache ROLLOUT_JAX_CACHE_GCS_DIR={uri}"
+        r" SAVE_JAX_CACHE=true ",
+    )
+    # ... and the multi-host rollout's Ray workers download it first.
+    self.assertRegex(res.stdout, rf"gcs_cache download /cache {uri} ")
+    # The pods get no other cache location, and no slice for the cache key.
+    self.assertNotRegex(
+        res.stdout, r"JAX_CACHE_BUCKET=|(?<!ROLLOUT_)JAX_CACHE_GCS_DIR="
+    )
+    self.assertNotIn("ROLLOUT_TPU_SLICE=", res.stdout)
+    self.assertNotIn("VLLM_DISABLE_COMPILE_CACHE", res.stdout)
+
+    # `disable` turns off both `gcs_cache` and vLLM's local XLA compile cache on
+    # the head and Ray workers.
+    res = self._run_launch([
+        *args,
+        "cluster_config.k8s.jax_cache.bucket=my-bucket",
+        "cluster_config.k8s.jax_cache.disable=true",
+    ])
+    self.assertEqual(res.returncode, 0, msg=res.stderr)
+    self.assertIn(
+        "DISABLE_JAX_CACHE=1 VLLM_DISABLE_COMPILE_CACHE=1 ", res.stdout
+    )
+    self.assertRegex(
+        res.stdout,
+        r"export VLLM_DISABLE_COMPILE_CACHE=1\n\s*"
+        r'echo "Starting Ray Head\.\.\."',
+    )
+    self.assertRegex(
+        res.stdout,
+        r"export VLLM_DISABLE_COMPILE_CACHE=1\n\s*ray start --address=",
+    )
+    self.assertNotIn("JAX_COMPILATION_CACHE_DIR", res.stdout)
+    self.assertNotIn("gcs_cache download", res.stdout)
 
   def test_k8s_passes_otel_settings_to_every_pod(self):
     args = [

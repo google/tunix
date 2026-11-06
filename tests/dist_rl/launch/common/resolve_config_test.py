@@ -24,6 +24,7 @@ from unittest import mock
 from absl.testing import absltest
 import omegaconf
 from tunix.cli import config as cli_config
+from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.launch.common import resolve_config
 
 
@@ -674,6 +675,208 @@ weight_sync_config:
     hp.config["env_kwargs"] = omegaconf.OmegaConf.create({"m": "???"})
     with self.assertRaises(omegaconf.MissingMandatoryValue):
       resolve_config.plain_config(hp)
+
+  def test_rollout_cache_params_follow_config(self):
+    hp = resolve_config.initialize([
+        "agentic_grpo_config.beta=0.0",
+        "rollout_engine=vllm",
+        "rollout_model_config.mesh.shape=(2,4,2)",
+        "rollout_model_config.mesh.axis_names=('fsdp','tp','expert')",
+        "rollout_model_config.lora_config={'rank': 16, 'alpha': 32.0}",
+        "rollout_config.max_prompt_length=256",
+        "rollout_config.total_generation_steps=128",
+        "vllm_config.max_model_len=512",
+        "vllm_config.enable_prefix_caching=true",
+        "vllm_config.async_scheduling=true",
+        "cluster_config.k8s.rollout.tpu_slice=tpuv5:2x2x2",
+    ])
+    self.assertEqual(
+        resolve_config.rollout_cache_params(hp),
+        gcs_cache.RolloutCacheKeyParams(
+            tpu_slice="tpuv5:2x2x2",
+            model_name="Qwen3-1.7B",
+            sampler="vllm",
+            max_prompt_length=256,
+            max_response_length=128,
+            vllm_max_model_len=512,
+            mesh_tp=4,
+            mesh_fsdp=2,
+            mesh_expert=2,
+            use_lora=True,
+            lora_rank=16,
+            enable_prefix_caching=True,
+            vllm_async_scheduling=True,
+        ),
+    )
+    # Without a model name, the model id names it; a MaxText rollout goes by
+    # its MaxText model name.
+    for overrides, model_name in (
+        (("rollout_model_config.model_name=",), "Qwen/Qwen3-1.7B"),
+        (
+            (
+                "model_config.model_source=maxtext",
+                "model_config.model_path=/ckpt/qwen3-1.7b/0/items",
+                "model_config.kwargs.maxtext_model_name=qwen3-1.7b",
+                "weight_sync_config.mode=raiden",
+            ),
+            "qwen3-1.7b",
+        ),
+    ):
+      with self.subTest(model_name=model_name):
+        hp = resolve_config.initialize(
+            ["agentic_grpo_config.beta=0.0", *overrides]
+        )
+        self.assertEqual(
+            resolve_config.rollout_cache_params(hp).model_name, model_name
+        )
+    # In-flight weight updates turn on vLLM's prefix caching, and so the key's.
+    hp = resolve_config.initialize([
+        "agentic_grpo_config.beta=0.0",
+        "vllm_config.enable_prefix_caching=false",
+        "weight_sync_config.in_flight_weight_updates=true",
+    ])
+    self.assertTrue(
+        resolve_config.rollout_cache_params(hp).enable_prefix_caching
+    )
+
+  def test_rollout_cache_settings_fail_loud(self):
+    # `k8s.sh` and the URI derivation must read `disable` the same way.
+    with self.assertRaisesRegex(TypeError, "jax_cache.disable must be a bool"):
+      resolve_config.initialize([
+          "agentic_grpo_config.beta=0.0",
+          "cluster_config.k8s.jax_cache.disable=y",
+      ])
+    # `k8s.sh` would save with `save: null`.
+    for save in ("null", "'false'"):
+      with self.subTest(save=save):
+        with self.assertRaisesRegex(TypeError, "jax_cache.save must be a bool"):
+          resolve_config.initialize([
+              "agentic_grpo_config.beta=0.0",
+              f"cluster_config.k8s.jax_cache.save={save}",
+          ])
+    for skip in ("true", "null", "2", "'1'"):
+      with self.subTest(rollout_skip_jax_precompile=skip):
+        with self.assertRaisesRegex(
+            ValueError, "rollout_skip_jax_precompile must be 0 or 1"
+        ):
+          resolve_config.initialize([
+              "agentic_grpo_config.beta=0.0",
+              f"cluster_config.k8s.jax_cache.rollout_skip_jax_precompile={skip}",
+          ])
+    for local_dir in ("''", "jax_cache", "null"):
+      with self.subTest(local_dir=local_dir):
+        with self.assertRaisesRegex(
+            ValueError, "local_dir must be a non-empty absolute path"
+        ):
+          resolve_config.initialize([
+              "agentic_grpo_config.beta=0.0",
+              f"cluster_config.k8s.jax_cache.local_dir={local_dir}",
+          ])
+    for key in ("rollout_gcs_dir", "gcs_dir", "bucket"):
+      for bad_type in ("123", "true", "[a]"):
+        with self.subTest(key=key, bad_type=bad_type):
+          with self.assertRaisesRegex(
+              TypeError, f"jax_cache.{key} must be a str"
+          ):
+            resolve_config.initialize([
+                "agentic_grpo_config.beta=0.0",
+                f"cluster_config.k8s.jax_cache.{key}={bad_type}",
+            ])
+      with self.subTest(key=key, bad_type=None):
+        hp = resolve_config.initialize(["agentic_grpo_config.beta=0.0"])
+        hp.config["cluster_config"]["k8s"]["jax_cache"][key] = None
+        with self.assertRaisesRegex(
+            TypeError, f"jax_cache.{key} must be a str"
+        ):
+          resolve_config.finalize_dist_config(hp)
+    for key in ("rollout_gcs_dir", "gcs_dir"):
+      for bad_uri in (
+          "my-bucket/cache",
+          "s3://my-bucket/cache",
+          "-bad",
+          "gs://",
+          "gs:///p",
+          "' gs://r '",
+      ):
+        with self.subTest(key=key, bad_uri=bad_uri):
+          with self.assertRaisesRegex(
+              ValueError, f"jax_cache.{key} must start with 'gs://<bucket>'"
+          ):
+            resolve_config.initialize([
+                "agentic_grpo_config.beta=0.0",
+                f"cluster_config.k8s.jax_cache.{key}={bad_uri}",
+            ])
+    for bad_bucket in (
+        "gs://",
+        "gs:///p",
+        "gs:/my-bucket",
+        "s3://my-bucket",
+        "/bad",
+        "-bad",
+        "' my-bucket '",
+    ):
+      with self.subTest(bad_bucket=bad_bucket):
+        with self.assertRaisesRegex(
+            ValueError,
+            "jax_cache.bucket must be a GCS bucket name or 'gs://<bucket>' URI",
+        ):
+          resolve_config.initialize([
+              "agentic_grpo_config.beta=0.0",
+              f"cluster_config.k8s.jax_cache.bucket={bad_bucket}",
+          ])
+    with self.assertRaisesRegex(ValueError, "lora_config is missing 'rank'"):
+      resolve_config.initialize([
+          "agentic_grpo_config.beta=0.0",
+          "rollout_model_config.lora_config={'alpha': 32.0}",
+      ])
+    # Both precompile settings are valid.
+    resolve_config.initialize([
+        "agentic_grpo_config.beta=0.0",
+        "cluster_config.k8s.jax_cache.rollout_skip_jax_precompile=0",
+    ])
+
+  def test_k8s_rollout_cache_uri_comes_from_the_config_only(self):
+    base = ["agentic_grpo_config.beta=0.0"]
+    digest = resolve_config.rollout_cache_params(
+        resolve_config.initialize(base)
+    ).cache_fingerprint()
+    # Hardware, model, rollout slice topology and mesh, and the key's digest.
+    derived = f"v5e/qwen3-1.7b/rollout_4x4_ep1_tp2_{digest}"
+    bucket = "cluster_config.k8s.jax_cache.bucket=my-bucket"
+    gcs_dir = "cluster_config.k8s.jax_cache.gcs_dir=gs://my-cache"
+    rollout_gcs_dir = "cluster_config.k8s.jax_cache.rollout_gcs_dir=gs://r/"
+    disable = "cluster_config.k8s.jax_cache.disable=true"
+    cases = (
+        ((), "''"),
+        ((bucket,), f"gs://my-bucket/jax_cache/{derived}"),
+        (
+            ("cluster_config.k8s.jax_cache.bucket=gs://my-bucket",),
+            f"gs://my-bucket/jax_cache/{derived}",
+        ),
+        ((bucket, "cluster_config.k8s.jax_cache.bucket=null"), "''"),
+        ((bucket, gcs_dir), f"gs://my-cache/{derived}"),
+        ((gcs_dir, rollout_gcs_dir), "gs://r"),
+        ((bucket, disable), "''"),
+        ((rollout_gcs_dir, disable), "''"),
+    )
+    # The settings the rollout node reads from its environment, set in the
+    # launcher's: none of them may change the URI.
+    stray_env = {
+        "BUCKET": "stray",
+        "DISABLE_JAX_CACHE": "1",
+        "JAX_CACHE_BUCKET": "stray",
+        "JAX_CACHE_GCS_DIR": "gs://stray",
+        "ROLLOUT_JAX_CACHE_GCS_DIR": "gs://stray/rollout",
+    }
+    with mock.patch.dict(os.environ, stray_env):
+      for overrides, uri in cases:
+        with self.subTest(overrides=overrides):
+          self.assertIn(
+              f"\nexport K8S_JAX_CACHE_ROLLOUT_GCS_DIR={uri}\n",
+              resolve_config.render_bash_exports(
+                  resolve_config.initialize([*base, *overrides])
+              ),
+          )
 
   def test_render_bash_exports_evaluates_in_bash(self):
     hp = resolve_config.initialize([

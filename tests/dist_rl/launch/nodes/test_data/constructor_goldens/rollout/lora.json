@@ -10,39 +10,7 @@
     {
       "tunix.dist_rl.common.gcs_cache.RolloutCacheKeyParams": {
         "kwargs": {
-          "attn_custom_num_reqs_buckets": "",
           "enable_prefix_caching": false,
-          "float32_logits": "",
-          "libtpu_init_args": "",
-          "lora_rank": 64,
-          "max_prompt_length": 1024,
-          "max_response_length": 1024,
-          "mesh_expert": 1,
-          "mesh_fsdp": 1,
-          "mesh_tp": 1,
-          "model_name": "model",
-          "onehot_moe_permute_threshold": "",
-          "rollout_fp8": "",
-          "rollout_quantization": "",
-          "sampler": "vllm",
-          "tpu_slice": "tpuv5e:4x4",
-          "use_batched_rpa_kernel": "",
-          "use_lora": false,
-          "vllm_async_scheduling": false,
-          "vllm_data_parallel_size": null,
-          "vllm_max_model_len": null,
-          "vllm_moe_chunk_size": "",
-          "vllm_server_mode": true
-        }
-      }
-    },
-    {
-      "tunix.dist_rl.common.gcs_cache.RolloutCacheKeyParams": {
-        "kwargs": {
-          "attn_custom_num_reqs_buckets": "",
-          "enable_prefix_caching": false,
-          "float32_logits": "",
-          "libtpu_init_args": "",
           "lora_rank": 16,
           "max_prompt_length": 1024,
           "max_response_length": 1024,
@@ -50,25 +18,18 @@
           "mesh_fsdp": 1,
           "mesh_tp": 4,
           "model_name": "Qwen3-1.7B",
-          "onehot_moe_permute_threshold": "",
-          "rollout_fp8": "",
-          "rollout_quantization": "",
           "sampler": "vllm",
           "tpu_slice": "tpuv5e:4x4",
-          "use_batched_rpa_kernel": "",
           "use_lora": true,
           "vllm_async_scheduling": false,
-          "vllm_data_parallel_size": null,
-          "vllm_max_model_len": null,
-          "vllm_moe_chunk_size": "",
-          "vllm_server_mode": true
+          "vllm_max_model_len": null
         }
       }
     },
     {
       "tunix.dist_rl.common.gcs_cache.restore_jax_cache": {
         "kwargs": {
-          "params": "<tunix.dist_rl.common.gcs_cache.RolloutCacheKeyParams()#2>"
+          "params": "<tunix.dist_rl.common.gcs_cache.RolloutCacheKeyParams()>"
         }
       }
     },

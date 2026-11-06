@@ -35,6 +35,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import shlex
 import sys
 from typing import Any, Final
@@ -42,6 +43,7 @@ from typing import Any, Final
 import omegaconf
 from tunix.cli import config as cli_config
 from tunix.common import datatypes as common_datatypes
+from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.queue_manager import trajectory_queue_manager
 from tunix.dist_rl.weight_sync import weight_sync
 
@@ -205,10 +207,96 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
       k8s["otel_id"] = f"{user}-otel"
 
 
+def _validate_rollout_cache_settings(hp: cli_config.HyperParameters) -> None:
+  """Checks the settings that `rollout_cache_params` and the cache URI read.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    TypeError: If `cluster_config.k8s.jax_cache.disable` or `save` is not a
+      bool, which `k8s.sh` and `render_bash_exports` could read differently
+      (e.g. `save: null` would still save on the pods).
+    ValueError: If `cluster_config.k8s.jax_cache.rollout_skip_jax_precompile`
+      is not the int 0 or 1, if `cluster_config.k8s.jax_cache.local_dir` is
+      not a non-empty absolute path, or if `rollout_model_config.lora_config`
+      is set without `rank`.
+  """
+  jax_cache = hp.config_mapping("cluster_config")["k8s"]["jax_cache"]
+  for key in ("disable", "save"):
+    if not isinstance(jax_cache[key], bool):
+      raise TypeError(
+          f"cluster_config.k8s.jax_cache.{key} must be a bool, got"
+          f" {jax_cache[key]!r}."
+      )
+  skip_precompile = jax_cache["rollout_skip_jax_precompile"]
+  # `bool` is an `int` subclass, but `k8s.sh` would pass it on as true/false.
+  if (
+      isinstance(skip_precompile, bool)
+      or not isinstance(skip_precompile, int)
+      or skip_precompile not in (0, 1)
+  ):
+    raise ValueError(
+        "cluster_config.k8s.jax_cache.rollout_skip_jax_precompile must be 0 or"
+        f" 1, got {skip_precompile!r}."
+    )
+  local_dir = jax_cache["local_dir"]
+  if not isinstance(local_dir, str) or not os.path.isabs(local_dir):
+    raise ValueError(
+        "cluster_config.k8s.jax_cache.local_dir must be a non-empty absolute"
+        f" path, got {local_dir!r}."
+    )
+  lora_config = hp.config_mapping("rollout_model_config")["lora_config"]
+  if lora_config and "rank" not in lora_config:
+    raise ValueError("rollout_model_config.lora_config is missing 'rank'.")
+
+
+_GCS_URI_RE: Final[re.Pattern[str]] = re.compile(
+    r"^gs://[a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?(?:/\S*)?\Z"
+)
+
+
+def _validate_k8s_jax_cache_gcs(hp: cli_config.HyperParameters) -> None:
+  """Checks the GCS location settings in `cluster_config.k8s.jax_cache`.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    TypeError: If `rollout_gcs_dir`, `gcs_dir`, or `bucket` is not a `str`.
+    ValueError: If a non-empty `rollout_gcs_dir` or `gcs_dir` is not a
+      `gs://<bucket>[/...]` URI without whitespace, or a non-empty `bucket` is
+      not a GCS bucket name or `gs://<bucket>[/...]` URI without whitespace.
+  """
+  jax_cache = hp.config_mapping("cluster_config")["k8s"]["jax_cache"]
+  for key in ("rollout_gcs_dir", "gcs_dir", "bucket"):
+    if not isinstance(jax_cache[key], str):
+      raise TypeError(
+          f"cluster_config.k8s.jax_cache.{key} must be a str, got"
+          f" {jax_cache[key]!r}."
+      )
+  for key in ("rollout_gcs_dir", "gcs_dir"):
+    value = jax_cache[key]
+    if value and not _GCS_URI_RE.match(value):
+      raise ValueError(
+          f"cluster_config.k8s.jax_cache.{key} must start with"
+          f" 'gs://<bucket>', got {value!r}."
+      )
+  bucket = jax_cache["bucket"]
+  bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+  if bucket and not _GCS_URI_RE.match(bucket_uri):
+    raise ValueError(
+        "cluster_config.k8s.jax_cache.bucket must be a GCS bucket name or"
+        f" 'gs://<bucket>' URI, got {bucket!r}."
+    )
+
+
 def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   """Validates cross-field invariants across trainer and rollout configs."""
   # TODO(noghabi): Check which of these checks can be consolidated with the
   # `tunix.cli` validations or left to the constructors that consume them.
+  _validate_rollout_cache_settings(hp)
+  _validate_k8s_jax_cache_gcs(hp)
   batch_size = int(hp.config["batch_size"])
   rl_train = hp.config_mapping("rl_training_config")
   mini_batch_size = int(rl_train["mini_batch_size"])
@@ -656,6 +744,60 @@ def config_fingerprint(hp: cli_config.HyperParameters) -> str:
   return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def rollout_cache_params(
+    hp: cli_config.HyperParameters,
+) -> gcs_cache.RolloutCacheKeyParams:
+  """Returns the rollout's compilation-cache key, from the config alone.
+
+  On k8s, the launcher derives the rollout pods' cache URI from it
+  (`render_bash_exports`). The rollout node keys its cache with it when it gets
+  no URI (e.g. local runs, where `cluster_config.k8s.rollout.tpu_slice` still
+  names the slice). Key fields that no config key sets keep their defaults;
+  JAX's own cache key still tells apart the programs they change (e.g. through
+  `LIBTPU_INIT_ARGS`).
+
+  Args:
+    hp: Resolved configuration.
+  """
+  # TODO(noghabi): Add `float32_logits` and the vLLM quantization to the key
+  # once they are schema keys.
+  rollout_model = hp.config_mapping("rollout_model_config")
+  rollout = hp.config_mapping("rollout_config")
+  vllm = hp.config_mapping("vllm_config")
+  axes = hp.mesh_axes("rollout_model_config")
+  lora_config = rollout_model["lora_config"]
+  max_model_len = vllm["max_model_len"]
+  return gcs_cache.RolloutCacheKeyParams(
+      # TODO(noghabi): Name the local rollout's slice from the local devices or
+      # config instead of `cluster_config.k8s.rollout.tpu_slice`.
+      tpu_slice=str(
+          hp.config_mapping("cluster_config")["k8s"]["rollout"]["tpu_slice"]
+      ),
+      model_name=str(
+          rollout_model["kwargs"]["maxtext_model_name"]
+          if rollout_model["model_source"] == "maxtext"
+          else (rollout_model["model_name"] or rollout_model["model_id"])
+      ),
+      sampler=str(hp.config["rollout_engine"]),
+      max_prompt_length=int(rollout["max_prompt_length"]),
+      max_response_length=int(rollout["total_generation_steps"]),
+      vllm_max_model_len=None if max_model_len is None else int(max_model_len),
+      mesh_tp=axes["tp"],
+      mesh_fsdp=axes["fsdp"],
+      mesh_expert=axes["expert"],
+      use_lora=bool(lora_config),
+      # `cache_fingerprint` hashes the rank only with LoRA.
+      lora_rank=int(lora_config["rank"]) if lora_config else 0,
+      # In-flight weight updates force prefix caching on, as in
+      # `rollout._common_vllm_engine_kwargs`.
+      enable_prefix_caching=bool(
+          vllm["enable_prefix_caching"]
+          or hp.config_mapping("weight_sync_config")["in_flight_weight_updates"]
+      ),
+      vllm_async_scheduling=bool(vllm["async_scheduling"]),
+  )
+
+
 def _bash_quote(val: object) -> str:
   if isinstance(val, bool):
     return "true" if val else "false"
@@ -687,6 +829,19 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       else {}
   )
   trainer_backend = "maxtext" if actor["model_source"] == "maxtext" else "tunix"
+  # The rollout pods' GCS compilation-cache URI, from the config alone and never
+  # the launcher's environment: `gcs_cache` reads the settings from this
+  # mapping, in its usual order (`rollout_gcs_dir`, then `gcs_dir`, `bucket`).
+  rollout_cache_uri: str | None = None
+  if not jax_cache["disable"]:
+    rollout_cache_uri = gcs_cache.derive_rollout_cache_uri(
+        params=rollout_cache_params(hp),
+        env={
+            "ROLLOUT_JAX_CACHE_GCS_DIR": str(jax_cache["rollout_gcs_dir"]),
+            "JAX_CACHE_GCS_DIR": str(jax_cache["gcs_dir"]),
+            "JAX_CACHE_BUCKET": str(jax_cache["bucket"]),
+        },
+    )
 
   exports: dict[str, object] = {
       "CLUSTER_TARGET": cluster["target"],
@@ -767,9 +922,8 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "K8S_ROLLOUT_REPLICAS": k8s_rollout["replicas"],
       "K8S_JAX_CACHE_DISABLE": jax_cache["disable"],
       "K8S_JAX_CACHE_LOCAL_DIR": jax_cache["local_dir"],
-      "K8S_JAX_CACHE_GCS_DIR": jax_cache["gcs_dir"],
-      "K8S_JAX_CACHE_ROLLOUT_GCS_DIR": jax_cache["rollout_gcs_dir"],
-      "K8S_JAX_CACHE_BUCKET": jax_cache["bucket"],
+      # Empty without a GCS cache.
+      "K8S_JAX_CACHE_ROLLOUT_GCS_DIR": rollout_cache_uri or "",
       "K8S_JAX_CACHE_SAVE": jax_cache["save"],
       "K8S_ROLLOUT_SKIP_JAX_PRECOMPILE": jax_cache[
           "rollout_skip_jax_precompile"

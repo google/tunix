@@ -390,6 +390,12 @@ cluster_config:
     user_container_memory: "48G"
     user_container_memory_limit: "70G"
     pathways_worker_memory: "100G"
+    # Rollout JAX compilation cache. Unless `disable`, the rollout pods cache in
+    # `local_dir` and use a GCS cache: `rollout_gcs_dir`, or else a directory
+    # under `gcs_dir` (or `gs://<bucket>/jax_cache`) named by the rollout config
+    # (`resolve_config.rollout_cache_params`); none when all three are empty.
+    # TODO(noghabi): Lift `jax_cache` to `cluster_config` and drive local runs
+    # from the config too, then retire the cache env vars into `legacy_env.sh`.
     jax_cache:
       disable: false
       local_dir: "/tmp/jax_cache"
@@ -397,7 +403,6 @@ cluster_config:
       rollout_gcs_dir: ""
       bucket: ""
       save: true
-      skip_jax_precompile: 1
       rollout_skip_jax_precompile: 1
     trainer:
       jobset_yaml: "jobset.pathways.yaml"

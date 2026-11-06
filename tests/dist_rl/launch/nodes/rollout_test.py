@@ -825,26 +825,6 @@ class EngineKwargsTest(absltest.TestCase):
 
 class RolloutMainTest(absltest.TestCase):
 
-  def test_cache_params_follow_config(self):
-    params = rollout._build_rollout_cache_params(
-        _hp(
-            "rollout_engine=vllm",
-            "rollout_model_config.mesh.shape=(2,4)",
-            "vllm_config.tensor_parallel_size=4",
-            "rollout_config.max_prompt_length=256",
-            "rollout_config.total_generation_steps=128",
-        )
-    )
-    self.assertEqual(params.sampler, "vllm")
-    self.assertEqual(params.model_name, "Qwen3-1.7B")
-    self.assertEqual(params.mesh_tp, 4)
-    self.assertEqual(params.mesh_fsdp, 2)
-    self.assertEqual(params.max_prompt_length, 256)
-    self.assertEqual(params.max_response_length, 128)
-    self.assertFalse(params.use_lora)
-    # Rollout always runs vLLM in server mode, so the key doesn't vary with it.
-    self.assertTrue(params.vllm_server_mode)
-
   def test_main_restores_jax_cache_before_jax_init(self):
     events: list[str] = []
     context = mock.Mock()
@@ -863,6 +843,10 @@ class RolloutMainTest(absltest.TestCase):
       events.append(f"restore:{params.sampler}")
       return True
 
+    argv = [
+        "rollout_engine=vanilla",
+        "cluster_config.registry_module=my_task.registry",
+    ]
     with contextlib.ExitStack() as stack:
       mock_import = stack.enter_context(
           mock.patch.object(rollout.importlib, "import_module")
@@ -875,17 +859,15 @@ class RolloutMainTest(absltest.TestCase):
           )
       )
       with self.assertRaisesRegex(RuntimeError, "stop at jax init"):
-        rollout.main(
-            [
-                "rollout_engine=vanilla",
-                "cluster_config.registry_module=my_task.registry",
-            ],
-            context=context,
-        )
+        rollout.main(argv, context=context)
 
     mock_import.assert_called_once_with("my_task.registry")
     mock_restore.assert_called_once()
-    self.assertEqual(mock_restore.call_args.kwargs["params"].sampler, "vanilla")
+    # The same key the launcher derives the k8s cache URI from.
+    self.assertEqual(
+        mock_restore.call_args.kwargs["params"],
+        resolve_config.rollout_cache_params(resolve_config.initialize(argv)),
+    )
     self.assertEqual(events, ["restore:vanilla", "jax_init"])
 
   def test_main_exports_otel_metrics_as_the_rollout(self):

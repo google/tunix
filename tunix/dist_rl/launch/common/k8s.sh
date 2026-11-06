@@ -101,10 +101,6 @@ is_jax_cache_disabled() {
   is_true "${K8S_JAX_CACHE_DISABLE:-false}"
 }
 
-if ! is_jax_cache_disabled && [[ -z "${K8S_JAX_CACHE_ROLLOUT_GCS_DIR}" ]]; then
-  K8S_JAX_CACHE_ROLLOUT_GCS_DIR=$("$PYTHON_BIN" -m tunix.dist_rl.common.gcs_cache resolve-uri 2>/dev/null || true)
-fi
-
 apply_manifest() {
   if is_true "${DRY_RUN}"; then
     echo "---"
@@ -256,7 +252,7 @@ start_rollout_instance() {
     echo "Rollout Pathways images: server=${K8S_PATHWAYS_SERVER_IMAGE} proxy=${K8S_PATHWAYS_PROXY_IMAGE}" >&2
   fi
 
-  local env_prefix="SKIP_JAX_PRECOMPILE=${K8S_ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${WEIGHT_SYNC_VERIFY_WEIGHTS} ROLLOUT_TPU_SLICE=$(printf '%q' "${K8S_ROLLOUT_TPU_SLICE}")"
+  local env_prefix="SKIP_JAX_PRECOMPILE=$(printf '%q' "${K8S_ROLLOUT_SKIP_JAX_PRECOMPILE}") VERIFY_WEIGHTS=$(printf '%q' "${WEIGHT_SYNC_VERIFY_WEIGHTS}")"
   if (( K8S_ROLLOUT_REPLICAS > 1 )); then
     # The node appends the index to `cluster_config.k8s.rollout_id`
     # (`node_utils.worker_id`), so it registers as `target_id`.
@@ -279,26 +275,32 @@ start_rollout_instance() {
   fi
 
   if is_jax_cache_disabled; then
-    env_prefix+=" DISABLE_JAX_CACHE=1"
+    env_prefix+=" DISABLE_JAX_CACHE=1 VLLM_DISABLE_COMPILE_CACHE=1"
   else
+    env_prefix+=" LOCAL_JAX_CACHE_DIR=$(printf '%q' "${K8S_JAX_CACHE_LOCAL_DIR}")"
+    # `resolve_config` derives the URI from `cluster_config.k8s.jax_cache` and
+    # the rollout config; it is empty without a GCS cache.
     if [[ -n "${K8S_JAX_CACHE_ROLLOUT_GCS_DIR}" ]]; then
       env_prefix+=" ROLLOUT_JAX_CACHE_GCS_DIR=$(printf '%q' "${K8S_JAX_CACHE_ROLLOUT_GCS_DIR}")"
-    fi
-    if [[ -n "${K8S_JAX_CACHE_GCS_DIR}" ]]; then
-      env_prefix+=" JAX_CACHE_GCS_DIR=$(printf '%q' "${K8S_JAX_CACHE_GCS_DIR}")"
-    fi
-    if [[ -n "${K8S_JAX_CACHE_BUCKET}" ]]; then
-      env_prefix+=" JAX_CACHE_BUCKET=$(printf '%q' "${K8S_JAX_CACHE_BUCKET}")"
     fi
     if [[ -n "${K8S_JAX_CACHE_SAVE}" ]]; then
       env_prefix+=" SAVE_JAX_CACHE=$(printf '%q' "${K8S_JAX_CACHE_SAVE}")"
     fi
   fi
 
-  local ray_head_pre_init_cmd="export JAX_COMPILATION_CACHE_DIR=\"${K8S_JAX_CACHE_LOCAL_DIR}\" VLLM_XLA_CACHE_PATH=\"${K8S_JAX_CACHE_LOCAL_DIR}\" && mkdir -p \"${K8S_JAX_CACHE_LOCAL_DIR}\""
-  local ray_worker_pre_init_cmd="${ray_head_pre_init_cmd}"
-  if ! is_jax_cache_disabled && [[ -n "${K8S_JAX_CACHE_ROLLOUT_GCS_DIR}" ]]; then
-    ray_worker_pre_init_cmd+=" && (python3 -m tunix.dist_rl.common.gcs_cache download \"${K8S_JAX_CACHE_LOCAL_DIR}\" \"${K8S_JAX_CACHE_ROLLOUT_GCS_DIR}\" || true)"
+  local ray_head_pre_init_cmd=""
+  local ray_worker_pre_init_cmd=""
+  if is_jax_cache_disabled; then
+    ray_head_pre_init_cmd="export VLLM_DISABLE_COMPILE_CACHE=1"
+    ray_worker_pre_init_cmd="${ray_head_pre_init_cmd}"
+  else
+    local local_dir
+    local_dir=$(printf '%q' "${K8S_JAX_CACHE_LOCAL_DIR}")
+    ray_head_pre_init_cmd="export JAX_COMPILATION_CACHE_DIR=${local_dir} VLLM_XLA_CACHE_PATH=${local_dir} && mkdir -p ${local_dir}"
+    ray_worker_pre_init_cmd="${ray_head_pre_init_cmd}"
+    if [[ -n "${K8S_JAX_CACHE_ROLLOUT_GCS_DIR}" ]]; then
+      ray_worker_pre_init_cmd+=" && (python3 -m tunix.dist_rl.common.gcs_cache download ${local_dir} $(printf '%q' "${K8S_JAX_CACHE_ROLLOUT_GCS_DIR}") || true)"
+    fi
   fi
 
   local startup_cmd="${OTEL_ENV_PREFIX}${env_prefix} python -m tunix.dist_rl.distributed.runtime.main --discovery_addrs=${K8S_ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} --process_executor=tunix.dist_rl.distributed.runtime.executor.K8sExecutor --process_main=${ROLLOUT_MAIN} ${CONTAINER_ARGS_STR}"
@@ -395,6 +397,31 @@ case "${COMMAND}" in
     fi
     ;;
 esac
+
+# The rollout pods take their JAX compilation cache settings only from
+# `cluster_config.k8s.jax_cache`: unlike `local.sh`'s nodes, they don't inherit
+# the caller's environment, which would silently drop these variables.
+if [[ "${COMMAND}" == "start" || "${COMMAND}" == "rollout" ]]; then
+  cache_env_set=()
+  for cache_var in DISABLE_JAX_CACHE JAX_CACHE_BUCKET JAX_CACHE_DIR \
+    JAX_CACHE_GCS_DIR JAX_CACHE_SYNC_TIMEOUT_S LOCAL_JAX_CACHE_DIR \
+    ROLLOUT_JAX_CACHE_GCS_DIR SAVE_JAX_CACHE VLLM_DISABLE_COMPILE_CACHE \
+    VLLM_JAX_CACHE_GCS_DIR VLLM_LOCAL_JAX_CACHE_DIR VLLM_SAVE_JAX_CACHE; do
+    if [[ -n "${!cache_var:-}" ]]; then
+      cache_env_set+=("${cache_var}")
+    fi
+  done
+  if (( ${#cache_env_set[@]} > 0 )); then
+    echo "Error: ${cache_env_set[*]} set in the environment, but the k8s" \
+      "rollout pods take their JAX cache settings from" \
+      "cluster_config.k8s.jax_cache (see base_dist_config.yaml)." >&2
+    exit 1
+  fi
+  if [[ -n "${BUCKET:-}" ]]; then
+    echo "Warning: the k8s rollout pods don't read BUCKET; set" \
+      "cluster_config.k8s.jax_cache.bucket for a GCS compilation cache." >&2
+  fi
+fi
 
 case "${COMMAND}" in
   start)
