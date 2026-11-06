@@ -889,6 +889,73 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     """Verifies _is_local_filesystem returns True only for local POSIX paths."""
     self.assertEqual(file_store._is_local_filesystem(path), expected)
 
+  def test_write_text_local_path_writes_atomically_via_temporary_file_and_replace(
+      self,
+  ) -> None:
+    """Verifies _write_text writes to a dot-prefixed temporary file and renames."""
+    dest_path = self.tmp_dir / "target.json"
+    tmp_path = self.tmp_dir / ".target.json.tmp"
+    path_cls = type(self.tmp_dir)
+
+    with (
+        mock.patch.object(
+            path_cls,
+            "write_text",
+            autospec=True,
+            side_effect=path_cls.write_text,
+        ) as mock_write,
+        mock.patch.object(
+            path_cls, "replace", autospec=True, side_effect=path_cls.replace
+        ) as mock_replace,
+    ):
+      file_store._write_text(dest_path, '{"hello": "world"}')
+
+    self.assertEqual(dest_path.read_text(), '{"hello": "world"}')
+    self.assertFalse(tmp_path.exists())
+    mock_write.assert_called_once_with(tmp_path, '{"hello": "world"}')
+    mock_replace.assert_called_once_with(tmp_path, dest_path)
+
+  def test_write_text_object_store_path_writes_directly_without_replace(
+      self,
+  ) -> None:
+    """Verifies _write_text writes directly to cloud object stores without rename."""
+    gcs_path = epath.Path("gs://bucket/target.json")
+    path_cls = type(gcs_path)
+
+    with (
+        mock.patch.object(path_cls, "write_text", autospec=True) as mock_write,
+        mock.patch.object(path_cls, "replace", autospec=True) as mock_replace,
+    ):
+      file_store._write_text(gcs_path, '{"cloud": "atomic"}')
+
+    mock_write.assert_called_once_with(gcs_path, '{"cloud": "atomic"}')
+    mock_replace.assert_not_called()
+
+  def test_async_file_writer_writes_all_files_atomically_on_local_filesystem(
+      self,
+  ) -> None:
+    """Verifies metadata, step, and metrics files are written atomically via replace."""
+    traj_id = trajectory_testing.TRAJECTORY_ID_1
+    meta_path = self.file_s.get_trajectory_metadata_path(traj_id)
+    step_path = self.file_s.get_step_path(
+        traj_id, trajectory_testing.STEP_1_1.step_id
+    )
+    metrics_path = self.file_s.get_trajectory_metrics_path(traj_id)
+    path_cls = type(self.tmp_dir)
+
+    with mock.patch.object(
+        path_cls, "replace", autospec=True, side_effect=path_cls.replace
+    ) as mock_replace:
+      self.file_s.add_step(
+          trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+      )
+      self._write_metrics(traj_id, {"loss": 0.5})
+
+    replaced_destinations = [c.args[1] for c in mock_replace.call_args_list]
+    self.assertIn(meta_path, replaced_destinations)
+    self.assertIn(step_path, replaced_destinations)
+    self.assertIn(metrics_path, replaced_destinations)
+
   def test_add_step_on_gcs_path_skips_mkdir_and_writes_files(self) -> None:
     """Verifies add_step on a gs:// path skips mkdir and writes files."""
     gcs_root = epath.Path("gs://test-bucket/trajectories")

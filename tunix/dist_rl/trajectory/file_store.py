@@ -277,6 +277,9 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
         (`file://`) filesystems, tracked by cached metadata and metrics state.
       - Write Deduplication: `metadata.json` and `metrics.json` are written only
         when their content changes.
+      - Atomic Writes: Local files are staged via a hidden temporary file and
+        swapped atomically with `replace()`. Cloud object stores write directly
+        since object uploads are atomic on stream close.
 
     Args:
       task: Container holding destination paths and write payload.
@@ -324,7 +327,7 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
         )
       merged = _merge_metrics(existing, task.metrics)
       if merged != existing:
-        task.metrics_path.write_text(merged.model_dump_json())
+        _write_text(task.metrics_path, merged.model_dump_json())
       self._metrics_by_trajectory_id[traj_id] = merged
       self._metrics_by_trajectory_id.move_to_end(traj_id)
       if len(self._metrics_by_trajectory_id) > _MAX_CACHED_METRICS:
