@@ -413,6 +413,44 @@ class ORPOTrainerTest(parameterized.TestCase):
         out.aux_metrics["sft_loss"].compute(), expected_sft_loss, rtol=1e-5
     )
 
+  def test_prompt_loss_without_full_mask_raises(self):
+    """Prompt loss without a full_mask fails with a clear error."""
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    input_ids = jnp.array([[1, 2, 3, 4], [0, 1, 2, 3]] * 2)
+    completion_mask = jnp.ones((4, 2), dtype=jnp.int32)
+    full_mask = (input_ids != 0).astype(jnp.int32)
+    positions = orpo_lib.common.build_positions_from_mask(full_mask)
+    attention_mask = orpo_lib.common.make_causal_attn_mask(full_mask)
+
+    with self.assertRaisesRegex(ValueError, "full_mask must be provided"):
+      orpo_lib.compute_logps(
+          model,
+          input_ids,
+          positions,
+          attention_mask,
+          logits_to_keep=2,
+          completion_mask=completion_mask,
+          enable_prompt_loss_orpo=True,
+          full_mask=None,
+      )
+
+    train_example = orpo_lib.TrainExample(
+        input_ids=input_ids,
+        positions=positions,
+        attention_mask=attention_mask,
+        ref_chosen_logps=None,
+        ref_rejected_logps=None,
+        completion_mask=completion_mask,
+        logits_to_keep=2,
+    )
+    with self.assertRaisesRegex(ValueError, "full_mask must be provided"):
+      orpo_lib.dpo_loss_fn(
+          model,
+          train_example,
+          algorithm="orpo",
+          enable_prompt_loss_orpo=True,
+      )
+
   def test_orpo_loss_fn_with_prompt_loss(self):
     """Test ORPO loss function directly with enable_prompt_loss_orpo=True."""
     np.random.seed(0)
