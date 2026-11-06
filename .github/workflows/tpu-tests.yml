@@ -54,13 +54,15 @@ env:
 jobs:
   # ---------------------------------------------------------------------------
   # Job: run_core
-  # Purpose: Multi-device TPU unit tests.
+  # Purpose: Multi-device TPU unit tests and non-vLLM/non-dist-RL integration
+  #          smoke tests.
   # Hardware: Live TPU v6e-8 accelerator (1 slice).
   # Image:    JAX stable stack candidate.
   # Secrets:  None (uses public Hugging Face Hub checkpoints).
   # Scope:    Generation, split-mesh RL cluster, and multi-device SFT unit tests
-  #           (plus catch-all). Full SFT, distillation, and CPU/mock suites run in
-  #           cpu-tests.yml.
+  #           (plus catch-all), followed by the vanilla-rollout GRPO demo and
+  #           SFT 2x2 PEFT integration smoke test. Full SFT, distillation, and
+  #           CPU/mock suites run in cpu-tests.yml.
   # ---------------------------------------------------------------------------
   run_core:
     runs-on: [linux-x86-ct6e-180-8tpu]
@@ -96,6 +98,14 @@ jobs:
           restore-keys: |
             uv-tpu-core-v5-${{ runner.os }}-
 
+      - name: Cache TFDS datasets
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: /root/.cache/tensorflow_datasets
+          key: tfds-core-v5-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements/**/*.txt', 'requirements*.txt') }}
+          restore-keys: |
+            tfds-core-v5-${{ runner.os }}-
+
       - name: Cache JAX compilation
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
@@ -109,6 +119,9 @@ jobs:
         run: |
           uv pip install --python "$(which python3)" "scikit-build-core>=0.10" "nanobind>=2.5.0" cmake ninja
           uv pip install --python "$(which python3)" --no-build-isolation -e ".[test]"
+          # candidate/tpu pre-installs a stale/incomplete tensorflow-datasets;
+          # upgrade and reinstall from PyPI (plus undeclared `six`) for gsm8k/mtnt.
+          uv pip install --python "$(which python3)" --upgrade --reinstall-package tensorflow-datasets tensorflow-datasets six
 
       - name: Verify TPU availability
         run: |
@@ -174,6 +187,24 @@ jobs:
             exit "${code:-0}"
           fi
 
+      - name: GRPO Integration Test (Llama3 / Qwen2 multi-device RL training demo)
+        run: |
+          export JAX_PLATFORMS=tpu,cpu
+          # Run GRPO demo script with minimal configuration
+          python3 scripts/grpo_demo_llama3_qwen2.py \
+            --root-dir=/tmp/grpo_test \
+            --num-batches=2 \
+            --num-test-batches=1 \
+            --global-batch-size=2 \
+            --train-mini-batch-size=2 \
+            --train-micro-batch-size=2 \
+            --rollout-engine=vanilla
+
+      - name: Run tunix SFT integration tests (PEFT with 2x2 mesh on TPU)
+        run: |
+          export JAX_PLATFORMS=tpu,cpu
+          ./tests/sft/sft_tpu_smoke_test.sh
+
       - name: Prune uv cache
         if: ${{ steps.cache-uv.outputs.cache-hit != 'true' }}
         run: |
@@ -183,23 +214,20 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Job: run_dev
-  # Purpose: TPU training/PEFT integration, live vLLM sampler tests, and the
-  #          distributed RL smoke test.
+  # Purpose: Live vLLM sampler tests and distributed RL smoke tests.
   # Hardware: Live TPU v6e-8 accelerator (1 slice).
   # Image:    vLLM TPU nightly.
   # Secrets:  None (uses public Hugging Face Hub and GCS checkpoints).
-  # Scope:    End-to-end GRPO RL demo training, vLLM Sampler generation / LoRA
-  #           mapping / checkpoint loading, SFT PEFT 2x2 mesh integration, then
-  #           the Qwen3-0.6B GSM8K distributed RL smoke test with Raiden sync.
+  # Scope:    vLLM Sampler generation / LoRA mapping / checkpoint loading, then
+  #           the Qwen3-0.6B GSM8K distributed RL smoke test (Tunix and MaxText
+  #           backends) with Raiden sync.
   #
   # ORDERING CONSTRAINTS (within run_dev):
-  #   1. `GRPO Integration Test` & `Run vllm tests` MUST run BEFORE `Run tunix SFT integration tests`.
-  #      They require the container's pinned `numpy==2.3.5` (for Numba / tpu-inference).
-  #   2. `Run tunix SFT integration tests` MUST run AFTER `Run vllm tests` and BEFORE
-  #      the Distributed RL smoke stage. It executes `uv pip install tensorflow` (needed
-  #      for TFDS dataset loading), which upgrades NumPy past 2.3.5 and would break
-  #      vLLM/Numba if run earlier.
-  #   3. Distributed RL Smoke Test (`run_dist_smoke` steps) MUST run as the last test stage in this job.
+  #   1. `Run vllm tests` MUST run BEFORE the Distributed RL smoke stage. It
+  #      requires the container's pinned `numpy==2.3.5` (for Numba /
+  #      tpu-inference), whereas the Distributed RL setup executes `uv pip
+  #      install tensorflow` and upgrades NumPy past 2.3.5.
+  #   2. Distributed RL Smoke Test (`run_dist_smoke` steps) MUST run as the last test stage in this job.
   #      It installs the native Raiden weight-sync wheel (`tpu_sync`) and spawns
   #      multi-process trainer/rollout servers across all 8 TPU chips; running it last
   #      prevents background process or chip-lock leakage into earlier tests.
@@ -268,23 +296,10 @@ jobs:
           # tpu-inference/Numba needs NumPy 2.3 or less.
           uv pip install --python "$(which python3)" --force-reinstall numpy==2.3.5
 
-      - name: GRPO Integration Test (Llama3 / Qwen2 multi-device RL training demo)
-        run: |
-          # Run GRPO demo script with minimal configuration
-          python3 scripts/grpo_demo_llama3_qwen2.py \
-            --root-dir=/tmp/grpo_test \
-            --num-batches=2 \
-            --num-test-batches=1 \
-            --global-batch-size=2 \
-            --train-mini-batch-size=2 \
-            --train-micro-batch-size=2 \
-            --rollout-engine=vanilla
-
       # --- vLLM stage (formerly the standalone `run_vllm` job) ----------------
-      # [ORDERING CONSTRAINT]: Must run BEFORE `Run tunix SFT integration tests`.
-      # SFT installs tensorflow, which pulls NumPy past the ==2.3.5 pin that
-      # tpu-inference/Numba requires. Keeping vLLM above SFT preserves the freshly
-      # pinned environment it had as a standalone job.
+      # [ORDERING CONSTRAINT]: Must run BEFORE the Distributed RL smoke stage.
+      # `Setup Tunix and dependencies` below installs tensorflow, which pulls
+      # NumPy past the ==2.3.5 pin that tpu-inference/Numba requires.
       - name: Run vllm tests
         run: |
           unset JAX_PLATFORMS
@@ -292,17 +307,6 @@ jobs:
           python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerTest -k "batch_mode and not data_parallel or sampling_kwargs" -v --tb=short
           python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerTest -k "server_mode or concurrency" -v --tb=short
           python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerTest -k "data_parallel" -v --tb=short
-
-      # [ORDERING CONSTRAINT]: Must run AFTER `Run vllm tests` (installing tensorflow
-      # upgrades NumPy past ==2.3.5) and BEFORE the Distributed RL smoke stage
-      # (which reuses this tensorflow install for TFDS dataset loading).
-      - name: Run tunix SFT integration tests (PEFT with 2x2 mesh on TPU)
-        run: |
-          # Loading tfds requires tensorflow.
-          uv pip install --python "$(which python3)" tensorflow
-
-          export JAX_PLATFORMS=tpu,cpu
-          ./tests/sft/sft_tpu_smoke_test.sh
 
       # --- Distributed RL smoke stage (formerly the standalone `run_dist_smoke`
       # job) --------------------------------------------------------------------
@@ -319,8 +323,8 @@ jobs:
       # setup step at the top of this job.
       - name: Setup Tunix and dependencies
         run: |
-          # GSM8K dataset loading via tfds. `tensorflow` itself is already
-          # installed by the SFT stage above; this adds the rest.
+          # GSM8K dataset loading via tfds. Installing `tensorflow` upgrades
+          # NumPy past the ==2.3.5 pin above, so this stage runs after vLLM.
           uv pip install --python "$(which python3)" tensorflow tensorflow_datasets array_record
 
       - name: Install Raiden weight sync library
