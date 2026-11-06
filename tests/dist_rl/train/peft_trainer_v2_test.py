@@ -668,6 +668,32 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertEqual(train_invoke, {'foo': 2, 'bar': 4})
     self.assertEqual(eval_invoke, {'foo': 1, 'bar': 16})
 
+  def test_eval_hook_receives_mean_loss_for_scalar_loss(self):
+    def custom_loss_fn(
+        model: nnx.Module,
+        input_tokens: jax.Array,
+        input_mask: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+    ) -> jax.Array:
+      del model, input_mask, positions, attention_mask
+      return jnp.mean(input_tokens.astype(jnp.float32))
+
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=1, max_steps=1)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(custom_loss_fn)
+    training_hooks = mock.create_autospec(hooks.TrainingHooks)
+    trainer.with_training_hooks(training_hooks)
+
+    trainer.train(self.train_ds, self.eval_ds)
+
+    eval_loss = trainer.metrics_logger.get_metric('', 'loss', 'eval')
+    call = training_hooks.on_eval_step_end.call_args_list[-1]
+    np.testing.assert_allclose(call.args[1], eval_loss, rtol=1e-6)
+
   @mock.patch.object(checkpoint_manager, 'CheckpointManager')
   def test_explicit_save_checkpoint(self, mock_checkpoint_manager_init):
     mock_cm = mock.MagicMock()
