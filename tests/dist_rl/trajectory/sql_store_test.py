@@ -4,11 +4,12 @@ from concurrent import futures
 import datetime
 import os
 import threading
-from typing import Any
+from typing import Any, ClassVar
 from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
+import numpy as np
 import sqlalchemy as sa
 from tunix.dist_rl.trajectory import async_writer
 from tunix.dist_rl.trajectory import db_engine
@@ -758,6 +759,35 @@ class SqlStoreWriterTest(parameterized.TestCase):
           run_id=run_id, trajectory_id=traj_id, metrics=metrics
       )
 
+  def test_enqueue_write_with_nul_bytes_strips_nul_and_preserves_backslashes(
+      self,
+  ) -> None:
+    writer = self._create_writer()
+    metadata = trajectory_lib.TrajectoryMetadata(
+        trajectory_id="traj_nul",
+        agent=trajectory_testing.METADATA_1.agent,
+        notes="meta\x00clean and " + r"literal\u0000text",
+    )
+    step = trajectory_lib.Step(
+        step_id=1,
+        source=trajectory_lib.Source.AGENT,
+        message="stdout\x00clean and " + r"literal\u0000text",
+    )
+
+    writer.enqueue_write(run_id="run_nul", metadata=metadata, step=step)
+    writer.flush()
+
+    (saved_traj,) = self._fetch_trajectories()
+    self.assertEqual(
+        saved_traj["trajectory_metadata"]["notes"],
+        "metaclean and " + r"literal\u0000text",
+    )
+    (saved_step,) = self._fetch_steps()
+    self.assertEqual(
+        saved_step["payload"]["message"],
+        "stdoutclean and " + r"literal\u0000text",
+    )
+
 
 class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
   """Unit tests for SqlTrajectoryStore initialization and lifecycle behavior."""
@@ -1166,6 +1196,32 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     trajs = second_store.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
 
     self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+
+  def test_add_step_with_copy_step_true_isolates_step_mutation(self) -> None:
+    copy_store = sql_store.SqlTrajectoryStore(
+        run_id="copy_step_run",
+        db_url=self.db_url,
+        copy_step=True,
+    )
+    self.addCleanup(copy_store.close)
+    step = trajectory_lib.Step(
+        step_id=1,
+        source=trajectory_lib.Source.AGENT,
+        message="Initial message",
+        extra={"notes": "initial note"},
+    )
+
+    copy_store.add_step(step, trajectory_testing.METADATA_1)
+    step.message = "Mutated message"
+    assert step.extra is not None
+    step.extra["notes"] = "MUTATED_AFTER_ENQUEUE"
+    copy_store.flush()
+
+    (recovered,) = copy_store.get_trajectories(
+        [trajectory_testing.TRAJECTORY_ID_1]
+    )
+    self.assertEqual(recovered.steps[0].message, "Initial message")
+    self.assertEqual(recovered.steps[0].extra, {"notes": "initial note"})
 
   def test_get_trajectories_metadata_rehydrates_tunix_metadata_and_orders_by_creation(
       self,
@@ -1619,6 +1675,179 @@ class SqlTrajectoryStoreConfigTest(store_testing.TrajectoryStoreConfigTestCase):
         [m.trajectory_id for m in rebuilt.get_trajectories_metadata()],
         [trajectory_testing.METADATA_1.trajectory_id],
     )
+
+  def test_copy_step_omitted_from_to_config(self) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "store.db")
+    db_url = f"sqlite:///{db_path}"
+
+    default_store = sql_store.SqlTrajectoryStore(
+        run_id="run_default",
+        db_url=db_url,
+    )
+    self.addCleanup(default_store.close)
+    self.assertFalse(default_store.copy_step)
+    self.assertNotIn("copy_step", default_store.to_config())
+
+    copy_store = sql_store.SqlTrajectoryStore(
+        run_id="run_copy",
+        db_url=db_url,
+        copy_step=True,
+    )
+    self.addCleanup(copy_store.close)
+    self.assertTrue(copy_store.copy_step)
+    self.assertNotIn("copy_step", copy_store.to_config())
+
+  @parameterized.named_parameters(
+      ("omitted", {}, False),
+      ("explicit_false", {"copy_step": False}, False),
+      ("explicit_true", {"copy_step": True}, True),
+  )
+  def test_from_config_parses_valid_copy_step(
+      self, extra_config: dict[str, Any], expected_copy_step: bool
+  ) -> None:
+    config = {**self._create_config(), **extra_config}
+    built_store = self._build_store(config)
+    self.assertIsInstance(built_store, sql_store.SqlTrajectoryStore)
+    assert isinstance(built_store, sql_store.SqlTrajectoryStore)
+    self.assertEqual(built_store.copy_step, expected_copy_step)
+
+  def test_add_step_zero_copy_handover_by_default(self) -> None:
+    class _UncopyableStep(trajectory_lib.Step):
+      """Step subclass that fails if deep copied."""
+
+      EXTENSIONS_KEY: ClassVar[str] = "uncopyable_test"
+
+      def __deepcopy__(
+          self, memo: dict[int, Any] | None = None
+      ) -> "_UncopyableStep":
+        raise AssertionError("step should not be deep copied")
+
+    db_path = os.path.join(self.create_tempdir().full_path, "store.db")
+    db_url = f"sqlite:///{db_path}"
+    default_store = sql_store.SqlTrajectoryStore(
+        run_id="run_zero_copy",
+        db_url=db_url,
+    )
+    self.addCleanup(default_store.close)
+    step = _UncopyableStep(
+        step_id=1,
+        source=trajectory_lib.Source.AGENT,
+        message="zero copy turn",
+    )
+    meta = trajectory_testing.METADATA_1.model_copy(deep=True)
+
+    default_store.add_step(step, meta)
+    meta.notes = "mutated_after_add_step"
+    default_store.flush()
+
+    (recovered,) = default_store.get_trajectories([meta.trajectory_id])
+    self.assertEqual(recovered.notes, trajectory_testing.METADATA_1.notes)
+    self.assertEqual(recovered.steps[0].message, "zero copy turn")
+
+    copy_store = sql_store.SqlTrajectoryStore(
+        run_id="run_defensive_copy",
+        db_url=db_url,
+        copy_step=True,
+    )
+    self.addCleanup(copy_store.close)
+    with self.assertRaisesRegex(
+        AssertionError, "step should not be deep copied"
+    ):
+      copy_store.add_step(step, trajectory_testing.METADATA_1)
+
+
+class SqlTrajectoryStoreRoutedExpertsTest(parameterized.TestCase):
+  """Tests binary `routed_experts_payload` persistence in SqlTrajectoryStore."""
+
+  def setUp(self) -> None:
+    super().setUp()
+    db_path = os.path.join(self.create_tempdir().full_path, "moe_store.db")
+    self._store = sql_store.SqlTrajectoryStore(
+        run_id="moe_sql_run",
+        db_url=f"sqlite:///{db_path}",
+    )
+    self.addCleanup(self._store.close)
+
+  def test_get_trajectories_when_routed_experts_written_round_trips_column(
+      self,
+  ) -> None:
+    routed_experts = np.arange(12, dtype=np.int16).reshape(2, 3, 2)
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="moe_sql_1",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+    )
+    step = trajectory_lib.TunixAgentStep(
+        step_id=0,
+        source=trajectory_lib.Source.AGENT,
+        message="moe turn",
+        prefill_routed_experts=routed_experts,
+        prefill_start=0,
+        prefill_num_context=1,
+    )
+    self._store.add_step(step, meta)
+    self._store.flush()
+
+    with self._store.engine.connect() as conn:
+      payload, raw_blob = conn.execute(
+          sa.select(
+              schema.STEPS_TABLE.c.payload,
+              schema.STEPS_TABLE.c.routed_experts_payload,
+          )
+      ).one()
+    self.assertNotIn(
+        "prefill_routed_experts", payload["extra"]["_tunix_extensions"]
+    )
+    self.assertIsInstance(raw_blob, bytes)
+
+    (full_traj,) = self._store.get_trajectories(["moe_sql_1"])
+    (full_step,) = full_traj.steps
+    assert isinstance(full_step, trajectory_lib.TunixAgentStep)
+    assert full_step.prefill_routed_experts is not None
+    self.assertEqual(
+        full_step.prefill_routed_experts.dtype, routed_experts.dtype
+    )
+    np.testing.assert_array_equal(
+        full_step.prefill_routed_experts, routed_experts
+    )
+
+  def test_add_step_when_overwritten_without_routed_experts_clears_column(
+      self,
+  ) -> None:
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="moe_sql_overwrite",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+    )
+    self._store.add_step(
+        trajectory_lib.TunixAgentStep(
+            step_id=0,
+            source=trajectory_lib.Source.AGENT,
+            message="initial",
+            prefill_routed_experts=np.ones((2, 2, 2), dtype=np.int16),
+            prefill_start=0,
+            prefill_num_context=1,
+        ),
+        meta,
+    )
+    self._store.add_step(
+        trajectory_lib.TunixAgentStep(
+            step_id=0,
+            source=trajectory_lib.Source.AGENT,
+            message="overwritten",
+        ),
+        meta,
+    )
+    self._store.flush()
+
+    with self._store.engine.connect() as conn:
+      raw_blob = conn.execute(
+          sa.select(schema.STEPS_TABLE.c.routed_experts_payload)
+      ).scalar_one()
+    self.assertIsNone(raw_blob)
+    (recovered,) = self._store.get_trajectories(["moe_sql_overwrite"])
+    (recovered_step,) = recovered.steps
+    assert isinstance(recovered_step, trajectory_lib.TunixAgentStep)
+    self.assertEqual(recovered_step.message, "overwritten")
+    self.assertIsNone(recovered_step.prefill_routed_experts)
 
 
 if __name__ == "__main__":

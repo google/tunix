@@ -484,13 +484,12 @@ class TrajectoryWriterTestCase(
     )
     self.assertEqual(traj_1, expected_traj_1)
 
-  def test_add_step_snapshots_step_and_metadata(self) -> None:
-    """Tests that mutating a step or metadata after logging does not alter the store."""
+  def test_add_step_snapshots_metadata(self) -> None:
+    """Tests that mutating metadata after logging does not alter the store."""
     meta = trajectory_testing.METADATA_1.model_copy(deep=True)
     step = trajectory_testing.STEP_1_1.model_copy(deep=True)
     self.writer.add_step(step, meta)
 
-    step.message = "mutated after logging"
     meta.notes = "mutated after logging"
     self.writer.flush()
 

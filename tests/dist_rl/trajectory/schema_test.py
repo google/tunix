@@ -16,6 +16,7 @@ class _DialectSpec:
   url: str
   dialect: sa.Dialect
   expected_json: str
+  expected_binary: str
   expected_timestamp: str
 
 
@@ -26,6 +27,7 @@ _DIALECT_SPECS = (
             url="postgresql://",
             dialect=postgresql.dialect(),
             expected_json="JSONB",
+            expected_binary="BYTEA",
             expected_timestamp="TIMESTAMP WITH TIME ZONE",
         ),
     ),
@@ -35,6 +37,7 @@ _DIALECT_SPECS = (
             url="sqlite://",
             dialect=sqlite.dialect(),
             expected_json="JSON",
+            expected_binary="BLOB",
             expected_timestamp="DATETIME",
         ),
     ),
@@ -107,6 +110,7 @@ class SchemaCompilationTest(parameterized.TestCase):
     self.assertIn("trajectory_id VARCHAR(128) NOT NULL", steps_ddl)
     self.assertIn("step_id INTEGER NOT NULL", steps_ddl)
     self.assertIn(spec.expected_json, steps_ddl)
+    self.assertIn(f"routed_experts_payload {spec.expected_binary}", steps_ddl)
     self.assertIn(spec.expected_timestamp, steps_ddl)
     self.assertIn(
         "CONSTRAINT pk_steps PRIMARY KEY (run_id, trajectory_id, step_id)",

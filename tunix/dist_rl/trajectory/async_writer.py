@@ -14,8 +14,9 @@ from absl import logging
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 
 # Default maximum number of pending WriteTasks buffered in AsyncWriter's queue.
-# Each WriteTask holds a deep copy of TrajectoryMetadata and Step (~24 KB/task
-# on average across 600k production steps, or ~11.5-36 KB across 8k-32k token
+# Each WriteTask holds deep copies of TrajectoryMetadata and TrajectoryMetrics
+# plus a reference to Step by default (or a deep copy when `copy_step=True`),
+# retaining ~24 KB/task in memory until drained (~11.5-36 KB across 8k-32k token
 # context windows). Bounding the queue at 10,000 tasks (~240 MB, <= 0.5% of a
 # 70 GB container limit) prevents unbounded heap growth, pymalloc arena
 # fragmentation, and Gen-2 GC pauses during storage stalls while providing ~10x
@@ -88,8 +89,9 @@ class WriteTask:
 
   Encapsulates all necessary data transferred across the thread boundary from
   the frontend calling thread (e.g. rollout worker) to the background worker
-  thread. `metadata`, `step`, and `metrics` are private deep copies owned by
-  the task.
+  thread. `metadata` and `metrics` are always deep copied so caller mutations
+  cannot leak in. `step` is transferred with zero-copy ownership by default, and
+  deep copied when `copy_step` is True.
   """
 
   metadata: trajectory_lib.TrajectoryMetadata | None = None
@@ -97,16 +99,20 @@ class WriteTask:
   run_id: str | None = None
   trajectory_id: str = ""
   metrics: trajectory_lib.TrajectoryMetrics | None = None
+  copy_step: bool = False
+  routed_experts_payload: bytes | None = dataclasses.field(
+      default=None, init=False
+  )
 
   def __post_init__(self) -> None:
-    """Deep copies the payload so later caller mutations cannot leak in."""
+    """Deep copies metadata/metrics and optionally step to isolate mutations."""
     if self.metadata is not None:
       object.__setattr__(
           self, "metadata", trajectory_lib.deep_copy(self.metadata)
       )
       if not self.trajectory_id and self.metadata.trajectory_id:
         object.__setattr__(self, "trajectory_id", self.metadata.trajectory_id)
-    if self.step is not None:
+    if self.step is not None and self.copy_step:
       object.__setattr__(self, "step", trajectory_lib.deep_copy(self.step))
     if self.metrics is not None:
       if not isinstance(self.metrics, trajectory_lib.TrajectoryMetrics):
@@ -126,12 +132,21 @@ class WriteTask:
     """Projects `metadata` and `step` to base ATIF models in-place.
 
     Called by the background worker thread before processing the task. Mutates
-    the frozen instance in-place to avoid a second deep copy.
+    the frozen instance in-place to avoid a second deep copy. Replaces the task
+    references with projected models; the caller's input turn object is never
+    mutated.
     """
     if self.metadata is not None:
       object.__setattr__(self, "metadata", self.metadata.to_atif_metadata())
     if self.step is not None:
-      object.__setattr__(self, "step", self.step.to_atif_step())
+      atif_step, routed_experts_payload = (
+          self.step.to_atif_step_with_routed_experts()
+      )
+      object.__setattr__(self, "step", atif_step)
+      if routed_experts_payload is not None:
+        object.__setattr__(
+            self, "routed_experts_payload", routed_experts_payload
+        )
 
 
 _TaskT = TypeVar("_TaskT", bound=WriteTask)
@@ -350,6 +365,7 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
       thread_name: str | None = None,
       max_queue_size: int = DEFAULT_MAX_QUEUE_SIZE,
       batching: BatchConfig | None = DEFAULT_BATCH_CONFIG,
+      copy_step: bool = False,
   ):
     """Initializes AsyncWriter without starting the background worker.
 
@@ -361,6 +377,9 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
         (10,000).
       batching: Configuration governing batch item limits and maximum batch wait
         time. Defaults to `DEFAULT_BATCH_CONFIG`.
+      copy_step: If True, deep copies step objects before enqueuing to prevent
+        caller mutations from leaking. Defaults to False (zero-copy step
+        handover) to avoid synchronous GIL contention on rollout workers.
 
     Raises:
       ValueError: If `max_queue_size` is not positive.
@@ -371,6 +390,7 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
       )
     self._thread_name = thread_name or f"{type(self).__name__}Worker"
     self._max_queue_size = max_queue_size
+    self._copy_step = copy_step
     self._step_queue_limit = max(
         1, int(max_queue_size * _STEP_QUEUE_CAPACITY_RATIO)
     )
@@ -428,6 +448,11 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
   def batch_wait_s(self) -> float:
     """Returns the current adaptive batch wait duration in seconds."""
     return self._batch_wait_s
+
+  @property
+  def copy_step(self) -> bool:
+    """Returns True if step objects are deep copied on enqueue."""
+    return self._copy_step
 
   @property
   def is_closed(self) -> bool:

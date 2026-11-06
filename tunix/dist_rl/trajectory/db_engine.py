@@ -3,10 +3,26 @@
 from collections.abc import Callable
 import dataclasses
 import enum
+import json
+import re
 import sqlite3
 import threading
+from typing import Any, Final
 
 import sqlalchemy as sa
+
+_NUL_ESCAPE_RE: Final[re.Pattern[str]] = re.compile(r"(\\*)\\u0000")
+
+
+def _serialize_json(value: Any) -> str:
+  """Serializes JSON payloads and strips NUL escapes rejected by PostgreSQL JSONB."""
+  dumped = json.dumps(value)
+  if "\\u0000" not in dumped:
+    return dumped
+  return _NUL_ESCAPE_RE.sub(
+      lambda m: m.group(1) if len(m.group(1)) % 2 == 0 else m.group(0),
+      dumped,
+  )
 
 
 class Dialect(enum.StrEnum):
@@ -106,6 +122,7 @@ def create_trajectory_engine(config: EngineConfig) -> sa.Engine:
     return sa.create_engine(
         url,
         echo=config.echo,
+        json_serializer=_serialize_json,
         pool_pre_ping=True,
         pool_size=config.pool_size,
         max_overflow=config.max_overflow,
@@ -118,6 +135,7 @@ def create_trajectory_engine(config: EngineConfig) -> sa.Engine:
       engine = sa.create_engine(
           url,
           echo=config.echo,
+          json_serializer=_serialize_json,
           connect_args={"check_same_thread": False},
           poolclass=sa.pool.StaticPool,
       )
@@ -125,6 +143,7 @@ def create_trajectory_engine(config: EngineConfig) -> sa.Engine:
       engine = sa.create_engine(
           url,
           echo=config.echo,
+          json_serializer=_serialize_json,
           pool_pre_ping=True,
           pool_size=config.pool_size,
           max_overflow=config.max_overflow,

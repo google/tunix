@@ -4,13 +4,14 @@ from collections.abc import Callable
 import tempfile
 import threading
 import time
-from typing import Any, Final, TypeAlias, cast
+from typing import Any, ClassVar, Final, TypeAlias, cast
 from unittest import mock
 
 from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
+import numpy as np
 import pydantic
 from tunix.dist_rl.trajectory import file_store
 from tunix.dist_rl.trajectory import store
@@ -645,20 +646,24 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
   def test_snapshot_on_enqueue_isolates_step_mutation(self) -> None:
     """Verifies step mutation after enqueue does not alter saved file."""
+    file_s_copy = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir, run_id="copy_run", copy_step=True
+    )
+    self.addCleanup(file_s_copy.close)
     step = trajectory_lib.Step(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="Initial message",
         extra={"notes": "initial note"},
     )
-    self.file_s.add_step(step, trajectory_testing.METADATA_1)
+    file_s_copy.add_step(step, trajectory_testing.METADATA_1)
     # Mutate the caller's step object after enqueue.
     step_extra = step.extra
     self.assertIsNotNone(step_extra)
     step_extra["notes"] = "MUTATED_AFTER_ENQUEUE"
-    self.file_s.flush()
+    file_s_copy.flush()
 
-    step_path = self.file_s.get_step_path(
+    step_path = file_s_copy.get_step_path(
         trajectory_testing.TRAJECTORY_ID_1, step_id=1
     )
     saved_step = trajectory_lib.Step.model_validate_json(step_path.read_text())
@@ -1588,6 +1593,200 @@ class FileTrajectoryStoreConfigTest(
 
     with self.assertRaisesRegex(ValueError, "run_id"):
       file_s.to_config()
+
+  def test_copy_step_omitted_from_to_config(self) -> None:
+    default_store = file_store.FileTrajectoryStore(
+        root_dir=self.create_tempdir().full_path,
+        run_id="run_default",
+    )
+    self.addCleanup(default_store.close)
+    self.assertFalse(default_store.copy_step)
+    self.assertNotIn("copy_step", default_store.to_config())
+
+    copy_store = file_store.FileTrajectoryStore(
+        root_dir=self.create_tempdir().full_path,
+        run_id="run_copy",
+        copy_step=True,
+    )
+    self.addCleanup(copy_store.close)
+    self.assertTrue(copy_store.copy_step)
+    self.assertNotIn("copy_step", copy_store.to_config())
+
+  @parameterized.named_parameters(
+      ("omitted", {}, False),
+      ("explicit_false", {"copy_step": False}, False),
+      ("explicit_true", {"copy_step": True}, True),
+  )
+  def test_from_config_parses_valid_copy_step(
+      self, extra_config: dict[str, Any], expected_copy_step: bool
+  ) -> None:
+    config = {**self._create_config(), **extra_config}
+    built_store = self._build_store(config)
+    self.assertIsInstance(built_store, file_store.FileTrajectoryStore)
+    assert isinstance(built_store, file_store.FileTrajectoryStore)
+    self.assertEqual(built_store.copy_step, expected_copy_step)
+
+  def test_add_step_zero_copy_handover_by_default(self) -> None:
+    class _UncopyableStep(trajectory_lib.Step):
+      """Step subclass that fails if deep copied."""
+
+      EXTENSIONS_KEY: ClassVar[str] = "uncopyable_test"
+
+      def __deepcopy__(
+          self, memo: dict[int, Any] | None = None
+      ) -> "_UncopyableStep":
+        raise AssertionError("step should not be deep copied")
+
+    default_store = file_store.FileTrajectoryStore(
+        root_dir=self.create_tempdir().full_path,
+        run_id="run_zero_copy",
+    )
+    self.addCleanup(default_store.close)
+    step = _UncopyableStep(
+        step_id=1,
+        source=trajectory_lib.Source.AGENT,
+        message="zero copy turn",
+    )
+    meta = trajectory_testing.METADATA_1.model_copy(deep=True)
+
+    default_store.add_step(step, meta)
+    meta.notes = "mutated_after_add_step"
+    default_store.flush()
+
+    (recovered,) = default_store.get_trajectories([meta.trajectory_id])
+    self.assertEqual(recovered.notes, trajectory_testing.METADATA_1.notes)
+    self.assertEqual(recovered.steps[0].message, "zero copy turn")
+
+    copy_store = file_store.FileTrajectoryStore(
+        root_dir=self.create_tempdir().full_path,
+        run_id="run_defensive_copy",
+        copy_step=True,
+    )
+    self.addCleanup(copy_store.close)
+    with self.assertRaisesRegex(
+        AssertionError, "step should not be deep copied"
+    ):
+      copy_store.add_step(step, trajectory_testing.METADATA_1)
+
+
+class FileTrajectoryStoreRoutedExpertsTest(parameterized.TestCase):
+  """Tests binary MoE sidecar persistence in FileTrajectoryStore."""
+
+  def setUp(self) -> None:
+    super().setUp()
+    self._root_dir = epath.Path(
+        self.enter_context(tempfile.TemporaryDirectory())
+    )
+    self._store = file_store.FileTrajectoryStore(
+        root_dir=self._root_dir, run_id="moe_file_run"
+    )
+    self.addCleanup(self._store.close)
+
+  def test_get_trajectories_when_routed_experts_written_round_trips_sidecar(
+      self,
+  ) -> None:
+    routed_experts = np.arange(12, dtype=np.int16).reshape(2, 3, 2)
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="moe_traj_1",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+    )
+    step = trajectory_lib.TunixAgentStep(
+        step_id=0,
+        source=trajectory_lib.Source.AGENT,
+        message="moe turn",
+        prefill_routed_experts=routed_experts,
+        prefill_start=0,
+        prefill_num_context=1,
+    )
+    self._store.add_step(step, meta)
+    self._store.flush()
+
+    json_path = self._store.get_step_path("moe_traj_1", step_id=1)
+    bin_path = self._store.get_step_routed_experts_path("moe_traj_1", step_id=1)
+    self.assertTrue(bin_path.exists())
+    self.assertNotIn("prefill_routed_experts", json_path.read_text())
+
+    (full_traj,) = self._store.get_trajectories(["moe_traj_1"])
+    (full_step,) = full_traj.steps
+    assert isinstance(full_step, trajectory_lib.TunixAgentStep)
+    assert full_step.prefill_routed_experts is not None
+    self.assertEqual(
+        full_step.prefill_routed_experts.dtype, routed_experts.dtype
+    )
+    np.testing.assert_array_equal(
+        full_step.prefill_routed_experts, routed_experts
+    )
+
+  def test_add_step_when_overwritten_without_routed_experts_removes_sidecar(
+      self,
+  ) -> None:
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="moe_overwrite",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+    )
+    routed = np.ones((2, 2, 2), dtype=np.int16)
+    self._store.add_step(
+        trajectory_lib.TunixAgentStep(
+            step_id=0,
+            source=trajectory_lib.Source.AGENT,
+            message="initial",
+            prefill_routed_experts=routed,
+            prefill_start=0,
+            prefill_num_context=1,
+        ),
+        meta,
+    )
+    self._store.flush()
+    bin_path = self._store.get_step_routed_experts_path(
+        "moe_overwrite", step_id=1
+    )
+    stale_bytes = bin_path.read_bytes()
+
+    self._store.add_step(
+        trajectory_lib.TunixAgentStep(
+            step_id=0,
+            source=trajectory_lib.Source.AGENT,
+            message="overwritten",
+        ),
+        meta,
+    )
+    self._store.flush()
+
+    self.assertFalse(bin_path.exists())
+    # Even if an orphan sidecar remains on a remote object store, the missing
+    # JSON marker prevents rehydrating stale routed experts.
+    bin_path.write_bytes(stale_bytes)
+    (recovered,) = self._store.get_trajectories(["moe_overwrite"])
+    (recovered_step,) = recovered.steps
+    assert isinstance(recovered_step, trajectory_lib.TunixAgentStep)
+    self.assertEqual(recovered_step.message, "overwritten")
+    self.assertIsNone(recovered_step.prefill_routed_experts)
+
+  def test_get_trajectories_when_expected_sidecar_missing_raises_value_error(
+      self,
+  ) -> None:
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="moe_missing_bin",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+    )
+    self._store.add_step(
+        trajectory_lib.TunixAgentStep(
+            step_id=0,
+            source=trajectory_lib.Source.AGENT,
+            message="moe",
+            prefill_routed_experts=np.ones((1, 2, 2), dtype=np.int16),
+            prefill_start=0,
+            prefill_num_context=0,
+        ),
+        meta,
+    )
+    self._store.flush()
+    self._store.get_step_routed_experts_path(
+        "moe_missing_bin", step_id=1
+    ).unlink()
+
+    with self.assertRaisesRegex(ValueError, "Missing routed_experts_payload"):
+      self._store.get_trajectories(["moe_missing_bin"])
 
 
 if __name__ == "__main__":

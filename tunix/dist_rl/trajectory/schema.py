@@ -186,6 +186,7 @@ STEPS_TABLE = sa.Table(
         server_default=sa.func.now(),
     ),
     sa.Column("payload", _JSON_TYPE, nullable=False),
+    sa.Column("routed_experts_payload", sa.LargeBinary(), nullable=True),
     sa.PrimaryKeyConstraint(
         "run_id", "trajectory_id", "step_id", name="pk_steps"
     ),
