@@ -35,6 +35,59 @@ from tunix.sft import utils as base_utils
 from tunix.tests import test_common as tc
 
 
+class SglangJaxWeightSyncTest(absltest.TestCase):
+
+  def test_preprocess_hook_with_and_without_tp_size(self):
+    sampler = object.__new__(sglang_jax_sampler.SglangJaxSampler)
+    runner = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(
+            get_total_num_kv_heads=lambda: 1, head_dim=2
+        )
+    )
+    sampler.args = {"tp_size": 4}
+    sampler.to_hf_key_mappings = {}
+    sampler.to_hf_transpose_keys = {}
+    source, prepared, target = {"w": jnp.ones(2)}, {"w": jnp.ones(2) * 2}, {}
+    for accepts_tp_size in (True, False):
+
+      def preprocess(weights, *, tp_size):
+        self.assertIs(weights, source)
+        self.assertEqual(tp_size, 4)
+        return prepared
+
+      hook = preprocess if accepts_tp_size else lambda weights: prepared
+      sampler.preprocess_src_state = mock.Mock(wraps=hook)
+      with (
+          mock.patch.object(
+              sglang_jax_sampler.SglangJaxSampler,
+              "_model_runner",
+              new_callable=mock.PropertyMock,
+              return_value=runner,
+          ),
+          mock.patch.object(
+              sglang_jax_sampler.SglangJaxSampler,
+              "transformer_state",
+              new_callable=mock.PropertyMock,
+              return_value=target,
+          ),
+          mock.patch.object(
+              sglang_jax_sampler.utils,
+              "transfer_state_with_mappings",
+              return_value=prepared,
+          ) as transfer,
+      ):
+        sampler.update_params(source)
+      self.assertEqual(
+          sampler.preprocess_src_state.call_args_list[0],
+          mock.call(source, tp_size=4),
+      )
+      self.assertEqual(
+          sampler.preprocess_src_state.call_count, 1 if accepts_tp_size else 2
+      )
+      self.assertIs(transfer.call_args.kwargs["src_state"], prepared)
+      np.testing.assert_array_equal(runner.model_state_leaves[0], prepared["w"])
+
+
 class SglangJaxSamplerTest(absltest.TestCase):
 
   @classmethod

@@ -125,6 +125,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     )
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
     self.to_hf_hook_fns = config.mapping_config.to_hf_hook_fns
+    self.preprocess_src_state = config.mapping_config.preprocess_src_state
 
     if config.mapping_config.lora_to_hf_mappings:
       self.to_hf_key_mappings |= config.mapping_config.lora_to_hf_mappings
@@ -144,6 +145,13 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     del filter_types
+    if self.preprocess_src_state is not None:
+      try:
+        updated_weights = self.preprocess_src_state(
+            updated_weights, tp_size=self.args["tp_size"]
+        )
+      except TypeError:
+        updated_weights = self.preprocess_src_state(updated_weights)
     new_state = utils.transfer_state_with_mappings(
         src_state=updated_weights,
         dst_state=self.transformer_state,
