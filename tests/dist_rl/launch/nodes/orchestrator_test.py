@@ -17,9 +17,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+import contextlib
 import dataclasses
 import importlib
 import pickle
+import signal
 import sys
 import threading
 from unittest import mock
@@ -179,15 +181,24 @@ class _RecordingMonitor(health_monitor.HealthMonitor):
 class _FakeCluster(cluster_orchestrator.ClusterOrchestrator):
   """Records the lifecycle calls made on it; starts and runs no workers."""
 
-  def __init__(self, run_error: Exception | None = None) -> None:
+  def __init__(
+      self,
+      run_error: BaseException | None = None,
+      *,
+      trajectory_store_config: dict[str, object] | None = None,
+      on_run: Callable[[], None] | None = None,
+  ) -> None:
     self.calls: list[str] = []
     registry = worker_registry.WorkerRegistry()
     super().__init__(
-        registry=registry, monitor=_RecordingMonitor(registry, self.calls)
+        registry=registry,
+        monitor=_RecordingMonitor(registry, self.calls),
+        trajectory_store_config=trajectory_store_config,
     )
     self.programs: list[rl_program.RLProgram] = []
     self.run_kwargs: dict[str, object] = {}
     self._run_error = run_error
+    self._on_run = on_run
 
   def bring_up_workers(self, dummy_data: object = None) -> None:
     del dummy_data  # Unused.
@@ -204,13 +215,14 @@ class _FakeCluster(cluster_orchestrator.ClusterOrchestrator):
     self.calls.append("run")
     self.programs.append(program)
     self.run_kwargs = {"bring_up": bring_up, **kwargs}
+    if self._on_run is not None:
+      self._on_run()
     if self._run_error is not None:
       raise self._run_error
 
   def shutdown(self, *, abort: bool = False) -> None:
-    del abort  # Unused.
     # `ClusterOrchestrator.shutdown` without the `stop` RPCs to fake workers.
-    self.calls.append("shutdown")
+    self.calls.append("shutdown(abort=True)" if abort else "shutdown")
     _close_keeping_workers(self)
 
 
@@ -220,6 +232,8 @@ def _close_keeping_workers(
   """Releases a test cluster without sending `stop` to its fake workers."""
   cluster.registry.close()
   cluster.monitor.close()
+  if cluster.trajectory_store is not None:
+    cluster.trajectory_store.close()
 
 
 class BuildersTest(absltest.TestCase):
@@ -845,18 +859,6 @@ class ClusterTest(absltest.TestCase):
     self.assertIn("Rejected a worker registration", logs.output[0])
     self.assertEqual(cluster.registry.infos(), registered)
 
-  def test_close_cluster_stops_workers_on_exit(self):
-    cluster = _FakeCluster()
-    orchestrator.close_cluster(_config(), cluster)
-    self.assertEqual(cluster.calls, ["shutdown", "monitor.close"])
-
-  def test_close_cluster_keeps_workers_running(self):
-    cluster = _FakeCluster()
-    orchestrator.close_cluster(
-        _config("cluster_config.stop_workers_on_exit=false"), cluster
-    )
-    self.assertEqual(cluster.calls, ["monitor.close"])
-
 
 class ProgramTest(absltest.TestCase):
 
@@ -1011,7 +1013,7 @@ class ProgramTest(absltest.TestCase):
     cluster = _FakeCluster()
     program, _ = self._run_program(cluster, ["trainer", "rollout"])
     self.assertLen(cluster.registry.infos(), 2)
-    # The caller tears the cluster down (`close_cluster`).
+    # The caller tears the cluster down (`managed_cluster_teardown`).
     self.assertEqual(cluster.calls, ["bring_up_workers", "run"])
     self.assertEqual(cluster.programs, [program])
     # `StandardRLProgram` stops after its own `max_steps`.
@@ -1165,28 +1167,23 @@ rl_training_config:
         load_tokenizer.assert_not_called()
         create_cluster.assert_not_called()
 
-  def test_tears_down_the_cluster_when_startup_fails(self):
+  def test_keeps_workers_running_and_closes_local_resources_on_clean_exit(self):
     recipe = self._recipe()
-    for name, extra_argv, service_types, build_error, error in (
-        # The program is built before waiting for the workers.
-        (
-            "program build fails",
-            [],
-            ["trainer", "rollout"],
-            ValueError,
-            ValueError,
-        ),
-        (
-            "workers do not register",
-            ["cluster_config.init_timeout_s=0.1"],
-            [],
-            None,
-            TimeoutError,
-        ),
-    ):
-      with self.subTest(name):
-        cluster = _FakeCluster()
+    for with_store in (False, True):
+      with self.subTest(with_store=with_store):
+        argv = [
+            f"override_config_file={recipe}",
+            "cluster_config.run_id=run_1",
+            "cluster_config.stop_workers_on_exit=false",
+        ]
+        store_cfg: dict[str, object] | None = (
+            {"backend": "memory"} if with_store else None
+        )
+        sha = resolve_config.config_fingerprint(resolve_config.initialize(argv))
+        cluster = _FakeCluster(trajectory_store_config=store_cfg)
+        store = cluster.trajectory_store
         with (
+            contextlib.ExitStack() as stack,
             mock.patch.object(
                 node_utils,
                 "load_hf_tokenizer",
@@ -1195,19 +1192,169 @@ rl_training_config:
             mock.patch.object(
                 orchestrator, "create_cluster", return_value=cluster
             ),
-            mock.patch.object(
-                orchestrator,
-                "build_program",
-                wraps=orchestrator.build_program,
-                side_effect=build_error,
-            ),
-            self.assertRaises(error),
+            mock.patch.object(otel_setup, "setup_metrics", return_value=False),
         ):
+          if store is not None:
+            stack.enter_context(
+                mock.patch.object(
+                    store,
+                    "close",
+                    side_effect=lambda rc=store.close, calls=cluster.calls: (
+                        calls.append("trajectory_store.close"),
+                        rc(),
+                    ),
+                )
+            )
           orchestrator.main(
-              [f"override_config_file={recipe}", *extra_argv],
-              _FakeProcessContext(_FakeDiscovery(service_types)),
+              argv,
+              _FakeProcessContext(
+                  _FakeDiscovery(["trainer", "rollout"], config_sha256=sha)
+              ),
           )
-        self.assertEqual(cluster.calls, ["shutdown", "monitor.close"])
+        expected = ["bring_up_workers", "run", "monitor.close"]
+        if with_store:
+          expected.append("trajectory_store.close")
+        self.assertEqual(cluster.calls, expected)
+
+  def test_aborts_cluster_on_startup_or_run_failure(self):
+    recipe = self._recipe()
+    for (
+        name,
+        extra_argv,
+        service_types,
+        build_error,
+        run_error,
+        expected_error,
+        expected_prefix,
+    ) in (
+        # The program is built before waiting for the workers.
+        (
+            "program build fails",
+            [],
+            ["trainer", "rollout"],
+            ValueError("bad program"),
+            None,
+            ValueError,
+            [],
+        ),
+        (
+            "workers do not register",
+            ["cluster_config.init_timeout_s=0.1"],
+            [],
+            None,
+            None,
+            TimeoutError,
+            [],
+        ),
+        (
+            "program run fails",
+            [],
+            ["trainer", "rollout"],
+            None,
+            RuntimeError("worker lost"),
+            RuntimeError,
+            ["bring_up_workers", "run"],
+        ),
+    ):
+      for stop_on_exit in (True, False):
+        with self.subTest(name=name, stop_workers_on_exit=stop_on_exit):
+          argv = [
+              f"override_config_file={recipe}",
+              "cluster_config.run_id=run_1",
+              f"cluster_config.stop_workers_on_exit={str(stop_on_exit).lower()}",
+              *extra_argv,
+          ]
+          sha = resolve_config.config_fingerprint(
+              resolve_config.initialize(argv)
+          )
+          store_cfg: dict[str, object] | None = (
+              None if stop_on_exit else {"backend": "memory"}
+          )
+          cluster = _FakeCluster(
+              run_error=run_error, trajectory_store_config=store_cfg
+          )
+          store = cluster.trajectory_store
+          with (
+              contextlib.ExitStack() as stack,
+              mock.patch.object(
+                  node_utils,
+                  "load_hf_tokenizer",
+                  return_value=_FakeTokenizer(pad_token_id=0, eos_token_id=1),
+              ),
+              mock.patch.object(
+                  orchestrator, "create_cluster", return_value=cluster
+              ),
+              mock.patch.object(
+                  orchestrator,
+                  "build_program",
+                  wraps=orchestrator.build_program,
+                  side_effect=build_error,
+              ),
+              mock.patch.object(
+                  otel_setup, "setup_metrics", return_value=False
+              ),
+              self.assertRaises(expected_error),
+          ):
+            if store is not None:
+              stack.enter_context(
+                  mock.patch.object(
+                      store,
+                      "close",
+                      side_effect=lambda rc=store.close, calls=cluster.calls: (
+                          calls.append("trajectory_store.close"),
+                          rc(),
+                      ),
+                  )
+              )
+            orchestrator.main(
+                argv,
+                _FakeProcessContext(
+                    _FakeDiscovery(service_types, config_sha256=sha)
+                ),
+            )
+          expected_teardown = (
+              ["shutdown(abort=True)", "monitor.close"]
+              if stop_on_exit
+              else ["monitor.close", "trajectory_store.close"]
+          )
+          self.assertEqual(
+              cluster.calls, [*expected_prefix, *expected_teardown]
+          )
+
+  def test_sigterm_during_run_program_aborts_cluster_and_exits_143(self):
+    argv = [
+        f"override_config_file={self._recipe()}",
+        "cluster_config.run_id=run_1",
+    ]
+    sha = resolve_config.config_fingerprint(resolve_config.initialize(argv))
+    prev_sigint = signal.getsignal(signal.SIGINT)
+    prev_sigterm = signal.getsignal(signal.SIGTERM)
+    cluster = _FakeCluster(
+        on_run=lambda: signal.raise_signal(signal.SIGTERM)
+    )
+    with (
+        mock.patch.object(
+            node_utils,
+            "load_hf_tokenizer",
+            return_value=_FakeTokenizer(pad_token_id=0, eos_token_id=1),
+        ),
+        mock.patch.object(orchestrator, "create_cluster", return_value=cluster),
+        mock.patch.object(otel_setup, "setup_metrics", return_value=False),
+        self.assertRaises(SystemExit) as cm,
+    ):
+      orchestrator.main(
+          argv,
+          _FakeProcessContext(
+              _FakeDiscovery(["trainer", "rollout"], config_sha256=sha)
+          ),
+      )
+    self.assertEqual(cm.exception.code, 128 + signal.SIGTERM)
+    self.assertEqual(
+        cluster.calls,
+        ["bring_up_workers", "run", "shutdown(abort=True)", "monitor.close"],
+    )
+    self.assertEqual(signal.getsignal(signal.SIGINT), prev_sigint)
+    self.assertEqual(signal.getsignal(signal.SIGTERM), prev_sigterm)
 
 
 if __name__ == "__main__":

@@ -24,14 +24,17 @@ import signal
 import sys
 import tempfile
 from typing import Literal
+import threading
 from unittest import mock
 
 from absl.testing import absltest
 import jax
 import transformers
+from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
+from tunix.dist_rl.worker import abstract_worker
 from tunix.dist_rl.worker import remote_execution
 
 # A run whose processes another launcher starts; it needs an absolute artifact
@@ -478,17 +481,60 @@ class OptionalBoolTest(absltest.TestCase):
     self.assertIs(node_utils.optional_bool({"flag": 1}, "flag"), True)
 
 
+class _StubWorker(abstract_worker.Worker):
+  """Minimal concrete `Worker` for exercising `serve_worker` lifecycle hooks."""
+
+  def __init__(self, *, stop_error: Exception | None = None) -> None:
+    self._stop_error = stop_error
+    self.on_stop_callbacks: list[Callable[[bool], None] | None] = []
+
+  def set_on_stop(self, callback: Callable[[bool], None] | None) -> None:
+    self.on_stop_callbacks.append(callback)
+    super().set_on_stop(callback)
+
+  def initialize(self) -> datatypes.Response:
+    return datatypes.Response()
+
+  def compile(self, dummy_data: object) -> datatypes.Response:
+    del dummy_data
+    return datatypes.Response()
+
+  def start(self) -> datatypes.Response:
+    return datatypes.Response()
+
+  def stop(self, *, abort: bool = False) -> datatypes.Response:
+    try:
+      self.state = datatypes.WorkerState.STOPPED
+      if self._stop_error is not None:
+        abort = True
+        raise self._stop_error
+      return datatypes.Response(
+          metadata={"stopped": True, "abort": bool(abort)}
+      )
+    finally:
+      self._notify_stopped(abort)
+
+  def info(self) -> datatypes.WorkerInfo:
+    return datatypes.WorkerInfo(
+        worker_id="rollout-0", roles=frozenset({"rollout"})
+    )
+
+  def heartbeat(self) -> datatypes.HealthReport:
+    return datatypes.HealthReport(state=self.state)
+
+
 class ServeWorkerTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
     self.context = mock.MagicMock()
+    self.worker = _StubWorker()
     self.server = mock.MagicMock(
         spec=remote_execution.GrpcRemoteExecutionServer
     )
     self.server.start_serving_async = mock.AsyncMock()
     self.server.stop_serving = mock.AsyncMock()
-    self.enter_context(
+    self.mock_server_cls = self.enter_context(
         mock.patch.object(
             remote_execution,
             "GrpcRemoteExecutionServer",
@@ -499,6 +545,7 @@ class ServeWorkerTest(absltest.TestCase):
   def _serve(
       self,
       *,
+      worker: _StubWorker | None = None,
       drain_fn: Callable[[], Awaitable[None] | None] | None = None,
       close_fn: Callable[[], None] | None = None,
       signal_to_send: signal.Signals | None = signal.SIGTERM,
@@ -510,10 +557,13 @@ class ServeWorkerTest(absltest.TestCase):
     serving task is cancelled instead.
 
     Args:
+      worker: Worker service passed to `serve_worker`; defaults to
+        `self.worker`.
       drain_fn: Passed through to `serve_worker`.
       close_fn: Passed through to `serve_worker`.
       signal_to_send: Signal whose registered handler is invoked, or None.
     """
+    target_worker = self.worker if worker is None else worker
 
     async def _run() -> None:
       loop = asyncio.get_running_loop()
@@ -531,7 +581,7 @@ class ServeWorkerTest(absltest.TestCase):
       ):
         task = asyncio.ensure_future(
             node_utils.serve_worker(
-                mock.sentinel.worker,
+                target_worker,
                 process_context=self.context,
                 role="rollout",
                 worker_id_str="rollout-0",
@@ -549,6 +599,49 @@ class ServeWorkerTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def _serve_until_remote_stop(self, *, abort: bool, calls: list[str]) -> None:
+    """Runs `serve_worker` and invokes `worker.stop(abort=...)` off-thread."""
+    registered = asyncio.Event()
+    self.context.ipc.discovery.register.side_effect = (
+        lambda **_: registered.set()
+    )
+
+    def _check_on_stop_registered(_: int) -> None:
+      self.assertLen(self.worker.on_stop_callbacks, 1)
+      self.assertIsNotNone(self.worker.on_stop_callbacks[0])
+
+    self.server.start_serving_async.side_effect = _check_on_stop_registered
+    self.server.stop_serving.side_effect = lambda **_: calls.append(
+        "stop_serving"
+    )
+
+    async def _run() -> None:
+      loop = asyncio.get_running_loop()
+      with mock.patch.object(loop, "add_signal_handler"):
+        task = asyncio.create_task(
+            node_utils.serve_worker(
+                self.worker,
+                process_context=self.context,
+                role="rollout",
+                worker_id_str="rollout-0",
+                port=20001,
+                config_sha256="config-sha",
+                drain_fn=lambda: calls.append("drain"),
+                close_fn=lambda: calls.append("close"),
+            )
+        )
+        await registered.wait()
+        stop_thread = threading.Thread(
+            target=lambda: self.worker.stop(abort=abort)
+        )
+        stop_thread.start()
+        try:
+          await task
+        finally:
+          stop_thread.join(timeout=5.0)
+
+    asyncio.run(_run())
+
   def test_registers_drains_and_stops_on_sigterm(self):
     drained: list[str] = []
 
@@ -557,6 +650,7 @@ class ServeWorkerTest(absltest.TestCase):
 
     self._serve(drain_fn=_drain)
 
+    self.mock_server_cls.assert_called_once_with(self.worker)
     self.server.start_serving_async.assert_called_once_with(20001)
     self.context.ipc.discovery.register.assert_called_once()
     registered = pickle.loads(
@@ -574,6 +668,7 @@ class ServeWorkerTest(absltest.TestCase):
     )
     self.assertEqual(drained, ["drained"])
     self.server.stop_serving.assert_called_once()
+    self.assertIsNone(self.worker.on_stop_callbacks[-1])
 
   def test_sigint_and_sync_drain_fn(self):
     drain = mock.Mock(return_value=None)
@@ -602,6 +697,7 @@ class ServeWorkerTest(absltest.TestCase):
     drain.assert_called_once_with()
     self.server.stop_serving.assert_called_once()
     close.assert_called_once_with()
+    self.assertIsNone(self.worker.on_stop_callbacks[-1])
 
   def test_drains_then_stops_serving_then_closes(self):
     calls: list[str] = []
@@ -609,7 +705,8 @@ class ServeWorkerTest(absltest.TestCase):
     def _drain() -> None:
       calls.append("drain")
 
-    def _stop_serving() -> None:
+    def _stop_serving(grace: float) -> None:
+      del grace  # Unused.
       calls.append("stop_serving")
 
     def _close() -> None:
@@ -625,6 +722,7 @@ class ServeWorkerTest(absltest.TestCase):
     with self.assertRaisesRegex(RuntimeError, "stop failed"):
       self._serve(close_fn=close)
     close.assert_called_once_with()
+    self.assertIsNone(self.worker.on_stop_callbacks[-1])
 
   def test_close_failure_raises_after_stop_serving(self):
     close = mock.Mock(side_effect=RuntimeError("close failed"))
@@ -632,6 +730,115 @@ class ServeWorkerTest(absltest.TestCase):
       self._serve(close_fn=close, signal_to_send=signal.SIGINT)
     self.server.stop_serving.assert_called_once()
     close.assert_called_once_with()
+    self.assertIsNone(self.worker.on_stop_callbacks[-1])
+
+  def test_clean_remote_stop_wakes_drains_closes_and_returns_cleanly(self):
+    calls: list[str] = []
+    self._serve_until_remote_stop(abort=False, calls=calls)
+    self.assertEqual(calls, ["drain", "stop_serving", "close"])
+    self.assertEqual(self.worker.state, datatypes.WorkerState.STOPPED)
+    self.assertLen(self.worker.on_stop_callbacks, 2)
+    self.assertIsNone(self.worker.on_stop_callbacks[-1])
+
+  def test_abort_remote_stop_drains_closes_and_exits_nonzero(self):
+    calls: list[str] = []
+    with self.assertRaises(SystemExit) as cm:
+      self._serve_until_remote_stop(abort=True, calls=calls)
+    self.assertEqual(cm.exception.code, 1)
+    self.assertEqual(calls, ["drain", "stop_serving", "close"])
+    self.assertEqual(self.worker.state, datatypes.WorkerState.STOPPED)
+    self.assertLen(self.worker.on_stop_callbacks, 2)
+    self.assertIsNone(self.worker.on_stop_callbacks[-1])
+
+  def test_sigterm_drain_stop_failure_escalates_to_nonzero_exit(self):
+    failing_worker = _StubWorker(stop_error=RuntimeError("cleanup failed"))
+    calls: list[str] = []
+    self.server.stop_serving.side_effect = lambda **_: calls.append(
+        "stop_serving"
+    )
+
+    def _drain() -> None:
+      calls.append("drain")
+      failing_worker.stop()
+
+    with self.assertRaises(SystemExit) as cm:
+      self._serve(
+          worker=failing_worker,
+          drain_fn=_drain,
+          close_fn=lambda: calls.append("close"),
+      )
+    self.assertEqual(cm.exception.code, 1)
+    self.assertEqual(calls, ["drain", "stop_serving", "close"])
+    self.assertIsNone(failing_worker.on_stop_callbacks[-1])
+
+  def test_stops_serving_with_a_grace_period_for_the_stop_rpc(self):
+    self._serve()
+    self.server.stop_serving.assert_awaited_once_with(
+        grace=node_utils._STOP_SERVING_GRACE_S  # pylint: disable=protected-access
+    )
+
+  def test_removes_its_signal_handlers_before_draining(self):
+    calls: list[str] = []
+
+    async def _run() -> None:
+      loop = asyncio.get_running_loop()
+      with (
+          mock.patch.object(
+              loop,
+              "add_signal_handler",
+              side_effect=lambda sig, callback: (
+                  loop.call_soon(callback) if sig == signal.SIGTERM else None
+              ),
+          ),
+          mock.patch.object(
+              loop,
+              "remove_signal_handler",
+              side_effect=lambda sig: calls.append(f"remove:{sig.name}"),
+          ),
+      ):
+        await node_utils.serve_worker(
+            self.worker,
+            process_context=self.context,
+            role="trainer",
+            worker_id_str="trainer-0",
+            port=20000,
+            config_sha256="config-sha",
+            drain_fn=lambda: calls.append("drain"),
+        )
+
+    asyncio.run(_run())
+    self.assertEqual(calls, ["remove:SIGINT", "remove:SIGTERM", "drain"])
+
+  def test_close_failure_after_a_failed_stop_exits_nonzero(self):
+    # The trainer node stops its worker in `close_fn`. A failed stop escalates
+    # to an abort and re-raises; the process still exits 1.
+    failing_worker = _StubWorker(stop_error=RuntimeError("cleanup failed"))
+
+    def _close() -> None:
+      failing_worker.stop()
+
+    with self.assertRaises(SystemExit) as cm:
+      self._serve(worker=failing_worker, close_fn=_close)
+    self.assertEqual(cm.exception.code, 1)
+    self.assertIsNone(failing_worker.on_stop_callbacks[-1])
+
+  def test_unregisters_on_stop_when_start_serving_fails(self):
+    def _fail_after_check(_: int) -> None:
+      self.assertLen(self.worker.on_stop_callbacks, 1)
+      self.assertIsNotNone(self.worker.on_stop_callbacks[0])
+      raise OSError("port in use")
+
+    self.server.start_serving_async.side_effect = _fail_after_check
+    drain = mock.Mock()
+    close = mock.Mock()
+    with self.assertRaisesRegex(OSError, "port in use"):
+      self._serve(drain_fn=drain, close_fn=close)
+    self.assertLen(self.worker.on_stop_callbacks, 2)
+    self.assertIsNone(self.worker.on_stop_callbacks[-1])
+    self.context.ipc.discovery.register.assert_not_called()
+    drain.assert_not_called()
+    self.server.stop_serving.assert_not_called()
+    close.assert_not_called()
 
 
 class LoadHfTokenizerTest(absltest.TestCase):

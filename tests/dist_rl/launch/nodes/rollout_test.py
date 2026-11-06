@@ -15,6 +15,7 @@
 """Unit tests for the distributed RL rollout worker node."""
 
 from collections.abc import Mapping
+import asyncio
 import contextlib
 import json
 import os
@@ -942,6 +943,34 @@ class RolloutMainTest(absltest.TestCase):
         serve_worker.call_args.kwargs["config_sha256"],
         resolve_config.config_fingerprint(resolve_config.initialize(argv)),
     )
+
+  def test_drain_stops_the_sampler_even_when_the_worker_stop_raises(self):
+    worker_service = mock.MagicMock(trajectory_store=None)
+    # E.g. `RolloutWorker.stop()` re-raising an earlier failed stop.
+    worker_service.stop.side_effect = RuntimeError("failed to stop cleanly")
+    worker_service.sampler.stop = mock.AsyncMock()
+    with contextlib.ExitStack() as stack:
+      # `main` sets environment defaults; restore the test's environment.
+      stack.enter_context(mock.patch.dict(os.environ))
+      stack.enter_context(mock.patch.object(rollout.importlib, "import_module"))
+      stack.enter_context(mock.patch.object(gcs_cache, "restore_jax_cache"))
+      stack.enter_context(mock.patch.object(node_utils, "load_hf_tokenizer"))
+      stack.enter_context(
+          mock.patch.object(
+              rollout, "_create_rollout_worker", return_value=worker_service
+          )
+      )
+      serve_worker = stack.enter_context(
+          mock.patch.object(
+              node_utils, "serve_worker", new_callable=mock.AsyncMock
+          )
+      )
+      rollout.main(["cluster_config.run_id=run_1"], context=mock.Mock())
+
+    drain_fn = serve_worker.call_args.kwargs["drain_fn"]
+    with self.assertRaisesRegex(RuntimeError, "failed to stop cleanly"):
+      asyncio.run(drain_fn())
+    worker_service.sampler.stop.assert_awaited_once_with()
 
   def test_main_sets_library_env_before_logging_the_resolved_config(self):
     logged_env: dict[str, str] = {}

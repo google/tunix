@@ -48,6 +48,8 @@ from collections.abc import Mapping, Sequence
 import dataclasses
 import logging
 import pickle
+import signal
+import threading
 import time
 
 import grain
@@ -592,25 +594,39 @@ def build_program(
   grpo = hp.config_mapping("agentic_grpo_config")
   raw_max_span = grpo["max_version_span"]
   max_version_span = int(raw_max_span) if raw_max_span is not None else None
-  return rl_program.StandardRLProgram(
-      algo_config=algo_config,
-      dataset=prompt_items,
-      max_steps=int(hp.config_mapping("rl_training_config")["max_steps"]),
-      reward_fns=reward_fns,
-      generation_args=build_generation_args(hp),
-      batch_size=int(hp.config["batch_size"]),
-      batch_config=build_batch_config(hp, pad_id=pad_id, eos_id=eos_id),
-      metrics_logging_options=metrics_logging_options,
-      trajectory_log_dir=_trajectory_log_dir(hp),
-      trajectory_store=trajectory_store,
-      max_staleness=int(grpo["off_policy_steps"]),
-      max_version_span=max_version_span,
-      group_order=rl_program.GroupOrder(str(grpo["trajectory_group_order"])),
-      sync_weights=_weight_sync_mode(hp) != weight_sync.WeightSyncMode.NONE,
-      precompile_trainer=bool(
-          hp.config_mapping("dist_training_config")["precompile_trainer"]
-      ),
+  # `StandardRLProgram` creates `AsyncTrajectoryLogger`, whose `__init__`
+  # installs its own `SIG_DFL`+`os.kill` handlers for SIGINT/SIGTERM/SIGHUP on
+  # the main thread. Restore the active handlers (`managed_cluster_teardown`
+  # owns SIGTERM; `run_program` flushes `program.close()` on unwind).
+  signals = (
+      (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+      if threading.current_thread() is threading.main_thread()
+      else ()
   )
+  saved_handlers = [(sig, signal.getsignal(sig)) for sig in signals]
+  try:
+    return rl_program.StandardRLProgram(
+        algo_config=algo_config,
+        dataset=prompt_items,
+        max_steps=int(hp.config_mapping("rl_training_config")["max_steps"]),
+        reward_fns=reward_fns,
+        generation_args=build_generation_args(hp),
+        batch_size=int(hp.config["batch_size"]),
+        batch_config=build_batch_config(hp, pad_id=pad_id, eos_id=eos_id),
+        metrics_logging_options=metrics_logging_options,
+        trajectory_log_dir=_trajectory_log_dir(hp),
+        trajectory_store=trajectory_store,
+        max_staleness=int(grpo["off_policy_steps"]),
+        max_version_span=max_version_span,
+        group_order=rl_program.GroupOrder(str(grpo["trajectory_group_order"])),
+        sync_weights=_weight_sync_mode(hp) != weight_sync.WeightSyncMode.NONE,
+        precompile_trainer=bool(
+            hp.config_mapping("dist_training_config")["precompile_trainer"]
+        ),
+    )
+  finally:
+    for sig, handler in saved_handlers:
+      signal.signal(sig, signal.SIG_DFL if handler is None else handler)
 
 
 def run_program(
@@ -624,7 +640,8 @@ def run_program(
 ) -> rl_program.RLStepResult | None:
   """Waits for the workers, brings them up, and runs `program`.
 
-  Always closes `program`; the caller tears the cluster down (`close_cluster`).
+  Always closes `program`; the caller tears the cluster down
+  (`managed_cluster_teardown`).
 
   Args:
     hp: Resolved distributed RL configuration.
@@ -661,28 +678,6 @@ def run_program(
   finally:
     program.close()
   return program.last_step_result
-
-
-def close_cluster(
-    hp: resolve_config.DistHyperParameters,
-    cluster: cluster_orchestrator.ClusterOrchestrator,
-) -> None:
-  """Tears the cluster down.
-
-  With `cluster_config.stop_workers_on_exit: false` the workers keep running;
-  only this process's monitor and trajectory store are closed.
-
-  Args:
-    hp: Resolved distributed RL configuration.
-    cluster: Cluster orchestrator to tear down.
-  """
-  if bool(hp.config_mapping("cluster_config")["stop_workers_on_exit"]):
-    logging.info("Shutting down cluster workers...")
-    cluster.shutdown()
-  else:
-    cluster.monitor.close()
-    if cluster.trajectory_store is not None:
-      cluster.trajectory_store.close()
 
 
 def _pin_control_plane_to_cpu() -> None:
@@ -737,7 +732,12 @@ def main(
   pad_id, eos_id = node_utils.pad_and_eos_ids(node_utils.load_hf_tokenizer(hp))
 
   cluster = create_cluster(hp, weight_sync_timeouts=weight_sync_timeouts)
-  try:
+  stop_workers_on_exit = bool(
+      hp.config_mapping("cluster_config")["stop_workers_on_exit"]
+  )
+  with cluster_orchestrator.managed_cluster_teardown(
+      cluster, stop_workers_on_exit=stop_workers_on_exit
+  ):
     program = build_program(
         hp,
         algo_config=algo_config,
@@ -756,8 +756,6 @@ def main(
         rpc_timeout_s=rpc_timeout_s,
         config_sha256=config_sha256,
     )
-  finally:
-    close_cluster(hp, cluster)
 
   if result is None:
     logging.info("=== GRPO run finished without a completed step ===")
