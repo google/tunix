@@ -673,9 +673,16 @@ class ClusterTest(absltest.TestCase):
         weight_sync_mode="fallback",
         trajectory_store_config=None,
         weight_sync_timeouts=phase_timeouts,
+        fault_tolerance_config=datatypes.FaultToleranceConfig(enabled=True),
     )
+    self.assertTrue(cluster.fault_tolerance_manager.config.enabled)
     # Workers register later, in `run_program`.
     self.assertEmpty(cluster.registry.infos())
+
+    disabled_cluster = self._cluster(
+        _config("cluster_config.rollout_fault_tolerance=false")
+    )
+    self.assertFalse(disabled_cluster.fault_tolerance_manager.config.enabled)
 
   def test_wait_for_workers_registers_with_rpc_timeout(self):
     hp = _config("agentic_grpo_config.beta=0.0")

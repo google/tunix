@@ -265,6 +265,11 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertIn(
         "old example launchers are set: K8S_NAMESPACE", res.stderr
     )
+    res = self._run_launch(args, extra_env={"ROLLOUT_FAULT_TOLERANCE": "false"})
+    self.assertNotEqual(res.returncode, 0)
+    self.assertIn(
+        "old example launchers are set: ROLLOUT_FAULT_TOLERANCE", res.stderr
+    )
     # An empty variable is not a setting.
     res = self._run_launch(args, extra_env={"MODEL_NAME": ""})
     self.assertEqual(res.returncode, 0, msg=res.stderr)

@@ -351,6 +351,9 @@ cluster_config:
   wait_debug_every_polls: 6
   wait_log_tail_lines: 40
   stop_workers_on_exit: true
+  # Evict unreachable rollout workers and retry their in-flight trajectories on
+  # surviving rollout workers (`FaultToleranceConfig(enabled=...)`).
+  rollout_fault_tolerance: true
   # Start a reference inference worker (for the KL penalty). Null means
   # `agentic_grpo_config.beta > 0`. Set false to use a reference worker started
   # separately; it registers with the orchestrator through discovery.

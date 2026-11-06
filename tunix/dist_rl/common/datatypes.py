@@ -242,35 +242,61 @@ class FaultToleranceConfig:
 
   Attributes:
     enabled: Whether worker fault tolerance (automatic eviction and task retry)
-      is enabled. Transient transport errors are first retried in place on the
-      same worker (dispatch: up to 3 serialized attempts; poll: until
-      `effective_poll_retry_budget_s`), and the worker is evicted only when
-      those run out or on a non-transient transport error. Defaults to `False`:
-      an evicted worker whose process is still alive never re-registers (rollout
-      workers register with discovery only once at startup), so a false eviction
-      of a healthy worker permanently shrinks the rollout pool. When `False`,
-      fault tolerance is disabled and `effective_max_task_retries` is `0`.
+      is enabled; defaults to `True`. Transient transport errors are retried in
+      place on the same worker—up to 3 total attempts (1 initial send + 2
+      serialized probes, ~1.5s default backoff, capped by
+      `effective_poll_retry_budget_s`) on `dispatch_task`, and up to
+      `effective_poll_retry_budget_s` (`60.0s` by default) on
+      `poll_responses`—before evicting the worker and re-dispatching its
+      in-flight tasks (`ft/rollout/task_retries_total` counts both cross-worker
+      re-dispatches and in-place retry probes/resends). When `False`, fault
+      tolerance is disabled (`effective_max_task_retries` is `0` and
+      `min_active_rollout_ratio` is ignored). Known limitations when `True`:
+      weight_sync: `TaskSession` detects failures only on workers holding
+        in-flight tasks, so a rollout worker that dies with none (after its last
+        delivery and before or during the next weight-sync round) is noticed
+        only by the next weight-sync round, which fails and aborts the program,
+        as with `enabled=False`. If the worker restarts and re-registers through
+        discovery before that round starts, it re-enters `REGISTERED` ->
+        `PENDING_WEIGHT_SYNC` and rejoins without failing the round (provided at
+        least one rollout worker is `ACTIVE` or `PENDING_WEIGHT_SYNC` when the
+        round starts). TODO(b/577214994): Add weight-sync fault tolerance after
+        the weight-sync redesign.
+      sampler_errors: Detects worker failures only via transport errors (e.g.
+        process exit or unreachability). If the worker process stays up, a hung
+        generation never returns (the first turn has no episode timeout) and
+        sampler errors return `FAILED` trajectories without evicting the worker.
+        TODO(b/577214994): Make fatal sampler errors exit the worker process so
+        they surface as worker failures.
+      live_evicted_workers: Rollout workers register with discovery only once at
+        startup, so a live worker evicted after exhausting its retry budget does
+        not rejoin (sustained pool shrink is bounded by
+        `min_active_rollout_ratio`).
+      poison_prompts: A prompt that deterministically crashes workers evicts up
+        to `max_task_retries + 1` workers before surfacing the terminal error
+        and aborting the program (as with `enabled=False`).
     max_task_retries: Maximum number of times an in-flight task is re-dispatched
       onto surviving workers after a worker failure when `enabled=True`. Because
       a task is re-dispatched only after its worker is evicted,
       `max_task_retries` also bounds the number of workers a single request can
       evict; defaults to `1`.
     poll_retry_budget_s: Optional override for the maximum wall-clock duration
-      in seconds to retry transient poll (and, when `enabled=True`, dispatch)
-      errors on a rollout worker before failing its in-flight tasks (`0.0` fails
-      immediately on the first transient error). When `None` (default),
-      `effective_poll_retry_budget_s` resolves to `60.0` when `enabled=True`
-      (gRPC keepalive ~30s plus margin) and `300.0` when `enabled=False`
-      (matching `TaskSession`'s default budget).
+      in seconds to retry transient `poll_responses` errors (and cap in-place
+      `dispatch_task` retry backoff when `enabled=True`) on a rollout worker
+      before failing its in-flight tasks (`0.0` fails immediately on the first
+      transient error). When `None` (default), `effective_poll_retry_budget_s`
+      resolves to `60.0` when `enabled=True` (gRPC keepalive ~30s plus margin;
+      bounds step stall when a pod is rescheduled to a new IP) and `300.0` when
+      `enabled=False` (matching `TaskSession`'s standalone default budget).
     min_active_rollout_ratio: Minimum ratio of currently `ACTIVE` rollout
       workers to the peak `ACTIVE` rollout worker count observed since startup,
-      in `(0.0, 1.0]`, or `None` (default) to disable the capacity-floor
-      guardrail. When `enabled=True` and set, `FaultToleranceManager` raises
-      `RolloutCapacityError` once `active / peak_active <
-      min_active_rollout_ratio` (strictly below; e.g. `2 / 4` at `0.5` does not
-      trigger) continuously for at least `min_active_rollout_grace_s` seconds
-      after the first rollout worker has reached `ACTIVE`. Ignored when
-      `enabled=False`.
+      in `(0.0, 1.0]`, or `None` to disable the capacity-floor guardrail;
+      defaults to `0.5`. When `enabled=True` and set, `FaultToleranceManager`
+      raises `RolloutCapacityError` once `active / peak_active <
+      min_active_rollout_ratio` (strictly below; e.g. `1 / 2` and `2 / 4` at
+      `0.5` do not trigger) continuously for at least
+      `min_active_rollout_grace_s` seconds after the first rollout worker has
+      reached `ACTIVE`. Ignored when `enabled=False`.
     min_active_rollout_grace_s: Wall-clock grace period in seconds (`>= 0.0`,
       default `900.0`) that the active rollout ratio may remain strictly below
       `min_active_rollout_ratio` before `RolloutCapacityError` is raised,
@@ -282,10 +308,10 @@ class FaultToleranceConfig:
       has elapsed.
   """
 
-  enabled: bool = False
+  enabled: bool = True
   max_task_retries: int = 1
   poll_retry_budget_s: float | None = None
-  min_active_rollout_ratio: float | None = None
+  min_active_rollout_ratio: float | None = 0.5
   min_active_rollout_grace_s: float = 900.0
 
   def __post_init__(self) -> None:

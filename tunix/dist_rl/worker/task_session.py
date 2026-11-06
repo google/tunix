@@ -71,9 +71,11 @@ class TaskSessionFaultToleranceConfig:
       the live membership source backing `actors`. Defaults to `None`.
   """
 
-  # TODO(b/577214994): Keep `max_task_retries=0` and
-  # `on_worker_unreachable=None` as the production default until control-plane
-  # dynamic worker eviction support is wired up.
+  # Standalone `TaskSession` defaults to `max_task_retries=0` and
+  # `on_worker_unreachable=None` because direct callers may pass a static
+  # `actors` sequence without membership eviction; production sessions build
+  # this config via `FaultToleranceManager.task_session_fault_tolerance_config`
+  # (`FaultToleranceConfig.enabled=True` by default).
   max_task_retries: int = 0
   on_worker_unreachable: Optional[OnWorkerUnreachableFn] = None
 

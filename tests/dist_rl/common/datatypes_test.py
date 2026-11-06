@@ -294,33 +294,41 @@ class WireSerializationTest(absltest.TestCase):
 
   def test_fault_tolerance_config_defaults_and_disabled_override(self):
     cfg = datatypes.FaultToleranceConfig()
-    self.assertFalse(cfg.enabled)
+    self.assertTrue(cfg.enabled)
     self.assertEqual(cfg.max_task_retries, 1)
     self.assertIsNone(cfg.poll_retry_budget_s)
-    self.assertIsNone(cfg.min_active_rollout_ratio)
+    self.assertEqual(cfg.min_active_rollout_ratio, 0.5)
     self.assertEqual(cfg.min_active_rollout_grace_s, 900.0)
-    self.assertEqual(cfg.effective_max_task_retries, 0)
-    self.assertEqual(cfg.effective_poll_retry_budget_s, 300.0)
+    self.assertEqual(cfg.effective_max_task_retries, 1)
+    self.assertEqual(cfg.effective_poll_retry_budget_s, 60.0)
 
-    enabled_cfg = datatypes.FaultToleranceConfig(
+    custom_enabled_cfg = datatypes.FaultToleranceConfig(
         enabled=True,
-        min_active_rollout_ratio=0.5,
+        min_active_rollout_ratio=0.75,
         min_active_rollout_grace_s=0.0,
     )
-    self.assertTrue(enabled_cfg.enabled)
-    self.assertEqual(enabled_cfg.effective_max_task_retries, 1)
-    self.assertEqual(enabled_cfg.effective_poll_retry_budget_s, 60.0)
-    self.assertEqual(enabled_cfg.min_active_rollout_ratio, 0.5)
-    self.assertEqual(enabled_cfg.min_active_rollout_grace_s, 0.0)
+    self.assertTrue(custom_enabled_cfg.enabled)
+    self.assertEqual(custom_enabled_cfg.effective_max_task_retries, 1)
+    self.assertEqual(custom_enabled_cfg.effective_poll_retry_budget_s, 60.0)
+    self.assertEqual(custom_enabled_cfg.min_active_rollout_ratio, 0.75)
+    self.assertEqual(custom_enabled_cfg.min_active_rollout_grace_s, 0.0)
+
+    no_guardrail_cfg = datatypes.FaultToleranceConfig(
+        min_active_rollout_ratio=None
+    )
+    self.assertIsNone(no_guardrail_cfg.min_active_rollout_ratio)
 
     full_ratio_cfg = datatypes.FaultToleranceConfig(
         min_active_rollout_ratio=1.0
     )
     self.assertEqual(full_ratio_cfg.min_active_rollout_ratio, 1.0)
 
-    re_enabled = dataclasses.replace(cfg, enabled=True)
-    self.assertEqual(re_enabled.effective_max_task_retries, 1)
-    self.assertEqual(re_enabled.effective_poll_retry_budget_s, 60.0)
+    disabled_default_budget = dataclasses.replace(cfg, enabled=False)
+    self.assertFalse(disabled_default_budget.enabled)
+    self.assertEqual(disabled_default_budget.effective_max_task_retries, 0)
+    self.assertEqual(
+        disabled_default_budget.effective_poll_retry_budget_s, 300.0
+    )
 
     disabled_cfg = datatypes.FaultToleranceConfig(
         enabled=False, max_task_retries=5, poll_retry_budget_s=15.0

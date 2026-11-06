@@ -434,6 +434,9 @@ echo "Launching CPU orchestrator..."
   if [[ -n "$TRAJECTORY_LOG_DIR" ]]; then
     ORCHESTRATOR_CMD+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")
   fi
+  if [[ -n "${ROLLOUT_FAULT_TOLERANCE:-}" ]]; then
+    ORCHESTRATOR_CMD+=(--rollout_fault_tolerance="$ROLLOUT_FAULT_TOLERANCE")
+  fi
   if [[ "$USE_ROLLOUT_LOGPS" == "false" || "$USE_ROLLOUT_LOGPS" == "False" || "$USE_ROLLOUT_LOGPS" == "0" ]]; then
     ORCHESTRATOR_CMD+=(--no-use_rollout_logps)
   else

@@ -2570,10 +2570,13 @@ class DistributedRLEngineTest(absltest.TestCase):
           weight_sync_coordinator=coordinator,
       )
       self.assertIsNotNone(engine._fault_tolerance_manager)
-      self.assertFalse(engine._fault_tolerance_manager.config.enabled)
-      self.assertEqual(engine._rollout_session._poll_retry_budget_s, 300.0)
-      self.assertEqual(engine._rollout_session._max_task_retries, 0)
-      self.assertIsNone(engine._rollout_session._on_worker_unreachable)
+      self.assertTrue(engine._fault_tolerance_manager.config.enabled)
+      self.assertEqual(
+          engine._fault_tolerance_manager.config.min_active_rollout_ratio, 0.5
+      )
+      self.assertEqual(engine._rollout_session._poll_retry_budget_s, 60.0)
+      self.assertEqual(engine._rollout_session._max_task_retries, 1)
+      self.assertIsNotNone(engine._rollout_session._on_worker_unreachable)
 
       await engine.sync_weights(policy_version=2)
       self.assertEqual(

@@ -400,6 +400,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " ahead of time during worker configuration."
       ),
   )
+  parser.add_argument(
+      "--rollout_fault_tolerance",
+      type=_str2bool,
+      default=_str2bool(os.getenv("ROLLOUT_FAULT_TOLERANCE", "true")),
+      nargs="?",
+      const=True,
+      help=(
+          "Whether to enable rollout worker fault tolerance (automatic"
+          " eviction and task retry)."
+      ),
+  )
   args = parser.parse_args(argv)
   return args
 
@@ -616,6 +627,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       weight_sync_mode=args.weight_sync_mode,
       trajectory_store_config=trajectory_store_config,
       weight_sync_timeouts=weight_sync_timeouts,
+      fault_tolerance_config=datatypes.FaultToleranceConfig(
+          enabled=args.rollout_fault_tolerance
+      ),
   )
   context.ipc.discovery.on_register(
       functools.partial(

@@ -95,8 +95,16 @@
       }
     },
     {
+      "tunix.dist_rl.common.datatypes.FaultToleranceConfig": {
+        "kwargs": {
+          "enabled": true
+        }
+      }
+    },
+    {
       "tunix.dist_rl.orchestrator.orchestrator.ClusterOrchestrator": {
         "kwargs": {
+          "fault_tolerance_config": "<tunix.dist_rl.common.datatypes.FaultToleranceConfig()>",
           "trajectory_store_config": null,
           "weight_sync_mode": "none",
           "weight_sync_timeouts": "<tunix.dist_rl.weight_sync.weight_sync_coordinator.PhaseTimeouts()>"

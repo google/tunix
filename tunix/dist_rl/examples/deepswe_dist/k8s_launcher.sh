@@ -309,6 +309,7 @@ start_orchestrator() {
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         --trainer_precompile=${TRAINER_PRECOMPILE} \
+        ${ROLLOUT_FAULT_TOLERANCE:+--rollout_fault_tolerance=${ROLLOUT_FAULT_TOLERANCE}} \
         --routed_experts_encode_mode=${ROUTED_EXPERTS_ENCODE_MODE} \
         ${ROUTED_EXPERTS_NUM_EXPERTS:+--routed_experts_num_experts=${ROUTED_EXPERTS_NUM_EXPERTS}} \
         --stop_workers_on_exit \

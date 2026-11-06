@@ -519,7 +519,10 @@ class OrchestratorFaultToleranceTest(absltest.TestCase):
   ) -> None:
     with fake_cluster.FakeClusterHarness(
         num_rollout_workers=2,
-        poll_retry_budget_s=0.25,
+        fault_tolerance_config=datatypes.FaultToleranceConfig(
+            enabled=False,
+            poll_retry_budget_s=0.25,
+        ),
     ) as harness:
       gate = fault_injection.FaultGate()
       harness.injector.on(

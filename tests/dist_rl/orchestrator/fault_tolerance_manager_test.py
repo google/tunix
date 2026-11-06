@@ -30,15 +30,17 @@ class FaultToleranceManagerTest(absltest.TestCase):
     registry = worker_registry.WorkerRegistry()
     default_ftm = fault_tolerance_manager.FaultToleranceManager(registry)
     self.assertEqual(default_ftm.config, datatypes.FaultToleranceConfig())
-    self.assertFalse(default_ftm.config.enabled)
+    self.assertTrue(default_ftm.config.enabled)
+    self.assertEqual(default_ftm.config.min_active_rollout_ratio, 0.5)
 
     custom_cfg = datatypes.FaultToleranceConfig(
-        enabled=True, max_task_retries=3
+        enabled=False, max_task_retries=3
     )
     custom_ftm = fault_tolerance_manager.FaultToleranceManager(
         registry, config=custom_cfg
     )
     self.assertEqual(custom_ftm.config, custom_cfg)
+    self.assertFalse(custom_ftm.config.enabled)
 
   def test_task_session_fault_tolerance_config_derivation(self):
     registry = worker_registry.WorkerRegistry()

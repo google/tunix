@@ -314,6 +314,7 @@ _RECORDED_INITS: tuple[type[object], ...] = (
     algorithm_config.GRPOConfig,
     batch_assembly.BatchConfig,
     checkpoint_options.TunixCheckpointingOptions,
+    dist_datatypes.FaultToleranceConfig,
     dist_datatypes.GenerationArgs,
     gcs_cache.RolloutCacheKeyParams,
     maxtext_utils.AdamWOptions,

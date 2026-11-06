@@ -435,10 +435,14 @@ def create_cluster(
     weight_sync_timeouts: weight_sync_coordinator.PhaseTimeouts,
 ) -> cluster_orchestrator.ClusterOrchestrator:
   """Creates the `ClusterOrchestrator`; the workers register in `run_program`."""
+  rollout_ft = bool(
+      hp.config_mapping("cluster_config")["rollout_fault_tolerance"]
+  )
   return cluster_orchestrator.ClusterOrchestrator(
       weight_sync_mode=_weight_sync_mode(hp).value,
       trajectory_store_config=node_utils.trajectory_store_config(hp),
       weight_sync_timeouts=weight_sync_timeouts,
+      fault_tolerance_config=datatypes.FaultToleranceConfig(enabled=rollout_ft),
   )
 
 

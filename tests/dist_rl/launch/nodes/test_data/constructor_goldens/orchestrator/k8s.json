@@ -95,8 +95,16 @@
       }
     },
     {
+      "tunix.dist_rl.common.datatypes.FaultToleranceConfig": {
+        "kwargs": {
+          "enabled": true
+        }
+      }
+    },
+    {
       "tunix.dist_rl.orchestrator.orchestrator.ClusterOrchestrator": {
         "kwargs": {
+          "fault_tolerance_config": "<tunix.dist_rl.common.datatypes.FaultToleranceConfig()>",
           "trajectory_store_config": {
             "backend": "file",
             "run_id": "golden"

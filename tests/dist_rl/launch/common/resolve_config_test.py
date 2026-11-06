@@ -755,6 +755,13 @@ weight_sync_config:
       resolve_config.initialize(["vllm_config.detokenize=yes_please"])
     with self.assertRaisesRegex(TypeError, "vllm_config.server_mode"):
       resolve_config.initialize(["vllm_config.server_mode=0"])
+    for bad_ft in ("yes_please", "0"):
+      with self.assertRaisesRegex(
+          TypeError, r"cluster_config\.rollout_fault_tolerance"
+      ):
+        resolve_config.initialize(
+            [f"cluster_config.rollout_fault_tolerance={bad_ft}"]
+        )
 
   def test_typed_vllm_keys_rejected_in_free_form_kwargs(self):
     with self.assertRaisesRegex(

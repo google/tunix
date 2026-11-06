@@ -450,6 +450,12 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_k8s_scalars(hp)
   _validate_k8s_worker_jobsets(hp)
   _validate_rollout_replicas(hp)
+  rollout_ft = hp.config_mapping("cluster_config")["rollout_fault_tolerance"]
+  if not isinstance(rollout_ft, bool):
+    raise TypeError(
+        "cluster_config.rollout_fault_tolerance must be a bool, got"
+        f" {rollout_ft!r}."
+    )
   batch_size = int(hp.config["batch_size"])
   rl_train = hp.config_mapping("rl_training_config")
   mini_batch_size = int(rl_train["mini_batch_size"])
