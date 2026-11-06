@@ -23,7 +23,6 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.generate import configs
 from tunix.experimental.generate import engine as engine_lib
-from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import request as request_lib
 
 VOCAB_SIZE = 32
@@ -65,11 +64,9 @@ class PagedSumTransformer(nnx.Module):
     self.offset = nnx.Param(jnp.asarray(offset, dtype=dtype))
     self.geometries = dict(geometries)
 
-  def init_kv_cache(
-      self, cache_config: configs.CacheConfig
-  ) -> kv_cache_manager_lib.KVCacheManager:
-    """Builds one cache per entry of `geometries`."""
-    return kv_cache_manager_lib.KVCacheManager(cache_config, self.geometries)
+  def cache_geometries(self) -> dict[str, configs.CacheGeometry]:
+    """Returns the geometry of each configured KV cache."""
+    return dict(self.geometries)
 
   def __call__(
       self, tokens, positions, cache, metadata, mesh, logits_idxs=None
@@ -177,7 +174,6 @@ def make_engine(
           max_device_size_gib=max_device_size_gib,
           page_size=PAGE_SIZE,
           dtype=jnp.float32,
-          mesh=mesh(),
       ),
       scheduler_config=configs.SchedulerConfig(
           max_num_batched_tokens=max_num_batched_tokens,

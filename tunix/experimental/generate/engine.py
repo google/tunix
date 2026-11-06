@@ -68,8 +68,8 @@ def _instantiate_components(
   """Validates the configs and builds the engine's components from them.
 
   Args:
-    transformer: The model to sample from. Its `init_kv_cache` builds the KV
-      cache manager for its layers.
+    transformer: The model to sample from. Its `cache_geometries` returns the
+      geometry of each of its KV caches.
     cache_config: The KV cache config.
     scheduler_config: The scheduler config.
     model_runner_config: The model runner config.
@@ -92,14 +92,18 @@ def _instantiate_components(
         f' ({model_runner_config.num_scheduler_steps}).'
     )
 
-  kv_cache_manager = transformer.init_kv_cache(cache_config)  # pyrefly: ignore[missing-attribute]
+  cache_geometries = transformer.cache_geometries()  # pyrefly: ignore[missing-attribute]
+  with jax.set_mesh(model_runner_config.mesh):
+    kv_cache_manager = kv_cache_manager_lib.KVCacheManager(
+        cache_config, cache_geometries
+    )
 
   # A sliding window layer must hold the KV of every token in its window while
   # it processes a prefill chunk, so a longer chunk size is truncated to the
   # largest power of 2 within the smallest window.
   window_sizes = [
       g.window_size
-      for g in kv_cache_manager.cache_geometries.values()
+      for g in cache_geometries.values()
       if g.window_size is not None
   ]
   if window_sizes:
@@ -132,8 +136,8 @@ class LLMEngine:
     """Initializes the engine.
 
     Args:
-      transformer: The model to sample from. Its `init_kv_cache` builds the KV
-        cache manager for its layers.
+      transformer: The model to sample from. Its `cache_geometries` returns the
+        geometry of each of its KV caches.
       cache_config: The KV cache config.
       scheduler_config: The scheduler config.
       model_runner_config: The model runner config.
