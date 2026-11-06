@@ -40,6 +40,10 @@ class DummyScoringCore:
 
 class DummyTrainer:
 
+  def with_fwd_only_fn(self, fn):
+    del fn
+    return self
+
   def compile(self, *args, **kwargs):
     pass
 

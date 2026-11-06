@@ -32,24 +32,61 @@ WorkerState = datatypes.WorkerState
 
 
 def _compute_per_token_logps(
-    model: nnx.Module, *args: Any, **kwargs: Any
+    model: nnx.Module,
+    payload: datatypes.RLTrainerPayload,
+    *,
+    chunk_size: int,
 ) -> jax.Array:
   """Computes per-token log-probabilities under live model weights.
 
   Args:
     model: The NNX Module instance to score with.
-    *args: Positional arguments forwarded to
-      `rl_common.compute_per_token_logps`.
-    **kwargs: Keyword arguments forwarded to
-      `rl_common.compute_per_token_logps`.
+    payload: The `RLTrainerPayload` micro-batch containing prompt, completion,
+      static scoring parameters (`pad_id`, `eos_id`, `temperature`), and
+      optional packing/routing arrays.
+    chunk_size: Sequence chunk size for computing log-probabilities (0 computes
+      all at once).
 
   Returns:
     A JAX Array containing the computed per-token log-probabilities.
   """
+  if (
+      payload.pad_id is None
+      or payload.eos_id is None
+      or payload.temperature is None
+  ):
+    raise ValueError(
+        "Scoring payload must populate static pad_id, eos_id, and temperature."
+    )
   graphdef, state = nnx.split(model)
-  return rl_common.compute_per_token_logps(
-      graphdef, state, *args, stop_gradient=True, **kwargs
+  logps = rl_common.compute_per_token_logps(
+      graphdef,
+      state,
+      prompt_tokens=jnp.asarray(payload.prompt_ids),
+      completion_tokens=jnp.asarray(payload.completion_ids),
+      pad_id=payload.pad_id,
+      eos_id=payload.eos_id,
+      stop_gradient=True,
+      return_entropy=False,
+      segment_ids=(
+          None
+          if payload.segment_ids is None
+          else jnp.asarray(payload.segment_ids)
+      ),
+      segment_positions=(
+          None
+          if payload.segment_positions is None
+          else jnp.asarray(payload.segment_positions)
+      ),
+      temperature=payload.temperature,
+      chunk_size=chunk_size,
+      routed_experts=(
+          None
+          if payload.routed_experts is None
+          else jnp.asarray(payload.routed_experts)
+      ),
   )
+  return cast(jax.Array, logps)
 
 
 class TrainerWorker(abstract_worker.Worker):
@@ -130,6 +167,11 @@ class TrainerWorker(abstract_worker.Worker):
       if self._trainer is None:
         with self.execution_context():
           trainer = self._trainer_factory()
+          trainer.with_fwd_only_fn(
+              functools.partial(
+                  _compute_per_token_logps, chunk_size=self._logps_chunk_size
+              )
+          )
           if self._pending_loss_fn is not None:
             trainer.with_loss_fn(*self._pending_loss_fn)
             self._pending_loss_fn = None
@@ -427,20 +469,24 @@ class TrainerWorker(abstract_worker.Worker):
       outs = []
       for start in range(0, batch_size, micro_batch_size):
         sl = slice(start, start + micro_batch_size)
-        outs.append(
-            trainer.fwd_only(
-                _compute_per_token_logps,
-                prompt[sl],
-                completion[sl],
-                pad_id=items.pad_id,
-                eos_id=items.eos_id,
-                temperature=temperature,
-                chunk_size=self._logps_chunk_size,
-                segment_ids=None if seg_ids is None else seg_ids[sl],
-                segment_positions=None if seg_pos is None else seg_pos[sl],
-                routed_experts=None if routed is None else routed[sl],
-            )
+        rows = prompt[sl].shape[0]
+        # The trainer scores what it trains on: an `RLTrainerPayload`. The masks
+        # mark the real tokens of each row; `advantages` has no meaning for
+        # scoring and is zero-filled only because the payload requires it.
+        payload = datatypes.RLTrainerPayload(
+            prompt_ids=prompt[sl],
+            prompt_mask=(prompt[sl] != items.pad_id).astype(np.int32),
+            completion_ids=completion[sl],
+            completion_mask=(completion[sl] != items.pad_id).astype(np.int32),
+            advantages=np.zeros((rows,), dtype=np.float32),
+            segment_ids=None if seg_ids is None else seg_ids[sl],
+            segment_positions=None if seg_pos is None else seg_pos[sl],
+            routed_experts=None if routed is None else routed[sl],
+            pad_id=int(items.pad_id),
+            eos_id=int(items.eos_id),
+            temperature=temperature,
         )
+        outs.append(trainer.fwd_only(payload))
       result = np.asarray(jnp.concatenate(outs, axis=0), dtype=np.float32)
       self._last_error = None
       return datatypes.LogprobsResponse(

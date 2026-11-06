@@ -336,6 +336,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     self.policy_version = policy_version
     self.step_count = step_count
     self.compile_error = compile_error
+    self._fwd_only_fn: Callable[..., Any] | None = None
     self.prepare_calls: int = 0
     self.release_calls: int = 0
 
@@ -367,8 +368,14 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
   def eval_step(self, payload: datatypes.TrainerPayload) -> None:
     del payload
 
-  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    return fn(None, *args, **kwargs)
+  def with_fwd_only_fn(self, fn: Callable[..., Any]) -> "FakeTrainer":
+    self._fwd_only_fn = fn
+    return self
+
+  def fwd_only(self, payload: datatypes.TrainerPayload) -> Any:
+    if self._fwd_only_fn is None:
+      raise ValueError("FakeTrainer.fwd_only needs with_fwd_only_fn() first.")
+    return self._fwd_only_fn(None, payload)
 
   def save_checkpoint(
       self,

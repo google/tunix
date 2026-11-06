@@ -60,7 +60,15 @@ class JaxPytreesTest(absltest.TestCase):
         if f.metadata == datatypes.STATIC_FIELD_METADATA
     }
     self.assertEqual(
-        static, {"num_segments", "sampler_agreement_applied", "metadata"}
+        static,
+        {
+            "pad_id",
+            "eos_id",
+            "temperature",
+            "num_segments",
+            "sampler_agreement_applied",
+            "metadata",
+        },
     )
     # Changing a static field changes the treedef (it is part of the
     # structure, i.e. a jit cache key), changing an array field does not.
