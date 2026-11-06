@@ -16,6 +16,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 from tunix.dist_rl.trajectory import async_writer
 from tunix.dist_rl.trajectory import db_engine
+from tunix.dist_rl.trajectory import pg_wire
 from tunix.dist_rl.trajectory import schema
 from tunix.dist_rl.trajectory import schema_testing
 from tunix.dist_rl.trajectory import sql_store
@@ -2550,6 +2551,140 @@ class SqlTrajectoryStoreConfigTest(store_testing.TrajectoryStoreConfigTestCase):
         AssertionError, "step should not be deep copied"
     ):
       copy_store.add_step(step, trajectory_testing.METADATA_1)
+
+
+class SqlStorePgWireSeamTest(parameterized.TestCase):
+  """Tests verifying the seam between SqlTrajectoryStore and pg_wire."""
+
+  def test_add_step_when_pg_wire_handles_upsert_skips_sqlalchemy_step_insert(
+      self,
+  ) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "seam_write.db")
+    db_url = f"sqlite:///{db_path}"
+    store_instance = sql_store.SqlTrajectoryStore(db_url=db_url, run_id="run_1")
+    self.addCleanup(store_instance.close)
+
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    metadata = trajectory_testing.make_metadata(trajectory_id=traj_id)
+    with mock.patch.object(
+        pg_wire, "try_upsert_step", return_value=True
+    ) as mock_try_upsert:
+      store_instance.add_step(trajectory_testing.STEP_2_1, metadata)
+      store_instance.add_step(trajectory_testing.STEP_2_2, metadata)
+      store_instance.flush()
+
+    self.assertEqual(mock_try_upsert.call_count, 2)
+    trajectories = store_instance.get_trajectories([traj_id])
+    self.assertLen(trajectories, 1)
+    self.assertEmpty(trajectories[0].steps)
+
+  def test_process_batch_when_pg_wire_handles_upsert_routes_all_steps(
+      self,
+  ) -> None:
+    engine = schema_testing.create_sqlite_memory_engine()
+    self.addCleanup(engine.dispose)
+    schema.METADATA.create_all(engine)
+    writer = _TestAsyncSqlWriter(engine=engine, batch_mode=True)
+    self.addCleanup(writer.close)
+
+    with mock.patch.object(
+        pg_wire, "try_upsert_step", return_value=True
+    ) as mock_try_upsert:
+      with writer.hold_batch():
+        writer.enqueue_write(
+            run_id="run_1",
+            metadata=trajectory_testing.METADATA_1,
+            step=trajectory_testing.STEP_2_1,
+        )
+        writer.enqueue_write(
+            run_id="run_1",
+            metadata=trajectory_testing.METADATA_2,
+            step=trajectory_testing.STEP_2_2,
+        )
+      writer.flush()
+
+    self.assertEqual(mock_try_upsert.call_count, 2)
+    with engine.connect() as conn:
+      step_count = conn.execute(
+          sa.select(sa.func.count()).select_from(schema.STEPS_TABLE)
+      ).scalar_one()
+    self.assertEqual(step_count, 0)
+
+  def test_process_batch_when_pg_wire_stops_mid_batch_replays_via_sqlalchemy(
+      self,
+  ) -> None:
+    engine = schema_testing.create_sqlite_memory_engine()
+    self.addCleanup(engine.dispose)
+    schema.METADATA.create_all(engine)
+    writer = _TestAsyncSqlWriter(engine=engine, batch_mode=True)
+    self.addCleanup(writer.close)
+
+    with mock.patch.object(
+        pg_wire, "try_upsert_step", side_effect=[True, False, False, False]
+    ):
+      with writer.hold_batch():
+        writer.enqueue_write(
+            run_id="run_1",
+            metadata=trajectory_testing.METADATA_1,
+            step=trajectory_testing.STEP_2_1,
+        )
+        writer.enqueue_write(
+            run_id="run_1",
+            metadata=trajectory_testing.METADATA_2,
+            step=trajectory_testing.STEP_2_2,
+        )
+      writer.flush()
+
+    with engine.connect() as conn:
+      step_count = conn.execute(
+          sa.select(sa.func.count()).select_from(schema.STEPS_TABLE)
+      ).scalar_one()
+    self.assertEqual(step_count, 2)
+
+  def test_get_trajectories_when_pg_wire_returns_rows_rehydrates_json_steps(
+      self,
+  ) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "seam.db")
+    db_url = f"sqlite:///{db_path}"
+    store_instance = sql_store.SqlTrajectoryStore(db_url=db_url, run_id="run_1")
+    self.addCleanup(store_instance.close)
+
+    step = trajectory_testing.STEP_1_1
+    traj_id = trajectory_testing.TRAJECTORY_ID_1
+    metadata = trajectory_testing.make_metadata(trajectory_id=traj_id)
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    with store_instance._engine.begin() as conn:
+      conn.execute(
+          sa.insert(schema.RUNS_TABLE).values(
+              run_id="run_1",
+              agent_name="test_agent",
+              status=schema.Status.RUNNING,
+              created_at=now,
+          )
+      )
+      conn.execute(
+          sa.insert(schema.TRAJECTORIES_TABLE).values(
+              run_id="run_1",
+              trajectory_id=traj_id,
+              trajectory_metadata=metadata.model_dump(mode="json"),
+              created_at=now,
+              updated_at=now,
+          )
+      )
+
+    fake_pg_rows = [(traj_id, step.model_dump_json(), None)]
+    with mock.patch.object(
+        pg_wire, "try_fetch_steps", return_value=fake_pg_rows
+    ) as mock_try_fetch:
+      trajectories = store_instance.get_trajectories([traj_id])
+
+      mock_try_fetch.assert_called_once()
+      self.assertLen(trajectories, 1)
+      self.assertEqual(trajectories[0].trajectory_id, traj_id)
+      self.assertLen(trajectories[0].steps, 1)
+      self.assertEqual(trajectories[0].steps[0].step_id, step.step_id)
+      self.assertEqual(trajectories[0].steps[0].message, step.message)
 
 
 if __name__ == "__main__":
