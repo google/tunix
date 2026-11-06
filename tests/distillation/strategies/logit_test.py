@@ -218,6 +218,24 @@ class LogitStrategyTest(parameterized.TestCase):
     for k, v in ref_metrics.items():
       npt.assert_allclose(metrics[k], v, rtol=1e-5, err_msg=k)
 
+  def test_only_all_zero_label_rows_are_padding(self):
+    """Weighted label rows with a negative sum are real positions."""
+    s_key, l_key = jax.random.split(jax.random.key(2))
+    batch_size, num_classes = 4, 10
+    student = self._get_dummy_logits(s_key, batch_size, num_classes)
+    labels = self._get_dummy_labels(l_key, batch_size, num_classes)
+    labels *= jnp.array([1.0, -1.0, 2.0, -0.5])[:, None]
+    strategy = LogitStrategy(
+        student_forward_fn=self.dummy_fn,
+        teacher_forward_fn=self.dummy_fn,
+        labels_fn=self.dummy_fn,
+    )
+
+    loss, _ = strategy.compute_eval_loss(student, labels)
+
+    ce = -jnp.sum(labels * jax.nn.log_softmax(student), axis=-1)
+    npt.assert_allclose(loss, jnp.mean(ce), rtol=1e-5)
+
   def test_get_train_loss(self):
     strategy = LogitStrategy(
         student_forward_fn=lambda _, student_output, **kwargs: student_output,

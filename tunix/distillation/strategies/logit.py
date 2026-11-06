@@ -29,9 +29,9 @@ def _masked_mean(values: jax.Array, labels: jax.Array) -> jax.Array:
 
   Padding positions are expected to carry an all-zero label row (see
   `examples/logit_distillation.ipynb`), so they are excluded from the mean.
-  Un-padded inputs, where every label row sums to 1, reduce to `jnp.mean`.
+  Un-padded inputs, where every label row is non-zero, reduce to `jnp.mean`.
   """
-  valid = (jnp.sum(labels, axis=-1) > 0).astype(values.dtype)
+  valid = jnp.any(labels != 0, axis=-1).astype(values.dtype)
   return jnp.sum(values * valid) / jnp.maximum(jnp.sum(valid), 1.0)
 
 
