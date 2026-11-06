@@ -3850,28 +3850,17 @@ class RLProgramTest(absltest.TestCase):
           logger.get_metric("rewards", "fn_a", "train"), 15.0
       )
       self.assertAlmostEqual(logger.get_metric("rewards", "fn_b", "train"), 1.5)
-      self.assertAlmostEqual(
-          logger.get_metric("trajectory_rewards", "mean", "train"), 2.5
-      )
-      self.assertAlmostEqual(
-          logger.get_metric("trajectory_rewards", "min", "train"), 1.0
-      )
-      self.assertAlmostEqual(
-          logger.get_metric("trajectory_rewards", "max", "train"), 4.0
-      )
-      # Per-group sums (3.0 and 7.0) are averaged across groups, as in the RL
-      # learners.
-      self.assertAlmostEqual(
-          logger.get_metric("trajectory_rewards", "sum", "train"), 5.0
+      self.assertAlmostEqual(logger.get_metric("rewards", "env", "train"), 2.5)
+      self.assertFalse(
+          logger.metric_exists("trajectory_rewards", "mean", "train")
       )
       prog.close()
 
       # 4. Two groups with unequal valid counts (Group 0 has 1 invalid + 1 valid
       # item with trajectory_reward=1.0; Group 1 has 2 valid items with
-      # trajectory_rewards=[3.0, 5.0]): invalid items are not scored, and the
-      # per-group trajectory_rewards metrics are reduced across groups like the
-      # RL learners' `MetricsBuffer` does, so mean = (1.0 + 4.0) / 2 = 2.5 and
-      # sum = (1.0 + 8.0) / 2 = 4.5.
+      # trajectory_rewards=[3.0, 5.0]): invalid items are not scored, and
+      # `rewards/env` concatenates per-trajectory env rewards across all valid
+      # items so mean([1.0, 3.0, 5.0]) = 3.0.
       self.algo_config.reward_mode = "env"
       prog_unequal = self._create_program(
           dataset=["prompt_0", "prompt_1"],
@@ -3942,16 +3931,10 @@ class RLProgramTest(absltest.TestCase):
           unequal_logger.get_metric("rewards", "mean", "train"), 8.0
       )
       self.assertAlmostEqual(
-          unequal_logger.get_metric("trajectory_rewards", "mean", "train"), 2.5
+          unequal_logger.get_metric("rewards", "env", "train"), 3.0
       )
-      self.assertAlmostEqual(
-          unequal_logger.get_metric("trajectory_rewards", "min", "train"), 1.0
-      )
-      self.assertAlmostEqual(
-          unequal_logger.get_metric("trajectory_rewards", "max", "train"), 5.0
-      )
-      self.assertAlmostEqual(
-          unequal_logger.get_metric("trajectory_rewards", "sum", "train"), 4.5
+      self.assertFalse(
+          unequal_logger.metric_exists("trajectory_rewards", "mean", "train")
       )
       prog_unequal.close()
 
@@ -4056,29 +4039,12 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(logger.get_metric("rewards", "max", "train"), 2.5)
       self.assertTrue(logger.metric_exists("rewards", "sum", "train"))
       self.assertAlmostEqual(logger.get_metric("rewards", "sum", "train"), 5.0)
-      self.assertTrue(
+      self.assertFalse(logger.metric_exists("rewards", "env", "train"))
+      self.assertFalse(
           logger.metric_exists("trajectory_rewards", "mean", "train")
       )
-      self.assertAlmostEqual(
-          logger.get_metric("trajectory_rewards", "mean", "train"), 2.5
-      )
-      self.assertTrue(
-          logger.metric_exists("trajectory_rewards", "min", "train")
-      )
-      self.assertAlmostEqual(
-          logger.get_metric("trajectory_rewards", "min", "train"), 2.5
-      )
-      self.assertTrue(
-          logger.metric_exists("trajectory_rewards", "max", "train")
-      )
-      self.assertAlmostEqual(
-          logger.get_metric("trajectory_rewards", "max", "train"), 2.5
-      )
-      self.assertTrue(
+      self.assertFalse(
           logger.metric_exists("trajectory_rewards", "sum", "train")
-      )
-      self.assertAlmostEqual(
-          logger.get_metric("trajectory_rewards", "sum", "train"), 5.0
       )
 
       # Advantage Metrics
@@ -4344,12 +4310,11 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(
           logger.get_metric("actor_mesh/rewards", "mean", "eval"), 3.0
       )
-      self.assertTrue(
-          logger.metric_exists("actor_mesh/trajectory_rewards", "mean", "eval")
+      self.assertFalse(
+          logger.metric_exists("actor_mesh/rewards", "env", "eval")
       )
-      self.assertAlmostEqual(
-          logger.get_metric("actor_mesh/trajectory_rewards", "mean", "eval"),
-          3.0,
+      self.assertFalse(
+          logger.metric_exists("actor_mesh/trajectory_rewards", "mean", "eval")
       )
       self.assertTrue(logger.metric_exists("actor_mesh/actor", "loss", "eval"))
       self.assertAlmostEqual(
@@ -5232,7 +5197,10 @@ class RLProgramTest(absltest.TestCase):
         self.assertIn("actor/train/loss", logged_keys)
         self.assertIn("actor/train/learning_rate", logged_keys)
         self.assertIn("rewards/train/mean", logged_keys)
-        self.assertIn("trajectory_rewards/train/mean", logged_keys)
+        self.assertNotIn("rewards/train/env", logged_keys)
+        self.assertFalse(
+            any(k.startswith("trajectory_rewards/") for k in logged_keys)
+        )
         self.assertIn("rewards/train/advantage/abs_mean", logged_keys)
         self.assertIn("rewards/train/advantage/nonzero_frac", logged_keys)
         self.assertIn("rollout/train/prompts/mean_length", logged_keys)

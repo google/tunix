@@ -30,6 +30,13 @@ from tunix.rl.agentic import agentic_rl_learner
 from tunix.rl.rollout import base_rollout
 
 
+def _dummy_reward_fn(
+    prompts: list[str], completions: list[str], **kwargs: Any
+) -> list[float]:
+  del completions, kwargs
+  return [0.0] * len(prompts)
+
+
 class DummyLearner(agentic_rl_learner.AgenticRLLearner):
 
   def _process_results(self, **kwargs):
@@ -61,7 +68,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
     ):
       DummyLearner(
           rl_engine=rl_engine,
-          reward_fns=mock.Mock(),
+          reward_fns=_dummy_reward_fn,
           algo_config=algo_config,
       )
 
@@ -84,7 +91,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, r"must have return_logprobs=True"):
       DummyLearner(
           rl_engine=rl_engine,
-          reward_fns=mock.Mock(),
+          reward_fns=_dummy_reward_fn,
           algo_config=algo_config,
       )
 
@@ -117,7 +124,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
     ):
       DummyLearner(
           rl_engine=rl_engine,
-          reward_fns=mock.Mock(),
+          reward_fns=_dummy_reward_fn,
           algo_config=algo_config,
       )
 
@@ -145,7 +152,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
     ):
       DummyLearner(
           rl_engine=rl_engine,
-          reward_fns=mock.Mock(),
+          reward_fns=_dummy_reward_fn,
           algo_config=algo_config,
       )
 
@@ -175,7 +182,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
       algo_config = agentic_rl_learner.AgenticRLConfig(max_response_length=10)
       learner = DummyLearner(
           rl_engine=rl_engine,
-          reward_fns=mock.Mock(),
+          reward_fns=_dummy_reward_fn,
           algo_config=algo_config,
       )
       train_dataset = [{"prompt": ["p1"]}]
@@ -217,7 +224,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
       algo_config = agentic_rl_learner.AgenticRLConfig(max_response_length=10)
       learner = DummyLearner(
           rl_engine=rl_engine,
-          reward_fns=mock.Mock(),
+          reward_fns=_dummy_reward_fn,
           algo_config=algo_config,
       )
       self.assertTrue(learner._packing_enabled)
@@ -254,7 +261,7 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
     with mock.patch.object(rl_utils, "is_sharing_weights", return_value=False):
       learner = DummyLearner(
           rl_engine=engine,
-          reward_fns=mock.Mock(),
+          reward_fns=_dummy_reward_fn,
           algo_config=agentic_grpo_learner.GRPOConfig(),
           chat_parser=object(),
       )

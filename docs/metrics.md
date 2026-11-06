@@ -66,6 +66,10 @@ the RL algorithm (e.g., PPO), reward modeling, and generation.
     (if applicable).
 *   **`rewards/<reward_fn_name>`**: If using multiple reward functions,
     individual reward components are logged by name.
+*   **`rewards/env`**: When `reward_mode="env"` is combined with additional
+    `reward_fns`, the environment trajectory reward component is logged
+    alongside each `rewards/<reward_fn_name>` (omitted when `reward_fns` is
+    empty so pure environment rewards are not duplicated under `rewards/*`).
 
 #### Policy & Value (PPO)
 

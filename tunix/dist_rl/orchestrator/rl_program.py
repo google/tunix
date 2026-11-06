@@ -1143,11 +1143,10 @@ class StandardRLProgram(RLProgram):
     reward_min = float(np.min(rewards_to_log)) if rewards_to_log else 0.0
     reward_max = float(np.max(rewards_to_log)) if rewards_to_log else 0.0
     reward_sum = float(np.sum(rewards_to_log)) if rewards_to_log else 0.0
-    # Reduce each reward manager metric over all of the step's groups with its
-    # own aggregation function, the same way `MetricsBuffer` reduces per-call
-    # values in the RL learners: per-group scalars such as
-    # `trajectory_rewards/mean` are reduced across groups, and per-trajectory
-    # arrays such as `rewards/<reward_fn>` across all trajectories.
+    # Reduce each per-trajectory reward manager metric (such as
+    # `rewards/<reward_fn>` and `rewards/env`) across all valid trajectories in
+    # the step with its own aggregation function; `rewards/{mean,std,min,max}`
+    # and `rewards/sum` below are computed over `rewards_to_log`.
     reward_metrics_accum: dict[
         str, tuple[RewardLogMetricAggFn, list[np.ndarray]]
     ] = {}
