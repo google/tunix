@@ -92,7 +92,8 @@ def _instantiate_components(
         f' ({model_runner_config.num_scheduler_steps}).'
     )
 
-  kv_cache_manager = transformer.init_kv_cache(cache_config)  # pyrefly: ignore[missing-attribute]
+  with jax.set_mesh(model_runner_config.mesh):
+    kv_cache_manager = transformer.init_kv_cache(cache_config)  # pyrefly: ignore[missing-attribute]
 
   # A sliding window layer must hold the KV of every token in its window while
   # it processes a prefill chunk, so a longer chunk size is truncated to the

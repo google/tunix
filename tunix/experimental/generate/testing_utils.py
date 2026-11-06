@@ -177,7 +177,6 @@ def make_engine(
           max_device_size_gib=max_device_size_gib,
           page_size=PAGE_SIZE,
           dtype=jnp.float32,
-          mesh=mesh(),
       ),
       scheduler_config=configs.SchedulerConfig(
           max_num_batched_tokens=max_num_batched_tokens,

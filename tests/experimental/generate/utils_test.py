@@ -87,9 +87,9 @@ class CacheSizingTest(parameterized.TestCase):
         max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
-        mesh=_create_mesh(),
     )
-    element_shape = utils.derive_kv_geometry(cfg, num_kv_heads=8, head_dim=64)
+    with jax.set_mesh(_create_mesh()):
+      element_shape = utils.derive_kv_geometry(cfg, num_kv_heads=8, head_dim=64)
     self.assertEqual(element_shape, (8, 2, 64))
 
   def test_derive_kv_geometry_pads_kv_heads_to_tp_size(self):
@@ -97,9 +97,9 @@ class CacheSizingTest(parameterized.TestCase):
         max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
-        mesh=_create_mesh(),
     )
-    element_shape = utils.derive_kv_geometry(cfg, num_kv_heads=1, head_dim=64)
+    with jax.set_mesh(_create_mesh()):
+      element_shape = utils.derive_kv_geometry(cfg, num_kv_heads=1, head_dim=64)
     self.assertEqual(element_shape, (2, 2, 64))
 
   def test_derive_kv_geometry_invalid_tp_divisibility_raises(self):
@@ -107,28 +107,30 @@ class CacheSizingTest(parameterized.TestCase):
         max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
-        mesh=_create_mesh((4,), ("tp",)),
     )
-    with self.assertRaisesRegex(ValueError, r"tp_size \(4\) must be divisible"):
-      utils.derive_kv_geometry(cfg, num_kv_heads=3, head_dim=64)
-    with self.assertRaisesRegex(
-        ValueError, r"num_kv_heads \(6\) must be divisible"
-    ):
-      utils.derive_kv_geometry(cfg, num_kv_heads=6, head_dim=64)
+    with jax.set_mesh(_create_mesh((4,), ("tp",))):
+      with self.assertRaisesRegex(
+          ValueError, r"tp_size \(4\) must be divisible"
+      ):
+        utils.derive_kv_geometry(cfg, num_kv_heads=3, head_dim=64)
+      with self.assertRaisesRegex(
+          ValueError, r"num_kv_heads \(6\) must be divisible"
+      ):
+        utils.derive_kv_geometry(cfg, num_kv_heads=6, head_dim=64)
 
   def test_derive_kv_geometry_invalid_kv_packing_divisibility_raises(self):
     cfg = configs.CacheConfig(
         max_device_size_gib=1.0,
         dtype=jnp.int8,
         page_size=16,
-        mesh=_create_mesh(),
     )
-    with self.assertRaisesRegex(
-        ValueError,
-        r"2 \* \(num_kv_heads // tp_size\) \(2\) must be divisible by "
-        r"kv_packing \(4\)\.",
-    ):
-      utils.derive_kv_geometry(cfg, num_kv_heads=2, head_dim=64)
+    with jax.set_mesh(_create_mesh()):
+      with self.assertRaisesRegex(
+          ValueError,
+          r"2 \* \(num_kv_heads // tp_size\) \(2\) must be divisible by "
+          r"kv_packing \(4\)\.",
+      ):
+        utils.derive_kv_geometry(cfg, num_kv_heads=2, head_dim=64)
 
   @parameterized.named_parameters(
       dict(
@@ -169,19 +171,18 @@ class CacheSizingTest(parameterized.TestCase):
   )
   def test_derive_cache_sharding(self, shape, axis_names, dp_axis, tp_axis):
     mesh = _create_mesh(shape, axis_names)
-    cfg = configs.CacheConfig(
-        max_device_size_gib=1.0,
-        dtype=jnp.bfloat16,
-        page_size=16,
-        mesh=mesh,
-    )
+    with jax.set_mesh(mesh):
+      sharding = utils.derive_cache_sharding()
     self.assertEqual(
-        utils.derive_cache_sharding(cfg),
+        sharding,
         jax.sharding.NamedSharding(
             mesh,
             jax.sharding.PartitionSpec(dp_axis, None, tp_axis, None, None),
         ),
     )
+
+  def test_derive_cache_sharding_without_active_mesh_returns_none(self):
+    self.assertIsNone(utils.derive_cache_sharding())
 
   def test_compute_page_limits(self):
     cfg = configs.CacheConfig(
@@ -189,13 +190,12 @@ class CacheSizingTest(parameterized.TestCase):
         max_host_size_gib=(512 * 1024) / _GIB,
         dtype=jnp.bfloat16,
         page_size=16,
-        mesh=_create_mesh((1,), ("tp",)),
     )
     element_shape = utils.derive_kv_geometry(cfg, num_kv_heads=8, head_dim=64)
     num_device_pages, num_host_pages = utils.compute_page_limits(
         config=cfg,
         element_shapes=(element_shape,) * 4,
-        sharding=utils.derive_cache_sharding(cfg),
+        sharding=utils.derive_cache_sharding(),
     )
     self.assertEqual(num_device_pages, 8)
     self.assertEqual(num_host_pages, 4)
@@ -205,7 +205,6 @@ class CacheSizingTest(parameterized.TestCase):
         max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
-        mesh=_create_mesh(),
     )
     with self.assertRaisesRegex(
         ValueError, r"element_shapes must not be empty\."
@@ -213,7 +212,7 @@ class CacheSizingTest(parameterized.TestCase):
       utils.compute_page_limits(
           config=cfg,
           element_shapes=(),
-          sharding=utils.derive_cache_sharding(cfg),
+          sharding=utils.derive_cache_sharding(),
       )
 
   # One page is 16 tokens * (16 KV heads * 64 head dim) * 2 bytes = 32 KiB.
@@ -263,13 +262,12 @@ class CacheSizingTest(parameterized.TestCase):
         (-1, expected_device_pages_one_byte_short, 2),
         (-0.2, expected_device_pages_one_byte_short, 2),
     ):
-      with self.subTest(budget_offset=budget_offset):
+      with self.subTest(budget_offset=budget_offset), jax.set_mesh(mesh):
         cfg = configs.CacheConfig(
             max_device_size_gib=(8 * page_bytes + budget_offset) / _GIB,
             max_host_size_gib=(3 * page_bytes + budget_offset) / _GIB,
             dtype=jnp.bfloat16,
             page_size=16,
-            mesh=mesh,
         )
         element_shape = utils.derive_kv_geometry(
             cfg, num_kv_heads=8, head_dim=64
@@ -277,7 +275,7 @@ class CacheSizingTest(parameterized.TestCase):
         num_device_pages, num_host_pages = utils.compute_page_limits(
             config=cfg,
             element_shapes=(element_shape,),
-            sharding=utils.derive_cache_sharding(cfg),
+            sharding=utils.derive_cache_sharding(),
         )
         self.assertEqual(num_device_pages, expected_device)
         self.assertEqual(num_host_pages, expected_host)
@@ -289,7 +287,6 @@ class CacheSizingTest(parameterized.TestCase):
         max_device_size_gib=(3 * (65536 + 16384)) / _GIB,
         dtype=jnp.bfloat16,
         page_size=16,
-        mesh=_create_mesh((1,), ("tp",)),
     )
     geometries = (
         configs.CacheGeometry(num_kv_heads=8, head_dim=64),
@@ -308,7 +305,7 @@ class CacheSizingTest(parameterized.TestCase):
     num_device_pages, _ = utils.compute_page_limits(
         config=cfg,
         element_shapes=element_shapes,
-        sharding=utils.derive_cache_sharding(cfg),
+        sharding=utils.derive_cache_sharding(),
     )
     self.assertEqual(num_device_pages, 3)
 
@@ -319,14 +316,14 @@ class CacheSizingTest(parameterized.TestCase):
         max_device_size_gib=(37 * 1024) / _GIB,
         dtype=jnp.bfloat16,
         page_size=16,
-        mesh=_create_mesh((4,), ("dp",)),
     )
-    element_shape = utils.derive_kv_geometry(cfg, num_kv_heads=2, head_dim=8)
-    num_device_pages, _ = utils.compute_page_limits(
-        config=cfg,
-        element_shapes=(element_shape,),
-        sharding=utils.derive_cache_sharding(cfg),
-    )
+    with jax.set_mesh(_create_mesh((4,), ("dp",))):
+      element_shape = utils.derive_kv_geometry(cfg, num_kv_heads=2, head_dim=8)
+      num_device_pages, _ = utils.compute_page_limits(
+          config=cfg,
+          element_shapes=(element_shape,),
+          sharding=utils.derive_cache_sharding(),
+      )
     # One page is 1 KiB, so each of the 4 devices holds 37 pages.
     self.assertEqual(num_device_pages, 4 * 37)
 
