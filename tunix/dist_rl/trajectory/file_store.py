@@ -6,12 +6,14 @@ from concurrent import futures
 import contextlib
 import dataclasses
 import functools
+import importlib
 import re
 import types
 from typing import Any, ClassVar, Final, TypeVar
 
 from absl import logging
 from etils import epath
+from etils.epath import backend as epath_backend
 import pydantic
 from tunix.dist_rl.trajectory import async_writer
 from tunix.dist_rl.trajectory import base_store as store
@@ -106,8 +108,81 @@ def _is_local_filesystem(path: epath.Path) -> bool:
   return not path.is_absolute() or path.as_uri().startswith("file://")
 
 
+@functools.lru_cache(maxsize=1)
+def _load_arrow_gcs_fs() -> tuple[Any, Any] | None:
+  """Loads `(pyarrow.fs, GcsFileSystem())` when PyArrow GCS is available."""
+  try:
+    pafs = importlib.import_module("pyarrow.fs")
+    return (pafs, pafs.GcsFileSystem())
+  except (
+      AttributeError,
+      ImportError,
+      NotImplementedError,
+      OSError,
+      ValueError,
+  ):
+    return None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _ArrowGcsTarget:
+  """Resolved PyArrow GCS filesystem client and bucket/object path."""
+
+  pafs: Any
+  fs: Any
+  object_path: str
+
+  def list_child_names(self, *, file_type: Any) -> Iterator[str]:
+    """Yields direct child names matching `file_type` under `object_path`."""
+    selector = self.pafs.FileSelector(
+        self.object_path, allow_not_found=True, recursive=False
+    )
+    for info in self.fs.get_file_info(selector):
+      if info.type == file_type and info.base_name:
+        yield info.base_name
+
+
+def _resolve_arrow_gcs_target(
+    path: epath.Path,
+) -> _ArrowGcsTarget | None:
+  """Returns `_ArrowGcsTarget` for `fsspec`-backed GCS paths."""
+  backend = getattr(path, "_backend", None)
+  if not isinstance(backend, epath_backend._FileSystemSpecBackend):  # pylint: disable=protected-access
+    return None
+  uri = path.as_uri()
+  if not uri.startswith("gs://"):
+    return None
+  object_path = uri.removeprefix("gs://").rstrip("/")
+  fs_pair = _load_arrow_gcs_fs()
+  if not object_path or fs_pair is None:
+    return None
+  pafs, arrow_fs = fs_pair
+  return _ArrowGcsTarget(pafs=pafs, fs=arrow_fs, object_path=object_path)
+
+
+def _iter_file_entries(dir_path: epath.Path) -> Iterator[epath.Path]:
+  """Yields child file paths inside `dir_path`."""
+  target = _resolve_arrow_gcs_target(dir_path)
+  if target is not None:
+    for name in target.list_child_names(file_type=target.pafs.FileType.File):
+      yield dir_path / name
+    return
+  for entry in dir_path.iterdir():
+    if not entry.is_dir():
+      yield entry
+
+
 def _write_text(path: epath.Path, content: str) -> None:
   """Writes `content` to `path`, using atomic temp-file replacement locally."""
+  target = _resolve_arrow_gcs_target(path)
+  if target is not None:
+    encoded = content.encode("utf-8")
+    with target.fs.open_output_stream(
+        target.object_path, compression=None
+    ) as stream:
+      stream.write(encoded)
+    return
+
   if not _is_local_filesystem(path):
     path.write_text(content)
     return
@@ -127,6 +202,18 @@ def _write_text(path: epath.Path, content: str) -> None:
     raise
 
 
+def _read_text(
+    path: epath.Path,
+    target: _ArrowGcsTarget | None = None,
+) -> str:
+  """Reads UTF-8 text from `path`, releasing the GIL on `gs://`."""
+  resolved = target if target is not None else _resolve_arrow_gcs_target(path)
+  if resolved is not None:
+    with resolved.fs.open_input_file(resolved.object_path) as stream:
+      return stream.read().decode("utf-8")
+  return path.read_text()
+
+
 def _read_text_or_none(path: epath.Path) -> str | None:
   """Returns the contents of the file at `path`, or None if it is missing.
 
@@ -137,12 +224,20 @@ def _read_text_or_none(path: epath.Path) -> str | None:
   Args:
     path: The path of the file to read.
   """
+  target = _resolve_arrow_gcs_target(path)
   try:
-    return path.read_text()
+    return _read_text(path, target)
   except FileNotFoundError:
     return None
   except OSError:
-    if not path.exists():
+    if target is not None:
+      exists = (
+          target.fs.get_file_info(target.object_path).type
+          != target.pafs.FileType.NotFound
+      )
+    else:
+      exists = path.exists()
+    if not exists:
       return None
     raise
 
@@ -324,7 +419,7 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
         )
       merged = _merge_metrics(existing, task.metrics)
       if merged != existing:
-        task.metrics_path.write_text(merged.model_dump_json())
+        _write_text(task.metrics_path, merged.model_dump_json())
       self._metrics_by_trajectory_id[traj_id] = merged
       self._metrics_by_trajectory_id.move_to_end(traj_id)
       if len(self._metrics_by_trajectory_id) > _MAX_CACHED_METRICS:
@@ -510,7 +605,11 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       get_path: Callable[[str], epath.Path],
   ) -> Iterator[Iterator[tuple[str, str | None]]]:
     """Opens parallel file reads yielding `(trajectory_id, text_or_none)`."""
-    if trajectory_ids is None and not self.root_dir.exists():
+    if (
+        trajectory_ids is None
+        and _resolve_arrow_gcs_target(self.root_dir) is None
+        and not self.root_dir.exists()
+    ):
       yield iter(())
       return
     executor = futures.ThreadPoolExecutor(
@@ -575,7 +674,9 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
           if trajectory_ids is None:
             if not any(
                 _STEP_FILENAME_REGEX.match(entry.name)
-                for entry in self.get_trajectory_dir(traj_id).iterdir()
+                for entry in _iter_file_entries(
+                    self.get_trajectory_dir(traj_id)
+                )
             ):
               continue
             meta_text = _read_text_or_none(
@@ -705,6 +806,20 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     Returns:
       An iterator over the trajectory IDs, sorted naturally by trajectory ID.
     """
+    target = _resolve_arrow_gcs_target(self.root_dir)
+    if target is not None:
+      names = target.list_child_names(file_type=target.pafs.FileType.Directory)
+      return iter(
+          sorted(
+              (
+                  match.group("trajectory_id")
+                  for name in names
+                  if (match := _TRAJECTORY_DIR_REGEX.match(name))
+              ),
+              key=_natural_sort_key,
+          )
+      )
+
     matched_entries = sorted(
         (
             (match.group("trajectory_id"), entry)
@@ -741,12 +856,12 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       executor: The executor to read the step files on.
 
     Returns:
-      Futures of the contents of the step files, in the order that `iterdir()`
-      lists the files.
+      Futures of the contents of the step files, in the order that
+      `_iter_file_entries` lists the files.
     """
     return collections.deque(
-        executor.submit(entry.read_text)
-        for entry in self.get_trajectory_dir(trajectory_id).iterdir()
+        executor.submit(_read_text, entry)
+        for entry in _iter_file_entries(self.get_trajectory_dir(trajectory_id))
         if _STEP_FILENAME_REGEX.match(entry.name)
     )
 
