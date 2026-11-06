@@ -650,8 +650,8 @@ class LLMEngine:
         utils.next_power_of_2(len(batch_tokens)),
         self._scheduler_config.max_num_batched_tokens,
     )
-    tokens = np.zeros((num_tokens,), dtype=np.int32)
-    tokens[: len(batch_tokens)] = batch_tokens
+    tokens = np.zeros((1, num_tokens), dtype=np.int32)
+    tokens[0, : len(batch_tokens)] = batch_tokens
 
     target_idxs = np.full((num_rows,), num_tokens, dtype=np.int32)
     for prev_row, decode_row in prev_to_decode_row.items():
@@ -663,7 +663,7 @@ class LLMEngine:
         },
         kv_lens=kv_lens,
         query_lens=query_lens,
-        distribution=np.asarray(distribution, dtype=np.int32),
+        distribution=np.asarray((distribution,), dtype=np.int32),
         decode_only=bool(
             distribution[0] == distribution[2] and distribution[2] > 0
         ),

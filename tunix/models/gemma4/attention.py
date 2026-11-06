@@ -840,19 +840,24 @@ class Attention(nnx.Module):
     """Attends a ragged batch through the paged KV cache.
 
     Args:
-      x: `[1, num_tokens, embed_dim]` the batch's tokens, back to back.
-      segment_pos: `[1, num_tokens]` each token's position in its sequence.
+      x: `[num_groups, tokens_per_group, embed_dim]` the batch's tokens, one
+        row per DP group.
+      segment_pos: `[num_groups, tokens_per_group]` each token's position in its
+        sequence.
       kv_cache: this layer's paged KV cache, in `paged_attention`'s layout.
       metadata: the batch's ragged layout and page tables.
       cache_name: the key of `kv_cache` in `metadata.page_indices`.
       update_kv_cache: whether to write this layer's K/V into `kv_cache`.
         KV-shared layers pass False: their lender already wrote this step's
         K/V into the shared cache, and the kernel reads it from there.
-      mesh: the mesh to shard the kernel over, by KV head.
+      mesh: the mesh to shard the kernel over, by DP group and KV head.
 
     Returns:
-      A tuple of (updated `kv_cache`, `[1, num_tokens, embed_dim]` output).
+      A tuple of (updated `kv_cache`,
+      `[num_groups, tokens_per_group, embed_dim]` output).
     """
+    num_groups, tokens_per_group, _ = x.shape
+    num_tokens = num_groups * tokens_per_group
     x = x.astype(self.config.dtype)
     queries = self._query_norm(self.q_einsum(x))
     queries = apply_rope(
@@ -861,15 +866,16 @@ class Attention(nnx.Module):
         base_frequency=self.rope_base_frequency,
         scale_factor=self.rope_scale_factor,
         rope_proportion=self.rope_proportion,
-    )[0]
+    ).reshape(num_tokens, self.config.num_heads, self.head_dim)
     if update_kv_cache:
       keys, values, _ = self._compute_kv_projections(x, segment_pos, None)
-      keys, values = keys[0], values[0]
+      keys = keys.reshape(num_tokens, self.num_kv_heads, self.head_dim)
+      values = values.reshape(num_tokens, self.num_kv_heads, self.head_dim)
     else:
       # The kernel reads every K/V from the shared cache and ignores these,
       # but its signature still takes them.
       keys = jnp.zeros(
-          (queries.shape[0], self.num_kv_heads, self.head_dim), queries.dtype
+          (num_tokens, self.num_kv_heads, self.head_dim), queries.dtype
       )
       values = keys
 
@@ -891,7 +897,10 @@ class Attention(nnx.Module):
         sm_scale=1.0,
     )
 
-    attn_output = self.attn_vec_einsum(attn_output[None])
+    attn_output = attn_output.reshape(
+        num_groups, tokens_per_group, self.config.num_heads, self.head_dim
+    )
+    attn_output = self.attn_vec_einsum(attn_output)
     attn_output = shard(attn_output, self.config.shd_config.act_btd)
     return kv_cache, attn_output
 

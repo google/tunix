@@ -703,20 +703,22 @@ class Gemma4(BackendMappingMixin, nnx.Module):
     """Runs a ragged batch through the paged KV cache.
 
     Args:
-      tokens: `[num_tokens]` the batch's tokens, back to back.
-      positions: `[num_tokens]` each token's position in its sequence.
+      tokens: `[num_groups, tokens_per_group]` each DP group's padded ragged
+        tokens.
+      positions: `[num_groups, tokens_per_group]` each token's position in its
+        sequence.
       cache: the paged KV caches, keyed by `init_kv_cache` name.
       metadata: the batch's ragged layout and page tables.
       mesh: the mesh to shard attention over.
-      logits_idxs: `[num_logits]` the tokens to compute logits for, or None for
-        every token.
+      logits_idxs: `[num_groups, logits_per_group]` per-group token indices to
+        compute logits for, or None for every token.
 
     Returns:
       A tuple of (`[num_logits, vocab_size]` logits, updated cache).
     """
-    # The ragged tokens run as one sequence of batch 1, so every layer keeps its
-    # `[B, T, ...]` shapes; only attention sees the ragged layout.
-    tokens, positions = tokens[None], positions[None]
+    # Each DP group runs as one row of the batch axis `B = num_groups`, so
+    # every layer keeps its `[B, T, ...]` shapes and shards `B` across the DP
+    # axes; only attention sees the ragged layout within each group.
     x = self.embedder.encode(tokens)
     per_layer_inputs = None
     if self.config.per_layer_input_dim > 0:
@@ -740,9 +742,9 @@ class Gemma4(BackendMappingMixin, nnx.Module):
     if logits_idxs is not None:
       # Skips unembedding the other tokens, whose logits are the largest
       # activation of a long batch.
-      x = x[:, logits_idxs]
+      x = jnp.take_along_axis(x, logits_idxs[..., None], axis=1)
     logits = self.compute_final_logits(self.final_norm(x))
-    return logits[0], cache
+    return logits.reshape(-1, logits.shape[-1]), cache
 
   def init_kv_cache(
       self, cache_config: generate_configs.CacheConfig

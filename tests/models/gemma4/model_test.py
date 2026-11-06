@@ -269,12 +269,12 @@ class ModelTest(parameterized.TestCase):
         page_indices={'layer_0': pages_0, 'layer_1': pages_1},
         kv_lens=np.array([*lens, 0], dtype=np.int32),
         query_lens=np.array([*lens, 0], dtype=np.int32),
-        distribution=np.array([0, 0, 2], dtype=np.int32),
+        distribution=np.array([[0, 0, 2]], dtype=np.int32),
     )
-    padded_tokens = jnp.concatenate([*seqs, jnp.zeros((2,), jnp.int32)])
+    padded_tokens = jnp.concatenate([*seqs, jnp.zeros((2,), jnp.int32)])[None]
     padded_positions = jnp.concatenate(
         [*(jnp.arange(n) for n in lens), jnp.zeros((2,), jnp.int32)]
-    )
+    )[None]
     paged_logits, new_cache = model(
         padded_tokens,
         positions=padded_positions,
@@ -299,15 +299,15 @@ class ModelTest(parameterized.TestCase):
         page_indices={'layer_0': decode_pages_0, 'layer_1': pages_1},
         kv_lens=np.array([*(n + 1 for n in lens), 0], dtype=np.int32),
         query_lens=np.array([1, 1, 0], dtype=np.int32),
-        distribution=np.array([2, 2, 2], dtype=np.int32),
+        distribution=np.array([[2, 2, 2]], dtype=np.int32),
     )
     paged_decode_logits, _ = model(
-        jnp.concatenate([decode_tokens, jnp.zeros((1,), jnp.int32)]),
-        positions=jnp.array([*lens, 0], dtype=jnp.int32),
+        jnp.concatenate([decode_tokens, jnp.zeros((1,), jnp.int32)])[None],
+        positions=jnp.array([[*lens, 0]], dtype=jnp.int32),
         cache=new_cache,
         metadata=decode_metadata,
         mesh=mesh,
-        logits_idxs=jnp.array([0, 1]),
+        logits_idxs=jnp.array([[0, 1]]),
     )
     np.testing.assert_allclose(
         paged_decode_logits,
@@ -318,8 +318,8 @@ class ModelTest(parameterized.TestCase):
 
     with self.assertRaisesRegex(TypeError, 'PagedCache'):
       model(
-          jnp.concatenate(seqs),
-          positions=jnp.concatenate([jnp.arange(n) for n in lens]),
+          jnp.concatenate(seqs)[None],
+          positions=jnp.concatenate([jnp.arange(n) for n in lens])[None],
           cache={'layer_0': {'k': cache['layer_0']}},
           metadata=metadata,
           mesh=mesh,
@@ -332,7 +332,7 @@ class ModelTest(parameterized.TestCase):
       )
 
     # With `logits_idxs`, only those tokens' logits are computed.
-    last_token_idxs = jnp.array([lens[0] - 1, sum(lens) - 1])
+    last_token_idxs = jnp.array([[lens[0] - 1, sum(lens) - 1]])
     last_token_logits, _ = model(
         padded_tokens,
         positions=padded_positions,
@@ -343,7 +343,7 @@ class ModelTest(parameterized.TestCase):
     )
     np.testing.assert_allclose(
         last_token_logits,
-        paged_logits[last_token_idxs],
+        paged_logits[last_token_idxs[0]],
         rtol=1e-4,
         atol=1e-4,
     )

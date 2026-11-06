@@ -27,6 +27,7 @@ interleaved `k0, v0, k1, v1, ...`.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from flax import struct
@@ -41,8 +42,12 @@ import numpy as np
 class PagedAttnMetadata:
   """Execution metadata for paged attention.
 
-  Rows are ordered `[decodes, chunked prefills, full prefills]`, followed by
-  padding rows up to the batch's row capacity.
+  The batch holds `num_groups` equal-sized slices of rows and tokens, one per
+  data parallel (DP) group. Each group's slice has `num_rows // num_groups`
+  rows, ordered `[decodes, chunked prefills, full prefills]` followed by padding
+  rows, and `max_num_tokens // num_groups` tokens, with the group's active
+  tokens packed at the front of its token slice followed by padding tokens. A
+  group's rows index the pages of its own KV caches.
   """
 
   # `[num_rows, max_pages_per_seq]` physical page indices of each row, keyed by
@@ -52,9 +57,9 @@ class PagedAttnMetadata:
   kv_lens: jax.Array | np.ndarray
   # `[num_rows]` number of tokens each row runs this step.
   query_lens: jax.Array | np.ndarray
-  # `[3]` row layout `(num_decodes, num_chunked_end, num_seqs)`: the decodes
-  # are rows `[0, i)`, the chunked prefills `[i, j)` and the full prefills
-  # `[j, k)`.
+  # `[num_groups, 3]` row layout `(num_decodes, num_chunked_end, num_seqs)` of
+  # each DP group, counted from the group's first row: its decodes are its rows
+  # `[0, i)`, its chunked prefills `[i, j)` and its full prefills `[j, k)`.
   distribution: jax.Array | np.ndarray
   # Static promise of at most one query token per active sequence.
   decode_only: bool = struct.field(pytree_node=False, default=False)
@@ -92,9 +97,11 @@ def paged_attention(
     kv_cache: the 5D cache described in the module docstring.
     metadata: the batch's ragged layout and page tables.
     cache_name: the key of `kv_cache` in `metadata.page_indices`.
-    mesh: the mesh to run the kernel over. KV heads are sharded across `'tp'`;
-      everything else is replicated, including the cache pages across data
-      parallelism.
+    mesh: the mesh to run the kernel over. KV heads are sharded across `'tp'`.
+      With several DP groups (`metadata.distribution` has more than one row),
+      the cache pages, queries, keys, values, and metadata are sharded across
+      the DP axes (`'dp'` and `'fsdp'`), and each device runs its group's slice
+      of rows and tokens against its own pages.
     decode_only: static promise of one query token per sequence. Combined with
       `metadata.decode_only`; on GPU it enables vLLM's split-KV decode launch.
     max_q_len: static per-sequence query bound for the JAX path; tokens past it
@@ -120,8 +127,12 @@ def paged_attention(
       q, k, v, cache, kv_lens, page_indices, query_lens, distribution
   ):
     cu_q_lens = jnp.pad(jnp.cumsum(query_lens, dtype=jnp.int32), (1, 0))
+    # `metadata.distribution` has shape `[num_groups, 3]`; `shard_map` slices
+    # axis 0 across `meta_spec = P(dp_spec)` without squeezing it, so each DP
+    # group receives its own `[1, 3]` slice here.
     return _paged_attention(
-        q, k, v, cache, kv_lens, page_indices, cu_q_lens, distribution,
+        q, k, v, cache, kv_lens, page_indices.reshape(-1), cu_q_lens,
+        jnp.squeeze(distribution, axis=0),
         decode_only=decode_only,
         max_q_len=max_q_len,
         backend=backend,
@@ -135,6 +146,15 @@ def paged_attention(
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
+    )
+
+  num_groups = metadata.distribution.shape[0]
+  dp_axes = tuple(axis for axis in mesh.axis_names if axis in ('dp', 'fsdp'))
+  mesh_groups = math.prod(mesh.shape[axis] for axis in dp_axes)
+  if num_groups != mesh_groups:
+    raise ValueError(
+        f'Got {num_groups} DP groups, but the mesh axes {dp_axes} hold'
+        f' {mesh_groups}.'
     )
 
   tp_spec = 'tp' if 'tp' in mesh.shape else None
@@ -162,8 +182,9 @@ def paged_attention(
           f'padded num_kv_heads ({keys.shape[1]}).'
       )
 
-  qkv_spec = P(None, tp_spec, None)
-  cache_spec = P(None, None, tp_spec, None, None)
+  qkv_spec = P(dp_axes, tp_spec, None)
+  meta_spec = P(dp_axes)
+  cache_spec = P(dp_axes, None, tp_spec, None, None)
   return shard_map(
       _call_paged_attention,
       mesh=mesh,
@@ -172,10 +193,10 @@ def paged_attention(
           qkv_spec,  # keys
           qkv_spec,  # values
           cache_spec,  # kv_cache
-          P(),  # kv_lens
-          P(),  # page_indices
-          P(),  # query_lens
-          P(),  # distribution
+          meta_spec,  # kv_lens
+          meta_spec,  # page_indices
+          meta_spec,  # query_lens
+          meta_spec,  # distribution
       ),
       out_specs=(qkv_spec, cache_spec),
       check_rep=False,
@@ -185,9 +206,7 @@ def paged_attention(
       values,
       kv_cache,
       jnp.asarray(metadata.kv_lens, dtype=jnp.int32),
-      jnp.asarray(metadata.page_indices[cache_name], dtype=jnp.int32).reshape(
-          -1
-      ),
+      jnp.asarray(metadata.page_indices[cache_name], dtype=jnp.int32),
       jnp.asarray(metadata.query_lens, dtype=jnp.int32),
       jnp.asarray(metadata.distribution, dtype=jnp.int32),
   )

@@ -53,14 +53,20 @@ def jit_scatter_last_column(
   Out-of-bounds indices in `target_idxs` are dropped.
 
   Args:
-    target: 1D destination array to update.
+    target: Destination array to update.
     source: 2D array whose last column (`source[:, -1]`) supplies the values.
-    target_idxs: 1D index array mapping each row of `source` into `target`.
+    target_idxs: 1D index array mapping each row of `source` into the flattened
+      `target`.
 
   Returns:
     A copy of `target` with `source[:, -1]` written at `target_idxs`.
   """
-  return target.at[target_idxs].set(source[:, -1], mode="drop")
+  return (
+      target.reshape(-1)
+      .at[target_idxs]
+      .set(source[:, -1], mode="drop")
+      .reshape(target.shape)
+  )
 
 
 def derive_kv_geometry(

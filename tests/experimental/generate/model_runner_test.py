@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import dataclasses
+import os
 from unittest import mock
 
 from absl.testing import absltest
@@ -26,6 +27,9 @@ from tunix.experimental.generate import request as request_lib
 from tunix.models import paged_attention
 from tunix.rl import reshard
 from tunix.tests import test_common as tc
+
+# Splitting the sampled rows across DP groups needs up to 4 devices.
+os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
 
 def _logits(row: list[float], num_rows: int = 1) -> jnp.ndarray:
@@ -63,8 +67,12 @@ def _metadata(
     num_rows: int | None = None,
     max_top_k: int = 8,
 ) -> model_runner_lib.SamplingMetadata:
+  n = len(params)
   return model_runner_lib.SamplingMetadata.from_sampling_params(
-      params, num_rows or len(params), max_top_k
+      params,
+      num_rows or n,
+      max_top_k,
+      distribution=np.array([[n, n, n]], dtype=np.int32),
   )
 
 
@@ -591,10 +599,16 @@ class _NextTokenTransformer(nnx.Module):
         + 5.0 * jax.nn.one_hot((tokens + 2) % _VOCAB_SIZE, _VOCAB_SIZE)
     )
     if logits_idxs is not None:
-      logits = logits[logits_idxs]
+      logits = jnp.take_along_axis(logits, logits_idxs[..., None], axis=1)
+    logits = logits.reshape(-1, _VOCAB_SIZE)
+    flat_positions = positions.reshape(-1)
     # The cache keeps its shape, as the decode loop carries it between steps.
     return logits, {
-        'positions': cache['positions'].at[: positions.shape[0]].set(positions)
+        'positions': (
+            cache['positions']
+            .at[: flat_positions.shape[0]]
+            .set(flat_positions)
+        )
     }
 
 
@@ -608,10 +622,10 @@ class _UniformTransformer(nnx.Module):
       self, tokens, positions, cache, metadata, mesh, logits_idxs=None
   ):
     del positions, metadata, mesh
-    logits = self.scale * jnp.zeros((tokens.shape[0], _VOCAB_SIZE))
+    logits = self.scale * jnp.zeros((*tokens.shape, _VOCAB_SIZE))
     if logits_idxs is not None:
-      logits = logits[logits_idxs]
-    return logits, cache
+      logits = jnp.take_along_axis(logits, logits_idxs[..., None], axis=1)
+    return logits.reshape(-1, _VOCAB_SIZE), cache
 
 
 def _rpa_metadata(
@@ -626,7 +640,7 @@ def _rpa_metadata(
       },
       kv_lens=np.array(kv_lens, dtype=np.int32),
       query_lens=np.array(query_lens, dtype=np.int32),
-      distribution=np.array(distribution, dtype=np.int32),
+      distribution=np.array([distribution], dtype=np.int32),
   )
 
 
@@ -643,7 +657,7 @@ class ExecuteStepTest(absltest.TestCase):
     self.metadata = _rpa_metadata(
         kv_lens=[6, 3, 0], query_lens=[1, 3, 0], distribution=[1, 1, 2]
     )
-    self.tokens = jnp.array([4, 7, 8, 9], dtype=jnp.int32)
+    self.tokens = jnp.array([[4, 7, 8, 9]], dtype=jnp.int32)
     self.greedy = (_params(temperature=0.0), _params(temperature=0.0))
 
   def _execute(self, runner, sampling_params=None):
@@ -661,12 +675,12 @@ class ExecuteStepTest(absltest.TestCase):
     )
 
     positions = runner._get_token_positions(
-        tokens=jnp.zeros((6,), dtype=jnp.int32), metadata=metadata
+        tokens=jnp.zeros((1, 6), dtype=jnp.int32), metadata=metadata
     )
 
     # Row 0 starts at 1 - 1 = 0 ([0]); row 1 starts at 7 - 3 = 4 ([4, 5, 6]);
     # the two trailing padding elements belong to row 2 (start 0 -> [0, 1]).
-    np.testing.assert_array_equal(positions, [0, 4, 5, 6, 0, 1])
+    np.testing.assert_array_equal(positions, [[0, 4, 5, 6, 0, 1]])
 
   def test_samples_from_the_last_token_of_each_row(self):
     tokens, logits, logp, _ = self._execute(_runner(_NextTokenTransformer()))
@@ -756,7 +770,7 @@ class ExecuteStepSeedTest(absltest.TestCase):
     )
     tokens, _, _, _ = runner.execute_step(
         cache={},
-        tokens=jnp.zeros((num_rows,), dtype=jnp.int32),
+        tokens=jnp.zeros((1, num_rows), dtype=jnp.int32),
         metadata=metadata,
         sampling_params=sampling_params or (_params(),) * num_rows,
     )
@@ -790,6 +804,133 @@ def _fake_step_fn(params, cache, tokens, metadata, sampling_metadata, rng):
   return jnp.ones((num_rows,), dtype=jnp.int32), None, None, cache, rng
 
 
+class SplitRowsTest(absltest.TestCase):
+  """Tests sampling each device's share of the rows."""
+
+  def setUp(self):
+    super().setUp()
+    if len(jax.devices()) < 4:
+      self.skipTest('needs 4 devices')
+
+  def _mesh_2x2(self) -> jax.sharding.Mesh:
+    return jax.sharding.Mesh(
+        np.array(jax.devices()[:4]).reshape(2, 2), ('dp', 'tp')
+    )
+
+  def test_splits_rows_across_the_dp_axes(self):
+    mesh = self._mesh_2x2()
+    runner = _runner(_NextTokenTransformer(), mesh=mesh)
+
+    split = jax.jit(runner._split_rows)(jnp.zeros((8, 3)))
+
+    # The "tp" devices of a DP group share its rows.
+    self.assertTrue(
+        split.sharding.is_equivalent_to(
+            jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec('dp')
+            ),
+            2,
+        )
+    )
+
+  def test_rows_that_do_not_divide_stay_whole(self):
+    mesh = self._mesh_2x2()
+    runner = _runner(_NextTokenTransformer(), mesh=mesh)
+    x = jax.device_put(
+        jnp.zeros((3, 3)),
+        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()),
+    )
+
+    out = jax.jit(runner._split_rows)(x)
+
+    self.assertTrue(out.sharding.is_fully_replicated)
+
+  def test_samples_every_row_on_its_dp_group(self):
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:4]), ('dp',))
+    runner = _runner(_NextTokenTransformer(), mesh=mesh, num_scheduler_steps=2)
+
+    # Four decodes, one row per DP group.
+    tokens, _, _, _ = runner.execute_step(
+        cache=_positions_cache(4),
+        tokens=jnp.array([[4], [7], [1], [2]], dtype=jnp.int32),
+        metadata=paged_attention.PagedAttnMetadata(
+            page_indices={
+                'layer_0': np.arange(8, dtype=np.int32).reshape(4, 2)
+            },
+            kv_lens=np.array([6, 3, 5, 2], dtype=np.int32),
+            query_lens=np.array([1, 1, 1, 1], dtype=np.int32),
+            distribution=np.array([[1, 1, 1]] * 4, dtype=np.int32),
+        ),
+        sampling_params=(_params(temperature=0.0),) * 4,
+    )
+
+    np.testing.assert_array_equal(tokens, [[5, 6], [8, 9], [2, 3], [3, 4]])
+    self.assertTrue(
+        tokens.sharding.is_equivalent_to(
+            jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('dp')),
+            2,
+        )
+    )
+
+  def test_multi_group_mixed_rows_pack_and_compact_within_each_group(self):
+    mesh = self._mesh_2x2()
+    runner = _runner(
+        _NextTokenTransformer(),
+        mesh=mesh,
+        num_scheduler_steps=2,
+        return_logprobs=True,
+    )
+
+    # Group 0: [decode (4), chunked prefill (1, 2), full prefill (7, 8), pad].
+    # Group 1: [decode (2), full prefill (10, 11), pad, pad].
+    tokens, _, logp, cache = runner.execute_step(
+        cache=_positions_cache(12),
+        tokens=jnp.array(
+            [[4, 1, 2, 7, 8, 0], [2, 10, 11, 0, 0, 0]], dtype=jnp.int32
+        ),
+        metadata=paged_attention.PagedAttnMetadata(
+            page_indices={
+                'layer_0': np.arange(16, dtype=np.int32).reshape(8, 2)
+            },
+            kv_lens=np.array([6, 2, 2, 0, 4, 2, 0, 0], dtype=np.int32),
+            query_lens=np.array([1, 2, 2, 0, 1, 2, 0, 0], dtype=np.int32),
+            distribution=np.array([[1, 2, 3], [1, 1, 2]], dtype=np.int32),
+        ),
+        sampling_params=(
+            _params(temperature=1.0, top_k=1),
+            _params(temperature=2.0, top_k=1),
+            _params(temperature=4.0, top_k=1),
+            _params(temperature=5.0, top_k=1),
+            _params(temperature=10.0, top_k=1),
+        ),
+    )
+
+    # Surviving rows (0, 2 in group 0; 4, 5 in group 1) return to their
+    # scheduled row positions after compacting within each group.
+    np.testing.assert_array_equal(tokens[0], [5, 6])
+    np.testing.assert_array_equal(tokens[2], [9, 10])
+    np.testing.assert_array_equal(tokens[4], [3, 4])
+    np.testing.assert_array_equal(tokens[5], [12, 13])
+    # Decode step 2 positions: group 0 survivors at [6, 2], group 1 at [4, 2].
+    np.testing.assert_array_equal(cache['positions'][:2], [6, 2])
+    np.testing.assert_array_equal(cache['positions'][4:6], [4, 2])
+    # Each surviving row keeps its own temperature across both steps.
+    assert logp is not None
+    for row, temp in ((0, 1.0), (2, 4.0), (4, 5.0), (5, 10.0)):
+      expected = float(
+          jax.nn.log_softmax(jnp.array([10.0, 5.0] + [0.0] * 14) / temp)[0]
+      )
+      np.testing.assert_allclose(
+          logp[row], [expected, expected], rtol=1e-5, atol=1e-6
+      )
+    self.assertTrue(
+        tokens.sharding.is_equivalent_to(
+            jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('dp')),
+            2,
+        )
+    )
+
+
 class MultiStepExecuteTest(absltest.TestCase):
 
   def setUp(self):
@@ -799,7 +940,7 @@ class MultiStepExecuteTest(absltest.TestCase):
     self.metadata = _rpa_metadata(
         kv_lens=[6, 4, 3, 0], query_lens=[1, 4, 3, 0], distribution=[1, 2, 3]
     )
-    self.tokens = jnp.array([4, 1, 2, 3, 4, 7, 8, 9], dtype=jnp.int32)
+    self.tokens = jnp.array([[4, 1, 2, 3, 4, 7, 8, 9]], dtype=jnp.int32)
     self.greedy = (_params(temperature=0.0),) * 3
 
   def _execute(self, runner):
@@ -870,12 +1011,12 @@ class MultiStepExecuteTest(absltest.TestCase):
     self.assertLen(step_metadata, 3)
     # The scheduled batch runs as-is.
     np.testing.assert_array_equal(step_metadata[0].query_lens, [1, 4, 3, 0])
-    np.testing.assert_array_equal(step_metadata[0].distribution, [1, 2, 3])
+    np.testing.assert_array_equal(step_metadata[0].distribution, [[1, 2, 3]])
     self.assertIs(step_metadata[0].decode_only, False)
     # The chunked prefill drops out and the rest decode one token per step.
     for metadata in step_metadata[1:]:
       np.testing.assert_array_equal(metadata.query_lens, [1, 1, 0, 0])
-      np.testing.assert_array_equal(metadata.distribution, [2, 2, 2])
+      np.testing.assert_array_equal(metadata.distribution, [[2, 2, 2]])
       self.assertIs(metadata.decode_only, True)
       self.assertEqual(metadata.query_lens.dtype, jnp.int32)
       self.assertEqual(metadata.kv_lens.dtype, jnp.int32)

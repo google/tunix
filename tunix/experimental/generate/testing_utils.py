@@ -75,6 +75,9 @@ class PagedSumTransformer(nnx.Module):
       self, tokens, positions, cache, metadata, mesh, logits_idxs=None
   ):
     del mesh
+    num_groups = tokens.shape[0]
+    tokens = tokens.reshape(-1)
+    positions = positions.reshape(-1)
     num_tokens = tokens.shape[0]
     query_lens = jnp.asarray(metadata.query_lens)
     rows = jnp.repeat(
@@ -111,10 +114,12 @@ class PagedSumTransformer(nnx.Module):
       )
       next_tokens = jnp.mod(jnp.round(total), VOCAB_SIZE).astype(jnp.int32)
 
-    logits = 10.0 * jax.nn.one_hot(next_tokens, VOCAB_SIZE)
+    logits = 10.0 * jax.nn.one_hot(
+        next_tokens.reshape(num_groups, -1), VOCAB_SIZE
+    )
     if logits_idxs is not None:
-      logits = logits[logits_idxs]
-    return logits, new_cache
+      logits = jnp.take_along_axis(logits, logits_idxs[..., None], axis=1)
+    return logits.reshape(-1, VOCAB_SIZE), new_cache
 
 
 class UniformTransformer(PagedSumTransformer):
