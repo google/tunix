@@ -151,6 +151,33 @@ class CheckpointManagerTest(parameterized.TestCase):
       self.assertFalse(cp_manager._context.array_options.saving.use_ocdbt)
       self.assertFalse(cp_manager._context.array_options.saving.use_zarr3)
 
+  @parameterized.named_parameters(
+      ('unset', None, False),
+      ('zero', '0', False),
+      ('one', '1', True),
+  )
+  def test_context_pathways_persistence_follows_env(self, value, expected):
+    env = {'JAX_PLATFORMS': 'proxy'}
+    if value is not None:
+      env['ENABLE_PATHWAYS_PERSISTENCE'] = value
+    with (
+        mock.patch.dict(os.environ, env),
+        mock.patch.object(
+            checkpoint_manager.ocp_pathways.CheckpointingImpl,
+            'from_options',
+            wraps=checkpoint_manager.ocp_pathways.CheckpointingImpl.from_options,
+        ) as mock_from_options,
+    ):
+      if value is None:
+        os.environ.pop('ENABLE_PATHWAYS_PERSISTENCE', None)
+      cp_manager = checkpoint_manager.CheckpointManager(
+          f'{self.temp_path}/{self.id()}'
+      )
+      self.assertIsNotNone(cp_manager._context)
+    mock_from_options.assert_called_once_with(
+        use_persistence_array_handler=expected
+    )
+
   def test_save(self):
     cp_path = f'{self.temp_path}/{self.id()}'
     cp_manager = checkpoint_manager.CheckpointManager(cp_path)

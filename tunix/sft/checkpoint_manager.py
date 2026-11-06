@@ -171,7 +171,9 @@ class CheckpointManager:
     # TODO: b/528053113 - Refactor the pathways check once internal pathways
     # properly enables persistence API.
     is_proxy_pathways = 'proxy' in os.getenv('JAX_PLATFORMS', '')
-    use_persistence = bool(os.getenv('ENABLE_PATHWAYS_PERSISTENCE', ''))
+    # Pathways and Orbax take "1" or "0" (k8s.sh passes "0" when persistence
+    # is off), so any other value, including "0", means no persistence.
+    use_persistence = os.getenv('ENABLE_PATHWAYS_PERSISTENCE', '') == '1'
 
     if is_proxy_pathways and use_persistence:
       logging.info('Using persistence API for checkpointing with Pathways.')
