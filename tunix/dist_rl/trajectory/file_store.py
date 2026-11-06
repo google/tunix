@@ -209,9 +209,9 @@ def _merge_metrics(
 class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
   """Asynchronously writes trajectory metadata, step, and metrics files."""
 
-  def __init__(self):
+  def __init__(self, copy_step: bool = False):
     """Initializes _AsyncFileWriter without starting the background worker."""
-    super().__init__()
+    super().__init__(copy_step=copy_step)
     # Worker-owned caches of persisted state used to skip redundant disk writes.
     self._metadata_hash_by_trajectory_id: dict[str, int] = {}
     self._metrics_by_trajectory_id: collections.OrderedDict[
@@ -231,17 +231,10 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
     waiting for any disk I/O. The worker thread is lazily spawned on the first
     invocation if not already running.
 
-    `metadata` and `step` are deep copied by `WriteTask`, so what lands
-    on disk is exactly what the caller passed in. Serialization happens on the
-    worker thread, possibly long after this call returns, and callers routinely
-    keep mutating the objects they hand over (a rollout worker appending tokens
-    to the step it just logged, or flipping trajectory status from RUNNING to
-    COMPLETED). Without the copy, those later mutations would leak into the
-    already enqueued write, producing files that never matched any state the
-    trajectory actually had. The copy makes the caller-side cost proportional
-    to the payload size rather than O(1), which is a deliberate trade for
-    correctness; the expensive part, serialization and I/O, remains off the
-    caller thread.
+    `metadata` is always deep copied by `WriteTask` so status/reward mutations
+    across turns do not leak. `step` is handed over with zero copy by default to
+    eliminate synchronous GIL contention on rollout workers. When `copy_step`
+    is True, `step` is deep copied defensively.
 
     Args:
       traj_dir: Directory path for the trajectory.
@@ -252,7 +245,12 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
       RuntimeError: If the writer has already been closed.
     """
     self._enqueue(
-        _FileWriteTask(traj_dir=traj_dir, metadata=metadata, step=step)
+        _FileWriteTask(
+            traj_dir=traj_dir,
+            metadata=metadata,
+            step=step,
+            copy_step=self._copy_step,
+        )
     )
 
   def enqueue_metrics_write(
@@ -387,6 +385,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       self,
       root_dir: epath.PathLike,
       run_id: str | None = None,
+      copy_step: bool = False,
   ) -> None:
     """Initializes FileTrajectoryStore.
 
@@ -397,10 +396,13 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         scoped under root_dir / run_id. This ID MUST stay the same when
         recovering from failures or process restarts as long as the same RL
         process is being continued.
+      copy_step: If True, deep copies step objects before writing. Defaults to
+        False (zero-copy step handover) to avoid synchronous GIL contention on
+        rollout workers.
 
     Raises:
-      ValueError: If root_dir is empty, or run_id is given but cannot be used as
-        a directory name.
+      ValueError: If root_dir is empty, or if run_id is given but cannot be
+        used as a directory name.
     """
     super().__init__()
     if not root_dir or not str(root_dir).strip():
@@ -417,7 +419,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       )
     self._raw_root_dir = epath.Path(root_dir)
     self._run_id = run_id
-    self._writer = _AsyncFileWriter()
+    self._writer = _AsyncFileWriter(copy_step=copy_step)
 
   @classmethod
   def _from_config(
@@ -426,7 +428,8 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
   ) -> "FileTrajectoryStore[MetadataT]":
     """Builds a file-backed store from `config`.
 
-    Requires "root_dir" and "run_id".
+    Requires "root_dir" and "run_id", with optional boolean "copy_step"
+    (defaults to False).
 
     Raises:
       ValueError: If "root_dir" or "run_id" is missing or empty.
@@ -454,10 +457,14 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     return cls(
         root_dir=config["root_dir"],
         run_id=config["run_id"],
+        copy_step=bool(config.get("copy_step", False)),
     )
 
   def to_config(self) -> dict[str, Any]:
     """Returns the config dict that rebuilds an equivalent store.
+
+    Writer-local tuning flags such as `copy_step` are omitted so `to_config()`
+    strictly represents the shared storage location across processes.
 
     Raises:
       ValueError: If this store was constructed without a run_id.
@@ -472,6 +479,11 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         "root_dir": str(self._raw_root_dir),
         "run_id": self._run_id,
     }
+
+  @property
+  def copy_step(self) -> bool:
+    """Returns True if step objects are deep copied before writing."""
+    return self._writer.copy_step
 
   @functools.cached_property
   def root_dir(self) -> epath.Path:
@@ -765,6 +777,11 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     delegates asynchronous queuing and non-blocking background I/O to the
     `_AsyncFileWriter`.
 
+    `metadata` is always snapshotted at call time. By default
+    (`copy_step=False`), ownership of `step` transfers to the background writer,
+    so callers must not mutate `step` or its nested containers after calling
+    `add_step()`. Pass `copy_step=True` if the caller mutates `step` afterwards.
+
     Args:
       step: Step object to log.
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
@@ -788,6 +805,10 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     calling thread so invalid IDs fail fast with actionable errors, then
     delegates asynchronous queuing and non-blocking background I/O to the
     `_AsyncFileWriter`.
+
+    `metadata` is always snapshotted at call time. When `step` is provided and
+    `copy_step=False` (the default), ownership of `step` transfers to the
+    background writer and callers must not mutate `step` afterwards.
 
     Args:
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
