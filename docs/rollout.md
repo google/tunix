@@ -225,7 +225,14 @@ For a concrete end-to-end example, see [grpo_demo_llama3_qwen2.py](https://githu
 
 ### Using vLLM rollout via the CLI
 
-The CLI support for vLLM rollout engine is WIP.
+For `tunix.cli.grpo_main`, set `rollout_engine=vllm` and configure engine-specific
+options under `vllm_config`, such as `model_version`, `hbm_utilization`, and
+`async_scheduling`. Shared sampling settings remain under `rollout_config`.
+See the existing
+[Qwen vLLM disaggregated recipe](https://github.com/google/tunix/blob/main/examples/rl/grpo/gsm8k/run_qwen3_vllm_disagg.sh)
+for a CLI configuration. The backend installation and weight-mapping requirements
+above also apply to CLI jobs. For help choosing between the CLI and the Python
+demo, see [Choosing a GRPO entry point](examples.md#choosing-a-grpo-entry-point).
 
 ### Troubleshooting
 
@@ -393,6 +400,16 @@ cluster_config = rl_engine_lib.ClusterConfig(
 
 For a concrete example in this repo, `scripts/grpo_demo_llama3_qwen2.py`
 supports `--rollout-engine sglang_jax`.
+
+### Using SGLang-JAX rollout via the CLI
+
+SGLang-JAX is also available through `tunix.cli.grpo_main`. Set
+`rollout_engine=sglang_jax` and configure engine-specific options under
+`sglang_jax_config`, such as `model_version`, `mem_fraction_static`, and
+`chunked_prefill_size`. Shared sampling settings remain under `rollout_config`.
+The installation and weight-mapping requirements above apply to both entry
+points. See [Choosing a GRPO entry point](examples.md#choosing-a-grpo-entry-point)
+for the differences between the CLI recipes and the Python demo.
 
 ### Troubleshooting
 
