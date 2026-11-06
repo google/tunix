@@ -1262,6 +1262,82 @@ class RlEngineTest(parameterized.TestCase):
     rl_engine.close()
     rl_engine.profiler.close.assert_called_once()
 
+  def test_is_colocated_and_release_rollout_for_training(self):
+    if self.device_count < 2:
+      self.skipTest('Requires at least 2 devices.')
+    devices = np.array(jax.devices()[:2])
+    actor_mesh = Mesh(devices.reshape(2, 1), ('fsdp', 'tp'))
+    colocated_rollout_mesh = Mesh(devices.reshape(1, 2), ('fsdp', 'tp'))
+    disjoint_mesh_a = Mesh(devices[:1].reshape(1, 1), ('fsdp', 'tp'))
+    disjoint_mesh_b = Mesh(devices[1:2].reshape(1, 1), ('fsdp', 'tp'))
+
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: actor_mesh,
+            rl_engine_lib.Role.REFERENCE: actor_mesh,
+            rl_engine_lib.Role.ROLLOUT: colocated_rollout_mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=10,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+            data_type=jnp.bfloat16,
+        ),
+    )
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=model,
+        reference=model,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+    self.assertTrue(
+        rl_engine.is_colocated(
+            rl_engine_lib.Role.ACTOR, rl_engine_lib.Role.ROLLOUT
+        )
+    )
+    rl_engine.r2m[rl_engine_lib.Role.ACTOR] = disjoint_mesh_a
+    rl_engine.r2m[rl_engine_lib.Role.ROLLOUT] = disjoint_mesh_b
+    self.assertFalse(
+        rl_engine.is_colocated(
+            rl_engine_lib.Role.ACTOR, rl_engine_lib.Role.ROLLOUT
+        )
+    )
+    rl_engine.r2m[rl_engine_lib.Role.ACTOR] = actor_mesh
+    rl_engine.r2m[rl_engine_lib.Role.ROLLOUT] = colocated_rollout_mesh
+
+    with (
+        mock.patch.object(
+            rl_engine.rollout, 'release_for_training'
+        ) as mock_release,
+        mock.patch.object(
+            rl_engine.rollout, 'restore_after_training'
+        ) as mock_restore,
+        mock.patch.object(
+            rl_engine.rollout, 'update_params'
+        ) as mock_update_params,
+    ):
+      rl_engine.release_rollout_for_training()
+      mock_release.assert_called_once()
+      self.assertTrue(mock_release.call_args.kwargs['free_weights'])
+      self.assertTrue(rl_engine._rollout_released_for_training)
+
+      rl_engine.sync_weights()
+      mock_update_params.assert_called_once()
+      mock_restore.assert_called_once()
+      self.assertFalse(rl_engine._rollout_released_for_training)
+
 
 class RlEngineTokenInputTest(parameterized.TestCase):
   """Explicit token rows through RLEngine.generate and VllmRollout.generate."""
@@ -1306,6 +1382,7 @@ class RlEngineTokenInputTest(parameterized.TestCase):
         _get_mesh_and_logical_axis_rules_cm=lambda _: contextlib.nullcontext(
             (SimpleNamespace(devices=[]), None)
         ),
+        maybe_restore_rollout_for_generation=mock.Mock(),
         _maybe_load_model_from_cpu=mock.Mock(),
         _maybe_offload_model_to_cpu=mock.Mock(),
         _perf=trace.NoopTracer(),

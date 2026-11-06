@@ -158,14 +158,11 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         )
     )
 
-    # Enable async rollout if trainer and rollout are not on the same mesh.
-    # If they do, then doesn't make sense for the interleave because they will
-    # have resource contention.
-    self.can_enable_async_rollout = (
-        self.rl_engine.cluster_config.role_to_mesh[rl_engine_lib.Role.ACTOR]
-        != self.rl_engine.cluster_config.role_to_mesh[
-            rl_engine_lib.Role.ROLLOUT
-        ]
+    # Enable async rollout if trainer and rollout are not colocated on the same
+    # physical devices. If they are colocated, interleaving causes resource
+    # contention.
+    self.can_enable_async_rollout = not self.rl_engine.is_colocated(
+        rl_engine_lib.Role.ACTOR, rl_engine_lib.Role.ROLLOUT
     )
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
     self._last_iter_step = self.rl_engine.actor_trainer.iter_steps
