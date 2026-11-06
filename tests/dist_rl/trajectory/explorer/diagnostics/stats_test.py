@@ -271,6 +271,7 @@ class OutcomeTest(parameterized.TestCase):
   @parameterized.named_parameters(
       ("status_name", "SUCCEEDED"),
       ("status_name_in_lower_case", "succeeded"),
+      ("status_name_padded_with_whitespace", " succeeded\n"),
   )
   def test_schemas_that_declare_the_fields_report_them(
       self, status: str
@@ -279,23 +280,8 @@ class OutcomeTest(parameterized.TestCase):
 
     stats = stats_lib.TrajectoryStats.from_trajectory(trajectory)
 
-    self.assertEqual(stats.status, stats_lib.TrajectoryStatus.SUCCEEDED)
+    self.assertEqual(stats.status, "SUCCEEDED")
     self.assertEqual(stats.total_reward, 0.5)
-
-  def test_a_status_stated_as_an_enum_member_is_reported(self) -> None:
-    # A schema may hold the `TrajectoryStatus` member itself rather than its
-    # name; `model_construct` skips validation so the enum is kept as-is.
-    trajectory = trajectory_lib.TunixTrajectory.model_construct(
-        trajectory_id="traj_test",
-        agent=_AGENT,
-        steps=[],
-        status=stats_lib.TrajectoryStatus.TIMEOUT,
-    )
-
-    stats = stats_lib.TrajectoryStats.from_trajectory(trajectory)
-
-    self.assertEqual(stats.status, stats_lib.TrajectoryStatus.TIMEOUT)
-    self.assertEqual(stats.to_row()["status"], "TIMEOUT")
 
   def test_schemas_that_do_not_declare_the_fields_report_neither(self) -> None:
     trajectory = _trajectory(extra={"status": "SUCCEEDED", "reward": 1.0})
@@ -305,16 +291,27 @@ class OutcomeTest(parameterized.TestCase):
     self.assertIsNone(stats.status)
     self.assertIsNone(stats.total_reward)
 
-  def test_an_unstated_status_is_unreported(self) -> None:
-    stats = stats_lib.TrajectoryStats.from_trajectory(_tunix_trajectory())
+  @parameterized.named_parameters(
+      ("unstated", None),
+      ("empty", ""),
+      ("blank", " \n"),
+  )
+  def test_an_unstated_or_blank_status_is_unreported(
+      self, status: str | None
+  ) -> None:
+    stats = stats_lib.TrajectoryStats.from_trajectory(
+        _tunix_trajectory(status=status)
+    )
 
     self.assertIsNone(stats.status)
 
-  def test_an_unrecognized_status_is_rejected(self) -> None:
-    trajectory = _tunix_trajectory(status="COMPLETED")
+  def test_any_status_is_reported_upper_cased(self) -> None:
+    # Statuses are not checked against any vocabulary.
+    trajectory = _tunix_trajectory(status="completed")
 
-    with self.assertRaisesRegex(ValueError, "Unrecognized trajectory status"):
-      stats_lib.TrajectoryStats.from_trajectory(trajectory)
+    stats = stats_lib.TrajectoryStats.from_trajectory(trajectory)
+
+    self.assertEqual(stats.status, "COMPLETED")
 
   @parameterized.named_parameters(
       ("nan", float("nan")),
@@ -473,28 +470,17 @@ class RunStatsTest(parameterized.TestCase):
   def test_status_counts_tally_only_reporting_trajectories(self) -> None:
     # "SUCCEEDED" and "succeeded" must merge into a single bucket: the
     # per-trajectory `.upper()` normalisation is what makes the run-level
-    # tally correct.
+    # tally correct. A blank status is not counted, like an unstated one.
     run = stats_lib.RunStats.from_trajectories([
         _tunix_trajectory(status="TIMEOUT"),
         _tunix_trajectory(status="SUCCEEDED"),
         _tunix_trajectory(),
         _tunix_trajectory(status="succeeded"),
+        _tunix_trajectory(status=" "),
     ])
 
-    self.assertEqual(
-        run.status_counts,
-        {
-            stats_lib.TrajectoryStatus.SUCCEEDED: 2,
-            stats_lib.TrajectoryStatus.TIMEOUT: 1,
-        },
-    )
-    self.assertEqual(
-        list(run.status_counts),
-        [
-            stats_lib.TrajectoryStatus.TIMEOUT,
-            stats_lib.TrajectoryStatus.SUCCEEDED,
-        ],
-    )
+    self.assertEqual(run.status_counts, {"SUCCEEDED": 2, "TIMEOUT": 1})
+    self.assertEqual(list(run.status_counts), ["TIMEOUT", "SUCCEEDED"])
     self.assertEqual(run.num_with_status, 3)
     self.assertEqual(
         run.to_json_dict()["status_counts"], {"SUCCEEDED": 2, "TIMEOUT": 1}

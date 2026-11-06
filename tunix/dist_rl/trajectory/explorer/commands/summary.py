@@ -22,7 +22,7 @@ import pandas as pd
 import simple_parsing
 from tunix.dist_rl.trajectory import store
 from tunix.dist_rl.trajectory.explorer.commands import base
-from tunix.dist_rl.trajectory.explorer.commands import formatting
+from tunix.dist_rl.trajectory.explorer.diagnostics import formatting
 from tunix.dist_rl.trajectory.explorer.diagnostics import stats
 
 
@@ -121,7 +121,6 @@ def _totals(run_stats: stats.RunStats) -> list[str]:
     trajectories_line = f"Trajectories: {n} (of {total})"
   else:
     trajectories_line = f"Trajectories: {n}"
-  statuses = {s.name: c for s, c in run_stats.status_counts.items()}
   lines = [
       trajectories_line,
       f"Steps: {run_stats.steps}",
@@ -130,7 +129,7 @@ def _totals(run_stats: stats.RunStats) -> list[str]:
           f" reported by {run_stats.num_with_tokens}/{n}"
       ),
       (
-          f"Statuses: {formatting.format_counts(statuses)}"
+          f"Statuses: {formatting.format_counts(run_stats.status_counts)}"
           f" reported by {run_stats.num_with_status}/{n}"
       ),
       (

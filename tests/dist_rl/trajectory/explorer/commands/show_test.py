@@ -221,23 +221,15 @@ class ShowTest(absltest.TestCase):
     self.assertRegex(out, rf"Status: \S*{_SUCCEEDED_TRAJECTORY.status}")
     self.assertIn(f"Reward: {_SUCCEEDED_TRAJECTORY.total_reward}", out)
 
-  def test_unrecognized_status_exits_1_with_message_on_stderr(self) -> None:
+  def test_any_status_is_shown_upper_cased(self) -> None:
     trajectory = _SUCCEEDED_TRAJECTORY.model_copy(
         update={"status": "not_a_status"}
     )
     mem_store = testing.create_store(trajectories=[trajectory])
     cmd = show.ShowCommand(trajectory_id=[_trajectory_id(trajectory)])
-    stderr = io.StringIO()
-    with contextlib.redirect_stderr(stderr):
-      exit_code, out = testing.execute_command(cmd, mem_store)
-    self.assertEqual(exit_code, 1)
-    self.assertEmpty(out)
-    self.assertIn(
-        f"error: trajectory {trajectory.trajectory_id}: Unrecognized"
-        " trajectory status 'not_a_status'",
-        stderr.getvalue(),
-    )
-    self.assertNotIn("Traceback", stderr.getvalue())
+    exit_code, out = testing.execute_command(cmd, mem_store)
+    self.assertEqual(exit_code, 0)
+    self.assertIn("Status: NOT_A_STATUS", out)
 
   def test_max_chars_truncates_content(self) -> None:
     cmd = show.ShowCommand(
@@ -344,32 +336,6 @@ class ShowTest(absltest.TestCase):
     self.assertEqual(exit_code, 1)
     self.assertEmpty(out)
     self.assertIn("trajectory not found: missing_traj", stderr.getvalue())
-
-  def test_multiple_trajectories_invalid_status_fails_batch_with_nothing_printed(
-      self,
-  ) -> None:
-    bad_trajectory = _SUCCEEDED_TRAJECTORY.model_copy(
-        update={"trajectory_id": "traj_bad", "status": "not_a_status"}
-    )
-    mem_store = testing.create_store(
-        trajectories=[_SUCCEEDED_TRAJECTORY, bad_trajectory]
-    )
-    cmd = show.ShowCommand(
-        trajectory_id=[
-            _trajectory_id(_SUCCEEDED_TRAJECTORY),
-            _trajectory_id(bad_trajectory),
-        ]
-    )
-    stderr = io.StringIO()
-    with contextlib.redirect_stderr(stderr):
-      exit_code, out = testing.execute_command(cmd, mem_store)
-    self.assertEqual(exit_code, 1)
-    self.assertEmpty(out)
-    self.assertIn(
-        f"error: trajectory {bad_trajectory.trajectory_id}: Unrecognized"
-        " trajectory status 'not_a_status'",
-        stderr.getvalue(),
-    )
 
   def test_empty_trajectory_id_list_exits_2(self) -> None:
     for raw_ids in ([], ["", ","]):

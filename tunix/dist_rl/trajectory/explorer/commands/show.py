@@ -22,7 +22,7 @@ import simple_parsing
 from tunix.dist_rl.trajectory import store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory.explorer.commands import base
-from tunix.dist_rl.trajectory.explorer.commands import formatting
+from tunix.dist_rl.trajectory.explorer.diagnostics import formatting
 from tunix.dist_rl.trajectory.explorer.diagnostics import stats
 
 _TRAJECTORY_DELIMITER = f"\n\n{'=' * 80}\n\n"
@@ -64,9 +64,8 @@ class ShowCommand(base.BaseCommand):
       output_json: Whether to format output as machine-readable JSON.
 
     Returns:
-      Process exit code: 0 on success, 1 if any trajectory does not exist or
-      states a status that is not a `TrajectoryStatus` name, and 2 if
-      `trajectory_id` is empty.
+      Process exit code: 0 on success, 1 if any trajectory does not exist, and
+      2 if `trajectory_id` is empty.
     """
     if not self.trajectory_id:
       print(
@@ -83,19 +82,10 @@ class ShowCommand(base.BaseCommand):
           file=sys.stderr,
       )
       return 1
-    entries = []
-    for trajectory in trajectories:
-      try:
-        entries.append(
-            (trajectory, stats.TrajectoryStats.from_trajectory(trajectory))
-        )
-      except ValueError as error:
-        print(
-            f"trajectory-explore: error: trajectory {trajectory.trajectory_id}:"
-            f" {error}",
-            file=sys.stderr,
-        )
-        return 1
+    entries = [
+        (trajectory, stats.TrajectoryStats.from_trajectory(trajectory))
+        for trajectory in trajectories
+    ]
     if output_json:
       payloads = [
           {
@@ -141,7 +131,7 @@ def _render_header(
       f"Trajectory {trajectory.trajectory_id}",
       f"Session: {formatting.format_optional(trajectory.session_id)}",
       f"Agent: {trajectory.agent.name} {trajectory.agent.version}",
-      f"Status: {formatting.format_status(trajectory_stats.status)}",
+      f"Status: {formatting.format_optional(trajectory_stats.status)}",
       (
           "Reward:"
           f" {formatting.format_optional(trajectory_stats.total_reward, '.3g')}"
