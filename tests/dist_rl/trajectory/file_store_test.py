@@ -4,7 +4,7 @@ from collections.abc import Callable
 import tempfile
 import threading
 import time
-from typing import Any, Final, TypeAlias, cast
+from typing import Any, ClassVar, Final, TypeAlias, cast
 from unittest import mock
 
 from absl import logging
@@ -645,20 +645,24 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
   def test_snapshot_on_enqueue_isolates_step_mutation(self) -> None:
     """Verifies step mutation after enqueue does not alter saved file."""
+    file_s_copy = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir, run_id="copy_run", copy_step=True
+    )
+    self.addCleanup(file_s_copy.close)
     step = trajectory_lib.Step(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="Initial message",
         extra={"notes": "initial note"},
     )
-    self.file_s.add_step(step, trajectory_testing.METADATA_1)
+    file_s_copy.add_step(step, trajectory_testing.METADATA_1)
     # Mutate the caller's step object after enqueue.
     step_extra = step.extra
     self.assertIsNotNone(step_extra)
     step_extra["notes"] = "MUTATED_AFTER_ENQUEUE"
-    self.file_s.flush()
+    file_s_copy.flush()
 
-    step_path = self.file_s.get_step_path(
+    step_path = file_s_copy.get_step_path(
         trajectory_testing.TRAJECTORY_ID_1, step_id=1
     )
     saved_step = trajectory_lib.Step.model_validate_json(step_path.read_text())
@@ -1588,6 +1592,80 @@ class FileTrajectoryStoreConfigTest(
 
     with self.assertRaisesRegex(ValueError, "run_id"):
       file_s.to_config()
+
+  def test_copy_step_omitted_from_to_config(self) -> None:
+    default_store = file_store.FileTrajectoryStore(
+        root_dir=self.create_tempdir().full_path,
+        run_id="run_default",
+    )
+    self.addCleanup(default_store.close)
+    self.assertFalse(default_store.copy_step)
+    self.assertNotIn("copy_step", default_store.to_config())
+
+    copy_store = file_store.FileTrajectoryStore(
+        root_dir=self.create_tempdir().full_path,
+        run_id="run_copy",
+        copy_step=True,
+    )
+    self.addCleanup(copy_store.close)
+    self.assertTrue(copy_store.copy_step)
+    self.assertNotIn("copy_step", copy_store.to_config())
+
+  @parameterized.named_parameters(
+      ("omitted", {}, False),
+      ("explicit_false", {"copy_step": False}, False),
+      ("explicit_true", {"copy_step": True}, True),
+  )
+  def test_from_config_parses_valid_copy_step(
+      self, extra_config: dict[str, Any], expected_copy_step: bool
+  ) -> None:
+    config = {**self._create_config(), **extra_config}
+    built_store = self._build_store(config)
+    self.assertIsInstance(built_store, file_store.FileTrajectoryStore)
+    assert isinstance(built_store, file_store.FileTrajectoryStore)
+    self.assertEqual(built_store.copy_step, expected_copy_step)
+
+  def test_add_step_zero_copy_handover_by_default(self) -> None:
+    class _UncopyableStep(trajectory_lib.Step):
+      """Step subclass that fails if deep copied."""
+
+      EXTENSIONS_KEY: ClassVar[str] = "uncopyable_test"
+
+      def __deepcopy__(
+          self, memo: dict[int, Any] | None = None
+      ) -> "_UncopyableStep":
+        raise AssertionError("step should not be deep copied")
+
+    default_store = file_store.FileTrajectoryStore(
+        root_dir=self.create_tempdir().full_path,
+        run_id="run_zero_copy",
+    )
+    self.addCleanup(default_store.close)
+    step = _UncopyableStep(
+        step_id=1,
+        source=trajectory_lib.Source.AGENT,
+        message="zero copy turn",
+    )
+    meta = trajectory_testing.METADATA_1.model_copy(deep=True)
+
+    default_store.add_step(step, meta)
+    meta.notes = "mutated_after_add_step"
+    default_store.flush()
+
+    (recovered,) = default_store.get_trajectories([meta.trajectory_id])
+    self.assertEqual(recovered.notes, trajectory_testing.METADATA_1.notes)
+    self.assertEqual(recovered.steps[0].message, "zero copy turn")
+
+    copy_store = file_store.FileTrajectoryStore(
+        root_dir=self.create_tempdir().full_path,
+        run_id="run_defensive_copy",
+        copy_step=True,
+    )
+    self.addCleanup(copy_store.close)
+    with self.assertRaisesRegex(
+        AssertionError, "step should not be deep copied"
+    ):
+      copy_store.add_step(step, trajectory_testing.METADATA_1)
 
 
 if __name__ == "__main__":
