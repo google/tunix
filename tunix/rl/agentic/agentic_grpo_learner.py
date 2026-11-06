@@ -497,7 +497,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       trajectories_to_log.append(item.traj)
       # Every assistant turn, so multi-turn episodes are scored in full.
       completion_texts.append(
-          agent_types.assistant_text(item.traj.get("conversation_text") or [])
+          agent_types.assistant_text(item.traj["conversation_text"])
       )
       prompt_tokens_list.append(np.asarray(item.traj.get("prompt_tokens")))
       prompt_lengths_list.append(item.traj.get("prompt_length"))

@@ -2596,6 +2596,12 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "exceeds training padding budget"):
       self._make_batch(raw=raw)
 
+  def test_missing_conversation_text_raises(self):
+    raw = self._raw_trajectory()
+    del raw["conversation_text"]
+    with self.assertRaisesRegex(KeyError, "conversation_text"):
+      self._make_batch(raw=raw)
+
   def test_validity_mask_is_separate_from_loss_mask_and_survives_packing(self):
     from tunix.rl import utils as rl_utils  # pylint: disable=g-import-not-at-top
 
