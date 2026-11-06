@@ -70,21 +70,37 @@ def _sum_trajectory_rewards(
 # Summary metrics logged as `rewards/<name>`; a reward function with one of
 # these names would overwrite them with its own `rewards/<name>` series.
 _RESERVED_REWARD_FN_NAMES: frozenset[str] = frozenset(
-    {"sum", "mean", "min", "max"}
+    {"sum", "mean", "std", "min", "max", "nonfinite_frac"}
 )
 
 
 def _calculate_scalar_reward_log_metrics(
-    rewards: np.ndarray,
-    sum_rewards: np.ndarray | None = None,
+    total_rewards: np.ndarray,
 ) -> Dict[str, Any]:
-  """Helper to calculate sum, mean, min, and max log metrics for rewards."""
-  total = np.nansum(rewards, axis=1) if sum_rewards is None else sum_rewards
+  """Builds the step-level `rewards/*` summary of per-trajectory total rewards.
+
+  A trajectory whose total reward is not finite (e.g. a `NaN` environment
+  reward) is excluded from training (`advantages`, `payload_builder`), so it is
+  excluded here too: its entry is set to `NaN` and every aggregation function
+  is `NaN`-aware, which lets the step-level reduction skip it instead of turning
+  the whole step's metric into `NaN`. `rewards/nonfinite_frac` reports how many
+  trajectories were excluded.
+
+  Args:
+    total_rewards: 1D per-trajectory total rewards.
+
+  Returns:
+    Mapping from metric name to `(values, agg_fn)`.
+  """
+  finite = np.isfinite(total_rewards)
+  masked = np.where(finite, total_rewards, np.nan)
   return {
-      "rewards/sum": (total, np.mean),
-      "rewards/mean": (np.nanmean(rewards, axis=1), np.mean),
-      "rewards/min": (np.min(rewards, axis=1), np.min),
-      "rewards/max": (np.max(rewards, axis=1), np.max),
+      "rewards/sum": (masked, np.nansum),
+      "rewards/mean": (masked, np.nanmean),
+      "rewards/std": (masked, np.nanstd),
+      "rewards/min": (masked, np.nanmin),
+      "rewards/max": (masked, np.nanmax),
+      "rewards/nonfinite_frac": ((~finite).astype(np.float64), np.mean),
   }
 
 
@@ -164,8 +180,8 @@ class SequenceRewardManager(AbstractRewardManager):
 
     Raises:
       ValueError: If `reward_fns` is empty while required, or a reward function
-        is named after a summary metric (`sum`, `mean`, `min`, `max`), whose
-        per-function `rewards/<name>` series would overwrite it.
+        is named after a summary metric (e.g. `sum`, `mean`, `min`, `max`),
+        whose per-function `rewards/<name>` series would overwrite it.
     """
     super().__init__(reward_fns, algo_config)
     if self._require_reward_fns and not self.reward_fns:
@@ -181,7 +197,7 @@ class SequenceRewardManager(AbstractRewardManager):
     if reserved:
       raise ValueError(
           f"Reward function names {reserved} are reserved for the"
-          " `rewards/{sum,mean,min,max}` summary metrics; rename them."
+          " `rewards/*` summary metrics; rename them."
       )
     self._pool = None
     # Reward fns that must be evaluated in the parent process, learned at
@@ -438,18 +454,22 @@ class SequenceRewardManager(AbstractRewardManager):
       completions: List[str],
       rewards: np.ndarray,  # (num_prompts, num_reward_fns)
       *,
-      sum_rewards: np.ndarray | None = None,
+      sum_rewards: np.ndarray,
       env_rewards: np.ndarray | None = None,
   ) -> Dict[str, Any]:
     """Builds per-trajectory reward and text log metrics.
+
+    `rewards/{sum,mean,std,min,max}` summarize the per-trajectory total reward
+    over the step. Per-source series (`rewards/env`, `rewards/<reward_fn>`)
+    skip trajectories with a non-finite total and `NaN` scores, matching the
+    trajectories that train.
 
     Args:
         prompts: Input prompts for the batch.
         completions: Generated text completions for the batch.
         rewards: 2D `(num_prompts, num_reward_fns)` matrix of reward-function
           scores.
-        sum_rewards: Optional precomputed 1D total rewards per trajectory for
-          `"rewards/sum"`.
+        sum_rewards: 1D total reward per trajectory.
         env_rewards: Optional 1D array of environment trajectory rewards; logged
           under `"rewards/env"` only when `self.reward_fns` is non-empty.
 
@@ -462,26 +482,22 @@ class SequenceRewardManager(AbstractRewardManager):
     metrics_to_log["prompts"] = (prompts, None)
     metrics_to_log["completions"] = (completions, None)
 
-    combined_rewards = (
-        np.column_stack([env_rewards, rewards])
-        if env_rewards is not None
-        else rewards
-    )
+    metrics_to_log.update(_calculate_scalar_reward_log_metrics(sum_rewards))
 
-    # Log the sum/mean rewards for each prompt-completion pair.
-    metrics_to_log.update(
-        _calculate_scalar_reward_log_metrics(
-            combined_rewards, sum_rewards=sum_rewards
-        )
-    )
-
+    finite_total = np.isfinite(sum_rewards)
     if env_rewards is not None and self.reward_fns:
-      metrics_to_log["rewards/env"] = (env_rewards, np.mean)
+      metrics_to_log["rewards/env"] = (
+          np.where(finite_total, env_rewards, np.nan),
+          np.nanmean,
+      )
 
     # Log individual rewards for this trajectory
     for i, reward_fn in enumerate(self.reward_fns):
       metric_name = f"rewards/{reward_fn.__name__}"
-      metrics_to_log[metric_name] = (rewards[:, i], np.mean)
+      metrics_to_log[metric_name] = (
+          np.where(finite_total, rewards[:, i], np.nan),
+          np.nanmean,
+      )
 
     return metrics_to_log
 

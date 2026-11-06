@@ -56,16 +56,22 @@ the RL algorithm (e.g., PPO), reward modeling, and generation.
 
 #### Rewards & Scores
 
-*   **`rewards/sum`**: The sum of rewards for a trajectory.
-*   **`rewards/mean`**, **`rewards/max`**, **`rewards/min`**: Statistics of the
-    rewards across the batch.
+*   **`rewards/mean`**, **`rewards/std`**, **`rewards/max`**, **`rewards/min`**,
+    **`rewards/sum`**: Statistics of the per-trajectory total reward over the
+    step's scored trajectories (`rewards/sum` is the step total). Trajectories
+    whose total reward is not finite (for example a `NaN` environment reward)
+    are excluded from training and from these statistics.
+*   **`rewards/nonfinite_frac`**: Fraction of scored trajectories excluded
+    because their total reward is not finite.
 *   **`score/mean`**, **`score/max`**, **`score/min`**: Statistics of the raw
     scores from the reward model (before any algorithm-specific modifications
     like KL penalty).
 *   **`reward_kl_penalty`**: The KL divergence penalty applied to the reward
     (if applicable).
 *   **`rewards/<reward_fn_name>`**: If using multiple reward functions,
-    individual reward components are logged by name.
+    individual reward components are logged by name (mean over trajectories
+    with a finite total, skipping `NaN` scores). Reward functions may not be
+    named after the summary metrics above.
 *   **`rewards/env`**: When `reward_mode="env"` is combined with additional
     `reward_fns`, the environment trajectory reward component is logged
     alongside each `rewards/<reward_fn_name>` (omitted when `reward_fns` is

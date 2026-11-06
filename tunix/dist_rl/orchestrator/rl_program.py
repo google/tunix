@@ -973,7 +973,6 @@ class StandardRLProgram(RLProgram):
       self,
       *,
       all_step_items: Sequence[datatypes.TrajectoryItem],
-      step_rewards: Sequence[float],
       step_advantages: Sequence[float] | None = None,
       prompt_lengths: Sequence[int] = (),
       completion_lengths: Sequence[int] = (),
@@ -1124,7 +1123,6 @@ class StandardRLProgram(RLProgram):
     )
 
     # --- 2. Reward Metrics ---
-    rewards_to_log = step_rewards
     if all_step_items:
       valid_flags = [item.is_valid for item in all_step_items]
       self._log_metric(
@@ -1132,21 +1130,10 @@ class StandardRLProgram(RLProgram):
           1.0 - float(np.mean(valid_flags)),
           log_step,
       )
-      rewards_to_log = [
-          reward
-          for reward, is_valid in zip(step_rewards, valid_flags)
-          if is_valid
-      ]
-
-    reward_mean = float(np.mean(rewards_to_log)) if rewards_to_log else 0.0
-    reward_std = float(np.std(rewards_to_log)) if rewards_to_log else 0.0
-    reward_min = float(np.min(rewards_to_log)) if rewards_to_log else 0.0
-    reward_max = float(np.max(rewards_to_log)) if rewards_to_log else 0.0
-    reward_sum = float(np.sum(rewards_to_log)) if rewards_to_log else 0.0
     # Reduce each per-trajectory reward manager metric (such as
-    # `rewards/<reward_fn>` and `rewards/env`) across all valid trajectories in
-    # the step with its own aggregation function; `rewards/{mean,std,min,max}`
-    # and `rewards/sum` below are computed over `rewards_to_log`.
+    # `rewards/{mean,std,min,max,sum}`, `rewards/<reward_fn>` and `rewards/env`)
+    # across all valid trajectories in the step with its own aggregation
+    # function. The reward manager only scores valid trajectories.
     reward_metrics_accum: dict[
         str, tuple[RewardLogMetricAggFn, list[np.ndarray]]
     ] = {}
@@ -1158,18 +1145,15 @@ class StandardRLProgram(RLProgram):
     step_reward_metrics: dict[str, float] = {
         name: float(agg_fn(np.concatenate(values)))
         for name, (agg_fn, values) in reward_metrics_accum.items()
-        if values
     }
-    if rewards_to_log:
-      step_reward_metrics.update({
-          "rewards/mean": reward_mean,
-          "rewards/std": reward_std,
-          "rewards/min": reward_min,
-          "rewards/max": reward_max,
-          "rewards/sum": reward_sum,
-      })
     for name, val in step_reward_metrics.items():
       self._log_metric(name, val, log_step)
+    # A step whose groups all lack valid trajectories has no reward summary.
+    reward_mean, reward_std = (
+        (step_reward_metrics["rewards/mean"], step_reward_metrics["rewards/std"])
+        if "rewards/mean" in step_reward_metrics
+        else (0.0, 0.0)
+    )
 
     # --- Advantage Metrics ---
     advantage_mean = float(np.mean(step_advantages)) if step_advantages else 0.0
@@ -1556,7 +1540,6 @@ class StandardRLProgram(RLProgram):
         step_result = None
         trainer_metrics = None
         step_sampler_agreement: dict[str, tuple[Any, list[Any]]] = {}
-        step_rewards: list[float] = []
         step_advantages: list[float] = []
         step_prompt_lengths: list[int] = []
         step_completion_lengths: list[int] = []
@@ -1680,13 +1663,11 @@ class StandardRLProgram(RLProgram):
             if scored_group.reward_log_metrics:
               step_reward_log_metrics.append(scored_group.reward_log_metrics)
             payloads: list[datatypes.RLTrainerPayload] = []
-            for item, payload, reward_val in zip(
+            for item, payload in zip(
                 scored_group.items,
                 scored_group.payloads,
-                scored_group.rewards,
                 strict=True,
             ):
-              step_rewards.append(reward_val)
               advantages = np.asarray(payload.advantages)
               if advantages.size > 0:
                 step_advantages.append(float(np.mean(advantages)))
@@ -1705,7 +1686,7 @@ class StandardRLProgram(RLProgram):
                   },
               )
               payloads.append(payload)
-              del item, payload, reward_val
+              del item, payload
             del scored_group
             uncommitted_groups.append(group_items)
             all_step_items.extend(group_items)
@@ -1808,7 +1789,6 @@ class StandardRLProgram(RLProgram):
 
         metrics_summary = self._collect_and_log_step_metrics(
             all_step_items=all_step_items,
-            step_rewards=step_rewards,
             step_advantages=step_advantages,
             prompt_lengths=step_prompt_lengths,
             completion_lengths=step_completion_lengths,

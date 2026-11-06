@@ -3815,7 +3815,6 @@ class RLProgramTest(absltest.TestCase):
 
       prog._collect_and_log_step_metrics(
           all_step_items=all_items,
-          step_rewards=step_rewards,
           step_advantages=[0.0, 0.0, 0.0, 0.0],
           generation_metrics={},
           step_result={"loss": 0.1},
@@ -3906,7 +3905,6 @@ class RLProgramTest(absltest.TestCase):
 
       prog_unequal._collect_and_log_step_metrics(
           all_step_items=unequal_items,
-          step_rewards=unequal_rewards,
           step_advantages=[0.0, 0.0, 0.0, 0.0],
           generation_metrics={},
           step_result={"loss": 0.1},
@@ -3937,6 +3935,63 @@ class RLProgramTest(absltest.TestCase):
           unequal_logger.metric_exists("trajectory_rewards", "mean", "train")
       )
       prog_unequal.close()
+
+    asyncio.run(_run())
+
+  def test_nan_env_reward_trajectory_excluded_from_step_reward_metrics(self):
+    async def _run():
+      # Env rewards [NaN, 2.0] and [4.0, 6.0] across two groups: the NaN
+      # trajectory is masked out of training, so the step's reward metrics
+      # skip it (only its own trajectory, not its group) instead of becoming
+      # NaN.
+      self.algo_config.reward_mode = "env"
+      prog = self._create_program(
+          dataset=["prompt_0", "prompt_1"], batch_size=2, reward_fns=[]
+      )
+      prog.engine = self.mock_engine
+      for prompt_id, group_rewards in (
+          ("prompt_0", [np.nan, 2.0]),
+          ("prompt_1", [4.0, 6.0]),
+      ):
+        for idx, r in enumerate(group_rewards):
+          await prog.raw_q.put(
+              distributed_rl_engine._response_to_trajectory_item(
+                  _create_rollout_response(
+                      f"req_{prompt_id}_{idx}",
+                      prompt_id,
+                      group_index=idx,
+                      reward=r,
+                  )
+              )
+          )
+      await prog.raw_q.close()
+      await prog.critique_stage()
+      g0 = await prog.scored_q.get()
+      g1 = await prog.scored_q.get()
+      assert g0 is not None and g1 is not None
+
+      summary = prog._collect_and_log_step_metrics(
+          all_step_items=list(g0.items) + list(g1.items),
+          step_advantages=[0.0, 0.0, 0.0, 0.0],
+          num_rollouts=4,
+          num_microbatches=1,
+          padding_stats=[],
+          packing_time_sec=0.0,
+          step_time_sec=0.1,
+          consumed_policy_version=0,
+          log_step=0,
+          reward_log_metrics=[g0.reward_log_metrics, g1.reward_log_metrics],
+      )
+      logger = prog.metrics_logger
+      self.assertAlmostEqual(logger.get_metric("rewards", "mean", "train"), 4.0)
+      self.assertAlmostEqual(logger.get_metric("rewards", "min", "train"), 2.0)
+      self.assertAlmostEqual(logger.get_metric("rewards", "max", "train"), 6.0)
+      self.assertAlmostEqual(logger.get_metric("rewards", "sum", "train"), 12.0)
+      self.assertAlmostEqual(
+          logger.get_metric("rewards", "nonfinite_frac", "train"), 0.25
+      )
+      self.assertAlmostEqual(summary["reward_mean"], 4.0)
+      prog.close()
 
     asyncio.run(_run())
 
@@ -4921,7 +4976,6 @@ class RLProgramTest(absltest.TestCase):
 
     program._collect_and_log_step_metrics(
         all_step_items=[],
-        step_rewards=[],
         num_rollouts=0,
         num_microbatches=0,
         padding_stats=[],
@@ -4967,7 +5021,6 @@ class RLProgramTest(absltest.TestCase):
 
     program._collect_and_log_step_metrics(
         all_step_items=[],
-        step_rewards=[],
         num_rollouts=0,
         num_microbatches=0,
         padding_stats=[],
@@ -6125,7 +6178,6 @@ class RLProgramTest(absltest.TestCase):
 
       program._collect_and_log_step_metrics(
           all_step_items=[],
-          step_rewards=[],
           step_advantages=[],
           step_result=None,
           trainer_metrics=None,
@@ -6169,7 +6221,6 @@ class RLProgramTest(absltest.TestCase):
     program = self._create_program()
     program._collect_and_log_step_metrics(
         all_step_items=[],
-        step_rewards=[],
         step_advantages=[],
         step_result=None,
         trainer_metrics=None,
@@ -6221,7 +6272,6 @@ class RLProgramTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "is missing policy_version"):
       program._collect_and_log_step_metrics(
           all_step_items=[unversioned],
-          step_rewards=[1.0],
           num_rollouts=1,
           num_microbatches=0,
           padding_stats=[],
@@ -6239,7 +6289,6 @@ class RLProgramTest(absltest.TestCase):
     )
     program._collect_and_log_step_metrics(
         all_step_items=[tombstone],
-        step_rewards=[0.0],
         num_rollouts=1,
         num_microbatches=0,
         padding_stats=[],
@@ -6461,10 +6510,12 @@ class RLProgramTest(absltest.TestCase):
 
   def test_collect_and_log_step_metrics_logs_invalid_trajectory_frac(self):
     program = self._create_program()
+    items = self._masked_metrics_items()
+    _, reward_log_metrics = program._score_group(items)
 
     program._collect_and_log_step_metrics(
-        all_step_items=self._masked_metrics_items(),
-        step_rewards=[1.0, 0.0],
+        all_step_items=items,
+        reward_log_metrics=[reward_log_metrics],
         step_advantages=[0.5, 0.0],
         step_result=None,
         trainer_metrics=None,
@@ -6495,7 +6546,6 @@ class RLProgramTest(absltest.TestCase):
 
     program._collect_and_log_step_metrics(
         all_step_items=all_invalid_items,
-        step_rewards=[0.0, 0.0],
         step_advantages=[0.0, 0.0],
         step_result=None,
         trainer_metrics=None,
@@ -6525,7 +6575,6 @@ class RLProgramTest(absltest.TestCase):
 
     metrics_summary = program._collect_and_log_step_metrics(
         all_step_items=[],
-        step_rewards=[],
         step_advantages=[],
         step_result=None,
         trainer_metrics=None,
@@ -6634,7 +6683,7 @@ class RLProgramTest(absltest.TestCase):
 
       program._collect_and_log_step_metrics(
           all_step_items=list(scored_group.items),
-          step_rewards=[1.0, 0.0],
+          reward_log_metrics=[scored_group.reward_log_metrics],
           step_advantages=[0.0, 0.0],
           step_result=None,
           trainer_metrics=None,
@@ -7353,7 +7402,6 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
     program.metrics_logger = mock.MagicMock()
     program._collect_and_log_step_metrics(
         all_step_items=[],
-        step_rewards=[],
         generation_metrics=metrics,
         num_rollouts=0,
         num_microbatches=0,
@@ -7411,7 +7459,6 @@ class EfficiencyMetricsLoggingTest(absltest.TestCase):
     program.metrics_logger = mock.MagicMock()
     program._collect_and_log_step_metrics(
         all_step_items=[],
-        step_rewards=[],
         num_rollouts=0,
         num_microbatches=len(padding_stats),
         padding_stats=padding_stats,
@@ -7788,7 +7835,13 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
         metadata={"batch_idx": batch_idx},
     )
     return rl_program.ScoredGroup(
-        payloads=(payload,), items=(item,), rewards=(reward,)
+        payloads=(payload,),
+        items=(item,),
+        rewards=(reward,),
+        reward_log_metrics={
+            "rewards/mean": (np.array([reward]), np.nanmean),
+            "rewards/std": (np.array([reward]), np.nanstd),
+        },
     )
 
   def test_defaults_to_trajectory_completion_and_prompt_arrival_builds_ordered_queue(
@@ -8686,7 +8739,6 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
         # rather than initial turn version v_0=1, and log version_span_*.
         program._collect_and_log_step_metrics(
             all_step_items=first.items,
-            step_rewards=first.rewards,
             num_rollouts=2,
             num_microbatches=1,
             padding_stats=[],
