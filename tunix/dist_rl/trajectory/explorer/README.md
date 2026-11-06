@@ -71,7 +71,7 @@ python3 -m tunix.dist_rl.trajectory.explorer.run_explorer \
 
 ## How to Add a New Subcommand
 
-Adding a new subcommand requires **4 steps**. `commands/summary.py` and `commands/show.py` are complete examples; shared terminal helpers (missing-value marker, status name) live in `commands/formatting.py`, and `StepCounts`/`TokenCounts` render themselves via `str()`.
+Adding a new subcommand requires **4 steps**. `commands/summary.py` and `commands/show.py` are complete examples; shared formatting helpers (missing-value marker, optional values, counts) live in `diagnostics/formatting.py`, and `StepCounts`/`TokenCounts` render themselves via `str()`.
 
 ### Step 1: Implement `BaseCommand` in `commands/<name>.py`
 Create a frozen dataclass inheriting from `base.BaseCommand`. Any fields declared on the dataclass automatically become subcommand-specific CLI flags via `simple_parsing`.
