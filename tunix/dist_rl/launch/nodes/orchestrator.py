@@ -193,7 +193,7 @@ def build_generation_args(
 
 def build_metrics_logging_options(
     hp: resolve_config.DistHyperParameters,
-) -> metrics_logger_lib.MetricsLoggerOptions:
+) -> metrics_logger_lib.MetricsLoggerOptions | None:
   """Builds `MetricsLoggerOptions` from `rl_training_config`.
 
   Uses `obtain_training_config_dict` rather than `create_rl_training_config()`:
@@ -204,15 +204,20 @@ def build_metrics_logging_options(
     hp: Resolved distributed RL configuration.
 
   Returns:
-    The metrics logger options, with the resolved config logged to W&B.
+    The metrics logger options, with the resolved config logged to W&B; None
+    when `rl_training_config.metrics_logging_options` is null, so the program
+    creates no metrics backends and logs no trajectories unless
+    `dist_training_config.trajectory_log_dir` is set.
   """
   options = hp.obtain_training_config_dict("rl_training_config")[
       "metrics_logging_options"
   ]
+  if options is None:
+    return None
   if not isinstance(options, metrics_logger_lib.MetricsLoggerOptions):
     raise TypeError(
-        "rl_training_config.metrics_logging_options must be set, got"
-        f" {options!r}."
+        "rl_training_config.metrics_logging_options must be a mapping or"
+        f" null, got {options!r}."
     )
   return dataclasses.replace(
       options,
@@ -405,9 +410,9 @@ def required_workers(
 ) -> dict[datatypes.Role | str, int]:
   """Returns the number of workers per role to wait for.
 
-  `cluster_config.target: k8s` launches `cluster_config.k8s.rollout.replicas`
-  rollout nodes; `target: local` launches one. The reference inference worker
-  is only needed for a KL penalty (`agentic_grpo_config.beta != 0`).
+  The rollout count is `cluster_config.rollout_replicas` on every target (one
+  on `target: local`). The reference inference worker is only needed for a KL
+  penalty (`agentic_grpo_config.beta != 0`).
 
   Args:
     hp: Resolved distributed RL configuration.
@@ -415,12 +420,7 @@ def required_workers(
   Returns:
     The minimum worker count per role.
   """
-  cluster = hp.config_mapping("cluster_config")
-  num_rollouts = (
-      int(cluster["k8s"]["rollout"]["replicas"])
-      if cluster["target"] == "k8s"
-      else 1
-  )
+  num_rollouts = int(hp.config_mapping("cluster_config")["rollout_replicas"])
   beta = float(hp.config_mapping("agentic_grpo_config")["beta"])
   return {
       datatypes.Role.ACTOR: 1,
@@ -566,7 +566,7 @@ def build_program(
     eos_id: int,
     prompt_items: grain.MapDataset[dict[str, object]],
     trajectory_store: trajectory_store_lib.TrajectoryStore | None,
-    metrics_logging_options: metrics_logger_lib.MetricsLoggerOptions,
+    metrics_logging_options: metrics_logger_lib.MetricsLoggerOptions | None,
 ) -> rl_program.StandardRLProgram:
   """Builds the `StandardRLProgram` from the configuration.
 
@@ -580,7 +580,7 @@ def build_program(
     prompt_items: Prompt items to dispatch (see `load_prompt_items`).
     trajectory_store: The cluster's trajectory store, if enabled.
     metrics_logging_options: Metrics logging (see
-      `build_metrics_logging_options`).
+      `build_metrics_logging_options`), or None to log no metrics.
 
   Returns:
     The RL program.

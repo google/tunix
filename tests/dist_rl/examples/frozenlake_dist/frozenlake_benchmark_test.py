@@ -171,8 +171,13 @@ class FrozenLakeBenchmarkTest(unittest.TestCase):
 
   def test_dist_launch_overrides_only_benchmark_settings(self):
     overrides, env, settings = self.dist_settings()
-    # The resolver rejects unknown keys; catch misspellings here too.
-    self.assertLessEqual(overrides.keys(), yaml_defaults().keys())
+    # The resolver rejects unknown keys; catch misspellings here too. An
+    # override may set a whole section (`metrics_logging_options=null`).
+    known = yaml_defaults().keys()
+    for key in overrides:
+      self.assertTrue(
+          any(name == key or name.startswith(f"{key}.") for name in known), key
+      )
     for name, value in {
         "batch_size": "8",
         "rl_training_config.mini_batch_size": "8",
@@ -182,7 +187,7 @@ class FrozenLakeBenchmarkTest(unittest.TestCase):
         "model_config.dtype": "bfloat16",
         "model_config.load_dtype": "float32",
         "rl_training_config.checkpointing_options.save_interval_steps": "0",
-        "rl_training_config.metrics_logging_options.log_dir": "",
+        "rl_training_config.metrics_logging_options": "null",
         "dist_training_config.trajectory_log_dir": "",
     }.items():
       self.assertEqual(overrides[name], value, name)
@@ -335,7 +340,11 @@ class FrozenLakeBenchmarkTest(unittest.TestCase):
     )
     self.assertEqual(config["vllm_config"]["data_parallel_size"], 1)
     self.assertIsNone(train["checkpoint_root_directory"])
+    # Neither stack creates metrics backends.
     self.assertIsNone(train["metrics_logging_options"])
+    self.assertEqual(
+        overrides["rl_training_config.metrics_logging_options"], "null"
+    )
     self.assertTrue(config["agentic_grpo_config"]["exact_token_continuity"])
 
   def test_benchmark_entry_points_wrap_the_launch_mains(self):

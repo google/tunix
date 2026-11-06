@@ -184,7 +184,7 @@ class RecipesTest(launcher_testing.LauncherTestCase):
     self.assertEqual(k8s["trainer"]["tpu_slice"], "tpuv5:2x2x2")
     self.assertEqual(k8s["rollout"]["jobset_yaml"], "jobset.tpu.yaml")
     self.assertEqual(k8s["rollout"]["tpu_slice"], "tpuv5:2x2x2")
-    self.assertEqual(k8s["rollout"]["replicas"], 2)
+    self.assertEqual(config["cluster_config"]["rollout_replicas"], 2)
     # Ports come from `math_gsm8k_dist/k8s_launcher.sh`; sequence lengths from
     # `math_gsm8k_dist/gsm8k.yaml`.
     self.assertEqual(config["cluster_config"]["ports"]["trainer"], 20002)
@@ -199,11 +199,11 @@ class RecipesTest(launcher_testing.LauncherTestCase):
         "recipes/trellis_gsm8k_qwen3p5_35b.sh",
         _K8S_IMAGE,
         "rl_training_config.max_steps=7",
-        "cluster_config.k8s.rollout.replicas=3",
+        "cluster_config.rollout_replicas=3",
     )
     config = run.resolve().config
     self.assertEqual(config["rl_training_config"]["max_steps"], 7)
-    self.assertEqual(config["cluster_config"]["k8s"]["rollout"]["replicas"], 3)
+    self.assertEqual(config["cluster_config"]["rollout_replicas"], 3)
     self.assertIn("testuser-roll-2", run.stdout)
 
 

@@ -66,7 +66,7 @@
       "tunix.sft.metrics_logger.MetricsLoggerOptions": {
         "kwargs": {
           "flush_every_n_steps": 1,
-          "log_dir": "",
+          "log_dir": "/artifacts/metrics",
           "project_name": "trellis-gsm8k",
           "run_name": ""
         }
@@ -75,7 +75,7 @@
     {
       "tunix.common.configs.TrainingConfig": {
         "kwargs": {
-          "checkpoint_root_directory": "checkpoints",
+          "checkpoint_root_directory": "/artifacts/checkpoints",
           "checkpointing_options": "<tunix.sft.checkpoint_options.TunixCheckpointingOptions()>",
           "data_sharding_axis": [
             "fsdp"

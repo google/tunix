@@ -37,7 +37,9 @@ commands without starting them. The launcher fails when environment variables
 of the old launcher, such as `BATCH_SIZE`, `MAX_STEPS`, or `WEIGHT_SYNC_MODE`,
 are set: unset them and pass the settings as arguments. The node logs go to
 `artifacts/frozenlake/*.log` (or to `LOG_ROOT`), the checkpoints to
-`checkpoints/frozenlake`, and the metrics to `/tmp/trellis_frozenlake`.
+`artifacts/frozenlake/checkpoints`, the metrics to
+`artifacts/frozenlake/metrics`, and the per-step trajectories to
+`artifacts/frozenlake/metrics/trajectories`.
 
 For a small infrastructure smoke test, use a smaller supported model and turn
 off weight synchronization:

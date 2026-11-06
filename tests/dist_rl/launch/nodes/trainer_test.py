@@ -16,6 +16,7 @@
 
 import contextlib
 import importlib
+import os
 from unittest import mock
 
 from absl.testing import absltest
@@ -127,6 +128,30 @@ class TrainerMainTest(absltest.TestCase):
     self.assertEqual(
         self.mock_serve_worker.call_args.kwargs["worker_id_str"], "trainer-1"
     )
+
+  def test_external_target_reads_worker_port_and_fails_fast_before_jax_init(
+      self,
+  ):
+    argv = [
+        "cluster_config.target=external",
+        "cluster_config.artifact_root=/artifacts/run_1",
+    ]
+    with mock.patch.dict(
+        os.environ, {"DIST_RL_WORKER_PORT": "41234"}, clear=True
+    ):
+      trainer.main(argv, context=self.mock_context)
+    self.assertEqual(
+        self.mock_serve_worker.call_args.kwargs["worker_id_str"], "trainer-0"
+    )
+    self.assertEqual(self.mock_serve_worker.call_args.kwargs["port"], 41234)
+
+    self.mock_context.jax.initialize.reset_mock()
+    with mock.patch.dict(os.environ, {}, clear=True):
+      with self.assertRaisesRegex(
+          ValueError, "DIST_RL_WORKER_PORT must be set"
+      ):
+        trainer.main(argv, context=self.mock_context)
+    self.mock_context.jax.initialize.assert_not_called()
 
   def test_main_raises_without_discovery_context(self):
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):
@@ -379,6 +404,13 @@ class TrainerFactoryTest(absltest.TestCase):
       factory()
     training_config = mock_peft_trainer.call_args.args[2]
     self.assertIsNone(training_config.checkpoint_root_directory)
+
+  def test_tunix_training_config_accepts_null_metrics_logging_options(self):
+    training_config = trainer._tunix_training_config(
+        _hp("rl_training_config.metrics_logging_options=null"),
+        gradient_accumulation_steps=1,
+    )
+    self.assertIsNone(training_config.metrics_logging_options)
 
   def test_checkpoint_root_directory_kept_when_saving_enabled(self):
     hp = _hp(
@@ -674,6 +706,25 @@ class MaxTextOptionsTest(absltest.TestCase):
     )
     self.assertTrue(opts.read_only)
     self.assertEqual(opts.save_interval_steps, 0)
+
+  def test_profiling_options_accepts_null_metrics_logging_options(self):
+    self.assertIsNone(
+        trainer._maxtext_profiling_options(
+            _hp(
+                *_MAXTEXT_ARGV,
+                "rl_training_config.metrics_logging_options=null",
+            )
+        )
+    )
+    opts = trainer._maxtext_profiling_options(
+        _hp(
+            *_MAXTEXT_ARGV,
+            "rl_training_config.metrics_logging_options=null",
+            "rl_training_config.profiler_options.profiler_steps=2",
+        )
+    )
+    self.assertIsInstance(opts, maxtext_utils.ProfilerOptions)
+    self.assertEqual(opts.profiler_steps, 2)
 
   def test_adamw_options_follow_optimizer_config(self):
     # Names are case-insensitive, as cli.config.create_optimizer reads them.

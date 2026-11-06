@@ -349,6 +349,20 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertEqual(res.returncode, 0, msg=res.stderr)
     self.assertNotIn("MAXTEXT_EXTRA_FLAGS", res.stdout)
 
+  def test_external_target_is_not_launched_here(self):
+    # The resolver accepts the target, with an absolute artifact root.
+    res = self._run_launch([
+        "--dry-run",
+        "cluster_config.target=external",
+        "cluster_config.artifact_root=/artifacts/external_run",
+    ])
+    self.assertEqual(res.returncode, 1, msg=res.stderr)
+    self.assertIn(
+        "cluster_config.target=external runs are started by another launcher",
+        res.stderr,
+    )
+    self.assertEqual(res.stdout, "")
+
   def test_drivers_refuse_direct_invocation(self):
     for script in ("local.sh", "k8s.sh"):
       with self.subTest(script=script):
@@ -375,7 +389,7 @@ class LaunchScriptsTest(absltest.TestCase):
         "cluster_config.k8s.tunix_image=test-image",
         "cluster_config.run_id=run_k8s_test",
         "weight_sync_config.mode=raiden",
-        "cluster_config.k8s.rollout.replicas=2",
+        "cluster_config.rollout_replicas=2",
         "agentic_grpo_config.beta=0.0",
     ])
     self.assertEqual(res.returncode, 0, msg=res.stderr)

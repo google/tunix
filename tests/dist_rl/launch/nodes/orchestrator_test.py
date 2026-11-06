@@ -360,7 +360,7 @@ class BuildersTest(absltest.TestCase):
             "batch_size=8",
         )
     )
-    self.assertIsInstance(options, metrics_logger_lib.MetricsLoggerOptions)
+    assert isinstance(options, metrics_logger_lib.MetricsLoggerOptions)
     self.assertEqual(options.log_dir, "/tmp/metrics")
     self.assertEqual(options.project_name, "proj")
     wandb_kwargs = options.backend_kwargs["wandb"]
@@ -435,6 +435,26 @@ class BuildersTest(absltest.TestCase):
         orchestrator.required_workers(_config("agentic_grpo_config.beta=0.0")),
         {role.ACTOR: 1, role.ROLLOUT: 1, role.REFERENCE: 0},
     )
+
+  def test_required_workers_waits_for_every_rollout_replica(self):
+    role = datatypes.Role
+    for target_overrides in (
+        ("cluster_config.target=k8s",),
+        (
+            "cluster_config.target=external",
+            "cluster_config.artifact_root=/artifacts/run",
+        ),
+    ):
+      with self.subTest(target=target_overrides[0]):
+        hp = _config(
+            *target_overrides,
+            "agentic_grpo_config.beta=0.0",
+            "cluster_config.rollout_replicas=3",
+        )
+        self.assertEqual(
+            orchestrator.required_workers(hp),
+            {role.ACTOR: 1, role.ROLLOUT: 3, role.REFERENCE: 0},
+        )
 
 
 class LoadPromptItemsTest(absltest.TestCase):
@@ -676,15 +696,16 @@ class ClusterTest(absltest.TestCase):
     assert isinstance(handle, remote_execution.GrpcRemoteActorHandle)
     self.assertEqual(handle._rpc_timeout_s, 42.0)  # pylint: disable=protected-access
 
-  def test_wait_for_workers_needs_rollout_replicas_on_k8s_only(self):
-    overrides = (
+  def test_wait_for_workers_waits_for_every_rollout_replica(self):
+    hp = _config(
+        "cluster_config.target=k8s",
         "agentic_grpo_config.beta=0.0",
-        "cluster_config.k8s.rollout.replicas=2",
+        "cluster_config.rollout_replicas=2",
         "cluster_config.init_timeout_s=0.5",
     )
 
     def wait(
-        hp: resolve_config.DistHyperParameters, service_types: Sequence[str]
+        service_types: Sequence[str],
     ) -> cluster_orchestrator.ClusterOrchestrator:
       cluster = self._cluster(hp)
       sha = resolve_config.config_fingerprint(hp)
@@ -697,22 +718,15 @@ class ClusterTest(absltest.TestCase):
       )
       return cluster
 
-    # `target: local` launches a single rollout node.
-    local = wait(_config(*overrides), ["trainer", "rollout"])
-    self.assertLen(
-        local.registry.handles(datatypes.Role.ROLLOUT, statuses=None), 1
-    )
-
-    k8s_hp = _config(*overrides, "cluster_config.target=k8s")
     with self.assertRaisesRegex(
         TimeoutError,
         r"did not register within cluster_config.init_timeout_s=0\.5s\."
         r" Required: .*'rollout'>: 2.*, registered: .*'rollout'>: 1",
     ):
-      wait(k8s_hp, ["trainer", "rollout"])
-    k8s = wait(k8s_hp, ["trainer", "rollout", "rollout"])
+      wait(["trainer", "rollout"])
+    cluster = wait(["trainer", "rollout", "rollout"])
     self.assertLen(
-        k8s.registry.handles(datatypes.Role.ROLLOUT, statuses=None), 2
+        cluster.registry.handles(datatypes.Role.ROLLOUT, statuses=None), 2
     )
 
   def test_wait_for_workers_rejects_a_worker_with_another_config(self):
@@ -901,6 +915,35 @@ class ProgramTest(absltest.TestCase):
     self.assertEqual(
         program_span.group_order, rl_program.GroupOrder.TRAJECTORY_COMPLETION
     )
+
+  def test_trajectory_logs_follow_the_metrics_logging_options(self):
+    artifact_root = self.create_tempdir().full_path
+    # By default, the metrics and the trajectories go under the artifact root.
+    hp = _config(f"cluster_config.artifact_root={artifact_root}")
+    options = orchestrator.build_metrics_logging_options(hp)
+    assert options is not None  # Narrows the type for pytype.
+    self.assertEqual(options.log_dir, f"{artifact_root}/metrics")
+    program = self._build_program(hp, reward_fns=[])
+    self.addCleanup(program.close)
+    self.assertIsNotNone(program.trajectory_logger)
+    # Null metrics logging options log neither, ...
+    no_metrics = (
+        f"cluster_config.artifact_root={artifact_root}",
+        "rl_training_config.metrics_logging_options=null",
+    )
+    hp = _config(*no_metrics)
+    self.assertIsNone(orchestrator.build_metrics_logging_options(hp))
+    program = self._build_program(hp, reward_fns=[])
+    self.addCleanup(program.close)
+    self.assertIsNone(program.trajectory_logger)
+    # ... unless a trajectory directory is set.
+    hp = _config(
+        *no_metrics,
+        f"dist_training_config.trajectory_log_dir={artifact_root}/trajectories",
+    )
+    program = self._build_program(hp, reward_fns=[])
+    self.addCleanup(program.close)
+    self.assertIsNotNone(program.trajectory_logger)
 
   def test_env_reward_mode_runs_without_reward_functions(self):
     hp = self._program_config()

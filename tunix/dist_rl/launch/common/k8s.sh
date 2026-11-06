@@ -261,9 +261,9 @@ stop_rollout_instance() {
 
 stop_rollout() {
   local i
-  for ((i = 0; i < K8S_ROLLOUT_REPLICAS; i++)); do
+  for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
     local target_id="${K8S_ROLLOUT_ID}"
-    if (( K8S_ROLLOUT_REPLICAS > 1 )); then
+    if (( ROLLOUT_REPLICAS > 1 )); then
       target_id="${K8S_ROLLOUT_ID}-${i}"
     fi
     stop_rollout_instance "${target_id}"
@@ -278,7 +278,7 @@ start_rollout_instance() {
   fi
 
   local env_prefix="SKIP_JAX_PRECOMPILE=$(printf '%q' "${K8S_ROLLOUT_SKIP_JAX_PRECOMPILE}") VERIFY_WEIGHTS=$(printf '%q' "${WEIGHT_SYNC_VERIFY_WEIGHTS}")"
-  if (( K8S_ROLLOUT_REPLICAS > 1 )); then
+  if (( ROLLOUT_REPLICAS > 1 )); then
     # The node appends the index to `cluster_config.k8s.rollout_id`
     # (`node_utils.worker_id`), so it registers as `target_id`.
     env_prefix+=" DIST_RL_ROLLOUT_REPLICA=${replica}"
@@ -368,9 +368,9 @@ start_rollout() {
     echo "[launcher] Rollout JAX cache GCS: ${K8S_JAX_CACHE_ROLLOUT_GCS_DIR} (save=${K8S_JAX_CACHE_SAVE:-true})" >&2
   fi
   local i
-  for ((i = 0; i < K8S_ROLLOUT_REPLICAS; i++)); do
+  for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
     local target_id="${K8S_ROLLOUT_ID}"
-    if (( K8S_ROLLOUT_REPLICAS > 1 )); then
+    if (( ROLLOUT_REPLICAS > 1 )); then
       target_id="${K8S_ROLLOUT_ID}-${i}"
     fi
     start_rollout_instance "${target_id}" "${i}"

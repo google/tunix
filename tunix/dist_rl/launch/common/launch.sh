@@ -18,7 +18,9 @@
 # Resolves YAML + CLI key=value configuration via `resolve_config.py` and
 # dispatches to `local.sh` (when `cluster_config.target=local`) or `k8s.sh`
 # (when `cluster_config.target=k8s`). This is the only script that parses
-# command-line arguments.
+# command-line arguments. Another launcher (e.g. a job scheduler that starts
+# each process separately) starts the processes of
+# `cluster_config.target=external` runs, so this script rejects that target.
 #
 # Usage:
 #   bash launch.sh [start|stop|orchestrator|trainer|rollout|otel|stop-otel] \
@@ -82,6 +84,10 @@ case "${CLUSTER_TARGET}" in
     ;;
   k8s)
     exec "${LAUNCH_DIR}/k8s.sh" "${COMMAND}" "${CONFIG_ARGS[@]}"
+    ;;
+  external)
+    echo "Error: cluster_config.target=external runs are started by another launcher (e.g. a job scheduler that starts each process separately), not by launch.sh; use cluster_config.target=local or k8s here." >&2
+    exit 1
     ;;
   *)
     echo "Error: Unsupported CLUSTER_TARGET='${CLUSTER_TARGET}' (expected 'local' or 'k8s')." >&2

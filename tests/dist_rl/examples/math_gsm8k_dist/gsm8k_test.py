@@ -354,8 +354,14 @@ class ExampleConfigTest(absltest.TestCase):
     self.assertEqual(generation_args.top_k, 0)
 
   def test_metrics_logging_options(self):
-    options = orchestrator.build_metrics_logging_options(_hp())
-    self.assertEqual(options.log_dir, "/tmp/trellis_gsm8k")
+    hp = _hp()
+    options = orchestrator.build_metrics_logging_options(hp)
+    assert options is not None  # Narrows the type for pytype.
+    # Under the example's artifact root.
+    artifact_root = pathlib.Path(
+        hp.config_mapping("cluster_config")["artifact_root"]
+    )
+    self.assertEqual(options.log_dir, str(artifact_root / "metrics"))
     self.assertEqual(options.project_name, "trellis-gsm8k")
     self.assertEqual(options.flush_every_n_steps, 1)
 

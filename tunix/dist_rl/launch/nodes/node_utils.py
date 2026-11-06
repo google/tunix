@@ -45,10 +45,16 @@ NodeRole = Literal["trainer", "rollout", "inference"]
 # Every process of a run: the orchestrator and the worker nodes.
 ProcessRole = Literal["orchestrator", "trainer", "rollout", "inference"]
 
-# Environment variable that `k8s.sh` sets to each rollout replica's index
-# (0-based) when `cluster_config.k8s.rollout.replicas > 1`, instead of giving
-# each replica its own config.
+# Environment variable that `k8s.sh` or an external launcher
+# (`cluster_config.target: external`) sets to each rollout replica's index
+# (0-based) when `cluster_config.rollout_replicas > 1`, instead of giving each
+# replica its own config.
 ROLLOUT_REPLICA_ENV = "DIST_RL_ROLLOUT_REPLICA"
+# Environment variable holding the worker's gRPC port on
+# `cluster_config.target: external`, where the launcher assigns each process
+# its own port (e.g. one a job scheduler allocates), instead of giving each
+# worker its own config.
+WORKER_PORT_ENV = "DIST_RL_WORKER_PORT"
 
 # Marker that starts the resolved-config log line, so the record can be found in
 # mixed logs (e.g. `sed -n 's/.*DIST_RL_RESOLVED_CONFIG //p' trainer.log | jq`).
@@ -62,6 +68,7 @@ CONFIG_SHA256_METADATA_KEY = "config_sha256"
 # nodes set; the prefixes are whole namespaces.
 _LOGGED_ENV_VARS = frozenset({
     ROLLOUT_REPLICA_ENV,
+    WORKER_PORT_ENV,
     "ALLOW_MULTIPLE_LIBTPU_LOAD",
     "CKPT_D2H_CONCURRENT_GB",
     "DISABLE_JAX_CACHE",
@@ -259,48 +266,101 @@ def worker_id(
 
   On `cluster_config.target: k8s` the id is `cluster_config.k8s.<role>_id`
   (always resolved by `DistHyperParameters`; `k8s.sh` pins it to the
-  launcher's value). With several rollout replicas
-  (`cluster_config.k8s.rollout.replicas > 1`), a rollout replica appends
-  `-<index>` from `ROLLOUT_REPLICA_ENV`, matching its JobSet name, so the
-  replicas share one config. On `target: local` it is the fixed
-  `local_worker_id`, so local runs keep stable ids across users.
+  launcher's value). On `target: local` and `target: external` it is the fixed
+  `local_worker_id`, which keeps the ids stable across users.
+
+  With several rollout replicas (`cluster_config.rollout_replicas > 1`, which
+  `target: local` rejects), each rollout replica takes its index from
+  `ROLLOUT_REPLICA_ENV`, so the replicas share one config: on k8s it appends
+  `-<index>` to its id, matching its JobSet name; on external its id is
+  `rollout-<index>`.
 
   Args:
     hp: Validated distributed RL configuration.
     role: Node role, which selects the `cluster_config.k8s.<role>_id` key.
-    local_worker_id: Worker id used on `target: local`.
+    local_worker_id: Worker id used on `target: local` and `target: external`.
 
   Returns:
     The worker id.
 
   Raises:
-    ValueError: If a rollout replica's index is unset or out of range.
+    ValueError: If `ROLLOUT_REPLICA_ENV` is unset (when `rollout_replicas > 1`),
+      not a non-negative integer, or out of `[0, rollout_replicas)` on a rollout
+      worker.
   """
   cluster = hp.config_mapping("cluster_config")
-  if cluster["target"] != "k8s":
-    return local_worker_id
-  k8s = cluster["k8s"]
-  role_id = str(k8s[f"{role}_id"])
-  replicas = int(k8s["rollout"]["replicas"])
-  if role != "rollout" or replicas <= 1:
+  target = cluster["target"]
+  role_id = (
+      str(cluster["k8s"][f"{role}_id"]) if target == "k8s" else local_worker_id
+  )
+  if role != "rollout":
+    return role_id
+  replicas = int(cluster["rollout_replicas"])
+  if replicas == 1 and ROLLOUT_REPLICA_ENV not in os.environ:
     return role_id
   if ROLLOUT_REPLICA_ENV not in os.environ:
     raise ValueError(
         f"{ROLLOUT_REPLICA_ENV} must be set on each rollout replica when"
-        f" cluster_config.k8s.rollout.replicas={replicas} (k8s.sh sets it)."
+        f" cluster_config.rollout_replicas={replicas} (k8s.sh or the external"
+        " launcher sets it)."
     )
-  replica = int(os.environ[ROLLOUT_REPLICA_ENV])
+  raw_replica = os.environ[ROLLOUT_REPLICA_ENV]
+  if not raw_replica.isdecimal():
+    raise ValueError(
+        f"{ROLLOUT_REPLICA_ENV} must be a non-negative integer, got"
+        f" {raw_replica!r}."
+    )
+  replica = int(raw_replica)
   if not 0 <= replica < replicas:
     raise ValueError(
         f"{ROLLOUT_REPLICA_ENV}={replica} is out of range for"
-        f" cluster_config.k8s.rollout.replicas={replicas}."
+        f" cluster_config.rollout_replicas={replicas}."
     )
-  return f"{role_id}-{replica}"
+  if replicas == 1:
+    return role_id
+  # `rollout-<i>` matches `rollout.LOCAL_WORKER_ID = "rollout-0"`.
+  return f"{role_id}-{replica}" if target == "k8s" else f"{role}-{replica}"
 
 
 def service_port(hp: resolve_config.DistHyperParameters, role: NodeRole) -> int:
-  """Returns `cluster_config.ports.<role>`, the node's gRPC port."""
-  return int(hp.config_mapping("cluster_config")["ports"][role])
+  """Returns the node's gRPC port.
+
+  On `cluster_config.target: external` the launcher assigns each worker its
+  port in `WORKER_PORT_ENV`, since every process gets the same config. On the
+  other targets the port is `cluster_config.ports.<role>`.
+
+  Args:
+    hp: Validated distributed RL configuration.
+    role: Node role, which selects the `cluster_config.ports.<role>` key.
+
+  Returns:
+    The port.
+
+  Raises:
+    ValueError: If `WORKER_PORT_ENV` is unset or not a port number on
+      `target: external`, or set on another target.
+  """
+  cluster = hp.config_mapping("cluster_config")
+  target = cluster["target"]
+  if target != "external":
+    if WORKER_PORT_ENV in os.environ:
+      raise ValueError(
+          f"{WORKER_PORT_ENV} is only for cluster_config.target=external; on"
+          f" target {target!r} the node listens on cluster_config.ports.{role}."
+          f" Unset {WORKER_PORT_ENV}."
+      )
+    return int(cluster["ports"][role])
+  if WORKER_PORT_ENV not in os.environ:
+    raise ValueError(
+        f"{WORKER_PORT_ENV} must be set on cluster_config.target=external,"
+        " where the launcher assigns each worker its gRPC port."
+    )
+  port = os.environ[WORKER_PORT_ENV]
+  if not port.isdecimal() or not 0 < int(port) <= 65535:
+    raise ValueError(
+        f"{WORKER_PORT_ENV} must be a port number in [1, 65535], got {port!r}."
+    )
+  return int(port)
 
 
 def setup_otel_metrics(

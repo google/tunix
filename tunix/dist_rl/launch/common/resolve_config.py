@@ -126,17 +126,28 @@ def _mutable_section(
 
 
 def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
-  """Resolves derived cluster, model, tokenizer, and optimizer defaults."""
+  """Resolves derived cluster, model, tokenizer, and optimizer defaults.
+
+  The output directories (checkpoints, metrics) default to subdirectories of
+  `cluster_config.artifact_root`.
+
+  Args:
+    hp: Loaded configuration updated in place.
+  """
   cluster = _mutable_section(hp, "cluster_config")
   target = str(cluster["target"])
-  if target not in ("local", "k8s"):
-    raise ValueError(
-        f"cluster_config.target must be 'local' or 'k8s', got {target!r}."
-    )
+  _check_choice("cluster_config.target", target, _CLUSTER_TARGETS)
 
   if not cluster["artifact_root"]:
     raise ValueError("cluster_config.artifact_root must not be empty.")
   artifact_root = pathlib.Path(str(cluster["artifact_root"]))
+  if target == "external" and not artifact_root.is_absolute():
+    raise ValueError(
+        "cluster_config.target=external requires an absolute"
+        f" cluster_config.artifact_root, got {str(artifact_root)!r}: each"
+        " process would resolve a relative path against its own working"
+        " directory."
+    )
   if target == "local" and not artifact_root.is_absolute():
     artifact_root = REPO_ROOT / artifact_root
   cluster["artifact_root"] = str(artifact_root)
@@ -161,9 +172,19 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
   if rl_train["mini_batch_size"] is None:
     rl_train["mini_batch_size"] = int(hp.config["batch_size"])
   if not rl_train["checkpoint_root_directory"]:
-    rl_train["checkpoint_root_directory"] = (
-        str(REPO_ROOT / "checkpoints") if target == "local" else "checkpoints"
-    )
+    rl_train["checkpoint_root_directory"] = str(artifact_root / "checkpoints")
+  metrics = rl_train["metrics_logging_options"]
+  # Null logs no metrics (see `orchestrator.build_metrics_logging_options`).
+  if metrics is not None:
+    if not isinstance(metrics, MutableMapping):
+      raise TypeError(
+          "rl_training_config.metrics_logging_options must be a mapping or"
+          f" null, got {type(metrics).__name__}."
+      )
+    if not metrics["log_dir"]:
+      # The orchestrator also logs trajectories under `<log_dir>/trajectories`
+      # unless `dist_training_config.trajectory_log_dir` is set.
+      metrics["log_dir"] = str(artifact_root / "metrics")
 
   opt = rl_train["actor_optimizer_config"]
   if isinstance(opt, MutableMapping):
@@ -392,6 +413,34 @@ def _validate_k8s_worker_jobsets(hp: cli_config.HyperParameters) -> None:
     )
 
 
+def _validate_rollout_replicas(hp: cli_config.HyperParameters) -> None:
+  """Checks `cluster_config.rollout_replicas`, the rollouts to wait for.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    ValueError: If the count is not an int >= 1, or is not 1 on
+      `cluster_config.target: local`, where `local.sh` starts one rollout.
+  """
+  cluster = hp.config_mapping("cluster_config")
+  replicas = cluster["rollout_replicas"]
+  if (
+      isinstance(replicas, bool)
+      or not isinstance(replicas, int)
+      or replicas < 1
+  ):
+    raise ValueError(
+        "cluster_config.rollout_replicas must be an int >= 1, got"
+        f" {replicas!r}."
+    )
+  if cluster["target"] == "local" and replicas != 1:
+    raise ValueError(
+        "cluster_config.target=local runs one rollout (local.sh starts one), so"
+        f" cluster_config.rollout_replicas must be 1, got {replicas}."
+    )
+
+
 def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   """Validates cross-field invariants across trainer and rollout configs."""
   # TODO(noghabi): Check which of these checks can be consolidated with the
@@ -400,6 +449,7 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_k8s_jax_cache_gcs(hp)
   _validate_k8s_scalars(hp)
   _validate_k8s_worker_jobsets(hp)
+  _validate_rollout_replicas(hp)
   batch_size = int(hp.config["batch_size"])
   rl_train = hp.config_mapping("rl_training_config")
   mini_batch_size = int(rl_train["mini_batch_size"])
@@ -781,6 +831,10 @@ def _validate_maxtext_extra_flags(hp: cli_config.HyperParameters) -> None:
     )
 
 
+# `launch.sh` starts the `local` processes (through `local.sh`) and the `k8s`
+# ones (through `k8s.sh`); another launcher starts the `external` ones, e.g. a
+# job scheduler that starts each process separately.
+_CLUSTER_TARGETS = ("local", "k8s", "external")
 _MODEL_DTYPES = ("bfloat16", "float32")
 _REMAT_CONFIGS = ("none", "block", "decoder")
 _ROLLOUT_ENGINES = ("inprocess_vllm", "vllm", "vanilla")
@@ -960,6 +1014,7 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "WAIT_DEBUG_EVERY_POLLS": cluster["wait_debug_every_polls"],
       "WAIT_LOG_TAIL_LINES": cluster["wait_log_tail_lines"],
       "RUN_INFERENCE_NODE": cluster["run_inference_node"],
+      "ROLLOUT_REPLICAS": cluster["rollout_replicas"],
       "ORCHESTRATOR_PORT": ports["orchestrator"],
       "TRAINER_PORT": ports["trainer"],
       "ROLLOUT_PORT": ports["rollout"],
@@ -1033,7 +1088,6 @@ def render_bash_exports(hp: cli_config.HyperParameters) -> str:
       "K8S_TRAINER_TPU_SLICE": k8s_trainer["tpu_slice"],
       "K8S_ROLLOUT_JOBSET_YAML": k8s_rollout["jobset_yaml"],
       "K8S_ROLLOUT_TPU_SLICE": k8s_rollout["tpu_slice"],
-      "K8S_ROLLOUT_REPLICAS": k8s_rollout["replicas"],
       "K8S_JAX_CACHE_DISABLE": jax_cache["disable"],
       "K8S_JAX_CACHE_LOCAL_DIR": jax_cache["local_dir"],
       # Empty without a GCS cache.
