@@ -13,6 +13,7 @@ from sqlalchemy.dialects import sqlite
 from tunix.dist_rl.trajectory import async_writer
 from tunix.dist_rl.trajectory import base_store as store
 from tunix.dist_rl.trajectory import db_engine
+from tunix.dist_rl.trajectory import pg_wire
 from tunix.dist_rl.trajectory import schema
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 
@@ -226,7 +227,10 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       task: Container holding run_id, metadata, and optional step.
     """
     run_id = task.run_id
-    assert run_id is not None
+    if run_id is None:
+      raise ValueError(
+          "SqlTrajectoryStore WriteTask requires a non-empty run_id."
+      )
     traj_id = task.trajectory_id
     now_dt = datetime.datetime.now(datetime.timezone.utc)
 
@@ -364,8 +368,17 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       traj_id: Validated non-empty trajectory identifier.
       step: The step to write.
     """
-    step_payload = step.model_dump(mode="json", exclude_none=True)
     step_time = _to_utc_timestamp(step.timestamp)
+    if pg_wire.try_upsert_step(
+        conn,
+        run_id=run_id,
+        trajectory_id=traj_id,
+        step=step,
+        created_at=step_time,
+    ):
+      return
+
+    step_payload = step.model_dump(mode="json", exclude_none=True)
 
     step_upsert_statement = (
         self._insert_fn(schema.STEPS_TABLE)
@@ -685,9 +698,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       )
       with self._engine.connect() as conn:
         metadata_rows = conn.execute(statement)
-        return [
-            self._load_metadata(row) for row in metadata_rows.scalars()
-        ]
+        return [self._load_metadata(row) for row in metadata_rows.scalars()]
 
     # Query only the requested trajectory IDs when a sequence is provided.
     if not trajectory_ids:
@@ -738,41 +749,51 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
         schema.TRAJECTORIES_TABLE.c.run_id == self._run_id,
         schema.TRAJECTORIES_TABLE.c.trajectory_id.in_(trajectory_ids),
     )
-    steps_statement = (
-        sa.select(
-            schema.STEPS_TABLE.c.trajectory_id,
-            schema.STEPS_TABLE.c.payload,
-        )
-        .where(
-            schema.STEPS_TABLE.c.run_id == self._run_id,
-            schema.STEPS_TABLE.c.trajectory_id.in_(trajectory_ids),
-        )
-        .order_by(
-            schema.STEPS_TABLE.c.trajectory_id,
-            schema.STEPS_TABLE.c.step_id,
-        )
-    )
-
     with self._engine.connect() as conn:
       metadata_rows = conn.execute(metadata_statement)
       metadata_by_trajectory_id = {
           trajectory_id: payload for trajectory_id, payload in metadata_rows
       }
-      step_rows = conn.execute(steps_statement)
-      steps_by_trajectory_id: dict[str, list[dict[str, Any]]] = (
+      pg_step_rows = pg_wire.try_fetch_steps(
+          conn, run_id=self._run_id, trajectory_ids=trajectory_ids
+      )
+      raw_steps_by_trajectory_id: dict[str, list[str | Mapping[str, Any]]] = (
           collections.defaultdict(list)
       )
-      for trajectory_id, payload in step_rows:
-        steps_by_trajectory_id[trajectory_id].append(payload)
+      if pg_step_rows is not None:
+        for trajectory_id, payload_json, _ in pg_step_rows:
+          raw_steps_by_trajectory_id[trajectory_id].append(payload_json)
+      else:
+        steps_statement = (
+            sa.select(
+                schema.STEPS_TABLE.c.trajectory_id,
+                schema.STEPS_TABLE.c.payload,
+            )
+            .where(
+                schema.STEPS_TABLE.c.run_id == self._run_id,
+                schema.STEPS_TABLE.c.trajectory_id.in_(trajectory_ids),
+            )
+            .order_by(
+                schema.STEPS_TABLE.c.trajectory_id,
+                schema.STEPS_TABLE.c.step_id,
+            )
+        )
+        for trajectory_id, payload in conn.execute(steps_statement):
+          raw_steps_by_trajectory_id[trajectory_id].append(payload)
 
+    validate_step: Callable[[Any], trajectory_lib.Step] = (
+        trajectory_lib.Step.model_validate_json
+        if pg_step_rows is not None
+        else trajectory_lib.Step.model_validate
+    )
     trajectories: list[trajectory_lib.Trajectory[Any]] = []
     for trajectory_id in trajectory_ids:
       if trajectory_id not in metadata_by_trajectory_id:
         raise store.TrajectoryNotFoundError(trajectory_id)
       meta = self._load_metadata(metadata_by_trajectory_id[trajectory_id])
       steps = [
-          trajectory_lib.Step.model_validate(step_payload)
-          for step_payload in steps_by_trajectory_id.get(trajectory_id, [])
+          validate_step(raw_step)
+          for raw_step in raw_steps_by_trajectory_id.get(trajectory_id, [])
       ]
       trajectories.append(meta.create_trajectory(steps=steps))
 

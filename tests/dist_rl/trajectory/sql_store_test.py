@@ -1,6 +1,7 @@
 """Unit and contract tests for SqlTrajectoryStore."""
 
 from concurrent import futures
+import datetime
 import os
 import threading
 from typing import Any
@@ -11,6 +12,7 @@ from absl.testing import parameterized
 import sqlalchemy as sa
 from tunix.dist_rl.trajectory import async_writer
 from tunix.dist_rl.trajectory import db_engine
+from tunix.dist_rl.trajectory import pg_wire
 from tunix.dist_rl.trajectory import schema
 from tunix.dist_rl.trajectory import schema_testing
 from tunix.dist_rl.trajectory import sql_store
@@ -1151,6 +1153,81 @@ class SqlTrajectoryStoreConfigTest(store_testing.TrajectoryStoreConfigTestCase):
         [m.trajectory_id for m in rebuilt.get_trajectories_metadata()],
         [trajectory_testing.METADATA_1.trajectory_id],
     )
+
+
+class SqlStorePgWireSeamTest(parameterized.TestCase):
+  """Tests verifying the seam between SqlTrajectoryStore and pg_wire."""
+
+  def test_add_step_when_pg_wire_handles_upsert_skips_sqlalchemy_step_insert(
+      self,
+  ) -> None:
+    engine = schema_testing.create_sqlite_memory_engine()
+    self.addCleanup(engine.dispose)
+    schema.METADATA.create_all(engine)
+    writer = sql_store._AsyncSqlWriter(engine=engine)
+    self.addCleanup(writer.close)
+
+    mock_conn = mock.MagicMock()
+    with (
+        mock.patch.object(
+            pg_wire, "try_upsert_step", return_value=True
+        ) as mock_try_upsert,
+        mock.patch.object(writer, "_insert_fn") as mock_insert_fn,
+    ):
+      writer._upsert_step(
+          mock_conn,
+          run_id="run_1",
+          traj_id="traj_1",
+          step=trajectory_testing.STEP_1_1,
+      )
+
+      mock_try_upsert.assert_called_once()
+      mock_insert_fn.assert_not_called()
+
+  def test_get_trajectories_when_pg_wire_returns_rows_rehydrates_json_steps(
+      self,
+  ) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "seam.db")
+    db_url = f"sqlite:///{db_path}"
+    store_instance = sql_store.SqlTrajectoryStore(db_url=db_url, run_id="run_1")
+    self.addCleanup(store_instance.close)
+
+    step = trajectory_testing.STEP_1_1
+    traj_id = trajectory_testing.TRAJECTORY_ID_1
+    metadata = trajectory_testing.make_metadata(trajectory_id=traj_id)
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    with store_instance._engine.begin() as conn:
+      conn.execute(
+          sa.insert(schema.RUNS_TABLE).values(
+              run_id="run_1",
+              agent_name="test_agent",
+              status=schema.Status.RUNNING,
+              created_at=now,
+          )
+      )
+      conn.execute(
+          sa.insert(schema.TRAJECTORIES_TABLE).values(
+              run_id="run_1",
+              trajectory_id=traj_id,
+              trajectory_metadata=metadata.model_dump(mode="json"),
+              created_at=now,
+              updated_at=now,
+          )
+      )
+
+    fake_pg_rows = [(traj_id, step.model_dump_json(), None)]
+    with mock.patch.object(
+        pg_wire, "try_fetch_steps", return_value=fake_pg_rows
+    ) as mock_try_fetch:
+      trajectories = store_instance.get_trajectories([traj_id])
+
+      mock_try_fetch.assert_called_once()
+      self.assertLen(trajectories, 1)
+      self.assertEqual(trajectories[0].trajectory_id, traj_id)
+      self.assertLen(trajectories[0].steps, 1)
+      self.assertEqual(trajectories[0].steps[0].step_id, step.step_id)
+      self.assertEqual(trajectories[0].steps[0].message, step.message)
 
 
 if __name__ == "__main__":
