@@ -200,6 +200,25 @@ class GroupQueueManagerTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
+  def test_prepare_clear_still_hands_out_ready_groups(self):
+    """Groups completed before the producer stops are not lost."""
+
+    async def _run_test():
+      manager = _create_manager(num_generations=2)
+      await manager.put(_create_item("g1", 0))
+      await manager.put(_create_item("g1", 1))
+
+      # The producer flags clearing as soon as its prompt stream ends, while
+      # the slower consumer has not fetched the ready group yet.
+      await manager.prepare_clear()
+      batch = await asyncio.wait_for(manager.get_batch(2), timeout=1.0)
+      self.assertLen(batch, 2)
+      self.assertEmpty(
+          await asyncio.wait_for(manager.get_batch(2), timeout=1.0)
+      )
+
+    asyncio.run(_run_test())
+
   def test_close(self):
     """Tests that close unblocks consumers and returns empty lists."""
 

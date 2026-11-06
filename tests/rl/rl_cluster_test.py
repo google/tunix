@@ -15,6 +15,7 @@
 import functools
 import os
 import os
+import threading
 import unittest
 from unittest import mock
 
@@ -302,6 +303,151 @@ class RlEngineTest(parameterized.TestCase):
     rl_engine.rollout.generate.assert_called_once()
     called_prompts = rl_engine.rollout.generate.call_args[0][0]
     self.assertEqual(called_prompts, ['formatted prompt'])
+
+  def _metrics_only_engine(self):
+    """Returns an RLEngine with only its metric buffers set up."""
+    rl_engine = rl_engine_lib.RLEngine.__new__(rl_engine_lib.RLEngine)
+    # pylint: disable=protected-access
+    rl_engine._buffered_train_metrics = []
+    rl_engine._buffered_eval_metrics = []
+    rl_engine._last_logged_steps = {}
+    rl_engine._metrics_lock = threading.Lock()
+    rl_engine._log_metrics = mock.Mock()
+    # pylint: enable=protected-access
+    rl_engine.global_steps = 0
+    return rl_engine
+
+  def test_buffer_metrics_async_routes_metrics_to_their_step(self):
+    rl_engine = self._metrics_only_engine()
+    # The producer runs ahead: step 1 metrics interleave with step 0 ones.
+    for step in (0, 1, 0, 1):
+      rl_engine.buffer_metrics_async({'m': (step, np.mean)}, step=step)
+    rl_engine.buffer_metrics_async({'m': (0, np.mean)})  # current step
+    buffers = rl_engine._buffered_train_metrics  # pylint: disable=protected-access
+    self.assertEqual([b.global_steps for b in buffers], [0, 1])
+    self.assertEqual(buffers[0].metrics['m'][0], [0, 0, 0])
+
+    rl_engine.global_steps = 1
+    rl_engine.buffer_metrics_async({'m': (1, np.mean)}, step=1)
+    logged = rl_engine._log_metrics.call_args.args[0]  # pylint: disable=protected-access
+    self.assertEqual(logged.global_steps, 0)
+    self.assertEqual(logged.metrics['m'][0], [0, 0, 0])
+    self.assertEqual(buffers[0].metrics['m'][0], [1, 1, 1])
+
+  def test_buffer_metrics_interleaved_with_lookahead_async_preserves_steps(
+      self,
+  ):
+    # Case A: async producer buffers lookahead steps [0, 1, 2], then trainer
+    # advances to global_steps=1 and calls sync buffer_metrics.
+    rl_engine = self._metrics_only_engine()
+    logged_steps = []
+    rl_engine._log_metrics = mock.Mock(  # pylint: disable=protected-access
+        side_effect=lambda b: logged_steps.append(b.global_steps)
+    )
+    for step in (0, 1, 2):
+      rl_engine.buffer_metrics_async(
+          {'async_m': (step * 10, np.sum)}, step=step
+      )
+    rl_engine.global_steps = 1
+    rl_engine.buffer_metrics({'sync_m': (1, np.sum)})
+
+    buffers = rl_engine._buffered_train_metrics  # pylint: disable=protected-access
+    self.assertEqual(logged_steps, [0])
+    self.assertEqual([b.global_steps for b in buffers], [1, 2])
+    self.assertEqual(buffers[0].metrics['async_m'][0], [10])
+    self.assertEqual(buffers[0].metrics['sync_m'][0], [1])
+    self.assertNotIn('sync_m', buffers[1].metrics)
+
+    # Advancing by multiple steps flushes all completed buffers via while loop.
+    rl_engine.global_steps = 3
+    rl_engine.buffer_metrics({'sync_m': (3, np.sum)})
+    self.assertEqual(logged_steps, [0, 1, 2])
+    self.assertEqual([b.global_steps for b in buffers], [3])
+
+    # Case B: late async metric for step 0 after global_steps=1 flushes step 0
+    # leaving [1, 2]; subsequent sync buffer_metrics at step 1 lands in step 1,
+    # not step 2.
+    rl_engine = self._metrics_only_engine()
+    logged_buffers = []
+    rl_engine._log_metrics = logged_buffers.append  # pylint: disable=protected-access
+    for step in (0, 1, 2):
+      rl_engine.buffer_metrics_async(
+          {'async_m': (step * 10, np.sum)}, step=step
+      )
+    rl_engine.global_steps = 1
+    rl_engine.buffer_metrics_async({'pause_s': (0.5, np.mean)}, step=0)
+
+    buffers = rl_engine._buffered_train_metrics  # pylint: disable=protected-access
+    self.assertLen(logged_buffers, 1)
+    self.assertEqual(logged_buffers[0].global_steps, 0)
+    self.assertEqual(logged_buffers[0].metrics['pause_s'][0], [0.5])
+    self.assertEqual([b.global_steps for b in buffers], [1, 2])
+
+    rl_engine.buffer_metrics({'perf': (2.0, np.mean)})
+    self.assertEqual([b.global_steps for b in buffers], [1, 2])
+    self.assertEqual(buffers[0].metrics['perf'][0], [2.0])
+    self.assertNotIn('perf', buffers[1].metrics)
+
+  def test_buffer_metrics_async_is_thread_safe(self):
+    rl_engine = self._metrics_only_engine()
+    logged = []
+    logged_steps = {
+        str(rl_engine_lib.Mode.TRAIN): [],
+        str(rl_engine_lib.Mode.EVAL): [],
+    }
+
+    def _record(b):
+      logged.extend(b.metrics['m'][0])
+      logged_steps[b.mode].append(b.global_steps)
+
+    rl_engine._log_metrics = _record  # pylint: disable=protected-access
+    n_calls, errors = 2000, []
+
+    def _producer(offset):
+      try:
+        for i in range(n_calls):
+          mode = (
+              rl_engine_lib.Mode.EVAL
+              if i % 5 == 0
+              else rl_engine_lib.Mode.TRAIN
+          )
+          rl_engine.buffer_metrics_async(
+              {'m': (1, np.sum)},
+              mode=mode,
+              step=rl_engine.global_steps + (i + offset) % 3,
+          )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        errors.append(e)
+
+    def _trainer():
+      try:
+        for step in range(200):
+          rl_engine.global_steps += 1
+          rl_engine.buffer_metrics({'m': (1, np.sum)})
+          if step % 10 == 0:
+            rl_engine.buffer_metrics(
+                {'m': (1, np.sum)}, mode=rl_engine_lib.Mode.EVAL
+            )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        errors.append(e)
+
+    threads = [threading.Thread(target=_producer, args=(k,)) for k in range(2)]
+    threads.append(threading.Thread(target=_trainer))
+    for t in threads:
+      t.start()
+    for t in threads:
+      t.join()
+    self.assertEqual(errors, [])
+    for mode, steps in logged_steps.items():
+      self.assertNotEmpty(steps, msg=f'mode={mode}')
+      self.assertEqual(steps, sorted(set(steps)), msg=f'mode={mode}')
+    # pylint: disable=protected-access
+    all_buffers = (
+        rl_engine._buffered_train_metrics + rl_engine._buffered_eval_metrics
+    )
+    # pylint: enable=protected-access
+    remaining = sum(len(b.metrics.get('m', ([], None))[0]) for b in all_buffers)
+    self.assertEqual(len(logged) + remaining, 2 * n_calls + 220)
 
   def _create_test_rl_engine(
       self,
@@ -1404,7 +1550,6 @@ class RlEngineTokenInputTest(parameterized.TestCase):
 
   @unittest.skipIf(is_run_core, 'Skipping in run_core')
   def test_vllm_rollout_forwards_token_rows_and_returns_own_result(self):
-    import threading  # pylint: disable=g-import-not-at-top
     from concurrent.futures import ThreadPoolExecutor  # pylint: disable=g-import-not-at-top
     from tunix.generate import base_sampler  # pylint: disable=g-import-not-at-top
     from tunix.rl.rollout import vllm_rollout  # pylint: disable=g-import-not-at-top
