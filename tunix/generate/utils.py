@@ -21,7 +21,19 @@ import gc
 import math
 import numbers
 import re
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 from absl import logging
 from flax import nnx
@@ -778,47 +790,145 @@ def _apply_dtype_cast(
   return val
 
 
+_FlatKey = Union[str, Tuple[Union[str, int], ...]]
+_StateLeaf = Union[nnx.Variable, jax.Array, np.ndarray, jax.ShapeDtypeStruct]
+
+
+def _flat_key_to_path(flat_key: _FlatKey) -> str:
+  return (
+      flat_key
+      if isinstance(flat_key, str)
+      else '.'.join(str(k) for k in flat_key)
+  )
+
+
+def _lookup_resharded_value(
+    resharded_flat_dict: Mapping[Any, jax.Array | np.ndarray],
+    tgt_key: _FlatKey,
+) -> jax.Array | np.ndarray:
+  """Looks up `tgt_key` across string and tuple-path key representations."""
+  val = resharded_flat_dict.get(tgt_key)
+  if val is None:
+    alt_keys: list[_FlatKey] = (
+        [tuple(tgt_key.split('.')), (tgt_key,)]
+        if isinstance(tgt_key, str)
+        else ['.'.join(str(k) for k in tgt_key)]
+    )
+    for alt_key in alt_keys:
+      if (val := resharded_flat_dict.get(alt_key)) is not None:
+        break
+  assert val is not None, f'Key {tgt_key} not in resharded values'
+  return val
+
+
+class _TiedLmHead(NamedTuple):
+  """Matched source-updated embedding and unsynced target `lm_head` leaves."""
+
+  embed: _StateLeaf
+  lm_head_index: int
+  lm_head_key: _FlatKey
+  lm_head: _StateLeaf
+
+
+def _find_tied_lm_head_pair(
+    tgt_flat_list: Sequence[Tuple[_FlatKey, _StateLeaf]],
+    transferred_target_keys: set[str],
+    *,
+    warn_on_mismatch: bool = False,
+) -> Optional[_TiedLmHead]:
+  """Finds a compatible tied `(embed, lm_head)` pair when `lm_head` is unsynced.
+
+  Args:
+    tgt_flat_list: Sequence of `(flat_key, target_leaf)` pairs for `dst_state`.
+    transferred_target_keys: Dot-separated target key paths updated (or planned
+      to be updated) by the mapping transfer.
+    warn_on_mismatch: Whether to log a warning if a candidate `lm_head` is
+      skipped due to shape or dtype incompatibility with the embedding.
+
+  Returns:
+    A `_TiedLmHead` entry when `embed` is in `transferred_target_keys`,
+    `lm_head` is not, and both leaves share matching shape and dtype; otherwise
+    `None`.
+  """
+  if any(
+      key.endswith(('lm_head', 'lm_head.weight'))
+      for key in transferred_target_keys
+  ):
+    return None
+  embed_param: Optional[_StateLeaf] = None
+  lm_head_entry: Optional[Tuple[int, _FlatKey, _StateLeaf]] = None
+  for idx, (flat_key, tgt_param) in enumerate(tgt_flat_list):
+    path = _flat_key_to_path(flat_key)
+    if (
+        path.endswith(('embedding', 'embed_tokens.weight'))
+        and path in transferred_target_keys
+    ):
+      embed_param = tgt_param
+    elif path.endswith(('lm_head', 'lm_head.weight')):
+      lm_head_entry = (idx, flat_key, tgt_param)
+  if embed_param is None or lm_head_entry is None:
+    return None
+  lm_head_idx, lm_head_flat_key, lm_head_param = lm_head_entry
+  embed_val = getattr(embed_param, 'value', embed_param)
+  lm_head_val = getattr(lm_head_param, 'value', lm_head_param)
+  embed_shape = getattr(embed_val, 'shape', None)
+  embed_dtype = getattr(embed_val, 'dtype', None)
+  lm_head_shape = getattr(lm_head_val, 'shape', None)
+  lm_head_dtype = getattr(lm_head_val, 'dtype', None)
+  if embed_shape is None or (lm_head_shape, lm_head_dtype) != (
+      embed_shape,
+      embed_dtype,
+  ):
+    if warn_on_mismatch:
+      logging.log_first_n(
+          logging.WARNING,
+          'Skipping tied lm_head sync for %s: shape/dtype (%s, %s) does not'
+          ' match embedding (%s, %s).',
+          5,
+          _flat_key_to_path(lm_head_flat_key),
+          lm_head_shape,
+          lm_head_dtype,
+          embed_shape,
+          embed_dtype,
+      )
+    return None
+  return _TiedLmHead(
+      embed=embed_param,
+      lm_head_index=lm_head_idx,
+      lm_head_key=lm_head_flat_key,
+      lm_head=lm_head_param,
+  )
+
+
 def _sync_tied_lm_head_if_needed(
-    tgt_flat_list: List[Tuple[Tuple[str, ...], Any]],
+    tgt_flat_list: List[Tuple[_FlatKey, _StateLeaf]],
     transferred_target_keys: set[str],
 ) -> None:
   """Mirrors embed weights into lm_head when the target implies a tied head.
 
-  Some JAX/vLLM state layouts materialize `lm_head` as a separate destination
-  leaf even when the module graph ties it to `embed.embedding`. If the mapping
-  updates only `embed.embedding`, keep `lm_head` in sync unless `lm_head` was
-  actually transferred from the source state.
+  Some JAX/vLLM state layouts (both `nnx.State` trees and flat `dict` states in
+  `VllmModelWrapper`) materialize `lm_head` as a separate destination leaf even
+  when the model ties it to `embed.embedding`. If the mapping updates the
+  embedding leaf without transferring `lm_head`, keep `lm_head` in sync and
+  record its path in `transferred_target_keys` so resharding handles it
+  uniformly.
 
   Args:
-    tgt_flat_list: A list of tuples, where each tuple contains the nested keys
-      and the corresponding target parameter.
-    transferred_target_keys: Target keys that were actually written during the
-      transfer loop.
+    tgt_flat_list: A list of `(flat_key, target_leaf)` pairs.
+    transferred_target_keys: Target key paths written during the transfer loop;
+      updated in-place with the `lm_head` path when mirrored.
   """
-  if any(key.endswith('lm_head') for key in transferred_target_keys):
+  tied = _find_tied_lm_head_pair(
+      tgt_flat_list, transferred_target_keys, warn_on_mismatch=True
+  )
+  if tied is None:
     return
-
-  embed_param = None
-  lm_head_param = None
-  for flat_key, tgt_param in tgt_flat_list:
-    path = (
-        flat_key
-        if isinstance(flat_key, str)
-        else '.'.join(str(k) for k in flat_key)
-    )
-    if path.endswith(('embedding', 'embed_tokens.weight')):
-      embed_param = tgt_param
-    elif path.endswith(('lm_head', 'lm_head.weight')):
-      lm_head_param = tgt_param
-
-  if embed_param is None or lm_head_param is None:
-    return
-  if not hasattr(embed_param, 'value') or not hasattr(lm_head_param, 'value'):
-    return
-  if embed_param.value.shape != lm_head_param.value.shape:
-    return
-
-  lm_head_param.value = embed_param.value
+  embed_val = getattr(tied.embed, 'value', tied.embed)
+  if hasattr(tied.lm_head, 'value'):
+    setattr(tied.lm_head, 'value', embed_val)
+  else:
+    tgt_flat_list[tied.lm_head_index] = (tied.lm_head_key, embed_val)
+  transferred_target_keys.add(_flat_key_to_path(tied.lm_head_key))
 
 
 def transfer_state_with_mappings(
@@ -832,9 +942,16 @@ def transfer_state_with_mappings(
 ):
   """Transfer state using mappings, with optional transpose and shard logic.
 
+  Only target keys updated by `key_mappings` (plus a shape/dtype-compatible
+  tied `lm_head` when mirrored from a transferred embedding) are snapshotted,
+  passed to `reshard_fn`, or freed when `delete_dst_buffers=True`; unmapped
+  destination leaves (such as RNGs, `ShapeDtypeStruct` placeholders, or
+  inference-only rotary caches) are preserved untouched.
+
   Args:
     src_state: The source state to transfer from.
-    dst_state: The destination state to transfer to.
+    dst_state: The destination state to transfer to (`nnx.State`, state with
+      `flat_state()`, or a flat `dict` keyed by dotted strings or key tuples).
     key_mappings: A dictionary defining how to map keys from the source state to
       the target state. The keys of the dictionary are the source keys, and the
       values are tuples containing the target key and the sharding information.
@@ -844,10 +961,13 @@ def transfer_state_with_mappings(
     transpose_keys: A dictionary defining which keys to transpose and the
       corresponding axes to transpose.
     reshard_fn: A function to shard the value.
-    **kwargs: Additional keyword arguments.
+    **kwargs: Additional keyword arguments (including `delete_dst_buffers` and
+      `reshard_chunk_size`).
 
   Returns:
-    The target state with the transferred values.
+    The updated target state. When `dst_state` is a `dict`, returns a new
+    `dict` with dotted-string keys that callers must write back if in-place
+    state mutation is required.
   """
   # Get flat target state
   tgt_flat_list = (
@@ -856,34 +976,39 @@ def transfer_state_with_mappings(
       else list(dst_state.items())
   )
 
-  # Build sharding dictionary and snapshot target buffers if resharding is
-  # needed.
-  sharding_dict = None
-  orig_tgt_buffers = None
-
-  if reshard_fn:
-    sharding_dict = {
-        key: (
-            tgt_params.value.sharding
-            if hasattr(tgt_params, 'value')
-            else tgt_params.sharding
-        )
-        for key, tgt_params in tgt_flat_list
-    }
-    orig_tgt_buffers = {
-        key: (
-            tgt_params.value
-            if hasattr(tgt_params, 'value')
-            else tgt_params
-        )
-        for key, tgt_params in tgt_flat_list
-    }
-
   # Build source-to-target mapping
   src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)  # type: ignore
 
   # Unroll scanned layers and flatten source state
   unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)
+  planned_target_keys = {
+      _flat_key_to_path(tgt_key) for _, tgt_key in unscanned_src_to_tgt_flat
+  }
+
+  # Snapshot original target buffers prior to in-place parameter updates only
+  # for mapped target keys (plus tied `lm_head` if applicable), leaving
+  # unmapped state leaves (such as RNGs, ShapeDtypeStruct placeholders, or
+  # rotary caches with custom TPU layouts) completely untouched.
+  sharding_dict = None
+  orig_tgt_buffers = None
+  if reshard_fn and planned_target_keys:
+    snapshot_paths = set(planned_target_keys)
+    tied = _find_tied_lm_head_pair(tgt_flat_list, planned_target_keys)
+    if tied is not None:
+      snapshot_paths.add(_flat_key_to_path(tied.lm_head_key))
+    orig_tgt_buffers = {
+        key: tgt_params.value if hasattr(tgt_params, 'value') else tgt_params
+        for key, tgt_params in tgt_flat_list
+        if _flat_key_to_path(key) in snapshot_paths
+    }
+    sharding_dict = {
+        key: _snapshot_dst_sharding(arr)
+        for key, arr in orig_tgt_buffers.items()
+    }
+
+  tgt_path_to_idx = {
+      _flat_key_to_path(tk): idx for idx, (tk, _) in enumerate(tgt_flat_list)
+  }
   transferred_target_keys = set()
 
   # Transfer values with transformations
@@ -909,11 +1034,9 @@ def transfer_state_with_mappings(
     if hasattr(tgt_param, 'value'):
       tgt_param.value = val
     else:
-      for idx, (tk, _) in enumerate(tgt_flat_list):
-        if tk == flat_tgt_key:
-          tgt_flat_list[idx] = (tk, val)
-          break
-    transferred_target_keys.add(flat_tgt_key)
+      idx = tgt_path_to_idx[flat_tgt_key]
+      tgt_flat_list[idx] = (tgt_flat_list[idx][0], val)
+    transferred_target_keys.add(_flat_key_to_path(flat_tgt_key))
 
   # Target rollout engine might have different implementation and have materialized lm_head
   _sync_tied_lm_head_if_needed(tgt_flat_list, transferred_target_keys)
@@ -922,14 +1045,19 @@ def transfer_state_with_mappings(
   del unscanned_src_to_tgt_flat
   gc.collect()
 
-  # Batch reshard and assign if resharding is configured
-  if reshard_fn:
+  # Batch reshard and assign only the keys updated by this transfer, leaving
+  # unmapped buffers (e.g. RNGs or cos_sin_cache with custom Format) untouched.
+  if reshard_fn and transferred_target_keys:
+    assert orig_tgt_buffers is not None
+    assert sharding_dict is not None
     tgt_flat_dict = {
         key: tgt_params.value if hasattr(tgt_params, 'value') else tgt_params
         for key, tgt_params in tgt_flat_list
+        if _flat_key_to_path(key) in transferred_target_keys
     }
+    orig_tgt_buffers = {key: orig_tgt_buffers[key] for key in tgt_flat_dict}
+    sharding_dict = {key: sharding_dict[key] for key in tgt_flat_dict}
     if kwargs.get('reshard_chunk_size', None) is not None:
-      assert orig_tgt_buffers is not None
       resharded_values_flat_dict = _reshard_in_chunks(
           src_flat=tgt_flat_dict,
           spec_flat=orig_tgt_buffers,
@@ -938,25 +1066,14 @@ def transfer_state_with_mappings(
           delete_spec_buffers=kwargs.get('delete_dst_buffers', False),
       )
     else:
-      if (
-          kwargs.get('delete_dst_buffers', False)
-          and orig_tgt_buffers is not None
-      ):
+      if kwargs.get('delete_dst_buffers', False):
         _delete_target_buffers(orig_tgt_buffers, tgt_flat_dict)
       resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
 
     for idx, (tgt_key, tgt_param) in enumerate(tgt_flat_list):
-      val = resharded_values_flat_dict.get(tgt_key)
-      if val is None:
-        alt_keys = (
-            [tuple(tgt_key.split('.')), (tgt_key,)]
-            if isinstance(tgt_key, str)
-            else ['.'.join(str(k) for k in tgt_key)]
-        )
-        for alt_key in alt_keys:
-          if (val := resharded_values_flat_dict.get(alt_key)) is not None:
-            break
-      assert val is not None, f'Key {tgt_key} not in resharded values'
+      if _flat_key_to_path(tgt_key) not in transferred_target_keys:
+        continue
+      val = _lookup_resharded_value(resharded_values_flat_dict, tgt_key)
       if hasattr(tgt_param, 'value'):
         tgt_param.value = val
       else:
@@ -1483,7 +1600,7 @@ def _fuse_moe_weights(
 
 
 def _collect_src_buffer_ids(
-    src_flat: Mapping[Tuple[str, ...], jax.Array | np.ndarray | nnx.Variable],
+    src_flat: Mapping[Any, Any],
 ) -> Optional[set[int]]:
   """Collects physical device buffer pointers for arrays in src_flat.
 
@@ -1513,8 +1630,8 @@ def _collect_src_buffer_ids(
 
 
 def _delete_target_buffers(
-    spec_flat: Mapping[Tuple[str, ...], jax.Array | np.ndarray | nnx.Variable],
-    src_flat: Mapping[Tuple[str, ...], jax.Array | np.ndarray | nnx.Variable],
+    spec_flat: Mapping[Any, Any],
+    src_flat: Mapping[Any, Any],
 ) -> None:
   """Deletes target arrays in spec_flat that don't alias any source shard."""
   # This will be a set() of IDs, or None if we are on Pathways
@@ -1566,14 +1683,23 @@ def _flatten_state(
       if hasattr(state, 'flat_state')
       else traverse_util.flatten_dict(state).items()
   )
-  return {
-      (
-          tuple(str(p) for p in k)
-          if isinstance(k, tuple)
-          else tuple(str(k).split('.'))
-      ): v
-      for k, v in items
-  }
+  return {tuple(_flat_key_to_path(k).split('.')): v for k, v in items}
+
+
+def _mapped_target_items(
+    src_to_tgt_map: Mapping[str, Any],
+) -> Dict[Tuple[str, ...], Any]:
+  """Extracts `(path_tuple -> target_leaf)` items from `build_flat_dict`."""
+  spec_flat: Dict[Tuple[str, ...], Any] = {}
+  for tgt_param, tgt_path, _ in src_to_tgt_map.values():
+    pairs = (
+        zip(tgt_param, tgt_path)
+        if isinstance(tgt_path, list)
+        else [(tgt_param, tgt_path)]
+    )
+    for val, path in pairs:
+      spec_flat[tuple(path.split('.'))] = val
+  return spec_flat
 
 
 def delete_state_buffers(
@@ -1581,14 +1707,46 @@ def delete_state_buffers(
     src_state: Any = None,
     key_mappings: Optional[Mapping[str, Any]] = None,
 ) -> None:
-  """Deletes device weight buffers in `dst_state` that will be overwritten on sync."""
+  """Deletes device weight buffers in `dst_state` that will be overwritten.
+
+  Supports three modes:
+  1. `key_mappings` + `src_state` provided: deletes only target leaves mapped
+     from keys present in `src_state` (plus a compatible tied `lm_head`),
+     skipping any target buffer that aliases a `src_state` buffer.
+  2. `key_mappings` + `src_state=None`: deletes all mapped target leaves (plus
+     a compatible tied `lm_head`) while preserving unmapped buffers such as
+     `cos_sin_cache`; no source-aliasing check is performed since `src_state`
+     is omitted.
+  3. `key_mappings=None`: deletes non-`rng` target leaves (intersected with
+     `src_state` keys and checked for aliasing when `src_state` is provided).
+
+  Args:
+    dst_state: Destination state holding device buffers to free.
+    src_state: Optional source state used to scope partial updates and protect
+      aliased buffers from deletion.
+    key_mappings: Optional source-to-target mapping dictionary.
+  """
   tgt_flat = _flatten_state(dst_state)
   if not tgt_flat:
     return
-  if key_mappings and src_state is not None:
-    src_to_tgt_map = build_flat_dict(
-        list(tgt_flat.items()), dict(key_mappings)  # pyrefly: ignore[bad-argument-type]
-    )
+  if not key_mappings:
+    src_flat = _flatten_state(src_state)
+    spec_flat = {
+        k: v
+        for k, v in tgt_flat.items()
+        if 'rng' not in k and (not src_flat or k in src_flat)
+    }
+    _delete_target_buffers(spec_flat, src_flat)
+    return
+
+  tgt_flat_items = list(tgt_flat.items())
+  src_to_tgt_map = build_flat_dict(
+      tgt_flat_items, dict(key_mappings)  # pyrefly: ignore[bad-argument-type]
+  )
+  if src_state is None:
+    src_flat = {}
+    spec_flat = _mapped_target_items(src_to_tgt_map)
+  else:
     unscanned = _unroll_scanned_layers(src_state, src_to_tgt_map)
     spec_flat = {
         tuple(tgt_key.split('.')): tgt_param
@@ -1598,13 +1756,13 @@ def delete_state_buffers(
         tuple(tgt_key.split('.')): val
         for (_, tgt_key), (val, _) in unscanned.items()
     }
-  else:
-    src_flat = _flatten_state(src_state)
-    spec_flat = {
-        k: v
-        for k, v in tgt_flat.items()
-        if 'rng' not in k and (not src_flat or k in src_flat)
-    }
+  tied = _find_tied_lm_head_pair(
+      tgt_flat_items, {'.'.join(k) for k in spec_flat}
+  )
+  if tied is not None:
+    spec_flat[tuple(_flat_key_to_path(tied.lm_head_key).split('.'))] = (
+        tied.lm_head
+    )
   _delete_target_buffers(spec_flat, src_flat)
 
 

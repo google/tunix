@@ -270,8 +270,15 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   def refresh_state_leaves(self) -> None:
     """Re-reads the runner's state leaves after its params were updated."""
-    self._model_runner.state_leaves = tuple(
-        jax.tree_util.tree_leaves(self._model_runner.state)
+    runner = self._model_runner
+    if hasattr(runner, "refresh_state_leaves"):
+      runner.refresh_state_leaves()
+      return
+    state = runner.state
+    runner.state_leaves = (
+        state
+        if isinstance(state, dict)
+        else tuple(jax.tree_util.tree_leaves(state))
     )
 
   def reinitialize_cache(self) -> None:
@@ -433,8 +440,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     runner.model.load_canonical_weights(canonical, runner.state)
 
   def _update_params_jax(self, updated_weights: jaxtyping.PyTree) -> None:
-    """Mapped weight sync into the tpu-inference flax/nnx model state."""
-    utils.transfer_state_with_mappings(
+    """Mapped weight sync into the tpu-inference flax/nnx or flat dict state."""
+    updated_dst = utils.transfer_state_with_mappings(
         src_state=updated_weights,
         dst_state=self.transformer_state,
         key_mappings=self.to_hf_key_mappings,
@@ -455,6 +462,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         ),
         tp_size=self.args.get("tensor_parallel_size", 1),
     )
+    if isinstance(self.transformer_state, dict):
+      # Mutate in place to preserve `runner.state` dict identity for aliases.
+      self.transformer_state.update(updated_dst)
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
@@ -466,6 +476,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   def _vllm_config(self, config: VllmConfig):
     """Setup vllm config from Tunix Vllm config."""
     args = config._processed_engine_kwargs.copy()
+
+    # Skip unused multimodal vision towers by default during text-only RL
+    # rollouts; vLLM only evaluates this option for multimodal checkpoints and
+    # callers can override it via `engine_kwargs={"language_model_only": ...}`.
+    args.setdefault("language_model_only", True)
 
     # Init vLLM model with random weights to speed up bootstrap time, because
     # model weights are synced from trainer later on

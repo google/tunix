@@ -2319,6 +2319,509 @@ class UtilsTest(parameterized.TestCase):
     self.assertTrue(jnp.array_equal(val, jnp.ones((2, 4))))
     mock_to_flat_state.assert_called_once_with("dummy_state")
 
+  def test_transfer_flat_dict_syncs_tied_lm_head_and_skips_unmapped_reshard(
+      self,
+  ):
+    src = MockState({
+        "embedder.input_embedding": MockParam(
+            jnp.full((4, 3), 5.0, dtype=jnp.float32)
+        ),
+    })
+    cos_sin_cache = jnp.full((8, 2), 9.0, dtype=jnp.float32)
+    dst = {
+        "vllm_model.model.embed_tokens.weight": jnp.zeros((4, 3), jnp.float32),
+        "vllm_model.lm_head.weight": jnp.zeros((4, 3), jnp.float32),
+        "vllm_model.model.layers.0.self_attn.rotary_emb.cos_sin_cache": (
+            cos_sin_cache
+        ),
+    }
+    mappings = {
+        "embedder.input_embedding": (
+            "vllm_model.model.embed_tokens.weight",
+            None,
+        ),
+        "lm_head.w": ("vllm_model.lm_head.weight", None),
+    }
+    resharded_keys = []
+
+    def tracking_reshard(source, target):
+      del target
+      resharded_keys.extend(source.keys())
+      return {k: v + 0.0 for k, v in source.items()}
+
+    result = utils.transfer_state_with_mappings(
+        src, dst, mappings, reshard_fn=tracking_reshard
+    )
+
+    np.testing.assert_array_equal(
+        result["vllm_model.model.embed_tokens.weight"], 5.0
+    )
+    np.testing.assert_array_equal(result["vllm_model.lm_head.weight"], 5.0)
+    self.assertEqual(
+        resharded_keys,
+        [
+            "vllm_model.model.embed_tokens.weight",
+            "vllm_model.lm_head.weight",
+        ],
+    )
+    self.assertIs(
+        result["vllm_model.model.layers.0.self_attn.rotary_emb.cos_sin_cache"],
+        cos_sin_cache,
+    )
+
+  def test_transfer_tuple_keyed_dict_returns_dotted_keys_and_ties_lm_head(self):
+    src = MockState({
+        "embedder.input_embedding": MockParam(
+            jnp.full((4, 3), 7.0, dtype=jnp.float32)
+        ),
+    })
+    untouched = jnp.full((2,), 9.0, dtype=jnp.float32)
+    dst = {
+        ("vllm_model", "model", "embed_tokens", "weight"): jnp.zeros(
+            (4, 3), jnp.float32
+        ),
+        ("vllm_model", "lm_head", "weight"): jnp.zeros((4, 3), jnp.float32),
+        ("vllm_model", "rotary_emb", "cos_sin_cache"): untouched,
+    }
+    mappings = {
+        "embedder.input_embedding": (
+            "vllm_model.model.embed_tokens.weight",
+            None,
+        ),
+    }
+
+    result = utils.transfer_state_with_mappings(
+        src, dst, mappings, reshard_fn=reshard.reshard_pytree
+    )
+
+    np.testing.assert_array_equal(
+        result["vllm_model.model.embed_tokens.weight"], 7.0
+    )
+    np.testing.assert_array_equal(result["vllm_model.lm_head.weight"], 7.0)
+    self.assertIs(
+        result["vllm_model.rotary_emb.cos_sin_cache"],
+        untouched,
+    )
+
+  def test_transfer_flat_dict_mirrors_tied_lm_head_into_shape_dtype_struct(
+      self,
+  ):
+    src = MockState({
+        "embedder.input_embedding": MockParam(
+            jnp.full((4, 3), 5.0, dtype=jnp.float32)
+        ),
+    })
+    untouched_sds = jax.ShapeDtypeStruct((8, 2), jnp.float32)
+    dst = {
+        "vllm_model.model.embed_tokens.weight": jax.ShapeDtypeStruct(
+            (4, 3), jnp.bfloat16
+        ),
+        "vllm_model.lm_head.weight": jax.ShapeDtypeStruct((4, 3), jnp.bfloat16),
+        "vllm_model.other": untouched_sds,
+    }
+    mappings = {
+        "embedder.input_embedding": (
+            "vllm_model.model.embed_tokens.weight",
+            None,
+        ),
+        "lm_head.w": ("vllm_model.lm_head.weight", None),
+    }
+
+    result = utils.transfer_state_with_mappings(
+        src, dst, mappings, reshard_fn=None
+    )
+
+    self.assertIsInstance(result["vllm_model.lm_head.weight"], jax.Array)
+    self.assertIs(
+        result["vllm_model.lm_head.weight"],
+        result["vllm_model.model.embed_tokens.weight"],
+    )
+    self.assertEqual(result["vllm_model.lm_head.weight"].dtype, jnp.bfloat16)
+    np.testing.assert_array_equal(result["vllm_model.lm_head.weight"], 5.0)
+    self.assertIs(result["vllm_model.other"], untouched_sds)
+
+  @parameterized.parameters((None,), (1,))
+  def test_transfer_flat_dict_tied_lm_head_with_delete_dst_buffers(
+      self, chunk_size
+  ):
+    dst_embed = jax.device_put(np.zeros((4, 3), dtype=np.float32))
+    dst_lm = jax.device_put(np.ones((4, 3), dtype=np.float32))
+    cos_sin_cache = jax.device_put(np.full((8, 2), 9.0, dtype=np.float32))
+    dst = {
+        "vllm_model.model.embed_tokens.weight": dst_embed,
+        "vllm_model.lm_head.weight": dst_lm,
+        "vllm_model.model.layers.0.self_attn.rotary_emb.cos_sin_cache": (
+            cos_sin_cache
+        ),
+    }
+    mappings = {
+        "embedder.input_embedding": (
+            "vllm_model.model.embed_tokens.weight",
+            None,
+        ),
+        "lm_head.w": ("vllm_model.lm_head.weight", None),
+    }
+
+    def fresh_device_reshard(source, target):
+      del target
+      return jax.tree.map(
+          lambda v: jax.device_put(np.asarray(v, dtype=np.float32)),
+          source,
+      )
+
+    src1 = MockState({
+        "embedder.input_embedding": MockParam(
+            jax.device_put(np.full((4, 3), 5.0, dtype=np.float32))
+        ),
+    })
+    result1 = utils.transfer_state_with_mappings(
+        src1,
+        dst,
+        mappings,
+        reshard_fn=fresh_device_reshard,
+        delete_dst_buffers=True,
+        reshard_chunk_size=chunk_size,
+    )
+    self.assertTrue(dst_embed.is_deleted())
+    self.assertTrue(dst_lm.is_deleted())
+    self.assertFalse(cos_sin_cache.is_deleted())
+    np.testing.assert_array_equal(
+        result1["vllm_model.model.embed_tokens.weight"], 5.0
+    )
+    np.testing.assert_array_equal(result1["vllm_model.lm_head.weight"], 5.0)
+    step1_embed = result1["vllm_model.model.embed_tokens.weight"]
+    step1_lm = result1["vllm_model.lm_head.weight"]
+
+    src2 = MockState({
+        "embedder.input_embedding": MockParam(
+            jax.device_put(np.full((4, 3), 8.0, dtype=np.float32))
+        ),
+    })
+    result2 = utils.transfer_state_with_mappings(
+        src2,
+        result1,
+        mappings,
+        reshard_fn=fresh_device_reshard,
+        delete_dst_buffers=True,
+        reshard_chunk_size=chunk_size,
+    )
+    self.assertTrue(step1_embed.is_deleted())
+    self.assertTrue(step1_lm.is_deleted())
+    self.assertFalse(cos_sin_cache.is_deleted())
+    np.testing.assert_array_equal(
+        result2["vllm_model.model.embed_tokens.weight"], 8.0
+    )
+    np.testing.assert_array_equal(result2["vllm_model.lm_head.weight"], 8.0)
+
+  @parameterized.parameters((None,), (1,))
+  def test_transfer_mock_state_tied_lm_head_handles_shared_initial_buffer(
+      self, chunk_size
+  ):
+    shared_init = jax.device_put(np.zeros((4, 3), dtype=np.float32))
+    dst_rng = jax.device_put(np.array([1, 2], dtype=np.uint32))
+    dst = MockState({
+        "model.embed.embedding": MockParam(shared_init),
+        "model.lm_head": MockParam(shared_init),
+        "model.rng": MockParam(dst_rng),
+    })
+    mappings = {
+        "embedder.input_embedding": ("model.embed.embedding", None),
+        "lm_head.w": ("model.lm_head", None),
+    }
+
+    def fresh_device_reshard(source, target):
+      del target
+      return jax.tree.map(
+          lambda v: jax.device_put(np.asarray(v, dtype=np.float32)),
+          source,
+      )
+
+    src = MockState({
+        "embedder.input_embedding": MockParam(
+            jax.device_put(np.full((4, 3), 5.0, dtype=np.float32))
+        ),
+    })
+    result = utils.transfer_state_with_mappings(
+        src,
+        dst,
+        mappings,
+        reshard_fn=fresh_device_reshard,
+        delete_dst_buffers=True,
+        reshard_chunk_size=chunk_size,
+    )
+    self.assertTrue(shared_init.is_deleted())
+    self.assertFalse(dst_rng.is_deleted())
+    np.testing.assert_array_equal(
+        result.params["model.embed.embedding"].value, 5.0
+    )
+    np.testing.assert_array_equal(result.params["model.lm_head"].value, 5.0)
+
+  def test_transfer_flat_dict_reshards_tied_lm_head_to_own_sharding(self):
+    dev0 = jax.devices()[0]
+    single_sharding = jax.sharding.SingleDeviceSharding(dev0)
+    mesh = jax.sharding.Mesh(np.array([dev0]), ("x",))
+    named_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec()
+    )
+    self.assertNotEqual(single_sharding, named_sharding)
+
+    dst_embed = jax.device_put(
+        np.zeros((4, 3), dtype=np.float32), single_sharding
+    )
+    dst_lm = jax.device_put(np.ones((4, 3), dtype=np.float32), named_sharding)
+    dst = {
+        "vllm_model.model.embed_tokens.weight": dst_embed,
+        "vllm_model.lm_head.weight": dst_lm,
+    }
+    mappings = {
+        "embedder.input_embedding": (
+            "vllm_model.model.embed_tokens.weight",
+            None,
+        ),
+        "lm_head.w": ("vllm_model.lm_head.weight", None),
+    }
+    reshard_calls = []
+
+    def sharding_preserving_reshard(source, target):
+      reshard_calls.append((list(source.keys()), dict(target)))
+      return {
+          k: jax.device_put(np.asarray(v, dtype=np.float32), target[k])
+          for k, v in source.items()
+      }
+
+    src = MockState({
+        "embedder.input_embedding": MockParam(
+            jnp.full((4, 3), 6.0, dtype=jnp.float32)
+        ),
+    })
+    result = utils.transfer_state_with_mappings(
+        src,
+        dst,
+        mappings,
+        reshard_fn=sharding_preserving_reshard,
+        delete_dst_buffers=True,
+    )
+
+    self.assertTrue(dst_embed.is_deleted())
+    self.assertTrue(dst_lm.is_deleted())
+    self.assertEqual(
+        reshard_calls,
+        [(
+            [
+                "vllm_model.model.embed_tokens.weight",
+                "vllm_model.lm_head.weight",
+            ],
+            {
+                "vllm_model.model.embed_tokens.weight": single_sharding,
+                "vllm_model.lm_head.weight": named_sharding,
+            },
+        )],
+    )
+    self.assertEqual(
+        result["vllm_model.model.embed_tokens.weight"].sharding, single_sharding
+    )
+    self.assertEqual(
+        result["vllm_model.lm_head.weight"].sharding, named_sharding
+    )
+    np.testing.assert_array_equal(result["vllm_model.lm_head.weight"], 6.0)
+
+  def test_transfer_flat_dict_skips_tied_lm_head_on_dtype_mismatch(self):
+    src = MockState({
+        "embedder.input_embedding": MockParam(
+            jnp.full((4, 3), 5.0, dtype=jnp.bfloat16)
+        ),
+    })
+    dst_lm = jax.device_put(np.full((4, 3), 9.0, dtype=np.float32))
+    dst = {
+        "vllm_model.model.embed_tokens.weight": jnp.zeros((4, 3), jnp.bfloat16),
+        "vllm_model.lm_head.weight": dst_lm,
+    }
+    mappings = {
+        "embedder.input_embedding": (
+            "vllm_model.model.embed_tokens.weight",
+            None,
+        ),
+        "lm_head.w": ("vllm_model.lm_head.weight", None),
+    }
+
+    with self.assertLogs(level="WARNING") as logs:
+      result = utils.transfer_state_with_mappings(
+          src,
+          dst,
+          mappings,
+          reshard_fn=lambda source, target: source,
+          delete_dst_buffers=True,
+      )
+
+    self.assertTrue(
+        any("Skipping tied lm_head sync" in msg for msg in logs.output)
+    )
+    self.assertFalse(dst_lm.is_deleted())
+    self.assertEqual(result["vllm_model.lm_head.weight"].dtype, jnp.float32)
+    np.testing.assert_array_equal(result["vllm_model.lm_head.weight"], 9.0)
+    self.assertEqual(
+        result["vllm_model.model.embed_tokens.weight"].dtype, jnp.bfloat16
+    )
+
+  def test_transfer_with_reshard_ignores_untouched_shape_dtype_struct(self):
+    placeholder = jax.ShapeDtypeStruct((4,), jnp.float32)
+    src = MockState({
+        "layers.0.w": MockParam(jnp.full((2, 2), 4.0, dtype=jnp.float32)),
+    })
+    dst = {
+        "vllm_model.model.layers.0.w": jnp.zeros((2, 2), jnp.float32),
+        "untouched.placeholder": placeholder,
+    }
+    mappings = {"layers.0.w": ("vllm_model.model.layers.0.w", None)}
+    resharded_keys = []
+
+    def tracking_reshard(source, target):
+      resharded_keys.extend(source.keys())
+      return reshard.reshard_pytree(source, target)
+
+    result = utils.transfer_state_with_mappings(
+        src,
+        dst,
+        mappings,
+        reshard_fn=tracking_reshard,
+        delete_dst_buffers=True,
+    )
+
+    self.assertEqual(resharded_keys, ["vllm_model.model.layers.0.w"])
+    np.testing.assert_array_equal(result["vllm_model.model.layers.0.w"], 4.0)
+    self.assertIs(result["untouched.placeholder"], placeholder)
+
+  def test_transfer_flat_dict_partial_sync_preserves_existing_lm_head(self):
+    src = MockState({
+        "layers.0.w": MockParam(jnp.full((2, 2), 3.0, dtype=jnp.float32)),
+    })
+    dst = {
+        "vllm_model.model.layers.0.w": jnp.zeros((2, 2), jnp.float32),
+        "vllm_model.model.embed_tokens.weight": jnp.full(
+            (4, 3), 2.0, dtype=jnp.float32
+        ),
+        "vllm_model.lm_head.weight": jnp.full((4, 3), 9.0, dtype=jnp.float32),
+    }
+    mappings = {
+        "layers.0.w": ("vllm_model.model.layers.0.w", None),
+        "embedder.input_embedding": (
+            "vllm_model.model.embed_tokens.weight",
+            None,
+        ),
+        "lm_head.w": ("vllm_model.lm_head.weight", None),
+    }
+
+    result = utils.transfer_state_with_mappings(src, dst, mappings)
+
+    np.testing.assert_array_equal(result["vllm_model.model.layers.0.w"], 3.0)
+    np.testing.assert_array_equal(
+        result["vllm_model.model.embed_tokens.weight"], 2.0
+    )
+    np.testing.assert_array_equal(result["vllm_model.lm_head.weight"], 9.0)
+
+  def test_transfer_flat_dict_does_not_overwrite_untied_lm_head(self):
+    src = MockState({
+        "embedder.input_embedding": MockParam(
+            jnp.full((4, 3), 2.0, dtype=jnp.float32)
+        ),
+        "lm_head.w": MockParam(jnp.full((3, 4), 7.0, dtype=jnp.float32)),
+    })
+    dst = {
+        "vllm_model.model.embed_tokens.weight": jnp.zeros((4, 3), jnp.float32),
+        "vllm_model.lm_head.weight": jnp.zeros((4, 3), jnp.float32),
+    }
+    mappings = {
+        "embedder.input_embedding": (
+            "vllm_model.model.embed_tokens.weight",
+            None,
+        ),
+        "lm_head.w": ("vllm_model.lm_head.weight", None),
+    }
+
+    result = utils.transfer_state_with_mappings(
+        src, dst, mappings, transpose_keys={"lm_head.w": (1, 0)}
+    )
+
+    np.testing.assert_array_equal(
+        result["vllm_model.model.embed_tokens.weight"], 2.0
+    )
+    np.testing.assert_array_equal(result["vllm_model.lm_head.weight"], 7.0)
+
+  def test_delete_state_buffers_flat_dict_preserves_cache_and_ties_head(self):
+    dst_embed = jax.device_put(np.zeros((4, 3), dtype=np.float32))
+    dst_lm = jax.device_put(np.ones((4, 3), dtype=np.float32))
+    cos_sin_cache = jax.device_put(np.full((8, 2), 9.0, dtype=np.float32))
+    dst = {
+        "vllm_model.model.embed_tokens.weight": dst_embed,
+        "vllm_model.lm_head.weight": dst_lm,
+        "vllm_model.model.layers.0.self_attn.rotary_emb.cos_sin_cache": (
+            cos_sin_cache
+        ),
+    }
+    mappings = {
+        "embedder.input_embedding": (
+            "vllm_model.model.embed_tokens.weight",
+            None,
+        ),
+    }
+
+    utils.delete_state_buffers(dst, src_state=None, key_mappings=mappings)
+
+    self.assertTrue(dst_embed.is_deleted())
+    self.assertTrue(dst_lm.is_deleted())
+    self.assertFalse(cos_sin_cache.is_deleted())
+
+  @parameterized.named_parameters(
+      ("shape_mismatch", (3, 4), np.float32),
+      ("dtype_mismatch", (4, 3), np.float16),
+  )
+  def test_delete_state_buffers_keeps_incompatible_tied_lm_head(
+      self, lm_shape, lm_dtype
+  ):
+    dst_embed = jax.device_put(np.zeros((4, 3), dtype=np.float32))
+    dst_lm = jax.device_put(np.ones(lm_shape, dtype=lm_dtype))
+    dst = {
+        "vllm_model.model.embed_tokens.weight": dst_embed,
+        "vllm_model.lm_head.weight": dst_lm,
+    }
+    mappings = {
+        "embedder.input_embedding": (
+            "vllm_model.model.embed_tokens.weight",
+            None,
+        ),
+    }
+
+    utils.delete_state_buffers(dst, src_state=None, key_mappings=mappings)
+
+    self.assertTrue(dst_embed.is_deleted())
+    self.assertFalse(dst_lm.is_deleted())
+
+  def test_delete_state_buffers_partial_src_keeps_embed_and_tied_lm_head(self):
+    dst_embed = jax.device_put(np.zeros((4, 3), dtype=np.float32))
+    dst_lm = jax.device_put(np.ones((4, 3), dtype=np.float32))
+    dst_lora = jax.device_put(np.ones((2, 1), dtype=np.float32))
+    dst = {
+        "vllm_model.model.embed_tokens.weight": dst_embed,
+        "vllm_model.lm_head.weight": dst_lm,
+        "vllm_model.model.layers.0.lora_a": dst_lora,
+    }
+    src = MockState({
+        "layers.0.lora_a": MockParam(jnp.zeros((2, 1), dtype=jnp.float32)),
+    })
+    mappings = {
+        "embedder.input_embedding": (
+            "vllm_model.model.embed_tokens.weight",
+            None,
+        ),
+        "layers.0.lora_a": ("vllm_model.model.layers.0.lora_a", None),
+    }
+
+    utils.delete_state_buffers(dst, src_state=src, key_mappings=mappings)
+
+    self.assertTrue(dst_lora.is_deleted())
+    self.assertFalse(dst_embed.is_deleted())
+    self.assertFalse(dst_lm.is_deleted())
+
 
 class ResolveParallelismSizesTest(parameterized.TestCase):
 

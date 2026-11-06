@@ -879,6 +879,20 @@ class VllmSamplerConfigTest(absltest.TestCase):
     self.assertEqual(sharding["sharding_strategy"]["expert_parallelism"], 4)
     self.assertNotIn("device_indexes", sharding["sharding_strategy"])
 
+  def test_language_model_only_defaults_true_and_allows_override(self):
+    default_sampler = self._make_sampler(
+        vllm_sampler.VllmConfig(init_with_random_weights=False)
+    )
+    self.assertTrue(default_sampler.args["language_model_only"])
+
+    override_sampler = self._make_sampler(
+        vllm_sampler.VllmConfig(
+            init_with_random_weights=False,
+            engine_kwargs={"language_model_only": False},
+        )
+    )
+    self.assertFalse(override_sampler.args["language_model_only"])
+
 
 class VllmSamplerTokenInputTest(absltest.TestCase):
   """Explicit token-ID prompts through the real sampler with a fake engine."""
@@ -1086,7 +1100,7 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
 
     dst_arr = jax.numpy.ones((2, 2), dtype=jax.numpy.float32)
     runner = types.SimpleNamespace(
-        state={"w": dst_arr},
+        state=nnx.State({"w": nnx.Param(dst_arr)}),
         state_leaves=(dst_arr,),
         model_config=types.SimpleNamespace(
             get_total_num_kv_heads=lambda: 1,
@@ -1112,11 +1126,82 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
 
     # Restore reallocates KV cache and resets _kv_cache_deleted.
     new_arr = jax.numpy.ones((2, 2), dtype=jax.numpy.float32) * 2.0
-    obj._model_runner.state = {"w": new_arr}
+    obj._model_runner.state = nnx.State({"w": nnx.Param(new_arr)})
     obj.restore_after_training()
     self.assertFalse(obj._kv_cache_deleted)
     obj.llm.collective_rpc.assert_called_with("reinitialize_kv_cache")
     self.assertEqual(obj._model_runner.state_leaves, (new_arr,))
+
+  def test_flat_dict_runner_state_preserved_on_update_and_refresh(self):
+    obj = self._sampler()
+    obj.to_hf_key_mappings = {"src.w": ("dst.w", None)}
+    obj.to_hf_hook_fns = {}
+    obj.to_hf_transpose_keys = {}
+    obj.config.free_kv_cache_during_weight_sync = False
+    obj.config.partial_rollout = False
+    obj.config.delete_dst_buffers = True
+    obj.config.reshard_chunk_size = None
+    old_dst_w = jax.device_put(np.zeros((2, 2), dtype=np.float32))
+    untouched_cache = jax.device_put(np.ones((3,), dtype=np.float32))
+    non_jax_meta = np.array([1, 2], dtype=np.int32)
+    runner_state = {
+        "dst.w": old_dst_w,
+        "untouched.cache": untouched_cache,
+        "non_jax.meta": non_jax_meta,
+    }
+    runner = types.SimpleNamespace(
+        state=runner_state,
+        state_leaves=runner_state,
+        model=types.SimpleNamespace(),
+        model_config=types.SimpleNamespace(
+            get_total_num_kv_heads=lambda: 1,
+            get_head_size=lambda: 2,
+        ),
+    )
+    obj.llm = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            model_executor=types.SimpleNamespace(
+                driver_worker=types.SimpleNamespace(model_runner=runner)
+            )
+        )
+    )
+
+    obj.release_for_training(free_weights=True)
+    self.assertTrue(old_dst_w.is_deleted())
+    self.assertFalse(untouched_cache.is_deleted())
+    self.assertEqual(runner.state_leaves, ())
+
+    obj._update_params_jax(
+        {"src.w": jax.device_put(np.full((2, 2), 5.0, dtype=np.float32))}
+    )
+    obj.restore_after_training()
+
+    self.assertFalse(untouched_cache.is_deleted())
+    self.assertFalse(runner.state["dst.w"].is_deleted())
+    self.assertIsInstance(runner.state_leaves, dict)
+    self.assertIs(runner.state_leaves, runner.state)
+    self.assertIs(runner.state["untouched.cache"], untouched_cache)
+    self.assertIs(runner.state["non_jax.meta"], non_jax_meta)
+    np.testing.assert_allclose(runner.state["dst.w"], 5.0)
+    np.testing.assert_allclose(runner.state["untouched.cache"], 1.0)
+
+  def test_refresh_state_leaves_delegates_to_runner_when_present(self):
+    obj = self._sampler()
+    runner = types.SimpleNamespace(
+        state={"dst.w": jax.numpy.zeros((2, 2), dtype=jax.numpy.float32)},
+        refresh_state_leaves=mock.Mock(),
+    )
+    obj.llm = types.SimpleNamespace(
+        llm_engine=types.SimpleNamespace(
+            model_executor=types.SimpleNamespace(
+                driver_worker=types.SimpleNamespace(model_runner=runner)
+            )
+        )
+    )
+
+    obj.refresh_state_leaves()
+
+    runner.refresh_state_leaves.assert_called_once_with()
 
 
 if __name__ == "__main__":
