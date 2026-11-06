@@ -298,10 +298,6 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
       `TrajectoryStatus`, all reported every step so dashboard series stay
       continuous. `critique_stage` maps a missing or unrecognized producer
       status to RUNNING, so a nonzero `running_frac` points at the producer.
-      Unlike `rollout/success_rate`, these keep such rollouts in the
-      denominator.
-    * `rollout/success_rate`: share of non-`RUNNING` rollouts that ended in
-      `SUCCEEDED`.
     * `rollout/num_turns_{mean,max}`: assistant turns per rollout, counted in
       `conversation_text`.
     * `rollout/turn_length/{mean,p50,p99,max}`: tokens sampled per assistant
@@ -354,13 +350,6 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
   if facts:
     for name, count in status_counts.items():
       metrics[f"rollout/status/{name.lower()}_frac"] = count / len(facts)
-    finished = (
-        len(facts) - status_counts[datatypes.TrajectoryStatus.RUNNING.name]
-    )
-    if finished > 0:
-      metrics["rollout/success_rate"] = (
-          status_counts[datatypes.TrajectoryStatus.SUCCEEDED.name] / finished
-      )
   if turns:
     metrics["rollout/num_turns_mean"] = float(np.mean(turns))
     metrics["rollout/num_turns_max"] = float(np.max(turns))

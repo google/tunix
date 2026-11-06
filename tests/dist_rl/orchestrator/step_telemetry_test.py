@@ -187,7 +187,7 @@ class RolloutHealthTest(absltest.TestCase):
     )
 
     self.assertEqual(health.metrics["rollout/status/succeeded_frac"], 0.75)
-    self.assertEqual(health.metrics["rollout/success_rate"], 0.75)
+    self.assertNotIn("rollout/success_rate", health.metrics)
     self.assertEqual(
         health.metrics["rollout/status/max_context_limit_reached_frac"], 0.25
     )

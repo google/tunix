@@ -4150,10 +4150,10 @@ class RLProgramTest(absltest.TestCase):
           logger.get_metric("rollout", "total_tokens_mean", "train"), 4.0
       )
 
-      self.assertTrue(logger.metric_exists("rollout", "success_rate", "train"))
       self.assertAlmostEqual(
-          logger.get_metric("rollout", "success_rate", "train"), 1.0
+          logger.get_metric("rollout", "status/succeeded_frac", "train"), 1.0
       )
+      self.assertFalse(logger.metric_exists("rollout", "success_rate", "train"))
       # `max_staleness=0` admits only current-version rollouts, so staleness
       # is 0 by construction and not logged; version span still is.
       for tag in ("staleness_mean", "staleness_max", "staleness_min"):
@@ -4187,7 +4187,8 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(
           logger.get_metric("orchestrator", "num_microbatches", "train"), 1.0
       )
-      self.assertTrue(
+      # Step time is logged once, as `perf/global_step_time`.
+      self.assertFalse(
           logger.metric_exists("orchestrator", "step_time_sec", "train")
       )
 
@@ -4647,7 +4648,7 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_rollouts_without_status_omits_success_rate(self):
+  def test_rollouts_without_status_report_running_frac(self):
     async def _run():
       traj_item_0 = datatypes.TrajectoryItem(
           group_index=0,
@@ -4688,7 +4689,10 @@ class RLProgramTest(absltest.TestCase):
       await program.run_async(self.mock_engine)
 
       logger = program.metrics_logger
-      self.assertFalse(logger.metric_exists("rollout", "success_rate", "train"))
+      # A missing producer status is mapped to RUNNING.
+      self.assertAlmostEqual(
+          logger.get_metric("rollout", "status/running_frac", "train"), 1.0
+      )
 
     asyncio.run(_run())
 

@@ -263,10 +263,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "log_ratio/abs_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "pg_loss/unclipped_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "pg_loss/clipped_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
-        "advantage/abs_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
-        "advantage/max": np.max,
-        "advantage/min": np.min,
-        "advantage/nonzero_frac": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "sampler_is/weight_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
         "sampler_is/weight_min": np.min,
         "sampler_is/weight_max": np.max,

@@ -1203,7 +1203,6 @@ class StandardRLProgram(RLProgram):
         "policy_version": float(self.policy_version),
         "num_rollouts": float(num_rollouts),
         "num_microbatches": float(num_microbatches),
-        "step_time_sec": float(step_time_sec),
     }
     for tag, val in orchestrator_stats.items():
       self._log_metric(f"orchestrator/{tag}", val, log_step)

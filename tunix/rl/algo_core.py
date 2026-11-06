@@ -665,20 +665,6 @@ def grpo_loss_fn(
   log_ratio_abs_mean = masked_mean(jnp.abs(seq_importance_ratio), active_mask)
   pg_loss_1_mean = masked_mean(pg_loss_1, active_mask)
   pg_loss_2_mean = masked_mean(pg_loss_2, active_mask)
-  adv_abs_mean = masked_mean(jnp.abs(adv), active_mask)
-  adv_max = jnp.where(
-      has_valid,
-      jnp.max(jnp.where(active_mask, adv, -jnp.inf)),
-      0.0,
-  )
-  adv_min = jnp.where(
-      has_valid,
-      jnp.min(jnp.where(active_mask, adv, jnp.inf)),
-      0.0,
-  )
-  nonzero_adv_frac = masked_mean(
-      (jnp.abs(adv) > 1e-8).astype(jnp.float32), active_mask
-  )
   aux: dict[str, jax.Array | sft_utils.WeightedMetric] = {
       "kl": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
       "kl_loss": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
@@ -699,10 +685,6 @@ def grpo_loss_fn(
       "log_ratio/abs_mean": log_ratio_abs_mean,
       "pg_loss/unclipped_mean": pg_loss_1_mean,
       "pg_loss/clipped_mean": pg_loss_2_mean,
-      "advantage/abs_mean": adv_abs_mean,
-      "advantage/max": adv_max,
-      "advantage/min": adv_min,
-      "advantage/nonzero_frac": nonzero_adv_frac,
   }
   if sampler_is_weights is not None:
     aux["sampler_is/weight_mean"] = sft_utils.WeightedMetric(
