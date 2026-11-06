@@ -27,6 +27,10 @@ class _FakeTrainer:
   def __init__(self):
     self.calls = []
 
+  def with_fwd_only_fn(self, fn):
+    del fn
+    return self
+
   def prepare_weight_sync(self, *, sync_request=None):
     del sync_request
     self.calls.append("prepare")

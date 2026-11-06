@@ -653,8 +653,14 @@ class RLTrainerPayload(TrainerPayload):
     old_values: Optional [B, C] critic value estimates (for PPO / Critic).
     num_segments: Optional static upper bound on number of segments in packed
       rows (static field, see `STATIC_FIELD_METADATA`).
-    sampler_agreement_applied: Whether the orchestrator already scored the
-      batch against the trainer (static field).
+    sampler_agreement_applied: Whether the orchestrator already scored the batch
+      against the trainer (static field).
+    pad_id: Optional static padding token id used when scoring log-probs (static
+      field, see `STATIC_FIELD_METADATA`).
+    eos_id: Optional static end-of-sequence token id used when scoring log-probs
+      (static field, see `STATIC_FIELD_METADATA`).
+    temperature: Optional static sampling temperature used when scoring
+      log-probs (static field, see `STATIC_FIELD_METADATA`).
     metadata: Extra payload metadata dictionary (static field).
   """
 
@@ -676,6 +682,15 @@ class RLTrainerPayload(TrainerPayload):
   )
   sampler_agreement_applied: bool = dataclasses.field(
       default=False, metadata=STATIC_FIELD_METADATA
+  )
+  pad_id: int | None = dataclasses.field(
+      default=None, metadata=STATIC_FIELD_METADATA
+  )
+  eos_id: int | None = dataclasses.field(
+      default=None, metadata=STATIC_FIELD_METADATA
+  )
+  temperature: float | None = dataclasses.field(
+      default=None, metadata=STATIC_FIELD_METADATA
   )
   metadata: dict[str, Any] = dataclasses.field(
       default_factory=dict, metadata=STATIC_FIELD_METADATA
