@@ -148,7 +148,9 @@ class DAPOLearner(grpo_learner_lib.GrpoLearner[DAPOConfig]):
   ):
     """Initializes the `DAPOLearner`."""
     reward_fns = (
-        [reward_fns] if not isinstance(reward_fns, Sequence) else [*reward_fns]
+        [reward_fns]
+        if not isinstance(reward_fns, Sequence)
+        else list(reward_fns)
     )
     if algo_config.overlong_buffer and algo_config.overlong_buffer["enable"]:
       reward_fns.append(reward_shaping)
