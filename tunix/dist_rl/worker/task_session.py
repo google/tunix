@@ -816,15 +816,12 @@ class TaskSession:
     # drop is retained until acknowledged by the client. Currently no outer
     # orchestrator timeout covers this window, so a lost response stalls
     # polling_stage until ACK redelivery lands.
-    # TODO: b/577214994 - Detect in-place worker restarts. If a worker process
-    # restarts at the same address within `poll_retry_budget_s` (e.g., a k8s
-    # `restartPolicy: OnFailure` container restart), the reconnected poll
-    # returns `None` from the new process's empty response queue and resets
-    # the outage budget below, so tasks dispatched to the old process are
-    # never completed or failed. Planned fix: have the server attach a
-    # per-process incarnation token to `PollResponses` and `DispatchTask`
-    # responses, and raise a non-transient `WorkerRestartedError` from
-    # `GrpcRemoteActorHandle` when it changes.
+    # TODO(b/577214994): Detect same-port server restarts for static-handle
+    # callers (e.g. via a per-process incarnation token). Discovery-backed
+    # rollout workers replace `actor` in `self._actors_fn()` on rejoin, whereas
+    # static-handle `TaskSession` callers (pinned by
+    # `test_bug_pin_same_port_worker_restart_loses_in_flight_task`) can still
+    # reconnect to an empty restarted server and stall.
     outage_start: Optional[float] = None
     retry_attempts = 0
     try:

@@ -149,6 +149,48 @@ class OrchestratorFaultToleranceTest(absltest.TestCase):
       future.result(timeout=60.0)
       self.assertEqual(harness.fake_trainer.step_count, 1)
 
+  def test_same_port_rollout_restart_with_rejoin_fails_over_in_flight_task(
+      self,
+  ) -> None:
+    # Re-registering at the same address replaces and closes the old handle,
+    # failing its in-flight task over to the survivor. The retry budget far
+    # exceeds the result timeout, so the step cannot finish by exhausting it.
+    with fake_cluster.FakeClusterHarness(
+        num_rollout_workers=2,
+        fault_tolerance_config=datatypes.FaultToleranceConfig(
+            enabled=True,
+            max_task_retries=1,
+            poll_retry_budget_s=60.0,
+        ),
+    ) as harness:
+      gate = fault_injection.FaultGate()
+      harness.injector.on(
+          "rollout_1",
+          "generate",
+          fault_injection.Block(gate),
+          times=1,
+      )
+      program = harness.build_program(
+          num_prompts=4,
+          max_steps=1,
+          num_generations=2,
+          mini_batch_size=2,
+          sync_weights=False,
+      )
+      future = harness.start_program(program)
+      self.assertTrue(gate.entered.wait(timeout=30.0))
+      old_handle = harness.orchestrator.registry.handle("rollout_1")
+      harness.restart_worker(
+          "rollout_1", same_port=True, override=False, re_register=True
+      )
+      gate.release()
+
+      future.result(timeout=30.0)
+      self.assertEqual(harness.fake_trainer.step_count, 1)
+      self.assertIsNot(
+          harness.orchestrator.registry.handle("rollout_1"), old_handle
+      )
+
   def test_rollout_rejoin_failure_mid_bring_up_unregisters_and_recovers_on_retry(
       self,
   ) -> None:

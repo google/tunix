@@ -1570,6 +1570,10 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
             _grpc_lib.StatusCode.DEADLINE_EXCEEDED,
             # Stale cached bulk port; retried after invalidation.
             _grpc_lib.StatusCode.FAILED_PRECONDITION,
+            # A server shutting down (e.g. restarting) may cancel an in-flight
+            # call instead of failing it with UNAVAILABLE. Caller cancellation
+            # surfaces as `asyncio.CancelledError` instead.
+            _grpc_lib.StatusCode.CANCELLED,
         )
     )
 
@@ -1582,7 +1586,8 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     """Raises the error for a failed `dispatch_task` / `poll_responses` RPC.
 
     Retryable transport faults (bulk transfer failures, a stale bulk port, and
-    gRPC `UNAVAILABLE` / `DEADLINE_EXCEEDED`) are raised as
+    gRPC `UNAVAILABLE` / `DEADLINE_EXCEEDED` / peer-side `CANCELLED`) are raised
+    as
     `TransientTransportError` so `TaskSession` retries them; caller
     cancellation and all other errors propagate unchanged.
 

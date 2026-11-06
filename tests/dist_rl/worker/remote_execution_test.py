@@ -4613,6 +4613,78 @@ class RemoteExecutionTest(parameterized.TestCase):
 
     asyncio.run(_run())
 
+  def test_grpc_session_rpcs_map_peer_cancelled_to_transient_transport_error(
+      self,
+  ):
+    import grpc  # pylint: disable=g-import-not-at-top
+
+    async def _run():
+      hold_poll = False
+      poll_started = asyncio.Event()
+      release_poll = asyncio.Event()
+
+      async def _handle_dispatch(request_iterator, context):
+        async for _ in request_iterator:
+          pass
+        await context.abort(grpc.StatusCode.CANCELLED, "server shutting down")
+
+      async def _handle_poll(request_bytes, context):
+        del request_bytes
+        if hold_poll:
+          poll_started.set()
+          await release_poll.wait()
+          return
+        await context.abort(grpc.StatusCode.CANCELLED, "server shutting down")
+        yield b""  # pylint: disable=unreachable
+
+      port = portpicker.pick_unused_port()
+      server = grpc.aio.server()
+      server.add_generic_rpc_handlers((
+          grpc.method_handlers_generic_handler(
+              "tunix.ExecutionService",
+              {
+                  "DispatchTask": grpc.stream_unary_rpc_method_handler(
+                      _handle_dispatch,
+                      request_deserializer=lambda b: b,
+                      response_serializer=lambda b: b,
+                  ),
+                  "PollResponses": grpc.unary_stream_rpc_method_handler(
+                      _handle_poll,
+                      request_deserializer=lambda b: b,
+                      response_serializer=lambda b: b,
+                  ),
+              },
+          ),
+      ))
+      server.add_insecure_port(f"[::]:{port}")
+      await server.start()
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{port}",
+          enable_bulk_transport=False,
+      )
+      try:
+        with self.assertRaisesRegex(
+            remote_lib.TransientTransportError, "CANCELLED"
+        ):
+          await handle.dispatch_task("r1", "compute", "x")
+        with self.assertRaisesRegex(
+            remote_lib.TransientTransportError, "CANCELLED"
+        ):
+          await handle.poll_responses(timeout_s=0.0)
+
+        hold_poll = True
+        poll_task = asyncio.create_task(handle.poll_responses(timeout_s=30.0))
+        await asyncio.wait_for(poll_started.wait(), timeout=5.0)
+        poll_task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+          await poll_task
+      finally:
+        release_poll.set()
+        await handle.close()
+        await server.stop(0)
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()
