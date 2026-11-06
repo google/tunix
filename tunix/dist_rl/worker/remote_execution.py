@@ -64,6 +64,7 @@ from typing import (
     TypeVar,
     Union,
 )
+import uuid
 import weakref
 
 from absl import logging
@@ -87,6 +88,7 @@ is_bulk_lz4_enabled = network.is_bulk_lz4_enabled
 set_bulk_lz4_enabled = network.set_bulk_lz4_enabled
 
 _BULK_CAPABILITY_METADATA = (("x-tunix-bulk", "1"),)
+_POLL_ACK_METADATA_KEY = "x-tunix-poll-ack"
 OFFLOAD_TO_THREAD_ATTR = "_tunix_offload_to_thread"
 _F = TypeVar("_F", bound=Callable[..., Any])
 
@@ -225,6 +227,7 @@ class ExecutionResponse:
       traceback: Optional[str] = None,
       retryable: bool = False,
       request_id: Optional[str] = None,
+      ack_id: Optional[int] = None,
   ):
     self.result = result
     self.error_message = error_message
@@ -232,6 +235,7 @@ class ExecutionResponse:
     self.traceback = traceback
     self.retryable = retryable
     self.request_id = request_id
+    self.ack_id = ack_id
 
   def _as_tuple(self) -> Tuple[Any, ...]:
     return (
@@ -241,6 +245,7 @@ class ExecutionResponse:
         self.traceback,
         self.retryable,
         self.request_id,
+        self.ack_id,
     )
 
   def _record_serialization_error(self, e: Exception) -> None:
@@ -683,6 +688,48 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     self._max_message_bytes = max_message_bytes
     self._enable_bulk_transport = enable_bulk_transport
     self._configured_bulk_port = bulk_port
+    # Sent responses kept until the active poll client acknowledges `ack_id`.
+    self._unacked_responses: Dict[
+        int, Tuple[ExecutionResponse, Optional[asyncio.Task[None]]]
+    ] = {}
+    self._poll_client_id: str = ""
+    self._next_ack_id: int = 0
+
+  def _release_in_flight(
+      self,
+      response: ExecutionResponse,
+      orig_task: Optional[asyncio.Task[None]],
+  ) -> None:
+    if (
+        orig_task is not None
+        and response.request_id
+        and self._in_flight_requests.get(response.request_id) is orig_task
+    ):
+      self._in_flight_requests.pop(response.request_id, None)
+
+  def _pop_unacked(self, ack_id: int) -> None:
+    popped = self._unacked_responses.pop(ack_id, None)
+    if popped is not None:
+      self._release_in_flight(*popped)
+
+  def _clear_unacked(self) -> None:
+    for response, orig_task in self._unacked_responses.values():
+      self._release_in_flight(response, orig_task)
+    self._unacked_responses.clear()
+
+  def _ack_from_context(self, context: Any) -> None:
+    """Drops an acknowledged poll response carried in RPC metadata."""
+    if context is None or not self._unacked_responses:
+      return
+    inv_meta = context.invocation_metadata()
+    if not inv_meta:
+      return
+    for key, val in inv_meta:
+      if key == _POLL_ACK_METADATA_KEY and isinstance(val, str):
+        client_id, sep, ack_str = val.partition(":")
+        if sep and client_id == self._poll_client_id:
+          self._pop_unacked(int(ack_str))
+        return
 
   async def _handle_get_bulk_port(
       self, request_bytes: bytes, context: Any
@@ -707,6 +754,7 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       self, request_iterator: AsyncIterator[bytes], context: Any
   ) -> AsyncIterator[bytes]:
     """Handles bidirectional chunked streaming execution requests."""
+    self._ack_from_context(context)
     try:
       request = await ExecutionRequest.deserialize_async_chunks(
           request_iterator, bulk_server=self._bulk_server
@@ -733,6 +781,7 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       self, request_iterator: AsyncIterator[bytes], context: Any
   ) -> bytes:
     """Handles client-streaming task dispatch and returns the task ACK ID."""
+    self._ack_from_context(context)
     try:
       request = await ExecutionRequest.deserialize_async_chunks(
           request_iterator, bulk_server=self._bulk_server
@@ -745,16 +794,50 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
   async def _handle_poll_responses(
       self, request_bytes: bytes, context: Any
   ) -> AsyncIterator[bytes]:
-    """Handles server-streaming long-polling for completed task responses."""
-    timeout_s = (
+    """Streams the next completed task response to a long-polling client.
+
+    Each non-empty request pickles `(timeout_s, client_id, ack_id)`. Dequeued
+    responses receive a monotonic `ack_id` and stay in `_unacked_responses`
+    until the same `client_id` acknowledges `ack_id` (on a later poll or via
+    `x-tunix-poll-ack` RPC metadata) or a new `client_id` takes over;
+    unacknowledged responses are resent before dequeuing from
+    `_response_queue`.
+
+    Args:
+      request_bytes: Pickled `(timeout_s, client_id, ack_id)` tuple, or `b""` to
+        use `(LONG_POLL_TIMEOUT_S, "", None)`.
+      context: The gRPC servicer context, or `None` in direct unit-test calls.
+
+    Yields:
+      Serialized byte chunks for at most one `ExecutionResponse`.
+    """
+    timeout_s, client_id, ack_id = (
         cloudpickle.loads(request_bytes)  # pylint: disable=g-unsafe-pickle-load
         if request_bytes
-        else LONG_POLL_TIMEOUT_S
+        else (LONG_POLL_TIMEOUT_S, "", None)
     )
-    response = await self._dequeue_response(timeout_s=timeout_s)
-    if response is None:
-      return
-    completed = False
+    if client_id != self._poll_client_id:
+      self._poll_client_id = client_id
+      self._clear_unacked()
+    elif ack_id is not None:
+      self._pop_unacked(ack_id)
+    if self._unacked_responses:
+      _, (response, orig_task) = next(iter(self._unacked_responses.items()))
+    else:
+      response = await self._dequeue_response(timeout_s=timeout_s)
+      if response is None:
+        return
+      if client_id != self._poll_client_id:
+        self._get_response_queue().put_nowait(response)
+        return
+      orig_task = (
+          self._in_flight_requests.get(response.request_id)
+          if response.request_id
+          else None
+      )
+      self._next_ack_id += 1
+      response.ack_id = self._next_ack_id
+      self._unacked_responses[response.ack_id] = (response, orig_task)
     # pylint: disable=protected-access
     poll_chunk_bytes = min(
         self._stream_chunk_bytes, network._CONCURRENT_STREAM_CHUNK_BYTES
@@ -767,13 +850,11 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
           bulk_server=self._bulk_server if use_bulk else None,
       ):
         yield chunk
-      completed = True
-      if response.request_id:
-        self._in_flight_requests.pop(response.request_id, None)
+      # Release `_in_flight_requests` once streamed so reused `request_id`s can
+      # execute again while `_unacked_responses` retains the payload until ACK.
+      self._release_in_flight(response, orig_task)
     finally:
       network._dec_active_poll_rpcs()
-      if not completed:
-        self._get_response_queue().put_nowait(response)
     # pylint: enable=protected-access
 
   async def start_serving_async(self, port: int = 50051) -> Any:
@@ -864,6 +945,8 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       self._stopped = True
       for task in list(self._background_tasks):
         task.cancel()
+      self._unacked_responses.clear()
+      self._in_flight_requests.clear()
       self._shutdown_sync_executor(wait=True, cancel_futures=True)
       if self._bulk_server is not None:
         self._bulk_server.stop()
@@ -882,6 +965,8 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       for task in tasks:
         task.cancel()
       await asyncio.gather(*tasks, return_exceptions=True)
+    self._unacked_responses.clear()
+    self._in_flight_requests.clear()
     await self._drain_sync_executor_async(cancel_futures=True)
     if self._bulk_server is not None:
       bulk_srv = self._bulk_server
@@ -1205,6 +1290,16 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         asyncio.AbstractEventLoop, asyncio.Lock
     ] = weakref.WeakKeyDictionary()
     self._send_locks_guard = threading.Lock()
+    self._client_id: str = uuid.uuid4().hex
+    # Server `ack_id` of the last polled response; see `_handle_poll_responses`.
+    self._last_ack_id: Optional[int] = None
+
+  def _call_metadata(self, *, bulk: bool) -> Tuple[Tuple[str, str], ...]:
+    base = _BULK_CAPABILITY_METADATA if bulk else ()
+    ack_id = self._last_ack_id
+    if ack_id is None:
+      return base
+    return (*base, (_POLL_ACK_METADATA_KEY, f"{self._client_id}:{ack_id}"))
 
   def _raise_if_closed(self) -> None:
     if self._closed:
@@ -1703,8 +1798,9 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
           _release_send_lock()
 
       call_kwargs: Dict[str, Any] = {"timeout": self._rpc_timeout_s}
-      if bulk_port > 0:
-        call_kwargs["metadata"] = _BULK_CAPABILITY_METADATA
+      metadata = self._call_metadata(bulk=bulk_port > 0)
+      if metadata:
+        call_kwargs["metadata"] = metadata
       call = rpc(_locked_chunks(), **call_kwargs)
       try:
         response = await ExecutionResponse.deserialize_async_chunks(
@@ -1819,9 +1915,13 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         push_tracker=push_tracker,
         need_port_for_response=False,
     )
+    call_kwargs: Dict[str, Any] = {"timeout": self._rpc_timeout_s}
+    metadata = self._call_metadata(bulk=False)
+    if metadata:
+      call_kwargs["metadata"] = metadata
     call: Any = None
     try:
-      call = dispatch_rpc(chunks, timeout=self._rpc_timeout_s)
+      call = dispatch_rpc(chunks, **call_kwargs)
       result = await call
     except BaseException as exc:  # pylint: disable=broad-exception-caught
       await self._cancel_and_close_request_stream(call, chunks)
@@ -1837,7 +1937,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
   async def poll_responses(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
   ) -> Optional[ExecutionResponse]:
-    """Long-polls remote server response queue for completed task results."""
+    """Long-polls the server for the next completed response (with poll ACK)."""
     await self._ensure_async_channel()
     # Bind the stub before the next `await`; see `dispatch_task`.
     poll_rpc = self._poll_rpc
@@ -1846,9 +1946,11 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     call_kwargs: Dict[str, Any] = {"timeout": self._rpc_timeout_s}
     if bulk_port > 0:
       call_kwargs["metadata"] = _BULK_CAPABILITY_METADATA
-    call = poll_rpc(timeout_s, **call_kwargs)
+    call = poll_rpc(
+        (timeout_s, self._client_id, self._last_ack_id), **call_kwargs
+    )
     try:
-      return await ExecutionResponse.deserialize_async_chunks(
+      response = await ExecutionResponse.deserialize_async_chunks(
           call,
           allow_empty=True,
           bulk_hosts=self._active_bulk_hosts,
@@ -1860,6 +1962,9 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       ):
         call.cancel()
       self._raise_session_rpc_error(exc, "polling")
+    if response is not None and response.ack_id is not None:
+      self._last_ack_id = response.ack_id
+    return response
 
   async def close(self) -> None:
     with self._sync_lock:

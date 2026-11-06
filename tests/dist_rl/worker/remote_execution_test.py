@@ -167,6 +167,17 @@ class _LockReturner:
     return threading.Lock()  # not serializable by (cloud)pickle
 
 
+def _aio_rpc_error(code_name: str, details: str) -> Exception:
+  import grpc  # pylint: disable=g-import-not-at-top
+
+  return grpc.aio.AioRpcError(
+      getattr(grpc.StatusCode, code_name),
+      initial_metadata=grpc.aio.Metadata(),
+      trailing_metadata=grpc.aio.Metadata(),
+      details=details,
+  )
+
+
 class RemoteExecutionTest(parameterized.TestCase):
   """Tests verifying ActorHandle and RemoteExecutionServer."""
 
@@ -1160,7 +1171,7 @@ class RemoteExecutionTest(parameterized.TestCase):
       self.assertNotEmpty(first_chunk)
       await stream.aclose()
 
-      # Subsequent poll must still receive the re-queued response
+      # The next poll does not ACK `req_requeue_1`, so the server resends it.
       recovered = await remote_lib.ExecutionResponse.deserialize_async_chunks(
           server._handle_poll_responses(b"", context=None)
       )
@@ -4549,17 +4560,6 @@ class RemoteExecutionTest(parameterized.TestCase):
 
   def test_task_session_retries_reply_lost_grpc_dispatch_in_place(self):
     """Real gRPC: a lost DispatchTask reply neither evicts nor re-executes."""
-    import grpc  # pylint: disable=g-import-not-at-top
-
-    class _FakeAioRpcError(grpc.aio.AioRpcError):
-
-      def __init__(self, code, details):
-        super().__init__(
-            code,
-            initial_metadata=grpc.aio.Metadata(),
-            trailing_metadata=grpc.aio.Metadata(),
-            details=details,
-        )
 
     class _GatedEngine:
 
@@ -4580,12 +4580,12 @@ class RemoteExecutionTest(parameterized.TestCase):
         real_dispatch_rpc = handle._dispatch_rpc
         lost_replies = 0
 
-        async def _lose_first_reply(chunks, timeout=None):
+        async def _lose_first_reply(chunks, **call_kwargs):
           nonlocal lost_replies
-          ack = await real_dispatch_rpc(chunks, timeout=timeout)
+          ack = await real_dispatch_rpc(chunks, **call_kwargs)
           if lost_replies == 0:
             lost_replies += 1
-            raise _FakeAioRpcError(grpc.StatusCode.UNAVAILABLE, "reply lost")
+            raise _aio_rpc_error("UNAVAILABLE", "reply lost")
           return ack
 
         with mock.patch.object(
@@ -4682,6 +4682,154 @@ class RemoteExecutionTest(parameterized.TestCase):
         release_poll.set()
         await handle.close()
         await server.stop(0)
+
+    asyncio.run(_run())
+
+  def test_poll_responses_redelivers_until_acknowledged(self):
+    async def _run():
+      engine = StubWorkerEngine("ack_worker", latency=0.0)
+      server = remote_lib.GrpcRemoteExecutionServer(engine)
+
+      async def _dispatch(req_id: str, arg: str) -> None:
+        await server.dispatch_task(
+            remote_lib.ExecutionRequest(req_id, "compute_trajectory", (arg,))
+        )
+
+      async def _poll(ack, client_id: str = "c1", timeout_s: float = 5.0):
+        payload = remote_lib.cloudpickle.dumps((timeout_s, client_id, ack))
+        return await remote_lib.ExecutionResponse.deserialize_async_chunks(
+            server._handle_poll_responses(payload, context=None),
+            allow_empty=True,
+        )
+
+      for i in (1, 2):
+        await _dispatch(f"req_{i}", f"p{i}")
+
+      first = await _poll(None)
+      assert first is not None and first.ack_id is not None
+      redelivered = await _poll(None)
+      assert redelivered is not None
+      self.assertEqual(
+          (redelivered.request_id, redelivered.ack_id),
+          (first.request_id, first.ack_id),
+      )
+      self.assertEqual(list(server._unacked_responses), [first.ack_id])
+
+      second = await _poll(first.ack_id)
+      assert second is not None and second.ack_id is not None
+      self.assertNotEqual(second.request_id, first.request_id)
+      self.assertEqual(list(server._unacked_responses), [second.ack_id])
+
+      # Reusing `second.request_id` executes again; if the poll carrying
+      # `ack=second.ack_id` drops in transit and retries with the same stale
+      # `ack`, `rerun` has a distinct `ack_id` and is resent instead of lost.
+      await _dispatch(second.request_id, "p_again")
+      rerun = await _poll(second.ack_id)
+      assert rerun is not None and rerun.ack_id is not None
+      rerun_retry = await _poll(second.ack_id, timeout_s=0.0)
+      assert rerun_retry is not None
+      self.assertEqual(rerun_retry.ack_id, rerun.ack_id)
+      self.assertIn("p_again", rerun_retry.unwrap())
+
+      # Resending `rerun` must not evict a newly started in-flight task that
+      # reuses `rerun.request_id`.
+      engine.latency = 10.0
+      await _dispatch(rerun.request_id, "in_flight")
+      self.assertIn(rerun.request_id, server._in_flight_requests)
+      await _poll(second.ack_id, timeout_s=0.0)
+      self.assertIn(rerun.request_id, server._in_flight_requests)
+
+      # A new handle (`client_id="c2"`) never inherits `"c1"`'s unacked item.
+      self.assertIsNone(await _poll(None, client_id="c2", timeout_s=0.0))
+      self.assertEmpty(server._unacked_responses)
+
+      # `stop_serving()` clears `_unacked_responses` and `_in_flight_requests`.
+      engine.latency = 0.0
+      await _dispatch("req_tail", "tail")
+      self.assertIsNotNone(await _poll(None, client_id="c2"))
+      self.assertNotEmpty(server._unacked_responses)
+      await server.stop_serving()
+      self.assertEmpty(server._unacked_responses)
+      self.assertEmpty(server._in_flight_requests)
+
+    asyncio.run(_run())
+
+  def test_task_session_recovers_poll_reply_lost_after_server_sent_it(self):
+    """Real gRPC: lost poll recovery, piggybacked ACK, stale dedup & flush."""
+
+    async def _run():
+      engine = StubWorkerEngine("ack_worker", latency=0.0)
+      async with running_grpc_server(engine) as (server, handle):
+        await handle._ensure_async_channel()
+        real_poll_rpc = handle._poll_rpc
+        poll_calls = 0
+        saved_first_chunks: list[bytes] = []
+
+        def _intercept_poll(request, **call_kwargs):
+          nonlocal poll_calls
+          poll_calls += 1
+          call_idx = poll_calls
+          if call_idx == 3:
+            # Inject a duplicate redelivery after `TaskSession` settled the
+            # first task to exercise `stale_responses_total`.
+            async def _replay():
+              for chunk in saved_first_chunks:
+                yield chunk
+
+            return _replay()
+          call = real_poll_rpc(request, **call_kwargs)
+
+          async def _chunks():
+            chunks = [chunk async for chunk in call]
+            if call_idx == 1:
+              raise _aio_rpc_error(
+                  "UNAVAILABLE", "connection dropped after the final frame"
+              )
+            if call_idx == 2:
+              saved_first_chunks.extend(chunks)
+            for chunk in chunks:
+              yield chunk
+
+          return _chunks()
+
+        with mock.patch.object(
+            handle, "_poll_rpc", side_effect=_intercept_poll
+        ):
+          async with task_session.TaskSession(
+              lambda: [handle],
+              poll_retry_initial_backoff_s=0.02,
+              poll_retry_max_backoff_s=0.02,
+          ) as session:
+            await session.submit("r1", "compute_trajectory", "p1")
+            await session.submit("r2", "compute_trajectory", "p2")
+            completed = []
+            while len(completed) < 2:
+              completed.extend(await session.poll_completed(timeout_s=5.0))
+            self.assertEqual([err for _, err in completed], [None, None])
+            outputs = [out for out, _ in completed]
+            self.assertTrue(any("p1" in out for out in outputs))
+            self.assertTrue(any("p2" in out for out in outputs))
+            self.assertEqual(session.stale_responses_total, 1)
+
+        self.assertEqual(engine.call_count, 2)
+        # Polling the 2nd response piggybacked `ack_id=1`, leaving only `[2]`.
+        self.assertEqual(list(server._unacked_responses), [2])
+
+        # A separate handle sending `x-tunix-poll-ack` must not wipe `handle`'s
+        # unacked state, while `dispatch_task` and `asubmit` on `handle` do.
+        probe = remote_lib.GrpcRemoteActorHandle(handle.target_address)
+        probe._last_ack_id = 2
+        try:
+          await probe.asubmit("get_status")
+        finally:
+          await probe.close()
+        self.assertEqual(list(server._unacked_responses), [2])
+        await handle.dispatch_task("r3", "compute_trajectory", "p3")
+        self.assertEmpty(server._unacked_responses)
+        self.assertIsNotNone(await handle.poll_responses(timeout_s=5.0))
+        self.assertEqual(list(server._unacked_responses), [3])
+        await handle.asubmit("get_status")
+        self.assertEmpty(server._unacked_responses)
 
     asyncio.run(_run())
 

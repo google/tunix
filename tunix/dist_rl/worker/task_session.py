@@ -811,11 +811,6 @@ class TaskSession:
 
   async def _poll_worker_loop(self, actor: ActorHandle) -> None:
     """Long-polls a single active worker until its in-flight set drains."""
-    # TODO: b/577214994 - Add ACK-based response redelivery so a response whose
-    # final frame was handed to the server transport just before a connection
-    # drop is retained until acknowledged by the client. Currently no outer
-    # orchestrator timeout covers this window, so a lost response stalls
-    # polling_stage until ACK redelivery lands.
     # TODO(b/577214994): Detect same-port server restarts for static-handle
     # callers (e.g. via a per-process incarnation token). Discovery-backed
     # rollout workers replace `actor` in `self._actors_fn()` on rejoin, whereas
