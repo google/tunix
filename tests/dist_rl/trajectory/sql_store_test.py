@@ -1,6 +1,7 @@
 """Unit and contract tests for SqlTrajectoryStore."""
 
 from concurrent import futures
+import datetime
 import os
 import threading
 from typing import Any
@@ -82,6 +83,12 @@ class SqlStoreWriterTest(parameterized.TestCase):
         sa.select(schema.STEPS_TABLE).order_by(schema.STEPS_TABLE.c.step_id),
     )
 
+  def _fetch_metrics(self) -> list[dict[str, Any]]:
+    """Returns every row in the trajectory_metrics table."""
+    return schema_testing.fetch_all(
+        self.engine, sa.select(schema.TRAJECTORY_METRICS_TABLE)
+    )
+
   def test_init_with_postgresql_engine_binds_postgresql_insert(self) -> None:
     mock_engine = mock.MagicMock()
     mock_engine.dialect.name = db_engine.Dialect.POSTGRESQL
@@ -147,11 +154,12 @@ class SqlStoreWriterTest(parameterized.TestCase):
     )
 
   @parameterized.named_parameters(
+      ("none", None),
       ("empty", ""),
       ("whitespace", "   "),
   )
   def test_enqueue_write_with_blank_run_id_raises_value_error(
-      self, blank_run_id: str
+      self, blank_run_id: Any
   ) -> None:
     writer = self._create_writer()
     metadata = trajectory_testing.make_metadata(trajectory_id="traj_valid")
@@ -585,6 +593,171 @@ class SqlStoreWriterTest(parameterized.TestCase):
     self.assertEqual(trajectories[0]["updated_at"], initial_updated_at)
     self.assertLen(self._fetch_steps(), 2)
 
+  def test_enqueue_metrics_write_persists_payload_and_caches_run(self) -> None:
+    writer = self._create_writer()
+    writer.enqueue_metrics_write(
+        run_id="run_m",
+        trajectory_id="  traj_padded  ",
+        metrics=trajectory_lib.TrajectoryMetrics(extra={"score": 42.0}),
+    )
+    # Subsequent write in the same run skips re-inserting runs row.
+    writer.enqueue_metrics_write(
+        run_id="run_m",
+        trajectory_id="traj_2",
+        metrics=trajectory_lib.TrajectoryMetrics(extra={"score": 10.0}),
+    )
+    writer.flush()
+
+    self.assertEqual(self._count_sql("INSERT INTO runs"), 1)
+    metrics_rows = self._fetch_metrics()
+    self.assertLen(metrics_rows, 2)
+    self.assertEqual(metrics_rows[0]["trajectory_id"], "  traj_padded  ")
+    self.assertEqual(metrics_rows[0]["payload"], {"extra": {"score": 42.0}})
+    self.assertEqual(self._fetch_runs()[0]["agent_name"], "")
+
+  def test_enqueue_metrics_write_shallow_merges_dotted_keys_and_none(
+      self,
+  ) -> None:
+    writer = self._create_writer()
+    for extra in (
+        {"a": 1, "env.reward": 0.5, "nested": {"x": 1}},
+        {"env.reward": 1.0, "nested": {"y": 2}, "a": None},
+    ):
+      writer.enqueue_metrics_write(
+          run_id="run_merge",
+          trajectory_id="traj_merge",
+          metrics=trajectory_lib.TrajectoryMetrics(extra=extra),
+      )
+    writer.flush()
+    merged_updated_at = self._fetch_metrics()[0]["updated_at"]
+
+    # Unchanged merged payloads and extra=None skip no-op updates.
+    for extra in (
+        {"env.reward": 1.0, "nested": {"y": 2}, "a": None},
+        {},
+        None,
+    ):
+      writer.enqueue_metrics_write(
+          run_id="run_merge",
+          trajectory_id="traj_merge",
+          metrics=trajectory_lib.TrajectoryMetrics(extra=extra),
+      )
+    writer.enqueue_metrics_write(
+        run_id="run_merge",
+        trajectory_id="traj_none_only",
+        metrics=trajectory_lib.TrajectoryMetrics(extra=None),
+    )
+    writer.flush()
+
+    self.assertEqual(self._count_sql("SELECT trajectory_metrics.payload"), 3)
+    self.assertEqual(self._count_sql("UPDATE trajectory_metrics"), 1)
+    metrics_by_id = {row["trajectory_id"]: row for row in self._fetch_metrics()}
+    self.assertEqual(
+        metrics_by_id["traj_merge"]["payload"],
+        {"extra": {"a": None, "env.reward": 1.0, "nested": {"y": 2}}},
+    )
+    self.assertEqual(
+        metrics_by_id["traj_merge"]["updated_at"], merged_updated_at
+    )
+    self.assertEqual(
+        metrics_by_id["traj_none_only"]["payload"], {"extra": None}
+    )
+
+  def test_enqueue_metrics_write_followed_by_step_updates_agent_name(
+      self,
+  ) -> None:
+    writer = self._create_writer()
+    writer.enqueue_metrics_write(
+        run_id="run_m",
+        trajectory_id="traj_m",
+        metrics=trajectory_lib.TrajectoryMetrics(extra={"score": 10.0}),
+    )
+    writer.enqueue_write(
+        run_id="run_m",
+        metadata=trajectory_testing.METADATA_1,
+        step=trajectory_testing.STEP_1_1,
+    )
+    writer.flush()
+
+    self.assertEqual(
+        self._fetch_runs()[0]["agent_name"],
+        trajectory_testing.METADATA_1.agent.name,
+    )
+
+  def test_enqueue_write_with_empty_agent_name_backfills_on_later_metadata(
+      self,
+  ) -> None:
+    writer = self._create_writer()
+    empty_agent_meta = trajectory_testing.make_metadata(
+        trajectory_id="traj_1",
+        agent=trajectory_lib.Agent(name="", version="1.0"),
+    )
+    named_agent_meta = trajectory_testing.make_metadata(
+        trajectory_id="traj_1",
+        agent=trajectory_lib.Agent(name="backfilled_agent", version="1.0"),
+    )
+    writer.enqueue_write(run_id="run_empty_agent", metadata=empty_agent_meta)
+    writer.enqueue_write(run_id="run_empty_agent", metadata=named_agent_meta)
+    writer.enqueue_write(
+        run_id="run_empty_agent",
+        metadata=named_agent_meta.model_copy(update={"notes": "later"}),
+    )
+    writer.flush()
+
+    self.assertEqual(self._count_sql("INSERT INTO runs"), 2)
+    self.assertEqual(self._fetch_runs()[0]["agent_name"], "backfilled_agent")
+
+  @parameterized.named_parameters(
+      (
+          "empty_run_id",
+          "",
+          "t1",
+          ValueError,
+          r"run_id must be a non-empty string",
+      ),
+      (
+          "whitespace_run_id",
+          "  ",
+          "t1",
+          ValueError,
+          r"run_id must be a non-empty string",
+      ),
+      (
+          "empty_traj_id",
+          "r1",
+          "",
+          ValueError,
+          r"trajectory_id must be a non-empty string",
+      ),
+      (
+          "whitespace_traj_id",
+          "r1",
+          "  ",
+          ValueError,
+          r"trajectory_id must be a non-empty string",
+      ),
+      (
+          "invalid_metrics_type",
+          "r1",
+          "t1",
+          TypeError,
+          r"Expected TrajectoryMetrics",
+      ),
+  )
+  def test_enqueue_metrics_write_invalid_args_raise(
+      self, run_id: str, traj_id: str, exc_type: type[Exception], regex: str
+  ) -> None:
+    writer = self._create_writer()
+    metrics: Any = (
+        trajectory_lib.TrajectoryMetrics()
+        if exc_type is ValueError
+        else {"bad": "type"}
+    )
+    with self.assertRaisesRegex(exc_type, regex):
+      writer.enqueue_metrics_write(
+          run_id=run_id, trajectory_id=traj_id, metrics=metrics
+      )
+
 
 class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
   """Unit tests for SqlTrajectoryStore initialization and lifecycle behavior."""
@@ -638,7 +811,7 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
       self, invalid_run_id: Any
   ) -> None:
     with self.assertRaisesRegex(
-        ValueError, r"SqlTrajectoryStore requires a non-empty run_id"
+        ValueError, r"run_id must be a non-empty string"
     ):
       sql_store.SqlTrajectoryStore(
           db_url=self.db_url,
@@ -654,7 +827,7 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
       self, invalid_db_url: Any
   ) -> None:
     with self.assertRaisesRegex(
-        ValueError, r"SqlTrajectoryStore requires a non-empty db_url"
+        ValueError, r"db_url must be a non-empty string"
     ):
       sql_store.SqlTrajectoryStore(
           run_id="test_run",
@@ -867,6 +1040,11 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     with self.assertRaisesRegex(RuntimeError, r"Cannot write to a closed"):
       store_inst.update_metadata(trajectory_testing.METADATA_1)
 
+    with self.assertRaisesRegex(RuntimeError, r"Cannot write to a closed"):
+      store_inst.update_metrics(
+          "t1", trajectory_lib.TrajectoryMetrics(extra={"x": 1})
+      )
+
   def test_close_drains_pending_writes(self) -> None:
     writer_store = sql_store.SqlTrajectoryStore(
         db_url=self.db_url,
@@ -1030,6 +1208,10 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     store_run_1.add_step(
         trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
     )
+    store_run_1.update_metrics(
+        trajectory_testing.TRAJECTORY_ID_1,
+        trajectory_lib.TrajectoryMetrics(extra={"run": 1}),
+    )
     store_run_1.flush()
 
     run_2_step_for_traj_1 = trajectory_testing.make_step(
@@ -1040,6 +1222,18 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     store_run_2.add_step(
         trajectory_testing.STEP_2_1, trajectory_testing.METADATA_2
     )
+    store_run_2.update_metrics(
+        trajectory_testing.TRAJECTORY_ID_1,
+        trajectory_lib.TrajectoryMetrics(extra={"run": 2}),
+    )
+    store_run_2.update_metrics(
+        trajectory_testing.TRAJECTORY_ID_1,
+        trajectory_lib.TrajectoryMetrics(extra={"extra_run_2": True}),
+    )
+    store_run_2.update_metrics(
+        trajectory_testing.TRAJECTORY_ID_2,
+        trajectory_lib.TrajectoryMetrics(extra={"only_run_2": True}),
+    )
     store_run_2.flush()
 
     self.assertEqual(
@@ -1049,6 +1243,26 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(
         store_run_1.get_trajectories([trajectory_testing.TRAJECTORY_ID_1]),
         [trajectory_testing.TRAJECTORY_1],
+    )
+    self.assertEqual(
+        store_run_1.get_trajectories_metrics(),
+        {
+            trajectory_testing.TRAJECTORY_ID_1: (
+                trajectory_lib.TrajectoryMetrics(extra={"run": 1})
+            )
+        },
+    )
+    self.assertEqual(
+        store_run_2.get_trajectories_metrics(
+            [trajectory_testing.TRAJECTORY_ID_1]
+        ),
+        {
+            trajectory_testing.TRAJECTORY_ID_1: (
+                trajectory_lib.TrajectoryMetrics(
+                    extra={"run": 2, "extra_run_2": True}
+                )
+            )
+        },
     )
     with self.assertRaisesRegex(
         store.TrajectoryMetadataNotFoundError,
@@ -1061,6 +1275,260 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
         store.TrajectoryNotFoundError, trajectory_testing.TRAJECTORY_ID_2
     ):
       store_run_1.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])
+    with self.assertRaisesRegex(
+        store.TrajectoryMetricsNotFoundError, trajectory_testing.TRAJECTORY_ID_2
+    ):
+      store_run_1.get_trajectories_metrics([trajectory_testing.TRAJECTORY_ID_2])
+
+  def test_init_upgrades_partial_schema_missing_trajectory_metrics(
+      self,
+  ) -> None:
+    legacy_db_path = os.path.join(self.create_tempdir().full_path, "legacy.db")
+    legacy_engine = schema_testing.create_sqlite_file_engine(legacy_db_path)
+    self.addCleanup(legacy_engine.dispose)
+    schema.METADATA.create_all(
+        legacy_engine,
+        tables=[
+            schema.RUNS_TABLE,
+            schema.TRAJECTORIES_TABLE,
+            schema.STEPS_TABLE,
+        ],
+    )
+    self.assertNotIn(
+        "trajectory_metrics", sa.inspect(legacy_engine).get_table_names()
+    )
+
+    upgraded_store = sql_store.SqlTrajectoryStore(
+        db_url=f"sqlite:///{legacy_db_path}",
+        run_id="upgrade_run",
+        auto_init=True,
+    )
+    self.addCleanup(upgraded_store.close)
+    metrics = trajectory_lib.TrajectoryMetrics(extra={"upgraded": True})
+    upgraded_store.update_metrics("traj_up", metrics)
+    upgraded_store.flush()
+
+    self.assertIn(
+        "trajectory_metrics", sa.inspect(legacy_engine).get_table_names()
+    )
+    self.assertEqual(
+        upgraded_store.get_trajectories_metrics(["traj_up"]),
+        {"traj_up": metrics},
+    )
+
+  def test_update_metrics_on_postgresql_compiles_atomic_jsonb_merge(
+      self,
+  ) -> None:
+    mock_engine, _, mock_write_conn = self._create_postgres_mock_engine()
+    self._patch_create_engine(mock_engine)
+    store_inst = sql_store.SqlTrajectoryStore(
+        db_url=_POSTGRES_URL,
+        run_id="pg_run",
+        auto_init=False,
+    )
+    self.addCleanup(store_inst.close)
+
+    store_inst.update_metrics(
+        "pg_traj", trajectory_lib.TrajectoryMetrics(extra={"score": 100})
+    )
+    store_inst.update_metrics(
+        "pg_traj_null", trajectory_lib.TrajectoryMetrics(extra=None)
+    )
+    store_inst.flush()
+
+    self.assertEqual(mock_write_conn.execute.call_count, 3)
+    pg_dialect = sql_store.postgresql.dialect()
+    compiled_upsert = str(
+        mock_write_conn.execute.call_args_list[1]
+        .args[0]
+        .compile(dialect=pg_dialect)
+    )
+    self.assertIn("INSERT INTO trajectory_metrics", compiled_upsert)
+    self.assertIn(
+        "ON CONFLICT (run_id, trajectory_id) DO UPDATE SET",
+        compiled_upsert,
+    )
+    self.assertIn("jsonb_set", compiled_upsert)
+    self.assertIn(
+        "jsonb_typeof(trajectory_metrics.payload->'extra') = 'object'",
+        compiled_upsert,
+    )
+    self.assertIn(
+        "WHERE trajectory_metrics.payload IS DISTINCT FROM",
+        compiled_upsert,
+    )
+
+    compiled_null_insert = str(
+        mock_write_conn.execute.call_args_list[2]
+        .args[0]
+        .compile(dialect=pg_dialect)
+    )
+    self.assertIn("INSERT INTO trajectory_metrics", compiled_null_insert)
+    self.assertIn(
+        "ON CONFLICT (run_id, trajectory_id) DO NOTHING",
+        compiled_null_insert,
+    )
+
+  def test_update_metrics_persists_across_instances_and_orders_by_created_at(
+      self,
+  ) -> None:
+    base_time = datetime.datetime(
+        2026, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc
+    )
+    store_1 = self._create_store(run_id="shared_run")
+    metrics_1 = trajectory_lib.TrajectoryMetrics(extra={"loss": 0.5})
+    metrics_2 = trajectory_lib.TrajectoryMetrics(extra={"loss": 0.2})
+    with mock.patch.object(sql_store, "datetime") as mock_dt:
+      mock_dt.timezone = datetime.timezone
+      mock_dt.datetime.now.side_effect = [
+          base_time,
+          base_time + datetime.timedelta(seconds=1),
+          base_time + datetime.timedelta(seconds=2),
+      ]
+      store_1.update_metrics(
+          "t_2", trajectory_lib.TrajectoryMetrics(extra={"loss": 0.9})
+      )
+      store_1.update_metrics("t_1", metrics_1)
+      store_1.update_metrics("t_2", metrics_2)
+      store_1.flush()
+
+    store_2 = self._create_store(run_id="shared_run")
+    all_metrics = store_2.get_trajectories_metrics(None)
+    self.assertEqual(list(all_metrics.keys()), ["t_2", "t_1"])
+    self.assertEqual(all_metrics, {"t_2": metrics_2, "t_1": metrics_1})
+
+  def test_update_metrics_concurrent_stores_merge_without_lock_errors(
+      self,
+  ) -> None:
+    num_workers = 8
+    barrier = threading.Barrier(num_workers)
+
+    def _write_worker(worker_idx: int) -> None:
+      barrier.wait(timeout=5.0)
+      worker_store = sql_store.SqlTrajectoryStore(
+          db_url=self.db_url,
+          run_id="concurrent_metrics_run",
+      )
+      try:
+        worker_store.update_metrics(
+            "shared_traj",
+            trajectory_lib.TrajectoryMetrics(
+                extra={f"worker_{worker_idx}": worker_idx, "dot.key": 1}
+            ),
+        )
+      finally:
+        worker_store.close()
+
+    with futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+      worker_futures = [
+          executor.submit(_write_worker, idx) for idx in range(num_workers)
+      ]
+      for future in futures.as_completed(worker_futures):
+        future.result()
+
+    reader_store = self._create_store(run_id="concurrent_metrics_run")
+    expected_extra = {f"worker_{idx}": idx for idx in range(num_workers)}
+    expected_extra["dot.key"] = 1
+    self.assertEqual(
+        reader_store.get_trajectories_metrics(["shared_traj"])[
+            "shared_traj"
+        ].extra,
+        expected_extra,
+    )
+
+  @parameterized.named_parameters(
+      (
+          "operational_error",
+          sa.exc.OperationalError("simulated lock timeout", None, Exception()),
+      ),
+      (
+          "statement_error",
+          sa.exc.StatementError("simulated statement error", None, None, None),
+      ),
+  )
+  def test_update_metrics_recovers_after_database_error(
+      self, exc: Exception
+  ) -> None:
+    store_inst = self._create_store(run_id="recover_metrics_run")
+    with (
+        mock.patch.object(
+            store_inst.engine,
+            "begin",
+            autospec=True,
+            spec_set=True,
+            side_effect=exc,
+        ),
+        mock.patch.object(
+            sql_store.logging, "exception", autospec=True, spec_set=True
+        ) as mock_log,
+    ):
+      store_inst.update_metrics(
+          "t1", trajectory_lib.TrajectoryMetrics(extra={"k1": 1})
+      )
+      store_inst.flush()
+    # Next write succeeds and previous failure was logged
+    store_inst.update_metrics(
+        "t1", trajectory_lib.TrajectoryMetrics(extra={"k2": 2})
+    )
+    store_inst.flush()
+
+    mock_log.assert_called_once_with(
+        "%s failed to write trajectory %s (run_id=%s, trajectory_id=%s) to"
+        " database.",
+        "_AsyncSqlWriterWorker",
+        "metrics",
+        "recover_metrics_run",
+        "t1",
+    )
+    self.assertEqual(
+        store_inst.get_trajectories_metrics(["t1"])["t1"].extra,
+        {"k2": 2},
+    )
+
+  def test_local_instance_metrics_verification(self) -> None:
+    db_file = os.path.join(self.create_tempdir().full_path, "local_demo.db")
+    db_url = f"sqlite:///{db_file}"
+    run_id = "run_demo_001"
+    store_inst = sql_store.SqlTrajectoryStore(db_url=db_url, run_id=run_id)
+
+    # 1. Update metrics across multiple rollout turns with shallow merge
+    store_inst.update_metrics(
+        "traj_1001",
+        trajectory_lib.TrajectoryMetrics(extra={"reward": 1.0, "step": 1}),
+    )
+    store_inst.update_metrics(
+        "traj_1001",
+        trajectory_lib.TrajectoryMetrics(extra={"eval.score": 98.5, "step": 2}),
+    )
+    store_inst.update_metrics(
+        "traj_1002",
+        trajectory_lib.TrajectoryMetrics(extra={"reward": 0.5}),
+    )
+    store_inst.flush()
+
+    # 2. Query metrics via TrajectoryReader
+    all_metrics = store_inst.get_trajectories_metrics()
+    self.assertEqual(
+        all_metrics["traj_1001"].extra,
+        {"reward": 1.0, "step": 2, "eval.score": 98.5},
+    )
+    self.assertEqual(all_metrics["traj_1002"].extra, {"reward": 0.5})
+
+    # 3. Direct relational DB inspection
+    with store_inst.engine.connect() as conn:
+      rows = conn.execute(
+          sa.select(
+              schema.TRAJECTORY_METRICS_TABLE.c.trajectory_id,
+              schema.TRAJECTORY_METRICS_TABLE.c.payload,
+          ).order_by(schema.TRAJECTORY_METRICS_TABLE.c.trajectory_id)
+      ).fetchall()
+      self.assertLen(rows, 2)
+      self.assertEqual(rows[0].trajectory_id, "traj_1001")
+      self.assertEqual(
+          rows[0].payload["extra"],
+          {"reward": 1.0, "step": 2, "eval.score": 98.5},
+      )
+    store_inst.close()
 
 
 class SqlTrajectoryReaderContractTest(store_testing.TrajectoryReaderTestCase):
