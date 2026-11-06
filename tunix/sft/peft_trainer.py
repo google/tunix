@@ -377,6 +377,10 @@ class PeftTrainer:
 
     self._train_steps = 0  # represent # of times model has been updated
     self._iter_steps = 0  # represent # of times trainer has looped
+    # Custom metadata computed at the most recent update step. Reused by the
+    # final checkpoint save in `close()`, which may run after the state that
+    # `custom_checkpoint_metadata()` reads has moved on (e.g. RL global steps).
+    self._last_checkpoint_metadata: dict[str, Any] | None = None
     self._throttler = inflight_throttler.InflightThrottler(
         max_inflight=training_config.max_inflight_computations
     )
@@ -1052,12 +1056,13 @@ class PeftTrainer:
           self._write_train_metrics()
 
           # Checkpoint frequency is configured by checkpointing_options.
+          self._last_checkpoint_metadata = self.custom_checkpoint_metadata()
           self.checkpoint_manager.save(
               self._train_steps,
               self.model,
               self.optimizer,
               save_only_lora_params=self._lora_enabled,
-              custom_metadata=self.custom_checkpoint_metadata(),
+              custom_metadata=self._last_checkpoint_metadata,
           )
 
           if (
@@ -1079,6 +1084,9 @@ class PeftTrainer:
       self.close()
 
   def _save_last_checkpoint(self):
+    if self._train_steps <= 0:
+      # The model has not been updated, so there is nothing to checkpoint.
+      return
     last_saved_step = self.checkpoint_manager.latest_step()
     if last_saved_step is None or last_saved_step < self._train_steps:
       self.checkpoint_manager.save(
@@ -1087,6 +1095,7 @@ class PeftTrainer:
           self.optimizer,
           save_only_lora_params=self._lora_enabled,
           force=True,
+          custom_metadata=self._last_checkpoint_metadata,
       )
 
   @property
