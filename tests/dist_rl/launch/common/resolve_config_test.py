@@ -218,6 +218,131 @@ weight_sync_config:
     with self.assertRaisesRegex(ValueError, "artifact_root must not be empty"):
       resolve_config.initialize(["cluster_config.artifact_root="])
 
+  def test_cluster_target_choices(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        r"cluster_config.target must be one of \('local', 'k8s', 'external'\),"
+        r" got 'borg'",
+    ):
+      resolve_config.initialize(["cluster_config.target=borg"])
+
+  def test_external_target_requires_an_absolute_artifact_root(self):
+    cluster = resolve_config.initialize([
+        "cluster_config.target=external",
+        "cluster_config.artifact_root=/artifacts/run_1",
+    ]).config_mapping("cluster_config")
+    self.assertEqual(cluster["target"], "external")
+    # Never joined to the repo root.
+    self.assertEqual(cluster["artifact_root"], "/artifacts/run_1")
+    # Only `target: k8s` rejects a reference worker.
+    self.assertTrue(cluster["run_inference_node"])
+    # Each process would resolve a relative root against its own working
+    # directory, including the base config's.
+    for overrides in (["cluster_config.artifact_root=artifacts/run_1"], []):
+      with self.subTest(overrides=overrides):
+        with self.assertRaisesRegex(
+            ValueError,
+            "cluster_config.target=external requires an absolute"
+            " cluster_config.artifact_root",
+        ):
+          resolve_config.initialize(
+              ["cluster_config.target=external", *overrides]
+          )
+
+  def test_rollout_replicas(self):
+    k8s = ("cluster_config.target=k8s", "agentic_grpo_config.beta=0.0")
+    external = (
+        "cluster_config.target=external",
+        "cluster_config.artifact_root=/artifacts/run",
+    )
+
+    def replicas(*overrides: str) -> object:
+      cluster = resolve_config.initialize(list(overrides)).config_mapping(
+          "cluster_config"
+      )
+      return cluster["rollout_replicas"]
+
+    self.assertEqual(replicas(), 1)
+    self.assertEqual(replicas(*k8s, "cluster_config.rollout_replicas=2"), 2)
+    self.assertEqual(
+        replicas(*external, "cluster_config.rollout_replicas=16"), 16
+    )
+    # `local.sh` starts one rollout.
+    with self.assertRaisesRegex(
+        ValueError, "cluster_config.rollout_replicas must be 1, got 2"
+    ):
+      replicas("cluster_config.rollout_replicas=2")
+    for value in ("0", "-1", "1.5", "two", "true"):
+      with self.subTest(value=value):
+        with self.assertRaisesRegex(
+            ValueError, "cluster_config.rollout_replicas must be an int >= 1"
+        ):
+          replicas(*k8s, f"cluster_config.rollout_replicas={value}")
+    # The k8s-only key it replaces is unknown now.
+    with self.assertRaisesRegex(
+        ValueError,
+        "Unknown configuration key 'cluster_config.k8s.rollout.replicas'",
+    ):
+      replicas(*k8s, "cluster_config.k8s.rollout.replicas=2")
+    # `k8s.sh` deploys `ROLLOUT_REPLICAS` rollouts.
+    exports = resolve_config.render_bash_exports(
+        resolve_config.initialize([*k8s, "cluster_config.rollout_replicas=2"])
+    )
+    self.assertIn("export ROLLOUT_REPLICAS=2\n", exports)
+    self.assertNotIn("K8S_ROLLOUT_REPLICAS", exports)
+
+  def test_output_dirs_default_under_artifact_root(self):
+    def output_dirs(*overrides: str) -> tuple[object, object]:
+      rl_train = resolve_config.initialize(list(overrides)).config_mapping(
+          "rl_training_config"
+      )
+      return (
+          rl_train["checkpoint_root_directory"],
+          rl_train["metrics_logging_options"]["log_dir"],
+      )
+
+    root = resolve_config.REPO_ROOT / "artifacts" / "my_task"
+    self.assertEqual(
+        output_dirs("cluster_config.artifact_root=artifacts/my_task"),
+        (str(root / "checkpoints"), str(root / "metrics")),
+    )
+    # A relative k8s root stays relative to the container working directory.
+    self.assertEqual(
+        output_dirs(
+            "cluster_config.target=k8s",
+            "agentic_grpo_config.beta=0.0",
+            "cluster_config.artifact_root=artifacts/my_task",
+        ),
+        ("artifacts/my_task/checkpoints", "artifacts/my_task/metrics"),
+    )
+    self.assertEqual(
+        output_dirs(
+            "cluster_config.target=external",
+            "cluster_config.artifact_root=/artifacts/run_1",
+        ),
+        ("/artifacts/run_1/checkpoints", "/artifacts/run_1/metrics"),
+    )
+    # Explicit directories are kept.
+    self.assertEqual(
+        output_dirs(
+            "rl_training_config.checkpoint_root_directory=/ckpt",
+            "rl_training_config.metrics_logging_options.log_dir=/logs",
+        ),
+        ("/ckpt", "/logs"),
+    )
+    # Null metrics logging options log no metrics; nothing is derived.
+    rl_train = resolve_config.initialize(
+        ["rl_training_config.metrics_logging_options=null"]
+    ).config_mapping("rl_training_config")
+    self.assertIsNone(rl_train["metrics_logging_options"])
+    with self.assertRaisesRegex(
+        TypeError,
+        "rl_training_config.metrics_logging_options must be a mapping or null",
+    ):
+      resolve_config.initialize(
+          ["rl_training_config.metrics_logging_options=off"]
+      )
+
   def test_invariants_fail_loud(self):
     with self.assertRaisesRegex(ValueError, "must be divisible by"):
       resolve_config.initialize(

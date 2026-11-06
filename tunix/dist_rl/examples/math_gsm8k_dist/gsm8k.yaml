@@ -86,7 +86,6 @@ rl_training_config:
     max_to_keep: 10
   metrics_logging_options:
     project_name: "trellis-gsm8k"
-    log_dir: "/tmp/trellis_gsm8k"
     flush_every_n_steps: 1
 
 agentic_grpo_config:

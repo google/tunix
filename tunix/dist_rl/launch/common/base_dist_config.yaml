@@ -113,15 +113,23 @@ training_config: &base_training_config
   max_steps: 1
   # Derived by RLTrainingConfig from mini_batch_size // train_micro_batch_size.
   gradient_accumulation_steps: null
+  # On `rl_training_config`, defaults to <cluster_config.artifact_root>/checkpoints
+  # when empty.
   checkpoint_root_directory: ""
   checkpointing_options:
     max_to_keep: 10
     save_interval_steps: 1
     enable_async_checkpointing: true
     timeout_secs: 1200
+  # `rl_training_config.metrics_logging_options: null` logs no metrics, and no
+  # trajectories unless `dist_training_config.trajectory_log_dir` is set.
   metrics_logging_options:
     project_name: "trellis-gsm8k"
     run_name: ""
+    # On `rl_training_config`, defaults to <cluster_config.artifact_root>/metrics
+    # when empty. The orchestrator also logs the trajectories of each step under
+    # <log_dir>/trajectories, unless `dist_training_config.trajectory_log_dir`
+    # is set.
     log_dir: ""
     flush_every_n_steps: 1
   perf_metrics_options: {}
@@ -303,6 +311,10 @@ trajectory_store_config:
   dir: ""
 
 cluster_config:
+  # Where the processes run and what starts them: "local" (one TPU host,
+  # `local.sh`) or "k8s" (GKE, `k8s.sh`), both through `launch.sh`; or
+  # "external", processes started by another launcher (e.g. a job scheduler
+  # that starts each process separately), which `launch.sh` rejects.
   target: "local"
   # Shared orchestrator for every task; the task comes from `data_module`,
   # `reward_functions` and the rollout `env_class_path`/`agent_class_path`.
@@ -315,8 +327,10 @@ cluster_config:
   # example YAML sets its own value.
   registry_module: "tunix.dist_rl.examples.math_gsm8k_dist.gsm8k"
   # Relative paths are resolved against the repo root on `target: local` and
-  # against the container working directory (repo root) on `target: k8s`.
-  # Each task recipe sets its own value.
+  # against the container working directory (repo root) on `target: k8s`;
+  # `target: external` requires an absolute filesystem path. The models,
+  # checkpoints, and metrics default to subdirectories of it. Each task recipe
+  # sets its own value.
   artifact_root: "artifacts/dist_rl"
   run_id: ""
   # Print the commands (local) or manifests (k8s) instead of launching.
@@ -342,6 +356,14 @@ cluster_config:
   # `agentic_grpo_config.beta > 0`. Set false to use a reference worker started
   # separately; it registers with the orchestrator through discovery.
   run_inference_node: null
+  # Rollout workers the orchestrator waits for: `k8s.sh` deploys this many,
+  # and an external launcher starts this many. `target: local` requires 1
+  # (`local.sh` starts one). With more than one, each rollout reads its
+  # 0-based index from the `DIST_RL_ROLLOUT_REPLICA` environment variable.
+  rollout_replicas: 1
+  # On `target: external`, a worker (trainer, rollout, or inference) listens on
+  # the port in the `DIST_RL_WORKER_PORT` environment variable instead of its
+  # port here; the launcher assigns one to each worker.
   ports:
     orchestrator: 30000
     trainer: 20000
@@ -405,4 +427,3 @@ cluster_config:
     rollout:
       jobset_yaml: "leaderworkerset.mcjax.ray.yaml"
       tpu_slice: "tpuv5e:4x4"
-      replicas: 1

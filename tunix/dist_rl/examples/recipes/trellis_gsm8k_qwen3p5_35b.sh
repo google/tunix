@@ -65,5 +65,5 @@ exec "${DIR}/../math_gsm8k_dist/k8s_launcher.sh" \
   cluster_config.k8s.trainer.tpu_slice="tpuv5:2x2x2" \
   cluster_config.k8s.rollout.jobset_yaml="jobset.tpu.yaml" \
   cluster_config.k8s.rollout.tpu_slice="tpuv5:2x2x2" \
-  cluster_config.k8s.rollout.replicas=2 \
+  cluster_config.rollout_replicas=2 \
   "$@"

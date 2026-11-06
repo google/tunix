@@ -110,18 +110,18 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
         k8s["rollout"]["jobset_yaml"], "leaderworkerset.mcjax.ray.yaml"
     )
     self.assertEqual(k8s["rollout"]["tpu_slice"], "tpuv5e:4x4")
-    self.assertEqual(k8s["rollout"]["replicas"], 1)
+    self.assertEqual(config["cluster_config"]["rollout_replicas"], 1)
 
   def test_user_args_override_launcher_values(self):
     run = self.dry_run(
         "math_gsm8k_dist/k8s_launcher.sh",
         _K8S_IMAGE,
         "batch_size=8",
-        "cluster_config.k8s.rollout.replicas=2",
+        "cluster_config.rollout_replicas=2",
     )
     config = run.resolve().config
     self.assertEqual(config["batch_size"], 8)
-    self.assertEqual(config["cluster_config"]["k8s"]["rollout"]["replicas"], 2)
+    self.assertEqual(config["cluster_config"]["rollout_replicas"], 2)
     self.assertIn("testuser-roll-1", run.stdout)
 
   def test_k8s_passes_otel_settings_to_every_pod(self):

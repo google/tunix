@@ -23,11 +23,7 @@
 set -Eeuo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${DIR}/../../../.." && pwd)"
 
-# The default checkpoint root, `<repo>/checkpoints`, is shared by every
-# example, and the orchestrator resumes from the checkpoints it finds there.
 exec "${DIR}/../../launch/common/launch.sh" \
   "override_config_file=${DIR}/frozenlake.yaml" \
-  "rl_training_config.checkpoint_root_directory=${REPO_ROOT}/checkpoints/frozenlake" \
   "$@"

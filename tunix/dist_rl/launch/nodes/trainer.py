@@ -611,13 +611,13 @@ def main(
   hp = resolve_config.initialize(argv)
   config_sha256 = node_utils.log_resolved_config(hp, "trainer")
   worker_id = node_utils.worker_id(hp, "trainer", LOCAL_WORKER_ID)
+  port = node_utils.service_port(hp, "trainer")
   # Before the JAX initialization, which can block on the other processes, so
-  # a malformed OpenTelemetry setting fails fast.
+  # a malformed port or OpenTelemetry setting fails fast.
   node_utils.setup_otel_metrics(hp, "trainer", worker_id)
 
   process_context.jax.initialize()
 
-  port = node_utils.service_port(hp, "trainer")
   rl_train = hp.config_mapping(_RL_TRAINING_KEY)
 
   logging.info("Creating generic TrainerWorker and gRPC server...")

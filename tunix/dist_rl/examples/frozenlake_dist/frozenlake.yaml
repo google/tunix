@@ -16,9 +16,9 @@
 # 8-chip TPU host).
 #
 # Layered on top of `launch/common/base_dist_config.yaml`, with the settings of
-# the previous FrozenLake launcher. `launcher.sh` adds the checkpoint
-# directory, and `run_gemma4_e2b.sh` the Gemma4 E2B model and placement. Later
-# `override_config_file=` arguments and `section.key=value` overrides win.
+# the previous FrozenLake launcher. `run_gemma4_e2b.sh` adds the Gemma4 E2B
+# model and placement. Later `override_config_file=` arguments and
+# `section.key=value` overrides win.
 
 model_config:
   model_name: "Qwen3-8B"
@@ -116,7 +116,6 @@ rl_training_config:
     max_to_keep: 1
   metrics_logging_options:
     project_name: "tunix-frozenlake"
-    log_dir: "/tmp/trellis_frozenlake"
     flush_every_n_steps: 1
 
 agentic_grpo_config:

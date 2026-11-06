@@ -44,5 +44,5 @@ exec "${DIR}/../../launch/common/launch.sh" \
   cluster_config.k8s.trainer.tpu_slice="tpuv5e:4x4" \
   cluster_config.k8s.rollout.jobset_yaml="leaderworkerset.mcjax.ray.yaml" \
   cluster_config.k8s.rollout.tpu_slice="tpuv5e:4x4" \
-  cluster_config.k8s.rollout.replicas=1 \
+  cluster_config.rollout_replicas=1 \
   "$@"

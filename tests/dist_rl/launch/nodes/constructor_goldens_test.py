@@ -132,13 +132,12 @@ _REGENERATE = (
 
 # Overrides every golden case starts from: values that would otherwise come
 # from the clock (`run_id`), the user (the k8s ids), the checkout (a relative
-# `artifact_root` or an unset `checkpoint_root_directory`), or the Hugging Face
-# hub (a hub tokenizer needs `HF_TOKEN`). The orchestrator's `data_module` is
-# recorded, not imported.
+# `artifact_root`, and the output directories derived from it), or the Hugging
+# Face hub (a hub tokenizer needs `HF_TOKEN`). The orchestrator's `data_module`
+# is recorded, not imported.
 FIXED_OVERRIDES = (
     "cluster_config.run_id=golden",
     "cluster_config.artifact_root=/artifacts",
-    "rl_training_config.checkpoint_root_directory=/artifacts/checkpoints",
     "cluster_config.k8s.orchestrator_id=golden-orchestrator",
     "cluster_config.k8s.trainer_id=golden-trainer",
     "cluster_config.k8s.rollout_id=golden-rollout",
@@ -167,10 +166,9 @@ class GoldenCase:
 # trajectory store, sequence packing, and off-policy steps.
 _K8S_OVERRIDES = (
     "cluster_config.target=k8s",
-    "cluster_config.k8s.rollout.replicas=2",
+    "cluster_config.rollout_replicas=2",
     "cluster_config.init_timeout_s=900",
     "cluster_config.rpc_timeout_s=3600",
-    "rl_training_config.checkpoint_root_directory=",
     "agentic_grpo_config.beta=0.0",
     "agentic_grpo_config.off_policy_steps=1",
     "agentic_grpo_config.max_version_span=2",

@@ -33,6 +33,13 @@ from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.worker import remote_execution
 
+# A run whose processes another launcher starts; it needs an absolute artifact
+# root.
+_EXTERNAL = (
+    "cluster_config.target=external",
+    "cluster_config.artifact_root=/artifacts/run",
+)
+
 
 class RequireDiscoveryContextTest(absltest.TestCase):
 
@@ -72,6 +79,7 @@ class LogResolvedConfigTest(absltest.TestCase):
         "DISABLE_MOSAIC_ATTN": "1",
         "TUNIX_BULK_TCP_LZ4": "0",
         node_utils.ROLLOUT_REPLICA_ENV: "1",
+        node_utils.WORKER_PORT_ENV: "41234",
         "HF_TOKEN": "secret",
         "VLLM_API_KEY": "secret",
         "VLLM_api_key": "secret",
@@ -97,6 +105,7 @@ class LogResolvedConfigTest(absltest.TestCase):
     self.assertEqual(record["env"]["DISABLE_MOSAIC_ATTN"], "1")
     self.assertEqual(record["env"]["TUNIX_BULK_TCP_LZ4"], "0")
     self.assertEqual(record["env"][node_utils.ROLLOUT_REPLICA_ENV], "1")
+    self.assertEqual(record["env"][node_utils.WORKER_PORT_ENV], "41234")
     # Credentials are never recorded, even under a logged prefix and in
     # mixed case.
     self.assertNotIn("HF_TOKEN", record["env"])
@@ -176,7 +185,7 @@ class WorkerIdAndPortTest(absltest.TestCase):
         "cluster_config.target=k8s",
         "cluster_config.k8s.trainer_id=trainer-1",
         "cluster_config.k8s.rollout_id=roll-1",
-        "cluster_config.k8s.rollout.replicas=2",
+        "cluster_config.rollout_replicas=2",
         # `k8s.sh` deploys no reference worker.
         "agentic_grpo_config.beta=0.0",
     ])
@@ -195,11 +204,108 @@ class WorkerIdAndPortTest(absltest.TestCase):
       with self.assertRaisesRegex(ValueError, "must be set"):
         node_utils.worker_id(hp, "rollout", "r-0")
 
+  def test_external_target_uses_fixed_local_worker_ids(self):
+    hp = resolve_config.initialize(list(_EXTERNAL))
+    replica_env = node_utils.ROLLOUT_REPLICA_ENV
+    env = {k: v for k, v in os.environ.items() if k != replica_env}
+    with mock.patch.dict(os.environ, env, clear=True):
+      for role, local_worker_id in (
+          ("trainer", "trainer-0"),
+          ("rollout", "rollout-0"),
+          ("inference", "reference-inference-0"),
+      ):
+        self.assertEqual(
+            node_utils.worker_id(hp, role, local_worker_id), local_worker_id
+        )
+    # Trainer and inference ignore `DIST_RL_ROLLOUT_REPLICA`; a single rollout
+    # accepts index "0" (still returning `local_worker_id`) and rejects an
+    # out-of-range or malformed index.
+    with mock.patch.dict(os.environ, {replica_env: "5"}):
+      self.assertEqual(
+          node_utils.worker_id(hp, "trainer", "trainer-0"), "trainer-0"
+      )
+      self.assertEqual(
+          node_utils.worker_id(hp, "inference", "reference-inference-0"),
+          "reference-inference-0",
+      )
+      with self.assertRaisesRegex(
+          ValueError, "out of range for cluster_config.rollout_replicas=1"
+      ):
+        node_utils.worker_id(hp, "rollout", "rollout-0")
+    with mock.patch.dict(os.environ, {replica_env: "0"}):
+      self.assertEqual(
+          node_utils.worker_id(hp, "rollout", "rollout-0"), "rollout-0"
+      )
+
+  def test_external_rollout_replica_takes_index_from_env(self):
+    hp = resolve_config.initialize(
+        [*_EXTERNAL, "cluster_config.rollout_replicas=3"]
+    )
+    replica_env = node_utils.ROLLOUT_REPLICA_ENV
+    with mock.patch.dict(os.environ, {replica_env: "2"}):
+      self.assertEqual(
+          node_utils.worker_id(hp, "rollout", "rollout-0"), "rollout-2"
+      )
+      # Only rollout replicas carry an index.
+      self.assertEqual(
+          node_utils.worker_id(hp, "trainer", "trainer-0"), "trainer-0"
+      )
+    with mock.patch.dict(os.environ, {replica_env: "3"}):
+      with self.assertRaisesRegex(
+          ValueError, "out of range for cluster_config.rollout_replicas=3"
+      ):
+        node_utils.worker_id(hp, "rollout", "rollout-0")
+    for bad_replica in ("", "x", "+1", "-1", " 0"):
+      with self.subTest(bad_replica=bad_replica):
+        with mock.patch.dict(os.environ, {replica_env: bad_replica}):
+          with self.assertRaisesRegex(
+              ValueError, f"{replica_env} must be a non-negative integer"
+          ):
+            node_utils.worker_id(hp, "rollout", "rollout-0")
+    env = {k: v for k, v in os.environ.items() if k != replica_env}
+    with mock.patch.dict(os.environ, env, clear=True):
+      with self.assertRaisesRegex(ValueError, f"{replica_env} must be set"):
+        node_utils.worker_id(hp, "rollout", "rollout-0")
+
   def test_service_port_reads_role_port(self):
-    hp = resolve_config.initialize(["cluster_config.ports.rollout=20051"])
-    self.assertEqual(node_utils.service_port(hp, "trainer"), 20000)
-    self.assertEqual(node_utils.service_port(hp, "rollout"), 20051)
-    self.assertEqual(node_utils.service_port(hp, "inference"), 20002)
+    port_env = node_utils.WORKER_PORT_ENV
+    env = {k: v for k, v in os.environ.items() if k != port_env}
+    for target in ("local", "k8s"):
+      hp = resolve_config.initialize([
+          f"cluster_config.target={target}",
+          "cluster_config.ports.rollout=20051",
+          "agentic_grpo_config.beta=0.0",
+      ])
+      with self.subTest(target=target):
+        with mock.patch.dict(os.environ, env, clear=True):
+          self.assertEqual(node_utils.service_port(hp, "trainer"), 20000)
+          self.assertEqual(node_utils.service_port(hp, "rollout"), 20051)
+          self.assertEqual(node_utils.service_port(hp, "inference"), 20002)
+        # The port variable is only for the external target.
+        with mock.patch.dict(os.environ, {port_env: "41234"}):
+          with self.assertRaisesRegex(
+              ValueError,
+              f"{port_env} is only for cluster_config.target=external",
+          ):
+            node_utils.service_port(hp, "trainer")
+
+  def test_external_service_port_reads_worker_port_env(self):
+    hp = resolve_config.initialize(list(_EXTERNAL))
+    port_env = node_utils.WORKER_PORT_ENV
+    with mock.patch.dict(os.environ, {port_env: "41234"}):
+      for role in ("trainer", "rollout", "inference"):
+        self.assertEqual(node_utils.service_port(hp, role), 41234)
+    env = {k: v for k, v in os.environ.items() if k != port_env}
+    with mock.patch.dict(os.environ, env, clear=True):
+      with self.assertRaisesRegex(ValueError, f"{port_env} must be set"):
+        node_utils.service_port(hp, "trainer")
+    for port in ("", "port", "-1", "0", "65536", " 41234"):
+      with self.subTest(port=port):
+        with mock.patch.dict(os.environ, {port_env: port}):
+          with self.assertRaisesRegex(
+              ValueError, f"{port_env} must be a port number"
+          ):
+            node_utils.service_port(hp, "rollout")
 
 
 class SetupOtelMetricsTest(absltest.TestCase):

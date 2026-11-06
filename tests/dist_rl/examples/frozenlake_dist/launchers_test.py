@@ -116,10 +116,13 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     self.assertEqual((optimizer["b1"], optimizer["b2"]), (0.9, 0.95))
     self.assertEqual(optimizer["weight_decay"], 0.0)
     self.assertEqual(optimizer["chain_kwargs"], {"max_norm": 100.0})
-    self.assertTrue(
-        rl_train["checkpoint_root_directory"].endswith(
-            "/checkpoints/frozenlake"
-        )
+    # The outputs go under the recipe's artifact root.
+    artifact_root = pathlib.Path(
+        hp.config_mapping("cluster_config")["artifact_root"]
+    )
+    self.assertEqual(
+        rl_train["checkpoint_root_directory"],
+        str(artifact_root / "checkpoints"),
     )
     self.assertEqual(grpo["reward_mode"], "env")
     self.assertEqual(hp.config["reward_functions"], [])
@@ -163,8 +166,15 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     self.assertEqual(batch_config.max_response_length, 2048)
     self.assertIsNone(batch_config.max_seq_token_per_tpu)
     options = orchestrator.build_metrics_logging_options(hp)
+    assert options is not None  # Narrows the type for pytype.
     self.assertEqual(options.project_name, "tunix-frozenlake")
-    self.assertEqual(options.log_dir, "/tmp/trellis_frozenlake")
+    self.assertEqual(
+        options.log_dir,
+        str(
+            pathlib.Path(hp.config_mapping("cluster_config")["artifact_root"])
+            / "metrics"
+        ),
+    )
 
   def test_qwen3_8b(self):
     _, hp = self.assert_launcher(_QWEN3)
@@ -258,7 +268,8 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     )
     # `launch.sh` would reject the old launchers' environment variables.
     self.assertEqual(env, {"LOG_ROOT": str(output)})
-    config = self.dry_run(_GEMMA4.script, *command[2:]).resolve().config
+    hp = self.dry_run(_GEMMA4.script, *command[2:]).resolve()
+    config = hp.config
     cluster = config["cluster_config"]
     self.assertEqual(
         cluster["orchestrator_main"], f"{workload.MODULE}.dist_main"
@@ -277,7 +288,9 @@ class LaunchersTest(launcher_testing.LauncherTestCase):
     self.assertEqual(
         rl_train["checkpointing_options"]["save_interval_steps"], 0
     )
-    self.assertEqual(rl_train["metrics_logging_options"]["log_dir"], "")
+    # No metrics backends and no trajectory logs.
+    self.assertIsNone(rl_train["metrics_logging_options"])
+    self.assertIsNone(orchestrator.build_metrics_logging_options(hp))
     self.assertEqual(config["dist_training_config"]["trajectory_log_dir"], "")
     self.assertEqual(
         config["env_kwargs"]["max_steps"],
