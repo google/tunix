@@ -478,7 +478,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     trajectory_metrics: List[tuple[int, str, Dict[str, Any]]] = []
 
     for index, item in enumerate(trajectories):
-      conversation = item.traj.get("conversation_text") or []
+      conversation = item.traj["conversation_text"]
       # Every assistant turn, so multi-turn episodes are scored in full.
       completion_texts.append(agent_types.assistant_text(conversation))
       prompt_tokens_list.append(np.asarray(item.traj.get("prompt_tokens")))
