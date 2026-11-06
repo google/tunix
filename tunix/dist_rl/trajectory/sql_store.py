@@ -92,11 +92,22 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
        (`_trajectories_by_run: dict[str, OrderedDict[str, dict[str, Any]]]`),
        evicting the oldest 50% LRU chunk when capacity is reached to eliminate
        redundant database roundtrips and PostgreSQL MVCC/index bloat.
-    4. Best-Effort Fault Tolerance:
+    4. Adaptive Multi-Row Batch Upserts with Per-Task Fallback:
+       In normal operation (`batch_wait_s == 0.0`), the worker writes each task
+       immediately in its own transaction. When database lock contention or pool
+       timeouts occur, `AsyncWriter` increases `batch_wait_s` and collects
+       multi-task batches. `_execute_batch_transaction` groups tasks by
+       trajectory and executes at most one multi-row `INSERT ... ON CONFLICT`
+       per table in one transaction. If the bulk transaction fails with a
+       contention or timeout error, the error propagates to `AsyncWriter` to
+       step up `batch_wait_s`. If it fails with a non-batchable data or
+       constraint error, `_process_batch` falls back to `super()._process_batch`
+       to isolate the poisoned task and persist the valid tasks.
+    5. Best-Effort Fault Tolerance:
        Persistence errors (transient database disconnections, lock timeouts)
        are logged with full traceback via `_log_task_error` and suppressed to
        prevent crashing training loops.
-    5. Caller-Owned Status:
+    6. Caller-Owned Status:
        Trajectory status is only ever reported by the caller. This writer never
        infers one; a row it creates starts at UNKNOWN, and a write that states
        no status leaves the stored value untouched.
@@ -210,6 +221,195 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
 
     metadata_by_traj[traj_id] = metadata_payload
     metadata_by_traj.move_to_end(traj_id)
+
+  def _should_batch_on_error(self, exc: BaseException) -> bool:
+    """Returns True for database lock contention or pool timeout errors."""
+    return isinstance(
+        exc,
+        (
+            sa.exc.OperationalError,
+            sa.exc.TimeoutError,
+        ),
+    )
+
+  def _process_batch(self, tasks: Sequence[async_writer.WriteTask]) -> None:
+    """Upserts a batch in one transaction and falls back per task on data error."""
+    if len(tasks) <= 1:
+      super()._process_batch(tasks)
+      return
+
+    try:
+      self._execute_batch_transaction(tasks)
+    except sa.exc.SQLAlchemyError as exc:
+      if self._should_batch_on_error(exc):
+        raise
+      logging.warning(
+          "%s bulk transaction failed for %d tasks; falling back to per-task"
+          " replay.",
+          self._thread_name,
+          len(tasks),
+          exc_info=True,
+      )
+      super()._process_batch(tasks)
+    else:
+      self._decrease_batch_wait()
+
+  def _build_batch_rows(
+      self,
+      tasks: Sequence[async_writer.WriteTask],
+      now_dt: datetime.datetime,
+  ) -> tuple[
+      list[dict[str, Any]],
+      list[dict[str, Any]],
+      list[dict[str, Any]],
+      dict[tuple[str, str], dict[str, Any]],
+  ]:
+    """Builds deduplicated run, trajectory, and step row dicts for `tasks`."""
+    run_rows_by_id: dict[str, dict[str, Any]] = {}
+    trajectory_rows: list[dict[str, Any]] = []
+    step_rows: list[dict[str, Any]] = []
+    committed_metadata_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+
+    for trajectory_batch in async_writer.group_tasks_by_trajectory(tasks):
+      run_id = trajectory_batch.run_id
+      assert run_id is not None
+      trajectory_id = trajectory_batch.trajectory_id
+
+      latest_metadata_task = trajectory_batch.latest_metadata_task
+      if (
+          latest_metadata_task is not None
+          and latest_metadata_task.metadata is not None
+      ):
+        metadata = latest_metadata_task.metadata
+        if (
+            run_id not in self._trajectories_by_run
+            and run_id not in run_rows_by_id
+        ):
+          run_rows_by_id[run_id] = {
+              "run_id": run_id,
+              "agent_name": metadata.agent.name,
+              "status": schema.Status.PENDING,
+              "created_at": now_dt,
+              "config": {},
+          }
+
+        metadata_payload = metadata.model_dump(mode="json", exclude_none=True)
+        committed_metadata_by_key[(run_id, trajectory_id)] = metadata_payload
+        if (
+            self._trajectories_by_run.get(run_id, {}).get(trajectory_id)
+            != metadata_payload
+        ):
+          trajectory_rows.append({
+              "run_id": run_id,
+              "trajectory_id": trajectory_id,
+              "status": _resolve_status(metadata),
+              "created_at": now_dt,
+              "updated_at": now_dt,
+              "trajectory_metadata": metadata_payload,
+          })
+
+      latest_step_by_id = {
+          step_task.step.step_id: step_task.step
+          for step_task in trajectory_batch.step_tasks
+          if step_task.step is not None and step_task.step.step_id is not None
+      }
+      for step_id, step in latest_step_by_id.items():
+        step_rows.append({
+            "run_id": run_id,
+            "trajectory_id": trajectory_id,
+            "step_id": step_id,
+            "payload": step.model_dump(mode="json", exclude_none=True),
+            "created_at": _to_utc_timestamp(step.timestamp),
+        })
+
+    return (
+        list(run_rows_by_id.values()),
+        trajectory_rows,
+        step_rows,
+        committed_metadata_by_key,
+    )
+
+  def _execute_batch_transaction(
+      self, tasks: Sequence[async_writer.WriteTask]
+  ) -> None:
+    """Executes multi-row VALUES upserts for `tasks` in a single transaction."""
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    (
+        run_rows,
+        trajectory_rows,
+        step_rows,
+        committed_metadata_by_key,
+    ) = self._build_batch_rows(tasks, now_dt)
+
+    if run_rows or trajectory_rows or step_rows:
+      with self._engine.begin() as conn:
+        if run_rows:
+          self._insert_run_rows(conn, run_rows)
+        if trajectory_rows:
+          self._upsert_trajectory_rows(conn, trajectory_rows)
+        if step_rows:
+          self._upsert_step_rows(conn, step_rows)
+
+    for (
+        run_id,
+        trajectory_id,
+    ), metadata_payload in committed_metadata_by_key.items():
+      self._cache_committed_state(run_id, trajectory_id, metadata_payload)
+
+  def _insert_run_rows(
+      self, conn: sa.Connection, run_rows: Sequence[dict[str, Any]]
+  ) -> None:
+    """Executes a multi-row run insert in the open transaction."""
+    run_insert_statement = (
+        self._insert_fn(schema.RUNS_TABLE)
+        .values(run_rows)
+        .on_conflict_do_nothing()
+    )
+    conn.execute(run_insert_statement)
+
+  def _upsert_trajectory_rows(
+      self, conn: sa.Connection, trajectory_rows: Sequence[dict[str, Any]]
+  ) -> None:
+    """Executes a multi-row trajectory upsert in the open transaction."""
+    trajectory_insert = self._insert_fn(schema.TRAJECTORIES_TABLE).values(
+        trajectory_rows
+    )
+    trajectory_upsert_statement = trajectory_insert.on_conflict_do_update(
+        index_elements=["run_id", "trajectory_id"],
+        set_={
+            "updated_at": trajectory_insert.excluded.updated_at,
+            "trajectory_metadata": (
+                trajectory_insert.excluded.trajectory_metadata
+            ),
+            "status": sa.case(
+                (
+                    trajectory_insert.excluded.status != schema.Status.UNKNOWN,
+                    trajectory_insert.excluded.status,
+                ),
+                else_=schema.TRAJECTORIES_TABLE.c.status,
+            ),
+        },
+        where=(
+            schema.TRAJECTORIES_TABLE.c.trajectory_metadata.is_distinct_from(
+                trajectory_insert.excluded.trajectory_metadata
+            )
+        ),
+    )
+    conn.execute(trajectory_upsert_statement)
+
+  def _upsert_step_rows(
+      self, conn: sa.Connection, step_rows: Sequence[dict[str, Any]]
+  ) -> None:
+    """Executes a multi-row step upsert in the open transaction."""
+    step_insert = self._insert_fn(schema.STEPS_TABLE).values(step_rows)
+    step_upsert_statement = step_insert.on_conflict_do_update(
+        index_elements=["run_id", "trajectory_id", "step_id"],
+        set_={
+            "payload": step_insert.excluded.payload,
+            "created_at": step_insert.excluded.created_at,
+        },
+    )
+    conn.execute(step_upsert_statement)
 
   def _process_task(self, task: async_writer.WriteTask) -> None:
     """Processes a single write task by upserting to SQL database.
@@ -685,9 +885,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       )
       with self._engine.connect() as conn:
         metadata_rows = conn.execute(statement)
-        return [
-            self._load_metadata(row) for row in metadata_rows.scalars()
-        ]
+        return [self._load_metadata(row) for row in metadata_rows.scalars()]
 
     # Query only the requested trajectory IDs when a sequence is provided.
     if not trajectory_ids:
