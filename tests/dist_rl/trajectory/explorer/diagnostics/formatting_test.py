@@ -12,11 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the explorer's terminal formatting helpers."""
+"""Unit tests for the explorer's plain-text formatting helpers."""
 
 from absl.testing import absltest
-from tunix.dist_rl.trajectory.explorer.commands import formatting
-from tunix.dist_rl.trajectory.explorer.diagnostics import stats
+from tunix.dist_rl.trajectory.explorer.diagnostics import formatting
 
 
 class FormattingTest(absltest.TestCase):
@@ -30,18 +29,6 @@ class FormattingTest(absltest.TestCase):
   def test_opt_applies_format_spec(self) -> None:
     self.assertEqual(formatting.format_optional(3), "3")
     self.assertEqual(formatting.format_optional(2.0 / 3, ".3g"), "0.667")
-
-  def test_status_renders_name(self) -> None:
-    self.assertEqual(formatting.format_status(None), formatting.MISSING)
-    self.assertEqual(
-        formatting.format_status(stats.TrajectoryStatus.RUNNING), "RUNNING"
-    )
-    self.assertEqual(
-        formatting.format_status(stats.TrajectoryStatus.SUCCEEDED), "SUCCEEDED"
-    )
-    self.assertEqual(
-        formatting.format_status(stats.TrajectoryStatus.TIMEOUT), "TIMEOUT"
-    )
 
   def test_counts_renders_empty_as_missing(self) -> None:
     self.assertEqual(formatting.format_counts({}), formatting.MISSING)

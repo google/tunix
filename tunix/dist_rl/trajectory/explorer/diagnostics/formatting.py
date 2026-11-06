@@ -12,13 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Terminal formatting helpers shared by the explorer subcommands."""
+"""Plain-text formatting helpers for explorer statistics.
+
+They depend on nothing else in the explorer, so both the diagnostics library
+and the CLI subcommands can use them.
+"""
 
 import collections
 from collections.abc import Mapping
 from typing import Any
-
-from tunix.dist_rl.trajectory.explorer.diagnostics import stats
 
 # Rendered in place of a quantity a trajectory does not report.
 MISSING = "-"
@@ -27,11 +29,6 @@ MISSING = "-"
 def format_optional(value: Any, spec: str = "") -> str:
   """Formats `value` with `spec` (as in `format()`), or `MISSING` for None."""
   return MISSING if value is None else format(value, spec)
-
-
-def format_status(value: stats.TrajectoryStatus | None) -> str:
-  """Renders a status by name, or `MISSING` for None."""
-  return MISSING if value is None else value.name
 
 
 def format_counts(counts: Mapping[str, int]) -> str:

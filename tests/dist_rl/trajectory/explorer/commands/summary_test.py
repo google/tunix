@@ -139,6 +139,16 @@ class SummaryTest(absltest.TestCase):
     )
     self.assertIn("Tokens: 8 completion reported by 1/1", rollout_out)
 
+  def test_any_status_is_counted_upper_cased(self) -> None:
+    # A status outside `TrajectoryStatus` used to make the whole run fail.
+    trajectory = _SUCCEEDED_TRAJECTORY.model_copy(
+        update={"status": "completed"}
+    )
+    mem_store = testing.create_store(trajectories=[trajectory])
+    exit_code, out = testing.execute_command(self.cmd, mem_store)
+    self.assertEqual(exit_code, 0)
+    self.assertIn("Statuses: COMPLETED x1 reported by 1/1", out)
+
   def test_json_output(self) -> None:
     mem_store = testing.create_store(
         trajectories=[_NO_OUTCOME_TRAJECTORY_1, _TOOL_CALLING_TRAJECTORY]

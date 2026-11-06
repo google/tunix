@@ -32,10 +32,8 @@ from typing import NamedTuple, Protocol, TypedDict, runtime_checkable
 
 import pandas as pd
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
-from tunix.rl.agentic.agents import agent_types
 
 _Trajectory = trajectory_lib.Trajectory[trajectory_lib.StepT]
-TrajectoryStatus = agent_types.TrajectoryStatus
 
 
 class StepCountsJson(TypedDict):
@@ -91,7 +89,7 @@ class RunStatsJson(TypedDict):
 class _ReportsOutcome(Protocol):
   """A trajectory whose schema declares a status and a total reward."""
 
-  status: str | TrajectoryStatus | None
+  status: str | None
   total_reward: float | None
 
 
@@ -285,7 +283,9 @@ class TrajectoryStats:
 
   Attributes:
     trajectory_id: The trajectory's ID, or None if unset.
-    status: Run status, or None if unreported.
+    status: The trajectory's status, stripped and upper-cased (e.g.
+      `SUCCEEDED`), or None if unreported or blank. Statuses are not checked
+      against any vocabulary.
     total_reward: Overall score of the trajectory (its episode return in RL), or
       None if unreported or non-finite (NaN, inf).
     steps: Step counts split by source.
@@ -295,7 +295,7 @@ class TrajectoryStats:
   """
 
   trajectory_id: str | None
-  status: TrajectoryStatus | None
+  status: str | None
   total_reward: float | None
   steps: StepCounts
   tokens: TokenCounts | None
@@ -307,26 +307,16 @@ class TrajectoryStats:
 
     Args:
       trajectory: The trajectory to summarize.
-
-    Raises:
-      ValueError: If the trajectory states a status string that is not a
-        `TrajectoryStatus` name.
     """
-    status: TrajectoryStatus | None = None
+    status: str | None = None
     total_reward: float | None = None
 
     if isinstance(trajectory, _ReportsOutcome):
       raw_status = trajectory.status
-      if isinstance(raw_status, str):
-        try:
-          status = TrajectoryStatus[raw_status.upper()]
-        except KeyError:
-          raise ValueError(
-              f"Unrecognized trajectory status {raw_status!r} expected one of"
-              f" {[s.name for s in TrajectoryStatus]}."
-          ) from None
-      else:
-        status = raw_status
+      if raw_status is not None:
+        # Stripping and upper-casing merge spellings such as " succeeded" and
+        # "SUCCEEDED"; a blank status counts as unreported.
+        status = raw_status.strip().upper() or None
       total_reward = trajectory.total_reward
     if total_reward is not None and not math.isfinite(total_reward):
       total_reward = None
@@ -347,7 +337,7 @@ class TrajectoryStats:
     """Returns the stats as a plain JSON-serializable dict."""
     return TrajectoryStatsJson(
         trajectory_id=self.trajectory_id,
-        status=self.status.name if self.status else None,
+        status=self.status,
         total_reward=self.total_reward,
         steps=self.steps.to_json_dict(),
         tokens=self.tokens.to_json_dict() if self.tokens is not None else None,
@@ -363,7 +353,7 @@ class TrajectoryStats:
     """
     return {
         "trajectory_id": self.trajectory_id,
-        "status": self.status.name if self.status else None,
+        "status": self.status,
         "total_reward": self.total_reward,
         **_prefixed("steps", self.steps, StepCounts._fields),
         **_prefixed("tokens", self.tokens, TokenCounts._fields),
@@ -476,14 +466,14 @@ class RunStats:
     )
 
   @property
-  def status_counts(self) -> Mapping[TrajectoryStatus, int]:
+  def status_counts(self) -> Mapping[str, int]:
     """Returns a read-only mapping from status to its number of trajectories.
 
     Trajectories that report no status are not counted.
     """
     counts = self.df["status"].value_counts(sort=False)
     return types.MappingProxyType(
-        {TrajectoryStatus[name]: int(count) for name, count in counts.items()}
+        {str(status): int(count) for status, count in counts.items()}
     )
 
   @property
@@ -517,7 +507,7 @@ class RunStats:
         steps=self.steps.to_json_dict(),
         tokens=self.tokens.to_json_dict() if self.tokens is not None else None,
         num_with_tokens=self.num_with_tokens,
-        status_counts={status.name: count for status, count in status_counts},
+        status_counts=dict(status_counts),
         num_with_status=self.num_with_status,
         mean_reward=self.mean_reward,
         num_with_reward=self.num_with_reward,
