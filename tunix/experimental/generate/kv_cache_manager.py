@@ -65,7 +65,7 @@ def _create_kv_cache_group_managers(
       )
       for geometry in caches_by_geometry
   }
-  sharding = utils.derive_cache_sharding(config)
+  sharding = utils.derive_cache_sharding()
   num_device_pages, num_host_pages = utils.compute_page_limits(
       config=config,
       element_shapes=[kv_shapes[g] for g in cache_geometries.values()],

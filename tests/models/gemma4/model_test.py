@@ -240,14 +240,14 @@ class ModelTest(parameterized.TestCase):
       dense_decode_logits.append(logits[0, -1:])
 
     mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ('tp',))
-    manager = model.init_kv_cache(
-        generate_configs.CacheConfig(
-            max_device_size_gib=(1 << 20) / (1 << 30),
-            page_size=4,
-            dtype=jnp.float32,
-            mesh=mesh,
-        )
-    )
+    with jax.set_mesh(mesh):
+      manager = model.init_kv_cache(
+          generate_configs.CacheConfig(
+              max_device_size_gib=(1 << 20) / (1 << 30),
+              page_size=4,
+              dtype=jnp.float32,
+          )
+      )
     geometries = manager.cache_geometries
     self.assertEqual(
         geometries,
