@@ -201,8 +201,8 @@ class MetadataDictSerializationTest(parameterized.TestCase):
     self.assertIsNot(dumped_tokens, tokens)
 
   def test_model_dump_copies_packed_scalar_lists_without_rescanning(self):
-    agent_step = trajectory_testing.TUNIX_AGENT_STEP_1.to_atif_step()
-    packed = agent_step.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    atif_meta = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
+    packed = atif_meta.extra[trajectory.TUNIX_EXTENSIONS_KEY]
     self.assertIs(type(packed), trajectory._JsonCompatibleDict)
     packed_lists = [
         value for value in packed.values() if isinstance(value, list)
@@ -220,13 +220,13 @@ class MetadataDictSerializationTest(parameterized.TestCase):
         "_to_json_compatible",
         wraps=trajectory._to_json_compatible,
     ) as mock_to_json_compatible:
-      dumped_extra = agent_step.model_dump()["extra"]
+      dumped_extra = atif_meta.model_dump()["extra"]
 
-    self.assertEqual(dumped_extra, agent_step.extra)
+    self.assertEqual(dumped_extra, atif_meta.extra)
     dumped_packed = dumped_extra[trajectory.TUNIX_EXTENSIONS_KEY]
     self.assertIs(type(dumped_packed), dict)
-    # Packed token, mask, and logprob lists are copied in one C call, and
-    # scalar extensions skip recursive dispatch altogether.
+    # Packed scalar lists are copied in one C call, and scalar extensions skip
+    # recursive dispatch altogether.
     called_values = [
         call.args[0] for call in mock_to_json_compatible.call_args_list
     ]
@@ -234,9 +234,10 @@ class MetadataDictSerializationTest(parameterized.TestCase):
       self.assertTrue(all(v is not packed_list for v in called_values))
     for packed_scalar in packed_scalars:
       self.assertTrue(all(v is not packed_scalar for v in called_values))
-    self.assertEqual(dumped_packed["assistant_tokens"], [10, 20])
+    self.assertEqual(dumped_packed["target_policy_versions"], [2, 3])
     self.assertIsNot(
-        dumped_packed["assistant_tokens"], packed["assistant_tokens"]
+        dumped_packed["target_policy_versions"],
+        packed["target_policy_versions"],
     )
 
   def test_model_dump_converts_caller_built_extensions_dict(self):
@@ -328,7 +329,10 @@ class PackedExtensionsTest(parameterized.TestCase):
 
     self.assertIs(type(packed), trajectory._JsonCompatibleDict)
     self.assertEqual(packed["custom"], [7])
-    self.assertEqual(packed["assistant_tokens"], [10, 20])
+    self.assertEqual(
+        packed["assistant_tokens"],
+        trajectory._serialize_int_array([10, 20]),
+    )
 
 
 class _IterationCountingArray(np.ndarray):
@@ -775,8 +779,8 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
 
   def test_deep_copy_preserves_packed_extensions(self) -> None:
     """Verifies packed extensions keep their type and copy lists directly."""
-    atif_step = trajectory_testing.TUNIX_AGENT_STEP_1.to_atif_step()
-    packed = atif_step.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    atif_meta = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
+    packed = atif_meta.extra[trajectory.TUNIX_EXTENSIONS_KEY]
     packed_lists = [
         value for value in packed.values() if isinstance(value, list)
     ]
@@ -787,13 +791,14 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
         "_deep_copy_into_memo",
         wraps=trajectory._deep_copy_into_memo,
     ) as mock_deep_copy_into_memo:
-      copied = trajectory.deep_copy(atif_step)
+      copied = trajectory.deep_copy(atif_meta)
 
     copied_packed = copied.extra[trajectory.TUNIX_EXTENSIONS_KEY]
     self.assertIs(type(copied_packed), trajectory._JsonCompatibleDict)
     self.assertEqual(copied_packed, packed)
     self.assertIsNot(
-        copied_packed["assistant_tokens"], packed["assistant_tokens"]
+        copied_packed["target_policy_versions"],
+        packed["target_policy_versions"],
     )
     for call in mock_deep_copy_into_memo.call_args_list:
       for packed_list in packed_lists:
@@ -803,20 +808,23 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
       dict(
           testcase_name="caller_supplied_nested_list",
           step_kwargs={
-              "extra": {
-                  trajectory.TUNIX_EXTENSIONS_KEY: {"tags": [{"k": "v"}]}
-              }
+              "extra": {trajectory.TUNIX_EXTENSIONS_KEY: {"tags": [{"k": "v"}]}}
           },
           packed_key="tags",
+          nested_key=0,
       ),
       dict(
           testcase_name="two_dimensional_array",
           step_kwargs={"logprobs": np.zeros((2, 3), dtype=np.float32)},
           packed_key="logprobs",
+          nested_key="shape",
       ),
   )
   def test_deep_copy_of_projected_step_shares_no_nested_containers(
-      self, step_kwargs: dict[str, Any], packed_key: str
+      self,
+      step_kwargs: dict[str, Any],
+      packed_key: str,
+      nested_key: int | str,
   ) -> None:
     """Verifies packed extensions holding nested containers are deep-copied."""
     atif_step = trajectory.TunixAgentStep(
@@ -831,7 +839,9 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
 
     copied_packed = copied.extra[trajectory.TUNIX_EXTENSIONS_KEY]
     self.assertEqual(copied_packed[packed_key], packed[packed_key])
-    self.assertIsNot(copied_packed[packed_key][0], packed[packed_key][0])
+    self.assertIsNot(
+        copied_packed[packed_key][nested_key], packed[packed_key][nested_key]
+    )
 
   def test_scalar_list_fields_populated_from_annotations(self) -> None:
     """Verifies `SCALAR_LIST_FIELDS` is derived from `model_fields` at import/init."""
@@ -1467,12 +1477,22 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     )
     json_str = step.model_dump_json(exclude_none=True)
     loaded_dict = json.loads(json_str)
-    self.assertEqual(loaded_dict["assistant_tokens"], [10, 20])
-    self.assertEqual(loaded_dict["logprobs"], [-0.5, -0.3])
+    self.assertEqual(
+        loaded_dict["assistant_tokens"],
+        trajectory._serialize_int_array(np.array([10, 20])),
+    )
+    self.assertEqual(
+        loaded_dict["logprobs"],
+        trajectory._serialize_float_array(np.array([-0.5, -0.3])),
+    )
 
     reloaded_step = trajectory.TunixAgentStep.model_validate_json(json_str)
-    self.assertEqual(reloaded_step.assistant_tokens, [10, 20])
-    self.assertEqual(reloaded_step.logprobs, [-0.5, -0.3])
+    np.testing.assert_array_equal(
+        reloaded_step.assistant_tokens, np.array([10, 20])
+    )
+    np.testing.assert_array_equal(
+        reloaded_step.logprobs, np.array([-0.5, -0.3])
+    )
 
   def test_step_equality(self):
     step1 = trajectory.TunixAgentStep(
@@ -1936,9 +1956,9 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
         {
             "user_key": "val",
             trajectory.TUNIX_EXTENSIONS_KEY: {
-                "assistant_tokens": [10, 20],
-                "assistant_masks": [1, 1],
-                "logprobs": [-0.5, -0.2],
+                "assistant_tokens": trajectory._serialize_int_array([10, 20]),
+                "assistant_masks": trajectory._serialize_int_array([1, 1]),
+                "logprobs": trajectory._serialize_float_array([-0.5, -0.2]),
                 "policy_version": 3,
                 "prefill_routed_experts": trajectory._serialize_int_3d_array(
                     [[[1, 2]], [[3, 4]], [[5, 6]]]
@@ -1965,8 +1985,8 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
             trajectory.TUNIX_EXTENSIONS_KEY: {
                 "reward": 1.0,
                 "done": False,
-                "env_tokens": [1, 2],
-                "env_masks": [1, 1],
+                "env_tokens": trajectory._serialize_int_array([1, 2]),
+                "env_masks": trajectory._serialize_int_array([1, 1]),
             },
         },
     )
@@ -3422,6 +3442,161 @@ class Int3DArraySerializationTest(parameterized.TestCase):
           prefill_routed_experts=np.zeros((1, 2, 1), dtype=np.int16),
           prefill_start=0,
           prefill_num_context=0,
+      )
+
+
+class Base641DArraySerializationTest(parameterized.TestCase):
+  """Tests Base64 binary serialization and validation for 1D arrays."""
+
+  @parameterized.named_parameters(
+      dict(testcase_name="int32", dtype=np.int32),
+      dict(testcase_name="int64", dtype=np.int64),
+  )
+  def test_model_dump_int_array_round_trips_base64_blob(self, dtype):
+    arr = np.array([10, 20, 30], dtype=dtype)
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="tokens",
+        assistant_tokens=arr,
+    )
+
+    dumped = step.model_dump(mode="json")
+    restored = trajectory.TunixAgentStep.model_validate(dumped)
+
+    blob = dumped["assistant_tokens"]
+    self.assertEqual(blob["shape"], [3])
+    self.assertEqual(blob["dtype"], np.dtype(dtype).name)
+    self.assertIsInstance(blob["data"], str)
+    self.assertIsInstance(restored.assistant_tokens, np.ndarray)
+    self.assertEqual(restored.assistant_tokens.dtype, dtype)
+    np.testing.assert_array_equal(restored.assistant_tokens, arr)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="float32", dtype=np.float32),
+      dict(testcase_name="float64", dtype=np.float64),
+  )
+  def test_model_dump_float_array_round_trips_base64_blob(self, dtype):
+    arr = np.array([-0.5, -0.25, 0.0], dtype=dtype)
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="logprobs",
+        logprobs=arr,
+    )
+
+    dumped = step.model_dump(mode="json")
+    restored = trajectory.TunixAgentStep.model_validate(dumped)
+
+    blob = dumped["logprobs"]
+    self.assertEqual(blob["shape"], [3])
+    self.assertEqual(blob["dtype"], np.dtype(dtype).name)
+    self.assertIsInstance(blob["data"], str)
+    self.assertIsInstance(restored.logprobs, np.ndarray)
+    self.assertEqual(restored.logprobs.dtype, dtype)
+    np.testing.assert_array_equal(restored.logprobs, arr)
+
+  def test_model_dump_empty_1d_arrays_preserves_shape_and_dtype(self):
+    empty_int = np.array([], dtype=np.int32)
+    empty_float = np.array([], dtype=np.float32)
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="empty",
+        assistant_tokens=empty_int,
+        logprobs=empty_float,
+    )
+
+    dumped = step.model_dump(mode="json")
+    restored = trajectory.TunixAgentStep.model_validate(dumped)
+
+    self.assertEqual(
+        dumped["assistant_tokens"],
+        {"shape": [0], "dtype": "int32", "data": ""},
+    )
+    self.assertEqual(
+        dumped["logprobs"],
+        {"shape": [0], "dtype": "float32", "data": ""},
+    )
+    np.testing.assert_array_equal(restored.assistant_tokens, empty_int)
+    np.testing.assert_array_equal(restored.logprobs, empty_float)
+
+  def test_init_exact_scalar_lists_copies_inputs_without_aliasing(self):
+    caller_tokens = [10, 20, 30]
+    caller_logprobs = [-0.5, -0.25, 0.0]
+
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="lists",
+        assistant_tokens=caller_tokens,
+        logprobs=caller_logprobs,
+    )
+    caller_tokens.append(40)
+    caller_logprobs.append(-1.0)
+
+    self.assertEqual(step.assistant_tokens, [10, 20, 30])
+    self.assertEqual(step.logprobs, [-0.5, -0.25, 0.0])
+
+  def test_init_mixed_numeric_list_delegates_to_pydantic_coercion(self):
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="coerced",
+        assistant_tokens=[10, 20],
+        logprobs=[-1, -0.5],
+    )
+
+    self.assertEqual(step.logprobs, [-1.0, -0.5])
+    self.assertTrue(all(isinstance(v, float) for v in step.logprobs or []))
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="bad_int_blob_keys",
+          field_name="assistant_tokens",
+          bad_value={"shape": [1], "dtype": "int32"},
+          expected_error="Invalid serialized IntArray keys",
+      ),
+      dict(
+          testcase_name="bad_int_blob_dtype",
+          field_name="assistant_tokens",
+          bad_value={"shape": [1], "dtype": "float32", "data": "AAAA"},
+          expected_error="Unsupported IntArray dtype",
+      ),
+      dict(
+          testcase_name="bad_int_blob_shape",
+          field_name="assistant_tokens",
+          bad_value={"shape": [1, 2], "dtype": "int32", "data": "AAAA"},
+          expected_error="Invalid IntArray shape",
+      ),
+      dict(
+          testcase_name="bad_int_base64",
+          field_name="assistant_tokens",
+          bad_value={"shape": [1], "dtype": "int32", "data": "%%%"},
+          expected_error="Failed to decode IntArray blob",
+      ),
+      dict(
+          testcase_name="int_byte_length_mismatch",
+          field_name="assistant_tokens",
+          bad_value={"shape": [2], "dtype": "int32", "data": "AAAAAA=="},
+          expected_error="does not match shape",
+      ),
+      dict(
+          testcase_name="bad_float_blob_dtype",
+          field_name="logprobs",
+          bad_value={"shape": [1], "dtype": "int32", "data": "AAAA"},
+          expected_error="Unsupported FloatArray dtype",
+      ),
+  )
+  def test_init_invalid_1d_array_blob_raises_value_error(
+      self, field_name, bad_value, expected_error
+  ):
+    with self.assertRaisesRegex(ValueError, expected_error):
+      trajectory.TunixAgentStep(
+          step_id=0,
+          source=trajectory.Source.AGENT,
+          message="invalid",
+          **{field_name: bad_value},
       )
 
 

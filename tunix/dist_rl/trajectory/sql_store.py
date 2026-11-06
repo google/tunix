@@ -106,6 +106,7 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       self,
       engine: sa.Engine,
       max_cached_trajectories: int = _MAX_CACHED_TRAJECTORIES,
+      copy_step: bool = False,
   ):
     """Initializes _AsyncSqlWriter without starting the background worker.
 
@@ -114,12 +115,14 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       max_cached_trajectories: Maximum number of trajectory metadata entries
         retained per run in the in-memory LRU cache to skip redundant trajectory
         upserts. Set to 0 to disable client-side trajectory metadata caching.
+      copy_step: If True, deep copies step objects before enqueuing. Defaults to
+        False (zero-copy step handover) to avoid synchronous GIL contention.
 
     Raises:
       ValueError: If the engine uses an unsupported database dialect, or if
         max_cached_trajectories is negative.
     """
-    super().__init__()
+    super().__init__(copy_step=copy_step)
     if max_cached_trajectories < 0:
       raise ValueError("max_cached_trajectories must be non-negative.")
     # Synchronous SQLAlchemy engine providing database connectivity and dialect.
@@ -133,16 +136,17 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
     ] = {}
 
     # Dialect-specific insert statement constructor for ON CONFLICT DO UPDATE.
-    self._insert_fn: Callable[..., Any]
-    if engine.dialect.name == db_engine.Dialect.POSTGRESQL:
-      self._insert_fn = postgresql.insert
-    elif engine.dialect.name == db_engine.Dialect.SQLITE:
-      self._insert_fn = sqlite.insert
-    else:
+    insert_fn_by_dialect: Mapping[str, Callable[..., Any]] = {
+        db_engine.Dialect.POSTGRESQL: postgresql.insert,
+        db_engine.Dialect.SQLITE: sqlite.insert,
+    }
+    insert_fn = insert_fn_by_dialect.get(engine.dialect.name)
+    if insert_fn is None:
       raise ValueError(
           f"Unsupported database dialect: {engine.dialect.name}. "
           f"Supported dialects are {', '.join(db_engine.Dialect)}."
       )
+    self._insert_fn: Callable[..., Any] = insert_fn
 
   def enqueue_write(
       self,
@@ -154,8 +158,9 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
 
     Identifiers are validated on the calling thread so malformed writes fail
     fast with actionable errors instead of surfacing later as suppressed worker
-    errors. They are persisted exactly as supplied. `metadata` and `step` are
-    deep copied by `WriteTask`.
+    errors. They are persisted exactly as supplied. `metadata` is always deep
+    copied by `WriteTask`; `step` is handed over with zero copy by default and
+    deep copied only when `copy_step` is True.
 
     Args:
       run_id: Run identifier associated with written trajectory and steps.
@@ -175,7 +180,12 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       raise ValueError("Step must have a non-empty step_id.")
 
     self._enqueue(
-        async_writer.WriteTask(run_id=run_id, metadata=metadata, step=step)
+        async_writer.WriteTask(
+            run_id=run_id,
+            metadata=metadata,
+            step=step,
+            copy_step=self._copy_step,
+        )
     )
 
   def _cache_committed_state(
@@ -317,32 +327,30 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       return
 
     status = _resolve_status(metadata)
+    trajectory_insert = self._insert_fn(schema.TRAJECTORIES_TABLE).values(
+        run_id=run_id,
+        trajectory_id=traj_id,
+        status=status,
+        created_at=now_dt,
+        updated_at=now_dt,
+        trajectory_metadata=metadata_payload,
+    )
 
-    # Columns to overwrite in an existing row.
+    # Columns to overwrite in an existing row. Referencing `excluded` binds
+    # `trajectory_metadata`, `updated_at`, and `status` once per statement.
     columns_to_overwrite: dict[str, Any] = {
-        "updated_at": now_dt,
-        "trajectory_metadata": metadata_payload,
+        "updated_at": trajectory_insert.excluded.updated_at,
+        "trajectory_metadata": trajectory_insert.excluded.trajectory_metadata,
     }
     if status != schema.Status.UNKNOWN:
-      columns_to_overwrite["status"] = status
+      columns_to_overwrite["status"] = trajectory_insert.excluded.status
 
-    trajectory_upsert_statement = (
-        self._insert_fn(schema.TRAJECTORIES_TABLE)
-        .values(
-            run_id=run_id,
-            trajectory_id=traj_id,
-            status=status,
-            created_at=now_dt,
-            updated_at=now_dt,
-            trajectory_metadata=metadata_payload,
-        )
-        .on_conflict_do_update(
-            index_elements=["run_id", "trajectory_id"],
-            set_=columns_to_overwrite,
-            where=schema.TRAJECTORIES_TABLE.c.trajectory_metadata.is_distinct_from(
-                metadata_payload
-            ),
-        )
+    trajectory_upsert_statement = trajectory_insert.on_conflict_do_update(
+        index_elements=["run_id", "trajectory_id"],
+        set_=columns_to_overwrite,
+        where=schema.TRAJECTORIES_TABLE.c.trajectory_metadata.is_distinct_from(
+            trajectory_insert.excluded.trajectory_metadata
+        ),
     )
     conn.execute(trajectory_upsert_statement)
 
@@ -367,22 +375,19 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
     step_payload = step.model_dump(mode="json", exclude_none=True)
     step_time = _to_utc_timestamp(step.timestamp)
 
-    step_upsert_statement = (
-        self._insert_fn(schema.STEPS_TABLE)
-        .values(
-            run_id=run_id,
-            trajectory_id=traj_id,
-            step_id=step.step_id,
-            payload=step_payload,
-            created_at=step_time,
-        )
-        .on_conflict_do_update(
-            index_elements=["run_id", "trajectory_id", "step_id"],
-            set_={
-                "payload": step_payload,
-                "created_at": step_time,
-            },
-        )
+    step_insert = self._insert_fn(schema.STEPS_TABLE).values(
+        run_id=run_id,
+        trajectory_id=traj_id,
+        step_id=step.step_id,
+        payload=step_payload,
+        created_at=step_time,
+    )
+    step_upsert_statement = step_insert.on_conflict_do_update(
+        index_elements=["run_id", "trajectory_id", "step_id"],
+        set_={
+            "payload": step_insert.excluded.payload,
+            "created_at": step_insert.excluded.created_at,
+        },
     )
     conn.execute(step_upsert_statement)
 
@@ -438,6 +443,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       run_id: str,
       db_url: str,
       auto_init: bool = True,
+      copy_step: bool = False,
   ) -> None:
     """Initializes SqlTrajectoryStore.
 
@@ -451,6 +457,9 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
         omit the password; libpq then reads `PGPASSWORD` or `~/.pgpass`.
       auto_init: If True, automatically creates database tables and indexes on
         startup via `_initialize_schema`.
+      copy_step: If True, deep copies step objects before enqueuing to database.
+        Defaults to False (zero-copy step handover) to avoid synchronous GIL
+        contention on rollout workers.
 
     Raises:
       ValueError: If `run_id` or `db_url` is empty, None, or whitespace, or if
@@ -469,7 +478,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     )
     self._engine = self._engine_handle.engine
     try:
-      self._writer = _AsyncSqlWriter(engine=self._engine)
+      self._writer = _AsyncSqlWriter(engine=self._engine, copy_step=copy_step)
     except Exception:
       self._engine_handle.release()
       raise
@@ -490,7 +499,8 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     """Builds a SQL-backed store from `config`.
 
     Args:
-      config: Requires "db_url" and "run_id".
+      config: Requires "db_url" and "run_id", with optional boolean "copy_step"
+        (defaults to False).
 
     Returns:
       A new SqlTrajectoryStore.
@@ -501,6 +511,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     return cls(
         run_id=config.get("run_id", ""),
         db_url=config.get("db_url", ""),
+        copy_step=bool(config.get("copy_step", False)),
     )
 
   def to_config(self) -> dict[str, Any]:
@@ -508,13 +519,20 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
 
     The returned "db_url" is the literal URL this store was built with,
     including any password it embeds. Do not log it; log
-    `to_redacted_config()` instead.
+    `to_redacted_config()` instead. Writer-local flags such as `auto_init` and
+    `copy_step` are omitted so `to_config()` strictly represents shared storage
+    identity across processes.
     """
     return {
         "backend": self.BACKEND,
         "db_url": self._db_url,
         "run_id": self._run_id,
     }
+
+  @property
+  def copy_step(self) -> bool:
+    """Returns True if step objects are deep copied before writing."""
+    return self._writer.copy_step
 
   def to_redacted_config(self) -> dict[str, Any]:
     """Returns `to_config()` with any password in "db_url" masked."""
@@ -589,6 +607,11 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     with actionable errors, then delegates asynchronous queuing and non-blocking
     database persistence to `_AsyncSqlWriter`.
 
+    `metadata` is always snapshotted at call time. By default
+    (`copy_step=False`), ownership of `step` transfers to the background writer,
+    so callers must not mutate `step` or its nested containers after calling
+    `add_step()`. Pass `copy_step=True` if the caller mutates `step` afterwards.
+
     Args:
       step: Step object to log.
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
@@ -613,6 +636,9 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     Validates input parameters on the calling thread so invalid IDs fail fast
     with actionable errors, then delegates asynchronous queuing and non-blocking
     database persistence to `_AsyncSqlWriter`.
+
+    `metadata` is always snapshotted at call time, so callers may keep mutating
+    it afterwards without affecting what was logged.
 
     Args:
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
@@ -685,9 +711,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       )
       with self._engine.connect() as conn:
         metadata_rows = conn.execute(statement)
-        return [
-            self._load_metadata(row) for row in metadata_rows.scalars()
-        ]
+        return [self._load_metadata(row) for row in metadata_rows.scalars()]
 
     # Query only the requested trajectory IDs when a sequence is provided.
     if not trajectory_ids:
