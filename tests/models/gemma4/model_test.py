@@ -26,6 +26,7 @@ import jax.numpy as jnp
 import numpy as np
 import qwix
 from tunix.experimental.generate import configs as generate_configs
+from tunix.experimental.generate import kv_cache_manager
 from tunix.models import cache_utils
 from tunix.models import paged_attention
 from tunix.models.gemma4 import attention as attention_lib
@@ -239,16 +240,7 @@ class ModelTest(parameterized.TestCase):
       dense_prefill_logits.append(logits[0, :-1])
       dense_decode_logits.append(logits[0, -1:])
 
-    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ('tp',))
-    manager = model.init_kv_cache(
-        generate_configs.CacheConfig(
-            max_device_size_gib=(1 << 20) / (1 << 30),
-            page_size=4,
-            dtype=jnp.float32,
-            mesh=mesh,
-        )
-    )
-    geometries = manager.cache_geometries
+    geometries = model.cache_geometries()
     self.assertEqual(
         geometries,
         {
@@ -260,6 +252,16 @@ class ModelTest(parameterized.TestCase):
             ),
         },
     )
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ('tp',))
+    with jax.set_mesh(mesh):
+      manager = kv_cache_manager.KVCacheManager(
+          generate_configs.CacheConfig(
+              max_device_size_gib=(1 << 20) / (1 << 30),
+              page_size=4,
+              dtype=jnp.float32,
+          ),
+          geometries,
+      )
     cache = manager.get_physical_pages()
     # Distinct page tables per cache verify `cache_name` routing; -1 marks
     # unallocated page slots. The last row and trailing tokens are padding.

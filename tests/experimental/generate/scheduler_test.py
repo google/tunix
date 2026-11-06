@@ -19,9 +19,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
-import jax
 import jax.numpy as jnp
-import numpy as np
 
 from tunix.experimental.generate import configs
 from tunix.experimental.generate import kv_cache_manager
@@ -47,7 +45,6 @@ def _create_cache_config(
       max_host_size_gib=(total_host_bytes_per_page * num_host_pages) / gib,
       page_size=page_size,
       dtype=jnp.float32,
-      mesh=jax.sharding.Mesh(np.array(jax.devices()[:1]), ("tp",)),
   )
 
 

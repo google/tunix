@@ -15,7 +15,6 @@
 """Configuration dataclasses for the v2 continuous batching generation engine."""
 
 import dataclasses
-import math
 
 import jax
 
@@ -58,10 +57,6 @@ class CacheConfig:
     enable_prefix_caching: Whether pages may be shared between requests with a
       common prefix.
     dtype: The data type of KV cache entries.
-    mesh: The mesh to shard the KV caches over. Pages are sharded across the
-      data parallel axes (`"dp"` and `"fsdp"`), and KV heads are sharded
-      across `"tp"`. Pages are allocated outside any mesh context, so the mesh
-      cannot be inferred.
   """
 
   max_device_size_gib: float
@@ -69,7 +64,6 @@ class CacheConfig:
   page_size: int = 16
   enable_prefix_caching: bool = True
   dtype: jax.typing.DTypeLike
-  mesh: jax.sharding.Mesh
 
   def __post_init__(self):
     positive_checks = {
@@ -84,22 +78,6 @@ class CacheConfig:
       raise ValueError(
           f"max_host_size_gib cannot be negative, got {self.max_host_size_gib}."
       )
-
-  @property
-  def dp_size(self) -> int:
-    """The number of data parallel replicas in `mesh`."""
-    return math.prod(
-        size
-        for axis, size in self.mesh.shape.items()
-        if axis in ("dp", "fsdp")
-    )
-
-  @property
-  def tp_size(self) -> int:
-    """The tensor parallel size in `mesh`."""
-    if "tp" not in self.mesh.shape:
-      return 1
-    return self.mesh.shape["tp"]
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

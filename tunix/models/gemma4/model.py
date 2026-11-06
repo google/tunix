@@ -19,7 +19,6 @@ from __future__ import annotations
 import dataclasses
 from functools import partial
 import itertools
-import typing
 from flax import nnx
 import jax
 from jax import numpy as jnp
@@ -28,9 +27,6 @@ from tunix.experimental.generate import configs as generate_configs
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.models import paged_attention
 from tunix.utils import compat
-
-if typing.TYPE_CHECKING:
-  from tunix.experimental.generate import kv_cache_manager
 
 # Re-export symbols to preserve public API paths after module decomposition.
 # pylint: disable=g-multiple-import,unused-import
@@ -72,7 +68,7 @@ from tunix.models.gemma4.attention import Attention, MeshType
 # pylint: enable=g-multiple-import,unused-import
 
 # Paged KV caches in `paged_attention`'s layout, keyed by
-# cache name (see `Gemma4.init_kv_cache`).
+# cache name (see `Gemma4.cache_geometries`).
 PagedCache = dict[str, jax.Array]
 
 
@@ -707,7 +703,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         tokens.
       positions: `[num_groups, tokens_per_group]` each token's position in its
         sequence.
-      cache: the paged KV caches, keyed by `init_kv_cache` name.
+      cache: the paged KV caches, keyed by `cache_geometries` name.
       metadata: the batch's ragged layout and page tables.
       mesh: the mesh to shard attention over.
       logits_idxs: `[num_groups, logits_per_group]` per-group token indices to
@@ -746,23 +742,17 @@ class Gemma4(BackendMappingMixin, nnx.Module):
     logits = self.compute_final_logits(self.final_norm(x))
     return logits.reshape(-1, logits.shape[-1]), cache
 
-  def init_kv_cache(
-      self, cache_config: generate_configs.CacheConfig
-  ) -> kv_cache_manager.KVCacheManager:
-    """Builds the paged KV caches `_paged_call` reads.
+  def cache_geometries(self) -> dict[str, generate_configs.CacheGeometry]:
+    """Returns the geometry of each paged KV cache `_paged_call` reads.
 
     Gemma 4's global layers project a different number of KV heads at a
     different head dim than its local ones, so caches differ in geometry.
     KV-shared layers get no cache of their own; they read their lender's.
 
-    Args:
-      cache_config: Capacity, page geometry and sharding, owned by the caller.
-
     Returns:
-      A manager holding one cache per unshared layer, named `layer_{i}`.
+      A mapping from cache name (`layer_{i}`) to its `CacheGeometry` for each
+      unshared layer.
     """
-    from tunix.experimental.generate import kv_cache_manager  # pylint: disable=g-import-not-at-top
-
     cache_geometries = {}
     for i, layer in enumerate(self.layers):
       if self.kv_cache_sharing_patterns[i] != i:
@@ -778,7 +768,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
               else None
           ),
       )
-    return kv_cache_manager.KVCacheManager(cache_config, cache_geometries)
+    return cache_geometries
 
   def _encode_vision(self, vision_input: PreprocessedVisionInput):
     """Encode images into the same space as the text embeddings."""

@@ -48,7 +48,6 @@ class LLMEngineTest(absltest.TestCase):
               max_device_size_gib=64 * testing_utils.GIB_PER_PAGE,
               page_size=testing_utils.PAGE_SIZE,
               dtype=jnp.float32,
-              mesh=testing_utils.mesh(),
           ),
           scheduler_config=configs.SchedulerConfig(
               max_num_batched_tokens=32,

@@ -65,7 +65,7 @@ def _create_kv_cache_group_managers(
       )
       for geometry in caches_by_geometry
   }
-  sharding = utils.derive_cache_sharding(config)
+  sharding = utils.derive_cache_sharding()
   num_device_pages, num_host_pages = utils.compute_page_limits(
       config=config,
       element_shapes=[kv_shapes[g] for g in cache_geometries.values()],
@@ -107,7 +107,6 @@ class KVCacheManager:
       cache_geometries: The geometry of each named cache.
     """
     self._cache_names = tuple(cache_geometries.keys())
-    self._cache_geometries = dict(cache_geometries)
 
     self._page_size = config.page_size
     self._enable_prefix_caching = config.enable_prefix_caching
@@ -129,11 +128,6 @@ class KVCacheManager:
   def cache_names(self) -> tuple[str, ...]:
     """Returns the names of all allocated caches."""
     return self._cache_names
-
-  @property
-  def cache_geometries(self) -> Mapping[str, configs.CacheGeometry]:
-    """Returns the geometry of each named cache."""
-    return self._cache_geometries
 
   @property
   def _null_computed_pages(self) -> tuple[tuple[Page | None, ...], ...]:
