@@ -150,10 +150,9 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
   ) -> None:
     """Atomically logs a turn step and its trajectory metadata.
 
-    The step is deep copied, so the stored trajectory reflects the step as it
-    was at call time and is unaffected by later mutations of the caller's
-    object. This matches the file-backed store, whose asynchronous writer
-    snapshots for the same reason.
+    Both `step` and `metadata` are deep copied in memory, so the stored
+    trajectory reflects the step as it was at call time and is unaffected by
+    later mutations of the caller's object.
 
     Args:
       step: Step object to log.

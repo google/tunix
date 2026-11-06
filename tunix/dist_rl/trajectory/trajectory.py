@@ -8,16 +8,31 @@ from __future__ import annotations
 
 import base64
 import binascii
-from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence, Set
 import copy
 import dataclasses
 import datetime
 import enum
 import functools
 import math
+import struct
 import sys
 import types
-from typing import Annotated, Any, ClassVar, Final, Generic, Literal, Self, TypeVar, TypedDict, Union, cast, get_args, get_origin
+from typing import (
+    Annotated,
+    Any,
+    ClassVar,
+    Final,
+    Generic,
+    Literal,
+    Self,
+    TypeVar,
+    TypedDict,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+)
 import weakref
 
 import numpy as np
@@ -34,15 +49,6 @@ class Source(enum.StrEnum):
   SYSTEM = enum.auto()
   USER = enum.auto()
   AGENT = enum.auto()
-
-
-def _serialize_array(value: list[Any] | np.ndarray | None) -> list[Any] | None:
-  """Serializes a NumPy array or list into a plain Python list."""
-  if value is None:
-    return None
-  if isinstance(value, np.ndarray):
-    return value.tolist()
-  return list(value)
 
 
 # Sequences whose elements all have one of these exact types are copied without
@@ -517,20 +523,256 @@ def _unpack_step_from_atif(
   return target_cls.model_validate(target_values_by_field)
 
 
-# `np.ndarray` comes first in these unions: smart-mode union validation returns
-# the first exact match, so an array input passes one `isinstance` check. With
-# `list[...]` first, the lax list validator would iterate and convert every
-# array element before the array matched exactly and the result was discarded.
+_ARRAY_BLOB_KEYS: Final[frozenset[str]] = frozenset({"shape", "dtype", "data"})
+_EXACT_INT_TYPES: Final[frozenset[type[object]]] = frozenset({int})
+_EXACT_FLOAT_TYPES: Final[frozenset[type[object]]] = frozenset({float})
+
+
+def _encode_base64_array(arr: np.ndarray) -> dict[str, Any]:
+  """Encodes a C-contiguous little-endian array into a base64 blob dict."""
+  return {
+      "shape": list(arr.shape),
+      "dtype": arr.dtype.name,
+      "data": (
+          ""
+          if arr.size == 0
+          else base64.b64encode(memoryview(arr.reshape(-1))).decode("ascii")
+      ),
+  }
+
+
+def _decode_base64_array(
+    value: Mapping[str, Any],
+    *,
+    type_label: str,
+    dtype_by_name: Mapping[str, np.dtype[Any]],
+    expected_ndims: tuple[int, ...] = (1,),
+) -> np.ndarray:
+  """Validates and decodes a serialized base64 array blob dict."""
+  if set(value.keys()) != _ARRAY_BLOB_KEYS:
+    raise ValueError(
+        f"Invalid serialized {type_label} keys {sorted(value.keys())};"
+        f" expected {sorted(_ARRAY_BLOB_KEYS)}."
+    )
+  dtype_name = value["dtype"]
+  if not isinstance(dtype_name, str) or dtype_name not in dtype_by_name:
+    raise ValueError(
+        f"Unsupported {type_label} dtype {dtype_name!r}; expected"
+        f" {sorted(dtype_by_name)}."
+    )
+  dtype = dtype_by_name[dtype_name]
+  raw_shape = value["shape"]
+  if (
+      not isinstance(raw_shape, (list, tuple))
+      or len(raw_shape) not in expected_ndims
+      or not all(
+          isinstance(dim, int) and not isinstance(dim, bool) and dim >= 0
+          for dim in raw_shape
+      )
+  ):
+    expected_desc = (
+        f"{expected_ndims[0]} non-negative integers"
+        if len(expected_ndims) == 1
+        else f"{expected_ndims} non-negative integers"
+    )
+    raise ValueError(
+        f"Invalid {type_label} shape {raw_shape!r}; expected {expected_desc}."
+    )
+  shape = tuple(raw_shape)
+  encoded = value["data"]
+  if not isinstance(encoded, str):
+    raise ValueError(
+        f"Expected base64 string for {type_label} data, got"
+        f" {type(encoded).__name__}."
+    )
+  try:
+    raw_bytes = base64.b64decode(encoded.encode("ascii"), validate=True)
+  except (UnicodeEncodeError, binascii.Error) as exc:
+    raise ValueError(f"Failed to decode {type_label} blob: {exc}") from exc
+  expected_bytes = math.prod(shape) * dtype.itemsize
+  if len(raw_bytes) != expected_bytes:
+    raise ValueError(
+        f"Decoded {type_label} byte length {len(raw_bytes)} does not match"
+        f" shape {shape} * {dtype.itemsize} ({expected_bytes} bytes)."
+    )
+  return (
+      np.frombuffer(raw_bytes, dtype=dtype)
+      .reshape(shape)
+      .astype(dtype.newbyteorder("="), copy=True)
+  )
+
+
+def _validate_1d_scalar_array(
+    value: Any,
+    handler: pydantic.ValidatorFunctionWrapHandler,
+    *,
+    type_label: str,
+    dtype_by_name: Mapping[str, np.dtype[Any]],
+    exact_scalar_types: frozenset[type[object]],
+    allowed_ndarray_dtypes: Set[str] | None = None,
+) -> np.ndarray | list[Any] | None:
+  """Fast-paths None, 1D np.ndarray, base64 blobs, and exact scalar lists."""
+  if value is None:
+    return None
+  if isinstance(value, np.ndarray):
+    if value.ndim != 1:
+      raise ValueError(
+          f"Expected a 1D array for {type_label}, got shape {value.shape}."
+      )
+    valid_dtypes = (
+        dtype_by_name
+        if allowed_ndarray_dtypes is None
+        else allowed_ndarray_dtypes
+    )
+    if value.dtype.name not in valid_dtypes:
+      raise ValueError(
+          f"Unsupported {type_label} dtype {value.dtype.name!r}; expected"
+          f" {sorted(valid_dtypes)}."
+      )
+    return value
+  if isinstance(value, Mapping):
+    return _decode_base64_array(
+        value,
+        type_label=type_label,
+        dtype_by_name=dtype_by_name,
+        expected_ndims=(1,),
+    )
+  if isinstance(value, list) and exact_scalar_types.issuperset(
+      map(type, value)
+  ):
+    return list(value)
+  return handler(value)
+
+
+def _serialize_1d_array(
+    value: np.ndarray | Sequence[Any] | None,
+    *,
+    dtype_by_name: Mapping[str, np.dtype[Any]],
+    default_dtype: np.dtype[Any],
+) -> dict[str, Any] | None:
+  """Serializes a 1D array or sequence into a base64 binary blob dict."""
+  if value is None:
+    return None
+  if isinstance(value, np.ndarray):
+    target_dtype = dtype_by_name.get(value.dtype.name, default_dtype)
+    if (
+        value.ndim == 1
+        and value.dtype == target_dtype
+        and value.flags.c_contiguous
+    ):
+      arr = value
+    else:
+      arr = np.ascontiguousarray(value, dtype=target_dtype).reshape(-1)
+  else:
+    arr = np.ascontiguousarray(value, dtype=default_dtype).reshape(-1)
+  return _encode_base64_array(arr)
+
+
+IntArrayDtype = Literal[
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+]
+_INT_DTYPE_BY_NAME: Final[Mapping[str, np.dtype[Any]]] = {
+    "int8": np.dtype("<i1"),
+    "int16": np.dtype("<i2"),
+    "int32": np.dtype("<i4"),
+    "int64": np.dtype("<i8"),
+    "uint8": np.dtype("<u1"),
+    "uint16": np.dtype("<u2"),
+    "uint32": np.dtype("<u4"),
+    "uint64": np.dtype("<u8"),
+}
+_DEFAULT_INT_DTYPE: Final[np.dtype[np.int64]] = np.dtype("<i8")
+
+
+class SerializedIntArray(TypedDict):
+  """Compact JSON-serializable Base64 envelope for a 1D integer array."""
+
+  shape: list[int]
+  dtype: IntArrayDtype
+  data: str
+
+
+_serialize_int_array = functools.partial(
+    _serialize_1d_array,
+    dtype_by_name=_INT_DTYPE_BY_NAME,
+    default_dtype=_DEFAULT_INT_DTYPE,
+)
+
+# `np.ndarray` comes first in these unions, and `_validate_1d_scalar_array`
+# fast-paths `None`, `np.ndarray`, serialized Base64 dicts, and exact
+# `list[int]` / `list[float]` inputs with one C-level scan.
 IntArray = Annotated[
     np.ndarray | list[int] | None,
+    pydantic.WrapValidator(
+        functools.partial(
+            _validate_1d_scalar_array,
+            type_label="IntArray",
+            dtype_by_name=_INT_DTYPE_BY_NAME,
+            exact_scalar_types=_EXACT_INT_TYPES,
+        )
+    ),
     pydantic.PlainSerializer(
-        _serialize_array, return_type=list[int] | None, when_used="always"
+        _serialize_int_array,
+        return_type=SerializedIntArray | None,
+        when_used="always",
+    ),
+]
+
+FloatArrayDtype = Literal["float16", "float32", "float64"]
+_FLOAT_DTYPE_BY_NAME: Final[Mapping[str, np.dtype[Any]]] = {
+    "float16": np.dtype("<f2"),
+    "float32": np.dtype("<f4"),
+    "float64": np.dtype("<f8"),
+}
+_DEFAULT_FLOAT_DTYPE: Final[np.dtype[np.float64]] = np.dtype("<f8")
+
+
+class SerializedFloatArray(TypedDict):
+  """Compact JSON-serializable Base64 envelope for a 1D float array."""
+
+  shape: list[int]
+  dtype: FloatArrayDtype
+  data: str
+
+
+_serialize_float_array = functools.partial(
+    _serialize_1d_array,
+    dtype_by_name=_FLOAT_DTYPE_BY_NAME,
+    default_dtype=_DEFAULT_FLOAT_DTYPE,
+)
+
+FloatArray = Annotated[
+    np.ndarray | list[float] | None,
+    pydantic.WrapValidator(
+        functools.partial(
+            _validate_1d_scalar_array,
+            type_label="FloatArray",
+            dtype_by_name=_FLOAT_DTYPE_BY_NAME,
+            exact_scalar_types=_EXACT_FLOAT_TYPES,
+            allowed_ndarray_dtypes=(
+                frozenset(_FLOAT_DTYPE_BY_NAME) | frozenset(_INT_DTYPE_BY_NAME)
+            ),
+        )
+    ),
+    pydantic.PlainSerializer(
+        _serialize_float_array,
+        return_type=SerializedFloatArray | None,
+        when_used="always",
     ),
 ]
 
 _INT3D_DTYPE: Final[np.dtype[np.int16]] = np.dtype("<i2")
 _INT3D_DTYPE_NAME: Final[Literal["int16"]] = "int16"
-_INT3D_BLOB_KEYS: Final[frozenset[str]] = frozenset({"shape", "dtype", "data"})
+_INT3D_DTYPE_BY_NAME: Final[Mapping[str, np.dtype[np.int16]]] = {
+    _INT3D_DTYPE_NAME: _INT3D_DTYPE
+}
 
 
 class SerializedInt3DArray(TypedDict):
@@ -548,51 +790,11 @@ def _validate_int_3d_array(
   if value is None:
     return None
   if isinstance(value, Mapping):
-    if set(value.keys()) != _INT3D_BLOB_KEYS:
-      raise ValueError(
-          f"Invalid serialized Int3DArray keys {sorted(value.keys())};"
-          f" expected {sorted(_INT3D_BLOB_KEYS)}."
-      )
-    dtype = value["dtype"]
-    if dtype != _INT3D_DTYPE_NAME:
-      raise ValueError(
-          f"Unsupported Int3DArray dtype {dtype!r}; expected"
-          f" {_INT3D_DTYPE_NAME!r}."
-      )
-    raw_shape = value["shape"]
-    if (
-        not isinstance(raw_shape, (list, tuple))
-        or len(raw_shape) != 3
-        or not all(
-            isinstance(dim, int) and not isinstance(dim, bool) and dim >= 0
-            for dim in raw_shape
-        )
-    ):
-      raise ValueError(
-          f"Invalid Int3DArray shape {raw_shape!r}; expected 3 non-negative"
-          " integers."
-      )
-    shape = (raw_shape[0], raw_shape[1], raw_shape[2])
-    encoded = value["data"]
-    if not isinstance(encoded, str):
-      raise ValueError(
-          "Expected base64 string for Int3DArray data, got"
-          f" {type(encoded).__name__}."
-      )
-    try:
-      raw_bytes = base64.b64decode(encoded.encode("ascii"), validate=True)
-    except (UnicodeEncodeError, binascii.Error) as exc:
-      raise ValueError(f"Failed to decode Int3DArray blob: {exc}") from exc
-    expected_bytes = math.prod(shape) * _INT3D_DTYPE.itemsize
-    if len(raw_bytes) != expected_bytes:
-      raise ValueError(
-          f"Decoded Int3DArray byte length {len(raw_bytes)} does not match"
-          f" shape {shape} * {_INT3D_DTYPE.itemsize} ({expected_bytes} bytes)."
-      )
-    return (
-        np.frombuffer(raw_bytes, dtype=_INT3D_DTYPE)
-        .reshape(shape)
-        .astype(np.int16, copy=True)
+    return _decode_base64_array(
+        value,
+        type_label="Int3DArray",
+        dtype_by_name=_INT3D_DTYPE_BY_NAME,
+        expected_ndims=(3,),
     )
   if isinstance(value, (np.ndarray, list)):
     arr = np.asarray(value)
@@ -635,13 +837,10 @@ def _serialize_int_3d_array(
     arr = value
   else:
     validated = _validate_int_3d_array(value)
-    assert validated is not None
+    if validated is None:
+      return None
     arr = np.ascontiguousarray(validated, dtype=_INT3D_DTYPE)
-  return {
-      "shape": list(arr.shape),
-      "dtype": _INT3D_DTYPE_NAME,
-      "data": base64.b64encode(arr.tobytes()).decode("ascii"),
-  }
+  return cast(SerializedInt3DArray, _encode_base64_array(arr))
 
 
 Int3DArray = Annotated[
@@ -651,13 +850,6 @@ Int3DArray = Annotated[
         _serialize_int_3d_array,
         return_type=SerializedInt3DArray | None,
         when_used="always",
-    ),
-]
-
-FloatArray = Annotated[
-    np.ndarray | list[float] | None,
-    pydantic.PlainSerializer(
-        _serialize_array, return_type=list[float] | None, when_used="always"
     ),
 ]
 
@@ -988,6 +1180,23 @@ class Step(pydantic.BaseModel):
       return self
     target_values_by_field["step_id"] = self.step_id + step_id_offset
     return Step.model_validate(target_values_by_field)
+
+  def to_atif_step_with_routed_experts(
+      self, step_id_offset: int | None = None
+  ) -> tuple[Step, bytes | None]:
+    """Projects this step to ATIF and extracts binary routed experts if any.
+
+    Args:
+      step_id_offset: Offset added to `step_id` when projecting to ATIF. If
+        `None`, uses this class's default offset (`0` for base `Step`).
+
+    Returns:
+      A `(atif_step, routed_experts_payload)` pair. Base `Step` instances always
+      return `None` for `routed_experts_payload`.
+    """
+    if step_id_offset is None:
+      return self.to_atif_step(), None
+    return self.to_atif_step(step_id_offset=step_id_offset), None
 
 
 class Agent(pydantic.BaseModel):
@@ -1473,6 +1682,189 @@ class TrajectoryError:
 # ==============================================================================
 
 TUNIX_EXTENSIONS_KEY: Final[str] = "_tunix_extensions"
+_ROUTED_EXPERTS_MAGIC: Final[bytes] = b"TREB"
+_ROUTED_EXPERTS_VERSION: Final[int] = 1
+_ROUTED_EXPERTS_HEADER_STRUCT: Final[struct.Struct] = struct.Struct("<4sBBBB")
+_ROUTED_EXPERTS_INT16_CODE: Final[int] = 1
+_ROUTED_EXPERTS_UINT8_CODE: Final[int] = 2
+_UINT8_DTYPE: Final[np.dtype[np.uint8]] = np.dtype("<u1")
+_ROUTED_EXPERTS_DTYPE_BY_CODE: Final[Mapping[int, np.dtype[Any]]] = {
+    _ROUTED_EXPERTS_INT16_CODE: _INT3D_DTYPE,
+    _ROUTED_EXPERTS_UINT8_CODE: _UINT8_DTYPE,
+}
+
+
+def pack_routed_experts_bytes(
+    value: np.ndarray | Sequence[Any],
+) -> bytes:
+  """Packs a MoE routed-experts array into a framed `TREB` binary blob.
+
+  Little-endian wire layout: `b"TREB"` magic, version `1`, dtype code
+  (`1` = int16, `2` = uint8), `ndim` (`3` or `4`), reserved `0`, `<{ndim}I`
+  shape dimensions, followed by the C-contiguous array bytes.
+
+  Args:
+    value: 3D or 4D integer routed-experts array.
+
+  Returns:
+    Framed `bytes` payload for `routed_experts_payload` persistence.
+
+  Raises:
+    ValueError: If `value` is not a 3D or 4D integer array or any shape
+      dimension exceeds `uint32` framing bounds.
+  """
+  arr = np.asarray(value)
+  if arr.ndim not in (3, 4):
+    raise ValueError(
+        "Expected a 3D or 4D array for routed_experts_payload, got shape"
+        f" {arr.shape}."
+    )
+  if not np.issubdtype(arr.dtype, np.integer) or np.issubdtype(
+      arr.dtype, np.bool_
+  ):
+    raise ValueError(
+        "Expected an integer array for routed_experts_payload, got dtype"
+        f" {arr.dtype}."
+    )
+  if arr.dtype == np.uint8:
+    target_dtype = _UINT8_DTYPE
+    dtype_code = _ROUTED_EXPERTS_UINT8_CODE
+  else:
+    target_dtype = _INT3D_DTYPE
+    dtype_code = _ROUTED_EXPERTS_INT16_CODE
+  arr = (
+      arr
+      if arr.dtype == target_dtype and arr.flags.c_contiguous
+      else np.ascontiguousarray(arr, dtype=target_dtype)
+  )
+  if any(dim > 0xFFFFFFFF for dim in arr.shape):
+    raise ValueError(
+        f"routed_experts_payload shape {arr.shape} exceeds uint32 framing"
+        " limit."
+    )
+  header = _ROUTED_EXPERTS_HEADER_STRUCT.pack(
+      _ROUTED_EXPERTS_MAGIC,
+      _ROUTED_EXPERTS_VERSION,
+      dtype_code,
+      arr.ndim,
+      0,
+  ) + struct.pack(f"<{arr.ndim}I", *arr.shape)
+  if arr.size == 0:
+    return header
+  return b"".join((header, memoryview(arr.reshape(-1)).cast("B")))
+
+
+def unpack_routed_experts_bytes(
+    blob: bytes | bytearray | memoryview,
+) -> np.ndarray:
+  """Unpacks a framed `TREB` binary blob into a writable NumPy array.
+
+  Args:
+    blob: Framed binary payload read from SQL `BYTEA`/`BLOB` or `.bin` sidecar.
+
+  Returns:
+    Writable native-endian NumPy array matching the original rank and dtype.
+
+  Raises:
+    ValueError: If `blob` has an invalid `TREB` header, unsupported dtype or
+      rank, or mismatched byte length.
+  """
+  view = memoryview(blob).cast("B")
+  if len(view) < _ROUTED_EXPERTS_HEADER_STRUCT.size:
+    raise ValueError(
+        f"Corrupt routed_experts_payload: length {len(view)} is shorter than"
+        f" {_ROUTED_EXPERTS_HEADER_STRUCT.size}-byte header."
+    )
+  magic, version, dtype_code, ndim, reserved = (
+      _ROUTED_EXPERTS_HEADER_STRUCT.unpack_from(view, 0)
+  )
+  if magic != _ROUTED_EXPERTS_MAGIC:
+    raise ValueError(
+        f"Invalid routed_experts_payload magic {magic!r}; expected"
+        f" {_ROUTED_EXPERTS_MAGIC!r}."
+    )
+  if version != _ROUTED_EXPERTS_VERSION or reserved != 0:
+    raise ValueError(
+        f"Unsupported routed_experts_payload version={version},"
+        f" reserved={reserved}."
+    )
+  dtype = _ROUTED_EXPERTS_DTYPE_BY_CODE.get(dtype_code)
+  if dtype is None:
+    raise ValueError(
+        f"Unsupported routed_experts_payload dtype code {dtype_code}."
+    )
+  if ndim not in (3, 4):
+    raise ValueError(
+        f"Invalid routed_experts_payload ndim {ndim}; expected 3 or 4."
+    )
+  header_end = _ROUTED_EXPERTS_HEADER_STRUCT.size + 4 * ndim
+  if len(view) < header_end:
+    raise ValueError(
+        f"Corrupt routed_experts_payload: length {len(view)} is shorter than"
+        f" {header_end}-byte framed header."
+    )
+  shape = struct.unpack_from(
+      f"<{ndim}I", view, _ROUTED_EXPERTS_HEADER_STRUCT.size
+  )
+  payload_view = view[header_end:]
+  expected_bytes = math.prod(shape) * dtype.itemsize
+  if len(payload_view) != expected_bytes:
+    raise ValueError(
+        f"Corrupt routed_experts_payload byte length {len(payload_view)};"
+        f" expected {expected_bytes} for shape {shape}."
+    )
+  if expected_bytes == 0:
+    return np.zeros(shape, dtype=dtype.newbyteorder("="))
+  return (
+      np.frombuffer(payload_view, dtype=dtype)
+      .reshape(shape)
+      .astype(dtype.newbyteorder("="), copy=True)
+  )
+
+
+def resolve_step_routed_experts(
+    step: StepT,
+    routed_experts_payload: bytes | bytearray | memoryview | None,
+) -> StepT:
+  """Rehydrates MoE routed-experts data on a loaded `Step`.
+
+  Args:
+    step: Loaded base ATIF `Step` or concrete Tunix step subclass.
+    routed_experts_payload: External binary payload from SQL or `.bin` sidecar,
+      or `None` when no binary payload was stored.
+
+  Returns:
+    Step of the same type with `routed_experts_payload` unpacked into
+    `extra[TUNIX_EXTENSIONS_KEY]["prefill_routed_experts"]` when expected.
+
+  Raises:
+    ValueError: If `step` expects an external routing payload when
+      `routed_experts_payload` is `None`, or if `routed_experts_payload` is
+      malformed.
+  """
+  if isinstance(step, TunixAgentStep):
+    return step
+  extra = step.extra or {}
+  raw_tunix_ext = extra.get(TUNIX_EXTENSIONS_KEY)
+  if (
+      not isinstance(raw_tunix_ext, Mapping)
+      or raw_tunix_ext.get("prefill_start") is None
+      or raw_tunix_ext.get("prefill_routed_experts") is not None
+  ):
+    return step
+  if routed_experts_payload is None:
+    raise ValueError(
+        f"Missing routed_experts_payload for step_id={step.step_id}."
+    )
+  tunix_ext = {
+      **raw_tunix_ext,
+      "prefill_routed_experts": unpack_routed_experts_bytes(
+          routed_experts_payload
+      ),
+  }
+  return step.model_copy(
+      update={"extra": {**extra, TUNIX_EXTENSIONS_KEY: tunix_ext}}
+  )
 
 
 class TunixAgentStep(Step):
@@ -1584,6 +1976,35 @@ class TunixAgentStep(Step):
   def to_atif_step(self, step_id_offset: int = 1) -> Step:
     """Converts this 0-indexed Tunix step to a 1-indexed base ATIF Step."""
     return super().to_atif_step(step_id_offset=step_id_offset)
+
+  def to_atif_step_with_routed_experts(
+      self, step_id_offset: int | None = None
+  ) -> tuple[Step, bytes | None]:
+    """Projects to ATIF and extracts `prefill_routed_experts` as raw bytes.
+
+    Args:
+      step_id_offset: Offset added to `step_id` when projecting to ATIF. If
+        `None`, defaults to `1` to convert 0-indexed Tunix steps to 1-indexed
+        ATIF steps.
+
+    Returns:
+      A `(atif_step, routed_experts_payload)` pair where
+      `routed_experts_payload` is framed `TREB` bytes, or `None` when
+      `prefill_routed_experts` is `None`.
+    """
+    resolved_offset = 1 if step_id_offset is None else step_id_offset
+    if self.prefill_routed_experts is None:
+      return self.to_atif_step(step_id_offset=resolved_offset), None
+    payload = pack_routed_experts_bytes(self.prefill_routed_experts)
+    target_values_by_field = _pack_subclass_values_into_extra(
+        self,
+        Step,
+        exclude_field_names=frozenset({"prefill_routed_experts"}),
+    )
+    if target_values_by_field is None:
+      return self, payload
+    target_values_by_field["step_id"] = self.step_id + resolved_offset
+    return Step.model_validate(target_values_by_field), payload
 
   @classmethod
   def from_atif_step(

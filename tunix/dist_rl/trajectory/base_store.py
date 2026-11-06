@@ -117,6 +117,7 @@ class TrajectoryReader(Protocol[MetadataT]):
     """
     ...
 
+
 @runtime_checkable
 class TrajectoryWriter(Protocol[MetadataT]):
   """Structural protocol defining write Trajectory Store operations."""
@@ -132,8 +133,10 @@ class TrajectoryWriter(Protocol[MetadataT]):
     asynchronously. Readers never observe partially written or inconsistent
     state.
 
-    Implementations snapshot `step` and `metadata` at call time, so callers may
-    keep mutating those objects afterwards without affecting what was logged.
+    Implementations always snapshot `metadata` at call time. Unless defensive
+    step copying is enabled on the backend, ownership of `step` transfers to
+    the writer on `add_step()`, so callers must not mutate `step` or its
+    nested containers afterwards.
 
     Args:
       step: Step object to log.
@@ -179,6 +182,7 @@ class TrajectoryWriter(Protocol[MetadataT]):
       metrics: TrajectoryMetrics containing the metrics data to record.
     """
     ...
+
   def flush(self) -> None:
     """Flushes any pending or asynchronous writes to persistent storage.
 

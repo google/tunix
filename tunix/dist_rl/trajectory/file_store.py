@@ -18,6 +18,7 @@ from tunix.dist_rl.trajectory import base_store as store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 
 MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)
+_T = TypeVar("_T")
 
 _METADATA_FILENAME: Final[str] = "metadata.json"
 _METRICS_FILENAME: Final[str] = "metrics.json"
@@ -34,7 +35,15 @@ _TRAJECTORY_DIR_REGEX: Final[re.Pattern[str]] = re.compile(
     rf"^{_TRAJECTORY_DIR_PREFIX}(?P<trajectory_id>{_TRAJECTORY_ID_PATTERN})$"
 )
 _STEP_FILENAME_TEMPLATE: Final[str] = "step_{step_id:06d}.json"
-_STEP_FILENAME_REGEX: Final[re.Pattern[str]] = re.compile(r"^step_\d+\.json$")
+_STEP_FILENAME_REGEX: Final[re.Pattern[str]] = re.compile(
+    r"^step_(?P<step_id>\d+)\.json$"
+)
+_STEP_ROUTED_EXPERTS_TEMPLATE: Final[str] = (
+    "step_{step_id:06d}_routed_experts.bin"
+)
+_STEP_ROUTED_EXPERTS_REGEX: Final[re.Pattern[str]] = re.compile(
+    r"^step_(?P<step_id>\d+)_routed_experts\.bin$"
+)
 # Maximum number of threads that each read call uses to access files in
 # parallel, which hides the per-file latency of remote filesystems such as GCS.
 # Only file access runs on these threads: parsing holds the GIL, so the calling
@@ -98,6 +107,13 @@ def _get_step_path(traj_dir: epath.Path, atif_step_id: int) -> epath.Path:
   return traj_dir / _STEP_FILENAME_TEMPLATE.format(step_id=atif_step_id)
 
 
+def _get_step_routed_experts_path(
+    traj_dir: epath.Path, atif_step_id: int
+) -> epath.Path:
+  """Returns the routed-experts binary sidecar path for a 1-indexed step_id."""
+  return traj_dir / _STEP_ROUTED_EXPERTS_TEMPLATE.format(step_id=atif_step_id)
+
+
 def _is_local_filesystem(path: epath.Path) -> bool:
   """Returns whether `path` is on a local POSIX filesystem."""
   # Local POSIX paths are either relative or resolve to a `file://` URI, whereas
@@ -106,24 +122,50 @@ def _is_local_filesystem(path: epath.Path) -> bool:
   return not path.is_absolute() or path.as_uri().startswith("file://")
 
 
-def _write_text(path: epath.Path, content: str) -> None:
-  """Writes `content` to `path`, using atomic temp-file replacement locally."""
+def _write_atomically(
+    path: epath.Path, write_fn: Callable[[epath.Path], Any]
+) -> None:
+  """Writes `path` via `write_fn`, using local atomic temp-file replacement."""
   if not _is_local_filesystem(path):
-    path.write_text(content)
+    write_fn(path)
     return
 
   # Stage the payload in a hidden sibling file on the same filesystem so
   # `replace()` performs an atomic POSIX rename and concurrent readers never
-  # observe a truncated or partially written JSON file.
+  # observe a truncated or partially written file.
   tmp_path = path.parent / f".{path.name}.tmp"
   try:
-    tmp_path.write_text(content)
+    write_fn(tmp_path)
     tmp_path.replace(path)
   except BaseException:
     try:
       tmp_path.unlink(missing_ok=True)
     except OSError:
       pass
+    raise
+
+
+def _write_text(path: epath.Path, content: str) -> None:
+  """Writes `content` to `path`, using atomic temp-file replacement locally."""
+  _write_atomically(path, lambda target: target.write_text(content))
+
+
+def _write_bytes(path: epath.Path, content: bytes) -> None:
+  """Writes raw `content` bytes to `path` atomically on local filesystems."""
+  _write_atomically(path, lambda target: target.write_bytes(content))
+
+
+def _read_or_none(
+    path: epath.Path, read_fn: Callable[[epath.Path], _T]
+) -> _T | None:
+  """Reads `path` via `read_fn`, returning None when `path` does not exist."""
+  try:
+    return read_fn(path)
+  except FileNotFoundError:
+    return None
+  except OSError:
+    if not path.exists():
+      return None
     raise
 
 
@@ -137,14 +179,12 @@ def _read_text_or_none(path: epath.Path) -> str | None:
   Args:
     path: The path of the file to read.
   """
-  try:
-    return path.read_text()
-  except FileNotFoundError:
-    return None
-  except OSError:
-    if not path.exists():
-      return None
-    raise
+  return _read_or_none(path, lambda target: target.read_text())
+
+
+def _read_bytes_or_none(path: epath.Path) -> bytes | None:
+  """Returns the raw bytes of `path`, or None if it does not exist."""
+  return _read_or_none(path, lambda target: target.read_bytes())
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -153,6 +193,9 @@ class _FileWriteTask(async_writer.WriteTask):
 
   traj_dir: epath.Path
   step_path: epath.Path | None = dataclasses.field(default=None, init=False)
+  routed_experts_path: epath.Path | None = dataclasses.field(
+      default=None, init=False
+  )
 
   @property
   def meta_path(self) -> epath.Path:
@@ -168,6 +211,11 @@ class _FileWriteTask(async_writer.WriteTask):
     if self.step is not None:
       object.__setattr__(
           self, "step_path", _get_step_path(self.traj_dir, self.step.step_id)
+      )
+      object.__setattr__(
+          self,
+          "routed_experts_path",
+          _get_step_routed_experts_path(self.traj_dir, self.step.step_id),
       )
 
 
@@ -209,9 +257,9 @@ def _merge_metrics(
 class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
   """Asynchronously writes trajectory metadata, step, and metrics files."""
 
-  def __init__(self):
+  def __init__(self, copy_step: bool = False):
     """Initializes _AsyncFileWriter without starting the background worker."""
-    super().__init__()
+    super().__init__(copy_step=copy_step)
     # Worker-owned caches of persisted state used to skip redundant disk writes.
     self._metadata_hash_by_trajectory_id: dict[str, int] = {}
     self._metrics_by_trajectory_id: collections.OrderedDict[
@@ -231,17 +279,10 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
     waiting for any disk I/O. The worker thread is lazily spawned on the first
     invocation if not already running.
 
-    `metadata` and `step` are deep copied by `WriteTask`, so what lands
-    on disk is exactly what the caller passed in. Serialization happens on the
-    worker thread, possibly long after this call returns, and callers routinely
-    keep mutating the objects they hand over (a rollout worker appending tokens
-    to the step it just logged, or flipping trajectory status from RUNNING to
-    COMPLETED). Without the copy, those later mutations would leak into the
-    already enqueued write, producing files that never matched any state the
-    trajectory actually had. The copy makes the caller-side cost proportional
-    to the payload size rather than O(1), which is a deliberate trade for
-    correctness; the expensive part, serialization and I/O, remains off the
-    caller thread.
+    `metadata` is always deep copied by `WriteTask` so status/reward mutations
+    across turns do not leak. `step` is handed over with zero copy by default to
+    eliminate synchronous GIL contention on rollout workers. When `copy_step`
+    is True, `step` is deep copied defensively.
 
     Args:
       traj_dir: Directory path for the trajectory.
@@ -252,7 +293,12 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
       RuntimeError: If the writer has already been closed.
     """
     self._enqueue(
-        _FileWriteTask(traj_dir=traj_dir, metadata=metadata, step=step)
+        _FileWriteTask(
+            traj_dir=traj_dir,
+            metadata=metadata,
+            step=step,
+            copy_step=self._copy_step,
+        )
     )
 
   def enqueue_metrics_write(
@@ -304,8 +350,12 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
     # never leaves metadata.json advertising a newer trajectory state (such as
     # COMPLETED) while the corresponding step file is missing on disk.
     if task.step is not None:
-      if task.step_path is None:
+      if task.step_path is None or task.routed_experts_path is None:
         raise RuntimeError("to_atif() must run before _process_task().")
+      if task.routed_experts_payload is not None:
+        _write_bytes(task.routed_experts_path, task.routed_experts_payload)
+      elif _is_local_filesystem(task.routed_experts_path):
+        task.routed_experts_path.unlink(missing_ok=True)
       _write_text(task.step_path, _dump_json(task.step))
 
     # Only write metadata.json if metadata content has changed.
@@ -317,21 +367,25 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
         self._metadata_hash_by_trajectory_id[traj_id] = meta_hash
 
     if task.metrics is not None:
-      existing = self._metrics_by_trajectory_id.get(traj_id)
-      if (
-          existing is None
-          and (disk_text := _read_text_or_none(task.metrics_path)) is not None
-      ):
-        existing = trajectory_lib.TrajectoryMetrics.model_validate_json(
-            disk_text
-        )
-      merged = _merge_metrics(existing, task.metrics)
-      if merged != existing:
-        _write_text(task.metrics_path, merged.model_dump_json())
-      self._metrics_by_trajectory_id[traj_id] = merged
-      self._metrics_by_trajectory_id.move_to_end(traj_id)
-      if len(self._metrics_by_trajectory_id) > _MAX_CACHED_METRICS:
-        self._metrics_by_trajectory_id.popitem(last=False)
+      self._write_metrics(traj_id, task)
+
+  def _write_metrics(self, traj_id: str, task: _FileWriteTask) -> None:
+    """Merges incoming trajectory metrics with cached state and writes."""
+    if task.metrics is None:
+      return
+    existing = self._metrics_by_trajectory_id.get(traj_id)
+    if (
+        existing is None
+        and (disk_text := _read_text_or_none(task.metrics_path)) is not None
+    ):
+      existing = trajectory_lib.TrajectoryMetrics.model_validate_json(disk_text)
+    merged = _merge_metrics(existing, task.metrics)
+    if merged != existing:
+      _write_text(task.metrics_path, merged.model_dump_json())
+    self._metrics_by_trajectory_id[traj_id] = merged
+    self._metrics_by_trajectory_id.move_to_end(traj_id)
+    if len(self._metrics_by_trajectory_id) > _MAX_CACHED_METRICS:
+      self._metrics_by_trajectory_id.popitem(last=False)
 
   def _log_task_error(self, task: _FileWriteTask) -> None:
     """Logs detailed task error with trajectory and filesystem path context.
@@ -377,6 +431,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
             ├── metadata.json
             ├── metrics.json
             ├── step_000001.json
+            ├── step_000001_routed_experts.bin  (optional)
             ├── step_000002.json
             └── ...
   """
@@ -387,6 +442,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       self,
       root_dir: epath.PathLike,
       run_id: str | None = None,
+      copy_step: bool = False,
   ) -> None:
     """Initializes FileTrajectoryStore.
 
@@ -397,10 +453,13 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         scoped under root_dir / run_id. This ID MUST stay the same when
         recovering from failures or process restarts as long as the same RL
         process is being continued.
+      copy_step: If True, deep copies step objects before writing. Defaults to
+        False (zero-copy step handover) to avoid synchronous GIL contention on
+        rollout workers.
 
     Raises:
-      ValueError: If root_dir is empty, or run_id is given but cannot be used as
-        a directory name.
+      ValueError: If root_dir is empty, or if run_id is given but cannot be
+        used as a directory name.
     """
     super().__init__()
     if not root_dir or not str(root_dir).strip():
@@ -417,7 +476,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       )
     self._raw_root_dir = epath.Path(root_dir)
     self._run_id = run_id
-    self._writer = _AsyncFileWriter()
+    self._writer = _AsyncFileWriter(copy_step=copy_step)
 
   @classmethod
   def _from_config(
@@ -426,7 +485,8 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
   ) -> "FileTrajectoryStore[MetadataT]":
     """Builds a file-backed store from `config`.
 
-    Requires "root_dir" and "run_id".
+    Requires "root_dir" and "run_id", with optional boolean "copy_step"
+    (defaults to False).
 
     Raises:
       ValueError: If "root_dir" or "run_id" is missing or empty.
@@ -454,10 +514,14 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     return cls(
         root_dir=config["root_dir"],
         run_id=config["run_id"],
+        copy_step=bool(config.get("copy_step", False)),
     )
 
   def to_config(self) -> dict[str, Any]:
     """Returns the config dict that rebuilds an equivalent store.
+
+    Writer-local tuning flags such as `copy_step` are omitted so `to_config()`
+    strictly represents the shared storage location across processes.
 
     Raises:
       ValueError: If this store was constructed without a run_id.
@@ -472,6 +536,11 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         "root_dir": str(self._raw_root_dir),
         "run_id": self._run_id,
     }
+
+  @property
+  def copy_step(self) -> bool:
+    """Returns True if step objects are deep copied before writing."""
+    return self._writer.copy_step
 
   @functools.cached_property
   def root_dir(self) -> epath.Path:
@@ -505,6 +574,22 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       The path of the step JSON file.
     """
     return _get_step_path(self.get_trajectory_dir(trajectory_id), step_id)
+
+  def get_step_routed_experts_path(
+      self, trajectory_id: str, step_id: int
+  ) -> epath.Path:
+    """Returns the binary routed-experts sidecar path for a 1-indexed step ID.
+
+    Args:
+      trajectory_id: The trajectory identifier.
+      step_id: The 1-indexed ATIF step_id, as serialized on disk.
+
+    Returns:
+      The path of the step routed-experts binary sidecar file.
+    """
+    return _get_step_routed_experts_path(
+        self.get_trajectory_dir(trajectory_id), step_id
+    )
 
   @contextlib.contextmanager
   def _open_parallel_reads(
@@ -676,12 +761,17 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         if meta_text is None:
           raise store.TrajectoryNotFoundError(traj_id)
         meta = self._parse_metadata(meta_text)
-        step_text_futures = step_reads_future.result()
+        step_read_futures = step_reads_future.result()
         steps: list[trajectory_lib.Step] = []
-        while step_text_futures:
+        while step_read_futures:
+          text_future, bytes_future = step_read_futures.popleft()
+          step = trajectory_lib.Step.model_validate_json(text_future.result())
+          routed_experts_bytes = (
+              bytes_future.result() if bytes_future is not None else None
+          )
           steps.append(
-              trajectory_lib.Step.model_validate_json(
-                  step_text_futures.popleft().result()
+              trajectory_lib.resolve_step_routed_experts(
+                  step, routed_experts_bytes
               )
           )
         trajs.append(meta.create_trajectory(steps=steps))
@@ -732,8 +822,12 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     return self._rehydrate_metadata(base_meta)
 
   def _submit_step_reads(
-      self, trajectory_id: str, executor: futures.Executor
-  ) -> collections.deque[futures.Future[str]]:
+      self,
+      trajectory_id: str,
+      executor: futures.Executor,
+  ) -> collections.deque[
+      tuple[futures.Future[str], futures.Future[bytes | None] | None]
+  ]:
     """Lists a trajectory's step files and submits their reads to `executor`.
 
     Returns without waiting for the reads, so that no task on `executor` waits
@@ -744,14 +838,29 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       executor: The executor to read the step files on.
 
     Returns:
-      Futures of the contents of the step files, in the order that `iterdir()`
-      lists the files.
+      Pairs of `(step_json_future, optional_routed_experts_bytes_future)` in
+      the order that `iterdir()` lists the step JSON files.
     """
-    return collections.deque(
-        executor.submit(entry.read_text)
-        for entry in self.get_trajectory_dir(trajectory_id).iterdir()
-        if _STEP_FILENAME_REGEX.match(entry.name)
-    )
+    json_entries_with_id: list[tuple[int, epath.Path]] = []
+    bin_entry_by_step_id: dict[int, epath.Path] = {}
+    for entry in self.get_trajectory_dir(trajectory_id).iterdir():
+      if match := _STEP_FILENAME_REGEX.match(entry.name):
+        json_entries_with_id.append((int(match.group("step_id")), entry))
+      elif match := _STEP_ROUTED_EXPERTS_REGEX.match(entry.name):
+        bin_entry_by_step_id[int(match.group("step_id"))] = entry
+
+    step_futures: collections.deque[
+        tuple[futures.Future[str], futures.Future[bytes | None] | None]
+    ] = collections.deque()
+    for step_id, json_entry in json_entries_with_id:
+      bin_entry = bin_entry_by_step_id.get(step_id)
+      bytes_future = (
+          executor.submit(_read_bytes_or_none, bin_entry)
+          if bin_entry is not None
+          else None
+      )
+      step_futures.append((executor.submit(json_entry.read_text), bytes_future))
+    return step_futures
 
   def add_step(
       self,
@@ -764,6 +873,11 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     calling thread so invalid IDs fail fast with actionable errors, then
     delegates asynchronous queuing and non-blocking background I/O to the
     `_AsyncFileWriter`.
+
+    `metadata` is always snapshotted at call time. By default
+    (`copy_step=False`), ownership of `step` transfers to the background writer,
+    so callers must not mutate `step` or its nested containers after calling
+    `add_step()`. Pass `copy_step=True` if the caller mutates `step` afterwards.
 
     Args:
       step: Step object to log.
@@ -788,6 +902,10 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     calling thread so invalid IDs fail fast with actionable errors, then
     delegates asynchronous queuing and non-blocking background I/O to the
     `_AsyncFileWriter`.
+
+    `metadata` is always snapshotted at call time. When `step` is provided and
+    `copy_step=False` (the default), ownership of `step` transfers to the
+    background writer and callers must not mutate `step` afterwards.
 
     Args:
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.

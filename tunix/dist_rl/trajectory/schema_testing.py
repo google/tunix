@@ -144,6 +144,31 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
           step_row["payload"],
           {"reward": 1.0, "observation": "initial"},
       )
+      self.assertIsNone(step_row["routed_experts_payload"])
+
+      conn.execute(
+          schema.STEPS_TABLE.insert().values(
+              run_id="run_alpha",
+              trajectory_id="traj_001",
+              step_id=1,
+              payload={"reward": 2.0},
+              routed_experts_payload=b"\x01\x02\x03\x04",
+          )
+      )
+      binary_step_row = (
+          conn.execute(
+              sa.select(schema.STEPS_TABLE).where(
+                  (schema.STEPS_TABLE.c.run_id == "run_alpha")
+                  & (schema.STEPS_TABLE.c.trajectory_id == "traj_001")
+                  & (schema.STEPS_TABLE.c.step_id == 1)
+              )
+          )
+          .mappings()
+          .one()
+      )
+      self.assertEqual(
+          binary_step_row["routed_experts_payload"], b"\x01\x02\x03\x04"
+      )
 
       metrics_row = (
           conn.execute(
