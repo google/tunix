@@ -297,13 +297,26 @@ class WireSerializationTest(absltest.TestCase):
     self.assertFalse(cfg.enabled)
     self.assertEqual(cfg.max_task_retries, 1)
     self.assertIsNone(cfg.poll_retry_budget_s)
+    self.assertIsNone(cfg.min_active_rollout_ratio)
+    self.assertEqual(cfg.min_active_rollout_grace_s, 900.0)
     self.assertEqual(cfg.effective_max_task_retries, 0)
     self.assertEqual(cfg.effective_poll_retry_budget_s, 300.0)
 
-    enabled_cfg = datatypes.FaultToleranceConfig(enabled=True)
+    enabled_cfg = datatypes.FaultToleranceConfig(
+        enabled=True,
+        min_active_rollout_ratio=0.5,
+        min_active_rollout_grace_s=0.0,
+    )
     self.assertTrue(enabled_cfg.enabled)
     self.assertEqual(enabled_cfg.effective_max_task_retries, 1)
     self.assertEqual(enabled_cfg.effective_poll_retry_budget_s, 60.0)
+    self.assertEqual(enabled_cfg.min_active_rollout_ratio, 0.5)
+    self.assertEqual(enabled_cfg.min_active_rollout_grace_s, 0.0)
+
+    full_ratio_cfg = datatypes.FaultToleranceConfig(
+        min_active_rollout_ratio=1.0
+    )
+    self.assertEqual(full_ratio_cfg.min_active_rollout_ratio, 1.0)
 
     re_enabled = dataclasses.replace(cfg, enabled=True)
     self.assertEqual(re_enabled.effective_max_task_retries, 1)
@@ -324,6 +337,20 @@ class WireSerializationTest(absltest.TestCase):
 
     with self.assertRaisesRegex(ValueError, "poll_retry_budget_s must be >= 0"):
       datatypes.FaultToleranceConfig(poll_retry_budget_s=-5.0)
+
+    for bad_ratio in (0.0, -0.1, 1.01, float("nan"), float("inf")):
+      with self.subTest(bad_ratio=bad_ratio):
+        with self.assertRaisesRegex(
+            ValueError, r"min_active_rollout_ratio must be in \(0\.0, 1\.0\]"
+        ):
+          datatypes.FaultToleranceConfig(min_active_rollout_ratio=bad_ratio)
+
+    for bad_grace in (-0.1, float("-inf"), float("nan")):
+      with self.subTest(bad_grace=bad_grace):
+        with self.assertRaisesRegex(
+            ValueError, "min_active_rollout_grace_s must be >= 0"
+        ):
+          datatypes.FaultToleranceConfig(min_active_rollout_grace_s=bad_grace)
 
 
 class RLTrainerPayloadTest(absltest.TestCase):

@@ -22,6 +22,7 @@ This module centralizes type aliases and dataclasses used for:
 from collections.abc import Callable, Mapping
 import dataclasses
 import enum
+import math
 import time
 from typing import Any, Dict, Protocol
 import uuid
@@ -239,10 +240,6 @@ _FT_ON_DEFAULT_POLL_RETRY_BUDGET_S = 60.0
 class FaultToleranceConfig:
   """Configuration for worker fault tolerance.
 
-  TODO(b/577214994): Extend with circuit-breaking knobs and flip `enabled` to
-  default to `True` once evicted workers whose process is still alive exit or
-  rejoin the rollout pool.
-
   Attributes:
     enabled: Whether worker fault tolerance (automatic eviction and task retry)
       is enabled. Transient transport errors are first retried in place on the
@@ -265,13 +262,31 @@ class FaultToleranceConfig:
       `effective_poll_retry_budget_s` resolves to `60.0` when `enabled=True`
       (gRPC keepalive ~30s plus margin) and `300.0` when `enabled=False`
       (matching `TaskSession`'s default budget).
+    min_active_rollout_ratio: Minimum ratio of currently `ACTIVE` rollout
+      workers to the peak `ACTIVE` rollout worker count observed since startup,
+      in `(0.0, 1.0]`, or `None` (default) to disable the capacity-floor
+      guardrail. When `enabled=True` and set, `FaultToleranceManager` raises
+      `RolloutCapacityError` once `active / peak_active <
+      min_active_rollout_ratio` (strictly below; e.g. `2 / 4` at `0.5` does not
+      trigger) continuously for at least `min_active_rollout_grace_s` seconds
+      after the first rollout worker has reached `ACTIVE`. Ignored when
+      `enabled=False`.
+    min_active_rollout_grace_s: Wall-clock grace period in seconds (`>= 0.0`,
+      default `900.0`) that the active rollout ratio may remain strictly below
+      `min_active_rollout_ratio` before `RolloutCapacityError` is raised,
+      allowing crashed workers time to be restarted and rejoin. The grace timer
+      starts on worker eviction, while the floor is checked at
+      `DistributedRLEngine` construction, after each `poll_rollouts()`, and
+      after `sync_weights()` promotion, so `RolloutCapacityError` surfaces on
+      the first poll or weight-sync boundary once `min_active_rollout_grace_s`
+      has elapsed.
   """
 
-  # TODO(b/577214994): Change `enabled` default to `True` once evicted workers
-  # whose process is still alive exit or rejoin the rollout pool.
   enabled: bool = False
   max_task_retries: int = 1
   poll_retry_budget_s: float | None = None
+  min_active_rollout_ratio: float | None = None
+  min_active_rollout_grace_s: float = 900.0
 
   def __post_init__(self) -> None:
     if self.max_task_retries < 0:
@@ -281,6 +296,21 @@ class FaultToleranceConfig:
     if self.poll_retry_budget_s is not None and self.poll_retry_budget_s < 0.0:
       raise ValueError(
           f"poll_retry_budget_s must be >= 0, got {self.poll_retry_budget_s}"
+      )
+    if self.min_active_rollout_ratio is not None and not (
+        0.0 < self.min_active_rollout_ratio <= 1.0
+    ):
+      raise ValueError(
+          "min_active_rollout_ratio must be in (0.0, 1.0], got"
+          f" {self.min_active_rollout_ratio}"
+      )
+    if (
+        math.isnan(self.min_active_rollout_grace_s)
+        or self.min_active_rollout_grace_s < 0.0
+    ):
+      raise ValueError(
+          "min_active_rollout_grace_s must be >= 0, got"
+          f" {self.min_active_rollout_grace_s}"
       )
 
   @property

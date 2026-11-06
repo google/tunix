@@ -30,6 +30,7 @@ import unittest
 
 from absl.testing import absltest
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.orchestrator import fault_tolerance_manager
 from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.testing import fake_cluster
@@ -590,6 +591,133 @@ class OrchestratorFaultToleranceTest(absltest.TestCase):
           ],
           ["rollout_0"],
       )
+
+  def test_rollout_capacity_floor_aborts_program_after_sustained_eviction(
+      self,
+  ) -> None:
+    with fake_cluster.FakeClusterHarness(
+        num_rollout_workers=2,
+        fault_tolerance_config=datatypes.FaultToleranceConfig(
+            enabled=True,
+            max_task_retries=1,
+            poll_retry_budget_s=0.05,
+            min_active_rollout_ratio=1.0,
+            min_active_rollout_grace_s=0.2,
+        ),
+    ) as harness:
+      evict_gate = fault_injection.FaultGate()
+      hold_gate = fault_injection.FaultGate()
+      harness.injector.on(
+          "rollout_1",
+          "generate",
+          fault_injection.Block(evict_gate),
+          times=1,
+      )
+      harness.injector.on(
+          "rollout_0",
+          "generate",
+          fault_injection.Block(hold_gate),
+          times=None,
+      )
+      program = harness.build_program(
+          num_prompts=1,
+          max_steps=1,
+          num_generations=2,
+          mini_batch_size=1,
+          batch_size=1,
+          sync_weights=True,
+      )
+      future = harness.start_program(program)
+      self.assertTrue(evict_gate.entered.wait(timeout=30.0))
+      self.assertTrue(hold_gate.entered.wait(timeout=30.0))
+      harness.stop_worker_server("rollout_1", grace=0.0)
+      evict_gate.release()
+
+      # Wait until TaskSession evicts rollout_1 (arming the capacity grace
+      # timer inside on_worker_unreachable while rollout_0 still holds both
+      # trajectories before any poll_rollouts() return).
+      _wait_until(
+          lambda: (
+              program.engine.fault_tolerance_metrics()[
+                  "ft/evictions_total/task_session"
+              ]
+              == 1.0
+          ),
+          desc="rollout_1 eviction via TaskSession",
+      )
+      time.sleep(0.25)
+      hold_gate.release()
+
+      with self.assertRaisesRegex(
+          fault_tolerance_manager.RolloutCapacityError,
+          r"1/2 active \(0\.500 < 1\.000\)",
+      ):
+        future.result(timeout=30.0)
+      self.assertTrue(future.done())
+      self.assertEqual(harness.fake_trainer.step_count, 0)
+
+  def test_rollout_capacity_floor_recovers_when_worker_rejoins_within_grace(
+      self,
+  ) -> None:
+    with fake_cluster.FakeClusterHarness(
+        num_rollout_workers=2,
+        fault_tolerance_config=datatypes.FaultToleranceConfig(
+            enabled=True,
+            max_task_retries=1,
+            poll_retry_budget_s=0.05,
+            min_active_rollout_ratio=1.0,
+            min_active_rollout_grace_s=15.0,
+        ),
+    ) as harness:
+      evict_gate = fault_injection.FaultGate()
+      harness.injector.on(
+          "rollout_1",
+          "generate",
+          fault_injection.Block(evict_gate),
+          times=1,
+      )
+      registry = harness.orchestrator.registry
+      step0_ratio_seen: list[float] = []
+
+      def _on_step_end(step: int, unused_res: Any) -> None:
+        if step == 0:
+          step0_ratio_seen.append(
+              program.engine.fault_tolerance_metrics()[
+                  "ft/fleet/rollout_active_ratio"
+              ]
+          )
+          harness.restart_worker(
+              "rollout_1", same_port=False, override=False, re_register=True
+          )
+          _wait_until(
+              lambda: (
+                  registry.status("rollout_1")
+                  == worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+              ),
+              desc="rejoined rollout_1 to enter PENDING_WEIGHT_SYNC",
+          )
+
+      program = harness.build_program(
+          num_prompts=4,
+          max_steps=2,
+          num_generations=2,
+          mini_batch_size=2,
+          batch_size=2,
+          sync_weights=True,
+          on_step_end=_on_step_end,
+      )
+      future = harness.start_program(program)
+      self.assertTrue(evict_gate.entered.wait(timeout=30.0))
+      harness.stop_worker_server("rollout_1", grace=0.0)
+      evict_gate.release()
+
+      future.result(timeout=60.0)
+      self.assertEqual(harness.fake_trainer.step_count, 2)
+      self.assertEqual(step0_ratio_seen, [0.5])
+      metrics = program.engine.fault_tolerance_metrics()
+      self.assertEqual(metrics["ft/fleet/rollout_active"], 2.0)
+      self.assertEqual(metrics["ft/fleet/rollout_active_ratio"], 1.0)
+      self.assertEqual(metrics["ft/rejoin/promoted_total"], 1.0)
 
   def test_in_flight_straggler_across_weight_sync_filtered_by_staleness(
       self,

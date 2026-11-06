@@ -104,6 +104,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         fault_tolerance_manager
         or fault_tolerance_manager_lib.FaultToleranceManager(registry)
     )
+    self._fault_tolerance_manager.check_rollout_capacity()
     self._rollout_session = task_session.TaskSession(
         self._rollout_handles,
         poll_retry_budget_s=(
@@ -462,6 +463,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             traj_item.group_index,
         )
         completed.append(traj_item)
+    self._fault_tolerance_manager.check_rollout_capacity()
     return completed
 
   async def generate(
@@ -873,6 +875,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             r.worker_id,
             worker_registry.AdmissionStatus.ACTIVE.value,
         )
+    self._fault_tolerance_manager.check_rollout_capacity()
     self._policy_version = result.policy_version
     logging.info(
         "Weight synchronization complete (policy_version=%d).",

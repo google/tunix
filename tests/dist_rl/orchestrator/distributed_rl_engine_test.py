@@ -2915,6 +2915,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               "ft/evictions_total/task_session": 3.0,
               "ft/rejoin/promoted_total": 4.0,
               "ft/fleet/rollout_active": 5.0,
+              "ft/fleet/rollout_active_ratio": 1.0,
               "ft/rejoin/bring_up_failures_total": 6.0,
               "ft/fleet/rollout_pending_weight_sync": 7.0,
               "ft/fleet/rollout_registered": 8.0,
@@ -2931,6 +2932,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               "ft/fleet/rollout_registered": 0.0,
               "ft/fleet/rollout_pending_weight_sync": 0.0,
               "ft/fleet/rollout_active": 0.0,
+              "ft/fleet/rollout_active_ratio": 1.0,
               "ft/evictions_total/task_session": 0.0,
               "ft/rollout/task_retries_total": 0.0,
               "ft/rollout/task_unrecovered_total": 0.0,
@@ -2939,6 +2941,104 @@ class DistributedRLEngineTest(absltest.TestCase):
           },
       )
       await minimal_engine.close()
+
+    asyncio.run(_run())
+
+  def test_engine_enforces_rollout_capacity_floor_across_init_poll_and_sync(
+      self,
+  ):
+    async def _run():
+      registry = worker_registry.WorkerRegistry()
+      w0, w1 = MockActorHandle(), MockActorHandle()
+      for idx, handle in enumerate((w0, w1)):
+        wid = f"rollout-{idx}"
+        registry.register_handle(wid, [datatypes.Role.ROLLOUT], handle)
+        worker_registry_testing.set_status(
+            registry, wid, worker_registry.AdmissionStatus.ACTIVE
+        )
+
+      w1_q: asyncio.Queue[remote_execution.ExecutionResponse] = asyncio.Queue()
+
+      async def _w1_generate(*, requests):
+        req = requests[0]
+        w1_q.put_nowait(
+            remote_execution.ExecutionResponse(
+                request_id=req.request_id,
+                result=[
+                    datatypes.RolloutResponse(
+                        request_id=req.request_id,
+                        status="COMPLETED",
+                        payload=datatypes.TrajectoryItem(
+                            prompt_id=str(req.prompt_id),
+                            group_index=req.group_index,
+                            traj={
+                                "trajectory_reward": 1.0,
+                                "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                            },
+                        ),
+                    )
+                ],
+            )
+        )
+
+      async def _w1_poll(timeout_s=50.0):
+        del timeout_s
+        return await w1_q.get()
+
+      w1.generate.side_effect = _w1_generate
+      w1.poll_responses.side_effect = _w1_poll
+      w0.poll_responses.side_effect = ConnectionError("w0 died on first poll")
+
+      now = [0.0]
+      ftm = fault_tolerance_manager_lib.FaultToleranceManager(
+          registry,
+          config=datatypes.FaultToleranceConfig(
+              enabled=True,
+              max_task_retries=1,
+              min_active_rollout_ratio=1.0,
+              min_active_rollout_grace_s=10.0,
+          ),
+      )
+      coordinator = _FakeWeightSyncCoordinator(workers=[])
+      with mock.patch.object(
+          fault_tolerance_manager_lib, "_monotonic", side_effect=lambda: now[0]
+      ):
+        engine = distributed_rl_engine.DistributedRLEngine(
+            registry=registry,
+            weight_sync_coordinator=coordinator,
+            fault_tolerance_manager=ftm,
+        )
+
+        # Dispatch 2 requests (1 to w0, 1 to w1). w0 is evicted during the first
+        # poll_rollouts() call; because __init__ seeded peak=2, poll_rollouts()
+        # observes 1/2 < 1.0 and starts the grace timer at t=0.0.
+        await engine.dispatch_rollout_requests([
+            datatypes.RolloutRequest(
+                request_id=f"req_{g}",
+                prompt="p",
+                prompt_id="p0",
+                group_index=g,
+            )
+            for g in range(2)
+        ])
+        completed: list[datatypes.TrajectoryItem] = []
+        while len(completed) < 2:
+          completed.extend(await engine.poll_rollouts(timeout_s=1.0))
+        self.assertLen(completed, 2)
+        self.assertEqual(
+            engine.fault_tolerance_metrics()["ft/fleet/rollout_active_ratio"],
+            0.5,
+        )
+
+        # Once the 10s grace window elapses without rejoin, sync_weights()
+        # raises RolloutCapacityError with the 1/2 active baseline intact.
+        now[0] = 10.0
+        with self.assertRaisesRegex(
+            fault_tolerance_manager_lib.RolloutCapacityError,
+            r"for 10\.0s \(grace 10\.0s\): 1/2 active \(0\.500 < 1\.000\)",
+        ):
+          await engine.sync_weights(policy_version=1)
+        await engine.close()
 
     asyncio.run(_run())
 
