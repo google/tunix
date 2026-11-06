@@ -38,15 +38,6 @@ class Source(enum.StrEnum):
   AGENT = enum.auto()
 
 
-def _serialize_array(value: list[Any] | np.ndarray | None) -> list[Any] | None:
-  """Serializes a NumPy array or list into a plain Python list."""
-  if value is None:
-    return None
-  if isinstance(value, np.ndarray):
-    return value.tolist()
-  return list(value)
-
-
 # Sequences whose elements all have one of these exact types are copied without
 # per-element recursion: one C-level scan of `map(type, ...)` vets the whole
 # sequence. Any other element type, including subclasses such as `StrEnum` and
@@ -533,14 +524,254 @@ def _unpack_step_from_atif(
   return target_cls.model_validate(target_values_by_field)
 
 
-# `np.ndarray` comes first in these unions: smart-mode union validation returns
-# the first exact match, so an array input passes one `isinstance` check. With
-# `list[...]` first, the lax list validator would iterate and convert every
-# array element before the array matched exactly and the result was discarded.
+_ARRAY_BLOB_KEYS: Final[frozenset[str]] = frozenset({"shape", "dtype", "data"})
+_EXACT_INT_TYPES: Final[frozenset[type[object]]] = frozenset({int})
+_EXACT_FLOAT_TYPES: Final[frozenset[type[object]]] = frozenset({float})
+
+IntArrayDtype = Literal[
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+]
+_INT_DTYPE_BY_NAME: Final[Mapping[str, np.dtype[Any]]] = {
+    "int8": np.dtype("<i1"),
+    "int16": np.dtype("<i2"),
+    "int32": np.dtype("<i4"),
+    "int64": np.dtype("<i8"),
+    "uint8": np.dtype("<u1"),
+    "uint16": np.dtype("<u2"),
+    "uint32": np.dtype("<u4"),
+    "uint64": np.dtype("<u8"),
+}
+_DEFAULT_INT_DTYPE: Final[np.dtype[np.int64]] = np.dtype("<i8")
+
+FloatArrayDtype = Literal["float16", "float32", "float64"]
+_FLOAT_DTYPE_BY_NAME: Final[Mapping[str, np.dtype[Any]]] = {
+    "float16": np.dtype("<f2"),
+    "float32": np.dtype("<f4"),
+    "float64": np.dtype("<f8"),
+}
+_DEFAULT_FLOAT_DTYPE: Final[np.dtype[np.float64]] = np.dtype("<f8")
+
+_NUMERIC_DTYPE_NAMES: Final[frozenset[str]] = frozenset(
+    _INT_DTYPE_BY_NAME
+) | frozenset(_FLOAT_DTYPE_BY_NAME)
+
+
+def _encode_base64_array(arr: np.ndarray) -> dict[str, Any]:
+  """Encodes a 1D C-contiguous little-endian array into a base64 blob dict."""
+  if arr.size == 0:
+    data = ""
+  else:
+    data = base64.b64encode(
+        memoryview(arr)  # pyrefly: ignore[bad-argument-type]
+    ).decode("ascii")
+  return {
+      "shape": list(arr.shape),
+      "dtype": arr.dtype.name,
+      "data": data,
+  }
+
+
+def _decode_base64_array(
+    value: Mapping[str, Any],
+    *,
+    type_label: str,
+    dtype_by_name: Mapping[str, np.dtype[Any]],
+) -> np.ndarray:
+  """Validates and decodes a serialized 1D base64 array blob dict."""
+  if set(value.keys()) != _ARRAY_BLOB_KEYS:
+    raise ValueError(
+        f"Invalid serialized {type_label} keys {sorted(value.keys())};"
+        f" expected {sorted(_ARRAY_BLOB_KEYS)}."
+    )
+  dtype_name = value["dtype"]
+  if not isinstance(dtype_name, str) or dtype_name not in dtype_by_name:
+    raise ValueError(
+        f"Unsupported {type_label} dtype {dtype_name!r}; expected"
+        f" {sorted(dtype_by_name)}."
+    )
+  dtype = dtype_by_name[dtype_name]
+  raw_shape = value["shape"]
+  if (
+      not isinstance(raw_shape, (list, tuple))
+      or len(raw_shape) != 1
+      or not isinstance(raw_shape[0], int)
+      or isinstance(raw_shape[0], bool)
+      or raw_shape[0] < 0
+  ):
+    raise ValueError(
+        f"Invalid {type_label} shape {raw_shape!r}; expected 1 non-negative"
+        " integer."
+    )
+  shape = (raw_shape[0],)
+  encoded = value["data"]
+  if not isinstance(encoded, str):
+    raise ValueError(
+        f"Expected base64 string for {type_label} data, got"
+        f" {type(encoded).__name__}."
+    )
+  try:
+    raw_bytes = base64.b64decode(encoded.encode("ascii"), validate=True)
+  except (UnicodeEncodeError, binascii.Error) as exc:
+    raise ValueError(f"Failed to decode {type_label} blob: {exc}") from exc
+  expected_bytes = shape[0] * dtype.itemsize
+  if len(raw_bytes) != expected_bytes:
+    raise ValueError(
+        f"Decoded {type_label} byte length {len(raw_bytes)} does not match"
+        f" shape {shape} * {dtype.itemsize} ({expected_bytes} bytes)."
+    )
+  return np.frombuffer(raw_bytes, dtype=dtype).astype(
+      dtype.newbyteorder("="), copy=True
+  )
+
+
+def _validate_1d_scalar_array(
+    value: Any,
+    handler: pydantic.ValidatorFunctionWrapHandler,
+    *,
+    type_label: str,
+    dtype_by_name: Mapping[str, np.dtype[Any]],
+    default_dtype: np.dtype[Any],
+    exact_scalar_types: frozenset[type[object]],
+    allowed_ndarray_dtypes: Set[str] | None = None,
+) -> np.ndarray | list[Any] | None:
+  """Fast-paths None, 1D np.ndarray, base64 blobs, and exact scalar lists."""
+  if value is None:
+    return None
+  if isinstance(value, np.ndarray):
+    if value.ndim != 1:
+      raise ValueError(
+          f"Expected a 1D array for {type_label}, got shape {value.shape}."
+      )
+    valid_dtypes = (
+        dtype_by_name
+        if allowed_ndarray_dtypes is None
+        else allowed_ndarray_dtypes
+    )
+    if value.dtype.name in valid_dtypes:
+      return value
+    if value.size == 0 and value.dtype.name in _NUMERIC_DTYPE_NAMES:
+      return np.empty(0, dtype=default_dtype)
+    raise ValueError(
+        f"Unsupported {type_label} dtype {value.dtype.name!r}; expected"
+        f" {sorted(valid_dtypes)}."
+    )
+  if isinstance(value, Mapping):
+    return _decode_base64_array(
+        value,
+        type_label=type_label,
+        dtype_by_name=dtype_by_name,
+    )
+  if isinstance(value, list) and exact_scalar_types.issuperset(
+      map(type, value)
+  ):
+    return list(value)
+  return handler(value)
+
+
+def _serialize_1d_array(
+    value: np.ndarray | Sequence[Any] | None,
+    *,
+    type_label: str,
+    dtype_by_name: Mapping[str, np.dtype[Any]],
+    default_dtype: np.dtype[Any],
+) -> dict[str, Any] | None:
+  """Serializes a 1D array or sequence into a base64 binary blob dict."""
+  if value is None:
+    return None
+  if isinstance(value, np.ndarray):
+    if value.ndim != 1:
+      raise ValueError(
+          f"Expected a 1D array for {type_label}, got shape {value.shape}."
+      )
+    target_dtype = dtype_by_name.get(value.dtype.name, default_dtype)
+    if value.dtype == target_dtype and value.flags.c_contiguous:
+      arr = value
+    else:
+      arr = np.ascontiguousarray(value, dtype=target_dtype)
+  else:
+    arr = np.ascontiguousarray(value, dtype=default_dtype)
+    if arr.ndim != 1:
+      raise ValueError(
+          f"Expected a 1D array for {type_label}, got shape {arr.shape}."
+      )
+  return _encode_base64_array(arr)
+
+
+class SerializedIntArray(TypedDict):
+  """Compact JSON-serializable Base64 envelope for a 1D integer array."""
+
+  shape: list[int]
+  dtype: IntArrayDtype
+  data: str
+
+
+_serialize_int_array = functools.partial(
+    _serialize_1d_array,
+    type_label="IntArray",
+    dtype_by_name=_INT_DTYPE_BY_NAME,
+    default_dtype=_DEFAULT_INT_DTYPE,
+)
+
+# `np.ndarray` comes first in these unions, and `_validate_1d_scalar_array`
+# fast-paths `None`, `np.ndarray`, serialized Base64 dicts, and exact
+# `list[int]` / `list[float]` inputs with one C-level scan.
 IntArray = Annotated[
     np.ndarray | list[int] | None,
+    pydantic.WrapValidator(
+        functools.partial(
+            _validate_1d_scalar_array,
+            type_label="IntArray",
+            dtype_by_name=_INT_DTYPE_BY_NAME,
+            default_dtype=_DEFAULT_INT_DTYPE,
+            exact_scalar_types=_EXACT_INT_TYPES,
+        )
+    ),
     pydantic.PlainSerializer(
-        _serialize_array, return_type=list[int] | None, when_used="always"
+        _serialize_int_array,
+        return_type=SerializedIntArray | None,
+        when_used="always",
+    ),
+]
+
+
+class SerializedFloatArray(TypedDict):
+  """Compact JSON-serializable Base64 envelope for a 1D float array."""
+
+  shape: list[int]
+  dtype: FloatArrayDtype
+  data: str
+
+
+_serialize_float_array = functools.partial(
+    _serialize_1d_array,
+    type_label="FloatArray",
+    dtype_by_name=_FLOAT_DTYPE_BY_NAME,
+    default_dtype=_DEFAULT_FLOAT_DTYPE,
+)
+
+FloatArray = Annotated[
+    np.ndarray | list[float] | None,
+    pydantic.WrapValidator(
+        functools.partial(
+            _validate_1d_scalar_array,
+            type_label="FloatArray",
+            dtype_by_name=_FLOAT_DTYPE_BY_NAME,
+            default_dtype=_DEFAULT_FLOAT_DTYPE,
+            exact_scalar_types=_EXACT_FLOAT_TYPES,
+            allowed_ndarray_dtypes=_NUMERIC_DTYPE_NAMES,
+        )
+    ),
+    pydantic.PlainSerializer(
+        _serialize_float_array,
+        return_type=SerializedFloatArray | None,
+        when_used="always",
     ),
 ]
 
@@ -735,13 +966,6 @@ Int3DArray = Annotated[
         _serialize_int_3d_array,
         return_type=SerializedInt3DArray | None,
         when_used="always",
-    ),
-]
-
-FloatArray = Annotated[
-    np.ndarray | list[float] | None,
-    pydantic.PlainSerializer(
-        _serialize_array, return_type=list[float] | None, when_used="always"
     ),
 ]
 
