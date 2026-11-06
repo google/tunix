@@ -14,8 +14,6 @@
 
 """Environment utils."""
 
-import os
-
 import flax
 
 
@@ -42,5 +40,3 @@ def is_pathways_initialized():
     return pathwaysutils.is_pathways_backend_used()
   except ImportError:
     return False
-
-SGLANG_JAX_TP_AXIS_NAME = os.getenv('SGLANG_JAX_TP_AXIS_NAME', 'tensor')

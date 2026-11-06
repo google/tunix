@@ -42,7 +42,6 @@ from tunix.common import configs
 from tunix.common import datatypes
 from tunix.experimental.rollout import vanilla_rollout as vanilla_rollout_v2
 from tunix.generate import tokenizer_adapter
-# Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -364,11 +363,10 @@ class RLEngine:
         "vanilla",
         "vanilla_v2",
         "vllm",
-        "sglang_jax",
     ]:
       raise ValueError(
           "`cluster_config.rollout_engine` should be one of `'vanilla'`, "
-          "`'vanilla_v2'`, `'vllm'`, or `'sglang_jax'`. Received:"
+          "`'vanilla_v2'`, or `'vllm'`. Received:"
           f" '{self.cluster_config.rollout_engine}'."
       )
 
@@ -548,34 +546,6 @@ class RLEngine:
             mesh=self.r2m[Role.ROLLOUT],
             rollout_config=loaded_vllm_config,
         )
-    elif self.cluster_config.rollout_engine == "sglang_jax":
-      from tunix.rl.rollout import sglang_jax_rollout
-
-      if isinstance(self.cluster_config.rollout_config, dict):
-        loaded_sglang_jax_config = self.cluster_config.rollout_config[
-            Mode.TRAIN
-        ]
-      else:
-        loaded_sglang_jax_config = self.cluster_config.rollout_config
-
-      if (
-          sft_utils.is_lora_enabled(self.rollout_actor)
-          and not loaded_sglang_jax_config.rollout_sglang_jax_enable_static_lora
-      ):
-        raise ValueError(
-            "Rollout sglang jax lora config is missing: must set"
-            " rollout_sglang_jax_lora_target_modules,"
-            " rollout_sglang_jax_enable_static_lora,"
-            " rollout_sglang_jax_max_lora_rank,"
-            " rollout_sglang_jax_lora_scaling."
-        )
-
-      self._rollout = sglang_jax_rollout.SglangJaxRollout(
-          self.rollout_actor,
-          self.tokenizer,
-          mesh=self.r2m[Role.ROLLOUT],
-          rollout_config=loaded_sglang_jax_config,
-      )
     elif (
         isinstance(self.cluster_config.rollout_engine, type)
         and issubclass(

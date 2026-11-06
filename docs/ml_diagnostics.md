@@ -19,7 +19,7 @@ trainer and sampler TPU slices:
 -   **`actor`**: Executes policy gradient updates and actor evaluation on
     trainer devices.
 -   **`rollout`**: Generates autoregressive completions using inference engines
-    such as vLLM or SGLang-JAX on sampler devices.
+    such as vLLM on sampler devices.
 
 Tunix provides two built-in integrations with Google Cloud ML Diagnostics:
 

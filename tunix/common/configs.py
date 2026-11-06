@@ -16,7 +16,7 @@
 
 import dataclasses
 import math
-from typing import Any, List, Optional, TYPE_CHECKING, Tuple
+from typing import Any, Optional, TYPE_CHECKING, Tuple
 
 import flax
 import jax
@@ -288,66 +288,6 @@ class RolloutConfig:
       default_factory=dict
   )
 
-  # SG-Lang JAX specific rollout configs.
-
-  # Model version for SG-Lang JAX rollout engine.
-  rollout_sglang_jax_model_version: str = ""
-
-  # Context length for SG-Lang JAX rollout engine.
-  rollout_sglang_jax_context_length: Optional[int] = None
-
-  # Allocated HBM fraction for SG-Lang JAX rollout engine.
-  rollout_sglang_jax_mem_fraction_static: float = 0.2
-
-  # Whether to initialize SG-Lang JAX model with random weights.
-  rollout_sglang_jax_init_with_random_weights: bool = True
-
-  # Radix cache disabling flag for SG-Lang JAX rollout engine. Default to True for RL.
-  rollout_sglang_jax_disable_radix_cache: bool = True
-
-  # Whether to enable deterministic sampling for SG-Lang JAX rollout engine.
-  rollout_sglang_jax_enable_deterministic_sampling: bool = False
-
-  # Whether to use lora
-  rollout_sglang_jax_enable_static_lora: bool = False
-
-  # Whether to use single controller mode, single controller mode is required in pathways
-  rollout_sglang_jax_enable_single_process: bool = True
-
-  # Specify the modules which are required to use lora
-  rollout_sglang_jax_lora_target_modules: Optional[List[str]] = None
-
-  # Specify the lora RANK
-  rollout_sglang_jax_max_lora_rank: Optional[int] = None
-
-  rollout_sglang_jax_lora_scaling: Optional[float] = None
-
-  # Specify the paddings for batch_size
-  rollout_sglang_jax_precompile_bs_paddings: Optional[List[int]] = None
-
-  # Specify the paddings for tokens which is used in prefll
-  rollout_sglang_jax_precompile_token_paddings: Optional[List[int]] = None
-
-  # Specify the the maximum number of tokens in a chunk for the chunked prefill
-  rollout_sglang_jax_chunked_prefill_size: Optional[int] = -1
-
-  # The number of tokens in a page
-  rollout_sglang_jax_page_size: int = 128
-
-  # The format of the model weights to load.
-  rollout_sglang_jax_load_format: str = "auto"
-
-  # The maximum number of running requests to accumulate batch
-  rollout_sglang_jax_max_running_requests: Optional[int] = None
-
-  # The log level of sglang_jax
-  rollout_sglang_jax_log_level: Optional[str] = "info"
-
-  # Additional keyword arguments forwarded directly to the SG-Lang JAX sampler/engine.
-  rollout_sglang_jax_kwargs: dict[str, Any] = dataclasses.field(
-      default_factory=dict
-  )
-
   # Distributed rollout worker & sampler orchestration configs.
   weight_sync_mode: str = "none"
 
@@ -578,7 +518,7 @@ class ClusterConfig:
     role_to_logical_axis_rule: Mapping from model role to logical axis rule.
       This is used when models are sharded with logical axis and expects a
       logical to physical axis mapping at runtime.
-    rollout_engine: Rollout engine to use. E.g. "vanilla", "vllm", "sglang_jax".
+    rollout_engine: Rollout engine to use. E.g. "vanilla", "vanilla_v2", "vllm".
       Alternatively, if a subclass of `BaseRollout` is provided, it will be used
       as the rollout engine.
     offload_to_cpu: Whether to offload models to CPU at each step..

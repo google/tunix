@@ -1680,27 +1680,6 @@ class UtilsTest(parameterized.TestCase):
         dst_state["layers_1"]["attn"]["kv_weight"][...], expected_1
     )
 
-  def test_sglang_jax_1d_kv_bias_alignment(self):
-    """Test 1-D KV bias alignment for sglang_jax rollout engine."""
-    src_key = "layers.0.attn.k_bias"
-    src_k_bias = jnp.arange(128, dtype=jnp.float32)
-    src = MockState({src_key: MockParam(src_k_bias)})
-    dst = MockState({src_key: MockParam(jnp.zeros((1024,), dtype=jnp.float32))})
-    mappings = {src_key: (src_key, None)}
-
-    result = utils.transfer_state_with_mappings(
-        src,
-        dst,
-        mappings,
-        rollout_engine="sglang_jax",
-        num_kv_heads=1,
-        head_dim=128,
-    )
-
-    self.assertEqual(result.params[src_key].shape, (1024,))
-    expected = jnp.tile(src_k_bias, 8)
-    self.assertTrue(jnp.allclose(result.params[src_key].value, expected))
-
   def test_transfer_state_directly_fuses_moe_weights(self):
     """Tests that wi_0 and wi_1 are fused into wi when target expects it."""
     wi_0_val = jnp.array([[1.0, 2.0], [5.0, 6.0]], dtype=jnp.float32)
@@ -2627,6 +2606,29 @@ class TokenIdsTest(parameterized.TestCase):
     self.assertFalse(base_w.is_deleted())
     self.assertFalse(shared_w.is_deleted())
     self.assertFalse(rng_arr.is_deleted())
+
+  def test_apply_transpose_skips_lora_keys(self):
+    val = jnp.arange(6, dtype=jnp.float32).reshape(2, 3)
+    transpose_keys: dict[str, tuple[int, ...]] = {
+        "kernel": (1, 0),
+        "layers.0.mlp.gate_proj.kernel_lora_a": (1, 0),
+        "layers.*.mlp.*": (1, 0),
+    }
+
+    transposed_base = utils._apply_transpose(
+        val, "layers.0.mlp.gate_proj.kernel", transpose_keys
+    )
+    self.assertEqual(transposed_base.shape, (3, 2))
+    np.testing.assert_array_equal(transposed_base, val.T)
+
+    for lora_key in (
+        "layers.0.mlp.gate_proj.kernel_lora_a",
+        "layers.0.mlp.gate_proj.kernel_lora_b",
+        "kernel_lora_a",
+    ):
+      unchanged = utils._apply_transpose(val, lora_key, transpose_keys)
+      self.assertEqual(unchanged.shape, (2, 3))
+      np.testing.assert_array_equal(unchanged, val)
 
 
 if __name__ == "__main__":

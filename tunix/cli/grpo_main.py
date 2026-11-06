@@ -55,7 +55,7 @@ class GrpoPipeline(base_rl_pipeline.BasePipeline):
     its own device slice; omitted meshes share the actor mesh by default.
   * role-specific ``same_mesh_as``: optional mesh sharing like
     ``reference_model_config.same_mesh_as: actor``.
-  * ``sglang_jax_config`` / ``vllm_config``: engine-specific rollout params.
+  * ``vllm_config``: engine-specific rollout params.
   * ``chat_parser_config.type``: ``"default"`` or ``"qwen"``.
   * ``agent_class_path`` / ``env_class_path``: dotted Python paths to load
     agent and env classes dynamically.

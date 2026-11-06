@@ -93,7 +93,7 @@ algorithm being used.
     execution of the chosen RL algorithm (such as PPO or GRPO). See
     [Algorithms Supported](algorithms.md) for more details.
 -   **Rollout Workers**: These workers generate sample trajectories from the
-    current model using optimized runtimes like **vLLM** or **SGLang**. This
+    current model using optimized runtimes like **vLLM**. This
     ensures high-throughput data collection, crucial for efficient RL training.
     See [Rollout](rollout.md) for more details.
 -   **Inference Workers**: These workers host inference models (e.g., critic,

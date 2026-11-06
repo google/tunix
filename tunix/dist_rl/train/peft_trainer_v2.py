@@ -1429,7 +1429,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           key_mapping_hook_fns=mapping_config.to_hf_hook_fns,
           transpose_keys=mapping_config.to_hf_transpose_keys,
           reshard_fn=None,
-          rollout_engine=backend,
           tp_size=self._rollout_tp_size,
       )
       worker.bind(converted_state)

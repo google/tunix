@@ -27,8 +27,8 @@ Environment Variables:
   the episode (default: MAX_MODEL_LEN - 256).
   ENABLE_GUARD: Set to "true" to enable action guard via GuardedSWEEnv (default:
   "false").
-  ROLLOUT_ENGINE: The underlying LLM engine to use. Choices are 'vanilla',
-  'vllm', or 'sglang_jax' (default: "vllm").
+  ROLLOUT_ENGINE: The underlying LLM engine to use. Choices are 'vanilla' or
+  'vllm' (default: "vllm").
   VLLM_HBM_UTILIZATION: HBM utilization ratio for vLLM engine (default: 0.4).
   VLLM_INIT_RANDOM_WEIGHTS: Set to "true" to init vLLM with random weights and
   sync later (default: "true").
@@ -36,10 +36,6 @@ Environment Variables:
   VLLM_MAX_NUM_SEQS: Maximum number of concurrent sequences in vLLM (default:
   128).
   VLLM_MAX_BATCHED_TOKENS: Maximum batched tokens for vLLM (default: 165888).
-  SGLANG_MEM_FRACTION_STATIC: Static memory fraction for SGLang (default: 0.4).
-  SGLANG_INIT_RANDOM_WEIGHTS: Set to "true" to init SGLang with random weights
-  and sync later (default: "true").
-  SGLANG_MAX_RUNNING_REQUESTS: Maximum running requests for SGLang (default: 1).
   OUTPUT_DIR: Directory where the evaluation results JSONL file will be saved
   (default: "eval_results").
   JAX_PLATFORMS: If set to "proxy", initializes Pathways utils.
@@ -124,14 +120,6 @@ VLLM_INIT_RANDOM_WEIGHTS = (
 VLLM_SERVER_MODE = os.getenv("VLLM_SERVER_MODE", "true").lower() == "true"
 VLLM_MAX_NUM_SEQS = int(os.getenv("VLLM_MAX_NUM_SEQS", "128"))
 VLLM_MAX_BATCHED_TOKENS = int(os.getenv("VLLM_MAX_BATCHED_TOKENS", "165888"))
-
-SGLANG_MEM_FRACTION_STATIC = float(
-    os.getenv("SGLANG_MEM_FRACTION_STATIC", "0.4")
-)
-SGLANG_INIT_RANDOM_WEIGHTS = (
-    os.getenv("SGLANG_INIT_RANDOM_WEIGHTS", "true").lower() == "true"
-)
-SGLANG_MAX_RUNNING_REQUESTS = int(os.getenv("SGLANG_MAX_RUNNING_REQUESTS", "1"))
 
 OUTPUT_DIR = os.getenv(
     "OUTPUT_DIR", os.path.join(os.path.dirname(__file__), "eval_results")
@@ -293,41 +281,10 @@ elif ROLLOUT_ENGINE == "vllm":
   sampler.load_checkpoint(nnx.state(model))
   logger.info("Synced model weights to vLLM engine.")
 
-elif ROLLOUT_ENGINE == "sglang_jax":
-  from tunix.generate import mappings
-  from tunix.generate.sglang_jax_sampler import SglangJaxConfig, SglangJaxSampler
-
-  mapping_config = mappings.MappingConfig.build(
-      mapping_obj=None,
-      model=model,
-      backend="sglang_jax",
-  )
-  sampler = SglangJaxSampler(
-      tokenizer=tokenizer,
-      config=SglangJaxConfig(
-          mesh=mesh,
-          mapping_config=mapping_config,
-          model_version=MODEL_VERSION,
-          context_length=MAX_MODEL_LEN,
-          mem_fraction_static=SGLANG_MEM_FRACTION_STATIC,
-          init_with_random_weights=SGLANG_INIT_RANDOM_WEIGHTS,
-          disable_radix_cache=True,
-          enable_deterministic_sampling=False,
-          precompile_token_paddings=[8192, 16384],
-          precompile_bs_paddings=[1],
-          max_running_requests=SGLANG_MAX_RUNNING_REQUESTS,
-      ),
-  )
-  if SGLANG_INIT_RANDOM_WEIGHTS:
-    from flax import nnx
-
-    sampler.load_checkpoint(nnx.state(model))
-    logger.info("Synced model weights to sglang_jax engine.")
-
 else:
   raise ValueError(
       f"Unsupported ROLLOUT_ENGINE: {ROLLOUT_ENGINE!r}. "
-      "Choose from: 'vanilla', 'vllm', 'sglang_jax'"
+      "Choose from: 'vanilla', 'vllm'"
   )
 
 # ========================== Model Call ==========================

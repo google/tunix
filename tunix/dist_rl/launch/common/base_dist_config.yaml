@@ -173,7 +173,6 @@ rollout_config:
 
 ############################### Other RL Config ###############################
 rollout_engine: "inprocess_vllm"
-sglang_jax_config: {}
 vllm_config:
   model_version: ""
   # null: `rollout_engine: vllm` defers to vLLM's native default

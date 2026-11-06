@@ -553,36 +553,25 @@ def _unroll_scanned_layers(
 def _apply_transpose(
     val: jnp.ndarray,
     src_key: str,
-    transpose_keys: Optional[Dict[str, Tuple[int, ...]]],
-    rollout_engine: Optional[str],
+    transpose_keys: Optional[Mapping[str, Tuple[int, ...]]],
 ) -> jnp.ndarray:
   """Apply transpose operation if configured for this key."""
-  if not transpose_keys:
+  if not transpose_keys or 'lora' in src_key:
     return val
 
   last_key = src_key.split('.')[-1]
-  all_key = src_key
   target_key = ''
-  if last_key in transpose_keys and 'lora' not in last_key:
+  if last_key in transpose_keys:
     target_key = last_key
-  elif all_key in transpose_keys and 'lora' not in all_key:
-    target_key = all_key
+  elif src_key in transpose_keys:
+    target_key = src_key
   else:
     for k, _ in transpose_keys.items():
       if '*' in k:
         pattern = '^' + re.escape(k).replace('\\*', '.*') + '$'
-        if re.match(pattern, all_key):
+        if re.match(pattern, src_key):
           target_key = k
           break
-
-  # For LoRA
-  # Note: The following codes takes effect in SGLangJAx rollout, and may not take effect in other rollout engine.
-
-  if rollout_engine == 'sglang_jax' and 'lora' in all_key:
-    for r_key in transpose_keys:
-      if re.compile(rf'{r_key}').match(all_key):
-        logging.debug('Applying LoRA transpose on %s', src_key)
-        return jnp.transpose(val[None, :, :], transpose_keys[r_key])
 
   if target_key != '':
     logging.debug('Applying transpose on %s', src_key)
@@ -595,7 +584,6 @@ def _align_shape(
     val: jnp.ndarray,
     tgt_shape: Tuple[int, ...],
     src_key: str,
-    rollout_engine: Optional[str] = None,
     **kwargs,
 ) -> jnp.ndarray:
   """Align source value shape to target shape through padding or repeating.
@@ -606,15 +594,11 @@ def _align_shape(
       biases and projections.
   2.  Padding/Repeating: For attention-related weights, it can pad the head
       dimension or repeat along the number of heads dimension.
-  3.  Special Handling: Includes specific logic for 1-D KV biases in
-      'sglang_jax' rollout.
 
   Args:
       val: Source value.
       tgt_shape: Target shape.
       src_key: Source key for error messages.
-      rollout_engine: Optional string indicating the rollout engine, used for
-        special-casing certain alignments (e.g., 'sglang_jax').
       **kwargs: Additional keyword arguments, potentially containing metadata
         like 'num_kv_heads' and 'head_dim' for specific alignment logic.
 
@@ -715,23 +699,6 @@ def _align_shape(
       raise ShapeMismatchError(
           f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
       )
-  elif re.compile(r'layers\..*\.attn\.(k|v)_bias').match(src_key):
-    logging.debug('Handling 1-D KV bias for %s in SGLangJAX rollout.', src_key)
-    assert tgt_shape[0] > val.shape[0] and tgt_shape[0] % val.shape[0] == 0, (
-        f'Unexpected attention bias shape: {val.shape} and target shape:'
-        f' {tgt_shape}'
-    )
-    repeat_factor = tgt_shape[0] // val.shape[0]
-    logging.debug(
-        'Replicating 1-D KV bias on %s: %s -> %s (repeat x%d per head)',
-        src_key,
-        val.shape,
-        tgt_shape,
-        repeat_factor,
-    )
-    val_2d = jnp.reshape(val, (kwargs['num_kv_heads'], kwargs['head_dim']))
-    val_2d = jnp.repeat(val_2d, repeat_factor, axis=0)
-    return jnp.reshape(val_2d, tgt_shape)
 
   attention_patterns = [
       r'.*(q|k|v|o|qkv)_proj.*',
@@ -861,7 +828,6 @@ def transfer_state_with_mappings(
     key_mapping_hook_fns=None,
     transpose_keys=None,
     reshard_fn=None,
-    rollout_engine=None,
     **kwargs,
 ):
   """Transfer state using mappings, with optional transpose and shard logic.
@@ -878,7 +844,6 @@ def transfer_state_with_mappings(
     transpose_keys: A dictionary defining which keys to transpose and the
       corresponding axes to transpose.
     reshard_fn: A function to shard the value.
-    rollout_engine: The name of the rollout engine being used.
     **kwargs: Additional keyword arguments.
 
   Returns:
@@ -927,7 +892,7 @@ def transfer_state_with_mappings(
       tgt_param,
   ) in unscanned_src_to_tgt_flat.items():
     # Apply transpose if configured
-    val = _apply_transpose(val, flat_src_key, transpose_keys, rollout_engine)
+    val = _apply_transpose(val, flat_src_key, transpose_keys)
 
     # Apply optional hook function
     if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
@@ -935,9 +900,7 @@ def transfer_state_with_mappings(
 
     # Align shapes (padding/repeating as needed)
     tgt_val = tgt_param.value if hasattr(tgt_param, 'value') else tgt_param
-    val = _align_shape(
-        val, tgt_val.shape, flat_src_key, rollout_engine, **kwargs
-    )
+    val = _align_shape(val, tgt_val.shape, flat_src_key, **kwargs)
 
     # Cast to target dtype
     val = _apply_dtype_cast(val, tgt_val.dtype, flat_src_key)

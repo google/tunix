@@ -18,8 +18,8 @@ support for:
 Tunix leverages the power of JAX for accelerated computation and seamless
 integration with JAX-based modeling frameworks like
 [Flax NNX](https://flax.readthedocs.io/en/latest/nnx_basics.html), and
-integrates with high-performance inference engines like vLLM and SGLang-JAX for
-rollout. **For our detailed documentation, please refer to the [Tunix Website](https://tunix.readthedocs.io/en/latest/index.html)**.
+integrates with high-performance inference engines like vLLM for rollout.
+**For our detailed documentation, please refer to the [Tunix Website](https://tunix.readthedocs.io/en/latest/index.html)**.
 
 
 **Current Status: V2 Release**
@@ -71,9 +71,8 @@ tuning workflows on top of the XLA and JAX infrastructure. See [Design Overview]
     -   Components are designed to be reusable and composable
     -   Easy to customize and extend
 -   **Performance & Efficiency**:
-    -   Native [vLLM](https://tunix.readthedocs.io/en/latest/rollout.html#vllm) and
-        [SGLang-JAX](https://tunix.readthedocs.io/en/latest/rollout.html#sglang) on TPU integration for performant
-        rollout
+    -   Native [vLLM](https://tunix.readthedocs.io/en/latest/rollout.html#vllm) on TPU
+        integration for performant rollout
     -   Native [MaxText](https://github.com/AI-Hypercomputer/maxtext) model
         integration for high performance kernels and model execution
     -   [Micro-batching](https://tunix.readthedocs.io/en/latest/performance.html#batching-config) support for component

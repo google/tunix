@@ -106,8 +106,8 @@ pip install -e ".[prod]"
 
 ### Optional Dependencies
 
-For accelerated inference, Tunix supports integration with vLLM and SGLang-Jax.
-These need to be installed manually.
+For accelerated inference, Tunix supports integration with vLLM. This needs to
+be installed manually.
 
 **vLLM on TPU**
 
@@ -145,16 +145,6 @@ Or install from source:
 
 ```
 bash scripts/install_tunix_vllm_requirement.sh
-```
-
-**SGLang-Jax**
-
-After installing Tunix, you can install SGLang-Jax from source:
-
-```sh
-git clone git@github.com:sgl-project/sglang-jax.git
-cd sglang-jax/python
-pip install -e .
 ```
 
 **GCS File System**

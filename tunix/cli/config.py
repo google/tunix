@@ -56,7 +56,6 @@ _OPEN_DICT_KEYS: frozenset[str] = frozenset({
     "agent_kwargs",
     "env_kwargs",
     "kubernetes_config",
-    "sglang_jax_config",
     "agentic_ppo_config",
     "perf_metrics_options",
 })

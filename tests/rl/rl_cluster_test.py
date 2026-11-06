@@ -36,7 +36,7 @@ from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import mock_rollout
 from tunix.tests import test_common as tc
 
-# Some tests relying on SGLang and vLLM cannot run in run_core environment.
+# Some tests relying on vLLM cannot run in run_core environment.
 is_run_core = os.environ.get('GITHUB_JOB') == 'run_core'
 
 PreTrainedTokenizerBase = tokenization_utils_base.PreTrainedTokenizerBase
@@ -455,22 +455,21 @@ class RlEngineTest(parameterized.TestCase):
         nnx.state(rl_engine.rollout.model(), nnx.Param),
     )
 
-  def test_init_engine_invalid_engine_string(self):
+  @parameterized.parameters('invalid_engine', 'sglang_jax')
+  def test_init_engine_invalid_engine_string(self, engine):
     with self.assertRaisesRegex(
         ValueError, '`cluster_config.rollout_engine` should be one of'
     ):
-      self._create_test_rl_engine(
-          'invalid_engine', base_rollout.RolloutConfig()
-      )
+      self._create_test_rl_engine(engine, base_rollout.RolloutConfig())
 
-  @parameterized.parameters('vanilla', 'vanilla_v2', 'vllm', 'sglang_jax')
+  @parameterized.parameters('vanilla', 'vanilla_v2', 'vllm')
   def test_init_rollout_engine_missing_config_raises_error(self, engine):
     with self.assertRaisesRegex(
         ValueError, '`cluster_config.rollout_config` cannot be None.'
     ):
       self._create_test_rl_engine(engine, None)
 
-  @parameterized.parameters('vanilla', 'vanilla_v2', 'vllm', 'sglang_jax')
+  @parameterized.parameters('vanilla', 'vanilla_v2', 'vllm')
   def test_init_rollout_engine_empty_dict_config_raises_error(self, engine):
     with self.assertRaisesRegex(
         ValueError,
@@ -710,62 +709,6 @@ class RlEngineTest(parameterized.TestCase):
         ValueError, 'Rollout vllm model version or path is missing!'
     ):
       self._create_test_rl_engine('vllm', rollout_config)
-
-  @parameterized.named_parameters(
-      dict(
-          testcase_name='single_config',
-          rollout_config=base_rollout.RolloutConfig(
-              max_tokens_to_generate=10, kv_cache_size=1024
-          ),
-          expected_train_config=base_rollout.RolloutConfig(
-              max_tokens_to_generate=10, kv_cache_size=1024
-          ),
-      ),
-      dict(
-          testcase_name='dict_config',
-          rollout_config={
-              rl_engine_lib.Mode.TRAIN: base_rollout.RolloutConfig(
-                  max_tokens_to_generate=10, kv_cache_size=1024
-              ),
-              rl_engine_lib.Mode.EVAL: base_rollout.RolloutConfig(
-                  max_tokens_to_generate=20, kv_cache_size=2048
-              ),
-          },
-          expected_train_config=base_rollout.RolloutConfig(
-              max_tokens_to_generate=10, kv_cache_size=1024
-          ),
-      ),
-  )
-  @unittest.skipIf(is_run_core, 'Skipping in run_core')
-  def test_init_sglang_jax_rollout_engine(
-      self, rollout_config, expected_train_config
-  ):
-    # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
-    from tunix.rl.rollout import sglang_jax_rollout
-
-    with mock.patch.object(
-        sglang_jax_rollout, 'SglangJaxRollout', autospec=True
-    ) as mock_sglang_cls:
-      rl_engine = self._create_test_rl_engine('sglang_jax', rollout_config)
-
-      mock_sglang_cls.assert_called_once()
-      self.assertEqual(rl_engine.rollout, mock_sglang_cls.return_value)
-      called_kwargs = mock_sglang_cls.call_args.kwargs
-      self.assertEqual(called_kwargs['rollout_config'], expected_train_config)
-      self.assertIn('mesh', called_kwargs)
-
-  @unittest.skipIf(is_run_core, 'Skipping in run_core')
-  @mock.patch.object(rl_engine_lib.sft_utils, 'is_lora_enabled', autospec=True)
-  def test_init_sglang_jax_rollout_engine_lora_error(self, mock_is_lora):
-    mock_is_lora.return_value = True
-    rollout_config = base_rollout.RolloutConfig(
-        rollout_sglang_jax_enable_static_lora=False
-    )
-
-    with self.assertRaisesRegex(
-        ValueError, 'Rollout sglang jax lora config is missing'
-    ):
-      self._create_test_rl_engine('sglang_jax', rollout_config)
 
   def test_init_engine_unsupported_engine_type(self):
     class InvalidEngine:

@@ -225,7 +225,6 @@ class MockVllmSampler(base_sampler.BaseSampler):
         dst_state=self._transformer_state,
         key_mappings=test_common.TOY_TRANSFORMER_TO_HF_MAPPINGS,
         reshard_fn=reshard.reshard_pytree,
-        rollout_engine="vllm_jax",
     )
     self._transformer_state = converted
 

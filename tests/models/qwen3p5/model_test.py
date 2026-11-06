@@ -682,8 +682,6 @@ class Qwen3p5ModelTest(parameterized.TestCase):
   def test_backend_mappings_unavailable_raises_runtime_error(self):
     with self.assertRaises(RuntimeError):
       qwen3p5_model.Qwen3p5.mapping_for('vllm_jax')
-    with self.assertRaises(RuntimeError):
-      qwen3p5_model.Qwen3p5.mapping_for('sglang_jax')
 
   def test_segment_ids_with_cache_raises_value_error(self):
     cfg = _make_tiny_qwen3p5_config()
