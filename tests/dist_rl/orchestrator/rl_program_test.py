@@ -4154,19 +4154,15 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(
           logger.get_metric("rollout", "success_rate", "train"), 1.0
       )
+      # `max_staleness=0` admits only current-version rollouts, so staleness
+      # is 0 by construction and not logged; version span still is.
+      for tag in ("staleness_mean", "staleness_max", "staleness_min"):
+        self.assertFalse(logger.metric_exists("rollout", tag, "train"))
       self.assertTrue(
-          logger.metric_exists("rollout", "staleness_mean", "train")
+          logger.metric_exists("rollout", "version_span_mean", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("rollout", "staleness_mean", "train"), 0.0
-      )
-      self.assertTrue(logger.metric_exists("rollout", "staleness_max", "train"))
-      self.assertAlmostEqual(
-          logger.get_metric("rollout", "staleness_max", "train"), 0.0
-      )
-      self.assertTrue(logger.metric_exists("rollout", "staleness_min", "train"))
-      self.assertAlmostEqual(
-          logger.get_metric("rollout", "staleness_min", "train"), 0.0
+          logger.get_metric("rollout", "version_span_mean", "train"), 0.0
       )
       self.assertNotIn("generation", logger._metrics)
 
@@ -5238,7 +5234,8 @@ class RLProgramTest(absltest.TestCase):
         self.assertIn("rollout/train/prompts/mean_length", logged_keys)
         self.assertIn("rollout/train/completions/mean_length", logged_keys)
         self.assertIn("rollout/train/total_tokens_mean", logged_keys)
-        self.assertIn("rollout/train/staleness_mean", logged_keys)
+        self.assertNotIn("rollout/train/staleness_mean", logged_keys)
+        self.assertIn("rollout/train/version_span_mean", logged_keys)
         self.assertIn("perf/train/global_step_time", logged_keys)
         self.assertIn("orchestrator/train/policy_version", logged_keys)
         self.assertFalse(any(k.startswith("generation/") for k in logged_keys))

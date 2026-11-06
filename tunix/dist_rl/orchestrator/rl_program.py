@@ -1022,9 +1022,13 @@ class StandardRLProgram(RLProgram):
       if not item.is_valid:
         continue
       item_version = trajectory_queue_manager.item_policy_version(item)
-      staleness_list.append(
-          float(max(0, consumed_policy_version - item_version))
-      )
+      # With `max_staleness == 0` only current-version rollouts are admitted,
+      # so staleness is 0 by construction and is not logged. Version span is
+      # still logged: in-flight weight updates can raise it without staleness.
+      if self.max_staleness > 0:
+        staleness_list.append(
+            float(max(0, consumed_policy_version - item_version))
+        )
       version_span_list.append(
           float(trajectory_queue_manager.item_version_span(item))
       )

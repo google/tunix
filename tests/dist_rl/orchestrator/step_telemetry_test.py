@@ -264,7 +264,7 @@ class RolloutHealthTest(absltest.TestCase):
     self.assertEqual(health.metrics["rollout/tail_sec"], 15.0)
     self.assertEqual(health.metrics["rollout/batch_wall_sec"], 50.0)
 
-  def test_separates_worker_execution_from_queue_wait_and_logs_env_reward_time(
+  def test_separates_worker_execution_from_queue_wait_and_logs_env_time(
       self,
   ):
     health = step_telemetry.rollout_health(
@@ -307,7 +307,10 @@ class RolloutHealthTest(absltest.TestCase):
     self.assertEqual(health.metrics["rollout/worker_queue_wait_sec/p50"], 12.5)
     self.assertEqual(health.metrics["rollout/worker_queue_wait_sec/max"], 15.0)
     self.assertEqual(health.metrics["rollout/env_time_sec/mean"], 6.5)
-    self.assertEqual(health.metrics["rollout/reward_time_sec/mean"], 0.5)
+    # `reward_time` on the trajectory is not reported as a rollout metric.
+    self.assertFalse(
+        any(k.startswith("rollout/reward_time_sec") for k in health.metrics)
+    )
 
   def test_rerouted_rollout_uses_latest_worker_received_and_isolates_queue_wait(
       self,

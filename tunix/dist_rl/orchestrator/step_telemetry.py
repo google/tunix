@@ -176,14 +176,6 @@ def _env_time_s(traj: Mapping[str, Any]) -> float | None:
   )
 
 
-def _reward_time_s(traj: Mapping[str, Any]) -> float | None:
-  """Reads `reward_latency` from `reward_time`."""
-  reward_time = traj.get("reward_time")
-  if reward_time is None:
-    return None
-  return float(reward_time["reward_latency"])
-
-
 def _num_turns(traj: Mapping[str, Any]) -> int | None:
   """Counts the assistant turns in a Token-mode rollout's message list.
 
@@ -219,8 +211,6 @@ class RolloutFacts:
     task_name: Semantic task name from lineage, or `""` when unset.
     env_time_s: Total environment interaction wall time (`reset` + `step` +
       `close`) in seconds, or None without `env_time`.
-    reward_time_s: Final reward evaluation wall time in seconds, or None without
-      `reward_time`.
   """
 
   traj_id: str
@@ -230,7 +220,6 @@ class RolloutFacts:
   window: RolloutWindow | None
   task_name: str = ""
   env_time_s: float | None = None
-  reward_time_s: float | None = None
 
   @classmethod
   def of(cls, item: datatypes.TrajectoryItem) -> "RolloutFacts":
@@ -265,7 +254,6 @@ class RolloutFacts:
         window=_rollout_window(item),
         task_name=task_name,
         env_time_s=_env_time_s(traj),
-        reward_time_s=_reward_time_s(traj),
     )
 
 
@@ -318,9 +306,8 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
       `conversation_text`.
     * `rollout/turn_length/{mean,p50,p99,max}`: tokens sampled per assistant
       turn, pooled over the step.
-    * `rollout/env_time_sec/{mean,p50,p99,max}` and
-      `rollout/reward_time_sec/{mean,p50,p99,max}`: environment (`reset` +
-      `step` + `close`) and final-reward wall time per rollout.
+    * `rollout/env_time_sec/{mean,p50,p99,max}`: environment (`reset` +
+      `step` + `close`) wall time per rollout.
     * `rollout/duration_sec/{p50,p90,p99,max}`: seconds from the engine
       building a rollout's request to its worker handing the trajectory back,
       as the orchestrator sees it: queueing before the worker starts, pauses
@@ -352,7 +339,6 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
   turn_lengths: list[int] = []
   windows: list[RolloutWindow] = []
   env_times: list[float] = []
-  reward_times: list[float] = []
   for fact in facts:
     status_counts[fact.status] += 1
     if fact.num_turns is not None:
@@ -363,8 +349,6 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
       windows.append(fact.window)
     if fact.env_time_s is not None:
       env_times.append(fact.env_time_s)
-    if fact.reward_time_s is not None:
-      reward_times.append(fact.reward_time_s)
 
   metrics: dict[str, float] = {}
   if facts:
@@ -391,14 +375,6 @@ def rollout_health(facts: Sequence[RolloutFacts]) -> RolloutHealth:
   if env_times:
     _add_percentiles(
         metrics, "rollout/env_time_sec", env_times, (50, 99), include_mean=True
-    )
-  if reward_times:
-    _add_percentiles(
-        metrics,
-        "rollout/reward_time_sec",
-        reward_times,
-        (50, 99),
-        include_mean=True,
     )
   if windows:
     durations = np.array([window.duration_s for window in windows])
