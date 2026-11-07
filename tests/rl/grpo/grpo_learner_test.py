@@ -148,6 +148,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         self._eval_iter_steps = 0
         self.rollout_worker_mesh = pxla.thread_resources.env.physical_mesh
         self._last_iter_step = 0
+        self._fast_forward_pending = False
         self.algo_config = grpo_config
         self._data_shuffle_seed = None
         self.rl_engine = types.SimpleNamespace(  # pyrefly: ignore[bad-assignment]
