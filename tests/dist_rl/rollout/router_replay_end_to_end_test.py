@@ -500,6 +500,7 @@ class SamplerToPayloadTest(absltest.TestCase):
 
     mock_env = mock.MagicMock()
     mock_env.max_steps = 2
+    mock_env.final_reward_fn = None
     mock_env.reset.return_value = ("initial_obs", {})
     mock_env.step.side_effect = [
         ("env_obs_1", 1.0, False, {}),

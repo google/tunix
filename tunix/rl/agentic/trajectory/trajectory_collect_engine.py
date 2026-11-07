@@ -138,7 +138,6 @@ class TrajectoryCollectEngine:
     self.trajectory_store = trajectory_store
     self.metadata = metadata
     self.store_routed_experts = store_routed_experts
-    self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
     if exact_token_continuity and (tokenizer is None or chat_parser is None):
       raise ValueError("exact_token_continuity requires a tokenizer and parser")
@@ -808,11 +807,6 @@ class TrajectoryCollectEngine:
     )
 
     self.env_time["reset_latency"] += wall_time
-    self.final_reward_fn = (
-        self.env.final_reward_fn
-        if hasattr(self.env, "final_reward_fn")
-        else None
-    )
     self._start_ts = time.perf_counter()
     self.agent.update_from_env(
         observation=obs,
@@ -1347,22 +1341,21 @@ class TrajectoryCollectEngine:
   async def _append_final_reward(self):
     """Compute and add final reward to the last step of the episode.
 
-    Applies the final reward function (if provided) to the episode's
-    final response and adds it to the last step's reward. This enables
-    additional reward signals based on overall episode performance.
+    Applies `self.env.final_reward_fn` (if provided) once at episode end and
+    adds the result to the terminal step's reward.
     """
     last_step = self.agent.get_current_step()
-    if (
-        last_step is None
-        or self.final_reward_fn is None
-        or not callable(self.final_reward_fn)
-    ):
-      # Skip reward computation in trajectory collection if no reward function
-      # is provided or no step is taken.
+    final_reward_fn = self.env.final_reward_fn
+    if last_step is None or final_reward_fn is None:
       logging.debug("%s Final reward function is skipped", self._debug_prefix)
       return
+    if not callable(final_reward_fn):
+      raise TypeError(
+          "env.final_reward_fn must be callable or None, got"
+          f" {type(final_reward_fn).__name__}"
+      )
     final_reward, wall_time = await self._run_with_timing(
-        self.final_reward_fn, timeout=self.final_reward_timeout
+        final_reward_fn, timeout=self.final_reward_timeout
     )
 
     self.reward_time["reward_latency"] += wall_time
