@@ -979,8 +979,6 @@ class StandardRLProgram(RLProgram):
       generation_metrics: Mapping[str, float] | None = None,
       step_result: Any = None,
       trainer_metrics: Any = None,
-      num_rollouts: int,
-      num_microbatches: int,
       padding_stats: Sequence[batch_assembly.PaddingStats],
       packing_time_sec: float,
       step_time_sec: float,
@@ -1182,13 +1180,9 @@ class StandardRLProgram(RLProgram):
 
     # --- 3. Perf & Orchestrator Metrics ---
     self._log_metric("perf/global_step_time", float(step_time_sec), log_step)
-    orchestrator_stats = {
-        "policy_version": float(self.policy_version),
-        "num_rollouts": float(num_rollouts),
-        "num_microbatches": float(num_microbatches),
-    }
-    for tag, val in orchestrator_stats.items():
-      self._log_metric(f"orchestrator/{tag}", val, log_step)
+    self._log_metric(
+        "orchestrator/policy_version", float(self.policy_version), log_step
+    )
     if step_times is not None:
       for tag, val in dataclasses.asdict(step_times).items():
         self._log_metric(f"perf/{tag}", val, log_step)
@@ -1209,7 +1203,6 @@ class StandardRLProgram(RLProgram):
 
     # --- 4. Actor Trainer Metrics ---
     loss_val = None
-    perplexity_val = None
     if trainer_metrics is None:
       if isinstance(step_result, dict):
         trainer_metrics = step_result.get("metrics")
@@ -1238,7 +1231,7 @@ class StandardRLProgram(RLProgram):
               continue
             scalar_metrics[k] = v
 
-      # Loss & Perplexity
+      # Loss
       raw_loss = scalar_metrics.pop(
           "loss",
           scalar_metrics.pop(
@@ -1255,8 +1248,6 @@ class StandardRLProgram(RLProgram):
       loss_val = _extract_scalar(raw_loss)
       if loss_val is not None:
         self._log_metric("loss", loss_val, log_step, prefix="actor")
-        perplexity_val = float(np.exp(loss_val))
-        self._log_metric("perplexity", perplexity_val, log_step, prefix="actor")
 
       # Learning Rate
       raw_lr = scalar_metrics.pop(
@@ -1320,7 +1311,6 @@ class StandardRLProgram(RLProgram):
         "advantage_mean": advantage_mean,
         "advantage_std": advantage_std,
         "loss_val": loss_val,
-        "perplexity_val": perplexity_val,
         "filtered_groups_count": filtered_groups_count,
         "filtered_trajectories_count": filtered_trajectories_count,
     }
@@ -1795,8 +1785,6 @@ class StandardRLProgram(RLProgram):
             generation_metrics=generation_metrics,
             step_result=step_result,
             trainer_metrics=trainer_metrics,
-            num_rollouts=num_rollouts,
-            num_microbatches=num_microbatches,
             padding_stats=step_padding_stats,
             packing_time_sec=step_packing_time_sec,
             step_time_sec=step_time_sec,
@@ -1827,16 +1815,14 @@ class StandardRLProgram(RLProgram):
         )
 
         loss_val = metrics_summary["loss_val"]
-        perplexity_val = metrics_summary["perplexity_val"]
         if self.mode == Mode.TRAIN:
           logging.info(
               "Train step %d - loss: %s - reward_mean: %.4f - advantage_mean:"
-              " %.4f - perplexity: %s - step_time: %.2fs",
+              " %.4f - step_time: %.2fs",
               current_step,
               f"{loss_val:.4f}" if loss_val is not None else "N/A",
               metrics_summary["reward_mean"],
               metrics_summary["advantage_mean"],
-              f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
               step_time_sec,
           )
 
