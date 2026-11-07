@@ -652,6 +652,80 @@ class SafetensorsLoaderTest(parameterized.TestCase):
           mode='original',
       )
 
+  def test_original_loader_supports_multihost_sharding_and_local_device_default(
+      self,
+  ):
+    stnp.save_file(
+        self.tensors, os.path.join(self.st_dir, 'model.safetensors')
+    )
+    local_dev = jax.local_devices()[0]
+    remote_dev = mock.create_autospec(jax.Device, instance=True)
+
+    with (
+        mock.patch.object(
+            jax, 'devices', return_value=[remote_dev, local_dev]
+        ),
+        mock.patch.object(jax, 'local_devices', return_value=[local_dev]),
+    ):
+      local_loaded = safetensors_loader.load_and_create_model(
+          self.st_dir,
+          test_common.ToyTransformer,
+          self.model.config,
+          key_mapping,
+          mesh=None,
+          dtype=jnp.float32,
+          mode='original',
+      )
+    jax.tree.map(
+        np.testing.assert_array_equal, self.state, nnx.state(local_loaded)
+    )
+
+    mesh = jax.sharding.Mesh(
+        np.array([local_dev]).reshape(1, 1), ('fsdp', 'tp')
+    )
+    orig_get_named_sharding = nnx.get_named_sharding
+
+    def fake_multihost_named_sharding(state, target_mesh):
+      real = orig_get_named_sharding(state, target_mesh)
+
+      def to_non_addressable(_):
+        s = mock.create_autospec(jax.sharding.NamedSharding, instance=True)
+        s.is_fully_addressable = False
+        return s
+
+      return jax.tree.map(to_non_addressable, real)
+
+    with (
+        mock.patch.object(
+            nnx, 'get_named_sharding', side_effect=fake_multihost_named_sharding
+        ),
+        mock.patch.object(
+            jax, 'device_put', wraps=jax.device_put
+        ) as mock_device_put,
+        mock.patch.object(
+            jax,
+            'make_array_from_callback',
+            side_effect=lambda shape, s, cb: jnp.asarray(
+                cb(tuple(slice(0, d) for d in shape))
+            ),
+        ) as mock_from_callback,
+    ):
+      mh_loaded = safetensors_loader.load_and_create_model(
+          self.st_dir,
+          test_common.ToyTransformer,
+          self.model.config,
+          key_mapping,
+          mesh=mesh,
+          dtype=jnp.float32,
+          mode='original',
+      )
+
+    mock_device_put.assert_not_called()
+    self.assertLen(mock_from_callback.call_args_list, len(self.tensors))
+    jax.tree.map(
+        np.testing.assert_array_equal, self.state, nnx.state(mh_loaded)
+    )
+
 
 if __name__ == '__main__':
   absltest.main()

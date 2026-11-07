@@ -36,6 +36,7 @@ import numpy as np
 from tunix.oss import utils
 from tunix.utils import compat
 from tunix.utils import env_utils
+from tunix.utils import sharding_utils
 from tunix.utils import torch_utils
 
 load_file_from_gcs = utils.load_file_from_gcs
@@ -405,7 +406,7 @@ def load_and_create_model_orig(
         nnx.get_named_sharding(abs_state, mesh).to_pure_dict()
     )
   else:
-    shardings = [jax.devices()[0]] * len(params)
+    shardings = [jax.local_devices()[0]] * len(params)
   key_map = key_mapping(config)
   target_dtype = None if dtype is None else np.dtype(dtype)
 
@@ -431,8 +432,8 @@ def load_and_create_model_orig(
     matches = _match_params(keys, params, tensors)
     if matches:
       # `device_get` turns any `jax.Array` returned by `preprocess_fn` into a
-      # host array, so device_put is a host-to-device copy, not a D2D program.
-      placed = jax.device_put(
+      # host array, so placement is a host-to-device copy, not a D2D program.
+      placed = sharding_utils.place_arrays_on_targets(
           jax.device_get([tensor for _, tensor in matches]),
           [shardings[i] for i, _ in matches],
       )
@@ -508,7 +509,7 @@ def load_and_create_model_opt(
   if mesh is not None:
     sharding_dict = nnx.get_named_sharding(abs_state, mesh).to_pure_dict()
   else:
-    device = jax.devices()[0]
+    device = jax.local_devices()[0]
     sharding_dict = jax.tree.map(lambda _: device, nnx_state_dict)
 
   key_map = key_mapping(config)
@@ -560,19 +561,12 @@ def load_and_create_model_opt(
   def shard_state(state_dict):
     def _shard_state(path, sharding):
       key = path_to_key(path)
-      possible_keys = [
-          key,
-          f'{key}.value',
-      ]  # for nnx.Param where a value suffix will be there
-      tensor = None
-      for k in possible_keys:
-        if k in state_dict:
-          tensor = state_dict[k]
-          break
-      if tensor is not None and dtype is not None:
-        np_dtype = to_np_dtype(dtype)
-        tensor = tensor.astype(np_dtype)
-      return jax.device_put(tensor, sharding)
+      tensor = (
+          state_dict[key] if key in state_dict else state_dict[f'{key}.value']
+      )
+      if dtype is not None:
+        tensor = tensor.astype(to_np_dtype(dtype))
+      return sharding_utils.place_array_on_target(tensor, sharding)
 
     return _shard_state
 

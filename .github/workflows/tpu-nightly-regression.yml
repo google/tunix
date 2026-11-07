@@ -60,7 +60,7 @@ jobs:
         python3 -m pip install --upgrade pip setuptools wheel
 
         # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
-        python3 -m pip install -e .[dev,test,cli]
+        python3 -m pip install -e ".[tpu,dev,test,cli]"
 
         # tpu-inference/Numba needs NumPy 2.3 or less.
         python3 -m pip install numpy==2.3.5 --force-reinstall
@@ -319,7 +319,7 @@ jobs:
         # Ensure build requirements are upgraded and present
         pip install packaging setuptools wheel setuptools-rust kagglehub kagglesdk --upgrade
 
-        pip install -e .[prod,test,cli]
+        pip install -e ".[tpu,prod,test,cli]"
 
         # Fetch latest vllm lkg commit hash from tpu-inference repo
         echo "Fetching latest vLLM LKG version..."

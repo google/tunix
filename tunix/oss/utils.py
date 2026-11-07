@@ -217,6 +217,9 @@ def hf_pipeline(model_id: str, model_download_path: str | None = None) -> str:
       cached_path = hf.hf_hub_download(repo_id=model_id, filename=filename)
     _link_or_copy_cached_file(cached_path, dst)
 
+  os.makedirs(model_download_path, exist_ok=True)
+  with open(os.path.join(model_download_path, '.hf_complete'), 'w') as f:
+    f.write(model_id)
   logging.info(
       'Downloaded %s to: %s',
       filtered_files,

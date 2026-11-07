@@ -8,6 +8,7 @@
 quickstart.md
 design.md
 agentic_rl.md
+gpu_support.md
 performance.md
 reliability.md
 launching.md

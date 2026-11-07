@@ -763,18 +763,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if mesh.empty:
       return
 
-    def _shard(x, p):
+    def _shard(x: Any, p: shd.PartitionSpec | None) -> Any:
       if not isinstance(x, (jax.Array, np.ndarray)):
         return x
-      if p is None:
-        p = shd.PartitionSpec()
-      sharding = sharding_utils.get_sharding(x, mesh, p)  # pyrefly: ignore[bad-argument-type]
-      if hasattr(x, "sharding") and x.sharding == sharding:
-        return x
-      if getattr(x, "is_fully_addressable", True):
-        with jax.transfer_guard("allow"):
-          return jax.device_put(x, sharding)
-      return x
+      sharding = sharding_utils.get_sharding(
+          x, mesh, shd.PartitionSpec() if p is None else p
+      )
+      return sharding_utils.place_array_on_target(x, sharding)
 
     optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
     optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
@@ -794,9 +789,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       )
 
     # Denominator is a scalar — replicate across all devices
-    self.grad_accumulator.denom[...] = jax.device_put(
+    self.grad_accumulator.denom[...] = _shard(
         self.grad_accumulator.denom[...],
-        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()),
+        shd.PartitionSpec(),
     )
 
   def jit_fwd_bwd_update_and_eval_step(

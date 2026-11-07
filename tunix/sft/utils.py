@@ -15,7 +15,7 @@
 """Simple utils used by SFT."""
 
 import collections
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 import contextlib
 import functools
 import gc
@@ -141,20 +141,21 @@ def _pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, Optional[float]]]:
   return [(hbm_used[device], hbm_limit) for device in devices]
 
 
-def _jax_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
-  """Returns the HBM usage for each device when using JAX."""
-  hbm_used = []
+def _jax_hbm_usage_gb(devices: Sequence[jax.Device]) -> list[tuple[int, int]]:
+  """Returns the HBM/VRAM usage in bytes for each accelerator device."""
+  hbm_used: list[tuple[int, int]] = []
   for device in devices:
     if device.platform == "cpu":
       logging.warning(
-          "Skipping non-TPU device: %s. You might be missing jax[tpu]"
-          " dependency.",
+          "Skipping CPU device (no HBM/VRAM memory_stats): %s.",
           device.platform,
       )
       return []
     stats = device.memory_stats()
-    used = stats["bytes_in_use"]
-    limit = stats["bytes_limit"]
+    if stats is None:
+      return []
+    used = int(stats["bytes_in_use"])
+    limit = int(stats["bytes_limit"])
     hbm_used.append((used, limit))
   return hbm_used
 
@@ -183,11 +184,12 @@ def show_hbm_usage(title=""):
     hbm_stats = _jax_hbm_usage_gb(devices)
 
     for i, (used, limit) in enumerate(hbm_stats):
+      pct_str = f"{100.0 * used / limit:.1f}%" if limit > 0 else "N/A"
       logging.info(
           "Using %s / %s (%s) on %s",
           fmt_size(used),
           fmt_size(limit),
-          used / limit,
+          pct_str,
           devices[i],
       )
 

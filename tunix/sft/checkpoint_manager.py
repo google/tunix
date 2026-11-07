@@ -28,6 +28,7 @@ from orbax.checkpoint import pathways as ocp_pathways
 from orbax.checkpoint import utils as ocp_utils
 from orbax.checkpoint import v1 as ocp
 from tunix.sft import checkpoint_options
+from tunix.utils import sharding_utils
 
 
 def _convert_host_local_array(x: Any) -> Any:
@@ -42,13 +43,16 @@ def _convert_host_local_array(x: Any) -> Any:
         mesh, jax.sharding.PartitionSpec()
     )
     if not x.shape:
-      val = x.item()
-      return jax.device_put(val, replicated_sharding)
+      return sharding_utils.place_array_on_target(
+          np.asarray(x.item()), replicated_sharding
+      )
     else:
       try:
         return ocp_utils.fully_replicated_host_local_array_to_global_array(x)
       except ValueError:
-        return jax.device_put(np.asarray(x), replicated_sharding)
+        return sharding_utils.place_array_on_target(
+            np.asarray(x), replicated_sharding
+        )
   return x
 
 

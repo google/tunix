@@ -240,6 +240,8 @@ class SafeDownloadTest(parameterized.TestCase):
     self.assertTrue(
         os.path.samefile(cached_file, os.path.join(local_dir, "config.json"))
     )
+    with open(os.path.join(local_dir, ".hf_complete")) as f:
+      self.assertEqual(f.read(), "org/repo")
 
   def test_hf_pipeline_defaults_download_path_when_none(self):
     temp_root = self.create_tempdir().full_path
