@@ -25,8 +25,9 @@ MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)
 # `full_batch_size * num_generations` trajectories are inflight per global step.
 # With default `batch_size=128` (`train_deepscaler_nb.py`) and
 # `num_generations=8` (`train_deepswe_nb.py`, `train_frozenlake.py`,
-# `run_gsm8k_dist_grpo.py`), one rollout step runs 128 * 8 = 1,024 trajectories;
-# 4,096 provides 4x headroom across overlapping steps (~4.5 MB RAM).
+# `math_gsm8k_dist/gsm8k.yaml`), one rollout step runs 128 * 8 = 1,024
+# trajectories; 4,096 provides 4x headroom across overlapping steps (~4.5 MB
+# RAM).
 _MAX_CACHED_TRAJECTORIES: Final[int] = 4_096
 
 # Process-local lock serializing concurrent schema initialization across threads

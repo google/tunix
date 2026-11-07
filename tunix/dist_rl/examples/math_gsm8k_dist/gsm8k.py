@@ -143,8 +143,7 @@ def create_dataset(
 
 # TODO(noghabi): Validate a non-empty `#### <answer>` in `load_gsm8k_dataset`
 # (and stop coercing a missing answer to "" in `GSM8KEnv.__init__`), and type
-# the task records with a `TypedDict`, once the legacy `run_gsm8k_dist_grpo.py`
-# is removed.
+# the task records with a `TypedDict`.
 def _to_task_record(
     example: collections.abc.Mapping[str, object],
 ) -> dict[str, object]:
@@ -172,41 +171,6 @@ def gsm8k_env_reward(
   completion = action.action if hasattr(action, "action") else str(action)
   gold_answer = task.get("answer", task.get("gold_answer"))
   return score_gsm8k_completion(str(completion), gold_answer)
-
-
-# TODO(noghabi): Remove with `run_gsm8k_dist_grpo.py`;
-# `gsm8k_rewards.reward_fn` replaces it.
-def make_gsm8k_reward_fn(
-    debug: bool = False,
-) -> collections.abc.Callable[..., list[float]]:
-  """Creates an orchestrator-side reward function scoring completions against gold answers."""
-
-  def reward_fn(
-      prompts: collections.abc.Sequence[str],
-      completions: collections.abc.Sequence[str],
-      answer: collections.abc.Sequence[str],
-      **kwargs: Any,
-  ) -> list[float]:
-    del kwargs
-    rewards: list[float] = []
-    for prompt, completion, gold_answer in zip(
-        prompts, completions, answer, strict=True
-    ):
-      reward, _ = score_gsm8k_completion(completion, gold_answer)
-      if debug:
-        logging.debug(
-            "[Orchestrator] Sampler response for %s:\n"
-            "[Sampled Response] ---\n%s\n--- [End Response] ---\n"
-            "Gold Answer: %s, Extracted Answer: %s",
-            prompt,
-            completion,
-            gold_answer,
-            extract_boxed_answer(completion),
-        )
-      rewards.append(reward)
-    return rewards
-
-  return reward_fn
 
 
 @registry.register_env(GSM8K_ENV_NAME)

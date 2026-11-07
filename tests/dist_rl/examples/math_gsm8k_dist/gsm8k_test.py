@@ -244,27 +244,6 @@ class GSM8KTest(absltest.TestCase):
     self.assertEqual(second_item["question"], "What is 3 * 7?")
     self.assertEqual(second_item["answer"], "21")
 
-  def test_make_gsm8k_reward_fn(self):
-    reward_fn = gsm8k.make_gsm8k_reward_fn(debug=True)
-
-    rewards = reward_fn(
-        prompts=["q1", "q2", "q3", "q4"],
-        completions=[
-            (
-                "<reasoning>Reasoning"
-                " step.</reasoning><answer>\\boxed{42}</answer>"
-            ),
-            (
-                "<reasoning>Reasoning"
-                " step.</reasoning><answer>\\boxed{100}</answer>"
-            ),
-            "The answer is \\boxed{42}",
-            "No answer here",
-        ],
-        answer=["42", "42", "42", "42"],
-    )
-    self.assertEqual(rewards, [1.0, 0.1, 0.5, 0.0])
-
 
 class ExampleConfigTest(absltest.TestCase):
   """`gsm8k.yaml` resolved on top of `base_dist_config.yaml`."""
@@ -322,8 +301,8 @@ class ExampleConfigTest(absltest.TestCase):
     self.assertEqual(traj_store["backend"], "file")
 
   def test_weight_sync_timeouts(self):
-    # Same values as `run_gsm8k_dist_grpo.py`: the coordinator's default
-    # `PhaseTimeouts` and `rpc_timeout_s=1800`.
+    # The coordinator's default `PhaseTimeouts` and `rpc_timeout_s=1800`, as
+    # the earlier GSM8K launcher used.
     phase_timeouts, rpc_timeout_s = orchestrator.resolve_weight_sync_timeouts(
         _hp()
     )
