@@ -264,7 +264,9 @@ class GRPOConfig(AlgorithmConfig):
       function. This term prevents policy updates from deviating too far from
       the reference model. A value of 0.0 means no KL penalty is applied.
     kl_loss_mode: The divergence mode used for KL penalty estimation. Default:
-      `kl`.
+      `low_var_kl`, the k3 estimator of the GRPO paper's KL term. Note that the
+      penalty is differentiated as a loss term: with `kl` (k1 = logp -
+      ref_logp) its gradient does not depend on the reference model.
     epsilon: Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to
       PPO, it ensures stable updates.
     epsilon_high: Epsilon value for upper bound clipping.
@@ -310,7 +312,7 @@ class GRPOConfig(AlgorithmConfig):
   num_generations: int = 2
   num_iterations: int = 1
   beta: float = 0.04
-  kl_loss_mode: str = "kl"
+  kl_loss_mode: str = "low_var_kl"
   epsilon: float = 0.2
   epsilon_high: float | None = None
   epsilon_c: float | None = None

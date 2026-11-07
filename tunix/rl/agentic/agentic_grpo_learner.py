@@ -73,7 +73,9 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     num_generations: Number of samples per prompt (G in the paper). Must be > 1.
     num_iterations: Number of GRPO iterations per batch (μ in the paper).
     beta: KL penalty coefficient.
-    kl_loss_mode: Method for computing the KL loss.
+    kl_loss_mode: Method for computing the KL loss. Default: `low_var_kl`, the
+      k3 estimator of the GRPO paper's KL term (with `kl`, the gradient of the
+      KL loss does not depend on the reference model).
     force_compute_kl: Whether to force compute KL divergence for logging even
       when it would normally be skipped (e.g., when beta is 0.0).
     epsilon: PPO-style clipping epsilon.
@@ -105,7 +107,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   num_generations: int = 2
   num_iterations: int = 1
   beta: float = 0.04
-  kl_loss_mode: str = "kl"
+  kl_loss_mode: str = "low_var_kl"
   force_compute_kl: bool = False
   epsilon: float = 0.2
   system_prompt: str = ""
