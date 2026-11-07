@@ -35,18 +35,14 @@ RolloutOutput = base_rollout.RolloutOutput
 
 class TrajectoryCollectEngineTest(absltest.TestCase):
 
-  class _TestEnv(base_environment.BaseTaskEnv):
-    """Dummy class to expose reward_fn to autospec."""
-
-    reward_fn = None
-    final_reward_fn = None
-
   def setUp(self):
     super().setUp()
     self.mock_agent = mock.create_autospec(
         base_agent.ConversationAgentBase, instance=True
     )
-    self.mock_env = mock.create_autospec(self._TestEnv, instance=True)
+    self.mock_env = mock.create_autospec(
+        base_environment.BaseTaskEnv, instance=True
+    )
 
     self.mock_env.max_steps = 10
 
@@ -484,7 +480,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
       return agent
 
     agent1 = configure_mock_agent('initial1')
-    env1 = mock.create_autospec(self._TestEnv, instance=True)
+    env1 = mock.create_autospec(base_environment.BaseTaskEnv, instance=True)
     env1.final_reward_fn = mock.Mock(return_value=0.5)
     env1.reset.return_value = ('initial1', {})
     env1.step.return_value = ('obs1', 1.0, True, {})
@@ -493,7 +489,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     env1.max_steps = 5
 
     agent2 = configure_mock_agent('initial2')
-    env2 = mock.create_autospec(self._TestEnv, instance=True)
+    env2 = mock.create_autospec(base_environment.BaseTaskEnv, instance=True)
     env2.final_reward_fn = mock.Mock(return_value=0.5)
     env2.reset.return_value = ('initial2', {})
     env2.step.side_effect = [
@@ -2085,6 +2081,55 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         traj.status,
         agent_types.TrajectoryStatus.SUCCEEDED,
     )
+
+  def test_base_task_env_final_reward_fn_init_and_late_binding(self):
+    grader = mock.Mock(return_value=0.6)
+
+    class _LateBoundTaskEnv(base_environment.BaseTaskEnv):
+
+      def _initial_observation(self):
+        self.final_reward_fn = grader
+        return 'late_bound_task'
+
+      def _step_impl(self, action):
+        del action
+        return base_environment.EnvStepResult(
+            observation='done', reward=0.4, done=True, info={}
+        )
+
+    bound_env = _LateBoundTaskEnv(final_reward_fn=grader, extra_key='v')
+    self.assertIs(bound_env.final_reward_fn, grader)
+    self.assertEqual(bound_env.extra_kwargs, {'extra_key': 'v'})
+    with self.assertRaisesRegex(TypeError, 'final_reward_fn'):
+      _LateBoundTaskEnv(
+          final_reward_fn=123  # pyrefly: ignore[bad-argument-type]
+      )
+
+    env = _LateBoundTaskEnv(max_steps=2)
+    self.assertIsNone(env.final_reward_fn)
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=env,
+        model_call=self.mock_model_call,
+    )
+    traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    grader.assert_called_once_with()
+    self.assertAlmostEqual(traj.steps[-1].reward, 1.0)
+    self.assertAlmostEqual(traj.reward, 1.0)
+
+  def test_non_callable_env_final_reward_fn_raises_type_error(self):
+    self.mock_env.max_steps = 1
+    self.mock_env.step.side_effect = [('obs1', 1.0, True, {})]
+    self.mock_env.final_reward_fn = 123  # pyrefly: ignore[bad-assignment]
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+    )
+    with self.assertRaisesRegex(
+        TypeError, 'env.final_reward_fn must be callable or None'
+    ):
+      asyncio.run(self._run_collect(engine, mode='Trajectory'))
 
 
 class _FreshTextTokenizer:
