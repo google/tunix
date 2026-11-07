@@ -1262,7 +1262,7 @@ class PaddingStatsTest(absltest.TestCase):
     self.assertAlmostEqual(summary["sequences_per_row_mean"], 1.5)
     self.assertEqual(summary["sequences_per_row_max"], 3.0)
     self.assertEqual(summary["valid_tokens"], 26.0)
-    self.assertEqual(summary["capacity_tokens"], 40.0)
+    self.assertNotIn("capacity_tokens", summary)
 
 
 class PaddedBatchAssemblerTest(absltest.TestCase):
