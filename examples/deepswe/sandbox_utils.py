@@ -20,14 +20,99 @@ from __future__ import annotations
 
 import atexit
 import collections
+# Eagerly materialize concurrent.futures.thread (even under lazy_imports) before
+# registering exit hooks so its threading._register_atexit(_python_exit) handler
+# precedes teardown_global_fleet in LIFO shutdown order.
+import concurrent.futures.thread as _futures_thread
+import hashlib
 import logging
 import os
 import threading
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 import numpy as np
 
-_GLOBAL_FLEET = None
+_ = _futures_thread._python_exit
+
+
+class PlanEntryLike(Protocol):
+  """Typed protocol for `agent_sandbox_rl.fleet.PlanEntry`."""
+
+  image: str
+  replicas: int
+
+
+class FleetPlanLike(Protocol):
+  """Typed protocol for `agent_sandbox_rl.fleet.FleetPlan`."""
+
+  entries: list[PlanEntryLike]
+
+
+class FleetConfigLike(Protocol):
+  """Typed protocol for `agent_sandbox_rl.config.FleetConfig`."""
+
+  max_warmpool_size: int
+  run_isolation: str
+  install_teardown_hooks: bool
+
+
+class SandboxFleetLike(Protocol):
+  """Typed protocol for `agent_sandbox_rl.fleet.SandboxFleet`."""
+
+  config: FleetConfigLike
+  run_id: str
+  plan_: FleetPlanLike | None
+  _image_rewrite_fn: Callable[[str], str] | None
+  _torndown: bool
+
+  def load_tasks(
+      self,
+      source: list[Any],
+      *,
+      image_rewrite: Callable[[str], str] | None = None,
+  ) -> list[Any]:
+    ...
+
+  def _install_teardown_hooks(self) -> None:
+    ...
+
+  def plan(self) -> FleetPlanLike:
+    ...
+
+  def warm_images(
+      self,
+      images: list[str],
+      replicas_override: int | None = None,
+      wait: bool = True,
+  ) -> None:
+    ...
+
+  def warm_image(
+      self,
+      image: str,
+      replicas_override: int | None = None,
+      wait: bool = True,
+  ) -> None:
+    ...
+
+  def set_pool_replicas(self, image: str, replicas: int) -> None:
+    ...
+
+  def unwarm_image(self, image: str) -> None:
+    ...
+
+  def acquire(self, task: Any) -> Any:
+    ...
+
+  def release(self, handle: Any) -> None:
+    ...
+
+  def teardown(self) -> Any:
+    ...
+
+
+_GLOBAL_FLEET: SandboxFleetLike | None = None
 _FLEET_LOCK = threading.Lock()
+_SHUTDOWN_HOOKS_REGISTERED = False
 _PATCH_LOCK = threading.Lock()
 _R2EGYM_PATCHED = False
 
@@ -193,6 +278,16 @@ def normalize_tasks_for_fleet(
   return normalized
 
 
+def format_fleet_run_id(run_id: str) -> str:
+  """Derives a deterministic 8-char DNS-1123 hex fleet ID from `run_id`."""
+  if not isinstance(run_id, str):
+    raise TypeError(f"run_id must be a str, got {type(run_id).__name__}.")
+  stripped = run_id.strip()
+  if not stripped:
+    raise ValueError("run_id must be a non-empty string when provided.")
+  return hashlib.sha256(stripped.encode("utf-8")).hexdigest()[:8]
+
+
 def init_global_fleet(
     tasks: list[Any] | None = None,
     max_concurrency: int = 128,
@@ -203,9 +298,18 @@ def init_global_fleet(
     scaffold: str = "r2egym",
     image_rewrite: Callable[[str], str] | None = None,
     node_selector: dict[str, str] | None = None,
-) -> Any:
+    *,
+    run_id: str | None = None,
+    teardown_on_exit: bool = True,
+) -> SandboxFleetLike:
   """Initialize the process-wide SandboxFleet instance once upfront."""
   global _GLOBAL_FLEET
+  if not isinstance(teardown_on_exit, bool):
+    raise TypeError(
+        "teardown_on_exit must be a bool, got"
+        f" {type(teardown_on_exit).__name__}."
+    )
+  fleet_run_id = format_fleet_run_id(run_id) if run_id is not None else None
   with _FLEET_LOCK:
     if _GLOBAL_FLEET is not None:
       return _GLOBAL_FLEET
@@ -242,8 +346,13 @@ def init_global_fleet(
     effective_max_concurrent = max(
         max_concurrency, batch_size * num_generations * 2
     )
+    target_warmpool_size = (
+        max_warmpool_replicas
+        if max_warmpool_replicas is not None
+        else num_generations
+    )
 
-    fleet_kwargs: dict[str, Any] = {
+    fleet_kwargs: dict[str, object] = {
         "clusters": [
             ClusterConfig(
                 name="default",
@@ -254,69 +363,103 @@ def init_global_fleet(
         ],
         "max_concurrent": effective_max_concurrent,
         "window_size": batch_size,
-        "max_warmpool_size": (
-            max_warmpool_replicas
-            if max_warmpool_replicas is not None
-            else num_generations
-        ),
+        "max_warmpool_size": target_warmpool_size,
         "warm_per_task": True,
+        "install_teardown_hooks": teardown_on_exit,
     }
+    if fleet_run_id is not None:
+      fleet_kwargs["run_isolation"] = "names"
+      fleet_kwargs["run_id"] = fleet_run_id
 
     fleet_cfg = FleetConfig(**fleet_kwargs)
-    fleet_inst = SandboxFleet(fleet_cfg)
+    fleet_inst: SandboxFleetLike = SandboxFleet(fleet_cfg)
+    try:
+      if fleet_run_id is not None and fleet_inst.run_id != fleet_run_id:
+        raise RuntimeError(
+            f"SandboxFleet did not honor shared run_id {fleet_run_id!r}:"
+            f" got {fleet_inst.run_id!r}."
+        )
 
-    image_rewrite_fn = get_image_rewrite_fn(image_rewrite)
-    fleet_inst._image_rewrite_fn = image_rewrite_fn
+      image_rewrite_fn = get_image_rewrite_fn(image_rewrite)
+      fleet_inst._image_rewrite_fn = image_rewrite_fn
 
-    if tasks is not None:
-      normalized_tasks = normalize_tasks_for_fleet(
-          tasks, scaffold=scaffold, image_rewrite=image_rewrite_fn
-      )
-      if image_rewrite_fn is not None:
-        try:
-          fleet_inst.load_tasks(
-              normalized_tasks, image_rewrite=image_rewrite_fn
-          )
-        except TypeError:
+      if tasks is not None:
+        normalized_tasks = normalize_tasks_for_fleet(
+            tasks, scaffold=scaffold, image_rewrite=image_rewrite_fn
+        )
+        if image_rewrite_fn is not None:
+          try:
+            fleet_inst.load_tasks(
+                normalized_tasks, image_rewrite=image_rewrite_fn
+            )
+          except TypeError:
+            fleet_inst.load_tasks(normalized_tasks)
+        else:
           fleet_inst.load_tasks(normalized_tasks)
-      else:
-        fleet_inst.load_tasks(normalized_tasks)
 
-    msg = (
-        f"[SandboxFleet] Initializing pipelined fleet in namespace={fleet_ns}"
-        f" (max_concurrent={effective_max_concurrent},"
-        f" window_size={batch_size},"
-        f" max_warmpool_replicas={fleet_kwargs['max_warmpool_size']},"
-        " warm_per_task=True)..."
-    )
-    logging.info(msg)
-    if getattr(fleet_cfg, "install_teardown_hooks", False):
-      fleet_inst._install_teardown_hooks()
-    fleet_inst._torndown = False
-    if hasattr(fleet_inst, "plan"):
+      logging.info(
+          "[SandboxFleet] Initializing pipelined fleet in namespace=%s"
+          " (max_concurrent=%d, window_size=%d, max_warmpool_replicas=%d,"
+          " warm_per_task=True, run_isolation=%s, run_id=%s,"
+          " teardown_on_exit=%s)...",
+          fleet_ns,
+          effective_max_concurrent,
+          batch_size,
+          target_warmpool_size,
+          fleet_cfg.run_isolation,
+          fleet_run_id or "<default>",
+          teardown_on_exit,
+      )
+      if fleet_cfg.install_teardown_hooks:
+        fleet_inst._install_teardown_hooks()
+      fleet_inst._torndown = False
       fleet_inst.plan()
+      if teardown_on_exit:
+        _register_shutdown_hooks()
+    except BaseException:
+      if teardown_on_exit:
+        try:
+          fleet_inst.teardown()
+        except Exception as teardown_err:  # pylint: disable=broad-exception-caught
+          logging.warning(
+              "[SandboxFleet] Teardown after failed init note: %s",
+              teardown_err,
+          )
+      raise
     _GLOBAL_FLEET = fleet_inst
-    atexit.register(teardown_global_fleet)
     return _GLOBAL_FLEET
 
 
 def warm_global_fleet() -> None:
   """Warms all planned task images in the global SandboxFleet and waits until ready."""
   fleet_inst = get_global_fleet()
-  entries = fleet_inst.plan_.entries
-  images = [e.image for e in entries]
+  if fleet_inst.plan_ is None:
+    raise RuntimeError(
+        "SandboxFleet has no active plan; call init_global_fleet() first."
+    )
+  images = [e.image for e in fleet_inst.plan_.entries]
   if images:
     target_replicas = fleet_inst.config.max_warmpool_size
     fleet_inst.warm_images(images, replicas_override=target_replicas, wait=True)
     logging.info(
-        "[SandboxFleet] Started initial warmpools for %d image(s) (%s"
+        "[SandboxFleet] Started initial warmpools for %d image(s) (%d"
         " replicas each, wait=True).",
         len(images),
         target_replicas,
     )
 
 
-def get_global_fleet() -> Any:
+def _register_shutdown_hooks() -> None:
+  """Registers process exit teardown before ThreadPoolExecutor shutdown."""
+  global _SHUTDOWN_HOOKS_REGISTERED
+  if _SHUTDOWN_HOOKS_REGISTERED:
+    return
+  threading._register_atexit(teardown_global_fleet)  # pyrefly: ignore[missing-attribute]
+  atexit.register(teardown_global_fleet)
+  _SHUTDOWN_HOOKS_REGISTERED = True
+
+
+def get_global_fleet() -> SandboxFleetLike:
   """Retrieve the active process-wide SandboxFleet instance."""
   if _GLOBAL_FLEET is None:
     raise RuntimeError(
@@ -326,17 +469,19 @@ def get_global_fleet() -> Any:
 
 
 def teardown_global_fleet() -> None:
-  """Atexit handler to cleanly tear down warm pools on process exit."""
+  """Tears down active warm pools on process exit."""
   global _GLOBAL_FLEET
-  if _GLOBAL_FLEET is not None:
+  with _FLEET_LOCK:
+    fleet = _GLOBAL_FLEET
+    _GLOBAL_FLEET = None
+  if fleet is not None:
     logging.info(
         "[SandboxFleet] Automatically tearing down warm pools on exit..."
     )
     try:
-      _GLOBAL_FLEET.teardown()
+      fleet.teardown()
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.warning("[SandboxFleet] Teardown note: %s", e)
-    _GLOBAL_FLEET = None
 
 
 class PrewarmDatasetIterator:
