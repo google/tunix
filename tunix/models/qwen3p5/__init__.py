@@ -15,9 +15,12 @@
 """Qwen3.5 API."""
 
 from typing import Any
+from tunix.models.qwen3p5 import mapping_vllm_jax
 from tunix.models.qwen3p5 import model
 from tunix.models.qwen3p5 import params
 
-BACKEND_MAPPINGS: dict[str, Any] = {}
+BACKEND_MAPPINGS: dict[str, Any] = {
+    'vllm_jax': mapping_vllm_jax.VLLM_JAX_MAPPING,
+}
 
-__all__ = ['BACKEND_MAPPINGS', 'model', 'params']
+__all__ = ['BACKEND_MAPPINGS', 'mapping_vllm_jax', 'model', 'params']
