@@ -547,16 +547,25 @@ def _run_trainer(
 def _run_rollout(
     recorder: _Recorder, argv: list[str], context: mock.MagicMock
 ) -> None:
-  """Runs the rollout node's `main` up to serving."""
+  """Runs the rollout node's `main` up to serving, then initializes its sampler."""
   _patch_model_loading(recorder)
   recorder.patch(importlib, "import_module")
   recorder.patch(gcs_cache, "restore_jax_cache")
+  vllm_sampler_module = types.SimpleNamespace(
+      VllmConfig=recorder.record("tunix.generate.vllm_sampler.VllmConfig"),
+      VllmSampler=recorder.record("tunix.generate.vllm_sampler.VllmSampler"),
+  )
+  recorder.patch(rollout, "_import_vllm_sampler", returns=vllm_sampler_module)
+  recorder.stack.enter_context(
+      mock.patch.object(
+          inprocess_vllm_sampler,
+          "_get_vllm_sampler_cls",
+          return_value=vllm_sampler_module,
+      )
+  )
   recorder.patch(
-      rollout,
-      "_import_vllm_sampler",
-      returns=types.SimpleNamespace(
-          VllmConfig=recorder.record("tunix.generate.vllm_sampler.VllmConfig")
-      ),
+      inprocess_vllm_sampler.raiden_weight_sync_delegate,
+      "RaidenWeightSyncDelegate",
   )
   arg_utils = types.ModuleType("vllm.engine.arg_utils")
   setattr(
@@ -568,8 +577,8 @@ def _run_rollout(
       mock.patch.dict(sys.modules, {"vllm.engine.arg_utils": arg_utils})
   )
   recorder.patch(vanilla_sampler, "VanillaSampler")
-  recorder.patch(inprocess_vllm_sampler, "InprocessVllmSampler")
-  recorder.patch(vllm_sampler, "VllmSampler")
+  recorder.record_init(inprocess_vllm_sampler.InprocessVllmSampler)
+  recorder.record_init(vllm_sampler.VllmSampler)
   recorder.patch(tokenizer_adapter, "TokenizerAdapter")
   recorder.stack.enter_context(
       mock.patch.dict(
@@ -598,6 +607,19 @@ def _run_rollout(
       rollout_worker, "RolloutWorker", forward_to=fake_rollout_worker
   )
   rollout.main(argv, context)
+  # `RolloutWorker` initializes its sampler when the orchestrator brings it up.
+  (sampler,) = [
+      kwargs["sampler"]
+      for label, _, kwargs in recorder.calls
+      if label == worker_label
+  ]
+  if isinstance(
+      sampler,
+      (inprocess_vllm_sampler.InprocessVllmSampler, vllm_sampler.VllmSampler),
+  ):
+    recorder.record("sampler.initialize", forward_to=sampler.initialize)()
+  if isinstance(sampler, inprocess_vllm_sampler.InprocessVllmSampler):
+    sampler._executor.shutdown(wait=False)
 
 
 _RUNS: Mapping[

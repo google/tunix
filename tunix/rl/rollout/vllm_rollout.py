@@ -58,7 +58,13 @@ class VllmRollout(base_rollout.BaseRollout):
             tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,
             additional_config=rollout_config.rollout_vllm_additional_config,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
-            hbm_utilization=rollout_config.rollout_vllm_hbm_utilization,
+            # TODO(yatlas): Remove default hbm_utilization once colocated hbm
+            # fixes are landed.
+            hbm_utilization=(
+                rollout_config.rollout_vllm_hbm_utilization
+                if rollout_config.rollout_vllm_hbm_utilization is not None
+                else 0.2
+            ),
             lora_config=rollout_config.rollout_vllm_lora_config,
             mesh=mesh,
             tensor_parallel_size=rollout_config.tensor_parallel_size,

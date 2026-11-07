@@ -19,8 +19,6 @@ import asyncio
 import contextlib
 import json
 import os
-import sys
-import types
 from typing import Any
 from unittest import mock
 
@@ -62,43 +60,25 @@ def _hp(*argv: str) -> resolve_config.DistHyperParameters:
   return resolve_config.initialize(list(argv))
 
 
-def _create_vllm_sampler_kwargs(
-    *argv: str,
-) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
-  """Returns the `AsyncEngineArgs` and `VllmSampler` kwargs it builds."""
-  arg_utils = types.ModuleType("vllm.engine.arg_utils")
-  async_engine_args = mock.Mock()
-  setattr(arg_utils, "AsyncEngineArgs", async_engine_args)
+def _vllm_rollout_config(*argv: str):
+  """Returns the RolloutConfig built for the `rollout_engine=vllm` worker."""
   hp = _hp("rollout_engine=vllm", *argv)
-  config = rollout._rollout_config(hp, mock.Mock(), sampler_type="vllm")
-  with mock.patch.dict(sys.modules, {"vllm.engine.arg_utils": arg_utils}):
-    with mock.patch.object(vllm_sampler, "VllmSampler") as sampler_cls:
-      rollout._create_vllm_sampler(hp, "rollout-0", mock.Mock(), config)
-  return async_engine_args.call_args.kwargs, sampler_cls.call_args.kwargs
+  return rollout._rollout_config(hp, mock.Mock(), sampler_type="vllm")
 
 
 def _vllm_engine_kwargs(*argv: str) -> Mapping[str, Any]:
-  """Returns the AsyncEngineArgs kwargs `_create_vllm_sampler` builds."""
-  engine_kwargs, _ = _create_vllm_sampler_kwargs(*argv)
-  return engine_kwargs
+  """Returns the AsyncEngineArgs kwargs of the `rollout_engine=vllm` worker."""
+  hp = _hp("rollout_engine=vllm", *argv)
+  config = rollout._rollout_config(hp, mock.Mock(), sampler_type="vllm")
+  sampler = rollout._create_vllm_sampler(hp, "rollout-0", mock.Mock(), config)
+  assert isinstance(sampler, vllm_sampler.VllmSampler)
+  return sampler._engine_kwargs
 
 
-def _inprocess_vllm_config_kwargs(*argv: str) -> Mapping[str, Any]:
-  """Returns the VllmConfig kwargs `_create_inprocess_vllm_sampler` builds."""
-  vllm_sampler_module = mock.Mock()
-  with (
-      mock.patch.object(
-          rollout, "_import_vllm_sampler", return_value=vllm_sampler_module
-      ),
-      mock.patch.object(node_utils, "create_mesh"),
-      mock.patch.object(inprocess_vllm_sampler, "InprocessVllmSampler"),
-  ):
-    hp = _hp(*argv)
-    config = rollout._rollout_config(
-        hp, mock.Mock(), sampler_type="inprocess_vllm"
-    )
-    rollout._create_inprocess_vllm_sampler(hp, "rollout-0", mock.Mock(), config)
-  return vllm_sampler_module.VllmConfig.call_args.kwargs
+def _inprocess_vllm_rollout_config(*argv: str):
+  """Returns the RolloutConfig built for the `inprocess_vllm` worker."""
+  hp = _hp(*argv)
+  return rollout._rollout_config(hp, mock.Mock(), sampler_type="inprocess_vllm")
 
 
 def _rollout_config(*argv: str):
@@ -369,6 +349,25 @@ class ValidateRolloutConfigTest(absltest.TestCase):
         _hp("rollout_engine=vllm", "vllm_config.server_mode=true")
     )
 
+  def test_rejects_non_default_tpu_backend_type_for_non_inprocess_vllm(self):
+    for rollout_engine in ("vllm", "vanilla"):
+      with self.subTest(rollout_engine=rollout_engine):
+        with self.assertRaisesRegex(
+            ValueError, "tpu_backend_type is only supported"
+        ):
+          rollout._validate_rollout_config(
+              _hp(
+                  f"rollout_engine={rollout_engine}",
+                  "vllm_config.tpu_backend_type=torchax",
+              )
+          )
+    rollout._validate_rollout_config(
+        _hp(
+            "rollout_engine=inprocess_vllm",
+            "vllm_config.tpu_backend_type=torchax",
+        )
+    )
+
 
 class CreateRolloutWorkerTest(absltest.TestCase):
   """`_create_rollout_worker` with only the sampler/model classes mocked."""
@@ -425,12 +424,9 @@ class CreateRolloutWorkerTest(absltest.TestCase):
     self.assertIsInstance(worker_kwargs["chat_parser"], parser.RawTextParser)
 
   def test_vllm_shares_config_with_sampler(self):
-    arg_utils = types.ModuleType("vllm.engine.arg_utils")
-    setattr(arg_utils, "AsyncEngineArgs", mock.Mock())
-    with (
-        mock.patch.dict(sys.modules, {"vllm.engine.arg_utils": arg_utils}),
-        mock.patch.object(vllm_sampler, "VllmSampler") as sampler_cls,
-    ):
+    with mock.patch.object(
+        vllm_sampler, "VllmSampler", autospec=True
+    ) as sampler_cls:
       rollout._create_rollout_worker(
           _hp("rollout_engine=vllm"), "rollout-0", self.tokenizer
       )
@@ -447,12 +443,7 @@ class CreateRolloutWorkerTest(absltest.TestCase):
     self.assertEqual(worker_kwargs["agent_config"], {})
 
   def test_worker_gets_env_and_agent_settings(self):
-    arg_utils = types.ModuleType("vllm.engine.arg_utils")
-    setattr(arg_utils, "AsyncEngineArgs", mock.Mock())
-    with (
-        mock.patch.dict(sys.modules, {"vllm.engine.arg_utils": arg_utils}),
-        mock.patch.object(vllm_sampler, "VllmSampler"),
-    ):
+    with mock.patch.object(vllm_sampler, "VllmSampler", autospec=True):
       rollout._create_rollout_worker(
           _hp(
               "rollout_engine=vllm",
@@ -503,7 +494,7 @@ class SamplerTest(absltest.TestCase):
     self.assertEqual(kwargs["tensor_parallel_size"], 4)
     self.assertEqual(kwargs["data_parallel_size"], 2)
     self.assertEqual(kwargs["max_num_seqs"], 64)
-    self.assertNotIn("max_num_batched_tokens", kwargs)
+    self.assertIsNone(kwargs["max_num_batched_tokens"])
     self.assertEqual(kwargs["max_model_len"], 4096)
     self.assertEqual(kwargs["dtype"], "float32")
     self.assertFalse(kwargs["enable_lora"])
@@ -511,16 +502,24 @@ class SamplerTest(absltest.TestCase):
     self.assertEqual(kwargs["model"], "Qwen/Qwen3-1.7B")
 
   def test_vllm_sampler_detokenize_follows_config(self):
-    _, default = _create_vllm_sampler_kwargs()
-    self.assertIs(default["detokenize"], True)
-    _, disabled = _create_vllm_sampler_kwargs("vllm_config.detokenize=false")
-    self.assertIs(disabled["detokenize"], False)
+    self.assertIs(
+        _vllm_rollout_config().rollout_vllm_sampling_kwargs["detokenize"],
+        True,
+    )
+    self.assertIs(
+        _vllm_rollout_config(
+            "vllm_config.detokenize=false"
+        ).rollout_vllm_sampling_kwargs["detokenize"],
+        False,
+    )
 
   def test_vllm_sampler_always_runs_in_server_mode(self):
-    _, default = _create_vllm_sampler_kwargs()
-    self.assertTrue(default["config"].rollout_vllm_server_mode)
-    _, explicit = _create_vllm_sampler_kwargs("vllm_config.server_mode=true")
-    self.assertTrue(explicit["config"].rollout_vllm_server_mode)
+    self.assertTrue(_vllm_rollout_config().rollout_vllm_server_mode)
+    self.assertTrue(
+        _vllm_rollout_config(
+            "vllm_config.server_mode=true"
+        ).rollout_vllm_server_mode
+    )
 
   def test_vllm_sampler_rejects_lora_with_data_parallelism(self):
     with self.assertRaisesRegex(ValueError, "LoRA is not supported"):
@@ -532,7 +531,7 @@ class SamplerTest(absltest.TestCase):
 
   def test_vllm_sampler_captures_routed_experts_only_when_asked(self):
     default = _vllm_engine_kwargs(*_MAXTEXT_ROLLOUT_ARGV)
-    self.assertNotIn("enable_return_routed_experts", default)
+    self.assertIs(default["enable_return_routed_experts"], False)
     self.assertNotIn(
         "return_routed_experts", default["additional_config"]["maxtext_config"]
     )
@@ -545,33 +544,31 @@ class SamplerTest(absltest.TestCase):
     )
 
   def test_inprocess_vllm_sampler_captures_routed_experts(self):
-    config_kwargs = _inprocess_vllm_config_kwargs(*_ROUTED_EXPERTS_ARGV)
-    self.assertIs(config_kwargs["return_routed_experts"], True)
+    config = _inprocess_vllm_rollout_config(*_ROUTED_EXPERTS_ARGV)
+    self.assertIs(config.return_routed_experts, True)
     self.assertIs(
-        config_kwargs["additional_config"]["maxtext_config"][
+        config.rollout_vllm_additional_config["maxtext_config"][
             "return_routed_experts"
         ],
         True,
     )
 
   def test_inprocess_vllm_config_follows_config(self):
-    config_kwargs = _inprocess_vllm_config_kwargs(
+    config = _inprocess_vllm_rollout_config(
         "rollout_model_config.mesh.shape=(1,4)",
         "vllm_config.hbm_utilization=0.75",
+        "vllm_config.tpu_backend_type=torchax",
         "weight_sync_config.in_flight_weight_updates=true",
     )
-    self.assertEqual(config_kwargs["tensor_parallel_size"], 4)
-    self.assertEqual(config_kwargs["data_parallel_size"], 1)
-    self.assertEqual(config_kwargs["hbm_utilization"], 0.75)
-    self.assertTrue(config_kwargs["server_mode"])
-    self.assertTrue(config_kwargs["partial_rollout"])
+    self.assertEqual(config.tensor_parallel_size, 4)
+    self.assertEqual(config.data_parallel_size, 1)
+    self.assertEqual(config.rollout_vllm_hbm_utilization, 0.75)
+    self.assertEqual(config.rollout_vllm_tpu_backend_type, "torchax")
+    self.assertTrue(config.partial_rollout)
     # Partial rollout needs prefix caching to resume frozen trajectories.
-    self.assertTrue(config_kwargs["engine_kwargs"]["enable_prefix_caching"])
-    self.assertIsNone(config_kwargs["lora_config"])
-    self.assertIsNone(config_kwargs["additional_config"])
-
-  def test_inprocess_vllm_server_mode_defaults_on(self):
-    self.assertTrue(_inprocess_vllm_config_kwargs()["server_mode"])
+    self.assertTrue(config.rollout_vllm_kwargs["enable_prefix_caching"])
+    self.assertIsNone(config.rollout_vllm_lora_config)
+    self.assertIsNone(config.rollout_vllm_additional_config)
 
   def test_inprocess_vllm_random_init_follows_weight_sync_mode(self):
     for argv, expected in (
@@ -590,7 +587,9 @@ class SamplerTest(absltest.TestCase):
     ):
       with self.subTest(argv=argv):
         self.assertIs(
-            _inprocess_vllm_config_kwargs(*argv)["init_with_random_weights"],
+            _inprocess_vllm_rollout_config(
+                *argv
+            ).rollout_vllm_init_with_random_weights,
             expected,
         )
 
@@ -612,9 +611,9 @@ class SamplerTest(absltest.TestCase):
     self.assertIs(vllm_mt_cfg["float32_gate_logits"], True)
     self.assertIs(vllm_mt_cfg["float32_logits"], False)
 
-    inproc_mt_cfg = _inprocess_vllm_config_kwargs(*argv)["additional_config"][
-        "maxtext_config"
-    ]
+    inproc_mt_cfg = _inprocess_vllm_rollout_config(
+        *argv
+    ).rollout_vllm_additional_config["maxtext_config"]
     self.assertIs(inproc_mt_cfg["float32_gate_logits"], True)
     self.assertIs(inproc_mt_cfg["float32_logits"], False)
 
@@ -629,16 +628,15 @@ class SamplerTest(absltest.TestCase):
         0.8,
     )
 
-    self.assertEqual(
-        _inprocess_vllm_config_kwargs("rollout_engine=inprocess_vllm")[
-            "hbm_utilization"
-        ],
-        0.5,
+    self.assertIsNone(
+        _inprocess_vllm_rollout_config(
+            "rollout_engine=inprocess_vllm"
+        ).rollout_vllm_hbm_utilization
     )
     self.assertEqual(
-        _inprocess_vllm_config_kwargs(
+        _inprocess_vllm_rollout_config(
             "rollout_engine=inprocess_vllm", "vllm_config.hbm_utilization=0.8"
-        )["hbm_utilization"],
+        ).rollout_vllm_hbm_utilization,
         0.8,
     )
 
@@ -717,6 +715,28 @@ class EngineKwargsTest(absltest.TestCase):
         ),
     )
 
+  def test_engine_kwargs_override_gemma4_stats_defaults(self):
+    gemma4 = "model_config.model_id=google/gemma-4-E2B-it"
+    self.assertNotIn("kv_cache_metrics", _vllm_engine_kwargs())
+    for rollout_engine, kwargs in (
+        ("vllm", _vllm_engine_kwargs(gemma4)),
+        (
+            "inprocess_vllm",
+            _inprocess_vllm_rollout_config(gemma4).rollout_vllm_kwargs,
+        ),
+    ):
+      with self.subTest(rollout_engine=rollout_engine):
+        self.assertIs(kwargs["kv_cache_metrics"], True)
+        self.assertIs(kwargs["disable_log_stats"], False)
+
+    overridden = _vllm_engine_kwargs(
+        gemma4,
+        "vllm_config.engine_kwargs.kv_cache_metrics=false",
+        "vllm_config.engine_kwargs.disable_log_stats=true",
+    )
+    self.assertIs(overridden["kv_cache_metrics"], False)
+    self.assertIs(overridden["disable_log_stats"], True)
+
   def test_engine_kwargs_rejected_for_non_vllm_rollout_engine(self):
     for rollout_engine in ("inprocess_vllm", "vanilla"):
       with self.subTest(rollout_engine=rollout_engine):
@@ -766,7 +786,7 @@ class EngineKwargsTest(absltest.TestCase):
           )
       )
 
-    for key in rollout._FORBIDDEN_ENGINE_KWARGS_KEYS:
+    for key in rollout._FORBIDDEN_ROLLOUT_KWARGS:
       with self.subTest(top_level_key=key):
         with self.assertRaisesRegex(
             ValueError,
@@ -796,7 +816,7 @@ class EngineKwargsTest(absltest.TestCase):
   def test_forbidden_keys_cover_node_built_engine_kwargs(self):
     # Drift guard: every `AsyncEngineArgs` key `_create_vllm_sampler` builds
     # from other config fields (except `additional_config`, which is
-    # deep-merged) must stay in `_FORBIDDEN_ENGINE_KWARGS_KEYS`.
+    # deep-merged) must stay in `_FORBIDDEN_ROLLOUT_KWARGS`.
     maximal_argv = (
         "rollout_engine=vllm",
         *_ROUTED_EXPERTS_ARGV,
@@ -813,7 +833,7 @@ class EngineKwargsTest(absltest.TestCase):
     kwargs = _vllm_engine_kwargs(*maximal_argv)
     self.assertLessEqual(
         set(kwargs) - {"additional_config"},
-        rollout._FORBIDDEN_ENGINE_KWARGS_KEYS,
+        rollout._FORBIDDEN_ROLLOUT_KWARGS,
     )
     mt_built = rollout._maxtext_additional_config(_hp(*maximal_argv))
     if mt_built is None:

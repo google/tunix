@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
+import dataclasses
 import importlib
 import logging
 import os
@@ -72,14 +73,10 @@ ChatParser = (
 )
 Tokenizer = node_utils.HfTokenizer
 
-# `vllm_config.hbm_utilization: null` uses this for `inprocess_vllm`; the
-# `vllm` sampler leaves `gpu_memory_utilization` to vLLM's own default.
-_DEFAULT_INPROCESS_VLLM_HBM_UTILIZATION = 0.5
-
-# Keep in sync with every `AsyncEngineArgs` key set from other config fields or
-# rollout invariants in this file's `_create_vllm_sampler` (`hbm_utilization` is
-# an alias guard for `gpu_memory_utilization`).
-_FORBIDDEN_ENGINE_KWARGS_KEYS = frozenset({
+# Keep in sync with every vLLM kwarg set from other config fields or rollout
+# invariants in `_rollout_config` and `VllmSampler` (`hbm_utilization` is an
+# alias guard for `gpu_memory_utilization`).
+_FORBIDDEN_ROLLOUT_KWARGS = frozenset({
     "model",
     "tokenizer",
     "tensor_parallel_size",
@@ -245,7 +242,7 @@ def _vllm_engine_kwargs(
         "vllm_config.engine_kwargs is only supported with rollout_engine:"
         f" vllm; got rollout_engine: {rollout_engine!r}."
     )
-  forbidden = sorted(set(engine_kwargs) & _FORBIDDEN_ENGINE_KWARGS_KEYS)
+  forbidden = sorted(set(engine_kwargs) & _FORBIDDEN_ROLLOUT_KWARGS)
   if forbidden:
     raise ValueError(
         "vllm_config.engine_kwargs contains keys managed by other config"
@@ -280,45 +277,6 @@ def _vllm_engine_kwargs(
   return dict(engine_kwargs)
 
 
-def _merge_engine_kwargs(
-    engine_kwargs: dict[str, Any], overrides: Mapping[str, Any]
-) -> None:
-  """Merges validated `vllm_config.engine_kwargs` into `engine_kwargs`.
-
-  Top-level keys are set directly. `additional_config` keys are merged onto the
-  node-built `additional_config`, and `additional_config.maxtext_config` keys
-  onto the node-built MaxText config.
-
-  Args:
-    engine_kwargs: `AsyncEngineArgs` kwargs built by the node; updated in place.
-    overrides: Output of `_vllm_engine_kwargs`.
-  """
-  top_level = dict(overrides)
-  if "additional_config" in top_level:
-    extra_additional = dict(top_level.pop("additional_config"))
-    additional = (
-        dict(engine_kwargs["additional_config"])
-        if "additional_config" in engine_kwargs
-        else {}
-    )
-    extra_maxtext = (
-        extra_additional.pop("maxtext_config")
-        if "maxtext_config" in extra_additional
-        else None
-    )
-    additional.update(extra_additional)
-    if extra_maxtext is not None:
-      # `_vllm_engine_kwargs` only allows `maxtext_config` for MaxText rollout
-      # models, whose node-built `additional_config` carries `maxtext_config`.
-      additional["maxtext_config"] = {
-          **additional["maxtext_config"],
-          **extra_maxtext,
-      }
-    if additional:
-      engine_kwargs["additional_config"] = additional
-  engine_kwargs.update(top_level)
-
-
 def _validate_rollout_config(hp: resolve_config.DistHyperParameters) -> None:
   """Validates rollout-only settings before any heavy import or JAX init.
 
@@ -351,6 +309,13 @@ def _validate_rollout_config(hp: resolve_config.DistHyperParameters) -> None:
     raise ValueError(
         "vllm_config.server_mode: false is not supported: both vLLM rollout"
         " samplers always run in server mode. Remove it."
+    )
+  tpu_backend_type = str(hp.config_mapping("vllm_config")["tpu_backend_type"])
+  if rollout_engine != "inprocess_vllm" and tpu_backend_type != "jax":
+    raise ValueError(
+        "vllm_config.tpu_backend_type is only supported with rollout_engine:"
+        f" inprocess_vllm; got tpu_backend_type={tpu_backend_type!r} with"
+        f" rollout_engine: {rollout_engine!r}."
     )
 
 
@@ -520,23 +485,20 @@ def _eos_token_ids(
 def _rollout_config(
     hp: resolve_config.DistHyperParameters,
     tokenizer: Tokenizer,
-    *,
     sampler_type: str,
 ) -> rollout_worker.RolloutConfig:
   """Builds the dist `rollout_worker.RolloutConfig`.
 
   `BasePipeline.create_rollout_config()` is not used: it builds the base
-  `RolloutConfig` (not the dist subclass with sampler, weight-sync, drain, and
-  trajectory-store fields), passes `eos_tokens` through as a raw string, adds
-  256 to `kv_cache_size`, and for `rollout_engine: vllm` sets in-engine vLLM
-  fields (server mode, max_num_seqs, ...) that the dist samplers configure
-  themselves.
+  `RolloutConfig` (not the dist subclass with weight-sync, drain, and
+  trajectory-store fields), passes `eos_tokens` through as a raw string, and
+  adds 256 to `kv_cache_size`.
 
   Args:
     hp: Validated distributed RL configuration.
     tokenizer: Tokenizer used to resolve `eos_tokens` strings.
     sampler_type: Sampler adapter the worker runs ("vanilla", "inprocess_vllm",
-      "vllm"); vLLM samplers also get `rollout_vllm_model_version`.
+      "vllm").
 
   Returns:
     The rollout config.
@@ -547,17 +509,10 @@ def _rollout_config(
   num_experts = vllm["routed_experts_num_experts"]
   max_prompt_length = int(rollout["max_prompt_length"])
   max_tokens_to_generate = int(rollout["total_generation_steps"])
-  return rollout_worker.RolloutConfig(
-      rollout_vllm_model_version=(
-          "" if sampler_type == "vanilla" else _vllm_model(hp)
-      ),
-      # Both vLLM samplers always run in server mode;
-      # `_validate_rollout_config` rejects `vllm_config.server_mode: false`.
-      rollout_vllm_server_mode=True,
+  config = rollout_worker.RolloutConfig(
       weight_sync_mode=weight_sync_lib.WeightSyncMode(str(ws["mode"])),
       max_prompt_length=max_prompt_length,
       max_tokens_to_generate=max_tokens_to_generate,
-      # Only the vanilla sampler reads it.
       kv_cache_size=max_prompt_length + max_tokens_to_generate,
       temperature=float(rollout["temperature"]),
       top_p=float(rollout["top_p"]),
@@ -577,6 +532,84 @@ def _rollout_config(
       routed_experts_num_experts=(
           None if num_experts is None else int(num_experts)
       ),
+  )
+  if sampler_type == "vanilla":
+    return config
+  return _with_vllm_settings(hp, config, sampler_type)
+
+
+def _with_vllm_settings(
+    hp: resolve_config.DistHyperParameters,
+    config: rollout_worker.RolloutConfig,
+    sampler_type: str,
+) -> rollout_worker.RolloutConfig:
+  """Returns a copy of `config` with the vLLM sampler settings filled in.
+
+  Args:
+    hp: Validated distributed RL configuration.
+    config: Rollout config with the settings every sampler shares.
+    sampler_type: vLLM sampler the worker runs ("inprocess_vllm" or "vllm").
+  """
+  vllm = hp.config_mapping("vllm_config")
+  family_name = _rollout_model_family_name(hp)
+  is_gemma4 = _is_gemma4_model(family_name)
+  vllm_model = _vllm_model(hp)
+  lora_rank = _lora_rank(hp)
+  lora_config = (
+      {"max_lora_rank": lora_rank, "max_loras": 1}
+      if lora_rank is not None
+      else None
+  )
+  rollout_vllm_kwargs = _vllm_passthrough_kwargs(
+      hp,
+      vllm_model=vllm_model,
+      partial_rollout=config.partial_rollout,
+      is_gemma4=is_gemma4,
+  )
+  sampling_kwargs: dict[str, Any] = (
+      {"skip_special_tokens": False} if is_gemma4 else {}
+  )
+  if sampler_type == "vllm":
+    sampling_kwargs["detokenize"] = bool(vllm["detokenize"])
+
+  return dataclasses.replace(
+      config,
+      kv_cache_size=_max_model_len(hp),
+      tensor_parallel_size=_tensor_parallel_size(hp),
+      data_parallel_size=max(1, _data_parallel_size(hp)),
+      rollout_mapping_config=(
+          _mapping_config_for(family_name)
+          if sampler_type == "inprocess_vllm"
+          else None
+      ),
+      rollout_vllm_model_version=vllm_model,
+      # Both vLLM samplers always run in server mode;
+      # `_validate_rollout_config` rejects `vllm_config.server_mode: false`.
+      rollout_vllm_server_mode=True,
+      rollout_vllm_init_with_random_weights=(
+          resolve_config.rollout_init_with_random_weights(hp)
+      ),
+      rollout_vllm_hbm_utilization=(
+          float(vllm["hbm_utilization"])
+          if vllm["hbm_utilization"] is not None
+          else None
+      ),
+      rollout_vllm_tpu_backend_type=str(vllm["tpu_backend_type"]),
+      rollout_vllm_lora_config=lora_config,
+      rollout_vllm_additional_config=_maxtext_additional_config(hp),
+      rollout_vllm_async_scheduling=bool(vllm["async_scheduling"]),
+      rollout_vllm_max_num_seqs=(
+          int(vllm["max_num_seqs"])
+          if vllm["max_num_seqs"] is not None
+          else None
+      ),
+      rollout_vllm_max_num_batched_tokens=(
+          int(vllm["max_num_batched_tokens"])
+          if vllm["max_num_batched_tokens"] is not None
+          else None
+      ),
+      rollout_vllm_kwargs=rollout_vllm_kwargs,
+      rollout_vllm_sampling_kwargs=sampling_kwargs,
   )
 
 
@@ -600,36 +633,33 @@ def _vllm_model(hp: resolve_config.DistHyperParameters) -> str:
   return str(rollout_model["model_id"])
 
 
-def _common_vllm_engine_kwargs(
+# TODO(yatlas): Remove Gemma4-specific model handling.
+def _vllm_passthrough_kwargs(
     hp: resolve_config.DistHyperParameters,
-    *,
     vllm_model: str,
-    max_model_len: int,
     partial_rollout: bool,
+    is_gemma4: bool,
 ) -> dict[str, Any]:
-  """Builds the `engine_kwargs` shared by both vLLM rollout samplers."""
+  """Builds the pass-through `rollout_vllm_kwargs` for vLLM rollout samplers."""
   vllm = hp.config_mapping("vllm_config")
-  engine_kwargs: dict[str, Any] = {
-      "model": vllm_model,
-      "max_model_len": max_model_len,
+  tokenizer_path = str(hp.config_mapping("tokenizer_config")["tokenizer_path"])
+  kwargs: dict[str, Any] = {
+      "tokenizer": tokenizer_path or vllm_model,
       "enable_prefix_caching": bool(
           vllm["enable_prefix_caching"] or partial_rollout
       ),
-      "async_scheduling": bool(vllm["async_scheduling"]),
       "dtype": str(vllm["dtype"]),
-      "max_logprobs": 1,
-      "logprobs_mode": "processed_logprobs",
   }
   hf_overrides = _vllm_hf_overrides(hp)
   if hf_overrides:
-    engine_kwargs["hf_overrides"] = hf_overrides
-  if vllm["max_num_seqs"] is not None:
-    engine_kwargs["max_num_seqs"] = int(vllm["max_num_seqs"])
-  if vllm["max_num_batched_tokens"] is not None:
-    engine_kwargs["max_num_batched_tokens"] = int(
-        vllm["max_num_batched_tokens"]
-    )
-  return engine_kwargs
+    kwargs["hf_overrides"] = hf_overrides
+  if is_gemma4:
+    # Defaults that `vllm_config.engine_kwargs` can override, so they are not
+    # in `_FORBIDDEN_ROLLOUT_KWARGS`.
+    kwargs["kv_cache_metrics"] = True
+    kwargs["disable_log_stats"] = False
+  kwargs.update(_vllm_engine_kwargs(hp))
+  return kwargs
 
 
 def _create_vanilla_sampler(
@@ -677,100 +707,26 @@ def _create_inprocess_vllm_sampler(
     config: rollout_worker.RolloutConfig,
 ) -> sampler_lib.Sampler:
   """Creates the in-process vLLM sampler."""
-  vllm_sampler = _import_vllm_sampler()
+  _import_vllm_sampler()
   from tunix.dist_rl.rollout import (  # pylint: disable=g-import-not-at-top
       inprocess_vllm_sampler,
   )
 
-  vllm = hp.config_mapping("vllm_config")
-  ws = hp.config_mapping("weight_sync_config")
-  logging.info("Creating vLLM mapping config...")
-  family_name = _rollout_model_family_name(hp)
-  mapping_config = _mapping_config_for(family_name)
-  vllm_model = _vllm_model(hp)
-  max_model_len = _max_model_len(hp)
   multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "")
-
-  partial_rollout = bool(ws["in_flight_weight_updates"])
-  engine_kwargs = _common_vllm_engine_kwargs(
-      hp,
-      vllm_model=vllm_model,
-      max_model_len=max_model_len,
-      partial_rollout=partial_rollout,
-  )
-  is_gemma4 = _is_gemma4_model(family_name)
-  if is_gemma4:
-    engine_kwargs["kv_cache_metrics"] = True
-    engine_kwargs["disable_log_stats"] = False
-  if multihost_backend:
-    engine_kwargs["distributed_executor_backend"] = multihost_backend
-  # `additional_config` must be set on VllmConfig (not engine_kwargs): the
-  # sampler overwrites args["additional_config"] from the VllmConfig field.
-  maxtext_additional_config = _maxtext_additional_config(hp)
-
-  # Enable VLLMInProcessDriver (`server_mode=True`) on both single-host and
-  # multi-host TPUs so concurrent `InprocessVllmSampler.sample()` worker
-  # threads submit into a single engine loop for continuous batching without
-  # racing on donated JAX KV-cache buffers. `InprocessVllmSampler` forces it
-  # on regardless, so `_validate_rollout_config` rejects `server_mode: false`.
   rollout_mesh = (
       None
       if multihost_backend
       else node_utils.create_mesh(hp, _ROLLOUT_KEY, "Rollout")
   )
-  tp_size = _tensor_parallel_size(hp)
-  dp_size = _data_parallel_size(hp)
-  logging.info(
-      "Creating vLLM config for model=%s mesh=%s tensor_parallel_size=%d "
-      "data_parallel_size=%d max_model_len=%d...",
-      vllm_model,
-      rollout_mesh,
-      tp_size,
-      dp_size,
-      max_model_len,
-  )
-  lora_rank = _lora_rank(hp)
-  lora_config = (
-      {"max_lora_rank": lora_rank, "max_loras": 1}
-      if lora_rank is not None
-      else None
-  )
-  return_routed_experts = bool(
-      hp.config_mapping("vllm_config")["return_routed_experts"]
-  )
   max_concurrency = int(
       hp.config_mapping("agentic_grpo_config")["max_concurrency"]
-  )
-  vllm_config = vllm_sampler.VllmConfig(
-      server_mode=True,
-      mesh=rollout_mesh,
-      tensor_parallel_size=tp_size,
-      data_parallel_size=dp_size,
-      return_logprobs=True,
-      return_routed_experts=return_routed_experts,
-      init_with_random_weights=(
-          resolve_config.rollout_init_with_random_weights(hp)
-      ),
-      hbm_utilization=(
-          float(vllm["hbm_utilization"])
-          if vllm["hbm_utilization"] is not None
-          else _DEFAULT_INPROCESS_VLLM_HBM_UTILIZATION
-      ),
-      lora_config=lora_config,
-      mapping_config=mapping_config,
-      additional_config=maxtext_additional_config,
-      sampling_kwargs={"skip_special_tokens": False} if is_gemma4 else {},
-      engine_kwargs=engine_kwargs,
-      eos_tokens=config.eos_tokens,
-      partial_rollout=partial_rollout,
   )
   return inprocess_vllm_sampler.InprocessVllmSampler(
       server_id=worker_id,
       tokenizer=tokenizer,
-      config=vllm_config,
-      weight_sync_mode=weight_sync_lib.WeightSyncMode(str(ws["mode"])),
+      config=config,
+      mesh=rollout_mesh,
       max_concurrency=max_concurrency,
-      partial_rollout=partial_rollout,
   )
 
 
@@ -781,70 +737,14 @@ def _create_vllm_sampler(
     config: rollout_worker.RolloutConfig,
 ) -> sampler_lib.Sampler:
   """Creates the vLLM `AsyncLLM` sampler."""
-  del tokenizer  # The engine loads its own tokenizer from `tokenizer_path`.
+  del hp, tokenizer
   from tunix.dist_rl.rollout import (  # pylint: disable=g-import-not-at-top
       vllm_sampler,
   )
-  from vllm.engine.arg_utils import (  # pylint: disable=g-import-not-at-top
-      AsyncEngineArgs,
-  )
 
-  vllm = hp.config_mapping("vllm_config")
-  ws = hp.config_mapping("weight_sync_config")
-  vllm_model = _vllm_model(hp)
-  max_model_len = _max_model_len(hp)
-  tp_size = _tensor_parallel_size(hp)
-  dp_size = max(1, _data_parallel_size(hp))
-  lora_rank = _lora_rank(hp)
-  logging.info(
-      "Creating vLLM VllmSampler config for model=%s tensor_parallel_size=%d "
-      "data_parallel_size=%d (%d chips) max_model_len=%d...",
-      vllm_model,
-      tp_size,
-      dp_size,
-      tp_size * dp_size,
-      max_model_len,
-  )
-  if dp_size > 1 and lora_rank is not None:
-    raise ValueError(
-        "LoRA is not supported with rollout data parallelism:"
-        f" rollout_model_config.mesh fsdp={dp_size} with"
-        " rollout_model_config.lora_config. Set fsdp=1 or drop LoRA."
-    )
-  partial_rollout = bool(ws["in_flight_weight_updates"])
-  tokenizer_path = str(hp.config_mapping("tokenizer_config")["tokenizer_path"])
-  engine_kwargs = _common_vllm_engine_kwargs(
-      hp,
-      vllm_model=vllm_model,
-      max_model_len=max_model_len,
-      partial_rollout=partial_rollout,
-  )
-  engine_kwargs.update(
-      tokenizer=tokenizer_path or vllm_model,
-      tensor_parallel_size=tp_size,
-      data_parallel_size=dp_size,
-      trust_remote_code=True,
-      enable_lora=lora_rank is not None,
-      max_lora_rank=lora_rank,
-      max_loras=1 if lora_rank is not None else None,
-  )
-  if vllm["hbm_utilization"] is not None:
-    engine_kwargs["gpu_memory_utilization"] = float(vllm["hbm_utilization"])
-  if bool(vllm["return_routed_experts"]):
-    engine_kwargs["enable_return_routed_experts"] = True
-  maxtext_additional_config = _maxtext_additional_config(hp)
-  if maxtext_additional_config is not None:
-    engine_kwargs["additional_config"] = maxtext_additional_config
-  _merge_engine_kwargs(engine_kwargs, _vllm_engine_kwargs(hp))
-  engine_args = AsyncEngineArgs(**engine_kwargs)
   return vllm_sampler.VllmSampler(
       server_id=worker_id,
-      engine_args=engine_args,
-      model_name=vllm_model,
       config=config,
-      weight_sync_mode=weight_sync_lib.WeightSyncMode(str(ws["mode"])),
-      partial_rollout=partial_rollout,
-      detokenize=bool(vllm["detokenize"]),
   )
 
 

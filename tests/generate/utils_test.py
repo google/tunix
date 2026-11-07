@@ -3134,5 +3134,57 @@ class TokenIdsTest(parameterized.TestCase):
       np.testing.assert_array_equal(unchanged, val)
 
 
+class MergeAdditionalConfigTest(absltest.TestCase):
+
+  def test_returns_none_when_both_inputs_are_none(self):
+    self.assertIsNone(utils.merge_additional_config(None, None))
+
+  def test_returns_none_when_merged_config_is_empty(self):
+    self.assertIsNone(utils.merge_additional_config({}, None))
+    self.assertIsNone(utils.merge_additional_config(None, {}))
+
+  def test_override_replaces_top_level_keys(self):
+    self.assertEqual(
+        utils.merge_additional_config(
+            {"sharding": {"a": 1}, "kept": 1}, {"sharding": {"b": 2}}
+        ),
+        {"sharding": {"b": 2}, "kept": 1},
+    )
+
+  def test_merges_maxtext_config_one_level_deep(self):
+    base = {"maxtext_config": {"model_name": "m", "attention": "dot_product"}}
+    override = {"maxtext_config": {"attention": "flash"}, "other": 1}
+
+    merged = utils.merge_additional_config(base, override)
+
+    self.assertEqual(
+        merged,
+        {
+            "maxtext_config": {"model_name": "m", "attention": "flash"},
+            "other": 1,
+        },
+    )
+    # The inputs are not modified.
+    self.assertEqual(base["maxtext_config"]["attention"], "dot_product")
+    self.assertEqual(
+        override, {"maxtext_config": {"attention": "flash"}, "other": 1}
+    )
+
+  def test_handles_none_maxtext_config_in_base_or_override(self):
+    self.assertEqual(
+        utils.merge_additional_config(
+            {"maxtext_config": None}, {"maxtext_config": {"attention": "flash"}}
+        ),
+        {"maxtext_config": {"attention": "flash"}},
+    )
+    self.assertEqual(
+        utils.merge_additional_config(
+            {"maxtext_config": {"attention": "dot_product"}, "kept": 1},
+            {"maxtext_config": None},
+        ),
+        {"maxtext_config": None, "kept": 1},
+    )
+
+
 if __name__ == "__main__":
   absltest.main()

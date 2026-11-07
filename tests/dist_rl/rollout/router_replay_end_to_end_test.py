@@ -163,7 +163,6 @@ class SamplerToPayloadTest(absltest.TestCase):
 
   def _sampling_response(self, fill):
     stub = mock.MagicMock()
-    stub.config = mock.Mock(return_routed_experts=True)
     stub.return_value = base_sampler.SamplerOutput(
         text=["answer"],
         logits=None,
@@ -176,7 +175,9 @@ class SamplerToPayloadTest(absltest.TestCase):
     )
 
     adapter = inprocess_vllm_sampler.InprocessVllmSampler(
-        server_id="rollout", tokenizer=_StubTokenizer()
+        server_id="rollout",
+        tokenizer=_StubTokenizer(),
+        config=base_rollout.RolloutConfig(return_routed_experts=True),
     )
     adapter.vllm_sampler = stub
     request = base_sampler_lib.SamplingRequest(
@@ -218,7 +219,6 @@ class SamplerToPayloadTest(absltest.TestCase):
   def test_multi_turn_routed_experts_prompt_start_to_payload(self):
     """Multi-turn rollout via routed_experts_prompt_start yields unpadded bit-exact payload."""
     stub = mock.MagicMock()
-    stub.config = mock.Mock(return_routed_experts=True)
 
     env_len = 3
     turn0_routing = _routing(PROMPT_LEN + GEN_LEN, 3)
@@ -248,7 +248,9 @@ class SamplerToPayloadTest(absltest.TestCase):
     ]
 
     adapter = inprocess_vllm_sampler.InprocessVllmSampler(
-        server_id="rollout", tokenizer=_StubTokenizer()
+        server_id="rollout",
+        tokenizer=_StubTokenizer(),
+        config=base_rollout.RolloutConfig(return_routed_experts=True),
     )
     adapter.vllm_sampler = stub
 
@@ -321,7 +323,6 @@ class SamplerToPayloadTest(absltest.TestCase):
   def test_heterogeneous_batch_routed_experts_prompt_start(self):
     """Batched requests with heterogeneous prompt_start offsets do not collapse or truncate each other."""
     stub = mock.MagicMock()
-    stub.config = mock.Mock(return_routed_experts=True)
 
     env_len = 3
     # req_a is Turn 0 (prompt_start=0): 8 tokens total
@@ -342,7 +343,9 @@ class SamplerToPayloadTest(absltest.TestCase):
     )
 
     adapter = inprocess_vllm_sampler.InprocessVllmSampler(
-        server_id="rollout", tokenizer=_StubTokenizer()
+        server_id="rollout",
+        tokenizer=_StubTokenizer(),
+        config=base_rollout.RolloutConfig(return_routed_experts=True),
     )
     adapter.vllm_sampler = stub
 
@@ -463,7 +466,9 @@ class SamplerToPayloadTest(absltest.TestCase):
       )
 
     adapter = inprocess_vllm_sampler.InprocessVllmSampler(
-        server_id="rollout", tokenizer=_StubTokenizer()
+        server_id="rollout",
+        tokenizer=_StubTokenizer(),
+        config=base_rollout.RolloutConfig(return_routed_experts=True),
     )
     adapter.vllm_sampler = sampler
 

@@ -2457,3 +2457,39 @@ def check_prompt_echo(
       raise ValueError(
           f'{backend_name} prompt echo / prompt_token_ids differed from input'
       )
+
+
+def merge_additional_config(
+    base: Mapping[str, Any] | None,
+    override: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+  """Merges vLLM `additional_config` overrides onto a base config.
+
+  Top-level keys in `override` replace those in `base`, except
+  `maxtext_config`, whose entries are merged one level deep so that an override
+  only replaces the MaxText settings it names.
+
+  Args:
+    base: The base `additional_config`, or None.
+    override: Entries to apply on top of `base`, or None.
+
+  Returns:
+    The merged config, or None if both inputs are None or the merged config is
+    empty.
+  """
+  if base is None and override is None:
+    return None
+  merged: dict[str, Any] = dict(base) if base is not None else {}
+  if override:
+    override_items = dict(override)
+    if 'maxtext_config' in override_items:
+      override_maxtext_config = override_items.pop('maxtext_config')
+      if override_maxtext_config is not None:
+        merged['maxtext_config'] = {
+            **(merged.get('maxtext_config') or {}),
+            **override_maxtext_config,
+        }
+      else:
+        merged['maxtext_config'] = None
+    merged.update(override_items)
+  return merged or None

@@ -60,8 +60,6 @@
           "partial_rollout": false,
           "return_logprobs": true,
           "return_routed_experts": false,
-          "rollout_vllm_model_version": "",
-          "rollout_vllm_server_mode": true,
           "routed_experts_encode_mode": "auto",
           "routed_experts_num_experts": null,
           "temperature": 1.0,

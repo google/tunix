@@ -72,7 +72,8 @@ class VllmConfig:
   # vLLM engine arg related, requires additional processing before passing into engine
   additional_config: Optional[Dict[str, Any]] = None
   enable_dp_attention: bool = False
-  hbm_utilization: float = 0.5
+  # `None` currently falls back to 0.2 (see the TODO in `_vllm_config`).
+  hbm_utilization: Optional[float] = 0.5
   lora_config: Optional[Dict[str, Any]] = None
   mesh: Optional[jax.sharding.Mesh] = None
   data_parallel_size: int = -1
@@ -487,7 +488,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if config.init_with_random_weights:
       args["load_format"] = "dummy"
 
-    args["gpu_memory_utilization"] = config.hbm_utilization
+    # TODO(yatlas): Remove default hbm_utilization once colocated hbm fixes are
+    # landed.
+    if config.hbm_utilization is not None:
+      args["gpu_memory_utilization"] = config.hbm_utilization
+    else:
+      args["gpu_memory_utilization"] = 0.2
 
     if config.return_logprobs:
       args.setdefault("max_logprobs", 1)
@@ -496,7 +502,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if config.return_routed_experts:
       args["enable_return_routed_experts"] = True
 
-    args["additional_config"] = config.additional_config or {}
+    args["additional_config"] = dict(config.additional_config or {})
 
     if config.lora_config is not None:
       args["additional_config"]["lora_config"] = config.lora_config

@@ -221,8 +221,13 @@ class RolloutConfig:
   # LoRA config for vLLM rollout engine.
   rollout_vllm_lora_config: dict[str, Any] | None = None
 
-  # Allocated HBM fraction for vLLM rollout engine.
-  rollout_vllm_hbm_utilization: float = 0.2
+  # TODO(yatlas): Once the HBM usage fixes land, make this non-optional and
+  # consolidate on a single default here instead of per-sampler defaults.
+  # Allocated HBM fraction for vLLM rollout engine. `None` falls back to each
+  # sampler's default (`0.2` in colocated `VllmRollout`, `0.5` in `dist_rl`'s
+  # `InprocessVllmSampler`, and vLLM's own default in `dist_rl`'s
+  # `VllmSampler`).
+  rollout_vllm_hbm_utilization: float | None = None
 
   # Whether to initialize vLLM model with random weights or huggingface weights.
   rollout_vllm_init_with_random_weights: bool = True

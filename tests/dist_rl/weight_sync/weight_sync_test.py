@@ -248,6 +248,12 @@ class MockVllmSampler(base_sampler.BaseSampler):
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
 
+  def pause(self, mode: str = "keep", *, clear_cache: bool = False) -> None:
+    del mode, clear_cache
+
+  def resume(self) -> None:
+    pass
+
   def stop(self) -> None:
     pass
 
