@@ -14,9 +14,12 @@
 
 """Unit tests for trajectory-to-payload conversion (`payload_builder`)."""
 
+import dataclasses
+
 from absl.testing import absltest
 import numpy as np
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import payload_builder
 from tunix.rl import advantages as rl_advantages
 from tunix.rl import algorithm_config
@@ -74,14 +77,14 @@ class CreateTrainerPayloadsTest(absltest.TestCase):
     np.testing.assert_array_equal(payloads[0].prompt_mask, [1.0, 1.0])
     np.testing.assert_array_equal(payloads[0].completion_ids, [3, 4])
     np.testing.assert_array_equal(payloads[0].completion_mask, [1.0, 1.0])
-    self.assertLen(payloads[0].advantages, 2)
+    self.assertLen(payloads[0].advantages, 1)
     self.assertLess(payloads[0].advantages[0], 0.0)
 
     np.testing.assert_array_equal(payloads[1].prompt_ids, [1, 2])
     np.testing.assert_array_equal(payloads[1].prompt_mask, [1.0, 1.0])
     np.testing.assert_array_equal(payloads[1].completion_ids, [5, 6])
     np.testing.assert_array_equal(payloads[1].completion_mask, [1.0, 1.0])
-    self.assertLen(payloads[1].advantages, 2)
+    self.assertLen(payloads[1].advantages, 1)
     self.assertGreater(payloads[1].advantages[0], 0.0)
 
   def test_grpo_create_trainer_payloads_with_rollout_logprobs(self):
@@ -262,8 +265,8 @@ class CreateTrainerPayloadsTest(absltest.TestCase):
         rewards=[1.0, 2.0],
         algo_config=cfg,
     )
-    np.testing.assert_allclose(payloads[0].advantages, [42.0, 42.0])
-    np.testing.assert_allclose(payloads[1].advantages, [-42.0, -42.0])
+    np.testing.assert_allclose(payloads[0].advantages, [42.0])
+    np.testing.assert_allclose(payloads[1].advantages, [-42.0])
 
   def test_ppo_masks_invalid_trajectory_and_attaches_routed_experts(self):
     cfg = algorithm_config.PPOConfig(num_generations=2)
@@ -294,12 +297,12 @@ class CreateTrainerPayloadsTest(absltest.TestCase):
         rewards=[3.0, 5.0],
         algo_config=cfg,
     )
-    np.testing.assert_allclose(payloads[0].advantages, [3.0, 3.0])
-    np.testing.assert_allclose(payloads[0].returns, [3.0, 3.0])
+    np.testing.assert_allclose(payloads[0].advantages, [3.0])
+    np.testing.assert_allclose(payloads[0].returns, [3.0])
     self.assertIsNotNone(payloads[0].routed_experts)
     np.testing.assert_array_equal(payloads[1].completion_mask, [0.0, 0.0])
-    np.testing.assert_array_equal(payloads[1].advantages, [0.0, 0.0])
-    np.testing.assert_array_equal(payloads[1].returns, [0.0, 0.0])
+    np.testing.assert_array_equal(payloads[1].advantages, [0.0])
+    np.testing.assert_array_equal(payloads[1].returns, [0.0])
 
   def test_ppo_masks_nonfinite_reward_trajectories(self):
     cfg = algorithm_config.PPOConfig(num_generations=3)
@@ -321,16 +324,84 @@ class CreateTrainerPayloadsTest(absltest.TestCase):
         rewards=[2.5, np.nan, np.inf],
         algo_config=cfg,
     )
-    np.testing.assert_allclose(payloads[0].advantages, [2.5, 2.5])
-    np.testing.assert_allclose(payloads[0].returns, [2.5, 2.5])
+    np.testing.assert_allclose(payloads[0].advantages, [2.5])
+    np.testing.assert_allclose(payloads[0].returns, [2.5])
     np.testing.assert_array_equal(payloads[0].completion_mask, [1.0, 1.0])
     for bad_idx in (1, 2):
       with self.subTest(group_index=bad_idx):
         np.testing.assert_array_equal(
             payloads[bad_idx].completion_mask, [0.0, 0.0]
         )
-        np.testing.assert_array_equal(payloads[bad_idx].advantages, [0.0, 0.0])
-        np.testing.assert_array_equal(payloads[bad_idx].returns, [0.0, 0.0])
+        np.testing.assert_array_equal(payloads[bad_idx].advantages, [0.0])
+        np.testing.assert_array_equal(payloads[bad_idx].returns, [0.0])
+
+  def test_sequence_scalars_expand_identically_in_batch_assemblers(self):
+    cfg = algorithm_config.PPOConfig(num_generations=2, use_rollout_logps=False)
+    items = [
+        datatypes.TrajectoryItem(
+            group_index=i,
+            prompt_id="g1",
+            traj={
+                "prompt_tokens": np.array([1, 2], dtype=np.int32),
+                "conversation_tokens": np.arange(3 + i, dtype=np.int32),
+                "conversation_masks": np.ones(3 + i, dtype=np.float32),
+            },
+        )
+        for i in range(2)
+    ]
+    compact = payload_builder.create_trainer_payloads(
+        items, rewards=[2.0, -1.0], algo_config=cfg
+    )
+    expanded = [
+        dataclasses.replace(
+            payload,
+            advantages=np.full(
+                len(payload.completion_ids),
+                payload.advantages[0],
+                dtype=np.float32,
+            ),
+            returns=np.full(
+                len(payload.completion_ids),
+                payload.returns[0],
+                dtype=np.float32,
+            ),
+        )
+        for payload in compact
+    ]
+
+    def padded_assembler():
+      return batch_assembly.PaddedBatchAssembler(
+          batch_size=2,
+          max_prompt_length=4,
+          max_response_length=5,
+          pad_id=0,
+          num_generations=2,
+          mini_batch_size=1,
+      )
+
+    def packed_assembler():
+      return batch_assembly.SequencePackedBatchAssembler(
+          batch_size=1,
+          num_generations=2,
+          mini_batch_size=1,
+          max_packed_len=16,
+      )
+
+    for name, assembler_factory in (
+        ("padded", padded_assembler),
+        ("packed", packed_assembler),
+    ):
+      with self.subTest(assembler=name):
+        actual = list(assembler_factory().feed(compact))[0].payload
+        expected = list(assembler_factory().feed(expanded))[0].payload
+        np.testing.assert_array_equal(
+            actual.completion_ids, expected.completion_ids
+        )
+        np.testing.assert_array_equal(
+            actual.completion_mask, expected.completion_mask
+        )
+        np.testing.assert_array_equal(actual.advantages, expected.advantages)
+        np.testing.assert_array_equal(actual.returns, expected.returns)
 
   def test_extract_tokens_and_masks_with_failed_item(self):
     failed_item = datatypes.TrajectoryItem(
@@ -577,7 +648,7 @@ class ExcludeMaskedFromAdvantageTest(absltest.TestCase):
         atol=1e-4,
     )
     np.testing.assert_array_equal(payloads[3].completion_mask, [0.0, 0.0])
-    np.testing.assert_array_equal(payloads[3].advantages, [0.0, 0.0])
+    np.testing.assert_array_equal(payloads[3].advantages, [0.0])
     self.assertLen(payloads[3].completion_ids, 2)
     np.testing.assert_array_equal(payloads[0].completion_mask, [1.0, 1.0])
 
@@ -635,7 +706,7 @@ class ExcludeMaskedFromAdvantageTest(absltest.TestCase):
     for i, payload in enumerate(payloads):
       with self.subTest(group_index=i):
         np.testing.assert_array_equal(payload.completion_mask, [0.0, 0.0])
-        np.testing.assert_array_equal(payload.advantages, [0.0, 0.0])
+        np.testing.assert_array_equal(payload.advantages, [0.0])
 
   def test_nonfinite_reward_item_is_excluded_and_zeroed(self):
     group = [self._item(i) for i in range(4)]
@@ -650,7 +721,7 @@ class ExcludeMaskedFromAdvantageTest(absltest.TestCase):
         atol=1e-4,
     )
     np.testing.assert_array_equal(payloads[3].completion_mask, [0.0, 0.0])
-    np.testing.assert_array_equal(payloads[3].advantages, [0.0, 0.0])
+    np.testing.assert_array_equal(payloads[3].advantages, [0.0])
     np.testing.assert_array_equal(payloads[0].completion_mask, [1.0, 1.0])
 
   def test_nonfinite_rewards_leaving_single_valid_peer_zeroes_group(self):
@@ -664,7 +735,7 @@ class ExcludeMaskedFromAdvantageTest(absltest.TestCase):
     for i, payload in enumerate(payloads):
       with self.subTest(group_index=i):
         np.testing.assert_array_equal(payload.completion_mask, [0.0, 0.0])
-        np.testing.assert_array_equal(payload.advantages, [0.0, 0.0])
+        np.testing.assert_array_equal(payload.advantages, [0.0])
 
   def test_all_valid_group_matches_legacy(self):
     group = [self._item(i) for i in range(4)]

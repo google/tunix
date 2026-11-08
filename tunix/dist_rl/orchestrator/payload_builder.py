@@ -132,7 +132,8 @@ def create_trainer_payloads(
     trajectories (`TrajectoryItem.is_valid` is False or a non-finite reward) get
     a zero advantage and a zeroed `completion_mask`, so they neither shape the
     group baseline nor contribute to the loss, while the static `[G]` batch
-    dimension is kept.
+    dimension is kept. Sequence-level advantages and returns stay as one-element
+    arrays until batch assembly broadcasts them over completion tokens.
   """
   r = np.asarray(rewards, dtype=np.float32).reshape(-1)
   if r.shape[0] != len(group):
@@ -199,7 +200,12 @@ def create_trainer_payloads(
             prompt_mask=np.ones(len(p_arr), dtype=np.float32),
             completion_ids=c_arr,
             completion_mask=act_arr,
-            advantages=np.full(len(c_arr), adv_val, dtype=np.float32),
+            # Assemblers broadcast sequence scalars over completions.
+            advantages=(
+                np.array([adv_val], dtype=np.float32)
+                if c_arr.size
+                else np.zeros(0, dtype=np.float32)
+            ),
             old_per_token_logps=(
                 _extract_old_logps(item, len(c_arr))
                 if algo_config.use_rollout_logps
@@ -208,7 +214,11 @@ def create_trainer_payloads(
             returns=(
                 None
                 if returns is None
-                else np.full(len(c_arr), float(returns[i]), dtype=np.float32)
+                else (
+                    np.array([returns[i]], dtype=np.float32)
+                    if c_arr.size
+                    else np.zeros(0, dtype=np.float32)
+                )
             ),
             routed_experts=_routed_experts_for(
                 item,
