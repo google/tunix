@@ -1,9 +1,11 @@
 """Unit tests for FileTrajectoryStore file layout and on-disk write behavior."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+import contextlib
 import tempfile
 import threading
 import time
+import types
 from typing import Any, Final, TypeAlias, cast
 from unittest import mock
 
@@ -12,6 +14,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
 import pydantic
+from tunix.dist_rl.trajectory import async_writer
 from tunix.dist_rl.trajectory import file_store
 from tunix.dist_rl.trajectory import store
 from tunix.dist_rl.trajectory import store_testing
@@ -27,6 +30,25 @@ _CONCURRENT_READ_TIMEOUT_SECONDS: Final[float] = 10.0
 _ReadMethod: TypeAlias = Callable[
     [file_store.FileTrajectoryStore[Any], list[str]], list[Any]
 ]
+
+
+def _make_gfile_error(code: int) -> OSError:
+  err = OSError(f"gfile status {code}")
+  setattr(err, "status", types.SimpleNamespace(code=code))
+  return err
+
+
+class _FakeHttpError(Exception):
+
+  def __init__(self, code: int) -> None:
+    super().__init__(f"HTTP {code}")
+    self.code = code
+
+
+def _make_tf_error(error_code: int) -> Exception:
+  err = Exception(f"tf error_code {error_code}")
+  setattr(err, "error_code", error_code)
+  return err
 
 
 class FileTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
@@ -1532,6 +1554,569 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     self.file_s.get_trajectory_metadata_path(traj_id).unlink()
     with self.assertRaises(store.TrajectoryMetadataNotFoundError):
       self.file_s.get_trajectories_metadata()
+
+  @parameterized.named_parameters(
+      ("gfile_resource_exhausted", _make_gfile_error(8), True),
+      ("gfile_aborted", _make_gfile_error(10), True),
+      ("gfile_unavailable", _make_gfile_error(14), True),
+      ("tf_resource_exhausted", _make_tf_error(8), True),
+      ("tf_aborted", _make_tf_error(10), True),
+      ("tf_unavailable", _make_tf_error(14), True),
+      ("http_409_conflict", _FakeHttpError(409), True),
+      ("http_429_rate_limit", _FakeHttpError(429), True),
+      ("http_503_unavailable", _FakeHttpError(503), True),
+      ("gfile_deadline_exceeded", _make_gfile_error(4), False),
+      ("gfile_not_found", _make_gfile_error(5), False),
+      ("gfile_permission_denied", _make_gfile_error(7), False),
+      ("tf_deadline_exceeded", _make_tf_error(4), False),
+      ("tf_permission_denied", _make_tf_error(7), False),
+      ("http_403_forbidden", _FakeHttpError(403), False),
+      ("http_408_request_timeout", _FakeHttpError(408), False),
+      ("http_500_internal", _FakeHttpError(500), False),
+      ("http_504_gateway_timeout", _FakeHttpError(504), False),
+      ("os_error_disk_full", OSError("disk full"), False),
+      ("timeout_error", TimeoutError("timed out"), False),
+      ("connection_reset_error", ConnectionResetError("reset"), False),
+      ("file_not_found_error", FileNotFoundError("missing path"), False),
+      ("permission_error", PermissionError("access denied"), False),
+      ("runtime_error", RuntimeError("to_atif not called"), False),
+      ("value_error", ValueError("invalid payload"), False),
+  )
+  def test_should_batch_on_error_with_exception_returns_expected_decision(
+      self, error: Exception, expected: bool
+  ) -> None:
+    should_batch = self.file_s._writer._should_batch_on_error(error)
+
+    self.assertEqual(should_batch, expected)
+
+  def _configure_batch_writer(
+      self, *, max_items: int, step_up: bool = True
+  ) -> None:
+    self.file_s.close()
+    self.file_s = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir,
+        batching=async_writer.BatchConfig(max_items=max_items, max_wait_s=5.0),
+    )
+    self.addCleanup(self.file_s.close)
+    if step_up:
+      self.file_s._writer._increase_batch_wait()
+
+  @contextlib.contextmanager
+  def _hold_batch(self, *, step_up: bool = True) -> Iterator[None]:
+    """Buffers writes made inside the block and flushes them as one batch."""
+    writer = self.file_s._writer
+    held_tasks: list[file_store._FileWriteTask] = []
+    orig_enqueue = writer._enqueue
+
+    def buffer_task(task: file_store._FileWriteTask) -> None:
+      held_tasks.append(task)
+
+    with mock.patch.object(writer, "_enqueue", side_effect=buffer_task):
+      yield
+
+    writer._batching = async_writer.BatchConfig(
+        max_items=max(len(held_tasks), 1),
+        max_wait_s=5.0,
+    )
+    if step_up and writer.batch_wait_s == 0.0:
+      writer._increase_batch_wait()
+    for task in held_tasks:
+      orig_enqueue(task)
+    self.file_s.flush()
+
+  def test_add_step_in_batch_mode_writes_jsonl_chunk_and_coalesces_metadata_and_metrics(
+      self,
+  ) -> None:
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta_v1 = trajectory_testing.METADATA_2.model_copy(
+        update={"notes": "initial"}
+    )
+    meta_v2 = trajectory_testing.METADATA_2.model_copy(
+        update={"notes": "final"}
+    )
+    step_1, step_2, step_3, step_4, step_5 = (
+        trajectory_testing.TRAJECTORY_2.steps
+    )
+
+    with self._hold_batch():
+      self.file_s.add_step(step_1, meta_v1)
+      self.file_s.add_step(step_2, meta_v1)
+      self.file_s.add_step(step_3, meta_v1)
+      self.file_s.add_step(step_4, meta_v1)
+      self.file_s.add_step(step_5, meta_v2)
+      self.file_s.update_metrics(
+          traj_id, trajectory_lib.TrajectoryMetrics(extra={"k1": 1, "k2": 10})
+      )
+      self.file_s.update_metrics(
+          traj_id, trajectory_lib.TrajectoryMetrics(extra={"k2": 20, "k3": 30})
+      )
+
+    chunk_path = self.file_s.get_steps_chunk_path(traj_id, 1, 5)
+    self.assertTrue(chunk_path.exists())
+    self.assertCountEqual(
+        [p.name for p in self.file_s.get_trajectory_dir(traj_id).iterdir()],
+        ["metadata.json", "metrics.json", "steps_000001_000005.jsonl"],
+    )
+    (recovered,) = self.file_s.get_trajectories([traj_id])
+    self.assertEqual(recovered.notes, "final")
+    self.assertEqual(recovered.steps, trajectory_testing.TRAJECTORY_2.steps)
+    self.assertEqual(
+        self.file_s.get_trajectories_metrics([traj_id])[traj_id].extra,
+        {"k1": 1, "k2": 20, "k3": 30},
+    )
+    self.assertAlmostEqual(self.file_s._writer.batch_wait_s, 0.8)
+
+  def test_add_step_in_batch_mode_with_multiple_trajectories_writes_per_trajectory_files(
+      self,
+  ) -> None:
+    traj_id_1 = trajectory_testing.TRAJECTORY_ID_1
+    traj_id_2 = trajectory_testing.TRAJECTORY_ID_2
+
+    with self._hold_batch():
+      self.file_s.add_step(
+          trajectory_testing.STEP_2_1, trajectory_testing.METADATA_2
+      )
+      self.file_s.add_step(
+          trajectory_testing.STEP_2_2, trajectory_testing.METADATA_2
+      )
+      self.file_s.add_step(
+          trajectory_testing.STEP_2_3, trajectory_testing.METADATA_2
+      )
+      self.file_s.add_step(
+          trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+      )
+
+    self.assertTrue(self.file_s.get_steps_chunk_path(traj_id_2, 1, 3).exists())
+    self.assertTrue(self.file_s.get_step_path(traj_id_1, 1).exists())
+    recovered_1, recovered_2 = self.file_s.get_trajectories(
+        [traj_id_1, traj_id_2]
+    )
+    self.assertEqual(recovered_1, trajectory_testing.TRAJECTORY_1)
+    self.assertEqual(
+        recovered_2.steps, trajectory_testing.TRAJECTORY_2.steps[:3]
+    )
+
+  def test_get_trajectories_with_json_and_jsonl_files_applies_single_step_revisions(
+      self,
+  ) -> None:
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    self.file_s.add_step(
+        trajectory_testing.STEP_2_1, trajectory_testing.METADATA_2
+    )
+    self.file_s.flush()
+    chunk_path = self.file_s.get_steps_chunk_path(traj_id, 1, 5)
+    chunk_lines = [
+        s.to_atif_step().model_dump_json(exclude_none=True)
+        for s in trajectory_testing.TRAJECTORY_2.steps
+    ]
+    chunk_path.write_text("\n".join(chunk_lines))
+    revised_step_1 = trajectory_testing.STEP_2_1.model_copy(
+        update={"message": "revised step 1"}
+    )
+    self.file_s.get_step_path(traj_id, 1).write_text(
+        revised_step_1.to_atif_step().model_dump_json(exclude_none=True)
+    )
+    revised_step_3 = trajectory_testing.STEP_2_3.model_copy(
+        update={"message": "revised step 3"}
+    )
+    self.file_s.get_step_path(traj_id, 3).write_text(
+        revised_step_3.to_atif_step().model_dump_json(exclude_none=True)
+    )
+
+    (recovered,) = self.file_s.get_trajectories([traj_id])
+
+    self.assertEqual(
+        [s.step_id for s in recovered.steps],
+        [1, 2, 3, 4, 5],
+    )
+    self.assertEqual(
+        [s.message for s in recovered.steps],
+        [
+            "revised step 1",
+            trajectory_testing.STEP_2_2.message,
+            "revised step 3",
+            trajectory_testing.STEP_2_4.message,
+            trajectory_testing.STEP_2_5.message,
+        ],
+    )
+
+  def test_add_step_in_batch_mode_with_duplicate_step_id_persists_latest_step(
+      self,
+  ) -> None:
+    traj_id = trajectory_testing.TRAJECTORY_ID_1
+    step_v1 = trajectory_lib.Step(
+        step_id=1, source=trajectory_lib.Source.AGENT, message="v1"
+    )
+    step_v2 = trajectory_lib.Step(
+        step_id=1, source=trajectory_lib.Source.AGENT, message="v2"
+    )
+
+    with self._hold_batch():
+      self.file_s.add_step(step_v1, trajectory_testing.METADATA_1)
+      self.file_s.add_step(step_v2, trajectory_testing.METADATA_1)
+
+    step_path = self.file_s.get_step_path(traj_id, 1)
+    self.assertTrue(step_path.exists())
+    (recovered,) = self.file_s.get_trajectories([traj_id])
+    (recovered_step,) = recovered.steps
+    self.assertEqual(recovered_step.message, "v2")
+
+  def test_add_step_in_batch_mode_after_unbatched_writes_updates_single_step_json(
+      self,
+  ) -> None:
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta = trajectory_testing.METADATA_2
+    revised_step_1 = trajectory_testing.STEP_2_1.model_copy(
+        update={"message": "step 1 v2"}
+    )
+    revised_step_2 = trajectory_testing.STEP_2_2.model_copy(
+        update={"message": "step 2 v2"}
+    )
+    # Write steps 1 and 2 unbatched, then revise step 1 unbatched so the
+    # highest persisted step ID stays 2 rather than regressing to 1.
+    self.file_s.add_step(trajectory_testing.STEP_2_1, meta)
+    self.file_s.add_step(trajectory_testing.STEP_2_2, meta)
+    self.file_s.add_step(revised_step_1, meta)
+    self.file_s.flush()
+
+    with self._hold_batch():
+      self.file_s.add_step(revised_step_2, meta)
+      self.file_s.add_step(trajectory_testing.STEP_2_3, meta)
+
+    self.assertFalse(self.file_s.get_steps_chunk_path(traj_id, 2, 3).exists())
+    self.assertTrue(self.file_s.get_step_path(traj_id, 2).exists())
+    self.assertTrue(self.file_s.get_step_path(traj_id, 3).exists())
+    (recovered,) = self.file_s.get_trajectories([traj_id])
+    self.assertEqual(
+        [step.message for step in recovered.steps],
+        ["step 1 v2", "step 2 v2", trajectory_testing.STEP_2_3.message],
+    )
+
+  def test_add_step_in_batch_mode_with_sparse_revisions_preserves_chunk_steps(
+      self,
+  ) -> None:
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta = trajectory_testing.METADATA_2
+    revised_step_1 = trajectory_testing.STEP_2_1.model_copy(
+        update={"message": "revised 1"}
+    )
+    revised_step_5 = trajectory_testing.STEP_2_5.model_copy(
+        update={"message": "revised 5"}
+    )
+    with self._hold_batch():
+      self.file_s.add_step(trajectory_testing.STEP_2_1, meta)
+      self.file_s.add_step(trajectory_testing.STEP_2_2, meta)
+      self.file_s.add_step(trajectory_testing.STEP_2_3, meta)
+      self.file_s.add_step(trajectory_testing.STEP_2_4, meta)
+      self.file_s.add_step(trajectory_testing.STEP_2_5, meta)
+
+    with self._hold_batch():
+      self.file_s.add_step(revised_step_1, meta)
+      self.file_s.add_step(revised_step_5, meta)
+
+    self.assertTrue(self.file_s.get_steps_chunk_path(traj_id, 1, 5).exists())
+    self.assertTrue(self.file_s.get_step_path(traj_id, 1).exists())
+    self.assertTrue(self.file_s.get_step_path(traj_id, 5).exists())
+    (recovered,) = self.file_s.get_trajectories([traj_id])
+    self.assertEqual(
+        [step.message for step in recovered.steps],
+        [
+            "revised 1",
+            trajectory_testing.STEP_2_2.message,
+            trajectory_testing.STEP_2_3.message,
+            trajectory_testing.STEP_2_4.message,
+            "revised 5",
+        ],
+    )
+
+  def test_add_step_in_batch_mode_with_non_contiguous_steps_writes_separate_chunks(
+      self,
+  ) -> None:
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta = trajectory_testing.METADATA_2
+
+    with self._hold_batch():
+      self.file_s.add_step(trajectory_testing.STEP_2_1, meta)
+      self.file_s.add_step(trajectory_testing.STEP_2_3, meta)
+      self.file_s.add_step(trajectory_testing.STEP_2_4, meta)
+      self.file_s.add_step(trajectory_testing.STEP_2_5, meta)
+    self.file_s.add_step(trajectory_testing.STEP_2_2, meta)
+    self.file_s.flush()
+
+    self.assertTrue(self.file_s.get_step_path(traj_id, 1).exists())
+    self.assertTrue(self.file_s.get_step_path(traj_id, 2).exists())
+    self.assertTrue(self.file_s.get_steps_chunk_path(traj_id, 3, 5).exists())
+    self.assertFalse(self.file_s.get_steps_chunk_path(traj_id, 1, 1).exists())
+    self.assertFalse(self.file_s.get_steps_chunk_path(traj_id, 1, 5).exists())
+    self.assertEqual(
+        self.file_s.get_trajectories([traj_id]),
+        [trajectory_testing.TRAJECTORY_2],
+    )
+
+  def test_add_step_in_batch_mode_on_chunk_write_error_logs_and_increases_wait(
+      self,
+  ) -> None:
+    failing_chunk_path = self.file_s.get_steps_chunk_path(
+        trajectory_testing.TRAJECTORY_ID_2, 1, 2
+    )
+    failing_chunk_tmp_path = (
+        failing_chunk_path.parent / f".{failing_chunk_path.name}.tmp"
+    )
+    path_cls = type(self.tmp_dir)
+    orig_write_text = path_cls.write_text
+
+    def fail_on_chunk_write(
+        path_self: epath.Path, *args: Any, **kwargs: Any
+    ) -> Any:
+      if path_self == failing_chunk_tmp_path:
+        raise _make_gfile_error(8)
+      return orig_write_text(path_self, *args, **kwargs)
+
+    with (
+        mock.patch.object(
+            path_cls,
+            "write_text",
+            autospec=True,
+            side_effect=fail_on_chunk_write,
+        ),
+        mock.patch.object(logging, "exception") as mock_log_exc,
+    ):
+      with self._hold_batch():
+        self.file_s.add_step(
+            trajectory_testing.STEP_2_1, trajectory_testing.METADATA_2
+        )
+        self.file_s.add_step(
+            trajectory_testing.STEP_2_2, trajectory_testing.METADATA_2
+        )
+        self.file_s.add_step(
+            trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+        )
+
+    mock_log_exc.assert_called_once_with(
+        "%s failed to write trajectory batch (trajectory_id=%s) to %s.",
+        "_AsyncFileWriterWorker",
+        trajectory_testing.TRAJECTORY_ID_2,
+        self.file_s.get_trajectory_dir(trajectory_testing.TRAJECTORY_ID_2),
+    )
+    (recovered_1,) = self.file_s.get_trajectories(
+        [trajectory_testing.TRAJECTORY_ID_1]
+    )
+    self.assertEqual(recovered_1, trajectory_testing.TRAJECTORY_1)
+    self.assertAlmostEqual(self.file_s._writer.batch_wait_s, 2.0)
+
+  def test_add_step_in_batch_mode_on_non_batchable_error_replays_valid_tasks(
+      self,
+  ) -> None:
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta = trajectory_testing.METADATA_2
+    poisoned_step_3 = trajectory_testing.STEP_2_3.model_copy(
+        update={"extra": {"unserializable": object()}}
+    )
+
+    with (
+        mock.patch.object(logging, "warning") as mock_log_warn,
+        mock.patch.object(logging, "exception") as mock_log_exc,
+    ):
+      with self._hold_batch():
+        self.file_s.add_step(trajectory_testing.STEP_2_1, meta)
+        self.file_s.add_step(trajectory_testing.STEP_2_2, meta)
+        self.file_s.add_step(poisoned_step_3, meta)
+
+    mock_log_warn.assert_called_once_with(
+        "%s trajectory batch write failed (trajectory_id=%s) at %s;"
+        " replaying trajectory tasks individually.",
+        "_AsyncFileWriterWorker",
+        traj_id,
+        self.file_s.get_trajectory_dir(traj_id),
+        exc_info=True,
+    )
+    mock_log_exc.assert_called_once_with(
+        "%s failed to write trajectory %s (trajectory_id=%s) to %s.",
+        "_AsyncFileWriterWorker",
+        "step 3",
+        traj_id,
+        self.file_s.get_step_path(traj_id, 3),
+    )
+    (recovered,) = self.file_s.get_trajectories([traj_id])
+    self.assertEqual(
+        recovered.steps,
+        [trajectory_testing.STEP_2_1, trajectory_testing.STEP_2_2],
+    )
+    self.assertAlmostEqual(self.file_s._writer.batch_wait_s, 0.8)
+
+  def test_add_step_on_rate_limit_error_transitions_to_batched_jsonl_chunking(
+      self,
+  ) -> None:
+    self._configure_batch_writer(max_items=4, step_up=False)
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    step_1, step_2, step_3, step_4, step_5 = (
+        trajectory_testing.TRAJECTORY_2.steps
+    )
+    meta = trajectory_testing.METADATA_2
+    metrics_path = self.file_s.get_trajectory_metrics_path(traj_id)
+    metrics_tmp_path = metrics_path.parent / f".{metrics_path.name}.tmp"
+    path_cls = type(self.tmp_dir)
+    orig_write_text = path_cls.write_text
+
+    def fail_metrics_once(
+        path_self: epath.Path, *args: Any, **kwargs: Any
+    ) -> Any:
+      if path_self == metrics_tmp_path:
+        raise _make_gfile_error(8)
+      return orig_write_text(path_self, *args, **kwargs)
+
+    # Phase 1: unbatched write of step 1 writes step_000001.json.
+    self.file_s.add_step(step_1, meta)
+    self.file_s.flush()
+    # Phase 2: rate-limit error on metrics write automatically enables batching.
+    with (
+        mock.patch.object(
+            path_cls, "write_text", autospec=True, side_effect=fail_metrics_once
+        ),
+        mock.patch.object(logging, "exception"),
+    ):
+      self.file_s.update_metrics(
+          traj_id, trajectory_lib.TrajectoryMetrics(extra={"k": 1})
+      )
+      self.file_s.flush()
+    wait_after_error = self.file_s._writer.batch_wait_s
+    # Phase 3: subsequent 4 steps fill max_items=4 and flush as a .jsonl chunk.
+    self.file_s.add_step(step_2, meta)
+    self.file_s.add_step(step_3, meta)
+    self.file_s.add_step(step_4, meta)
+    self.file_s.add_step(step_5, meta)
+    self.file_s.flush()
+
+    self.assertTrue(self.file_s.get_step_path(traj_id, 1).exists())
+    self.assertAlmostEqual(wait_after_error, 1.0)
+    self.assertTrue(self.file_s.get_steps_chunk_path(traj_id, 2, 5).exists())
+    self.assertAlmostEqual(self.file_s._writer.batch_wait_s, 0.8)
+    (recovered,) = self.file_s.get_trajectories([traj_id])
+    self.assertEqual(recovered, trajectory_testing.TRAJECTORY_2)
+
+  def test_init_with_custom_batch_config_exposes_batching_property(
+      self,
+  ) -> None:
+    custom_batch = async_writer.BatchConfig(max_items=16, max_wait_s=0.5)
+    file_s = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir,
+        batching=custom_batch,
+    )
+    self.addCleanup(file_s.close)
+
+    self.assertEqual(file_s.batching, custom_batch)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="gfile_not_found", exc=_make_gfile_error(5)),
+      dict(testcase_name="tf_not_found", exc=_make_tf_error(5)),
+      dict(testcase_name="http_404", exc=_FakeHttpError(404)),
+  )
+  def test_read_text_or_none_on_remote_not_found_skips_exists_check(
+      self, exc: Exception
+  ) -> None:
+    missing_path = self.tmp_dir / "missing.json"
+    path_cls = type(self.tmp_dir)
+    with (
+        mock.patch.object(
+            path_cls, "read_text", autospec=True, side_effect=exc
+        ),
+        mock.patch.object(path_cls, "exists", autospec=True) as mock_exists,
+    ):
+      self.assertIsNone(file_store._read_text_or_none(missing_path))
+      mock_exists.assert_not_called()
+
+  def test_get_trajectories_metadata_on_remote_store_skips_exists_and_is_dir(
+      self,
+  ) -> None:
+    self.file_s.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    self.file_s.flush()
+    path_cls = type(self.tmp_dir)
+
+    with (
+        mock.patch.object(
+            file_store, "_is_local_filesystem", return_value=False
+        ),
+        mock.patch.object(path_cls, "exists", autospec=True) as mock_exists,
+        mock.patch.object(path_cls, "is_dir", autospec=True) as mock_is_dir,
+    ):
+      metas = self.file_s.get_trajectories_metadata()
+
+    self.assertEqual(metas, [trajectory_testing.METADATA_1])
+    mock_exists.assert_not_called()
+    mock_is_dir.assert_not_called()
+
+  def test_get_trajectories_metadata_on_missing_remote_root_dir_returns_empty(
+      self,
+  ) -> None:
+    path_cls = type(self.tmp_dir)
+
+    with (
+        mock.patch.object(
+            file_store, "_is_local_filesystem", return_value=False
+        ),
+        mock.patch.object(
+            path_cls,
+            "iterdir",
+            autospec=True,
+            side_effect=_make_gfile_error(5),
+        ),
+        mock.patch.object(path_cls, "exists", autospec=True) as mock_exists,
+    ):
+      metas = self.file_s.get_trajectories_metadata()
+
+    self.assertEqual(metas, [])
+    mock_exists.assert_not_called()
+
+  @parameterized.named_parameters(
+      dict(testcase_name="local_posix", is_local=True),
+      dict(testcase_name="remote_object_store", is_local=False),
+  )
+  def test_add_step_in_batch_mode_on_reopened_store_seeds_persisted_step_ids(
+      self, is_local: bool
+  ) -> None:
+    traj_id = trajectory_testing.TRAJECTORY_ID_2
+    meta = trajectory_testing.METADATA_2
+    step_1, step_2, step_3, step_4, step_5 = (
+        trajectory_testing.TRAJECTORY_2.steps
+    )
+    with file_store.FileTrajectoryStore(root_dir=self.tmp_dir) as first_store:
+      first_store.add_step(step_1, meta)
+      first_store.add_step(step_2, meta)
+      first_store.flush()
+    revised_step_1 = step_1.model_copy(
+        update={"message": "step 1 after restart"}
+    )
+    revised_step_2 = step_2.model_copy(
+        update={"message": "step 2 after restart"}
+    )
+
+    with (
+        mock.patch.object(
+            file_store, "_is_local_filesystem", return_value=is_local
+        ),
+        self._hold_batch(),
+    ):
+      self.file_s.add_step(revised_step_1, meta)
+      self.file_s.add_step(revised_step_2, meta)
+      self.file_s.add_step(step_3, meta)
+      self.file_s.add_step(step_4, meta)
+      self.file_s.add_step(step_5, meta)
+
+    self.assertFalse(self.file_s.get_steps_chunk_path(traj_id, 1, 5).exists())
+    self.assertTrue(self.file_s.get_steps_chunk_path(traj_id, 3, 5).exists())
+    (recovered,) = self.file_s.get_trajectories([traj_id])
+    self.assertEqual(
+        [s.message for s in recovered.steps],
+        [
+            "step 1 after restart",
+            "step 2 after restart",
+            step_3.message,
+            step_4.message,
+            step_5.message,
+        ],
+    )
 
 
 class FileTrajectoryStoreMetadataClsTest(

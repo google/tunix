@@ -1,11 +1,12 @@
 """File-based implementation for Trajectory Store."""
 
 import collections
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent import futures
 import contextlib
 import dataclasses
 import functools
+import itertools
 import re
 import types
 from typing import Any, ClassVar, Final, TypeVar
@@ -31,10 +32,36 @@ _TRAJECTORY_ID_REGEX: Final[re.Pattern[str]] = re.compile(
     rf"^{_TRAJECTORY_ID_PATTERN}$"
 )
 _TRAJECTORY_DIR_REGEX: Final[re.Pattern[str]] = re.compile(
-    rf"^{_TRAJECTORY_DIR_PREFIX}(?P<trajectory_id>{_TRAJECTORY_ID_PATTERN})$"
+    rf"^{_TRAJECTORY_DIR_PREFIX}({_TRAJECTORY_ID_PATTERN})$"
 )
 _STEP_FILENAME_TEMPLATE: Final[str] = "step_{step_id:06d}.json"
-_STEP_FILENAME_REGEX: Final[re.Pattern[str]] = re.compile(r"^step_\d+\.json$")
+_STEP_FILENAME_REGEX: Final[re.Pattern[str]] = re.compile(r"^step_(\d+)\.json$")
+_STEPS_CHUNK_FILENAME_TEMPLATE: Final[str] = (
+    "steps_{first_step_id:06d}_{last_step_id:06d}.jsonl"
+)
+_STEPS_CHUNK_FILENAME_REGEX: Final[re.Pattern[str]] = re.compile(
+    r"^steps_(\d+)_(\d+)\.jsonl$"
+)
+# Canonical status codes (`grpc.StatusCode`) on `gfile.GOSError.status.code` or
+# `tf.errors.OpError.error_code` that indicate object write rate limits,
+# contention, or backend backpressure.
+_BATCHABLE_STATUS_CODES: Final[frozenset[int]] = frozenset({
+    8,  # RESOURCE_EXHAUSTED.
+    10,  # ABORTED.
+    14,  # UNAVAILABLE.
+})
+# HTTP status codes on cloud storage exceptions (`HttpError.code` /
+# `GoogleAPICallError.code`) for the same rate-limit and contention conditions.
+_BATCHABLE_HTTP_STATUS_CODES: Final[frozenset[int]] = frozenset({
+    409,  # Conflict.
+    429,  # Too Many Requests.
+    503,  # Service Unavailable.
+})
+# Canonical `grpc.StatusCode.NOT_FOUND` (5) and HTTP 404 status codes raised by
+# cloud storage backends (`gfile.GOSError`, `tf.errors.NotFoundError`,
+# `GoogleAPICallError`) when an object or prefix does not exist.
+_NOT_FOUND_STATUS_CODE: Final[int] = 5
+_NOT_FOUND_HTTP_STATUS_CODE: Final[int] = 404
 # Maximum number of threads that each read call uses to access files in
 # parallel, which hides the per-file latency of remote filesystems such as GCS.
 # Only file access runs on these threads: parsing holds the GIL, so the calling
@@ -98,6 +125,58 @@ def _get_step_path(traj_dir: epath.Path, atif_step_id: int) -> epath.Path:
   return traj_dir / _STEP_FILENAME_TEMPLATE.format(step_id=atif_step_id)
 
 
+def _get_steps_chunk_path(
+    traj_dir: epath.Path, first_step_id: int, last_step_id: int
+) -> epath.Path:
+  """Returns the JSONL chunk path for an ATIF step_id range under traj_dir."""
+  return traj_dir / _STEPS_CHUNK_FILENAME_TEMPLATE.format(
+      first_step_id=first_step_id,
+      last_step_id=last_step_id,
+  )
+
+
+def _step_file_sort_key(filename: str) -> tuple[int, int, int, str] | None:
+  """Returns the read-order sort key for a step or chunk file, or None.
+
+  Orders files by starting `step_id` so earlier steps are read first. When a
+  single-step `step_XXXXXX.json` revision overlaps a `steps_XXXXXX_YYYYYY.jsonl`
+  chunk (`step_id >= first_step_id`), the chunk (`tier=0`) sorts before the
+  single-step revision (`tier=1`) so the revision overwrites the chunk entry.
+  """
+  if match := _STEP_FILENAME_REGEX.match(filename):
+    (step_id_str,) = match.groups()
+    step_id = int(step_id_str)
+    return (step_id, 1, step_id, filename)
+  if match := _STEPS_CHUNK_FILENAME_REGEX.match(filename):
+    first_id_str, last_id_str = match.groups()
+    return (int(first_id_str), 0, int(last_id_str), filename)
+  return None
+
+
+def _group_contiguous_step_ids(
+    step_ids: Sequence[int],
+) -> Iterator[list[int]]:
+  """Yields maximal runs of consecutive ascending step IDs."""
+  counter = itertools.count()
+  for _, group in itertools.groupby(
+      step_ids, key=lambda step_id: step_id - next(counter)
+  ):
+    yield list(group)
+
+
+def _parse_step_file(filename: str, text: str) -> list[trajectory_lib.Step]:
+  """Parses a single-step .json file or a multi-step .jsonl chunk file."""
+  if filename.endswith(".jsonl"):
+    steps = [
+        trajectory_lib.Step.model_validate_json(line)
+        for line in text.splitlines()
+        if line and not line.isspace()
+    ]
+    if steps:
+      return steps
+  return [trajectory_lib.Step.model_validate_json(text)]
+
+
 def _is_local_filesystem(path: epath.Path) -> bool:
   """Returns whether `path` is on a local POSIX filesystem."""
   # Local POSIX paths are either relative or resolve to a `file://` URI, whereas
@@ -127,24 +206,50 @@ def _write_text(path: epath.Path, content: str) -> None:
     raise
 
 
+def _is_not_found_error(exc: BaseException) -> bool:
+  """Returns whether `exc` indicates a missing file, directory, or object."""
+  return (
+      isinstance(exc, (FileNotFoundError, NotADirectoryError))
+      or getattr(getattr(exc, "status", None), "code", None)
+      == _NOT_FOUND_STATUS_CODE
+      or getattr(exc, "error_code", None) == _NOT_FOUND_STATUS_CODE
+      or getattr(exc, "code", None) == _NOT_FOUND_HTTP_STATUS_CODE
+  )
+
+
 def _read_text_or_none(path: epath.Path) -> str | None:
   """Returns the contents of the file at `path`, or None if it is missing.
 
   Reads the file before checking that it exists, so that a file that exists
   costs a single round trip on remote filesystems such as GCS. Existence is
-  checked only once the read fails.
+  checked only when the read fails with an ambiguous `OSError`.
 
   Args:
     path: The path of the file to read.
   """
   try:
     return path.read_text()
-  except FileNotFoundError:
-    return None
-  except OSError:
-    if not path.exists():
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    if _is_not_found_error(exc):
+      return None
+    if isinstance(exc, OSError) and not path.exists():
       return None
     raise
+
+
+def _read_max_persisted_step_id(traj_dir: epath.Path) -> int:
+  """Returns the maximum ATIF step_id already present under `traj_dir`."""
+  max_step_id = 0
+  try:
+    for entry in traj_dir.iterdir():
+      if (sort_key := _step_file_sort_key(entry.name)) is not None:
+        _, _, last_step_id, _ = sort_key
+        max_step_id = max(max_step_id, last_step_id)
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    if _is_not_found_error(exc) or isinstance(exc, OSError):
+      return 0
+    raise
+  return max_step_id
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -209,10 +314,15 @@ def _merge_metrics(
 class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
   """Asynchronously writes trajectory metadata, step, and metrics files."""
 
-  def __init__(self):
+  def __init__(
+      self,
+      batching: async_writer.BatchConfig | None = None,
+  ):
     """Initializes _AsyncFileWriter without starting the background worker."""
-    super().__init__()
-    # Worker-owned caches of persisted state used to skip redundant disk writes.
+    super().__init__(batching=batching)
+    # Worker-owned caches of persisted state used to skip redundant disk writes
+    # and route step revisions to single-step JSON files.
+    self._max_step_id_by_trajectory_id: dict[str, int] = {}
     self._metadata_hash_by_trajectory_id: dict[str, int] = {}
     self._metrics_by_trajectory_id: collections.OrderedDict[
         str, trajectory_lib.TrajectoryMetrics
@@ -269,6 +379,179 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
         )
     )
 
+  def _should_batch_on_error(self, exc: BaseException) -> bool:
+    """Returns True for rate-limit, contention, or backpressure errors."""
+    status = getattr(exc, "status", None)
+    status_code = getattr(status, "code", None) or getattr(
+        exc, "error_code", None
+    )
+    http_code = getattr(exc, "code", None)
+    return (
+        status_code in _BATCHABLE_STATUS_CODES
+        or http_code in _BATCHABLE_HTTP_STATUS_CODES
+    )
+
+  def _ensure_traj_dir(self, traj_id: str, traj_dir: epath.Path) -> None:
+    """Creates `traj_dir` once per trajectory on local filesystems."""
+    # Create directory once per trajectory on local filesystems. Remote object
+    # stores use a flat object namespace where writing a file materializes the
+    # prefix without a 0-byte directory marker.
+    has_dir = (
+        traj_id in self._max_step_id_by_trajectory_id
+        or traj_id in self._metadata_hash_by_trajectory_id
+        or traj_id in self._metrics_by_trajectory_id
+    )
+    if not has_dir and _is_local_filesystem(traj_dir):
+      traj_dir.mkdir(parents=True, exist_ok=True)
+
+  def _write_steps(self, step_tasks: Sequence[_FileWriteTask]) -> None:
+    """Writes revised steps as `.json` and contiguous new runs as `.jsonl`."""
+    if not step_tasks:
+      return
+    latest_step_by_id: dict[int, trajectory_lib.Step] = {}
+    for task in step_tasks:
+      if task.step is None or task.step_path is None:
+        raise RuntimeError("to_atif() must run before _write_steps().")
+      latest_step_by_id[task.step.step_id] = task.step
+
+    traj_id = step_tasks[-1].trajectory_id
+    traj_dir = step_tasks[-1].traj_dir
+    if (
+        traj_id not in self._max_step_id_by_trajectory_id
+        and len(latest_step_by_id) > 1
+    ):
+      self._max_step_id_by_trajectory_id[traj_id] = _read_max_persisted_step_id(
+          traj_dir
+      )
+    max_persisted_step_id = self._max_step_id_by_trajectory_id.get(traj_id, 0)
+    new_step_ids: list[int] = []
+    for step_id in sorted(latest_step_by_id):
+      if step_id <= max_persisted_step_id:
+        _write_text(
+            _get_step_path(traj_dir, step_id),
+            _dump_json(latest_step_by_id[step_id]),
+        )
+        continue
+      new_step_ids.append(step_id)
+
+    for run in _group_contiguous_step_ids(new_step_ids):
+      if len(run) == 1:
+        (step_id,) = run
+        _write_text(
+            _get_step_path(traj_dir, step_id),
+            _dump_json(latest_step_by_id[step_id]),
+        )
+        last_step_id = step_id
+      else:
+        first_step_id, *_, last_step_id = run
+        chunk_path = _get_steps_chunk_path(
+            traj_dir, first_step_id, last_step_id
+        )
+        chunk_lines = [
+            _dump_json(latest_step_by_id[step_id]) for step_id in run
+        ]
+        _write_text(chunk_path, "\n".join(chunk_lines))
+      self._max_step_id_by_trajectory_id[traj_id] = last_step_id
+
+  def _write_metadata(self, task: _FileWriteTask | None) -> None:
+    """Writes `metadata.json` when the serialized metadata has changed."""
+    if task is None or task.metadata is None:
+      return
+    traj_id = task.trajectory_id
+    meta_json = _dump_json(task.metadata)
+    meta_hash = hash(meta_json)
+    if self._metadata_hash_by_trajectory_id.get(traj_id) != meta_hash:
+      _write_text(task.meta_path, meta_json)
+      self._metadata_hash_by_trajectory_id[traj_id] = meta_hash
+
+  def _write_metrics(self, task: _FileWriteTask | None) -> None:
+    """Shallow-merges and writes `metrics.json` when metrics have changed."""
+    if task is None or task.metrics is None:
+      return
+    traj_id = task.trajectory_id
+    existing = self._metrics_by_trajectory_id.get(traj_id)
+    if (
+        existing is None
+        and (disk_text := _read_text_or_none(task.metrics_path)) is not None
+    ):
+      existing = trajectory_lib.TrajectoryMetrics.model_validate_json(disk_text)
+    merged = _merge_metrics(existing, task.metrics)
+    if merged != existing:
+      _write_text(task.metrics_path, merged.model_dump_json())
+    self._metrics_by_trajectory_id[traj_id] = merged
+    self._metrics_by_trajectory_id.move_to_end(traj_id)
+    if len(self._metrics_by_trajectory_id) > _MAX_CACHED_METRICS:
+      self._metrics_by_trajectory_id.popitem(last=False)
+
+  def _write_single_task(self, task: _FileWriteTask) -> None:
+    """Writes directory, step, metadata, and metrics for a single `task`."""
+    self._ensure_traj_dir(task.trajectory_id, task.traj_dir)
+    # Write step file before metadata.json so a crash or I/O error mid-write
+    # never leaves metadata.json advertising a newer trajectory state (such as
+    # COMPLETED) while the corresponding step file is missing on disk.
+    if task.step is not None:
+      self._write_steps((task,))
+    self._write_metadata(task)
+    self._write_metrics(task)
+
+  def _replay_failed_tasks(
+      self, tasks: Sequence[_FileWriteTask], trajectory_id: str
+  ) -> bool:
+    """Replays tasks for `trajectory_id` one by one after a batch failure."""
+    had_batchable_error = False
+    for task in tasks:
+      if task.trajectory_id != trajectory_id:
+        continue
+      try:
+        self._write_single_task(task)
+      except Exception as replay_exc:  # pylint: disable=broad-exception-caught
+        replay_exc.__context__ = None
+        self._safe_log_task_error(task)
+        if self._should_batch_on_error(replay_exc):
+          had_batchable_error = True
+    return had_batchable_error
+
+  def _process_batch(self, tasks: Sequence[_FileWriteTask]) -> None:
+    """Writes coalesced step, metadata, and metrics files for task batches."""
+    if len(tasks) <= 1:
+      super()._process_batch(tasks)
+      return
+
+    had_batchable_error = False
+    traj_dir_by_id = {task.trajectory_id: task.traj_dir for task in tasks}
+    for batch in async_writer.group_tasks_by_trajectory(tasks):
+      traj_dir = traj_dir_by_id[batch.trajectory_id]
+      try:
+        self._ensure_traj_dir(batch.trajectory_id, traj_dir)
+        self._write_steps(batch.step_tasks)
+        self._write_metadata(batch.latest_metadata_task)
+        self._write_metrics(batch.merged_queued_metrics_task)
+      except Exception as exc:  # pylint: disable=broad-exception-caught
+        if self._should_batch_on_error(exc):
+          logging.exception(
+              "%s failed to write trajectory batch (trajectory_id=%s) to %s.",
+              self._thread_name,
+              batch.trajectory_id,
+              traj_dir,
+          )
+          had_batchable_error = True
+          continue
+        logging.warning(
+            "%s trajectory batch write failed (trajectory_id=%s) at %s;"
+            " replaying trajectory tasks individually.",
+            self._thread_name,
+            batch.trajectory_id,
+            traj_dir,
+            exc_info=True,
+        )
+        if self._replay_failed_tasks(tasks, batch.trajectory_id):
+          had_batchable_error = True
+
+    if had_batchable_error:
+      self._increase_batch_wait()
+    else:
+      self._decrease_batch_wait()
+
   def _process_task(self, task: _FileWriteTask) -> None:
     """Processes a single write task by writing metadata, step, or metrics.
 
@@ -288,50 +571,7 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
       RuntimeError: If the task has a step but `to_atif()` was not called first,
         so its step file path is unknown.
     """
-    traj_id = task.trajectory_id
-
-    # Create directory once per trajectory on local filesystems. Remote object
-    # stores use a flat object namespace where writing a file materializes the
-    # prefix without a 0-byte directory marker.
-    has_dir = (
-        traj_id in self._metadata_hash_by_trajectory_id
-        or traj_id in self._metrics_by_trajectory_id
-    )
-    if not has_dir and _is_local_filesystem(task.traj_dir):
-      task.traj_dir.mkdir(parents=True, exist_ok=True)
-
-    # Write step file before metadata.json so a crash or I/O error mid-write
-    # never leaves metadata.json advertising a newer trajectory state (such as
-    # COMPLETED) while the corresponding step file is missing on disk.
-    if task.step is not None:
-      if task.step_path is None:
-        raise RuntimeError("to_atif() must run before _process_task().")
-      _write_text(task.step_path, _dump_json(task.step))
-
-    # Only write metadata.json if metadata content has changed.
-    if task.metadata is not None:
-      meta_json = _dump_json(task.metadata)
-      meta_hash = hash(meta_json)
-      if self._metadata_hash_by_trajectory_id.get(traj_id) != meta_hash:
-        _write_text(task.meta_path, meta_json)
-        self._metadata_hash_by_trajectory_id[traj_id] = meta_hash
-
-    if task.metrics is not None:
-      existing = self._metrics_by_trajectory_id.get(traj_id)
-      if (
-          existing is None
-          and (disk_text := _read_text_or_none(task.metrics_path)) is not None
-      ):
-        existing = trajectory_lib.TrajectoryMetrics.model_validate_json(
-            disk_text
-        )
-      merged = _merge_metrics(existing, task.metrics)
-      if merged != existing:
-        _write_text(task.metrics_path, merged.model_dump_json())
-      self._metrics_by_trajectory_id[traj_id] = merged
-      self._metrics_by_trajectory_id.move_to_end(traj_id)
-      if len(self._metrics_by_trajectory_id) > _MAX_CACHED_METRICS:
-        self._metrics_by_trajectory_id.popitem(last=False)
+    self._write_single_task(task)
 
   def _log_task_error(self, task: _FileWriteTask) -> None:
     """Logs detailed task error with trajectory and filesystem path context.
@@ -378,6 +618,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
             ├── metrics.json
             ├── step_000001.json
             ├── step_000002.json
+            ├── steps_000003_000005.jsonl
             └── ...
   """
 
@@ -387,6 +628,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       self,
       root_dir: epath.PathLike,
       run_id: str | None = None,
+      batching: async_writer.BatchConfig | None = None,
   ) -> None:
     """Initializes FileTrajectoryStore.
 
@@ -397,6 +639,8 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         scoped under root_dir / run_id. This ID MUST stay the same when
         recovering from failures or process restarts as long as the same RL
         process is being continued.
+      batching: Optional BatchConfig governing how queued step and metadata
+        writes are coalesced and chunked on disk.
 
     Raises:
       ValueError: If root_dir is empty, or run_id is given but cannot be used as
@@ -417,7 +661,12 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       )
     self._raw_root_dir = epath.Path(root_dir)
     self._run_id = run_id
-    self._writer = _AsyncFileWriter()
+    self._writer = _AsyncFileWriter(batching=batching)
+
+  @property
+  def batching(self) -> async_writer.BatchConfig:
+    """Returns the active BatchConfig for this store."""
+    return self._writer.batching
 
   @classmethod
   def _from_config(
@@ -506,6 +755,26 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     """
     return _get_step_path(self.get_trajectory_dir(trajectory_id), step_id)
 
+  def get_steps_chunk_path(
+      self,
+      trajectory_id: str,
+      first_step_id: int,
+      last_step_id: int,
+  ) -> epath.Path:
+    """Returns the JSONL chunk file path for a trajectory and ATIF step range.
+
+    Args:
+      trajectory_id: The trajectory identifier.
+      first_step_id: First 1-indexed ATIF step_id in the chunk.
+      last_step_id: Last 1-indexed ATIF step_id in the chunk.
+
+    Returns:
+      The path of the step chunk JSONL file.
+    """
+    return _get_steps_chunk_path(
+        self.get_trajectory_dir(trajectory_id), first_step_id, last_step_id
+    )
+
   @contextlib.contextmanager
   def _open_parallel_reads(
       self,
@@ -513,7 +782,11 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       get_path: Callable[[str], epath.Path],
   ) -> Iterator[Iterator[tuple[str, str | None]]]:
     """Opens parallel file reads yielding `(trajectory_id, text_or_none)`."""
-    if trajectory_ids is None and not self.root_dir.exists():
+    if (
+        trajectory_ids is None
+        and _is_local_filesystem(self.root_dir)
+        and not self.root_dir.exists()
+    ):
       yield iter(())
       return
     executor = futures.ThreadPoolExecutor(
@@ -576,9 +849,8 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       for traj_id, meta_text in reads:
         if meta_text is None:
           if trajectory_ids is None:
-            if not any(
-                _STEP_FILENAME_REGEX.match(entry.name)
-                for entry in self.get_trajectory_dir(traj_id).iterdir()
+            if not _read_max_persisted_step_id(
+                self.get_trajectory_dir(traj_id)
             ):
               continue
             meta_text = _read_text_or_none(
@@ -677,13 +949,12 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
           raise store.TrajectoryNotFoundError(traj_id)
         meta = self._parse_metadata(meta_text)
         step_text_futures = step_reads_future.result()
-        steps: list[trajectory_lib.Step] = []
+        step_by_id: dict[int, trajectory_lib.Step] = {}
         while step_text_futures:
-          steps.append(
-              trajectory_lib.Step.model_validate_json(
-                  step_text_futures.popleft().result()
-              )
-          )
+          filename, step_text_future = step_text_futures.popleft()
+          for step in _parse_step_file(filename, step_text_future.result()):
+            step_by_id[step.step_id] = step
+        steps = [step_by_id[step_id] for step_id in sorted(step_by_id)]
         trajs.append(meta.create_trajectory(steps=steps))
       return trajs
     finally:
@@ -694,28 +965,46 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
   def _list_trajectory_ids(self, executor: futures.Executor) -> Iterator[str]:
     """Returns the IDs of the trajectory directories in `root_dir`.
 
-    Entries are filtered by name before checking whether they are directories,
-    so that entries that cannot be trajectory directories cost no round trip on
-    remote filesystems such as GCS. All the checks are submitted before this
-    returns, but the IDs are yielded lazily, so that callers can start working
-    on the leading IDs while the remaining checks are still running.
+    Entries are filtered by name first. On remote object stores (where prefixes
+    only exist when objects are written beneath them), name-matched entries are
+    returned directly without per-entry `is_dir` RPCs. On local filesystems,
+    `is_dir` checks are submitted in parallel before returning and yielded
+    lazily in natural ID order.
 
     Args:
       executor: The executor to check on, in parallel, whether each entry of
-        `root_dir` named like a trajectory directory is a directory. It must
-        stay alive until the returned iterator is exhausted.
+        `root_dir` named like a trajectory directory is a directory on local
+        filesystems. It must stay alive until the returned iterator is
+        exhausted.
 
     Returns:
       An iterator over the trajectory IDs, sorted naturally by trajectory ID.
     """
+
+    def _entry_sort_key(item: tuple[str, epath.Path]) -> list[int | str]:
+      trajectory_id, _ = item
+      return _natural_sort_key(trajectory_id)
+
+    try:
+      entries = list(self.root_dir.iterdir())
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      if _is_not_found_error(exc) or (
+          isinstance(exc, OSError) and not self.root_dir.exists()
+      ):
+        return iter(())
+      raise
+
     matched_entries = sorted(
         (
-            (match.group("trajectory_id"), entry)
-            for entry in self.root_dir.iterdir()
+            (trajectory_id, entry)
+            for entry in entries
             if (match := _TRAJECTORY_DIR_REGEX.match(entry.name))
+            for (trajectory_id,) in (match.groups(),)
         ),
-        key=lambda pair: _natural_sort_key(pair[0]),
+        key=_entry_sort_key,
     )
+    if not _is_local_filesystem(self.root_dir):
+      return (trajectory_id for trajectory_id, _ in matched_entries)
     candidates = [
         (trajectory_id, executor.submit(entry.is_dir))
         for trajectory_id, entry in matched_entries
@@ -733,7 +1022,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
 
   def _submit_step_reads(
       self, trajectory_id: str, executor: futures.Executor
-  ) -> collections.deque[futures.Future[str]]:
+  ) -> collections.deque[tuple[str, futures.Future[str]]]:
     """Lists a trajectory's step files and submits their reads to `executor`.
 
     Returns without waiting for the reads, so that no task on `executor` waits
@@ -744,13 +1033,18 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       executor: The executor to read the step files on.
 
     Returns:
-      Futures of the contents of the step files, in the order that `iterdir()`
-      lists the files.
+      Pairs of `(filename, content_future)` ordered by step range so chunked
+      `.jsonl` files are applied before single-step `.json` revisions.
     """
+    matched_entries: list[tuple[tuple[int, int, int, str], epath.Path]] = []
+    for entry in self.get_trajectory_dir(trajectory_id).iterdir():
+      sort_key = _step_file_sort_key(entry.name)
+      if sort_key is not None:
+        matched_entries.append((sort_key, entry))
+    matched_entries.sort()
     return collections.deque(
-        executor.submit(entry.read_text)
-        for entry in self.get_trajectory_dir(trajectory_id).iterdir()
-        if _STEP_FILENAME_REGEX.match(entry.name)
+        (entry.name, executor.submit(entry.read_text))
+        for _, entry in matched_entries
     )
 
   def add_step(
