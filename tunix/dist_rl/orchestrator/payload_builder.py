@@ -100,6 +100,13 @@ def _extract_old_logps(
   """Extracts old_per_token_logps from TrajectoryItem."""
   old_lp = item.traj.get("old_logprobs")
   if old_lp is None:
+    old_lp = item.metadata.get("old_logprobs")
+  if old_lp is None and completion_len == 0:
+    # Zero-token rollouts (e.g. turn-0 failures or timeouts from
+    # TrajectoryCollectEngine) carry `old_logprobs=None`; return a `(0,)`
+    # array so batch assembly keeps `old_per_token_logps` across the chunk.
+    return np.zeros(0, dtype=np.float32)
+  if old_lp is None:
     return None
   old_lp = np.asarray(old_lp, dtype=np.float32).reshape(-1)
   if len(old_lp) != completion_len:
