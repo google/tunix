@@ -4,11 +4,11 @@ Sources checked through **November 9, 2026**. This roadmap starts with broad are
 
 | Area | Opportunities | Representative references |
 | --- | --- | --- |
-| **1. Diffusion: Image/Video Generation RL** | Continuous diffusion/flow training, generation rewards, sampling objectives. | [Flow-GRPO](https://arxiv.org/abs/2505.05470), [DiffusionNFT](https://arxiv.org/abs/2509.16117), [Miles Diffusion](https://github.com/radixark/miles_diffusion) |
-| **2. Multimodal: Understanding and Interactive RL** | Image/audio/video inputs, visual tools, multimodal OPD. | [VAGEN](https://arxiv.org/abs/2510.16907), [Miles GEO3K VLM](https://github.com/radixark/miles/tree/88cf4fc932fca650aebc409ccbb5bc9dd7f59afe/examples/geo3k_vlm) |
-| **3. Swarms: Multi-Agent Collaborative RL** | Shared-policy teams, collective rewards and time pressure, orchestration, communication, and credit. | [RLCR](https://www.gr.inc/avalonm1.pdf), [PARL](https://www.kimi.com/en/blog/kimi-k2-5), [AT-GRPO](https://arxiv.org/abs/2510.11062), [C3](https://arxiv.org/abs/2603.06859) |
-| **4. RSI: Recursive Self-Improvement** | Automatic curricula, skill evolution, team experience, workflow/code improvement. | [R²Orch](https://arxiv.org/abs/2610.22740), [Skill-SP](https://arxiv.org/abs/2607.22529), [MASS](https://arxiv.org/abs/2610.12176), [SwarmRSI](https://arxiv.org/abs/2610.20431) |
-| **5. Distillation: Online and Self-Distillation** | Extend OPD with feedback, hindsight, roles, and multiple teachers. | [SDPO](https://arxiv.org/abs/2601.20802), [SEED](https://arxiv.org/abs/2607.14777), [SRD](https://arxiv.org/abs/2610.08077), [MAS-OPD](https://arxiv.org/abs/2609.34234) |
+| **1. OPD and Distillation** | Extend OPD with feedback, hindsight, roles, and multiple teachers. | [SDPO](https://arxiv.org/abs/2601.20802), [SEED](https://arxiv.org/abs/2607.14777), [SRD](https://arxiv.org/abs/2610.08077), [MAS-OPD](https://arxiv.org/abs/2609.34234) |
+| **2. Swarms: Multi-Agent Collaborative RL** | Shared-policy teams, collective rewards and time pressure, orchestration, communication, and credit. | [RLCR](https://www.gr.inc/avalonm1.pdf), [PARL](https://www.kimi.com/en/blog/kimi-k2-5), [AT-GRPO](https://arxiv.org/abs/2510.11062), [C3](https://arxiv.org/abs/2603.06859) |
+| **3. RSI: Recursive Self-Improvement** | Automatic curricula, skill evolution, team experience, workflow/code improvement. | [R²Orch](https://arxiv.org/abs/2610.22740), [Skill-SP](https://arxiv.org/abs/2607.22529), [MASS](https://arxiv.org/abs/2610.12176), [SwarmRSI](https://arxiv.org/abs/2610.20431) |
+| **4. Multimodal: Understanding and Interactive RL** | Image/audio/video inputs, visual tools, multimodal OPD. | [VAGEN](https://arxiv.org/abs/2510.16907), [Miles GEO3K VLM](https://github.com/radixark/miles/tree/88cf4fc932fca650aebc409ccbb5bc9dd7f59afe/examples/geo3k_vlm) |
+| **5. Diffusion: Image/Video Generation RL** | Continuous diffusion/flow training, generation rewards, sampling objectives. | [Flow-GRPO](https://arxiv.org/abs/2505.05470), [DiffusionNFT](https://arxiv.org/abs/2509.16117), [Miles Diffusion](https://github.com/radixark/miles_diffusion) |
 | **6. Long-Horizon Agents** | Long tool interactions, memory, segment/milestone credit. | [Mem-α](https://arxiv.org/abs/2509.25911), [BEACON](https://arxiv.org/abs/2605.06078), [Agent Lightning](https://arxiv.org/abs/2508.03680) |
 | **7. Environments and World Models** | Executable environment generation, co-evolution, transition prediction. | [AWM](https://arxiv.org/abs/2602.10090), [GenEnv](https://arxiv.org/abs/2512.19682), [EvoEnv](https://arxiv.org/abs/2605.14392), [RWML](https://arxiv.org/abs/2602.05842) |
 | **8. Rewards and Verification** | Outcome/process rewards, generator/verifier learning, tests and formal proofs. | [MAPPA](https://arxiv.org/abs/2601.23228), [V₁](https://arxiv.org/abs/2603.04304), [DeepSeek-Prover-V2](https://arxiv.org/abs/2504.21801), [SWE-RL](https://arxiv.org/abs/2502.18449) |
@@ -16,31 +16,23 @@ Sources checked through **November 9, 2026**. This roadmap starts with broad are
 | **10. RL Algorithms and Sample Efficiency** | Objectives/advantages, replay and off-policy correction, learned update rules. | [DistIL](https://arxiv.org/abs/2606.05152), [Experience Replay](https://arxiv.org/abs/2604.08706), [DiscoRL](https://google-deepmind.github.io/disco_rl/) |
 | **11. RL Systems and Scalable Training** | Asynchrony, resource scheduling, weight synchronization, multi-policy/LoRA services, recovery. | [RLinf](https://arxiv.org/abs/2509.15965), [FlexMARL](https://arxiv.org/abs/2602.09578), [Belayer](https://arxiv.org/abs/2608.14635), [Miles](https://github.com/radixark/miles) |
 
+**Near-term priority: OPD → Swarms → RSI.** Other areas follow as optional extensions.
+
 **How to read this roadmap:** each row is a user-visible milestone demonstrated by a recipe, example, or evaluation report. Stages progress from foundations to extensions; audio, video, and OPD branches can proceed in parallel. DTOs, masks, and scorers are implementation tasks rather than standalone features. Existing capabilities are labeled where recipe maintenance or hardware acceptance remains. These are proposed outcomes, not claims of completed support. Miles references use inspected fixed revisions; see the [reference index](tunix_rl_research_references.md) for availability boundaries.
 
-## 1. Diffusion: Image/Video Generation RL
+## 1. OPD and Distillation
 
 | Stage | Feature milestone | Observable outcome / acceptance demonstration | References |
 | --- | --- | --- | --- |
-| DF1 | **Image-generation SFT recipe** | Fine-tune a fixed continuous-generation model on image/text data, save it, and produce comparison samples. | [Miles Diffusion model backend][md-model], [SFT entry point](https://github.com/radixark/miles_diffusion/blob/221f965fa68e4d865665a48e8478932a231dc4ad/train_sft.py) |
-| DF2 | **Text-to-image RL recipe** | Train with OCR or image/text preference rewards; report before/after images, rewards, and costs. | [Miles Diffusion rollout][md-rollout], [reward hub][md-reward] |
-| DF3 | **Selectable image RL modes** | Choose Flow-GRPO or NFT for the same model/task and compare quality and sampling cost; extend to LoRA afterward. | [Miles Flow-GRPO][md-flow], [NFT][md-nft] |
-| DF4 | **Text-to-video RL recipe** | Train and evaluate on fixed-duration video tasks; report temporal/task rewards and generation cost. | [Miles Diffusion](https://github.com/radixark/miles_diffusion/tree/221f965fa68e4d865665a48e8478932a231dc4ad) |
-
-## 2. Multimodal: Understanding and Interactive RL
-
-| Stage | Feature milestone | Observable outcome / acceptance demonstration | References |
-| --- | --- | --- | --- |
-| MM1 | **Single-image understanding RL recipe** | Use one fixed VLM and visual-QA task with training, save/restore, and baseline/final evaluation; initially freeze the vision encoder. | [Miles GEO3K recipe][m-vlm-run] |
-| MM2 | **Multi-image understanding RL** | Accept several images per question and provide comparison/joint-reasoning training and evaluation examples. | [Miles VLM][m-vlm], [Media processing][m-media] — Specific multi-image recipes require separate validation. |
-| MM3 | **Multi-turn visual tool-agent recipe** | Let the model inspect images, invoke crop/screenshot tools, read new images, and continue acting; train and evaluate this interaction loop. | [Miles GEO3K multi-turn][m-vlm-turn] |
-| MM4 | **Audio understanding RL recipe** | Train on transcription or audio QA with audio input, text output, and a fixed test-set report. | [Tunix Gemma4 inference example](../tunix/models/gemma4/sampling_example.ipynb) — Inference foundation exists; RL integration is proposed. |
-| MM5 | **Video understanding RL recipe** | Train on fixed-frame/fixed-duration video QA and provide evaluation examples sensitive to temporal order. | [Miles media components][m-media] — Component reference only, not an existing complete video RL recipe. |
-| MM6 | **Multimodal OPD recipe** | Sample student responses on image tasks and obtain teacher supervision for the same media and responses; compare task RL with distillation. | [Miles VLM][m-vlm], [Miles OPD][m-opd-example] — The combined feature needs independent validation. |
+| KD1 | **Fixed-teacher text OPD acceptance** | The Qwen3-8B←32B recipe already exists; add actual teacher/TPU execution, recovery, and before/after quality reports. | [Existing Tunix recipe](../tunix/dist_rl/examples/on_policy_distillation/QWEN3_8B_OPD.md), [Miles OPD][m-opd-example] |
+| KD2 | **Candidate-distribution distillation mode** | Select sampled-token or top-k distillation and compare quality and teacher cost with the same model pair/task. | [Miles teacher scoring][m-teacher], [OPD loss][m-opd-loss] |
+| KD3 | **Task-based multi-teacher routing** | Select specialist teachers by sample type in one run; record each teacher's usage, cost, and outcomes. | [Miles multi-teacher OPD examples][m-opd-example] |
+| KD4 | **Experience/feedback self-distillation recipe** | Use error feedback, successful demonstrations, or hindsight experience to improve the policy, with ordinary RL as a control. | [SDPO](https://github.com/lasgroup/SDPO), [SEED](https://github.com/jinyangwu/SEED) |
+| KD5 | **Multi-turn tool/role distillation recipe** | Distill on tool interactions or multi-agent role tasks; compare role quality, team performance, and scoring cost. | [MAS-OPD method](https://arxiv.org/abs/2609.34234), [Miles agentic session][m-session] |
 
 <a id="swarms-rlcr"></a>
 
-## 3. Swarms: Multi-Agent Collaborative RL
+## 2. Swarms: Multi-Agent Collaborative RL
 
 | Stage | Feature milestone | Observable outcome / acceptance demonstration | References |
 | --- | --- | --- | --- |
@@ -51,7 +43,7 @@ Sources checked through **November 9, 2026**. This roadmap starts with broad are
 | SW5 | **Optional: independent-role policy co-training** | Allow solver/verifier or other roles to use separate models/configurations and collaborate, update, and restore within one task. | [Miles multi-policy][m-multipolicy] |
 | SW6 | **Optional: role credit and team distillation** | Compare shared rewards, role/counterfactual credit, or role OPD; evaluate specialization and collaboration benefits. | [C3](https://github.com/EIT-EAST-Lab/C3), [MAS-OPD](https://arxiv.org/abs/2609.34234) |
 
-### 3.1 Focus reference: How to Train a Swarm / Avalon-M1
+### 2.1 Focus reference: How to Train a Swarm / Avalon-M1
 
 Primary sources: [How to Train a Swarm (blog)](https://www.gr.inc/blog/how-to-train-a-swarm); [Avalon-M1: Reinforcement Learning from Collective Rewards (report)](https://www.gr.inc/avalonm1.pdf) ([original PDF URL](https://gr.inc/avalonm1.pdf)).
 
@@ -68,13 +60,13 @@ Primary sources: [How to Train a Swarm (blog)](https://www.gr.inc/blog/how-to-tr
 
 Method details follow [report §2](https://www.gr.inc/avalonm1.pdf); time pressure, anytime returns, and communication follow the [blog](https://www.gr.inc/blog/how-to-train-a-swarm). Equal-return rollouts completed before the deadline do not receive different rewards solely because one finishes earlier: a deadline is not a per-second latency bonus.
 
-### 3.2 Initial Tunix RLCR Prototype
+### 2.2 Initial Tunix RLCR Prototype
 
 Milestones: **SW1 demonstrable collaborative team → SW2 trainable shared-policy team → SW3 time-budgeted RLCR-style recipe**. SW4 adds dynamic parallelism; SW5/SW6 are independent-policy, credit-assignment, and distillation branches rather than initial prerequisites.
 
 The first prototype can reuse Tunix GRPO for **RLCR-style** validation; the original primarily uses CISPO, so a blog should state that difference. Broadcasting a collective advantage does not replace token ownership, failure handling, or valid-group checks.
 
-### 3.3 Proposed Blog Angle
+### 2.3 Proposed Blog Angle
 
 Suggested title: **“From Single-Agent RL to Shared-Policy Teams: An RLCR Design for Tunix.”**
 
@@ -86,7 +78,7 @@ Suggested title: **“From Single-Agent RL to Shared-Policy Teams: An RLCR Desig
 
 Keep the conditions when citing results: the reported **3.9×** is an average **derived-latency** speedup at matched output-token budgets and comparable scores, not training throughput or a universal hardware wall-clock speedup. [Report §3.2.2](https://www.gr.inc/avalonm1.pdf) The inspected report is still marked under revision.
 
-## 4. RSI: Recursive Self-Improvement
+## 3. RSI: Recursive Self-Improvement
 
 | Stage | Feature milestone | Observable outcome / acceptance demonstration | References |
 | --- | --- | --- | --- |
@@ -95,15 +87,25 @@ Keep the conditions when citing results: the reported **3.9×** is an average **
 | RS3 | **Skill-augmented self-improving agent** | Extract, reuse, and update skills from experience; compare no-skill, static-skill, and evolving-skill configurations. | [SkillRL](https://github.com/aiming-lab/SkillRL), [Skill-SP](https://github.com/Qwen-Applications/skill-self-play) |
 | RS4 | **Multi-cycle self-improvement experiment recipe** | Run several improvement cycles, select models/workflows using fixed evaluation, and report transfer, forgetting, and cumulative cost. | [MASS](https://github.com/SakanaAI/mass), [R²Orch](https://arxiv.org/abs/2610.22740) |
 
-## 5. Distillation: Online and Self-Distillation
+## 4. Multimodal: Understanding and Interactive RL
 
 | Stage | Feature milestone | Observable outcome / acceptance demonstration | References |
 | --- | --- | --- | --- |
-| KD1 | **Fixed-teacher text OPD acceptance** | The Qwen3-8B←32B recipe already exists; add actual teacher/TPU execution, recovery, and before/after quality reports. | [Existing Tunix recipe](../tunix/dist_rl/examples/on_policy_distillation/QWEN3_8B_OPD.md), [Miles OPD][m-opd-example] |
-| KD2 | **Candidate-distribution distillation mode** | Select sampled-token or top-k distillation and compare quality and teacher cost with the same model pair/task. | [Miles teacher scoring][m-teacher], [OPD loss][m-opd-loss] |
-| KD3 | **Task-based multi-teacher routing** | Select specialist teachers by sample type in one run; record each teacher's usage, cost, and outcomes. | [Miles multi-teacher OPD examples][m-opd-example] |
-| KD4 | **Experience/feedback self-distillation recipe** | Use error feedback, successful demonstrations, or hindsight experience to improve the policy, with ordinary RL as a control. | [SDPO](https://github.com/lasgroup/SDPO), [SEED](https://github.com/jinyangwu/SEED) |
-| KD5 | **Multi-turn tool/role distillation recipe** | Distill on tool interactions or multi-agent role tasks; compare role quality, team performance, and scoring cost. | [MAS-OPD method](https://arxiv.org/abs/2609.34234), [Miles agentic session][m-session] |
+| MM1 | **Single-image understanding RL recipe** | Use one fixed VLM and visual-QA task with training, save/restore, and baseline/final evaluation; initially freeze the vision encoder. | [Miles GEO3K recipe][m-vlm-run] |
+| MM2 | **Multi-image understanding RL** | Accept several images per question and provide comparison/joint-reasoning training and evaluation examples. | [Miles VLM][m-vlm], [Media processing][m-media] — Specific multi-image recipes require separate validation. |
+| MM3 | **Multi-turn visual tool-agent recipe** | Let the model inspect images, invoke crop/screenshot tools, read new images, and continue acting; train and evaluate this interaction loop. | [Miles GEO3K multi-turn][m-vlm-turn] |
+| MM4 | **Audio understanding RL recipe** | Train on transcription or audio QA with audio input, text output, and a fixed test-set report. | [Tunix Gemma4 inference example](../tunix/models/gemma4/sampling_example.ipynb) — Inference foundation exists; RL integration is proposed. |
+| MM5 | **Video understanding RL recipe** | Train on fixed-frame/fixed-duration video QA and provide evaluation examples sensitive to temporal order. | [Miles media components][m-media] — Component reference only, not an existing complete video RL recipe. |
+| MM6 | **Multimodal OPD recipe** | Sample student responses on image tasks and obtain teacher supervision for the same media and responses; compare task RL with distillation. | [Miles VLM][m-vlm], [Miles OPD][m-opd-example] — The combined feature needs independent validation. |
+
+## 5. Diffusion: Image/Video Generation RL
+
+| Stage | Feature milestone | Observable outcome / acceptance demonstration | References |
+| --- | --- | --- | --- |
+| DF1 | **Image-generation SFT recipe** | Fine-tune a fixed continuous-generation model on image/text data, save it, and produce comparison samples. | [Miles Diffusion model backend][md-model], [SFT entry point](https://github.com/radixark/miles_diffusion/blob/221f965fa68e4d865665a48e8478932a231dc4ad/train_sft.py) |
+| DF2 | **Text-to-image RL recipe** | Train with OCR or image/text preference rewards; report before/after images, rewards, and costs. | [Miles Diffusion rollout][md-rollout], [reward hub][md-reward] |
+| DF3 | **Selectable image RL modes** | Choose Flow-GRPO or NFT for the same model/task and compare quality and sampling cost; extend to LoRA afterward. | [Miles Flow-GRPO][md-flow], [NFT][md-nft] |
+| DF4 | **Text-to-video RL recipe** | Train and evaluate on fixed-duration video tasks; report temporal/task rewards and generation cost. | [Miles Diffusion](https://github.com/radixark/miles_diffusion/tree/221f965fa68e4d865665a48e8478932a231dc4ad) |
 
 ## 6. Long-Horizon Agents
 
