@@ -71,8 +71,9 @@ def maxtext_modules():
 #      `_ROLLOUT_DTYPE_MODULE_ALIASES`, and the top-level `Mapping` and `types`
 #      imports.
 #   2. In `build_maxtext_config()`, remove `supports_rollout_weight_dtype`
-#      gating (and its fallback `logging.info`) and emit
-#      `f"rollout_weight_dtype={DEFAULT_ROLLOUT_WEIGHT_DTYPE}"` unconditionally.
+#      (and its fallback `logging.info`) and `supports_skip_step_on_nan`
+#      gating, and emit `f"rollout_weight_dtype={DEFAULT_ROLLOUT_WEIGHT_DTYPE}"`
+#      and `"skip_step_on_nan=True"` unconditionally.
 #   3. Delete `_configure_target_free_rollout_dtypes()` and remove its call from
 #      `create_maxtext_engine()`.
 #   4. In `maxtext_utils_test.py`, replace the `[legacy-maxtext-a2cf3bc8b]`
@@ -560,6 +561,9 @@ def build_maxtext_config(
   supports_rollout_weight_dtype = _pyconfig_supports_field(
       pyconfig, "rollout_weight_dtype"
   )
+  supports_skip_step_on_nan = _pyconfig_supports_field(
+      pyconfig, "skip_step_on_nan"
+  )
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
@@ -608,6 +612,8 @@ def build_maxtext_config(
           else []
       ),
       "grad_dtype=float32",
+      "skip_step_on_spikes=True",
+      *(["skip_step_on_nan=True"] if supports_skip_step_on_nan else []),
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
       "init_weights_seed=42",

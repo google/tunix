@@ -722,6 +722,8 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertIn("allow_split_physical_axes=True", argv)
     self.assertIn("attention=dot_product", argv)
     self.assertIn("ici_context_parallelism=1", argv)
+    self.assertIn("skip_step_on_spikes=True", argv)
+    self.assertIn("skip_step_on_nan=True", argv)
     self.assertNotIn("context_parallel_load_balance=False", argv)
     self.assertNotIn("override_model_config=True", argv)
 
@@ -882,11 +884,15 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertFalse(
         any(arg.startswith("rollout_weight_dtype=") for arg in legacy_argv)
     )
+    self.assertFalse(
+        any(arg.startswith("skip_step_on_nan=") for arg in legacy_argv)
+    )
 
     mock_pyconfig.reset_mock()
     mock_pyconfig.types.MaxTextConfig.model_fields = {
         "model_name": object(),
         "rollout_weight_dtype": object(),
+        "skip_step_on_nan": object(),
     }
     mock_pyconfig.initialize.side_effect = ValueError(
         "invalid M_ROLLOUT_WEIGHT_DTYPE"
@@ -901,6 +907,7 @@ class MaxTextUtilsTest(absltest.TestCase):
     mock_pyconfig.initialize.assert_called_once()
     supported_argv = mock_pyconfig.initialize.call_args[0][0]
     self.assertIn("rollout_weight_dtype=bfloat16", supported_argv)
+    self.assertIn("skip_step_on_nan=True", supported_argv)
 
   def test_create_maxtext_engine_target_free_shim_legacy_pinned_maxtext(self):
     class TunixMaxTextAdapter:

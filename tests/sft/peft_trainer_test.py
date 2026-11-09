@@ -697,6 +697,25 @@ class PeftTrainerTest(parameterized.TestCase):
     ):
       peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
 
+  def test_max_grad_norm_spike_raises_value_error(self):
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    for config, expected in (
+        (
+            peft_trainer.TrainingConfig(
+                eval_every_n_steps=2, max_steps=100, skip_step_on_nan=True
+            ),
+            'skip_step_on_nan=True is not supported',
+        ),
+        (
+            peft_trainer.TrainingConfig(
+                eval_every_n_steps=2, max_steps=100, max_grad_norm_spike=10.0
+            ),
+            'max_grad_norm_spike is not supported',
+        ),
+    ):
+      with self.assertRaisesRegex(ValueError, expected):
+        peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+
   def test_loss_output_format(self):
     def custom_loss_fn(
         model: nnx.Module,

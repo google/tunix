@@ -335,6 +335,19 @@ class PeftTrainer:
           " (tunix.dist_rl.train.peft_trainer_v2)."
       )
 
+    if training_config.skip_step_on_nan:
+      raise ValueError(
+          "skip_step_on_nan=True is not supported in SFT PeftTrainer (v1); use"
+          " distributed RL PeftTrainer v2"
+          " (tunix.dist_rl.train.peft_trainer_v2)."
+      )
+    if training_config.max_grad_norm_spike is not None:
+      raise ValueError(
+          "max_grad_norm_spike is not supported in SFT PeftTrainer (v1); use"
+          " distributed RL PeftTrainer v2"
+          " (tunix.dist_rl.train.peft_trainer_v2)."
+      )
+
     self.model = model
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)

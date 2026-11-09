@@ -137,21 +137,18 @@ def _calculate_global_batch_size(train_example: Any) -> int:
   )
 
 
-def _opt_state_dtypes(optimizer: nnx.Optimizer) -> Any:
-  """Returns the array dtype of every optimizer-state variable."""
-  return jax.tree_util.tree_map(
+def _apply_optimizer_update(
+    model: nnx.Module, optimizer: nnx.Optimizer, grads: Any
+) -> None:
+  """Applies `grads` via `optimizer` while preserving OptState float dtypes."""
+  dtypes = jax.tree_util.tree_map(
       lambda value: value.get_value().dtype,
       nnx.state(optimizer, nnx.optimizer.OptState),
       is_leaf=lambda value: isinstance(value, nnx.Variable),
   )
+  optimizer.update(model, grads)
 
-
-def _restore_opt_state_float_dtypes(
-    optimizer: nnx.Optimizer, dtypes: Any
-) -> None:
-  """Restores floating optimizer-state leaves to their pre-update dtypes."""
-
-  def _restore(value, dtype):
+  def _restore(value: nnx.Variable, dtype: Any) -> None:
     array = value.get_value()
     if jnp.issubdtype(array.dtype, jnp.floating) and array.dtype != dtype:
       value.set_value(array.astype(dtype))
@@ -162,6 +159,13 @@ def _restore_opt_state_float_dtypes(
       dtypes,
       is_leaf=lambda value: isinstance(value, nnx.Variable),
   )
+
+
+def _skip_optimizer_update(
+    model: nnx.Module, optimizer: nnx.Optimizer, grads: Any
+) -> None:
+  """No-op `nnx.cond` branch preserving `_SIMPLE_COND_FN_CACHE` identity."""
+  del model, optimizer, grads
 
 
 class GradientAccumulator(nnx.Module):
@@ -334,9 +338,10 @@ class GradientAccumulator(nnx.Module):
     """
     if self.persistent:
       def _zero_in_place(v):
-        # `x * 0` rather than `jnp.zeros_like(x)`, to preserve the buffer's
-        # sharding.
-        v.set_value(v[...] * 0)
+        # `jnp.zeros_like` (not `x * 0`, where `NaN * 0` and `Inf * 0` stay
+        # `NaN`) clears non-finite gradients after a skipped step while
+        # preserving sharding; `set_value` avoids indexed `__setitem__`.
+        v.set_value(jnp.zeros_like(v[...]))
       jax.tree_util.tree_map(
           _zero_in_place,
           self.grads,
@@ -681,16 +686,35 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       The gradient norm.
     """
     acc_grads = grad_accumulator.get()
+    grad_accumulator.reset()
     # Compute the norm in float32. For production-size models the sum-of-squares
     # over bf16 grads quickly exhausts bf16, and float32 is needed for numerical
     # stability.
     norm = optax.global_norm(
         jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads)
     )
-    opt_state_dtypes = _opt_state_dtypes(optimizer)
-    optimizer.update(model, acc_grads)
-    _restore_opt_state_float_dtypes(optimizer, opt_state_dtypes)
-    grad_accumulator.reset()
+    checks: list[jax.Array] = []
+    if self.config.get_with_default("skip_step_on_nan", True):
+      checks.append(jnp.isfinite(norm))
+    if self.config.max_grad_norm_spike is not None:
+      checks.append(jnp.logical_not(norm > self.config.max_grad_norm_spike))
+    if not checks:
+      _apply_optimizer_update(model, optimizer, acc_grads)
+      return norm
+    should_apply = functools.reduce(jnp.logical_and, checks)
+    mesh = pxla.thread_resources.env.physical_mesh
+    if not mesh.empty:
+      should_apply = jax.lax.with_sharding_constraint(
+          should_apply, shd.PartitionSpec()
+      )
+    nnx.cond(
+        should_apply,
+        _apply_optimizer_update,
+        _skip_optimizer_update,
+        model,
+        optimizer,
+        acc_grads,
+    )
     return norm
 
   def _train_step(

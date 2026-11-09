@@ -411,6 +411,36 @@ class TrainingConfig:
   # large budgets; ``pack_sequences`` raises if a pack exceeds it.
   max_segments_per_packed_row: int | None = None
 
+  # Guard against NaN/Inf gradients or severe gradient norm spikes poisoning
+  # model weights and optimizer state. `skip_step_on_nan=None` uses each
+  # trainer's default (`True` in PeftTrainer v2, `False` in SFT PeftTrainer v1;
+  # explicitly passing `True` to SFT PeftTrainer v1 raises ValueError). When
+  # `max_grad_norm_spike` is set, updates are skipped if the global gradient
+  # norm exceeds it (PeftTrainer v2 only).
+  skip_step_on_nan: bool | None = None
+  max_grad_norm_spike: float | None = None
+
+  def __post_init__(self):
+    if self.skip_step_on_nan is not None and not isinstance(
+        self.skip_step_on_nan, bool
+    ):
+      raise TypeError(
+          "skip_step_on_nan must be a bool or None, got"
+          f" {self.skip_step_on_nan!r}."
+      )
+    if self.max_grad_norm_spike is not None:
+      if (
+          isinstance(self.max_grad_norm_spike, bool)
+          or not isinstance(self.max_grad_norm_spike, (int, float))
+          or not math.isfinite(self.max_grad_norm_spike)
+          or self.max_grad_norm_spike <= 0
+      ):
+        raise ValueError(
+            "max_grad_norm_spike must be a positive finite number or None,"
+            f" got {self.max_grad_norm_spike!r}."
+        )
+      self.max_grad_norm_spike = float(self.max_grad_norm_spike)
+
   @property
   def sequence_packing_enabled(self) -> bool:
     """Returns True if sequence packing (`max_seq_token_per_tpu > 0`) is enabled."""
@@ -468,6 +498,7 @@ class RLTrainingConfig(TrainingConfig):
 
   def __post_init__(self):
     """Validates the configuration after initialization."""
+    super().__post_init__()
     if (
         self.profiler_options is not None
         and self.rl_profiler_config is not None
