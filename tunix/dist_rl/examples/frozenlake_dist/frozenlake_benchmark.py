@@ -250,7 +250,6 @@ def agentic_config(workload, model_dir):
       },
       "reward_functions": [],
       "agentic_grpo_config": {
-          "exact_token_continuity": True,
           "num_generations": w["generations"],
           "num_iterations": 1,
           "beta": 0.0,

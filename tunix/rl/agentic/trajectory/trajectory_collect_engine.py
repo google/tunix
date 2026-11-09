@@ -75,7 +75,6 @@ class TrajectoryCollectEngine:
       filter_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
       overlong_filter: bool = False,
       perf_v2: Optional[perf_tracer_v2.Tracer] = None,
-      exact_token_continuity: bool = False,
       policy_version: Optional[int] = None,
       trajectory_store: Optional[store_lib.TrajectoryWriter] = None,
       metadata: Optional[trajectory_lib.TrajectoryMetadata] = None,
@@ -87,9 +86,15 @@ class TrajectoryCollectEngine:
         agent (ConversationAgentBase): The agent that will interact with the
           environment
         env (BaseTaskEnv): The environment providing tasks and feedback
-        model_call (Callable): Function that takes chat completions as first
-          argument with optional kwargs and returns model response string.
-          Handles the actual LLM inference.
+        model_call (Callable): Sync or async callable handling LLM inference and
+          returning a `RolloutOutput`. Invoked as `model_call(chat_completions,
+          env, max_generation_steps=..., **kwargs)` on the first turn (and on
+          all turns when token tracking is disabled). When both `tokenizer` and
+          `chat_parser` are provided, turns after the first pass
+          `chat_completions=None` and keyword argument `prompt_token_ids`
+          containing the recorded token IDs from prior turns; every turn's
+          `RolloutOutput` must provide 2-D `left_padded_prompt_tokens` and
+          non-None `prompt_lengths` echoing the submitted prompt IDs.
         model_call_kwargs (Optional[Dict[str, Any]]): Optional kwargs to pass to
           model_call.
         gamma (float): Discount factor for MC reward calculation (1.0 = no
@@ -99,8 +104,8 @@ class TrajectoryCollectEngine:
         timeout (float): Maximum episode duration in seconds before timeout
           termination. Model calls after the first turn are cut off, and no
           model call or env.step starts, once it is spent.
-        reset_timeout (Optional[float]): Deadline in seconds for `env.reset`;
-          if it passes, `collect()` raises `asyncio.TimeoutError` and closes the
+        reset_timeout (Optional[float]): Deadline in seconds for `env.reset`; if
+          it passes, `collect()` raises `asyncio.TimeoutError` and closes the
           env while `env.reset` may still run in its executor thread. Defaults
           to 3600.0; None means no deadline.
         final_reward_timeout (Optional[float]): Deadline in seconds for the
@@ -108,16 +113,19 @@ class TrajectoryCollectEngine:
           `asyncio.TimeoutError` and closes the env while the grader may still
           run in its executor thread. Defaults to 3600.0; None means no
           deadline.
-        tokenizer: Optional tokenizer for converting messages to token IDs. This
-          is required if we want to track down token counts.
-        chat_parser: Optional chat parser for formatting messages
+        tokenizer: Optional tokenizer for encoding environment observations.
+          Providing both `tokenizer` and `chat_parser` enables token tracking
+          with multi-turn token continuity (first turn tokenized by
+          `model_call`, subsequent turns prompted via `prompt_token_ids`, and
+          `agent` chat history restricted to append-only updates).
+        chat_parser: Optional chat template parser used with `tokenizer` to
+          tokenize environment observations and append assistant end-of-turn
+          suffix tokens (`update_assistant_end_tokens` must only append tokens).
         filter_statuses (Set[TrajectoryStatus]): A set of statuses that are
           masked out for overlong filtering.
         overlong_filter: Whether to filter overlong trajectories.
         perf_v2 (Optional[perf_tracer_v2.Tracer]): Optional performance tracer
           to use for performance measurements. Defaults to a no-op tracer.
-        exact_token_continuity: Preserve recorded token history on later turns.
-          Requires a token-aware model_call, tokenizer, and parser.
         policy_version: Optional policy version integer to pass down for
           trajectory and performance tracing.
         trajectory_store: Optional TrajectoryWriter to write trajectory steps
@@ -139,10 +147,7 @@ class TrajectoryCollectEngine:
     self.metadata = metadata
     self.store_routed_experts = store_routed_experts
     self.model_call_kwargs = model_call_kwargs or {}
-    if exact_token_continuity and (tokenizer is None or chat_parser is None):
-      raise ValueError("exact_token_continuity requires a tokenizer and parser")
-    self.exact_token_continuity = exact_token_continuity
-    self._exact_chat_history: List[Dict[str, Any]] = []
+    self._recorded_chat_history: List[Dict[str, Any]] = []
     self.perf_v2 = (
         perf_v2 if perf_v2 is not None else perf_tracer_v2.NoopTracer()
     )
@@ -160,6 +165,9 @@ class TrajectoryCollectEngine:
     # Tokenizer utilities for stepwise tokenization
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
+    self._tracks_tokens: bool = (
+        tokenizer is not None and chat_parser is not None
+    )
     self._start_ts: float = 0.0
     self._logged_clip_reasons: Set[str] = set()
     self.filter_statuses = filter_statuses or {
@@ -190,9 +198,7 @@ class TrajectoryCollectEngine:
         ),  # Wall-clock time (Total real-world time elapsed)
     }
 
-    if self.max_response_length is not None and not (
-        self.tokenizer and self.chat_parser
-    ):
+    if self.max_response_length is not None and not self._tracks_tokens:
       logging.warning(
           "max_response_length is set to %d, but no tokenizer or chat_parser is"
           " provided. response length limits will not be enforced.",
@@ -360,7 +366,6 @@ class TrajectoryCollectEngine:
     prompt_length = self.agent.trajectory.prompt_length
     if prompt_length is None:
       return np.asarray(prompt_tokens)
-    # Exact mode stores the first-turn prompt left-padded alongside its length.
     return packing.unpad_prompt(prompt_tokens, prompt_length)
 
   def _record_task_step(self) -> None:
@@ -368,7 +373,7 @@ class TrajectoryCollectEngine:
 
     The step carries the unpadded first-turn prompt token ids in `env_tokens`
     once they are known, so Token-mode data can be rebuilt from the store
-    without re-tokenizing. In exact token continuity mode, the ids are only
+    without re-tokenizing. When token tracking is enabled, the ids are only
     known after the first `model_call`, so the step is re-recorded (upserted on
     `step_id=0`) at that point.
     """
@@ -654,11 +659,7 @@ class TrajectoryCollectEngine:
         sample_shape = (
             sample_arr.shape[1:] if sample_arr is not None else (0, 0)
         )
-        prompt_len = (
-            (self.agent.trajectory.prompt_length or 0)
-            if self.exact_token_continuity
-            else (len(prompt_tokens) if prompt_tokens is not None else 0)
-        )
+        prompt_len = self.agent.trajectory.prompt_length or 0
         if prompt_len > 0:
           if prompt_routed is None:
             raise ValueError(
@@ -701,7 +702,7 @@ class TrajectoryCollectEngine:
           "group_id": self.env.extra_kwargs.get("group_id"),
       }
       if self.agent.trajectory.prompt_length is not None:
-        # Set only by exact token continuity; lets training unpad by length.
+        # Lets training unpad left-padded first-turn prompt tokens by length.
         result["prompt_length"] = self.agent.trajectory.prompt_length
       return result
     elif mode == "Conversation":
@@ -770,8 +771,8 @@ class TrajectoryCollectEngine:
   async def _reset(self):
     """Resets the environment and agent at the beginning of a new episode.
 
-    This involves calling the environment's reset method, updating the agent's
-    state, and optionally tokenizing the initial prompt messages.
+    Calls `env.reset`, initializes episode state on the agent, and snapshots the
+    initial chat history when token tracking is active.
     """
     self.agent.reset()
     self.agent.trajectory.step_idx = -1
@@ -815,37 +816,24 @@ class TrajectoryCollectEngine:
         info=self._rollout_state_info(info),
     )
 
-    if (
-        self.tokenizer is not None
-        and self.chat_parser is not None
-        and not self.exact_token_continuity
-    ):
-      # Get the current messages (usually System + User)
-      init_messages = self.agent.chat_completions
-      prompt_tokens, _ = utils.tokenize_and_generate_masks(
-          init_messages,
-          tokenizer=self.tokenizer,
-          parser=self.chat_parser,
-          contains_first_msg=True,
-          contains_generation_msg=True,
-      )
-      self.agent.trajectory.prompt_tokens = prompt_tokens
-    if self.exact_token_continuity:
-      self._exact_chat_history = [
+    if self._tracks_tokens:
+      self._recorded_chat_history = [
           copy.deepcopy(msg) for msg in self.agent.chat_completions
       ]
 
-  def _record_exact_turn(
-      self, cur_step: agent_types.Step, *, terminal: bool
-  ) -> None:
+  def _record_turn(self, cur_step: agent_types.Step, *, terminal: bool) -> None:
     """Closes the recorded turn and checks the agent only appended messages.
+
+    Args:
+      cur_step: Current trajectory step being finalized.
+      terminal: Whether this turn terminates the episode.
 
     Raises:
       ValueError: the agent rewrote earlier chat history, which would silently
         desynchronize text from the recorded ids.
     """
     messages = self.agent.chat_completions
-    previous = self._exact_chat_history
+    previous = self._recorded_chat_history
     if messages[: len(previous)] != previous:
       raise ValueError("agent rewrote previously recorded chat history")
     if terminal:
@@ -898,9 +886,10 @@ class TrajectoryCollectEngine:
     Those tokens are part of the recorded completion, so the response budget
     must reserve room for them.
     """
-    if self.tokenizer is None or self.chat_parser is None:
+    if not self._tracks_tokens:
       return 0
     if self._assistant_suffix_len_cache is None:
+      assert self.chat_parser is not None
       _, n_append = self.chat_parser.update_assistant_end_tokens(
           np.zeros((0,), dtype=np.int32)
       )
@@ -991,7 +980,7 @@ class TrajectoryCollectEngine:
 
     chat_input = self.agent.chat_completions
     call_kwargs = dict(self.model_call_kwargs)
-    if self.exact_token_continuity and self.agent.trajectory.steps:
+    if self._tracks_tokens and self.agent.trajectory.steps:
       chat_input = None  # later turn: recorded ids, not re-encoded text
       call_kwargs["prompt_token_ids"] = utils.continuation_prompt_tokens(
           self.agent.trajectory
@@ -1040,7 +1029,12 @@ class TrajectoryCollectEngine:
       )
     logging.debug("%s model_call done", self._debug_prefix)
 
-    if self.exact_token_continuity:
+    if self._tracks_tokens:
+      if rollout_output.prompt_lengths is None:
+        raise ValueError(
+            "model_call must return RolloutOutput.prompt_lengths when tokenizer"
+            " and chat_parser are provided"
+        )
       if not self.agent.trajectory.steps:
         # The owned first-turn prompt; later turns replay exactly these ids.
         self.agent.trajectory.prompt_tokens = (
@@ -1083,16 +1077,7 @@ class TrajectoryCollectEngine:
 
     if routed is not None and not self.agent.trajectory.steps:
       init_routed = np.asarray(routed, dtype=np.int16)
-      prompt_len = (
-          (self.agent.trajectory.prompt_length or 0)
-          if self.exact_token_continuity
-          else (
-              len(self.agent.trajectory.prompt_tokens)
-              if getattr(self.agent.trajectory, "prompt_tokens", None)
-              is not None
-              else 0
-          )
-      )
+      prompt_len = self.agent.trajectory.prompt_length or 0
       self.agent.trajectory.prompt_routed_experts = (  # pyrefly: ignore[missing-attribute]
           init_routed[:prompt_len]
       )
@@ -1173,20 +1158,18 @@ class TrajectoryCollectEngine:
       cur_step.assistant_routed_experts = (
           self._current_step_initial_routed_experts
       )
-    if self.tokenizer and self.chat_parser and rollout_output.tokens:
+    if self._tracks_tokens and rollout_output.tokens:
+      assert self.chat_parser is not None
       assistant_message = utils.get_recent_assistant_message(
           self.agent.chat_completions
       )
       if assistant_message:
-        cur_step.assistant_tokens, n_append = (
-            self.chat_parser.update_assistant_end_tokens(
-                rollout_output.tokens[0]
-            )
+        updated_tokens, n_append = self.chat_parser.update_assistant_end_tokens(
+            rollout_output.tokens[0]
         )
-        if self.exact_token_continuity:
-          cur_step.assistant_tokens = utils.assistant_with_suffix(
-              rollout_output.tokens[0], cur_step.assistant_tokens, n_append
-          )
+        cur_step.assistant_tokens = utils.assistant_with_suffix(
+            rollout_output.tokens[0], updated_tokens, n_append
+        )
         # Sampled tokens were counted after the model call; count the suffix.
         self._response_token_count += n_append
         cur_step.assistant_masks = np.concatenate(
@@ -1280,7 +1263,8 @@ class TrajectoryCollectEngine:
       done = True
 
     step_timed_out = budget_spent or self._remaining_time() < 0
-    if self.tokenizer and self.chat_parser:
+    if self._tracks_tokens:
+      assert self.tokenizer is not None and self.chat_parser is not None
       env_messages = utils.get_recent_env_messages(self.agent.chat_completions)
       # Terminal-step environment messages are not appended to the response
       # token stream when the step ends the trajectory.
@@ -1313,8 +1297,7 @@ class TrajectoryCollectEngine:
           cur_step.env_masks = np.array(e_masks)
           self._response_token_count += len(e_tokens)
 
-    if self.exact_token_continuity:
-      self._record_exact_turn(cur_step, terminal=done or step_timed_out)
+      self._record_turn(cur_step, terminal=done or step_timed_out)
 
     if step_timed_out:
       self._mark_timeout()

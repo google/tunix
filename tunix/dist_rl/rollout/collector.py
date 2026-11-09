@@ -151,7 +151,6 @@ class TrajectoryCollectorEngine:
         None
     )
     self.max_response_length = request.max_response_length
-    self.exact_token_continuity = request.exact_token_continuity
     # The stop set the sampler was configured with, which is what decides
     # whether a rollout ended on its own. Defined at the recipe level via
     # `RolloutConfig.eos_tokens` (e.g. `<|im_end|>` for Qwen chat models) rather
@@ -316,7 +315,6 @@ class TrajectoryCollectorEngine:
         max_response_length=self.max_response_length,
         timeout=self.episode_timeout,
         overlong_filter=self.overlong_filter,
-        exact_token_continuity=self.exact_token_continuity,
         policy_version=self.request.target_policy_version,
         trajectory_store=self.trajectory_store,
         metadata=self.metadata,

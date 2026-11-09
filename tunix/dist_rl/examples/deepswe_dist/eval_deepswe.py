@@ -154,7 +154,6 @@ def request_fields(args: argparse.Namespace, entry: dict, index: int) -> dict:
       },
       "metadata": {
           "episode_timeout": args.timeout,
-          "exact_token_continuity": False,
           "record_episode_summary": True,
           "env_config": {
               "entry": entry,
@@ -421,7 +420,6 @@ async def run_worker(args: argparse.Namespace):
       max_response_length=response_budget(args),
       kv_cache_size=args.max_model_len,
       episode_timeout=float(args.timeout),
-      exact_token_continuity=False,
       temperature=0.0,
       return_logprobs=False,
       eos_tokens=eos,

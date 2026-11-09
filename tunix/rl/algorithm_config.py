@@ -83,9 +83,6 @@ class AlgorithmConfig:
   # probabilities. If False, recompute old-policy log probabilities on the
   # trainer actor.
   use_rollout_logps: bool = True
-  # Whether to preserve exact token IDs across multi-turn rollout steps
-  # without detokenizing and re-tokenizing intermediate turns (TITO).
-  exact_token_continuity: bool = True
   # Optional importance-sampling and rejection-sampling controls between the
   # rollout sampler and trainer actor.
   sampler_is: str | None = None

@@ -196,7 +196,6 @@ class RolloutConfig:
   rollout_vanilla_v2_num_scheduler_steps: int = 1
 
   # Trajectory execution configs.
-  exact_token_continuity: bool = True
   episode_timeout: float = 600.0
   overlong_filter: bool = False
 

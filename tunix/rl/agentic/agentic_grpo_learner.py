@@ -558,12 +558,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           if prompt_len_raw is not None
           else len(prompt_tokens)
       )
-      if self.algo_config.exact_token_continuity and (
+      if (
           prompt_len > rollout_config.max_prompt_length
           or len(completion_tokens) > max_response_length
       ):
         raise ValueError(
-            "Exact trajectory exceeds training padding budget:"
+            "Trajectory exceeds training padding budget:"
             f" prompt={prompt_len}/{rollout_config.max_prompt_length},"
             f" completion={len(completion_tokens)}/{max_response_length}"
         )
@@ -614,19 +614,15 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           )
 
     prompt_ids = jnp.asarray(padded_prompt_ids)
-    prompt_mask = prompt_ids != pad_value
     completion_ids = jnp.asarray(padded_completion_ids)
     completion_mask = jnp.asarray(padded_completion_masks)
-    completion_attention_mask = None
-    token_mask = None
-    if self.algo_config.exact_token_continuity:
-      # Validity by length: environment/template tokens are context, and a
-      # real token equal to the pad id stays valid.
-      prompt_mask = jnp.asarray(padded_prompt_masks)
-      completion_attention_mask = jnp.asarray(padded_completion_attention_masks)
-      token_mask = jnp.concatenate(
-          [prompt_mask, completion_attention_mask], axis=1
-      )
+    # Validity by length: environment/template tokens are context, and a real
+    # token equal to the pad id stays valid.
+    prompt_mask = jnp.asarray(padded_prompt_masks)
+    completion_attention_mask = jnp.asarray(padded_completion_attention_masks)
+    token_mask = jnp.concatenate(
+        [prompt_mask, completion_attention_mask], axis=1
+    )
     logging.debug(
         "Token shapes: prompt_ids=%s, completion_ids=%s",
         prompt_ids.shape,

@@ -293,7 +293,7 @@ def get_or_create_loop():
   return loop
 
 
-# ---- Exact token continuity ------------------------------------------------
+# ---- Multi-turn token continuity -------------------------------------------
 # A later turn is prompted with the ids the engine actually consumed so far,
 # never with re-encoded chat text:
 #

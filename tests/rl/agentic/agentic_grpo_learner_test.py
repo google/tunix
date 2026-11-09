@@ -1633,7 +1633,6 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         num_generations=2,
         num_iterations=num_iterations,
         use_rollout_logps=use_rollout_logps,
-        exact_token_continuity=False,
     )
     learner = agentic_grpo_learner.GRPOLearner(
         rl_engine=rl_engine,
@@ -2521,14 +2520,13 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
         "original_input": {"prompts": ["fixture"]},
     }
 
-  def _make_batch(self, *, exact=True, packed=False, raw=None):
+  def _make_batch(self, *, packed=False, raw=None):
     import copy  # pylint: disable=g-import-not-at-top
     from tunix.perf.experimental import tracer  # pylint: disable=g-import-not-at-top
     from tunix.rl.agentic.agents import agent_types  # pylint: disable=g-import-not-at-top
 
     obj = object.__new__(agentic_grpo_learner.GRPOLearner)
     obj.algo_config = agentic_grpo_learner.GRPOConfig(
-        exact_token_continuity=exact,
         max_response_length=20,
         beta=0.0,
         use_rollout_logps=True,
@@ -2629,14 +2627,6 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
           packed.completion_mask[0][positions],
           [0, 0, 0] + list(raw["conversation_masks"]),
       )
-
-  def test_native_default_keeps_pad_id_validity(self):
-    from tunix.rl import utils as rl_utils  # pylint: disable=g-import-not-at-top
-
-    batch = self._make_batch(exact=False)
-    self.assertIsNone(batch.completion_attention_mask)
-    np.testing.assert_array_equal(batch.prompt_mask[0], [0, 0, 1, 1, 1])
-    self.assertLen(rl_utils.unpad_train_example(batch)[0]["completion_ids"], 5)
 
   def test_actor_ref_and_loss_consume_token_mask(self):
     from tunix.rl import common  # pylint: disable=g-import-not-at-top

@@ -274,7 +274,6 @@ def _trajectory_fields(engine):
   trajectory = engine.agent.trajectory
   env_time = engine.env_time
   return {
-      "exact_token_continuity": engine.exact_token_continuity,
       "turns": len(trajectory.steps),
       "environment_seconds": (
           env_time["reset_latency"]

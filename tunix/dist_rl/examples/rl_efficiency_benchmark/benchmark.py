@@ -208,10 +208,6 @@ def rollout_summary(events, step_ids, expected):
   ]
   if any(e["status"] not in COMPLETED_STATUSES for e in trajectories):
     raise ValueError("Run contains incomplete or timed-out trajectories.")
-  if not all(e["exact_token_continuity"] for e in trajectories):
-    raise ValueError(
-        "Benchmark requires exact token continuity in both stacks."
-    )
   collection_times = []
   for step in sorted(step_ids):
     in_step = [e for e in trajectories if e["step"] == step]

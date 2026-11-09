@@ -345,7 +345,6 @@ class FrozenLakeBenchmarkTest(unittest.TestCase):
     self.assertEqual(
         overrides["rl_training_config.metrics_logging_options"], "null"
     )
-    self.assertTrue(config["agentic_grpo_config"]["exact_token_continuity"])
 
   def test_benchmark_entry_points_wrap_the_launch_mains(self):
     overrides, _, _ = self.dist_settings()

@@ -276,14 +276,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             "AgenticRLLearner when use_rollout_logps=True. Please set this "
             "before initializing RLEngine."
         )
-      if self.algo_config.exact_token_continuity:
-        if not config.return_logprobs:
-          raise ValueError("exact_token_continuity requires sampled logprobs")
-        if config.return_routed_experts and self._packing_enabled:
-          raise ValueError(
-              "exact_token_continuity does not replay expert routing when"
-              " sequence packing (max_seq_token_per_tpu) is enabled"
-          )
+      if config.return_routed_experts and self._packing_enabled:
+        raise ValueError(
+            "AgenticRLLearner does not replay expert routing when"
+            " sequence packing (max_seq_token_per_tpu) is enabled"
+        )
       if config.max_tokens_to_generate != self.algo_config.max_response_length:
         raise ValueError(
             f"RolloutConfig ({mode}) max_tokens_to_generate "
@@ -511,7 +508,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         overlong_filter=self.algo_config.overlong_filter,
         filter_statuses=self.algo_config.filter_statuses,
         perf_v2=self.rl_engine.perf_v2,
-        exact_token_continuity=self.algo_config.exact_token_continuity,
     )
     return rollout_orchestrator.RolloutOrchestrator(
         engine_cls=trajectory_collect_engine.TrajectoryCollectEngine,

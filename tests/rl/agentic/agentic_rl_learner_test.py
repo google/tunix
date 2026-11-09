@@ -250,49 +250,29 @@ class AgenticRLLearnerTest(parameterized.TestCase):
 
 class ExactTokenContinuityConfigTest(absltest.TestCase):
 
-  def test_default_exact_token_continuity_reaches_the_collector(self):
-    config = base_rollout.RolloutConfig(
-        max_tokens_to_generate=1024, return_logprobs=True
+  def test_orchestrator_wires_tokenizer_and_parser_to_collector(self):
+    obj = types.SimpleNamespace(
+        algo_config=agentic_rl_learner.AgenticRLConfig(),
+        _model_call=mock.Mock(),
+        tokenizer=mock.Mock(),
+        chat_parser=mock.Mock(),
+        rl_engine=types.SimpleNamespace(perf_v2=mock.Mock()),
+        _rollout_sync_lock=mock.Mock(),
     )
-    engine = mock.MagicMock()
-    engine.cluster_config.rollout_engine = "generic"
-    engine.cluster_config.rollout_config = config
-    engine.cluster_config.training_config.max_seq_token_per_tpu = None
-    with mock.patch.object(rl_utils, "is_sharing_weights", return_value=False):
-      learner = DummyLearner(
-          rl_engine=engine,
-          reward_fns=_dummy_reward_fn,
-          algo_config=agentic_grpo_learner.GRPOConfig(),
-          chat_parser=object(),
-      )
-    self.assertIs(learner.algo_config.exact_token_continuity, True)
+    with mock.patch.object(
+        agentic_rl_learner.rollout_orchestrator, "RolloutOrchestrator"
+    ) as factory:
+      agentic_rl_learner.AgenticRLLearner._build_orchestrator(obj)
+    engine_kwargs = factory.call_args.kwargs["engine_kwargs"]
+    self.assertIs(engine_kwargs["tokenizer"], obj.tokenizer)
+    self.assertIs(engine_kwargs["chat_parser"], obj.chat_parser)
 
-    for enabled in (False, True):
-      obj = types.SimpleNamespace(
-          algo_config=agentic_rl_learner.AgenticRLConfig(
-              exact_token_continuity=enabled
-          ),
-          _model_call=mock.Mock(),
-          tokenizer=mock.Mock(),
-          chat_parser=mock.Mock(),
-          rl_engine=types.SimpleNamespace(perf_v2=mock.Mock()),
-          _rollout_sync_lock=mock.Mock(),
-      )
-      with mock.patch.object(
-          agentic_rl_learner.rollout_orchestrator, "RolloutOrchestrator"
-      ) as factory:
-        agentic_rl_learner.AgenticRLLearner._build_orchestrator(obj)
-      self.assertIs(
-          factory.call_args.kwargs["engine_kwargs"]["exact_token_continuity"],
-          enabled,
-      )
-
-  def test_exact_mode_rejects_rollout_configs_it_cannot_honor(
+  def test_learner_rejects_rollout_configs_it_cannot_honor(
       self,
   ):
-    for option, value, max_seq_token, message in (
-        ("return_logprobs", False, None, "sampled logprobs"),
-        ("return_routed_experts", True, 1024, "expert routing"),
+    for option, value, max_seq_token, use_rollout_logps, message in (
+        ("return_logprobs", False, None, True, "return_logprobs=True"),
+        ("return_routed_experts", True, 1024, False, "expert routing"),
     ):
       config = base_rollout.RolloutConfig(
           max_tokens_to_generate=1024, return_logprobs=True
@@ -312,16 +292,14 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
         agentic_grpo_learner.GRPOLearner(
             engine,
             agentic_grpo_learner.GRPOConfig(
-                exact_token_continuity=True, use_rollout_logps=False
+                use_rollout_logps=use_rollout_logps
             ),
             chat_parser=object(),
         )
 
   def test_model_call_forwards_token_ids_without_parsing(self):
     obj = types.SimpleNamespace(
-        algo_config=agentic_rl_learner.AgenticRLConfig(
-            exact_token_continuity=True
-        ),
+        algo_config=agentic_rl_learner.AgenticRLConfig(),
         chat_parser=types.SimpleNamespace(
             parse=mock.Mock(side_effect=AssertionError("history parse"))
         ),

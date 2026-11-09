@@ -1182,7 +1182,7 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
     np.testing.assert_array_equal(item.traj["routed_experts"], mock_routed)
     np.testing.assert_array_equal(item.routed_experts, mock_routed)
 
-  def test_multi_turn_exact_token_continuity_passes_prompt_token_ids(self):
+  def test_multi_turn_token_continuity_passes_prompt_token_ids(self):
     class _TwoTurnEnv(base_environment.BaseTaskEnv):
 
       def __init__(self):
@@ -1233,7 +1233,6 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
         prompt="q0",
         max_response_length=64,
     )
-    self.assertTrue(req.exact_token_continuity)
     engine = collector.TrajectoryCollectorEngine(
         traj_id="traj_tito",
         request=req,

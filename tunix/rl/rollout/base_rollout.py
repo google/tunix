@@ -63,7 +63,8 @@ class RolloutOutput:
   # unless the backend was asked to capture them, or for dense models.
   routed_experts: list[np.ndarray | None] | None = None
 
-  # Valid prompt length per row, before left padding. Optional for old backends.
+  # Valid prompt length per row, before left padding. Required when
+  # TrajectoryCollectEngine tracks tokens (both tokenizer and chat_parser set).
   prompt_lengths: np.ndarray | None = None
 
 

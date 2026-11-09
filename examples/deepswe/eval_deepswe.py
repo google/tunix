@@ -79,6 +79,7 @@ from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.rl.agentic.pipeline.rollout_orchestrator import RolloutOrchestrator
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
+from tunix.rl.rollout import base_rollout
 from tunix.sft import utils as sft_utils
 
 Counter = collections.Counter
@@ -311,26 +312,42 @@ def _is_prompt_overflow_error(exc: Exception) -> bool:
   )
 
 
-def model_call(chat_completions, env_unused):
+def model_call(
+    chat_completions,
+    env_unused,
+    *,
+    max_generation_steps=None,
+    prompt_token_ids=None,
+    **kwargs,
+):
   """Model inference via tunix sampler."""
+  del kwargs
   pair_index = None
   instance_id = "unknown"
   if env_unused is not None:
     pair_index = getattr(env_unused, "extra_kwargs", {}).get("pair_index")
     instance_id = getattr(env_unused, "entry", {}).get("instance_id", "unknown")
 
-  prompt = chat_parser.parse(
-      chat_completions,
-      add_generation_prompt=True,
-      is_first_msg=True,
-  )
-  prompt_token_count = len(tokenizer.encode(prompt))
+  if prompt_token_ids is not None:
+    prompt = None
+    token_rows = [prompt_token_ids]
+    prompt_chars = 0
+    prompt_token_count = len(prompt_token_ids)
+  else:
+    prompt = chat_parser.parse(
+        chat_completions,
+        add_generation_prompt=True,
+        is_first_msg=True,
+    )
+    token_rows = None
+    prompt_chars = len(prompt)
+    prompt_token_count = len(tokenizer.encode(prompt))
   logger.info(
       "[pair=%s instance=%s] model_call start prompt_chars=%d prompt_tokens=%d"
       " max_model_len=%d",
       pair_index,
       instance_id,
-      len(prompt),
+      prompt_chars,
       prompt_token_count,
       MAX_MODEL_LEN,
   )
@@ -339,22 +356,29 @@ def model_call(chat_completions, env_unused):
         "Prompt too long before sampler call:"
         f" prompt_tokens={prompt_token_count}, max_model_len={MAX_MODEL_LEN}"
     )
+  gen_steps = (
+      MAX_RESPONSE_LENGTH
+      if max_generation_steps is None
+      else min(MAX_RESPONSE_LENGTH, max_generation_steps)
+  )
   t0 = time.time()
   try:
     if sampler_lock is None:
       out = sampler(
           prompt,
-          max_generation_steps=MAX_RESPONSE_LENGTH,
+          max_generation_steps=gen_steps,
           echo=False,
           eos_tokens=qwen_eos_tokens,
+          prompt_token_ids=token_rows,
       )
     else:
       with sampler_lock:
         out = sampler(
             prompt,
-            max_generation_steps=MAX_RESPONSE_LENGTH,
+            max_generation_steps=gen_steps,
             echo=False,
             eos_tokens=qwen_eos_tokens,
+            prompt_token_ids=token_rows,
         )
   except Exception as exc:
     if _is_prompt_overflow_error(exc):
@@ -367,7 +391,15 @@ def model_call(chat_completions, env_unused):
       len(out.text[0]) if out.text else 0,
       time.time() - t0,
   )
-  return out
+  return base_rollout.RolloutOutput(
+      text=out.text,
+      logits=out.logits,
+      tokens=out.tokens,
+      left_padded_prompt_tokens=out.padded_prompt_tokens,
+      logprobs=out.logprobs,
+      routed_experts=out.routed_experts,
+      prompt_lengths=out.prompt_lengths,
+  )
 
 
 # ========================== Evaluation ==========================
@@ -495,7 +527,7 @@ async def run_evaluation():
       engine_kwargs=dict(
           model_call=model_call,
           timeout=TIMEOUT,
-          max_context_limit=MAX_CONTEXT_LIMIT,
+          max_response_length=MAX_CONTEXT_LIMIT,
           tokenizer=tokenizer_for_agentic,
           chat_parser=chat_parser,
       ),

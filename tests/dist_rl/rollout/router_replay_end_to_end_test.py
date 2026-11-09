@@ -391,12 +391,12 @@ class SamplerToPayloadTest(absltest.TestCase):
     env_len = 3
     prompt0_ids = list(range(10, 10 + PROMPT_LEN))
     gen0_ids = list(range(20, 20 + GEN_LEN))
-    prompt1_ids = list(range(10, 10 + PROMPT_LEN + GEN_LEN + env_len))
+    env_ids = list(range(30, 30 + env_len))
+    prompt1_ids = prompt0_ids + gen0_ids + env_ids
     gen1_ids = list(range(40, 40 + GEN_LEN))
 
     mock_tokenize_masks.side_effect = [
-        (prompt0_ids, [1] * PROMPT_LEN),
-        (list(range(30, 30 + env_len)), [1] * env_len),
+        (env_ids, [1] * env_len),
     ]
 
     # Turn 0: vLLM routes P_0 + G_0 - 1 tokens (4 prompt + 3 generated = 7 tokens)
@@ -518,9 +518,12 @@ class SamplerToPayloadTest(absltest.TestCase):
         chat_completions, env=None, max_generation_steps=GEN_LEN, **kwargs
     ):
       del chat_completions, env
+      prompt_ids = kwargs.get("prompt_token_ids")
+      if prompt_ids is None:
+        prompt_ids = np.array(prompt0_ids, dtype=np.int32)
       req = base_sampler_lib.SamplingRequest(
           request_id="req",
-          prompt=np.array(prompt0_ids, dtype=np.int32),
+          prompt=np.asarray(prompt_ids, dtype=np.int32),
           sampling_params=base_sampler_lib.SamplingParams(
               max_tokens=max_generation_steps,
               return_routed_experts=True,
@@ -530,11 +533,13 @@ class SamplerToPayloadTest(absltest.TestCase):
           ),
       )
       resp = (await adapter.sample([req]))[0]
+      echoed = np.asarray(resp.prompt_token_ids, dtype=np.int32)
       return base_rollout.RolloutOutput(
           text=[resp.text],
           logits=None,
           tokens=[np.asarray(resp.output_tokens, dtype=np.int32)],
-          left_padded_prompt_tokens=np.asarray([prompt0_ids], dtype=np.int32),
+          left_padded_prompt_tokens=echoed.reshape(1, -1),
+          prompt_lengths=np.asarray([len(echoed)], dtype=np.int32),
           logprobs=[np.zeros(GEN_LEN, dtype=np.float32)],
           routed_experts=[resp.routed_experts],
       )

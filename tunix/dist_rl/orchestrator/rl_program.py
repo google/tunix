@@ -745,7 +745,6 @@ class StandardRLProgram(RLProgram):
         dispatch_kwargs: dict[str, Any] = {
             "num_generations": self.num_generations,
             "policy_version": self.policy_version,
-            "exact_token_continuity": self.algo_config.exact_token_continuity,
         }
         if self.generation_args is not None:
           dispatch_kwargs["generation_args"] = self.generation_args

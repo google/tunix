@@ -409,8 +409,6 @@ class RolloutRequest(Request):
       turns of the rollout episode.
     target_policy_version: Policy model version identifier to use for rollout
       generation.
-    exact_token_continuity: Whether to preserve exact token IDs across
-      multi-turn rollout steps (Token-In-Token-Out). Defaults to True.
   """
 
   prompt: Any = ""
@@ -420,7 +418,6 @@ class RolloutRequest(Request):
   max_turns: int = 10
   max_response_length: int | None = None
   target_policy_version: int = 0
-  exact_token_continuity: bool = True
 
   @property
   def traj_id(self) -> str:

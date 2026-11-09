@@ -371,9 +371,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
                 generation_kwargs=generation_kwargs,
                 max_turns=max_turns,
                 max_response_length=max_response_length,
-                exact_token_continuity=kwargs.get(
-                    "exact_token_continuity", True
-                ),
                 metadata=request_metadata,
             )
         )

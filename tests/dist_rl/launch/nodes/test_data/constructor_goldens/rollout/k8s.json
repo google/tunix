@@ -83,7 +83,6 @@
             151643
           ],
           "episode_timeout": 600.0,
-          "exact_token_continuity": true,
           "expert_parallel_size": 1,
           "kv_cache_size": 2048,
           "max_prompt_length": 1024,
