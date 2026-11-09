@@ -175,7 +175,6 @@ def _build_engine(
           page_size=rollout_config.rollout_vanilla_v2_kv_cache_page_size,
           enable_prefix_caching=rollout_config.rollout_vanilla_v2_enable_prefix_caching,
           dtype=model.config.dtype,  # pyrefly: ignore[missing-attribute]
-          mesh=mesh,
       ),
       scheduler_config=configs.SchedulerConfig(
           max_num_batched_tokens=rollout_config.rollout_vanilla_v2_max_num_batched_tokens,

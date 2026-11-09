@@ -56,60 +56,14 @@ class CacheGeometryTest(parameterized.TestCase):
 class CacheConfigTest(parameterized.TestCase):
 
   def test_valid_config(self):
-    mesh = _create_mesh()
     cfg = configs.CacheConfig(
         max_device_size_gib=1.0,
         max_host_size_gib=0.5,
         page_size=16,
         dtype=jnp.float32,
-        mesh=mesh,
     )
     self.assertEqual(cfg.page_size, 16)
     self.assertEqual(cfg.dtype, jnp.float32)
-    self.assertIs(cfg.mesh, mesh)
-    self.assertEqual(cfg.dp_size, 2)
-    self.assertEqual(cfg.tp_size, 2)
-
-  @parameterized.named_parameters(
-      dict(
-          testcase_name="single_device",
-          shape=(1,),
-          axis_names=("tp",),
-          expected_dp_size=1,
-          expected_tp_size=1,
-      ),
-      dict(
-          testcase_name="tp_only",
-          shape=(2,),
-          axis_names=("tp",),
-          expected_dp_size=1,
-          expected_tp_size=2,
-      ),
-      dict(
-          testcase_name="dp_only",
-          shape=(2,),
-          axis_names=("dp",),
-          expected_dp_size=2,
-          expected_tp_size=1,
-      ),
-      dict(
-          testcase_name="multiple_dp_axes_and_tp",
-          shape=(2, 2, 1),
-          axis_names=("fsdp", "dp", "tp"),
-          expected_dp_size=4,
-          expected_tp_size=1,
-      ),
-  )
-  def test_infers_dp_and_tp_size_from_mesh(
-      self, shape, axis_names, expected_dp_size, expected_tp_size
-  ):
-    cfg = configs.CacheConfig(
-        max_device_size_gib=1.0,
-        dtype=jnp.float32,
-        mesh=_create_mesh(shape, axis_names),
-    )
-    self.assertEqual(cfg.dp_size, expected_dp_size)
-    self.assertEqual(cfg.tp_size, expected_tp_size)
 
   def test_invalid_page_size_raises(self):
     with self.assertRaisesRegex(ValueError, r"page_size must be positive"):
@@ -117,7 +71,6 @@ class CacheConfigTest(parameterized.TestCase):
           page_size=0,
           max_device_size_gib=1.0,
           dtype=jnp.float32,
-          mesh=_create_mesh(),
       )
 
   def test_invalid_negative_size_raises(self):
@@ -128,7 +81,6 @@ class CacheConfigTest(parameterized.TestCase):
           page_size=16,
           max_device_size_gib=-1.0,
           dtype=jnp.float32,
-          mesh=_create_mesh(),
       )
     with self.assertRaisesRegex(
         ValueError, r"max_host_size_gib cannot be negative"
@@ -138,7 +90,6 @@ class CacheConfigTest(parameterized.TestCase):
           max_device_size_gib=1.0,
           max_host_size_gib=-1.0,
           dtype=jnp.float32,
-          mesh=_create_mesh(),
       )
 
   def test_zero_device_size_raises(self):
@@ -149,7 +100,6 @@ class CacheConfigTest(parameterized.TestCase):
           page_size=16,
           max_device_size_gib=0.0,
           dtype=jnp.float32,
-          mesh=_create_mesh(),
       )
 
 

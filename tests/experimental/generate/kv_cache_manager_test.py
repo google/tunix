@@ -51,7 +51,6 @@ def _create_cache_config(
     num_caches: int = 1,
     num_kv_heads: int = 2,
     head_dim: int = 16,
-    mesh: jax.sharding.Mesh | None = None,
     enable_prefix_caching: bool = True,
 ) -> configs.CacheConfig:
   bytes_per_cache_page = page_size * (2 * num_kv_heads) * head_dim * 4
@@ -62,7 +61,6 @@ def _create_cache_config(
       page_size=page_size,
       enable_prefix_caching=enable_prefix_caching,
       dtype=jnp.float32,
-      mesh=mesh if mesh is not None else _create_mesh((1,), ("tp",)),
   )
 
 
@@ -93,10 +91,17 @@ def _create_manager(
   cache_geometries = _create_cache_geometries(
       num_caches=num_caches, cache_to_window_size=cache_to_window_size
   )
+  config = _create_cache_config(
+      num_caches=len(cache_geometries), **config_kwargs
+  )
+  if jax.sharding.get_mesh().empty:
+    with jax.set_mesh(_create_mesh((1,), ("tp",))):
+      return kv_cache_manager.KVCacheManager(
+          config=config,
+          cache_geometries=cache_geometries,
+      )
   return kv_cache_manager.KVCacheManager(
-      config=_create_cache_config(
-          num_caches=len(cache_geometries), **config_kwargs
-      ),
+      config=config,
       cache_geometries=cache_geometries,
   )
 
@@ -234,19 +239,19 @@ class KVCacheManagerInitTest(parameterized.TestCase):
         max_device_size_gib=(4 * (4 * 4 * 8 * 4 + 4 * 1 * 16 * 4)) / _GIB,
         page_size=4,
         dtype=jnp.float32,
-        mesh=_create_mesh((1,), ("tp",)),
     )
-    mgr = kv_cache_manager.KVCacheManager(
-        config=cfg,
-        cache_geometries={
-            "cache_0": configs.CacheGeometry(
-                num_kv_heads=2, head_dim=8, window_size=8
-            ),
-            "cache_1": configs.CacheGeometry(
-                num_kv_heads=1, head_dim=16
-            ),
-        },
-    )
+    with jax.set_mesh(_create_mesh((1,), ("tp",))):
+      mgr = kv_cache_manager.KVCacheManager(
+          config=cfg,
+          cache_geometries={
+              "cache_0": configs.CacheGeometry(
+                  num_kv_heads=2, head_dim=8, window_size=8
+              ),
+              "cache_1": configs.CacheGeometry(
+                  num_kv_heads=1, head_dim=16
+              ),
+          },
+      )
 
     pages = mgr.get_physical_pages()
     # (num_pages, page_size, *element_shape); element_shape is
@@ -262,10 +267,9 @@ class KVCacheManagerInitTest(parameterized.TestCase):
       )
 
   def test_init_sharding(self):
-    # Pages are allocated outside any mesh context, so the mesh travels on the
-    # config rather than through `jax.set_mesh`.
     mesh = _create_mesh()
-    mgr = _create_manager(num_caches=1, mesh=mesh)
+    with jax.set_mesh(mesh):
+      mgr = _create_manager(num_caches=1)
 
     arr = mgr.get_physical_pages()["cache_0"]
     assert isinstance(arr, jax.Array)
@@ -282,19 +286,19 @@ class KVCacheManagerInitTest(parameterized.TestCase):
         max_device_size_gib=1e-3,
         page_size=4,
         dtype=jnp.bfloat16,
-        mesh=mesh,
     )
-    mgr = kv_cache_manager.KVCacheManager(
-        config=cfg,
-        cache_geometries={
-            "local": configs.CacheGeometry(
-                num_kv_heads=2, head_dim=8, window_size=8
-            ),
-            "global": configs.CacheGeometry(
-                num_kv_heads=1, head_dim=16
-            ),
-        },
-    )
+    with jax.set_mesh(mesh):
+      mgr = kv_cache_manager.KVCacheManager(
+          config=cfg,
+          cache_geometries={
+              "local": configs.CacheGeometry(
+                  num_kv_heads=2, head_dim=8, window_size=8
+              ),
+              "global": configs.CacheGeometry(
+                  num_kv_heads=1, head_dim=16
+              ),
+          },
+      )
 
     pages = mgr.get_physical_pages()
     expected_sharding = jax.sharding.NamedSharding(
@@ -310,13 +314,13 @@ class KVCacheManagerInitTest(parameterized.TestCase):
         page_size=4,
         dtype=jnp.float32,
         max_device_size_gib=10 / _GIB,
-        mesh=_create_mesh(),
     )
-    with self.assertRaisesRegex(ValueError, r"Cannot allocate 0 device pages"):
-      kv_cache_manager.KVCacheManager(
-          config=cfg,
-          cache_geometries=_create_cache_geometries(num_caches=1),
-      )
+    with jax.set_mesh(_create_mesh((1,), ("tp",))):
+      with self.assertRaisesRegex(ValueError, r"Cannot allocate 0 device pages"):
+        kv_cache_manager.KVCacheManager(
+            config=cfg,
+            cache_geometries=_create_cache_geometries(num_caches=1),
+        )
 
 
 class SyncRequestStateTest(parameterized.TestCase):

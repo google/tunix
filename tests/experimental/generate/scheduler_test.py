@@ -47,7 +47,6 @@ def _create_cache_config(
       max_host_size_gib=(total_host_bytes_per_page * num_host_pages) / gib,
       page_size=page_size,
       dtype=jnp.float32,
-      mesh=jax.sharding.Mesh(np.array(jax.devices()[:1]), ("tp",)),
   )
 
 
@@ -56,18 +55,20 @@ def _create_kv_cache_manager(
     num_device_pages: int = 20,
     num_host_pages: int = 20,
 ) -> kv_cache_manager.KVCacheManager:
-  return kv_cache_manager.KVCacheManager(
-      config=_create_cache_config(
-          page_size=page_size,
-          num_device_pages=num_device_pages,
-          num_host_pages=num_host_pages,
-      ),
-      cache_geometries={
-          "cache_0": configs.CacheGeometry(
-              num_kv_heads=2, head_dim=16
-          )
-      },
-  )
+  mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("tp",))
+  with jax.set_mesh(mesh):
+    return kv_cache_manager.KVCacheManager(
+        config=_create_cache_config(
+            page_size=page_size,
+            num_device_pages=num_device_pages,
+            num_host_pages=num_host_pages,
+        ),
+        cache_geometries={
+            "cache_0": configs.CacheGeometry(
+                num_kv_heads=2, head_dim=16
+            )
+        },
+    )
 
 
 def _create_scheduler_config(**overrides) -> configs.SchedulerConfig:
