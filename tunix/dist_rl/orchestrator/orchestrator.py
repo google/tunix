@@ -49,7 +49,9 @@ class ClusterOrchestrator:
       lifecycle_driver: lifecycle.LifecycleDriver | None = None,
       monitor: health_monitor.HealthMonitor | None = None,
       weight_sync_mode: str | None = None,
-      trajectory_store_config: Mapping[str, Any] | None = None,
+      trajectory_store_config: (
+          Mapping[str, Any] | Sequence[Mapping[str, Any] | None] | None
+      ) = None,
       weight_sync_timeouts: weight_sync_coordinator.PhaseTimeouts | None = None,
       fault_tolerance_config: datatypes.FaultToleranceConfig | None = None,
       weight_sync_handler: weight_sync.WeightSyncHandler | None = None,
@@ -62,11 +64,12 @@ class ClusterOrchestrator:
       lifecycle_driver: Lifecycle driver to use; one is created if omitted.
       monitor: Health monitor to use; one is created if omitted.
       weight_sync_mode: Weight sync mode, if any.
-      trajectory_store_config: Trajectory Store configuration for this process,
-        or None to run without a store. See `store.TrajectoryStore.from_config`.
-        Pass the same config to every process in the run: for the file backend
-        it is the shared root_dir and run_id that will make the workers' writes
-        visible to this process's reads once read/write wiring is connected.
+      trajectory_store_config: Trajectory Store configuration (or sequence of
+        configurations) for this process, or None to run without a store. See
+        `store.TrajectoryStore.from_config`. Pass the same config to every
+        process in the run: for the file backend it is the shared root_dir and
+        run_id that will make the workers' writes visible to this process's
+        reads once read/write wiring is connected.
       weight_sync_timeouts: Per-phase deadlines forwarded to
         `WeightSyncCoordinator`, or None to use `PhaseTimeouts()` defaults.
       fault_tolerance_config: Fault-tolerance configuration for the
@@ -109,12 +112,12 @@ class ClusterOrchestrator:
             trajectory_store_config
         )
     )
-    if self.trajectory_store is not None:
+    for store in trajectory_store_lib.iter_stores(self.trajectory_store):
       # Logged so a config mismatch between this process and its workers is one
       # grep away.
       logging.info(
           "[trajectory-store] orchestrator built %s",
-          self.trajectory_store.to_redacted_config(),
+          store.to_redacted_config(),
       )
 
   @property
@@ -176,10 +179,8 @@ class ClusterOrchestrator:
       self, infos: Sequence[datatypes.WorkerInfo]
   ) -> None:
     """Verifies that rollout workers match the orchestrator's TrajectoryStore config."""
-    expected_config = (
-        self.trajectory_store.to_config()
-        if self.trajectory_store is not None
-        else None
+    expected_config = trajectory_store_lib.serialize_store_config(
+        self.trajectory_store
     )
     for info in infos:
       worker_config = info.resources.get("trajectory_store_config")
@@ -232,7 +233,8 @@ class ClusterOrchestrator:
       # Registered in reverse order of execution (LIFO) so that every stage
       # runs even if a preceding stage raises an exception.
       if self.trajectory_store is not None:
-        stack.callback(self.trajectory_store.close)
+        for store in trajectory_store_lib.iter_stores(self.trajectory_store):
+          stack.callback(store.close)
       stack.callback(self.registry.close)
       if abort:
         stack.callback(self.lifecycle_driver.shutdown, abort=True)
@@ -344,7 +346,8 @@ def _teardown_cluster(
   else:
     with contextlib.ExitStack() as stack:
       if cluster.trajectory_store is not None:
-        stack.callback(cluster.trajectory_store.close)
+        for store in trajectory_store_lib.iter_stores(cluster.trajectory_store):
+          stack.callback(store.close)
       stack.callback(cluster.monitor.close)
 
 

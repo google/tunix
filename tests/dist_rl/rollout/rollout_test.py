@@ -15,6 +15,7 @@
 """Integration and unit tests for Distributed-RL Rollout Subsystem."""
 
 import asyncio
+import tempfile
 from typing import List
 from unittest import mock
 from absl.testing import absltest
@@ -481,6 +482,63 @@ class RolloutWorkerTest(parameterized.TestCase):
       self.assertIsInstance(max_steps_metas[0].reward_time, dict)
       self.assertIn("reward_latency", max_steps_metas[0].reward_time)
       max_steps_svc.stop()
+
+    asyncio.run(_run_test())
+
+  def test_generate_with_dual_trajectory_stores_writes_to_non_none_stores(
+      self,
+  ):
+    """Verifies dual stores [file_store, memory_store] both receive rollout writes."""
+    tmp_dir = self.enter_context(tempfile.TemporaryDirectory())
+    file_cfg = {
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "dual_rollout_test",
+    }
+    mem_cfg = {"backend": "memory"}
+
+    async def _run_test():
+      svc = worker.RolloutWorker(
+          worker_id="test_dual_worker",
+          config=worker.RolloutConfig(
+              trajectory_store_config=[file_cfg, None, mem_cfg]
+          ),
+          sampler=self.sampler,
+          env_name="mock_env",
+          agent_name="mock_agent",
+          tokenizer=mocks.MockTokenizer(),
+          chat_parser=mocks.MockChatParser(),
+      )
+      await svc.start()
+      req = datatypes.RolloutRequest(
+          prompt_id="prompt_dual",
+          prompt="Solve dual store task",
+          generation_kwargs={
+              "delay_seconds": 0.01,
+              "min_turns": 2,
+              "force_finish": False,
+              "max_generation_steps": 64,
+          },
+      )
+      await svc.generate(req)
+      stores = svc.trajectory_store
+      self.assertIsInstance(stores, list)
+      self.assertLen(stores, 2)
+      self.assertIsNotNone(stores[0])
+      self.assertIsInstance(stores[1], in_memory_store.InMemoryTrajectoryStore)
+      mem_metas = stores[1].get_trajectories_metadata(["traj_prompt_dual_g0"])
+      self.assertLen(mem_metas, 1)
+      self.assertEqual(mem_metas[0].status, "MAX_STEPS_REACHED")
+      svc.stop()
+
+      reader_store = trajectory_store_lib.TrajectoryStore.from_config(file_cfg)
+      self.assertIsNotNone(reader_store)
+      file_metas = reader_store.get_trajectories_metadata(
+          ["traj_prompt_dual_g0"]
+      )
+      self.assertLen(file_metas, 1)
+      self.assertEqual(file_metas[0].status, "MAX_STEPS_REACHED")
+      reader_store.close()
 
     asyncio.run(_run_test())
 

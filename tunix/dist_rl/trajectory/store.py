@@ -36,3 +36,7 @@ TrajectoryReader = base_store.TrajectoryReader
 TrajectoryWriter = base_store.TrajectoryWriter
 TrajectoryStore = base_store.TrajectoryStore
 TunixTrajectoryStore = base_store.TunixTrajectoryStore
+close_stores = base_store.close_stores
+config_from_flags = base_store.config_from_flags
+iter_stores = base_store.iter_stores
+serialize_store_config = base_store.serialize_store_config

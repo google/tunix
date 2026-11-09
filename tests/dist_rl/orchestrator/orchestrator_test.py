@@ -373,6 +373,86 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
           trajectory_testing.TUNIX_METADATA_1,
       )
 
+  def test_init_and_shutdown_with_multi_store_config_closes_all_stores(self):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    file_cfg = {
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "cluster_run",
+    }
+    in_mem_cfg = {"backend": "memory"}
+    orch = _trajectory_store_orchestrator(
+        trajectory_store_config=[file_cfg, None, in_mem_cfg]
+    )
+    self.assertIsInstance(orch.trajectory_store, list)
+    self.assertLen(orch.trajectory_store, 2)
+    self.assertIsInstance(
+        orch.trajectory_store[0], file_store.FileTrajectoryStore
+    )
+    file_s = orch.trajectory_store[0]
+    orch.shutdown()
+    with self.assertRaises(RuntimeError):
+      file_s.add_step(
+          trajectory_testing.TUNIX_ENV_STEP_0,
+          trajectory_testing.TUNIX_METADATA_1,
+      )
+
+  def test_bring_up_workers_with_matching_multi_store_config_succeeds(self):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    file_cfg = {
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "shared_run",
+    }
+    in_mem_cfg = {"backend": "memory"}
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        monitor=mock.MagicMock(),
+        trajectory_store_config=[file_cfg, in_mem_cfg],
+    )
+    expected_cfg = [file_cfg, in_mem_cfg]
+    mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout.submit.side_effect = [
+        datatypes.Response(metadata={"trajectory_store_config": expected_cfg}),
+        datatypes.Response(),
+        datatypes.Response(),
+        datatypes.Response(),
+    ]
+    orch.registry.register_handle(
+        "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout
+    )
+    orch.bring_up_workers()
+    orch.shutdown()
+
+  def test_bring_up_workers_with_mismatched_multi_store_config_raises_value_error(
+      self,
+  ):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    file_cfg = {
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "shared_run",
+    }
+    in_mem_cfg = {"backend": "memory"}
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        monitor=mock.MagicMock(),
+        trajectory_store_config=[file_cfg, in_mem_cfg],
+    )
+    mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout.submit.side_effect = [
+        datatypes.Response(metadata={"trajectory_store_config": [file_cfg]}),
+        datatypes.Response(),
+        datatypes.Response(),
+        datatypes.Response(),
+    ]
+    orch.registry.register_handle(
+        "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout
+    )
+    with self.assertRaises(ValueError):
+      orch.bring_up_workers()
+    orch.shutdown()
+
   def test_shutdown_closes_the_store_even_when_a_prior_step_raises(self):
     orch = _trajectory_store_orchestrator()
     orch.trajectory_store = mock.MagicMock()

@@ -483,9 +483,7 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     worker_b = _worker(
         config=rollout_worker.RolloutConfig(trajectory_store_config=config)
     )
-    self.assertIsNot(
-        worker_a.trajectory_store, worker_b.trajectory_store
-    )
+    self.assertIsNot(worker_a.trajectory_store, worker_b.trajectory_store)
     worker_a.stop()
     worker_b.stop()
 
@@ -607,9 +605,7 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
         "run_id": "handshake_run",
     }
     worker_enabled = _worker(
-        config=rollout_worker.RolloutConfig(
-            trajectory_store_config=input_cfg
-        )
+        config=rollout_worker.RolloutConfig(trajectory_store_config=input_cfg)
     )
     self.assertEqual(
         worker_enabled.info().resources["trajectory_store_config"],
@@ -620,6 +616,58 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
         input_cfg,
     )
     worker_enabled.stop()
+
+  def test_init_and_stop_with_multi_store_config_closes_all_stores(self):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    file_cfg = {
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "dual_worker_run",
+    }
+    worker = _worker(
+        config=rollout_worker.RolloutConfig(
+            trajectory_store_config=[file_cfg, None, {"backend": "memory"}]
+        )
+    )
+    self.assertIsInstance(worker.trajectory_store, list)
+    self.assertLen(worker.trajectory_store, 2)
+    self.assertIsInstance(
+        worker.trajectory_store[0], file_store.FileTrajectoryStore
+    )
+    self.assertIs(worker.manager.trajectory_store, worker.trajectory_store)
+    file_store_inst = worker.trajectory_store[0]
+    worker.stop()
+    with self.assertRaises(RuntimeError):
+      file_store_inst.add_step(
+          trajectory_testing.TUNIX_ENV_STEP_0,
+          trajectory_testing.TUNIX_METADATA_1,
+      )
+
+  def test_info_and_initialize_with_multi_store_config_report_config_list(
+      self,
+  ):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    file_cfg = {
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "multi_run",
+    }
+    mem_cfg = {"backend": "memory"}
+    worker = _worker(
+        config=rollout_worker.RolloutConfig(
+            trajectory_store_config=[file_cfg, mem_cfg]
+        )
+    )
+    expected_cfg = [file_cfg, mem_cfg]
+    self.assertEqual(
+        worker.info().resources["trajectory_store_config"],
+        expected_cfg,
+    )
+    self.assertEqual(
+        worker.initialize().metadata["trajectory_store_config"],
+        expected_cfg,
+    )
+    worker.stop()
 
   def test_rollout_config_drain_timeout_forwarded_and_reported(self):
     worker_default = _worker()

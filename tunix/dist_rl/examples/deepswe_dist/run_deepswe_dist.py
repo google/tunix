@@ -43,6 +43,7 @@ from tunix.dist_rl.examples.deepswe_dist import deepswe
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import orchestrator
 from tunix.dist_rl.orchestrator import rl_program
+from tunix.dist_rl.trajectory import store as trajectory_store_lib
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
 from tunix.rl import algorithm_config
@@ -263,6 +264,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Root directory for the file-backed TrajectoryStore.",
   )
   parser.add_argument(
+      "--trajectory_store_db_url",
+      type=str,
+      default=os.getenv("TRAJECTORY_STORE_DB_URL", ""),
+      help="Database connection URL for the SQL TrajectoryStore.",
+  )
+  parser.add_argument(
       "--trainer_precompile",
       type=_str2bool,
       default=_str2bool(os.getenv("TRAINER_PRECOMPILE", "true")),
@@ -301,20 +308,15 @@ def _str2bool(v: str | bool) -> bool:
 
 def _trajectory_store_config(
     args: argparse.Namespace,
-) -> dict[str, Any] | None:
-  """Builds TrajectoryStore config dict from parsed CLI flags."""
-  if not getattr(args, "enable_trajectory_store", False):
-    return None
-  config: dict[str, Any] = {
-      "backend": getattr(args, "trajectory_store_backend", "file") or "file",
-  }
-  root_dir = getattr(args, "trajectory_store_dir", "")
-  if root_dir:
-    config["root_dir"] = root_dir
-  run_id = getattr(args, "run_id", "")
-  if run_id:
-    config["run_id"] = run_id
-  return config
+) -> list[dict[str, Any]] | dict[str, Any] | None:
+  """Builds TrajectoryStore config dict or list from parsed CLI flags."""
+  return trajectory_store_lib.config_from_flags(
+      enabled=bool(getattr(args, "enable_trajectory_store", False)),
+      backend=getattr(args, "trajectory_store_backend", "file"),
+      root_dir=getattr(args, "trajectory_store_dir", ""),
+      db_url=getattr(args, "trajectory_store_db_url", ""),
+      run_id=getattr(args, "run_id", ""),
+  )
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_config.GRPOConfig:

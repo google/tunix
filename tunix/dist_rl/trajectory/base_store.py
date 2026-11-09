@@ -15,9 +15,11 @@
 """Base protocols and abstract class defining Trajectory Store interfaces."""
 
 import abc
-from collections.abc import Mapping
-from typing import Any, ClassVar, Protocol, Self, TypeVar, cast, get_args, get_origin, runtime_checkable
+from collections.abc import Mapping, Sequence
+import contextlib
+from typing import Any, ClassVar, Protocol, Self, TypeVar, cast, get_args, get_origin, overload, runtime_checkable
 
+from absl import logging
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 
 MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)
@@ -228,6 +230,13 @@ class TrajectoryStore(
   BACKEND: ClassVar[str]
   _REGISTRY: ClassVar[dict[str, type["TrajectoryStore[Any]"]]] = {}
 
+  # Errors during single backend instantiation that indicate connection/driver
+  # failure. Caught in from_config to skip unreachable backends gracefully.
+  CONNECT_ERRORS: ClassVar[tuple[type[Exception], ...]] = (
+      OSError,
+      ImportError,
+  )
+
   # Bound metadata class for this store. Starts as `None` on unparameterized
   # stores, is set on the class when a subclass specifies a concrete metadata
   # type (e.g. `class MyStore(InMemoryStore[TunixMetadata])`), and is set on the
@@ -436,8 +445,51 @@ class TrajectoryStore(
     """
     return self.to_config()
 
+  @overload
   @classmethod
-  def from_config(cls, config: Mapping[str, Any] | None) -> Self | None:
+  def from_config(cls, config: None) -> None:
+    ...
+
+  @overload
+  @classmethod
+  def from_config(cls, config: Mapping[str, Any]) -> Self | None:
+    ...
+
+  @overload
+  @classmethod
+  def from_config(
+      cls, config: Sequence[Mapping[str, Any] | None]
+  ) -> list[Self] | None:
+    ...
+
+  @classmethod
+  def _from_config_sequence(
+      cls, configs: Sequence[Mapping[str, Any] | None]
+  ) -> list[Self] | None:
+    """Builds stores from a config sequence, closing built stores on error."""
+    stores: list[Self] = []
+    try:
+      for item in configs:
+        if item is None:
+          continue
+        if not isinstance(item, Mapping):
+          raise ValueError(
+              "Each item in a TrajectoryStore sequence config must be a"
+              f" Mapping or None, got {type(item).__name__}."
+          )
+        built = cls.from_config(item)
+        if built is not None:
+          stores.append(built)
+    except Exception:
+      close_stores(stores)
+      raise
+    return stores or None
+
+  @classmethod
+  def from_config(
+      cls,
+      config: Mapping[str, Any] | Sequence[Mapping[str, Any] | None] | None,
+  ) -> Self | list[Self] | None:
     """Builds the store described by `config`, or None when it is disabled.
 
     Call once per process and hold onto the result: the process that built a
@@ -447,11 +499,13 @@ class TrajectoryStore(
     construct once.
 
     Args:
-      config: Configuration mapping, or None to run without a store. The
-        "backend" key selects the implementation.
+      config: Configuration mapping, sequence of configuration mappings, or None
+        to run without a store. The "backend" key selects the implementation.
 
     Returns:
-      A store instance, or None if `config` is None.
+      A store instance, a list of store instances (when `config` is a sequence),
+      or None if `config` is None or all stores in the sequence are disabled /
+      unreachable.
 
     Raises:
       ValueError: If `config` contains the removed "enabled" key, "backend"
@@ -460,6 +514,16 @@ class TrajectoryStore(
     """
     if config is None:
       return None
+
+    if isinstance(config, Sequence) and not isinstance(config, (str, bytes)):
+      return cls._from_config_sequence(config)
+
+    if not isinstance(config, Mapping):
+      raise ValueError(
+          "TrajectoryStore config must be a Mapping or Sequence of Mappings,"
+          f" got {type(config).__name__}."
+      )
+
     # Backends ignore keys they do not read, so a leftover "enabled": False
     # would otherwise build an active store. Reject the key so such configs
     # fail loudly instead.
@@ -475,7 +539,19 @@ class TrajectoryStore(
           f"Unknown Trajectory Store backend {backend!r}; expected one of"
           f" {sorted(cls._REGISTRY)}."
       )
-    store = cls._REGISTRY[backend]._from_config(config)  # pylint: disable=protected-access
+    backend_cls = cls._REGISTRY[backend]
+    try:
+      store = backend_cls._from_config(config)  # pylint: disable=protected-access
+    except backend_cls.CONNECT_ERRORS:
+      logging.warning(
+          "Failed to connect to %r TrajectoryStore backend (%s). Skipping"
+          " store.",
+          backend,
+          backend_cls.__name__,
+          exc_info=True,
+      )
+      return None
+
     metadata_cls = getattr(cls, "_metadata_cls", None)
     if metadata_cls is not None:
       store._metadata_cls = metadata_cls  # pylint: disable=protected-access
@@ -491,3 +567,80 @@ class TunixTrajectoryStore(
   (`FileTrajectoryStore`, `SqlTrajectoryStore`, or `InMemoryTrajectoryStore`)
   and binds it to `TunixTrajectoryMetadata`.
   """
+
+
+StoreT = TypeVar("StoreT")
+
+
+def iter_stores(
+    store_or_stores: StoreT | Sequence[StoreT | None] | None,
+) -> tuple[StoreT, ...]:
+  """Returns a flat tuple of non-None store instances."""
+  if store_or_stores is None:
+    return ()
+  if isinstance(store_or_stores, Sequence) and not isinstance(
+      store_or_stores, (str, bytes)
+  ):
+    return tuple(s for s in store_or_stores if s is not None)
+  return (store_or_stores,)
+
+
+def close_stores(
+    store_or_stores: (
+        TrajectoryWriter[Any] | Sequence[TrajectoryWriter[Any] | None] | None
+    ),
+) -> None:
+  """Closes all non-None store instances safely via ExitStack."""
+  with contextlib.ExitStack() as stack:
+    for store in iter_stores(store_or_stores):
+      stack.callback(store.close)
+
+
+def serialize_store_config(
+    store_or_stores: (
+        TrajectoryStore[Any] | Sequence[TrajectoryStore[Any] | None] | None
+    ),
+) -> dict[str, Any] | list[dict[str, Any]] | None:
+  """Serializes a single store or sequence of stores to config dict(s)."""
+  if store_or_stores is None:
+    return None
+  if isinstance(store_or_stores, Sequence) and not isinstance(
+      store_or_stores, (str, bytes)
+  ):
+    configs = [s.to_config() for s in store_or_stores if s is not None]
+    return configs or None
+  return store_or_stores.to_config()
+
+
+def config_from_flags(
+    *,
+    enabled: bool,
+    backend: str = "file",
+    root_dir: str = "",
+    db_url: str = "",
+    run_id: str = "",
+) -> list[dict[str, Any]] | dict[str, Any] | None:
+  """Builds TrajectoryStore config dict or list from CLI flag values."""
+  if not enabled:
+    return None
+  backend = (backend or "").strip() or "file"
+  root_dir = (root_dir or "").strip()
+  db_url = (db_url or "").strip()
+  run_id = (run_id or "").strip()
+  base = {"run_id": run_id} if run_id else {}
+  if backend != "file":
+    sql_kw = {"db_url": db_url} if backend == "sql" and db_url else {}
+    return {"backend": backend, **sql_kw, **base}
+  configs = [
+      *(
+          [{"backend": "file", "root_dir": root_dir, **base}]
+          if root_dir
+          else []
+      ),
+      *([{"backend": "sql", "db_url": db_url, **base}] if db_url else []),
+  ]
+  if len(configs) == 2:
+    return configs
+  if configs:
+    return configs[0]
+  return {"backend": "file", **base}

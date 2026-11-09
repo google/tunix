@@ -40,6 +40,7 @@ from tunix.dist_rl.distributed.runtime import context as context_lib
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.rollout import sampler as sampler_lib
+from tunix.dist_rl.trajectory import store as trajectory_store_lib
 from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
 from tunix.dist_rl.worker import rollout_worker
@@ -870,9 +871,9 @@ def main(
         config_sha256=config_sha256,
         extra_metadata={
             "trajectory_store_config": (
-                worker_service.trajectory_store.to_config()
-                if worker_service.trajectory_store is not None
-                else None
+                trajectory_store_lib.serialize_store_config(
+                    worker_service.trajectory_store
+                )
             ),
         },
         drain_fn=_drain,

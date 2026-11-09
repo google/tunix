@@ -695,6 +695,11 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
   """
 
   BACKEND: ClassVar[str] = "sql"
+  CONNECT_ERRORS: ClassVar[tuple[type[Exception], ...]] = (
+      sa.exc.SQLAlchemyError,
+      OSError,
+      ImportError,
+  )
 
   def __init__(
       self,

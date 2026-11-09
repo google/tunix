@@ -41,6 +41,7 @@ from tunix.dist_rl.distributed.runtime import context as runtime_context
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import orchestrator
 from tunix.dist_rl.orchestrator import rl_program
+from tunix.dist_rl.trajectory import store as trajectory_store_lib
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
 from tunix.experimental.examples.deepswe_dist import deepswe
@@ -390,6 +391,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Root directory for the file-backed TrajectoryStore.",
   )
   parser.add_argument(
+      "--trajectory_store_db_url",
+      type=str,
+      default=os.getenv("TRAJECTORY_STORE_DB_URL", ""),
+      help="Database connection URL for the SQL TrajectoryStore.",
+  )
+  parser.add_argument(
       "--trainer_precompile",
       type=_str2bool,
       default=_str2bool(os.getenv("TRAINER_PRECOMPILE", "true")),
@@ -452,18 +459,15 @@ def _str2bool(v: str | bool) -> bool:
 
 def _trajectory_store_config(
     args: argparse.Namespace,
-) -> dict[str, Any] | None:
-  """Builds TrajectoryStore config dict from parsed CLI flags."""
-  if not args.enable_trajectory_store:
-    return None
-  config: dict[str, Any] = {
-      "backend": args.trajectory_store_backend or "file",
-  }
-  if args.trajectory_store_dir:
-    config["root_dir"] = args.trajectory_store_dir
-  if args.run_id:
-    config["run_id"] = args.run_id
-  return config
+) -> list[dict[str, Any]] | dict[str, Any] | None:
+  """Builds TrajectoryStore config dict or list from parsed CLI flags."""
+  return trajectory_store_lib.config_from_flags(
+      enabled=bool(getattr(args, "enable_trajectory_store", False)),
+      backend=getattr(args, "trajectory_store_backend", "file"),
+      root_dir=getattr(args, "trajectory_store_dir", ""),
+      db_url=getattr(args, "trajectory_store_db_url", ""),
+      run_id=getattr(args, "run_id", ""),
+  )
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_config.GRPOConfig:
@@ -799,8 +803,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       cluster.shutdown()
     else:
       cluster.monitor.close()
-      if cluster.trajectory_store is not None:
-        cluster.trajectory_store.close()
+      trajectory_store_lib.close_stores(cluster.trajectory_store)
 
   result = program.last_step_result
   if result is None:

@@ -571,7 +571,11 @@ def build_program(
     pad_id: int,
     eos_id: int,
     prompt_items: grain.MapDataset[dict[str, object]],
-    trajectory_store: trajectory_store_lib.TrajectoryStore | None,
+    trajectory_store: (
+        trajectory_store_lib.TrajectoryStore
+        | Sequence[trajectory_store_lib.TrajectoryStore | None]
+        | None
+    ),
     metrics_logging_options: metrics_logger_lib.MetricsLoggerOptions | None,
 ) -> rl_program.StandardRLProgram:
   """Builds the `StandardRLProgram` from the configuration.
