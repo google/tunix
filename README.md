@@ -36,7 +36,7 @@ for efficient model refinement. It sits as an intermediate layer between these
 core utilities and optimized models like MaxText and MaxDiffusion, streamlining
 tuning workflows on top of the XLA and JAX infrastructure. See [Design Overview](https://tunix.readthedocs.io/en/latest/design.html) for more details on the architecture.
 
-![Tunix in JAX ecosystem](docs/images/tunix_in_jax_ecosystem.png)
+![Tunix in Accelerators ecosystem](docs/images/tunix_in_jax_ecosystem.png)
 
 ## Key Features
 -   **[Supervised Fine-Tuning (SFT)](https://tunix.readthedocs.io/en/latest/algorithms.html)**:
