@@ -1,3 +1,18 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Tests for the ATIF trajectory models and their extension hooks."""
+
 import collections
 from collections.abc import Iterator
 import copy
@@ -18,7 +33,7 @@ from tunix.dist_rl.trajectory import trajectory_testing
 from tunix.rl.agentic.agents import agent_types
 
 _SAMPLE_ATIF_PATH = os.path.join(
-    os.path.dirname(trajectory.__file__), "testdata", "sample_atif_v1_7.json"
+    os.path.dirname(__file__), "test_data", "sample_atif_v1_7.json"
 )
 
 
@@ -1395,10 +1410,10 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
         TypeError,
         "Expected trajectory_cls to be a subclass of _NoNewFields",
     ):
-      meta._create_paired_trajectory(trajectory.Trajectory, None, None)
+      meta.create_paired_trajectory(trajectory.Trajectory, None, None)
 
   def test_create_paired_trajectory_rejects_incompatible_trajectory_cls(self):
-    """_create_paired_trajectory enforces that trajectory_cls subclasses type(self)."""
+    """create_paired_trajectory enforces that trajectory_cls subclasses type(self)."""
 
     class _NewField(trajectory.TrajectoryMetadata):
       EXTENSIONS_KEY = "_test_extensions"
@@ -1413,7 +1428,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
       with self.assertRaisesRegex(
           TypeError, "Expected trajectory_cls to be a subclass of _NewField"
       ):
-        meta._create_paired_trajectory(trajectory.Trajectory, None, None)
+        meta.create_paired_trajectory(trajectory.Trajectory, None, None)
 
       traj = meta.create_trajectory()
       self.assertIsInstance(traj, _NewField)
@@ -2897,7 +2912,7 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
           steps: list[trajectory.Step] | None = None,
           subagent_trajectories: list["DefaultedTagTrajectory"] | None = None,
       ) -> "DefaultedTagTrajectory":
-        return self._create_paired_trajectory(
+        return self.create_paired_trajectory(
             DefaultedTagTrajectory, steps, subagent_trajectories
         )
 
