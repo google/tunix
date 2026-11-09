@@ -31,6 +31,7 @@ from tunix.common import datatypes as common_datatypes
 from tunix.dist_rl.common import gcs_cache
 from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.common import timeouts
+from tunix.dist_rl.trajectory import store as trajectory_store_lib
 from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
 from tunix.dist_rl.worker import rollout_worker
@@ -126,9 +127,7 @@ def _parse_vllm_config_json(
   try:
     parsed = json.loads(raw_json)
   except json.JSONDecodeError as exc:
-    raise ValueError(
-        "--vllm_config_json must be a valid JSON object."
-    ) from exc
+    raise ValueError("--vllm_config_json must be a valid JSON object.") from exc
   if not isinstance(parsed, dict):
     raise ValueError("--vllm_config_json must decode to a JSON object.")
   forbidden = sorted(set(parsed) & _FORBIDDEN_ROLLOUT_KWARGS)
@@ -337,8 +336,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       type=str,
       default="",
       help=(
-          "Override MaxText inference attention kernel (e.g."
-          " vllm_batched_rpa)."
+          "Override MaxText inference attention kernel (e.g. vllm_batched_rpa)."
       ),
   )
   parser.add_argument(
@@ -383,9 +381,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--registry_module",
       type=str,
       default=os.getenv("ROLLOUT_REGISTRY_MODULE", DEFAULT_REGISTRY_MODULE),
-      help=(
-          "Module imported at startup to register rollout env/agent classes."
-      ),
+      help="Module imported at startup to register rollout env/agent classes.",
   )
   parser.add_argument(
       "--env_name",
@@ -578,6 +574,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default="",
       help="Root directory for the file-backed TrajectoryStore.",
   )
+  parser.add_argument(
+      "--trajectory_store_db_url",
+      type=str,
+      default=os.getenv("TRAJECTORY_STORE_DB_URL", ""),
+      help="Database connection URL for the SQL TrajectoryStore.",
+  )
   args = parser.parse_args(argv)
   if args.vllm_config_json is not None:
     if args.sampler != "vllm":
@@ -622,7 +624,9 @@ def _agent_config(args: argparse.Namespace) -> dict[str, Any]:
   try:
     config = json.loads(args.agent_config_json or "{}")
   except json.JSONDecodeError as exc:
-    raise ValueError("--agent_config_json must be a valid JSON object.") from exc
+    raise ValueError(
+        "--agent_config_json must be a valid JSON object."
+    ) from exc
   if not isinstance(config, dict):
     raise ValueError("--agent_config_json must decode to a JSON object.")
   return config
@@ -630,18 +634,15 @@ def _agent_config(args: argparse.Namespace) -> dict[str, Any]:
 
 def _trajectory_store_config(
     args: argparse.Namespace,
-) -> dict[str, Any] | None:
-  """Builds TrajectoryStore config dict from parsed CLI flags."""
-  if not args.enable_trajectory_store:
-    return None
-  config: dict[str, Any] = {
-      "backend": args.trajectory_store_backend or "file",
-  }
-  if args.trajectory_store_dir:
-    config["root_dir"] = args.trajectory_store_dir
-  if args.run_id:
-    config["run_id"] = args.run_id
-  return config
+) -> list[dict[str, Any]] | dict[str, Any] | None:
+  """Builds TrajectoryStore config dict or list from parsed CLI flags."""
+  return trajectory_store_lib.config_from_flags(
+      enabled=bool(getattr(args, "enable_trajectory_store", False)),
+      backend=getattr(args, "trajectory_store_backend", "file"),
+      root_dir=getattr(args, "trajectory_store_dir", ""),
+      db_url=getattr(args, "trajectory_store_db_url", ""),
+      run_id=getattr(args, "run_id", ""),
+  )
 
 
 def _eos_token_ids(
@@ -1072,9 +1073,9 @@ def main(argv: list[str], context: Any = None) -> None:
             "service_port": args.port,
             "worker_id": args.worker_id,
             "trajectory_store_config": (
-                worker_service.trajectory_store.to_config()
-                if worker_service.trajectory_store is not None
-                else None
+                trajectory_store_lib.serialize_store_config(
+                    worker_service.trajectory_store
+                )
             ),
         },
         drain_fn=worker_service.sampler.stop,

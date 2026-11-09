@@ -114,6 +114,26 @@ class DbEngineTest(parameterized.TestCase):
           pool_size=10,
           max_overflow=5,
           pool_timeout=3.0,
+          connect_args={"connect_timeout": 5},
+      )
+
+  def test_create_trajectory_engine_postgresql_with_query_timeout_preserves_query_timeout(
+      self,
+  ) -> None:
+    url = "postgresql+psycopg2://user:pass@localhost:5432/testdb?connect_timeout=15"
+    with mock.patch.object(
+        db_engine.sa, "create_engine", autospec=True, spec_set=True
+    ) as mock_create:
+      db_engine.create_trajectory_engine(db_engine.EngineConfig(url=url))
+      mock_create.assert_called_once_with(
+          url,
+          echo=False,
+          json_serializer=db_engine._serialize_json,
+          pool_pre_ping=True,
+          pool_size=1,
+          max_overflow=1,
+          pool_timeout=10.0,
+          connect_args={},
       )
 
   def test_serialize_json_strips_null_byte_escapes(self) -> None:

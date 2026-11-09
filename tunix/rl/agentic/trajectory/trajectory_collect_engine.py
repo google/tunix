@@ -25,7 +25,7 @@ import copy
 import inspect
 import json
 import time
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from absl import logging
 import numpy as np
@@ -77,7 +77,11 @@ class TrajectoryCollectEngine:
       perf_v2: Optional[perf_tracer_v2.Tracer] = None,
       exact_token_continuity: bool = False,
       policy_version: Optional[int] = None,
-      trajectory_store: Optional[store_lib.TrajectoryWriter] = None,
+      trajectory_store: (
+          store_lib.TrajectoryWriter[Any]
+          | Sequence[store_lib.TrajectoryWriter[Any] | None]
+          | None
+      ) = None,
       metadata: Optional[trajectory_lib.TrajectoryMetadata] = None,
       store_routed_experts: bool = False,
   ):
@@ -99,8 +103,8 @@ class TrajectoryCollectEngine:
         timeout (float): Maximum episode duration in seconds before timeout
           termination. Model calls after the first turn are cut off, and no
           model call or env.step starts, once it is spent.
-        reset_timeout (Optional[float]): Deadline in seconds for `env.reset`;
-          if it passes, `collect()` raises `asyncio.TimeoutError` and closes the
+        reset_timeout (Optional[float]): Deadline in seconds for `env.reset`; if
+          it passes, `collect()` raises `asyncio.TimeoutError` and closes the
           env while `env.reset` may still run in its executor thread. Defaults
           to 3600.0; None means no deadline.
         final_reward_timeout (Optional[float]): Deadline in seconds for the
@@ -120,22 +124,25 @@ class TrajectoryCollectEngine:
           Requires a token-aware model_call, tokenizer, and parser.
         policy_version: Optional policy version integer to pass down for
           trajectory and performance tracing.
-        trajectory_store: Optional TrajectoryWriter to write trajectory steps
-          to.
+        trajectory_store: Optional TrajectoryWriter or sequence of
+          TrajectoryWriters (e.g. [file_store, sql_store], where None entries
+          are skipped) to write trajectory steps to.
         metadata: Optional TrajectoryMetadata for the current episode.
         store_routed_experts: Whether to persist captured prefill MoE
           routed_experts to `trajectory_store` on each agent step.
     """
     if not isinstance(store_routed_experts, bool):
       raise ValueError(
-          "store_routed_experts must be a bool, got"
-          f" {store_routed_experts!r}"
+          f"store_routed_experts must be a bool, got {store_routed_experts!r}"
       )
     self.agent = agent
     self.env = env
     self.model_call = model_call
     self.policy_version = policy_version
-    self.trajectory_store = trajectory_store
+    stores = list(store_lib.iter_stores(trajectory_store))
+    self.trajectory_store: list[store_lib.TrajectoryWriter[Any]] | None = (
+        stores if stores else None
+    )
     self.metadata = metadata
     self.store_routed_experts = store_routed_experts
     self.model_call_kwargs = model_call_kwargs or {}
@@ -311,9 +318,9 @@ class TrajectoryCollectEngine:
 
     Args:
       include_timings: Whether to sync `env_time` and `reward_time`.
-      include_final_metrics: Whether to compute and set the ATIF
-        `final_metrics` rollup. Only enabled at episode end so per-step syncs
-        keep metadata unchanged and do not trigger metadata rewrites.
+      include_final_metrics: Whether to compute and set the ATIF `final_metrics`
+        rollup. Only enabled at episode end so per-step syncs keep metadata
+        unchanged and do not trigger metadata rewrites.
     """
     if self.trajectory_store is None or self.metadata is None:
       return
@@ -338,13 +345,43 @@ class TrajectoryCollectEngine:
           exc_info=True,
       )
 
+  def _store_add_step(self, step: Any) -> None:
+    """Writes a step to each configured trajectory store, isolating failures."""
+    if self.trajectory_store is None or self.metadata is None:
+      return
+    for store in store_lib.iter_stores(self.trajectory_store):
+      try:
+        store.add_step(step, self.metadata)
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "%s Failed to record step in %s.",
+            self._debug_prefix,
+            type(store).__name__,
+            exc_info=True,
+        )
+
+  def _store_update_metadata(self) -> None:
+    """Updates trajectory metadata in each configured store, isolating failures."""
+    if self.trajectory_store is None or self.metadata is None:
+      return
+    for store in store_lib.iter_stores(self.trajectory_store):
+      try:
+        store.update_metadata(self.metadata)
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "%s Failed to update trajectory metadata in %s.",
+            self._debug_prefix,
+            type(store).__name__,
+            exc_info=True,
+        )
+
   def record_metadata(self) -> None:
     """Syncs and updates trajectory metadata in trajectory_store."""
     if self.trajectory_store is None or self.metadata is None:
       return
     try:
       self._sync_trajectory_metadata(include_final_metrics=True)
-      self.trajectory_store.update_metadata(self.metadata)
+      self._store_update_metadata()
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(
           "%s Failed to update trajectory metadata in store.",
@@ -394,7 +431,7 @@ class TrajectoryCollectEngine:
       prompt_token_ids = self._prompt_token_ids()
       if prompt_token_ids is not None:
         task_step.env_tokens = prompt_token_ids
-      self.trajectory_store.add_step(task_step, self.metadata)
+      self._store_add_step(task_step)
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(
           "%s Failed to record task step in trajectory store.",
@@ -431,7 +468,7 @@ class TrajectoryCollectEngine:
       )
       if agent_step is not None:
         self._sync_trajectory_metadata(include_timings=False)
-        self.trajectory_store.add_step(agent_step, self.metadata)
+        self._store_add_step(agent_step)
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(
           "%s Failed to record agent step in trajectory store.",
@@ -451,7 +488,7 @@ class TrajectoryCollectEngine:
           step, tunix_step_id=self.agent.trajectory.step_idx
       )
       if env_step is not None:
-        self.trajectory_store.add_step(env_step, self.metadata)
+        self._store_add_step(env_step)
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(
           "%s Failed to record env step in trajectory store.",
@@ -1000,9 +1037,7 @@ class TrajectoryCollectEngine:
     model_call_fn = self.model_call
     is_async = inspect.iscoroutinefunction(model_call_fn) or (
         hasattr(model_call_fn, "__call__")
-        and inspect.iscoroutinefunction(
-            getattr(model_call_fn, "__call__")
-        )
+        and inspect.iscoroutinefunction(getattr(model_call_fn, "__call__"))
     )
     if self._cumulative_prompt_tokens > 0:
       call_kwargs["routed_experts_prompt_start"] = (

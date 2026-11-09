@@ -122,9 +122,7 @@ class RunRolloutNodeTest(absltest.TestCase):
 
     self.assertEqual(overrides["architectures"], ["Gemma4ForCausalLM"])
     self.assertEqual(overrides["final_logit_softcapping"], 30.0)
-    self.assertEqual(
-        overrides["text_config"]["final_logit_softcapping"], 30.0
-    )
+    self.assertEqual(overrides["text_config"]["final_logit_softcapping"], 30.0)
 
   def test_qwen_does_not_get_gemma4_overrides(self):
     args = run_rollout_node._parse_args(["--model_id=Qwen/Qwen3-8B"])
@@ -741,6 +739,66 @@ class RunRolloutNodeTest(absltest.TestCase):
       self.assertIsNone(registered_callbacks[-1])
       mock_server.stop_serving.assert_awaited_once_with(grace=5.0)
       self.assertEqual(shutdown_order, ["worker_service.stop", "sampler.stop"])
+
+  def test_trajectory_store_config_with_dir_and_db_url_returns_dual_config_list(
+      self,
+  ):
+    args = run_rollout_node._parse_args([
+        "--enable_trajectory_store=true",
+        "--trajectory_store_dir=/tmp/trajectories",
+        "--trajectory_store_db_url=postgresql+psycopg2://user:pass@localhost/db",
+        "--run_id=test_run",
+    ])
+    cfg = run_rollout_node._trajectory_store_config(args)
+    self.assertEqual(
+        cfg,
+        [
+            {
+                "backend": "file",
+                "root_dir": "/tmp/trajectories",
+                "run_id": "test_run",
+            },
+            {
+                "backend": "sql",
+                "db_url": "postgresql+psycopg2://user:pass@localhost/db",
+                "run_id": "test_run",
+            },
+        ],
+    )
+
+  def test_trajectory_store_config_with_sql_backend_ignores_default_dir_and_returns_sql_config(
+      self,
+  ):
+    args = run_rollout_node._parse_args([
+        "--enable_trajectory_store=true",
+        "--trajectory_store_backend=sql",
+        "--trajectory_store_dir=/tmp/default",
+        "--trajectory_store_db_url=postgresql://localhost/db",
+    ])
+    self.assertEqual(
+        run_rollout_node._trajectory_store_config(args),
+        {"backend": "sql", "db_url": "postgresql://localhost/db"},
+    )
+
+  def test_trajectory_store_config_with_memory_backend_ignores_default_dir_and_returns_memory_config(
+      self,
+  ):
+    args = run_rollout_node._parse_args([
+        "--enable_trajectory_store=true",
+        "--trajectory_store_backend=memory",
+        "--trajectory_store_dir=/tmp/default",
+    ])
+    self.assertEqual(
+        run_rollout_node._trajectory_store_config(args),
+        {"backend": "memory"},
+    )
+
+  def test_trajectory_store_config_disabled_returns_none(self):
+    args = run_rollout_node._parse_args([
+        "--enable_trajectory_store=false",
+        "--trajectory_store_dir=/tmp/trajectories",
+    ])
+    self.assertIsNone(run_rollout_node._trajectory_store_config(args))
 
 
 if __name__ == "__main__":

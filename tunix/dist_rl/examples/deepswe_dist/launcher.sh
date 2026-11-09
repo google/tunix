@@ -93,6 +93,16 @@ RUN_ID=${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_$$}
 TRAJECTORY_STORE_ENABLED=${TRAJECTORY_STORE_ENABLED:-false}
 TRAJECTORY_STORE_BACKEND=${TRAJECTORY_STORE_BACKEND:-file}
 TRAJECTORY_STORE_DIR=${TRAJECTORY_STORE_DIR:-"${LOG_DIR:-${LOG_ROOT}}/trajectory_store"}
+USE_DEFAULT_SQL_STORE=${USE_DEFAULT_SQL_STORE:-false}
+TRAJECTORY_STORE_DB_URL=${TRAJECTORY_STORE_DB_URL:-}
+if [[ "${DRY_RUN:-false}" != "true" && -z "${TRAJECTORY_STORE_DB_URL}" && "${USE_DEFAULT_SQL_STORE}" =~ ^(1|true|True|TRUE)$ ]]; then
+  if [[ -n "${PROJECT:-}" ]]; then
+    TRAJECTORY_STORE_DB_URL="$(timeout 10s gcloud secrets versions access latest --secret=tunix-sql-store-uri --project="${PROJECT}" --quiet 2>/dev/null || true)"
+  fi
+  if [[ -z "${TRAJECTORY_STORE_DB_URL}" ]]; then
+    echo "WARNING: USE_DEFAULT_SQL_STORE is enabled, and TRAJECTORY_STORE_DB_URL could not be resolved from GCP Secret Manager for project '${PROJECT:-}'. Skipping SQL store." >&2
+  fi
+fi
 FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
 
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
@@ -342,6 +352,12 @@ echo "Launching DeepSWE rollout node..."
     --trajectory_store_dir="$TRAJECTORY_STORE_DIR"
     --run_id="$RUN_ID"
   )
+  if [[ -n "$TRAJECTORY_STORE_DB_URL" ]]; then
+    ORCHESTRATOR_CMD+=(--trajectory_store_db_url="$TRAJECTORY_STORE_DB_URL")
+  fi
+  if [[ -n "$TRAJECTORY_STORE_DB_URL" ]]; then
+    ROLLOUT_CMD+=(--trajectory_store_db_url="$TRAJECTORY_STORE_DB_URL")
+  fi
   export JAX_PLATFORMS=tpu,cpu
   export SKIP_JAX_PRECOMPILE=1
   export TPU_VISIBLE_DEVICES=${ROLLOUT_TPU_CHIPS}
@@ -405,6 +421,9 @@ echo "Launching CPU orchestrator..."
     --trajectory_store_dir="$TRAJECTORY_STORE_DIR"
     --run_id="$RUN_ID"
   )
+  if [[ -n "$TRAJECTORY_STORE_DB_URL" ]]; then
+    ORCHESTRATOR_CMD+=(--trajectory_store_db_url="$TRAJECTORY_STORE_DB_URL")
+  fi
   if [[ -n "$DATASET_PATH" ]]; then
     ORCHESTRATOR_CMD+=(--dataset_path="$DATASET_PATH")
   fi

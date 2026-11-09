@@ -41,6 +41,7 @@ from tunix.dist_rl.orchestrator import health_monitor
 from tunix.dist_rl.orchestrator import orchestrator as cluster_orchestrator
 from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.orchestrator import worker_registry
+from tunix.dist_rl.trajectory import store as trajectory_store_lib
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
 from tunix.dist_rl.worker import remote_execution
 from tunix.rl import reward_manager
@@ -232,8 +233,7 @@ def _close_keeping_workers(
   """Releases a test cluster without sending `stop` to its fake workers."""
   cluster.registry.close()
   cluster.monitor.close()
-  if cluster.trajectory_store is not None:
-    cluster.trajectory_store.close()
+  trajectory_store_lib.close_stores(cluster.trajectory_store)
 
 
 class BuildersTest(absltest.TestCase):
@@ -1194,12 +1194,12 @@ rl_training_config:
             ),
             mock.patch.object(otel_setup, "setup_metrics", return_value=False),
         ):
-          if store is not None:
+          for s in trajectory_store_lib.iter_stores(store):
             stack.enter_context(
                 mock.patch.object(
-                    store,
+                    s,
                     "close",
-                    side_effect=lambda rc=store.close, calls=cluster.calls: (
+                    side_effect=lambda rc=s.close, calls=cluster.calls: (
                         calls.append("trajectory_store.close"),
                         rc(),
                     ),
@@ -1295,12 +1295,12 @@ rl_training_config:
               ),
               self.assertRaises(expected_error),
           ):
-            if store is not None:
+            for s in trajectory_store_lib.iter_stores(store):
               stack.enter_context(
                   mock.patch.object(
-                      store,
+                      s,
                       "close",
-                      side_effect=lambda rc=store.close, calls=cluster.calls: (
+                      side_effect=lambda rc=s.close, calls=cluster.calls: (
                           calls.append("trajectory_store.close"),
                           rc(),
                       ),
@@ -1329,9 +1329,7 @@ rl_training_config:
     sha = resolve_config.config_fingerprint(resolve_config.initialize(argv))
     prev_sigint = signal.getsignal(signal.SIGINT)
     prev_sigterm = signal.getsignal(signal.SIGTERM)
-    cluster = _FakeCluster(
-        on_run=lambda: signal.raise_signal(signal.SIGTERM)
-    )
+    cluster = _FakeCluster(on_run=lambda: signal.raise_signal(signal.SIGTERM))
     with (
         mock.patch.object(
             node_utils,

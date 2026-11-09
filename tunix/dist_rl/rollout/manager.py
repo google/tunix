@@ -56,7 +56,11 @@ class RolloutManager:
       config: Optional[base_rollout.RolloutConfig] = None,
       max_concurrency: int = 64,
       drain_timeout_s: float = timeouts_lib.DEFAULT_DRAIN_TIMEOUT_S,
-      trajectory_store: Optional[store.TrajectoryWriter] = None,
+      trajectory_store: (
+          store.TrajectoryWriter[Any]
+          | Sequence[store.TrajectoryWriter[Any] | None]
+          | None
+      ) = None,
   ):
     """Initializes the RolloutManager.
 
@@ -76,8 +80,9 @@ class RolloutManager:
         `partial_rollout` is False. Waits up to `drain_timeout_s` for in-flight
         trajectories to finish naturally before `pause_all()` pauses remaining
         stragglers.
-      trajectory_store: Optional TrajectoryWriter for persisting rollout steps
-        and episode metadata.
+      trajectory_store: Optional TrajectoryWriter or sequence of
+        TrajectoryWriters (e.g. [file_store, sql_store], where None entries are
+        skipped) for persisting rollout steps and episode metadata.
     """
     self._drain_timeout_s = timeouts_lib.validate_positive_finite(
         drain_timeout_s, "drain_timeout_s"

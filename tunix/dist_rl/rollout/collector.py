@@ -91,7 +91,11 @@ class TrajectoryCollectorEngine:
       eos_ids: Collection[int] | None = None,
       partial_rollout: bool = False,
       policy_version_fn: Callable[[], int] | None = None,
-      trajectory_store: Optional[store.TrajectoryWriter] = None,
+      trajectory_store: (
+          store.TrajectoryWriter[Any]
+          | Sequence[store.TrajectoryWriter[Any] | None]
+          | None
+      ) = None,
       store_routed_experts: bool = False,
       routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = "auto",
       routed_experts_num_experts: int | None = None,
@@ -118,7 +122,10 @@ class TrajectoryCollectorEngine:
     self.agent = agent
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
-    self.trajectory_store = trajectory_store
+    stores = list(store.iter_stores(trajectory_store))
+    self.trajectory_store: list[store.TrajectoryWriter[Any]] | None = (
+        stores if stores else None
+    )
     self.store_routed_experts: bool = bool(store_routed_experts)
     self.routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = (
         routed_experts_encode_mode

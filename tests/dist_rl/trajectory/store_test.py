@@ -16,9 +16,11 @@
 
 import tempfile
 from typing import Generic, TypeVar
+from unittest import mock
 
 from absl.testing import absltest
 from etils import epath
+import sqlalchemy as sa
 from tunix.dist_rl.trajectory import file_store
 from tunix.dist_rl.trajectory import in_memory_store
 from tunix.dist_rl.trajectory import sql_store
@@ -230,6 +232,131 @@ class FromConfigTest(absltest.TestCase):
           )
       )
     store.close()
+
+  def test_from_config_sequence_with_none_returns_non_none_stores(self):
+    config = [self._file_config(), self._sql_config(), None]
+    stores = store_lib.TrajectoryStore.from_config(config)
+    self.assertIsInstance(stores, list)
+    self.assertLen(stores, 2)
+    self.assertIsInstance(stores[0], file_store.FileTrajectoryStore)
+    self.assertIsInstance(stores[1], sql_store.SqlTrajectoryStore)
+    store_lib.close_stores(stores)
+
+  def test_from_config_sequence_all_none_returns_none(self):
+    self.assertIsNone(store_lib.TrajectoryStore.from_config([None, None]))
+
+  def test_tunix_trajectory_store_from_config_sequence_binds_tunix_metadata(
+      self,
+  ):
+    config = [self._file_config(), self._sql_config()]
+    stores = store_lib.TunixTrajectoryStore.from_config(config)
+    self.assertIsInstance(stores, list)
+    self.assertLen(stores, 2)
+    self.assertIs(
+        stores[0].bound_metadata_cls, trajectory_lib.TunixTrajectoryMetadata
+    )
+    self.assertIs(
+        stores[1].bound_metadata_cls, trajectory_lib.TunixTrajectoryMetadata
+    )
+    store_lib.close_stores(stores)
+
+  def test_from_config_sql_operational_error_returns_none_and_keeps_healthy_store(
+      self,
+  ):
+    sql_config = {
+        "backend": "sql",
+        "db_url": "postgresql+psycopg2://user:pass@127.0.0.1:5432/db",
+        "run_id": "run_1",
+    }
+    with mock.patch.object(
+        sql_store.SqlTrajectoryStore,
+        "_from_config",
+        side_effect=sa.exc.OperationalError("connect", None, Exception("down")),
+    ):
+      single_store = store_lib.TrajectoryStore.from_config(sql_config)
+      self.assertIsNone(single_store)
+
+      stores = store_lib.TrajectoryStore.from_config(
+          [self._file_config(), sql_config]
+      )
+      self.assertIsInstance(stores, list)
+      self.assertLen(stores, 1)
+      self.assertIsInstance(stores[0], file_store.FileTrajectoryStore)
+      store_lib.close_stores(stores)
+
+  def test_from_config_sql_missing_driver_import_error_skips_store(self):
+    sql_config = {
+        "backend": "sql",
+        "db_url": "postgresql+psycopg2://user:pass@127.0.0.1:5432/db",
+        "run_id": "run_1",
+    }
+    with mock.patch.object(
+        sql_store.SqlTrajectoryStore,
+        "_from_config",
+        side_effect=ModuleNotFoundError("No module named 'psycopg2'"),
+    ):
+      stores = store_lib.TrajectoryStore.from_config(
+          [self._file_config(), sql_config]
+      )
+      self.assertIsInstance(stores, list)
+      self.assertLen(stores, 1)
+      self.assertIsInstance(stores[0], file_store.FileTrajectoryStore)
+      store_lib.close_stores(stores)
+
+  def test_from_config_sequence_with_invalid_config_closes_already_built_stores_and_raises(
+      self,
+  ):
+    invalid_seq = [self._file_config(), {"backend": "unknown_backend"}]
+    with mock.patch.object(
+        file_store.FileTrajectoryStore,
+        "close",
+        autospec=True,
+        wraps=file_store.FileTrajectoryStore.close,
+    ) as mock_close:
+      with self.assertRaisesRegex(
+          ValueError, "Unknown Trajectory Store backend"
+      ):
+        store_lib.TrajectoryStore.from_config(invalid_seq)
+      mock_close.assert_called_once()
+
+  def test_iter_stores_with_sequence_and_none_returns_non_none_tuple(self):
+    store_a = in_memory_store.InMemoryTrajectoryStore()
+    store_b = in_memory_store.InMemoryTrajectoryStore()
+    self.assertEqual(store_lib.iter_stores(None), ())
+    self.assertEqual(store_lib.iter_stores(store_a), (store_a,))
+    self.assertEqual(
+        store_lib.iter_stores([store_a, None, store_b]), (store_a, store_b)
+    )
+
+  def test_close_stores_when_one_store_raises_closes_remaining_stores(self):
+    store_a = mock.MagicMock(spec=store_lib.TrajectoryStore)
+    store_a.close.side_effect = RuntimeError("failed to close a")
+    store_b = mock.MagicMock(spec=store_lib.TrajectoryStore)
+
+    with self.assertRaises(RuntimeError):
+      store_lib.close_stores([store_a, store_b])
+
+    store_a.close.assert_called_once()
+    store_b.close.assert_called_once()
+
+  def test_serialize_store_config_with_single_and_sequence_returns_serialized_configs(
+      self,
+  ):
+    self.assertIsNone(store_lib.serialize_store_config(None))
+
+    file_s = store_lib.TrajectoryStore.from_config(self._file_config())
+    cfg = store_lib.serialize_store_config(file_s)
+    self.assertIsInstance(cfg, dict)
+    self.assertEqual(cfg["backend"], "file")
+    file_s.close()
+
+    mem_s1 = in_memory_store.InMemoryTrajectoryStore()
+    mem_s2 = in_memory_store.InMemoryTrajectoryStore()
+    cfgs = store_lib.serialize_store_config([mem_s1, None, mem_s2])
+    self.assertIsInstance(cfgs, list)
+    self.assertLen(cfgs, 2)
+    self.assertEqual(cfgs[0]["backend"], "memory")
+    self.assertEqual(cfgs[1]["backend"], "memory")
 
   def test_bound_metadata_cls_property_reports_bound_metadata_class(self):
     file_s = store_lib.TunixTrajectoryStore.from_config(self._file_config())
@@ -664,6 +791,70 @@ class ExceptionsTest(absltest.TestCase):
     err = store_lib.TrajectoryMetricsNotFoundError("t_789")
     self.assertEqual(err.trajectory_id, "t_789")
     self.assertIn("t_789", str(err))
+
+
+class ConfigFromFlagsTest(absltest.TestCase):
+
+  def test_config_from_flags_with_dual_and_single_backends_returns_expected_configs(
+      self,
+  ) -> None:
+    # Given disabled flag, when calling config_from_flags, then returns None.
+    self.assertIsNone(store_lib.config_from_flags(enabled=False))
+
+    # Given dual backend flags (file + sql), when calling config_from_flags,
+    # then returns list of both.
+    dual = store_lib.config_from_flags(
+        enabled=True,
+        backend="file",
+        root_dir="/tmp/t",
+        db_url="sqlite:///t.db",
+        run_id="run_123",
+    )
+    self.assertEqual(
+        dual,
+        [
+            {"backend": "file", "root_dir": "/tmp/t", "run_id": "run_123"},
+            {"backend": "sql", "db_url": "sqlite:///t.db", "run_id": "run_123"},
+        ],
+    )
+
+    # Given explicit sql backend, when calling config_from_flags,
+    # then returns single sql dict.
+    sql_cfg = store_lib.config_from_flags(
+        enabled=True,
+        backend="sql",
+        db_url="sqlite:///t.db",
+        run_id="run_123",
+    )
+    self.assertEqual(
+        sql_cfg,
+        {"backend": "sql", "db_url": "sqlite:///t.db", "run_id": "run_123"},
+    )
+
+    # Given memory backend, when calling config_from_flags,
+    # then returns single memory dict.
+    mem_cfg = store_lib.config_from_flags(
+        enabled=True,
+        backend="memory",
+        run_id="run_123",
+    )
+    self.assertEqual(
+        mem_cfg,
+        {"backend": "memory", "run_id": "run_123"},
+    )
+
+    # Given single file backend, when calling config_from_flags,
+    # then returns single file dict.
+    file_cfg = store_lib.config_from_flags(
+        enabled=True,
+        backend="file",
+        root_dir="/tmp/t",
+        run_id="run_123",
+    )
+    self.assertEqual(
+        file_cfg,
+        {"backend": "file", "root_dir": "/tmp/t", "run_id": "run_123"},
+    )
 
 
 if __name__ == "__main__":

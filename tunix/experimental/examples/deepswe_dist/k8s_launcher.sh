@@ -181,6 +181,17 @@ export RUN_ID=${RUN_ID:-${JOB_PREFIX}}
 export TRAJECTORY_STORE_ENABLED=${TRAJECTORY_STORE_ENABLED:-false}
 export TRAJECTORY_STORE_BACKEND=${TRAJECTORY_STORE_BACKEND:-file}
 export TRAJECTORY_STORE_DIR=${TRAJECTORY_STORE_DIR:-${TRAJECTORY_STORE_ROOT_DIR:-"${LOG_DIR:-artifacts/deepswe_dist}/trajectory_store"}}
+export USE_DEFAULT_SQL_STORE=${USE_DEFAULT_SQL_STORE:-false}
+export TRAJECTORY_STORE_DB_URL=${TRAJECTORY_STORE_DB_URL:-}
+if [[ "${DRY_RUN:-false}" != "true" && -z "${TRAJECTORY_STORE_DB_URL}" && "${USE_DEFAULT_SQL_STORE}" =~ ^(1|true|True|TRUE)$ ]]; then
+  if [[ -n "${PROJECT:-}" ]]; then
+    TRAJECTORY_STORE_DB_URL="$(timeout 10s gcloud secrets versions access latest --secret=tunix-sql-store-uri --project="${PROJECT}" --quiet 2>/dev/null || true)"
+  fi
+  if [[ -z "${TRAJECTORY_STORE_DB_URL}" ]]; then
+    echo "WARNING: USE_DEFAULT_SQL_STORE is enabled, and TRAJECTORY_STORE_DB_URL could not be resolved from GCP Secret Manager for project '${PROJECT:-}'. Skipping SQL store." >&2
+  fi
+fi
+export TRAJECTORY_STORE_DB_URL
 
 export ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-${JOB_PREFIX}-orch}
 export ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-20000}
@@ -473,6 +484,7 @@ start_orchestrator() {
         --enable_trajectory_store=${TRAJECTORY_STORE_ENABLED} \
         --trajectory_store_backend=${TRAJECTORY_STORE_BACKEND} \
         --trajectory_store_dir=\"${TRAJECTORY_STORE_DIR}\" \
+        ${TRAJECTORY_STORE_DB_URL:+--trajectory_store_db_url=\"${TRAJECTORY_STORE_DB_URL}\"} \
         --run_id=\"${RUN_ID}\" \
         ${MAX_WARMPOOL_REPLICAS:+--max_warmpool_replicas=${MAX_WARMPOOL_REPLICAS}} \
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \
@@ -819,6 +831,7 @@ start_rollout() {
           --enable_trajectory_store=${TRAJECTORY_STORE_ENABLED} \
           --trajectory_store_backend=${TRAJECTORY_STORE_BACKEND} \
           --trajectory_store_dir=\"${TRAJECTORY_STORE_DIR}\" \
+          ${TRAJECTORY_STORE_DB_URL:+--trajectory_store_db_url=\"${TRAJECTORY_STORE_DB_URL}\"} \
           --run_id=\"${RUN_ID}\" \
           ${lora_args} \
           ${maxtext_args} \

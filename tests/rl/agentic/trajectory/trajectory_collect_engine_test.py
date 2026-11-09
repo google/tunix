@@ -2082,6 +2082,64 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         agent_types.TrajectoryStatus.SUCCEEDED,
     )
 
+  def test_collect_with_trajectory_store_list_writes_to_all_non_none_stores(
+      self,
+  ):
+    store1 = in_memory_store.InMemoryTrajectoryStore()
+    store2 = in_memory_store.InMemoryTrajectoryStore()
+    metadata = converter_lib.create_trajectory_metadata(
+        traj_id='traj_multi_store_123',
+    )
+    self.mock_agent.trajectory.task = {'prompts': ['Solve math']}
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        trajectory_store=[store1, None, store2],
+        metadata=metadata,
+        policy_version=42,
+    )
+    traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    self.assertEqual(traj.status, agent_types.TrajectoryStatus.SUCCEEDED)
+
+    for store in (store1, store2):
+      trajs = store.get_trajectories(['traj_multi_store_123'])
+      self.assertLen(trajs, 1)
+      self.assertGreaterEqual(len(trajs[0].steps), 3)
+      metas = store.get_trajectories_metadata()
+      self.assertLen(metas, 1)
+      self.assertEqual(metas[0].status, 'SUCCEEDED')
+      self.assertEqual(metas[0].target_policy_versions, [42])
+
+  def test_collect_when_one_store_raises_writes_to_healthy_store(
+      self,
+  ):
+    failing_store = mock.MagicMock(spec=in_memory_store.InMemoryTrajectoryStore)
+    failing_store.add_step.side_effect = RuntimeError('writer closed')
+    failing_store.update_metadata.side_effect = RuntimeError('writer closed')
+    healthy_store = in_memory_store.InMemoryTrajectoryStore()
+    metadata = converter_lib.create_trajectory_metadata(
+        traj_id='traj_isolated_123',
+    )
+    self.mock_agent.trajectory.task = {'prompts': ['Solve math']}
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        trajectory_store=[failing_store, healthy_store],
+        metadata=metadata,
+        policy_version=42,
+    )
+    traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    self.assertEqual(traj.status, agent_types.TrajectoryStatus.SUCCEEDED)
+
+    trajs = healthy_store.get_trajectories(['traj_isolated_123'])
+    self.assertLen(trajs, 1)
+    self.assertGreaterEqual(len(trajs[0].steps), 3)
+    metas = healthy_store.get_trajectories_metadata()
+    self.assertLen(metas, 1)
+    self.assertEqual(metas[0].status, 'SUCCEEDED')
+
   def test_base_task_env_final_reward_fn_init_and_late_binding(self):
     grader = mock.Mock(return_value=0.6)
 

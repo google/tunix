@@ -51,7 +51,9 @@ class RolloutConfig(base_rollout.RolloutConfig):
       `partial_rollout` is False before remaining stragglers are paused.
   """
 
-  trajectory_store_config: Mapping[str, Any] | None = None
+  trajectory_store_config: (
+      Mapping[str, Any] | Sequence[Mapping[str, Any] | None] | None
+  ) = None
   drain_timeout_s: float = timeouts.DEFAULT_DRAIN_TIMEOUT_S
 
   def __post_init__(self) -> None:
@@ -131,14 +133,15 @@ class RolloutWorker(abstract_worker.Worker):
         )
     )
     if self._trajectory_store is not None:
-      # Several workers can share one log stream, and absl log lines carry no
-      # process identity, so the worker_id is what attributes a reported
-      # config to a process.
-      logging.info(
-          "[trajectory-store] worker %s built %s",
-          worker_id,
-          self._trajectory_store.to_redacted_config(),
-      )
+      for store in trajectory_store_lib.iter_stores(self._trajectory_store):
+        # Several workers can share one log stream, and absl log lines carry no
+        # process identity, so the worker_id is what attributes a reported
+        # config to a process.
+        logging.info(
+            "[trajectory-store] worker %s built %s",
+            worker_id,
+            store.to_redacted_config(),
+        )
     drain_timeout_s = (
         config.drain_timeout_s
         if config is not None
@@ -161,7 +164,11 @@ class RolloutWorker(abstract_worker.Worker):
   @property
   def trajectory_store(
       self,
-  ) -> trajectory_store_lib.TunixTrajectoryStore | None:
+  ) -> (
+      trajectory_store_lib.TunixTrajectoryStore
+      | list[trajectory_store_lib.TunixTrajectoryStore]
+      | None
+  ):
     return self._trajectory_store
 
   @property
@@ -180,9 +187,9 @@ class RolloutWorker(abstract_worker.Worker):
             "sampler": type(self.sampler).__name__,
             "policy_version": self._policy_version,
             "trajectory_store_config": (
-                self._trajectory_store.to_config()
-                if self._trajectory_store is not None
-                else None
+                trajectory_store_lib.serialize_store_config(
+                    self._trajectory_store
+                )
             ),
             "drain_timeout_s": self.manager.drain_timeout_s,
             "partial_rollout": self.manager.partial_rollout,
@@ -205,10 +212,8 @@ class RolloutWorker(abstract_worker.Worker):
 
   def initialize(self) -> datatypes.Response:
     with self._init_lock:
-      trajectory_store_config = (
-          self._trajectory_store.to_config()
-          if self._trajectory_store is not None
-          else None
+      trajectory_store_config = trajectory_store_lib.serialize_store_config(
+          self._trajectory_store
       )
       if self.state == WorkerState.READY:
         return self._response(
@@ -289,7 +294,10 @@ class RolloutWorker(abstract_worker.Worker):
           # and waits for the cache syncer instead of leaking them.
           stack.callback(self._jax_cache_syncer.wait)
           if self._trajectory_store is not None:
-            stack.callback(self._trajectory_store.close)
+            for store in trajectory_store_lib.iter_stores(
+                self._trajectory_store
+            ):
+              stack.callback(store.close)
           self.manager.cancel_all()
       except Exception as exc:
         self._stop_error = str(exc)
@@ -371,7 +379,10 @@ class RolloutWorker(abstract_worker.Worker):
       return item
     if isinstance(item, datatypes.TrajectoryItem):
       req_id = request_id or getattr(item, "traj_id", "")
-      if prompt_tokens is not None and getattr(item, "prompt_tokens", None) is None:
+      if (
+          prompt_tokens is not None
+          and getattr(item, "prompt_tokens", None) is None
+      ):
         item.metadata["prompt_tokens"] = prompt_tokens
       exec_time_s = (
           item.traj.get("execution_time_s")
