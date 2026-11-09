@@ -146,6 +146,7 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       engine: sa.Engine,
       max_cached_trajectories: int = _MAX_CACHED_TRAJECTORIES,
       batching: async_writer.BatchConfig | None = None,
+      copy_step: bool = False,
   ):
     """Initializes _AsyncSqlWriter without starting the background worker.
 
@@ -156,12 +157,14 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
         upserts. Set to 0 to disable client-side trajectory metadata caching.
       batching: Optional BatchConfig governing how queued tasks are grouped into
         multi-row SQL transactions.
+      copy_step: If True, deep copies step objects before enqueuing. Defaults to
+        False (zero-copy step handover) to avoid synchronous GIL contention.
 
     Raises:
       ValueError: If the engine uses an unsupported database dialect, or if
         max_cached_trajectories is negative.
     """
-    super().__init__(batching=batching)
+    super().__init__(batching=batching, copy_step=copy_step)
     if max_cached_trajectories < 0:
       raise ValueError("max_cached_trajectories must be non-negative.")
     # Synchronous SQLAlchemy engine providing database connectivity and dialect.
@@ -199,8 +202,9 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
 
     Identifiers are validated on the calling thread so malformed writes fail
     fast with actionable errors instead of surfacing later as suppressed worker
-    errors. They are persisted exactly as supplied. `metadata` and `step` are
-    deep copied by `WriteTask`.
+    errors. They are persisted exactly as supplied. `metadata` is always deep
+    copied by `WriteTask`; `step` is handed over with zero copy by default and
+    deep copied only when `copy_step` is True.
 
     Args:
       run_id: Run identifier associated with written trajectory and steps.
@@ -218,7 +222,11 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       raise ValueError("Step must have a non-empty step_id.")
 
     self._enqueue(
-        async_writer.WriteTask(run_id=run_id, metadata=metadata, step=step)
+        async_writer.WriteTask(
+            run_id=run_id,
+            metadata=metadata,
+            step=step,
+        )
     )
 
   def enqueue_metrics_write(
@@ -695,6 +703,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       db_url: str,
       auto_init: bool = True,
       batching: async_writer.BatchConfig | None = None,
+      copy_step: bool = False,
   ) -> None:
     """Initializes SqlTrajectoryStore.
 
@@ -711,6 +720,9 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
         startup via `_initialize_schema`.
       batching: Optional BatchConfig governing how queued tasks are grouped into
         multi-row SQL transactions.
+      copy_step: If True, deep copies step objects before enqueuing to database.
+        Defaults to False (zero-copy step handover) to avoid synchronous GIL
+        contention on rollout workers.
 
     Raises:
       ValueError: If `run_id` or `db_url` is empty, None, or whitespace, or if
@@ -724,7 +736,9 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     )
     self._engine = self._engine_handle.engine
     try:
-      self._writer = _AsyncSqlWriter(engine=self._engine, batching=batching)
+      self._writer = _AsyncSqlWriter(
+          engine=self._engine, batching=batching, copy_step=copy_step
+      )
     except Exception:
       self._engine_handle.release()
       raise
@@ -750,7 +764,8 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     """Builds a SQL-backed store from `config`.
 
     Args:
-      config: Requires "db_url" and "run_id".
+      config: Requires "db_url" and "run_id", with optional boolean "copy_step"
+        (defaults to False).
 
     Returns:
       A new SqlTrajectoryStore.
@@ -761,6 +776,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     return cls(
         run_id=config.get("run_id", ""),
         db_url=config.get("db_url", ""),
+        copy_step=bool(config.get("copy_step", False)),
     )
 
   def to_config(self) -> dict[str, Any]:
@@ -768,13 +784,20 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
 
     The returned "db_url" is the literal URL this store was built with,
     including any password it embeds. Do not log it; log
-    `to_redacted_config()` instead.
+    `to_redacted_config()` instead. Writer-local flags such as `auto_init` and
+    `copy_step` are omitted so `to_config()` strictly represents shared storage
+    identity across processes.
     """
     return {
         "backend": self.BACKEND,
         "db_url": self._db_url,
         "run_id": self._run_id,
     }
+
+  @property
+  def copy_step(self) -> bool:
+    """Returns True if step objects are deep copied before writing."""
+    return self._writer.copy_step
 
   def to_redacted_config(self) -> dict[str, Any]:
     """Returns `to_config()` with any password in "db_url" masked."""
@@ -850,6 +873,11 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     with actionable errors, then delegates asynchronous queuing and non-blocking
     database persistence to `_AsyncSqlWriter`.
 
+    `metadata` is always snapshotted at call time. By default
+    (`copy_step=False`), ownership of `step` transfers to the background writer,
+    so callers must not mutate `step` or its nested containers after calling
+    `add_step()`. Pass `copy_step=True` if the caller mutates `step` afterwards.
+
     Args:
       step: Step object to log.
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
@@ -874,6 +902,9 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     Validates input parameters on the calling thread so invalid IDs fail fast
     with actionable errors, then delegates asynchronous queuing and non-blocking
     database persistence to `_AsyncSqlWriter`.
+
+    `metadata` is always snapshotted at call time, so callers may keep mutating
+    it afterwards without affecting what was logged.
 
     Args:
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.

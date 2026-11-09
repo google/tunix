@@ -109,11 +109,56 @@ class DbEngineTest(parameterized.TestCase):
       mock_create.assert_called_once_with(
           url,
           echo=False,
+          json_serializer=db_engine._serialize_json,
           pool_pre_ping=True,
           pool_size=10,
           max_overflow=5,
           pool_timeout=3.0,
       )
+
+  def test_serialize_json_strips_null_byte_escapes(self) -> None:
+    engine = db_engine.create_trajectory_engine(
+        db_engine.EngineConfig(url="sqlite:///:memory:")
+    )
+    self.addCleanup(engine.dispose)
+    metadata = sa.MetaData()
+    items = sa.Table(
+        "items",
+        metadata,
+        sa.Column("item_id", sa.String, primary_key=True),
+        sa.Column("payload", sa.JSON(), nullable=False),
+    )
+    metadata.create_all(engine)
+
+    with engine.begin() as conn:
+      conn.execute(
+          items.insert(),
+          {
+              "item_id": "row1",
+              "payload": {
+                  "stdout": "+ \x01\x00\x00\x00Pill",
+                  "nested": ["ok", "a\x00b", 42],
+                  "literal_escaped_backslash": r"\u0000",
+                  "backslash_then_nul": "\\\x00",
+                  "long_backslash_run": "\\" * 16_000,
+              },
+          },
+      )
+    with engine.connect() as conn:
+      saved = conn.execute(
+          sa.select(items.c.payload).where(items.c.item_id == "row1")
+      ).scalar_one()
+
+    self.assertEqual(
+        saved,
+        {
+            "stdout": "+ \x01Pill",
+            "nested": ["ok", "ab", 42],
+            "literal_escaped_backslash": r"\u0000",
+            "backslash_then_nul": "\\",
+            "long_backslash_run": "\\" * 16_000,
+        },
+    )
 
   def test_engine_config_defaults_match_single_writer_budget(self) -> None:
     config = db_engine.EngineConfig(url="sqlite:///:memory:")

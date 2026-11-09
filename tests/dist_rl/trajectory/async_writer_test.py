@@ -43,11 +43,13 @@ class _TestAsyncWriter(async_writer.AsyncWriter[_TestWriteTask]):
       batching: async_writer.BatchConfig | None = (
           async_writer.DEFAULT_BATCH_CONFIG
       ),
+      copy_step: bool = False,
   ):
     super().__init__(
         thread_name=thread_name,
         max_queue_size=max_queue_size,
         batching=batching,
+        copy_step=copy_step,
     )
     self.processed_tasks: list[_TestWriteTask] = []
     self.processed_batches: list[tuple[_TestWriteTask, ...]] = []
@@ -127,17 +129,25 @@ class AsyncWriterTest(trajectory_testing.TrajectoryTestCase):
       self,
       thread_name: str | None = None,
       fail_on_step_id: int | None = None,
+      batchable_error_step_ids: Sequence[int] = (),
+      batch_error_on_call: int | None = None,
+      block_on_batch_call: int | None = None,
       max_queue_size: int = async_writer.DEFAULT_MAX_QUEUE_SIZE,
       batching: async_writer.BatchConfig | None = (
           async_writer.DEFAULT_BATCH_CONFIG
       ),
+      copy_step: bool = False,
   ) -> _TestAsyncWriter:
     """Creates a test writer with guaranteed cleanup on test completion."""
     writer = _TestAsyncWriter(
         thread_name=thread_name,
         fail_on_step_id=fail_on_step_id,
+        batchable_error_step_ids=batchable_error_step_ids,
+        batch_error_on_call=batch_error_on_call,
+        block_on_batch_call=block_on_batch_call,
         max_queue_size=max_queue_size,
         batching=batching,
+        copy_step=copy_step,
     )
     self.addCleanup(writer.close)
     return writer
@@ -269,12 +279,19 @@ class AsyncWriterTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(task.trajectory_id, "traj_derived")
 
   def test_write_task_deep_copies_on_init_and_projects_on_worker(self) -> None:
-    writer = self._create_writer()
+    writer = self._create_writer(copy_step=True)
     meta = trajectory_testing.TUNIX_METADATA_1.model_copy(deep=True)
     step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(deep=True)
     task = _TestWriteTask(metadata=meta, step=step)
 
-    # Mutate base ATIF containers.
+    # WriteTask deep-copies metadata on init; _enqueue deep-copies step when
+    # writer.copy_step is True.
+    self.assertIsNot(task.metadata, meta)
+    self.assertIs(type(task.metadata), trajectory_lib.TunixTrajectoryMetadata)
+    self.assertEqual(task.metadata, trajectory_testing.TUNIX_METADATA_1)
+    writer._enqueue(task)
+
+    # Mutate base ATIF containers after enqueue.
     meta.agent.tool_definitions[0]["name"] = "mutated_tool"
     meta.agent.tool_definitions.append({"name": "extra_tool"})
     meta.final_metrics.extra["final_key"] = "mutated_final"
@@ -293,13 +310,7 @@ class AsyncWriterTest(trajectory_testing.TrajectoryTestCase):
     step.assistant_masks[0] = 0
     step.logprobs[0] = -9.9
 
-    # Caller thread only deep-copies; Tunix subclass types remain unprojected.
-    self.assertIs(type(task.metadata), trajectory_lib.TunixTrajectoryMetadata)
-    self.assertEqual(task.metadata, trajectory_testing.TUNIX_METADATA_1)
-    self.assertStepEqual(task.step, trajectory_testing.TUNIX_AGENT_STEP_1)
-
     # Worker thread projects to base ATIF when draining the queue.
-    writer._enqueue(task)
     writer.flush()
 
     self.assertLen(writer.processed_tasks, 1)
@@ -316,6 +327,37 @@ class AsyncWriterTest(trajectory_testing.TrajectoryTestCase):
         processed_task.step,
         trajectory_testing.TUNIX_AGENT_STEP_1.to_atif_step(),
     )
+
+  def test_write_task_zero_copy_step_by_default(self) -> None:
+    writer = self._create_writer()
+    meta = trajectory_testing.TUNIX_METADATA_1.model_copy(deep=True)
+    step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(deep=True)
+    task = _TestWriteTask(metadata=meta, step=step)
+
+    # By default, step is not copied (zero-copy handover to avoid GIL cost).
+    self.assertIs(task.step, step)
+    # Metadata is always defensively copied.
+    self.assertIsNot(task.metadata, meta)
+    self.assertEqual(task.metadata, meta)
+
+    writer._enqueue(task)
+    writer.flush()
+
+    self.assertLen(writer.processed_tasks, 1)
+    processed_task = writer.processed_tasks[0]
+    self.assertEqual(
+        processed_task.step,
+        trajectory_testing.TUNIX_AGENT_STEP_1.to_atif_step(),
+    )
+    # Worker ATIF projection replaces task.step without mutating caller's step.
+    self.assertStepEqual(step, trajectory_testing.TUNIX_AGENT_STEP_1)
+
+  def test_writer_copy_step_property(self) -> None:
+    writer_default = self._create_writer()
+    self.assertFalse(writer_default.copy_step)
+
+    writer_copy = self._create_writer(copy_step=True)
+    self.assertTrue(writer_copy.copy_step)
 
   # ============================================================================
   # 3. Barrier Synchronization (flush)
