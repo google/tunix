@@ -46,6 +46,12 @@ model_config: &base_model_config
 
 actor_model_config:
   <<: *base_model_config
+  # Stops the gradient into the MoE router (`router_logits` and `router_scale`),
+  # so training keeps the routing the model was loaded with. RL recipes that
+  # replay the rollout routing (`vllm_config.return_routed_experts`) usually set
+  # it. Needs the Tunix trainer and a model whose config defines
+  # `freeze_router` (Gemma 4 MoE); the trainer fails on any other model.
+  freeze_router: false
 
 critic_model_config: null
 

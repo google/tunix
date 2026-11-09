@@ -297,11 +297,69 @@ class TrainerFactoryTest(absltest.TestCase):
         remat_config="decoder",
         use_flash_attention=True,
         flash_attention_block_size=256,
+        freeze_router=False,
     )
     lora_config = apply_lora.call_args.kwargs["lora_config"]
     self.assertEqual(lora_config["rank"], 32)
     self.assertEqual(lora_config["alpha"], 64.0)
     self.assertIn(".*q_proj", lora_config["module_path"])
+
+  def test_model_loading_validates_freeze_router(self):
+    hp = _hp("actor_model_config.freeze_router=true")
+    loaded = mock.Mock(config=mock.Mock(freeze_router=True))
+    with mock.patch.object(
+        trainer.automodel.AutoModel,
+        "from_pretrained",
+        return_value=(loaded, "/tmp/m"),
+    ) as load:
+      self.assertIs(
+          trainer._load_actor_model(hp, "/tmp/m", mock.sentinel.mesh), loaded
+      )
+    self.assertIs(load.call_args.kwargs["freeze_router"], True)
+
+    for cfg, err in (
+        (object(), "not supported by model"),
+        (mock.Mock(freeze_router=False), "not applied to model"),
+    ):
+      with mock.patch.object(
+          trainer.automodel.AutoModel,
+          "from_pretrained",
+          return_value=(mock.Mock(config=cfg), "/tmp/m"),
+      ):
+        with self.assertRaisesRegex(ValueError, err):
+          trainer._load_actor_model(hp, "/tmp/m", mock.sentinel.mesh)
+
+  def test_model_loading_validates_return_routed_experts_support(self):
+    hp = _hp("vllm_config.return_routed_experts=true")
+
+    class _ReplayModel:
+
+      def __call__(self, x, forced_routed_experts=None):
+        del x, forced_routed_experts
+
+    class _NoReplayModel:
+
+      def __call__(self, x):
+        del x
+
+    replay_model = _ReplayModel()
+    with mock.patch.object(
+        trainer.automodel.AutoModel,
+        "from_pretrained",
+        return_value=(replay_model, "/tmp/m"),
+    ):
+      self.assertIs(
+          trainer._load_actor_model(hp, "/tmp/m", mock.sentinel.mesh),
+          replay_model,
+      )
+
+    with mock.patch.object(
+        trainer.automodel.AutoModel,
+        "from_pretrained",
+        return_value=(_NoReplayModel(), "/tmp/m"),
+    ):
+      with self.assertRaisesRegex(ValueError, "forced_routed_experts"):
+        trainer._load_actor_model(hp, "/tmp/m", mock.sentinel.mesh)
 
   def test_lora_config_supports_module_path_weight_qtype_and_tile_size(self):
     lora_config = trainer._lora_config(

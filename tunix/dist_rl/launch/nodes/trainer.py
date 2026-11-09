@@ -47,6 +47,7 @@ from tunix.dist_rl.train import abstract_trainer
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.worker import trainer_worker
 from tunix.models import automodel
+from tunix.rl import common as rl_common
 from tunix.utils import maxtext_utils
 
 LOCAL_WORKER_ID = "trainer-0"
@@ -285,9 +286,14 @@ def _load_actor_model(
 
   Returns:
     The actor `nnx.Module`.
+
+  Raises:
+    ValueError: If `actor_model_config.freeze_router` is set but the model was
+      not loaded with a frozen router (see `_check_router_frozen`).
   """
   actor = hp.config_mapping(_ACTOR_KEY)
   block_size = actor["flash_attention_block_size"]
+  freeze_router = bool(actor["freeze_router"])
   model, _ = automodel.AutoModel.from_pretrained(
       model_id=str(actor["model_name"]),
       mesh=mesh,
@@ -299,13 +305,59 @@ def _load_actor_model(
       flash_attention_block_size=(
           int(block_size) if block_size is not None else None
       ),
+      freeze_router=freeze_router,
   )
+  if freeze_router:
+    _check_router_frozen(model, str(actor["model_name"]))
+  if bool(hp.config_mapping("vllm_config")["return_routed_experts"]):
+    _check_router_replay_supported(model, str(actor["model_name"]))
   lora_config = _lora_config(actor)
   if lora_config is None:
     return model
   return model_utils.apply_lora_to_model(
       model, mesh=mesh, lora_config=lora_config
   )
+
+
+def _check_router_replay_supported(model: nnx.Module, model_name: str) -> None:
+  """Raises unless `model` accepts `forced_routed_experts`."""
+  if not rl_common.model_call_contains(model, "forced_routed_experts"):
+    raise ValueError(
+        "vllm_config.return_routed_experts is not supported by model"
+        f" {model_name!r} ({type(model).__name__}.__call__ has no"
+        " forced_routed_experts parameter)."
+    )
+
+
+def _check_router_frozen(model: nnx.Module, model_name: str) -> None:
+  """Raises unless `model` was loaded with `freeze_router=True`.
+
+  `AutoModel.from_pretrained` drops the overrides that the model config does not
+  define, so a model without a router to freeze would otherwise silently keep
+  training its router.
+
+  Args:
+    model: The loaded actor, before LoRA.
+    model_name: `actor_model_config.model_name`, for the error message.
+
+  Raises:
+    ValueError: If the model config has no `freeze_router` field, or it is
+      false.
+  """
+  model_config = model.config  # pyrefly: ignore[missing-attribute]
+  try:
+    router_frozen = model_config.freeze_router
+  except AttributeError as exc:
+    raise ValueError(
+        "actor_model_config.freeze_router is not supported by model"
+        f" {model_name!r} ({type(model_config).__name__} has no freeze_router"
+        " field)."
+    ) from exc
+  if not router_frozen:
+    raise ValueError(
+        "actor_model_config.freeze_router was not applied to model"
+        f" {model_name!r}."
+    )
 
 
 def _create_tunix_trainer_factory(
