@@ -1,7 +1,10 @@
 """Unit and contract tests for SqlTrajectoryStore."""
 
+from collections.abc import Iterator, Sequence
 from concurrent import futures
+import contextlib
 import datetime
+import logging
 import os
 import threading
 from typing import Any
@@ -10,6 +13,7 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 from tunix.dist_rl.trajectory import async_writer
 from tunix.dist_rl.trajectory import db_engine
 from tunix.dist_rl.trajectory import schema
@@ -23,6 +27,82 @@ from tunix.dist_rl.trajectory import trajectory_testing
 _POSTGRES_URL = "postgresql+psycopg2://user@host/db"
 
 
+class _TestAsyncSqlWriter(sql_store._AsyncSqlWriter):
+  """Testable `_AsyncSqlWriter` with explicit failure injection hooks."""
+
+  def __init__(
+      self,
+      engine: sa.Engine,
+      max_cached_trajectories: int = sql_store._MAX_CACHED_TRAJECTORIES,
+      bulk_transaction_error: Exception | None = None,
+      error_by_step_id: dict[int, Exception] | None = None,
+      batch_mode: bool = False,
+  ) -> None:
+    super().__init__(
+        engine=engine,
+        max_cached_trajectories=max_cached_trajectories,
+    )
+    self.bulk_transaction_error = bulk_transaction_error
+    self.error_by_step_id: dict[int, Exception] = (
+        dict(error_by_step_id) if error_by_step_id is not None else {}
+    )
+    self._holding_batch: bool = False
+    self._held_tasks: list[async_writer.WriteTask] = []
+    self._held_batch_sizes: list[int] = []
+    if batch_mode:
+      self._increase_batch_wait()
+
+  @contextlib.contextmanager
+  def hold_batch(self) -> Iterator[None]:
+    """Defers `_enqueue` calls until block exit so all tasks enter one batch."""
+    self._holding_batch = True
+    try:
+      yield
+    finally:
+      self._holding_batch = False
+      if self._held_tasks:
+        self._held_batch_sizes.append(len(self._held_tasks))
+        for task in self._held_tasks:
+          super()._enqueue(task)
+        self._held_tasks.clear()
+
+  def _enqueue(self, task: async_writer.WriteTask) -> None:
+    if self._holding_batch:
+      self._held_tasks.append(task)
+      return
+    super()._enqueue(task)
+
+  def _collect_next_batch(self) -> list[async_writer.WriteTask]:
+    first_task = self._queue.get()
+    if first_task is None:
+      self._queue.task_done()
+      return []
+    collected: list[async_writer.WriteTask] = [first_task]
+    if self._held_batch_sizes and self._batch_wait_s > 0.0:
+      expected_size = self._held_batch_sizes.pop(0)
+      while len(collected) < expected_size:
+        task = self._queue.get()
+        if task is None:
+          self._queue.put_nowait(None)
+          self._queue.task_done()
+          break
+        collected.append(task)
+    return collected
+
+  def _upsert_step_rows(
+      self, conn: sa.Connection, step_rows: Sequence[dict[str, Any]]
+  ) -> None:
+    if self.bulk_transaction_error is not None:
+      err = self.bulk_transaction_error
+      self.bulk_transaction_error = None
+      raise err
+    for row in step_rows:
+      step_id = row["step_id"]
+      if step_id in self.error_by_step_id:
+        raise self.error_by_step_id.pop(step_id)
+    super()._upsert_step_rows(conn, step_rows)
+
+
 class SqlStoreWriterTest(parameterized.TestCase):
   """Tests for the SQL behavior of _AsyncSqlWriter."""
 
@@ -32,10 +112,16 @@ class SqlStoreWriterTest(parameterized.TestCase):
     self.addCleanup(self.engine.dispose)
     schema.METADATA.create_all(self.engine)
     self.executed_sql: list[str] = []
+    self.transaction_begins: int = 0
     sa.event.listen(
         self.engine,
         "before_cursor_execute",
         self._record_sql_statement,
+    )
+    sa.event.listen(
+        self.engine,
+        "begin",
+        self._record_transaction_begin,
     )
 
   def _record_sql_statement(
@@ -50,6 +136,15 @@ class SqlStoreWriterTest(parameterized.TestCase):
     del conn, cursor, parameters, context, executemany
     self.executed_sql.append(statement)
 
+  def _record_transaction_begin(self, conn: Any) -> None:
+    del conn
+    self.transaction_begins += 1
+
+  def _reset_sql_tracking(self) -> None:
+    """Clears recorded SQL statements and transaction begin counts."""
+    self.executed_sql.clear()
+    self.transaction_begins = 0
+
   def _count_sql(self, prefix: str) -> int:
     """Returns the number of executed SQL statements starting with `prefix`."""
     return sum(stmt.startswith(prefix) for stmt in self.executed_sql)
@@ -57,11 +152,17 @@ class SqlStoreWriterTest(parameterized.TestCase):
   def _create_writer(
       self,
       max_cached_trajectories: int = sql_store._MAX_CACHED_TRAJECTORIES,
-  ) -> sql_store._AsyncSqlWriter:
+      bulk_transaction_error: Exception | None = None,
+      error_by_step_id: dict[int, Exception] | None = None,
+      batch_mode: bool = False,
+  ) -> _TestAsyncSqlWriter:
     """Returns a writer bound to the test engine, closed on teardown."""
-    writer = sql_store._AsyncSqlWriter(
+    writer = _TestAsyncSqlWriter(
         engine=self.engine,
         max_cached_trajectories=max_cached_trajectories,
+        bulk_transaction_error=bulk_transaction_error,
+        error_by_step_id=error_by_step_id,
+        batch_mode=batch_mode,
     )
     self.addCleanup(writer.close)
     return writer
@@ -70,11 +171,19 @@ class SqlStoreWriterTest(parameterized.TestCase):
     """Returns every row in the runs table."""
     return schema_testing.fetch_all(self.engine, sa.select(schema.RUNS_TABLE))
 
+  def _fetch_runs_by_id(self) -> dict[str, dict[str, Any]]:
+    """Returns every row in the runs table keyed by `run_id`."""
+    return {row["run_id"]: row for row in self._fetch_runs()}
+
   def _fetch_trajectories(self) -> list[dict[str, Any]]:
     """Returns every row in the trajectories table."""
     return schema_testing.fetch_all(
         self.engine, sa.select(schema.TRAJECTORIES_TABLE)
     )
+
+  def _fetch_trajectories_by_id(self) -> dict[str, dict[str, Any]]:
+    """Returns every row in the trajectories table keyed by `trajectory_id`."""
+    return {row["trajectory_id"]: row for row in self._fetch_trajectories()}
 
   def _fetch_steps(self) -> list[dict[str, Any]]:
     """Returns every row in the steps table, ordered by step id."""
@@ -88,6 +197,22 @@ class SqlStoreWriterTest(parameterized.TestCase):
     return schema_testing.fetch_all(
         self.engine, sa.select(schema.TRAJECTORY_METRICS_TABLE)
     )
+
+  def _fetch_metrics_by_id(self) -> dict[str, dict[str, Any]]:
+    """Returns every row in trajectory_metrics keyed by `trajectory_id`."""
+    return {row["trajectory_id"]: row for row in self._fetch_metrics()}
+
+  def _find_error_exceptions(
+      self, records: Sequence[logging.LogRecord]
+  ) -> list[BaseException]:
+    """Returns exception instances attached to ERROR-level log records."""
+    exceptions: list[BaseException] = []
+    for record in records:
+      if record.levelno == logging.ERROR and record.exc_info is not None:
+        _, exc_value, _ = record.exc_info
+        if exc_value is not None:
+          exceptions.append(exc_value)
+    return exceptions
 
   def test_init_with_postgresql_engine_binds_postgresql_insert(self) -> None:
     mock_engine = mock.MagicMock()
@@ -490,7 +615,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
       self,
   ) -> None:
     writer = self._create_writer()
-    original_upsert_step = writer._upsert_step
+    original_upsert_step_rows = writer._upsert_step_rows
     call_count = 0
 
     def fail_on_first_step(*args: Any, **kwargs: Any) -> None:
@@ -498,10 +623,10 @@ class SqlStoreWriterTest(parameterized.TestCase):
       call_count += 1
       if call_count == 1:
         raise sa.exc.OperationalError("simulated deadlock", None, Exception())
-      original_upsert_step(*args, **kwargs)
+      original_upsert_step_rows(*args, **kwargs)
 
     with mock.patch.object(
-        writer, "_upsert_step", side_effect=fail_on_first_step
+        writer, "_upsert_step_rows", side_effect=fail_on_first_step
     ):
       writer.enqueue_write(
           run_id="run_rollback",
@@ -758,6 +883,671 @@ class SqlStoreWriterTest(parameterized.TestCase):
           run_id=run_id, trajectory_id=traj_id, metrics=metrics
       )
 
+  @parameterized.named_parameters(
+      (
+          "operational_error",
+          sa.exc.OperationalError("database is locked", None, Exception()),
+          True,
+      ),
+      (
+          "pool_timeout_error",
+          sa.exc.TimeoutError("QueuePool limit overflow"),
+          True,
+      ),
+      (
+          "disconnection_error",
+          sa.exc.DisconnectionError("connection closed"),
+          False,
+      ),
+      (
+          "integrity_error",
+          sa.exc.IntegrityError("duplicate key", None, Exception()),
+          False,
+      ),
+      (
+          "programming_error",
+          sa.exc.ProgrammingError("syntax error", None, Exception()),
+          False,
+      ),
+      ("value_error", ValueError("invalid payload"), False),
+  )
+  def test_should_batch_on_error_with_exception_returns_expected_decision(
+      self, error: Exception, expected: bool
+  ) -> None:
+    writer = self._create_writer()
+
+    is_batchable = writer._should_batch_on_error(error)
+
+    self.assertEqual(is_batchable, expected)
+
+  def test_enqueue_write_after_operational_error_batches_multi_row_upserts(
+      self,
+  ) -> None:
+    writer = self._create_writer(
+        error_by_step_id={
+            0: sa.exc.OperationalError("simulated deadlock", None, Exception())
+        },
+    )
+    meta_1 = trajectory_testing.make_metadata(trajectory_id="traj_batch_1")
+    meta_2 = trajectory_testing.make_metadata(trajectory_id="traj_batch_2")
+    initial_step = trajectory_lib.Step(
+        step_id=0, source=trajectory_lib.Source.AGENT, message="step 0"
+    )
+    with self.assertLogs(level=logging.ERROR):
+      writer.enqueue_write(
+          run_id="run_batch", metadata=meta_1, step=initial_step
+      )
+      writer.flush()
+    self.assertAlmostEqual(writer.batch_wait_s, 0.05)
+    self._reset_sql_tracking()
+
+    with writer.hold_batch():
+      writer.enqueue_write(
+          run_id="run_batch", metadata=meta_1, step=trajectory_testing.STEP_2_1
+      )
+      writer.enqueue_write(
+          run_id="run_batch", metadata=meta_1, step=trajectory_testing.STEP_2_2
+      )
+      writer.enqueue_write(
+          run_id="run_batch", metadata=meta_1, step=trajectory_testing.STEP_2_3
+      )
+      writer.enqueue_write(
+          run_id="run_batch", metadata=meta_2, step=trajectory_testing.STEP_2_4
+      )
+      writer.enqueue_write(
+          run_id="run_batch", metadata=meta_2, step=trajectory_testing.STEP_2_5
+      )
+    writer.flush()
+
+    self.assertEqual(self.transaction_begins, 1)
+    self.assertEqual(self._count_sql("INSERT INTO runs"), 1)
+    self.assertEqual(self._count_sql("INSERT INTO trajectories"), 1)
+    self.assertEqual(self._count_sql("INSERT INTO steps"), 1)
+    self.assertLen(self._fetch_runs(), 1)
+    self.assertLen(self._fetch_trajectories(), 2)
+    self.assertLen(self._fetch_steps(), 5)
+    self.assertAlmostEqual(writer.batch_wait_s, 0.04)
+
+  def test_enqueue_write_in_batch_mode_with_multiple_updates_collapses_to_latest_metadata(
+      self,
+  ) -> None:
+    writer = self._create_writer(batch_mode=True)
+    meta_v1 = trajectory_lib.TrajectoryMetadata(
+        trajectory_id="traj_collapse",
+        agent=trajectory_testing.METADATA_1.agent,
+        notes="v1 notes",
+    )
+    meta_v2 = trajectory_lib.TrajectoryMetadata(
+        trajectory_id="traj_collapse",
+        agent=trajectory_testing.METADATA_1.agent,
+        notes="v2 final notes",
+    )
+
+    with writer.hold_batch():
+      writer.enqueue_write(
+          run_id="run_collapse",
+          metadata=meta_v1,
+          step=trajectory_testing.STEP_2_1,
+      )
+      writer.enqueue_write(
+          run_id="run_collapse",
+          metadata=meta_v2,
+          step=trajectory_testing.STEP_2_2,
+      )
+    writer.flush()
+
+    self.assertEqual(self.transaction_begins, 1)
+    self.assertEqual(self._count_sql("INSERT INTO runs"), 1)
+    self.assertEqual(self._count_sql("INSERT INTO trajectories"), 1)
+    self.assertEqual(self._count_sql("INSERT INTO steps"), 1)
+    traj_by_id = self._fetch_trajectories_by_id()
+    self.assertEqual(
+        traj_by_id["traj_collapse"]["trajectory_metadata"]["notes"],
+        "v2 final notes",
+    )
+    self.assertLen(self._fetch_steps(), 2)
+
+  @parameterized.named_parameters(
+      (
+          "preserves_db_status_when_batch_omits_status",
+          trajectory_lib.TunixTrajectoryMetadata(
+              trajectory_id="traj_status",
+              agent=trajectory_testing.METADATA_1.agent,
+              status="SUCCEEDED",
+          ),
+          trajectory_lib.TrajectoryMetadata(
+              trajectory_id="traj_status",
+              agent=trajectory_testing.METADATA_1.agent,
+              notes="v1 without status",
+          ),
+          trajectory_lib.TrajectoryMetadata(
+              trajectory_id="traj_status",
+              agent=trajectory_testing.METADATA_1.agent,
+              notes="v2 without status",
+          ),
+          "SUCCEEDED",
+          "v2 without status",
+      ),
+      (
+          "overrides_earlier_batch_status_with_latest_stated_status",
+          None,
+          trajectory_lib.TunixTrajectoryMetadata(
+              trajectory_id="traj_status",
+              agent=trajectory_testing.METADATA_1.agent,
+              status="RUNNING",
+              notes="v1 running",
+          ),
+          trajectory_lib.TunixTrajectoryMetadata(
+              trajectory_id="traj_status",
+              agent=trajectory_testing.METADATA_1.agent,
+              status="FAILED",
+              notes="v2 failed",
+          ),
+          "FAILED",
+          "v2 failed",
+      ),
+      (
+          "preserves_earlier_batch_status_when_trailing_task_omits_status",
+          None,
+          trajectory_lib.TunixTrajectoryMetadata(
+              trajectory_id="traj_status",
+              agent=trajectory_testing.METADATA_1.agent,
+              status="RUNNING",
+              notes="v1 running",
+          ),
+          trajectory_lib.TrajectoryMetadata(
+              trajectory_id="traj_status",
+              agent=trajectory_testing.METADATA_1.agent,
+              notes="v2 without status",
+          ),
+          "RUNNING",
+          "v2 without status",
+      ),
+  )
+  def test_enqueue_write_in_batch_mode_with_status_transitions_resolves_expected_status(
+      self,
+      seeded_meta: trajectory_lib.TrajectoryMetadata | None,
+      first_batch_meta: trajectory_lib.TrajectoryMetadata,
+      second_batch_meta: trajectory_lib.TrajectoryMetadata,
+      expected_status: str,
+      expected_notes: str,
+  ) -> None:
+    writer = self._create_writer()
+    if seeded_meta is not None:
+      writer.enqueue_write(run_id="run_status", metadata=seeded_meta)
+      writer.flush()
+    writer._increase_batch_wait()
+    self._reset_sql_tracking()
+
+    with writer.hold_batch():
+      writer.enqueue_write(
+          run_id="run_status",
+          metadata=first_batch_meta,
+          step=trajectory_testing.STEP_2_1,
+      )
+      writer.enqueue_write(
+          run_id="run_status",
+          metadata=second_batch_meta,
+          step=trajectory_testing.STEP_2_2,
+      )
+    writer.flush()
+
+    self.assertEqual(self.transaction_begins, 1)
+    self.assertEqual(self._count_sql("INSERT INTO trajectories"), 1)
+    traj_by_id = self._fetch_trajectories_by_id()
+    self.assertEqual(traj_by_id["traj_status"]["status"], expected_status)
+    self.assertEqual(
+        traj_by_id["traj_status"]["trajectory_metadata"]["notes"],
+        expected_notes,
+    )
+
+  def test_enqueue_write_in_batch_mode_with_interleaved_trajectories_deduplicates_per_key(
+      self,
+  ) -> None:
+    writer = self._create_writer(batch_mode=True)
+    meta_a_v1 = trajectory_lib.TrajectoryMetadata(
+        trajectory_id="traj_a",
+        agent=trajectory_testing.METADATA_1.agent,
+        notes="a_v1",
+    )
+    meta_b_v1 = trajectory_lib.TrajectoryMetadata(
+        trajectory_id="traj_b",
+        agent=trajectory_testing.METADATA_1.agent,
+        notes="b_v1",
+    )
+    meta_a_v2 = trajectory_lib.TrajectoryMetadata(
+        trajectory_id="traj_a",
+        agent=trajectory_testing.METADATA_1.agent,
+        notes="a_v2",
+    )
+
+    with writer.hold_batch():
+      writer.enqueue_write(
+          run_id="run_interleaved",
+          metadata=meta_a_v1,
+          step=trajectory_testing.STEP_2_1,
+      )
+      writer.enqueue_write(
+          run_id="run_interleaved",
+          metadata=meta_b_v1,
+          step=trajectory_testing.STEP_2_1,
+      )
+      writer.enqueue_write(
+          run_id="run_interleaved",
+          metadata=meta_a_v2,
+          step=trajectory_testing.STEP_2_2,
+      )
+    writer.flush()
+
+    self.assertEqual(self.transaction_begins, 1)
+    self.assertEqual(self._count_sql("INSERT INTO runs"), 1)
+    self.assertEqual(self._count_sql("INSERT INTO trajectories"), 1)
+    self.assertEqual(self._count_sql("INSERT INTO steps"), 1)
+    traj_by_id = self._fetch_trajectories_by_id()
+    self.assertEqual(list(traj_by_id.keys()), ["traj_a", "traj_b"])
+    self.assertEqual(
+        traj_by_id["traj_a"]["trajectory_metadata"]["notes"], "a_v2"
+    )
+    self.assertEqual(
+        traj_by_id["traj_b"]["trajectory_metadata"]["notes"], "b_v1"
+    )
+    self.assertLen(self._fetch_steps(), 3)
+
+  def test_enqueue_write_and_metrics_on_postgresql_in_batch_mode_compiles_multi_row_upserts(
+      self,
+  ) -> None:
+    mock_engine = mock.MagicMock()
+    mock_engine.dialect.name = db_engine.Dialect.POSTGRESQL
+    mock_conn = mock.create_autospec(
+        sa.Connection, instance=True, spec_set=True
+    )
+    mock_engine.begin.return_value.__enter__.return_value = mock_conn
+    writer = _TestAsyncSqlWriter(engine=mock_engine, batch_mode=True)
+    self.addCleanup(writer.close)
+
+    with writer.hold_batch():
+      writer.enqueue_write(
+          run_id="r1",
+          metadata=trajectory_testing.METADATA_1,
+          step=trajectory_testing.STEP_2_1,
+      )
+      writer.enqueue_write(
+          run_id="r1",
+          metadata=trajectory_testing.METADATA_2,
+          step=trajectory_testing.STEP_2_2,
+      )
+      writer.enqueue_metrics_write(
+          run_id="r1",
+          trajectory_id="t1",
+          metrics=trajectory_lib.TrajectoryMetrics(extra={"score": 1.0}),
+      )
+      writer.enqueue_metrics_write(
+          run_id="r2",
+          trajectory_id="t2",
+          metrics=trajectory_lib.TrajectoryMetrics(extra=None),
+      )
+    writer.flush()
+
+    pg_dialect = postgresql.dialect()
+    (
+        run_call,
+        traj_call,
+        step_call,
+        metrics_null_call,
+        metrics_merge_call,
+    ) = mock_conn.execute.call_args_list
+    run_sql = str(run_call.args[0].compile(dialect=pg_dialect))
+    traj_sql = str(traj_call.args[0].compile(dialect=pg_dialect))
+    step_sql = str(step_call.args[0].compile(dialect=pg_dialect))
+    metrics_null_sql = str(
+        metrics_null_call.args[0].compile(dialect=pg_dialect)
+    )
+    metrics_merge_sql = str(
+        metrics_merge_call.args[0].compile(dialect=pg_dialect)
+    )
+    self.assertIn("INSERT INTO runs", run_sql)
+    self.assertIn("ON CONFLICT (run_id) DO UPDATE SET", run_sql)
+    self.assertIn("WHERE runs.agent_name =", run_sql)
+    self.assertIn("INSERT INTO trajectories", traj_sql)
+    self.assertIn("ON CONFLICT (run_id, trajectory_id) DO UPDATE SET", traj_sql)
+    self.assertIn("IS DISTINCT FROM", traj_sql)
+    self.assertIn("INSERT INTO steps", step_sql)
+    self.assertIn(
+        "ON CONFLICT (run_id, trajectory_id, step_id) DO UPDATE SET",
+        step_sql,
+    )
+    self.assertIn("INSERT INTO trajectory_metrics", metrics_null_sql)
+    self.assertIn(
+        "ON CONFLICT (run_id, trajectory_id) DO NOTHING", metrics_null_sql
+    )
+    self.assertIn("INSERT INTO trajectory_metrics", metrics_merge_sql)
+    self.assertIn(
+        "ON CONFLICT (run_id, trajectory_id) DO UPDATE SET", metrics_merge_sql
+    )
+    self.assertIn("jsonb_set", metrics_merge_sql)
+    self.assertIn("IS DISTINCT FROM", metrics_merge_sql)
+
+  def test_enqueue_metrics_write_in_batch_mode_with_multiple_updates_merges_extra_fields(
+      self,
+  ) -> None:
+    writer = self._create_writer()
+    writer.enqueue_metrics_write(
+        run_id="run_batch_m",
+        trajectory_id="traj_existing",
+        metrics=trajectory_lib.TrajectoryMetrics(
+            extra={"seed": 1, "score": 0.1}
+        ),
+    )
+    writer.enqueue_metrics_write(
+        run_id="run_batch_m",
+        trajectory_id="traj_keep",
+        metrics=trajectory_lib.TrajectoryMetrics(extra={"preserved": True}),
+    )
+    writer.flush()
+    keep_updated_at = self._fetch_metrics_by_id()["traj_keep"]["updated_at"]
+    writer._increase_batch_wait()
+    self._reset_sql_tracking()
+
+    with writer.hold_batch():
+      writer.enqueue_metrics_write(
+          run_id="run_batch_m",
+          trajectory_id="traj_existing",
+          metrics=trajectory_lib.TrajectoryMetrics(
+              extra={"score": 0.5, "dot.key": "v1"}
+          ),
+      )
+      writer.enqueue_metrics_write(
+          run_id="run_batch_m",
+          trajectory_id="traj_existing",
+          metrics=trajectory_lib.TrajectoryMetrics(
+              extra={"dot.key": "v2", "cleared": None}
+          ),
+      )
+      writer.enqueue_metrics_write(
+          run_id="run_batch_m",
+          trajectory_id="traj_keep",
+          metrics=trajectory_lib.TrajectoryMetrics(extra=None),
+      )
+      writer.enqueue_metrics_write(
+          run_id="run_batch_m",
+          trajectory_id="traj_new",
+          metrics=trajectory_lib.TrajectoryMetrics(extra={"fresh": 10}),
+      )
+    writer.flush()
+
+    self.assertEqual(self.transaction_begins, 1)
+    self.assertEqual(self._count_sql("INSERT INTO runs"), 0)
+    metrics_by_id = self._fetch_metrics_by_id()
+    self.assertEqual(
+        metrics_by_id["traj_existing"]["payload"],
+        {
+            "extra": {
+                "seed": 1,
+                "score": 0.5,
+                "dot.key": "v2",
+                "cleared": None,
+            }
+        },
+    )
+    self.assertEqual(
+        metrics_by_id["traj_keep"]["payload"], {"extra": {"preserved": True}}
+    )
+    self.assertEqual(metrics_by_id["traj_keep"]["updated_at"], keep_updated_at)
+    self.assertEqual(
+        metrics_by_id["traj_new"]["payload"], {"extra": {"fresh": 10}}
+    )
+
+  def test_enqueue_metrics_write_in_batch_mode_with_new_run_inserts_empty_agent_name_once(
+      self,
+  ) -> None:
+    writer = self._create_writer()
+    writer.enqueue_write(
+        run_id="run_cached", metadata=trajectory_testing.METADATA_1
+    )
+    writer.flush()
+    writer._increase_batch_wait()
+    self._reset_sql_tracking()
+
+    with writer.hold_batch():
+      writer.enqueue_metrics_write(
+          run_id="run_cached",
+          trajectory_id="traj_cached",
+          metrics=trajectory_lib.TrajectoryMetrics(extra={"score": 1.0}),
+      )
+      writer.enqueue_metrics_write(
+          run_id="run_metrics_only",
+          trajectory_id="traj_1",
+          metrics=trajectory_lib.TrajectoryMetrics(extra={"score": 2.0}),
+      )
+      writer.enqueue_metrics_write(
+          run_id="run_metrics_only",
+          trajectory_id="traj_2",
+          metrics=trajectory_lib.TrajectoryMetrics(extra={"score": 3.0}),
+      )
+    writer.flush()
+
+    self.assertEqual(self.transaction_begins, 1)
+    self.assertEqual(self._count_sql("INSERT INTO runs"), 1)
+    runs_by_id = self._fetch_runs_by_id()
+    self.assertEqual(runs_by_id["run_metrics_only"]["agent_name"], "")
+    self.assertLen(self._fetch_metrics(), 3)
+
+  def test_enqueue_write_in_batch_mode_with_empty_run_agent_backfills_first_named_agent(
+      self,
+  ) -> None:
+    with self.engine.begin() as conn:
+      conn.execute(
+          schema.RUNS_TABLE.insert().values(
+              run_id="run_external",
+              agent_name="external_owner",
+              status=schema.Status.RUNNING,
+          )
+      )
+    writer = self._create_writer()
+    writer.enqueue_metrics_write(
+        run_id="run_backfill",
+        trajectory_id="traj_1",
+        metrics=trajectory_lib.TrajectoryMetrics(extra={"score": 1.0}),
+    )
+    writer.flush()
+    writer._increase_batch_wait()
+    self._reset_sql_tracking()
+    empty_agent_meta = trajectory_testing.make_metadata(
+        trajectory_id="traj_1",
+        agent=trajectory_lib.Agent(name="", version="1.0"),
+    )
+    named_agent_meta = trajectory_testing.make_metadata(
+        trajectory_id="traj_2",
+        agent=trajectory_lib.Agent(
+            name="batch_backfilled_agent", version="1.0"
+        ),
+    )
+    trailing_empty_agent_meta = trajectory_lib.TrajectoryMetadata(
+        trajectory_id="traj_2",
+        agent=trajectory_lib.Agent(name="", version="1.0"),
+        notes="later statusless update with empty agent",
+    )
+    external_meta = trajectory_testing.make_metadata(
+        trajectory_id="traj_ext",
+        agent=trajectory_lib.Agent(name="late_worker", version="1.0"),
+    )
+
+    with writer.hold_batch():
+      writer.enqueue_write(run_id="run_backfill", metadata=empty_agent_meta)
+      writer.enqueue_write(run_id="run_backfill", metadata=named_agent_meta)
+      writer.enqueue_write(
+          run_id="run_backfill", metadata=trailing_empty_agent_meta
+      )
+      writer.enqueue_write(run_id="run_external", metadata=external_meta)
+    writer.flush()
+
+    self.assertEqual(self.transaction_begins, 1)
+    self.assertEqual(self._count_sql("INSERT INTO runs"), 1)
+    runs_by_id = self._fetch_runs_by_id()
+    self.assertEqual(
+        runs_by_id["run_backfill"]["agent_name"], "batch_backfilled_agent"
+    )
+    self.assertEqual(runs_by_id["run_external"]["agent_name"], "external_owner")
+
+  def test_enqueue_write_in_batch_mode_with_duplicate_step_id_persists_latest_step(
+      self,
+  ) -> None:
+    writer = self._create_writer(batch_mode=True)
+    meta = trajectory_testing.make_metadata(trajectory_id="traj_dup_step")
+    step_v1 = trajectory_lib.Step(
+        step_id=1, source=trajectory_lib.Source.AGENT, message="v1"
+    )
+    step_v2 = trajectory_lib.Step(
+        step_id=1, source=trajectory_lib.Source.AGENT, message="v2"
+    )
+
+    with writer.hold_batch():
+      writer.enqueue_write(run_id="run_dup", metadata=meta, step=step_v1)
+      writer.enqueue_write(run_id="run_dup", metadata=meta, step=step_v2)
+    writer.flush()
+
+    self.assertEqual(self._count_sql("INSERT INTO steps"), 1)
+    (persisted_step,) = self._fetch_steps()
+    self.assertEqual(persisted_step["payload"]["message"], "v2")
+
+  def test_enqueue_write_in_batch_mode_with_cached_metadata_skips_transaction(
+      self,
+  ) -> None:
+    writer = self._create_writer()
+    meta = trajectory_testing.make_metadata(trajectory_id="traj_cached")
+    writer.enqueue_write(run_id="run_cached", metadata=meta)
+    writer.flush()
+    writer._increase_batch_wait()
+    self._reset_sql_tracking()
+
+    with writer.hold_batch():
+      writer.enqueue_write(run_id="run_cached", metadata=meta)
+      writer.enqueue_write(run_id="run_cached", metadata=meta)
+    writer.flush()
+
+    self.assertEmpty(self.executed_sql)
+    self.assertEqual(self.transaction_begins, 0)
+
+  def test_enqueue_write_in_batch_mode_with_missing_run_id_replays_and_persists_valid_tasks(
+      self,
+  ) -> None:
+    writer = self._create_writer(batch_mode=True)
+    missing_run_task = async_writer.WriteTask(
+        run_id=None,
+        metadata=trajectory_testing.METADATA_1,
+        step=trajectory_testing.STEP_1_1,
+    )
+
+    with self.assertLogs(level=logging.WARNING) as captured_logs:
+      with writer.hold_batch():
+        writer._enqueue(missing_run_task)
+        writer.enqueue_write(
+            run_id="run_valid_batch",
+            metadata=trajectory_testing.METADATA_2,
+            step=trajectory_testing.STEP_2_1,
+        )
+      writer.flush()
+
+    self.assertIn("WriteTask requires run_id", "\n".join(captured_logs.output))
+    (only_run,) = self._fetch_runs()
+    self.assertEqual(only_run["run_id"], "run_valid_batch")
+    self.assertLen(self._fetch_steps(), 1)
+
+  def test_enqueue_write_in_batch_mode_on_bulk_operational_error_rolls_back_and_increases_wait(
+      self,
+  ) -> None:
+    writer = self._create_writer(
+        bulk_transaction_error=sa.exc.OperationalError(
+            "bulk deadlock", None, Exception()
+        ),
+        batch_mode=True,
+    )
+    self.assertAlmostEqual(writer.batch_wait_s, 0.05)
+
+    with self.assertLogs(level=logging.ERROR) as captured_logs:
+      with writer.hold_batch():
+        writer.enqueue_write(
+            run_id="run_contention",
+            metadata=trajectory_testing.METADATA_2,
+            step=trajectory_testing.STEP_2_1,
+        )
+        writer.enqueue_write(
+            run_id="run_contention",
+            metadata=trajectory_testing.METADATA_2,
+            step=trajectory_testing.STEP_2_2,
+        )
+      writer.flush()
+
+    self.assertIn(
+        "failed to process a write batch", "\n".join(captured_logs.output)
+    )
+    self.assertEqual(self.transaction_begins, 1)
+    self.assertEmpty(self._fetch_runs())
+    self.assertEmpty(self._fetch_trajectories())
+    self.assertEmpty(self._fetch_steps())
+    self.assertAlmostEqual(writer.batch_wait_s, 0.10)
+
+  @parameterized.named_parameters(
+      (
+          "non_batchable_replay_error_decays_wait",
+          sa.exc.IntegrityError("bulk integrity failure", None, Exception()),
+          sa.exc.IntegrityError("poisoned step 2", None, Exception()),
+          0.04,
+      ),
+      (
+          "batchable_replay_error_steps_up_wait",
+          sa.exc.IntegrityError("bulk integrity failure", None, Exception()),
+          sa.exc.OperationalError("step 2 lock timeout", None, Exception()),
+          0.10,
+      ),
+      (
+          "non_sqlalchemy_bulk_error_replays_per_task",
+          TypeError("simulated bulk serialization error"),
+          ValueError("poisoned step 2 value"),
+          0.04,
+      ),
+  )
+  def test_enqueue_write_in_batch_mode_on_non_batchable_bulk_error_replays_per_task(
+      self,
+      bulk_error: Exception,
+      step_2_error: Exception,
+      expected_wait_s: float,
+  ) -> None:
+    writer = self._create_writer(
+        bulk_transaction_error=bulk_error,
+        error_by_step_id={2: step_2_error},
+        batch_mode=True,
+    )
+    self.assertAlmostEqual(writer.batch_wait_s, 0.05)
+
+    with self.assertLogs(level=logging.WARNING) as captured_logs:
+      with writer.hold_batch():
+        writer.enqueue_write(
+            run_id="run_fallback",
+            metadata=trajectory_testing.METADATA_2,
+            step=trajectory_testing.STEP_2_1,
+        )
+        writer.enqueue_write(
+            run_id="run_fallback",
+            metadata=trajectory_testing.METADATA_2,
+            step=trajectory_testing.STEP_2_2,
+        )
+        writer.enqueue_write(
+            run_id="run_fallback",
+            metadata=trajectory_testing.METADATA_2,
+            step=trajectory_testing.STEP_2_3,
+        )
+      writer.flush()
+
+    self.assertIn(
+        "falling back to per-task replay", "\n".join(captured_logs.output)
+    )
+    (replay_exc,) = self._find_error_exceptions(captured_logs.records)
+    self.assertIsNone(replay_exc.__context__)
+    step_1, step_3 = self._fetch_steps()
+    self.assertEqual((step_1["step_id"], step_3["step_id"]), (1, 3))
+    self.assertAlmostEqual(writer.batch_wait_s, expected_wait_s)
+
 
 class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
   """Unit tests for SqlTrajectoryStore initialization and lifecycle behavior."""
@@ -801,6 +1591,19 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     mock_create_engine = patcher.start()
     self.addCleanup(patcher.stop)
     return mock_create_engine
+
+  def test_init_with_custom_batch_config_exposes_batching_property(
+      self,
+  ) -> None:
+    custom_batch = async_writer.BatchConfig(max_items=16, max_wait_s=0.5)
+    store_inst = sql_store.SqlTrajectoryStore(
+        run_id="run_batch_cfg",
+        db_url=self.db_url,
+        batching=custom_batch,
+    )
+    self.addCleanup(store_inst.close)
+
+    self.assertEqual(store_inst.batching, custom_batch)
 
   @parameterized.named_parameters(
       ("none", None),
@@ -1336,13 +2139,9 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     )
     store_inst.flush()
 
-    self.assertEqual(mock_write_conn.execute.call_count, 3)
+    _, merge_call, null_insert_call = mock_write_conn.execute.call_args_list
     pg_dialect = sql_store.postgresql.dialect()
-    compiled_upsert = str(
-        mock_write_conn.execute.call_args_list[1]
-        .args[0]
-        .compile(dialect=pg_dialect)
-    )
+    compiled_upsert = str(merge_call.args[0].compile(dialect=pg_dialect))
     self.assertIn("INSERT INTO trajectory_metrics", compiled_upsert)
     self.assertIn(
         "ON CONFLICT (run_id, trajectory_id) DO UPDATE SET",
@@ -1350,18 +2149,17 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     )
     self.assertIn("jsonb_set", compiled_upsert)
     self.assertIn(
-        "jsonb_typeof(trajectory_metrics.payload->'extra') = 'object'",
+        "jsonb_typeof((trajectory_metrics.payload ->",
         compiled_upsert,
     )
+    self.assertIn("|| (excluded.payload ->", compiled_upsert)
     self.assertIn(
         "WHERE trajectory_metrics.payload IS DISTINCT FROM",
         compiled_upsert,
     )
 
     compiled_null_insert = str(
-        mock_write_conn.execute.call_args_list[2]
-        .args[0]
-        .compile(dialect=pg_dialect)
+        null_insert_call.args[0].compile(dialect=pg_dialect)
     )
     self.assertIn("INSERT INTO trajectory_metrics", compiled_null_insert)
     self.assertIn(

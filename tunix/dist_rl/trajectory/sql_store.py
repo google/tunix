@@ -3,7 +3,6 @@
 import collections
 from collections.abc import Callable, Mapping, Sequence
 import datetime
-import textwrap
 import threading
 from typing import Any, ClassVar, Final, TypeVar
 
@@ -38,24 +37,6 @@ _SCHEMA_INIT_LOCK: Final[threading.Lock] = threading.Lock()
 # during cold-start schema DDL initialization (derived from SHA-256 of
 # `"TRAJECTORY_STORE"`).
 _POSTGRES_SCHEMA_INIT_LOCK_ID: Final[int] = 0x568C418D_F1971EA0
-
-# Atomic PostgreSQL JSONB shallow merge for `trajectory_metrics.payload` when
-# `EXCLUDED.payload->'extra'` is a JSON object (`extra=None` is handled up
-# front via `ON CONFLICT DO NOTHING`): shallow-merges onto stored `extra` when
-# it is a JSON object (preserving null values on keys), or sets `extra` to
-# `EXCLUDED.payload->'extra'` otherwise.
-_POSTGRES_METRICS_MERGE_SQL: Final[str] = textwrap.dedent("""\
-    jsonb_set(
-        EXCLUDED.payload,
-        '{extra}',
-        CASE
-            WHEN jsonb_typeof(trajectory_metrics.payload->'extra') = 'object'
-            THEN (trajectory_metrics.payload->'extra')
-                || (EXCLUDED.payload->'extra')
-            ELSE EXCLUDED.payload->'extra'
-        END
-    )
-""").strip()
 
 
 def _validate_non_empty_str(value: str | None, field_name: str) -> str:
@@ -103,6 +84,26 @@ def _resolve_status(
   return schema.Status.UNKNOWN
 
 
+def _build_postgres_metrics_merge_payload(
+    metrics_insert: postgresql.Insert,
+) -> sa.ColumnElement[Any]:
+  """Returns a PostgreSQL JSONB expression that shallow-merges `extra`."""
+  stored_extra = schema.TRAJECTORY_METRICS_TABLE.c.payload["extra"]
+  incoming_extra = metrics_insert.excluded.payload["extra"]
+  merged_extra = sa.case(
+      (
+          sa.func.jsonb_typeof(stored_extra) == "object",
+          stored_extra.concat(incoming_extra),
+      ),
+      else_=incoming_extra,
+  )
+  return sa.func.jsonb_set(
+      metrics_insert.excluded.payload,
+      sa.literal_column("'{extra}'"),
+      merged_extra,
+  )
+
+
 class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
   """Asynchronously writes trajectory metadata, step, and metrics records.
 
@@ -119,11 +120,22 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
        committed `metadata_payload` dicts in `_trajectories_by_run`, evicting
        the oldest 50% LRU chunk when capacity is reached to eliminate redundant
        database roundtrips and PostgreSQL MVCC/index bloat.
-    4. Best-Effort Fault Tolerance:
+    4. Unified 3-Stage Transactional Pipeline (Single Task & Multi-Row Batch):
+       Both single-task steady-state writes (`_process_task`) and contention
+       batches (`_process_batch`) execute `_execute_batch_transaction`:
+         a. In-memory normalization and cache filtering per table.
+         b. Foreign-key-ordered multi-row `INSERT ... ON CONFLICT` statements
+            inside a single transaction (`runs` -> `trajectories` -> `steps`
+            and `trajectory_metrics`).
+         c. Post-commit cache updates once the transaction commits.
+       Non-batchable bulk errors fall back to `super()._process_batch` to
+       isolate the failing task and persist the remaining valid tasks.
+    5. Best-Effort Fault Tolerance:
        Persistence errors (transient database disconnections, lock timeouts)
-       are logged with full traceback via `_log_task_error` and suppressed to
+       are logged with full traceback via `_log_task_error` (or at the batch
+       level when a bulk contention error aborts a batch) and suppressed to
        prevent crashing training loops.
-    5. Caller-Owned Status:
+    6. Caller-Owned Status:
        Trajectory status is only ever reported by the caller. This writer never
        infers one; a row it creates starts at UNKNOWN, and a write that states
        no status leaves the stored value untouched.
@@ -133,6 +145,7 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       self,
       engine: sa.Engine,
       max_cached_trajectories: int = _MAX_CACHED_TRAJECTORIES,
+      batching: async_writer.BatchConfig | None = None,
   ):
     """Initializes _AsyncSqlWriter without starting the background worker.
 
@@ -141,12 +154,14 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       max_cached_trajectories: Maximum number of trajectory metadata entries
         retained per run in the in-memory LRU cache to skip redundant trajectory
         upserts. Set to 0 to disable client-side trajectory metadata caching.
+      batching: Optional BatchConfig governing how queued tasks are grouped into
+        multi-row SQL transactions.
 
     Raises:
       ValueError: If the engine uses an unsupported database dialect, or if
         max_cached_trajectories is negative.
     """
-    super().__init__()
+    super().__init__(batching=batching)
     if max_cached_trajectories < 0:
       raise ValueError("max_cached_trajectories must be non-negative.")
     # Synchronous SQLAlchemy engine providing database connectivity and dialect.
@@ -162,16 +177,17 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
     ] = {}
 
     # Dialect-specific insert statement constructor for ON CONFLICT DO UPDATE.
-    self._insert_fn: Callable[..., Any]
-    if engine.dialect.name == db_engine.Dialect.POSTGRESQL:
-      self._insert_fn = postgresql.insert
-    elif engine.dialect.name == db_engine.Dialect.SQLITE:
-      self._insert_fn = sqlite.insert
-    else:
+    insert_fn_by_dialect: Mapping[str, Callable[..., Any]] = {
+        db_engine.Dialect.POSTGRESQL: postgresql.insert,
+        db_engine.Dialect.SQLITE: sqlite.insert,
+    }
+    insert_fn = insert_fn_by_dialect.get(engine.dialect.name)
+    if insert_fn is None:
       raise ValueError(
           f"Unsupported database dialect: {engine.dialect.name}. "
           f"Supported dialects are {', '.join(db_engine.Dialect)}."
       )
+    self._insert_fn: Callable[..., Any] = insert_fn
 
   def enqueue_write(
       self,
@@ -274,151 +290,332 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
     metadata_by_traj[traj_id] = metadata_payload
     metadata_by_traj.move_to_end(traj_id)
 
-  def _process_task(self, task: async_writer.WriteTask) -> None:
-    """Processes a single write task by upserting to SQL database.
-
-    Every statement for a task runs inside one transaction, so a trajectory row
-    and its step land atomically. Run IDs and trajectory metadata states are
-    cached only after that transaction commits, so a rolled back write is
-    retried on the next task without violating foreign-key constraints.
-
-    Database errors propagate to the worker loop, which logs them via
-    `_log_task_error` and continues with the next task.
-
-    Args:
-      task: Container holding run_id, metadata, metrics, and optional step.
-    """
-    run_id = task.run_id
-    if not run_id:
-      raise ValueError("WriteTask requires run_id.")
-    traj_id = task.trajectory_id
-    now_dt = datetime.datetime.now(datetime.timezone.utc)
-
-    if task.metrics is not None:
-      metrics_payload = task.metrics.model_dump(mode="json")
-      with self._engine.begin() as conn:
-        self._ensure_run_exists(conn, run_id, now_dt)
-        self._upsert_metrics(conn, run_id, traj_id, metrics_payload, now_dt)
-      if not self._run_agent_by_id.get(run_id):
-        self._run_agent_by_id[run_id] = ""
-      return
-
-    if task.metadata is not None:
-      agent_name = task.metadata.agent.name
-      metadata_payload = task.metadata.model_dump(
-          mode="json", exclude_none=True
-      )
-      with self._engine.begin() as conn:
-        self._ensure_run_exists(conn, run_id, now_dt, agent_name=agent_name)
-        self._upsert_trajectory(
-            conn, run_id, traj_id, task.metadata, metadata_payload, now_dt
-        )
-        if task.step is not None:
-          self._upsert_step(conn, run_id, traj_id, task.step)
-      if not self._run_agent_by_id.get(run_id):
-        self._run_agent_by_id[run_id] = agent_name
-      self._cache_committed_state(run_id, traj_id, metadata_payload)
-    elif task.step is not None:
-      with self._engine.begin() as conn:
-        self._upsert_step(conn, run_id, traj_id, task.step)
-
-  def _ensure_run_exists(
-      self,
-      conn: sa.Connection,
-      run_id: str,
-      now_dt: datetime.datetime,
-      agent_name: str = "",
-  ) -> None:
-    """Inserts the parent run row or backfills its `agent_name` if needed.
-
-    Committed `run_id -> agent_name` mappings are cached in `_run_agent_by_id`
-    to eliminate a database roundtrip on repeat writes. When a write registers
-    a run with an empty `agent_name`, the first subsequent metadata write with
-    a non-empty `agent_name` backfills it without overwriting non-empty values
-    registered elsewhere.
-
-    Args:
-      conn: Open connection participating in the task's transaction.
-      run_id: Validated non-empty run identifier.
-      now_dt: Single timestamp shared by every row written for this task.
-      agent_name: Owning agent name when known, or empty when unknown.
-    """
-    cached_agent = self._run_agent_by_id.get(run_id)
-    if cached_agent is not None and (cached_agent or not agent_name):
-      return
-
-    run_insert = self._insert_fn(schema.RUNS_TABLE).values(
-        run_id=run_id,
-        agent_name=agent_name,
-        status=schema.Status.PENDING,
-        created_at=now_dt,
-        config={},
+  def _should_batch_on_error(self, exc: BaseException) -> bool:
+    """Returns True for database lock contention or pool timeout errors."""
+    return isinstance(
+        exc,
+        (
+            sa.exc.OperationalError,
+            sa.exc.TimeoutError,
+        ),
     )
-    if agent_name:
-      run_insert_statement = run_insert.on_conflict_do_update(
-          index_elements=["run_id"],
-          set_={"agent_name": agent_name},
-          where=schema.RUNS_TABLE.c.agent_name == sa.literal(""),
+
+  def _process_batch(self, tasks: Sequence[async_writer.WriteTask]) -> None:
+    """Upserts a batch in one transaction, falling back per task on data error."""
+    if len(tasks) <= 1:
+      super()._process_batch(tasks)
+      return
+
+    try:
+      self._execute_batch_transaction(tasks)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      if self._should_batch_on_error(exc):
+        raise
+      logging.warning(
+          "%s bulk transaction failed for %d tasks; falling back to per-task"
+          " replay.",
+          self._thread_name,
+          len(tasks),
+          exc_info=True,
       )
     else:
-      run_insert_statement = run_insert.on_conflict_do_nothing(
-          index_elements=["run_id"]
-      )
-    conn.execute(run_insert_statement)
+      self._decrease_batch_wait()
+      return
 
-  def _upsert_metrics(
+    super()._process_batch(tasks)
+
+  def _process_task(self, task: async_writer.WriteTask) -> None:
+    """Persists a single write task through the unified transaction pipeline."""
+    self._execute_batch_transaction((task,))
+
+  def _collect_run_agents_to_upsert(
+      self, tasks: Sequence[async_writer.WriteTask]
+  ) -> dict[str, str]:
+    """Validates `run_id` and returns `run_id -> agent_name` updates."""
+    agent_name_by_run_id: dict[str, str] = {}
+    for task in tasks:
+      run_id = task.run_id
+      if not run_id:
+        raise ValueError("WriteTask requires run_id.")
+      if task.metadata is not None:
+        agent_name_by_run_id[run_id] = (
+            agent_name_by_run_id.get(run_id) or task.metadata.agent.name
+        )
+      elif task.metrics is not None:
+        agent_name_by_run_id.setdefault(run_id, "")
+
+    return {
+        run_id: agent_name
+        for run_id, agent_name in agent_name_by_run_id.items()
+        if (cached_agent := self._run_agent_by_id.get(run_id)) is None
+        or (not cached_agent and agent_name)
+    }
+
+  def _collect_trajectory_updates(
+      self,
+      tasks: Sequence[async_writer.WriteTask],
+      trajectory_batches: Sequence[
+          async_writer.TrajectoryBatch[async_writer.WriteTask]
+      ],
+      now_dt: datetime.datetime,
+  ) -> tuple[list[dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
+    """Returns deduplicated trajectory rows and post-commit cache entries."""
+    latest_status_by_key: dict[tuple[str, str], str] = {}
+    for task in tasks:
+      if (
+          task.run_id
+          and task.metadata is not None
+          and (status := _resolve_status(task.metadata))
+          != schema.Status.UNKNOWN
+      ):
+        latest_status_by_key[(task.run_id, task.trajectory_id)] = status
+
+    trajectory_rows: list[dict[str, Any]] = []
+    committed_metadata_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for batch in trajectory_batches:
+      meta_task = batch.latest_metadata_task
+      if (
+          batch.run_id is None
+          or meta_task is None
+          or meta_task.metadata is None
+      ):
+        continue
+      traj_key = (batch.run_id, batch.trajectory_id)
+      metadata_payload = meta_task.metadata.model_dump(
+          mode="json", exclude_none=True
+      )
+      committed_metadata_by_key[traj_key] = metadata_payload
+      resolved_status = latest_status_by_key.get(
+          traj_key, schema.Status.UNKNOWN
+      )
+      has_earlier_batch_status = resolved_status != _resolve_status(
+          meta_task.metadata
+      )
+      cached_payload = self._trajectories_by_run.get(batch.run_id, {}).get(
+          batch.trajectory_id
+      )
+      if cached_payload != metadata_payload or has_earlier_batch_status:
+        trajectory_rows.append({
+            "run_id": batch.run_id,
+            "trajectory_id": batch.trajectory_id,
+            "status": resolved_status,
+            "created_at": now_dt,
+            "updated_at": now_dt,
+            "trajectory_metadata": metadata_payload,
+        })
+    return trajectory_rows, committed_metadata_by_key
+
+  def _collect_step_and_metrics_rows(
+      self,
+      trajectory_batches: Sequence[
+          async_writer.TrajectoryBatch[async_writer.WriteTask]
+      ],
+      now_dt: datetime.datetime,
+  ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Returns deduplicated step and metrics row dicts across trajectories."""
+    step_rows: list[dict[str, Any]] = []
+    metrics_rows: list[dict[str, Any]] = []
+    for batch in trajectory_batches:
+      if batch.run_id is None:
+        continue
+      latest_step_by_id = {
+          step_task.step.step_id: step_task.step
+          for step_task in batch.step_tasks
+          if step_task.step is not None and step_task.step.step_id is not None
+      }
+      for step in latest_step_by_id.values():
+        step_rows.append({
+            "run_id": batch.run_id,
+            "trajectory_id": batch.trajectory_id,
+            "step_id": step.step_id,
+            "payload": step.model_dump(mode="json", exclude_none=True),
+            "created_at": _to_utc_timestamp(step.timestamp),
+        })
+      merged_metrics_task = batch.merged_queued_metrics_task
+      if (
+          merged_metrics_task is not None
+          and merged_metrics_task.metrics is not None
+      ):
+        metrics_rows.append({
+            "run_id": batch.run_id,
+            "trajectory_id": batch.trajectory_id,
+            "payload": merged_metrics_task.metrics.model_dump(mode="json"),
+            "created_at": now_dt,
+            "updated_at": now_dt,
+        })
+    return step_rows, metrics_rows
+
+  def _execute_batch_transaction(
+      self, tasks: Sequence[async_writer.WriteTask]
+  ) -> None:
+    """Persists deduplicated run, trajectory, step, and metrics rows atomically."""
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    run_agent_by_id = self._collect_run_agents_to_upsert(tasks)
+    run_rows = [
+        {
+            "run_id": run_id,
+            "agent_name": agent_name,
+            "status": schema.Status.PENDING,
+            "created_at": now_dt,
+            "config": {},
+        }
+        for run_id, agent_name in run_agent_by_id.items()
+    ]
+    trajectory_batches = async_writer.group_tasks_by_trajectory(tasks)
+    trajectory_rows, committed_metadata_by_key = (
+        self._collect_trajectory_updates(tasks, trajectory_batches, now_dt)
+    )
+    step_rows, metrics_rows = self._collect_step_and_metrics_rows(
+        trajectory_batches, now_dt
+    )
+
+    if any((run_rows, trajectory_rows, step_rows, metrics_rows)):
+      with self._engine.begin() as conn:
+        self._upsert_run_rows(conn, run_rows)
+        self._upsert_trajectory_rows(conn, trajectory_rows)
+        self._upsert_step_rows(conn, step_rows)
+        self._upsert_metrics_rows(conn, metrics_rows, now_dt)
+
+    self._run_agent_by_id.update(run_agent_by_id)
+    for (
+        run_id,
+        traj_id,
+    ), metadata_payload in committed_metadata_by_key.items():
+      self._cache_committed_state(run_id, traj_id, metadata_payload)
+
+  def _upsert_run_rows(
+      self, conn: sa.Connection, run_rows: Sequence[dict[str, Any]]
+  ) -> None:
+    """Inserts parent run rows or backfills empty `agent_name` values."""
+    if not run_rows:
+      return
+    run_insert = self._insert_fn(schema.RUNS_TABLE).values(run_rows)
+    if any(row["agent_name"] for row in run_rows):
+      stored_agent = schema.RUNS_TABLE.c.agent_name
+      incoming_agent = run_insert.excluded.agent_name
+      run_upsert = run_insert.on_conflict_do_update(
+          index_elements=["run_id"],
+          set_={"agent_name": incoming_agent},
+          where=sa.and_(
+              stored_agent == sa.literal(""),
+              incoming_agent != sa.literal(""),
+          ),
+      )
+    else:
+      run_upsert = run_insert.on_conflict_do_nothing(index_elements=["run_id"])
+    conn.execute(run_upsert)
+
+  def _upsert_trajectory_rows(
+      self, conn: sa.Connection, trajectory_rows: Sequence[dict[str, Any]]
+  ) -> None:
+    """Executes a multi-row trajectory upsert in the open transaction."""
+    if not trajectory_rows:
+      return
+    trajectory_insert = self._insert_fn(schema.TRAJECTORIES_TABLE).values(
+        trajectory_rows
+    )
+    stored_metadata = schema.TRAJECTORIES_TABLE.c.trajectory_metadata
+    stored_status = schema.TRAJECTORIES_TABLE.c.status
+    incoming = trajectory_insert.excluded
+    has_incoming_status = incoming.status != schema.Status.UNKNOWN
+    conn.execute(
+        trajectory_insert.on_conflict_do_update(
+            index_elements=["run_id", "trajectory_id"],
+            set_={
+                "updated_at": incoming.updated_at,
+                "trajectory_metadata": incoming.trajectory_metadata,
+                "status": sa.case(
+                    (has_incoming_status, incoming.status),
+                    else_=stored_status,
+                ),
+            },
+            where=sa.or_(
+                stored_metadata.is_distinct_from(incoming.trajectory_metadata),
+                sa.and_(has_incoming_status, stored_status != incoming.status),
+            ),
+        )
+    )
+
+  def _upsert_step_rows(
+      self, conn: sa.Connection, step_rows: Sequence[dict[str, Any]]
+  ) -> None:
+    """Executes a multi-row step upsert in the open transaction."""
+    if not step_rows:
+      return
+    step_insert = self._insert_fn(schema.STEPS_TABLE).values(step_rows)
+    incoming = step_insert.excluded
+    conn.execute(
+        step_insert.on_conflict_do_update(
+            index_elements=["run_id", "trajectory_id", "step_id"],
+            set_={
+                "payload": incoming.payload,
+                "created_at": incoming.created_at,
+            },
+        )
+    )
+
+  def _upsert_metrics_rows(
       self,
       conn: sa.Connection,
-      run_id: str,
-      traj_id: str,
-      metrics_payload: dict[str, Any],
+      metrics_rows: Sequence[dict[str, Any]],
       now_dt: datetime.datetime,
   ) -> None:
-    """Upserts trajectory metrics with shallow top-level `extra` merge."""
-    values = {
-        "run_id": run_id,
-        "trajectory_id": traj_id,
-        "payload": metrics_payload,
-        "created_at": now_dt,
-        "updated_at": now_dt,
-    }
-    if metrics_payload["extra"] is None:
+    """Upserts trajectory metrics rows with shallow top-level `extra` merge."""
+    insert_only_rows = [
+        row for row in metrics_rows if row["payload"]["extra"] is None
+    ]
+    if insert_only_rows:
       conn.execute(
           self._insert_fn(schema.TRAJECTORY_METRICS_TABLE)
-          .values(**values)
+          .values(insert_only_rows)
           .on_conflict_do_nothing(index_elements=["run_id", "trajectory_id"])
       )
+
+    merge_rows = [
+        row for row in metrics_rows if row["payload"]["extra"] is not None
+    ]
+    if not merge_rows:
       return
 
     if self._engine.dialect.name == db_engine.Dialect.POSTGRESQL:
-      merged_payload_sql = sa.text(_POSTGRES_METRICS_MERGE_SQL)
+      metrics_insert = postgresql.insert(
+          schema.TRAJECTORY_METRICS_TABLE
+      ).values(merge_rows)
+      stored_payload = schema.TRAJECTORY_METRICS_TABLE.c.payload
+      merged_payload = _build_postgres_metrics_merge_payload(metrics_insert)
       conn.execute(
-          postgresql.insert(schema.TRAJECTORY_METRICS_TABLE)
-          .values(**values)
-          .on_conflict_do_update(
+          metrics_insert.on_conflict_do_update(
               index_elements=["run_id", "trajectory_id"],
               set_={
                   "updated_at": now_dt,
-                  "payload": merged_payload_sql,
+                  "payload": merged_payload,
               },
-              where=schema.TRAJECTORY_METRICS_TABLE.c.payload.is_distinct_from(
-                  merged_payload_sql
-              ),
+              where=stored_payload.is_distinct_from(merged_payload),
           )
       )
       return
 
-    # On SQLite, lead with `INSERT ... ON CONFLICT DO NOTHING` so new rows
-    # commit in a single roundtrip and conflicts acquire the write lock up
-    # front (preventing WAL read-to-write lock upgrade failures).
+    for row in merge_rows:
+      self._upsert_sqlite_metrics_row(conn, row, now_dt)
+
+  def _upsert_sqlite_metrics_row(
+      self,
+      conn: sa.Connection,
+      row: Mapping[str, Any],
+      now_dt: datetime.datetime,
+  ) -> None:
+    """Upserts one SQLite trajectory metrics row with non-None `extra`."""
     insert_result = conn.execute(
         self._insert_fn(schema.TRAJECTORY_METRICS_TABLE)
-        .values(**values)
+        .values(**row)
         .on_conflict_do_nothing(index_elements=["run_id", "trajectory_id"])
     )
     if insert_result.rowcount:
       return
 
+    run_id = row["run_id"]
+    traj_id = row["trajectory_id"]
+    metrics_payload = row["payload"]
     existing_payload = conn.execute(
         sa.select(schema.TRAJECTORY_METRICS_TABLE.c.payload).where(
             schema.TRAJECTORY_METRICS_TABLE.c.run_id == run_id,
@@ -440,107 +637,6 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
             updated_at=now_dt,
         )
     )
-
-  def _upsert_trajectory(
-      self,
-      conn: sa.Connection,
-      run_id: str,
-      traj_id: str,
-      metadata: trajectory_lib.TrajectoryMetadata,
-      metadata_payload: dict[str, Any],
-      now_dt: datetime.datetime,
-  ) -> None:
-    """Upserts the trajectory row if its metadata has changed.
-
-    Skips the database roundtrip entirely when `metadata_payload` matches the
-    cached payload in `_trajectories_by_run`. On a cache miss,
-    `on_conflict_do_update` refreshes `trajectory_metadata` and `updated_at`
-    (plus `status` when provided) only when the incoming `trajectory_metadata`
-    differs from the stored row.
-
-    Args:
-      conn: Open connection participating in the task's transaction.
-      run_id: Validated non-empty run identifier.
-      traj_id: Validated non-empty trajectory identifier.
-      metadata: Trajectory metadata instance used to resolve status.
-      metadata_payload: Serialized JSON-compatible trajectory metadata dict.
-      now_dt: Single timestamp shared by every row written for this task.
-    """
-    if (
-        self._trajectories_by_run.get(run_id, {}).get(traj_id)
-        == metadata_payload
-    ):
-      return
-
-    status = _resolve_status(metadata)
-
-    # Columns to overwrite in an existing row.
-    columns_to_overwrite: dict[str, Any] = {
-        "updated_at": now_dt,
-        "trajectory_metadata": metadata_payload,
-    }
-    if status != schema.Status.UNKNOWN:
-      columns_to_overwrite["status"] = status
-
-    trajectory_upsert_statement = (
-        self._insert_fn(schema.TRAJECTORIES_TABLE)
-        .values(
-            run_id=run_id,
-            trajectory_id=traj_id,
-            status=status,
-            created_at=now_dt,
-            updated_at=now_dt,
-            trajectory_metadata=metadata_payload,
-        )
-        .on_conflict_do_update(
-            index_elements=["run_id", "trajectory_id"],
-            set_=columns_to_overwrite,
-            where=schema.TRAJECTORIES_TABLE.c.trajectory_metadata.is_distinct_from(
-                metadata_payload
-            ),
-        )
-    )
-    conn.execute(trajectory_upsert_statement)
-
-  def _upsert_step(
-      self,
-      conn: sa.Connection,
-      run_id: str,
-      traj_id: str,
-      step: trajectory_lib.Step,
-  ) -> None:
-    """Upserts the step row attached to the trajectory.
-
-    `on_conflict_do_update` replaces `payload` and `created_at` when the same
-    step id is written again.
-
-    Args:
-      conn: Open connection participating in the task's transaction.
-      run_id: Validated non-empty run identifier.
-      traj_id: Validated non-empty trajectory identifier.
-      step: The step to write.
-    """
-    step_payload = step.model_dump(mode="json", exclude_none=True)
-    step_time = _to_utc_timestamp(step.timestamp)
-
-    step_upsert_statement = (
-        self._insert_fn(schema.STEPS_TABLE)
-        .values(
-            run_id=run_id,
-            trajectory_id=traj_id,
-            step_id=step.step_id,
-            payload=step_payload,
-            created_at=step_time,
-        )
-        .on_conflict_do_update(
-            index_elements=["run_id", "trajectory_id", "step_id"],
-            set_={
-                "payload": step_payload,
-                "created_at": step_time,
-            },
-        )
-    )
-    conn.execute(step_upsert_statement)
 
   def _log_task_error(self, task: async_writer.WriteTask) -> None:
     """Logs detailed task error with trajectory and run context.
@@ -598,6 +694,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       run_id: str,
       db_url: str,
       auto_init: bool = True,
+      batching: async_writer.BatchConfig | None = None,
   ) -> None:
     """Initializes SqlTrajectoryStore.
 
@@ -612,6 +709,8 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
         omit the password; libpq then reads `PGPASSWORD` or `~/.pgpass`.
       auto_init: If True, automatically creates database tables and indexes on
         startup via `_initialize_schema`.
+      batching: Optional BatchConfig governing how queued tasks are grouped into
+        multi-row SQL transactions.
 
     Raises:
       ValueError: If `run_id` or `db_url` is empty, None, or whitespace, or if
@@ -625,7 +724,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     )
     self._engine = self._engine_handle.engine
     try:
-      self._writer = _AsyncSqlWriter(engine=self._engine)
+      self._writer = _AsyncSqlWriter(engine=self._engine, batching=batching)
     except Exception:
       self._engine_handle.release()
       raise
@@ -637,6 +736,11 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
         # drain with a disposed engine.
         self.close()
         raise
+
+  @property
+  def batching(self) -> async_writer.BatchConfig:
+    """Returns the active BatchConfig for this store."""
+    return self._writer.batching
 
   @classmethod
   def _from_config(
@@ -868,9 +972,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       )
       with self._engine.connect() as conn:
         metadata_rows = conn.execute(statement)
-        return [
-            self._load_metadata(row) for row in metadata_rows.scalars()
-        ]
+        return [self._load_metadata(row) for row in metadata_rows.scalars()]
 
     # Query only the requested trajectory IDs when a sequence is provided.
     if not trajectory_ids:
