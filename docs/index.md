@@ -13,6 +13,9 @@ reliability.md
 launching.md
 rollout.md
 algorithms.md
+tunix_capability_checklist.md
+tunix_rl_research_directions.md
+tunix_rl_research_references.md
 models.md
 metrics.md
 examples.md
