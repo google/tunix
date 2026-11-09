@@ -1223,6 +1223,7 @@ class TrajectoryCollectEngine:
     # If the budget is already spent (e.g. by the unbounded first model call),
     # skip env.step and end as TIMEOUT below rather than as a hung env.
     budget_spent = remaining_time <= 0
+    truncated = False
     if not budget_spent and not self._check_and_set_context_limit_reached():
       try:
         with self.perf_v2.span(
@@ -1272,7 +1273,9 @@ class TrajectoryCollectEngine:
           self._debug_prefix,
           json.dumps(info, default=str, indent=2),
       )
-      self.agent.update_from_env(obs, rew, done, self._rollout_state_info(info))
+      enriched_info = self._rollout_state_info(info)
+      truncated = done and bool(enriched_info.get("truncated"))
+      self.agent.update_from_env(obs, rew, done, enriched_info)
     else:
       done = True
 
@@ -1317,6 +1320,12 @@ class TrajectoryCollectEngine:
       self._mark_timeout()
       cur_step.done = True
       return True
+
+    if truncated:
+      self.agent.trajectory.status = (
+          agent_types.TrajectoryStatus.MAX_STEPS_REACHED
+      )
+      self._log_trajectory_clip("MAX_STEPS_REACHED")
 
     return done
 

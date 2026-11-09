@@ -338,15 +338,25 @@ class BaseTaskEnv(BaseEnv):
       action: The agent's action to execute.
 
     Returns:
-      A tuple of (observation, reward, done, info).
+      A tuple of (observation, reward, done, info). When `max_steps` forces
+      termination on a non-terminal `_step_impl` result, `info["truncated"]` is
+      set to True.
     """
     self.step_count += 1
     result = self._step_impl(action)
 
     # Enforce maximum episode length; if _step_impl has already finished
-    # the episode, keep done=True.
-    done = result.done or (self.step_count >= self.max_steps)
-    return result.observation, result.reward, done, result.info
+    # the episode, keep done=True without marking truncation.
+    truncated = not result.done and self.step_count >= self.max_steps
+    done = result.done or truncated
+    raw_info = result.info or {}
+    if truncated:
+      info = {**raw_info, "truncated": True}
+    elif result.done and "truncated" in raw_info:
+      info = {**raw_info, "truncated": False}
+    else:
+      info = raw_info if result.info is not None else {}
+    return result.observation, result.reward, done, info
 
   @classmethod
   def from_dict(cls, env_args: Dict[str, Any]) -> "BaseTaskEnv":

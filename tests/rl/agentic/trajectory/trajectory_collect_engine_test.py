@@ -2131,6 +2131,129 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     ):
       asyncio.run(self._run_collect(engine, mode='Trajectory'))
 
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_base_task_env_max_steps_truncation_vs_natural_done(
+      self, mock_convert
+  ):
+    class _StubTaskEnv(base_environment.BaseTaskEnv):
+
+      def __init__(self, *, step_results, **kwargs):
+        super().__init__(**kwargs)
+        self._step_results = iter(step_results)
+
+      def _initial_observation(self):
+        return 'task_prompt'
+
+      def _step_impl(self, action):
+        del action
+        return next(self._step_results)
+
+    null_info_env = _StubTaskEnv(
+        step_results=[
+            base_environment.EnvStepResult(
+                observation='obs',
+                reward=0.0,
+                done=False,
+                info=None,  # pyrefly: ignore[bad-argument-type]
+            )
+        ],
+        max_steps=1,
+    )
+    null_info_env.reset()
+    _, _, null_done, null_info = null_info_env.step('act')
+    self.assertTrue(null_done)
+    self.assertEqual(null_info, {'truncated': True})
+
+    mock_convert.side_effect = [
+        ([101], [1]),
+        ([301], [0]),
+        ([101], [1]),
+        ([302], [0]),
+    ]
+    truncated_grader = mock.Mock(return_value=1.0)
+    truncated_env = _StubTaskEnv(
+        step_results=[
+            base_environment.EnvStepResult(
+                observation='obs1', reward=0.0, done=False, info={'turn': 1}
+            ),
+            base_environment.EnvStepResult(
+                observation='obs2', reward=0.0, done=False, info={'turn': 2}
+            ),
+        ],
+        max_steps=2,
+        final_reward_fn=truncated_grader,
+    )
+    truncated_data = asyncio.run(
+        self._run_collect(
+            trajectory_collect_engine.TrajectoryCollectEngine(
+                agent=self.mock_agent,
+                env=truncated_env,
+                model_call=self.mock_model_call,
+                tokenizer=self.mock_tokenizer,
+                chat_parser=self.mock_chat_parser,
+                overlong_filter=True,
+            ),
+            mode='Token',
+        )
+    )
+    self.assertNotIn('truncated', self.trajectory.steps[0].info)
+    self.assertEqual(self.trajectory.steps[-1].info['turn'], 2)
+    self.assertTrue(self.trajectory.steps[-1].info['truncated'])
+    self.assertEqual(
+        truncated_data['status'],
+        agent_types.TrajectoryStatus.MAX_STEPS_REACHED.name,
+    )
+    self.assertTrue(self.trajectory.masked_out)
+    truncated_grader.assert_not_called()
+    np.testing.assert_array_equal(
+        truncated_data['conversation_masks'], np.zeros(5, dtype=np.int32)
+    )
+
+    natural_grader = mock.Mock(return_value=1.0)
+    natural_env = _StubTaskEnv(
+        step_results=[
+            base_environment.EnvStepResult(
+                observation='obs1',
+                reward=0.0,
+                done=False,
+                info={'turn': 1, 'truncated': True},
+            ),
+            base_environment.EnvStepResult(
+                observation='obs2',
+                reward=0.0,
+                done=True,
+                info={'turn': 2, 'truncated': True},
+            ),
+        ],
+        max_steps=2,
+        final_reward_fn=natural_grader,
+    )
+    natural_data = asyncio.run(
+        self._run_collect(
+            trajectory_collect_engine.TrajectoryCollectEngine(
+                agent=self.mock_agent,
+                env=natural_env,
+                model_call=self.mock_model_call,
+                tokenizer=self.mock_tokenizer,
+                chat_parser=self.mock_chat_parser,
+                overlong_filter=True,
+            ),
+            mode='Token',
+        )
+    )
+    self.assertTrue(self.trajectory.steps[0].info['truncated'])
+    self.assertFalse(self.trajectory.steps[-1].info['truncated'])
+    self.assertEqual(
+        natural_data['status'], agent_types.TrajectoryStatus.SUCCEEDED.name
+    )
+    self.assertFalse(self.trajectory.masked_out)
+    natural_grader.assert_called_once_with()
+    self.assertAlmostEqual(natural_data['trajectory_reward'], 1.0)
+    np.testing.assert_array_equal(
+        natural_data['conversation_masks'],
+        np.array([1, 1, 0, 1, 1], dtype=np.int32),
+    )
+
 
 class _FreshTextTokenizer:
   """Only freshly formatted observations are allowed into this encoder."""
