@@ -1,9 +1,11 @@
 import collections
 from collections.abc import Iterator
+from concurrent import futures
 import copy
 import json
 import os
 import pickle
+import random
 import sys
 from typing import Any
 from unittest import mock
@@ -201,8 +203,8 @@ class MetadataDictSerializationTest(parameterized.TestCase):
     self.assertIsNot(dumped_tokens, tokens)
 
   def test_model_dump_copies_packed_scalar_lists_without_rescanning(self):
-    agent_step = trajectory_testing.TUNIX_AGENT_STEP_1.to_atif_step()
-    packed = agent_step.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    atif_meta = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
+    packed = atif_meta.extra[trajectory.TUNIX_EXTENSIONS_KEY]
     self.assertIs(type(packed), trajectory._JsonCompatibleDict)
     packed_lists = [
         value for value in packed.values() if isinstance(value, list)
@@ -220,13 +222,13 @@ class MetadataDictSerializationTest(parameterized.TestCase):
         "_to_json_compatible",
         wraps=trajectory._to_json_compatible,
     ) as mock_to_json_compatible:
-      dumped_extra = agent_step.model_dump()["extra"]
+      dumped_extra = atif_meta.model_dump()["extra"]
 
-    self.assertEqual(dumped_extra, agent_step.extra)
+    self.assertEqual(dumped_extra, atif_meta.extra)
     dumped_packed = dumped_extra[trajectory.TUNIX_EXTENSIONS_KEY]
     self.assertIs(type(dumped_packed), dict)
-    # Packed token, mask, and logprob lists are copied in one C call, and
-    # scalar extensions skip recursive dispatch altogether.
+    # Packed scalar lists are copied in one C call, and scalar extensions skip
+    # recursive dispatch altogether.
     called_values = [
         call.args[0] for call in mock_to_json_compatible.call_args_list
     ]
@@ -234,9 +236,10 @@ class MetadataDictSerializationTest(parameterized.TestCase):
       self.assertTrue(all(v is not packed_list for v in called_values))
     for packed_scalar in packed_scalars:
       self.assertTrue(all(v is not packed_scalar for v in called_values))
-    self.assertEqual(dumped_packed["assistant_tokens"], [10, 20])
+    self.assertEqual(dumped_packed["target_policy_versions"], [2, 3])
     self.assertIsNot(
-        dumped_packed["assistant_tokens"], packed["assistant_tokens"]
+        dumped_packed["target_policy_versions"],
+        packed["target_policy_versions"],
     )
 
   def test_model_dump_converts_caller_built_extensions_dict(self):
@@ -328,7 +331,10 @@ class PackedExtensionsTest(parameterized.TestCase):
 
     self.assertIs(type(packed), trajectory._JsonCompatibleDict)
     self.assertEqual(packed["custom"], [7])
-    self.assertEqual(packed["assistant_tokens"], [10, 20])
+    self.assertEqual(
+        packed["assistant_tokens"],
+        trajectory._serialize_int_array([10, 20]),
+    )
 
 
 class _IterationCountingArray(np.ndarray):
@@ -775,8 +781,8 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
 
   def test_deep_copy_preserves_packed_extensions(self) -> None:
     """Verifies packed extensions keep their type and copy lists directly."""
-    atif_step = trajectory_testing.TUNIX_AGENT_STEP_1.to_atif_step()
-    packed = atif_step.extra[trajectory.TUNIX_EXTENSIONS_KEY]
+    atif_meta = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
+    packed = atif_meta.extra[trajectory.TUNIX_EXTENSIONS_KEY]
     packed_lists = [
         value for value in packed.values() if isinstance(value, list)
     ]
@@ -787,13 +793,14 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
         "_deep_copy_into_memo",
         wraps=trajectory._deep_copy_into_memo,
     ) as mock_deep_copy_into_memo:
-      copied = trajectory.deep_copy(atif_step)
+      copied = trajectory.deep_copy(atif_meta)
 
     copied_packed = copied.extra[trajectory.TUNIX_EXTENSIONS_KEY]
     self.assertIs(type(copied_packed), trajectory._JsonCompatibleDict)
     self.assertEqual(copied_packed, packed)
     self.assertIsNot(
-        copied_packed["assistant_tokens"], packed["assistant_tokens"]
+        copied_packed["target_policy_versions"],
+        packed["target_policy_versions"],
     )
     for call in mock_deep_copy_into_memo.call_args_list:
       for packed_list in packed_lists:
@@ -803,20 +810,23 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
       dict(
           testcase_name="caller_supplied_nested_list",
           step_kwargs={
-              "extra": {
-                  trajectory.TUNIX_EXTENSIONS_KEY: {"tags": [{"k": "v"}]}
-              }
+              "extra": {trajectory.TUNIX_EXTENSIONS_KEY: {"tags": [{"k": "v"}]}}
           },
           packed_key="tags",
+          nested_key=0,
       ),
       dict(
-          testcase_name="two_dimensional_array",
-          step_kwargs={"logprobs": np.zeros((2, 3), dtype=np.float32)},
+          testcase_name="serialized_1d_array",
+          step_kwargs={"logprobs": np.zeros((3,), dtype=np.float32)},
           packed_key="logprobs",
+          nested_key="shape",
       ),
   )
   def test_deep_copy_of_projected_step_shares_no_nested_containers(
-      self, step_kwargs: dict[str, Any], packed_key: str
+      self,
+      step_kwargs: dict[str, Any],
+      packed_key: str,
+      nested_key: int | str,
   ) -> None:
     """Verifies packed extensions holding nested containers are deep-copied."""
     atif_step = trajectory.TunixAgentStep(
@@ -831,7 +841,9 @@ class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
 
     copied_packed = copied.extra[trajectory.TUNIX_EXTENSIONS_KEY]
     self.assertEqual(copied_packed[packed_key], packed[packed_key])
-    self.assertIsNot(copied_packed[packed_key][0], packed[packed_key][0])
+    self.assertIsNot(
+        copied_packed[packed_key][nested_key], packed[packed_key][nested_key]
+    )
 
   def test_scalar_list_fields_populated_from_annotations(self) -> None:
     """Verifies `SCALAR_LIST_FIELDS` is derived from `model_fields` at import/init."""
@@ -1467,12 +1479,22 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     )
     json_str = step.model_dump_json(exclude_none=True)
     loaded_dict = json.loads(json_str)
-    self.assertEqual(loaded_dict["assistant_tokens"], [10, 20])
-    self.assertEqual(loaded_dict["logprobs"], [-0.5, -0.3])
+    self.assertEqual(
+        loaded_dict["assistant_tokens"],
+        trajectory._serialize_int_array(np.array([10, 20])),
+    )
+    self.assertEqual(
+        loaded_dict["logprobs"],
+        trajectory._serialize_float_array(np.array([-0.5, -0.3])),
+    )
 
     reloaded_step = trajectory.TunixAgentStep.model_validate_json(json_str)
-    self.assertEqual(reloaded_step.assistant_tokens, [10, 20])
-    self.assertEqual(reloaded_step.logprobs, [-0.5, -0.3])
+    np.testing.assert_array_equal(
+        reloaded_step.assistant_tokens, np.array([10, 20])
+    )
+    np.testing.assert_array_equal(
+        reloaded_step.logprobs, np.array([-0.5, -0.3])
+    )
 
   def test_step_equality(self):
     step1 = trajectory.TunixAgentStep(
@@ -1936,9 +1958,9 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
         {
             "user_key": "val",
             trajectory.TUNIX_EXTENSIONS_KEY: {
-                "assistant_tokens": [10, 20],
-                "assistant_masks": [1, 1],
-                "logprobs": [-0.5, -0.2],
+                "assistant_tokens": trajectory._serialize_int_array([10, 20]),
+                "assistant_masks": trajectory._serialize_int_array([1, 1]),
+                "logprobs": trajectory._serialize_float_array([-0.5, -0.2]),
                 "policy_version": 3,
                 "prefill_routed_experts": trajectory._serialize_int_3d_array(
                     [[[1, 2]], [[3, 4]], [[5, 6]]]
@@ -1965,8 +1987,8 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
             trajectory.TUNIX_EXTENSIONS_KEY: {
                 "reward": 1.0,
                 "done": False,
-                "env_tokens": [1, 2],
-                "env_masks": [1, 1],
+                "env_tokens": trajectory._serialize_int_array([1, 2]),
+                "env_masks": trajectory._serialize_int_array([1, 1]),
             },
         },
     )
@@ -3425,6 +3447,281 @@ class Int3DArraySerializationTest(parameterized.TestCase):
       )
 
 
+class Base641DArraySerializationTest(parameterized.TestCase):
+  """Tests Base64 binary serialization and validation for 1D arrays."""
+
+  @parameterized.named_parameters(
+      dict(testcase_name="int8", dtype=np.int8),
+      dict(testcase_name="int16", dtype=np.int16),
+      dict(testcase_name="int32", dtype=np.int32),
+      dict(testcase_name="int64", dtype=np.int64),
+      dict(testcase_name="uint8", dtype=np.uint8),
+      dict(testcase_name="uint16", dtype=np.uint16),
+      dict(testcase_name="uint32", dtype=np.uint32),
+      dict(testcase_name="uint64", dtype=np.uint64),
+  )
+  def test_model_dump_int_array_round_trips_base64_blob(
+      self, dtype: Any
+  ) -> None:
+    arr = np.array([10, 20, 30], dtype=dtype)
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="tokens",
+        assistant_tokens=arr,
+    )
+
+    dumped = step.model_dump(mode="json")
+    restored = trajectory.TunixAgentStep.model_validate(dumped)
+
+    blob = dumped["assistant_tokens"]
+    self.assertEqual(blob["shape"], [3])
+    self.assertEqual(blob["dtype"], np.dtype(dtype).name)
+    self.assertIsInstance(blob["data"], str)
+    self.assertIsInstance(restored.assistant_tokens, np.ndarray)
+    self.assertEqual(restored.assistant_tokens.dtype, dtype)
+    np.testing.assert_array_equal(restored.assistant_tokens, arr)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="float16", dtype=np.float16),
+      dict(testcase_name="float32", dtype=np.float32),
+      dict(testcase_name="float64", dtype=np.float64),
+  )
+  def test_model_dump_float_array_round_trips_base64_blob(
+      self, dtype: Any
+  ) -> None:
+    arr = np.array([-0.5, -0.25, 0.0], dtype=dtype)
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="logprobs",
+        logprobs=arr,
+    )
+
+    dumped = step.model_dump(mode="json")
+    restored = trajectory.TunixAgentStep.model_validate(dumped)
+
+    blob = dumped["logprobs"]
+    self.assertEqual(blob["shape"], [3])
+    self.assertEqual(blob["dtype"], np.dtype(dtype).name)
+    self.assertIsInstance(blob["data"], str)
+    self.assertIsInstance(restored.logprobs, np.ndarray)
+    self.assertEqual(restored.logprobs.dtype, dtype)
+    np.testing.assert_array_equal(restored.logprobs, arr)
+
+  def test_model_dump_empty_1d_arrays_preserves_shape_and_dtype(self) -> None:
+    empty_int = np.array([], dtype=np.int32)
+    empty_float = np.array([], dtype=np.float32)
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="empty",
+        assistant_tokens=empty_int,
+        logprobs=empty_float,
+    )
+
+    dumped = step.model_dump(mode="json")
+    restored = trajectory.TunixAgentStep.model_validate(dumped)
+
+    self.assertEqual(
+        dumped["assistant_tokens"],
+        {"shape": [0], "dtype": "int32", "data": ""},
+    )
+    self.assertEqual(
+        dumped["logprobs"],
+        {"shape": [0], "dtype": "float32", "data": ""},
+    )
+    np.testing.assert_array_equal(restored.assistant_tokens, empty_int)
+    np.testing.assert_array_equal(restored.logprobs, empty_float)
+
+  def test_init_empty_untyped_ndarray_succeeds_for_int_and_float_arrays(
+      self,
+  ) -> None:
+    step = trajectory.TunixEnvStep(
+        step_id=0,
+        source=trajectory.Source.USER,
+        message="empty_env",
+        env_tokens=np.array([]),
+        env_masks=np.array([]),
+    )
+
+    self.assertEqual(step.env_tokens.dtype, np.int64)
+    self.assertEqual(step.env_masks.dtype, np.int64)
+
+    dumped = step.to_atif_step().model_dump(mode="json")
+    restored = trajectory.TunixEnvStep.from_atif_step(
+        trajectory.Step.model_validate(dumped)
+    )
+
+    self.assertEqual(
+        dumped["extra"][trajectory.TunixEnvStep.EXTENSIONS_KEY]["env_tokens"],
+        {"shape": [0], "dtype": "int64", "data": ""},
+    )
+    self.assertIsInstance(restored.env_tokens, np.ndarray)
+    self.assertEqual(restored.env_tokens.shape, (0,))
+    self.assertEqual(restored.env_tokens.dtype, np.int64)
+
+  def test_model_dump_1d_arrays_matches_golden_little_endian_base64_literals(
+      self,
+  ) -> None:
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="golden",
+        assistant_tokens=np.array([1, 2], dtype=">i4"),
+        logprobs=np.array([-0.5, 0.25], dtype=">f4"),
+    )
+
+    dumped = step.model_dump(mode="json")
+    restored = trajectory.TunixAgentStep.model_validate(dumped)
+
+    self.assertEqual(
+        dumped["assistant_tokens"],
+        {"shape": [2], "dtype": "int32", "data": "AQAAAAIAAAA="},
+    )
+    self.assertEqual(
+        dumped["logprobs"],
+        {"shape": [2], "dtype": "float32", "data": "AAAAvwAAgD4="},
+    )
+    self.assertEqual(restored.assistant_tokens.dtype, np.dtype("<i4"))
+    self.assertEqual(restored.logprobs.dtype, np.dtype("<f4"))
+    np.testing.assert_array_equal(
+        restored.assistant_tokens, np.array([1, 2], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        restored.logprobs, np.array([-0.5, 0.25], dtype=np.float32)
+    )
+
+  def test_from_atif_step_rehydrates_legacy_list_payloads(self) -> None:
+    legacy_atif_step = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="legacy",
+        extra={
+            trajectory.TunixAgentStep.EXTENSIONS_KEY: {
+                "assistant_tokens": [10, 20, 30],
+                "assistant_masks": [1, 1, 0],
+                "logprobs": [-0.5, -0.25, 0.0],
+            }
+        },
+    )
+
+    restored = trajectory.TunixAgentStep.from_atif_step(legacy_atif_step)
+
+    self.assertEqual(restored.step_id, 0)
+    self.assertEqual(restored.assistant_tokens, [10, 20, 30])
+    self.assertEqual(restored.assistant_masks, [1, 1, 0])
+    self.assertEqual(restored.logprobs, [-0.5, -0.25, 0.0])
+
+  def test_init_exact_scalar_lists_copies_inputs_without_aliasing(self) -> None:
+    caller_tokens = [10, 20, 30]
+    caller_logprobs = [-0.5, -0.25, 0.0]
+
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="lists",
+        assistant_tokens=caller_tokens,
+        logprobs=caller_logprobs,
+    )
+    caller_tokens.append(40)
+    caller_logprobs.append(-1.0)
+
+    self.assertEqual(step.assistant_tokens, [10, 20, 30])
+    self.assertEqual(step.logprobs, [-0.5, -0.25, 0.0])
+
+  def test_init_mixed_numeric_list_delegates_to_pydantic_coercion(self) -> None:
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="coerced",
+        assistant_tokens=[10, 20],
+        logprobs=[-1, -0.5],
+    )
+
+    self.assertEqual(step.logprobs, [-1.0, -0.5])
+    self.assertTrue(all(isinstance(v, float) for v in step.logprobs or []))
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="bad_int_blob_keys",
+          field_name="assistant_tokens",
+          bad_value={"shape": [1], "dtype": "int32"},
+          expected_error="Invalid serialized IntArray keys",
+      ),
+      dict(
+          testcase_name="bad_int_blob_dtype",
+          field_name="assistant_tokens",
+          bad_value={"shape": [1], "dtype": "float32", "data": "AAAA"},
+          expected_error="Unsupported IntArray dtype",
+      ),
+      dict(
+          testcase_name="bad_int_blob_shape",
+          field_name="assistant_tokens",
+          bad_value={"shape": [1, 2], "dtype": "int32", "data": "AAAA"},
+          expected_error="Invalid IntArray shape",
+      ),
+      dict(
+          testcase_name="bad_int_base64",
+          field_name="assistant_tokens",
+          bad_value={"shape": [1], "dtype": "int32", "data": "%%%"},
+          expected_error="Failed to decode IntArray blob",
+      ),
+      dict(
+          testcase_name="int_byte_length_mismatch",
+          field_name="assistant_tokens",
+          bad_value={"shape": [2], "dtype": "int32", "data": "AAAAAA=="},
+          expected_error="does not match shape",
+      ),
+      dict(
+          testcase_name="bad_float_blob_dtype",
+          field_name="logprobs",
+          bad_value={"shape": [1], "dtype": "int32", "data": "AAAA"},
+          expected_error="Unsupported FloatArray dtype",
+      ),
+      dict(
+          testcase_name="two_dimensional_ndarray",
+          field_name="assistant_tokens",
+          bad_value=np.zeros((2, 3), dtype=np.int32),
+          expected_error="Expected a 1D array for IntArray",
+      ),
+      dict(
+          testcase_name="unsupported_ndarray_dtype",
+          field_name="assistant_tokens",
+          bad_value=np.array([True, False]),
+          expected_error="Unsupported IntArray dtype",
+      ),
+      dict(
+          testcase_name="non_empty_float_ndarray_for_int_array",
+          field_name="assistant_tokens",
+          bad_value=np.array([1.0, 2.0], dtype=np.float64),
+          expected_error="Unsupported IntArray dtype",
+      ),
+      dict(
+          testcase_name="empty_bool_ndarray_for_int_array",
+          field_name="assistant_tokens",
+          bad_value=np.array([], dtype=bool),
+          expected_error="Unsupported IntArray dtype",
+      ),
+      dict(
+          testcase_name="empty_bool_ndarray_for_float_array",
+          field_name="logprobs",
+          bad_value=np.array([], dtype=bool),
+          expected_error="Unsupported FloatArray dtype",
+      ),
+  )
+  def test_init_invalid_1d_array_blob_raises_value_error(
+      self, field_name: str, bad_value: Any, expected_error: str
+  ) -> None:
+    with self.assertRaisesRegex(ValueError, expected_error):
+      trajectory.TunixAgentStep(
+          step_id=0,
+          source=trajectory.Source.AGENT,
+          message="invalid",
+          **{field_name: bad_value},
+      )
+
+
 class TrajectoryMetricsTest(parameterized.TestCase):
   """Tests for the standalone TrajectoryMetrics model."""
 
@@ -3485,6 +3782,417 @@ class TrajectoryMetricsTest(parameterized.TestCase):
   def test_unknown_top_level_field_raises_validation_error(self) -> None:
     with self.assertRaisesRegex(pydantic.ValidationError, "extra_forbidden"):
       trajectory.TrajectoryMetrics.model_validate({"unknown_metric": 1})
+
+
+def _build_1d_test_array(dtype: np.dtype[Any], length: int) -> np.ndarray:
+  if length == 0:
+    return np.array([], dtype=dtype)
+  if np.issubdtype(dtype, np.floating):
+    vals = [((-1.25) ** (i + 1)) + 0.5 * i for i in range(length)]
+    return np.array(vals, dtype=dtype)
+  if np.issubdtype(dtype, np.signedinteger):
+    info = np.iinfo(dtype)
+    span = min(info.max, 100)
+    vals = [((i * 37) % (2 * span + 1)) - span for i in range(length)]
+    return np.array(vals, dtype=dtype)
+  info = np.iinfo(dtype)
+  span = min(info.max, 200)
+  vals = [(i * 53) % (span + 1) for i in range(length)]
+  return np.array(vals, dtype=dtype)
+
+
+class JsonNulSanitizationTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      dict(testcase_name="ascii_json", payload='{"key": "clean_value"}'),
+      dict(testcase_name="unicode_json", payload='{"key": "αβγ🚀"}'),
+      dict(testcase_name="empty_json", payload="{}"),
+  )
+  def test_strip_json_nul_bytes_clean_input_returns_same_object(
+      self, payload: str
+  ) -> None:
+    actual = trajectory.strip_json_nul_bytes(payload)
+
+    self.assertIs(actual, payload)
+    with mock.patch.object(trajectory, "_trajectory_ext", None):
+      fallback_actual = trajectory.strip_json_nul_bytes(payload)
+    self.assertIs(fallback_actual, payload)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="two_backslashes",
+          payload=r'{"key": "\\u0000"}',
+          expected_val=r"\u0000",
+      ),
+      dict(
+          testcase_name="four_backslashes",
+          payload=r'{"key": "\\\\u0000"}',
+          expected_val=r"\\u0000",
+      ),
+  )
+  def test_strip_json_nul_bytes_even_backslashes_preserves_literal(
+      self, payload: str, expected_val: str
+  ) -> None:
+    actual = trajectory.strip_json_nul_bytes(payload)
+
+    self.assertIs(actual, payload)
+    self.assertEqual(json.loads(actual), {"key": expected_val})
+    with mock.patch.object(trajectory, "_trajectory_ext", None):
+      fallback_actual = trajectory.strip_json_nul_bytes(payload)
+    self.assertIs(fallback_actual, payload)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="raw_nul_byte",
+          payload='{"key": "a\x00b"}',
+          expected='{"key": "ab"}',
+      ),
+      dict(
+          testcase_name="escaped_nul_sequence",
+          payload=r'{"key": "a\u0000b"}',
+          expected='{"key": "ab"}',
+      ),
+      dict(
+          testcase_name="three_backslashes_before_nul",
+          payload=r'{"key": "\\\u0000"}',
+          expected=r'{"key": "\\"}',
+      ),
+      dict(
+          testcase_name="five_backslashes_before_nul",
+          payload=r'{"key": "\\\\\u0000"}',
+          expected=r'{"key": "\\\\"}',
+      ),
+      dict(
+          testcase_name="mixed_raw_escaped_literal_and_unicode",
+          payload='{"key": "α\x00β\\u0000γ\\\\u0000δ🚀"}',
+          expected='{"key": "αβγ\\\\u0000δ🚀"}',
+      ),
+      dict(
+          testcase_name="split_escape_across_raw_nul",
+          payload='{"key": "\\\\\x00u0000"}',
+          expected='{"key": "\\\\u0000"}',
+      ),
+      dict(
+          testcase_name="backslash_raw_nul_and_escaped_nul",
+          payload='{"key": "\\\\\x00\\u0000"}',
+          expected='{"key": "\\\\"}',
+      ),
+  )
+  def test_strip_json_nul_bytes_nul_inputs_matches_expected_json(
+      self, payload: str, expected: str
+  ) -> None:
+    actual = trajectory.strip_json_nul_bytes(payload)
+    with mock.patch.object(trajectory, "_trajectory_ext", None):
+      fallback_actual = trajectory.strip_json_nul_bytes(payload)
+
+    self.assertEqual(actual, expected)
+    self.assertEqual(fallback_actual, expected)
+    self.assertIsInstance(json.loads(actual), dict)
+
+
+class TrajectoryCodecExtensionTest(parameterized.TestCase):
+
+  def setUp(self) -> None:
+    super().setUp()
+    if trajectory._trajectory_ext is None:
+      if "TEST_SRCDIR" in os.environ:
+        self.fail("Expected _trajectory_ext to be linked in Blaze tests.")
+      self.skipTest("C++ _trajectory_ext extension unavailable.")
+
+  @parameterized.product(
+      dtype_name=(
+          "int8",
+          "int16",
+          "int32",
+          "int64",
+          "uint8",
+          "uint16",
+          "uint32",
+          "uint64",
+          "float16",
+          "float32",
+          "float64",
+      ),
+      length=(0, 1, 2, 3, 5, 7),
+  )
+  def test_base64_1d_codec_all_dtypes_and_remainders_matches_python(
+      self, dtype_name: str, length: int
+  ) -> None:
+    dtype = np.dtype(dtype_name)
+    dtype_by_name = {dtype_name: dtype.newbyteorder("<")}
+    arr = _build_1d_test_array(dtype_by_name[dtype_name], length)
+
+    ext_blob = trajectory._encode_base64_array(arr)
+    with mock.patch.object(trajectory, "_trajectory_ext", None):
+      py_blob = trajectory._encode_base64_array(arr)
+      py_decoded = trajectory._decode_base64_array(
+          ext_blob, type_label="TestArray", dtype_by_name=dtype_by_name
+      )
+    ext_decoded = trajectory._decode_base64_array(
+        py_blob, type_label="TestArray", dtype_by_name=dtype_by_name
+    )
+
+    self.assertEqual(ext_blob, py_blob)
+    self.assertEqual(ext_decoded.dtype, arr.dtype)
+    self.assertEqual(ext_decoded.shape, arr.shape)
+    self.assertTrue(ext_decoded.flags.writeable)
+    self.assertTrue(ext_decoded.flags.c_contiguous)
+    np.testing.assert_array_equal(
+        ext_decoded.view(np.uint8), arr.view(np.uint8)
+    )
+    np.testing.assert_array_equal(
+        py_decoded.view(np.uint8), arr.view(np.uint8)
+    )
+
+  @parameterized.named_parameters(
+      dict(testcase_name="empty_axis", shape=(0, 4, 2)),
+      dict(testcase_name="rem_2_bytes", shape=(1, 1, 1)),
+      dict(testcase_name="rem_1_byte", shape=(1, 1, 2)),
+      dict(testcase_name="rem_0_bytes", shape=(1, 1, 3)),
+      dict(testcase_name="multi_turn_tensor", shape=(3, 4, 5)),
+  )
+  def test_int3d_array_step_round_trip_matches_python(
+      self, shape: tuple[int, int, int]
+  ) -> None:
+    size = shape[0] * shape[1] * shape[2]
+    arr = np.arange(size, dtype=np.int16).reshape(shape) - 7
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="moe",
+        prefill_routed_experts=arr,
+        prefill_start=0,
+        prefill_num_context=0,
+    )
+
+    ext_dumped = step.model_dump(mode="json")
+    with mock.patch.object(trajectory, "_trajectory_ext", None):
+      py_dumped = step.model_dump(mode="json")
+      py_restored = trajectory.TunixAgentStep.model_validate(ext_dumped)
+    ext_restored = trajectory.TunixAgentStep.model_validate(py_dumped)
+
+    self.assertEqual(
+        ext_dumped["prefill_routed_experts"],
+        py_dumped["prefill_routed_experts"],
+    )
+    self.assertIsNotNone(ext_restored.prefill_routed_experts)
+    self.assertIsNotNone(py_restored.prefill_routed_experts)
+    self.assertTrue(ext_restored.prefill_routed_experts.flags.writeable)
+    self.assertTrue(ext_restored.prefill_routed_experts.flags.c_contiguous)
+    np.testing.assert_array_equal(ext_restored.prefill_routed_experts, arr)
+    np.testing.assert_array_equal(py_restored.prefill_routed_experts, arr)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="leading_whitespace",
+          shape=[1],
+          data=" AAAAAA==",
+          expected_error="Failed to decode IntArray blob",
+      ),
+      dict(
+          testcase_name="trailing_newline",
+          shape=[1],
+          data="AAAAAA==\n",
+          expected_error="Failed to decode IntArray blob",
+      ),
+      dict(
+          testcase_name="embedded_space",
+          shape=[1],
+          data="AAA AAA==",
+          expected_error="Failed to decode IntArray blob",
+      ),
+      dict(
+          testcase_name="non_ascii",
+          shape=[1],
+          data="éAAAAA==",
+          expected_error="Failed to decode IntArray blob",
+      ),
+      dict(
+          testcase_name="embedded_nul",
+          shape=[1],
+          data="AA\x00AAA==",
+          expected_error="Failed to decode IntArray blob",
+      ),
+      dict(
+          testcase_name="unaligned_length_1",
+          shape=[1],
+          data="A",
+          expected_error="Failed to decode IntArray blob",
+      ),
+      dict(
+          testcase_name="unaligned_length_3",
+          shape=[1],
+          data="AAA",
+          expected_error="Failed to decode IntArray blob",
+      ),
+      dict(
+          testcase_name="only_padding_4",
+          shape=[1],
+          data="====",
+          expected_error="Failed to decode IntArray blob",
+      ),
+      dict(
+          testcase_name="three_equals_padding",
+          shape=[1],
+          data="A===",
+          expected_error="Failed to decode IntArray blob",
+      ),
+      dict(
+          testcase_name="mid_quad_padding",
+          shape=[1],
+          data="AA=A",
+          expected_error="Failed to decode IntArray blob",
+      ),
+      dict(
+          testcase_name="early_quad_padding",
+          shape=[2],
+          data="AA==AAAA",
+          expected_error="Failed to decode IntArray blob",
+      ),
+      dict(
+          testcase_name="byte_length_mismatch",
+          shape=[2],
+          data="AAAAAA==",
+          expected_error="does not match shape",
+      ),
+      dict(
+          testcase_name="huge_64bit_shape_mismatch",
+          shape=[2**50],
+          data="AAAAAA==",
+          expected_error="does not match shape",
+      ),
+      dict(
+          testcase_name="huge_arbitrary_precision_shape_mismatch",
+          shape=[10**30],
+          data="AAAAAA==",
+          expected_error="does not match shape",
+      ),
+  )
+  def test_decode_base64_invalid_blob_raises_value_error_matching_python(
+      self, shape: list[int], data: str, expected_error: str
+  ) -> None:
+    bad_blob = {"shape": shape, "dtype": "int32", "data": data}
+    dtype_by_name = {"int32": np.dtype("<i4")}
+
+    with self.assertRaisesRegex(ValueError, expected_error):
+      trajectory._decode_base64_array(
+          bad_blob, type_label="IntArray", dtype_by_name=dtype_by_name
+      )
+    with mock.patch.object(trajectory, "_trajectory_ext", None):
+      with self.assertRaisesRegex(ValueError, expected_error):
+        trajectory._decode_base64_array(
+            bad_blob, type_label="IntArray", dtype_by_name=dtype_by_name
+        )
+
+  def test_encode_base64_bytes_strided_view_raises_value_error(self) -> None:
+    strided = np.arange(8, dtype=np.int32)[::2]
+
+    with self.assertRaisesRegex(ValueError, "not C-contiguous"):
+      trajectory._trajectory_ext.encode_base64_bytes(strided)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="unsupported_dtype",
+          b64="AAAA",
+          dtype_name="complex64",
+          shape=[1],
+          expected_error="Unsupported array dtype",
+      ),
+      dict(
+          testcase_name="empty_shape",
+          b64="AAAA",
+          dtype_name="int32",
+          shape=[],
+          expected_error="expected at least 1 dimension",
+      ),
+      dict(
+          testcase_name="negative_dimension",
+          b64="AAAA",
+          dtype_name="int32",
+          shape=[-1],
+          expected_error="non-negative integers",
+      ),
+      dict(
+          testcase_name="boolean_dimension",
+          b64="AAAA",
+          dtype_name="int32",
+          shape=[True],
+          expected_error="non-negative integers",
+      ),
+      dict(
+          testcase_name="oversized_zero_product_dimension",
+          b64="",
+          dtype_name="int32",
+          shape=[10**30, 0],
+          expected_error="Maximum allowed dimension exceeded",
+      ),
+      dict(
+          testcase_name="3d_product_overflow",
+          b64="AAAA",
+          dtype_name="int16",
+          shape=[2**30, 2**30, 8],
+          expected_error="does not match shape",
+      ),
+  )
+  def test_ext_decode_base64_array_invalid_args_raise_value_error(
+      self,
+      b64: str,
+      dtype_name: str,
+      shape: list[Any],
+      expected_error: str,
+  ) -> None:
+    with self.assertRaisesRegex(ValueError, expected_error):
+      trajectory._trajectory_ext.decode_base64_array(b64, dtype_name, shape)
+
+  def test_strip_json_nul_bytes_seeded_fuzz_matches_python_and_parses(
+      self,
+  ) -> None:
+    rng = random.Random(0)
+    alphabet = ("", "a", "\x00", "\\", "\\\\", "u0000", "\\u0000", "🚀", "\n")
+
+    for case_idx in range(2_000):
+      raw_text = "".join(rng.choices(alphabet, k=rng.randint(0, 24)))
+      serialized = json.dumps({"v": raw_text}, ensure_ascii=False)
+      if case_idx % 3 == 0:
+        serialized = serialized[:-2] + "\x00" + serialized[-2:]
+
+      ext_cleaned = trajectory.strip_json_nul_bytes(serialized)
+      with mock.patch.object(trajectory, "_trajectory_ext", None):
+        py_cleaned = trajectory.strip_json_nul_bytes(serialized)
+
+      with self.subTest(case_idx=case_idx):
+        self.assertEqual(ext_cleaned, py_cleaned)
+        self.assertNotIn("\x00", ext_cleaned)
+        if ext_cleaned == serialized:
+          self.assertIs(ext_cleaned, serialized)
+        self.assertEqual(
+            json.loads(ext_cleaned), {"v": raw_text.replace("\x00", "")}
+        )
+
+  def test_concurrent_codec_calls_across_threads_preserve_outputs(
+      self,
+  ) -> None:
+    ext = trajectory._trajectory_ext
+
+    def run_worker(worker_id: int) -> tuple[np.ndarray, str]:
+      arr = np.arange(worker_id, worker_id + 257, dtype=np.int32)
+      b64 = ext.encode_base64_bytes(arr)
+      decoded = ext.decode_base64_array(b64, "int32", [257], "IntArray")
+      sanitized = ext.strip_json_nul_bytes(
+          f'{{"id": {worker_id}, "msg": "x\x00y\\u0000\\\\u0000z"}}'
+      )
+      return decoded, sanitized
+
+    with futures.ThreadPoolExecutor(max_workers=8) as pool:
+      results = list(pool.map(run_worker, range(64)))
+
+    self.assertLen(results, 64)
+    for worker_id, (decoded, sanitized) in enumerate(results):
+      expected_arr = np.arange(worker_id, worker_id + 257, dtype=np.int32)
+      np.testing.assert_array_equal(decoded, expected_arr)
+      self.assertEqual(
+          sanitized, f'{{"id": {worker_id}, "msg": "xy\\\\u0000z"}}'
+      )
 
 
 if __name__ == "__main__":
