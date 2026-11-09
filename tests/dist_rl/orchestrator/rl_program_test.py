@@ -4489,12 +4489,14 @@ class RLProgramTest(absltest.TestCase):
           [],
       )
       self.algo_config.reward_mode = "env"
+      traj_store = in_memory_store.InMemoryTrajectoryStore()
       program = self._create_program(
-          dataset=["prompt_0"], reward_fns=[], max_staleness=2
+          dataset=["prompt_0"],
+          reward_fns=[],
+          max_staleness=2,
+          trajectory_store=traj_store,
       )
       program.policy_version = 5
-      mock_traj_logger = mock.MagicMock()
-      program.trajectory_logger = mock_traj_logger
 
       await program.run_async(self.mock_engine)
 
@@ -4512,12 +4514,13 @@ class RLProgramTest(absltest.TestCase):
       )
       # The scored-group re-wrap must carry the version through unchanged:
       # 4 for the valid rollout and None (not 0) for the tombstone.
-      rows = [
-          call.args[0]
-          for call in mock_traj_logger.log_item_async.call_args_list
-      ]
+      recorded_metrics = traj_store.get_trajectories_metrics()
       self.assertEqual(
-          {row["group_index"]: row["rollout_policy_version"] for row in rows},
+          {
+              m.extra["group_index"]: m.extra["rollout_policy_version"]
+              for m in recorded_metrics.values()
+              if m.extra is not None
+          },
           {0: 4, 1: None},
       )
 
@@ -6757,29 +6760,32 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_trajectory_logger_initialization(self):
+  def test_trajectory_log_dir_deprecated_and_no_trajectory_logger_attribute(
+      self,
+  ):
     self.algo_config.reward_mode = "env"
-    with mock.patch(
-        "tunix.utils.trajectory_logger.AsyncTrajectoryLogger"
-    ) as mock_logger_cls:
-      mock_logger_inst = mock.MagicMock()
-      mock_logger_cls.return_value = mock_logger_inst
+    metrics_dir = self.create_tempdir().full_path
+    program1 = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo_config=self.algo_config,
+        batch_config=self.batch_config,
+        metrics_logging_options=metrics_logger_lib.MetricsLoggerOptions(
+            log_dir=metrics_dir,
+            backend_kwargs={
+                "custom_backend": [
+                    lambda: mock.create_autospec(
+                        metrax_logging.LoggingBackend, instance=True
+                    )
+                ]
+            },
+        ),
+    )
+    self.addCleanup(program1.close)
+    self.assertFalse(hasattr(program1, "trajectory_logger"))
+    self.assertIsNone(program1.trajectory_store)
 
-      # Case 1: derived from metrics_logging_options.log_dir
-      program1 = rl_program.StandardRLProgram(
-          dataset=["prompt_0"],
-          max_steps=1,
-          algo_config=self.algo_config,
-          batch_config=self.batch_config,
-          metrics_logging_options=metrics_logger_lib.MetricsLoggerOptions(
-              log_dir="/tmp/metrics_dir"
-          ),
-      )
-      mock_logger_cls.assert_called_with("/tmp/metrics_dir/trajectories")
-      self.assertIs(program1.trajectory_logger, mock_logger_inst)
-
-      # Case 2: explicit trajectory_log_dir
-      mock_logger_cls.reset_mock()
+    with self.assertLogs(level="WARNING") as cm:
       program2 = rl_program.StandardRLProgram(
           dataset=["prompt_0"],
           max_steps=1,
@@ -6787,112 +6793,145 @@ class RLProgramTest(absltest.TestCase):
           batch_config=self.batch_config,
           trajectory_log_dir="/custom/trajectories",
       )
-      mock_logger_cls.assert_called_with("/custom/trajectories")
-      self.assertIs(program2.trajectory_logger, mock_logger_inst)
-
-      # Case 3: disabled when no log_dir provided
-      program3 = rl_program.StandardRLProgram(
-          dataset=["prompt_0"],
-          max_steps=1,
-          algo_config=self.algo_config,
-          batch_config=self.batch_config,
-      )
-      self.assertIsNone(program3.trajectory_logger)
+    self.addCleanup(program2.close)
+    self.assertIsNone(program2.trajectory_store)
+    self.assertTrue(
+        any("trajectory_log_dir" in msg for msg in cm.output),
+        f"Expected trajectory_log_dir deprecation warning, got {cm.output}",
+    )
 
   def test_log_consumed_trajectories(self):
     self.algo_config.reward_mode = "env"
+    traj_store = in_memory_store.InMemoryTrajectoryStore()
     program = rl_program.StandardRLProgram(
         dataset=["prompt_0"],
         max_steps=1,
         algo_config=self.algo_config,
         batch_config=self.batch_config,
+        trajectory_store=traj_store,
     )
-    mock_traj_logger = mock.MagicMock()
-    program.trajectory_logger = mock_traj_logger
+    self.addCleanup(program.close)
 
     # A real Token-mode trajectory dict, matching what the collector produces.
-    # A MagicMock here would make the reward assertion pass for the wrong
-    # reason, since float(MagicMock()) happens to return 1.0.
     traj = {
         "policy_versions": [2],
         "status": datatypes.TrajectoryStatus.SUCCEEDED,
         "trajectory_reward": 1.0,
+        "execution_time_s": 1.25,
+        "env_time": {
+            "reset_latency": 0.1,
+            "step_latency": [0.2],
+            "close_latency": 0.05,
+        },
+        "reward_time": {"total": 0.03},
         "conversation_text": [
             {"role": "user", "content": "Q: What is 2+2?\nA:"},
             {"role": "assistant", "content": "4"},
         ],
     }
     item = datatypes.TrajectoryItem(
-        traj_id="traj_1",
         prompt_id="prompt_1",
         group_index=0,
         prompt_tokens=[1, 2],
         completion_tokens=[3, 4],
         metadata={
+            "epoch": 2,
             "question": "What is 2+2?",
             "prompt": "Q: What is 2+2?\nA:",
             "gold_answer": "4",
         },
         traj=traj,
     )
+    step_times = step_telemetry.StepTimes(
+        exposed_generation_time=0.4,
+        policy_training_time=0.8,
+        weight_sync_time=0.1,
+    )
 
     program._log_consumed_trajectories(
         [item],
         log_step=3,
         consumed_policy_version=3,
+        item_advantages=[0.75],
+        step_times=step_times,
     )
 
-    mock_traj_logger.log_item_async.assert_called_once()
-    row = mock_traj_logger.log_item_async.call_args[0][0]
-    self.assertEqual(row["global_step"], 3)
-    self.assertEqual(row["consumed_policy_version"], 3)
-    self.assertEqual(row["prompt_id"], "prompt_1")
-    self.assertEqual(row["group_index"], 0)
-    self.assertEqual(row["rollout_policy_version"], 2)
-    self.assertEqual(row["status"], "SUCCEEDED")
-    self.assertEqual(row["reward"], 1.0)
-    self.assertEqual(row["question"], "What is 2+2?")
-    self.assertEqual(row["prompt"], "Q: What is 2+2?\nA:")
-    # Only the assistant turn, never the prompt that precedes it.
-    self.assertEqual(row["completion"], "4")
-    self.assertEqual(row["gold_answer"], "4")
-    self.assertEqual(row["prompt_tokens"], [1, 2])
-    self.assertEqual(row["completion_tokens"], [3, 4])
-    self.assertEqual(row["metadata"], item.metadata)
-    self.assertEqual(row["trajectory"], traj)
+    metrics_by_id = traj_store.get_trajectories_metrics()
+    self.assertIn("traj_prompt_1_g0", metrics_by_id)
+    extra = metrics_by_id["traj_prompt_1_g0"].extra
+    assert extra is not None
+    self.assertEqual(extra["global_step"], 3)
+    self.assertEqual(extra["epoch"], 2)
+    self.assertEqual(extra["consumed_policy_version"], 3)
+    self.assertEqual(extra["prompt_id"], "prompt_1")
+    self.assertEqual(extra["group_index"], 0)
+    self.assertEqual(extra["rollout_policy_version"], 2)
+    self.assertEqual(extra["status"], "SUCCEEDED")
+    self.assertEqual(extra["total_reward"], 1.0)
+    self.assertAlmostEqual(extra["advantage"], 0.75)
+    self.assertAlmostEqual(extra["rollout_time"], 1.25)
+    self.assertEqual(extra["env_time"], traj["env_time"])
+    self.assertEqual(extra["reward_time"], traj["reward_time"])
+    self.assertEqual(extra["step_StageTime"], dataclasses.asdict(step_times))
+    self.assertEqual(extra["question"], "What is 2+2?")
+    self.assertEqual(extra["gold_answer"], "4")
+    self.assertEqual(extra["mode"], "train")
+    self.assertTrue(extra["consumed"])
+    for omitted_key in (
+        "prompt",
+        "completion",
+        "prompt_tokens",
+        "completion_tokens",
+        "metadata",
+        "trajectory",
+        "reward",
+        "policy_version",
+    ):
+      self.assertNotIn(omitted_key, extra)
 
     multi_turn_item = datatypes.TrajectoryItem(
-        traj_id="traj_multi",
         prompt_id="prompt_multi",
         group_index=1,
         prompt_tokens=[1, 2],
         completion_tokens=[3, 4],
-        metadata={
-            "question": "What is 2+2?",
-        },
+        metadata={"question": "What is 2+2?"},
         traj={**traj, "policy_versions": [1, 4]},
     )
-    program._log_consumed_trajectories(
+    eval_store = in_memory_store.InMemoryTrajectoryStore()
+    eval_program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo_config=self.algo_config,
+        batch_config=self.batch_config,
+        trajectory_store=eval_store,
+        mode=rl_program.Mode.EVAL,
+    )
+    self.addCleanup(eval_program.close)
+    eval_program._log_consumed_trajectories(
         [multi_turn_item],
         log_step=4,
         consumed_policy_version=5,
     )
-    multi_row = mock_traj_logger.log_item_async.call_args[0][0]
-    self.assertEqual(multi_row["rollout_policy_version"], 4)
+    multi_extra = eval_store.get_trajectories_metrics()[
+        "traj_prompt_multi_g1"
+    ].extra
+    assert multi_extra is not None
+    self.assertEqual(multi_extra["rollout_policy_version"], 4)
+    self.assertEqual(multi_extra["mode"], "eval")
+    self.assertIsNone(multi_extra["advantage"])
+    self.assertIsNone(multi_extra["step_StageTime"])
 
-    program.close()
-    mock_traj_logger.stop.assert_called_once()
-
-  def test_log_consumed_trajectories_reward_distinction(self):
+  def test_log_consumed_trajectories_reward_and_validation(self):
     self.algo_config.reward_mode = "env"
+    traj_store = in_memory_store.InMemoryTrajectoryStore()
     program = rl_program.StandardRLProgram(
         dataset=["prompt_0"],
         max_steps=1,
         algo_config=self.algo_config,
         batch_config=self.batch_config,
+        trajectory_store=traj_store,
     )
-    mock_traj_logger = mock.MagicMock()
-    program.trajectory_logger = mock_traj_logger
+    self.addCleanup(program.close)
 
     # Case 1: Actual zero reward (should log 0.0)
     zero_reward_item = datatypes.TrajectoryItem(
@@ -6900,89 +6939,154 @@ class RLProgramTest(absltest.TestCase):
         group_index=0,
         traj={"status": "FAILED", "trajectory_reward": 0.0},
     )
-    # Case 2: Reward not available / None (should log None, not 0.0)
+    # Case 2: Explicit None reward on an invalid/aborted item (logs None, not 0.0)
     none_reward_item = datatypes.TrajectoryItem(
         prompt_id="p_none",
         group_index=1,
-        traj={"status": "RUNNING"},
-    )
-    # Case 3: No traj object at all (should log None, not 0.0)
-    no_traj_item = datatypes.TrajectoryItem(
-        prompt_id="p_notraj",
-        group_index=2,
-        traj=None,
+        is_valid=False,
+        traj={"status": "RUNNING", "trajectory_reward": None},
     )
 
     program._log_consumed_trajectories(
-        [zero_reward_item, none_reward_item, no_traj_item],
+        [zero_reward_item, none_reward_item],
         log_step=1,
         consumed_policy_version=1,
     )
 
-    self.assertEqual(mock_traj_logger.log_item_async.call_count, 3)
-    rows = [
-        call[0][0] for call in mock_traj_logger.log_item_async.call_args_list
-    ]
+    metrics_by_id = traj_store.get_trajectories_metrics()
+    zero_extra = metrics_by_id["traj_p_zero_g0"].extra
+    none_extra = metrics_by_id["traj_p_none_g1"].extra
+    assert zero_extra is not None and none_extra is not None
+    self.assertEqual(zero_extra["total_reward"], 0.0)
+    self.assertIsNone(none_extra["total_reward"])
 
-    self.assertEqual(rows[0]["reward"], 0.0)
-    self.assertIsNone(rows[1]["reward"])
-    self.assertIsNone(rows[2]["reward"])
+    # Fail-fast checks on malformed inputs.
+    with self.assertRaises(TypeError):
+      program._log_consumed_trajectories(
+          [
+              datatypes.TrajectoryItem(
+                  prompt_id="p_bad", group_index=0, traj=None
+              )
+          ],
+          log_step=1,
+          consumed_policy_version=1,
+      )
+    with self.assertRaises(KeyError):
+      program._log_consumed_trajectories(
+          [
+              datatypes.TrajectoryItem(
+                  prompt_id="p_missing_reward",
+                  group_index=0,
+                  is_valid=False,
+                  traj={"status": "FAILED"},
+              )
+          ],
+          log_step=1,
+          consumed_policy_version=1,
+      )
+    with self.assertRaises(ValueError):
+      program._log_consumed_trajectories(
+          [
+              datatypes.TrajectoryItem(
+                  prompt_id="p_missing_ver",
+                  group_index=0,
+                  is_valid=True,
+                  traj={"status": "SUCCEEDED", "trajectory_reward": 1.0},
+              )
+          ],
+          log_step=1,
+          consumed_policy_version=1,
+      )
+    with self.assertRaises(ValueError):
+      program._log_consumed_trajectories(
+          [zero_reward_item],
+          log_step=1,
+          consumed_policy_version=1,
+          item_advantages=[0.1, 0.2],
+      )
 
-    program.close()
+  def test_train_stage_persists_per_trajectory_advantage_and_stage_times(self):
+    async def _run():
+      self.algo_config.reward_mode = "env"
+      payload_0 = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.array([1, 1], dtype=np.float32),
+          completion_ids=np.array([3, 4], dtype=np.int32),
+          completion_mask=np.array([1, 1], dtype=np.float32),
+          advantages=np.array([-1.25, -1.25], dtype=np.float32),
+      )
+      payload_1 = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.array([1, 1], dtype=np.float32),
+          completion_ids=np.array([5, 6], dtype=np.int32),
+          completion_mask=np.array([1, 1], dtype=np.float32),
+          advantages=np.array([1.25, 1.25], dtype=np.float32),
+      )
+      self.mock_create_trainer_payloads.return_value = [payload_0, payload_1]
+      group = [
+          distributed_rl_engine._response_to_trajectory_item(
+              _create_rollout_response(
+                  "req_0",
+                  "prompt_0",
+                  group_index=0,
+                  policy_version=0,
+                  reward=0.0,
+              )
+          ),
+          distributed_rl_engine._response_to_trajectory_item(
+              _create_rollout_response(
+                  "req_1",
+                  "prompt_0",
+                  group_index=1,
+                  policy_version=0,
+                  reward=2.0,
+              )
+          ),
+      ]
+      _set_mock_poll_batches(self.mock_engine, group, [])
+      traj_store = in_memory_store.InMemoryTrajectoryStore()
+      program = self._create_program(
+          dataset=["prompt_0"],
+          reward_fns=[],
+          trajectory_store=traj_store,
+      )
+      self.addCleanup(program.close)
 
-  def test_log_consumed_trajectories_multi_turn_includes_env_messages(self):
-    self.algo_config.reward_mode = "env"
-    program = rl_program.StandardRLProgram(
-        dataset=["prompt_0"],
-        max_steps=1,
-        algo_config=self.algo_config,
-        batch_config=self.batch_config,
-    )
-    mock_traj_logger = mock.MagicMock()
-    program.trajectory_logger = mock_traj_logger
+      await program.run_async(self.mock_engine)
 
-    traj = {
-        "status": datatypes.TrajectoryStatus.SUCCEEDED,
-        "trajectory_reward": 1.0,
-        "conversation_text": [
-            {"role": "system", "content": "You are a coding agent."},
-            {"role": "user", "content": "Fix bug in foo.py"},
-            {"role": "assistant", "content": "ls -l"},
-            {"role": "user", "content": "foo.py bar.py"},
-            {"role": "assistant", "content": "done"},
-        ],
-    }
-    item = datatypes.TrajectoryItem(
-        prompt_id="prompt_multi",
-        group_index=0,
-        traj=traj,
-    )
+      metrics_by_id = traj_store.get_trajectories_metrics()
+      self.assertCountEqual(
+          metrics_by_id.keys(), ["traj_prompt_0_g0", "traj_prompt_0_g1"]
+      )
+      m0 = metrics_by_id["traj_prompt_0_g0"].extra
+      m1 = metrics_by_id["traj_prompt_0_g1"].extra
+      assert m0 is not None and m1 is not None
+      self.assertAlmostEqual(m0["advantage"], -1.25)
+      self.assertAlmostEqual(m1["advantage"], 1.25)
+      self.assertEqual(m0["total_reward"], 0.0)
+      self.assertEqual(m1["total_reward"], 2.0)
+      self.assertEqual(m0["global_step"], 0)
+      self.assertEqual(m0["consumed_policy_version"], 0)
+      self.assertEqual(m0["rollout_policy_version"], 0)
+      self.assertTrue(m0["consumed"])
+      self.assertIn("policy_training_time", m0["step_StageTime"])
+      self.assertIn("exposed_generation_time", m0["step_StageTime"])
 
-    program._log_consumed_trajectories(
-        [item], log_step=1, consumed_policy_version=1
-    )
+    asyncio.run(_run())
 
-    mock_traj_logger.log_item_async.assert_called_once()
-    row = mock_traj_logger.log_item_async.call_args[0][0]
-    expected_completion = (
-        "[assistant]: ls -l\n[environment]: foo.py bar.py\n[assistant]: done"
-    )
-    self.assertEqual(row["completion"], expected_completion)
-    self.assertEqual(row["prompt"], "Fix bug in foo.py")
-    program.close()
-
-  def test_log_consumed_trajectories_extracts_prompt_and_gold_without_env_config(
+  def test_log_consumed_trajectories_extracts_question_and_gold_without_env_config(
       self,
   ):
     self.algo_config.reward_mode = "env"
+    traj_store = in_memory_store.InMemoryTrajectoryStore()
     program = rl_program.StandardRLProgram(
         dataset=["prompt_0"],
         max_steps=1,
         algo_config=self.algo_config,
         batch_config=self.batch_config,
+        trajectory_store=traj_store,
     )
-    mock_traj_logger = mock.MagicMock()
-    program.trajectory_logger = mock_traj_logger
+    self.addCleanup(program.close)
 
     item = datatypes.TrajectoryItem(
         prompt_id="prompt_gsm",
@@ -6993,6 +7097,7 @@ class RLProgramTest(absltest.TestCase):
             "env_config": {"question": "stale", "gold_answer": "stale"},
         },
         traj={
+            "policy_versions": [1],
             "status": datatypes.TrajectoryStatus.SUCCEEDED,
             "trajectory_reward": 1.0,
             "conversation_text": [
@@ -7007,30 +7112,13 @@ class RLProgramTest(absltest.TestCase):
         [item], log_step=1, consumed_policy_version=1
     )
 
-    row = mock_traj_logger.log_item_async.call_args[0][0]
-    self.assertEqual(row["prompt"], "Solve Q0")
-    self.assertEqual(row["question"], "Q0")
-    self.assertEqual(row["gold_answer"], "0")
-    self.assertNotIn("env_config", row["metadata"])
-    program.close()
-
-    self.assertEqual(
-        rl_program._extract_rollout_prompt({"prompt": "Explicit"}, []),
-        "Explicit",
-    )
-    self.assertEqual(rl_program._extract_rollout_prompt({}, "raw_string"), "")
-    self.assertEqual(
-        rl_program._extract_rollout_prompt(
-            {}, [{"role": "system", "content": "sys"}]
-        ),
-        "",
-    )
-    self.assertEqual(
-        rl_program._extract_rollout_prompt(
-            {}, ["non_dict_entry", {"role": "user", "content": "Solve Q1"}]
-        ),
-        "Solve Q1",
-    )
+    extra = traj_store.get_trajectories_metrics()["traj_prompt_gsm_g0"].extra
+    assert extra is not None
+    self.assertEqual(extra["question"], "Q0")
+    self.assertEqual(extra["gold_answer"], "0")
+    self.assertNotIn("env_config", extra)
+    self.assertNotIn("prompt", extra)
+    self.assertNotIn("completion", extra)
 
   def test_critique_stage_passes_concatenated_assistant_text_and_metadata(
       self,
@@ -7614,6 +7702,23 @@ class StandardRLProgramTrajectoryStoreTest(absltest.TestCase):
     program = self._create_program()
     program.close()
 
+  def test_close_closes_reward_manager_even_if_metrics_logger_raises(self):
+    program = self._create_program()
+    with (
+        mock.patch.object(
+            program.metrics_logger,
+            "close",
+            autospec=True,
+            side_effect=RuntimeError("metrics close failed"),
+        ),
+        mock.patch.object(
+            program.reward_manager, "close", autospec=True
+        ) as mock_rm_close,
+    ):
+      with self.assertRaisesRegex(RuntimeError, "metrics close failed"):
+        program.close()
+      mock_rm_close.assert_called_once()
+
 
 class StandardRLProgramAsyncDatasetTest(absltest.TestCase):
   """Tests rollout_dispatch_stage with generator datasets and checkpoint resume."""
@@ -7720,6 +7825,7 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
           num_generations=1,
           mini_batch_size=1,
       )
+      traj_store = in_memory_store.InMemoryTrajectoryStore()
       program = rl_program.StandardRLProgram(
           dataset=[],
           max_steps=1,
@@ -7728,6 +7834,7 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
           reward_fns=[lambda prompts, completions, **_: [1.0] * len(prompts)],
           assembler=assembler,
           sync_weights=True,
+          trajectory_store=traj_store,
       )
       mock_engine = mock.MagicMock()
       trained_routed_copy: list[np.ndarray] = []
@@ -7764,7 +7871,6 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
       )
       mock_engine.sync_weights = mock.AsyncMock(side_effect=_fake_sync_weights)
       program.engine = mock_engine
-      program.trajectory_logger = mock.MagicMock()
 
       src_item = datatypes.TrajectoryItem(
           prompt_id="p0",
@@ -7827,9 +7933,11 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
       self.assertEqual(routed_alive_during_sync, [False])
       self.assertEqual(batched_alive_during_sync, [False])
       self.assertIsNone(routed_ref())
-      logged_row = program.trajectory_logger.log_item_async.call_args.args[0]
-      self.assertNotIn("routed_experts", logged_row["metadata"])
-      self.assertNotIn("routed_experts", logged_row["trajectory"])
+      recorded = traj_store.get_trajectories_metrics(["traj_p0_g0"])[
+          "traj_p0_g0"
+      ]
+      assert recorded.extra is not None
+      self.assertNotIn("routed_experts", recorded.extra)
 
     asyncio.run(_run())
 
