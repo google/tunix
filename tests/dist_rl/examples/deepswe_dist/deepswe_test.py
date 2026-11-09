@@ -16,6 +16,7 @@
 
 from collections.abc import Mapping
 import json
+import pathlib
 import unittest
 from unittest import mock
 
@@ -33,6 +34,7 @@ except ImportError as exc:
 import datasets
 import grain
 import numpy as np
+from tunix.cli import config as cli_config
 from tunix.dist_rl.common import registry
 from tunix.dist_rl.examples.deepswe_dist import deepswe
 from tunix.dist_rl.launch.common import resolve_config
@@ -41,6 +43,15 @@ from examples.deepswe import swe_agent
 from examples.deepswe import swe_env
 
 # pylint: enable=g-import-not-at-top
+
+_DEEPSWE_YAML = pathlib.Path(deepswe.__file__).parent / "deepswe.yaml"
+
+
+def _hp(*overrides: str) -> resolve_config.DistHyperParameters:
+  """Resolves `deepswe.yaml` on top of `base_dist_config.yaml`."""
+  return resolve_config.initialize(
+      [f"override_config_file={_DEEPSWE_YAML}", *overrides]
+  )
 
 
 def _sample_rows(count: int) -> list[dict[str, object]]:
@@ -374,6 +385,7 @@ class DeepSWEDistTest(parameterized.TestCase):
     self.assertTrue(metadata["overlong_filter"])
     self.assertEqual([items[0], items[1]], [items[2], items[3]])
 
+  # TODO(noghabi): Remove with `build_prompt_item` and `run_deepswe_dist.py`.
   def test_rollout_env_and_agent_match_legacy_build_prompt_item(self):
     dataset_dir = self.create_tempdir().full_path
     datasets.Dataset.from_list(_sample_rows(1)).save_to_disk(dataset_dir)
@@ -457,6 +469,124 @@ class DeepSWEDistTest(parameterized.TestCase):
             scaffold="r2egym", use_fn_calling=False
         ),
     )
+
+  def test_rollout_env_and_agent_from_deepswe_yaml(self):
+    dataset_dir = self.create_tempdir().full_path
+    datasets.Dataset.from_list(_sample_rows(1)).save_to_disk(dataset_dir)
+    hp = _hp(
+        f"data_config.dataset_path={dataset_dir}",
+        "data_config.shuffle=false",
+    )
+    item = orchestrator.load_prompt_items(hp)[0]
+    assert item is not None
+    metadata = item["metadata"]
+    assert isinstance(metadata, Mapping)
+    self.assertNotIn("agent_config", metadata)
+    self.assertEqual(metadata["episode_timeout"], 1800.0)
+    self.assertFalse(metadata["overlong_filter"])
+    env_config = metadata["env_config"]
+    assert isinstance(env_config, Mapping)
+
+    env_cls = registry.ENV_REGISTRY.get(hp.config["env_class_path"])
+    env = env_cls(**{
+        **hp.config_mapping("env_kwargs"),
+        **env_config,
+        "group_index": 1,
+        "num_generations": 2,
+        "policy_version": 4,
+    })
+    self.assertEqual(env.max_steps, 3)
+    self.assertEqual(env.step_timeout, 1800)
+    self.assertEqual(env.reward_timeout, 1800)
+    self.assertEqual(env.backend, "kubernetes")
+    self.assertFalse(env.use_agent_sandbox)
+    self.assertEqual(env.scaffold, "r2egym")
+    self.assertFalse(env.verbose)
+    self.assertEqual(env.extra_kwargs["group_id"], "repo__0")
+    self.assertEqual(env.extra_kwargs["pair_index"], 1)
+    self.assertEqual(env.task["prompt_id"], "repo__0")
+    self.assertEqual(env.task["group_index"], 1)
+    self.assertEqual(env.task["num_generations"], 2)
+    self.assertEqual(env.task["policy_version"], 4)
+
+    agent_cls = registry.AGENT_REGISTRY.get(hp.config["agent_class_path"])
+    agent = agent_cls(**hp.config_mapping("agent_kwargs"))
+    self.assertIsInstance(agent, deepswe.DeepSWEAgent)
+    self.assertEqual(agent.name, "deepswe_agent")
+    self.assertEqual(
+        agent.system_prompt,
+        swe_agent.get_system_prompt(scaffold="r2egym", use_fn_calling=False),
+    )
+    self.assertEqual(
+        agent.user_prompt_template,
+        swe_agent.get_user_prompt_template(
+            scaffold="r2egym", use_fn_calling=False
+        ),
+    )
+
+  def test_deepswe_yaml_preserves_recipe_defaults(self):
+    hp = _hp()
+    self.assertEqual(
+        hp.config_mapping("chat_parser_config"),
+        {"type": "auto", "enable_thinking": False},
+    )
+    rollout_cfg = hp.config_mapping("rollout_config")
+    self.assertEqual(rollout_cfg["eos_tokens"], "")
+    grpo_map = hp.config_mapping("agentic_grpo_config")
+    env_kwargs = hp.config_mapping("env_kwargs")
+    self.assertEqual(env_kwargs["max_steps"], grpo_map["max_turns"])
+    self.assertEqual(grpo_map["max_turns"], 3)
+    self.assertEqual(grpo_map["max_concurrency"], 64)
+
+    rl_train = hp.config_mapping("rl_training_config")
+    optimizer = rl_train["actor_optimizer_config"]
+    self.assertEqual(cli_config.create_learning_rate(optimizer), 1e-6)
+    self.assertEqual((optimizer["b1"], optimizer["b2"]), (0.9, 0.999))
+    self.assertEqual(optimizer["weight_decay"], 0.0)
+    self.assertEqual(optimizer["chain_kwargs"], {"max_norm": 1.0})
+
+    self.assertIsNone(grpo_map["epsilon_high"])
+    grpo = orchestrator.build_grpo_config(hp)
+    self.assertEqual(grpo.num_generations, 2)
+    self.assertEqual(grpo.beta, 0.0)
+    self.assertEqual(grpo.epsilon, 0.2)
+    self.assertEqual(grpo.epsilon_high, 0.2)
+    self.assertEqual(grpo.loss_algo, "grpo")
+    self.assertEqual(grpo.kl_loss_mode, "kl")
+    self.assertEqual(grpo.advantage_estimator, "grpo")
+    self.assertIsNone(grpo.sampler_is)
+    self.assertEqual(grpo.reward_mode, "env")
+    self.assertTrue(grpo.use_rollout_logps)
+
+    _, derived_rpc_timeout = orchestrator.resolve_weight_sync_timeouts(hp)
+    self.assertEqual(derived_rpc_timeout, 2100.0)
+    cluster = hp.config_mapping("cluster_config")
+    self.assertEqual(cluster["local"]["worker_shutdown_grace_secs"], 60)
+
+  def test_orchestrator_loads_default_deepswe_yaml_from_the_hub(self):
+    hub_source = grain.MapDataset.source(_sample_rows(2))
+    mock_create = self.enter_context(
+        mock.patch.object(
+            deepswe.deepswe_data,
+            "create_dataset",
+            autospec=True,
+            spec_set=True,
+            return_value=hub_source,
+        )
+    )
+    items = orchestrator.load_prompt_items(_hp())
+    mock_create.assert_called_once_with(
+        dataset_name="R2E-Gym/R2E-Gym-Subset",
+        dataset_split="train",
+        cache_dir=None,
+        shuffle=True,
+        seed=42,
+    )
+    first = items[0]
+    assert first is not None
+    self.assertEqual(first["prompt"], "Fix bug 0")
+    self.assertEqual(first["task_name"], "deepswe")
+    self.assertEqual(first["max_turns"], 3)
 
 
 if __name__ == "__main__":

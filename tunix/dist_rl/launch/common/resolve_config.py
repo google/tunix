@@ -125,6 +125,39 @@ def _mutable_section(
   return section
 
 
+def _resolve_sandbox_namespace(
+    hp: cli_config.HyperParameters, target: str
+) -> None:
+  """Resolves `kubernetes_config.namespace: null` to the GKE namespace.
+
+  On `cluster_config.target=k8s`, a null sandbox namespace means the namespace
+  the run's JobSets use (`cluster_config.k8s.namespace`), so the agent
+  sandboxes run next to the RL pods.
+
+  Args:
+    hp: Loaded configuration; updated in place.
+    target: The validated `cluster_config.target`.
+
+  Raises:
+    ValueError: If the namespace is null on any other target, which has no GKE
+      namespace to follow.
+  """
+  sandbox_k8s = hp.config["kubernetes_config"]
+  if not isinstance(sandbox_k8s, MutableMapping):
+    return
+  if "namespace" not in sandbox_k8s or sandbox_k8s["namespace"] is not None:
+    return
+  if target != "k8s":
+    raise ValueError(
+        "kubernetes_config.namespace=null follows cluster_config.k8s.namespace"
+        f" and needs cluster_config.target=k8s, got {target!r}; set the"
+        " sandbox namespace explicitly."
+    )
+  sandbox_k8s["namespace"] = str(
+      hp.config_mapping("cluster_config")["k8s"]["namespace"]
+  )
+
+
 def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
   """Resolves derived cluster, model, tokenizer, and optimizer defaults.
 
@@ -151,6 +184,8 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
   if target == "local" and not artifact_root.is_absolute():
     artifact_root = REPO_ROOT / artifact_root
   cluster["artifact_root"] = str(artifact_root)
+
+  _resolve_sandbox_namespace(hp, target)
 
   if not cluster["run_id"]:
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -185,6 +220,10 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
       # The orchestrator also logs trajectories under `<log_dir>/trajectories`
       # unless `dist_training_config.trajectory_log_dir` is set.
       metrics["log_dir"] = str(artifact_root / "metrics")
+
+  traj_store = _mutable_section(hp, "trajectory_store_config")
+  if traj_store["backend"] == "file" and not traj_store["dir"]:
+    traj_store["dir"] = str(artifact_root / "trajectory_store")
 
   opt = rl_train["actor_optimizer_config"]
   if isinstance(opt, MutableMapping):

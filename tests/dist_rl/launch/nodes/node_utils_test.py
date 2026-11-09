@@ -272,15 +272,20 @@ class TrajectoryStoreConfigTest(absltest.TestCase):
         {"backend": "file", "root_dir": "/tmp/store", "run_id": "run_1"},
     )
 
-  def test_enabled_without_dir_omits_root_dir(self):
+  def test_enabled_file_store_without_dir_uses_artifact_root(self):
     hp = resolve_config.initialize([
+        *_EXTERNAL,
         "trajectory_store_config.enable=true",
         "trajectory_store_config.dir=",
         "cluster_config.run_id=run_1",
     ])
     self.assertEqual(
         node_utils.trajectory_store_config(hp),
-        {"backend": "file", "run_id": "run_1"},
+        {
+            "backend": "file",
+            "root_dir": "/artifacts/run/trajectory_store",
+            "run_id": "run_1",
+        },
     )
 
 

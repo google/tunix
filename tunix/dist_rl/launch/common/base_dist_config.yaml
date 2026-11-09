@@ -322,6 +322,7 @@ weight_sync_config:
 trajectory_store_config:
   enable: false
   backend: "file"
+  # Empty with the "file" backend: `<cluster_config.artifact_root>/trajectory_store`.
   dir: ""
 
 cluster_config:

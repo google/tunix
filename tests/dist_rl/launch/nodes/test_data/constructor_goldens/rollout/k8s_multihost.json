@@ -64,6 +64,7 @@
           "top_p": 1.0,
           "trajectory_store_config": {
             "backend": "file",
+            "root_dir": "/artifacts/trajectory_store",
             "run_id": "golden"
           },
           "weight_sync_mode": "WeightSyncMode.RAIDEN"
@@ -140,6 +141,7 @@
           "top_p": 1.0,
           "trajectory_store_config": {
             "backend": "file",
+            "root_dir": "/artifacts/trajectory_store",
             "run_id": "golden"
           },
           "weight_sync_mode": "WeightSyncMode.RAIDEN"

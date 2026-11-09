@@ -1,0 +1,161 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Example defaults for the distributed DeepSWE GRPO recipe (Qwen3-1.7B).
+#
+# Layered on top of `launch/common/base_dist_config.yaml`; cluster, mesh, and
+# chip placement default to `base_dist_config.yaml` (target local) unless set
+# below; `k8s_launcher_v2.sh` adds the GKE overrides as `section.key=value`
+# arguments. Later `override_config_file=` arguments and `section.key=value`
+# overrides win.
+
+model_config:
+  model_name: "Qwen3-1.7B"
+  model_source: "huggingface"
+  model_id: "Qwen/Qwen3-1.7B"
+  dtype: "float32"
+  load_dtype: "float32"
+  mesh:
+    shape: "(1,2)"
+    axis_names: "('fsdp','tp')"
+
+tokenizer_config:
+  # A public Hugging Face hub id needs no `HF_TOKEN` (gated repos do). On a
+  # host without hub access, set it to `model_config.model_download_path`.
+  tokenizer_path: "Qwen/Qwen3-1.7B"
+
+# Each model family's own chat template, without thinking (base: `raw`).
+chat_parser_config:
+  type: "auto"
+  enable_thinking: false
+
+rollout_engine: "inprocess_vllm"
+rollout_config:
+  max_prompt_length: 1024
+  total_generation_steps: 1024
+  temperature: 1.0
+  top_p: 1.0
+  # Disabled.
+  top_k: -1
+  # Stop on the tokenizer's EOS token.
+  eos_tokens: ""
+  return_logprobs: true
+
+weight_sync_config:
+  mode: "none"
+  use_weight_converter: true
+  verify_weights: false
+  in_flight_weight_updates: false
+
+# The orchestrator loads the task records with
+# `deepswe.create_dataset(**data_config)`.
+data_module: "tunix.dist_rl.examples.deepswe_dist.deepswe"
+task_name: "deepswe"
+data_config:
+  split: "train"
+  shuffle: true
+  seed: 42
+  dataset_name: "R2E-Gym/R2E-Gym-Subset"
+  # `data_config.dataset_path=<dir>` loads a `save_to_disk` copy instead. Not
+  # listed here: an empty string in this file would reach `create_dataset` as
+  # None.
+  cache_dir: null
+
+batch_size: 1
+rl_training_config:
+  mini_batch_size: 1
+  train_micro_batch_size: 1
+  max_steps: 1
+  eval_every_n_steps: 1000000
+  actor_optimizer_config:
+    opt_type: "adamw"
+    learning_rate: 1.0e-6
+    # Empty: a constant learning rate.
+    schedule_type: ""
+    b1: 0.9
+    b2: 0.999
+    eps: 1.0e-8
+    weight_decay: 0.0
+    opt_chain_type: "clip_by_global_norm"
+    chain_kwargs:
+      max_norm: 1.0
+  checkpointing_options:
+    save_interval_steps: 1
+    max_to_keep: 10
+  metrics_logging_options:
+    project_name: "trellis-deepswe"
+    flush_every_n_steps: 1
+
+agentic_grpo_config:
+  num_generations: 2
+  num_iterations: 1
+  beta: 0.0
+  epsilon: 0.2
+  # Canonical `GRPOConfig` loss defaults: symmetric clipping, "kl" penalty, and
+  # no sampler importance correction.
+  epsilon_high: null
+  loss_algo: "grpo"
+  loss_agg_mode: "sequence-mean-token-mean"
+  kl_loss_mode: "kl"
+  advantage_estimator: "grpo"
+  sampler_is: null
+  sampler_is_threshold: 2.0
+  max_concurrency: 64
+  off_policy_steps: 0
+  trajectory_group_order: "trajectory_completion"
+  # "env": `DeepSWEEnv` evaluates each patch in its sandbox and returns reward.
+  reward_mode: "env"
+  episode_timeout: 1800
+  # Keep equal to `env_kwargs.max_steps`.
+  max_turns: 3
+  overlong_filter: false
+  use_rollout_logps: true
+
+reward_functions: []
+
+env_class_path: "deepswe_env"
+# `DeepSWEEnv` settings for the whole run; each task record adds `entry` and
+# `prompt_id` through `metadata.env_config`.
+env_kwargs:
+  # Keep equal to `agentic_grpo_config.max_turns`.
+  max_steps: 3
+  step_timeout: 1800
+  reward_timeout: 1800
+  backend: "kubernetes"
+  use_agent_sandbox: false
+  scaffold: "r2egym"
+  verbose: false
+
+agent_class_path: "deepswe_agent"
+agent_kwargs:
+  scaffold: "r2egym"
+
+# Forwarded to the rollout worker as `NAMESPACE`, `NODE_SELECTOR_KEY`, and
+# `NODE_SELECTOR_VAL` for `SWEEnv` / `SandboxFleet` Kubernetes pods. On
+# `cluster_config.target=k8s`, `namespace: null` (what `k8s_launcher_v2.sh`
+# sets) follows `cluster_config.k8s.namespace`.
+kubernetes_config:
+  namespace: "rl-tunix-swebench"
+  node_selector_key: null
+  node_selector_val: null
+
+cluster_config:
+  # Imported by the rollout node to register `DeepSWEEnv` / `DeepSWEAgent`.
+  registry_module: "tunix.dist_rl.examples.deepswe_dist.deepswe"
+  artifact_root: "artifacts/deepswe"
+  # Null derives the worker RPC deadline from the weight-sync phase timeouts,
+  # which scale with `agentic_grpo_config.episode_timeout` (2100s at 1800s).
+  rpc_timeout_s: null
+  local:
+    worker_shutdown_grace_secs: 60

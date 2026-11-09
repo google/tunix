@@ -219,6 +219,46 @@ weight_sync_config:
     with self.assertRaisesRegex(ValueError, "artifact_root must not be empty"):
       resolve_config.initialize(["cluster_config.artifact_root="])
 
+  def test_null_sandbox_namespace_follows_the_gke_namespace(self):
+    hp = resolve_config.initialize([
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.namespace=team-ns",
+        "kubernetes_config.namespace=null",
+    ])
+    self.assertEqual(hp.config["kubernetes_config"]["namespace"], "team-ns")
+    self.assertIn(
+        "export SANDBOX_NAMESPACE=team-ns",
+        resolve_config.render_bash_exports(hp),
+    )
+    # An explicit sandbox namespace wins.
+    hp = resolve_config.initialize([
+        "cluster_config.target=k8s",
+        "cluster_config.k8s.namespace=team-ns",
+        "kubernetes_config.namespace=swe-ns",
+    ])
+    self.assertEqual(hp.config["kubernetes_config"]["namespace"], "swe-ns")
+    with self.assertRaisesRegex(ValueError, "needs cluster_config.target=k8s"):
+      resolve_config.initialize(["kubernetes_config.namespace=null"])
+
+  def test_file_trajectory_store_dir_defaults_under_artifact_root(self):
+    hp = resolve_config.initialize([
+        "cluster_config.target=external",
+        "cluster_config.artifact_root=/artifacts/run",
+        "trajectory_store_config.enable=true",
+    ])
+    self.assertEqual(
+        hp.config_mapping("trajectory_store_config")["dir"],
+        "/artifacts/run/trajectory_store",
+    )
+    hp = resolve_config.initialize([
+        "cluster_config.target=external",
+        "cluster_config.artifact_root=/artifacts/run",
+        "trajectory_store_config.dir=/stores/run",
+    ])
+    self.assertEqual(
+        hp.config_mapping("trajectory_store_config")["dir"], "/stores/run"
+    )
+
   def test_cluster_target_choices(self):
     with self.assertRaisesRegex(
         ValueError,
