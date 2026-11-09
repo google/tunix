@@ -6,7 +6,7 @@
 
 </div>
 
-**Tunix (Tune-in-JAX)** is a JAX based library designed to streamline the
+**Tunix (Tune-in-Accelerators)** is a library designed to streamline the
 post-training of Large Language Models. It provides efficient and scalable
 support for:
 
