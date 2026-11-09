@@ -994,6 +994,7 @@ class RolloutMainTest(absltest.TestCase):
 
   def test_main_sets_library_env_before_logging_the_resolved_config(self):
     logged_env: dict[str, str] = {}
+    os.environ.pop("VLLM_WORKER_MULTIPROC_METHOD", None)
 
     def _log_resolved_config(
         hp: resolve_config.DistHyperParameters, role: str
@@ -1001,7 +1002,7 @@ class RolloutMainTest(absltest.TestCase):
       del hp, role
       logged_env.update(
           (name, os.environ[name])
-          for name in _LIBRARY_ENV_VARS
+          for name in (*_LIBRARY_ENV_VARS, "VLLM_WORKER_MULTIPROC_METHOD")
           if name in os.environ
       )
       raise RuntimeError("stop after logging")
@@ -1030,8 +1031,25 @@ class RolloutMainTest(absltest.TestCase):
             "VERIFY_WEIGHTS": "false",
             "TPU_RAIDEN_DATA_NICS": "eth1",
             "SKIP_JAX_PRECOMPILE": "0",
+            "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         },
     )
+
+  def test_main_preserves_explicit_vllm_worker_multiproc_method(self):
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "fork"
+    with contextlib.ExitStack() as stack:
+      stack.enter_context(mock.patch.object(rollout.importlib, "import_module"))
+      stack.enter_context(mock.patch.object(gcs_cache, "restore_jax_cache"))
+      stack.enter_context(
+          mock.patch.object(
+              node_utils,
+              "log_resolved_config",
+              side_effect=RuntimeError("stop after logging"),
+          )
+      )
+      with self.assertRaisesRegex(RuntimeError, "stop after logging"):
+        rollout.main([], context=mock.Mock())
+    self.assertEqual(os.environ["VLLM_WORKER_MULTIPROC_METHOD"], "fork")
 
   def test_main_rejects_another_library_value_before_starting(self):
     os.environ["SKIP_JAX_PRECOMPILE"] = "0"

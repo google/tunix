@@ -836,6 +836,10 @@ def main(
   os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
   os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
   os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+  # `AsyncLLMEngine` (`rollout_engine: vllm`) still launches an `EngineCore`
+  # child process; default to `spawn` (`vllm.envs` reads this lazily) rather
+  # than `os.fork()`ing the multithreaded gRPC server on single-host TPU slices.
+  os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
   if _maxtext_model_name(hp):
     os.environ.setdefault("NEW_MODEL_DESIGN", "1")
   # Logged after the defaults above, so the record holds the effective env, and

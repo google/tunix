@@ -1039,6 +1039,7 @@ def main(argv: list[str], context: Any = None) -> None:
   os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
   os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
   os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+  os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
   if args.maxtext_model_name:
     os.environ.setdefault("NEW_MODEL_DESIGN", "1")
 

@@ -690,14 +690,19 @@ class RunRolloutNodeTest(absltest.TestCase):
       context.ipc.discovery.register.side_effect = (
           _register_and_trigger_clean_stop
       )
-      run_rollout_node.main(
-          [
-              "--sampler=inprocess_vllm",
-              "--port=20001",
-              "--worker_id=rollout-0",
-          ],
-          context=context,
-      )
+      with mock.patch.dict(os.environ):
+        os.environ.pop("VLLM_WORKER_MULTIPROC_METHOD", None)
+        run_rollout_node.main(
+            [
+                "--sampler=inprocess_vllm",
+                "--port=20001",
+                "--worker_id=rollout-0",
+            ],
+            context=context,
+        )
+        self.assertEqual(
+            os.environ.get("VLLM_WORKER_MULTIPROC_METHOD"), "spawn"
+        )
       self.assertIsNone(registered_callbacks[-1])
       self.assertEqual(
           shutdown_order,
