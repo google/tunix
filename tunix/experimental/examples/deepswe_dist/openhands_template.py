@@ -14,10 +14,13 @@
 
 """Templates and specifications for OpenHands DeepSWE agents and environments."""
 
+from __future__ import annotations
+
+import ast
 import json
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Protocol, runtime_checkable
 
 OPENHANDS_SCAFFOLDS = ("openhands",)
 
@@ -862,26 +865,148 @@ DEFAULT_OPENHANDS_KEEPALIVE_CMD = [
 
 RUNTIME_CONTAINER_NAME = "agent-runtime"
 EVAL_CONTAINER_NAME = "eval"
+TASK_IMAGE_PLACEHOLDER = "{task_image}"
+DEFAULT_OPENHANDS_SERVER_IMAGE = (
+    "gcr.io/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62-chardet"
+)
 
 
-def get_openhands_pod_template(
-    node_selector: Optional[dict[str, str]] = None,
-) -> Any:
-  """Builds and returns the TemplateSpec for OpenHands agent sandbox."""
+@runtime_checkable
+class TemplateSpecLike(Protocol):
+  """Typed protocol for `agent_sandbox_rl.config.TemplateSpec`."""
+
+  image_pull_policy: str
+  keepalive_command: list[str]
+  resources: object
+  node_selector: dict[str, str] | None
+  extra_pod_spec: dict[str, object]
+  network_policy_management: str | None
+  automount_service_account_token: bool
+  share_process_namespace: bool
+
+
+def get_image_pull_policy() -> str:
+  """Returns the container `imagePullPolicy` for sandbox pods."""
+  return os.getenv("SANDBOX_IMAGE_PULL_POLICY", "IfNotPresent")
+
+
+def _resolve_tolerations(
+    node_selector: dict[str, str] | None,
+) -> list[dict[str, object]] | None:
+  """Resolves sandbox pod tolerations from env or `sandbox-np` nodepool."""
+  tolerations_raw = os.getenv("SANDBOX_TOLERATIONS")
+  if tolerations_raw:
+    try:
+      return json.loads(tolerations_raw)
+    except json.JSONDecodeError:
+      try:
+        return ast.literal_eval(tolerations_raw)
+      except (ValueError, SyntaxError) as e:
+        logging.warning("Failed to parse SANDBOX_TOLERATIONS: %s", e)
+
+  if (
+      node_selector
+      and "cloud.google.com/gke-nodepool" in node_selector
+      and node_selector["cloud.google.com/gke-nodepool"] == "sandbox-np"
+  ):
+    return [{
+        "key": "workload",
+        "operator": "Equal",
+        "value": "sandbox",
+        "effect": "NoSchedule",
+    }]
+  return None
+
+
+def _build_sandbox_template(
+    *,
+    node_selector: dict[str, str] | None,
+    keepalive_command: list[str] | None = None,
+    runtime_container: dict[str, object] | None = None,
+    init_containers: list[dict[str, object]] | None = None,
+    volumes: list[dict[str, object]] | None = None,
+) -> TemplateSpecLike:
+  """Builds a hardened `TemplateSpec` with a fresh `{task_image}` `eval` sidecar."""
   try:
-    from agent_sandbox_rl import ResourceSpec, TemplateSpec  # pylint: disable=g-import-not-at-top,g-multiple-import  # pyrefly: ignore[missing-import]  # pytype: disable=import-error
+    from agent_sandbox_rl import ResourceSpec  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
+    from agent_sandbox_rl import TemplateSpec  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
+    from agent_sandbox_rl.constants import TASK_IMAGE_PLACEHOLDER as sdk_task_image_placeholder  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
   except ImportError as e:
     raise ImportError(
         "use_agent_sandbox=True strictly requires the 'agent_sandbox_rl'"
-        " package. Install via: pip install"
-        " git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl"
+        " package (>= 9afee7039342). Install via: pip install"
+        " git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=examples/agent-sandbox-rl"
     ) from e
 
+  pull_policy = get_image_pull_policy()
+  cpu_limit = os.getenv("SANDBOX_CPU_LIMIT", "2")
+  memory_limit = os.getenv("SANDBOX_MEM_LIMIT", "4Gi")
+  eval_sidecar: dict[str, object] = {
+      "name": EVAL_CONTAINER_NAME,
+      "image": sdk_task_image_placeholder,
+      "imagePullPolicy": pull_policy,
+      "command": ["sleep", "infinity"],
+      "stdin": True,
+      "tty": True,
+      "resources": {
+          "requests": {
+              "cpu": os.getenv("SANDBOX_EVAL_CPU", "50m"),
+              "memory": os.getenv("SANDBOX_EVAL_MEM", "128Mi"),
+          },
+          "limits": {
+              "cpu": cpu_limit,
+              "memory": memory_limit,
+          },
+      },
+  }
+  containers: list[dict[str, object]] = []
+  if runtime_container is not None:
+    containers.append({
+        "name": RUNTIME_CONTAINER_NAME,
+        "imagePullPolicy": pull_policy,
+        **runtime_container,
+    })
+  containers.append(eval_sidecar)
+
+  extra_pod_spec: dict[str, object] = {"containers": containers}
+  if init_containers:
+    extra_pod_spec["initContainers"] = [
+        {"imagePullPolicy": pull_policy, **ctr} for ctr in init_containers
+    ]
+  if volumes:
+    extra_pod_spec["volumes"] = volumes
+  tolerations = _resolve_tolerations(node_selector)
+  if tolerations is not None:
+    extra_pod_spec["tolerations"] = tolerations
+
+  template_kwargs: dict[str, object] = {
+      "image_pull_policy": pull_policy,
+      "resources": ResourceSpec(
+          cpu=os.getenv("SANDBOX_CPU", "500m"),
+          memory=os.getenv("SANDBOX_MEM", "1Gi"),
+          cpu_limit=cpu_limit,
+          memory_limit=memory_limit,
+      ),
+      "extra_pod_spec": extra_pod_spec,
+      "node_selector": node_selector,
+      "network_policy_management": "Unmanaged",
+      "automount_service_account_token": False,
+      "share_process_namespace": False,
+  }
+  if keepalive_command is not None:
+    template_kwargs["keepalive_command"] = keepalive_command
+  return TemplateSpec(**template_kwargs)
+
+
+def get_openhands_pod_template(
+    node_selector: dict[str, str] | None = None,
+) -> TemplateSpecLike:
+  """Builds and returns the `TemplateSpec` for OpenHands agent sandboxes."""
   session_key = os.getenv("SANDBOX_SESSION_KEY", "")
   if os.getenv("AGENT_SERVER_COMMAND"):
     try:
       keepalive_cmd = json.loads(os.environ["AGENT_SERVER_COMMAND"])
-    except Exception:  # pylint: disable=broad-exception-caught
+    except json.JSONDecodeError:
       keepalive_cmd = os.environ["AGENT_SERVER_COMMAND"].split()
   else:
     keepalive_cmd = list(DEFAULT_OPENHANDS_KEEPALIVE_CMD)
@@ -890,88 +1015,64 @@ def get_openhands_pod_template(
       os.getenv("OPENHANDS_SERVER_IMAGE")
       or os.getenv("SANDBOX_RUNTIME_CONTAINER_IMAGE")
       or os.getenv("AGENT_SERVER_IMAGE")
-      or "gcr.io/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62-chardet"
+      or DEFAULT_OPENHANDS_SERVER_IMAGE
+  )
+  init_containers: list[dict[str, object]] = [{
+      "name": "oh-server",
+      "image": server_image,
+      "command": [
+          "sh",
+          "-c",
+          (
+              "cp -a /opt/oh/. /oh/ 2>/dev/null || cp -a"
+              " /usr/local/bin/openhands-agent-server /oh/ 2>/dev/null ||"
+              " cp -a /openhands/poetry/*/bin/agent-server"
+              " /oh/openhands-agent-server 2>/dev/null || true"
+          ),
+      ],
+      "volumeMounts": [{"name": "oh", "mountPath": "/oh"}],
+  }]
+  runtime_container: dict[str, object] = {
+      "ports": [{"containerPort": 8000}],
+      "volumeMounts": [{"name": "oh", "mountPath": "/oh"}],
+      "readinessProbe": {
+          "httpGet": {"path": "/health", "port": 8000},
+          "periodSeconds": 2,
+          "failureThreshold": 150,
+      },
+      "env": (
+          [{"name": "OH_SESSION_API_KEYS_0", "value": session_key}]
+          if session_key
+          else []
+      ),
+  }
+  return _build_sandbox_template(
+      node_selector=node_selector,
+      keepalive_command=keepalive_cmd,
+      runtime_container=runtime_container,
+      init_containers=init_containers,
+      volumes=[{"name": "oh", "emptyDir": {}}],
   )
 
-  extra_pod_spec = {
-      "automountServiceAccountToken": False,
-      "shareProcessNamespace": False,
-      "initContainers": [{
-          "name": "oh-server",
-          "image": server_image,
-          "command": [
-              "sh",
-              "-c",
-              (
-                  "cp -a /opt/oh/. /oh/ 2>/dev/null || cp -a"
-                  " /usr/local/bin/openhands-agent-server /oh/ 2>/dev/null ||"
-                  " cp -a /openhands/poetry/*/bin/agent-server /oh/openhands-agent-server 2>/dev/null || true"
-              ),
-          ],
-          "volumeMounts": [{"name": "oh", "mountPath": "/oh"}],
-      }],
-      "volumes": [{"name": "oh", "emptyDir": {}}],
-      "containers": [{
-          "ports": [{"containerPort": 8000}],
-          "volumeMounts": [{"name": "oh", "mountPath": "/oh"}],
-          "readinessProbe": {
-              "httpGet": {"path": "/health", "port": 8000},
-              "periodSeconds": 2,
-              "failureThreshold": 150,
-          },
-          "resources": {
-              "limits": {
-                  "cpu": os.getenv("SANDBOX_CPU_LIMIT", "2"),
-                  "memory": os.getenv("SANDBOX_MEM_LIMIT", "4Gi"),
-              }
-          },
-          "env": (
-              [{"name": "OH_SESSION_API_KEYS_0", "value": session_key}]
-              if session_key
-              else []
-          ),
-      }],
-  }
 
-  tolerations_raw = os.getenv("SANDBOX_TOLERATIONS")
-  if tolerations_raw:
-    try:
-      extra_pod_spec["tolerations"] = json.loads(tolerations_raw)
-    except Exception:  # pylint: disable=broad-exception-caught
-      try:
-        import ast  # pylint: disable=g-import-not-at-top
-        extra_pod_spec["tolerations"] = ast.literal_eval(tolerations_raw)
-      except Exception as e:  # pylint: disable=broad-exception-caught
-        logging.warning("Failed to parse SANDBOX_TOLERATIONS: %s", e)
-
-  if (
-      "tolerations" not in extra_pod_spec
-      and node_selector
-      and node_selector.get("cloud.google.com/gke-nodepool") == "sandbox-np"
-  ):
-    extra_pod_spec["tolerations"] = [{
-        "key": "workload",
-        "operator": "Equal",
-        "value": "sandbox",
-        "effect": "NoSchedule",
-    }]
-
-  return TemplateSpec(
-      keepalive_command=keepalive_cmd,
-      resources=ResourceSpec(
-          cpu=os.getenv("SANDBOX_CPU", "500m"),
-          memory=os.getenv("SANDBOX_MEM", "1Gi"),
-      ),
-      extra_pod_spec=extra_pod_spec,
+def get_r2egym_pod_template(
+    node_selector: dict[str, str] | None = None,
+) -> TemplateSpecLike:
+  """Builds and returns the `TemplateSpec` for R2E-Gym / SWE-agent sandboxes."""
+  keepalive_cmd = ["sleep", "infinity"]
+  runtime_container: dict[str, object] = {"name": RUNTIME_CONTAINER_NAME}
+  return _build_sandbox_template(
       node_selector=node_selector,
+      keepalive_command=keepalive_cmd,
+      runtime_container=runtime_container,
   )
 
 
 def get_template(
     scaffold: str,
-    node_selector: Optional[dict[str, str]] = None,
-) -> Any:
-  """Returns the fleet TemplateSpec for the given scaffold, or None."""
+    node_selector: dict[str, str] | None = None,
+) -> TemplateSpecLike:
+  """Returns the fleet `TemplateSpec` for the given scaffold."""
   if scaffold in OPENHANDS_SCAFFOLDS:
     return get_openhands_pod_template(node_selector=node_selector)
-  return None
+  return get_r2egym_pod_template(node_selector=node_selector)

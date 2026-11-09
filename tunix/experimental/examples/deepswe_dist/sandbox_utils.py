@@ -20,34 +20,58 @@ from __future__ import annotations
 
 import collections
 from collections.abc import Callable, Iterable, Iterator
+import contextlib
 import dataclasses
 import hashlib
 import logging
 import os
 import re
 import threading
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 from tunix.experimental.examples.deepswe_dist import openhands_template
 
-RUNTIME_CONTAINER_NAME = "agent-runtime"
-EVAL_CONTAINER_NAME = "eval"
+RUNTIME_CONTAINER_NAME = openhands_template.RUNTIME_CONTAINER_NAME
+EVAL_CONTAINER_NAME = openhands_template.EVAL_CONTAINER_NAME
 _LEGACY_ACQUIRE_RETRIES = 5
 
 
-def set_runtime_container(target: Any, container_name: str) -> None:
-  """Configures an R2E-Gym runtime (or RepoEnv) to exec in `container_name`."""
-  if target is None:
+@runtime_checkable
+class SandboxRuntimeLike(Protocol):
+  """Typed protocol for `FleetDockerRuntime` bound to a multi-container pod."""
+
+  _container: str | None
+
+
+@runtime_checkable
+class RepoEnvLike(Protocol):
+  """Typed protocol for `FleetRepoEnv` wrapping a `SandboxRuntimeLike`."""
+
+  runtime: SandboxRuntimeLike | None
+
+
+def set_runtime_container(env: RepoEnvLike | None, container_name: str) -> None:
+  """Configures `env.runtime` to execute commands in `container_name`."""
+  if env is None or env.runtime is None:
     return
-  runtime = getattr(target, "runtime", None) or target
+  env.runtime._container = container_name
+
+
+@contextlib.contextmanager
+def runtime_container_scope(
+    env: RepoEnvLike | None, container_name: str
+) -> Iterator[None]:
+  """Temporarily switches `env.runtime` to `container_name` and restores it."""
+  if env is None or env.runtime is None:
+    yield
+    return
+  previous_container = env.runtime._container or RUNTIME_CONTAINER_NAME
+  env.runtime._container = container_name
   try:
-    runtime._target_container = container_name
-    client = getattr(runtime, "client", None)
-    if client is not None:
-      client._default_container = container_name
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    logging.debug("[SandboxFleet] set_runtime_container note: %s", e)
+    yield
+  finally:
+    env.runtime._container = previous_container
 
 
 @dataclasses.dataclass(frozen=True)
@@ -110,6 +134,7 @@ class FleetConfigLike(Protocol):
   install_teardown_hooks: bool
   template_name_prefix: str
   labels: dict[str, str]
+  template: openhands_template.TemplateSpecLike | None
 
 
 @runtime_checkable
@@ -173,6 +198,81 @@ _PATCH_LOCK = threading.Lock()
 _R2EGYM_PATCHED = False
 
 
+def _r2egym_patched_init(self: object, *args: object, **kwargs: object):
+  """Routes `kubernetes-sandbox` backend initialization on `DockerRuntime`."""
+  if "backend" in kwargs and kwargs["backend"] == "kubernetes-sandbox":
+    kwargs["backend"] = "kubernetes"
+    setattr(self, "_actual_backend", "kubernetes-sandbox")
+  return getattr(self, "_orig_init")(*args, **kwargs)
+
+
+def _r2egym_patched_start_container(
+    self: object,
+    docker_image: str,
+    command: object,
+    ctr_name: str,
+    **kwargs: object,
+):
+  """Binds warm pod and initializes `_container` from handle when unset."""
+  is_k8s_sandbox = (
+      hasattr(self, "_actual_backend")
+      and getattr(self, "_actual_backend") == "kubernetes-sandbox"
+  ) or (
+      hasattr(self, "backend")
+      and getattr(self, "backend") == "kubernetes-sandbox"
+  )
+  if not is_k8s_sandbox:
+    return getattr(self, "_orig_start_container")(
+        docker_image, command, ctr_name, **kwargs
+    )
+  res = getattr(self, "_start_kubernetes_sandbox")()
+  if not hasattr(self, "_container") or not getattr(self, "_container"):
+    handle = getattr(self, "_handle") if hasattr(self, "_handle") else None
+    target_ctr = (
+        getattr(handle, "target_container")
+        if handle is not None and hasattr(handle, "target_container")
+        else None
+    )
+    runtime_ctr = (
+        getattr(handle, "runtime_container")
+        if handle is not None and hasattr(handle, "runtime_container")
+        else None
+    )
+    setattr(
+        self,
+        "_container",
+        target_ctr or runtime_ctr or RUNTIME_CONTAINER_NAME,
+    )
+  return res
+
+
+def _r2egym_patched_setup_env(self: object, *args: object, **kwargs: object):
+  """Defers `setup_env` on OpenHands `eval` sidecars until reward grading."""
+  defer_self = hasattr(self, "_defer_setup_env") and bool(
+      getattr(self, "_defer_setup_env")
+  )
+  handle = getattr(self, "_handle") if hasattr(self, "_handle") else None
+  defer_handle = (
+      handle is not None
+      and hasattr(handle, "_defer_setup_env")
+      and bool(getattr(handle, "_defer_setup_env"))
+  )
+  if defer_self or defer_handle:
+    setattr(self, "_needs_deferred_setup_env", True)
+    ctr = (
+        getattr(self, "_container")
+        if hasattr(self, "_container") and getattr(self, "_container")
+        else EVAL_CONTAINER_NAME
+    )
+    logging.debug(
+        "[SandboxFleet] Deferring setup_env on container '%s' until evaluation",
+        ctr,
+    )
+    return None
+  setattr(self, "_needs_deferred_setup_env", False)
+  return getattr(self, "_orig_setup_env")(*args, **kwargs)
+
+
 def patch_r2egym_for_agent_sandbox() -> None:
   """In-memory compatibility patch for r2egym to route 'kubernetes-sandbox' backend."""
   global _R2EGYM_PATCHED
@@ -188,7 +288,7 @@ def patch_r2egym_for_agent_sandbox() -> None:
         from huggingface_hub._login import HfFolder  # pyrefly: ignore[missing-import]
 
         huggingface_hub.HfFolder = HfFolder
-      except Exception:  # pylint: disable=broad-exception-caught
+      except ImportError:
 
         class DummyHfFolder:
 
@@ -197,170 +297,27 @@ def patch_r2egym_for_agent_sandbox() -> None:
             return None
 
         huggingface_hub.HfFolder = DummyHfFolder
-  except Exception as e:  # pylint: disable=broad-exception-caught
+  except ImportError as e:
     logging.debug("[SandboxFleet] HfFolder patch note: %s", e)
 
   try:
-    from kubernetes import client as k8s_client  # pyrefly: ignore[missing-import]
-
-    orig_exec = getattr(
-        k8s_client.CoreV1Api, "_orig_connect_get_namespaced_pod_exec", None
-    )
-    if orig_exec is None and hasattr(
-        k8s_client.CoreV1Api, "connect_get_namespaced_pod_exec"
-    ):
-      k8s_client.CoreV1Api._orig_connect_get_namespaced_pod_exec = (
-          k8s_client.CoreV1Api.connect_get_namespaced_pod_exec
-      )
-
-      def _patched_connect_get_namespaced_pod_exec(self, *args, **kwargs):
-        if not kwargs.get("container"):
-          kwargs["container"] = getattr(
-              self, "_default_container", RUNTIME_CONTAINER_NAME
-          )
-        return self._orig_connect_get_namespaced_pod_exec(*args, **kwargs)
-
-      k8s_client.CoreV1Api.connect_get_namespaced_pod_exec = (
-          _patched_connect_get_namespaced_pod_exec
-      )
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    logging.debug("[SandboxFleet] CoreV1Api exec patch note: %s", e)
-
-  try:
     from r2egym.agenthub.runtime import docker as docker_mod  # pyrefly: ignore[missing-import]
+  except ImportError as e:
+    logging.debug("[SandboxFleet] r2egym not installed, skipping patch: %s", e)
+    return
 
-    if not hasattr(docker_mod.DockerRuntime, "_orig_init"):
-      docker_mod.DockerRuntime._orig_init = docker_mod.DockerRuntime.__init__
-
-      def _patched_init(self, *args, **kwargs):
-        if "backend" in kwargs and kwargs["backend"] == "kubernetes-sandbox":
-          kwargs["backend"] = "kubernetes"
-          self._actual_backend = "kubernetes-sandbox"
-        return self._orig_init(*args, **kwargs)
-
-      docker_mod.DockerRuntime.__init__ = _patched_init
-
-    if not hasattr(docker_mod.DockerRuntime, "_orig_start_container"):
-      docker_mod.DockerRuntime._orig_start_container = (
-          docker_mod.DockerRuntime.start_container
-      )
-
-      def _patched_start_container(
-          self, docker_image, command, ctr_name, **kwargs
-      ):
-        if (
-            hasattr(self, "_actual_backend")
-            and self._actual_backend == "kubernetes-sandbox"
-        ) or (
-            hasattr(self, "backend") and self.backend == "kubernetes-sandbox"
-        ):
-          res = self._start_kubernetes_sandbox()
-          target_ctr = (
-              getattr(self, "_target_container", None)
-              or getattr(
-                  getattr(self, "_handle", None),
-                  "_target_container",
-                  None,
-              )
-              or RUNTIME_CONTAINER_NAME
-          )
-          self._target_container = target_ctr
-          if getattr(self, "client", None) is not None:
-            self.client._default_container = target_ctr
-          return res
-        return self._orig_start_container(
-            docker_image, command, ctr_name, **kwargs
-        )
-
-      docker_mod.DockerRuntime.start_container = _patched_start_container
-
-    orig_setup_env = getattr(
-        docker_mod.DockerRuntime, "_orig_setup_env", None
-    )
-    if orig_setup_env is None and hasattr(
-        docker_mod.DockerRuntime, "setup_env"
-    ):
-      docker_mod.DockerRuntime._orig_setup_env = (
-          docker_mod.DockerRuntime.setup_env
-      )
-
-      def _patched_setup_env(self, *args, **kwargs):
-        if getattr(self, "_defer_setup_env", False) or getattr(
-            getattr(self, "_handle", None), "_defer_setup_env", False
-        ):
-          self._needs_deferred_setup_env = True
-          logging.debug(
-              "[SandboxFleet] Deferring setup_env on container '%s' until"
-              " evaluation",
-              getattr(self, "_target_container", EVAL_CONTAINER_NAME),
-          )
-          return None
-        self._needs_deferred_setup_env = False
-        return self._orig_setup_env(*args, **kwargs)
-
-      docker_mod.DockerRuntime.setup_env = _patched_setup_env
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    logging.debug("[SandboxFleet] r2egym in-memory patch note: %s", e)
-
-  patch_agent_sandbox_rl_templates()
-
-
-def patch_agent_sandbox_rl_templates() -> None:
-  """Patches generated SandboxTemplates for network policy and fresh eval sidecar."""
-  try:
-    from agent_sandbox_rl import resources as asrl_resources  # pyrefly: ignore[missing-import]
-
-    if not hasattr(asrl_resources.Resources, "_orig_template_manifest") and (
-        hasattr(asrl_resources.Resources, "_template_manifest")
-    ):
-      asrl_resources.Resources._orig_template_manifest = (
-          asrl_resources.Resources._template_manifest
-      )
-
-      def _patched_template_manifest(self, image, template_name, template):
-        manifest = self._orig_template_manifest(image, template_name, template)
-        spec = manifest["spec"]
-        spec["networkPolicyManagement"] = "Unmanaged"
-        pod_spec = spec["podTemplate"]["spec"]
-        pod_spec["automountServiceAccountToken"] = False
-        pod_spec["shareProcessNamespace"] = False
-        containers = pod_spec["containers"]
-        if containers:
-          containers[0]["name"] = RUNTIME_CONTAINER_NAME
-        if not any(
-            "name" in c and c["name"] == EVAL_CONTAINER_NAME
-            for c in containers
-        ):
-          pull_policy = (
-              template.image_pull_policy
-              if template is not None and template.image_pull_policy
-              else "IfNotPresent"
-          )
-          containers.append({
-              "name": EVAL_CONTAINER_NAME,
-              "image": image,
-              "imagePullPolicy": pull_policy,
-              "command": ["sleep", "infinity"],
-              "stdin": True,
-              "tty": True,
-              "resources": {
-                  "requests": {
-                      "cpu": os.getenv("SANDBOX_EVAL_CPU", "50m"),
-                      "memory": os.getenv("SANDBOX_EVAL_MEM", "128Mi"),
-                  },
-                  "limits": {
-                      "cpu": os.getenv("SANDBOX_CPU_LIMIT", "2"),
-                      "memory": os.getenv("SANDBOX_MEM_LIMIT", "4Gi"),
-                  },
-              },
-          })
-        return manifest
-
-      asrl_resources.Resources._template_manifest = _patched_template_manifest
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    logging.debug(
-        "[SandboxFleet] agent_sandbox_rl template patch note: %s", e
-    )
+  runtime_cls = docker_mod.DockerRuntime
+  if not hasattr(runtime_cls, "_orig_init"):
+    runtime_cls._orig_init = runtime_cls.__init__
+    runtime_cls.__init__ = _r2egym_patched_init
+  if not hasattr(runtime_cls, "_orig_start_container"):
+    runtime_cls._orig_start_container = runtime_cls.start_container
+    runtime_cls.start_container = _r2egym_patched_start_container
+  if not hasattr(runtime_cls, "_orig_setup_env") and hasattr(
+      runtime_cls, "setup_env"
+  ):
+    runtime_cls._orig_setup_env = runtime_cls.setup_env
+    runtime_cls.setup_env = _r2egym_patched_setup_env
 
 
 def get_image_rewrite_fn(
@@ -624,9 +581,9 @@ def init_global_fleet(
     if fail_fast.ready_timeout_s is not None:
       fleet_kwargs["ready_timeout"] = fail_fast.ready_timeout_s
 
-    template = openhands_template.get_template(scaffold, node_sel)
-    if template is not None:
-      fleet_kwargs["template"] = template
+    fleet_kwargs["template"] = openhands_template.get_template(
+        scaffold, node_sel
+    )
 
     fleet_cfg = FleetConfig(**fleet_kwargs)
     fleet_inst: SandboxFleetLike = SandboxFleet(fleet_cfg)

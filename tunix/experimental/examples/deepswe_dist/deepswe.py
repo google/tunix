@@ -538,8 +538,14 @@ class DeepSWEEnv(swe_env.SWEEnv):
         cmd_files = r2egym_command_files()
       except Exception:  # pylint: disable=broad-exception-caught
         cmd_files = None
+    if self.handle is not None:
+      self.handle.target_container = sandbox_utils.RUNTIME_CONTAINER_NAME
+    env_container = (
+        sandbox_utils.EVAL_CONTAINER_NAME
+        if is_openhands
+        else sandbox_utils.RUNTIME_CONTAINER_NAME
+    )
     if is_openhands and self.handle is not None:
-      self.handle._target_container = sandbox_utils.EVAL_CONTAINER_NAME  # pylint: disable=protected-access
       self.handle._defer_setup_env = True  # pylint: disable=protected-access
     try:
       self.env = make_fleet_repo_env(
@@ -548,10 +554,10 @@ class DeepSWEEnv(swe_env.SWEEnv):
           step_timeout=self.step_timeout,
           reward_timeout=self.reward_timeout,
           verbose=self.verbose,
+          container=env_container,
       )
     finally:
       if is_openhands and self.handle is not None:
-        self.handle._target_container = sandbox_utils.RUNTIME_CONTAINER_NAME  # pylint: disable=protected-access
         self.handle._defer_setup_env = False  # pylint: disable=protected-access
     if is_openhands:
       sandbox_utils.set_runtime_container(
