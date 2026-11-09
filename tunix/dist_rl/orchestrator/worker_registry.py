@@ -29,6 +29,7 @@ from typing import Any
 
 from absl import logging
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.distributed.runtime.discovery import discovery
 from tunix.dist_rl.worker import abstract_worker
 from tunix.dist_rl.worker import remote_execution
 
@@ -104,7 +105,7 @@ class WorkerRegistry:
     if not info.roles:
       raise ValueError(f"worker {worker_id!r} declares no roles")
     if self._closed:
-      raise RuntimeError(
+      raise discovery.RegistrationUnavailableError(
           f"Worker registration is closed; cannot register {worker_id!r}."
       )
     if worker_id in self._entries and not override:
@@ -224,7 +225,10 @@ class WorkerRegistry:
       The registered `WorkerInfo`.
 
     Raises:
-      RuntimeError: If `service_type` is unknown or registration is closed.
+      RuntimeError: If `service_type` is unknown.
+      discovery.RegistrationUnavailableError: If registration is closed. It
+        is a `RuntimeError`; discovery reports it as `UNAVAILABLE`, so the
+        worker retries, e.g. until a restarted orchestrator takes over.
       ValueError: If `worker_id` collides with a worker of a different role, a
         non-rollout worker already promoted past `REGISTERED`, a worker with no
         address, or a live worker at a different address.
@@ -270,7 +274,7 @@ class WorkerRegistry:
       with self._condition:
         if self._closed:
           # Fail before the up-to-5s liveness probe below.
-          raise RuntimeError(
+          raise discovery.RegistrationUnavailableError(
               f"Worker registration is closed; cannot register {worker_id!r}."
           )
         existing = self._entries.get(worker_id)

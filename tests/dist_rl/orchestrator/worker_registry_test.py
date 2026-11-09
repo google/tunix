@@ -21,6 +21,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.distributed.runtime.discovery import discovery
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.testing import worker_registry_testing
 from tunix.dist_rl.worker import mock_worker
@@ -841,14 +842,18 @@ class WorkerRegistryTest(absltest.TestCase):
     registry.close_registration()
 
     h = mock.MagicMock(spec=remote_execution.ActorHandle)
-    with self.assertRaisesRegex(RuntimeError, "registration is closed"):
+    with self.assertRaisesRegex(
+        discovery.RegistrationUnavailableError, "registration is closed"
+    ):
       registry.register_handle("r0", [datatypes.Role.ROLLOUT], h, override=True)
     meta = pickle.dumps({
         "service_type": "rollout",
         "service_port": 5000,
         "worker_id": "r0",
     })
-    with self.assertRaisesRegex(RuntimeError, "registration is closed"):
+    with self.assertRaisesRegex(
+        discovery.RegistrationUnavailableError, "registration is closed"
+    ):
       registry.register_from_hostname("host", 0, meta)
     remote_handle.sync_close.assert_called_once()
 
@@ -916,7 +921,9 @@ class WorkerRegistryTest(absltest.TestCase):
     # A closed registry rejects registration without creating a probe handle.
     registry.close_registration()
     mock_from_address.reset_mock()  # Also resets `new_handle`'s call counts.
-    with self.assertRaisesRegex(RuntimeError, "registration is closed"):
+    with self.assertRaisesRegex(
+        discovery.RegistrationUnavailableError, "registration is closed"
+    ):
       registry.register_from_hostname("hostB", 0, meta)
     mock_from_address.assert_called_once()  # Only the new worker's handle.
     new_handle.sync_close.assert_called_once()
@@ -943,7 +950,9 @@ class WorkerRegistryTest(absltest.TestCase):
   def test_register_local_worker_rejected_after_close(self):
     registry = worker_registry.WorkerRegistry()
     registry.close()
-    with self.assertRaisesRegex(RuntimeError, "registration is closed"):
+    with self.assertRaisesRegex(
+        discovery.RegistrationUnavailableError, "registration is closed"
+    ):
       registry.register(mock_worker.MockWorker("t0", roles={"trainer"}))
     self.assertEmpty(registry)
 

@@ -15,12 +15,23 @@
 """gRPC-based peer discovery server and client helper functions."""
 
 from concurrent import futures
+import logging
 import time
 from typing import Callable
 
 import grpc
 from tunix.dist_rl.distributed.runtime.discovery import discovery_service_pb2 as pb2
 from tunix.dist_rl.distributed.runtime.discovery import discovery_service_pb2_grpc as pb2_grpc
+
+
+class RegistrationUnavailableError(RuntimeError):
+  """The discovery server cannot accept a registration right now.
+
+  A registration callback raises it when the failure is transient, e.g. while
+  the server is shutting down and a restarted server will take its place. The
+  server returns `UNAVAILABLE` for it, so `register` retries instead of
+  failing the worker for good.
+  """
 
 
 class DiscoveryServer:
@@ -60,7 +71,10 @@ class DiscoveryServer:
       def Register(
           self, request: pb2.RegisterRequest, context: grpc.ServicerContext
       ):
-        callback(request.hostname, request.port, request.metadata)
+        try:
+          callback(request.hostname, request.port, request.metadata)
+        except RegistrationUnavailableError as e:
+          context.abort(grpc.StatusCode.UNAVAILABLE, str(e))
         return pb2.RegisterResponse()
 
     pb2_grpc.add_DiscoveryServiceServicer_to_server(_handler(), server)
@@ -83,9 +97,16 @@ class DiscoveryServer:
 
 
 def register(
-    server_address: str, hostname: str, port: int, metadata: bytes
+    server_address: str,
+    hostname: str,
+    port: int,
+    metadata: bytes,
+    address_resolver: Callable[[], str] | None = None,
 ) -> None:
   """Registers a node with the remote discovery server using exponential backoff.
+
+  Retries while the server returns `UNAVAILABLE`: it is not up yet, it moved,
+  or it cannot accept registrations right now (`RegistrationUnavailableError`).
 
   Args:
     server_address: Host and port of the target discovery server (e.g.
@@ -93,6 +114,11 @@ def register(
     hostname: Hostname or address of the registering node.
     port: Port of the registering node.
     metadata: Custom serialized metadata bytes to pass to the server.
+    address_resolver: Returns the server's current address, for servers that can
+      move (e.g. a restarted server behind a service name that resolves to its
+      current host). Called before each retry; when its address differs from the
+      current one, the next attempt goes to the new address, starting over from
+      the initial backoff. If it raises, the current address is kept.
 
   Raises:
     ValueError: If `server_address` is empty.
@@ -103,28 +129,51 @@ def register(
         "server_address must be non-empty. did you set --discovery_addrs ?"
     )
 
-  with grpc.insecure_channel(server_address) as channel:
-    stub = pb2_grpc.DiscoveryServiceStub(channel)
-
-    request = pb2.RegisterRequest(
-        hostname=hostname, port=port, metadata=metadata
-    )
-
+  request = pb2.RegisterRequest(hostname=hostname, port=port, metadata=metadata)
+  channel = grpc.insecure_channel(server_address)
+  stub = pb2_grpc.DiscoveryServiceStub(channel)
+  try:
     delay = 1
     count = 0
     while True:
       try:
         stub.Register(request)
-        break
+        return
       except grpc.RpcError as e:
-        if e.code() == grpc.StatusCode.UNAVAILABLE:  # pyrefly: ignore[missing-attribute]
-          time.sleep(delay)
-          count += 1
-          if count >= 60:
-            delay = min(delay * 2, 300)
-            count = 0
-          continue
-        else:
+        if e.code() != grpc.StatusCode.UNAVAILABLE:  # pyrefly: ignore[missing-attribute]
           raise RuntimeError(
               f"discovery register failed: {e.code()} - {e.details()}"  # pyrefly: ignore[missing-attribute]
-          )
+          ) from e
+      time.sleep(delay)
+      count += 1
+      if count >= 60:
+        delay = min(delay * 2, 300)
+        count = 0
+      if address_resolver is None:
+        continue
+      try:
+        new_address = address_resolver()
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "Could not re-resolve the discovery server address; retrying %s:"
+            " %s",
+            server_address,
+            e,
+        )
+        continue
+      if new_address and new_address != server_address:
+        logging.info(
+            "Discovery server moved from %s to %s; registering there.",
+            server_address,
+            new_address,
+        )
+        channel.close()
+        server_address = new_address
+        channel = grpc.insecure_channel(server_address)
+        stub = pb2_grpc.DiscoveryServiceStub(channel)
+        # The new server may still be starting; don't make it wait out the
+        # backoff accumulated against the old one.
+        delay = 1
+        count = 0
+  finally:
+    channel.close()
