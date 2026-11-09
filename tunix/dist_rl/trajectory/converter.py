@@ -618,6 +618,7 @@ def create_trajectory_metadata(
   meta_extra = dict(getattr(request, "metadata", None) or {})
   if extra:
     meta_extra.update(extra)
+  meta_extra.pop("env_config", None)
 
   if isinstance(agent, trajectory_lib.Agent):
     agent_obj = agent
@@ -759,9 +760,11 @@ def update_trajectory_metadata(
       setattr(metadata, "reward_time", reward_time)
 
   if extra:
-    if metadata.extra is None:
-      metadata.extra = {}
-    metadata.extra.update(extra)
+    sanitized_extra = {k: v for k, v in extra.items() if k != "env_config"}
+    if sanitized_extra:
+      if metadata.extra is None:
+        metadata.extra = {}
+      metadata.extra.update(sanitized_extra)
 
   if final_metrics is not None:
     metadata.final_metrics = final_metrics

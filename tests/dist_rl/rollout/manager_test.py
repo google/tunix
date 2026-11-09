@@ -244,6 +244,43 @@ class RegisteredEnvMetadataTest(unittest.IsolatedAsyncioTestCase):
         },
     )
 
+  async def test_failed_episode_strips_env_config_from_trajectory_error(self):
+    class _FailingCollector(_NoopCollector):
+
+      async def run_episode(self):
+        raise RuntimeError("sandbox boom")
+
+    manager = manager_lib.RolloutManager(
+        config=rollout_worker.RolloutConfig(),
+        sampler=_FakeSyncSampler([]),
+        env_factory=_CaptureEnv,
+        agent_factory=test_utils.MockAgent,
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(
+        request_id="req_err",
+        prompt="",
+        prompt_id="prompt_err",
+        group_index=1,
+        target_policy_version=3,
+        metadata={
+            "question": "Q0",
+            "env_config": {"verifier_bytes": b"\x80\xff"},
+        },
+    )
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _FailingCollector,
+    ):
+      err = await manager.generate(request)
+
+    self.assertNotIn("env_config", err.metadata)
+    self.assertEqual(err.metadata["question"], "Q0")
+    self.assertIn("env_config", request.metadata)
+
 
 class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
 

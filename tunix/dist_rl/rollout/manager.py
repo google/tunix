@@ -246,6 +246,7 @@ class RolloutManager:
         trajectory.traj["execution_time_s"] = time.perf_counter() - run_start
     except Exception as e:  # pylint: disable=broad-exception-caught
       error_metadata = dict(request.metadata or {})
+      error_metadata.pop("env_config", None)
       error_metadata["prompt_id"] = request.prompt_id
       error_metadata["group_index"] = request.group_index
       error_metadata["policy_version"] = int(request.target_policy_version or 0)

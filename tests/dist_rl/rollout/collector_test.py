@@ -29,6 +29,7 @@ from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import payload_builder
 from tunix.dist_rl.rollout import collector
 from tunix.dist_rl.rollout import sampler as sampler_lib
+from tunix.dist_rl.trajectory import file_store
 from tunix.dist_rl.trajectory import in_memory_store
 from tunix.rl import algorithm_config
 from tunix.rl import packing
@@ -1805,6 +1806,61 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
     self.assertEqual(mixed_batch.routed_experts.dtype, np.int16)
     np.testing.assert_array_equal(mixed_batch.routed_experts[0, 0:4], raw_g0)
     np.testing.assert_array_equal(mixed_batch.routed_experts[0, 5:9], raw_g1)
+
+  def test_run_episode_strips_binary_env_config_from_item_store_and_logger(
+      self,
+  ):
+    class _PromptTaskEnv(base_environment.BaseTaskEnv):
+
+      def _initial_observation(self):
+        return "Solve Q0"
+
+      def _step_impl(self, action):
+        del action
+        return base_environment.EnvStepResult(
+            observation="",
+            reward=1.0,
+            done=True,
+            info={},
+        )
+
+    req = datatypes.RolloutRequest(
+        prompt_id="p_gsm",
+        prompt="",
+        group_index=0,
+        max_response_length=16,
+        metadata={
+            "question": "Q0",
+            "answer": "0",
+            "env_config": {
+                "prompt": "Solve Q0",
+                "verifier_bytes": b"\x80\xff",
+            },
+        },
+    )
+    with file_store.FileTrajectoryStore(
+        self.create_tempdir().full_path
+    ) as store:
+      engine = collector.TrajectoryCollectorEngine(
+          traj_id="traj_bin",
+          request=req,
+          sampler=_MockSampler(token_lengths=[3]),
+          env_client=_PromptTaskEnv(task={}, max_steps=1),
+          agent=model_agent.ModelAgent("sys"),
+          tokenizer=_MockTokenizer(),
+          chat_parser=_RecordingParser(),
+          trajectory_store=store,
+      )
+      item = asyncio.run(engine.run_episode())
+      store.flush()
+      stored = store.get_trajectories(["traj_bin"])
+
+    self.assertNotIn("env_config", item.metadata)
+    self.assertEqual(item.metadata["question"], "Q0")
+    self.assertEqual(item.metadata["answer"], "0")
+    self.assertEqual(req.metadata["env_config"]["verifier_bytes"], b"\x80\xff")
+    self.assertLen(stored, 1)
+    self.assertEqual(stored[0].extra, {"question": "Q0", "answer": "0"})
 
 
 if __name__ == "__main__":

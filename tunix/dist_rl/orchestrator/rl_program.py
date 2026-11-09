@@ -202,6 +202,24 @@ def _extract_reward(item: Any) -> float:
   return float(traj["trajectory_reward"])
 
 
+def _extract_rollout_prompt(
+    metadata: Mapping[str, Any], conversation: Any
+) -> str:
+  """Extracts the initial prompt text for trajectory logging."""
+  if "prompt" in metadata and metadata["prompt"]:
+    return str(metadata["prompt"])
+  if not isinstance(conversation, list):
+    return ""
+  return next(
+      (
+          str(msg.get("content") or "")
+          for msg in conversation
+          if isinstance(msg, dict) and msg.get("role") == "user"
+      ),
+      "",
+  )
+
+
 def _format_rollout_completion(conversation: Any) -> str:
   """Renders post-prompt interaction (assistant + env) for trajectory logging.
 
@@ -1413,9 +1431,7 @@ class StandardRLProgram(RLProgram):
     for item in all_step_items:
       metadata = dict(getattr(item, "metadata", None) or {})
       metadata.pop("routed_experts", None)
-      env_config = metadata.get("env_config")
-      if not isinstance(env_config, dict):
-        env_config = {}
+      metadata.pop("env_config", None)
       # Logging must never take down a training step, so read defensively
       # rather than reusing the strict `_extract_reward` above.
       traj = dict(getattr(item, "traj", None) or {})
@@ -1436,14 +1452,15 @@ class StandardRLProgram(RLProgram):
           ),
           "status": status or "UNKNOWN",
           "reward": float(reward) if reward is not None else None,
-          "question": metadata.get("question", env_config.get("question", "")),
-          "prompt": metadata.get("prompt", env_config.get("prompt", "")),
+          "question": metadata.get("question", ""),
+          "prompt": _extract_rollout_prompt(
+              metadata, traj.get("conversation_text")
+          ),
           "completion": _format_rollout_completion(
               traj.get("conversation_text", "")
           ),
           "gold_answer": metadata.get(
-              "gold_answer",
-              metadata.get("answer", env_config.get("gold_answer", "")),
+              "gold_answer", metadata.get("answer", "")
           ),
           "prompt_tokens": getattr(item, "prompt_tokens", None),
           "completion_tokens": getattr(item, "completion_tokens", None),

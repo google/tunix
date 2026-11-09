@@ -1591,6 +1591,32 @@ class CreateTrajectoryMetadataTest(parameterized.TestCase):
         meta.extra, {"experiment": "exp_v1", "custom_tag": "run_1"}
     )
 
+  def test_create_trajectory_metadata_strips_env_config(self):
+    class MockRolloutRequest:
+      prompt_id = "prompt_harbor"
+      group_index = 0
+      generation_kwargs = None
+      metadata = {"env_config": {"verifier_bytes": b"\x80\xff"}}
+
+    meta = converter.create_trajectory_metadata(
+        traj_id="traj_harbor",
+        request=MockRolloutRequest(),
+    )
+    self.assertIsNone(meta.extra)
+
+    converter.update_trajectory_metadata(
+        metadata=meta,
+        extra={"env_config": {"verifier_bytes": b"\x80\xff"}},
+    )
+    self.assertIsNone(meta.extra)
+
+    converter.update_trajectory_metadata(
+        metadata=meta,
+        extra={"env_config": {"verifier_bytes": b"\x80\xff"}, "tag": "v1"},
+    )
+    self.assertEqual(meta.extra, {"tag": "v1"})
+    self.assertIn("traj_harbor", meta.model_dump_json(exclude_none=True))
+
 
 class UpdateTrajectoryMetadataTest(parameterized.TestCase):
 

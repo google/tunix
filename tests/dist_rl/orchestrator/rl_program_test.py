@@ -6806,7 +6806,6 @@ class RLProgramTest(absltest.TestCase):
         max_steps=1,
         algo_config=self.algo_config,
         batch_config=self.batch_config,
-        trajectory_log_dir="/tmp/trajectories",
     )
     mock_traj_logger = mock.MagicMock()
     program.trajectory_logger = mock_traj_logger
@@ -6891,7 +6890,6 @@ class RLProgramTest(absltest.TestCase):
         max_steps=1,
         algo_config=self.algo_config,
         batch_config=self.batch_config,
-        trajectory_log_dir="/tmp/trajectories",
     )
     mock_traj_logger = mock.MagicMock()
     program.trajectory_logger = mock_traj_logger
@@ -6939,7 +6937,6 @@ class RLProgramTest(absltest.TestCase):
         max_steps=1,
         algo_config=self.algo_config,
         batch_config=self.batch_config,
-        trajectory_log_dir="/tmp/trajectories",
     )
     mock_traj_logger = mock.MagicMock()
     program.trajectory_logger = mock_traj_logger
@@ -6971,7 +6968,69 @@ class RLProgramTest(absltest.TestCase):
         "[assistant]: ls -l\n[environment]: foo.py bar.py\n[assistant]: done"
     )
     self.assertEqual(row["completion"], expected_completion)
+    self.assertEqual(row["prompt"], "Fix bug in foo.py")
     program.close()
+
+  def test_log_consumed_trajectories_extracts_prompt_and_gold_without_env_config(
+      self,
+  ):
+    self.algo_config.reward_mode = "env"
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo_config=self.algo_config,
+        batch_config=self.batch_config,
+    )
+    mock_traj_logger = mock.MagicMock()
+    program.trajectory_logger = mock_traj_logger
+
+    item = datatypes.TrajectoryItem(
+        prompt_id="prompt_gsm",
+        group_index=0,
+        metadata={
+            "question": "Q0",
+            "answer": "0",
+            "env_config": {"question": "stale", "gold_answer": "stale"},
+        },
+        traj={
+            "status": datatypes.TrajectoryStatus.SUCCEEDED,
+            "trajectory_reward": 1.0,
+            "conversation_text": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "Solve Q0"},
+                {"role": "assistant", "content": "0"},
+            ],
+        },
+    )
+
+    program._log_consumed_trajectories(
+        [item], log_step=1, consumed_policy_version=1
+    )
+
+    row = mock_traj_logger.log_item_async.call_args[0][0]
+    self.assertEqual(row["prompt"], "Solve Q0")
+    self.assertEqual(row["question"], "Q0")
+    self.assertEqual(row["gold_answer"], "0")
+    self.assertNotIn("env_config", row["metadata"])
+    program.close()
+
+    self.assertEqual(
+        rl_program._extract_rollout_prompt({"prompt": "Explicit"}, []),
+        "Explicit",
+    )
+    self.assertEqual(rl_program._extract_rollout_prompt({}, "raw_string"), "")
+    self.assertEqual(
+        rl_program._extract_rollout_prompt(
+            {}, [{"role": "system", "content": "sys"}]
+        ),
+        "",
+    )
+    self.assertEqual(
+        rl_program._extract_rollout_prompt(
+            {}, ["non_dict_entry", {"role": "user", "content": "Solve Q1"}]
+        ),
+        "Solve Q1",
+    )
 
   def test_critique_stage_passes_concatenated_assistant_text_and_metadata(
       self,

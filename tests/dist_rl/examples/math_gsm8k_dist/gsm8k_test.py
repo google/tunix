@@ -67,9 +67,9 @@ def _expected_record(index: int) -> dict[str, object]:
   return {
       "prompt": prompt,
       "metadata": {
+          "question": f"Q{index}",
           "answer": str(index),
           "env_config": {
-              # The orchestrator's trajectory log reads `prompt` here.
               "prompt": prompt,
               "question": f"Q{index}",
               "answer": str(index),
@@ -397,6 +397,7 @@ class TaskRecordsTest(absltest.TestCase):
           "task_name": "gsm8k",
           "max_turns": 1,
           "metadata": {
+              "question": f"Q{index}",
               "answer": str(index),
               "env_config": {
                   "prompt": prompt,

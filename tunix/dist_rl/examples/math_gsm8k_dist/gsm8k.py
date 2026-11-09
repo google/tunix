@@ -122,9 +122,9 @@ def create_dataset(
   """Returns the GSM8K task records for the distributed orchestrator.
 
   The orchestrator calls `create_dataset(**data_config)` (`data_module`). Each
-  record holds the prompt and its `metadata`: the gold `answer` for reward
-  functions and the `env_config` that the rollout worker builds `GSM8KEnv`
-  from.
+  record holds the prompt and its `metadata`: `question` and the gold `answer`
+  for trajectory logging and reward functions, plus the `env_config` that the
+  rollout worker builds `GSM8KEnv` from.
 
   Args:
     split: TFDS split, e.g. "train" or "train[:16]".
@@ -149,16 +149,18 @@ def _to_task_record(
 ) -> dict[str, object]:
   """Maps a `load_gsm8k_dataset` example to an orchestrator task record."""
   prompt = example["prompts"]
+  question = example["question"]
   answer = example["answer"]
   return {
       "prompt": prompt,
       "metadata": {
+          "question": question,
           "answer": answer,
-          # `GSM8KEnv` takes the prompt as `prompt` or `prompts`; the
-          # orchestrator's trajectory log reads `prompt`.
+          # `GSM8KEnv` is constructed from `env_config` on the rollout worker
+          # and stripped before returning trajectories to the orchestrator.
           "env_config": {
               "prompt": prompt,
-              "question": example["question"],
+              "question": question,
               "answer": answer,
           },
       },

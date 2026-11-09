@@ -448,6 +448,7 @@ class TrajectoryCollectorEngine:
     # reward was read instead of the real one, and the mirrored text held the
     # whole conversation rather than the model's answer.
     metadata = dict(self.request.metadata or {})
+    metadata.pop("env_config", None)
     metadata["prompt_id"] = self.request.prompt_id
     metadata["group_index"] = self.request.group_index
     metadata["status"] = rl_traj.get("status", "")
