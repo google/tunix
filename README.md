@@ -136,7 +136,7 @@ cutting-edge research and easy reproducibility.
 ## Citing Tunix
 ```bibtex
 @misc{tunix2025,
-  title={Tunix (Tune-in-JAX)},
+  title={Tunix (Tune-in-Accelerators)},
   author={Bao, Tianshu and Carpenter, Jeff and Chai, Lin and Gao, Haoyu and Jiang, Yangmu and Noghabi, Shadi and Sharma, Abheesht and Tan, Sizhi and Wang, Lance and Yan, Ann and Yu, Weiren and others},
   year={2025},
   howpublished={\url{https://github.com/google/tunix}},
