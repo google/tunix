@@ -76,6 +76,12 @@ class ParseArgsTest(absltest.TestCase):
     config = _parse_cmd("summary --limit 5")
     self.assertEqual(config.cmd, summary.SummaryCommand(limit=5))
 
+  def test_subcommand_summary_with_trajectory_table(self) -> None:
+    config = _parse_cmd("summary --show_trajectory_table")
+    self.assertEqual(
+        config.cmd, summary.SummaryCommand(show_trajectory_table=True)
+    )
+
   def test_subcommand_show_with_its_own_flags(self) -> None:
     config = _parse_cmd("show --trajectory_id t1 --max_chars 0")
     self.assertEqual(
@@ -218,7 +224,7 @@ class RunCliTest(absltest.TestCase):
     self.assertEqual(exit_code, 0)
     self.assertEqual(
         json.loads(stdout.getvalue())["stats"]["schema_stats"],
-        {"tunix": {"masked_out": False}},
+        {"tunix": {"masked_out": False, "trainable_tokens": 2, "valid": True}},
     )
 
 

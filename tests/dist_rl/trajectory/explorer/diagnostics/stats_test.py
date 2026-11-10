@@ -20,6 +20,7 @@ from typing import Any, ClassVar
 
 from absl.testing import absltest
 from absl.testing import parameterized
+import pandas as pd
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory import trajectory_testing
 from tunix.dist_rl.trajectory.explorer.diagnostics import schema_diagnostics
@@ -28,6 +29,8 @@ from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_diagnostics
 
 _AGENT = trajectory_lib.Agent(name="a", version="1.0")
 _TUNIX_DIAGNOSTICS = tunix_diagnostics.TunixDiagnostics()
+# The `RunStats.df` names of the Tunix columns, which the Tunix diagnostics own.
+_TUNIX_DF_COLUMNS = [f"tunix__{c}" for c in _TUNIX_DIAGNOSTICS.COLUMN_DTYPES]
 
 
 def _trajectory(
@@ -358,6 +361,19 @@ class OutcomeTest(parameterized.TestCase):
     )
 
 
+class RewardSignCountsTest(absltest.TestCase):
+
+  def test_counts_default_to_zero_and_sum_to_the_total(self) -> None:
+    counts = stats_lib.RewardSignCounts(positive=3, unscored=1)
+
+    self.assertEqual(counts.non_positive, 0)
+    self.assertEqual(counts.total, 4)
+    self.assertEqual(
+        counts.to_json_dict(),
+        {"positive": 3, "non_positive": 0, "unscored": 1, "total": 4},
+    )
+
+
 class RunStatsTest(parameterized.TestCase):
 
   def test_df_has_one_typed_row_per_trajectory(self) -> None:
@@ -497,6 +513,7 @@ class RunStatsTest(parameterized.TestCase):
     self.assertEqual(run.num_with_reward, 0)
     self.assertEmpty(run.status_counts)
     self.assertEqual(run.num_with_status, 0)
+    self.assertEmpty(run.reward_signs_by_status)
     self.assertEmpty(run.tool_counts)
 
   def test_status_counts_tally_only_reporting_trajectories(self) -> None:
@@ -519,6 +536,54 @@ class RunStatsTest(parameterized.TestCase):
     )
     self.assertEqual(
         list(run.to_json_dict()["status_counts"]), ["SUCCEEDED", "TIMEOUT"]
+    )
+
+  def test_reward_signs_are_counted_per_status(self) -> None:
+    run = stats_lib.RunStats.from_trajectories([
+        _tunix_trajectory(status="MAX_STEPS_REACHED", total_reward=1.0),
+        _tunix_trajectory(status="SUCCEEDED", total_reward=1.0),
+        _tunix_trajectory(status=" succeeded", total_reward=0.25),
+        _tunix_trajectory(status="SUCCEEDED", total_reward=0.0),
+        _tunix_trajectory(status="SUCCEEDED", total_reward=-1.0),
+        _tunix_trajectory(status="SUCCEEDED"),
+        _tunix_trajectory(status="SUCCEEDED", total_reward=float("nan")),
+        # Trajectories that report no status are not counted.
+        _tunix_trajectory(total_reward=1.0),
+    ])
+
+    self.assertEqual(
+        run.reward_signs_by_status,
+        {
+            "MAX_STEPS_REACHED": stats_lib.RewardSignCounts(positive=1),
+            "SUCCEEDED": stats_lib.RewardSignCounts(
+                positive=2, non_positive=2, unscored=2
+            ),
+        },
+    )
+    self.assertEqual(
+        list(run.reward_signs_by_status), ["MAX_STEPS_REACHED", "SUCCEEDED"]
+    )
+    # The JSON keeps the order of its `status_counts`, most frequent first.
+    self.assertEqual(
+        run.to_json_dict()["reward_signs_by_status"],
+        {
+            "SUCCEEDED": {
+                "positive": 2,
+                "non_positive": 2,
+                "unscored": 2,
+                "total": 6,
+            },
+            "MAX_STEPS_REACHED": {
+                "positive": 1,
+                "non_positive": 0,
+                "unscored": 0,
+                "total": 1,
+            },
+        },
+    )
+    self.assertEqual(
+        list(run.to_json_dict()["reward_signs_by_status"]),
+        ["SUCCEEDED", "MAX_STEPS_REACHED"],
     )
 
   def test_tool_counts_are_summed_across_the_run(self) -> None:
@@ -582,6 +647,14 @@ class RunStatsTest(parameterized.TestCase):
             "num_with_tokens": 1,
             "status_counts": {"SUCCEEDED": 1},
             "num_with_status": 1,
+            "reward_signs_by_status": {
+                "SUCCEEDED": {
+                    "positive": 1,
+                    "non_positive": 0,
+                    "unscored": 0,
+                    "total": 1,
+                }
+            },
             "mean_reward": 1.0,
             "num_with_reward": 1,
             "tool_counts": {},
@@ -697,14 +770,14 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
   def test_trajectory_stats_carry_the_values_of_active_diagnostics(
       self,
   ) -> None:
+    trajectory = _tunix_trajectory(masked_out=True)
     stats = stats_lib.TrajectoryStats.from_trajectory(
-        _tunix_trajectory(masked_out=True), diagnostics=(_TUNIX_DIAGNOSTICS,)
+        trajectory, diagnostics=(_TUNIX_DIAGNOSTICS,)
     )
 
-    self.assertEqual(stats.schema_stats, {"tunix": {"masked_out": True}})
-    self.assertEqual(
-        stats.to_json_dict()["schema_stats"], {"tunix": {"masked_out": True}}
-    )
+    values = _TUNIX_DIAGNOSTICS.extract(trajectory)
+    self.assertEqual(stats.schema_stats, {"tunix": values})
+    self.assertEqual(stats.to_json_dict()["schema_stats"], {"tunix": values})
     self.assertIs(stats.to_row()["tunix__masked_out"], True)
 
   def test_diagnostics_skip_trajectories_of_other_schemas(self) -> None:
@@ -728,8 +801,7 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     )
 
     self.assertEqual(
-        run.df.columns.tolist(),
-        [*stats_lib.COLUMN_DTYPES, "tunix__masked_out"],
+        run.df.columns.tolist(), [*stats_lib.COLUMN_DTYPES, *_TUNIX_DF_COLUMNS]
     )
     masked_out = run.df["tunix__masked_out"]
     self.assertEqual(str(masked_out.dtype), "boolean")
@@ -738,7 +810,8 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     self.assertEqual(masked_out.isna().tolist(), [False, False, True, True])
     self.assertEqual(masked_out.dropna().tolist(), [True, False])
     self.assertEqual(
-        run.columns_of(_TUNIX_DIAGNOSTICS).columns.tolist(), ["masked_out"]
+        run.columns_of(_TUNIX_DIAGNOSTICS).columns.tolist(),
+        [*stats_lib.COLUMN_DTYPES, *_TUNIX_DIAGNOSTICS.COLUMN_DTYPES],
     )
     self.assertEqual(
         run.schema_stats,
@@ -771,7 +844,7 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     self.assertEqual(
         run.df.columns.tolist()[len(stats_lib.COLUMN_DTYPES) :],
         [
-            "tunix__masked_out",
+            *_TUNIX_DF_COLUMNS,
             "acme_eval__verdict",
             "acme_eval__num_retries",
             "acme_eval__latency_ms",
@@ -814,7 +887,7 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
         diagnostics=(diagnostics,),
     )
 
-    columns = run.columns_of(diagnostics)
+    columns = run.columns_of(diagnostics)[list(diagnostics.COLUMN_DTYPES)]
     self.assertEqual(
         columns.dtypes.astype(str).tolist(), ["string", "Int64", "Float64"]
     )
@@ -837,6 +910,84 @@ class SchemaDiagnosticsTest(parameterized.TestCase):
     self.assertEqual(num_retries.isna().tolist(), [False, True])
     # 2**53 + 1 is the smallest int a float64 cannot hold exactly.
     self.assertEqual(num_retries.iloc[0], 2**53 + 1)
+
+  def test_run_level_hooks_see_the_core_columns(self) -> None:
+    class Reporting(schema_diagnostics.SchemaDiagnostics[_EvalMetadata]):
+      COLUMN_DTYPES = {"verdict": "string"}
+
+      def compute_run_summary(
+          self, df: pd.DataFrame
+      ) -> Mapping[str, schema_diagnostics.JsonValue]:
+        return {"columns": df.columns.tolist()}
+
+    diagnostics = Reporting()
+    run = stats_lib.RunStats.from_trajectories(
+        [
+            _EvalMetadata(agent=_AGENT, verdict="pass").create_trajectory(
+                steps=[]
+            )
+        ],
+        diagnostics=(diagnostics,),
+    )
+
+    columns = [*stats_lib.COLUMN_DTYPES, "verdict"]
+    self.assertEqual(run.schema_stats["acme_eval"], {"columns": columns})
+    self.assertEqual(run.columns_of(diagnostics).columns.tolist(), columns)
+
+  def test_run_level_hooks_see_only_the_trajectories_of_their_schema(
+      self,
+  ) -> None:
+    class Reporting(
+        schema_diagnostics.SchemaDiagnostics[
+            trajectory_lib.TunixTrajectoryMetadata
+        ]
+    ):
+      COLUMN_DTYPES = {"masked_out": "boolean"}
+
+      def compute_run_summary(
+          self, df: pd.DataFrame
+      ) -> Mapping[str, schema_diagnostics.JsonValue]:
+        return {"trajectory_ids": df["trajectory_id"].tolist()}
+
+    diagnostics = Reporting()
+    run = stats_lib.RunStats.from_trajectories(
+        [
+            _tunix_trajectory("traj_1", masked_out=True),
+            _trajectory(),
+            # Its only column is null, yet it is a trajectory of the schema.
+            _tunix_trajectory("traj_3"),
+        ],
+        diagnostics=(diagnostics,),
+    )
+
+    self.assertEqual(
+        run.schema_stats["tunix"], {"trajectory_ids": ["traj_1", "traj_3"]}
+    )
+    # The rows keep their labels in `df`, which `summary` matches them by.
+    self.assertEqual(run.columns_of(diagnostics).index.tolist(), [0, 2])
+
+  def test_columns_must_not_have_the_names_of_core_columns(self) -> None:
+    class Shadowing(
+        schema_diagnostics.SchemaDiagnostics[
+            trajectory_lib.TunixTrajectoryMetadata
+        ]
+    ):
+      COLUMN_DTYPES = {"status": "string"}
+
+    diagnostics = (Shadowing(),)
+    error = r"Shadowing: columns \['status'\] have the names of core columns"
+    with self.assertRaisesRegex(ValueError, error):
+      stats_lib.RunStats.from_trajectories(
+          [_tunix_trajectory(status="SUCCEEDED")], diagnostics=diagnostics
+      )
+    # Like the namespace check, it runs up front, whatever the trajectories: a
+    # trajectory of another schema or an empty run fails too.
+    with self.assertRaisesRegex(ValueError, error):
+      stats_lib.TrajectoryStats.from_trajectory(
+          _trajectory(), diagnostics=diagnostics
+      )
+    with self.assertRaisesRegex(ValueError, error):
+      stats_lib.RunStats.from_trajectories([], diagnostics=diagnostics)
 
   @parameterized.named_parameters(
       ("run_of_another_schema", 2),

@@ -14,13 +14,20 @@
 
 """Unit tests for the Tunix schema diagnostics."""
 
+from typing import Any
+
 from absl.testing import absltest
+from absl.testing import parameterized
+import numpy as np
 import pandas as pd
 from tunix.dist_rl.trajectory import trajectory_testing
 from tunix.dist_rl.trajectory.explorer.diagnostics import tunix_diagnostics
 
+# Succeeded with reward 3.5, was not masked out, and trains on 2 tokens.
+_VALID_TRAJECTORY = trajectory_testing.PAIRED_TUNIX_TRAJECTORY
 
-class TunixDiagnosticsTest(absltest.TestCase):
+
+class TunixDiagnosticsTest(parameterized.TestCase):
 
   def setUp(self) -> None:
     super().setUp()
@@ -29,15 +36,95 @@ class TunixDiagnosticsTest(absltest.TestCase):
   def test_namespace_comes_from_the_tunix_extensions_key(self) -> None:
     self.assertEqual(self.diagnostics.NAMESPACE, "tunix")
 
-  def test_extract_reports_masked_out(self) -> None:
+  def test_extract_reports_each_column(self) -> None:
     self.assertEqual(
-        self.diagnostics.extract(trajectory_testing.PAIRED_TUNIX_TRAJECTORY),
-        {"masked_out": False},
+        self.diagnostics.extract(_VALID_TRAJECTORY),
+        {"masked_out": False, "trainable_tokens": 2, "valid": True},
     )
-    # A rollout that was not post-processed does not report the value.
+    # A rollout that was not post-processed reports neither `masked_out` nor a
+    # status, and its steps report no masks.
     self.assertEqual(
         self.diagnostics.extract(trajectory_testing.TUNIX_ROLLOUT_TRAJECTORY),
-        {"masked_out": None},
+        {"masked_out": None, "trainable_tokens": None, "valid": False},
+    )
+
+  def test_only_masked_out_is_printed(self) -> None:
+    values = self.diagnostics.extract(_VALID_TRAJECTORY)
+
+    self.assertEqual(
+        list(self.diagnostics.format_show_header(values)),
+        ["masked_out: False"],
+    )
+
+  @parameterized.named_parameters(
+      ("status_in_lower_case", {"status": " succeeded"}, True),
+      ("overlong_but_not_masked_out", {"status": "MAX_STEPS_REACHED"}, True),
+      (
+          "context_limit_but_not_masked_out",
+          {"status": "MAX_CONTEXT_LIMIT_REACHED"},
+          True,
+      ),
+      # Like the trainer, a status that `TrajectoryStatus` lacks is valid.
+      ("unknown_status", {"status": "COMPLETED"}, True),
+      ("not_post_processed", {"masked_out": None}, True),
+      ("unset_status", {"status": None}, False),
+      ("blank_status", {"status": " "}, False),
+      ("running", {"status": "RUNNING"}, False),
+      ("failed", {"status": "failed"}, False),
+      ("timeout", {"status": "TIMEOUT"}, False),
+      ("env_timeout", {"status": "ENV_TIMEOUT"}, False),
+      ("cancelled", {"status": "CANCELLED"}, False),
+      ("masked_out", {"masked_out": True}, False),
+      ("unscored", {"total_reward": None}, False),
+      ("non_finite_reward", {"total_reward": float("nan")}, False),
+  )
+  def test_validity(self, update: dict[str, Any], valid: bool) -> None:
+    trajectory = _VALID_TRAJECTORY.model_copy(update=update)
+
+    self.assertEqual(self.diagnostics.extract(trajectory)["valid"], valid)
+
+  def test_trainable_tokens_sum_the_masks_of_agent_steps(self) -> None:
+    agent_step = trajectory_testing.TUNIX_AGENT_STEP_1
+    trajectory = _VALID_TRAJECTORY.model_copy(
+        update={
+            "steps": [
+                trajectory_testing.TUNIX_ENV_STEP_0,
+                agent_step.model_copy(
+                    update={"assistant_masks": np.array([1, 1, 0])}
+                ),
+                agent_step.model_copy(update={"assistant_masks": [0, 1]}),
+                agent_step.model_copy(update={"assistant_masks": None}),
+            ]
+        }
+    )
+
+    self.assertEqual(
+        self.diagnostics.extract(trajectory)["trainable_tokens"], 3
+    )
+
+  @parameterized.named_parameters(
+      ("no_trainable_tokens", np.array([0, 0]), 0, False),
+      # Like the trainer, skip the check when no step reports masks.
+      ("unreported_masks", None, None, True),
+  )
+  def test_trainable_tokens_decide_validity_only_when_reported(
+      self,
+      masks: np.ndarray | None,
+      trainable_tokens: int | None,
+      valid: bool,
+  ) -> None:
+    agent_step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(
+        update={"assistant_masks": masks}
+    )
+    trajectory = _VALID_TRAJECTORY.model_copy(update={"steps": [agent_step]})
+
+    self.assertEqual(
+        self.diagnostics.extract(trajectory),
+        {
+            "masked_out": False,
+            "trainable_tokens": trainable_tokens,
+            "valid": valid,
+        },
     )
 
   def test_summarize_counts_masked_out_trajectories(self) -> None:
