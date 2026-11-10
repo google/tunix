@@ -188,6 +188,23 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--scaffold", choices=("r2egym", "sweagent"), default="r2egym"
   )
   parser.add_argument("--use_agent_sandbox", action="store_true")
+  parser.add_argument(
+      "--max_warmpool_concurrency",
+      type=int,
+      default=int(os.getenv("MAX_WARMPOOL_CONCURRENCY", "128")),
+      help="Maximum concurrent warmpool operations / sandbox claims.",
+  )
+  parser.add_argument(
+      "--max_warmpool_replicas",
+      type=int,
+      default=(
+          int(val) if (val := os.getenv("MAX_WARMPOOL_REPLICAS")) else None
+      ),
+      help=(
+          "Maximum warmpool replicas per task image. Defaults to"
+          " num_generations when unset."
+      ),
+  )
   parser.add_argument("--env_verbose", action="store_true")
   parser.add_argument(
       "--flush_every_n_steps",
@@ -447,6 +464,28 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       len(dataset),
   )
 
+  if args.use_agent_sandbox:
+    from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
+
+    logging.info(
+        "Initializing orchestrator SandboxFleet and warming dataset images "
+        "(size=%d, max_warmpool_concurrency=%d, num_generations=%d, "
+        "max_warmpool_replicas=%s)...",
+        len(dataset),
+        args.max_warmpool_concurrency,
+        args.num_generations,
+        args.max_warmpool_replicas,
+    )
+    sandbox_utils.init_global_fleet(
+        tasks=dataset,
+        max_concurrency=args.max_warmpool_concurrency,
+        num_generations=args.num_generations,
+        batch_size=args.batch_size,
+        max_warmpool_replicas=args.max_warmpool_replicas,
+        scaffold=args.scaffold,
+    )
+    sandbox_utils.warm_global_fleet()
+
   trajectory_store_config = _trajectory_store_config(args)
   cluster = orchestrator.ClusterOrchestrator(
       weight_sync_mode=args.weight_sync_mode,
@@ -557,6 +596,10 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
     finally:
       program.close()
+      if args.use_agent_sandbox:
+        from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
+
+        sandbox_utils.teardown_global_fleet()
 
   result = program.last_step_result
   if result is None:
