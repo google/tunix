@@ -391,6 +391,104 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
     )
     self.assertIsNone(restored.steps[1].env_routed_experts)
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="uint8_3d",
+          trailing_shape=(2, 4),
+      ),
+      dict(
+          testcase_name="uint10_4d",
+          trailing_shape=(2, 1, 5),
+      ),
+      dict(
+          testcase_name="uint10_4d_non_div4_k6",
+          trailing_shape=(2, 1, 8),
+      ),
+      dict(
+          testcase_name="uint10_4d_non_div4_k10",
+          trailing_shape=(2, 1, 13),
+      ),
+  )
+  def test_to_tunix_trajectory_splits_compact_uint8_prefill_routed_experts(
+      self, trailing_shape
+  ):
+    traj, _, _ = self._routed_trajectory()
+    n_tail = int(np.prod(trailing_shape))
+    prefill_0 = np.arange(3 * n_tail, dtype=np.uint8).reshape(
+        (3,) + trailing_shape
+    )
+    prefill_1 = np.arange(3 * n_tail, 8 * n_tail, dtype=np.uint8).reshape(
+        (5,) + trailing_shape
+    )
+    traj.steps[1].prefill_routed_experts = prefill_0
+    traj.steps[3].prefill_routed_experts = prefill_1
+
+    restored = converter.to_tunix_trajectory(traj.to_json_dict())
+    self.assertEqual(restored.prompt_routed_experts.dtype, np.uint8)
+    np.testing.assert_array_equal(restored.prompt_routed_experts, prefill_0[:2])
+    np.testing.assert_array_equal(
+        restored.steps[0].assistant_routed_experts,
+        np.concatenate([prefill_0[2:], prefill_1[:2]], axis=0),
+    )
+    np.testing.assert_array_equal(
+        restored.steps[0].env_routed_experts, prefill_1[2:4]
+    )
+    np.testing.assert_array_equal(
+        restored.steps[1].assistant_routed_experts, prefill_1[4:]
+    )
+
+  def test_to_tunix_trajectory_normalizes_mixed_tier_non_div4_topk(self):
+    from tunix.rl import packing  # pylint: disable=g-import-not-at-top
+
+    traj, _, _ = self._routed_trajectory()
+    raw_0 = np.arange(3 * 2 * 10, dtype=np.int16).reshape(3, 2, 10) % 200
+    raw_0[0, 0, -1] = -1
+    raw_1 = (
+        np.arange(5 * 2 * 10, dtype=np.int16).reshape(5, 2, 10) + 260
+    ) % 512
+    raw_1[-1, -1, 0] = -1
+    # Turn 0 fits in uint8 (3, 2, 10); Turn 1 requires uint10 (5, 2, 1, 13).
+    enc_0 = packing.encode_routed_experts(raw_0, mode="auto", batched=False)
+    enc_1 = packing.encode_routed_experts(raw_1, mode="auto", batched=False)
+    self.assertEqual(enc_0.shape, (3, 2, 10))
+    self.assertEqual(enc_1.shape, (5, 2, 1, 13))
+    traj.steps[1].prefill_routed_experts = enc_0
+    traj.steps[3].prefill_routed_experts = enc_1
+
+    restored = converter.to_tunix_trajectory(traj.to_json_dict())
+    self.assertEqual(restored.prompt_routed_experts.shape, (2, 2, 1, 13))
+    self.assertEqual(
+        restored.steps[0].assistant_routed_experts.shape, (3, 2, 1, 13)
+    )
+    self.assertEqual(restored.steps[0].env_routed_experts.shape, (2, 2, 1, 13))
+    self.assertEqual(
+        restored.steps[1].assistant_routed_experts.shape, (1, 2, 1, 13)
+    )
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(
+            restored.prompt_routed_experts, batched=False
+        ),
+        raw_0[:2],
+    )
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(
+            restored.steps[0].assistant_routed_experts, batched=False
+        ),
+        np.concatenate([raw_0[2:], raw_1[:2]], axis=0),
+    )
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(
+            restored.steps[0].env_routed_experts, batched=False
+        ),
+        raw_1[2:4],
+    )
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(
+            restored.steps[1].assistant_routed_experts, batched=False
+        ),
+        raw_1[4:],
+    )
+
   def test_to_tunix_trajectory_truncated_to_previous_turn_splits_prefix_cleanly(
       self,
   ):

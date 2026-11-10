@@ -640,18 +640,33 @@ class PackSegmentAlignmentTest(absltest.TestCase):
     np.testing.assert_array_equal(
         packing.decode_routed_experts(enc_i16), raw_i16.astype(np.int16)
     )
-    # 255 <= max <= 1022 with K % 4 != 0 falls back to int16 in "auto" mode and
-    # raises ValueError when mode="uint10" is requested explicitly.
-    for k_non_div4 in (2, 6):
+    # 255 <= max <= 1022 with K % 4 != 0 (e.g., K=1, 2, 3, 5, 6, 7, 10 for
+    # tail-only rem=1/2/3 and Qwen3.5-397B-A17B) packs into byte-exact uint10
+    # (T, L, 1, ceil(10*K/8)).
+    non_div4_cases: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for k_non_div4 in (1, 2, 3, 5, 6, 7, 10):
       raw_k_non_div4 = rng.integers(
           -1, 512, size=(5, 3, k_non_div4), dtype=np.int16
       )
       raw_k_non_div4[0, 0, 0] = 300
+      raw_k_non_div4[1] = agent_types.UNSET_ROUTED_EXPERT
       enc_auto = packing.encode_routed_experts(raw_k_non_div4, mode="auto")
-      self.assertEqual(enc_auto.dtype, np.int16)
-      np.testing.assert_array_equal(enc_auto, raw_k_non_div4)
-      with self.assertRaisesRegex(ValueError, "top_k divisible by 4"):
-        packing.encode_routed_experts(raw_k_non_div4, mode="uint10")
+      expected_bytes = (10 * k_non_div4 + 7) // 8
+      self.assertEqual(enc_auto.dtype, np.uint8)
+      self.assertEqual(enc_auto.shape, (5, 3, 1, expected_bytes))
+      self.assertEqual(
+          packing.routed_experts_logical_shape(enc_auto, batched=False),
+          (5, 3, k_non_div4),
+      )
+      np.testing.assert_array_equal(
+          packing.decode_routed_experts(enc_auto, batched=False),
+          raw_k_non_div4,
+      )
+      enc_explicit = packing.encode_routed_experts(
+          raw_k_non_div4, mode="uint10"
+      )
+      np.testing.assert_array_equal(enc_explicit, enc_auto)
+      non_div4_cases[k_non_div4] = (raw_k_non_div4, enc_auto)
 
     # 4. K == 5 disambiguation between unbatched (T, L, 5) and batched
     # (B, T, L, 5) for both C++ and Python fallback.
@@ -700,16 +715,16 @@ class PackSegmentAlignmentTest(absltest.TestCase):
           packing.decode_routed_experts(enc_k5_batched, batched=True),
           raw_k5_batched,
       )
-      for k_non_div4 in (2, 6):
-        raw_k_non_div4 = rng.integers(
-            -1, 512, size=(5, 3, k_non_div4), dtype=np.int16
-        )
-        raw_k_non_div4[0, 0, 0] = 300
+      for k_non_div4, (raw_k_non_div4, enc_auto) in non_div4_cases.items():
         py_auto = packing.encode_routed_experts(raw_k_non_div4, mode="auto")
-        self.assertEqual(py_auto.dtype, np.int16)
-        np.testing.assert_array_equal(py_auto, raw_k_non_div4)
-        with self.assertRaisesRegex(ValueError, "top_k divisible by 4"):
-          packing.encode_routed_experts(raw_k_non_div4, mode="uint10")
+        expected_bytes = (10 * k_non_div4 + 7) // 8
+        self.assertEqual(py_auto.dtype, np.uint8)
+        self.assertEqual(py_auto.shape, (5, 3, 1, expected_bytes))
+        np.testing.assert_array_equal(py_auto, enc_auto)
+        np.testing.assert_array_equal(
+            packing.decode_routed_experts(py_auto, batched=False),
+            raw_k_non_div4,
+        )
     finally:
       packing._packing_ext = orig_ext
 
@@ -904,10 +919,15 @@ class PackSegmentAlignmentTest(absltest.TestCase):
           self.assertEqual(re_i16.dtype, np.int16)
           self.assertEqual(re_i16.shape, (2, 7, 3, 5))
           np.testing.assert_array_equal(re_i16, raw_batched_k5)
-          with self.assertRaisesRegex(ValueError, "top_k divisible by 4"):
-            packing.encode_routed_experts(
-                enc_batched_k5, mode="uint10", batched=True
-            )
+          re_u10 = packing.encode_routed_experts(
+              enc_batched_k5, mode="uint10", batched=True
+          )
+          self.assertEqual(re_u10.dtype, np.uint8)
+          self.assertEqual(re_u10.shape, (2, 7, 3, 1, 7))
+          np.testing.assert_array_equal(
+              packing.decode_routed_experts(re_u10, batched=True),
+              raw_batched_k5,
+          )
 
           # Verify routed_experts_encoding on unbatched vs batched uint10/int16.
           enc_unbatched_u10 = packing.encode_routed_experts(
@@ -1255,6 +1275,40 @@ class TokenIdsTest(parameterized.TestCase):
       empty = packing.unpad_prompt(source, zero_or_neg)
       self.assertEqual(empty.dtype, np.int32)
       self.assertEqual(empty.shape, (0,))
+
+  def test_alloc_batched_routed_experts_all_modes_and_invalid(self):
+    buf_u8 = packing.alloc_batched_routed_experts(2, 6, (3, 8), "uint8")
+    self.assertEqual(buf_u8.dtype, np.uint8)
+    self.assertEqual(buf_u8.shape, (2, 6, 3, 8))
+    np.testing.assert_array_equal(buf_u8, 0)
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(buf_u8, batched=True), -1
+    )
+
+    buf_u10_div4 = packing.alloc_batched_routed_experts(2, 6, (3, 8), "uint10")
+    self.assertEqual(buf_u10_div4.dtype, np.uint8)
+    self.assertEqual(buf_u10_div4.shape, (2, 6, 3, 2, 5))
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(buf_u10_div4, batched=True), -1
+    )
+
+    buf_u10_tail = packing.alloc_batched_routed_experts(2, 6, (3, 10), "uint10")
+    self.assertEqual(buf_u10_tail.dtype, np.uint8)
+    self.assertEqual(buf_u10_tail.shape, (2, 6, 3, 1, 13))
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(buf_u10_tail, batched=True), -1
+    )
+
+    buf_i16 = packing.alloc_batched_routed_experts(2, 6, (3, 10), "int16")
+    self.assertEqual(buf_i16.dtype, np.int16)
+    self.assertEqual(buf_i16.shape, (2, 6, 3, 10))
+    np.testing.assert_array_equal(buf_i16, -1)
+
+    bad_mode = "bad"
+    with self.assertRaisesRegex(
+        ValueError, "Unsupported routed_experts wire encoding"
+    ):
+      packing.alloc_batched_routed_experts(2, 6, (3, 8), bad_mode)  # pyrefly: ignore[bad-argument-type]
 
 
 if __name__ == "__main__":

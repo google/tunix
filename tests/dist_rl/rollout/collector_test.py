@@ -16,11 +16,13 @@
 
 import asyncio
 import dataclasses
+import pathlib
 import types
 import unittest
 from unittest import mock
 
 from absl.testing import absltest
+import jax.numpy as jnp
 import numpy as np
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import test_utils as mocks
@@ -29,9 +31,12 @@ from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import payload_builder
 from tunix.dist_rl.rollout import collector
 from tunix.dist_rl.rollout import sampler as sampler_lib
+from tunix.dist_rl.trajectory import converter as converter_lib
 from tunix.dist_rl.trajectory import file_store
 from tunix.dist_rl.trajectory import in_memory_store
+from tunix.dist_rl.trajectory import sql_store
 from tunix.rl import algorithm_config
+from tunix.rl import common as rl_common
 from tunix.rl import packing
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
@@ -1572,8 +1577,8 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
     )
 
     # 1. Default mode="auto" with max_val=31 <= 254 produces compact 3D uint8
-    # via asyncio.to_thread, while InMemoryTrajectoryStore still persists
-    # decoded int16 prefill_routed_experts from agent.trajectory.steps.
+    # both on TrajectoryItem.routed_experts and in TrajectoryStore's per-turn
+    # prefill_routed_experts.
     store = in_memory_store.InMemoryTrajectoryStore()
     engine_u8 = collector.TrajectoryCollectorEngine(
         traj_id="traj_u8",
@@ -1588,11 +1593,7 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
         trajectory_store=store,
         store_routed_experts=True,
     )
-    with mock.patch.object(
-        collector.asyncio, "to_thread", wraps=asyncio.to_thread
-    ) as spy_to_thread:
-      item_u8 = asyncio.run(engine_u8.run_episode())
-    spy_to_thread.assert_called_once()
+    item_u8 = asyncio.run(engine_u8.run_episode())
     self.assertEqual(item_u8.routed_experts.dtype, np.uint8)
     self.assertEqual(item_u8.routed_experts.shape, (5, 2, 4))
     np.testing.assert_array_equal(
@@ -1602,19 +1603,22 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
     stored_trajs = store.get_trajectories(["traj_u8"])
     self.assertLen(stored_trajs, 1)
     # Step 1 is the TunixAgentStep containing prefill_routed_experts (2 prompt
-    # tokens).
+    # tokens + 2 routed decode tokens).
     agent_steps = [
         s for s in stored_trajs[0].steps if s.source.value == "agent"
     ]
     self.assertLen(agent_steps, 1)
-    self.assertEqual(agent_steps[0].prefill_routed_experts.dtype, np.int16)
+    self.assertEqual(agent_steps[0].prefill_routed_experts.dtype, np.uint8)
+    self.assertEqual(agent_steps[0].prefill_routed_experts.shape, (4, 2, 4))
     np.testing.assert_array_equal(
-        agent_steps[0].prefill_routed_experts,
+        packing.decode_routed_experts(
+            agent_steps[0].prefill_routed_experts, batched=False
+        ),
         raw_routed_steps,
     )
 
     # 2. Deterministic tier via routed_experts_num_experts=256 encodes into 4D
-    # uint10 [T, L, K//4, 5] even though max_val=31 <= 254.
+    # uint10 [T, L, K//4, 5] both in TrajectoryItem and TrajectoryStore.
     engine_u10 = collector.TrajectoryCollectorEngine(
         traj_id="traj_u10",
         request=req,
@@ -1625,6 +1629,8 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
         agent=model_agent.ModelAgent("sys"),
         tokenizer=_MockTokenizer(),
         chat_parser=_RecordingParser(),
+        trajectory_store=store,
+        store_routed_experts=True,
         routed_experts_encode_mode="auto",
         routed_experts_num_experts=256,
     )
@@ -1634,6 +1640,20 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
     np.testing.assert_array_equal(
         packing.decode_routed_experts(item_u10.routed_experts, batched=False),
         expected_full_routed,
+    )
+    stored_u10 = store.get_trajectories(["traj_u10"])
+    agent_steps_u10 = [
+        s for s in stored_u10[0].steps if s.source.value == "agent"
+    ]
+    self.assertEqual(agent_steps_u10[0].prefill_routed_experts.dtype, np.uint8)
+    self.assertEqual(
+        agent_steps_u10[0].prefill_routed_experts.shape, (4, 2, 1, 5)
+    )
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(
+            agent_steps_u10[0].prefill_routed_experts, batched=False
+        ),
+        raw_routed_steps,
     )
 
     # 3. Explicit mode="int16" preserves 3D int16.
@@ -1647,12 +1667,23 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
         agent=model_agent.ModelAgent("sys"),
         tokenizer=_MockTokenizer(),
         chat_parser=_RecordingParser(),
+        trajectory_store=store,
+        store_routed_experts=True,
         routed_experts_encode_mode="int16",
     )
     item_i16 = asyncio.run(engine_i16.run_episode())
     self.assertEqual(item_i16.routed_experts.dtype, np.int16)
     self.assertEqual(item_i16.routed_experts.shape, (5, 2, 4))
     np.testing.assert_array_equal(item_i16.routed_experts, expected_full_routed)
+    stored_i16 = store.get_trajectories(["traj_i16"])
+    agent_steps_i16 = [
+        s for s in stored_i16[0].steps if s.source.value == "agent"
+    ]
+    self.assertEqual(agent_steps_i16[0].prefill_routed_experts.dtype, np.int16)
+    np.testing.assert_array_equal(
+        agent_steps_i16[0].prefill_routed_experts,
+        raw_routed_steps,
+    )
 
   def test_end_to_end_rollout_encoded_to_adapter_and_assemblers(self):
     raw_g0 = np.array(
@@ -1860,6 +1891,427 @@ class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
     self.assertEqual(req.metadata["env_config"]["verifier_bytes"], b"\x80\xff")
     self.assertLen(stored, 1)
     self.assertEqual(stored[0].extra, {"question": "Q0", "answer": "0"})
+
+  def test_multi_turn_trajectory_store_compression_and_jax_decode_parity(self):
+    rng = np.random.default_rng(42)
+
+    class _MultiStepTextEnv(base_environment.BaseTaskEnv):
+
+      def _initial_observation(self):
+        return "start"
+
+      def _step_impl(self, action):
+        del action
+        return base_environment.EnvStepResult(
+            observation="env_feedback",
+            reward=1.0,
+            done=False,
+            info={},
+        )
+
+    class _MultiTurnRoutedSampler(sampler_lib.Sampler):
+
+      def __init__(self, asst_lengths, routed_per_turn):
+        self._asst_lengths = asst_lengths
+        self._routed_per_turn = routed_per_turn
+        self._idx = 0
+
+      async def sample(self, req, **kwargs):
+        del kwargs
+        i = self._idx
+        self._idx += 1
+        req_prompt = getattr(req, "prompt", None)
+        prompt_token_ids = (
+            np.asarray(req_prompt, dtype=np.int32)
+            if isinstance(req_prompt, np.ndarray)
+            else np.asarray([ord(c) % 1000 for c in "PARSED"], dtype=np.int32)
+        )
+        return sampler_lib.SamplingResponse(
+            request_id=getattr(req, "request_id", ""),
+            text=f"turn_{i}",
+            token_ids=np.arange(1, self._asst_lengths[i] + 1, dtype=np.int32),
+            prompt_token_ids=prompt_token_ids,
+            routed_experts=self._routed_per_turn[i],
+        )
+
+    prompt_len = 6
+    env_len = 6
+    asst_lengths = [128, 128, 113]
+    step_lengths = [
+        prompt_len + asst_lengths[0] - 1,
+        1 + env_len + asst_lengths[1] - 1,
+        1 + env_len + asst_lengths[2] - 1,
+    ]
+
+    def _collect_with_mode(
+        encode_mode, store_backend, traj_id, routed_turns, num_experts
+    ):
+      req = datatypes.RolloutRequest(
+          prompt_id="p_bench",
+          prompt="Solve multi-turn task",
+          group_index=0,
+          max_response_length=512,
+          generation_kwargs={"return_routed_experts": True},
+      )
+      engine = collector.TrajectoryCollectorEngine(
+          traj_id=traj_id,
+          request=req,
+          sampler=_MultiTurnRoutedSampler(asst_lengths, routed_turns),
+          env_client=_MultiStepTextEnv(task={"q": "1"}, max_steps=3),
+          agent=model_agent.ModelAgent("sys"),
+          tokenizer=_MockTokenizer(),
+          chat_parser=_RecordingParser(),
+          trajectory_store=store_backend,
+          store_routed_experts=True,
+          routed_experts_encode_mode=encode_mode,
+          routed_experts_num_experts=num_experts
+          if encode_mode == "auto"
+          else None,
+      )
+      return asyncio.run(engine.run_episode())
+
+    for (
+        model_label,
+        num_layers,
+        top_k,
+        num_experts,
+        expected_tier,
+        expected_ratio,
+    ) in (
+        ("Qwen3-30B-A3B (E=128, K=8)", 48, 8, 128, "uint8", 0.50),
+        ("DeepSeek-V2 (E=160, K=6)", 30, 6, 160, "uint8", 0.50),
+        ("DeepSeek-V3 / Qwen3.5 (E=256, K=8)", 60, 8, 256, "uint10", 0.625),
+        ("Large-MoE (E=512, K=8)", 60, 8, 512, "uint10", 0.625),
+        ("Qwen3.5-397B-A17B (E=512, K=10)", 60, 10, 512, "uint10", 0.65),
+    ):
+      with self.subTest(model_label=model_label):
+        routed_turns = [
+            rng.integers(
+                0, num_experts, size=(t_len, num_layers, top_k), dtype=np.int16
+            )
+            for t_len in step_lengths
+        ]
+        # Inject -1 (UNSET_ROUTED_EXPERT) at periodic slots for sentinel parity.
+        routed_turns[0][0, ::4, :] = -1
+        routed_turns[1][-1, ::3, -1] = -1
+
+        tmp_root = pathlib.Path(self.create_tempdir().full_path)
+        mem_i16 = in_memory_store.InMemoryTrajectoryStore()
+        mem_cmp = in_memory_store.InMemoryTrajectoryStore()
+        file_i16_dir = tmp_root / "file_i16"
+        file_cmp_dir = tmp_root / "file_cmp"
+        f_store_i16 = file_store.FileTrajectoryStore(root_dir=str(file_i16_dir))
+        f_store_cmp = file_store.FileTrajectoryStore(root_dir=str(file_cmp_dir))
+        sql_i16_db = tmp_root / "sql_i16.db"
+        sql_cmp_db = tmp_root / "sql_cmp.db"
+        s_store_i16 = sql_store.SqlTrajectoryStore(
+            run_id="r1", db_url=f"sqlite:///{sql_i16_db}"
+        )
+        s_store_cmp = sql_store.SqlTrajectoryStore(
+            run_id="r1", db_url=f"sqlite:///{sql_cmp_db}"
+        )
+
+        try:
+          item_i16 = _collect_with_mode(
+              "int16", mem_i16, "t_i16", routed_turns, num_experts
+          )
+          item_cmp = _collect_with_mode(
+              "auto", mem_cmp, "t_cmp", routed_turns, num_experts
+          )
+
+          _collect_with_mode(
+              "int16", f_store_i16, "t_f_i16", routed_turns, num_experts
+          )
+          f_store_i16.flush()
+
+          _collect_with_mode(
+              "auto", f_store_cmp, "t_f_cmp", routed_turns, num_experts
+          )
+          f_store_cmp.flush()
+
+          _collect_with_mode(
+              "int16", s_store_i16, "t_s_i16", routed_turns, num_experts
+          )
+          s_store_i16.flush()
+          _collect_with_mode(
+              "auto", s_store_cmp, "t_s_cmp", routed_turns, num_experts
+          )
+          s_store_cmp.flush()
+
+          stored_f_i16 = f_store_i16.get_trajectories(["t_f_i16"])[0]
+          stored_f_cmp = f_store_cmp.get_trajectories(["t_f_cmp"])[0]
+
+          stored_s_i16 = s_store_i16.get_trajectories(["t_s_i16"])[0]
+          stored_s_cmp = s_store_cmp.get_trajectories(["t_s_cmp"])[0]
+        finally:
+          f_store_i16.close()
+          f_store_cmp.close()
+          s_store_i16.close()
+          s_store_cmp.close()
+
+        # 1. Storage size measurements across InMemory, File (JSON), and SQLite.
+        steps_i16 = [s for s in stored_f_i16.steps if s.source.value == "agent"]
+        steps_cmp = [s for s in stored_f_cmp.steps if s.source.value == "agent"]
+        self.assertLen(steps_cmp, 3)
+
+        ram_bytes_i16 = sum(s.prefill_routed_experts.nbytes for s in steps_i16)
+        ram_bytes_cmp = sum(s.prefill_routed_experts.nbytes for s in steps_cmp)
+        self.assertAlmostEqual(
+            ram_bytes_cmp / ram_bytes_i16, expected_ratio, places=4
+        )
+
+        file_bytes_i16 = sum(
+            p.stat().st_size
+            for p in (file_i16_dir / "traj_t_f_i16").glob("step*")
+        )
+        file_bytes_cmp = sum(
+            p.stat().st_size
+            for p in (file_cmp_dir / "traj_t_f_cmp").glob("step*")
+        )
+        self.assertGreater(file_bytes_cmp, 0)
+        self.assertLess(file_bytes_cmp, file_bytes_i16)
+
+        sql_bytes_i16 = len(
+            stored_s_i16.model_dump_json(exclude_none=True).encode("utf-8")
+        )
+        sql_bytes_cmp = len(
+            stored_s_cmp.model_dump_json(exclude_none=True).encode("utf-8")
+        )
+        self.assertLess(sql_bytes_cmp, sql_bytes_i16)
+        sql_db_bytes_i16 = sql_i16_db.stat().st_size
+        sql_db_bytes_cmp = sql_cmp_db.stat().st_size
+        self.assertLess(sql_db_bytes_cmp, sql_db_bytes_i16)
+
+        # 2. Bitwise parity on stored prefill_routed_experts (File & SQL).
+        for idx, raw_turn in enumerate(routed_turns):
+          self.assertEqual(
+              packing.routed_experts_encoding(
+                  steps_cmp[idx].prefill_routed_experts, batched=False
+              ),
+              expected_tier,
+          )
+          np.testing.assert_array_equal(
+              packing.decode_routed_experts(
+                  steps_cmp[idx].prefill_routed_experts, batched=False
+              ),
+              raw_turn,
+          )
+        steps_sql_cmp = [
+            s for s in stored_s_cmp.steps if s.source.value == "agent"
+        ]
+        for idx, raw_turn in enumerate(routed_turns):
+          np.testing.assert_array_equal(
+              packing.decode_routed_experts(
+                  steps_sql_cmp[idx].prefill_routed_experts, batched=False
+              ),
+              raw_turn,
+          )
+
+        # 3. Bitwise parity on converter.to_tunix_trajectory rehydration and
+        # prefill-context vs decode-token stitching across multi-turn steps.
+        rehydrated_i16 = converter_lib.to_tunix_trajectory(stored_f_i16)
+        rehydrated_cmp = converter_lib.to_tunix_trajectory(stored_f_cmp)
+        decoded_prompt = packing.decode_routed_experts(
+            rehydrated_cmp.prompt_routed_experts, batched=False
+        )
+        np.testing.assert_array_equal(
+            decoded_prompt, rehydrated_i16.prompt_routed_experts
+        )
+        np.testing.assert_array_equal(
+            decoded_prompt, routed_turns[0][:prompt_len]
+        )
+        for turn_idx, (s_i16, s_cmp) in enumerate(
+            zip(rehydrated_i16.steps, rehydrated_cmp.steps)
+        ):
+          decoded_asst = packing.decode_routed_experts(
+              s_cmp.assistant_routed_experts, batched=False
+          )
+          np.testing.assert_array_equal(
+              decoded_asst, s_i16.assistant_routed_experts
+          )
+          own_start = prompt_len if turn_idx == 0 else 1 + env_len
+          if turn_idx < 2:
+            # Non-final turn: decode prefix from turn_idx stitched with the
+            # delayed final decode token prefilled in turn_idx + 1.
+            expected_asst = np.concatenate(
+                [
+                    routed_turns[turn_idx][own_start:],
+                    routed_turns[turn_idx + 1][:1],
+                ],
+                axis=0,
+            )
+          else:
+            # Final turn: decode prefix from turn 2 (last token never
+            # prefilled).
+            expected_asst = routed_turns[turn_idx][own_start:]
+          np.testing.assert_array_equal(decoded_asst, expected_asst)
+          if s_i16.env_routed_experts is not None:
+            decoded_env = packing.decode_routed_experts(
+                s_cmp.env_routed_experts, batched=False
+            )
+            np.testing.assert_array_equal(decoded_env, s_i16.env_routed_experts)
+            np.testing.assert_array_equal(
+                decoded_env,
+                routed_turns[turn_idx + 1][1 : 1 + env_len],
+            )
+
+        # 4. Bitwise parity on TrajectoryItem, BatchAssembly, JAX decode, and
+        # direct bit-matching against original raw rollout router indices.
+        raw_all_routed = np.concatenate(routed_turns, axis=0)
+        decoded_item_routed = packing.decode_routed_experts(
+            item_cmp.routed_experts, batched=False
+        )
+        np.testing.assert_array_equal(
+            decoded_item_routed, item_i16.routed_experts
+        )
+        np.testing.assert_array_equal(decoded_item_routed[:-1], raw_all_routed)
+        # Final unprefilled decode token of the trajectory is padded with -1.
+        np.testing.assert_array_equal(decoded_item_routed[-1], -1)
+        p_i16 = payload_builder.create_trainer_payloads(
+            [item_i16, dataclasses.replace(item_i16, group_index=1)],
+            rewards=[0.0, 1.0],
+            algo_config=algorithm_config.GRPOConfig(num_generations=2),
+        )
+        p_cmp = payload_builder.create_trainer_payloads(
+            [item_cmp, dataclasses.replace(item_cmp, group_index=1)],
+            rewards=[0.0, 1.0],
+            algo_config=algorithm_config.GRPOConfig(
+                num_generations=2,
+                routed_experts_encode_mode="auto",
+                routed_experts_num_experts=num_experts,
+            ),
+        )
+        pad_asm_i16 = batch_assembly.PaddedBatchAssembler(
+            batch_size=2,
+            num_generations=2,
+            mini_batch_size=1,
+            max_prompt_length=16,
+            max_response_length=400,
+            pad_id=0,
+        )
+        pad_asm_cmp = batch_assembly.PaddedBatchAssembler(
+            batch_size=2,
+            num_generations=2,
+            mini_batch_size=1,
+            max_prompt_length=16,
+            max_response_length=400,
+            pad_id=0,
+        )
+        pad_payload_i16 = list(pad_asm_i16.feed(p_i16))[0].payload
+        pad_payload_cmp = list(pad_asm_cmp.feed(p_cmp))[0].payload
+        batch_i16 = pad_payload_i16.routed_experts
+        batch_cmp = pad_payload_cmp.routed_experts
+        jax_decoded_i16 = np.asarray(
+            rl_common.decode_routed_experts_jax(jnp.asarray(batch_i16))
+        )
+        jax_decoded_cmp = np.asarray(
+            rl_common.decode_routed_experts_jax(jnp.asarray(batch_cmp))
+        )
+        np.testing.assert_array_equal(jax_decoded_cmp, jax_decoded_i16)
+        left_pad = 16 - prompt_len
+        np.testing.assert_array_equal(
+            jax_decoded_cmp[0, left_pad : left_pad + len(raw_all_routed)],
+            raw_all_routed,
+        )
+        self.assertEqual(jax_decoded_cmp.shape[-2:], (num_layers, top_k))
+
+        seq_asm_i16 = batch_assembly.SequencePackedBatchAssembler(
+            batch_size=1,
+            num_generations=2,
+            mini_batch_size=1,
+            max_packed_len=800,
+            pad_id=0,
+            segment_alignment_boundary=1,
+        )
+        seq_asm_cmp = batch_assembly.SequencePackedBatchAssembler(
+            batch_size=1,
+            num_generations=2,
+            mini_batch_size=1,
+            max_packed_len=800,
+            pad_id=0,
+            segment_alignment_boundary=1,
+        )
+        seq_batch_i16 = list(seq_asm_i16.feed(p_i16))[0].payload.routed_experts
+        seq_batch_cmp = list(seq_asm_cmp.feed(p_cmp))[0].payload.routed_experts
+        jax_seq_i16 = np.asarray(
+            rl_common.decode_routed_experts_jax(jnp.asarray(seq_batch_i16))
+        )
+        jax_seq_cmp = np.asarray(
+            rl_common.decode_routed_experts_jax(jnp.asarray(seq_batch_cmp))
+        )
+        np.testing.assert_array_equal(jax_seq_cmp, jax_seq_i16)
+        np.testing.assert_array_equal(
+            jax_seq_cmp[0, : len(raw_all_routed)], raw_all_routed
+        )
+
+    # 5. End-to-end rollout -> store -> batch assembly -> trainer JAX decode
+    # with dynamic cross-turn tier promotion (num_experts=None: uint8 -> uint10)
+    # for both K % 4 == 0 (K=8) and K % 4 != 0 (K=10).
+    for promo_k in (8, 10):
+      with self.subTest(dynamic_promotion_top_k=promo_k):
+        promo_turns = [
+            rng.integers(
+                0, 128, size=(step_lengths[0], 16, promo_k), dtype=np.int16
+            ),
+            rng.integers(
+                256, 512, size=(step_lengths[1], 16, promo_k), dtype=np.int16
+            ),
+            rng.integers(
+                0, 64, size=(step_lengths[2], 16, promo_k), dtype=np.int16
+            ),
+        ]
+        raw_promo_all = np.concatenate(promo_turns, axis=0)
+        promo_store_i16 = in_memory_store.InMemoryTrajectoryStore()
+        promo_store_cmp = in_memory_store.InMemoryTrajectoryStore()
+        promo_i16 = _collect_with_mode(
+            "int16", promo_store_i16, f"p_i16_{promo_k}", promo_turns, None
+        )
+        promo_cmp = _collect_with_mode(
+            "auto", promo_store_cmp, f"p_cmp_{promo_k}", promo_turns, None
+        )
+        promo_payloads_i16 = payload_builder.create_trainer_payloads(
+            [promo_i16, dataclasses.replace(promo_i16, group_index=1)],
+            rewards=[0.0, 1.0],
+            algo_config=algorithm_config.GRPOConfig(num_generations=2),
+        )
+        promo_payloads_cmp = payload_builder.create_trainer_payloads(
+            [promo_cmp, dataclasses.replace(promo_cmp, group_index=1)],
+            rewards=[0.0, 1.0],
+            algo_config=algorithm_config.GRPOConfig(
+                num_generations=2,
+                routed_experts_encode_mode="auto",
+            ),
+        )
+        promo_seq_i16 = list(
+            batch_assembly.SequencePackedBatchAssembler(
+                batch_size=1,
+                num_generations=2,
+                mini_batch_size=1,
+                max_packed_len=800,
+                pad_id=0,
+                segment_alignment_boundary=1,
+            ).feed(promo_payloads_i16)
+        )[0].payload.routed_experts
+        promo_seq_cmp = list(
+            batch_assembly.SequencePackedBatchAssembler(
+                batch_size=1,
+                num_generations=2,
+                mini_batch_size=1,
+                max_packed_len=800,
+                pad_id=0,
+                segment_alignment_boundary=1,
+            ).feed(promo_payloads_cmp)
+        )[0].payload.routed_experts
+        jax_promo_i16 = np.asarray(
+            rl_common.decode_routed_experts_jax(jnp.asarray(promo_seq_i16))
+        )
+        jax_promo_cmp = np.asarray(
+            rl_common.decode_routed_experts_jax(jnp.asarray(promo_seq_cmp))
+        )
+        np.testing.assert_array_equal(jax_promo_cmp, jax_promo_i16)
+        np.testing.assert_array_equal(
+            jax_promo_cmp[0, : len(raw_promo_all)], raw_promo_all
+        )
 
 
 if __name__ == "__main__":

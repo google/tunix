@@ -22,9 +22,10 @@ import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import jax.tree_util as jtu
+from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
+from tunix.rl import packing
 from tunix.sft import utils
 
 make_causal_attn_mask = utils.make_causal_attn_mask
@@ -417,7 +418,8 @@ def decode_routed_experts_jax(routed_experts: jax.Array) -> jax.Array:
 
   Only batched layouts are accepted:
   - Mode 2 (`uint10` packed as 4 values per 5 bytes, 5D `(B, T, L, K // 4, 5)`
-    `uint8`): branchless bitwise shift/mask unpack followed by `- 1` offset.
+    or tail-packed `(B, T, L, 1, ceil(10 * K / 8))` `uint8`): branchless bitwise
+    shift/mask unpack followed by `- 1` offset.
   - Mode 1 (`+1`-shifted `uint8`, 4D `(B, T, L, K)` `uint8`, including
     `K == 5`): `routed_experts.astype(jnp.int32) - 1`.
   - Raw `int16` / `int32` (4D `(B, T, L, K)`):
@@ -432,23 +434,30 @@ def decode_routed_experts_jax(routed_experts: jax.Array) -> jax.Array:
   """
   arr = jnp.asarray(routed_experts)
   if arr.dtype == jnp.uint8:
-    if arr.ndim == 5 and arr.shape[4] == 5:
-      b0 = arr[..., 0].astype(jnp.int32)
-      b1 = arr[..., 1].astype(jnp.int32)
-      b2 = arr[..., 2].astype(jnp.int32)
-      b3 = arr[..., 3].astype(jnp.int32)
-      b4 = arr[..., 4].astype(jnp.int32)
-      v0 = (b0 | ((b1 & 0x03) << 8)) - 1
-      v1 = ((b1 >> 2) | ((b2 & 0x0F) << 6)) - 1
-      v2 = ((b2 >> 4) | ((b3 & 0x3F) << 4)) - 1
-      v3 = ((b3 >> 6) | (b4 << 2)) - 1
-      stacked = jnp.stack([v0, v1, v2, v3], axis=-1)
-      return stacked.reshape(*arr.shape[:-2], arr.shape[-2] * 4)
+    if arr.ndim == 5:
+      top_k = packing.uint10_logical_k(arr.shape[3], arr.shape[4])
+      if top_k is not None:
+        if arr.shape[4] != 5:
+          pad_b = (5 - arr.shape[4] % 5) % 5
+          arr = jnp.pad(arr, ((0, 0), (0, 0), (0, 0), (0, 0), (0, pad_b)))
+          arr = arr.reshape(*arr.shape[:3], arr.shape[4] // 5, 5)
+        b0 = arr[..., 0].astype(jnp.int32)
+        b1 = arr[..., 1].astype(jnp.int32)
+        b2 = arr[..., 2].astype(jnp.int32)
+        b3 = arr[..., 3].astype(jnp.int32)
+        b4 = arr[..., 4].astype(jnp.int32)
+        v0 = (b0 | ((b1 & 0x03) << 8)) - 1
+        v1 = ((b1 >> 2) | ((b2 & 0x0F) << 6)) - 1
+        v2 = ((b2 >> 4) | ((b3 & 0x3F) << 4)) - 1
+        v3 = ((b3 >> 6) | (b4 << 2)) - 1
+        stacked = jnp.stack([v0, v1, v2, v3], axis=-1)
+        return stacked.reshape(*arr.shape[:-2], arr.shape[-2] * 4)[..., :top_k]
     if arr.ndim == 4:
       return arr.astype(jnp.int32) - jnp.int32(1)
     raise ValueError(
         "decode_routed_experts_jax expects a batched 4D (B, T, L, K) uint8 or"
-        f" 5D (B, T, L, K // 4, 5) uint10 array, got shape={arr.shape}."
+        " 5D (B, T, L, K // 4, 5) / (B, T, L, 1, ceil(10 * K / 8)) uint10"
+        f" array, got shape={arr.shape}."
     )
   if arr.ndim != 4:
     raise ValueError(
@@ -510,10 +519,11 @@ def compute_per_token_logps(
       this size.
     routed_experts: Optional `[B, T, num_layers, top_k]` MoE experts captured
       during rollout (either `int16`/`int32`, `+1`-shifted `uint8`, or 5D `[B,
-      T, num_layers, top_k // 4, 5]` `+1`-shifted `uint10`). Decoded on device
-      and forwarded to the model as `forced_routed_experts` -- the name
-      MaxText's adapter uses -- so it replays this routing instead of re-running
-      its router. Ignored by models that do not accept the kwarg.
+      T, num_layers, top_k // 4, 5]` / `[B, T, num_layers, 1, ceil(10 * top_k /
+      8)]` `+1`-shifted `uint10`). Decoded on device and forwarded to the model
+      as `forced_routed_experts` -- the name MaxText's adapter uses -- so it
+      replays this routing instead of re-running its router. Ignored by models
+      that do not accept the kwarg.
     token_mask: Optional explicit valid positions for prompt plus completion.
 
   Returns:

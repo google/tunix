@@ -1740,16 +1740,30 @@ class ProcessIdsTokenMaskTest(absltest.TestCase):
     self.assertEqual(jax_u8.dtype, jnp.int32)
     np.testing.assert_array_equal(np.asarray(jax_u8), raw_u8.astype(np.int32))
 
-    # 2. Mode 2: uint10 [B, T, L, K//4, 5]
-    raw_u10 = rng.integers(-1, 1023, size=(2, 8, 4, 8), dtype=np.int16)
-    raw_u10[0, 0, 0, 0] = 777
-    raw_u10[:, -2:] = -1
-    enc_u10 = packing.encode_routed_experts(raw_u10)
-    self.assertEqual(enc_u10.dtype, np.uint8)
-    self.assertEqual(enc_u10.ndim, 5)
-    jax_u10 = jax.jit(common.decode_routed_experts_jax)(jnp.asarray(enc_u10))
-    self.assertEqual(jax_u10.dtype, jnp.int32)
-    np.testing.assert_array_equal(np.asarray(jax_u10), raw_u10.astype(np.int32))
+    # 2. Mode 2: uint10 [B, T, L, K//4, 5] and non-div4
+    # [B, T, L, 1, ceil(10*K/8)] across all K % 4 in {0, 1, 2, 3} remainder
+    # classes (including pure tail K < 4).
+    for k_u10, expected_trailing in (
+        (1, (1, 2)),
+        (2, (1, 3)),
+        (3, (1, 4)),
+        (5, (1, 7)),
+        (6, (1, 8)),
+        (7, (1, 9)),
+        (8, (2, 5)),
+        (10, (1, 13)),
+    ):
+      raw_u10 = rng.integers(-1, 1023, size=(2, 8, 4, k_u10), dtype=np.int16)
+      raw_u10[0, 0, 0, 0] = 777
+      raw_u10[:, -2:] = -1
+      enc_u10 = packing.encode_routed_experts(raw_u10, batched=True)
+      self.assertEqual(enc_u10.dtype, np.uint8)
+      self.assertEqual(enc_u10.shape, (2, 8, 4, *expected_trailing))
+      jax_u10 = jax.jit(common.decode_routed_experts_jax)(jnp.asarray(enc_u10))
+      self.assertEqual(jax_u10.dtype, jnp.int32)
+      np.testing.assert_array_equal(
+          np.asarray(jax_u10), raw_u10.astype(np.int32)
+      )
 
     # 3. Raw int16 [B, T, L, K]
     raw_i16 = rng.integers(-1, 2048, size=(2, 8, 4, 8), dtype=np.int16)
@@ -1823,6 +1837,7 @@ class ProcessIdsTokenMaskTest(absltest.TestCase):
         (4, 128, "uint8"),
         (5, 200, "uint8"),
         (8, 512, "uint10"),
+        (10, 512, "uint10"),
     ):
       with self.subTest(top_k=top_k, mode=mode):
         raw_i16 = rng.integers(

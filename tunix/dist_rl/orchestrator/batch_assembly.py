@@ -571,10 +571,9 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
     # `[prompt | completion]` sequence; `PackItem` re-validates the
     # `(p + c - 1 or p + c, num_layers, top_k)` shape.
     raw_routed = np.asarray(item.routed_experts)
-    if raw_routed.dtype == np.uint8 and (
-        raw_routed.ndim == 3
-        or (raw_routed.ndim == 4 and raw_routed.shape[3] == 5)
-    ):
+    if raw_routed.dtype == np.uint8:
+      # Validate compact uint8/uint10 shape; raises ValueError on invalid 4D.
+      packing.routed_experts_encoding(raw_routed, batched=False)
       routed = raw_routed
     else:
       routed = np.asarray(raw_routed, dtype=np.int16)
@@ -1275,7 +1274,7 @@ class PaddedBatchAssembler:
       routed_mode = "int16"
       if replay_routing:
         routed_shape: tuple[int, int] | None = None
-        encs: set[str] = set()
+        encs: set[packing.RoutedExpertsWireEncoding] = set()
         for item in chunk:
           if item.routed_experts is None:
             continue
@@ -1293,41 +1292,10 @@ class PaddedBatchAssembler:
           encs.add(packing.routed_experts_encoding(r, batched=False))
         if routed_shape is not None:
           total_seq_len = self.max_prompt_length + self.max_response_length
-          if "int16" not in encs and "uint10" in encs:
-            routed_mode = "uint10"
-            batched_routed_experts = np.zeros(
-                (
-                    self.batch_size,
-                    total_seq_len,
-                    routed_shape[0],
-                    routed_shape[1] // 4,
-                    5,
-                ),
-                dtype=np.uint8,
-            )
-          elif encs == {"uint8"}:
-            routed_mode = "uint8"
-            batched_routed_experts = np.zeros(
-                (
-                    self.batch_size,
-                    total_seq_len,
-                    routed_shape[0],
-                    routed_shape[1],
-                ),
-                dtype=np.uint8,
-            )
-          else:
-            routed_mode = "int16"
-            batched_routed_experts = np.full(
-                (
-                    self.batch_size,
-                    total_seq_len,
-                    routed_shape[0],
-                    routed_shape[1],
-                ),
-                datatypes.UNSET_ROUTED_EXPERT,
-                dtype=np.int16,
-            )
+          routed_mode = packing.widest_routed_encoding(encs)
+          batched_routed_experts = packing.alloc_batched_routed_experts(
+              self.batch_size, total_seq_len, routed_shape, routed_mode
+          )
       truncated_prompts = truncated_completions = 0
       row_valid_tokens = np.zeros(self.batch_size, dtype=np.int64)
       row_num_sequences = np.zeros(self.batch_size, dtype=np.int64)

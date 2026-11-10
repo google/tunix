@@ -3069,6 +3069,68 @@ class SequencePackedRoutingTest(absltest.TestCase):
     np.testing.assert_array_equal(dec_pad_k5[0, 7:], _UNSET)
     np.testing.assert_array_equal(dec_pad_k5[1, 2:7], raw_k5_b)
 
+    # Also verify non-multiple-of-4 top_k=10 (Qwen3.5-397B-A17B) mixed uint8 +
+    # uint10 (T, L, 1, 13) assembly and C++ vs Python fallback parity.
+    rng = np.random.default_rng(1010)
+    raw_k10_u8 = rng.integers(0, 128, size=(5, 2, 10), dtype=np.int16)
+    raw_k10_u10 = rng.integers(0, 512, size=(5, 2, 10), dtype=np.int16)
+    raw_k10_u10[0, 0, 9] = 511
+    p1_k10_u8 = dataclasses.replace(
+        _make_payload(2, 4, advantage=1.0),
+        routed_experts=packing.encode_routed_experts(raw_k10_u8),
+    )
+    p2_k10_u10 = dataclasses.replace(
+        _make_payload(2, 4, advantage=-1.0),
+        routed_experts=packing.encode_routed_experts(raw_k10_u10),
+    )
+    self.assertEqual(p1_k10_u8.routed_experts.shape, (5, 2, 10))
+    self.assertEqual(p2_k10_u10.routed_experts.shape, (5, 2, 1, 13))
+    [b_k10_cpp] = list(
+        batch_assembly.SequencePackedBatchAssembler(
+            batch_size=1,
+            num_generations=2,
+            mini_batch_size=1,
+            max_packed_len=16,
+        ).feed([p1_k10_u8, p2_k10_u10])
+    )
+    [pb_k10_cpp] = list(
+        batch_assembly.PaddedBatchAssembler(
+            batch_size=2,
+            max_prompt_length=4,
+            max_response_length=6,
+            pad_id=0,
+            num_generations=2,
+            mini_batch_size=1,
+        ).feed([p1_k10_u8, p2_k10_u10])
+    )
+    self.assertEqual(b_k10_cpp.payload.routed_experts.shape, (1, 16, 2, 1, 13))
+    self.assertEqual(pb_k10_cpp.payload.routed_experts.shape, (2, 10, 2, 1, 13))
+    orig_ext = packing._packing_ext
+    try:
+      packing._packing_ext = None
+      [b_k10_py] = list(
+          batch_assembly.SequencePackedBatchAssembler(
+              batch_size=1,
+              num_generations=2,
+              mini_batch_size=1,
+              max_packed_len=16,
+          ).feed([p1_k10_u8, p2_k10_u10])
+      )
+      [pb_k10_py] = list(
+          batch_assembly.PaddedBatchAssembler(
+              batch_size=2,
+              max_prompt_length=4,
+              max_response_length=6,
+              pad_id=0,
+              num_generations=2,
+              mini_batch_size=1,
+          ).feed([p1_k10_u8, p2_k10_u10])
+      )
+    finally:
+      packing._packing_ext = orig_ext
+    self._assert_batches_identical([b_k10_cpp], [b_k10_py])
+    self._assert_batches_identical([pb_k10_cpp], [pb_k10_py])
+
     orig_ext = packing._packing_ext
     try:
       packing._packing_ext = None
@@ -3470,6 +3532,15 @@ class BuildDummyPayloadTest(parameterized.TestCase):
           (3, 14, 3, 1, 5),
           np.uint8,
       ),
+      (
+          "padded_auto_u10_k10",
+          "padded",
+          "auto",
+          512,
+          10,
+          (3, 14, 3, 1, 13),
+          np.uint8,
+      ),
       ("padded_u8", "padded", "uint8", 8, 2, (3, 14, 3, 2), np.uint8),
       ("padded_u10", "padded", "uint10", 256, 4, (3, 14, 3, 1, 5), np.uint8),
       ("padded_i16", "padded", "int16", 256, 4, (3, 14, 3, 4), np.int16),
@@ -3481,6 +3552,15 @@ class BuildDummyPayloadTest(parameterized.TestCase):
           256,
           4,
           (2, 16, 3, 1, 5),
+          np.uint8,
+      ),
+      (
+          "packed_auto_u10_k10",
+          "packed",
+          "auto",
+          512,
+          10,
+          (2, 16, 3, 1, 13),
           np.uint8,
       ),
       ("packed_i16", "packed", "int16", 8, 2, (2, 16, 3, 2), np.int16),
@@ -3570,6 +3650,27 @@ class BuildDummyPayloadTest(parameterized.TestCase):
           with_routed_experts=True,
           routed_experts_encode_mode="bad_mode",
       )
+
+  def test_to_pack_item_rejects_invalid_4d_uint8_routed_experts_shape(self):
+    bad_payload = dataclasses.replace(
+        _make_payload(2, 2),
+        routed_experts=np.zeros((3, 2, 2, 6), dtype=np.uint8),
+    )
+    with self.assertRaisesRegex(
+        ValueError,
+        "4D uint10",
+    ):
+      batch_assembly.to_pack_item(bad_payload)
+    orig_ext = packing._packing_ext
+    try:
+      packing._packing_ext = None
+      with self.assertRaisesRegex(
+          ValueError,
+          "unbatched uint8 routed_experts must have 3D .* or 4D uint10 shape",
+      ):
+        batch_assembly.to_pack_item(bad_payload)
+    finally:
+      packing._packing_ext = orig_ext
 
   def test_padded_leaves_assembler_state_untouched(self):
     asm = batch_assembly.PaddedBatchAssembler(

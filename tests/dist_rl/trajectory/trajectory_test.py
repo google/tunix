@@ -3314,9 +3314,50 @@ class Int3DArraySerializationTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
+          testcase_name="uint8_3d",
+          shape=(3, 4, 2),
+      ),
+      dict(
+          testcase_name="uint10_packed_4d",
+          shape=(3, 4, 2, 5),
+      ),
+      dict(
+          testcase_name="uint10_packed_4d_k10",
+          shape=(3, 4, 1, 13),
+      ),
+  )
+  def test_uint8_routed_experts_serializes_and_round_trips(self, shape):
+    arr = np.arange(int(np.prod(shape)), dtype=np.uint8).reshape(shape)
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="routed_u8",
+        prefill_routed_experts=arr,
+        prefill_start=0,
+        prefill_num_context=1,
+    )
+
+    dumped = step.model_dump(mode="json")
+    blob = dumped["prefill_routed_experts"]
+    self.assertEqual(blob["shape"], list(shape))
+    self.assertEqual(blob["dtype"], "uint8")
+    self.assertIsInstance(blob["data"], str)
+
+    restored = trajectory.TunixAgentStep.model_validate(dumped)
+    self.assertIsInstance(restored.prefill_routed_experts, np.ndarray)
+    self.assertEqual(restored.prefill_routed_experts.dtype, np.uint8)
+    np.testing.assert_array_equal(restored.prefill_routed_experts, arr)
+
+  @parameterized.named_parameters(
+      dict(
           testcase_name="wrong_ndim",
           bad_value=np.zeros((3, 4), dtype=np.int16),
           expected_error="Expected a 3D array",
+      ),
+      dict(
+          testcase_name="wrong_uint8_4d_last_dim",
+          bad_value=np.zeros((3, 4, 2, 4), dtype=np.uint8),
+          expected_error="Expected a 3D uint8 array or 4D uint10-packed",
       ),
       dict(
           testcase_name="float_array",
@@ -3341,6 +3382,16 @@ class Int3DArraySerializationTest(parameterized.TestCase):
       dict(
           testcase_name="bad_blob_shape",
           bad_value={"shape": [1, -1, 1], "dtype": "int16", "data": ""},
+          expected_error="Invalid Int3DArray shape",
+      ),
+      dict(
+          testcase_name="bad_int16_4d_blob_shape",
+          bad_value={"shape": [1, 1, 1, 5], "dtype": "int16", "data": ""},
+          expected_error="Invalid Int3DArray shape",
+      ),
+      dict(
+          testcase_name="bad_uint8_4d_blob_shape",
+          bad_value={"shape": [1, 1, 1, 6], "dtype": "uint8", "data": ""},
           expected_error="Invalid Int3DArray shape",
       ),
       dict(

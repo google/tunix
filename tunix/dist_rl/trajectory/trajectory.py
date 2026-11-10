@@ -17,11 +17,12 @@ import functools
 import math
 import sys
 import types
-from typing import Annotated, Any, ClassVar, Final, Generic, Literal, Self, TypeVar, TypedDict, Union, cast, get_args, get_origin
+from typing import Annotated, Any, ClassVar, Final, Generic, Literal, Self, TypeGuard, TypeVar, TypedDict, Union, cast, get_args, get_origin
 import weakref
 
 import numpy as np
 import pydantic
+from tunix.rl import packing
 
 # ==============================================================================
 # --- Pure ATIF Base Classes ---
@@ -529,118 +530,186 @@ IntArray = Annotated[
 ]
 
 _INT3D_DTYPE: Final[np.dtype[np.int16]] = np.dtype("<i2")
+_UINT8_DTYPE: Final[np.dtype[np.uint8]] = np.dtype("uint8")
 _INT3D_DTYPE_NAME: Final[Literal["int16"]] = "int16"
+_UINT8_DTYPE_NAME: Final[Literal["uint8"]] = "uint8"
 _INT3D_BLOB_KEYS: Final[frozenset[str]] = frozenset({"shape", "dtype", "data"})
 
 
 class SerializedInt3DArray(TypedDict):
-  """Compact JSON-serializable base64 binary representation of a 3D int16 array."""
+  """JSON-serializable base64 binary representation of MoE routed experts.
+
+  Supported layouts:
+  - 3D `int16` `(T, L, K)`: raw expert IDs (`0 <= id < E`), `-1` for unset. Raw
+    unshifted expert IDs must be passed as `int16`.
+  - 3D `uint8` `(T, L, K)`: `+1`-shifted expert IDs (`id + 1`), `0` for unset
+    (any `uint8` array is interpreted as already `+1`-shifted).
+  - 4D `uint8` `(T, L, K // 4, 5)` (or `(T, L, 1, ceil(10 * K / 8))` when
+    `K % 4 != 0`): `uint10` packing `+1`-shifted 10-bit values (`id + 1`, `0`
+    for unset) into little-endian bytes.
+
+  Note: Offline readers or older binaries consuming a `TrajectoryStore` written
+  with `dtype="uint8"` blobs must include this schema version (otherwise older
+  readers fail with `Unsupported Int3DArray dtype 'uint8'`).
+  """
 
   shape: list[int]
-  dtype: Literal["int16"]
+  dtype: Literal["int16", "uint8"]
   data: str
+
+
+def _is_valid_uint8_routed_shape(shape: Sequence[int]) -> bool:
+  """Returns True if `shape` is a valid 3D uint8 or 4D uint10-packed shape."""
+  return len(shape) == 3 or (
+      len(shape) == 4
+      and packing.uint10_logical_k(shape[2], shape[3]) is not None
+  )
+
+
+def _decode_int_3d_array_blob(value: Mapping[str, Any]) -> np.ndarray:
+  """Decodes and validates a base64-serialized routed-experts blob dict."""
+  if set(value.keys()) != _INT3D_BLOB_KEYS:
+    raise ValueError(
+        f"Invalid serialized Int3DArray keys {sorted(value.keys())};"
+        f" expected {sorted(_INT3D_BLOB_KEYS)}."
+    )
+  dtype = value["dtype"]
+  if dtype == _INT3D_DTYPE_NAME:
+    np_dtype, out_dtype = _INT3D_DTYPE, np.int16
+  elif dtype == _UINT8_DTYPE_NAME:
+    np_dtype, out_dtype = _UINT8_DTYPE, np.uint8
+  else:
+    raise ValueError(
+        f"Unsupported Int3DArray dtype {dtype!r}; expected"
+        f" {_INT3D_DTYPE_NAME!r} or {_UINT8_DTYPE_NAME!r}."
+    )
+  raw_shape = value["shape"]
+  valid_dims = isinstance(raw_shape, (list, tuple)) and all(
+      isinstance(dim, int) and not isinstance(dim, bool) and dim >= 0
+      for dim in raw_shape
+  )
+  valid_rank = valid_dims and (
+      (dtype == _INT3D_DTYPE_NAME and len(raw_shape) == 3)
+      or (
+          dtype == _UINT8_DTYPE_NAME and _is_valid_uint8_routed_shape(raw_shape)
+      )
+  )
+  if not valid_rank:
+    raise ValueError(
+        f"Invalid Int3DArray shape {raw_shape!r} for dtype {dtype!r}; expected"
+        " 3 non-negative integers (or 4D uint10 shape for uint8)."
+    )
+  shape = tuple(int(dim) for dim in raw_shape)
+  encoded = value["data"]
+  if not isinstance(encoded, str):
+    raise ValueError(
+        "Expected base64 string for Int3DArray data, got"
+        f" {type(encoded).__name__}."
+    )
+  try:
+    raw_bytes = base64.b64decode(encoded.encode("ascii"), validate=True)
+  except (UnicodeEncodeError, binascii.Error) as exc:
+    raise ValueError(f"Failed to decode Int3DArray blob: {exc}") from exc
+  expected_bytes = math.prod(shape) * np_dtype.itemsize
+  if len(raw_bytes) != expected_bytes:
+    raise ValueError(
+        f"Decoded Int3DArray byte length {len(raw_bytes)} does not match"
+        f" shape {shape} * {np_dtype.itemsize} ({expected_bytes} bytes)."
+    )
+  return (
+      np.frombuffer(raw_bytes, dtype=np_dtype)
+      .reshape(shape)
+      .astype(out_dtype, copy=True)
+  )
+
+
+def _is_valid_contiguous_int_3d_array(value: Any) -> TypeGuard[np.ndarray]:
+  """Returns True if `value` is already a C-contiguous valid Int3DArray ndarray."""
+  return (
+      isinstance(value, np.ndarray)
+      and value.flags.c_contiguous
+      and (
+          (value.dtype == _INT3D_DTYPE and value.ndim == 3)
+          or (
+              value.dtype == _UINT8_DTYPE
+              and _is_valid_uint8_routed_shape(value.shape)
+          )
+      )
+  )
 
 
 def _validate_int_3d_array(
     value: np.ndarray | list[list[list[int]]] | Mapping[str, Any] | None,
 ) -> np.ndarray | None:
-  """Validates and normalizes a 3D int16 array or decodes its base64 blob."""
+  """Validates a 3D int16/uint8 or 4D uint10-packed uint8 array or blob."""
   if value is None:
     return None
+  if _is_valid_contiguous_int_3d_array(value):
+    return value
   if isinstance(value, Mapping):
-    if set(value.keys()) != _INT3D_BLOB_KEYS:
-      raise ValueError(
-          f"Invalid serialized Int3DArray keys {sorted(value.keys())};"
-          f" expected {sorted(_INT3D_BLOB_KEYS)}."
-      )
-    dtype = value["dtype"]
-    if dtype != _INT3D_DTYPE_NAME:
-      raise ValueError(
-          f"Unsupported Int3DArray dtype {dtype!r}; expected"
-          f" {_INT3D_DTYPE_NAME!r}."
-      )
-    raw_shape = value["shape"]
-    if (
-        not isinstance(raw_shape, (list, tuple))
-        or len(raw_shape) != 3
-        or not all(
-            isinstance(dim, int) and not isinstance(dim, bool) and dim >= 0
-            for dim in raw_shape
-        )
-    ):
-      raise ValueError(
-          f"Invalid Int3DArray shape {raw_shape!r}; expected 3 non-negative"
-          " integers."
-      )
-    shape = (raw_shape[0], raw_shape[1], raw_shape[2])
-    encoded = value["data"]
-    if not isinstance(encoded, str):
-      raise ValueError(
-          "Expected base64 string for Int3DArray data, got"
-          f" {type(encoded).__name__}."
-      )
-    try:
-      raw_bytes = base64.b64decode(encoded.encode("ascii"), validate=True)
-    except (UnicodeEncodeError, binascii.Error) as exc:
-      raise ValueError(f"Failed to decode Int3DArray blob: {exc}") from exc
-    expected_bytes = math.prod(shape) * _INT3D_DTYPE.itemsize
-    if len(raw_bytes) != expected_bytes:
-      raise ValueError(
-          f"Decoded Int3DArray byte length {len(raw_bytes)} does not match"
-          f" shape {shape} * {_INT3D_DTYPE.itemsize} ({expected_bytes} bytes)."
-      )
-    return (
-        np.frombuffer(raw_bytes, dtype=_INT3D_DTYPE)
-        .reshape(shape)
-        .astype(np.int16, copy=True)
+    return _decode_int_3d_array_blob(value)
+  if not isinstance(value, (np.ndarray, list)):
+    raise ValueError(
+        f"Unsupported type for Int3DArray: {type(value).__name__}."
     )
-  if isinstance(value, (np.ndarray, list)):
-    arr = np.asarray(value)
-    if arr.ndim != 3:
+  arr = np.asarray(value)
+  if isinstance(value, np.ndarray) and arr.dtype == np.uint8:
+    if _is_valid_uint8_routed_shape(arr.shape):
+      return np.ascontiguousarray(arr, dtype=np.uint8)
+    raise ValueError(
+        "Expected a 3D uint8 array or 4D uint10-packed uint8 array for"
+        f" Int3DArray, got shape {arr.shape}."
+    )
+  if arr.ndim != 3:
+    raise ValueError(
+        f"Expected a 3D array for Int3DArray, got shape {arr.shape}."
+    )
+  if arr.size == 0:
+    return np.zeros(arr.shape, dtype=np.int16)
+  if not np.issubdtype(arr.dtype, np.integer) or np.issubdtype(
+      arr.dtype, np.bool_
+  ):
+    raise ValueError(
+        f"Expected an integer array for Int3DArray, got dtype {arr.dtype}."
+    )
+  if arr.dtype != np.int16:
+    info = np.iinfo(np.int16)
+    min_val, max_val = int(arr.min()), int(arr.max())
+    if min_val < info.min or max_val > info.max:
       raise ValueError(
-          f"Expected a 3D array for Int3DArray, got shape {arr.shape}."
+          f"Int3DArray values [{min_val}, {max_val}] exceed int16 range"
+          f" [{info.min}, {info.max}]."
       )
-    if arr.size == 0:
-      return np.zeros(arr.shape, dtype=np.int16)
-    if not np.issubdtype(arr.dtype, np.integer) or np.issubdtype(
-        arr.dtype, np.bool_
-    ):
-      raise ValueError(
-          f"Expected an integer array for Int3DArray, got dtype {arr.dtype}."
-      )
-    if arr.dtype != np.int16:
-      info = np.iinfo(np.int16)
-      min_val, max_val = int(arr.min()), int(arr.max())
-      if min_val < info.min or max_val > info.max:
-        raise ValueError(
-            f"Int3DArray values [{min_val}, {max_val}] exceed int16 range"
-            f" [{info.min}, {info.max}]."
-        )
-    return np.ascontiguousarray(arr, dtype=np.int16)
-  raise ValueError(f"Unsupported type for Int3DArray: {type(value).__name__}.")
+  return np.ascontiguousarray(arr, dtype=np.int16)
 
 
 def _serialize_int_3d_array(
     value: np.ndarray | list[list[list[int]]] | Mapping[str, Any] | None,
 ) -> SerializedInt3DArray | None:
-  """Serializes a 3D int16 array into a base64 binary blob dict."""
+  """Serializes a 3D int16/uint8 or 4D uint10-packed uint8 array into base64."""
   if value is None:
     return None
-  if (
-      isinstance(value, np.ndarray)
-      and value.ndim == 3
-      and value.dtype == _INT3D_DTYPE
-      and value.flags.c_contiguous
-  ):
-    arr = value
+  if _is_valid_contiguous_int_3d_array(value):
+    contig = value
   else:
-    validated = _validate_int_3d_array(value)
-    assert validated is not None
-    arr = np.ascontiguousarray(validated, dtype=_INT3D_DTYPE)
+    arr = _validate_int_3d_array(value)
+    if arr is None:
+      return None
+    contig = np.ascontiguousarray(
+        arr,
+        dtype=_UINT8_DTYPE if arr.dtype == np.uint8 else _INT3D_DTYPE,
+    )
+  dtype_name: Literal["int16", "uint8"] = (
+      _UINT8_DTYPE_NAME if contig.dtype == np.uint8 else _INT3D_DTYPE_NAME
+  )
   return {
-      "shape": list(arr.shape),
-      "dtype": _INT3D_DTYPE_NAME,
-      "data": base64.b64encode(arr.tobytes()).decode("ascii"),
+      "shape": list(contig.shape),
+      "dtype": dtype_name,
+      "data": (
+          base64.b64encode(
+              memoryview(contig)  # pyrefly: ignore[bad-argument-type]
+          ).decode("ascii")
+      ),
   }
 
 
@@ -1504,13 +1573,20 @@ class TunixAgentStep(Step):
   prefill_routed_experts: Int3DArray = pydantic.Field(
       default=None,
       description=(
-          "MoE routed expert IDs returned by this step's model call, shape"
-          " (T, L, K), covering sequence positions [prefill_start,"
-          " prefill_start + T). The last sampled token of a turn (plus any"
-          " chat-parser suffix tokens appended to assistant_tokens) is only"
-          " routed by the next turn's prefill, so rows are: turn 0 = prompt +"
-          " this turn's routed assistant prefix; turn t > 0 = previous turn's"
-          " unrouted assistant tail + previous env tokens + this turn's routed"
+          "MoE routed expert IDs returned by this step's model call, covering"
+          " sequence positions [prefill_start, prefill_start + T). Stored in"
+          " one of three layouts (decode with"
+          " tunix.rl.packing.decode_routed_experts): (1) 3D int16 (T, L, K)"
+          " holding raw expert IDs with -1 for unset (raw IDs must be written"
+          " as int16); (2) 3D uint8 (T, L, K) holding +1-shifted expert IDs"
+          " (id + 1) with 0 for unset; or (3) 4D uint8 (T, L, K // 4, 5) (or"
+          " (T, L, 1, ceil(10 * K / 8)) when K % 4 != 0) packing +1-shifted"
+          " 10-bit values (id + 1, 0 for unset) into bytes. The last sampled"
+          " token of a turn (plus any chat-parser"
+          " suffix tokens appended to assistant_tokens) is only routed by the"
+          " next turn's prefill, so rows are: turn 0 = prompt + this turn's"
+          " routed assistant prefix; turn t > 0 = previous turn's unrouted"
+          " assistant tail + previous env tokens + this turn's routed"
           " assistant prefix. Written once and never rewritten."
       ),
   )

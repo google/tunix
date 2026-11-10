@@ -23,7 +23,6 @@ from tunix.dist_rl.common import timeouts
 from tunix.dist_rl.rollout import sampler as sampler_lib
 from tunix.dist_rl.trajectory import base_store as store
 from tunix.dist_rl.trajectory import converter as converter_lib
-from tunix.rl import packing
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine as rl_collect_engine
 from tunix.rl.rollout import base_rollout
@@ -124,21 +123,6 @@ class TrajectoryCollectorEngine:
         routed_experts_encode_mode
     )
     self.routed_experts_num_experts: int | None = routed_experts_num_experts
-    if (
-        self.store_routed_experts
-        and self.routed_experts_encode_mode == "auto"
-        and self.routed_experts_num_experts is None
-    ):
-      logging.log_first_n(
-          logging.WARNING,
-          "store_routed_experts is enabled with"
-          " routed_experts_encode_mode='auto' and"
-          " routed_experts_num_experts=None. For MoE models with >255 experts,"
-          " set routed_experts_num_experts (or"
-          " routed_experts_encode_mode='uint10') to avoid per-step tier"
-          " switching between 4D uint8 and 5D uint10.",
-          1,
-      )
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
@@ -319,32 +303,11 @@ class TrajectoryCollectorEngine:
         trajectory_store=self.trajectory_store,
         metadata=self.metadata,
         store_routed_experts=self.store_routed_experts,
+        routed_experts_encode_mode=self.routed_experts_encode_mode,
+        routed_experts_num_experts=self.routed_experts_num_experts,
     )
     self._inner_engine = inner_engine
     rl_traj = await inner_engine.collect(mode="Token")
-    if isinstance(rl_traj, dict):
-      routed_experts = rl_traj.get("routed_experts")
-      if routed_experts is not None:
-        if (
-            self.routed_experts_encode_mode == "auto"
-            and self.routed_experts_num_experts is None
-        ):
-          logging.log_first_n(
-              logging.WARNING,
-              "Encoding routed_experts with routed_experts_encode_mode='auto'"
-              " and routed_experts_num_experts=None. For MoE models with >255"
-              " experts, set routed_experts_num_experts (or"
-              " routed_experts_encode_mode='uint10') to avoid per-step tier"
-              " switching between 4D uint8 and 5D uint10.",
-              1,
-          )
-        rl_traj["routed_experts"] = await asyncio.to_thread(
-            packing.encode_routed_experts,
-            routed_experts,
-            mode=self.routed_experts_encode_mode,
-            num_experts=self.routed_experts_num_experts,
-            batched=False,
-        )
     self.is_done = True
     return self._convert_to_trajectory(rl_traj)
 

@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 from tunix.dist_rl.trajectory import action_converter
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
+from tunix.rl import packing
 from tunix.rl.agentic.agents import agent_types
 
 
@@ -109,8 +110,13 @@ def create_agent_step(
     step: The Tunix RL step to convert, or None.
     tunix_step_id: 0-based turn index of the step in the Tunix trajectory.
     policy_version: Optional policy version override for the agent step.
-    prefill_routed_experts: Raw MoE routed expert IDs returned by this turn's
-      model call, shape (T, L, K). Stored as-is; see
+    prefill_routed_experts: Raw or compact-encoded MoE routed expert IDs
+      returned by this turn's model call: - 3D `int16` `(T, L, K)`: raw 0-based
+      expert IDs (`-1` for unset). Raw unshifted expert IDs must be passed as
+      `int16`. - 3D `uint8` `(T, L, K)`: `+1`-shifted expert IDs (`id + 1`, `0`
+      for unset). Any `uint8` array is interpreted as already `+1`-shifted. - 4D
+      `uint8` `(T, L, K // 4, 5)` (or `(T, L, 1, ceil(10 * K / 8))` when `K % 4
+      != 0`): `+1`-shifted `uint10` byte packing. Stored as-is; see
       `TunixAgentStep.prefill_routed_experts` for the row layout.
     prefill_start: Sequence position of the first `prefill_routed_experts` row.
     prefill_num_context: Number of leading `prefill_routed_experts` rows that
@@ -337,8 +343,9 @@ def to_tunix_trajectory(
     `env_tokens` (if set) -> `prompt_tokens` and `prompt_length`.
   - Subsequent steps (Agent step at 2i+1, Env step at 2i+2) -> Paired into
     Tunix `agent_types.Step` instances for turn i.
-  - Agent steps' raw `prefill_routed_experts` -> Split into the trajectory's
-    `prompt_routed_experts` and each step's assistant/env routed experts.
+  - Agent steps' raw or compact-encoded `prefill_routed_experts` -> Split into
+    the trajectory's `prompt_routed_experts` and each step's assistant/env
+    routed experts.
 
   Args:
     traj: Trajectory or dictionary representation.
@@ -459,10 +466,28 @@ def to_tunix_trajectory(
   )
 
 
+def _normalize_prefill_encodings(
+    prefills: list[np.ndarray | None],
+) -> list[np.ndarray | None]:
+  """Widens mixed-tier prefill arrays to the widest tier in the episode."""
+  valid = [p for p in prefills if p is not None]
+  if len(valid) <= 1 or len({(p.dtype, p.ndim) for p in valid}) == 1:
+    return prefills
+  target_mode = packing.widest_routed_encoding(
+      packing.routed_experts_encoding(p, batched=False) for p in valid
+  )
+  return [
+      None
+      if p is None
+      else packing.encode_routed_experts(p, mode=target_mode, batched=False)
+      for p in prefills
+  ]
+
+
 def _split_prefill_routed_experts(
     routed_turns: list[tuple[agent_types.Step, trajectory_lib.TunixAgentStep]],
 ) -> np.ndarray | None:
-  """Splits each turn's raw prefill routing back into per-step routing.
+  """Splits each turn's raw or compact-encoded prefill routing into step routing.
 
   Turn i's `prefill_routed_experts` starts with `prefill_num_context` rows for
   earlier tokens (turn 0: the prompt; turn i > 0: turn i-1's unrouted assistant
@@ -470,7 +495,8 @@ def _split_prefill_routed_experts(
   routed assistant prefix (excluding its last sampled token and any chat-parser
   suffix tokens). The final turn's trailing assistant tokens were never
   prefilled, so they stay unrouted here; consumers pad them with
-  `agent_types.UNSET_ROUTED_EXPERT`.
+  `agent_types.UNSET_ROUTED_EXPERT` (`-1`) for `int16` or `0` for compact
+  `uint8`/`uint10`.
 
   Sets `assistant_routed_experts` and `env_routed_experts` on the Tunix steps in
   place.
@@ -488,12 +514,16 @@ def _split_prefill_routed_experts(
   if all(src.prefill_routed_experts is None for _, src in routed_turns):
     return None
 
+  normalized_prefills = _normalize_prefill_encodings(
+      [_to_numpy_or_none(src.prefill_routed_experts) for _, src in routed_turns]
+  )
   prompt_routed_experts = None
   prev_step: agent_types.Step | None = None
   prev_own = np.zeros((0,))
   expected_start = 0
-  for turn, (step, src) in enumerate(routed_turns):
-    prefill = _to_numpy_or_none(src.prefill_routed_experts)
+  for turn, ((step, src), prefill) in enumerate(
+      zip(routed_turns, normalized_prefills)
+  ):
     num_context = src.prefill_num_context
     if prefill is None:
       raise ValueError(
