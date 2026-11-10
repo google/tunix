@@ -519,11 +519,6 @@ def _validate_args(
           "max_version_span is only supported with"
           " trajectory_group_order='trajectory_completion'."
       )
-  if args.use_agent_sandbox and args.max_staleness > 1:
-    raise ValueError(
-        "use_agent_sandbox only supports max_staleness <= 1, got"
-        f" {args.max_staleness}."
-    )
   if args.step_timeout_secs <= 0:
     raise ValueError("step_timeout_secs must be positive.")
   if args.reward_timeout_secs <= 0:
