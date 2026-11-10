@@ -27,6 +27,7 @@ from typing import Any, Optional
 import uuid
 
 from tunix.experimental.examples.deepswe_dist import opencode_fuzzy
+from examples.deepswe import sandbox_utils as oss_sandbox_utils
 from tunix.rl.agentic.environments.base_environment import EnvStepResult
 
 fuzzy_find_match = opencode_fuzzy.fuzzy_find_match
@@ -772,25 +773,27 @@ _GIT_EXCLUDE_R2E_AND_OH_CMD = (
 def hide_r2e_tests_for_rollout(
     target: Any, entry: Optional[dict[str, Any]] = None
 ) -> None:
-  """Removes /r2e_tests and /run_tests.sh from the rollout container."""
-  try:
-    cmd = (
-        f"{_HIDE_R2E_TESTS_CMD} && "
-        "(git -C /testbed reset --hard 2>/dev/null || true) && "
-        f"{_GIT_EXCLUDE_R2E_AND_OH_CMD} && "
-        "(git -C /testbed rev-parse HEAD 2>/dev/null || true)"
+  """Removes /r2e_tests and /run_tests.sh and scrubs future git history."""
+  cmd = (
+      f"{_HIDE_R2E_TESTS_CMD} && "
+      f"{oss_sandbox_utils.SCRUB_GIT_HISTORY_CMD} && "
+      f"{_GIT_EXCLUDE_R2E_AND_OH_CMD} && "
+      "(git -C /testbed rev-parse HEAD 2>/dev/null || true)"
+  )
+  res = _exec_in_sandbox(target, cmd, timeout=180.0)
+  stdout, exit_code = _unpack_exec_output(res)
+  if exit_code != 0:
+    raise RuntimeError(
+        "[SWEEnv] Failed to scrub R2E tests and git history for rollout"
+        f" (exit={exit_code}): {stdout}"
     )
-    res = _exec_in_sandbox(target, cmd, timeout=60.0)
-    if entry is not None and (
-        "base_commit" not in entry or not entry["base_commit"]
-    ):
-      stdout, exit_code = _unpack_exec_output(res)
-      if exit_code == 0 and stdout:
-        lines = [ln.strip() for ln in stdout.strip().splitlines() if ln.strip()]
-        if lines and re.fullmatch(r"[0-9a-fA-F]{7,40}", lines[-1]):
-          entry["base_commit"] = lines[-1]
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    logging.warning("[SWEEnv] Failed to hide R2E tests for rollout: %s", e)
+  if entry is not None and (
+      "base_commit" not in entry or not entry["base_commit"]
+  ):
+    if stdout:
+      lines = [ln.strip() for ln in stdout.strip().splitlines() if ln.strip()]
+      if lines and re.fullmatch(r"[0-9a-fA-F]{7,40}", lines[-1]):
+        entry["base_commit"] = lines[-1]
 
 
 def setup_openhands_workspace(
@@ -812,7 +815,10 @@ def setup_openhands_workspace(
       return
 
   setup_cmds = [
-      "rm -f /var/tmp/.oh_cwd /var/tmp/.oh_editor_history.json 2>/dev/null || true",
+      (
+          "rm -f /var/tmp/.oh_cwd /var/tmp/.oh_editor_history.json 2>/dev/null"
+          " || true"
+      ),
       "git config --global user.email 'openhands@agent.sandbox'",
       "git config --global user.name 'OpenHands Agent'",
       'git config --global core.pager ""',
@@ -835,40 +841,29 @@ def setup_openhands_workspace(
           ' "$sp/chardet" ]; then cp -a /oh/pkgs/. "$sp/"'
           " 2>/dev/null || true; fi; done; fi"
       ),
-      "git -C /testbed reset --hard 2>/dev/null || true",
-      (
-          "(for r in $(git -C /testbed remote 2>/dev/null); do"
-          ' git -C /testbed remote remove "$r" 2>/dev/null || true; done)'
-      ),
+      oss_sandbox_utils.SCRUB_GIT_HISTORY_CMD,
       _HIDE_R2E_TESTS_CMD,
       _GIT_EXCLUDE_R2E_AND_OH_CMD,
       "git -C /testbed rev-parse HEAD 2>/dev/null || true",
   ]
 
   full_setup_cmd = _STRIP_PYINSTALLER_LD_PATH + " && ".join(setup_cmds)
-  try:
-    logging.info("[SWEEnv] Configuring OpenHands workspace...")
-    res = workspace.execute_command(full_setup_cmd, timeout=180.0)
-    if getattr(res, "exit_code", 0) != 0:
-      logging.warning(
-          "[SWEEnv] Workspace setup exit code %s: %s",
-          res.exit_code,
-          getattr(res, "stderr", None) or getattr(res, "stdout", None),
-      )
-    else:
-      logging.info("[SWEEnv] Successfully configured OpenHands workspace")
-      if entry is not None and (
-          "base_commit" not in entry or not entry["base_commit"]
-      ):
-        stdout = getattr(res, "stdout", None)
-        if isinstance(stdout, str):
-          lines = [
-              ln.strip() for ln in stdout.strip().splitlines() if ln.strip()
-          ]
-          if lines and re.fullmatch(r"[0-9a-fA-F]{7,40}", lines[-1]):
-            entry["base_commit"] = lines[-1]
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    logging.warning("[SWEEnv] Failed to set up repository in workspace: %s", e)
+  logging.info("[SWEEnv] Configuring OpenHands workspace...")
+  res = workspace.execute_command(full_setup_cmd, timeout=180.0)
+  stdout, exit_code = _unpack_exec_output(res)
+  if exit_code != 0:
+    stderr = getattr(res, "stderr", None) or stdout
+    raise RuntimeError(
+        f"[SWEEnv] Workspace setup failed with exit code {exit_code}: {stderr}"
+    )
+  logging.info("[SWEEnv] Successfully configured OpenHands workspace")
+  if entry is not None and (
+      "base_commit" not in entry or not entry["base_commit"]
+  ):
+    if stdout:
+      lines = [ln.strip() for ln in stdout.strip().splitlines() if ln.strip()]
+      if lines and re.fullmatch(r"[0-9a-fA-F]{7,40}", lines[-1]):
+        entry["base_commit"] = lines[-1]
 
 
 def restore_r2e_tests_for_reward(target: Any) -> None:

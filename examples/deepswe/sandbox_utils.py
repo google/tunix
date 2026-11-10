@@ -22,14 +22,85 @@ import atexit
 import collections
 import logging
 import os
+import shlex
 import threading
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 import numpy as np
 
 _GLOBAL_FLEET = None
 _FLEET_LOCK = threading.Lock()
 _PATCH_LOCK = threading.Lock()
 _R2EGYM_PATCHED = False
+
+
+class CommandRuntime(Protocol):
+  """Protocol for sandbox runtimes executing shell commands."""
+
+  def run(self, code: str, timeout: int = ...) -> tuple[str, str | int]:
+    ...
+
+
+def build_scrub_git_history_cmd(repo_path: str = "/testbed") -> str:
+  """Builds a POSIX shell command that prunes future git refs, reflogs, and objects.
+
+  Task images built via ``git clone`` followed by ``git checkout <base_commit>``
+  retain local branch and tag refs (e.g. ``refs/heads/main``), ``.git/logs``
+  reflog entries pointing at ``<gold_commit>^``, and future commit objects in
+  ``.git/objects``. Detaching ``HEAD``, deleting all refs and reflogs, and
+  running ``git gc --prune=now`` with ``gc.cruftPacks=false`` physically removes
+  unreachable future objects while preserving ``HEAD`` and its ancestor history
+  for ``git diff <base_commit>``.
+
+  Args:
+    repo_path: Path to the git repository inside the rollout container.
+
+  Returns:
+    A shell command string that exits non-zero if scrubbing fails or any ref
+    remains under ``refs/``.
+  """
+  quoted = shlex.quote(repo_path)
+  return (
+      f"if [ -d {quoted}/.git ]; then "
+      f"rm -f {quoted}/.git/index.lock {quoted}/.git/gc.pid && "
+      f"(git config --global --add safe.directory {quoted} "
+      "2>/dev/null || true) && "
+      f"git -C {quoted} reset --hard HEAD && "
+      f"git -C {quoted} checkout --detach HEAD && "
+      f"(for r in $(git -C {quoted} remote 2>/dev/null); do "
+      f'git -C {quoted} remote remove "$r" 2>/dev/null || true; done) && '
+      f"(git -C {quoted} for-each-ref --format='%(refname)' | "
+      "while IFS= read -r ref; do "
+      f'[ -n "$ref" ] && git -C {quoted} update-ref -d --no-deref "$ref"; '
+      "done) && "
+      f"git -C {quoted} reflog expire "
+      "--expire=now --expire-unreachable=now --all && "
+      f"rm -rf {quoted}/.git/logs "
+      f"{quoted}/.git/FETCH_HEAD {quoted}/.git/ORIG_HEAD && "
+      f"git -C {quoted} -c gc.cruftPacks=false -c gc.autoDetach=false "
+      "gc --prune=now --quiet && "
+      f"test -z \"$(git -C {quoted} for-each-ref --format='%(refname)')\"; "
+      "fi"
+  )
+
+
+SCRUB_GIT_HISTORY_CMD = build_scrub_git_history_cmd("/testbed")
+
+
+def scrub_repo_git_history(
+    runtime: CommandRuntime,
+    repo_path: str = "/testbed",
+    timeout: int = 180,
+) -> None:
+  """Scrubs future git refs, reflogs, and unreachable objects from a runtime."""
+  cmd = build_scrub_git_history_cmd(repo_path)
+  output, exit_code = runtime.run(
+      f"/bin/sh -c {shlex.quote(cmd)}", timeout=timeout
+  )
+  if str(exit_code).strip() != "0":
+    raise RuntimeError(
+        f"Failed to scrub git history in {repo_path} (exit={exit_code}):"
+        f" {output}"
+    )
 
 
 def patch_r2egym_for_agent_sandbox() -> None:

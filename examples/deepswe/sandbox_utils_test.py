@@ -14,10 +14,42 @@
 
 """Unit tests for tunix.oss.examples.deepswe.sandbox_utils."""
 
+import os
+import shutil
+import subprocess
 from unittest import mock
 from absl.testing import absltest
 import numpy as np
 from examples.deepswe import sandbox_utils
+
+
+class LocalShellRuntime:
+  """Executes shell commands locally in an isolated temporary HOME."""
+
+  def __init__(self, home_dir: str):
+    self._env = {**os.environ, "HOME": home_dir}
+    self.calls: list[tuple[str, int]] = []
+
+  def run(self, code: str, timeout: int = 60) -> tuple[str, str]:
+    self.calls.append((code, timeout))
+    proc = subprocess.run(
+        code,
+        shell=True,
+        env=self._env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    return proc.stdout + proc.stderr, str(proc.returncode)
+
+
+class FailingRuntime:
+  """Fake runtime returning a non-zero exit status."""
+
+  def run(self, code: str, timeout: int = 60) -> tuple[str, str]:
+    del code, timeout
+    return "simulated git failure", "128"
 
 
 class FakeFleet:
@@ -299,6 +331,103 @@ class SandboxUtilsTest(absltest.TestCase):
             replicas_override=4,
             wait=False,
         )
+
+  def test_scrub_repo_git_history_removes_future_objects_and_preserves_head(
+      self,
+  ):
+    if shutil.which("git") is None:
+      self.skipTest("git binary is unavailable in test environment")
+
+    root_dir = self.create_tempdir().full_path
+    upstream = os.path.join(root_dir, "upstream")
+    clone = os.path.join(root_dir, "testbed")
+    home = os.path.join(root_dir, "home")
+    os.makedirs(upstream)
+    os.makedirs(home)
+    env = {**os.environ, "HOME": home}
+
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=upstream, env=env, check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "jdoe@example.com"],
+        cwd=upstream,
+        env=env,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "John Doe"],
+        cwd=upstream,
+        env=env,
+        check=True,
+    )
+    with open(os.path.join(upstream, "app.py"), "w", encoding="utf-8") as f:
+      f.write("VALUE = 1\n")
+    subprocess.run(["git", "add", "."], cwd=upstream, env=env, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "base"], cwd=upstream, env=env, check=True
+    )
+    base_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=upstream, env=env, text=True
+    ).strip()
+
+    with open(os.path.join(upstream, "app.py"), "w", encoding="utf-8") as f:
+      f.write("VALUE = 99  # FUTURE_FIX\n")
+    subprocess.run(["git", "add", "."], cwd=upstream, env=env, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "future fix"],
+        cwd=upstream,
+        env=env,
+        check=True,
+    )
+    subprocess.run(["git", "tag", "v1.2.3"], cwd=upstream, env=env, check=True)
+    subprocess.run(["git", "gc", "--quiet"], cwd=upstream, env=env, check=True)
+    future_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=upstream, env=env, text=True
+    ).strip()
+
+    subprocess.run(
+        ["git", "clone", "--quiet", f"file://{upstream}", clone],
+        env=env,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "--quiet", f"{future_sha}^"],
+        cwd=clone,
+        env=env,
+        check=True,
+    )
+
+    runtime = LocalShellRuntime(home)
+    sandbox_utils.scrub_repo_git_history(runtime, repo_path=clone)
+
+    head_after = subprocess.check_output(
+        ["git", "-C", clone, "rev-parse", "HEAD"], env=env, text=True
+    ).strip()
+    self.assertEqual(head_after, base_sha)
+    refs_after = subprocess.check_output(
+        ["git", "-C", clone, "for-each-ref", "--format=%(refname)"],
+        env=env,
+        text=True,
+    ).strip()
+    self.assertEqual(refs_after, "")
+    all_objs = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            clone,
+            "cat-file",
+            "--batch-check",
+            "--batch-all-objects",
+        ],
+        env=env,
+        text=True,
+    )
+    self.assertNotIn(future_sha, all_objs)
+
+  def test_scrub_repo_git_history_raises_on_nonzero_exit(self):
+    with self.assertRaisesRegex(RuntimeError, "Failed to scrub git history"):
+      sandbox_utils.scrub_repo_git_history(FailingRuntime(), repo_path="/repo")
 
 
 if __name__ == "__main__":
