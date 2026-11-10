@@ -1,0 +1,86 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Static vLLM engine and per-role environment overrides for `mlperf_35b_128_v5p.sh`.
+
+vllm_config:
+  engine_kwargs:
+    enable_expert_parallel: true
+    prefix_cache_retention_interval: 0
+    mamba_cache_mode: "align"
+    kv_cache_dtype: "bfloat16"
+    block_size: 256
+    enable_chunked_prefill: true
+    language_model_only: true
+    reasoning_parser: "qwen3"
+    limit_mm_per_prompt:
+      image: 0
+      video: 0
+    additional_config:
+      sharding:
+        sharding_strategy:
+          expert_parallelism: 4
+          tensor_parallelism: 1
+          enable_dp_attention: true
+      custom_mamba_cache_multiplier: 16
+      maxtext_config:
+        use_multimodal: false
+        per_device_batch_size: 0.0
+
+cluster_config:
+  role_env:
+    orchestrator:
+      WANDB_ENTITY: "google-trellis"
+      RAIDEN_BROADCAST_HOST_RATIO: "1.0"
+      RAIDEN_BROADCAST_PIPELINE_STAGES: "4"
+      SCAFFOLD: "openhands"
+      OPENHANDS_MULTI_TOOL_CALLS: "false"
+    trainer:
+      ONEHOT_MOE_PERMUTE_THRESHOLD: "32768"
+      RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES: "67108864"
+      RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE: "16"
+      RAIDEN_BROADCAST_HOST_RATIO: "1.0"
+      RAIDEN_BROADCAST_PIPELINE_STAGES: "4"
+      RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER: "0"
+    rollout:
+      RAIDEN_DEVICES_PER_HOST: "4"
+      NUM_PRECOMPILE_WORKERS: "8"
+      ATTN_BUCKETIZED_NUM_REQS: "true"
+      ATTN_CUSTOM_NUM_REQS_BUCKETS: "4"
+      ONEHOT_MOE_PERMUTE_THRESHOLD: "32768"
+      RAGGED_GATHER_REDUCE_VERSION: "v2"
+      VLLM_MOE_CHUNK_SIZE: "256"
+      SLICE_ROPE_CACHE: "1"
+      DP_SCHED_BATCH_PREFILL: "false"
+      VLLM_LOGGING_LEVEL: "INFO"
+      TPU_SMALL_ALL_REDUCE: "0"
+      TPU_MOE_SINGLE_SORT: "0"
+      TPU_MOE_ROUTER_TOPK: "sort"
+      TPU_MOE_LOWTOK: "0"
+      USE_BATCHED_RPA_LONG_CTX_KERNEL: "false"
+      RAY_memory_monitor_refresh_ms: "0"
+      RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES: "67108864"
+      RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE: "16"
+      RAIDEN_PARALLELISM: "16"
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1800"
+      RAIDEN_BROADCAST_HOST_RATIO: "1.0"
+      RAIDEN_BROADCAST_PIPELINE_STAGES: "4"
+      LIBTPU_INIT_ARGS: >-
+        --xla_tpu_use_minor_sharding_for_major_trivial_input=true
+        --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false
+        --xla_tpu_ars_combiner_threshold_in_bytes=0
+        --xla_tpu_enable_async_collective_merger=false
+        --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false
+      SCAFFOLD: "openhands"
+      OPENHANDS_MULTI_TOOL_CALLS: "false"
