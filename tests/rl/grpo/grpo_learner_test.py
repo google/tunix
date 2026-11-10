@@ -34,6 +34,7 @@ import orbax.checkpoint as ocp
 from tunix.perf import trace as trace_lib
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl import rl_cluster as rl_engine_lib
+from tunix.rl import utils as rl_utils
 from tunix.rl.grpo import grpo_learner as grpo_lib
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
@@ -95,7 +96,7 @@ def setup(kwargs: Optional[Dict[str, Any]] = None):
       config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
   )
 
-  mesh = pxla.thread_resources.env.physical_mesh
+  mesh = kwargs.get('mesh', pxla.thread_resources.env.physical_mesh)
   cluster_config = rl_engine_lib.ClusterConfig(
       role_to_mesh={
           rl_engine_lib.Role.ACTOR: mesh,
@@ -113,6 +114,9 @@ def setup(kwargs: Optional[Dict[str, Any]] = None):
           if kwargs.get('gradient_accumulation_steps', None)
           else None,
           max_seq_token_per_tpu=kwargs.get('max_seq_token_per_tpu', None),
+          max_segments_per_packed_row=kwargs.get(
+              'max_segments_per_packed_row', None
+          ),
           rollout_micro_batch_size=kwargs.get('rollout_micro_batch_size', None),
       ),
       rollout_config=base_rollout.RolloutConfig(
@@ -150,6 +154,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         self._last_iter_step = 0
         self.algo_config = grpo_config
         self._data_shuffle_seed = None
+        self._packing_enabled = False
         self.rl_engine = types.SimpleNamespace(  # pyrefly: ignore[bad-assignment]
             global_steps=0,
             cluster_config=types.SimpleNamespace(
@@ -782,15 +787,58 @@ class GRPOLearnerTest(parameterized.TestCase):
           testcase_name='large_budget',
           max_token_len=1000,  # fits multiple sequences, pads to 1000
       ),
+      # With beta=0 and no trainer logps, the train batch stays in numpy until
+      # it is packed.
+      dict(
+          testcase_name='host_batch',
+          max_token_len=532,
+          beta=0.0,
+      ),
+      dict(
+          testcase_name='host_batch_rollout_logps_one_sequence_per_chunk',
+          max_token_len=532,
+          beta=0.0,
+          return_logprobs=True,
+          max_segments_per_packed_row=1,
+      ),
+      dict(
+          testcase_name='host_batch_multi_iteration',
+          max_token_len=532,
+          beta=0.0,
+          num_iterations=2,
+          return_logprobs=True,
+          max_segments_per_packed_row=1,
+      ),
+      # On a mesh the packed chunks stay in numpy until `shard_input`.
+      dict(
+          testcase_name='host_batch_on_mesh',
+          max_token_len=532,
+          beta=0.0,
+          return_logprobs=True,
+          use_mesh=True,
+      ),
   )
-  def test_sequence_packing(self, max_token_len):
-    kwargs = {'eval_every_n_steps': 2}
+  def test_sequence_packing(
+      self,
+      max_token_len,
+      beta=0.04,
+      num_iterations=1,
+      return_logprobs=False,
+      max_segments_per_packed_row=None,
+      use_mesh=False,
+  ):
+    kwargs = {'eval_every_n_steps': 2, 'return_logprobs': return_logprobs}
+    if use_mesh:
+      kwargs['mesh'] = Mesh(
+          np.array(jax.devices()[:2]).reshape(2, 1), ('fsdp', 'tp')
+      )
 
     # Train without sequence packing
-    rl_engine_unpacked, model_unpacked, original_variables = setup(kwargs)
+    rl_engine_unpacked, _, original_variables = setup(kwargs)
     grpo_config_unpacked = grpo_lib.GRPOConfig(
         num_generations=2,
-        num_iterations=1,
+        num_iterations=num_iterations,
+        beta=beta,
     )
     learner_unpacked = grpo_lib.GRPOLearner(
         rl_engine=rl_engine_unpacked,
@@ -800,26 +848,42 @@ class GRPOLearnerTest(parameterized.TestCase):
     # the algorithm config use_sequence_packing is False by default
     train_ds_1 = _dummy_dataset(MySource(repeat=4), batch_size=2)
     learner_unpacked.train(train_ds_1, None)
-    params_unpacked = nnx.state(model_unpacked, nnx.Param)
+    # On a mesh the engine trains a resharded copy of the model.
+    params_unpacked = nnx.state(
+        rl_engine_unpacked.actor_trainer.model, nnx.Param
+    )
 
     # Train with sequence packing
-    kwargs_packed = {
-        'eval_every_n_steps': 2,
-        'max_seq_token_per_tpu': max_token_len,
-    }
-    rl_engine_packed, model_packed, _ = setup(kwargs_packed)
+    kwargs_packed = dict(
+        kwargs,
+        max_seq_token_per_tpu=max_token_len,
+        max_segments_per_packed_row=max_segments_per_packed_row,
+    )
+    rl_engine_packed, _, _ = setup(kwargs_packed)
     grpo_config_packed = grpo_lib.GRPOConfig(
         num_generations=2,
-        num_iterations=1,
+        num_iterations=num_iterations,
+        beta=beta,
     )
     learner_packed = grpo_lib.GRPOLearner(
         rl_engine=rl_engine_packed,
         reward_fns=reward_1,
         algo_config=grpo_config_packed,
     )
+    train_batch_types = []
+    generate_and_compute_advantage = (
+        learner_packed._generate_and_compute_advantage
+    )
+
+    def record_train_batch_type(training_input, mode=rl_engine_lib.Mode.TRAIN):
+      example = generate_and_compute_advantage(training_input, mode)
+      train_batch_types.append(type(example.completion_ids))
+      return example
+
+    learner_packed._generate_and_compute_advantage = record_train_batch_type
     train_ds_2 = _dummy_dataset(MySource(repeat=4), batch_size=2)
     learner_packed.train(train_ds_2, None)
-    params_packed = nnx.state(model_packed, nnx.Param)
+    params_packed = nnx.state(rl_engine_packed.actor_trainer.model, nnx.Param)
 
     jax.tree.map_with_path(
         tc.assert_not_equal, original_variables, params_packed
@@ -835,8 +899,196 @@ class GRPOLearnerTest(parameterized.TestCase):
         params_packed,
     )
 
-    # Verify that both learners processed the same number of examples
-    self.assertEqual(learner_unpacked._iter_steps, learner_packed._iter_steps)
+    # The test exercises the intended path: numpy train batches when beta=0.
+    self.assertNotEmpty(train_batch_types)
+    expected_type = np.ndarray if beta == 0.0 else jax.Array
+    for batch_type in train_batch_types:
+      self.assertTrue(issubclass(batch_type, expected_type), batch_type)
+
+    # Verify that both learners processed the same number of examples. A
+    # mini-batch has 4 sequences (2 prompts x 2 generations); with one sequence
+    # per packed row each is its own chunk, otherwise one chunk holds them all.
+    chunks_per_mini_batch = 4 if max_segments_per_packed_row == 1 else 1
+    self.assertEqual(
+        learner_packed._iter_steps,
+        learner_unpacked._iter_steps * chunks_per_mini_batch,
+    )
+    self.assertEqual(
+        rl_engine_packed.actor_trainer.train_steps,
+        rl_engine_unpacked.actor_trainer.train_steps,
+    )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='one_iteration',
+          num_iterations=1,
+          eval_every_n_steps=2,
+          expected_eval_steps=[0, 2, 4, 6],
+      ),
+      # Steps 3 and 9 are the second optimizer step of a mini-batch. Steps 1
+      # and 7 get eval because eval data stays set for the rest of the
+      # mini-batch, as on main.
+      dict(
+          testcase_name='two_iterations',
+          num_iterations=2,
+          eval_every_n_steps=3,
+          expected_eval_steps=[0, 1, 3, 6, 7, 9],
+      ),
+  )
+  def test_sequence_packing_chains_updates_and_keeps_eval_unpacked(
+      self, num_iterations, eval_every_n_steps, expected_eval_steps
+  ):
+    # beta=0 keeps packed train batches in numpy; eval batches are never packed
+    # and must keep their padded device arrays. One sequence per packed row
+    # gives 4 chunks per optimizer step (2 prompts x 2 generations).
+    rl_engine, _, _ = setup({
+        'eval_every_n_steps': eval_every_n_steps,
+        'max_seq_token_per_tpu': 532,
+        'max_segments_per_packed_row': 1,
+        'return_logprobs': True,
+    })
+    learner = grpo_lib.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=reward_1,
+        algo_config=grpo_lib.GRPOConfig(
+            num_generations=2, num_iterations=num_iterations, beta=0.0
+        ),
+    )
+    trainer = rl_engine.actor_trainer
+
+    steps_per_update_actor_call = []
+    update_actor = rl_engine.update_actor
+
+    def counting_update_actor(*args, **kwargs):
+      start = trainer.iter_steps
+      update_actor(*args, **kwargs)
+      steps_per_update_actor_call.append(trainer.iter_steps - start)
+
+    rl_engine.update_actor = counting_update_actor
+
+    eval_datasets = []
+    eval_steps = []
+    run_eval = trainer._run_eval
+
+    def recording_run_eval(eval_ds, eval_step_fn):
+      eval_datasets.append(eval_ds)
+      eval_steps.append(trainer.train_steps)
+      return run_eval(eval_ds, eval_step_fn)
+
+    trainer._run_eval = recording_run_eval
+
+    learner.train(
+        _dummy_dataset(MySource(repeat=4), batch_size=2),
+        _dummy_dataset(batch_size=2),
+    )
+
+    train_steps = trainer.train_steps
+    self.assertGreater(train_steps, 0)
+    # One update_actor call per optimizer step, and it trains all 4 chunks.
+    self.assertEqual(steps_per_update_actor_call, [4] * train_steps)
+    # Every eval point runs, once per step. With one call per chunk eval ran
+    # once per chunk, on unchanged weights.
+    self.assertEqual(eval_steps, expected_eval_steps)
+    # Eval data is unchanged: the first eval micro-batch, padded, on device.
+    for eval_ds in eval_datasets:
+      [eval_example] = eval_ds
+      self.assertIsInstance(eval_example.completion_ids, jax.Array)
+      self.assertEqual(eval_example.completion_ids.shape, (4, 10))
+    eval_losses = trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
+        'actor', 'loss', 'eval'
+    )
+    self.assertLen(eval_losses, len(eval_datasets))
+    self.assertTrue(np.all(np.isfinite(eval_losses)))
+
+  def test_packed_train_batch_on_host_matches_device_batch(self):
+    # With packing and beta=0, train batches are built in numpy. They must hold
+    # the same values as the device batch built for eval, and unpad into the
+    # rollout's own sequences.
+    rl_engine, _, _ = setup(
+        {'max_seq_token_per_tpu': 532, 'rollout_micro_batch_size': 2}
+    )
+    learner = grpo_lib.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=reward_1,
+        algo_config=grpo_lib.GRPOConfig(
+            num_generations=2, num_iterations=1, beta=0.0
+        ),
+    )
+    pad_id = rl_engine.rollout.pad_id()
+    tokens = [
+        np.array([5, 6, 7], dtype=np.int32),
+        np.array([8], dtype=np.int32),
+        np.arange(3, 13, dtype=np.int32),  # exactly max_tokens_to_generate
+        np.array([9, 10], dtype=np.int32),
+    ]
+    logprobs = [
+        -np.arange(1, len(t) + 1, dtype=np.float32) / 10 for t in tokens
+    ]
+    rollout_output = base_rollout.RolloutOutput(
+        text=['a', 'b', 'c', 'd'],
+        logits=None,
+        tokens=tokens,
+        left_padded_prompt_tokens=np.array(
+            [[pad_id, 3, 4], [pad_id, pad_id, 4], [5, 3, 4], [pad_id, 3, 4]],
+            dtype=np.int32,
+        ),
+        logprobs=logprobs,
+    )
+    rl_engine.generate = lambda **unused_kwargs: rollout_output
+    inputs = {
+        'prompts': ['p0', 'p1', 'p2', 'p3'],
+        'answer': ['0', '1', '2', '3'],
+    }
+
+    host = learner._generate_and_compute_advantage(
+        dict(inputs), rl_engine_lib.Mode.TRAIN
+    )
+    device = learner._generate_and_compute_advantage(
+        dict(inputs), rl_engine_lib.Mode.EVAL
+    )
+
+    for name in (
+        'prompt_ids',
+        'prompt_mask',
+        'completion_ids',
+        'completion_mask',
+        'advantages',
+        'old_per_token_logps',
+    ):
+      with self.subTest(name=name):
+        host_value = getattr(host, name)
+        device_value = getattr(device, name)
+        self.assertIsInstance(host_value, np.ndarray)
+        self.assertIsInstance(device_value, jax.Array)
+        self.assertEqual(host_value.dtype, device_value.dtype)
+        np.testing.assert_array_equal(host_value, np.asarray(device_value))
+    self.assertIsNone(host.ref_per_token_logps)
+    self.assertIsNone(device.ref_per_token_logps)
+
+    host_items = rl_utils.train_example_to_pack_items(host)
+    device_items = rl_utils.train_example_to_pack_items(device)
+    self.assertLen(host_items, len(tokens))
+    self.assertLen(device_items, len(tokens))
+    for host_item, device_item, completion, logps in zip(
+        host_items, device_items, tokens, logprobs
+    ):
+      np.testing.assert_array_equal(host_item.completion_ids, completion)
+      np.testing.assert_array_equal(
+          host_item.per_token['old_per_token_logps'], logps
+      )
+      np.testing.assert_array_equal(
+          host_item.prompt_ids, device_item.prompt_ids
+      )
+      np.testing.assert_array_equal(
+          host_item.completion_ids, device_item.completion_ids
+      )
+      np.testing.assert_array_equal(
+          host_item.completion_mask, device_item.completion_mask
+      )
+      np.testing.assert_array_equal(
+          host_item.advantages, device_item.advantages
+      )
+      self.assertEqual(host_item.per_token.keys(), device_item.per_token.keys())
 
   def test_exception_from_data_preparation(self):
     class _TrainerWithException(grpo_lib.GRPOLearner):
