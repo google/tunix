@@ -904,11 +904,18 @@ class ModelTest(absltest.TestCase):
     )
     # `canon_all_disabled` does not route through the RPA backend
     # (`use_canon_attention=False`): still the stock program, bitwise.
+    stock = by_name['stock_qwen3 (model.py)']
     disabled = by_name['canon_all_disabled']
     self.assertEqual(disabled.vs_stock_max_abs_diff, 0.0)
-    self.assertEqual(disabled.decode_vs_prefill_max_diff, 0.0)
-    self.assertEqual(disabled.batch1_vs_batchn_max_diff, 0.0)
-    self.assertEqual(disabled.fwd_vs_fwdbwd_max_diff, 0.0)
+    self.assertEqual(
+        disabled.decode_vs_prefill_max_diff, stock.decode_vs_prefill_max_diff
+    )
+    self.assertEqual(
+        disabled.batch1_vs_batchn_max_diff, stock.batch1_vs_batchn_max_diff
+    )
+    self.assertEqual(
+        disabled.fwd_vs_fwdbwd_max_diff, stock.fwd_vs_fwdbwd_max_diff
+    )
     enabled = by_name['canon_all_enabled (Zero-TIM)']
     for field in (
         'decode_vs_prefill_max_diff',
