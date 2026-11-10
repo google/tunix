@@ -2,11 +2,11 @@
 
 # Design Overview
 
-This document provides an overview of Tunix (Tune-in-JAX), a JAX-native
-framework for post-training large language models. It covers the overall layered
-architecture and the training loop architectures for Supervised Fine-Tuning
-(SFT), Reinforcement Learning (RL), and Agentic RL. Understanding this design
-should help you better utilize and extend Tunix for model tuning.
+This document provides an overview of Tunix (Tune-in-Accelerators), a unified
+framework for post-training large language models on accelerators. It covers the
+overall layered architecture and the training loop architectures for Supervised
+Fine-Tuning (SFT), Reinforcement Learning (RL), and Agentic RL. Understanding
+this design should help you better utilize and extend Tunix for model tuning.
 
 ## High Level Architecture
 

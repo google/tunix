@@ -6,9 +6,9 @@
 
 </div>
 
-**Tunix (Tune-in-Accelerators)** is a library designed to streamline the
-post-training of Large Language Models. It provides efficient and scalable
-support for:
+**Tunix (Tune-in-Accelerators)** is a unified library designed to streamline the
+post-training of Large Language Models on accelerators. It provides efficient
+and scalable support for:
 
 - **SOTA Training performance on TPUs**
 - **Supervised Fine-Tuning**
