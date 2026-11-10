@@ -44,12 +44,14 @@ class _TestAsyncWriter(async_writer.AsyncWriter[_TestWriteTask]):
           async_writer.DEFAULT_BATCH_CONFIG
       ),
       copy_step: bool = False,
+      exclude_step_arrays: Sequence[str] = (),
   ):
     super().__init__(
         thread_name=thread_name,
         max_queue_size=max_queue_size,
         batching=batching,
         copy_step=copy_step,
+        exclude_step_arrays=exclude_step_arrays,
     )
     self.processed_tasks: list[_TestWriteTask] = []
     self.processed_batches: list[tuple[_TestWriteTask, ...]] = []
@@ -963,6 +965,74 @@ class AsyncWriterTest(trajectory_testing.TrajectoryTestCase):
         [t.trajectory_id for t in writer.processed_tasks],
         [trajectory_testing.TRAJECTORY_ID_1] * 3,
     )
+
+
+class StepArrayFilteringTest(trajectory_testing.TrajectoryTestCase):
+  """Tests configurable pre-queue dropping of step array fields."""
+
+  def _create_writer(self, **kwargs) -> _TestAsyncWriter:
+    writer = _TestAsyncWriter(**kwargs)
+    self.addCleanup(writer.close)
+    return writer
+
+  def test_writer_rejects_string_exclusions(self) -> None:
+    with self.assertRaisesRegex(TypeError, r"not a string"):
+      _TestAsyncWriter(exclude_step_arrays="logprobs")
+
+  def test_writer_exposes_exclusions_without_checking_names(self) -> None:
+    # Field names are schema-specific and validated by the owning store.
+    writer = self._create_writer(exclude_step_arrays=["logprobs", "unknown"])
+
+    self.assertEqual(
+        writer.exclude_step_arrays, frozenset({"logprobs", "unknown"})
+    )
+
+  def test_enqueue_drops_excluded_arrays_without_mutating_caller_step(
+      self,
+  ) -> None:
+    writer = self._create_writer(
+        exclude_step_arrays=["assistant_tokens", "logprobs"]
+    )
+    step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(deep=True)
+
+    writer._enqueue(
+        _TestWriteTask(metadata=trajectory_testing.TUNIX_METADATA_1, step=step)
+    )
+    writer.flush()
+
+    self.assertLen(writer.processed_tasks, 1)
+    processed_task = writer.processed_tasks[0]
+    self.assertEqual(
+        processed_task.step,
+        trajectory_testing.TUNIX_AGENT_STEP_1.without_excluded_fields(
+            frozenset({"assistant_tokens", "logprobs"})
+        ).to_atif_step(),
+    )
+    self.assertStepEqual(step, trajectory_testing.TUNIX_AGENT_STEP_1)
+
+  def test_enqueue_filters_before_deep_copy(self) -> None:
+    writer = self._create_writer(
+        copy_step=True, exclude_step_arrays=["assistant_tokens", "logprobs"]
+    )
+    task = _TestWriteTask(
+        metadata=trajectory_testing.TUNIX_METADATA_1,
+        step=trajectory_testing.TUNIX_AGENT_STEP_1,
+    )
+
+    with mock.patch.object(
+        trajectory_lib, "deep_copy", wraps=trajectory_lib.deep_copy
+    ) as mock_deep_copy:
+      writer._enqueue(task)
+
+    (copied_step,) = [
+        call.args[0]
+        for call in mock_deep_copy.call_args_list
+        if isinstance(call.args[0], trajectory_lib.Step)
+    ]
+    self.assertIsNone(copied_step.assistant_tokens)
+    self.assertIsNone(copied_step.logprobs)
+    self.assertIsNotNone(copied_step.assistant_masks)
+    self.assertIsNotNone(trajectory_testing.TUNIX_AGENT_STEP_1.assistant_tokens)
 
 
 class AsyncWriterShutdownHookTest(parameterized.TestCase):

@@ -1,7 +1,7 @@
 """SQL-backed implementation for Trajectory Store."""
 
 import collections
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 import datetime
 import threading
 from typing import Any, ClassVar, Final, TypeVar
@@ -147,6 +147,7 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
       max_cached_trajectories: int = _MAX_CACHED_TRAJECTORIES,
       batching: async_writer.BatchConfig | None = None,
       copy_step: bool = False,
+      exclude_step_arrays: Collection[str] = (),
   ):
     """Initializes _AsyncSqlWriter without starting the background worker.
 
@@ -159,12 +160,20 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
         multi-row SQL transactions.
       copy_step: If True, deep copies step objects before enqueuing. Defaults to
         False (zero-copy step handover) to avoid synchronous GIL contention.
+      exclude_step_arrays: Step array fields dropped before queueing step
+        writes (see `AsyncWriter`).
 
     Raises:
       ValueError: If the engine uses an unsupported database dialect, or if
         max_cached_trajectories is negative.
+      TypeError: If exclude_step_arrays is a single string or contains
+        non-string entries.
     """
-    super().__init__(batching=batching, copy_step=copy_step)
+    super().__init__(
+        batching=batching,
+        copy_step=copy_step,
+        exclude_step_arrays=exclude_step_arrays,
+    )
     if max_cached_trajectories < 0:
       raise ValueError("max_cached_trajectories must be non-negative.")
     # Synchronous SQLAlchemy engine providing database connectivity and dialect.
@@ -704,6 +713,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       auto_init: bool = True,
       batching: async_writer.BatchConfig | None = None,
       copy_step: bool = False,
+      exclude_step_arrays: Collection[str] = (),
   ) -> None:
     """Initializes SqlTrajectoryStore.
 
@@ -723,10 +733,18 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       copy_step: If True, deep copies step objects before enqueuing to database.
         Defaults to False (zero-copy step handover) to avoid synchronous GIL
         contention on rollout workers.
+      exclude_step_arrays: Heavy step array fields to drop before steps are
+        queued and written, e.g. `("assistant_tokens", "logprobs")` for
+        observability-only runs. Names must be declared in
+        `EXCLUDABLE_ARRAY_FIELDS` by the step classes of the bound metadata
+        type (checked on the first write, or at startup via a schema-bound
+        `from_config`). Defaults to keeping all arrays.
 
     Raises:
       ValueError: If `run_id` or `db_url` is empty, None, or whitespace, or if
         `db_url` uses an unsupported database dialect.
+      TypeError: If `exclude_step_arrays` is a single string or contains
+        non-string entries.
     """
     super().__init__()
     self._run_id = _validate_non_empty_str(run_id, "run_id").strip()
@@ -737,7 +755,10 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     self._engine = self._engine_handle.engine
     try:
       self._writer = _AsyncSqlWriter(
-          engine=self._engine, batching=batching, copy_step=copy_step
+          engine=self._engine,
+          batching=batching,
+          copy_step=copy_step,
+          exclude_step_arrays=exclude_step_arrays,
       )
     except Exception:
       self._engine_handle.release()
@@ -765,7 +786,8 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
 
     Args:
       config: Requires "db_url" and "run_id", with optional boolean "copy_step"
-        (defaults to False).
+        (defaults to False). Accepts an optional "exclude_step_arrays" list of
+        step array fields to drop before writing.
 
     Returns:
       A new SqlTrajectoryStore.
@@ -777,6 +799,11 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
         run_id=config.get("run_id", ""),
         db_url=config.get("db_url", ""),
         copy_step=bool(config.get("copy_step", False)),
+        exclude_step_arrays=(
+            ()
+            if (exclude := config.get("exclude_step_arrays")) is None
+            else exclude
+        ),
     )
 
   def to_config(self) -> dict[str, Any]:
@@ -788,11 +815,19 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     `copy_step` are omitted so `to_config()` strictly represents shared storage
     identity across processes.
     """
-    return {
+    config: dict[str, Any] = {
         "backend": self.BACKEND,
         "db_url": self._db_url,
         "run_id": self._run_id,
     }
+    if self._writer.exclude_step_arrays:
+      config["exclude_step_arrays"] = sorted(self._writer.exclude_step_arrays)
+    return config
+
+  @property
+  def exclude_step_arrays(self) -> frozenset[str]:
+    """Returns the step array fields dropped before writing steps."""
+    return self._writer.exclude_step_arrays
 
   @property
   def copy_step(self) -> bool:
@@ -885,7 +920,9 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     Raises:
       TypeError: If metadata is not a TrajectoryMetadata instance or its type
         conflicts with the store's bound metadata type.
-      ValueError: If metadata.trajectory_id is empty, None, or whitespace.
+      ValueError: If metadata.trajectory_id is empty, None, or whitespace, or
+        if `exclude_step_arrays` names fields that the bound metadata type's
+        step classes cannot exclude.
       RuntimeError: If the store has already been closed.
     """
     self._validate_and_bind_metadata(metadata)
@@ -912,7 +949,9 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     Raises:
       TypeError: If metadata is not a TrajectoryMetadata instance or its type
         conflicts with the store's bound metadata type.
-      ValueError: If metadata.trajectory_id is empty, None, or whitespace.
+      ValueError: If metadata.trajectory_id is empty, None, or whitespace, or
+        if `exclude_step_arrays` names fields that the bound metadata type's
+        step classes cannot exclude.
       RuntimeError: If the store has already been closed.
     """
     self._validate_and_bind_metadata(metadata)

@@ -1,7 +1,7 @@
 """File-based implementation for Trajectory Store."""
 
 import collections
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from concurrent import futures
 import contextlib
 import dataclasses
@@ -318,9 +318,21 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
       self,
       batching: async_writer.BatchConfig | None = None,
       copy_step: bool = False,
+      exclude_step_arrays: Collection[str] = (),
   ):
-    """Initializes _AsyncFileWriter without starting the background worker."""
-    super().__init__(batching=batching, copy_step=copy_step)
+    """Initializes _AsyncFileWriter without starting the background worker.
+
+    Args:
+      batching: Optional BatchConfig governing how queued writes are coalesced.
+      copy_step: If True, deep copies step objects before enqueuing.
+      exclude_step_arrays: Step array fields dropped before queueing step
+        writes (see `AsyncWriter`).
+    """
+    super().__init__(
+        batching=batching,
+        copy_step=copy_step,
+        exclude_step_arrays=exclude_step_arrays,
+    )
     # Worker-owned caches of persisted state used to skip redundant disk writes
     # and route step revisions to single-step JSON files.
     self._max_step_id_by_trajectory_id: dict[str, int] = {}
@@ -628,6 +640,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       run_id: str | None = None,
       batching: async_writer.BatchConfig | None = None,
       copy_step: bool = False,
+      exclude_step_arrays: Collection[str] = (),
   ) -> None:
     """Initializes FileTrajectoryStore.
 
@@ -643,10 +656,18 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       copy_step: If True, deep copies step objects before writing. Defaults to
         False (zero-copy step handover) to avoid synchronous GIL contention on
         rollout workers.
+      exclude_step_arrays: Heavy step array fields to drop before steps are
+        queued and written, e.g. `("assistant_tokens", "logprobs")` for
+        observability-only runs. Names must be declared in
+        `EXCLUDABLE_ARRAY_FIELDS` by the step classes of the bound metadata
+        type (checked on the first write, or at startup via a schema-bound
+        `from_config`). Defaults to keeping all arrays.
 
     Raises:
       ValueError: If root_dir is empty, or if run_id is given but cannot be
         used as a directory name.
+      TypeError: If exclude_step_arrays is a single string or contains
+        non-string entries.
     """
     super().__init__()
     if not root_dir or not str(root_dir).strip():
@@ -663,7 +684,11 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       )
     self._raw_root_dir = epath.Path(root_dir)
     self._run_id = run_id
-    self._writer = _AsyncFileWriter(batching=batching, copy_step=copy_step)
+    self._writer = _AsyncFileWriter(
+        batching=batching,
+        copy_step=copy_step,
+        exclude_step_arrays=exclude_step_arrays,
+    )
 
   @property
   def batching(self) -> async_writer.BatchConfig:
@@ -678,7 +703,8 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     """Builds a file-backed store from `config`.
 
     Requires "root_dir" and "run_id", with optional boolean "copy_step"
-    (defaults to False).
+    (defaults to False). Accepts an optional "exclude_step_arrays" list of
+    step array fields to drop before writing.
 
     Raises:
       ValueError: If "root_dir" or "run_id" is missing or empty.
@@ -707,6 +733,11 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         root_dir=config["root_dir"],
         run_id=config["run_id"],
         copy_step=bool(config.get("copy_step", False)),
+        exclude_step_arrays=(
+            ()
+            if (exclude := config.get("exclude_step_arrays")) is None
+            else exclude
+        ),
     )
 
   def to_config(self) -> dict[str, Any]:
@@ -723,11 +754,19 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
           "FileTrajectoryStore without a run_id cannot export a valid"
           " distributed config."
       )
-    return {
+    config: dict[str, Any] = {
         "backend": self.BACKEND,
         "root_dir": str(self._raw_root_dir),
         "run_id": self._run_id,
     }
+    if self._writer.exclude_step_arrays:
+      config["exclude_step_arrays"] = sorted(self._writer.exclude_step_arrays)
+    return config
+
+  @property
+  def exclude_step_arrays(self) -> frozenset[str]:
+    """Returns the step array fields dropped before writing steps."""
+    return self._writer.exclude_step_arrays
 
   @property
   def copy_step(self) -> bool:
@@ -1084,7 +1123,9 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       TypeError: If metadata is not a TrajectoryMetadata instance or its type
         conflicts with the store's bound metadata type.
       ValueError: If metadata.trajectory_id is empty, None, or contains
-        characters that cannot be encoded in a trajectory directory name.
+        characters that cannot be encoded in a trajectory directory name, or
+        if `exclude_step_arrays` names fields that the bound metadata type's
+        step classes cannot exclude.
     """
     self.update_metadata(metadata, step=step)
 
@@ -1112,7 +1153,9 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       TypeError: If metadata is not a TrajectoryMetadata instance or its type
         conflicts with the store's bound metadata type.
       ValueError: If metadata.trajectory_id is empty, None, or contains
-        characters that cannot be encoded in a trajectory directory name.
+        characters that cannot be encoded in a trajectory directory name, or
+        if `exclude_step_arrays` names fields that the bound metadata type's
+        step classes cannot exclude.
     """
     self._validate_and_bind_metadata(metadata)
     traj_id = _validate_trajectory_id(metadata.trajectory_id)

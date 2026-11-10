@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Collection, Mapping, MutableMapping, Sequence, Set
 import copy
 import dataclasses
 import datetime
@@ -964,6 +964,11 @@ class Step(pydantic.BaseModel):
   # scan. Populated in `__pydantic_init_subclass__` from `model_fields`.
   SCALAR_LIST_FIELDS: ClassVar[frozenset[str]] = frozenset()
 
+  # Heavy array fields that stores may be configured to drop before writing
+  # (via `exclude_step_arrays`), e.g. for observability-only runs. Subclasses
+  # declare their own fields; base ATIF steps define none.
+  EXCLUDABLE_ARRAY_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
   @classmethod
   def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
     """Validates `EXTENSIONS_KEY` and records scalar-list fields."""
@@ -1048,6 +1053,30 @@ class Step(pydantic.BaseModel):
         )
     return self
 
+  def without_excluded_fields(self, exclude: Set[str]) -> Self:
+    """Returns this step with the `exclude` fields set to None.
+
+    Uses a shallow `model_copy`, so this step is never mutated and the dropped
+    values are never copied. Names this step's class does not define, or whose
+    values are already None, are ignored. Callers are expected to pass names
+    validated against `EXCLUDABLE_ARRAY_FIELDS`.
+
+    Args:
+      exclude: Names of fields to drop.
+
+    Returns:
+      A shallow copy with the fields dropped, or `self` if nothing was dropped.
+    """
+    if not exclude:
+      return self
+    fields = type(self).model_fields
+    update = {
+        field: None
+        for field in exclude
+        if field in fields and getattr(self, field) is not None
+    }
+    return self.model_copy(update=update) if update else self
+
   # TODO(tunix-dev): Add automatic Step subclass registration and resolution
   # (mirroring TrajectoryMetadata._SUBCLASS_FIELDS and resolve_subclass) so
   # persistent stores rehydrate custom Step subclasses automatically.
@@ -1058,6 +1087,53 @@ class Step(pydantic.BaseModel):
       return self
     target_values_by_field["step_id"] = self.step_id + step_id_offset
     return Step.model_validate(target_values_by_field)
+
+
+def validate_step_array_exclusions(
+    fields: Collection[str],
+    allowed_fields: Set[str] | None = None,
+) -> frozenset[str]:
+  """Validates and normalizes a collection of step array fields to exclude.
+
+  The check is schema-agnostic: callers that know the step schema pass its
+  excludable fields (e.g. `TrajectoryMetadata.excludable_step_array_fields()`)
+  as `allowed_fields`.
+
+  Args:
+    fields: Names of step array fields to drop before queueing writes.
+    allowed_fields: If given, every name in `fields` must be in this set.
+
+  Returns:
+    The validated field names as a frozenset.
+
+  Raises:
+    TypeError: If `fields` is not a collection, is a string, bytes, or mapping
+      (e.g. `{"logprobs": False}`), or contains non-string entries.
+    ValueError: If `allowed_fields` is given and `fields` contains names
+      outside it.
+  """
+  if isinstance(fields, (str, bytes, Mapping)) or not isinstance(
+      fields, Collection
+  ):
+    raise TypeError(
+        "exclude_step_arrays must be a collection of field names (e.g. a"
+        f" list), not a string, bytes, or mapping; got {fields!r}."
+    )
+  excluded = frozenset(fields)
+  non_str = [field for field in excluded if not isinstance(field, str)]
+  if non_str:
+    raise TypeError(
+        "exclude_step_arrays must contain only field name strings; got"
+        f" {non_str!r}."
+    )
+  if allowed_fields is not None:
+    unknown = excluded - allowed_fields
+    if unknown:
+      raise ValueError(
+          f"Unsupported exclude_step_arrays fields {sorted(unknown)}; supported"
+          f" fields are {sorted(allowed_fields)}."
+      )
+  return excluded
 
 
 class Agent(pydantic.BaseModel):
@@ -1106,6 +1182,10 @@ class TrajectoryMetadata(pydantic.BaseModel):
   # `deep_copy` copies them with one `list.copy()` instead of a per-element
   # scan. Populated in `__pydantic_init_subclass__` from `model_fields`.
   SCALAR_LIST_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
+  # Step classes written to trajectories with this metadata type. Used to
+  # validate a store's `exclude_step_arrays` against the bound step schema.
+  STEP_CLASSES: ClassVar[tuple[type[Step], ...]] = (Step,)
 
   # Maps each registered TrajectoryMetadata subclass to the set of extension
   # field names it defines beyond the base ATIF TrajectoryMetadata schema.
@@ -1188,6 +1268,13 @@ class TrajectoryMetadata(pydantic.BaseModel):
       default=None,
       description="Custom root-level metadata.",
   )
+
+  @classmethod
+  def excludable_step_array_fields(cls) -> frozenset[str]:
+    """Returns the step array fields a store bound to `cls` may exclude."""
+    return frozenset().union(
+        *(step_cls.EXCLUDABLE_ARRAY_FIELDS for step_cls in cls.STEP_CLASSES)
+    )
 
   def to_atif_metadata(self) -> TrajectoryMetadata:
     """Converts this metadata to base ATIF TrajectoryMetadata, storing subclass fields in extra."""
@@ -1657,6 +1744,20 @@ class TunixAgentStep(Step):
 
   EXTENSIONS_KEY: ClassVar[str] = TUNIX_EXTENSIONS_KEY
 
+  EXCLUDABLE_ARRAY_FIELDS: ClassVar[frozenset[str]] = frozenset({
+      "assistant_tokens",
+      "assistant_masks",
+      "logprobs",
+      "prefill_routed_experts",
+  })
+
+  # Scalars that must be all set or all None with `prefill_routed_experts` (see
+  # `validate_agent_source`), so they are dropped along with it.
+  _PREFILL_COMPANION_FIELDS: ClassVar[frozenset[str]] = frozenset({
+      "prefill_start",
+      "prefill_num_context",
+  })
+
   assistant_tokens: IntArray = pydantic.Field(
       default=None,
       description="Token IDs generated by the assistant for this step.",
@@ -1746,6 +1847,19 @@ class TunixAgentStep(Step):
         )
     return self
 
+  def without_excluded_fields(self, exclude: Set[str]) -> Self:
+    """Drops `exclude` fields, clearing prefill scalars with routed experts.
+
+    Args:
+      exclude: Names of fields to drop.
+
+    Returns:
+      A shallow copy with the fields dropped, or `self` if nothing was dropped.
+    """
+    if "prefill_routed_experts" in exclude:
+      exclude = exclude | self._PREFILL_COMPANION_FIELDS
+    return super().without_excluded_fields(exclude)
+
   @pydantic.model_validator(mode="after")
   def validate_assistant_tokens_match_logprobs(self) -> TunixAgentStep:
     """Validate that `assistant_tokens` and `logprobs` have equal lengths."""
@@ -1781,6 +1895,15 @@ class TunixEnvStep(Step):
   )
 
   EXTENSIONS_KEY: ClassVar[str] = TUNIX_EXTENSIONS_KEY
+
+  # Note: `converter.to_tunix_trajectory` uses the previous step's
+  # `env_tokens` length to split `prefill_num_context` when reconstructing
+  # multi-turn MoE routing, so keep `env_tokens` when `prefill_routed_experts`
+  # is retained and that reconstruction is needed.
+  EXCLUDABLE_ARRAY_FIELDS: ClassVar[frozenset[str]] = frozenset({
+      "env_tokens",
+      "env_masks",
+  })
 
   reward: float | None = pydantic.Field(
       default=None,
@@ -1846,6 +1969,11 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
   """Tunix-specific trajectory metadata extending base ATIF TrajectoryMetadata."""
 
   EXTENSIONS_KEY: ClassVar[str] = TUNIX_EXTENSIONS_KEY
+
+  STEP_CLASSES: ClassVar[tuple[type[Step], ...]] = (
+      TunixAgentStep,
+      TunixEnvStep,
+  )
 
   prompt_id: str | None = pydantic.Field(
       default=None,

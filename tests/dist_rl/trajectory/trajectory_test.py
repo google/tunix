@@ -108,6 +108,126 @@ class StepTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(restored_step, step)
 
 
+class StepArrayExclusionTest(trajectory_testing.TrajectoryTestCase):
+  """Tests `Step.without_excluded_fields` and excludable field declarations."""
+
+  @parameterized.named_parameters(
+      ("step", trajectory.Step),
+      ("tunix_agent_step", trajectory.TunixAgentStep),
+      ("tunix_env_step", trajectory.TunixEnvStep),
+  )
+  def test_excludable_array_fields_are_model_fields(self, step_cls):
+    self.assertContainsSubset(
+        step_cls.EXCLUDABLE_ARRAY_FIELDS, step_cls.model_fields
+    )
+
+  def test_excludable_step_array_fields_follow_step_classes(self):
+    self.assertEqual(
+        trajectory.TrajectoryMetadata.excludable_step_array_fields(),
+        frozenset(),
+    )
+    self.assertEqual(
+        trajectory.TunixTrajectoryMetadata.excludable_step_array_fields(),
+        frozenset({
+            "assistant_tokens",
+            "assistant_masks",
+            "logprobs",
+            "prefill_routed_experts",
+            "env_tokens",
+            "env_masks",
+        }),
+    )
+
+  def test_validate_without_allowed_fields_only_normalizes(self):
+    self.assertEqual(
+        trajectory.validate_step_array_exclusions(["anything", "logprobs"]),
+        frozenset({"anything", "logprobs"}),
+    )
+
+  def test_validate_accepts_subset_of_allowed_fields(self):
+    self.assertEqual(
+        trajectory.validate_step_array_exclusions(
+            ("a", "b"), allowed_fields=frozenset({"a", "b", "c"})
+        ),
+        frozenset({"a", "b"}),
+    )
+
+  def test_validate_rejects_fields_outside_allowed_fields(self):
+    with self.assertRaisesRegex(ValueError, r"Unsupported.*'message'"):
+      trajectory.validate_step_array_exclusions(
+          ["a", "message"], allowed_fields=frozenset({"a"})
+      )
+
+  @parameterized.named_parameters(
+      ("string", "logprobs"),
+      ("empty_string", ""),
+      ("bytes", b"logprobs"),
+      ("mapping", {"logprobs": False}),
+      ("non_collection", 1),
+      ("iterator", iter(["logprobs"])),
+  )
+  def test_validate_rejects_non_collection_containers(self, fields):
+    with self.assertRaisesRegex(TypeError, r"collection of field names"):
+      trajectory.validate_step_array_exclusions(fields)
+
+  def test_validate_rejects_non_string_entries(self):
+    with self.assertRaisesRegex(TypeError, r"only field name strings"):
+      trajectory.validate_step_array_exclusions(["logprobs", 1])
+
+  def test_no_exclusions_returns_same_step(self):
+    step = trajectory_testing.TUNIX_AGENT_STEP_1
+
+    self.assertIs(step.without_excluded_fields(frozenset()), step)
+
+  def test_drops_excluded_fields_without_mutating_source(self):
+    step = trajectory_testing.TUNIX_AGENT_STEP_1
+
+    filtered = step.without_excluded_fields(
+        frozenset({"assistant_tokens", "logprobs"})
+    )
+
+    self.assertIsInstance(filtered, trajectory.TunixAgentStep)
+    self.assertIsNone(filtered.assistant_tokens)
+    self.assertIsNone(filtered.logprobs)
+    # Non-excluded arrays and other fields are kept by reference (shallow).
+    self.assertIs(filtered.assistant_masks, step.assistant_masks)
+    self.assertIs(filtered.metrics, step.metrics)
+    # The source step is unchanged.
+    self.assertIsNotNone(step.assistant_tokens)
+    self.assertIsNotNone(step.logprobs)
+
+  def test_dropping_prefill_routed_experts_clears_companions(self):
+    step = trajectory_testing.TUNIX_AGENT_STEP_1
+    self.assertIsNotNone(step.prefill_routed_experts)
+
+    filtered = step.without_excluded_fields(
+        frozenset({"prefill_routed_experts"})
+    )
+
+    self.assertIsNone(filtered.prefill_routed_experts)
+    self.assertIsNone(filtered.prefill_start)
+    self.assertIsNone(filtered.prefill_num_context)
+    self.assertIsNotNone(step.prefill_start)
+    # The filtered step still satisfies `validate_agent_source`.
+    rehydrated = trajectory.TunixAgentStep.from_atif_step(
+        filtered.to_atif_step()
+    )
+    self.assertIsNone(rehydrated.prefill_routed_experts)
+
+  def test_ignores_fields_not_defined_on_step(self):
+    env_step = trajectory_testing.TUNIX_ENV_STEP_0
+
+    self.assertIs(
+        env_step.without_excluded_fields(frozenset({"assistant_tokens"})),
+        env_step,
+    )
+    filtered = env_step.without_excluded_fields(
+        frozenset({"env_tokens", "env_masks"})
+    )
+    self.assertIsNone(filtered.env_tokens)
+    self.assertIsNone(filtered.env_masks)
+
+
 class MetadataDictSerializationTest(parameterized.TestCase):
 
   @parameterized.named_parameters(

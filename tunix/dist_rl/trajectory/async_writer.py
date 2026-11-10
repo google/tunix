@@ -2,7 +2,7 @@
 
 import abc
 import atexit
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 import dataclasses
 import queue
 import threading
@@ -354,6 +354,7 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
       max_queue_size: int = DEFAULT_MAX_QUEUE_SIZE,
       batching: BatchConfig | None = DEFAULT_BATCH_CONFIG,
       copy_step: bool = False,
+      exclude_step_arrays: Collection[str] = (),
   ):
     """Initializes AsyncWriter without starting the background worker.
 
@@ -368,14 +369,24 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
       copy_step: If True, deep copies step objects before enqueuing to prevent
         caller mutations from leaking. Defaults to False (zero-copy step
         handover) to avoid synchronous GIL contention on rollout workers.
+      exclude_step_arrays: Names of step array fields that `_enqueue` drops
+        (via `Step.without_excluded_fields`) before queueing a step write.
+        Only the container type is checked here; field names are validated
+        against the step schema by the owning store. Defaults to keeping all
+        arrays.
 
     Raises:
       ValueError: If `max_queue_size` is not positive.
+      TypeError: If `exclude_step_arrays` is a single string or contains
+        non-string entries.
     """
     if max_queue_size <= 0:
       raise ValueError(
           f"max_queue_size must be positive, got {max_queue_size}."
       )
+    self._exclude_step_arrays: frozenset[str] = (
+        trajectory_lib.validate_step_array_exclusions(exclude_step_arrays)
+    )
     self._thread_name = thread_name or f"{type(self).__name__}Worker"
     self._max_queue_size = max_queue_size
     self._copy_step = copy_step
@@ -433,6 +444,11 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
     return self._batching
 
   @property
+  def exclude_step_arrays(self) -> frozenset[str]:
+    """Returns the step array fields dropped before queueing step writes."""
+    return self._exclude_step_arrays
+
+  @property
   def batch_wait_s(self) -> float:
     """Returns the current adaptive batch wait duration in seconds."""
     return self._batch_wait_s
@@ -462,6 +478,14 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
       RuntimeError: If the writer has already been closed.
     """
     trajectory_id = task.trajectory_id
+    # Drop excluded arrays via a shallow copy (the caller's step is untouched)
+    # before any deep copy, so excluded arrays are never copied or queued.
+    if self._exclude_step_arrays and task.step is not None:
+      object.__setattr__(
+          task,
+          "step",
+          task.step.without_excluded_fields(self._exclude_step_arrays),
+      )
     if self._copy_step and task.step is not None:
       object.__setattr__(task, "step", trajectory_lib.deep_copy(task.step))
     with self._lock:
