@@ -33,7 +33,7 @@ jobs:
   run_prod:
     runs-on: [linux-x86-ct6e-180-8tpu]
     container:
-      image: vllm/vllm-tpu:nightly-20260911-4b80060-51da0ca # zizmor: ignore[unpinned-images]
+      image: vllm/vllm-tpu:nightly-20261110-02e570d-52e8596 # zizmor: ignore[unpinned-images]
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v6e-8

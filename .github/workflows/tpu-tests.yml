@@ -240,7 +240,7 @@ jobs:
     # provides >3x headroom while catching hung processes.
     timeout-minutes: 60
     container:
-      image: vllm/vllm-tpu:nightly-20260911-4b80060-51da0ca # zizmor: ignore[unpinned-images]
+      image: vllm/vllm-tpu:nightly-20261110-02e570d-52e8596 # zizmor: ignore[unpinned-images]
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v6e-8
@@ -289,9 +289,17 @@ jobs:
           echo "Current directory:"
           pwd
 
-          # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
+          # Preserve the container's co-versioned JAX/vLLM/Tokamax stack so resolving Tunix
+          # doesn't downgrade preinstalled wheels (including container-only .dev builds).
+          # TODO(b/584829765): Deduplicate container-overrides setup with cpu-tests.yml.
+          uv pip freeze --python "$(which python3)" \
+            | grep -E '^(jax|jaxlib|libtpu|tokamax|flax|safetensors|transformers|huggingface-hub|torch|torchvision|torchax|numba)==' \
+            > /tmp/container-overrides.txt || [ "$?" -eq 1 ]
+
+          # Install Tunix with test dependencies without overwriting the vLLM dependencies.
           uv pip install --python "$(which python3)" "scikit-build-core>=0.10" "nanobind>=2.5.0" cmake ninja
-          uv pip install --python "$(which python3)" --no-build-isolation -e ".[tpu,test]"
+          # `--override` forces uv to keep the frozen container versions even if package bounds differ.
+          uv pip install --python "$(which python3)" --no-build-isolation --override /tmp/container-overrides.txt -e ".[test]"
           uv pip install --python "$(which python3)" --no-deps --no-build-isolation -r requirements/special_requirements.txt
           # tpu-inference/Numba needs NumPy 2.3 or less.
           uv pip install --python "$(which python3)" --force-reinstall numpy==2.3.5
@@ -352,7 +360,8 @@ jobs:
 
       - name: Install MaxText dependencies
         run: |
-          uv pip install --python "$(which python3)" -r requirements/maxtext_requirements.txt
+          # `--override` forces uv to keep the container's frozen JAX/Tokamax/Flax versions over transitive deps.
+          uv pip install --python "$(which python3)" --override /tmp/container-overrides.txt -r requirements/maxtext_requirements.txt
           uv pip install --python "$(which python3)" "protobuf>=7.35.1"
 
       - name: Run GSM8K Distributed RL Smoke Test (MaxText Backend + Raiden Sync)

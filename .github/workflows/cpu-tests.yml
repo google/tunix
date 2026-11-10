@@ -180,7 +180,7 @@ jobs:
   run_vllm:
     runs-on: ubuntu-24.04
     container:
-      image: vllm/vllm-tpu:nightly-20260911-4b80060-51da0ca # zizmor: ignore[unpinned-images]
+      image: vllm/vllm-tpu:nightly-20261110-02e570d-52e8596 # zizmor: ignore[unpinned-images]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -193,11 +193,21 @@ jobs:
 
       - name: Install the tunix wheel
         run: |
-          python3 -m pip install --upgrade pip setuptools wheel
-          python3 -m pip install --find-links=. "google-tunix[prod,test,experimental]"
+          rm -f /etc/pip.conf /root/.config/pip/pip.conf /opt/venv/pip.conf ~/.pip/pip.conf || true
+          # Preserve the container's co-versioned JAX/vLLM/Tokamax stack (including container-only .dev builds)
+          # instead of plain `pip install`, which downgrades preinstalled wheels when resolving Tunix deps.
+          # TODO(b/584829765): Deduplicate container-overrides setup into a shared action/script and
+          # revisit `--override` if vllm/vllm-tpu stops shipping unpublished .dev wheels.
+          python3 -m pip install -q uv
+          uv pip freeze --python "$(which python3)" \
+            | grep -E '^(jax|jaxlib|libtpu|tokamax|flax|safetensors|transformers|huggingface-hub|torch|torchvision|torchax|numba)==' \
+            > /tmp/container-overrides.txt || [ "$?" -eq 1 ]
+          # `--override` forces uv to keep the frozen container versions even if package bounds differ.
+          uv pip install --system --break-system-packages --find-links=. --override /tmp/container-overrides.txt "google-tunix[test,experimental]"
+          # Copy compiled nanobind .so extensions from the wheel into `./tunix` so pytest finds them via source-tree imports.
           python3 -c "import pathlib, shutil, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.so')) for ext in ('dist_rl/worker/_compression_ext', 'rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'; [shutil.copy2(p, pathlib.Path('tunix') / p.relative_to(root)) for paths in exts.values() for p in paths]"
           # tpu-inference/Numba needs NumPy 2.3 or less.
-          python3 -m pip install numpy==2.3.5 --force-reinstall
+          uv pip install --system --break-system-packages --force-reinstall numpy==2.3.5
 
       - name: Run vllm driver tests
         run: |
