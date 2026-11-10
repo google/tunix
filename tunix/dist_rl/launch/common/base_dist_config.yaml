@@ -434,8 +434,8 @@ cluster_config:
     # Container image for the trainer/rollout pods; required for target=k8s
     # (`k8s.sh` fails fast when empty). Example launchers set it.
     tunix_image: ""
-    pathways_server_image: "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest"
-    pathways_proxy_image: "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest"
+    pathways_server_image: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest"
+    pathways_proxy_image: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server:latest"
     pathways_proxy_memory_limit: "190G"
     pathways_proxy_memory: "16G"
     pathways_rm_memory: "4G"

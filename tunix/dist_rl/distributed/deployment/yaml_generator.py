@@ -288,13 +288,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
   parser.add_argument(
       "--pathways_server_image",
-      default="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest",
+      default=(
+          "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest"
+      ),
       help="Pathways server image",
   )
   parser.add_argument(
       "--pathways_proxy_server_image",
       default=(
-          "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest"
+          "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/"
+          "proxy_server:latest"
       ),
       help="Pathways proxy server image",
   )
