@@ -204,6 +204,7 @@ class SWEEnv(BaseTaskEnv):
         reward_timeout=self.reward_timeout,
         verbose=self.verbose,
     )
+    sandbox_utils.scrub_repo_git_history(self.env.runtime)
 
   def _init_local_repo_env(self) -> None:
     # Initialize standard local Docker RepoEnv
@@ -219,6 +220,7 @@ class SWEEnv(BaseTaskEnv):
         reward_timeout=self.reward_timeout,
         verbose=self.verbose,
     )
+    sandbox_utils.scrub_repo_git_history(self.env.runtime)
     if self.scaffold == "r2egym":
       self.env.add_commands(R2EGYM_COMMAND_FILES)
     elif self.scaffold == "sweagent":
@@ -232,6 +234,7 @@ class SWEEnv(BaseTaskEnv):
         self._init_local_repo_env()
     else:
       self.env.reset()
+      sandbox_utils.scrub_repo_git_history(self.env.runtime)
 
     self.final_reward_fn = self.env.compute_reward  # pyrefly: ignore[missing-attribute]
     self.total_steps = 0
