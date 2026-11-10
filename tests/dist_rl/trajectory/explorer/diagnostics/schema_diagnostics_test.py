@@ -164,6 +164,13 @@ class DefinitionTest(parameterized.TestCase):
       class Diagnostics(schema_diagnostics.SchemaDiagnostics[_EvalMetadata]):  # pylint: disable=unused-variable
         pass
 
+  def test_hidden_columns_must_be_columns(self) -> None:
+    with self.assertRaisesRegex(TypeError, r"HIDDEN_COLUMNS \['latency_ms'\]"):
+
+      class Diagnostics(schema_diagnostics.SchemaDiagnostics[_EvalMetadata]):  # pylint: disable=unused-variable
+        COLUMN_DTYPES = {"verdict": "string"}
+        HIDDEN_COLUMNS = frozenset({"verdict", "latency_ms"})
+
   def test_extract_cannot_be_overridden(self) -> None:
     with self.assertRaisesRegex(TypeError, "override compute_columns"):
 
@@ -368,6 +375,21 @@ class DefaultHooksTest(absltest.TestCase):
     self.assertEqual(list(columns), list(df.columns))
     for name, column in columns.items():
       pd.testing.assert_series_equal(column, df[name])
+
+  def test_hidden_columns_are_extracted_but_not_printed(self) -> None:
+    class Hiding(schema_diagnostics.SchemaDiagnostics[_EvalMetadata]):
+      COLUMN_DTYPES = {"verdict": "string", "latency_ms": "Float64"}
+      HIDDEN_COLUMNS = frozenset({"latency_ms"})
+
+    diagnostics = Hiding()
+    values = diagnostics.extract(_metadata(verdict="pass", latency_ms=12.5))
+    df = pd.DataFrame({"verdict": ["pass"], "latency_ms": [12.5]})
+
+    self.assertEqual(values, {"verdict": "pass", "latency_ms": 12.5})
+    self.assertEqual(
+        list(diagnostics.format_show_header(values)), ["verdict: pass"]
+    )
+    self.assertEqual(list(diagnostics.format_summary_columns(df)), ["verdict"])
 
   def test_run_summary_and_summary_totals_are_empty(self) -> None:
     self.assertEqual(self.diagnostics.summarize(pd.DataFrame()), {})
