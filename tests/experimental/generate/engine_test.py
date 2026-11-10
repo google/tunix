@@ -22,7 +22,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.common import datatypes
-from tunix.experimental.generate import configs
 from tunix.experimental.generate import engine as engine_lib
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import testing_utils
@@ -39,27 +38,6 @@ class LLMEngineTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, 'needs up to 7 pages'):
       testing_utils.make_engine(
           max_model_len=24, max_device_size_gib=6 * testing_utils.GIB_PER_PAGE
-      )
-
-  def test_mismatched_num_scheduler_steps_raises(self):
-    with self.assertRaisesRegex(ValueError, 'num_scheduler_steps'):
-      engine_lib.LLMEngine(
-          testing_utils.PagedSumTransformer(),
-          cache_config=configs.CacheConfig(
-              max_device_size_gib=64 * testing_utils.GIB_PER_PAGE,
-              page_size=testing_utils.PAGE_SIZE,
-              dtype=jnp.float32,
-          ),
-          scheduler_config=configs.SchedulerConfig(
-              max_num_batched_tokens=32,
-              max_num_seqs=4,
-              max_chunked_prefill_length=32,
-              num_scheduler_steps=2,
-          ),
-          model_runner_config=configs.ModelRunnerConfig(
-              max_top_k=4, mesh=testing_utils.mesh(), num_scheduler_steps=1
-          ),
-          max_model_len=24,
       )
 
   def test_exposes_the_model(self):

@@ -16,15 +16,17 @@
 
 from collections.abc import Mapping
 import dataclasses
+from unittest import mock
 
 from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.common import configs as common_configs
 from tunix.common import datatypes
-from tunix.experimental.generate import configs
 from tunix.experimental.generate import engine as engine_lib
 from tunix.experimental.generate import request as request_lib
+from tunix.experimental.generate import utils
 
 VOCAB_SIZE = 32
 PAGE_SIZE = 4
@@ -169,29 +171,26 @@ def make_engine(
     eos_token_ids: frozenset[int] = frozenset(),
 ) -> engine_lib.LLMEngine:
   """Returns an engine running `transformer`, a `PagedSumTransformer` if None."""
-  return engine_lib.LLMEngine(
-      transformer if transformer is not None else PagedSumTransformer(),
-      cache_config=configs.CacheConfig(
-          max_device_size_gib=max_device_size_gib,
-          page_size=PAGE_SIZE,
-          dtype=jnp.float32,
-      ),
-      scheduler_config=configs.SchedulerConfig(
-          max_num_batched_tokens=max_num_batched_tokens,
-          max_num_seqs=4,
-          max_chunked_prefill_length=chunked_prefill_length,
-          num_scheduler_steps=num_scheduler_steps,
-      ),
-      model_runner_config=configs.ModelRunnerConfig(
-          max_top_k=max_top_k,
-          mesh=mesh(),
-          return_logprobs=return_logprobs,
-          return_logits=return_logits,
-          num_scheduler_steps=num_scheduler_steps,
-      ),
-      max_model_len=max_model_len,
-      eos_token_ids=eos_token_ids,
+  rollout_config = common_configs.RolloutConfig(
+      top_k=max_top_k,
+      eos_tokens=list(eos_token_ids),
+      return_logprobs=return_logprobs,
+      return_logits=return_logits,
+      rollout_vanilla_v2_kv_cache_page_size=PAGE_SIZE,
+      rollout_vanilla_v2_max_num_seqs=4,
+      rollout_vanilla_v2_max_num_batched_tokens=max_num_batched_tokens,
+      rollout_vanilla_v2_chunked_prefill_length=chunked_prefill_length,
+      rollout_vanilla_v2_num_scheduler_steps=num_scheduler_steps,
   )
+  with mock.patch.object(
+      utils, 'resolve_max_device_size_gib', return_value=max_device_size_gib
+  ):
+    return engine_lib.LLMEngine(
+        transformer if transformer is not None else PagedSumTransformer(),
+        rollout_config=rollout_config,
+        mesh=mesh(),
+        max_model_len=max_model_len,
+    )
 
 
 def make_request(

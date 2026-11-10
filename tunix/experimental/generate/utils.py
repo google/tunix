@@ -14,14 +14,119 @@
 
 """Utilities for the v2 sampler."""
 
+from collections import defaultdict
 from collections.abc import Sequence
 import math
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 from tunix.experimental.generate import configs
 
 _GIB = 1 << 30
+
+
+def _device_hbm_limit_bytes(device: Any) -> int:
+  """Returns the total HBM bytes per JAX device from its `device_kind`."""
+  kind = device.device_kind
+  if "TPU" not in kind:
+    raise ValueError(
+        f"Device {device} does not report HBM memory_stats() and has "
+        f"unsupported device_kind={kind!r}."
+    )
+  if kind.endswith(" lite"):
+    kind = kind[: -len(" lite")] + "e"
+  if kind in ("TPU v5p", "TPU v5"):
+    return 95 * _GIB
+  if kind == "TPU v5e":
+    return 16 * _GIB
+  if kind in ("TPU v6e", "TPU v4"):
+    return 32 * _GIB
+  if kind.startswith("TPU7") or kind == "TPU v7":
+    return 96 * _GIB
+  if kind.startswith("TPU8") or kind == "TPU v8i":
+    return 144 * _GIB
+  raise ValueError(f"Unknown TPU device_kind={kind!r} on {device}.")
+
+
+def _live_arrays_hbm_usage_bytes(devices: list[Any]) -> dict[Any, int]:
+  """Computes per-device HBM bytes in use from `jax.live_arrays()` (Pathways)."""
+  used: dict[Any, int] = defaultdict(int)
+  seen_buffers: set[int] = set()
+  for array in jax.live_arrays():
+    if array.is_deleted():
+      continue
+    for shard in array.addressable_shards:
+      buf_id = id(shard.data)
+      if buf_id not in seen_buffers:
+        seen_buffers.add(buf_id)
+        used[shard.data.device] += shard.data.nbytes
+  return {d: used[d] for d in devices}
+
+
+def resolve_max_device_size_gib(
+    hbm_utilization: float,
+    mesh: jax.sharding.Mesh,
+) -> float:
+  """Computes available per-device KV cache GiB from an HBM utilization cap.
+
+  Matches vLLM's `determine_available_memory`: budgets `int(bytes_limit *
+  hbm_utilization)` total HBM per device and subtracts `bytes_in_use` (e.g.
+  already-allocated model weights), returning the minimum across local devices
+  in GiB. Falls back to `jax.live_arrays()` + `device_kind` HBM limits when
+  running under Pathways (where IFRT proxy devices do not implement
+  `memory_stats()`).
+
+  Args:
+    hbm_utilization: Fraction of total device HBM (`bytes_limit`) to budget, in
+      `(0, 1]`.
+    mesh: The JAX mesh whose local devices are queried.
+
+  Returns:
+    The minimum available GiB per device across queried devices.
+
+  Raises:
+    ValueError: If `hbm_utilization` is out of `(0, 1]`, no local devices are
+      available, `memory_stats()` does not report `bytes_limit` /
+      `bytes_in_use`, or `bytes_in_use` already exceeds the utilization cap.
+  """
+  if not 0.0 < hbm_utilization <= 1.0:
+    raise ValueError(
+        "rollout_vanilla_v2_hbm_utilization must be in (0, 1], got"
+        f" {hbm_utilization}."
+    )
+  devices = list(mesh.local_devices)
+  if not devices:
+    raise ValueError("No addressable JAX devices found to query HBM stats.")
+
+  available_per_device: list[int] = []
+  live_used_by_device: dict[Any, int] | None = None
+  for device in devices:
+    try:
+      stats = device.memory_stats()
+    except jax.errors.JaxRuntimeError:
+      stats = None
+    if not stats or "bytes_limit" not in stats or "bytes_in_use" not in stats:
+      if live_used_by_device is None:
+        live_used_by_device = _live_arrays_hbm_usage_bytes(devices)
+      stats = {
+          "bytes_limit": _device_hbm_limit_bytes(device),
+          "bytes_in_use": live_used_by_device[device],
+      }
+    limit = int(stats["bytes_limit"])
+    used = int(stats["bytes_in_use"])
+    limit_cap = int(limit * hbm_utilization)
+    avail = limit_cap - used
+    if avail <= 0:
+      raise ValueError(
+          f"Insufficient HBM on device {device} for"
+          f" rollout_vanilla_v2_hbm_utilization={hbm_utilization}:"
+          f" bytes_in_use ({used}) >="
+          f" int(bytes_limit ({limit}) * {hbm_utilization}) ({limit_cap})."
+      )
+    available_per_device.append(avail)
+
+  return min(available_per_device) / _GIB
 
 
 def cdiv(a: int, b: int) -> int:

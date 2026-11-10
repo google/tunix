@@ -148,6 +148,18 @@ class VanillaRolloutTest(parameterized.TestCase):
     self.assertEqual(output.logprobs[0].shape, output.tokens[0].shape)
 
   @parameterized.parameters(False, True)
+  def test_generate_returns_logits_when_asked(self, server_mode):
+    rollout = self.make_rollout(server_mode, return_logits=True)
+
+    output = rollout.generate(['1 2 3'], _rollout_config(return_logits=True))
+
+    self.assertIsNotNone(output.logits)
+    self.assertEqual(
+        output.logits[0].shape,
+        (output.tokens[0].shape[0], testing_utils.VOCAB_SIZE),
+    )
+
+  @parameterized.parameters(False, True)
   def test_update_params_changes_the_model(self, server_mode):
     rollout = self.make_rollout(server_mode)
 
@@ -184,83 +196,6 @@ class VanillaRolloutTest(parameterized.TestCase):
       self.make_rollout(
           False, rollout_vanilla_v2_hbm_utilization=hbm_utilization
       )
-
-  def test_resolve_max_device_size_gib_takes_min_across_devices(self):
-    self._local_devices_mock.return_value = [
-        _FakeDevice({'bytes_limit': 1000, 'bytes_in_use': 100}),
-        _FakeDevice({'bytes_limit': 1000, 'bytes_in_use': 300}),
-    ]
-    size_gib = vanilla_rollout._resolve_max_device_size_gib(
-        0.5, testing_utils.mesh()
-    )
-    self.assertEqual(size_gib, (500 - 300) / (1 << 30))
-
-  def test_resolve_max_device_size_gib_insufficient_hbm_raises(self):
-    self._local_devices_mock.return_value = [
-        _FakeDevice({'bytes_limit': 1000, 'bytes_in_use': 600}),
-    ]
-    with self.assertRaisesRegex(ValueError, 'Insufficient HBM'):
-      self.make_rollout(False, rollout_vanilla_v2_hbm_utilization=0.5)
-
-  def test_resolve_max_device_size_gib_missing_memory_stats_raises(self):
-    self._local_devices_mock.return_value = [_FakeDevice(None)]
-    with self.assertRaisesRegex(ValueError, 'memory_stats'):
-      self.make_rollout(False, rollout_vanilla_v2_hbm_utilization=0.5)
-
-  @parameterized.parameters(
-      ('TPU v5p', 95),
-      ('TPU v5', 95),
-      ('TPU v5e', 16),
-      ('TPU v5 lite', 16),
-      ('TPU v6e', 32),
-      ('TPU v6 lite', 32),
-      ('TPU v4', 32),
-      ('TPU7x', 96),
-      ('TPU v7', 96),
-      ('TPU8x', 144),
-      ('TPU v8i', 144),
-  )
-  def test_device_hbm_limit_bytes_returns_tpu_capacity(
-      self, device_kind, expected_gib
-  ):
-    device = _FakeDevice(device_kind=device_kind)
-    self.assertEqual(
-        vanilla_rollout._device_hbm_limit_bytes(device),
-        expected_gib * (1 << 30),
-    )
-
-  def test_device_hbm_limit_bytes_rejects_non_tpu_and_unknown_tpu(self):
-    with self.assertRaisesRegex(ValueError, 'unsupported device_kind'):
-      vanilla_rollout._device_hbm_limit_bytes(_FakeDevice(device_kind='CPU'))
-    with self.assertRaisesRegex(ValueError, 'Unknown TPU device_kind'):
-      vanilla_rollout._device_hbm_limit_bytes(
-          _FakeDevice(device_kind='TPU v99')
-      )
-
-  @parameterized.parameters(True, False)
-  def test_resolve_max_device_size_gib_falls_back_to_live_arrays(
-      self, raise_on_stats
-  ):
-    device = _FakeDevice(
-        stats=None, device_kind='TPU v6e', raise_on_stats=raise_on_stats
-    )
-    self._local_devices_mock.return_value = [device]
-    fake_data = mock.Mock(device=device, nbytes=4 * (1 << 30))
-    fake_shard = mock.Mock(data=fake_data)
-    fake_live_array = mock.Mock(
-        is_deleted=lambda: False, addressable_shards=[fake_shard, fake_shard]
-    )
-    deleted_array = mock.Mock(
-        is_deleted=lambda: True, addressable_shards=[fake_shard]
-    )
-    with mock.patch.object(
-        jax, 'live_arrays', return_value=[fake_live_array, deleted_array]
-    ):
-      size_gib = vanilla_rollout._resolve_max_device_size_gib(
-          0.5, testing_utils.mesh()
-      )
-    # 0.5 * 32 GiB - 4 GiB (deduplicated across shards sharing buf_id) = 12 GiB.
-    self.assertEqual(size_gib, 12.0)
 
   @parameterized.parameters(False, True)
   def test_combines_tokenizer_eos_and_configured_eos_tokens(self, server_mode):

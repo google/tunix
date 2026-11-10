@@ -91,6 +91,10 @@ class Scheduler:
         )
     )
 
+  @property
+  def config(self) -> configs.SchedulerConfig:
+    return self._config
+
   def schedule_step(
       self, new_requests: list[request_lib.RequestState]
   ) -> tuple[tuple[request_lib.RequestState, ...], tuple[int, int, int]]:

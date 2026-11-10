@@ -29,6 +29,8 @@ from flax.nnx import statelib
 import jax
 import jaxtyping
 import numpy as np
+
+from tunix.common import configs as common_configs
 from tunix.experimental.generate import configs
 from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import model_runner as model_runner_lib
@@ -57,43 +59,35 @@ class _InFlightStep:
 
 def _instantiate_components(
     transformer: nnx.Module,
-    cache_config: configs.CacheConfig,
-    scheduler_config: configs.SchedulerConfig,
-    model_runner_config: configs.ModelRunnerConfig,
+    rollout_config: common_configs.RolloutConfig,
+    mesh: jax.sharding.Mesh,
 ) -> tuple[
     model_runner_lib.ModelRunner,
     kv_cache_manager_lib.KVCacheManager,
     scheduler_lib.Scheduler,
 ]:
-  """Validates the configs and builds the engine's components from them.
+  """Builds the engine's components from `rollout_config` and `mesh`.
 
   Args:
-    transformer: The model to sample from. Its `cache_geometries` returns the
-      geometry of each of its KV caches.
-    cache_config: The KV cache config.
-    scheduler_config: The scheduler config.
-    model_runner_config: The model runner config.
+    transformer: The model to sample from.
+    rollout_cfg: The rollout configuration.
+    mesh: The device mesh the model runs on.
 
   Returns:
     A tuple of (the model runner, the KV cache manager, the scheduler).
-
-  Raises:
-    ValueError: If the scheduler and model runner disagree on
-      `num_scheduler_steps`.
   """
-  if (
-      scheduler_config.num_scheduler_steps
-      != model_runner_config.num_scheduler_steps
-  ):
-    raise ValueError(
-        'scheduler_config.num_scheduler_steps'
-        f' ({scheduler_config.num_scheduler_steps}) must equal'
-        ' model_runner_config.num_scheduler_steps'
-        f' ({model_runner_config.num_scheduler_steps}).'
-    )
-
+  max_device_size_gib = utils.resolve_max_device_size_gib(
+      rollout_config.rollout_vanilla_v2_hbm_utilization, mesh
+  )
+  cache_config = configs.CacheConfig(
+      max_device_size_gib=max_device_size_gib,
+      max_host_size_gib=rollout_config.rollout_vanilla_v2_host_size_gib,
+      page_size=rollout_config.rollout_vanilla_v2_kv_cache_page_size,
+      enable_prefix_caching=rollout_config.rollout_vanilla_v2_enable_prefix_caching,
+      dtype=transformer.config.dtype,  # pyrefly: ignore[missing-attribute]
+  )
   cache_geometries = transformer.cache_geometries()  # pyrefly: ignore[missing-attribute]
-  with jax.set_mesh(model_runner_config.mesh):
+  with jax.set_mesh(mesh):
     kv_cache_manager = kv_cache_manager_lib.KVCacheManager(
         cache_config, cache_geometries
     )
@@ -106,18 +100,35 @@ def _instantiate_components(
       for g in cache_geometries.values()
       if g.window_size is not None
   ]
+  max_chunked_prefill_length = (
+      rollout_config.rollout_vanilla_v2_chunked_prefill_length
+  )
   if window_sizes:
     min_window_size = min(window_sizes)
-    if scheduler_config.max_chunked_prefill_length > min_window_size:
-      scheduler_config = dataclasses.replace(
-          scheduler_config,
-          max_chunked_prefill_length=1 << (min_window_size.bit_length() - 1),
-      )
-
-  model_runner = model_runner_lib.ModelRunner(transformer, model_runner_config)
+    max_chunked_prefill_length = min(
+        max_chunked_prefill_length,
+        1 << (min_window_size.bit_length() - 1)
+    )
+  scheduler_config = configs.SchedulerConfig(
+      max_num_batched_tokens=rollout_config.rollout_vanilla_v2_max_num_batched_tokens,
+      max_num_seqs=rollout_config.rollout_vanilla_v2_max_num_seqs,
+      max_chunked_prefill_length=max_chunked_prefill_length,
+      num_scheduler_steps=rollout_config.rollout_vanilla_v2_num_scheduler_steps,
+  )
   scheduler = scheduler_lib.Scheduler(
       config=scheduler_config, kv_cache_manager=kv_cache_manager
   )
+
+  model_runner_config = configs.ModelRunnerConfig(
+      max_top_k=rollout_config.top_k or -1,
+      mesh=mesh,
+      return_logprobs=rollout_config.return_logprobs,
+      return_logits=rollout_config.return_logits,
+      num_scheduler_steps=rollout_config.rollout_vanilla_v2_num_scheduler_steps,
+      seed=0 if rollout_config.seed is None else int(rollout_config.seed),
+  )
+  model_runner = model_runner_lib.ModelRunner(transformer, model_runner_config)
+
   return model_runner, kv_cache_manager, scheduler
 
 
@@ -127,61 +138,50 @@ class LLMEngine:
   def __init__(
       self,
       transformer: nnx.Module,
-      cache_config: configs.CacheConfig,
-      scheduler_config: configs.SchedulerConfig,
-      model_runner_config: configs.ModelRunnerConfig,
+      rollout_config: common_configs.RolloutConfig,
+      mesh: jax.sharding.Mesh,
       max_model_len: int,
-      eos_token_ids: frozenset[int] = frozenset(),
   ):
     """Initializes the engine.
 
     Args:
-      transformer: The model to sample from. Its `cache_geometries` returns the
-        geometry of each of its KV caches.
-      cache_config: The KV cache config.
-      scheduler_config: The scheduler config.
-      model_runner_config: The model runner config.
+      transformer: The model to sample from.
+      rollout_config: The engine's rollout configuration.
+      mesh: The device mesh the model runs on.
       max_model_len: The maximum number of tokens a sequence may hold (prompt +
         generated).
-      eos_token_ids: Token ids that finish a request once sampled.
 
     Raises:
-      ValueError: If `max_model_len` is not positive, or the scheduler and
-        model runner disagree on `num_scheduler_steps`.
+      ValueError: If `max_model_len` is not positive, or if `rollout_config`
+        settings are invalid.
     """
     if max_model_len <= 0:
       raise ValueError(f'max_model_len must be positive, got {max_model_len}.')
 
     self._model_runner, self._kv_cache_manager, self._scheduler = (
-        _instantiate_components(
-            transformer,
-            cache_config,
-            scheduler_config,
-            model_runner_config,
-        )
+        _instantiate_components(transformer, rollout_config, mesh)
     )
-    self._scheduler_config = self._scheduler._config  # pylint: disable=protected-access
-    self._model_runner_config = model_runner_config
-    self._eos_token_ids = eos_token_ids
+    self._scheduler_config = self._scheduler.config
+    self._model_runner_config = self._model_runner.config
+    self._eos_token_ids = frozenset(rollout_config.eos_tokens or ())
     self._replicated_sharding = jax.sharding.NamedSharding(
-        model_runner_config.mesh, jax.sharding.PartitionSpec()
+        mesh, jax.sharding.PartitionSpec()
     )
 
     # The maximum number of tokens a sequence may hold (prompt + generated).
     self._max_model_len = max_model_len
     # The maximum number of pages a sequence may hold in the KV cache.
     self._max_pages_per_seq = utils.cdiv(
-        max_model_len + scheduler_config.num_scheduler_steps,
-        cache_config.page_size,
+        max_model_len + self._scheduler_config.num_scheduler_steps,
+        self._kv_cache_manager.page_size,
     )
-    num_device_pages = self._kv_cache_manager.num_device_pages
-    if self._max_pages_per_seq > num_device_pages:
+    if self._max_pages_per_seq > self._kv_cache_manager.num_device_pages:
       raise ValueError(
           f'A sequence of max_model_len={max_model_len} with'
-          f' num_scheduler_steps={scheduler_config.num_scheduler_steps} and'
-          f' page_size={cache_config.page_size} needs up to'
+          f' num_scheduler_steps={self._scheduler_config.num_scheduler_steps} and'
+          f' page_size={self._kv_cache_manager.page_size} needs up to'
           f' {self._max_pages_per_seq} pages, but the KV cache only has'
-          f' {num_device_pages} device pages.'
+          f' {self._kv_cache_manager.num_device_pages} device pages.'
       )
 
     # Requests submitted since the last step, in submission order.

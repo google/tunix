@@ -49,7 +49,7 @@ Page = single_type_kv_cache_manager.Page
 def _create_kv_cache_group_managers(
     config: configs.CacheConfig,
     cache_geometries: Mapping[str, datatypes.CacheGeometry],
-) -> tuple[list[single_type_kv_cache_manager.SingleTypeKVCacheManager], int]:
+) -> tuple[Sequence[single_type_kv_cache_manager.SingleTypeKVCacheManager], int]:
   """Creates one `SingleTypeKVCacheManager` per unique cache geometry."""
   if not cache_geometries:
     raise ValueError("At least one cache must be configured.")
@@ -73,7 +73,7 @@ def _create_kv_cache_group_managers(
       sharding=sharding,
   )
 
-  managers = []
+  managers: list[single_type_kv_cache_manager.SingleTypeKVCacheManager] = []
   for geometry, caches in caches_by_geometry.items():
     page_pool_config = page_pool_lib.TieredPagePoolConfig(
         page_size=config.page_size,

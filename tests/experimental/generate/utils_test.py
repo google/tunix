@@ -16,6 +16,7 @@
 
 import math
 import os
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -29,6 +30,25 @@ from tunix.experimental.generate import utils
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 
 _GIB = 1 << 30
+
+
+class _FakeDevice:
+
+  def __init__(
+      self,
+      stats: dict[str, int] | None = None,
+      *,
+      device_kind: str = "CPU",
+      raise_on_stats: bool = False,
+  ):
+    self._stats = stats
+    self.device_kind = device_kind
+    self._raise_on_stats = raise_on_stats
+
+  def memory_stats(self) -> dict[str, int] | None:
+    if self._raise_on_stats:
+      raise jax.errors.JaxRuntimeError("memory_stats not implemented")
+    return self._stats
 
 
 def _create_mesh(
@@ -333,6 +353,110 @@ class CacheSizingTest(parameterized.TestCase):
       )
     # One page is 1 KiB, so each of the 4 devices holds 37 pages.
     self.assertEqual(num_device_pages, 4 * 37)
+
+  @parameterized.parameters(0.0, -0.1, 1.5)
+  def test_resolve_max_device_size_gib_invalid_hbm_utilization_raises(
+      self, hbm_utilization
+  ):
+    with self.assertRaisesRegex(
+        ValueError, "rollout_vanilla_v2_hbm_utilization"
+    ):
+      utils.resolve_max_device_size_gib(hbm_utilization, _create_mesh())
+
+  def test_resolve_max_device_size_gib_takes_min_across_devices(self):
+    mesh = _create_mesh((1,), ("tp",))
+    with mock.patch.object(
+        jax.sharding.Mesh,
+        "local_devices",
+        new_callable=mock.PropertyMock,
+        return_value=[
+            _FakeDevice({"bytes_limit": 1000, "bytes_in_use": 100}),
+            _FakeDevice({"bytes_limit": 1000, "bytes_in_use": 300}),
+        ],
+    ):
+      size_gib = utils.resolve_max_device_size_gib(0.5, mesh)
+    self.assertEqual(size_gib, (500 - 300) / _GIB)
+
+  def test_resolve_max_device_size_gib_insufficient_hbm_raises(self):
+    mesh = _create_mesh((1,), ("tp",))
+    with mock.patch.object(
+        jax.sharding.Mesh,
+        "local_devices",
+        new_callable=mock.PropertyMock,
+        return_value=[_FakeDevice({"bytes_limit": 1000, "bytes_in_use": 600})],
+    ):
+      with self.assertRaisesRegex(ValueError, "Insufficient HBM"):
+        utils.resolve_max_device_size_gib(0.5, mesh)
+
+  def test_resolve_max_device_size_gib_missing_memory_stats_raises(self):
+    mesh = _create_mesh((1,), ("tp",))
+    with mock.patch.object(
+        jax.sharding.Mesh,
+        "local_devices",
+        new_callable=mock.PropertyMock,
+        return_value=[_FakeDevice(None)],
+    ):
+      with self.assertRaisesRegex(ValueError, "memory_stats"):
+        utils.resolve_max_device_size_gib(0.5, mesh)
+
+  @parameterized.parameters(
+      ("TPU v5p", 95),
+      ("TPU v5", 95),
+      ("TPU v5e", 16),
+      ("TPU v5 lite", 16),
+      ("TPU v6e", 32),
+      ("TPU v6 lite", 32),
+      ("TPU v4", 32),
+      ("TPU7x", 96),
+      ("TPU v7", 96),
+      ("TPU8x", 144),
+      ("TPU v8i", 144),
+  )
+  def test_device_hbm_limit_bytes_returns_tpu_capacity(
+      self, device_kind, expected_gib
+  ):
+    device = _FakeDevice(device_kind=device_kind)
+    self.assertEqual(
+        utils._device_hbm_limit_bytes(device),
+        expected_gib * _GIB,
+    )
+
+  def test_device_hbm_limit_bytes_rejects_non_tpu_and_unknown_tpu(self):
+    with self.assertRaisesRegex(ValueError, "unsupported device_kind"):
+      utils._device_hbm_limit_bytes(_FakeDevice(device_kind="CPU"))
+    with self.assertRaisesRegex(ValueError, "Unknown TPU device_kind"):
+      utils._device_hbm_limit_bytes(_FakeDevice(device_kind="TPU v99"))
+
+  @parameterized.parameters(True, False)
+  def test_resolve_max_device_size_gib_falls_back_to_live_arrays(
+      self, raise_on_stats
+  ):
+    mesh = _create_mesh((1,), ("tp",))
+    device = _FakeDevice(
+        stats=None, device_kind="TPU v6e", raise_on_stats=raise_on_stats
+    )
+    fake_data = mock.Mock(device=device, nbytes=4 * _GIB)
+    fake_shard = mock.Mock(data=fake_data)
+    fake_live_array = mock.Mock(
+        is_deleted=lambda: False, addressable_shards=[fake_shard, fake_shard]
+    )
+    deleted_array = mock.Mock(
+        is_deleted=lambda: True, addressable_shards=[fake_shard]
+    )
+    with (
+        mock.patch.object(
+            jax.sharding.Mesh,
+            "local_devices",
+            new_callable=mock.PropertyMock,
+            return_value=[device],
+        ),
+        mock.patch.object(
+            jax, "live_arrays", return_value=[fake_live_array, deleted_array]
+        ),
+    ):
+      size_gib = utils.resolve_max_device_size_gib(0.5, mesh)
+    # 0.5 * 32 GiB - 4 GiB (deduplicated across shards sharing buf_id) = 12 GiB.
+    self.assertEqual(size_gib, 12.0)
 
 
 if __name__ == "__main__":
