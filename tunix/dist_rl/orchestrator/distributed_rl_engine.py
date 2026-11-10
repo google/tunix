@@ -921,11 +921,14 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   async def resume_from_checkpoint(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
-      resync_rollout_weights: bool = True,
   ) -> int:
-    """Restores a checkpoint and realigns the mesh to the restored state.
+    """Restores the trainer checkpoint for `role` and aligns engine policy state.
 
-    See `rl_engine_interface.AbstractRLEngine.resume_from_checkpoint`.
+    Args:
+      role: Trainer role whose checkpoint should be restored.
+
+    Returns:
+      The restored step, or 0 when starting fresh.
     """
     self._restored_checkpoint_metadata = None
     self._inflight_fwd_bwd[role].clear()
@@ -984,23 +987,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         restored_policy_version,
         metadata,
     )
-    if resync_rollout_weights:
-      await self._maybe_configure_trainer_target_state(role)
-      synced_version = await self.sync_weights(
-          role=role,
-          policy_version=restored_policy_version,
-      )
-      if synced_version != restored_policy_version:
-        raise RuntimeError(
-            "Resumed policy_version=%d does not match synced version=%d"
-            % (restored_policy_version, synced_version)
-        )
-    else:
-      logging.warning(
-          "resync_rollout_weights is False. Resumed rollout workers will use"
-          " base weights instead of restored checkpoint version %d.",
-          restored_policy_version,
-      )
     return restored_step
 
   async def close(self) -> None:

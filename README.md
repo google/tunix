@@ -6,7 +6,7 @@
 
 </div>
 
-**Tunix (Tune-in-Accelerators)** is a library designed to streamline the
+**Tunix (Tune-in-JAX)** is a JAX based library designed to streamline the
 post-training of Large Language Models. It provides efficient and scalable
 support for:
 
@@ -36,7 +36,7 @@ for efficient model refinement. It sits as an intermediate layer between these
 core utilities and optimized models like MaxText and MaxDiffusion, streamlining
 tuning workflows on top of the XLA and JAX infrastructure. See [Design Overview](https://tunix.readthedocs.io/en/latest/design.html) for more details on the architecture.
 
-![Tunix in Accelerators ecosystem](docs/images/tunix_in_jax_ecosystem.png)
+![Tunix in JAX ecosystem](docs/images/tunix_in_jax_ecosystem.png)
 
 ## Key Features
 -   **[Supervised Fine-Tuning (SFT)](https://tunix.readthedocs.io/en/latest/algorithms.html)**:
@@ -136,7 +136,7 @@ cutting-edge research and easy reproducibility.
 ## Citing Tunix
 ```bibtex
 @misc{tunix2025,
-  title={Tunix (Tune-in-Accelerators)},
+  title={Tunix (Tune-in-JAX)},
   author={Bao, Tianshu and Carpenter, Jeff and Chai, Lin and Gao, Haoyu and Jiang, Yangmu and Noghabi, Shadi and Sharma, Abheesht and Tan, Sizhi and Wang, Lance and Yan, Ann and Yu, Weiren and others},
   year={2025},
   howpublished={\url{https://github.com/google/tunix}},

@@ -213,19 +213,16 @@ class AbstractRLEngine(Protocol):
   async def resume_from_checkpoint(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
-      resync_rollout_weights: bool = True,
   ) -> int:
-    """Restores a checkpoint and realigns the mesh to the restored state.
+    """Restores the trainer checkpoint for `role` and aligns engine policy state.
 
-    Restores the trainer checkpoint for `role`, aligns the engine's internal
-    policy version with the restored step boundary, and (optionally) resyncs
-    rollout worker weights so subsequent rollouts use the restored policy.
+    Restores the trainer checkpoint for `role` and aligns the engine's internal
+    policy version and restored checkpoint metadata with the restored step
+    boundary. Callers synchronize rollout worker weights separately via
+    `prepare_rollout_policy`.
 
     Args:
       role: Trainer role whose checkpoint should be restored.
-      resync_rollout_weights: If True, resync rollout worker weights to the
-        restored policy version. If False, the resync is skipped and rollout
-        workers keep their current/base weights.
 
     Returns:
       The restored step.

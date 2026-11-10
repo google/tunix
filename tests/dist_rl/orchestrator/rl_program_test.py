@@ -675,25 +675,13 @@ class RLProgramTest(absltest.TestCase):
       await program._resume_from_checkpoint()
 
     asyncio.run(_run())
+    self.mock_engine.resume_from_checkpoint.assert_called_once_with(
+        role=datatypes.Role.ACTOR
+    )
     self.assertEqual(program.step, 3)
     self.assertEqual(program.policy_version, 3)
 
-  def test_resume_forwards_role_and_resync_flag_when_sync_enabled(self):
-    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=3)
-    program = self._create_program(
-        dataset=["p0"], max_steps=5, sync_weights=True
-    )
-
-    async def _run():
-      program.engine = self.mock_engine
-      await program._resume_from_checkpoint()
-
-    asyncio.run(_run())
-    self.mock_engine.resume_from_checkpoint.assert_called_once_with(
-        role=datatypes.Role.ACTOR, resync_rollout_weights=True
-    )
-
-  def test_resume_forwards_resync_disabled_when_sync_weights_false(self):
+  def test_resume_warns_when_sync_weights_disabled(self):
     self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=2)
     program = self._create_program(
         dataset=["p0"], max_steps=5, sync_weights=False
@@ -703,11 +691,108 @@ class RLProgramTest(absltest.TestCase):
       program.engine = self.mock_engine
       await program._resume_from_checkpoint()
 
-    asyncio.run(_run())
-    self.mock_engine.resume_from_checkpoint.assert_called_once_with(
-        role=datatypes.Role.ACTOR, resync_rollout_weights=False
-    )
+    with self.assertLogs(level="WARNING") as logs:
+      asyncio.run(_run())
     self.assertEqual(program.step, 2)
+    self.assertEqual(program.policy_version, 2)
+    self.assertTrue(
+        any("base weights" in line for line in logs.output), logs.output
+    )
+
+  def _resume_with_engine_metadata(
+      self, metadata: dict[str, Any]
+  ) -> tuple[
+      rl_program.StandardRLProgram, distributed_rl_engine.DistributedRLEngine
+  ]:
+    actor_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    async def _asubmit(method, **unused_kwargs):
+      self.assertEqual(method, "restore_checkpoint")
+      return dict(metadata)
+
+    actor_handle.asubmit.side_effect = _asubmit
+    engine = _make_engine(trainer_workers={datatypes.Role.ACTOR: actor_handle})
+    program = self._create_program(dataset=["p0", "p1"], max_steps=5)
+
+    async def _run():
+      program.engine = engine
+      await program._resume_from_checkpoint()
+
+    asyncio.run(_run())
+    return program, engine
+
+  def test_resume_uses_step_boundary_policy_version_without_off_policy_state(
+      self,
+  ):
+    program, engine = self._resume_with_engine_metadata(
+        {"step": 3, "policy_version": 5}
+    )
+
+    self.assertEqual(program.step, 3)
+    self.assertEqual(program.policy_version, 3)
+    self.assertEqual(program.policy_version, engine._policy_version)
+
+  def test_resume_uses_recorded_policy_version_with_off_policy_state(self):
+    program, engine = self._resume_with_engine_metadata({
+        "step": 3,
+        "policy_version": 5,
+        "committed_prompt_ids": ["p0"],
+        "skipped_prompt_ids": [],
+    })
+
+    self.assertEqual(program.step, 3)
+    self.assertEqual(program.policy_version, 5)
+    self.assertEqual(program.policy_version, engine._policy_version)
+
+  def test_resume_defers_rollout_weight_resync_to_prepare_rollout_policy(self):
+    events: list[tuple[str, object]] = []
+    actor_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    async def _asubmit(method, **unused_kwargs):
+      if method == "restore_checkpoint":
+        events.append(("restore_checkpoint", None))
+        return {"step": 3, "policy_version": 3}
+      return datatypes.Response()
+
+    def _submit(method, *unused_args, **unused_kwargs):
+      events.append((method, None))
+      return datatypes.Response()
+
+    actor_handle.asubmit.side_effect = _asubmit
+    actor_handle.submit.side_effect = _submit
+
+    coordinator = mock.MagicMock()
+
+    async def _sync(*, policy_version, destination_statuses):
+      del destination_statuses
+      events.append(("sync", policy_version))
+      return mock.MagicMock(policy_version=policy_version, workers=())
+
+    coordinator.sync = mock.AsyncMock(side_effect=_sync)
+    engine = _make_engine(
+        trainer_workers={datatypes.Role.ACTOR: actor_handle},
+        weight_sync_coordinator=coordinator,
+    )
+    program = self._create_program(
+        dataset=["p0", "p1", "p2"],
+        max_steps=3,
+        sync_weights=True,
+        precompile_trainer=True,
+        generation_args=datatypes.GenerationArgs(temperature=1.0),
+    )
+
+    asyncio.run(program.run_async(engine))
+
+    self.assertEqual(
+        events,
+        [
+            ("restore_checkpoint", None),
+            ("with_loss_fn", None),
+            ("with_gen_model_input_fn", None),
+            ("compile", None),
+            ("sync", 3),
+        ],
+    )
 
   def test_resume_skips_already_consumed_dataset_prefix(self):
     self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=3)

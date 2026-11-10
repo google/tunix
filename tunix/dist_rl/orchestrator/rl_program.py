@@ -637,19 +637,17 @@ class StandardRLProgram(RLProgram):
   async def _resume_from_checkpoint(self) -> None:
     """Realigns program orchestration state with the engine's restored checkpoint.
 
-    Delegates the mesh-level work (restoring the trainer checkpoint and, when
-    `sync_weights` is enabled, resyncing rollout worker weights to the restored
-    policy) to the engine, then translates the restored step into program
+    Delegates restoring the trainer checkpoint to the engine (`run_async`
+    synchronizes rollout weights once in `prepare_rollout_policy` after
+    `configure_worker`), then translates the restored step into program
     orchestration state: the train-loop bound (`_step`), the exact set of
     committed and skipped `prompt_id`s (when off-policy state was persisted),
     or the dataset prefix to skip (resumed `_step` if any).
     """
     assert self.engine is not None
-    restored = await self.engine.resume_from_checkpoint(
+    restored_step = await self.engine.resume_from_checkpoint(
         role=datatypes.Role.ACTOR,
-        resync_rollout_weights=self.sync_weights,
     )
-    restored_step = restored[0] if isinstance(restored, tuple) else restored
     if restored_step <= 0:
       return
     self._step = restored_step
@@ -657,12 +655,25 @@ class StandardRLProgram(RLProgram):
     if isinstance(self.scored_q, BatchOrderedGroupQueue):
       self.scored_q.skip(0, restored_step)
     ckpt_meta = self.engine.restored_checkpoint_metadata
+    off_policy_resume = self.dispatch_window.restore_checkpoint_metadata(
+        ckpt_meta
+    )
+    # Matches `DistributedRLEngine.resume_from_checkpoint()`: a recorded
+    # `policy_version` is honored only with off-policy resume state; otherwise
+    # resume at the step boundary.
     if (
-        isinstance(ckpt_meta, Mapping)
+        off_policy_resume
+        and isinstance(ckpt_meta, Mapping)
         and ckpt_meta.get("policy_version") is not None
     ):
       self.policy_version = int(ckpt_meta["policy_version"])
-    if self.dispatch_window.restore_checkpoint_metadata(ckpt_meta):
+    if not self.sync_weights:
+      logging.warning(
+          "sync_weights is False; resumed rollout workers will use base weights"
+          " instead of restored checkpoint policy_version=%d.",
+          self.policy_version,
+      )
+    if off_policy_resume:
       logging.info(
           "Resuming from off-policy checkpoint: step=%d policy_version=%d"
           " (committed=%d, skipped=%d).",

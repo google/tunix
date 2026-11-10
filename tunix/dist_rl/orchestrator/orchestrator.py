@@ -283,10 +283,7 @@ class ClusterOrchestrator:
     if bring_up:
       self.bring_up_workers(dummy_data=dummy_data)
 
-    # TODO(b/577214994): Poll only `ACTIVE` and `PENDING_WEIGHT_SYNC` workers so
-    # a late rollout worker that crashes while still `REGISTERED` cannot abort
-    # `run()` before `LifecycleDriver` unregisters it.
-    self.monitor.poll()
+    self.monitor.poll(statuses=(worker_registry.AdmissionStatus.ACTIVE,))
     logging.info("Executing program %s...", type(program).__name__)
     engine = self.engine or self._create_engine()
 

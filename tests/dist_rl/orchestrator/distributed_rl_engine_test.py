@@ -529,7 +529,7 @@ class DistributedRLEngineTest(absltest.TestCase):
         weight_sync_coordinator=coordinator,
     )
 
-  def test_resume_from_checkpoint_returns_step_and_resyncs_weights(self):
+  def test_resume_from_checkpoint_returns_step_without_syncing_rollouts(self):
     async def _run():
       self.mock_actor.restore_checkpoint.return_value = {
           "step": 3,
@@ -541,14 +541,12 @@ class DistributedRLEngineTest(absltest.TestCase):
       result = await engine.resume_from_checkpoint(role=datatypes.Role.ACTOR)
 
       self.assertEqual(result, 3)
-      # Engine aligns its own policy version and resyncs rollout weights.
+      # Engine aligns its own policy version; rollout sync is handled by
+      # `prepare_rollout_policy`.
       self.assertEqual(engine._policy_version, 3)
-      self.assertEqual(coordinator.calls, [3])
+      self.assertEqual(coordinator.calls, [])
       self.mock_actor.restore_checkpoint.assert_called_once_with(step=None)
-      self.mock_rollout_1.get_target_state.assert_called_once_with()
-      self.mock_actor.set_target_state.assert_called_once_with(
-          target_state={"params": 1}
-      )
+      self.mock_rollout_1.get_target_state.assert_not_called()
 
     asyncio.run(_run())
 
@@ -565,7 +563,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       result = await engine.resume_from_checkpoint()
       self.assertEqual(result, 3)
       self.assertEqual(engine._policy_version, 3)
-      self.assertEqual(coordinator.calls, [3])
+      self.assertEqual(coordinator.calls, [])
 
     asyncio.run(_run())
 
@@ -583,7 +581,7 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       self.assertEqual(result, 3)
       self.assertEqual(engine._policy_version, 3)
-      self.assertEqual(coordinator.calls, [3])
+      self.assertEqual(coordinator.calls, [])
 
     asyncio.run(_run())
 
@@ -606,7 +604,7 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       self.assertEqual(result, 3)
       self.assertEqual(engine._policy_version, 5)
-      self.assertEqual(coordinator.calls, [5])
+      self.assertEqual(coordinator.calls, [])
       self.assertEqual(engine.restored_checkpoint_metadata, ckpt_meta)
 
     asyncio.run(_run())
@@ -639,45 +637,6 @@ class DistributedRLEngineTest(absltest.TestCase):
           self.assertEqual(coordinator.calls, [])
 
         asyncio.run(_run())
-
-  def test_resume_from_checkpoint_skips_resync_when_disabled(self):
-    async def _run():
-      self.mock_actor.restore_checkpoint.return_value = {
-          "step": 2,
-          "policy_version": 2,
-      }
-      coordinator = _FakeWeightSyncCoordinator()
-      engine = self._engine_with_coordinator(coordinator)
-
-      with self.assertLogs(level="WARNING") as logs:
-        result = await engine.resume_from_checkpoint(
-            resync_rollout_weights=False
-        )
-
-      self.assertEqual(result, 2)
-      self.assertEqual(engine._policy_version, 2)
-      self.assertEqual(coordinator.calls, [])
-      self.assertTrue(
-          any("base weights" in line for line in logs.output), logs.output
-      )
-
-    asyncio.run(_run())
-
-  def test_resume_from_checkpoint_raises_on_version_mismatch(self):
-    async def _run():
-      self.mock_actor.restore_checkpoint.return_value = {
-          "step": 3,
-          "policy_version": 3,
-      }
-      coordinator = _FakeWeightSyncCoordinator(forced_version=1)
-      engine = self._engine_with_coordinator(coordinator)
-
-      with self.assertRaisesRegex(
-          RuntimeError, "does not match synced version"
-      ):
-        await engine.resume_from_checkpoint()
-
-    asyncio.run(_run())
 
   def test_train_step_sends_only_the_request_to_fwd_bwd(self):
     async def _run():

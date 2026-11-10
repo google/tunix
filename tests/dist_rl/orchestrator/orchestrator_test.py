@@ -43,6 +43,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
     self.mock_registry = mock.MagicMock()
     self.mock_registry.worker_ids.return_value = []
     self.mock_registry.infos.return_value = []
+    self.mock_registry.targets.return_value = []
     self.mock_lifecycle = mock.MagicMock()
     self.mock_monitor = mock.MagicMock()
     self.orch = orchestrator.ClusterOrchestrator(
@@ -295,7 +296,9 @@ class ClusterOrchestratorTest(absltest.TestCase):
       )
 
     self.mock_lifecycle.bring_up.assert_called_once_with("dummy_init")
-    self.mock_monitor.poll.assert_called_once()
+    self.mock_monitor.poll.assert_called_once_with(
+        statuses=(worker_registry.AdmissionStatus.ACTIVE,)
+    )
     mock_program.run.assert_called_once_with(
         engine=mock_engine,
         train_dataset=["batch1", "batch2"],
@@ -313,10 +316,69 @@ class ClusterOrchestratorTest(absltest.TestCase):
     )
 
     self.mock_lifecycle.bring_up.assert_not_called()
-    self.mock_monitor.poll.assert_called_once()
+    self.mock_monitor.poll.assert_called_once_with(
+        statuses=(worker_registry.AdmissionStatus.ACTIVE,)
+    )
     mock_program.run.assert_called_once_with(
         engine=mock_engine,
     )
+
+  def test_run_skips_non_active_late_rollout_workers_in_health_poll(self):
+    registry = worker_registry.WorkerRegistry()
+    actor_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+    actor_handle.submit.side_effect = lambda method, *a, **kw: (
+        datatypes.HealthReport(state=datatypes.WorkerState.READY)
+        if method == "heartbeat"
+        else datatypes.Response()
+    )
+    pending_sync_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    def _pending_submit(method, *unused_args, **unused_kwargs):
+      if method == "heartbeat":
+        raise RuntimeError("unexpected heartbeat on PENDING_WEIGHT_SYNC worker")
+      return datatypes.Response()
+
+    pending_sync_handle.submit.side_effect = _pending_submit
+    late_closed = threading.Event()
+    self.addCleanup(late_closed.set)
+    late_rollout_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+    late_rollout_handle.sync_close.side_effect = late_closed.set
+
+    def _late_submit(method, *unused_args, **unused_kwargs):
+      if method == "initialize":
+        late_closed.wait(timeout=5.0)
+      raise RuntimeError(f"unexpected {method} on REGISTERED newcomer")
+
+    late_rollout_handle.submit.side_effect = _late_submit
+    registry.register_handle("actor-0", [datatypes.Role.ACTOR], actor_handle)
+    orch = orchestrator.ClusterOrchestrator(
+        registry=registry, weight_sync_mode="none"
+    )
+    self.addCleanup(orch.shutdown)
+    orch.bring_up_workers()
+    registry.register_handle(
+        "rollout-pending", [datatypes.Role.ROLLOUT], pending_sync_handle
+    )
+    worker_registry_testing.set_status(
+        registry,
+        "rollout-pending",
+        worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+    )
+    registry.register_handle(
+        "rollout-late", [datatypes.Role.ROLLOUT], late_rollout_handle
+    )
+    mock_program = mock.MagicMock(spec=rl_program.RLProgram)
+
+    orch.run(program=mock_program, bring_up=False)
+
+    self.assertIn(mock.call("heartbeat"), actor_handle.submit.call_args_list)
+    self.assertNotIn(
+        mock.call("heartbeat"), pending_sync_handle.submit.call_args_list
+    )
+    self.assertNotIn(
+        mock.call("heartbeat"), late_rollout_handle.submit.call_args_list
+    )
+    mock_program.run.assert_called_once()
 
 
 def _trajectory_store_orchestrator(
@@ -325,6 +387,7 @@ def _trajectory_store_orchestrator(
   mock_registry = mock.MagicMock()
   mock_registry.worker_ids.return_value = []
   mock_registry.infos.return_value = []
+  mock_registry.targets.return_value = []
   return orchestrator.ClusterOrchestrator(
       registry=mock_registry,
       lifecycle_driver=mock.MagicMock(),
