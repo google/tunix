@@ -14,6 +14,7 @@
 
 """Summarizes every trajectory in a run."""
 
+from collections.abc import Sequence
 import dataclasses
 import json
 import sys
@@ -23,6 +24,7 @@ import simple_parsing
 from tunix.dist_rl.trajectory import store
 from tunix.dist_rl.trajectory.explorer.commands import base
 from tunix.dist_rl.trajectory.explorer.diagnostics import formatting
+from tunix.dist_rl.trajectory.explorer.diagnostics import schema_diagnostics
 from tunix.dist_rl.trajectory.explorer.diagnostics import stats
 
 
@@ -36,17 +38,23 @@ class SummaryCommand(base.BaseCommand):
   )
 
   def execute(
-      self, reader: store.TrajectoryReader, output_json: bool = False
+      self,
+      reader: store.TrajectoryReader,
+      output_json: bool = False,
+      *,
+      diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics] = (),
   ) -> int:
     """Summarizes all trajectories the reader can see.
 
     Args:
       reader: The trajectory store reader backend.
       output_json: Whether to format output as machine-readable JSON.
+      diagnostics: Unused.
 
     Returns:
       Process exit code (0 for success).
     """
+    del diagnostics  # Unused.
     if self.limit is not None and self.limit < 0:
       print(
           "trajectory-explore: error: --limit must be non-negative, got"

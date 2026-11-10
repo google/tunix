@@ -15,8 +15,10 @@
 """Abstract base class for Trajectory Explorer CLI subcommands."""
 
 import abc
+from collections.abc import Sequence
 import dataclasses
 from tunix.dist_rl.trajectory import store
+from tunix.dist_rl.trajectory.explorer.diagnostics import schema_diagnostics
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -33,13 +35,19 @@ class BaseCommand(abc.ABC):
 
   @abc.abstractmethod
   def execute(
-      self, reader: store.TrajectoryReader, output_json: bool = False
+      self,
+      reader: store.TrajectoryReader,
+      output_json: bool = False,
+      *,
+      diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics] = (),
   ) -> int:
     """Executes the command against a TrajectoryReader and returns an exit code.
 
     Args:
       reader: The trajectory store reader backend.
       output_json: Whether to format output as machine-readable JSON.
+      diagnostics: Schema diagnostics to compute and render, for commands that
+        report trajectory statistics.
 
     Returns:
       Process exit code (0 for success, non-zero for failure).

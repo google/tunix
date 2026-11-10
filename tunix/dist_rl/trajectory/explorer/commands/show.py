@@ -14,6 +14,7 @@
 
 """Shows the steps of one or more trajectories."""
 
+from collections.abc import Sequence
 import dataclasses
 import json
 import sys
@@ -23,6 +24,7 @@ from tunix.dist_rl.trajectory import store
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
 from tunix.dist_rl.trajectory.explorer.commands import base
 from tunix.dist_rl.trajectory.explorer.diagnostics import formatting
+from tunix.dist_rl.trajectory.explorer.diagnostics import schema_diagnostics
 from tunix.dist_rl.trajectory.explorer.diagnostics import stats
 
 _TRAJECTORY_DELIMITER = f"\n\n{'=' * 80}\n\n"
@@ -55,13 +57,19 @@ class ShowCommand(base.BaseCommand):
     )
 
   def execute(
-      self, reader: store.TrajectoryReader, output_json: bool = False
+      self,
+      reader: store.TrajectoryReader,
+      output_json: bool = False,
+      *,
+      diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics] = (),
   ) -> int:
     """Shows the trajectories in `trajectory_id`.
 
     Args:
       reader: The trajectory store reader backend.
       output_json: Whether to format output as machine-readable JSON.
+      diagnostics: Schema diagnostics to compute and render for each trajectory
+        of their schema.
 
     Returns:
       Process exit code: 0 on success, 1 if any trajectory does not exist, and
@@ -83,7 +91,12 @@ class ShowCommand(base.BaseCommand):
       )
       return 1
     entries = [
-        (trajectory, stats.TrajectoryStats.from_trajectory(trajectory))
+        (
+            trajectory,
+            stats.TrajectoryStats.from_trajectory(
+                trajectory, diagnostics=diagnostics
+            ),
+        )
         for trajectory in trajectories
     ]
     if output_json:
@@ -98,7 +111,9 @@ class ShowCommand(base.BaseCommand):
       return 0
     print(
         _TRAJECTORY_DELIMITER.join(
-            _render_trajectory(trajectory, trajectory_stats, self.max_chars)
+            _render_trajectory(
+                trajectory, trajectory_stats, diagnostics, self.max_chars
+            )
             for trajectory, trajectory_stats in entries
         )
     )
@@ -108,11 +123,12 @@ class ShowCommand(base.BaseCommand):
 def _render_trajectory(
     trajectory: trajectory_lib.Trajectory[trajectory_lib.Step],
     trajectory_stats: stats.TrajectoryStats,
+    diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics],
     max_chars: int,
 ) -> str:
   """Renders a single trajectory's header, steps, and tool sequence."""
   blocks = [
-      _render_header(trajectory, trajectory_stats),
+      _render_header(trajectory, trajectory_stats, diagnostics),
       *(_render_step(step, max_chars) for step in trajectory.steps),
   ]
   if trajectory_stats.tool_call_names:
@@ -125,6 +141,7 @@ def _render_trajectory(
 def _render_header(
     trajectory: trajectory_lib.Trajectory[trajectory_lib.Step],
     trajectory_stats: stats.TrajectoryStats,
+    diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics],
 ) -> str:
   """Renders the trajectory's identity and headline figures."""
   lines = [
@@ -139,6 +156,10 @@ def _render_header(
       f"Steps: {trajectory_stats.steps}",
       f"Tokens: {formatting.format_optional(trajectory_stats.tokens)}",
   ]
+  for d in diagnostics:
+    if d.NAMESPACE in trajectory_stats.schema_stats:
+      values = trajectory_stats.schema_stats[d.NAMESPACE]
+      lines.extend(d.format_show_header(values))
   return "\n".join(lines)
 
 

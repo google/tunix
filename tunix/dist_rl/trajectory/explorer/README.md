@@ -9,7 +9,7 @@
    The CLI parses backend store flags (`--store`, `--root_dir`, `--run_id`) via `simple_parsing.subgroups`, builds the store config dict via `build_store_config()`, constructs the selected backend through `store.TrajectoryStore.from_config()`, and passes it to subcommands as a `store.TrajectoryReader`. Subcommands only ever receive a `TrajectoryReader`, guaranteeing that inspection tools cannot mutate or corrupt rollout data or couple to backend-specific storage internals.
 
 2. **Dual Output Contract (Human & `--json`)**
-   Every subcommand implements `execute(self, reader: store.TrajectoryReader, output_json: bool = False) -> int`.
+   Every subcommand implements `execute(self, reader: store.TrajectoryReader, output_json: bool = False, *, diagnostics: Sequence[SchemaDiagnostics] = ()) -> int`, where `diagnostics` are the schema diagnostics the entry point passes to `launch_cli(diagnostics=...)`.
    - When `output_json=False` (default), commands print formatted, human-readable terminal summaries.
    - When `output_json=True` (`--json`), commands emit machine-readable JSON to `stdout` while any CLI usage errors are isolated to `stderr` (exit code `2`), enabling clean composition with `jq` and automated evaluation scripts.
 
@@ -17,7 +17,7 @@
    CLI flag parsing and store initialization are tested once in `run_explorer_test.py`. Individual subcommand tests (`commands/*_test.py`) do **not** touch the filesystem or CLI parser; instead, they test command logic directly against prefilled in-memory stores using the test harness in `commands/testing.py`.
 
 4. **Decoupled Diagnostics Library (`diagnostics/`)**
-  Statistics live in `diagnostics/stats.py` (`:diagnostics`), which has no CLI dependencies: `TrajectoryStats.from_trajectory()` summarizes one trajectory and `RunStats.from_trajectories()` aggregates a run into a `pandas.DataFrame` (`RunStats.df`, columns per `COLUMN_DTYPES`) whose columns are reduced into run totals. Unreported quantities are `None` (nulls in the DataFrame), never `0`. This holds for each token count on its own, so a trajectory that reports only completion tokens renders as `N completion`. Both classes offer `to_json_dict()` for the `--json` contract. Subcommands render these objects rather than computing their own figures, so notebooks and evaluation scripts can import the same numbers.
+  Statistics live in `diagnostics/stats.py` (`:diagnostics`), which has no CLI dependencies: `TrajectoryStats.from_trajectory()` summarizes one trajectory and `RunStats.from_trajectories()` aggregates a run into a `pandas.DataFrame` (`RunStats.df`, columns per `COLUMN_DTYPES`) whose columns are reduced into run totals. Unreported quantities are `None` (nulls in the DataFrame), never `0`. This holds for each token count on its own, so a trajectory that reports only completion tokens renders as `N completion`. Both classes offer `to_json_dict()` for the `--json` contract. Subcommands render these objects rather than computing their own figures, so notebooks and evaluation scripts can import the same numbers. Statistics that only one trajectory schema reports come from schema diagnostics (see *Schema Diagnostics* below).
 
 5. **Exit Codes**
    `0` on success, `1` when the requested data does not exist (e.g. `show` on an unknown trajectory ID), and `2` for a bad flag or flag combination. Errors go to `stderr`, never into the `--json` payload.
@@ -30,7 +30,7 @@
 |---|---|
 | `ping` | Store connectivity and the number of trajectories. |
 | `summary [--limit=<N>]` | One row per trajectory (status, steps by source, tokens, tool calls, reward) followed by run totals: steps, tokens, status counts, mean reward and per-tool call counts. Optional `--limit` bounds trajectory loading and table size. Under `--json`, the rows are the records of `RunStats.df`. |
-| `show --trajectory_id=<id> [<id> ...]` | Each trajectory's header (status, reward, steps, tokens, subagents), every step with its message, reasoning, tool calls and observations (truncated to `--max_chars`, `0` for no truncation), and the tool-call sequence. Accepts space- or comma-separated IDs; multiple trajectories are separated by an `====` rule (`--json` emits a list when 2+ IDs are given). |
+| `show --trajectory_id=<id> [<id> ...]` | Each trajectory's header (status, reward, steps, tokens, subagents, then one line per value of each schema diagnostics that applies, e.g. Tunix `masked_out`), every step with its message, reasoning, tool calls and observations (truncated to `--max_chars`, `0` for no truncation), and the tool-call sequence. Accepts space- or comma-separated IDs; multiple trajectories are separated by an `====` rule (`--json` emits a list when 2+ IDs are given). |
 
 ---
 
@@ -69,6 +69,14 @@ python3 -m tunix.dist_rl.trajectory.explorer.run_explorer \
 
 ---
 
+## Schema Diagnostics
+
+`diagnostics/stats.py` only computes what every ATIF trajectory reports. Statistics for fields that only one schema stores come from a `SchemaDiagnostics` subclass (`diagnostics/schema_diagnostics.py`), whose generic parameter is the schema's `TrajectoryMetadata` subclass.
+
+- **Activation**: nothing is registered. Pass instances to `TrajectoryStats.from_trajectory(..., diagnostics=...)` and `RunStats.from_trajectories(..., diagnostics=...)`, or to `run_explorer.launch_cli(diagnostics=...)` from a CLI entry point, as `run_explorer.py` does with `TunixDiagnostics`. A diagnostics class only applies to trajectories that are instances of its schema.
+
+---
+
 ## How to Add a New Subcommand
 
 Adding a new subcommand requires **4 steps**. `commands/summary.py` and `commands/show.py` are complete examples; shared formatting helpers (missing-value marker, optional values, counts) live in `diagnostics/formatting.py`, and `StepCounts`/`TokenCounts` render themselves via `str()`.
@@ -84,7 +92,11 @@ class MyCommand(base.BaseCommand):
   some_flag: str = simple_parsing.field(help="Becomes --some_flag.")
 
   def execute(
-      self, reader: store.TrajectoryReader, output_json: bool = False
+      self,
+      reader: store.TrajectoryReader,
+      output_json: bool = False,
+      *,
+      diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics] = (),
   ) -> int:
     ...  # Query `reader`, print JSON or human-readable output.
     return 0
