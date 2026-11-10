@@ -2543,7 +2543,7 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
         cluster_config=types.SimpleNamespace(
             rollout_config=base_rollout.RolloutConfig(max_prompt_length=5),
             training_config=types.SimpleNamespace(
-                max_seq_token_per_tpu=32 if packed else None,
+                max_seq_tokens_per_device=32 if packed else None,
                 compute_logps_micro_batch_size=1,
                 mini_batch_size=None,
             ),

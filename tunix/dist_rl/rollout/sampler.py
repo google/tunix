@@ -14,14 +14,16 @@
 
 """Sampler abstractions for Distributed-RL."""
 
+from __future__ import annotations
+
 import dataclasses
 from typing import Any, Protocol, Sequence, runtime_checkable
-from jax import typing
 import numpy as np
+from numpy import typing as npt
 
 from tunix.dist_rl.common import datatypes
 
-ArrayLike = typing.ArrayLike
+ArrayLike = npt.ArrayLike
 
 
 @dataclasses.dataclass(kw_only=True)

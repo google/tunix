@@ -878,9 +878,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       pack_size = rl_utils.compute_pack_size(mesh)
 
       logging.info(
-          "Using sequence packing with max_seq_token_per_tpu: %d, "
+          "Using sequence packing with max_seq_tokens_per_device: %d, "
           " pack_size: %d",
-          self._training_config.max_seq_token_per_tpu,
+          self._training_config.max_seq_tokens_per_device,
           pack_size,
       )
 
@@ -888,7 +888,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # independent of any micro-batch/streaming granularity.
       train_data_gen = rl_utils.pack_sequences(
           train_data_gen,
-          self._training_config.max_seq_token_per_tpu,  # pyrefly: ignore[bad-argument-type]
+          self._training_config.max_seq_tokens_per_device,  # pyrefly: ignore[bad-argument-type]
           sequences_per_update=mini_batch_size * self._num_generations(),
           pack_size=pack_size,
           max_segments_per_packed_row=getattr(

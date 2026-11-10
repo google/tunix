@@ -723,7 +723,7 @@ class WeightSyncE2ETest(absltest.TestCase):
     """Verifies Fallback mode weight transfer from PeftTrainer to VanillaSampler."""
     adapter_config = RolloutConfig(
         kv_cache_size=64,
-        weight_sync_mode=WeightSyncMode.FALLBACK,
+        weight_sync_mode=WeightSyncMode.IN_MEMORY,
     )
     vanilla_model = test_common.ToyTransformer(
         self.model_config, rngs=nnx.Rngs(2)
@@ -767,7 +767,7 @@ class WeightSyncE2ETest(absltest.TestCase):
   def test_fallback_mode_weight_sync_with_vllm_adapter(self):
     """Verifies Fallback mode weight transfer from PeftTrainer to InprocessVllmSampler."""
     adapter_config = RolloutConfig(
-        weight_sync_mode=WeightSyncMode.FALLBACK,
+        weight_sync_mode=WeightSyncMode.IN_MEMORY,
     )
     adapter = inprocess_vllm_sampler.InprocessVllmSampler(
         server_id="vllm_sampler_fallback_0",

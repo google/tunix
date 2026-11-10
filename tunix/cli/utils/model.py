@@ -13,17 +13,19 @@
 # limitations under the License.
 """Utilities for creating and managing models in Tunix CLI."""
 
+from __future__ import annotations
+
 import os
-from typing import Any, Tuple
+from typing import Any, TYPE_CHECKING, Tuple
 
 from absl import logging
-from flax import nnx
-import jax
-import qwix
 from tunix.generate import tokenizer_adapter as tokenizer_lib
 from tunix.models import automodel
 from tunix.models import naming
-from tunix.rl import reshard
+
+if TYPE_CHECKING:
+  from flax import nnx
+  import jax
 
 _DEFAULT_TOKENIZER_PATH = 'meta-llama/Llama-3.1-8B'
 _GCS_DEFAULT_TOKENIZER_PATHS = {
@@ -37,6 +39,10 @@ _GCS_DEFAULT_TOKENIZER_PATHS = {
 
 def apply_lora_to_model(base_model, mesh, lora_config, rng_seed=0):
   """Apply Lora to the base model if given lora config."""
+  from flax import nnx  # pylint: disable=g-import-not-at-top
+  import qwix  # pylint: disable=g-import-not-at-top
+  from tunix.rl import reshard  # pylint: disable=g-import-not-at-top
+
   logging.info('lora_config %r', lora_config)
   # Basic keyword arguments for LoraProvider
   lora_kwargs = {
@@ -239,6 +245,8 @@ def create_model(
     logging.info('Training with Full Weight')
 
   if model_config['model_display']:
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+
     nnx.display(model)
 
   return model, tokenizer_path

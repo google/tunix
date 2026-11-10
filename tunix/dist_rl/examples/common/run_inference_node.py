@@ -22,17 +22,18 @@ import logging
 import os
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-import jax
-from jax.experimental import mesh_utils
-from jax.sharding import Mesh
 from transformers import AutoTokenizer
 from tunix.dist_rl.common import otel_setup
 from tunix.dist_rl.worker import inference_worker as exp_inference_worker
 from tunix.dist_rl.worker import remote_execution
 from tunix.models import automodel
+from tunix.oss import utils as oss_utils
 from tunix.rl.inference import inference_worker as rl_inference_worker
+
+if TYPE_CHECKING:
+  from jax.sharding import Mesh
 
 REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
@@ -100,8 +101,6 @@ def _ensure_model_dir(model_dir: str, model_id: str) -> str:
       model_id,
   )
   model_path.mkdir(parents=True, exist_ok=True)
-  from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
-
   oss_utils.hf_pipeline(model_id, str(model_path))
   if _has_direct_safetensors(model_path):
     return str(model_path)
@@ -111,7 +110,12 @@ def _ensure_model_dir(model_dir: str, model_id: str) -> str:
   )
 
 
-def _create_mesh(args) -> Mesh:
+def _create_mesh(args: argparse.Namespace) -> Mesh:
+  """Creates the 2D `(fsdp, tp)` JAX device mesh for inference."""
+  import jax  # pylint: disable=g-import-not-at-top
+  from jax import sharding as jax_sharding  # pylint: disable=g-import-not-at-top
+  from jax.experimental import mesh_utils  # pylint: disable=g-import-not-at-top
+
   shape = (args.mesh_fsdp, args.mesh_tp)
   if args.mesh_fsdp * args.mesh_tp != jax.device_count():
     raise ValueError(
@@ -119,7 +123,7 @@ def _create_mesh(args) -> Mesh:
         f"Got shape={shape}, devices={jax.device_count()}."
     )
   devices = mesh_utils.create_device_mesh(shape, jax.devices())
-  return Mesh(devices, axis_names=("fsdp", "tp"))
+  return jax_sharding.Mesh(devices, axis_names=("fsdp", "tp"))
 
 
 def main(argv: list[str], context: Any = None) -> None:

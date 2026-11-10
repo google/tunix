@@ -157,7 +157,7 @@
       }
     },
     {
-      "tunix.dist_rl.launch.nodes.node_utils.Mesh": {
+      "jax.sharding.Mesh": {
         "args": [
           "<jax.experimental.mesh_utils.create_device_mesh()>"
         ],
@@ -174,7 +174,7 @@
         "kwargs": {
           "config": "<tunix.dist_rl.worker.rollout_worker.RolloutConfig()#2>",
           "max_concurrency": 256,
-          "mesh": "<tunix.dist_rl.launch.nodes.node_utils.Mesh()>",
+          "mesh": "<jax.sharding.Mesh()>",
           "server_id": "rollout-0",
           "tokenizer": "<tokenizer>"
         }
@@ -269,7 +269,7 @@
           "init_with_random_weights": false,
           "lora_config": null,
           "mapping_config": "<MappingConfig(**tunix.models.qwen3.mapping_vllm_jax.VLLM_JAX_MAPPING)>",
-          "mesh": "<tunix.dist_rl.launch.nodes.node_utils.Mesh()>",
+          "mesh": "<jax.sharding.Mesh()>",
           "overlap_postprocessing": true,
           "partial_rollout": false,
           "reshard_chunk_size": null,

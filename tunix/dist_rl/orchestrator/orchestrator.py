@@ -18,12 +18,14 @@ Supervises WorkerRegistry, LifecycleDriver, HealthMonitor, and StartupValidator.
 Provides supervised RL program execution (`run`).
 """
 
+from __future__ import annotations
+
 from collections.abc import Iterator, Mapping, Sequence
 import contextlib
 import signal
 import threading
 import types
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from absl import logging
 from tunix.dist_rl.common import datatypes
@@ -32,11 +34,13 @@ from tunix.dist_rl.orchestrator import distributed_rl_engine
 from tunix.dist_rl.orchestrator import fault_tolerance_manager as fault_tolerance_manager_lib
 from tunix.dist_rl.orchestrator import health_monitor
 from tunix.dist_rl.orchestrator import lifecycle
-from tunix.dist_rl.orchestrator import rl_program
 from tunix.dist_rl.orchestrator import worker_registry
 from tunix.dist_rl.trajectory import store as trajectory_store_lib
 from tunix.dist_rl.weight_sync import weight_sync
 from tunix.dist_rl.weight_sync import weight_sync_coordinator
+
+if TYPE_CHECKING:
+  from tunix.dist_rl.orchestrator import rl_program
 
 
 class ClusterOrchestrator:

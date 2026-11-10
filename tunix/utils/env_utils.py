@@ -14,11 +14,11 @@
 
 """Environment utils."""
 
-import flax
-
 
 def setup_sharding_environment():
   """Sets up the sharding environment."""
+  import flax  # pylint: disable=g-import-not-at-top
+
   if hasattr(flax.config, 'flax_always_shard_variable'):
     flax.config.update('flax_always_shard_variable', False)
 

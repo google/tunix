@@ -1991,6 +1991,18 @@ class DestinationStatusFilterTest(CoordinatorTestBase):
         },
     )
 
+  def test_create_default_handler_raises_not_implemented_for_pending_transports(
+      self,
+  ):
+    for mode in (
+        weight_sync.WeightSyncMode.IN_MEMORY,
+        weight_sync.WeightSyncMode.FS,
+        weight_sync.WeightSyncMode.NCCL,
+    ):
+      with self.subTest(mode=mode.value):
+        with self.assertRaisesRegex(NotImplementedError, "not implemented"):
+          weight_sync_coordinator.create_default_handler(mode)
+
 
 if __name__ == "__main__":
   absltest.main()

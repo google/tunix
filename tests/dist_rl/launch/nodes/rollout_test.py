@@ -31,7 +31,9 @@ from tunix.dist_rl.launch.nodes import rollout
 from tunix.dist_rl.rollout import inprocess_vllm_sampler
 from tunix.dist_rl.rollout import vanilla_sampler
 from tunix.dist_rl.rollout import vllm_sampler
+from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
+from tunix.dist_rl.worker import rollout_worker
 from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.utils import maxtext_utils
@@ -376,7 +378,7 @@ class CreateRolloutWorkerTest(absltest.TestCase):
     super().setUp()
     self.tokenizer = mock.MagicMock(bos_token="<bos>", eos_token="<eos>")
     self.mock_worker_cls = self.enter_context(
-        mock.patch.object(rollout.rollout_worker, "RolloutWorker")
+        mock.patch.object(rollout_worker, "RolloutWorker")
     )
 
   def _worker_kwargs(self) -> Mapping[str, Any]:
@@ -882,6 +884,7 @@ class RolloutMainTest(absltest.TestCase):
         "cluster_config.registry_module=my_task.registry",
     ]
     with contextlib.ExitStack() as stack:
+      stack.enter_context(mock.patch.object(raiden_preload, "import_raiden"))
       mock_import = stack.enter_context(
           mock.patch.object(rollout.importlib, "import_module")
       )

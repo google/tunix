@@ -14,16 +14,13 @@
 
 """Common configuration classes for Tunix."""
 
+from __future__ import annotations
+
 import dataclasses
 import math
-from typing import Any, Optional, TYPE_CHECKING, Tuple
+from typing import Any, Optional, Protocol, TYPE_CHECKING, Tuple, runtime_checkable
 
-import flax
-import jax
-from jax import numpy as jnp
-from jax.sharding import Mesh
 import numpy as np
-import optax
 from tunix.common import datatypes
 from tunix.generate import mappings
 from tunix.perf import metrics as perf_metrics
@@ -32,12 +29,21 @@ from tunix.sft import metrics_logger as sft_metrics_logger
 from tunix.sft import profiler
 
 if TYPE_CHECKING:
+  import flax
+  import jax
+  from jax import numpy as jnp
+  from jax.sharding import Mesh
+  import optax
   from tunix.rl.rollout import base_rollout  # pyrefly: ignore[missing-import]
+
+MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
 
 # For rl_utils calls inside RLTrainingConfig
 # For base_rollout typing inside ClusterConfig
 
-MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
+_VALID_WEIGHT_SYNC_MODES = tuple(
+    mode.value for mode in datatypes.WeightSyncMode
+)
 Mode = datatypes.Mode
 Role = datatypes.Role
 
@@ -232,6 +238,7 @@ class RolloutConfig:
   rollout_vllm_init_with_random_weights: bool = True
 
   # TPU backend type for vLLM rollout engine, "jax" or "torchax", default to "jax".
+  # TODO(deprecate): used by maxtext; keep until migrated.
   rollout_vllm_tpu_backend_type: str = "jax"
 
   # Whether to enable asynchronous scheduling for vLLM rollout engine.
@@ -311,10 +318,10 @@ class RolloutConfig:
           f" {self.episode_timeout!r}."
       )
     self.episode_timeout = float(self.episode_timeout)
-    if self.weight_sync_mode not in ("none", "fallback", "raiden"):
+    if self.weight_sync_mode not in _VALID_WEIGHT_SYNC_MODES:
       raise ValueError(
-          "weight_sync_mode must be one of ('none', 'fallback', 'raiden'),"
-          f" got {self.weight_sync_mode!r}."
+          f"weight_sync_mode must be one of {_VALID_WEIGHT_SYNC_MODES}, got"
+          f" {self.weight_sync_mode!r}."
       )
 
 
@@ -362,6 +369,15 @@ class RLProfileConfig:
       raise ValueError(f"timeout_secs must be > 0. Got: {self.timeout_secs}")
 
 
+def _validate_seq_tokens_budget(field_name: str, val: object) -> None:
+  if val is not None and (
+      isinstance(val, bool) or not isinstance(val, int) or val < 0
+  ):
+    raise ValueError(
+        f"{field_name} must be a non-negative integer or None, got {val!r}."
+    )
+
+
 @dataclasses.dataclass(slots=True, kw_only=True)
 class TrainingConfig:
   """Configuration for the trainer."""
@@ -401,18 +417,59 @@ class TrainingConfig:
   pbar_description: str | None = "Training"
 
   # Sequence packing configuration.
+  max_seq_tokens_per_device: int | None = None
+  # TODO(deprecate): used by maxtext and jax_privacy; remove once migrated to
+  # max_seq_tokens_per_device.
   max_seq_token_per_tpu: int | None = None
   # Static upper bound on real segments (sequences) per packed row, used to size
   # the segment-aware loss buckets (num_segments = this + 1 for the padding
-  # bucket). ``None`` defaults to ``max_seq_token_per_tpu`` -- provably safe (a
-  # pack of ``budget`` tokens holds at most ``budget`` unit-length segments) and
-  # needs no tuning. Set a smaller value only to shrink the loss buckets at very
-  # large budgets; ``pack_sequences`` raises if a pack exceeds it.
+  # bucket). ``None`` defaults to ``max_seq_tokens_per_device`` -- provably safe
+  # (a pack of ``budget`` tokens holds at most ``budget`` unit-length segments)
+  # and needs no tuning. Set a smaller value only to shrink the loss buckets at
+  # very large budgets; ``pack_sequences`` raises if a pack exceeds it.
   max_segments_per_packed_row: int | None = None
+
+  def __post_init__(self):
+    _validate_seq_tokens_budget(
+        "max_seq_tokens_per_device", self.max_seq_tokens_per_device
+    )
+    _validate_seq_tokens_budget(
+        "max_seq_token_per_tpu", self.max_seq_token_per_tpu
+    )
+    if (
+        self.max_seq_tokens_per_device is not None
+        and self.max_seq_token_per_tpu is not None
+        and self.max_seq_tokens_per_device != self.max_seq_token_per_tpu
+    ):
+      raise ValueError(
+          "max_seq_tokens_per_device and max_seq_token_per_tpu must match when"
+          f" both are set, got {self.max_seq_tokens_per_device} vs"
+          f" {self.max_seq_token_per_tpu}."
+      )
+    if self.max_seq_tokens_per_device is None:
+      object.__setattr__(
+          self, "max_seq_tokens_per_device", self.max_seq_token_per_tpu
+      )
+    else:
+      object.__setattr__(
+          self, "max_seq_token_per_tpu", self.max_seq_tokens_per_device
+      )
+
+  def __setattr__(self, name: str, value: Any) -> None:
+    if (
+        name in ("max_seq_tokens_per_device", "max_seq_token_per_tpu")
+        and hasattr(self, "max_seq_tokens_per_device")
+        and hasattr(self, "max_seq_token_per_tpu")
+    ):
+      _validate_seq_tokens_budget(name, value)
+      object.__setattr__(self, "max_seq_tokens_per_device", value)
+      object.__setattr__(self, "max_seq_token_per_tpu", value)
+      return
+    object.__setattr__(self, name, value)
 
   @property
   def sequence_packing_enabled(self) -> bool:
-    """Returns True if sequence packing (`max_seq_token_per_tpu > 0`) is enabled."""
+    """Returns True if sequence packing (`max_seq_tokens_per_device > 0`) is enabled."""
     return is_sequence_packing_enabled(self)
 
   def get_with_default(self, key: str, default: Any) -> Any:
@@ -422,10 +479,17 @@ class TrainingConfig:
     return val
 
 
-def is_sequence_packing_enabled(config: Any) -> bool:
-  """Returns True if sequence packing (`max_seq_token_per_tpu > 0`) is enabled."""
-  budget = getattr(config, "max_seq_token_per_tpu", None)
-  return isinstance(budget, int) and budget > 0
+@runtime_checkable
+class SequencePackingConfig(Protocol):
+  """Structural protocol for objects exposing a `max_seq_tokens_per_device` budget."""
+
+  max_seq_tokens_per_device: int | None
+
+
+def is_sequence_packing_enabled(config: SequencePackingConfig) -> bool:
+  """Returns True if sequence packing (`max_seq_tokens_per_device > 0`) is enabled."""
+  budget = config.max_seq_tokens_per_device
+  return isinstance(budget, int) and not isinstance(budget, bool) and budget > 0
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -467,6 +531,7 @@ class RLTrainingConfig(TrainingConfig):
 
   def __post_init__(self):
     """Validates the configuration after initialization."""
+    super().__post_init__()
     if (
         self.profiler_options is not None
         and self.rl_profiler_config is not None

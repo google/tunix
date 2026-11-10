@@ -21,14 +21,17 @@ and results are returned as host numpy. This version hosts frozen weights only;
 there is no weight sync.
 """
 
-from typing import Any, Protocol
+from __future__ import annotations
 
-import jax
-import jax.numpy as jnp
+from typing import Any, Protocol, TYPE_CHECKING
+
 import numpy as np
 from tunix.dist_rl.common import batch_utils
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.worker import abstract_worker
+
+if TYPE_CHECKING:
+  import jax
 
 WorkerState = datatypes.WorkerState
 
@@ -189,6 +192,8 @@ class InferenceWorker(abstract_worker.Worker):
           segment_ids_chunk: np.ndarray | None = None,
           segment_positions_chunk: np.ndarray | None = None,
       ) -> jax.Array:
+        import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+
         segment_kwargs: dict[str, jax.Array] = {}
         if (
             segment_ids_chunk is not None
@@ -257,6 +262,8 @@ class InferenceWorker(abstract_worker.Worker):
       def _score(
           prompt_chunk: np.ndarray, completion_chunk: np.ndarray
       ) -> jax.Array:
+        import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+
         return self._core.get_rewards(
             prompt_tokens=jnp.asarray(prompt_chunk, dtype=jnp.int32),
             completion_tokens=jnp.asarray(completion_chunk, dtype=jnp.int32),

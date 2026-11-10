@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Config and CLI launched interface."""
+
+from __future__ import annotations
+
 import ast
 import collections
 from collections.abc import Callable
@@ -24,19 +27,19 @@ import os
 import pathlib
 import shutil
 import stat
-from typing import Any, Dict, Iterator, Sequence
+from typing import Any, Dict, Iterator, Sequence, TYPE_CHECKING
 
 from absl import logging
 import dotenv
-import jax
 import omegaconf
-import optax
 from tunix.models import naming
 from tunix.perf import metrics as perf_metrics
 from tunix.sft import checkpoint_options
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
-from tunix.utils import mesh as mesh_lib
+
+if TYPE_CHECKING:
+  import optax
 
 # Define a prefix for environment variables that can override YAML keys
 _TUNIX_PREFIX = "T_"
@@ -373,6 +376,8 @@ def get_schedule_fn(
     AttributeError: If the schedule type does not correspond to a valid
                     function in optax.schedules.
   """
+  import optax  # pylint: disable=g-import-not-at-top
+
   try:
     schedule_fn = getattr(optax.schedules, schedule_type)
     return schedule_fn
@@ -458,6 +463,9 @@ def create_optimizer(
       does not provide.
     TypeError: If the extracted kwargs do not match the optimizer signature.
   """
+  import jax  # pylint: disable=g-import-not-at-top
+  import optax  # pylint: disable=g-import-not-at-top
+
   if not isinstance(optimizer_config, omegaconf.dictconfig.DictConfig | dict):
     raise ValueError("optimizer_config must be a dictionary")
 
@@ -1235,6 +1243,8 @@ class HyperParameters:
           "The 'mesh' configuration must be a dictionary-like object, got"
           f" {type(mesh_config)}."
       )
+    from tunix.utils import mesh as mesh_lib  # pylint: disable=g-import-not-at-top
+
     return mesh_lib.normalize_allocation_policy(
         mesh_config.get("allocation_policy")
     )

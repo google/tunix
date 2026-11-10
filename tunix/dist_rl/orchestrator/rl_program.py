@@ -44,11 +44,20 @@ from tunix.dist_rl.orchestrator import step_telemetry
 from tunix.dist_rl.queue_manager import trajectory_queue_manager
 from tunix.dist_rl.trajectory import store as trajectory_store_lib
 from tunix.rl import algorithm_config
-from tunix.rl import common as rl_common
 from tunix.rl import function_registry
 from tunix.rl import reward_manager as reward_manager_lib
 from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.utils import trajectory_logger
+
+
+def __getattr__(name: str) -> Any:
+  if name == "rl_common":
+    from tunix.rl import common as _rl_common  # pylint: disable=g-import-not-at-top
+
+    globals()[name] = _rl_common
+    return _rl_common
+  raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 MetricsLogger = metrics_logger_lib.MetricsLogger
 MetricsLoggerOptions = metrics_logger_lib.MetricsLoggerOptions
@@ -1397,6 +1406,8 @@ class StandardRLProgram(RLProgram):
         datatypes.Role.ACTOR, items=logps_req
     )
     trainer_logps = np.asarray(trainer_logps.per_token_logps, dtype=np.float32)
+    from tunix.rl import common as rl_common  # pylint: disable=g-import-not-at-top
+
     sa_metrics, sampler_is_weights, filtered_completion_mask = (
         rl_common.sampler_trainer_agreement(
             batch.old_per_token_logps,
@@ -1969,10 +1980,10 @@ class StandardRLProgram(RLProgram):
     def _retrieve_task_exception(t: asyncio.Task[Any]) -> None:
       try:
         t.result()
-      except Exception:  # pylint: disable=broad-except
-        # Exception is already logged inside run_async, we just need to
-        # retrieve it so asyncio doesn't complain about unretrieved exceptions.
-        pass
+      except Exception as exc:  # pylint: disable=broad-except
+        # Exception is already logged inside run_async, we log here for visibility
+        # and to retrieve it so asyncio doesn't complain about unretrieved exceptions.
+        logging.debug("Swallowing retrieved background task exception: %s", exc)
 
     if loop and loop.is_running():
       self._bg_task = asyncio.create_task(self.run_async(engine, **kwargs))

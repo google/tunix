@@ -39,6 +39,8 @@ TrajectoryStatus = agent_types.TrajectoryStatus
 TrajectoryItem = agent_types.TrajectoryItem
 format_traj_id = agent_types.format_traj_id
 Role = common_datatypes.Role
+WeightSyncMode = common_datatypes.WeightSyncMode
+DEFAULT_WEIGHT_SYNC_MODE = common_datatypes.DEFAULT_WEIGHT_SYNC_MODE
 ROUTED_EXPERTS_ENCODE_MODES = common_datatypes.ROUTED_EXPERTS_ENCODE_MODES
 RoutedExpertsEncodeMode = common_datatypes.RoutedExpertsEncodeMode
 validate_routed_experts_encode_config = (
@@ -188,6 +190,22 @@ class AdmissionStatus(enum.Enum):
   REGISTERED = "registered"
   PENDING_WEIGHT_SYNC = "pending_weight_sync"
   ACTIVE = "active"
+
+
+class GroupOrder(enum.Enum):
+  """Order in which the scored group queue yields ready groups to the trainer.
+
+  Attributes:
+    TRAJECTORY_COMPLETION: Yields completed groups as soon as they finish
+      scoring via `FifoGroupQueue`, regardless of which dataset prompt batch
+      they originated from.
+    PROMPT_ARRIVAL: Partitions scored groups by dataset prompt batch (`batch_idx
+      = prompt_idx // full_batch_size`) via `BatchOrderedGroupQueue` and serves
+      only groups belonging to the current batch cursor.
+  """
+
+  TRAJECTORY_COMPLETION = "trajectory_completion"
+  PROMPT_ARRIVAL = "prompt_arrival"
 
 
 @dataclasses.dataclass(kw_only=True)

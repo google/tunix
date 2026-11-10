@@ -168,7 +168,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
       training_config.compute_logps_micro_batch_size = 2
       training_config.train_micro_batch_size = 1
       training_config.mini_batch_size = None
-      training_config.max_seq_token_per_tpu = None
+      training_config.max_seq_tokens_per_device = None
       rl_engine.cluster_config.training_config = training_config
       rl_engine.cluster_config.rollout_config = base_rollout.RolloutConfig(
           max_tokens_to_generate=10, return_logprobs=True
@@ -207,7 +207,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
       training_config.compute_logps_micro_batch_size = 1
       training_config.train_micro_batch_size = 3
       training_config.mini_batch_size = 4
-      training_config.max_seq_token_per_tpu = 16  # Enable packing
+      training_config.max_seq_tokens_per_device = 16  # Enable packing
       training_config.max_segments_per_packed_row = None
       training_config.max_steps = 100
       rl_engine.cluster_config.training_config = training_config
@@ -284,7 +284,7 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
           cluster_config=types.SimpleNamespace(
               rollout_config=config,
               training_config=types.SimpleNamespace(
-                  max_seq_token_per_tpu=max_seq_token
+                  max_seq_tokens_per_device=max_seq_token
               ),
           ),
       )

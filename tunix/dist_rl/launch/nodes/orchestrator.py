@@ -53,7 +53,6 @@ import threading
 import time
 
 import grain
-import jax
 from tunix.cli.utils import data as data_lib
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.common import timeouts
@@ -134,15 +133,15 @@ def build_batch_config(
   # `create_rollout_config()` needs worker meshes for `rollout_engine=vllm`; the
   # CPU orchestrator only needs the length budgets.
   rollout = hp.config_mapping("rollout_config")
-  max_seq_token_per_tpu = rl_train["max_seq_token_per_tpu"]
+  max_seq_tokens_per_device = rl_train["max_seq_tokens_per_device"]
   max_segments_per_packed_row = rl_train["max_segments_per_packed_row"]
   return batch_assembly.BatchConfig(
       pad_id=pad_id,
       eos_id=eos_id,
       max_prompt_length=int(rollout["max_prompt_length"]),
       max_response_length=int(rollout["total_generation_steps"]),
-      max_seq_token_per_tpu=(
-          None if max_seq_token_per_tpu is None else int(max_seq_token_per_tpu)
+      max_seq_tokens_per_device=(
+          int(max_seq_tokens_per_device) if max_seq_tokens_per_device else None
       ),
       max_segments_per_packed_row=(
           None
@@ -691,6 +690,8 @@ def _pin_control_plane_to_cpu() -> None:
   JAX reads `JAX_PLATFORMS` when it is imported, so an explicitly set value is
   already in `jax.config` and is kept. Must run before any JAX backend use.
   """
+  import jax  # pylint: disable=g-import-not-at-top
+
   # TODO(noghabi): Remove the orchestrator's JAX dependency (NumPy advantages,
   # no JAX-importing modules on the control plane), then drop this pin.
   if not jax.config.jax_platforms:
@@ -706,6 +707,8 @@ def main(
     argv: `override_config_file=...` and `section.key=value` overrides.
     context: Runtime process context providing the discovery API.
   """
+  import jax  # pylint: disable=g-import-not-at-top
+
   _pin_control_plane_to_cpu()
   discovery = node_utils.require_discovery_context(context).ipc.discovery
   logging.basicConfig(

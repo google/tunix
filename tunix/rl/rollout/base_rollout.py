@@ -14,19 +14,22 @@
 
 """Base rollout worker interface."""
 
+from __future__ import annotations
+
 import abc
 import dataclasses
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, TYPE_CHECKING
 
-import jax
-from jax import numpy as jnp
-import jaxtyping
 import numpy as np
 from tunix.common import configs
+from tunix.generate import mappings
+
+if TYPE_CHECKING:
+  import jax
+  import jaxtyping
 
 CacheConfig = configs.CacheConfig
 RolloutConfig = configs.RolloutConfig
-from tunix.generate import mappings
 
 ABC = abc.ABC
 abstractmethod = abc.abstractmethod

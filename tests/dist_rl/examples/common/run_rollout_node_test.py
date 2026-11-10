@@ -15,9 +15,11 @@
 """Tests for distributed rollout model-family configuration."""
 
 import contextlib
+import importlib
 import io
 import json
 import os
+import sys
 from unittest import mock
 
 from absl.testing import absltest
@@ -746,6 +748,29 @@ class RunRolloutNodeTest(absltest.TestCase):
       self.assertIsNone(registered_callbacks[-1])
       mock_server.stop_serving.assert_awaited_once_with(grace=5.0)
       self.assertEqual(shutdown_order, ["worker_service.stop", "sampler.stop"])
+
+  def test_importing_run_rollout_node_keeps_ml_frameworks_unloaded(self):
+    forbidden = ("jax", "flax", "optax", "torch", "tpu_raiden")
+    with mock.patch.dict(sys.modules):
+      for name in list(sys.modules):
+        if (
+            name == "tunix"
+            or name.startswith("tunix.")
+            or name.endswith(".tunix")
+            or ".tunix." in name
+        ):
+          sys.modules.pop(name, None)
+        elif any(
+            name == pkg or name.startswith(f"{pkg}.") or f".{pkg}" in name
+            for pkg in forbidden
+        ):
+          sys.modules[name] = None
+      for pkg in forbidden:
+        sys.modules[pkg] = None
+      mod = importlib.import_module(
+          "tunix.dist_rl.examples.common.run_rollout_node"
+      )
+      self.assertTrue(callable(mod.main))
 
 
 if __name__ == "__main__":

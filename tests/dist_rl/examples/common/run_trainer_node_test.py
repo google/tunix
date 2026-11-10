@@ -20,6 +20,7 @@ import importlib
 from pathlib import Path
 import pickle
 import signal
+import sys
 import tempfile
 from typing import Any
 from unittest import mock
@@ -32,6 +33,7 @@ from tunix.dist_rl.examples.common import run_trainer_node
 from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import trainer_worker
+from tunix.models import automodel
 from tunix.utils import maxtext_utils
 
 
@@ -185,7 +187,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
           run_trainer_node.os.environ.pop("MODEL_LOAD_DTYPE", None)
           args = run_trainer_node._parse_args(argv)
         with mock.patch.object(
-            run_trainer_node.automodel.AutoModel,
+            automodel.AutoModel,
             "from_pretrained",
             return_value=(mock.sentinel.model, "/tmp/model"),
         ) as load:
@@ -625,18 +627,15 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     mock_create_maxtext.assert_called_once_with(args_maxtext)
     mock_create_tunix.assert_not_called()
 
-  @mock.patch.object(
-      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
-  )
-  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
-  @mock.patch.object(
-      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
-  )
-  def test_create_maxtext_trainer_factory_plumbs_max_seq_token_per_tpu(
+  @mock.patch.object(maxtext_utils, "get_tokenizer_pad_id", return_value=0)
+  @mock.patch.object(maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(maxtext_utils, "build_maxtext_config", autospec=True)
+  def test_create_maxtext_trainer_factory_plumbs_max_seq_tokens_per_device(
       self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
   ):
+    del mock_create_mesh, mock_get_pad_id
     args = run_trainer_node._parse_args([
-        "--max_seq_token_per_tpu",
+        "--max_seq_tokens_per_device",
         "4096",
     ])
     run_trainer_node._create_maxtext_trainer_factory(args)
@@ -645,13 +644,9 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         mock_build_cfg.call_args.kwargs["max_seq_token_per_tpu"], 4096
     )
 
-  @mock.patch.object(
-      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
-  )
-  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
-  @mock.patch.object(
-      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
-  )
+  @mock.patch.object(maxtext_utils, "get_tokenizer_pad_id", return_value=0)
+  @mock.patch.object(maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(maxtext_utils, "build_maxtext_config", autospec=True)
   def test_create_maxtext_trainer_factory_plumbs_profiler_and_tpu_options(
       self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
   ):
@@ -676,7 +671,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     mock_build_cfg.assert_called_once()
     self.assertEqual(
         mock_build_cfg.call_args.kwargs["profiling_options"],
-        run_trainer_node.maxtext_utils.ProfilerOptions(
+        maxtext_utils.ProfilerOptions(
             skip_first_n_steps=8,
             profiler_steps=3,
             profiler_period=10,
@@ -688,13 +683,9 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         ),
     )
 
-  @mock.patch.object(
-      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
-  )
-  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
-  @mock.patch.object(
-      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
-  )
+  @mock.patch.object(maxtext_utils, "get_tokenizer_pad_id", return_value=0)
+  @mock.patch.object(maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(maxtext_utils, "build_maxtext_config", autospec=True)
   def test_create_maxtext_trainer_factory_plumbs_adamw_options(
       self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
   ):
@@ -712,13 +703,9 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         ),
     )
 
-  @mock.patch.object(
-      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
-  )
-  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
-  @mock.patch.object(
-      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
-  )
+  @mock.patch.object(maxtext_utils, "get_tokenizer_pad_id", return_value=0)
+  @mock.patch.object(maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(maxtext_utils, "build_maxtext_config", autospec=True)
   def test_create_maxtext_trainer_factory_plumbs_weight_dtype(
       self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
   ):
@@ -729,13 +716,9 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         mock_build_cfg.call_args.kwargs["weight_dtype"], "bfloat16"
     )
 
-  @mock.patch.object(
-      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
-  )
-  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
-  @mock.patch.object(
-      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
-  )
+  @mock.patch.object(maxtext_utils, "get_tokenizer_pad_id", return_value=0)
+  @mock.patch.object(maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(maxtext_utils, "build_maxtext_config", autospec=True)
   def test_create_maxtext_trainer_factory_plumbs_optional_maxtext_knobs(
       self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
   ):
@@ -752,11 +735,11 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(kwargs["attention"], "flash")
 
   @mock.patch.object(
-      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+      maxtext_utils, "get_tokenizer_pad_id", return_value=0
   )
-  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(maxtext_utils, "create_maxtext_mesh")
   @mock.patch.object(
-      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+      maxtext_utils, "build_maxtext_config", autospec=True
   )
   def test_create_maxtext_trainer_factory_passes_legacy_launcher_env(
       self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
@@ -852,23 +835,27 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
   )
   @mock.patch.object(run_trainer_node, "_create_mesh")
   @mock.patch.object(run_trainer_node, "_load_actor_model")
-  @mock.patch.object(run_trainer_node.peft_trainer_v2, "TrainingConfig")
-  def test_create_tunix_trainer_factory_ignores_max_seq_token_per_tpu(
+  @mock.patch.object(peft_trainer_v2, "TrainingConfig")
+  def test_create_tunix_trainer_factory_ignores_max_seq_tokens_per_device(
       self,
       mock_training_config,
       mock_load_model,
       mock_create_mesh,
       mock_ensure_dir,
   ):
+    del mock_load_model, mock_create_mesh, mock_ensure_dir
     # The flag is for MaxText's max_target_length. Under the orchestrator the
     # PeftTrainer never packs -- the SequencePackedBatchAssembler does, and the
     # packing weights arrive on the payload -- so it stays off TrainingConfig.
     args = run_trainer_node._parse_args([
-        "--max_seq_token_per_tpu",
+        "--max_seq_tokens_per_device",
         "4096",
     ])
     run_trainer_node._create_tunix_trainer_factory(args)
     mock_training_config.assert_called_once()
+    self.assertNotIn(
+        "max_seq_tokens_per_device", mock_training_config.call_args.kwargs
+    )
     self.assertNotIn(
         "max_seq_token_per_tpu", mock_training_config.call_args.kwargs
     )
@@ -883,7 +870,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "4",
         "--mesh_fsdp",
         "4",
-        "--max_seq_token_per_tpu",
+        "--max_seq_tokens_per_device",
         "4096",
     ])
     self.assertEqual(run_trainer_node._gradient_accumulation_steps(args), 1)
@@ -895,8 +882,8 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
   )
   @mock.patch.object(run_trainer_node, "_create_mesh")
   @mock.patch.object(run_trainer_node, "_load_actor_model")
-  @mock.patch.object(run_trainer_node.peft_trainer_v2, "TrainingConfig")
-  @mock.patch.object(run_trainer_node.peft_trainer_v2, "PeftTrainer")
+  @mock.patch.object(peft_trainer_v2, "TrainingConfig")
+  @mock.patch.object(peft_trainer_v2, "PeftTrainer")
   def test_create_tunix_trainer_factory_keeps_rollout_tp_off_training_config(
       self,
       mock_peft_trainer,
@@ -1480,6 +1467,47 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         run_trainer_node._ensure_model_dir_for_trainer(
             tmp_file.name, "Qwen/Qwen3-1.7B"
         )
+
+  def test_parse_args_syncs_max_seq_tokens_per_device_and_rejects_mismatch(
+      self,
+  ):
+    args_device = run_trainer_node._parse_args(
+        ["--max_seq_tokens_per_device=8192"]
+    )
+    self.assertEqual(args_device.max_seq_tokens_per_device, 8192)
+    self.assertEqual(args_device.max_seq_token_per_tpu, 8192)
+    self.assertEqual(
+        run_trainer_node._gradient_accumulation_steps(args_device), 1
+    )
+
+    with self.assertRaises(SystemExit):
+      run_trainer_node._parse_args([
+          "--max_seq_tokens_per_device=8192",
+          "--max_seq_token_per_tpu=4096",
+      ])
+
+  def test_importing_run_trainer_node_keeps_ml_frameworks_unloaded(self):
+    forbidden = ("jax", "flax", "optax", "torch", "tpu_raiden")
+    with mock.patch.dict(sys.modules):
+      for name in list(sys.modules):
+        if (
+            name == "tunix"
+            or name.startswith("tunix.")
+            or name.endswith(".tunix")
+            or ".tunix." in name
+        ):
+          sys.modules.pop(name, None)
+        elif any(
+            name == pkg or name.startswith(f"{pkg}.") or f".{pkg}" in name
+            for pkg in forbidden
+        ):
+          sys.modules[name] = None
+      for pkg in forbidden:
+        sys.modules[pkg] = None
+      mod = importlib.import_module(
+          "tunix.dist_rl.examples.common.run_trainer_node"
+      )
+      self.assertTrue(callable(mod.main))
 
 
 if __name__ == "__main__":

@@ -318,7 +318,7 @@ class PeftTrainer:
   ):
     # TODO(noghabi): Implement sequence packing for SFT and remove this check.
     if (
-        training_config.max_seq_token_per_tpu is not None
+        configs.is_sequence_packing_enabled(training_config)
         and not self.supports_sequence_packing
     ):
       raise ValueError(
@@ -346,7 +346,7 @@ class PeftTrainer:
     # model-sized grad-tree allocation there.
     _uses_cond_path = not (
         self.config.get_with_default("gradient_accumulation_steps", 1) == 1
-        and self.config.max_seq_token_per_tpu is None
+        and not configs.is_sequence_packing_enabled(self.config)
     )
     self.grad_accumulator = GradientAccumulator(
         self.model, wrt_target, allocate_grads=_uses_cond_path
@@ -532,7 +532,7 @@ class PeftTrainer:
     # keeps the cond path since its cadence comes from `is_update_step`.
     if (
         self.config.get_with_default("gradient_accumulation_steps", 1) == 1
-        and self.config.max_seq_token_per_tpu is None
+        and not configs.is_sequence_packing_enabled(self.config)
     ):
       if isinstance(aux, utils.LossOutput):
         denom = jnp.asarray(aux.primary_loss.denominator, dtype=jnp.float32)
@@ -992,7 +992,7 @@ class PeftTrainer:
             not is_update_step_val
             and self.config.get_with_default("gradient_accumulation_steps", 1)
             == 1
-            and self.config.max_seq_token_per_tpu is None
+            and not configs.is_sequence_packing_enabled(self.config)
         ):
           # The depth-1 direct-update path in `_train_step` updates on every
           # step; a data-driven skip flag would be silently ignored there.

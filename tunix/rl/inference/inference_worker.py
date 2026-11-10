@@ -14,15 +14,21 @@
 
 """Inference worker for RL."""
 
-from flax import nnx
-import jax
-from tunix.rl import common
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+  from flax import nnx
+  import jax
 
 
 class InferenceWorker:
   """Inference worker hosting critic, reference and reward models."""
 
   def __init__(self, models: dict[str, nnx.Module]):
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+
     for k in models.keys():
       if k not in ["critic", "reference", "reward"]:
         raise ValueError(
@@ -42,6 +48,8 @@ class InferenceWorker:
       pad_id: int,
       eos_id: int,
   ) -> jax.Array:
+    from tunix.rl import common  # pylint: disable=g-import-not-at-top
+
     reward_model = self._models.get("reward")
     if reward_model is None:
       raise ValueError("Reward model is not available.")
@@ -60,6 +68,8 @@ class InferenceWorker:
       segment_positions: jax.Array | None = None,
       token_mask: jax.Array | None = None,
   ) -> jax.Array:
+    from tunix.rl import common  # pylint: disable=g-import-not-at-top
+
     graphdef, state = self._model_states.get("reference")  # pyrefly: ignore[not-iterable]
     if graphdef is None:
       raise ValueError("Reference model is not available.")
@@ -84,6 +94,9 @@ class InferenceWorker:
       pad_id: int,
       eos_id: int,
   ) -> jax.Array:
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+    from tunix.rl import common  # pylint: disable=g-import-not-at-top
+
     graphdef, state = self._model_states.get("critic")  # pyrefly: ignore[not-iterable]
     critic_model = nnx.merge(graphdef, state)
     if critic_model is None:

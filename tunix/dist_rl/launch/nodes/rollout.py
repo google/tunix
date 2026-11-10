@@ -44,12 +44,20 @@ from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.weight_sync import weight_sync as weight_sync_lib
 from tunix.dist_rl.worker import rollout_worker
 from tunix.generate import mappings as mappings_lib
+from tunix.generate import tokenizer_adapter as tokenizer_adapter_lib
 from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 from tunix.utils import maxtext_utils
 
-# Import Raiden before any other libraries to ensure correct JAX compilation.
-raiden_preload.import_raiden()
+SamplerBuilder = Callable[
+    [
+        resolve_config.DistHyperParameters,
+        str,
+        node_utils.HfTokenizer,
+        rollout_worker.RolloutConfig,
+    ],
+    sampler_lib.Sampler,
+]
 
 LOCAL_WORKER_ID = "rollout-0"
 
@@ -415,6 +423,7 @@ def _maxtext_additional_config(
   maxtext_model_name = _maxtext_model_name(hp)
   if not maxtext_model_name:
     return None
+
   # The architectures override is applied by `_vllm_hf_overrides`.
   logging.info(
       "Loading MaxText model %r natively via maxtext_vllm_adapter's"
@@ -748,16 +757,6 @@ def _create_vllm_sampler(
   )
 
 
-SamplerBuilder = Callable[
-    [
-        resolve_config.DistHyperParameters,
-        str,
-        Tokenizer,
-        rollout_worker.RolloutConfig,
-    ],
-    sampler_lib.Sampler,
-]
-
 # `rollout_engine` -> sampler builder; every builder takes the same arguments
 # and the shared `RolloutConfig`.
 _SAMPLER_BUILDERS: Mapping[str, SamplerBuilder] = {
@@ -771,10 +770,6 @@ def _create_rollout_worker(
     hp: resolve_config.DistHyperParameters, worker_id: str, tokenizer: Tokenizer
 ) -> rollout_worker.RolloutWorker:
   """Builds the `RolloutConfig` and sampler, and wraps them in a worker."""
-  from tunix.generate import (  # pylint: disable=g-import-not-at-top
-      tokenizer_adapter as tokenizer_adapter_lib,
-  )
-
   rollout_engine = str(hp.config["rollout_engine"])
   config = _rollout_config(hp, tokenizer, sampler_type=rollout_engine)
   sampler = _SAMPLER_BUILDERS[rollout_engine](hp, worker_id, tokenizer, config)
@@ -846,6 +841,7 @@ def main(
   # before the JAX initialization, which can block on the other processes.
   config_sha256 = node_utils.log_resolved_config(hp, "rollout")
 
+  raiden_preload.import_raiden()
   sampler_type = str(hp.config["rollout_engine"])
   if sampler_type == "vanilla":
     process_context.jax.initialize()

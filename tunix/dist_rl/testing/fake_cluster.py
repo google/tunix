@@ -114,7 +114,7 @@ class FakeClusterHarness:
       self,
       *,
       num_rollout_workers: int = 2,
-      weight_sync_mode: str = "fallback",
+      weight_sync_mode: str = "noop",
       weight_sync_handler: weight_sync.WeightSyncHandler | None = None,
       weight_sync_timeouts: weight_sync_coordinator.PhaseTimeouts | None = None,
       rpc_timeout_s: float = 30.0,

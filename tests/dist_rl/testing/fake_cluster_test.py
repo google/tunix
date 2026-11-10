@@ -24,7 +24,7 @@ class FakeClusterTest(absltest.TestCase):
   def test_fake_cluster_e2e_two_steps(self) -> None:
     with fake_cluster.FakeClusterHarness(
         num_rollout_workers=2,
-        weight_sync_mode="fallback",
+        weight_sync_mode="noop",
     ) as harness:
       program = harness.build_program(
           num_prompts=4,
@@ -60,7 +60,7 @@ class FakeClusterTest(absltest.TestCase):
     handler = fake_cluster.RecordingFaultHandler()
     with fake_cluster.FakeClusterHarness(
         num_rollout_workers=2,
-        weight_sync_mode="fallback",
+        weight_sync_mode="noop",
         weight_sync_handler=handler,
     ) as harness:
       program = harness.build_program(

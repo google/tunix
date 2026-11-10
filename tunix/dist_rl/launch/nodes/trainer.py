@@ -30,26 +30,24 @@ import dataclasses
 import logging
 import os
 import sys
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
-from flax import nnx
-import jax
-from jax.sharding import Mesh
-import optax
-from orbax import checkpoint as ocp
 from tunix.cli.utils import model as model_utils
 from tunix.dist_rl.distributed.runtime import context as context_lib
 from tunix.dist_rl.launch.common import resolve_config
 from tunix.dist_rl.launch.nodes import node_utils
 from tunix.dist_rl.train import abstract_trainer
-from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.weight_sync import raiden_preload
 from tunix.dist_rl.worker import trainer_worker
 from tunix.models import automodel
 from tunix.utils import maxtext_utils
 
-# Import Raiden before any other libraries to ensure correct JAX compilation.
-raiden_preload.import_raiden()
+if TYPE_CHECKING:
+  from flax import nnx
+  from jax.sharding import Mesh
+  import optax
+  from orbax import checkpoint as ocp
+  from tunix.dist_rl.train import peft_trainer_v2
 
 LOCAL_WORKER_ID = "trainer-0"
 
@@ -69,18 +67,20 @@ KwargValue = int | float | str | bool
 _T = TypeVar("_T", int, float, str, bool)
 
 
-def _sequence_packing_enabled(hp: resolve_config.DistHyperParameters) -> bool:
-  """Returns whether `rl_training_config.max_seq_token_per_tpu > 0`.
+def _max_seq_tokens_per_device_enabled(
+    hp: resolve_config.DistHyperParameters,
+) -> bool:
+  """Returns whether `rl_training_config.max_seq_tokens_per_device > 0`.
 
   `common_configs.is_sequence_packing_enabled` needs a built TrainingConfig:
   `RLTrainingConfig` cannot be built for dist configs (its micro-batch is
   prompt-level, the dist one is trajectory-level), and the trainer's
-  `TrainingConfig` deliberately leaves `max_seq_token_per_tpu` unset.
+  `TrainingConfig` deliberately leaves `max_seq_tokens_per_device` unset.
 
   Args:
     hp: Validated distributed RL configuration.
   """
-  budget = hp.config_mapping(_RL_TRAINING_KEY)["max_seq_token_per_tpu"]
+  budget = hp.config_mapping(_RL_TRAINING_KEY)["max_seq_tokens_per_device"]
   return budget is not None and int(budget) > 0
 
 
@@ -102,7 +102,7 @@ def _gradient_accumulation_steps(
     1 with sequence packing (the micro-batch count is then dynamic and losses
     are token-normalized), otherwise the static micro-step count.
   """
-  if _sequence_packing_enabled(hp):
+  if _max_seq_tokens_per_device_enabled(hp):
     return 1
   rl_train = hp.config_mapping(_RL_TRAINING_KEY)
   num_generations = int(
@@ -189,6 +189,8 @@ def _tunix_training_config(
   Returns:
     The trainer config.
   """
+  from tunix.dist_rl.train import peft_trainer_v2  # pylint: disable=g-import-not-at-top
+
   rl_train = hp.config_mapping(_RL_TRAINING_KEY)
   built = hp.obtain_training_config_dict(_RL_TRAINING_KEY)
   return peft_trainer_v2.TrainingConfig(
@@ -203,14 +205,15 @@ def _tunix_training_config(
           device_host_concurrent_gb=_ckpt_d2h_concurrent_gb(hp),
       ),
       checkpoint_root_directory=_checkpoint_root_directory(hp),
-      # No max_seq_token_per_tpu here. Under the orchestrator the trainer never
-      # packs: the SequencePackedBatchAssembler does, and the weighting that
-      # packing needs rides in on the payload (`_fwd_bwd_step` accumulates with
-      # `denom=aux.primary_loss.denominator`). The only thing the field would
-      # change on this path is `_is_single_microstep()`, and the orchestrator
-      # drives `fwd_bwd` + `update` rather than the fused step it gates.
-      # The orchestrator owns resume: it calls restore_checkpoint() explicitly
-      # and realigns its step/policy_version from the returned metadata.
+      # No max_seq_tokens_per_device here. Under the orchestrator the trainer
+      # never packs: the SequencePackedBatchAssembler does, and the weighting
+      # that packing needs rides in on the payload (`_fwd_bwd_step` accumulates
+      # with `denom=aux.primary_loss.denominator`). The only thing the field
+      # would change on this path is `_is_single_microstep()`, and the
+      # orchestrator drives `fwd_bwd` + `update` rather than the fused step it
+      # gates. The orchestrator owns resume: it calls restore_checkpoint()
+      # explicitly and realigns its step/policy_version from the returned
+      # metadata.
       resume_from_checkpoint_on_init=False,
   )
 
@@ -311,6 +314,8 @@ def _create_tunix_trainer_factory(
     hp: resolve_config.DistHyperParameters,
 ) -> tuple[TrainerFactory, Mesh]:
   """Creates the PeftTrainer v2 factory and the trainer mesh."""
+  from tunix.dist_rl.train import peft_trainer_v2  # pylint: disable=g-import-not-at-top
+
   logging.info("Trainer backend: Tunix's PeftTrainer.")
   actor = hp.config_mapping(_ACTOR_KEY)
   rl_train = hp.config_mapping(_RL_TRAINING_KEY)
@@ -334,12 +339,12 @@ def _create_tunix_trainer_factory(
   num_generations = int(
       hp.config_mapping("agentic_grpo_config")["num_generations"]
   )
-  if _sequence_packing_enabled(hp):
+  if _max_seq_tokens_per_device_enabled(hp):
     logging.info(
         "Trainer gradient accumulation is dynamic via sequence packing"
-        " (max_seq_token_per_tpu=%s, mini_batch_size=%s prompt groups,"
+        " (max_seq_tokens_per_device=%s, mini_batch_size=%s prompt groups,"
         " num_generations=%d).",
-        rl_train["max_seq_token_per_tpu"],
+        rl_train["max_seq_tokens_per_device"],
         rl_train["mini_batch_size"],
         num_generations,
     )
@@ -389,6 +394,8 @@ def _maxtext_checkpointing_options(
     saving but still restores `load_parameters_path`), otherwise interval and
     retention options.
   """
+  from orbax import checkpoint as ocp  # pylint: disable=g-import-not-at-top
+
   interval = _save_interval_steps(hp)
   if interval == 0:
     logging.info(
@@ -528,6 +535,8 @@ def _create_maxtext_trainer_factory(
   Returns:
     The trainer factory and the MaxText device mesh.
   """
+  import jax  # pylint: disable=g-import-not-at-top
+
   logging.info("Trainer backend: MaxText's MaxTextTrainingEngine.")
   actor = hp.config_mapping(_ACTOR_KEY)
   kwargs = actor["kwargs"]
@@ -549,7 +558,7 @@ def _create_maxtext_trainer_factory(
         _ACTOR_OPTIMIZER_KEY,
         opt["schedule_type"],
     )
-  max_seq_token_per_tpu = rl_train["max_seq_token_per_tpu"]
+  max_seq_tokens_per_device = rl_train["max_seq_tokens_per_device"]
   maxtext_config = maxtext_utils.build_maxtext_config(
       model_name=maxtext_model_name,
       worker_id=worker_id,
@@ -586,7 +595,9 @@ def _create_maxtext_trainer_factory(
           hp.config_mapping("weight_sync_config")["use_weight_converter"]
       ),
       max_seq_token_per_tpu=(
-          int(max_seq_token_per_tpu) if max_seq_token_per_tpu is not None else 0
+          int(max_seq_tokens_per_device)
+          if max_seq_tokens_per_device is not None
+          else 0
       ),
       weight_dtype=str(actor["load_dtype"]),
       attention=_kwarg(kwargs, "attention", ""),
@@ -644,6 +655,7 @@ def main(
   # a malformed port or OpenTelemetry setting fails fast.
   node_utils.setup_otel_metrics(hp, "trainer", worker_id)
 
+  raiden_preload.import_raiden()
   process_context.jax.initialize()
 
   rl_train = hp.config_mapping(_RL_TRAINING_KEY)
