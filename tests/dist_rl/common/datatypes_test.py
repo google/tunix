@@ -127,9 +127,7 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(
         restored.payload.policy_version, original.payload.policy_version
     )
-    self.assertEqual(
-        restored.payload.traj.reward, original.payload.traj.reward
-    )
+    self.assertEqual(restored.payload.traj.reward, original.payload.traj.reward)
     np.testing.assert_array_equal(
         restored.payload.prompt_tokens, original.payload.prompt_tokens
     )
@@ -284,7 +282,9 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(item.traj_id, "traj_42_g2")
 
   def test_trajectory_item_fields(self):
-    item = datatypes.TrajectoryItem(prompt_id="prompt_88", group_index=4, traj={})
+    item = datatypes.TrajectoryItem(
+        prompt_id="prompt_88", group_index=4, traj={}
+    )
     self.assertEqual(item.prompt_id, "prompt_88")
     self.assertEqual(item.group_index, 4)
 
@@ -387,13 +387,33 @@ class RLTrainerPayloadTest(absltest.TestCase):
         if f.metadata == datatypes.STATIC_FIELD_METADATA
     }
     self.assertEqual(
-        static, {"num_segments", "sampler_agreement_applied", "metadata"}
+        static,
+        {"num_segments", "sampler_agreement_applied", "metadata"},
     )
     self.assertEmpty([
         f.name
         for f in dataclasses.fields(datatypes.SFTTrainerPayload)
         if f.metadata
     ])
+
+  def test_logprobs_scoring_payload_static_field_metadata(self):
+    static = {
+        f.name
+        for f in dataclasses.fields(datatypes.LogprobsScoringPayload)
+        if f.metadata == datatypes.STATIC_FIELD_METADATA
+    }
+    self.assertEqual(static, {"pad_id", "eos_id", "temperature"})
+    payload = datatypes.LogprobsScoringPayload(
+        prompt_ids=np.array([[1, 2]], dtype=np.int32),
+        completion_ids=np.array([[3, 4]], dtype=np.int32),
+        pad_id=0,
+        eos_id=2,
+        temperature=0.8,
+    )
+    self.assertEqual(payload.pad_id, 0)
+    self.assertEqual(payload.eos_id, 2)
+    self.assertEqual(payload.temperature, 0.8)
+    self.assertIsNone(payload.segment_ids)
 
   def test_rl_trainer_payload_cloudpickle_roundtrip(self):
     payload = datatypes.RLTrainerPayload(

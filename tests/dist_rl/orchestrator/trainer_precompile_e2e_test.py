@@ -35,6 +35,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
 import jax
+import jax.numpy as jnp
 import numpy as np
 import optax
 from tunix.dist_rl.common import datatypes
@@ -47,6 +48,7 @@ from tunix.dist_rl.train import peft_trainer_v2
 from tunix.dist_rl.worker import remote_execution
 from tunix.dist_rl.worker import trainer_worker
 from tunix.rl import algorithm_config
+from tunix.rl import common as rl_common
 from tunix.tests import test_common as tc
 
 try:
@@ -537,6 +539,88 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
     self.assertEqual(step, 1)
     self.assertEqual(trace_counts, traces_after_configure)
     self.assertEmpty(self._compiled_step_executables(_MAXTEXT_STEP_EXECUTABLES))
+
+  @absltest.skipUnless(
+      MAXTEXT_AVAILABLE
+      # TODO(igorts): Drop hasattr guard once cl/1015725345 lands.
+      and hasattr(maxtext_engine.MaxTextTrainingEngine, "with_fwd_only_fn"),
+      "requires MaxText with with_fwd_only_fn",
+  )
+  @parameterized.named_parameters(
+      ("padded", "padded"),
+      ("packed", "packed"),
+  )
+  def test_maxtext_engine_per_token_logps_padded_and_packed(
+      self, assembler_kind
+  ):
+    engine, _ = self._build_maxtext_trainer()
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: engine,
+        worker_id="trainer-0",
+        logps_micro_batch_size=1,
+    )
+    worker.initialize()
+
+    if assembler_kind == "padded":
+      req = datatypes.LogprobsRequest(
+          prompt_tokens=np.array([[0, 1, 2, 3], [0, 0, 1, 2]], dtype=np.int32),
+          completion_tokens=np.array([[4, 5, 1], [6, 1, 0]], dtype=np.int32),
+          temperature=1.0,
+          pad_id=0,
+          eos_id=1,
+      )
+    elif assembler_kind == "packed":
+      req = datatypes.LogprobsRequest(
+          prompt_tokens=np.zeros((2, 0), dtype=np.int32),
+          completion_tokens=np.array(
+              [[2, 3, 1, 4, 5, 1, 0, 0], [3, 4, 5, 1, 0, 0, 0, 0]],
+              dtype=np.int32,
+          ),
+          segment_ids=np.array(
+              [[1, 1, 1, 2, 2, 2, 0, 0], [1, 1, 1, 1, 0, 0, 0, 0]],
+              dtype=np.int32,
+          ),
+          segment_positions=np.array(
+              [[0, 1, 2, 0, 1, 2, 0, 0], [0, 1, 2, 3, 0, 0, 0, 0]],
+              dtype=np.int32,
+          ),
+          temperature=1.0,
+          pad_id=0,
+          eos_id=1,
+      )
+    else:
+      raise ValueError(f"Unknown assembler_kind: {assembler_kind}")
+
+    resp = worker.per_token_logps(items=req)
+    self.assertLen(engine._fwd_only_cache, 1)
+
+    graphdef, state = nnx.split(engine.model)
+    with engine._sharding_ctx():
+      expected = np.asarray(
+          rl_common.compute_per_token_logps(
+              graphdef,
+              state,
+              prompt_tokens=jnp.asarray(req.prompt_tokens),
+              completion_tokens=jnp.asarray(req.completion_tokens),
+              pad_id=req.pad_id,
+              eos_id=req.eos_id,
+              stop_gradient=True,
+              temperature=req.temperature,
+              segment_ids=(
+                  None
+                  if req.segment_ids is None
+                  else jnp.asarray(req.segment_ids)
+              ),
+              segment_positions=(
+                  None
+                  if req.segment_positions is None
+                  else jnp.asarray(req.segment_positions)
+              ),
+          )
+      )
+    np.testing.assert_allclose(
+        resp.per_token_logps, expected, rtol=1e-4, atol=1e-4
+    )
 
 
 if __name__ == "__main__":

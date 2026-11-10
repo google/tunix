@@ -40,6 +40,7 @@ TRAINER_PAYLOAD_TYPES: tuple[type[datatypes.TrainerPayload], ...] = (
     datatypes.TrainerPayload,
     datatypes.SFTTrainerPayload,
     datatypes.RLTrainerPayload,
+    datatypes.LogprobsScoringPayload,
 )
 
 for _payload_type in TRAINER_PAYLOAD_TYPES:

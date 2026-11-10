@@ -650,8 +650,8 @@ class RLTrainerPayload(TrainerPayload):
     old_values: Optional [B, C] critic value estimates (for PPO / Critic).
     num_segments: Optional static upper bound on number of segments in packed
       rows (static field, see `STATIC_FIELD_METADATA`).
-    sampler_agreement_applied: Whether the orchestrator already scored the
-      batch against the trainer (static field).
+    sampler_agreement_applied: Whether the orchestrator already scored the batch
+      against the trainer (static field).
     metadata: Extra payload metadata dictionary (static field).
   """
 
@@ -678,6 +678,33 @@ class RLTrainerPayload(TrainerPayload):
       default_factory=dict, metadata=STATIC_FIELD_METADATA
   )
   # TODO(tunix-dev): add ppo specific fields in PPORLTrainerPayload.
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class LogprobsScoringPayload(TrainerPayload):
+  """Read-only payload for actor-side per-token log-probability scoring.
+
+  Attributes:
+    prompt_ids: [B, P] prompt token IDs.
+    completion_ids: [B, C] completion (or packed sequence) token IDs.
+    pad_id: Padding token ID (static field, see `STATIC_FIELD_METADATA`).
+    eos_id: End-of-sequence token ID (static field, see
+      `STATIC_FIELD_METADATA`).
+    temperature: Softmax temperature used when scoring log-probs (static field,
+      see `STATIC_FIELD_METADATA`).
+    segment_ids: Optional [B, T] packing segment ids.
+    segment_positions: Optional [B, T] position indices within each segment.
+    routed_experts: Optional MoE expert ids captured during rollout.
+  """
+
+  prompt_ids: np.ndarray
+  completion_ids: np.ndarray
+  pad_id: int = dataclasses.field(metadata=STATIC_FIELD_METADATA)
+  eos_id: int = dataclasses.field(metadata=STATIC_FIELD_METADATA)
+  temperature: float = dataclasses.field(metadata=STATIC_FIELD_METADATA)
+  segment_ids: np.ndarray | None = None
+  segment_positions: np.ndarray | None = None
+  routed_experts: np.ndarray | None = None
 
 
 @dataclasses.dataclass(kw_only=True)

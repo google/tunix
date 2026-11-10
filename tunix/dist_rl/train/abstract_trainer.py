@@ -155,20 +155,42 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Read-only.
+  def with_fwd_only_fn(self, fn: Callable[..., Any]) -> "AbstractTrainer":
+    """Sets the read-only callback `fwd_only` runs.
 
-    Runs a forward pass with the trainer model and caller-supplied function.
+    The forward-only counterpart of `with_loss_fn`. Invalidates any cached
+    forward-only JIT executables.
 
-    The trainer owns model access and shards `args`/`kwargs` on its data axis;
-    `fn` owns the computation and must not mutate the model.
     Args:
-      fn: Called as `fn(model, *args, **kwargs)`.
-      *args: Positional arguments forwarded to `fn` after sharding.
-      **kwargs: Keyword arguments forwarded to `fn` after sharding.
+      fn: Called as `fn(model, payload)`, where `model` is a read-only copy of
+        the trainer model in `eval()` mode (`model.eval()`) and `payload` is the
+        sharded input payload.
 
     Returns:
-      Whatever `fn` returns.
+      self, for chaining.
+    """
+    raise NotImplementedError(
+        f"{type(self).__name__} does not implement with_fwd_only_fn."
+    )
+
+  @abc.abstractmethod
+  def fwd_only(self, payload: datatypes.TrainerPayload) -> Any:
+    """Read-only.
+
+    Runs the registered `with_fwd_only_fn` callback on a read-only model copy in
+    `eval()` mode (`model.eval()`) and sharded `payload`.
+
+    The trainer owns model access, JIT compilation/caching, and sharding on its
+    data axis; `fn` owns the computation and must not mutate trainer state.
+
+    Args:
+      payload: The input payload to prepare and shard.
+
+    Returns:
+      Whatever the callback returns.
+
+    Raises:
+      ValueError: If `with_fwd_only_fn` has not been called.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement fwd_only."

@@ -508,6 +508,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._jitted_update_step_fn = None
     self._jitted_eval_step_fn = None
     self._jitted_train_step_fn = None
+    self._fwd_only_fn: Callable[..., Any] | None = None
+    self._jitted_fwd_only_fn: Callable[..., Any] | None = None
     self._prof: profiler.Profiler | None = None
     self._sync_step_derived_state()
     self._buffered_train_metrics: MetricsBuffer | None = None
@@ -570,6 +572,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._jitted_update_step_fn = None
     self._jitted_eval_step_fn = None
     self._jitted_train_step_fn = None
+    self._jitted_fwd_only_fn = None
 
   @override
   def with_loss_fn(
@@ -1291,26 +1294,50 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           self._buffered_eval_metrics = None
 
   @override
-  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Runs `fn(model, *args, **kwargs)` on `self.model'.
+  def with_fwd_only_fn(self, fn: Callable[..., Any]) -> "PeftTrainer":
+    def _step(
+        graphdef: nnx.GraphDef,
+        state: nnx.State,
+        payload: datatypes.TrainerPayload,
+    ) -> Any:
+      model = nnx.merge(graphdef, state, copy=True)
+      model.eval()
+      return fn(model, payload)
 
-    Shards the inputs and passes them to the function along with the live
-    model.
+    self._fwd_only_fn = _step
+    self._jitted_fwd_only_fn = None
+    return self
+
+  @override
+  def fwd_only(self, payload: datatypes.TrainerPayload) -> Any:
+    """Runs the registered `with_fwd_only_fn` callback under `jax.jit`.
+
+    Prepares and shards `payload` via `_prepare_payload` (stripping host
+    `metadata` and sharding arrays on `config.data_sharding_axis`),
+    reconstructs a read-only copy of the model (`nnx.merge(graphdef, state,
+    copy=True)` so live trainer state is never mutated), and invokes
+    `fn(model, payload)`.
+
+    Args:
+      payload: Input payload to prepare and shard on
+        `config.data_sharding_axis`.
+
+    Returns:
+      Whatever the callback returns.
+
+    Raises:
+      ValueError: If `with_fwd_only_fn` has not been called.
     """
-    axis = self.config.data_sharding_axis
-
-    def _shard(x: Any) -> Any:
-      if not isinstance(x, (jax.Array, np.ndarray)):
-        return x
-      x = jnp.asarray(x)
-      # Skip zero-column arrays (e.g. the empty prompt in packed mode) to avoid
-      # constructing degenerate global arrays.
-      if x.ndim >= 2 and x.shape[1] == 0:
-        return x
-      return sharding_utils.shard_input(x, axis)
-
-    args, kwargs = jax.tree.map(_shard, (args, kwargs))
-    return fn(self.model, *args, **kwargs)
+    if self._fwd_only_fn is None:
+      raise ValueError(
+          "PeftTrainer.fwd_only needs a callback: call with_fwd_only_fn()"
+          " first."
+      )
+    payload = self._prepare_payload(payload)
+    if self._jitted_fwd_only_fn is None:
+      self._jitted_fwd_only_fn = jax.jit(self._fwd_only_fn)
+    graphdef, state = nnx.split(self.model)
+    return self._jitted_fwd_only_fn(graphdef, state, payload)
 
   @override
   def save_checkpoint(

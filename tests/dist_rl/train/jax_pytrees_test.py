@@ -73,6 +73,37 @@ class JaxPytreesTest(absltest.TestCase):
         ),
     )
 
+  def test_logprobs_scoring_payload_is_a_pytree_with_static_scoring_fields(
+      self,
+  ):
+    static = {
+        f.name
+        for f in dataclasses.fields(datatypes.LogprobsScoringPayload)
+        if f.metadata == datatypes.STATIC_FIELD_METADATA
+    }
+    self.assertEqual(static, {"pad_id", "eos_id", "temperature"})
+    base = datatypes.LogprobsScoringPayload(
+        prompt_ids=np.array([[1, 2]], dtype=np.int32),
+        completion_ids=np.array([[3, 4]], dtype=np.int32),
+        pad_id=0,
+        eos_id=2,
+        temperature=1.0,
+    )
+    self.assertLen(jax.tree.leaves(base), 2)
+    base_struct = jax.tree.structure(base)
+    self.assertNotEqual(
+        base_struct,
+        jax.tree.structure(dataclasses.replace(base, temperature=0.7)),
+    )
+    self.assertEqual(
+        base_struct,
+        jax.tree.structure(
+            dataclasses.replace(
+                base, prompt_ids=np.array([[9, 9]], dtype=np.int32)
+            )
+        ),
+    )
+
   def test_tree_map_preserves_type_and_statics(self):
     payload = _rl_payload()
     doubled = jax.tree.map(lambda x: x * 2, payload)
