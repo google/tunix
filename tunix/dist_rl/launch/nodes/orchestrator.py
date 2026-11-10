@@ -423,11 +423,13 @@ def load_prompt_items(
 def required_workers(
     hp: resolve_config.DistHyperParameters,
 ) -> dict[datatypes.Role | str, int]:
-  """Returns the number of workers per role to wait for.
+  """Returns the minimum number of workers per role to wait for at startup.
 
-  The rollout count is `cluster_config.rollout_replicas` on every target (one
-  on `target: local`). The reference inference worker is only needed for a KL
-  penalty (`agentic_grpo_config.beta != 0`).
+  The rollout count is `cluster_config.min_rollout_replicas` when set, or
+  `cluster_config.rollout_replicas` otherwise (one on `target: local`). Any
+  remaining rollout replicas register in the background after startup begins.
+  The reference inference worker is only needed for a KL penalty
+  (`agentic_grpo_config.beta != 0`).
 
   Args:
     hp: Resolved distributed RL configuration.
@@ -435,11 +437,15 @@ def required_workers(
   Returns:
     The minimum worker count per role.
   """
-  num_rollouts = int(hp.config_mapping("cluster_config")["rollout_replicas"])
+  cluster = hp.config_mapping("cluster_config")
+  num_rollouts = int(cluster["rollout_replicas"])
+  min_rollouts = cluster["min_rollout_replicas"]
   beta = float(hp.config_mapping("agentic_grpo_config")["beta"])
   return {
       datatypes.Role.ACTOR: 1,
-      datatypes.Role.ROLLOUT: num_rollouts,
+      datatypes.Role.ROLLOUT: (
+          int(min_rollouts) if min_rollouts is not None else num_rollouts
+      ),
       datatypes.Role.REFERENCE: 1 if beta != 0.0 else 0,
   }
 
@@ -503,7 +509,7 @@ def wait_for_workers(
     rpc_timeout_s: float,
     config_sha256: str,
 ) -> None:
-  """Registers the workers announced through `discovery` until all are up.
+  """Registers the workers announced through `discovery` until `required_workers(hp)` are up.
 
   A worker whose config fingerprint differs from `config_sha256` is rejected:
   its registration fails, and while this waits, so does the wait. A worker

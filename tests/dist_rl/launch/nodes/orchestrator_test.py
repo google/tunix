@@ -104,17 +104,29 @@ class _FakeDiscovery(runtime_context.DiscoveryContext):
   ) -> None:
     self._service_types = service_types
     self._config_sha256 = config_sha256
+    self._callback: Callable[[str, int, bytes], None] | None = None
+    self._next_index = 0
+
+  def announce(
+      self, service_type: str, *, config_sha256: str | None = None
+  ) -> None:
+    assert self._callback is not None
+    idx = self._next_index
+    self._next_index += 1
+    sha = self._config_sha256 if config_sha256 is None else config_sha256
+    metadata: dict[str, object] = {
+        "service_type": service_type,
+        "service_port": 50000 + idx,
+        "worker_id": f"{service_type}-{idx}",
+    }
+    if sha is not None:
+      metadata[node_utils.CONFIG_SHA256_METADATA_KEY] = sha
+    self._callback("localhost", 0, pickle.dumps(metadata))
 
   def on_register(self, callback: Callable[[str, int, bytes], None]) -> None:
-    for i, service_type in enumerate(self._service_types):
-      metadata: dict[str, object] = {
-          "service_type": service_type,
-          "service_port": 50000 + i,
-          "worker_id": f"{service_type}-{i}",
-      }
-      if self._config_sha256 is not None:
-        metadata[node_utils.CONFIG_SHA256_METADATA_KEY] = self._config_sha256
-      callback("localhost", 0, pickle.dumps(metadata))
+    self._callback = callback
+    for service_type in self._service_types:
+      self.announce(service_type)
 
 
 class _ThreadedDiscovery(_FakeDiscovery):
@@ -491,6 +503,27 @@ class BuildersTest(absltest.TestCase):
             {role.ACTOR: 1, role.ROLLOUT: 3, role.REFERENCE: 0},
         )
 
+  def test_required_workers_uses_min_rollout_replicas_when_set(self):
+    role = datatypes.Role
+    for target_overrides in (
+        ("cluster_config.target=k8s",),
+        (
+            "cluster_config.target=external",
+            "cluster_config.artifact_root=/artifacts/run",
+        ),
+    ):
+      with self.subTest(target=target_overrides[0]):
+        hp = _config(
+            *target_overrides,
+            "agentic_grpo_config.beta=0.0",
+            "cluster_config.rollout_replicas=4",
+            "cluster_config.min_rollout_replicas=2",
+        )
+        self.assertEqual(
+            orchestrator.required_workers(hp),
+            {role.ACTOR: 1, role.ROLLOUT: 2, role.REFERENCE: 0},
+        )
+
 
 class LoadPromptItemsTest(absltest.TestCase):
 
@@ -770,6 +803,51 @@ class ClusterTest(absltest.TestCase):
     self.assertLen(
         cluster.registry.handles(datatypes.Role.ROLLOUT, statuses=None), 2
     )
+
+  def test_wait_for_workers_unblocks_at_min_rollout_replicas(self):
+    hp = _config(
+        "cluster_config.target=k8s",
+        "agentic_grpo_config.beta=0.0",
+        "cluster_config.rollout_replicas=3",
+        "cluster_config.min_rollout_replicas=1",
+        "cluster_config.init_timeout_s=0.5",
+    )
+    sha = resolve_config.config_fingerprint(hp)
+
+    empty_rollout_cluster = self._cluster(hp)
+    with self.assertRaisesRegex(
+        TimeoutError,
+        r"did not register within cluster_config.init_timeout_s=0\.5s\."
+        r" Required: .*'rollout'>: 1.*, registered: .*'rollout'>: 0",
+    ):
+      orchestrator.wait_for_workers(
+          hp,
+          empty_rollout_cluster,
+          _FakeDiscovery(["trainer"], config_sha256=sha),
+          rpc_timeout_s=1.0,
+          config_sha256=sha,
+      )
+
+    cluster = self._cluster(hp)
+    discovery = _FakeDiscovery(["trainer", "rollout"], config_sha256=sha)
+    orchestrator.wait_for_workers(
+        hp,
+        cluster,
+        discovery,
+        rpc_timeout_s=1.0,
+        config_sha256=sha,
+    )
+    self.assertLen(
+        cluster.registry.handles(datatypes.Role.ROLLOUT, statuses=None), 1
+    )
+    # Slower initial replicas register after `wait_for_workers` returns and are
+    # still config-checked by the live discovery callback.
+    discovery.announce("rollout")
+    self.assertLen(
+        cluster.registry.handles(datatypes.Role.ROLLOUT, statuses=None), 2
+    )
+    with self.assertRaisesRegex(ValueError, "resolved a different config"):
+      discovery.announce("rollout", config_sha256="0" * 64)
 
   def test_wait_for_workers_rejects_a_worker_with_another_config(self):
     hp = _config(

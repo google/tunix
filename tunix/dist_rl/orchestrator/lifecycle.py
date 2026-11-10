@@ -78,7 +78,7 @@ class LifecycleDriver:
 
   @property
   def bring_up_failures_total(self) -> int:
-    """Number of late rollout workers unregistered after a failed bring-up."""
+    """Number of late or rejoined rollout workers that failed bring-up."""
     with self._late_lock:
       return self._bring_up_failures_total
 

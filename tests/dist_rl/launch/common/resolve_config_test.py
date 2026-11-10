@@ -332,6 +332,89 @@ weight_sync_config:
     self.assertIn("export ROLLOUT_REPLICAS=2\n", exports)
     self.assertNotIn("K8S_ROLLOUT_REPLICAS", exports)
 
+  def test_min_rollout_replicas(self):
+    k8s = ("cluster_config.target=k8s", "agentic_grpo_config.beta=0.0")
+    external = (
+        "cluster_config.target=external",
+        "cluster_config.artifact_root=/artifacts/run",
+    )
+
+    def min_replicas(*overrides: str) -> object:
+      cluster = resolve_config.initialize(list(overrides)).config_mapping(
+          "cluster_config"
+      )
+      return cluster["min_rollout_replicas"]
+
+    self.assertIsNone(min_replicas())
+    self.assertEqual(min_replicas("cluster_config.min_rollout_replicas=1"), 1)
+    self.assertIsNone(
+        min_replicas(
+            *k8s,
+            "cluster_config.rollout_replicas=4",
+            "cluster_config.min_rollout_replicas=null",
+        )
+    )
+    self.assertEqual(
+        min_replicas(
+            *k8s,
+            "cluster_config.rollout_replicas=4",
+            "cluster_config.min_rollout_replicas=2",
+        ),
+        2,
+    )
+    self.assertEqual(
+        min_replicas(
+            *k8s,
+            "cluster_config.rollout_replicas=4",
+            "cluster_config.min_rollout_replicas=4",
+        ),
+        4,
+    )
+    self.assertEqual(
+        min_replicas(
+            *external,
+            "cluster_config.rollout_replicas=16",
+            "cluster_config.min_rollout_replicas=4",
+        ),
+        4,
+    )
+    for value in ("0", "-1", "1.5", "two", "true", "false"):
+      with self.subTest(value=value):
+        with self.assertRaisesRegex(
+            ValueError,
+            "cluster_config.min_rollout_replicas must be null or an int >= 1",
+        ):
+          min_replicas(
+              *k8s,
+              "cluster_config.rollout_replicas=4",
+              f"cluster_config.min_rollout_replicas={value}",
+          )
+    with self.assertRaisesRegex(
+        ValueError,
+        r"cluster_config\.min_rollout_replicas \(3\) must be <="
+        r" cluster_config\.rollout_replicas \(2\)",
+    ):
+      min_replicas(
+          *k8s,
+          "cluster_config.rollout_replicas=2",
+          "cluster_config.min_rollout_replicas=3",
+      )
+    with self.assertRaisesRegex(
+        ValueError,
+        r"cluster_config\.min_rollout_replicas \(2\) must be <="
+        r" cluster_config\.rollout_replicas \(1\)",
+    ):
+      min_replicas("cluster_config.min_rollout_replicas=2")
+    exports = resolve_config.render_bash_exports(
+        resolve_config.initialize([
+            *k8s,
+            "cluster_config.rollout_replicas=4",
+            "cluster_config.min_rollout_replicas=2",
+        ])
+    )
+    self.assertIn("export ROLLOUT_REPLICAS=4\n", exports)
+    self.assertNotIn("MIN_ROLLOUT_REPLICAS", exports)
+
   def test_output_dirs_default_under_artifact_root(self):
     def output_dirs(*overrides: str) -> tuple[object, object]:
       rl_train = resolve_config.initialize(list(overrides)).config_mapping(

@@ -100,6 +100,69 @@ class OrchestratorFaultToleranceTest(absltest.TestCase):
       for sampler in harness.samplers.values():
         self.assertEqual(sampler.policy_version, 1)
 
+  def test_elastic_min_rollout_startup_promotes_late_initial_replica(
+      self,
+  ) -> None:
+    # Starts training once `M=1` rollout replica is up (`min_rollout_replicas=1`
+    # out of `N=2`) with strict `min_active_rollout_ratio=1.0` and zero grace:
+    # `peak_active` starts at 1 (no false capacity abort before replica 2 joins)
+    # and ratchets up to 2 once replica 2 finishes background bring-up and
+    # receives step 1's weight sync.
+    with fake_cluster.FakeClusterHarness(
+        num_rollout_workers=1,
+        fault_tolerance_config=datatypes.FaultToleranceConfig(
+            enabled=True,
+            min_active_rollout_ratio=1.0,
+            min_active_rollout_grace_s=0.0,
+        ),
+    ) as harness:
+      step0_observations: list[tuple[float, float]] = []
+
+      def _on_step_begin(step: int) -> None:
+        if step == 0:
+          metrics = harness.orchestrator.fault_tolerance_manager.metrics()
+          step0_observations.append((
+              metrics["ft/fleet/rollout_active"],
+              metrics["ft/fleet/rollout_active_ratio"],
+          ))
+          harness._create_and_register_rollout_worker(  # pylint: disable=protected-access
+              "rollout_1", override=False
+          )
+          _wait_until(
+              lambda: (
+                  harness.orchestrator.registry.status("rollout_1")
+                  == worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+              ),
+              desc="rollout_1 background bring-up to PENDING_WEIGHT_SYNC",
+          )
+
+      program = harness.build_program(
+          num_prompts=4,
+          max_steps=2,
+          num_generations=2,
+          mini_batch_size=2,
+          sync_weights=True,
+          on_step_begin=_on_step_begin,
+      )
+      future = harness.start_program(program, bring_up=True)
+      future.result(timeout=60.0)
+
+      self.assertEqual(step0_observations, [(1.0, 1.0)])
+      self.assertEqual(harness.fake_trainer.step_count, 2)
+      self.assertEqual(
+          harness.orchestrator.registry.status("rollout_1"),
+          worker_registry.AdmissionStatus.ACTIVE,
+      )
+      for wid in ("rollout_0", "rollout_1"):
+        self.assertEqual(harness.samplers[wid].policy_version, 2)
+        self.assertNotEmpty(
+            harness.samplers[wid]._turn_counters  # pylint: disable=protected-access
+        )
+      final_metrics = harness.orchestrator.fault_tolerance_manager.metrics()
+      self.assertEqual(final_metrics["ft/fleet/rollout_active"], 2.0)
+      self.assertEqual(final_metrics["ft/fleet/rollout_active_ratio"], 1.0)
+      self.assertEqual(final_metrics["ft/rejoin/promoted_total"], 1.0)
+
   def test_same_port_rollout_rejoin_isolates_subchannel_and_recovers(
       self,
   ) -> None:

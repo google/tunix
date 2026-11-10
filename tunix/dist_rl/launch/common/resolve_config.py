@@ -442,14 +442,15 @@ def _validate_k8s_worker_jobsets(hp: cli_config.HyperParameters) -> None:
 
 
 def _validate_rollout_replicas(hp: cli_config.HyperParameters) -> None:
-  """Checks `cluster_config.rollout_replicas`, the rollouts to wait for.
+  """Checks `cluster_config.{rollout_replicas,min_rollout_replicas}`.
 
   Args:
     hp: Loaded configuration.
 
   Raises:
-    ValueError: If the count is not an int >= 1, or is not 1 on
-      `cluster_config.target: local`, where `local.sh` starts one rollout.
+    ValueError: If `rollout_replicas` is not an int >= 1 (or != 1 on
+      `cluster_config.target: local`), or `min_rollout_replicas` is neither
+      null nor an int in `1..rollout_replicas`.
   """
   cluster = hp.config_mapping("cluster_config")
   replicas = cluster["rollout_replicas"]
@@ -466,6 +467,23 @@ def _validate_rollout_replicas(hp: cli_config.HyperParameters) -> None:
     raise ValueError(
         "cluster_config.target=local runs one rollout (local.sh starts one), so"
         f" cluster_config.rollout_replicas must be 1, got {replicas}."
+    )
+  min_replicas = cluster["min_rollout_replicas"]
+  if min_replicas is None:
+    return
+  if (
+      isinstance(min_replicas, bool)
+      or not isinstance(min_replicas, int)
+      or min_replicas < 1
+  ):
+    raise ValueError(
+        "cluster_config.min_rollout_replicas must be null or an int >= 1, got"
+        f" {min_replicas!r}."
+    )
+  if min_replicas > replicas:
+    raise ValueError(
+        f"cluster_config.min_rollout_replicas ({min_replicas}) must be <="
+        f" cluster_config.rollout_replicas ({replicas})."
     )
 
 

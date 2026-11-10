@@ -76,7 +76,7 @@ class FaultToleranceManager:
     return self._config
 
   def record_rejoin_promoted(self) -> None:
-    """Counts a worker promoted from PENDING_WEIGHT_SYNC to ACTIVE."""
+    """Counts a late-arriving or rejoined rollout worker promoted to ACTIVE."""
     with self._lock:
       self._promoted_total += 1
 

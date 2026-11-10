@@ -393,11 +393,15 @@ cluster_config:
   # `agentic_grpo_config.beta > 0`. Set false to use a reference worker started
   # separately; it registers with the orchestrator through discovery.
   run_inference_node: null
-  # Rollout workers the orchestrator waits for: `k8s.sh` deploys this many,
-  # and an external launcher starts this many. `target: local` requires 1
-  # (`local.sh` starts one). With more than one, each rollout reads its
-  # 0-based index from the `DIST_RL_ROLLOUT_REPLICA` environment variable.
+  # Rollout workers in the cluster: `k8s.sh` deploys this many, and an external
+  # launcher starts this many. `target: local` requires 1 (`local.sh` starts
+  # one). With more than one, each rollout reads its 0-based index from the
+  # `DIST_RL_ROLLOUT_REPLICA` environment variable.
   rollout_replicas: 1
+  # Minimum rollout workers the orchestrator waits for before starting
+  # bring-up; slower initial replicas join in the background and promote to
+  # `ACTIVE` on weight sync. Null waits for all `rollout_replicas`.
+  min_rollout_replicas: null
   # On `target: external`, a worker (trainer, rollout, or inference) listens on
   # the port in the `DIST_RL_WORKER_PORT` environment variable instead of its
   # port here; the launcher assigns one to each worker.
