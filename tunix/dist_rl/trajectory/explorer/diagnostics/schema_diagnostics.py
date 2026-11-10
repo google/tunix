@@ -26,6 +26,7 @@ Diagnostics are not registered; callers pass instances explicitly.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import json
 import math
 import re
 import types
@@ -61,15 +62,15 @@ class SchemaDiagnostics(Generic[MetadataT]):
   """Diagnostics for one schema, a `TrajectoryMetadata` or `Trajectory` subclass.
 
   A subclass passes its schema as the generic parameter, declares its columns in
-  `COLUMN_DTYPES`, and may override `compute_columns`, `summarize_run` and the
-  `format_*` hooks, which all have defaults. `extract` is final. Instances hold
-  no state.
+  `COLUMN_DTYPES`, and may override `compute_columns`, `compute_run_summary` and
+  the `format_*` hooks, which all have defaults. `extract` and `summarize` are
+  final. Instances hold no state.
 
   `compute_columns` and `format_show_header` are called only for trajectories
-  that are instances of the schema. `summarize_run` and `format_summary_columns`
-  receive this class's columns, under their own names (e.g. `df["masked_out"]`),
-  with one row per trajectory of the run; the rows of trajectories of other
-  schemas are null.
+  that are instances of the schema. `compute_run_summary` and
+  `format_summary_columns` receive this class's columns, under their own names
+  (e.g. `df["masked_out"]`), with one row per trajectory of the run; the rows of
+  trajectories of other schemas are null.
 
   Attributes:
     SCHEMA: The generic parameter of the class's `SchemaDiagnostics[X]` base.
@@ -93,8 +94,8 @@ class SchemaDiagnostics(Generic[MetadataT]):
       TypeError: If the class does not subclass `SchemaDiagnostics[X]` directly
         for a `TrajectoryMetadata` subclass `X`, if `X.EXTENSIONS_KEY` does not
         have the form `_<namespace>_extensions`, if the class overrides
-        `extract`, or if a column name is not an identifier or its dtype is not
-        nullable.
+        `extract` or `summarize`, or if a column name is not an identifier or
+        its dtype is not nullable.
       AttributeError: If the class declares no `COLUMN_DTYPES`, or `X` has no
         `EXTENSIONS_KEY`.
     """
@@ -105,6 +106,11 @@ class SchemaDiagnostics(Generic[MetadataT]):
       raise TypeError(
           f"{cls.__name__} overrides extract(); override compute_columns()"
           " instead."
+      )
+    if "summarize" in vars(cls):
+      raise TypeError(
+          f"{cls.__name__} overrides summarize(); override"
+          " compute_run_summary() instead."
       )
     for column, dtype in cls.COLUMN_DTYPES.items():
       if not column.isidentifier():
@@ -165,10 +171,42 @@ class SchemaDiagnostics(Generic[MetadataT]):
     """
     return {column: getattr(record, column) for column in self.COLUMN_DTYPES}
 
-  def summarize_run(self, df: pd.DataFrame) -> Mapping[str, JsonValue]:
+  @final
+  def summarize(self, df: pd.DataFrame) -> Mapping[str, JsonValue]:
     """Returns this class's run summary, computed from its columns.
 
-    The default returns an empty mapping.
+    The summary is that of `compute_run_summary(df)`, checked to be standard
+    JSON serializable.
+
+    Args:
+      df: This class's columns, one row per trajectory of the run.
+
+    Raises:
+      TypeError: If `compute_run_summary` returns a value that is not JSON
+        serializable, such as a numpy integer.
+      ValueError: If `compute_run_summary` returns a non-finite float (NaN,
+        inf), which standard JSON cannot represent.
+    """
+    run_summary = self.compute_run_summary(df)
+    try:
+      json.dumps(dict(run_summary), allow_nan=False)
+    except TypeError as e:
+      raise TypeError(
+          f"{type(self).__name__}.compute_run_summary() returned a value that"
+          f" is not JSON serializable: {e}"
+      ) from e
+    except ValueError as e:
+      raise ValueError(
+          f"{type(self).__name__}.compute_run_summary() returned a value that"
+          f" is not standard JSON: {e}"
+      ) from e
+    return run_summary
+
+  def compute_run_summary(self, df: pd.DataFrame) -> Mapping[str, JsonValue]:
+    """Returns this class's run summary, computed from its columns.
+
+    `summarize` checks and returns the result. The default returns an empty
+    mapping.
 
     Args:
       df: This class's columns, one row per trajectory of the run.
@@ -213,7 +251,7 @@ class SchemaDiagnostics(Generic[MetadataT]):
     The default returns no lines.
 
     Args:
-      run_summary: This class's `summarize_run()` result.
+      run_summary: This class's `summarize()` result.
       num_trajectories: The number of trajectories in the run.
     """
     del run_summary, num_trajectories  # Unused.

@@ -72,6 +72,23 @@ def _overriding(
   return Overriding()
 
 
+def _summarizing(
+    run_summary: Mapping[str, schema_diagnostics.JsonValue],
+) -> schema_diagnostics.SchemaDiagnostics[_EvalMetadata]:
+  """Returns diagnostics whose `compute_run_summary` returns `run_summary`."""
+
+  class Summarizing(schema_diagnostics.SchemaDiagnostics[_EvalMetadata]):
+    COLUMN_DTYPES = {"verdict": "string"}
+
+    def compute_run_summary(
+        self, df: pd.DataFrame
+    ) -> Mapping[str, schema_diagnostics.JsonValue]:
+      del df  # Unused.
+      return run_summary
+
+  return Summarizing()
+
+
 class DefinitionTest(parameterized.TestCase):
 
   def test_schema_and_namespace_are_derived(self) -> None:
@@ -158,6 +175,18 @@ class DefinitionTest(parameterized.TestCase):
             self, record: _EvalMetadata
         ) -> Mapping[str, schema_diagnostics.JsonScalar]:
           return {"verdict": record.verdict}
+
+  def test_summarize_cannot_be_overridden(self) -> None:
+    with self.assertRaisesRegex(TypeError, "override compute_run_summary"):
+
+      class Diagnostics(schema_diagnostics.SchemaDiagnostics[_EvalMetadata]):  # pylint: disable=unused-variable
+        COLUMN_DTYPES = {"verdict": "string"}
+
+        # pyrefly: ignore[bad-override]
+        def summarize(  # pylint: disable=overridden-final-method
+            self, df: pd.DataFrame
+        ) -> Mapping[str, schema_diagnostics.JsonValue]:
+          return {"num_trajectories": len(df)}
 
 
 class ComputeColumnsTest(absltest.TestCase):
@@ -262,6 +291,46 @@ class ExtractTest(parameterized.TestCase):
       _overriding(values).extract(_metadata())
 
 
+class SummarizeTest(parameterized.TestCase):
+
+  def test_returns_the_computed_run_summary(self) -> None:
+    run_summary: dict[str, schema_diagnostics.JsonValue] = {
+        "num_passed": 1,
+        "pass_rate": 0.5,
+        "tags": {"a": [None]},
+    }
+
+    self.assertEqual(
+        _summarizing(run_summary).summarize(pd.DataFrame()), run_summary
+    )
+
+  @parameterized.named_parameters(
+      ("numpy_integer", {"num_passed": np.int64(1)}),
+      ("numpy_boolean", {"all_passed": np.bool_(True)}),
+      ("pandas_null", {"max_retries": pd.NA}),
+  )
+  def test_a_run_summary_that_is_not_json_is_rejected(
+      self, run_summary: Mapping[str, schema_diagnostics.JsonValue]
+  ) -> None:
+    with self.assertRaisesRegex(
+        TypeError, r"^Summarizing\.compute_run_summary\(\)"
+    ):
+      _summarizing(run_summary).summarize(pd.DataFrame())
+
+  @parameterized.named_parameters(
+      ("nan", {"pass_rate": float("nan")}),
+      ("inf", {"pass_rate": float("inf")}),
+      ("nested_negative_inf", {"rates": {"a": [float("-inf")]}}),
+  )
+  def test_a_run_summary_with_a_non_finite_float_is_rejected(
+      self, run_summary: Mapping[str, schema_diagnostics.JsonValue]
+  ) -> None:
+    with self.assertRaisesRegex(
+        ValueError, r"^Summarizing\.compute_run_summary\(\)"
+    ):
+      _summarizing(run_summary).summarize(pd.DataFrame())
+
+
 class DefaultHooksTest(absltest.TestCase):
 
   def setUp(self) -> None:
@@ -301,7 +370,7 @@ class DefaultHooksTest(absltest.TestCase):
       pd.testing.assert_series_equal(column, df[name])
 
   def test_run_summary_and_summary_totals_are_empty(self) -> None:
-    self.assertEqual(self.diagnostics.summarize_run(pd.DataFrame()), {})
+    self.assertEqual(self.diagnostics.summarize(pd.DataFrame()), {})
     self.assertEmpty(
         self.diagnostics.format_summary_totals({}, num_trajectories=2)
     )

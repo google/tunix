@@ -19,6 +19,9 @@ tool calls, status, reward); `RunStats.from_trajectories` aggregates a
 collection of them (a "run") into a per-trajectory `pandas.DataFrame`. A
 quantity a trajectory does not report (status, reward, each token count) is
 `None` rather than 0 (a null in the DataFrame). See `TokenCounts`.
+
+Both also compute the schema diagnostics passed to them (`diagnostics=`): the
+values that only one trajectory schema reports. See `schema_diagnostics.py`.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from typing import NamedTuple, Protocol, TypedDict, runtime_checkable
 
 import pandas as pd
 from tunix.dist_rl.trajectory import trajectory as trajectory_lib
+from tunix.dist_rl.trajectory.explorer.diagnostics import schema_diagnostics
 
 _Trajectory = trajectory_lib.Trajectory[trajectory_lib.StepT]
 
@@ -68,6 +72,8 @@ class TrajectoryStatsJson(TypedDict):
   steps: StepCountsJson
   tokens: TokenCountsJson | None
   tool_call_names: list[str]
+  # Each active schema diagnostics' `extract()` result, by `NAMESPACE`.
+  schema_stats: dict[str, dict[str, schema_diagnostics.JsonScalar]]
 
 
 class RunStatsJson(TypedDict):
@@ -83,6 +89,8 @@ class RunStatsJson(TypedDict):
   mean_reward: float | None
   num_with_reward: int
   tool_counts: dict[str, int]
+  # Each active schema diagnostics' `summarize()` result, by `NAMESPACE`.
+  schema_stats: dict[str, dict[str, schema_diagnostics.JsonValue]]
 
 
 @runtime_checkable
@@ -292,6 +300,9 @@ class TrajectoryStats:
     tokens: Token counts, or None if the trajectory reports none.
     tool_call_names: Function name of every tool call, in invocation order, with
       repeats kept.
+    schema_stats: The `extract()` result of each passed schema diagnostics that
+      applies to the trajectory (it is an instance of its `SCHEMA`), by
+      `NAMESPACE`, in the order passed.
   """
 
   trajectory_id: str | None
@@ -300,14 +311,30 @@ class TrajectoryStats:
   steps: StepCounts
   tokens: TokenCounts | None
   tool_call_names: tuple[str, ...]
+  schema_stats: Mapping[str, Mapping[str, schema_diagnostics.JsonScalar]]
 
   @classmethod
-  def from_trajectory(cls, trajectory: _Trajectory) -> TrajectoryStats:
+  def from_trajectory(
+      cls,
+      trajectory: _Trajectory,
+      *,
+      diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics] = (),
+  ) -> TrajectoryStats:
     """Derives the statistics of a single trajectory.
 
     Args:
       trajectory: The trajectory to summarize.
+      diagnostics: Schema diagnostics to compute. Those whose `SCHEMA` the
+        trajectory is not an instance of are skipped.
+
+    Raises:
+      ValueError: If two `diagnostics` share a `NAMESPACE`, or a diagnostics'
+        `compute_columns()` does not return exactly the columns of its
+        `COLUMN_DTYPES`.
+      TypeError: If a diagnostics' `compute_columns()` returns a value that does
+        not fit its column's dtype.
     """
+    _check_unique_namespaces(diagnostics)
     status: str | None = None
     total_reward: float | None = None
 
@@ -331,6 +358,11 @@ class TrajectoryStats:
         steps=StepCounts.from_steps(trajectory.steps),
         tokens=TokenCounts.from_trajectory(trajectory),
         tool_call_names=tuple(tool_call_names),
+        schema_stats=types.MappingProxyType({
+            d.NAMESPACE: d.extract(trajectory)
+            for d in diagnostics
+            if isinstance(trajectory, d.SCHEMA)
+        }),
     )
 
   def to_json_dict(self) -> TrajectoryStatsJson:
@@ -342,16 +374,21 @@ class TrajectoryStats:
         steps=self.steps.to_json_dict(),
         tokens=self.tokens.to_json_dict() if self.tokens is not None else None,
         tool_call_names=list(self.tool_call_names),
+        schema_stats={
+            namespace: dict(values)
+            for namespace, values in self.schema_stats.items()
+        },
     )
 
-  def to_row(self) -> dict[str, str | float | int | None]:
+  def to_row(self) -> dict[str, schema_diagnostics.JsonScalar]:
     """Returns the stats as one flat `RunStats.df` row.
 
     Unreported quantities are None, which become nulls in the DataFrame. The
     per-call `tool_call_names` sequence is reduced to `num_tool_calls`; the
-    run keeps the per-tool tally in `RunStats.tool_counts`.
+    run keeps the per-tool tally in `RunStats.tool_counts`. Schema diagnostics
+    values come last, as `{NAMESPACE}__{column}`.
     """
-    return {
+    row: dict[str, schema_diagnostics.JsonScalar] = {
         "trajectory_id": self.trajectory_id,
         "status": self.status,
         "total_reward": self.total_reward,
@@ -359,6 +396,10 @@ class TrajectoryStats:
         **_prefixed("tokens", self.tokens, TokenCounts._fields),
         "num_tool_calls": len(self.tool_call_names),
     }
+    for namespace, values in self.schema_stats.items():
+      for column, value in values.items():
+        row[_schema_column(namespace, column)] = value
+    return row
 
 
 def _prefixed(
@@ -369,6 +410,39 @@ def _prefixed(
   """Returns `{f"{prefix}_{field}": value}`; all None if `counts` is None."""
   values = counts._asdict() if counts is not None else dict.fromkeys(fields)
   return {f"{prefix}_{field}": values[field] for field in fields}
+
+
+def _schema_column(namespace: str, column: str) -> str:
+  """Returns the `RunStats.df` name of a schema diagnostics column."""
+  # `__` separates the namespace, which may contain `_` but never `__`. No base
+  # column contains `__`, so the names cannot collide.
+  return f"{namespace}__{column}"
+
+
+def _columns_of(
+    df: pd.DataFrame, diagnostics: schema_diagnostics.SchemaDiagnostics
+) -> pd.DataFrame:
+  """Returns the columns of `diagnostics` in `df`, under their own names."""
+  names = {
+      _schema_column(diagnostics.NAMESPACE, column): column
+      for column in diagnostics.COLUMN_DTYPES
+  }
+  return df[list(names)].rename(columns=names)
+
+
+def _check_unique_namespaces(
+    diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics],
+) -> None:
+  """Raises ValueError if two of `diagnostics` share a `NAMESPACE`."""
+  seen: dict[str, schema_diagnostics.SchemaDiagnostics] = {}
+  for d in diagnostics:
+    if d.NAMESPACE in seen:
+      raise ValueError(
+          "Schema diagnostics must have distinct namespaces;"
+          f" {type(seen[d.NAMESPACE]).__name__} and {type(d).__name__} share"
+          f" {d.NAMESPACE!r}."
+      )
+    seen[d.NAMESPACE] = d
 
 
 COLUMN_DTYPES: Mapping[str, str] = types.MappingProxyType({
@@ -392,16 +466,21 @@ class RunStats:
 
   Attributes:
     df: One row per trajectory, in the order the trajectories were given, with
-      the columns and dtypes of `COLUMN_DTYPES` (see `TrajectoryStats.to_row`).
-      Unreported quantities are null.
+      the columns and dtypes of `COLUMN_DTYPES`, followed by the columns of each
+      active schema diagnostics as `{NAMESPACE}__{column}` (see
+      `TrajectoryStats.to_row`). Unreported quantities are null.
     tool_counts: Read-only mapping from tool name to its number of calls across
       the run, keyed in first-seen order.
+    schema_stats: The `summarize()` result of each schema diagnostics active in
+      the run, by `NAMESPACE`, in the order passed. Computed once, from `df`,
+      when the run is built.
     num_total_trajectories: Total number of trajectories in the run, or None if
       equal to the number of loaded trajectories in `df`.
   """
 
   df: pd.DataFrame
   tool_counts: Mapping[str, int]
+  schema_stats: Mapping[str, Mapping[str, schema_diagnostics.JsonValue]]
   num_total_trajectories: int | None = None
 
   @classmethod
@@ -409,20 +488,55 @@ class RunStats:
       cls,
       trajectories: Iterable[_Trajectory],
       num_total_trajectories: int | None = None,
+      *,
+      diagnostics: Sequence[schema_diagnostics.SchemaDiagnostics] = (),
   ) -> RunStats:
-    """Derives per-trajectory and aggregate statistics for `trajectories`."""
+    """Derives per-trajectory and aggregate statistics for `trajectories`.
+
+    Args:
+      trajectories: The trajectories to summarize, iterated once.
+      num_total_trajectories: Total number of trajectories in the run, or None
+        if all of them are given.
+      diagnostics: Schema diagnostics to compute. One is active in the run if
+        any trajectory is an instance of its `SCHEMA`; the other trajectories
+        get nulls in its columns.
+
+    Raises:
+      ValueError: If two `diagnostics` share a `NAMESPACE`, a diagnostics'
+        `compute_columns()` does not return exactly the columns of its
+        `COLUMN_DTYPES`, or its `compute_run_summary()` returns a non-finite
+        float.
+      TypeError: If a diagnostics' `compute_columns()` returns a value that does
+        not fit its column's dtype, or its `compute_run_summary()` returns a
+        value that is not JSON serializable.
+    """
+    _check_unique_namespaces(diagnostics)
     rows = []
     tool_counts = collections.Counter[str]()
+    active_namespaces: set[str] = set()
     for trajectory in trajectories:
-      stats = TrajectoryStats.from_trajectory(trajectory)
+      stats = TrajectoryStats.from_trajectory(
+          trajectory, diagnostics=diagnostics
+      )
       tool_counts.update(stats.tool_call_names)
+      active_namespaces.update(stats.schema_stats)
       rows.append(stats.to_row())
-    df = pd.DataFrame(rows, columns=list(COLUMN_DTYPES)).astype(
-        dict(COLUMN_DTYPES)
+    active = tuple(d for d in diagnostics if d.NAMESPACE in active_namespaces)
+    column_dtypes = dict(COLUMN_DTYPES)
+    for d in active:
+      for column, dtype in d.COLUMN_DTYPES.items():
+        column_dtypes[_schema_column(d.NAMESPACE, column)] = dtype
+    # Built as `object` so that values reach their dtype unchanged: inference
+    # would first turn an integer column with a null into float64.
+    df = pd.DataFrame(rows, columns=list(column_dtypes), dtype=object).astype(
+        column_dtypes
     )
     return cls(
         df=df,
         tool_counts=types.MappingProxyType(tool_counts),
+        schema_stats=types.MappingProxyType(
+            {d.NAMESPACE: d.summarize(_columns_of(df, d)) for d in active}
+        ),
         num_total_trajectories=(
             num_total_trajectories
             if num_total_trajectories is not None
@@ -493,6 +607,24 @@ class RunStats:
       return None
     return float(self.df["total_reward"].mean())
 
+  def columns_of(
+      self, diagnostics: schema_diagnostics.SchemaDiagnostics
+  ) -> pd.DataFrame:
+    """Returns the columns of `diagnostics` in `df`, under their own names.
+
+    Args:
+      diagnostics: An active schema diagnostics of the run.
+
+    Raises:
+      KeyError: If `diagnostics` is not active in the run.
+    """
+    if diagnostics.NAMESPACE not in self.schema_stats:
+      raise KeyError(
+          f"Schema diagnostics {diagnostics.NAMESPACE!r} is not active in the"
+          " run."
+      )
+    return _columns_of(self.df, diagnostics)
+
   def to_json_dict(self) -> RunStatsJson:
     """Returns the totals as a plain JSON-serializable dict."""
     status_counts = collections.Counter(self.status_counts).most_common()
@@ -512,4 +644,8 @@ class RunStats:
         mean_reward=self.mean_reward,
         num_with_reward=self.num_with_reward,
         tool_counts=dict(tool_counts),
+        schema_stats={
+            namespace: dict(summary)
+            for namespace, summary in self.schema_stats.items()
+        },
     )
