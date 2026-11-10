@@ -384,6 +384,73 @@ weight_sync_config:
           ["rl_training_config.metrics_logging_options=off"]
       )
 
+  def test_trajectory_logging(self):
+    dist_train = resolve_config.initialize([]).config_mapping(
+        "dist_training_config"
+    )
+    self.assertIs(dist_train["trajectory_logging"], True)
+    self.assertEqual(dist_train["trajectory_log_dir"], "")
+    dist_train = resolve_config.initialize(
+        ["dist_training_config.trajectory_logging=false"]
+    ).config_mapping("dist_training_config")
+    self.assertIs(dist_train["trajectory_logging"], False)
+    # A directory for trajectories that are never logged is contradictory.
+    with self.assertRaisesRegex(
+        ValueError,
+        "trajectory_logging=false logs no trajectories, but"
+        " dist_training_config.trajectory_log_dir is set",
+    ):
+      resolve_config.initialize([
+          "dist_training_config.trajectory_logging=false",
+          "dist_training_config.trajectory_log_dir=/logs/trajectories",
+      ])
+    for value in ("yes_please", "0"):
+      with self.subTest(value=value):
+        with self.assertRaisesRegex(
+            TypeError, "dist_training_config.trajectory_logging must be a bool"
+        ):
+          resolve_config.initialize(
+              [f"dist_training_config.trajectory_logging={value}"]
+          )
+
+  def test_rollout_logps_settings(self):
+    rs_band = [
+        "agentic_grpo_config.sampler_rs_min=0.999",
+        "agentic_grpo_config.sampler_rs_max=1.002",
+    ]
+    grpo = resolve_config.initialize([
+        "agentic_grpo_config.sampler_rs=geometric",
+        *rs_band,
+        "agentic_grpo_config.seq_logprob_error_threshold=2.0",
+    ]).config_mapping("agentic_grpo_config")
+    self.assertIs(grpo["use_rollout_logps"], True)
+    self.assertEqual(grpo["sampler_rs"], "geometric")
+    # `sampler_is` keeps its "token" default without rollout log-probabilities.
+    grpo = resolve_config.initialize(
+        ["agentic_grpo_config.use_rollout_logps=false"]
+    ).config_mapping("agentic_grpo_config")
+    self.assertEqual(grpo["sampler_is"], "token")
+    for overrides, ignored in (
+        (["agentic_grpo_config.sampler_rs=geometric", *rs_band], "sampler_rs"),
+        (
+            ["agentic_grpo_config.seq_logprob_error_threshold=2.0"],
+            "seq_logprob_error_threshold",
+        ),
+    ):
+      with self.subTest(ignored=ignored):
+        with self.assertRaisesRegex(
+            ValueError,
+            rf"agentic_grpo_config sets \['{ignored}'\], which only take"
+            " effect with agentic_grpo_config.use_rollout_logps=true",
+        ):
+          resolve_config.initialize(
+              ["agentic_grpo_config.use_rollout_logps=false", *overrides]
+          )
+    with self.assertRaisesRegex(
+        TypeError, "agentic_grpo_config.use_rollout_logps must be a bool"
+    ):
+      resolve_config.initialize(["agentic_grpo_config.use_rollout_logps=0"])
+
   def test_invariants_fail_loud(self):
     with self.assertRaisesRegex(ValueError, "must be divisible by"):
       resolve_config.initialize(

@@ -129,7 +129,7 @@ training_config: &base_training_config
     # On `rl_training_config`, defaults to <cluster_config.artifact_root>/metrics
     # when empty. The orchestrator also logs the trajectories of each step under
     # <log_dir>/trajectories, unless `dist_training_config.trajectory_log_dir`
-    # is set.
+    # is set or `dist_training_config.trajectory_logging` is false.
     log_dir: ""
     flush_every_n_steps: 1
   perf_metrics_options: {}
@@ -264,6 +264,20 @@ agentic_grpo_config:
   advantage_estimator: "grpo"
   sampler_is: "token"
   sampler_is_threshold: 2.0
+  # Rejection sampling, separate from `sampler_is`. "geometric" zeroes the loss
+  # weight of each sequence whose geometric-mean trainer/sampler probability
+  # ratio is outside [sampler_rs_min, sampler_rs_max], "token" that of each
+  # token whose ratio is; null disables it.
+  sampler_rs: null
+  # Keep-band of `sampler_rs`, which requires it. Set both ends or neither,
+  # with 0 <= sampler_rs_min <= sampler_rs_max.
+  sampler_rs_min: null
+  sampler_rs_max: null
+  # Drops from the loss each sequence whose mean per-token
+  # exp|log p_trainer - log q_sampler| exceeds this (>= 1.0); null disables
+  # it. This and `sampler_rs` need `use_rollout_logps: true`, which the
+  # resolver checks.
+  seq_logprob_error_threshold: null
   max_concurrency: 256
   off_policy_steps: 0
   max_version_span: null
@@ -302,6 +316,11 @@ dist_training_config:
   segment_alignment_boundary: 1
   # Precompile the trainer step before the first rollout batch arrives.
   precompile_trainer: true
+  # Whether the orchestrator logs the trajectories of each step, to
+  # `trajectory_log_dir` or, when that is empty, under <log_dir>/trajectories
+  # of `rl_training_config.metrics_logging_options` (none when that is null).
+  # false requires an empty `trajectory_log_dir`.
+  trajectory_logging: true
   trajectory_log_dir: ""
 
 weight_sync_config:

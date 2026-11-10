@@ -306,6 +306,18 @@ class LaunchScriptsTest(absltest.TestCase):
     self.assertContainsSubset(
         {"KUEUE_QUEUE", "TRAINER_EXPERT", "WEIGHT_SYNC_MODE"}, legacy
     )
+    # `launch.sh` would ignore these, silently dropping the old launchers'
+    # rejection sampling or logging the trajectories they turned off.
+    self.assertContainsSubset(
+        {
+            "SAMPLER_RS",
+            "SAMPLER_RS_MAX",
+            "SAMPLER_RS_MIN",
+            "SEQ_LOGPROB_ERROR_THRESHOLD",
+            "TRAJECTORY_LOGGING",
+        },
+        legacy,
+    )
     # Libraries read it; the nodes set it from the config and reject another
     # value in the environment (`node_utils.apply_library_env`).
     self.assertNotIn("VERIFY_WEIGHTS", legacy)

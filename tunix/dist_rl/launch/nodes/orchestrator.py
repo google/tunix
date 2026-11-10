@@ -228,8 +228,21 @@ def build_metrics_logging_options(
 
 
 def _trajectory_log_dir(hp: resolve_config.DistHyperParameters) -> str | None:
-  """Returns the per-step trajectory log directory, or None when unset."""
-  log_dir = str(hp.config_mapping("dist_training_config")["trajectory_log_dir"])
+  """Returns the `trajectory_log_dir` argument of `StandardRLProgram`.
+
+  Args:
+    hp: Resolved distributed RL configuration.
+
+  Returns:
+    "" when `dist_training_config.trajectory_logging` is false, which disables
+    trajectory logging. Otherwise `dist_training_config.trajectory_log_dir`, or
+    None when it is empty, so the program logs under the metrics
+    `<log_dir>/trajectories` (nothing without metrics logging options).
+  """
+  dist_train = hp.config_mapping("dist_training_config")
+  if not dist_train["trajectory_logging"]:
+    return ""
+  log_dir = str(dist_train["trajectory_log_dir"])
   return log_dir or None
 
 

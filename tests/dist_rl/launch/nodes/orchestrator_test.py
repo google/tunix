@@ -273,6 +273,27 @@ class BuildersTest(absltest.TestCase):
     self.assertEqual(config.reward_mode, "reward_fn")
     self.assertFalse(config.use_rollout_logps)
 
+  def test_grpo_config_forwards_rejection_sampling_settings(self):
+    # The base config leaves rejection sampling and the sequence error gate
+    # off, as `GRPOConfig` does.
+    config = orchestrator.build_grpo_config(_config())
+    self.assertIsNone(config.sampler_rs)
+    self.assertIsNone(config.sampler_rs_min)
+    self.assertIsNone(config.sampler_rs_max)
+    self.assertIsNone(config.seq_logprob_error_threshold)
+    config = orchestrator.build_grpo_config(
+        _config(
+            "agentic_grpo_config.sampler_rs=geometric",
+            "agentic_grpo_config.sampler_rs_min=0.999",
+            "agentic_grpo_config.sampler_rs_max=1.002",
+            "agentic_grpo_config.seq_logprob_error_threshold=2.0",
+        )
+    )
+    self.assertEqual(config.sampler_rs, "geometric")
+    self.assertEqual(config.sampler_rs_min, 0.999)
+    self.assertEqual(config.sampler_rs_max, 1.002)
+    self.assertEqual(config.seq_logprob_error_threshold, 2.0)
+
   def test_grpo_config_forwards_typed_routed_experts_settings(self):
     config = orchestrator.build_grpo_config(
         _config(
@@ -953,6 +974,18 @@ class ProgramTest(absltest.TestCase):
     program = self._build_program(hp, reward_fns=[])
     self.addCleanup(program.close)
     self.assertIsNotNone(program.trajectory_logger)
+
+  def test_trajectory_logging_false_logs_no_trajectories(self):
+    artifact_root = self.create_tempdir().full_path
+    hp = _config(
+        f"cluster_config.artifact_root={artifact_root}",
+        "dist_training_config.trajectory_logging=false",
+    )
+    # The metrics are still logged, but not the trajectories.
+    self.assertIsNotNone(orchestrator.build_metrics_logging_options(hp))
+    program = self._build_program(hp, reward_fns=[])
+    self.addCleanup(program.close)
+    self.assertIsNone(program.trajectory_logger)
 
   def test_env_reward_mode_runs_without_reward_functions(self):
     hp = self._program_config()

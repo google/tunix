@@ -218,7 +218,8 @@ def _finalize_dist_defaults(hp: cli_config.HyperParameters) -> None:
       )
     if not metrics["log_dir"]:
       # The orchestrator also logs trajectories under `<log_dir>/trajectories`
-      # unless `dist_training_config.trajectory_log_dir` is set.
+      # unless `dist_training_config.trajectory_log_dir` is set or
+      # `dist_training_config.trajectory_logging` is false.
       metrics["log_dir"] = str(artifact_root / "metrics")
 
   traj_store = _mutable_section(hp, "trajectory_store_config")
@@ -468,6 +469,80 @@ def _validate_rollout_replicas(hp: cli_config.HyperParameters) -> None:
     )
 
 
+def _validate_trajectory_logging(hp: cli_config.HyperParameters) -> None:
+  """Checks `dist_training_config.trajectory_logging`.
+
+  `trajectory_log_dir` names where the trajectories go, so it must be empty
+  when `trajectory_logging` is false.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    TypeError: If `trajectory_logging` is not a bool.
+    ValueError: If `trajectory_logging` is false and `trajectory_log_dir` is
+      not empty.
+  """
+  dist_train = hp.config_mapping("dist_training_config")
+  enabled = dist_train["trajectory_logging"]
+  if not isinstance(enabled, bool):
+    raise TypeError(
+        "dist_training_config.trajectory_logging must be a bool, got"
+        f" {enabled!r}."
+    )
+  log_dir = dist_train["trajectory_log_dir"]
+  if not enabled and log_dir:
+    raise ValueError(
+        "dist_training_config.trajectory_logging=false logs no trajectories,"
+        " but dist_training_config.trajectory_log_dir is set"
+        f" ({log_dir!r}). Clear trajectory_log_dir or set"
+        " trajectory_logging=true."
+    )
+
+
+# `agentic_grpo_config` keys that only take effect with `use_rollout_logps:
+# true`. `sampler_is` is left out: it defaults to "token", which runs with
+# `use_rollout_logps: false` keep.
+_ROLLOUT_LOGPS_KEYS: Final[tuple[str, ...]] = (
+    "sampler_rs",
+    "seq_logprob_error_threshold",
+)
+
+
+def _validate_rollout_logps_settings(hp: cli_config.HyperParameters) -> None:
+  """Checks the settings that need `agentic_grpo_config.use_rollout_logps`.
+
+  With `use_rollout_logps: false`, the trainer doesn't compare its
+  log-probabilities with the rollout's, so it would skip rejection sampling
+  and the sequence log-prob error check without a word.
+
+  Args:
+    hp: Loaded configuration.
+
+  Raises:
+    TypeError: If `use_rollout_logps` is not a bool.
+    ValueError: If `use_rollout_logps` is false and a `_ROLLOUT_LOGPS_KEYS`
+      key is set.
+  """
+  grpo = hp.config_mapping("agentic_grpo_config")
+  use_rollout_logps = grpo["use_rollout_logps"]
+  if not isinstance(use_rollout_logps, bool):
+    raise TypeError(
+        "agentic_grpo_config.use_rollout_logps must be a bool, got"
+        f" {use_rollout_logps!r}."
+    )
+  if use_rollout_logps:
+    return
+  ignored = [key for key in _ROLLOUT_LOGPS_KEYS if grpo[key] is not None]
+  if ignored:
+    raise ValueError(
+        f"agentic_grpo_config sets {ignored}, which only take effect with"
+        " agentic_grpo_config.use_rollout_logps=true: with false, the trainer"
+        " doesn't compare its log-probabilities with the rollout's. Set"
+        " use_rollout_logps=true or clear them."
+    )
+
+
 def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   """Validates cross-field invariants across trainer and rollout configs."""
   # TODO(noghabi): Check which of these checks can be consolidated with the
@@ -477,6 +552,8 @@ def _validate_dist_invariants(hp: cli_config.HyperParameters) -> None:
   _validate_k8s_scalars(hp)
   _validate_k8s_worker_jobsets(hp)
   _validate_rollout_replicas(hp)
+  _validate_trajectory_logging(hp)
+  _validate_rollout_logps_settings(hp)
   rollout_ft = hp.config_mapping("cluster_config")["rollout_fault_tolerance"]
   if not isinstance(rollout_ft, bool):
     raise TypeError(
